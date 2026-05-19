@@ -35,7 +35,7 @@ LDFLAGS  := -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir 
 #---------------------------------------------------------------------------------
 # Rust staticlib + switch-mesa GL stack + libnx
 #---------------------------------------------------------------------------------
-RUST_LIB_DIR := $(TOPDIR)/../rust/target/aarch64-unknown-linux-gnu/release
+RUST_LIB_DIR := $(TOPDIR)/../rust/target/aarch64-nintendo-switch-freestanding/release
 
 LIBS    := -lruffle_switch -lEGL -lglapi -ldrm_nouveau -lGLESv2 -lnx
 LIBDIRS := $(PORTLIBS) $(LIBNX)

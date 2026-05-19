@@ -1,14 +1,14 @@
-# Target for the Rust staticlib that gets linked into the devkitPro C++ wrapper.
+# Phase 0: no_std staticlib targeting the Rust tier-3 Switch target.
+# Tier-3 means rust-std isn't pre-built, so we build core/alloc from source
+# via `-Z build-std`. This requires the nightly toolchain (pinned via
+# rust-toolchain.toml).
 #
-# `aarch64-unknown-linux-gnu` is the starting point because Ruffle requires std
-# and Switch homebrew typically links against newlib (Linux-flavored ABI).
-# Real-world tuning is one of the first engineering problems to solve in Phase 0:
-# - if cargo emits incompatible relocations, try a custom JSON target file
-# - if libc symbol mismatches arise at link time, switch to `aarch64-unknown-linux-musl`
-#   or write a target.json that points at devkitPro's newlib sysroot.
+# Phase 1 will switch to a custom JSON target that maps libc -> newlib so we
+# can pull in ruffle_core (which needs std). The freestanding target only
+# supports no_std code.
 [build]
-target = "aarch64-unknown-linux-gnu"
+target = "aarch64-nintendo-switch-freestanding"
 
-# No `linker = ...` line here on purpose: we build a staticlib (.a), so cargo
-# only needs to archive object files. Final linking is done by the C++ Makefile
-# via aarch64-none-elf-gcc / -ld with libnx.specs.
+[unstable]
+build-std = ["core", "alloc", "compiler_builtins"]
+build-std-features = ["compiler-builtins-mem"]

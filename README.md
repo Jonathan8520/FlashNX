@@ -49,15 +49,17 @@ flash-for-switch/
 └── scripts/{setup-env.ps1, build.ps1}
 ```
 
-## Build flow
+## Build
 
+```bash
+./scripts/build.sh
 ```
-cargo build --release --target aarch64-unknown-linux-gnu
-   → rust/target/.../libruffle_switch.a
-make -C cpp/
-   → link contre libruffle_switch.a + libnx + libEGL/libGLESv2 (switch-mesa)
-   → cpp/flash-for-switch.nro
-```
+
+Le script orchestre :
+1. `cargo build --release` côté Rust (target `aarch64-nintendo-switch-freestanding`, no_std, build-std nightly) → `rust/target/.../libruffle_switch.a`
+2. `make` côté C++ lancé **dans le bash MSYS2 de devkitPro** (pour que `switch_rules` résolve les paths correctement) → link contre `libruffle_switch.a` + libnx + libEGL/libGLESv2 → `cpp/flash-for-switch.nro`
+
+**Phase 0 actuelle** : Rust est en no_std (juste FFI vers glClear). **Phase 1** : passera à un target custom JSON `std-via-newlib` pour pouvoir tirer `ruffle_core` qui nécessite std.
 
 ## Phases
 
@@ -94,12 +96,17 @@ make -C cpp/
 - **Cross Windows → Switch :** LLVM Windows + `LIBCLANG_PATH`, clang `-target aarch64-none-elf --sysroot=$DEVKITPRO/devkitA64/aarch64-none-elf -isystem $LIBNX/include`. Piège : chemins MSYS vs Windows.
 - **Pattern d'architecture à copier :** ScummVM `backends/platform/sdl/switch/` — séparation OSystem → OSystem_SDL → OSystem_Switch. Appliquer en Rust : trait `Backend` portable + `SwitchBackend` mince.
 
-## Toolchain requise
+## Toolchain installée (état actuel)
 
-- devkitPro + meta-package `switch-dev` + `dkp-pacman -S switch-mesa`
-- Rust nightly + `rustup component add rust-src`
-- LLVM Windows (libclang.dll), CMake ≥3.20, Python 3
-- Env : `DEVKITPRO`, `DEVKITA64`, `LIBCLANG_PATH`
+- **devkitPro** dans `C:\devkitPro\` avec packages `switch-dev`, `switch-mesa`, `switch-glm`, `switch-glad`
+- **Rust** : toolchain pin via `rust/rust-toolchain.toml` → `nightly-x86_64-pc-windows-gnu` + `rust-src` (host GNU obligatoire — MSVC casse les build scripts sans Visual Studio Build Tools)
+- LLVM/CMake/Python : pas nécessaires pour Phase 0 ; viendront pour Phase 1 (bindgen libnx)
+
+**Gotchas rencontrés et résolus :**
+- Avast Web Shield (HTTPS scanning) intercepte les connexions pacman/pkg.devkitpro.org en injectant son propre root CA → désactiver le « scan HTTPS » dans Avast avant `pacman -Sy`.
+- Avast CyberCapture flag `target/release/build/build-script-build.exe` (cargo build script compilé en .exe Windows) à chaque build → ajouter une exception sur le dossier du projet.
+- Le `make` chocolatey ne gère pas les paths MSYS-style de devkitPro → `scripts/build.sh` délègue à `/c/devkitPro/msys2/usr/bin/bash -lc 'make'` qui voit `/opt/devkitpro/...` correctement.
+- Le target `aarch64-nintendo-switch-freestanding` est tier-3 → pas de rust-std pré-built → `-Z build-std` requis → nightly requis.
 
 ## Hardware
 

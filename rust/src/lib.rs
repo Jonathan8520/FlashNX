@@ -1,17 +1,21 @@
 //! flash-for-switch — Ruffle Flash player port to Nintendo Switch.
 //!
-//! Compiles as a staticlib that the devkitPro C++ wrapper in ../cpp/ links
-//! against to produce the final .nro.
+//! Compiles as a no_std staticlib that the devkitPro C++ wrapper in ../cpp/
+//! links against to produce the final .nro.
 //!
 //! Phase 0: hello triangle — `ruffle_render_frame` just clears the screen red,
 //! proving the FFI path Rust -> C -> libnx/EGL -> switch-mesa -> GPU works.
-//! Phase 1: integrate ruffle_core and implement the backend traits below.
+//! Phase 1: switch to a std-via-newlib custom target so we can pull in
+//! ruffle_core (which requires std), and implement the backend traits below.
+
+#![no_std]
 
 mod backend;
 mod ffi;
 mod player;
 
 use core::ffi::{c_float, c_int, c_uint};
+use core::panic::PanicInfo;
 
 extern "C" {
     fn glClearColor(r: c_float, g: c_float, b: c_float, a: c_float);
@@ -22,7 +26,6 @@ const GL_COLOR_BUFFER_BIT: c_uint = 0x0000_4000;
 
 #[no_mangle]
 pub extern "C" fn ruffle_init() -> c_int {
-    eprintln!("[rust] ruffle_init (phase 0)");
     0
 }
 
@@ -35,6 +38,9 @@ pub extern "C" fn ruffle_render_frame() {
 }
 
 #[no_mangle]
-pub extern "C" fn ruffle_shutdown() {
-    eprintln!("[rust] ruffle_shutdown (phase 0)");
+pub extern "C" fn ruffle_shutdown() {}
+
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    loop {}
 }
