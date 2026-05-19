@@ -61,26 +61,65 @@ Le script orchestre :
 
 **Phase 0 actuelle** : Rust est en no_std (juste FFI vers glClear). **Phase 1** : passera à un target custom JSON `std-via-newlib` pour pouvoir tirer `ruffle_core` qui nécessite std.
 
-## Phases
+## Roadmap
 
-**Phase 0 — hello triangle** (2-4 semaines)
+### Phase 0 — fondation validée ✓ (2026-05-20)
+
 - `cpp/main.cpp` ouvre fenêtre + GL context switch-mesa
 - `rust/lib.rs` expose `ruffle_init()`, `ruffle_render_frame()`, `ruffle_shutdown()`
-- Rendu = `glClear(rouge)`. Si rouge à l'écran sur Switch → fondation validée.
+- Rendu = `glClear(rouge)`. **Confirmé sur Switch réelle :** écran rouge affiché, exit sur bouton +.
+- Ce que ça a prouvé : cross-compile Rust ARM64 + staticlib link C++ devkitPro + FFI Rust↔C + switch-mesa sur hardware + pipeline `.nro` complète.
 
-**Phase 1 — intégration Ruffle** (2-4 mois)
-- submodule `third_party/ruffle/`, link `ruffle_core` depuis rust/
-- Impl `RenderBackend` MVP (5 méthodes) : `submit_frame`, `register_shape`, `register_bitmap`, `update_texture`, `viewport_dimensions`
-- Impl `AudioBackend` via audren (FFI libnx C — la crate `nx` n'expose pas audren)
-- Stubs : `NavigatorBackend`, `UiBackend`, `LogBackend` → nxlink
-- Frontend : file picker `.swf` depuis `sdmc:/switch/ruffle/`
+### Phase 0.5 — triangle réel (optionnel, 1-3 h)
 
-**Phase 2 — polish** (1-2 mois)
+Avant le gros plongeon Phase 1, dérisquer un point précis : est-ce que des shaders GLSL compilent et tournent sur switch-mesa ?
+
+- Charger un vertex + fragment shader minimal depuis Rust (encore en no_std)
+- VBO/VAO d'un triangle, draw call, vérifier que le triangle s'affiche
+- Si OK → on sait que GL fonctionne au-delà de `glClear` → confiance pour Phase 1
+- Si KO → on règle ça avant d'ajouter la complexité Ruffle
+
+### Phase 1 — intégration Ruffle (6-10 semaines)
+
+Objectif : charger un `.swf` depuis la SD et voir *quelque chose* à l'écran (probablement buggé).
+
+| Étape | Boulot | Risque |
+|---|---|---|
+| 1.1 Custom `target.json` `std-via-newlib` (libc devkitPro mappé) | 1-2 semaines | **Élevé** — R&D toolchain, peu de précédents publics |
+| 1.2 Ajouter `ruffle_core` comme dep, neutraliser features problématiques (`cpal` → notre AudioBackend, `flate2` feature `rust_backend`, `reqwest` stub) | 3-5 jours | Moyen |
+| 1.3 Implémenter `RenderBackend` MVP (5 méthodes : `submit_frame`, `register_shape`, `register_bitmap`, `update_texture`, `viewport_dimensions`) en mappant primitives Flash → OpenGL via switch-mesa | 2-4 semaines | Moyen |
+| 1.4 Stubs `NavigatorBackend` (no-op), `UiBackend` (minimal), `StorageBackend` (sdmc:/), `LogBackend` (nxlink) | 2-3 jours | Faible |
+| 1.5 Frontend C++ : file picker `.swf` depuis `sdmc:/switch/ruffle/`, pump `Player.tick()` chaque frame | 2-3 jours | Faible |
+
+**Pivot Phase 1.3 si wgpu-GL casse sur switch-mesa :** réécrire `RenderBackend` directement en GLES2/4.3 natif (sans wgpu). +2-3 semaines mais moins d'inconnues.
+
+**Pivot Phase 1.1 si std-via-newlib échoue :** fork Ruffle pour le rendre no_std (énorme, plusieurs mois) OU pivoter vers un autre player Flash open-source (peu de candidats). C'est le risque qui peut tuer le projet.
+
+### Phase 2 — Mario 63 jouable (3-6 mois après Phase 1)
+
+À ce stade un `.swf` charge mais probablement plein de bugs visuels/comportementaux. Phase 2 c'est rendre *un* jeu (Mario 63) jouable de bout en bout :
+
+- Backend audio réel via audren (au lieu du stub silencieux)
+- Mapping joycon → événements souris/clavier Flash (Mario 63 utilise beaucoup le clavier)
+- Bugs `RenderBackend` qui sortent uniquement sur du contenu non-trivial (sprites multiples, masques, gradients)
+- Quirks Mario 63 spécifiques découverts en jouant (timing, state machines AS2)
+- Performance : viser 60 FPS sur Tegra X1
+
+### Phase 3 — polish + distribution (1-2 mois)
+
 - Cycle applet (focus-lost, suspend/resume, libération GPU)
-- Mapping joycon → événements souris/clavier Flash
-- `.nacp` metadata, icon, packaging hb-app.store
+- `.nacp` metadata, icon final, packaging hb-app.store
+- README utilisateur, instructions install SD
+- Compat globale : tester sur d'autres `.swf` AS1/AS2 populaires (Madness, Newgrounds classics)
 
-**Pivot si Phase 1 casse sur wgpu-GL :** écrire `RenderBackend` directement en GL natif (sans wgpu).
+### Verdict timeline solo
+
+- Premier `.swf` qui affiche un truc : **6-10 semaines**
+- Mario 63 jouable : **+3-6 mois**
+- Release publique propre : **+1-2 mois**
+- **Total estimé : 6-12 mois solo** sur du temps de soir/weekend soutenu
+
+Ces estimations supposent que Phase 1.1 (std-via-newlib) marche. Si ça casse, multiplier par 2-3.
 
 ## Contraintes / faits à retenir
 
