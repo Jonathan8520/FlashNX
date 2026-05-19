@@ -1,0 +1,14 @@
+# Target for the Rust staticlib that gets linked into the devkitPro C++ wrapper.
+#
+# `aarch64-unknown-linux-gnu` is the starting point because Ruffle requires std
+# and Switch homebrew typically links against newlib (Linux-flavored ABI).
+# Real-world tuning is one of the first engineering problems to solve in Phase 0:
+# - if cargo emits incompatible relocations, try a custom JSON target file
+# - if libc symbol mismatches arise at link time, switch to `aarch64-unknown-linux-musl`
+#   or write a target.json that points at devkitPro's newlib sysroot.
+[build]
+target = "aarch64-unknown-linux-gnu"
+
+# No `linker = ...` line here on purpose: we build a staticlib (.a), so cargo
+# only needs to archive object files. Final linking is done by the C++ Makefile
+# via aarch64-none-elf-gcc / -ld with libnx.specs.

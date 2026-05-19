@@ -1,0 +1,23 @@
+# Rust
+/rust/target/
+**/*.rs.bk
+Cargo.lock
+
+# C++ build
+/cpp/build/
+/cpp/*.elf
+/cpp/*.nro
+/cpp/*.nso
+/cpp/*.nacp
+/cpp/*.map
+/cpp/*.pfs0
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Third-party submodule build artefacts (the submodule itself is tracked)
+/third_party/ruffle/target/
