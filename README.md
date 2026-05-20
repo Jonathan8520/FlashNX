@@ -93,7 +93,7 @@ Objectif : charger un `.swf` depuis la SD et voir *quelque chose* à l'écran (p
 | Étape | Boulot | Risque |
 |---|---|---|
 | 1.1 ~~Custom `target.json` `std-via-newlib`~~ → cfg rustflags sur target upstream ✓ validée hardware 2026-05-21 | ~~1-2 semaines~~ ~1 h | **Résolu** : on pirate le target upstream avec `--cfg target_family=unix` + `--cfg target_env=newlib` + `--cfg unix` + `-Aexplicit_builtin_cfgs_in_flags` ; stdlib utilise les branches `target_os = "horizon"` déjà présentes pour le 3DS. `#![feature(restricted_std)]` côté lib. Triangle Phase 0.5 + `std::format!`/`Vec<u8>` au boot → confirmés sur Switch. `.nro` 5.83 MB (+40 KB vs Phase 0.5). |
-| 1.2 Ajouter `ruffle_core` comme dep, neutraliser features problématiques (`cpal` → notre AudioBackend, `flate2` feature `rust_backend`, `reqwest` stub) | 3-5 jours | Moyen |
+| 1.2 ✓ Ajouter `ruffle_core` comme dep + validation hardware (2026-05-21) | ~4 h | **Résolu**. submodule pin `nightly-2026-05-19`. `cpal`/`reqwest`/`tokio`/`wgpu` ne sont PAS dans `core`, juste `desktop` → rien à neutraliser. `flate2` workspace par défaut = miniz_oxide (pure Rust). Blocages résolus : (a) MinGW dlltool manquant → `scoop install mingw` ; (b) `restricted_std` → **Patch 1** stdlib (build.rs) ; (c) `getrandom` 0.3 sans backend → `--cfg getrandom_backend="custom"` + impl xorshift dans `lib.rs` ; (d) `libc::getrandom` appelé par stdlib pour HashMap seeding → stub C dans `ruffle_bridge.cpp` ; (e) **lazy thread_local crash sur Horizon** → **Patch 2** stdlib (`hash/random.rs` cfg-gated AtomicU64). Bisection A-G a isolé : `BTreeMap` ✓, const thread_local ✓, getrandom direct ✓, **lazy thread_local avec init par fn = crash**. PlayerBuilder construit + droppé OK avec les 2 patches. `.nro` 5.84 MB. |
 | 1.3 Implémenter `RenderBackend` MVP (5 méthodes : `submit_frame`, `register_shape`, `register_bitmap`, `update_texture`, `viewport_dimensions`) en mappant primitives Flash → OpenGL via switch-mesa | 2-4 semaines | Moyen |
 | 1.4 Stubs `NavigatorBackend` (no-op), `UiBackend` (minimal), `StorageBackend` (sdmc:/), `LogBackend` (nxlink) | 2-3 jours | Faible |
 | 1.5 Frontend C++ : file picker `.swf` depuis `sdmc:/switch/ruffle/`, pump `Player.tick()` chaque frame | 2-3 jours | Faible |
@@ -146,7 +146,38 @@ Ces estimations supposent que Phase 1.1 (std-via-newlib) marche. Si ça casse, m
 
 - **devkitPro** dans `C:\devkitPro\` avec packages `switch-dev`, `switch-mesa`, `switch-glm`, `switch-glad`
 - **Rust** : toolchain pin via `rust/rust-toolchain.toml` → `nightly-x86_64-pc-windows-gnu` + `rust-src` (host GNU obligatoire — MSVC casse les build scripts sans Visual Studio Build Tools)
-- LLVM/CMake/Python : pas nécessaires pour Phase 0 ; viendront pour Phase 1 (bindgen libnx)
+- **MinGW-w64** via `scoop install mingw` (16.1.0) — pour `dlltool.exe` que Rust nightly GNU embarque buggé. Ajouter `~/scoop/apps/mingw/current/bin` au PATH avant `cargo build` (le `scripts/build.sh` le fait déjà).
+- LLVM/CMake/Python : pas nécessaires pour Phase 0/1 ; viendront si Phase 2 a besoin de bindgen libnx pour `audren`.
+
+### Patches rust-src à ré-appliquer après chaque `rustup update`
+
+**Patch 1** — `C:\Users\Jlevy\.rustup\toolchains\nightly-x86_64-pc-windows-gnu\lib\rustlib\src\rust\library\std\build.rs` : ajouter après la ligne `|| (target_vendor == "nintendo" && target_env == "newlib")` :
+
+```rust
+|| (target_vendor == "nintendo" && target_os == "horizon")
+```
+
+Sans ça, stdlib se compile en mode `restricted_std` → tous les crates std de crates.io (memchr, simd-adler32, num-traits, thiserror, etc.) refusent de compiler. Cargo ne nous laisse pas overrider `CARGO_CFG_TARGET_ENV` proprement, d'où ce patch.
+
+**Patch 2** — `C:\Users\Jlevy\.rustup\toolchains\nightly-x86_64-pc-windows-gnu\lib\rustlib\src\rust\library\std\src\hash\random.rs` : envelopper le corps de `RandomState::new()` dans un cfg-switch :
+
+```rust
+pub fn new() -> RandomState {
+    #[cfg(target_os = "horizon")]
+    {
+        use crate::sync::atomic::{AtomicU64, Ordering};
+        static K0: AtomicU64 = AtomicU64::new(0x9E3779B97F4A7C15);
+        let k0 = K0.fetch_add(1, Ordering::Relaxed);
+        return RandomState { k0, k1: 0x517CC1B727220A95 };
+    }
+    #[cfg(not(target_os = "horizon"))]
+    {
+        // ... code original (thread_local) ...
+    }
+}
+```
+
+Sans ça, `HashMap::new()` puis `.insert()` crash sur hardware. Le lazy thread_local de stdlib avec init par fonction crashe sur notre target (bisection A-G validée 2026-05-21). Hash-flooding DoS est non-pertinent pour un player Flash.
 
 **Gotchas rencontrés et résolus :**
 - Avast Web Shield (HTTPS scanning) intercepte les connexions pacman/pkg.devkitpro.org en injectant son propre root CA → désactiver le « scan HTTPS » dans Avast avant `pacman -Sy`.

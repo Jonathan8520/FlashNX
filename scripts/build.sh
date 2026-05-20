@@ -9,6 +9,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 export PATH="$USERPROFILE/.cargo/bin:$PATH"
+# Phase 1.2: Rust nightly GNU's bundled dlltool.exe crashes on raw-dylib build
+# scripts (windows-sys). MinGW-w64 from scoop provides a working dlltool.
+export PATH="$USERPROFILE/scoop/apps/mingw/current/bin:$PATH"
 
 echo "[1/2] Building Rust no_std staticlib for aarch64-nintendo-switch-freestanding..."
 (cd "$ROOT/rust" && cargo build --release)

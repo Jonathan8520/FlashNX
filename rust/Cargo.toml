@@ -9,9 +9,13 @@ name = "ruffle_switch"
 crate-type = ["staticlib"]
 
 [dependencies]
-# Phase 1 will add:
-# ruffle_core    = { path = "../third_party/ruffle/core" }
-# ruffle_render  = { path = "../third_party/ruffle/render" }
+# Pulled in at Phase 1.2 (2026-05-21). Default features off — we don't need
+# lzma, mp3, aac, nellymoser, audio (dasp), egui, jpegxr. We'll add
+# ruffle_render once core compiles, since RenderBackend lives there.
+ruffle_core = { path = "../third_party/ruffle/core", default-features = false }
+# Needed to declare `__getrandom_v03_custom` with the correct Error type;
+# the cfg flag in .cargo/config.toml puts getrandom in "custom backend" mode.
+getrandom = "0.3"
 
 [profile.release]
 opt-level = 3

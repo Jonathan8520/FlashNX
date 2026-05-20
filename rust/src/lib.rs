@@ -65,10 +65,15 @@ static mut GPU: Option<GpuState> = None;
 
 #[no_mangle]
 pub extern "C" fn ruffle_init() -> c_int {
-    // Phase 1.1 smoke test: exercise std types so the linker actually pulls in
-    // newlib (malloc/free for Vec, String formatting). If the .nro links at
-    // all with this code, std-via-newlib is genuinely working.
-    let banner = std::format!("Ruffle Switch booting (std OS = {})\n", std::env::consts::OS);
+    // bisect-G (2026-05-21): patched RandomState fixed HashMap. Now retry
+    // the original Phase 1.2 goal: construct PlayerBuilder. If still crashes,
+    // ruffle_core has its own lazy thread_local somewhere (e.g., tracing,
+    // gc-arena), and we'll need more patches or a different TLS strategy.
+    let _builder = ruffle_core::PlayerBuilder::new();
+    let banner = std::format!(
+        "bisect-G: PlayerBuilder OK (size={})\n",
+        std::mem::size_of::<ruffle_core::PlayerBuilder>(),
+    );
     let mut bytes: std::vec::Vec<u8> = banner.into_bytes();
     bytes.push(0);
     unsafe { ruffle_log_cstr(bytes.as_ptr() as *const c_char); }
@@ -134,6 +139,29 @@ pub extern "C" fn ruffle_render_frame() {
 
 #[no_mangle]
 pub extern "C" fn ruffle_shutdown() {}
+
+// getrandom 0.3 custom backend. Phase 1.2 stub: LCG seeded from a static
+// counter. Insecure but enough for game RNG (Mario 63 wiggles, particle
+// effects). Phase 2 will route to libnx `csrngGetRandomBytes` for real
+// entropy via Switch's `csrng` service.
+#[no_mangle]
+pub unsafe extern "Rust" fn __getrandom_v03_custom(
+    dest: *mut u8,
+    len: usize,
+) -> Result<(), getrandom::Error> {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static SEED: AtomicU64 = AtomicU64::new(0x9E3779B97F4A7C15);
+    let mut state = SEED.load(Ordering::Relaxed);
+    for i in 0..len {
+        // xorshift64* — fast, deterministic, NOT cryptographic.
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        *dest.add(i) = (state.wrapping_mul(0x2545F4914F6CDD1D) >> 32) as u8;
+    }
+    SEED.store(state, Ordering::Relaxed);
+    Ok(())
+}
 
 fn build_program() -> Option<GLuint> {
     let vs = compile_shader(GL_VERTEX_SHADER, VERT_SRC)?;
