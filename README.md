@@ -70,14 +70,21 @@ Le script orchestre :
 - Rendu = `glClear(rouge)`. **Confirmé sur Switch réelle :** écran rouge affiché, exit sur bouton +.
 - Ce que ça a prouvé : cross-compile Rust ARM64 + staticlib link C++ devkitPro + FFI Rust↔C + switch-mesa sur hardware + pipeline `.nro` complète.
 
-### Phase 0.5 — triangle réel (optionnel, 1-3 h)
+### Phase 0.5 — triangle réel (codée 2026-05-21, attend test hardware)
 
 Avant le gros plongeon Phase 1, dérisquer un point précis : est-ce que des shaders GLSL compilent et tournent sur switch-mesa ?
 
-- Charger un vertex + fragment shader minimal depuis Rust (encore en no_std)
-- VBO/VAO d'un triangle, draw call, vérifier que le triangle s'affiche
-- Si OK → on sait que GL fonctionne au-delà de `glClear` → confiance pour Phase 1
-- Si KO → on règle ça avant d'ajouter la complexité Ruffle
+- Vertex + fragment shader GLSL 330 core chargés depuis Rust no_std (`rust/src/lib.rs`)
+- VBO + VAO d'un triangle RGB (pos.xy + col.rgb interleavé), `glDrawArrays`
+- FFI GL côté Rust : `rust/src/ffi/gl.rs` (subset GL 3.3+ core)
+- Callback log Rust → nxlink : `ruffle_log_cstr` dans `cpp/src/ruffle_bridge.cpp`
+- Build OK, `.nro` 5.8 MB, **attend validation sur Switch réelle**
+
+**Critères de succès attendus sur Switch :**
+- Fond bleu nuit `rgb(13, 13, 26)` au lieu du rouge Phase 0
+- Triangle centré sommet rouge (haut), vert (bas-gauche), bleu (bas-droite) avec gradient interpolé
+- Pas de panic / pas d'écran noir → GLSL compile sur switch-mesa
+- Si shader compile fail → message d'erreur visible via `nxlink -s`
 
 ### Phase 1 — intégration Ruffle (6-10 semaines)
 
