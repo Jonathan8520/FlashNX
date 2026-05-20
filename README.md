@@ -92,7 +92,7 @@ Objectif : charger un `.swf` depuis la SD et voir *quelque chose* à l'écran (p
 
 | Étape | Boulot | Risque |
 |---|---|---|
-| 1.1 ~~Custom `target.json` `std-via-newlib`~~ → cfg rustflags sur target upstream | ~~1-2 semaines~~ ✓ codée 2026-05-21, attend test | **Risque résolu** : on pirate le target existant avec `--cfg target_family=unix` + `--cfg target_env=newlib` + `--cfg unix` + `-Aexplicit_builtin_cfgs_in_flags` ; stdlib utilise les branches `target_os = "horizon"` déjà présentes pour le 3DS. `#![feature(restricted_std)]` côté lib. Aucune erreur de link, `.nro` à 5.83 MB (+40 KB vs Phase 0.5). |
+| 1.1 ~~Custom `target.json` `std-via-newlib`~~ → cfg rustflags sur target upstream ✓ validée hardware 2026-05-21 | ~~1-2 semaines~~ ~1 h | **Résolu** : on pirate le target upstream avec `--cfg target_family=unix` + `--cfg target_env=newlib` + `--cfg unix` + `-Aexplicit_builtin_cfgs_in_flags` ; stdlib utilise les branches `target_os = "horizon"` déjà présentes pour le 3DS. `#![feature(restricted_std)]` côté lib. Triangle Phase 0.5 + `std::format!`/`Vec<u8>` au boot → confirmés sur Switch. `.nro` 5.83 MB (+40 KB vs Phase 0.5). |
 | 1.2 Ajouter `ruffle_core` comme dep, neutraliser features problématiques (`cpal` → notre AudioBackend, `flate2` feature `rust_backend`, `reqwest` stub) | 3-5 jours | Moyen |
 | 1.3 Implémenter `RenderBackend` MVP (5 méthodes : `submit_frame`, `register_shape`, `register_bitmap`, `update_texture`, `viewport_dimensions`) en mappant primitives Flash → OpenGL via switch-mesa | 2-4 semaines | Moyen |
 | 1.4 Stubs `NavigatorBackend` (no-op), `UiBackend` (minimal), `StorageBackend` (sdmc:/), `LogBackend` (nxlink) | 2-3 jours | Faible |
