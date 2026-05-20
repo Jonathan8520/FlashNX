@@ -1,25 +1,27 @@
 //! flash-for-switch — Ruffle Flash player port to Nintendo Switch.
 //!
-//! Compiles as a no_std staticlib that the devkitPro C++ wrapper in ../cpp/
+//! Compiles as a staticlib that the devkitPro C++ wrapper in ../cpp/
 //! links against to produce the final .nro.
 //!
 //! Phase 0:   ruffle_render_frame = glClear red. Proved Rust→C→libnx/EGL→
 //!            switch-mesa→Tegra X1 on real hardware (2026-05-20).
-//! Phase 0.5: ruffle_render_frame compiles a GLSL program once, then draws a
-//!            single colored triangle. Derisks that switch-mesa's GLSL compiler
-//!            and the desktop-GL core-profile pipeline both work beyond glClear.
-//! Phase 1:   switch to a std-via-newlib custom target so we can pull in
-//!            ruffle_core (which requires std), and implement the backend
-//!            traits in src/backend/.
+//! Phase 0.5: ruffle_render_frame compiles GLSL + draws an RGB triangle.
+//!            Validated on hardware (2026-05-21).
+//! Phase 1.1: std is now pulled in via -Z build-std on the existing tier-3
+//!            target (its spec already says os=horizon, which stdlib supports
+//!            via the 3DS cfg branches). No custom target JSON needed.
+//! Phase 1.2: pull ruffle_core, neutralize cpal/reqwest, implement RenderBackend.
 
-#![no_std]
+// stdlib is built for an "unrecognized" platform (we forced family=unix +
+// env=newlib + os=horizon onto a target spec that doesn't officially declare
+// them). Opt in to the resulting restricted std (some APIs return errors).
+#![feature(restricted_std)]
 
 mod backend;
 mod ffi;
 mod player;
 
 use core::ffi::{c_char, c_int};
-use core::panic::PanicInfo;
 use core::ptr;
 
 use ffi::gl::*;
@@ -63,6 +65,14 @@ static mut GPU: Option<GpuState> = None;
 
 #[no_mangle]
 pub extern "C" fn ruffle_init() -> c_int {
+    // Phase 1.1 smoke test: exercise std types so the linker actually pulls in
+    // newlib (malloc/free for Vec, String formatting). If the .nro links at
+    // all with this code, std-via-newlib is genuinely working.
+    let banner = std::format!("Ruffle Switch booting (std OS = {})\n", std::env::consts::OS);
+    let mut bytes: std::vec::Vec<u8> = banner.into_bytes();
+    bytes.push(0);
+    unsafe { ruffle_log_cstr(bytes.as_ptr() as *const c_char); }
+
     let program = match build_program() {
         Some(p) => p,
         None => return -1,
@@ -200,7 +210,3 @@ fn log(msg_nul: &[u8]) {
     }
 }
 
-#[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    loop {}
-}
