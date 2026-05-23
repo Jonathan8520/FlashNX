@@ -30,3 +30,15 @@ extern "C" long getrandom(void* buf, std::size_t buflen, unsigned int /*flags*/)
     }
     return static_cast<long>(buflen);
 }
+
+// Newlib (devkitPro) ships no `sysconf`. jpeg_decoder's multithreaded worker
+// calls it via std::thread::available_parallelism() to size its mpsc pool.
+// Always report 1 CPU so the worker falls back to its single-threaded path.
+// Any other query (page size, etc.) returns -1 / EINVAL semantics implicitly.
+extern "C" long sysconf(int name) {
+    // _SC_NPROCESSORS_ONLN is 84 on glibc, but newlib doesn't define it.
+    // Returning 1 unconditionally is safe: the only meaningful caller in our
+    // dep graph is jpeg_decoder asking for parallelism.
+    (void)name;
+    return 1;
+}
