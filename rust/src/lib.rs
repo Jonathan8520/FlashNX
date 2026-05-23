@@ -7,18 +7,18 @@
 //!            switch-mesa→Tegra X1 on real hardware (2026-05-20).
 //! Phase 0.5: ruffle_render_frame compiles GLSL + draws an RGB triangle.
 //!            Validated on hardware (2026-05-21).
-//! Phase 1.1: std is now pulled in via -Z build-std on the existing tier-3
-//!            target (its spec already says os=horizon, which stdlib supports
-//!            via the 3DS cfg branches). No custom target JSON needed.
-//! Phase 1.2: pull ruffle_core, validate PlayerBuilder constructs without
-//!            crashing (validated 2026-05-21).
-//! Phase 1.3: implement SwitchRenderBackend (see backend/render.rs) and
-//!            attach it via PlayerBuilder::with_renderer to force all 15
-//!            trait methods to actually link.
+//! Phase 1.1: std is pulled in via -Z build-std on the existing tier-3 target
+//!            (its spec already says os=horizon, which stdlib supports via
+//!            the 3DS cfg branches). No custom target JSON needed.
+//! Phase 1.2: pull ruffle_core, validate PlayerBuilder constructs and drops
+//!            without crashing (validated 2026-05-21).
+//! Phase 1.3.1: SwitchRenderBackend skeleton — all 15 trait methods
+//!            implemented Null-style. Validated on hardware (2026-05-23).
+//! Phase 1.3.2: real ShapeTessellator + per-frame CommandList walk in
+//!            submit_frame. RenderShape draws cached GPU meshes; DrawRect
+//!            draws an immediate-mode unit quad. Other commands no-op with
+//!            a one-shot log.
 
-// stdlib is built for an "unrecognized" platform (we forced family=unix +
-// env=newlib + os=horizon onto a target spec that doesn't officially declare
-// them). Opt in to the resulting restricted std (some APIs return errors).
 #![feature(restricted_std)]
 
 mod backend;
@@ -26,142 +26,170 @@ mod ffi;
 mod player;
 
 use core::ffi::{c_char, c_int};
-use core::ptr;
 
-use ffi::gl::*;
+use ruffle_render::backend::RenderBackend;
+use ruffle_render::bitmap::{BitmapHandle, BitmapSize, BitmapSource};
+use ruffle_render::commands::{CommandHandler, CommandList};
+use ruffle_render::matrix::Matrix;
+use ruffle_render::shape_utils::{DistilledShape, DrawCommand, DrawPath, FillRule};
+use ruffle_render::transform::Transform;
+use swf::{Color, Point, Rectangle, Twips};
+
+use backend::render::SwitchRenderBackend;
 
 extern "C" {
     fn ruffle_log_cstr(msg: *const c_char);
 }
 
-const VERT_SRC: &[u8] = b"#version 330 core\n\
-layout(location = 0) in vec2 a_pos;\n\
-layout(location = 1) in vec3 a_col;\n\
-out vec3 v_col;\n\
-void main() {\n\
-    v_col = a_col;\n\
-    gl_Position = vec4(a_pos, 0.0, 1.0);\n\
-}\n\0";
-
-const FRAG_SRC: &[u8] = b"#version 330 core\n\
-in vec3 v_col;\n\
-out vec4 frag_color;\n\
-void main() {\n\
-    frag_color = vec4(v_col, 1.0);\n\
-}\n\0";
-
-#[rustfmt::skip]
-const TRIANGLE: [f32; 15] = [
-    // pos        // color (RGB)
-     0.0,  0.6,   1.0, 0.0, 0.0,
-    -0.6, -0.6,   0.0, 1.0, 0.0,
-     0.6, -0.6,   0.0, 0.0, 1.0,
-];
-
-struct GpuState {
-    program: GLuint,
-    vao: GLuint,
-    #[allow(dead_code)] // kept for shutdown / future glDeleteBuffers
-    vbo: GLuint,
+/// We need stable storage to keep the renderer alive across the
+/// per-frame ruffle_render_frame call. Single-threaded by design.
+struct State {
+    renderer: SwitchRenderBackend,
+    /// Cached shape registered once at init for the visual demo.
+    demo_shape: ruffle_render::backend::ShapeHandle,
 }
 
-static mut GPU: Option<GpuState> = None;
+static mut STATE: Option<State> = None;
 
 #[no_mangle]
 pub extern "C" fn ruffle_init() -> c_int {
-    // Phase 1.3: attach our SwitchRenderBackend and exercise it through a
-    // `dyn RenderBackend` trait object so LTO cannot devirtualize the calls
-    // away. This forces every method we touch below to be present in the
-    // staticlib — same "build first, refine later" principle as phase 1.2.
-    //
-    // We call name() + debug_info() + submit_frame(Color::BLACK, ...) so
-    // that any unsupported FFI/std use surfaces at link or boot time.
-    use ruffle_render::backend::RenderBackend;
-    use ruffle_render::commands::CommandList;
-    let mut renderer: std::boxed::Box<dyn RenderBackend> =
-        std::boxed::Box::new(backend::render::SwitchRenderBackend::new(1280, 720));
-    let renderer_name = renderer.name();
-    let renderer_debug = renderer.debug_info();
-    renderer.submit_frame(swf::Color::BLACK, CommandList::new(), std::vec::Vec::new());
+    // Construct the renderer. This compiles + links our solid-color shader,
+    // builds the unit-quad VBO/VAO, and is the first non-trivial GL activity
+    // after the C++ side set up the EGL context.
+    let mut renderer = match SwitchRenderBackend::new(1280, 720) {
+        Some(r) => r,
+        None => {
+            log(b"ruffle_init: SwitchRenderBackend::new failed\n\0");
+            return -1;
+        }
+    };
+
+    // Banner.
     let banner = std::format!(
-        "phase 1.3: renderer={} ({})\n",
-        renderer_name,
-        renderer_debug,
+        "phase 1.3.2: renderer={} ({})\n",
+        renderer.name(),
+        renderer.debug_info(),
     );
     let mut bytes: std::vec::Vec<u8> = banner.into_bytes();
     bytes.push(0);
     unsafe { ruffle_log_cstr(bytes.as_ptr() as *const c_char); }
 
-    // Hand the renderer to the PlayerBuilder. with_boxed_renderer takes our
-    // already-boxed instance — no extra layer.
-    let _builder = ruffle_core::PlayerBuilder::new().with_boxed_renderer(renderer);
-
-    let program = match build_program() {
-        Some(p) => p,
-        None => return -1,
-    };
-
-    let mut vao: GLuint = 0;
-    let mut vbo: GLuint = 0;
-    unsafe {
-        glGenVertexArrays(1, &mut vao);
-        glBindVertexArray(vao);
-
-        glGenBuffers(1, &mut vbo);
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferData(
-            GL_ARRAY_BUFFER,
-            core::mem::size_of_val(&TRIANGLE) as GLsizeiptr,
-            TRIANGLE.as_ptr() as *const _,
-            GL_STATIC_DRAW,
-        );
-
-        let stride = (5 * core::mem::size_of::<f32>()) as GLsizei;
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, ptr::null());
-        glEnableVertexAttribArray(1);
-        glVertexAttribPointer(
-            1,
-            3,
-            GL_FLOAT,
-            GL_FALSE,
-            stride,
-            (2 * core::mem::size_of::<f32>()) as *const _,
-        );
-
-        glBindVertexArray(0);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-
-        GPU = Some(GpuState { program, vao, vbo });
+    // Force-construct a PlayerBuilder + hand the renderer to it so we keep
+    // exercising the FFI surface Ruffle expects. We drop the builder
+    // immediately and recover the renderer separately for our manual demo
+    // — until Phase 1.5 wires up a real Player::tick() loop, manual
+    // submission stays our test harness.
+    {
+        let throwaway_renderer: std::boxed::Box<dyn RenderBackend> =
+            std::boxed::Box::new(SwitchRenderBackend::new(1, 1).expect("second backend"));
+        let _builder = ruffle_core::PlayerBuilder::new().with_boxed_renderer(throwaway_renderer);
     }
 
-    log(b"ruffle_init: triangle pipeline ready\n\0");
+    // Build a small triangle DistilledShape and register it. This exercises
+    // ShapeTessellator + the upload path on hardware — the first time
+    // lyon has run on Switch in this project.
+    let demo_shape = register_demo_shape(&mut renderer);
+
+    unsafe {
+        STATE = Some(State { renderer, demo_shape });
+    }
+
+    log(b"ruffle_init: SwitchRenderBackend ready, demo shape registered\n\0");
     0
+}
+
+/// Synthesise a yellow triangle and register it. Returns the ShapeHandle
+/// to draw via RenderShape every frame.
+fn register_demo_shape(renderer: &mut SwitchRenderBackend) -> ruffle_render::backend::ShapeHandle {
+    // Triangle in pixel coords: (640, 200), (840, 500), (440, 500).
+    // (i.e. roughly the center of a 1280x720 viewport, pointing up).
+    let p = |x_px: f64, y_px: f64| Point {
+        x: Twips::from_pixels(x_px),
+        y: Twips::from_pixels(y_px),
+    };
+    let fill_style = swf::FillStyle::Color(Color::from_rgb(0xFFC107, 255));
+    let commands = std::vec![
+        DrawCommand::MoveTo(p(640.0, 200.0)),
+        DrawCommand::LineTo(p(840.0, 500.0)),
+        DrawCommand::LineTo(p(440.0, 500.0)),
+        DrawCommand::LineTo(p(640.0, 200.0)),
+    ];
+    let path = DrawPath::Fill {
+        style: &fill_style,
+        commands,
+        winding_rule: FillRule::EvenOdd,
+    };
+    let bounds = Rectangle {
+        x_min: Twips::from_pixels(440.0),
+        y_min: Twips::from_pixels(200.0),
+        x_max: Twips::from_pixels(840.0),
+        y_max: Twips::from_pixels(500.0),
+    };
+    let shape = DistilledShape {
+        paths: std::vec![path],
+        shape_bounds: bounds,
+        edge_bounds: bounds,
+        id: 0,
+    };
+    renderer.register_shape(shape, &NullBitmapSource)
+}
+
+/// Empty BitmapSource — fine for solid-fill shapes.
+struct NullBitmapSource;
+impl BitmapSource for NullBitmapSource {
+    fn bitmap_size(&self, _id: u16) -> Option<BitmapSize> { None }
+    fn bitmap_handle(&self, _id: u16, _renderer: &mut dyn RenderBackend) -> Option<BitmapHandle> { None }
 }
 
 #[no_mangle]
 pub extern "C" fn ruffle_render_frame() {
-    unsafe {
-        glClearColor(0.05, 0.05, 0.1, 1.0);
-        glClear(GL_COLOR_BUFFER_BIT);
-
-        if let Some(gpu) = (*ptr::addr_of!(GPU)).as_ref() {
-            glUseProgram(gpu.program);
-            glBindVertexArray(gpu.vao);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
-            glBindVertexArray(0);
-            glUseProgram(0);
+    let state = unsafe {
+        match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
+            Some(s) => s,
+            None => return,
         }
+    };
+
+    // Build a small CommandList:
+    //   - clear to dark navy
+    //   - 3 DrawRects across the top (red, green, blue) of width 200, height 100
+    //   - 1 RenderShape: the yellow triangle we registered at init
+    let mut commands = CommandList::new();
+    commands.draw_rect(Color::from_rgb(0xE53935, 255), rect_matrix( 80.0, 60.0, 200.0, 100.0));
+    commands.draw_rect(Color::from_rgb(0x43A047, 255), rect_matrix(540.0, 60.0, 200.0, 100.0));
+    commands.draw_rect(Color::from_rgb(0x1E88E5, 255), rect_matrix(1000.0, 60.0, 200.0, 100.0));
+    commands.render_shape(state.demo_shape.clone(), Transform::default());
+
+    state.renderer.submit_frame(
+        Color::from_rgb(0x0D0D1A, 255),
+        commands,
+        std::vec::Vec::new(),
+    );
+}
+
+/// Build the Flash matrix that maps a unit (0..1) square to a screen-space
+/// rect of `(w, h)` pixels translated to `(x, y)`.
+fn rect_matrix(x: f64, y: f64, w: f64, h: f64) -> Matrix {
+    Matrix {
+        a: w as f32,
+        b: 0.0,
+        c: 0.0,
+        d: h as f32,
+        tx: Twips::from_pixels(x),
+        ty: Twips::from_pixels(y),
     }
 }
 
 #[no_mangle]
-pub extern "C" fn ruffle_shutdown() {}
+pub extern "C" fn ruffle_shutdown() {
+    unsafe {
+        STATE = None;
+    }
+}
 
-// getrandom 0.3 custom backend. Phase 1.2 stub: LCG seeded from a static
-// counter. Insecure but enough for game RNG (Mario 63 wiggles, particle
-// effects). Phase 2 will route to libnx `csrngGetRandomBytes` for real
-// entropy via Switch's `csrng` service.
+// getrandom 0.3 custom backend. Phase 1.2 stub: xorshift seeded from a static
+// counter. Insecure but enough for game RNG. Phase 2 will route to libnx
+// `csrngGetRandomBytes` for real entropy via Switch's `csrng` service.
 #[no_mangle]
 pub unsafe extern "Rust" fn __getrandom_v03_custom(
     dest: *mut u8,
@@ -171,7 +199,6 @@ pub unsafe extern "Rust" fn __getrandom_v03_custom(
     static SEED: AtomicU64 = AtomicU64::new(0x9E3779B97F4A7C15);
     let mut state = SEED.load(Ordering::Relaxed);
     for i in 0..len {
-        // xorshift64* — fast, deterministic, NOT cryptographic.
         state ^= state << 13;
         state ^= state >> 7;
         state ^= state << 17;
@@ -181,78 +208,8 @@ pub unsafe extern "Rust" fn __getrandom_v03_custom(
     Ok(())
 }
 
-fn build_program() -> Option<GLuint> {
-    let vs = compile_shader(GL_VERTEX_SHADER, VERT_SRC)?;
-    let fs = compile_shader(GL_FRAGMENT_SHADER, FRAG_SRC)?;
-    unsafe {
-        let program = glCreateProgram();
-        glAttachShader(program, vs);
-        glAttachShader(program, fs);
-        glLinkProgram(program);
-
-        let mut status: GLint = 0;
-        glGetProgramiv(program, GL_LINK_STATUS, &mut status);
-        if status == 0 {
-            log_info_log(program, true);
-            glDeleteShader(vs);
-            glDeleteShader(fs);
-            return None;
-        }
-
-        glDeleteShader(vs);
-        glDeleteShader(fs);
-        Some(program)
-    }
-}
-
-fn compile_shader(kind: GLenum, src_nul: &[u8]) -> Option<GLuint> {
-    unsafe {
-        let shader = glCreateShader(kind);
-        // src_nul is NUL-terminated → length omitted (NULL length array).
-        let src_ptr = src_nul.as_ptr() as *const GLchar;
-        glShaderSource(shader, 1, &src_ptr, ptr::null());
-        glCompileShader(shader);
-
-        let mut status: GLint = 0;
-        glGetShaderiv(shader, GL_COMPILE_STATUS, &mut status);
-        if status == 0 {
-            log(b"shader compile failed:\n\0");
-            log_info_log(shader, false);
-            glDeleteShader(shader);
-            return None;
-        }
-        Some(shader)
-    }
-}
-
-fn log_info_log(handle: GLuint, is_program: bool) {
-    unsafe {
-        let mut buf: [u8; 1024] = [0; 1024];
-        let mut written: GLsizei = 0;
-        if is_program {
-            glGetProgramInfoLog(
-                handle,
-                buf.len() as GLsizei,
-                &mut written,
-                buf.as_mut_ptr() as *mut GLchar,
-            );
-        } else {
-            glGetShaderInfoLog(
-                handle,
-                buf.len() as GLsizei,
-                &mut written,
-                buf.as_mut_ptr() as *mut GLchar,
-            );
-        }
-        // Force NUL terminator at the last byte just in case.
-        buf[buf.len() - 1] = 0;
-        ruffle_log_cstr(buf.as_ptr() as *const c_char);
-    }
-}
-
 fn log(msg_nul: &[u8]) {
     unsafe {
         ruffle_log_cstr(msg_nul.as_ptr() as *const c_char);
     }
 }
-
