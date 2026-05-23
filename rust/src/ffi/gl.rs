@@ -1,7 +1,8 @@
 //! Minimal OpenGL FFI subset used by the project.
 //!
 //! Targets desktop GL core profile (the EGL context in cpp/gl_context.cpp is
-//! created with EGL_OPENGL_API + EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT, GL 4.3).
+//! created with EGL_OPENGL_API + EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT, GL 4.3,
+//! and EGL_STENCIL_SIZE=8, so masking can use the stencil buffer).
 //! All names match the standard libGL ABI exposed by switch-mesa.
 
 #![allow(non_snake_case, non_camel_case_types, dead_code)]
@@ -25,6 +26,8 @@ pub const GL_COLOR_BUFFER_BIT: GLbitfield = 0x0000_4000;
 pub const GL_DEPTH_BUFFER_BIT: GLbitfield = 0x0000_0100;
 pub const GL_STENCIL_BUFFER_BIT: GLbitfield = 0x0000_0400;
 
+pub const GL_POINTS: GLenum = 0x0000;
+pub const GL_LINES: GLenum = 0x0001;
 pub const GL_TRIANGLES: GLenum = 0x0004;
 pub const GL_FLOAT: GLenum = 0x1406;
 pub const GL_UNSIGNED_INT: GLenum = 0x1405;
@@ -45,8 +48,41 @@ pub const GL_BLEND: GLenum = 0x0BE2;
 pub const GL_SRC_ALPHA: GLenum = 0x0302;
 pub const GL_ONE_MINUS_SRC_ALPHA: GLenum = 0x0303;
 
+// Textures
+pub const GL_TEXTURE_2D: GLenum = 0x0DE1;
+pub const GL_RGBA: GLenum = 0x1908;
+pub const GL_RGBA8: GLenum = 0x8058;
+pub const GL_TEXTURE0: GLenum = 0x84C0;
+pub const GL_TEXTURE_WRAP_S: GLenum = 0x2802;
+pub const GL_TEXTURE_WRAP_T: GLenum = 0x2803;
+pub const GL_TEXTURE_MIN_FILTER: GLenum = 0x2801;
+pub const GL_TEXTURE_MAG_FILTER: GLenum = 0x2800;
+pub const GL_LINEAR: GLenum = 0x2601;
+pub const GL_NEAREST: GLenum = 0x2600;
+pub const GL_CLAMP_TO_EDGE: GLenum = 0x812F;
+pub const GL_REPEAT: GLenum = 0x2901;
+pub const GL_MIRRORED_REPEAT: GLenum = 0x8370;
+pub const GL_UNPACK_ALIGNMENT: GLenum = 0x0CF5;
+
+// Stencil
+pub const GL_STENCIL_TEST: GLenum = 0x0B90;
+pub const GL_NEVER: GLenum = 0x0200;
+pub const GL_LESS: GLenum = 0x0201;
+pub const GL_EQUAL: GLenum = 0x0202;
+pub const GL_LEQUAL: GLenum = 0x0203;
+pub const GL_GREATER: GLenum = 0x0204;
+pub const GL_NOTEQUAL: GLenum = 0x0205;
+pub const GL_GEQUAL: GLenum = 0x0206;
+pub const GL_ALWAYS: GLenum = 0x0207;
+pub const GL_KEEP: GLenum = 0x1E00;
+pub const GL_REPLACE: GLenum = 0x1E01;
+pub const GL_INCR: GLenum = 0x1E02;
+pub const GL_DECR: GLenum = 0x1E03;
+pub const GL_INVERT: GLenum = 0x150A;
+
 extern "C" {
     pub fn glClearColor(r: GLfloat, g: GLfloat, b: GLfloat, a: GLfloat);
+    pub fn glClearStencil(s: GLint);
     pub fn glClear(mask: GLbitfield);
     pub fn glViewport(x: GLint, y: GLint, w: GLsizei, h: GLsizei);
     pub fn glDrawArrays(mode: GLenum, first: GLint, count: GLsizei);
@@ -55,6 +91,11 @@ extern "C" {
     pub fn glEnable(cap: GLenum);
     pub fn glDisable(cap: GLenum);
     pub fn glBlendFunc(sfactor: GLenum, dfactor: GLenum);
+    pub fn glLineWidth(width: GLfloat);
+    pub fn glColorMask(r: GLboolean, g: GLboolean, b: GLboolean, a: GLboolean);
+    pub fn glStencilMask(mask: GLuint);
+    pub fn glStencilFunc(func: GLenum, refr: GLint, mask: GLuint);
+    pub fn glStencilOp(sfail: GLenum, dpfail: GLenum, dppass: GLenum);
 
     pub fn glGenBuffers(n: GLsizei, buffers: *mut GLuint);
     pub fn glDeleteBuffers(n: GLsizei, buffers: *const GLuint);
@@ -111,5 +152,37 @@ extern "C" {
         transpose: GLboolean,
         value: *const GLfloat,
     );
+    pub fn glUniform1i(location: GLint, v0: GLint);
+    pub fn glUniform1f(location: GLint, v0: GLfloat);
     pub fn glUniform4f(location: GLint, x: GLfloat, y: GLfloat, z: GLfloat, w: GLfloat);
+
+    // Textures
+    pub fn glGenTextures(n: GLsizei, textures: *mut GLuint);
+    pub fn glDeleteTextures(n: GLsizei, textures: *const GLuint);
+    pub fn glBindTexture(target: GLenum, texture: GLuint);
+    pub fn glActiveTexture(texture: GLenum);
+    pub fn glTexImage2D(
+        target: GLenum,
+        level: GLint,
+        internal_format: GLint,
+        width: GLsizei,
+        height: GLsizei,
+        border: GLint,
+        format: GLenum,
+        ty: GLenum,
+        pixels: *const c_void,
+    );
+    pub fn glTexSubImage2D(
+        target: GLenum,
+        level: GLint,
+        xoffset: GLint,
+        yoffset: GLint,
+        width: GLsizei,
+        height: GLsizei,
+        format: GLenum,
+        ty: GLenum,
+        pixels: *const c_void,
+    );
+    pub fn glTexParameteri(target: GLenum, pname: GLenum, param: GLint);
+    pub fn glPixelStorei(pname: GLenum, param: GLint);
 }
