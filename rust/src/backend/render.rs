@@ -888,6 +888,52 @@ impl SwitchRenderBackend {
         }
     }
 
+    /// Draw a small white crosshair at the given screen pixel position.
+    /// Intended to be called *after* `submit_frame` has returned so it
+    /// overlays the player's rendering rather than getting cleared away.
+    /// Re-binds the GL state we'd left in a fresh state at end of submit.
+    pub fn draw_cursor_overlay(&mut self, x: f32, y: f32, clicked: bool) {
+        const BAR_W: f32 = 24.0;
+        const BAR_H: f32 = 4.0;
+        // Red when clicked, white otherwise. Helps confirm clicks register.
+        let color = if clicked {
+            swf::Color::from_rgb(0xFF1744, 255)
+        } else {
+            swf::Color::from_rgb(0xFFFFFF, 255)
+        };
+        // Horizontal bar centred on (x, y).
+        let h_mat = Matrix {
+            a: BAR_W,
+            b: 0.0,
+            c: 0.0,
+            d: BAR_H,
+            tx: swf::Twips::from_pixels((x - BAR_W * 0.5) as f64),
+            ty: swf::Twips::from_pixels((y - BAR_H * 0.5) as f64),
+        };
+        // Vertical bar.
+        let v_mat = Matrix {
+            a: BAR_H,
+            b: 0.0,
+            c: 0.0,
+            d: BAR_W,
+            tx: swf::Twips::from_pixels((x - BAR_H * 0.5) as f64),
+            ty: swf::Twips::from_pixels((y - BAR_W * 0.5) as f64),
+        };
+        unsafe {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_STENCIL_TEST);
+        }
+        // Reuse CommandHandler's draw_rect path. It binds program + VAO and
+        // uploads a fresh dynamic quad each call.
+        <Self as CommandHandler>::draw_rect(self, color, h_mat);
+        <Self as CommandHandler>::draw_rect(self, color, v_mat);
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+    }
+
     // ── Mask state machine ──
     //
     // Flash mask sequence for one mask:
