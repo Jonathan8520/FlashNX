@@ -39,11 +39,24 @@ static mut STATE: Option<State> = None;
 
 const VIEWPORT_W: u32 = 1280;
 const VIEWPORT_H: u32 = 720;
-const TEST_SWF_PATH: &str = "sdmc:/switch/ruffle/test.swf";
+
+/// Candidate paths tried in order. We use a hardcoded list because
+/// `std::fs::read_dir` on Horizon corrupts entry names — observed
+/// 2026-05-24 on nightly stdlib: a 23-char filename came back missing its
+/// first 2 bytes. Suspected dirent struct-layout mismatch between Rust's
+/// Unix `dirent` model and devkitPro's newlib (alignment of d_reclen/d_type
+/// vs d_name on aarch64). Until 1.5.c writes a libnx-direct file picker
+/// (which avoids stdlib's dir reading entirely), we look for known names.
+const SWF_CANDIDATES: &[&str] = &[
+    "sdmc:/ruffle/test.swf",
+    "sdmc:/ruffle/mario.swf",
+    "sdmc:/ruffle/Super_Mario_63_2010.swf",
+    "sdmc:/switch/ruffle/test.swf",
+];
 
 /// Embedded fallback: a 43-byte SWF that just sets a red stage background.
 /// Pulled from the upstream ruffle tree as a known-good reproducible target
-/// for Phase 1.5.b validation.
+/// when no `.swf` is found on the SD card.
 const EMBEDDED_FALLBACK_SWF: &[u8] =
     include_bytes!("../../third_party/ruffle/swf/tests/swfs/SimpleRedBackground.swf");
 
@@ -76,24 +89,22 @@ pub extern "C" fn ruffle_init() -> c_int {
         .with_autoplay(true)
         .with_viewport_dimensions(VIEWPORT_W, VIEWPORT_H, 1.0);
 
-    // Try to load a real SWF from the SD card. If missing, fall back to
-    // the embedded test SWF (a 43-byte red-background movie) so we always
-    // have something for the Player to play.
+    // Look for a SWF on the SD card. We scan each search dir in order and
+    // take the first `.swf` we find. If nothing turns up, we use the
+    // embedded red-background fallback so the Player always has content.
     let (movie_bytes, source_label): (std::vec::Vec<u8>, std::string::String) =
-        match std::fs::read(TEST_SWF_PATH) {
-            Ok(b) => {
+        match find_and_load_swf() {
+            Some((bytes, path)) => {
                 log_str(&std::format!(
-                    "ruffle_init: read {} bytes from {}\n",
-                    b.len(),
-                    TEST_SWF_PATH,
+                    "ruffle_init: loaded {} bytes from {}\n",
+                    bytes.len(),
+                    path,
                 ));
-                (b, std::format!("file://{}", TEST_SWF_PATH))
+                (bytes, std::format!("file://{}", path))
             }
-            Err(e) => {
+            None => {
                 log_str(&std::format!(
-                    "ruffle_init: no {} ({}), using embedded fallback ({} bytes)\n",
-                    TEST_SWF_PATH,
-                    e,
+                    "ruffle_init: no .swf found on SD, using embedded fallback ({} bytes)\n",
                     EMBEDDED_FALLBACK_SWF.len(),
                 ));
                 (
@@ -128,6 +139,23 @@ pub extern "C" fn ruffle_init() -> c_int {
         STATE = Some(State { player });
     }
     0
+}
+
+/// Try each path in `SWF_CANDIDATES` in order. Returns the first file we
+/// can successfully read. Logs each miss so the user can see which paths
+/// were tried.
+fn find_and_load_swf() -> Option<(std::vec::Vec<u8>, std::string::String)> {
+    for path in SWF_CANDIDATES {
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                return Some((bytes, std::string::String::from(*path)));
+            }
+            Err(err) => {
+                log_str(&std::format!("scan: {} not found ({})\n", path, err));
+            }
+        }
+    }
+    None
 }
 
 #[no_mangle]
