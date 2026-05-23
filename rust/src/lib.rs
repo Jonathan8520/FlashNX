@@ -10,7 +10,11 @@
 //! Phase 1.1: std is now pulled in via -Z build-std on the existing tier-3
 //!            target (its spec already says os=horizon, which stdlib supports
 //!            via the 3DS cfg branches). No custom target JSON needed.
-//! Phase 1.2: pull ruffle_core, neutralize cpal/reqwest, implement RenderBackend.
+//! Phase 1.2: pull ruffle_core, validate PlayerBuilder constructs without
+//!            crashing (validated 2026-05-21).
+//! Phase 1.3: implement SwitchRenderBackend (see backend/render.rs) and
+//!            attach it via PlayerBuilder::with_renderer to force all 15
+//!            trait methods to actually link.
 
 // stdlib is built for an "unrecognized" platform (we forced family=unix +
 // env=newlib + os=horizon onto a target spec that doesn't officially declare
@@ -65,18 +69,32 @@ static mut GPU: Option<GpuState> = None;
 
 #[no_mangle]
 pub extern "C" fn ruffle_init() -> c_int {
-    // bisect-G (2026-05-21): patched RandomState fixed HashMap. Now retry
-    // the original Phase 1.2 goal: construct PlayerBuilder. If still crashes,
-    // ruffle_core has its own lazy thread_local somewhere (e.g., tracing,
-    // gc-arena), and we'll need more patches or a different TLS strategy.
-    let _builder = ruffle_core::PlayerBuilder::new();
+    // Phase 1.3: attach our SwitchRenderBackend and exercise it through a
+    // `dyn RenderBackend` trait object so LTO cannot devirtualize the calls
+    // away. This forces every method we touch below to be present in the
+    // staticlib — same "build first, refine later" principle as phase 1.2.
+    //
+    // We call name() + debug_info() + submit_frame(Color::BLACK, ...) so
+    // that any unsupported FFI/std use surfaces at link or boot time.
+    use ruffle_render::backend::RenderBackend;
+    use ruffle_render::commands::CommandList;
+    let mut renderer: std::boxed::Box<dyn RenderBackend> =
+        std::boxed::Box::new(backend::render::SwitchRenderBackend::new(1280, 720));
+    let renderer_name = renderer.name();
+    let renderer_debug = renderer.debug_info();
+    renderer.submit_frame(swf::Color::BLACK, CommandList::new(), std::vec::Vec::new());
     let banner = std::format!(
-        "bisect-G: PlayerBuilder OK (size={})\n",
-        std::mem::size_of::<ruffle_core::PlayerBuilder>(),
+        "phase 1.3: renderer={} ({})\n",
+        renderer_name,
+        renderer_debug,
     );
     let mut bytes: std::vec::Vec<u8> = banner.into_bytes();
     bytes.push(0);
     unsafe { ruffle_log_cstr(bytes.as_ptr() as *const c_char); }
+
+    // Hand the renderer to the PlayerBuilder. with_boxed_renderer takes our
+    // already-boxed instance — no extra layer.
+    let _builder = ruffle_core::PlayerBuilder::new().with_boxed_renderer(renderer);
 
     let program = match build_program() {
         Some(p) => p,
