@@ -197,6 +197,29 @@ int main(int argc, char** argv) {
 
     std::printf("flash-for-switch: starting\n"); std::fflush(stdout);
 
+    // Boot-replay: if the previous launch crashed (Rust panic OR native
+    // exception), its dump was appended to sdmc:/switch/ruffle-crash.log
+    // by either the panic hook or the libnx exception handler. We print
+    // and clear it now so the user sees the previous-run diagnostics in
+    // this nxlink session — even though the crashing process itself died
+    // before its TCP buffer could flush.
+    {
+        FILE* f = std::fopen("sdmc:/switch/ruffle-crash.log", "r");
+        if (f) {
+            std::printf("=== previous-run crash log ===\n");
+            char buf[512];
+            size_t n;
+            while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) {
+                std::fwrite(buf, 1, n, stdout);
+            }
+            std::fclose(f);
+            std::printf("=== end previous-run crash log ===\n");
+            std::fflush(stdout);
+            // Truncate so we only replay each crash once.
+            std::remove("sdmc:/switch/ruffle-crash.log");
+        }
+    }
+
     // Spawn the Ruffle worker with a 32 MB stack. NULL stack_mem → libnx
     // allocates from heap, so we don't bloat .nro BSS. Priority 0x2C is the
     // same as the default main thread; cpuid=-2 lets the kernel choose.

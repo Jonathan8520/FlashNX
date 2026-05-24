@@ -35,6 +35,10 @@ use backend::tracing::SwitchTracingSubscriber;
 extern "C" {
     fn ruffle_log_cstr(msg: *const c_char);
     fn ruffle_query_ram(used_out: *mut u64, total_out: *mut u64) -> c_int;
+    /// Writes `msg` to `sdmc:/switch/ruffle-crash.log` AND nxlink stdout, then
+    /// sleeps ~150 ms so the TCP buffer drains before abort() races us. Used
+    /// only from the panic hook.
+    fn ruffle_crash_dump(msg: *const c_char);
 }
 
 /// Snapshot of process RAM in bytes (used, total). Returns (0,0) if the
@@ -88,12 +92,39 @@ const EMBEDDED_FALLBACK_SWF: &[u8] =
 pub extern "C" fn ruffle_init() -> c_int {
     // Pipe panics through nxlink so we don't die silently. `panic = "abort"`
     // means the hook fires once, then we're done — but at least the message
-    // makes it out.
+    // makes it out. We snapshot RAM at the moment of the crash too: lets us
+    // distinguish a logic bug (Mario 63 unimplemented filter etc) from a
+    // genuine OOM kill where the headroom collapsed in the last few frames.
     std::panic::set_hook(std::boxed::Box::new(|info| {
-        let msg = std::format!("PANIC: {}\n", info);
+        let (used, total) = query_ram();
+        let location = info
+            .location()
+            .map(|l| std::format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| std::string::String::from("<unknown>"));
+        // Try to recover a string message (str or String); ignore anything
+        // else (e.g. a custom panic payload).
+        let payload = info.payload();
+        let payload_msg = if let Some(s) = payload.downcast_ref::<&'static str>() {
+            *s
+        } else if let Some(s) = payload.downcast_ref::<std::string::String>() {
+            s.as_str()
+        } else {
+            "<non-string panic payload>"
+        };
+        let free_mb = total.saturating_sub(used) / (1024 * 1024);
+        let used_mb = used / (1024 * 1024);
+        let total_mb = total / (1024 * 1024);
+        let msg = std::format!(
+            "\n=== PANIC ===\nat {}\nmsg: {}\nram: used={}MB total={}MB free={}MB\n=============\n",
+            location, payload_msg, used_mb, total_mb, free_mb,
+        );
         let mut bytes = msg.into_bytes();
         bytes.push(0);
-        unsafe { ruffle_log_cstr(bytes.as_ptr() as *const c_char) };
+        // Use crash_dump (file + stdout + 150 ms sleep) so the message
+        // survives the imminent abort() — plain ruffle_log_cstr previously
+        // got swallowed by the kernel TCP buffer when the process died
+        // before nxlink finished sending.
+        unsafe { ruffle_crash_dump(bytes.as_ptr() as *const c_char) };
     }));
 
     log_str(&std::format!("phase 1.5: ruffle_init starting\n"));

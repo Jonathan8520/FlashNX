@@ -24,6 +24,12 @@ int ruffle_query_ram(uint64_t* used_out, uint64_t* total_out);
 uint64_t ruffle_tick_now(void);
 uint64_t ruffle_tick_freq(void);
 
+/// Persist a panic message to `sdmc:/switch/ruffle-crash.log` (append mode)
+/// AND to stdout, then sleep ~150 ms so the kernel TCP buffer for nxlink has
+/// time to flush before the imminent abort(). Returns nothing. Safe to call
+/// from a panic hook — uses only libnx + stdio.
+void ruffle_crash_dump(const char* msg);
+
 #ifdef __cplusplus
 }
 #endif

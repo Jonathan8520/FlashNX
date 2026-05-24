@@ -42,6 +42,7 @@ use ruffle_render::bitmap::{
 };
 use ruffle_render::commands::{CommandHandler, CommandList, RenderBlendMode};
 use ruffle_render::error::Error;
+use ruffle_render::filters::Filter;
 use ruffle_render::matrix::Matrix;
 use ruffle_render::pixel_bender::{PixelBenderShader, PixelBenderShaderHandle};
 use ruffle_render::pixel_bender_support::PixelBenderShaderArgument;
@@ -49,6 +50,196 @@ use ruffle_render::quality::StageQuality;
 use ruffle_render::shape_utils::{DistilledShape, GradientType};
 use ruffle_render::tessellator::{DrawType, Gradient, ShapeTessellator};
 use ruffle_render::transform::Transform;
+use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
+use std::sync::Mutex;
+
+/// Count of `GpuDraw`s currently alive (created minus dropped). Used to
+/// detect leaks: if this monotonically grows (and matches `shapes_registered`
+/// minus shape Drops), Ruffle is retaining shape handles forever and our
+/// VBO/VAO/IBO pool fills up — exactly the suspected cause of the jetpack
+/// crash (rocket nozzle particle system emits a new shape per frame, never
+/// freed, until Mesa's bind table walks off the end and faults).
+static LIVE_GPU_DRAWS: AtomicUsize = AtomicUsize::new(0);
+/// Count of `GpuShape`s currently alive (created minus dropped). Should
+/// roughly track `register_shape` calls if Ruffle never drops handles.
+static LIVE_GPU_SHAPES: AtomicUsize = AtomicUsize::new(0);
+
+// ─── Mega-buffer arena ─────────────────────────────────────────────────────
+//
+// Mario 63 + rocket nozzle = ~3 new shapes per frame, never freed by Ruffle
+// for several seconds. Each shape used to create its own VBO + IBO + VAO,
+// and Mesa-NVK on Tegra X1 segfaults inside `glBindBuffer` once we exceed
+// ~27 000 simultaneously-live GL buffer handles (we caught it twice:
+// x24=GL_ARRAY_BUFFER, FAR a poisoned slot pointer at offset 0x50 of a
+// table, then a small index 0x1011 — Mesa's internal buffer slot table
+// has a finite size which we walked off the end of).
+//
+// The fix is to stop creating GL objects per shape entirely: allocate one
+// huge VBO and one huge IBO at boot, then suballocate ranges out of those
+// for each shape via a freelist. From Mesa's point of view there are only
+// ~5 GL handles total, no matter how many Ruffle shapes pile up.
+//
+// `glDrawElementsBaseVertex` lets us pack many shapes into a single VBO
+// while letting each shape keep its own local 0..N index numbering: the
+// driver shifts every fetched index by `base_vertex` before reading.
+//
+// Sizing: at the crash we had ~14 MB of vertex data + ~3 MB of indices
+// in flight. We size for ~4x headroom so a long Mario 63 session has
+// plenty of slack.
+const ARENA_VBO_SIZE: GLsizeiptr = 64 * 1024 * 1024;  // 64 MB
+// IBO bumped to 32 MB after the first arena test (jetpack run 2026-05-25):
+// after ~5 minutes of Mario 63 the index arena peaked at 13 MB (81 %) —
+// uncomfortably close to OOM. 32 MB gives us 2× headroom for longer
+// sessions and more index-heavy levels.
+const ARENA_IBO_SIZE: GLsizeiptr = 32 * 1024 * 1024;  // 32 MB
+/// VBO alignment = one full vertex (pos.xy + rgba = 6 × f32 = 24 bytes).
+/// MUST match the vertex stride so `glDrawElementsBaseVertex(base_vertex)`
+/// can use `vbo_offset / 24` and land exactly on a vertex boundary.
+/// First mega-arena attempt used 16-byte alignment (a power of two for
+/// `&!(align-1)` rounding) — that produced offsets like 48, 64, 80 which
+/// are NOT multiples of 24, so base_vertex was off by fractional vertices
+/// and Mario 63 rendered as a corrupted mess. Round-up logic switched to
+/// the generic `((x + a - 1) / a) * a` to allow non-power-of-2 alignments.
+const ARENA_VBO_ALIGN: GLsizeiptr = 24;
+/// IBO alignment = sizeof(u32). `glDrawElementsBaseVertex`'s `indices` byte
+/// offset must be aligned to the index type (4 bytes for GL_UNSIGNED_INT).
+const ARENA_IBO_ALIGN: GLsizeiptr = 4;
+
+struct BufferArena {
+    gl_id: GLuint,
+    target: GLenum,
+    capacity: GLsizeiptr,
+    /// Alignment for allocations in this arena (24 for vertex, 4 for index).
+    align: GLsizeiptr,
+    /// Free segments, sorted by offset, adjacent ones coalesced.
+    free: Vec<(GLintptr, GLsizeiptr)>,
+    /// High-water diagnostic: max bytes ever in use simultaneously.
+    peak_in_use: GLsizeiptr,
+    /// Failed-allocation diagnostic: when we ran out, log it once.
+    oom_warned: bool,
+}
+
+impl BufferArena {
+    fn new(target: GLenum, capacity: GLsizeiptr, align: GLsizeiptr) -> Self {
+        let mut gl_id: GLuint = 0;
+        unsafe {
+            glGenBuffers(1, &mut gl_id);
+            glBindBuffer(target, gl_id);
+            glBufferData(target, capacity, core::ptr::null(), GL_DYNAMIC_DRAW);
+            glBindBuffer(target, 0);
+        }
+        Self {
+            gl_id,
+            target,
+            capacity,
+            align,
+            free: std::vec![(0 as GLintptr, capacity)],
+            peak_in_use: 0,
+            oom_warned: false,
+        }
+    }
+
+    /// Allocate `size` bytes (rounded up to `self.align`). First-fit. Returns
+    /// the byte offset, or `None` if the arena is full.
+    fn alloc(&mut self, size: GLsizeiptr) -> Option<GLintptr> {
+        let size = ((size + self.align - 1) / self.align) * self.align;
+        for i in 0..self.free.len() {
+            let (off, sz) = self.free[i];
+            if sz >= size {
+                let alloc_off = off;
+                if sz == size {
+                    self.free.remove(i);
+                } else {
+                    self.free[i] = (off + size, sz - size);
+                }
+                let in_use = self.capacity - self.free_bytes();
+                if in_use > self.peak_in_use {
+                    self.peak_in_use = in_use;
+                }
+                return Some(alloc_off);
+            }
+        }
+        if !self.oom_warned {
+            self.oom_warned = true;
+            let msg = std::format!(
+                "ARENA OOM: target=0x{:04X} capacity={} requested={} peak_in_use={}\n",
+                self.target, self.capacity, size, self.peak_in_use,
+            );
+            let mut bytes = msg.into_bytes();
+            bytes.push(0);
+            unsafe { ruffle_log_cstr(bytes.as_ptr() as *const _) };
+        }
+        None
+    }
+
+    /// Free a previously-allocated region. Size MUST match the alloc size
+    /// (after alignment rounding) — caller is responsible.
+    fn free_region(&mut self, offset: GLintptr, size: GLsizeiptr) {
+        let size = ((size + self.align - 1) / self.align) * self.align;
+        let insert_idx = self.free.partition_point(|(off, _)| *off < offset);
+        self.free.insert(insert_idx, (offset, size));
+        // Coalesce with next.
+        if insert_idx + 1 < self.free.len() {
+            let (off, sz) = self.free[insert_idx];
+            let (next_off, next_sz) = self.free[insert_idx + 1];
+            if off + sz == next_off {
+                self.free[insert_idx] = (off, sz + next_sz);
+                self.free.remove(insert_idx + 1);
+            }
+        }
+        // Coalesce with previous.
+        if insert_idx > 0 {
+            let (prev_off, prev_sz) = self.free[insert_idx - 1];
+            let (off, sz) = self.free[insert_idx];
+            if prev_off + prev_sz == off {
+                self.free[insert_idx - 1] = (prev_off, prev_sz + sz);
+                self.free.remove(insert_idx);
+            }
+        }
+    }
+
+    fn upload(&self, offset: GLintptr, data: &[u8]) {
+        unsafe {
+            glBindBuffer(self.target, self.gl_id);
+            glBufferSubData(
+                self.target,
+                offset,
+                data.len() as GLsizeiptr,
+                data.as_ptr() as *const _,
+            );
+        }
+    }
+
+    fn free_bytes(&self) -> GLsizeiptr {
+        self.free.iter().map(|(_, sz)| *sz).sum()
+    }
+
+    fn in_use_bytes(&self) -> GLsizeiptr {
+        self.capacity - self.free_bytes()
+    }
+}
+
+impl Drop for BufferArena {
+    fn drop(&mut self) {
+        unsafe { glDeleteBuffers(1, &self.gl_id) };
+    }
+}
+
+// ─── Pending frees queue ────────────────────────────────────────────────────
+//
+// `GpuDraw::drop` runs without access to the SwitchRenderBackend (it's just
+// triggered by Arc reference count going to zero, anywhere Ruffle decides
+// to release a ShapeHandle). We can't free arena regions directly from the
+// Drop — they'd need &mut to the arena. Instead, Drop enqueues
+// (offset, size) tuples here, and submit_frame drains them at the top of
+// each frame, calling `BufferArena::free_region`.
+struct PendingFree {
+    vbo_offset: GLintptr,
+    vbo_size: GLsizeiptr,
+    ibo_offset: GLintptr,
+    ibo_size: GLsizeiptr,
+}
+static PENDING_FREES: Mutex<Vec<PendingFree>> = Mutex::new(Vec::new());
 use swf::{BlendMode, Color, GradientSpread};
 
 use crate::ffi::gl::*;
@@ -280,20 +471,29 @@ enum DrawKind {
 }
 
 struct GpuDraw {
-    vao: GLuint,
-    vbo: GLuint,
-    ibo: GLuint,
+    /// Byte offset of this draw's vertices inside the global vertex arena.
+    vbo_offset: GLintptr,
+    /// Allocated vertex bytes (multiple of `ARENA_ALIGN`).
+    vbo_size: GLsizeiptr,
+    /// Byte offset of this draw's indices inside the global index arena.
+    ibo_offset: GLintptr,
+    /// Allocated index bytes (multiple of `ARENA_ALIGN`).
+    ibo_size: GLsizeiptr,
     num_indices: GLsizei,
     kind: DrawKind,
 }
 
 impl Drop for GpuDraw {
     fn drop(&mut self) {
-        unsafe {
-            glDeleteBuffers(1, &self.vbo);
-            glDeleteBuffers(1, &self.ibo);
-            glDeleteVertexArrays(1, &self.vao);
-        }
+        LIVE_GPU_DRAWS.fetch_sub(1, Ordering::Relaxed);
+        // Can't free arena regions from here — no &mut to the backend.
+        // Enqueue; submit_frame drains at the top of each frame.
+        PENDING_FREES.lock().unwrap().push(PendingFree {
+            vbo_offset: self.vbo_offset,
+            vbo_size: self.vbo_size,
+            ibo_offset: self.ibo_offset,
+            ibo_size: self.ibo_size,
+        });
     }
 }
 
@@ -304,6 +504,7 @@ struct GpuShape {
 
 impl Drop for GpuShape {
     fn drop(&mut self) {
+        LIVE_GPU_SHAPES.fetch_sub(1, Ordering::Relaxed);
         if !self.gradient_textures.is_empty() {
             unsafe {
                 glDeleteTextures(
@@ -439,10 +640,49 @@ pub struct SwitchRenderBackend {
     bitmaps_registered: u32,
     bitmap_draws_emitted: u32,
     bitmap_render_count: u32,
+    /// How many times Ruffle has called `render_offscreen` since boot —
+    /// non-zero means something on stage uses `cacheAsBitmap` or a filter.
+    /// Logged every heartbeat so we can correlate spikes with crashes.
+    render_offscreen_calls: u32,
+    /// How many times Ruffle has called `apply_filter` since boot.
+    apply_filter_calls: u32,
+    /// One bit per `Filter` variant we've seen via `is_filter_supported`,
+    /// so each variant is logged the first time only. Variant ordinals
+    /// match `filter_variant_ordinal()`. `Cell` would be simpler but
+    /// `is_filter_supported` takes `&self`, so we use an atomic.
+    filters_seen_mask: AtomicU16,
     /// Pool of texture atlases. New atlases get appended when current is
     /// full. Bitmaps are packed into these instead of getting individual
     /// GL textures.
     atlases: Vec<Atlas>,
+
+    /// Single global VBO for all shape draws (suballocated via freelist).
+    /// All `GpuDraw::vbo_offset` are byte offsets into this buffer.
+    vertex_arena: BufferArena,
+    /// Single global IBO for all shape draws.
+    index_arena: BufferArena,
+    /// Single VAO used for every shape draw. Pre-configured at boot to
+    /// read (pos.xy, rgba) from `vertex_arena` with stride 24, and to use
+    /// `index_arena` as the element buffer. Each draw shifts the read
+    /// origin via `glDrawElementsBaseVertex(base_vertex)`.
+    shape_vao: GLuint,
+}
+
+/// Returns a stable 0..=9 ordinal + short name for a `Filter` variant so we
+/// can dedupe `is_filter_supported` logs without allocating a HashSet.
+fn filter_variant_ordinal(f: &Filter) -> (u8, &'static str) {
+    match f {
+        Filter::BevelFilter(_) => (0, "Bevel"),
+        Filter::BlurFilter(_) => (1, "Blur"),
+        Filter::ColorMatrixFilter(_) => (2, "ColorMatrix"),
+        Filter::ConvolutionFilter(_) => (3, "Convolution"),
+        Filter::DisplacementMapFilter(_) => (4, "DisplacementMap"),
+        Filter::DropShadowFilter(_) => (5, "DropShadow"),
+        Filter::GlowFilter(_) => (6, "Glow"),
+        Filter::GradientBevelFilter(_) => (7, "GradientBevel"),
+        Filter::GradientGlowFilter(_) => (8, "GradientGlow"),
+        Filter::ShaderFilter(_) => (9, "Shader"),
+    }
 }
 
 // ─── Shaders source ───────────────────────────────────────────────────────────
@@ -770,6 +1010,42 @@ fn build_line_rect() -> (GLuint, GLuint) {
     upload_static_vbo_pos_rgba(&LINES)
 }
 
+/// Build the single VAO used by every shape draw. Bound once per frame
+/// during `submit_frame`, then each draw call uses
+/// `glDrawElementsBaseVertex` to point at its own slice of the arenas.
+///
+/// The arena VBO is recorded as the source for attribs 0 (pos.xy) and 1
+/// (rgba). The arena IBO is recorded as the VAO's element buffer. These
+/// bindings persist for the lifetime of the VAO — `glBufferSubData` calls
+/// to upload new shape data later don't disturb them.
+fn build_shape_arena_vao(arena_vbo: GLuint, arena_ibo: GLuint) -> GLuint {
+    let mut vao: GLuint = 0;
+    unsafe {
+        glGenVertexArrays(1, &mut vao);
+        glBindVertexArray(vao);
+        glBindBuffer(GL_ARRAY_BUFFER, arena_vbo);
+        let stride = (6 * core::mem::size_of::<f32>()) as GLsizei;
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, core::ptr::null());
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(
+            1,
+            4,
+            GL_FLOAT,
+            GL_FALSE,
+            stride,
+            (2 * core::mem::size_of::<f32>()) as *const _,
+        );
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, arena_ibo);
+        glBindVertexArray(0);
+        // Unbind GL_ARRAY_BUFFER without disturbing the VAO's recorded
+        // attrib bindings (VAO already captured them above). The IBO bind
+        // is part of VAO state in core profile, so we don't unbind that.
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+    }
+    vao
+}
+
 /// Upload a (pos+rgba) interleaved f32 buffer to a fresh VAO/VBO with the
 /// standard 6-float stride and attribute layout (loc 0 = vec2 pos, loc 1 =
 /// vec4 col). Returns (vao, vbo).
@@ -812,6 +1088,8 @@ fn upload_draw(
     draw: &ruffle_render::tessellator::Draw,
     gradient_textures: &[GLuint],
     bitmap_meta: Option<&SwitchBitmapHandle>,
+    vertex_arena: &mut BufferArena,
+    index_arena: &mut BufferArena,
 ) -> Option<GpuDraw> {
     if draw.vertices.is_empty() || draw.indices.is_empty() {
         return None;
@@ -828,44 +1106,38 @@ fn upload_draw(
         verts.push(v.color.a as f32 / 255.0);
     }
 
-    let mut vao: GLuint = 0;
-    let mut vbo: GLuint = 0;
-    let mut ibo: GLuint = 0;
-    unsafe {
-        glGenVertexArrays(1, &mut vao);
-        glBindVertexArray(vao);
-        glGenBuffers(1, &mut vbo);
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferData(
-            GL_ARRAY_BUFFER,
-            (verts.len() * core::mem::size_of::<f32>()) as GLsizeiptr,
-            verts.as_ptr() as *const _,
-            GL_STATIC_DRAW,
-        );
-        glGenBuffers(1, &mut ibo);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
-        glBufferData(
-            GL_ELEMENT_ARRAY_BUFFER,
-            (draw.indices.len() * core::mem::size_of::<u32>()) as GLsizeiptr,
-            draw.indices.as_ptr() as *const _,
-            GL_STATIC_DRAW,
-        );
-        let stride = (6 * core::mem::size_of::<f32>()) as GLsizei;
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, core::ptr::null());
-        glEnableVertexAttribArray(1);
-        glVertexAttribPointer(
-            1,
-            4,
-            GL_FLOAT,
-            GL_FALSE,
-            stride,
-            (2 * core::mem::size_of::<f32>()) as *const _,
-        );
-        glBindVertexArray(0);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
-    }
+    // Allocate space in the global arenas. We pay no glGen* per draw —
+    // the data lands inside the single mega-VBO and mega-IBO. The arenas'
+    // freelists coalesce frees so long sessions don't fragment too badly.
+    let vbo_bytes = (verts.len() * core::mem::size_of::<f32>()) as GLsizeiptr;
+    let ibo_bytes = (draw.indices.len() * core::mem::size_of::<u32>()) as GLsizeiptr;
+    let vbo_offset = vertex_arena.alloc(vbo_bytes)?;
+    let ibo_offset = match index_arena.alloc(ibo_bytes) {
+        Some(o) => o,
+        None => {
+            // Roll back the vertex alloc so we don't leak.
+            vertex_arena.free_region(vbo_offset, vbo_bytes);
+            return None;
+        }
+    };
+    let verts_bytes: &[u8] = unsafe {
+        core::slice::from_raw_parts(
+            verts.as_ptr() as *const u8,
+            verts.len() * core::mem::size_of::<f32>(),
+        )
+    };
+    let indices_bytes: &[u8] = unsafe {
+        core::slice::from_raw_parts(
+            draw.indices.as_ptr() as *const u8,
+            draw.indices.len() * core::mem::size_of::<u32>(),
+        )
+    };
+    vertex_arena.upload(vbo_offset, verts_bytes);
+    index_arena.upload(ibo_offset, indices_bytes);
+    // Aligned sizes (what the arenas actually consumed) — needed at free
+    // time. Mirror the rounding `alloc` does.
+    let vbo_size = ((vbo_bytes + ARENA_VBO_ALIGN - 1) / ARENA_VBO_ALIGN) * ARENA_VBO_ALIGN;
+    let ibo_size = ((ibo_bytes + ARENA_IBO_ALIGN - 1) / ARENA_IBO_ALIGN) * ARENA_IBO_ALIGN;
 
     let kind = match &draw.draw_type {
         DrawType::Color => DrawKind::Solid,
@@ -896,9 +1168,10 @@ fn upload_draw(
         DrawType::Bitmap(b) => {
             let Some(meta) = bitmap_meta else {
                 return Some(GpuDraw {
-                    vao,
-                    vbo,
-                    ibo,
+                    vbo_offset,
+                    vbo_size,
+                    ibo_offset,
+                    ibo_size,
                     num_indices: draw.indices.len() as GLsizei,
                     kind: DrawKind::Solid,
                 });
@@ -922,9 +1195,10 @@ fn upload_draw(
     };
 
     Some(GpuDraw {
-        vao,
-        vbo,
-        ibo,
+        vbo_offset,
+        vbo_size,
+        ibo_offset,
+        ibo_size,
         num_indices: draw.indices.len() as GLsizei,
         kind,
     })
@@ -1048,6 +1322,20 @@ impl SwitchRenderBackend {
         let (line_vao, line_vbo) = build_line_segment();
         let (line_rect_vao, line_rect_vbo) = build_line_rect();
 
+        // Mega-buffer arena for all shape draws — see the BufferArena
+        // comment block at the top of this file for the rationale.
+        let vertex_arena = BufferArena::new(
+            GL_ARRAY_BUFFER,
+            ARENA_VBO_SIZE,
+            ARENA_VBO_ALIGN,
+        );
+        let index_arena = BufferArena::new(
+            GL_ELEMENT_ARRAY_BUFFER,
+            ARENA_IBO_SIZE,
+            ARENA_IBO_ALIGN,
+        );
+        let shape_vao = build_shape_arena_vao(vertex_arena.gl_id, index_arena.gl_id);
+
         Some(Self {
             dimensions: ViewportDimensions {
                 width,
@@ -1073,8 +1361,14 @@ impl SwitchRenderBackend {
             shapes_registered: 0,
             bitmaps_registered: 0,
             bitmap_draws_emitted: 0,
+            render_offscreen_calls: 0,
+            apply_filter_calls: 0,
+            filters_seen_mask: AtomicU16::new(0),
             bitmap_render_count: 0,
             atlases: Vec::new(),
+            vertex_arena,
+            index_arena,
+            shape_vao,
         })
     }
 
@@ -1435,7 +1729,13 @@ impl RenderBackend for SwitchRenderBackend {
         let mut draws: Vec<GpuDraw> = Vec::with_capacity(mesh.draws.len());
         for (idx, draw) in mesh.draws.iter().enumerate() {
             let meta_ref = bitmap_metas[idx].as_ref();
-            if let Some(mut gpu) = upload_draw(draw, &gradient_textures, meta_ref) {
+            if let Some(mut gpu) = upload_draw(
+                draw,
+                &gradient_textures,
+                meta_ref,
+                &mut self.vertex_arena,
+                &mut self.index_arena,
+            ) {
                 // Refine gradient parameters now that we have the Gradient.
                 if let DrawKind::Gradient {
                     texture_index,
@@ -1458,11 +1758,29 @@ impl RenderBackend for SwitchRenderBackend {
                     };
                     *focal = f32::from(g.focal_point);
                 }
+                LIVE_GPU_DRAWS.fetch_add(1, Ordering::Relaxed);
                 draws.push(gpu);
             }
         }
 
         self.shapes_registered = self.shapes_registered.wrapping_add(1);
+        LIVE_GPU_SHAPES.fetch_add(1, Ordering::Relaxed);
+
+        // Periodic visibility into shape pressure. With Mario 63's rocket
+        // nozzle particle system pumping ~3 shapes/frame, this lets us see
+        // whether Ruffle is dropping old handles (live stays bounded) or
+        // not (live grows linearly with `shapes_registered`).
+        if self.shapes_registered % 500 == 0 {
+            let live_s = LIVE_GPU_SHAPES.load(Ordering::Relaxed);
+            let live_d = LIVE_GPU_DRAWS.load(Ordering::Relaxed);
+            let msg = std::format!(
+                "register_shape: total={} live_shapes={} live_draws={}\n",
+                self.shapes_registered, live_s, live_d,
+            );
+            let mut bytes = msg.into_bytes();
+            bytes.push(0);
+            unsafe { ruffle_log_cstr(bytes.as_ptr() as *const _) };
+        }
 
         ShapeHandle(Arc::new(SwitchShapeHandle(Arc::new(GpuShape {
             draws,
@@ -1473,14 +1791,93 @@ impl RenderBackend for SwitchRenderBackend {
     fn render_offscreen(
         &mut self,
         _handle: BitmapHandle,
-        _commands: CommandList,
-        _quality: StageQuality,
-        _bounds: PixelRegion,
+        commands: CommandList,
+        quality: StageQuality,
+        bounds: PixelRegion,
     ) -> Option<Box<dyn SyncHandle>> {
-        // Filter rendering deferred until we can faithfully port the
-        // Ruffle wgpu pipeline (Phase 2.1.b). Returning None makes Ruffle
-        // skip cache+filter for filtered display objects.
+        // Filter rendering deferred (Phase 2.3). Returning None makes Ruffle
+        // skip cache+filter for filtered display objects — but we still want
+        // to know HOW OFTEN this gets called, because a sudden surge means
+        // either a `cacheAsBitmap` clip just appeared on stage or a filtered
+        // sprite (e.g. Mario 63 rocket-nozzle glow) is now being rendered.
+        self.render_offscreen_calls = self.render_offscreen_calls.wrapping_add(1);
+        // Log first 10 calls + every 60th after, so a spike is visible
+        // without flooding nxlink.
+        let n = self.render_offscreen_calls;
+        if n <= 10 || n % 60 == 0 {
+            let cmd_len = commands.commands.len();
+            let (ram_used, ram_total) = query_ram();
+            let msg = std::format!(
+                "render_offscreen #{}: bounds={}x{} (origin {},{}) quality={:?} cmds={} ram={}MB/{}MB\n",
+                n,
+                bounds.width(),
+                bounds.height(),
+                bounds.x_min,
+                bounds.y_min,
+                quality,
+                cmd_len,
+                ram_used / (1024 * 1024),
+                ram_total / (1024 * 1024),
+            );
+            let mut bytes = msg.into_bytes();
+            bytes.push(0);
+            unsafe { ruffle_log_cstr(bytes.as_ptr() as *const _) };
+        }
         None
+    }
+
+    fn apply_filter(
+        &mut self,
+        _source: BitmapHandle,
+        source_point: (u32, u32),
+        source_size: (u32, u32),
+        _destination: BitmapHandle,
+        dest_point: (i32, i32),
+        filter: Filter,
+    ) -> Option<Box<dyn SyncHandle>> {
+        // Filter passes are not implemented yet (Phase 2.3). We log every
+        // call so when Mario 63 crashes after equipping the rocket nozzle
+        // we can see which filter was being requested and how often.
+        self.apply_filter_calls = self.apply_filter_calls.wrapping_add(1);
+        let (_, name) = filter_variant_ordinal(&filter);
+        let n = self.apply_filter_calls;
+        if n <= 20 || n % 60 == 0 {
+            let msg = std::format!(
+                "apply_filter #{}: kind={} src={}x{}@({},{}) dst@({},{})\n",
+                n,
+                name,
+                source_size.0,
+                source_size.1,
+                source_point.0,
+                source_point.1,
+                dest_point.0,
+                dest_point.1,
+            );
+            let mut bytes = msg.into_bytes();
+            bytes.push(0);
+            unsafe { ruffle_log_cstr(bytes.as_ptr() as *const _) };
+        }
+        None
+    }
+
+    fn is_filter_supported(&self, filter: &Filter) -> bool {
+        // We log each Filter variant the first time Ruffle queries it, so a
+        // single line tells us the entire palette of filters the current
+        // .swf actually exercises (vs. what the format theoretically allows).
+        let (ord, name) = filter_variant_ordinal(filter);
+        let bit = 1u16 << ord;
+        let prev = self.filters_seen_mask.fetch_or(bit, Ordering::Relaxed);
+        if prev & bit == 0 {
+            let msg = std::format!("is_filter_supported: {} (first sighting)\n", name);
+            let mut bytes = msg.into_bytes();
+            bytes.push(0);
+            unsafe { ruffle_log_cstr(bytes.as_ptr() as *const _) };
+        }
+        false
+    }
+
+    fn is_offscreen_supported(&self) -> bool {
+        false
     }
 
     fn submit_frame(
@@ -1489,22 +1886,64 @@ impl RenderBackend for SwitchRenderBackend {
         commands: CommandList,
         _cache_entries: Vec<BitmapCacheEntry>,
     ) {
+        // Drain any pending arena frees enqueued by `GpuDraw::drop`. Doing
+        // this at frame boundaries (not from Drop itself) keeps us off the
+        // hook for &mut access during arbitrary Ruffle drops, and keeps
+        // arena bookkeeping localised to the GL thread.
+        {
+            let mut pending = PENDING_FREES.lock().unwrap();
+            for f in pending.drain(..) {
+                self.vertex_arena.free_region(f.vbo_offset, f.vbo_size);
+                self.index_arena.free_region(f.ibo_offset, f.ibo_size);
+            }
+        }
 
         // Drain GL errors once per second, plus a one-line heartbeat with
         // running counters every 2 seconds. Quiet otherwise.
         self.frame_count = self.frame_count.wrapping_add(1);
-        if self.frame_count % 120 == 0 {
+        // Diagnostic heartbeat: full counters every 60 frames (~1 s), plus a
+        // 1-byte-cheap per-frame tick so the LAST frame before a crash is
+        // visible in the log. The previous 120-frame cadence left a ~2 s
+        // window of total silence around the jetpack crash.
+        //
+        // Note about RAM: the previous "WARN low ram" alert was misleading.
+        // `svcGetInfo(UsedMemorySize)` returns the heap RESERVED by the
+        // applet (set once at crt0), not the heap actually consumed by
+        // malloc. It barely moves, so a 99% ratio at boot is normal and the
+        // warning fired every 30 frames for nothing. Removed.
+        if self.frame_count % 60 == 0 {
             let (ram_used, ram_total) = query_ram();
+            let live_s = LIVE_GPU_SHAPES.load(Ordering::Relaxed);
+            let live_d = LIVE_GPU_DRAWS.load(Ordering::Relaxed);
+            let v_used_mb = self.vertex_arena.in_use_bytes() / (1024 * 1024);
+            let v_peak_mb = self.vertex_arena.peak_in_use / (1024 * 1024);
+            let i_used_mb = self.index_arena.in_use_bytes() / (1024 * 1024);
+            let i_peak_mb = self.index_arena.peak_in_use / (1024 * 1024);
+            let v_frag = self.vertex_arena.free.len();
+            let i_frag = self.index_arena.free.len();
             let msg = std::format!(
-                "f{}: shapes={} bitmaps={} atlases={} bitmap_draws={} ram={}MB/{}MB\n",
+                "f{}: shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) bitmaps={} atlases={} bitmap_draws={} offscreen={} filter={} ram={}MB/{}MB\n",
                 self.frame_count,
                 self.shapes_registered,
+                live_s,
+                live_d,
+                v_used_mb, v_peak_mb, v_frag,
+                i_used_mb, i_peak_mb, i_frag,
                 self.bitmaps_registered,
                 self.atlases.len(),
                 self.bitmap_draws_emitted,
+                self.render_offscreen_calls,
+                self.apply_filter_calls,
                 ram_used / (1024 * 1024),
                 ram_total / (1024 * 1024),
             );
+            let mut bytes = msg.into_bytes();
+            bytes.push(0);
+            unsafe { ruffle_log_cstr(bytes.as_ptr() as *const _) };
+        } else if self.frame_count % 10 == 0 {
+            // Tight tick every 10 frames so we know "we made it to f3170"
+            // even when the heartbeat hasn't fired. Very short payload.
+            let msg = std::format!("·f{}\n", self.frame_count);
             let mut bytes = msg.into_bytes();
             bytes.push(0);
             unsafe { ruffle_log_cstr(bytes.as_ptr() as *const _) };
@@ -1788,13 +2227,20 @@ impl CommandHandler for SwitchRenderBackend {
                     );
                 }
             }
+            // Single VAO for all shape draws — it points at the arena VBO
+            // and IBO. base_vertex shifts each fetched index by the byte
+            // offset of this draw's vertices, expressed as a vertex count
+            // (stride 24 bytes = 6 f32 per vertex).
+            let stride_bytes = 6 * core::mem::size_of::<f32>() as GLintptr;
+            let base_vertex = (draw.vbo_offset / stride_bytes) as GLint;
             unsafe {
-                glBindVertexArray(draw.vao);
-                glDrawElements(
+                glBindVertexArray(self.shape_vao);
+                glDrawElementsBaseVertex(
                     GL_TRIANGLES,
                     draw.num_indices,
                     GL_UNSIGNED_INT,
-                    core::ptr::null(),
+                    draw.ibo_offset as *const _,
+                    base_vertex,
                 );
             }
         }
@@ -1930,6 +2376,8 @@ impl Drop for SwitchRenderBackend {
             glDeleteVertexArrays(1, &self.line_vao);
             glDeleteBuffers(1, &self.line_rect_vbo);
             glDeleteVertexArrays(1, &self.line_rect_vao);
+            glDeleteVertexArrays(1, &self.shape_vao);
+            // vertex_arena / index_arena released via their Drop impls.
             // Programs freed by their respective Drop impls.
         }
     }

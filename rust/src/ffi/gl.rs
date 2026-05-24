@@ -17,6 +17,7 @@ pub type GLfloat = c_float;
 pub type GLint = c_int;
 pub type GLsizei = c_int;
 pub type GLsizeiptr = isize;
+pub type GLintptr = isize;
 pub type GLuint = c_uint;
 
 pub const GL_FALSE: GLboolean = 0;
@@ -101,6 +102,22 @@ extern "C" {
     pub fn glDeleteBuffers(n: GLsizei, buffers: *const GLuint);
     pub fn glBindBuffer(target: GLenum, buffer: GLuint);
     pub fn glBufferData(target: GLenum, size: GLsizeiptr, data: *const c_void, usage: GLenum);
+    pub fn glBufferSubData(
+        target: GLenum,
+        offset: GLintptr,
+        size: GLsizeiptr,
+        data: *const c_void,
+    );
+    /// Like `glDrawElements`, but adds `base_vertex` to each fetched index
+    /// before reading from the bound VBO. Lets us pack many shapes into a
+    /// single VBO with each shape using local indices 0..N.
+    pub fn glDrawElementsBaseVertex(
+        mode: GLenum,
+        count: GLsizei,
+        ty: GLenum,
+        indices: *const c_void,
+        base_vertex: GLint,
+    );
 
     pub fn glGenVertexArrays(n: GLsizei, arrays: *mut GLuint);
     pub fn glDeleteVertexArrays(n: GLsizei, arrays: *const GLuint);

@@ -21,6 +21,31 @@ extern "C" void ruffle_log_cstr(const char* msg) {
     }
 }
 
+// Called from the Rust panic hook. Mirrors the panic message to a file on
+// the SD card AND to nxlink stdout, then blocks briefly so the kernel's TCP
+// buffer for the nxlink socket has time to drain before Rust's `panic = abort`
+// short-circuits the process. Without the sleep, a previous crash logged
+// PANIC to stdout but the bytes never made it across the wire — we saw
+// `socket error 0x0 on poll` with no panic info in the host-side log.
+extern "C" void ruffle_crash_dump(const char* msg) {
+    if (!msg) return;
+    // 1. nxlink stdout (best-effort, may not flush before abort)
+    std::fputs(msg, stdout);
+    std::fflush(stdout);
+    // 2. Persist to SD so we can read it post-mortem even if the socket
+    // was truncated. We append so successive panics in one boot accumulate.
+    FILE* f = std::fopen("sdmc:/switch/ruffle-crash.log", "a");
+    if (f) {
+        std::fputs(msg, f);
+        std::fflush(f);
+        std::fclose(f);
+    }
+    // 3. Give the kernel ~150 ms to push the nxlink TCP buffer to the host.
+    // svcSleepThread takes nanoseconds. The actual abort() happens right
+    // after this returns, so without the sleep the buffered bytes get lost.
+    svcSleepThread(150 * 1000 * 1000);
+}
+
 // Rust stdlib on target_os=horizon calls libc::getrandom for HashMap key
 // seeding (hash-flooding mitigation). Newlib has no such symbol. Stub it
 // with a xorshift LCG — HashMap doesn't need crypto-strength entropy, and
