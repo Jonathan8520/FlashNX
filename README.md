@@ -15,39 +15,35 @@ Stratégie **hybride C++/Rust** (Ruffle nécessite `std`, pas no_std → newlib 
 cpp/ (devkitPro)  →  rust staticlib (Ruffle + backends)  →  switch-mesa GL  →  GPU Tegra X1
 ```
 
-## Structure projet
+## Structure projet (état actuel)
 
 ```
 flash-for-switch/
-├── Makefile                      # orchestration top-level
 ├── cpp/
 │   ├── Makefile                  # template devkitPro switch
 │   ├── src/
-│   │   ├── main.cpp              # libnx init + applet loop
-│   │   ├── gl_context.cpp        # EGL/GL via switch-mesa
-│   │   ├── input.cpp             # padInit, padUpdate → events
-│   │   ├── audio.cpp             # audren init/voices/buffers
-│   │   └── ruffle_bridge.cpp     # appels Rust staticlib
+│   │   ├── main.cpp              # libnx init + applet loop + joycon/touch input
+│   │   ├── gl_context.cpp        # EGL/GL via switch-mesa, EGL_STENCIL_SIZE=8
+│   │   ├── input.cpp             # (vide — placeholder)
+│   │   ├── audio.cpp             # (vide — Phase 2 audren)
+│   │   └── ruffle_bridge.cpp     # ruffle_log_cstr + getrandom + sysconf stubs
 │   └── include/ruffle_bridge.h
 ├── rust/
-│   ├── Cargo.toml                # crate-type = ["staticlib"]
-│   ├── build.rs                  # bindgen libnx
-│   ├── .cargo/config.toml        # target aarch64-unknown-linux-gnu
+│   ├── Cargo.toml                # crate-type = ["staticlib"], ruffle_core + ruffle_render + swf
+│   ├── rust-toolchain.toml       # nightly-x86_64-pc-windows-gnu + rust-src
+│   ├── .cargo/config.toml        # target aarch64-nintendo-switch-freestanding + rustflags
 │   └── src/
-│       ├── lib.rs                # #[no_mangle] extern "C" exports
-│       ├── ffi/                  # bindings libnx (audren/hid/applet)
-│       ├── backend/
-│       │   ├── render.rs         # RenderBackend (wgpu GL)
-│       │   ├── audio.rs          # AudioBackend → audren FFI
-│       │   ├── ui.rs             # stub
-│       │   ├── navigator.rs      # stub
-│       │   ├── storage.rs        # sdmc:/
-│       │   └── log.rs            # nxlink stdout
-│       └── player.rs             # PlayerBuilder + lifecycle
-├── third_party/ruffle/           # git submodule, pin tag stable
+│       ├── lib.rs                # FFI exports + PlayerBuilder + SWF loader + input handlers
+│       ├── ffi/gl.rs             # OpenGL FFI subset (no bindgen — hand-written)
+│       └── backend/
+│           ├── render.rs         # SwitchRenderBackend (~1500 lignes, 4 shaders, atlas)
+│           └── log.rs            # SwitchLogBackend → ruffle_log_cstr
+├── third_party/ruffle/           # git submodule, pin nightly-2026-05-19
 ├── assets/{icon.jpg, *.nacp}
-└── scripts/{setup-env.ps1, build.ps1}
+└── scripts/{build.sh, setup-env.ps1, setup-env.sh}
 ```
+
+Les backends Navigator/UI/Storage/Audio/Video utilisent les implémentations `Null*` que ruffle_core fournit par défaut — pas de fichier dédié.
 
 ## Build
 
@@ -56,10 +52,36 @@ flash-for-switch/
 ```
 
 Le script orchestre :
-1. `cargo build --release` côté Rust (target `aarch64-nintendo-switch-freestanding`, no_std, build-std nightly) → `rust/target/.../libruffle_switch.a`
-2. `make` côté C++ lancé **dans le bash MSYS2 de devkitPro** (pour que `switch_rules` résolve les paths correctement) → link contre `libruffle_switch.a` + libnx + libEGL/libGLESv2 → `cpp/flash-for-switch.nro`
+1. `cargo build --release` côté Rust (target `aarch64-nintendo-switch-freestanding`, std-via-newlib, build-std nightly) → `rust/target/.../libruffle_switch.a` (~12-13 MB)
+2. `make` côté C++ lancé **dans le bash MSYS2 de devkitPro** (pour que `switch_rules` résolve les paths correctement) → link contre `libruffle_switch.a` + libnx + libEGL/libGLESv2 → `cpp/flash-for-switch.nro` (~11.6 MB)
 
-**Phase 0 actuelle** : Rust est en no_std (juste FFI vers glClear). **Phase 1** : passera à un target custom JSON `std-via-newlib` pour pouvoir tirer `ruffle_core` qui nécessite std.
+**État Mai 2026** : full std via les 2 patches stdlib (voir plus bas), `ruffle_core` linké, Mario 63 jouable avec input clavier+souris+tactile mais sprites en blocs blancs.
+
+## Tester sur Switch
+
+1. Copier ton `.swf` sur la SD à un des chemins reconnus :
+   - `sdmc:/ruffle/test.swf` (de préférence)
+   - `sdmc:/ruffle/mario.swf`
+   - `sdmc:/ruffle/Super_Mario_63_2010.swf`
+   - `sdmc:/switch/ruffle/test.swf`
+   - Sinon : fallback embarqué (43-octet `SimpleRedBackground.swf` → fond rouge)
+2. Switch en mode **netloader** : Homebrew Menu → `Y` (ou `R` sur anciennes versions)
+3. PC : `nxlink -s cpp/flash-for-switch.nro`
+
+**Contrôles** (Mario 63 et autres jeux Flash) :
+
+| Joycon | Action Flash |
+|---|---|
+| A | Space (jump principal) |
+| B | Z (alt jump) |
+| X | X (run/dive) |
+| Y | Shift (alt run) |
+| Stick gauche / D-pad | Flèches |
+| **Stick droit** | **Curseur souris** (crosshair visible) |
+| **ZR** ou **écran tactile** | **Clic souris** |
+| Minus | Enter (« Press Start ») |
+| L | Escape |
+| Plus | Quitter le `.nro` |
 
 ## Roadmap
 
@@ -70,25 +92,13 @@ Le script orchestre :
 - Rendu = `glClear(rouge)`. **Confirmé sur Switch réelle :** écran rouge affiché, exit sur bouton +.
 - Ce que ça a prouvé : cross-compile Rust ARM64 + staticlib link C++ devkitPro + FFI Rust↔C + switch-mesa sur hardware + pipeline `.nro` complète.
 
-### Phase 0.5 — triangle réel (codée 2026-05-21, attend test hardware)
+### Phase 0.5 — triangle GLSL réel ✓ (validée hardware 2026-05-21)
 
-Avant le gros plongeon Phase 1, dérisquer un point précis : est-ce que des shaders GLSL compilent et tournent sur switch-mesa ?
+Vertex + fragment shader GLSL 330 core chargés depuis Rust, VBO/VAO d'un triangle RGB. Confirme que les shaders GLSL compilent et tournent sur switch-mesa. Triangle visible sommet rouge (haut), vert (bas-gauche), bleu (bas-droite) sur fond bleu nuit.
 
-- Vertex + fragment shader GLSL 330 core chargés depuis Rust no_std (`rust/src/lib.rs`)
-- VBO + VAO d'un triangle RGB (pos.xy + col.rgb interleavé), `glDrawArrays`
-- FFI GL côté Rust : `rust/src/ffi/gl.rs` (subset GL 3.3+ core)
-- Callback log Rust → nxlink : `ruffle_log_cstr` dans `cpp/src/ruffle_bridge.cpp`
-- Build OK, `.nro` 5.8 MB, **attend validation sur Switch réelle**
+### Phase 1 — intégration Ruffle ✓ (bouclée en ~6 jours au lieu des 6-10 semaines estimées)
 
-**Critères de succès attendus sur Switch :**
-- Fond bleu nuit `rgb(13, 13, 26)` au lieu du rouge Phase 0
-- Triangle centré sommet rouge (haut), vert (bas-gauche), bleu (bas-droite) avec gradient interpolé
-- Pas de panic / pas d'écran noir → GLSL compile sur switch-mesa
-- Si shader compile fail → message d'erreur visible via `nxlink -s`
-
-### Phase 1 — intégration Ruffle (6-10 semaines)
-
-Objectif : charger un `.swf` depuis la SD et voir *quelque chose* à l'écran (probablement buggé).
+Objectif initial : charger un `.swf` depuis la SD et voir quelque chose à l'écran. **Atteint et dépassé** — Mario 63 jouable avec input complet.
 
 | Étape | Boulot | Risque |
 |---|---|---|
@@ -109,56 +119,55 @@ Objectif : charger un `.swf` depuis la SD et voir *quelque chose* à l'écran (p
 | 1.5.e ⚠ Texture atlas pour bitmap fills (code en place, désactivé) | ~3 h | **Implémenté mais désactivé**. `Atlas` skyline packer 2048×2048 RGBA (16 MB) en `rust/src/backend/render.rs` partage les sprites Mario 63 dans 1 seule texture GL. Shaders `BITMAP_PROG` et `SHAPE_BITMAP_PROG` étendus avec `u_uv_remap` (vec4) pour mapper UV vers la sous-région atlas. **MAIS** : la cascade des ~600 `bitmap_source.bitmap_handle(id, self)` appels en moins de 2 sec déclenche un crash inconnu (likely Ruffle internal RAM spike du décodage de tous les bitmaps en parallèle — issues upstream #2448, #4690 documentent les crashes Mario 63 connus). `PER_SHAPE_BITMAP_BUDGET = 0` désactive la résolution → blocs blancs mais stable. **Phase 2.x** devra soit throttler la résolution cross-frame, soit patcher Ruffle upstream. |
 | 1.5.f File picker C++ : scan `sdmc:/ruffle/*.swf`, UI de sélection joycon, passer le path à Rust | 2-3 jours | Faible. Bloqué partiellement par bug `std::fs::read_dir` Horizon (filenames tronqués de 2 chars). Workaround actuel : liste hardcodée de chemins candidats. |
 
-**Pivot Phase 1.3 si wgpu-GL casse sur switch-mesa :** *non-applicable* — on est déjà parti directement en GL natif (pas via wgpu). Décision prise dès Phase 1.3.1 vu le risque connu wgpu-GL/mesa.
+### Phase 2 — finir Mario 63 (sprites + son + level transitions)
 
-**Pivot Phase 1.1 si std-via-newlib échoue :** fork Ruffle pour le rendre no_std (énorme, plusieurs mois) OU pivoter vers un autre player Flash open-source (peu de candidats). C'est le risque qui peut tuer le projet.
+À ce stade Mario 63 charge, l'AS2 exécute, l'input répond, le premier niveau se joue. Il manque :
 
-### Phase 2 — Mario 63 jouable (3-6 mois après Phase 1)
+| Étape | Boulot | Risque |
+|---|---|---|
+| 2.1 Sprites visibles | Throttler la résolution des `bitmap_handle` cross-frame (étaler les ~600 décodages Ruffle sur N frames au lieu d'un burst de 2 sec) **OU** patcher Ruffle upstream pour décoder lazy. L'atlas GL est déjà en place (`rust/src/backend/render.rs`), il manque juste l'amorce. | Moyen |
+| 2.2 Audio audren | Bindgen libnx audren symbols → `audrvCreate`/`audrvVoiceInit`/`audrvVoiceAddWaveBuf`/`audrvUpdate`. Côté Rust, implémenter un `AudioBackend` qui consomme les samples de Ruffle et les pousse dans audren via FFI. Bridge MP3/AAC restera best-effort (deps externes). | Moyen-fort |
+| 2.3 Bugs upstream Mario 63 | Issues Ruffle connues #1909 (crash tutorial), #6906 (castle), #4690 (title freeze), #11077 (Bowser non-completable), #2448 (gradients). Beaucoup ont des fixes upstream à intégrer en bumpant le submodule. | Variable |
+| 2.4 Performance | Mesurer FPS sur Tegra X1 docked/handheld. Optimiser : batcher les draws solides, cacher uniforms entre draws, réduire glUseProgram. | Faible |
+| 2.5 Real file picker C++ | Scan `sdmc:/ruffle/*.swf` via libnx fsdev (contourne le bug `std::fs::read_dir` Horizon — filenames tronqués). UI joycon : liste avec A=select. | Faible |
 
-À ce stade un `.swf` charge mais probablement plein de bugs visuels/comportementaux. Phase 2 c'est rendre *un* jeu (Mario 63) jouable de bout en bout :
+### Phase 3 — polish + distribution
 
-- Backend audio réel via audren (au lieu du stub silencieux)
-- Mapping joycon → événements souris/clavier Flash (Mario 63 utilise beaucoup le clavier)
-- Bugs `RenderBackend` qui sortent uniquement sur du contenu non-trivial (sprites multiples, masques, gradients)
-- Quirks Mario 63 spécifiques découverts en jouant (timing, state machines AS2)
-- Performance : viser 60 FPS sur Tegra X1
+- Cycle applet (`appletGetFocusState`, suspend/resume, libération GPU au focus-lost)
+- `.nacp` metadata final, icon
+- Packaging hb-app.store
+- Compat globale : Madness, Newgrounds classics, autres SWF AS1/AS2 populaires
 
-### Phase 3 — polish + distribution (1-2 mois)
+### Verdict timeline solo (révisé 2026-05-24)
 
-- Cycle applet (focus-lost, suspend/resume, libération GPU)
-- `.nacp` metadata, icon final, packaging hb-app.store
-- README utilisateur, instructions install SD
-- Compat globale : tester sur d'autres `.swf` AS1/AS2 populaires (Madness, Newgrounds classics)
-
-### Verdict timeline solo
-
-- Premier `.swf` qui affiche un truc : **6-10 semaines**
-- Mario 63 jouable : **+3-6 mois**
+- ~~Premier `.swf` qui affiche un truc : 6-10 semaines~~ → **fait en 6 jours**
+- ~~Mario 63 jouable : +3-6 mois~~ → **input + chargement faits en 6 jours, sprites/audio restent**
+- Phase 2 (sprites + son + bugs upstream) : estimation **2-4 semaines** maintenant
 - Release publique propre : **+1-2 mois**
-- **Total estimé : 6-12 mois solo** sur du temps de soir/weekend soutenu
 
-Ces estimations supposent que Phase 1.1 (std-via-newlib) marche. Si ça casse, multiplier par 2-3.
+La sous-estimation initiale (6-12 mois) venait surtout de la peur autour de `std-via-newlib` (Phase 1.1) qui s'est résolue en 1h au lieu de 1-2 semaines, car upstream stdlib avait déjà les branches `target_os = "horizon"` pour le 3DS.
 
 ## Contraintes / faits à retenir
 
-- **Mario 63 = AS2 pur interprété.** Pas d'AVM2 JIT requis → service Horizon `jit:u` non nécessaire.
-- **Ruffle deps à neutraliser :** `cpal` (remplacer par notre AudioBackend), `flate2` feature `rust_backend`, `reqwest` stub via `NavigatorBackend`. `tokio` n'est PAS dans `ruffle_core`.
-- **libnx symbols à bindgen :**
-  - HID : `hidInitialize`, `padConfigureInput`, `padInitializeDefault`, `padUpdate`, `padGetButtons`, `padGetStickPos`
-  - Audio : `audrenInitialize`, `audrenStartAudioRenderer`, `audrvCreate`, `audrvMemPoolAdd/Attach`, `audrvVoiceInit`, `audrvVoiceAddWaveBuf`, `audrvUpdate`
-  - Applet : `appletMainLoop`, `appletGetCurrentFocusState`, `appletHook`
-  - Socket : `socketInitializeDefault`, `nxlinkStdio` (debug stdout réseau)
-  - FS : rien à wrapper — `sdmc:/` monté auto par crt0 libnx, `fopen("sdmc:/...")` marche direct
-- **bindgen config :** `.use_core() + .ctypes_prefix("core::ffi")` (Rust ≥1.64).
-- **Cross Windows → Switch :** LLVM Windows + `LIBCLANG_PATH`, clang `-target aarch64-none-elf --sysroot=$DEVKITPRO/devkitA64/aarch64-none-elf -isystem $LIBNX/include`. Piège : chemins MSYS vs Windows.
-- **Pattern d'architecture à copier :** ScummVM `backends/platform/sdl/switch/` — séparation OSystem → OSystem_SDL → OSystem_Switch. Appliquer en Rust : trait `Backend` portable + `SwitchBackend` mince.
+- **Mario 63 = AS2 pur interprété.** AVM2 JIT non nécessaire → service Horizon `jit:u` non requis. Confirmé en pratique : le SWF v8 charge et exécute sans JIT.
+- **Ruffle deps à neutraliser :** ~~prévu pour `cpal`, `flate2 rust_backend`, `reqwest`~~ → **non nécessaire en pratique**. `cpal`/`reqwest`/`tokio`/`wgpu` ne sont PAS dans `ruffle_core`, juste dans `ruffle_desktop`. `flate2` workspace default = `miniz_oxide` (pure Rust). Tout linke direct.
+- **FFI libnx utilisée** (Phase 1 complétée) :
+  - HID : `padConfigureInput`/`padInitializeDefault`/`padUpdate`/`padGetButtonsDown/Up`/`padGetStickPos`/`hidInitializeTouchScreen`/`hidGetTouchScreenStates` (appelés direct dans `cpp/src/main.cpp`)
+  - Applet : `appletMainLoop`, `nwindowGetDefault`
+  - Socket : `socketInitializeDefault`, `nxlinkStdio` (stdout réseau)
+  - FS : `sdmc:/...` monté auto par crt0 libnx → `std::fs::read` marche depuis Rust (sauf `read_dir` qui bug — voir Phase 2.5)
+- **FFI libnx à venir** (Phase 2) :
+  - Audio : `audrenInitialize`/`audrenStartAudioRenderer`/`audrvCreate`/`audrvMemPoolAdd|Attach`/`audrvVoiceInit`/`audrvVoiceAddWaveBuf`/`audrvUpdate`
+  - Applet : `appletGetCurrentFocusState`/`appletHook` pour cycle suspend/resume
+- **Bindgen** : non utilisé en pratique. FFI écrite à la main dans `rust/src/ffi/gl.rs` (subset GL 4.3 core) et `cpp/src/ruffle_bridge.cpp`. Plus simple et zéro dep build-time.
+- **Pattern d'architecture à copier :** ScummVM `backends/platform/sdl/switch/` — séparation OSystem → OSystem_SDL → OSystem_Switch. Adapté ici en Rust : trait `RenderBackend` (de Ruffle) + impl `SwitchRenderBackend` mince.
 
 ## Toolchain installée (état actuel)
 
 - **devkitPro** dans `C:\devkitPro\` avec packages `switch-dev`, `switch-mesa`, `switch-glm`, `switch-glad`
 - **Rust** : toolchain pin via `rust/rust-toolchain.toml` → `nightly-x86_64-pc-windows-gnu` + `rust-src` (host GNU obligatoire — MSVC casse les build scripts sans Visual Studio Build Tools)
 - **MinGW-w64** via `scoop install mingw` (16.1.0) — pour `dlltool.exe` que Rust nightly GNU embarque buggé. Ajouter `~/scoop/apps/mingw/current/bin` au PATH avant `cargo build` (le `scripts/build.sh` le fait déjà).
-- LLVM/CMake/Python : pas nécessaires pour Phase 0/1 ; viendront si Phase 2 a besoin de bindgen libnx pour `audren`.
+- LLVM/CMake/Python : **toujours pas nécessaires** — confirmé en pratique. Phase 2 audren se fera via FFI manuelle dans `cpp/src/audio.cpp`, pas bindgen.
 
 ### Patches rust-src à ré-appliquer après chaque `rustup update`
 
@@ -199,8 +208,9 @@ Sans ça, `HashMap::new()` puis `.insert()` crash sur hardware. Le lazy thread_l
 ## Hardware
 
 - Switch moddée Atmosphère
-- nxlink pour stdout réseau (debug)
-- SD : `/switch/flash-for-switch.nro`, `/switch/ruffle/*.swf`
+- nxlink pour stdout réseau (debug) + netloader (push `.nro` par WiFi)
+- SD : copier le `.nro` dans `/switch/flash-for-switch.nro` pour le mode SD (non requis si netload)
+- SWFs cherchés en priorité dans `sdmc:/ruffle/` (voir section « Tester sur Switch » plus haut)
 
 ## Références
 
