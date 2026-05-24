@@ -185,4 +185,13 @@ extern "C" {
     );
     pub fn glTexParameteri(target: GLenum, pname: GLenum, param: GLint);
     pub fn glPixelStorei(pname: GLenum, param: GLint);
+
+    pub fn glGetError() -> GLenum;
 }
+
+pub const GL_NO_ERROR: GLenum = 0;
+pub const GL_INVALID_ENUM: GLenum = 0x0500;
+pub const GL_INVALID_VALUE: GLenum = 0x0501;
+pub const GL_INVALID_OPERATION: GLenum = 0x0502;
+pub const GL_OUT_OF_MEMORY: GLenum = 0x0505;
+pub const GL_INVALID_FRAMEBUFFER_OPERATION: GLenum = 0x0506;

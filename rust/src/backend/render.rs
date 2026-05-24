@@ -63,28 +63,129 @@ fn log(nul_terminated: &[u8]) {
 
 // ─── GPU resources ────────────────────────────────────────────────────────────
 
-/// One bitmap uploaded as a GL texture. Owned by `Arc<GpuTexture>` so the
-/// last clone of a `BitmapHandle` triggers `glDeleteTextures`.
-struct GpuTexture {
-    id: GLuint,
-    width: u32,
+// ─── Texture atlas ─────────────────────────────────────────────────────────
+//
+// Mario 63 (and likely many other Flash games) register hundreds of small
+// bitmaps. One GL texture per bitmap exhausts driver resources on Tegra X1
+// — a deterministic crash at ~600 textures was bisected on 2026-05-24.
+//
+// Atlas: a single 2048x2048 RGBA texture (16 MB) packed with a shelf-based
+// allocator. New atlases are added when the current one fills up. Each
+// bitmap becomes a sub-rectangle (u0,v0)–(u1,v1) of one atlas.
+
+const ATLAS_SIZE: u32 = 2048;
+const ATLAS_PAD: u32 = 1; // 1 px padding around each bitmap to avoid bleed
+
+struct Shelf {
+    y: u32,
     height: u32,
+    used_w: u32,
 }
 
-impl Drop for GpuTexture {
-    fn drop(&mut self) {
-        unsafe { glDeleteTextures(1, &self.id) };
+struct Atlas {
+    texture: GLuint,
+    width: u32,
+    height: u32,
+    shelves: Vec<Shelf>,
+}
+
+impl Atlas {
+    fn new(size: u32) -> Self {
+        let mut tex: GLuint = 0;
+        unsafe {
+            glGenTextures(1, &mut tex);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glTexImage2D(
+                GL_TEXTURE_2D,
+                0,
+                GL_RGBA8 as GLint,
+                size as GLsizei,
+                size as GLsizei,
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                core::ptr::null(),
+            );
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as GLint);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as GLint);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as GLint);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as GLint);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+        Self {
+            texture: tex,
+            width: size,
+            height: size,
+            shelves: Vec::new(),
+        }
+    }
+
+    /// Try to allocate a `w×h` region (plus padding). Returns the content
+    /// origin (without padding).
+    fn pack(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
+        let w_full = w + 2 * ATLAS_PAD;
+        let h_full = h + 2 * ATLAS_PAD;
+        if w_full > self.width || h_full > self.height {
+            return None;
+        }
+        for shelf in &mut self.shelves {
+            if shelf.height >= h_full && shelf.used_w + w_full <= self.width {
+                let x = shelf.used_w + ATLAS_PAD;
+                let y = shelf.y + ATLAS_PAD;
+                shelf.used_w += w_full;
+                return Some((x, y));
+            }
+        }
+        let next_y = self.shelves.last().map(|s| s.y + s.height).unwrap_or(0);
+        if next_y + h_full > self.height {
+            return None;
+        }
+        self.shelves.push(Shelf {
+            y: next_y,
+            height: h_full,
+            used_w: w_full,
+        });
+        Some((ATLAS_PAD, next_y + ATLAS_PAD))
+    }
+
+    fn upload_region(&self, x: u32, y: u32, w: u32, h: u32, pixels: &[u8]) {
+        unsafe {
+            glBindTexture(GL_TEXTURE_2D, self.texture);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glTexSubImage2D(
+                GL_TEXTURE_2D,
+                0,
+                x as GLint,
+                y as GLint,
+                w as GLsizei,
+                h as GLsizei,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                pixels.as_ptr() as *const _,
+            );
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
     }
 }
 
-impl std::fmt::Debug for GpuTexture {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "GpuTexture({}x{} #{})", self.width, self.height, self.id)
+impl Drop for Atlas {
+    fn drop(&mut self) {
+        unsafe { glDeleteTextures(1, &self.texture) };
     }
 }
 
 #[derive(Clone, Debug)]
-struct SwitchBitmapHandle(Arc<GpuTexture>);
+struct SwitchBitmapHandle {
+    atlas_index: usize,
+    /// Atlas-space UV bounds in [0, 1].
+    u0: f32,
+    v0: f32,
+    u1: f32,
+    v1: f32,
+    width: u32,
+    height: u32,
+}
 impl BitmapHandleImpl for SwitchBitmapHandle {}
 
 /// What kind of draw call this is (chooses the shader program).
@@ -99,6 +200,21 @@ enum DrawKind {
         gradient_kind: i32, // 0=linear, 1=radial, 2=focal
         spread: i32,        // 0=pad, 1=reflect, 2=repeat
         focal: f32,
+    },
+    Bitmap {
+        /// Index into `SwitchRenderBackend::atlases` — the GL texture is
+        /// owned by the atlas, not per-draw.
+        atlas_index: usize,
+        /// Atlas-space UV remap (origin.x, origin.y, scale.x, scale.y).
+        uv_remap: [f32; 4],
+        /// 3x3 column-major matrix mapping `a_pos` (shape pixels) to UV
+        /// in [0, 1] of the source bitmap. Pre-inverted by
+        /// `swf_bitmap_to_gl_matrix`.
+        local_matrix: [GLfloat; 9],
+        #[allow(dead_code)]
+        is_smoothed: bool,
+        #[allow(dead_code)]
+        is_repeating: bool,
     },
 }
 
@@ -163,6 +279,7 @@ struct BitmapProgram {
     u_mult: GLint,
     u_add: GLint,
     u_tex: GLint,
+    u_uv_remap: GLint,
 }
 
 struct GradientProgram {
@@ -177,6 +294,20 @@ struct GradientProgram {
     u_grad_focal: GLint,
 }
 
+/// Shader for "bitmap fill inside a shape": vertex computes UV from
+/// `a_pos` via a per-draw 3×3 matrix (no per-vertex UV attribute), then
+/// remaps from [0,1] to the atlas sub-rectangle. Fragment samples the
+/// bound texture and applies color transform.
+struct ShapeBitmapProgram {
+    program: GLuint,
+    u_world: GLint,
+    u_mult: GLint,
+    u_add: GLint,
+    u_tex: GLint,
+    u_uv: GLint,
+    u_uv_remap: GLint,
+}
+
 impl Drop for SolidProgram {
     fn drop(&mut self) {
         unsafe { glDeleteProgram(self.program) };
@@ -188,6 +319,11 @@ impl Drop for BitmapProgram {
     }
 }
 impl Drop for GradientProgram {
+    fn drop(&mut self) {
+        unsafe { glDeleteProgram(self.program) };
+    }
+}
+impl Drop for ShapeBitmapProgram {
     fn drop(&mut self) {
         unsafe { glDeleteProgram(self.program) };
     }
@@ -212,6 +348,7 @@ pub struct SwitchRenderBackend {
 
     solid: SolidProgram,
     bitmap_prog: BitmapProgram,
+    shape_bitmap_prog: ShapeBitmapProgram,
     gradient_prog: GradientProgram,
 
     /// Solid unit quad (pos+rgba, 6 vertices). Used by `draw_rect`.
@@ -233,6 +370,16 @@ pub struct SwitchRenderBackend {
 
     mask: MaskState,
     warned_unsupported: u32,
+    /// Frame counter for periodic `glGetError` polling.
+    frame_count: u32,
+    /// Diagnostic counters: how many shapes/bitmaps registered so far.
+    shapes_registered: u32,
+    bitmaps_registered: u32,
+    bitmap_draws_emitted: u32,
+    /// Pool of texture atlases. New atlases get appended when current is
+    /// full. Bitmaps are packed into these instead of getting individual
+    /// GL textures.
+    atlases: Vec<Atlas>,
 }
 
 // ─── Shaders source ───────────────────────────────────────────────────────────
@@ -261,11 +408,12 @@ const BITMAP_VERT: &[u8] = b"#version 330 core\n\
 layout(location = 0) in vec2 a_pos;\n\
 layout(location = 1) in vec2 a_uv;\n\
 uniform mat3 u_world;\n\
+uniform vec4 u_uv_remap;\n\
 out vec2 v_uv;\n\
 void main() {\n\
     vec3 p = u_world * vec3(a_pos, 1.0);\n\
     gl_Position = vec4(p.xy, 0.0, 1.0);\n\
-    v_uv = a_uv;\n\
+    v_uv = u_uv_remap.xy + a_uv * u_uv_remap.zw;\n\
 }\n\0";
 
 const BITMAP_FRAG: &[u8] = b"#version 330 core\n\
@@ -290,6 +438,33 @@ void main() {\n\
     vec3 p = u_world * vec3(a_pos, 1.0);\n\
     gl_Position = vec4(p.xy, 0.0, 1.0);\n\
     v_pos = a_pos;\n\
+}\n\0";
+
+/// Vertex shader for bitmap fills inside shapes: computes UV by applying
+/// `u_uv` (pre-inverted matrix from `swf_bitmap_to_gl_matrix`) to `a_pos`,
+/// then remaps from per-bitmap [0,1] into the atlas sub-rect.
+const SHAPE_BITMAP_VERT: &[u8] = b"#version 330 core\n\
+layout(location = 0) in vec2 a_pos;\n\
+uniform mat3 u_world;\n\
+uniform mat3 u_uv;\n\
+uniform vec4 u_uv_remap;\n\
+out vec2 v_uv;\n\
+void main() {\n\
+    vec3 p = u_world * vec3(a_pos, 1.0);\n\
+    gl_Position = vec4(p.xy, 0.0, 1.0);\n\
+    vec3 uv = u_uv * vec3(a_pos, 1.0);\n\
+    v_uv = u_uv_remap.xy + uv.xy * u_uv_remap.zw;\n\
+}\n\0";
+
+const SHAPE_BITMAP_FRAG: &[u8] = b"#version 330 core\n\
+in vec2 v_uv;\n\
+out vec4 frag_color;\n\
+uniform sampler2D u_tex;\n\
+uniform vec4 u_mult;\n\
+uniform vec4 u_add;\n\
+void main() {\n\
+    vec4 c = texture(u_tex, v_uv);\n\
+    frag_color = clamp(c * u_mult + u_add, 0.0, 1.0);\n\
 }\n\0";
 
 // `u_grad_local` here is the matrix produced by ruffle's `swf_to_gl_matrix`
@@ -410,6 +585,20 @@ fn build_bitmap_program() -> Option<BitmapProgram> {
         u_mult: loc(program, b"u_mult\0"),
         u_add: loc(program, b"u_add\0"),
         u_tex: loc(program, b"u_tex\0"),
+        u_uv_remap: loc(program, b"u_uv_remap\0"),
+        program,
+    })
+}
+
+fn build_shape_bitmap_program() -> Option<ShapeBitmapProgram> {
+    let program = link_program(SHAPE_BITMAP_VERT, SHAPE_BITMAP_FRAG)?;
+    Some(ShapeBitmapProgram {
+        u_world: loc(program, b"u_world\0"),
+        u_mult: loc(program, b"u_mult\0"),
+        u_add: loc(program, b"u_add\0"),
+        u_tex: loc(program, b"u_tex\0"),
+        u_uv: loc(program, b"u_uv\0"),
+        u_uv_remap: loc(program, b"u_uv_remap\0"),
         program,
     })
 }
@@ -545,8 +734,13 @@ fn upload_static_vbo_pos_rgba(verts: &[f32]) -> (GLuint, GLuint) {
 }
 
 /// Upload one tessellated `Draw` and store its draw kind. Returns None for
-/// degenerate draws (empty).
-fn upload_draw(draw: &ruffle_render::tessellator::Draw, gradient_textures: &[GLuint]) -> Option<GpuDraw> {
+/// degenerate draws (empty). `bitmap_meta` is `Some` only when the draw is
+/// `DrawType::Bitmap` and the source bitmap was successfully resolved.
+fn upload_draw(
+    draw: &ruffle_render::tessellator::Draw,
+    gradient_textures: &[GLuint],
+    bitmap_meta: Option<&SwitchBitmapHandle>,
+) -> Option<GpuDraw> {
     if draw.vertices.is_empty() || draw.indices.is_empty() {
         return None;
     }
@@ -627,11 +821,31 @@ fn upload_draw(draw: &ruffle_render::tessellator::Draw, gradient_textures: &[GLu
                 }
             }
         }
-        DrawType::Bitmap(_) => {
-            // Bitmap fills inside shapes — same idea as gradients, deferred
-            // to 1.3.6.b. Render the vertex color (white) for now so the
-            // shape's silhouette is visible.
-            DrawKind::Solid
+        DrawType::Bitmap(b) => {
+            let Some(meta) = bitmap_meta else {
+                return Some(GpuDraw {
+                    vao,
+                    vbo,
+                    ibo,
+                    num_indices: draw.indices.len() as GLsizei,
+                    kind: DrawKind::Solid,
+                });
+            };
+            // `b.matrix` maps `a_pos` (shape pixels) to UV in [0,1] of the
+            // source bitmap. The shader composes with `u_uv_remap` to land
+            // in the atlas sub-rect.
+            let local_matrix = [
+                b.matrix[0][0], b.matrix[0][1], b.matrix[0][2],
+                b.matrix[1][0], b.matrix[1][1], b.matrix[1][2],
+                b.matrix[2][0], b.matrix[2][1], b.matrix[2][2],
+            ];
+            DrawKind::Bitmap {
+                atlas_index: meta.atlas_index,
+                uv_remap: [meta.u0, meta.v0, meta.u1 - meta.u0, meta.v1 - meta.v0],
+                local_matrix,
+                is_smoothed: b.is_smoothed,
+                is_repeating: b.is_repeating,
+            }
         }
     };
 
@@ -726,40 +940,16 @@ fn lerp_color(a: &Color, b: &Color, t: f32) -> Color {
     }
 }
 
-fn upload_bitmap_texture(bitmap: &Bitmap<'_>) -> Option<GpuTexture> {
+/// Convert a Ruffle `Bitmap` into an RGBA byte buffer + dims. Returns None
+/// for empty or unrecognised formats.
+fn bitmap_to_rgba_bytes(bitmap: &Bitmap<'_>) -> Option<(Vec<u8>, u32, u32)> {
     let rgba = bitmap.clone().to_rgba();
-    let w = rgba.width() as GLsizei;
-    let h = rgba.height() as GLsizei;
-    if w <= 0 || h <= 0 || rgba.format() != BitmapFormat::Rgba {
+    let w = rgba.width();
+    let h = rgba.height();
+    if w == 0 || h == 0 || rgba.format() != BitmapFormat::Rgba {
         return None;
     }
-    let mut tex: GLuint = 0;
-    unsafe {
-        glGenTextures(1, &mut tex);
-        glBindTexture(GL_TEXTURE_2D, tex);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexImage2D(
-            GL_TEXTURE_2D,
-            0,
-            GL_RGBA8 as GLint,
-            w,
-            h,
-            0,
-            GL_RGBA,
-            GL_UNSIGNED_BYTE,
-            rgba.data().as_ptr() as *const _,
-        );
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as GLint);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as GLint);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as GLint);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as GLint);
-        glBindTexture(GL_TEXTURE_2D, 0);
-    }
-    Some(GpuTexture {
-        id: tex,
-        width: rgba.width(),
-        height: rgba.height(),
-    })
+    Some((rgba.data().to_vec(), w, h))
 }
 
 // ─── Downcast helpers ─────────────────────────────────────────────────────────
@@ -778,6 +968,7 @@ impl SwitchRenderBackend {
     pub fn new(width: u32, height: u32) -> Option<Self> {
         let solid = build_solid_program()?;
         let bitmap_prog = build_bitmap_program()?;
+        let shape_bitmap_prog = build_shape_bitmap_program()?;
         let gradient_prog = build_gradient_program()?;
 
         let (rect_vao, rect_vbo) = build_solid_quad();
@@ -794,6 +985,7 @@ impl SwitchRenderBackend {
             tessellator: ShapeTessellator::new(),
             solid,
             bitmap_prog,
+            shape_bitmap_prog,
             gradient_prog,
             rect_vao,
             rect_vbo,
@@ -805,6 +997,11 @@ impl SwitchRenderBackend {
             line_rect_vbo,
             mask: MaskState::default(),
             warned_unsupported: 0,
+            frame_count: 0,
+            shapes_registered: 0,
+            bitmaps_registered: 0,
+            bitmap_draws_emitted: 0,
+            atlases: Vec::new(),
         })
     }
 
@@ -843,15 +1040,54 @@ impl SwitchRenderBackend {
         }
     }
 
-    fn use_bitmap(&self, world: &[GLfloat; 9], mult: &[f32; 4], add: &[f32; 4], tex: GLuint) {
+    fn use_bitmap(
+        &self,
+        world: &[GLfloat; 9],
+        mult: &[f32; 4],
+        add: &[f32; 4],
+        tex: GLuint,
+        uv_remap: &[f32; 4],
+    ) {
         unsafe {
             glUseProgram(self.bitmap_prog.program);
             glUniformMatrix3fv(self.bitmap_prog.u_world, 1, GL_FALSE, world.as_ptr());
             glUniform4f(self.bitmap_prog.u_mult, mult[0], mult[1], mult[2], mult[3]);
             glUniform4f(self.bitmap_prog.u_add, add[0], add[1], add[2], add[3]);
+            glUniform4f(
+                self.bitmap_prog.u_uv_remap,
+                uv_remap[0], uv_remap[1], uv_remap[2], uv_remap[3],
+            );
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, tex);
             glUniform1i(self.bitmap_prog.u_tex, 0);
+        }
+    }
+
+    fn use_shape_bitmap(
+        &self,
+        world: &[GLfloat; 9],
+        mult: &[f32; 4],
+        add: &[f32; 4],
+        tex: GLuint,
+        uv_matrix: &[GLfloat; 9],
+        uv_remap: &[f32; 4],
+    ) {
+        // Atlas texture parameters are set once at atlas creation; no per-
+        // draw glTexParameteri (avoids per-frame state churn that bisection
+        // on 2026-05-24 implicated in a Mario 63 driver-side issue).
+        unsafe {
+            glUseProgram(self.shape_bitmap_prog.program);
+            glUniformMatrix3fv(self.shape_bitmap_prog.u_world, 1, GL_FALSE, world.as_ptr());
+            glUniform4f(self.shape_bitmap_prog.u_mult, mult[0], mult[1], mult[2], mult[3]);
+            glUniform4f(self.shape_bitmap_prog.u_add, add[0], add[1], add[2], add[3]);
+            glUniformMatrix3fv(self.shape_bitmap_prog.u_uv, 1, GL_FALSE, uv_matrix.as_ptr());
+            glUniform4f(
+                self.shape_bitmap_prog.u_uv_remap,
+                uv_remap[0], uv_remap[1], uv_remap[2], uv_remap[3],
+            );
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glUniform1i(self.shape_bitmap_prog.u_tex, 0);
         }
     }
 
@@ -879,6 +1115,57 @@ impl SwitchRenderBackend {
             glBindTexture(GL_TEXTURE_2D, tex);
             glUniform1i(self.gradient_prog.u_tex, 0);
         }
+    }
+
+    /// Pack a bitmap's RGBA pixels into one of our atlases. Returns the
+    /// SwitchBitmapHandle metadata, or None if the bitmap is too big for
+    /// the atlas size.
+    fn pack_into_atlas(
+        &mut self,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Option<SwitchBitmapHandle> {
+        for (idx, atlas) in self.atlases.iter_mut().enumerate() {
+            if let Some((x, y)) = atlas.pack(width, height) {
+                atlas.upload_region(x, y, width, height, pixels);
+                let inv = 1.0 / ATLAS_SIZE as f32;
+                return Some(SwitchBitmapHandle {
+                    atlas_index: idx,
+                    u0: x as f32 * inv,
+                    v0: y as f32 * inv,
+                    u1: (x + width) as f32 * inv,
+                    v1: (y + height) as f32 * inv,
+                    width,
+                    height,
+                });
+            }
+        }
+        // No room — allocate a new atlas (16 MB GPU texture).
+        let new_atlas_index = self.atlases.len();
+        let msg = std::format!(
+            "atlas: allocating #{} (16 MB) for {}x{}\n",
+            new_atlas_index, width, height,
+        );
+        let mut bytes = msg.into_bytes();
+        bytes.push(0);
+        unsafe { ruffle_log_cstr(bytes.as_ptr() as *const _) };
+        let mut atlas = Atlas::new(ATLAS_SIZE);
+        let Some((x, y)) = atlas.pack(width, height) else {
+            return None;
+        };
+        atlas.upload_region(x, y, width, height, pixels);
+        self.atlases.push(atlas);
+        let inv = 1.0 / ATLAS_SIZE as f32;
+        Some(SwitchBitmapHandle {
+            atlas_index: new_atlas_index,
+            u0: x as f32 * inv,
+            v0: y as f32 * inv,
+            u1: (x + width) as f32 * inv,
+            v1: (y + height) as f32 * inv,
+            width,
+            height,
+        })
     }
 
     fn warn_once(&mut self, msg: &[u8]) {
@@ -1030,9 +1317,41 @@ impl RenderBackend for SwitchRenderBackend {
             gradient_textures.push(build_gradient_texture(g));
         }
 
-        let mut draws: Vec<GpuDraw> = Vec::with_capacity(mesh.draws.len());
+        // Resolve bitmap fills. The atlas (shared GL texture pool) is in
+        // place but Mario-63-scale cascades (~600 bitmap_handle calls in
+        // 2 seconds) still crash on Switch — likely a Ruffle-internal RAM
+        // spike from decoding all bitmaps eagerly. Budget=0 disables the
+        // resolution entirely → shapes render as solid white but the run
+        // is stable. Future Phase 2.x will need either upstream throttling
+        // or a smarter cross-frame resolution scheme.
+        const PER_SHAPE_BITMAP_BUDGET: usize = 0;
+        let mut bitmap_metas: Vec<Option<SwitchBitmapHandle>> =
+            Vec::with_capacity(mesh.draws.len());
+        let bitmap_fill_count = mesh
+            .draws
+            .iter()
+            .filter(|d| matches!(d.draw_type, DrawType::Bitmap(_)))
+            .count();
+        let resolve_bitmaps = bitmap_fill_count <= PER_SHAPE_BITMAP_BUDGET;
         for draw in &mesh.draws {
-            if let Some(mut gpu) = upload_draw(draw, &gradient_textures) {
+            let meta = if resolve_bitmaps {
+                if let DrawType::Bitmap(b) = &draw.draw_type {
+                    bitmap_source
+                        .bitmap_handle(b.bitmap_id, self)
+                        .and_then(|h| as_switch_bitmap(&h).cloned())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            bitmap_metas.push(meta);
+        }
+
+        let mut draws: Vec<GpuDraw> = Vec::with_capacity(mesh.draws.len());
+        for (idx, draw) in mesh.draws.iter().enumerate() {
+            let meta_ref = bitmap_metas[idx].as_ref();
+            if let Some(mut gpu) = upload_draw(draw, &gradient_textures, meta_ref) {
                 // Refine gradient parameters now that we have the Gradient.
                 if let DrawKind::Gradient {
                     texture_index,
@@ -1059,6 +1378,8 @@ impl RenderBackend for SwitchRenderBackend {
             }
         }
 
+        self.shapes_registered = self.shapes_registered.wrapping_add(1);
+
         ShapeHandle(Arc::new(SwitchShapeHandle(Arc::new(GpuShape {
             draws,
             gradient_textures,
@@ -1081,6 +1402,43 @@ impl RenderBackend for SwitchRenderBackend {
         commands: CommandList,
         _cache_entries: Vec<BitmapCacheEntry>,
     ) {
+        // Drain GL errors once per second, plus a one-line heartbeat with
+        // running counters every 2 seconds. Quiet otherwise.
+        self.frame_count = self.frame_count.wrapping_add(1);
+        if self.frame_count % 120 == 0 {
+            let msg = std::format!(
+                "f{}: shapes={} bitmaps={} atlases={} bitmap_draws={}\n",
+                self.frame_count,
+                self.shapes_registered,
+                self.bitmaps_registered,
+                self.atlases.len(),
+                self.bitmap_draws_emitted,
+            );
+            let mut bytes = msg.into_bytes();
+            bytes.push(0);
+            unsafe { ruffle_log_cstr(bytes.as_ptr() as *const _) };
+        }
+        if self.frame_count % 60 == 0 {
+            unsafe {
+                let mut err = glGetError();
+                while err != GL_NO_ERROR {
+                    let name = match err {
+                        GL_INVALID_ENUM => "GL_INVALID_ENUM",
+                        GL_INVALID_VALUE => "GL_INVALID_VALUE",
+                        GL_INVALID_OPERATION => "GL_INVALID_OPERATION",
+                        GL_OUT_OF_MEMORY => "GL_OUT_OF_MEMORY",
+                        GL_INVALID_FRAMEBUFFER_OPERATION => "GL_INVALID_FRAMEBUFFER_OPERATION",
+                        _ => "GL_UNKNOWN",
+                    };
+                    let msg = std::format!("gl err: 0x{:04X} ({})\n", err, name);
+                    let mut bytes = msg.into_bytes();
+                    bytes.push(0);
+                    ruffle_log_cstr(bytes.as_ptr() as *const _);
+                    err = glGetError();
+                }
+            }
+        }
+
         unsafe {
             glViewport(
                 0,
@@ -1121,40 +1479,25 @@ impl RenderBackend for SwitchRenderBackend {
         width: NonZeroU32,
         height: NonZeroU32,
     ) -> Result<BitmapHandle, Error> {
-        let mut tex: GLuint = 0;
-        unsafe {
-            glGenTextures(1, &mut tex);
-            glBindTexture(GL_TEXTURE_2D, tex);
-            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-            glTexImage2D(
-                GL_TEXTURE_2D,
-                0,
-                GL_RGBA8 as GLint,
-                width.get() as GLsizei,
-                height.get() as GLsizei,
-                0,
-                GL_RGBA,
-                GL_UNSIGNED_BYTE,
-                core::ptr::null(),
-            );
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as GLint);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as GLint);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as GLint);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as GLint);
-            glBindTexture(GL_TEXTURE_2D, 0);
-        }
-        Ok(BitmapHandle(Arc::new(SwitchBitmapHandle(Arc::new(GpuTexture {
-            id: tex,
-            width: width.get(),
-            height: height.get(),
-        })))))
+        // Allocate a fully-transparent region in the atlas. Pixel data of
+        // size W*H*4, all zeros. Caller will fill via update_texture.
+        let pixels = vec![0u8; (width.get() * height.get() * 4) as usize];
+        let Some(meta) = self.pack_into_atlas(&pixels, width.get(), height.get()) else {
+            return Err(Error::TooLarge);
+        };
+        self.bitmaps_registered = self.bitmaps_registered.wrapping_add(1);
+        Ok(BitmapHandle(Arc::new(meta)))
     }
 
     fn register_bitmap(&mut self, bitmap: Bitmap<'_>) -> Result<BitmapHandle, Error> {
-        match upload_bitmap_texture(&bitmap) {
-            Some(tex) => Ok(BitmapHandle(Arc::new(SwitchBitmapHandle(Arc::new(tex))))),
-            None => Err(Error::UnknownType),
-        }
+        let Some((bytes, w, h)) = bitmap_to_rgba_bytes(&bitmap) else {
+            return Err(Error::UnknownType);
+        };
+        let Some(meta) = self.pack_into_atlas(&bytes, w, h) else {
+            return Err(Error::TooLarge);
+        };
+        self.bitmaps_registered = self.bitmaps_registered.wrapping_add(1);
+        Ok(BitmapHandle(Arc::new(meta)))
     }
 
     fn update_texture(
@@ -1167,27 +1510,19 @@ impl RenderBackend for SwitchRenderBackend {
             return Err(Error::UnknownHandle(handle.clone()));
         };
         let rgba = bitmap.to_rgba();
-        let w = region.x_max.saturating_sub(region.x_min) as GLsizei;
-        let h = region.y_max.saturating_sub(region.y_min) as GLsizei;
-        if w <= 0 || h <= 0 {
+        let w = region.x_max.saturating_sub(region.x_min);
+        let h = region.y_max.saturating_sub(region.y_min);
+        if w == 0 || h == 0 {
             return Ok(());
         }
-        unsafe {
-            glBindTexture(GL_TEXTURE_2D, switch_bitmap.0.id);
-            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-            glTexSubImage2D(
-                GL_TEXTURE_2D,
-                0,
-                region.x_min as GLint,
-                region.y_min as GLint,
-                w,
-                h,
-                GL_RGBA,
-                GL_UNSIGNED_BYTE,
-                rgba.data().as_ptr() as *const _,
-            );
-            glBindTexture(GL_TEXTURE_2D, 0);
-        }
+        let atlas = match self.atlases.get(switch_bitmap.atlas_index) {
+            Some(a) => a,
+            None => return Err(Error::UnknownHandle(handle.clone())),
+        };
+        // Compute the atlas-space pixel offset for the bitmap.
+        let base_x = (switch_bitmap.u0 * ATLAS_SIZE as f32).round() as u32;
+        let base_y = (switch_bitmap.v0 * ATLAS_SIZE as f32).round() as u32;
+        atlas.upload_region(base_x + region.x_min, base_y + region.y_min, w, h, rgba.data());
         Ok(())
     }
 
@@ -1251,12 +1586,14 @@ impl CommandHandler for SwitchRenderBackend {
             self.warn_once(b"cmd: render_bitmap with non-Switch BitmapHandle\n\0");
             return;
         };
+        let Some(atlas) = self.atlases.get(switch_bitmap.atlas_index) else {
+            return;
+        };
+        let tex = atlas.texture;
         let mut m = transform.matrix;
         pixel_snapping.apply(&mut m);
-        // Scale the unit quad by the bitmap's pixel dimensions so the result
-        // lands at (transform.matrix * (0..w, 0..h)).
-        let w = switch_bitmap.0.width as f32;
-        let h = switch_bitmap.0.height as f32;
+        let w = switch_bitmap.width as f32;
+        let h = switch_bitmap.height as f32;
         let scaled = Matrix {
             a: m.a * w,
             b: m.b * w,
@@ -1268,7 +1605,13 @@ impl CommandHandler for SwitchRenderBackend {
         let world = self.world_matrix(&scaled);
         let mult = transform.color_transform.mult_rgba_normalized();
         let add = transform.color_transform.add_rgba_normalized();
-        self.use_bitmap(&world, &mult, &add, switch_bitmap.0.id);
+        let uv_remap = [
+            switch_bitmap.u0,
+            switch_bitmap.v0,
+            switch_bitmap.u1 - switch_bitmap.u0,
+            switch_bitmap.v1 - switch_bitmap.v0,
+        ];
+        self.use_bitmap(&world, &mult, &add, tex, &uv_remap);
         unsafe {
             glBindVertexArray(self.bitmap_vao);
             glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -1284,7 +1627,20 @@ impl CommandHandler for SwitchRenderBackend {
             self.warn_once(b"cmd: render_shape with non-Switch ShapeHandle\n\0");
             return;
         };
+        // Bail out on a non-finite transform: AS code occasionally produces
+        // NaN scales/translations that would propagate into the shader and
+        // crash the driver mid-sample.
+        if !transform.matrix.a.is_finite()
+            || !transform.matrix.b.is_finite()
+            || !transform.matrix.c.is_finite()
+            || !transform.matrix.d.is_finite()
+        {
+            return;
+        }
         let world = self.world_matrix(&transform.matrix);
+        if world.iter().any(|v| !v.is_finite()) {
+            return;
+        }
         let mult = transform.color_transform.mult_rgba_normalized();
         let add = transform.color_transform.add_rgba_normalized();
         for draw in &switch_shape.0.draws {
@@ -1309,6 +1665,30 @@ impl CommandHandler for SwitchRenderBackend {
                         *gradient_kind,
                         *spread,
                         *focal,
+                    );
+                }
+                DrawKind::Bitmap {
+                    atlas_index,
+                    uv_remap,
+                    local_matrix,
+                    is_smoothed: _,
+                    is_repeating: _,
+                } => {
+                    if local_matrix.iter().any(|v| !v.is_finite()) {
+                        continue;
+                    }
+                    let Some(atlas) = self.atlases.get(*atlas_index) else {
+                        continue;
+                    };
+                    let tex = atlas.texture;
+                    self.bitmap_draws_emitted = self.bitmap_draws_emitted.wrapping_add(1);
+                    self.use_shape_bitmap(
+                        &world,
+                        &mult,
+                        &add,
+                        tex,
+                        local_matrix,
+                        uv_remap,
                     );
                 }
             }
