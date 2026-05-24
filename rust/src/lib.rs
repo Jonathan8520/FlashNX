@@ -29,9 +29,20 @@ use ruffle_render::backend::RenderBackend;
 
 use backend::log::SwitchLogBackend;
 use backend::render::SwitchRenderBackend;
+use backend::tracing::SwitchTracingSubscriber;
 
 extern "C" {
     fn ruffle_log_cstr(msg: *const c_char);
+    fn ruffle_query_ram(used_out: *mut u64, total_out: *mut u64) -> c_int;
+}
+
+/// Snapshot of process RAM in bytes (used, total). Returns (0,0) if the
+/// underlying svcGetInfo call fails.
+pub(crate) fn query_ram() -> (u64, u64) {
+    let mut used = 0u64;
+    let mut total = 0u64;
+    let rc = unsafe { ruffle_query_ram(&mut used as *mut _, &mut total as *mut _) };
+    if rc == 0 { (used, total) } else { (0, 0) }
 }
 
 struct State {
@@ -85,6 +96,9 @@ pub extern "C" fn ruffle_init() -> c_int {
     }));
 
     log_str(&std::format!("phase 1.5: ruffle_init starting\n"));
+
+    let _ = tracing::subscriber::set_global_default(SwitchTracingSubscriber::new());
+    log(b"ruffle_init: tracing subscriber installed (INFO level)\n\0");
 
     let renderer = match SwitchRenderBackend::new(VIEWPORT_W, VIEWPORT_H) {
         Some(r) => r,
@@ -177,6 +191,18 @@ fn find_and_load_swf() -> Option<(std::vec::Vec<u8>, std::string::String)> {
 
 #[no_mangle]
 pub extern "C" fn ruffle_render_frame() {
+    // Back-compat entry: fall back to 1/60 if the C++ side didn't measure
+    // elapsed time itself. New main.cpp uses ruffle_render_frame_dt instead.
+    render_frame_with_dt(FloatDuration::from_secs(1.0 / 60.0));
+}
+
+#[no_mangle]
+pub extern "C" fn ruffle_render_frame_dt(dt_us: u64) {
+    let dt = FloatDuration::from_secs(dt_us as f64 / 1_000_000.0);
+    render_frame_with_dt(dt);
+}
+
+fn render_frame_with_dt(dt: FloatDuration) {
     let state = unsafe {
         match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
             Some(s) => s,
@@ -184,9 +210,6 @@ pub extern "C" fn ruffle_render_frame() {
         }
     };
 
-    // Fixed 60 Hz tick. Real frame pacing comes later once we bind to
-    // `appletGetFocusState`/`gfx_swap` timing.
-    let dt = FloatDuration::from_secs(1.0 / 60.0);
     let mut player = match state.player.lock() {
         Ok(p) => p,
         Err(_) => return,

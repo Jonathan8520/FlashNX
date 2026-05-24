@@ -21,6 +21,11 @@ swf = { path = "../third_party/ruffle/swf" }
 # Needed to declare `__getrandom_v03_custom` with the correct Error type;
 # the cfg flag in .cargo/config.toml puts getrandom in "custom backend" mode.
 getrandom = "0.3"
+# Wire a tracing subscriber so Ruffle's internal warn!/error!/debug! reach
+# nxlink. Without this they go to a noop subscriber and we miss signal —
+# notably the frame-40 mystery crash whose precursor is likely a tracing
+# warn or error from Ruffle itself.
+tracing = "0.1.43"
 
 [profile.release]
 opt-level = 3
@@ -31,3 +36,11 @@ strip = "symbols"
 
 [profile.dev]
 panic = "abort"
+
+# Switchfork of jpeg-decoder 0.3.2 with select_worker() patched to never
+# pick the multithreaded path. The default heuristic spawns std::thread
+# for JPEGs > 128*128 px, which crashes natively on Switch (newlib pthread
+# limitation). Pinned in third_party/. Pin once we confirm fixed, then can
+# upstream a target-cfg PR.
+[patch.crates-io]
+jpeg-decoder = { path = "../third_party/jpeg-decoder-switchfork" }

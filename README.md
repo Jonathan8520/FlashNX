@@ -55,7 +55,7 @@ Le script orchestre :
 1. `cargo build --release` côté Rust (target `aarch64-nintendo-switch-freestanding`, std-via-newlib, build-std nightly) → `rust/target/.../libruffle_switch.a` (~12-13 MB)
 2. `make` côté C++ lancé **dans le bash MSYS2 de devkitPro** (pour que `switch_rules` résolve les paths correctement) → link contre `libruffle_switch.a` + libnx + libEGL/libGLESv2 → `cpp/flash-for-switch.nro` (~11.6 MB)
 
-**État Mai 2026** : full std via les 2 patches stdlib (voir plus bas), `ruffle_core` linké, Mario 63 jouable avec input clavier+souris+tactile mais sprites en blocs blancs.
+**État Mai 2026 (Phase 2.1 ✓)** : full std via les 2 patches stdlib (voir plus bas), `ruffle_core` linké, **Mario 63 jouable avec sprites complets** (atlas 2048×2048, edge replication, UV wrap shader). Audio = Phase 2.2 à venir.
 
 ## Tester sur Switch
 
@@ -116,16 +116,17 @@ Objectif initial : charger un `.swf` depuis la SD et voir quelque chose à l'éc
 | 1.5.b ✓ Real SWF parser + render (validé hardware 2026-05-24) | ~30 min | **Résolu**. `std::fs::read` + `SwfMovie::from_data` sur Switch. Fallback embarqué `SimpleRedBackground.swf` 43 octets. Background rouge confirmé visuellement. |
 | 1.5.c ✓ Input keyboard+mouse+touch via joycon (validé hardware 2026-05-24) | ~3 h | **Résolu**. FFI `ruffle_handle_key`/`ruffle_handle_mouse_move`/`ruffle_handle_mouse_button`. Mapping joycon : A=Space, B=Z, X=X, Y=Shift, D-pad/L-stick=arrows, Minus=Enter, L=Escape, stick droit=souris, ZR=clic, **écran tactile**=tap. Crosshair overlay (rouge quand clic). [[feedback-flash-input-mouse]] : Flash games ont souvent besoin de clic souris pour leurs menus, même les platformers. |
 | 1.5.d ✓ **Mario 63 jouable sur Switch** (validé hardware 2026-05-24) | ~1 h | **Résolu**. 15.3 MB SWF v8 450x300 chargé depuis `sdmc:/ruffle/Super_Mario_63_2010.swf` (path candidates list pour contourner bug `read_dir` Horizon). AS2/AVM1 bytecode exécute, trace `Runouw.com` visible, input réactif, "Press Start" passé, premier niveau chargé. **Limitation actuelle** : sprites en blocs blancs car `register_shape` ne résout pas `DrawType::Bitmap` (cap 0 — voir 1.5.e ci-dessous). |
-| 1.5.e ⚠ Texture atlas pour bitmap fills (code en place, désactivé) | ~3 h | **Implémenté mais désactivé**. `Atlas` skyline packer 2048×2048 RGBA (16 MB) en `rust/src/backend/render.rs` partage les sprites Mario 63 dans 1 seule texture GL. Shaders `BITMAP_PROG` et `SHAPE_BITMAP_PROG` étendus avec `u_uv_remap` (vec4) pour mapper UV vers la sous-région atlas. **MAIS** : la cascade des ~600 `bitmap_source.bitmap_handle(id, self)` appels en moins de 2 sec déclenche un crash inconnu (likely Ruffle internal RAM spike du décodage de tous les bitmaps en parallèle — issues upstream #2448, #4690 documentent les crashes Mario 63 connus). `PER_SHAPE_BITMAP_BUDGET = 0` désactive la résolution → blocs blancs mais stable. **Phase 2.x** devra soit throttler la résolution cross-frame, soit patcher Ruffle upstream. |
+| 1.5.e ✓ Texture atlas pour bitmap fills (validé hardware 2026-05-24 fin journée) | ~3 h | **Résolu**. `Atlas` skyline packer 2048×2048 RGBA (16 MB) avec edge-pixel replication dans `Atlas::upload_region_padded`. Shaders `BITMAP_PROG` et `SHAPE_BITMAP_PROG` avec `u_uv_remap` + `u_wrap_mode` (clamp/fract selon `is_repeating`). Bitmaps comme Mario 63 ground fills tilés rendent correctement sans bleeding sur d'autres bitmaps de l'atlas. `PER_SHAPE_BITMAP_BUDGET = usize::MAX`. ~1200 bitmaps Mario 63 décodés + atlasés sans crash. |
+| 1.5.e.bis ✓ Fork jpeg-decoder pour Switch | ~30 min diag + 30 min fix | **Le diagnostic** : crash à frame ~40 avec budget>0 vient du fait que `jpeg_decoder` 0.3.2 (sans rayon) utilise quand même `std::thread::spawn` quand `width * height > 128*128 px`. La newlib pthread shim de devkitPro crashe natif silencieusement sur ce spawn. **Le fix** : `third_party/jpeg-decoder-switchfork/` patche `select_worker` pour toujours retourner `Immediate` (mono-thread). Référencé via `[patch.crates-io] jpeg-decoder = { path = "..." }` dans `rust/Cargo.toml`. Coût perf : décodage JPEG passe de multi-thread à single-thread (~5 ms / JPEG vs ~1 ms estimé multi-thread), preload total +~5 sec mais stable. |
 | 1.5.f File picker C++ : scan `sdmc:/ruffle/*.swf`, UI de sélection joycon, passer le path à Rust | 2-3 jours | Faible. Bloqué partiellement par bug `std::fs::read_dir` Horizon (filenames tronqués de 2 chars). Workaround actuel : liste hardcodée de chemins candidats. |
 
-### Phase 2 — finir Mario 63 (sprites + son + level transitions)
+### Phase 2 — finir Mario 63 (sprites ✓ + son + level transitions)
 
-À ce stade Mario 63 charge, l'AS2 exécute, l'input répond, le premier niveau se joue. Il manque :
+À ce stade Mario 63 charge, l'AS2 exécute, l'input répond, le premier niveau se joue **avec les sprites visibles**. Il manque :
 
 | Étape | Boulot | Risque |
 |---|---|---|
-| 2.1 Sprites visibles | Throttler la résolution des `bitmap_handle` cross-frame (étaler les ~600 décodages Ruffle sur N frames au lieu d'un burst de 2 sec) **OU** patcher Ruffle upstream pour décoder lazy. L'atlas GL est déjà en place (`rust/src/backend/render.rs`), il manque juste l'amorce. | Moyen |
+| 2.1 ✓ Sprites visibles (validé hardware 2026-05-24) | ~4 h debug + ~1 h fix | **Résolu**. Voir 1.5.e + 1.5.e.bis ci-dessus. Aussi un bug d'UV wrap (Mario apparaissait sur le sol) corrigé en pousser `fract/clamp` dans le fragment shader avant le remap atlas. Et un bug d'edge bleed (lignes noires entre sprites avec LINEAR filtering) corrigé en répliquant les pixels du bord dans le pad atlas. |
 | 2.2 Audio audren | Bindgen libnx audren symbols → `audrvCreate`/`audrvVoiceInit`/`audrvVoiceAddWaveBuf`/`audrvUpdate`. Côté Rust, implémenter un `AudioBackend` qui consomme les samples de Ruffle et les pousse dans audren via FFI. Bridge MP3/AAC restera best-effort (deps externes). | Moyen-fort |
 | 2.3 Bugs upstream Mario 63 | Issues Ruffle connues #1909 (crash tutorial), #6906 (castle), #4690 (title freeze), #11077 (Bowser non-completable), #2448 (gradients). Beaucoup ont des fixes upstream à intégrer en bumpant le submodule. | Variable |
 | 2.4 Performance | Mesurer FPS sur Tegra X1 docked/handheld. Optimiser : batcher les draws solides, cacher uniforms entre draws, réduire glUseProgram. | Faible |
@@ -138,11 +139,13 @@ Objectif initial : charger un `.swf` depuis la SD et voir quelque chose à l'éc
 - Packaging hb-app.store
 - Compat globale : Madness, Newgrounds classics, autres SWF AS1/AS2 populaires
 
-### Verdict timeline solo (révisé 2026-05-24)
+### Verdict timeline solo (révisé 2026-05-24 fin journée)
 
 - ~~Premier `.swf` qui affiche un truc : 6-10 semaines~~ → **fait en 6 jours**
-- ~~Mario 63 jouable : +3-6 mois~~ → **input + chargement faits en 6 jours, sprites/audio restent**
-- Phase 2 (sprites + son + bugs upstream) : estimation **2-4 semaines** maintenant
+- ~~Mario 63 jouable : +3-6 mois~~ → **input + chargement + SPRITES VISIBLES faits en 6 jours**
+- Phase 2.1 sprites : ~~estimation 1-2 semaines~~ → **fait en ~5 h (le même jour que budget=0)** après débuggage methodique du crash silencieux jpeg_decoder
+- Phase 2.2 (audio audren) : estimation **2-3 jours**
+- Phase 2.3 (bump submodule + bugs upstream) : estimation **3-7 jours**
 - Release publique propre : **+1-2 mois**
 
 La sous-estimation initiale (6-12 mois) venait surtout de la peur autour de `std-via-newlib` (Phase 1.1) qui s'est résolue en 1h au lieu de 1-2 semaines, car upstream stdlib avait déjà les branches `target_os = "horizon"` pour le 3DS.
@@ -168,6 +171,7 @@ La sous-estimation initiale (6-12 mois) venait surtout de la peur autour de `std
 - **Rust** : toolchain pin via `rust/rust-toolchain.toml` → `nightly-x86_64-pc-windows-gnu` + `rust-src` (host GNU obligatoire — MSVC casse les build scripts sans Visual Studio Build Tools)
 - **MinGW-w64** via `scoop install mingw` (16.1.0) — pour `dlltool.exe` que Rust nightly GNU embarque buggé. Ajouter `~/scoop/apps/mingw/current/bin` au PATH avant `cargo build` (le `scripts/build.sh` le fait déjà).
 - LLVM/CMake/Python : **toujours pas nécessaires** — confirmé en pratique. Phase 2 audren se fera via FFI manuelle dans `cpp/src/audio.cpp`, pas bindgen.
+- **`third_party/jpeg-decoder-switchfork/`** : fork patchée de `jpeg-decoder` 0.3.2 (single-line patch dans `select_worker` pour toujours retourner Immediate). Référencée via `[patch.crates-io]` dans `rust/Cargo.toml`. Sans elle, Mario 63 crashe silencieusement après ~3 sec parce que jpeg-decoder spawne `std::thread` sur newlib pour JPEGs > 128×128 px.
 
 ### Patches rust-src à ré-appliquer après chaque `rustup update`
 

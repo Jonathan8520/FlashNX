@@ -60,27 +60,25 @@ static constexpr float STICK_MAX      = 32767.0f;
 // Cursor speed in pixels per frame at full stick deflection.
 static constexpr float CURSOR_SPEED   = 12.0f;
 
-int main(int argc, char** argv) {
-    (void)argc; (void)argv;
-
-    socketInitializeDefault();
-    nxlinkStdio();
-    romfsInit();
-
-    std::printf("flash-for-switch: starting\n");
+// All of the GL + Ruffle work runs in a dedicated worker thread with a
+// 32 MB stack (vs the default ~1 MB main-thread stack from nx-hbloader).
+// Mario 63's AS2 preload recursion + Ruffle's AVM1 interpreter + GC arena
+// traversal blew through 1 MB at frame ~40, producing a silent SIGSEGV
+// that left no Rust-panic trail. With 32 MB we should have headroom for
+// any AS2 game we'll realistically run.
+static void worker_entry(void* /*arg*/) {
+    std::printf("worker: starting (32 MB stack)\n"); std::fflush(stdout);
 
     NWindow* win = nwindowGetDefault();
     if (!gl_context_init(win)) {
-        std::printf("gl_context_init failed\n");
-        socketExit();
-        return EXIT_FAILURE;
+        std::printf("gl_context_init failed\n"); std::fflush(stdout);
+        return;
     }
 
     if (ruffle_init() != 0) {
-        std::printf("ruffle_init failed\n");
+        std::printf("ruffle_init failed\n"); std::fflush(stdout);
         gl_context_shutdown();
-        socketExit();
-        return EXIT_FAILURE;
+        return;
     }
 
     PadState pad;
@@ -97,6 +95,13 @@ int main(int argc, char** argv) {
     float cursor_y = VIEWPORT_H * 0.5f;
     ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
     bool zr_was_pressed = false;
+
+    // Real-time pacing: instead of telling Ruffle "16.6 ms elapsed" every tick,
+    // we measure actual wall-clock between iterations and let its frame
+    // accumulator decide how many SWF frames to run. Matches the desktop
+    // Ruffle pacing model (core/src/player.rs::tick).
+    const uint64_t tick_freq = ruffle_tick_freq();
+    uint64_t last_tick = ruffle_tick_now();
 
     while (appletMainLoop()) {
         padUpdate(&pad);
@@ -161,12 +166,54 @@ int main(int argc, char** argv) {
         zr_was_pressed = zr_pressed;
         touch_was_pressed = touch_pressed;
 
-        ruffle_render_frame();
+        // Compute real elapsed since last iteration → microseconds.
+        // tick_freq is ~19.2 MHz on Switch, so this is precise to ~50ns.
+        const uint64_t now_tick = ruffle_tick_now();
+        const uint64_t dt_ticks = now_tick - last_tick;
+        last_tick = now_tick;
+        // dt_us = dt_ticks * 1e6 / tick_freq, but avoid overflow on big stalls.
+        uint64_t dt_us = (tick_freq > 0)
+            ? ((dt_ticks * 1000000ULL) / tick_freq)
+            : 16667ULL;
+        // Cap to 100 ms so a one-off stall (texture upload, JIT warmup) doesn't
+        // make Ruffle catch up by replaying 6 SWF frames in a row.
+        if (dt_us > 100000ULL) dt_us = 100000ULL;
+
+        ruffle_render_frame_dt(dt_us);
         gl_context_swap();
     }
 
     ruffle_shutdown();
     gl_context_shutdown();
+    std::printf("worker: exiting\n"); std::fflush(stdout);
+}
+
+int main(int argc, char** argv) {
+    (void)argc; (void)argv;
+
+    socketInitializeDefault();
+    nxlinkStdio();
+    romfsInit();
+
+    std::printf("flash-for-switch: starting\n"); std::fflush(stdout);
+
+    // Spawn the Ruffle worker with a 32 MB stack. NULL stack_mem → libnx
+    // allocates from heap, so we don't bloat .nro BSS. Priority 0x2C is the
+    // same as the default main thread; cpuid=-2 lets the kernel choose.
+    Thread t;
+    Result rc = threadCreate(&t, worker_entry, nullptr,
+                              nullptr, 32 * 1024 * 1024,
+                              0x2C, -2);
+    if (R_FAILED(rc)) {
+        std::printf("threadCreate failed: 0x%x\n", rc); std::fflush(stdout);
+        romfsExit();
+        socketExit();
+        return EXIT_FAILURE;
+    }
+    threadStart(&t);
+    threadWaitForExit(&t);
+    threadClose(&t);
+
     romfsExit();
     socketExit();
     return EXIT_SUCCESS;

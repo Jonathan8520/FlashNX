@@ -52,6 +52,7 @@ use ruffle_render::transform::Transform;
 use swf::{BlendMode, Color, GradientSpread};
 
 use crate::ffi::gl::*;
+use crate::query_ram;
 
 extern "C" {
     fn ruffle_log_cstr(msg: *const core::ffi::c_char);
@@ -163,6 +164,66 @@ impl Atlas {
                 GL_RGBA,
                 GL_UNSIGNED_BYTE,
                 pixels.as_ptr() as *const _,
+            );
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+    }
+
+    /// Like `upload_region`, but also replicates the 1-pixel border into
+    /// the surrounding pad area. Required for atlased rendering with
+    /// LINEAR filtering: without edge bleed, sampling at the bitmap edge
+    /// blends 50% transparent-black-pad → visible black grid between
+    /// sprites in Mario 63. Caller must guarantee that (x, y) is at least
+    /// ATLAS_PAD pixels away from the atlas borders (always true for our
+    /// packer).
+    fn upload_region_padded(&self, x: u32, y: u32, w: u32, h: u32, pixels: &[u8]) {
+        if w == 0 || h == 0 {
+            return;
+        }
+        // Build a (w+2) × (h+2) buffer with edge replication.
+        let pw = (w + 2) as usize;
+        let ph = (h + 2) as usize;
+        let mut buf = vec![0u8; pw * ph * 4];
+        let row_bytes = w as usize * 4;
+        // Center rows: copy each source row into the buffer with 1 px
+        // of horizontal replication on each side.
+        for src_row in 0..h as usize {
+            let src_off = src_row * row_bytes;
+            let dst_row = src_row + 1;
+            let dst_off = dst_row * pw * 4 + 4; // skip the left pad pixel
+            buf[dst_off..dst_off + row_bytes]
+                .copy_from_slice(&pixels[src_off..src_off + row_bytes]);
+            // Left pad pixel = first source pixel of this row.
+            let lpad_off = dst_row * pw * 4;
+            buf[lpad_off..lpad_off + 4].copy_from_slice(&pixels[src_off..src_off + 4]);
+            // Right pad pixel = last source pixel of this row.
+            let rpad_off = dst_row * pw * 4 + (pw - 1) * 4;
+            let last_pix_off = src_off + (w as usize - 1) * 4;
+            buf[rpad_off..rpad_off + 4]
+                .copy_from_slice(&pixels[last_pix_off..last_pix_off + 4]);
+        }
+        // Top pad row (row 0) = duplicate of first content row (row 1,
+        // already has horizontal replication baked in).
+        let row_stride = pw * 4;
+        buf.copy_within(row_stride..2 * row_stride, 0);
+        // Bottom pad row (row h+1) = duplicate of last content row (row h).
+        let last_content = h as usize * row_stride;
+        let last_pad = (h as usize + 1) * row_stride;
+        buf.copy_within(last_content..last_content + row_stride, last_pad);
+
+        unsafe {
+            glBindTexture(GL_TEXTURE_2D, self.texture);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glTexSubImage2D(
+                GL_TEXTURE_2D,
+                0,
+                (x as i32) - 1,
+                (y as i32) - 1,
+                (w + 2) as GLsizei,
+                (h + 2) as GLsizei,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                buf.as_ptr() as *const _,
             );
             glBindTexture(GL_TEXTURE_2D, 0);
         }
@@ -306,6 +367,7 @@ struct ShapeBitmapProgram {
     u_tex: GLint,
     u_uv: GLint,
     u_uv_remap: GLint,
+    u_wrap_mode: GLint,
 }
 
 impl Drop for SolidProgram {
@@ -376,6 +438,7 @@ pub struct SwitchRenderBackend {
     shapes_registered: u32,
     bitmaps_registered: u32,
     bitmap_draws_emitted: u32,
+    bitmap_render_count: u32,
     /// Pool of texture atlases. New atlases get appended when current is
     /// full. Bitmaps are packed into these instead of getting individual
     /// GL textures.
@@ -440,30 +503,38 @@ void main() {\n\
     v_pos = a_pos;\n\
 }\n\0";
 
-/// Vertex shader for bitmap fills inside shapes: computes UV by applying
-/// `u_uv` (pre-inverted matrix from `swf_bitmap_to_gl_matrix`) to `a_pos`,
-/// then remaps from per-bitmap [0,1] into the atlas sub-rect.
+/// Vertex shader for bitmap fills inside shapes: computes the per-bitmap UV
+/// from `u_uv * a_pos` (matrix already pre-inverted by `swf_bitmap_to_gl_matrix`)
+/// and passes it through unmodified. The fragment shader handles wrap mode
+/// (fract for repeating fills, clamp otherwise) BEFORE remapping into the
+/// atlas sub-rect — doing fract/clamp before remap is critical, since the
+/// atlas places multiple bitmaps in one texture and remapping an out-of-
+/// range UV would index into a neighbour bitmap (visible bug: Mario 63's
+/// ground tile showed Mario's hat sprite).
 const SHAPE_BITMAP_VERT: &[u8] = b"#version 330 core\n\
 layout(location = 0) in vec2 a_pos;\n\
 uniform mat3 u_world;\n\
 uniform mat3 u_uv;\n\
-uniform vec4 u_uv_remap;\n\
-out vec2 v_uv;\n\
+out vec2 v_uv_local;\n\
 void main() {\n\
     vec3 p = u_world * vec3(a_pos, 1.0);\n\
     gl_Position = vec4(p.xy, 0.0, 1.0);\n\
     vec3 uv = u_uv * vec3(a_pos, 1.0);\n\
-    v_uv = u_uv_remap.xy + uv.xy * u_uv_remap.zw;\n\
+    v_uv_local = uv.xy;\n\
 }\n\0";
 
 const SHAPE_BITMAP_FRAG: &[u8] = b"#version 330 core\n\
-in vec2 v_uv;\n\
+in vec2 v_uv_local;\n\
 out vec4 frag_color;\n\
 uniform sampler2D u_tex;\n\
 uniform vec4 u_mult;\n\
 uniform vec4 u_add;\n\
+uniform vec4 u_uv_remap;\n\
+uniform int u_wrap_mode;\n\
 void main() {\n\
-    vec4 c = texture(u_tex, v_uv);\n\
+    vec2 local = (u_wrap_mode == 1) ? fract(v_uv_local) : clamp(v_uv_local, 0.0, 1.0);\n\
+    vec2 atlas_uv = u_uv_remap.xy + local * u_uv_remap.zw;\n\
+    vec4 c = texture(u_tex, atlas_uv);\n\
     frag_color = clamp(c * u_mult + u_add, 0.0, 1.0);\n\
 }\n\0";
 
@@ -599,6 +670,7 @@ fn build_shape_bitmap_program() -> Option<ShapeBitmapProgram> {
         u_tex: loc(program, b"u_tex\0"),
         u_uv: loc(program, b"u_uv\0"),
         u_uv_remap: loc(program, b"u_uv_remap\0"),
+        u_wrap_mode: loc(program, b"u_wrap_mode\0"),
         program,
     })
 }
@@ -1001,6 +1073,7 @@ impl SwitchRenderBackend {
             shapes_registered: 0,
             bitmaps_registered: 0,
             bitmap_draws_emitted: 0,
+            bitmap_render_count: 0,
             atlases: Vec::new(),
         })
     }
@@ -1071,6 +1144,7 @@ impl SwitchRenderBackend {
         tex: GLuint,
         uv_matrix: &[GLfloat; 9],
         uv_remap: &[f32; 4],
+        is_repeating: bool,
     ) {
         // Atlas texture parameters are set once at atlas creation; no per-
         // draw glTexParameteri (avoids per-frame state churn that bisection
@@ -1084,6 +1158,12 @@ impl SwitchRenderBackend {
             glUniform4f(
                 self.shape_bitmap_prog.u_uv_remap,
                 uv_remap[0], uv_remap[1], uv_remap[2], uv_remap[3],
+            );
+            // u_wrap_mode: 0 = clamp (default for non-repeating fills),
+            // 1 = fract (for tile/repeat fills like Mario 63 ground).
+            glUniform1i(
+                self.shape_bitmap_prog.u_wrap_mode,
+                if is_repeating { 1 } else { 0 },
             );
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, tex);
@@ -1128,7 +1208,7 @@ impl SwitchRenderBackend {
     ) -> Option<SwitchBitmapHandle> {
         for (idx, atlas) in self.atlases.iter_mut().enumerate() {
             if let Some((x, y)) = atlas.pack(width, height) {
-                atlas.upload_region(x, y, width, height, pixels);
+                atlas.upload_region_padded(x, y, width, height, pixels);
                 let inv = 1.0 / ATLAS_SIZE as f32;
                 return Some(SwitchBitmapHandle {
                     atlas_index: idx,
@@ -1317,14 +1397,18 @@ impl RenderBackend for SwitchRenderBackend {
             gradient_textures.push(build_gradient_texture(g));
         }
 
-        // Resolve bitmap fills. The atlas (shared GL texture pool) is in
-        // place but Mario-63-scale cascades (~600 bitmap_handle calls in
-        // 2 seconds) still crash on Switch — likely a Ruffle-internal RAM
-        // spike from decoding all bitmaps eagerly. Budget=0 disables the
-        // resolution entirely → shapes render as solid white but the run
-        // is stable. Future Phase 2.x will need either upstream throttling
-        // or a smarter cross-frame resolution scheme.
-        const PER_SHAPE_BITMAP_BUDGET: usize = 0;
+        // Baseline: budget=0 → bitmap fills render as solid white (the
+        // "blocs blancs" state of commit 6a2b858, README "phase 1.5"). With
+        // ANY budget > 0 Mario 63 deterministically crashes at host frame
+        // ~40 during render_shape's DrawKind::Bitmap path inside
+        // submit_frame — bitmap registration is fine (650+ regs at flat
+        // RAM), the bug is in the GL draw side. Restore =0 while we
+        // instrument that exact path.
+        // Crash fixed (2026-05-24): jpeg_decoder's std::thread::spawn for
+        // JPEGs > 128*128 used to crash Switch newlib pthread. Forked the
+        // crate to always use Immediate worker → no spawn → no crash.
+        // We can now resolve every bitmap fill (full sprites for Mario 63).
+        const PER_SHAPE_BITMAP_BUDGET: usize = usize::MAX;
         let mut bitmap_metas: Vec<Option<SwitchBitmapHandle>> =
             Vec::with_capacity(mesh.draws.len());
         let bitmap_fill_count = mesh
@@ -1406,13 +1490,16 @@ impl RenderBackend for SwitchRenderBackend {
         // running counters every 2 seconds. Quiet otherwise.
         self.frame_count = self.frame_count.wrapping_add(1);
         if self.frame_count % 120 == 0 {
+            let (ram_used, ram_total) = query_ram();
             let msg = std::format!(
-                "f{}: shapes={} bitmaps={} atlases={} bitmap_draws={}\n",
+                "f{}: shapes={} bitmaps={} atlases={} bitmap_draws={} ram={}MB/{}MB\n",
                 self.frame_count,
                 self.shapes_registered,
                 self.bitmaps_registered,
                 self.atlases.len(),
                 self.bitmap_draws_emitted,
+                ram_used / (1024 * 1024),
+                ram_total / (1024 * 1024),
             );
             let mut bytes = msg.into_bytes();
             bytes.push(0);
@@ -1611,6 +1698,7 @@ impl CommandHandler for SwitchRenderBackend {
             switch_bitmap.u1 - switch_bitmap.u0,
             switch_bitmap.v1 - switch_bitmap.v0,
         ];
+        self.bitmap_render_count = self.bitmap_render_count.wrapping_add(1);
         self.use_bitmap(&world, &mult, &add, tex, &uv_remap);
         unsafe {
             glBindVertexArray(self.bitmap_vao);
@@ -1672,7 +1760,7 @@ impl CommandHandler for SwitchRenderBackend {
                     uv_remap,
                     local_matrix,
                     is_smoothed: _,
-                    is_repeating: _,
+                    is_repeating,
                 } => {
                     if local_matrix.iter().any(|v| !v.is_finite()) {
                         continue;
@@ -1689,6 +1777,7 @@ impl CommandHandler for SwitchRenderBackend {
                         tex,
                         local_matrix,
                         uv_remap,
+                        *is_repeating,
                     );
                 }
             }
