@@ -135,26 +135,53 @@ Objectif initial : charger un `.swf` depuis la SD et voir quelque chose à l'éc
 | 2.1.b ✓ Mega-buffer arena + libnx exception handler (validé hardware 2026-05-25 nuit) | ~3 h diag + ~2 h refactor | **Résolu**. Bug : Mario 63 + rocket-nozzle FLUDD particle system émet ~3 shapes/frame, accumulés sans relâche par Ruffle. À ~27 000 GpuDraws live (= ~83 000 VBO/IBO/VAO handles GL côté Mesa-NVK Switch), `glBindBuffer` segfault dans une table interne saturée (DataAbort, `x24=GL_ARRAY_BUFFER`, FAR=index 0x1011). Le crash bypassait le `panic_hook` Rust car c'est une faute native. **Fixes appliqués :** (a) [cpp/src/exception.cpp](cpp/src/exception.cpp) — `__libnx_exception_handler` weak-override (32 KB dedicated stack) qui dump PC/LR/SP/FAR/ESR + x0–x28 vers nxlink + `sdmc:/switch/ruffle-crash.log`. (b) [cpp/src/main.cpp](cpp/src/main.cpp) — boot-replay du `ruffle-crash.log` au lancement suivant. (c) [rust/src/backend/render.rs](rust/src/backend/render.rs) — `BufferArena` (1 mega-VBO 64 MB + 1 mega-IBO 32 MB, freelist coalesçant), `PENDING_FREES` queue drainée au top de `submit_frame`, `GpuDraw` reshape en `{vbo_offset, vbo_size, ibo_offset, ibo_size, num_indices, kind}`, single global `shape_vao` configuré une fois au boot, render path utilise `glDrawElementsBaseVertex`. **Gotcha critique :** l'alignement arena VBO doit égaler le vertex stride (24 bytes), pas une puissance de 2 (16 cassait base_vertex). Round-up générique `((x+a-1)/a)*a` au lieu de `& !(a-1)`. **Résultat hardware :** 18 720 frames / 1.2 M bitmap_draws / 30 502 live draws au test, exit propre via Plus. Phase 2.4 = bugs Ruffle upstream (Toad NPC manquant dans château, "non-registered character" errors) prend le relais. |
 | 2.3 ⏳ Filtres Flash (Glow / DropShadow / Blur) | Porter [render/wgpu/src/filters/](third_party/ruffle/render/wgpu/src/filters/) au backend GL. Touche `render_offscreen` + `apply_filter` + cache_entries dans `submit_frame`. Premier essai 2026-05-24 a régressé les sprites (BitmapHandle Atlas vs Owned mal géré, source==destination UB). Revert clean. À refaire en portant fidèlement (cf. [[port-ruffle-dont-invent]]). Mario 63 visuel manque "brillures" sur logo et "bordures aux lettres". | Moyen-fort |
 | 2.4 Bugs upstream Mario 63 | Issues Ruffle connues #13198 (text/audio open), #1909 (crash tutorial), #6906 (castle), #4690 (title freeze), #11077 (Bowser non-completable), #2448 (gradients). Beaucoup ont des fixes upstream à intégrer en bumpant le submodule. | Variable |
-| 2.5 Performance | Mesurer FPS sur Tegra X1 docked/handheld. Optimiser : batcher les draws solides, cacher uniforms entre draws, réduire glUseProgram. | Faible |
+| 2.4.bis ⏳ SharedObject / URL invalide | **À ce jour, aucune sauvegarde de progression ne marche** : Mario 63 redémarre à zéro à chaque boot du `.nro`. Cause double : (a) `StorageBackend = NullStorageBackend` par défaut, (b) URL `file://sdmc:/ruffle/foo.swf` rejetée par le parser URL de Ruffle (`invalid international domain name`) → `SharedObject::get_local: Unable to parse movie URL` visible dans nos logs (4 occurrences au boot Mario 63). **Conséquences confirmées en jeu** : Toad NPC manquant dans le château (probable flag SharedObject non récupéré), progression non persistée entre sessions. **Fix recalibré (vérifié 2026-05-25)** : Ruffle a un trait `StorageBackend` minimal (3 méthodes : `get`/`put`/`remove_key`) dans [core/src/backend/storage.rs](third_party/ruffle/core/src/backend/storage.rs), et un `DiskStorageBackend` réutilisable tel quel dans [frontend-utils/src/backends/storage.rs](third_party/ruffle/frontend-utils/src/backends/storage.rs). Effort réel : (1) **fix URL ~30 min** = `file://sdmc:` → URL bidon valide (`http://flashforswitch.local/mario.swf`) dans `lib.rs` — c'est un PRÉREQUIS car `get_local` foire avant même d'appeler notre backend ; (2) **`SwitchStorageBackend` ~30 min** = copier `DiskStorageBackend`, pointer sur `sdmc:/switch/flash-for-switch/sharedobjects/`, le brancher via `PlayerBuilder::with_storage(...)`. **Bonus import** : le format `.sol` est de l'AMF Adobe standard cross-platform. Un utilisateur peut **glisser sur la SD** ses sauvegardes existantes depuis `%APPDATA%\Macromedia\Flash Player\#SharedObjects\<random>\localhost\<path>\<exe>\<key>.sol` (Windows) → notre StorageBackend les lira directement. | Faible |
+| 2.5 Performance | Mesurer FPS sur Tegra X1 docked/handheld. Optimiser : batcher les draws solides via `glMultiDrawElementsBaseVertex` (l'arena rend ça maintenant facile), cacher uniforms entre draws, réduire glUseProgram. Chutes de FPS constatées par utilisateur en jeu (2026-05-25 nuit). | Faible |
 | 2.6 Real file picker C++ | Scan `sdmc:/ruffle/*.swf` via libnx fsdev (contourne le bug `std::fs::read_dir` Horizon — filenames tronqués). UI joycon : liste avec A=select. | Faible |
 
-### Phase 3 — polish + distribution
+### Phase 3 — Plateforme Flash games (ScummVM-style)
 
-- Cycle applet (`appletGetFocusState`, suspend/resume, libération GPU au focus-lost)
-- `.nacp` metadata final, icon
-- Packaging hb-app.store
-- Compat globale : Madness, Newgrounds classics, autres SWF AS1/AS2 populaires
+**Vision** : transformer le `.nro` "Mario 63 player" en **plateforme générique pour SWF AS1/AS2** sur Switch, avec UI propre type ScummVM/Dolphin port. C'est ce qui distingue un POC d'un vrai logiciel de référence pour la préservation Flash sur Switch.
 
-### Verdict timeline solo (révisé 2026-05-24 fin journée)
+**Contexte qui justifie ça** (avec honnêteté sur les trade-offs) :
+- Le `.exe` Flash projector standalone Adobe (v32.0.0.363, avril 2020 — dernière version possible, Adobe a tué Flash en décembre 2020) est **l'environnement de référence sur lequel Mario 63 a été développé et finalisé**. À ce titre il joue le jeu à 100% sans bug : c'est la cible originale, par construction.
+- Ruffle est une **clean-room reimplementation** de Flash Player en Rust, faite par des bénévoles. Selon [ruffle.rs/compatibility](https://ruffle.rs/compatibility) : 99% du langage AVM1/AS2 supporté, **mais seulement 75-81% des APIs et 77% des properties**. Donc des écarts visibles sur les SWF complexes — c'est notre cas (Toad manquant Mario 63, `non-registered character` errors). Ces écarts se réduisent à chaque release nightly, sans probablement jamais atteindre 100% parity. **Ruffle n'est PAS plus fiable que le `.exe` Adobe.**
+- L'argument pour Ruffle est ailleurs : **(a) portabilité** — Ruffle tourne sur Switch ARM, Web, embedded ; le `.exe` Adobe ne tourne que sur Win/Mac/Linux x86 ; **(b) maintenance** — Ruffle évolue, le `.exe` est définitivement figé.
+- Pour un utilisateur Windows qui veut juste jouer Mario 63 sur PC, **le `.exe` reste la meilleure option qualité visuelle/fidélité**. Notre projet n'a pas vocation à le remplacer là-dessus.
+- Notre projet a vocation à **être la seule voie possible vers Flash portable Switch** — d'où l'intérêt de viser une vraie UX (plateforme ScummVM-style) et pas juste "ça boot Mario 63". Le compromis qualité (écarts Ruffle) est accepté en échange de la portabilité.
+
+| Étape | Boulot | Risque |
+|---|---|---|
+| 3.1 Cycle applet | `appletGetCurrentFocusState`/`appletHook` pour suspend/resume propre (release GPU au focus-lost, restore au focus-regained). Aujourd'hui le `.nro` plante si on home-button. | Faible |
+| 3.2 `SwitchStorageBackend` (.sol persistés) | Voir 2.4.bis. Effort ~1 h. Permet sauvegardes propres + import depuis AppData Windows / Ruffle desktop. | Faible |
+| 3.3 Menu in-game (pause + options) | **+** = pause (toggle `g_paused` qui stoppe `ruffle_render_frame_dt`). **-** = ouvre un overlay GL dessiné par notre stack (au-dessus du rendu Ruffle, en post-frame). Options du menu : Resume / Save state / Load state / Customize keys / Back to library / Quit. Sub-blocker mineur : pas de text rendering chez nous → init `libnx pl` (font system) pour récup une font Switch native. Architecture : `cpp/src/ui/menu.cpp` + `cpp/src/ui/overlay_gl.cpp` (primitives GL UI) + `cpp/src/ui/text.cpp` (FreeType via libnx pl). | Moyen, ~2-3 j |
+| 3.4 File picker / Library UI (ScummVM-style) | Au boot du `.nro` : scan `sdmc:/ruffle/*.swf` + `sdmc:/switch/ruffle/*.swf` via libnx `fsFsOpenDirectory` (contourne le bug `std::fs::read_dir` Horizon). Pour chaque SWF : parser le header via `SwfMovie::from_data` light (titre/dims/FPS/AS version). UI list scrollable joycon-navigable : **A**=launch, **X**=delete, **Y**=info, **L/R**=filtres. Optionnel : sidecar `.json` par jeu (display name, category) + `.png` thumbnail. Remplace 2.6 (file picker basique). | Moyen, ~2-3 j |
+| 3.5 Savestate "light" (reload + state) | **Caveat important (vérifié 2026-05-25)** : Ruffle n'a PAS de `Player::serialize()` natif (grep `savestate|save_state|serialize_player` dans tout `third_party/ruffle/` = 0 résultat, idem GitHub issues). Le Player tient un `gc_arena::Gc<>` graph non-trivialement sérialisable. Solution pragmatique : capturer le SharedObject + frame courant + variables `_root.foo`. Au restore : reload du SWF + injection du state. Marche pour les jeux à progression linéaire (Mario 63), foire sur les animations en cours. **80% du bénéfice utilisateur pour 10% de l'effort vrai savestate.** | Faible, ~1 j |
+| 3.6 Compat globale autres SWF AS1/AS2 | Tester Madness, Newgrounds classics (Alien Hominid, Castle Crashers prototype, etc.). Probable que chaque jeu exposera ses propres bugs Ruffle. Reuse de la diag infrastructure (exception handler natif, crash log, compteurs live arena). | Variable |
+
+### Phase 4 — polish + distribution
+
+- `.nacp` metadata final propre, icône custom
+- Packaging hb-app.store officiel
+- Documentation utilisateur (comment importer ses saves, mappings touches, troubleshooting)
+- **Savestate "vrai" (upstream contribution)** : ajouter `Player::serialize_state()`/`deserialize_state()` à ruffle_core (traverser le GC graph, sérialiser tout). Gros chantier ~2 semaines en collaboration mainteneurs Ruffle. Optionnel, bénéficie à tous les frontends Ruffle.
+
+### Verdict timeline solo (révisé 2026-05-25 nuit)
 
 - ~~Premier `.swf` qui affiche un truc : 6-10 semaines~~ → **fait en 6 jours**
 - ~~Mario 63 jouable : +3-6 mois~~ → **input + chargement + SPRITES VISIBLES faits en 6 jours**
-- Phase 2.1 sprites : ~~estimation 1-2 semaines~~ → **fait en ~5 h (le même jour que budget=0)** après débuggage methodique du crash silencieux jpeg_decoder
-- Phase 2.2 audio : ~~estimation 2-3 jours~~ → **fait en ~3 h (même journée)** en portant CpalAudioBackend tel quel + libnx audren côté C++
-- Phase 2.3 (bump submodule + bugs upstream + filtres Glow/DropShadow) : estimation **3-7 jours**
-- Release publique propre : **+1-2 mois**
+- Phase 2.1 sprites : ~~estimation 1-2 semaines~~ → **fait en ~5 h** après débuggage méthodique du crash silencieux jpeg_decoder
+- Phase 2.2 audio : ~~estimation 2-3 jours~~ → **fait en ~3 h** en portant CpalAudioBackend tel quel + libnx audren côté C++
+- Phase 2.1.b mega-arena (crash jetpack) : ~~bug bloquant Mario 63 long-play~~ → **fait en ~5 h** (3 h diag + 2 h refactor) en installant `__libnx_exception_handler` natif pour capturer le DataAbort Mesa
+- Phase 2.4.bis (URL fix + StorageBackend) : estimation **~1 h** (corrigée de ½ j initial, après audit du trait StorageBackend qui est minimal — réuse direct du `DiskStorageBackend` upstream)
+- Phase 2.3 (filtres Glow/DropShadow) : estimation **3-7 jours**
+- Phase 2.4 (bump submodule + bugs upstream Mario 63) : estimation **2-5 jours**
+- Phase 2.5 (perf, batching draws via `glMultiDrawElementsBaseVertex`) : estimation **2-3 jours**
+- **Phase 3 plateforme Flash games (StorageBackend + menu + library + savestate light)** : estimation **5-7 jours** (StorageBackend ~1 h + suspend/resume ~½ j + menu ~2-3 j + library ~2-3 j + savestate light ~1 j)
+- Release publique propre v1 (Phase 4) : **+2-3 semaines**
+- Savestate "vrai" (upstream contribution Ruffle) : **+2 semaines** optionnel post-v1
 
-La sous-estimation initiale (6-12 mois) venait surtout de la peur autour de `std-via-newlib` (Phase 1.1) qui s'est résolue en 1h au lieu de 1-2 semaines, car upstream stdlib avait déjà les branches `target_os = "horizon"` pour le 3DS.
+La sous-estimation initiale (6-12 mois) venait surtout de la peur autour de `std-via-newlib` (Phase 1.1) qui s'est résolue en 1h au lieu de 1-2 semaines, car upstream stdlib avait déjà les branches `target_os = "horizon"` pour le 3DS. La même surprise s'est répétée Phase 2.4.bis : on imaginait un effort `StorageBackend` complexe, en fait l'API Ruffle est minimale (3 méthodes) et un `DiskStorageBackend` est directement réutilisable.
 
 ## Contraintes / faits à retenir
 
