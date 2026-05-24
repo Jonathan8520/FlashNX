@@ -55,7 +55,7 @@ Le script orchestre :
 1. `cargo build --release` côté Rust (target `aarch64-nintendo-switch-freestanding`, std-via-newlib, build-std nightly) → `rust/target/.../libruffle_switch.a` (~12-13 MB)
 2. `make` côté C++ lancé **dans le bash MSYS2 de devkitPro** (pour que `switch_rules` résolve les paths correctement) → link contre `libruffle_switch.a` + libnx + libEGL/libGLESv2 → `cpp/flash-for-switch.nro` (~11.6 MB)
 
-**État Mai 2026 (Phase 2.1 ✓)** : full std via les 2 patches stdlib (voir plus bas), `ruffle_core` linké, **Mario 63 jouable avec sprites complets** (atlas 2048×2048, edge replication, UV wrap shader). Audio = Phase 2.2 à venir.
+**État Mai 2026 (Phase 2.1 + 2.2 ✓)** : full std via les 2 patches stdlib (voir plus bas), `ruffle_core` linké avec features `audio` + `mp3`, **Mario 63 jouable avec sprites complets + son** (atlas 2048×2048, edge replication, UV wrap shader, audren via SwitchAudioBackend qui porte le pattern CpalAudioBackend).
 
 ## Tester sur Switch
 
@@ -127,7 +127,7 @@ Objectif initial : charger un `.swf` depuis la SD et voir quelque chose à l'éc
 | Étape | Boulot | Risque |
 |---|---|---|
 | 2.1 ✓ Sprites visibles (validé hardware 2026-05-24) | ~4 h debug + ~1 h fix | **Résolu**. Voir 1.5.e + 1.5.e.bis ci-dessus. Aussi un bug d'UV wrap (Mario apparaissait sur le sol) corrigé en pousser `fract/clamp` dans le fragment shader avant le remap atlas. Et un bug d'edge bleed (lignes noires entre sprites avec LINEAR filtering) corrigé en répliquant les pixels du bord dans le pad atlas. |
-| 2.2 Audio audren | Bindgen libnx audren symbols → `audrvCreate`/`audrvVoiceInit`/`audrvVoiceAddWaveBuf`/`audrvUpdate`. Côté Rust, implémenter un `AudioBackend` qui consomme les samples de Ruffle et les pousse dans audren via FFI. Bridge MP3/AAC restera best-effort (deps externes). | Moyen-fort |
+| 2.2 ✓ Audio audren (validé hardware 2026-05-24 fin journée) | ~3 h | **Résolu**. [cpp/src/audio.cpp](cpp/src/audio.cpp) wrappe `audrenInitialize`/`audrvCreate`/`audrvVoiceInit`/`audrvVoiceAddWaveBuf` + worker thread libnx (NUM_WAVE_BUFS=4, 4096 frames each, ~340 ms cushion). Côté Rust, [rust/src/backend/audio.rs](rust/src/backend/audio.rs) = port de `frontend-utils/CpalAudioBackend`: wraps `ruffle_core::AudioMixer` + `impl_audio_mixer_backend!` macro, expose `proxy` via `OnceLock<Mutex<>>` que le C++ pull via `ruffle_audio_fill_buffer`. Features `ruffle_core = ["audio", "mp3"]` (Mario 63 utilise MP3 pour TOUT son audio incl. SFX, +250 KB symphonia mais indispensable). `mixer.set_volume(0.5)` pour éviter clipping (sans, `max_seen=32767` constant → grésillements audibles ; avec, `max_seen=6009` propre). |
 | 2.3 Bugs upstream Mario 63 | Issues Ruffle connues #1909 (crash tutorial), #6906 (castle), #4690 (title freeze), #11077 (Bowser non-completable), #2448 (gradients). Beaucoup ont des fixes upstream à intégrer en bumpant le submodule. | Variable |
 | 2.4 Performance | Mesurer FPS sur Tegra X1 docked/handheld. Optimiser : batcher les draws solides, cacher uniforms entre draws, réduire glUseProgram. | Faible |
 | 2.5 Real file picker C++ | Scan `sdmc:/ruffle/*.swf` via libnx fsdev (contourne le bug `std::fs::read_dir` Horizon — filenames tronqués). UI joycon : liste avec A=select. | Faible |
@@ -144,8 +144,8 @@ Objectif initial : charger un `.swf` depuis la SD et voir quelque chose à l'éc
 - ~~Premier `.swf` qui affiche un truc : 6-10 semaines~~ → **fait en 6 jours**
 - ~~Mario 63 jouable : +3-6 mois~~ → **input + chargement + SPRITES VISIBLES faits en 6 jours**
 - Phase 2.1 sprites : ~~estimation 1-2 semaines~~ → **fait en ~5 h (le même jour que budget=0)** après débuggage methodique du crash silencieux jpeg_decoder
-- Phase 2.2 (audio audren) : estimation **2-3 jours**
-- Phase 2.3 (bump submodule + bugs upstream) : estimation **3-7 jours**
+- Phase 2.2 audio : ~~estimation 2-3 jours~~ → **fait en ~3 h (même journée)** en portant CpalAudioBackend tel quel + libnx audren côté C++
+- Phase 2.3 (bump submodule + bugs upstream + filtres Glow/DropShadow) : estimation **3-7 jours**
 - Release publique propre : **+1-2 mois**
 
 La sous-estimation initiale (6-12 mois) venait surtout de la peur autour de `std-via-newlib` (Phase 1.1) qui s'est résolue en 1h au lieu de 1-2 semaines, car upstream stdlib avait déjà les branches `target_os = "horizon"` pour le 3DS.

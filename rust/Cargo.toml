@@ -10,8 +10,11 @@ crate-type = ["staticlib"]
 
 [dependencies]
 # Pulled in at Phase 1.2 (2026-05-21). Default features off — we don't need
-# lzma, mp3, aac, nellymoser, audio (dasp), egui, jpegxr.
-ruffle_core = { path = "../third_party/ruffle/core", default-features = false }
+# lzma, mp3, aac, nellymoser, egui, jpegxr. `audio` feature enables Ruffle's
+# software AudioMixer (dasp + PCM/ADPCM decoders) which we wire to libnx
+# audren in [backend::audio::SwitchAudioBackend] (Phase 2.2). MP3/AAC/
+# Nellymoser left off for now — most Mario 63 sounds are PCM/ADPCM.
+ruffle_core = { path = "../third_party/ruffle/core", default-features = false, features = ["audio", "mp3"] }
 # Phase 1.3 (2026-05-23): RenderBackend trait lives here. Already pulled
 # transitively by ruffle_core with feature `tessellator`, but we need a direct
 # dep to name its types in src/backend/render.rs.

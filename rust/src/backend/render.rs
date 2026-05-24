@@ -393,7 +393,7 @@ impl Drop for ShapeBitmapProgram {
 
 // ─── Stencil mask state ───────────────────────────────────────────────────────
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 struct MaskState {
     /// Nesting depth: 0 = no mask, N = drawing the Nth maskee.
     depth: u32,
@@ -1234,7 +1234,7 @@ impl SwitchRenderBackend {
         let Some((x, y)) = atlas.pack(width, height) else {
             return None;
         };
-        atlas.upload_region(x, y, width, height, pixels);
+        atlas.upload_region_padded(x, y, width, height, pixels);
         self.atlases.push(atlas);
         let inv = 1.0 / ATLAS_SIZE as f32;
         Some(SwitchBitmapHandle {
@@ -1477,6 +1477,9 @@ impl RenderBackend for SwitchRenderBackend {
         _quality: StageQuality,
         _bounds: PixelRegion,
     ) -> Option<Box<dyn SyncHandle>> {
+        // Filter rendering deferred until we can faithfully port the
+        // Ruffle wgpu pipeline (Phase 2.1.b). Returning None makes Ruffle
+        // skip cache+filter for filtered display objects.
         None
     }
 
@@ -1486,6 +1489,7 @@ impl RenderBackend for SwitchRenderBackend {
         commands: CommandList,
         _cache_entries: Vec<BitmapCacheEntry>,
     ) {
+
         // Drain GL errors once per second, plus a one-line heartbeat with
         // running counters every 2 seconds. Quiet otherwise.
         self.frame_count = self.frame_count.wrapping_add(1);
@@ -1566,8 +1570,11 @@ impl RenderBackend for SwitchRenderBackend {
         width: NonZeroU32,
         height: NonZeroU32,
     ) -> Result<BitmapHandle, Error> {
-        // Allocate a fully-transparent region in the atlas. Pixel data of
-        // size W*H*4, all zeros. Caller will fill via update_texture.
+        // Atlas-backed empty texture: matches the long-standing behavior
+        // that Mario 63's BitmapData usage depends on. The Owned/FBO
+        // variant is kept in the codebase for future filter targets but
+        // we currently keep is_offscreen_supported = false so Ruffle
+        // never asks for one.
         let pixels = vec![0u8; (width.get() * height.get() * 4) as usize];
         let Some(meta) = self.pack_into_atlas(&pixels, width.get(), height.get()) else {
             return Err(Error::TooLarge);

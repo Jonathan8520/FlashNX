@@ -27,6 +27,7 @@ use ruffle_core::tag_utils::SwfMovie;
 use ruffle_core::{FloatDuration, Player, PlayerBuilder};
 use ruffle_render::backend::RenderBackend;
 
+use backend::audio::SwitchAudioBackend;
 use backend::log::SwitchLogBackend;
 use backend::render::SwitchRenderBackend;
 use backend::tracing::SwitchTracingSubscriber;
@@ -111,9 +112,11 @@ pub extern "C" fn ruffle_init() -> c_int {
 
     let mut builder = PlayerBuilder::new()
         .with_boxed_renderer(std::boxed::Box::new(renderer) as std::boxed::Box<dyn RenderBackend>)
+        .with_audio(SwitchAudioBackend::new())
         .with_log(SwitchLogBackend::new())
         .with_autoplay(true)
         .with_viewport_dimensions(VIEWPORT_W, VIEWPORT_H, 1.0);
+    log(b"ruffle_init: audio backend constructed\n\0");
 
     // Look for a SWF on the SD card. We scan each search dir in order and
     // take the first `.swf` we find. If nothing turns up, we use the
