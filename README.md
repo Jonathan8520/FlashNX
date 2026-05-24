@@ -22,28 +22,32 @@ flash-for-switch/
 ├── cpp/
 │   ├── Makefile                  # template devkitPro switch
 │   ├── src/
-│   │   ├── main.cpp              # libnx init + applet loop + joycon/touch input
+│   │   ├── main.cpp              # libnx init + worker thread + applet loop + joycon/touch input
 │   │   ├── gl_context.cpp        # EGL/GL via switch-mesa, EGL_STENCIL_SIZE=8
-│   │   ├── input.cpp             # (vide — placeholder)
-│   │   ├── audio.cpp             # (vide — Phase 2 audren)
-│   │   └── ruffle_bridge.cpp     # ruffle_log_cstr + getrandom + sysconf stubs
+│   │   ├── input.cpp             # (vide — placeholder, l'input est dans main.cpp)
+│   │   ├── audio.cpp             # libnx audren wrapper + worker thread (Phase 2.2)
+│   │   └── ruffle_bridge.cpp     # ruffle_log_cstr + getrandom + sysconf stubs + svcGetInfo RAM
 │   └── include/ruffle_bridge.h
 ├── rust/
-│   ├── Cargo.toml                # crate-type = ["staticlib"], ruffle_core + ruffle_render + swf
+│   ├── Cargo.toml                # crate-type = ["staticlib"], ruffle_core features=[audio,mp3] + jpeg-decoder patch
 │   ├── rust-toolchain.toml       # nightly-x86_64-pc-windows-gnu + rust-src
 │   ├── .cargo/config.toml        # target aarch64-nintendo-switch-freestanding + rustflags
 │   └── src/
 │       ├── lib.rs                # FFI exports + PlayerBuilder + SWF loader + input handlers
 │       ├── ffi/gl.rs             # OpenGL FFI subset (no bindgen — hand-written)
 │       └── backend/
-│           ├── render.rs         # SwitchRenderBackend (~1500 lignes, 4 shaders, atlas)
+│           ├── render.rs         # SwitchRenderBackend (~1900 lignes, 4 shaders, atlas, edge replication, UV wrap)
+│           ├── audio.rs          # SwitchAudioBackend (port CpalAudioBackend → libnx audren)
+│           ├── tracing.rs        # Routes Ruffle's tracing events to nxlink stdout
 │           └── log.rs            # SwitchLogBackend → ruffle_log_cstr
-├── third_party/ruffle/           # git submodule, pin nightly-2026-05-19
+├── third_party/
+│   ├── ruffle/                   # git submodule, master @ e41992ab (2026-05-24)
+│   └── jpeg-decoder-switchfork/  # vendored jpeg-decoder-0.3.2 with select_worker → Immediate forced
 ├── assets/{icon.jpg, *.nacp}
 └── scripts/{build.sh, setup-env.ps1, setup-env.sh}
 ```
 
-Les backends Navigator/UI/Storage/Audio/Video utilisent les implémentations `Null*` que ruffle_core fournit par défaut — pas de fichier dédié.
+Les backends Navigator/UI/Storage/Video utilisent les implémentations `Null*` que ruffle_core fournit par défaut — pas de fichier dédié. **Audio** = `SwitchAudioBackend` (Phase 2.2).
 
 ## Build
 
@@ -52,8 +56,8 @@ Les backends Navigator/UI/Storage/Audio/Video utilisent les implémentations `Nu
 ```
 
 Le script orchestre :
-1. `cargo build --release` côté Rust (target `aarch64-nintendo-switch-freestanding`, std-via-newlib, build-std nightly) → `rust/target/.../libruffle_switch.a` (~12-13 MB)
-2. `make` côté C++ lancé **dans le bash MSYS2 de devkitPro** (pour que `switch_rules` résolve les paths correctement) → link contre `libruffle_switch.a` + libnx + libEGL/libGLESv2 → `cpp/flash-for-switch.nro` (~11.6 MB)
+1. `cargo build --release` côté Rust (target `aarch64-nintendo-switch-freestanding`, std-via-newlib, build-std nightly) → `rust/target/.../libruffle_switch.a` (~13-14 MB avec features audio+mp3)
+2. `make` côté C++ lancé **dans le bash MSYS2 de devkitPro** (pour que `switch_rules` résolve les paths correctement) → link contre `libruffle_switch.a` + libnx + libEGL/libGLESv2 → `cpp/flash-for-switch.nro` (~12.2 MB)
 
 **État Mai 2026 (Phase 2.1 + 2.2 ✓)** : full std via les 2 patches stdlib (voir plus bas), `ruffle_core` linké avec features `audio` + `mp3`, **Mario 63 jouable avec sprites complets + son** (atlas 2048×2048, edge replication, UV wrap shader, audren via SwitchAudioBackend qui porte le pattern CpalAudioBackend).
 
@@ -120,17 +124,18 @@ Objectif initial : charger un `.swf` depuis la SD et voir quelque chose à l'éc
 | 1.5.e.bis ✓ Fork jpeg-decoder pour Switch | ~30 min diag + 30 min fix | **Le diagnostic** : crash à frame ~40 avec budget>0 vient du fait que `jpeg_decoder` 0.3.2 (sans rayon) utilise quand même `std::thread::spawn` quand `width * height > 128*128 px`. La newlib pthread shim de devkitPro crashe natif silencieusement sur ce spawn. **Le fix** : `third_party/jpeg-decoder-switchfork/` patche `select_worker` pour toujours retourner `Immediate` (mono-thread). Référencé via `[patch.crates-io] jpeg-decoder = { path = "..." }` dans `rust/Cargo.toml`. Coût perf : décodage JPEG passe de multi-thread à single-thread (~5 ms / JPEG vs ~1 ms estimé multi-thread), preload total +~5 sec mais stable. |
 | 1.5.f File picker C++ : scan `sdmc:/ruffle/*.swf`, UI de sélection joycon, passer le path à Rust | 2-3 jours | Faible. Bloqué partiellement par bug `std::fs::read_dir` Horizon (filenames tronqués de 2 chars). Workaround actuel : liste hardcodée de chemins candidats. |
 
-### Phase 2 — finir Mario 63 (sprites ✓ + son + level transitions)
+### Phase 2 — finir Mario 63 (sprites ✓ + son ✓ + reste)
 
-À ce stade Mario 63 charge, l'AS2 exécute, l'input répond, le premier niveau se joue **avec les sprites visibles**. Il manque :
+À ce stade Mario 63 charge, l'AS2 exécute, l'input répond, le premier niveau se joue **avec sprites visibles + son audible (musique + SFX)**. Il manque :
 
 | Étape | Boulot | Risque |
 |---|---|---|
 | 2.1 ✓ Sprites visibles (validé hardware 2026-05-24) | ~4 h debug + ~1 h fix | **Résolu**. Voir 1.5.e + 1.5.e.bis ci-dessus. Aussi un bug d'UV wrap (Mario apparaissait sur le sol) corrigé en pousser `fract/clamp` dans le fragment shader avant le remap atlas. Et un bug d'edge bleed (lignes noires entre sprites avec LINEAR filtering) corrigé en répliquant les pixels du bord dans le pad atlas. |
 | 2.2 ✓ Audio audren (validé hardware 2026-05-24 fin journée) | ~3 h | **Résolu**. [cpp/src/audio.cpp](cpp/src/audio.cpp) wrappe `audrenInitialize`/`audrvCreate`/`audrvVoiceInit`/`audrvVoiceAddWaveBuf` + worker thread libnx (NUM_WAVE_BUFS=4, 4096 frames each, ~340 ms cushion). Côté Rust, [rust/src/backend/audio.rs](rust/src/backend/audio.rs) = port de `frontend-utils/CpalAudioBackend`: wraps `ruffle_core::AudioMixer` + `impl_audio_mixer_backend!` macro, expose `proxy` via `OnceLock<Mutex<>>` que le C++ pull via `ruffle_audio_fill_buffer`. Features `ruffle_core = ["audio", "mp3"]` (Mario 63 utilise MP3 pour TOUT son audio incl. SFX, +250 KB symphonia mais indispensable). `mixer.set_volume(0.5)` pour éviter clipping (sans, `max_seen=32767` constant → grésillements audibles ; avec, `max_seen=6009` propre). |
-| 2.3 Bugs upstream Mario 63 | Issues Ruffle connues #1909 (crash tutorial), #6906 (castle), #4690 (title freeze), #11077 (Bowser non-completable), #2448 (gradients). Beaucoup ont des fixes upstream à intégrer en bumpant le submodule. | Variable |
-| 2.4 Performance | Mesurer FPS sur Tegra X1 docked/handheld. Optimiser : batcher les draws solides, cacher uniforms entre draws, réduire glUseProgram. | Faible |
-| 2.5 Real file picker C++ | Scan `sdmc:/ruffle/*.swf` via libnx fsdev (contourne le bug `std::fs::read_dir` Horizon — filenames tronqués). UI joycon : liste avec A=select. | Faible |
+| 2.3 ⏳ Filtres Flash (Glow / DropShadow / Blur) | Porter [render/wgpu/src/filters/](third_party/ruffle/render/wgpu/src/filters/) au backend GL. Touche `render_offscreen` + `apply_filter` + cache_entries dans `submit_frame`. Premier essai 2026-05-24 a régressé les sprites (BitmapHandle Atlas vs Owned mal géré, source==destination UB). Revert clean. À refaire en portant fidèlement (cf. [[port-ruffle-dont-invent]]). Mario 63 visuel manque "brillures" sur logo et "bordures aux lettres". | Moyen-fort |
+| 2.4 Bugs upstream Mario 63 | Issues Ruffle connues #13198 (text/audio open), #1909 (crash tutorial), #6906 (castle), #4690 (title freeze), #11077 (Bowser non-completable), #2448 (gradients). Beaucoup ont des fixes upstream à intégrer en bumpant le submodule. | Variable |
+| 2.5 Performance | Mesurer FPS sur Tegra X1 docked/handheld. Optimiser : batcher les draws solides, cacher uniforms entre draws, réduire glUseProgram. | Faible |
+| 2.6 Real file picker C++ | Scan `sdmc:/ruffle/*.swf` via libnx fsdev (contourne le bug `std::fs::read_dir` Horizon — filenames tronqués). UI joycon : liste avec A=select. | Faible |
 
 ### Phase 3 — polish + distribution
 
@@ -154,13 +159,15 @@ La sous-estimation initiale (6-12 mois) venait surtout de la peur autour de `std
 
 - **Mario 63 = AS2 pur interprété.** AVM2 JIT non nécessaire → service Horizon `jit:u` non requis. Confirmé en pratique : le SWF v8 charge et exécute sans JIT.
 - **Ruffle deps à neutraliser :** ~~prévu pour `cpal`, `flate2 rust_backend`, `reqwest`~~ → **non nécessaire en pratique**. `cpal`/`reqwest`/`tokio`/`wgpu` ne sont PAS dans `ruffle_core`, juste dans `ruffle_desktop`. `flate2` workspace default = `miniz_oxide` (pure Rust). Tout linke direct.
-- **FFI libnx utilisée** (Phase 1 complétée) :
+- **FFI libnx utilisée** (Phase 1 + 2.2 complétées) :
   - HID : `padConfigureInput`/`padInitializeDefault`/`padUpdate`/`padGetButtonsDown/Up`/`padGetStickPos`/`hidInitializeTouchScreen`/`hidGetTouchScreenStates` (appelés direct dans `cpp/src/main.cpp`)
   - Applet : `appletMainLoop`, `nwindowGetDefault`
   - Socket : `socketInitializeDefault`, `nxlinkStdio` (stdout réseau)
   - FS : `sdmc:/...` monté auto par crt0 libnx → `std::fs::read` marche depuis Rust (sauf `read_dir` qui bug — voir Phase 2.5)
-- **FFI libnx à venir** (Phase 2) :
-  - Audio : `audrenInitialize`/`audrenStartAudioRenderer`/`audrvCreate`/`audrvMemPoolAdd|Attach`/`audrvVoiceInit`/`audrvVoiceAddWaveBuf`/`audrvUpdate`
+  - Thread : `threadCreate`/`threadStart`/`threadWaitForExit`/`threadClose` pour worker GL (main.cpp) et worker audio (audio.cpp)
+  - System : `svcGetInfo` (RAM diagnostic via `ruffle_query_ram`), `armGetSystemTick` (pacing dt réel pour Ruffle)
+  - **Audio (Phase 2.2)** : `audrenInitialize`/`audrenStartAudioRenderer`/`audrenWaitFrame`/`audrvCreate`/`audrvMemPoolAdd|Attach`/`audrvVoiceInit`/`audrvVoiceSetDestinationMix`/`audrvVoiceSetMixFactor`/`audrvVoiceAddWaveBuf`/`audrvVoiceIsPlaying`/`audrvVoiceStart`/`audrvVoiceStop`/`audrvUpdate`/`audrvClose`/`audrenExit`
+- **FFI libnx à venir** (Phase 3) :
   - Applet : `appletGetCurrentFocusState`/`appletHook` pour cycle suspend/resume
 - **Bindgen** : non utilisé en pratique. FFI écrite à la main dans `rust/src/ffi/gl.rs` (subset GL 4.3 core) et `cpp/src/ruffle_bridge.cpp`. Plus simple et zéro dep build-time.
 - **Pattern d'architecture à copier :** ScummVM `backends/platform/sdl/switch/` — séparation OSystem → OSystem_SDL → OSystem_Switch. Adapté ici en Rust : trait `RenderBackend` (de Ruffle) + impl `SwitchRenderBackend` mince.
@@ -170,7 +177,7 @@ La sous-estimation initiale (6-12 mois) venait surtout de la peur autour de `std
 - **devkitPro** dans `C:\devkitPro\` avec packages `switch-dev`, `switch-mesa`, `switch-glm`, `switch-glad`
 - **Rust** : toolchain pin via `rust/rust-toolchain.toml` → `nightly-x86_64-pc-windows-gnu` + `rust-src` (host GNU obligatoire — MSVC casse les build scripts sans Visual Studio Build Tools)
 - **MinGW-w64** via `scoop install mingw` (16.1.0) — pour `dlltool.exe` que Rust nightly GNU embarque buggé. Ajouter `~/scoop/apps/mingw/current/bin` au PATH avant `cargo build` (le `scripts/build.sh` le fait déjà).
-- LLVM/CMake/Python : **toujours pas nécessaires** — confirmé en pratique. Phase 2 audren se fera via FFI manuelle dans `cpp/src/audio.cpp`, pas bindgen.
+- LLVM/CMake/Python : **toujours pas nécessaires** — confirmé en pratique. Phase 2.2 audren faite via FFI manuelle dans `cpp/src/audio.cpp`, pas bindgen.
 - **`third_party/jpeg-decoder-switchfork/`** : fork patchée de `jpeg-decoder` 0.3.2 (single-line patch dans `select_worker` pour toujours retourner Immediate). Référencée via `[patch.crates-io]` dans `rust/Cargo.toml`. Sans elle, Mario 63 crashe silencieusement après ~3 sec parce que jpeg-decoder spawne `std::thread` sur newlib pour JPEGs > 128×128 px.
 
 ### Patches rust-src à ré-appliquer après chaque `rustup update`
