@@ -54,6 +54,64 @@ use ruffle_render::transform::Transform;
 use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
+/// Pause-menu labels rendered by `draw_menu_overlay`. C++ maps the selected
+/// index from this slice to an action (Resume / Restart / Quit). Keep the
+/// order in sync with the `MENU_*` constants in `cpp/src/main.cpp`.
+pub const MENU_ITEMS: &[&str] = &["REPRENDRE", "REDEMARRER", "QUITTER"];
+
+/// 5×7 pixel glyphs for the pause menu. ASCII art keeps the data
+/// hand-editable: each row is exactly 5 chars wide, ' ' = off, anything
+/// else = on. `draw_text` upper-cases input before lookup, so we only
+/// carry one case. Unknown chars render as blank (the cursor still
+/// advances). Add more entries here if a future label needs new
+/// characters.
+type Glyph = [&'static str; 7];
+static GLYPHS: &[(char, Glyph)] = &[
+    (' ', ["     ", "     ", "     ", "     ", "     ", "     ", "     "]),
+    ('A', [" ### ", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"]),
+    ('B', ["#### ", "#   #", "#   #", "#### ", "#   #", "#   #", "#### "]),
+    ('C', [" ####", "#    ", "#    ", "#    ", "#    ", "#    ", " ####"]),
+    ('D', ["#### ", "#   #", "#   #", "#   #", "#   #", "#   #", "#### "]),
+    ('E', ["#####", "#    ", "#    ", "#### ", "#    ", "#    ", "#####"]),
+    ('F', ["#####", "#    ", "#    ", "#### ", "#    ", "#    ", "#    "]),
+    ('G', [" ####", "#    ", "#    ", "#  ##", "#   #", "#   #", " ####"]),
+    ('H', ["#   #", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"]),
+    ('I', [" ### ", "  #  ", "  #  ", "  #  ", "  #  ", "  #  ", " ### "]),
+    ('J', ["#####", "    #", "    #", "    #", "    #", "#   #", " ### "]),
+    ('K', ["#   #", "#  # ", "# #  ", "##   ", "# #  ", "#  # ", "#   #"]),
+    ('L', ["#    ", "#    ", "#    ", "#    ", "#    ", "#    ", "#####"]),
+    ('M', ["#   #", "## ##", "# # #", "#   #", "#   #", "#   #", "#   #"]),
+    ('N', ["#   #", "##  #", "# # #", "#  ##", "#   #", "#   #", "#   #"]),
+    ('O', [" ### ", "#   #", "#   #", "#   #", "#   #", "#   #", " ### "]),
+    ('P', ["#### ", "#   #", "#   #", "#### ", "#    ", "#    ", "#    "]),
+    ('Q', [" ### ", "#   #", "#   #", "#   #", "# # #", "#  # ", " ## #"]),
+    ('R', ["#### ", "#   #", "#   #", "#### ", "# #  ", "#  # ", "#   #"]),
+    ('S', [" ####", "#    ", "#    ", " ### ", "    #", "    #", "#### "]),
+    ('T', ["#####", "  #  ", "  #  ", "  #  ", "  #  ", "  #  ", "  #  "]),
+    ('U', ["#   #", "#   #", "#   #", "#   #", "#   #", "#   #", " ### "]),
+    ('V', ["#   #", "#   #", "#   #", "#   #", "#   #", " # # ", "  #  "]),
+    ('W', ["#   #", "#   #", "#   #", "#   #", "# # #", "## ##", "#   #"]),
+    ('X', ["#   #", "#   #", " # # ", "  #  ", " # # ", "#   #", "#   #"]),
+    ('Y', ["#   #", "#   #", " # # ", "  #  ", "  #  ", "  #  ", "  #  "]),
+    ('Z', ["#####", "    #", "   # ", "  #  ", " #   ", "#    ", "#####"]),
+    ('0', [" ### ", "#   #", "#  ##", "# # #", "##  #", "#   #", " ### "]),
+    ('1', ["  #  ", " ##  ", "  #  ", "  #  ", "  #  ", "  #  ", " ### "]),
+    ('2', [" ### ", "#   #", "    #", "   # ", "  #  ", " #   ", "#####"]),
+    ('3', [" ### ", "#   #", "    #", "  ## ", "    #", "#   #", " ### "]),
+    ('4', ["#  # ", "#  # ", "#  # ", "#####", "   # ", "   # ", "   # "]),
+    ('5', ["#####", "#    ", "#### ", "    #", "    #", "#   #", " ### "]),
+    ('6', [" ### ", "#    ", "#    ", "#### ", "#   #", "#   #", " ### "]),
+    ('7', ["#####", "    #", "   # ", "  #  ", " #   ", " #   ", " #   "]),
+    ('8', [" ### ", "#   #", "#   #", " ### ", "#   #", "#   #", " ### "]),
+    ('9', [" ### ", "#   #", "#   #", " ####", "    #", "    #", " ### "]),
+    ('-', ["     ", "     ", "     ", "#####", "     ", "     ", "     "]),
+    ('=', ["     ", "     ", "#####", "     ", "#####", "     ", "     "]),
+    ('>', ["#    ", " #   ", "  #  ", "   # ", "  #  ", " #   ", "#    "]),
+    (':', ["     ", "  #  ", "  #  ", "     ", "  #  ", "  #  ", "     "]),
+    ('.', ["     ", "     ", "     ", "     ", "     ", " ##  ", " ##  "]),
+    ('/', ["    #", "    #", "   # ", "  #  ", " #   ", "#    ", "#    "]),
+];
+
 /// Count of `GpuDraw`s currently alive (created minus dropped). Used to
 /// detect leaks: if this monotonically grows (and matches `shapes_registered`
 /// minus shape Drops), Ruffle is retaining shape handles forever and our
@@ -1391,6 +1449,23 @@ fn as_switch_bitmap(handle: &BitmapHandle) -> Option<&SwitchBitmapHandle> {
 
 impl SwitchRenderBackend {
     pub fn new(width: u32, height: u32) -> Option<Self> {
+        // Reset cross-instance statics so the diagnostic counters and the
+        // pending-frees queue match THIS backend, not whatever the previous
+        // one left behind. Without this clear, restarting the Player (e.g.
+        // pause-menu REDEMARRER) makes:
+        //   - LIVE_GPU_DRAWS/SHAPES briefly noisy if old Drops race with
+        //     new register_shape calls (they don't in practice — drops are
+        //     synchronous on Arc=0 — but defensive cost is one atomic store).
+        //   - PENDING_FREES the actual bug: stale (offset, size) tuples from
+        //     the old arena get applied to the NEW fresh arena's freelist
+        //     on first submit_frame drain, marking already-free regions as
+        //     "double-free" and producing the `arena_v=-2MB(frag 18)`
+        //     nonsense in heartbeat logs. Worse, the bogus free regions
+        //     would alias with future allocs and silently corrupt draws.
+        PENDING_FREES.lock().unwrap().clear();
+        LIVE_GPU_DRAWS.store(0, Ordering::Relaxed);
+        LIVE_GPU_SHAPES.store(0, Ordering::Relaxed);
+
         let solid = build_solid_program()?;
         let bitmap_prog = build_bitmap_program()?;
         let shape_bitmap_prog = build_shape_bitmap_program()?;
@@ -1690,6 +1765,172 @@ impl SwitchRenderBackend {
         }
         // We just zeroed program + VAO, but the cache thinks they are still
         // bound. Invalidate so the next frame's first draw re-binds.
+        self.gl_state.invalidate();
+    }
+
+    /// Draw an ASCII string with the embedded 5x7 pixel font (see `GLYPHS`).
+    /// `x`, `y` are top-left in screen pixels. Each lit glyph pixel becomes
+    /// a `scale × scale` solid rect drawn via the same path as `draw_rect`.
+    /// Unknown chars render as blank space.
+    pub fn draw_text(&mut self, x: f32, y: f32, scale: f32, text: &str, color: swf::Color) {
+        let mut cur_x = x;
+        for ch in text.chars() {
+            // Uppercase fold — our font only carries A-Z.
+            let lookup = ch.to_ascii_uppercase();
+            if let Some((_, pattern)) = GLYPHS.iter().find(|(c, _)| *c == lookup) {
+                for (row_idx, row_str) in pattern.iter().enumerate() {
+                    for (col_idx, pixel) in row_str.chars().enumerate() {
+                        if pixel != ' ' {
+                            let px = cur_x + col_idx as f32 * scale;
+                            let py = y + row_idx as f32 * scale;
+                            let mat = Matrix {
+                                a: scale,
+                                b: 0.0,
+                                c: 0.0,
+                                d: scale,
+                                tx: swf::Twips::from_pixels(px as f64),
+                                ty: swf::Twips::from_pixels(py as f64),
+                            };
+                            <Self as CommandHandler>::draw_rect(self, color, mat);
+                        }
+                    }
+                }
+            }
+            // Advance by 6 px (5-wide glyph + 1-px gap), scaled.
+            cur_x += 6.0 * scale;
+        }
+    }
+
+    /// Measure rendered width of `text` in pixels at the given scale.
+    /// Lets the menu centre items horizontally.
+    pub fn measure_text(&self, text: &str, scale: f32) -> f32 {
+        text.chars().count() as f32 * 6.0 * scale
+    }
+
+    /// Draw the pause-modal overlay on top of whatever's already in the
+    /// framebuffer. The caller is expected to have re-rendered the paused
+    /// game state (via `Player::render`) so this overlay sits over a frozen
+    /// snapshot of the game, not a blank screen.
+    ///
+    /// `selected` indexes `MENU_ITEMS`. The cursor `>` is drawn on the
+    /// selected row; the selected label is rendered in yellow, others in
+    /// white. Help line at the bottom describes the buttons.
+    pub fn draw_menu_overlay(&mut self, selected: usize) {
+        // Re-bind blend / disable stencil, same as the cursor overlay.
+        unsafe {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_STENCIL_TEST);
+        }
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+
+        // Full-screen dim backdrop (50 % black). Hides the game so the
+        // user's eye snaps to the menu.
+        let backdrop = Matrix {
+            a: vw,
+            b: 0.0,
+            c: 0.0,
+            d: vh,
+            tx: swf::Twips::from_pixels(0.0),
+            ty: swf::Twips::from_pixels(0.0),
+        };
+        // 50 % black backdrop (AA=0x80).
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x80_00_00_00), backdrop);
+
+        // Centred panel — sized so 1280x720 fits 3 items + title comfortably.
+        const PANEL_W: f32 = 520.0;
+        const PANEL_H: f32 = 380.0;
+        let panel_x = (vw - PANEL_W) * 0.5;
+        let panel_y = (vh - PANEL_H) * 0.5;
+        let panel = Matrix {
+            a: PANEL_W,
+            b: 0.0,
+            c: 0.0,
+            d: PANEL_H,
+            tx: swf::Twips::from_pixels(panel_x as f64),
+            ty: swf::Twips::from_pixels(panel_y as f64),
+        };
+        // Dark blue-ish panel background (alpha 240/255 → mostly opaque).
+        // Dark navy panel at ~94% alpha so a hint of the paused frame shows
+        // through. AARRGGBB = F0 14 20 38.
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_14_20_38), panel);
+        // 1-px-style border via line rect at panel scale.
+        let border = Matrix {
+            a: PANEL_W,
+            b: 0.0,
+            c: 0.0,
+            d: PANEL_H,
+            tx: swf::Twips::from_pixels(panel_x as f64),
+            ty: swf::Twips::from_pixels(panel_y as f64),
+        };
+        <Self as CommandHandler>::draw_line_rect(
+            self,
+            swf::Color::from_rgb(0xFFFFFF, 255),
+            border,
+        );
+
+        // Title.
+        const TITLE_SCALE: f32 = 5.0;
+        let title = "PAUSE";
+        let title_w = self.measure_text(title, TITLE_SCALE);
+        let title_x = panel_x + (PANEL_W - title_w) * 0.5;
+        let title_y = panel_y + 30.0;
+        self.draw_text(
+            title_x,
+            title_y,
+            TITLE_SCALE,
+            title,
+            swf::Color::from_rgb(0xFFFFFF, 255),
+        );
+
+        // Menu items.
+        const ITEM_SCALE: f32 = 3.0;
+        const ITEM_SPACING: f32 = 50.0;
+        let items_y = panel_y + 130.0;
+        let item_color_selected = swf::Color::from_rgb(0xFFD740, 255); // amber
+        let item_color_normal = swf::Color::from_rgb(0xCCCCCC, 255);
+        // Pre-measure the longest item so all rows share a left margin.
+        let longest = MENU_ITEMS
+            .iter()
+            .map(|s| s.chars().count())
+            .max()
+            .unwrap_or(0) as f32;
+        let block_w = (longest + 2.0) * 6.0 * ITEM_SCALE; // 2 chars left padding for ">  "
+        let items_x = panel_x + (PANEL_W - block_w) * 0.5;
+        for (i, item) in MENU_ITEMS.iter().enumerate() {
+            let y = items_y + i as f32 * ITEM_SPACING;
+            let color = if i == selected {
+                item_color_selected
+            } else {
+                item_color_normal
+            };
+            if i == selected {
+                self.draw_text(items_x, y, ITEM_SCALE, ">", color);
+            }
+            // Always render label at the same x (cursor occupies first slot).
+            let label_x = items_x + 2.0 * 6.0 * ITEM_SCALE;
+            self.draw_text(label_x, y, ITEM_SCALE, item, color);
+        }
+
+        // Footer help line.
+        const HELP_SCALE: f32 = 2.0;
+        let help = "A:OK   B:ANNULER   HAUT/BAS:NAV";
+        let help_w = self.measure_text(help, HELP_SCALE);
+        let help_x = panel_x + (PANEL_W - help_w) * 0.5;
+        let help_y = panel_y + PANEL_H - 40.0;
+        self.draw_text(
+            help_x,
+            help_y,
+            HELP_SCALE,
+            help,
+            swf::Color::from_rgb(0x99AABB, 255),
+        );
+
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
         self.gl_state.invalidate();
     }
 

@@ -103,6 +103,22 @@ const SWF_CANDIDATES: &[&str] = &[
 /// the candidates list.
 static OVERRIDE_SWF_PATH: OnceLock<std::string::String> = OnceLock::new();
 
+/// Raw SWF bytes + synthesized URL, populated by the first successful
+/// `find_and_load_swf` and reused on every subsequent re-init (e.g. when the
+/// pause-menu's REDEMARRER tears the Player down and rebuilds it).
+///
+/// **Why**: Mario 63 is 15.3 MB. The first `std::fs::read` succeeds on a
+/// fresh heap, but after several minutes of play the newlib heap fragments
+/// (gc_arena does a lot of small allocs that scatter free blocks). When we
+/// drop the Player on restart, the big SwfMovie chunk frees but the heap
+/// can't satisfy another 15+ MB contiguous request — `read_to_end` reports
+/// `OutOfMemory` and we'd fall back to the 43-byte embedded red screen.
+/// Caching the bytes once at first boot bypasses re-reading entirely, so
+/// restart only needs the smaller transient SwfMovie::from_data
+/// decompression buffer (~25 MB) which fits comfortably in the headroom
+/// freed by dropping the old Player.
+static CACHED_SWF: OnceLock<(std::vec::Vec<u8>, std::string::String)> = OnceLock::new();
+
 /// Called from C++ (cpp/src/swf_picker.cpp) before `ruffle_init`. Copies the
 /// path into a Rust-owned String. Idempotent — only the first call sticks.
 /// Returns 0 on success, non-zero on malformed input.
@@ -198,42 +214,11 @@ pub extern "C" fn ruffle_init() -> c_int {
         .with_viewport_dimensions(VIEWPORT_W, VIEWPORT_H, 1.0);
     log(b"ruffle_init: audio + storage backends constructed\n\0");
 
-    // Look for a SWF on the SD card. We scan each search dir in order and
-    // take the first `.swf` we find. If nothing turns up, we use the
-    // embedded red-background fallback so the Player always has content.
-    let (movie_bytes, source_label): (std::vec::Vec<u8>, std::string::String) =
-        match find_and_load_swf() {
-            Some((bytes, path)) => {
-                log_str(&std::format!(
-                    "ruffle_init: loaded {} bytes from {}\n",
-                    bytes.len(),
-                    path,
-                ));
-                // We can't use `file://sdmc:/...` — Ruffle's URL parser rejects
-                // "sdmc" as an IDN. SharedObject path keying derives from the
-                // movie URL, so we synthesize a stable http URL keyed by the
-                // basename. This is what Ruffle Web also does for blob URLs.
-                let basename = path
-                    .rsplit(['/', '\\'])
-                    .next()
-                    .unwrap_or("movie.swf");
-                let url = std::format!("http://flashforswitch.local/{}", basename);
-                (bytes, url)
-            }
-            None => {
-                log_str(&std::format!(
-                    "ruffle_init: no .swf found on SD, using embedded fallback ({} bytes)\n",
-                    EMBEDDED_FALLBACK_SWF.len(),
-                ));
-                (
-                    EMBEDDED_FALLBACK_SWF.to_vec(),
-                    std::string::String::from(
-                        "http://flashforswitch.local/SimpleRedBackground.swf",
-                    ),
-                )
-            }
-        };
-    match SwfMovie::from_data(&movie_bytes, source_label, None) {
+    // Look for a SWF on the SD card. First call populates `CACHED_SWF` so
+    // subsequent ruffle_init invocations (e.g. menu REDEMARRER) skip the
+    // expensive `std::fs::read` — see CACHED_SWF docs for the OOM reason.
+    let (movie_bytes, source_label) = ensure_swf_loaded();
+    match SwfMovie::from_data(movie_bytes, source_label.clone(), None) {
         Ok(movie) => {
             log_str(&std::format!(
                 "ruffle_init: SwfMovie parsed (version={}, dims={}x{})\n",
@@ -266,10 +251,50 @@ pub extern "C" fn ruffle_init() -> c_int {
     0
 }
 
+/// Return a reference to the cached `(bytes, url)`, loading from disk on the
+/// first call only. On every subsequent call (post-restart) returns the same
+/// data without touching the SD or growing a fresh 15+ MB Vec — see
+/// `CACHED_SWF` docs for why that matters.
+fn ensure_swf_loaded() -> &'static (std::vec::Vec<u8>, std::string::String) {
+    CACHED_SWF.get_or_init(|| {
+        match find_and_load_swf_uncached() {
+            Some((bytes, path)) => {
+                log_str(&std::format!(
+                    "ruffle_init: loaded {} bytes from {} (cached for future restarts)\n",
+                    bytes.len(),
+                    path,
+                ));
+                // Ruffle's URL parser rejects "sdmc" as an IDN, so we
+                // synthesize an http URL keyed by the basename. Stable
+                // across restarts → SharedObject paths stay the same.
+                let basename = path
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or("movie.swf");
+                let url = std::format!("http://flashforswitch.local/{}", basename);
+                (bytes, url)
+            }
+            None => {
+                log_str(&std::format!(
+                    "ruffle_init: no .swf found on SD, using embedded fallback ({} bytes)\n",
+                    EMBEDDED_FALLBACK_SWF.len(),
+                ));
+                (
+                    EMBEDDED_FALLBACK_SWF.to_vec(),
+                    std::string::String::from(
+                        "http://flashforswitch.local/SimpleRedBackground.swf",
+                    ),
+                )
+            }
+        }
+    })
+}
+
 /// Try the runtime override path (set by C++ swf_picker.cpp via
 /// `ruffle_set_swf_path`) first, then fall back to `SWF_CANDIDATES`.
-/// Returns the first file we can successfully read.
-fn find_and_load_swf() -> Option<(std::vec::Vec<u8>, std::string::String)> {
+/// Returns the first file we can successfully read. Only called once —
+/// `ensure_swf_loaded` memoises the result.
+fn find_and_load_swf_uncached() -> Option<(std::vec::Vec<u8>, std::string::String)> {
     if let Some(path) = OVERRIDE_SWF_PATH.get() {
         match std::fs::read(path) {
             Ok(bytes) => {
@@ -349,6 +374,74 @@ fn render_frame_with_dt(dt: FloatDuration) {
     }
 }
 
+/// Redraw the current Player state WITHOUT advancing AVM/animation by a
+/// time step — used while the pause modal is open so the frame behind the
+/// modal stays frozen but doesn't go black (the back buffer would otherwise
+/// be stale after a swap). Also redraws the cursor overlay so input still
+/// visually responds while paused.
+#[no_mangle]
+pub extern "C" fn ruffle_redraw_paused() {
+    let state = unsafe {
+        match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
+            Some(s) => s,
+            None => return,
+        }
+    };
+    let mut player = match state.player.lock() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    player.render();
+    let cx = state.cursor_x;
+    let cy = state.cursor_y;
+    let clicked = state.cursor_clicked;
+    let renderer = player.renderer_mut();
+    if let Some(backend) =
+        <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(renderer)
+    {
+        backend.draw_cursor_overlay(cx, cy, clicked);
+    }
+}
+
+/// Draw the pause-menu overlay on top of whatever's already in the
+/// framebuffer. `selected` indexes into `render::MENU_ITEMS`. C++ calls
+/// this right after `ruffle_redraw_paused` so the menu sits on top of a
+/// frozen game frame, then `gl_context_swap`s.
+#[no_mangle]
+pub extern "C" fn ruffle_draw_menu(selected: c_int) {
+    let state = unsafe {
+        match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
+            Some(s) => s,
+            None => return,
+        }
+    };
+    let Ok(mut player) = state.player.lock() else {
+        return;
+    };
+    let renderer = player.renderer_mut();
+    if let Some(backend) =
+        <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(renderer)
+    {
+        let idx = selected.max(0) as usize;
+        backend.draw_menu_overlay(idx);
+    }
+}
+
+/// Drop the current Player + renderer (Ruffle owns the SwitchRenderBackend,
+/// so its Drop frees VAOs/VBOs/atlases/programs) and re-run `ruffle_init`
+/// to load the SWF afresh. The C++-managed GL context stays alive across
+/// this call. Used by the pause menu's "REDEMARRER" entry. Returns 0 on
+/// success, non-zero on init failure.
+#[no_mangle]
+pub extern "C" fn ruffle_restart() -> c_int {
+    log(b"ruffle_restart: tearing down current Player\n\0");
+    unsafe {
+        STATE = None;
+    }
+    log(b"ruffle_restart: re-initialising\n\0");
+    ruffle_init()
+}
+
 /// Switch button codes shared with `cpp/src/main.cpp`. Keep these in sync.
 /// We map joycon → Flash key events; Mario 63 (and most AS2 Flash games)
 /// use Space/Z for jump, Enter for start, arrows for movement.
@@ -363,6 +456,7 @@ const SK_DOWN: c_int = 7;
 const SK_Z: c_int = 8;
 const SK_X: c_int = 9;
 const SK_SHIFT: c_int = 10;
+const SK_P: c_int = 11;
 
 fn key_descriptor(code: c_int) -> Option<KeyDescriptor> {
     let (physical, logical) = match code {
@@ -376,6 +470,7 @@ fn key_descriptor(code: c_int) -> Option<KeyDescriptor> {
         SK_Z => (PhysicalKey::KeyZ, LogicalKey::Character('z')),
         SK_X => (PhysicalKey::KeyX, LogicalKey::Character('x')),
         SK_SHIFT => (PhysicalKey::ShiftLeft, LogicalKey::Named(NamedKey::Shift)),
+        SK_P => (PhysicalKey::KeyP, LogicalKey::Character('p')),
         _ => return None,
     };
     Some(KeyDescriptor {

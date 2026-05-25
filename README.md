@@ -89,9 +89,12 @@ Le Makefile a `libruffle_switch.a` comme dépendance explicite du `.elf`, donc t
 | Stick gauche / D-pad | Flèches |
 | **Stick droit** | **Curseur souris** (crosshair visible) |
 | **ZR** ou **écran tactile** | **Clic souris** |
-| Minus | Enter (« Press Start ») |
+| R | Enter (« Press Start ») |
 | L | Escape |
-| Plus | Quitter le `.nro` |
+| Plus | P (touche pause standard) |
+| **Minus** | **Ouvre le menu pause** (REPRENDRE / REDEMARRER / QUITTER) |
+
+Dans le menu pause : D-pad/stick haut-bas pour naviguer, **A** valide, **B** ou **Minus** referme sans rien faire. « QUITTER » sort vers le Homebrew Menu, « REDEMARRER » recharge le SWF depuis zéro (conserve les sauvegardes `.sol`).
 
 ## Roadmap
 

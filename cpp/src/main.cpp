@@ -14,6 +14,9 @@ extern "C" void swf_picker_run(void);
 extern "C" void ruffle_handle_key(int code, bool down);
 extern "C" void ruffle_handle_mouse_move(int x, int y);
 extern "C" void ruffle_handle_mouse_button(bool down);
+extern "C" void ruffle_redraw_paused(void);
+extern "C" void ruffle_draw_menu(int selected);
+extern "C" int  ruffle_restart(void);
 
 // Switch key codes (must match SK_* constants in rust/src/lib.rs).
 enum SwitchKey {
@@ -28,9 +31,14 @@ enum SwitchKey {
     SK_Z        = 8,
     SK_X        = 9,
     SK_SHIFT    = 10,
+    SK_P        = 11,
 };
 
-// Joycon → key mapping table. + is reserved for "exit the app".
+// Joycon → key mapping table for in-game (modal closed) state.
+//   - `+` sends P (standard Flash-game pause key — Mario 63 honours it).
+//   - `-` is intercepted in the worker loop (opens the pause modal); it
+//     does NOT appear here so Ruffle never sees a stray ENTER from it.
+//   - `R` covers "Press Start" prompts, the role `-` used to play.
 struct ButtonBinding {
     u64 mask;
     int key;
@@ -40,7 +48,8 @@ static const ButtonBinding BINDINGS[] = {
     { HidNpadButton_B,     SK_Z     }, // alt jump (Mario 63 uses Z)
     { HidNpadButton_X,     SK_X     }, // run / item / dive
     { HidNpadButton_Y,     SK_SHIFT }, // alt run
-    { HidNpadButton_Minus, SK_ENTER }, // "Press Start" prompts
+    { HidNpadButton_R,     SK_ENTER }, // "Press Start" prompts (was on Minus)
+    { HidNpadButton_Plus,  SK_P     }, // in-game pause key
     { HidNpadButton_L,     SK_ESCAPE},
     { HidNpadButton_Left,  SK_LEFT  },
     { HidNpadButton_Right, SK_RIGHT },
@@ -50,6 +59,15 @@ static const ButtonBinding BINDINGS[] = {
     { HidNpadButton_StickLRight, SK_RIGHT },
     { HidNpadButton_StickLUp,    SK_UP    },
     { HidNpadButton_StickLDown,  SK_DOWN  },
+};
+
+// Pause-menu items. The labels live on the Rust side (render::MENU_ITEMS);
+// here we just need the count and per-index action enum.
+enum MenuAction {
+    MENU_RESUME  = 0,
+    MENU_RESTART = 1,
+    MENU_QUIT    = 2,
+    MENU_COUNT   = 3,
 };
 
 // Viewport size — keep in sync with rust/src/lib.rs VIEWPORT_W/H.
@@ -110,13 +128,83 @@ static void worker_entry(void* /*arg*/) {
     const uint64_t tick_freq = ruffle_tick_freq();
     uint64_t last_tick = ruffle_tick_now();
 
+    // Pause-modal state. While `menu_open` is true the Ruffle frame loop is
+    // skipped (we just re-render the last Player state under the overlay)
+    // and joycon input is rerouted to menu navigation only.
+    bool menu_open = false;
+    int  menu_selection = MENU_RESUME;
+    bool quit_requested = false;
+
     while (appletMainLoop()) {
         padUpdate(&pad);
         const u64 kDown = padGetButtonsDown(&pad);
         const u64 kUp   = padGetButtonsUp(&pad);
         const u64 kHeld = padGetButtons(&pad);
 
-        if (kDown & HidNpadButton_Plus) break;
+        if (menu_open) {
+            // Menu navigation. Edge-detected so a held D-pad doesn't scroll
+            // past every entry. Press `-` again or `B` to dismiss without
+            // selecting (= Resume).
+            if (kDown & (HidNpadButton_Up | HidNpadButton_StickLUp)) {
+                menu_selection = (menu_selection + MENU_COUNT - 1) % MENU_COUNT;
+            }
+            if (kDown & (HidNpadButton_Down | HidNpadButton_StickLDown)) {
+                menu_selection = (menu_selection + 1) % MENU_COUNT;
+            }
+            if (kDown & (HidNpadButton_Minus | HidNpadButton_B)) {
+                menu_open = false;
+                // Re-measure wall clock so the resumed frame doesn't
+                // catch up by replaying the paused interval.
+                last_tick = ruffle_tick_now();
+                continue;
+            }
+            if (kDown & HidNpadButton_A) {
+                switch (menu_selection) {
+                case MENU_RESUME:
+                    menu_open = false;
+                    last_tick = ruffle_tick_now();
+                    continue;
+                case MENU_RESTART: {
+                    std::printf("menu: REDEMARRER → ruffle_restart()\n");
+                    std::fflush(stdout);
+                    if (ruffle_restart() != 0) {
+                        std::printf("menu: ruffle_restart() failed\n");
+                        std::fflush(stdout);
+                        quit_requested = true;
+                        break;
+                    }
+                    menu_open = false;
+                    last_tick = ruffle_tick_now();
+                    continue;
+                }
+                case MENU_QUIT:
+                    quit_requested = true;
+                    break;
+                }
+                if (quit_requested) break;
+            }
+
+            // Re-render the frozen game frame + cursor, then layer the menu
+            // on top, then swap. Skipping ruffle_render_frame_dt freezes AVM
+            // so the game doesn't advance.
+            ruffle_redraw_paused();
+            ruffle_draw_menu(menu_selection);
+            gl_context_swap();
+            continue;
+        }
+
+        // `-` opens the pause modal. Captured before BINDINGS so it can't
+        // also fire a key event into Ruffle.
+        if (kDown & HidNpadButton_Minus) {
+            menu_open = true;
+            menu_selection = MENU_RESUME;
+            // Release any held in-game keys so the player doesn't keep
+            // running / jumping while paused.
+            for (const auto& b : BINDINGS) {
+                if (kHeld & b.mask) ruffle_handle_key(b.key, false);
+            }
+            continue;
+        }
 
         // Keyboard-style buttons via edge detection.
         for (const auto& b : BINDINGS) {
@@ -188,6 +276,8 @@ static void worker_entry(void* /*arg*/) {
 
         ruffle_render_frame_dt(dt_us);
         gl_context_swap();
+
+        if (quit_requested) break;
     }
 
     ruffle_shutdown();
