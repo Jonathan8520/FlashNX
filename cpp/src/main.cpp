@@ -9,6 +9,8 @@ extern "C" bool gl_context_init(NWindow* win);
 extern "C" void gl_context_shutdown(void);
 extern "C" void gl_context_swap(void);
 
+extern "C" void swf_picker_run(void);
+
 extern "C" void ruffle_handle_key(int code, bool down);
 extern "C" void ruffle_handle_mouse_move(int x, int y);
 extern "C" void ruffle_handle_mouse_button(bool down);
@@ -74,6 +76,11 @@ static void worker_entry(void* /*arg*/) {
         std::printf("gl_context_init failed\n"); std::fflush(stdout);
         return;
     }
+
+    // Scan the SD card for a `.swf` and forward the path to Rust. Bypasses
+    // the Rust read_dir bug on Horizon. If nothing is found, Rust's
+    // hardcoded candidates / embedded fallback still apply.
+    swf_picker_run();
 
     if (ruffle_init() != 0) {
         std::printf("ruffle_init failed\n"); std::fflush(stdout);

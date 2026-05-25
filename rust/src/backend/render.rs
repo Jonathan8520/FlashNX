@@ -29,6 +29,7 @@
 
 use std::any::Any;
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
@@ -605,6 +606,67 @@ struct MaskState {
 
 // ─── The backend ──────────────────────────────────────────────────────────────
 
+/// Cached GL state to avoid redundant calls. On Mesa-Switch each call goes
+/// through the driver's command-buffer encoder; even if value-unchanged
+/// dispatches are cheap on PC, they're measurable on Tegra X1. Mario 63 in
+/// the worst frame (FLUDD rocket) issues ~3 shapes/frame × 5 draws each =
+/// ~15 draws/frame all on `shape_bitmap_prog` with the same atlas texture
+/// and the same wrap_mode. With this cache, only one glUseProgram +
+/// one glBindTexture per such run reaches the driver.
+///
+/// Interior mutability via `Cell` so the `use_*` helpers can keep `&self`
+/// without bubbling `&mut self` through every render path.
+#[derive(Default)]
+struct GlStateCache {
+    last_program: Cell<GLuint>,
+    last_texture: Cell<GLuint>,
+    last_wrap_mode: Cell<i32>,
+    last_vao: Cell<GLuint>,
+}
+
+impl GlStateCache {
+    /// Forget what we cached. Call at submit_frame start (after we know
+    /// any external glXxx calls have potentially mutated state) and at end
+    /// (where we reset GL to zero anyway).
+    fn invalidate(&self) {
+        self.last_program.set(0);
+        self.last_texture.set(0);
+        self.last_wrap_mode.set(-1);
+        self.last_vao.set(0);
+    }
+
+    fn use_program(&self, prog: GLuint) {
+        if self.last_program.get() != prog {
+            unsafe { glUseProgram(prog) };
+            self.last_program.set(prog);
+        }
+    }
+
+    fn bind_texture_unit0(&self, tex: GLuint) {
+        if self.last_texture.get() != tex {
+            unsafe {
+                glActiveTexture(GL_TEXTURE0);
+                glBindTexture(GL_TEXTURE_2D, tex);
+            }
+            self.last_texture.set(tex);
+        }
+    }
+
+    fn set_wrap_mode(&self, location: GLint, mode: i32) {
+        if self.last_wrap_mode.get() != mode {
+            unsafe { glUniform1i(location, mode) };
+            self.last_wrap_mode.set(mode);
+        }
+    }
+
+    fn bind_vao(&self, vao: GLuint) {
+        if self.last_vao.get() != vao {
+            unsafe { glBindVertexArray(vao) };
+            self.last_vao.set(vao);
+        }
+    }
+}
+
 pub struct SwitchRenderBackend {
     dimensions: ViewportDimensions,
     tessellator: ShapeTessellator,
@@ -613,6 +675,9 @@ pub struct SwitchRenderBackend {
     bitmap_prog: BitmapProgram,
     shape_bitmap_prog: ShapeBitmapProgram,
     gradient_prog: GradientProgram,
+
+    /// Mesa-Switch GL state cache. See `GlStateCache` docs above.
+    gl_state: GlStateCache,
 
     /// Solid unit quad (pos+rgba, 6 vertices). Used by `draw_rect`.
     rect_vao: GLuint,
@@ -1336,6 +1401,20 @@ impl SwitchRenderBackend {
         );
         let shape_vao = build_shape_arena_vao(vertex_arena.gl_id, index_arena.gl_id);
 
+        // The texture samplers `u_tex` in every program are always bound to
+        // texture unit 0. Set them once at link time so we don't have to
+        // `glUniform1i(u_tex, 0)` on every draw. Mesa caches sampler bindings
+        // per-program across glUseProgram switches, so this is permanent.
+        unsafe {
+            glUseProgram(bitmap_prog.program);
+            glUniform1i(bitmap_prog.u_tex, 0);
+            glUseProgram(shape_bitmap_prog.program);
+            glUniform1i(shape_bitmap_prog.u_tex, 0);
+            glUseProgram(gradient_prog.program);
+            glUniform1i(gradient_prog.u_tex, 0);
+            glUseProgram(0);
+        }
+
         Some(Self {
             dimensions: ViewportDimensions {
                 width,
@@ -1347,6 +1426,7 @@ impl SwitchRenderBackend {
             bitmap_prog,
             shape_bitmap_prog,
             gradient_prog,
+            gl_state: GlStateCache::default(),
             rect_vao,
             rect_vbo,
             bitmap_vao,
@@ -1399,8 +1479,8 @@ impl SwitchRenderBackend {
     }
 
     fn use_solid(&self, world: &[GLfloat; 9], mult: &[f32; 4], add: &[f32; 4]) {
+        self.gl_state.use_program(self.solid.program);
         unsafe {
-            glUseProgram(self.solid.program);
             glUniformMatrix3fv(self.solid.u_world, 1, GL_FALSE, world.as_ptr());
             glUniform4f(self.solid.u_mult, mult[0], mult[1], mult[2], mult[3]);
             glUniform4f(self.solid.u_add, add[0], add[1], add[2], add[3]);
@@ -1415,8 +1495,11 @@ impl SwitchRenderBackend {
         tex: GLuint,
         uv_remap: &[f32; 4],
     ) {
+        // Sampler binding (u_tex = 0) set once at program link; no per-draw
+        // glUniform1i(u_tex) needed here.
+        self.gl_state.use_program(self.bitmap_prog.program);
+        self.gl_state.bind_texture_unit0(tex);
         unsafe {
-            glUseProgram(self.bitmap_prog.program);
             glUniformMatrix3fv(self.bitmap_prog.u_world, 1, GL_FALSE, world.as_ptr());
             glUniform4f(self.bitmap_prog.u_mult, mult[0], mult[1], mult[2], mult[3]);
             glUniform4f(self.bitmap_prog.u_add, add[0], add[1], add[2], add[3]);
@@ -1424,9 +1507,6 @@ impl SwitchRenderBackend {
                 self.bitmap_prog.u_uv_remap,
                 uv_remap[0], uv_remap[1], uv_remap[2], uv_remap[3],
             );
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, tex);
-            glUniform1i(self.bitmap_prog.u_tex, 0);
         }
     }
 
@@ -1443,8 +1523,18 @@ impl SwitchRenderBackend {
         // Atlas texture parameters are set once at atlas creation; no per-
         // draw glTexParameteri (avoids per-frame state churn that bisection
         // on 2026-05-24 implicated in a Mario 63 driver-side issue).
+        // u_wrap_mode and u_tex sampler are routed through the GL state
+        // cache so identical-state runs of draws (very common for atlas
+        // bitmap fills) only hit the driver once.
+        self.gl_state.use_program(self.shape_bitmap_prog.program);
+        self.gl_state.bind_texture_unit0(tex);
+        // u_wrap_mode: 0 = clamp (default for non-repeating fills),
+        // 1 = fract (for tile/repeat fills like Mario 63 ground).
+        self.gl_state.set_wrap_mode(
+            self.shape_bitmap_prog.u_wrap_mode,
+            if is_repeating { 1 } else { 0 },
+        );
         unsafe {
-            glUseProgram(self.shape_bitmap_prog.program);
             glUniformMatrix3fv(self.shape_bitmap_prog.u_world, 1, GL_FALSE, world.as_ptr());
             glUniform4f(self.shape_bitmap_prog.u_mult, mult[0], mult[1], mult[2], mult[3]);
             glUniform4f(self.shape_bitmap_prog.u_add, add[0], add[1], add[2], add[3]);
@@ -1453,15 +1543,6 @@ impl SwitchRenderBackend {
                 self.shape_bitmap_prog.u_uv_remap,
                 uv_remap[0], uv_remap[1], uv_remap[2], uv_remap[3],
             );
-            // u_wrap_mode: 0 = clamp (default for non-repeating fills),
-            // 1 = fract (for tile/repeat fills like Mario 63 ground).
-            glUniform1i(
-                self.shape_bitmap_prog.u_wrap_mode,
-                if is_repeating { 1 } else { 0 },
-            );
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, tex);
-            glUniform1i(self.shape_bitmap_prog.u_tex, 0);
         }
     }
 
@@ -1476,8 +1557,9 @@ impl SwitchRenderBackend {
         spread: i32,
         focal: f32,
     ) {
+        self.gl_state.use_program(self.gradient_prog.program);
+        self.gl_state.bind_texture_unit0(tex);
         unsafe {
-            glUseProgram(self.gradient_prog.program);
             glUniformMatrix3fv(self.gradient_prog.u_world, 1, GL_FALSE, world.as_ptr());
             glUniform4f(self.gradient_prog.u_mult, mult[0], mult[1], mult[2], mult[3]);
             glUniform4f(self.gradient_prog.u_add, add[0], add[1], add[2], add[3]);
@@ -1485,9 +1567,6 @@ impl SwitchRenderBackend {
             glUniform1i(self.gradient_prog.u_grad_kind, kind);
             glUniform1i(self.gradient_prog.u_grad_spread, spread);
             glUniform1f(self.gradient_prog.u_grad_focal, focal);
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, tex);
-            glUniform1i(self.gradient_prog.u_tex, 0);
         }
     }
 
@@ -1593,6 +1672,9 @@ impl SwitchRenderBackend {
             glUseProgram(0);
             glBindVertexArray(0);
         }
+        // We just zeroed program + VAO, but the cache thinks they are still
+        // bound. Invalidate so the next frame's first draw re-binds.
+        self.gl_state.invalidate();
     }
 
     // ── Mask state machine ──
@@ -1992,6 +2074,11 @@ impl RenderBackend for SwitchRenderBackend {
             glStencilMask(0xFF);
         }
         self.mask = MaskState::default();
+        // Anything outside our render path (Ruffle internals, our own
+        // overlay path) may have touched GL state since the last frame's
+        // closing reset. Drop the cache so the first use_* below
+        // unconditionally re-binds.
+        self.gl_state.invalidate();
 
         commands.execute(self);
 
@@ -2002,6 +2089,9 @@ impl RenderBackend for SwitchRenderBackend {
             glDisable(GL_STENCIL_TEST);
             glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         }
+        // Mirror the actual GL state we just wrote so the cache stays
+        // truthful for any post-frame work (e.g. the cursor overlay).
+        self.gl_state.invalidate();
     }
 
     fn create_empty_texture(
@@ -2146,8 +2236,8 @@ impl CommandHandler for SwitchRenderBackend {
         ];
         self.bitmap_render_count = self.bitmap_render_count.wrapping_add(1);
         self.use_bitmap(&world, &mult, &add, tex, &uv_remap);
+        self.gl_state.bind_vao(self.bitmap_vao);
         unsafe {
-            glBindVertexArray(self.bitmap_vao);
             glDrawArrays(GL_TRIANGLES, 0, 6);
         }
     }
@@ -2233,8 +2323,8 @@ impl CommandHandler for SwitchRenderBackend {
             // (stride 24 bytes = 6 f32 per vertex).
             let stride_bytes = 6 * core::mem::size_of::<f32>() as GLintptr;
             let base_vertex = (draw.vbo_offset / stride_bytes) as GLint;
+            self.gl_state.bind_vao(self.shape_vao);
             unsafe {
-                glBindVertexArray(self.shape_vao);
                 glDrawElementsBaseVertex(
                     GL_TRIANGLES,
                     draw.num_indices,
@@ -2272,8 +2362,8 @@ impl CommandHandler for SwitchRenderBackend {
         const IDENT_MULT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
         const IDENT_ADD: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
         self.use_solid(&world, &IDENT_MULT, &IDENT_ADD);
+        self.gl_state.bind_vao(self.rect_vao);
         unsafe {
-            glBindVertexArray(self.rect_vao);
             glBindBuffer(GL_ARRAY_BUFFER, self.rect_vbo);
             glBufferData(
                 GL_ARRAY_BUFFER,
@@ -2299,9 +2389,9 @@ impl CommandHandler for SwitchRenderBackend {
         const IDENT_MULT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
         const IDENT_ADD: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
         self.use_solid(&world, &IDENT_MULT, &IDENT_ADD);
+        self.gl_state.bind_vao(self.line_vao);
         unsafe {
             glLineWidth(1.0);
-            glBindVertexArray(self.line_vao);
             glBindBuffer(GL_ARRAY_BUFFER, self.line_vbo);
             glBufferData(
                 GL_ARRAY_BUFFER,
@@ -2329,9 +2419,9 @@ impl CommandHandler for SwitchRenderBackend {
         const IDENT_MULT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
         const IDENT_ADD: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
         self.use_solid(&world, &IDENT_MULT, &IDENT_ADD);
+        self.gl_state.bind_vao(self.line_rect_vao);
         unsafe {
             glLineWidth(1.0);
-            glBindVertexArray(self.line_rect_vao);
             glBindBuffer(GL_ARRAY_BUFFER, self.line_rect_vbo);
             glBufferData(
                 GL_ARRAY_BUFFER,

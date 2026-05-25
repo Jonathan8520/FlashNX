@@ -18,7 +18,7 @@ mod ffi;
 mod player;
 
 use core::ffi::{c_char, c_int};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ruffle_core::events::{
     KeyDescriptor, KeyLocation, LogicalKey, MouseButton, NamedKey, PhysicalKey, PlayerEvent,
@@ -30,6 +30,7 @@ use ruffle_render::backend::RenderBackend;
 use backend::audio::SwitchAudioBackend;
 use backend::log::SwitchLogBackend;
 use backend::render::SwitchRenderBackend;
+use backend::storage::SwitchStorageBackend;
 use backend::tracing::SwitchTracingSubscriber;
 
 extern "C" {
@@ -81,6 +82,31 @@ const SWF_CANDIDATES: &[&str] = &[
     "sdmc:/ruffle/Super_Mario_63_2010.swf",
     "sdmc:/switch/ruffle/test.swf",
 ];
+
+/// Path supplied at runtime by `ruffle_set_swf_path` (Phase 2.6) — C++ scans
+/// the SD card via libnx fsdev, picks the first `.swf` it finds, and stores
+/// the absolute path here. `find_and_load_swf` consults this first so we
+/// support any filename the user drops in `sdmc:/ruffle/` without rebuilding
+/// the candidates list.
+static OVERRIDE_SWF_PATH: OnceLock<std::string::String> = OnceLock::new();
+
+/// Called from C++ (cpp/src/swf_picker.cpp) before `ruffle_init`. Copies the
+/// path into a Rust-owned String. Idempotent — only the first call sticks.
+/// Returns 0 on success, non-zero on malformed input.
+#[no_mangle]
+pub extern "C" fn ruffle_set_swf_path(path: *const c_char) -> c_int {
+    if path.is_null() {
+        return -1;
+    }
+    // SAFETY: caller (swf_picker.cpp) passes a NUL-terminated C string. We
+    // copy immediately so the caller's buffer can be freed.
+    let s = unsafe { core::ffi::CStr::from_ptr(path) };
+    let Ok(string) = s.to_str() else {
+        return -2;
+    };
+    let _ = OVERRIDE_SWF_PATH.set(std::string::String::from(string));
+    0
+}
 
 /// Embedded fallback: a 43-byte SWF that just sets a red stage background.
 /// Pulled from the upstream ruffle tree as a known-good reproducible target
@@ -141,13 +167,23 @@ pub extern "C" fn ruffle_init() -> c_int {
     };
     log(b"ruffle_init: renderer constructed\n\0");
 
+    // SharedObject persistence (Phase 2.4.bis). Stored next to the game on
+    // SD so the user can manage saves alongside the SWFs (e.g. drop in a
+    // `.sol` exported from Ruffle desktop / Flash Player on PC, or back up
+    // progression). Full layout under here is `<host>/<swf_path>/<name>.sol`
+    // — Ruffle builds that key string itself, our backend just appends
+    // `.sol` and joins with this base.
+    let storage_path = std::path::PathBuf::from("sdmc:/ruffle/saves");
+    let storage = SwitchStorageBackend::new(storage_path);
+
     let mut builder = PlayerBuilder::new()
         .with_boxed_renderer(std::boxed::Box::new(renderer) as std::boxed::Box<dyn RenderBackend>)
         .with_audio(SwitchAudioBackend::new())
         .with_log(SwitchLogBackend::new())
+        .with_storage(std::boxed::Box::new(storage))
         .with_autoplay(true)
         .with_viewport_dimensions(VIEWPORT_W, VIEWPORT_H, 1.0);
-    log(b"ruffle_init: audio backend constructed\n\0");
+    log(b"ruffle_init: audio + storage backends constructed\n\0");
 
     // Look for a SWF on the SD card. We scan each search dir in order and
     // take the first `.swf` we find. If nothing turns up, we use the
@@ -160,7 +196,16 @@ pub extern "C" fn ruffle_init() -> c_int {
                     bytes.len(),
                     path,
                 ));
-                (bytes, std::format!("file://{}", path))
+                // We can't use `file://sdmc:/...` — Ruffle's URL parser rejects
+                // "sdmc" as an IDN. SharedObject path keying derives from the
+                // movie URL, so we synthesize a stable http URL keyed by the
+                // basename. This is what Ruffle Web also does for blob URLs.
+                let basename = path
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or("movie.swf");
+                let url = std::format!("http://flashforswitch.local/{}", basename);
+                (bytes, url)
             }
             None => {
                 log_str(&std::format!(
@@ -169,7 +214,9 @@ pub extern "C" fn ruffle_init() -> c_int {
                 ));
                 (
                     EMBEDDED_FALLBACK_SWF.to_vec(),
-                    std::string::String::from("embedded://SimpleRedBackground.swf"),
+                    std::string::String::from(
+                        "http://flashforswitch.local/SimpleRedBackground.swf",
+                    ),
                 )
             }
         };
@@ -206,10 +253,24 @@ pub extern "C" fn ruffle_init() -> c_int {
     0
 }
 
-/// Try each path in `SWF_CANDIDATES` in order. Returns the first file we
-/// can successfully read. Logs each miss so the user can see which paths
-/// were tried.
+/// Try the runtime override path (set by C++ swf_picker.cpp via
+/// `ruffle_set_swf_path`) first, then fall back to `SWF_CANDIDATES`.
+/// Returns the first file we can successfully read.
 fn find_and_load_swf() -> Option<(std::vec::Vec<u8>, std::string::String)> {
+    if let Some(path) = OVERRIDE_SWF_PATH.get() {
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                log_str(&std::format!("scan: using override path {}\n", path));
+                return Some((bytes, path.clone()));
+            }
+            Err(err) => {
+                log_str(&std::format!(
+                    "scan: override path {} read failed ({}), falling back to candidates\n",
+                    path, err,
+                ));
+            }
+        }
+    }
     for path in SWF_CANDIDATES {
         match std::fs::read(path) {
             Ok(bytes) => {

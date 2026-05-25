@@ -7,6 +7,11 @@ extern "C" {
 #endif
 
 int  ruffle_init(void);
+/// Tell Ruffle which SWF path to load (instead of the hardcoded candidate
+/// list). Path string is copied into a Rust-owned buffer; caller's storage
+/// can be freed immediately. Returns 0 on success, non-zero on failure
+/// (path too long, NUL, etc.). Must be called before `ruffle_init`.
+int  ruffle_set_swf_path(const char* path);
 void ruffle_render_frame(void);
 /// Same as `ruffle_render_frame`, but the tick uses the supplied real elapsed
 /// dt (microseconds) instead of the hardcoded 1/60 fallback. Lets Ruffle's

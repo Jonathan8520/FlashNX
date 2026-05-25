@@ -1,0 +1,35 @@
+diff --git a/core/src/display_object.rs b/core/src/display_object.rs
+index 2e6e0178..c4cf84d6 100644
+--- a/core/src/display_object.rs
++++ b/core/src/display_object.rs
+@@ -2585,6 +2585,17 @@ pub trait TDisplayObject<'gc>:
+     /// Tests if a given stage position point intersects with the world bounds of this object.
+     #[no_dynamic]
+     fn hit_test_bounds(self, point: Point<Twips>) -> bool {
++        // Parity with Adobe Flash Player: a display object whose composed
++        // world transform has zero determinant (zero-scale on any axis, or
++        // degenerate skew) is not hit-testable. Without this guard, a zero-
++        // scale placeholder whose translation happens to coincide with the
++        // hit point reports a positive hit, which Mario 63 relies on NOT
++        // happening in the castle scene (#6906 — Toad NPC + ground collision
++        // checks against an offscreen placeholder MC). See the discussion at
++        // https://github.com/ruffle-rs/ruffle/issues/6906 for context.
++        if self.local_to_global_matrix().determinant().abs() <= f32::EPSILON {
++            return false;
++        }
+         self.world_bounds(BoundsMode::Engine).contains(point)
+     }
+ 
+@@ -2604,6 +2615,12 @@ pub trait TDisplayObject<'gc>:
+         point: Point<Twips>,
+         options: HitTestOptions,
+     ) -> bool {
++        // Same zero-scale guard as hit_test_bounds — see #6906. Applied here
++        // too because some hit_test_shape overrides (movie_clip, button)
++        // bypass hit_test_bounds and walk into per-shape tracing directly.
++        if self.local_to_global_matrix().determinant().abs() <= f32::EPSILON {
++            return false;
++        }
+         // Default to using bounding box.
+         (!options.contains(HitTestOptions::SKIP_INVISIBLE) || self.visible())
+             && self.hit_test_bounds(point)

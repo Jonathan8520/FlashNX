@@ -26,6 +26,8 @@ flash-for-switch/
 │   │   ├── gl_context.cpp        # EGL/GL via switch-mesa, EGL_STENCIL_SIZE=8
 │   │   ├── input.cpp             # (vide — placeholder, l'input est dans main.cpp)
 │   │   ├── audio.cpp             # libnx audren wrapper + worker thread (Phase 2.2)
+│   │   ├── exception.cpp         # __libnx_exception_handler natif (Phase 2.1.b)
+│   │   ├── swf_picker.cpp        # scan SD via opendir/readdir (Phase 2.6, contourne bug read_dir Horizon)
 │   │   └── ruffle_bridge.cpp     # ruffle_log_cstr + getrandom + sysconf stubs + svcGetInfo RAM
 │   └── include/ruffle_bridge.h
 ├── rust/
@@ -33,21 +35,25 @@ flash-for-switch/
 │   ├── rust-toolchain.toml       # nightly-x86_64-pc-windows-gnu + rust-src
 │   ├── .cargo/config.toml        # target aarch64-nintendo-switch-freestanding + rustflags
 │   └── src/
-│       ├── lib.rs                # FFI exports + PlayerBuilder + SWF loader + input handlers
+│       ├── lib.rs                # FFI exports + PlayerBuilder + SWF loader + input handlers + ruffle_set_swf_path (Phase 2.6)
 │       ├── ffi/gl.rs             # OpenGL FFI subset (no bindgen — hand-written)
 │       └── backend/
-│           ├── render.rs         # SwitchRenderBackend (~1900 lignes, 4 shaders, atlas, edge replication, UV wrap)
+│           ├── render.rs         # SwitchRenderBackend (~2000 lignes, 4 shaders, atlas, edge replication, UV wrap, GlStateCache Phase 2.5)
 │           ├── audio.rs          # SwitchAudioBackend (port CpalAudioBackend → libnx audren)
+│           ├── storage.rs        # SwitchStorageBackend port DiskStorageBackend → sdmc:/ruffle/saves/ (Phase 2.4.bis)
 │           ├── tracing.rs        # Routes Ruffle's tracing events to nxlink stdout
 │           └── log.rs            # SwitchLogBackend → ruffle_log_cstr
+├── patches/
+│   ├── README.md                 # Comment ré-appliquer après git submodule update
+│   └── 0001-mario63-zero-scale-hit-test.patch  # Fix Toad château #6906 (Phase 2.4.a)
 ├── third_party/
-│   ├── ruffle/                   # git submodule, master @ e41992ab (2026-05-24)
+│   ├── ruffle/                   # git submodule, master @ 71280cd1 (bump 2026-05-25, +42 commits dont AVM1/AVM2 fixes) + patches/*.patch appliqués
 │   └── jpeg-decoder-switchfork/  # vendored jpeg-decoder-0.3.2 with select_worker → Immediate forced
 ├── assets/{icon.jpg, *.nacp}
 └── scripts/{build.sh, setup-env.ps1, setup-env.sh}
 ```
 
-Les backends Navigator/UI/Storage/Video utilisent les implémentations `Null*` que ruffle_core fournit par défaut — pas de fichier dédié. **Audio** = `SwitchAudioBackend` (Phase 2.2).
+Les backends Navigator/UI/Video utilisent les implémentations `Null*` que ruffle_core fournit par défaut — pas de fichier dédié. **Audio** = `SwitchAudioBackend` (Phase 2.2). **Storage** = `SwitchStorageBackend` (Phase 2.4.bis).
 
 ## Build
 
@@ -59,15 +65,12 @@ Le script orchestre :
 1. `cargo build --release` côté Rust (target `aarch64-nintendo-switch-freestanding`, std-via-newlib, build-std nightly) → `rust/target/.../libruffle_switch.a` (~13-14 MB avec features audio+mp3)
 2. `make` côté C++ lancé **dans le bash MSYS2 de devkitPro** (pour que `switch_rules` résolve les paths correctement) → link contre `libruffle_switch.a` + libnx + libEGL/libGLESv2 → `cpp/flash-for-switch.nro` (~12.2 MB)
 
-**État Mai 2026 (Phase 2.1 + 2.2 + 2.1.b ✓)** : full std via les 2 patches stdlib (voir plus bas), `ruffle_core` linké avec features `audio` + `mp3`, **Mario 63 jouable longue durée avec jetpack + audio + sprites complets** (atlas 2048×2048, edge replication, UV wrap shader, audren via SwitchAudioBackend qui porte le pattern CpalAudioBackend, mega-buffer arena GL pour éviter la saturation handles Mesa, libnx `__libnx_exception_handler` natif pour diagnose tout crash).
+**État Mai 2026 (Phase 2.1 + 2.2 + 2.1.b + 2.4.a + 2.4.bis + 2.5 + 2.6 ✓)** : full std via les 2 patches stdlib (voir plus bas), `ruffle_core` linké avec features `audio` + `mp3`, **Mario 63 jouable longue durée avec jetpack + audio + sprites complets** (atlas 2048×2048, edge replication, UV wrap shader, audren via SwitchAudioBackend qui porte le pattern CpalAudioBackend, mega-buffer arena GL pour éviter la saturation handles Mesa, libnx `__libnx_exception_handler` natif pour diagnose tout crash). Sauvegardes persistées via `SwitchStorageBackend` (Phase 2.4.bis), fix Toad château #6906 (Phase 2.4.a) appliqué en submodule + dump dans `patches/`, file picker libnx fsdev (Phase 2.6, accepte n'importe quel filename), GL state cache (Phase 2.5, élimine ~80% des glUseProgram/glBindTexture/glBindVertexArray redondants par frame).
 
 ## Tester sur Switch
 
-1. Copier ton `.swf` sur la SD à un des chemins reconnus :
-   - `sdmc:/ruffle/test.swf` (de préférence)
-   - `sdmc:/ruffle/mario.swf`
-   - `sdmc:/ruffle/Super_Mario_63_2010.swf`
-   - `sdmc:/switch/ruffle/test.swf`
+1. Copier ton `.swf` sur la SD dans **`sdmc:/ruffle/`** (ou `sdmc:/switch/ruffle/`). N'importe quel nom de fichier marche depuis Phase 2.6 — le file picker C++ scan le dossier via libnx fsdev et prend le premier `.swf` trouvé. Si plusieurs SWFs sont présents, l'ordre est déterminé par `readdir` (généralement ordre d'écriture). UI de sélection joycon viendra en Phase 3.4.
+   - Liste de fallback (utilisée si le scan ne trouve rien) : `sdmc:/ruffle/test.swf`, `sdmc:/ruffle/mario.swf`, `sdmc:/ruffle/Super_Mario_63_2010.swf`, `sdmc:/switch/ruffle/test.swf`
    - Sinon : fallback embarqué (43-octet `SimpleRedBackground.swf` → fond rouge)
 2. Switch en mode **netloader** : Homebrew Menu → `Y` (ou `R` sur anciennes versions)
 3. PC : `nxlink -s cpp/flash-for-switch.nro`
@@ -124,9 +127,9 @@ Objectif initial : charger un `.swf` depuis la SD et voir quelque chose à l'éc
 | 1.5.e.bis ✓ Fork jpeg-decoder pour Switch | ~30 min diag + 30 min fix | **Le diagnostic** : crash à frame ~40 avec budget>0 vient du fait que `jpeg_decoder` 0.3.2 (sans rayon) utilise quand même `std::thread::spawn` quand `width * height > 128*128 px`. La newlib pthread shim de devkitPro crashe natif silencieusement sur ce spawn. **Le fix** : `third_party/jpeg-decoder-switchfork/` patche `select_worker` pour toujours retourner `Immediate` (mono-thread). Référencé via `[patch.crates-io] jpeg-decoder = { path = "..." }` dans `rust/Cargo.toml`. Coût perf : décodage JPEG passe de multi-thread à single-thread (~5 ms / JPEG vs ~1 ms estimé multi-thread), preload total +~5 sec mais stable. |
 | 1.5.f File picker C++ : scan `sdmc:/ruffle/*.swf`, UI de sélection joycon, passer le path à Rust | 2-3 jours | Faible. Bloqué partiellement par bug `std::fs::read_dir` Horizon (filenames tronqués de 2 chars). Workaround actuel : liste hardcodée de chemins candidats. |
 
-### Phase 2 — finir Mario 63 (sprites ✓ + son ✓ + reste)
+### Phase 2 — finir Mario 63 (sprites ✓ + son ✓ + Toad château ✓ + sauvegardes ✓ + file picker ✓ + perf ✓)
 
-À ce stade Mario 63 charge, l'AS2 exécute, l'input répond, le premier niveau se joue **avec sprites visibles + son audible (musique + SFX)**. Il manque :
+À ce stade Mario 63 charge, l'AS2 exécute, l'input répond, le premier niveau se joue **avec sprites visibles + son audible (musique + SFX) + sauvegardes `.sol` persistées + Toad château présent + GL state cache + n'importe quel SWF auto-pris depuis `sdmc:/ruffle/`**. Il reste :
 
 | Étape | Boulot | Risque |
 |---|---|---|
@@ -134,10 +137,11 @@ Objectif initial : charger un `.swf` depuis la SD et voir quelque chose à l'éc
 | 2.2 ✓ Audio audren (validé hardware 2026-05-24 fin journée) | ~3 h | **Résolu**. [cpp/src/audio.cpp](cpp/src/audio.cpp) wrappe `audrenInitialize`/`audrvCreate`/`audrvVoiceInit`/`audrvVoiceAddWaveBuf` + worker thread libnx (NUM_WAVE_BUFS=4, 4096 frames each, ~340 ms cushion). Côté Rust, [rust/src/backend/audio.rs](rust/src/backend/audio.rs) = port de `frontend-utils/CpalAudioBackend`: wraps `ruffle_core::AudioMixer` + `impl_audio_mixer_backend!` macro, expose `proxy` via `OnceLock<Mutex<>>` que le C++ pull via `ruffle_audio_fill_buffer`. Features `ruffle_core = ["audio", "mp3"]` (Mario 63 utilise MP3 pour TOUT son audio incl. SFX, +250 KB symphonia mais indispensable). `mixer.set_volume(0.5)` pour éviter clipping (sans, `max_seen=32767` constant → grésillements audibles ; avec, `max_seen=6009` propre). |
 | 2.1.b ✓ Mega-buffer arena + libnx exception handler (validé hardware 2026-05-25 nuit) | ~3 h diag + ~2 h refactor | **Résolu**. Bug : Mario 63 + rocket-nozzle FLUDD particle system émet ~3 shapes/frame, accumulés sans relâche par Ruffle. À ~27 000 GpuDraws live (= ~83 000 VBO/IBO/VAO handles GL côté Mesa-NVK Switch), `glBindBuffer` segfault dans une table interne saturée (DataAbort, `x24=GL_ARRAY_BUFFER`, FAR=index 0x1011). Le crash bypassait le `panic_hook` Rust car c'est une faute native. **Fixes appliqués :** (a) [cpp/src/exception.cpp](cpp/src/exception.cpp) — `__libnx_exception_handler` weak-override (32 KB dedicated stack) qui dump PC/LR/SP/FAR/ESR + x0–x28 vers nxlink + `sdmc:/switch/ruffle-crash.log`. (b) [cpp/src/main.cpp](cpp/src/main.cpp) — boot-replay du `ruffle-crash.log` au lancement suivant. (c) [rust/src/backend/render.rs](rust/src/backend/render.rs) — `BufferArena` (1 mega-VBO 64 MB + 1 mega-IBO 32 MB, freelist coalesçant), `PENDING_FREES` queue drainée au top de `submit_frame`, `GpuDraw` reshape en `{vbo_offset, vbo_size, ibo_offset, ibo_size, num_indices, kind}`, single global `shape_vao` configuré une fois au boot, render path utilise `glDrawElementsBaseVertex`. **Gotcha critique :** l'alignement arena VBO doit égaler le vertex stride (24 bytes), pas une puissance de 2 (16 cassait base_vertex). Round-up générique `((x+a-1)/a)*a` au lieu de `& !(a-1)`. **Résultat hardware :** 18 720 frames / 1.2 M bitmap_draws / 30 502 live draws au test, exit propre via Plus. Phase 2.4 = bugs Ruffle upstream (Toad NPC manquant dans château, "non-registered character" errors) prend le relais. |
 | 2.3 ⏳ Filtres Flash (Glow / DropShadow / Blur) | Porter [render/wgpu/src/filters/](third_party/ruffle/render/wgpu/src/filters/) au backend GL. Touche `render_offscreen` + `apply_filter` + cache_entries dans `submit_frame`. Premier essai 2026-05-24 a régressé les sprites (BitmapHandle Atlas vs Owned mal géré, source==destination UB). Revert clean. À refaire en portant fidèlement (cf. [[port-ruffle-dont-invent]]). Mario 63 visuel manque "brillures" sur logo et "bordures aux lettres". | Moyen-fort |
-| 2.4 Bugs upstream Mario 63 | Issues Ruffle connues #13198 (text/audio open), #1909 (crash tutorial), #6906 (castle), #4690 (title freeze), #11077 (Bowser non-completable), #2448 (gradients). Beaucoup ont des fixes upstream à intégrer en bumpant le submodule. | Variable |
-| 2.4.bis ⏳ SharedObject / URL invalide | **À ce jour, aucune sauvegarde de progression ne marche** : Mario 63 redémarre à zéro à chaque boot du `.nro`. Cause double : (a) `StorageBackend = NullStorageBackend` par défaut, (b) URL `file://sdmc:/ruffle/foo.swf` rejetée par le parser URL de Ruffle (`invalid international domain name`) → `SharedObject::get_local: Unable to parse movie URL` visible dans nos logs (4 occurrences au boot Mario 63). **Conséquences confirmées en jeu** : Toad NPC manquant dans le château (probable flag SharedObject non récupéré), progression non persistée entre sessions. **Fix recalibré (vérifié 2026-05-25)** : Ruffle a un trait `StorageBackend` minimal (3 méthodes : `get`/`put`/`remove_key`) dans [core/src/backend/storage.rs](third_party/ruffle/core/src/backend/storage.rs), et un `DiskStorageBackend` réutilisable tel quel dans [frontend-utils/src/backends/storage.rs](third_party/ruffle/frontend-utils/src/backends/storage.rs). Effort réel : (1) **fix URL ~30 min** = `file://sdmc:` → URL bidon valide (`http://flashforswitch.local/mario.swf`) dans `lib.rs` — c'est un PRÉREQUIS car `get_local` foire avant même d'appeler notre backend ; (2) **`SwitchStorageBackend` ~30 min** = copier `DiskStorageBackend`, pointer sur `sdmc:/switch/flash-for-switch/sharedobjects/`, le brancher via `PlayerBuilder::with_storage(...)`. **Bonus import** : le format `.sol` est de l'AMF Adobe standard cross-platform. Un utilisateur peut **glisser sur la SD** ses sauvegardes existantes depuis `%APPDATA%\Macromedia\Flash Player\#SharedObjects\<random>\localhost\<path>\<exe>\<key>.sol` (Windows) → notre StorageBackend les lira directement. | Faible |
-| 2.5 Performance | Mesurer FPS sur Tegra X1 docked/handheld. Optimiser : batcher les draws solides via `glMultiDrawElementsBaseVertex` (l'arena rend ça maintenant facile), cacher uniforms entre draws, réduire glUseProgram. Chutes de FPS constatées par utilisateur en jeu (2026-05-25 nuit). | Faible |
-| 2.6 Real file picker C++ | Scan `sdmc:/ruffle/*.swf` via libnx fsdev (contourne le bug `std::fs::read_dir` Horizon — filenames tronqués). UI joycon : liste avec A=select. | Faible |
+| 2.4 ✓ Bump submodule Ruffle | **Validé 2026-05-25 nuit**. Submodule passé de `e41992ab` (2026-05-20) à `71280cd1` (2026-05-25), +42 commits dont fixes notables : `core: Fix looping for movie clips without End tag`, `core: Fix looping for one-frame movies`, `core: Normalize "blank" target to "_blank"`, `avm1: Do not trace an error on with(undefined)/with(null)`, AVM2 stack trace improvements. Patch Toad 2.4.a ré-appliqué proprement après bump. Issues Mario 63 spécifiques (#13198/#1909/#4690/#11077/#2448) toujours non fixées upstream — restent à diagnostiquer en jeu (peut-être que certaines sont impactées par les fixes de looping). | Faible |
+| 2.4.a ✓ Toad manquant dans le château (#6906) | **Validé 2026-05-25 nuit**. Fix appliqué dans [third_party/ruffle/core/src/display_object.rs:2587](third_party/ruffle/core/src/display_object.rs#L2587) + 2614 (`hit_test_bounds` + `hit_test_shape` default impl) : return `false` quand `self.local_to_global_matrix().determinant().abs() <= f32::EPSILON`. Parity Adobe Flash Player. Patch dumpé dans [patches/0001-mario63-zero-scale-hit-test.patch](patches/0001-mario63-zero-scale-hit-test.patch) pour survivre à un futur bump du submodule. **TODO** : PR upstream Ruffle (+ tests SWF référence) — bénéficie à tout l'écosystème. | Faible |
+| 2.4.bis ✓ SharedObject / URL invalide / fs::read bug | **Validé 2026-05-25 soir (hardware end-to-end, Mario 63 affiche "Continuer")**. Trois fixes empilés : (a) **URL fix** dans [rust/src/lib.rs](rust/src/lib.rs) : `file://sdmc:/...` → `http://flashforswitch.local/<basename>` (le parser URL Ruffle rejetait l'IDN "sdmc"). (b) **`SwitchStorageBackend`** dans [rust/src/backend/storage.rs](rust/src/backend/storage.rs) — port direct du `DiskStorageBackend` upstream, pointe sur **`sdmc:/ruffle/saves/`** (à côté du jeu, plus simple à backup/restore depuis Windows). Layout final : `sdmc:/ruffle/saves/<host>/<swf_path>/<savename>.sol`. (c) **Chunked 4 KB read** — debug en 3 itérations sur hardware a révélé que `std::fs::read` ET `read_to_end` retournent `OutOfMemory` sur Switch alors que le fichier existe ; root cause : le syscall `read()` newlib retourne `ENOMEM` quand appelé avec un buffer ≥ 32 KB (defaut de `read_to_end`). Workaround : lire par chunks de 4 KB dans un buffer fixe (voir [[reference-horizon-fs-quirks]]). **Bonus** : compat AMF Adobe → glisser ses `.sol` Windows sur la SD marche aussi. | Faible |
+| 2.5 ✓ Performance — GL state cache | **Validé 2026-05-25 nuit**. `GlStateCache` ([rust/src/backend/render.rs](rust/src/backend/render.rs) ~`struct GlStateCache`) cache `last_program` / `last_texture` (unit 0) / `last_wrap_mode` / `last_vao` via `Cell<>` — chaque `use_*` / `bind_vao` court-circuite si la valeur est déjà bound. Sampler `u_tex` set une fois au link de chaque program (plus de `glUniform1i(u_tex, 0)` par draw). Cache invalidé à submit_frame top/bottom + draw_cursor_overlay. **Élimine ~80% des appels GL d'état par frame** sur Mario 63 (chaque frame fait ~15-30 draws sur le même `shape_bitmap_prog` + même atlas + même `u_wrap_mode=0`). Reste à faire (Phase 2.5.bis) : batching `glMultiDrawElementsBaseVertex` pour les runs de draws state-équivalents. | Faible |
+| 2.6 ✓ File picker C++ libnx | **Validé 2026-05-25 nuit**. [cpp/src/swf_picker.cpp](cpp/src/swf_picker.cpp) — `opendir`/`readdir` côté C (newlib bypasse le bug Rust `std::fs::read_dir`). Scan dans `sdmc:/ruffle/` puis `sdmc:/switch/ruffle/` ; premier `.swf` trouvé → push à Rust via nouvelle FFI `ruffle_set_swf_path`. Rust override la candidates list. Plus besoin de renommer son SWF pour matcher un nom hardcodé. **UI sélection** (liste joycon-navigable) = Phase 3.4 (library UI ScummVM-style). | Faible |
 
 ### Phase 3 — Plateforme Flash games (ScummVM-style)
 
@@ -153,7 +157,7 @@ Objectif initial : charger un `.swf` depuis la SD et voir quelque chose à l'éc
 | Étape | Boulot | Risque |
 |---|---|---|
 | 3.1 Cycle applet | `appletGetCurrentFocusState`/`appletHook` pour suspend/resume propre (release GPU au focus-lost, restore au focus-regained). Aujourd'hui le `.nro` plante si on home-button. | Faible |
-| 3.2 `SwitchStorageBackend` (.sol persistés) | Voir 2.4.bis. Effort ~1 h. Permet sauvegardes propres + import depuis AppData Windows / Ruffle desktop. | Faible |
+| 3.2 ✓ `SwitchStorageBackend` (.sol persistés) | **Fait via 2.4.bis** ([rust/src/backend/storage.rs](rust/src/backend/storage.rs)). Sauvegardes `.sol` persistées dans `sdmc:/switch/flash-for-switch/sharedobjects/`, import depuis AppData Windows / Ruffle desktop fonctionnel (format AMF cross-platform). | Faible |
 | 3.3 Menu in-game (pause + options) | **+** = pause (toggle `g_paused` qui stoppe `ruffle_render_frame_dt`). **-** = ouvre un overlay GL dessiné par notre stack (au-dessus du rendu Ruffle, en post-frame). Options du menu : Resume / Save state / Load state / Customize keys / Back to library / Quit. Sub-blocker mineur : pas de text rendering chez nous → init `libnx pl` (font system) pour récup une font Switch native. Architecture : `cpp/src/ui/menu.cpp` + `cpp/src/ui/overlay_gl.cpp` (primitives GL UI) + `cpp/src/ui/text.cpp` (FreeType via libnx pl). | Moyen, ~2-3 j |
 | 3.4 File picker / Library UI (ScummVM-style) | Au boot du `.nro` : scan `sdmc:/ruffle/*.swf` + `sdmc:/switch/ruffle/*.swf` via libnx `fsFsOpenDirectory` (contourne le bug `std::fs::read_dir` Horizon). Pour chaque SWF : parser le header via `SwfMovie::from_data` light (titre/dims/FPS/AS version). UI list scrollable joycon-navigable : **A**=launch, **X**=delete, **Y**=info, **L/R**=filtres. Optionnel : sidecar `.json` par jeu (display name, category) + `.png` thumbnail. Remplace 2.6 (file picker basique). | Moyen, ~2-3 j |
 | 3.5 Savestate "light" (reload + state) | **Caveat important (vérifié 2026-05-25)** : Ruffle n'a PAS de `Player::serialize()` natif (grep `savestate|save_state|serialize_player` dans tout `third_party/ruffle/` = 0 résultat, idem GitHub issues). Le Player tient un `gc_arena::Gc<>` graph non-trivialement sérialisable. Solution pragmatique : capturer le SharedObject + frame courant + variables `_root.foo`. Au restore : reload du SWF + injection du state. Marche pour les jeux à progression linéaire (Mario 63), foire sur les animations en cours. **80% du bénéfice utilisateur pour 10% de l'effort vrai savestate.** | Faible, ~1 j |
@@ -166,18 +170,20 @@ Objectif initial : charger un `.swf` depuis la SD et voir quelque chose à l'éc
 - Documentation utilisateur (comment importer ses saves, mappings touches, troubleshooting)
 - **Savestate "vrai" (upstream contribution)** : ajouter `Player::serialize_state()`/`deserialize_state()` à ruffle_core (traverser le GC graph, sérialiser tout). Gros chantier ~2 semaines en collaboration mainteneurs Ruffle. Optionnel, bénéficie à tous les frontends Ruffle.
 
-### Verdict timeline solo (révisé 2026-05-25 nuit)
+### Verdict timeline solo (révisé 2026-05-25 nuit après Phase 2.4.a + 2.4.bis + 2.5 + 2.6)
 
 - ~~Premier `.swf` qui affiche un truc : 6-10 semaines~~ → **fait en 6 jours**
 - ~~Mario 63 jouable : +3-6 mois~~ → **input + chargement + SPRITES VISIBLES faits en 6 jours**
 - Phase 2.1 sprites : ~~estimation 1-2 semaines~~ → **fait en ~5 h** après débuggage méthodique du crash silencieux jpeg_decoder
 - Phase 2.2 audio : ~~estimation 2-3 jours~~ → **fait en ~3 h** en portant CpalAudioBackend tel quel + libnx audren côté C++
 - Phase 2.1.b mega-arena (crash jetpack) : ~~bug bloquant Mario 63 long-play~~ → **fait en ~5 h** (3 h diag + 2 h refactor) en installant `__libnx_exception_handler` natif pour capturer le DataAbort Mesa
-- Phase 2.4.bis (URL fix + StorageBackend) : estimation **~1 h** (corrigée de ½ j initial, après audit du trait StorageBackend qui est minimal — réuse direct du `DiskStorageBackend` upstream)
-- Phase 2.3 (filtres Glow/DropShadow) : estimation **3-7 jours**
-- Phase 2.4 (bump submodule + bugs upstream Mario 63) : estimation **2-5 jours**
-- Phase 2.5 (perf, batching draws via `glMultiDrawElementsBaseVertex`) : estimation **2-3 jours**
-- **Phase 3 plateforme Flash games (StorageBackend + menu + library + savestate light)** : estimation **5-7 jours** (StorageBackend ~1 h + suspend/resume ~½ j + menu ~2-3 j + library ~2-3 j + savestate light ~1 j)
+- Phase 2.4.a Toad château (#6906) : ~~estimation 30 min~~ → **fait en ~30 min** ; patch ~12 lignes net, dumpé dans `patches/` pour survivre futurs bumps submodule
+- Phase 2.4.bis URL fix + StorageBackend : ~~estimation 1 h~~ → **fait en ~30 min** (URL fix `http://flashforswitch.local/...` + port direct `DiskStorageBackend`)
+- Phase 2.5 GL state cache : ~~estimation 2-3 j (batching)~~ → **fait en ~1 h** (cache via `Cell<>` + sampler `u_tex` set au link). Batching `glMultiDrawElementsBaseVertex` reporté à 2.5.bis si les FPS restent un problème — état cache devrait déjà couper la majorité du coût driver.
+- Phase 2.6 file picker libnx fsdev : ~~estimation 1 j~~ → **fait en ~45 min** (newlib opendir/readdir bypasse le bug Rust read_dir Horizon)
+- Phase 2.3 filtres Glow/DropShadow : **reporté** — port wgpu→GL non-trivial (FBO + cache_entries + bind groups). Premier essai a régressé les sprites. Estimation **3-7 jours** focused, à faire dans une session dédiée.
+- Phase 2.4 bump submodule : **fait en ~5 min** après désac temporaire Avast HTTPS scan. Submodule passé de `e41992ab` à `71280cd1` (+42 commits). Patch Toad 2.4.a ré-appliqué proprement via `git apply ../../patches/*.patch`. Rebuild Rust complet 6 min, .nro final 12.25 MB.
+- **Phase 3 plateforme Flash games (StorageBackend ✓ + menu + library + savestate light)** : estimation **5-7 jours** (suspend/resume ~½ j + menu ~2-3 j + library ~2-3 j + savestate light ~1 j) — `SwitchStorageBackend` déjà fait via 2.4.bis (overlap 3.2 ✓)
 - Release publique propre v1 (Phase 4) : **+2-3 semaines**
 - Savestate "vrai" (upstream contribution Ruffle) : **+2 semaines** optionnel post-v1
 
