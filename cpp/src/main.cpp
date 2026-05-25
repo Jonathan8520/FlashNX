@@ -204,6 +204,24 @@ int main(int argc, char** argv) {
 
     std::printf("flash-for-switch: starting\n"); std::fflush(stdout);
 
+    // CpuBoostMode FastLoad — Mario 63 is bottlenecked by Ruffle's AVM1
+    // bytecode interpreter on the Cortex-A57 (Tegra X1, 1.02 GHz handheld /
+    // 1.78 GHz docked). Profiling on hardware (2026-05-25 soir) showed
+    // tick=50ms/frame vs render=5ms/frame in heavy scenes → CPU-bound, not
+    // GPU. `FastLoad` (libnx name for "Type1") boosts CPU clocks and
+    // throttles the GPU to minimum, which we can afford — our render is
+    // < 5ms even worst case. Within stock clock specs; same API Nintendo's
+    // own titles use for loading screens. No hardware risk.
+    {
+        Result rc = appletSetCpuBoostMode(ApmCpuBoostMode_FastLoad);
+        if (R_FAILED(rc)) {
+            std::printf("appletSetCpuBoostMode(FastLoad) failed: 0x%x (continuing)\n", rc);
+        } else {
+            std::printf("appletSetCpuBoostMode(FastLoad) OK — CPU prioritized over GPU\n");
+        }
+        std::fflush(stdout);
+    }
+
     // Boot-replay: if the previous launch crashed (Rust panic OR native
     // exception), its dump was appended to sdmc:/switch/ruffle-crash.log
     // by either the panic hook or the libnx exception handler. We print
@@ -229,7 +247,11 @@ int main(int argc, char** argv) {
 
     // Spawn the Ruffle worker with a 32 MB stack. NULL stack_mem → libnx
     // allocates from heap, so we don't bloat .nro BSS. Priority 0x2C is the
-    // same as the default main thread; cpuid=-2 lets the kernel choose.
+    // libnx default; bumping it to 0x20 was tested 2026-05-25 soir and
+    // produced no measurable FPS improvement (the Switch isn't loaded with
+    // competing threads, so priority doesn't help). cpuid=-2 lets the
+    // kernel pick the least-loaded core. The CpuBoostMode_FastLoad set
+    // above is the perf lever that actually moved the needle.
     Thread t;
     Result rc = threadCreate(&t, worker_entry, nullptr,
                               nullptr, 32 * 1024 * 1024,

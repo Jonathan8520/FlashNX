@@ -40,7 +40,20 @@ extern "C" {
     /// sleeps ~150 ms so the TCP buffer drains before abort() races us. Used
     /// only from the panic hook.
     fn ruffle_crash_dump(msg: *const c_char);
+    /// Monotonic system tick counter (armGetSystemTick). Used to profile
+    /// tick() vs render() time per frame.
+    fn ruffle_tick_now() -> u64;
+    /// System tick frequency in Hz (~19.2 MHz on Switch).
+    fn ruffle_tick_freq() -> u64;
 }
+
+/// Per-frame tick/render time accumulators. Cleared by the render backend's
+/// heartbeat code once per 60 frames. Stored as system-tick counts (not
+/// ns/us) so we don't lose precision on each frame's addition.
+pub(crate) static TICK_TICKS_ACCUM: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub(crate) static RENDER_TICKS_ACCUM: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// Snapshot of process RAM in bytes (used, total). Returns (0,0) if the
 /// underlying svcGetInfo call fails.
@@ -309,8 +322,18 @@ fn render_frame_with_dt(dt: FloatDuration) {
         Ok(p) => p,
         Err(_) => return,
     };
+    // Profile tick (AVM1 advance + game logic + filter cache) vs render
+    // (our backend dispatch: shape/bitmap/gradient draws to GL) so the
+    // heartbeat in render.rs can show the breakdown — tells us whether
+    // CPU (AVM) or GPU (draws) is the perf bottleneck in any given scene.
+    use std::sync::atomic::Ordering;
+    let t0 = unsafe { ruffle_tick_now() };
     player.tick(dt);
+    let t1 = unsafe { ruffle_tick_now() };
     player.render();
+    let t2 = unsafe { ruffle_tick_now() };
+    TICK_TICKS_ACCUM.fetch_add(t1.saturating_sub(t0), Ordering::Relaxed);
+    RENDER_TICKS_ACCUM.fetch_add(t2.saturating_sub(t1), Ordering::Relaxed);
 
     // Overlay the cursor crosshair on top of whatever Ruffle drew. We pull
     // a `&mut SwitchRenderBackend` out of the Player by downcasting the

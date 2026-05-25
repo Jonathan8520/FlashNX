@@ -248,6 +248,10 @@ use crate::query_ram;
 
 extern "C" {
     fn ruffle_log_cstr(msg: *const core::ffi::c_char);
+    /// Monotonic tick counter (armGetSystemTick). Used for FPS heartbeat.
+    fn ruffle_tick_now() -> u64;
+    /// Tick frequency in Hz (~19.2 MHz on Switch). Constant after boot.
+    fn ruffle_tick_freq() -> u64;
 }
 
 fn log(nul_terminated: &[u8]) {
@@ -705,6 +709,16 @@ pub struct SwitchRenderBackend {
     bitmaps_registered: u32,
     bitmap_draws_emitted: u32,
     bitmap_render_count: u32,
+    /// System tick at the start of the current heartbeat window (60 frames).
+    /// Set to 0 on first heartbeat; FPS measurement skipped until we have
+    /// two samples to subtract. Uses `armGetSystemTick` for high resolution
+    /// — at ~19.2 MHz a 60-frame window resolves ~50 ns granularity, way
+    /// better than what FPS measurement needs.
+    heartbeat_tick: u64,
+    /// Number of GL draw calls (glDrawElements*/glDrawArrays) emitted since
+    /// the last heartbeat. Helps correlate FPS drops with draw-call count
+    /// — if it spikes from ~30 to ~300, the next perf step is batching.
+    draw_calls_this_window: u32,
     /// How many times Ruffle has called `render_offscreen` since boot —
     /// non-zero means something on stage uses `cacheAsBitmap` or a filter.
     /// Logged every heartbeat so we can correlate spikes with crashes.
@@ -1441,6 +1455,8 @@ impl SwitchRenderBackend {
             shapes_registered: 0,
             bitmaps_registered: 0,
             bitmap_draws_emitted: 0,
+            heartbeat_tick: 0,
+            draw_calls_this_window: 0,
             render_offscreen_calls: 0,
             apply_filter_calls: 0,
             filters_seen_mask: AtomicU16::new(0),
@@ -1994,6 +2010,47 @@ impl RenderBackend for SwitchRenderBackend {
         // malloc. It barely moves, so a 99% ratio at boot is normal and the
         // warning fired every 30 frames for nothing. Removed.
         if self.frame_count % 60 == 0 {
+            // Wall-clock FPS over the last 60-frame window. armGetSystemTick
+            // runs at ~19.2 MHz so the resolution is ~50 ns — way more than
+            // FPS needs. We log "—" on the very first heartbeat since we
+            // don't have a previous tick to subtract from.
+            let now_tick = unsafe { ruffle_tick_now() };
+            let tick_freq = unsafe { ruffle_tick_freq() };
+            let fps_str = if self.heartbeat_tick != 0 && tick_freq > 0 {
+                let dt_ticks = now_tick.saturating_sub(self.heartbeat_tick);
+                if dt_ticks > 0 {
+                    // 60 frames over `dt_ticks` ticks at `tick_freq` Hz =
+                    // 60 * tick_freq / dt_ticks frames per second. Multiply
+                    // by 10 then format as "X.Y" to get one decimal place
+                    // without pulling in float formatting.
+                    let fps_x10 = (60u64 * tick_freq * 10) / dt_ticks;
+                    std::format!("{}.{}", fps_x10 / 10, fps_x10 % 10)
+                } else {
+                    std::string::String::from("inf")
+                }
+            } else {
+                std::string::String::from("—")
+            };
+            self.heartbeat_tick = now_tick;
+            // Read + clear the tick/render time accumulators populated by
+            // render_frame_with_dt in lib.rs. Convert from system ticks
+            // (~19.2 MHz) to milliseconds across the 60-frame window. Mean
+            // per-frame time = total_ms / 60. Helps localise the bottleneck:
+            //   tick=high render=low → AVM1/game-logic CPU bound
+            //   tick=low  render=high → GL/draw-call bound
+            //   tick=high render=high → both contribute (shape register etc)
+            let tick_total_ticks = crate::TICK_TICKS_ACCUM.swap(0, Ordering::Relaxed);
+            let render_total_ticks = crate::RENDER_TICKS_ACCUM.swap(0, Ordering::Relaxed);
+            let (tick_ms, render_ms) = if tick_freq > 0 {
+                (
+                    (tick_total_ticks * 1000) / tick_freq,
+                    (render_total_ticks * 1000) / tick_freq,
+                )
+            } else {
+                (0, 0)
+            };
+            let draw_calls = self.draw_calls_this_window;
+            self.draw_calls_this_window = 0;
             let (ram_used, ram_total) = query_ram();
             let live_s = LIVE_GPU_SHAPES.load(Ordering::Relaxed);
             let live_d = LIVE_GPU_DRAWS.load(Ordering::Relaxed);
@@ -2004,8 +2061,12 @@ impl RenderBackend for SwitchRenderBackend {
             let v_frag = self.vertex_arena.free.len();
             let i_frag = self.index_arena.free.len();
             let msg = std::format!(
-                "f{}: shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) bitmaps={} atlases={} bitmap_draws={} offscreen={} filter={} ram={}MB/{}MB\n",
+                "f{}: fps={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) bitmaps={} atlases={} bitmap_draws={} offscreen={} filter={} ram={}MB/{}MB\n",
                 self.frame_count,
+                fps_str,
+                tick_ms,
+                render_ms,
+                draw_calls,
                 self.shapes_registered,
                 live_s,
                 live_d,
@@ -2237,6 +2298,7 @@ impl CommandHandler for SwitchRenderBackend {
         self.bitmap_render_count = self.bitmap_render_count.wrapping_add(1);
         self.use_bitmap(&world, &mult, &add, tex, &uv_remap);
         self.gl_state.bind_vao(self.bitmap_vao);
+        self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
         unsafe {
             glDrawArrays(GL_TRIANGLES, 0, 6);
         }
@@ -2324,6 +2386,7 @@ impl CommandHandler for SwitchRenderBackend {
             let stride_bytes = 6 * core::mem::size_of::<f32>() as GLintptr;
             let base_vertex = (draw.vbo_offset / stride_bytes) as GLint;
             self.gl_state.bind_vao(self.shape_vao);
+            self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
             unsafe {
                 glDrawElementsBaseVertex(
                     GL_TRIANGLES,
@@ -2363,6 +2426,7 @@ impl CommandHandler for SwitchRenderBackend {
         const IDENT_ADD: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
         self.use_solid(&world, &IDENT_MULT, &IDENT_ADD);
         self.gl_state.bind_vao(self.rect_vao);
+        self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
         unsafe {
             glBindBuffer(GL_ARRAY_BUFFER, self.rect_vbo);
             glBufferData(
@@ -2390,6 +2454,7 @@ impl CommandHandler for SwitchRenderBackend {
         const IDENT_ADD: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
         self.use_solid(&world, &IDENT_MULT, &IDENT_ADD);
         self.gl_state.bind_vao(self.line_vao);
+        self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
         unsafe {
             glLineWidth(1.0);
             glBindBuffer(GL_ARRAY_BUFFER, self.line_vbo);
@@ -2420,6 +2485,7 @@ impl CommandHandler for SwitchRenderBackend {
         const IDENT_ADD: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
         self.use_solid(&world, &IDENT_MULT, &IDENT_ADD);
         self.gl_state.bind_vao(self.line_rect_vao);
+        self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
         unsafe {
             glLineWidth(1.0);
             glBindBuffer(GL_ARRAY_BUFFER, self.line_rect_vbo);
