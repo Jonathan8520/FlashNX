@@ -96,6 +96,45 @@ Le Makefile a `libruffle_switch.a` comme dépendance explicite du `.elf`, donc t
 
 Dans le menu pause : D-pad/stick haut-bas pour naviguer, **A** valide, **B** ou **Minus** referme sans rien faire. « QUITTER » sort vers le Homebrew Menu, « REDEMARRER » recharge le SWF depuis zéro (conserve les sauvegardes `.sol`).
 
+## Customisation des touches (keymap JSON)
+
+Les mappings ci-dessus sont les **valeurs par défaut**, biaisées Mario 63 (Z/X/Shift = convention platformer Flash). Tu peux les rebinder par jeu ou globalement en éditant un fichier JSON sur la SD.
+
+**Hiérarchie de lookup** (premier hit gagne) :
+1. `sdmc:/ruffle/<basename>.keymap.json` — override par jeu (ex. `sdmc:/ruffle/Super_Mario_63_2010.swf.keymap.json`)
+2. `sdmc:/ruffle/keymap_default.json` — default global choisi par toi
+3. Fallback hardcodé dans le `.nro` — la table ci-dessus
+
+Au premier boot, si `keymap_default.json` n'existe pas, le `.nro` l'écrit avec le fallback hardcodé — ouvre-le dans Notepad pour voir le schema et adapter.
+
+**Schema** (exemple) :
+```json
+{
+  "version": 1,
+  "bindings": {
+    "A": "Space",
+    "B": "Z",
+    "X": "X",
+    "Y": "Shift",
+    "L": "Escape",
+    "R": "Enter",
+    "Plus": "P",
+    "Up": "Up", "Down": "Down", "Left": "Left", "Right": "Right",
+    "StickLUp": "Up", "StickLDown": "Down", "StickLLeft": "Left", "StickLRight": "Right"
+  }
+}
+```
+
+**Noms de boutons Switch supportés** : `A`, `B`, `X`, `Y`, `L`, `R`, `ZL`, `Plus`, `Up`/`Down`/`Left`/`Right` (D-pad), `StickLUp`/`StickLDown`/`StickLLeft`/`StickLRight` (stick gauche directionnel). Boutons absents = unbound. `Minus` est réservé pour le menu pause et ne peut pas être remappé.
+
+**Noms de touches Flash supportées** : `Space`, `Enter`, `Escape`, `Up`/`Down`/`Left`/`Right`, `Z`, `X`, `Shift`, `P`. D'autres lettres/touches à demander.
+
+**Vérification** : à chaque boot le `.nro` logue via nxlink la résolution finale (`keymap: resolved 15 bindings: A=1 B=8 ...`) — utile pour confirmer que ton fichier est bien pris en compte.
+
+**Exemple use case** : un jeu utilise Q/W/E au lieu de Z/X/Shift → tu crées un sidecar `sdmc:/ruffle/MonJeu.swf.keymap.json` avec ces bindings spécifiques sans toucher au default global qui reste sur Mario 63.
+
+UI in-game wizard pour remap sans toucher au JSON = prévu en Phase 3.3 suite.
+
 ## Roadmap
 
 ### Phase 0 — fondation validée ✓ (2026-05-20)

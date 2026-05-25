@@ -15,6 +15,8 @@
 
 mod backend;
 mod ffi;
+mod keymap;
+mod menu;
 mod player;
 
 use core::ffi::{c_char, c_int};
@@ -218,6 +220,17 @@ pub extern "C" fn ruffle_init() -> c_int {
     // subsequent ruffle_init invocations (e.g. menu REDEMARRER) skip the
     // expensive `std::fs::read` — see CACHED_SWF docs for the OOM reason.
     let (movie_bytes, source_label) = ensure_swf_loaded();
+
+    // Load the user's keymap (sidecar → default → hardcoded fallback). Uses
+    // the SWF basename to find a per-game sidecar like
+    // `sdmc:/ruffle/Super_Mario_63_2010.swf.keymap.json`. Idempotent across
+    // restarts so REDEMARRER doesn't reload a different keymap mid-session.
+    let basename = source_label
+        .rsplit('/')
+        .next()
+        .unwrap_or("unknown.swf");
+    keymap::init_for_swf(basename);
+
     match SwfMovie::from_data(movie_bytes, source_label.clone(), None) {
         Ok(movie) => {
             log_str(&std::format!(
@@ -442,21 +455,100 @@ pub extern "C" fn ruffle_restart() -> c_int {
     ruffle_init()
 }
 
+/// Look up the Flash key bound to a Switch button by NAME (e.g. "A",
+/// "StickLLeft"). Called from C++ once per binding at boot to fill its
+/// runtime BINDINGS array. Returns the matching SK_* code, or `SK_NONE` if
+/// the button is unbound in the active keymap. The name must be one of the
+/// values listed in `keymap::FALLBACK_BINDINGS` (case sensitive). Caller
+/// passes a NUL-terminated UTF-8 C string.
+#[no_mangle]
+pub extern "C" fn ruffle_keymap_lookup(name: *const c_char) -> c_int {
+    if name.is_null() {
+        return SK_NONE;
+    }
+    // SAFETY: caller guarantees NUL-terminated UTF-8.
+    let s = unsafe { core::ffi::CStr::from_ptr(name) };
+    let Ok(button) = s.to_str() else {
+        return SK_NONE;
+    };
+    keymap::lookup(button).unwrap_or(SK_NONE)
+}
+
+// ── TOUCHES sub-screen FFI ────────────────────────────────────────────────
+//
+// Thin wrappers over `menu::*`. C++ owns the pause-main modal (Reprendre /
+// Touches / Redemarrer / Quitter); when the user picks "Touches", it calls
+// `ruffle_touches_open` and from then on forwards joycon down-edges via
+// `ruffle_touches_input` until `ruffle_touches_active` returns 0 again
+// (user pressed B to back out). Each frame, C++ calls `ruffle_touches_draw`
+// over the frozen-game backdrop, then `ruffle_touches_consume_dirty` to
+// know whether to refresh its runtime BINDINGS table.
+
+#[no_mangle]
+pub extern "C" fn ruffle_touches_open() {
+    menu::open();
+}
+
+#[no_mangle]
+pub extern "C" fn ruffle_touches_close() {
+    menu::close();
+}
+
+#[no_mangle]
+pub extern "C" fn ruffle_touches_active() -> c_int {
+    if menu::is_active() { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn ruffle_touches_input(button_name: *const c_char) -> c_int {
+    if button_name.is_null() {
+        return 0;
+    }
+    let s = unsafe { core::ffi::CStr::from_ptr(button_name) };
+    let Ok(b) = s.to_str() else { return 0 };
+    if menu::input(b) { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn ruffle_touches_consume_dirty() -> c_int {
+    if menu::consume_dirty() { 1 } else { 0 }
+}
+
+/// Render the active TOUCHES screen on top of whatever's already in the
+/// framebuffer. No-op when the sub-screen is inactive. Caller should call
+/// `ruffle_redraw_paused` first so a frozen game frame sits underneath.
+#[no_mangle]
+pub extern "C" fn ruffle_touches_draw() {
+    let state = unsafe {
+        match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
+            Some(s) => s,
+            None => return,
+        }
+    };
+    let Ok(mut player) = state.player.lock() else { return };
+    let renderer = player.renderer_mut();
+    if let Some(backend) =
+        <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(renderer)
+    {
+        menu::draw(backend);
+    }
+}
+
 /// Switch button codes shared with `cpp/src/main.cpp`. Keep these in sync.
 /// We map joycon → Flash key events; Mario 63 (and most AS2 Flash games)
 /// use Space/Z for jump, Enter for start, arrows for movement.
-const SK_NONE: c_int = 0;
-const SK_SPACE: c_int = 1;
-const SK_ENTER: c_int = 2;
-const SK_ESCAPE: c_int = 3;
-const SK_LEFT: c_int = 4;
-const SK_RIGHT: c_int = 5;
-const SK_UP: c_int = 6;
-const SK_DOWN: c_int = 7;
-const SK_Z: c_int = 8;
-const SK_X: c_int = 9;
-const SK_SHIFT: c_int = 10;
-const SK_P: c_int = 11;
+pub(crate) const SK_NONE: c_int = 0;
+pub(crate) const SK_SPACE: c_int = 1;
+pub(crate) const SK_ENTER: c_int = 2;
+pub(crate) const SK_ESCAPE: c_int = 3;
+pub(crate) const SK_LEFT: c_int = 4;
+pub(crate) const SK_RIGHT: c_int = 5;
+pub(crate) const SK_UP: c_int = 6;
+pub(crate) const SK_DOWN: c_int = 7;
+pub(crate) const SK_Z: c_int = 8;
+pub(crate) const SK_X: c_int = 9;
+pub(crate) const SK_SHIFT: c_int = 10;
+pub(crate) const SK_P: c_int = 11;
 
 fn key_descriptor(code: c_int) -> Option<KeyDescriptor> {
     let (physical, logical) = match code {

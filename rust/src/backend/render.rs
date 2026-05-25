@@ -55,9 +55,9 @@ use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 /// Pause-menu labels rendered by `draw_menu_overlay`. C++ maps the selected
-/// index from this slice to an action (Resume / Restart / Quit). Keep the
-/// order in sync with the `MENU_*` constants in `cpp/src/main.cpp`.
-pub const MENU_ITEMS: &[&str] = &["REPRENDRE", "REDEMARRER", "QUITTER"];
+/// index from this slice to an action (Resume / Touches / Restart / Quit).
+/// Keep the order in sync with the `MENU_*` constants in `cpp/src/main.cpp`.
+pub const MENU_ITEMS: &[&str] = &["REPRENDRE", "TOUCHES", "REDEMARRER", "QUITTER"];
 
 /// 5×7 pixel glyphs for the pause menu. ASCII art keeps the data
 /// hand-editable: each row is exactly 5 chars wide, ' ' = off, anything
@@ -1922,6 +1922,228 @@ impl SwitchRenderBackend {
         self.draw_text(
             help_x,
             help_y,
+            HELP_SCALE,
+            help,
+            swf::Color::from_rgb(0x99AABB, 255),
+        );
+
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
+    /// TOUCHES list screen — the keymap editor. Shows up to `visible_rows`
+    /// entries of `bindings` (Switch-button name + current Flash-key
+    /// binding) starting at `scroll_offset`. The row at `selection` is
+    /// highlighted in amber with a `>` cursor.
+    pub fn draw_touches_list(
+        &mut self,
+        selection: usize,
+        scroll_offset: usize,
+        bindings: &[(&str, Option<std::string::String>)],
+        visible_rows: usize,
+    ) {
+        unsafe {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_STENCIL_TEST);
+        }
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+
+        // Same backdrop + panel framing as the pause menu — visually links
+        // the two screens.
+        let backdrop = Matrix {
+            a: vw, b: 0.0, c: 0.0, d: vh,
+            tx: swf::Twips::from_pixels(0.0),
+            ty: swf::Twips::from_pixels(0.0),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x80_00_00_00), backdrop);
+
+        const PANEL_W: f32 = 720.0;
+        const PANEL_H: f32 = 600.0;
+        let panel_x = (vw - PANEL_W) * 0.5;
+        let panel_y = (vh - PANEL_H) * 0.5;
+        let panel = Matrix {
+            a: PANEL_W, b: 0.0, c: 0.0, d: PANEL_H,
+            tx: swf::Twips::from_pixels(panel_x as f64),
+            ty: swf::Twips::from_pixels(panel_y as f64),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_14_20_38), panel);
+        <Self as CommandHandler>::draw_line_rect(
+            self,
+            swf::Color::from_rgb(0xFFFFFF, 255),
+            panel,
+        );
+
+        // Title.
+        const TITLE_SCALE: f32 = 4.0;
+        let title = "TOUCHES";
+        let title_w = self.measure_text(title, TITLE_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - title_w) * 0.5,
+            panel_y + 25.0,
+            TITLE_SCALE,
+            title,
+            swf::Color::from_rgb(0xFFFFFF, 255),
+        );
+
+        // Rows.
+        const ROW_SCALE: f32 = 3.0;
+        const ROW_SPACING: f32 = 50.0;
+        let rows_top_y = panel_y + 130.0;
+        let rows_left_x = panel_x + 80.0;
+        // Right column = binding value, aligned to a fixed x.
+        let value_col_x = panel_x + 360.0;
+
+        let total = bindings.len();
+        let end = (scroll_offset + visible_rows).min(total);
+        for (visible_idx, abs_idx) in (scroll_offset..end).enumerate() {
+            let (btn, binding) = &bindings[abs_idx];
+            let y = rows_top_y + visible_idx as f32 * ROW_SPACING;
+            let is_sel = abs_idx == selection;
+            let color = if is_sel {
+                swf::Color::from_rgb(0xFFD740, 255) // amber
+            } else {
+                swf::Color::from_rgb(0xCCCCCC, 255)
+            };
+            if is_sel {
+                self.draw_text(rows_left_x - 30.0, y, ROW_SCALE, ">", color);
+            }
+            self.draw_text(rows_left_x, y, ROW_SCALE, btn, color);
+            let value_str = binding
+                .as_deref()
+                .unwrap_or("(aucune)");
+            // Brackets around the value to suggest "editable field".
+            let bracketed = std::format!("[ {} ]", value_str);
+            self.draw_text(value_col_x, y, ROW_SCALE, &bracketed, color);
+        }
+
+        // Scroll indicator on the right edge if the list is longer than
+        // what's visible.
+        if total > visible_rows {
+            let bar_x = panel_x + PANEL_W - 30.0;
+            let bar_top_y = rows_top_y;
+            let bar_h_total = visible_rows as f32 * ROW_SPACING;
+            let bar_h_thumb = (bar_h_total * visible_rows as f32 / total as f32).max(20.0);
+            let progress = scroll_offset as f32 / (total - visible_rows) as f32;
+            let thumb_y = bar_top_y + (bar_h_total - bar_h_thumb) * progress;
+            // Bar track (faint).
+            let track = Matrix {
+                a: 4.0, b: 0.0, c: 0.0, d: bar_h_total,
+                tx: swf::Twips::from_pixels(bar_x as f64),
+                ty: swf::Twips::from_pixels(bar_top_y as f64),
+            };
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x40_99AABB), track);
+            // Thumb.
+            let thumb = Matrix {
+                a: 4.0, b: 0.0, c: 0.0, d: bar_h_thumb,
+                tx: swf::Twips::from_pixels(bar_x as f64),
+                ty: swf::Twips::from_pixels(thumb_y as f64),
+            };
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), thumb);
+        }
+
+        // Footer.
+        const HELP_SCALE: f32 = 2.0;
+        let help = "A:EDITER   B:RETOUR   HAUT/BAS:NAV";
+        let help_w = self.measure_text(help, HELP_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - help_w) * 0.5,
+            panel_y + PANEL_H - 40.0,
+            HELP_SCALE,
+            help,
+            swf::Color::from_rgb(0x99AABB, 255),
+        );
+
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
+    /// TOUCHES dropdown — shown when the user presses A on a list row. Lists
+    /// the available Flash-key options; A on a row commits, B cancels.
+    pub fn draw_touches_dropdown(
+        &mut self,
+        button_name: &str,
+        selection: usize,
+        options: &[&str],
+    ) {
+        unsafe {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_STENCIL_TEST);
+        }
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+
+        // Full-screen dim (slightly deeper than the list backdrop so the
+        // dropdown reads as a modal-over-modal).
+        let backdrop = Matrix {
+            a: vw, b: 0.0, c: 0.0, d: vh,
+            tx: swf::Twips::from_pixels(0.0),
+            ty: swf::Twips::from_pixels(0.0),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xB0_00_00_00), backdrop);
+
+        const PANEL_W: f32 = 480.0;
+        let row_h: f32 = 40.0;
+        let panel_h = 130.0 + options.len() as f32 * row_h + 60.0;
+        let panel_x = (vw - PANEL_W) * 0.5;
+        let panel_y = (vh - panel_h) * 0.5;
+        let panel = Matrix {
+            a: PANEL_W, b: 0.0, c: 0.0, d: panel_h,
+            tx: swf::Twips::from_pixels(panel_x as f64),
+            ty: swf::Twips::from_pixels(panel_y as f64),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_14_20_38), panel);
+        <Self as CommandHandler>::draw_line_rect(
+            self,
+            swf::Color::from_rgb(0xFFFFFF, 255),
+            panel,
+        );
+
+        // Title: "A → ?" (Switch button → which Flash key).
+        const TITLE_SCALE: f32 = 3.0;
+        let title = std::format!("{} ->", button_name);
+        let title_w = self.measure_text(&title, TITLE_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - title_w) * 0.5,
+            panel_y + 25.0,
+            TITLE_SCALE,
+            &title,
+            swf::Color::from_rgb(0xFFFFFF, 255),
+        );
+
+        // Options.
+        const OPT_SCALE: f32 = 2.5;
+        let opts_top_y = panel_y + 110.0;
+        let opts_left_x = panel_x + 100.0;
+        for (i, opt) in options.iter().enumerate() {
+            let y = opts_top_y + i as f32 * row_h;
+            let is_sel = i == selection;
+            let color = if is_sel {
+                swf::Color::from_rgb(0xFFD740, 255)
+            } else {
+                swf::Color::from_rgb(0xCCCCCC, 255)
+            };
+            if is_sel {
+                self.draw_text(opts_left_x - 30.0, y, OPT_SCALE, ">", color);
+            }
+            self.draw_text(opts_left_x, y, OPT_SCALE, opt, color);
+        }
+
+        // Footer.
+        const HELP_SCALE: f32 = 2.0;
+        let help = "A:OK   B:ANNULER";
+        let help_w = self.measure_text(help, HELP_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - help_w) * 0.5,
+            panel_y + panel_h - 35.0,
             HELP_SCALE,
             help,
             swf::Color::from_rgb(0x99AABB, 255),

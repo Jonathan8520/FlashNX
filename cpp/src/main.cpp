@@ -17,6 +17,13 @@ extern "C" void ruffle_handle_mouse_button(bool down);
 extern "C" void ruffle_redraw_paused(void);
 extern "C" void ruffle_draw_menu(int selected);
 extern "C" int  ruffle_restart(void);
+extern "C" int  ruffle_keymap_lookup(const char* button_name);
+extern "C" void ruffle_touches_open(void);
+extern "C" void ruffle_touches_close(void);
+extern "C" int  ruffle_touches_active(void);
+extern "C" int  ruffle_touches_input(const char* button_name);
+extern "C" int  ruffle_touches_consume_dirty(void);
+extern "C" void ruffle_touches_draw(void);
 
 // Switch key codes (must match SK_* constants in rust/src/lib.rs).
 enum SwitchKey {
@@ -34,40 +41,96 @@ enum SwitchKey {
     SK_P        = 11,
 };
 
-// Joycon → key mapping table for in-game (modal closed) state.
-//   - `+` sends P (standard Flash-game pause key — Mario 63 honours it).
-//   - `-` is intercepted in the worker loop (opens the pause modal); it
-//     does NOT appear here so Ruffle never sees a stray ENTER from it.
-//   - `R` covers "Press Start" prompts, the role `-` used to play.
+// Joycon → key mapping is now driven by the user-editable keymap on SD:
+// `sdmc:/ruffle/<basename>.keymap.json` (per-game) → `sdmc:/ruffle/keymap_default.json`
+// (global) → hardcoded fallback in rust/src/keymap.rs. We declare every
+// joycon button we COULD bind here (name + mask); at boot we ask Rust which
+// Flash SK_* each name resolves to, and populate the runtime BINDINGS array.
+//
+// Unbound buttons stay in the table with key=SK_NONE and are skipped in the
+// input loop. `Minus` is intentionally absent — it's reserved by the
+// runtime for the pause menu and cannot be remapped.
 struct ButtonBinding {
-    u64 mask;
-    int key;
+    const char* name;  // matches keymap JSON key strings
+    u64         mask;
+    int         key;   // populated at boot via ruffle_keymap_lookup
 };
-static const ButtonBinding BINDINGS[] = {
-    { HidNpadButton_A,     SK_SPACE }, // jump in most Flash games
-    { HidNpadButton_B,     SK_Z     }, // alt jump (Mario 63 uses Z)
-    { HidNpadButton_X,     SK_X     }, // run / item / dive
-    { HidNpadButton_Y,     SK_SHIFT }, // alt run
-    { HidNpadButton_R,     SK_ENTER }, // "Press Start" prompts (was on Minus)
-    { HidNpadButton_Plus,  SK_P     }, // in-game pause key
-    { HidNpadButton_L,     SK_ESCAPE},
-    { HidNpadButton_Left,  SK_LEFT  },
-    { HidNpadButton_Right, SK_RIGHT },
-    { HidNpadButton_Up,    SK_UP    },
-    { HidNpadButton_Down,  SK_DOWN  },
-    { HidNpadButton_StickLLeft,  SK_LEFT  },
-    { HidNpadButton_StickLRight, SK_RIGHT },
-    { HidNpadButton_StickLUp,    SK_UP    },
-    { HidNpadButton_StickLDown,  SK_DOWN  },
+static ButtonBinding BINDINGS[] = {
+    { "A",            HidNpadButton_A,            SK_NONE },
+    { "B",            HidNpadButton_B,            SK_NONE },
+    { "X",            HidNpadButton_X,            SK_NONE },
+    { "Y",            HidNpadButton_Y,            SK_NONE },
+    { "L",            HidNpadButton_L,            SK_NONE },
+    { "R",            HidNpadButton_R,            SK_NONE },
+    { "ZL",           HidNpadButton_ZL,           SK_NONE },
+    // ZR is hardcoded as left-mouse-click below (touch fallback shares it);
+    // we still expose it here so a future keymap could repurpose it if the
+    // user disables mouse — for now ZR in the JSON is no-op (handled
+    // alongside touch in the click path).
+    { "Plus",         HidNpadButton_Plus,         SK_NONE },
+    { "Left",         HidNpadButton_Left,         SK_NONE },
+    { "Right",        HidNpadButton_Right,        SK_NONE },
+    { "Up",           HidNpadButton_Up,           SK_NONE },
+    { "Down",         HidNpadButton_Down,         SK_NONE },
+    { "StickLLeft",   HidNpadButton_StickLLeft,   SK_NONE },
+    { "StickLRight",  HidNpadButton_StickLRight,  SK_NONE },
+    { "StickLUp",     HidNpadButton_StickLUp,     SK_NONE },
+    { "StickLDown",   HidNpadButton_StickLDown,   SK_NONE },
+};
+static constexpr size_t BINDINGS_COUNT = sizeof(BINDINGS) / sizeof(BINDINGS[0]);
+
+// Buttons forwarded to the Rust TOUCHES sub-screen as down-edges. Names
+// match what `keymap::EDITABLE_BUTTONS` exposes (plus the nav-only ones
+// like Up/Down/A/B/Minus). Keep in sync with the EDITABLE_BUTTONS slice.
+struct MenuNavButton {
+    const char* name;
+    u64         mask;
+};
+static const MenuNavButton MENU_NAV_BUTTONS[] = {
+    { "A",            HidNpadButton_A            },
+    { "B",            HidNpadButton_B            },
+    { "X",            HidNpadButton_X            },
+    { "Y",            HidNpadButton_Y            },
+    { "L",            HidNpadButton_L            },
+    { "R",            HidNpadButton_R            },
+    { "ZL",           HidNpadButton_ZL           },
+    { "Plus",         HidNpadButton_Plus         },
+    { "Minus",        HidNpadButton_Minus        },
+    { "Up",           HidNpadButton_Up           },
+    { "Down",         HidNpadButton_Down         },
+    { "Left",         HidNpadButton_Left         },
+    { "Right",        HidNpadButton_Right        },
+    { "StickLUp",     HidNpadButton_StickLUp     },
+    { "StickLDown",   HidNpadButton_StickLDown   },
+    { "StickLLeft",   HidNpadButton_StickLLeft   },
+    { "StickLRight",  HidNpadButton_StickLRight  },
 };
 
+static void populate_bindings_from_keymap(void) {
+    for (size_t i = 0; i < BINDINGS_COUNT; ++i) {
+        BINDINGS[i].key = ruffle_keymap_lookup(BINDINGS[i].name);
+    }
+    // Quick visibility into what the loaded keymap resolved to. Helps the
+    // user confirm their edits to keymap.json took effect.
+    std::printf("keymap: resolved %zu bindings:", BINDINGS_COUNT);
+    for (size_t i = 0; i < BINDINGS_COUNT; ++i) {
+        if (BINDINGS[i].key != SK_NONE) {
+            std::printf(" %s=%d", BINDINGS[i].name, BINDINGS[i].key);
+        }
+    }
+    std::printf("\n");
+    std::fflush(stdout);
+}
+
 // Pause-menu items. The labels live on the Rust side (render::MENU_ITEMS);
-// here we just need the count and per-index action enum.
+// here we just need the count and per-index action enum. ORDER MUST MATCH
+// the `MENU_ITEMS` slice in [rust/src/backend/render.rs].
 enum MenuAction {
     MENU_RESUME  = 0,
-    MENU_RESTART = 1,
-    MENU_QUIT    = 2,
-    MENU_COUNT   = 3,
+    MENU_TOUCHES = 1,  // opens the keymap editor sub-screen (Rust-driven)
+    MENU_RESTART = 2,
+    MENU_QUIT    = 3,
+    MENU_COUNT   = 4,
 };
 
 // Viewport size — keep in sync with rust/src/lib.rs VIEWPORT_W/H.
@@ -106,6 +169,12 @@ static void worker_entry(void* /*arg*/) {
         return;
     }
 
+    // Resolve "A", "B", ..., "StickLDown" to their SK_* codes per the
+    // user's keymap (loaded inside ruffle_init via keymap::init_for_swf).
+    // Done once at boot — keymap is locked in a OnceLock so it doesn't
+    // change across REDEMARRER cycles.
+    populate_bindings_from_keymap();
+
     PadState pad;
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     padInitializeDefault(&pad);
@@ -142,9 +211,28 @@ static void worker_entry(void* /*arg*/) {
         const u64 kHeld = padGetButtons(&pad);
 
         if (menu_open) {
-            // Menu navigation. Edge-detected so a held D-pad doesn't scroll
-            // past every entry. Press `-` again or `B` to dismiss without
-            // selecting (= Resume).
+            // ─── Sub-screen branch: TOUCHES (Rust-driven) ───────────────
+            // If the user picked "TOUCHES" earlier, Rust now owns the
+            // input + rendering for the keymap editor. We just forward
+            // joycon down-edges and ask it to draw.
+            if (ruffle_touches_active()) {
+                for (const auto& nb : MENU_NAV_BUTTONS) {
+                    if (kDown & nb.mask) ruffle_touches_input(nb.name);
+                }
+                // If a binding was committed, refresh our runtime BINDINGS
+                // so the change applies immediately (no need to REDEMARRER).
+                if (ruffle_touches_consume_dirty()) {
+                    populate_bindings_from_keymap();
+                }
+                ruffle_redraw_paused();
+                ruffle_touches_draw();
+                gl_context_swap();
+                continue;
+            }
+
+            // ─── Pause main menu ────────────────────────────────────────
+            // Edge-detected nav so a held D-pad doesn't scroll past every
+            // entry. Press `-` again or `B` to dismiss (= Resume).
             if (kDown & (HidNpadButton_Up | HidNpadButton_StickLUp)) {
                 menu_selection = (menu_selection + MENU_COUNT - 1) % MENU_COUNT;
             }
@@ -163,6 +251,12 @@ static void worker_entry(void* /*arg*/) {
                 case MENU_RESUME:
                     menu_open = false;
                     last_tick = ruffle_tick_now();
+                    continue;
+                case MENU_TOUCHES:
+                    // Hand control to the Rust TOUCHES sub-screen.
+                    // menu_open stays true so we re-enter the branch above
+                    // next frame; Rust closes itself on B/Minus.
+                    ruffle_touches_open();
                     continue;
                 case MENU_RESTART: {
                     std::printf("menu: REDEMARRER → ruffle_restart()\n");
