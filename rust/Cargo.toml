@@ -37,6 +37,18 @@ codegen-units = 1
 panic = "abort"
 strip = "symbols"
 
+# Fast-iteration release profile. Same opt-level as release so runtime
+# behaviour is the same modulo LLVM LTO bugs, but `lto = "thin"` and
+# `codegen-units = 16` cut the compile + link time from ~3 min to ~30 s.
+# Use for hardware test iterations (`cargo build --profile release-dev`).
+# The official `.nro` we ship still goes through `--release`.
+[profile.release-dev]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+# Keep symbols so panics resolve to source lines in dev sessions.
+strip = "none"
+
 [profile.dev]
 panic = "abort"
 

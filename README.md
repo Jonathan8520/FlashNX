@@ -58,12 +58,15 @@ Les backends Navigator/UI/Video utilisent les implémentations `Null*` que ruffl
 ## Build
 
 ```bash
-./scripts/build.sh
+./scripts/build.sh            # release : LTO=full, ~3 min, .nro 12.2 MB (officiel)
+./scripts/build.sh --dev      # release-dev : LTO=thin + codegen-units=16, ~30 s rebuild, .nro légèrement plus gros
 ```
 
 Le script orchestre :
-1. `cargo build --release` côté Rust (target `aarch64-nintendo-switch-freestanding`, std-via-newlib, build-std nightly) → `rust/target/.../libruffle_switch.a` (~13-14 MB avec features audio+mp3)
+1. `cargo build --release` (ou `--profile release-dev`) côté Rust (target `aarch64-nintendo-switch-freestanding`, std-via-newlib, build-std nightly) → `rust/target/.../libruffle_switch.a` (~13-14 MB avec features audio+mp3)
 2. `make` côté C++ lancé **dans le bash MSYS2 de devkitPro** (pour que `switch_rules` résolve les paths correctement) → link contre `libruffle_switch.a` + libnx + libEGL/libGLESv2 → `cpp/flash-for-switch.nro` (~12.2 MB)
+
+Le Makefile a `libruffle_switch.a` comme dépendance explicite du `.elf`, donc tout changement Rust déclenche le relink C++ automatiquement (plus besoin de `make clean` manuel après chaque modif Rust). Le profile `release-dev` est sélectionné via la variable d'env `RUST_PROFILE` que `build.sh --dev` exporte.
 
 **État Mai 2026 (Phase 2.1 + 2.2 + 2.1.b + 2.4.a + 2.4.bis + 2.5 + 2.6 ✓)** : full std via les 2 patches stdlib (voir plus bas), `ruffle_core` linké avec features `audio` + `mp3`, **Mario 63 jouable longue durée avec jetpack + audio + sprites complets** (atlas 2048×2048, edge replication, UV wrap shader, audren via SwitchAudioBackend qui porte le pattern CpalAudioBackend, mega-buffer arena GL pour éviter la saturation handles Mesa, libnx `__libnx_exception_handler` natif pour diagnose tout crash). Sauvegardes persistées via `SwitchStorageBackend` (Phase 2.4.bis), fix Toad château #6906 (Phase 2.4.a) appliqué en submodule + dump dans `patches/`, file picker libnx fsdev (Phase 2.6, accepte n'importe quel filename), GL state cache (Phase 2.5, élimine ~80% des glUseProgram/glBindTexture/glBindVertexArray redondants par frame).
 

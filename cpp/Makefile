@@ -35,7 +35,16 @@ LDFLAGS  := -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir 
 #---------------------------------------------------------------------------------
 # Rust staticlib + switch-mesa GL stack + libnx
 #---------------------------------------------------------------------------------
-RUST_LIB_DIR := $(TOPDIR)/../rust/target/aarch64-nintendo-switch-freestanding/release
+# RUST_PROFILE picks which Cargo profile dir to link against. Default
+# `release` matches `cargo build --release`. Override to `release-dev` for
+# the LTO=thin fast-iteration dev profile (see scripts/build.sh --dev).
+RUST_PROFILE ?= release
+RUST_LIB_DIR := $(TOPDIR)/../rust/target/aarch64-nintendo-switch-freestanding/$(RUST_PROFILE)
+# Concrete static lib path — used as a make dependency so the .elf relinks
+# automatically whenever cargo regenerates it. Without this, switching a
+# Rust file would not trigger the C++ link step and the .nro would stay
+# stale on disk while the .a is fresh.
+RUST_STATICLIB := $(RUST_LIB_DIR)/libruffle_switch.a
 
 LIBS    := -lruffle_switch -lEGL -lglapi -ldrm_nouveau -lGLESv2 -lnx
 LIBDIRS := $(PORTLIBS) $(LIBNX)
@@ -88,7 +97,10 @@ DEPENDS := $(OFILES:.o=.d)
 all: $(OUTPUT).nro
 
 $(OUTPUT).nro: $(OUTPUT).elf $(OUTPUT).nacp
-$(OUTPUT).elf: $(OFILES)
+# Force .elf relink whenever the Rust staticlib changes. Without this, a
+# `cargo build` followed by `make` shows "Rien à faire" and the .nro
+# stays at the previous Rust binary.
+$(OUTPUT).elf: $(OFILES) $(RUST_STATICLIB)
 
 -include $(DEPENDS)
 
