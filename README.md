@@ -35,7 +35,9 @@ flash-for-switch/
 │   ├── rust-toolchain.toml       # nightly-x86_64-pc-windows-gnu + rust-src
 │   ├── .cargo/config.toml        # target aarch64-nintendo-switch-freestanding + rustflags
 │   └── src/
-│       ├── lib.rs                # FFI exports + PlayerBuilder + SWF loader + input handlers + ruffle_set_swf_path (Phase 2.6)
+│       ├── lib.rs                # FFI exports + PlayerBuilder + SWF loader + input handlers + ruffle_set_swf_path (Phase 2.6) + TOUCHES FFI (Phase 3.3)
+│       ├── keymap.rs             # JSON keymap (sidecar + default + fallback) + mutation API (Phase 3.3)
+│       ├── menu.rs               # TOUCHES sub-screen state machine (list + dropdown) (Phase 3.3)
 │       ├── ffi/gl.rs             # OpenGL FFI subset (no bindgen — hand-written)
 │       └── backend/
 │           ├── render.rs         # SwitchRenderBackend (~2000 lignes, 4 shaders, atlas, edge replication, UV wrap, GlStateCache Phase 2.5)
@@ -92,13 +94,25 @@ Le Makefile a `libruffle_switch.a` comme dépendance explicite du `.elf`, donc t
 | R | Enter (« Press Start ») |
 | L | Escape |
 | Plus | P (touche pause standard) |
-| **Minus** | **Ouvre le menu pause** (REPRENDRE / REDEMARRER / QUITTER) |
+| **Minus** | **Ouvre le menu pause** (REPRENDRE / TOUCHES / REDEMARRER / QUITTER) |
 
-Dans le menu pause : D-pad/stick haut-bas pour naviguer, **A** valide, **B** ou **Minus** referme sans rien faire. « QUITTER » sort vers le Homebrew Menu, « REDEMARRER » recharge le SWF depuis zéro (conserve les sauvegardes `.sol`).
+Dans le menu pause : D-pad/stick haut-bas pour naviguer, **A** valide, **B** ou **Minus** referme sans rien faire. « QUITTER » sort vers le Homebrew Menu, « REDEMARRER » recharge le SWF depuis zéro (conserve les sauvegardes `.sol`), « TOUCHES » ouvre l'éditeur de keymap (voir ci-dessous).
 
-## Customisation des touches (keymap JSON)
+## Customisation des touches
 
-Les mappings ci-dessus sont les **valeurs par défaut**, biaisées Mario 63 (Z/X/Shift = convention platformer Flash). Tu peux les rebinder par jeu ou globalement en éditant un fichier JSON sur la SD.
+Deux moyens, le second est de loin le plus simple :
+
+### Éditeur in-game « TOUCHES » (recommandé)
+
+Depuis le menu pause (Minus), sélectionne **TOUCHES** + A. Tu vois la liste des boutons Switch avec leur binding actuel entre `[ brackets ]`. Navigue avec haut/bas, **A** sur une ligne ouvre un dropdown listant toutes les touches Flash possibles (`Space`, `Z`, `X`, `Shift`, `Enter`, `Escape`, `P`, flèches, ou `(aucune)` pour unbind). **A** confirme, **B** annule.
+
+À chaque confirmation, le sidecar JSON est sauvé sur SD ET le binding s'applique immédiatement en jeu (pas besoin de REDEMARRER pour tester). **B** ou **Minus** depuis l'éditeur revient au menu pause.
+
+Le sidecar écrit est `sdmc:/ruffle/<basename>.keymap.json` — par jeu, sans toucher au default global.
+
+### Édition JSON manuelle (power users)
+
+Si tu préfères tout faire au clavier depuis ton PC, le `.nro` lit / écrit des JSON sur la SD.
 
 **Hiérarchie de lookup** (premier hit gagne) :
 1. `sdmc:/ruffle/<basename>.keymap.json` — override par jeu (ex. `sdmc:/ruffle/Super_Mario_63_2010.swf.keymap.json`)
@@ -131,9 +145,7 @@ Au premier boot, si `keymap_default.json` n'existe pas, le `.nro` l'écrit avec 
 
 **Vérification** : à chaque boot le `.nro` logue via nxlink la résolution finale (`keymap: resolved 15 bindings: A=1 B=8 ...`) — utile pour confirmer que ton fichier est bien pris en compte.
 
-**Exemple use case** : un jeu utilise Q/W/E au lieu de Z/X/Shift → tu crées un sidecar `sdmc:/ruffle/MonJeu.swf.keymap.json` avec ces bindings spécifiques sans toucher au default global qui reste sur Mario 63.
-
-UI in-game wizard pour remap sans toucher au JSON = prévu en Phase 3.3 suite.
+**Exemple use case** : un jeu utilise Q/W/E au lieu de Z/X/Shift → tu crées un sidecar `sdmc:/ruffle/MonJeu.swf.keymap.json` avec ces bindings spécifiques sans toucher au default global qui reste sur Mario 63 (ou plus simple : tu fais le remap depuis l'éditeur in-game TOUCHES, même résultat).
 
 ## Roadmap
 
@@ -203,7 +215,7 @@ Objectif initial : charger un `.swf` depuis la SD et voir quelque chose à l'éc
 |---|---|---|
 | 3.1 ✓ Cycle applet | **Validé empiriquement 2026-05-25 nuit** : home-button + mise en veille Switch fonctionnent déjà sans crash sur Mario 63 long-play. `appletMainLoop()` de libnx gère implicitement le pause/resume du worker thread — pas besoin de hooks explicites (`appletGetCurrentFocusState`/`appletHook`) tant qu'on ne fait rien d'exotique côté GPU pendant le focus-lost. Si un cas pathologique apparaît (e.g. crash après suspend très long), on pourra ajouter les hooks à ce moment-là. | Faible / aucun |
 | 3.2 ✓ `SwitchStorageBackend` (.sol persistés) | **Fait via 2.4.bis** ([rust/src/backend/storage.rs](rust/src/backend/storage.rs)). Sauvegardes `.sol` persistées dans `sdmc:/ruffle/saves/`, import depuis AppData Windows / Ruffle desktop fonctionnel (format AMF cross-platform). | Faible |
-| 3.3 Menu pause in-game (partial ✓) | **Livré 2026-05-25 nuit** : Minus ouvre un modal custom dessiné en GL natif par `SwitchRenderBackend::draw_menu_overlay` (backdrop 50%, panneau navy, sélection ambre, texte 5×7 pixel font ASCII-art `GLYPHS` en [rust/src/backend/render.rs](rust/src/backend/render.rs)). Options actuelles : **REPRENDRE / REDEMARRER / QUITTER**. REDEMARRER = `ruffle_restart()` qui drop le Player puis rebuild (cache SWF static évite OOM heap fragmenté sur re-read 15 MB). Plus = touche `P` (pause native du jeu Flash). État machine côté C++ : `g_menu_open` skip Ruffle tick → game frozen sous le menu, `ruffle_redraw_paused` + `ruffle_draw_menu(idx)` rendus à la place. **Reste à ajouter** : Save state / Load state / Customize keys / Back to library (dépendent de Phase 3.4 + 3.5). Pas de FreeType — la font pixel-art interne suffit pour l'UI homebrew. | Faible, ~1 j pour les options manquantes |
+| 3.3 ✓ Menu pause in-game + éditeur TOUCHES | **Livré 2026-05-25 nuit → 2026-05-26 nuit**. Modal custom GL natif via `SwitchRenderBackend::draw_menu_overlay` (font 5×7 pixel-art hand-encodée `GLYPHS`, backdrop semi-transparent, sélection ambre). 4 entrées : **REPRENDRE / TOUCHES / REDEMARRER / QUITTER**. REDEMARRER = `ruffle_restart()` drop+rebuild Player (cache SWF static contre OOM heap). Plus = touche `P`. **Éditeur TOUCHES** (2e modal) : liste scrollable des boutons Switch avec binding actuel, A ouvre un dropdown des touches Flash (Space/Z/X/Shift/Enter/Escape/P/flèches/(aucune)), A confirme → save sidecar `sdmc:/ruffle/<basename>.keymap.json` + live reload des BINDINGS via `consume_dirty` flag (pas besoin de REDEMARRER pour tester). State machine TOUCHES vit en Rust ([rust/src/menu.rs](rust/src/menu.rs)), C++ forward juste les down-edges via `ruffle_touches_input(name)`. **Reste à ajouter** (dépendent d'autres phases) : Save state / Load state (Phase 3.5) et Back to library (Phase 3.4). | ✓ |
 | 3.4 File picker / Library UI (ScummVM-style) | Au boot du `.nro` : scan `sdmc:/ruffle/*.swf` + `sdmc:/switch/ruffle/*.swf` via libnx `fsFsOpenDirectory` (contourne le bug `std::fs::read_dir` Horizon). Pour chaque SWF : parser le header via `SwfMovie::from_data` light (titre/dims/FPS/AS version). UI list scrollable joycon-navigable : **A**=launch, **X**=delete, **Y**=info, **L/R**=filtres. Optionnel : sidecar `.json` par jeu (display name, category) + `.png` thumbnail. Remplace 2.6 (file picker basique). | Moyen, ~2-3 j |
 | 3.5 Savestate "light" (reload + state) | **Caveat important (vérifié 2026-05-25)** : Ruffle n'a PAS de `Player::serialize()` natif (grep `savestate|save_state|serialize_player` dans tout `third_party/ruffle/` = 0 résultat, idem GitHub issues). Le Player tient un `gc_arena::Gc<>` graph non-trivialement sérialisable. Solution pragmatique : capturer le SharedObject + frame courant + variables `_root.foo`. Au restore : reload du SWF + injection du state. Marche pour les jeux à progression linéaire (Mario 63), foire sur les animations en cours. **80% du bénéfice utilisateur pour 10% de l'effort vrai savestate.** | Faible, ~1 j |
 | 3.6 Compat globale autres SWF AS1/AS2 | Tester Madness, Newgrounds classics (Alien Hominid, Castle Crashers prototype, etc.). Probable que chaque jeu exposera ses propres bugs Ruffle. Reuse de la diag infrastructure (exception handler natif, crash log, compteurs live arena). | Variable |
@@ -229,8 +241,8 @@ Objectif initial : charger un `.swf` depuis la SD et voir quelque chose à l'éc
 - Phase 2.3 filtres Glow/DropShadow : **PARKED 2026-05-25 nuit** (2e tentative). Le code est écrit, compile clean, port fidèle des 4 shaders + infra FBO + dispatcher. Mais 3 bugs hardware (boutons invisibles via chain-break sur filtre non supporté, fps 30→5 à cause alloc GL textures par frame, text bizarre). Sauvé dans `temp/phase-2.3-filters-wip/`. Estimation pour reprendre : **1 jour focused** (les fixes sont localisés et identifiés).
 - Phase 2.4 bump submodule : **fait en ~5 min** après désac temporaire Avast HTTPS scan. Submodule passé de `e41992ab` à `71280cd1` (+42 commits). Patch Toad 2.4.a ré-appliqué proprement via `git apply ../../patches/*.patch`. Rebuild Rust complet 6 min, .nro final 12.25 MB.
 - **Phase 3.1 cycle applet** : ~~estimation ½ j~~ → **0 jour, déjà OK** (validé empiriquement 2026-05-25 nuit, home-button + mise en veille marchent sans crash via `appletMainLoop` libnx implicit)
-- **Phase 3.3 menu pause** (partial) : ~~estimation 2-3 j (avec FreeType + libnx pl)~~ → **fait en ~3 h** (modal custom GL natif + font pixel-art 5×7 hand-encodée + state machine C++, REDEMARRER via `ruffle_restart()` + cache SWF static contre OOM heap). Reste les options avancées (Save/Load state / Keys / Library) qui dépendent de 3.4/3.5.
-- **Phase 3 restant (library + savestate light)** : estimation **3-4 jours** (3.4 library ~2-3 j + 3.5 savestate light ~1 j) — `SwitchStorageBackend` ✓ via 2.4.bis (3.2 ✓), cycle applet ✓ implicit (3.1 ✓), menu pause ✓ basique (3.3 partial)
+- **Phase 3.3 menu pause + éditeur TOUCHES** : ~~estimation 2-3 j (avec FreeType + libnx pl)~~ → **fait en ~5 h total sur 2 nuits** (25 nuit modal + REDEMARRER, 26 nuit éditeur TOUCHES live + keymap JSON system). Font pixel-art 5×7 hand-encodée suffisante (pas besoin FreeType). Save state / Load state / Back to library = dépendent de 3.5 / 3.4 respectivement, pas vraiment du scope 3.3.
+- **Phase 3 restant (library + savestate light)** : estimation **3-4 jours** (3.4 library ~2-3 j + 3.5 savestate light ~1 j) — `SwitchStorageBackend` ✓ via 2.4.bis (3.2 ✓), cycle applet ✓ implicit (3.1 ✓), menu pause + éditeur touches ✓ (3.3 ✓)
 - Release publique propre v1 (Phase 4) : **+2-3 semaines**
 - Savestate "vrai" (upstream contribution Ruffle) : **+2 semaines** optionnel post-v1
 
