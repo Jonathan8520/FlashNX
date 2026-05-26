@@ -57,7 +57,15 @@ RUST_LIB_DIR := $(TOPDIR)/../rust/target/aarch64-nintendo-switch-freestanding/$(
 # stale on disk while the .a is fresh.
 RUST_STATICLIB := $(RUST_LIB_DIR)/libruffle_switch.a
 
-LIBS    := -lruffle_switch -lEGL -lglapi -ldrm_nouveau -lGLESv2 -lnx
+# Phase 3.7 — libcurl + mbedtls (HTTPS via switch-curl/switch-mbedtls portlibs).
+# Order matters: curl after mbedtls is wrong; curl uses mbedtls so it must
+# come first on the link line for static libs. zlib needed for curl's
+# CURLOPT_ACCEPT_ENCODING and the SWF CWS inflate (already pulled by Rust
+# but switch-zlib provides the .a). nx must stay last so libnx exports
+# resolve. usbhsfs and friends aren't needed.
+LIBS    := -lruffle_switch -lEGL -lglapi -ldrm_nouveau -lGLESv2 \
+           -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz \
+           -lnx
 LIBDIRS := $(PORTLIBS) $(LIBNX)
 
 #---------------------------------------------------------------------------------

@@ -2065,13 +2065,18 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
-    /// TOUCHES dropdown — shown when the user presses A on a list row. Lists
-    /// the available Flash-key options; A on a row commits, B cancels.
+    /// TOUCHES dropdown — shown when the user presses A on a list row.
+    /// Scrollable window so we can fit the full 48-key Flash keyboard
+    /// without overflowing the 720-px viewport. `visible_rows` rows are
+    /// drawn at a time starting from `scroll_offset`; selection is
+    /// always within this window (caller maintains via clamp_scroll).
     pub fn draw_touches_dropdown(
         &mut self,
         button_name: &str,
         selection: usize,
+        scroll_offset: usize,
         options: &[&str],
+        visible_rows: usize,
     ) {
         unsafe {
             glEnable(GL_BLEND);
@@ -2092,7 +2097,10 @@ impl SwitchRenderBackend {
 
         const PANEL_W: f32 = 480.0;
         let row_h: f32 = 40.0;
-        let panel_h = 130.0 + options.len() as f32 * row_h + 60.0;
+        // Panel sized for at most `visible_rows` rows + header + footer.
+        // No longer grows with total options count — that was the bug
+        // when ALL_FLASH_KEYS jumped from 12 to 48 entries.
+        let panel_h = 130.0 + visible_rows as f32 * row_h + 60.0;
         let panel_x = (vw - PANEL_W) * 0.5;
         let panel_y = (vh - panel_h) * 0.5;
         let panel = Matrix {
@@ -2107,7 +2115,7 @@ impl SwitchRenderBackend {
             panel,
         );
 
-        // Title: "A → ?" (Switch button → which Flash key).
+        // Title.
         const TITLE_SCALE: f32 = 3.0;
         let title = std::format!("{} ->", button_name);
         let title_w = self.measure_text(&title, TITLE_SCALE);
@@ -2119,13 +2127,16 @@ impl SwitchRenderBackend {
             swf::Color::from_rgb(0xFFFFFF, 255),
         );
 
-        // Options.
+        // Options (windowed). Slice the list to scroll_offset..end and
+        // index back to absolute selection for the highlight check.
         const OPT_SCALE: f32 = 2.5;
         let opts_top_y = panel_y + 110.0;
         let opts_left_x = panel_x + 100.0;
-        for (i, opt) in options.iter().enumerate() {
-            let y = opts_top_y + i as f32 * row_h;
-            let is_sel = i == selection;
+        let total = options.len();
+        let end = (scroll_offset + visible_rows).min(total);
+        for (visible_idx, abs_idx) in (scroll_offset..end).enumerate() {
+            let y = opts_top_y + visible_idx as f32 * row_h;
+            let is_sel = abs_idx == selection;
             let color = if is_sel {
                 swf::Color::from_rgb(0xFFD740, 255)
             } else {
@@ -2134,12 +2145,34 @@ impl SwitchRenderBackend {
             if is_sel {
                 self.draw_text(opts_left_x - 30.0, y, OPT_SCALE, ">", color);
             }
-            self.draw_text(opts_left_x, y, OPT_SCALE, opt, color);
+            self.draw_text(opts_left_x, y, OPT_SCALE, options[abs_idx], color);
+        }
+
+        // Scrollbar (matches the TOUCHES list scrollbar style).
+        if total > visible_rows {
+            let bar_x = panel_x + PANEL_W - 30.0;
+            let bar_top_y = opts_top_y;
+            let bar_h_total = visible_rows as f32 * row_h;
+            let bar_h_thumb = (bar_h_total * visible_rows as f32 / total as f32).max(20.0);
+            let progress = scroll_offset as f32 / (total - visible_rows) as f32;
+            let thumb_y = bar_top_y + (bar_h_total - bar_h_thumb) * progress;
+            let track = Matrix {
+                a: 4.0, b: 0.0, c: 0.0, d: bar_h_total,
+                tx: swf::Twips::from_pixels(bar_x as f64),
+                ty: swf::Twips::from_pixels(bar_top_y as f64),
+            };
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x40_99AABB), track);
+            let thumb = Matrix {
+                a: 4.0, b: 0.0, c: 0.0, d: bar_h_thumb,
+                tx: swf::Twips::from_pixels(bar_x as f64),
+                ty: swf::Twips::from_pixels(thumb_y as f64),
+            };
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), thumb);
         }
 
         // Footer.
         const HELP_SCALE: f32 = 2.0;
-        let help = "A:OK   B:ANNULER";
+        let help = "A:OK   B:ANNULER   HAUT/BAS:NAV";
         let help_w = self.measure_text(help, HELP_SCALE);
         self.draw_text(
             panel_x + (PANEL_W - help_w) * 0.5,
@@ -2286,9 +2319,11 @@ impl SwitchRenderBackend {
             y += 40.0;
         }
 
-        // Footer: only QUITTER works in the empty state.
+        // Footer: Y opens DISTANT mode (so a user with empty SD can
+        // still import via archive.org without needing to drop files
+        // on SD first); - exits .nro.
         const HELP_SCALE: f32 = 2.0;
-        let help = "-:QUITTER";
+        let help = "Y:IMPORT DISTANT   -:QUITTER";
         let help_w = self.measure_text(help, HELP_SCALE);
         self.draw_text(
             (vw - help_w) * 0.5,
@@ -2509,7 +2544,7 @@ impl SwitchRenderBackend {
 
         // Footer.
         const HELP_SCALE: f32 = 2.0;
-        let help = "A:JOUER   X:OPTIONS   -:QUITTER   HAUT/BAS:NAV";
+        let help = "A:JOUER   X:OPTIONS   Y:IMPORT   -:QUITTER";
         let help_w = self.measure_text(help, HELP_SCALE);
         self.draw_text(
             (vw - help_w) * 0.5,
@@ -2623,6 +2658,502 @@ impl SwitchRenderBackend {
             swf::Color::from_rgb(0x99AABB, 255),
         );
 
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
+    // ── Phase 3.7: DISTANT mode screens ────────────────────────────────
+
+    /// Splash for `Screen::DistantIdle`. `recent_url` is the
+    /// currently-displayed history entry (if any); `hist_pos` is
+    /// `(current, total)` for the "[3 / 12]" badge. When history is
+    /// empty we show the static "press A to type URL" CTA.
+    pub fn draw_library_distant_idle(
+        &mut self,
+        recent_url: Option<&str>,
+        hist_pos: Option<(usize, usize)>,
+    ) {
+        self.library_clear();
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+
+        // Title with drop shadow.
+        let title = "IMPORT DISTANT";
+        let scale_t = 5.0;
+        let tw = self.measure_text(title, scale_t);
+        self.draw_text(
+            (vw - tw) * 0.5 + 4.0,
+            vh * 0.13 + 4.0,
+            scale_t,
+            title,
+            swf::Color::from_rgb(0x000000, 255),
+        );
+        self.draw_text(
+            (vw - tw) * 0.5,
+            vh * 0.13,
+            scale_t,
+            title,
+            swf::Color::from_rgb(0xFFD740, 255),
+        );
+
+        // Subtitle.
+        let sub = "TELECHARGEMENT DE SWF DEPUIS ARCHIVE.ORG";
+        let scale_s = 2.0;
+        let sw = self.measure_text(sub, scale_s);
+        self.draw_text(
+            (vw - sw) * 0.5,
+            vh * 0.24,
+            scale_s,
+            sub,
+            swf::Color::from_rgb(0xAABFD8, 255),
+        );
+
+        // Big CTA / history panel.
+        const PANEL_W: f32 = 1120.0;
+        const PANEL_H: f32 = 280.0;
+        let panel_x = (vw - PANEL_W) * 0.5;
+        let panel_y = vh * 0.34;
+        let panel = Matrix {
+            a: PANEL_W, b: 0.0, c: 0.0, d: PANEL_H,
+            tx: swf::Twips::from_pixels(panel_x as f64),
+            ty: swf::Twips::from_pixels(panel_y as f64),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xC0_14_20_38), panel);
+        <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(0xFFD740, 255), panel);
+
+        match recent_url {
+            None => {
+                // No history yet — just the "press A" CTA.
+                let cta = "APPUYEZ SUR A POUR SAISIR UNE URL";
+                let scale_c = 3.0;
+                let cw = self.measure_text(cta, scale_c);
+                self.draw_text(
+                    panel_x + (PANEL_W - cw) * 0.5,
+                    panel_y + 80.0,
+                    scale_c,
+                    cta,
+                    swf::Color::from_rgb(0xFFFFFF, 255),
+                );
+                let hint = "EXEMPLE: HTTPS://ARCHIVE.ORG/DETAILS/<ITEM-ID>";
+                let scale_h = 1.8;
+                let hw = self.measure_text(hint, scale_h);
+                self.draw_text(
+                    panel_x + (PANEL_W - hw) * 0.5,
+                    panel_y + 150.0,
+                    scale_h,
+                    hint,
+                    swf::Color::from_rgb(0x99AABB, 255),
+                );
+                let hint2 = "OU SIMPLEMENT <ITEM-ID>";
+                let hw2 = self.measure_text(hint2, scale_h);
+                self.draw_text(
+                    panel_x + (PANEL_W - hw2) * 0.5,
+                    panel_y + 185.0,
+                    scale_h,
+                    hint2,
+                    swf::Color::from_rgb(0x99AABB, 255),
+                );
+            }
+            Some(url) => {
+                // Show "HISTORIQUE [n / total]" header.
+                let scale_lbl = 2.0;
+                let label = if let Some((cur, total)) = hist_pos {
+                    std::format!("HISTORIQUE [{} / {}]", cur, total)
+                } else {
+                    std::string::String::from("HISTORIQUE")
+                };
+                let lw = self.measure_text(&label, scale_lbl);
+                self.draw_text(
+                    panel_x + (PANEL_W - lw) * 0.5,
+                    panel_y + 30.0,
+                    scale_lbl,
+                    &label,
+                    swf::Color::from_rgb(0xFFD740, 255),
+                );
+
+                // URL truncated if too wide. Scale 2 → 12 px per char.
+                let scale_u = 2.0;
+                let char_w = 6.0 * scale_u;
+                let max_chars = ((PANEL_W - 60.0) / char_w) as usize;
+                let mut display = url.to_string();
+                if display.chars().count() > max_chars && max_chars > 1 {
+                    display = display.chars().take(max_chars - 1).collect();
+                    display.push('…');
+                }
+                let uw = self.measure_text(&display, scale_u);
+                self.draw_text(
+                    panel_x + (PANEL_W - uw) * 0.5,
+                    panel_y + 90.0,
+                    scale_u,
+                    &display,
+                    swf::Color::from_rgb(0xFFFFFF, 255),
+                );
+
+                // Action hints stacked inside the panel.
+                let scale_h = 1.8;
+                let lines = [
+                    "ZR : CHARGER CETTE URL DIRECTEMENT",
+                    "A  : SAISIR / EDITER URL (CLAVIER)",
+                    "L / R : URL PRECEDENTE / SUIVANTE",
+                ];
+                for (i, line) in lines.iter().enumerate() {
+                    let w = self.measure_text(line, scale_h);
+                    self.draw_text(
+                        panel_x + (PANEL_W - w) * 0.5,
+                        panel_y + 150.0 + i as f32 * 32.0,
+                        scale_h,
+                        line,
+                        swf::Color::from_rgb(0x99AABB, 255),
+                    );
+                }
+            }
+        }
+
+        // Footer.
+        const HELP_SCALE: f32 = 2.0;
+        let help = if recent_url.is_some() {
+            "ZR:OUVRIR   A:EDITER   L/R:NAV   Y:RETOUR LOCAL   -:QUITTER"
+        } else {
+            "A:SAISIR URL   Y:RETOUR LOCAL   -:QUITTER"
+        };
+        let help_w = self.measure_text(help, HELP_SCALE);
+        self.draw_text(
+            (vw - help_w) * 0.5,
+            vh - 42.0,
+            HELP_SCALE,
+            help,
+            swf::Color::from_rgb(0x99AABB, 255),
+        );
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
+    /// List of remote files (one row per `RemoteFile`). Mirrors the local
+    /// `draw_library_list` layout but skips the per-file color chip /
+    /// metadata panel — remote files only have name + size to show.
+    /// `downloaded` is the set of basenames already pulled this session
+    /// (drawn with a green `OK` prefix so the user knows what's done).
+    pub fn draw_library_distant_files(
+        &mut self,
+        selection: usize,
+        scroll_offset: usize,
+        files: &[crate::net::RemoteFile],
+        visible_rows: usize,
+        downloaded: &[std::string::String],
+    ) {
+        self.library_clear();
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+
+        // Header.
+        let title = "FICHIERS DISTANTS";
+        let scale_t = 4.0;
+        let tw = self.measure_text(title, scale_t);
+        self.draw_text(
+            (vw - tw) * 0.5 + 3.0,
+            30.0 + 3.0,
+            scale_t,
+            title,
+            swf::Color::from_rgb(0x000000, 255),
+        );
+        self.draw_text(
+            (vw - tw) * 0.5,
+            30.0,
+            scale_t,
+            title,
+            swf::Color::from_rgb(0xFFD740, 255),
+        );
+
+        let sub = std::format!("{} FICHIER(S) .SWF TROUVE(S)", files.len());
+        let scale_s = 2.0;
+        let sw = self.measure_text(&sub, scale_s);
+        self.draw_text(
+            (vw - sw) * 0.5,
+            85.0,
+            scale_s,
+            &sub,
+            swf::Color::from_rgb(0xAABFD8, 255),
+        );
+
+        // Rows.
+        const ROW_SCALE: f32 = 2.5;
+        const ROW_SPACING: f32 = 50.0;
+        let rows_top_y = 150.0;
+        let rows_left_x = 80.0;
+        let total = files.len();
+        let end = (scroll_offset + visible_rows).min(total);
+        for (visible_idx, abs_idx) in (scroll_offset..end).enumerate() {
+            let f = &files[abs_idx];
+            let y = rows_top_y + visible_idx as f32 * ROW_SPACING;
+            let is_sel = abs_idx == selection;
+            let color = if is_sel {
+                swf::Color::from_rgb(0xFFD740, 255)
+            } else {
+                swf::Color::from_rgb(0xCCCCCC, 255)
+            };
+            if is_sel {
+                self.draw_text(rows_left_x - 30.0, y, ROW_SCALE, ">", color);
+            }
+            // OK badge for files already downloaded this session.
+            let is_downloaded = downloaded.iter().any(|n| n == &f.name);
+            let badge_w = if is_downloaded {
+                let badge = "OK";
+                let bw = self.measure_text(badge, 2.0);
+                // Bright green tint so it pops over the amber/grey rows.
+                self.draw_text(rows_left_x, y + 4.0, 2.0, badge, swf::Color::from_rgb(0x66DD66, 255));
+                bw + 12.0
+            } else {
+                0.0
+            };
+            let name_x = rows_left_x + badge_w;
+            // Truncate filename to fit. Each row = filename + size on
+            // the right edge.
+            let size_str = format_size_pretty(f.size_bytes);
+            let size_w = self.measure_text(&size_str, ROW_SCALE);
+            let size_x = vw - 80.0 - size_w;
+            let max_name_w = size_x - name_x - 20.0;
+            let mut display = f.name.clone();
+            // ~6 px per char at ROW_SCALE * 6 (5+1 spacing).
+            let char_w = 6.0 * ROW_SCALE;
+            let max_chars = (max_name_w / char_w) as usize;
+            if display.chars().count() > max_chars && max_chars > 1 {
+                display = display.chars().take(max_chars - 1).collect();
+                display.push('…');
+            }
+            self.draw_text(name_x, y, ROW_SCALE, &display, color);
+            self.draw_text(size_x, y, ROW_SCALE, &size_str, color);
+        }
+
+        // Scrollbar if needed.
+        if total > visible_rows {
+            let bar_x = vw - 30.0;
+            let bar_top_y = rows_top_y;
+            let bar_h_total = visible_rows as f32 * ROW_SPACING;
+            let bar_h_thumb = (bar_h_total * visible_rows as f32 / total as f32).max(20.0);
+            let progress = scroll_offset as f32 / (total - visible_rows) as f32;
+            let thumb_y = bar_top_y + (bar_h_total - bar_h_thumb) * progress;
+            let track = Matrix {
+                a: 4.0, b: 0.0, c: 0.0, d: bar_h_total,
+                tx: swf::Twips::from_pixels(bar_x as f64),
+                ty: swf::Twips::from_pixels(bar_top_y as f64),
+            };
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x40_99AABB), track);
+            let thumb = Matrix {
+                a: 4.0, b: 0.0, c: 0.0, d: bar_h_thumb,
+                tx: swf::Twips::from_pixels(bar_x as f64),
+                ty: swf::Twips::from_pixels(thumb_y as f64),
+            };
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), thumb);
+        }
+
+        // Footer.
+        const HELP_SCALE: f32 = 2.0;
+        let help = "A:TELECHARGER (OK->JOUER)   B:RETOUR   HAUT/BAS:NAV";
+        let help_w = self.measure_text(help, HELP_SCALE);
+        self.draw_text(
+            (vw - help_w) * 0.5,
+            vh - 42.0,
+            HELP_SCALE,
+            help,
+            swf::Color::from_rgb(0x99AABB, 255),
+        );
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
+    /// Download in flight — big title, filename, progress bar, footer.
+    /// `bytes_total = 0` means Content-Length wasn't known at the start;
+    /// show an indeterminate bar in that case (just a slim animated
+    /// marker; for v1 we just show "??.?? / ??" until total arrives).
+    pub fn draw_library_distant_downloading(
+        &mut self,
+        file_name: &str,
+        bytes_done: u64,
+        bytes_total: u64,
+    ) {
+        self.library_clear();
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+
+        let title = "TELECHARGEMENT";
+        let scale_t = 5.0;
+        let tw = self.measure_text(title, scale_t);
+        self.draw_text(
+            (vw - tw) * 0.5 + 4.0,
+            vh * 0.18 + 4.0,
+            scale_t,
+            title,
+            swf::Color::from_rgb(0x000000, 255),
+        );
+        self.draw_text(
+            (vw - tw) * 0.5,
+            vh * 0.18,
+            scale_t,
+            title,
+            swf::Color::from_rgb(0xFFD740, 255),
+        );
+
+        // Filename (truncated if needed).
+        let scale_n = 2.0;
+        let mut display = file_name.to_string();
+        let max_chars = 56usize;
+        if display.chars().count() > max_chars && max_chars > 1 {
+            display = display.chars().take(max_chars - 1).collect();
+            display.push('…');
+        }
+        let nw = self.measure_text(&display, scale_n);
+        self.draw_text(
+            (vw - nw) * 0.5,
+            vh * 0.34,
+            scale_n,
+            &display,
+            swf::Color::from_rgb(0xCCCCCC, 255),
+        );
+
+        // Progress bar (centred 800x40, fill amber, track navy).
+        const BAR_W: f32 = 800.0;
+        const BAR_H: f32 = 40.0;
+        let bar_x = (vw - BAR_W) * 0.5;
+        let bar_y = vh * 0.50;
+        let track = Matrix {
+            a: BAR_W, b: 0.0, c: 0.0, d: BAR_H,
+            tx: swf::Twips::from_pixels(bar_x as f64),
+            ty: swf::Twips::from_pixels(bar_y as f64),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0x142038, 255), track);
+        <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(0xFFFFFF, 255), track);
+
+        let frac = if bytes_total > 0 {
+            (bytes_done as f32 / bytes_total as f32).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if frac > 0.0 {
+            let fill = Matrix {
+                a: BAR_W * frac, b: 0.0, c: 0.0, d: BAR_H,
+                tx: swf::Twips::from_pixels(bar_x as f64),
+                ty: swf::Twips::from_pixels(bar_y as f64),
+            };
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), fill);
+        }
+
+        // % + bytes label below the bar.
+        let scale_p = 2.5;
+        let label = if bytes_total > 0 {
+            std::format!(
+                "{}%   {} / {}",
+                (frac * 100.0) as u32,
+                format_size_pretty(bytes_done),
+                format_size_pretty(bytes_total),
+            )
+        } else {
+            std::format!("{} ...", format_size_pretty(bytes_done))
+        };
+        let pw = self.measure_text(&label, scale_p);
+        self.draw_text(
+            (vw - pw) * 0.5,
+            bar_y + BAR_H + 20.0,
+            scale_p,
+            &label,
+            swf::Color::from_rgb(0xFFFFFF, 255),
+        );
+
+        // Footer.
+        const HELP_SCALE: f32 = 2.0;
+        let help = "B:ANNULER";
+        let help_w = self.measure_text(help, HELP_SCALE);
+        self.draw_text(
+            (vw - help_w) * 0.5,
+            vh - 42.0,
+            HELP_SCALE,
+            help,
+            swf::Color::from_rgb(0x99AABB, 255),
+        );
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
+    /// Error toast for DISTANT mode (URL parse / metadata fetch / DL fail).
+    pub fn draw_library_distant_error(&mut self, msg: &str) {
+        self.library_clear();
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+
+        let title = "ERREUR";
+        let scale_t = 5.0;
+        let tw = self.measure_text(title, scale_t);
+        self.draw_text(
+            (vw - tw) * 0.5 + 4.0,
+            vh * 0.22 + 4.0,
+            scale_t,
+            title,
+            swf::Color::from_rgb(0x000000, 255),
+        );
+        self.draw_text(
+            (vw - tw) * 0.5,
+            vh * 0.22,
+            scale_t,
+            title,
+            swf::Color::from_rgb(0xFF5040, 255),
+        );
+
+        // Word-wrap the message into ~70-char lines (rough heuristic at
+        // scale 2.0). We use the simple split-on-space algorithm. Lines
+        // are centred horizontally.
+        let scale_m = 2.0;
+        const WRAP_AT: usize = 60;
+        let mut lines: std::vec::Vec<std::string::String> = std::vec::Vec::new();
+        let mut current = std::string::String::new();
+        for word in msg.split(' ') {
+            if current.is_empty() {
+                current.push_str(word);
+            } else if current.len() + 1 + word.len() <= WRAP_AT {
+                current.push(' ');
+                current.push_str(word);
+            } else {
+                lines.push(current.clone());
+                current.clear();
+                current.push_str(word);
+            }
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+        let mut y = vh * 0.42;
+        for line in &lines {
+            let w = self.measure_text(line, scale_m);
+            self.draw_text(
+                (vw - w) * 0.5,
+                y,
+                scale_m,
+                line,
+                swf::Color::from_rgb(0xCCCCCC, 255),
+            );
+            y += 30.0;
+        }
+
+        const HELP_SCALE: f32 = 2.0;
+        let help = "A/B:OK";
+        let help_w = self.measure_text(help, HELP_SCALE);
+        self.draw_text(
+            (vw - help_w) * 0.5,
+            vh - 42.0,
+            HELP_SCALE,
+            help,
+            swf::Color::from_rgb(0x99AABB, 255),
+        );
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);

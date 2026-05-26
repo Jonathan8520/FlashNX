@@ -32,6 +32,7 @@ use std::io::Read;
 use std::sync::Mutex;
 
 use crate::backend::render::SwitchRenderBackend;
+use crate::net::{self, RemoteFile};
 use crate::{keymap, menu};
 
 /// Currently displayed library screen. `Inactive` is set before
@@ -41,7 +42,7 @@ pub(crate) enum Screen {
     Inactive,
     /// No SWF on SD. Shows a help message ("drop .swf in sdmc:/ruffle/").
     Empty,
-    /// Main game list. `selection` indexes `Library::entries`,
+    /// Main local game list. `selection` indexes `State::entries`,
     /// `scroll_offset` is the topmost visible row.
     List { selection: usize, scroll_offset: usize },
     /// OPTIONS modal for the game at `game_idx`. `selection` indexes
@@ -55,9 +56,89 @@ pub(crate) enum Screen {
     /// `menu::*`. When `menu::is_active()` returns false we return to the
     /// OptionsModal screen.
     TouchesEditor { game_idx: usize },
+    // ── Phase 3.7: DISTANT mode (archive.org import) ───────────────────
+    /// Entry screen for DISTANT mode. Shows the FlashNX banner + a prompt
+    /// "A: SAISIR URL  Y: RETOUR LOCAL  -: QUITTER".
+    DistantIdle,
+    /// After a successful archive.org metadata fetch. Lists `RemoteFile`s
+    /// stored in `State::remote_files`; `selection` indexes that vec.
+    DistantFiles { selection: usize, scroll_offset: usize },
+    /// Download in flight. The filename and target path live in
+    /// `State::download_file_name` / `download_out_path`. Progress polled
+    /// every frame via `net::download_progress`.
+    DistantDownloading,
+    /// Error from URL parse / metadata fetch / download. Message in
+    /// `State::distant_error`. B or A dismisses back to DistantIdle.
+    DistantError,
 }
 
-pub(crate) const OPTIONS_ENTRIES: &[&str] = &["TOUCHES", "RETOUR"];
+pub(crate) const OPTIONS_ENTRIES: &[&str] = &["TOUCHES", "RENOMMER", "RETOUR"];
+
+/// Sidecar JSON written next to the SWF — gives a display name override
+/// without touching the physical filename. Per the README 3.4.bis design:
+/// **never** rename the .swf file itself (saves/keymap/etc. all key off
+/// basename). Sidecar lives at `sdmc:/ruffle/<basename>.meta.json`.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct MetaSidecar {
+    pub display_name: Option<std::string::String>,
+}
+
+/// User-facing SD roots. Order = priority for lookup (read). Writes
+/// always go to entry 0 (the new `sdmc:/flashnx/`). The legacy
+/// `sdmc:/ruffle/` is kept for backward compat — users coming from
+/// pre-rename builds still see their saves/sidecars without manual
+/// migration.
+const USER_SD_ROOTS: &[&str] = &["sdmc:/flashnx", "sdmc:/ruffle"];
+
+/// Find a user-facing sidecar / config file by suffix (e.g.
+/// "Super_Mario_63_2010.swf.meta.json") under one of the known SD
+/// roots. Returns the first existing path, or None.
+fn find_user_file(suffix: &str) -> Option<std::string::String> {
+    for root in USER_SD_ROOTS {
+        let p = std::format!("{}/{}", root, suffix);
+        if std::path::Path::new(&p).exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Where to WRITE a user-facing sidecar / config. Always the primary
+/// root (entry 0 of `USER_SD_ROOTS`) — new state goes to `flashnx/`.
+fn primary_user_path(suffix: &str) -> std::string::String {
+    std::format!("{}/{}", USER_SD_ROOTS[0], suffix)
+}
+
+fn read_meta_sidecar(basename: &str) -> Option<MetaSidecar> {
+    let suffix = std::format!("{}.meta.json", basename);
+    let path = find_user_file(&suffix)?;
+    let txt = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&txt).ok()
+}
+
+/// Persist a display-name override. Empty string removes the sidecar so
+/// the library reverts to showing the basename. Always writes to the
+/// primary root (`sdmc:/flashnx/`); legacy `sdmc:/ruffle/<...>.meta.json`
+/// is left untouched (would orphan, but harmless).
+fn write_meta_sidecar(basename: &str, display_name: &str) -> bool {
+    let path = primary_user_path(&std::format!("{}.meta.json", basename));
+    if display_name.trim().is_empty() {
+        let _ = std::fs::remove_file(&path);
+        // Also try to clean up any legacy copy so the next library
+        // boot doesn't resurrect a stale display name.
+        if let Some(legacy) = find_user_file(&std::format!("{}.meta.json", basename)) {
+            let _ = std::fs::remove_file(&legacy);
+        }
+        return true;
+    }
+    let meta = MetaSidecar {
+        display_name: Some(display_name.to_string()),
+    };
+    match serde_json::to_string_pretty(&meta) {
+        Ok(json) => std::fs::write(&path, json.as_bytes()).is_ok(),
+        Err(_) => false,
+    }
+}
 
 /// Cached SWF header data parsed once at scan time. Compressed (CWS) movies
 /// also store dims here — we inflate the first ~256 bytes via flate2 to
@@ -95,6 +176,30 @@ pub(crate) struct State {
     /// to feed a stable phase into sin() animations (cursor pulse, selection
     /// pulse).
     pub(crate) anim_origin_ticks: u64,
+    // ── Phase 3.7 DISTANT mode auxiliary state ─────────────────────────
+    /// Files listed by the last archive.org metadata fetch. Populated in
+    /// `enter_distant_via_url`, cleared on every successful navigation
+    /// back to LOCAL. Indexed by `Screen::DistantFiles::selection`.
+    pub(crate) remote_files: std::vec::Vec<RemoteFile>,
+    /// Filename + target SD path of the file currently downloading. Saved
+    /// so `Screen::DistantDownloading` can show them and post-download
+    /// can `add_path` to the local list without re-deriving.
+    pub(crate) download_file_name: std::string::String,
+    pub(crate) download_out_path: std::string::String,
+    /// Last error message — shown in `Screen::DistantError` until user
+    /// dismisses with A/B.
+    pub(crate) distant_error: std::string::String,
+    /// Set of basenames already downloaded this session. Used to draw a
+    /// `✓` next to entries in `Screen::DistantFiles` so the user knows
+    /// what's been pulled. Cleared by `reset` (back-to-library).
+    pub(crate) downloaded_basenames: std::vec::Vec<std::string::String>,
+    /// URL history persisted across boots (see `distant_history.json`).
+    /// `history_idx` indexes this; 0 = oldest, len-1 = most recent.
+    /// Loaded lazily by `load_history_from_sd` on first DistantIdle entry.
+    pub(crate) url_history: std::vec::Vec<std::string::String>,
+    /// Currently-displayed history index in `Screen::DistantIdle`. Cycled
+    /// with L/R. None when history is empty.
+    pub(crate) history_idx: Option<usize>,
 }
 
 static LIBRARY: Mutex<State> = Mutex::new(State {
@@ -105,7 +210,21 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     banner_w: 0,
     banner_h: 0,
     anim_origin_ticks: 0,
+    remote_files: std::vec::Vec::new(),
+    download_file_name: std::string::String::new(),
+    download_out_path: std::string::String::new(),
+    distant_error: std::string::String::new(),
+    downloaded_basenames: std::vec::Vec::new(),
+    url_history: std::vec::Vec::new(),
+    history_idx: None,
 });
+
+/// Where the URL history persists across boots. Format: JSON array of
+/// strings, max 20 entries (LRU-style — newest at end, oldest dropped
+/// when we exceed). Lives in the same dir as `cacert.pem` so the user's
+/// `sdmc:/ruffle/` stays SWF-only.
+const HISTORY_PATH: &str = "sdmc:/switch/flash-for-switch/distant_history.json";
+const HISTORY_MAX: usize = 20;
 
 /// `visible_rows` on the list screen — keep in sync with the slot count
 /// drawn in `draw_library_list`. Picked so 1280×720 fits header + banner +
@@ -144,9 +263,16 @@ pub fn add_path(path: &str) -> bool {
         }
     };
     let color_chip = color_from_basename(&basename);
+    // Honour a per-game display-name override from the .meta.json sidecar
+    // (Phase 3.4.bis RENOMMER). Sidecar absent / unparseable / empty
+    // display_name → fall back to basename.
+    let display_name = read_meta_sidecar(&basename)
+        .and_then(|m| m.display_name)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| basename.clone());
     let entry = Entry {
         path: path.to_string(),
-        display_name: basename.clone(),
+        display_name,
         basename,
         size_bytes,
         swf_version,
@@ -164,6 +290,9 @@ pub fn add_path(path: &str) -> bool {
 /// Transition from Inactive → List (or Empty if `entries` is empty). Called
 /// after C++ has finished scanning and the GL renderer is up.
 pub fn open() {
+    // Reload URL history from SD on each open so changes from a previous
+    // .nro boot are visible. Cheap (file is <2 KB typical).
+    load_history_from_sd();
     if let Ok(mut s) = LIBRARY.lock() {
         s.anim_origin_ticks = unsafe { ruffle_tick_now() };
         s.screen = if s.entries.is_empty() {
@@ -171,6 +300,63 @@ pub fn open() {
         } else {
             Screen::List { selection: 0, scroll_offset: 0 }
         };
+    }
+}
+
+fn load_history_from_sd() {
+    let txt = match std::fs::read_to_string(HISTORY_PATH) {
+        Ok(s) => s,
+        Err(_) => return, // file absent on first ever boot, normal
+    };
+    let list: std::vec::Vec<std::string::String> = match serde_json::from_str(&txt) {
+        Ok(v) => v,
+        Err(e) => {
+            log(&std::format!("library: history JSON parse failed: {}\n", e));
+            return;
+        }
+    };
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.url_history = list;
+        if !s.url_history.is_empty() {
+            s.history_idx = Some(s.url_history.len() - 1);
+        } else {
+            s.history_idx = None;
+        }
+    }
+}
+
+fn save_history_to_sd(history: &[std::string::String]) {
+    let json = match serde_json::to_string_pretty(&history) {
+        Ok(s) => s,
+        Err(e) => {
+            log(&std::format!("library: history serialise failed: {}\n", e));
+            return;
+        }
+    };
+    if let Err(e) = std::fs::write(HISTORY_PATH, json.as_bytes()) {
+        log(&std::format!("library: history write failed: {}\n", e));
+    }
+}
+
+/// Push `url` onto the history. De-dups (if already present, moves to
+/// most-recent end). Truncates to `HISTORY_MAX`. Saves to SD.
+fn push_history(url: &str) {
+    let url = url.trim().to_string();
+    if url.is_empty() {
+        return;
+    }
+    if let Ok(mut s) = LIBRARY.lock() {
+        if let Some(pos) = s.url_history.iter().position(|u| u == &url) {
+            s.url_history.remove(pos);
+        }
+        s.url_history.push(url);
+        while s.url_history.len() > HISTORY_MAX {
+            s.url_history.remove(0);
+        }
+        s.history_idx = Some(s.url_history.len() - 1);
+        let snapshot = s.url_history.clone();
+        drop(s);
+        save_history_to_sd(&snapshot);
     }
 }
 
@@ -196,6 +382,42 @@ pub fn selected_path() -> Option<std::string::String> {
     LIBRARY.lock().ok().and_then(|s| s.selected_path.clone())
 }
 
+/// Reset the library back to Inactive — clears entries, the picked-path
+/// slot, and the menu/touches editor sub-screens. Banner texture, banner
+/// dims, and anim origin are deliberately kept so we don't re-decode +
+/// re-upload the banner PNG every back-to-library cycle. Caller (FFI
+/// `ruffle_library_reset`) MUST shutdown and re-init the renderer between
+/// game sessions because dropping the SwitchRenderBackend invalidates the
+/// banner texture handle that lives on it — we re-decode when the
+/// renderer reappears via `ruffle_library_init`.
+pub fn reset() {
+    // Cancel any download in flight before we clear state — avoids the
+    // C++ multi handle leaking + the partial file staying on SD.
+    net::cancel_download();
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.entries.clear();
+        s.selected_path = None;
+        s.screen = Screen::Inactive;
+        s.banner_tex = 0;
+        s.banner_w = 0;
+        s.banner_h = 0;
+        s.remote_files.clear();
+        s.download_file_name.clear();
+        s.download_out_path.clear();
+        s.distant_error.clear();
+        s.downloaded_basenames.clear();
+        // url_history + history_idx are deliberately NOT cleared — they
+        // persist across back-to-library cycles AND across .nro reboots
+        // (loaded fresh from SD by load_history_from_sd at every library
+        // re-open).
+    }
+    // Make sure any open keymap editor sub-screen closes too — defensive,
+    // in practice menu::close() is called by the library state machine on
+    // every exit-from-touches transition, but a back-to-library from
+    // mid-game means the user never left the in-game menu cleanly.
+    menu::close();
+}
+
 /// Forward a Switch-button down-edge from C++. Returns true if consumed.
 pub fn input(button: &str) -> bool {
     // Sub-screen: TOUCHES editor owns input while active.
@@ -211,6 +433,48 @@ pub fn input(button: &str) -> bool {
         }
         return consumed;
     }
+    // Special case: A / ZR on DistantIdle triggers swkbd or HTTPS metadata
+    // fetch, both synchronous + several seconds long. We MUST release the
+    // LIBRARY lock for the duration so render() can keep redrawing the
+    // last-known screen state and any other callers don't deadlock.
+    //
+    // Same for A on OPTIONS > RENOMMER — opens swkbd to type the new
+    // display name. Hoisted here for the same reason.
+    {
+        let screen_snap = match LIBRARY.lock() {
+            Ok(g) => g.screen,
+            Err(_) => return false,
+        };
+        if screen_snap == Screen::DistantIdle {
+            match button {
+                "A" => {
+                    // Swkbd → fetch flow. Pre-fill from history if available.
+                    run_url_fetch_flow();
+                    return true;
+                }
+                "ZR" => {
+                    // Re-fetch the currently-displayed history URL without
+                    // re-opening the keyboard. Quick "I want this same item
+                    // again" path.
+                    let url = LIBRARY
+                        .lock()
+                        .ok()
+                        .and_then(|s| s.history_idx.and_then(|i| s.url_history.get(i).cloned()));
+                    if let Some(url) = url {
+                        run_fetch_for_url(&url);
+                    }
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        if let Screen::OptionsModal { game_idx, selection } = screen_snap {
+            if button == "A" && OPTIONS_ENTRIES.get(selection).copied() == Some("RENOMMER") {
+                run_rename_flow(game_idx);
+                return true;
+            }
+        }
+    }
     let mut s = match LIBRARY.lock() {
         Ok(g) => g,
         Err(_) => return false,
@@ -219,8 +483,10 @@ pub fn input(button: &str) -> bool {
     match screen_copy {
         Screen::Inactive | Screen::Picked | Screen::Quit => false,
         Screen::Empty => {
-            if matches!(button, "Minus" | "B") {
-                s.screen = Screen::Quit;
+            match button {
+                "Minus" => { s.screen = Screen::Quit; }
+                "Y" => { s.screen = Screen::DistantIdle; }
+                _ => {}
             }
             true
         }
@@ -233,6 +499,32 @@ pub fn input(button: &str) -> bool {
             true
         }
         Screen::TouchesEditor { .. } => false,
+        Screen::DistantIdle => {
+            handle_distant_idle_input(&mut s, button);
+            true
+        }
+        Screen::DistantFiles { selection, scroll_offset } => {
+            handle_distant_files_input(&mut s, button, selection, scroll_offset);
+            true
+        }
+        Screen::DistantDownloading => {
+            // B = cancel download. Any other button is ignored during DL.
+            if matches!(button, "B") {
+                net::cancel_download();
+                s.distant_error = std::string::String::from(
+                    "Telechargement annule par l'utilisateur."
+                );
+                s.screen = Screen::DistantError;
+            }
+            true
+        }
+        Screen::DistantError => {
+            if matches!(button, "A" | "B" | "Minus") {
+                s.distant_error.clear();
+                s.screen = Screen::DistantIdle;
+            }
+            true
+        }
     }
 }
 
@@ -264,6 +556,11 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
             }
             return;
         }
+        "Y" => {
+            // Switch to DISTANT (archive.org import) mode.
+            s.screen = Screen::DistantIdle;
+            return;
+        }
         "Minus" => {
             s.screen = Screen::Quit;
             return;
@@ -271,6 +568,160 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
         _ => {}
     }
     s.screen = Screen::List { selection, scroll_offset: scroll };
+}
+
+// ── Phase 3.7: DISTANT mode input handlers ────────────────────────────
+
+fn handle_distant_idle_input(s: &mut State, button: &str) {
+    // Note: A / ZR are handled at the top of `input()` (hoisted out
+    // because they call into swkbd + HTTPS, which we can't run while
+    // holding the LIBRARY lock).
+    match button {
+        "L" => {
+            // Older entry in history (idx -= 1, wrap).
+            if !s.url_history.is_empty() {
+                let len = s.url_history.len();
+                let cur = s.history_idx.unwrap_or(len - 1);
+                let new_idx = if cur == 0 { len - 1 } else { cur - 1 };
+                s.history_idx = Some(new_idx);
+            }
+        }
+        "R" => {
+            // Newer entry in history (idx += 1, wrap).
+            if !s.url_history.is_empty() {
+                let len = s.url_history.len();
+                let cur = s.history_idx.unwrap_or(0);
+                let new_idx = if cur + 1 >= len { 0 } else { cur + 1 };
+                s.history_idx = Some(new_idx);
+            }
+        }
+        "Y" | "B" => {
+            s.screen = if s.entries.is_empty() {
+                Screen::Empty
+            } else {
+                Screen::List { selection: 0, scroll_offset: 0 }
+            };
+        }
+        "Minus" => {
+            s.screen = Screen::Quit;
+        }
+        _ => {}
+    }
+}
+
+/// Drive the full "user typed a URL → fetch metadata → show files" flow.
+/// Called from `input()` only — never holds the LIBRARY lock during the
+/// swkbd or HTTPS calls (both are seconds-long blocking). The swkbd
+/// pre-fills with the currently-displayed history URL so editing a
+/// neighbouring item is one-character-change away.
+fn run_url_fetch_flow() {
+    // Snapshot current history URL to prefill swkbd. Drop the lock
+    // before calling out to libnx.
+    let prefill = LIBRARY
+        .lock()
+        .ok()
+        .and_then(|s| s.history_idx.and_then(|i| s.url_history.get(i).cloned()));
+    let Some(url) = net::prompt_url_with_initial(prefill.as_deref()) else {
+        return; // user cancelled
+    };
+    run_fetch_for_url(&url);
+}
+
+/// Fetch the given URL and transition state. Used both by the post-swkbd
+/// path (`run_url_fetch_flow`) and by the ZR re-fetch-without-swkbd path.
+fn run_fetch_for_url(url: &str) {
+    let Some(item_id) = net::extract_item_id(url) else {
+        set_distant_error("URL invalide. Attendu une URL archive.org type https://archive.org/details/<id> ou simplement <id>.");
+        return;
+    };
+    log(&std::format!("library: fetching archive.org metadata for {}\n", item_id));
+    match net::fetch_archive_metadata(&item_id) {
+        Ok(files) if files.is_empty() => {
+            set_distant_error("Aucun fichier .SWF trouve dans cet item archive.org.");
+        }
+        Ok(files) => {
+            // Successful fetch — remember the URL for future sessions.
+            push_history(url);
+            if let Ok(mut s) = LIBRARY.lock() {
+                s.remote_files = files;
+                s.screen = Screen::DistantFiles { selection: 0, scroll_offset: 0 };
+            }
+        }
+        Err(e) => {
+            set_distant_error(&e);
+        }
+    }
+}
+
+fn handle_distant_files_input(
+    s: &mut State,
+    button: &str,
+    mut selection: usize,
+    mut scroll: usize,
+) {
+    let last = s.remote_files.len().saturating_sub(1);
+    match button {
+        "Up" | "StickLUp" => {
+            selection = if selection == 0 { last } else { selection - 1 };
+            scroll = clamp_scroll(scroll, selection);
+        }
+        "Down" | "StickLDown" => {
+            selection = if selection >= last { 0 } else { selection + 1 };
+            scroll = clamp_scroll(scroll, selection);
+        }
+        "A" => {
+            let Some(file) = s.remote_files.get(selection).cloned() else {
+                return;
+            };
+            let safe_name: std::string::String = file
+                .name
+                .chars()
+                .map(|c| if matches!(c, '/' | '\\') { '_' } else { c })
+                .collect();
+            let out_path = std::format!("{}/{}", USER_SD_ROOTS[0], safe_name);
+            // If the file is already on SD (entry exists from boot scan),
+            // block the download entirely — the OK badge is the signal,
+            // re-downloading would just waste bandwidth + overwrite the
+            // file. To play it, the user backs out to LOCAL (Y) and hits
+            // A on the same file from there. Silent no-op = no popup
+            // noise during list navigation.
+            if s.entries.iter().any(|e| e.basename == safe_name) {
+                log(&std::format!(
+                    "library: A ignore — {} deja sur SD (bascule en LOCAL pour jouer)\n",
+                    safe_name,
+                ));
+                return;
+            }
+            match net::start_download(&file.download_url, &out_path) {
+                Ok(()) => {
+                    s.download_file_name = file.name.clone();
+                    s.download_out_path = out_path;
+                    s.screen = Screen::DistantDownloading;
+                }
+                Err(e) => {
+                    s.distant_error = e;
+                    s.screen = Screen::DistantError;
+                }
+            }
+            return;
+        }
+        "B" | "Y" => {
+            s.remote_files.clear();
+            s.screen = Screen::DistantIdle;
+            return;
+        }
+        _ => {}
+    }
+    s.screen = Screen::DistantFiles { selection, scroll_offset: scroll };
+}
+
+/// Set the DistantError state + message from anywhere (used after FFI
+/// returns where we don't already hold the lock).
+fn set_distant_error(msg: &str) {
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.distant_error = msg.to_string();
+        s.screen = Screen::DistantError;
+    }
 }
 
 fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut selection: usize) {
@@ -287,15 +738,18 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                 "TOUCHES" => {
                     // Initialise the keymap for THIS game so the editor's
                     // current_binding/set_binding land in the right
-                    // sidecar file. `init_for_swf` is OnceLock and may
-                    // already have been called by a prior open; that's OK
-                    // because we ALWAYS pick a game before ruffle_init
-                    // runs, so this is the first init.
+                    // sidecar file. Re-init is a no-op if the basename
+                    // matches the last init.
                     if let Some(entry) = s.entries.get(game_idx) {
                         keymap::init_for_swf(&entry.basename);
                     }
                     menu::open();
                     s.screen = Screen::TouchesEditor { game_idx };
+                    return;
+                }
+                "RENOMMER" => {
+                    // Handled at the top of `input()` (hoisted out
+                    // because it calls into swkbd). No-op here.
                     return;
                 }
                 "RETOUR" => {
@@ -314,6 +768,38 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
         _ => {}
     }
     s.screen = Screen::OptionsModal { game_idx, selection };
+}
+
+/// RENOMMER flow: open swkbd with the current display_name pre-filled,
+/// write the .meta.json sidecar with the result, update the in-memory
+/// entry. Empty input removes the sidecar (revert to basename). Called
+/// from `input()` only — must NOT hold the LIBRARY lock during swkbd.
+fn run_rename_flow(game_idx: usize) {
+    let (basename, current_display) = match LIBRARY.lock() {
+        Ok(g) => match g.entries.get(game_idx) {
+            Some(e) => (e.basename.clone(), e.display_name.clone()),
+            None => return,
+        },
+        Err(_) => return,
+    };
+    let Some(new_name) = net::prompt_rename(&current_display) else {
+        return; // cancelled
+    };
+    let new_name_trimmed = new_name.trim().to_string();
+    let persisted = write_meta_sidecar(&basename, &new_name_trimmed);
+    if !persisted {
+        log("library: write_meta_sidecar failed (in-memory rename only)\n");
+    }
+    // Update the in-memory entry.
+    if let Ok(mut s) = LIBRARY.lock() {
+        if let Some(entry) = s.entries.get_mut(game_idx) {
+            entry.display_name = if new_name_trimmed.is_empty() {
+                entry.basename.clone()
+            } else {
+                new_name_trimmed
+            };
+        }
+    }
 }
 
 fn clamp_scroll(mut scroll: usize, selection: usize) -> usize {
@@ -390,7 +876,139 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             backend.draw_library_dim_backdrop();
             menu::draw(backend);
         }
+        // ── Phase 3.7 DISTANT mode ─────────────────────────────────────
+        Screen::DistantIdle => {
+            // Snapshot history + current pointer so render doesn't hold
+            // the lock across GL FFI.
+            let (hist_url, hist_pos) = LIBRARY
+                .lock()
+                .ok()
+                .map(|s| {
+                    let url = s.history_idx.and_then(|i| s.url_history.get(i).cloned());
+                    let pos = s.history_idx.map(|i| (i + 1, s.url_history.len()));
+                    (url, pos)
+                })
+                .unwrap_or((None, None));
+            backend.draw_library_distant_idle(hist_url.as_deref(), hist_pos);
+        }
+        Screen::DistantFiles { selection, scroll_offset } => {
+            // Union of session-downloaded basenames (filled by
+            // `on_download_finished`) and basenames already scanned
+            // from SD into `entries`. The latter catches files that
+            // were on SD before this .nro boot — fixes the "OK badge
+            // missed across sessions" report.
+            let (files, marked) = LIBRARY
+                .lock()
+                .ok()
+                .map(|s| {
+                    let mut marked = s.downloaded_basenames.clone();
+                    for e in &s.entries {
+                        if !marked.iter().any(|n| n == &e.basename) {
+                            marked.push(e.basename.clone());
+                        }
+                    }
+                    (s.remote_files.clone(), marked)
+                })
+                .unwrap_or_default();
+            backend.draw_library_distant_files(
+                selection,
+                scroll_offset,
+                &files,
+                LIST_VISIBLE_ROWS,
+                &marked,
+            );
+        }
+        Screen::DistantDownloading => {
+            // Pump the curl multi handle once per frame and check
+            // completion. The progress snapshot reflects whatever the
+            // last tick updated.
+            let (done, total) = net::download_progress();
+            // Snapshot the filename for the UI.
+            let file_name = LIBRARY
+                .lock()
+                .ok()
+                .map(|s| s.download_file_name.clone())
+                .unwrap_or_default();
+            backend.draw_library_distant_downloading(&file_name, done, total);
+            match net::tick_download() {
+                Ok(false) => {}
+                Ok(true) => on_download_finished(),
+                Err(msg) => set_distant_error(&msg),
+            }
+        }
+        Screen::DistantError => {
+            let msg = LIBRARY
+                .lock()
+                .ok()
+                .map(|s| s.distant_error.clone())
+                .unwrap_or_default();
+            backend.draw_library_distant_error(&msg);
+        }
     }
+}
+
+/// Called from `render()` after `tick_download` returns Ok(true). Adds
+/// the downloaded file to the local entries list (so it's playable when
+/// the user goes back to LOCAL) and returns to the DistantFiles screen
+/// so the user can keep picking other files from the same archive.org
+/// item without re-typing the URL. The just-downloaded basename is
+/// tracked in `downloaded_basenames` so the list shows a `✓` next to it.
+fn on_download_finished() {
+    let (out_path, file_name) = match LIBRARY.lock() {
+        Ok(g) => (g.download_out_path.clone(), g.download_file_name.clone()),
+        Err(_) => return,
+    };
+    if out_path.is_empty() {
+        return;
+    }
+    log(&std::format!("library: download finished -> {}\n", out_path));
+    // Add to the LOCAL entries list (so when the user backs out of
+    // DISTANT mode, the file appears in the LOCAL library).
+    let _ = add_or_replace_path(&out_path);
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.download_file_name.clear();
+        s.download_out_path.clear();
+        if !file_name.is_empty() && !s.downloaded_basenames.iter().any(|n| n == &file_name) {
+            s.downloaded_basenames.push(file_name);
+        }
+        // Return to DistantFiles, NOT LOCAL — the user almost certainly
+        // wants to pick more files from the same item. To go back to
+        // LOCAL they hit Y or B from the DistantFiles screen.
+        // Restore the previous selection / scroll so the list doesn't
+        // visibly jump.
+        let sel = 0;
+        let scroll = clamp_scroll(0, sel);
+        s.screen = Screen::DistantFiles { selection: sel, scroll_offset: scroll };
+    }
+}
+
+/// `add_path` with dedupe-by-path: if the basename is already known,
+/// REPLACE the entry rather than push a duplicate. Used by the download
+/// completion path so re-downloading an existing file refreshes metadata
+/// instead of growing the list.
+fn add_or_replace_path(path: &str) -> bool {
+    // We re-use add_path's header-parse via a manual inline. Cheap.
+    if !add_path(path) {
+        return false;
+    }
+    // add_path pushed unconditionally. Dedup: if there are two entries
+    // with the same path, keep the most recent (last pushed) one.
+    if let Ok(mut s) = LIBRARY.lock() {
+        // Find duplicates by path. add_path pushed the latest at the end.
+        let last_idx = s.entries.len().saturating_sub(1);
+        if last_idx == 0 {
+            return true;
+        }
+        let last_path = s.entries[last_idx].path.clone();
+        // Look earlier in the list for the same path; if found, remove it.
+        if let Some(prev_idx) = s.entries[..last_idx]
+            .iter()
+            .position(|e| e.path == last_path)
+        {
+            s.entries.remove(prev_idx);
+        }
+    }
+    true
 }
 
 pub(crate) struct LibraryListSnapshot {

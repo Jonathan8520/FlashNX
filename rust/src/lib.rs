@@ -18,16 +18,18 @@ mod ffi;
 mod keymap;
 mod library;
 mod menu;
+mod net;
 mod player;
 
 use core::ffi::{c_char, c_int};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use ruffle_core::events::{
     KeyDescriptor, KeyLocation, LogicalKey, MouseButton, NamedKey, PhysicalKey, PlayerEvent,
 };
 use ruffle_core::tag_utils::SwfMovie;
-use ruffle_core::{FloatDuration, Player, PlayerBuilder};
+use ruffle_core::config::Letterbox;
+use ruffle_core::{FloatDuration, Player, PlayerBuilder, StageAlign, StageScaleMode};
 use ruffle_render::backend::RenderBackend;
 
 use backend::audio::SwitchAudioBackend;
@@ -93,34 +95,41 @@ const VIEWPORT_H: u32 = 720;
 /// vs d_name on aarch64). Until 1.5.c writes a libnx-direct file picker
 /// (which avoids stdlib's dir reading entirely), we look for known names.
 const SWF_CANDIDATES: &[&str] = &[
+    "sdmc:/flashnx/test.swf",
+    "sdmc:/flashnx/mario.swf",
     "sdmc:/ruffle/test.swf",
     "sdmc:/ruffle/mario.swf",
     "sdmc:/ruffle/Super_Mario_63_2010.swf",
+    "sdmc:/switch/flashnx/test.swf",
     "sdmc:/switch/ruffle/test.swf",
 ];
 
-/// Path supplied at runtime by `ruffle_set_swf_path` (Phase 2.6) — C++ scans
-/// the SD card via libnx fsdev, picks the first `.swf` it finds, and stores
-/// the absolute path here. `find_and_load_swf` consults this first so we
-/// support any filename the user drops in `sdmc:/ruffle/` without rebuilding
-/// the candidates list.
-static OVERRIDE_SWF_PATH: OnceLock<std::string::String> = OnceLock::new();
+/// Path supplied at runtime by `ruffle_set_swf_path` — the library UI calls
+/// it with the path the user picked. Mutex<Option<String>> rather than
+/// OnceLock so the user can come back to the library (via the pause menu's
+/// QUITTER entry now wired to "back to library" not "exit .nro") and pick
+/// a different game — second set replaces first.
+static OVERRIDE_SWF_PATH: Mutex<Option<std::string::String>> = Mutex::new(None);
 
-/// Raw SWF bytes + synthesized URL, populated by the first successful
-/// `find_and_load_swf` and reused on every subsequent re-init (e.g. when the
-/// pause-menu's REDEMARRER tears the Player down and rebuilds it).
+/// Raw SWF bytes + synthesized URL. Populated by the first successful
+/// `find_and_load_swf` and reused on every subsequent `ruffle_init` for the
+/// SAME game (pause-menu REDEMARRER path) to avoid re-reading 15 MB from
+/// SD after newlib heap fragments.
 ///
-/// **Why**: Mario 63 is 15.3 MB. The first `std::fs::read` succeeds on a
-/// fresh heap, but after several minutes of play the newlib heap fragments
-/// (gc_arena does a lot of small allocs that scatter free blocks). When we
-/// drop the Player on restart, the big SwfMovie chunk frees but the heap
-/// can't satisfy another 15+ MB contiguous request — `read_to_end` reports
-/// `OutOfMemory` and we'd fall back to the 43-byte embedded red screen.
-/// Caching the bytes once at first boot bypasses re-reading entirely, so
-/// restart only needs the smaller transient SwfMovie::from_data
-/// decompression buffer (~25 MB) which fits comfortably in the headroom
-/// freed by dropping the old Player.
-static CACHED_SWF: OnceLock<(std::vec::Vec<u8>, std::string::String)> = OnceLock::new();
+/// **Why the cache exists**: Mario 63 is 15.3 MB. The first `std::fs::read`
+/// succeeds on a fresh heap, but after several minutes of play the heap
+/// fragments (gc_arena does a lot of small allocs that scatter free
+/// blocks). When we drop the Player on restart, the big SwfMovie chunk
+/// frees but the heap can't satisfy another 15+ MB contiguous request —
+/// `read_to_end` reports `OutOfMemory`. Caching avoids re-reading.
+///
+/// **Why Mutex<Option<>> not OnceLock**: back-to-library can pick a
+/// DIFFERENT game from last session. We `ruffle_library_reset` the cache
+/// before re-scanning so the new pick gets read fresh from SD. (Same-game
+/// REDEMARRER still hits the cache because we DON'T reset between
+/// REDEMARRER cycles — only between back-to-library cycles.)
+static CACHED_SWF: Mutex<Option<(std::vec::Vec<u8>, std::string::String)>> =
+    Mutex::new(None);
 
 /// Called from C++ (cpp/src/swf_picker.cpp) before `ruffle_init`. Copies the
 /// path into a Rust-owned String. Idempotent — only the first call sticks.
@@ -136,7 +145,9 @@ pub extern "C" fn ruffle_set_swf_path(path: *const c_char) -> c_int {
     let Ok(string) = s.to_str() else {
         return -2;
     };
-    let _ = OVERRIDE_SWF_PATH.set(std::string::String::from(string));
+    if let Ok(mut g) = OVERRIDE_SWF_PATH.lock() {
+        *g = Some(std::string::String::from(string));
+    }
     0
 }
 
@@ -199,14 +210,15 @@ pub extern "C" fn ruffle_init() -> c_int {
     };
     log(b"ruffle_init: renderer constructed\n\0");
 
-    // SharedObject persistence (Phase 2.4.bis). Stored next to the game on
-    // SD so the user can manage saves alongside the SWFs (e.g. drop in a
-    // `.sol` exported from Ruffle desktop / Flash Player on PC, or back up
-    // progression). Full layout under here is `<host>/<swf_path>/<name>.sol`
-    // — Ruffle builds that key string itself, our backend just appends
-    // `.sol` and joins with this base.
-    let storage_path = std::path::PathBuf::from("sdmc:/ruffle/saves");
-    let storage = SwitchStorageBackend::new(storage_path);
+    // SharedObject persistence — flat layout next to the .swf files
+    // (Phase 3.4 / 2026-05-26 nuit revision). New saves go to
+    // `sdmc:/flashnx/<basename>.<sol_name>.sol`; legacy saves under
+    // `sdmc:/ruffle/saves/<host>/<basename>/<sol_name>.sol` (or the
+    // brief intermediate `sdmc:/flashnx/saves/...`) are still read via
+    // the backend's read-fallback path.
+    let flat_root = std::path::PathBuf::from("sdmc:/flashnx");
+    let legacy_root = std::path::PathBuf::from("sdmc:/ruffle/saves");
+    let storage = SwitchStorageBackend::new(flat_root, legacy_root);
 
     let mut builder = PlayerBuilder::new()
         .with_boxed_renderer(std::boxed::Box::new(renderer) as std::boxed::Box<dyn RenderBackend>)
@@ -214,25 +226,63 @@ pub extern "C" fn ruffle_init() -> c_int {
         .with_log(SwitchLogBackend::new())
         .with_storage(std::boxed::Box::new(storage))
         .with_autoplay(true)
-        .with_viewport_dimensions(VIEWPORT_W, VIEWPORT_H, 1.0);
-    log(b"ruffle_init: audio + storage backends constructed\n\0");
+        .with_viewport_dimensions(VIEWPORT_W, VIEWPORT_H, 1.0)
+        // Force `ShowAll` — preserves aspect ratio + scales the SWF up
+        // to fill the 1280x720 viewport (letterbox bars left/right when
+        // the SWF is narrower than 16:9). `force=true` blocks AS code
+        // from setting `Stage.scaleMode = "noScale"` (the failure mode
+        // that left small SWFs rendering in their native size in the
+        // top-left corner — observed 2026-05-26 on Super Mario World
+        // Flash 480x320 and Flappy Bird 500x700). Trade-off: SWFs that
+        // implemented their own responsive layout via NoScale will now
+        // run as a letterboxed fixed-size canvas. The corner-rect
+        // failure mode was much worse than that, so this is the right
+        // default for a portable-console target.
+        .with_scale_mode(StageScaleMode::ShowAll, true)
+        // Force the empty StageAlign — Flash default = centered. SWFs
+        // (e.g. Mario Forever Flash, observed 2026-05-26) sometimes set
+        // `Stage.align = "L"` via AS to stick rendering to the left
+        // edge, which gives an awful "game crammed in the left half of
+        // the screen with empty space on the right" look on our 16:9
+        // viewport. `force=true` blocks the SWF from changing it.
+        .with_align(StageAlign::empty(), true)
+        // Force `Letterbox::On` — draws black bars around the SWF stage
+        // rect ALWAYS (not just in fullscreen mode, which is the
+        // `Fullscreen` default). Without this, off-stage content drawn
+        // outside the SWF's declared bounds bleeds into the viewport —
+        // observed 2026-05-26 on Flappy Bird where the off-screen
+        // pipes / sprite-pool entities were visible left/right of the
+        // playable area. Letterboxing clips the rendering to the stage
+        // rect, giving us black bars + a clean playable zone.
+        .with_letterbox(Letterbox::On);
+    log(b"ruffle_init: audio + storage backends constructed (scale_mode=ShowAll + align=centered + letterbox=On all forced)\n\0");
 
     // Look for a SWF on the SD card. First call populates `CACHED_SWF` so
     // subsequent ruffle_init invocations (e.g. menu REDEMARRER) skip the
     // expensive `std::fs::read` — see CACHED_SWF docs for the OOM reason.
-    let (movie_bytes, source_label) = ensure_swf_loaded();
+    let (movie_bytes, source_label) = match ensure_swf_loaded() {
+        Some(t) => t,
+        None => {
+            log(b"ruffle_init: no SWF available, using embedded fallback\n\0");
+            (
+                EMBEDDED_FALLBACK_SWF.to_vec(),
+                std::string::String::from("http://flashforswitch.local/SimpleRedBackground.swf"),
+            )
+        }
+    };
 
     // Load the user's keymap (sidecar → default → hardcoded fallback). Uses
     // the SWF basename to find a per-game sidecar like
     // `sdmc:/ruffle/Super_Mario_63_2010.swf.keymap.json`. Idempotent across
-    // restarts so REDEMARRER doesn't reload a different keymap mid-session.
+    // restarts so REDEMARRER doesn't reload a different keymap mid-session,
+    // but re-initialises when back-to-library picks a different game.
     let basename = source_label
         .rsplit('/')
         .next()
         .unwrap_or("unknown.swf");
     keymap::init_for_swf(basename);
 
-    match SwfMovie::from_data(movie_bytes, source_label.clone(), None) {
+    match SwfMovie::from_data(&movie_bytes, source_label.clone(), None) {
         Ok(movie) => {
             log_str(&std::format!(
                 "ruffle_init: SwfMovie parsed (version={}, dims={}x{})\n",
@@ -265,55 +315,59 @@ pub extern "C" fn ruffle_init() -> c_int {
     0
 }
 
-/// Return a reference to the cached `(bytes, url)`, loading from disk on the
-/// first call only. On every subsequent call (post-restart) returns the same
-/// data without touching the SD or growing a fresh 15+ MB Vec — see
-/// `CACHED_SWF` docs for why that matters.
-fn ensure_swf_loaded() -> &'static (std::vec::Vec<u8>, std::string::String) {
-    CACHED_SWF.get_or_init(|| {
-        match find_and_load_swf_uncached() {
-            Some((bytes, path)) => {
-                log_str(&std::format!(
-                    "ruffle_init: loaded {} bytes from {} (cached for future restarts)\n",
-                    bytes.len(),
-                    path,
-                ));
-                // Ruffle's URL parser rejects "sdmc" as an IDN, so we
-                // synthesize an http URL keyed by the basename. Stable
-                // across restarts → SharedObject paths stay the same.
-                let basename = path
-                    .rsplit(['/', '\\'])
-                    .next()
-                    .unwrap_or("movie.swf");
-                let url = std::format!("http://flashforswitch.local/{}", basename);
-                (bytes, url)
-            }
-            None => {
-                log_str(&std::format!(
-                    "ruffle_init: no .swf found on SD, using embedded fallback ({} bytes)\n",
-                    EMBEDDED_FALLBACK_SWF.len(),
-                ));
-                (
-                    EMBEDDED_FALLBACK_SWF.to_vec(),
-                    std::string::String::from(
-                        "http://flashforswitch.local/SimpleRedBackground.swf",
-                    ),
-                )
-            }
+/// Return the cached `(bytes, url)`, loading from disk on the first call
+/// for the current cache slot. Subsequent calls (post-REDEMARRER) clone
+/// the cached bytes without touching the SD — see `CACHED_SWF` docs for
+/// why that matters. The cache is cleared by `ruffle_library_reset` so
+/// back-to-library pick of a different game gets fresh bytes.
+///
+/// Returns None when no SWF candidate read succeeds at all; the caller
+/// then falls back to the embedded red SWF.
+fn ensure_swf_loaded() -> Option<(std::vec::Vec<u8>, std::string::String)> {
+    if let Ok(g) = CACHED_SWF.lock() {
+        if let Some(cached) = g.as_ref() {
+            // ~15 MB clone — measured at ~30 ms on Switch CPU. Acceptable
+            // overhead for the back-to-library use case; pause-menu
+            // REDEMARRER still benefits from skipping the SD read.
+            return Some(cached.clone());
         }
-    })
+    }
+    let (bytes, path) = find_and_load_swf_uncached()?;
+    log_str(&std::format!(
+        "ruffle_init: loaded {} bytes from {} (cached for future restarts)\n",
+        bytes.len(),
+        path,
+    ));
+    // Ruffle's URL parser rejects "sdmc" as an IDN, so we synthesize an
+    // http URL keyed by the basename. Stable across restarts → SharedObject
+    // paths stay the same.
+    let basename = path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("movie.swf");
+    let url = std::format!("http://flashforswitch.local/{}", basename);
+    let entry = (bytes, url);
+    if let Ok(mut g) = CACHED_SWF.lock() {
+        *g = Some(entry.clone());
+    }
+    Some(entry)
 }
 
-/// Try the runtime override path (set by C++ swf_picker.cpp via
-/// `ruffle_set_swf_path`) first, then fall back to `SWF_CANDIDATES`.
-/// Returns the first file we can successfully read. Only called once —
-/// `ensure_swf_loaded` memoises the result.
+/// Try the runtime override path (set by C++ via `ruffle_set_swf_path`)
+/// first, then fall back to `SWF_CANDIDATES`. Returns the first file we
+/// can successfully read.
 fn find_and_load_swf_uncached() -> Option<(std::vec::Vec<u8>, std::string::String)> {
-    if let Some(path) = OVERRIDE_SWF_PATH.get() {
-        match std::fs::read(path) {
+    // Snapshot the override path so we don't hold the lock across the
+    // (slow) `std::fs::read` call.
+    let override_path: Option<std::string::String> = OVERRIDE_SWF_PATH
+        .lock()
+        .ok()
+        .and_then(|g| g.clone());
+    if let Some(path) = override_path {
+        match std::fs::read(&path) {
             Ok(bytes) => {
                 log_str(&std::format!("scan: using override path {}\n", path));
-                return Some((bytes, path.clone()));
+                return Some((bytes, path));
             }
             Err(err) => {
                 log_str(&std::format!(
@@ -566,6 +620,14 @@ pub extern "C" fn ruffle_library_init() -> c_int {
     if let Ok(mut slot) = LIBRARY_RENDERER.lock() {
         *slot = Some(renderer);
     }
+    // Phase 3.7 — write embedded CA bundle to SD so libcurl can verify
+    // TLS certs. Cheap & idempotent (no-op if already present at the
+    // right size). Done here once per `.nro` boot, not per library cycle.
+    net::boot_init();
+    // Make sure the user-facing root dir exists. Downloads write here
+    // and the SD scan list reads from it. Idempotent (errors on EEXIST
+    // are silently swallowed by `create_dir_all`).
+    let _ = std::fs::create_dir_all("sdmc:/flashnx");
     log(b"library_init: standalone renderer + banner ready\n\0");
     0
 }
@@ -650,6 +712,25 @@ pub extern "C" fn ruffle_library_shutdown() {
     }
 }
 
+/// Reset all per-game state so the next library cycle picks up a fresh
+/// game cleanly: library entries cleared, keymap dropped (next
+/// `init_for_swf` re-reads sidecar), CACHED_SWF + OVERRIDE_SWF_PATH
+/// cleared (next `ruffle_init` re-reads the new pick from SD). Called by
+/// C++ when the user picks QUITTER in the in-game pause menu and we
+/// loop back to the library.
+#[no_mangle]
+pub extern "C" fn ruffle_library_reset() {
+    log(b"library_reset: clearing entries / keymap / SWF cache / override\n\0");
+    library::reset();
+    keymap::reset();
+    if let Ok(mut g) = CACHED_SWF.lock() {
+        *g = None;
+    }
+    if let Ok(mut g) = OVERRIDE_SWF_PATH.lock() {
+        *g = None;
+    }
+}
+
 /// Switch button codes shared with `cpp/src/main.cpp`. Keep these in sync.
 /// We map joycon → Flash key events; Mario 63 (and most AS2 Flash games)
 /// use Space/Z for jump, Enter for start, arrows for movement.
@@ -665,6 +746,51 @@ pub(crate) const SK_Z: c_int = 8;
 pub(crate) const SK_X: c_int = 9;
 pub(crate) const SK_SHIFT: c_int = 10;
 pub(crate) const SK_P: c_int = 11;
+// Full alphabet — A-Z minus Z/X/P which already have constants. Order
+// = alphabetical for readability; the numeric SK_* values are an
+// opaque enum (only matters that they're unique and stable). Phase
+// 3.3.bis (2026-05-26 nuit) — bumped from 12-key platformer subset to
+// full keyboard so games binding to arbitrary letters (Flappy Bird
+// "press A to jump", Mario Forever "press W to throw", etc.) work.
+pub(crate) const SK_A: c_int = 12;
+pub(crate) const SK_B: c_int = 13;
+pub(crate) const SK_C: c_int = 14;
+pub(crate) const SK_D: c_int = 15;
+pub(crate) const SK_E: c_int = 16;
+pub(crate) const SK_F: c_int = 17;
+pub(crate) const SK_G: c_int = 18;
+pub(crate) const SK_H: c_int = 19;
+pub(crate) const SK_I: c_int = 20;
+pub(crate) const SK_J: c_int = 21;
+pub(crate) const SK_K: c_int = 22;
+pub(crate) const SK_L: c_int = 23;
+pub(crate) const SK_M: c_int = 24;
+pub(crate) const SK_N: c_int = 25;
+pub(crate) const SK_O: c_int = 26;
+pub(crate) const SK_Q: c_int = 27;
+pub(crate) const SK_R: c_int = 28;
+pub(crate) const SK_S: c_int = 29;
+pub(crate) const SK_T: c_int = 30;
+pub(crate) const SK_U: c_int = 31;
+pub(crate) const SK_V: c_int = 32;
+pub(crate) const SK_W: c_int = 33;
+pub(crate) const SK_Y: c_int = 34;
+// Digits 0-9.
+pub(crate) const SK_0: c_int = 35;
+pub(crate) const SK_1: c_int = 36;
+pub(crate) const SK_2: c_int = 37;
+pub(crate) const SK_3: c_int = 38;
+pub(crate) const SK_4: c_int = 39;
+pub(crate) const SK_5: c_int = 40;
+pub(crate) const SK_6: c_int = 41;
+pub(crate) const SK_7: c_int = 42;
+pub(crate) const SK_8: c_int = 43;
+pub(crate) const SK_9: c_int = 44;
+// Common non-letter keys.
+pub(crate) const SK_TAB: c_int = 45;
+pub(crate) const SK_BACKSPACE: c_int = 46;
+pub(crate) const SK_CONTROL: c_int = 47;
+pub(crate) const SK_ALT: c_int = 48;
 
 fn key_descriptor(code: c_int) -> Option<KeyDescriptor> {
     let (physical, logical) = match code {
@@ -675,10 +801,52 @@ fn key_descriptor(code: c_int) -> Option<KeyDescriptor> {
         SK_RIGHT => (PhysicalKey::ArrowRight, LogicalKey::Named(NamedKey::ArrowRight)),
         SK_UP => (PhysicalKey::ArrowUp, LogicalKey::Named(NamedKey::ArrowUp)),
         SK_DOWN => (PhysicalKey::ArrowDown, LogicalKey::Named(NamedKey::ArrowDown)),
-        SK_Z => (PhysicalKey::KeyZ, LogicalKey::Character('z')),
-        SK_X => (PhysicalKey::KeyX, LogicalKey::Character('x')),
         SK_SHIFT => (PhysicalKey::ShiftLeft, LogicalKey::Named(NamedKey::Shift)),
+        // A-Z (alphabetical). Each is a physical KeyX + logical char
+        // 'x' (lowercase — Flash treats the logical key as the
+        // unmodified char; Shift is handled separately).
+        SK_A => (PhysicalKey::KeyA, LogicalKey::Character('a')),
+        SK_B => (PhysicalKey::KeyB, LogicalKey::Character('b')),
+        SK_C => (PhysicalKey::KeyC, LogicalKey::Character('c')),
+        SK_D => (PhysicalKey::KeyD, LogicalKey::Character('d')),
+        SK_E => (PhysicalKey::KeyE, LogicalKey::Character('e')),
+        SK_F => (PhysicalKey::KeyF, LogicalKey::Character('f')),
+        SK_G => (PhysicalKey::KeyG, LogicalKey::Character('g')),
+        SK_H => (PhysicalKey::KeyH, LogicalKey::Character('h')),
+        SK_I => (PhysicalKey::KeyI, LogicalKey::Character('i')),
+        SK_J => (PhysicalKey::KeyJ, LogicalKey::Character('j')),
+        SK_K => (PhysicalKey::KeyK, LogicalKey::Character('k')),
+        SK_L => (PhysicalKey::KeyL, LogicalKey::Character('l')),
+        SK_M => (PhysicalKey::KeyM, LogicalKey::Character('m')),
+        SK_N => (PhysicalKey::KeyN, LogicalKey::Character('n')),
+        SK_O => (PhysicalKey::KeyO, LogicalKey::Character('o')),
         SK_P => (PhysicalKey::KeyP, LogicalKey::Character('p')),
+        SK_Q => (PhysicalKey::KeyQ, LogicalKey::Character('q')),
+        SK_R => (PhysicalKey::KeyR, LogicalKey::Character('r')),
+        SK_S => (PhysicalKey::KeyS, LogicalKey::Character('s')),
+        SK_T => (PhysicalKey::KeyT, LogicalKey::Character('t')),
+        SK_U => (PhysicalKey::KeyU, LogicalKey::Character('u')),
+        SK_V => (PhysicalKey::KeyV, LogicalKey::Character('v')),
+        SK_W => (PhysicalKey::KeyW, LogicalKey::Character('w')),
+        SK_X => (PhysicalKey::KeyX, LogicalKey::Character('x')),
+        SK_Y => (PhysicalKey::KeyY, LogicalKey::Character('y')),
+        SK_Z => (PhysicalKey::KeyZ, LogicalKey::Character('z')),
+        // 0-9.
+        SK_0 => (PhysicalKey::Digit0, LogicalKey::Character('0')),
+        SK_1 => (PhysicalKey::Digit1, LogicalKey::Character('1')),
+        SK_2 => (PhysicalKey::Digit2, LogicalKey::Character('2')),
+        SK_3 => (PhysicalKey::Digit3, LogicalKey::Character('3')),
+        SK_4 => (PhysicalKey::Digit4, LogicalKey::Character('4')),
+        SK_5 => (PhysicalKey::Digit5, LogicalKey::Character('5')),
+        SK_6 => (PhysicalKey::Digit6, LogicalKey::Character('6')),
+        SK_7 => (PhysicalKey::Digit7, LogicalKey::Character('7')),
+        SK_8 => (PhysicalKey::Digit8, LogicalKey::Character('8')),
+        SK_9 => (PhysicalKey::Digit9, LogicalKey::Character('9')),
+        // Common modifier / control keys.
+        SK_TAB => (PhysicalKey::Tab, LogicalKey::Named(NamedKey::Tab)),
+        SK_BACKSPACE => (PhysicalKey::Backspace, LogicalKey::Named(NamedKey::Backspace)),
+        SK_CONTROL => (PhysicalKey::ControlLeft, LogicalKey::Named(NamedKey::Control)),
+        SK_ALT => (PhysicalKey::AltLeft, LogicalKey::Named(NamedKey::Alt)),
         _ => return None,
     };
     Some(KeyDescriptor {

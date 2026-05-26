@@ -29,8 +29,9 @@ enum Screen {
     /// index of the topmost visible row (for the 8-rows-at-a-time window).
     List { selection: usize, scroll_offset: usize },
     /// `button_idx` indexes `EDITABLE_BUTTONS` (the row we're editing),
-    /// `selection` indexes `ALL_FLASH_KEYS`.
-    Dropdown { button_idx: usize, selection: usize },
+    /// `selection` indexes `ALL_FLASH_KEYS`, `scroll_offset` is the
+    /// topmost visible row in the dropdown's scrollable window.
+    Dropdown { button_idx: usize, selection: usize, scroll_offset: usize },
 }
 
 struct State {
@@ -49,6 +50,12 @@ static TOUCHES: Mutex<State> = Mutex::new(State {
 /// Maximum rows shown at once in the list screen. Keep in sync with the
 /// vertical space `draw_touches_list` allocates in render.rs.
 pub const LIST_VISIBLE_ROWS: usize = 8;
+/// Maximum rows shown at once in the Flash-key dropdown. Bumped from
+/// the old "fits all 12 entries" implicit cap to a fixed 10 — needed
+/// after Phase 3.3.bis expanded ALL_FLASH_KEYS to 48 entries (A-Z,
+/// 0-9, mods). 10 rows × 40 px = 400 px panel, fits 720-px tall screen
+/// with header + footer + 80 px breathing room.
+pub const DROPDOWN_VISIBLE_ROWS: usize = 10;
 
 pub fn is_active() -> bool {
     matches!(
@@ -95,8 +102,8 @@ pub fn input(button: &str) -> bool {
             handle_list_input(&mut s, button, selection, scroll_offset);
             true
         }
-        Screen::Dropdown { button_idx, selection } => {
-            handle_dropdown_input(&mut s, button, button_idx, selection);
+        Screen::Dropdown { button_idx, selection, scroll_offset } => {
+            handle_dropdown_input(&mut s, button, button_idx, selection, scroll_offset);
             true
         }
     }
@@ -115,14 +122,22 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
         }
         "A" => {
             // Open dropdown for this row. Pre-select the current binding
-            // so the cursor lands on the active value.
+            // so the cursor lands on the active value, and auto-scroll
+            // the dropdown window so the cursor is visible (especially
+            // for late-alphabet bindings like "W" that would otherwise
+            // be off-screen).
             let btn = keymap::EDITABLE_BUTTONS[selection];
             let current = keymap::current_binding(btn);
             let dropdown_sel = current
                 .as_deref()
                 .and_then(|k| keymap::ALL_FLASH_KEYS.iter().position(|x| *x == k))
                 .unwrap_or(0); // index 0 = "(aucune)"
-            s.screen = Screen::Dropdown { button_idx: selection, selection: dropdown_sel };
+            let dropdown_scroll = clamp_dropdown_scroll(0, dropdown_sel);
+            s.screen = Screen::Dropdown {
+                button_idx: selection,
+                selection: dropdown_sel,
+                scroll_offset: dropdown_scroll,
+            };
             return;
         }
         "B" | "Minus" => {
@@ -135,14 +150,22 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
     s.screen = Screen::List { selection, scroll_offset: scroll };
 }
 
-fn handle_dropdown_input(s: &mut State, button: &str, button_idx: usize, mut selection: usize) {
+fn handle_dropdown_input(
+    s: &mut State,
+    button: &str,
+    button_idx: usize,
+    mut selection: usize,
+    mut scroll: usize,
+) {
     let last = keymap::ALL_FLASH_KEYS.len().saturating_sub(1);
     match button {
         "Up" | "StickLUp" => {
             selection = if selection == 0 { last } else { selection - 1 };
+            scroll = clamp_dropdown_scroll(scroll, selection);
         }
         "Down" | "StickLDown" => {
             selection = if selection >= last { 0 } else { selection + 1 };
+            scroll = clamp_dropdown_scroll(scroll, selection);
         }
         "A" => {
             // Commit: 0 = unbind, otherwise the chosen Flash key name.
@@ -169,7 +192,7 @@ fn handle_dropdown_input(s: &mut State, button: &str, button_idx: usize, mut sel
         }
         _ => {}
     }
-    s.screen = Screen::Dropdown { button_idx, selection };
+    s.screen = Screen::Dropdown { button_idx, selection, scroll_offset: scroll };
 }
 
 /// Adjust `scroll` so the row at `selection` is visible. Window size =
@@ -179,6 +202,16 @@ fn clamp_scroll(mut scroll: usize, selection: usize) -> usize {
         scroll = selection;
     } else if selection >= scroll + LIST_VISIBLE_ROWS {
         scroll = selection + 1 - LIST_VISIBLE_ROWS;
+    }
+    scroll
+}
+
+/// Same as `clamp_scroll` but for the Flash-key dropdown window (10 rows).
+fn clamp_dropdown_scroll(mut scroll: usize, selection: usize) -> usize {
+    if selection < scroll {
+        scroll = selection;
+    } else if selection >= scroll + DROPDOWN_VISIBLE_ROWS {
+        scroll = selection + 1 - DROPDOWN_VISIBLE_ROWS;
     }
     scroll
 }
@@ -202,9 +235,15 @@ pub fn draw(backend: &mut SwitchRenderBackend) {
                 .collect();
             backend.draw_touches_list(selection, scroll_offset, &bindings, LIST_VISIBLE_ROWS);
         }
-        Screen::Dropdown { button_idx, selection } => {
+        Screen::Dropdown { button_idx, selection, scroll_offset } => {
             let btn = keymap::EDITABLE_BUTTONS[button_idx];
-            backend.draw_touches_dropdown(btn, selection, keymap::ALL_FLASH_KEYS);
+            backend.draw_touches_dropdown(
+                btn,
+                selection,
+                scroll_offset,
+                keymap::ALL_FLASH_KEYS,
+                DROPDOWN_VISIBLE_ROWS,
+            );
         }
     }
 }

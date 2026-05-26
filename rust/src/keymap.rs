@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
@@ -81,24 +81,33 @@ pub const EDITABLE_BUTTONS: &[&str] = &[
 /// arm will log "unknown Flash key" at lookup time.
 pub const ALL_FLASH_KEYS: &[&str] = &[
     "(aucune)",
+    // Common modifier / nav keys first (most used in Flash games).
     "Space",
     "Enter",
     "Escape",
-    "Up", "Down", "Left", "Right",
-    "Z", "X",
     "Shift",
-    "P",
+    "Control",
+    "Alt",
+    "Tab",
+    "Backspace",
+    "Up", "Down", "Left", "Right",
+    // Full alphabet (A-Z). Sorted so the user can navigate by letter.
+    "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
+    "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
+    // Digits 0-9.
+    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
 ];
 
 /// SWF basename the keymap was loaded for. Used by `save_sidecar` to know
-/// where to write. Set by `init_for_swf` on first call, never changes
-/// (REDEMARRER keeps the same SWF).
-static ACTIVE_BASENAME: OnceLock<std::string::String> = OnceLock::new();
+/// where to write. Set by `init_for_swf` — replaced when the user goes
+/// back to the library and picks a different game (Phase 3.4 quit-to-
+/// library flow). REDEMARRER keeps the same basename and so re-uses the
+/// already-loaded keymap.
+static ACTIVE_BASENAME: Mutex<Option<std::string::String>> = Mutex::new(None);
 
-/// In-memory keymap, behind a Mutex now (was OnceLock) because the TOUCHES
-/// editor mutates it live. Lock is held briefly across single-key edits +
-/// during sidecar write.
-static ACTIVE_KEYMAP: OnceLock<Mutex<Keymap>> = OnceLock::new();
+/// In-memory keymap. Lock is held briefly across single-key edits + during
+/// sidecar write.
+static ACTIVE_KEYMAP: Mutex<Option<Keymap>> = Mutex::new(None);
 
 fn fallback_keymap() -> Keymap {
     let mut bindings = BTreeMap::new();
@@ -106,6 +115,25 @@ fn fallback_keymap() -> Keymap {
         bindings.insert((*btn).into(), (*key).into());
     }
     Keymap { version: 1, bindings }
+}
+
+/// User-visible SD roots, priority order. Reads scan all, first hit
+/// wins. Writes always go to entry 0. Mirrors `library::USER_SD_ROOTS`
+/// — duplicated here to keep keymap a leaf module (no library dep).
+const USER_SD_ROOTS: &[&str] = &["sdmc:/flashnx", "sdmc:/ruffle"];
+
+fn find_user_path(suffix: &str) -> Option<std::string::String> {
+    for root in USER_SD_ROOTS {
+        let p = std::format!("{}/{}", root, suffix);
+        if std::path::Path::new(&p).exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+fn primary_path(suffix: &str) -> std::string::String {
+    std::format!("{}/{}", USER_SD_ROOTS[0], suffix)
 }
 
 /// Read a small JSON file using chunked 4 KB reads — same workaround as
@@ -186,50 +214,76 @@ fn write_default_to_sd(path: &str, keymap: &Keymap) {
 }
 
 /// Initialise `ACTIVE_KEYMAP` for the given SWF basename (e.g.
-/// "Super_Mario_63_2010.swf"). Called once from `ruffle_init` after we know
-/// which SWF we loaded. Subsequent calls are no-ops thanks to `OnceLock`.
-/// Idempotent across `ruffle_restart()`.
+/// "Super_Mario_63_2010.swf"). Called from `ruffle_init` and from the
+/// library's pre-launch OPTIONS > TOUCHES path. Idempotent **for the same
+/// basename** — REDEMARRER keeps the same keymap, but back-to-library +
+/// pick-different-game reloads the per-game sidecar so the user doesn't
+/// inherit the previous game's bindings.
 pub fn init_for_swf(swf_basename: &str) {
-    if ACTIVE_KEYMAP.get().is_some() {
-        // Already initialised by an earlier ruffle_init (we're being called
-        // by a restart) — keep the same keymap so REDEMARRER doesn't reload
-        // a different file mid-session.
-        return;
+    if let Ok(g) = ACTIVE_BASENAME.lock() {
+        if g.as_deref() == Some(swf_basename) {
+            // Same basename as last init — no-op.
+            return;
+        }
     }
-    let _ = ACTIVE_BASENAME.set(swf_basename.into());
-    let sidecar = std::format!("sdmc:/ruffle/{}.keymap.json", swf_basename);
-    let default = "sdmc:/ruffle/keymap_default.json";
+    // Lookup order: new `sdmc:/flashnx/` first, then legacy
+    // `sdmc:/ruffle/`. Writes (save_sidecar, default bootstrap) go to
+    // the primary `flashnx/` location.
+    let sidecar_name = std::format!("{}.keymap.json", swf_basename);
+    let sidecar = find_user_path(&sidecar_name);
+    let default = find_user_path("keymap_default.json");
+    let default_write = primary_path("keymap_default.json");
 
-    let km = if let Some(txt) = read_json_file(&sidecar) {
-        log(std::format!("keymap: using per-game sidecar {}\n", sidecar));
-        parse_keymap(&txt, &sidecar).unwrap_or_else(|| {
+    let km = if let Some(txt) = sidecar.as_deref().and_then(read_json_file) {
+        let path_str = sidecar.as_deref().unwrap_or("?");
+        log(std::format!("keymap: using per-game sidecar {}\n", path_str));
+        parse_keymap(&txt, path_str).unwrap_or_else(|| {
             log("keymap: sidecar invalid, falling back to default\n");
-            try_default_or_fallback(default)
+            try_default_or_fallback(default.as_deref())
         })
-    } else if let Some(txt) = read_json_file(default) {
-        log(std::format!("keymap: using global default {}\n", default));
-        parse_keymap(&txt, default).unwrap_or_else(|| {
+    } else if let Some(txt) = default.as_deref().and_then(read_json_file) {
+        let path_str = default.as_deref().unwrap_or("?");
+        log(std::format!("keymap: using global default {}\n", path_str));
+        parse_keymap(&txt, path_str).unwrap_or_else(|| {
             log("keymap: default invalid, falling back to hardcoded\n");
             fallback_keymap()
         })
     } else {
-        // No JSON on SD at all — write the hardcoded fallback to the global
-        // default path so the user discovers the schema in their dir on
-        // next reboot / SD inspection.
+        // No JSON on SD at all — write the hardcoded fallback to the new
+        // default path so the user discovers the schema in their flashnx
+        // dir on next reboot / SD inspection. Only on first ever boot.
         log("keymap: no JSON on SD, bootstrapping global default + using hardcoded fallback\n");
         let km = fallback_keymap();
-        write_default_to_sd(default, &km);
+        write_default_to_sd(&default_write, &km);
         km
     };
 
-    let _ = ACTIVE_KEYMAP.set(Mutex::new(km));
+    if let Ok(mut g) = ACTIVE_BASENAME.lock() {
+        *g = Some(swf_basename.into());
+    }
+    if let Ok(mut g) = ACTIVE_KEYMAP.lock() {
+        *g = Some(km);
+    }
+}
+
+/// Clear the active keymap so the next `init_for_swf` re-reads from SD.
+/// Called by `ruffle_library_reset` when the user quits a game back to
+/// the library — the next pick may be a different game with a different
+/// per-game sidecar, so we drop the current one to force a fresh load.
+pub fn reset() {
+    if let Ok(mut g) = ACTIVE_KEYMAP.lock() {
+        *g = None;
+    }
+    if let Ok(mut g) = ACTIVE_BASENAME.lock() {
+        *g = None;
+    }
 }
 
 /// Current binding for `button` (e.g. "A"), or `None` if unbound. Caller
 /// gets an owned String to avoid holding the Mutex across UI work.
 pub fn current_binding(button: &str) -> Option<std::string::String> {
-    let km = ACTIVE_KEYMAP.get()?.lock().ok()?;
-    km.bindings.get(button).cloned()
+    let g = ACTIVE_KEYMAP.lock().ok()?;
+    g.as_ref()?.bindings.get(button).cloned()
 }
 
 /// Set `button` → `flash_key` (e.g. "A" → "Space"). `None` clears the
@@ -237,12 +291,12 @@ pub fn current_binding(button: &str) -> Option<std::string::String> {
 /// across reboots. Returns false on write failure (in-memory change still
 /// applied — caller can retry / surface error).
 pub fn set_binding(button: &str, flash_key: Option<&str>) -> bool {
-    let Some(km_lock) = ACTIVE_KEYMAP.get() else { return false };
     {
-        let mut km = match km_lock.lock() {
+        let mut g = match ACTIVE_KEYMAP.lock() {
             Ok(g) => g,
             Err(_) => return false,
         };
+        let Some(km) = g.as_mut() else { return false };
         match flash_key {
             Some(k) => {
                 km.bindings.insert(button.into(), k.into());
@@ -258,13 +312,21 @@ pub fn set_binding(button: &str, flash_key: Option<&str>) -> bool {
 /// Persist the active keymap to `sdmc:/ruffle/<basename>.keymap.json`. Auto
 /// called by `set_binding`; also callable directly. Returns true on success.
 pub fn save_sidecar() -> bool {
-    let Some(basename) = ACTIVE_BASENAME.get() else { return false };
-    let Some(km_lock) = ACTIVE_KEYMAP.get() else { return false };
-    let km = match km_lock.lock() {
-        Ok(g) => g.clone(),
+    let basename = match ACTIVE_BASENAME.lock() {
+        Ok(g) => match g.as_ref() {
+            Some(b) => b.clone(),
+            None => return false,
+        },
         Err(_) => return false,
     };
-    let path = std::format!("sdmc:/ruffle/{}.keymap.json", basename);
+    let km = match ACTIVE_KEYMAP.lock() {
+        Ok(g) => match g.as_ref() {
+            Some(k) => k.clone(),
+            None => return false,
+        },
+        Err(_) => return false,
+    };
+    let path = primary_path(&std::format!("{}.keymap.json", basename));
     let json = match serde_json::to_string_pretty(&km) {
         Ok(s) => s,
         Err(e) => {
@@ -294,7 +356,8 @@ pub fn save_sidecar() -> bool {
     }
 }
 
-fn try_default_or_fallback(default_path: &str) -> Keymap {
+fn try_default_or_fallback(default_path: Option<&str>) -> Keymap {
+    let Some(default_path) = default_path else { return fallback_keymap(); };
     if let Some(txt) = read_json_file(default_path) {
         parse_keymap(&txt, default_path).unwrap_or_else(fallback_keymap)
     } else {
@@ -308,7 +371,8 @@ fn try_default_or_fallback(default_path: &str) -> Keymap {
 /// recognised. Returns `Some(SK_NONE)` if the JSON binds to a key we don't
 /// support yet — caller treats that as "ignored".
 pub fn lookup(button_name: &str) -> Option<core::ffi::c_int> {
-    let km = ACTIVE_KEYMAP.get()?.lock().ok()?;
+    let g = ACTIVE_KEYMAP.lock().ok()?;
+    let km = g.as_ref()?;
     let key_name = km.bindings.get(button_name)?;
     Some(flash_key_name_to_sk(key_name))
 }
@@ -318,20 +382,36 @@ pub fn lookup(button_name: &str) -> Option<core::ffi::c_int> {
 /// support. Unknown names log a warning and return `SK_NONE`.
 fn flash_key_name_to_sk(name: &str) -> core::ffi::c_int {
     match name {
-        "Space"  => crate::SK_SPACE,
-        "Enter"  => crate::SK_ENTER,
-        "Escape" => crate::SK_ESCAPE,
-        "Left"   => crate::SK_LEFT,
-        "Right"  => crate::SK_RIGHT,
-        "Up"     => crate::SK_UP,
-        "Down"   => crate::SK_DOWN,
-        "Z"      => crate::SK_Z,
-        "X"      => crate::SK_X,
-        "Shift"  => crate::SK_SHIFT,
-        "P"      => crate::SK_P,
+        "Space"     => crate::SK_SPACE,
+        "Enter"     => crate::SK_ENTER,
+        "Escape"    => crate::SK_ESCAPE,
+        "Shift"     => crate::SK_SHIFT,
+        "Control"   => crate::SK_CONTROL,
+        "Alt"       => crate::SK_ALT,
+        "Tab"       => crate::SK_TAB,
+        "Backspace" => crate::SK_BACKSPACE,
+        "Left"      => crate::SK_LEFT,
+        "Right"     => crate::SK_RIGHT,
+        "Up"        => crate::SK_UP,
+        "Down"      => crate::SK_DOWN,
+        // A-Z.
+        "A" => crate::SK_A, "B" => crate::SK_B, "C" => crate::SK_C,
+        "D" => crate::SK_D, "E" => crate::SK_E, "F" => crate::SK_F,
+        "G" => crate::SK_G, "H" => crate::SK_H, "I" => crate::SK_I,
+        "J" => crate::SK_J, "K" => crate::SK_K, "L" => crate::SK_L,
+        "M" => crate::SK_M, "N" => crate::SK_N, "O" => crate::SK_O,
+        "P" => crate::SK_P, "Q" => crate::SK_Q, "R" => crate::SK_R,
+        "S" => crate::SK_S, "T" => crate::SK_T, "U" => crate::SK_U,
+        "V" => crate::SK_V, "W" => crate::SK_W, "X" => crate::SK_X,
+        "Y" => crate::SK_Y, "Z" => crate::SK_Z,
+        // 0-9.
+        "0" => crate::SK_0, "1" => crate::SK_1, "2" => crate::SK_2,
+        "3" => crate::SK_3, "4" => crate::SK_4, "5" => crate::SK_5,
+        "6" => crate::SK_6, "7" => crate::SK_7, "8" => crate::SK_8,
+        "9" => crate::SK_9,
         other => {
             log(std::format!(
-                "keymap: unknown Flash key '{}' in bindings — ignored (supported: Space, Enter, Escape, Left/Right/Up/Down, Z, X, Shift, P)\n",
+                "keymap: unknown Flash key '{}' in bindings — ignored\n",
                 other,
             ));
             crate::SK_NONE

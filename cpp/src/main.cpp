@@ -21,6 +21,7 @@ extern "C" int  ruffle_library_input(const char* button_name);
 extern "C" void ruffle_library_render(void);
 extern "C" int  ruffle_library_selected_path(char* out, int cap);
 extern "C" void ruffle_library_shutdown(void);
+extern "C" void ruffle_library_reset(void);
 
 extern "C" void ruffle_handle_key(int code, bool down);
 extern "C" void ruffle_handle_mouse_move(int x, int y);
@@ -90,32 +91,101 @@ static ButtonBinding BINDINGS[] = {
 };
 static constexpr size_t BINDINGS_COUNT = sizeof(BINDINGS) / sizeof(BINDINGS[0]);
 
-// Buttons forwarded to the Rust TOUCHES sub-screen as down-edges. Names
-// match what `keymap::EDITABLE_BUTTONS` exposes (plus the nav-only ones
-// like Up/Down/A/B/Minus). Keep in sync with the EDITABLE_BUTTONS slice.
+// Buttons forwarded to the Rust TOUCHES sub-screen / library state.
+// Names match what `keymap::EDITABLE_BUTTONS` exposes. `repeat = true`
+// makes the button auto-repeat when held in menu loops (D-pad + L-stick
+// directions only — face buttons stay one-shot so held A doesn't
+// re-trigger downloads, options, etc.).
 struct MenuNavButton {
     const char* name;
     u64         mask;
+    bool        repeat;
 };
 static const MenuNavButton MENU_NAV_BUTTONS[] = {
-    { "A",            HidNpadButton_A            },
-    { "B",            HidNpadButton_B            },
-    { "X",            HidNpadButton_X            },
-    { "Y",            HidNpadButton_Y            },
-    { "L",            HidNpadButton_L            },
-    { "R",            HidNpadButton_R            },
-    { "ZL",           HidNpadButton_ZL           },
-    { "Plus",         HidNpadButton_Plus         },
-    { "Minus",        HidNpadButton_Minus        },
-    { "Up",           HidNpadButton_Up           },
-    { "Down",         HidNpadButton_Down         },
-    { "Left",         HidNpadButton_Left         },
-    { "Right",        HidNpadButton_Right        },
-    { "StickLUp",     HidNpadButton_StickLUp     },
-    { "StickLDown",   HidNpadButton_StickLDown   },
-    { "StickLLeft",   HidNpadButton_StickLLeft   },
-    { "StickLRight",  HidNpadButton_StickLRight  },
+    { "A",            HidNpadButton_A,            false },
+    { "B",            HidNpadButton_B,            false },
+    { "X",            HidNpadButton_X,            false },
+    { "Y",            HidNpadButton_Y,            false },
+    { "L",            HidNpadButton_L,            false },
+    { "R",            HidNpadButton_R,            false },
+    { "ZL",           HidNpadButton_ZL,           false },
+    // ZR is consumed by the in-game mouse-click path, but during the
+    // library / menu loops we forward its down-edge to Rust so DISTANT
+    // mode can use it as "fetch this URL without opening the keyboard".
+    // No collision because in-game and library loops are exclusive.
+    { "ZR",           HidNpadButton_ZR,           false },
+    { "Plus",         HidNpadButton_Plus,         false },
+    { "Minus",        HidNpadButton_Minus,        false },
+    { "Up",           HidNpadButton_Up,           true  },
+    { "Down",         HidNpadButton_Down,         true  },
+    { "Left",         HidNpadButton_Left,         true  },
+    { "Right",        HidNpadButton_Right,        true  },
+    { "StickLUp",     HidNpadButton_StickLUp,     true  },
+    { "StickLDown",   HidNpadButton_StickLDown,   true  },
+    { "StickLLeft",   HidNpadButton_StickLLeft,   true  },
+    { "StickLRight",  HidNpadButton_StickLRight,  true  },
 };
+static constexpr size_t MENU_NAV_COUNT =
+    sizeof(MENU_NAV_BUTTONS) / sizeof(MENU_NAV_BUTTONS[0]);
+
+// Per-button hold-to-repeat state for the menu / library loops.
+// `held_since[i]` is the tick count when the button was first pressed (0
+// = not held). `last_emit[i]` is the tick of the last forwarded event;
+// once `held_since[i] != 0`, repeat events fire after INITIAL_DELAY,
+// then every REPEAT_INTERVAL until release.
+struct MenuRepeatState {
+    u64  held_since[MENU_NAV_COUNT];
+    u64  last_emit[MENU_NAV_COUNT];
+    bool first_repeat_done[MENU_NAV_COUNT];
+};
+
+// Reset all per-button state. Call when entering a menu loop so previous
+// long-held buttons don't bleed in.
+static void menu_repeat_reset(MenuRepeatState& rs) {
+    for (size_t i = 0; i < MENU_NAV_COUNT; ++i) {
+        rs.held_since[i] = 0;
+        rs.last_emit[i] = 0;
+        rs.first_repeat_done[i] = false;
+    }
+}
+
+// Forward one frame of pad input to a Rust input callback, with auto-
+// repeat for buttons marked `repeat = true`. `forward` is called once
+// per emitted event (down-edge or repeat tick). 400 ms initial delay,
+// 80 ms repeat interval — matches standard hbmenu / Switch system feel.
+static void menu_repeat_step(
+    MenuRepeatState& rs,
+    u64 kDown, u64 kUp, u64 kHeld,
+    u64 now_tick, u64 tick_freq,
+    int (*forward)(const char* name)
+) {
+    const u64 INITIAL_DELAY = (400ULL * tick_freq) / 1000ULL;
+    const u64 REPEAT_INTERVAL = ( 80ULL * tick_freq) / 1000ULL;
+    for (size_t i = 0; i < MENU_NAV_COUNT; ++i) {
+        const auto& nb = MENU_NAV_BUTTONS[i];
+        if (kDown & nb.mask) {
+            rs.held_since[i] = now_tick;
+            rs.last_emit[i] = now_tick;
+            rs.first_repeat_done[i] = false;
+            forward(nb.name);
+        } else if (kUp & nb.mask) {
+            rs.held_since[i] = 0;
+            rs.first_repeat_done[i] = false;
+        } else if (nb.repeat && (kHeld & nb.mask) && rs.held_since[i] != 0) {
+            const u64 since_press = now_tick - rs.held_since[i];
+            if (!rs.first_repeat_done[i]) {
+                if (since_press >= INITIAL_DELAY) {
+                    rs.first_repeat_done[i] = true;
+                    rs.last_emit[i] = now_tick;
+                    forward(nb.name);
+                }
+            } else if (now_tick - rs.last_emit[i] >= REPEAT_INTERVAL) {
+                rs.last_emit[i] = now_tick;
+                forward(nb.name);
+            }
+        }
+    }
+}
 
 static void populate_bindings_from_keymap(void) {
     for (size_t i = 0; i < BINDINGS_COUNT; ++i) {
@@ -180,73 +250,80 @@ static void worker_entry(void* /*arg*/) {
     HidTouchScreenState touch_state = {0};
     bool touch_was_pressed = false;
 
+    // Tick clock — used by hold-to-repeat in the menu loops and by the
+    // game-loop dt pacing later. Hoisted here so both phases share it.
+    const uint64_t tick_freq_global = ruffle_tick_freq();
+
+    // Outer loop: library phase → game phase → (QUITTER) back to library.
+    // `exit_nro = true` on any unrecoverable failure or when the user
+    // chose to leave the launcher via QUITTER on the library screen.
+    bool exit_nro = false;
+    while (!exit_nro) {
     // ── Phase 3.4: library launcher (FlashNX picker) ───────────────────
     //
-    // Before booting Ruffle, show the library UI: scan SD, list all .swf
-    // files, let the user pick one. A=JOUER → ruffle_set_swf_path + boot
-    // Ruffle on the chosen file. -=QUITTER → exit the .nro cleanly without
-    // ever initialising Ruffle. Two SwitchRenderBackend instances are
-    // created over the boot — one for the library, dropped before Ruffle's
-    // own gets built; ~96 MB GPU arena per instance but never alive at
-    // the same time.
-    if (ruffle_library_init() == 0) {
-        // Enumerate every .swf on SD and push to the Rust library state.
-        swf_picker_run();
-        ruffle_library_open();
-
-        while (ruffle_library_active() && appletMainLoop()) {
-            padUpdate(&pad);
-            const u64 kDownLib = padGetButtonsDown(&pad);
-            // Forward joycon down-edges into the library state machine.
-            // Reuses the same MENU_NAV_BUTTONS table the pause menu uses —
-            // covers A/B/X/Y/Up/Down/Left/Right/sticks/Minus/Plus.
-            for (const auto& nb : MENU_NAV_BUTTONS) {
-                if (kDownLib & nb.mask) ruffle_library_input(nb.name);
-            }
-            ruffle_library_render();
-            gl_context_swap();
-        }
-
-        const bool picked = ruffle_library_picked() != 0;
-        char selected_path[512] = {0};
-        if (picked && ruffle_library_selected_path(selected_path, sizeof(selected_path)) == 0) {
-            std::printf("library: user picked %s\n", selected_path);
-            std::fflush(stdout);
-            // Forward the choice to Ruffle's loader (consumed by find_and_
-            // load_swf_uncached → CACHED_SWF in lib.rs).
-            ruffle_set_swf_path(selected_path);
-        } else {
-            std::printf("library: user quit (no selection) — exiting .nro\n");
-            std::fflush(stdout);
-            ruffle_library_shutdown();
-            gl_context_shutdown();
-            return;
-        }
-
-        // Drop the library's standalone SwitchRenderBackend so its GL
-        // resources (~96 MB arenas + shader programs + banner texture)
-        // free BEFORE ruffle_init allocates Ruffle's own renderer. Without
-        // this we'd peak at ~200 MB GPU during the cross-over second.
-        ruffle_library_shutdown();
-    } else {
-        // Library init failed (renderer alloc failed). Fall back to the
-        // original swf_picker first-hit logic + embedded SWF — bare bones,
-        // but at least the .nro doesn't refuse to boot.
-        std::printf("library_init failed — falling back to first-hit picker\n");
+    // Show the library UI: scan SD, list all .swf files, let the user pick
+    // one. A=JOUER → ruffle_set_swf_path + boot Ruffle. -=QUITTER from
+    // library → break out of the outer loop and exit the .nro. Two
+    // SwitchRenderBackend instances exist over the boot — one for the
+    // library (dropped before Ruffle's own gets built; ~96 MB GPU arena
+    // per instance, never alive at the same time). On each iteration of
+    // the outer loop a fresh library renderer + banner upload happens.
+    if (ruffle_library_init() != 0) {
+        std::printf("library_init failed — exiting .nro\n");
         std::fflush(stdout);
-        swf_picker_run();
+        break;
+    }
+    // Enumerate every .swf on SD and push to the Rust library state.
+    swf_picker_run();
+    ruffle_library_open();
+
+    MenuRepeatState lib_repeat;
+    menu_repeat_reset(lib_repeat);
+    while (ruffle_library_active() && appletMainLoop()) {
+        padUpdate(&pad);
+        const u64 kDownLib = padGetButtonsDown(&pad);
+        const u64 kUpLib   = padGetButtonsUp(&pad);
+        const u64 kHeldLib = padGetButtons(&pad);
+        const u64 now_lib  = ruffle_tick_now();
+        // Forward joycon edges + auto-repeat (D-pad/sticks) into the
+        // library state machine. Pause / Plus / face buttons are one-shot
+        // (no repeat) — see MENU_NAV_BUTTONS.repeat flags.
+        menu_repeat_step(lib_repeat, kDownLib, kUpLib, kHeldLib,
+                         now_lib, tick_freq_global, ruffle_library_input);
+        ruffle_library_render();
+        gl_context_swap();
     }
 
+    const bool picked = ruffle_library_picked() != 0;
+    char selected_path[512] = {0};
+    if (!picked || ruffle_library_selected_path(selected_path, sizeof(selected_path)) != 0) {
+        std::printf("library: user quit (no selection) — exiting .nro\n");
+        std::fflush(stdout);
+        ruffle_library_shutdown();
+        break;
+    }
+    std::printf("library: user picked %s\n", selected_path);
+    std::fflush(stdout);
+    // Forward the choice to Ruffle's loader (consumed by find_and_
+    // load_swf_uncached → CACHED_SWF in lib.rs).
+    ruffle_set_swf_path(selected_path);
+
+    // Drop the library's standalone SwitchRenderBackend so its GL
+    // resources (~96 MB arenas + shader programs + banner texture)
+    // free BEFORE ruffle_init allocates Ruffle's own renderer. Without
+    // this we'd peak at ~200 MB GPU during the cross-over second.
+    ruffle_library_shutdown();
+
     if (ruffle_init() != 0) {
-        std::printf("ruffle_init failed\n"); std::fflush(stdout);
-        gl_context_shutdown();
-        return;
+        std::printf("ruffle_init failed — exiting .nro\n");
+        std::fflush(stdout);
+        break;
     }
 
     // Resolve "A", "B", ..., "StickLDown" to their SK_* codes per the
     // user's keymap (loaded inside ruffle_init via keymap::init_for_swf).
-    // Done once at boot — keymap is locked in a OnceLock so it doesn't
-    // change across REDEMARRER cycles.
+    // Re-runs on each game iteration so the new pick's per-game sidecar
+    // is honoured if the user back-to-library'd and picked a different SWF.
     populate_bindings_from_keymap();
 
     // Mouse cursor — centred at start.
@@ -254,6 +331,7 @@ static void worker_entry(void* /*arg*/) {
     float cursor_y = VIEWPORT_H * 0.5f;
     ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
     bool zr_was_pressed = false;
+    touch_was_pressed = false;
 
     // Real-time pacing: instead of telling Ruffle "16.6 ms elapsed" every tick,
     // we measure actual wall-clock between iterations and let its frame
@@ -267,7 +345,15 @@ static void worker_entry(void* /*arg*/) {
     // and joycon input is rerouted to menu navigation only.
     bool menu_open = false;
     int  menu_selection = MENU_RESUME;
-    bool quit_requested = false;
+    // MENU_QUIT now means "back to library" — controlled by this flag.
+    // appletMainLoop returning false (home button → Close) also exits the
+    // inner loop but with back_to_library=false → full .nro exit.
+    bool back_to_library = false;
+
+    // Hold-to-repeat state for the in-game TOUCHES editor (16 entries
+    // scrollable list — benefits a lot from D-pad auto-repeat).
+    MenuRepeatState touches_repeat;
+    menu_repeat_reset(touches_repeat);
 
     while (appletMainLoop()) {
         padUpdate(&pad);
@@ -281,9 +367,9 @@ static void worker_entry(void* /*arg*/) {
             // input + rendering for the keymap editor. We just forward
             // joycon down-edges and ask it to draw.
             if (ruffle_touches_active()) {
-                for (const auto& nb : MENU_NAV_BUTTONS) {
-                    if (kDown & nb.mask) ruffle_touches_input(nb.name);
-                }
+                menu_repeat_step(touches_repeat, kDown, kUp, kHeld,
+                                 ruffle_tick_now(), tick_freq_global,
+                                 ruffle_touches_input);
                 // If a binding was committed, refresh our runtime BINDINGS
                 // so the change applies immediately (no need to REDEMARRER).
                 if (ruffle_touches_consume_dirty()) {
@@ -329,7 +415,7 @@ static void worker_entry(void* /*arg*/) {
                     if (ruffle_restart() != 0) {
                         std::printf("menu: ruffle_restart() failed\n");
                         std::fflush(stdout);
-                        quit_requested = true;
+                        back_to_library = true;
                         break;
                     }
                     menu_open = false;
@@ -337,10 +423,10 @@ static void worker_entry(void* /*arg*/) {
                     continue;
                 }
                 case MENU_QUIT:
-                    quit_requested = true;
+                    back_to_library = true;
                     break;
                 }
-                if (quit_requested) break;
+                if (back_to_library) break;
             }
 
             // Re-render the frozen game frame + cursor, then layer the menu
@@ -436,10 +522,25 @@ static void worker_entry(void* /*arg*/) {
         ruffle_render_frame_dt(dt_us);
         gl_context_swap();
 
-        if (quit_requested) break;
+        if (back_to_library) break;
     }
 
+    // End of game loop. Either:
+    //   - back_to_library == true: user picked QUITTER → tear down Ruffle,
+    //     reset library/keymap/SWF cache, loop back to library phase.
+    //   - back_to_library == false: appletMainLoop() returned false (home
+    //     button → Close, applet focus loss without resume, etc.) → full
+    //     .nro exit.
     ruffle_shutdown();
+    if (back_to_library) {
+        std::printf("game: QUITTER → reset + back to library\n");
+        std::fflush(stdout);
+        ruffle_library_reset();
+    } else {
+        exit_nro = true;
+    }
+    } // end of outer "while (!exit_nro)"
+
     gl_context_shutdown();
     std::printf("worker: exiting\n"); std::fflush(stdout);
 }

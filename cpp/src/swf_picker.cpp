@@ -79,11 +79,21 @@ void scan_dir_all(const char* dir) {
 
 // Public entry: populate the Rust library state with every .swf on SD.
 // Called from the worker thread BEFORE `ruffle_library_init` opens the UI.
-// Idempotent — calling twice would just duplicate entries; we don't expect
-// callers to do that.
+//
+// Scan order (Phase 3.4 / 2026-05-26 nuit rename):
+//   1. `sdmc:/flashnx/`         — new default (matches brand)
+//   2. `sdmc:/ruffle/`          — backward-compat for users coming from
+//                                 the pre-rename releases
+//   3. `sdmc:/switch/ruffle/`   — homebrew convention path, legacy
+//   4. `sdmc:/switch/flashnx/`  — homebrew convention path, new name
+//
+// Same file present in two dirs would produce two list entries (deduped
+// on basename later via `add_or_replace_path`).
 extern "C" void swf_picker_run(void) {
     static const char* DIRS[] = {
+        "sdmc:/flashnx/",
         "sdmc:/ruffle/",
+        "sdmc:/switch/flashnx/",
         "sdmc:/switch/ruffle/",
     };
     for (const char* dir : DIRS) {
