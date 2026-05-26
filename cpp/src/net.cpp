@@ -351,3 +351,32 @@ extern "C" int swkbd_prompt_url(const char* initial, char* out, int cap) {
     }
     return 0;
 }
+
+// Search prompt used by the DistantFiles list (X button). Empty input
+// clears the filter — caller decides what that means.
+extern "C" int swkbd_prompt_search(const char* initial, char* out, int cap) {
+    if (cap < 2) return -1;
+    SwkbdConfig kbd;
+    Result rc = swkbdCreate(&kbd, 0);
+    if (R_FAILED(rc)) {
+        std::printf("swkbd_prompt_search: swkbdCreate failed 0x%x\n", rc);
+        std::fflush(stdout);
+        return -1;
+    }
+    swkbdConfigMakePresetDefault(&kbd);
+    swkbdConfigSetType(&kbd, SwkbdType_QWERTY);
+    swkbdConfigSetHeaderText(&kbd, "FlashNX - Rechercher");
+    swkbdConfigSetGuideText(&kbd, "Filtre nom de fichier (vide = tout afficher)");
+    if (initial && *initial) {
+        swkbdConfigSetInitialText(&kbd, initial);
+    }
+    swkbdConfigSetStringLenMax(&kbd, (u32)(cap - 1));
+    rc = swkbdShow(&kbd, out, (size_t)cap);
+    swkbdClose(&kbd);
+    if (R_FAILED(rc)) {
+        std::printf("swkbd_prompt_search: swkbdShow rc=0x%x\n", rc);
+        std::fflush(stdout);
+        return -1;
+    }
+    return 0;
+}

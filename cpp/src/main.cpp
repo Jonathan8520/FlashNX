@@ -106,8 +106,11 @@ static const MenuNavButton MENU_NAV_BUTTONS[] = {
     { "B",            HidNpadButton_B,            false },
     { "X",            HidNpadButton_X,            false },
     { "Y",            HidNpadButton_Y,            false },
-    { "L",            HidNpadButton_L,            false },
-    { "R",            HidNpadButton_R,            false },
+    // L/R: hold-to-repeat ON so DistantFiles page-up/down can be held to
+    // scroll quickly through thousand-entry archive.org dumps. DistantIdle
+    // history cycle is fine with repeat (just bumps the visible URL index).
+    { "L",            HidNpadButton_L,            true  },
+    { "R",            HidNpadButton_R,            true  },
     { "ZL",           HidNpadButton_ZL,           false },
     // ZR is consumed by the in-game mouse-click path, but during the
     // library / menu loops we forward its down-edge to Rust so DISTANT

@@ -20,6 +20,7 @@ extern "C" {
     fn https_download_cancel();
     fn swkbd_prompt_url(initial: *const c_char, out: *mut c_char, cap: c_int) -> c_int;
     fn swkbd_prompt_rename(initial: *const c_char, out: *mut c_char, cap: c_int) -> c_int;
+    fn swkbd_prompt_search(initial: *const c_char, out: *mut c_char, cap: c_int) -> c_int;
     fn ruffle_log_cstr(msg: *const c_char);
 }
 
@@ -93,7 +94,10 @@ pub fn fetch_archive_metadata(
     item_id: &str,
 ) -> Result<std::vec::Vec<RemoteFile>, std::string::String> {
     let url = std::format!("https://archive.org/metadata/{}", item_id);
-    let mut buf = std::vec![0u8; 256 * 1024]; // 256 KB cap for metadata JSON
+    // 4 MB cap for metadata JSON. Big Flash dumps (armorgames ~500 KB,
+    // 1100+ files) blow through smaller caps and the C++ side returns -3
+    // overflow. 4 MB covers anything realistic and is a transient alloc.
+    let mut buf = std::vec![0u8; 4 * 1024 * 1024];
     let mut url_c = url.clone().into_bytes();
     url_c.push(0);
     let n = unsafe {
@@ -103,6 +107,11 @@ pub fn fetch_archive_metadata(
             buf.len() as c_int,
         )
     };
+    if n == -3 {
+        return Err(std::string::String::from(
+            "Reponse archive.org trop volumineuse (>4 MB). Item trop massif pour cette version.",
+        ));
+    }
     if n < 0 {
         return Err(std::format!(
             "Echec HTTPS (code {}). Verifiez le WiFi + l'URL.",
@@ -283,5 +292,28 @@ pub fn prompt_rename(initial: &str) -> Option<std::string::String> {
     buf.truncate(nul);
     // We allow returning an empty string (caller interprets as "revert
     // to basename"), so don't filter empties here.
+    std::string::String::from_utf8(buf).ok()
+}
+
+/// Search prompt for filtering the DistantFiles list. `initial` pre-fills
+/// the input with the currently-active filter so the user can refine it.
+/// Returns the typed text on commit (empty string = clear filter), None
+/// on cancel.
+pub fn prompt_search(initial: &str) -> Option<std::string::String> {
+    let mut buf = std::vec![0u8; 256];
+    let mut initial_owned = initial.as_bytes().to_vec();
+    initial_owned.push(0);
+    let rc = unsafe {
+        swkbd_prompt_search(
+            initial_owned.as_ptr() as *const c_char,
+            buf.as_mut_ptr() as *mut c_char,
+            buf.len() as c_int,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    let nul = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    buf.truncate(nul);
     std::string::String::from_utf8(buf).ok()
 }

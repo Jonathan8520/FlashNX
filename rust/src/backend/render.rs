@@ -2664,6 +2664,128 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
+    /// Destructive-confirm modal for OPTIONS > SUPPRIMER. Bigger / redder
+    /// than `draw_library_options` because the action is irreversible.
+    pub fn draw_library_delete_confirm(
+        &mut self,
+        game_display_name: &str,
+        basename: &str,
+    ) {
+        unsafe {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_STENCIL_TEST);
+        }
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+
+        let backdrop = Matrix {
+            a: vw, b: 0.0, c: 0.0, d: vh,
+            tx: swf::Twips::from_pixels(0.0),
+            ty: swf::Twips::from_pixels(0.0),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xCC_00_00_00), backdrop);
+
+        const PANEL_W: f32 = 720.0;
+        const PANEL_H: f32 = 360.0;
+        let panel_x = (vw - PANEL_W) * 0.5;
+        let panel_y = (vh - PANEL_H) * 0.5;
+        let panel = Matrix {
+            a: PANEL_W, b: 0.0, c: 0.0, d: PANEL_H,
+            tx: swf::Twips::from_pixels(panel_x as f64),
+            ty: swf::Twips::from_pixels(panel_y as f64),
+        };
+        // Dark red panel to signal danger.
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_40_10_18), panel);
+        <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(0xFF6060, 255), panel);
+
+        const TITLE_SCALE: f32 = 4.0;
+        let header = "SUPPRIMER ?";
+        let header_w = self.measure_text(header, TITLE_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - header_w) * 0.5,
+            panel_y + 30.0,
+            TITLE_SCALE,
+            header,
+            swf::Color::from_rgb(0xFFD740, 255),
+        );
+
+        const NAME_SCALE: f32 = 2.5;
+        let max_chars = 36usize;
+        let display = if game_display_name.chars().count() > max_chars {
+            let mut t: std::string::String = game_display_name.chars().take(max_chars - 1).collect();
+            t.push('…');
+            t
+        } else {
+            game_display_name.to_string()
+        };
+        let dw = self.measure_text(&display, NAME_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - dw) * 0.5,
+            panel_y + 105.0,
+            NAME_SCALE,
+            &display,
+            swf::Color::from_rgb(0xFFFFFF, 255),
+        );
+
+        const SUB_SCALE: f32 = 1.5;
+        let bn = std::format!("[{}]", basename);
+        let bnw = self.measure_text(&bn, SUB_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - bnw) * 0.5,
+            panel_y + 145.0,
+            SUB_SCALE,
+            &bn,
+            swf::Color::from_rgb(0xCCAAAA, 255),
+        );
+
+        const WARN_SCALE: f32 = 2.0;
+        let warn1 = "Le fichier .swf, les sauvegardes (.sol),";
+        let warn2 = "les touches et l'alias seront effaces.";
+        let w1w = self.measure_text(warn1, WARN_SCALE);
+        let w2w = self.measure_text(warn2, WARN_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - w1w) * 0.5,
+            panel_y + 195.0,
+            WARN_SCALE,
+            warn1,
+            swf::Color::from_rgb(0xFFEEDD, 255),
+        );
+        self.draw_text(
+            panel_x + (PANEL_W - w2w) * 0.5,
+            panel_y + 225.0,
+            WARN_SCALE,
+            warn2,
+            swf::Color::from_rgb(0xFFEEDD, 255),
+        );
+        let irrev = "Action irreversible.";
+        let iw = self.measure_text(irrev, WARN_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - iw) * 0.5,
+            panel_y + 260.0,
+            WARN_SCALE,
+            irrev,
+            swf::Color::from_rgb(0xFF9090, 255),
+        );
+
+        const HELP_SCALE: f32 = 2.5;
+        let help = "A: SUPPRIMER     B: ANNULER";
+        let help_w = self.measure_text(help, HELP_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - help_w) * 0.5,
+            panel_y + PANEL_H - 50.0,
+            HELP_SCALE,
+            help,
+            swf::Color::from_rgb(0xFFFFFF, 255),
+        );
+
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
     // ── Phase 3.7: DISTANT mode screens ────────────────────────────────
 
     /// Splash for `Screen::DistantIdle`. `recent_url` is the
@@ -2845,6 +2967,8 @@ impl SwitchRenderBackend {
         files: &[crate::net::RemoteFile],
         visible_rows: usize,
         downloaded: &[std::string::String],
+        filter: Option<&str>,
+        total_unfiltered: usize,
     ) {
         self.library_clear();
         let vw = self.dimensions.width as f32;
@@ -2869,7 +2993,14 @@ impl SwitchRenderBackend {
             swf::Color::from_rgb(0xFFD740, 255),
         );
 
-        let sub = std::format!("{} FICHIER(S) .SWF TROUVE(S)", files.len());
+        // Sub-line shows filter status: "23/3633 — FILTRE: mario" when
+        // filter is active, "3633 FICHIER(S) .SWF TROUVE(S)" otherwise.
+        let sub = match filter {
+            Some(f) if !f.is_empty() => {
+                std::format!("{} / {} — FILTRE: {}", files.len(), total_unfiltered, f)
+            }
+            _ => std::format!("{} FICHIER(S) .SWF TROUVE(S)", files.len()),
+        };
         let scale_s = 2.0;
         let sw = self.measure_text(&sub, scale_s);
         self.draw_text(
@@ -2953,7 +3084,7 @@ impl SwitchRenderBackend {
 
         // Footer.
         const HELP_SCALE: f32 = 2.0;
-        let help = "A:TELECHARGER (OK->JOUER)   B:RETOUR   HAUT/BAS:NAV";
+        let help = "A:TELECHARGER   B:RETOUR   X:RECHERCHE   L/R:PAGE   HAUT/BAS:NAV";
         let help_w = self.measure_text(help, HELP_SCALE);
         self.draw_text(
             (vw - help_w) * 0.5,

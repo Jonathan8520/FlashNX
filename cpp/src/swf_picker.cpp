@@ -13,11 +13,13 @@
 // then opens each file briefly to parse SWF version + size for the
 // metadata panel.
 
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "ruffle_bridge.h"
 
@@ -99,4 +101,58 @@ extern "C" void swf_picker_run(void) {
     for (const char* dir : DIRS) {
         scan_dir_all(dir);
     }
+}
+
+// Phase 3.4.bis SUPPRIMER — delete a game's .swf + every sidecar / save
+// file matching its basename. Pattern matched: file name == basename OR
+// file name starts with `<basename>.` (catches `.meta.json`,
+// `.keymap.json`, and the flat-layout `<basename>.<sol_name>.sol` saves
+// from Phase 3.9). Same opendir/readdir path as the scan to dodge the
+// Rust `read_dir` Horizon bug.
+//
+// Returns the number of files actually removed, or -1 on parameter /
+// opendir failure. Missing matches are not an error (idempotent).
+extern "C" int swf_picker_delete_game(const char* swf_path) {
+    if (!swf_path || !*swf_path) return -1;
+    const char* slash = std::strrchr(swf_path, '/');
+    if (!slash) return -1;
+    const size_t plen = std::strlen(swf_path);
+    const size_t dirlen = (size_t)(slash - swf_path) + 1; // include trailing '/'
+    const size_t blen = plen - dirlen;
+    char dir[512];
+    char basename[256];
+    if (dirlen >= sizeof(dir) || blen == 0 || blen >= sizeof(basename)) return -1;
+    std::memcpy(dir, swf_path, dirlen);
+    dir[dirlen] = '\0';
+    std::memcpy(basename, slash + 1, blen);
+    basename[blen] = '\0';
+
+    DIR* d = opendir(dir);
+    if (!d) {
+        std::printf("swf_picker_delete_game: opendir(%s) failed errno=%d\n", dir, errno);
+        std::fflush(stdout);
+        return -1;
+    }
+    int removed = 0;
+    char path[512];
+    while (struct dirent* ent = readdir(d)) {
+        const char* n = ent->d_name;
+        const bool exact = (std::strcmp(n, basename) == 0);
+        const bool prefixed =
+            !exact && std::strncmp(n, basename, blen) == 0 && n[blen] == '.';
+        if (!exact && !prefixed) continue;
+        if (ent->d_type == DT_DIR) continue; // defensive
+        const int nl = std::snprintf(path, sizeof(path), "%s%s", dir, n);
+        if (nl <= 0 || (size_t)nl >= sizeof(path)) continue;
+        if (::unlink(path) == 0) {
+            std::printf("swf_picker_delete_game: removed %s\n", path);
+            ++removed;
+        } else {
+            std::printf("swf_picker_delete_game: unlink(%s) failed errno=%d\n",
+                        path, errno);
+        }
+    }
+    closedir(d);
+    std::fflush(stdout);
+    return removed;
 }
