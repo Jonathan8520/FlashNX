@@ -35,6 +35,17 @@ tracing = "0.1.43"
 # we can name its types in src/keymap.rs.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Phase 3.4 — banner.png decode (assets/banner.png embedded via include_bytes!
+# and uploaded as a GL texture for the library UI title). `png` 0.18.x is
+# already pulled transitively by ruffle_render and `image`, so direct-dep
+# binary cost is ~0. Picked over the full `image` crate to keep the API
+# surface tight (we only need PNG, not BMP/TIFF/AVIF/WebP).
+png = "0.18"
+# Phase 3.4 — zlib decompress of SWF header chunks (compressed CWS movies
+# need the first ~64 bytes inflated to read the stage RECT for the library
+# metadata panel). Already in the dep tree via ruffle_core, declaring direct
+# so we can call the API in src/library.rs.
+flate2 = "1"
 
 [profile.release]
 opt-level = 3

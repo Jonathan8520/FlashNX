@@ -1,4 +1,4 @@
-// Phase 2.6 — scan SD card for .swf files via newlib's opendir/readdir.
+// Phase 3.4 — enumerate every .swf on SD into the library UI.
 //
 // We do this in C++ rather than Rust because Rust's `std::fs::read_dir` on
 // Horizon corrupts entry names (observed 2026-05-24: filenames came back
@@ -6,11 +6,12 @@
 // between Rust's Unix model and devkitPro's newlib on aarch64). C-level
 // opendir/readdir via libnx fsdev does not exhibit this bug.
 //
-// We scan two locations: `sdmc:/ruffle/` (the preferred drop dir, used by
-// the desktop Ruffle frontend convention) and `sdmc:/switch/ruffle/` (a
-// fallback under the Switch homebrew convention). The first `.swf` we find
-// becomes the SWF to load. The library UI (Phase 3.4) will replace this
-// with a real list+picker once we have a font/text-rendering stack.
+// Two locations are scanned: `sdmc:/ruffle/` (the preferred drop dir, used
+// by the desktop Ruffle frontend convention) and `sdmc:/switch/ruffle/` (a
+// fallback under the Switch homebrew convention). Every `.swf` we find is
+// pushed into the Rust library state via `ruffle_library_add_path` — Rust
+// then opens each file briefly to parse SWF version + size for the
+// metadata panel.
 
 #include <cstdio>
 #include <cstring>
@@ -20,10 +21,9 @@
 
 #include "ruffle_bridge.h"
 
-// Defined in the Rust staticlib: stores the path and overrides the SWF
-// resolution that would otherwise fall back to the hardcoded candidates
-// list in lib.rs. Returns 0 on success.
-extern "C" int ruffle_set_swf_path(const char* path);
+// Defined in the Rust staticlib: pushes one (path) onto the library's
+// scan list. Rust handles reading SWF header lazily. Returns 0 on success.
+extern "C" int ruffle_library_add_path(const char* path);
 
 namespace {
 
@@ -34,61 +34,59 @@ bool ends_with_swf(const char* name) {
     return strcasecmp(name + n - 4, ".swf") == 0;
 }
 
-// Scan one directory for the first `.swf` it contains. Writes the full path
-// into `out` (up to out_cap bytes including NUL). Returns true on hit.
-bool scan_dir(const char* dir, char* out, size_t out_cap) {
+// Enumerate every `.swf` in `dir` and forward absolute paths to Rust.
+// Silent if the directory doesn't exist (SD often only has one of the two
+// candidate locations populated).
+void scan_dir_all(const char* dir) {
     DIR* d = opendir(dir);
     if (!d) {
-        std::printf("swf_picker: opendir(%s) failed (errno may be unmounted/missing dir)\n", dir);
+        std::printf("library scan: opendir(%s) failed (skip — dir absent)\n", dir);
         std::fflush(stdout);
-        return false;
+        return;
     }
-    bool found = false;
+    char path[512];
+    int found = 0;
     while (struct dirent* ent = readdir(d)) {
         if (!ends_with_swf(ent->d_name)) continue;
-        // Build "<dir>/<name>" with NUL-safe truncation.
-        const int n = std::snprintf(out, out_cap, "%s%s%s",
+        const int n = std::snprintf(path, sizeof(path), "%s%s%s",
                                     dir,
                                     (dir[std::strlen(dir) - 1] == '/') ? "" : "/",
                                     ent->d_name);
-        if (n <= 0 || (size_t)n >= out_cap) continue;
-        // Confirm it's a regular file (some dirents have d_type=DT_UNKNOWN on
-        // newlib's fsdev — fall back to stat).
-        if (ent->d_type == DT_REG || ent->d_type == DT_UNKNOWN) {
+        if (n <= 0 || (size_t)n >= sizeof(path)) {
+            std::printf("library scan: path too long, skipping %s\n", ent->d_name);
+            continue;
+        }
+        // Confirm regular file (DT_UNKNOWN on some fsdev volumes — fall back
+        // to stat). Skip dirs / symlinks / etc.
+        bool is_regular = (ent->d_type == DT_REG);
+        if (!is_regular && ent->d_type == DT_UNKNOWN) {
             struct stat st;
-            if (ent->d_type == DT_REG || (::stat(out, &st) == 0 && S_ISREG(st.st_mode))) {
-                found = true;
-                break;
+            if (::stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
+                is_regular = true;
             }
+        }
+        if (!is_regular) continue;
+        if (ruffle_library_add_path(path) == 0) {
+            ++found;
         }
     }
     closedir(d);
-    return found;
+    std::printf("library scan: %s -> %d .swf\n", dir, found);
+    std::fflush(stdout);
 }
 
 } // namespace
 
-// Public entry: scan known SWF locations and tell Rust the path to use.
-// Called from the worker thread before `ruffle_init`. Idempotent — if no
-// SWF is found, Rust falls back to its hardcoded candidates / embedded
-// red-background SWF, so we never block boot.
+// Public entry: populate the Rust library state with every .swf on SD.
+// Called from the worker thread BEFORE `ruffle_library_init` opens the UI.
+// Idempotent — calling twice would just duplicate entries; we don't expect
+// callers to do that.
 extern "C" void swf_picker_run(void) {
     static const char* DIRS[] = {
         "sdmc:/ruffle/",
         "sdmc:/switch/ruffle/",
     };
-    char path[512];
     for (const char* dir : DIRS) {
-        if (scan_dir(dir, path, sizeof(path))) {
-            std::printf("swf_picker: found %s\n", path);
-            std::fflush(stdout);
-            if (ruffle_set_swf_path(path) != 0) {
-                std::printf("swf_picker: ruffle_set_swf_path rejected %s\n", path);
-                std::fflush(stdout);
-            }
-            return;
-        }
+        scan_dir_all(dir);
     }
-    std::printf("swf_picker: no .swf found in known SD locations — Rust will use hardcoded candidates / fallback\n");
-    std::fflush(stdout);
 }

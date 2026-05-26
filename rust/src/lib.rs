@@ -16,6 +16,7 @@
 mod backend;
 mod ffi;
 mod keymap;
+mod library;
 mod menu;
 mod player;
 
@@ -531,6 +532,121 @@ pub extern "C" fn ruffle_touches_draw() {
         <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(renderer)
     {
         menu::draw(backend);
+    }
+}
+
+// ── Library boot screen (Phase 3.4) ──────────────────────────────────────
+//
+// Standalone SwitchRenderBackend used by the pre-Ruffle library UI. Lives
+// in its own slot because the Ruffle one is owned by `Player` and doesn't
+// exist yet at boot. Once the user picks a game we drop this renderer so
+// its GL resources (96 MB arena VBO/IBO, shader programs, banner texture)
+// free up before `ruffle_init` builds Ruffle's own.
+
+static LIBRARY_RENDERER: Mutex<Option<SwitchRenderBackend>> = Mutex::new(None);
+
+#[no_mangle]
+pub extern "C" fn ruffle_library_init() -> c_int {
+    let mut renderer = match SwitchRenderBackend::new(VIEWPORT_W, VIEWPORT_H) {
+        Some(r) => r,
+        None => {
+            log(b"library_init: SwitchRenderBackend::new failed\n\0");
+            return -1;
+        }
+    };
+    // Decode the embedded banner PNG and upload as a GL texture. On
+    // failure (corrupt asset, OOM) we set tex=0 and the library falls back
+    // to ASCII title — no fatal.
+    if let Some((rgba, w, h)) = library::decode_banner() {
+        let tex = renderer.upload_rgba_texture(&rgba, w, h);
+        if tex != 0 {
+            library::set_banner_texture(tex, w, h);
+        }
+    }
+    if let Ok(mut slot) = LIBRARY_RENDERER.lock() {
+        *slot = Some(renderer);
+    }
+    log(b"library_init: standalone renderer + banner ready\n\0");
+    0
+}
+
+/// Push one `.swf` path onto the library's scan list. Called by
+/// `swf_picker_run` (cpp/src/swf_picker.cpp) per file. Returns 0 on success.
+#[no_mangle]
+pub extern "C" fn ruffle_library_add_path(path: *const c_char) -> c_int {
+    if path.is_null() {
+        return -1;
+    }
+    let s = unsafe { core::ffi::CStr::from_ptr(path) };
+    let Ok(p) = s.to_str() else { return -2 };
+    if library::add_path(p) { 0 } else { -3 }
+}
+
+/// Transition the library from Inactive → List/Empty. Call after the SD
+/// scan has populated all entries.
+#[no_mangle]
+pub extern "C" fn ruffle_library_open() {
+    library::open();
+}
+
+#[no_mangle]
+pub extern "C" fn ruffle_library_active() -> c_int {
+    if library::is_active() { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn ruffle_library_picked() -> c_int {
+    if library::picked() { 1 } else { 0 }
+}
+
+/// Forward a Switch-button down-edge (e.g. "A", "Up", "Minus") to the
+/// library state machine. Returns 1 if consumed, 0 otherwise.
+#[no_mangle]
+pub extern "C" fn ruffle_library_input(button_name: *const c_char) -> c_int {
+    if button_name.is_null() {
+        return 0;
+    }
+    let s = unsafe { core::ffi::CStr::from_ptr(button_name) };
+    let Ok(b) = s.to_str() else { return 0 };
+    if library::input(b) { 1 } else { 0 }
+}
+
+/// Render one library frame to the current GL framebuffer. C++ calls
+/// `gl_context_swap` afterwards.
+#[no_mangle]
+pub extern "C" fn ruffle_library_render() {
+    let Ok(mut slot) = LIBRARY_RENDERER.lock() else { return };
+    let Some(backend) = slot.as_mut() else { return };
+    library::render(backend);
+}
+
+/// Copy the selected SWF path into a C-owned buffer. Returns 0 on success.
+/// -1 if no path was picked (user quit), -2 if `cap` is too small.
+#[no_mangle]
+pub extern "C" fn ruffle_library_selected_path(out: *mut c_char, cap: c_int) -> c_int {
+    let Some(path) = library::selected_path() else { return -1 };
+    let bytes = path.as_bytes();
+    let needed = bytes.len() + 1; // +1 for NUL
+    if (cap as usize) < needed {
+        return -2;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, bytes.len());
+        *out.add(bytes.len()) = 0;
+    }
+    0
+}
+
+/// Drop the standalone library renderer so its GL resources (~96 MB arena
+/// + shader programs + banner texture) free BEFORE `ruffle_init` builds
+/// Ruffle's own. Idempotent.
+#[no_mangle]
+pub extern "C" fn ruffle_library_shutdown() {
+    if let Ok(mut slot) = LIBRARY_RENDERER.lock() {
+        if slot.is_some() {
+            log(b"library_shutdown: dropping standalone renderer\n\0");
+        }
+        *slot = None;
     }
 }
 

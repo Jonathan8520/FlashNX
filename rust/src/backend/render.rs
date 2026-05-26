@@ -2156,6 +2156,495 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
+    // ── Library UI (Phase 3.4) ──────────────────────────────────────────
+
+    /// Upload an RGBA8 byte buffer as a standalone GL texture (not packed
+    /// into any atlas). Used by the library boot path to upload
+    /// `assets/banner.png` as a single texture that survives until the
+    /// library renderer is dropped. Returns the GL id, or 0 on failure.
+    pub fn upload_rgba_texture(&mut self, rgba: &[u8], width: u32, height: u32) -> GLuint {
+        if width == 0 || height == 0 || rgba.len() < (width as usize) * (height as usize) * 4 {
+            return 0;
+        }
+        let mut tex: GLuint = 0;
+        unsafe {
+            glGenTextures(1, &mut tex);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glTexImage2D(
+                GL_TEXTURE_2D,
+                0,
+                GL_RGBA8 as GLint,
+                width as GLsizei,
+                height as GLsizei,
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                rgba.as_ptr() as *const _,
+            );
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as GLint);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as GLint);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as GLint);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as GLint);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+        // The cache thinks unit 0 is bound to whatever was there before. We
+        // just clobbered it via the upload binds + unbind — invalidate so
+        // the next draw re-binds correctly.
+        self.gl_state.invalidate();
+        tex
+    }
+
+    /// Draw a screen-aligned axis-aligned textured rectangle. Uses the
+    /// existing `bitmap_prog` + unit-quad VAO; no per-call buffer upload.
+    /// Identity color transform (mult=1, add=0).
+    pub fn draw_textured_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        tex: GLuint,
+    ) {
+        if tex == 0 || w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let mat = Matrix {
+            a: w,
+            b: 0.0,
+            c: 0.0,
+            d: h,
+            tx: swf::Twips::from_pixels(x as f64),
+            ty: swf::Twips::from_pixels(y as f64),
+        };
+        let world = self.world_matrix(&mat);
+        let mult = [1.0, 1.0, 1.0, 1.0];
+        let add = [0.0, 0.0, 0.0, 0.0];
+        let uv_remap = [0.0, 0.0, 1.0, 1.0];
+        self.use_bitmap(&world, &mult, &add, tex, &uv_remap);
+        self.gl_state.bind_vao(self.bitmap_vao);
+        unsafe {
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+        }
+    }
+
+    /// Full-screen black clear used at the top of each library render. We
+    /// own the framebuffer here (no Ruffle behind us pre-init).
+    pub fn library_clear(&mut self) {
+        unsafe {
+            glDisable(GL_STENCIL_TEST);
+            glDisable(GL_BLEND);
+            glClearColor(0.078, 0.125, 0.219, 1.0); // dark navy, matches panels
+            glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        }
+        self.gl_state.invalidate();
+    }
+
+    /// Empty-state screen — no `.swf` found on SD. Shows where to drop files.
+    pub fn draw_library_empty(&mut self) {
+        self.library_clear();
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+
+        let title = "AUCUN JEU";
+        let scale_title = 6.0;
+        let title_w = self.measure_text(title, scale_title);
+        // Drop shadow on the title — dark navy offset (4, 4) under the white.
+        self.draw_text(
+            (vw - title_w) * 0.5 + 4.0,
+            vh * 0.30 + 4.0,
+            scale_title,
+            title,
+            swf::Color::from_rgb(0x000000, 255),
+        );
+        self.draw_text(
+            (vw - title_w) * 0.5,
+            vh * 0.30,
+            scale_title,
+            title,
+            swf::Color::from_rgb(0xFFD740, 255),
+        );
+
+        let lines = [
+            "DEPOSEZ DES FICHIERS .SWF DANS",
+            "SDMC:/RUFFLE/   OU   SDMC:/SWITCH/RUFFLE/",
+            "PUIS REDEMARREZ FLASHNX.",
+        ];
+        let scale_msg = 2.5;
+        let mut y = vh * 0.48;
+        for line in &lines {
+            let w = self.measure_text(line, scale_msg);
+            self.draw_text(
+                (vw - w) * 0.5,
+                y,
+                scale_msg,
+                line,
+                swf::Color::from_rgb(0xCCCCCC, 255),
+            );
+            y += 40.0;
+        }
+
+        // Footer: only QUITTER works in the empty state.
+        const HELP_SCALE: f32 = 2.0;
+        let help = "-:QUITTER";
+        let help_w = self.measure_text(help, HELP_SCALE);
+        self.draw_text(
+            (vw - help_w) * 0.5,
+            vh - 60.0,
+            HELP_SCALE,
+            help,
+            swf::Color::from_rgb(0x99AABB, 255),
+        );
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
+    /// Main library list. Reads `entries` (snapshot — caller drops the
+    /// Mutex before this call), draws the title banner + N visible rows +
+    /// metadata panel + footer help. Animations (cursor pulse, selection
+    /// pulse) driven by `phase_ticks` (system ticks since the library
+    /// opened — see `library::State::anim_origin_ticks`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_library_list(
+        &mut self,
+        selection: usize,
+        scroll_offset: usize,
+        entries: &[crate::library::Entry],
+        visible_rows: usize,
+        banner_tex: GLuint,
+        banner_w: u32,
+        banner_h: u32,
+        phase_ticks: u64,
+    ) {
+        self.library_clear();
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+
+        // Phase in seconds (tick_freq ≈ 19.2 MHz on Switch — same as Ruffle's
+        // pacing clock). We pass it through `sinf`-style math without
+        // pulling in libm; (phase % period) is enough for visual pulses.
+        let phase_s = (phase_ticks as f64) / (unsafe { ruffle_tick_freq() } as f64);
+        // Sine via Taylor — pulls in no extra deps, accurate enough for
+        // ±5 % amplitude visual pulses. Period 1.6 s reads as "subtle
+        // breathing" rather than "annoying flash".
+        let pulse = approx_sin(phase_s as f32 * (2.0 * core::f32::consts::PI / 1.6));
+
+        // ── Banner (or ASCII title fallback) ─────────────────────────
+        let banner_y = 24.0;
+        if banner_tex != 0 && banner_w > 0 && banner_h > 0 {
+            // Centre at 720×144 (asset spec). If banner is larger we down-
+            // scale to fit the viewport with a 32-px side margin.
+            let max_w = vw - 64.0;
+            let scale = (max_w / banner_w as f32).min(1.0);
+            let draw_w = banner_w as f32 * scale;
+            let draw_h = banner_h as f32 * scale;
+            let draw_x = (vw - draw_w) * 0.5;
+            self.draw_textured_rect(draw_x, banner_y, draw_w, draw_h, banner_tex);
+        } else {
+            // ASCII fallback — same look as the empty-state title but
+            // smaller so it still leaves room for the list.
+            let title = "FLASHNX";
+            let scale_title = 5.0;
+            let title_w = self.measure_text(title, scale_title);
+            // Drop shadow.
+            self.draw_text(
+                (vw - title_w) * 0.5 + 3.0,
+                banner_y + 30.0 + 3.0,
+                scale_title,
+                title,
+                swf::Color::from_rgb(0x000000, 255),
+            );
+            self.draw_text(
+                (vw - title_w) * 0.5,
+                banner_y + 30.0,
+                scale_title,
+                title,
+                swf::Color::from_rgb(0xFFD740, 255),
+            );
+        }
+
+        // ── Game list ───────────────────────────────────────────────────
+        const ROW_SCALE: f32 = 3.0;
+        const ROW_SPACING: f32 = 50.0;
+        const CHIP_PAD: f32 = 12.0;
+        const CHIP_SIZE: f32 = 18.0;
+        let rows_top_y = banner_y + 170.0;
+        let rows_left_x = 80.0;
+        let chip_x = rows_left_x;
+        let label_x = rows_left_x + CHIP_SIZE + CHIP_PAD * 2.0;
+
+        let total = entries.len();
+        let end = (scroll_offset + visible_rows).min(total);
+        for (visible_idx, abs_idx) in (scroll_offset..end).enumerate() {
+            let entry = &entries[abs_idx];
+            let y = rows_top_y + visible_idx as f32 * ROW_SPACING;
+            let is_sel = abs_idx == selection;
+
+            // Color chip — small square in the per-game hash color.
+            let chip_color = swf::Color::from_rgb(entry.color_chip, 255);
+            let chip_mat = Matrix {
+                a: CHIP_SIZE, b: 0.0, c: 0.0, d: CHIP_SIZE,
+                tx: swf::Twips::from_pixels(chip_x as f64),
+                ty: swf::Twips::from_pixels((y + 4.0) as f64),
+            };
+            <Self as CommandHandler>::draw_rect(self, chip_color, chip_mat);
+
+            // Label color: amber for selection (pulsing), light grey otherwise.
+            let color = if is_sel {
+                // Pulse amber [0xFFD740] ↔ [0xFFEC8B]. Linear blend on each
+                // channel; 0.5 (pulse+1)/2 stays in [0,1].
+                let p = (pulse * 0.5) + 0.5;
+                let r = (0xFF as f32 + (0xFF - 0xFF) as f32 * p) as u32;
+                let g = (0xD7 as f32 + (0xEC - 0xD7) as f32 * p) as u32;
+                let b = (0x40 as f32 + (0x8B - 0x40) as f32 * p) as u32;
+                swf::Color::from_rgb((r << 16) | (g << 8) | b, 255)
+            } else {
+                swf::Color::from_rgb(0xCCCCCC, 255)
+            };
+            if is_sel {
+                // Animated cursor — `►` shape, x position breathes by a few
+                // pixels each cycle.
+                let cursor_dx = pulse * 4.0;
+                self.draw_text(label_x - 36.0 + cursor_dx, y, ROW_SCALE, ">", color);
+            }
+            // Truncate display name if it would overflow the visible area
+            // (1280 - label_x - margin). 22 chars at scale 3 ≈ 396 px.
+            let max_chars = 24usize;
+            let display = if entry.display_name.chars().count() > max_chars {
+                let mut t: std::string::String = entry.display_name.chars().take(max_chars - 1).collect();
+                t.push('…');
+                t
+            } else {
+                entry.display_name.clone()
+            };
+            self.draw_text(label_x, y, ROW_SCALE, &display, color);
+        }
+
+        // Scrollbar on the right edge if needed.
+        if total > visible_rows {
+            let bar_x = vw - 30.0;
+            let bar_top_y = rows_top_y;
+            let bar_h_total = visible_rows as f32 * ROW_SPACING;
+            let bar_h_thumb = (bar_h_total * visible_rows as f32 / total as f32).max(20.0);
+            let progress = scroll_offset as f32 / (total - visible_rows) as f32;
+            let thumb_y = bar_top_y + (bar_h_total - bar_h_thumb) * progress;
+            let track = Matrix {
+                a: 4.0, b: 0.0, c: 0.0, d: bar_h_total,
+                tx: swf::Twips::from_pixels(bar_x as f64),
+                ty: swf::Twips::from_pixels(bar_top_y as f64),
+            };
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x40_99AABB), track);
+            let thumb = Matrix {
+                a: 4.0, b: 0.0, c: 0.0, d: bar_h_thumb,
+                tx: swf::Twips::from_pixels(bar_x as f64),
+                ty: swf::Twips::from_pixels(thumb_y as f64),
+            };
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), thumb);
+        }
+
+        // ── Metadata panel (bottom strip) ──────────────────────────────
+        if let Some(entry) = entries.get(selection) {
+            let panel_y = vh - 130.0;
+            let panel_x = 40.0;
+            let panel_w = vw - 80.0;
+            let panel_h = 70.0;
+            let panel_mat = Matrix {
+                a: panel_w, b: 0.0, c: 0.0, d: panel_h,
+                tx: swf::Twips::from_pixels(panel_x as f64),
+                ty: swf::Twips::from_pixels(panel_y as f64),
+            };
+            <Self as CommandHandler>::draw_rect(
+                self,
+                swf::Color::from_rgba(0xC0_20_2C_40),
+                panel_mat,
+            );
+
+            // Display name (larger).
+            self.draw_text(
+                panel_x + 20.0,
+                panel_y + 10.0,
+                3.0,
+                &entry.display_name,
+                swf::Color::from_rgb(0xFFFFFF, 255),
+            );
+            // Sub-line: size · compression · version · dims.
+            let size_str = format_size_pretty(entry.size_bytes);
+            let dims_str = match (entry.width_px, entry.height_px) {
+                (Some(w), Some(h)) => std::format!("{}X{}", w, h),
+                _ => std::string::String::from("?X?"),
+            };
+            let meta = std::format!(
+                "{} // SWF V{} {} // {}",
+                size_str,
+                entry.swf_version,
+                entry.compression_label,
+                dims_str,
+            );
+            self.draw_text(
+                panel_x + 20.0,
+                panel_y + 42.0,
+                2.0,
+                &meta,
+                swf::Color::from_rgb(0xAABFD8, 255),
+            );
+
+            // Tiny basename in lower-right (so the user always sees the
+            // physical filename — matters when display_name diverges in
+            // Phase 3.4.bis RENOMMER).
+            let bn_str = std::format!("[{}]", entry.basename);
+            let bn_w = self.measure_text(&bn_str, 1.5);
+            self.draw_text(
+                panel_x + panel_w - bn_w - 20.0,
+                panel_y + panel_h - 22.0,
+                1.5,
+                &bn_str,
+                swf::Color::from_rgb(0x7A8A9C, 255),
+            );
+        }
+
+        // Footer.
+        const HELP_SCALE: f32 = 2.0;
+        let help = "A:JOUER   X:OPTIONS   -:QUITTER   HAUT/BAS:NAV";
+        let help_w = self.measure_text(help, HELP_SCALE);
+        self.draw_text(
+            (vw - help_w) * 0.5,
+            vh - 42.0,
+            HELP_SCALE,
+            help,
+            swf::Color::from_rgb(0x99AABB, 255),
+        );
+
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
+    /// OPTIONS modal — small panel showing the game name + per-game options.
+    /// v1: only TOUCHES + RETOUR.
+    pub fn draw_library_options(
+        &mut self,
+        game_display_name: &str,
+        selection: usize,
+        options: &[&str],
+    ) {
+        unsafe {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_STENCIL_TEST);
+        }
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+
+        let backdrop = Matrix {
+            a: vw, b: 0.0, c: 0.0, d: vh,
+            tx: swf::Twips::from_pixels(0.0),
+            ty: swf::Twips::from_pixels(0.0),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xB0_00_00_00), backdrop);
+
+        const PANEL_W: f32 = 520.0;
+        let row_h: f32 = 50.0;
+        let panel_h = 180.0 + options.len() as f32 * row_h + 60.0;
+        let panel_x = (vw - PANEL_W) * 0.5;
+        let panel_y = (vh - panel_h) * 0.5;
+        let panel = Matrix {
+            a: PANEL_W, b: 0.0, c: 0.0, d: panel_h,
+            tx: swf::Twips::from_pixels(panel_x as f64),
+            ty: swf::Twips::from_pixels(panel_y as f64),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_14_20_38), panel);
+        <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(0xFFFFFF, 255), panel);
+
+        // Header.
+        const TITLE_SCALE: f32 = 3.0;
+        let header = "OPTIONS";
+        let header_w = self.measure_text(header, TITLE_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - header_w) * 0.5,
+            panel_y + 25.0,
+            TITLE_SCALE,
+            header,
+            swf::Color::from_rgb(0xFFFFFF, 255),
+        );
+        // Game name (sub-title).
+        const SUB_SCALE: f32 = 2.0;
+        // Truncate game name to fit the panel.
+        let max_chars = 28usize;
+        let sub = if game_display_name.chars().count() > max_chars {
+            let mut t: std::string::String = game_display_name.chars().take(max_chars - 1).collect();
+            t.push('…');
+            t
+        } else {
+            game_display_name.to_string()
+        };
+        let sub_w = self.measure_text(&sub, SUB_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - sub_w) * 0.5,
+            panel_y + 75.0,
+            SUB_SCALE,
+            &sub,
+            swf::Color::from_rgb(0xAABFD8, 255),
+        );
+
+        // Options list.
+        const OPT_SCALE: f32 = 2.5;
+        let opts_top_y = panel_y + 140.0;
+        let opts_left_x = panel_x + 120.0;
+        for (i, opt) in options.iter().enumerate() {
+            let y = opts_top_y + i as f32 * row_h;
+            let is_sel = i == selection;
+            let color = if is_sel {
+                swf::Color::from_rgb(0xFFD740, 255)
+            } else {
+                swf::Color::from_rgb(0xCCCCCC, 255)
+            };
+            if is_sel {
+                self.draw_text(opts_left_x - 30.0, y, OPT_SCALE, ">", color);
+            }
+            self.draw_text(opts_left_x, y, OPT_SCALE, opt, color);
+        }
+
+        // Footer.
+        const HELP_SCALE: f32 = 2.0;
+        let help = "A:OK   B:RETOUR";
+        let help_w = self.measure_text(help, HELP_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - help_w) * 0.5,
+            panel_y + panel_h - 38.0,
+            HELP_SCALE,
+            help,
+            swf::Color::from_rgb(0x99AABB, 255),
+        );
+
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
+    /// Dim backdrop used when the menu module's TOUCHES editor is on top of
+    /// the library (pre-launch keymap edit). Quick black fill — no library
+    /// content underneath, no Ruffle render — just a flat backdrop so
+    /// `menu::draw` sits on something solid.
+    pub fn draw_library_dim_backdrop(&mut self) {
+        unsafe {
+            glDisable(GL_STENCIL_TEST);
+            glClearColor(0.04, 0.06, 0.10, 1.0);
+            glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        }
+        self.gl_state.invalidate();
+    }
+
     // ── Mask state machine ──
     //
     // Flash mask sequence for one mask:
@@ -2225,6 +2714,44 @@ impl SwitchRenderBackend {
             }
         }
     }
+}
+
+/// Format a byte count as a short pretty string ("3 KB", "15 MB"). Picks
+/// the largest unit that keeps the integer part ≤ 999. KiB-style (1024)
+/// instead of decimal because that's what hbmenu / fsadm show for files.
+fn format_size_pretty(bytes: u64) -> std::string::String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    const GB: u64 = 1024 * 1024 * 1024;
+    if bytes >= GB {
+        std::format!("{}.{} GB", bytes / GB, (bytes % GB) / (GB / 10))
+    } else if bytes >= MB {
+        std::format!("{} MB", bytes / MB)
+    } else if bytes >= KB {
+        std::format!("{} KB", bytes / KB)
+    } else {
+        std::format!("{} B", bytes)
+    }
+}
+
+/// Cheap sin approximation for UI animations. Bhaskara-I-style polynomial
+/// — accurate to ~3 decimal places, no libm dependency, branch-free except
+/// for the period fold. Plenty for visual pulses (we only use it to
+/// modulate amber → bright-amber and a 4-pixel cursor offset).
+fn approx_sin(x: f32) -> f32 {
+    // Fold to [-π, π].
+    let two_pi = 2.0 * core::f32::consts::PI;
+    let mut t = x % two_pi;
+    if t > core::f32::consts::PI { t -= two_pi; }
+    if t < -core::f32::consts::PI { t += two_pi; }
+    // Bhaskara I: sin(x) ≈ 16x(π − x) / (5π² − 4x(π − x)) for x ∈ [0, π].
+    // Use sign symmetry for negative x.
+    let sign = if t < 0.0 { -1.0 } else { 1.0 };
+    let t = t.abs();
+    let pi = core::f32::consts::PI;
+    let num = 16.0 * t * (pi - t);
+    let den = 5.0 * pi * pi - 4.0 * t * (pi - t);
+    sign * (num / den)
 }
 
 impl RenderBackend for SwitchRenderBackend {

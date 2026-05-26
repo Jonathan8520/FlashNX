@@ -11,6 +11,17 @@ extern "C" void gl_context_swap(void);
 
 extern "C" void swf_picker_run(void);
 
+// Phase 3.4 — library boot screen FFI (rust/src/library.rs).
+extern "C" int  ruffle_library_init(void);
+extern "C" int  ruffle_library_add_path(const char* path);
+extern "C" void ruffle_library_open(void);
+extern "C" int  ruffle_library_active(void);
+extern "C" int  ruffle_library_picked(void);
+extern "C" int  ruffle_library_input(const char* button_name);
+extern "C" void ruffle_library_render(void);
+extern "C" int  ruffle_library_selected_path(char* out, int cap);
+extern "C" void ruffle_library_shutdown(void);
+
 extern "C" void ruffle_handle_key(int code, bool down);
 extern "C" void ruffle_handle_mouse_move(int x, int y);
 extern "C" void ruffle_handle_mouse_button(bool down);
@@ -158,10 +169,73 @@ static void worker_entry(void* /*arg*/) {
         return;
     }
 
-    // Scan the SD card for a `.swf` and forward the path to Rust. Bypasses
-    // the Rust read_dir bug on Horizon. If nothing is found, Rust's
-    // hardcoded candidates / embedded fallback still apply.
-    swf_picker_run();
+    // Pad + touch init moved BEFORE the library so both the library boot
+    // screen and the in-game loop share one PadState instance. Pad config
+    // doesn't change between the two phases.
+    PadState pad;
+    padConfigureInput(1, HidNpadStyleSet_NpadStandard);
+    padInitializeDefault(&pad);
+
+    hidInitializeTouchScreen();
+    HidTouchScreenState touch_state = {0};
+    bool touch_was_pressed = false;
+
+    // ── Phase 3.4: library launcher (FlashNX picker) ───────────────────
+    //
+    // Before booting Ruffle, show the library UI: scan SD, list all .swf
+    // files, let the user pick one. A=JOUER → ruffle_set_swf_path + boot
+    // Ruffle on the chosen file. -=QUITTER → exit the .nro cleanly without
+    // ever initialising Ruffle. Two SwitchRenderBackend instances are
+    // created over the boot — one for the library, dropped before Ruffle's
+    // own gets built; ~96 MB GPU arena per instance but never alive at
+    // the same time.
+    if (ruffle_library_init() == 0) {
+        // Enumerate every .swf on SD and push to the Rust library state.
+        swf_picker_run();
+        ruffle_library_open();
+
+        while (ruffle_library_active() && appletMainLoop()) {
+            padUpdate(&pad);
+            const u64 kDownLib = padGetButtonsDown(&pad);
+            // Forward joycon down-edges into the library state machine.
+            // Reuses the same MENU_NAV_BUTTONS table the pause menu uses —
+            // covers A/B/X/Y/Up/Down/Left/Right/sticks/Minus/Plus.
+            for (const auto& nb : MENU_NAV_BUTTONS) {
+                if (kDownLib & nb.mask) ruffle_library_input(nb.name);
+            }
+            ruffle_library_render();
+            gl_context_swap();
+        }
+
+        const bool picked = ruffle_library_picked() != 0;
+        char selected_path[512] = {0};
+        if (picked && ruffle_library_selected_path(selected_path, sizeof(selected_path)) == 0) {
+            std::printf("library: user picked %s\n", selected_path);
+            std::fflush(stdout);
+            // Forward the choice to Ruffle's loader (consumed by find_and_
+            // load_swf_uncached → CACHED_SWF in lib.rs).
+            ruffle_set_swf_path(selected_path);
+        } else {
+            std::printf("library: user quit (no selection) — exiting .nro\n");
+            std::fflush(stdout);
+            ruffle_library_shutdown();
+            gl_context_shutdown();
+            return;
+        }
+
+        // Drop the library's standalone SwitchRenderBackend so its GL
+        // resources (~96 MB arenas + shader programs + banner texture)
+        // free BEFORE ruffle_init allocates Ruffle's own renderer. Without
+        // this we'd peak at ~200 MB GPU during the cross-over second.
+        ruffle_library_shutdown();
+    } else {
+        // Library init failed (renderer alloc failed). Fall back to the
+        // original swf_picker first-hit logic + embedded SWF — bare bones,
+        // but at least the .nro doesn't refuse to boot.
+        std::printf("library_init failed — falling back to first-hit picker\n");
+        std::fflush(stdout);
+        swf_picker_run();
+    }
 
     if (ruffle_init() != 0) {
         std::printf("ruffle_init failed\n"); std::fflush(stdout);
@@ -174,15 +248,6 @@ static void worker_entry(void* /*arg*/) {
     // Done once at boot — keymap is locked in a OnceLock so it doesn't
     // change across REDEMARRER cycles.
     populate_bindings_from_keymap();
-
-    PadState pad;
-    padConfigureInput(1, HidNpadStyleSet_NpadStandard);
-    padInitializeDefault(&pad);
-
-    // Touch screen state.
-    hidInitializeTouchScreen();
-    HidTouchScreenState touch_state = {0};
-    bool touch_was_pressed = false;
 
     // Mouse cursor — centred at start.
     float cursor_x = VIEWPORT_W * 0.5f;

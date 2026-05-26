@@ -17,9 +17,20 @@ BUILD       := build
 SOURCES     := src
 INCLUDES    := include
 
-APP_TITLE   := Flash for Switch
+# User-facing name = "FlashNX" (per 2026-05-26 rebrand). The repo / target /
+# Cargo lib name stay `flash-for-switch` for stability — bascule destructrice
+# mid-projet evitee. APP_TITLE est ce que voient hbmenu, Sphaira et le `.nacp`
+# embarque dans le `.nro`.
+APP_TITLE   := FlashNX
 APP_AUTHOR  := flash-for-switch contributors
 APP_VERSION := 0.0.1
+# Icon shown in hbmenu / Sphaira / forwarders. Lives in the repo root's
+# `assets/` folder so it sits next to README + the banner. devkitPro's
+# %.nro rule reads $(NROFLAGS) which we wire below — without --icon= the
+# .nro gets no embedded icon at all (NOT the default_icon.jpg fallback;
+# that fallback only kicks in when APP_ICON is consumed by elf2nro
+# explicitly via NROFLAGS).
+ICON        := ../assets/icon.jpg
 
 #---------------------------------------------------------------------------------
 ARCH     := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
@@ -75,6 +86,14 @@ export INCLUDE    := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
 
 export LIBPATHS   := $(foreach dir,$(LIBDIRS),-L$(dir)/lib) \
                      -L$(RUST_LIB_DIR)
+
+# Wire the NACP + icon into the final .nro via elf2nro. The %.nro rule in
+# devkitPro's switch_rules invokes `elf2nro $< $@ $(NROFLAGS)` — without
+# these flags the .nro ships with no metadata + no icon, so hbmenu shows
+# it as "Unknown" with the default question-mark tile. APP_ICON is the
+# absolute path elf2nro needs (relative paths break the recursive make).
+export APP_ICON  := $(TOPDIR)/$(ICON)
+export NROFLAGS  += --nacp=$(CURDIR)/$(TARGET).nacp --icon=$(APP_ICON)
 
 .PHONY: $(BUILD) clean all
 
