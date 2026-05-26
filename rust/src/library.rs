@@ -140,9 +140,7 @@ fn write_meta_sidecar(basename: &str, display_name: &str) -> bool {
     }
 }
 
-/// Cached SWF header data parsed once at scan time. Compressed (CWS) movies
-/// also store dims here — we inflate the first ~256 bytes via flate2 to
-/// reach the RECT.
+/// Cached SWF header data parsed once at scan time.
 #[derive(Debug, Clone)]
 pub(crate) struct Entry {
     pub path: std::string::String,
@@ -152,9 +150,6 @@ pub(crate) struct Entry {
     pub swf_version: u8,
     /// 0 = uncompressed FWS, 1 = zlib CWS, 2 = lzma ZWS.
     pub compression_label: &'static str,
-    /// `None` if we couldn't parse the RECT (rare CWS/ZWS edge cases).
-    pub width_px: Option<u32>,
-    pub height_px: Option<u32>,
     /// 0xRRGGBB derived from a hash of the basename — drives the per-game
     /// color chip in the list. Same hash always produces the same color
     /// across reboots (no persistence needed) because the input is stable.
@@ -252,8 +247,8 @@ pub fn add_path(path: &str) -> bool {
         .next()
         .unwrap_or(path)
         .to_string();
-    let (size_bytes, swf_version, compression_label, dims) = match read_swf_header(path) {
-        Some(h) => (h.size_bytes, h.version, h.compression_label, h.dims),
+    let (size_bytes, swf_version, compression_label) = match read_swf_header(path) {
+        Some(h) => (h.size_bytes, h.version, h.compression_label),
         None => {
             log(&std::format!(
                 "library: failed to parse SWF header for {}, skipping\n",
@@ -277,8 +272,6 @@ pub fn add_path(path: &str) -> bool {
         size_bytes,
         swf_version,
         compression_label,
-        width_px: dims.map(|(w, _)| w),
-        height_px: dims.map(|(_, h)| h),
         color_chip,
     };
     if let Ok(mut s) = LIBRARY.lock() {
@@ -1101,126 +1094,33 @@ struct ParsedSwfHeader {
     size_bytes: u64,
     version: u8,
     compression_label: &'static str,
-    dims: Option<(u32, u32)>,
 }
 
 fn read_swf_header(path: &str) -> Option<ParsedSwfHeader> {
-    // Chunked 4 KB reads — matches the safe path keymap.rs uses for the
-    // ENOMEM-at-32KB newlib quirk. For the SWF header we only ever need
-    // the first chunk.
+    // Take size from the SWF header's `file_length` (u32 LE at bytes 4..8)
+    // rather than `fs::metadata().len()` — on Horizon/newlib the latter
+    // returned a bogus value (~1.6 GB for every file) that hosed the
+    // library metadata panel. The SWF field is canonical anyway: for
+    // compressed (CWS/ZWS) movies it's the uncompressed size.
     let mut file = File::open(path).ok()?;
-    let size_bytes = file.metadata().ok().map(|m| m.len()).unwrap_or(0);
-    let mut buf = [0u8; 4096];
+    let mut buf = [0u8; 8];
     let n = file.read(&mut buf).ok()?;
     if n < 8 {
         return None;
     }
-    let (compression_label, compressed) = match &buf[0..3] {
-        b"FWS" => ("FWS", None),
-        b"CWS" => ("CWS", Some(true)),
-        b"ZWS" => ("ZWS", Some(false)),
+    let compression_label = match &buf[0..3] {
+        b"FWS" => "FWS",
+        b"CWS" => "CWS",
+        b"ZWS" => "ZWS",
         _ => return None,
     };
     let version = buf[3];
-    // Body starts at byte 8 (after sig + version + file_length). For CWS
-    // it's a zlib stream we need to inflate to reach the RECT.
-    let dims = match compressed {
-        None => parse_rect(&buf[8..n]),
-        Some(true) => inflate_and_parse_rect(&buf[8..n]),
-        Some(false) => None, // ZWS (lzma) — rare, skip dims for v1
-    };
+    let size_bytes = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as u64;
     Some(ParsedSwfHeader {
         size_bytes,
         version,
         compression_label,
-        dims,
     })
-}
-
-fn inflate_and_parse_rect(compressed_body: &[u8]) -> Option<(u32, u32)> {
-    use flate2::read::ZlibDecoder;
-    let mut decoder = ZlibDecoder::new(compressed_body);
-    let mut out = [0u8; 256];
-    // The decoder may return less than 256 bytes if the compressed input
-    // we have doesn't expand that far — that's fine, RECT fits in <=17.
-    let n = decoder.read(&mut out).ok()?;
-    if n == 0 {
-        return None;
-    }
-    parse_rect(&out[..n])
-}
-
-/// Parse the SWF RECT (stage bounds) from the uncompressed body. Returns
-/// (width_px, height_px) — the difference between Xmax/Ymax and Xmin/Ymin,
-/// converted from twips (1/20 px) to pixels. Returns None on truncated input.
-fn parse_rect(body: &[u8]) -> Option<(u32, u32)> {
-    if body.is_empty() {
-        return None;
-    }
-    let mut bits = BitReader::new(body);
-    let nbits = bits.read_ubits(5)? as u32;
-    if nbits == 0 || nbits > 31 {
-        return None;
-    }
-    let xmin = bits.read_sbits(nbits as u8)?;
-    let xmax = bits.read_sbits(nbits as u8)?;
-    let ymin = bits.read_sbits(nbits as u8)?;
-    let ymax = bits.read_sbits(nbits as u8)?;
-    let w = ((xmax - xmin).max(0) as u64 / 20) as u32;
-    let h = ((ymax - ymin).max(0) as u64 / 20) as u32;
-    Some((w, h))
-}
-
-/// Minimal MSB-first bit reader. Mirrors what `swf::read::Reader` does
-/// internally — we inline it here to avoid pulling more of the swf crate's
-/// internals (Reader isn't a re-export, and we only need ~10 lines of it).
-struct BitReader<'a> {
-    data: &'a [u8],
-    /// Byte cursor + remaining-bits-in-current-byte counter.
-    byte: usize,
-    bit: u8,
-}
-
-impl<'a> BitReader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, byte: 0, bit: 8 }
-    }
-
-    fn read_ubits(&mut self, n: u8) -> Option<u32> {
-        let mut acc: u32 = 0;
-        for _ in 0..n {
-            if self.byte >= self.data.len() {
-                return None;
-            }
-            if self.bit == 0 {
-                self.byte += 1;
-                self.bit = 8;
-                if self.byte >= self.data.len() {
-                    return None;
-                }
-            }
-            let bit = (self.data[self.byte] >> (self.bit - 1)) & 1;
-            acc = (acc << 1) | (bit as u32);
-            self.bit -= 1;
-        }
-        Some(acc)
-    }
-
-    /// Signed n-bit read, sign-extended from the top bit.
-    fn read_sbits(&mut self, n: u8) -> Option<i64> {
-        if n == 0 {
-            return Some(0);
-        }
-        let raw = self.read_ubits(n)? as i64;
-        let sign_mask = 1i64 << (n - 1);
-        if raw & sign_mask != 0 {
-            // Negative — sign extend.
-            let high_mask = !((sign_mask << 1) - 1);
-            Some(raw | high_mask)
-        } else {
-            Some(raw)
-        }
-    }
 }
 
 // ── Color chip from basename ──────────────────────────────────────────────

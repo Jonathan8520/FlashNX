@@ -2447,9 +2447,11 @@ impl SwitchRenderBackend {
                 let cursor_dx = pulse * 4.0;
                 self.draw_text(label_x - 36.0 + cursor_dx, y, ROW_SCALE, ">", color);
             }
-            // Truncate display name if it would overflow the visible area
-            // (1280 - label_x - margin). 22 chars at scale 3 ≈ 396 px.
-            let max_chars = 24usize;
+            // Truncate display name if it would overflow the visible area.
+            // Scale 3 ≈ 18 px/char ; label_x ≈ 122, scrollbar ~vw-30=1250,
+            // → ~60 chars fit. 40 keeps comfortable visual margin before
+            // hitting the scrollbar / metadata panel edges.
+            let max_chars = 40usize;
             let display = if entry.display_name.chars().count() > max_chars {
                 let mut t: std::string::String = entry.display_name.chars().take(max_chars - 1).collect();
                 t.push('…');
@@ -2507,18 +2509,15 @@ impl SwitchRenderBackend {
                 &entry.display_name,
                 swf::Color::from_rgb(0xFFFFFF, 255),
             );
-            // Sub-line: size · compression · version · dims.
+            // Sub-line: size · compression · version. Stage dims dropped —
+            // 3.8 forces ShowAll + letterbox so native dims are no longer
+            // user-facing info.
             let size_str = format_size_pretty(entry.size_bytes);
-            let dims_str = match (entry.width_px, entry.height_px) {
-                (Some(w), Some(h)) => std::format!("{}X{}", w, h),
-                _ => std::string::String::from("?X?"),
-            };
             let meta = std::format!(
-                "{} // SWF V{} {} // {}",
+                "{} // SWF V{} {}",
                 size_str,
                 entry.swf_version,
                 entry.compression_label,
-                dims_str,
             );
             self.draw_text(
                 panel_x + 20.0,
