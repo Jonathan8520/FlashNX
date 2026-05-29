@@ -127,6 +127,15 @@ static const MenuNavButton MENU_NAV_BUTTONS[] = {
     { "StickLDown",   HidNpadButton_StickLDown,   true  },
     { "StickLLeft",   HidNpadButton_StickLLeft,   true  },
     { "StickLRight",  HidNpadButton_StickLRight,  true  },
+    // Right stick also navigates the library / menus. It's the mouse cursor
+    // ONLY in-game, and the library/menu loops are exclusive with the game
+    // loop, so it's free here. Aliased to the left-stick nav names so every
+    // screen's existing Up/Down/Left/Right handling picks it up with no Rust
+    // change. (Separate repeat-state slots → no conflict with the left stick.)
+    { "StickLUp",     HidNpadButton_StickRUp,     true  },
+    { "StickLDown",   HidNpadButton_StickRDown,   true  },
+    { "StickLLeft",   HidNpadButton_StickRLeft,   true  },
+    { "StickLRight",  HidNpadButton_StickRRight,  true  },
 };
 static constexpr size_t MENU_NAV_COUNT =
     sizeof(MENU_NAV_BUTTONS) / sizeof(MENU_NAV_BUTTONS[0]);
@@ -387,10 +396,12 @@ static void worker_entry(void* /*arg*/) {
             // ─── Pause main menu ────────────────────────────────────────
             // Edge-detected nav so a held D-pad doesn't scroll past every
             // entry. Press `-` again or `B` to dismiss (= Resume).
-            if (kDown & (HidNpadButton_Up | HidNpadButton_StickLUp)) {
+            // Right stick navigates too (it's the mouse cursor only when the
+            // menu is closed — this branch `continue`s before the cursor code).
+            if (kDown & (HidNpadButton_Up | HidNpadButton_StickLUp | HidNpadButton_StickRUp)) {
                 menu_selection = (menu_selection + MENU_COUNT - 1) % MENU_COUNT;
             }
-            if (kDown & (HidNpadButton_Down | HidNpadButton_StickLDown)) {
+            if (kDown & (HidNpadButton_Down | HidNpadButton_StickLDown | HidNpadButton_StickRDown)) {
                 menu_selection = (menu_selection + 1) % MENU_COUNT;
             }
             if (kDown & (HidNpadButton_Minus | HidNpadButton_B)) {
