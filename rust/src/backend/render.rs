@@ -5214,15 +5214,25 @@ impl RenderBackend for SwitchRenderBackend {
         self.cache_entries_max_window = self.cache_entries_max_window.max(cache_entries.len() as u32);
         // Age out filter-pool textures not reused recently (TTL eviction).
         self.filter_tex_pool.begin_frame(self.frame_count as u64);
-        // Per-frame filter budget. Each filtered cache entry costs ~4-5
+        // Per-frame filter budget. Each filtered cache entry costs ~3-5
         // offscreen passes; a menu *transition* can re-filter dozens of
-        // animated elements in one frame, spiking render time (Mario 63 menu
-        // hitches). Cap how many filter chains we run per frame — entries past
-        // the budget render their (already-composited) cache UNFILTERED for
-        // that frame. Static screens re-submit few/no entries (the cache holds)
-        // so they keep full quality; only busy transition frames drop a few
-        // borders for a frame or two, which motion hides — but fps stays up.
-        const FILTER_CHAINS_PER_FRAME_BUDGET: usize = 6;
+        // animated elements in one frame, spiking render time. Cap how many
+        // filter CHAINS we run per frame — entries past the budget keep the
+        // content from step 1 (text/shape) but skip their bevel/glow border for
+        // that frame.
+        //
+        // IMPORTANT: step 1 (render the content into entry.handle) must run for
+        // EVERY entry, every frame. `entry.handle` is NOT a persistent cache we
+        // can leave stale — Ruffle re-uses/clears it, so skipping step 1 blanks
+        // the whole element (the "tous les boutons clignotent / plus de texte"
+        // regression). Only the *filter pass* is budgeted, never the content.
+        //
+        // Budget set high (was 6) so the bevel/glow borders stay present on
+        // Mario 63's menus, where many text fields re-cache each frame
+        // (cacheMax peaks ~40). Raising it trades a little render time on busy
+        // transitions for the reflections no longer dropping in and out. Tune
+        // down if a heavy menu hitches.
+        const FILTER_CHAINS_PER_FRAME_BUDGET: usize = 48;
         let mut filter_chains_run: usize = 0;
         for entry in cache_entries {
             let Some(standalone) = as_standalone_bitmap(&entry.handle) else {
@@ -5233,14 +5243,14 @@ impl RenderBackend for SwitchRenderBackend {
             let w = standalone.0.width;
             let h = standalone.0.height;
 
-            // Step 1: render directly into entry.handle (the first filter src).
+            // Step 1: render the content into entry.handle (ALWAYS — see above).
             self.render_commands_to_texture(dst_tex, w, h, entry.commands, entry.clear);
             if entry.filters.is_empty() {
                 continue;
             }
-            // Over the per-frame filter budget → leave this entry unfiltered
-            // for this frame (its cache texture still holds the rendered
-            // content from step 1, so it's visible, just without the border).
+            // Over the per-frame filter budget → leave this entry unfiltered for
+            // this frame: text/shape is still present (step 1), just without the
+            // bevel/glow border this frame.
             if filter_chains_run >= FILTER_CHAINS_PER_FRAME_BUDGET {
                 continue;
             }
