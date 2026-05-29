@@ -519,7 +519,11 @@ static void worker_entry(void* /*arg*/) {
             ? ((dt_ticks * 1000000ULL) / tick_freq)
             : 16667ULL;
         // Cap to 100 ms so a one-off stall (texture upload, JIT warmup) doesn't
-        // make Ruffle catch up by replaying 6 SWF frames in a row.
+        // make Ruffle replay ~6 SWF frames at once. A tighter cap (tried 35 ms)
+        // does NOT help heavy scenes — their cost is a single run_frame (~55 ms
+        // of AVM1 + display-list work), not catch-up replay — and only adds
+        // visible slow-motion, so keep the loose cap and let the game run at
+        // real-time speed (dropping rendered frames) when the sim can't keep up.
         if (dt_us > 100000ULL) dt_us = 100000ULL;
 
         ruffle_render_frame_dt(dt_us);

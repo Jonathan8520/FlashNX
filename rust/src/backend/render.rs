@@ -584,13 +584,25 @@ fn make_standalone_texture(width: u32, height: u32) -> Option<StandaloneTexture>
     let mut tex: GLuint = 0;
     unsafe {
         glGenTextures(1, &mut tex);
+        // glGenTextures returns 0 on failure (e.g. GL out of memory / too many
+        // live textures). Using a 0 texture as an FBO color attachment or
+        // sampler source crashes Mesa with a NULL deref (Data Abort, FAR≈0x0e).
+        // Bail so callers (the filter pool) skip the pass instead of crashing.
+        if tex == 0 {
+            ruffle_log_cstr(b"make_standalone_texture: glGenTextures returned 0 (OOM?)\n\0".as_ptr() as *const _);
+            return None;
+        }
         glBindTexture(GL_TEXTURE_2D, tex);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        let zeroes = vec![0u8; (width as usize) * (height as usize) * 4];
+        // Allocate storage with NULL data: every consumer fully overwrites the
+        // texture before sampling it (render_commands_to_texture glClears it;
+        // filter passes draw the whole region). The old `vec![0u8; w*h*4]`
+        // CPU-side zero-fill was pure overhead — and dominated frame time when
+        // the (now bounded) filter pool had to re-allocate on a cache miss.
         glTexImage2D(
             GL_TEXTURE_2D, 0, GL_RGBA8 as GLint,
             width as GLsizei, height as GLsizei, 0,
-            GL_RGBA, GL_UNSIGNED_BYTE, zeroes.as_ptr() as *const _,
+            GL_RGBA, GL_UNSIGNED_BYTE, core::ptr::null(),
         );
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as GLint);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as GLint);
@@ -996,22 +1008,57 @@ pub struct SwitchRenderBackend {
 ///
 /// Reusing entries across filter passes prevents the per-frame texture
 /// alloc/free thrash that brought Mario 63 down to 5 fps in the prior patch.
+/// How many frames a pooled texture survives without being reused before the
+/// pool frees it. 2 = "used this frame or last frame stays". This bounds the
+/// pool to the recent working set: a stable filtered scene reuses every
+/// texture each frame (0 reallocations after the first frame), while sizes
+/// that stop appearing are reclaimed within 2 frames — preventing the
+/// unbounded session-long growth that exhausted GL textures (→ glGenTextures
+/// 0 → Mesa NULL-deref crash). A fixed COUNT cap was worse: once full of stale
+/// sizes it blocked new ones, thrashing alloc/free every frame.
+const FILTER_POOL_TTL_FRAMES: u64 = 2;
+
 struct FilterTexturePool {
-    buckets: std::collections::HashMap<(u32, u32), Vec<StandaloneTexture>>,
+    /// Each entry carries the frame it was last released, for TTL eviction.
+    buckets: std::collections::HashMap<(u32, u32), Vec<(StandaloneTexture, u64)>>,
+    /// Total retained (for the heartbeat).
+    pooled: usize,
+    /// Set by `begin_frame`; `release` stamps freed textures with it.
+    current_frame: u64,
 }
 
 impl FilterTexturePool {
-    fn new() -> Self { Self { buckets: std::collections::HashMap::new() } }
+    fn new() -> Self {
+        Self { buckets: std::collections::HashMap::new(), pooled: 0, current_frame: 0 }
+    }
+    /// Reclaim textures not reused within `FILTER_POOL_TTL_FRAMES`. Called once
+    /// per `submit_frame` before the cache_entries filter chain runs.
+    fn begin_frame(&mut self, frame: u64) {
+        self.current_frame = frame;
+        let keep_from = frame.saturating_sub(FILTER_POOL_TTL_FRAMES - 1);
+        for bucket in self.buckets.values_mut() {
+            let before = bucket.len();
+            bucket.retain(|(_, f)| *f >= keep_from); // dropped entries free their GL texture
+            self.pooled -= before - bucket.len();
+        }
+        self.buckets.retain(|_, v| !v.is_empty());
+    }
     fn acquire(&mut self, w: u32, h: u32) -> Option<StandaloneTexture> {
         if let Some(bucket) = self.buckets.get_mut(&(w, h)) {
-            if let Some(tex) = bucket.pop() { return Some(tex); }
+            if let Some((tex, _)) = bucket.pop() {
+                self.pooled = self.pooled.saturating_sub(1);
+                return Some(tex);
+            }
         }
         make_standalone_texture(w, h)
     }
     fn release(&mut self, tex: StandaloneTexture) {
         let key = (tex.width, tex.height);
-        self.buckets.entry(key).or_default().push(tex);
+        let f = self.current_frame;
+        self.buckets.entry(key).or_default().push((tex, f));
+        self.pooled += 1;
     }
+    fn len(&self) -> usize { self.pooled }
 }
 
 /// Returns a stable 0..=9 ordinal + short name for a `Filter` variant so we
@@ -2324,7 +2371,13 @@ impl SwitchRenderBackend {
         source_size: (u32, u32),
         filter: &swf::BlurFilter,
     ) -> Option<StandaloneTexture> {
-        let num_passes = filter.num_passes() as usize;
+        // Cap blur quality passes at 1. Flash defaults to 3 (a box blur
+        // iterated 3× ≈ Gaussian), but each pass is 2 extra FBO draws (H+V) per
+        // filtered element — and Mario 63's menu filters dozens of cached text
+        // elements per frame, so 3 passes tripled the offscreen draw load and
+        // spiked render time. One pass is visually fine for thin glow/shadow
+        // outlines and roughly thirds the blur cost.
+        let num_passes = (filter.num_passes() as usize).min(1);
         let blur_x = filter.blur_x.to_f32().min(255.0);
         let blur_y = filter.blur_y.to_f32().min(255.0);
 
@@ -4644,6 +4697,14 @@ impl RenderBackend for SwitchRenderBackend {
             bytes.push(0);
             unsafe { ruffle_log_cstr(bytes.as_ptr() as *const _) };
         }
+        // Re-enabled 2026-05-29 after fixing the crash root cause: the filter
+        // shader chain itself was fine, but the FilterTexturePool grew
+        // unbounded (one texture per distinct size, never freed) → texture
+        // exhaustion → glGenTextures returned 0 → Mesa NULL-deref. Fixed by
+        // bounding the pool (MAX_POOLED_FILTER_TEXTURES) and returning None
+        // from make_standalone_texture on failure (filters then skip cleanly
+        // instead of using a 0 texture). Restores glow/drop-shadow (e.g. the
+        // outlined-letter borders Mario 63 draws on its menu text).
         matches!(
             filter,
             Filter::ColorMatrixFilter(_)
@@ -4699,6 +4760,18 @@ impl RenderBackend for SwitchRenderBackend {
         //   3. If filters moved current off entry.handle, identity-blit the
         //      final filter texture back into entry.handle (so the cache
         //      texture sees the filtered result).
+        // Age out filter-pool textures not reused recently (TTL eviction).
+        self.filter_tex_pool.begin_frame(self.frame_count as u64);
+        // Per-frame filter budget. Each filtered cache entry costs ~4-5
+        // offscreen passes; a menu *transition* can re-filter dozens of
+        // animated elements in one frame, spiking render time (Mario 63 menu
+        // hitches). Cap how many filter chains we run per frame — entries past
+        // the budget render their (already-composited) cache UNFILTERED for
+        // that frame. Static screens re-submit few/no entries (the cache holds)
+        // so they keep full quality; only busy transition frames drop a few
+        // borders for a frame or two, which motion hides — but fps stays up.
+        const FILTER_CHAINS_PER_FRAME_BUDGET: usize = 6;
+        let mut filter_chains_run: usize = 0;
         for entry in cache_entries {
             let Some(standalone) = as_standalone_bitmap(&entry.handle) else {
                 self.warn_once(b"cache_entry: non-standalone handle (skipped)\n\0");
@@ -4708,18 +4781,25 @@ impl RenderBackend for SwitchRenderBackend {
             let w = standalone.0.width;
             let h = standalone.0.height;
 
-            // Step 1: render directly into entry.handle.
+            // Step 1: render directly into entry.handle (the first filter src).
             self.render_commands_to_texture(dst_tex, w, h, entry.commands, entry.clear);
             if entry.filters.is_empty() {
                 continue;
             }
+            // Over the per-frame filter budget → leave this entry unfiltered
+            // for this frame (its cache texture still holds the rendered
+            // content from step 1, so it's visible, just without the border).
+            if filter_chains_run >= FILTER_CHAINS_PER_FRAME_BUDGET {
+                continue;
+            }
+            filter_chains_run += 1;
 
-            // Step 2: filter chain using FilterTexturePool. The first source
-            // is entry.handle.texture itself; each successful filter writes
-            // into a fresh pool temp, the previous owned temp is released back
-            // to the pool. This is the Bug #2 perf fix — without the pool,
-            // Mario 63's filtered scenes drop fps from ~60 to ~5 because of
-            // per-frame glGenTextures/glDeleteTextures thrash.
+            // Step 2: filter chain using the (now bounded) FilterTexturePool.
+            // The first source is entry.handle.texture itself; each successful
+            // filter writes into a fresh pool temp and the previous owned temp
+            // is released. acquire() can return None (pool/​GL exhaustion guard)
+            // — we break and keep whatever we have, so we never feed a 0 texture
+            // to the shaders (the old crash).
             let mut current_tex = dst_tex;
             let mut current_owned: Option<StandaloneTexture> = None;
             for filter in entry.filters {
@@ -4730,15 +4810,13 @@ impl RenderBackend for SwitchRenderBackend {
                     next_tex, (0, 0), &filter,
                 );
                 if ok {
-                    // Release the previous owned temp (if any) — entry.handle
-                    // is never owned by us so it's not released.
                     if let Some(prev) = current_owned.take() {
                         self.filter_tex_pool.release(prev);
                     }
                     current_tex = next_tex;
                     current_owned = Some(next);
                 } else {
-                    // Unsupported filter — passthrough, return next to pool.
+                    // Unsupported/failed filter — passthrough, return to pool.
                     self.filter_tex_pool.release(next);
                 }
             }
@@ -4825,7 +4903,7 @@ impl RenderBackend for SwitchRenderBackend {
             let v_frag = self.vertex_arena.free.len();
             let i_frag = self.index_arena.free.len();
             let msg = std::format!(
-                "f{}: fps={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) bitmaps={} atlases={} bitmap_draws={} offscreen={} sync={} filter={} pushmask={} amask={} maskeddraw={} maskshape={} ram={}MB/{}MB\n",
+                "f{}: fps={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) bitmaps={} atlases={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} pushmask={} amask={} maskeddraw={} maskshape={} ram={}MB/{}MB\n",
                 self.frame_count,
                 fps_str,
                 tick_ms,
@@ -4842,6 +4920,7 @@ impl RenderBackend for SwitchRenderBackend {
                 self.render_offscreen_calls,
                 self.resolve_sync_calls,
                 self.apply_filter_calls,
+                self.filter_tex_pool.len(),
                 pushmask,
                 amask,
                 maskeddraw,
