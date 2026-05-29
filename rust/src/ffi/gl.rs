@@ -48,8 +48,14 @@ pub const GL_INFO_LOG_LENGTH: GLenum = 0x8B84;
 pub const GL_BLEND: GLenum = 0x0BE2;
 pub const GL_ZERO: GLenum = 0;
 pub const GL_ONE: GLenum = 1;
+pub const GL_SRC_COLOR: GLenum = 0x0300;
+pub const GL_ONE_MINUS_SRC_COLOR: GLenum = 0x0301;
 pub const GL_SRC_ALPHA: GLenum = 0x0302;
 pub const GL_ONE_MINUS_SRC_ALPHA: GLenum = 0x0303;
+// Blend equations (glBlendEquation / glBlendEquationSeparate)
+pub const GL_FUNC_ADD: GLenum = 0x8006;
+pub const GL_FUNC_SUBTRACT: GLenum = 0x800A;
+pub const GL_FUNC_REVERSE_SUBTRACT: GLenum = 0x800B;
 
 // Textures
 pub const GL_TEXTURE_2D: GLenum = 0x0DE1;
@@ -113,6 +119,8 @@ extern "C" {
         src_alpha: GLenum,
         dst_alpha: GLenum,
     );
+    pub fn glBlendEquation(mode: GLenum);
+    pub fn glBlendEquationSeparate(mode_rgb: GLenum, mode_alpha: GLenum);
     pub fn glLineWidth(width: GLfloat);
     pub fn glColorMask(r: GLboolean, g: GLboolean, b: GLboolean, a: GLboolean);
     pub fn glStencilMask(mask: GLuint);
@@ -230,6 +238,19 @@ extern "C" {
     );
     pub fn glTexParameteri(target: GLenum, pname: GLenum, param: GLint);
     pub fn glPixelStorei(pname: GLenum, param: GLint);
+    /// Copy a rectangle of the currently-bound read framebuffer into the
+    /// currently-bound texture (must already have storage allocated). Used to
+    /// snapshot the backdrop for complex blend modes (multiply/overlay/…).
+    pub fn glCopyTexSubImage2D(
+        target: GLenum,
+        level: GLint,
+        xoffset: GLint,
+        yoffset: GLint,
+        x: GLint,
+        y: GLint,
+        width: GLsizei,
+        height: GLsizei,
+    );
 
     // Framebuffer objects
     pub fn glGenFramebuffers(n: GLsizei, framebuffers: *mut GLuint);

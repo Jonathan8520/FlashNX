@@ -348,8 +348,8 @@ Pour **jouer des SWF AS1/AS2 courants, c'est fonctionnellement quasi complet**. 
 
 | Manque | Impact | Fréquence |
 |---|---|---|
-| **`render_alpha_mask`** complètement skippé (`warn_once` + return) | Les **masques alpha/luminance doux** (≠ masques vectoriels stencil qu'on gère) font **disparaître leur contenu masqué** | Moyen — prochain « élément/écran vide » mystère viendra probablement de là |
-| **Blend modes réels** — `blend()` inline juste les commandes en Normal | Multiply / Screen / Overlay / Add / Difference… rendus comme Normal → couleurs fausses sur effets de lumière/ombre | Moyen |
+| ~~**`render_alpha_mask`** complètement skippé~~ **✓ IMPLÉMENTÉ 2026-05-29** | Masques alpha/luminance doux : maskee + mask rendus en textures offscreen, composite `maskee × mask.alpha` (port `alpha_mask.wgsl`), redessiné via le path standalone prouvé. **Limite** : dégradé en inline non-masqué si imbriqué dans un autre offscreen (cache/blend/mask) — FBO offscreen unique non récursif | (résolu pour le cas top-level) |
+| ~~**Blend modes réels** — `blend()` inline en Normal~~ **✓ IMPLÉMENTÉ 2026-05-29** | **Trivial** (Add/Subtract/Screen via états GL `glBlendEquationSeparate`/`glBlendFuncSeparate`) + **Complex** (Multiply/Lighten/Darken/Difference/Invert/Overlay/HardLight via shader `COMPLEX_BLEND_FRAG` + snapshot backdrop `glCopyTexSubImage2D`). Normal/Layer = inline. **Restent** : Alpha/Erase (besoin layer tracking), Shader/PixelBender → fallback Normal. **Limites** : backdrop complexe = approx "fond opaque" sur main FB ; pas de blend imbriqué (offscreen non récursif) | (résolu pour le cas courant) |
 | **Filtres restants** : GradientGlow, GradientBevel, Convolution, DisplacementMap | Droppés (passthrough). Faits : ColorMatrix / Blur / Glow / DropShadow / **Bevel** | Faible-moyen |
 | **`BitmapData.draw()` v1 incomplet** : clear-transparent (pas de composite sur l'existant), texture temp par appel (pas de pool), affichage-après-draw-sans-lecture-CPU = périmé | OK pour le pattern tile-engine (SMWF), pas fidèle pour tous les usages BitmapData (effets dynamiques, captures in-game) | Faible |
 | **Perf des filtres en transitions menu** (N passes FBO/frame) | Hoquets sur menus très filtrés/animés (Mario 63). Bornés par budget/frame + pool TTL mais pas éliminés. Vrai fix = batching des passes | Visible sur Mario 63 |
@@ -372,7 +372,7 @@ Pour **jouer des SWF AS1/AS2 courants, c'est fonctionnellement quasi complet**. 
 
 - **Instrumentation de debug** laissée dans le heartbeat (`pushmask`/`amask`/`maskeddraw`/`maskshape`/`fpool`/`tickMax`/`rndMax`/`cacheMax`) + bindings FFI `glGetFramebufferAttachmentParameteriv`/`GL_STENCIL`/`GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE` devenus inutilisés (self-test stencil retiré). À nettoyer pour une release, ou à garder (cohérent avec le style « heartbeat instrumenté » du projet).
 
-**TL;DR** : les deux manques de rendu les plus susceptibles de casser un nouveau jeu = **`render_alpha_mask`** et **les blend modes**. Le reste de (A) est rare, (B) est Ruffle, (C) est de la distribution.
+**TL;DR** : ~~les deux manques de rendu les plus susceptibles de casser un nouveau jeu = `render_alpha_mask` et les blend modes~~ → **les deux sont implémentés 2026-05-29** (alpha mask soft + blend modes trivial & complex). Restent en (A) : blend modes Alpha/Erase (layer tracking), filtres gradient/convolution/displacement, blend imbriqué (FBO offscreen non récursif). (B) est Ruffle, (C) est de la distribution.
 
 ## Contraintes / faits à retenir
 

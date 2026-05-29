@@ -819,6 +819,26 @@ impl Drop for BevelFilterProgram {
     fn drop(&mut self) { unsafe { glDeleteProgram(self.program) }; }
 }
 
+/// Two-texture programs for `render_alpha_mask` and complex `blend` modes.
+/// Both reuse FILTER_VERT (a full-quad pass with `u_src_uv`), and sample a
+/// second texture at unit 1 in addition to `u_tex` at unit 0.
+struct AlphaMaskProgram {
+    program: GLuint,
+    u_src_uv: GLint,
+}
+struct ComplexBlendProgram {
+    program: GLuint,
+    u_src_uv: GLint,
+    u_blend_mode: GLint,
+    u_current_flip: GLint,
+}
+impl Drop for AlphaMaskProgram {
+    fn drop(&mut self) { unsafe { glDeleteProgram(self.program) }; }
+}
+impl Drop for ComplexBlendProgram {
+    fn drop(&mut self) { unsafe { glDeleteProgram(self.program) }; }
+}
+
 // ─── Stencil mask state ───────────────────────────────────────────────────────
 
 /// DIAGNOSTIC TOGGLE: when true, mask shapes stay invisible but the stencil
@@ -1014,6 +1034,13 @@ pub struct SwitchRenderBackend {
     blur_filter: BlurFilterProgram,
     glow_filter: GlowFilterProgram,
     bevel_filter: BevelFilterProgram,
+    /// Two-texture composite programs for soft alpha masks + complex blends.
+    alpha_mask_prog: AlphaMaskProgram,
+    complex_blend_prog: ComplexBlendProgram,
+    /// How many times `blend` ran a real (non-Normal) composite this window,
+    /// and `render_alpha_mask` ran a soft-mask composite. Surfaced in the
+    /// heartbeat so a blank/wrong screen can be correlated with these paths.
+    blend_window: u32,
     /// Pool of standalone textures reused across filter passes within a
     /// single submit_frame, keyed by `(width, height)`. Avoids paying
     /// glGenTextures + glTexImage2D + glDeleteTextures per filter per
@@ -1431,6 +1458,76 @@ void main() {\n\
     frag_color = outc;\n\
 }\n\0";
 
+// Alpha-mask composite, faithful port of `alpha_mask.wgsl`. Samples the
+// pre-rendered maskee (unit 0) and mask (unit 1) textures at the same UV and
+// outputs the maskee scaled by the mask's alpha — a soft/luminance mask that
+// the stencil masking path can't express. Reuses FILTER_VERT (u_src_uv set to
+// the full [0,1]² so v_uv == a_uv). Output is premultiplied; the caller draws
+// the result back over the stage with premultiplied "over" blending.
+const ALPHA_MASK_FRAG: &[u8] = b"#version 330 core\n\
+in vec2 v_uv;\n\
+out vec4 frag_color;\n\
+uniform sampler2D u_tex;\n\
+uniform sampler2D u_mask_tex;\n\
+void main() {\n\
+    vec4 dst = texture(u_tex, v_uv);\n\
+    vec4 src = texture(u_mask_tex, v_uv);\n\
+    frag_color = vec4(dst.rgb * src.a, dst.a * src.a);\n\
+}\n\0";
+
+// Complex (non-trivial) blend modes, faithful port of the wgpu `blend/*.wgsl`
+// family (multiply/lighten/darken/difference/invert/overlay/hardlight). Samples
+// the backdrop "parent" (unit 0, a glCopyTexSubImage2D snapshot of the current
+// render target) and the freshly-rendered blend group "current" (unit 1), and
+// writes the full composited pixel (premultiplied) so the caller can overwrite
+// the target region with blending DISABLED. `u_current_flip` flips the current
+// sampler's V when the target is the main framebuffer (which renders Y-flipped,
+// unlike offscreen textures whose row 0 is the Flash top); the parent snapshot
+// is always sampled straight since it's a 1:1 copy of the target. All the inner
+// blend funcs operate on un-premultiplied colour, guarding the divide so a
+// transparent backdrop (dst.a == 0) collapses the formula back to `src`.
+const COMPLEX_BLEND_FRAG: &[u8] = b"#version 330 core\n\
+in vec2 v_uv;\n\
+out vec4 frag_color;\n\
+uniform sampler2D u_tex;\n\
+uniform sampler2D u_current_tex;\n\
+uniform int u_blend_mode;\n\
+uniform float u_current_flip;\n\
+vec3 blend_func(vec3 s, vec3 d) {\n\
+    if (u_blend_mode == 0) { return s * d; }\n\
+    if (u_blend_mode == 1) { return max(s, d); }\n\
+    if (u_blend_mode == 2) { return min(s, d); }\n\
+    if (u_blend_mode == 3) { return abs(d - s); }\n\
+    if (u_blend_mode == 4) { return 1.0 - d; }\n\
+    if (u_blend_mode == 5) {\n\
+        vec3 o = s;\n\
+        o.r = (d.r <= 0.5) ? (2.0 * s.r * d.r) : (1.0 - 2.0 * (1.0 - d.r) * (1.0 - s.r));\n\
+        o.g = (d.g <= 0.5) ? (2.0 * s.g * d.g) : (1.0 - 2.0 * (1.0 - d.g) * (1.0 - s.g));\n\
+        o.b = (d.b <= 0.5) ? (2.0 * s.b * d.b) : (1.0 - 2.0 * (1.0 - d.b) * (1.0 - s.b));\n\
+        return o;\n\
+    }\n\
+    if (u_blend_mode == 6) {\n\
+        vec3 o = s;\n\
+        o.r = (s.r <= 0.5) ? (2.0 * s.r * d.r) : (1.0 - 2.0 * (1.0 - d.r) * (1.0 - s.r));\n\
+        o.g = (s.g <= 0.5) ? (2.0 * s.g * d.g) : (1.0 - 2.0 * (1.0 - d.g) * (1.0 - s.g));\n\
+        o.b = (s.b <= 0.5) ? (2.0 * s.b * d.b) : (1.0 - 2.0 * (1.0 - d.b) * (1.0 - s.b));\n\
+        return o;\n\
+    }\n\
+    return s;\n\
+}\n\
+void main() {\n\
+    vec2 cuv = vec2(v_uv.x, mix(v_uv.y, 1.0 - v_uv.y, u_current_flip));\n\
+    vec4 dst = texture(u_tex, v_uv);\n\
+    vec4 src = texture(u_current_tex, cuv);\n\
+    if (src.a <= 0.0) { frag_color = dst; return; }\n\
+    vec3 s_un = src.rgb / src.a;\n\
+    vec3 d_un = (dst.a > 0.0) ? (dst.rgb / dst.a) : vec3(0.0);\n\
+    vec3 bf = blend_func(s_un, d_un);\n\
+    vec3 rgb = src.rgb * (1.0 - dst.a) + dst.rgb * (1.0 - src.a) + src.a * dst.a * bf;\n\
+    float a = src.a + dst.a * (1.0 - src.a);\n\
+    frag_color = vec4(rgb, a);\n\
+}\n\0";
+
 // ─── Shader build helpers ─────────────────────────────────────────────────────
 
 fn compile_shader(kind: GLenum, src_nul: &[u8]) -> Option<GLuint> {
@@ -1591,6 +1688,24 @@ fn build_bevel_filter_program() -> Option<BevelFilterProgram> {
         u_strength: loc(program, b"u_strength\0"),
         u_bevel_type: loc(program, b"u_bevel_type\0"),
         u_knockout: loc(program, b"u_knockout\0"),
+        program,
+    })
+}
+
+fn build_alpha_mask_program() -> Option<AlphaMaskProgram> {
+    let program = link_program(FILTER_VERT, ALPHA_MASK_FRAG)?;
+    Some(AlphaMaskProgram {
+        u_src_uv: loc(program, b"u_src_uv\0"),
+        program,
+    })
+}
+
+fn build_complex_blend_program() -> Option<ComplexBlendProgram> {
+    let program = link_program(FILTER_VERT, COMPLEX_BLEND_FRAG)?;
+    Some(ComplexBlendProgram {
+        u_src_uv: loc(program, b"u_src_uv\0"),
+        u_blend_mode: loc(program, b"u_blend_mode\0"),
+        u_current_flip: loc(program, b"u_current_flip\0"),
         program,
     })
 }
@@ -2006,6 +2121,8 @@ impl SwitchRenderBackend {
         let blur_filter = build_blur_filter_program()?;
         let glow_filter = build_glow_filter_program()?;
         let bevel_filter = build_bevel_filter_program()?;
+        let alpha_mask_prog = build_alpha_mask_program()?;
+        let complex_blend_prog = build_complex_blend_program()?;
 
         let (rect_vao, rect_vbo) = build_solid_quad();
         let (bitmap_vao, bitmap_vbo) = build_bitmap_quad();
@@ -2049,6 +2166,14 @@ impl SwitchRenderBackend {
             glUseProgram(bevel_filter.program);
             glUniform1i(loc(bevel_filter.program, b"u_tex\0"), 0);
             glUniform1i(loc(bevel_filter.program, b"u_blur_tex\0"), 1);
+            // Two-texture composites: backdrop/maskee at unit 0, mask/current
+            // at unit 1.
+            glUseProgram(alpha_mask_prog.program);
+            glUniform1i(loc(alpha_mask_prog.program, b"u_tex\0"), 0);
+            glUniform1i(loc(alpha_mask_prog.program, b"u_mask_tex\0"), 1);
+            glUseProgram(complex_blend_prog.program);
+            glUniform1i(loc(complex_blend_prog.program, b"u_tex\0"), 0);
+            glUniform1i(loc(complex_blend_prog.program, b"u_current_tex\0"), 1);
             glUseProgram(0);
         }
 
@@ -2067,6 +2192,9 @@ impl SwitchRenderBackend {
             blur_filter,
             glow_filter,
             bevel_filter,
+            alpha_mask_prog,
+            complex_blend_prog,
+            blend_window: 0,
             filter_tex_pool: FilterTexturePool::new(),
             gl_state: GlStateCache::default(),
             rect_vao,
@@ -2848,6 +2976,120 @@ impl SwitchRenderBackend {
             ),
             _ => false,
         }
+    }
+
+    /// Pixel dimensions of whatever we're currently rendering into: the main
+    /// framebuffer normally, or the active offscreen FBO when replaying
+    /// commands into a cache/blend/mask texture.
+    fn current_target_dims(&self) -> (u32, u32) {
+        match self.offscreen_dims {
+            Some((w, h)) => (w, h),
+            None => (self.dimensions.width, self.dimensions.height),
+        }
+    }
+
+    /// Draw a standalone texture covering the whole current target (full-screen
+    /// quad), reusing the proven standalone-`render_bitmap` path (bitmap shader
+    /// + bitmap_vao + Y-flip-aware `world_matrix`), but with a caller-chosen GL
+    /// blend state set just before the draw. Always restores the default
+    /// premultiplied-over blend afterwards. `tex` is assumed premultiplied with
+    /// texel row 0 = Flash top (every offscreen render we produce is).
+    fn draw_fullscreen_texture(&mut self, tex: GLuint, tw: u32, th: u32, set_blend: impl FnOnce()) {
+        let scaled = Matrix::scale(tw as f32, th as f32);
+        let world = self.world_matrix(&scaled);
+        const IDENT_MULT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+        const IDENT_ADD: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+        let uv_remap = [0.0, 0.0, 1.0, 1.0];
+        self.use_bitmap(&world, &IDENT_MULT, &IDENT_ADD, tex, &uv_remap);
+        self.gl_state.bind_vao(self.bitmap_vao);
+        self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
+        set_blend();
+        unsafe {
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            // Restore the main-pass blend so following draws composite normally.
+            glBlendEquation(GL_FUNC_ADD);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        }
+    }
+
+    /// Composite a soft alpha mask: `result_tex` ← maskee × mask.alpha. Both
+    /// inputs and the output share the offscreen "row 0 = Flash top" layout, so
+    /// the combine FBO pass samples them straight. Returns false on FBO failure.
+    fn composite_alpha_mask(
+        &mut self,
+        maskee_tex: GLuint,
+        mask_tex: GLuint,
+        result_tex: GLuint,
+        w: u32,
+        h: u32,
+    ) -> bool {
+        unsafe {
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, mask_tex);
+            glActiveTexture(GL_TEXTURE0);
+        }
+        let ok = self.draw_filter_pass(
+            self.alpha_mask_prog.program,
+            self.alpha_mask_prog.u_src_uv,
+            maskee_tex, w, h, (0, 0), (w, h),
+            result_tex, 0, 0, w, h,
+            || {},
+        );
+        unsafe {
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glActiveTexture(GL_TEXTURE0);
+        }
+        ok
+    }
+
+    /// Run a complex blend (multiply/overlay/…) straight onto the current
+    /// target: a full-screen quad samples the backdrop snapshot (`parent_tex`,
+    /// unit 0) and the freshly-rendered blend group (`current_tex`, unit 1),
+    /// outputs the full composite, and overwrites the target with blending
+    /// DISABLED. `flip` (0/1) flips the current sampler's V on the main
+    /// framebuffer (Y-flipped) vs an offscreen target (not flipped).
+    fn composite_complex_to_current(
+        &mut self,
+        parent_tex: GLuint,
+        current_tex: GLuint,
+        w: u32,
+        h: u32,
+        mode: i32,
+        flip: f32,
+    ) {
+        let prog = self.complex_blend_prog.program;
+        let u_src_uv = self.complex_blend_prog.u_src_uv;
+        let u_blend_mode = self.complex_blend_prog.u_blend_mode;
+        let u_current_flip = self.complex_blend_prog.u_current_flip;
+        unsafe {
+            glViewport(0, 0, w as GLsizei, h as GLsizei);
+            glDisable(GL_BLEND);
+            glDisable(GL_STENCIL_TEST);
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            glStencilMask(0xFF);
+            glUseProgram(prog);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, parent_tex);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, current_tex);
+            glUniform4f(u_src_uv, 0.0, 0.0, 1.0, 1.0);
+            glUniform1i(u_blend_mode, mode);
+            glUniform1f(u_current_flip, flip);
+            glBindVertexArray(self.bitmap_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            glBindVertexArray(0);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glEnable(GL_BLEND);
+            glBlendEquation(GL_FUNC_ADD);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        }
+        self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
+        // The direct glUseProgram/bind above bypassed the state cache.
+        self.gl_state.invalidate();
     }
 
     fn use_solid(&self, world: &[GLfloat; 9], mult: &[f32; 4], add: &[f32; 4]) {
@@ -5105,10 +5347,12 @@ impl RenderBackend for SwitchRenderBackend {
                 self.push_mask_window, self.alpha_mask_window,
                 self.masked_draw_window, self.mask_shape_draw_window,
             );
+            let blend = self.blend_window;
             self.push_mask_window = 0;
             self.alpha_mask_window = 0;
             self.masked_draw_window = 0;
             self.mask_shape_draw_window = 0;
+            self.blend_window = 0;
             let (ram_used, ram_total) = query_ram();
             let live_s = LIVE_GPU_SHAPES.load(Ordering::Relaxed);
             let live_d = LIVE_GPU_DRAWS.load(Ordering::Relaxed);
@@ -5119,7 +5363,7 @@ impl RenderBackend for SwitchRenderBackend {
             let v_frag = self.vertex_arena.free.len();
             let i_frag = self.index_arena.free.len();
             let msg = std::format!(
-                "f{}: fps={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) bitmaps={} atlases={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} pushmask={} amask={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB\n",
+                "f{}: fps={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) bitmaps={} atlases={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB\n",
                 self.frame_count,
                 fps_str,
                 tick_ms,
@@ -5139,6 +5383,7 @@ impl RenderBackend for SwitchRenderBackend {
                 self.filter_tex_pool.len(),
                 pushmask,
                 amask,
+                blend,
                 maskeddraw,
                 maskshape,
                 tick_max_ms,
@@ -5601,11 +5846,68 @@ impl CommandHandler for SwitchRenderBackend {
 
     fn render_alpha_mask(
         &mut self,
-        _maskee_commands: CommandList,
-        _mask_commands: CommandList,
+        maskee_commands: CommandList,
+        mask_commands: CommandList,
     ) {
+        // Soft alpha/luminance mask (the kind stencil masking can't express).
+        // Render maskee + mask into two offscreen textures sized to the current
+        // target, composite maskee × mask.alpha into a third, then draw that
+        // back over the stage. All three textures share the "row 0 = Flash top"
+        // offscreen layout, so the combine pass needs no Y handling; only the
+        // final draw-back (proven standalone-bitmap path) flips for the main FB.
         self.alpha_mask_window = self.alpha_mask_window.saturating_add(1);
-        self.warn_once(b"cmd: render_alpha_mask (skipped)\n\0");
+        // We have a single shared offscreen FBO; recursing into it (when this
+        // mask is itself nested inside a cache entry / blend / outer mask)
+        // would reset the outer target's color attachment mid-render. Degrade
+        // to an inline unmasked draw in that case — the outer render stays
+        // correct. The common top-level case (offscreen_dims == None) is fully
+        // handled.
+        if self.offscreen_dims.is_some() {
+            maskee_commands.execute(self);
+            return;
+        }
+        let (w, h) = self.current_target_dims();
+        if w == 0 || h == 0 {
+            maskee_commands.execute(self);
+            return;
+        }
+        // Acquire all three textures up front so we can fall back to drawing the
+        // maskee unmasked (better than vanishing) if the pool/GL is exhausted.
+        let acquired = (
+            self.filter_tex_pool.acquire(w, h),
+            self.filter_tex_pool.acquire(w, h),
+            self.filter_tex_pool.acquire(w, h),
+        );
+        let (maskee, mask, result) = match acquired {
+            (Some(a), Some(b), Some(c)) => (a, b, c),
+            (a, b, c) => {
+                if let Some(t) = a { self.filter_tex_pool.release(t); }
+                if let Some(t) = b { self.filter_tex_pool.release(t); }
+                if let Some(t) = c { self.filter_tex_pool.release(t); }
+                maskee_commands.execute(self);
+                return;
+            }
+        };
+        let transparent = Color { r: 0, g: 0, b: 0, a: 0 };
+        let mk_ok = self.render_commands_to_texture(maskee.texture, w, h, maskee_commands, transparent);
+        let ms_ok = self.render_commands_to_texture(mask.texture, w, h, mask_commands, transparent);
+        if mk_ok && ms_ok
+            && self.composite_alpha_mask(maskee.texture, mask.texture, result.texture, w, h)
+        {
+            self.draw_fullscreen_texture(result.texture, w, h, || unsafe {
+                glBlendEquation(GL_FUNC_ADD);
+                glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            });
+        } else if mk_ok {
+            // Composite failed but the maskee rendered — show it unmasked.
+            self.draw_fullscreen_texture(maskee.texture, w, h, || unsafe {
+                glBlendEquation(GL_FUNC_ADD);
+                glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            });
+        }
+        self.filter_tex_pool.release(maskee);
+        self.filter_tex_pool.release(mask);
+        self.filter_tex_pool.release(result);
     }
 
     fn draw_rect(&mut self, color: Color, matrix: Matrix) {
@@ -5716,12 +6018,118 @@ impl CommandHandler for SwitchRenderBackend {
         self.mask_pop();
     }
 
-    fn blend(&mut self, commands: CommandList, _blend_mode: RenderBlendMode) {
-        // Real blend modes (multiply, screen, etc.) need offscreen
-        // framebuffer compositing — out of scope here. Inline the inner
-        // commands so we at least see them rather than dropping them.
-        let _ = BlendMode::Normal;
-        commands.execute(self);
+    fn blend(&mut self, commands: CommandList, blend_mode: RenderBlendMode) {
+        // Classify per wgpu's `BlendType`:
+        //  - Normal/Layer  → just inline the group (source-over is the default
+        //    blend, and drawing primitives sequentially is exactly the group's
+        //    composite). No extra texture.
+        //  - Add/Subtract/Screen ("trivial") → render the group into a temp,
+        //    then draw it back with the matching GL blend state, so the group
+        //    composites with the backdrop as a unit (no per-primitive double
+        //    accumulation).
+        //  - Multiply/Lighten/Darken/Difference/Invert/Overlay/HardLight
+        //    ("complex") → snapshot the backdrop, render the group into a temp,
+        //    then a shader composites the two straight onto the target.
+        //  - Alpha/Erase need real layer tracking (group alpha vs the enclosing
+        //    layer); Shader is PixelBender (unsupported). Fall back to inline.
+        let mode = match blend_mode {
+            RenderBlendMode::Builtin(m) => m,
+            RenderBlendMode::Shader(_) => {
+                commands.execute(self);
+                return;
+            }
+        };
+
+        // Nested inside another offscreen render (cache entry / outer blend /
+        // mask)? Our single shared offscreen FBO can't recurse without
+        // corrupting the outer target's color attachment, so degrade to a plain
+        // inline (Normal) composite. Top-level blends (the common case) run the
+        // full path below.
+        if self.offscreen_dims.is_some() {
+            commands.execute(self);
+            return;
+        }
+
+        // 0..=6 must match the u_blend_mode switch in COMPLEX_BLEND_FRAG.
+        let complex_mode: i32 = match mode {
+            BlendMode::Multiply => 0,
+            BlendMode::Lighten => 1,
+            BlendMode::Darken => 2,
+            BlendMode::Difference => 3,
+            BlendMode::Invert => 4,
+            BlendMode::Overlay => 5,
+            BlendMode::HardLight => 6,
+            // Non-complex modes handled below.
+            BlendMode::Normal | BlendMode::Layer | BlendMode::Alpha | BlendMode::Erase => {
+                commands.execute(self);
+                return;
+            }
+            BlendMode::Add | BlendMode::Subtract | BlendMode::Screen => {
+                let (w, h) = self.current_target_dims();
+                let Some(temp) = (if w == 0 || h == 0 { None } else { self.filter_tex_pool.acquire(w, h) }) else {
+                    commands.execute(self);
+                    return;
+                };
+                let transparent = Color { r: 0, g: 0, b: 0, a: 0 };
+                if self.render_commands_to_texture(temp.texture, w, h, commands, transparent) {
+                    self.blend_window = self.blend_window.saturating_add(1);
+                    let m = mode;
+                    self.draw_fullscreen_texture(temp.texture, w, h, move || unsafe {
+                        // Premultiplied group temp. Alpha channel always uses
+                        // "over"; RGB uses the mode-specific factors/equation.
+                        match m {
+                            BlendMode::Add => {
+                                glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+                                glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+                            }
+                            BlendMode::Subtract => {
+                                glBlendEquationSeparate(GL_FUNC_REVERSE_SUBTRACT, GL_FUNC_ADD);
+                                glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+                            }
+                            // Screen: out = src + dst*(1 - src).
+                            _ => {
+                                glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+                                glBlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_COLOR, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+                            }
+                        }
+                    });
+                }
+                self.filter_tex_pool.release(temp);
+                return;
+            }
+        };
+
+        // Complex path: snapshot the backdrop + render the group, then composite.
+        let (w, h) = self.current_target_dims();
+        let flip = if self.offscreen_dims.is_some() { 0.0 } else { 1.0 };
+        let parent = if w == 0 || h == 0 { None } else { self.filter_tex_pool.acquire(w, h) };
+        let current = if w == 0 || h == 0 { None } else { self.filter_tex_pool.acquire(w, h) };
+        let (parent, current) = match (parent, current) {
+            (Some(p), Some(c)) => (p, c),
+            (a, b) => {
+                if let Some(t) = a { self.filter_tex_pool.release(t); }
+                if let Some(t) = b { self.filter_tex_pool.release(t); }
+                commands.execute(self);
+                return;
+            }
+        };
+        // Snapshot the current target's colour into `parent` (1:1, so it's
+        // sampled straight regardless of target Y orientation). Reads from the
+        // currently-bound framebuffer (the main FB here) into the texture bound
+        // on the active unit, so pin the active unit to 0 first.
+        unsafe {
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, parent.texture);
+            glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, w as GLsizei, h as GLsizei);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+        let transparent = Color { r: 0, g: 0, b: 0, a: 0 };
+        if self.render_commands_to_texture(current.texture, w, h, commands, transparent) {
+            self.blend_window = self.blend_window.saturating_add(1);
+            self.composite_complex_to_current(parent.texture, current.texture, w, h, complex_mode, flip);
+        }
+        self.filter_tex_pool.release(parent);
+        self.filter_tex_pool.release(current);
     }
 }
 
