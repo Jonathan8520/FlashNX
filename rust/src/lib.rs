@@ -59,6 +59,13 @@ pub(crate) static TICK_TICKS_ACCUM: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 pub(crate) static RENDER_TICKS_ACCUM: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+/// Worst single-frame tick / render time within the current heartbeat window
+/// (system-tick counts). A periodic 1-frame stall (e.g. an HUD text updating
+/// once/sec) is invisible in the window AVERAGE but shows up here as a spike.
+pub(crate) static TICK_TICKS_MAX: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub(crate) static RENDER_TICKS_MAX: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// Snapshot of process RAM in bytes (used, total). Returns (0,0) if the
 /// underlying svcGetInfo call fails.
@@ -425,8 +432,12 @@ fn render_frame_with_dt(dt: FloatDuration) {
     let t1 = unsafe { ruffle_tick_now() };
     player.render();
     let t2 = unsafe { ruffle_tick_now() };
-    TICK_TICKS_ACCUM.fetch_add(t1.saturating_sub(t0), Ordering::Relaxed);
-    RENDER_TICKS_ACCUM.fetch_add(t2.saturating_sub(t1), Ordering::Relaxed);
+    let tick_dt = t1.saturating_sub(t0);
+    let render_dt = t2.saturating_sub(t1);
+    TICK_TICKS_ACCUM.fetch_add(tick_dt, Ordering::Relaxed);
+    RENDER_TICKS_ACCUM.fetch_add(render_dt, Ordering::Relaxed);
+    TICK_TICKS_MAX.fetch_max(tick_dt, Ordering::Relaxed);
+    RENDER_TICKS_MAX.fetch_max(render_dt, Ordering::Relaxed);
 
     // Overlay the cursor crosshair on top of whatever Ruffle drew. We pull
     // a `&mut SwitchRenderBackend` out of the Player by downcasting the

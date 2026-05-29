@@ -804,6 +804,21 @@ impl Drop for GlowFilterProgram {
     fn drop(&mut self) { unsafe { glDeleteProgram(self.program) }; }
 }
 
+struct BevelFilterProgram {
+    program: GLuint,
+    u_src_uv: GLint,
+    u_blur_uv_l: GLint,
+    u_blur_uv_r: GLint,
+    u_highlight: GLint,
+    u_shadow: GLint,
+    u_strength: GLint,
+    u_bevel_type: GLint,
+    u_knockout: GLint,
+}
+impl Drop for BevelFilterProgram {
+    fn drop(&mut self) { unsafe { glDeleteProgram(self.program) }; }
+}
+
 // ─── Stencil mask state ───────────────────────────────────────────────────────
 
 /// DIAGNOSTIC TOGGLE: when true, mask shapes stay invisible but the stencil
@@ -946,6 +961,10 @@ pub struct SwitchRenderBackend {
     /// If this is ~0 while `masked_draw_window` is large, mask shapes aren't
     /// producing stencil → maskee gated empty → everything masked is invisible.
     mask_shape_draw_window: u32,
+    /// Max `cache_entries` count in any frame of the current window. A periodic
+    /// spike (e.g. once/sec) means an HUD/text element is re-caching + (with
+    /// filters on) re-filtering on a timer — the idle-stutter suspect.
+    cache_entries_max_window: u32,
     /// How many times Ruffle has called `render_offscreen` since boot —
     /// non-zero means something on stage uses `cacheAsBitmap` or a filter.
     /// Logged every heartbeat so we can correlate spikes with crashes.
@@ -994,6 +1013,7 @@ pub struct SwitchRenderBackend {
     color_matrix_filter: ColorMatrixFilterProgram,
     blur_filter: BlurFilterProgram,
     glow_filter: GlowFilterProgram,
+    bevel_filter: BevelFilterProgram,
     /// Pool of standalone textures reused across filter passes within a
     /// single submit_frame, keyed by `(width, height)`. Avoids paying
     /// glGenTextures + glTexImage2D + glDeleteTextures per filter per
@@ -1357,6 +1377,60 @@ void main() {\n\
     frag_color = color;\n\
 }\n\0";
 
+// Bevel: like Glow, but samples the blurred alpha at TWO opposite offsets
+// (±blur_offset along the filter angle) to derive a highlight side and a
+// shadow side. Faithful port of wgpu's `bevel.wgsl`.
+const BEVEL_VERT: &[u8] = b"#version 330 core\n\
+layout(location = 0) in vec2 a_pos;\n\
+layout(location = 1) in vec2 a_uv;\n\
+uniform vec4 u_src_uv;\n\
+uniform vec4 u_blur_uv_l;\n\
+uniform vec4 u_blur_uv_r;\n\
+out vec2 v_src_uv;\n\
+out vec2 v_blur_l;\n\
+out vec2 v_blur_r;\n\
+void main() {\n\
+    gl_Position = vec4(a_pos.x * 2.0 - 1.0, a_pos.y * 2.0 - 1.0, 0.0, 1.0);\n\
+    v_src_uv = u_src_uv.xy + a_uv * u_src_uv.zw;\n\
+    v_blur_l = u_blur_uv_l.xy + a_uv * u_blur_uv_l.zw;\n\
+    v_blur_r = u_blur_uv_r.xy + a_uv * u_blur_uv_r.zw;\n\
+}\n\0";
+
+const BEVEL_FRAG: &[u8] = b"#version 330 core\n\
+in vec2 v_src_uv;\n\
+in vec2 v_blur_l;\n\
+in vec2 v_blur_r;\n\
+out vec4 frag_color;\n\
+uniform sampler2D u_tex;\n\
+uniform sampler2D u_blur_tex;\n\
+uniform vec4 u_highlight;\n\
+uniform vec4 u_shadow;\n\
+uniform float u_strength;\n\
+uniform int u_bevel_type;\n\
+uniform int u_knockout;\n\
+void main() {\n\
+    bool knockout = u_knockout != 0;\n\
+    bool outer = (u_bevel_type == 0 || u_bevel_type == 2);\n\
+    bool inner = (u_bevel_type == 1 || u_bevel_type == 2);\n\
+    float bl = texture(u_blur_tex, v_blur_l).a;\n\
+    float br = texture(u_blur_tex, v_blur_r).a;\n\
+    vec4 dst = texture(u_tex, v_src_uv);\n\
+    if (v_blur_l.x < 0.0 || v_blur_l.x > 1.0 || v_blur_l.y < 0.0 || v_blur_l.y > 1.0) bl = 0.0;\n\
+    if (v_blur_r.x < 0.0 || v_blur_r.x > 1.0 || v_blur_r.y < 0.0 || v_blur_r.y > 1.0) br = 0.0;\n\
+    float ha = clamp((bl - br) * u_strength, 0.0, 1.0);\n\
+    float sa = clamp((br - bl) * u_strength, 0.0, 1.0);\n\
+    vec4 glow = u_highlight * ha + u_shadow * sa;\n\
+    vec4 outc;\n\
+    if (inner && outer) {\n\
+        outc = knockout ? glow : (dst - dst * glow.a + glow);\n\
+    } else if (inner) {\n\
+        outc = knockout ? (glow * dst.a) : (glow * dst.a + dst * (1.0 - glow.a));\n\
+    } else {\n\
+        outc = knockout ? (glow - glow * dst.a) : (dst + glow - glow * dst.a);\n\
+    }\n\
+    frag_color = outc;\n\
+}\n\0";
+
 // ─── Shader build helpers ─────────────────────────────────────────────────────
 
 fn compile_shader(kind: GLenum, src_nul: &[u8]) -> Option<GLuint> {
@@ -1502,6 +1576,21 @@ fn build_glow_filter_program() -> Option<GlowFilterProgram> {
         u_inner: loc(program, b"u_inner\0"),
         u_knockout: loc(program, b"u_knockout\0"),
         u_composite_source: loc(program, b"u_composite_source\0"),
+        program,
+    })
+}
+
+fn build_bevel_filter_program() -> Option<BevelFilterProgram> {
+    let program = link_program(BEVEL_VERT, BEVEL_FRAG)?;
+    Some(BevelFilterProgram {
+        u_src_uv: loc(program, b"u_src_uv\0"),
+        u_blur_uv_l: loc(program, b"u_blur_uv_l\0"),
+        u_blur_uv_r: loc(program, b"u_blur_uv_r\0"),
+        u_highlight: loc(program, b"u_highlight\0"),
+        u_shadow: loc(program, b"u_shadow\0"),
+        u_strength: loc(program, b"u_strength\0"),
+        u_bevel_type: loc(program, b"u_bevel_type\0"),
+        u_knockout: loc(program, b"u_knockout\0"),
         program,
     })
 }
@@ -1916,6 +2005,7 @@ impl SwitchRenderBackend {
         let color_matrix_filter = build_color_matrix_filter_program()?;
         let blur_filter = build_blur_filter_program()?;
         let glow_filter = build_glow_filter_program()?;
+        let bevel_filter = build_bevel_filter_program()?;
 
         let (rect_vao, rect_vbo) = build_solid_quad();
         let (bitmap_vao, bitmap_vbo) = build_bitmap_quad();
@@ -1956,6 +2046,9 @@ impl SwitchRenderBackend {
             glUseProgram(glow_filter.program);
             glUniform1i(loc(glow_filter.program, b"u_tex\0"), 0);
             glUniform1i(loc(glow_filter.program, b"u_blur_tex\0"), 1);
+            glUseProgram(bevel_filter.program);
+            glUniform1i(loc(bevel_filter.program, b"u_tex\0"), 0);
+            glUniform1i(loc(bevel_filter.program, b"u_blur_tex\0"), 1);
             glUseProgram(0);
         }
 
@@ -1973,6 +2066,7 @@ impl SwitchRenderBackend {
             color_matrix_filter,
             blur_filter,
             glow_filter,
+            bevel_filter,
             filter_tex_pool: FilterTexturePool::new(),
             gl_state: GlStateCache::default(),
             rect_vao,
@@ -1995,6 +2089,7 @@ impl SwitchRenderBackend {
             alpha_mask_window: 0,
             masked_draw_window: 0,
             mask_shape_draw_window: 0,
+            cache_entries_max_window: 0,
             render_offscreen_calls: 0,
             apply_filter_calls: 0,
             resolve_sync_calls: 0,
@@ -2596,6 +2691,115 @@ impl SwitchRenderBackend {
         ok
     }
 
+    /// Bevel: blur the source alpha, then a composite pass samples that blur at
+    /// two opposite offsets (±angle·distance) to make a highlight side and a
+    /// shadow side. Faithful port of wgpu's bevel. Mirrors the glow path.
+    fn apply_bevel_raw(
+        &mut self,
+        src_tex: GLuint,
+        src_w: u32,
+        src_h: u32,
+        source_point: (u32, u32),
+        source_size: (u32, u32),
+        dst_tex: GLuint,
+        dest_point: (i32, i32),
+        filter: &swf::BevelFilter,
+    ) -> bool {
+        let blur_args = filter.inner_blur_filter();
+        let blur_temp_opt = self.run_blur_to_temp(
+            src_tex, src_w, src_h, source_point, source_size, &blur_args,
+        );
+        let (blur_tex, blur_w, blur_h, blur_temp_to_release) = match blur_temp_opt {
+            Some(t) => (t.texture, t.width, t.height, Some(t)),
+            None => {
+                // Impotent blur → synthesise a transparent temp so both
+                // samples read 0 (no highlight/shadow, source passes through).
+                let Some(empty) = self.filter_tex_pool.acquire(source_size.0, source_size.1) else {
+                    return false;
+                };
+                if self.offscreen_fbo == 0 {
+                    unsafe {
+                        let mut fbo: GLuint = 0;
+                        glGenFramebuffers(1, &mut fbo);
+                        self.offscreen_fbo = fbo;
+                    }
+                }
+                unsafe {
+                    let mut prev_fbo: GLint = 0;
+                    let mut prev_vp: [GLint; 4] = [0; 4];
+                    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &mut prev_fbo);
+                    glGetIntegerv(GL_VIEWPORT, prev_vp.as_mut_ptr());
+                    glBindFramebuffer(GL_FRAMEBUFFER, self.offscreen_fbo);
+                    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, empty.texture, 0);
+                    glClearColor(0.0, 0.0, 0.0, 0.0);
+                    glClear(GL_COLOR_BUFFER_BIT);
+                    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+                    glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo as GLuint);
+                    glViewport(prev_vp[0], prev_vp[1], prev_vp[2], prev_vp[3]);
+                }
+                (empty.texture, empty.width, empty.height, Some(empty))
+            }
+        };
+
+        // ±blur_offset along the filter angle, normalised to the blur texture.
+        let distance = filter.distance.to_f32();
+        let angle = filter.angle.to_f32();
+        let off = (angle.cos() * distance, angle.sin() * distance);
+        let bw = blur_w.max(1) as f32;
+        let bh = blur_h.max(1) as f32;
+        let (lu, lv) = (off.0 / bw, off.1 / bh);
+        let (ru, rv) = (-off.0 / bw, -off.1 / bh);
+
+        // Premultiplied colors (matches wgpu) — the cache texture is later
+        // drawn back with premultiplied "over".
+        let prem = |c: swf::Color| {
+            let a = c.a as f32 / 255.0;
+            [c.r as f32 / 255.0 * a, c.g as f32 / 255.0 * a, c.b as f32 / 255.0 * a, a]
+        };
+        let hi = prem(filter.highlight_color);
+        let sh = prem(filter.shadow_color);
+        let strength = filter.strength.to_f32();
+        let bevel_type: GLint = if filter.is_on_top() { 2 } else if filter.is_inner() { 1 } else { 0 };
+        let knockout_i: GLint = if filter.is_knockout() { 1 } else { 0 };
+
+        let prog = self.bevel_filter.program;
+        let u_src_uv = self.bevel_filter.u_src_uv;
+        let u_blur_uv_l = self.bevel_filter.u_blur_uv_l;
+        let u_blur_uv_r = self.bevel_filter.u_blur_uv_r;
+        let u_highlight = self.bevel_filter.u_highlight;
+        let u_shadow = self.bevel_filter.u_shadow;
+        let u_strength = self.bevel_filter.u_strength;
+        let u_bevel_type = self.bevel_filter.u_bevel_type;
+        let u_knockout = self.bevel_filter.u_knockout;
+
+        unsafe {
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, blur_tex);
+            glActiveTexture(GL_TEXTURE0);
+        }
+        let ok = self.draw_filter_pass(
+            prog, u_src_uv,
+            src_tex, src_w, src_h, source_point, source_size,
+            dst_tex, dest_point.0, dest_point.1, source_size.0, source_size.1,
+            move || unsafe {
+                glUniform4f(u_blur_uv_l, lu, lv, 1.0, 1.0);
+                glUniform4f(u_blur_uv_r, ru, rv, 1.0, 1.0);
+                glUniform4f(u_highlight, hi[0], hi[1], hi[2], hi[3]);
+                glUniform4f(u_shadow, sh[0], sh[1], sh[2], sh[3]);
+                glUniform1f(u_strength, strength);
+                glUniform1i(u_bevel_type, bevel_type);
+                glUniform1i(u_knockout, knockout_i);
+            },
+        );
+        unsafe {
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glActiveTexture(GL_TEXTURE0);
+        }
+        if let Some(t) = blur_temp_to_release { self.filter_tex_pool.release(t); }
+        ok
+    }
+
     /// Filter dispatcher used by both the trait `apply_filter` (for
     /// BitmapData operations Ruffle drives directly) and the
     /// `cache_entries` chain in `submit_frame`. Takes raw texture IDs so the
@@ -2638,6 +2842,10 @@ impl SwitchRenderBackend {
                     dst_tex, dest_point, &inner, (-x, -y),
                 )
             }
+            Filter::BevelFilter(args) => self.apply_bevel_raw(
+                src_tex, src_w, src_h, source_point, source_size,
+                dst_tex, dest_point, args,
+            ),
             _ => false,
         }
     }
@@ -4711,6 +4919,7 @@ impl RenderBackend for SwitchRenderBackend {
                 | Filter::BlurFilter(_)
                 | Filter::GlowFilter(_)
                 | Filter::DropShadowFilter(_)
+                | Filter::BevelFilter(_)
         )
     }
 
@@ -4760,6 +4969,7 @@ impl RenderBackend for SwitchRenderBackend {
         //   3. If filters moved current off entry.handle, identity-blit the
         //      final filter texture back into entry.handle (so the cache
         //      texture sees the filtered result).
+        self.cache_entries_max_window = self.cache_entries_max_window.max(cache_entries.len() as u32);
         // Age out filter-pool textures not reused recently (TTL eviction).
         self.filter_tex_pool.begin_frame(self.frame_count as u64);
         // Per-frame filter budget. Each filtered cache entry costs ~4-5
@@ -4875,14 +5085,20 @@ impl RenderBackend for SwitchRenderBackend {
             //   tick=high render=high → both contribute (shape register etc)
             let tick_total_ticks = crate::TICK_TICKS_ACCUM.swap(0, Ordering::Relaxed);
             let render_total_ticks = crate::RENDER_TICKS_ACCUM.swap(0, Ordering::Relaxed);
-            let (tick_ms, render_ms) = if tick_freq > 0 {
+            let tick_max_ticks = crate::TICK_TICKS_MAX.swap(0, Ordering::Relaxed);
+            let render_max_ticks = crate::RENDER_TICKS_MAX.swap(0, Ordering::Relaxed);
+            let (tick_ms, render_ms, tick_max_ms, render_max_ms) = if tick_freq > 0 {
                 (
                     (tick_total_ticks * 1000) / tick_freq,
                     (render_total_ticks * 1000) / tick_freq,
+                    (tick_max_ticks * 1000) / tick_freq,
+                    (render_max_ticks * 1000) / tick_freq,
                 )
             } else {
-                (0, 0)
+                (0, 0, 0, 0)
             };
+            let cache_max = self.cache_entries_max_window;
+            self.cache_entries_max_window = 0;
             let draw_calls = self.draw_calls_this_window;
             self.draw_calls_this_window = 0;
             let (pushmask, amask, maskeddraw, maskshape) = (
@@ -4903,7 +5119,7 @@ impl RenderBackend for SwitchRenderBackend {
             let v_frag = self.vertex_arena.free.len();
             let i_frag = self.index_arena.free.len();
             let msg = std::format!(
-                "f{}: fps={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) bitmaps={} atlases={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} pushmask={} amask={} maskeddraw={} maskshape={} ram={}MB/{}MB\n",
+                "f{}: fps={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) bitmaps={} atlases={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} pushmask={} amask={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB\n",
                 self.frame_count,
                 fps_str,
                 tick_ms,
@@ -4925,6 +5141,9 @@ impl RenderBackend for SwitchRenderBackend {
                 amask,
                 maskeddraw,
                 maskshape,
+                tick_max_ms,
+                render_max_ms,
+                cache_max,
                 ram_used / (1024 * 1024),
                 ram_total / (1024 * 1024),
             );
