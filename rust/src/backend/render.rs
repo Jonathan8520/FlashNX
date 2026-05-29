@@ -503,6 +503,104 @@ struct SwitchBitmapHandle {
 }
 impl BitmapHandleImpl for SwitchBitmapHandle {}
 
+// ─── Standalone (FBO-attachable) textures ─────────────────────────────────────
+//
+// The atlas system above packs many bitmaps into shared GL textures, which is
+// great for the common case but cannot be used as an FBO color attachment
+// (you'd render over neighbours). cacheAsBitmap / filtered display objects need
+// their own texture to render into and sample from, so Ruffle hands us a
+// dedicated handle via `create_empty_texture`. This is the second BitmapHandle
+// variant — code paths taking a BitmapHandle try `as_standalone_bitmap` before
+// falling back to `as_switch_bitmap`. Mirrors the wgpu backend where EVERY
+// bitmap is a standalone `Texture`.
+
+/// A GL texture that owns its storage (not atlas-packed), suitable as an FBO
+/// color attachment and as a sampling source. Owns the GL texture; the Drop
+/// frees it.
+struct StandaloneTexture {
+    texture: GLuint,
+    width: u32,
+    height: u32,
+}
+
+impl Drop for StandaloneTexture {
+    fn drop(&mut self) {
+        unsafe { glDeleteTextures(1, &self.texture) };
+    }
+}
+
+impl std::fmt::Debug for StandaloneTexture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "StandaloneTexture(id={}, {}x{})", self.texture, self.width, self.height)
+    }
+}
+
+/// BitmapHandle payload for a standalone texture. Cheap to clone (Arc); the
+/// GL texture dies when the last Arc drops.
+#[derive(Clone, Debug)]
+struct StandaloneBitmap(Arc<StandaloneTexture>);
+impl BitmapHandleImpl for StandaloneBitmap {}
+
+/// Minimal SyncHandle. Ruffle wants something back from `render_offscreen` to
+/// confirm the work was scheduled; `apply_filter` returns this since its
+/// result is read straight back via `render_bitmap`, never via a sync.
+#[derive(Debug)]
+struct NoOpSyncHandle;
+impl SyncHandle for NoOpSyncHandle {}
+
+/// SyncHandle for `BitmapData.draw()`. Owns the temporary texture the draw
+/// commands were rendered into, plus the dirty region to read back. Ruffle
+/// stores this in the BitmapData's `GpuModified` state and calls
+/// `resolve_sync_handle` on the next CPU access (e.g. `copyPixels`), which
+/// reads the pixels back into the BitmapData's CPU buffer. The owned texture
+/// is freed when this handle drops (right after readback).
+struct BitmapDataSyncHandle {
+    texture: StandaloneTexture,
+    /// Dirty region (BitmapData/top-left coords) — must match the `bounds`
+    /// Ruffle passed to `render_offscreen`, since the readback closure indexes
+    /// the buffer relative to this region's origin.
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+}
+impl std::fmt::Debug for BitmapDataSyncHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "BitmapDataSyncHandle(tex={}, region={}x{}@{},{})",
+            self.texture.texture, self.w, self.h, self.x, self.y
+        )
+    }
+}
+impl SyncHandle for BitmapDataSyncHandle {}
+
+/// Allocate a fresh transparent RGBA8 texture (linear + clamp-to-edge),
+/// suitable as an FBO color attachment. Returns None for a zero dimension.
+fn make_standalone_texture(width: u32, height: u32) -> Option<StandaloneTexture> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let mut tex: GLuint = 0;
+    unsafe {
+        glGenTextures(1, &mut tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        let zeroes = vec![0u8; (width as usize) * (height as usize) * 4];
+        glTexImage2D(
+            GL_TEXTURE_2D, 0, GL_RGBA8 as GLint,
+            width as GLsizei, height as GLsizei, 0,
+            GL_RGBA, GL_UNSIGNED_BYTE, zeroes.as_ptr() as *const _,
+        );
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as GLint);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as GLint);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as GLint);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as GLint);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+    Some(StandaloneTexture { texture: tex, width, height })
+}
+
 /// What kind of draw call this is (chooses the shader program).
 enum DrawKind {
     Solid,
@@ -655,15 +753,61 @@ impl Drop for ShapeBitmapProgram {
     }
 }
 
+// ─── Filter programs ──────────────────────────────────────────────────────────
+
+struct ColorMatrixFilterProgram {
+    program: GLuint,
+    u_src_uv: GLint,
+    u_color_mat: GLint,
+    u_color_extra: GLint,
+}
+struct BlurFilterProgram {
+    program: GLuint,
+    u_src_uv: GLint,
+    u_blur_dir: GLint,
+    u_blur_m: GLint,
+    u_blur_m2: GLint,
+    u_blur_full_size: GLint,
+    u_blur_first_weight: GLint,
+    u_blur_last_offset: GLint,
+    u_blur_last_weight: GLint,
+}
+struct GlowFilterProgram {
+    program: GLuint,
+    u_src_uv: GLint,
+    u_blur_uv: GLint,
+    u_color: GLint,
+    u_strength: GLint,
+    u_inner: GLint,
+    u_knockout: GLint,
+    u_composite_source: GLint,
+}
+impl Drop for ColorMatrixFilterProgram {
+    fn drop(&mut self) { unsafe { glDeleteProgram(self.program) }; }
+}
+impl Drop for BlurFilterProgram {
+    fn drop(&mut self) { unsafe { glDeleteProgram(self.program) }; }
+}
+impl Drop for GlowFilterProgram {
+    fn drop(&mut self) { unsafe { glDeleteProgram(self.program) }; }
+}
+
 // ─── Stencil mask state ───────────────────────────────────────────────────────
 
+/// DIAGNOSTIC TOGGLE: when true, mask shapes stay invisible but the stencil
+/// gating is skipped so maskees draw unconditionally. Used to confirm whether
+/// the SMWF overworld blank screen is caused by our stencil masking. Set back
+/// to false once the masking bug is understood/fixed.
 #[derive(Default, Clone, Copy)]
 struct MaskState {
-    /// Nesting depth: 0 = no mask, N = drawing the Nth maskee.
+    /// Nesting depth: 0 = no mask, N = drawing the Nth maskee. Doubles as the
+    /// stencil coverage count a maskee at this depth must equal.
     depth: u32,
-    /// 0 when no mask, otherwise the stencil reference value drawn maskees
-    /// must equal.
-    active_value: u8,
+    /// True while we are drawing a MASK shape into the stencil (between
+    /// push_mask/deactivate_mask and the following activate_mask/pop). Draws
+    /// issued in this phase write the stencil region; if none happen, the
+    /// maskee is gated against an empty stencil → invisible.
+    writing: bool,
 }
 
 // ─── The backend ──────────────────────────────────────────────────────────────
@@ -777,12 +921,29 @@ pub struct SwitchRenderBackend {
     /// the last heartbeat. Helps correlate FPS drops with draw-call count
     /// — if it spikes from ~30 to ~300, the next perf step is batching.
     draw_calls_this_window: u32,
+    /// Mask diagnostics, reset per heartbeat window. `push_mask_window` counts
+    /// `push_mask` calls; `alpha_mask_window` counts `render_alpha_mask` (which
+    /// we currently SKIP — non-zero on a blank screen would explain it);
+    /// `masked_draw_window` counts shape/bitmap draws issued while a stencil
+    /// mask is active (gated on stencil EQUAL). If a screen draws thousands of
+    /// masked things but shows nothing, the mask shape isn't writing stencil.
+    push_mask_window: u32,
+    alpha_mask_window: u32,
+    masked_draw_window: u32,
+    /// Draws issued while writing a mask shape into the stencil (writing=true).
+    /// If this is ~0 while `masked_draw_window` is large, mask shapes aren't
+    /// producing stencil → maskee gated empty → everything masked is invisible.
+    mask_shape_draw_window: u32,
     /// How many times Ruffle has called `render_offscreen` since boot —
     /// non-zero means something on stage uses `cacheAsBitmap` or a filter.
     /// Logged every heartbeat so we can correlate spikes with crashes.
     render_offscreen_calls: u32,
     /// How many times Ruffle has called `apply_filter` since boot.
     apply_filter_calls: u32,
+    /// How many times we've read a BitmapData.draw() result back to the CPU
+    /// (`resolve_sync_handle`). Non-zero confirms the tile-engine readback path
+    /// (SMWF terrain) is firing.
+    resolve_sync_calls: u32,
     /// One bit per `Filter` variant we've seen via `is_filter_supported`,
     /// so each variant is logged the first time only. Variant ordinals
     /// match `filter_variant_ordinal()`. `Cell` would be simpler but
@@ -803,6 +964,54 @@ pub struct SwitchRenderBackend {
     /// `index_arena` as the element buffer. Each draw shifts the read
     /// origin via `glDrawElementsBaseVertex(base_vertex)`.
     shape_vao: GLuint,
+
+    /// When `Some((w, h))`, `world_matrix` targets an offscreen FBO of that
+    /// size (no Y-flip) instead of the main framebuffer. Set while replaying
+    /// commands into a cache texture. Commands are pre-shifted by Ruffle to
+    /// target-local coords, so no origin offset is needed.
+    offscreen_dims: Option<(u32, u32)>,
+    /// Reusable FBO object (lazy; 0 = not created). Color attachment is
+    /// rebound per offscreen render.
+    offscreen_fbo: GLuint,
+    /// Shared depth+stencil renderbuffer attached to `offscreen_fbo`, so
+    /// stencil masks pushed by `commands.execute()` work inside the FBO.
+    /// Grows monotonically; attached once.
+    offscreen_depth_stencil: GLuint,
+    offscreen_depth_stencil_dims: (u32, u32),
+
+    color_matrix_filter: ColorMatrixFilterProgram,
+    blur_filter: BlurFilterProgram,
+    glow_filter: GlowFilterProgram,
+    /// Pool of standalone textures reused across filter passes within a
+    /// single submit_frame, keyed by `(width, height)`. Avoids paying
+    /// glGenTextures + glTexImage2D + glDeleteTextures per filter per
+    /// frame, which was the main fps killer in Phase 2.3's first try.
+    filter_tex_pool: FilterTexturePool,
+}
+
+/// Pool of `StandaloneTexture` keyed by `(width, height)`. Acquire pulls an
+/// existing entry of the right size or makes a fresh one; release pushes it
+/// back for the next caller. Each entry is RGBA8 with linear sampling and
+/// clamp-to-edge wrap — same setup as `make_standalone_texture`.
+///
+/// Reusing entries across filter passes prevents the per-frame texture
+/// alloc/free thrash that brought Mario 63 down to 5 fps in the prior patch.
+struct FilterTexturePool {
+    buckets: std::collections::HashMap<(u32, u32), Vec<StandaloneTexture>>,
+}
+
+impl FilterTexturePool {
+    fn new() -> Self { Self { buckets: std::collections::HashMap::new() } }
+    fn acquire(&mut self, w: u32, h: u32) -> Option<StandaloneTexture> {
+        if let Some(bucket) = self.buckets.get_mut(&(w, h)) {
+            if let Some(tex) = bucket.pop() { return Some(tex); }
+        }
+        make_standalone_texture(w, h)
+    }
+    fn release(&mut self, tex: StandaloneTexture) {
+        let key = (tex.width, tex.height);
+        self.buckets.entry(key).or_default().push(tex);
+    }
 }
 
 /// Returns a stable 0..=9 ordinal + short name for a `Filter` variant so we
@@ -957,6 +1166,150 @@ void main() {\n\
     frag_color = clamp(c * u_mult + u_add, 0.0, 1.0);\n\
 }\n\0";
 
+// ─── Filter shaders ───────────────────────────────────────────────────────────
+//
+// Ported from `third_party/ruffle/render/wgpu/shaders/filter/{blur,glow,color_matrix}.wgsl`
+// with one convention difference: no Y-flip in the vertex stage. wgpu's filter
+// vertex shader does `vec4(pos.x*2-1, 1-pos.y*2, ...)` to compensate for its
+// top-left texture origin; GL stores texel(0,0) at bottom-left so the no-flip
+// version is correct here.
+//
+// All filter passes share: unit quad input (pos.xy in [0,1]², matching
+// `build_bitmap_quad`), `u_src_uv` re-mapping the [0,1] UV into a sub-rect of
+// the source texture, and `u_tex` sampler bound at unit 0 (set at link time).
+
+const FILTER_VERT: &[u8] = b"#version 330 core\n\
+layout(location = 0) in vec2 a_pos;\n\
+layout(location = 1) in vec2 a_uv;\n\
+uniform vec4 u_src_uv;\n\
+out vec2 v_uv;\n\
+void main() {\n\
+    gl_Position = vec4(a_pos.x * 2.0 - 1.0, a_pos.y * 2.0 - 1.0, 0.0, 1.0);\n\
+    v_uv = u_src_uv.xy + a_uv * u_src_uv.zw;\n\
+}\n\0";
+
+// Faithful port of `color_matrix.wgsl`. 20-float ColorMatrix as a 4×4 mat plus
+// a vec4 of "+" terms; un-premultiply rgb before the multiply, re-premultiply
+// after, to match the Flash convention.
+const COLOR_MATRIX_FRAG: &[u8] = b"#version 330 core\n\
+in vec2 v_uv;\n\
+out vec4 frag_color;\n\
+uniform sampler2D u_tex;\n\
+uniform mat4 u_color_mat;\n\
+uniform vec4 u_color_extra;\n\
+void main() {\n\
+    vec4 src = texture(u_tex, v_uv);\n\
+    vec3 rgb_un = src.a > 0.0 ? src.rgb / src.a : vec3(0.0);\n\
+    vec4 in_vec = vec4(rgb_un, src.a);\n\
+    vec4 out_vec = u_color_mat * in_vec + u_color_extra;\n\
+    vec4 c = clamp(out_vec, 0.0, 1.0);\n\
+    frag_color = vec4(c.rgb * c.a, c.a);\n\
+}\n\0";
+
+// Separable Gaussian-approximating blur, faithful port of `blur.wgsl`. The
+// vertex stage pre-shifts UV so the fragment loop starts at the right offset
+// (`u_blur_m` half-distance, `u_blur_m2 = m*2` outer bound). The last sample
+// is fused with a fractional weight to handle non-integer kernel radii.
+// See <https://fgiesen.wordpress.com/2012/08/01/fast-blurs-2/>.
+const BLUR_VERT: &[u8] = b"#version 330 core\n\
+layout(location = 0) in vec2 a_pos;\n\
+layout(location = 1) in vec2 a_uv;\n\
+uniform vec4 u_src_uv;\n\
+uniform vec2 u_blur_dir;\n\
+uniform float u_blur_m;\n\
+out vec2 v_uv;\n\
+void main() {\n\
+    gl_Position = vec4(a_pos.x * 2.0 - 1.0, a_pos.y * 2.0 - 1.0, 0.0, 1.0);\n\
+    vec2 raw = u_src_uv.xy + a_uv * u_src_uv.zw;\n\
+    v_uv = raw - u_blur_dir * u_blur_m;\n\
+}\n\0";
+
+const BLUR_FRAG: &[u8] = b"#version 330 core\n\
+in vec2 v_uv;\n\
+out vec4 frag_color;\n\
+uniform sampler2D u_tex;\n\
+uniform vec2 u_blur_dir;\n\
+uniform float u_blur_m2;\n\
+uniform float u_blur_full_size;\n\
+uniform float u_blur_first_weight;\n\
+uniform float u_blur_last_offset;\n\
+uniform float u_blur_last_weight;\n\
+void main() {\n\
+    vec2 direction = u_blur_dir;\n\
+    vec4 total = vec4(0.0);\n\
+    total += texture(u_tex, v_uv - direction) * u_blur_first_weight;\n\
+    vec4 center = vec4(0.0);\n\
+    for (float i = 0.5; i < u_blur_m2; i += 2.0) {\n\
+        center += texture(u_tex, v_uv + direction * i);\n\
+    }\n\
+    total += center * 2.0;\n\
+    vec2 last_loc = v_uv + direction * (u_blur_m2 + u_blur_last_offset);\n\
+    total += texture(u_tex, last_loc) * u_blur_last_weight;\n\
+    vec4 result = total / u_blur_full_size;\n\
+    frag_color = floor(result * 255.0) / 255.0;\n\
+}\n\0";
+
+// Glow composite + DropShadow: faithful port of `glow.wgsl`. Reads the source
+// texture (unit 0) and a pre-blurred version of it (unit 1), composites with
+// a uniform colour + strength + inner/knockout/composite_source flags. The
+// blur_uv is offset per-vertex by `u_blur_uv.xy` (DropShadow distance), so
+// the blur effectively shifts on the destination.
+const GLOW_VERT: &[u8] = b"#version 330 core\n\
+layout(location = 0) in vec2 a_pos;\n\
+layout(location = 1) in vec2 a_uv;\n\
+uniform vec4 u_src_uv;\n\
+uniform vec4 u_blur_uv;\n\
+out vec2 v_src_uv;\n\
+out vec2 v_blur_uv;\n\
+void main() {\n\
+    gl_Position = vec4(a_pos.x * 2.0 - 1.0, a_pos.y * 2.0 - 1.0, 0.0, 1.0);\n\
+    v_src_uv = u_src_uv.xy + a_uv * u_src_uv.zw;\n\
+    v_blur_uv = u_blur_uv.xy + a_uv * u_blur_uv.zw;\n\
+}\n\0";
+
+const GLOW_FRAG: &[u8] = b"#version 330 core\n\
+in vec2 v_src_uv;\n\
+in vec2 v_blur_uv;\n\
+out vec4 frag_color;\n\
+uniform sampler2D u_tex;\n\
+uniform sampler2D u_blur_tex;\n\
+uniform vec4 u_color;\n\
+uniform float u_strength;\n\
+uniform int u_inner;\n\
+uniform int u_knockout;\n\
+uniform int u_composite_source;\n\
+void main() {\n\
+    bool inner = u_inner != 0;\n\
+    bool knockout = u_knockout != 0;\n\
+    bool composite_source = u_composite_source != 0;\n\
+    float blur_a = texture(u_blur_tex, v_blur_uv).a;\n\
+    vec4 dst = texture(u_tex, v_src_uv);\n\
+    if (v_blur_uv.x < 0.0 || v_blur_uv.x > 1.0 || v_blur_uv.y < 0.0 || v_blur_uv.y > 1.0) {\n\
+        blur_a = 0.0;\n\
+    }\n\
+    vec4 color = vec4(u_color.r, u_color.g, u_color.b, 1.0);\n\
+    if (inner) {\n\
+        float alpha = u_color.a * clamp((1.0 - blur_a) * u_strength, 0.0, 1.0);\n\
+        if (knockout) {\n\
+            color = color * alpha * dst.a;\n\
+        } else if (composite_source) {\n\
+            color = color * alpha * dst.a + dst * (1.0 - alpha);\n\
+        } else {\n\
+            color = color * alpha * dst.a;\n\
+        }\n\
+    } else {\n\
+        float alpha = u_color.a * clamp(blur_a * u_strength, 0.0, 1.0);\n\
+        if (knockout) {\n\
+            color = color * alpha * (1.0 - dst.a);\n\
+        } else if (composite_source) {\n\
+            color = color * alpha * (1.0 - dst.a) + dst;\n\
+        } else {\n\
+            color = color * alpha;\n\
+        }\n\
+    }\n\
+    frag_color = color;\n\
+}\n\0";
+
 // ─── Shader build helpers ─────────────────────────────────────────────────────
 
 fn compile_shader(kind: GLenum, src_nul: &[u8]) -> Option<GLuint> {
@@ -1063,6 +1416,45 @@ fn build_gradient_program() -> Option<GradientProgram> {
         u_grad_kind: loc(program, b"u_grad_kind\0"),
         u_grad_spread: loc(program, b"u_grad_spread\0"),
         u_grad_focal: loc(program, b"u_grad_focal\0"),
+        program,
+    })
+}
+
+fn build_color_matrix_filter_program() -> Option<ColorMatrixFilterProgram> {
+    let program = link_program(FILTER_VERT, COLOR_MATRIX_FRAG)?;
+    Some(ColorMatrixFilterProgram {
+        u_src_uv: loc(program, b"u_src_uv\0"),
+        u_color_mat: loc(program, b"u_color_mat\0"),
+        u_color_extra: loc(program, b"u_color_extra\0"),
+        program,
+    })
+}
+
+fn build_blur_filter_program() -> Option<BlurFilterProgram> {
+    let program = link_program(BLUR_VERT, BLUR_FRAG)?;
+    Some(BlurFilterProgram {
+        u_src_uv: loc(program, b"u_src_uv\0"),
+        u_blur_dir: loc(program, b"u_blur_dir\0"),
+        u_blur_m: loc(program, b"u_blur_m\0"),
+        u_blur_m2: loc(program, b"u_blur_m2\0"),
+        u_blur_full_size: loc(program, b"u_blur_full_size\0"),
+        u_blur_first_weight: loc(program, b"u_blur_first_weight\0"),
+        u_blur_last_offset: loc(program, b"u_blur_last_offset\0"),
+        u_blur_last_weight: loc(program, b"u_blur_last_weight\0"),
+        program,
+    })
+}
+
+fn build_glow_filter_program() -> Option<GlowFilterProgram> {
+    let program = link_program(GLOW_VERT, GLOW_FRAG)?;
+    Some(GlowFilterProgram {
+        u_src_uv: loc(program, b"u_src_uv\0"),
+        u_blur_uv: loc(program, b"u_blur_uv\0"),
+        u_color: loc(program, b"u_color\0"),
+        u_strength: loc(program, b"u_strength\0"),
+        u_inner: loc(program, b"u_inner\0"),
+        u_knockout: loc(program, b"u_knockout\0"),
+        u_composite_source: loc(program, b"u_composite_source\0"),
         program,
     })
 }
@@ -1445,6 +1837,10 @@ fn as_switch_bitmap(handle: &BitmapHandle) -> Option<&SwitchBitmapHandle> {
     <dyn Any>::downcast_ref(&*handle.0)
 }
 
+fn as_standalone_bitmap(handle: &BitmapHandle) -> Option<&StandaloneBitmap> {
+    <dyn Any>::downcast_ref(&*handle.0)
+}
+
 // ─── Backend implementation ───────────────────────────────────────────────────
 
 impl SwitchRenderBackend {
@@ -1470,6 +1866,9 @@ impl SwitchRenderBackend {
         let bitmap_prog = build_bitmap_program()?;
         let shape_bitmap_prog = build_shape_bitmap_program()?;
         let gradient_prog = build_gradient_program()?;
+        let color_matrix_filter = build_color_matrix_filter_program()?;
+        let blur_filter = build_blur_filter_program()?;
+        let glow_filter = build_glow_filter_program()?;
 
         let (rect_vao, rect_vbo) = build_solid_quad();
         let (bitmap_vao, bitmap_vbo) = build_bitmap_quad();
@@ -1501,6 +1900,15 @@ impl SwitchRenderBackend {
             glUniform1i(shape_bitmap_prog.u_tex, 0);
             glUseProgram(gradient_prog.program);
             glUniform1i(gradient_prog.u_tex, 0);
+            // Filter programs sample at unit 0; glow additionally samples a
+            // pre-blurred source at unit 1.
+            glUseProgram(color_matrix_filter.program);
+            glUniform1i(loc(color_matrix_filter.program, b"u_tex\0"), 0);
+            glUseProgram(blur_filter.program);
+            glUniform1i(loc(blur_filter.program, b"u_tex\0"), 0);
+            glUseProgram(glow_filter.program);
+            glUniform1i(loc(glow_filter.program, b"u_tex\0"), 0);
+            glUniform1i(loc(glow_filter.program, b"u_blur_tex\0"), 1);
             glUseProgram(0);
         }
 
@@ -1515,6 +1923,10 @@ impl SwitchRenderBackend {
             bitmap_prog,
             shape_bitmap_prog,
             gradient_prog,
+            color_matrix_filter,
+            blur_filter,
+            glow_filter,
+            filter_tex_pool: FilterTexturePool::new(),
             gl_state: GlStateCache::default(),
             rect_vao,
             rect_vbo,
@@ -1532,22 +1944,45 @@ impl SwitchRenderBackend {
             bitmap_draws_emitted: 0,
             heartbeat_tick: 0,
             draw_calls_this_window: 0,
+            push_mask_window: 0,
+            alpha_mask_window: 0,
+            masked_draw_window: 0,
+            mask_shape_draw_window: 0,
             render_offscreen_calls: 0,
             apply_filter_calls: 0,
+            resolve_sync_calls: 0,
             filters_seen_mask: AtomicU16::new(0),
             bitmap_render_count: 0,
             atlases: Vec::new(),
             vertex_arena,
             index_arena,
             shape_vao,
+            offscreen_dims: None,
+            offscreen_fbo: 0,
+            offscreen_depth_stencil: 0,
+            offscreen_depth_stencil_dims: (0, 0),
         })
     }
 
     /// Build the 3x3 column-major matrix that combines (Flash 2x3 affine)
-    /// with (pixels → NDC, Y flipped). Sent as the `u_world` uniform.
+    /// with (pixels → NDC). Sent as the `u_world` uniform.
+    ///
+    /// Main framebuffer: target = viewport, Y flipped (Flash top → NDC y=+1).
+    /// Offscreen FBO (`offscreen_dims`): target = FBO size, NO Y flip so that
+    /// Flash top maps to texel y=0 of the result — matching the convention of
+    /// CPU-uploaded bitmaps (glTexImage2D row 0 = top = texel y=0), so a later
+    /// `render_bitmap` of this texture samples it the same way as any bitmap.
+    /// Commands are pre-shifted by Ruffle to target-local coords, so no origin
+    /// offset is applied here.
     fn world_matrix(&self, m: &Matrix) -> [GLfloat; 9] {
-        let w = self.dimensions.width.max(1) as f32;
-        let h = self.dimensions.height.max(1) as f32;
+        let (w, h, flip_y) = match self.offscreen_dims {
+            Some((ow, oh)) => (ow.max(1) as f32, oh.max(1) as f32, false),
+            None => (
+                self.dimensions.width.max(1) as f32,
+                self.dimensions.height.max(1) as f32,
+                true,
+            ),
+        };
         let a = m.a;
         let b = m.b;
         let c = m.c;
@@ -1555,7 +1990,8 @@ impl SwitchRenderBackend {
         let tx = m.tx.to_pixels() as f32;
         let ty = m.ty.to_pixels() as f32;
         let sx = 2.0 / w;
-        let sy = -2.0 / h;
+        let sy = if flip_y { -2.0 / h } else { 2.0 / h };
+        let ty_off = if flip_y { 1.0 } else { -1.0 };
         [
             a * sx,
             b * sy,
@@ -1564,9 +2000,593 @@ impl SwitchRenderBackend {
             d * sy,
             0.0,
             tx * sx - 1.0,
-            ty * sy + 1.0,
+            ty * sy + ty_off,
             1.0,
         ]
+    }
+
+    /// Lazy-create the reusable FBO + a shared depth-stencil renderbuffer
+    /// sized to cover at least `(w, h)`. The renderbuffer is required so that
+    /// stencil masks pushed by `commands.execute()` inside the FBO actually
+    /// work (without it the stencil ops no-op and masked sub-trees vanish).
+    /// Grows monotonically; attachment persists. Must be called with the FBO
+    /// already bound.
+    fn ensure_offscreen_depth_stencil(&mut self, w: u32, h: u32) {
+        let need_create = self.offscreen_depth_stencil == 0;
+        if need_create {
+            unsafe {
+                let mut rbo: GLuint = 0;
+                glGenRenderbuffers(1, &mut rbo);
+                self.offscreen_depth_stencil = rbo;
+            }
+        }
+        let (cw, ch) = self.offscreen_depth_stencil_dims;
+        let nw = cw.max(w).max(1);
+        let nh = ch.max(h).max(1);
+        if need_create || nw > cw || nh > ch {
+            unsafe {
+                glBindRenderbuffer(GL_RENDERBUFFER, self.offscreen_depth_stencil);
+                glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, nw as GLsizei, nh as GLsizei);
+                glBindRenderbuffer(GL_RENDERBUFFER, 0);
+            }
+            self.offscreen_depth_stencil_dims = (nw, nh);
+        }
+        if need_create {
+            unsafe {
+                glFramebufferRenderbuffer(
+                    GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER,
+                    self.offscreen_depth_stencil,
+                );
+            }
+        }
+    }
+
+    /// Bind `tex` as the FBO color attachment and replay `commands` into it.
+    /// Restores the previous render target + viewport. Returns false if the
+    /// FBO is incomplete.
+    fn render_commands_to_texture(
+        &mut self,
+        tex: GLuint,
+        tex_w: u32,
+        tex_h: u32,
+        commands: CommandList,
+        clear: Color,
+    ) -> bool {
+        if self.offscreen_fbo == 0 {
+            unsafe {
+                let mut fbo: GLuint = 0;
+                glGenFramebuffers(1, &mut fbo);
+                self.offscreen_fbo = fbo;
+            }
+        }
+        let mut prev_fbo: GLint = 0;
+        let mut prev_vp: [GLint; 4] = [0; 4];
+        unsafe {
+            glGetIntegerv(GL_FRAMEBUFFER_BINDING, &mut prev_fbo);
+            glGetIntegerv(GL_VIEWPORT, prev_vp.as_mut_ptr());
+            glBindFramebuffer(GL_FRAMEBUFFER, self.offscreen_fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+        }
+        self.ensure_offscreen_depth_stencil(tex_w, tex_h);
+        unsafe {
+            let status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+            if status != GL_FRAMEBUFFER_COMPLETE {
+                let msg = std::format!("offscreen: FBO incomplete 0x{:04X} ({}x{})\n", status, tex_w, tex_h);
+                let mut b = msg.into_bytes();
+                b.push(0);
+                ruffle_log_cstr(b.as_ptr() as *const _);
+                glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo as GLuint);
+                return false;
+            }
+            glViewport(0, 0, tex_w as GLsizei, tex_h as GLsizei);
+            glClearColor(
+                clear.r as GLfloat / 255.0,
+                clear.g as GLfloat / 255.0,
+                clear.b as GLfloat / 255.0,
+                clear.a as GLfloat / 255.0,
+            );
+            glClearStencil(0);
+            glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+            // Premultiplied-alpha-correct accumulation: standard blend for RGB
+            // but accumulate the alpha channel additively, otherwise a cache
+            // texture's alpha ends up as `a²` and is too faint when sampled.
+            glEnable(GL_BLEND);
+            glBlendFuncSeparate(
+                GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+                GL_ONE, GL_ONE_MINUS_SRC_ALPHA,
+            );
+            glDisable(GL_STENCIL_TEST);
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            glStencilMask(0xFF);
+        }
+
+        let prev_mask = self.mask;
+        self.mask = MaskState::default();
+        let prev_offscreen = self.offscreen_dims;
+        self.offscreen_dims = Some((tex_w, tex_h));
+        self.gl_state.invalidate();
+
+        commands.execute(self);
+
+        self.offscreen_dims = prev_offscreen;
+        self.mask = prev_mask;
+        unsafe {
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+            glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo as GLuint);
+            glViewport(prev_vp[0], prev_vp[1], prev_vp[2], prev_vp[3]);
+            // Restore the main-framebuffer blend (non-separate is fine there).
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        }
+        self.gl_state.invalidate();
+        true
+    }
+
+    /// Generic single-pass filter blit. Binds the reusable FBO to `dst_tex`,
+    /// runs `program` over the unit quad sampling `src_tex` (with `src_pt` /
+    /// `src_size` defining the sub-rect in source coords), and writes into
+    /// `(dst_x, dst_y, dst_w, dst_h)` in destination viewport coords.
+    /// `setup_uniforms` is called once the program is bound, before the draw,
+    /// to push filter-specific uniforms. Blend is DISABLED (filter passes
+    /// overwrite rather than composite) and stencil is OFF. Restores the
+    /// previous FBO/viewport. Returns false on FBO incompleteness.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_filter_pass(
+        &mut self,
+        program: GLuint,
+        u_src_uv_loc: GLint,
+        src_tex: GLuint,
+        src_w: u32,
+        src_h: u32,
+        src_pt: (u32, u32),
+        src_size: (u32, u32),
+        dst_tex: GLuint,
+        dst_x: i32,
+        dst_y: i32,
+        dst_w: u32,
+        dst_h: u32,
+        setup_uniforms: impl FnOnce(),
+    ) -> bool {
+        if self.offscreen_fbo == 0 {
+            unsafe {
+                let mut fbo: GLuint = 0;
+                glGenFramebuffers(1, &mut fbo);
+                self.offscreen_fbo = fbo;
+            }
+        }
+        let mut prev_fbo: GLint = 0;
+        let mut prev_vp: [GLint; 4] = [0; 4];
+        unsafe {
+            glGetIntegerv(GL_FRAMEBUFFER_BINDING, &mut prev_fbo);
+            glGetIntegerv(GL_VIEWPORT, prev_vp.as_mut_ptr());
+            glBindFramebuffer(GL_FRAMEBUFFER, self.offscreen_fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dst_tex, 0);
+        }
+        let need_w = (dst_x.max(0) as u32).saturating_add(dst_w);
+        let need_h = (dst_y.max(0) as u32).saturating_add(dst_h);
+        self.ensure_offscreen_depth_stencil(need_w, need_h);
+        unsafe {
+            let status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+            if status != GL_FRAMEBUFFER_COMPLETE {
+                let msg = std::format!("filter pass: FBO incomplete 0x{:04X}\n", status);
+                let mut b = msg.into_bytes();
+                b.push(0);
+                ruffle_log_cstr(b.as_ptr() as *const _);
+                glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo as GLuint);
+                return false;
+            }
+            glViewport(dst_x, dst_y, dst_w as GLsizei, dst_h as GLsizei);
+            glDisable(GL_BLEND);
+            glDisable(GL_STENCIL_TEST);
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            glUseProgram(program);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, src_tex);
+            // Source UV sub-rect: which region of src_tex to sample.
+            let su = src_pt.0 as f32 / src_w.max(1) as f32;
+            let sv = src_pt.1 as f32 / src_h.max(1) as f32;
+            let sw = src_size.0 as f32 / src_w.max(1) as f32;
+            let sh = src_size.1 as f32 / src_h.max(1) as f32;
+            glUniform4f(u_src_uv_loc, su, sv, sw, sh);
+        }
+        setup_uniforms();
+        unsafe {
+            glBindVertexArray(self.bitmap_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            glBindVertexArray(0);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glEnable(GL_BLEND);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+            glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo as GLuint);
+            glViewport(prev_vp[0], prev_vp[1], prev_vp[2], prev_vp[3]);
+        }
+        self.gl_state.invalidate();
+        true
+    }
+
+    /// Reorder a 20-float SWF ColorMatrixFilter into the `(mat4, vec4)` pair
+    /// the GLSL `color_matrix.wgsl` expects (column-major mat4).
+    fn color_matrix_uniforms(matrix: &[f32; 20]) -> ([f32; 16], [f32; 4]) {
+        let mat4 = [
+            matrix[0], matrix[5], matrix[10], matrix[15],  // col 0 = input r
+            matrix[1], matrix[6], matrix[11], matrix[16],  // col 1 = input g
+            matrix[2], matrix[7], matrix[12], matrix[17],  // col 2 = input b
+            matrix[3], matrix[8], matrix[13], matrix[18],  // col 3 = input a
+        ];
+        let extras = [matrix[4] / 255.0, matrix[9] / 255.0, matrix[14] / 255.0, matrix[19] / 255.0];
+        (mat4, extras)
+    }
+
+    /// Identity-blit `(src_tex, src_pt, src_size)` to `(dst_tex, dst_pt, dst_w, dst_h)`
+    /// via the ColorMatrix shader with an identity matrix. Used to copy the
+    /// final filter target back to a cache entry's destination texture.
+    #[allow(clippy::too_many_arguments)]
+    fn blit_identity(
+        &mut self,
+        src_tex: GLuint,
+        src_w: u32,
+        src_h: u32,
+        src_pt: (u32, u32),
+        src_size: (u32, u32),
+        dst_tex: GLuint,
+        dst_pt: (i32, i32),
+        dst_w: u32,
+        dst_h: u32,
+    ) -> bool {
+        let prog = self.color_matrix_filter.program;
+        let u_src_uv = self.color_matrix_filter.u_src_uv;
+        let u_mat = self.color_matrix_filter.u_color_mat;
+        let u_extra = self.color_matrix_filter.u_color_extra;
+        #[rustfmt::skip]
+        let id: [f32; 16] = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let zero = [0.0_f32; 4];
+        self.draw_filter_pass(
+            prog, u_src_uv,
+            src_tex, src_w, src_h, src_pt, src_size,
+            dst_tex, dst_pt.0, dst_pt.1, dst_w, dst_h,
+            move || unsafe {
+                glUniformMatrix4fv(u_mat, 1, GL_FALSE, id.as_ptr());
+                glUniform4f(u_extra, zero[0], zero[1], zero[2], zero[3]);
+            },
+        )
+    }
+
+    /// Apply a ColorMatrixFilter from `source` (full standalone) to
+    /// `destination`. Handles source==dest via a pool temp.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_color_matrix_raw(
+        &mut self,
+        src_tex: GLuint,
+        src_w: u32,
+        src_h: u32,
+        source_point: (u32, u32),
+        source_size: (u32, u32),
+        dst_tex: GLuint,
+        dest_point: (i32, i32),
+        filter: &swf::ColorMatrixFilter,
+    ) -> bool {
+        let prog = self.color_matrix_filter.program;
+        let u_src_uv = self.color_matrix_filter.u_src_uv;
+        let u_mat = self.color_matrix_filter.u_color_mat;
+        let u_extra = self.color_matrix_filter.u_color_extra;
+        let (mat, extras) = Self::color_matrix_uniforms(&filter.matrix);
+
+        if src_tex != dst_tex {
+            return self.draw_filter_pass(
+                prog, u_src_uv,
+                src_tex, src_w, src_h, source_point, source_size,
+                dst_tex, dest_point.0, dest_point.1, source_size.0, source_size.1,
+                move || unsafe {
+                    glUniformMatrix4fv(u_mat, 1, GL_FALSE, mat.as_ptr());
+                    glUniform4f(u_extra, extras[0], extras[1], extras[2], extras[3]);
+                },
+            );
+        }
+        // In-place: filter into a temp, then identity-blit back.
+        let Some(temp) = self.filter_tex_pool.acquire(source_size.0, source_size.1) else { return false };
+        let temp_tex = temp.texture;
+        let temp_w = temp.width;
+        let temp_h = temp.height;
+        let ok1 = self.draw_filter_pass(
+            prog, u_src_uv,
+            src_tex, src_w, src_h, source_point, source_size,
+            temp_tex, 0, 0, source_size.0, source_size.1,
+            move || unsafe {
+                glUniformMatrix4fv(u_mat, 1, GL_FALSE, mat.as_ptr());
+                glUniform4f(u_extra, extras[0], extras[1], extras[2], extras[3]);
+            },
+        );
+        if !ok1 {
+            self.filter_tex_pool.release(temp);
+            return false;
+        }
+        let ok2 = self.blit_identity(
+            temp_tex, temp_w, temp_h, (0, 0), (temp_w, temp_h),
+            dst_tex, dest_point, source_size.0, source_size.1,
+        );
+        self.filter_tex_pool.release(temp);
+        ok2
+    }
+
+    /// Run the H+V ping-pong loop of a separable blur. Returns the temp
+    /// texture holding the blurred result, or None if the blur was impotent
+    /// (no axis above 1.0). Caller releases the returned texture to the pool.
+    fn run_blur_to_temp(
+        &mut self,
+        src_tex: GLuint,
+        src_w: u32,
+        src_h: u32,
+        source_point: (u32, u32),
+        source_size: (u32, u32),
+        filter: &swf::BlurFilter,
+    ) -> Option<StandaloneTexture> {
+        let num_passes = filter.num_passes() as usize;
+        let blur_x = filter.blur_x.to_f32().min(255.0);
+        let blur_y = filter.blur_y.to_f32().min(255.0);
+
+        let mut flip = self.filter_tex_pool.acquire(source_size.0, source_size.1)?;
+        let Some(mut flop) = self.filter_tex_pool.acquire(source_size.0, source_size.1) else {
+            self.filter_tex_pool.release(flip);
+            return None;
+        };
+
+        let prog = self.blur_filter.program;
+        let u_src_uv = self.blur_filter.u_src_uv;
+        let u_dir = self.blur_filter.u_blur_dir;
+        let u_m = self.blur_filter.u_blur_m;
+        let u_m2 = self.blur_filter.u_blur_m2;
+        let u_full = self.blur_filter.u_blur_full_size;
+        let u_first = self.blur_filter.u_blur_first_weight;
+        let u_last_off = self.blur_filter.u_blur_last_offset;
+        let u_last_wt = self.blur_filter.u_blur_last_weight;
+
+        let mut any_pass = false;
+        for _ in 0..num_passes {
+            for i in 0..2 {
+                let horizontal = i % 2 == 0;
+                let strength = if horizontal { blur_x } else { blur_y };
+                let full_size = strength.min(255.0);
+                if full_size <= 1.0 { continue; }
+
+                let (sample_tex, sample_w, sample_h, sample_pt, sample_sz) = if !any_pass {
+                    (src_tex, src_w, src_h, source_point, source_size)
+                } else {
+                    (flip.texture, flip.width, flip.height, (0, 0), (flip.width, flip.height))
+                };
+                // Fractional-radius fast blur (cf. fgiesen blog post).
+                let radius = (full_size - 1.0) / 2.0;
+                let m = radius.ceil() - 1.0;
+                let alpha = ((radius - m) * 255.0).floor() / 255.0;
+                let last_offset = 1.0 / ((1.0 / alpha) + 1.0);
+                let last_weight = alpha + 1.0;
+                let dir = if horizontal {
+                    (1.0_f32 / sample_w.max(1) as f32, 0.0_f32)
+                } else {
+                    (0.0_f32, 1.0_f32 / sample_h.max(1) as f32)
+                };
+                let m_val = m;
+                let m2_val = m * 2.0;
+                let flop_tex = flop.texture;
+                let flop_w = flop.width;
+                let flop_h = flop.height;
+                let ok = self.draw_filter_pass(
+                    prog, u_src_uv,
+                    sample_tex, sample_w, sample_h, sample_pt, sample_sz,
+                    flop_tex, 0, 0, flop_w, flop_h,
+                    move || unsafe {
+                        glUniform2f(u_dir, dir.0, dir.1);
+                        glUniform1f(u_m, m_val);
+                        glUniform1f(u_m2, m2_val);
+                        glUniform1f(u_full, full_size);
+                        glUniform1f(u_first, alpha);
+                        glUniform1f(u_last_off, last_offset);
+                        glUniform1f(u_last_wt, last_weight);
+                    },
+                );
+                if !ok {
+                    self.filter_tex_pool.release(flip);
+                    self.filter_tex_pool.release(flop);
+                    return None;
+                }
+                any_pass = true;
+                std::mem::swap(&mut flip, &mut flop);
+            }
+        }
+        self.filter_tex_pool.release(flop);
+        if any_pass { Some(flip) } else {
+            self.filter_tex_pool.release(flip);
+            None
+        }
+    }
+
+    /// Apply a Blur filter `source` → `destination`.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_blur_raw(
+        &mut self,
+        src_tex: GLuint,
+        src_w: u32,
+        src_h: u32,
+        source_point: (u32, u32),
+        source_size: (u32, u32),
+        dst_tex: GLuint,
+        dest_point: (i32, i32),
+        filter: &swf::BlurFilter,
+    ) -> bool {
+        match self.run_blur_to_temp(src_tex, src_w, src_h, source_point, source_size, filter) {
+            Some(result) => {
+                let rt = result.texture;
+                let rw = result.width;
+                let rh = result.height;
+                let ok = self.blit_identity(
+                    rt, rw, rh, (0, 0), (rw, rh),
+                    dst_tex, dest_point, source_size.0, source_size.1,
+                );
+                self.filter_tex_pool.release(result);
+                ok
+            }
+            None => self.blit_identity(
+                src_tex, src_w, src_h, source_point, source_size,
+                dst_tex, dest_point, source_size.0, source_size.1,
+            ),
+        }
+    }
+
+    /// Apply a Glow (`blur_offset = (0, 0)`) or DropShadow (non-zero offset).
+    /// `blur_offset` is in source pixels. Faithful to wgpu's
+    /// `vertices_with_blur_offset`: `blur_uv = (source_left + blur_offset) /
+    /// source_width`. DropShadow callers pass `(-x, -y)` so the blur sample
+    /// at quad top-left lies above-left of source, visible shadow ends up
+    /// down-right (the angle=0 convention).
+    #[allow(clippy::too_many_arguments)]
+    fn apply_glow_or_drop_shadow_raw(
+        &mut self,
+        src_tex: GLuint,
+        src_w: u32,
+        src_h: u32,
+        source_point: (u32, u32),
+        source_size: (u32, u32),
+        dst_tex: GLuint,
+        dest_point: (i32, i32),
+        filter: &swf::GlowFilter,
+        blur_offset: (f32, f32),
+    ) -> bool {
+        let blur_args = filter.inner_blur_filter();
+        let blur_temp_opt = self.run_blur_to_temp(
+            src_tex, src_w, src_h, source_point, source_size, &blur_args,
+        );
+
+        // If blur was impotent, synthesise a fully-transparent temp so the
+        // glow shader reads blur_a=0 and outputs the "no glow" tint cleanly.
+        let (blur_tex, blur_w, blur_h, blur_temp_to_release) = match blur_temp_opt {
+            Some(t) => (t.texture, t.width, t.height, Some(t)),
+            None => {
+                let Some(empty) = self.filter_tex_pool.acquire(source_size.0, source_size.1) else {
+                    return false;
+                };
+                // Pool entries may hold stale data — clear to transparent.
+                if self.offscreen_fbo == 0 {
+                    unsafe {
+                        let mut fbo: GLuint = 0;
+                        glGenFramebuffers(1, &mut fbo);
+                        self.offscreen_fbo = fbo;
+                    }
+                }
+                unsafe {
+                    let mut prev_fbo: GLint = 0;
+                    let mut prev_vp: [GLint; 4] = [0; 4];
+                    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &mut prev_fbo);
+                    glGetIntegerv(GL_VIEWPORT, prev_vp.as_mut_ptr());
+                    glBindFramebuffer(GL_FRAMEBUFFER, self.offscreen_fbo);
+                    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, empty.texture, 0);
+                    glClearColor(0.0, 0.0, 0.0, 0.0);
+                    glClear(GL_COLOR_BUFFER_BIT);
+                    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+                    glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo as GLuint);
+                    glViewport(prev_vp[0], prev_vp[1], prev_vp[2], prev_vp[3]);
+                }
+                (empty.texture, empty.width, empty.height, Some(empty))
+            }
+        };
+
+        let prog = self.glow_filter.program;
+        let u_src_uv = self.glow_filter.u_src_uv;
+        let u_blur_uv = self.glow_filter.u_blur_uv;
+        let u_color = self.glow_filter.u_color;
+        let u_strength = self.glow_filter.u_strength;
+        let u_inner = self.glow_filter.u_inner;
+        let u_knockout = self.glow_filter.u_knockout;
+        let u_composite_source = self.glow_filter.u_composite_source;
+
+        // Blur UV remap matches wgpu: at quad (0,0), uv = blur_offset / W; at
+        // quad (1,1), uv = 1 + blur_offset / W. Sign is direct (no negation).
+        let bu0 = blur_offset.0 / blur_w.max(1) as f32;
+        let bv0 = blur_offset.1 / blur_h.max(1) as f32;
+        let color_f = [
+            filter.color.r as f32 / 255.0,
+            filter.color.g as f32 / 255.0,
+            filter.color.b as f32 / 255.0,
+            filter.color.a as f32 / 255.0,
+        ];
+        let strength = filter.strength.to_f32();
+        let inner_i: GLint = if filter.is_inner() { 1 } else { 0 };
+        let knockout_i: GLint = if filter.is_knockout() { 1 } else { 0 };
+        let composite_i: GLint = if filter.composite_source() { 1 } else { 0 };
+
+        unsafe {
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, blur_tex);
+            glActiveTexture(GL_TEXTURE0);
+        }
+        let ok = self.draw_filter_pass(
+            prog, u_src_uv,
+            src_tex, src_w, src_h, source_point, source_size,
+            dst_tex, dest_point.0, dest_point.1, source_size.0, source_size.1,
+            move || unsafe {
+                glUniform4f(u_blur_uv, bu0, bv0, 1.0, 1.0);
+                glUniform4f(u_color, color_f[0], color_f[1], color_f[2], color_f[3]);
+                glUniform1f(u_strength, strength);
+                glUniform1i(u_inner, inner_i);
+                glUniform1i(u_knockout, knockout_i);
+                glUniform1i(u_composite_source, composite_i);
+            },
+        );
+        unsafe {
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glActiveTexture(GL_TEXTURE0);
+        }
+        if let Some(t) = blur_temp_to_release { self.filter_tex_pool.release(t); }
+        ok
+    }
+
+    /// Filter dispatcher used by both the trait `apply_filter` (for
+    /// BitmapData operations Ruffle drives directly) and the
+    /// `cache_entries` chain in `submit_frame`. Takes raw texture IDs so the
+    /// cache_entries loop can use `FilterTexturePool` temps without wrapping
+    /// each one in a `BitmapHandle` Arc (which would tie its lifetime to
+    /// the Arc rather than the pool — the perf blocker for filtered scenes).
+    #[allow(clippy::too_many_arguments)]
+    fn apply_filter_raw(
+        &mut self,
+        src_tex: GLuint,
+        src_w: u32,
+        src_h: u32,
+        source_point: (u32, u32),
+        source_size: (u32, u32),
+        dst_tex: GLuint,
+        dest_point: (i32, i32),
+        filter: &Filter,
+    ) -> bool {
+        match filter {
+            Filter::ColorMatrixFilter(args) => self.apply_color_matrix_raw(
+                src_tex, src_w, src_h, source_point, source_size,
+                dst_tex, dest_point, args,
+            ),
+            Filter::BlurFilter(args) => self.apply_blur_raw(
+                src_tex, src_w, src_h, source_point, source_size,
+                dst_tex, dest_point, args,
+            ),
+            Filter::GlowFilter(args) => self.apply_glow_or_drop_shadow_raw(
+                src_tex, src_w, src_h, source_point, source_size,
+                dst_tex, dest_point, args, (0.0, 0.0),
+            ),
+            Filter::DropShadowFilter(args) => {
+                let inner = args.inner_glow_filter();
+                let dist = args.distance.to_f32();
+                let angle = args.angle.to_f32();
+                let x = angle.cos() * dist;
+                let y = angle.sin() * dist;
+                self.apply_glow_or_drop_shadow_raw(
+                    src_tex, src_w, src_h, source_point, source_size,
+                    dst_tex, dest_point, &inner, (-x, -y),
+                )
+            }
+            _ => false,
+        }
     }
 
     fn use_solid(&self, world: &[GLfloat; 9], mult: &[f32; 4], add: &[f32; 4]) {
@@ -3316,52 +4336,53 @@ impl SwitchRenderBackend {
     //   5. deactivate_mask → maskee done
     //   6. pop_mask      → undo the stencil ref
     //
-    // We support depth up to 255 via the 8-bit stencil buffer; nested masks
-    // bitwise-OR their values (1, 2, 4, ...).
+    // Scheme: INCR/DECR coverage counting. The frame starts with stencil
+    // cleared to 0 (submit_frame). A maskee at nesting depth N is drawn where
+    // the stencil count equals N — i.e. it was covered by all N enclosing mask
+    // shapes (their intersection). Sequential masks each INCR from 0 then DECR
+    // back, so no per-push full-buffer clear is needed. This replaced an
+    // earlier bit-OR + REPLACE scheme whose written value didn't match the
+    // EQUAL gate, leaving every maskee rejected (SMWF overworld was blank).
     fn mask_push(&mut self) {
+        self.push_mask_window = self.push_mask_window.saturating_add(1);
+        self.mask.writing = true;
         self.mask.depth = self.mask.depth.saturating_add(1);
         unsafe {
             glEnable(GL_STENCIL_TEST);
-            glClearStencil(self.mask.active_value as GLint);
-            glClear(GL_STENCIL_BUFFER_BIT);
-            // Draw mask into stencil only.
+            // Mask shape writes stencil only (no color): increment coverage.
             glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
             glStencilMask(0xFF);
-            let next_value = (self.mask.active_value | (1u8 << ((self.mask.depth - 1).min(7)))) & 0xFF;
-            glStencilFunc(GL_ALWAYS, next_value as GLint, 0xFF);
-            glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+            glStencilFunc(GL_ALWAYS, 0, 0xFF);
+            glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
         }
     }
 
     fn mask_activate(&mut self) {
-        // Mask shape just finished writing to stencil. Switch to drawing
-        // maskee, gated on stencil == new_value.
-        self.mask.active_value =
-            self.mask.active_value | (1u8 << ((self.mask.depth.saturating_sub(1)).min(7)));
+        // Mask shape done. Draw the maskee where coverage == nesting depth.
+        self.mask.writing = false;
         unsafe {
             glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
             glStencilMask(0);
-            glStencilFunc(GL_EQUAL, self.mask.active_value as GLint, 0xFF);
+            glStencilFunc(GL_EQUAL, self.mask.depth as GLint, 0xFF);
             glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
         }
     }
 
     fn mask_deactivate(&mut self) {
-        // Maskee finished — but we may be inside a nested mask, so don't
-        // disable stencil yet. Switch back to "draw mask" mode to allow
-        // erasing/popping.
+        // Maskee done. Redraw the mask shape decrementing coverage back, so
+        // sibling/outer masks see a clean stencil without a full clear.
+        self.mask.writing = true;
         unsafe {
             glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
             glStencilMask(0xFF);
-            glStencilFunc(GL_ALWAYS, self.mask.active_value as GLint, 0xFF);
-            glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+            glStencilFunc(GL_ALWAYS, 0, 0xFF);
+            glStencilOp(GL_KEEP, GL_KEEP, GL_DECR);
         }
     }
 
     fn mask_pop(&mut self) {
-        // Undo this mask bit.
+        self.mask.writing = false;
         if self.mask.depth > 0 {
-            self.mask.active_value &= !(1u8 << ((self.mask.depth - 1).min(7)));
             self.mask.depth -= 1;
         }
         unsafe {
@@ -3369,8 +4390,9 @@ impl SwitchRenderBackend {
             if self.mask.depth == 0 {
                 glDisable(GL_STENCIL_TEST);
             } else {
+                // Resume gating the enclosing maskee at the outer depth.
                 glStencilMask(0);
-                glStencilFunc(GL_EQUAL, self.mask.active_value as GLint, 0xFF);
+                glStencilFunc(GL_EQUAL, self.mask.depth as GLint, 0xFF);
                 glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
             }
         }
@@ -3539,80 +4561,80 @@ impl RenderBackend for SwitchRenderBackend {
 
     fn render_offscreen(
         &mut self,
-        _handle: BitmapHandle,
+        handle: BitmapHandle,
         commands: CommandList,
-        quality: StageQuality,
+        _quality: StageQuality,
         bounds: PixelRegion,
     ) -> Option<Box<dyn SyncHandle>> {
-        // Filter rendering deferred (Phase 2.3). Returning None makes Ruffle
-        // skip cache+filter for filtered display objects — but we still want
-        // to know HOW OFTEN this gets called, because a sudden surge means
-        // either a `cacheAsBitmap` clip just appeared on stage or a filtered
-        // sprite (e.g. Mario 63 rocket-nozzle glow) is now being rendered.
         self.render_offscreen_calls = self.render_offscreen_calls.wrapping_add(1);
-        // Log first 10 calls + every 60th after, so a spike is visible
-        // without flooding nxlink.
-        let n = self.render_offscreen_calls;
-        if n <= 10 || n % 60 == 0 {
-            let cmd_len = commands.commands.len();
-            let (ram_used, ram_total) = query_ram();
-            let msg = std::format!(
-                "render_offscreen #{}: bounds={}x{} (origin {},{}) quality={:?} cmds={} ram={}MB/{}MB\n",
-                n,
-                bounds.width(),
-                bounds.height(),
-                bounds.x_min,
-                bounds.y_min,
-                quality,
-                cmd_len,
-                ram_used / (1024 * 1024),
-                ram_total / (1024 * 1024),
-            );
-            let mut bytes = msg.into_bytes();
-            bytes.push(0);
-            unsafe { ruffle_log_cstr(bytes.as_ptr() as *const _) };
+        // Target dimensions. BitmapData backs its handle via `register_bitmap`
+        // (atlas) in the common AS2 `new BitmapData()` case, so accept both
+        // atlas and standalone handles here.
+        let (tex_w, tex_h) = if let Some(s) = as_standalone_bitmap(&handle) {
+            (s.0.width, s.0.height)
+        } else if let Some(b) = as_switch_bitmap(&handle) {
+            (b.width, b.height)
+        } else {
+            self.warn_once(b"render_offscreen: unknown handle\n\0");
+            return None;
+        };
+        if tex_w == 0 || tex_h == 0 {
+            return None;
         }
-        None
+        // Render the draw() commands into a FRESH temporary texture rather than
+        // the handle's own texture: atlas-backed handles can't be FBO targets,
+        // and we only need the result long enough to read it back into the
+        // BitmapData's CPU pixels. Ruffle marks the BitmapData `GpuModified`;
+        // the next CPU access (copyPixels/getPixel — exactly what the SMWF tile
+        // engine does after drawing its tileset) triggers `resolve_sync_handle`
+        // below, after which the CPU pixels are authoritative and the normal
+        // atlas-upload display path takes over.
+        //
+        // Limitations (acceptable for the tile-engine pattern, which always
+        // draws into a freshly-made BitmapData then reads it back):
+        //  - fresh-target semantics (clear transparent); we don't composite
+        //    draw() output onto the BitmapData's prior content.
+        //  - a draw() followed by direct on-stage display WITHOUT any CPU read
+        //    would show stale content, since the temp texture isn't the
+        //    handle's texture.
+        let temp = make_standalone_texture(tex_w, tex_h)?;
+        let transparent = Color { r: 0, g: 0, b: 0, a: 0 };
+        if !self.render_commands_to_texture(temp.texture, tex_w, tex_h, commands, transparent) {
+            return None;
+        }
+        // Read back exactly `bounds`: the resolve closure indexes its buffer
+        // relative to this region's origin with stride = bounds.width().
+        Some(Box::new(BitmapDataSyncHandle {
+            texture: temp,
+            x: bounds.x_min,
+            y: bounds.y_min,
+            w: bounds.width(),
+            h: bounds.height(),
+        }))
     }
 
     fn apply_filter(
         &mut self,
-        _source: BitmapHandle,
+        source: BitmapHandle,
         source_point: (u32, u32),
         source_size: (u32, u32),
-        _destination: BitmapHandle,
+        destination: BitmapHandle,
         dest_point: (i32, i32),
         filter: Filter,
     ) -> Option<Box<dyn SyncHandle>> {
-        // Filter passes are not implemented yet (Phase 2.3). We log every
-        // call so when Mario 63 crashes after equipping the rocket nozzle
-        // we can see which filter was being requested and how often.
         self.apply_filter_calls = self.apply_filter_calls.wrapping_add(1);
-        let (_, name) = filter_variant_ordinal(&filter);
-        let n = self.apply_filter_calls;
-        if n <= 20 || n % 60 == 0 {
-            let msg = std::format!(
-                "apply_filter #{}: kind={} src={}x{}@({},{}) dst@({},{})\n",
-                n,
-                name,
-                source_size.0,
-                source_size.1,
-                source_point.0,
-                source_point.1,
-                dest_point.0,
-                dest_point.1,
-            );
-            let mut bytes = msg.into_bytes();
-            bytes.push(0);
-            unsafe { ruffle_log_cstr(bytes.as_ptr() as *const _) };
-        }
-        None
+        let Some(src) = as_standalone_bitmap(&source) else { return None };
+        let Some(dst) = as_standalone_bitmap(&destination) else { return None };
+        let (src_tex, src_w, src_h) = (src.0.texture, src.0.width, src.0.height);
+        let dst_tex = dst.0.texture;
+        let ok = self.apply_filter_raw(
+            src_tex, src_w, src_h, source_point, source_size,
+            dst_tex, dest_point, &filter,
+        );
+        if ok { Some(Box::new(NoOpSyncHandle)) } else { None }
     }
 
     fn is_filter_supported(&self, filter: &Filter) -> bool {
-        // We log each Filter variant the first time Ruffle queries it, so a
-        // single line tells us the entire palette of filters the current
-        // .swf actually exercises (vs. what the format theoretically allows).
         let (ord, name) = filter_variant_ordinal(filter);
         let bit = 1u16 << ord;
         let prev = self.filters_seen_mask.fetch_or(bit, Ordering::Relaxed);
@@ -3622,18 +4644,31 @@ impl RenderBackend for SwitchRenderBackend {
             bytes.push(0);
             unsafe { ruffle_log_cstr(bytes.as_ptr() as *const _) };
         }
-        false
+        matches!(
+            filter,
+            Filter::ColorMatrixFilter(_)
+                | Filter::BlurFilter(_)
+                | Filter::GlowFilter(_)
+                | Filter::DropShadowFilter(_)
+        )
     }
 
     fn is_offscreen_supported(&self) -> bool {
-        false
+        // Enabled with the minimal cache path (no filter shaders yet). Ruffle
+        // will cacheAsBitmap filtered/cached display objects, render their
+        // commands into our standalone textures, and draw them back. Filters
+        // in cache_entries are ignored for now (is_filter_supported = false),
+        // so we render the unfiltered source content — visible content shows,
+        // alpha~0+filter-only content (platforms) stays invisible until the
+        // filter pipeline lands.
+        true
     }
 
     fn submit_frame(
         &mut self,
         clear: Color,
         commands: CommandList,
-        _cache_entries: Vec<BitmapCacheEntry>,
+        cache_entries: Vec<BitmapCacheEntry>,
     ) {
         // Drain any pending arena frees enqueued by `GpuDraw::drop`. Doing
         // this at frame boundaries (not from Drop itself) keeps us off the
@@ -3644,6 +4679,76 @@ impl RenderBackend for SwitchRenderBackend {
             for f in pending.drain(..) {
                 self.vertex_arena.free_region(f.vbo_offset, f.vbo_size);
                 self.index_arena.free_region(f.ibo_offset, f.ibo_size);
+            }
+        }
+
+        // Render cacheAsBitmap entries: each has a standalone destination
+        // texture, a command list, a clear color, and (ignored for now) a
+        // filter list. Minimal path — render the source commands directly
+        // into the cache texture. Ruffle later draws it back via
+        // `render_bitmap`. Filters are NOT applied yet (see is_offscreen).
+        // Faithful port of wgpu's submit_frame cache_entries flow
+        // (`render/wgpu/src/backend.rs:512`):
+        //   1. Render commands directly into entry.handle.texture — this is
+        //      the first filter source.
+        //   2. Chain filters: each apply() reads `current` and writes into a
+        //      fresh pool texture. On unsupported filter (returns None) we
+        //      passthrough — keep current_handle. wgpu uses an identity-blit
+        //      fallback that allocates a fresh texture; our passthrough is
+        //      functionally equivalent and saves one copy.
+        //   3. If filters moved current off entry.handle, identity-blit the
+        //      final filter texture back into entry.handle (so the cache
+        //      texture sees the filtered result).
+        for entry in cache_entries {
+            let Some(standalone) = as_standalone_bitmap(&entry.handle) else {
+                self.warn_once(b"cache_entry: non-standalone handle (skipped)\n\0");
+                continue;
+            };
+            let dst_tex = standalone.0.texture;
+            let w = standalone.0.width;
+            let h = standalone.0.height;
+
+            // Step 1: render directly into entry.handle.
+            self.render_commands_to_texture(dst_tex, w, h, entry.commands, entry.clear);
+            if entry.filters.is_empty() {
+                continue;
+            }
+
+            // Step 2: filter chain using FilterTexturePool. The first source
+            // is entry.handle.texture itself; each successful filter writes
+            // into a fresh pool temp, the previous owned temp is released back
+            // to the pool. This is the Bug #2 perf fix — without the pool,
+            // Mario 63's filtered scenes drop fps from ~60 to ~5 because of
+            // per-frame glGenTextures/glDeleteTextures thrash.
+            let mut current_tex = dst_tex;
+            let mut current_owned: Option<StandaloneTexture> = None;
+            for filter in entry.filters {
+                let Some(next) = self.filter_tex_pool.acquire(w, h) else { break };
+                let next_tex = next.texture;
+                let ok = self.apply_filter_raw(
+                    current_tex, w, h, (0, 0), (w, h),
+                    next_tex, (0, 0), &filter,
+                );
+                if ok {
+                    // Release the previous owned temp (if any) — entry.handle
+                    // is never owned by us so it's not released.
+                    if let Some(prev) = current_owned.take() {
+                        self.filter_tex_pool.release(prev);
+                    }
+                    current_tex = next_tex;
+                    current_owned = Some(next);
+                } else {
+                    // Unsupported filter — passthrough, return next to pool.
+                    self.filter_tex_pool.release(next);
+                }
+            }
+
+            // Step 3: if the chain moved current off entry.handle, blit the
+            // final temp back into entry.handle and return the temp to pool.
+            if let Some(final_owned) = current_owned {
+                let ft = final_owned.texture;
+                self.blit_identity(ft, w, h, (0, 0), (w, h), dst_tex, (0, 0), w, h);
+                self.filter_tex_pool.release(final_owned);
             }
         }
 
@@ -3702,6 +4807,14 @@ impl RenderBackend for SwitchRenderBackend {
             };
             let draw_calls = self.draw_calls_this_window;
             self.draw_calls_this_window = 0;
+            let (pushmask, amask, maskeddraw, maskshape) = (
+                self.push_mask_window, self.alpha_mask_window,
+                self.masked_draw_window, self.mask_shape_draw_window,
+            );
+            self.push_mask_window = 0;
+            self.alpha_mask_window = 0;
+            self.masked_draw_window = 0;
+            self.mask_shape_draw_window = 0;
             let (ram_used, ram_total) = query_ram();
             let live_s = LIVE_GPU_SHAPES.load(Ordering::Relaxed);
             let live_d = LIVE_GPU_DRAWS.load(Ordering::Relaxed);
@@ -3712,7 +4825,7 @@ impl RenderBackend for SwitchRenderBackend {
             let v_frag = self.vertex_arena.free.len();
             let i_frag = self.index_arena.free.len();
             let msg = std::format!(
-                "f{}: fps={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) bitmaps={} atlases={} bitmap_draws={} offscreen={} filter={} ram={}MB/{}MB\n",
+                "f{}: fps={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) bitmaps={} atlases={} bitmap_draws={} offscreen={} sync={} filter={} pushmask={} amask={} maskeddraw={} maskshape={} ram={}MB/{}MB\n",
                 self.frame_count,
                 fps_str,
                 tick_ms,
@@ -3727,7 +4840,12 @@ impl RenderBackend for SwitchRenderBackend {
                 self.atlases.len(),
                 self.bitmap_draws_emitted,
                 self.render_offscreen_calls,
+                self.resolve_sync_calls,
                 self.apply_filter_calls,
+                pushmask,
+                amask,
+                maskeddraw,
+                maskshape,
                 ram_used / (1024 * 1024),
                 ram_total / (1024 * 1024),
             );
@@ -3811,23 +4929,28 @@ impl RenderBackend for SwitchRenderBackend {
         width: NonZeroU32,
         height: NonZeroU32,
     ) -> Result<BitmapHandle, Error> {
-        // Atlas-backed empty texture: matches the long-standing behavior
-        // that Mario 63's BitmapData usage depends on. The Owned/FBO
-        // variant is kept in the codebase for future filter targets but
-        // we currently keep is_offscreen_supported = false so Ruffle
-        // never asks for one.
-        let pixels = vec![0u8; (width.get() * height.get() * 4) as usize];
-        let Some(meta) = self.pack_into_atlas(&pixels, width.get(), height.get()) else {
-            return Err(Error::TooLarge);
-        };
+        // Standalone (FBO-attachable) texture — Ruffle hands this to
+        // `render_offscreen` / cache_entries for cacheAsBitmap + filtered
+        // display objects, then draws it back via `render_bitmap`.
+        let standalone = make_standalone_texture(width.get(), height.get())
+            .ok_or(Error::TooLarge)?;
         self.bitmaps_registered = self.bitmaps_registered.wrapping_add(1);
-        Ok(BitmapHandle(Arc::new(meta)))
+        Ok(BitmapHandle(Arc::new(StandaloneBitmap(Arc::new(standalone)))))
     }
 
     fn register_bitmap(&mut self, bitmap: Bitmap<'_>) -> Result<BitmapHandle, Error> {
         let Some((bytes, w, h)) = bitmap_to_rgba_bytes(&bitmap) else {
             return Err(Error::UnknownType);
         };
+        // Kept atlas-backed: shape bitmap fills (see `DrawKind::Bitmap`)
+        // look up by `as_switch_bitmap` which requires the atlas variant.
+        // Standalone register_bitmap broke the SMWF sky background (rendered
+        // as a shape with a JPEG fill) and crashed on level entry. The
+        // tradeoff is that BitmapData.draw() on bitmaps registered this way
+        // can't be FBO-targeted — render_offscreen returns None for them,
+        // and Ruffle treats those draws as no-ops. Acceptable until we
+        // either (a) extend shape rendering to sample standalone textures
+        // too, or (b) promote atlas → standalone on first render_offscreen.
         let Some(meta) = self.pack_into_atlas(&bytes, w, h) else {
             return Err(Error::TooLarge);
         };
@@ -3841,15 +4964,33 @@ impl RenderBackend for SwitchRenderBackend {
         bitmap: Bitmap<'_>,
         region: PixelRegion,
     ) -> Result<(), Error> {
-        let Some(switch_bitmap) = as_switch_bitmap(handle) else {
-            return Err(Error::UnknownHandle(handle.clone()));
-        };
         let rgba = bitmap.to_rgba();
         let w = region.x_max.saturating_sub(region.x_min);
         let h = region.y_max.saturating_sub(region.y_min);
         if w == 0 || h == 0 {
             return Ok(());
         }
+        // Standalone texture: upload the sub-region directly to its GL texture.
+        if let Some(standalone) = as_standalone_bitmap(handle) {
+            unsafe {
+                glBindTexture(GL_TEXTURE_2D, standalone.0.texture);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                let stride = rgba.width() as usize * 4;
+                let src_offset = (region.y_min as usize) * stride + (region.x_min as usize) * 4;
+                glTexSubImage2D(
+                    GL_TEXTURE_2D, 0,
+                    region.x_min as GLint, region.y_min as GLint,
+                    w as GLsizei, h as GLsizei,
+                    GL_RGBA, GL_UNSIGNED_BYTE,
+                    rgba.data()[src_offset..].as_ptr() as *const _,
+                );
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+            return Ok(());
+        }
+        let Some(switch_bitmap) = as_switch_bitmap(handle) else {
+            return Err(Error::UnknownHandle(handle.clone()));
+        };
         let atlas = match self.atlases.get(switch_bitmap.atlas_index) {
             Some(a) => a,
             None => return Err(Error::UnknownHandle(handle.clone())),
@@ -3900,10 +5041,64 @@ impl RenderBackend for SwitchRenderBackend {
 
     fn resolve_sync_handle(
         &mut self,
-        _handle: Box<dyn SyncHandle>,
-        _with_rgba: RgbaBufRead,
+        handle: Box<dyn SyncHandle>,
+        with_rgba: RgbaBufRead,
     ) -> Result<(), Error> {
-        Err(Error::Unimplemented("Sync handle resolution".into()))
+        // The only sync handles we produce are `BitmapDataSyncHandle` (from
+        // BitmapData.draw()). Read the rendered dirty region back from its temp
+        // texture into a CPU buffer and hand it to Ruffle's copy closure.
+        let sh = Box::<dyn Any>::downcast::<BitmapDataSyncHandle>(handle)
+            .map_err(|_| Error::Unimplemented("resolve_sync_handle: unknown handle".into()))?;
+        self.resolve_sync_calls = self.resolve_sync_calls.wrapping_add(1);
+        let (rw, rh) = (sh.w, sh.h);
+        if rw == 0 || rh == 0 {
+            return Ok(());
+        }
+        let mut buf = vec![0u8; (rw as usize) * (rh as usize) * 4];
+        if self.offscreen_fbo == 0 {
+            unsafe {
+                let mut fbo: GLuint = 0;
+                glGenFramebuffers(1, &mut fbo);
+                self.offscreen_fbo = fbo;
+            }
+        }
+        // Save/restore the bound FBO: this runs during AS execution (a sync),
+        // not inside our frame render, so we must not clobber whatever target
+        // the caller had bound.
+        let mut prev_fbo: GLint = 0;
+        unsafe {
+            glGetIntegerv(GL_FRAMEBUFFER_BINDING, &mut prev_fbo);
+            glBindFramebuffer(GL_FRAMEBUFFER, self.offscreen_fbo);
+            glFramebufferTexture2D(
+                GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sh.texture.texture, 0,
+            );
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            // No Y-flip: offscreen renders with texel row 0 = top (see
+            // `world_matrix`), and glReadPixels row 0 = window y=0 = texel
+            // row 0 = top, which is exactly what `copy_pixels_to_bitmapdata`
+            // expects (buffer row 0 = region's y_min).
+            glReadPixels(
+                sh.x as GLint, sh.y as GLint, rw as GLsizei, rh as GLsizei,
+                GL_RGBA, GL_UNSIGNED_BYTE, buf.as_mut_ptr() as *mut _,
+            );
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+            glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo as GLuint);
+        }
+        // The offscreen blend (glBlendFuncSeparate in render_commands_to_texture)
+        // accumulates PREMULTIPLIED alpha, but BitmapData stores straight alpha.
+        // Un-premultiply: a no-op for opaque pixels (a=255), which is the
+        // common tile-engine case, and recovers straight color for translucent
+        // ones.
+        for px in buf.chunks_exact_mut(4) {
+            let a = px[3] as u32;
+            if a != 0 && a != 255 {
+                px[0] = ((px[0] as u32 * 255) / a).min(255) as u8;
+                px[1] = ((px[1] as u32 * 255) / a).min(255) as u8;
+                px[2] = ((px[2] as u32 * 255) / a).min(255) as u8;
+            }
+        }
+        with_rgba(&buf, rw * 4);
+        Ok(())
     }
 }
 
@@ -3917,6 +5112,50 @@ impl CommandHandler for SwitchRenderBackend {
         _smoothing: bool,
         pixel_snapping: PixelSnapping,
     ) {
+        if self.mask.writing {
+            self.mask_shape_draw_window = self.mask_shape_draw_window.saturating_add(1);
+        } else if self.mask.depth > 0 {
+            self.masked_draw_window = self.masked_draw_window.saturating_add(1);
+        }
+        // Standalone (FBO-backed) variant: own GL texture, full [0,1]² UV.
+        // Used to draw cacheAsBitmap / filter / BitmapData results back onto
+        // the stage.
+        if let Some(standalone) = as_standalone_bitmap(&bitmap) {
+            let tex = standalone.0.texture;
+            let w = standalone.0.width as f32;
+            let h = standalone.0.height as f32;
+            let mut m = transform.matrix;
+            pixel_snapping.apply(&mut m);
+            let scaled = Matrix {
+                a: m.a * w,
+                b: m.b * w,
+                c: m.c * h,
+                d: m.d * h,
+                tx: m.tx,
+                ty: m.ty,
+            };
+            let world = self.world_matrix(&scaled);
+            let mult = transform.color_transform.mult_rgba_normalized();
+            let add = transform.color_transform.add_rgba_normalized();
+            let uv_remap = [0.0, 0.0, 1.0, 1.0];
+            self.bitmap_render_count = self.bitmap_render_count.wrapping_add(1);
+            self.use_bitmap(&world, &mult, &add, tex, &uv_remap);
+            self.gl_state.bind_vao(self.bitmap_vao);
+            self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
+            // Standalone cache textures store PREMULTIPLIED alpha (the offscreen
+            // render uses `glBlendFuncSeparate(ONE, ONE_MINUS_SRC_ALPHA)` for the
+            // alpha channel + the glow shader outputs `color * alpha`). The
+            // straight-alpha blend used for atlas bitmaps multiplies alpha a
+            // second time, producing alpha² output — too faint for filter
+            // results like DropShadow. Switch to premultiplied "over" blend
+            // for the standalone draw, then restore.
+            unsafe {
+                glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+                glDrawArrays(GL_TRIANGLES, 0, 6);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            }
+            return;
+        }
         let Some(switch_bitmap) = as_switch_bitmap(&bitmap) else {
             self.warn_once(b"cmd: render_bitmap with non-Switch BitmapHandle\n\0");
             return;
@@ -3980,6 +5219,18 @@ impl CommandHandler for SwitchRenderBackend {
         }
         let mult = transform.color_transform.mult_rgba_normalized();
         let add = transform.color_transform.add_rgba_normalized();
+        // RELIABLE mask counters: only count once we're certain this shape
+        // actually issues geometry (past all early-returns). `mask_shape` now
+        // means "a mask shape that really draws into the stencil"; if it's ~0
+        // while maskee draws are high, mask shapes produce no geometry.
+        let ndraws = switch_shape.0.draws.len() as u32;
+        if ndraws > 0 {
+            if self.mask.writing {
+                self.mask_shape_draw_window = self.mask_shape_draw_window.saturating_add(1);
+            } else if self.mask.depth > 0 {
+                self.masked_draw_window = self.masked_draw_window.saturating_add(1);
+            }
+        }
         for draw in &switch_shape.0.draws {
             match &draw.kind {
                 DrawKind::Solid => {
@@ -4055,10 +5306,14 @@ impl CommandHandler for SwitchRenderBackend {
         _maskee_commands: CommandList,
         _mask_commands: CommandList,
     ) {
+        self.alpha_mask_window = self.alpha_mask_window.saturating_add(1);
         self.warn_once(b"cmd: render_alpha_mask (skipped)\n\0");
     }
 
     fn draw_rect(&mut self, color: Color, matrix: Matrix) {
+        if self.mask.writing {
+            self.mask_shape_draw_window = self.mask_shape_draw_window.saturating_add(1);
+        }
         let r = color.r as f32 / 255.0;
         let g = color.g as f32 / 255.0;
         let b = color.b as f32 / 255.0;
@@ -4184,6 +5439,12 @@ impl Drop for SwitchRenderBackend {
             glDeleteBuffers(1, &self.line_rect_vbo);
             glDeleteVertexArrays(1, &self.line_rect_vao);
             glDeleteVertexArrays(1, &self.shape_vao);
+            if self.offscreen_fbo != 0 {
+                glDeleteFramebuffers(1, &self.offscreen_fbo);
+            }
+            if self.offscreen_depth_stencil != 0 {
+                glDeleteRenderbuffers(1, &self.offscreen_depth_stencil);
+            }
             // vertex_arena / index_arena released via their Drop impls.
             // Programs freed by their respective Drop impls.
         }

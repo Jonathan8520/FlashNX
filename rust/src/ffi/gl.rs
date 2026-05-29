@@ -46,6 +46,8 @@ pub const GL_LINK_STATUS: GLenum = 0x8B82;
 pub const GL_INFO_LOG_LENGTH: GLenum = 0x8B84;
 
 pub const GL_BLEND: GLenum = 0x0BE2;
+pub const GL_ZERO: GLenum = 0;
+pub const GL_ONE: GLenum = 1;
 pub const GL_SRC_ALPHA: GLenum = 0x0302;
 pub const GL_ONE_MINUS_SRC_ALPHA: GLenum = 0x0303;
 
@@ -64,6 +66,19 @@ pub const GL_CLAMP_TO_EDGE: GLenum = 0x812F;
 pub const GL_REPEAT: GLenum = 0x2901;
 pub const GL_MIRRORED_REPEAT: GLenum = 0x8370;
 pub const GL_UNPACK_ALIGNMENT: GLenum = 0x0CF5;
+pub const GL_PACK_ALIGNMENT: GLenum = 0x0D05;
+pub const GL_TEXTURE1: GLenum = 0x84C1;
+
+// Framebuffer objects (offscreen rendering for cacheAsBitmap / filters)
+pub const GL_FRAMEBUFFER: GLenum = 0x8D40;
+pub const GL_COLOR_ATTACHMENT0: GLenum = 0x8CE0;
+pub const GL_FRAMEBUFFER_BINDING: GLenum = 0x8CA6;
+pub const GL_FRAMEBUFFER_COMPLETE: GLenum = 0x8CD5;
+pub const GL_VIEWPORT: GLenum = 0x0BA2;
+// Renderbuffer (depth-stencil attachment so masks work inside an FBO)
+pub const GL_RENDERBUFFER: GLenum = 0x8D41;
+pub const GL_DEPTH24_STENCIL8: GLenum = 0x88F0;
+pub const GL_DEPTH_STENCIL_ATTACHMENT: GLenum = 0x821A;
 
 // Stencil
 pub const GL_STENCIL_TEST: GLenum = 0x0B90;
@@ -92,6 +107,12 @@ extern "C" {
     pub fn glEnable(cap: GLenum);
     pub fn glDisable(cap: GLenum);
     pub fn glBlendFunc(sfactor: GLenum, dfactor: GLenum);
+    pub fn glBlendFuncSeparate(
+        src_rgb: GLenum,
+        dst_rgb: GLenum,
+        src_alpha: GLenum,
+        dst_alpha: GLenum,
+    );
     pub fn glLineWidth(width: GLfloat);
     pub fn glColorMask(r: GLboolean, g: GLboolean, b: GLboolean, a: GLboolean);
     pub fn glStencilMask(mask: GLuint);
@@ -171,7 +192,14 @@ extern "C" {
     );
     pub fn glUniform1i(location: GLint, v0: GLint);
     pub fn glUniform1f(location: GLint, v0: GLfloat);
+    pub fn glUniform2f(location: GLint, v0: GLfloat, v1: GLfloat);
     pub fn glUniform4f(location: GLint, x: GLfloat, y: GLfloat, z: GLfloat, w: GLfloat);
+    pub fn glUniformMatrix4fv(
+        location: GLint,
+        count: GLsizei,
+        transpose: GLboolean,
+        value: *const GLfloat,
+    );
 
     // Textures
     pub fn glGenTextures(n: GLsizei, textures: *mut GLuint);
@@ -203,8 +231,57 @@ extern "C" {
     pub fn glTexParameteri(target: GLenum, pname: GLenum, param: GLint);
     pub fn glPixelStorei(pname: GLenum, param: GLint);
 
+    // Framebuffer objects
+    pub fn glGenFramebuffers(n: GLsizei, framebuffers: *mut GLuint);
+    pub fn glDeleteFramebuffers(n: GLsizei, framebuffers: *const GLuint);
+    pub fn glBindFramebuffer(target: GLenum, framebuffer: GLuint);
+    pub fn glFramebufferTexture2D(
+        target: GLenum,
+        attachment: GLenum,
+        textarget: GLenum,
+        texture: GLuint,
+        level: GLint,
+    );
+    pub fn glCheckFramebufferStatus(target: GLenum) -> GLenum;
+    pub fn glGetIntegerv(pname: GLenum, params: *mut GLint);
+    pub fn glIsEnabled(cap: GLenum) -> GLboolean;
+    pub fn glReadPixels(
+        x: GLint,
+        y: GLint,
+        width: GLsizei,
+        height: GLsizei,
+        format: GLenum,
+        ty: GLenum,
+        pixels: *mut c_void,
+    );
+    pub fn glGenRenderbuffers(n: GLsizei, renderbuffers: *mut GLuint);
+    pub fn glDeleteRenderbuffers(n: GLsizei, renderbuffers: *const GLuint);
+    pub fn glBindRenderbuffer(target: GLenum, renderbuffer: GLuint);
+    pub fn glRenderbufferStorage(
+        target: GLenum,
+        internalformat: GLenum,
+        width: GLsizei,
+        height: GLsizei,
+    );
+    pub fn glFramebufferRenderbuffer(
+        target: GLenum,
+        attachment: GLenum,
+        renderbuffertarget: GLenum,
+        renderbuffer: GLuint,
+    );
+
     pub fn glGetError() -> GLenum;
+    pub fn glGetFramebufferAttachmentParameteriv(
+        target: GLenum,
+        attachment: GLenum,
+        pname: GLenum,
+        params: *mut GLint,
+    );
 }
+
+// Default-framebuffer stencil introspection (mask debugging).
+pub const GL_STENCIL: GLenum = 0x1802;
+pub const GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE: GLenum = 0x8217;
 
 pub const GL_NO_ERROR: GLenum = 0;
 pub const GL_INVALID_ENUM: GLenum = 0x0500;
