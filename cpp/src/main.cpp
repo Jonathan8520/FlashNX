@@ -367,11 +367,32 @@ static void worker_entry(void* /*arg*/) {
     MenuRepeatState touches_repeat;
     menu_repeat_reset(touches_repeat);
 
+    // CpuBoostMode re-assert counter. Hardware profiling (2026-05-30) showed
+    // the OS drops the boot-time FastLoad boost back to the 1020 MHz handheld
+    // base clock mid-gameplay (seen in the heavy water lake), and the worst fps
+    // dips (9-12 fps) lined up with those 1020 MHz windows while the same scene
+    // held ~15 fps at 1785 MHz. So we re-assert periodically to recover any
+    // transient drop. IMPORTANT FINDING: re-asserting every single frame did
+    // NOT eliminate the drops — they recur at the SAME elapsed time each run
+    // (~25-30 s into sustained load), i.e. the apm sysmodule *force-revokes*
+    // FastLoad on sustained use (it's officially a short loading-screen boost)
+    // and we cannot override that, whatever the cadence. So per-frame re-assert
+    // only spammed the IPC for no gain; every 30 frames recovers non-forced
+    // drops without the spam. NB: even pinned at 1785 MHz the lake is AVM1-bound
+    // (~15 fps) — this only recovers dropped windows, it doesn't lift Ruffle's
+    // interpreter ceiling. Still stock spec, no hardware risk.
+    int boost_reassert = 0;
+
     while (appletMainLoop()) {
         padUpdate(&pad);
         const u64 kDown = padGetButtonsDown(&pad);
         const u64 kUp   = padGetButtonsUp(&pad);
         const u64 kHeld = padGetButtons(&pad);
+
+        if (++boost_reassert >= 30) {
+            boost_reassert = 0;
+            appletSetCpuBoostMode(ApmCpuBoostMode_FastLoad);
+        }
 
         if (menu_open) {
             // ─── Sub-screen branch: TOUCHES (Rust-driven) ───────────────

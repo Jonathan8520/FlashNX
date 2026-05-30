@@ -1,13 +1,21 @@
-.PHONY: all rust cpp clean
+# The supported build entry point is scripts/build.sh. It (1) builds the Rust
+# staticlib for the tier-3 `aarch64-nintendo-switch-freestanding` target via
+# `-Z build-std` (target + rustflags supplied by rust/.cargo/config.toml), then
+# (2) links the .nro *inside devkitPro's MSYS2 bash* so `switch_rules` resolves
+# /opt/devkitpro paths correctly.
+#
+# The old recipe here ran `cargo build --target aarch64-unknown-linux-gnu`,
+# which is WRONG: it targets the host-ish GNU triple (target_env=gnu), so libc's
+# `timespec` is configured out and the build dies with 40+ errors. These targets
+# now just delegate to build.sh so `make` stays a valid, reliable entry point.
+.PHONY: all dev clean
 
-all: cpp
+all:
+	bash scripts/build.sh
 
-rust:
-	cd rust && cargo build --release --target aarch64-unknown-linux-gnu
-
-cpp: rust
-	$(MAKE) -C cpp
+dev:
+	bash scripts/build.sh --dev
 
 clean:
 	cd rust && cargo clean
-	$(MAKE) -C cpp clean
+	rm -rf cpp/build cpp/flash-for-switch.nro cpp/flash-for-switch.elf cpp/flash-for-switch.nacp cpp/flash-for-switch.map

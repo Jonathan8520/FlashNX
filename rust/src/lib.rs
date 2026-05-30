@@ -439,6 +439,30 @@ fn render_frame_with_dt(dt: FloatDuration) {
     TICK_TICKS_MAX.fetch_max(tick_dt, Ordering::Relaxed);
     RENDER_TICKS_MAX.fetch_max(render_dt, Ordering::Relaxed);
 
+    // Slow-frame detector. A frame whose wall time (tick + render) blows the
+    // FPS budget gets a one-line breakdown of what it did, so an FPS spike can
+    // be attributed to its cause (offscreen filter passes, bitmap uploads,
+    // shape tessellation, draw count, …) instead of being averaged away by the
+    // 60-frame heartbeat. Fires only above threshold, so it stays silent during
+    // smooth play and never floods nxlink — but catches every spike. 22 ms ≈
+    // below 45 fps (a 60 fps frame is 16.7 ms).
+    const SLOW_FRAME_US: u64 = 22_000;
+    let tick_freq = unsafe { ruffle_tick_freq() };
+    let slow_frame = if tick_freq > 0 {
+        let total_us = (tick_dt.saturating_add(render_dt))
+            .saturating_mul(1_000_000)
+            / tick_freq;
+        if total_us > SLOW_FRAME_US {
+            let tick_us = (tick_dt.saturating_mul(1_000_000)) / tick_freq;
+            let render_us = (render_dt.saturating_mul(1_000_000)) / tick_freq;
+            Some((total_us, tick_us, render_us))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // Overlay the cursor crosshair on top of whatever Ruffle drew. We pull
     // a `&mut SwitchRenderBackend` out of the Player by downcasting the
     // trait object — `RenderBackend: Any` so this is just a vtable check.
@@ -449,6 +473,9 @@ fn render_frame_with_dt(dt: FloatDuration) {
     if let Some(backend) =
         <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(renderer)
     {
+        if let Some((total_us, tick_us, render_us)) = slow_frame {
+            backend.log_slow_frame(total_us, tick_us, render_us);
+        }
         backend.draw_cursor_overlay(cx, cy, clicked);
     }
 }

@@ -310,6 +310,11 @@ extern "C" {
     fn ruffle_tick_now() -> u64;
     /// Tick frequency in Hz (~19.2 MHz on Switch). Constant after boot.
     fn ruffle_tick_freq() -> u64;
+    /// Actual current CPU clock in Hz (clkrst). 0 if unavailable. Lets the
+    /// heartbeat confirm whether CpuBoostMode is holding the A57 at 1785 MHz.
+    fn ruffle_cpu_clock_hz() -> u32;
+    /// 1 when docked, 0 handheld.
+    fn ruffle_is_docked() -> core::ffi::c_int;
 }
 
 fn log(nul_terminated: &[u8]) {
@@ -1046,6 +1051,47 @@ pub struct SwitchRenderBackend {
     /// glGenTextures + glTexImage2D + glDeleteTextures per filter per
     /// frame, which was the main fps killer in Phase 2.3's first try.
     filter_tex_pool: FilterTexturePool,
+
+    /// Per-frame perf attribution for the slow-frame detector. `frame_snapshot`
+    /// is the raw counter state captured at the top of `submit_frame`;
+    /// `last_frame` is the delta of the frame that just finished. lib.rs reads
+    /// `last_frame` whenever a frame blows the FPS budget, so an FPS spike can
+    /// be pinned on what the frame actually did (offscreen filter passes,
+    /// bitmap uploads, shape tessellation, draw-call count, …). Cumulative
+    /// counters (offscreen/filter/resolve/bmp/shape) are exact; the window
+    /// counters (dc/blend/pmask/mdraw) under-report on the 1-in-60 heartbeat
+    /// frame because the heartbeat zeroes them mid-`submit_frame`.
+    frame_snapshot: FrameBreakdown,
+    last_frame: FrameBreakdown,
+}
+
+/// One frame's worth of per-counter activity (or the raw snapshot used to
+/// derive it). All fields are deltas in `last_frame`. Logged by the slow-frame
+/// detector — see `SwitchRenderBackend::log_slow_frame`.
+#[derive(Clone, Copy, Default)]
+struct FrameBreakdown {
+    /// GL draw calls (glDrawElements*/glDrawArrays) emitted this frame.
+    draw_calls: u32,
+    /// `render_offscreen` calls — cacheAsBitmap / filter source renders.
+    offscreen: u32,
+    /// `apply_filter` calls — individual blur/glow/bevel/color-matrix passes.
+    filter: u32,
+    /// `resolve_sync_handle` readbacks (BitmapData.draw() → CPU).
+    resolve: u32,
+    /// Bitmaps registered (texture uploads) this frame.
+    bmp_uploads: u32,
+    /// Shapes registered (tessellation) this frame.
+    shape_regs: u32,
+    /// Non-Normal blend composites run this frame.
+    blend: u32,
+    /// `push_mask` calls this frame.
+    pushmask: u32,
+    /// Draws issued under an active stencil mask this frame.
+    masked_draw: u32,
+    /// cacheAsBitmap entries processed by `submit_frame` this frame.
+    cache_entries: u32,
+    /// Filter chains actually run this frame (bounded by the per-frame budget).
+    filter_chains: u32,
 }
 
 /// Pool of `StandaloneTexture` keyed by `(width, height)`. Acquire pulls an
@@ -2231,6 +2277,8 @@ impl SwitchRenderBackend {
             offscreen_fbo: 0,
             offscreen_depth_stencil: 0,
             offscreen_depth_stencil_dims: (0, 0),
+            frame_snapshot: FrameBreakdown::default(),
+            last_frame: FrameBreakdown::default(),
         })
     }
 
@@ -2604,11 +2652,47 @@ impl SwitchRenderBackend {
         let blur_x = filter.blur_x.to_f32().min(255.0);
         let blur_y = filter.blur_y.to_f32().min(255.0);
 
-        let mut flip = self.filter_tex_pool.acquire(source_size.0, source_size.1)?;
-        let Some(mut flop) = self.filter_tex_pool.acquire(source_size.0, source_size.1) else {
+        // Neither axis blurs → keep the None contract (glow/bevel synthesise a
+        // transparent halo; plain blur passes the source through). Checked up
+        // front so the half-res seed below never runs for an impotent blur.
+        if blur_x <= 1.0 && blur_y <= 1.0 {
+            return None;
+        }
+
+        // HALF-RESOLUTION blur. Blur is low-frequency, so we downsample the
+        // source, blur at ¼ the fill, and let callers upsample the result via
+        // normalised-uv sampling / size-aware blit — visually identical for
+        // glow/shadow/bevel halos. This was the dominant per-frame cost on
+        // Mario 63's lit scenes: each filter chain ran ~8-11 ms and 9-26 chains
+        // fire per frame, so `render` hit 90-260 ms (fps 9-26). The result temp
+        // is half-size, which is transparent to callers ONLY because their
+        // blur-offset uv divides by the SOURCE size, not the temp pixel size
+        // (see apply_glow_or_drop_shadow_raw / apply_bevel_raw). Engage only
+        // above a min size so thin outlines stay crisp and tiny surfaces don't
+        // pay for the extra downsample.
+        let downscale = source_size.0 >= 64 && source_size.1 >= 64;
+        let (work_w, work_h, scale) = if downscale {
+            ((source_size.0 / 2).max(1), (source_size.1 / 2).max(1), 0.5_f32)
+        } else {
+            (source_size.0, source_size.1, 1.0_f32)
+        };
+
+        let mut flip = self.filter_tex_pool.acquire(work_w, work_h)?;
+        let Some(mut flop) = self.filter_tex_pool.acquire(work_w, work_h) else {
             self.filter_tex_pool.release(flip);
             return None;
         };
+
+        // Seed `flip` with the source at work resolution — blit_identity scales
+        // full-res src → work-res via linear filtering, which IS the downsample.
+        if !self.blit_identity(
+            src_tex, src_w, src_h, source_point, source_size,
+            flip.texture, (0, 0), work_w, work_h,
+        ) {
+            self.filter_tex_pool.release(flip);
+            self.filter_tex_pool.release(flop);
+            return None;
+        }
 
         let prog = self.blur_filter.program;
         let u_src_uv = self.blur_filter.u_src_uv;
@@ -2624,15 +2708,17 @@ impl SwitchRenderBackend {
         for _ in 0..num_passes {
             for i in 0..2 {
                 let horizontal = i % 2 == 0;
-                let strength = if horizontal { blur_x } else { blur_y };
+                // Strength is in source pixels; at work resolution each texel
+                // spans 1/scale source px, so the kernel radius scales with
+                // `scale` to keep the spatial blur the same.
+                let strength = if horizontal { blur_x } else { blur_y } * scale;
                 let full_size = strength.min(255.0);
                 if full_size <= 1.0 { continue; }
 
-                let (sample_tex, sample_w, sample_h, sample_pt, sample_sz) = if !any_pass {
-                    (src_tex, src_w, src_h, source_point, source_size)
-                } else {
-                    (flip.texture, flip.width, flip.height, (0, 0), (flip.width, flip.height))
-                };
+                // `flip` is already seeded with the (downsampled) source, so we
+                // always ping-pong on the work-res temps.
+                let (sample_tex, sample_w, sample_h, sample_pt, sample_sz) =
+                    (flip.texture, flip.width, flip.height, (0, 0), (flip.width, flip.height));
                 // Fractional-radius fast blur (cf. fgiesen blog post).
                 let radius = (full_size - 1.0) / 2.0;
                 let m = radius.ceil() - 1.0;
@@ -2673,10 +2759,13 @@ impl SwitchRenderBackend {
             }
         }
         self.filter_tex_pool.release(flop);
-        if any_pass { Some(flip) } else {
-            self.filter_tex_pool.release(flip);
-            None
-        }
+        // `flip` holds the blurred source — or, if both scaled strengths fell
+        // below 1 px (a sub-pixel blur on a large surface), merely the
+        // downsampled seed, which is itself a valid mild low-freq halo. Either
+        // way it's a usable result, so we never fall back to the None path here
+        // (we already returned None up front for a truly impotent blur).
+        let _ = any_pass;
+        Some(flip)
     }
 
     /// Apply a Blur filter `source` → `destination`.
@@ -2737,8 +2826,11 @@ impl SwitchRenderBackend {
 
         // If blur was impotent, synthesise a fully-transparent temp so the
         // glow shader reads blur_a=0 and outputs the "no glow" tint cleanly.
-        let (blur_tex, blur_w, blur_h, blur_temp_to_release) = match blur_temp_opt {
-            Some(t) => (t.texture, t.width, t.height, Some(t)),
+        // We don't bind the temp's pixel size: the blur temp may be half-res
+        // (see run_blur_to_temp), and the blur-offset uv below is computed from
+        // the SOURCE size so it's resolution-independent.
+        let (blur_tex, blur_temp_to_release) = match blur_temp_opt {
+            Some(t) => (t.texture, Some(t)),
             None => {
                 let Some(empty) = self.filter_tex_pool.acquire(source_size.0, source_size.1) else {
                     return false;
@@ -2764,7 +2856,7 @@ impl SwitchRenderBackend {
                     glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo as GLuint);
                     glViewport(prev_vp[0], prev_vp[1], prev_vp[2], prev_vp[3]);
                 }
-                (empty.texture, empty.width, empty.height, Some(empty))
+                (empty.texture, Some(empty))
             }
         };
 
@@ -2779,8 +2871,11 @@ impl SwitchRenderBackend {
 
         // Blur UV remap matches wgpu: at quad (0,0), uv = blur_offset / W; at
         // quad (1,1), uv = 1 + blur_offset / W. Sign is direct (no negation).
-        let bu0 = blur_offset.0 / blur_w.max(1) as f32;
-        let bv0 = blur_offset.1 / blur_h.max(1) as f32;
+        // Divide by the SOURCE size (not the blur temp's pixel size) so the
+        // offset stays correct when the blur temp is half-res — the temp spans
+        // the same [0,1] spatial region regardless of its resolution.
+        let bu0 = blur_offset.0 / source_size.0.max(1) as f32;
+        let bv0 = blur_offset.1 / source_size.1.max(1) as f32;
         let color_f = [
             filter.color.r as f32 / 255.0,
             filter.color.g as f32 / 255.0,
@@ -2837,8 +2932,8 @@ impl SwitchRenderBackend {
         let blur_temp_opt = self.run_blur_to_temp(
             src_tex, src_w, src_h, source_point, source_size, &blur_args,
         );
-        let (blur_tex, blur_w, blur_h, blur_temp_to_release) = match blur_temp_opt {
-            Some(t) => (t.texture, t.width, t.height, Some(t)),
+        let (blur_tex, blur_temp_to_release) = match blur_temp_opt {
+            Some(t) => (t.texture, Some(t)),
             None => {
                 // Impotent blur → synthesise a transparent temp so both
                 // samples read 0 (no highlight/shadow, source passes through).
@@ -2865,16 +2960,18 @@ impl SwitchRenderBackend {
                     glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo as GLuint);
                     glViewport(prev_vp[0], prev_vp[1], prev_vp[2], prev_vp[3]);
                 }
-                (empty.texture, empty.width, empty.height, Some(empty))
+                (empty.texture, Some(empty))
             }
         };
 
-        // ±blur_offset along the filter angle, normalised to the blur texture.
+        // ±blur_offset along the filter angle, normalised to the SOURCE size
+        // (not the blur temp's pixel size) so the highlight/shadow offset stays
+        // correct when the blur temp is half-res — see run_blur_to_temp.
         let distance = filter.distance.to_f32();
         let angle = filter.angle.to_f32();
         let off = (angle.cos() * distance, angle.sin() * distance);
-        let bw = blur_w.max(1) as f32;
-        let bh = blur_h.max(1) as f32;
+        let bw = source_size.0.max(1) as f32;
+        let bh = source_size.1.max(1) as f32;
         let (lu, lv) = (off.0 / bw, off.1 / bh);
         let (ru, rv) = (-off.0 / bw, -off.1 / bh);
 
@@ -3240,6 +3337,48 @@ impl SwitchRenderBackend {
             self.warned_unsupported += 1;
             log(msg);
         }
+    }
+
+    /// Snapshot the raw counters that feed `FrameBreakdown`, so a per-frame
+    /// delta can be taken across `submit_frame`. The window counters
+    /// (draw_calls/blend/pushmask/masked_draw) only grow within a single frame
+    /// except on the heartbeat frame, where the heartbeat zeroes them — see the
+    /// caveat on `frame_snapshot`.
+    fn frame_counters(&self) -> FrameBreakdown {
+        FrameBreakdown {
+            draw_calls: self.draw_calls_this_window,
+            offscreen: self.render_offscreen_calls,
+            filter: self.apply_filter_calls,
+            resolve: self.resolve_sync_calls,
+            bmp_uploads: self.bitmaps_registered,
+            shape_regs: self.shapes_registered,
+            blend: self.blend_window,
+            pushmask: self.push_mask_window,
+            masked_draw: self.masked_draw_window,
+            cache_entries: 0,
+            filter_chains: 0,
+        }
+    }
+
+    /// Emit a one-line breakdown for a frame that blew the FPS budget. Called
+    /// from lib.rs's `render_frame_with_dt` once it knows the frame's wall time
+    /// (tick + render). `last_frame` was filled at the end of `submit_frame`.
+    /// Timings are microseconds. This fires only on slow frames, so it never
+    /// floods nxlink during smooth play but captures every spike with the
+    /// activity that caused it.
+    pub fn log_slow_frame(&self, total_us: u64, tick_us: u64, render_us: u64) {
+        let fb = self.last_frame;
+        let msg = std::format!(
+            "SLOW f{} {}us (tick {}us render {}us) dc={} offs={} filt={}({}chains) resolve={} bmpUp={} shpReg={} blend={} pmask={} mdraw={} cacheEnt={}\n",
+            self.frame_count,
+            total_us, tick_us, render_us,
+            fb.draw_calls, fb.offscreen, fb.filter, fb.filter_chains,
+            fb.resolve, fb.bmp_uploads, fb.shape_regs,
+            fb.blend, fb.pushmask, fb.masked_draw, fb.cache_entries,
+        );
+        let mut bytes = msg.into_bytes();
+        bytes.push(0);
+        unsafe { ruffle_log_cstr(bytes.as_ptr() as *const _) };
     }
 
     /// Draw a small white crosshair at the given screen pixel position.
@@ -5194,6 +5333,12 @@ impl RenderBackend for SwitchRenderBackend {
             }
         }
 
+        // Snapshot counters for the per-frame slow-frame breakdown (consumed
+        // right after `commands.execute` below). `cache_entries` is moved by the
+        // filter loop, so grab its length up front.
+        self.frame_snapshot = self.frame_counters();
+        let frame_cache_entries = cache_entries.len() as u32;
+
         // Render cacheAsBitmap entries: each has a standalone destination
         // texture, a command list, a clear color, and (ignored for now) a
         // filter list. Minimal path — render the source commands directly
@@ -5372,10 +5517,17 @@ impl RenderBackend for SwitchRenderBackend {
             let i_peak_mb = self.index_arena.peak_in_use / (1024 * 1024);
             let v_frag = self.vertex_arena.free.len();
             let i_frag = self.index_arena.free.len();
+            // Actual CPU clock (MHz) + dock state, so we can read whether
+            // CpuBoostMode is holding the A57 at 1785 MHz during heavy AVM1
+            // scenes (the water lake) — confirming if any CPU headroom remains.
+            let cpu_mhz = unsafe { ruffle_cpu_clock_hz() } / 1_000_000;
+            let docked = unsafe { ruffle_is_docked() } != 0;
             let msg = std::format!(
-                "f{}: fps={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) bitmaps={} atlases={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB\n",
+                "f{}: fps={} cpu={}MHz dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) bitmaps={} atlases={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB\n",
                 self.frame_count,
                 fps_str,
+                cpu_mhz,
+                docked,
                 tick_ms,
                 render_ms,
                 draw_calls,
@@ -5475,6 +5627,25 @@ impl RenderBackend for SwitchRenderBackend {
         // Mirror the actual GL state we just wrote so the cache stays
         // truthful for any post-frame work (e.g. the cursor overlay).
         self.gl_state.invalidate();
+
+        // Close out the per-frame breakdown: delta vs the top-of-frame
+        // snapshot. Cumulative counters use wrapping_sub (exact); window
+        // counters use saturating_sub so the 1-in-60 heartbeat frame (which
+        // zeroed them mid-frame) clamps to 0 instead of printing garbage.
+        let s = self.frame_snapshot;
+        self.last_frame = FrameBreakdown {
+            draw_calls: self.draw_calls_this_window.saturating_sub(s.draw_calls),
+            offscreen: self.render_offscreen_calls.wrapping_sub(s.offscreen),
+            filter: self.apply_filter_calls.wrapping_sub(s.filter),
+            resolve: self.resolve_sync_calls.wrapping_sub(s.resolve),
+            bmp_uploads: self.bitmaps_registered.wrapping_sub(s.bmp_uploads),
+            shape_regs: self.shapes_registered.wrapping_sub(s.shape_regs),
+            blend: self.blend_window.saturating_sub(s.blend),
+            pushmask: self.push_mask_window.saturating_sub(s.pushmask),
+            masked_draw: self.masked_draw_window.saturating_sub(s.masked_draw),
+            cache_entries: frame_cache_entries,
+            filter_chains: filter_chains_run as u32,
+        };
     }
 
     fn create_empty_texture(

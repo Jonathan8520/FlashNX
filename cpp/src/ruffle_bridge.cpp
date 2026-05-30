@@ -97,3 +97,32 @@ extern "C" uint64_t ruffle_tick_now(void) {
 extern "C" uint64_t ruffle_tick_freq(void) {
     return armGetSystemTickFreq();
 }
+
+// Actual current CPU clock in Hz, read from the clkrst sysmodule (firmware
+// 8.0+). Lets the heartbeat CONFIRM whether CpuBoostMode(FastLoad) is really
+// holding the A57 at its boosted 1785 MHz during heavy AVM1 scenes (the water
+// lake) — i.e. whether there's any CPU headroom left, or the lag is just the
+// interpreter maxing a stock-clocked core. Returns 0 if the service is
+// unavailable. Service is opened lazily once and left open for the process
+// lifetime (cleaned up on exit).
+extern "C" uint32_t ruffle_cpu_clock_hz(void) {
+    static bool inited = false;
+    if (!inited) {
+        if (R_FAILED(clkrstInitialize())) return 0;
+        inited = true;
+    }
+    ClkrstSession session;
+    // PcvModuleId_CpuBus = the Cortex-A57 cluster clock. The trailing arg is
+    // the clkrst "unk" device-id (3 is what Nintendo/atmosphère use here).
+    if (R_FAILED(clkrstOpenSession(&session, PcvModuleId_CpuBus, 3))) return 0;
+    uint32_t hz = 0;
+    Result rc = clkrstGetClockRate(&session, &hz);
+    clkrstCloseSession(&session);
+    return R_SUCCEEDED(rc) ? hz : 0;
+}
+
+// 1 when docked (AppletOperationMode_Console), 0 handheld. Pairs with the CPU
+// clock so a low clock can be read as "handheld + boost dropped" vs "expected".
+extern "C" int ruffle_is_docked(void) {
+    return appletGetOperationMode() == AppletOperationMode_Console ? 1 : 0;
+}

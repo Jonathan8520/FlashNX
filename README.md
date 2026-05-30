@@ -72,12 +72,30 @@ Deux logos en place dans `assets/`, tous deux **wired et actifs dans le `.nro`**
 | `assets/icon.jpg` | JPEG baseline, sRGB, no alpha | **256×256** px | ✓ livré + embarqué | Icône `.nro` repris automatiquement par hbmenu / Sphaira / forwarders home menu via `elf2nro --icon=...` (cf. [cpp/Makefile](cpp/Makefile)). `.nacp` correspondant : `APP_TITLE = "FlashNX"`, `APP_AUTHOR = "flash-for-switch contributors"`. Test à la production : check lisibilité de `icon.jpg` réduit à 100×100 px (taille hbmenu/Sphaira) — si bruit du fond éclair fatigue à cette échelle, simplifier le background plus tard. |
 | `assets/banner.png` | PNG RGBA | **720×144** px (ratio 5:1) | ✓ livré + embarqué | Banner du top de la library UI, embarqué via `include_bytes!` dans [rust/src/library.rs](rust/src/library.rs), décodé via crate `png` 0.18 au boot, uploadé en texture GL via `SwitchRenderBackend::upload_rgba_texture` ([rust/src/backend/render.rs](rust/src/backend/render.rs)), rendu par `draw_textured_rect` qui réutilise le `bitmap_prog` existant (1 quad textured par frame au lieu de ~120 draw_rect d'un titre ASCII). Auto-scale si banner > viewport - 64 px. Fallback ASCII "FLASHNX" si le decode échoue. |
 
-## Build
+## Build & netload (référence rapide)
 
 ```bash
+# 1. BUILD (depuis Git Bash, à la racine du repo)
 ./scripts/build.sh            # release : LTO=full, ~3 min, .nro ~12.5 MB (officiel)
 ./scripts/build.sh --dev      # release-dev : LTO=thin + codegen-units=16, ~30 s rebuild, .nro ~13.2 MB
+#   Équivalents : `make` (= build.sh) / `make dev` (= build.sh --dev) /
+#   `scripts\build.ps1 [--dev]` depuis PowerShell. Tous délèguent à build.sh.
+
+# 2. NETLOAD (Switch : Homebrew Menu → Y pour passer en netloader)
+nxlink -s cpp/flash-for-switch.nro    # push le .nro par WiFi + redirige stdout du Switch vers ce terminal
 ```
+
+> ⚠️ `scripts/build.sh` est **le seul chemin de build supporté**. Ne pas appeler
+> `cargo build --target aarch64-unknown-linux-gnu` (mauvais target → échec libc
+> `target_env=gnu`). Le bon target (`aarch64-nintendo-switch-freestanding`,
+> tier-3, build-std) est fourni par `rust/.cargo/config.toml` ; build.sh fait
+> `cargo build` sans `--target`. Le `Makefile` racine et `build.ps1` ne sont que
+> des wrappers fins autour de build.sh.
+
+> 💡 Le flag `-s` de `nxlink` garde le terminal attaché au stdout du Switch :
+> c'est là qu'apparaissent le heartbeat de perf (`f1234: fps=… tick=…ms
+> render=…ms …`) et les lignes `SLOW f…` du détecteur de frame lente (voir
+> [rust/src/lib.rs](rust/src/lib.rs) `render_frame_with_dt`).
 
 Le script orchestre :
 1. `cargo build --release` (ou `--profile release-dev`) côté Rust (target `aarch64-nintendo-switch-freestanding`, std-via-newlib, build-std nightly) → `rust/target/.../libruffle_switch.a` (~13-14 MB avec features audio+mp3)
