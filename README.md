@@ -26,7 +26,7 @@ Stick gauche / D-pad = flèches · **A/B/X/Y** = touches Flash (remappables) · 
 
 ## Jeux testés
 
-Super Mario 63 · Super Mario World Flash · Mario Forever · Tetris'd · Flappy Bird · Pursuit of Hat 2 · Mario 3D Racing · Flash Equestria… La plupart tournent à 55-60 fps.
+Super Mario 63 · Super Mario World Flash · Mario Forever · Tetris'd · Flappy Bird · Pursuit of Hat 2 · Mario 3D Racing… La plupart tournent à 55-60 fps.
 
 ## Limites connues
 
@@ -50,7 +50,7 @@ FlashNX n'est qu'une **couche d'intégration Switch** au-dessus de projets remar
 **Bibliothèques Rust**
 - [jpeg-decoder](https://github.com/image-rs/jpeg-decoder) (fork patché pour newlib) · `png` · `serde` / `serde_json` · `tracing` · `flate2` · `getrandom` · + dépendances transitives de Ruffle (`gc-arena`, `dasp`…).
 
-**Inspirations** *(projets étudiés pour l'architecture du port, sans code repris)* : [ScummVM](https://www.scummvm.org/) (pattern de port `OSystem`), le port Switch de PPSSPP (référence switch-mesa GL), et la communauté homebrew Switch.
+**Remerciements** — projets de l'écosystème homebrew Switch consultés pendant le R&D du port (sans code repris) : [ScummVM](https://www.scummvm.org/) (pattern de port `OSystem`), le port Switch de PPSSPP (référence switch-mesa GL), [Tico](https://github.com/ticohq/tico), [dawn-switch](https://github.com/dantiicu/dawn-switch) *(l'alternative WebGPU évaluée)*, et la communauté devkitPro / GBAtemp.
 
 **Licence** : le code d'intégration FlashNX est distribué sous licence **MIT** (voir [`LICENSE`](LICENSE)). Ruffle et les autres dépendances conservent leurs licences respectives.
 

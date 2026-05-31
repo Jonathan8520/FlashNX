@@ -17,7 +17,7 @@ Première release officielle. FlashNX fait tourner des jeux Flash AS1/AS2 (et un
 
 ### Jeux testés sur hardware
 
-Super Mario 63, Super Mario World Flash, Mario Forever Flash, Tetris'd, Flappy Bird, Flash Equestria, There Is Only One Level, Mario 3D Racing, Pursuit of Hat 2, et d'autres. La plupart tournent à 55-60 fps.
+Super Mario 63, Super Mario World Flash, Mario Forever Flash, Tetris'd, Flappy Bird, There Is Only One Level, Mario 3D Racing, Pursuit of Hat 2, et d'autres. La plupart tournent à 55-60 fps.
 
 ### Limites connues (assumées)
 
