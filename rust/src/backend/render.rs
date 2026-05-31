@@ -321,6 +321,44 @@ fn log(nul_terminated: &[u8]) {
     unsafe { ruffle_log_cstr(nul_terminated.as_ptr() as *const _) };
 }
 
+// ─── Per-frame backend-primitive timing (FPS-spike attribution) ──────────────
+//
+// Question we want answered: when `tick` spikes to ~1.3 s on one frame, is it
+// OUR backend (a readback/upload/blit stalling the GPU) or pure AVM2 bytecode
+// execution (upstream Ruffle)? We time the primitives Ruffle calls DURING
+// player.tick() — render_offscreen (incl. the draw() repatriation), bitmap
+// register/upload, copyPixels resolve — and surface them in the slow-frame line.
+// A slow frame with huge `tick` but ~0 primN_us is pure AVM2; one where a primN
+// dominates is a backend culprit we can fix.
+//
+// CUR_* accumulate within a frame via `PrimTimer` guards. submit_frame (which
+// runs right after player.tick) snapshots CUR into LAST and zeroes CUR; the
+// slow-frame logger then reads LAST. Raw ticks (~19.2 MHz), µs at display.
+static PRIM_OFFSCREEN_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_OFFSCREEN_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_BMPUP_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_BMPUP_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_RESOLVE_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_RESOLVE_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// RAII guard: adds elapsed ticks to a static on drop, covering every
+/// early-return path of the timed function automatically.
+struct PrimTimer {
+    start: u64,
+    acc: &'static std::sync::atomic::AtomicU64,
+}
+impl PrimTimer {
+    fn new(acc: &'static std::sync::atomic::AtomicU64) -> Self {
+        PrimTimer { start: unsafe { ruffle_tick_now() }, acc }
+    }
+}
+impl Drop for PrimTimer {
+    fn drop(&mut self) {
+        let elapsed = unsafe { ruffle_tick_now() }.saturating_sub(self.start);
+        self.acc.fetch_add(elapsed, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 // ─── GPU resources ────────────────────────────────────────────────────────────
 
 // ─── Texture atlas ─────────────────────────────────────────────────────────
@@ -2573,6 +2611,56 @@ impl SwitchRenderBackend {
         )
     }
 
+    /// Read an (x, y, w, h) sub-rect of `tex` back into a CPU RGBA buffer with
+    /// STRAIGHT alpha. `tex` is one of our offscreen renders (premultiplied,
+    /// texel row 0 = Flash top): attach it to the shared offscreen FBO,
+    /// `glReadPixels` (row 0 = y=0 = texel row 0 = top — no Y-flip, exactly what
+    /// BitmapData CPU pixels and atlas uploads both expect), then un-premultiply.
+    /// Saves/restores the bound FBO since this runs during AS execution, not
+    /// inside our frame render. Buffer stride = w*4, row 0 = the region's y_min.
+    /// Shared by `resolve_sync_handle` (copyPixels readback) and
+    /// `render_offscreen` (repatriating draw() into an atlas-backed handle).
+    fn readback_region_straight(&mut self, tex: GLuint, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
+        let mut buf = vec![0u8; (w as usize) * (h as usize) * 4];
+        if w == 0 || h == 0 {
+            return buf;
+        }
+        if self.offscreen_fbo == 0 {
+            unsafe {
+                let mut fbo: GLuint = 0;
+                glGenFramebuffers(1, &mut fbo);
+                self.offscreen_fbo = fbo;
+            }
+        }
+        let mut prev_fbo: GLint = 0;
+        unsafe {
+            glGetIntegerv(GL_FRAMEBUFFER_BINDING, &mut prev_fbo);
+            glBindFramebuffer(GL_FRAMEBUFFER, self.offscreen_fbo);
+            glFramebufferTexture2D(
+                GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0,
+            );
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            glReadPixels(
+                x as GLint, y as GLint, w as GLsizei, h as GLsizei,
+                GL_RGBA, GL_UNSIGNED_BYTE, buf.as_mut_ptr() as *mut _,
+            );
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+            glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo as GLuint);
+        }
+        // The offscreen blend accumulates PREMULTIPLIED alpha; straight-alpha
+        // consumers (BitmapData CPU pixels, atlas slots) need un-premultiply —
+        // a no-op for opaque pixels (a=255), the common tile-engine case.
+        for px in buf.chunks_exact_mut(4) {
+            let a = px[3] as u32;
+            if a != 0 && a != 255 {
+                px[0] = ((px[0] as u32 * 255) / a).min(255) as u8;
+                px[1] = ((px[1] as u32 * 255) / a).min(255) as u8;
+                px[2] = ((px[2] as u32 * 255) / a).min(255) as u8;
+            }
+        }
+        buf
+    }
+
     /// Apply a ColorMatrixFilter from `source` (full standalone) to
     /// `destination`. Handles source==dest via a pool temp.
     #[allow(clippy::too_many_arguments)]
@@ -3380,10 +3468,20 @@ impl SwitchRenderBackend {
     /// activity that caused it.
     pub fn log_slow_frame(&self, total_us: u64, tick_us: u64, render_us: u64) {
         let fb = self.last_frame;
+        // Backend-primitive time during this frame's tick (LAST_* snapshotted at
+        // submit_frame). primOffs = render_offscreen incl. draw() repatriation;
+        // primBmp = bitmap register/upload; primRes = copyPixels resolve. tick
+        // huge + these ~0 ⇒ pure AVM2 (upstream); one dominating ⇒ our backend.
+        let tick_freq = unsafe { ruffle_tick_freq() };
+        let to_us = |t: u64| if tick_freq > 0 { t.saturating_mul(1_000_000) / tick_freq } else { 0 };
+        let prim_offs = to_us(PRIM_OFFSCREEN_LAST.load(std::sync::atomic::Ordering::Relaxed));
+        let prim_bmp = to_us(PRIM_BMPUP_LAST.load(std::sync::atomic::Ordering::Relaxed));
+        let prim_res = to_us(PRIM_RESOLVE_LAST.load(std::sync::atomic::Ordering::Relaxed));
         let msg = std::format!(
-            "SLOW f{} {}us (tick {}us render {}us) dc={} offs={} filt={}({}chains) resolve={} bmpUp={} shpReg={} blend={} pmask={} mdraw={} cacheEnt={}\n",
+            "SLOW f{} {}us (tick {}us render {}us) primOffs={}us primBmp={}us primRes={}us dc={} offs={} filt={}({}chains) resolve={} bmpUp={} shpReg={} blend={} pmask={} mdraw={} cacheEnt={}\n",
             self.frame_count,
             total_us, tick_us, render_us,
+            prim_offs, prim_bmp, prim_res,
             fb.draw_calls, fb.offscreen, fb.filter, fb.filter_chains,
             fb.resolve, fb.bmp_uploads, fb.shape_regs,
             fb.blend, fb.pushmask, fb.masked_draw, fb.cache_entries,
@@ -5236,6 +5334,7 @@ impl RenderBackend for SwitchRenderBackend {
         _quality: StageQuality,
         bounds: PixelRegion,
     ) -> Option<Box<dyn SyncHandle>> {
+        let _pt = PrimTimer::new(&PRIM_OFFSCREEN_CUR);
         self.render_offscreen_calls = self.render_offscreen_calls.wrapping_add(1);
         // Target dimensions. BitmapData backs its handle via `register_bitmap`
         // (atlas) in the common AS2 `new BitmapData()` case, so accept both
@@ -5271,6 +5370,37 @@ impl RenderBackend for SwitchRenderBackend {
         let transparent = Color { r: 0, g: 0, b: 0, a: 0 };
         if !self.render_commands_to_texture(temp.texture, tex_w, tex_h, commands, transparent) {
             return None;
+        }
+        // Repatriate the rendered result into the HANDLE's own texture, so a
+        // draw() followed by DIRECT on-stage display (a Bitmap / bitmap-fill
+        // with no copyPixels/getPixel — the AS3 pattern Pursuit of Hat 2 uses
+        // for its platforms/scenery) shows the content. Previously the result
+        // lived only in `temp` and reached the screen ONLY via a CPU readback
+        // triggered by copyPixels (the SMWF tile-engine path); direct-display
+        // games got a black BitmapData. `temp` is still handed to Ruffle as the
+        // SyncHandle below, so copyPixels/getPixel keep working unchanged.
+        let (rx, ry, rw, rh) = (bounds.x_min, bounds.y_min, bounds.width(), bounds.height());
+        if rw > 0 && rh > 0 {
+            if let Some(s) = as_standalone_bitmap(&handle) {
+                // Standalone textures store PREMULTIPLIED alpha (matches the
+                // premultiplied "over" blend `render_bitmap` uses for them), so
+                // a straight GPU copy is correct — no un-premultiply, no readback.
+                self.blit_identity(
+                    temp.texture, tex_w, tex_h, (rx, ry), (rw, rh),
+                    s.0.texture, (rx as i32, ry as i32), tex_w, tex_h,
+                );
+                self.warn_once(b"render_offscreen: repatriated draw() -> standalone handle\n\0");
+            } else if let Some(b) = as_switch_bitmap(&handle) {
+                // Atlas slots store STRAIGHT alpha — read back (un-premultiply)
+                // then upload into the slot's sub-rect.
+                let buf = self.readback_region_straight(temp.texture, rx, ry, rw, rh);
+                if let Some(atlas) = self.atlases.get(b.atlas_index) {
+                    let base_x = (b.u0 * ATLAS_SIZE as f32).round() as u32;
+                    let base_y = (b.v0 * ATLAS_SIZE as f32).round() as u32;
+                    atlas.upload_region(base_x + rx, base_y + ry, rw, rh, &buf);
+                }
+                self.warn_once(b"render_offscreen: repatriated draw() -> atlas slot\n\0");
+            }
         }
         // Read back exactly `bounds`: the resolve closure indexes its buffer
         // relative to this region's origin with stride = bounds.width().
@@ -5361,6 +5491,23 @@ impl RenderBackend for SwitchRenderBackend {
             }
         }
 
+        // Snapshot+reset the per-frame backend-primitive timers. We're at the
+        // start of submit_frame — right after player.tick() ran the AVM frame and
+        // any render_offscreen/upload/resolve it triggered — so CUR holds exactly
+        // this frame's tick-side primitive time. Move it to LAST (read by
+        // log_slow_frame, which runs just after) and zero CUR for the next frame.
+        PRIM_OFFSCREEN_LAST.store(
+            PRIM_OFFSCREEN_CUR.swap(0, std::sync::atomic::Ordering::Relaxed),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        PRIM_BMPUP_LAST.store(
+            PRIM_BMPUP_CUR.swap(0, std::sync::atomic::Ordering::Relaxed),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        PRIM_RESOLVE_LAST.store(
+            PRIM_RESOLVE_CUR.swap(0, std::sync::atomic::Ordering::Relaxed),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         // Snapshot counters for the per-frame slow-frame breakdown (consumed
         // right after `commands.execute` below). `cache_entries` is moved by the
         // filter loop, so grab its length up front.
@@ -5691,6 +5838,7 @@ impl RenderBackend for SwitchRenderBackend {
     }
 
     fn register_bitmap(&mut self, bitmap: Bitmap<'_>) -> Result<BitmapHandle, Error> {
+        let _pt = PrimTimer::new(&PRIM_BMPUP_CUR);
         let Some((bytes, w, h)) = bitmap_to_rgba_bytes(&bitmap) else {
             return Err(Error::UnknownType);
         };
@@ -5738,6 +5886,7 @@ impl RenderBackend for SwitchRenderBackend {
         bitmap: Bitmap<'_>,
         region: PixelRegion,
     ) -> Result<(), Error> {
+        let _pt = PrimTimer::new(&PRIM_BMPUP_CUR);
         let rgba = bitmap.to_rgba();
         let w = region.x_max.saturating_sub(region.x_min);
         let h = region.y_max.saturating_sub(region.y_min);
@@ -5818,9 +5967,12 @@ impl RenderBackend for SwitchRenderBackend {
         handle: Box<dyn SyncHandle>,
         with_rgba: RgbaBufRead,
     ) -> Result<(), Error> {
+        let _pt = PrimTimer::new(&PRIM_RESOLVE_CUR);
         // The only sync handles we produce are `BitmapDataSyncHandle` (from
         // BitmapData.draw()). Read the rendered dirty region back from its temp
-        // texture into a CPU buffer and hand it to Ruffle's copy closure.
+        // texture (straight alpha) and hand it to Ruffle's copy closure. This is
+        // the same readback `render_offscreen` now uses to repatriate the result
+        // into an atlas-backed handle for direct-display games.
         let sh = Box::<dyn Any>::downcast::<BitmapDataSyncHandle>(handle)
             .map_err(|_| Error::Unimplemented("resolve_sync_handle: unknown handle".into()))?;
         self.resolve_sync_calls = self.resolve_sync_calls.wrapping_add(1);
@@ -5828,49 +5980,7 @@ impl RenderBackend for SwitchRenderBackend {
         if rw == 0 || rh == 0 {
             return Ok(());
         }
-        let mut buf = vec![0u8; (rw as usize) * (rh as usize) * 4];
-        if self.offscreen_fbo == 0 {
-            unsafe {
-                let mut fbo: GLuint = 0;
-                glGenFramebuffers(1, &mut fbo);
-                self.offscreen_fbo = fbo;
-            }
-        }
-        // Save/restore the bound FBO: this runs during AS execution (a sync),
-        // not inside our frame render, so we must not clobber whatever target
-        // the caller had bound.
-        let mut prev_fbo: GLint = 0;
-        unsafe {
-            glGetIntegerv(GL_FRAMEBUFFER_BINDING, &mut prev_fbo);
-            glBindFramebuffer(GL_FRAMEBUFFER, self.offscreen_fbo);
-            glFramebufferTexture2D(
-                GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sh.texture.texture, 0,
-            );
-            glPixelStorei(GL_PACK_ALIGNMENT, 1);
-            // No Y-flip: offscreen renders with texel row 0 = top (see
-            // `world_matrix`), and glReadPixels row 0 = window y=0 = texel
-            // row 0 = top, which is exactly what `copy_pixels_to_bitmapdata`
-            // expects (buffer row 0 = region's y_min).
-            glReadPixels(
-                sh.x as GLint, sh.y as GLint, rw as GLsizei, rh as GLsizei,
-                GL_RGBA, GL_UNSIGNED_BYTE, buf.as_mut_ptr() as *mut _,
-            );
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
-            glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo as GLuint);
-        }
-        // The offscreen blend (glBlendFuncSeparate in render_commands_to_texture)
-        // accumulates PREMULTIPLIED alpha, but BitmapData stores straight alpha.
-        // Un-premultiply: a no-op for opaque pixels (a=255), which is the
-        // common tile-engine case, and recovers straight color for translucent
-        // ones.
-        for px in buf.chunks_exact_mut(4) {
-            let a = px[3] as u32;
-            if a != 0 && a != 255 {
-                px[0] = ((px[0] as u32 * 255) / a).min(255) as u8;
-                px[1] = ((px[1] as u32 * 255) / a).min(255) as u8;
-                px[2] = ((px[2] as u32 * 255) / a).min(255) as u8;
-            }
-        }
+        let buf = self.readback_region_straight(sh.texture.texture, sh.x, sh.y, rw, rh);
         with_rgba(&buf, rw * 4);
         Ok(())
     }
