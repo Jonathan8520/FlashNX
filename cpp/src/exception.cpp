@@ -49,7 +49,7 @@ void __libnx_exception_handler(ThreadExceptionDump* ctx) {
     // can't be fed to addr2line directly. We print the runtime address of a
     // known symbol in THIS module (the handler itself), so on the host:
     //   elf_addr = PC - REF + nm(__libnx_exception_handler)
-    // then `aarch64-none-elf-addr2line -e cpp/flash-for-switch.elf -f -C <elf_addr>`
+    // then `aarch64-none-elf-addr2line -e cpp/FlashNX.elf -f -C <elf_addr>`
     // resolves the crashing source line. Same base cancels out, ASLR-proof.
     const unsigned long ref = (unsigned long)(uintptr_t)&__libnx_exception_handler;
 

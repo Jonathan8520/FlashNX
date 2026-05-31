@@ -29,7 +29,7 @@
 
 namespace {
 
-constexpr const char* CACERT_PATH = "sdmc:/switch/flash-for-switch/cacert.pem";
+constexpr const char* CACERT_PATH = "sdmc:/switch/FlashNX/cacert.pem";
 
 bool g_curl_inited = false;
 
@@ -123,7 +123,7 @@ extern "C" void net_shutdown(void) {
 extern "C" int write_cacert_to_sd(const char* data, int len) {
     if (!data || len <= 0) return -1;
     ::mkdir("sdmc:/switch", 0755);
-    ::mkdir("sdmc:/switch/flash-for-switch", 0755);
+    ::mkdir("sdmc:/switch/FlashNX", 0755);
     struct stat st;
     if (::stat(CACERT_PATH, &st) == 0 && (int)st.st_size == len) {
         return 0;

@@ -18,4 +18,4 @@ dev:
 
 clean:
 	cd rust && cargo clean
-	rm -rf cpp/build cpp/flash-for-switch.nro cpp/flash-for-switch.elf cpp/flash-for-switch.nacp cpp/flash-for-switch.map
+	rm -rf cpp/build cpp/FlashNX.nro cpp/FlashNX.elf cpp/FlashNX.nacp cpp/FlashNX.map

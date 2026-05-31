@@ -591,7 +591,7 @@ int main(int argc, char** argv) {
     nxlinkStdio();
     romfsInit();
 
-    std::printf("flash-for-switch: starting\n"); std::fflush(stdout);
+    std::printf("FlashNX: starting\n"); std::fflush(stdout);
 
     // CpuBoostMode FastLoad — Mario 63 is bottlenecked by Ruffle's AVM1
     // bytecode interpreter on the Cortex-A57 (Tegra X1, 1.02 GHz handheld /

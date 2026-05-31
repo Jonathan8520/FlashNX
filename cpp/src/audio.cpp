@@ -66,9 +66,11 @@ bool s_audio_initialised = false;
 extern "C" void ruffle_audio_fill_buffer(int16_t* out, size_t len);
 
 void worker_entry(void* /*arg*/) {
-    std::printf("audio worker: starting\n"); std::fflush(stdout);
+    std::printf("audio worker: starting on core %d\n",
+                svcGetCurrentProcessorNumber()); std::fflush(stdout);
     uint32_t fills = 0;
     uint32_t fills_with_signal = 0;
+    uint32_t underruns = 0;
     int16_t max_abs_seen = 0;
 
     while (s_worker_running) {
@@ -104,8 +106,8 @@ void worker_entry(void* /*arg*/) {
             // Log every ~5 sec (= ~625 buffers if ~85 ms/buf).
             if (fills % 60 == 0) {
                 std::printf(
-                    "audio: fills=%u with_signal=%u max_seen=%d voice_playing=%d\n",
-                    fills, fills_with_signal, (int)max_abs_seen,
+                    "audio: fills=%u with_signal=%u max_seen=%d underruns=%u voice_playing=%d\n",
+                    fills, fills_with_signal, (int)max_abs_seen, underruns,
                     audrvVoiceIsPlaying(&s_drv, 0));
                 std::fflush(stdout);
             }
@@ -124,12 +126,16 @@ void worker_entry(void* /*arg*/) {
         // an underrun.
         audrvUpdate(&s_drv);
         if (s_voice_should_play && !audrvVoiceIsPlaying(&s_drv, 0)) {
+            // Voice stopped while it should play = buffers ran dry (underrun).
+            // Count it past warm-up so the heartbeat shows whether crackles
+            // correlate with CPU-starved refills.
+            if (fills > (uint32_t)NUM_WAVE_BUFS) underruns++;
             audrvVoiceStart(&s_drv, 0);
         }
     }
 
-    std::printf("audio worker: exiting (fills=%u with_signal=%u max=%d)\n",
-                fills, fills_with_signal, (int)max_abs_seen);
+    std::printf("audio worker: exiting (fills=%u with_signal=%u max=%d underruns=%u)\n",
+                fills, fills_with_signal, (int)max_abs_seen, underruns);
     std::fflush(stdout);
 }
 
@@ -208,8 +214,18 @@ extern "C" int ruffle_audio_init(unsigned int /*sample_rate*/, unsigned int /*ch
 
     // Spawn the worker on a modest 64 KB stack — it only does memcpy +
     // syscalls, no deep stacks expected.
+    // Pin the worker to core 2, away from the main Ruffle thread: heavy AVM
+    // ticks (Mario 63 dense scenes exceed 1 s/frame) saturate the main thread's
+    // core, and on a shared core that starved this worker → audible crackle.
+    // Fall back to the default core (-2) if core 2 isn't in our core mask.
     rc = threadCreate(&s_worker_thread, worker_entry, nullptr, nullptr,
-                      64 * 1024, 0x2C, -2);
+                      64 * 1024, 0x2C, 2);
+    if (R_FAILED(rc)) {
+        std::printf("audio worker: core 2 unavailable (0x%x), using default core\n", rc);
+        std::fflush(stdout);
+        rc = threadCreate(&s_worker_thread, worker_entry, nullptr, nullptr,
+                          64 * 1024, 0x2C, -2);
+    }
     if (R_FAILED(rc)) {
         std::printf("audio worker threadCreate failed: 0x%x\n", rc); std::fflush(stdout);
         audrvClose(&s_drv);

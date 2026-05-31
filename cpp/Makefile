@@ -12,18 +12,18 @@ TOPDIR ?= $(CURDIR)
 include $(DEVKITPRO)/libnx/switch_rules
 
 #---------------------------------------------------------------------------------
-TARGET      := flash-for-switch
+TARGET      := FlashNX
 BUILD       := build
 SOURCES     := src
 INCLUDES    := include
 
-# User-facing name = "FlashNX" (per 2026-05-26 rebrand). The repo / target /
-# Cargo lib name stay `flash-for-switch` for stability — bascule destructrice
-# mid-projet evitee. APP_TITLE est ce que voient hbmenu, Sphaira et le `.nacp`
-# embarque dans le `.nro`.
+# User-facing name = "FlashNX" (rebrand 2026-05-26, fully applied at v1.0.0).
+# The repo + Cargo lib name stay `flash-for-switch` (dev-facing, stable); every
+# user-facing artifact is FlashNX — the `.nro`/.nacp name (TARGET), the .nacp
+# title/author below, and the SD data dir `switch/FlashNX/`.
 APP_TITLE   := FlashNX
-APP_AUTHOR  := flash-for-switch contributors
-APP_VERSION := 0.0.1
+APP_AUTHOR  := Jonathan8520
+APP_VERSION := 1.0.0
 # Icon shown in hbmenu / Sphaira / forwarders. Lives in the repo root's
 # `assets/` folder so it sits next to README + the banner. devkitPro's
 # %.nro rule reads $(NROFLAGS) which we wire below — without --icon= the

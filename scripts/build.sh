@@ -40,5 +40,5 @@ echo "[2/2] Building C++ wrapper and linking .nro via devkitPro MSYS2..."
 "
 
 echo
-echo "Done. Output: cpp/flash-for-switch.nro"
-ls -la "$ROOT/cpp/flash-for-switch.nro" 2>/dev/null || echo "(.nro not found — build failed)"
+echo "Done. Output: cpp/FlashNX.nro"
+ls -la "$ROOT/cpp/FlashNX.nro" 2>/dev/null || echo "(.nro not found — build failed)"

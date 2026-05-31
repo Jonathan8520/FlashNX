@@ -239,7 +239,7 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
 /// strings, max 20 entries (LRU-style — newest at end, oldest dropped
 /// when we exceed). Lives in the same dir as `cacert.pem` so the user's
 /// `sdmc:/ruffle/` stays SWF-only.
-const HISTORY_PATH: &str = "sdmc:/switch/flash-for-switch/distant_history.json";
+const HISTORY_PATH: &str = "sdmc:/switch/FlashNX/distant_history.json";
 const HISTORY_MAX: usize = 20;
 
 /// `visible_rows` on the LOCAL list screen — keep in sync with the slot

@@ -82,7 +82,7 @@ Deux logos en place dans `assets/`, tous deux **wired et actifs dans le `.nro`**
 #   `scripts\build.ps1 [--dev]` depuis PowerShell. Tous délèguent à build.sh.
 
 # 2. NETLOAD (Switch : Homebrew Menu → Y pour passer en netloader)
-nxlink -s cpp/flash-for-switch.nro    # push le .nro par WiFi + redirige stdout du Switch vers ce terminal
+nxlink -s cpp/FlashNX.nro    # push le .nro par WiFi + redirige stdout du Switch vers ce terminal
 ```
 
 > ⚠️ `scripts/build.sh` est **le seul chemin de build supporté**. Ne pas appeler
@@ -99,7 +99,7 @@ nxlink -s cpp/flash-for-switch.nro    # push le .nro par WiFi + redirige stdout 
 
 Le script orchestre :
 1. `cargo build --release` (ou `--profile release-dev`) côté Rust (target `aarch64-nintendo-switch-freestanding`, std-via-newlib, build-std nightly) → `rust/target/.../libruffle_switch.a` (~13-14 MB avec features audio+mp3)
-2. `make` côté C++ lancé **dans le bash MSYS2 de devkitPro** (pour que `switch_rules` résolve les paths correctement) → link contre `libruffle_switch.a` + libnx + libEGL/libGLESv2 → `cpp/flash-for-switch.nro` (~12.2 MB)
+2. `make` côté C++ lancé **dans le bash MSYS2 de devkitPro** (pour que `switch_rules` résolve les paths correctement) → link contre `libruffle_switch.a` + libnx + libEGL/libGLESv2 → `cpp/FlashNX.nro` (~12.2 MB)
 
 Le Makefile a `libruffle_switch.a` comme dépendance explicite du `.elf`, donc tout changement Rust déclenche le relink C++ automatiquement (plus besoin de `make clean` manuel après chaque modif Rust). Le profile `release-dev` est sélectionné via la variable d'env `RUST_PROFILE` que `build.sh --dev` exporte.
 
@@ -145,7 +145,7 @@ Highlights de la session 2026-05-29 (détails dans Phase 2.3 / 2.7 ci-dessous) :
    - **Empty state** : si SD vide, la library affiche "AUCUN JEU" + instructions où poser les `.swf`. **Y** te permet quand même d'aller en DISTANT pour télécharger via archive.org.
    - **Fallback ultime** (library init fail) : ruffle_init avec le SWF embarqué 43-octet (fond rouge). Le `.nro` ne refuse jamais de booter.
 2. Switch en mode **netloader** : Homebrew Menu → `Y` (ou `R` sur anciennes versions)
-3. PC : `nxlink -s cpp/flash-for-switch.nro`
+3. PC : `nxlink -s cpp/FlashNX.nro`
 
 **Contrôles in-game** (binding par défaut Mario 63 platformer ; remappable via TOUCHES) :
 
@@ -253,8 +253,8 @@ Tout est à plat, scannable d'un coup d'œil, déplaçable par drag-drop depuis 
 **Backward-compat** : si tu as des fichiers dans l'ancien `sdmc:/ruffle/`, le `.nro` les détecte et les utilise quand même (scan + read-fallback). Pour les saves, l'ancienne arbo nested `sdmc:/ruffle/saves/<host>/<basename>/<sol>.sol` est lue puis migrée automatiquement vers le nouveau path flat à la prochaine sauvegarde (auto-flatten on write). Tu peux supprimer `sdmc:/ruffle/` une fois que tu as déplacé tes `.swf` / `.keymap.json` / `.meta.json` et joué chaque jeu une fois (pour que les saves migrent).
 
 **Autres fichiers système** (cachés du user, dans le dossier homebrew) :
-- `sdmc:/switch/flash-for-switch/cacert.pem` — bundle CA Mozilla pour HTTPS (Phase 3.7)
-- `sdmc:/switch/flash-for-switch/distant_history.json` — historique URLs archive.org (Phase 3.7, persisté)
+- `sdmc:/switch/FlashNX/cacert.pem` — bundle CA Mozilla pour HTTPS (Phase 3.7)
+- `sdmc:/switch/FlashNX/distant_history.json` — historique URLs archive.org (Phase 3.7, persisté)
 - `sdmc:/switch/ruffle-crash.log` — replay du dernier crash natif (vu au boot suivant via nxlink)
 
 ## Roadmap
@@ -467,7 +467,7 @@ Sans ça, `HashMap::new()` puis `.insert()` crash sur hardware. Le lazy thread_l
 
 - Switch moddée Atmosphère
 - nxlink pour stdout réseau (debug) + netloader (push `.nro` par WiFi)
-- SD : copier le `.nro` dans `/switch/flash-for-switch.nro` pour le mode SD (non requis si netload)
+- SD : copier le `.nro` dans `/switch/FlashNX.nro` pour le mode SD (non requis si netload)
 - SWFs cherchés en priorité dans `sdmc:/ruffle/` (voir section « Tester sur Switch » plus haut)
 
 ## Références

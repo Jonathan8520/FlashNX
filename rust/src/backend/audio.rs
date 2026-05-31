@@ -52,12 +52,14 @@ pub struct SwitchAudioBackend {
 impl SwitchAudioBackend {
     pub fn new() -> Self {
         let mut mixer = AudioMixer::new(OUTPUT_CHANNELS, OUTPUT_SAMPLE_RATE);
-        // Mario 63 plays many short SFX simultaneously plus MP3 music. The
-        // mixer sums them in f32; if the sum exceeds [-1, 1] the i16 cast
-        // saturates and we get audible crackle (observed 2026-05-24 even
-        // with no underruns — voice_playing=1 throughout). Headroom of 0.5
-        // is a conservative default; the SWF can still bump it via AS2.
-        mixer.set_volume(0.5);
+        // Mix at native level (1.0). The old 0.5 headroom avoided i16-cast
+        // saturation when Mario 63's many simultaneous SFX + MP3 summed past
+        // [-1, 1] (audible crackle, 2026-05-24) — but it halved the volume of
+        // EVERY game for that one worst case (e.g. a quiet game peaked at ~10%
+        // of full scale). Instead, `ruffle_audio_fill_buffer` now mixes in f32
+        // and applies a make-up gain + soft limiter before the i16 cast: quiet
+        // games get louder, dense peaks compress smoothly with no crackle.
+        mixer.set_volume(1.0);
         // Stash the proxy in the global slot so the C++ side can pull samples.
         let slot = AUDIO_PROXY.get_or_init(|| Mutex::new(None));
         if let Ok(mut guard) = slot.lock() {
@@ -107,6 +109,12 @@ impl AudioBackend for SwitchAudioBackend {
     }
 }
 
+/// Reusable f32 mix scratch for `ruffle_audio_fill_buffer`. A `static` (not a
+/// `thread_local!`) on purpose: the caller is a libnx-created C++ worker thread
+/// whose Rust TLS isn't initialised, so a thread-local would fault. The audio
+/// worker is single-threaded, so this mutex never actually contends.
+static SCRATCH_F32: Mutex<std::vec::Vec<f32>> = Mutex::new(std::vec::Vec::new());
+
 /// Called from the C++ audio worker thread to fill `len` interleaved i16
 /// stereo samples (so the buffer holds `len/2` frames). No-op when no
 /// SwitchAudioBackend is currently alive (returns leaving the buffer at
@@ -125,5 +133,19 @@ pub extern "C" fn ruffle_audio_fill_buffer(out: *mut i16, len: usize) {
     };
     let Ok(mut guard) = slot.lock() else { return };
     let Some(proxy) = guard.as_mut() else { return };
-    proxy.mix::<i16>(buf);
+    // Mix in f32 at native level, then apply a make-up gain + soft limiter
+    // before the i16 cast (see `set_volume(1.0)` in `new`). The Reinhard curve
+    // x/(1+|x|) maps (-inf,inf) → (-1,1) smoothly: quiet sounds get ~GAIN louder
+    // in the near-linear region while loud peaks compress gently instead of
+    // hard-saturating the i16 cast (the Mario 63 crackle the old 0.5 worked
+    // around). |y| < 1 always, so the cast never clips. GAIN is tunable by ear.
+    let Ok(mut scratch) = SCRATCH_F32.lock() else { return };
+    scratch.resize(len, 0.0);
+    proxy.mix::<f32>(&mut scratch[..]);
+    const GAIN: f32 = 3.0;
+    for (o, &s) in buf.iter_mut().zip(scratch.iter()) {
+        let x = s * GAIN;
+        let y = x / (1.0 + x.abs());
+        *o = (y * 32767.0) as i16;
+    }
 }

@@ -36,7 +36,7 @@ fn log(s: &str) {
 const CACERT_PEM: &[u8] = include_bytes!("../../assets/cacert.pem");
 
 /// Called once from `ruffle_library_init`. Writes the embedded CA bundle
-/// to `sdmc:/switch/flash-for-switch/cacert.pem` (idempotent — skips if
+/// to `sdmc:/switch/FlashNX/cacert.pem` (idempotent — skips if
 /// already present at the right size). libcurl reads from that path via
 /// CURLOPT_CAINFO. We can't use CURLOPT_CAINFO_BLOB (added in curl 7.77)
 /// because switch-curl is 7.69.
