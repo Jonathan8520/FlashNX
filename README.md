@@ -6,7 +6,7 @@
 
 ## Installation
 
-1. Télécharge **`FlashNX.nro`** depuis les [Releases](https://github.com/Jonathan8520/flash-for-switch/releases).
+1. Télécharge **`FlashNX.nro`** depuis les [Releases](https://github.com/Jonathan8520/FlashNX/releases).
 2. Copie-le dans **`sdmc:/switch/`**.
 3. Copie tes fichiers **`.swf`** dans **`sdmc:/flashnx/`**.
 4. Lance **FlashNX** depuis le Homebrew Menu.
