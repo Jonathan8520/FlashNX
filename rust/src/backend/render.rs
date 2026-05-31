@@ -4787,7 +4787,15 @@ impl SwitchRenderBackend {
             Some(f) if !f.is_empty() => {
                 std::format!("{} / {} — FILTRE: {}", files.len(), total_unfiltered, f)
             }
-            _ => std::format!("{} FICHIER(S) .SWF TROUVE(S)", files.len()),
+            _ => {
+                // Vrai pluriel conditionnel. L'ancien "FICHIER(S) .SWF TROUVE(S)"
+                // s'affichait "FICHIER S ... TROUVE S" car la police pixel-art ne
+                // rend pas les parenthèses (rendues comme des espaces). 0 et 1 =
+                // singulier en français, >1 = pluriel.
+                let n = files.len();
+                let p = if n > 1 { "S" } else { "" };
+                std::format!("{} FICHIER{} .SWF TROUVE{}", n, p, p)
+            }
         };
         let scale_s = 2.0;
         let sw = self.measure_text(&sub, scale_s);
