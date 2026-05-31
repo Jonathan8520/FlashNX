@@ -154,6 +154,12 @@ pub(crate) struct Entry {
     pub swf_version: u8,
     /// 0 = uncompressed FWS, 1 = zlib CWS, 2 = lzma ZWS.
     pub compression_label: &'static str,
+    /// True if the movie is ActionScript 3 (AVM2). Surfaced as a neutral "AS3"
+    /// tag in the library — Ruffle's AVM2 is less complete than AVM1, so it's
+    /// the riskier engine, but it's informational only: many AS3 games run fine
+    /// (Mario Forever) while others don't (Pursuit of Hat), so we flag the
+    /// engine rather than claim a game is broken.
+    pub is_as3: bool,
     /// 0xRRGGBB derived from a hash of the basename — drives the per-game
     /// color chip in the list. Same hash always produces the same color
     /// across reboots (no persistence needed) because the input is stable.
@@ -268,8 +274,8 @@ pub fn add_path(path: &str) -> bool {
         .next()
         .unwrap_or(path)
         .to_string();
-    let (size_bytes, swf_version, compression_label) = match read_swf_header(path) {
-        Some(h) => (h.size_bytes, h.version, h.compression_label),
+    let (size_bytes, swf_version, compression_label, is_as3) = match read_swf_header(path) {
+        Some(h) => (h.size_bytes, h.version, h.compression_label, h.is_as3),
         None => {
             log(&std::format!(
                 "library: failed to parse SWF header for {}, skipping\n",
@@ -293,8 +299,14 @@ pub fn add_path(path: &str) -> bool {
         size_bytes,
         swf_version,
         compression_label,
+        is_as3,
         color_chip,
     };
+    log(&std::format!(
+        "library: added {} (SWF v{} {}, {})\n",
+        path, swf_version, compression_label,
+        if is_as3 { "AS3/AVM2" } else { "AS2/AVM1" },
+    ));
     if let Ok(mut s) = LIBRARY.lock() {
         s.entries.push(entry);
     }
@@ -1275,6 +1287,64 @@ struct ParsedSwfHeader {
     size_bytes: u64,
     version: u8,
     compression_label: &'static str,
+    is_as3: bool,
+}
+
+/// Best-effort ActionScript-3 (AVM2) detection. The authoritative signal is the
+/// `FileAttributes` tag's `ActionScript3` flag; that tag is mandatory as the
+/// FIRST tag of any SWF >= 8, so we only need the first few dozen bytes of the
+/// (decompressed) body — not the whole movie. `file` must be positioned right
+/// after the 8-byte SWF header.
+fn detect_as3(file: &mut File, version: u8, compression_label: &str) -> bool {
+    // SWF < 8 predates FileAttributes → always AVM1.
+    if version < 8 {
+        return false;
+    }
+    let mut prefix = [0u8; 64];
+    let got = match compression_label {
+        "FWS" => fill_read(file, &mut prefix),
+        "CWS" => {
+            let mut z = flate2::read::ZlibDecoder::new(file);
+            fill_read(&mut z, &mut prefix)
+        }
+        // ZWS = LZMA, only ever emitted for SWF >= 13 (the AS3 era). We don't
+        // wire the LZMA prefix reader, so treat it as AS3 by version.
+        _ => return true,
+    };
+    parse_as3_flag(&prefix[..got]).unwrap_or(version >= 9)
+}
+
+/// Read repeatedly until `buf` is full or the stream ends. Returns bytes read.
+fn fill_read<R: Read>(r: &mut R, buf: &mut [u8]) -> usize {
+    let mut n = 0;
+    while n < buf.len() {
+        match r.read(&mut buf[n..]) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(_) => break,
+        }
+    }
+    n
+}
+
+/// Parse the decompressed SWF body prefix: skip the stage RECT + frame
+/// rate/count, then read the first tag. For SWF >= 8 that's `FileAttributes`
+/// (tag code 69), whose first flag byte carries `ActionScript3` at bit 3.
+fn parse_as3_flag(buf: &[u8]) -> Option<bool> {
+    let first = *buf.first()?;
+    // RECT: top 5 bits of byte 0 = nbits, then 4 fields of nbits each.
+    let nbits = (first >> 3) as usize;
+    let rect_bytes = (5 + nbits * 4 + 7) / 8;
+    // RECT, then frame rate (u16) + frame count (u16), then the first tag.
+    let p = rect_bytes + 4;
+    let (lo, hi) = (*buf.get(p)?, *buf.get(p + 1)?);
+    let tag_code = u16::from_le_bytes([lo, hi]) >> 6;
+    if tag_code != 69 {
+        // No FileAttributes as the first tag → not AS3-flagged.
+        return Some(false);
+    }
+    let flags = *buf.get(p + 2)?;
+    Some(flags & 0x08 != 0) // ActionScript3 = bit 3.
 }
 
 fn read_swf_header(path: &str) -> Option<ParsedSwfHeader> {
@@ -1297,10 +1367,14 @@ fn read_swf_header(path: &str) -> Option<ParsedSwfHeader> {
     };
     let version = buf[3];
     let size_bytes = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as u64;
+    // `file` is now positioned just after the 8-byte header — exactly where
+    // detect_as3 expects to start the (possibly compressed) body.
+    let is_as3 = detect_as3(&mut file, version, compression_label);
     Some(ParsedSwfHeader {
         size_bytes,
         version,
         compression_label,
+        is_as3,
     })
 }
 

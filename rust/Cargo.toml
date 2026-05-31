@@ -21,6 +21,12 @@ ruffle_core = { path = "../third_party/ruffle/core", default-features = false, f
 ruffle_render = { path = "../third_party/ruffle/render", features = ["tessellator"] }
 # Same — swf::Color is the clear color in submit_frame.
 swf = { path = "../third_party/ruffle/swf" }
+# Phase 3.x — library AS3 badge. We decompress only the small prefix of each
+# SWF body at scan time to read its FileAttributes tag (AVM2/ActionScript3
+# flag), so the library can warn that an AS3 game has limited support. flate2
+# is already in the dep tree (the `swf` crate uses it for CWS), so direct-dep
+# binary cost is ~0.
+flate2 = "1"
 # Needed to declare `__getrandom_v03_custom` with the correct Error type;
 # the cfg flag in .cargo/config.toml puts getrandom in "custom backend" mode.
 getrandom = "0.3"

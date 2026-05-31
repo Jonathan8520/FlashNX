@@ -4171,22 +4171,38 @@ impl SwitchRenderBackend {
                 &entry.display_name,
                 swf::Color::from_rgb(0xFFFFFF, 255),
             );
-            // Sub-line: size · compression · version. Stage dims dropped —
-            // 3.8 forces ShowAll + letterbox so native dims are no longer
-            // user-facing info.
+            // Sub-line: size · compression · version, plus a neutral engine
+            // tag. Stage dims dropped — 3.8 forces ShowAll + letterbox so native
+            // dims are no longer user-facing info. AS3 (AVM2) games get a soft
+            // amber "AS3" marker — purely informational, NOT a verdict: Ruffle's
+            // AVM2 is less complete so AS3 is the "here be dragons" engine, yet
+            // plenty of AS3 games (Mario Forever, Flappy Bird, Tetris'd) run
+            // perfectly while others (Pursuit of Hat) don't. So we flag the
+            // engine, not "broken". AS2 is the norm and needs no tag.
             let size_str = format_size_pretty(entry.size_bytes);
-            let meta = std::format!(
-                "{} // SWF V{} {}",
-                size_str,
-                entry.swf_version,
-                entry.compression_label,
-            );
+            let (meta, meta_color) = if entry.is_as3 {
+                (
+                    std::format!(
+                        "{} // SWF V{} {} // AS3",
+                        size_str, entry.swf_version, entry.compression_label,
+                    ),
+                    0xE0B24D,
+                )
+            } else {
+                (
+                    std::format!(
+                        "{} // SWF V{} {}",
+                        size_str, entry.swf_version, entry.compression_label,
+                    ),
+                    0xAABFD8,
+                )
+            };
             self.draw_text(
                 panel_x + 20.0,
                 panel_y + 42.0,
                 2.0,
                 &meta,
-                swf::Color::from_rgb(0xAABFD8, 255),
+                swf::Color::from_rgb(meta_color, 255),
             );
 
             // Tiny basename in lower-right (so the user always sees the
