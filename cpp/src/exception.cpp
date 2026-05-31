@@ -14,6 +14,7 @@
 // The handler runs on a dedicated 32 KB stack we reserve below — the
 // faulting thread's own stack may itself be corrupted on entry.
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <switch.h>
@@ -33,14 +34,31 @@ u64 __nx_exception_stack_size = sizeof(g_exception_stack);
 void __libnx_exception_handler(ThreadExceptionDump* ctx) {
     if (!ctx) return;
 
+    // Re-entry guard: walking the faulting thread's stack below could itself
+    // fault on a bad frame pointer, re-entering this handler. The process
+    // aborts after the first crash anyway, so just bail on any nested entry
+    // (never reset) rather than risk an infinite fault loop.
+    static volatile bool s_handling = false;
+    if (s_handling) return;
+    s_handling = true;
+
     // Format the whole dump into a single stack buffer so the fputs/file
     // write happens as one shot (less chance of being torn by another
     // crash mid-write).
+    // Anchor for symbolication. PC/LR carry the ASLR'd module base, so they
+    // can't be fed to addr2line directly. We print the runtime address of a
+    // known symbol in THIS module (the handler itself), so on the host:
+    //   elf_addr = PC - REF + nm(__libnx_exception_handler)
+    // then `aarch64-none-elf-addr2line -e cpp/flash-for-switch.elf -f -C <elf_addr>`
+    // resolves the crashing source line. Same base cancels out, ASLR-proof.
+    const unsigned long ref = (unsigned long)(uintptr_t)&__libnx_exception_handler;
+
     char buf[2048];
     int n = std::snprintf(buf, sizeof(buf),
         "\n=== NATIVE EXCEPTION ===\n"
         "error_desc = 0x%lx (0x100=InstrAbort 0x101=DataAbort 0x102=MisalignedPC\n"
         "                   0x103=MisalignedSP 0x104=Trap 0x106=SError 0x301=BadSVC)\n"
+        "REF = 0x%016lx  (&__libnx_exception_handler; elf=PC-REF+nm(handler))\n"
         "PC  = 0x%016lx\n"
         "LR  = 0x%016lx\n"
         "SP  = 0x%016lx\n"
@@ -58,6 +76,7 @@ void __libnx_exception_handler(ThreadExceptionDump* ctx) {
         "x28=0x%016lx\n"
         "========================\n",
         (unsigned long)ctx->error_desc,
+        ref,
         (unsigned long)ctx->pc.x,
         (unsigned long)ctx->lr.x,
         (unsigned long)ctx->sp.x,
@@ -95,6 +114,45 @@ void __libnx_exception_handler(ThreadExceptionDump* ctx) {
             std::fflush(f);
             std::fclose(f);
         }
+
+        // Backtrace via STACK SCAN. Rust is built without frame pointers, so
+        // the x29 chain is unusable (FP isn't even 8-aligned at the fault). So
+        // instead we scan the faulting thread's stack for 4-aligned words that
+        // land inside this module's code (|word - REF| < a generous window) —
+        // these are return-address candidates. The PC/LR only show the panic
+        // machinery (panic_count/panic_with_hook); the real `panic!` caller is
+        // among these. Printed REF-relative so the host can addr2line each. Noisy
+        // (some false positives) but it climbs past the panic frames without
+        // needing a frame-pointer rebuild.
+        char bt[2048];
+        int m = std::snprintf(bt, sizeof(bt),
+            "=== STACK SCAN (ret-addr candidates, REF-relative; addr2line each) ===\n");
+        uint64_t sp = ctx->sp.x;
+        const int64_t WIN = 0x8000000; // ±128 MB around REF (module is big: Mesa+std)
+        int found = 0;
+        for (uint64_t a = sp; a < sp + 0x6000 && found < 48; a += 8) {
+            uint64_t v = *(volatile uint64_t*)a;
+            if ((v & 3) != 0) continue; // AArch64 instructions are 4-aligned
+            int64_t d = (int64_t)(v - ref);
+            if (d > -WIN && d < WIN) {
+                m += std::snprintf(bt + m, sizeof(bt) - m,
+                    "sp+0x%04lx: %s0x%lx\n",
+                    (unsigned long)(a - sp),
+                    d < 0 ? "-" : "+",
+                    (unsigned long)(d < 0 ? -d : d));
+                found++;
+            }
+            if (m > (int)sizeof(bt) - 48) break;
+        }
+        std::fputs(bt, stdout);
+        std::fflush(stdout);
+        FILE* fb = std::fopen("sdmc:/switch/ruffle-crash.log", "a");
+        if (fb) {
+            std::fputs(bt, fb);
+            std::fflush(fb);
+            std::fclose(fb);
+        }
+
         // 3. Give nxlink ~500 ms to drain its TCP buffer before the kernel
         // tears the process down.
         svcSleepThread(500ULL * 1000 * 1000);

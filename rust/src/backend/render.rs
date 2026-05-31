@@ -3290,6 +3290,18 @@ impl SwitchRenderBackend {
         width: u32,
         height: u32,
     ) -> Option<SwitchBitmapHandle> {
+        // A bitmap bigger than the atlas in either axis can NEVER be packed.
+        // Bail out here — before the new-atlas path below would allocate a
+        // doomed 16 MB GPU texture (`Atlas::new` → glGenTextures + glTexImage2D)
+        // only for `pack` to then fail. That wasted allocation, under GPU memory
+        // pressure, is what preceded a Mesa NULL-deref native crash (DataAbort,
+        // FAR=0x98) on haunt-the-house's 3400x1600 background (atlas is 2048²).
+        // Returning None makes register_bitmap report TooLarge cleanly, so
+        // Ruffle no-ops that one oversized bitmap instead of taking down the app.
+        if width > ATLAS_SIZE || height > ATLAS_SIZE {
+            self.warn_once(b"pack_into_atlas: bitmap exceeds 2048 atlas, skipped (no crash)\n\0");
+            return None;
+        }
         for (idx, atlas) in self.atlases.iter_mut().enumerate() {
             if let Some((x, y)) = atlas.pack(width, height) {
                 atlas.upload_region_padded(x, y, width, height, pixels);
@@ -5682,20 +5694,42 @@ impl RenderBackend for SwitchRenderBackend {
         let Some((bytes, w, h)) = bitmap_to_rgba_bytes(&bitmap) else {
             return Err(Error::UnknownType);
         };
-        // Kept atlas-backed: shape bitmap fills (see `DrawKind::Bitmap`)
-        // look up by `as_switch_bitmap` which requires the atlas variant.
-        // Standalone register_bitmap broke the SMWF sky background (rendered
-        // as a shape with a JPEG fill) and crashed on level entry. The
-        // tradeoff is that BitmapData.draw() on bitmaps registered this way
-        // can't be FBO-targeted — render_offscreen returns None for them,
-        // and Ruffle treats those draws as no-ops. Acceptable until we
-        // either (a) extend shape rendering to sample standalone textures
-        // too, or (b) promote atlas → standalone on first render_offscreen.
-        let Some(meta) = self.pack_into_atlas(&bytes, w, h) else {
+        // Small bitmaps stay atlas-backed: shape bitmap fills (see
+        // `DrawKind::Bitmap`) look up by `as_switch_bitmap` which requires the
+        // atlas variant, and packing many small bitmaps into one texture is
+        // what keeps Tegra's texture count sane. Keeping ALL bitmaps standalone
+        // broke the SMWF sky (a shape with a JPEG fill → no atlas variant) — so
+        // the atlas path is the default.
+        if let Some(meta) = self.pack_into_atlas(&bytes, w, h) {
+            self.bitmaps_registered = self.bitmaps_registered.wrapping_add(1);
+            return Ok(BitmapHandle(Arc::new(meta)));
+        }
+        // Too big for the 2048² atlas. Returning Err(TooLarge) here used to make
+        // Ruffle's `BitmapRawDataWrapper::bitmap_handle` (which `.expect()`s a
+        // handle) PANIC — haunt-the-house's 3400×1600 BitmapData.draw crashed
+        // the app (panic → worker-thread TLS fault, see exception.cpp backtrace).
+        // Give it a standalone GL texture instead (good up to GL_MAX ≈ 16384,
+        // and FBO-attachable — exactly what BitmapData.draw wants), with the
+        // pixels uploaded. As a shape FILL it'd fall back to solid (no atlas
+        // variant), but it never crashes. Genuine GL OOM / over GL_MAX still
+        // returns TooLarge (Ruffle handles a None handle there without us
+        // forcing it through the expect path on every frame).
+        let Some(standalone) = make_standalone_texture(w, h) else {
             return Err(Error::TooLarge);
         };
+        unsafe {
+            glBindTexture(GL_TEXTURE_2D, standalone.texture);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glTexSubImage2D(
+                GL_TEXTURE_2D, 0, 0, 0,
+                w as GLsizei, h as GLsizei,
+                GL_RGBA, GL_UNSIGNED_BYTE, bytes.as_ptr() as *const _,
+            );
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+        self.warn_once(b"register_bitmap: >2048 bitmap -> standalone texture (no crash)\n\0");
         self.bitmaps_registered = self.bitmaps_registered.wrapping_add(1);
-        Ok(BitmapHandle(Arc::new(meta)))
+        Ok(BitmapHandle(Arc::new(StandaloneBitmap(Arc::new(standalone)))))
     }
 
     fn update_texture(

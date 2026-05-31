@@ -103,6 +103,16 @@ Le script orchestre :
 
 Le Makefile a `libruffle_switch.a` comme dépendance explicite du `.elf`, donc tout changement Rust déclenche le relink C++ automatiquement (plus besoin de `make clean` manuel après chaque modif Rust). Le profile `release-dev` est sélectionné via la variable d'env `RUST_PROFILE` que `build.sh --dev` exporte.
 
+**État 2026-05-31 — perf filtres, badge AS3, crash bitmap réglé + outillage de debug** :
+
+Highlights de la session 2026-05-31 :
+- **Half-res blur** ([render.rs](rust/src/backend/render.rs) `run_blur_to_temp`) — les Glow/Bevel/Blur tournent en demi-résolution (downsample → ¼ du fill → upsample). Validé hardware : **~11 ms → ~4 ms par filter chain (2,5-3×)**, pire pic `render` **323 → 64 ms**, l'effondrement filtre-bound (scènes éclairées Mario 63) a disparu. UV glow/bevel divisés par `source_size` (pas la taille du temp, devenue moitié).
+- **Détecteur de frame lente + horloge CPU** au heartbeat ([lib.rs](rust/src/lib.rs)) — lignes `SLOW f… tick=… render=… filt=N(chains) …` (attribution par-frame de chaque pic) + `cpu=…MHz dock=…`. A révélé que les chutes en niveau sont l'**AVM1/AVM2 de Ruffle** (CPU), pas notre rendu, et que l'OS révoque par intermittence le boost CPU FastLoad (1785→1020 MHz) sur charge soutenue.
+- **Badge AS3 dans la library** ([library.rs](rust/src/library.rs) `detect_as3`) — détection via le tag `FileAttributes` (préfixe décompressé au scan, pas la version : « There Is Only One Level » v10 est en AS2). Les jeux **AS3 (AVM2)** affichent un tag ambre `// AS3` au panneau metadata = moteur Ruffle moins complet, support variable (Mario Forever tourne, Pursuit of Hat non). Pose les attentes avant lancement.
+- **Crash bitmap > 2048 réglé** — `BitmapData.draw()` sur un grand bitmap (haunt-the-house 3400×1600) faisait renvoyer `TooLarge` par `register_bitmap` (atlas = 2048²) → Ruffle `bitmap_handle().expect()` paniquait → crash natif. Fix : route les bitmaps trop grands vers une **texture standalone** (FBO-attachable, jusqu'à ~16384 px). Robustesse pour **tout** jeu, pas que l'AS3.
+- **Symbolisation des crashes natifs** ([exception.cpp](cpp/src/exception.cpp)) — ligne `REF` (annule l'ASLR : `elf=PC-REF+nm(handler)`) + **backtrace par stack-scan** (Rust n'a pas de frame pointers). Tout crash futur est traçable à la fonction près via `addr2line`. NB : un panic Rust sur le thread worker libnx faute dans `panic_count` (TLS worker non initialisée pour std) — le message est perdu, mais le stack-scan donne la chaîne d'appel.
+- **Fiabilité build** : `Makefile` + `scripts/build.ps1` ne sont plus que des wrappers de `scripts/build.sh` (l'ancien target `aarch64-unknown-linux-gnu` cassait libc). README build + netload à jour.
+
 **État 2026-05-29 — plateforme jouable end-to-end, pipeline de rendu Flash quasi complet** :
 
 Highlights de la session 2026-05-29 (détails dans Phase 2.3 / 2.7 ci-dessous) :
