@@ -19,11 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-FlashNX is an integration layer for Nintendo Switch built on top of Ruffle
-(https://github.com/ruffle-rs/ruffle, Apache-2.0 / MIT) and other third-party
-projects (devkitPro/libnx, switch-mesa, libcurl, Mbed-TLS, zlib, jpeg-decoder,
-and various Rust crates). Those components remain under their own respective
-licenses; see the "Crédits & licences" section of README.md for details.
