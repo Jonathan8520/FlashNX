@@ -1,9 +1,14 @@
 # assets
 
-Files consumed by the C++ Makefile to produce the final `.nro`:
+Bundled into the final `.nro` / consumed by the build:
 
-- `icon.jpg` — 256x256 JPEG icon shown by hbmenu
-- `FlashNX.nacp` — application metadata (title, author, version);
-  generated automatically by `switch_rules` from the `APP_*` vars in `cpp/Makefile`
+- `icon.jpg` — 256×256 JPEG icon shown by hbmenu (wired via `--icon=` in `cpp/Makefile`).
+- `banner.png` — 720×144 RGBA logo, embedded via `include_bytes!` in
+  [../rust/src/library.rs](../rust/src/library.rs) and drawn at the top of the library UI.
+- `cacert.pem` — Mozilla CA bundle for libcurl HTTPS (archive.org import).
+- `FlashNX.nacp` — application metadata (title, author, version), generated at
+  build time by `switch_rules` from the `APP_*` vars in `cpp/Makefile`.
 
-Phase 2 — replace the placeholder icon, polish metadata for distribution.
+## screenshots/
+
+Captures used in the project README only — not shipped in the `.nro`.

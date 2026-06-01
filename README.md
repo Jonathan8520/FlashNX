@@ -1,8 +1,27 @@
-# FlashNX
+<p align="center">
+  <img src="assets/banner.png" alt="FlashNX" width="480">
+</p>
 
-**Lecteur Flash homebrew pour Nintendo Switch.** Fais tourner tes jeux Flash (`.swf` — AS1/AS2, et une partie de l'AS3) directement depuis la carte SD. Propulsé par **[Ruffle](https://github.com/ruffle-rs/ruffle)**.
+<p align="center">
+  <strong>Lecteur Flash homebrew pour Nintendo Switch.</strong><br>
+  Fais tourner tes jeux Flash (<code>.swf</code> — AS1/AS2, et une partie de l'AS3) directement depuis la carte SD.<br>
+  Propulsé par <a href="https://github.com/ruffle-rs/ruffle">Ruffle</a>.
+</p>
+
+<p align="center">
+  <a href="https://github.com/Jonathan8520/FlashNX/releases"><img src="https://img.shields.io/github/v/release/Jonathan8520/FlashNX?label=release" alt="Release"></a>
+  <img src="https://img.shields.io/badge/platform-Nintendo%20Switch-e60012" alt="Platform">
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="License">
+</p>
 
 > Le repo, la toolchain et le crate Rust gardent le nom historique `flash-for-switch` ; **FlashNX** est le nom de l'application (ce que voient hbmenu et le `.nro`).
+
+## Aperçu
+
+| Library | Import distant | En jeu |
+|:---:|:---:|:---:|
+| ![Library FlashNX](assets/screenshots/library.png) | ![Import archive.org](assets/screenshots/remote-import.png) | ![Super Mario 63 + menu pause](assets/screenshots/in-game.png) |
+| Navigation joycon, banner + chip couleur, badge AS3 | Téléchargement `.swf` HTTPS depuis archive.org | Jeu + menu pause / éditeur de touches |
 
 ## Installation
 
@@ -56,5 +75,5 @@ FlashNX n'est qu'une **couche d'intégration Switch** au-dessus de projets remar
 
 ---
 
-📖 **Architecture, build, roadmap & notes techniques** → [DEVELOPMENT.md](DEVELOPMENT.md)
+📖 **Architecture, build & notes techniques** → [DEVELOPMENT.md](DEVELOPMENT.md)
 📦 **Changelog** → [CHANGELOG.md](CHANGELOG.md)

@@ -21,3 +21,11 @@ Cargo.lock
 
 # Third-party submodule build artefacts (the submodule itself is tracked)
 /third_party/ruffle/target/
+
+# Local dev scratch — debug notes, WIP patches, test SWFs (never shipped).
+# Distinct from third_party/ruffle (the tracked Ruffle submodule).
+/temp/
+/ruffle/
+
+# Bundled test/sample SWFs are copyrighted games — keep them off the repo.
+*.swf
