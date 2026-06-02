@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="https://hb-app.store/switch/FlashNX"><img src="https://img.shields.io/badge/Homebrew%20App%20Store-FlashNX-2ea44f" alt="Homebrew App Store"></a>
   <a href="https://github.com/Jonathan8520/FlashNX/releases"><img src="https://img.shields.io/github/v/release/Jonathan8520/FlashNX?label=release" alt="Release"></a>
   <img src="https://img.shields.io/badge/platform-Nintendo%20Switch-e60012" alt="Platform">
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="License">
@@ -25,10 +26,13 @@
 
 ## Installation
 
+**Le plus simple — via le [Homebrew App Store](https://hb-app.store/switch/FlashNX)** : ouvre l'app **hb-appstore** sur ta Switch, cherche **FlashNX**, installe. Les mises à jour suivront automatiquement.
+
+**Ou manuellement** :
 1. Télécharge **`FlashNX.nro`** depuis les [Releases](https://github.com/Jonathan8520/FlashNX/releases).
 2. Copie-le dans **`sdmc:/switch/`**.
-3. Copie tes fichiers **`.swf`** dans **`sdmc:/flashnx/`**.
-4. Lance **FlashNX** depuis le Homebrew Menu.
+
+Dans les deux cas : copie tes fichiers **`.swf`** dans **`sdmc:/flashnx/`**, puis lance **FlashNX** depuis le Homebrew Menu.
 
 *(Switch moddée Atmosphère requise.)*
 
