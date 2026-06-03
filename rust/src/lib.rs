@@ -340,6 +340,13 @@ fn ensure_swf_loaded() -> Option<(std::vec::Vec<u8>, std::string::String)> {
         }
     }
     let (bytes, path) = find_and_load_swf_uncached()?;
+    // Transparently unwrap 4399-style "loadBytes the real game" wrappers
+    // (see `maybe_unwrap_embedded_game`). Done before caching so REDEMARRER /
+    // back-to-library reuse the inner game bytes and skip re-parsing the shell.
+    let bytes = match maybe_unwrap_embedded_game(&bytes) {
+        Some(inner) => inner,
+        None => bytes,
+    };
     log_str(&std::format!(
         "ruffle_init: loaded {} bytes from {} (cached for future restarts)\n",
         bytes.len(),
@@ -358,6 +365,66 @@ fn ensure_swf_loaded() -> Option<(std::vec::Vec<u8>, std::string::String)> {
         *g = Some(entry.clone());
     }
     Some(entry)
+}
+
+/// Some Chinese game-portal SWFs are a tiny AS3 shell whose only job is to
+/// `Loader.loadBytes()` the real game, which ships embedded as a
+/// `DefineBinaryData` blob and is bound to a class name ending in
+/// `…_gamefile` via `SymbolClass` (e.g. 4399's `prefor.System4399Manager`
+/// wrapper, class `L4399Main_gamefile`).
+///
+/// Our AVM2 doesn't yet instantiate that loadBytes'd child's document class,
+/// so the wrapper renders a frozen near-empty stage — observed on
+/// `catmario.swf` (Cat Mario / Syobon Action): root advances thousands of
+/// frames but only ~5 shapes ever register, giving the user a "red screen".
+///
+/// Detect that exact shape and transparently swap in the inner game SWF,
+/// bypassing the loadBytes path entirely. Returns `Some(inner_bytes)` when an
+/// embedded game SWF is found; `None` leaves ordinary SWFs untouched. The
+/// `…gamefile` SymbolClass marker is specific enough that a normal standalone
+/// game won't false-positive.
+fn maybe_unwrap_embedded_game(bytes: &[u8]) -> Option<std::vec::Vec<u8>> {
+    let buf = swf::decompress_swf(bytes).ok()?;
+    let parsed = swf::parse_swf(&buf).ok()?;
+
+    // 1. Find the character id that SymbolClass marks as the game payload.
+    let mut game_id: Option<swf::CharacterId> = None;
+    for tag in &parsed.tags {
+        if let swf::Tag::SymbolClass(links) = tag {
+            for link in links {
+                if link
+                    .class_name
+                    .to_str_lossy(swf::UTF_8)
+                    .to_ascii_lowercase()
+                    .contains("gamefile")
+                {
+                    game_id = Some(link.id);
+                }
+            }
+        }
+    }
+    let game_id = game_id?;
+
+    // 2. Pull the matching DefineBinaryData and confirm it's itself an SWF
+    //    (FWS uncompressed / CWS zlib / ZWS lzma).
+    for tag in &parsed.tags {
+        if let swf::Tag::DefineBinaryData(bin) = tag {
+            let is_swf = bin.data.len() > 8
+                && {
+                    let sig = &bin.data[0..3];
+                    sig == b"FWS" || sig == b"CWS" || sig == b"ZWS"
+                };
+            if bin.id == game_id && is_swf {
+                log_str(&std::format!(
+                    "unwrap: portal wrapper detected — loading embedded game directly (id={}, {} bytes)\n",
+                    game_id,
+                    bin.data.len(),
+                ));
+                return Some(bin.data.to_vec());
+            }
+        }
+    }
+    None
 }
 
 /// Try the runtime override path (set by C++ via `ruffle_set_swf_path`)

@@ -340,6 +340,23 @@ static PRIM_BMPUP_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 static PRIM_BMPUP_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PRIM_RESOLVE_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PRIM_RESOLVE_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+// DIAG (2026-06-03, catmario perf): sub-phase breakdown of render_offscreen,
+// which dominates frame time at ~330ms when cacheAsBitmap-heavy AS3 games run.
+// ALLOC=make_standalone_texture, RENDER=render_commands_to_texture,
+// READBACK=glReadPixels (atlas-slot repatriate), UPLOAD=atlas.upload_region.
+// N=call count this frame, PIX=sum of readback-region pixels (glReadPixels cost).
+static PRIM_OFF_ALLOC_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_OFF_ALLOC_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_OFF_RENDER_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_OFF_RENDER_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_OFF_READBACK_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_OFF_READBACK_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_OFF_UPLOAD_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_OFF_UPLOAD_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_OFF_N_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_OFF_N_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_OFF_PIX_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_OFF_PIX_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// RAII guard: adds elapsed ticks to a static on drop, covering every
 /// early-return path of the timed function automatically.
@@ -591,14 +608,17 @@ impl BitmapHandleImpl for StandaloneBitmap {}
 struct NoOpSyncHandle;
 impl SyncHandle for NoOpSyncHandle {}
 
-/// SyncHandle for `BitmapData.draw()`. Owns the temporary texture the draw
-/// commands were rendered into, plus the dirty region to read back. Ruffle
-/// stores this in the BitmapData's `GpuModified` state and calls
+/// SyncHandle for `BitmapData.draw()`. Holds a NON-owning GL texture id (the
+/// temp the draw commands were rendered into) plus the dirty region to read
+/// back. Ruffle stores this in the BitmapData's `GpuModified` state and calls
 /// `resolve_sync_handle` on the next CPU access (e.g. `copyPixels`), which
-/// reads the pixels back into the BitmapData's CPU buffer. The owned texture
-/// is freed when this handle drops (right after readback).
+/// reads the pixels back into the BitmapData's CPU buffer. The texture itself
+/// lives in the backend's `offscreen_temp_retired`/`offscreen_temp_pool`
+/// (recycled one frame later, after Ruffle has resolved/dropped this handle in
+/// the same tick), so this struct does NOT free it on drop — avoiding a
+/// per-call texture alloc that cost ~90ms/frame on cacheAsBitmap-heavy games.
 struct BitmapDataSyncHandle {
-    texture: StandaloneTexture,
+    texture: GLuint,
     /// Dirty region (BitmapData/top-left coords) — must match the `bounds`
     /// Ruffle passed to `render_offscreen`, since the readback closure indexes
     /// the buffer relative to this region's origin.
@@ -612,7 +632,7 @@ impl std::fmt::Debug for BitmapDataSyncHandle {
         write!(
             f,
             "BitmapDataSyncHandle(tex={}, region={}x{}@{},{})",
-            self.texture.texture, self.w, self.h, self.x, self.y
+            self.texture, self.w, self.h, self.x, self.y
         )
     }
 }
@@ -869,6 +889,17 @@ struct AlphaMaskProgram {
     program: GLuint,
     u_src_uv: GLint,
 }
+/// Single-texture full-quad blit program (FILTER_VERT + a chosen fragment
+/// shader). Used for the premultiplied<->straight conversions that move
+/// render_offscreen results between premultiplied temps and straight atlas
+/// slots without a CPU readback.
+struct BlitProgram {
+    program: GLuint,
+    u_src_uv: GLint,
+}
+impl Drop for BlitProgram {
+    fn drop(&mut self) { unsafe { glDeleteProgram(self.program) }; }
+}
 struct ComplexBlendProgram {
     program: GLuint,
     u_src_uv: GLint,
@@ -883,6 +914,15 @@ impl Drop for ComplexBlendProgram {
 }
 
 // ─── Stencil mask state ───────────────────────────────────────────────────────
+
+/// DIAGNOSTIC (2026-06-03, catmario invisible world): when true, maskees draw
+/// unconditionally (GL_ALWAYS) instead of being gated by the stencil coverage
+/// count. If the world (platforms/ground/enemies) appears with this on, the
+/// invisible-world bug is in our stencil masking; if it stays invisible, the
+/// cached content itself is empty/not composited. Set back to false after.
+/// Result (2026-06-03): world stayed invisible with gating off → NOT masking;
+/// the cached content path is the culprit. Left at false.
+const DISABLE_MASK_GATING: bool = false;
 
 /// DIAGNOSTIC TOGGLE: when true, mask shapes stay invisible but the stencil
 /// gating is skipped so maskees draw unconditionally. Used to confirm whether
@@ -1074,6 +1114,8 @@ pub struct SwitchRenderBackend {
     offscreen_depth_stencil_dims: (u32, u32),
 
     color_matrix_filter: ColorMatrixFilterProgram,
+    unpremult_blit: BlitProgram,
+    premult_blit: BlitProgram,
     blur_filter: BlurFilterProgram,
     glow_filter: GlowFilterProgram,
     bevel_filter: BevelFilterProgram,
@@ -1089,6 +1131,16 @@ pub struct SwitchRenderBackend {
     /// glGenTextures + glTexImage2D + glDeleteTextures per filter per
     /// frame, which was the main fps killer in Phase 2.3's first try.
     filter_tex_pool: FilterTexturePool,
+
+    /// Reusable temp textures for `render_offscreen` (BitmapData.draw /
+    /// cacheAsBitmap). `_pool` holds textures free for reuse; `_retired` holds
+    /// the ones handed to this frame's SyncHandles. Ruffle resolves/drops each
+    /// SyncHandle within the same tick, so `submit_frame` moves `_retired` back
+    /// into `_pool` for the next frame. This avoids a per-call glGenTextures +
+    /// glTexImage2D + glDeleteTextures — which became the dominant cost
+    /// (~90ms/frame, 48 allocs) once the readback was moved onto the GPU.
+    offscreen_temp_pool: Vec<StandaloneTexture>,
+    offscreen_temp_retired: Vec<StandaloneTexture>,
 
     /// Per-frame perf attribution for the slow-frame detector. `frame_snapshot`
     /// is the raw counter state captured at the top of `submit_frame`;
@@ -1382,6 +1434,38 @@ void main() {\n\
     vec4 out_vec = u_color_mat * in_vec + u_color_extra;\n\
     vec4 c = clamp(out_vec, 0.0, 1.0);\n\
     frag_color = vec4(c.rgb * c.a, c.a);\n\
+}\n\0";
+
+// Premultiplied -> straight-alpha copy. `render_offscreen` renders draw()
+// commands into a PREMULTIPLIED temp texture; atlas slots store STRAIGHT
+// alpha, so repatriating the result into an atlas slot needs an
+// un-premultiply. Doing it on the GPU (this shader, into the atlas FBO)
+// replaces a per-call `glReadPixels` + CPU divide + re-upload — that readback
+// was ~78% of frame time on cacheAsBitmap-heavy AS3 games (catmario:
+// ~260ms/frame across 48 draw() repatriations). Reuses FILTER_VERT.
+const UNPREMULT_FRAG: &[u8] = b"#version 330 core\n\
+in vec2 v_uv;\n\
+out vec4 frag_color;\n\
+uniform sampler2D u_tex;\n\
+void main() {\n\
+    vec4 src = texture(u_tex, v_uv);\n\
+    frag_color = src.a > 0.0 ? vec4(src.rgb / src.a, src.a) : vec4(0.0);\n\
+}\n\0";
+
+// Straight-alpha -> premultiplied copy (inverse of UNPREMULT_FRAG). Used to
+// SEED a render_offscreen temp with the BitmapData's existing (straight, atlas)
+// content before compositing new draw() commands on top — Ruffle's
+// `render_offscreen` must blend onto the previous contents (its wgpu backend
+// uses `RenderTargetMode::FreshWithTexture`). Without this seed, a game that
+// builds its frame by accumulating many draw()s into one BitmapData (a software
+// blitter, e.g. catmario's `stageBitmapdata`) loses all but the last draw.
+const PREMULT_FRAG: &[u8] = b"#version 330 core\n\
+in vec2 v_uv;\n\
+out vec4 frag_color;\n\
+uniform sampler2D u_tex;\n\
+void main() {\n\
+    vec4 src = texture(u_tex, v_uv);\n\
+    frag_color = vec4(src.rgb * src.a, src.a);\n\
 }\n\0";
 
 // Separable Gaussian-approximating blur, faithful port of `blur.wgsl`. The
@@ -1728,6 +1812,22 @@ fn build_color_matrix_filter_program() -> Option<ColorMatrixFilterProgram> {
         u_src_uv: loc(program, b"u_src_uv\0"),
         u_color_mat: loc(program, b"u_color_mat\0"),
         u_color_extra: loc(program, b"u_color_extra\0"),
+        program,
+    })
+}
+
+fn build_unpremult_blit_program() -> Option<BlitProgram> {
+    let program = link_program(FILTER_VERT, UNPREMULT_FRAG)?;
+    Some(BlitProgram {
+        u_src_uv: loc(program, b"u_src_uv\0"),
+        program,
+    })
+}
+
+fn build_premult_blit_program() -> Option<BlitProgram> {
+    let program = link_program(FILTER_VERT, PREMULT_FRAG)?;
+    Some(BlitProgram {
+        u_src_uv: loc(program, b"u_src_uv\0"),
         program,
     })
 }
@@ -2202,6 +2302,8 @@ impl SwitchRenderBackend {
         let shape_bitmap_prog = build_shape_bitmap_program()?;
         let gradient_prog = build_gradient_program()?;
         let color_matrix_filter = build_color_matrix_filter_program()?;
+        let unpremult_blit = build_unpremult_blit_program()?;
+        let premult_blit = build_premult_blit_program()?;
         let blur_filter = build_blur_filter_program()?;
         let glow_filter = build_glow_filter_program()?;
         let bevel_filter = build_bevel_filter_program()?;
@@ -2242,6 +2344,10 @@ impl SwitchRenderBackend {
             // pre-blurred source at unit 1.
             glUseProgram(color_matrix_filter.program);
             glUniform1i(loc(color_matrix_filter.program, b"u_tex\0"), 0);
+            glUseProgram(unpremult_blit.program);
+            glUniform1i(loc(unpremult_blit.program, b"u_tex\0"), 0);
+            glUseProgram(premult_blit.program);
+            glUniform1i(loc(premult_blit.program, b"u_tex\0"), 0);
             glUseProgram(blur_filter.program);
             glUniform1i(loc(blur_filter.program, b"u_tex\0"), 0);
             glUseProgram(glow_filter.program);
@@ -2273,6 +2379,8 @@ impl SwitchRenderBackend {
             shape_bitmap_prog,
             gradient_prog,
             color_matrix_filter,
+            unpremult_blit,
+            premult_blit,
             blur_filter,
             glow_filter,
             bevel_filter,
@@ -2280,6 +2388,8 @@ impl SwitchRenderBackend {
             complex_blend_prog,
             blend_window: 0,
             filter_tex_pool: FilterTexturePool::new(),
+            offscreen_temp_pool: Vec::new(),
+            offscreen_temp_retired: Vec::new(),
             gl_state: GlStateCache::default(),
             rect_vao,
             rect_vbo,
@@ -2406,7 +2516,7 @@ impl SwitchRenderBackend {
         tex_w: u32,
         tex_h: u32,
         commands: CommandList,
-        clear: Color,
+        clear: Option<Color>,
     ) -> bool {
         if self.offscreen_fbo == 0 {
             unsafe {
@@ -2435,14 +2545,22 @@ impl SwitchRenderBackend {
                 return false;
             }
             glViewport(0, 0, tex_w as GLsizei, tex_h as GLsizei);
-            glClearColor(
-                clear.r as GLfloat / 255.0,
-                clear.g as GLfloat / 255.0,
-                clear.b as GLfloat / 255.0,
-                clear.a as GLfloat / 255.0,
-            );
             glClearStencil(0);
-            glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+            // `Some(color)` = fresh target (clear to color). `None` = composite
+            // mode: the temp was pre-seeded with the BitmapData's existing
+            // content (render_offscreen's FreshWithTexture semantics), so keep
+            // the colour and only reset the stencil for this pass's masks.
+            if let Some(c) = clear {
+                glClearColor(
+                    c.r as GLfloat / 255.0,
+                    c.g as GLfloat / 255.0,
+                    c.b as GLfloat / 255.0,
+                    c.a as GLfloat / 255.0,
+                );
+                glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+            } else {
+                glClear(GL_STENCIL_BUFFER_BIT);
+            }
             // Premultiplied-alpha-correct accumulation: standard blend for RGB
             // but accumulate the alpha channel additively, otherwise a cache
             // texture's alpha ends up as `a²` and is too faint when sampled.
@@ -2609,6 +2727,76 @@ impl SwitchRenderBackend {
                 glUniform4f(u_extra, zero[0], zero[1], zero[2], zero[3]);
             },
         )
+    }
+
+    /// GPU premultiplied->straight blit of the `(src_pt, src_size)` sub-rect of
+    /// `src_tex` into the `(dst_pt, src_size)` sub-rect of `dst_tex`, via
+    /// UNPREMULT_FRAG. Used to repatriate a draw() render into an atlas slot
+    /// without the per-call `glReadPixels` + CPU un-premultiply + re-upload that
+    /// dominated frame time on cacheAsBitmap-heavy AS3 games.
+    #[allow(clippy::too_many_arguments)]
+    fn blit_unpremult(
+        &mut self,
+        src_tex: GLuint,
+        src_w: u32,
+        src_h: u32,
+        src_pt: (u32, u32),
+        src_size: (u32, u32),
+        dst_tex: GLuint,
+        dst_pt: (i32, i32),
+        dst_w: u32,
+        dst_h: u32,
+    ) -> bool {
+        let prog = self.unpremult_blit.program;
+        let u_src_uv = self.unpremult_blit.u_src_uv;
+        self.draw_filter_pass(
+            prog, u_src_uv,
+            src_tex, src_w, src_h, src_pt, src_size,
+            dst_tex, dst_pt.0, dst_pt.1, dst_w, dst_h,
+            || {},
+        )
+    }
+
+    /// GPU straight->premultiplied blit (inverse of `blit_unpremult`), via
+    /// PREMULT_FRAG. Seeds a render_offscreen temp with a BitmapData's existing
+    /// (straight, atlas-stored) content so the new draw() commands composite
+    /// onto it instead of replacing it.
+    #[allow(clippy::too_many_arguments)]
+    fn blit_premult(
+        &mut self,
+        src_tex: GLuint,
+        src_w: u32,
+        src_h: u32,
+        src_pt: (u32, u32),
+        src_size: (u32, u32),
+        dst_tex: GLuint,
+        dst_pt: (i32, i32),
+        dst_w: u32,
+        dst_h: u32,
+    ) -> bool {
+        let prog = self.premult_blit.program;
+        let u_src_uv = self.premult_blit.u_src_uv;
+        self.draw_filter_pass(
+            prog, u_src_uv,
+            src_tex, src_w, src_h, src_pt, src_size,
+            dst_tex, dst_pt.0, dst_pt.1, dst_w, dst_h,
+            || {},
+        )
+    }
+
+    /// Acquire a temp texture for a `render_offscreen` pass: reuse a pooled one
+    /// of the exact size if available (the steady-state case — BitmapData sizes
+    /// are stable across frames), else allocate a fresh one.
+    /// `render_commands_to_texture` clears it, so stale pooled content is fine.
+    fn acquire_offscreen_temp(&mut self, w: u32, h: u32) -> Option<StandaloneTexture> {
+        if let Some(i) = self
+            .offscreen_temp_pool
+            .iter()
+            .position(|t| t.width == w && t.height == h)
+        {
+            return Some(self.offscreen_temp_pool.swap_remove(i));
+        }
+        make_standalone_texture(w, h)
     }
 
     /// Read an (x, y, w, h) sub-rect of `tex` back into a CPU RGBA buffer with
@@ -3477,14 +3665,21 @@ impl SwitchRenderBackend {
         let prim_offs = to_us(PRIM_OFFSCREEN_LAST.load(std::sync::atomic::Ordering::Relaxed));
         let prim_bmp = to_us(PRIM_BMPUP_LAST.load(std::sync::atomic::Ordering::Relaxed));
         let prim_res = to_us(PRIM_RESOLVE_LAST.load(std::sync::atomic::Ordering::Relaxed));
+        let off_alloc = to_us(PRIM_OFF_ALLOC_LAST.load(std::sync::atomic::Ordering::Relaxed));
+        let off_render = to_us(PRIM_OFF_RENDER_LAST.load(std::sync::atomic::Ordering::Relaxed));
+        let off_readback = to_us(PRIM_OFF_READBACK_LAST.load(std::sync::atomic::Ordering::Relaxed));
+        let off_upload = to_us(PRIM_OFF_UPLOAD_LAST.load(std::sync::atomic::Ordering::Relaxed));
+        let off_n = PRIM_OFF_N_LAST.load(std::sync::atomic::Ordering::Relaxed);
+        let off_pix = PRIM_OFF_PIX_LAST.load(std::sync::atomic::Ordering::Relaxed);
         let msg = std::format!(
-            "SLOW f{} {}us (tick {}us render {}us) primOffs={}us primBmp={}us primRes={}us dc={} offs={} filt={}({}chains) resolve={} bmpUp={} shpReg={} blend={} pmask={} mdraw={} cacheEnt={}\n",
+            "SLOW f{} {}us (tick {}us render {}us) primOffs={}us primBmp={}us primRes={}us dc={} offs={} filt={}({}chains) resolve={} bmpUp={} shpReg={} blend={} pmask={} mdraw={} cacheEnt={} | offN={} offPix={} alloc={}us render={}us readback={}us upload={}us\n",
             self.frame_count,
             total_us, tick_us, render_us,
             prim_offs, prim_bmp, prim_res,
             fb.draw_calls, fb.offscreen, fb.filter, fb.filter_chains,
             fb.resolve, fb.bmp_uploads, fb.shape_regs,
             fb.blend, fb.pushmask, fb.masked_draw, fb.cache_entries,
+            off_n, off_pix, off_alloc, off_render, off_readback, off_upload,
         );
         let mut bytes = msg.into_bytes();
         bytes.push(0);
@@ -5139,7 +5334,8 @@ impl SwitchRenderBackend {
         unsafe {
             glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
             glStencilMask(0);
-            glStencilFunc(GL_EQUAL, self.mask.depth as GLint, 0xFF);
+            let func = if DISABLE_MASK_GATING { GL_ALWAYS } else { GL_EQUAL };
+            glStencilFunc(func, self.mask.depth as GLint, 0xFF);
             glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
         }
     }
@@ -5168,7 +5364,8 @@ impl SwitchRenderBackend {
             } else {
                 // Resume gating the enclosing maskee at the outer depth.
                 glStencilMask(0);
-                glStencilFunc(GL_EQUAL, self.mask.depth as GLint, 0xFF);
+                let func = if DISABLE_MASK_GATING { GL_ALWAYS } else { GL_EQUAL };
+                glStencilFunc(func, self.mask.depth as GLint, 0xFF);
                 glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
             }
         }
@@ -5344,13 +5541,21 @@ impl RenderBackend for SwitchRenderBackend {
     ) -> Option<Box<dyn SyncHandle>> {
         let _pt = PrimTimer::new(&PRIM_OFFSCREEN_CUR);
         self.render_offscreen_calls = self.render_offscreen_calls.wrapping_add(1);
-        // Target dimensions. BitmapData backs its handle via `register_bitmap`
-        // (atlas) in the common AS2 `new BitmapData()` case, so accept both
-        // atlas and standalone handles here.
-        let (tex_w, tex_h) = if let Some(s) = as_standalone_bitmap(&handle) {
-            (s.0.width, s.0.height)
+        // Where the BitmapData's pixels live + its dimensions. BitmapData backs
+        // its handle via `register_bitmap` (atlas) in the common
+        // `new BitmapData()` case; large ones fall back to a standalone texture.
+        #[derive(Clone, Copy)]
+        enum Backing {
+            Standalone(GLuint),
+            Atlas { tex: GLuint, base_x: u32, base_y: u32 },
+        }
+        let (tex_w, tex_h, backing) = if let Some(s) = as_standalone_bitmap(&handle) {
+            (s.0.width, s.0.height, Backing::Standalone(s.0.texture))
         } else if let Some(b) = as_switch_bitmap(&handle) {
-            (b.width, b.height)
+            let base_x = (b.u0 * ATLAS_SIZE as f32).round() as u32;
+            let base_y = (b.v0 * ATLAS_SIZE as f32).round() as u32;
+            let Some(a) = self.atlases.get(b.atlas_index) else { return None };
+            (b.width, b.height, Backing::Atlas { tex: a.texture, base_x, base_y })
         } else {
             self.warn_once(b"render_offscreen: unknown handle\n\0");
             return None;
@@ -5358,62 +5563,86 @@ impl RenderBackend for SwitchRenderBackend {
         if tex_w == 0 || tex_h == 0 {
             return None;
         }
-        // Render the draw() commands into a FRESH temporary texture rather than
-        // the handle's own texture: atlas-backed handles can't be FBO targets,
-        // and we only need the result long enough to read it back into the
-        // BitmapData's CPU pixels. Ruffle marks the BitmapData `GpuModified`;
-        // the next CPU access (copyPixels/getPixel — exactly what the SMWF tile
-        // engine does after drawing its tileset) triggers `resolve_sync_handle`
-        // below, after which the CPU pixels are authoritative and the normal
-        // atlas-upload display path takes over.
-        //
-        // Limitations (acceptable for the tile-engine pattern, which always
-        // draws into a freshly-made BitmapData then reads it back):
-        //  - fresh-target semantics (clear transparent); we don't composite
-        //    draw() output onto the BitmapData's prior content.
-        //  - a draw() followed by direct on-stage display WITHOUT any CPU read
-        //    would show stale content, since the temp texture isn't the
-        //    handle's texture.
-        let temp = make_standalone_texture(tex_w, tex_h)?;
-        let transparent = Color { r: 0, g: 0, b: 0, a: 0 };
-        if !self.render_commands_to_texture(temp.texture, tex_w, tex_h, commands, transparent) {
-            return None;
-        }
-        // Repatriate the rendered result into the HANDLE's own texture, so a
-        // draw() followed by DIRECT on-stage display (a Bitmap / bitmap-fill
-        // with no copyPixels/getPixel — the AS3 pattern Pursuit of Hat 2 uses
-        // for its platforms/scenery) shows the content. Previously the result
-        // lived only in `temp` and reached the screen ONLY via a CPU readback
-        // triggered by copyPixels (the SMWF tile-engine path); direct-display
-        // games got a black BitmapData. `temp` is still handed to Ruffle as the
-        // SyncHandle below, so copyPixels/getPixel keep working unchanged.
-        let (rx, ry, rw, rh) = (bounds.x_min, bounds.y_min, bounds.width(), bounds.height());
-        if rw > 0 && rh > 0 {
-            if let Some(s) = as_standalone_bitmap(&handle) {
-                // Standalone textures store PREMULTIPLIED alpha (matches the
-                // premultiplied "over" blend `render_bitmap` uses for them), so
-                // a straight GPU copy is correct — no un-premultiply, no readback.
-                self.blit_identity(
-                    temp.texture, tex_w, tex_h, (rx, ry), (rw, rh),
-                    s.0.texture, (rx as i32, ry as i32), tex_w, tex_h,
-                );
-                self.warn_once(b"render_offscreen: repatriated draw() -> standalone handle\n\0");
-            } else if let Some(b) = as_switch_bitmap(&handle) {
-                // Atlas slots store STRAIGHT alpha — read back (un-premultiply)
-                // then upload into the slot's sub-rect.
-                let buf = self.readback_region_straight(temp.texture, rx, ry, rw, rh);
-                if let Some(atlas) = self.atlases.get(b.atlas_index) {
-                    let base_x = (b.u0 * ATLAS_SIZE as f32).round() as u32;
-                    let base_y = (b.v0 * ATLAS_SIZE as f32).round() as u32;
-                    atlas.upload_region(base_x + rx, base_y + ry, rw, rh, &buf);
+        // render_offscreen must COMPOSITE the draw() commands onto the
+        // BitmapData's existing content (Ruffle's wgpu backend uses
+        // `RenderTargetMode::FreshWithTexture`), not replace it. We render into a
+        // pooled temp (atlas slots can't be FBO targets) in three steps:
+        //   1. SEED temp with the BitmapData's current pixels (premultiplied).
+        //   2. COMPOSITE the new draw() commands on top (no colour clear).
+        //   3. WRITE the result back into the BitmapData's storage.
+        // Without the seed, a software-blitter game that accumulates many
+        // draw()s into one BitmapData per frame (catmario's `stageBitmapdata`:
+        // ~48 tile draws/frame) keeps only the last draw → invisible world.
+        // `temp` is also returned as the SyncHandle, so copyPixels/getPixel
+        // (SMWF's tile-engine readback) still resolve from the full result.
+        PRIM_OFF_N_CUR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        PRIM_OFF_PIX_CUR.fetch_add(
+            (tex_w as u64) * (tex_h as u64),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let temp = {
+            let _t = PrimTimer::new(&PRIM_OFF_ALLOC_CUR);
+            self.acquire_offscreen_temp(tex_w, tex_h)?
+        };
+        let temp_id = temp.texture;
+
+        // 1. Seed temp with the BitmapData's current content (premultiplied).
+        {
+            let _t = PrimTimer::new(&PRIM_OFF_READBACK_CUR);
+            match backing {
+                Backing::Standalone(s_tex) => {
+                    // Standalone already stores premultiplied — straight copy.
+                    self.blit_identity(
+                        s_tex, tex_w, tex_h, (0, 0), (tex_w, tex_h),
+                        temp_id, (0, 0), tex_w, tex_h,
+                    );
                 }
-                self.warn_once(b"render_offscreen: repatriated draw() -> atlas slot\n\0");
+                Backing::Atlas { tex, base_x, base_y } => {
+                    // Atlas stores STRAIGHT alpha — premultiply it into temp.
+                    self.blit_premult(
+                        tex, ATLAS_SIZE, ATLAS_SIZE, (base_x, base_y), (tex_w, tex_h),
+                        temp_id, (0, 0), tex_w, tex_h,
+                    );
+                }
             }
         }
+
+        // 2. Composite the new draw() commands on top (no colour clear).
+        let rendered = {
+            let _t = PrimTimer::new(&PRIM_OFF_RENDER_CUR);
+            self.render_commands_to_texture(temp_id, tex_w, tex_h, commands, None)
+        };
+        if !rendered {
+            self.offscreen_temp_retired.push(temp);
+            return None;
+        }
+
+        // 3. Write the composited result back into the BitmapData's storage.
+        {
+            let _t = PrimTimer::new(&PRIM_OFF_UPLOAD_CUR);
+            match backing {
+                Backing::Standalone(s_tex) => {
+                    self.blit_identity(
+                        temp_id, tex_w, tex_h, (0, 0), (tex_w, tex_h),
+                        s_tex, (0, 0), tex_w, tex_h,
+                    );
+                }
+                Backing::Atlas { tex, base_x, base_y } => {
+                    self.blit_unpremult(
+                        temp_id, tex_w, tex_h, (0, 0), (tex_w, tex_h),
+                        tex, (base_x as i32, base_y as i32), tex_w, tex_h,
+                    );
+                }
+            }
+        }
+        self.warn_once(b"render_offscreen: composite draw() -> handle\n\0");
+        // Retire temp for reuse next frame (submit_frame recycles it into the
+        // pool) instead of freeing it; the SyncHandle references it by raw id.
+        self.offscreen_temp_retired.push(temp);
         // Read back exactly `bounds`: the resolve closure indexes its buffer
         // relative to this region's origin with stride = bounds.width().
         Some(Box::new(BitmapDataSyncHandle {
-            texture: temp,
+            texture: temp_id,
             x: bounds.x_min,
             y: bounds.y_min,
             w: bounds.width(),
@@ -5516,6 +5745,33 @@ impl RenderBackend for SwitchRenderBackend {
             PRIM_RESOLVE_CUR.swap(0, std::sync::atomic::Ordering::Relaxed),
             std::sync::atomic::Ordering::Relaxed,
         );
+        // DIAG: render_offscreen sub-phase timers (see statics near top).
+        for (cur, last) in [
+            (&PRIM_OFF_ALLOC_CUR, &PRIM_OFF_ALLOC_LAST),
+            (&PRIM_OFF_RENDER_CUR, &PRIM_OFF_RENDER_LAST),
+            (&PRIM_OFF_READBACK_CUR, &PRIM_OFF_READBACK_LAST),
+            (&PRIM_OFF_UPLOAD_CUR, &PRIM_OFF_UPLOAD_LAST),
+            (&PRIM_OFF_N_CUR, &PRIM_OFF_N_LAST),
+            (&PRIM_OFF_PIX_CUR, &PRIM_OFF_PIX_LAST),
+        ] {
+            last.store(
+                cur.swap(0, std::sync::atomic::Ordering::Relaxed),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+
+        // Recycle this frame's render_offscreen temps into the reuse pool. Their
+        // SyncHandles were resolved/dropped during this frame's tick (Ruffle
+        // reads a BitmapData.draw() result back on the next CPU access, which
+        // happens in the same AS frame), so the textures are safe to reuse next
+        // frame. Cap the pool so churning BitmapData sizes can't grow it without
+        // bound (excess textures drop here → glDeleteTextures).
+        const OFFSCREEN_TEMP_POOL_CAP: usize = 128;
+        self.offscreen_temp_pool
+            .append(&mut self.offscreen_temp_retired);
+        if self.offscreen_temp_pool.len() > OFFSCREEN_TEMP_POOL_CAP {
+            self.offscreen_temp_pool.truncate(OFFSCREEN_TEMP_POOL_CAP);
+        }
         // Snapshot counters for the per-frame slow-frame breakdown (consumed
         // right after `commands.execute` below). `cache_entries` is moved by the
         // filter loop, so grab its length up front.
@@ -5572,7 +5828,7 @@ impl RenderBackend for SwitchRenderBackend {
             let h = standalone.0.height;
 
             // Step 1: render the content into entry.handle (ALWAYS — see above).
-            self.render_commands_to_texture(dst_tex, w, h, entry.commands, entry.clear);
+            self.render_commands_to_texture(dst_tex, w, h, entry.commands, Some(entry.clear));
             if entry.filters.is_empty() {
                 continue;
             }
@@ -5988,7 +6244,7 @@ impl RenderBackend for SwitchRenderBackend {
         if rw == 0 || rh == 0 {
             return Ok(());
         }
-        let buf = self.readback_region_straight(sh.texture.texture, sh.x, sh.y, rw, rh);
+        let buf = self.readback_region_straight(sh.texture, sh.x, sh.y, rw, rh);
         with_rgba(&buf, rw * 4);
         Ok(())
     }
@@ -6238,8 +6494,8 @@ impl CommandHandler for SwitchRenderBackend {
             }
         };
         let transparent = Color { r: 0, g: 0, b: 0, a: 0 };
-        let mk_ok = self.render_commands_to_texture(maskee.texture, w, h, maskee_commands, transparent);
-        let ms_ok = self.render_commands_to_texture(mask.texture, w, h, mask_commands, transparent);
+        let mk_ok = self.render_commands_to_texture(maskee.texture, w, h, maskee_commands, Some(transparent));
+        let ms_ok = self.render_commands_to_texture(mask.texture, w, h, mask_commands, Some(transparent));
         if mk_ok && ms_ok
             && self.composite_alpha_mask(maskee.texture, mask.texture, result.texture, w, h)
         {
@@ -6420,7 +6676,7 @@ impl CommandHandler for SwitchRenderBackend {
                     return;
                 };
                 let transparent = Color { r: 0, g: 0, b: 0, a: 0 };
-                if self.render_commands_to_texture(temp.texture, w, h, commands, transparent) {
+                if self.render_commands_to_texture(temp.texture, w, h, commands, Some(transparent)) {
                     self.blend_window = self.blend_window.saturating_add(1);
                     let m = mode;
                     self.draw_fullscreen_texture(temp.texture, w, h, move || unsafe {
@@ -6473,7 +6729,7 @@ impl CommandHandler for SwitchRenderBackend {
             glBindTexture(GL_TEXTURE_2D, 0);
         }
         let transparent = Color { r: 0, g: 0, b: 0, a: 0 };
-        if self.render_commands_to_texture(current.texture, w, h, commands, transparent) {
+        if self.render_commands_to_texture(current.texture, w, h, commands, Some(transparent)) {
             self.blend_window = self.blend_window.saturating_add(1);
             self.composite_complex_to_current(parent.texture, current.texture, w, h, complex_mode, flip);
         }
