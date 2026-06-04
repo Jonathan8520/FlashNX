@@ -21,6 +21,7 @@ mod loc;
 mod menu;
 mod net;
 mod player;
+mod sd;
 
 use core::ffi::{c_char, c_int};
 use std::sync::{Arc, Mutex};

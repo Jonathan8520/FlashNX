@@ -151,3 +151,37 @@ extern "C" uint32_t ruffle_cpu_clock_hz(void) {
 extern "C" int ruffle_is_docked(void) {
     return appletGetOperationMode() == AppletOperationMode_Console ? 1 : 0;
 }
+
+// 1 when running with the SMALL applet memory pool (~448-560 MB), 0 when we
+// have the full title-takeover application heap (~3.2 GB). Ruffle + our
+// backend need the full heap; in applet mode launching a SWF OOMs and falls
+// back to the embedded red screen. The library UI uses this to show a clear
+// "launch via title takeover" notice instead of that red screen. hbmenu's
+// album-takeover runs us as a LibraryApplet; a forwarder / title takeover
+// runs us as a (System)Application.
+extern "C" int ruffle_is_applet_mode(void) {
+    AppletType t = appletGetAppletType();
+    if (t == AppletType_Application || t == AppletType_SystemApplication) {
+        return 0;
+    }
+    return 1;
+}
+
+// Flush buffered `sdmc:` writes to the physical card. libnx's fsdev mount
+// buffers writes; data written via newlib (Rust `std::fs`) does NOT hit the
+// card until the device is committed or the process exits cleanly. Two
+// instances of FlashNX (library-applet album-takeover vs title-takeover
+// application) can otherwise observe divergent, uncommitted state — the
+// classic symptom being the URL history reading empty in one mode and then
+// getting overwritten. The Rust side calls this right after every write we
+// want durable (URL history, settings, saves, keymap/meta sidecars).
+// Returns 0 on success, -1 on failure (logged, never fatal).
+extern "C" int flashnx_commit_sd(void) {
+    Result rc = fsdevCommitDevice("sdmc");
+    if (R_FAILED(rc)) {
+        std::printf("flashnx_commit_sd: fsdevCommitDevice(sdmc) failed 0x%x\n", rc);
+        std::fflush(stdout);
+        return -1;
+    }
+    return 0;
+}

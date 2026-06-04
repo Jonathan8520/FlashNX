@@ -98,6 +98,9 @@ pub struct Strings {
     pub empty_footer: &'static str,
     // Library list
     pub list_footer: &'static str,
+    // Applet-mode notice (P1c) — shown when a game can't launch (small heap)
+    pub applet_title: &'static str,
+    pub applet_notice: &'static str,
     // OPTIONS modal (per-game)
     pub options_title: &'static str,
     pub opt_keys: &'static str,
@@ -147,7 +150,7 @@ pub struct Strings {
     // Error MESSAGES (word-wrapped in the error toast). `{}` placeholders
     // are substituted at runtime via str::replace.
     pub err_too_large: &'static str,
-    pub err_https: &'static str,         // {} = code
+    pub err_https: &'static str,         // {} = failure detail (curl/http)
     pub err_json: &'static str,          // {} = parser detail
     pub err_json_no_files: &'static str,
     pub err_dl_start: &'static str,      // {} = code
@@ -180,7 +183,9 @@ const EN: Strings = Strings {
     empty_l2: "SDMC:/FLASHNX/   OR   SDMC:/SWITCH/FLASHNX/",
     empty_l3: "THEN RESTART FLASHNX.",
     empty_footer: "Y:REMOTE IMPORT   -:QUIT",
-    list_footer: "A:PLAY  X:OPTIONS  Y:IMPORT  +:SETTINGS  -:QUIT",
+    list_footer: "A:PLAY  X:SEARCH  ZL:OPTIONS  Y:IMPORT  +:SETTINGS  -:QUIT",
+    applet_title: "APPLET MODE",
+    applet_notice: "LAUNCHING A GAME NEEDS THE FULL APP MEMORY, WHICH APPLET MODE DOES NOT HAVE. IN THE HOMEBREW MENU, HOLD R ON A TITLE (OR USE A FORWARDER) TO START FLASHNX WITH FULL MEMORY.",
     options_title: "OPTIONS",
     opt_keys: "CONTROLS",
     opt_rename: "RENAME",
@@ -201,7 +206,7 @@ const EN: Strings = Strings {
     dist_hint_zr: "ZR : LOAD THIS URL DIRECTLY",
     dist_hint_a: "A  : ENTER / EDIT URL (KEYBOARD)",
     dist_hint_lr: "L / R : PREVIOUS / NEXT URL",
-    dist_footer_hist: "ZR:OPEN  A:EDIT  X:DELETE  L/R:NAV  Y:LOCAL  -:QUIT",
+    dist_footer_hist: "ZR:OPEN  A:EDIT  ZL:DELETE  L/R:NAV  Y:LOCAL  -:QUIT",
     dist_footer_nohist: "A:ENTER URL   Y:BACK LOCAL   -:QUIT",
     files_title: "REMOTE FILES",
     files_filter: "FILTER",
@@ -220,7 +225,7 @@ const EN: Strings = Strings {
     histdel_title: "DELETE URL ?",
     histdel_msg: "Remove this URL from the history?",
     err_too_large: "Archive.org response too large (>4 MB). Item too big for this build.",
-    err_https: "HTTPS failed (code {}). Check WiFi + the URL.",
+    err_https: "HTTPS failed ({}). Check the clock, WiFi + the URL.",
     err_json: "Unreadable archive.org JSON: {}",
     err_json_no_files: "JSON has no \"files\" field",
     err_dl_start: "Could not start the download (code {}).",
@@ -229,7 +234,7 @@ const EN: Strings = Strings {
     err_url_invalid: "Invalid URL. Expected an archive.org URL like https://archive.org/details/<id> or simply <id>.",
     err_no_swf: "No .SWF file found in this archive.org item.",
     kbd_url_header: "FlashNX - Remote import",
-    kbd_url_guide: "archive.org item URL (e.g. https://archive.org/download/banned-from-equestria-daily-1.5)",
+    kbd_url_guide: "archive.org item URL (e.g. https://archive.org/download/your-game-id)",
     kbd_rename_header: "FlashNX - Rename game",
     kbd_rename_guide: "Display name (leave empty to revert to the file name)",
     kbd_search_header: "FlashNX - Search",
@@ -252,7 +257,9 @@ const FR: Strings = Strings {
     empty_l2: "SDMC:/FLASHNX/   OU   SDMC:/SWITCH/FLASHNX/",
     empty_l3: "PUIS RED\u{00C9}MARREZ FLASHNX.",
     empty_footer: "Y:IMPORT DISTANT   -:QUITTER",
-    list_footer: "A:JOUER  X:OPTIONS  Y:IMPORT  +:R\u{00C9}GLAGES  -:QUITTER",
+    list_footer: "A:JOUER  X:RECHERCHE  ZL:OPTIONS  Y:IMPORT  +:R\u{00C9}GLAGES  -:QUITTER",
+    applet_title: "MODE APPLET",
+    applet_notice: "LANCER UN JEU DEMANDE TOUTE LA M\u{00C9}MOIRE DE L'APP, INDISPONIBLE EN MODE APPLET. DANS LE HOMEBREW MENU, TIENS R SUR UN TITRE (OU UN FORWARDER) POUR D\u{00C9}MARRER FLASHNX AVEC TOUTE LA M\u{00C9}MOIRE.",
     options_title: "OPTIONS",
     opt_keys: "TOUCHES",
     opt_rename: "RENOMMER",
@@ -273,7 +280,7 @@ const FR: Strings = Strings {
     dist_hint_zr: "ZR : CHARGER CETTE URL DIRECTEMENT",
     dist_hint_a: "A  : SAISIR / \u{00C9}DITER URL (CLAVIER)",
     dist_hint_lr: "L / R : URL PR\u{00C9}C\u{00C9}DENTE / SUIVANTE",
-    dist_footer_hist: "ZR:OUVRIR  A:\u{00C9}DITER  X:SUPPR  L/R:NAV  Y:LOCAL  -:QUITTER",
+    dist_footer_hist: "ZR:OUVRIR  A:\u{00C9}DITER  ZL:SUPPR  L/R:NAV  Y:LOCAL  -:QUITTER",
     dist_footer_nohist: "A:SAISIR URL   Y:RETOUR LOCAL   -:QUITTER",
     files_title: "FICHIERS DISTANTS",
     files_filter: "FILTRE",
@@ -292,7 +299,7 @@ const FR: Strings = Strings {
     histdel_title: "SUPPRIMER URL ?",
     histdel_msg: "RETIRER CETTE URL DE L'HISTORIQUE ?",
     err_too_large: "R\u{00C9}PONSE ARCHIVE.ORG TROP VOLUMINEUSE (>4 MB). ITEM TROP MASSIF POUR CETTE VERSION.",
-    err_https: "\u{00C9}CHEC HTTPS (CODE {}). V\u{00C9}RIFIEZ LE WIFI + L'URL.",
+    err_https: "\u{00C9}CHEC HTTPS ({}). V\u{00C9}RIFIEZ L'HORLOGE, LE WIFI + L'URL.",
     err_json: "JSON ARCHIVE.ORG ILLISIBLE : {}",
     err_json_no_files: "JSON SANS CHAMP \"files\"",
     err_dl_start: "IMPOSSIBLE DE LANCER LE T\u{00C9}L\u{00C9}CHARGEMENT (CODE {}).",
@@ -301,7 +308,7 @@ const FR: Strings = Strings {
     err_url_invalid: "URL INVALIDE. ATTENDU UNE URL ARCHIVE.ORG TYPE https://archive.org/details/<id> OU SIMPLEMENT <id>.",
     err_no_swf: "AUCUN FICHIER .SWF TROUV\u{00C9} DANS CET ITEM ARCHIVE.ORG.",
     kbd_url_header: "FlashNX - Import distant",
-    kbd_url_guide: "URL archive.org de l'item (ex: https://archive.org/download/banned-from-equestria-daily-1.5)",
+    kbd_url_guide: "URL archive.org de l'item (ex: https://archive.org/download/your-game-id)",
     kbd_rename_header: "FlashNX - Renommer le jeu",
     kbd_rename_guide: "Nom d'affichage (laisser vide pour revenir au nom de fichier)",
     kbd_search_header: "FlashNX - Rechercher",
@@ -324,7 +331,9 @@ const ES: Strings = Strings {
     empty_l2: "SDMC:/FLASHNX/   O   SDMC:/SWITCH/FLASHNX/",
     empty_l3: "Y REINICIA FLASHNX.",
     empty_footer: "Y:IMPORTAR REMOTO   -:SALIR",
-    list_footer: "A:JUGAR  X:OPCIONES  Y:IMPORTAR  +:AJUSTES  -:SALIR",
+    list_footer: "A:JUGAR  X:BUSCAR  ZL:OPCIONES  Y:IMPORTAR  +:AJUSTES  -:SALIR",
+    applet_title: "MODO APPLET",
+    applet_notice: "EJECUTAR UN JUEGO NECESITA TODA LA MEMORIA DE LA APP, QUE EL MODO APPLET NO TIENE. EN EL HOMEBREW MENU, MANT\u{00C9}N R SOBRE UN T\u{00CD}TULO (O USA UN FORWARDER) PARA INICIAR FLASHNX CON TODA LA MEMORIA.",
     options_title: "OPCIONES",
     opt_keys: "CONTROLES",
     opt_rename: "RENOMBRAR",
@@ -345,7 +354,7 @@ const ES: Strings = Strings {
     dist_hint_zr: "ZR : CARGAR ESTA URL DIRECTAMENTE",
     dist_hint_a: "A  : INTRODUCIR / EDITAR URL (TECLADO)",
     dist_hint_lr: "L / R : URL ANTERIOR / SIGUIENTE",
-    dist_footer_hist: "ZR:ABRIR  A:EDITAR  X:BORRAR  L/R:NAV  Y:LOCAL  -:SALIR",
+    dist_footer_hist: "ZR:ABRIR  A:EDITAR  ZL:BORRAR  L/R:NAV  Y:LOCAL  -:SALIR",
     dist_footer_nohist: "A:INTRODUCIR URL   Y:VOLVER LOCAL   -:SALIR",
     files_title: "ARCHIVOS REMOTOS",
     files_filter: "FILTRO",
@@ -364,7 +373,7 @@ const ES: Strings = Strings {
     histdel_title: "\u{00BF}BORRAR URL ?",
     histdel_msg: "\u{00BF}QUITAR ESTA URL DEL HISTORIAL?",
     err_too_large: "RESPUESTA DE ARCHIVE.ORG DEMASIADO GRANDE (>4 MB). ITEM DEMASIADO GRANDE PARA ESTA VERSI\u{00D3}N.",
-    err_https: "FALLO HTTPS (C\u{00D3}DIGO {}). COMPRUEBA EL WIFI + LA URL.",
+    err_https: "FALLO HTTPS ({}). COMPRUEBA EL RELOJ, EL WIFI + LA URL.",
     err_json: "JSON DE ARCHIVE.ORG ILEGIBLE: {}",
     err_json_no_files: "JSON SIN CAMPO \"files\"",
     err_dl_start: "NO SE PUDO INICIAR LA DESCARGA (C\u{00D3}DIGO {}).",
@@ -373,7 +382,7 @@ const ES: Strings = Strings {
     err_url_invalid: "URL INV\u{00C1}LIDA. SE ESPERABA UNA URL DE ARCHIVE.ORG TIPO https://archive.org/details/<id> O SIMPLEMENTE <id>.",
     err_no_swf: "NO SE ENCONTR\u{00D3} NING\u{00DA}N ARCHIVO .SWF EN ESTE ITEM DE ARCHIVE.ORG.",
     kbd_url_header: "FlashNX - Importar remoto",
-    kbd_url_guide: "URL del item de archive.org (ej: https://archive.org/download/banned-from-equestria-daily-1.5)",
+    kbd_url_guide: "URL del item de archive.org (ej: https://archive.org/download/your-game-id)",
     kbd_rename_header: "FlashNX - Renombrar juego",
     kbd_rename_guide: "Nombre a mostrar (dejar vacio para volver al nombre de archivo)",
     kbd_search_header: "FlashNX - Buscar",
@@ -398,7 +407,9 @@ const RU: Strings = Strings {
     empty_l2: "SDMC:/FLASHNX/   ИЛИ   SDMC:/SWITCH/FLASHNX/",
     empty_l3: "ЗАТЕМ ПЕРЕЗАПУСТИТЕ FLASHNX.",
     empty_footer: "Y:ЗАГРУЗКА ПО СЕТИ   -:ВЫХОД",
-    list_footer: "A:ИГРАТЬ  X:ОПЦИИ  Y:ЗАГРУЗКА  +:НАСТРОЙКИ  -:ВЫХОД",
+    list_footer: "A:ИГРАТЬ  X:ПОИСК  ZL:ОПЦИИ  Y:ЗАГРУЗКА  +:НАСТРОЙКИ  -:ВЫХОД",
+    applet_title: "РЕЖИМ АППЛЕТА",
+    applet_notice: "ДЛЯ ЗАПУСКА ИГРЫ НУЖНА ВСЯ ПАМЯТЬ ПРИЛОЖЕНИЯ, КОТОРОЙ НЕТ В РЕЖИМЕ АППЛЕТА. В HOMEBREW MENU УДЕРЖИВАЙТЕ R НА ИГРЕ, ЧТОБЫ ЗАПУСТИТЬ FLASHNX СО ВСЕЙ ПАМЯТЬЮ.",
     options_title: "ОПЦИИ",
     opt_keys: "КЛАВИШИ",
     opt_rename: "ПЕРЕИМЕНОВАТЬ",
@@ -419,7 +430,7 @@ const RU: Strings = Strings {
     dist_hint_zr: "ZR : ЗАГРУЗИТЬ ЭТОТ URL НАПРЯМУЮ",
     dist_hint_a: "A  : ВВЕСТИ / ИЗМЕНИТЬ URL (КЛАВИАТУРА)",
     dist_hint_lr: "L / R : ПРЕДЫДУЩИЙ / СЛЕДУЮЩИЙ URL",
-    dist_footer_hist: "ZR:ОТКР  A:ИЗМ  X:УДАЛ  L/R:НАВ  Y:НАЗАД  -:ВЫХОД",
+    dist_footer_hist: "ZR:ОТКР  A:ИЗМ  ZL:УДАЛ  L/R:НАВ  Y:НАЗАД  -:ВЫХОД",
     dist_footer_nohist: "A:ВВЕСТИ URL   Y:НАЗАД   -:ВЫХОД",
     files_title: "ФАЙЛЫ ПО СЕТИ",
     files_filter: "ФИЛЬТР",
@@ -438,7 +449,7 @@ const RU: Strings = Strings {
     histdel_title: "УДАЛИТЬ URL ?",
     histdel_msg: "УБРАТЬ ЭТОТ URL ИЗ ИСТОРИИ?",
     err_too_large: "ОТВЕТ ARCHIVE.ORG СЛИШКОМ БОЛЬШОЙ (>4 МБ). ЭЛЕМЕНТ СЛИШКОМ ВЕЛИК ДЛЯ ЭТОЙ ВЕРСИИ.",
-    err_https: "ОШИБКА HTTPS (КОД {}). ПРОВЕРЬТЕ WIFI + URL.",
+    err_https: "ОШИБКА HTTPS ({}). ПРОВЕРЬТЕ ЧАСЫ, WIFI + URL.",
     err_json: "НЕЧИТАЕМЫЙ JSON ARCHIVE.ORG: {}",
     err_json_no_files: "В JSON НЕТ ПОЛЯ \"files\"",
     err_dl_start: "НЕ УДАЛОСЬ НАЧАТЬ ЗАГРУЗКУ (КОД {}).",
@@ -447,7 +458,7 @@ const RU: Strings = Strings {
     err_url_invalid: "НЕВЕРНЫЙ URL. ОЖИДАЛСЯ URL ARCHIVE.ORG ВИДА https://archive.org/details/<id> ИЛИ ПРОСТО <id>.",
     err_no_swf: "В ЭТОМ ЭЛЕМЕНТЕ ARCHIVE.ORG НЕ НАЙДЕНО ФАЙЛОВ .SWF.",
     kbd_url_header: "FlashNX - Zagruzka po seti",
-    kbd_url_guide: "URL elementa archive.org (naprimer: https://archive.org/download/banned-from-equestria-daily-1.5)",
+    kbd_url_guide: "URL elementa archive.org (naprimer: https://archive.org/download/your-game-id)",
     kbd_rename_header: "FlashNX - Pereimenovat",
     kbd_rename_guide: "Otobrazhaemoe imya (ostavte pustym chtoby vernut imya fayla)",
     kbd_search_header: "FlashNX - Poisk",
@@ -499,8 +510,8 @@ fn fill(template: &str, arg: &str) -> std::string::String {
     template.replacen("{}", arg, 1)
 }
 
-pub fn err_https(code: i32) -> std::string::String {
-    fill(s().err_https, &code.to_string())
+pub fn err_https(detail: &str) -> std::string::String {
+    fill(s().err_https, detail)
 }
 pub fn err_json(detail: &str) -> std::string::String {
     fill(s().err_json, detail)
@@ -565,7 +576,14 @@ pub fn save(lang: Lang) -> bool {
     let path = settings_write_path();
     let json = std::format!("{{\n    \"language\": \"{}\"\n}}\n", lang.code());
     match File::create(&path) {
-        Ok(mut f) => f.write_all(json.as_bytes()).is_ok(),
+        Ok(mut f) => {
+            let ok = f.write_all(json.as_bytes()).is_ok();
+            if ok {
+                // Flush so the choice survives a mode switch / abrupt exit.
+                crate::sd::commit();
+            }
+            ok
+        }
         Err(_) => false,
     }
 }

@@ -50,6 +50,11 @@ pub(crate) enum Screen {
     OptionsModal { game_idx: usize, selection: usize },
     /// User pressed A on a game; main loop reads `selected_path` and exits.
     Picked,
+    /// Applet mode: the user pressed A on a game but we have only the small
+    /// applet heap, so launching would OOM. Shows a "use title takeover"
+    /// notice (P1c) instead of the embedded red SWF. Carries the list row to
+    /// return to on dismiss.
+    AppletNotice { selection: usize, scroll_offset: usize },
     /// User pressed - or chose to quit; main loop exits the `.nro`.
     Quit,
     /// User pressed A on OPTIONS > TOUCHES — control delegated to
@@ -150,7 +155,9 @@ fn primary_user_path(suffix: &str) -> std::string::String {
 fn read_meta_sidecar(basename: &str) -> Option<MetaSidecar> {
     let suffix = std::format!("{}.meta.json", basename);
     let path = find_user_file(&suffix)?;
-    let txt = std::fs::read_to_string(&path).ok()?;
+    // Bounded read (not read_to_string) so display-name overrides survive
+    // applet mode too — see read_sd_text.
+    let txt = read_sd_text(&path, 64 * 1024).ok()?;
     serde_json::from_str(&txt).ok()
 }
 
@@ -167,13 +174,20 @@ fn write_meta_sidecar(basename: &str, display_name: &str) -> bool {
         if let Some(legacy) = find_user_file(&std::format!("{}.meta.json", basename)) {
             let _ = std::fs::remove_file(&legacy);
         }
+        crate::sd::commit();
         return true;
     }
     let meta = MetaSidecar {
         display_name: Some(display_name.to_string()),
     };
     match serde_json::to_string_pretty(&meta) {
-        Ok(json) => std::fs::write(&path, json.as_bytes()).is_ok(),
+        Ok(json) => {
+            let ok = std::fs::write(&path, json.as_bytes()).is_ok();
+            if ok {
+                crate::sd::commit();
+            }
+            ok
+        }
         Err(_) => false,
     }
 }
@@ -252,6 +266,22 @@ pub(crate) struct State {
     /// the Settings modal (Plus), so closing it returns to the same row
     /// instead of jumping to the top — mirrors the OPTIONS (X) modal.
     pub(crate) settings_return: (usize, usize),
+    /// True once `load_history_from_sd` has established a TRUSTWORTHY view of
+    /// the on-disk history: either a successful parse, or a confirmed-absent
+    /// file (legit empty first boot). False after a read/parse ERROR — in
+    /// that case we must NOT persist, or we'd overwrite URLs we merely failed
+    /// to read. Guards every `save_history_to_sd` call site.
+    history_loaded: bool,
+    /// True when FlashNX runs with the small applet memory pool (album
+    /// takeover) — games can't be launched (OOM). Set in `open()`. Drives the
+    /// `AppletNotice` screen shown instead of the embedded red SWF (P1c).
+    applet_mode: bool,
+    /// Active substring filter on the LOCAL list (X = open swkbd to set/edit;
+    /// empty input = clear). Mirrors `distant_filter`: lowercase, substring
+    /// match against the lowercased display name OR basename. `None` = show
+    /// all. While set, `Screen::List` selection/scroll index the FILTERED
+    /// view (see `local_filtered_indices`).
+    local_filter: Option<std::string::String>,
 }
 
 static LIBRARY: Mutex<State> = Mutex::new(State {
@@ -272,6 +302,9 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     distant_filter: None,
     download_resume_pos: None,
     settings_return: (0, 0),
+    history_loaded: false,
+    applet_mode: false,
+    local_filter: None,
 });
 
 /// Where the URL history persists across boots. Format: JSON array of
@@ -297,6 +330,9 @@ pub const DISTANT_VISIBLE_ROWS: usize = 10;
 extern "C" {
     fn ruffle_tick_now() -> u64;
     fn ruffle_log_cstr(msg: *const core::ffi::c_char);
+    /// 1 = small applet memory pool (can't launch games — see P1c notice),
+    /// 0 = full title-takeover heap. Defined in cpp/src/ruffle_bridge.cpp.
+    fn ruffle_is_applet_mode() -> core::ffi::c_int;
 }
 
 fn log(s: &str) {
@@ -361,7 +397,13 @@ pub fn open() {
     // If we're re-opening after quitting a game, land the cursor back on
     // that game's row instead of the top of the list.
     let want = last_played_basename();
+    let applet = unsafe { ruffle_is_applet_mode() } != 0;
+    log(&std::format!("library: open applet_mode={}\n", applet));
     if let Ok(mut s) = LIBRARY.lock() {
+        s.applet_mode = applet;
+        // Fresh open = no filter, so `want`'s absolute index below is a valid
+        // filtered-view position (view == full list).
+        s.local_filter = None;
         s.anim_origin_ticks = unsafe { ruffle_tick_now() };
         s.screen = if s.entries.is_empty() {
             Screen::Empty
@@ -376,15 +418,69 @@ pub fn open() {
     }
 }
 
+/// Read a small SD text file WITHOUT trusting `metadata().len()` for the
+/// initial buffer allocation. `std::fs::read_to_string` pre-reserves a buffer
+/// sized from fstat; in APPLET mode that size comes back bogus, so the reserve
+/// fails with `OutOfMemory` and the read errors out even though the file is
+/// <2 KB (this is exactly why the URL history showed empty in applet — P0).
+/// Reading in a bounded loop (like `loc.rs`'s settings reader, and like the
+/// SWF-header scan that works fine in applet) sidesteps the bad pre-reserve.
+/// `File::open` still yields `NotFound` for an absent file, so callers can
+/// keep distinguishing "absent" from a real read error.
+fn read_sd_text(path: &str, max: usize) -> std::io::Result<std::string::String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut data: std::vec::Vec<u8> = std::vec::Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        data.extend_from_slice(&buf[..n]);
+        if data.len() > max {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "file too large",
+            ));
+        }
+    }
+    std::string::String::from_utf8(data)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "not utf-8"))
+}
+
 fn load_history_from_sd() {
-    let txt = match std::fs::read_to_string(HISTORY_PATH) {
+    // 256 KB cap: history is max 20 URLs (<2 KB); the cap is just a safety net.
+    let txt = match read_sd_text(HISTORY_PATH, 256 * 1024) {
         Ok(s) => s,
-        Err(_) => return, // file absent on first ever boot, normal
+        Err(e) => {
+            // Distinguish "file absent" (legit empty first boot — safe to
+            // persist later) from a real read error (must NOT overwrite, or
+            // we'd clobber an existing history we just couldn't read).
+            if e.kind() == std::io::ErrorKind::NotFound {
+                log(&std::format!("library: history file ABSENT at {}\n", HISTORY_PATH));
+                if let Ok(mut s) = LIBRARY.lock() {
+                    s.url_history.clear();
+                    s.history_idx = None;
+                    s.history_loaded = true;
+                }
+            } else {
+                log(&std::format!("library: history read failed: {} (will NOT overwrite)\n", e));
+                if let Ok(mut s) = LIBRARY.lock() {
+                    s.history_loaded = false;
+                }
+            }
+            return;
+        }
     };
     let list: std::vec::Vec<std::string::String> = match serde_json::from_str(&txt) {
         Ok(v) => v,
         Err(e) => {
-            log(&std::format!("library: history JSON parse failed: {}\n", e));
+            // Corrupt/partial JSON: keep the file, refuse to persist over it.
+            log(&std::format!("library: history JSON parse failed: {} (will NOT overwrite)\n", e));
+            if let Ok(mut s) = LIBRARY.lock() {
+                s.history_loaded = false;
+            }
             return;
         }
     };
@@ -395,6 +491,11 @@ fn load_history_from_sd() {
         } else {
             s.history_idx = None;
         }
+        s.history_loaded = true;
+        log(&std::format!(
+            "library: history LOADED {} url(s) from {}\n",
+            s.url_history.len(), HISTORY_PATH,
+        ));
     }
 }
 
@@ -408,7 +509,14 @@ fn save_history_to_sd(history: &[std::string::String]) {
     };
     if let Err(e) = std::fs::write(HISTORY_PATH, json.as_bytes()) {
         log(&std::format!("library: history write failed: {}\n", e));
+        return;
     }
+    // Flush to the physical card so the applet/app modes agree (see sd.rs).
+    crate::sd::commit();
+    log(&std::format!(
+        "library: history SAVED {} url(s) + committed to {}\n",
+        history.len(), HISTORY_PATH,
+    ));
 }
 
 /// Push `url` onto the history. De-dups (if already present, moves to
@@ -428,8 +536,16 @@ fn push_history(url: &str) {
         }
         s.history_idx = Some(s.url_history.len() - 1);
         let snapshot = s.url_history.clone();
+        let loaded = s.history_loaded;
         drop(s);
-        save_history_to_sd(&snapshot);
+        // Only persist when we trust our view of the file. If the last load
+        // errored, keep the addition in memory but leave the SD file intact
+        // rather than overwrite a history we failed to read.
+        if loaded {
+            save_history_to_sd(&snapshot);
+        } else {
+            log("library: history not loaded cleanly — keeping new URL in memory only\n");
+        }
     }
 }
 
@@ -559,6 +675,13 @@ pub fn input(button: &str) -> bool {
             run_distant_search_flow();
             return true;
         }
+        // X on the LOCAL list = search (coherent with DISTANT). Hoisted for
+        // the same reason: swkbd is a synchronous fullscreen applet that must
+        // not run while we hold the LIBRARY lock.
+        if matches!(screen_snap, Screen::List { .. }) && button == "X" {
+            run_local_search_flow();
+            return true;
+        }
     }
     let mut s = match LIBRARY.lock() {
         Ok(g) => g,
@@ -577,6 +700,13 @@ pub fn input(button: &str) -> bool {
         }
         Screen::List { selection, scroll_offset } => {
             handle_list_input(&mut s, button, selection, scroll_offset);
+            true
+        }
+        Screen::AppletNotice { selection, scroll_offset } => {
+            // Any dismiss button returns to the same list row.
+            if matches!(button, "A" | "B" | "Minus") {
+                s.screen = Screen::List { selection, scroll_offset };
+            }
             true
         }
         Screen::OptionsModal { game_idx, selection } => {
@@ -706,18 +836,33 @@ fn handle_settings_language_input(s: &mut State, button: &str, mut selection: us
 }
 
 fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scroll: usize) {
-    let last = s.entries.len().saturating_sub(1);
+    // `selection` / `scroll` index the FILTERED view (== the full list when no
+    // filter is set). Map back to the absolute `entries` index via `filtered`
+    // for actions that touch a specific game (play / options).
+    let filtered = local_filtered_indices(&s.entries, &s.local_filter);
+    let total = filtered.len();
+    let last = total.saturating_sub(1);
     match button {
         "Up" | "StickLUp" => {
+            if total == 0 { return; }
             selection = if selection == 0 { last } else { selection - 1 };
             scroll = clamp_scroll(scroll, selection, LIST_VISIBLE_ROWS);
         }
         "Down" | "StickLDown" => {
+            if total == 0 { return; }
             selection = if selection >= last { 0 } else { selection + 1 };
             scroll = clamp_scroll(scroll, selection, LIST_VISIBLE_ROWS);
         }
         "A" => {
-            if let Some(entry) = s.entries.get(selection) {
+            let Some(&abs) = filtered.get(selection) else { return; };
+            if let Some(entry) = s.entries.get(abs) {
+                // Applet mode has too little RAM to launch a SWF (it would
+                // OOM into the embedded red screen). Show a clear notice
+                // instead of attempting the launch (P1c).
+                if s.applet_mode {
+                    s.screen = Screen::AppletNotice { selection, scroll_offset: scroll };
+                    return;
+                }
                 s.selected_path = Some(entry.path.clone());
                 // Remember it so quit-to-library lands back on this row and
                 // the pause menu can show the title.
@@ -730,9 +875,11 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
             }
             return;
         }
-        "X" => {
-            if !s.entries.is_empty() {
-                s.screen = Screen::OptionsModal { game_idx: selection, selection: 0 };
+        // X = search (hoisted at the top of `input()`). ZL = per-game OPTIONS
+        // (moved off X so search is the same button as the DISTANT list).
+        "ZL" => {
+            if let Some(&abs) = filtered.get(selection) {
+                s.screen = Screen::OptionsModal { game_idx: abs, selection: 0 };
             }
             return;
         }
@@ -782,14 +929,19 @@ fn handle_distant_idle_input(s: &mut State, button: &str) {
                 s.history_idx = Some(new_idx);
             }
         }
-        "X" => {
+        "ZL" => {
             // Delete the currently-shown history URL (with confirmation).
-            // No-op when the history is empty (nothing to delete).
+            // Moved off X (now reserved for search everywhere); ZL is the
+            // "manage selected item" button across the library. No-op when
+            // the history is empty (nothing to delete).
             if !s.url_history.is_empty() && s.history_idx.is_some() {
                 s.screen = Screen::DistantHistoryConfirm;
             }
         }
         "Y" | "B" => {
+            // Fresh local view — drop any leftover local filter so coming
+            // back from DISTANT never hides games unexpectedly.
+            s.local_filter = None;
             s.screen = if s.entries.is_empty() {
                 Screen::Empty
             } else {
@@ -817,9 +969,12 @@ fn delete_current_history(s: &mut State) {
         Some(idx.min(s.url_history.len() - 1))
     };
     // save_history_to_sd does not lock LIBRARY, so calling it while we hold
-    // the guard `s` is safe.
-    let snapshot = s.url_history.clone();
-    save_history_to_sd(&snapshot);
+    // the guard `s` is safe. Skip the write if the last load errored (same
+    // guard as push_history) — a delete should never clobber an unread file.
+    if s.history_loaded {
+        let snapshot = s.url_history.clone();
+        save_history_to_sd(&snapshot);
+    }
 }
 
 /// Drive the full "user typed a URL → fetch metadata → show files" flow.
@@ -982,6 +1137,42 @@ pub(crate) fn filtered_indices(
     }
 }
 
+/// Absolute indices into `entries` that match the active LOCAL filter.
+/// `None`/empty = all indices. Substring, case-insensitive, on the display
+/// name OR the basename. Mirror of `filtered_indices` for the local list.
+pub(crate) fn local_filtered_indices(
+    entries: &[Entry],
+    filter: &Option<std::string::String>,
+) -> std::vec::Vec<usize> {
+    let needle = filter
+        .as_deref()
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty());
+    match needle {
+        None => (0..entries.len()).collect(),
+        Some(q) => entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                e.display_name.to_lowercase().contains(&q)
+                    || e.basename.to_lowercase().contains(&q)
+            })
+            .map(|(i, _)| i)
+            .collect(),
+    }
+}
+
+/// Build a `Screen::List` positioned on the entry at ABSOLUTE index `abs`,
+/// translated into the current filtered view so sub-screens (OPTIONS, etc.)
+/// can return to the right row WITHOUT clearing the active filter. Falls back
+/// to row 0 if `abs` isn't in the filtered set.
+fn list_screen_for_abs(s: &State, abs: usize) -> Screen {
+    let filtered = local_filtered_indices(&s.entries, &s.local_filter);
+    let pos = filtered.iter().position(|&i| i == abs).unwrap_or(0);
+    let scroll = clamp_scroll(0, pos, LIST_VISIBLE_ROWS);
+    Screen::List { selection: pos, scroll_offset: scroll }
+}
+
 /// Set the DistantError state + message from anywhere (used after FFI
 /// returns where we don't already hold the lock).
 fn set_distant_error(msg: &str) {
@@ -1024,16 +1215,14 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                     return;
                 }
                 "RETOUR" => {
-                    let scroll = clamp_scroll(0, game_idx, LIST_VISIBLE_ROWS);
-                    s.screen = Screen::List { selection: game_idx, scroll_offset: scroll };
+                    s.screen = list_screen_for_abs(s, game_idx);
                     return;
                 }
                 _ => {}
             }
         }
         "B" | "Minus" => {
-            let scroll = clamp_scroll(0, game_idx, LIST_VISIBLE_ROWS);
-            s.screen = Screen::List { selection: game_idx, scroll_offset: scroll };
+            s.screen = list_screen_for_abs(s, game_idx);
             return;
         }
         _ => {}
@@ -1087,6 +1276,9 @@ fn handle_delete_confirm_input(s: &mut State, button: &str, game_idx: usize) {
                 s.screen = Screen::Empty;
                 return;
             }
+            // Deletion shifts absolute indices and the filtered set; drop the
+            // filter so `new_sel` (an absolute index) is a valid full-view row.
+            s.local_filter = None;
             let new_sel = game_idx.min(s.entries.len() - 1);
             let scroll = clamp_scroll(0, new_sel, LIST_VISIBLE_ROWS);
             s.screen = Screen::List { selection: new_sel, scroll_offset: scroll };
@@ -1144,6 +1336,27 @@ fn run_distant_search_flow() {
     }
 }
 
+/// LOCAL list search (X) — same behaviour as the DISTANT filter: opens swkbd
+/// (pre-filled with the current filter so it can be refined), then narrows the
+/// list to entries whose display name or basename contains the text. Empty
+/// input clears the filter. Selection resets to the top of the filtered view.
+/// Called from `input()` only (swkbd must not run while we hold the lock).
+fn run_local_search_flow() {
+    let current = LIBRARY
+        .lock()
+        .ok()
+        .and_then(|s| s.local_filter.clone())
+        .unwrap_or_default();
+    let Some(typed) = net::prompt_search(&current) else {
+        return; // cancelled
+    };
+    let trimmed = typed.trim().to_string();
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.local_filter = if trimmed.is_empty() { None } else { Some(trimmed) };
+        s.screen = Screen::List { selection: 0, scroll_offset: 0 };
+    }
+}
+
 fn clamp_scroll(mut scroll: usize, selection: usize, visible_rows: usize) -> usize {
     if selection < scroll {
         scroll = selection;
@@ -1170,21 +1383,32 @@ pub fn render(backend: &mut SwitchRenderBackend) {
     // current screen has no animation.
     match screen {
         Screen::Inactive | Screen::Picked | Screen::Quit => {}
+        Screen::AppletNotice { .. } => {
+            backend.draw_library_applet_notice(crate::loc::s().applet_notice);
+        }
         Screen::Empty => {
             backend.draw_library_empty();
         }
         Screen::List { selection, scroll_offset } => {
-            // Snapshot entries + banner state so we don't hold the lock
-            // across the GL FFI calls in draw_library_list.
+            // Snapshot the FILTERED entries + banner state so we don't hold
+            // the lock across the GL FFI calls in draw_library_list. selection
+            // / scroll_offset already index the filtered view.
             let snapshot = LIBRARY.lock().ok().map(|s| {
-                LibraryListSnapshot {
-                    entries: s.entries.clone(),
-                    banner_tex: s.banner_tex,
-                    banner_w: s.banner_w,
-                    banner_h: s.banner_h,
-                }
+                let idx = local_filtered_indices(&s.entries, &s.local_filter);
+                let entries: std::vec::Vec<Entry> =
+                    idx.iter().map(|&i| s.entries[i].clone()).collect();
+                (
+                    LibraryListSnapshot {
+                        entries,
+                        banner_tex: s.banner_tex,
+                        banner_w: s.banner_w,
+                        banner_h: s.banner_h,
+                    },
+                    s.local_filter.clone(),
+                    s.entries.len(),
+                )
             });
-            if let Some(snap) = snapshot {
+            if let Some((snap, filter, total_unfiltered)) = snapshot {
                 let now = unsafe { ruffle_tick_now() };
                 let phase_ticks = now.saturating_sub(anim_origin);
                 backend.draw_library_list(
@@ -1196,6 +1420,8 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     snap.banner_w,
                     snap.banner_h,
                     phase_ticks,
+                    filter.as_deref(),
+                    total_unfiltered,
                 );
             }
         }

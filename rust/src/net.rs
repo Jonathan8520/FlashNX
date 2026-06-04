@@ -14,6 +14,9 @@ use core::ffi::{c_char, c_int};
 extern "C" {
     fn write_cacert_to_sd(data: *const c_char, len: c_int) -> c_int;
     fn https_get_into_buf(url: *const c_char, buf: *mut c_char, cap: c_int) -> c_int;
+    // Fills `out` with a short description of the last transfer failure
+    // ("curl 60 (...) http 0"). Read after a negative `https_get_into_buf`.
+    fn https_last_error_desc(out: *mut c_char, cap: c_int);
     fn https_download_start(url: *const c_char, out_path: *const c_char) -> c_int;
     fn https_download_tick() -> c_int;
     fn https_download_progress(done_out: *mut u64, total_out: *mut u64);
@@ -53,9 +56,26 @@ pub fn boot_init() {
     let rc = unsafe {
         write_cacert_to_sd(CACERT_PEM.as_ptr() as *const c_char, len as c_int)
     };
-    if rc != 0 {
-        log(&std::format!("net: write_cacert_to_sd rc={} (CA verify may fail)\n", rc));
-    }
+    // Log presence + size at every boot. A missing/short cacert.pem makes
+    // EVERY HTTPS call fail (curl 77/60); when a user reports the import
+    // error this line tells us immediately whether the bundle is in place.
+    log(&std::format!(
+        "net: cacert.pem {} bytes, write_cacert_to_sd rc={}{}\n",
+        len, rc,
+        if rc != 0 { " (CA verify may fail)" } else { "" },
+    ));
+}
+
+/// Short description of the last libcurl failure recorded by the C++ layer,
+/// e.g. `"curl 60 (SSL peer certificate or SSH remote key was not OK) http 0"`.
+/// Used to turn the opaque `-2` import error into something a user (with no
+/// nxlink) can actually act on.
+fn last_https_error() -> std::string::String {
+    let mut buf = std::vec![0u8; 192];
+    unsafe { https_last_error_desc(buf.as_mut_ptr() as *mut c_char, buf.len() as c_int) };
+    let nul = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    buf.truncate(nul);
+    std::string::String::from_utf8_lossy(&buf).into_owned()
 }
 
 // ── archive.org metadata ───────────────────────────────────────────────
@@ -119,7 +139,15 @@ pub fn fetch_archive_metadata(
         return Err(std::string::String::from(crate::loc::s().err_too_large));
     }
     if n < 0 {
-        return Err(crate::loc::err_https(n));
+        // -2 = transfer failed (curl/HTTP) — surface the REAL cause instead
+        // of an opaque code. Other negatives (-1 init failure) carry no curl
+        // result, so just show the raw code.
+        let detail = if n == -2 {
+            last_https_error()
+        } else {
+            std::format!("rc {}", n)
+        };
+        return Err(crate::loc::err_https(&detail));
     }
     buf.truncate(n as usize);
     let json: serde_json::Value = serde_json::from_slice(&buf).map_err(|e| {

@@ -126,6 +126,9 @@ extern "C" int write_cacert_to_sd(const char* data, int len) {
     ::mkdir("sdmc:/switch/FlashNX", 0755);
     struct stat st;
     if (::stat(CACERT_PATH, &st) == 0 && (int)st.st_size == len) {
+        std::printf("write_cacert_to_sd: present, %d bytes at %s (skip)\n",
+                    (int)st.st_size, CACERT_PATH);
+        std::fflush(stdout);
         return 0;
     }
     FILE* f = std::fopen(CACERT_PATH, "wb");
@@ -171,6 +174,10 @@ extern "C" int https_get_into_buf(const char* url, char* buf, int cap) {
         return -3;
     }
     if (res != CURLE_OK || http_code < 200 || http_code >= 400) {
+        // Record the real cause so the Rust layer can SHOW it on screen
+        // (the user has no nxlink). Otherwise "-2" is all they ever see.
+        g_last_curl_result = (int)res;
+        g_last_http_code = http_code;
         std::printf("https_get %s: curl=%d (%s) http=%ld\n",
                     url, (int)res, curl_easy_strerror(res), http_code);
         std::fflush(stdout);
@@ -178,6 +185,20 @@ extern "C" int https_get_into_buf(const char* url, char* buf, int cap) {
     }
     buf[w.pos] = '\0';
     return w.pos;
+}
+
+// Short human description of the most recent transfer failure recorded by
+// `https_get_into_buf` (or `https_download_tick`). Rust calls this after a
+// negative return to compose the on-screen error, e.g.
+//   "curl 60 (SSL peer certificate or SSH remote key was not OK) http 0"
+// curl 60/77 -> certificate/cacert problem; curl 6 -> DNS; curl 7/28 ->
+// connect/timeout; http 403/429 -> blocked/rate-limited.
+extern "C" void https_last_error_desc(char* out, int cap) {
+    if (!out || cap < 1) return;
+    std::snprintf(out, (size_t)cap, "curl %d (%s) http %ld",
+                  g_last_curl_result,
+                  curl_easy_strerror((CURLcode)g_last_curl_result),
+                  g_last_http_code);
 }
 
 // Begin an async download. Sets up a curl multi handle so `_tick` can be

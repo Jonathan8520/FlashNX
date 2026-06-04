@@ -203,6 +203,7 @@ fn write_default_to_sd(path: &str, keymap: &Keymap) {
                     path, e,
                 ));
             } else {
+                crate::sd::commit();
                 log(&std::format!(
                     "keymap: wrote default to {} ({} bytes) — user can now edit it\n",
                     path,
@@ -375,6 +376,7 @@ pub fn save_sidecar() -> bool {
     match File::create(&path) {
         Ok(mut f) => match f.write_all(json.as_bytes()) {
             Ok(_) => {
+                crate::sd::commit();
                 log(std::format!(
                     "keymap: saved sidecar {} ({} bytes)\n",
                     path,

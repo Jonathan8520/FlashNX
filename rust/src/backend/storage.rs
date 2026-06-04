@@ -174,6 +174,9 @@ impl StorageBackend for SwitchStorageBackend {
         match File::create(&path) {
             Ok(mut f) => match f.write_all(value) {
                 Ok(()) => {
+                    // Flush so the save survives a mode switch / abrupt exit
+                    // (libnx fsdev buffers writes — see crate::sd).
+                    crate::sd::commit();
                     tracing::info!(
                         "storage.put({}) OK path={} {}B",
                         name,
@@ -207,5 +210,8 @@ impl StorageBackend for SwitchStorageBackend {
                 let _ = fs::remove_file(&legacy);
             }
         }
+        // Make the deletion durable too, so a removed save doesn't reappear
+        // after a mode switch with the uncommitted file still on the card.
+        crate::sd::commit();
     }
 }

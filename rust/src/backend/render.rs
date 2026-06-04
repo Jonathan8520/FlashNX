@@ -4410,6 +4410,8 @@ impl SwitchRenderBackend {
         banner_w: u32,
         banner_h: u32,
         phase_ticks: u64,
+        filter: Option<&str>,
+        total_unfiltered: usize,
     ) {
         self.library_clear();
         let vw = self.dimensions.width as f32;
@@ -4456,6 +4458,27 @@ impl SwitchRenderBackend {
                 title,
                 swf::Color::from_rgb(0xFFD740, 255),
             );
+        }
+
+        // Active-filter indicator (mirrors the DISTANT files sub-line):
+        // "3 / 18 - FILTRE: mario". Only shown while a filter is set; an
+        // empty filtered list just shows "0 / N" + no rows below.
+        if let Some(f) = filter {
+            if !f.is_empty() {
+                let sub = std::format!(
+                    "{} / {} - {}: {}",
+                    entries.len(), total_unfiltered, crate::loc::s().files_filter, f,
+                );
+                let scale_s = 2.0;
+                let sw = self.measure_text(&sub, scale_s);
+                self.draw_text(
+                    (vw - sw) * 0.5,
+                    178.0,
+                    scale_s,
+                    &sub,
+                    swf::Color::from_rgb(0xAABFD8, 255),
+                );
+            }
         }
 
         // ── Game list ───────────────────────────────────────────────────
@@ -5291,11 +5314,23 @@ impl SwitchRenderBackend {
 
     /// Error toast for DISTANT mode (URL parse / metadata fetch / DL fail).
     pub fn draw_library_distant_error(&mut self, msg: &str) {
+        self.draw_centered_notice(crate::loc::s().err_title, 0xFF5040, msg);
+    }
+
+    /// Applet-mode notice (P1c): same centered layout as the error toast, but
+    /// an amber "info" title instead of red — games can't launch in applet
+    /// mode, this is guidance rather than a failure.
+    pub fn draw_library_applet_notice(&mut self, msg: &str) {
+        self.draw_centered_notice(crate::loc::s().applet_title, 0xFFB740, msg);
+    }
+
+    /// Shared full-screen centered notice: big title (in `title_rgb`), a
+    /// word-wrapped body, and the generic dismiss footer.
+    fn draw_centered_notice(&mut self, title: &str, title_rgb: u32, msg: &str) {
         self.library_clear();
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
 
-        let title = crate::loc::s().err_title;
         let scale_t = 5.0;
         let tw = self.measure_text(title, scale_t);
         self.draw_text(
@@ -5310,7 +5345,7 @@ impl SwitchRenderBackend {
             vh * 0.22,
             scale_t,
             title,
-            swf::Color::from_rgb(0xFF5040, 255),
+            swf::Color::from_rgb(title_rgb, 255),
         );
 
         // Word-wrap the message into ~70-char lines (rough heuristic at
