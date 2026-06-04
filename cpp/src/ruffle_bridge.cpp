@@ -21,6 +21,31 @@ extern "C" void ruffle_log_cstr(const char* msg) {
     }
 }
 
+// Map the console's system language to FlashNX's locale index:
+//   0 = English, 1 = French, 2 = Spanish, 3 = Russian, -1 = unsupported.
+// Called once from loc::init() when no settings.json language is stored.
+extern "C" int ruffle_detect_system_lang(void) {
+    if (R_FAILED(setInitialize())) return -1;
+    u64 lcode = 0;
+    SetLanguage lang = SetLanguage_ENUS;
+    int idx = -1;
+    if (R_SUCCEEDED(setGetSystemLanguage(&lcode)) &&
+        R_SUCCEEDED(setMakeLanguage(lcode, &lang))) {
+        switch (lang) {
+            case SetLanguage_ENUS:
+            case SetLanguage_ENGB:  idx = 0; break;
+            case SetLanguage_FR:
+            case SetLanguage_FRCA:  idx = 1; break;
+            case SetLanguage_ES:
+            case SetLanguage_ES419: idx = 2; break;
+            case SetLanguage_RU:    idx = 3; break;
+            default:                idx = -1; break;
+        }
+    }
+    setExit();
+    return idx;
+}
+
 // Called from the Rust panic hook. Mirrors the panic message to a file on
 // the SD card AND to nxlink stdout, then blocks briefly so the kernel's TCP
 // buffer for the nxlink socket has time to drain before Rust's `panic = abort`

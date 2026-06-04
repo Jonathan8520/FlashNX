@@ -17,6 +17,7 @@ mod backend;
 mod ffi;
 mod keymap;
 mod library;
+mod loc;
 mod menu;
 mod net;
 mod player;
@@ -706,6 +707,9 @@ static LIBRARY_RENDERER: Mutex<Option<SwitchRenderBackend>> = Mutex::new(None);
 
 #[no_mangle]
 pub extern "C" fn ruffle_library_init() -> c_int {
+    // Pick the UI language (settings.json → system language → English)
+    // before anything draws.
+    loc::init();
     let mut renderer = match SwitchRenderBackend::new(VIEWPORT_W, VIEWPORT_H) {
         Some(r) => r,
         None => {

@@ -110,6 +110,67 @@ static GLYPHS: &[(char, Glyph)] = &[
     (':', ["     ", "  #  ", "  #  ", "     ", "  #  ", "  #  ", "     "]),
     ('.', ["     ", "     ", "     ", "     ", "     ", " ##  ", " ##  "]),
     ('/', ["    #", "    #", "   # ", "  #  ", " #   ", "#    ", "#    "]),
+    // Punctuation (previously missing — rendered blank, e.g. "SUPPRIMER ?").
+    (',', ["     ", "     ", "     ", "     ", "  ## ", "  #  ", " #   "]),
+    ('\'', ["  #  ", "  #  ", " #   ", "     ", "     ", "     ", "     "]),
+    ('?', [" ### ", "#   #", "    #", "   # ", "  #  ", "     ", "  #  "]),
+    ('!', ["  #  ", "  #  ", "  #  ", "  #  ", "  #  ", "     ", "  #  "]),
+    ('(', ["   # ", "  #  ", " #   ", " #   ", " #   ", "  #  ", "   # "]),
+    (')', [" #   ", "  #  ", "   # ", "   # ", "   # ", "  #  ", " #   "]),
+    ('[', [" ### ", " #   ", " #   ", " #   ", " #   ", " #   ", " ### "]),
+    (']', [" ### ", "   # ", "   # ", "   # ", "   # ", "   # ", " ### "]),
+    ('<', ["   # ", "  #  ", " #   ", "#    ", " #   ", "  #  ", "   # "]),
+    ('+', ["     ", "  #  ", "  #  ", "#####", "  #  ", "  #  ", "     "]),
+    ('%', ["##  #", "##  #", "   # ", "  #  ", " #   ", "#  ##", "#  ##"]),
+    ('\u{2026}', ["     ", "     ", "     ", "     ", "     ", "     ", "# # #"]), // …
+    // Accented uppercase Latin (French + Spanish). The letter body is
+    // compressed to 6 rows so the diacritic fits on row 0.
+    ('\u{00C9}', ["  ## ", "     ", "#####", "#    ", "#### ", "#    ", "#####"]), // É
+    ('\u{00C8}', [" ##  ", "     ", "#####", "#    ", "#### ", "#    ", "#####"]), // È
+    ('\u{00CA}', [" # # ", "     ", "#####", "#    ", "#### ", "#    ", "#####"]), // Ê
+    ('\u{00C0}', [" ##  ", "     ", " ### ", "#   #", "#####", "#   #", "#   #"]), // À
+    ('\u{00C1}', ["  ## ", "     ", " ### ", "#   #", "#####", "#   #", "#   #"]), // Á
+    ('\u{00CD}', ["  ## ", "     ", " ### ", "  #  ", "  #  ", "  #  ", " ### "]), // Í
+    ('\u{00D3}', ["  ## ", "     ", " ### ", "#   #", "#   #", "#   #", " ### "]), // Ó
+    ('\u{00DA}', ["  ## ", "     ", "#   #", "#   #", "#   #", "#   #", " ### "]), // Ú
+    ('\u{00D1}', [" ### ", "     ", "#   #", "##  #", "# # #", "#  ##", "#   #"]), // Ñ
+    ('\u{00C7}', [" ####", "#    ", "#    ", "#    ", "#    ", " ####", "  #  "]), // Ç (cedilla below)
+    ('\u{00BF}', ["  #  ", "     ", "  #  ", " #   ", "#    ", "#   #", " ### "]), // ¿
+    ('\u{00A1}', ["  #  ", "     ", "  #  ", "  #  ", "  #  ", "  #  ", "  #  "]), // ¡
+    // Cyrillic uppercase (Russian locale). draw_text does not case-fold
+    // non-ASCII, so RU strings are written uppercase to hit these directly.
+    ('\u{0410}', [" ### ", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"]), // А
+    ('\u{0411}', ["#####", "#    ", "#    ", "#### ", "#   #", "#   #", "#### "]), // Б
+    ('\u{0412}', ["#### ", "#   #", "#   #", "#### ", "#   #", "#   #", "#### "]), // В
+    ('\u{0413}', ["#####", "#    ", "#    ", "#    ", "#    ", "#    ", "#    "]), // Г
+    ('\u{0414}', [" ####", " #  #", " #  #", " #  #", " #  #", "#####", "#   #"]), // Д
+    ('\u{0415}', ["#####", "#    ", "#    ", "#### ", "#    ", "#    ", "#####"]), // Е
+    ('\u{0416}', ["# # #", "# # #", " ### ", "  #  ", " ### ", "# # #", "# # #"]), // Ж
+    ('\u{0417}', [" ### ", "#   #", "    #", "  ## ", "    #", "#   #", " ### "]), // З
+    ('\u{0418}', ["#   #", "#  ##", "# # #", "##  #", "#   #", "#   #", "#   #"]), // И
+    ('\u{0419}', [" ### ", "#   #", "#  ##", "# # #", "##  #", "#   #", "#   #"]), // Й
+    ('\u{041A}', ["#   #", "#  # ", "# #  ", "##   ", "# #  ", "#  # ", "#   #"]), // К
+    ('\u{041B}', ["  ###", "  # #", "  # #", "  # #", " ## #", " #  #", "#   #"]), // Л
+    ('\u{041C}', ["#   #", "## ##", "# # #", "#   #", "#   #", "#   #", "#   #"]), // М
+    ('\u{041D}', ["#   #", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"]), // Н
+    ('\u{041E}', [" ### ", "#   #", "#   #", "#   #", "#   #", "#   #", " ### "]), // О
+    ('\u{041F}', ["#####", "#   #", "#   #", "#   #", "#   #", "#   #", "#   #"]), // П
+    ('\u{0420}', ["#### ", "#   #", "#   #", "#### ", "#    ", "#    ", "#    "]), // Р
+    ('\u{0421}', [" ####", "#    ", "#    ", "#    ", "#    ", "#    ", " ####"]), // С
+    ('\u{0422}', ["#####", "  #  ", "  #  ", "  #  ", "  #  ", "  #  ", "  #  "]), // Т
+    ('\u{0423}', ["#   #", "#   #", " ####", "    #", "    #", "   # ", " ##  "]), // У
+    ('\u{0424}', ["  #  ", " ### ", "# # #", "# # #", "# # #", " ### ", "  #  "]), // Ф
+    ('\u{0425}', ["#   #", "#   #", " # # ", "  #  ", " # # ", "#   #", "#   #"]), // Х
+    ('\u{0426}', ["#   #", "#   #", "#   #", "#   #", "#   #", "#####", "    #"]), // Ц
+    ('\u{0427}', ["#   #", "#   #", "#   #", " ####", "    #", "    #", "    #"]), // Ч
+    ('\u{0428}', ["# # #", "# # #", "# # #", "# # #", "# # #", "# # #", "#####"]), // Ш
+    ('\u{0429}', ["# # #", "# # #", "# # #", "# # #", "# # #", "#####", "    #"]), // Щ
+    ('\u{042A}', ["##   ", " #   ", " #   ", " ### ", " #  #", " #  #", " ### "]), // Ъ
+    ('\u{042B}', ["#   #", "#   #", "#   #", "##  #", "# # #", "# # #", "## ##"]), // Ы
+    ('\u{042C}', ["#    ", "#    ", "#    ", "#### ", "#   #", "#   #", "#### "]), // Ь
+    ('\u{042D}', [" ### ", "#   #", "    #", "  ###", "    #", "#   #", " ### "]), // Э
+    ('\u{042E}', ["#  # ", "# # #", "# # #", "# # #", "# # #", "# # #", "#  # "]), // Ю
+    ('\u{042F}', [" ####", "#   #", "#   #", " ####", "  # #", " #  #", "#   #"]), // Я
 ];
 
 /// Count of `GpuDraw`s currently alive (created minus dropped). Used to
@@ -3839,7 +3900,7 @@ impl SwitchRenderBackend {
 
         // Title.
         const TITLE_SCALE: f32 = 5.0;
-        let title = "PAUSE";
+        let title = crate::loc::s().pause_title;
         let title_w = self.measure_text(title, TITLE_SCALE);
         let title_x = panel_x + (PANEL_W - title_w) * 0.5;
         let title_y = panel_y + 30.0;
@@ -3851,6 +3912,27 @@ impl SwitchRenderBackend {
             swf::Color::from_rgb(0xFFFFFF, 255),
         );
 
+        // Game name under the title (mirrors the OPTIONS modal's sub-title).
+        if let Some(name) = crate::library::active_display_name() {
+            const SUB_SCALE: f32 = 2.0;
+            let max_chars = 30usize;
+            let sub = if name.chars().count() > max_chars {
+                let mut t: std::string::String = name.chars().take(max_chars - 1).collect();
+                t.push('\u{2026}');
+                t
+            } else {
+                name
+            };
+            let sub_w = self.measure_text(&sub, SUB_SCALE);
+            self.draw_text(
+                panel_x + (PANEL_W - sub_w) * 0.5,
+                panel_y + 80.0,
+                SUB_SCALE,
+                &sub,
+                swf::Color::from_rgb(0xAABFD8, 255),
+            );
+        }
+
         // Menu items.
         const ITEM_SCALE: f32 = 3.0;
         const ITEM_SPACING: f32 = 50.0;
@@ -3858,14 +3940,19 @@ impl SwitchRenderBackend {
         let item_color_selected = swf::Color::from_rgb(0xFFD740, 255); // amber
         let item_color_normal = swf::Color::from_rgb(0xCCCCCC, 255);
         // Pre-measure the longest item so all rows share a left margin.
-        let longest = MENU_ITEMS
+        let lc = crate::loc::s();
+        // Localized labels, same order/count as the MENU_ITEMS contract C++
+        // relies on for pause-menu navigation.
+        let items = [lc.menu_resume, lc.menu_keys, lc.menu_restart, lc.menu_quit];
+        debug_assert_eq!(items.len(), MENU_ITEMS.len());
+        let longest = items
             .iter()
             .map(|s| s.chars().count())
             .max()
             .unwrap_or(0) as f32;
         let block_w = (longest + 2.0) * 6.0 * ITEM_SCALE; // 2 chars left padding for ">  "
         let items_x = panel_x + (PANEL_W - block_w) * 0.5;
-        for (i, item) in MENU_ITEMS.iter().enumerate() {
+        for (i, item) in items.iter().enumerate() {
             let y = items_y + i as f32 * ITEM_SPACING;
             let color = if i == selected {
                 item_color_selected
@@ -3882,7 +3969,7 @@ impl SwitchRenderBackend {
 
         // Footer help line.
         const HELP_SCALE: f32 = 2.0;
-        let help = "A:OK   B:ANNULER   HAUT/BAS:NAV";
+        let help = crate::loc::s().pause_footer;
         let help_w = self.measure_text(help, HELP_SCALE);
         let help_x = panel_x + (PANEL_W - help_w) * 0.5;
         let help_y = panel_y + PANEL_H - 40.0;
@@ -3947,7 +4034,7 @@ impl SwitchRenderBackend {
 
         // Title.
         const TITLE_SCALE: f32 = 4.0;
-        let title = "TOUCHES";
+        let title = crate::loc::s().keys_title;
         let title_w = self.measure_text(title, TITLE_SCALE);
         self.draw_text(
             panel_x + (PANEL_W - title_w) * 0.5,
@@ -3982,7 +4069,7 @@ impl SwitchRenderBackend {
             self.draw_text(rows_left_x, y, ROW_SCALE, btn, color);
             let value_str = binding
                 .as_deref()
-                .unwrap_or("(aucune)");
+                .unwrap_or(crate::loc::s().none);
             // Brackets around the value to suggest "editable field".
             let bracketed = std::format!("[ {} ]", value_str);
             self.draw_text(value_col_x, y, ROW_SCALE, &bracketed, color);
@@ -4015,7 +4102,7 @@ impl SwitchRenderBackend {
 
         // Footer.
         const HELP_SCALE: f32 = 2.0;
-        let help = "A:EDITER   B:RETOUR   HAUT/BAS:NAV";
+        let help = crate::loc::s().keys_footer;
         let help_w = self.measure_text(help, HELP_SCALE);
         self.draw_text(
             panel_x + (PANEL_W - help_w) * 0.5,
@@ -4112,7 +4199,11 @@ impl SwitchRenderBackend {
             if is_sel {
                 self.draw_text(opts_left_x - 30.0, y, OPT_SCALE, ">", color);
             }
-            self.draw_text(opts_left_x, y, OPT_SCALE, options[abs_idx], color);
+            // Index 0 is the "unbind" entry — show the localized "(none)"
+            // label instead of the raw sentinel. All other entries are
+            // technical Flash key names, never translated.
+            let label = if abs_idx == 0 { crate::loc::s().none } else { options[abs_idx] };
+            self.draw_text(opts_left_x, y, OPT_SCALE, label, color);
         }
 
         // Scrollbar (matches the TOUCHES list scrollbar style).
@@ -4139,7 +4230,7 @@ impl SwitchRenderBackend {
 
         // Footer.
         const HELP_SCALE: f32 = 2.0;
-        let help = "A:OK   B:ANNULER   HAUT/BAS:NAV";
+        let help = crate::loc::s().keys_dropdown_footer;
         let help_w = self.measure_text(help, HELP_SCALE);
         self.draw_text(
             panel_x + (PANEL_W - help_w) * 0.5,
@@ -4248,7 +4339,7 @@ impl SwitchRenderBackend {
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
 
-        let title = "AUCUN JEU";
+        let title = crate::loc::s().empty_title;
         let scale_title = 6.0;
         let title_w = self.measure_text(title, scale_title);
         // Drop shadow on the title — dark navy offset (4, 4) under the white.
@@ -4267,11 +4358,8 @@ impl SwitchRenderBackend {
             swf::Color::from_rgb(0xFFD740, 255),
         );
 
-        let lines = [
-            "DEPOSEZ DES FICHIERS .SWF DANS",
-            "SDMC:/RUFFLE/   OU   SDMC:/SWITCH/RUFFLE/",
-            "PUIS REDEMARREZ FLASHNX.",
-        ];
+        let lc = crate::loc::s();
+        let lines = [lc.empty_l1, lc.empty_l2, lc.empty_l3];
         let scale_msg = 2.5;
         let mut y = vh * 0.48;
         for line in &lines {
@@ -4290,7 +4378,7 @@ impl SwitchRenderBackend {
         // still import via archive.org without needing to drop files
         // on SD first); - exits .nro.
         const HELP_SCALE: f32 = 2.0;
-        let help = "Y:IMPORT DISTANT   -:QUITTER";
+        let help = crate::loc::s().empty_footer;
         let help_w = self.measure_text(help, HELP_SCALE);
         self.draw_text(
             (vw - help_w) * 0.5,
@@ -4371,11 +4459,15 @@ impl SwitchRenderBackend {
         }
 
         // ── Game list ───────────────────────────────────────────────────
+        // Spacing tightened (50 → 44) so 8 rows fit between the banner and the
+        // metadata panel (top at vh-130) without overlap.
         const ROW_SCALE: f32 = 3.0;
-        const ROW_SPACING: f32 = 50.0;
+        const ROW_SPACING: f32 = 44.0;
         const CHIP_PAD: f32 = 12.0;
         const CHIP_SIZE: f32 = 18.0;
-        let rows_top_y = banner_y + 170.0;
+        // Lowered so the 8-row block is vertically centered in the band
+        // between the banner (~168 px) and the metadata panel (vh-130).
+        let rows_top_y = banner_y + 190.0;
         let rows_left_x = 80.0;
         let chip_x = rows_left_x;
         let label_x = rows_left_x + CHIP_SIZE + CHIP_PAD * 2.0;
@@ -4526,7 +4618,7 @@ impl SwitchRenderBackend {
 
         // Footer.
         const HELP_SCALE: f32 = 2.0;
-        let help = "A:JOUER   X:OPTIONS   Y:IMPORT   -:QUITTER";
+        let help = crate::loc::s().list_footer;
         let help_w = self.measure_text(help, HELP_SCALE);
         self.draw_text(
             (vw - help_w) * 0.5,
@@ -4581,7 +4673,7 @@ impl SwitchRenderBackend {
 
         // Header.
         const TITLE_SCALE: f32 = 3.0;
-        let header = "OPTIONS";
+        let header = crate::loc::s().options_title;
         let header_w = self.measure_text(header, TITLE_SCALE);
         self.draw_text(
             panel_x + (PANEL_W - header_w) * 0.5,
@@ -4630,7 +4722,7 @@ impl SwitchRenderBackend {
 
         // Footer.
         const HELP_SCALE: f32 = 2.0;
-        let help = "A:OK   B:RETOUR";
+        let help = crate::loc::s().options_footer;
         let help_w = self.measure_text(help, HELP_SCALE);
         self.draw_text(
             panel_x + (PANEL_W - help_w) * 0.5,
@@ -4683,7 +4775,7 @@ impl SwitchRenderBackend {
         <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(0xFF6060, 255), panel);
 
         const TITLE_SCALE: f32 = 4.0;
-        let header = "SUPPRIMER ?";
+        let header = crate::loc::s().del_title;
         let header_w = self.measure_text(header, TITLE_SCALE);
         self.draw_text(
             panel_x + (PANEL_W - header_w) * 0.5,
@@ -4723,8 +4815,8 @@ impl SwitchRenderBackend {
         );
 
         const WARN_SCALE: f32 = 2.0;
-        let warn1 = "Le fichier .swf, les sauvegardes (.sol),";
-        let warn2 = "les touches et l'alias seront effaces.";
+        let warn1 = crate::loc::s().del_l1;
+        let warn2 = crate::loc::s().del_l2;
         let w1w = self.measure_text(warn1, WARN_SCALE);
         let w2w = self.measure_text(warn2, WARN_SCALE);
         self.draw_text(
@@ -4741,7 +4833,7 @@ impl SwitchRenderBackend {
             warn2,
             swf::Color::from_rgb(0xFFEEDD, 255),
         );
-        let irrev = "Action irreversible.";
+        let irrev = crate::loc::s().del_l3;
         let iw = self.measure_text(irrev, WARN_SCALE);
         self.draw_text(
             panel_x + (PANEL_W - iw) * 0.5,
@@ -4752,7 +4844,7 @@ impl SwitchRenderBackend {
         );
 
         const HELP_SCALE: f32 = 2.5;
-        let help = "A: SUPPRIMER     B: ANNULER";
+        let help = crate::loc::s().del_footer;
         let help_w = self.measure_text(help, HELP_SCALE);
         self.draw_text(
             panel_x + (PANEL_W - help_w) * 0.5,
@@ -4785,7 +4877,7 @@ impl SwitchRenderBackend {
         let vh = self.dimensions.height as f32;
 
         // Title with drop shadow.
-        let title = "IMPORT DISTANT";
+        let title = crate::loc::s().dist_title;
         let scale_t = 5.0;
         let tw = self.measure_text(title, scale_t);
         self.draw_text(
@@ -4804,7 +4896,7 @@ impl SwitchRenderBackend {
         );
 
         // Subtitle.
-        let sub = "TELECHARGEMENT DE SWF DEPUIS ARCHIVE.ORG";
+        let sub = crate::loc::s().dist_subtitle;
         let scale_s = 2.0;
         let sw = self.measure_text(sub, scale_s);
         self.draw_text(
@@ -4831,7 +4923,7 @@ impl SwitchRenderBackend {
         match recent_url {
             None => {
                 // No history yet — just the "press A" CTA.
-                let cta = "APPUYEZ SUR A POUR SAISIR UNE URL";
+                let cta = crate::loc::s().dist_press_a;
                 let scale_c = 3.0;
                 let cw = self.measure_text(cta, scale_c);
                 self.draw_text(
@@ -4841,7 +4933,7 @@ impl SwitchRenderBackend {
                     cta,
                     swf::Color::from_rgb(0xFFFFFF, 255),
                 );
-                let hint = "EXEMPLE: HTTPS://ARCHIVE.ORG/DETAILS/<ITEM-ID>";
+                let hint = crate::loc::s().dist_example1;
                 let scale_h = 1.8;
                 let hw = self.measure_text(hint, scale_h);
                 self.draw_text(
@@ -4851,7 +4943,7 @@ impl SwitchRenderBackend {
                     hint,
                     swf::Color::from_rgb(0x99AABB, 255),
                 );
-                let hint2 = "OU SIMPLEMENT <ITEM-ID>";
+                let hint2 = crate::loc::s().dist_example2;
                 let hw2 = self.measure_text(hint2, scale_h);
                 self.draw_text(
                     panel_x + (PANEL_W - hw2) * 0.5,
@@ -4865,9 +4957,9 @@ impl SwitchRenderBackend {
                 // Show "HISTORIQUE [n / total]" header.
                 let scale_lbl = 2.0;
                 let label = if let Some((cur, total)) = hist_pos {
-                    std::format!("HISTORIQUE [{} / {}]", cur, total)
+                    std::format!("{} [{} / {}]", crate::loc::s().dist_history, cur, total)
                 } else {
-                    std::string::String::from("HISTORIQUE")
+                    crate::loc::s().dist_history.to_string()
                 };
                 let lw = self.measure_text(&label, scale_lbl);
                 self.draw_text(
@@ -4898,11 +4990,8 @@ impl SwitchRenderBackend {
 
                 // Action hints stacked inside the panel.
                 let scale_h = 1.8;
-                let lines = [
-                    "ZR : CHARGER CETTE URL DIRECTEMENT",
-                    "A  : SAISIR / EDITER URL (CLAVIER)",
-                    "L / R : URL PRECEDENTE / SUIVANTE",
-                ];
+                let lc = crate::loc::s();
+                let lines = [lc.dist_hint_zr, lc.dist_hint_a, lc.dist_hint_lr];
                 for (i, line) in lines.iter().enumerate() {
                     let w = self.measure_text(line, scale_h);
                     self.draw_text(
@@ -4919,9 +5008,9 @@ impl SwitchRenderBackend {
         // Footer.
         const HELP_SCALE: f32 = 2.0;
         let help = if recent_url.is_some() {
-            "ZR:OUVRIR   A:EDITER   L/R:NAV   Y:RETOUR LOCAL   -:QUITTER"
+            crate::loc::s().dist_footer_hist
         } else {
-            "A:SAISIR URL   Y:RETOUR LOCAL   -:QUITTER"
+            crate::loc::s().dist_footer_nohist
         };
         let help_w = self.measure_text(help, HELP_SCALE);
         self.draw_text(
@@ -4958,7 +5047,7 @@ impl SwitchRenderBackend {
         let vh = self.dimensions.height as f32;
 
         // Header.
-        let title = "FICHIERS DISTANTS";
+        let title = crate::loc::s().files_title;
         let scale_t = 4.0;
         let tw = self.measure_text(title, scale_t);
         self.draw_text(
@@ -4980,17 +5069,11 @@ impl SwitchRenderBackend {
         // filter is active, "3633 FICHIER(S) .SWF TROUVE(S)" otherwise.
         let sub = match filter {
             Some(f) if !f.is_empty() => {
-                std::format!("{} / {} — FILTRE: {}", files.len(), total_unfiltered, f)
+                std::format!("{} / {} - {}: {}", files.len(), total_unfiltered, crate::loc::s().files_filter, f)
             }
-            _ => {
-                // Vrai pluriel conditionnel. L'ancien "FICHIER(S) .SWF TROUVE(S)"
-                // s'affichait "FICHIER S ... TROUVE S" car la police pixel-art ne
-                // rend pas les parenthèses (rendues comme des espaces). 0 et 1 =
-                // singulier en français, >1 = pluriel.
-                let n = files.len();
-                let p = if n > 1 { "S" } else { "" };
-                std::format!("{} FICHIER{} .SWF TROUVE{}", n, p, p)
-            }
+            // The pixel font now renders parentheses, so "FILE(S) FOUND" is
+            // fine across locales; the count template lives in loc.rs.
+            _ => crate::loc::files_found(files.len()),
         };
         let scale_s = 2.0;
         let sw = self.measure_text(&sub, scale_s);
@@ -5075,7 +5158,7 @@ impl SwitchRenderBackend {
 
         // Footer.
         const HELP_SCALE: f32 = 2.0;
-        let help = "A:TELECHARGER   B:RETOUR   X:RECHERCHE   L/R:PAGE   HAUT/BAS:NAV";
+        let help = crate::loc::s().files_footer;
         let help_w = self.measure_text(help, HELP_SCALE);
         self.draw_text(
             (vw - help_w) * 0.5,
@@ -5105,7 +5188,7 @@ impl SwitchRenderBackend {
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
 
-        let title = "TELECHARGEMENT";
+        let title = crate::loc::s().dl_title;
         let scale_t = 5.0;
         let tw = self.measure_text(title, scale_t);
         self.draw_text(
@@ -5190,7 +5273,7 @@ impl SwitchRenderBackend {
 
         // Footer.
         const HELP_SCALE: f32 = 2.0;
-        let help = "B:ANNULER";
+        let help = crate::loc::s().dl_footer;
         let help_w = self.measure_text(help, HELP_SCALE);
         self.draw_text(
             (vw - help_w) * 0.5,
@@ -5212,7 +5295,7 @@ impl SwitchRenderBackend {
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
 
-        let title = "ERREUR";
+        let title = crate::loc::s().err_title;
         let scale_t = 5.0;
         let tw = self.measure_text(title, scale_t);
         self.draw_text(
@@ -5266,7 +5349,7 @@ impl SwitchRenderBackend {
         }
 
         const HELP_SCALE: f32 = 2.0;
-        let help = "A/B:OK";
+        let help = crate::loc::s().err_footer;
         let help_w = self.measure_text(help, HELP_SCALE);
         self.draw_text(
             (vw - help_w) * 0.5,
@@ -5286,6 +5369,236 @@ impl SwitchRenderBackend {
     /// the library (pre-launch keymap edit). Quick black fill — no library
     /// content underneath, no Ruffle render — just a flat backdrop so
     /// `menu::draw` sits on something solid.
+    /// Settings modal (Plus from the library). Caller has already cleared
+    /// the screen via `draw_library_dim_backdrop`. `entries` are localized
+    /// labels in fixed order (default controls / language / back).
+    pub fn draw_library_settings(&mut self, selection: usize, entries: &[&str]) {
+        unsafe {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_STENCIL_TEST);
+        }
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+
+        const PANEL_W: f32 = 600.0;
+        let row_h: f32 = 56.0;
+        let panel_h = 140.0 + entries.len() as f32 * row_h + 60.0;
+        let panel_x = (vw - PANEL_W) * 0.5;
+        let panel_y = (vh - panel_h) * 0.5;
+        let panel = Matrix {
+            a: PANEL_W, b: 0.0, c: 0.0, d: panel_h,
+            tx: swf::Twips::from_pixels(panel_x as f64),
+            ty: swf::Twips::from_pixels(panel_y as f64),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_14_20_38), panel);
+        <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(0xFFFFFF, 255), panel);
+
+        const TITLE_SCALE: f32 = 3.0;
+        let header = crate::loc::s().settings_title;
+        let header_w = self.measure_text(header, TITLE_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - header_w) * 0.5,
+            panel_y + 28.0,
+            TITLE_SCALE,
+            header,
+            swf::Color::from_rgb(0xFFFFFF, 255),
+        );
+
+        const OPT_SCALE: f32 = 2.5;
+        let opts_top_y = panel_y + 110.0;
+        let opts_left_x = panel_x + 110.0;
+        for (i, opt) in entries.iter().enumerate() {
+            let y = opts_top_y + i as f32 * row_h;
+            let is_sel = i == selection;
+            let color = if is_sel {
+                swf::Color::from_rgb(0xFFD740, 255)
+            } else {
+                swf::Color::from_rgb(0xCCCCCC, 255)
+            };
+            if is_sel {
+                self.draw_text(opts_left_x - 30.0, y, OPT_SCALE, ">", color);
+            }
+            self.draw_text(opts_left_x, y, OPT_SCALE, opt, color);
+        }
+
+        const HELP_SCALE: f32 = 2.0;
+        let help = crate::loc::s().settings_footer;
+        let help_w = self.measure_text(help, HELP_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - help_w) * 0.5,
+            panel_y + panel_h - 38.0,
+            HELP_SCALE,
+            help,
+            swf::Color::from_rgb(0x99AABB, 255),
+        );
+
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
+    /// Language picker (Settings → LANGUAGE). `languages` are native display
+    /// names in `loc::PICKER_LANGS` order. The currently-active language is
+    /// tinted teal even when the cursor is elsewhere.
+    pub fn draw_library_language_picker(&mut self, selection: usize, languages: &[&str]) {
+        unsafe {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_STENCIL_TEST);
+        }
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+
+        const PANEL_W: f32 = 520.0;
+        let row_h: f32 = 56.0;
+        let panel_h = 140.0 + languages.len() as f32 * row_h + 60.0;
+        let panel_x = (vw - PANEL_W) * 0.5;
+        let panel_y = (vh - panel_h) * 0.5;
+        let panel = Matrix {
+            a: PANEL_W, b: 0.0, c: 0.0, d: panel_h,
+            tx: swf::Twips::from_pixels(panel_x as f64),
+            ty: swf::Twips::from_pixels(panel_y as f64),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_14_20_38), panel);
+        <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(0xFFFFFF, 255), panel);
+
+        const TITLE_SCALE: f32 = 3.0;
+        let header = crate::loc::s().lang_title;
+        let header_w = self.measure_text(header, TITLE_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - header_w) * 0.5,
+            panel_y + 28.0,
+            TITLE_SCALE,
+            header,
+            swf::Color::from_rgb(0xFFFFFF, 255),
+        );
+
+        let active = crate::loc::current().index();
+        const OPT_SCALE: f32 = 2.5;
+        let opts_top_y = panel_y + 110.0;
+        let opts_left_x = panel_x + 120.0;
+        for (i, lang) in languages.iter().enumerate() {
+            let y = opts_top_y + i as f32 * row_h;
+            let is_sel = i == selection;
+            let color = if is_sel {
+                swf::Color::from_rgb(0xFFD740, 255) // amber cursor row
+            } else if i == active {
+                swf::Color::from_rgb(0x66DDCC, 255) // teal = currently active
+            } else {
+                swf::Color::from_rgb(0xCCCCCC, 255)
+            };
+            if is_sel {
+                self.draw_text(opts_left_x - 30.0, y, OPT_SCALE, ">", color);
+            }
+            self.draw_text(opts_left_x, y, OPT_SCALE, lang, color);
+        }
+
+        const HELP_SCALE: f32 = 2.0;
+        let help = crate::loc::s().lang_footer;
+        let help_w = self.measure_text(help, HELP_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - help_w) * 0.5,
+            panel_y + panel_h - 38.0,
+            HELP_SCALE,
+            help,
+            swf::Color::from_rgb(0x99AABB, 255),
+        );
+
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
+    /// Confirm removing a URL from the DISTANT history (X on DistantIdle).
+    /// Shows the URL + a confirmation prompt; reuses the red "danger" theme.
+    pub fn draw_library_history_delete_confirm(&mut self, url: &str) {
+        self.library_clear();
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        unsafe {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_STENCIL_TEST);
+        }
+
+        const PANEL_W: f32 = 980.0;
+        const PANEL_H: f32 = 300.0;
+        let panel_x = (vw - PANEL_W) * 0.5;
+        let panel_y = (vh - PANEL_H) * 0.5;
+        let panel = Matrix {
+            a: PANEL_W, b: 0.0, c: 0.0, d: PANEL_H,
+            tx: swf::Twips::from_pixels(panel_x as f64),
+            ty: swf::Twips::from_pixels(panel_y as f64),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_40_10_18), panel);
+        <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(0xFF6060, 255), panel);
+
+        // Title.
+        const TITLE_SCALE: f32 = 3.5;
+        let header = crate::loc::s().histdel_title;
+        let header_w = self.measure_text(header, TITLE_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - header_w) * 0.5,
+            panel_y + 28.0,
+            TITLE_SCALE,
+            header,
+            swf::Color::from_rgb(0xFFD740, 255),
+        );
+
+        // The URL, truncated to fit the panel width.
+        const URL_SCALE: f32 = 2.0;
+        let char_w = 6.0 * URL_SCALE;
+        let max_chars = ((PANEL_W - 60.0) / char_w) as usize;
+        let mut display = url.to_string();
+        if display.chars().count() > max_chars && max_chars > 1 {
+            display = display.chars().take(max_chars - 1).collect();
+            display.push('\u{2026}');
+        }
+        let uw = self.measure_text(&display, URL_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - uw) * 0.5,
+            panel_y + 110.0,
+            URL_SCALE,
+            &display,
+            swf::Color::from_rgb(0xFFFFFF, 255),
+        );
+
+        // Confirmation prompt.
+        const MSG_SCALE: f32 = 2.0;
+        let msg = crate::loc::s().histdel_msg;
+        let mw = self.measure_text(msg, MSG_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - mw) * 0.5,
+            panel_y + 165.0,
+            MSG_SCALE,
+            msg,
+            swf::Color::from_rgb(0xFFEEDD, 255),
+        );
+
+        // Footer reuses the generic "A: DELETE   B: CANCEL" line.
+        const HELP_SCALE: f32 = 2.5;
+        let help = crate::loc::s().del_footer;
+        let help_w = self.measure_text(help, HELP_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - help_w) * 0.5,
+            panel_y + PANEL_H - 50.0,
+            HELP_SCALE,
+            help,
+            swf::Color::from_rgb(0xFFFFFF, 255),
+        );
+
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
     pub fn draw_library_dim_backdrop(&mut self) {
         unsafe {
             glDisable(GL_STENCIL_TEST);

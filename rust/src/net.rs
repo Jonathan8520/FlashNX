@@ -18,10 +18,18 @@ extern "C" {
     fn https_download_tick() -> c_int;
     fn https_download_progress(done_out: *mut u64, total_out: *mut u64);
     fn https_download_cancel();
-    fn swkbd_prompt_url(initial: *const c_char, out: *mut c_char, cap: c_int) -> c_int;
-    fn swkbd_prompt_rename(initial: *const c_char, out: *mut c_char, cap: c_int) -> c_int;
-    fn swkbd_prompt_search(initial: *const c_char, out: *mut c_char, cap: c_int) -> c_int;
+    // header/guide are localized prompt strings supplied by Rust (loc.rs).
+    fn swkbd_prompt_url(header: *const c_char, guide: *const c_char, initial: *const c_char, out: *mut c_char, cap: c_int) -> c_int;
+    fn swkbd_prompt_rename(header: *const c_char, guide: *const c_char, initial: *const c_char, out: *mut c_char, cap: c_int) -> c_int;
+    fn swkbd_prompt_search(header: *const c_char, guide: *const c_char, initial: *const c_char, out: *mut c_char, cap: c_int) -> c_int;
     fn ruffle_log_cstr(msg: *const c_char);
+}
+
+/// NUL-terminate a string for passing to C.
+fn cstr(s: &str) -> std::vec::Vec<u8> {
+    let mut v = s.as_bytes().to_vec();
+    v.push(0);
+    v
 }
 
 fn log(s: &str) {
@@ -108,20 +116,15 @@ pub fn fetch_archive_metadata(
         )
     };
     if n == -3 {
-        return Err(std::string::String::from(
-            "Reponse archive.org trop volumineuse (>4 MB). Item trop massif pour cette version.",
-        ));
+        return Err(std::string::String::from(crate::loc::s().err_too_large));
     }
     if n < 0 {
-        return Err(std::format!(
-            "Echec HTTPS (code {}). Verifiez le WiFi + l'URL.",
-            n
-        ));
+        return Err(crate::loc::err_https(n));
     }
     buf.truncate(n as usize);
     let json: serde_json::Value = serde_json::from_slice(&buf).map_err(|e| {
         log(&std::format!("net: JSON parse failed: {}\n", e));
-        std::format!("JSON archive.org illisible : {}", e)
+        crate::loc::err_json(&e.to_string())
     })?;
 
     // archive.org returns `{server: "...", dir: "...", files: [...]}`.
@@ -132,7 +135,7 @@ pub fn fetch_archive_metadata(
     let files_json = json
         .get("files")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| std::string::String::from("JSON sans champ \"files\""))?;
+        .ok_or_else(|| std::string::String::from(crate::loc::s().err_json_no_files))?;
     let mut out: std::vec::Vec<RemoteFile> = std::vec::Vec::new();
     for f in files_json {
         let format = f
@@ -206,7 +209,7 @@ pub fn start_download(url: &str, out_path: &str) -> Result<(), std::string::Stri
         https_download_start(url_c.as_ptr() as *const c_char, path_c.as_ptr() as *const c_char)
     };
     if rc != 0 {
-        return Err(std::format!("Impossible de lancer le telechargement (code {}).", rc));
+        return Err(crate::loc::err_dl_start(rc));
     }
     Ok(())
 }
@@ -223,7 +226,7 @@ pub fn tick_download() -> Result<bool, std::string::String> {
     if rc == 1 {
         return Ok(true);
     }
-    Err(std::format!("Telechargement echoue (code {})", rc))
+    Err(crate::loc::err_dl_failed(rc))
 }
 
 /// Current bytes downloaded / total bytes (0 until the Content-Length
@@ -259,8 +262,16 @@ pub fn prompt_url_with_initial(initial: Option<&str>) -> Option<std::string::Str
         .as_ref()
         .map(|v| v.as_ptr() as *const c_char)
         .unwrap_or(core::ptr::null());
+    let header_c = cstr(crate::loc::s().kbd_url_header);
+    let guide_c = cstr(crate::loc::s().kbd_url_guide);
     let rc = unsafe {
-        swkbd_prompt_url(initial_ptr, buf.as_mut_ptr() as *mut c_char, buf.len() as c_int)
+        swkbd_prompt_url(
+            header_c.as_ptr() as *const c_char,
+            guide_c.as_ptr() as *const c_char,
+            initial_ptr,
+            buf.as_mut_ptr() as *mut c_char,
+            buf.len() as c_int,
+        )
     };
     if rc != 0 {
         return None;
@@ -278,8 +289,12 @@ pub fn prompt_rename(initial: &str) -> Option<std::string::String> {
     let mut buf = std::vec![0u8; 512];
     let mut initial_owned = initial.as_bytes().to_vec();
     initial_owned.push(0);
+    let header_c = cstr(crate::loc::s().kbd_rename_header);
+    let guide_c = cstr(crate::loc::s().kbd_rename_guide);
     let rc = unsafe {
         swkbd_prompt_rename(
+            header_c.as_ptr() as *const c_char,
+            guide_c.as_ptr() as *const c_char,
             initial_owned.as_ptr() as *const c_char,
             buf.as_mut_ptr() as *mut c_char,
             buf.len() as c_int,
@@ -303,8 +318,12 @@ pub fn prompt_search(initial: &str) -> Option<std::string::String> {
     let mut buf = std::vec![0u8; 256];
     let mut initial_owned = initial.as_bytes().to_vec();
     initial_owned.push(0);
+    let header_c = cstr(crate::loc::s().kbd_search_header);
+    let guide_c = cstr(crate::loc::s().kbd_search_guide);
     let rc = unsafe {
         swkbd_prompt_search(
+            header_c.as_ptr() as *const c_char,
+            guide_c.as_ptr() as *const c_char,
             initial_owned.as_ptr() as *const c_char,
             buf.as_mut_ptr() as *mut c_char,
             buf.len() as c_int,

@@ -105,6 +105,12 @@ pub const ALL_FLASH_KEYS: &[&str] = &[
 /// already-loaded keymap.
 static ACTIVE_BASENAME: Mutex<Option<std::string::String>> = Mutex::new(None);
 
+/// Sentinel "basename" set by `init_for_global_default`. When this is the
+/// active basename, `save_sidecar` writes `keymap_default.json` instead of
+/// a per-game `<basename>.keymap.json`. The leading control char makes it
+/// impossible to collide with a real `.swf` file name.
+const GLOBAL_SENTINEL: &str = "\u{1}__global_default__";
+
 /// In-memory keymap. Lock is held briefly across single-key edits + during
 /// sidecar write.
 static ACTIVE_KEYMAP: Mutex<Option<Keymap>> = Mutex::new(None);
@@ -266,6 +272,32 @@ pub fn init_for_swf(swf_basename: &str) {
     }
 }
 
+/// Load the GLOBAL DEFAULT keymap (`keymap_default.json`, or the hardcoded
+/// fallback bootstrapped to SD) into `ACTIVE_KEYMAP` for editing via the
+/// reused TOUCHES editor. Sets the active basename to `GLOBAL_SENTINEL` so
+/// subsequent `set_binding` / `save_sidecar` calls persist to
+/// `keymap_default.json` instead of a per-game sidecar. Called from the
+/// library Settings modal (Plus → DEFAULT CONTROLS).
+pub fn init_for_global_default() {
+    let default = find_user_path("keymap_default.json");
+    let km = if let Some(txt) = default.as_deref().and_then(read_json_file) {
+        let path_str = default.as_deref().unwrap_or("?");
+        log(std::format!("keymap: editing global default {}\n", path_str));
+        parse_keymap(&txt, path_str).unwrap_or_else(fallback_keymap)
+    } else {
+        log("keymap: no global default on SD, bootstrapping from fallback\n");
+        let km = fallback_keymap();
+        write_default_to_sd(&primary_path("keymap_default.json"), &km);
+        km
+    };
+    if let Ok(mut g) = ACTIVE_BASENAME.lock() {
+        *g = Some(GLOBAL_SENTINEL.into());
+    }
+    if let Ok(mut g) = ACTIVE_KEYMAP.lock() {
+        *g = Some(km);
+    }
+}
+
 /// Clear the active keymap so the next `init_for_swf` re-reads from SD.
 /// Called by `ruffle_library_reset` when the user quits a game back to
 /// the library — the next pick may be a different game with a different
@@ -326,7 +358,13 @@ pub fn save_sidecar() -> bool {
         },
         Err(_) => return false,
     };
-    let path = primary_path(&std::format!("{}.keymap.json", basename));
+    // The global-default editor writes keymap_default.json; per-game
+    // editing writes the basename sidecar.
+    let path = if basename == GLOBAL_SENTINEL {
+        primary_path("keymap_default.json")
+    } else {
+        primary_path(&std::format!("{}.keymap.json", basename))
+    };
     let json = match serde_json::to_string_pretty(&km) {
         Ok(s) => s,
         Err(e) => {

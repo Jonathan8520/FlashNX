@@ -74,9 +74,43 @@ pub(crate) enum Screen {
     /// Error from URL parse / metadata fetch / download. Message in
     /// `State::distant_error`. B or A dismisses back to DistantIdle.
     DistantError,
+    /// Confirm removing the currently-shown URL from the history (X on
+    /// DistantIdle). A = delete + persist, B/Minus = cancel.
+    DistantHistoryConfirm,
+    // ── Settings modal (Plus from the library) ─────────────────────────
+    /// Global settings. `selection` indexes the 3 entries: 0 = default
+    /// controls, 1 = language, 2 = back.
+    SettingsModal { selection: usize },
+    /// Editing the GLOBAL DEFAULT keymap via the reused `menu::*` editor.
+    SettingsKeymapEditor,
+    /// Language picker. `selection` indexes `loc::PICKER_LANGS`.
+    SettingsLanguagePicker { selection: usize },
 }
 
 pub(crate) const OPTIONS_ENTRIES: &[&str] = &["TOUCHES", "RENOMMER", "SUPPRIMER", "RETOUR"];
+
+/// The game most recently launched, as `(basename, display_name)`. Set on
+/// pick (JOUER), and deliberately NOT cleared by `reset()` so that:
+///   1. quitting a game back to the library restores the cursor to that
+///      row (instead of jumping to the top), and
+///   2. the in-game pause menu can show the game's name under "PAUSE".
+static LAST_PLAYED: Mutex<Option<(std::string::String, std::string::String)>> = Mutex::new(None);
+
+fn note_played(basename: &str, display_name: &str) {
+    if let Ok(mut g) = LAST_PLAYED.lock() {
+        *g = Some((basename.into(), display_name.into()));
+    }
+}
+
+fn last_played_basename() -> Option<std::string::String> {
+    LAST_PLAYED.lock().ok().and_then(|g| g.as_ref().map(|(b, _)| b.clone()))
+}
+
+/// Display name of the currently/last launched game — used by the pause
+/// menu (`render::draw_menu_overlay`) to show the title under "PAUSE".
+pub fn active_display_name() -> Option<std::string::String> {
+    LAST_PLAYED.lock().ok().and_then(|g| g.as_ref().map(|(_, n)| n.clone()))
+}
 
 /// Sidecar JSON written next to the SWF — gives a display name override
 /// without touching the physical filename. Per the README 3.4.bis design:
@@ -214,6 +248,10 @@ pub(crate) struct State {
     /// back on the same row instead of jumping to the top of the list.
     /// Stored as filtered-list indices (matches the screen state).
     pub(crate) download_resume_pos: Option<(usize, usize)>,
+    /// (selection, scroll_offset) of the library list when the user opened
+    /// the Settings modal (Plus), so closing it returns to the same row
+    /// instead of jumping to the top — mirrors the OPTIONS (X) modal.
+    pub(crate) settings_return: (usize, usize),
 }
 
 static LIBRARY: Mutex<State> = Mutex::new(State {
@@ -233,6 +271,7 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     history_idx: None,
     distant_filter: None,
     download_resume_pos: None,
+    settings_return: (0, 0),
 });
 
 /// Where the URL history persists across boots. Format: JSON array of
@@ -245,7 +284,7 @@ const HISTORY_MAX: usize = 20;
 /// `visible_rows` on the LOCAL list screen — keep in sync with the slot
 /// count drawn in `draw_library_list`. Picked so 1280×720 fits header +
 /// banner + rows + footer with margin.
-pub const LIST_VISIBLE_ROWS: usize = 6;
+pub const LIST_VISIBLE_ROWS: usize = 8;
 
 /// `visible_rows` on the DISTANT (archive.org) files screen. Larger than
 /// LOCAL because typical archive.org dumps run 80-3600+ entries — 10 is
@@ -319,12 +358,20 @@ pub fn open() {
     // Reload URL history from SD on each open so changes from a previous
     // .nro boot are visible. Cheap (file is <2 KB typical).
     load_history_from_sd();
+    // If we're re-opening after quitting a game, land the cursor back on
+    // that game's row instead of the top of the list.
+    let want = last_played_basename();
     if let Ok(mut s) = LIBRARY.lock() {
         s.anim_origin_ticks = unsafe { ruffle_tick_now() };
         s.screen = if s.entries.is_empty() {
             Screen::Empty
         } else {
-            Screen::List { selection: 0, scroll_offset: 0 }
+            let selection = want
+                .as_deref()
+                .and_then(|b| s.entries.iter().position(|e| e.basename == b))
+                .unwrap_or(0);
+            let scroll_offset = clamp_scroll(0, selection, LIST_VISIBLE_ROWS);
+            Screen::List { selection, scroll_offset }
         };
     }
 }
@@ -454,8 +501,14 @@ pub fn input(button: &str) -> bool {
         // If menu just closed itself, fall back to the OPTIONS modal.
         if !menu::is_active() {
             if let Ok(mut s) = LIBRARY.lock() {
-                if let Screen::TouchesEditor { game_idx } = s.screen {
-                    s.screen = Screen::OptionsModal { game_idx, selection: 0 };
+                match s.screen {
+                    Screen::TouchesEditor { game_idx } => {
+                        s.screen = Screen::OptionsModal { game_idx, selection: 0 };
+                    }
+                    Screen::SettingsKeymapEditor => {
+                        s.screen = Screen::SettingsModal { selection: 0 };
+                    }
+                    _ => {}
                 }
             }
         }
@@ -547,9 +600,7 @@ pub fn input(button: &str) -> bool {
             // B = cancel download. Any other button is ignored during DL.
             if matches!(button, "B") {
                 net::cancel_download();
-                s.distant_error = std::string::String::from(
-                    "Telechargement annule par l'utilisateur."
-                );
+                s.distant_error = std::string::String::from(crate::loc::s().err_dl_cancelled);
                 s.screen = Screen::DistantError;
             }
             true
@@ -561,7 +612,97 @@ pub fn input(button: &str) -> bool {
             }
             true
         }
+        Screen::DistantHistoryConfirm => {
+            match button {
+                "A" => {
+                    delete_current_history(&mut s);
+                    s.screen = Screen::DistantIdle;
+                }
+                "B" | "Minus" => {
+                    s.screen = Screen::DistantIdle;
+                }
+                _ => {}
+            }
+            true
+        }
+        Screen::SettingsModal { selection } => {
+            handle_settings_input(&mut s, button, selection);
+            true
+        }
+        // Owned by the reused menu::* editor (handled at the top of input()).
+        Screen::SettingsKeymapEditor => false,
+        Screen::SettingsLanguagePicker { selection } => {
+            handle_settings_language_input(&mut s, button, selection);
+            true
+        }
     }
+}
+
+/// Settings modal: 0 = default controls, 1 = language, 2 = back.
+fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
+    const LAST: usize = 2;
+    match button {
+        "Up" | "StickLUp" => {
+            selection = if selection == 0 { LAST } else { selection - 1 };
+        }
+        "Down" | "StickLDown" => {
+            selection = if selection >= LAST { 0 } else { selection + 1 };
+        }
+        "A" => {
+            match selection {
+                0 => {
+                    // Reuse the TOUCHES editor, pointed at the global default.
+                    keymap::init_for_global_default();
+                    menu::open();
+                    s.screen = Screen::SettingsKeymapEditor;
+                }
+                1 => {
+                    let cur = crate::loc::current().index();
+                    s.screen = Screen::SettingsLanguagePicker { selection: cur };
+                }
+                _ => {
+                    let (sel, scroll) = s.settings_return;
+                    s.screen = Screen::List { selection: sel, scroll_offset: scroll };
+                }
+            }
+            return;
+        }
+        "B" | "Minus" => {
+            let (sel, scroll) = s.settings_return;
+            s.screen = Screen::List { selection: sel, scroll_offset: scroll };
+            return;
+        }
+        _ => {}
+    }
+    s.screen = Screen::SettingsModal { selection };
+}
+
+/// Language picker: `selection` indexes `loc::PICKER_LANGS`. A applies +
+/// persists the choice; B/Minus cancels back to the settings modal.
+fn handle_settings_language_input(s: &mut State, button: &str, mut selection: usize) {
+    let last = crate::loc::PICKER_LANGS.len().saturating_sub(1);
+    match button {
+        "Up" | "StickLUp" => {
+            selection = if selection == 0 { last } else { selection - 1 };
+        }
+        "Down" | "StickLDown" => {
+            selection = if selection >= last { 0 } else { selection + 1 };
+        }
+        "A" => {
+            if let Some(&lang) = crate::loc::PICKER_LANGS.get(selection) {
+                crate::loc::set(lang);
+                crate::loc::save(lang);
+            }
+            s.screen = Screen::SettingsModal { selection: 1 };
+            return;
+        }
+        "B" | "Minus" => {
+            s.screen = Screen::SettingsModal { selection: 1 };
+            return;
+        }
+        _ => {}
+    }
+    s.screen = Screen::SettingsLanguagePicker { selection };
 }
 
 fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scroll: usize) {
@@ -578,6 +719,9 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
         "A" => {
             if let Some(entry) = s.entries.get(selection) {
                 s.selected_path = Some(entry.path.clone());
+                // Remember it so quit-to-library lands back on this row and
+                // the pause menu can show the title.
+                note_played(&entry.basename, &entry.display_name);
                 log(&std::format!(
                     "library: JOUER -> {} ({})\n",
                     entry.display_name, entry.path,
@@ -595,6 +739,13 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
         "Y" => {
             // Switch to DISTANT (archive.org import) mode.
             s.screen = Screen::DistantIdle;
+            return;
+        }
+        "Plus" => {
+            // Open the global Settings modal (controls + language). Remember
+            // the list position so closing returns to the same row.
+            s.settings_return = (selection, scroll);
+            s.screen = Screen::SettingsModal { selection: 0 };
             return;
         }
         "Minus" => {
@@ -631,6 +782,13 @@ fn handle_distant_idle_input(s: &mut State, button: &str) {
                 s.history_idx = Some(new_idx);
             }
         }
+        "X" => {
+            // Delete the currently-shown history URL (with confirmation).
+            // No-op when the history is empty (nothing to delete).
+            if !s.url_history.is_empty() && s.history_idx.is_some() {
+                s.screen = Screen::DistantHistoryConfirm;
+            }
+        }
         "Y" | "B" => {
             s.screen = if s.entries.is_empty() {
                 Screen::Empty
@@ -643,6 +801,25 @@ fn handle_distant_idle_input(s: &mut State, button: &str) {
         }
         _ => {}
     }
+}
+
+/// Remove the currently-displayed history URL and persist the trimmed list.
+/// Keeps `history_idx` in range (or None when the list becomes empty).
+fn delete_current_history(s: &mut State) {
+    let Some(idx) = s.history_idx else { return };
+    if idx >= s.url_history.len() {
+        return;
+    }
+    s.url_history.remove(idx);
+    s.history_idx = if s.url_history.is_empty() {
+        None
+    } else {
+        Some(idx.min(s.url_history.len() - 1))
+    };
+    // save_history_to_sd does not lock LIBRARY, so calling it while we hold
+    // the guard `s` is safe.
+    let snapshot = s.url_history.clone();
+    save_history_to_sd(&snapshot);
 }
 
 /// Drive the full "user typed a URL → fetch metadata → show files" flow.
@@ -667,13 +844,13 @@ fn run_url_fetch_flow() {
 /// path (`run_url_fetch_flow`) and by the ZR re-fetch-without-swkbd path.
 fn run_fetch_for_url(url: &str) {
     let Some(item_id) = net::extract_item_id(url) else {
-        set_distant_error("URL invalide. Attendu une URL archive.org type https://archive.org/details/<id> ou simplement <id>.");
+        set_distant_error(crate::loc::s().err_url_invalid);
         return;
     };
     log(&std::format!("library: fetching archive.org metadata for {}\n", item_id));
     match net::fetch_archive_metadata(&item_id) {
         Ok(files) if files.is_empty() => {
-            set_distant_error("Aucun fichier .SWF trouve dans cet item archive.org.");
+            set_distant_error(crate::loc::s().err_no_swf);
         }
         Ok(files) => {
             // Successful fetch — remember the URL for future sessions.
@@ -1028,10 +1205,15 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 .ok()
                 .and_then(|s| s.entries.get(game_idx).cloned());
             if let Some(entry) = entry_snapshot {
+                // OPTIONS_ENTRIES stays the stable logical key list (matched
+                // in input handling); display uses localized labels in the
+                // same order (TOUCHES / RENOMMER / SUPPRIMER / RETOUR).
+                let lc = crate::loc::s();
+                let labels = [lc.opt_keys, lc.opt_rename, lc.opt_delete, lc.opt_back];
                 backend.draw_library_options(
                     &entry.display_name,
                     selection,
-                    OPTIONS_ENTRIES,
+                    &labels,
                 );
             }
         }
@@ -1040,6 +1222,24 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             // a dim panel + delegate to menu::draw.
             backend.draw_library_dim_backdrop();
             menu::draw(backend);
+        }
+        Screen::SettingsModal { selection } => {
+            backend.draw_library_dim_backdrop();
+            let lc = crate::loc::s();
+            let entries = [lc.set_keys, lc.set_language, lc.set_back];
+            backend.draw_library_settings(selection, &entries);
+        }
+        Screen::SettingsKeymapEditor => {
+            // Same as TouchesEditor — the editor edits the global default
+            // (keymap module was pointed there on entry).
+            backend.draw_library_dim_backdrop();
+            menu::draw(backend);
+        }
+        Screen::SettingsLanguagePicker { selection } => {
+            backend.draw_library_dim_backdrop();
+            let names: std::vec::Vec<&str> =
+                crate::loc::PICKER_LANGS.iter().map(|l| l.native_name()).collect();
+            backend.draw_library_language_picker(selection, &names);
         }
         Screen::DeleteConfirm { game_idx } => {
             let snap = LIBRARY
@@ -1123,6 +1323,14 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 .map(|s| s.distant_error.clone())
                 .unwrap_or_default();
             backend.draw_library_distant_error(&msg);
+        }
+        Screen::DistantHistoryConfirm => {
+            let url = LIBRARY
+                .lock()
+                .ok()
+                .and_then(|s| s.history_idx.and_then(|i| s.url_history.get(i).cloned()))
+                .unwrap_or_default();
+            backend.draw_library_history_delete_confirm(&url);
         }
     }
 }

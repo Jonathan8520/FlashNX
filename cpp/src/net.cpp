@@ -297,7 +297,7 @@ extern "C" void https_download_cancel(void) {
 // strings are RENOMMER-specific; if we end up needing yet another swkbd
 // flavour we should refactor to a single `swkbd_prompt_text(...)` that
 // takes them as params. For now two specialised helpers are fine.
-extern "C" int swkbd_prompt_rename(const char* initial, char* out, int cap) {
+extern "C" int swkbd_prompt_rename(const char* header, const char* guide, const char* initial, char* out, int cap) {
     if (cap < 2) return -1;
     SwkbdConfig kbd;
     Result rc = swkbdCreate(&kbd, 0);
@@ -308,8 +308,8 @@ extern "C" int swkbd_prompt_rename(const char* initial, char* out, int cap) {
     }
     swkbdConfigMakePresetDefault(&kbd);
     swkbdConfigSetType(&kbd, SwkbdType_QWERTY);
-    swkbdConfigSetHeaderText(&kbd, "FlashNX - Renommer le jeu");
-    swkbdConfigSetGuideText(&kbd, "Nom d'affichage (laisser vide pour revenir au nom de fichier)");
+    if (header && *header) swkbdConfigSetHeaderText(&kbd, header);
+    if (guide && *guide) swkbdConfigSetGuideText(&kbd, guide);
     if (initial && *initial) {
         swkbdConfigSetInitialText(&kbd, initial);
     }
@@ -326,7 +326,7 @@ extern "C" int swkbd_prompt_rename(const char* initial, char* out, int cap) {
 
 // `initial` may be NULL or empty — falls back to a sensible default so
 // the user lands on a usable prefix even on the very first import.
-extern "C" int swkbd_prompt_url(const char* initial, char* out, int cap) {
+extern "C" int swkbd_prompt_url(const char* header, const char* guide, const char* initial, char* out, int cap) {
     if (cap < 2) return -1;
     SwkbdConfig kbd;
     Result rc = swkbdCreate(&kbd, 0);
@@ -337,8 +337,8 @@ extern "C" int swkbd_prompt_url(const char* initial, char* out, int cap) {
     }
     swkbdConfigMakePresetDefault(&kbd);
     swkbdConfigSetType(&kbd, SwkbdType_QWERTY);
-    swkbdConfigSetGuideText(&kbd, "URL archive.org de l'item (ex: https://archive.org/download/banned-from-equestria-daily-1.5)");
-    swkbdConfigSetHeaderText(&kbd, "FlashNX - Import distant");
+    if (guide && *guide) swkbdConfigSetGuideText(&kbd, guide);
+    if (header && *header) swkbdConfigSetHeaderText(&kbd, header);
     const char* prefill = (initial && *initial) ? initial : "https://archive.org/download/";
     swkbdConfigSetInitialText(&kbd, prefill);
     swkbdConfigSetStringLenMax(&kbd, (u32)(cap - 1));
@@ -354,7 +354,7 @@ extern "C" int swkbd_prompt_url(const char* initial, char* out, int cap) {
 
 // Search prompt used by the DistantFiles list (X button). Empty input
 // clears the filter — caller decides what that means.
-extern "C" int swkbd_prompt_search(const char* initial, char* out, int cap) {
+extern "C" int swkbd_prompt_search(const char* header, const char* guide, const char* initial, char* out, int cap) {
     if (cap < 2) return -1;
     SwkbdConfig kbd;
     Result rc = swkbdCreate(&kbd, 0);
@@ -365,8 +365,8 @@ extern "C" int swkbd_prompt_search(const char* initial, char* out, int cap) {
     }
     swkbdConfigMakePresetDefault(&kbd);
     swkbdConfigSetType(&kbd, SwkbdType_QWERTY);
-    swkbdConfigSetHeaderText(&kbd, "FlashNX - Rechercher");
-    swkbdConfigSetGuideText(&kbd, "Filtre nom de fichier (vide = tout afficher)");
+    if (header && *header) swkbdConfigSetHeaderText(&kbd, header);
+    if (guide && *guide) swkbdConfigSetGuideText(&kbd, guide);
     if (initial && *initial) {
         swkbdConfigSetInitialText(&kbd, initial);
     }
