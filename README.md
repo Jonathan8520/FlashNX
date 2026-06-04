@@ -39,7 +39,7 @@ Either way: copy your **`.swf`** files into **`sdmc:/flashnx/`**, then launch **
 ## Usage
 
 **In the library**
-Up/down (D-pad or sticks) = navigate · **A** = play · **X** = options (controls, rename, delete) · **Y** = import from archive.org · **+** = settings (default controls, language) · **−** = quit.
+Up/down (D-pad or sticks) = navigate · **A** = play · **X** = search (filter by name) · **ZL** = options (controls, rename, delete) · **Y** = import from archive.org · **+** = settings (default controls, language) · **−** = quit.
 
 **In game**
 Left stick / D-pad = arrows · **A/B/X/Y** = Flash keys (remappable) · right stick = mouse cursor · **ZR** / touch = click · **−** = pause menu.
