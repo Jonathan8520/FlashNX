@@ -72,6 +72,7 @@ pub const GL_CLAMP_TO_EDGE: GLenum = 0x812F;
 pub const GL_REPEAT: GLenum = 0x2901;
 pub const GL_MIRRORED_REPEAT: GLenum = 0x8370;
 pub const GL_UNPACK_ALIGNMENT: GLenum = 0x0CF5;
+pub const GL_UNPACK_ROW_LENGTH: GLenum = 0x0CF2;
 pub const GL_PACK_ALIGNMENT: GLenum = 0x0D05;
 pub const GL_TEXTURE1: GLenum = 0x84C1;
 

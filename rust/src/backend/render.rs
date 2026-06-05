@@ -525,10 +525,17 @@ impl Atlas {
         Some((ATLAS_PAD, next_y + ATLAS_PAD))
     }
 
-    fn upload_region(&self, x: u32, y: u32, w: u32, h: u32, pixels: &[u8]) {
+    /// `src_row_len_px` = the row length (in pixels) of the SOURCE `pixels`
+    /// buffer, which may be wider than `w` when uploading a sub-region of a
+    /// larger bitmap. Passed to GL_UNPACK_ROW_LENGTH so GL skips full source
+    /// rows instead of packing them contiguously at width `w` (the latter
+    /// shears partial-width uploads). `pixels` must start at the region's
+    /// top-left pixel.
+    fn upload_region(&self, x: u32, y: u32, w: u32, h: u32, src_row_len_px: u32, pixels: &[u8]) {
         unsafe {
             glBindTexture(GL_TEXTURE_2D, self.texture);
             glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, src_row_len_px as GLint);
             glTexSubImage2D(
                 GL_TEXTURE_2D,
                 0,
@@ -540,6 +547,7 @@ impl Atlas {
                 GL_UNSIGNED_BYTE,
                 pixels.as_ptr() as *const _,
             );
+            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
             glBindTexture(GL_TEXTURE_2D, 0);
         }
     }
@@ -6510,8 +6518,15 @@ impl RenderBackend for SwitchRenderBackend {
             unsafe {
                 glBindTexture(GL_TEXTURE_2D, standalone.0.texture);
                 glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                // The source `rgba` buffer has full-bitmap-width rows. When the
+                // dirty `region` is narrower than the bitmap, GL must skip
+                // `rgba.width()` px per source row, not `w`. Without
+                // GL_UNPACK_ROW_LENGTH it packs rows contiguously at width `w`
+                // → each row drifts → diagonal shear / stripes (Icy Tower gauge
+                // + whole-frame skew on partial-width BitmapData updates).
                 let stride = rgba.width() as usize * 4;
                 let src_offset = (region.y_min as usize) * stride + (region.x_min as usize) * 4;
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, rgba.width() as GLint);
                 glTexSubImage2D(
                     GL_TEXTURE_2D, 0,
                     region.x_min as GLint, region.y_min as GLint,
@@ -6519,6 +6534,7 @@ impl RenderBackend for SwitchRenderBackend {
                     GL_RGBA, GL_UNSIGNED_BYTE,
                     rgba.data()[src_offset..].as_ptr() as *const _,
                 );
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
                 glBindTexture(GL_TEXTURE_2D, 0);
             }
             return Ok(());
@@ -6533,7 +6549,15 @@ impl RenderBackend for SwitchRenderBackend {
         // Compute the atlas-space pixel offset for the bitmap.
         let base_x = (switch_bitmap.u0 * ATLAS_SIZE as f32).round() as u32;
         let base_y = (switch_bitmap.v0 * ATLAS_SIZE as f32).round() as u32;
-        atlas.upload_region(base_x + region.x_min, base_y + region.y_min, w, h, rgba.data());
+        // Start the source pointer at the region's top-left and tell GL the
+        // real source row length (rgba.width()), same fix as the standalone
+        // path: a partial-width region would otherwise shear.
+        let src_offset = (region.y_min as usize) * (rgba.width() as usize) * 4
+            + (region.x_min as usize) * 4;
+        atlas.upload_region(
+            base_x + region.x_min, base_y + region.y_min, w, h,
+            rgba.width(), &rgba.data()[src_offset..],
+        );
         Ok(())
     }
 
