@@ -219,3 +219,30 @@ pub fn fetch_and_cache(
     crate::sd::commit();
     Ok(path)
 }
+
+/// Remove the cover files tied to a game on delete that the C++ dir scan can't
+/// reach: the cached online cover lives in the `covers/` SUBDIR (a different
+/// directory than the `.swf`), and stem-named manual sidecars (`<name>.png`)
+/// don't match the C++ `<basename>.swf.*` prefix. The `<basename>.swf.png/.jpg`
+/// sidecars ARE deleted C++-side, so they're not repeated here. Best-effort
+/// (missing files are fine); returns the count removed for logging. The caller
+/// commits the SD. `basename` is the full `.swf` filename (e.g. `Mario.swf`).
+pub fn remove_for(basename: &str) -> u32 {
+    let mut removed = 0u32;
+    // 1) Cached online cover (covers/<basename>.cover.png).
+    if std::fs::remove_file(cache_path(basename)).is_ok() {
+        removed += 1;
+    }
+    // 2) Stem-named manual sidecars (the natural `<name>.png`/`.jpg` form that
+    //    `resolve` accepts) across the SD roots.
+    let st = stem(basename);
+    for root in USER_SD_ROOTS {
+        for ext in ["png", "jpg"] {
+            let p = std::format!("{}/{}.{}", root, st, ext);
+            if std::fs::remove_file(&p).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}

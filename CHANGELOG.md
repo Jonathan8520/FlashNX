@@ -18,6 +18,11 @@ Library redesign: a tabbed navbar, a cover-art gallery, and a list-based importe
 
 - **Controls**: **−** is search, **+** is the selected game's options; the default-controls, language and **Quit** actions all live in the Settings tab. Switching tabs is **L / R** only.
 
+### Fixes
+
+- **Large backgrounds no longer turn white**: games whose backdrop or floor is a bitmap wider or taller than 2048px (e.g. Mario Combat's sky and ground) used to render as solid white blocks. They now draw correctly.
+- **Deleting a game cleans up everything**: removing a game now also deletes its cached online cover and the cover sidecars saved under the plain game name (on top of the `.swf` and its keymap/rename/save files), and clears the leftover Import-list "downloaded" badge and the on-screen cover, so re-importing the same game later starts fresh.
+
 ### Notes
 
 - Covers use the public Flashpoint metadata and logo API to enrich games you already have. FlashNX never downloads games from Flashpoint.

@@ -760,9 +760,11 @@ enum DrawKind {
     },
     Bitmap {
         /// Index into `SwitchRenderBackend::atlases` — the GL texture is
-        /// owned by the atlas, not per-draw.
+        /// owned by the atlas, not per-draw. Ignored when `standalone` is set.
         atlas_index: usize,
         /// Atlas-space UV remap (origin.x, origin.y, scale.x, scale.y).
+        /// Identity `[0,0,1,1]` for a standalone fill (the texture IS the
+        /// whole bitmap).
         uv_remap: [f32; 4],
         /// 3x3 column-major matrix mapping `a_pos` (shape pixels) to UV
         /// in [0, 1] of the source bitmap. Pre-inverted by
@@ -770,8 +772,13 @@ enum DrawKind {
         local_matrix: [GLfloat; 9],
         #[allow(dead_code)]
         is_smoothed: bool,
-        #[allow(dead_code)]
         is_repeating: bool,
+        /// Set for fills whose source bitmap is too big for the 2048² atlas
+        /// (e.g. Mario Combat's >2048 sky/floor): the standalone GL texture to
+        /// sample instead of `atlas_index`. Holds the `Arc` so the texture
+        /// outlives this draw (its `Drop` deletes the GL texture). Without this
+        /// the fill fell back to `Solid` and rendered as a white block.
+        standalone: Option<Arc<StandaloneTexture>>,
     },
 }
 
@@ -2133,6 +2140,7 @@ fn upload_draw(
     draw: &ruffle_render::tessellator::Draw,
     gradient_textures: &[GLuint],
     bitmap_meta: Option<&SwitchBitmapHandle>,
+    standalone: Option<Arc<StandaloneTexture>>,
     vertex_arena: &mut BufferArena,
     index_arena: &mut BufferArena,
 ) -> Option<GpuDraw> {
@@ -2211,30 +2219,35 @@ fn upload_draw(
             }
         }
         DrawType::Bitmap(b) => {
-            let Some(meta) = bitmap_meta else {
-                return Some(GpuDraw {
-                    vbo_offset,
-                    vbo_size,
-                    ibo_offset,
-                    ibo_size,
-                    num_indices: draw.indices.len() as GLsizei,
-                    kind: DrawKind::Solid,
-                });
-            };
             // `b.matrix` maps `a_pos` (shape pixels) to UV in [0,1] of the
-            // source bitmap. The shader composes with `u_uv_remap` to land
-            // in the atlas sub-rect.
+            // source bitmap. The shader composes with `u_uv_remap` to land in
+            // the atlas sub-rect (identity remap for a standalone full texture).
             let local_matrix = [
                 b.matrix[0][0], b.matrix[0][1], b.matrix[0][2],
                 b.matrix[1][0], b.matrix[1][1], b.matrix[1][2],
                 b.matrix[2][0], b.matrix[2][1], b.matrix[2][2],
             ];
-            DrawKind::Bitmap {
-                atlas_index: meta.atlas_index,
-                uv_remap: [meta.u0, meta.v0, meta.u1 - meta.u0, meta.v1 - meta.v0],
-                local_matrix,
-                is_smoothed: b.is_smoothed,
-                is_repeating: b.is_repeating,
+            match (bitmap_meta, standalone) {
+                // Common case: the fill bitmap is atlas-packed.
+                (Some(meta), _) => DrawKind::Bitmap {
+                    atlas_index: meta.atlas_index,
+                    uv_remap: [meta.u0, meta.v0, meta.u1 - meta.u0, meta.v1 - meta.v0],
+                    local_matrix,
+                    is_smoothed: b.is_smoothed,
+                    is_repeating: b.is_repeating,
+                    standalone: None,
+                },
+                // >2048 fill: sample its standalone texture directly (full UV).
+                (None, Some(tex)) => DrawKind::Bitmap {
+                    atlas_index: 0,
+                    uv_remap: [0.0, 0.0, 1.0, 1.0],
+                    local_matrix,
+                    is_smoothed: b.is_smoothed,
+                    is_repeating: b.is_repeating,
+                    standalone: Some(tex),
+                },
+                // Bitmap never resolved → solid (degenerate; e.g. budget cut).
+                (None, None) => DrawKind::Solid,
             }
         }
     };
@@ -7059,6 +7072,11 @@ impl RenderBackend for SwitchRenderBackend {
         const PER_SHAPE_BITMAP_BUDGET: usize = usize::MAX;
         let mut bitmap_metas: Vec<Option<SwitchBitmapHandle>> =
             Vec::with_capacity(mesh.draws.len());
+        // Parallel to `bitmap_metas`: the standalone texture for >2048 fills
+        // that don't fit the atlas. Exactly one of the two is Some per bitmap
+        // fill; both None means the fill renders solid (degenerate).
+        let mut bitmap_standalones: Vec<Option<Arc<StandaloneTexture>>> =
+            Vec::with_capacity(mesh.draws.len());
         let bitmap_fill_count = mesh
             .draws
             .iter()
@@ -7066,27 +7084,41 @@ impl RenderBackend for SwitchRenderBackend {
             .count();
         let resolve_bitmaps = bitmap_fill_count <= PER_SHAPE_BITMAP_BUDGET;
         for draw in &mesh.draws {
-            let meta = if resolve_bitmaps {
+            let (meta, standalone) = if resolve_bitmaps {
                 if let DrawType::Bitmap(b) = &draw.draw_type {
-                    bitmap_source
-                        .bitmap_handle(b.bitmap_id, self)
-                        .and_then(|h| as_switch_bitmap(&h).cloned())
+                    match bitmap_source.bitmap_handle(b.bitmap_id, self) {
+                        // Atlas-packed (common) vs standalone (>2048): pick
+                        // whichever variant this handle is.
+                        Some(h) => {
+                            if let Some(sw) = as_switch_bitmap(&h) {
+                                (Some(sw.clone()), None)
+                            } else if let Some(st) = as_standalone_bitmap(&h) {
+                                (None, Some(st.0.clone()))
+                            } else {
+                                (None, None)
+                            }
+                        }
+                        None => (None, None),
+                    }
                 } else {
-                    None
+                    (None, None)
                 }
             } else {
-                None
+                (None, None)
             };
             bitmap_metas.push(meta);
+            bitmap_standalones.push(standalone);
         }
 
         let mut draws: Vec<GpuDraw> = Vec::with_capacity(mesh.draws.len());
         for (idx, draw) in mesh.draws.iter().enumerate() {
             let meta_ref = bitmap_metas[idx].as_ref();
+            let standalone = bitmap_standalones[idx].clone();
             if let Some(mut gpu) = upload_draw(
                 draw,
                 &gradient_textures,
                 meta_ref,
+                standalone,
                 &mut self.vertex_arena,
                 &mut self.index_arena,
             ) {
@@ -8035,14 +8067,20 @@ impl CommandHandler for SwitchRenderBackend {
                     local_matrix,
                     is_smoothed: _,
                     is_repeating,
+                    standalone,
                 } => {
                     if local_matrix.iter().any(|v| !v.is_finite()) {
                         continue;
                     }
-                    let Some(atlas) = self.atlases.get(*atlas_index) else {
-                        continue;
+                    // >2048 fill: sample its own texture. Otherwise the atlas.
+                    let tex = if let Some(s) = standalone {
+                        s.texture
+                    } else {
+                        let Some(atlas) = self.atlases.get(*atlas_index) else {
+                            continue;
+                        };
+                        atlas.texture
                     };
-                    let tex = atlas.texture;
                     self.bitmap_draws_emitted = self.bitmap_draws_emitted.wrapping_add(1);
                     self.use_shape_bitmap(
                         &world,

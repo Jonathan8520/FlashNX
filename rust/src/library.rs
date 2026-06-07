@@ -1787,11 +1787,25 @@ fn delete_game(s: &mut State, game_idx: usize) {
     let rc = unsafe {
         swf_picker_delete_game(path_c.as_ptr() as *const core::ffi::c_char)
     };
+    // The C++ scan only sees the .swf's own directory; clean up the cached
+    // cover (covers/ subdir) and stem-named sidecars it can't reach, then
+    // commit so the unlinks (C++ + Rust) actually persist to the SD card.
+    let extra = crate::covers::remove_for(&entry.basename);
+    // Drop the renderer's cached cover TEXTURE (keyed by basename) too: deleting
+    // the file alone left a re-import of the same name showing the old cover
+    // straight from GPU memory. Mirrors run_cover_fetch_flow's invalidate.
+    crate::backend::render::invalidate_cover(&entry.basename);
+    crate::sd::commit();
     log(&std::format!(
-        "library: SUPPRIMER {} -> rc={} (count of files removed)\n",
-        entry.path, rc,
+        "library: SUPPRIMER {} -> rc={} (+{} cover/sidecar)\n",
+        entry.path, rc, extra,
     ));
     s.entries.remove(game_idx);
+    // Clear the session "downloaded" mark too. The IMPORTER green OK badge is a
+    // union of `entries` (updated just above) and this set; a same-session
+    // download lingering here kept the badge lit after a delete, while the
+    // A-press "already on SD" check (entries-only) disagreed and re-downloaded.
+    s.downloaded_basenames.retain(|n| n != &entry.basename);
 }
 
 extern "C" {
