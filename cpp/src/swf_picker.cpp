@@ -25,7 +25,7 @@
 
 // Defined in the Rust staticlib: pushes one (path) onto the library's
 // scan list. Rust handles reading SWF header lazily. Returns 0 on success.
-extern "C" int ruffle_library_add_path(const char* path);
+extern "C" int ruffle_library_add_path(const char* path, unsigned long long mtime);
 
 namespace {
 
@@ -58,17 +58,13 @@ void scan_dir_all(const char* dir) {
             std::printf("library scan: path too long, skipping %s\n", ent->d_name);
             continue;
         }
-        // Confirm regular file (DT_UNKNOWN on some fsdev volumes — fall back
-        // to stat). Skip dirs / symlinks / etc.
-        bool is_regular = (ent->d_type == DT_REG);
-        if (!is_regular && ent->d_type == DT_UNKNOWN) {
-            struct stat st;
-            if (::stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
-                is_regular = true;
-            }
-        }
-        if (!is_regular) continue;
-        if (ruffle_library_add_path(path) == 0) {
+        // stat() for the regular-file check AND the mtime: the "recent" sort
+        // needs a timestamp, d_type carries none (and is DT_UNKNOWN on some
+        // fsdev volumes anyway), and Rust's std::fs metadata is unreliable on
+        // Horizon — so the timestamp comes from here.
+        struct stat st;
+        if (::stat(path, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        if (ruffle_library_add_path(path, (unsigned long long)st.st_mtime) == 0) {
             ++found;
         }
     }

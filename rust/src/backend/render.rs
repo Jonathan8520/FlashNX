@@ -5779,15 +5779,21 @@ impl SwitchRenderBackend {
                 &name,
                 swf::Color::from_rgb(0xFFFFFF, 255),
             );
+            let played = crate::playtime::get(&entry.basename);
+            let pt = if played > 0 {
+                std::format!(" // {} {}", format_playtime(played), crate::loc::s().played_label)
+            } else {
+                std::string::String::new()
+            };
             let info = if entry.is_as3 {
                 std::format!(
-                    "{} // SWF V{} {} // AS3",
-                    format_size_pretty(entry.size_bytes), entry.swf_version, entry.compression_label,
+                    "{} // SWF V{} {} // AS3{}",
+                    format_size_pretty(entry.size_bytes), entry.swf_version, entry.compression_label, pt,
                 )
             } else {
                 std::format!(
-                    "{} // SWF V{} {}",
-                    format_size_pretty(entry.size_bytes), entry.swf_version, entry.compression_label,
+                    "{} // SWF V{} {}{}",
+                    format_size_pretty(entry.size_bytes), entry.swf_version, entry.compression_label, pt,
                 )
             };
             let isc = 2.0;
@@ -6601,6 +6607,8 @@ impl SwitchRenderBackend {
         titles: &[&str],
         urls: &[&str],
         msg: &str,
+        header_title: &str,
+        footer: &str,
     ) {
         unsafe {
             glEnable(GL_BLEND);
@@ -6626,14 +6634,14 @@ impl SwitchRenderBackend {
             };
             <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_14_20_38), panel);
             <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(0xFFFFFF, 255), panel);
-            let title = crate::loc::s().cover_title;
+            let title = header_title;
             let tw = self.measure_text(title, 3.0);
             self.draw_text(panel_x + (PANEL_W - tw) * 0.5, panel_y + 30.0, 3.0, title, swf::Color::from_rgb(0xFFFFFF, 255));
             let m = if msg.is_empty() { crate::loc::s().cover_none } else { msg };
             let shown = truncate_mid(m, ((PANEL_W - 120.0) / 12.0) as usize);
             let mw = self.measure_text(&shown, 2.0);
             self.draw_text(panel_x + (PANEL_W - mw) * 0.5, panel_y + 120.0, 2.0, &shown, swf::Color::from_rgb(0xAABFD8, 255));
-            let help = crate::loc::s().cover_footer;
+            let help = footer;
             let hw = self.measure_text(help, 2.0);
             self.draw_text(panel_x + (PANEL_W - hw) * 0.5, panel_y + panel_h - 36.0, 2.0, help, swf::Color::from_rgb(0x99AABB, 255));
             unsafe {
@@ -6664,7 +6672,7 @@ impl SwitchRenderBackend {
         <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(0xFFFFFF, 255), panel);
 
         // Title + game-name subtitle.
-        let title = crate::loc::s().cover_title;
+        let title = header_title;
         let tw = self.measure_text(title, 3.0);
         self.draw_text(panel_x + (PANEL_W - tw) * 0.5, panel_y + 26.0, 3.0, title, swf::Color::from_rgb(0xFFFFFF, 255));
         let gn = truncate_mid(game_name, 44);
@@ -6739,9 +6747,247 @@ impl SwitchRenderBackend {
         }
 
         // Footer.
-        let help = crate::loc::s().cover_footer;
+        let help = footer;
         let hw = self.measure_text(help, 2.0);
         self.draw_text(panel_x + (PANEL_W - hw) * 0.5, panel_y + panel_h - 34.0, 2.0, help, swf::Color::from_rgb(0x99AABB, 255));
+
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
+    /// Full-page, scrollable cover gallery for Flashpoint search results
+    /// (IMPORTER > X). Unlike the JAQUETTE picker (a centered modal sized for a
+    /// handful of candidates), this fills the screen like a tab page and scrolls
+    /// — `scroll_row` is the first visible row. Thumbnails load progressively
+    /// from `urls` via the same `thumb_for` cache as the cover picker.
+    pub fn draw_library_fp_gallery(
+        &mut self,
+        query: &str,
+        selection: usize,
+        scroll_row: usize,
+        titles: &[&str],
+        urls: &[&str],
+        installed: &[bool],
+        msg: &str,
+        header_title: &str,
+        footer: &str,
+    ) {
+        self.library_clear();
+        unsafe {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_STENCIL_TEST);
+        }
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        let cols = crate::library::FP_GALLERY_COLS;
+        let rows_visible = crate::library::FP_GALLERY_ROWS;
+        let n = urls.len();
+
+        // Header (title + the search query) and footer.
+        let tw = self.measure_text(header_title, 3.0);
+        self.draw_text((vw - tw) * 0.5, 36.0, 3.0, header_title, swf::Color::from_rgb(0xFFFFFF, 255));
+        if !query.is_empty() {
+            let q = truncate_mid(query, 60);
+            let qw = self.measure_text(&q, 2.0);
+            self.draw_text((vw - qw) * 0.5, 80.0, 2.0, &q, swf::Color::from_rgb(0xFFD740, 255));
+        }
+        let hw = self.measure_text(footer, 2.0);
+        self.draw_text((vw - hw) * 0.5, vh - 34.0, 2.0, footer, swf::Color::from_rgb(0x99AABB, 255));
+
+        if n == 0 {
+            let m = if msg.is_empty() { crate::loc::s().cover_none } else { msg };
+            let mw = self.measure_text(m, 2.5);
+            self.draw_text((vw - mw) * 0.5, vh * 0.5 - 12.0, 2.5, m, swf::Color::from_rgb(0xAABFD8, 255));
+            unsafe {
+                glUseProgram(0);
+                glBindVertexArray(0);
+            }
+            self.gl_state.invalidate();
+            return;
+        }
+
+        const MARGIN: f32 = 40.0;
+        const GAP: f32 = 16.0;
+        const LABEL_H: f32 = 22.0;
+        let grid_top = 116.0;
+        let grid_bottom = vh - 52.0;
+        let inner_w = vw - MARGIN * 2.0;
+        let cell_w = (inner_w - GAP * (cols as f32 - 1.0)) / cols as f32;
+        let row_h = (grid_bottom - grid_top) / rows_visible as f32;
+        let thumb_h = (row_h - LABEL_H - GAP).max(40.0);
+
+        let phase_s = (unsafe { ruffle_tick_now() } as f64) / (unsafe { ruffle_tick_freq() } as f64);
+        let pulse = approx_sin(phase_s as f32 * (2.0 * core::f32::consts::PI / 1.6));
+
+        let start = scroll_row * cols;
+        let end = ((scroll_row + rows_visible) * cols).min(n);
+        let mut loaded_one = false;
+        for i in start..end {
+            let vis = i - start;
+            let col = (vis % cols) as f32;
+            let r = (vis / cols) as f32;
+            let cx = MARGIN + col * (cell_w + GAP);
+            let cy = grid_top + r * row_h;
+
+            // Cell backdrop (so pending / failed thumbs still show a tile).
+            let bg = Matrix {
+                a: cell_w, b: 0.0, c: 0.0, d: thumb_h,
+                tx: swf::Twips::from_pixels(cx as f64),
+                ty: swf::Twips::from_pixels(cy as f64),
+            };
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xFF_0B_12_22), bg);
+
+            match self.thumb_for(urls[i], &mut loaded_one) {
+                Some(ThumbTex::Image { tex, w, h }) => {
+                    self.draw_textured_rect_cover(cx, cy, cell_w, thumb_h, tex, w, h);
+                }
+                Some(ThumbTex::Failed) => {
+                    let q = "?";
+                    let qw = self.measure_text(q, 4.0);
+                    self.draw_text(cx + (cell_w - qw) * 0.5, cy + thumb_h * 0.5 - 14.0, 4.0, q, swf::Color::from_rgb(0x55_66_77, 255));
+                }
+                None => {
+                    let d = "...";
+                    let dw = self.measure_text(d, 3.0);
+                    self.draw_text(cx + (cell_w - dw) * 0.5, cy + thumb_h * 0.5 - 10.0, 3.0, d, swf::Color::from_rgb(0x7A8A9C, 255));
+                }
+            }
+
+            // "OK" badge (top-right) for games already in the local library.
+            if installed.get(i).copied().unwrap_or(false) {
+                let bw = 32.0;
+                let bh = 18.0;
+                let bx = cx + cell_w - bw - 4.0;
+                let by = cy + 4.0;
+                let badge = Matrix {
+                    a: bw, b: 0.0, c: 0.0, d: bh,
+                    tx: swf::Twips::from_pixels(bx as f64),
+                    ty: swf::Twips::from_pixels(by as f64),
+                };
+                <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_2E_8B_57), badge);
+                let okw = self.measure_text("OK", 1.5);
+                self.draw_text(bx + (bw - okw) * 0.5, by + 3.0, 1.5, "OK", swf::Color::from_rgb(0xFFFFFF, 255));
+            }
+            // Per-cell title (truncated to the cell width).
+            if let Some(t) = titles.get(i) {
+                let ls = 1.5;
+                let max_chars = ((cell_w / (6.0 * ls)) as usize).max(1);
+                let shown = truncate_mid(t, max_chars);
+                let lw = self.measure_text(&shown, ls);
+                let col_txt = if i == selection { 0xFFFFFF } else { 0x9FB0C2 };
+                self.draw_text(cx + (cell_w - lw) * 0.5, cy + thumb_h + 5.0, ls, &shown, swf::Color::from_rgb(col_txt, 255));
+            }
+
+            if i == selection {
+                let p = (pulse * 0.5) + 0.5;
+                let g = (0xC0 as f32 + (0xFF - 0xC0) as f32 * p) as u32;
+                let col = swf::Color::from_rgb((0xFF << 16) | (g << 8) | 0x30, 255);
+                let b = 4.0;
+                let bars = [
+                    (cx - b, cy - b, cell_w + 2.0 * b, b),
+                    (cx - b, cy + thumb_h, cell_w + 2.0 * b, b),
+                    (cx - b, cy, b, thumb_h),
+                    (cx + cell_w, cy, b, thumb_h),
+                ];
+                for (bx, by, bw, bh) in bars {
+                    let m = Matrix {
+                        a: bw, b: 0.0, c: 0.0, d: bh,
+                        tx: swf::Twips::from_pixels(bx as f64),
+                        ty: swf::Twips::from_pixels(by as f64),
+                    };
+                    <Self as CommandHandler>::draw_rect(self, col, m);
+                }
+            }
+        }
+
+        // Scrollbar (right edge) when there's more than one screenful.
+        let rows_total = (n + cols - 1) / cols;
+        if rows_total > rows_visible {
+            let track_x = vw - 14.0;
+            let track_y = grid_top;
+            let track_h = grid_bottom - grid_top;
+            let track = Matrix {
+                a: 4.0, b: 0.0, c: 0.0, d: track_h,
+                tx: swf::Twips::from_pixels(track_x as f64),
+                ty: swf::Twips::from_pixels(track_y as f64),
+            };
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x40_FF_FF_FF), track);
+            let frac = rows_visible as f32 / rows_total as f32;
+            let thumb_h2 = (track_h * frac).max(24.0);
+            let max_scroll = (rows_total - rows_visible) as f32;
+            let pos = if max_scroll > 0.0 { scroll_row as f32 / max_scroll } else { 0.0 };
+            let thumb_y = track_y + (track_h - thumb_h2) * pos;
+            let bar = Matrix {
+                a: 4.0, b: 0.0, c: 0.0, d: thumb_h2,
+                tx: swf::Twips::from_pixels(track_x as f64),
+                ty: swf::Twips::from_pixels(thumb_y as f64),
+            };
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), bar);
+        }
+
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
+    /// Centered modal list for the JOUER sort picker (Y). `options` are the sort
+    /// labels; `selection` highlights the active one. Self-contained (dims behind).
+    pub fn draw_library_sort_modal(
+        &mut self,
+        selection: usize,
+        options: &[&str],
+        title: &str,
+        footer: &str,
+    ) {
+        unsafe {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_STENCIL_TEST);
+        }
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        self.fill_screen_dim(0xB0_00_00_00);
+
+        const PANEL_W: f32 = 460.0;
+        let row_h: f32 = 54.0;
+        let panel_h = 130.0 + options.len() as f32 * row_h + 46.0;
+        let panel_x = (vw - PANEL_W) * 0.5;
+        let panel_y = (vh - panel_h) * 0.5;
+        let panel = Matrix {
+            a: PANEL_W, b: 0.0, c: 0.0, d: panel_h,
+            tx: swf::Twips::from_pixels(panel_x as f64),
+            ty: swf::Twips::from_pixels(panel_y as f64),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_14_20_38), panel);
+        <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(0xFFFFFF, 255), panel);
+
+        let tw = self.measure_text(title, 3.0);
+        self.draw_text(panel_x + (PANEL_W - tw) * 0.5, panel_y + 26.0, 3.0, title, swf::Color::from_rgb(0xFFFFFF, 255));
+
+        let opts_top = panel_y + 100.0;
+        let opts_left = panel_x + 120.0;
+        for (i, opt) in options.iter().enumerate() {
+            let y = opts_top + i as f32 * row_h;
+            let is_sel = i == selection;
+            let color = if is_sel {
+                swf::Color::from_rgb(0xFFD740, 255)
+            } else {
+                swf::Color::from_rgb(0xCCCCCC, 255)
+            };
+            if is_sel {
+                self.draw_text(opts_left - 30.0, y, 2.5, ">", color);
+            }
+            self.draw_text(opts_left, y, 2.5, opt, color);
+        }
+
+        let hw = self.measure_text(footer, 2.0);
+        self.draw_text(panel_x + (PANEL_W - hw) * 0.5, panel_y + panel_h - 34.0, 2.0, footer, swf::Color::from_rgb(0x99AABB, 255));
 
         unsafe {
             glUseProgram(0);
@@ -6995,10 +7241,28 @@ impl SwitchRenderBackend {
     }
 }
 
+/// Human playtime: "42s", "5m", "1h03m".
+fn format_playtime(secs: u64) -> std::string::String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    if h > 0 {
+        std::format!("{}h{:02}m", h, m)
+    } else if m > 0 {
+        std::format!("{}m", m)
+    } else {
+        std::format!("{}s", secs)
+    }
+}
+
 /// Format a byte count as a short pretty string ("3 KB", "15 MB"). Picks
 /// the largest unit that keeps the integer part ≤ 999. KiB-style (1024)
 /// instead of decimal because that's what hbmenu / fsadm show for files.
 fn format_size_pretty(bytes: u64) -> std::string::String {
+    // Unknown size (e.g. Flashpoint search hits — db-api doesn't expose the
+    // GameZIP size) → show nothing rather than a misleading "0 B".
+    if bytes == 0 {
+        return std::string::String::new();
+    }
     const KB: u64 = 1024;
     const MB: u64 = 1024 * 1024;
     const GB: u64 = 1024 * 1024 * 1024;

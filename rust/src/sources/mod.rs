@@ -7,6 +7,7 @@
 //! adds the per-source URL parsing and JSON shapes on top of `net::http_get`.
 
 pub mod flashpoint;
+pub mod gamezip;
 
 /// How a user-pasted import string is routed. The IMPORTER tab classifies the
 /// input and dispatches to the matching flow. Deliberately small — FlashNX

@@ -13,7 +13,7 @@ extern "C" void swf_picker_run(void);
 
 // Phase 3.4 — library boot screen FFI (rust/src/library.rs).
 extern "C" int  ruffle_library_init(void);
-extern "C" int  ruffle_library_add_path(const char* path);
+extern "C" int  ruffle_library_add_path(const char* path, unsigned long long mtime);
 extern "C" void ruffle_library_open(void);
 extern "C" int  ruffle_library_active(void);
 extern "C" int  ruffle_library_picked(void);

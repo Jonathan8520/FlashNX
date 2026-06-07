@@ -75,6 +75,17 @@ pub(crate) enum Screen {
     /// `State::cover_msg` (non-empty) shows a notice instead of a list (covers
     /// off / no results / fetch error). A = fetch+cache the chosen logo.
     CoverPicker { game_idx: usize, selection: usize },
+    /// Flashpoint game gallery (IMPORTER > X): a cover grid of search hits;
+    /// A downloads the selected game's GameZIP. Reuses `cover_candidates` for
+    /// storage and `draw_library_cover_picker` for rendering.
+    FpGallery { selection: usize, scroll: usize },
+    /// JOUER sort picker (Y): centered modal — A-Z / recent / most-played / size.
+    /// `prev_sel`/`prev_scroll` restore the gallery cursor when B (cancel) is hit.
+    SortModal { selection: usize, prev_sel: usize, prev_scroll: usize },
+    /// Sort picker for the DISTANT lists (Y). `fp` = Flashpoint gallery (sorts
+    /// `cover_candidates` by name/developer) vs archive.org files (sorts
+    /// `remote_files` by name/size). `prev_*` restore the cursor on cancel.
+    RemoteSortModal { selection: usize, fp: bool, prev_sel: usize, prev_scroll: usize },
     // ── Phase 3.7: DISTANT mode (archive.org import) ───────────────────
     /// IMPORTER home: a navigable LIST of saved URLs + a trailing "+ add" row.
     /// `selection` indexes [history urls.., add-row]. A launches the selected
@@ -160,6 +171,124 @@ pub(crate) fn screen_tab(screen: Screen) -> Option<Tab> {
 ///      row (instead of jumping to the top), and
 ///   2. the in-game pause menu can show the game's name under "PAUSE".
 static LAST_PLAYED: Mutex<Option<(std::string::String, std::string::String)>> = Mutex::new(None);
+
+/// System tick captured when a game is launched; `open()` (return to library)
+/// subtracts it to bank the session's playtime. NOT cleared by `reset()` so it
+/// survives the game->library teardown.
+static LAUNCH_TICK: Mutex<Option<u64>> = Mutex::new(None);
+
+/// Active library sort, persisted to `sdmc:/flashnx/sort.txt`
+/// (0 = A-Z, 1 = recent, 2 = most played). Default A-Z.
+static SORT_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// One-shot guard: load playtime + sort prefs once per boot (not every open()).
+static PREFS_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+const SORT_PATH: &str = "sdmc:/flashnx/sort.txt";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SortMode {
+    Alpha,
+    Recent,
+    RecentlyPlayed,
+    MostPlayed,
+    Size,
+}
+
+pub(crate) fn current_sort_mode() -> SortMode {
+    match SORT_MODE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => SortMode::Recent,
+        2 => SortMode::RecentlyPlayed,
+        3 => SortMode::MostPlayed,
+        4 => SortMode::Size,
+        _ => SortMode::Alpha,
+    }
+}
+
+/// 0/1/2 index of the active sort (for the sort modal cursor).
+pub(crate) fn sort_mode_index() -> usize {
+    SORT_MODE.load(std::sync::atomic::Ordering::Relaxed) as usize
+}
+
+/// Set + persist the active sort mode (0/1/2).
+pub(crate) fn set_sort_mode(idx: u8) {
+    SORT_MODE.store(idx, std::sync::atomic::Ordering::Relaxed);
+    let c: &[u8] = match idx {
+        1 => b"1",
+        2 => b"2",
+        3 => b"3",
+        4 => b"4",
+        _ => b"0",
+    };
+    if std::fs::write(SORT_PATH, c).is_ok() {
+        crate::sd::commit();
+    }
+}
+
+fn read_sort_mode() -> u8 {
+    use std::io::Read;
+    let mut f = match std::fs::File::open(SORT_PATH) {
+        Ok(f) => f,
+        Err(_) => return 0,
+    };
+    let mut b = [0u8; 1];
+    match f.read(&mut b) {
+        Ok(n) if n >= 1 => match b[0] {
+            b'1' => 1,
+            b'2' => 2,
+            b'3' => 3,
+            b'4' => 4,
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
+/// Boot-once load of persisted playtime + sort preference into memory.
+fn ensure_prefs_loaded() {
+    if !PREFS_LOADED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        crate::playtime::load();
+        SORT_MODE.store(read_sort_mode(), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// On return from a game, add its session duration to the running total.
+/// Consumes `LAUNCH_TICK` so each session is banked exactly once.
+fn bank_playtime() {
+    let start = LAUNCH_TICK.lock().ok().and_then(|mut g| g.take());
+    if let (Some(start), Some(base)) = (start, last_played_basename()) {
+        let now = unsafe { ruffle_tick_now() };
+        let freq = unsafe { ruffle_tick_freq() };
+        if freq > 0 && now > start {
+            crate::playtime::add(&base, (now - start) / freq);
+        }
+    }
+}
+
+/// Sort `entries` in place by the given mode (alpha tiebreak everywhere).
+pub(crate) fn sort_entries(entries: &mut std::vec::Vec<Entry>, mode: SortMode) {
+    let alpha = |a: &Entry, b: &Entry| {
+        a.display_name
+            .to_lowercase()
+            .cmp(&b.display_name.to_lowercase())
+    };
+    match mode {
+        SortMode::Alpha => entries.sort_by(alpha),
+        SortMode::Recent => entries.sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| alpha(a, b))),
+        SortMode::RecentlyPlayed => entries.sort_by(|a, b| {
+            crate::playtime::get_last(&b.basename)
+                .cmp(&crate::playtime::get_last(&a.basename))
+                .then_with(|| alpha(a, b))
+        }),
+        SortMode::MostPlayed => entries.sort_by(|a, b| {
+            crate::playtime::get(&b.basename)
+                .cmp(&crate::playtime::get(&a.basename))
+                .then_with(|| alpha(a, b))
+        }),
+        SortMode::Size => {
+            entries.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes).then_with(|| alpha(a, b)))
+        }
+    }
+}
 
 fn note_played(basename: &str, display_name: &str) {
     if let Ok(mut g) = LAST_PLAYED.lock() {
@@ -272,6 +401,10 @@ pub(crate) struct Entry {
     /// color chip in the list. Same hash always produces the same color
     /// across reboots (no persistence needed) because the input is stable.
     pub color_chip: u32,
+    /// File mtime (seconds since epoch, 0 if unavailable) — drives the "recent
+    /// first" sort. Relative order is reliable even with a wrong console clock
+    /// (all files are stamped by the same clock).
+    pub mtime: u64,
 }
 
 pub(crate) struct State {
@@ -299,6 +432,10 @@ pub(crate) struct State {
     /// can `add_path` to the local list without re-deriving.
     pub(crate) download_file_name: std::string::String,
     pub(crate) download_out_path: std::string::String,
+    /// Set when the in-flight download is a Flashpoint GameZIP: holds the FINAL
+    /// `.swf` path to extract the zip into (the download itself goes to a temp
+    /// `.zip`). `None` for a normal direct/archive.org `.swf` download.
+    pub(crate) download_zip_extract: Option<std::string::String>,
     /// Last error message — shown in `Screen::DistantError` until user
     /// dismisses with A/B.
     pub(crate) distant_error: std::string::String,
@@ -364,6 +501,7 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     remote_files: std::vec::Vec::new(),
     download_file_name: std::string::String::new(),
     download_out_path: std::string::String::new(),
+    download_zip_extract: None,
     distant_error: std::string::String::new(),
     downloaded_basenames: std::vec::Vec::new(),
     url_history: std::vec::Vec::new(),
@@ -394,6 +532,12 @@ pub const GALLERY_ROWS_VISIBLE: usize = 3;
 /// renderer's layout and the input handler's 2D navigation agree.
 pub const COVER_PICKER_COLS: usize = 4;
 
+/// Flashpoint result gallery (IMPORTER > X): full-page scrollable cover grid.
+/// Shared between `draw_library_fp_gallery` (layout) and `handle_fp_gallery_input`
+/// (2D nav + scroll clamp) so they agree on columns / visible rows.
+pub const FP_GALLERY_COLS: usize = 5;
+pub const FP_GALLERY_ROWS: usize = 3;
+
 /// `visible_rows` on the DISTANT (archive.org) files screen. Larger than
 /// LOCAL because typical archive.org dumps run 80-3600+ entries — 10 is
 /// the most that fits between the header at y≈150 and footer at y≈680
@@ -404,6 +548,7 @@ pub const DISTANT_VISIBLE_ROWS: usize = 10;
 
 extern "C" {
     fn ruffle_tick_now() -> u64;
+    fn ruffle_tick_freq() -> u64;
     fn ruffle_log_cstr(msg: *const core::ffi::c_char);
     /// 1 = small applet memory pool (can't launch games — see P1c notice),
     /// 0 = full title-takeover heap. Defined in cpp/src/ruffle_bridge.cpp.
@@ -418,7 +563,7 @@ fn log(s: &str) {
 
 /// Called from C++ once per `.swf` found during the SD scan. Parses the
 /// header inline so the library list has full metadata to display.
-pub fn add_path(path: &str) -> bool {
+pub fn add_path(path: &str, mtime: u64) -> bool {
     let basename = path
         .rsplit(['/', '\\'])
         .next()
@@ -451,6 +596,7 @@ pub fn add_path(path: &str) -> bool {
         compression_label,
         is_as3,
         color_chip,
+        mtime,
     };
     log(&std::format!(
         "library: added {} (SWF v{} {}, {})\n",
@@ -469,6 +615,10 @@ pub fn open() {
     // Reload URL history from SD on each open so changes from a previous
     // .nro boot are visible. Cheap (file is <2 KB typical).
     load_history_from_sd();
+    // Boot-once: load persisted playtime + sort preference.
+    ensure_prefs_loaded();
+    // Returning from a game? Bank that session's playtime before we re-sort.
+    bank_playtime();
     // If we're re-opening after quitting a game, land the cursor back on
     // that game's row instead of the top of the list.
     let want = last_played_basename();
@@ -482,6 +632,8 @@ pub fn open() {
         // filtered-view position (view == full list).
         s.local_filter = None;
         s.anim_origin_ticks = unsafe { ruffle_tick_now() };
+        // Apply the active sort BEFORE the cursor position is computed below.
+        sort_entries(&mut s.entries, current_sort_mode());
         s.screen = if s.entries.is_empty() {
             Screen::Empty
         } else {
@@ -694,6 +846,7 @@ pub fn reset() {
         s.remote_files.clear();
         s.download_file_name.clear();
         s.download_out_path.clear();
+        s.download_zip_extract = None;
         s.distant_error.clear();
         s.downloaded_basenames.clear();
         s.distant_filter = None;
@@ -792,6 +945,12 @@ pub fn input(button: &str) -> bool {
             }
         }
         if let Screen::DistantIdle { selection } = screen_snap {
+            if button == "X" {
+                // X on the IMPORTER home = search Flashpoint for a game to
+                // download. Hoisted: swkbd + HTTPS must run WITHOUT the lock.
+                run_fp_search_flow();
+                return true;
+            }
             if button == "A" {
                 // A on a URL row launches it; A on the trailing "+ add" row
                 // (selection == history len, so get() is None) opens swkbd.
@@ -892,6 +1051,18 @@ pub fn input(button: &str) -> bool {
         Screen::CoverPicker { game_idx, selection } => {
             // A is hoisted (HTTPS fetch); here we only move/cancel.
             handle_cover_picker_input(&mut s, button, game_idx, selection);
+            true
+        }
+        Screen::FpGallery { selection, scroll } => {
+            handle_fp_gallery_input(&mut s, button, selection, scroll);
+            true
+        }
+        Screen::SortModal { selection, prev_sel, prev_scroll } => {
+            handle_sort_modal_input(&mut s, button, selection, prev_sel, prev_scroll);
+            true
+        }
+        Screen::RemoteSortModal { selection, fp, prev_sel, prev_scroll } => {
+            handle_remote_sort_modal_input(&mut s, button, selection, fp, prev_sel, prev_scroll);
             true
         }
         Screen::DistantIdle { selection } => {
@@ -1092,6 +1263,9 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
                 // Remember it so quit-to-library lands back on this row and
                 // the pause menu can show the title.
                 note_played(&entry.basename, &entry.display_name);
+                if let Ok(mut g) = LAUNCH_TICK.lock() {
+                    *g = Some(unsafe { ruffle_tick_now() });
+                }
                 log(&std::format!(
                     "library: JOUER -> {} ({})\n",
                     entry.display_name, entry.path,
@@ -1121,8 +1295,13 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
             return;
         }
         "Y" => {
-            // Quick shortcut to the IMPORT tab (also reachable via L/R).
-            s.screen = Screen::DistantIdle { selection: 0 };
+            // Open the sort picker (cursor on the active mode); remember where we
+            // were so B (cancel) restores it instead of jumping to the top.
+            s.screen = Screen::SortModal {
+                selection: sort_mode_index(),
+                prev_sel: selection,
+                prev_scroll: scroll,
+            };
             return;
         }
         _ => {}
@@ -1306,6 +1485,45 @@ fn run_direct_download(url: &str) {
     }
 }
 
+/// IMPORTER > X: search Flashpoint for Flash games by name and open the cover
+/// gallery (`FpGallery`) of the hits. Hoisted from `input()` — runs swkbd + a
+/// synchronous HTTPS search WITHOUT the LIBRARY lock. On A in the gallery the
+/// user downloads the selected game's GameZIP (see `handle_fp_gallery_input`).
+/// Reuses `cover_candidates`/`cover_msg`/`cover_query` (the cover-picker state);
+/// pre-fills the keyboard with the last query so re-searching to refine is easy.
+fn run_fp_search_flow() {
+    let initial = LIBRARY
+        .lock()
+        .ok()
+        .map(|s| s.cover_query.clone())
+        .unwrap_or_default();
+    let Some(query) = net::prompt_search(&initial) else {
+        return;
+    };
+    let query = query.trim().to_string();
+    if query.is_empty() {
+        return;
+    }
+    let (cands, msg) = match crate::sources::gamezip::search(&query) {
+        Ok(list) if list.is_empty() => {
+            (std::vec::Vec::new(), crate::loc::s().cover_none.to_string())
+        }
+        Ok(list) => (list, std::string::String::new()),
+        Err(e) => (std::vec::Vec::new(), e),
+    };
+    log(&std::format!(
+        "library: flashpoint game search \"{}\" -> {} hit(s)\n",
+        query,
+        cands.len(),
+    ));
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.cover_candidates = cands;
+        s.cover_msg = msg;
+        s.cover_query = query;
+        s.screen = Screen::FpGallery { selection: 0, scroll: 0 };
+    }
+}
+
 /// archive.org item import (async): start the metadata fetch + open the reveal
 /// window (with a spinner) from the launched row. `render`'s DistantLoading arm
 /// polls `net::tick_archive_fetch` each frame and switches to DistantFiles on
@@ -1408,7 +1626,17 @@ fn handle_distant_files_input(
             }
             return;
         }
-        "B" | "Y" => {
+        "Y" => {
+            // Sort picker for the archive.org file list (name / size).
+            s.screen = Screen::RemoteSortModal {
+                selection: 0,
+                fp: false,
+                prev_sel: selection,
+                prev_scroll: scroll,
+            };
+            return;
+        }
+        "B" => {
             // Collapse the file list back down to its row; render() clears +
             // returns to the IMPORTER list once the reveal finishes. Keep the
             // screen + remote_files so the list stays drawable while it shrinks.
@@ -1716,6 +1944,196 @@ fn handle_cover_picker_input(s: &mut State, button: &str, game_idx: usize, mut s
     s.screen = Screen::CoverPicker { game_idx, selection };
 }
 
+/// Flashpoint gallery (IMPORTER > X) navigation + download. A cover grid of the
+/// search hits; A downloads the selected game's GameZIP (async — then
+/// `on_download_finished` unzips it), B returns to the IMPORTER list. Called
+/// under the LIBRARY lock; `net::start_download` is non-blocking so that's fine.
+fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mut scroll: usize) {
+    let total = s.cover_candidates.len();
+    let cols = FP_GALLERY_COLS;
+    let rows_visible = FP_GALLERY_ROWS;
+    match button {
+        "Left" | "StickLLeft" => {
+            if total > 0 && selection > 0 {
+                selection -= 1;
+            }
+        }
+        "Right" | "StickLRight" => {
+            if total > 0 && selection + 1 < total {
+                selection += 1;
+            }
+        }
+        "Up" | "StickLUp" => {
+            if selection >= cols {
+                selection -= cols;
+            }
+        }
+        "Down" | "StickLDown" => {
+            if selection + cols < total {
+                selection += cols;
+            }
+        }
+        "A" => {
+            let Some(cand) = s.cover_candidates.get(selection).cloned() else {
+                return;
+            };
+            let swf_name = crate::sources::gamezip::swf_filename(&cand.title);
+            // Already on SD → silent no-op (play it from JOUER instead).
+            if s.entries.iter().any(|e| e.basename == swf_name) {
+                log(&std::format!("library: A ignore — {} deja sur SD\n", swf_name));
+                return;
+            }
+            let swf_path = std::format!("{}/{}", USER_SD_ROOTS[0], swf_name);
+            let zip_path = std::format!("{}/.fpdl.zip", USER_SD_ROOTS[0]);
+            let url = crate::sources::gamezip::get_url(&cand.id);
+            match net::start_download(&url, &zip_path) {
+                Ok(()) => {
+                    s.download_file_name = swf_name;
+                    s.download_out_path = zip_path;
+                    s.download_zip_extract = Some(swf_path);
+                    s.download_resume_pos = Some((selection, scroll));
+                    s.screen = Screen::DistantDownloading;
+                }
+                Err(e) => {
+                    s.distant_error = e;
+                    s.screen = Screen::DistantError;
+                }
+            }
+            return;
+        }
+        "Y" => {
+            // Sort picker for the Flashpoint results (name / developer).
+            s.screen = Screen::RemoteSortModal {
+                selection: 0,
+                fp: true,
+                prev_sel: selection,
+                prev_scroll: scroll,
+            };
+            return;
+        }
+        "B" => {
+            s.cover_candidates.clear();
+            s.cover_msg.clear();
+            s.cover_query.clear();
+            s.screen = Screen::DistantIdle { selection: 0 };
+            return;
+        }
+        _ => {}
+    }
+    // Keep the selected row visible (edge-scroll).
+    let sel_row = selection / cols;
+    if sel_row < scroll {
+        scroll = sel_row;
+    } else if sel_row >= scroll + rows_visible {
+        scroll = sel_row + 1 - rows_visible;
+    }
+    s.screen = Screen::FpGallery { selection, scroll };
+}
+
+/// JOUER sort picker (Y) input: Up/Down move, A applies + persists + re-sorts,
+/// B cancels. After a sort change the list reorders, so the cursor resets to top.
+fn handle_sort_modal_input(
+    s: &mut State,
+    button: &str,
+    mut selection: usize,
+    prev_sel: usize,
+    prev_scroll: usize,
+) {
+    const N: usize = 5;
+    match button {
+        "Up" | "StickLUp" => {
+            if selection > 0 {
+                selection -= 1;
+            }
+        }
+        "Down" | "StickLDown" => {
+            if selection + 1 < N {
+                selection += 1;
+            }
+        }
+        "A" => {
+            // Applied a new sort → the list reorders, so land on the top.
+            set_sort_mode(selection as u8);
+            sort_entries(&mut s.entries, current_sort_mode());
+            s.screen = Screen::List { selection: 0, scroll_offset: 0 };
+            return;
+        }
+        "B" => {
+            // Cancel → restore the cursor where it was.
+            s.screen = Screen::List { selection: prev_sel, scroll_offset: prev_scroll };
+            return;
+        }
+        _ => {}
+    }
+    s.screen = Screen::SortModal { selection, prev_sel, prev_scroll };
+}
+
+/// DISTANT sort picker (Y). `fp` selects the target list + option set:
+/// Flashpoint = name / developer (`cover_candidates`); archive.org = name / size
+/// (`remote_files`). A applies + returns to the list (cursor top), B restores.
+fn handle_remote_sort_modal_input(
+    s: &mut State,
+    button: &str,
+    mut selection: usize,
+    fp: bool,
+    prev_sel: usize,
+    prev_scroll: usize,
+) {
+    const N: usize = 2;
+    match button {
+        "Up" | "StickLUp" => {
+            if selection > 0 {
+                selection -= 1;
+            }
+        }
+        "Down" | "StickLDown" => {
+            if selection + 1 < N {
+                selection += 1;
+            }
+        }
+        "A" => {
+            if fp {
+                if selection == 1 {
+                    s.cover_candidates.sort_by(|a, b| {
+                        a.developer
+                            .to_lowercase()
+                            .cmp(&b.developer.to_lowercase())
+                            .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
+                    });
+                } else {
+                    s.cover_candidates
+                        .sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+                }
+                s.screen = Screen::FpGallery { selection: 0, scroll: 0 };
+            } else {
+                if selection == 1 {
+                    s.remote_files.sort_by(|a, b| {
+                        b.size_bytes
+                            .cmp(&a.size_bytes)
+                            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                    });
+                } else {
+                    s.remote_files
+                        .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                }
+                s.screen = Screen::DistantFiles { selection: 0, scroll_offset: 0 };
+            }
+            return;
+        }
+        "B" => {
+            // Cancel → restore the list cursor where it was.
+            if fp {
+                s.screen = Screen::FpGallery { selection: prev_sel, scroll: prev_scroll };
+            } else {
+                s.screen = Screen::DistantFiles { selection: prev_sel, scroll_offset: prev_scroll };
+            }
+            return;
+        }
+        _ => {}
+    }
+    s.screen = Screen::RemoteSortModal { selection, fp, prev_sel, prev_scroll };
+}
+
 /// RENOMMER flow: open swkbd with the current display_name pre-filled,
 /// write the .meta.json sidecar with the result, update the in-memory
 /// entry. Empty input removes the sidecar (revert to basename). Called
@@ -1932,6 +2350,8 @@ fn modal_kind(screen: Screen) -> u8 {
         Screen::DistantHistoryConfirm => 6,
         Screen::TouchesEditor { .. } => 7,
         Screen::SettingsKeymapEditor => 8,
+        Screen::SortModal { .. } => 9,
+        Screen::RemoteSortModal { .. } => 10,
         _ => 0,
     }
 }
@@ -1957,7 +2377,7 @@ static PENDING_AFTER_CLOSE: Mutex<Option<PendingClose>> = Mutex::new(None);
 /// DistantHistoryConfirm=6) are handled EXPLICITLY in their own handlers instead
 /// (they defer the mutation too — see `PendingClose`), so they're not listed here.
 fn modal_close_deferred(kind: u8) -> bool {
-    matches!(kind, 1 | 3 | 4 | 5)
+    matches!(kind, 1 | 3 | 4 | 5 | 9 | 10)
 }
 
 /// Draw the JOUER gallery (snapshot + draw) — shared by the List screen and the
@@ -2223,8 +2643,69 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 let title_refs: std::vec::Vec<&str> = titles.iter().map(|x| x.as_str()).collect();
                 let url_refs: std::vec::Vec<&str> = urls.iter().map(|x| x.as_str()).collect();
                 backend.draw_library_dim_backdrop();
-                backend.draw_library_cover_picker(&name, selection, &title_refs, &url_refs, &msg);
+                backend.draw_library_cover_picker(
+                    &name, selection, &title_refs, &url_refs, &msg,
+                    crate::loc::s().cover_title, crate::loc::s().cover_footer,
+                );
             }
+        }
+        Screen::FpGallery { selection, scroll } => {
+            // Full-page scrollable cover grid (not a modal). Subtitle = the
+            // search query; thumbnails load progressively from the candidates'
+            // cover_url (Flashpoint logos, same source as covers).
+            let snap = LIBRARY.lock().ok().map(|s| {
+                let titles: std::vec::Vec<std::string::String> = s
+                    .cover_candidates
+                    .iter()
+                    .map(|c| {
+                        if c.developer.is_empty() {
+                            c.title.clone()
+                        } else {
+                            std::format!("{} - {}", c.title, c.developer)
+                        }
+                    })
+                    .collect();
+                let urls: std::vec::Vec<std::string::String> =
+                    s.cover_candidates.iter().map(|c| c.cover_url.clone()).collect();
+                // Which hits are already in the local library (drives the OK badge).
+                let installed: std::vec::Vec<bool> = s
+                    .cover_candidates
+                    .iter()
+                    .map(|c| {
+                        let name = crate::sources::gamezip::swf_filename(&c.title);
+                        s.entries.iter().any(|e| e.basename == name)
+                    })
+                    .collect();
+                (titles, urls, installed, s.cover_msg.clone(), s.cover_query.clone())
+            });
+            if let Some((titles, urls, installed, msg, query)) = snap {
+                let title_refs: std::vec::Vec<&str> = titles.iter().map(|x| x.as_str()).collect();
+                let url_refs: std::vec::Vec<&str> = urls.iter().map(|x| x.as_str()).collect();
+                backend.draw_library_fp_gallery(
+                    &query, selection, scroll, &title_refs, &url_refs, &installed, &msg,
+                    crate::loc::s().fp_title, crate::loc::s().fp_footer,
+                );
+            }
+        }
+        Screen::SortModal { selection, .. } => {
+            let lc = crate::loc::s();
+            let labels = [
+                lc.sort_alpha,
+                lc.sort_recent,
+                lc.sort_recent_played,
+                lc.sort_played,
+                lc.sort_size,
+            ];
+            backend.draw_library_sort_modal(selection, &labels, lc.sort_title, lc.sort_footer);
+        }
+        Screen::RemoteSortModal { selection, fp, .. } => {
+            let lc = crate::loc::s();
+            let labels: [&str; 2] = if fp {
+                [lc.sort_alpha, lc.sort_dev]
+            } else {
+                [lc.sort_alpha, lc.sort_size]
+            };
+            backend.draw_library_sort_modal(selection, &labels, lc.sort_title, lc.sort_footer);
         }
         // ── Phase 3.7 DISTANT mode ─────────────────────────────────────
         Screen::DistantIdle { selection } => {
@@ -2245,7 +2726,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 .unwrap_or_default();
             // Reuse the per-game OPTIONS modal style for the URL options.
             let lc = crate::loc::s();
-            let labels = [lc.opt_rename, lc.opt_delete, lc.opt_back];
+            let labels = [lc.opt_edit, lc.opt_delete, lc.opt_back];
             backend.draw_library_dim_backdrop();
             backend.draw_library_options(&url, selection, &labels);
         }
@@ -2422,6 +2903,31 @@ pub fn render(backend: &mut SwitchRenderBackend) {
     }
 }
 
+/// Read a downloaded Flashpoint GameZIP at `zip_path`, extract its `.swf` to
+/// `swf_path`, and add it to the local library. Returns false on any
+/// read/parse/write failure (caller then shows `err_no_swf`).
+fn finish_gamezip(zip_path: &str, swf_path: &str) -> bool {
+    let Some(zip) = crate::sources::gamezip::read_file_bounded(zip_path, 64 * 1024 * 1024) else {
+        log("library: gamezip read failed\n");
+        return false;
+    };
+    let Some(swf) = crate::sources::gamezip::extract_first_swf(&zip) else {
+        log("library: gamezip has no .swf entry\n");
+        return false;
+    };
+    if std::fs::write(swf_path, &swf).is_err() {
+        log("library: gamezip .swf write failed\n");
+        return false;
+    }
+    crate::sd::commit();
+    log(&std::format!(
+        "library: gamezip extracted -> {} ({} bytes)\n",
+        swf_path,
+        swf.len(),
+    ));
+    add_or_replace_path(swf_path)
+}
+
 /// Called from `render()` after `tick_download` returns Ok(true). Adds
 /// the downloaded file to the local entries list (so it's playable when
 /// the user goes back to LOCAL) and returns to the DistantFiles screen
@@ -2429,14 +2935,49 @@ pub fn render(backend: &mut SwitchRenderBackend) {
 /// item without re-typing the URL. The just-downloaded basename is
 /// tracked in `downloaded_basenames` so the list shows a `✓` next to it.
 fn on_download_finished() {
-    let (out_path, file_name) = match LIBRARY.lock() {
-        Ok(g) => (g.download_out_path.clone(), g.download_file_name.clone()),
+    let (out_path, file_name, zip_extract) = match LIBRARY.lock() {
+        Ok(g) => (
+            g.download_out_path.clone(),
+            g.download_file_name.clone(),
+            g.download_zip_extract.clone(),
+        ),
         Err(_) => return,
     };
     if out_path.is_empty() {
         return;
     }
     log(&std::format!("library: download finished -> {}\n", out_path));
+
+    // Flashpoint GameZIP: the downloaded file is a `.zip`; extract its `.swf`
+    // to `swf_path` and add THAT (not the zip), then delete the temp zip.
+    if let Some(swf_path) = zip_extract {
+        let added = finish_gamezip(&out_path, &swf_path);
+        let _ = std::fs::remove_file(&out_path);
+        if !added {
+            if let Ok(mut s) = LIBRARY.lock() {
+                s.download_file_name.clear();
+                s.download_out_path.clear();
+                s.download_zip_extract = None;
+                s.download_resume_pos = None;
+            }
+            set_distant_error(crate::loc::s().err_no_swf);
+            return;
+        }
+        if let Ok(mut s) = LIBRARY.lock() {
+            s.download_file_name.clear();
+            s.download_out_path.clear();
+            s.download_zip_extract = None;
+            if !file_name.is_empty() && !s.downloaded_basenames.iter().any(|n| n == &file_name) {
+                s.downloaded_basenames.push(file_name);
+            }
+            // Back to the Flashpoint gallery so the user can grab another game.
+            let (sel, scroll) = s.download_resume_pos.take().unwrap_or((0, 0));
+            let sel = sel.min(s.cover_candidates.len().saturating_sub(1));
+            s.screen = Screen::FpGallery { selection: sel, scroll };
+        }
+        return;
+    }
+
     // Add to the LOCAL entries list (so when the user backs out of
     // DISTANT mode, the file appears in the LOCAL library).
     let _ = add_or_replace_path(&out_path);
@@ -2473,8 +3014,13 @@ fn on_download_finished() {
 /// completion path so re-downloading an existing file refreshes metadata
 /// instead of growing the list.
 fn add_or_replace_path(path: &str) -> bool {
-    // We re-use add_path's header-parse via a manual inline. Cheap.
-    if !add_path(path) {
+    // Just-downloaded file → stamp "now" so the "recent" sort floats it to the
+    // top until the next full scan reads the real on-disk mtime.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if !add_path(path, now) {
         return false;
     }
     // add_path pushed unconditionally. Dedup: if there are two entries

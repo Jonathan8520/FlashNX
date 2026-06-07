@@ -22,6 +22,7 @@ mod loc;
 mod menu;
 mod net;
 mod player;
+mod playtime;
 mod sd;
 mod sources;
 
@@ -821,13 +822,13 @@ pub extern "C" fn ruffle_library_init() -> c_int {
 /// Push one `.swf` path onto the library's scan list. Called by
 /// `swf_picker_run` (cpp/src/swf_picker.cpp) per file. Returns 0 on success.
 #[no_mangle]
-pub extern "C" fn ruffle_library_add_path(path: *const c_char) -> c_int {
+pub extern "C" fn ruffle_library_add_path(path: *const c_char, mtime: u64) -> c_int {
     if path.is_null() {
         return -1;
     }
     let s = unsafe { core::ffi::CStr::from_ptr(path) };
     let Ok(p) = s.to_str() else { return -2 };
-    if library::add_path(p) { 0 } else { -3 }
+    if library::add_path(p, mtime) { 0 } else { -3 }
 }
 
 /// Transition the library from Inactive → List/Empty. Call after the SD
