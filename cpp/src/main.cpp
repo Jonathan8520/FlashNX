@@ -28,6 +28,8 @@ extern "C" void ruffle_handle_mouse_move(int x, int y);
 extern "C" void ruffle_handle_mouse_button(bool down);
 extern "C" void ruffle_redraw_paused(void);
 extern "C" void ruffle_draw_menu(int selected);
+extern "C" void ruffle_menu_close_begin(void);
+extern "C" int  ruffle_draw_menu_closing(int selected);
 extern "C" int  ruffle_restart(void);
 extern "C" int  ruffle_keymap_lookup(const char* button_name);
 extern "C" void ruffle_touches_open(void);
@@ -356,6 +358,10 @@ static void worker_entry(void* /*arg*/) {
     // skipped (we just re-render the last Player state under the overlay)
     // and joycon input is rerouted to menu navigation only.
     bool menu_open = false;
+    // While true, the pause menu is playing its scale-out close pop; input is
+    // suspended and we drain `ruffle_draw_menu_closing` until it reports done,
+    // then resume the game. Keeps the close animated instead of snapping shut.
+    bool menu_closing = false;
     int  menu_selection = MENU_RESUME;
     // MENU_QUIT now means "back to library" — controlled by this flag.
     // appletMainLoop returning false (home button → Close) also exits the
@@ -395,6 +401,22 @@ static void worker_entry(void* /*arg*/) {
         }
 
         if (menu_open) {
+            // ─── Closing drain: play the scale-out, then resume the game ──
+            // On dismiss we don't snap shut; we keep re-rendering the frozen
+            // frame + the shrinking menu until the close pop reports done.
+            if (menu_closing) {
+                ruffle_redraw_paused();
+                if (ruffle_draw_menu_closing(menu_selection)) {
+                    menu_open = false;
+                    menu_closing = false;
+                    // Re-measure wall clock so the resumed frame doesn't catch
+                    // up by replaying the paused + closing interval.
+                    last_tick = ruffle_tick_now();
+                }
+                gl_context_swap();
+                continue;
+            }
+
             // ─── Sub-screen branch: TOUCHES (Rust-driven) ───────────────
             // If the user picked "TOUCHES" earlier, Rust now owns the
             // input + rendering for the keymap editor. We just forward
@@ -426,17 +448,17 @@ static void worker_entry(void* /*arg*/) {
                 menu_selection = (menu_selection + 1) % MENU_COUNT;
             }
             if (kDown & (HidNpadButton_Minus | HidNpadButton_B)) {
-                menu_open = false;
-                // Re-measure wall clock so the resumed frame doesn't
-                // catch up by replaying the paused interval.
-                last_tick = ruffle_tick_now();
+                // Scale the menu out (drained at the top of this branch over the
+                // next frames), then resume.
+                ruffle_menu_close_begin();
+                menu_closing = true;
                 continue;
             }
             if (kDown & HidNpadButton_A) {
                 switch (menu_selection) {
                 case MENU_RESUME:
-                    menu_open = false;
-                    last_tick = ruffle_tick_now();
+                    ruffle_menu_close_begin();
+                    menu_closing = true;
                     continue;
                 case MENU_TOUCHES:
                     // Hand control to the Rust TOUCHES sub-screen.

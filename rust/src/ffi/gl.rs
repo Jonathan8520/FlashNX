@@ -46,6 +46,9 @@ pub const GL_LINK_STATUS: GLenum = 0x8B82;
 pub const GL_INFO_LOG_LENGTH: GLenum = 0x8B84;
 
 pub const GL_BLEND: GLenum = 0x0BE2;
+// Scissor test — clips draws to a rectangle (used to bound the JOUER gallery
+// band so smooth-scrolled rows don't bleed onto the banner / info line).
+pub const GL_SCISSOR_TEST: GLenum = 0x0C11;
 pub const GL_ZERO: GLenum = 0;
 pub const GL_ONE: GLenum = 1;
 pub const GL_SRC_COLOR: GLenum = 0x0300;
@@ -108,6 +111,7 @@ extern "C" {
     pub fn glClearStencil(s: GLint);
     pub fn glClear(mask: GLbitfield);
     pub fn glViewport(x: GLint, y: GLint, w: GLsizei, h: GLsizei);
+    pub fn glScissor(x: GLint, y: GLint, width: GLsizei, height: GLsizei);
     pub fn glDrawArrays(mode: GLenum, first: GLint, count: GLsizei);
     pub fn glDrawElements(mode: GLenum, count: GLsizei, ty: GLenum, indices: *const c_void);
 

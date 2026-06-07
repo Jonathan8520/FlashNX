@@ -600,7 +600,69 @@ pub extern "C" fn ruffle_draw_menu(selected: c_int) {
         <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(renderer)
     {
         let idx = selected.max(0) as usize;
+        // Scale-in pop on open (v1.2.0): the pause menu is C++-owned and only
+        // draws while paused, so we detect a fresh open by the gap since the last
+        // draw — a gap over a few frames means it was closed then reopened. The
+        // dim backdrop stays put (fill_screen_dim); only the panel scales.
+        let now = unsafe { ruffle_tick_now() };
+        let freq = unsafe { ruffle_tick_freq() };
+        static LAST_MENU_TICK: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        let last = LAST_MENU_TICK.swap(now, std::sync::atomic::Ordering::Relaxed);
+        if last == 0 || (freq > 0 && now.saturating_sub(last) > freq / 8) {
+            backend::render::modal_open_begin();
+        }
+        let (scale, active, _done) = backend::render::modal_scale_step(now);
+        if active {
+            backend.set_ui_modal_scale(scale);
+        } else {
+            backend.clear_ui_transform();
+        }
         backend.draw_menu_overlay(idx);
+        backend.clear_ui_transform();
+    }
+}
+
+/// Begin the pause-menu close pop (scale-out). C++ calls this on dismiss
+/// (Resume / B / Minus), then keeps calling `ruffle_draw_menu_closing` until it
+/// returns 1, so the menu shrinks away before the game resumes.
+#[no_mangle]
+pub extern "C" fn ruffle_menu_close_begin() {
+    backend::render::modal_close_begin();
+}
+
+/// Draw the pause menu scaling OUT for one frame (over the frozen game the caller
+/// re-rendered first). Returns 1 once the close pop has finished — the caller
+/// then resumes the game — or 0 while still animating. The dim backdrop stays put
+/// (fill_screen_dim); only the panel shrinks.
+#[no_mangle]
+pub extern "C" fn ruffle_draw_menu_closing(selected: c_int) -> c_int {
+    let state = unsafe {
+        match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
+            Some(s) => s,
+            None => return 1,
+        }
+    };
+    let Ok(mut player) = state.player.lock() else {
+        return 1;
+    };
+    let renderer = player.renderer_mut();
+    if let Some(backend) =
+        <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(renderer)
+    {
+        let now = unsafe { ruffle_tick_now() };
+        let (scale, _active, close_done) = backend::render::modal_scale_step(now);
+        if close_done {
+            backend.clear_ui_transform();
+            return 1;
+        }
+        backend.set_ui_modal_scale(scale);
+        let idx = selected.max(0) as usize;
+        backend.draw_menu_overlay(idx);
+        backend.clear_ui_transform();
+        0
+    } else {
+        1
     }
 }
 
@@ -651,6 +713,8 @@ pub extern "C" fn ruffle_keymap_lookup(name: *const c_char) -> c_int {
 #[no_mangle]
 pub extern "C" fn ruffle_touches_open() {
     menu::open();
+    // Scale the editor in, same pop as the library / pause modals.
+    backend::render::modal_open_begin();
 }
 
 #[no_mangle]
@@ -694,7 +758,17 @@ pub extern "C" fn ruffle_touches_draw() {
     if let Some(backend) =
         <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(renderer)
     {
+        // Scale-in pop (open begun in ruffle_touches_open). The dim backdrop
+        // stays put (fill_screen_dim); only the panel scales.
+        let now = unsafe { ruffle_tick_now() };
+        let (scale, active, _done) = backend::render::modal_scale_step(now);
+        if active {
+            backend.set_ui_modal_scale(scale);
+        } else {
+            backend.clear_ui_transform();
+        }
         menu::draw(backend);
+        backend.clear_ui_transform();
     }
 }
 

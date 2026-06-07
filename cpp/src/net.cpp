@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <string>
 #include <sys/stat.h>
 
 #include <switch.h>
@@ -49,6 +50,22 @@ size_t write_to_buffer(char* ptr, size_t size, size_t nmemb, void* userdata) {
     }
     std::memcpy(w->buf + w->pos, ptr, bytes);
     w->pos += (int)bytes;
+    return bytes;
+}
+
+// Growing in-memory response for the ASYNC metadata GET (`https_get_*`). It
+// reuses the single g_multi/g_handle below (a metadata GET and a file download
+// are never in flight at once), writing here instead of to a file.
+std::string g_get_buf;
+
+size_t write_to_string(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    std::string* s = (std::string*)userdata;
+    const size_t bytes = size * nmemb;
+    // Cap at 8 MB so a pathological response can't exhaust the heap.
+    if (s->size() + bytes > 8u * 1024u * 1024u) {
+        return 0; // signal write error -> curl aborts the transfer
+    }
+    s->append(ptr, bytes);
     return bytes;
 }
 
@@ -311,6 +328,102 @@ extern "C" void https_download_cancel(void) {
         std::printf("https_download_cancel\n"); std::fflush(stdout);
         multi_cleanup(true);
     }
+}
+
+// ── Async in-memory GET (archive.org metadata, non-blocking) ──────────────
+// Same curl-multi machinery as the download, but the response accumulates in
+// g_get_buf instead of a file, so the UI keeps rendering (a spinner) while it
+// runs. Returns: 0 on success (in progress), -1 init, -5 if busy.
+extern "C" int https_get_start(const char* url) {
+    if (g_multi || g_handle) {
+        return -5;
+    }
+    if (net_init() != 0) return -1;
+    CURLM* m = curl_multi_init();
+    CURL* c = curl_easy_init();
+    if (!m || !c) {
+        if (m) curl_multi_cleanup(m);
+        if (c) curl_easy_cleanup(c);
+        return -1;
+    }
+    g_get_buf.clear();
+    curl_easy_setopt(c, CURLOPT_URL, url);
+    curl_easy_setopt(c, CURLOPT_USERAGENT, "FlashNX/0.0.1 (Nintendo Switch homebrew)");
+    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
+    curl_easy_setopt(c, CURLOPT_CAINFO, CACERT_PATH);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, write_to_string);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, &g_get_buf);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 60L);
+    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_multi_add_handle(m, c);
+    g_multi = m;
+    g_handle = c;
+    g_dl_file = nullptr; // in-memory GET, not a file download
+    g_bytes_done = 0;
+    g_bytes_total = 0;
+    g_last_curl_result = 0;
+    g_last_http_code = 0;
+    std::printf("https_get_start: %s\n", url);
+    std::fflush(stdout);
+    return 0;
+}
+
+// Pump the GET once. Returns: 0 = in progress, 1 = done (response in g_get_buf),
+// <0 = error (handles cleaned up; g_get_buf left as-is).
+extern "C" int https_get_tick(void) {
+    if (!g_multi) return -1;
+    int still_running = 0;
+    CURLMcode mc = curl_multi_perform(g_multi, &still_running);
+    if (mc != CURLM_OK) {
+        std::printf("https_get_tick: curl_multi_perform mc=%d\n", (int)mc);
+        std::fflush(stdout);
+        multi_cleanup(false);
+        return -2;
+    }
+    if (still_running > 0) return 0;
+
+    bool ok = false;
+    CURLMsg* msg;
+    int msgs_left = 0;
+    while ((msg = curl_multi_info_read(g_multi, &msgs_left))) {
+        if (msg->msg == CURLMSG_DONE && msg->easy_handle == g_handle) {
+            g_last_curl_result = (int)msg->data.result;
+            curl_easy_getinfo(g_handle, CURLINFO_RESPONSE_CODE, &g_last_http_code);
+            ok = (msg->data.result == CURLE_OK) && (g_last_http_code >= 200) && (g_last_http_code < 400);
+            break;
+        }
+    }
+    multi_cleanup(false); // frees g_multi/g_handle (g_dl_file is null); keeps g_get_buf
+    if (!ok) {
+        std::printf("https_get_tick: failed curl=%d (%s) http=%ld\n",
+                    g_last_curl_result, curl_easy_strerror((CURLcode)g_last_curl_result),
+                    g_last_http_code);
+        std::fflush(stdout);
+        return -2;
+    }
+    std::printf("https_get_tick: OK %zu bytes\n", g_get_buf.size());
+    std::fflush(stdout);
+    return 1;
+}
+
+// Copy the completed response into `out` (NUL-terminated). Returns bytes copied,
+// or -3 if the response doesn't fit in `cap`. Call after `https_get_tick` == 1.
+extern "C" int https_get_buffer(char* out, int cap) {
+    if (!out || cap < 1) return -1;
+    const int n = (int)g_get_buf.size();
+    if (n >= cap) return -3;
+    std::memcpy(out, g_get_buf.data(), (size_t)n);
+    out[n] = '\0';
+    return n;
+}
+
+extern "C" void https_get_cancel(void) {
+    if (g_multi) {
+        std::printf("https_get_cancel\n"); std::fflush(stdout);
+        multi_cleanup(false);
+    }
+    g_get_buf.clear();
 }
 
 // Generic swkbd prompt for a display name (Phase 3.4.bis RENOMMER). Pre-

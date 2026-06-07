@@ -50,6 +50,11 @@ pub(crate) enum Screen {
     OptionsModal { game_idx: usize, selection: usize },
     /// User pressed A on a game; main loop reads `selected_path` and exits.
     Picked,
+    /// Transient launch animation (v1.2.0): the cover reveal is playing (tile ->
+    /// full screen) before we flip to `Picked`. `is_active` stays true so the C++
+    /// library loop keeps rendering it; `render` flips to `Picked` when the
+    /// reveal finishes. Carries the gallery row so the frozen gallery draws behind.
+    Launching { selection: usize, scroll_offset: usize },
     /// Applet mode: the user pressed A on a game but we have only the small
     /// applet heap, so launching would OOM. Shows a "use title takeover"
     /// notice (P1c) instead of the embedded red SWF. Carries the list row to
@@ -75,6 +80,11 @@ pub(crate) enum Screen {
     /// `selection` indexes [history urls.., add-row]. A launches the selected
     /// URL (or adds one on the add-row); + opens per-URL options.
     DistantIdle { selection: usize },
+    /// Async archive.org metadata fetch in flight (v1.2.0). The reveal window is
+    /// open from the launched URL's row with a spinner; `net::tick_archive_fetch`
+    /// is polled each frame in `render`. On success → DistantFiles, on error →
+    /// DistantError. `State::pending_fetch_url` holds the URL to remember on success.
+    DistantLoading,
     /// After a successful archive.org metadata fetch. Lists `RemoteFile`s
     /// stored in `State::remote_files`; `selection` indexes that vec.
     DistantFiles { selection: usize, scroll_offset: usize },
@@ -335,6 +345,9 @@ pub(crate) struct State {
     /// Notice shown on the `CoverPicker` when there's no list to show (covers
     /// off / no results / fetch error). Empty = render the candidate list.
     cover_msg: std::string::String,
+    /// URL of the async archive.org fetch in flight (`Screen::DistantLoading`),
+    /// pushed to history once the fetch succeeds.
+    pending_fetch_url: std::string::String,
 }
 
 static LIBRARY: Mutex<State> = Mutex::new(State {
@@ -359,6 +372,7 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     local_filter: None,
     cover_candidates: std::vec::Vec::new(),
     cover_msg: std::string::String::new(),
+    pending_fetch_url: std::string::String::new(),
 });
 
 /// Where the URL history persists across boots. Format: JSON array of
@@ -371,10 +385,6 @@ const HISTORY_MAX: usize = 20;
 /// Rows of covers visible at once in the JOUER justified gallery (v1.2.0).
 /// Must match the number of rows `draw_library_gallery` fits under the banner.
 pub const GALLERY_ROWS_VISIBLE: usize = 3;
-
-/// Page size for the cursor-restore math in `list_screen_for_abs`/`clamp_scroll`
-/// (the DISTANT list + sub-screen returns still use a simple row model).
-pub const LIST_VISIBLE_ROWS: usize = 8;
 
 /// Columns in the OPTIONS > JAQUETTE thumbnail picker grid. Shared so the
 /// renderer's layout and the input handler's 2D navigation agree.
@@ -460,6 +470,8 @@ pub fn open() {
     let want = last_played_basename();
     let applet = unsafe { ruffle_is_applet_mode() } != 0;
     log(&std::format!("library: open applet_mode={}\n", applet));
+    // Identity of the just-played game, for the quit "close" reveal below.
+    let mut collapse_info: Option<(std::string::String, std::string::String, u32)> = None;
     if let Ok(mut s) = LIBRARY.lock() {
         s.applet_mode = applet;
         // Fresh open = no filter, so `want`'s absolute index below is a valid
@@ -473,9 +485,31 @@ pub fn open() {
                 .as_deref()
                 .and_then(|b| s.entries.iter().position(|e| e.basename == b))
                 .unwrap_or(0);
-            let scroll_offset = clamp_scroll(0, selection, LIST_VISIBLE_ROWS);
+            // The JOUER gallery scrolls by ROWS (not flat index), and a tile's
+            // row depends on the justified layout — so derive the scroll from the
+            // layout the last render published (still valid across a quit->library
+            // round-trip: same entries). `gallery_scroll_for` falls back to 0 when
+            // no layout exists yet (first boot). Using the old flat `clamp_scroll`
+            // here put a last-row game off-screen (blank gallery on quit).
+            let scroll_offset = gallery_scroll_for(selection, 0);
             Screen::List { selection, scroll_offset }
         };
+        // Returning from a game (last-played still present) → grab its identity
+        // so we can play the cover shrinking back to its tile.
+        if let Some(b) = want.as_deref() {
+            if let Some(e) = s.entries.iter().find(|e| e.basename == b) {
+                collapse_info = Some((e.basename.clone(), e.display_name.clone(), e.color_chip));
+            }
+        }
+    }
+    // Snap the gallery glide to wherever the cursor lands (last-played row),
+    // so the first JOUER frame doesn't slide in from a stale position.
+    crate::backend::render::gallery_anim_reset();
+    // Play the quit "close" reveal: the cover shrinks from full screen back to
+    // the launched tile (rect = the tile's pre-launch screen box, still cached).
+    if let Some((bn, dn, color)) = collapse_info {
+        let rect = crate::backend::render::gallery_sel_rect_read();
+        crate::backend::render::game_reveal_begin(true, rect, &bn, &dn, color);
     }
 }
 
@@ -641,10 +675,12 @@ pub fn selected_path() -> Option<std::string::String> {
 /// banner texture handle that lives on it — we re-decode when the
 /// renderer reappears via `ruffle_library_init`.
 pub fn reset() {
-    // Cancel any download in flight before we clear state — avoids the
-    // C++ multi handle leaking + the partial file staying on SD.
+    // Cancel any download / metadata fetch in flight before we clear state —
+    // avoids the C++ multi handle leaking + the partial file staying on SD.
     net::cancel_download();
+    net::cancel_archive_fetch();
     if let Ok(mut s) = LIBRARY.lock() {
+        s.pending_fetch_url.clear();
         s.entries.clear();
         s.selected_path = None;
         s.screen = Screen::Inactive;
@@ -672,21 +708,38 @@ pub fn reset() {
 
 /// Forward a Switch-button down-edge from C++. Returns true if consumed.
 pub fn input(button: &str) -> bool {
+    // Suspend input during a close-out / reveal transition (brief) so screens
+    // can't be re-navigated mid-animation; the deferred swap lands in render()
+    // when the animation finishes.
+    if crate::backend::render::modal_close_active()
+        || crate::backend::render::distant_reveal_active()
+        || crate::backend::render::game_reveal_active()
+    {
+        return true;
+    }
     // Sub-screen: TOUCHES editor owns input while active.
     if menu::is_active() {
         let consumed = menu::input(button);
         // If menu just closed itself, fall back to the OPTIONS modal.
         if !menu::is_active() {
+            let mut dest: Option<Screen> = None;
             if let Ok(mut s) = LIBRARY.lock() {
                 match s.screen {
                     Screen::TouchesEditor { game_idx } => {
                         s.screen = Screen::OptionsModal { game_idx, selection: 0 };
+                        dest = Some(s.screen);
                     }
                     Screen::SettingsKeymapEditor => {
                         s.screen = Screen::SettingsModal { selection: 0 };
+                        dest = Some(s.screen);
                     }
                     _ => {}
                 }
+            }
+            if dest.is_some() {
+                // Closing TOUCHES: scale the destination panel back in (the
+                // OPTIONS modal, or the REGLAGES tab content).
+                crate::backend::render::modal_open_begin();
             }
         }
         return consumed;
@@ -723,6 +776,14 @@ pub fn input(button: &str) -> bool {
                         Tab::Reglages => Screen::SettingsModal { selection: 0 },
                     };
                 }
+                // Slide the incoming tab's content in from the side pressed
+                // (L = from the left, R = from the right); the navbar stays fixed.
+                // (Tabs slide; modals/editors scale.)
+                let dir = if button == "L" { -1.0 } else { 1.0 };
+                crate::backend::render::tab_transition_begin(dir);
+                // Snap the JOUER glide so the gallery lands on its (reset) top
+                // instead of gliding from a stale cursor.
+                crate::backend::render::gallery_anim_reset();
                 return true;
             }
         }
@@ -735,7 +796,10 @@ pub fn input(button: &str) -> bool {
                     .ok()
                     .and_then(|s| s.url_history.get(selection).cloned());
                 match url {
-                    Some(u) => run_fetch_for_url(&u),
+                    // archive.org → async fetch + reveal (begun inside, opens the
+                    // row with a spinner); direct .swf → download screen. The
+                    // expand is started by `run_archive_fetch_async`, not here.
+                    Some(u) => run_fetch_for_url(&u, selection),
                     None => run_add_url_flow(),
                 }
                 return true;
@@ -783,8 +847,11 @@ pub fn input(button: &str) -> bool {
         Err(_) => return false,
     };
     let screen_copy = s.screen;
-    match screen_copy {
+    let consumed = match screen_copy {
         Screen::Inactive | Screen::Picked | Screen::Quit => false,
+        // Input is suspended during the launch reveal (handled above); this arm
+        // only satisfies exhaustiveness.
+        Screen::Launching { .. } => true,
         Screen::Empty => {
             match button {
                 "Minus" => { s.screen = Screen::Quit; }
@@ -831,6 +898,16 @@ pub fn input(button: &str) -> bool {
             handle_distant_files_input(&mut s, button, selection, scroll_offset);
             true
         }
+        Screen::DistantLoading => {
+            // Input is suspended during the opening reveal (handled at the top of
+            // input via `distant_reveal_active`); once open, B/Minus/Y cancels the
+            // async fetch and returns to the IMPORTER list.
+            if matches!(button, "B" | "Minus" | "Y") {
+                net::cancel_archive_fetch();
+                s.screen = Screen::DistantIdle { selection: 0 };
+            }
+            true
+        }
         Screen::DistantDownloading => {
             // B = cancel download. Any other button is ignored during DL.
             if matches!(button, "B") {
@@ -848,15 +925,24 @@ pub fn input(button: &str) -> bool {
             true
         }
         Screen::DistantHistoryConfirm => {
+            // Both paths scale OUT first (panel stays populated); the delete (A)
+            // is deferred to render's close-done, cancel (B) just returns.
             match button {
                 "A" => {
-                    let idx = s.history_idx.unwrap_or(0);
-                    delete_current_history(&mut s);
-                    s.screen = Screen::DistantIdle { selection: idx.saturating_sub(0).min(s.url_history.len()) };
+                    if let Ok(mut p) = PENDING_AFTER_CLOSE.lock() {
+                        *p = Some(PendingClose::DeleteHistory);
+                    }
+                    crate::backend::render::modal_close_begin();
                 }
                 "B" | "Minus" => {
                     let idx = s.history_idx.unwrap_or(0);
-                    s.screen = Screen::DistantIdle { selection: idx.min(s.url_history.len()) };
+                    let n = s.url_history.len();
+                    if let Ok(mut p) = PENDING_AFTER_CLOSE.lock() {
+                        *p = Some(PendingClose::Goto(Screen::DistantIdle {
+                            selection: idx.min(n),
+                        }));
+                    }
+                    crate::backend::render::modal_close_begin();
                 }
                 _ => {}
             }
@@ -872,7 +958,23 @@ pub fn input(button: &str) -> bool {
             handle_settings_language_input(&mut s, button, selection);
             true
         }
+    };
+    // Defer a modal close so it can scale OUT: render() swaps to the stashed
+    // target once the close pop finishes. Only plain modal -> non-modal closes
+    // for the deferred kinds; modal -> modal (including -> TOUCHES editor) keeps
+    // its instant swap, and render's open detection scales the new panel IN.
+    let new_screen = s.screen;
+    if modal_close_deferred(modal_kind(screen_copy))
+        && modal_kind(new_screen) == 0
+        && new_screen != screen_copy
+    {
+        if let Ok(mut p) = PENDING_AFTER_CLOSE.lock() {
+            *p = Some(PendingClose::Goto(new_screen));
+        }
+        s.screen = screen_copy;
+        crate::backend::render::modal_close_begin();
     }
+    consumed
 }
 
 /// Settings modal: 0 = default controls, 1 = language, 2 = back.
@@ -985,7 +1087,18 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
                     "library: JOUER -> {} ({})\n",
                     entry.display_name, entry.path,
                 ));
-                s.screen = Screen::Picked;
+                // Play the cover "open" reveal (tile -> full screen) first; render
+                // flips to Picked when it finishes, then the SWF loads behind the
+                // frozen full-screen cover (a free loading screen).
+                let rect = crate::backend::render::gallery_sel_rect_read();
+                crate::backend::render::game_reveal_begin(
+                    false,
+                    rect,
+                    &entry.basename,
+                    &entry.display_name,
+                    entry.color_chip,
+                );
+                s.screen = Screen::Launching { selection, scroll_offset: scroll };
             }
             return;
         }
@@ -1106,7 +1219,9 @@ fn run_add_url_flow() {
     let Some(url) = net::prompt_url_with_initial(None) else {
         return; // user cancelled
     };
-    run_fetch_for_url(&url);
+    // The reveal grows from the trailing "+ add" row (== current history len).
+    let add_row = LIBRARY.lock().map(|s| s.url_history.len()).unwrap_or(0);
+    run_fetch_for_url(&url, add_row);
 }
 
 /// DistantUrlOptions > edit: swkbd prefilled with the existing URL. Commit
@@ -1144,10 +1259,10 @@ fn run_edit_url_flow(url_idx: usize) {
 /// v1.2.0: routes by source shape so the IMPORTER is "globalisable" — an
 /// archive.org URL/item-id goes through the metadata file list, a direct
 /// `.swf` URL downloads straight to SD.
-fn run_fetch_for_url(url: &str) {
+fn run_fetch_for_url(url: &str, source_sel: usize) {
     match crate::sources::classify(url) {
         crate::sources::SourceKind::DirectUrl => run_direct_download(url),
-        crate::sources::SourceKind::ArchiveOrg => run_archive_fetch(url),
+        crate::sources::SourceKind::ArchiveOrg => run_archive_fetch_async(url, source_sel),
     }
 }
 
@@ -1182,28 +1297,25 @@ fn run_direct_download(url: &str) {
     }
 }
 
-/// archive.org item import: fetch the metadata, show the `.swf` file list.
-fn run_archive_fetch(url: &str) {
+/// archive.org item import (async): start the metadata fetch + open the reveal
+/// window (with a spinner) from the launched row. `render`'s DistantLoading arm
+/// polls `net::tick_archive_fetch` each frame and switches to DistantFiles on
+/// success (no UI freeze). `source_sel` is the history row the window grows from.
+fn run_archive_fetch_async(url: &str, source_sel: usize) {
     let Some(item_id) = net::extract_item_id(url) else {
         set_distant_error(crate::loc::s().err_url_invalid);
         return;
     };
-    log(&std::format!("library: fetching archive.org metadata for {}\n", item_id));
-    match net::fetch_archive_metadata(&item_id) {
-        Ok(files) if files.is_empty() => {
-            set_distant_error(crate::loc::s().err_no_swf);
-        }
-        Ok(files) => {
-            // Successful fetch — remember the URL for future sessions.
-            push_history(url);
+    log(&std::format!("library: async fetch archive.org metadata for {}\n", item_id));
+    match net::start_archive_fetch(&item_id) {
+        Ok(()) => {
             if let Ok(mut s) = LIBRARY.lock() {
-                s.remote_files = files;
-                s.screen = Screen::DistantFiles { selection: 0, scroll_offset: 0 };
+                s.pending_fetch_url = url.to_string();
+                s.screen = Screen::DistantLoading;
             }
+            crate::backend::render::distant_reveal_begin_expand(source_sel);
         }
-        Err(e) => {
-            set_distant_error(&e);
-        }
+        Err(e) => set_distant_error(&e),
     }
 }
 
@@ -1288,9 +1400,10 @@ fn handle_distant_files_input(
             return;
         }
         "B" | "Y" => {
-            s.remote_files.clear();
-            s.distant_filter = None;
-            s.screen = Screen::DistantIdle { selection: 0 };
+            // Collapse the file list back down to its row; render() clears +
+            // returns to the IMPORTER list once the reveal finishes. Keep the
+            // screen + remote_files so the list stays drawable while it shrinks.
+            crate::backend::render::distant_reveal_begin_collapse();
             return;
         }
         // X = handled at the top of `input()` (hoisted because swkbd
@@ -1581,22 +1694,17 @@ fn run_rename_flow(game_idx: usize) {
 fn handle_delete_confirm_input(s: &mut State, button: &str, game_idx: usize) {
     match button {
         "A" => {
-            delete_game(s, game_idx);
-            // After deletion the list is shorter — clamp the selection
-            // so we don't land out of bounds. If the list is now empty
-            // we drop the user back on the Empty screen.
-            if s.entries.is_empty() {
-                s.screen = Screen::Empty;
-                return;
+            // Defer the delete until the close-out finishes: stash the action,
+            // start the scale-out, and leave the screen on DeleteConfirm so its
+            // panel stays populated while it shrinks. render() runs the delete
+            // + lands on List (or Empty) once the pop is done.
+            if let Ok(mut p) = PENDING_AFTER_CLOSE.lock() {
+                *p = Some(PendingClose::DeleteGame { game_idx });
             }
-            // Deletion shifts absolute indices and the filtered set; drop the
-            // filter so `new_sel` (an absolute index) is a valid full-view row.
-            s.local_filter = None;
-            let new_sel = game_idx.min(s.entries.len() - 1);
-            let scroll = clamp_scroll(0, new_sel, LIST_VISIBLE_ROWS);
-            s.screen = Screen::List { selection: new_sel, scroll_offset: scroll };
+            crate::backend::render::modal_close_begin();
         }
         "B" | "Minus" => {
+            // Cancel back to OPTIONS (modal -> modal: instant swap, OPTIONS pops).
             s.screen = Screen::OptionsModal { game_idx, selection: 0 };
         }
         _ => {}
@@ -1668,6 +1776,8 @@ fn run_local_search_flow() {
         s.local_filter = if trimmed.is_empty() { None } else { Some(trimmed) };
         s.screen = Screen::List { selection: 0, scroll_offset: 0 };
     }
+    // Filtered view = brand-new layout; snap the glide to the top.
+    crate::backend::render::gallery_anim_reset();
 }
 
 fn clamp_scroll(mut scroll: usize, selection: usize, visible_rows: usize) -> usize {
@@ -1722,6 +1832,120 @@ fn gallery_scroll_for(selection: usize, scroll: usize) -> usize {
     }
 }
 
+/// Screen rect of history row `sel` in the IMPORTER list (matches the layout in
+/// `draw_library_distant_list`: top=160, row_h=50, 9 visible). Used as the
+/// expand/collapse reveal's grow-from / shrink-to box.
+fn distant_row_rect(sel: usize, vw: f32) -> (f32, f32, f32, f32) {
+    const TOP: f32 = 160.0;
+    const ROW_H: f32 = 50.0;
+    const VISIBLE: usize = 9;
+    let first = if sel < VISIBLE { 0 } else { sel + 1 - VISIBLE };
+    let row_y = TOP + (sel - first) as f32 * ROW_H;
+    (20.0, row_y - 8.0, vw - 40.0, ROW_H + 4.0)
+}
+
+/// Stable id per panel/modal screen (0 = not a modal). Used by `render` to fire
+/// the scale-in "pop" exactly once when a modal is first shown. Full-screen
+/// notices (AppletNotice / DistantError / Downloading) are NOT modals here — no
+/// panel to scale. The TOUCHES editors ARE modals (scale in like the rest).
+fn modal_kind(screen: Screen) -> u8 {
+    match screen {
+        Screen::OptionsModal { .. } => 1,
+        Screen::DeleteConfirm { .. } => 2,
+        Screen::CoverPicker { .. } => 3,
+        Screen::SettingsLanguagePicker { .. } => 4,
+        Screen::DistantUrlOptions { .. } => 5,
+        Screen::DistantHistoryConfirm => 6,
+        Screen::TouchesEditor { .. } => 7,
+        Screen::SettingsKeymapEditor => 8,
+        _ => 0,
+    }
+}
+
+/// Last modal kind seen by `render` (0 = none), so we trigger the open pop only
+/// on the frame a modal first appears, not every frame it stays up.
+static LAST_MODAL_KIND: Mutex<u8> = Mutex::new(0);
+
+/// What `render` does once a deferred close-out finishes. Most closes just swap
+/// to another screen; the destructive confirms defer their MUTATION here too, so
+/// the panel stays populated while it scales out and the delete + swap land
+/// together at the very end. Set by `input`, consumed by `render`.
+enum PendingClose {
+    Goto(Screen),
+    DeleteGame { game_idx: usize },
+    DeleteHistory,
+}
+
+static PENDING_AFTER_CLOSE: Mutex<Option<PendingClose>> = Mutex::new(None);
+
+/// Modal kinds whose close the generic interception defers for a scale-out
+/// (plain modal -> non-modal). The destructive confirms (DeleteConfirm=2,
+/// DistantHistoryConfirm=6) are handled EXPLICITLY in their own handlers instead
+/// (they defer the mutation too — see `PendingClose`), so they're not listed here.
+fn modal_close_deferred(kind: u8) -> bool {
+    matches!(kind, 1 | 3 | 4 | 5)
+}
+
+/// Draw the JOUER gallery (snapshot + draw) — shared by the List screen and the
+/// frozen background of the `Launching` reveal.
+fn draw_gallery(
+    backend: &mut SwitchRenderBackend,
+    selection: usize,
+    scroll_offset: usize,
+    anim_origin: u64,
+) {
+    let snapshot = LIBRARY.lock().ok().map(|s| {
+        let idx = local_filtered_indices(&s.entries, &s.local_filter);
+        let entries: std::vec::Vec<Entry> = idx.iter().map(|&i| s.entries[i].clone()).collect();
+        (
+            LibraryListSnapshot {
+                entries,
+                banner_tex: s.banner_tex,
+                banner_w: s.banner_w,
+                banner_h: s.banner_h,
+            },
+            s.local_filter.clone(),
+            s.entries.len(),
+        )
+    });
+    if let Some((snap, filter, total_unfiltered)) = snapshot {
+        let phase_ticks = unsafe { ruffle_tick_now() }.saturating_sub(anim_origin);
+        backend.draw_library_gallery(
+            selection,
+            scroll_offset,
+            &snap.entries,
+            snap.banner_tex,
+            snap.banner_w,
+            snap.banner_h,
+            phase_ticks,
+            filter.as_deref(),
+            total_unfiltered,
+        );
+    }
+}
+
+/// Draw the launch/quit reveal window for openness `frac` (0 = tile, 1 = full):
+/// the game's cover clipped to a window that opens/closes between the two, plus
+/// the bright border + dim chrome so the rectangle reads over the gallery behind.
+fn draw_game_reveal_window(backend: &mut SwitchRenderBackend, frac: f32, fade: f32) {
+    let (vw, vh) = backend.screen_size();
+    let ((rx, ry, rw, rh), basename, name, color) = crate::backend::render::game_reveal_info();
+    let wx = rx * (1.0 - frac);
+    let wy = ry * (1.0 - frac);
+    let ww = rw + (vw - rw) * frac;
+    let wh = rh + (vh - rh) * frac;
+    backend.set_clip(wx, wy, ww, wh);
+    backend.draw_game_reveal_tile(0.0, 0.0, vw, vh, &basename, &name, color);
+    // Launch fade-to-black: a black veil over the (full-screen) cover so the game
+    // pops calmly out of the dark instead of replacing the cover in one frame.
+    if fade > 0.0 {
+        let alpha = (fade.clamp(0.0, 1.0) * 255.0) as u32;
+        backend.draw_overlay_rect(0.0, 0.0, vw, vh, alpha << 24);
+    }
+    backend.clear_clip();
+    backend.draw_reveal_chrome(wx, wy, ww, wh);
+}
+
 /// Render the current screen using the backend. C++ calls this each frame
 /// while the library is active, AFTER `glClear` (we own the entire
 /// framebuffer — no Ruffle behind us at this stage).
@@ -1730,9 +1954,78 @@ pub fn render(backend: &mut SwitchRenderBackend) {
         Ok(g) => g,
         Err(_) => return,
     };
-    let screen = s.screen;
+    let mut screen = s.screen;
     let anim_origin = s.anim_origin_ticks;
     drop(s);
+
+    let now = unsafe { ruffle_tick_now() };
+
+    // Scale pop (v1.2.0): everything that appears scales UP — tab switches,
+    // modals, and the TOUCHES editor (open begun in `input`). Modals also scale
+    // DOWN on close; that screen-swap is DEFERRED (input rewinds the screen and
+    // starts the close pop), and we apply the stashed target only once the pop
+    // finishes here. The transform is reset to identity before the navbar below.
+    let closing = crate::backend::render::modal_close_active();
+    // Open detection: fire the grow pop the first frame a modal appears. Skipped
+    // while closing, since the screen is the rewound modal then.
+    if !closing {
+        let k = modal_kind(screen);
+        if let Ok(mut last) = LAST_MODAL_KIND.lock() {
+            if k != 0 && k != *last {
+                crate::backend::render::modal_open_begin();
+            }
+            *last = k;
+        }
+    }
+    let (modal_scale, modal_active, close_done) = crate::backend::render::modal_scale_step(now);
+    if close_done {
+        // Close pop finished — apply the stashed action/target now.
+        let pending = PENDING_AFTER_CLOSE.lock().ok().and_then(|mut p| p.take());
+        if let Ok(mut s2) = LIBRARY.lock() {
+            match pending {
+                Some(PendingClose::Goto(t)) => {
+                    s2.screen = t;
+                }
+                Some(PendingClose::DeleteGame { game_idx }) => {
+                    delete_game(&mut s2, game_idx);
+                    if s2.entries.is_empty() {
+                        s2.screen = Screen::Empty;
+                    } else {
+                        s2.local_filter = None;
+                        let new_sel = game_idx.min(s2.entries.len() - 1);
+                        let scroll = gallery_scroll_for(new_sel, 0);
+                        s2.screen = Screen::List { selection: new_sel, scroll_offset: scroll };
+                        // Layout shifted (a tile is gone) — snap the glide.
+                        crate::backend::render::gallery_anim_reset();
+                    }
+                }
+                Some(PendingClose::DeleteHistory) => {
+                    let idx = s2.history_idx.unwrap_or(0);
+                    delete_current_history(&mut s2);
+                    let n = s2.url_history.len();
+                    s2.screen = Screen::DistantIdle { selection: idx.min(n) };
+                }
+                None => {}
+            }
+            screen = s2.screen;
+        }
+        if let Ok(mut last) = LAST_MODAL_KIND.lock() {
+            *last = modal_kind(screen);
+        }
+    }
+    // Modals + the TOUCHES editor SCALE (open/close pop); tab-home content SLIDES
+    // on an L/R switch. `modal_active` = an in-flight scale pop; a settled modal
+    // stays full; a tab-home slides while a tab slide runs; else identity.
+    if modal_active {
+        backend.set_ui_modal_scale(modal_scale);
+    } else if modal_kind(screen) != 0 {
+        backend.set_ui_modal_scale(1.0);
+    } else if crate::backend::render::tab_slide_active() {
+        let dx = crate::backend::render::tab_slide_translate(now, 140.0);
+        backend.set_ui_slide(dx);
+    } else {
+        backend.clear_ui_transform();
+    }
 
     // Phase = current tick - origin. Drives sin() animations. ms-resolution
     // is enough; we compute it lazily below to avoid an FFI call when the
@@ -1746,38 +2039,32 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             backend.draw_library_empty();
         }
         Screen::List { selection, scroll_offset } => {
-            // Snapshot the FILTERED entries + banner state so we don't hold
-            // the lock across the GL FFI calls in draw_library_list. selection
-            // / scroll_offset already index the filtered view.
-            let snapshot = LIBRARY.lock().ok().map(|s| {
-                let idx = local_filtered_indices(&s.entries, &s.local_filter);
-                let entries: std::vec::Vec<Entry> =
-                    idx.iter().map(|&i| s.entries[i].clone()).collect();
-                (
-                    LibraryListSnapshot {
-                        entries,
-                        banner_tex: s.banner_tex,
-                        banner_w: s.banner_w,
-                        banner_h: s.banner_h,
-                    },
-                    s.local_filter.clone(),
-                    s.entries.len(),
-                )
-            });
-            if let Some((snap, filter, total_unfiltered)) = snapshot {
-                let now = unsafe { ruffle_tick_now() };
-                let phase_ticks = now.saturating_sub(anim_origin);
-                backend.draw_library_gallery(
-                    selection,
-                    scroll_offset,
-                    &snap.entries,
-                    snap.banner_tex,
-                    snap.banner_w,
-                    snap.banner_h,
-                    phase_ticks,
-                    filter.as_deref(),
-                    total_unfiltered,
-                );
+            draw_gallery(backend, selection, scroll_offset, anim_origin);
+            // Quit collapse reveal: the cover shrinks from full screen back to its
+            // tile over the gallery (active only right after returning from a
+            // game; a no-op otherwise — the anim deactivates itself when idle).
+            if let Some((frac, fade, _collapsing, _done)) =
+                crate::backend::render::game_reveal_step(now)
+            {
+                draw_game_reveal_window(backend, frac, fade);
+            }
+        }
+        Screen::Launching { selection, scroll_offset } => {
+            // Launch reveal: the cover opens from the tile to full screen over the
+            // frozen gallery, then we flip to Picked (the C++ loop exits + loads
+            // the SWF behind that frozen full-screen cover = a free loading screen).
+            draw_gallery(backend, selection, scroll_offset, anim_origin);
+            let done = match crate::backend::render::game_reveal_step(now) {
+                Some((frac, fade, _collapsing, done)) => {
+                    draw_game_reveal_window(backend, frac, fade);
+                    done
+                }
+                None => true,
+            };
+            if done {
+                if let Ok(mut s) = LIBRARY.lock() {
+                    s.screen = Screen::Picked;
+                }
             }
         }
         Screen::OptionsModal { game_idx, selection } => {
@@ -1888,13 +2175,77 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             backend.draw_library_dim_backdrop();
             backend.draw_library_options(&url, selection, &labels);
         }
+        Screen::DistantLoading => {
+            // Async metadata fetch in flight: the reveal window opens from the
+            // launched row with a spinner, the IMPORTER list shows behind. Poll
+            // the fetch each frame and switch to DistantFiles on success.
+            let (urls, title) = LIBRARY
+                .lock()
+                .ok()
+                .map(|s| (s.url_history.clone(), s.pending_fetch_url.clone()))
+                .unwrap_or_default();
+            let refs: std::vec::Vec<&str> = urls.iter().map(|u| u.as_str()).collect();
+            let src = crate::backend::render::distant_reveal_source_sel();
+            backend.draw_library_distant_list(src, &refs, crate::loc::s().dist_add);
+            // Window: expanding (reveal active) or full screen (reveal done).
+            let frac = crate::backend::render::distant_reveal_step(now)
+                .map(|(f, _, _)| f)
+                .unwrap_or(1.0);
+            let (vw, vh) = backend.screen_size();
+            let (rx, ry, rw, rh) = distant_row_rect(src, vw);
+            let wx = rx * (1.0 - frac);
+            let wy = ry * (1.0 - frac);
+            let ww = rw + (vw - rw) * frac;
+            let wh = rh + (vh - rh) * frac;
+            backend.set_clip(wx, wy, ww, wh);
+            // Opaque navy panel inside the window REPLACES the URL list there;
+            // then the loading content (URL title + spinner). The URL list stays
+            // visible (dimmed) only OUTSIDE the window via the chrome below.
+            backend.draw_overlay_rect(wx, wy, ww, wh, 0xFF_14_20_38);
+            backend.draw_loading_panel(&title, now);
+            backend.clear_clip();
+            backend.draw_reveal_chrome(wx, wy, ww, wh);
+            // Poll the async fetch.
+            match net::tick_archive_fetch() {
+                net::ArchivePoll::Pending => {}
+                net::ArchivePoll::Done(files) => {
+                    if files.is_empty() {
+                        set_distant_error(crate::loc::s().err_no_swf);
+                    } else {
+                        let url = {
+                            let mut g = LIBRARY.lock().ok();
+                            if let Some(s) = g.as_mut() {
+                                s.remote_files = files;
+                                s.screen = Screen::DistantFiles { selection: 0, scroll_offset: 0 };
+                                Some(s.pending_fetch_url.clone())
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some(u) = url {
+                            push_history(&u);
+                            // push_history moved this URL to the most-recent END
+                            // of history — retarget the reveal so closing collapses
+                            // to its NEW row (and the cursor lands there).
+                            let new_idx = LIBRARY
+                                .lock()
+                                .ok()
+                                .map(|s| s.url_history.len().saturating_sub(1))
+                                .unwrap_or(0);
+                            crate::backend::render::distant_reveal_set_source(new_idx);
+                        }
+                    }
+                }
+                net::ArchivePoll::Error(e) => set_distant_error(&e),
+            }
+        }
         Screen::DistantFiles { selection, scroll_offset } => {
             // Union of session-downloaded basenames (filled by
             // `on_download_finished`) and basenames already scanned
             // from SD into `entries`. The latter catches files that
             // were on SD before this .nro boot — fixes the "OK badge
             // missed across sessions" report.
-            let (files, marked, filter, total) = LIBRARY
+            let (files, marked, filter, total, urls) = LIBRARY
                 .lock()
                 .ok()
                 .map(|s| {
@@ -1908,18 +2259,48 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     let total = s.remote_files.len();
                     let filtered: std::vec::Vec<crate::net::RemoteFile> =
                         idx.iter().map(|&i| s.remote_files[i].clone()).collect();
-                    (filtered, marked, s.distant_filter.clone(), total)
+                    (filtered, marked, s.distant_filter.clone(), total, s.url_history.clone())
                 })
                 .unwrap_or_default();
-            backend.draw_library_distant_files(
-                selection,
-                scroll_offset,
-                &files,
-                DISTANT_VISIBLE_ROWS,
-                &marked,
-                filter.as_deref(),
-                total,
-            );
+            // Expand/collapse reveal (v1.2.0): while a reveal runs, draw the
+            // IMPORTER list underneath and the file list clipped to a window that
+            // opens from / closes to the launched URL's row.
+            if let Some((frac, collapsing, done)) =
+                crate::backend::render::distant_reveal_step(now)
+            {
+                let (vw, vh) = backend.screen_size();
+                let src = crate::backend::render::distant_reveal_source_sel();
+                let (rx, ry, rw, rh) = distant_row_rect(src, vw);
+                // Lerp the window from the row rect (frac 0) to full screen (1).
+                let wx = rx * (1.0 - frac);
+                let wy = ry * (1.0 - frac);
+                let ww = rw + (vw - rw) * frac;
+                let wh = rh + (vh - rh) * frac;
+                let refs: std::vec::Vec<&str> = urls.iter().map(|u| u.as_str()).collect();
+                backend.draw_library_distant_list(src, &refs, crate::loc::s().dist_add);
+                backend.set_clip(wx, wy, ww, wh);
+                backend.draw_library_distant_files(
+                    selection, scroll_offset, &files, DISTANT_VISIBLE_ROWS,
+                    &marked, filter.as_deref(), total,
+                );
+                backend.clear_clip();
+                // Make the opening/closing rectangle visible (same navy behind):
+                // dim outside + bright border.
+                backend.draw_reveal_chrome(wx, wy, ww, wh);
+                if done && collapsing {
+                    if let Ok(mut s) = LIBRARY.lock() {
+                        s.remote_files.clear();
+                        s.distant_filter = None;
+                        let n = s.url_history.len();
+                        s.screen = Screen::DistantIdle { selection: src.min(n) };
+                    }
+                }
+            } else {
+                backend.draw_library_distant_files(
+                    selection, scroll_offset, &files, DISTANT_VISIBLE_ROWS,
+                    &marked, filter.as_deref(), total,
+                );
+            }
         }
         Screen::DistantDownloading => {
             // Pump the curl multi handle once per frame and check
@@ -1960,7 +2341,8 @@ pub fn render(backend: &mut SwitchRenderBackend) {
     // ── Navbar (v1.2.0) ──────────────────────────────────────────────────
     // Drawn last so the tab strip sits on top of every tab-home screen. L/R
     // switches tabs (see `input()`); sub-screens (`screen_tab` == None) show
-    // no navbar.
+    // no navbar. Reset the transform first so the navbar itself never moves.
+    backend.clear_ui_transform();
     if let Some(tab) = screen_tab(screen) {
         backend.draw_navbar(tab.index());
     }

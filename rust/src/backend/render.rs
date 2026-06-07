@@ -1173,6 +1173,18 @@ pub struct SwitchRenderBackend {
     /// commands into a cache texture. Commands are pre-shifted by Ruffle to
     /// target-local coords, so no origin offset is needed.
     offscreen_dims: Option<(u32, u32)>,
+    /// Global pixel translation folded into `world_matrix` for the LIBRARY UI
+    /// only (v1.2.0 polish). Lets `library::render` slide a whole screen's
+    /// content for tab transitions / modal pops without every draw call knowing
+    /// about it. Always 0 during in-game / offscreen rendering (set + reset
+    /// around the library content draw, so the navbar and Ruffle are untouched).
+    ui_translate_x: f32,
+    ui_translate_y: f32,
+    /// Uniform scale about (`ui_pivot_x`, `ui_pivot_y`) for the modal open/close
+    /// pop. 1.0 = identity (always so in-game / offscreen).
+    ui_scale: f32,
+    ui_pivot_x: f32,
+    ui_pivot_y: f32,
     /// Reusable FBO object (lazy; 0 = not created). Color attachment is
     /// rebound per offscreen render.
     offscreen_fbo: GLuint,
@@ -2409,6 +2421,537 @@ pub fn gallery_layout_read() -> (std::vec::Vec<GalleryCell>, u32) {
     gallery_cache().lock().map(|g| (g.0.clone(), g.1)).unwrap_or_default()
 }
 
+/// Selected tile's current screen rect (x,y,w,h) from the last gallery render.
+/// The game launch/quit reveal grows the cover from / shrinks it to this box.
+fn gallery_sel_rect() -> &'static std::sync::Mutex<(f32, f32, f32, f32)> {
+    static R: std::sync::Mutex<(f32, f32, f32, f32)> =
+        std::sync::Mutex::new((0.0, 0.0, 0.0, 0.0));
+    &R
+}
+
+/// The selected tile's last-rendered screen rect (for the launch/quit reveal).
+pub fn gallery_sel_rect_read() -> (f32, f32, f32, f32) {
+    gallery_sel_rect().lock().map(|r| *r).unwrap_or((0.0, 0.0, 0.0, 0.0))
+}
+
+/// Eased visual state for the JOUER gallery (v1.2.0 polish). The input layer
+/// still works in discrete tile/row indices; this is purely cosmetic — the
+/// selection frame glides toward the active tile and the row window scrolls in
+/// pixels instead of snapping. Process-wide like `gallery_cache`; snapped to
+/// its target whenever `inited` is false (set by `gallery_anim_reset` on every
+/// fresh entry into the gallery, so the cursor never streaks from a stale spot).
+#[derive(Clone, Copy)]
+struct GalleryAnim {
+    inited: bool,
+    last_tick: u64,
+    last_sel: usize,
+    /// Selection frame in CONTENT space: `sel_x`/`sel_w` are screen px, `sel_y`
+    /// is pre-scroll (screen y = `sel_y - scroll_px`) so the cursor glide and
+    /// the scroll glide stay independent.
+    sel_x: f32,
+    sel_y: f32,
+    sel_w: f32,
+    /// Vertical scroll in pixels, eased toward `scroll_offset * pitch`.
+    scroll_px: f32,
+    /// Decays 1->0 after a selection change; drives a small frame "pop".
+    pop: f32,
+}
+
+fn gallery_anim() -> &'static std::sync::Mutex<GalleryAnim> {
+    static A: std::sync::Mutex<GalleryAnim> = std::sync::Mutex::new(GalleryAnim {
+        inited: false,
+        last_tick: 0,
+        last_sel: 0,
+        sel_x: 0.0,
+        sel_y: 0.0,
+        sel_w: 0.0,
+        scroll_px: 0.0,
+        pop: 0.0,
+    });
+    &A
+}
+
+/// Snap the gallery animation to its target on the next frame (no glide).
+/// Called from `library` whenever the gallery is (re)entered with a possibly
+/// far-away selection — fresh open, navbar switch into JOUER, new search — so
+/// the cursor doesn't slide across the whole screen from a stale position.
+pub fn gallery_anim_reset() {
+    if let Ok(mut a) = gallery_anim().lock() {
+        a.inited = false;
+    }
+}
+
+/// Frame-rate aware approach of `cur` toward `target`. `rate` ~ 1/time-constant
+/// (s^-1); `dt` is the frame delta in seconds. Linear in dt (no `exp()`: we
+/// stay off libm like `approx_sin`), which is plenty smooth at ~60 fps.
+fn ease_to(cur: f32, target: f32, dt: f32, rate: f32) -> f32 {
+    let t = (rate * dt).clamp(0.0, 1.0);
+    cur + (target - cur) * t
+}
+
+/// Horizontal content slide for tab transitions (v1.2.0). The navbar stays put;
+/// `library::render` slides the active tab's content in from the side the user
+/// pressed (L = from the left, R = from the right) over a short ease-out. Begun
+/// by `tab_transition_begin` (which knows the L/R direction), stepped each frame
+/// by `tab_slide_translate`. Tabs slide; modals/editors scale — that split is
+/// deliberate (lateral siblings slide, things that "pop up" scale).
+#[derive(Clone, Copy)]
+struct TabSlide {
+    active: bool,
+    inited: bool,
+    last_tick: u64,
+    t: f32,   // 0..1 progress
+    dir: f32, // +1 = enter from right (R), -1 = enter from left (L)
+}
+
+fn tab_slide() -> &'static std::sync::Mutex<TabSlide> {
+    static A: std::sync::Mutex<TabSlide> = std::sync::Mutex::new(TabSlide {
+        active: false,
+        inited: false,
+        last_tick: 0,
+        t: 0.0,
+        dir: 1.0,
+    });
+    &A
+}
+
+/// Kick off a tab-change content slide. `dir` is +1 for the NEXT tab (R, content
+/// enters from the right) and -1 for the PREVIOUS tab (L).
+pub fn tab_transition_begin(dir: f32) {
+    if let Ok(mut a) = tab_slide().lock() {
+        a.active = true;
+        a.inited = false;
+        a.t = 0.0;
+        a.dir = dir;
+    }
+}
+
+/// Advance the tab slide and return the content x-translate in px (0 when idle).
+/// The content eases from `slide_px * dir` to 0; `now` is absolute ticks.
+pub fn tab_slide_translate(now: u64, slide_px: f32) -> f32 {
+    let mut a = match tab_slide().lock() {
+        Ok(g) => g,
+        Err(_) => return 0.0,
+    };
+    if !a.active {
+        return 0.0;
+    }
+    if !a.inited {
+        a.inited = true;
+        a.last_tick = now;
+    }
+    let freq = unsafe { ruffle_tick_freq() } as f32;
+    let dt = if freq > 0.0 {
+        (now.saturating_sub(a.last_tick) as f32 / freq).min(0.1)
+    } else {
+        1.0 / 60.0
+    };
+    a.last_tick = now;
+    // ~6.5 /s => ~150 ms total. Ease-OUT (remaining squared) so the content
+    // decelerates as it settles into place.
+    a.t = (a.t + dt * 6.5).min(1.0);
+    if a.t >= 1.0 {
+        a.active = false;
+        return 0.0;
+    }
+    let remaining = 1.0 - a.t;
+    remaining * remaining * slide_px * a.dir
+}
+
+/// True while a tab slide is mid-flight (so `library::render` applies it).
+pub fn tab_slide_active() -> bool {
+    tab_slide().lock().map(|a| a.active).unwrap_or(false)
+}
+
+
+/// Modal "pop" (v1.2.0): a panel/modal screen scales UP from small to full when
+/// it opens, and scales DOWN to a point when it closes. The close screen-swap is
+/// deferred by `library` until this reports done, so the modal stays drawn while
+/// it shrinks. The dim backdrop stays put (drawn scale/translate-immune via
+/// `fill_screen_dim` / `glClear`). Stepped each frame by `modal_scale_step`.
+#[derive(Clone, Copy, PartialEq)]
+enum ModalMode {
+    Idle,
+    Opening,
+    Closing,
+}
+
+#[derive(Clone, Copy)]
+struct ModalAnim {
+    mode: ModalMode,
+    inited: bool,
+    last_tick: u64,
+    t: f32, // 0..1 progress within the current mode
+}
+
+fn modal_anim() -> &'static std::sync::Mutex<ModalAnim> {
+    static A: std::sync::Mutex<ModalAnim> = std::sync::Mutex::new(ModalAnim {
+        mode: ModalMode::Idle,
+        inited: false,
+        last_tick: 0,
+        t: 0.0,
+    });
+    &A
+}
+
+const MODAL_OPEN_FROM: f32 = 0.55; // start scale when opening
+const MODAL_CLOSE_TO: f32 = 0.0; // end scale when closing (vanishes to the pivot)
+
+/// Begin the open pop (scale grows to full). Called when a modal first appears.
+pub fn modal_open_begin() {
+    if let Ok(mut a) = modal_anim().lock() {
+        a.mode = ModalMode::Opening;
+        a.inited = false;
+        a.t = 0.0;
+    }
+}
+
+/// Begin the close pop (scale shrinks away). Called by `library` when a modal's
+/// close is requested; the real screen swap waits for `modal_scale_step` to
+/// report the close finished.
+pub fn modal_close_begin() {
+    if let Ok(mut a) = modal_anim().lock() {
+        a.mode = ModalMode::Closing;
+        a.inited = false;
+        a.t = 0.0;
+    }
+}
+
+/// True while a close pop is mid-flight (input is suspended during this so the
+/// modal can't be re-navigated as it scales away).
+pub fn modal_close_active() -> bool {
+    modal_anim().lock().map(|a| a.mode == ModalMode::Closing).unwrap_or(false)
+}
+
+/// Advance the modal pop. Returns `(scale, active, close_done)`:
+///   - `scale`: uniform scale to apply to the modal content this frame.
+///   - `active`: true while opening or closing (caller applies `scale`).
+///   - `close_done`: true on the single frame a close finishes (caller then
+///     swaps to the deferred target screen).
+pub fn modal_scale_step(now: u64) -> (f32, bool, bool) {
+    let mut a = match modal_anim().lock() {
+        Ok(g) => g,
+        Err(_) => return (1.0, false, false),
+    };
+    if a.mode == ModalMode::Idle {
+        return (1.0, false, false);
+    }
+    if !a.inited {
+        a.inited = true;
+        a.last_tick = now;
+    }
+    let freq = unsafe { ruffle_tick_freq() } as f32;
+    let dt = if freq > 0.0 {
+        (now.saturating_sub(a.last_tick) as f32 / freq).min(0.1)
+    } else {
+        1.0 / 60.0
+    };
+    a.last_tick = now;
+    match a.mode {
+        ModalMode::Opening => {
+            a.t = (a.t + dt * 7.0).min(1.0); // ~140 ms
+            if a.t >= 1.0 {
+                a.mode = ModalMode::Idle;
+                return (1.0, false, false);
+            }
+            let e = 1.0 - (1.0 - a.t) * (1.0 - a.t); // ease-out (settle in)
+            (MODAL_OPEN_FROM + (1.0 - MODAL_OPEN_FROM) * e, true, false)
+        }
+        ModalMode::Closing => {
+            a.t = (a.t + dt * 9.0).min(1.0); // ~110 ms, snappier
+            if a.t >= 1.0 {
+                a.mode = ModalMode::Idle;
+                return (1.0, false, true);
+            }
+            let e = a.t * a.t; // ease-in (accelerate away)
+            (1.0 + (MODAL_CLOSE_TO - 1.0) * e, true, false)
+        }
+        ModalMode::Idle => (1.0, false, false),
+    }
+}
+
+/// Eased selection highlight for the plain vertical-list tabs (IMPORTER /
+/// REGLAGES), so the cursor glides between rows like the JOUER frame. Tracks a
+/// single screen-space y; `key` distinguishes lists so switching tabs snaps the
+/// highlight to the new layout instead of sliding across it.
+#[derive(Clone, Copy)]
+struct ListHl {
+    inited: bool,
+    key: u32,
+    last_tick: u64,
+    y: f32,
+}
+
+fn list_hl() -> &'static std::sync::Mutex<ListHl> {
+    static A: std::sync::Mutex<ListHl> = std::sync::Mutex::new(ListHl {
+        inited: false,
+        key: 0,
+        last_tick: 0,
+        y: 0.0,
+    });
+    &A
+}
+
+/// Advance + return the eased top-y of a list's selection highlight. Snaps to
+/// `target_y` on the first frame or when `key` changes (different list).
+fn eased_list_y(target_y: f32, key: u32, now: u64) -> f32 {
+    let mut a = match list_hl().lock() {
+        Ok(g) => g,
+        Err(_) => return target_y,
+    };
+    if !a.inited || a.key != key {
+        a.inited = true;
+        a.key = key;
+        a.last_tick = now;
+        a.y = target_y;
+        return target_y;
+    }
+    let freq = unsafe { ruffle_tick_freq() } as f32;
+    let dt = if freq > 0.0 {
+        (now.saturating_sub(a.last_tick) as f32 / freq).min(0.1)
+    } else {
+        1.0 / 60.0
+    };
+    a.last_tick = now;
+    a.y = ease_to(a.y, target_y, dt, 20.0);
+    a.y
+}
+
+/// Expand/collapse reveal for the IMPORTER drill-in (v1.2.0). Launching a saved
+/// URL "opens" its row into the full-screen file list; closing collapses it back
+/// to the row. Driven by a scissor window that grows from the row rect to the
+/// full screen (expand) and shrinks back (collapse) — no scaling, just a clip
+/// that opens. `source_sel` is the history row to grow from / shrink to.
+#[derive(Clone, Copy)]
+struct DistantReveal {
+    active: bool,
+    collapsing: bool,
+    inited: bool,
+    last_tick: u64,
+    t: f32,
+    source_sel: usize,
+}
+
+fn distant_reveal() -> &'static std::sync::Mutex<DistantReveal> {
+    static A: std::sync::Mutex<DistantReveal> = std::sync::Mutex::new(DistantReveal {
+        active: false,
+        collapsing: false,
+        inited: false,
+        last_tick: 0,
+        t: 0.0,
+        source_sel: 0,
+    });
+    &A
+}
+
+/// Begin the expand reveal (row -> full screen) from history row `source_sel`.
+pub fn distant_reveal_begin_expand(source_sel: usize) {
+    if let Ok(mut a) = distant_reveal().lock() {
+        a.active = true;
+        a.collapsing = false;
+        a.inited = false;
+        a.t = 0.0;
+        a.source_sel = source_sel;
+    }
+}
+
+/// Begin the collapse reveal (full screen -> the row it grew from).
+pub fn distant_reveal_begin_collapse() {
+    if let Ok(mut a) = distant_reveal().lock() {
+        a.active = true;
+        a.collapsing = true;
+        a.inited = false;
+        a.t = 0.0;
+    }
+}
+
+/// True while a reveal is running (input is suspended during it).
+pub fn distant_reveal_active() -> bool {
+    distant_reveal().lock().map(|a| a.active).unwrap_or(false)
+}
+
+/// The history row the reveal grows from / shrinks to.
+pub fn distant_reveal_source_sel() -> usize {
+    distant_reveal().lock().map(|a| a.source_sel).unwrap_or(0)
+}
+
+/// Retarget the reveal's grow-from / shrink-to row. Used after `push_history`
+/// reorders the launched URL to the most-recent end, so the collapse (and the
+/// DistantIdle cursor) land on its NEW row instead of its old one.
+pub fn distant_reveal_set_source(idx: usize) {
+    if let Ok(mut a) = distant_reveal().lock() {
+        a.source_sel = idx;
+    }
+}
+
+/// Advance the reveal. Returns `(frac, collapsing, done)`:
+///   - `frac`: 0..1 openness (already eased) — 0 = the row rect, 1 = full screen;
+///     the caller lerps row->full by `frac`.
+///   - `collapsing`: direction (for the caller's done handling).
+///   - `done`: true on the frame the reveal finishes.
+/// Returns None when idle.
+pub fn distant_reveal_step(now: u64) -> Option<(f32, bool, bool)> {
+    let mut a = match distant_reveal().lock() {
+        Ok(g) => g,
+        Err(_) => return None,
+    };
+    if !a.active {
+        return None;
+    }
+    if !a.inited {
+        a.inited = true;
+        a.last_tick = now;
+    }
+    let freq = unsafe { ruffle_tick_freq() } as f32;
+    let dt = if freq > 0.0 {
+        (now.saturating_sub(a.last_tick) as f32 / freq).min(0.1)
+    } else {
+        1.0 / 60.0
+    };
+    a.last_tick = now;
+    a.t = (a.t + dt * 6.0).min(1.0); // ~165 ms
+    let collapsing = a.collapsing;
+    if a.t >= 1.0 {
+        a.active = false;
+        return Some((if collapsing { 0.0 } else { 1.0 }, collapsing, true));
+    }
+    let e = 1.0 - (1.0 - a.t) * (1.0 - a.t); // ease-out openness
+    let frac = if collapsing { 1.0 - e } else { e };
+    Some((frac, collapsing, false))
+}
+
+/// Game launch/quit reveal (v1.2.0): the chosen game's cover "opens" from its
+/// gallery tile to full screen on launch (then the SWF loads behind that frozen
+/// full-screen frame = a free loading screen), and "closes" back to the tile on
+/// quit. Same window-reveal as the IMPORTER drill-in, but the content is the
+/// full-screen cover and the box is the selected tile. Holds the game identity
+/// so the cover can be resolved from either render phase.
+struct GameReveal {
+    active: bool,
+    collapsing: bool,
+    inited: bool,
+    last_tick: u64,
+    t: f32,
+    rx: f32,
+    ry: f32,
+    rw: f32,
+    rh: f32,
+    basename: std::string::String,
+    display_name: std::string::String,
+    color_chip: u32,
+}
+
+fn game_reveal() -> &'static std::sync::Mutex<GameReveal> {
+    static A: std::sync::Mutex<GameReveal> = std::sync::Mutex::new(GameReveal {
+        active: false,
+        collapsing: false,
+        inited: false,
+        last_tick: 0,
+        t: 0.0,
+        rx: 0.0,
+        ry: 0.0,
+        rw: 0.0,
+        rh: 0.0,
+        basename: std::string::String::new(),
+        display_name: std::string::String::new(),
+        color_chip: 0,
+    });
+    &A
+}
+
+/// Begin a game reveal. `collapsing` = quit (full screen -> tile); otherwise
+/// launch (tile -> full screen). `rect` is the gallery tile box; the rest is the
+/// game identity used to draw the full-screen cover.
+pub fn game_reveal_begin(
+    collapsing: bool,
+    rect: (f32, f32, f32, f32),
+    basename: &str,
+    display_name: &str,
+    color_chip: u32,
+) {
+    if let Ok(mut a) = game_reveal().lock() {
+        a.active = true;
+        a.collapsing = collapsing;
+        a.inited = false;
+        a.t = 0.0;
+        a.rx = rect.0;
+        a.ry = rect.1;
+        a.rw = rect.2;
+        a.rh = rect.3;
+        a.basename = basename.to_string();
+        a.display_name = display_name.to_string();
+        a.color_chip = color_chip;
+    }
+}
+
+/// True while a game reveal is running (input suspended; library loop kept alive).
+pub fn game_reveal_active() -> bool {
+    game_reveal().lock().map(|a| a.active).unwrap_or(false)
+}
+
+/// The reveal's tile rect + game identity `(rect, basename, display_name, color)`.
+pub fn game_reveal_info() -> ((f32, f32, f32, f32), std::string::String, std::string::String, u32) {
+    game_reveal()
+        .lock()
+        .map(|a| {
+            (
+                (a.rx, a.ry, a.rw, a.rh),
+                a.basename.clone(),
+                a.display_name.clone(),
+                a.color_chip,
+            )
+        })
+        .unwrap_or_default()
+}
+
+/// Advance the game reveal. Returns `(frac, fade, collapsing, done)`:
+///   - `frac`: 0 = tile rect, 1 = full screen.
+///   - `fade`: 0..1 black overlay alpha — the LAUNCH adds a fade-to-black phase
+///     after the cover reaches full screen, so the game can pop calmly out of the
+///     dark instead of replacing the (often wrong-aspect) cover in one frame.
+///   - `collapsing` / `done` as before. None when idle.
+/// Launch runs `t` over [0,2] (expand [0,1] then fade [1,2]); collapse over [0,1].
+pub fn game_reveal_step(now: u64) -> Option<(f32, f32, bool, bool)> {
+    let mut a = match game_reveal().lock() {
+        Ok(g) => g,
+        Err(_) => return None,
+    };
+    if !a.active {
+        return None;
+    }
+    if !a.inited {
+        a.inited = true;
+        a.last_tick = now;
+    }
+    let freq = unsafe { ruffle_tick_freq() } as f32;
+    let dt = if freq > 0.0 {
+        (now.saturating_sub(a.last_tick) as f32 / freq).min(0.1)
+    } else {
+        1.0 / 60.0
+    };
+    a.last_tick = now;
+    let collapsing = a.collapsing;
+    let max_t = if collapsing { 1.0 } else { 2.0 };
+    a.t = (a.t + dt * 5.5).min(max_t); // ~180 ms per phase
+    if a.t >= max_t {
+        a.active = false;
+        // collapse done -> fully closed; launch done -> full screen + full black.
+        let frac = if collapsing { 0.0 } else { 1.0 };
+        let fade = if collapsing { 0.0 } else { 1.0 };
+        return Some((frac, fade, collapsing, true));
+    }
+    if collapsing {
+        let e = 1.0 - (1.0 - a.t) * (1.0 - a.t); // ease-out
+        Some((1.0 - e, 0.0, true, false))
+    } else if a.t <= 1.0 {
+        let e = 1.0 - (1.0 - a.t) * (1.0 - a.t); // ease-out openness
+        Some((e, 0.0, false, false))
+    } else {
+        // Fade phase: full screen, cover darkening to black.
+        Some((1.0, a.t - 1.0, false, false))
+    }
+}
+
 /// Cover-picker thumbnail state, keyed by the candidate's logo URL. Loaded
 /// progressively (one per frame) so opening the picker never freezes.
 #[derive(Clone, Copy)]
@@ -2576,6 +3119,11 @@ impl SwitchRenderBackend {
             index_arena,
             shape_vao,
             offscreen_dims: None,
+            ui_translate_x: 0.0,
+            ui_translate_y: 0.0,
+            ui_scale: 1.0,
+            ui_pivot_x: 0.0,
+            ui_pivot_y: 0.0,
             offscreen_fbo: 0,
             offscreen_depth_stencil: 0,
             offscreen_depth_stencil_dims: (0, 0),
@@ -2603,12 +3151,17 @@ impl SwitchRenderBackend {
                 true,
             ),
         };
-        let a = m.a;
-        let b = m.b;
-        let c = m.c;
-        let d = m.d;
-        let tx = m.tx.to_pixels() as f32;
-        let ty = m.ty.to_pixels() as f32;
+        // LIBRARY-UI transform: a uniform scale about a pivot (the modal/tab/
+        // editor open-close pop), with `ui_translate_*` kept for the dim-backdrop
+        // exemption. Folded in so every draw honours it. Identity (scale 1, pivot
+        // 0, translate 0) in-game / offscreen, so this is a no-op there.
+        let s = self.ui_scale;
+        let a = m.a * s;
+        let b = m.b * s;
+        let c = m.c * s;
+        let d = m.d * s;
+        let tx = m.tx.to_pixels() as f32 * s + self.ui_pivot_x * (1.0 - s) + self.ui_translate_x;
+        let ty = m.ty.to_pixels() as f32 * s + self.ui_pivot_y * (1.0 - s) + self.ui_translate_y;
         let sx = 2.0 / w;
         let sy = if flip_y { -2.0 / h } else { 2.0 / h };
         let ty_off = if flip_y { 1.0 } else { -1.0 };
@@ -3948,16 +4501,9 @@ impl SwitchRenderBackend {
 
         // Full-screen dim backdrop (50 % black). Hides the game so the
         // user's eye snaps to the menu.
-        let backdrop = Matrix {
-            a: vw,
-            b: 0.0,
-            c: 0.0,
-            d: vh,
-            tx: swf::Twips::from_pixels(0.0),
-            ty: swf::Twips::from_pixels(0.0),
-        };
-        // 50 % black backdrop (AA=0x80).
-        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x80_00_00_00), backdrop);
+        // 50% black backdrop. fill_screen_dim keeps it full-screen + still while
+        // the panel scales in (in-game pause pop), like the library modals.
+        self.fill_screen_dim(0x80_00_00_00);
 
         // Centred panel — sized so 1280x720 fits 3 items + title comfortably.
         const PANEL_W: f32 = 520.0;
@@ -4100,14 +4646,9 @@ impl SwitchRenderBackend {
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
 
-        // Same backdrop + panel framing as the pause menu — visually links
-        // the two screens.
-        let backdrop = Matrix {
-            a: vw, b: 0.0, c: 0.0, d: vh,
-            tx: swf::Twips::from_pixels(0.0),
-            ty: swf::Twips::from_pixels(0.0),
-        };
-        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x80_00_00_00), backdrop);
+        // Same backdrop + panel framing as the pause menu — visually links the
+        // two screens. fill_screen_dim keeps it full while the panel scales in.
+        self.fill_screen_dim(0x80_00_00_00);
 
         const PANEL_W: f32 = 720.0;
         const PANEL_H: f32 = 600.0;
@@ -4233,14 +4774,9 @@ impl SwitchRenderBackend {
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
 
-        // Full-screen dim (slightly deeper than the list backdrop so the
-        // dropdown reads as a modal-over-modal).
-        let backdrop = Matrix {
-            a: vw, b: 0.0, c: 0.0, d: vh,
-            tx: swf::Twips::from_pixels(0.0),
-            ty: swf::Twips::from_pixels(0.0),
-        };
-        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xB0_00_00_00), backdrop);
+        // Full-screen dim (deeper than the list backdrop so the dropdown reads as
+        // a modal-over-modal). fill_screen_dim keeps it full while the panel scales.
+        self.fill_screen_dim(0xB0_00_00_00);
 
         const PANEL_W: f32 = 480.0;
         let row_h: f32 = 40.0;
@@ -4534,6 +5070,227 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
+    /// Slide the whole library-UI content horizontally (tab transitions); no
+    /// scale. `library::render` resets this via `clear_ui_transform` afterwards.
+    pub fn set_ui_slide(&mut self, x: f32) {
+        self.ui_scale = 1.0;
+        self.ui_pivot_x = 0.0;
+        self.ui_pivot_y = 0.0;
+        self.ui_translate_x = x;
+        self.ui_translate_y = 0.0;
+    }
+
+    /// Scale the whole library-UI content about the screen centre (modal pop).
+    pub fn set_ui_modal_scale(&mut self, scale: f32) {
+        self.ui_scale = scale;
+        self.ui_pivot_x = self.dimensions.width as f32 * 0.5;
+        self.ui_pivot_y = self.dimensions.height as f32 * 0.5;
+        self.ui_translate_x = 0.0;
+        self.ui_translate_y = 0.0;
+    }
+
+    /// Reset the library-UI transform to identity (before the fixed navbar, and
+    /// for screens with no transition).
+    pub fn clear_ui_transform(&mut self) {
+        self.ui_scale = 1.0;
+        self.ui_pivot_x = 0.0;
+        self.ui_pivot_y = 0.0;
+        self.ui_translate_x = 0.0;
+        self.ui_translate_y = 0.0;
+    }
+
+    /// Library viewport size in pixels (for transition math in `library::render`).
+    pub fn screen_size(&self) -> (f32, f32) {
+        (self.dimensions.width as f32, self.dimensions.height as f32)
+    }
+
+    /// Clip subsequent draws to the screen-space rect (x,y,w,h), top-left origin.
+    /// Used by the IMPORTER reveal to open/close the file list through a window
+    /// (the window's `library_clear` glClear is confined to it, too). GL scissor
+    /// is bottom-left origin, so flip Y.
+    pub fn set_clip(&mut self, x: f32, y: f32, w: f32, h: f32) {
+        let vh = self.dimensions.height as f32;
+        unsafe {
+            glEnable(GL_SCISSOR_TEST);
+            glScissor(
+                x.max(0.0) as GLint,
+                (vh - (y + h)).max(0.0) as GLint,
+                w.max(0.0) as GLsizei,
+                h.max(0.0) as GLsizei,
+            );
+        }
+    }
+
+    /// Disable the scissor clip set by `set_clip`.
+    pub fn clear_clip(&mut self) {
+        unsafe {
+            glDisable(GL_SCISSOR_TEST);
+        }
+    }
+
+    /// Chrome for the IMPORTER reveal window (x,y,w,h): dim everything OUTSIDE it
+    /// and draw a bright border around it, so the opening/closing rectangle reads
+    /// clearly over the same-coloured list behind. Call after the clipped content.
+    pub fn draw_reveal_chrome(&mut self, x: f32, y: f32, w: f32, h: f32) {
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        let rect = |s: &mut Self, rx: f32, ry: f32, rw: f32, rh: f32, col: swf::Color| {
+            if rw <= 0.0 || rh <= 0.0 {
+                return;
+            }
+            let m = Matrix {
+                a: rw, b: 0.0, c: 0.0, d: rh,
+                tx: swf::Twips::from_pixels(rx as f64),
+                ty: swf::Twips::from_pixels(ry as f64),
+            };
+            <Self as CommandHandler>::draw_rect(s, col, m);
+        };
+        // Dim the four panes outside the window (darkens the list behind so the
+        // bright window pops). Shrinks to nothing as the window fills the screen.
+        let dim = swf::Color::from_rgba(0x88_00_00_00);
+        rect(self, 0.0, 0.0, vw, y, dim); // top
+        rect(self, 0.0, y + h, vw, vh - (y + h), dim); // bottom
+        rect(self, 0.0, y, x, h, dim); // left
+        rect(self, x + w, y, vw - (x + w), h, dim); // right
+        // Bright border around the window.
+        let col = swf::Color::from_rgb(0xFFD740, 255);
+        let b = 4.0;
+        rect(self, x - b, y - b, w + 2.0 * b, b, col); // top
+        rect(self, x - b, y + h, w + 2.0 * b, b, col); // bottom
+        rect(self, x - b, y, b, h, col); // left
+        rect(self, x + w, y, b, h, col); // right
+    }
+
+    /// Draw the game-reveal content for the rect (x,y,w,h): the game's cover
+    /// LETTERBOXED (fit, keeps aspect — no crop, no stretch; black bars fill the
+    /// rest) if it has one, else its colour chip + initials. Used full-screen as
+    /// the launch/quit reveal window's content.
+    pub fn draw_game_reveal_tile(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        basename: &str,
+        display_name: &str,
+        color_chip: u32,
+    ) {
+        match self.cover_for(basename) {
+            CoverTex::Image { tex, w: iw, h: ih } if iw > 0 && ih > 0 => {
+                // Black backdrop (the letterbox bars).
+                self.draw_overlay_rect(x, y, w, h, 0xFF_00_00_00);
+                // Fit the cover inside (w,h) keeping its aspect, centred.
+                let cover_aspect = iw as f32 / ih as f32;
+                let win_aspect = w / h;
+                let (dw, dh) = if cover_aspect > win_aspect {
+                    (w, w / cover_aspect)
+                } else {
+                    (h * cover_aspect, h)
+                };
+                self.draw_textured_rect(x + (w - dw) * 0.5, y + (h - dh) * 0.5, dw, dh, tex);
+            }
+            _ => {
+                // No cover: the colour chip + initials fill the window.
+                self.draw_overlay_rect(x, y, w, h, 0xFF_00_00_00 | color_chip);
+                let initials: std::string::String = display_name.chars().take(3).collect();
+                let isc = (h / 36.0).clamp(3.0, 14.0);
+                let tw = self.measure_text(&initials, isc);
+                self.draw_text(
+                    x + (w - tw) * 0.5,
+                    y + (h - 7.0 * isc) * 0.5,
+                    isc,
+                    &initials,
+                    swf::Color::from_rgb(0xFFFFFF, 255),
+                );
+            }
+        }
+    }
+
+    /// Draw a solid AARRGGBB rectangle (x,y,w,h). Used for the reveal's letterbox
+    /// bars and the launch fade-to-black overlay.
+    pub fn draw_overlay_rect(&mut self, x: f32, y: f32, w: f32, h: f32, rgba: u32) {
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let m = Matrix {
+            a: w, b: 0.0, c: 0.0, d: h,
+            tx: swf::Twips::from_pixels(x as f64),
+            ty: swf::Twips::from_pixels(y as f64),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(rgba), m);
+    }
+
+    /// Loading spinner: N dots in a circle whose brightness waves around, driven
+    /// by `now` ticks. Shown on the IMPORTER async-fetch screen.
+    pub fn draw_spinner(&mut self, cx: f32, cy: f32, radius: f32, now: u64) {
+        const N: usize = 8;
+        let two_pi = 2.0 * core::f32::consts::PI;
+        let freq = unsafe { ruffle_tick_freq() } as f32;
+        let phase = if freq > 0.0 { (now as f32 / freq) * 6.0 } else { 0.0 };
+        let dot = (radius * 0.34).max(5.0);
+        for i in 0..N {
+            let a = two_pi * (i as f32) / (N as f32);
+            let dx = cx + radius * approx_sin(a + core::f32::consts::FRAC_PI_2); // cos
+            let dy = cy + radius * approx_sin(a);
+            let b = (approx_sin(phase - a) * 0.5 + 0.5).clamp(0.0, 1.0);
+            let alpha = (40.0 + b * 215.0) as u32;
+            let rgba = (alpha << 24) | 0x00_FF_FF_FF;
+            let m = Matrix {
+                a: dot, b: 0.0, c: 0.0, d: dot,
+                tx: swf::Twips::from_pixels((dx - dot * 0.5) as f64),
+                ty: swf::Twips::from_pixels((dy - dot * 0.5) as f64),
+            };
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(rgba), m);
+        }
+    }
+
+    /// Loading panel content for the IMPORTER async fetch: the URL/item title
+    /// above a centred spinner. The caller fills the window with an opaque panel
+    /// first (so the URL list behind is replaced, not seen through).
+    pub fn draw_loading_panel(&mut self, title: &str, now: u64) {
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        let t = truncate_mid(title, 48);
+        let ts = 2.5;
+        let tw = self.measure_text(&t, ts);
+        self.draw_text(
+            (vw - tw) * 0.5,
+            vh * 0.5 - 96.0,
+            ts,
+            &t,
+            swf::Color::from_rgb(0xFFFFFF, 255),
+        );
+        self.draw_spinner(vw * 0.5, vh * 0.5 + 8.0, 30.0, now);
+    }
+
+    /// Draw a full-screen dim rect that ignores the active UI transform, so a
+    /// modal's backdrop stays full-screen + still while its panel scales in/out.
+    /// Saves + restores the transform around the single draw.
+    fn fill_screen_dim(&mut self, rgba: u32) {
+        let saved = (
+            self.ui_scale, self.ui_pivot_x, self.ui_pivot_y,
+            self.ui_translate_x, self.ui_translate_y,
+        );
+        self.ui_scale = 1.0;
+        self.ui_pivot_x = 0.0;
+        self.ui_pivot_y = 0.0;
+        self.ui_translate_x = 0.0;
+        self.ui_translate_y = 0.0;
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        let m = Matrix {
+            a: vw, b: 0.0, c: 0.0, d: vh,
+            tx: swf::Twips::from_pixels(0.0),
+            ty: swf::Twips::from_pixels(0.0),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(rgba), m);
+        self.ui_scale = saved.0;
+        self.ui_pivot_x = saved.1;
+        self.ui_pivot_y = saved.2;
+        self.ui_translate_x = saved.3;
+        self.ui_translate_y = saved.4;
+    }
+
     /// Top navbar (v1.2.0) — tab strip switched with the L/R shoulder buttons.
     /// `active` indexes JOUER(0) / IMPORTER(1) / REGLAGES(2). Drawn last, over
     /// the top of every tab-home screen, by `library::render`.
@@ -4739,11 +5496,10 @@ impl SwitchRenderBackend {
         let avail_w = vw - LEFT * 2.0;
         let pitch = ROW_IMG_H + GAP_Y;
 
-        // Pass 1 — resolve covers + JUSTIFIED layout. (a) assign tiles to rows
-        // greedily by natural width; (b) per row, scale the tile widths so the
-        // row fills the full width (true justify, accepting a little enlarging).
-        // The last row keeps natural size, left-aligned. cover_for caches, so
-        // this is cheap after the first frame.
+        // Pass 1 — resolve covers + row layout. (a) assign tiles to rows greedily
+        // by natural width; (b) lay each row out CENTERED with a uniform gap, so
+        // every cover keeps its natural aspect (no stretch) and rows stay evenly
+        // spaced (no big justify gaps). cover_for caches, cheap after frame 1.
         let total = entries.len();
         let mut nat: std::vec::Vec<(CoverTex, f32, u32)> = std::vec::Vec::with_capacity(total);
         let mut cur_x = LEFT;
@@ -4764,7 +5520,9 @@ impl SwitchRenderBackend {
         }
         let rows_total = if total == 0 { 0 } else { row + 1 };
 
-        // (b) Justify each row into final (cover, x, w, row) tiles.
+        // (b) Lay out each row CENTERED with a uniform gap — covers keep their
+        // natural width (no stretch) and rows are balanced (no big justify gaps).
+        // `tiles` = (cover, x, w, row).
         let mut tiles: std::vec::Vec<(CoverTex, f32, f32, u32)> =
             std::vec::Vec::with_capacity(total);
         let mut cells: std::vec::Vec<GalleryCell> = std::vec::Vec::with_capacity(total);
@@ -4775,20 +5533,13 @@ impl SwitchRenderBackend {
             while j < nat.len() && nat[j].2 == r {
                 j += 1;
             }
-            let n = (j - i) as f32;
+            let n = j - i;
             let sum_nat: f32 = nat[i..j].iter().map(|t| t.1).sum();
-            let gaps = (n - 1.0) * GAP_X;
-            let is_last = j >= nat.len();
-            // Full rows fill the width (scale >= 1, capped to avoid grotesque
-            // blow-ups); the trailing row stays at natural size.
-            let factor = if is_last || sum_nat <= 0.0 {
-                1.0
-            } else {
-                ((avail_w - gaps) / sum_nat).clamp(1.0, 2.5)
-            };
-            let mut x = LEFT;
+            let row_w = sum_nat + (n.saturating_sub(1) as f32) * GAP_X;
+            // Centre the row within the available band.
+            let mut x = LEFT + ((avail_w - row_w) * 0.5).max(0.0);
             for t in &nat[i..j] {
-                let w = t.1 * factor;
+                let w = t.1;
                 tiles.push((t.0, x, w, r));
                 cells.push(GalleryCell { row: r, cx: x + w * 0.5 });
                 x += w + GAP_X;
@@ -4800,14 +5551,106 @@ impl SwitchRenderBackend {
             *g = (cells, rows_total);
         }
 
-        // Pass 2 — draw only the visible row window.
-        let first_row = scroll_offset as u32;
+        // Pass 2 — smooth-scrolled visible window (v1.2.0 polish). The input
+        // layer still tracks a discrete first row (`scroll_offset`) + tile
+        // index (`selection`); here we ease an actual pixel scroll toward that
+        // row and glide a single selection frame toward the active tile, so
+        // cursor moves and row changes slide instead of snapping. A scissor
+        // clips the band so partially-scrolled rows don't bleed onto the banner
+        // or the info line.
+        // Clip band sits a touch ABOVE the first row (TOP) so the resting row's
+        // top edge + its selection frame (which overhangs ~4px, more on a pop)
+        // aren't rogned; the 16px headroom still leaves a gap to the banner so a
+        // row scrolling UP fades out cleanly instead of overlapping it.
+        let band_top = TOP - 16.0;
+        let band_bot = TOP + rows_visible as f32 * pitch;
+        let target_scroll = scroll_offset as f32 * pitch;
+        // Selected tile geometry in content space — the eased frame chases it.
+        let (target_sel_x, target_sel_row, target_sel_w) = tiles
+            .get(selection)
+            .map(|&(_, tx, tw, trow)| (tx, trow, tw))
+            .unwrap_or((LEFT, 0, 0.0));
+        let target_sel_y = TOP + target_sel_row as f32 * pitch;
+
+        // Advance the animation toward the targets (snap on the first frame
+        // after a reset; ease otherwise). Falls back to the targets if the lock
+        // is somehow unavailable — worst case is one un-eased frame.
+        let mut scroll_px = target_scroll;
+        let mut frame_x = target_sel_x;
+        let mut frame_y = target_sel_y;
+        let mut frame_w = target_sel_w;
+        let mut pop = 0.0f32;
+        if let Ok(mut a) = gallery_anim().lock() {
+            let now = phase_ticks;
+            if !a.inited {
+                a.inited = true;
+                a.last_tick = now;
+                a.last_sel = selection;
+                a.sel_x = target_sel_x;
+                a.sel_y = target_sel_y;
+                a.sel_w = target_sel_w;
+                a.scroll_px = target_scroll;
+                a.pop = 0.0;
+            } else {
+                let freq = unsafe { ruffle_tick_freq() } as f32;
+                let dt = if freq > 0.0 {
+                    (now.saturating_sub(a.last_tick) as f32 / freq).min(0.1)
+                } else {
+                    1.0 / 60.0
+                };
+                a.last_tick = now;
+                if selection != a.last_sel {
+                    a.pop = 1.0; // kick the "snap" pop on every cursor move
+                    a.last_sel = selection;
+                }
+                a.sel_x = ease_to(a.sel_x, target_sel_x, dt, 18.0);
+                a.sel_y = ease_to(a.sel_y, target_sel_y, dt, 18.0);
+                a.sel_w = ease_to(a.sel_w, target_sel_w, dt, 18.0);
+                a.scroll_px = ease_to(a.scroll_px, target_scroll, dt, 16.0);
+                a.pop = ease_to(a.pop, 0.0, dt, 12.0);
+            }
+            scroll_px = a.scroll_px;
+            frame_x = a.sel_x;
+            frame_y = a.sel_y;
+            frame_w = a.sel_w;
+            pop = a.pop;
+        }
+
+        // Publish the selected tile's current screen rect for the game launch /
+        // quit reveal (the cover grows from / shrinks to it).
+        if !tiles.is_empty() {
+            let sel_y = TOP + target_sel_row as f32 * pitch - scroll_px;
+            if let Ok(mut r) = gallery_sel_rect().lock() {
+                *r = (target_sel_x, sel_y, target_sel_w, ROW_IMG_H);
+            }
+        }
+
+        // Clip to the gallery band. GL scissor is bottom-left origin while our
+        // pixels are top-left, so flip: y = vh - band_bot, height = band height.
+        unsafe {
+            glEnable(GL_SCISSOR_TEST);
+            glScissor(
+                0,
+                (vh - band_bot).max(0.0) as GLint,
+                vw as GLsizei,
+                (band_bot - band_top).max(0.0) as GLsizei,
+            );
+        }
+
+        // Draw the rows that can intersect the band. `scroll_offset` moves at
+        // most one row per input, so a ±1 window around it always covers the
+        // partially-scrolled rows; the scissor does the exact clipping.
+        let lo_row = scroll_offset.saturating_sub(1) as u32;
+        let hi_row = (scroll_offset + rows_visible + 1) as u32;
         for (idx, &(cover, tx, tw, trow)) in tiles.iter().enumerate() {
-            if trow < first_row || trow >= first_row + rows_visible as u32 {
+            if trow < lo_row || trow > hi_row {
                 continue;
             }
-            let ty = TOP + (trow - first_row) as f32 * pitch;
-            let is_sel = idx == selection;
+            let ty = TOP + trow as f32 * pitch - scroll_px;
+            // Skip tiles fully outside the band (cheap reject before draw).
+            if ty + ROW_IMG_H < band_top || ty > band_bot {
+                continue;
+            }
 
             match cover {
                 CoverTex::Image { tex, .. } => {
@@ -4851,39 +5694,51 @@ impl SwitchRenderBackend {
                     swf::Color::from_rgb(0xE0B24D, 255),
                 );
             }
+        }
 
-            // Bright pulsing frame around the SELECTED tile, drawn ON TOP of
-            // the cover (a behind-panel was invisible under a full-bleed cover).
-            if is_sel {
-                let p = (pulse * 0.5) + 0.5;
-                let g = (0xC0 as f32 + (0xFF - 0xC0) as f32 * p) as u32;
-                let col = swf::Color::from_rgb((0xFF << 16) | (g << 8) | 0x30, 255);
-                let b = 4.0;
-                let bars = [
-                    (tx - b, ty - b, tw + 2.0 * b, b),         // top
-                    (tx - b, ty + ROW_IMG_H, tw + 2.0 * b, b), // bottom
-                    (tx - b, ty, b, ROW_IMG_H),                // left
-                    (tx + tw, ty, b, ROW_IMG_H),               // right
-                ];
-                for (bx, by, bw, bh) in bars {
-                    let m = Matrix {
-                        a: bw, b: 0.0, c: 0.0, d: bh,
-                        tx: swf::Twips::from_pixels(bx as f64),
-                        ty: swf::Twips::from_pixels(by as f64),
-                    };
-                    <Self as CommandHandler>::draw_rect(self, col, m);
-                }
+        // Single eased selection frame, drawn last and still inside the scissor
+        // so it clips with its tile when partially scrolled. `pop` briefly
+        // inflates it right after a move for a little tactile "snap"; `pulse`
+        // keeps the existing breathing brightness.
+        if !tiles.is_empty() {
+            let p = (pulse * 0.5) + 0.5;
+            let g = (0xC0 as f32 + (0xFF - 0xC0) as f32 * p) as u32;
+            let col = swf::Color::from_rgb((0xFF << 16) | (g << 8) | 0x30, 255);
+            let grow = pop * 5.0;
+            let fx = frame_x - grow;
+            let fy = frame_y - scroll_px - grow;
+            let fw = frame_w + 2.0 * grow;
+            let fh = ROW_IMG_H + 2.0 * grow;
+            let b = 4.0;
+            let bars = [
+                (fx - b, fy - b, fw + 2.0 * b, b), // top
+                (fx - b, fy + fh, fw + 2.0 * b, b), // bottom
+                (fx - b, fy, b, fh),                // left
+                (fx + fw, fy, b, fh),               // right
+            ];
+            for (bx, by, bw, bh) in bars {
+                let m = Matrix {
+                    a: bw, b: 0.0, c: 0.0, d: bh,
+                    tx: swf::Twips::from_pixels(bx as f64),
+                    ty: swf::Twips::from_pixels(by as f64),
+                };
+                <Self as CommandHandler>::draw_rect(self, col, m);
             }
         }
 
-        // Scrollbar (by rows).
+        unsafe {
+            glDisable(GL_SCISSOR_TEST);
+        }
+
+        // Scrollbar — tracks the eased pixel scroll so the thumb glides too.
         if rows_total > rows_visible as u32 {
             let bar_x = vw - 18.0;
             let bar_top = TOP;
             let bar_h = rows_visible as f32 * pitch;
             let thumb = (bar_h * rows_visible as f32 / rows_total as f32).max(24.0);
-            let denom = (rows_total as usize).saturating_sub(rows_visible).max(1) as f32;
-            let progress = scroll_offset as f32 / denom;
+            let denom_px =
+                (rows_total as usize).saturating_sub(rows_visible).max(1) as f32 * pitch;
+            let progress = (scroll_px / denom_px).clamp(0.0, 1.0);
             let thumb_y = bar_top + (bar_h - thumb) * progress;
             let track = Matrix {
                 a: 4.0, b: 0.0, c: 0.0, d: bar_h,
@@ -4968,12 +5823,9 @@ impl SwitchRenderBackend {
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
 
-        let backdrop = Matrix {
-            a: vw, b: 0.0, c: 0.0, d: vh,
-            tx: swf::Twips::from_pixels(0.0),
-            ty: swf::Twips::from_pixels(0.0),
-        };
-        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xB0_00_00_00), backdrop);
+        // Dim the screen behind. Translate-immune so the panel can drop in
+        // (modal-open pop) without the backdrop sliding off an edge.
+        self.fill_screen_dim(0xB0_00_00_00);
 
         const PANEL_W: f32 = 520.0;
         let row_h: f32 = 50.0;
@@ -5071,12 +5923,8 @@ impl SwitchRenderBackend {
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
 
-        let backdrop = Matrix {
-            a: vw, b: 0.0, c: 0.0, d: vh,
-            tx: swf::Twips::from_pixels(0.0),
-            ty: swf::Twips::from_pixels(0.0),
-        };
-        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xCC_00_00_00), backdrop);
+        // Translate-immune backdrop (panel drops in over a fixed dim).
+        self.fill_screen_dim(0xCC_00_00_00);
 
         const PANEL_W: f32 = 720.0;
         const PANEL_H: f32 = 360.0;
@@ -5210,6 +6058,24 @@ impl SwitchRenderBackend {
         let end = (first + VISIBLE).min(total);
         let scale = 2.0;
         let max_chars = ((vw - left - 80.0) / (6.0 * scale)) as usize;
+
+        // Gliding selection highlight (v1.2.0): a translucent bar + cursor that
+        // ease toward the selected row so moving the cursor slides instead of
+        // snapping. Key `1` ties this to the IMPORTER list (REGLAGES uses `2`),
+        // so switching tabs snaps rather than sliding across layouts.
+        let sel_vis = selection.saturating_sub(first);
+        let target_hy = top + sel_vis as f32 * row_h;
+        let now_hl = unsafe { ruffle_tick_now() };
+        let hy = eased_list_y(target_hy, 1, now_hl);
+        let bar_x = left - 40.0;
+        let bar = Matrix {
+            a: vw - bar_x - 56.0, b: 0.0, c: 0.0, d: row_h - 12.0,
+            tx: swf::Twips::from_pixels(bar_x as f64),
+            ty: swf::Twips::from_pixels((hy - 6.0) as f64),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x33_FF_D7_40), bar);
+        self.draw_text(left - 34.0, hy, scale, ">", swf::Color::from_rgb(0xFFD740, 255));
+
         for (vis, i) in (first..end).enumerate() {
             let y = top + vis as f32 * row_h;
             let is_sel = i == selection;
@@ -5218,9 +6084,6 @@ impl SwitchRenderBackend {
             } else {
                 swf::Color::from_rgb(0xCCCCCC, 255)
             };
-            if is_sel {
-                self.draw_text(left - 34.0, y, scale, ">", color);
-            }
             if i < urls.len() {
                 let shown = truncate_mid(urls[i], max_chars);
                 self.draw_text(left, y, scale, &shown, color);
@@ -5661,10 +6524,28 @@ impl SwitchRenderBackend {
         };
         <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x80_99_AA_BB), rule);
 
-        // Centered entry list.
+        // Centered entry list with a gliding selection highlight (v1.2.0).
         const OPT_SCALE: f32 = 3.0;
         let row_h = 66.0;
         let top_y = 230.0;
+
+        let target_hy = top_y + selection as f32 * row_h;
+        let now_hl = unsafe { ruffle_tick_now() };
+        let hy = eased_list_y(target_hy, 2, now_hl);
+        const BAR_W: f32 = 460.0;
+        let bar = Matrix {
+            a: BAR_W, b: 0.0, c: 0.0, d: row_h - 16.0,
+            tx: swf::Twips::from_pixels(((vw - BAR_W) * 0.5) as f64),
+            ty: swf::Twips::from_pixels((hy - 8.0) as f64),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x33_FF_D7_40), bar);
+        // Cursor at the eased y, x aligned to the selected entry's centering.
+        if let Some(sel) = entries.get(selection) {
+            let sel_ow = self.measure_text(sel, OPT_SCALE);
+            let sel_x = (vw - sel_ow) * 0.5;
+            self.draw_text(sel_x - 40.0, hy, OPT_SCALE, ">", swf::Color::from_rgb(0xFFD740, 255));
+        }
+
         for (i, opt) in entries.iter().enumerate() {
             let y = top_y + i as f32 * row_h;
             let is_sel = i == selection;
@@ -5675,9 +6556,6 @@ impl SwitchRenderBackend {
             };
             let ow = self.measure_text(opt, OPT_SCALE);
             let x = (vw - ow) * 0.5;
-            if is_sel {
-                self.draw_text(x - 40.0, y, OPT_SCALE, ">", color);
-            }
             self.draw_text(x, y, OPT_SCALE, opt, color);
         }
 

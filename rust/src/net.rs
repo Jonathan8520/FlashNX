@@ -21,6 +21,12 @@ extern "C" {
     fn https_download_tick() -> c_int;
     fn https_download_progress(done_out: *mut u64, total_out: *mut u64);
     fn https_download_cancel();
+    // Async in-memory GET (archive.org metadata) — same multi machinery as the
+    // download, but non-blocking so the UI can spin while it runs.
+    fn https_get_start(url: *const c_char) -> c_int;
+    fn https_get_tick() -> c_int;
+    fn https_get_buffer(out: *mut c_char, cap: c_int) -> c_int;
+    fn https_get_cancel();
     // header/guide are localized prompt strings supplied by Rust (loc.rs).
     fn swkbd_prompt_url(header: *const c_char, guide: *const c_char, initial: *const c_char, out: *mut c_char, cap: c_int) -> c_int;
     fn swkbd_prompt_rename(header: *const c_char, guide: *const c_char, initial: *const c_char, out: *mut c_char, cap: c_int) -> c_int;
@@ -151,48 +157,31 @@ pub fn extract_item_id(url_or_id: &str) -> Option<std::string::String> {
     None
 }
 
-/// Fetch `https://archive.org/metadata/<item_id>` and parse the JSON.
-/// Returns the list of `.swf` files in the item, or an error string for
-/// the UI to display. **Synchronous**: blocks the worker thread for
-/// 1-3 s typical. Metadata responses are small (<64 KB).
-pub fn fetch_archive_metadata(
+/// Parse archive.org metadata JSON → the item's `.swf` files. Used by the async
+/// `tick_archive_fetch`. archive.org
+/// returns `{server, dir, files:[...]}`; we build each download URL as
+/// `https://archive.org/download/<item_id>/<filename URL-encoded>` (archive.org
+/// redirects to the CDN, keeping us URL-stable across mirror moves).
+fn parse_archive_metadata(
+    buf: &[u8],
     item_id: &str,
 ) -> Result<std::vec::Vec<RemoteFile>, std::string::String> {
-    let url = std::format!("https://archive.org/metadata/{}", item_id);
-    // 4 MB cap for metadata JSON. Big Flash dumps (armorgames ~500 KB,
-    // 1100+ files) blow through smaller caps and the C++ side returns -3
-    // overflow. 4 MB covers anything realistic and is a transient alloc.
-    let buf = http_get(&url, 4 * 1024 * 1024)?;
-    let json: serde_json::Value = serde_json::from_slice(&buf).map_err(|e| {
+    let json: serde_json::Value = serde_json::from_slice(buf).map_err(|e| {
         log(&std::format!("net: JSON parse failed: {}\n", e));
         crate::loc::err_json(&e.to_string())
     })?;
-
-    // archive.org returns `{server: "...", dir: "...", files: [...]}`.
-    // Build the per-file download URL as `https://archive.org/download/
-    // <item_id>/<filename URL-encoded>` — archive.org redirects to the
-    // CDN server. Going through archive.org keeps us URL-stable even if
-    // the file moves between mirrors.
     let files_json = json
         .get("files")
         .and_then(|v| v.as_array())
         .ok_or_else(|| std::string::String::from(crate::loc::s().err_json_no_files))?;
     let mut out: std::vec::Vec<RemoteFile> = std::vec::Vec::new();
     for f in files_json {
-        let format = f
-            .get("format")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let format = f.get("format").and_then(|v| v.as_str()).unwrap_or("");
         if format != "Shockwave Flash" {
-            // Filter early — items can have dozens of files of which only
-            // a few are SWFs (thumbnails, torrents, metadata XMLs, ...).
+            // Filter early — items have many non-SWF files (thumbnails, XMLs…).
             continue;
         }
-        let name = f
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
         if name.is_empty() {
             continue;
         }
@@ -206,18 +195,68 @@ pub fn fetch_archive_metadata(
             item_id,
             url_encode_path(&name),
         );
-        out.push(RemoteFile {
-            name,
-            size_bytes,
-            download_url,
-        });
+        out.push(RemoteFile { name, size_bytes, download_url });
     }
-    log(&std::format!(
-        "net: archive.org/{} -> {} .swf file(s)\n",
-        item_id,
-        out.len()
-    ));
+    log(&std::format!("net: archive.org/{} -> {} .swf file(s)\n", item_id, out.len()));
     Ok(out)
+}
+
+/// Result of polling the async metadata fetch.
+pub enum ArchivePoll {
+    Pending,
+    Done(std::vec::Vec<RemoteFile>),
+    Error(std::string::String),
+}
+
+/// item-id of the in-flight async fetch, kept so completion can build the
+/// per-file download URLs (mirrors the sync path's `item_id` argument).
+static FETCH_ITEM_ID: std::sync::Mutex<std::string::String> =
+    std::sync::Mutex::new(std::string::String::new());
+
+/// Start the async archive.org metadata fetch (non-blocking). Returns
+/// immediately; the C++ multi handle runs on each `tick_archive_fetch`.
+pub fn start_archive_fetch(item_id: &str) -> Result<(), std::string::String> {
+    let url = std::format!("https://archive.org/metadata/{}", item_id);
+    let url_c = cstr(&url);
+    let rc = unsafe { https_get_start(url_c.as_ptr() as *const c_char) };
+    if rc != 0 {
+        log(&std::format!("net: https_get_start rc={}\n", rc));
+        return Err(crate::loc::err_https(&std::format!("rc {}", rc)));
+    }
+    if let Ok(mut g) = FETCH_ITEM_ID.lock() {
+        *g = item_id.to_string();
+    }
+    Ok(())
+}
+
+/// Poll the async metadata fetch once (call per frame while loading).
+pub fn tick_archive_fetch() -> ArchivePoll {
+    let rc = unsafe { https_get_tick() };
+    if rc == 0 {
+        return ArchivePoll::Pending;
+    }
+    if rc < 0 {
+        let detail = last_https_error();
+        return ArchivePoll::Error(crate::loc::err_https(&detail));
+    }
+    // rc == 1: response ready — copy out of C++ and parse.
+    const CAP: usize = 8 * 1024 * 1024;
+    let mut buf = std::vec![0u8; CAP];
+    let n = unsafe { https_get_buffer(buf.as_mut_ptr() as *mut c_char, CAP as c_int) };
+    if n < 0 {
+        return ArchivePoll::Error(std::string::String::from(crate::loc::s().err_too_large));
+    }
+    buf.truncate(n as usize);
+    let item_id = FETCH_ITEM_ID.lock().map(|g| g.clone()).unwrap_or_default();
+    match parse_archive_metadata(&buf, &item_id) {
+        Ok(files) => ArchivePoll::Done(files),
+        Err(e) => ArchivePoll::Error(e),
+    }
+}
+
+/// Abort an in-flight async metadata fetch (user backed out).
+pub fn cancel_archive_fetch() {
+    unsafe { https_get_cancel() };
 }
 
 /// Percent-encode characters that aren't URL-safe in a path segment.
