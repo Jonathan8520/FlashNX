@@ -2,6 +2,26 @@
 
 Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://github.com/ruffle-rs/ruffle).
 
+## v1.2.0 (unreleased)
+
+Library redesign: a tabbed navbar, a cover-art gallery, and a list-based importer.
+
+### Features
+
+- **Tabbed navigation**: a top navbar switched with **L / R** between **Play** (your games), **Import**, and **Settings**.
+- **Cover gallery**: the library is now a gallery of cover art (justified rows, each cover at its natural size) instead of a text list. Games with no cover get a generated tile (color + initials).
+- **Your own covers**: drop a `<game>.png` or `.jpg` next to the `.swf` and it shows up as the cover.
+- **Flashpoint covers**: a game's options has a **Cover** action that searches the Flashpoint Archive by name and shows the candidates as thumbnails to pick from.
+- **Import as a list**: the Import tab is now a list of your saved URLs. Press **A** to launch one, use the **+ Add a URL** row to enter a new one, and **+** on a URL to edit or delete it. It accepts archive.org items and direct `.swf` URLs.
+
+### Changes
+
+- **Controls**: **−** is search, **+** is the selected game's options; the default-controls, language and **Quit** actions all live in the Settings tab. Switching tabs is **L / R** only.
+
+### Notes
+
+- Covers use the public Flashpoint metadata and logo API to enrich games you already have. FlashNX never downloads games from Flashpoint.
+
 ## v1.1.1 (2026-06-05)
 
 Data-safety and import-diagnostics fixes, plus library search.

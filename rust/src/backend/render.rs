@@ -2345,6 +2345,91 @@ fn as_standalone_bitmap(handle: &BitmapHandle) -> Option<&StandaloneBitmap> {
     <dyn Any>::downcast_ref(&*handle.0)
 }
 
+/// Cached cover texture for a library game (v1.2.0 JOUER grid). Looked up by
+/// `.swf` basename; a cover is decoded + uploaded once on first display and
+/// kept for the backend's lifetime (the GL context outlives the library UI).
+/// `Default` = no cover image found → the grid draws a generated tile.
+#[derive(Clone, Copy)]
+enum CoverTex {
+    Image { tex: GLuint, w: u32, h: u32 },
+    Default,
+}
+
+/// Process-wide cover-texture cache. A function-local `static` keeps the GL
+/// handles out of the (cloned) library snapshot; a plain Vec is fine for the
+/// handful of games shown per session.
+fn cover_cache() -> &'static std::sync::Mutex<std::vec::Vec<(std::string::String, CoverTex)>> {
+    static C: std::sync::Mutex<std::vec::Vec<(std::string::String, CoverTex)>> =
+        std::sync::Mutex::new(std::vec::Vec::new());
+    &C
+}
+
+/// Drop a game's cached cover texture so the next frame re-resolves it (after
+/// the user sets a new cover via OPTIONS > JAQUETTE). The old GL texture handle
+/// is leaked — covers are tiny and this is rare, not worth a cross-thread
+/// delete (the GL context only frees at app exit anyway).
+pub fn invalidate_cover(basename: &str) {
+    if let Ok(mut cache) = cover_cache().lock() {
+        cache.retain(|(b, _)| b != basename);
+    }
+}
+
+/// Truncate to `max_chars` glyphs, appending an ellipsis when cut. Used by the
+/// cover picker (long Flashpoint titles) and notices.
+fn truncate_mid(s: &str, max_chars: usize) -> std::string::String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let mut t: std::string::String = s.chars().take(max_chars.saturating_sub(1)).collect();
+        t.push('…');
+        t
+    }
+}
+
+/// One library tile's layout (row index + horizontal center), shared from the
+/// gallery renderer to the input handler. The JOUER gallery has a variable
+/// number of tiles per row (each cover keeps its natural width), so Up/Down
+/// can't use fixed columns — input reads this to jump to the spatially nearest
+/// tile in the row above/below.
+#[derive(Clone, Copy, Default)]
+pub struct GalleryCell {
+    pub row: u32,
+    pub cx: f32,
+}
+
+fn gallery_cache() -> &'static std::sync::Mutex<(std::vec::Vec<GalleryCell>, u32)> {
+    static C: std::sync::Mutex<(std::vec::Vec<GalleryCell>, u32)> =
+        std::sync::Mutex::new((std::vec::Vec::new(), 0));
+    &C
+}
+
+/// `(per-tile cells in filtered order, total row count)` from the last gallery
+/// render. Read by `library::handle_list_input` for 2D navigation.
+pub fn gallery_layout_read() -> (std::vec::Vec<GalleryCell>, u32) {
+    gallery_cache().lock().map(|g| (g.0.clone(), g.1)).unwrap_or_default()
+}
+
+/// Cover-picker thumbnail state, keyed by the candidate's logo URL. Loaded
+/// progressively (one per frame) so opening the picker never freezes.
+#[derive(Clone, Copy)]
+enum ThumbTex {
+    Image { tex: GLuint, w: u32, h: u32 },
+    Failed,
+}
+
+fn thumb_cache() -> &'static std::sync::Mutex<std::vec::Vec<(std::string::String, ThumbTex)>> {
+    static C: std::sync::Mutex<std::vec::Vec<(std::string::String, ThumbTex)>> =
+        std::sync::Mutex::new(std::vec::Vec::new());
+    &C
+}
+
+fn thumb_lookup(url: &str) -> Option<ThumbTex> {
+    thumb_cache()
+        .lock()
+        .ok()
+        .and_then(|c| c.iter().find(|(u, _)| u == url).map(|(_, t)| *t))
+}
+
 // ─── Backend implementation ───────────────────────────────────────────────────
 
 impl SwitchRenderBackend {
@@ -4327,6 +4412,53 @@ impl SwitchRenderBackend {
         }
     }
 
+    /// Draw `tex` filling the rect (x,y,w,h) with CROP-TO-FILL — no black bars.
+    /// Scales the image to cover the whole rect and center-crops the overflow
+    /// via a UV remap (the shader does `v_uv = remap.xy + uv * remap.zw`).
+    /// `img_w`/`img_h` are the texture's pixel dims, used for the aspect ratio.
+    /// This is what makes the cover grid look clean despite mixed cover sizes.
+    pub fn draw_textured_rect_cover(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        tex: GLuint,
+        img_w: u32,
+        img_h: u32,
+    ) {
+        if tex == 0 || w <= 0.0 || h <= 0.0 || img_w == 0 || img_h == 0 {
+            return;
+        }
+        let tile_aspect = w / h;
+        let img_aspect = img_w as f32 / img_h as f32;
+        // remap = [offset_x, offset_y, scale_x, scale_y] over UV [0,1]. Crop the
+        // long axis so the short axis fills the tile (center-cropped).
+        let uv_remap = if img_aspect > tile_aspect {
+            let fx = tile_aspect / img_aspect; // visible width fraction
+            [(1.0 - fx) * 0.5, 0.0, fx, 1.0]
+        } else {
+            let fy = img_aspect / tile_aspect; // visible height fraction
+            [0.0, (1.0 - fy) * 0.5, 1.0, fy]
+        };
+        let mat = Matrix {
+            a: w,
+            b: 0.0,
+            c: 0.0,
+            d: h,
+            tx: swf::Twips::from_pixels(x as f64),
+            ty: swf::Twips::from_pixels(y as f64),
+        };
+        let world = self.world_matrix(&mat);
+        let mult = [1.0, 1.0, 1.0, 1.0];
+        let add = [0.0, 0.0, 0.0, 0.0];
+        self.use_bitmap(&world, &mult, &add, tex, &uv_remap);
+        self.gl_state.bind_vao(self.bitmap_vao);
+        unsafe {
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+        }
+    }
+
     /// Full-screen black clear used at the top of each library render. We
     /// own the framebuffer here (no Ruffle behind us pre-init).
     pub fn library_clear(&mut self) {
@@ -4402,18 +4534,141 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
-    /// Main library list. Reads `entries` (snapshot — caller drops the
-    /// Mutex before this call), draws the title banner + N visible rows +
-    /// metadata panel + footer help. Animations (cursor pulse, selection
-    /// pulse) driven by `phase_ticks` (system ticks since the library
-    /// opened — see `library::State::anim_origin_ticks`).
+    /// Top navbar (v1.2.0) — tab strip switched with the L/R shoulder buttons.
+    /// `active` indexes JOUER(0) / IMPORTER(1) / REGLAGES(2). Drawn last, over
+    /// the top of every tab-home screen, by `library::render`.
+    pub fn draw_navbar(&mut self, active: usize) {
+        let vw = self.dimensions.width as f32;
+        let lc = crate::loc::s();
+        let tabs = [lc.tab_play, lc.tab_import, lc.tab_settings];
+
+        let nav_y = 4.0_f32;
+        let nav_h = 34.0_f32;
+        // Background bar (semi-opaque dark navy) spanning the full width.
+        let bar = Matrix {
+            a: vw, b: 0.0, c: 0.0, d: nav_h,
+            tx: swf::Twips::from_pixels(0.0),
+            ty: swf::Twips::from_pixels(nav_y as f64),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xE0_10_16_28), bar);
+
+        // L / R chevrons at the edges — hint that the shoulders switch tabs.
+        let edge_scale = 2.0;
+        let label_y = nav_y + 8.0;
+        let edge_col = swf::Color::from_rgb(0x88AACC, 255);
+        self.draw_text(14.0, label_y, edge_scale, "L", edge_col);
+        let r_w = self.measure_text("R", edge_scale);
+        self.draw_text(vw - 14.0 - r_w, label_y, edge_scale, "R", edge_col);
+
+        // Tab labels, centered as a group with even gaps.
+        let scale = 2.0;
+        let gap = 48.0;
+        let widths = [
+            self.measure_text(tabs[0], scale),
+            self.measure_text(tabs[1], scale),
+            self.measure_text(tabs[2], scale),
+        ];
+        let total: f32 = widths.iter().sum::<f32>() + gap * (tabs.len() as f32 - 1.0);
+        let mut x = (vw - total) * 0.5;
+        for (i, t) in tabs.iter().enumerate() {
+            let is_active = i == active;
+            let color = if is_active {
+                swf::Color::from_rgb(0xFFD740, 255)
+            } else {
+                swf::Color::from_rgb(0x99AABB, 255)
+            };
+            if is_active {
+                // Underline the active tab.
+                let ul = Matrix {
+                    a: widths[i] + 8.0, b: 0.0, c: 0.0, d: 3.0,
+                    tx: swf::Twips::from_pixels((x - 4.0) as f64),
+                    ty: swf::Twips::from_pixels((nav_y + nav_h - 4.0) as f64),
+                };
+                <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), ul);
+            }
+            self.draw_text(x, label_y, scale, t, color);
+            x += widths[i] + gap;
+        }
+
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
+    /// Resolve + cache a game's cover texture by basename. Decodes/uploads on
+    /// first use; returns `Default` when there's no cover image (caller draws
+    /// the generated tile).
+    fn cover_for(&mut self, basename: &str) -> CoverTex {
+        if let Ok(cache) = cover_cache().lock() {
+            if let Some((_, t)) = cache.iter().find(|(b, _)| b == basename) {
+                return *t;
+            }
+        }
+        let resolved = match crate::covers::resolve(basename) {
+            crate::covers::Cover::Image(path) => match crate::covers::decode_file(&path) {
+                Some((rgba, w, h)) => {
+                    let tex = self.upload_rgba_texture(&rgba, w, h);
+                    if tex != 0 {
+                        CoverTex::Image { tex, w, h }
+                    } else {
+                        CoverTex::Default
+                    }
+                }
+                None => CoverTex::Default,
+            },
+            crate::covers::Cover::Default => CoverTex::Default,
+        };
+        if let Ok(mut cache) = cover_cache().lock() {
+            cache.push((basename.to_string(), resolved));
+        }
+        resolved
+    }
+
+    /// Cover-picker thumbnail for a candidate logo `url` — cached. Loads at most
+    /// ONE thumbnail per frame (guarded by `loaded_one`) so the picker fills in
+    /// progressively instead of freezing while N logos download. Returns `None`
+    /// while a thumbnail is still pending its turn to load.
+    fn thumb_for(&mut self, url: &str, loaded_one: &mut bool) -> Option<ThumbTex> {
+        if let Some(t) = thumb_lookup(url) {
+            return Some(t);
+        }
+        if *loaded_one {
+            return None; // this frame's single-load budget is spent
+        }
+        *loaded_one = true;
+        let state = match crate::net::http_get(url, 4 * 1024 * 1024) {
+            Ok(bytes) => match crate::covers::decode_bytes(&bytes) {
+                Some((rgba, w, h)) => {
+                    let tex = self.upload_rgba_texture(&rgba, w, h);
+                    if tex != 0 {
+                        ThumbTex::Image { tex, w, h }
+                    } else {
+                        ThumbTex::Failed
+                    }
+                }
+                None => ThumbTex::Failed,
+            },
+            Err(_) => ThumbTex::Failed,
+        };
+        if let Ok(mut c) = thumb_cache().lock() {
+            c.push((url.to_string(), state));
+        }
+        Some(state)
+    }
+
+    /// JOUER library as a COVER GRID (v1.2.0; replaces the text list). Covers
+    /// are mandatory: a game with no sidecar/cached cover gets a generated tile
+    /// (per-game color + initials). `selection` is a linear index into
+    /// `entries`; `scroll_offset` is the first visible item (multiple of
+    /// `LIST_COLS`).
     #[allow(clippy::too_many_arguments)]
-    pub fn draw_library_list(
+    pub fn draw_library_gallery(
         &mut self,
         selection: usize,
         scroll_offset: usize,
         entries: &[crate::library::Entry],
-        visible_rows: usize,
         banner_tex: GLuint,
         banner_w: u32,
         banner_h: u32,
@@ -4424,237 +4679,268 @@ impl SwitchRenderBackend {
         self.library_clear();
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
-
-        // Phase in seconds (tick_freq ≈ 19.2 MHz on Switch — same as Ruffle's
-        // pacing clock). We pass it through `sinf`-style math without
-        // pulling in libm; (phase % period) is enough for visual pulses.
         let phase_s = (phase_ticks as f64) / (unsafe { ruffle_tick_freq() } as f64);
-        // Sine via Taylor — pulls in no extra deps, accurate enough for
-        // ±5 % amplitude visual pulses. Period 1.6 s reads as "subtle
-        // breathing" rather than "annoying flash".
         let pulse = approx_sin(phase_s as f32 * (2.0 * core::f32::consts::PI / 1.6));
 
-        // ── Banner (or ASCII title fallback) ─────────────────────────
-        let banner_y = 24.0;
+        // Banner — compact, fully below the navbar strip (y 4..38). Scaled to a
+        // small target height so it doesn't dominate the screen (was full 720x144).
+        let banner_y = 46.0;
         if banner_tex != 0 && banner_w > 0 && banner_h > 0 {
-            // Centre at 720×144 (asset spec). If banner is larger we down-
-            // scale to fit the viewport with a 32-px side margin.
-            let max_w = vw - 64.0;
-            let scale = (max_w / banner_w as f32).min(1.0);
+            let target_h = 72.0;
+            let scale = (target_h / banner_h as f32).min((vw - 64.0) / banner_w as f32);
             let draw_w = banner_w as f32 * scale;
             let draw_h = banner_h as f32 * scale;
             let draw_x = (vw - draw_w) * 0.5;
             self.draw_textured_rect(draw_x, banner_y, draw_w, draw_h, banner_tex);
         } else {
-            // ASCII fallback — same look as the empty-state title but
-            // smaller so it still leaves room for the list.
             let title = "FLASHNX";
-            let scale_title = 5.0;
-            let title_w = self.measure_text(title, scale_title);
-            // Drop shadow.
+            let st = 3.0;
+            let tw = self.measure_text(title, st);
             self.draw_text(
-                (vw - title_w) * 0.5 + 3.0,
-                banner_y + 30.0 + 3.0,
-                scale_title,
-                title,
-                swf::Color::from_rgb(0x000000, 255),
-            );
-            self.draw_text(
-                (vw - title_w) * 0.5,
-                banner_y + 30.0,
-                scale_title,
+                (vw - tw) * 0.5,
+                banner_y + 16.0,
+                st,
                 title,
                 swf::Color::from_rgb(0xFFD740, 255),
             );
         }
 
-        // Active-filter indicator (mirrors the DISTANT files sub-line):
-        // "3 / 18 - FILTRE: mario". Only shown while a filter is set; an
-        // empty filtered list just shows "0 / N" + no rows below.
+        // Active-filter indicator (same as the list view).
         if let Some(f) = filter {
             if !f.is_empty() {
                 let sub = std::format!(
                     "{} / {} - {}: {}",
                     entries.len(), total_unfiltered, crate::loc::s().files_filter, f,
                 );
-                let scale_s = 2.0;
-                let sw = self.measure_text(&sub, scale_s);
+                let ss = 2.0;
+                let sw = self.measure_text(&sub, ss);
                 self.draw_text(
                     (vw - sw) * 0.5,
-                    178.0,
-                    scale_s,
+                    128.0,
+                    ss,
                     &sub,
                     swf::Color::from_rgb(0xAABFD8, 255),
                 );
             }
         }
 
-        // ── Game list ───────────────────────────────────────────────────
-        // Spacing tightened (50 → 44) so 8 rows fit between the banner and the
-        // metadata panel (top at vh-130) without overlap.
-        const ROW_SCALE: f32 = 3.0;
-        const ROW_SPACING: f32 = 44.0;
-        const CHIP_PAD: f32 = 12.0;
-        const CHIP_SIZE: f32 = 18.0;
-        // Lowered so the 8-row block is vertically centered in the band
-        // between the banner (~168 px) and the metadata panel (vh-130).
-        let rows_top_y = banner_y + 190.0;
-        let rows_left_x = 80.0;
-        let chip_x = rows_left_x;
-        let label_x = rows_left_x + CHIP_SIZE + CHIP_PAD * 2.0;
+        // ── Cover gallery (v1.2.0) ───────────────────────────────────────
+        // Justified rows: fixed image HEIGHT, each cover keeps its NATURAL
+        // width (no crop, no letterbox bars). Tiles flow left-to-right and
+        // wrap, so the count per row varies with cover sizes. `scroll_offset`
+        // is the first visible ROW.
+        const ROW_IMG_H: f32 = 120.0;
+        const GAP_X: f32 = 16.0;
+        const GAP_Y: f32 = 20.0;
+        const LEFT: f32 = 40.0;
+        const TOP: f32 = 150.0;
+        const DEFAULT_ASPECT: f32 = 1.0; // square placeholder for no-cover games
+        let rows_visible = crate::library::GALLERY_ROWS_VISIBLE;
+        let avail_w = vw - LEFT * 2.0;
+        let pitch = ROW_IMG_H + GAP_Y;
 
+        // Pass 1 — resolve covers + JUSTIFIED layout. (a) assign tiles to rows
+        // greedily by natural width; (b) per row, scale the tile widths so the
+        // row fills the full width (true justify, accepting a little enlarging).
+        // The last row keeps natural size, left-aligned. cover_for caches, so
+        // this is cheap after the first frame.
         let total = entries.len();
-        let end = (scroll_offset + visible_rows).min(total);
-        for (visible_idx, abs_idx) in (scroll_offset..end).enumerate() {
-            let entry = &entries[abs_idx];
-            let y = rows_top_y + visible_idx as f32 * ROW_SPACING;
-            let is_sel = abs_idx == selection;
-
-            // Color chip — small square in the per-game hash color.
-            let chip_color = swf::Color::from_rgb(entry.color_chip, 255);
-            let chip_mat = Matrix {
-                a: CHIP_SIZE, b: 0.0, c: 0.0, d: CHIP_SIZE,
-                tx: swf::Twips::from_pixels(chip_x as f64),
-                ty: swf::Twips::from_pixels((y + 4.0) as f64),
+        let mut nat: std::vec::Vec<(CoverTex, f32, u32)> = std::vec::Vec::with_capacity(total);
+        let mut cur_x = LEFT;
+        let mut row: u32 = 0;
+        for entry in entries.iter() {
+            let cover = self.cover_for(&entry.basename);
+            let aspect = match cover {
+                CoverTex::Image { w, h, .. } if h > 0 => w as f32 / h as f32,
+                _ => DEFAULT_ASPECT,
             };
-            <Self as CommandHandler>::draw_rect(self, chip_color, chip_mat);
-
-            // Label color: amber for selection (pulsing), light grey otherwise.
-            let color = if is_sel {
-                // Pulse amber [0xFFD740] ↔ [0xFFEC8B]. Linear blend on each
-                // channel; 0.5 (pulse+1)/2 stays in [0,1].
-                let p = (pulse * 0.5) + 0.5;
-                let r = (0xFF as f32 + (0xFF - 0xFF) as f32 * p) as u32;
-                let g = (0xD7 as f32 + (0xEC - 0xD7) as f32 * p) as u32;
-                let b = (0x40 as f32 + (0x8B - 0x40) as f32 * p) as u32;
-                swf::Color::from_rgb((r << 16) | (g << 8) | b, 255)
-            } else {
-                swf::Color::from_rgb(0xCCCCCC, 255)
-            };
-            if is_sel {
-                // Animated cursor — `►` shape, x position breathes by a few
-                // pixels each cycle.
-                let cursor_dx = pulse * 4.0;
-                self.draw_text(label_x - 36.0 + cursor_dx, y, ROW_SCALE, ">", color);
+            let nat_w = (ROW_IMG_H * aspect).clamp(70.0, avail_w);
+            if cur_x > LEFT && cur_x + nat_w > LEFT + avail_w {
+                row += 1;
+                cur_x = LEFT;
             }
-            // Truncate display name if it would overflow the visible area.
-            // Scale 3 ≈ 18 px/char ; label_x ≈ 122, scrollbar ~vw-30=1250,
-            // → ~60 chars fit. 40 keeps comfortable visual margin before
-            // hitting the scrollbar / metadata panel edges.
-            let max_chars = 40usize;
-            let display = if entry.display_name.chars().count() > max_chars {
-                let mut t: std::string::String = entry.display_name.chars().take(max_chars - 1).collect();
-                t.push('…');
-                t
+            nat.push((cover, nat_w, row));
+            cur_x += nat_w + GAP_X;
+        }
+        let rows_total = if total == 0 { 0 } else { row + 1 };
+
+        // (b) Justify each row into final (cover, x, w, row) tiles.
+        let mut tiles: std::vec::Vec<(CoverTex, f32, f32, u32)> =
+            std::vec::Vec::with_capacity(total);
+        let mut cells: std::vec::Vec<GalleryCell> = std::vec::Vec::with_capacity(total);
+        let mut i = 0usize;
+        while i < nat.len() {
+            let r = nat[i].2;
+            let mut j = i;
+            while j < nat.len() && nat[j].2 == r {
+                j += 1;
+            }
+            let n = (j - i) as f32;
+            let sum_nat: f32 = nat[i..j].iter().map(|t| t.1).sum();
+            let gaps = (n - 1.0) * GAP_X;
+            let is_last = j >= nat.len();
+            // Full rows fill the width (scale >= 1, capped to avoid grotesque
+            // blow-ups); the trailing row stays at natural size.
+            let factor = if is_last || sum_nat <= 0.0 {
+                1.0
             } else {
-                entry.display_name.clone()
+                ((avail_w - gaps) / sum_nat).clamp(1.0, 2.5)
             };
-            self.draw_text(label_x, y, ROW_SCALE, &display, color);
+            let mut x = LEFT;
+            for t in &nat[i..j] {
+                let w = t.1 * factor;
+                tiles.push((t.0, x, w, r));
+                cells.push(GalleryCell { row: r, cx: x + w * 0.5 });
+                x += w + GAP_X;
+            }
+            i = j;
+        }
+        // Publish layout for input-side 2D navigation.
+        if let Ok(mut g) = gallery_cache().lock() {
+            *g = (cells, rows_total);
         }
 
-        // Scrollbar on the right edge if needed.
-        if total > visible_rows {
-            let bar_x = vw - 30.0;
-            let bar_top_y = rows_top_y;
-            let bar_h_total = visible_rows as f32 * ROW_SPACING;
-            let bar_h_thumb = (bar_h_total * visible_rows as f32 / total as f32).max(20.0);
-            let progress = scroll_offset as f32 / (total - visible_rows) as f32;
-            let thumb_y = bar_top_y + (bar_h_total - bar_h_thumb) * progress;
+        // Pass 2 — draw only the visible row window.
+        let first_row = scroll_offset as u32;
+        for (idx, &(cover, tx, tw, trow)) in tiles.iter().enumerate() {
+            if trow < first_row || trow >= first_row + rows_visible as u32 {
+                continue;
+            }
+            let ty = TOP + (trow - first_row) as f32 * pitch;
+            let is_sel = idx == selection;
+
+            match cover {
+                CoverTex::Image { tex, .. } => {
+                    // tw == ROW_IMG_H * aspect, so the cover draws at its natural
+                    // aspect ratio — no crop, no black bars.
+                    self.draw_textured_rect(tx, ty, tw, ROW_IMG_H, tex);
+                }
+                CoverTex::Default => {
+                    let bg = Matrix {
+                        a: tw, b: 0.0, c: 0.0, d: ROW_IMG_H,
+                        tx: swf::Twips::from_pixels(tx as f64),
+                        ty: swf::Twips::from_pixels(ty as f64),
+                    };
+                    <Self as CommandHandler>::draw_rect(
+                        self,
+                        swf::Color::from_rgb(entries[idx].color_chip, 255),
+                        bg,
+                    );
+                    let initials: std::string::String =
+                        entries[idx].display_name.chars().take(3).collect();
+                    let isc = 4.0;
+                    let iw = self.measure_text(&initials, isc);
+                    self.draw_text(
+                        tx + (tw - iw) * 0.5,
+                        ty + (ROW_IMG_H - 7.0 * isc) * 0.5,
+                        isc,
+                        &initials,
+                        swf::Color::from_rgb(0xFFFFFF, 255),
+                    );
+                }
+            }
+
+            if entries[idx].is_as3 {
+                let bsc = 1.5;
+                let bw = self.measure_text("AS3", bsc);
+                self.draw_text(
+                    tx + tw - bw - 6.0,
+                    ty + 6.0,
+                    bsc,
+                    "AS3",
+                    swf::Color::from_rgb(0xE0B24D, 255),
+                );
+            }
+
+            // Bright pulsing frame around the SELECTED tile, drawn ON TOP of
+            // the cover (a behind-panel was invisible under a full-bleed cover).
+            if is_sel {
+                let p = (pulse * 0.5) + 0.5;
+                let g = (0xC0 as f32 + (0xFF - 0xC0) as f32 * p) as u32;
+                let col = swf::Color::from_rgb((0xFF << 16) | (g << 8) | 0x30, 255);
+                let b = 4.0;
+                let bars = [
+                    (tx - b, ty - b, tw + 2.0 * b, b),         // top
+                    (tx - b, ty + ROW_IMG_H, tw + 2.0 * b, b), // bottom
+                    (tx - b, ty, b, ROW_IMG_H),                // left
+                    (tx + tw, ty, b, ROW_IMG_H),               // right
+                ];
+                for (bx, by, bw, bh) in bars {
+                    let m = Matrix {
+                        a: bw, b: 0.0, c: 0.0, d: bh,
+                        tx: swf::Twips::from_pixels(bx as f64),
+                        ty: swf::Twips::from_pixels(by as f64),
+                    };
+                    <Self as CommandHandler>::draw_rect(self, col, m);
+                }
+            }
+        }
+
+        // Scrollbar (by rows).
+        if rows_total > rows_visible as u32 {
+            let bar_x = vw - 18.0;
+            let bar_top = TOP;
+            let bar_h = rows_visible as f32 * pitch;
+            let thumb = (bar_h * rows_visible as f32 / rows_total as f32).max(24.0);
+            let denom = (rows_total as usize).saturating_sub(rows_visible).max(1) as f32;
+            let progress = scroll_offset as f32 / denom;
+            let thumb_y = bar_top + (bar_h - thumb) * progress;
             let track = Matrix {
-                a: 4.0, b: 0.0, c: 0.0, d: bar_h_total,
+                a: 4.0, b: 0.0, c: 0.0, d: bar_h,
                 tx: swf::Twips::from_pixels(bar_x as f64),
-                ty: swf::Twips::from_pixels(bar_top_y as f64),
+                ty: swf::Twips::from_pixels(bar_top as f64),
             };
             <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x40_99AABB), track);
-            let thumb = Matrix {
-                a: 4.0, b: 0.0, c: 0.0, d: bar_h_thumb,
+            let th = Matrix {
+                a: 4.0, b: 0.0, c: 0.0, d: thumb,
                 tx: swf::Twips::from_pixels(bar_x as f64),
                 ty: swf::Twips::from_pixels(thumb_y as f64),
             };
-            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), thumb);
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), th);
         }
 
-        // ── Metadata panel (bottom strip) ──────────────────────────────
+        // Selected-game info line (name + size · version · engine).
         if let Some(entry) = entries.get(selection) {
-            let panel_y = vh - 130.0;
-            let panel_x = 40.0;
-            let panel_w = vw - 80.0;
-            let panel_h = 70.0;
-            let panel_mat = Matrix {
-                a: panel_w, b: 0.0, c: 0.0, d: panel_h,
-                tx: swf::Twips::from_pixels(panel_x as f64),
-                ty: swf::Twips::from_pixels(panel_y as f64),
-            };
-            <Self as CommandHandler>::draw_rect(
-                self,
-                swf::Color::from_rgba(0xC0_20_2C_40),
-                panel_mat,
-            );
-
-            // Display name (larger).
+            let name = truncate_mid(&entry.display_name, 40);
+            let nsc = 2.5;
+            let nw = self.measure_text(&name, nsc);
             self.draw_text(
-                panel_x + 20.0,
-                panel_y + 10.0,
-                3.0,
-                &entry.display_name,
+                (vw - nw) * 0.5,
+                vh - 96.0,
+                nsc,
+                &name,
                 swf::Color::from_rgb(0xFFFFFF, 255),
             );
-            // Sub-line: size · compression · version, plus a neutral engine
-            // tag. Stage dims dropped — 3.8 forces ShowAll + letterbox so native
-            // dims are no longer user-facing info. AS3 (AVM2) games get a soft
-            // amber "AS3" marker — purely informational, NOT a verdict: Ruffle's
-            // AVM2 is less complete so AS3 is the "here be dragons" engine, yet
-            // plenty of AS3 games (Mario Forever, Flappy Bird, Tetris'd) run
-            // perfectly while others (Pursuit of Hat) don't. So we flag the
-            // engine, not "broken". AS2 is the norm and needs no tag.
-            let size_str = format_size_pretty(entry.size_bytes);
-            let (meta, meta_color) = if entry.is_as3 {
-                (
-                    std::format!(
-                        "{} // SWF V{} {} // AS3",
-                        size_str, entry.swf_version, entry.compression_label,
-                    ),
-                    0xE0B24D,
+            let info = if entry.is_as3 {
+                std::format!(
+                    "{} // SWF V{} {} // AS3",
+                    format_size_pretty(entry.size_bytes), entry.swf_version, entry.compression_label,
                 )
             } else {
-                (
-                    std::format!(
-                        "{} // SWF V{} {}",
-                        size_str, entry.swf_version, entry.compression_label,
-                    ),
-                    0xAABFD8,
+                std::format!(
+                    "{} // SWF V{} {}",
+                    format_size_pretty(entry.size_bytes), entry.swf_version, entry.compression_label,
                 )
             };
+            let isc = 2.0;
+            let iw = self.measure_text(&info, isc);
             self.draw_text(
-                panel_x + 20.0,
-                panel_y + 42.0,
-                2.0,
-                &meta,
-                swf::Color::from_rgb(meta_color, 255),
-            );
-
-            // Tiny basename in lower-right (so the user always sees the
-            // physical filename — matters when display_name diverges in
-            // Phase 3.4.bis RENOMMER).
-            let bn_str = std::format!("[{}]", entry.basename);
-            let bn_w = self.measure_text(&bn_str, 1.5);
-            self.draw_text(
-                panel_x + panel_w - bn_w - 20.0,
-                panel_y + panel_h - 22.0,
-                1.5,
-                &bn_str,
-                swf::Color::from_rgb(0x7A8A9C, 255),
+                (vw - iw) * 0.5,
+                vh - 66.0,
+                isc,
+                &info,
+                swf::Color::from_rgb(0xAABFD8, 255),
             );
         }
 
         // Footer.
-        const HELP_SCALE: f32 = 2.0;
         let help = crate::loc::s().list_footer;
-        let help_w = self.measure_text(help, HELP_SCALE);
+        let hsc = 2.0;
+        let hw = self.measure_text(help, hsc);
         self.draw_text(
-            (vw - help_w) * 0.5,
+            (vw - hw) * 0.5,
             vh - 42.0,
-            HELP_SCALE,
+            hsc,
             help,
             swf::Color::from_rgb(0x99AABB, 255),
         );
@@ -4894,163 +5180,96 @@ impl SwitchRenderBackend {
 
     // ── Phase 3.7: DISTANT mode screens ────────────────────────────────
 
-    /// Splash for `Screen::DistantIdle`. `recent_url` is the
-    /// currently-displayed history entry (if any); `hist_pos` is
-    /// `(current, total)` for the "[3 / 12]" badge. When history is
-    /// empty we show the static "press A to type URL" CTA.
-    pub fn draw_library_distant_idle(
-        &mut self,
-        recent_url: Option<&str>,
-        hist_pos: Option<(usize, usize)>,
-    ) {
+    /// IMPORTER tab (v1.2.0) — a compact LIST of saved URLs plus a trailing
+    /// "+ add" row, replacing the old big CTA splash. `urls` are the history
+    /// entries; `selection` indexes them and `selection == urls.len()` is the
+    /// add row. A = launch (or add a URL), + = per-URL options. Windowed to fit.
+    pub fn draw_library_distant_list(&mut self, selection: usize, urls: &[&str], add_label: &str) {
         self.library_clear();
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
 
-        // Title with drop shadow.
-        let title = crate::loc::s().dist_title;
-        let scale_t = 5.0;
-        let tw = self.measure_text(title, scale_t);
+        // Header.
+        let header = crate::loc::s().dist_title;
+        let hs = 4.0;
+        let hw = self.measure_text(header, hs);
         self.draw_text(
-            (vw - tw) * 0.5 + 4.0,
-            vh * 0.13 + 4.0,
-            scale_t,
-            title,
-            swf::Color::from_rgb(0x000000, 255),
-        );
-        self.draw_text(
-            (vw - tw) * 0.5,
-            vh * 0.13,
-            scale_t,
-            title,
+            (vw - hw) * 0.5,
+            70.0,
+            hs,
+            header,
             swf::Color::from_rgb(0xFFD740, 255),
         );
 
-        // Subtitle.
-        let sub = crate::loc::s().dist_subtitle;
-        let scale_s = 2.0;
-        let sw = self.measure_text(sub, scale_s);
-        self.draw_text(
-            (vw - sw) * 0.5,
-            vh * 0.24,
-            scale_s,
-            sub,
-            swf::Color::from_rgb(0xAABFD8, 255),
-        );
-
-        // Big CTA / history panel.
-        const PANEL_W: f32 = 1120.0;
-        const PANEL_H: f32 = 280.0;
-        let panel_x = (vw - PANEL_W) * 0.5;
-        let panel_y = vh * 0.34;
-        let panel = Matrix {
-            a: PANEL_W, b: 0.0, c: 0.0, d: PANEL_H,
-            tx: swf::Twips::from_pixels(panel_x as f64),
-            ty: swf::Twips::from_pixels(panel_y as f64),
-        };
-        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xC0_14_20_38), panel);
-        <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(0xFFD740, 255), panel);
-
-        match recent_url {
-            None => {
-                // No history yet — just the "press A" CTA.
-                let cta = crate::loc::s().dist_press_a;
-                let scale_c = 3.0;
-                let cw = self.measure_text(cta, scale_c);
-                self.draw_text(
-                    panel_x + (PANEL_W - cw) * 0.5,
-                    panel_y + 80.0,
-                    scale_c,
-                    cta,
-                    swf::Color::from_rgb(0xFFFFFF, 255),
-                );
-                let hint = crate::loc::s().dist_example1;
-                let scale_h = 1.8;
-                let hw = self.measure_text(hint, scale_h);
-                self.draw_text(
-                    panel_x + (PANEL_W - hw) * 0.5,
-                    panel_y + 150.0,
-                    scale_h,
-                    hint,
-                    swf::Color::from_rgb(0x99AABB, 255),
-                );
-                let hint2 = crate::loc::s().dist_example2;
-                let hw2 = self.measure_text(hint2, scale_h);
-                self.draw_text(
-                    panel_x + (PANEL_W - hw2) * 0.5,
-                    panel_y + 185.0,
-                    scale_h,
-                    hint2,
-                    swf::Color::from_rgb(0x99AABB, 255),
-                );
+        let total = urls.len() + 1; // + the trailing "add" row
+        const VISIBLE: usize = 9;
+        let row_h = 50.0;
+        let top = 160.0;
+        let left = 80.0;
+        let first = if selection < VISIBLE { 0 } else { selection + 1 - VISIBLE };
+        let end = (first + VISIBLE).min(total);
+        let scale = 2.0;
+        let max_chars = ((vw - left - 80.0) / (6.0 * scale)) as usize;
+        for (vis, i) in (first..end).enumerate() {
+            let y = top + vis as f32 * row_h;
+            let is_sel = i == selection;
+            let color = if is_sel {
+                swf::Color::from_rgb(0xFFD740, 255)
+            } else {
+                swf::Color::from_rgb(0xCCCCCC, 255)
+            };
+            if is_sel {
+                self.draw_text(left - 34.0, y, scale, ">", color);
             }
-            Some(url) => {
-                // Show "HISTORIQUE [n / total]" header.
-                let scale_lbl = 2.0;
-                let label = if let Some((cur, total)) = hist_pos {
-                    std::format!("{} [{} / {}]", crate::loc::s().dist_history, cur, total)
+            if i < urls.len() {
+                let shown = truncate_mid(urls[i], max_chars);
+                self.draw_text(left, y, scale, &shown, color);
+            } else {
+                // Add row — teal when not selected so it stands out from URLs.
+                let c = if is_sel {
+                    color
                 } else {
-                    crate::loc::s().dist_history.to_string()
+                    swf::Color::from_rgb(0x88CC99, 255)
                 };
-                let lw = self.measure_text(&label, scale_lbl);
-                self.draw_text(
-                    panel_x + (PANEL_W - lw) * 0.5,
-                    panel_y + 30.0,
-                    scale_lbl,
-                    &label,
-                    swf::Color::from_rgb(0xFFD740, 255),
-                );
-
-                // URL truncated if too wide. Scale 2 → 12 px per char.
-                let scale_u = 2.0;
-                let char_w = 6.0 * scale_u;
-                let max_chars = ((PANEL_W - 60.0) / char_w) as usize;
-                let mut display = url.to_string();
-                if display.chars().count() > max_chars && max_chars > 1 {
-                    display = display.chars().take(max_chars - 1).collect();
-                    display.push('…');
-                }
-                let uw = self.measure_text(&display, scale_u);
-                self.draw_text(
-                    panel_x + (PANEL_W - uw) * 0.5,
-                    panel_y + 90.0,
-                    scale_u,
-                    &display,
-                    swf::Color::from_rgb(0xFFFFFF, 255),
-                );
-
-                // Action hints stacked inside the panel.
-                let scale_h = 1.8;
-                let lc = crate::loc::s();
-                let lines = [lc.dist_hint_zr, lc.dist_hint_a, lc.dist_hint_lr];
-                for (i, line) in lines.iter().enumerate() {
-                    let w = self.measure_text(line, scale_h);
-                    self.draw_text(
-                        panel_x + (PANEL_W - w) * 0.5,
-                        panel_y + 150.0 + i as f32 * 32.0,
-                        scale_h,
-                        line,
-                        swf::Color::from_rgb(0x99AABB, 255),
-                    );
-                }
+                self.draw_text(left, y, scale, add_label, c);
             }
         }
 
+        // Scrollbar.
+        if total > VISIBLE {
+            let bar_x = vw - 40.0;
+            let bar_top = top;
+            let bar_h = VISIBLE as f32 * row_h;
+            let thumb = (bar_h * VISIBLE as f32 / total as f32).max(24.0);
+            let denom = (total - VISIBLE).max(1) as f32;
+            let progress = first as f32 / denom;
+            let thumb_y = bar_top + (bar_h - thumb) * progress;
+            let track = Matrix {
+                a: 4.0, b: 0.0, c: 0.0, d: bar_h,
+                tx: swf::Twips::from_pixels(bar_x as f64),
+                ty: swf::Twips::from_pixels(bar_top as f64),
+            };
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x40_99AABB), track);
+            let th = Matrix {
+                a: 4.0, b: 0.0, c: 0.0, d: thumb,
+                tx: swf::Twips::from_pixels(bar_x as f64),
+                ty: swf::Twips::from_pixels(thumb_y as f64),
+            };
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), th);
+        }
+
         // Footer.
-        const HELP_SCALE: f32 = 2.0;
-        let help = if recent_url.is_some() {
-            crate::loc::s().dist_footer_hist
-        } else {
-            crate::loc::s().dist_footer_nohist
-        };
-        let help_w = self.measure_text(help, HELP_SCALE);
+        let help = crate::loc::s().dist_list_footer;
+        let hsc = 2.0;
+        let hw2 = self.measure_text(help, hsc);
         self.draw_text(
-            (vw - help_w) * 0.5,
+            (vw - hw2) * 0.5,
             vh - 42.0,
-            HELP_SCALE,
+            hsc,
             help,
             swf::Color::from_rgb(0x99AABB, 255),
         );
+
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
@@ -5415,7 +5634,83 @@ impl SwitchRenderBackend {
     /// Settings modal (Plus from the library). Caller has already cleared
     /// the screen via `draw_library_dim_backdrop`. `entries` are localized
     /// labels in fixed order (default controls / language / back).
+    /// REGLAGES — a full-screen navbar TAB page (v1.2.0), not a floating modal:
+    /// clears its own background, draws a top header + a centered entry list +
+    /// footer. The navbar is drawn over the top afterwards by `library::render`.
     pub fn draw_library_settings(&mut self, selection: usize, entries: &[&str]) {
+        self.library_clear();
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+
+        // Header (below the navbar strip).
+        const TITLE_SCALE: f32 = 4.0;
+        let header = crate::loc::s().settings_title;
+        let header_w = self.measure_text(header, TITLE_SCALE);
+        self.draw_text(
+            (vw - header_w) * 0.5,
+            90.0,
+            TITLE_SCALE,
+            header,
+            swf::Color::from_rgb(0xFFD740, 255),
+        );
+        // Thin underline accent under the header.
+        let rule = Matrix {
+            a: 360.0, b: 0.0, c: 0.0, d: 2.0,
+            tx: swf::Twips::from_pixels(((vw - 360.0) * 0.5) as f64),
+            ty: swf::Twips::from_pixels(150.0),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x80_99_AA_BB), rule);
+
+        // Centered entry list.
+        const OPT_SCALE: f32 = 3.0;
+        let row_h = 66.0;
+        let top_y = 230.0;
+        for (i, opt) in entries.iter().enumerate() {
+            let y = top_y + i as f32 * row_h;
+            let is_sel = i == selection;
+            let color = if is_sel {
+                swf::Color::from_rgb(0xFFD740, 255)
+            } else {
+                swf::Color::from_rgb(0xCCCCCC, 255)
+            };
+            let ow = self.measure_text(opt, OPT_SCALE);
+            let x = (vw - ow) * 0.5;
+            if is_sel {
+                self.draw_text(x - 40.0, y, OPT_SCALE, ">", color);
+            }
+            self.draw_text(x, y, OPT_SCALE, opt, color);
+        }
+
+        // Footer.
+        const HELP_SCALE: f32 = 2.0;
+        let help = crate::loc::s().settings_footer;
+        let help_w = self.measure_text(help, HELP_SCALE);
+        self.draw_text(
+            (vw - help_w) * 0.5,
+            vh - 42.0,
+            HELP_SCALE,
+            help,
+            swf::Color::from_rgb(0x99AABB, 255),
+        );
+
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
+    /// Cover picker (OPTIONS > JAQUETTE, v1.2.0). Shows Flashpoint candidate
+    /// covers as a THUMBNAIL GRID (loaded progressively, one per frame). A
+    /// non-empty `msg` with no candidates shows a notice instead.
+    pub fn draw_library_cover_picker(
+        &mut self,
+        game_name: &str,
+        selection: usize,
+        titles: &[&str],
+        urls: &[&str],
+        msg: &str,
+    ) {
         unsafe {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -5424,9 +5719,49 @@ impl SwitchRenderBackend {
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
 
-        const PANEL_W: f32 = 600.0;
-        let row_h: f32 = 56.0;
-        let panel_h = 140.0 + entries.len() as f32 * row_h + 60.0;
+        const PANEL_W: f32 = 980.0;
+        let cols = crate::library::COVER_PICKER_COLS;
+        let n = urls.len();
+
+        if n == 0 {
+            // Empty: a compact notice panel (covers off / no results / error).
+            let panel_h = 240.0;
+            let panel_x = (vw - PANEL_W) * 0.5;
+            let panel_y = (vh - panel_h) * 0.5;
+            let panel = Matrix {
+                a: PANEL_W, b: 0.0, c: 0.0, d: panel_h,
+                tx: swf::Twips::from_pixels(panel_x as f64),
+                ty: swf::Twips::from_pixels(panel_y as f64),
+            };
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_14_20_38), panel);
+            <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(0xFFFFFF, 255), panel);
+            let title = crate::loc::s().cover_title;
+            let tw = self.measure_text(title, 3.0);
+            self.draw_text(panel_x + (PANEL_W - tw) * 0.5, panel_y + 30.0, 3.0, title, swf::Color::from_rgb(0xFFFFFF, 255));
+            let m = if msg.is_empty() { crate::loc::s().cover_none } else { msg };
+            let shown = truncate_mid(m, ((PANEL_W - 120.0) / 12.0) as usize);
+            let mw = self.measure_text(&shown, 2.0);
+            self.draw_text(panel_x + (PANEL_W - mw) * 0.5, panel_y + 120.0, 2.0, &shown, swf::Color::from_rgb(0xAABFD8, 255));
+            let help = crate::loc::s().cover_footer;
+            let hw = self.measure_text(help, 2.0);
+            self.draw_text(panel_x + (PANEL_W - hw) * 0.5, panel_y + panel_h - 36.0, 2.0, help, swf::Color::from_rgb(0x99AABB, 255));
+            unsafe {
+                glUseProgram(0);
+                glBindVertexArray(0);
+            }
+            self.gl_state.invalidate();
+            return;
+        }
+
+        // Grid geometry.
+        const MARGIN: f32 = 40.0;
+        const CELL_GAP: f32 = 16.0;
+        const THUMB_H: f32 = 120.0;
+        let inner_w = PANEL_W - MARGIN * 2.0;
+        let cell_w = (inner_w - CELL_GAP * (cols as f32 - 1.0)) / cols as f32;
+        let rows = (n + cols - 1) / cols;
+        let grid_h = rows as f32 * (THUMB_H + CELL_GAP);
+        let panel_h = 110.0 + grid_h + 84.0;
         let panel_x = (vw - PANEL_W) * 0.5;
         let panel_y = (vh - panel_h) * 0.5;
         let panel = Matrix {
@@ -5437,44 +5772,85 @@ impl SwitchRenderBackend {
         <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_14_20_38), panel);
         <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(0xFFFFFF, 255), panel);
 
-        const TITLE_SCALE: f32 = 3.0;
-        let header = crate::loc::s().settings_title;
-        let header_w = self.measure_text(header, TITLE_SCALE);
-        self.draw_text(
-            panel_x + (PANEL_W - header_w) * 0.5,
-            panel_y + 28.0,
-            TITLE_SCALE,
-            header,
-            swf::Color::from_rgb(0xFFFFFF, 255),
-        );
+        // Title + game-name subtitle.
+        let title = crate::loc::s().cover_title;
+        let tw = self.measure_text(title, 3.0);
+        self.draw_text(panel_x + (PANEL_W - tw) * 0.5, panel_y + 26.0, 3.0, title, swf::Color::from_rgb(0xFFFFFF, 255));
+        let gn = truncate_mid(game_name, 44);
+        let sw = self.measure_text(&gn, 2.0);
+        self.draw_text(panel_x + (PANEL_W - sw) * 0.5, panel_y + 70.0, 2.0, &gn, swf::Color::from_rgb(0xFFD740, 255));
 
-        const OPT_SCALE: f32 = 2.5;
-        let opts_top_y = panel_y + 110.0;
-        let opts_left_x = panel_x + 110.0;
-        for (i, opt) in entries.iter().enumerate() {
-            let y = opts_top_y + i as f32 * row_h;
+        // Phase from the system tick for a subtle selection pulse.
+        let phase_s = (unsafe { ruffle_tick_now() } as f64) / (unsafe { ruffle_tick_freq() } as f64);
+        let pulse = approx_sin(phase_s as f32 * (2.0 * core::f32::consts::PI / 1.6));
+
+        let grid_top = panel_y + 110.0;
+        let grid_left = panel_x + MARGIN;
+        let mut loaded_one = false;
+        for i in 0..n {
+            let col = (i % cols) as f32;
+            let row = (i / cols) as f32;
+            let cx = grid_left + col * (cell_w + CELL_GAP);
+            let cy = grid_top + row * (THUMB_H + CELL_GAP);
             let is_sel = i == selection;
-            let color = if is_sel {
-                swf::Color::from_rgb(0xFFD740, 255)
-            } else {
-                swf::Color::from_rgb(0xCCCCCC, 255)
+
+            // Cell backdrop (so pending / failed thumbs still show a tile).
+            let bg = Matrix {
+                a: cell_w, b: 0.0, c: 0.0, d: THUMB_H,
+                tx: swf::Twips::from_pixels(cx as f64),
+                ty: swf::Twips::from_pixels(cy as f64),
             };
-            if is_sel {
-                self.draw_text(opts_left_x - 30.0, y, OPT_SCALE, ">", color);
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xFF_0B_12_22), bg);
+
+            match self.thumb_for(urls[i], &mut loaded_one) {
+                Some(ThumbTex::Image { tex, w, h }) => {
+                    self.draw_textured_rect_cover(cx, cy, cell_w, THUMB_H, tex, w, h);
+                }
+                Some(ThumbTex::Failed) => {
+                    let q = "?";
+                    let qw = self.measure_text(q, 4.0);
+                    self.draw_text(cx + (cell_w - qw) * 0.5, cy + THUMB_H * 0.5 - 14.0, 4.0, q, swf::Color::from_rgb(0x55_66_77, 255));
+                }
+                None => {
+                    let d = "...";
+                    let dw = self.measure_text(d, 3.0);
+                    self.draw_text(cx + (cell_w - dw) * 0.5, cy + THUMB_H * 0.5 - 10.0, 3.0, d, swf::Color::from_rgb(0x7A8A9C, 255));
+                }
             }
-            self.draw_text(opts_left_x, y, OPT_SCALE, opt, color);
+
+            if is_sel {
+                let p = (pulse * 0.5) + 0.5;
+                let g = (0xC0 as f32 + (0xFF - 0xC0) as f32 * p) as u32;
+                let col = swf::Color::from_rgb((0xFF << 16) | (g << 8) | 0x30, 255);
+                let b = 4.0;
+                let bars = [
+                    (cx - b, cy - b, cell_w + 2.0 * b, b),
+                    (cx - b, cy + THUMB_H, cell_w + 2.0 * b, b),
+                    (cx - b, cy, b, THUMB_H),
+                    (cx + cell_w, cy, b, THUMB_H),
+                ];
+                for (bx, by, bw, bh) in bars {
+                    let m = Matrix {
+                        a: bw, b: 0.0, c: 0.0, d: bh,
+                        tx: swf::Twips::from_pixels(bx as f64),
+                        ty: swf::Twips::from_pixels(by as f64),
+                    };
+                    <Self as CommandHandler>::draw_rect(self, col, m);
+                }
+            }
         }
 
-        const HELP_SCALE: f32 = 2.0;
-        let help = crate::loc::s().settings_footer;
-        let help_w = self.measure_text(help, HELP_SCALE);
-        self.draw_text(
-            panel_x + (PANEL_W - help_w) * 0.5,
-            panel_y + panel_h - 38.0,
-            HELP_SCALE,
-            help,
-            swf::Color::from_rgb(0x99AABB, 255),
-        );
+        // Selected candidate title under the grid.
+        if let Some(t) = titles.get(selection) {
+            let shown = truncate_mid(t, ((PANEL_W - 80.0) / 12.0) as usize);
+            let sw2 = self.measure_text(&shown, 2.0);
+            self.draw_text(panel_x + (PANEL_W - sw2) * 0.5, panel_y + panel_h - 66.0, 2.0, &shown, swf::Color::from_rgb(0xCCCCCC, 255));
+        }
+
+        // Footer.
+        let help = crate::loc::s().cover_footer;
+        let hw = self.measure_text(help, 2.0);
+        self.draw_text(panel_x + (PANEL_W - hw) * 0.5, panel_y + panel_h - 34.0, 2.0, help, swf::Color::from_rgb(0x99AABB, 255));
 
         unsafe {
             glUseProgram(0);

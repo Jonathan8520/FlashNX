@@ -14,6 +14,7 @@
 #![feature(restricted_std)]
 
 mod backend;
+mod covers;
 mod ffi;
 mod keymap;
 mod library;
@@ -22,6 +23,7 @@ mod menu;
 mod net;
 mod player;
 mod sd;
+mod sources;
 
 use core::ffi::{c_char, c_int};
 use std::sync::{Arc, Mutex};

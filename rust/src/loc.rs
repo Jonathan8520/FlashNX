@@ -15,7 +15,7 @@
 //! stored in keymap JSON and are intentionally NOT translated — only the
 //! "(none)" placeholder is localized (`none`).
 
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::fs::File;
 use std::io::{Read, Write};
 
@@ -116,6 +116,8 @@ pub struct Strings {
     pub del_footer: &'static str,
     // DISTANT idle / history
     pub dist_title: &'static str,
+    pub dist_add: &'static str,
+    pub dist_list_footer: &'static str,
     pub dist_subtitle: &'static str,
     pub dist_press_a: &'static str,
     pub dist_example1: &'static str,
@@ -140,7 +142,21 @@ pub struct Strings {
     pub settings_title: &'static str,
     pub set_keys: &'static str,
     pub set_language: &'static str,
+    pub set_quit: &'static str,
     pub set_back: &'static str,
+    // Navbar tabs (v1.2.0) — switched with L/R.
+    pub tab_play: &'static str,
+    pub tab_import: &'static str,
+    pub tab_settings: &'static str,
+    // v1.2.0 covers + online toggle.
+    pub set_covers: &'static str,
+    pub lbl_on: &'static str,
+    pub lbl_off: &'static str,
+    pub opt_cover: &'static str,
+    pub cover_title: &'static str,
+    pub cover_footer: &'static str,
+    pub cover_off_notice: &'static str,
+    pub cover_none: &'static str,
     pub settings_footer: &'static str,
     pub lang_title: &'static str,
     pub lang_footer: &'static str,
@@ -183,7 +199,7 @@ const EN: Strings = Strings {
     empty_l2: "SDMC:/FLASHNX/   OR   SDMC:/SWITCH/FLASHNX/",
     empty_l3: "THEN RESTART FLASHNX.",
     empty_footer: "Y:REMOTE IMPORT   -:QUIT",
-    list_footer: "A:PLAY  X:SEARCH  ZL:OPTIONS  Y:IMPORT  +:SETTINGS  -:QUIT",
+    list_footer: "L/R:TABS  A:PLAY  -:SEARCH  +:OPTIONS",
     applet_title: "APPLET MODE",
     applet_notice: "LAUNCHING A GAME NEEDS THE FULL APP MEMORY, WHICH APPLET MODE DOES NOT HAVE. IN THE HOMEBREW MENU, HOLD R ON A TITLE (OR USE A FORWARDER) TO START FLASHNX WITH FULL MEMORY.",
     options_title: "OPTIONS",
@@ -198,6 +214,8 @@ const EN: Strings = Strings {
     del_l3: "This cannot be undone.",
     del_footer: "A: DELETE     B: CANCEL",
     dist_title: "REMOTE IMPORT",
+    dist_add: "+ ADD A URL",
+    dist_list_footer: "A:LAUNCH   +:OPTIONS   L/R:TABS",
     dist_subtitle: "DOWNLOAD SWF FROM ARCHIVE.ORG",
     dist_press_a: "PRESS A TO ENTER A URL",
     dist_example1: "EXAMPLE: HTTPS://ARCHIVE.ORG/DETAILS/<ITEM-ID>",
@@ -218,8 +236,20 @@ const EN: Strings = Strings {
     settings_title: "SETTINGS",
     set_keys: "DEFAULT CONTROLS",
     set_language: "LANGUAGE",
+    set_quit: "QUIT",
     set_back: "BACK",
-    settings_footer: "A:OK   B:BACK",
+    tab_play: "PLAY",
+    tab_import: "IMPORT",
+    tab_settings: "SETTINGS",
+    set_covers: "ONLINE COVERS",
+    lbl_on: "ON",
+    lbl_off: "OFF",
+    opt_cover: "COVER",
+    cover_title: "CHOOSE A COVER",
+    cover_footer: "A: CHOOSE   UP/DOWN: MOVE   B: BACK",
+    cover_off_notice: "ENABLE ONLINE COVERS IN SETTINGS",
+    cover_none: "NO RESULTS",
+    settings_footer: "L/R:TABS   A:OK",
     lang_title: "LANGUAGE",
     lang_footer: "A:OK   B:CANCEL",
     histdel_title: "DELETE URL ?",
@@ -257,7 +287,7 @@ const FR: Strings = Strings {
     empty_l2: "SDMC:/FLASHNX/   OU   SDMC:/SWITCH/FLASHNX/",
     empty_l3: "PUIS RED\u{00C9}MARREZ FLASHNX.",
     empty_footer: "Y:IMPORT DISTANT   -:QUITTER",
-    list_footer: "A:JOUER  X:RECHERCHE  ZL:OPTIONS  Y:IMPORT  +:R\u{00C9}GLAGES  -:QUITTER",
+    list_footer: "L/R:ONGLETS  A:JOUER  -:RECHERCHE  +:OPTIONS",
     applet_title: "MODE APPLET",
     applet_notice: "LANCER UN JEU DEMANDE TOUTE LA M\u{00C9}MOIRE DE L'APP, INDISPONIBLE EN MODE APPLET. DANS LE HOMEBREW MENU, TIENS R SUR UN TITRE (OU UN FORWARDER) POUR D\u{00C9}MARRER FLASHNX AVEC TOUTE LA M\u{00C9}MOIRE.",
     options_title: "OPTIONS",
@@ -272,6 +302,8 @@ const FR: Strings = Strings {
     del_l3: "ACTION IRR\u{00C9}VERSIBLE.",
     del_footer: "A: SUPPRIMER     B: ANNULER",
     dist_title: "IMPORT DISTANT",
+    dist_add: "+ AJOUTER UNE URL",
+    dist_list_footer: "A:LANCER   +:OPTIONS   L/R:ONGLETS",
     dist_subtitle: "T\u{00C9}L\u{00C9}CHARGEMENT DE SWF DEPUIS ARCHIVE.ORG",
     dist_press_a: "APPUYEZ SUR A POUR SAISIR UNE URL",
     dist_example1: "EXEMPLE: HTTPS://ARCHIVE.ORG/DETAILS/<ITEM-ID>",
@@ -292,8 +324,20 @@ const FR: Strings = Strings {
     settings_title: "R\u{00C9}GLAGES",
     set_keys: "TOUCHES PAR D\u{00C9}FAUT",
     set_language: "LANGUE",
+    set_quit: "QUITTER",
     set_back: "RETOUR",
-    settings_footer: "A:OK   B:RETOUR",
+    tab_play: "JOUER",
+    tab_import: "IMPORTER",
+    tab_settings: "R\u{00C9}GLAGES",
+    set_covers: "JAQUETTES EN LIGNE",
+    lbl_on: "ON",
+    lbl_off: "OFF",
+    opt_cover: "JAQUETTE",
+    cover_title: "CHOISIR UNE JAQUETTE",
+    cover_footer: "A: CHOISIR   HAUT/BAS: NAVIGUER   B: RETOUR",
+    cover_off_notice: "ACTIVE LES JAQUETTES EN LIGNE DANS LES R\u{00C9}GLAGES",
+    cover_none: "AUCUN R\u{00C9}SULTAT",
+    settings_footer: "L/R:ONGLETS   A:OK",
     lang_title: "LANGUE",
     lang_footer: "A:OK   B:ANNULER",
     histdel_title: "SUPPRIMER URL ?",
@@ -331,7 +375,7 @@ const ES: Strings = Strings {
     empty_l2: "SDMC:/FLASHNX/   O   SDMC:/SWITCH/FLASHNX/",
     empty_l3: "Y REINICIA FLASHNX.",
     empty_footer: "Y:IMPORTAR REMOTO   -:SALIR",
-    list_footer: "A:JUGAR  X:BUSCAR  ZL:OPCIONES  Y:IMPORTAR  +:AJUSTES  -:SALIR",
+    list_footer: "L/R:PESTA\u{00D1}AS  A:JUGAR  -:BUSCAR  +:OPCIONES",
     applet_title: "MODO APPLET",
     applet_notice: "EJECUTAR UN JUEGO NECESITA TODA LA MEMORIA DE LA APP, QUE EL MODO APPLET NO TIENE. EN EL HOMEBREW MENU, MANT\u{00C9}N R SOBRE UN T\u{00CD}TULO (O USA UN FORWARDER) PARA INICIAR FLASHNX CON TODA LA MEMORIA.",
     options_title: "OPCIONES",
@@ -346,6 +390,8 @@ const ES: Strings = Strings {
     del_l3: "ACCI\u{00D3}N IRREVERSIBLE.",
     del_footer: "A: BORRAR     B: CANCELAR",
     dist_title: "IMPORTAR REMOTO",
+    dist_add: "+ A\u{00D1}ADIR UNA URL",
+    dist_list_footer: "A:LANZAR   +:OPCIONES   L/R:PESTA\u{00D1}AS",
     dist_subtitle: "DESCARGAR SWF DESDE ARCHIVE.ORG",
     dist_press_a: "PULSA A PARA INTRODUCIR UNA URL",
     dist_example1: "EJEMPLO: HTTPS://ARCHIVE.ORG/DETAILS/<ITEM-ID>",
@@ -366,8 +412,20 @@ const ES: Strings = Strings {
     settings_title: "AJUSTES",
     set_keys: "CONTROLES POR DEFECTO",
     set_language: "IDIOMA",
+    set_quit: "SALIR",
     set_back: "VOLVER",
-    settings_footer: "A:OK   B:VOLVER",
+    tab_play: "JUGAR",
+    tab_import: "IMPORTAR",
+    tab_settings: "AJUSTES",
+    set_covers: "CARATULAS EN LINEA",
+    lbl_on: "ON",
+    lbl_off: "OFF",
+    opt_cover: "CARATULA",
+    cover_title: "ELEGIR CARATULA",
+    cover_footer: "A: ELEGIR   ARRIBA/ABAJO: MOVER   B: VOLVER",
+    cover_off_notice: "ACTIVA CARATULAS EN LINEA EN AJUSTES",
+    cover_none: "SIN RESULTADOS",
+    settings_footer: "L/R:PESTA\u{00D1}AS   A:OK",
     lang_title: "IDIOMA",
     lang_footer: "A:OK   B:CANCELAR",
     histdel_title: "\u{00BF}BORRAR URL ?",
@@ -407,7 +465,7 @@ const RU: Strings = Strings {
     empty_l2: "SDMC:/FLASHNX/   ИЛИ   SDMC:/SWITCH/FLASHNX/",
     empty_l3: "ЗАТЕМ ПЕРЕЗАПУСТИТЕ FLASHNX.",
     empty_footer: "Y:ЗАГРУЗКА ПО СЕТИ   -:ВЫХОД",
-    list_footer: "A:ИГРАТЬ  X:ПОИСК  ZL:ОПЦИИ  Y:ЗАГРУЗКА  +:НАСТРОЙКИ  -:ВЫХОД",
+    list_footer: "L/R:ВКЛАДКИ  A:ИГРАТЬ  -:ПОИСК  +:ОПЦИИ",
     applet_title: "РЕЖИМ АППЛЕТА",
     applet_notice: "ДЛЯ ЗАПУСКА ИГРЫ НУЖНА ВСЯ ПАМЯТЬ ПРИЛОЖЕНИЯ, КОТОРОЙ НЕТ В РЕЖИМЕ АППЛЕТА. В HOMEBREW MENU УДЕРЖИВАЙТЕ R НА ИГРЕ, ЧТОБЫ ЗАПУСТИТЬ FLASHNX СО ВСЕЙ ПАМЯТЬЮ.",
     options_title: "ОПЦИИ",
@@ -422,6 +480,8 @@ const RU: Strings = Strings {
     del_l3: "ДЕЙСТВИЕ НЕОБРАТИМО.",
     del_footer: "A: УДАЛИТЬ     B: ОТМЕНА",
     dist_title: "ЗАГРУЗКА ПО СЕТИ",
+    dist_add: "+ ДОБАВИТЬ URL",
+    dist_list_footer: "A:ЗАПУСК   +:ОПЦИИ   L/R:ВКЛАДКИ",
     dist_subtitle: "ЗАГРУЗКА SWF С ARCHIVE.ORG",
     dist_press_a: "НАЖМИТЕ A ЧТОБЫ ВВЕСТИ URL",
     dist_example1: "ПРИМЕР: HTTPS://ARCHIVE.ORG/DETAILS/<ITEM-ID>",
@@ -442,8 +502,20 @@ const RU: Strings = Strings {
     settings_title: "НАСТРОЙКИ",
     set_keys: "КЛАВИШИ ПО УМОЛЧАНИЮ",
     set_language: "ЯЗЫК",
+    set_quit: "ВЫХОД",
     set_back: "НАЗАД",
-    settings_footer: "A:ОК   B:НАЗАД",
+    tab_play: "ИГРАТЬ",
+    tab_import: "ЗАГРУЗКА",
+    tab_settings: "НАСТРОЙКИ",
+    set_covers: "ОБЛОЖКИ ОНЛАЙН",
+    lbl_on: "ON",
+    lbl_off: "OFF",
+    opt_cover: "ОБЛОЖКА",
+    cover_title: "ВЫБЕРИТЕ ОБЛОЖКУ",
+    cover_footer: "A: ВЫБРАТЬ   ВВЕРХ/ВНИЗ: НАВИГАЦИЯ   B: НАЗАД",
+    cover_off_notice: "ВКЛЮЧИТЕ ОБЛОЖКИ ОНЛАЙН В НАСТРОЙКАХ",
+    cover_none: "НЕТ РЕЗУЛЬТАТОВ",
+    settings_footer: "L/R:ВКЛАДКИ   A:ОК",
     lang_title: "ЯЗЫК",
     lang_footer: "A:ОК   B:ОТМЕНА",
     histdel_title: "УДАЛИТЬ URL ?",
@@ -475,6 +547,24 @@ pub fn current() -> Lang {
 
 pub fn set(lang: Lang) {
     CURRENT.store(lang.index() as u8, Ordering::Relaxed);
+}
+
+/// v1.2.0 — whether the per-game "JAQUETTE" action may reach Flashpoint to
+/// fetch cover art. OFF by default: with it off, FlashNX makes ZERO unsolicited
+/// network requests (covers come only from local sidecars/cache). Persisted in
+/// settings.json alongside the language.
+static COVERS_ONLINE: AtomicBool = AtomicBool::new(false);
+
+pub fn covers_online() -> bool {
+    // v1.2.0: online covers are always available (no user toggle). Kept as a
+    // function so the persisted setting stays consistent and a toggle could
+    // come back later without touching call sites.
+    let _ = COVERS_ONLINE.load(Ordering::Relaxed);
+    true
+}
+
+pub fn set_covers_online(v: bool) {
+    COVERS_ONLINE.store(v, Ordering::Relaxed);
 }
 
 /// The active language's string table. Short name because it's called a lot.
@@ -569,12 +659,31 @@ fn read_small_file(path: &str) -> Option<std::string::String> {
     std::string::String::from_utf8(data).ok()
 }
 
-/// Persist the chosen language to `sdmc:/flashnx/settings.json`. Returns
-/// true on success. Best-effort — a write failure leaves the in-memory
-/// language applied for the session.
-pub fn save(lang: Lang) -> bool {
+/// Parse the boolean `"covers_online"` value out of settings.json (tiny hand
+/// parser, like `parse_language`). Absent → None (keep the default).
+fn parse_covers_online(json: &str) -> Option<bool> {
+    let idx = json.find("\"covers_online\"")?;
+    let rest = &json[idx + "\"covers_online\"".len()..];
+    let colon = rest.find(':')?;
+    let after = rest[colon + 1..].trim_start();
+    if after.starts_with("true") {
+        Some(true)
+    } else if after.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Write the full settings file (language + covers toggle). Both settings
+/// persist together so saving one never drops the other.
+fn write_settings(lang: Lang, covers: bool) -> bool {
     let path = settings_write_path();
-    let json = std::format!("{{\n    \"language\": \"{}\"\n}}\n", lang.code());
+    let json = std::format!(
+        "{{\n    \"language\": \"{}\",\n    \"covers_online\": {}\n}}\n",
+        lang.code(),
+        covers,
+    );
     match File::create(&path) {
         Ok(mut f) => {
             let ok = f.write_all(json.as_bytes()).is_ok();
@@ -586,6 +695,12 @@ pub fn save(lang: Lang) -> bool {
         }
         Err(_) => false,
     }
+}
+
+/// Persist the chosen language. Best-effort. (The covers-online flag is always
+/// on in v1.2.0 — no toggle — but stays in the file for forward-compat.)
+pub fn save(lang: Lang) -> bool {
+    write_settings(lang, covers_online())
 }
 
 extern "C" {
@@ -600,6 +715,9 @@ pub fn init() {
     // 1. Explicit user choice persisted on SD wins.
     if let Some(path) = settings_read_path() {
         if let Some(txt) = read_small_file(&path) {
+            if let Some(c) = parse_covers_online(&txt) {
+                set_covers_online(c);
+            }
             if let Some(lang) = parse_language(&txt) {
                 set(lang);
                 return;

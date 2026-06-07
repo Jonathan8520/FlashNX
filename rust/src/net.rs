@@ -78,6 +78,43 @@ fn last_https_error() -> std::string::String {
     std::string::String::from_utf8_lossy(&buf).into_owned()
 }
 
+/// Generic synchronous HTTPS GET into a freshly-allocated buffer; returns the
+/// raw response bytes (truncated to the real length). `cap` bounds the
+/// response (the C++ side returns -3 on overflow). Reuses the exact same
+/// curl+TLS path as the archive.org metadata fetch — User-Agent `FlashNX/...`,
+/// follows redirects, CA bundle from `cacert.pem`. Used by the `sources` layer
+/// (Flashpoint search JSON, cover logos) and by `fetch_archive_metadata`.
+pub(crate) fn http_get(
+    url: &str,
+    cap: usize,
+) -> Result<std::vec::Vec<u8>, std::string::String> {
+    let mut buf = std::vec![0u8; cap];
+    let mut url_c = url.as_bytes().to_vec();
+    url_c.push(0);
+    let n = unsafe {
+        https_get_into_buf(
+            url_c.as_ptr() as *const c_char,
+            buf.as_mut_ptr() as *mut c_char,
+            buf.len() as c_int,
+        )
+    };
+    if n == -3 {
+        return Err(std::string::String::from(crate::loc::s().err_too_large));
+    }
+    if n < 0 {
+        // -2 = transfer failed (curl/HTTP); surface the real cause. Other
+        // negatives (-1 init) carry no curl result, so show the raw code.
+        let detail = if n == -2 {
+            last_https_error()
+        } else {
+            std::format!("rc {}", n)
+        };
+        return Err(crate::loc::err_https(&detail));
+    }
+    buf.truncate(n as usize);
+    Ok(buf)
+}
+
 // ── archive.org metadata ───────────────────────────────────────────────
 
 /// One file inside an archive.org item. Only fields we actually use.
@@ -125,31 +162,7 @@ pub fn fetch_archive_metadata(
     // 4 MB cap for metadata JSON. Big Flash dumps (armorgames ~500 KB,
     // 1100+ files) blow through smaller caps and the C++ side returns -3
     // overflow. 4 MB covers anything realistic and is a transient alloc.
-    let mut buf = std::vec![0u8; 4 * 1024 * 1024];
-    let mut url_c = url.clone().into_bytes();
-    url_c.push(0);
-    let n = unsafe {
-        https_get_into_buf(
-            url_c.as_ptr() as *const c_char,
-            buf.as_mut_ptr() as *mut c_char,
-            buf.len() as c_int,
-        )
-    };
-    if n == -3 {
-        return Err(std::string::String::from(crate::loc::s().err_too_large));
-    }
-    if n < 0 {
-        // -2 = transfer failed (curl/HTTP) — surface the REAL cause instead
-        // of an opaque code. Other negatives (-1 init failure) carry no curl
-        // result, so just show the raw code.
-        let detail = if n == -2 {
-            last_https_error()
-        } else {
-            std::format!("rc {}", n)
-        };
-        return Err(crate::loc::err_https(&detail));
-    }
-    buf.truncate(n as usize);
+    let buf = http_get(&url, 4 * 1024 * 1024)?;
     let json: serde_json::Value = serde_json::from_slice(&buf).map_err(|e| {
         log(&std::format!("net: JSON parse failed: {}\n", e));
         crate::loc::err_json(&e.to_string())
@@ -210,7 +223,7 @@ pub fn fetch_archive_metadata(
 /// Percent-encode characters that aren't URL-safe in a path segment.
 /// Keeps ASCII alphanumerics, `.`, `-`, `_`, `~`; everything else
 /// becomes %XX (UTF-8 byte-per-byte). Spaces → %20.
-fn url_encode_path(s: &str) -> std::string::String {
+pub(crate) fn url_encode_path(s: &str) -> std::string::String {
     let mut out = std::string::String::with_capacity(s.len());
     for &b in s.as_bytes() {
         let safe = matches!(b,

@@ -47,6 +47,15 @@ serde_json = "1"
 # binary cost is ~0. Picked over the full `image` crate to keep the API
 # surface tight (we only need PNG, not BMP/TIFF/AVIF/WebP).
 png = "0.18"
+# v1.2.0 — local cover art. We decode user-dropped `.jpg` sidecars and (opt-in)
+# Flashpoint logos. jpeg-decoder is pinned via [patch.crates-io] to the Switch
+# fork. CRITICAL: `default-features = false` — the crate defaults to `rayon`,
+# whose parallel decode path (`compute_image_parallel`) spawns threads and
+# CRASHES on Switch (newlib pthread). ruffle_render already disables it for the
+# same reason; enabling it here (even just by feature-unification from a default
+# dep) re-introduced the crash on any SWF with an embedded JPEG. We only use the
+# single-threaded API (Decoder::new/decode/info), so no features are needed.
+jpeg-decoder = { version = "0.3", default-features = false }
 
 [profile.release]
 opt-level = 3

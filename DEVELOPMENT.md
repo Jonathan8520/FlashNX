@@ -44,7 +44,9 @@ flash-for-switch/
 │   └── src/
 │       ├── lib.rs                # FFI exports + PlayerBuilder + SWF loader + input handlers + tick/render profiling
 │       ├── library.rs            # Library UI state + banner/icon embed + SWF header parse + meta/keymap sidecars
-│       ├── net.rs                # Remote import archive.org: fetch JSON + download async curl multi
+│       ├── net.rs                # HTTPS transport: http_get (sync) + async curl multi download + swkbd prompts
+│       ├── sources/             # Multi-source: classify (archive.org / direct .swf) + Flashpoint cover lookup (metadata only)
+│       ├── covers.rs            # Local cover art: sidecar/cache/default resolution + PNG/JPEG decode + opt-in Flashpoint fetch
 │       ├── keymap.rs             # JSON keymap (sidecar + default + fallback) + mutation API
 │       ├── menu.rs               # TOUCHES sub-screen state machine (list + dropdown)
 │       ├── loc.rs                # UI localization (EN/FR/ES/RU) + settings.json persistence

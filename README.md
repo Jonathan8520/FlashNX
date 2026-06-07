@@ -22,7 +22,7 @@
 | Library | Remote import | In game |
 |:---:|:---:|:---:|
 | ![FlashNX library](assets/screenshots/library.png) | ![archive.org import](assets/screenshots/remote-import.png) | ![Super Mario 63 + pause menu](assets/screenshots/in-game.png) |
-| Joycon navigation, banner + color chip, AS3 badge | HTTPS `.swf` download from archive.org | Game + pause menu / key editor |
+| Cover gallery, L/R tabs, AS3 badge | URL list: archive.org or a direct `.swf` | Game + pause menu / key editor |
 
 ## Installation
 
@@ -39,14 +39,18 @@ Either way: copy your **`.swf`** files into **`sdmc:/flashnx/`**, then launch **
 ## Usage
 
 **In the library**
-Up/down (D-pad or sticks) = navigate · **A** = play · **X** = search (filter by name) · **ZL** = options (controls, rename, delete) · **Y** = import from archive.org · **+** = settings (default controls, language) · **−** = quit.
+**L / R** = switch tabs (Play / Import / Settings) · D-pad or sticks = move in the cover gallery · **A** = play · **−** = search (filter by name) · **+** = game options (controls, rename, cover, delete). Quit from the Settings tab.
+
+**Import tab**
+A list of your saved URLs · **A** = launch one · **+ Add a URL** row to enter a new one · **+** on a URL = edit or delete it. Accepts archive.org items and direct `.swf` URLs.
 
 **In game**
 Left stick / D-pad = arrows · **A/B/X/Y** = Flash keys (remappable) · right stick = mouse cursor · **ZR** / touch = click · **−** = pause menu.
 
+- **Cover art**: the library is a gallery of covers at their natural size. Drop a `<game>.png` or `.jpg` next to the `.swf` to set one, or fetch artwork from the Flashpoint Archive in a game's options (pick from thumbnails).
 - **Automatic saves** for games that save (SharedObject `.sol`), on the SD card.
-- **Built-in key editor** (48 Flash keys, configurable per game) — and a **global default** layout in the settings.
-- **Languages**: English, French, Spanish, Russian — auto-detected from the console's system language, switchable from the settings (**+**).
+- **Built-in key editor** (48 Flash keys, configurable per game), plus a **global default** layout in the Settings tab.
+- **Languages**: English, French, Spanish, Russian, auto-detected from the console's system language, switchable from the Settings tab.
 
 ## Tested games
 

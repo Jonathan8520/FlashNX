@@ -65,10 +65,16 @@ pub(crate) enum Screen {
     /// sidecars / saves matching the basename, then back to List. B =
     /// back to OptionsModal. Destructive, hence the explicit step.
     DeleteConfirm { game_idx: usize },
+    /// Cover picker (OPTIONS > JAQUETTE, v1.2.0). Lists Flashpoint search
+    /// candidates from `State::cover_candidates`; `selection` indexes that vec.
+    /// `State::cover_msg` (non-empty) shows a notice instead of a list (covers
+    /// off / no results / fetch error). A = fetch+cache the chosen logo.
+    CoverPicker { game_idx: usize, selection: usize },
     // ── Phase 3.7: DISTANT mode (archive.org import) ───────────────────
-    /// Entry screen for DISTANT mode. Shows the FlashNX banner + a prompt
-    /// "A: SAISIR URL  Y: RETOUR LOCAL  -: QUITTER".
-    DistantIdle,
+    /// IMPORTER home: a navigable LIST of saved URLs + a trailing "+ add" row.
+    /// `selection` indexes [history urls.., add-row]. A launches the selected
+    /// URL (or adds one on the add-row); + opens per-URL options.
+    DistantIdle { selection: usize },
     /// After a successful archive.org metadata fetch. Lists `RemoteFile`s
     /// stored in `State::remote_files`; `selection` indexes that vec.
     DistantFiles { selection: usize, scroll_offset: usize },
@@ -79,9 +85,12 @@ pub(crate) enum Screen {
     /// Error from URL parse / metadata fetch / download. Message in
     /// `State::distant_error`. B or A dismisses back to DistantIdle.
     DistantError,
-    /// Confirm removing the currently-shown URL from the history (X on
-    /// DistantIdle). A = delete + persist, B/Minus = cancel.
+    /// Confirm removing a history URL (from DistantUrlOptions > delete).
+    /// A = delete + persist, B/Minus = cancel.
     DistantHistoryConfirm,
+    /// Per-URL options modal (Plus on a history URL): rename(edit) / delete /
+    /// back. `url_idx` indexes `url_history`; `selection` indexes the options.
+    DistantUrlOptions { url_idx: usize, selection: usize },
     // ── Settings modal (Plus from the library) ─────────────────────────
     /// Global settings. `selection` indexes the 3 entries: 0 = default
     /// controls, 1 = language, 2 = back.
@@ -92,7 +101,48 @@ pub(crate) enum Screen {
     SettingsLanguagePicker { selection: usize },
 }
 
-pub(crate) const OPTIONS_ENTRIES: &[&str] = &["TOUCHES", "RENOMMER", "SUPPRIMER", "RETOUR"];
+pub(crate) const OPTIONS_ENTRIES: &[&str] =
+    &["TOUCHES", "RENOMMER", "JAQUETTE", "SUPPRIMER", "RETOUR"];
+
+/// Top-level navbar tabs (v1.2.0), switched with the L/R shoulder buttons.
+/// Each maps to a "home" screen. The navbar is drawn on every tab-home screen;
+/// sub-screens (OPTIONS modal, DISTANT file list, download, in-game) are NOT
+/// tab-homes, so L/R keeps any local meaning there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tab {
+    Jouer,
+    Importer,
+    Reglages,
+}
+
+impl Tab {
+    pub(crate) const ORDER: [Tab; 3] = [Tab::Jouer, Tab::Importer, Tab::Reglages];
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Tab::Jouer => 0,
+            Tab::Importer => 1,
+            Tab::Reglages => 2,
+        }
+    }
+    fn next(self) -> Tab {
+        Tab::ORDER[(self.index() + 1) % Tab::ORDER.len()]
+    }
+    fn prev(self) -> Tab {
+        Tab::ORDER[(self.index() + Tab::ORDER.len() - 1) % Tab::ORDER.len()]
+    }
+}
+
+/// The tab a screen belongs to — `Some` only for tab-HOME screens (where the
+/// navbar shows and L/R switches tabs). Sub-screens return `None` so L/R keeps
+/// its local meaning (or is ignored) there.
+pub(crate) fn screen_tab(screen: Screen) -> Option<Tab> {
+    match screen {
+        Screen::List { .. } | Screen::Empty => Some(Tab::Jouer),
+        Screen::DistantIdle { .. } => Some(Tab::Importer),
+        Screen::SettingsModal { .. } => Some(Tab::Reglages),
+        _ => None,
+    }
+}
 
 /// The game most recently launched, as `(basename, display_name)`. Set on
 /// pick (JOUER), and deliberately NOT cleared by `reset()` so that:
@@ -262,10 +312,6 @@ pub(crate) struct State {
     /// back on the same row instead of jumping to the top of the list.
     /// Stored as filtered-list indices (matches the screen state).
     pub(crate) download_resume_pos: Option<(usize, usize)>,
-    /// (selection, scroll_offset) of the library list when the user opened
-    /// the Settings modal (Plus), so closing it returns to the same row
-    /// instead of jumping to the top — mirrors the OPTIONS (X) modal.
-    pub(crate) settings_return: (usize, usize),
     /// True once `load_history_from_sd` has established a TRUSTWORTHY view of
     /// the on-disk history: either a successful parse, or a confirmed-absent
     /// file (legit empty first boot). False after a read/parse ERROR — in
@@ -282,6 +328,13 @@ pub(crate) struct State {
     /// all. While set, `Screen::List` selection/scroll index the FILTERED
     /// view (see `local_filtered_indices`).
     local_filter: Option<std::string::String>,
+    /// Flashpoint cover candidates for the current `CoverPicker` (OPTIONS >
+    /// JAQUETTE). Filled by `run_cover_search_flow`, indexed by the picker
+    /// selection, consumed by `run_cover_fetch_flow`.
+    cover_candidates: std::vec::Vec<crate::sources::flashpoint::CatalogEntry>,
+    /// Notice shown on the `CoverPicker` when there's no list to show (covers
+    /// off / no results / fetch error). Empty = render the candidate list.
+    cover_msg: std::string::String,
 }
 
 static LIBRARY: Mutex<State> = Mutex::new(State {
@@ -301,10 +354,11 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     history_idx: None,
     distant_filter: None,
     download_resume_pos: None,
-    settings_return: (0, 0),
     history_loaded: false,
     applet_mode: false,
     local_filter: None,
+    cover_candidates: std::vec::Vec::new(),
+    cover_msg: std::string::String::new(),
 });
 
 /// Where the URL history persists across boots. Format: JSON array of
@@ -314,10 +368,17 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
 const HISTORY_PATH: &str = "sdmc:/switch/FlashNX/distant_history.json";
 const HISTORY_MAX: usize = 20;
 
-/// `visible_rows` on the LOCAL list screen — keep in sync with the slot
-/// count drawn in `draw_library_list`. Picked so 1280×720 fits header +
-/// banner + rows + footer with margin.
+/// Rows of covers visible at once in the JOUER justified gallery (v1.2.0).
+/// Must match the number of rows `draw_library_gallery` fits under the banner.
+pub const GALLERY_ROWS_VISIBLE: usize = 3;
+
+/// Page size for the cursor-restore math in `list_screen_for_abs`/`clamp_scroll`
+/// (the DISTANT list + sub-screen returns still use a simple row model).
 pub const LIST_VISIBLE_ROWS: usize = 8;
+
+/// Columns in the OPTIONS > JAQUETTE thumbnail picker grid. Shared so the
+/// renderer's layout and the input handler's 2D navigation agree.
+pub const COVER_PICKER_COLS: usize = 4;
 
 /// `visible_rows` on the DISTANT (archive.org) files screen. Larger than
 /// LOCAL because typical archive.org dumps run 80-3600+ entries — 10 is
@@ -642,27 +703,49 @@ pub fn input(button: &str) -> bool {
             Ok(g) => g.screen,
             Err(_) => return false,
         };
-        if screen_snap == Screen::DistantIdle {
-            match button {
-                "A" => {
-                    // Swkbd → fetch flow. Pre-fill from history if available.
-                    run_url_fetch_flow();
-                    return true;
+        // ── Navbar (v1.2.0): L/R switch tabs from any tab-home screen. ──
+        // Intercepted before per-screen handling so the home screens don't
+        // need to know about it. Sub-screens (`screen_tab` == None) keep L/R
+        // for their own use (e.g. nothing today; DISTANT paging moved to Up/Down).
+        if matches!(button, "L" | "R") {
+            if let Some(tab) = screen_tab(screen_snap) {
+                let target = if button == "L" { tab.prev() } else { tab.next() };
+                if let Ok(mut s) = LIBRARY.lock() {
+                    s.screen = match target {
+                        Tab::Jouer => {
+                            if s.entries.is_empty() {
+                                Screen::Empty
+                            } else {
+                                Screen::List { selection: 0, scroll_offset: 0 }
+                            }
+                        }
+                        Tab::Importer => Screen::DistantIdle { selection: 0 },
+                        Tab::Reglages => Screen::SettingsModal { selection: 0 },
+                    };
                 }
-                "ZR" => {
-                    // Re-fetch the currently-displayed history URL without
-                    // re-opening the keyboard. Quick "I want this same item
-                    // again" path.
-                    let url = LIBRARY
-                        .lock()
-                        .ok()
-                        .and_then(|s| s.history_idx.and_then(|i| s.url_history.get(i).cloned()));
-                    if let Some(url) = url {
-                        run_fetch_for_url(&url);
-                    }
-                    return true;
+                return true;
+            }
+        }
+        if let Screen::DistantIdle { selection } = screen_snap {
+            if button == "A" {
+                // A on a URL row launches it; A on the trailing "+ add" row
+                // (selection == history len, so get() is None) opens swkbd.
+                let url = LIBRARY
+                    .lock()
+                    .ok()
+                    .and_then(|s| s.url_history.get(selection).cloned());
+                match url {
+                    Some(u) => run_fetch_for_url(&u),
+                    None => run_add_url_flow(),
                 }
-                _ => {}
+                return true;
+            }
+        }
+        // EDIT a URL from its options modal (entry 0) — swkbd, hoisted.
+        if let Screen::DistantUrlOptions { url_idx, selection } = screen_snap {
+            if button == "A" && selection == 0 {
+                run_edit_url_flow(url_idx);
+                return true;
             }
         }
         if let Screen::OptionsModal { game_idx, selection } = screen_snap {
@@ -670,15 +753,27 @@ pub fn input(button: &str) -> bool {
                 run_rename_flow(game_idx);
                 return true;
             }
+            // JAQUETTE = Flashpoint cover search by name. Hoisted: it's a
+            // synchronous HTTPS call that must not run under the LIBRARY lock.
+            if button == "A" && OPTIONS_ENTRIES.get(selection).copied() == Some("JAQUETTE") {
+                run_cover_search_flow(game_idx);
+                return true;
+            }
         }
-        if matches!(screen_snap, Screen::DistantFiles { .. }) && button == "X" {
+        // A on the CoverPicker = download + cache the chosen logo (HTTPS).
+        if let Screen::CoverPicker { game_idx, selection } = screen_snap {
+            if button == "A" {
+                run_cover_fetch_flow(game_idx, selection);
+                return true;
+            }
+        }
+        // SEARCH is on Minus (-) now (was X). Hoisted because swkbd is a
+        // synchronous fullscreen applet that must not run under the LIBRARY lock.
+        if matches!(screen_snap, Screen::DistantFiles { .. }) && button == "Minus" {
             run_distant_search_flow();
             return true;
         }
-        // X on the LOCAL list = search (coherent with DISTANT). Hoisted for
-        // the same reason: swkbd is a synchronous fullscreen applet that must
-        // not run while we hold the LIBRARY lock.
-        if matches!(screen_snap, Screen::List { .. }) && button == "X" {
+        if matches!(screen_snap, Screen::List { .. }) && button == "Minus" {
             run_local_search_flow();
             return true;
         }
@@ -693,7 +788,7 @@ pub fn input(button: &str) -> bool {
         Screen::Empty => {
             match button {
                 "Minus" => { s.screen = Screen::Quit; }
-                "Y" => { s.screen = Screen::DistantIdle; }
+                "Y" => { s.screen = Screen::DistantIdle { selection: 0 }; }
                 _ => {}
             }
             true
@@ -718,8 +813,18 @@ pub fn input(button: &str) -> bool {
             handle_delete_confirm_input(&mut s, button, game_idx);
             true
         }
-        Screen::DistantIdle => {
-            handle_distant_idle_input(&mut s, button);
+        Screen::CoverPicker { game_idx, selection } => {
+            // A is hoisted (HTTPS fetch); here we only move/cancel.
+            handle_cover_picker_input(&mut s, button, game_idx, selection);
+            true
+        }
+        Screen::DistantIdle { selection } => {
+            handle_distant_idle_input(&mut s, button, selection);
+            true
+        }
+        Screen::DistantUrlOptions { url_idx, selection } => {
+            // A on entry 0 (edit) is hoisted; here we handle move / delete / back.
+            handle_distant_url_options_input(&mut s, button, url_idx, selection);
             true
         }
         Screen::DistantFiles { selection, scroll_offset } => {
@@ -738,18 +843,20 @@ pub fn input(button: &str) -> bool {
         Screen::DistantError => {
             if matches!(button, "A" | "B" | "Minus") {
                 s.distant_error.clear();
-                s.screen = Screen::DistantIdle;
+                s.screen = Screen::DistantIdle { selection: 0 };
             }
             true
         }
         Screen::DistantHistoryConfirm => {
             match button {
                 "A" => {
+                    let idx = s.history_idx.unwrap_or(0);
                     delete_current_history(&mut s);
-                    s.screen = Screen::DistantIdle;
+                    s.screen = Screen::DistantIdle { selection: idx.saturating_sub(0).min(s.url_history.len()) };
                 }
                 "B" | "Minus" => {
-                    s.screen = Screen::DistantIdle;
+                    let idx = s.history_idx.unwrap_or(0);
+                    s.screen = Screen::DistantIdle { selection: idx.min(s.url_history.len()) };
                 }
                 _ => {}
             }
@@ -770,6 +877,7 @@ pub fn input(button: &str) -> bool {
 
 /// Settings modal: 0 = default controls, 1 = language, 2 = back.
 fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
+    // 0 = default controls, 1 = language, 2 = quit. (No BACK — leave via L/R.)
     const LAST: usize = 2;
     match button {
         "Up" | "StickLUp" => {
@@ -790,18 +898,15 @@ fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
                     let cur = crate::loc::current().index();
                     s.screen = Screen::SettingsLanguagePicker { selection: cur };
                 }
-                _ => {
-                    let (sel, scroll) = s.settings_return;
-                    s.screen = Screen::List { selection: sel, scroll_offset: scroll };
+                2 => {
+                    // QUIT (Minus is SEARCH now). Exits the .nro.
+                    s.screen = Screen::Quit;
                 }
+                _ => {}
             }
             return;
         }
-        "B" | "Minus" => {
-            let (sel, scroll) = s.settings_return;
-            s.screen = Screen::List { selection: sel, scroll_offset: scroll };
-            return;
-        }
+        // No B "back to JOUER": the navbar (L/R) is the only inter-tab nav.
         _ => {}
     }
     s.screen = Screen::SettingsModal { selection };
@@ -841,17 +946,26 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
     // for actions that touch a specific game (play / options).
     let filtered = local_filtered_indices(&s.entries, &s.local_filter);
     let total = filtered.len();
-    let last = total.saturating_sub(1);
+    // v1.2.0: JOUER is a justified cover GALLERY (variable tiles per row). 2D
+    // nav reads the layout the renderer publishes each frame: Left/Right =
+    // prev/next tile in flow order, Up/Down = nearest tile in the adjacent row.
+    // No wrap-around.
     match button {
+        "Left" | "StickLLeft" => {
+            if total > 0 && selection > 0 { selection -= 1; }
+            scroll = gallery_scroll_for(selection, scroll);
+        }
+        "Right" | "StickLRight" => {
+            if total > 0 && selection + 1 < total { selection += 1; }
+            scroll = gallery_scroll_for(selection, scroll);
+        }
         "Up" | "StickLUp" => {
-            if total == 0 { return; }
-            selection = if selection == 0 { last } else { selection - 1 };
-            scroll = clamp_scroll(scroll, selection, LIST_VISIBLE_ROWS);
+            if let Some(ns) = gallery_neighbor(selection, -1) { selection = ns; }
+            scroll = gallery_scroll_for(selection, scroll);
         }
         "Down" | "StickLDown" => {
-            if total == 0 { return; }
-            selection = if selection >= last { 0 } else { selection + 1 };
-            scroll = clamp_scroll(scroll, selection, LIST_VISIBLE_ROWS);
+            if let Some(ns) = gallery_neighbor(selection, 1) { selection = ns; }
+            scroll = gallery_scroll_for(selection, scroll);
         }
         "A" => {
             let Some(&abs) = filtered.get(selection) else { return; };
@@ -875,28 +989,18 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
             }
             return;
         }
-        // X = search (hoisted at the top of `input()`). ZL = per-game OPTIONS
-        // (moved off X so search is the same button as the DISTANT list).
-        "ZL" => {
+        // X = search (hoisted at the top of `input()`). `+` = per-game OPTIONS
+        // (moved off ZL); the Settings modal `+` used to open is now the
+        // REGLAGES navbar tab (reached with L/R).
+        "Plus" => {
             if let Some(&abs) = filtered.get(selection) {
                 s.screen = Screen::OptionsModal { game_idx: abs, selection: 0 };
             }
             return;
         }
         "Y" => {
-            // Switch to DISTANT (archive.org import) mode.
-            s.screen = Screen::DistantIdle;
-            return;
-        }
-        "Plus" => {
-            // Open the global Settings modal (controls + language). Remember
-            // the list position so closing returns to the same row.
-            s.settings_return = (selection, scroll);
-            s.screen = Screen::SettingsModal { selection: 0 };
-            return;
-        }
-        "Minus" => {
-            s.screen = Screen::Quit;
+            // Quick shortcut to the IMPORT tab (also reachable via L/R).
+            s.screen = Screen::DistantIdle { selection: 0 };
             return;
         }
         _ => {}
@@ -906,53 +1010,72 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
 
 // ── Phase 3.7: DISTANT mode input handlers ────────────────────────────
 
-fn handle_distant_idle_input(s: &mut State, button: &str) {
-    // Note: A / ZR are handled at the top of `input()` (hoisted out
-    // because they call into swkbd + HTTPS, which we can't run while
-    // holding the LIBRARY lock).
+fn handle_distant_idle_input(s: &mut State, button: &str, mut selection: usize) {
+    // A (launch / add) is hoisted (swkbd + HTTPS). Here we just navigate the
+    // list and open per-URL options. The add-row is index `n` (== history len).
+    let n = s.url_history.len();
     match button {
-        "L" => {
-            // Older entry in history (idx -= 1, wrap).
-            if !s.url_history.is_empty() {
-                let len = s.url_history.len();
-                let cur = s.history_idx.unwrap_or(len - 1);
-                let new_idx = if cur == 0 { len - 1 } else { cur - 1 };
-                s.history_idx = Some(new_idx);
+        "Up" | "StickLUp" => {
+            if selection > 0 {
+                selection -= 1;
             }
         }
-        "R" => {
-            // Newer entry in history (idx += 1, wrap).
-            if !s.url_history.is_empty() {
-                let len = s.url_history.len();
-                let cur = s.history_idx.unwrap_or(0);
-                let new_idx = if cur + 1 >= len { 0 } else { cur + 1 };
-                s.history_idx = Some(new_idx);
+        "Down" | "StickLDown" => {
+            if selection < n {
+                selection += 1;
             }
         }
-        "ZL" => {
-            // Delete the currently-shown history URL (with confirmation).
-            // Moved off X (now reserved for search everywhere); ZL is the
-            // "manage selected item" button across the library. No-op when
-            // the history is empty (nothing to delete).
-            if !s.url_history.is_empty() && s.history_idx.is_some() {
+        "Plus" => {
+            // Options on a real URL row (not the trailing add-row).
+            if selection < n {
+                s.screen = Screen::DistantUrlOptions { url_idx: selection, selection: 0 };
+                return;
+            }
+        }
+        // No B "back to JOUER": the navbar (L/R) is the only inter-tab nav.
+        _ => {}
+    }
+    s.screen = Screen::DistantIdle { selection };
+}
+
+/// DistantUrlOptions modal nav (Up/Down move, B back). A on entry 0 (edit) is
+/// hoisted; entry 1 = delete (confirm), entry 2 = back.
+fn handle_distant_url_options_input(
+    s: &mut State,
+    button: &str,
+    url_idx: usize,
+    mut selection: usize,
+) {
+    const LAST: usize = 2; // 0 = edit, 1 = delete, 2 = back
+    let back = |s: &mut State| {
+        let n = s.url_history.len();
+        s.screen = Screen::DistantIdle { selection: url_idx.min(n) };
+    };
+    match button {
+        "Up" | "StickLUp" => {
+            selection = if selection == 0 { LAST } else { selection - 1 };
+        }
+        "Down" | "StickLDown" => {
+            selection = if selection >= LAST { 0 } else { selection + 1 };
+        }
+        "A" => {
+            if selection == 1 {
+                // Delete -> reuse the existing confirm screen via history_idx.
+                s.history_idx = Some(url_idx);
                 s.screen = Screen::DistantHistoryConfirm;
-            }
-        }
-        "Y" | "B" => {
-            // Fresh local view — drop any leftover local filter so coming
-            // back from DISTANT never hides games unexpectedly.
-            s.local_filter = None;
-            s.screen = if s.entries.is_empty() {
-                Screen::Empty
             } else {
-                Screen::List { selection: 0, scroll_offset: 0 }
-            };
+                // 0 (edit) is hoisted; 2 = back.
+                back(s);
+            }
+            return;
         }
-        "Minus" => {
-            s.screen = Screen::Quit;
+        "B" => {
+            back(s);
+            return;
         }
         _ => {}
     }
+    s.screen = Screen::DistantUrlOptions { url_idx, selection };
 }
 
 /// Remove the currently-displayed history URL and persist the trimmed list.
@@ -977,27 +1100,90 @@ fn delete_current_history(s: &mut State) {
     }
 }
 
-/// Drive the full "user typed a URL → fetch metadata → show files" flow.
-/// Called from `input()` only — never holds the LIBRARY lock during the
-/// swkbd or HTTPS calls (both are seconds-long blocking). The swkbd
-/// pre-fills with the currently-displayed history URL so editing a
-/// neighbouring item is one-character-change away.
-fn run_url_fetch_flow() {
-    // Snapshot current history URL to prefill swkbd. Drop the lock
-    // before calling out to libnx.
-    let prefill = LIBRARY
-        .lock()
-        .ok()
-        .and_then(|s| s.history_idx.and_then(|i| s.url_history.get(i).cloned()));
-    let Some(url) = net::prompt_url_with_initial(prefill.as_deref()) else {
+/// IMPORTER "+ add" row: prompt for a NEW url (no prefill), then fetch. Called
+/// from `input()` only (swkbd + HTTPS must run without the LIBRARY lock).
+fn run_add_url_flow() {
+    let Some(url) = net::prompt_url_with_initial(None) else {
         return; // user cancelled
     };
     run_fetch_for_url(&url);
 }
 
+/// DistantUrlOptions > edit: swkbd prefilled with the existing URL. Commit
+/// replaces it (empty input deletes it), persists, returns to the list. Called
+/// from `input()` only.
+fn run_edit_url_flow(url_idx: usize) {
+    let prefill = LIBRARY
+        .lock()
+        .ok()
+        .and_then(|s| s.url_history.get(url_idx).cloned());
+    let Some(prefill) = prefill else { return };
+    let Some(new_url) = net::prompt_url_with_initial(Some(&prefill)) else {
+        return; // cancelled — leave history untouched
+    };
+    let new_url = new_url.trim().to_string();
+    if let Ok(mut s) = LIBRARY.lock() {
+        if url_idx < s.url_history.len() {
+            if new_url.is_empty() {
+                s.url_history.remove(url_idx);
+            } else {
+                s.url_history[url_idx] = new_url;
+            }
+        }
+        if s.history_loaded {
+            let snapshot = s.url_history.clone();
+            save_history_to_sd(&snapshot);
+        }
+        let n = s.url_history.len();
+        s.screen = Screen::DistantIdle { selection: url_idx.min(n) };
+    }
+}
+
 /// Fetch the given URL and transition state. Used both by the post-swkbd
 /// path (`run_url_fetch_flow`) and by the ZR re-fetch-without-swkbd path.
+/// v1.2.0: routes by source shape so the IMPORTER is "globalisable" — an
+/// archive.org URL/item-id goes through the metadata file list, a direct
+/// `.swf` URL downloads straight to SD.
 fn run_fetch_for_url(url: &str) {
+    match crate::sources::classify(url) {
+        crate::sources::SourceKind::DirectUrl => run_direct_download(url),
+        crate::sources::SourceKind::ArchiveOrg => run_archive_fetch(url),
+    }
+}
+
+/// Direct `.swf` URL import: download straight to SD, no metadata list. The
+/// filename is derived from the URL's last path segment (query/fragment
+/// stripped); a re-download just overwrites + refreshes the entry.
+fn run_direct_download(url: &str) {
+    let tail = url.rsplit('/').next().unwrap_or("");
+    let stem = tail.split(['?', '#']).next().unwrap_or(tail);
+    let base = if stem.is_empty() { "download.swf" } else { stem };
+    let cleaned: std::string::String = base
+        .chars()
+        .map(|c| if matches!(c, '/' | '\\') { '_' } else { c })
+        .collect();
+    let safe_name = if cleaned.to_ascii_lowercase().ends_with(".swf") {
+        cleaned
+    } else {
+        std::format!("{}.swf", cleaned)
+    };
+    let out_path = std::format!("{}/{}", USER_SD_ROOTS[0], safe_name);
+    match net::start_download(url, &out_path) {
+        Ok(()) => {
+            push_history(url);
+            if let Ok(mut s) = LIBRARY.lock() {
+                s.download_file_name = safe_name;
+                s.download_out_path = out_path;
+                s.download_resume_pos = None;
+                s.screen = Screen::DistantDownloading;
+            }
+        }
+        Err(e) => set_distant_error(&e),
+    }
+}
+
+/// archive.org item import: fetch the metadata, show the `.swf` file list.
+fn run_archive_fetch(url: &str) {
     let Some(item_id) = net::extract_item_id(url) else {
         set_distant_error(crate::loc::s().err_url_invalid);
         return;
@@ -1104,7 +1290,7 @@ fn handle_distant_files_input(
         "B" | "Y" => {
             s.remote_files.clear();
             s.distant_filter = None;
-            s.screen = Screen::DistantIdle;
+            s.screen = Screen::DistantIdle { selection: 0 };
             return;
         }
         // X = handled at the top of `input()` (hoisted because swkbd
@@ -1169,7 +1355,11 @@ pub(crate) fn local_filtered_indices(
 fn list_screen_for_abs(s: &State, abs: usize) -> Screen {
     let filtered = local_filtered_indices(&s.entries, &s.local_filter);
     let pos = filtered.iter().position(|&i| i == abs).unwrap_or(0);
-    let scroll = clamp_scroll(0, pos, LIST_VISIBLE_ROWS);
+    // Gallery scroll is ROW-based, not a linear item index — use the published
+    // layout so returning from OPTIONS lands the game's ROW on screen. (Bug
+    // fix: clamp_scroll's linear value was read as a row index → games on row
+    // 2/3 came back scrolled past the end, showing a blank screen.)
+    let scroll = gallery_scroll_for(pos, 0);
     Screen::List { selection: pos, scroll_offset: scroll }
 }
 
@@ -1210,6 +1400,11 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                     // because it calls into swkbd). No-op here.
                     return;
                 }
+                "JAQUETTE" => {
+                    // Handled at the top of `input()` (hoisted — Flashpoint
+                    // search is a synchronous HTTPS call). No-op here.
+                    return;
+                }
                 "SUPPRIMER" => {
                     s.screen = Screen::DeleteConfirm { game_idx };
                     return;
@@ -1228,6 +1423,124 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
         _ => {}
     }
     s.screen = Screen::OptionsModal { game_idx, selection };
+}
+
+/// Build a Flashpoint search query from a game's display name: drop a trailing
+/// `.swf`, turn `_`/`-` into spaces so "Super_Mario_63" matches "Super Mario 63".
+fn cover_query_from_name(name: &str) -> std::string::String {
+    let base = if name.len() > 4 && name[name.len() - 4..].eq_ignore_ascii_case(".swf") {
+        &name[..name.len() - 4]
+    } else {
+        name
+    };
+    base.replace(['_', '-'], " ").trim().to_string()
+}
+
+/// OPTIONS > JAQUETTE: search Flashpoint by the game's name and open the cover
+/// picker. Gated on the online-covers toggle (OFF → notice). Called from
+/// `input()` only — runs a synchronous HTTPS search WITHOUT the LIBRARY lock.
+fn run_cover_search_flow(game_idx: usize) {
+    let name = match LIBRARY.lock() {
+        Ok(g) => match g.entries.get(game_idx) {
+            Some(e) => e.display_name.clone(),
+            None => return,
+        },
+        Err(_) => return,
+    };
+    let query = cover_query_from_name(&name);
+    let (cands, msg) = match crate::sources::flashpoint::search(&query) {
+        Ok(list) if list.is_empty() => {
+            (std::vec::Vec::new(), crate::loc::s().cover_none.to_string())
+        }
+        Ok(list) => (list, std::string::String::new()),
+        Err(e) => (std::vec::Vec::new(), e),
+    };
+    log(&std::format!(
+        "covers: search \"{}\" -> {} candidate(s){}\n",
+        query,
+        cands.len(),
+        if msg.is_empty() { std::string::String::new() } else { std::format!(" [{}]", msg) },
+    ));
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.cover_candidates = cands;
+        s.cover_msg = msg;
+        s.screen = Screen::CoverPicker { game_idx, selection: 0 };
+    }
+}
+
+/// CoverPicker > A: download the chosen candidate's logo and cache it as the
+/// game's cover. Called from `input()` only — synchronous HTTPS download
+/// WITHOUT the LIBRARY lock. On success, invalidates the backend cover-texture
+/// cache so the grid shows the new art, and returns to the OPTIONS modal.
+fn run_cover_fetch_flow(game_idx: usize, selection: usize) {
+    let picked = match LIBRARY.lock() {
+        Ok(g) => {
+            let cand = g.cover_candidates.get(selection).cloned();
+            let base = g.entries.get(game_idx).map(|e| e.basename.clone());
+            match (cand, base) {
+                (Some(c), Some(b)) => Some((c, b)),
+                _ => None,
+            }
+        }
+        Err(_) => return,
+    };
+    let Some((cand, basename)) = picked else { return };
+    log(&std::format!("covers: fetch \"{}\" <- {}\n", basename, cand.cover_url));
+    match crate::covers::fetch_and_cache(&basename, &cand) {
+        Ok(path) => {
+            log(&std::format!("covers: cached -> {}\n", path));
+            crate::backend::render::invalidate_cover(&basename);
+            if let Ok(mut s) = LIBRARY.lock() {
+                s.cover_candidates.clear();
+                s.cover_msg.clear();
+                // Back to OPTIONS on the JAQUETTE row (index 2).
+                s.screen = Screen::OptionsModal { game_idx, selection: 2 };
+            }
+        }
+        Err(e) => {
+            log(&std::format!("covers: fetch FAILED: {}\n", e));
+            if let Ok(mut s) = LIBRARY.lock() {
+                s.cover_msg = e;
+            }
+        }
+    }
+}
+
+/// CoverPicker navigation (Up/Down move, B/Minus cancel). A is hoisted in
+/// `input()` (HTTPS fetch).
+fn handle_cover_picker_input(s: &mut State, button: &str, game_idx: usize, mut selection: usize) {
+    let total = s.cover_candidates.len();
+    let cols = COVER_PICKER_COLS;
+    match button {
+        "Left" | "StickLLeft" => {
+            if total > 0 && selection > 0 {
+                selection -= 1;
+            }
+        }
+        "Right" | "StickLRight" => {
+            if total > 0 && selection + 1 < total {
+                selection += 1;
+            }
+        }
+        "Up" | "StickLUp" => {
+            if selection >= cols {
+                selection -= cols;
+            }
+        }
+        "Down" | "StickLDown" => {
+            if selection + cols < total {
+                selection += cols;
+            }
+        }
+        "B" | "Minus" => {
+            s.cover_candidates.clear();
+            s.cover_msg.clear();
+            s.screen = Screen::OptionsModal { game_idx, selection: 2 };
+            return;
+        }
+        _ => {}
+    }
+    s.screen = Screen::CoverPicker { game_idx, selection };
 }
 
 /// RENOMMER flow: open swkbd with the current display_name pre-filled,
@@ -1366,6 +1679,49 @@ fn clamp_scroll(mut scroll: usize, selection: usize, visible_rows: usize) -> usi
     scroll
 }
 
+/// Move selection to the spatially-nearest tile in the row `dir` (-1 up /
+/// +1 down) of the JOUER gallery, using the layout the renderer published via
+/// `gallery_layout_read`. `None` if there's no such row (or no layout yet).
+fn gallery_neighbor(selection: usize, dir: i32) -> Option<usize> {
+    let (cells, rows) = crate::backend::render::gallery_layout_read();
+    if selection >= cells.len() || rows == 0 {
+        return None;
+    }
+    let cur = cells[selection];
+    let target_row = cur.row as i32 + dir;
+    if target_row < 0 || target_row as u32 >= rows {
+        return None;
+    }
+    let target_row = target_row as u32;
+    let mut best: Option<(usize, f32)> = None;
+    for (i, c) in cells.iter().enumerate() {
+        if c.row == target_row {
+            let d = (c.cx - cur.cx).abs();
+            if best.map_or(true, |(_, bd)| d < bd) {
+                best = Some((i, d));
+            }
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// First-visible-row scroll so `selection`'s row stays on screen in the JOUER
+/// gallery. Reads the published layout for the selection's row.
+fn gallery_scroll_for(selection: usize, scroll: usize) -> usize {
+    let (cells, _rows) = crate::backend::render::gallery_layout_read();
+    if selection >= cells.len() {
+        return scroll;
+    }
+    let sel_row = cells[selection].row as usize;
+    if sel_row < scroll {
+        sel_row
+    } else if sel_row >= scroll + GALLERY_ROWS_VISIBLE {
+        sel_row + 1 - GALLERY_ROWS_VISIBLE
+    } else {
+        scroll
+    }
+}
+
 /// Render the current screen using the backend. C++ calls this each frame
 /// while the library is active, AFTER `glClear` (we own the entire
 /// framebuffer — no Ruffle behind us at this stage).
@@ -1411,11 +1767,10 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             if let Some((snap, filter, total_unfiltered)) = snapshot {
                 let now = unsafe { ruffle_tick_now() };
                 let phase_ticks = now.saturating_sub(anim_origin);
-                backend.draw_library_list(
+                backend.draw_library_gallery(
                     selection,
                     scroll_offset,
                     &snap.entries,
-                    LIST_VISIBLE_ROWS,
                     snap.banner_tex,
                     snap.banner_w,
                     snap.banner_h,
@@ -1435,7 +1790,9 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 // in input handling); display uses localized labels in the
                 // same order (TOUCHES / RENOMMER / SUPPRIMER / RETOUR).
                 let lc = crate::loc::s();
-                let labels = [lc.opt_keys, lc.opt_rename, lc.opt_delete, lc.opt_back];
+                // Order must match OPTIONS_ENTRIES (TOUCHES/RENOMMER/JAQUETTE/
+                // SUPPRIMER/RETOUR).
+                let labels = [lc.opt_keys, lc.opt_rename, lc.opt_cover, lc.opt_delete, lc.opt_back];
                 backend.draw_library_options(
                     &entry.display_name,
                     selection,
@@ -1450,9 +1807,10 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             menu::draw(backend);
         }
         Screen::SettingsModal { selection } => {
-            backend.draw_library_dim_backdrop();
+            // REGLAGES is a full navbar TAB now (not a popup): no dim backdrop,
+            // no BACK entry — leave via L/R.
             let lc = crate::loc::s();
-            let entries = [lc.set_keys, lc.set_language, lc.set_back];
+            let entries = [lc.set_keys, lc.set_language, lc.set_quit];
             backend.draw_library_settings(selection, &entries);
         }
         Screen::SettingsKeymapEditor => {
@@ -1476,20 +1834,59 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 backend.draw_library_delete_confirm(&display_name, &basename);
             }
         }
+        Screen::CoverPicker { game_idx, selection } => {
+            // Snapshot candidate labels + notice + game name, drop the lock
+            // before the GL draw.
+            let snap = LIBRARY.lock().ok().map(|s| {
+                let titles: std::vec::Vec<std::string::String> = s
+                    .cover_candidates
+                    .iter()
+                    .map(|c| {
+                        if c.developer.is_empty() {
+                            c.title.clone()
+                        } else {
+                            std::format!("{} - {}", c.title, c.developer)
+                        }
+                    })
+                    .collect();
+                let urls: std::vec::Vec<std::string::String> =
+                    s.cover_candidates.iter().map(|c| c.cover_url.clone()).collect();
+                let name = s
+                    .entries
+                    .get(game_idx)
+                    .map(|e| e.display_name.clone())
+                    .unwrap_or_default();
+                (titles, urls, s.cover_msg.clone(), name)
+            });
+            if let Some((titles, urls, msg, name)) = snap {
+                let title_refs: std::vec::Vec<&str> = titles.iter().map(|x| x.as_str()).collect();
+                let url_refs: std::vec::Vec<&str> = urls.iter().map(|x| x.as_str()).collect();
+                backend.draw_library_dim_backdrop();
+                backend.draw_library_cover_picker(&name, selection, &title_refs, &url_refs, &msg);
+            }
+        }
         // ── Phase 3.7 DISTANT mode ─────────────────────────────────────
-        Screen::DistantIdle => {
-            // Snapshot history + current pointer so render doesn't hold
-            // the lock across GL FFI.
-            let (hist_url, hist_pos) = LIBRARY
+        Screen::DistantIdle { selection } => {
+            // Snapshot the URL history; render the list (+ trailing add-row).
+            let urls = LIBRARY
                 .lock()
                 .ok()
-                .map(|s| {
-                    let url = s.history_idx.and_then(|i| s.url_history.get(i).cloned());
-                    let pos = s.history_idx.map(|i| (i + 1, s.url_history.len()));
-                    (url, pos)
-                })
-                .unwrap_or((None, None));
-            backend.draw_library_distant_idle(hist_url.as_deref(), hist_pos);
+                .map(|s| s.url_history.clone())
+                .unwrap_or_default();
+            let refs: std::vec::Vec<&str> = urls.iter().map(|u| u.as_str()).collect();
+            backend.draw_library_distant_list(selection, &refs, crate::loc::s().dist_add);
+        }
+        Screen::DistantUrlOptions { url_idx, selection } => {
+            let url = LIBRARY
+                .lock()
+                .ok()
+                .and_then(|s| s.url_history.get(url_idx).cloned())
+                .unwrap_or_default();
+            // Reuse the per-game OPTIONS modal style for the URL options.
+            let lc = crate::loc::s();
+            let labels = [lc.opt_rename, lc.opt_delete, lc.opt_back];
+            backend.draw_library_dim_backdrop();
+            backend.draw_library_options(&url, selection, &labels);
         }
         Screen::DistantFiles { selection, scroll_offset } => {
             // Union of session-downloaded basenames (filled by
@@ -1559,6 +1956,14 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             backend.draw_library_history_delete_confirm(&url);
         }
     }
+
+    // ── Navbar (v1.2.0) ──────────────────────────────────────────────────
+    // Drawn last so the tab strip sits on top of every tab-home screen. L/R
+    // switches tabs (see `input()`); sub-screens (`screen_tab` == None) show
+    // no navbar.
+    if let Some(tab) = screen_tab(screen) {
+        backend.draw_navbar(tab.index());
+    }
 }
 
 /// Called from `render()` after `tick_download` returns Ok(true). Adds
@@ -1592,13 +1997,18 @@ fn on_download_finished() {
         // the cursor lands on the same row the user just downloaded
         // (handy when stepping through a long list).
         let (sel, scroll) = s.download_resume_pos.take().unwrap_or((0, 0));
-        // Defensive clamp: if filter changed mid-download (it can't via
-        // input lock, but if upstream code ever frees the lock) keep the
-        // selection in range.
-        let filtered_len = filtered_indices(&s.remote_files, &s.distant_filter).len();
-        let sel = sel.min(filtered_len.saturating_sub(1));
-        let scroll = clamp_scroll(scroll, sel, DISTANT_VISIBLE_ROWS);
-        s.screen = Screen::DistantFiles { selection: sel, scroll_offset: scroll };
+        if s.remote_files.is_empty() {
+            // Direct `.swf` import (no metadata list) — back to IMPORTER home.
+            s.screen = Screen::DistantIdle { selection: 0 };
+        } else {
+            // Defensive clamp: if filter changed mid-download (it can't via
+            // input lock, but if upstream code ever frees the lock) keep the
+            // selection in range.
+            let filtered_len = filtered_indices(&s.remote_files, &s.distant_filter).len();
+            let sel = sel.min(filtered_len.saturating_sub(1));
+            let scroll = clamp_scroll(scroll, sel, DISTANT_VISIBLE_ROWS);
+            s.screen = Screen::DistantFiles { selection: sel, scroll_offset: scroll };
+        }
     }
 }
 
