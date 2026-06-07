@@ -53,9 +53,15 @@ pub fn search(
         "{}?smartSearch={}&filter=true&fields=id,title,developer,platform,library",
         SEARCH_BASE, q
     );
+    // Log the exact URL hit: distinguishes a mangled/encoded query from a real
+    // no-match, the single most useful clue when a cover search comes back empty.
+    net::log(&std::format!("flashpoint: GET {}\n", url));
     // 1 MB cap is generous for a name search (the catalog browser is out of
     // scope; we only want the top matches).
     let bytes = net::http_get(&url, 1024 * 1024)?;
+    // Response size tells a successful-but-empty result (e.g. "[]") apart from a
+    // truncated/garbage body before we even try to parse it.
+    net::log(&std::format!("flashpoint: {} bytes received\n", bytes.len()));
     let json: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|e| crate::loc::err_json(&e.to_string()))?;
     // db-api returns a top-level JSON array of game objects.

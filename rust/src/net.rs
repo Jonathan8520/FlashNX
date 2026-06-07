@@ -41,7 +41,7 @@ fn cstr(s: &str) -> std::vec::Vec<u8> {
     v
 }
 
-fn log(s: &str) {
+pub(crate) fn log(s: &str) {
     let mut bytes = s.as_bytes().to_vec();
     bytes.push(0);
     unsafe { ruffle_log_cstr(bytes.as_ptr() as *const _) };

@@ -11,7 +11,7 @@ Library redesign: a tabbed navbar, a cover-art gallery, and a list-based importe
 - **Tabbed navigation**: a top navbar switched with **L / R** between **Play** (your games), **Import**, and **Settings**.
 - **Cover gallery**: the library is now a gallery of cover art (justified rows, each cover at its natural size) instead of a text list. Games with no cover get a generated tile (color + initials).
 - **Your own covers**: drop a `<game>.png` or `.jpg` next to the `.swf` and it shows up as the cover.
-- **Flashpoint covers**: a game's options has a **Cover** action that searches the Flashpoint Archive by name and shows the candidates as thumbnails to pick from.
+- **Flashpoint covers**: a game's options has a **Cover** action that searches the Flashpoint Archive by name and shows the candidates as thumbnails to pick from. The search name is cleaned up automatically (download-id suffixes such as `game-15938d603` are dropped), and **−** lets you retype the title when the filename does not match the catalog (e.g. `catmario` → `cat mario`).
 - **Import as a list**: the Import tab is now a list of your saved URLs. Press **A** to launch one, use the **+ Add a URL** row to enter a new one, and **+** on a URL to edit or delete it. It accepts archive.org items and direct `.swf` URLs.
 
 ### Changes

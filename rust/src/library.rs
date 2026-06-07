@@ -345,6 +345,9 @@ pub(crate) struct State {
     /// Notice shown on the `CoverPicker` when there's no list to show (covers
     /// off / no results / fetch error). Empty = render the candidate list.
     cover_msg: std::string::String,
+    /// Last search term used for the `CoverPicker`, so Minus (refine) can
+    /// pre-fill the keyboard with it instead of the raw filename-derived query.
+    cover_query: std::string::String,
     /// URL of the async archive.org fetch in flight (`Screen::DistantLoading`),
     /// pushed to history once the fetch succeeds.
     pending_fetch_url: std::string::String,
@@ -372,6 +375,7 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     local_filter: None,
     cover_candidates: std::vec::Vec::new(),
     cover_msg: std::string::String::new(),
+    cover_query: std::string::String::new(),
     pending_fetch_url: std::string::String::new(),
 });
 
@@ -825,9 +829,14 @@ pub fn input(button: &str) -> bool {
             }
         }
         // A on the CoverPicker = download + cache the chosen logo (HTTPS).
+        // Minus = refine: re-type the title and re-search (swkbd + HTTPS).
         if let Screen::CoverPicker { game_idx, selection } = screen_snap {
             if button == "A" {
                 run_cover_fetch_flow(game_idx, selection);
+                return true;
+            }
+            if button == "Minus" {
+                run_cover_research_flow(game_idx);
                 return true;
             }
         }
@@ -1546,7 +1555,24 @@ fn cover_query_from_name(name: &str) -> std::string::String {
     } else {
         name
     };
-    base.replace(['_', '-'], " ").trim().to_string()
+    let spaced = base.replace(['_', '-'], " ");
+    let mut toks: std::vec::Vec<&str> = spaced.split_whitespace().collect();
+    // Drop a single trailing download-id suffix (e.g. `pursuit-of-hat-2-15938d603`,
+    // `haunt-the-house-719579f9`): itch/Flashpoint mirrors append these and they
+    // make smartSearch return nothing. Keep at least one real word.
+    if toks.len() > 1 && looks_like_download_hash(toks[toks.len() - 1]) {
+        toks.pop();
+    }
+    toks.join(" ")
+}
+
+/// True for a trailing download-id token like `15938d603` / `719579f9`: hex,
+/// at least 6 chars, AND containing a digit (so real hex-letter words such as
+/// "facade"/"decade" are left alone). Strips only what is clearly an id suffix.
+fn looks_like_download_hash(tok: &str) -> bool {
+    tok.len() >= 6
+        && tok.bytes().all(|b| b.is_ascii_hexdigit())
+        && tok.bytes().any(|b| b.is_ascii_digit())
 }
 
 /// OPTIONS > JAQUETTE: search Flashpoint by the game's name and open the cover
@@ -1561,6 +1587,37 @@ fn run_cover_search_flow(game_idx: usize) {
         Err(_) => return,
     };
     let query = cover_query_from_name(&name);
+    run_cover_search_with(game_idx, query);
+}
+
+/// CoverPicker > Minus: re-open the keyboard pre-filled with the last query so
+/// the user can fix a name the filename couldn't match (e.g. `catmario` ->
+/// `cat mario`), then re-run the search. Called from `input()` only — swkbd +
+/// HTTPS must run WITHOUT the LIBRARY lock.
+fn run_cover_research_flow(game_idx: usize) {
+    let current = match LIBRARY.lock() {
+        Ok(g) if !g.cover_query.is_empty() => g.cover_query.clone(),
+        Ok(g) => g
+            .entries
+            .get(game_idx)
+            .map(|e| cover_query_from_name(&e.display_name))
+            .unwrap_or_default(),
+        Err(_) => return,
+    };
+    let Some(typed) = net::prompt_search(&current) else {
+        return; // cancelled — keep the picker as it was
+    };
+    let query = typed.trim().to_string();
+    if query.is_empty() {
+        return; // empty submit = no-op, don't wipe the current list
+    }
+    run_cover_search_with(game_idx, query);
+}
+
+/// Shared Flashpoint cover search: runs the synchronous HTTPS search for
+/// `query`, remembers it (for Minus/refine pre-fill), and opens or refreshes
+/// the CoverPicker. Called from `input()` only — no LIBRARY lock during HTTPS.
+fn run_cover_search_with(game_idx: usize, query: std::string::String) {
     let (cands, msg) = match crate::sources::flashpoint::search(&query) {
         Ok(list) if list.is_empty() => {
             (std::vec::Vec::new(), crate::loc::s().cover_none.to_string())
@@ -1577,6 +1634,7 @@ fn run_cover_search_flow(game_idx: usize) {
     if let Ok(mut s) = LIBRARY.lock() {
         s.cover_candidates = cands;
         s.cover_msg = msg;
+        s.cover_query = query;
         s.screen = Screen::CoverPicker { game_idx, selection: 0 };
     }
 }
@@ -1606,6 +1664,7 @@ fn run_cover_fetch_flow(game_idx: usize, selection: usize) {
             if let Ok(mut s) = LIBRARY.lock() {
                 s.cover_candidates.clear();
                 s.cover_msg.clear();
+                s.cover_query.clear();
                 // Back to OPTIONS on the JAQUETTE row (index 2).
                 s.screen = Screen::OptionsModal { game_idx, selection: 2 };
             }
@@ -1619,8 +1678,8 @@ fn run_cover_fetch_flow(game_idx: usize, selection: usize) {
     }
 }
 
-/// CoverPicker navigation (Up/Down move, B/Minus cancel). A is hoisted in
-/// `input()` (HTTPS fetch).
+/// CoverPicker navigation (Up/Down move, B cancel). A (fetch) and Minus
+/// (refine search) are hoisted in `input()` (HTTPS / swkbd).
 fn handle_cover_picker_input(s: &mut State, button: &str, game_idx: usize, mut selection: usize) {
     let total = s.cover_candidates.len();
     let cols = COVER_PICKER_COLS;
@@ -1645,9 +1704,10 @@ fn handle_cover_picker_input(s: &mut State, button: &str, game_idx: usize, mut s
                 selection += cols;
             }
         }
-        "B" | "Minus" => {
+        "B" => {
             s.cover_candidates.clear();
             s.cover_msg.clear();
+            s.cover_query.clear();
             s.screen = Screen::OptionsModal { game_idx, selection: 2 };
             return;
         }
