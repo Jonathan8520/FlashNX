@@ -72,6 +72,9 @@ FlashNX is only a **Switch integration layer** on top of remarkable projects —
 - **[devkitPro](https://devkitpro.org/) / libnx** — *ISC* — Switch toolchain + Horizon API (audio **audren**, input **hid**, threads, exception handler).
 - **[switch-mesa](https://github.com/devkitPro/pacman-packages)** — *MIT* — OpenGL/GLES via Nouveau, the graphics backend.
 
+**Game & cover data**
+- **[Flashpoint Archive](https://flashpointarchive.org/)**: the Flash game preservation project. FlashNX uses its public APIs (search, logos, GameZIPs) so you can find cover art and download the games you choose. All preserved games stay the property of their original creators, and FlashNX only fetches what you explicitly request.
+
 **Network (archive.org import over HTTPS)**
 - [libcurl](https://curl.se/) · [Mbed-TLS](https://github.com/Mbed-TLS/mbedtls) · [zlib](https://zlib.net/) · [Mozilla](https://curl.se/docs/caextract.html) CA certificate bundle.
 
