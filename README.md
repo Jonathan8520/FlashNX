@@ -19,10 +19,10 @@
 
 ## Overview
 
-| Library | Remote import | In game |
-|:---:|:---:|:---:|
-| ![FlashNX library](assets/screenshots/library.png) | ![archive.org import](assets/screenshots/remote-import.png) | ![Super Mario 63 + pause menu](assets/screenshots/in-game.png) |
-| Cover gallery, L/R tabs, AS3 badge | URL list: archive.org or a direct `.swf` | Game + pause menu / key editor |
+| Play | Flashpoint | In game | Settings |
+|:---:|:---:|:---:|:---:|
+| ![FlashNX library](assets/screenshots/library.png) | ![Flashpoint download](assets/screenshots/flashpoint.png) | ![In game + pause menu](assets/screenshots/in-game.png) | ![Settings](assets/screenshots/settings.png) |
+| Cover gallery, L/R tabs | Download games from Flashpoint | Game + pause menu / key editor | Language, controls, bug report |
 
 ## Installation
 

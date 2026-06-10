@@ -5387,6 +5387,29 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
+    /// Small version label in the bottom-right corner of the launcher UI (drawn
+    /// on the tab-home screens, after the navbar). The version string's single
+    /// source of truth is `crate::bugreport::APP_VERSION`.
+    pub fn draw_version_badge(&mut self) {
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        let label = std::format!("V{}", crate::bugreport::APP_VERSION);
+        let scale = 1.5;
+        let w = self.measure_text(&label, scale);
+        self.draw_text(
+            vw - w - 14.0,
+            vh - 22.0,
+            scale,
+            &label,
+            swf::Color::from_rgb(0x66788A, 255),
+        );
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
     /// Resolve + cache a game's cover texture by basename. Decodes/uploads on
     /// first use; returns `Default` when there's no cover image (caller draws
     /// the generated tile).

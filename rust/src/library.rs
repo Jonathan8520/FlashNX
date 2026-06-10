@@ -3279,6 +3279,8 @@ pub fn render(backend: &mut SwitchRenderBackend) {
     backend.clear_ui_transform();
     if let Some(tab) = screen_tab(screen) {
         backend.draw_navbar(tab.index());
+        // Version label, bottom-right of the home screens.
+        backend.draw_version_badge();
     }
 }
 

@@ -2,7 +2,7 @@
 
 Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://github.com/ruffle-rs/ruffle).
 
-## v1.2.0 (unreleased)
+## v1.2.0 — 2026-06-10
 
 Big library update: a tabbed navbar, a cover-art gallery, a list-based importer, Flashpoint game downloads, library sorting, playtime, and in-app bug reports.
 
