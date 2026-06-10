@@ -133,19 +133,28 @@ pub extern "C" fn ruffle_audio_fill_buffer(out: *mut i16, len: usize) {
     };
     let Ok(mut guard) = slot.lock() else { return };
     let Some(proxy) = guard.as_mut() else { return };
-    // Mix in f32 at native level, then apply a make-up gain + soft limiter
-    // before the i16 cast (see `set_volume(1.0)` in `new`). The Reinhard curve
-    // x/(1+|x|) maps (-inf,inf) → (-1,1) smoothly: quiet sounds get ~GAIN louder
-    // in the near-linear region while loud peaks compress gently instead of
-    // hard-saturating the i16 cast (the Mario 63 crackle the old 0.5 worked
-    // around). |y| < 1 always, so the cast never clips. GAIN is tunable by ear.
+    // Mix in f32 at the SWF's NATIVE level, then soft-limit only the peaks
+    // before the i16 cast. The earlier 3.0 make-up gain made every game far
+    // louder than the rest of the Switch (the user's "beaucoup trop fort"); it
+    // was meant to lift quiet games but it pushed normal content way past the
+    // system's usual level. Instead we pass content through unchanged below a
+    // KNEE (so loudness matches other apps) and gently compress the excess above
+    // it into [-1, 1] — that still prevents the i16-cast wrap that caused the
+    // Mario 63 crackle, without inflating overall volume.
     let Ok(mut scratch) = SCRATCH_F32.lock() else { return };
     scratch.resize(len, 0.0);
     proxy.mix::<f32>(&mut scratch[..]);
-    const GAIN: f32 = 3.0;
+    const KNEE: f32 = 0.8; // below this = transparent (native level)
     for (o, &s) in buf.iter_mut().zip(scratch.iter()) {
-        let x = s * GAIN;
-        let y = x / (1.0 + x.abs());
-        *o = (y * 32767.0) as i16;
+        let a = s.abs();
+        let mag = if a <= KNEE {
+            a
+        } else {
+            // Map (KNEE, +inf) → (KNEE, 1.0) smoothly so peaks can't wrap.
+            let over = a - KNEE;
+            KNEE + over / (1.0 + over / (1.0 - KNEE))
+        };
+        let y = if s < 0.0 { -mag } else { mag };
+        *o = (y.clamp(-1.0, 1.0) * 32767.0) as i16;
     }
 }

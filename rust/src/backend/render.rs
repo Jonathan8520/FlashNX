@@ -105,6 +105,7 @@ static GLYPHS: &[(char, Glyph)] = &[
     ('8', [" ### ", "#   #", "#   #", " ### ", "#   #", "#   #", " ### "]),
     ('9', [" ### ", "#   #", "#   #", " ####", "    #", "    #", " ### "]),
     ('-', ["     ", "     ", "     ", "#####", "     ", "     ", "     "]),
+    ('_', ["     ", "     ", "     ", "     ", "     ", "     ", "#####"]),
     ('=', ["     ", "     ", "#####", "     ", "#####", "     ", "     "]),
     ('>', ["#    ", " #   ", "  #  ", "   # ", "  #  ", " #   ", "#    "]),
     (':', ["     ", "  #  ", "  #  ", "     ", "  #  ", "  #  ", "     "]),
@@ -2986,6 +2987,25 @@ fn thumb_lookup(url: &str) -> Option<ThumbTex> {
         .and_then(|c| c.iter().find(|(u, _)| u == url).map(|(_, t)| *t))
 }
 
+/// URL of the thumbnail currently being fetched ASYNC (at most one at a time),
+/// or None when idle. The gallery render starts the next uncached logo when
+/// idle and `pump_thumbnail_load` finishes it — so the render thread NEVER
+/// blocks on a logo download (some Flashpoint logos are hundreds of KB).
+fn thumb_inflight() -> &'static std::sync::Mutex<Option<std::string::String>> {
+    static C: std::sync::Mutex<Option<std::string::String>> = std::sync::Mutex::new(None);
+    &C
+}
+
+/// Cancel any in-flight thumbnail fetch and clear the in-flight marker. Called
+/// when leaving a thumbnail screen (FpGallery / cover picker) or starting a new
+/// search, so the isolated curl handle is never left wedged.
+pub fn thumb_cancel_all() {
+    crate::net::thumb_cancel();
+    if let Ok(mut g) = thumb_inflight().lock() {
+        *g = None;
+    }
+}
+
 // ─── Backend implementation ───────────────────────────────────────────────────
 
 impl SwitchRenderBackend {
@@ -5396,20 +5416,41 @@ impl SwitchRenderBackend {
         resolved
     }
 
-    /// Cover-picker thumbnail for a candidate logo `url` — cached. Loads at most
-    /// ONE thumbnail per frame (guarded by `loaded_one`) so the picker fills in
-    /// progressively instead of freezing while N logos download. Returns `None`
-    /// while a thumbnail is still pending its turn to load.
-    fn thumb_for(&mut self, url: &str, loaded_one: &mut bool) -> Option<ThumbTex> {
+    /// Cover/logo thumbnail for `url`, cached. NON-BLOCKING: returns the cached
+    /// texture if ready, else `None` (the cell shows a "..." placeholder). When
+    /// nothing is currently downloading, starts an ASYNC fetch for this url so
+    /// the next uncached cell in the iteration kicks off one download; the fetch
+    /// is finished by `pump_thumbnail_load` on a later frame. This way the render
+    /// thread never blocks on a logo download (some are hundreds of KB).
+    fn thumb_for(&mut self, url: &str) -> Option<ThumbTex> {
         if let Some(t) = thumb_lookup(url) {
             return Some(t);
         }
-        if *loaded_one {
-            return None; // this frame's single-load budget is spent
+        // Not cached. If no fetch is in flight, start one for this url (the first
+        // uncached visible cell each frame wins; later cells see it busy → None).
+        if let Ok(mut inflight) = thumb_inflight().lock() {
+            if inflight.is_none() && crate::net::thumb_start(url) {
+                *inflight = Some(url.to_string());
+            }
         }
-        *loaded_one = true;
-        let state = match crate::net::http_get(url, 4 * 1024 * 1024) {
-            Ok(bytes) => match crate::covers::decode_bytes(&bytes) {
+        None
+    }
+
+    /// Pump the single in-flight thumbnail fetch once per frame. On completion,
+    /// decode + upload the logo, cache it (success OR failure so it's not
+    /// retried), and clear the in-flight marker so the next cell can start. Call
+    /// once at the top of each thumbnail screen's render.
+    fn pump_thumbnail_load(&mut self) {
+        let url = match thumb_inflight().lock() {
+            Ok(g) => match g.as_ref() {
+                Some(u) => u.clone(),
+                None => return,
+            },
+            Err(_) => return,
+        };
+        let state = match crate::net::thumb_tick() {
+            crate::net::ThumbPoll::Pending => return,
+            crate::net::ThumbPoll::Done(bytes) => match crate::covers::decode_bytes(&bytes) {
                 Some((rgba, w, h)) => {
                     let tex = self.upload_rgba_texture(&rgba, w, h);
                     if tex != 0 {
@@ -5420,12 +5461,14 @@ impl SwitchRenderBackend {
                 }
                 None => ThumbTex::Failed,
             },
-            Err(_) => ThumbTex::Failed,
+            crate::net::ThumbPoll::Error => ThumbTex::Failed,
         };
         if let Ok(mut c) = thumb_cache().lock() {
-            c.push((url.to_string(), state));
+            c.push((url, state));
         }
-        Some(state)
+        if let Ok(mut inflight) = thumb_inflight().lock() {
+            *inflight = None;
+        }
     }
 
     /// JOUER library as a COVER GRID (v1.2.0; replaces the text list). Covers
@@ -5495,70 +5538,38 @@ impl SwitchRenderBackend {
         }
 
         // ── Cover gallery (v1.2.0) ───────────────────────────────────────
-        // Justified rows: fixed image HEIGHT, each cover keeps its NATURAL
-        // width (no crop, no letterbox bars). Tiles flow left-to-right and
-        // wrap, so the count per row varies with cover sizes. `scroll_offset`
-        // is the first visible ROW.
-        const ROW_IMG_H: f32 = 120.0;
+        // Fixed 5-per-row GRID. Every tile is the same size and covers are
+        // CROP-TO-FILL (object-fit: cover, via draw_textured_rect_cover), so
+        // the grid stays perfectly aligned whatever each cover's native aspect —
+        // we accept cropping the overflow (the deliberate "5 per row, tant pis"
+        // choice). `scroll_offset` is the first visible ROW.
+        const COLS: usize = 5;
+        const ROW_IMG_H: f32 = 132.0; // uniform tile height
         const GAP_X: f32 = 16.0;
-        const GAP_Y: f32 = 20.0;
+        const GAP_Y: f32 = 22.0;
         const LEFT: f32 = 40.0;
         const TOP: f32 = 150.0;
-        const DEFAULT_ASPECT: f32 = 1.0; // square placeholder for no-cover games
         let rows_visible = crate::library::GALLERY_ROWS_VISIBLE;
         let avail_w = vw - LEFT * 2.0;
+        let cell_w = ((avail_w - (COLS as f32 - 1.0) * GAP_X) / COLS as f32).max(10.0);
         let pitch = ROW_IMG_H + GAP_Y;
 
-        // Pass 1 — resolve covers + row layout. (a) assign tiles to rows greedily
-        // by natural width; (b) lay each row out CENTERED with a uniform gap, so
-        // every cover keeps its natural aspect (no stretch) and rows stay evenly
-        // spaced (no big justify gaps). cover_for caches, cheap after frame 1.
+        // Regular grid: tile i sits at (col = i % COLS, row = i / COLS).
+        // `tiles` = (cover, x, w, row); `cells` feeds input-side 2D navigation
+        // (which reads row + center-x, so a fixed grid works unchanged).
         let total = entries.len();
-        let mut nat: std::vec::Vec<(CoverTex, f32, u32)> = std::vec::Vec::with_capacity(total);
-        let mut cur_x = LEFT;
-        let mut row: u32 = 0;
-        for entry in entries.iter() {
-            let cover = self.cover_for(&entry.basename);
-            let aspect = match cover {
-                CoverTex::Image { w, h, .. } if h > 0 => w as f32 / h as f32,
-                _ => DEFAULT_ASPECT,
-            };
-            let nat_w = (ROW_IMG_H * aspect).clamp(70.0, avail_w);
-            if cur_x > LEFT && cur_x + nat_w > LEFT + avail_w {
-                row += 1;
-                cur_x = LEFT;
-            }
-            nat.push((cover, nat_w, row));
-            cur_x += nat_w + GAP_X;
-        }
-        let rows_total = if total == 0 { 0 } else { row + 1 };
-
-        // (b) Lay out each row CENTERED with a uniform gap — covers keep their
-        // natural width (no stretch) and rows are balanced (no big justify gaps).
-        // `tiles` = (cover, x, w, row).
         let mut tiles: std::vec::Vec<(CoverTex, f32, f32, u32)> =
             std::vec::Vec::with_capacity(total);
         let mut cells: std::vec::Vec<GalleryCell> = std::vec::Vec::with_capacity(total);
-        let mut i = 0usize;
-        while i < nat.len() {
-            let r = nat[i].2;
-            let mut j = i;
-            while j < nat.len() && nat[j].2 == r {
-                j += 1;
-            }
-            let n = j - i;
-            let sum_nat: f32 = nat[i..j].iter().map(|t| t.1).sum();
-            let row_w = sum_nat + (n.saturating_sub(1) as f32) * GAP_X;
-            // Centre the row within the available band.
-            let mut x = LEFT + ((avail_w - row_w) * 0.5).max(0.0);
-            for t in &nat[i..j] {
-                let w = t.1;
-                tiles.push((t.0, x, w, r));
-                cells.push(GalleryCell { row: r, cx: x + w * 0.5 });
-                x += w + GAP_X;
-            }
-            i = j;
+        for (idx, entry) in entries.iter().enumerate() {
+            let cover = self.cover_for(&entry.basename);
+            let col = idx % COLS;
+            let row = (idx / COLS) as u32;
+            let x = LEFT + col as f32 * (cell_w + GAP_X);
+            tiles.push((cover, x, cell_w, row));
+            cells.push(GalleryCell { row, cx: x + cell_w * 0.5 });
         }
+        let rows_total = if total == 0 { 0 } else { ((total + COLS - 1) / COLS) as u32 };
         // Publish layout for input-side 2D navigation.
         if let Ok(mut g) = gallery_cache().lock() {
             *g = (cells, rows_total);
@@ -5666,10 +5677,10 @@ impl SwitchRenderBackend {
             }
 
             match cover {
-                CoverTex::Image { tex, .. } => {
-                    // tw == ROW_IMG_H * aspect, so the cover draws at its natural
-                    // aspect ratio — no crop, no black bars.
-                    self.draw_textured_rect(tx, ty, tw, ROW_IMG_H, tex);
+                CoverTex::Image { tex, w, h } => {
+                    // Crop-to-fill the uniform cell (object-fit: cover) so the
+                    // grid stays aligned regardless of the cover's native aspect.
+                    self.draw_textured_rect_cover(tx, ty, tw, ROW_IMG_H, tex, w, h);
                 }
                 CoverTex::Default => {
                     let bg = Matrix {
@@ -5769,8 +5780,11 @@ impl SwitchRenderBackend {
 
         // Selected-game info line (name + size · version · engine).
         if let Some(entry) = entries.get(selection) {
-            let name = truncate_mid(&entry.display_name, 40);
             let nsc = 2.5;
+            // Allow the name to use ~the full screen width before truncating
+            // (was a flat 40 chars, which cut common titles). 6 px/char at nsc.
+            let max_name = (((vw - 60.0) / (6.0 * nsc)) as usize).max(12);
+            let name = truncate_mid(&entry.display_name, max_name);
             let nw = self.measure_text(&name, nsc);
             self.draw_text(
                 (vw - nw) * 0.5,
@@ -6683,9 +6697,11 @@ impl SwitchRenderBackend {
         let phase_s = (unsafe { ruffle_tick_now() } as f64) / (unsafe { ruffle_tick_freq() } as f64);
         let pulse = approx_sin(phase_s as f32 * (2.0 * core::f32::consts::PI / 1.6));
 
+        // Finish at most one async logo download this frame (never blocks).
+        self.pump_thumbnail_load();
+
         let grid_top = panel_y + 110.0;
         let grid_left = panel_x + MARGIN;
-        let mut loaded_one = false;
         for i in 0..n {
             let col = (i % cols) as f32;
             let row = (i / cols) as f32;
@@ -6701,7 +6717,7 @@ impl SwitchRenderBackend {
             };
             <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xFF_0B_12_22), bg);
 
-            match self.thumb_for(urls[i], &mut loaded_one) {
+            match self.thumb_for(urls[i]) {
                 Some(ThumbTex::Image { tex, w, h }) => {
                     self.draw_textured_rect_cover(cx, cy, cell_w, THUMB_H, tex, w, h);
                 }
@@ -6823,9 +6839,11 @@ impl SwitchRenderBackend {
         let phase_s = (unsafe { ruffle_tick_now() } as f64) / (unsafe { ruffle_tick_freq() } as f64);
         let pulse = approx_sin(phase_s as f32 * (2.0 * core::f32::consts::PI / 1.6));
 
+        // Finish at most one async logo download this frame (never blocks).
+        self.pump_thumbnail_load();
+
         let start = scroll_row * cols;
         let end = ((scroll_row + rows_visible) * cols).min(n);
-        let mut loaded_one = false;
         for i in start..end {
             let vis = i - start;
             let col = (vis % cols) as f32;
@@ -6841,7 +6859,7 @@ impl SwitchRenderBackend {
             };
             <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xFF_0B_12_22), bg);
 
-            match self.thumb_for(urls[i], &mut loaded_one) {
+            match self.thumb_for(urls[i]) {
                 Some(ThumbTex::Image { tex, w, h }) => {
                     self.draw_textured_rect_cover(cx, cy, cell_w, thumb_h, tex, w, h);
                 }
@@ -6936,6 +6954,119 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
+    /// Flashpoint details popup (`+` on a gallery tile): full title (word-wrapped)
+    /// + developer / publisher / release date (rows skipped when unknown) +
+    /// download size. The caller draws the dim backdrop first.
+    pub fn draw_library_fp_details(
+        &mut self,
+        title: &str,
+        developer: &str,
+        publisher: &str,
+        release_date: &str,
+        size_bytes: u64,
+    ) {
+        unsafe {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_STENCIL_TEST);
+        }
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        let lc = crate::loc::s();
+
+        const PANEL_W: f32 = 840.0;
+        let title_scale = 2.5;
+        let title_cpl = (((PANEL_W - 80.0) / (6.0 * title_scale)) as usize).max(8);
+
+        // Word-wrap the (possibly long) title on spaces.
+        let mut title_lines: std::vec::Vec<std::string::String> = std::vec::Vec::new();
+        let mut cur = std::string::String::new();
+        for word in title.split(' ') {
+            if cur.is_empty() {
+                cur.push_str(word);
+            } else if cur.chars().count() + 1 + word.chars().count() <= title_cpl {
+                cur.push(' ');
+                cur.push_str(word);
+            } else {
+                title_lines.push(cur.clone());
+                cur.clear();
+                cur.push_str(word);
+            }
+        }
+        if !cur.is_empty() {
+            title_lines.push(cur);
+        }
+        if title_lines.is_empty() {
+            title_lines.push(std::string::String::from("?"));
+        }
+
+        // Info rows (label, value) — skip unknown fields; size always shown.
+        let size_val = if size_bytes > 0 {
+            format_size_pretty(size_bytes)
+        } else {
+            std::string::String::from("?")
+        };
+        let mut rows: std::vec::Vec<(&str, std::string::String)> = std::vec::Vec::new();
+        if !developer.is_empty() {
+            rows.push((lc.fp_details_dev, developer.to_string()));
+        }
+        if !publisher.is_empty() {
+            rows.push((lc.fp_details_publisher, publisher.to_string()));
+        }
+        if !release_date.is_empty() {
+            rows.push((lc.fp_details_date, release_date.to_string()));
+        }
+        rows.push((lc.fp_details_size, size_val));
+
+        let title_line_h = 7.0 * title_scale + 10.0;
+        let row_h = 40.0;
+        let panel_h = 60.0 + title_lines.len() as f32 * title_line_h + 24.0
+            + rows.len() as f32 * row_h + 64.0;
+        let panel_x = (vw - PANEL_W) * 0.5;
+        let panel_y = (vh - panel_h) * 0.5;
+        let panel = Matrix {
+            a: PANEL_W, b: 0.0, c: 0.0, d: panel_h,
+            tx: swf::Twips::from_pixels(panel_x as f64),
+            ty: swf::Twips::from_pixels(panel_y as f64),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_14_20_38), panel);
+        <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(0xFFFFFF, 255), panel);
+
+        // Header.
+        let hdr = lc.fp_details_title;
+        let hw = self.measure_text(hdr, 2.0);
+        self.draw_text(panel_x + (PANEL_W - hw) * 0.5, panel_y + 22.0, 2.0, hdr, swf::Color::from_rgb(0xFFD740, 255));
+
+        // Title (centered, white).
+        let mut y = panel_y + 60.0;
+        for line in &title_lines {
+            let w = self.measure_text(line, title_scale);
+            self.draw_text(panel_x + (PANEL_W - w) * 0.5, y, title_scale, line, swf::Color::from_rgb(0xFFFFFF, 255));
+            y += title_line_h;
+        }
+        y += 24.0;
+
+        // Info rows: "LABEL : value", truncated to the panel width.
+        let row_scale = 2.0;
+        let row_cpl = (((PANEL_W - 80.0) / (6.0 * row_scale)) as usize).max(8);
+        let label_x = panel_x + 40.0;
+        for (label, value) in &rows {
+            let line = truncate_mid(&std::format!("{} : {}", label, value), row_cpl);
+            self.draw_text(label_x, y, row_scale, &line, swf::Color::from_rgb(0xCCCCCC, 255));
+            y += row_h;
+        }
+
+        // Footer.
+        let fw = self.measure_text(lc.fp_details_footer, 2.0);
+        self.draw_text(panel_x + (PANEL_W - fw) * 0.5, panel_y + panel_h - 36.0, 2.0, lc.fp_details_footer, swf::Color::from_rgb(0x99AABB, 255));
+
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
     /// Centered modal list for the JOUER sort picker (Y). `options` are the sort
     /// labels; `selection` highlights the active one. Self-contained (dims behind).
     pub fn draw_library_sort_modal(
@@ -6944,6 +7075,7 @@ impl SwitchRenderBackend {
         options: &[&str],
         title: &str,
         footer: &str,
+        dir_label: &str,
     ) {
         unsafe {
             glEnable(GL_BLEND);
@@ -6956,7 +7088,8 @@ impl SwitchRenderBackend {
 
         const PANEL_W: f32 = 460.0;
         let row_h: f32 = 54.0;
-        let panel_h = 130.0 + options.len() as f32 * row_h + 46.0;
+        // +40 vs before for the direction (SENS) line under the title.
+        let panel_h = 170.0 + options.len() as f32 * row_h + 46.0;
         let panel_x = (vw - PANEL_W) * 0.5;
         let panel_y = (vh - panel_h) * 0.5;
         let panel = Matrix {
@@ -6970,7 +7103,17 @@ impl SwitchRenderBackend {
         let tw = self.measure_text(title, 3.0);
         self.draw_text(panel_x + (PANEL_W - tw) * 0.5, panel_y + 26.0, 3.0, title, swf::Color::from_rgb(0xFFFFFF, 255));
 
-        let opts_top = panel_y + 100.0;
+        // Direction indicator (toggled with X) — teal, centered under the title.
+        let dw = self.measure_text(dir_label, 2.0);
+        self.draw_text(
+            panel_x + (PANEL_W - dw) * 0.5,
+            panel_y + 66.0,
+            2.0,
+            dir_label,
+            swf::Color::from_rgb(0x66DDCC, 255),
+        );
+
+        let opts_top = panel_y + 130.0;
         let opts_left = panel_x + 120.0;
         for (i, opt) in options.iter().enumerate() {
             let y = opts_top + i as f32 * row_h;
@@ -6994,6 +7137,103 @@ impl SwitchRenderBackend {
             glBindVertexArray(0);
         }
         self.gl_state.invalidate();
+    }
+
+    /// Bug-report game picker (RÉGLAGES → SIGNALER UN BUG). A full-page
+    /// scrollable list of game names — pick which `.swf` is broken. Mirrors the
+    /// DistantFiles list layout (header + rows + scrollbar + footer).
+    pub fn draw_library_bug_picker(
+        &mut self,
+        selection: usize,
+        scroll_offset: usize,
+        names: &[&str],
+        visible_rows: usize,
+        title: &str,
+        footer: &str,
+    ) {
+        self.library_clear();
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+
+        // Header (drop shadow + amber, like the other list screens).
+        let scale_t = 4.0;
+        let tw = self.measure_text(title, scale_t);
+        self.draw_text((vw - tw) * 0.5 + 3.0, 30.0 + 3.0, scale_t, title, swf::Color::from_rgb(0x000000, 255));
+        self.draw_text((vw - tw) * 0.5, 30.0, scale_t, title, swf::Color::from_rgb(0xFFD740, 255));
+
+        // Rows.
+        const ROW_SCALE: f32 = 2.5;
+        const ROW_SPACING: f32 = 50.0;
+        let rows_top_y = 150.0;
+        let rows_left_x = 80.0;
+        let total = names.len();
+        let end = (scroll_offset + visible_rows).min(total);
+        for (visible_idx, abs_idx) in (scroll_offset..end).enumerate() {
+            let y = rows_top_y + visible_idx as f32 * ROW_SPACING;
+            let is_sel = abs_idx == selection;
+            let color = if is_sel {
+                swf::Color::from_rgb(0xFFD740, 255)
+            } else {
+                swf::Color::from_rgb(0xCCCCCC, 255)
+            };
+            if is_sel {
+                self.draw_text(rows_left_x - 30.0, y, ROW_SCALE, ">", color);
+            }
+            // Truncate the name to the row width.
+            let char_w = 6.0 * ROW_SCALE;
+            let max_chars = ((vw - rows_left_x * 2.0) / char_w) as usize;
+            let mut display = names[abs_idx].to_string();
+            if display.chars().count() > max_chars && max_chars > 1 {
+                display = display.chars().take(max_chars - 1).collect();
+                display.push('…');
+            }
+            self.draw_text(rows_left_x, y, ROW_SCALE, &display, color);
+        }
+
+        // Scrollbar if needed.
+        if total > visible_rows {
+            let bar_x = vw - 30.0;
+            let bar_top_y = rows_top_y;
+            let bar_h_total = visible_rows as f32 * ROW_SPACING;
+            let bar_h_thumb = (bar_h_total * visible_rows as f32 / total as f32).max(20.0);
+            let progress = scroll_offset as f32 / (total - visible_rows) as f32;
+            let thumb_y = bar_top_y + (bar_h_total - bar_h_thumb) * progress;
+            let track = Matrix {
+                a: 4.0, b: 0.0, c: 0.0, d: bar_h_total,
+                tx: swf::Twips::from_pixels(bar_x as f64),
+                ty: swf::Twips::from_pixels(bar_top_y as f64),
+            };
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x40_99AABB), track);
+            let thumb = Matrix {
+                a: 4.0, b: 0.0, c: 0.0, d: bar_h_thumb,
+                tx: swf::Twips::from_pixels(bar_x as f64),
+                ty: swf::Twips::from_pixels(thumb_y as f64),
+            };
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), thumb);
+        }
+
+        // Footer.
+        const HELP_SCALE: f32 = 2.0;
+        let help_w = self.measure_text(footer, HELP_SCALE);
+        self.draw_text((vw - help_w) * 0.5, vh - 42.0, HELP_SCALE, footer, swf::Color::from_rgb(0x99AABB, 255));
+
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
+    /// Bug-report result notice. Green title on success, red on failure; the
+    /// body is the (already-localized) message. Reuses the shared centered
+    /// notice layout.
+    pub fn draw_library_bug_result(&mut self, msg: &str, ok: bool) {
+        let lc = crate::loc::s();
+        if ok {
+            self.draw_centered_notice(lc.bug_ok_title, 0x66DD66, msg);
+        } else {
+            self.draw_centered_notice(lc.bug_fail_title, 0xFF5040, msg);
+        }
     }
 
     /// Language picker (Settings → LANGUAGE). `languages` are native display

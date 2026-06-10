@@ -39,15 +39,15 @@ Either way: copy your **`.swf`** files into **`sdmc:/flashnx/`**, then launch **
 ## Usage
 
 **In the library**
-**L / R** = switch tabs (Play / Import / Settings) · D-pad or sticks = move in the cover gallery · **A** = play · **−** = search (filter by name) · **+** = game options (controls, rename, cover, delete). Quit from the Settings tab.
+**L / R** = switch tabs (Play / Import / Settings) · D-pad or sticks = move in the cover gallery · **A** = play · **Y** = sort (name / added / played / size, **X** reverses) · **−** = search (filter by name) · **+** = game options (controls, rename, cover, delete). Quit, plus bug report and suggestions, from the Settings tab.
 
 **Import tab**
-A list of your saved URLs · **A** = launch one · **+ Add a URL** row to enter a new one · **+** on a URL = edit or delete it. Accepts archive.org items and direct `.swf` URLs.
+A list of your saved URLs · **A** = launch one · **+ Add a URL** row to enter a new one · **+** on a URL = edit or delete it. Accepts archive.org items and direct `.swf` URLs. **X** searches the **Flashpoint Archive** and downloads a game (cover and real title included; **+** on a result shows its details + download size).
 
 **In game**
 Left stick / D-pad = arrows · **A/B/X/Y** = Flash keys (remappable) · right stick = mouse cursor · **ZR** / touch = click · **−** = pause menu.
 
-- **Cover art**: the library is a gallery of covers at their natural size. Drop a `<game>.png` or `.jpg` next to the `.swf` to set one, or fetch artwork from the Flashpoint Archive in a game's options (pick from thumbnails).
+- **Cover art**: the library is a grid of covers, 5 per row (cropped to fill). Drop a `<game>.png` or `.jpg` next to the `.swf` to set one, or fetch artwork from the Flashpoint Archive in a game's options (pick from thumbnails).
 - **Automatic saves** for games that save (SharedObject `.sol`), on the SD card.
 - **Built-in key editor** (48 Flash keys, configurable per game), plus a **global default** layout in the Settings tab.
 - **Languages**: English, French, Spanish, Russian, auto-detected from the console's system language, switchable from the Settings tab.

@@ -79,13 +79,20 @@ pub(crate) enum Screen {
     /// A downloads the selected game's GameZIP. Reuses `cover_candidates` for
     /// storage and `draw_library_cover_picker` for rendering.
     FpGallery { selection: usize, scroll: usize },
+    /// Details popup for the Flashpoint game at `selection` (`+` on the gallery):
+    /// full title + developer/publisher/date + download size. `size` is the
+    /// GameZIP's Content-Length (0 = unknown / probe failed). `scroll` restores
+    /// the gallery on close.
+    FpDetails { selection: usize, scroll: usize, size: u64 },
     /// JOUER sort picker (Y): centered modal — A-Z / recent / most-played / size.
     /// `prev_sel`/`prev_scroll` restore the gallery cursor when B (cancel) is hit.
     SortModal { selection: usize, prev_sel: usize, prev_scroll: usize },
     /// Sort picker for the DISTANT lists (Y). `fp` = Flashpoint gallery (sorts
-    /// `cover_candidates` by name/developer) vs archive.org files (sorts
-    /// `remote_files` by name/size). `prev_*` restore the cursor on cancel.
-    RemoteSortModal { selection: usize, fp: bool, prev_sel: usize, prev_scroll: usize },
+    /// `cover_candidates` by name — developers are unknown so there's no
+    /// developer sort) vs archive.org files (sorts `remote_files` by name/size).
+    /// `reverse` mirrors the JOUER modal's X toggle (local to this picker, not
+    /// persisted). `prev_*` restore the cursor on cancel.
+    RemoteSortModal { selection: usize, fp: bool, reverse: bool, prev_sel: usize, prev_scroll: usize },
     // ── Phase 3.7: DISTANT mode (archive.org import) ───────────────────
     /// IMPORTER home: a navigable LIST of saved URLs + a trailing "+ add" row.
     /// `selection` indexes [history urls.., add-row]. A launches the selected
@@ -120,10 +127,21 @@ pub(crate) enum Screen {
     SettingsKeymapEditor,
     /// Language picker. `selection` indexes `loc::PICKER_LANGS`.
     SettingsLanguagePicker { selection: usize },
+    // ── Bug report (RÉGLAGES → SIGNALER UN BUG) ─────────────────────────
+    /// Pick which game is broken. `selection` indexes `State::entries`,
+    /// `scroll_offset` is the topmost visible row. A → describe + send,
+    /// B → back to the RÉGLAGES tab.
+    BugPicker { selection: usize, scroll_offset: usize },
+    /// Result of a bug submission. `State::bug_ok` picks the success/failure
+    /// styling, `State::bug_msg` is the (already-localized) message. A/B dismiss
+    /// back to the RÉGLAGES tab.
+    BugResult,
 }
 
+// No "RETOUR" entry: B already backs out of the modal, so a dedicated row is
+// redundant clutter.
 pub(crate) const OPTIONS_ENTRIES: &[&str] =
-    &["TOUCHES", "RENOMMER", "JAQUETTE", "SUPPRIMER", "RETOUR"];
+    &["TOUCHES", "RENOMMER", "JAQUETTE", "SUPPRIMER"];
 
 /// Top-level navbar tabs (v1.2.0), switched with the L/R shoulder buttons.
 /// Each maps to a "home" screen. The navbar is drawn on every tab-home screen;
@@ -178,8 +196,12 @@ static LAST_PLAYED: Mutex<Option<(std::string::String, std::string::String)>> = 
 static LAUNCH_TICK: Mutex<Option<u64>> = Mutex::new(None);
 
 /// Active library sort, persisted to `sdmc:/flashnx/sort.txt`
-/// (0 = A-Z, 1 = recent, 2 = most played). Default A-Z.
+/// (0 = A-Z, 1 = recent, 2 = recently played, 3 = most played, 4 = size).
+/// Default A-Z.
 static SORT_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// Whether the active sort is reversed (the modal's X toggle). Persisted in the
+/// same `sort.txt` as a trailing `R` after the mode digit. Default off.
+static SORT_REVERSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// One-shot guard: load playtime + sort prefs once per boot (not every open()).
 static PREFS_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -204,50 +226,81 @@ pub(crate) fn current_sort_mode() -> SortMode {
     }
 }
 
-/// 0/1/2 index of the active sort (for the sort modal cursor).
+/// 0..=4 index of the active sort (for the sort modal cursor).
 pub(crate) fn sort_mode_index() -> usize {
     SORT_MODE.load(std::sync::atomic::Ordering::Relaxed) as usize
 }
 
-/// Set + persist the active sort mode (0/1/2).
-pub(crate) fn set_sort_mode(idx: u8) {
-    SORT_MODE.store(idx, std::sync::atomic::Ordering::Relaxed);
-    let c: &[u8] = match idx {
-        1 => b"1",
-        2 => b"2",
-        3 => b"3",
-        4 => b"4",
-        _ => b"0",
+/// Whether the active sort is currently reversed.
+pub(crate) fn current_sort_reverse() -> bool {
+    SORT_REVERSE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Persist the mode + reverse flag together to `sort.txt` (digit, then `R` if
+/// reversed). Best-effort.
+fn persist_sort() {
+    let mode = SORT_MODE.load(std::sync::atomic::Ordering::Relaxed);
+    let rev = SORT_REVERSE.load(std::sync::atomic::Ordering::Relaxed);
+    let digit = match mode {
+        1 => '1',
+        2 => '2',
+        3 => '3',
+        4 => '4',
+        _ => '0',
     };
-    if std::fs::write(SORT_PATH, c).is_ok() {
+    let txt = if rev {
+        std::format!("{}R", digit)
+    } else {
+        digit.to_string()
+    };
+    if std::fs::write(SORT_PATH, txt.as_bytes()).is_ok() {
         crate::sd::commit();
     }
 }
 
-fn read_sort_mode() -> u8 {
+/// Set + persist the active sort mode (0..=4).
+pub(crate) fn set_sort_mode(idx: u8) {
+    SORT_MODE.store(idx, std::sync::atomic::Ordering::Relaxed);
+    persist_sort();
+}
+
+/// Set + persist the reverse flag.
+pub(crate) fn set_sort_reverse(rev: bool) {
+    SORT_REVERSE.store(rev, std::sync::atomic::Ordering::Relaxed);
+    persist_sort();
+}
+
+/// Read the persisted `(mode, reverse)` pair from `sort.txt`. First byte = mode
+/// digit; a trailing `R` (legacy files lacked it) = reversed.
+fn read_sort_prefs() -> (u8, bool) {
     use std::io::Read;
     let mut f = match std::fs::File::open(SORT_PATH) {
         Ok(f) => f,
-        Err(_) => return 0,
+        Err(_) => return (0, false),
     };
-    let mut b = [0u8; 1];
-    match f.read(&mut b) {
-        Ok(n) if n >= 1 => match b[0] {
-            b'1' => 1,
-            b'2' => 2,
-            b'3' => 3,
-            b'4' => 4,
-            _ => 0,
-        },
-        _ => 0,
+    let mut b = [0u8; 4];
+    let n = f.read(&mut b).unwrap_or(0);
+    if n == 0 {
+        return (0, false);
     }
+    let mode = match b[0] {
+        b'1' => 1,
+        b'2' => 2,
+        b'3' => 3,
+        b'4' => 4,
+        _ => 0,
+    };
+    let rev = b[..n].iter().any(|&c| c == b'R' || c == b'r');
+    (mode, rev)
 }
 
 /// Boot-once load of persisted playtime + sort preference into memory.
 fn ensure_prefs_loaded() {
     if !PREFS_LOADED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         crate::playtime::load();
-        SORT_MODE.store(read_sort_mode(), std::sync::atomic::Ordering::Relaxed);
+        let (mode, rev) = read_sort_prefs();
+        SORT_MODE.store(mode, std::sync::atomic::Ordering::Relaxed);
+        SORT_REVERSE.store(rev, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -264,8 +317,10 @@ fn bank_playtime() {
     }
 }
 
-/// Sort `entries` in place by the given mode (alpha tiebreak everywhere).
-pub(crate) fn sort_entries(entries: &mut std::vec::Vec<Entry>, mode: SortMode) {
+/// Sort `entries` in place by the given mode (alpha tiebreak everywhere). When
+/// `reverse` is set, the whole sorted order is flipped (so A-Z → Z-A, newest →
+/// oldest, biggest → smallest, etc.).
+pub(crate) fn sort_entries(entries: &mut std::vec::Vec<Entry>, mode: SortMode, reverse: bool) {
     let alpha = |a: &Entry, b: &Entry| {
         a.display_name
             .to_lowercase()
@@ -287,6 +342,9 @@ pub(crate) fn sort_entries(entries: &mut std::vec::Vec<Entry>, mode: SortMode) {
         SortMode::Size => {
             entries.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes).then_with(|| alpha(a, b)))
         }
+    }
+    if reverse {
+        entries.reverse();
     }
 }
 
@@ -436,6 +494,17 @@ pub(crate) struct State {
     /// `.swf` path to extract the zip into (the download itself goes to a temp
     /// `.zip`). `None` for a normal direct/archive.org `.swf` download.
     pub(crate) download_zip_extract: Option<std::string::String>,
+    /// Set when a Flashpoint game download is in flight: the cover/logo URL to
+    /// fetch + cache automatically once the `.swf` lands (so the game shows its
+    /// art in JOUER without a manual "Jaquette" step). `None` for archive.org /
+    /// direct downloads (those carry no known cover).
+    pub(crate) download_cover_url: Option<std::string::String>,
+    /// Set for a Flashpoint download: the REAL game title. The on-SD `.swf`
+    /// filename is sanitized (e.g. `:` → `_`), so we persist the true title as a
+    /// display-name sidecar once the file lands — the game then shows its real
+    /// name AND a later "Jaquette" cover search uses the real title (not the
+    /// mangled filename, which finds nothing). `None` for archive.org / direct.
+    pub(crate) download_title: Option<std::string::String>,
     /// Last error message — shown in `Screen::DistantError` until user
     /// dismisses with A/B.
     pub(crate) distant_error: std::string::String,
@@ -488,6 +557,10 @@ pub(crate) struct State {
     /// URL of the async archive.org fetch in flight (`Screen::DistantLoading`),
     /// pushed to history once the fetch succeeds.
     pending_fetch_url: std::string::String,
+    /// Bug-report result message (`Screen::BugResult`) + whether it succeeded
+    /// (drives the green/red notice styling).
+    bug_msg: std::string::String,
+    bug_ok: bool,
 }
 
 static LIBRARY: Mutex<State> = Mutex::new(State {
@@ -502,6 +575,8 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     download_file_name: std::string::String::new(),
     download_out_path: std::string::String::new(),
     download_zip_extract: None,
+    download_cover_url: None,
+    download_title: None,
     distant_error: std::string::String::new(),
     downloaded_basenames: std::vec::Vec::new(),
     url_history: std::vec::Vec::new(),
@@ -515,6 +590,8 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     cover_msg: std::string::String::new(),
     cover_query: std::string::String::new(),
     pending_fetch_url: std::string::String::new(),
+    bug_msg: std::string::String::new(),
+    bug_ok: false,
 });
 
 /// Where the URL history persists across boots. Format: JSON array of
@@ -543,6 +620,11 @@ pub const FP_GALLERY_ROWS: usize = 3;
 /// the most that fits between the header at y≈150 and footer at y≈680
 /// with `ROW_SPACING=50`.
 pub const DISTANT_VISIBLE_ROWS: usize = 10;
+
+/// Rows visible at once in the bug-report game picker (RÉGLAGES → SIGNALER UN
+/// BUG). A simple scrollable name list — shares the layout in
+/// `draw_library_bug_picker`.
+pub const BUG_PICKER_VISIBLE_ROWS: usize = 10;
 
 // ── Setup / FFI helpers ───────────────────────────────────────────────────
 
@@ -633,7 +715,7 @@ pub fn open() {
         s.local_filter = None;
         s.anim_origin_ticks = unsafe { ruffle_tick_now() };
         // Apply the active sort BEFORE the cursor position is computed below.
-        sort_entries(&mut s.entries, current_sort_mode());
+        sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
         s.screen = if s.entries.is_empty() {
             Screen::Empty
         } else {
@@ -835,6 +917,7 @@ pub fn reset() {
     // avoids the C++ multi handle leaking + the partial file staying on SD.
     net::cancel_download();
     net::cancel_archive_fetch();
+    crate::backend::render::thumb_cancel_all();
     if let Ok(mut s) = LIBRARY.lock() {
         s.pending_fetch_url.clear();
         s.entries.clear();
@@ -847,6 +930,8 @@ pub fn reset() {
         s.download_file_name.clear();
         s.download_out_path.clear();
         s.download_zip_extract = None;
+        s.download_cover_url = None;
+        s.download_title = None;
         s.distant_error.clear();
         s.downloaded_basenames.clear();
         s.distant_filter = None;
@@ -1009,6 +1094,31 @@ pub fn input(button: &str) -> bool {
             run_local_search_flow();
             return true;
         }
+        // A on the bug-report picker = describe + send. Hoisted: swkbd + the
+        // synchronous HTTPS POST must not run under the LIBRARY lock.
+        if let Screen::BugPicker { selection, .. } = screen_snap {
+            if button == "A" {
+                run_bug_report_flow(selection);
+                return true;
+            }
+        }
+        // A on the RÉGLAGES "FAIRE UNE PROPOSITION" row (index 3) = swkbd + POST.
+        // Hoisted for the same reason.
+        if let Screen::SettingsModal { selection } = screen_snap {
+            if button == "A" && selection == 3 {
+                run_suggestion_flow();
+                return true;
+            }
+        }
+        // `+` on a Flashpoint gallery tile = details popup. Hoisted: it does a
+        // blocking HEAD to read the download size, which must not run under the
+        // LIBRARY lock.
+        if let Screen::FpGallery { selection, scroll } = screen_snap {
+            if button == "Plus" {
+                run_fp_info_flow(selection, scroll);
+                return true;
+            }
+        }
     }
     let mut s = match LIBRARY.lock() {
         Ok(g) => g,
@@ -1057,12 +1167,20 @@ pub fn input(button: &str) -> bool {
             handle_fp_gallery_input(&mut s, button, selection, scroll);
             true
         }
+        Screen::FpDetails { selection, scroll, .. } => {
+            // `+` is hoisted only for FpGallery; here `+`/`B` close back to the
+            // gallery (the deferred modal-close machinery scales it out).
+            if matches!(button, "B" | "Plus") {
+                s.screen = Screen::FpGallery { selection, scroll };
+            }
+            true
+        }
         Screen::SortModal { selection, prev_sel, prev_scroll } => {
             handle_sort_modal_input(&mut s, button, selection, prev_sel, prev_scroll);
             true
         }
-        Screen::RemoteSortModal { selection, fp, prev_sel, prev_scroll } => {
-            handle_remote_sort_modal_input(&mut s, button, selection, fp, prev_sel, prev_scroll);
+        Screen::RemoteSortModal { selection, fp, reverse, prev_sel, prev_scroll } => {
+            handle_remote_sort_modal_input(&mut s, button, selection, fp, reverse, prev_sel, prev_scroll);
             true
         }
         Screen::DistantIdle { selection } => {
@@ -1138,6 +1256,18 @@ pub fn input(button: &str) -> bool {
             handle_settings_language_input(&mut s, button, selection);
             true
         }
+        Screen::BugPicker { selection, scroll_offset } => {
+            handle_bug_picker_input(&mut s, button, selection, scroll_offset);
+            true
+        }
+        Screen::BugResult => {
+            if matches!(button, "A" | "B" | "Minus") {
+                s.bug_msg.clear();
+                // Back to the RÉGLAGES tab, cursor on SIGNALER UN BUG.
+                s.screen = Screen::SettingsModal { selection: 2 };
+            }
+            true
+        }
     };
     // Defer a modal close so it can scale OUT: render() swaps to the stashed
     // target once the close pop finishes. Only plain modal -> non-modal closes
@@ -1157,10 +1287,10 @@ pub fn input(button: &str) -> bool {
     consumed
 }
 
-/// Settings modal: 0 = default controls, 1 = language, 2 = back.
+/// Settings tab entries: 0 = default controls, 1 = language, 2 = report a bug,
+/// 3 = make a suggestion, 4 = quit. (No BACK — leave via L/R.)
 fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
-    // 0 = default controls, 1 = language, 2 = quit. (No BACK — leave via L/R.)
-    const LAST: usize = 2;
+    const LAST: usize = 4;
     match button {
         "Up" | "StickLUp" => {
             selection = if selection == 0 { LAST } else { selection - 1 };
@@ -1181,6 +1311,18 @@ fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
                     s.screen = Screen::SettingsLanguagePicker { selection: cur };
                 }
                 2 => {
+                    // SIGNALER UN BUG — pick the broken game, then describe + send.
+                    // No game on SD = nothing to report; show a short notice.
+                    if s.entries.is_empty() {
+                        s.bug_ok = false;
+                        s.bug_msg = crate::loc::s().bug_no_games.to_string();
+                        s.screen = Screen::BugResult;
+                    } else {
+                        s.screen = Screen::BugPicker { selection: 0, scroll_offset: 0 };
+                    }
+                }
+                // 3 = FAIRE UNE PROPOSITION is hoisted in input() (opens swkbd).
+                4 => {
                     // QUIT (Minus is SEARCH now). Exits the .nro.
                     s.screen = Screen::Quit;
                 }
@@ -1220,6 +1362,121 @@ fn handle_settings_language_input(s: &mut State, button: &str, mut selection: us
         _ => {}
     }
     s.screen = Screen::SettingsLanguagePicker { selection };
+}
+
+/// Bug-report game picker (RÉGLAGES → SIGNALER UN BUG). A scrollable list of
+/// the local games; A (hoisted) describes + sends, B returns to RÉGLAGES.
+/// `selection`/`scroll` index `entries` directly (no filter here).
+fn handle_bug_picker_input(s: &mut State, button: &str, mut selection: usize, mut scroll: usize) {
+    let total = s.entries.len();
+    let last = total.saturating_sub(1);
+    match button {
+        "Up" | "StickLUp" => {
+            if total == 0 {
+                return;
+            }
+            selection = if selection == 0 { last } else { selection - 1 };
+            scroll = clamp_scroll(scroll, selection, BUG_PICKER_VISIBLE_ROWS);
+        }
+        "Down" | "StickLDown" => {
+            if total == 0 {
+                return;
+            }
+            selection = if selection >= last { 0 } else { selection + 1 };
+            scroll = clamp_scroll(scroll, selection, BUG_PICKER_VISIBLE_ROWS);
+        }
+        "B" => {
+            s.screen = Screen::SettingsModal { selection: 2 };
+            return;
+        }
+        // A is hoisted in input() (swkbd + HTTPS POST run without the lock).
+        _ => {}
+    }
+    s.screen = Screen::BugPicker { selection, scroll_offset: scroll };
+}
+
+/// BugPicker > A: snapshot the chosen game's metadata, open swkbd for a
+/// description, then POST the report to the relay. Hoisted from `input()` — the
+/// keyboard + synchronous HTTPS POST must NOT run under the LIBRARY lock.
+fn run_bug_report_flow(game_idx: usize) {
+    // Snapshot the game's technical info under the lock, then release it.
+    let base = match LIBRARY.lock() {
+        Ok(g) => g.entries.get(game_idx).map(|e| {
+            (
+                e.display_name.clone(),
+                e.basename.clone(),
+                e.size_bytes,
+                e.swf_version,
+                e.compression_label,
+                e.is_as3,
+            )
+        }),
+        Err(_) => None,
+    };
+    let Some((game, file, size, swf_version, compression, as3)) = base else {
+        return;
+    };
+    // Description is optional — cancel (None) aborts the whole report.
+    let Some(description) = net::prompt_bug() else {
+        return;
+    };
+    let applet = unsafe { ruffle_is_applet_mode() } != 0;
+    let report = crate::bugreport::Report {
+        kind: "bug",
+        game,
+        file,
+        size,
+        swf_version,
+        compression: compression.to_string(),
+        as3,
+        app_version: crate::bugreport::APP_VERSION,
+        lang: crate::loc::current().code(),
+        applet,
+        description: description.trim().to_string(),
+    };
+    submit_and_show(&report);
+}
+
+/// RÉGLAGES > FAIRE UNE PROPOSITION: open swkbd for a free-text idea and POST it
+/// as a "suggestion" issue (same relay/token as the bug report, different
+/// label). No game involved. Hoisted from `input()` — swkbd + the synchronous
+/// HTTPS POST must not run under the LIBRARY lock. Empty input aborts.
+fn run_suggestion_flow() {
+    let Some(text) = net::prompt_long(crate::loc::s().kbd_suggest_header, crate::loc::s().kbd_suggest_guide)
+    else {
+        return; // cancelled
+    };
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return; // nothing to send
+    }
+    let report = crate::bugreport::Report {
+        kind: "suggestion",
+        game: std::string::String::new(),
+        file: std::string::String::new(),
+        size: 0,
+        swf_version: 0,
+        compression: std::string::String::new(),
+        as3: false,
+        app_version: crate::bugreport::APP_VERSION,
+        lang: crate::loc::current().code(),
+        applet: unsafe { ruffle_is_applet_mode() } != 0,
+        description: text,
+    };
+    submit_and_show(&report);
+}
+
+/// Submit a bug/suggestion report and land on the result screen.
+fn submit_and_show(report: &crate::bugreport::Report) {
+    let (ok, msg) = match crate::bugreport::submit(report) {
+        Ok(()) => (true, crate::loc::s().bug_ok_msg.to_string()),
+        Err(e) => (false, e),
+    };
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.bug_ok = ok;
+        s.bug_msg = msg;
+        s.screen = Screen::BugResult;
+    }
 }
 
 fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scroll: usize) {
@@ -1347,7 +1604,7 @@ fn handle_distant_url_options_input(
     url_idx: usize,
     mut selection: usize,
 ) {
-    const LAST: usize = 2; // 0 = edit, 1 = delete, 2 = back
+    const LAST: usize = 1; // 0 = edit, 1 = delete (no back row — B backs out)
     let back = |s: &mut State| {
         let n = s.url_history.len();
         s.screen = Screen::DistantIdle { selection: url_idx.min(n) };
@@ -1360,13 +1617,11 @@ fn handle_distant_url_options_input(
             selection = if selection >= LAST { 0 } else { selection + 1 };
         }
         "A" => {
+            // 0 (edit) is hoisted in input(); only 1 (delete) reaches here.
             if selection == 1 {
                 // Delete -> reuse the existing confirm screen via history_idx.
                 s.history_idx = Some(url_idx);
                 s.screen = Screen::DistantHistoryConfirm;
-            } else {
-                // 0 (edit) is hoisted; 2 = back.
-                back(s);
             }
             return;
         }
@@ -1504,18 +1759,25 @@ fn run_fp_search_flow() {
     if query.is_empty() {
         return;
     }
-    let (cands, msg) = match crate::sources::gamezip::search(&query) {
+    let (mut cands, msg) = match crate::sources::gamezip::search(&query) {
         Ok(list) if list.is_empty() => {
             (std::vec::Vec::new(), crate::loc::s().cover_none.to_string())
         }
         Ok(list) => (list, std::string::String::new()),
         Err(e) => (std::vec::Vec::new(), e),
     };
+    // The db-api returns hits in its own (relevance-ish) order, which reads as
+    // random in a cover grid. Default to A-Z so the gallery is browsable; the
+    // user can re-sort / reverse with Y.
+    cands.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
     log(&std::format!(
         "library: flashpoint game search \"{}\" -> {} hit(s)\n",
         query,
         cands.len(),
     ));
+    // New result set → drop any thumbnail fetch still in flight from a previous
+    // gallery so the isolated handle starts clean.
+    crate::backend::render::thumb_cancel_all();
     if let Ok(mut s) = LIBRARY.lock() {
         s.cover_candidates = cands;
         s.cover_msg = msg;
@@ -1631,6 +1893,7 @@ fn handle_distant_files_input(
             s.screen = Screen::RemoteSortModal {
                 selection: 0,
                 fp: false,
+                reverse: false,
                 prev_sel: selection,
                 prev_scroll: scroll,
             };
@@ -1759,10 +2022,6 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                     s.screen = Screen::DeleteConfirm { game_idx };
                     return;
                 }
-                "RETOUR" => {
-                    s.screen = list_screen_for_abs(s, game_idx);
-                    return;
-                }
                 _ => {}
             }
         }
@@ -1859,6 +2118,8 @@ fn run_cover_search_with(game_idx: usize, query: std::string::String) {
         cands.len(),
         if msg.is_empty() { std::string::String::new() } else { std::format!(" [{}]", msg) },
     ));
+    // New result set → drop any thumbnail fetch still in flight.
+    crate::backend::render::thumb_cancel_all();
     if let Ok(mut s) = LIBRARY.lock() {
         s.cover_candidates = cands;
         s.cover_msg = msg;
@@ -1933,6 +2194,7 @@ fn handle_cover_picker_input(s: &mut State, button: &str, game_idx: usize, mut s
             }
         }
         "B" => {
+            crate::backend::render::thumb_cancel_all();
             s.cover_candidates.clear();
             s.cover_msg.clear();
             s.cover_query.clear();
@@ -1991,6 +2253,11 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
                     s.download_file_name = swf_name;
                     s.download_out_path = zip_path;
                     s.download_zip_extract = Some(swf_path);
+                    // Grab this game's cover automatically once the .swf lands.
+                    s.download_cover_url = Some(cand.cover_url.clone());
+                    // Keep the REAL title so we can restore it as the display
+                    // name (the filename loses `:` and other chars).
+                    s.download_title = Some(cand.title.clone());
                     s.download_resume_pos = Some((selection, scroll));
                     s.screen = Screen::DistantDownloading;
                 }
@@ -2002,16 +2269,18 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
             return;
         }
         "Y" => {
-            // Sort picker for the Flashpoint results (name / developer).
+            // Sort picker for the Flashpoint results (name only — devs unknown).
             s.screen = Screen::RemoteSortModal {
                 selection: 0,
                 fp: true,
+                reverse: false,
                 prev_sel: selection,
                 prev_scroll: scroll,
             };
             return;
         }
         "B" => {
+            crate::backend::render::thumb_cancel_all();
             s.cover_candidates.clear();
             s.cover_msg.clear();
             s.cover_query.clear();
@@ -2028,6 +2297,27 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
         scroll = sel_row + 1 - rows_visible;
     }
     s.screen = Screen::FpGallery { selection, scroll };
+}
+
+/// FpGallery `+`: show the details popup for the selected game. Snapshots the
+/// candidate's id under the lock, then (without the lock) does a blocking HEAD
+/// to read the GameZIP's download size, and opens `FpDetails`. Called from
+/// `input()` only. Size 0 = the probe failed (shown as "?" in the popup).
+fn run_fp_info_flow(selection: usize, scroll: usize) {
+    let id = match LIBRARY.lock() {
+        Ok(g) => g.cover_candidates.get(selection).map(|c| c.id.clone()),
+        Err(_) => None,
+    };
+    let Some(id) = id else { return };
+    let url = crate::sources::gamezip::get_url(&id);
+    let size = net::head_content_length(&url).unwrap_or(0);
+    if let Ok(mut s) = LIBRARY.lock() {
+        // Only open if we're still on the gallery (user might have navigated
+        // away during the HEAD).
+        if matches!(s.screen, Screen::FpGallery { .. }) {
+            s.screen = Screen::FpDetails { selection, scroll, size };
+        }
+    }
 }
 
 /// JOUER sort picker (Y) input: Up/Down move, A applies + persists + re-sorts,
@@ -2051,10 +2341,19 @@ fn handle_sort_modal_input(
                 selection += 1;
             }
         }
+        "X" => {
+            // Toggle the sort direction in place: flip + persist + re-sort now.
+            // The list reorders, so a later B can't restore a meaningful cursor —
+            // park prev at the top.
+            set_sort_reverse(!current_sort_reverse());
+            sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
+            s.screen = Screen::SortModal { selection, prev_sel: 0, prev_scroll: 0 };
+            return;
+        }
         "A" => {
             // Applied a new sort → the list reorders, so land on the top.
             set_sort_mode(selection as u8);
-            sort_entries(&mut s.entries, current_sort_mode());
+            sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
             s.screen = Screen::List { selection: 0, scroll_offset: 0 };
             return;
         }
@@ -2068,18 +2367,31 @@ fn handle_sort_modal_input(
     s.screen = Screen::SortModal { selection, prev_sel, prev_scroll };
 }
 
+/// Number of criteria in the DISTANT sort picker. Flashpoint exposes only NAME
+/// (developers are unknown — removed); archive.org exposes NAME + SIZE. Direction
+/// (asc/desc) is a separate X toggle, not a criterion.
+fn remote_sort_count(fp: bool) -> usize {
+    if fp {
+        1
+    } else {
+        2
+    }
+}
+
 /// DISTANT sort picker (Y). `fp` selects the target list + option set:
-/// Flashpoint = name / developer (`cover_candidates`); archive.org = name / size
-/// (`remote_files`). A applies + returns to the list (cursor top), B restores.
+/// Flashpoint = name only (`cover_candidates`); archive.org = name / size
+/// (`remote_files`). X toggles direction; A applies + returns to the list
+/// (cursor top), B restores.
 fn handle_remote_sort_modal_input(
     s: &mut State,
     button: &str,
     mut selection: usize,
     fp: bool,
+    reverse: bool,
     prev_sel: usize,
     prev_scroll: usize,
 ) {
-    const N: usize = 2;
+    let n = remote_sort_count(fp);
     match button {
         "Up" | "StickLUp" => {
             if selection > 0 {
@@ -2087,26 +2399,33 @@ fn handle_remote_sort_modal_input(
             }
         }
         "Down" | "StickLDown" => {
-            if selection + 1 < N {
+            if selection + 1 < n {
                 selection += 1;
             }
         }
+        "X" => {
+            // Flip the direction indicator (applied on A). Stays in the modal.
+            s.screen = Screen::RemoteSortModal {
+                selection,
+                fp,
+                reverse: !reverse,
+                prev_sel,
+                prev_scroll,
+            };
+            return;
+        }
         "A" => {
             if fp {
-                if selection == 1 {
-                    s.cover_candidates.sort_by(|a, b| {
-                        a.developer
-                            .to_lowercase()
-                            .cmp(&b.developer.to_lowercase())
-                            .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
-                    });
-                } else {
-                    s.cover_candidates
-                        .sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+                // Only NAME (A-Z); X gives Z-A.
+                s.cover_candidates
+                    .sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+                if reverse {
+                    s.cover_candidates.reverse();
                 }
                 s.screen = Screen::FpGallery { selection: 0, scroll: 0 };
             } else {
                 if selection == 1 {
+                    // SIZE: biggest first by default.
                     s.remote_files.sort_by(|a, b| {
                         b.size_bytes
                             .cmp(&a.size_bytes)
@@ -2115,6 +2434,9 @@ fn handle_remote_sort_modal_input(
                 } else {
                     s.remote_files
                         .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                }
+                if reverse {
+                    s.remote_files.reverse();
                 }
                 s.screen = Screen::DistantFiles { selection: 0, scroll_offset: 0 };
             }
@@ -2131,7 +2453,7 @@ fn handle_remote_sort_modal_input(
         }
         _ => {}
     }
-    s.screen = Screen::RemoteSortModal { selection, fp, prev_sel, prev_scroll };
+    s.screen = Screen::RemoteSortModal { selection, fp, reverse, prev_sel, prev_scroll };
 }
 
 /// RENOMMER flow: open swkbd with the current display_name pre-filled,
@@ -2352,6 +2674,7 @@ fn modal_kind(screen: Screen) -> u8 {
         Screen::SettingsKeymapEditor => 8,
         Screen::SortModal { .. } => 9,
         Screen::RemoteSortModal { .. } => 10,
+        Screen::FpDetails { .. } => 11,
         _ => 0,
     }
 }
@@ -2377,7 +2700,7 @@ static PENDING_AFTER_CLOSE: Mutex<Option<PendingClose>> = Mutex::new(None);
 /// DistantHistoryConfirm=6) are handled EXPLICITLY in their own handlers instead
 /// (they defer the mutation too — see `PendingClose`), so they're not listed here.
 fn modal_close_deferred(kind: u8) -> bool {
-    matches!(kind, 1 | 3 | 4 | 5 | 9 | 10)
+    matches!(kind, 1 | 3 | 4 | 5 | 9 | 10 | 11)
 }
 
 /// Draw the JOUER gallery (snapshot + draw) — shared by the List screen and the
@@ -2572,8 +2895,8 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 // same order (TOUCHES / RENOMMER / SUPPRIMER / RETOUR).
                 let lc = crate::loc::s();
                 // Order must match OPTIONS_ENTRIES (TOUCHES/RENOMMER/JAQUETTE/
-                // SUPPRIMER/RETOUR).
-                let labels = [lc.opt_keys, lc.opt_rename, lc.opt_cover, lc.opt_delete, lc.opt_back];
+                // SUPPRIMER). No back row — B backs out.
+                let labels = [lc.opt_keys, lc.opt_rename, lc.opt_cover, lc.opt_delete];
                 backend.draw_library_options(
                     &entry.display_name,
                     selection,
@@ -2591,7 +2914,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             // REGLAGES is a full navbar TAB now (not a popup): no dim backdrop,
             // no BACK entry — leave via L/R.
             let lc = crate::loc::s();
-            let entries = [lc.set_keys, lc.set_language, lc.set_quit];
+            let entries = [lc.set_keys, lc.set_language, lc.set_report_bug, lc.set_suggest, lc.set_quit];
             backend.draw_library_settings(selection, &entries);
         }
         Screen::SettingsKeymapEditor => {
@@ -2605,6 +2928,36 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             let names: std::vec::Vec<&str> =
                 crate::loc::PICKER_LANGS.iter().map(|l| l.native_name()).collect();
             backend.draw_library_language_picker(selection, &names);
+        }
+        Screen::BugPicker { selection, scroll_offset } => {
+            let names = LIBRARY
+                .lock()
+                .ok()
+                .map(|s| {
+                    s.entries
+                        .iter()
+                        .map(|e| e.display_name.clone())
+                        .collect::<std::vec::Vec<_>>()
+                })
+                .unwrap_or_default();
+            let refs: std::vec::Vec<&str> = names.iter().map(|n| n.as_str()).collect();
+            let lc = crate::loc::s();
+            backend.draw_library_bug_picker(
+                selection,
+                scroll_offset,
+                &refs,
+                BUG_PICKER_VISIBLE_ROWS,
+                lc.bug_pick_title,
+                lc.bug_pick_footer,
+            );
+        }
+        Screen::BugResult => {
+            let (msg, ok) = LIBRARY
+                .lock()
+                .ok()
+                .map(|s| (s.bug_msg.clone(), s.bug_ok))
+                .unwrap_or_default();
+            backend.draw_library_bug_result(&msg, ok);
         }
         Screen::DeleteConfirm { game_idx } => {
             let snap = LIBRARY
@@ -2687,6 +3040,22 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 );
             }
         }
+        Screen::FpDetails { selection, size, .. } => {
+            let snap = LIBRARY.lock().ok().and_then(|s| {
+                s.cover_candidates.get(selection).map(|c| {
+                    (
+                        c.title.clone(),
+                        c.developer.clone(),
+                        c.publisher.clone(),
+                        c.release_date.clone(),
+                    )
+                })
+            });
+            if let Some((title, dev, publisher, date)) = snap {
+                backend.draw_library_dim_backdrop();
+                backend.draw_library_fp_details(&title, &dev, &publisher, &date, size);
+            }
+        }
         Screen::SortModal { selection, .. } => {
             let lc = crate::loc::s();
             let labels = [
@@ -2696,16 +3065,19 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 lc.sort_played,
                 lc.sort_size,
             ];
-            backend.draw_library_sort_modal(selection, &labels, lc.sort_title, lc.sort_footer);
+            let dir = if current_sort_reverse() { lc.sort_dir_desc } else { lc.sort_dir_asc };
+            backend.draw_library_sort_modal(selection, &labels, lc.sort_title, lc.sort_footer, dir);
         }
-        Screen::RemoteSortModal { selection, fp, .. } => {
+        Screen::RemoteSortModal { selection, fp, reverse, .. } => {
             let lc = crate::loc::s();
-            let labels: [&str; 2] = if fp {
-                [lc.sort_alpha, lc.sort_dev]
+            // Flashpoint: NAME only. archive.org: NAME + SIZE.
+            let labels: &[&str] = if fp {
+                &[lc.sort_alpha]
             } else {
-                [lc.sort_alpha, lc.sort_size]
+                &[lc.sort_alpha, lc.sort_size]
             };
-            backend.draw_library_sort_modal(selection, &labels, lc.sort_title, lc.sort_footer);
+            let dir = if reverse { lc.sort_dir_desc } else { lc.sort_dir_asc };
+            backend.draw_library_sort_modal(selection, labels, lc.sort_title, lc.sort_footer, dir);
         }
         // ── Phase 3.7 DISTANT mode ─────────────────────────────────────
         Screen::DistantIdle { selection } => {
@@ -2725,8 +3097,9 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 .and_then(|s| s.url_history.get(url_idx).cloned())
                 .unwrap_or_default();
             // Reuse the per-game OPTIONS modal style for the URL options.
+            // No back row — B backs out.
             let lc = crate::loc::s();
-            let labels = [lc.opt_edit, lc.opt_delete, lc.opt_back];
+            let labels = [lc.opt_edit, lc.opt_delete];
             backend.draw_library_dim_backdrop();
             backend.draw_library_options(&url, selection, &labels);
         }
@@ -2862,11 +3235,17 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             // completion. The progress snapshot reflects whatever the
             // last tick updated.
             let (done, total) = net::download_progress();
-            // Snapshot the filename for the UI.
+            // Snapshot the name for the UI — prefer the REAL Flashpoint title
+            // (with its `:` etc.) over the sanitized on-SD filename.
             let file_name = LIBRARY
                 .lock()
                 .ok()
-                .map(|s| s.download_file_name.clone())
+                .map(|s| {
+                    s.download_title
+                        .clone()
+                        .filter(|t| !t.trim().is_empty())
+                        .unwrap_or_else(|| s.download_file_name.clone())
+                })
                 .unwrap_or_default();
             backend.draw_library_distant_downloading(&file_name, done, total);
             match net::tick_download() {
@@ -2935,11 +3314,13 @@ fn finish_gamezip(zip_path: &str, swf_path: &str) -> bool {
 /// item without re-typing the URL. The just-downloaded basename is
 /// tracked in `downloaded_basenames` so the list shows a `✓` next to it.
 fn on_download_finished() {
-    let (out_path, file_name, zip_extract) = match LIBRARY.lock() {
+    let (out_path, file_name, zip_extract, cover_url, real_title) = match LIBRARY.lock() {
         Ok(g) => (
             g.download_out_path.clone(),
             g.download_file_name.clone(),
             g.download_zip_extract.clone(),
+            g.download_cover_url.clone(),
+            g.download_title.clone(),
         ),
         Err(_) => return,
     };
@@ -2958,15 +3339,54 @@ fn on_download_finished() {
                 s.download_file_name.clear();
                 s.download_out_path.clear();
                 s.download_zip_extract = None;
+                s.download_cover_url = None;
+                s.download_title = None;
                 s.download_resume_pos = None;
             }
             set_distant_error(crate::loc::s().err_no_swf);
             return;
         }
+        // Auto-fetch the game's cover (logo) so JOUER shows its art right away —
+        // no manual "Jaquette" step. Done WITHOUT the LIBRARY lock (synchronous
+        // HTTPS); best-effort, a failure just leaves the default tile.
+        if let Some(url) = &cover_url {
+            if !file_name.is_empty() {
+                match crate::covers::fetch_url_and_cache(&file_name, url) {
+                    Ok(p) => {
+                        log(&std::format!("library: auto-cover cached -> {}\n", p));
+                        crate::backend::render::invalidate_cover(&file_name);
+                    }
+                    Err(e) => log(&std::format!("library: auto-cover failed: {}\n", e)),
+                }
+            }
+        }
+        // Persist the REAL Flashpoint title as the display name (the filename
+        // dropped `:` and friends), so the game shows its true name AND a later
+        // "Jaquette" search uses the real title. Sidecar write does its own SD
+        // commit; no LIBRARY lock needed here.
+        let stem = file_name.strip_suffix(".swf").unwrap_or(&file_name);
+        let restored_title = real_title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty() && *t != stem);
+        if let (Some(title), false) = (restored_title, file_name.is_empty()) {
+            if write_meta_sidecar(&file_name, title) {
+                log(&std::format!("library: saved real title \"{}\" for {}\n", title, file_name));
+            }
+        }
         if let Ok(mut s) = LIBRARY.lock() {
             s.download_file_name.clear();
             s.download_out_path.clear();
             s.download_zip_extract = None;
+            s.download_cover_url = None;
+            s.download_title = None;
+            // Reflect the restored title on the in-memory entry too (so it shows
+            // immediately without waiting for the next library scan).
+            if let Some(title) = restored_title {
+                if let Some(e) = s.entries.iter_mut().find(|e| e.basename == file_name) {
+                    e.display_name = title.to_string();
+                }
+            }
             if !file_name.is_empty() && !s.downloaded_basenames.iter().any(|n| n == &file_name) {
                 s.downloaded_basenames.push(file_name);
             }

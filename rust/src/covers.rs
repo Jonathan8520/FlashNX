@@ -211,8 +211,19 @@ pub fn fetch_and_cache(
     basename: &str,
     candidate: &flashpoint::CatalogEntry,
 ) -> Result<std::string::String, std::string::String> {
-    // Logos are small PNGs; 4 MB cap is plenty and matches the metadata cap.
-    let bytes = crate::net::http_get(&candidate.cover_url, 4 * 1024 * 1024)?;
+    fetch_url_and_cache(basename, &candidate.cover_url)
+}
+
+/// Download a cover image from `cover_url` and cache it as `basename`'s cover.
+/// Synchronous (HTTPS GET). Used by the per-game "Jaquette" picker and by the
+/// Flashpoint game download, which grabs the cover automatically so the game
+/// shows its art in JOUER without a manual step.
+pub fn fetch_url_and_cache(
+    basename: &str,
+    cover_url: &str,
+) -> Result<std::string::String, std::string::String> {
+    // Logos are PNGs (a few KB up to a few hundred KB); 4 MB cap is plenty.
+    let bytes = crate::net::http_get(cover_url, 4 * 1024 * 1024)?;
     let _ = std::fs::create_dir_all(COVER_CACHE_DIR);
     let path = cache_path(basename);
     std::fs::write(&path, &bytes).map_err(|e| std::format!("write cover: {}", e))?;

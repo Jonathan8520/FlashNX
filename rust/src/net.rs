@@ -14,6 +14,9 @@ use core::ffi::{c_char, c_int};
 extern "C" {
     fn write_cacert_to_sd(data: *const c_char, len: c_int) -> c_int;
     fn https_get_into_buf(url: *const c_char, buf: *mut c_char, cap: c_int) -> c_int;
+    // Synchronous HTTPS POST with a JSON body (bug-report relay). Same return
+    // contract as https_get_into_buf (-1 init, -2 transfer, -3 overflow).
+    fn https_post_json(url: *const c_char, body: *const c_char, buf: *mut c_char, cap: c_int) -> c_int;
     // Fills `out` with a short description of the last transfer failure
     // ("curl 60 (...) http 0"). Read after a negative `https_get_into_buf`.
     fn https_last_error_desc(out: *mut c_char, cap: c_int);
@@ -27,6 +30,15 @@ extern "C" {
     fn https_get_tick() -> c_int;
     fn https_get_buffer(out: *mut c_char, cap: c_int) -> c_int;
     fn https_get_cancel();
+    // Isolated async GET for cover/logo thumbnails (separate curl handle from
+    // the metadata GET above — see net.cpp). Lets the gallery stream logos
+    // without ever blocking the render thread.
+    fn https_thumb_start(url: *const c_char) -> c_int;
+    fn https_thumb_tick() -> c_int;
+    fn https_thumb_buffer(out: *mut c_char, cap: c_int) -> c_int;
+    fn https_thumb_cancel();
+    // Synchronous HEAD → Content-Length (or -1). Flashpoint details popup.
+    fn https_head_content_length(url: *const c_char) -> i64;
     // header/guide are localized prompt strings supplied by Rust (loc.rs).
     fn swkbd_prompt_url(header: *const c_char, guide: *const c_char, initial: *const c_char, out: *mut c_char, cap: c_int) -> c_int;
     fn swkbd_prompt_rename(header: *const c_char, guide: *const c_char, initial: *const c_char, out: *mut c_char, cap: c_int) -> c_int;
@@ -110,6 +122,42 @@ pub(crate) fn http_get(
     if n < 0 {
         // -2 = transfer failed (curl/HTTP); surface the real cause. Other
         // negatives (-1 init) carry no curl result, so show the raw code.
+        let detail = if n == -2 {
+            last_https_error()
+        } else {
+            std::format!("rc {}", n)
+        };
+        return Err(crate::loc::err_https(&detail));
+    }
+    buf.truncate(n as usize);
+    Ok(buf)
+}
+
+/// Synchronous HTTPS POST of a JSON `body` to `url`; returns the response
+/// bytes (truncated to the real length). Same TLS path as `http_get`. Used by
+/// the bug-report relay (`crate::bugreport`). Blocks the caller for the
+/// duration (a couple seconds) — run it hoisted out of the LIBRARY lock, like
+/// the other HTTPS flows.
+pub(crate) fn post_json(
+    url: &str,
+    body: &str,
+    cap: usize,
+) -> Result<std::vec::Vec<u8>, std::string::String> {
+    let mut buf = std::vec![0u8; cap];
+    let url_c = cstr(url);
+    let body_c = cstr(body);
+    let n = unsafe {
+        https_post_json(
+            url_c.as_ptr() as *const c_char,
+            body_c.as_ptr() as *const c_char,
+            buf.as_mut_ptr() as *mut c_char,
+            buf.len() as c_int,
+        )
+    };
+    if n == -3 {
+        return Err(std::string::String::from(crate::loc::s().err_too_large));
+    }
+    if n < 0 {
         let detail = if n == -2 {
             last_https_error()
         } else {
@@ -259,6 +307,60 @@ pub fn cancel_archive_fetch() {
     unsafe { https_get_cancel() };
 }
 
+// ── Async thumbnail GET (cover/logo grids) ─────────────────────────────────
+
+/// Result of polling an async thumbnail fetch.
+pub enum ThumbPoll {
+    Pending,
+    Done(std::vec::Vec<u8>),
+    Error,
+}
+
+/// Start an async thumbnail GET. Returns true if it started (false if one is
+/// already in flight or init failed — the caller serialises to one at a time).
+pub(crate) fn thumb_start(url: &str) -> bool {
+    let url_c = cstr(url);
+    unsafe { https_thumb_start(url_c.as_ptr() as *const c_char) == 0 }
+}
+
+/// Poll the in-flight thumbnail GET. On `Done`, returns the response bytes.
+pub(crate) fn thumb_tick() -> ThumbPoll {
+    let rc = unsafe { https_thumb_tick() };
+    if rc == 0 {
+        return ThumbPoll::Pending;
+    }
+    if rc < 0 {
+        return ThumbPoll::Error;
+    }
+    // rc == 1: bytes ready. Logos are usually <1 MB but some run larger; 4 MB cap.
+    const CAP: usize = 4 * 1024 * 1024;
+    let mut buf = std::vec![0u8; CAP];
+    let n = unsafe { https_thumb_buffer(buf.as_mut_ptr() as *mut c_char, CAP as c_int) };
+    if n < 0 {
+        return ThumbPoll::Error;
+    }
+    buf.truncate(n as usize);
+    ThumbPoll::Done(buf)
+}
+
+/// Abort any in-flight thumbnail GET (gallery left / new search started).
+pub(crate) fn thumb_cancel() {
+    unsafe { https_thumb_cancel() };
+}
+
+/// Content-Length of `url` via a HEAD request (follows redirects). `None` if the
+/// server doesn't report it / the request fails. Blocking (~a few hundred ms) —
+/// call hoisted out of the LIBRARY lock. Used by the Flashpoint details popup.
+pub(crate) fn head_content_length(url: &str) -> Option<u64> {
+    let url_c = cstr(url);
+    let n = unsafe { https_head_content_length(url_c.as_ptr() as *const c_char) };
+    if n > 0 {
+        Some(n as u64)
+    } else {
+        None
+    }
+}
+
 /// Percent-encode characters that aren't URL-safe in a path segment.
 /// Keeps ASCII alphanumerics, `.`, `-`, `_`, `~`; everything else
 /// becomes %XX (UTF-8 byte-per-byte). Spaces → %20.
@@ -388,6 +490,38 @@ pub fn prompt_rename(initial: &str) -> Option<std::string::String> {
     // We allow returning an empty string (caller interprets as "revert
     // to basename"), so don't filter empties here.
     std::string::String::from_utf8(buf).ok()
+}
+
+/// Generic long free-text prompt (2 KB buffer, no prefill). Reuses the generic
+/// C++ `swkbd_prompt_search` with caller-supplied header/guide. Used by the bug
+/// report and the suggestion flow. Returns None on cancel; may return an empty
+/// string (caller decides whether that's allowed).
+pub fn prompt_long(header: &str, guide: &str) -> Option<std::string::String> {
+    let mut buf = std::vec![0u8; 2048];
+    let initial = [0u8]; // empty prefill
+    let header_c = cstr(header);
+    let guide_c = cstr(guide);
+    let rc = unsafe {
+        swkbd_prompt_search(
+            header_c.as_ptr() as *const c_char,
+            guide_c.as_ptr() as *const c_char,
+            initial.as_ptr() as *const c_char,
+            buf.as_mut_ptr() as *mut c_char,
+            buf.len() as c_int,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    let nul = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    buf.truncate(nul);
+    std::string::String::from_utf8(buf).ok()
+}
+
+/// Bug-report description prompt (empty input allowed — the report still carries
+/// the game's technical info).
+pub fn prompt_bug() -> Option<std::string::String> {
+    prompt_long(crate::loc::s().kbd_bug_header, crate::loc::s().kbd_bug_guide)
 }
 
 /// Search prompt for filtering the DistantFiles list. `initial` pre-fills

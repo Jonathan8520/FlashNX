@@ -57,7 +57,7 @@ pub fn search(name: &str) -> Result<std::vec::Vec<flashpoint::CatalogEntry>, std
     const MAX: usize = 60;
     let q = net::url_encode_path(name.trim());
     let url = std::format!(
-        "{}?smartSearch={}&platform=Flash&fields=id,title,developer,zipped",
+        "{}?smartSearch={}&platform=Flash&fields=id,title,developer,publisher,releaseDate,zipped",
         SEARCH_BASE, q
     );
     let bytes = net::http_get(&url, 1024 * 1024)?;
@@ -83,10 +83,22 @@ pub fn search(name: &str) -> Result<std::vec::Vec<flashpoint::CatalogEntry>, std
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let publisher = g
+            .get("publisher")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let release_date = g
+            .get("releaseDate")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         out.push(flashpoint::CatalogEntry {
             id: id.to_string(),
             title,
             developer,
+            publisher,
+            release_date,
             cover_url: flashpoint::logo_url(id),
         });
         if out.len() >= MAX {

@@ -34,7 +34,7 @@ flash-for-switch/
 │   │   ├── audio.cpp             # libnx audren wrapper + worker thread
 │   │   ├── exception.cpp         # native __libnx_exception_handler (symbolizable crash log)
 │   │   ├── swf_picker.cpp        # SD scan via opendir/readdir (works around the Horizon read_dir bug)
-│   │   ├── net.cpp               # swkbd (URL + rename) + remote import helpers
+│   │   ├── net.cpp               # swkbd prompts + HTTPS: sync GET/POST, async download + metadata GET + isolated thumbnail GET + HEAD size
 │   │   └── ruffle_bridge.cpp     # ruffle_log_cstr + getrandom + sysconf stubs + svcGetInfo RAM
 │   └── include/ruffle_bridge.h
 ├── rust/
@@ -43,10 +43,12 @@ flash-for-switch/
 │   ├── .cargo/config.toml        # target aarch64-nintendo-switch-freestanding + rustflags
 │   └── src/
 │       ├── lib.rs                # FFI exports + PlayerBuilder + SWF loader + input handlers + tick/render profiling
-│       ├── library.rs            # Library UI state + banner/icon embed + SWF header parse + meta/keymap sidecars
-│       ├── net.rs                # HTTPS transport: http_get (sync) + async curl multi download + swkbd prompts
-│       ├── sources/             # Multi-source: classify (archive.org / direct .swf) + Flashpoint cover lookup (metadata only)
-│       ├── covers.rs            # Local cover art: sidecar/cache/default resolution + PNG/JPEG decode + opt-in Flashpoint fetch
+│       ├── library.rs            # Library UI state + banner/icon embed + SWF header parse + meta/keymap sidecars + sort + bug-report/suggestion flows
+│       ├── bugreport.rs          # In-app bug report / suggestion: build JSON + POST to the relay (Cloudflare Worker in tools/bug-report-worker)
+│       ├── playtime.rs           # Per-game play time (playtime.json) + most-played sort
+│       ├── net.rs                # HTTPS transport: sync GET/POST + async download/metadata/thumbnail GET + HEAD size + swkbd prompts
+│       ├── sources/             # Multi-source: classify (archive.org / direct .swf) + Flashpoint search/cover logos + GameZIP game download (gamezip.rs)
+│       ├── covers.rs            # Local cover art: sidecar/cache/default resolution + PNG/JPEG decode + Flashpoint fetch (manual + auto-on-download)
 │       ├── keymap.rs             # JSON keymap (sidecar + default + fallback) + mutation API
 │       ├── menu.rs               # TOUCHES sub-screen state machine (list + dropdown)
 │       ├── loc.rs                # UI localization (EN/FR/ES/RU) + settings.json persistence

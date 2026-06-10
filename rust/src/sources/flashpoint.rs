@@ -19,6 +19,10 @@ pub struct CatalogEntry {
     pub id: std::string::String,
     pub title: std::string::String,
     pub developer: std::string::String,
+    /// Publisher + release date — shown in the Flashpoint details popup (`+`).
+    /// Empty when unknown / not requested (the cover picker leaves them blank).
+    pub publisher: std::string::String,
+    pub release_date: std::string::String,
     /// Fully-built logo (cover) URL for `id`.
     pub cover_url: std::string::String,
 }
@@ -88,6 +92,11 @@ pub fn search(
             id: id.to_string(),
             title,
             developer,
+            // The cover picker doesn't show these; left blank to keep its
+            // response small (the FpGallery details popup fills them — see
+            // gamezip::search).
+            publisher: std::string::String::new(),
+            release_date: std::string::String::new(),
             cover_url: logo_url(id),
         });
         // A short candidate list is all the cover-picker needs.

@@ -14,6 +14,7 @@
 #![feature(restricted_std)]
 
 mod backend;
+mod bugreport;
 mod covers;
 mod ffi;
 mod keymap;

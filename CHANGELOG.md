@@ -4,28 +4,36 @@ Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://
 
 ## v1.2.0 (unreleased)
 
-Library redesign: a tabbed navbar, a cover-art gallery, and a list-based importer.
+Big library update: a tabbed navbar, a cover-art gallery, a list-based importer, Flashpoint game downloads, library sorting, playtime, and in-app bug reports.
 
 ### Features
 
 - **Tabbed navigation**: a top navbar switched with **L / R** between **Play** (your games), **Import**, and **Settings**.
-- **Cover gallery**: the library is now a gallery of cover art (justified rows, each cover at its natural size) instead of a text list. Games with no cover get a generated tile (color + initials).
+- **Cover gallery**: the Play tab is a grid of cover art, 5 per row (covers are cropped to fill the tile). Games with no cover get a generated tile (color + initials).
 - **Your own covers**: drop a `<game>.png` or `.jpg` next to the `.swf` and it shows up as the cover.
-- **Flashpoint covers**: a game's options has a **Cover** action that searches the Flashpoint Archive by name and shows the candidates as thumbnails to pick from. The search name is cleaned up automatically (download-id suffixes such as `game-15938d603` are dropped), and **−** lets you retype the title when the filename does not match the catalog (e.g. `catmario` → `cat mario`).
-- **Import as a list**: the Import tab is now a list of your saved URLs. Press **A** to launch one, use the **+ Add a URL** row to enter a new one, and **+** on a URL to edit or delete it. It accepts archive.org items and direct `.swf` URLs.
+- **Flashpoint covers**: a game's options has a **Cover** action that searches the Flashpoint Archive by name and shows the candidates as thumbnails to pick from. The search name is cleaned up automatically (download-id suffixes such as `game-15938d603` are dropped), and **−** lets you retype the title when the filename does not match the catalog (for example `catmario` to `cat mario`).
+- **Download games from Flashpoint**: in the Import tab, **X** searches the Flashpoint Archive and shows the results as a cover grid; **A** downloads a game's `.swf` directly. Its cover is fetched automatically, and its real title is kept even when the filename cannot hold characters like `:`. Press **+** on a result to see its full title, developer, publisher, release date and download size.
+- **Import as a list**: the Import tab is a list of your saved URLs. Press **A** to launch one, use the **+ Add a URL** row to enter a new one, and **+** on a URL to edit or delete it. It accepts archive.org items and direct `.swf` URLs.
+- **Sort your library** (**Y** in the Play tab): by name, date added, last played, most played, or size. **X** reverses the order, and the choice is saved.
+- **Playtime**: each game tracks how long you have played it (shown under the selected game, and used by the "most played" sort).
+- **Report a bug or send a suggestion** (Settings tab): flag a game that renders or plays wrong, or send a feature idea. It opens an issue on the FlashNX repository, with no account and no login.
 
 ### Changes
 
-- **Controls**: **−** is search, **+** is the selected game's options; the default-controls, language and **Quit** actions all live in the Settings tab. Switching tabs is **L / R** only.
+- **Controls**: **−** is search, **+** is the selected game's options; default controls, language, bug report, suggestion and **Quit** all live in the Settings tab. Switching tabs is **L / R** only, and **B** always just backs out of a modal (the redundant "Back" rows were removed).
+- **Audio level**: the in-app sound now matches the rest of the Switch (it used to be noticeably louder).
 
 ### Fixes
 
-- **Large backgrounds no longer turn white**: games whose backdrop or floor is a bitmap wider or taller than 2048px (e.g. Mario Combat's sky and ground) used to render as solid white blocks. They now draw correctly.
+- **Large backgrounds no longer turn white**: games whose backdrop or floor is a bitmap wider or taller than 2048px (for example Mario Combat's sky and ground) used to render as solid white blocks. They now draw correctly.
 - **Deleting a game cleans up everything**: removing a game now also deletes its cached online cover and the cover sidecars saved under the plain game name (on top of the `.swf` and its keymap/rename/save files), and clears the leftover Import-list "downloaded" badge and the on-screen cover, so re-importing the same game later starts fresh.
+- **Flashpoint cover grids no longer freeze the UI**: logos load in the background, so a broad search with dozens of results stays responsive while the thumbnails fill in.
+- **Missing accents** restored on several labels (the sort options, "edit", "download").
 
 ### Notes
 
-- Covers use the public Flashpoint metadata and logo API to enrich games you already have. FlashNX never downloads games from Flashpoint.
+- Covers and downloads use the public Flashpoint Archive APIs (metadata, logos, GameZIP). Downloading a game is always something you choose, one game at a time.
+- Bug reports and suggestions are anonymous: they go through a small relay that opens a GitHub issue, so you never need an account or to log in.
 
 ## v1.1.1 (2026-06-05)
 

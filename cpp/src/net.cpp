@@ -204,6 +204,58 @@ extern "C" int https_get_into_buf(const char* url, char* buf, int cap) {
     return w.pos;
 }
 
+// Synchronous HTTPS POST with a JSON body. Used by the bug-report flow
+// (`crate::bugreport`) to hand a small JSON payload to the relay endpoint that
+// opens the GitHub issue. Same TLS/CA setup as `https_get_into_buf`; sets the
+// `Content-Type: application/json` header and POSTs `body` (NUL-terminated).
+// The response (the relay's JSON, e.g. the created issue URL) is written into
+// `buf`. Returns bytes written, or a negative code (-1 init, -2 transfer
+// failed, -3 response overflow) — mirrors `https_get_into_buf` so the Rust
+// layer can reuse `https_last_error_desc`.
+extern "C" int https_post_json(const char* url, const char* body, char* buf, int cap) {
+    if (net_init() != 0) return -1;
+    if (cap < 2) return -3;
+    CURL* c = curl_easy_init();
+    if (!c) return -1;
+    struct curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    headers = curl_slist_append(headers, "Accept: application/json");
+    BufferWriter w = { buf, cap - 1, 0, false };
+    curl_easy_setopt(c, CURLOPT_URL, url);
+    curl_easy_setopt(c, CURLOPT_USERAGENT, "FlashNX/0.0.1 (Nintendo Switch homebrew)");
+    curl_easy_setopt(c, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(c, CURLOPT_POST, 1L);
+    curl_easy_setopt(c, CURLOPT_POSTFIELDS, body ? body : "");
+    curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, (long)(body ? std::strlen(body) : 0));
+    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
+    curl_easy_setopt(c, CURLOPT_CAINFO, CACERT_PATH);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, write_to_buffer);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, &w);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 10L);
+    CURLcode res = curl_easy_perform(c);
+    long http_code = 0;
+    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(c);
+    curl_slist_free_all(headers);
+    if (w.overflow) {
+        std::printf("https_post %s: overflow (cap=%d)\n", url, cap);
+        std::fflush(stdout);
+        return -3;
+    }
+    if (res != CURLE_OK || http_code < 200 || http_code >= 400) {
+        g_last_curl_result = (int)res;
+        g_last_http_code = http_code;
+        std::printf("https_post %s: curl=%d (%s) http=%ld\n",
+                    url, (int)res, curl_easy_strerror(res), http_code);
+        std::fflush(stdout);
+        return -2;
+    }
+    buf[w.pos] = '\0';
+    return w.pos;
+}
+
 // Short human description of the most recent transfer failure recorded by
 // `https_get_into_buf` (or `https_download_tick`). Rust calls this after a
 // negative return to compose the on-screen error, e.g.
@@ -424,6 +476,139 @@ extern "C" void https_get_cancel(void) {
         multi_cleanup(false);
     }
     g_get_buf.clear();
+}
+
+// ── Async thumbnail GET (Flashpoint logos, non-blocking) ──────────────────
+// A SECOND, fully isolated curl-multi handle dedicated to cover/logo
+// thumbnails. It deliberately does NOT touch g_multi/g_handle (the
+// archive.org metadata + download handle), so a thumbnail stream and a
+// metadata fetch can never corrupt each other's state — they live on
+// different library screens but the isolation removes any doubt. The
+// FpGallery / cover-picker render pumps `https_thumb_tick` once per frame and
+// decodes ONE finished logo, so the UI never blocks on the (sometimes
+// hundreds-of-KB) logo downloads. Same return contract as the metadata GET.
+namespace {
+CURLM*      g_thumb_multi  = nullptr;
+CURL*       g_thumb_handle = nullptr;
+std::string g_thumb_buf;
+int         g_thumb_curl_result = 0;
+long        g_thumb_http_code   = 0;
+
+void thumb_cleanup() {
+    if (g_thumb_handle) {
+        if (g_thumb_multi) {
+            curl_multi_remove_handle(g_thumb_multi, g_thumb_handle);
+        }
+        curl_easy_cleanup(g_thumb_handle);
+        g_thumb_handle = nullptr;
+    }
+    if (g_thumb_multi) {
+        curl_multi_cleanup(g_thumb_multi);
+        g_thumb_multi = nullptr;
+    }
+}
+} // namespace
+
+// Start an async thumbnail GET. 0 = started, -1 init, -5 if one is already in
+// flight (the caller serialises to one logo at a time).
+extern "C" int https_thumb_start(const char* url) {
+    if (g_thumb_multi || g_thumb_handle) {
+        return -5;
+    }
+    if (net_init() != 0) return -1;
+    CURLM* m = curl_multi_init();
+    CURL* c = curl_easy_init();
+    if (!m || !c) {
+        if (m) curl_multi_cleanup(m);
+        if (c) curl_easy_cleanup(c);
+        return -1;
+    }
+    g_thumb_buf.clear();
+    curl_easy_setopt(c, CURLOPT_URL, url);
+    curl_easy_setopt(c, CURLOPT_USERAGENT, "FlashNX/0.0.1 (Nintendo Switch homebrew)");
+    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
+    curl_easy_setopt(c, CURLOPT_CAINFO, CACERT_PATH);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, write_to_string);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, &g_thumb_buf);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 20L);
+    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 8L);
+    curl_multi_add_handle(m, c);
+    g_thumb_multi = m;
+    g_thumb_handle = c;
+    g_thumb_curl_result = 0;
+    g_thumb_http_code = 0;
+    return 0;
+}
+
+// Pump the thumbnail GET once. 0 = in progress, 1 = done (in g_thumb_buf),
+// <0 = error (handle cleaned up).
+extern "C" int https_thumb_tick(void) {
+    if (!g_thumb_multi) return -1;
+    int still_running = 0;
+    CURLMcode mc = curl_multi_perform(g_thumb_multi, &still_running);
+    if (mc != CURLM_OK) {
+        thumb_cleanup();
+        return -2;
+    }
+    if (still_running > 0) return 0;
+    bool ok = false;
+    CURLMsg* msg;
+    int msgs_left = 0;
+    while ((msg = curl_multi_info_read(g_thumb_multi, &msgs_left))) {
+        if (msg->msg == CURLMSG_DONE && msg->easy_handle == g_thumb_handle) {
+            g_thumb_curl_result = (int)msg->data.result;
+            curl_easy_getinfo(g_thumb_handle, CURLINFO_RESPONSE_CODE, &g_thumb_http_code);
+            ok = (msg->data.result == CURLE_OK) && (g_thumb_http_code >= 200) && (g_thumb_http_code < 400);
+            break;
+        }
+    }
+    thumb_cleanup();
+    return ok ? 1 : -2;
+}
+
+// Copy the completed thumbnail bytes into `out`. Returns bytes copied, or -3 if
+// it doesn't fit in `cap`. Call after https_thumb_tick == 1.
+extern "C" int https_thumb_buffer(char* out, int cap) {
+    if (!out || cap < 1) return -1;
+    const int n = (int)g_thumb_buf.size();
+    if (n > cap) return -3;
+    std::memcpy(out, g_thumb_buf.data(), (size_t)n);
+    return n;
+}
+
+extern "C" void https_thumb_cancel(void) {
+    thumb_cleanup();
+    g_thumb_buf.clear();
+}
+
+// Synchronous HEAD: return the Content-Length of `url` (following redirects),
+// or -1 if unavailable. Used by the Flashpoint details popup to show a game's
+// download size without fetching the whole GameZIP. Blocks ~a few hundred ms.
+extern "C" long long https_head_content_length(const char* url) {
+    if (net_init() != 0) return -1;
+    CURL* c = curl_easy_init();
+    if (!c) return -1;
+    curl_easy_setopt(c, CURLOPT_URL, url);
+    curl_easy_setopt(c, CURLOPT_NOBODY, 1L); // HEAD request
+    curl_easy_setopt(c, CURLOPT_USERAGENT, "FlashNX/0.0.1 (Nintendo Switch homebrew)");
+    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
+    curl_easy_setopt(c, CURLOPT_CAINFO, CACERT_PATH);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 15L);
+    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 8L);
+    CURLcode res = curl_easy_perform(c);
+    long long len = -1;
+    if (res == CURLE_OK) {
+        curl_off_t cl = -1;
+        curl_easy_getinfo(c, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &cl);
+        if (cl > 0) len = (long long)cl;
+    } else {
+        std::printf("https_head %s: curl=%d (%s)\n", url, (int)res, curl_easy_strerror(res));
+        std::fflush(stdout);
+    }
+    curl_easy_cleanup(c);
+    return len;
 }
 
 // Generic swkbd prompt for a display name (Phase 3.4.bis RENOMMER). Pre-
