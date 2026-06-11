@@ -307,6 +307,48 @@ pub fn cancel_archive_fetch() {
     unsafe { https_get_cancel() };
 }
 
+/// Result of polling a generic async GET (`start_get_async` / `tick_get_async`).
+pub enum GetPoll {
+    Pending,
+    Done(std::vec::Vec<u8>),
+    Error(std::string::String),
+}
+
+/// Start a generic async GET of `url` (non-blocking). Shares the single C++
+/// `https_get_*` multi handle with the archive.org metadata fetch, so only one
+/// of the two runs at a time (the UI serialises them). Used for the async
+/// Flashpoint game search so its result list arrives behind a spinner instead
+/// of freezing the UI on the blocking HTTP.
+pub fn start_get_async(url: &str) -> Result<(), std::string::String> {
+    let url_c = cstr(url);
+    let rc = unsafe { https_get_start(url_c.as_ptr() as *const c_char) };
+    if rc != 0 {
+        log(&std::format!("net: https_get_start rc={}\n", rc));
+        return Err(crate::loc::err_https(&std::format!("rc {}", rc)));
+    }
+    Ok(())
+}
+
+/// Poll a generic async GET once (call per frame while loading). On `Done`,
+/// hands back the raw response bytes for the caller to parse.
+pub fn tick_get_async() -> GetPoll {
+    let rc = unsafe { https_get_tick() };
+    if rc == 0 {
+        return GetPoll::Pending;
+    }
+    if rc < 0 {
+        return GetPoll::Error(crate::loc::err_https(&last_https_error()));
+    }
+    const CAP: usize = 4 * 1024 * 1024;
+    let mut buf = std::vec![0u8; CAP];
+    let n = unsafe { https_get_buffer(buf.as_mut_ptr() as *mut c_char, CAP as c_int) };
+    if n < 0 {
+        return GetPoll::Error(std::string::String::from(crate::loc::s().err_too_large));
+    }
+    buf.truncate(n as usize);
+    GetPoll::Done(buf)
+}
+
 // ── Async thumbnail GET (cover/logo grids) ─────────────────────────────────
 
 /// Result of polling an async thumbnail fetch.

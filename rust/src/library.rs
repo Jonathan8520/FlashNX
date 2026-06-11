@@ -563,6 +563,11 @@ pub(crate) struct State {
     /// Last search term used for the `CoverPicker`, so Minus (refine) can
     /// pre-fill the keyboard with it instead of the raw filename-derived query.
     cover_query: std::string::String,
+    /// True while an async Flashpoint game search (X in the importer) is in
+    /// flight: the `FpGallery` arm then shows a spinner and polls the async GET
+    /// instead of drawing the (still-empty) cover grid. Avoids the UI freeze the
+    /// old synchronous `gamezip::search` caused.
+    fp_loading: bool,
     /// URL of the async archive.org fetch in flight (`Screen::DistantLoading`),
     /// pushed to history once the fetch succeeds.
     pending_fetch_url: std::string::String,
@@ -599,6 +604,7 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     cover_candidates: std::vec::Vec::new(),
     cover_msg: std::string::String::new(),
     cover_query: std::string::String::new(),
+    fp_loading: false,
     pending_fetch_url: std::string::String::new(),
     bug_msg: std::string::String::new(),
     bug_ok: false,
@@ -1817,30 +1823,33 @@ fn run_fp_search_flow() {
     if query.is_empty() {
         return;
     }
-    let (mut cands, msg) = match crate::sources::gamezip::search(&query) {
-        Ok(list) if list.is_empty() => {
-            (std::vec::Vec::new(), crate::loc::s().cover_none.to_string())
-        }
-        Ok(list) => (list, std::string::String::new()),
-        Err(e) => (std::vec::Vec::new(), e),
-    };
-    // The db-api returns hits in its own (relevance-ish) order, which reads as
-    // random in a cover grid. Default to A-Z so the gallery is browsable; the
-    // user can re-sort / reverse with Y.
-    cands.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
-    log(&std::format!(
-        "library: flashpoint game search \"{}\" -> {} hit(s)\n",
-        query,
-        cands.len(),
-    ));
-    // New result set → drop any thumbnail fetch still in flight from a previous
-    // gallery so the isolated handle starts clean.
+    // Start the search ASYNC (was a blocking `gamezip::search` that froze the UI
+    // for a second or two). Flip straight to the FpGallery with `fp_loading` set:
+    // its render arm shows a spinner and polls `net::tick_get_async`, then fills
+    // the grid. Sorting + the "no hits" message move there too.
+    log(&std::format!("library: flashpoint game search \"{}\" (async)\n", query));
+    // Drop any thumbnail fetch still in flight from a previous gallery so the
+    // isolated handle starts clean.
     crate::backend::render::thumb_cancel_all();
-    if let Ok(mut s) = LIBRARY.lock() {
-        s.cover_candidates = cands;
-        s.cover_msg = msg;
-        s.cover_query = query;
-        s.screen = Screen::FpGallery { selection: 0, scroll: 0 };
+    match net::start_get_async(&crate::sources::gamezip::search_url(&query)) {
+        Ok(()) => {
+            if let Ok(mut s) = LIBRARY.lock() {
+                s.cover_candidates = std::vec::Vec::new();
+                s.cover_msg = std::string::String::new();
+                s.cover_query = query;
+                s.fp_loading = true;
+                s.screen = Screen::FpGallery { selection: 0, scroll: 0 };
+            }
+        }
+        Err(e) => {
+            if let Ok(mut s) = LIBRARY.lock() {
+                s.cover_candidates = std::vec::Vec::new();
+                s.cover_msg = e;
+                s.cover_query = query;
+                s.fp_loading = false;
+                s.screen = Screen::FpGallery { selection: 0, scroll: 0 };
+            }
+        }
     }
 }
 
@@ -2270,6 +2279,16 @@ fn handle_cover_picker_input(s: &mut State, button: &str, game_idx: usize, mut s
 /// `on_download_finished` unzips it), B returns to the IMPORTER list. Called
 /// under the LIBRARY lock; `net::start_download` is non-blocking so that's fine.
 fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mut scroll: usize) {
+    // Async search still loading (spinner showing): ignore navigation; B/Minus
+    // cancels the in-flight fetch and returns to the importer.
+    if s.fp_loading {
+        if matches!(button, "B" | "Minus") {
+            net::cancel_archive_fetch();
+            s.fp_loading = false;
+            s.screen = Screen::DistantIdle { selection: 0 };
+        }
+        return;
+    }
     let total = s.cover_candidates.len();
     let cols = FP_GALLERY_COLS;
     let rows_visible = FP_GALLERY_ROWS;
@@ -3071,41 +3090,80 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             }
         }
         Screen::FpGallery { selection, scroll } => {
-            // Full-page scrollable cover grid (not a modal). Subtitle = the
-            // search query; thumbnails load progressively from the candidates'
-            // cover_url (Flashpoint logos, same source as covers).
-            let snap = LIBRARY.lock().ok().map(|s| {
-                let titles: std::vec::Vec<std::string::String> = s
-                    .cover_candidates
-                    .iter()
-                    .map(|c| {
-                        if c.developer.is_empty() {
-                            c.title.clone()
-                        } else {
-                            std::format!("{} - {}", c.title, c.developer)
+            // Async search in flight: spinner + poll until the result list lands,
+            // then fill the grid. Avoids the UI freeze the old blocking search had.
+            let loading = LIBRARY.lock().ok().map(|s| s.fp_loading).unwrap_or(false);
+            if loading {
+                let (vw, vh) = backend.screen_size();
+                let q = LIBRARY.lock().ok().map(|s| s.cover_query.clone()).unwrap_or_default();
+                backend.draw_overlay_rect(0.0, 0.0, vw, vh, 0xFF_14_20_38);
+                backend.draw_loading_panel(&q, now);
+                match net::tick_get_async() {
+                    net::GetPoll::Pending => {}
+                    net::GetPoll::Done(bytes) => {
+                        let (mut cands, msg) =
+                            match crate::sources::gamezip::parse_search(&bytes) {
+                                Ok(list) if list.is_empty() => {
+                                    (std::vec::Vec::new(), crate::loc::s().cover_none.to_string())
+                                }
+                                Ok(list) => (list, std::string::String::new()),
+                                Err(e) => (std::vec::Vec::new(), e),
+                            };
+                        // db-api order reads as random in a grid → default A-Z
+                        // (the user re-sorts / reverses with Y).
+                        cands.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+                        if let Ok(mut s) = LIBRARY.lock() {
+                            s.cover_candidates = cands;
+                            s.cover_msg = msg;
+                            s.fp_loading = false;
                         }
-                    })
-                    .collect();
-                let urls: std::vec::Vec<std::string::String> =
-                    s.cover_candidates.iter().map(|c| c.cover_url.clone()).collect();
-                // Which hits are already in the local library (drives the OK badge).
-                let installed: std::vec::Vec<bool> = s
-                    .cover_candidates
-                    .iter()
-                    .map(|c| {
-                        let name = crate::sources::gamezip::swf_filename(&c.title);
-                        s.entries.iter().any(|e| e.basename == name)
-                    })
-                    .collect();
-                (titles, urls, installed, s.cover_msg.clone(), s.cover_query.clone())
-            });
-            if let Some((titles, urls, installed, msg, query)) = snap {
-                let title_refs: std::vec::Vec<&str> = titles.iter().map(|x| x.as_str()).collect();
-                let url_refs: std::vec::Vec<&str> = urls.iter().map(|x| x.as_str()).collect();
-                backend.draw_library_fp_gallery(
-                    &query, selection, scroll, &title_refs, &url_refs, &installed, &msg,
-                    crate::loc::s().fp_title, crate::loc::s().fp_footer,
-                );
+                    }
+                    net::GetPoll::Error(e) => {
+                        if let Ok(mut s) = LIBRARY.lock() {
+                            s.cover_candidates = std::vec::Vec::new();
+                            s.cover_msg = e;
+                            s.fp_loading = false;
+                        }
+                    }
+                }
+            } else {
+                // Full-page scrollable cover grid (not a modal). Subtitle = the
+                // search query; thumbnails load progressively from the candidates'
+                // cover_url (Flashpoint logos, same source as covers).
+                let snap = LIBRARY.lock().ok().map(|s| {
+                    let titles: std::vec::Vec<std::string::String> = s
+                        .cover_candidates
+                        .iter()
+                        .map(|c| {
+                            if c.developer.is_empty() {
+                                c.title.clone()
+                            } else {
+                                std::format!("{} - {}", c.title, c.developer)
+                            }
+                        })
+                        .collect();
+                    let urls: std::vec::Vec<std::string::String> =
+                        s.cover_candidates.iter().map(|c| c.cover_url.clone()).collect();
+                    // Which hits are already in the local library (drives the OK badge).
+                    let installed: std::vec::Vec<bool> = s
+                        .cover_candidates
+                        .iter()
+                        .map(|c| {
+                            let name = crate::sources::gamezip::swf_filename(&c.title);
+                            s.entries.iter().any(|e| e.basename == name)
+                        })
+                        .collect();
+                    (titles, urls, installed, s.cover_msg.clone(), s.cover_query.clone())
+                });
+                if let Some((titles, urls, installed, msg, query)) = snap {
+                    let title_refs: std::vec::Vec<&str> =
+                        titles.iter().map(|x| x.as_str()).collect();
+                    let url_refs: std::vec::Vec<&str> = urls.iter().map(|x| x.as_str()).collect();
+                    backend.draw_library_fp_gallery(
+                        &query, selection, scroll, &title_refs, &url_refs, &installed, &msg,
+                        crate::loc::s().fp_title, crate::loc::s().fp_footer,
+                    );
+                }
             }
         }
         Screen::FpDetails { selection, size, .. } => {
@@ -3543,17 +3601,21 @@ fn add_or_replace_path(path: &str) -> bool {
     if let Ok(mut s) = LIBRARY.lock() {
         // Find duplicates by path. add_path pushed the latest at the end.
         let last_idx = s.entries.len().saturating_sub(1);
-        if last_idx == 0 {
-            return true;
+        if last_idx > 0 {
+            let last_path = s.entries[last_idx].path.clone();
+            // Look earlier in the list for the same path; if found, remove it.
+            if let Some(prev_idx) = s.entries[..last_idx]
+                .iter()
+                .position(|e| e.path == last_path)
+            {
+                s.entries.remove(prev_idx);
+            }
         }
-        let last_path = s.entries[last_idx].path.clone();
-        // Look earlier in the list for the same path; if found, remove it.
-        if let Some(prev_idx) = s.entries[..last_idx]
-            .iter()
-            .position(|e| e.path == last_path)
-        {
-            s.entries.remove(prev_idx);
-        }
+        // Re-apply the active sort so a freshly downloaded / imported game lands
+        // in its sorted slot (e.g. A-Z) instead of stuck at the bottom of the
+        // list. The "now" mtime stamp from `add_path` still floats it to the top
+        // under the RECENT sort.
+        sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
     }
     true
 }

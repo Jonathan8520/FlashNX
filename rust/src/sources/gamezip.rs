@@ -49,20 +49,26 @@ pub fn swf_filename(title: &str) -> std::string::String {
     s
 }
 
-/// Search Flashpoint for Flash games by name. Returns up to `MAX` hits as
-/// `CatalogEntry`s (id = UUID for the `/get?id=` download, title, developer,
-/// cover_url) so the cover-grid renderer can show them as a gallery and the
-/// download flow can build the GameZIP URL from `id`.
-pub fn search(name: &str) -> Result<std::vec::Vec<flashpoint::CatalogEntry>, std::string::String> {
-    const MAX: usize = 60;
+/// Build the db-api search URL for `name`. Split from `parse_search` so the
+/// Flashpoint game search can run through the async GET path (spinner) instead
+/// of blocking the UI on a synchronous HTTP.
+pub fn search_url(name: &str) -> std::string::String {
     let q = net::url_encode_path(name.trim());
-    let url = std::format!(
+    std::format!(
         "{}?smartSearch={}&platform=Flash&fields=id,title,developer,publisher,releaseDate,zipped",
         SEARCH_BASE, q
-    );
-    let bytes = net::http_get(&url, 1024 * 1024)?;
+    )
+}
+
+/// Parse a db-api search response into up to 60 fetchable `CatalogEntry` hits
+/// (id = UUID for the `/get?id=` download, title, developer, cover_url). Only
+/// `zipped` games are kept — the others 404 on `/get?id=`.
+pub fn parse_search(
+    bytes: &[u8],
+) -> Result<std::vec::Vec<flashpoint::CatalogEntry>, std::string::String> {
+    const MAX: usize = 60;
     let json: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(|e| crate::loc::err_json(&e.to_string()))?;
+        serde_json::from_slice(bytes).map_err(|e| crate::loc::err_json(&e.to_string()))?;
     let arr = json
         .as_array()
         .ok_or_else(|| std::string::String::from(crate::loc::s().err_json_no_files))?;
