@@ -478,108 +478,139 @@ extern "C" void https_get_cancel(void) {
     g_get_buf.clear();
 }
 
-// ── Async thumbnail GET (Flashpoint logos, non-blocking) ──────────────────
-// A SECOND, fully isolated curl-multi handle dedicated to cover/logo
-// thumbnails. It deliberately does NOT touch g_multi/g_handle (the
-// archive.org metadata + download handle), so a thumbnail stream and a
-// metadata fetch can never corrupt each other's state — they live on
-// different library screens but the isolation removes any doubt. The
-// FpGallery / cover-picker render pumps `https_thumb_tick` once per frame and
-// decodes ONE finished logo, so the UI never blocks on the (sometimes
-// hundreds-of-KB) logo downloads. Same return contract as the metadata GET.
+// ── Async thumbnail GET (Flashpoint logos, non-blocking, PARALLEL) ─────────
+// A SECOND, isolated curl-multi handle dedicated to cover/logo thumbnails, with
+// a POOL of slots so several logos download CONCURRENTLY (curl_multi naturally
+// runs them in parallel) instead of one-at-a-time. It deliberately does NOT
+// touch g_multi/g_handle (the archive.org metadata + download handle). The
+// FpGallery / cover-picker render starts a fetch per free slot, pumps
+// `https_thumb_tick` once per frame, and takes each finished slot, so the grid
+// fills several covers at a time without ever blocking the UI.
 namespace {
-CURLM*      g_thumb_multi  = nullptr;
-CURL*       g_thumb_handle = nullptr;
-std::string g_thumb_buf;
-int         g_thumb_curl_result = 0;
-long        g_thumb_http_code   = 0;
+constexpr int THUMB_SLOTS = 4;
+CURLM* g_thumb_multi = nullptr;
+struct ThumbSlot {
+    CURL*       handle = nullptr;
+    std::string buf;
+    long        http_code = 0;
+    bool        active = false; // a transfer is in flight on this slot
+    bool        done   = false; // finished; bytes ready to take
+    bool        ok     = false; // finished successfully (CURLE_OK + 2xx/3xx)
+};
+ThumbSlot g_thumb[THUMB_SLOTS];
 
-void thumb_cleanup() {
-    if (g_thumb_handle) {
-        if (g_thumb_multi) {
-            curl_multi_remove_handle(g_thumb_multi, g_thumb_handle);
-        }
-        curl_easy_cleanup(g_thumb_handle);
-        g_thumb_handle = nullptr;
+void thumb_slot_free(int i) {
+    if (g_thumb[i].handle) {
+        if (g_thumb_multi) curl_multi_remove_handle(g_thumb_multi, g_thumb[i].handle);
+        curl_easy_cleanup(g_thumb[i].handle);
+        g_thumb[i].handle = nullptr;
     }
-    if (g_thumb_multi) {
-        curl_multi_cleanup(g_thumb_multi);
-        g_thumb_multi = nullptr;
-    }
+    g_thumb[i].buf.clear();
+    g_thumb[i].http_code = 0;
+    g_thumb[i].active = false;
+    g_thumb[i].done = false;
+    g_thumb[i].ok = false;
 }
 } // namespace
 
-// Start an async thumbnail GET. 0 = started, -1 init, -5 if one is already in
-// flight (the caller serialises to one logo at a time).
+// Start a thumbnail GET in a free slot. Returns the slot index (>=0), -5 if the
+// pool is full (all slots busy/unread), -1 on init error.
 extern "C" int https_thumb_start(const char* url) {
-    if (g_thumb_multi || g_thumb_handle) {
-        return -5;
-    }
     if (net_init() != 0) return -1;
-    CURLM* m = curl_multi_init();
-    CURL* c = curl_easy_init();
-    if (!m || !c) {
-        if (m) curl_multi_cleanup(m);
-        if (c) curl_easy_cleanup(c);
-        return -1;
+    if (!g_thumb_multi) {
+        g_thumb_multi = curl_multi_init();
+        if (!g_thumb_multi) return -1;
     }
-    g_thumb_buf.clear();
+    int slot = -1;
+    for (int i = 0; i < THUMB_SLOTS; i++) {
+        if (!g_thumb[i].active && !g_thumb[i].done) { slot = i; break; }
+    }
+    if (slot < 0) return -5;
+    CURL* c = curl_easy_init();
+    if (!c) return -1;
+    g_thumb[slot].buf.clear();
     curl_easy_setopt(c, CURLOPT_URL, url);
     curl_easy_setopt(c, CURLOPT_USERAGENT, "FlashNX/1.3.0 (Nintendo Switch homebrew)");
     curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
     curl_easy_setopt(c, CURLOPT_CAINFO, CACERT_PATH);
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, write_to_string);
-    curl_easy_setopt(c, CURLOPT_WRITEDATA, &g_thumb_buf);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, &g_thumb[slot].buf);
     curl_easy_setopt(c, CURLOPT_TIMEOUT, 20L);
     curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 8L);
-    curl_multi_add_handle(m, c);
-    g_thumb_multi = m;
-    g_thumb_handle = c;
-    g_thumb_curl_result = 0;
-    g_thumb_http_code = 0;
-    return 0;
+    curl_multi_add_handle(g_thumb_multi, c);
+    g_thumb[slot].handle = c;
+    g_thumb[slot].active = true;
+    g_thumb[slot].done = false;
+    g_thumb[slot].ok = false;
+    g_thumb[slot].http_code = 0;
+    return slot;
 }
 
-// Pump the thumbnail GET once. 0 = in progress, 1 = done (in g_thumb_buf),
-// <0 = error (handle cleaned up).
+// Pump ALL in-flight thumbnail transfers once; mark completed slots `done`
+// (their bytes wait in the slot until taken). Returns the number still active.
 extern "C" int https_thumb_tick(void) {
-    if (!g_thumb_multi) return -1;
+    if (!g_thumb_multi) return 0;
     int still_running = 0;
-    CURLMcode mc = curl_multi_perform(g_thumb_multi, &still_running);
-    if (mc != CURLM_OK) {
-        thumb_cleanup();
-        return -2;
+    if (curl_multi_perform(g_thumb_multi, &still_running) != CURLM_OK) {
+        return still_running;
     }
-    if (still_running > 0) return 0;
-    bool ok = false;
     CURLMsg* msg;
-    int msgs_left = 0;
-    while ((msg = curl_multi_info_read(g_thumb_multi, &msgs_left))) {
-        if (msg->msg == CURLMSG_DONE && msg->easy_handle == g_thumb_handle) {
-            g_thumb_curl_result = (int)msg->data.result;
-            curl_easy_getinfo(g_thumb_handle, CURLINFO_RESPONSE_CODE, &g_thumb_http_code);
-            ok = (msg->data.result == CURLE_OK) && (g_thumb_http_code >= 200) && (g_thumb_http_code < 400);
+    int left = 0;
+    while ((msg = curl_multi_info_read(g_thumb_multi, &left))) {
+        if (msg->msg != CURLMSG_DONE) continue;
+        for (int i = 0; i < THUMB_SLOTS; i++) {
+            if (g_thumb[i].handle != msg->easy_handle) continue;
+            curl_easy_getinfo(g_thumb[i].handle, CURLINFO_RESPONSE_CODE, &g_thumb[i].http_code);
+            g_thumb[i].ok = (msg->data.result == CURLE_OK)
+                && (g_thumb[i].http_code >= 200) && (g_thumb[i].http_code < 400);
+            curl_multi_remove_handle(g_thumb_multi, g_thumb[i].handle);
+            curl_easy_cleanup(g_thumb[i].handle);
+            g_thumb[i].handle = nullptr;
+            g_thumb[i].active = false;
+            g_thumb[i].done = true; // keep buf for the take below
             break;
         }
     }
-    thumb_cleanup();
-    return ok ? 1 : -2;
+    return still_running;
 }
 
-// Copy the completed thumbnail bytes into `out`. Returns bytes copied, or -3 if
-// it doesn't fit in `cap`. Call after https_thumb_tick == 1.
-extern "C" int https_thumb_buffer(char* out, int cap) {
-    if (!out || cap < 1) return -1;
-    const int n = (int)g_thumb_buf.size();
-    if (n > cap) return -3;
-    std::memcpy(out, g_thumb_buf.data(), (size_t)n);
-    return n;
+// Poll one slot: 1 = done OK, -2 = done error, 0 = in flight, -1 = invalid/free.
+extern "C" int https_thumb_slot_status(int slot) {
+    if (slot < 0 || slot >= THUMB_SLOTS) return -1;
+    if (g_thumb[slot].active) return 0;
+    if (g_thumb[slot].done) return g_thumb[slot].ok ? 1 : -2;
+    return -1;
+}
+
+// Copy a done slot's bytes into `out` and FREE the slot. Returns bytes copied,
+// -3 if it doesn't fit `cap`, -2 if the slot errored, -1 invalid. Call once
+// after https_thumb_slot_status(slot) != 0.
+extern "C" int https_thumb_slot_take(int slot, char* out, int cap) {
+    if (slot < 0 || slot >= THUMB_SLOTS || !out || cap < 1) return -1;
+    if (!g_thumb[slot].done) return -1;
+    int rc;
+    if (!g_thumb[slot].ok) {
+        rc = -2;
+    } else {
+        const int n = (int)g_thumb[slot].buf.size();
+        if (n > cap) {
+            rc = -3;
+        } else {
+            std::memcpy(out, g_thumb[slot].buf.data(), (size_t)n);
+            rc = n;
+        }
+    }
+    thumb_slot_free(slot);
+    return rc;
 }
 
 extern "C" void https_thumb_cancel(void) {
-    thumb_cleanup();
-    g_thumb_buf.clear();
+    for (int i = 0; i < THUMB_SLOTS; i++) thumb_slot_free(i);
+    if (g_thumb_multi) {
+        curl_multi_cleanup(g_thumb_multi);
+        g_thumb_multi = nullptr;
+    }
 }
 
 // Synchronous HEAD: return the Content-Length of `url` (following redirects),

@@ -35,7 +35,8 @@ extern "C" {
     // without ever blocking the render thread.
     fn https_thumb_start(url: *const c_char) -> c_int;
     fn https_thumb_tick() -> c_int;
-    fn https_thumb_buffer(out: *mut c_char, cap: c_int) -> c_int;
+    fn https_thumb_slot_status(slot: c_int) -> c_int;
+    fn https_thumb_slot_take(slot: c_int, out: *mut c_char, cap: c_int) -> c_int;
     fn https_thumb_cancel();
     // Synchronous HEAD → Content-Length (or -1). Flashpoint details popup.
     fn https_head_content_length(url: *const c_char) -> i64;
@@ -351,41 +352,42 @@ pub fn tick_get_async() -> GetPoll {
 
 // ── Async thumbnail GET (cover/logo grids) ─────────────────────────────────
 
-/// Result of polling an async thumbnail fetch.
-pub enum ThumbPoll {
-    Pending,
-    Done(std::vec::Vec<u8>),
-    Error,
-}
-
-/// Start an async thumbnail GET. Returns true if it started (false if one is
-/// already in flight or init failed — the caller serialises to one at a time).
-pub(crate) fn thumb_start(url: &str) -> bool {
+/// Start an async thumbnail GET in a free pool slot (covers download in
+/// PARALLEL, up to the C++ pool size). Returns the slot index (>=0) to poll, or
+/// a negative value when the pool is full / init failed. The render thumbnail
+/// driver tracks slot -> url and polls each slot.
+pub(crate) fn thumb_start(url: &str) -> i32 {
     let url_c = cstr(url);
-    unsafe { https_thumb_start(url_c.as_ptr() as *const c_char) == 0 }
+    unsafe { https_thumb_start(url_c.as_ptr() as *const c_char) }
 }
 
-/// Poll the in-flight thumbnail GET. On `Done`, returns the response bytes.
-pub(crate) fn thumb_tick() -> ThumbPoll {
-    let rc = unsafe { https_thumb_tick() };
-    if rc == 0 {
-        return ThumbPoll::Pending;
+/// Pump EVERY in-flight thumbnail transfer once (call once per frame before
+/// polling the slots).
+pub(crate) fn thumb_pump() {
+    unsafe {
+        https_thumb_tick();
     }
-    if rc < 0 {
-        return ThumbPoll::Error;
-    }
-    // rc == 1: bytes ready. Logos are usually <1 MB but some run larger; 4 MB cap.
+}
+
+/// Poll one slot: 1 = done OK, 0 = in flight, negative = done error / free.
+pub(crate) fn thumb_slot_status(slot: i32) -> i32 {
+    unsafe { https_thumb_slot_status(slot) }
+}
+
+/// Take a finished slot's bytes and free it. `Some` on success, `None` on error
+/// / oversize. Call once after `thumb_slot_status(slot) != 0`.
+pub(crate) fn thumb_slot_take(slot: i32) -> Option<std::vec::Vec<u8>> {
     const CAP: usize = 4 * 1024 * 1024;
     let mut buf = std::vec![0u8; CAP];
-    let n = unsafe { https_thumb_buffer(buf.as_mut_ptr() as *mut c_char, CAP as c_int) };
+    let n = unsafe { https_thumb_slot_take(slot, buf.as_mut_ptr() as *mut c_char, CAP as c_int) };
     if n < 0 {
-        return ThumbPoll::Error;
+        return None;
     }
     buf.truncate(n as usize);
-    ThumbPoll::Done(buf)
+    Some(buf)
 }
 
-/// Abort any in-flight thumbnail GET (gallery left / new search started).
+/// Abort ALL in-flight thumbnail GETs (gallery left / new search started).
 pub(crate) fn thumb_cancel() {
     unsafe { https_thumb_cancel() };
 }

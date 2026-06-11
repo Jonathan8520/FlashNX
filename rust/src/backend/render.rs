@@ -3014,8 +3014,9 @@ fn thumb_lookup(url: &str) -> Option<ThumbTex> {
 /// or None when idle. The gallery render starts the next uncached logo when
 /// idle and `pump_thumbnail_load` finishes it — so the render thread NEVER
 /// blocks on a logo download (some Flashpoint logos are hundreds of KB).
-fn thumb_inflight() -> &'static std::sync::Mutex<Option<std::string::String>> {
-    static C: std::sync::Mutex<Option<std::string::String>> = std::sync::Mutex::new(None);
+fn thumb_inflight() -> &'static std::sync::Mutex<std::vec::Vec<(i32, std::string::String)>> {
+    static C: std::sync::Mutex<std::vec::Vec<(i32, std::string::String)>> =
+        std::sync::Mutex::new(std::vec::Vec::new());
     &C
 }
 
@@ -3025,7 +3026,7 @@ fn thumb_inflight() -> &'static std::sync::Mutex<Option<std::string::String>> {
 pub fn thumb_cancel_all() {
     crate::net::thumb_cancel();
     if let Ok(mut g) = thumb_inflight().lock() {
-        *g = None;
+        g.clear();
     }
 }
 
@@ -5496,11 +5497,15 @@ impl SwitchRenderBackend {
         if let Some(t) = thumb_lookup(url) {
             return Some(t);
         }
-        // Not cached. If no fetch is in flight, start one for this url (the first
-        // uncached visible cell each frame wins; later cells see it busy → None).
+        // Not cached. Start a fetch in a free pool slot so several covers load in
+        // PARALLEL: each uncached visible cell tries to grab a slot until the
+        // pool is full (`thumb_start` < 0). Skip a url already in flight.
         if let Ok(mut inflight) = thumb_inflight().lock() {
-            if inflight.is_none() && crate::net::thumb_start(url) {
-                *inflight = Some(url.to_string());
+            if !inflight.iter().any(|(_, u)| u == url) {
+                let slot = crate::net::thumb_start(url);
+                if slot >= 0 {
+                    inflight.push((slot, url.to_string()));
+                }
             }
         }
         None
@@ -5511,33 +5516,45 @@ impl SwitchRenderBackend {
     /// retried), and clear the in-flight marker so the next cell can start. Call
     /// once at the top of each thumbnail screen's render.
     fn pump_thumbnail_load(&mut self) {
-        let url = match thumb_inflight().lock() {
-            Ok(g) => match g.as_ref() {
-                Some(u) => u.clone(),
-                None => return,
-            },
-            Err(_) => return,
+        // Advance every in-flight transfer, then reap the slots that finished.
+        crate::net::thumb_pump();
+        let done: std::vec::Vec<(i32, std::string::String)> = {
+            let inflight = match thumb_inflight().lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            inflight
+                .iter()
+                .filter(|(slot, _)| crate::net::thumb_slot_status(*slot) != 0)
+                .cloned()
+                .collect()
         };
-        let state = match crate::net::thumb_tick() {
-            crate::net::ThumbPoll::Pending => return,
-            crate::net::ThumbPoll::Done(bytes) => match crate::covers::decode_bytes(&bytes) {
-                Some((rgba, w, h)) => {
-                    let tex = self.upload_rgba_texture(&rgba, w, h);
-                    if tex != 0 {
-                        ThumbTex::Image { tex, w, h }
-                    } else {
-                        ThumbTex::Failed
+        if done.is_empty() {
+            return;
+        }
+        for (slot, url) in &done {
+            // Take the bytes (frees the slot), then decode + upload + cache the
+            // logo (success OR failure, so it's never retried).
+            let state = match crate::net::thumb_slot_take(*slot) {
+                Some(bytes) => match crate::covers::decode_bytes(&bytes) {
+                    Some((rgba, w, h)) => {
+                        let tex = self.upload_rgba_texture(&rgba, w, h);
+                        if tex != 0 {
+                            ThumbTex::Image { tex, w, h }
+                        } else {
+                            ThumbTex::Failed
+                        }
                     }
-                }
+                    None => ThumbTex::Failed,
+                },
                 None => ThumbTex::Failed,
-            },
-            crate::net::ThumbPoll::Error => ThumbTex::Failed,
-        };
-        if let Ok(mut c) = thumb_cache().lock() {
-            c.push((url, state));
+            };
+            if let Ok(mut c) = thumb_cache().lock() {
+                c.push((url.clone(), state));
+            }
         }
         if let Ok(mut inflight) = thumb_inflight().lock() {
-            *inflight = None;
+            inflight.retain(|(slot, _)| !done.iter().any(|(ds, _)| ds == slot));
         }
     }
 
