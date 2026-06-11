@@ -3334,7 +3334,7 @@ fn finish_gamezip(zip_path: &str, swf_path: &str) -> bool {
         log("library: gamezip read failed\n");
         return false;
     };
-    let Some(swf) = crate::sources::gamezip::extract_first_swf(&zip) else {
+    let Some((swf, entry_name)) = crate::sources::gamezip::extract_first_swf(&zip) else {
         log("library: gamezip has no .swf entry\n");
         return false;
     };
@@ -3348,6 +3348,24 @@ fn finish_gamezip(zip_path: &str, swf_path: &str) -> bool {
         swf_path,
         swf.len(),
     ));
+    // Multi-file games: fetch the companion SWFs this game loads (loadMovie /
+    // GetURL into _levelN) into its `<game>.files/` sidecar dir, so the
+    // SidecarNavigator can serve them at play time. Best-effort; a game that
+    // references no other SWF just writes nothing. Same Flashpoint mirror the
+    // GameZIP came from (the db-api GameZIP often ships only the main SWF).
+    if let Some(base) = crate::sources::gamezip::htdocs_base_from_entry(&entry_name) {
+        let files_dir = crate::sidecar_dir_for(Some(swf_path));
+        let files_dir = files_dir.to_string_lossy().into_owned();
+        let main_name = entry_name.rsplit('/').next().unwrap_or("");
+        let n = crate::sources::gamezip::fetch_siblings(&swf, main_name, &base, &files_dir);
+        if n > 0 {
+            log(&std::format!(
+                "library: fetched {} companion SWF(s) -> {}\n",
+                n, files_dir
+            ));
+            crate::sd::commit();
+        }
+    }
     add_or_replace_path(swf_path)
 }
 

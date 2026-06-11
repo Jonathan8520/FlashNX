@@ -373,8 +373,9 @@ pub extern "C" fn ruffle_init() -> c_int {
 /// `<game-dir>/<game-stem>.files`. E.g. `sdmc:/flashnx/Foo.swf` ->
 /// `sdmc:/flashnx/Foo.files`. Falls back to a shared dir if the real path is
 /// unknown (embedded fallback SWF). Per-game (not flat) so two games can each
-/// ship their own `top.swf` without colliding.
-fn sidecar_dir_for(real_path: Option<&str>) -> std::path::PathBuf {
+/// ship their own `top.swf` without colliding. `pub(crate)` so the download
+/// flow (library.rs) writes companions to the SAME dir the navigator reads.
+pub(crate) fn sidecar_dir_for(real_path: Option<&str>) -> std::path::PathBuf {
     use std::path::PathBuf;
     match real_path {
         Some(p) => {
