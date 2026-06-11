@@ -48,6 +48,7 @@ A list of your saved URLs · **A** = launch one · **+ Add a URL** row to enter 
 Left stick / D-pad = arrows · **A/B/X/Y** = Flash keys (remappable) · right stick = mouse cursor · **ZR** / touch = click · **−** = pause menu.
 
 - **Cover art**: the library is a grid of covers, 5 per row (cropped to fill). Drop a `<game>.png` or `.jpg` next to the `.swf` to set one, or fetch artwork from the Flashpoint Archive in a game's options (pick from thumbnails).
+- **Multi-file games**: some games load companion `.swf` files (a title screen, a minigame, music). Put those files in a folder named `<game>.files/` next to the `.swf` (so `Foo.swf` uses `Foo.files/`), and FlashNX loads them on demand. Example: *Garfield's Scary Scavenger Hunt* needs `top.swf`, `scavengerhunttitle.swf`, `bats.swf`, `books.swf`, `safe.swf` and `music.swf` in its `.files/` folder.
 - **Automatic saves** for games that save (SharedObject `.sol`), on the SD card.
 - **Built-in key editor** (48 Flash keys, configurable per game), plus a **global default** layout in the Settings tab.
 - **Languages**: English, French, Spanish, Russian, auto-detected from the console's system language, switchable from the Settings tab.
@@ -62,6 +63,7 @@ Super Mario 63 · Super Mario World Flash · Mario Forever · Tetris'd · Flappy
 - **AS3 compatibility**: partial, inherited from Ruffle (see [Ruffle compatibility](https://ruffle.rs/compatibility)). AS3 games show a badge in the library.
 - **No savestate / rewind**: Ruffle does not expose a snapshot of the execution state. Games' native `.sol` saves do work.
 - **Audio**: occasional light crackle on *very* dense scenes (to be refined).
+- **Multi-file games**: a few games are split across several `.swf` files. Place the companions in a `<game>.files/` folder (see Usage). The in-app Flashpoint download currently fetches only the main file, so these games need their companions added by hand.
 
 ## Credits & licenses
 

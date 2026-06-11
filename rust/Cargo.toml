@@ -56,6 +56,19 @@ png = "0.18"
 # dep) re-introduced the crash on any SWF with an embedded JPEG. We only use the
 # single-threaded API (Decoder::new/decode/info), so no features are needed.
 jpeg-decoder = { version = "0.3", default-features = false }
+# v1.2.x — multi-file SWF games. The sidecar NavigatorBackend in
+# src/backend/navigator.rs serves a game's sibling SWFs off the SD card so
+# loadMovie / GetURL-into-_levelN works (e.g. Garfield's Scary Scavenger Hunt
+# loads top.swf into _level100, which sets _level0.introend=2 to unblock its
+# frame-4 gate). These four are only needed to *name* the types in our
+# `impl NavigatorBackend` (url/encoding_rs in the fetch response; async-channel/
+# indexmap in the socket + navigate signatures). Versions pinned to Ruffle's
+# workspace so they unify to a single crate instance — a second copy would make
+# our impl reference foreign Url/Encoding types and fail to satisfy the trait.
+url = "2.5.8"
+encoding_rs = "0.8.35"
+async-channel = "2.5.0"
+indexmap = "2.13.0"
 
 [profile.release]
 opt-level = 3

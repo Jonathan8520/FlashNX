@@ -60,7 +60,8 @@ flash-for-switch/
 │           ├── audio.rs          # SwitchAudioBackend (port CpalAudioBackend → libnx audren)
 │           ├── storage.rs        # SwitchStorageBackend (port DiskStorageBackend → sdmc:/flashnx/ flat)
 │           ├── tracing.rs        # Routes Ruffle's tracing events to nxlink stdout
-│           └── log.rs            # SwitchLogBackend → ruffle_log_cstr
+│           ├── log.rs            # SwitchLogBackend → ruffle_log_cstr
+│           └── navigator.rs       # SidecarNavigator : multi-file games, serves sibling SWFs from <game>.files/
 ├── patches/
 │   ├── README.md                 # How to re-apply after git submodule update
 │   ├── 0001-mario63-zero-scale-hit-test.patch  # Fix Toad castle #6906
@@ -72,7 +73,7 @@ flash-for-switch/
 └── scripts/{build.sh, build.ps1, setup-env.ps1, setup-env.sh}
 ```
 
-The Navigator/UI/Video backends use the `Null*` implementations provided by default by `ruffle_core` — no dedicated file. **Audio** = `SwitchAudioBackend`. **Storage** = `SwitchStorageBackend`.
+The UI/Video backends use the `Null*` implementations provided by default by `ruffle_core` (no dedicated file). **Audio** = `SwitchAudioBackend`. **Storage** = `SwitchStorageBackend`. **Navigator** = `SidecarNavigator`: for multi-file games it resolves relative loads (`loadMovie` / `GetURL` into `_levelN`) against the movie URL and reads the sibling SWF from `<game>.files/` on the SD card; the spawned loader futures are pumped once per frame by a `NullExecutor` kept in `State` (after the player lock is released, since they re-lock the player). Genuine network fetches stay rejected.
 
 ### Assets embedded in the `.nro`
 
@@ -213,6 +214,9 @@ sdmc:/flashnx/
 ├── Super_Mario_63_2010.swf.keymap.json               ← per-game keymap
 ├── Super_Mario_63_2010.swf.meta.json                 ← display_name (rename)
 ├── Super_Mario_63_2010.swf.<SaveName>.sol            ← save (flat)
+├── Garfield's Scary Scavenger Hunt.files/            ← companion SWFs for a multi-file game (loaded on demand)
+│   ├── top.swf
+│   └── scavengerhunttitle.swf, books.swf, ...
 ├── keymap_default.json                               ← global default keymap (edited via + → DEFAULT CONTROLS)
 ├── settings.json                                     ← UI language (EN/FR/ES/RU), set via + → LANGUAGE
 └── ...
@@ -221,6 +225,8 @@ sdmc:/flashnx/
 The **`+` button** in the library opens a global Settings modal: **DEFAULT CONTROLS** (edits `keymap_default.json` with the same editor as the per-game TOUCHES screen) and **LANGUAGE** (writes `settings.json`; auto-detected from the console language on first boot — see [rust/src/loc.rs](rust/src/loc.rs)).
 
 **Backward-compat**: files in the old `sdmc:/ruffle/` are detected and used (scan + read-fallback). Saves in the old nested tree `sdmc:/ruffle/saves/<host>/<basename>/<sol>.sol` are read and then automatically migrated to the flat path on the next save.
+
+**Multi-file games** (companion `<game>.files/` folder): a game that loads other SWFs (`loadMovie` / `GetURL` into `_levelN`) reads them from `sdmc:/flashnx/<game-stem>.files/`. For `Foo.swf` that is `Foo.files/`, and a relative load of `top.swf` resolves to `Foo.files/top.swf`. Per-game (not flat) so two games can each ship their own `top.swf` without colliding. Sourcing the companions for a Flashpoint game: they are usually NOT in the db-api GameZIP (`/get?id=` may return only the main SWF). The full set lives in the Legacy htdocs, served public at `https://infinity.unstable.life/Flashpoint/Legacy/htdocs/<host>/<path>/<file>` (find which files to grab by listing the `.swf` strings referenced inside the main SWF). See [rust/src/backend/navigator.rs](rust/src/backend/navigator.rs).
 
 **System files** (in the homebrew folder):
 - `sdmc:/switch/FlashNX/cacert.pem` — Mozilla CA bundle for HTTPS

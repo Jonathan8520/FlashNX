@@ -30,6 +30,7 @@ mod sources;
 use core::ffi::{c_char, c_int};
 use std::sync::{Arc, Mutex};
 
+use ruffle_core::backend::navigator::NullExecutor;
 use ruffle_core::events::{
     KeyDescriptor, KeyLocation, LogicalKey, MouseButton, NamedKey, PhysicalKey, PlayerEvent,
 };
@@ -40,6 +41,7 @@ use ruffle_render::backend::RenderBackend;
 
 use backend::audio::SwitchAudioBackend;
 use backend::log::SwitchLogBackend;
+use backend::navigator::SidecarNavigator;
 use backend::render::SwitchRenderBackend;
 use backend::storage::SwitchStorageBackend;
 use backend::tracing::SwitchTracingSubscriber;
@@ -84,6 +86,13 @@ pub(crate) fn query_ram() -> (u64, u64) {
 
 struct State {
     player: Arc<Mutex<Player>>,
+    /// Drives loader futures spawned by the SidecarNavigator (multi-file games:
+    /// loadMovie / GetURL-into-_levelN). Pumped once per frame in
+    /// `render_frame_with_dt`, AFTER the player lock is dropped — the futures
+    /// re-lock the player to install the loaded movie, so running them under
+    /// our own guard would deadlock. The navigator holds a spawner into this
+    /// pool; an empty pool's `run()` is a cheap no-op.
+    executor: NullExecutor,
     /// Last reported cursor position in screen pixels. We track it so we can
     /// (a) overlay a visible crosshair after `Player::render()`, and (b) send
     /// it as the click position when `ruffle_handle_mouse_button` fires
@@ -123,6 +132,13 @@ const SWF_CANDIDATES: &[&str] = &[
 /// QUITTER entry now wired to "back to library" not "exit .nro") and pick
 /// a different game — second set replaces first.
 static OVERRIDE_SWF_PATH: Mutex<Option<std::string::String>> = Mutex::new(None);
+
+/// The real SD path of the SWF most recently loaded by
+/// `find_and_load_swf_uncached` (override or candidate). `ensure_swf_loaded`
+/// only keeps the synthetic `http://flashforswitch.local/<basename>` URL, but
+/// the sidecar NavigatorBackend needs the actual on-disk directory to find a
+/// multi-file game's sibling SWFs. Set on each successful read.
+static LAST_SWF_REAL_PATH: Mutex<Option<std::string::String>> = Mutex::new(None);
 
 /// Raw SWF bytes + synthesized URL. Populated by the first successful
 /// `find_and_load_swf` and reused on every subsequent `ruffle_init` for the
@@ -298,10 +314,12 @@ pub extern "C" fn ruffle_init() -> c_int {
     match SwfMovie::from_data(&movie_bytes, source_label.clone(), None) {
         Ok(movie) => {
             log_str(&std::format!(
-                "ruffle_init: SwfMovie parsed (version={}, dims={}x{})\n",
+                "ruffle_init: SwfMovie parsed (version={}, dims={}x{}, frames={}, url={})\n",
                 movie.version(),
                 movie.width().to_pixels(),
                 movie.height().to_pixels(),
+                movie.num_frames(),
+                movie.url(),
             ));
             builder = builder.with_movie(movie);
         }
@@ -313,6 +331,28 @@ pub extern "C" fn ruffle_init() -> c_int {
         }
     }
 
+    // Multi-file SWF support: wire a sidecar NavigatorBackend so relative
+    // loads (loadMovie / GetURL into _levelN) resolve to sibling files on the
+    // SD card. `source_label` is the synthetic movie URL relative loads are
+    // resolved against; `sidecar_dir` is `<game-dir>/<game-stem>.files`, derived
+    // from the real on-disk path. `executor` (kept in State) drives the loader
+    // futures the navigator spawns — pumped once per frame in render_frame_with_dt.
+    let executor = NullExecutor::new();
+    let real_path = LAST_SWF_REAL_PATH
+        .lock()
+        .ok()
+        .and_then(|g| g.clone());
+    let sidecar_dir = sidecar_dir_for(real_path.as_deref());
+    log_str(&std::format!(
+        "ruffle_init: sidecar dir = {}\n",
+        sidecar_dir.display()
+    ));
+    builder = builder.with_navigator(SidecarNavigator::new(
+        executor.spawner(),
+        source_label.clone(),
+        sidecar_dir,
+    ));
+
     log(b"ruffle_init: calling PlayerBuilder::build()\n\0");
     let player = builder.build();
     log(b"ruffle_init: PlayerBuilder::build() returned\n\0");
@@ -320,12 +360,34 @@ pub extern "C" fn ruffle_init() -> c_int {
     unsafe {
         STATE = Some(State {
             player,
+            executor,
             cursor_x: VIEWPORT_W as f32 * 0.5,
             cursor_y: VIEWPORT_H as f32 * 0.5,
             cursor_clicked: false,
         });
     }
     0
+}
+
+/// Per-game sidecar directory for a multi-file game's sibling SWFs:
+/// `<game-dir>/<game-stem>.files`. E.g. `sdmc:/flashnx/Foo.swf` ->
+/// `sdmc:/flashnx/Foo.files`. Falls back to a shared dir if the real path is
+/// unknown (embedded fallback SWF). Per-game (not flat) so two games can each
+/// ship their own `top.swf` without colliding.
+fn sidecar_dir_for(real_path: Option<&str>) -> std::path::PathBuf {
+    use std::path::PathBuf;
+    match real_path {
+        Some(p) => {
+            let pb = PathBuf::from(p);
+            let parent = pb
+                .parent()
+                .map(|x| x.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from("sdmc:/flashnx"));
+            let stem = pb.file_stem().and_then(|s| s.to_str()).unwrap_or("game");
+            parent.join(std::format!("{}.files", stem))
+        }
+        None => PathBuf::from("sdmc:/flashnx/_shared.files"),
+    }
 }
 
 /// Return the cached `(bytes, url)`, loading from disk on the first call
@@ -447,6 +509,9 @@ fn find_and_load_swf_uncached() -> Option<(std::vec::Vec<u8>, std::string::Strin
         match std::fs::read(&path) {
             Ok(bytes) => {
                 log_str(&std::format!("scan: using override path {}\n", path));
+                if let Ok(mut g) = LAST_SWF_REAL_PATH.lock() {
+                    *g = Some(path.clone());
+                }
                 return Some((bytes, path));
             }
             Err(err) => {
@@ -460,6 +525,9 @@ fn find_and_load_swf_uncached() -> Option<(std::vec::Vec<u8>, std::string::Strin
     for path in SWF_CANDIDATES {
         match std::fs::read(path) {
             Ok(bytes) => {
+                if let Ok(mut g) = LAST_SWF_REAL_PATH.lock() {
+                    *g = Some(std::string::String::from(*path));
+                }
                 return Some((bytes, std::string::String::from(*path)));
             }
             Err(err) => {
@@ -551,6 +619,13 @@ fn render_frame_with_dt(dt: FloatDuration) {
         }
         backend.draw_cursor_overlay(cx, cy, clicked);
     }
+
+    // Drive any loader futures the SidecarNavigator spawned this frame
+    // (multi-file games: loadMovie / GetURL-into-_levelN). This MUST run with
+    // the player lock released — the futures re-lock the player to install the
+    // loaded movie, so pumping them under our own guard would deadlock.
+    drop(player);
+    state.executor.run();
 }
 
 /// Redraw the current Player state WITHOUT advancing AVM/animation by a
