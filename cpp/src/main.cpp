@@ -247,6 +247,19 @@ static constexpr float CURSOR_SPEED   = 12.0f;
 static void worker_entry(void* /*arg*/) {
     std::printf("worker: starting (32 MB stack)\n"); std::fflush(stdout);
 
+    // DIAG (worker-TLS fault): this worker is a raw libnx thread. The kernel
+    // sets TPIDRRO_EL0 (IPC/syscall TLS) but leaves TPIDR_EL0 (ELF/compiler
+    // TLS, used by Rust's #[thread_local]) = 0. Ruffle's hot path never touches
+    // TLS so the game runs fine — but the moment a Rust panic fires,
+    // std::panicking::panic_with_hook reads the `panic_count` thread-local via
+    // TPIDR_EL0 and faults at 0x100, so our panic hook never runs and the panic
+    // MESSAGE is lost (we only see the native data abort, see exception.cpp).
+    // Point TPIDR_EL0 at a zeroed scratch block so panic_count reads 0 and the
+    // hook can format + dump the real message. Safe: TPIDR_EL0 was unused (0)
+    // and syscalls use TPIDRRO_EL0, not this register.
+    static unsigned char s_worker_tls[0x1000] __attribute__((aligned(16))) = {0};
+    __asm__ volatile("msr tpidr_el0, %0" :: "r"(&s_worker_tls[0]));
+
     NWindow* win = nwindowGetDefault();
     if (!gl_context_init(win)) {
         std::printf("gl_context_init failed\n"); std::fflush(stdout);

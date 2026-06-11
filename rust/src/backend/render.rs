@@ -45,8 +45,31 @@ use ruffle_render::commands::{CommandHandler, CommandList, RenderBlendMode};
 use ruffle_render::error::Error;
 use ruffle_render::filters::Filter;
 use ruffle_render::matrix::Matrix;
-use ruffle_render::pixel_bender::{PixelBenderShader, PixelBenderShaderHandle};
+use ruffle_render::pixel_bender::{
+    PixelBenderShader, PixelBenderShaderHandle, PixelBenderShaderImpl,
+};
 use ruffle_render::pixel_bender_support::PixelBenderShaderArgument;
+
+/// FlashNX: minimal `PixelBenderShaderImpl` that just carries the parsed shader.
+/// The Switch GL backend can't compile or run PixelBender (same limitation as
+/// Ruffle's own webgl backend), but returning a handle from
+/// `compile_pixelbender_shader` instead of `Err` lets AVM2 `Shader` / `ShaderData`
+/// / `ShaderFilter` construction SUCCEED. That matters because games build these
+/// inside `enterFrame` / `click` handlers (e.g. The Terminal) — erroring there
+/// aborts the handler and silently breaks input + game logic. With a real handle:
+/// `run_pixelbender_shader` still errs (so `ShaderJob` no-ops cleanly) and the
+/// renderer already skips `Filter::ShaderFilter` (`is_filter_supported` = false),
+/// so the shader EFFECT is simply absent — the game keeps running normally.
+#[derive(Debug)]
+struct NoopPixelBenderShader {
+    shader: PixelBenderShader,
+}
+
+impl PixelBenderShaderImpl for NoopPixelBenderShader {
+    fn parsed_shader(&self) -> &PixelBenderShader {
+        &self.shader
+    }
+}
 use ruffle_render::quality::StageQuality;
 use ruffle_render::shape_utils::{DistilledShape, GradientType};
 use ruffle_render::tessellator::{DrawType, Gradient, ShapeTessellator};
@@ -8395,11 +8418,14 @@ impl RenderBackend for SwitchRenderBackend {
 
     fn compile_pixelbender_shader(
         &mut self,
-        _shader: PixelBenderShader,
+        shader: PixelBenderShader,
     ) -> Result<PixelBenderShaderHandle, Error> {
-        Err(Error::Unimplemented(
-            "Pixel bender shader compilation".into(),
-        ))
+        // FlashNX: see NoopPixelBenderShader. We can't GL-compile PixelBender, but
+        // we hold the parsed shader so AVM2 construction succeeds; execution
+        // (run_pixelbender_shader) still errs and the renderer skips ShaderFilter.
+        Ok(PixelBenderShaderHandle(std::sync::Arc::new(
+            NoopPixelBenderShader { shader },
+        )))
     }
 
     fn run_pixelbender_shader(

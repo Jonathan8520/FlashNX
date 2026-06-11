@@ -63,7 +63,8 @@ flash-for-switch/
 │           └── log.rs            # SwitchLogBackend → ruffle_log_cstr
 ├── patches/
 │   ├── README.md                 # How to re-apply after git submodule update
-│   └── 0001-mario63-zero-scale-hit-test.patch  # Fix Toad castle #6906
+│   ├── 0001-mario63-zero-scale-hit-test.patch  # Fix Toad castle #6906
+│   └── 0002-pixelbender-shaderjob-run-noop.patch  # PixelBender games don't crash
 ├── third_party/
 │   ├── ruffle/                   # git submodule + patches/*.patch applied
 │   └── jpeg-decoder-switchfork/  # vendored jpeg-decoder-0.3.2, select_worker → Immediate forced
@@ -238,7 +239,8 @@ For playing common AS1/AS2 SWFs, it's functionally near-complete. Honest invento
 | **`BitmapData.draw()`**: clear-transparent (no composite over the existing content), temp texture per call (no pool) | OK for the tile-engine pattern (SMWF), not faithful for all BitmapData uses. |
 | **Blend modes** Alpha / Erase (need layer tracking); nested blend (non-recursive offscreen FBO) | Trivial (Add/Screen…) and Complex (Multiply/Overlay…) are done. |
 | **Filter perf in menu transitions** (N FBO passes/frame) | Hiccups on heavily filtered menus (Mario 63). Bounded by budget/frame + pool TTL. Real fix = batching the passes. |
-| **Context3D / Stage3D**, **PixelBender** (AS3) | Not implemented (stubs). Near-zero for 2D AS1/2 Flash. |
+| **Context3D / Stage3D** (AS3) | Not implemented (stubs). Near-zero for 2D AS1/2 Flash. |
+| **PixelBender** (AS3 `Shader` / `ShaderFilter` / `ShaderJob`) | No GL execution (wgpu-only upstream). Degrades gracefully: `compile_pixelbender_shader` returns a parsed-shader handle so AVM2 construction succeeds, the renderer skips `Filter::ShaderFilter`, `ShaderJob` no-ops (patch 0002). The effect is absent but the game runs (e.g. The Terminal). |
 
 ### Ruffle core (out of our scope)
 

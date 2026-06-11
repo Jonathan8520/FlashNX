@@ -1,0 +1,30 @@
+diff --git a/core/src/avm2/globals/flash/display/shader_job.rs b/core/src/avm2/globals/flash/display/shader_job.rs
+index ce5e8a5d5..f69928e2e 100644
+--- a/core/src/avm2/globals/flash/display/shader_job.rs
++++ b/core/src/avm2/globals/flash/display/shader_job.rs
+@@ -324,11 +324,20 @@ pub fn start<'gc>(
+         }
+     }
+ 
+-    let output = activation
+-        .context
+-        .renderer
+-        .run_pixelbender_shader(shader_handle, &arguments, &pixel_bender_target)
+-        .expect("Failed to run shader");
++    // FlashNX patch: backend can't run PixelBender → warn + no-op instead of the
++    // `.expect` panic. (Unreachable on Switch today since compile always fails and
++    // the handle is None above, but kept correct if a backend ever compiles.)
++    let output = match activation.context.renderer.run_pixelbender_shader(
++        shader_handle,
++        &arguments,
++        &pixel_bender_target,
++    ) {
++        Ok(output) => output,
++        Err(e) => {
++            tracing::warn!("FlashNX: run_pixelbender_shader failed, ShaderJob no-op: {e:?}");
++            return Ok(Value::Undefined);
++        }
++    };
+ 
+     match output {
+         PixelBenderOutput::Bitmap(sync_handle) => {

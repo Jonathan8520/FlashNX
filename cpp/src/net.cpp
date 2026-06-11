@@ -173,7 +173,7 @@ extern "C" int https_get_into_buf(const char* url, char* buf, int cap) {
     if (!c) return -1;
     BufferWriter w = { buf, cap - 1, 0, false };
     curl_easy_setopt(c, CURLOPT_URL, url);
-    curl_easy_setopt(c, CURLOPT_USERAGENT, "FlashNX/1.2.0 (Nintendo Switch homebrew)");
+    curl_easy_setopt(c, CURLOPT_USERAGENT, "FlashNX/1.2.1 (Nintendo Switch homebrew)");
     curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
     curl_easy_setopt(c, CURLOPT_CAINFO, CACERT_PATH);
@@ -222,7 +222,7 @@ extern "C" int https_post_json(const char* url, const char* body, char* buf, int
     headers = curl_slist_append(headers, "Accept: application/json");
     BufferWriter w = { buf, cap - 1, 0, false };
     curl_easy_setopt(c, CURLOPT_URL, url);
-    curl_easy_setopt(c, CURLOPT_USERAGENT, "FlashNX/1.2.0 (Nintendo Switch homebrew)");
+    curl_easy_setopt(c, CURLOPT_USERAGENT, "FlashNX/1.2.1 (Nintendo Switch homebrew)");
     curl_easy_setopt(c, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(c, CURLOPT_POST, 1L);
     curl_easy_setopt(c, CURLOPT_POSTFIELDS, body ? body : "");
@@ -300,7 +300,7 @@ extern "C" int https_download_start(const char* url, const char* out_path) {
     g_dl_out_path[sizeof(g_dl_out_path) - 1] = 0;
 
     curl_easy_setopt(c, CURLOPT_URL, url);
-    curl_easy_setopt(c, CURLOPT_USERAGENT, "FlashNX/1.2.0 (Nintendo Switch homebrew)");
+    curl_easy_setopt(c, CURLOPT_USERAGENT, "FlashNX/1.2.1 (Nintendo Switch homebrew)");
     curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
     curl_easy_setopt(c, CURLOPT_CAINFO, CACERT_PATH);
@@ -400,7 +400,7 @@ extern "C" int https_get_start(const char* url) {
     }
     g_get_buf.clear();
     curl_easy_setopt(c, CURLOPT_URL, url);
-    curl_easy_setopt(c, CURLOPT_USERAGENT, "FlashNX/1.2.0 (Nintendo Switch homebrew)");
+    curl_easy_setopt(c, CURLOPT_USERAGENT, "FlashNX/1.2.1 (Nintendo Switch homebrew)");
     curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
     curl_easy_setopt(c, CURLOPT_CAINFO, CACERT_PATH);
@@ -525,7 +525,7 @@ extern "C" int https_thumb_start(const char* url) {
     }
     g_thumb_buf.clear();
     curl_easy_setopt(c, CURLOPT_URL, url);
-    curl_easy_setopt(c, CURLOPT_USERAGENT, "FlashNX/1.2.0 (Nintendo Switch homebrew)");
+    curl_easy_setopt(c, CURLOPT_USERAGENT, "FlashNX/1.2.1 (Nintendo Switch homebrew)");
     curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
     curl_easy_setopt(c, CURLOPT_CAINFO, CACERT_PATH);
@@ -591,7 +591,7 @@ extern "C" long long https_head_content_length(const char* url) {
     if (!c) return -1;
     curl_easy_setopt(c, CURLOPT_URL, url);
     curl_easy_setopt(c, CURLOPT_NOBODY, 1L); // HEAD request
-    curl_easy_setopt(c, CURLOPT_USERAGENT, "FlashNX/1.2.0 (Nintendo Switch homebrew)");
+    curl_easy_setopt(c, CURLOPT_USERAGENT, "FlashNX/1.2.1 (Nintendo Switch homebrew)");
     curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
     curl_easy_setopt(c, CURLOPT_CAINFO, CACERT_PATH);
