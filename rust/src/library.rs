@@ -568,6 +568,19 @@ pub(crate) struct State {
     /// instead of drawing the (still-empty) cover grid. Avoids the UI freeze the
     /// old synchronous `gamezip::search` caused.
     fp_loading: bool,
+    /// Incremental companion-SWF download (multi-file game, v1.3.0). After the
+    /// main GameZIP lands, each sibling SWF is pulled through the normal
+    /// `https_download_*` path so it shows on the SAME progress bar ("LINKED
+    /// FILES"). The `DistantDownloading` render arm drives this queue: download a
+    /// companion, read it back, scan it for further companions (BFS), repeat,
+    /// then finalize. `seen` holds every name ever queued so we don't loop.
+    dl_companion_active: bool,
+    dl_companion_base: std::string::String,
+    dl_companion_dir: std::string::String,
+    dl_companion_current: std::string::String,
+    dl_companion_queue: std::vec::Vec<std::string::String>,
+    dl_companion_seen: std::vec::Vec<std::string::String>,
+    dl_companion_done: u32,
     /// URL of the async archive.org fetch in flight (`Screen::DistantLoading`),
     /// pushed to history once the fetch succeeds.
     pending_fetch_url: std::string::String,
@@ -605,6 +618,13 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     cover_msg: std::string::String::new(),
     cover_query: std::string::String::new(),
     fp_loading: false,
+    dl_companion_active: false,
+    dl_companion_base: std::string::String::new(),
+    dl_companion_dir: std::string::String::new(),
+    dl_companion_current: std::string::String::new(),
+    dl_companion_queue: std::vec::Vec::new(),
+    dl_companion_seen: std::vec::Vec::new(),
+    dl_companion_done: 0,
     pending_fetch_url: std::string::String::new(),
     bug_msg: std::string::String::new(),
     bug_ok: false,
@@ -3357,27 +3377,56 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             }
         }
         Screen::DistantDownloading => {
-            // Pump the curl multi handle once per frame and check
-            // completion. The progress snapshot reflects whatever the
-            // last tick updated.
-            let (done, total) = net::download_progress();
-            // Snapshot the name for the UI — prefer the REAL Flashpoint title
-            // (with its `:` etc.) over the sanitized on-SD filename.
-            let file_name = LIBRARY
+            // Pump the curl multi handle once per frame and check completion. The
+            // progress snapshot reflects whatever the last tick updated.
+            let companion = LIBRARY
                 .lock()
                 .ok()
                 .map(|s| {
-                    s.download_title
-                        .clone()
-                        .filter(|t| !t.trim().is_empty())
-                        .unwrap_or_else(|| s.download_file_name.clone())
+                    (
+                        s.dl_companion_active,
+                        s.dl_companion_current.clone(),
+                        s.dl_companion_queue.len(),
+                    )
                 })
-                .unwrap_or_default();
-            backend.draw_library_distant_downloading(&file_name, done, total);
-            match net::tick_download() {
-                Ok(false) => {}
-                Ok(true) => on_download_finished(),
-                Err(msg) => set_distant_error(&msg),
+                .unwrap_or((false, std::string::String::new(), 0));
+            if companion.0 {
+                // Companion phase (multi-file game): each sibling streams through
+                // the same bar, labelled "MULTI-FICHIERS : <name> (remaining)".
+                let (done, total) = net::download_progress();
+                let label = std::format!(
+                    "{} : {} ({})",
+                    crate::loc::s().multifile,
+                    companion.1,
+                    companion.2 + 1,
+                );
+                backend.draw_library_distant_downloading(&label, done, total);
+                match net::tick_download() {
+                    Ok(false) => {}
+                    // Done OR errored: a failed companion is skipped (the game may
+                    // still partly work), the queue carries on / finalizes.
+                    _ => companion_download_finished(),
+                }
+            } else {
+                let (done, total) = net::download_progress();
+                // Snapshot the name for the UI — prefer the REAL Flashpoint title
+                // (with its `:` etc.) over the sanitized on-SD filename.
+                let file_name = LIBRARY
+                    .lock()
+                    .ok()
+                    .map(|s| {
+                        s.download_title
+                            .clone()
+                            .filter(|t| !t.trim().is_empty())
+                            .unwrap_or_else(|| s.download_file_name.clone())
+                    })
+                    .unwrap_or_default();
+                backend.draw_library_distant_downloading(&file_name, done, total);
+                match net::tick_download() {
+                    Ok(false) => {}
+                    Ok(true) => on_download_finished(),
+                    Err(msg) => set_distant_error(&msg),
+                }
             }
         }
         Screen::DistantError => {
@@ -3413,18 +3462,19 @@ pub fn render(backend: &mut SwitchRenderBackend) {
 /// Read a downloaded Flashpoint GameZIP at `zip_path`, extract its `.swf` to
 /// `swf_path`, and add it to the local library. Returns false on any
 /// read/parse/write failure (caller then shows `err_no_swf`).
-fn finish_gamezip(zip_path: &str, swf_path: &str) -> bool {
-    let Some(zip) = crate::sources::gamezip::read_file_bounded(zip_path, 64 * 1024 * 1024) else {
-        log("library: gamezip read failed\n");
-        return false;
-    };
-    let Some((swf, entry_name)) = crate::sources::gamezip::extract_first_swf(&zip) else {
-        log("library: gamezip has no .swf entry\n");
-        return false;
-    };
+/// Extract the GameZIP's main `.swf` to `swf_path` and return its ZIP entry
+/// name (used to build the companion htdocs base) + the SWF bytes (scanned for
+/// which companions to pull). Companion fetch + library add happen afterwards,
+/// incrementally, so they show on the download progress bar. None on failure.
+fn extract_gamezip_main(
+    zip_path: &str,
+    swf_path: &str,
+) -> Option<(std::string::String, std::vec::Vec<u8>)> {
+    let zip = crate::sources::gamezip::read_file_bounded(zip_path, 64 * 1024 * 1024)?;
+    let (swf, entry_name) = crate::sources::gamezip::extract_first_swf(&zip)?;
     if std::fs::write(swf_path, &swf).is_err() {
         log("library: gamezip .swf write failed\n");
-        return false;
+        return None;
     }
     crate::sd::commit();
     log(&std::format!(
@@ -3432,25 +3482,147 @@ fn finish_gamezip(zip_path: &str, swf_path: &str) -> bool {
         swf_path,
         swf.len(),
     ));
-    // Multi-file games: fetch the companion SWFs this game loads (loadMovie /
-    // GetURL into _levelN) into its `<game>.files/` sidecar dir, so the
-    // SidecarNavigator can serve them at play time. Best-effort; a game that
-    // references no other SWF just writes nothing. Same Flashpoint mirror the
-    // GameZIP came from (the db-api GameZIP often ships only the main SWF).
-    if let Some(base) = crate::sources::gamezip::htdocs_base_from_entry(&entry_name) {
-        let files_dir = crate::sidecar_dir_for(Some(swf_path));
-        let files_dir = files_dir.to_string_lossy().into_owned();
-        let main_name = entry_name.rsplit('/').next().unwrap_or("");
-        let n = crate::sources::gamezip::fetch_siblings(&swf, main_name, &base, &files_dir);
-        if n > 0 {
-            log(&std::format!(
-                "library: fetched {} companion SWF(s) -> {}\n",
-                n, files_dir
-            ));
-            crate::sd::commit();
+    Some((entry_name, swf))
+}
+
+/// Pop the next companion name and start its download into `<files-dir>/<name>`
+/// via the normal `https_download_*` path (so it shows on the progress bar).
+/// Returns true if a download started, false when the queue is empty (the
+/// companion phase is then done). Names that fail to start are skipped.
+fn start_next_companion() -> bool {
+    loop {
+        let (name, base, dir) = {
+            let mut g = match LIBRARY.lock() {
+                Ok(g) => g,
+                Err(_) => return false,
+            };
+            match g.dl_companion_queue.pop() {
+                Some(n) => (n, g.dl_companion_base.clone(), g.dl_companion_dir.clone()),
+                None => return false,
+            }
+        };
+        let url = std::format!("{}{}", base, name);
+        let out = std::format!("{}/{}", dir, name);
+        match net::start_download(&url, &out) {
+            Ok(()) => {
+                if let Ok(mut g) = LIBRARY.lock() {
+                    g.dl_companion_current = name;
+                }
+                return true;
+            }
+            Err(e) => {
+                log(&std::format!("library: companion start failed {} ({})\n", url, e));
+                // skip this one, try the next
+            }
         }
     }
-    add_or_replace_path(swf_path)
+}
+
+/// A companion finished downloading: read it back, scan it for further
+/// companions (BFS — e.g. maingame.swf pulls console.swf/endgame.swf), queue
+/// the new ones, then start the next download or finalize when the queue dries.
+fn companion_download_finished() {
+    let (dir, current) = match LIBRARY.lock() {
+        Ok(g) => (g.dl_companion_dir.clone(), g.dl_companion_current.clone()),
+        Err(_) => return,
+    };
+    let path = std::format!("{}/{}", dir, current);
+    if let Some(bytes) = crate::sources::gamezip::read_file_bounded(&path, 16 * 1024 * 1024) {
+        let is_swf = bytes.len() > 8 && {
+            let sig = &bytes[0..3];
+            sig == b"FWS" || sig == b"CWS" || sig == b"ZWS"
+        };
+        if is_swf {
+            let more = crate::sources::gamezip::scan_swf_siblings(&bytes);
+            if let Ok(mut s) = LIBRARY.lock() {
+                for n in more {
+                    let lower = n.to_ascii_lowercase();
+                    if !s.dl_companion_seen.iter().any(|x| *x == lower) {
+                        s.dl_companion_seen.push(lower);
+                        s.dl_companion_queue.push(n);
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.dl_companion_done += 1;
+    }
+    crate::sd::commit();
+    if !start_next_companion() {
+        if let Ok(mut s) = LIBRARY.lock() {
+            s.dl_companion_active = false;
+        }
+        finalize_gamezip_download();
+    }
+}
+
+/// Finish a Flashpoint game download once its main SWF (and any companions) are
+/// on the SD card: add it to the local library, write the source-URL sidecar,
+/// auto-fetch the cover, restore the real title, and return to the FpGallery.
+/// Reads the `download_*` state (still populated until here). Shared by the
+/// no-companion path and the companion-phase completion.
+fn finalize_gamezip_download() {
+    let (swf_path, file_name, cover_url, real_title, source_url) = match LIBRARY.lock() {
+        Ok(g) => (
+            g.download_zip_extract.clone().unwrap_or_default(),
+            g.download_file_name.clone(),
+            g.download_cover_url.clone(),
+            g.download_title.clone(),
+            g.download_source_url.clone(),
+        ),
+        Err(_) => return,
+    };
+    if swf_path.is_empty() {
+        return;
+    }
+    add_or_replace_path(&swf_path);
+    // Record where this game came from (Flashpoint GameZIP URL) next to the
+    // extracted .swf, for later bug-report attribution.
+    write_url_sidecar(&swf_path, &source_url);
+    // Auto-fetch the game's cover (logo) so JOUER shows its art right away — no
+    // manual "Jaquette" step. Synchronous HTTPS, best-effort.
+    if let Some(url) = &cover_url {
+        if !file_name.is_empty() {
+            match crate::covers::fetch_url_and_cache(&file_name, url) {
+                Ok(p) => {
+                    log(&std::format!("library: auto-cover cached -> {}\n", p));
+                    crate::backend::render::invalidate_cover(&file_name);
+                }
+                Err(e) => log(&std::format!("library: auto-cover failed: {}\n", e)),
+            }
+        }
+    }
+    // Persist the REAL Flashpoint title as the display name.
+    let stem = file_name.strip_suffix(".swf").unwrap_or(&file_name);
+    let restored_title = real_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty() && *t != stem);
+    if let (Some(title), false) = (restored_title, file_name.is_empty()) {
+        if write_meta_sidecar(&file_name, title) {
+            log(&std::format!("library: saved real title \"{}\" for {}\n", title, file_name));
+        }
+    }
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.download_file_name.clear();
+        s.download_out_path.clear();
+        s.download_zip_extract = None;
+        s.download_cover_url = None;
+        s.download_title = None;
+        if let Some(title) = restored_title {
+            if let Some(e) = s.entries.iter_mut().find(|e| e.basename == file_name) {
+                e.display_name = title.to_string();
+            }
+        }
+        if !file_name.is_empty() && !s.downloaded_basenames.iter().any(|n| n == &file_name) {
+            s.downloaded_basenames.push(file_name);
+        }
+        // Back to the Flashpoint gallery so the user can grab another game.
+        let (sel, scroll) = s.download_resume_pos.take().unwrap_or((0, 0));
+        let sel = sel.min(s.cover_candidates.len().saturating_sub(1));
+        s.screen = Screen::FpGallery { selection: sel, scroll };
+    }
 }
 
 /// Called from `render()` after `tick_download` returns Ok(true). Adds
@@ -3460,13 +3632,14 @@ fn finish_gamezip(zip_path: &str, swf_path: &str) -> bool {
 /// item without re-typing the URL. The just-downloaded basename is
 /// tracked in `downloaded_basenames` so the list shows a `✓` next to it.
 fn on_download_finished() {
-    let (out_path, file_name, zip_extract, cover_url, real_title, source_url) = match LIBRARY.lock() {
+    // `cover_url` / `real_title` are read from state inside
+    // `finalize_gamezip_download` (also called from the companion phase), so we
+    // only pull what this function uses directly here.
+    let (out_path, file_name, zip_extract, source_url) = match LIBRARY.lock() {
         Ok(g) => (
             g.download_out_path.clone(),
             g.download_file_name.clone(),
             g.download_zip_extract.clone(),
-            g.download_cover_url.clone(),
-            g.download_title.clone(),
             g.download_source_url.clone(),
         ),
         Err(_) => return,
@@ -3479,9 +3652,8 @@ fn on_download_finished() {
     // Flashpoint GameZIP: the downloaded file is a `.zip`; extract its `.swf`
     // to `swf_path` and add THAT (not the zip), then delete the temp zip.
     if let Some(swf_path) = zip_extract {
-        let added = finish_gamezip(&out_path, &swf_path);
-        let _ = std::fs::remove_file(&out_path);
-        if !added {
+        let Some((entry_name, swf)) = extract_gamezip_main(&out_path, &swf_path) else {
+            let _ = std::fs::remove_file(&out_path);
             if let Ok(mut s) = LIBRARY.lock() {
                 s.download_file_name.clear();
                 s.download_out_path.clear();
@@ -3492,59 +3664,46 @@ fn on_download_finished() {
             }
             set_distant_error(crate::loc::s().err_no_swf);
             return;
-        }
-        // Record where this game came from (Flashpoint GameZIP URL) next to the
-        // extracted .swf, for later bug-report attribution.
-        write_url_sidecar(&swf_path, &source_url);
-        // Auto-fetch the game's cover (logo) so JOUER shows its art right away —
-        // no manual "Jaquette" step. Done WITHOUT the LIBRARY lock (synchronous
-        // HTTPS); best-effort, a failure just leaves the default tile.
-        if let Some(url) = &cover_url {
-            if !file_name.is_empty() {
-                match crate::covers::fetch_url_and_cache(&file_name, url) {
-                    Ok(p) => {
-                        log(&std::format!("library: auto-cover cached -> {}\n", p));
-                        crate::backend::render::invalidate_cover(&file_name);
+        };
+        let _ = std::fs::remove_file(&out_path);
+        // Multi-file game: queue its companion SWFs so they download (on the same
+        // progress bar) before we finalize, so they're present when the user
+        // launches it. No companions → finalize straight away.
+        let base = crate::sources::gamezip::htdocs_base_from_entry(&entry_name);
+        let companions = crate::sources::gamezip::scan_swf_siblings(&swf);
+        if let (Some(base), false) = (base, companions.is_empty()) {
+            let files_dir = crate::sidecar_dir_for(Some(&swf_path))
+                .to_string_lossy()
+                .into_owned();
+            let _ = std::fs::create_dir_all(&files_dir);
+            let main_name = entry_name.rsplit('/').next().unwrap_or("").to_ascii_lowercase();
+            if let Ok(mut s) = LIBRARY.lock() {
+                s.dl_companion_base = base;
+                s.dl_companion_dir = files_dir;
+                s.dl_companion_current = std::string::String::new();
+                s.dl_companion_done = 0;
+                s.dl_companion_seen = std::vec![main_name];
+                s.dl_companion_queue = std::vec::Vec::new();
+                for n in companions {
+                    let lower = n.to_ascii_lowercase();
+                    if !s.dl_companion_seen.iter().any(|x| *x == lower) {
+                        s.dl_companion_seen.push(lower);
+                        s.dl_companion_queue.push(n);
                     }
-                    Err(e) => log(&std::format!("library: auto-cover failed: {}\n", e)),
                 }
+                s.dl_companion_active = true;
+            }
+            // Start the first companion; the DistantDownloading arm drives the
+            // rest and finalizes when the queue dries. If none actually started,
+            // fall through to finalize now.
+            if start_next_companion() {
+                return;
+            }
+            if let Ok(mut s) = LIBRARY.lock() {
+                s.dl_companion_active = false;
             }
         }
-        // Persist the REAL Flashpoint title as the display name (the filename
-        // dropped `:` and friends), so the game shows its true name AND a later
-        // "Jaquette" search uses the real title. Sidecar write does its own SD
-        // commit; no LIBRARY lock needed here.
-        let stem = file_name.strip_suffix(".swf").unwrap_or(&file_name);
-        let restored_title = real_title
-            .as_deref()
-            .map(str::trim)
-            .filter(|t| !t.is_empty() && *t != stem);
-        if let (Some(title), false) = (restored_title, file_name.is_empty()) {
-            if write_meta_sidecar(&file_name, title) {
-                log(&std::format!("library: saved real title \"{}\" for {}\n", title, file_name));
-            }
-        }
-        if let Ok(mut s) = LIBRARY.lock() {
-            s.download_file_name.clear();
-            s.download_out_path.clear();
-            s.download_zip_extract = None;
-            s.download_cover_url = None;
-            s.download_title = None;
-            // Reflect the restored title on the in-memory entry too (so it shows
-            // immediately without waiting for the next library scan).
-            if let Some(title) = restored_title {
-                if let Some(e) = s.entries.iter_mut().find(|e| e.basename == file_name) {
-                    e.display_name = title.to_string();
-                }
-            }
-            if !file_name.is_empty() && !s.downloaded_basenames.iter().any(|n| n == &file_name) {
-                s.downloaded_basenames.push(file_name);
-            }
-            // Back to the Flashpoint gallery so the user can grab another game.
-            let (sel, scroll) = s.download_resume_pos.take().unwrap_or((0, 0));
-            let sel = sel.min(s.cover_candidates.len().saturating_sub(1));
-            s.screen = Screen::FpGallery { selection: sel, scroll };
-        }
+        finalize_gamezip_download();
         return;
     }
 
