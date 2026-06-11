@@ -5433,6 +5433,30 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
+    /// Multi-file launch indicator (v1.3.0): a centered label near the bottom of
+    /// the launch/loading reveal, e.g. "MULTI-FILE (6)", telling the user this
+    /// game pulls in companion SWFs from its `.files/` folder. The caller gates
+    /// when it shows (launch reveal only, once the cover fills the screen).
+    pub fn draw_multifile_badge(&mut self, label: &str, count: i32) {
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        let text = std::format!("{} ({})", label, count);
+        let scale = 1.8;
+        let tw = self.measure_text(&text, scale);
+        self.draw_text(
+            (vw - tw) * 0.5,
+            vh - 48.0,
+            scale,
+            &text,
+            swf::Color::from_rgb(0xFFFFFF, 255),
+        );
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
     /// Resolve + cache a game's cover texture by basename. Decodes/uploads on
     /// first use; returns `Default` when there's no cover image (caller draws
     /// the generated tile).

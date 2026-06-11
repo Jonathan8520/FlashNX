@@ -99,6 +99,31 @@ extern "C" void swf_picker_run(void) {
     }
 }
 
+// Recursively delete a directory and everything under it (one nested level is
+// enough for our companion folders, but recurse anyway for safety). Uses
+// opendir/readdir/unlink/rmdir — safe on Horizon, unlike Rust's read_dir.
+// Returns the number of entries (files + dirs) removed; 0 if `path` is absent.
+static int remove_dir_recursive(const char* path) {
+    DIR* d = opendir(path);
+    if (!d) return 0; // absent or not a directory — nothing to do (idempotent)
+    int removed = 0;
+    char child[512];
+    while (struct dirent* ent = readdir(d)) {
+        const char* n = ent->d_name;
+        if (std::strcmp(n, ".") == 0 || std::strcmp(n, "..") == 0) continue;
+        const int nl = std::snprintf(child, sizeof(child), "%s/%s", path, n);
+        if (nl <= 0 || (size_t)nl >= sizeof(child)) continue;
+        if (ent->d_type == DT_DIR) {
+            removed += remove_dir_recursive(child);
+        } else if (::unlink(child) == 0) {
+            ++removed;
+        }
+    }
+    closedir(d);
+    if (::rmdir(path) == 0) ++removed;
+    return removed;
+}
+
 // Phase 3.4.bis SUPPRIMER — delete a game's .swf + every sidecar / save
 // file matching its basename. Pattern matched: file name == basename OR
 // file name starts with `<basename>.` (catches `.meta.json`,
@@ -149,6 +174,69 @@ extern "C" int swf_picker_delete_game(const char* swf_path) {
         }
     }
     closedir(d);
+
+    // Multi-file games (v1.3.0): also remove the companion folder
+    // `<stem>.files/` (sibling SWFs fetched by gamezip::fetch_siblings, plus any
+    // nested asset dirs). `stem` = basename minus a trailing ".swf". Rust can't
+    // enumerate it reliably on Horizon, so the recursive unlink lives here.
+    {
+        size_t stemlen = blen;
+        if (blen >= 4) {
+            const char* e = basename + blen - 4;
+            if (e[0] == '.' && (e[1] == 's' || e[1] == 'S') && (e[2] == 'w' || e[2] == 'W')
+                && (e[3] == 'f' || e[3] == 'F')) {
+                stemlen = blen - 4;
+            }
+        }
+        char filesdir[512];
+        const int nl = std::snprintf(filesdir, sizeof(filesdir), "%s%.*s.files",
+                                     dir, (int)stemlen, basename);
+        if (nl > 0 && (size_t)nl < sizeof(filesdir)) {
+            const int n = remove_dir_recursive(filesdir);
+            if (n > 0) {
+                std::printf("swf_picker_delete_game: removed companion dir %s (%d entries)\n",
+                            filesdir, n);
+                removed += n;
+            }
+        }
+    }
+
     std::fflush(stdout);
     return removed;
+}
+
+// Multi-file indicator (v1.3.0): count the companion SWFs in a game's
+// `<stem>.files/` folder. Returns the count, or 0 if the folder is absent.
+// opendir/readdir is Horizon-safe (unlike Rust's read_dir).
+extern "C" int swf_picker_count_companions(const char* swf_path) {
+    if (!swf_path || !*swf_path) return 0;
+    const size_t plen = std::strlen(swf_path);
+    size_t base = plen; // strip a trailing ".swf" to get "<dir><stem>"
+    if (plen >= 4) {
+        const char* e = swf_path + plen - 4;
+        if (e[0] == '.' && (e[1] == 's' || e[1] == 'S') && (e[2] == 'w' || e[2] == 'W')
+            && (e[3] == 'f' || e[3] == 'F')) {
+            base = plen - 4;
+        }
+    }
+    char filesdir[512];
+    const int nl = std::snprintf(filesdir, sizeof(filesdir), "%.*s.files", (int)base, swf_path);
+    if (nl <= 0 || (size_t)nl >= sizeof(filesdir)) return 0;
+    DIR* d = opendir(filesdir);
+    if (!d) return 0; // no companion folder for this game
+    int count = 0;
+    while (struct dirent* ent = readdir(d)) {
+        if (ent->d_type == DT_DIR) continue;
+        const char* n = ent->d_name;
+        const size_t l = std::strlen(n);
+        if (l >= 4) {
+            const char* e = n + l - 4;
+            if (e[0] == '.' && (e[1] == 's' || e[1] == 'S') && (e[2] == 'w' || e[2] == 'W')
+                && (e[3] == 'f' || e[3] == 'F')) {
+                ++count;
+            }
+        }
+    }
+    closedir(d);
+    return count;
 }

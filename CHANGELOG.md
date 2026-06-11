@@ -2,6 +2,19 @@
 
 Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://github.com/ruffle-rs/ruffle).
 
+## v1.3.0 (2026-06-11)
+
+Multi-file Flash games now work: games split across several `.swf` files (a separate title screen, minigames, music) load their companion files instead of hanging on a black screen.
+
+### Added
+
+- **Multi-file game support**: a game that loads other `.swf` files at runtime (`loadMovie` / `loadMovieNum` into a level) now finds them in a `<game>.files/` folder next to the `.swf`. Download a game from the Flashpoint search (X) and its companion files are fetched automatically; for a game added another way, drop the companions in that folder yourself. *Garfield's Scary Scavenger Hunt* now plays from start to finish.
+- **Multi-file indicator**: the launch screen shows a "MULTI-FILE (N)" label when a game pulls in companion files, so you can tell at a glance.
+
+### Fixes
+
+- **Deleting a game also removes its `<game>.files/` companion folder**, so nothing is left behind on the SD card.
+
 ## v1.2.1 (2026-06-11)
 
 Small fix release: games that use PixelBender shaders no longer crash.

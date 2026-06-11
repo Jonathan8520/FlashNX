@@ -195,6 +195,11 @@ static LAST_PLAYED: Mutex<Option<(std::string::String, std::string::String)>> = 
 /// survives the game->library teardown.
 static LAUNCH_TICK: Mutex<Option<u64>> = Mutex::new(None);
 
+/// Companion-SWF count of the launching game's `<game>.files/` folder
+/// (multi-file indicator, v1.3.0). Set at launch (A-press), shown on the launch
+/// reveal, reset to 0 on return to the library so the quit reveal stays clean.
+static LAUNCH_COMPANIONS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
 /// Active library sort, persisted to `sdmc:/flashnx/sort.txt`
 /// (0 = A-Z, 1 = recent, 2 = recently played, 3 = most played, 4 = size).
 /// Default A-Z.
@@ -747,6 +752,9 @@ pub fn open() {
     }
     // Snap the gallery glide to wherever the cursor lands (last-played row),
     // so the first JOUER frame doesn't slide in from a stale position.
+    // The multi-file badge is a launch-only cue; clear it so the quit reveal
+    // (cover shrinking back to the tile) doesn't carry it.
+    LAUNCH_COMPANIONS.store(0, std::sync::atomic::Ordering::Relaxed);
     crate::backend::render::gallery_anim_reset();
     // Play the quit "close" reveal: the cover shrinks from full screen back to
     // the launched tile (rect = the tile's pre-launch screen box, still cached).
@@ -1553,6 +1561,16 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
                 note_played(&entry.basename, &entry.display_name);
                 if let Ok(mut g) = LAUNCH_TICK.lock() {
                     *g = Some(unsafe { ruffle_tick_now() });
+                }
+                // Multi-file indicator: count companion SWFs in <game>.files/ so
+                // the launch reveal can flag a multi-file game.
+                {
+                    let mut p = entry.path.as_bytes().to_vec();
+                    p.push(0);
+                    let n = unsafe {
+                        swf_picker_count_companions(p.as_ptr() as *const core::ffi::c_char)
+                    };
+                    LAUNCH_COMPANIONS.store(n.max(0), std::sync::atomic::Ordering::Relaxed);
                 }
                 log(&std::format!(
                     "library: JOUER -> {} ({})\n",
@@ -2592,6 +2610,7 @@ fn delete_game(s: &mut State, game_idx: usize) {
 
 extern "C" {
     fn swf_picker_delete_game(swf_path: *const core::ffi::c_char) -> core::ffi::c_int;
+    fn swf_picker_count_companions(swf_path: *const core::ffi::c_char) -> core::ffi::c_int;
 }
 
 /// Search flow: open swkbd pre-filled with the current filter, submit
@@ -2803,6 +2822,13 @@ fn draw_game_reveal_window(backend: &mut SwitchRenderBackend, frac: f32, fade: f
     }
     backend.clear_clip();
     backend.draw_reveal_chrome(wx, wy, ww, wh);
+    // Multi-file indicator (v1.3.0): once the cover fills the screen (the SWF is
+    // loading behind it), flag that this game pulls in companion SWFs from its
+    // `.files/` folder. Count is reset to 0 on the quit reveal, so launch-only.
+    let companions = LAUNCH_COMPANIONS.load(std::sync::atomic::Ordering::Relaxed);
+    if companions > 0 && frac >= 0.85 {
+        backend.draw_multifile_badge(crate::loc::s().multifile, companions);
+    }
 }
 
 /// Render the current screen using the backend. C++ calls this each frame

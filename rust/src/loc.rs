@@ -181,6 +181,10 @@ pub struct Strings {
     pub played_label: &'static str,
     pub sort_recent_played: &'static str,
     pub sort_dev: &'static str,
+    /// Label shown on the launch/loading screen when a game loads companion
+    /// SWFs from its `<game>.files/` folder (multi-file game). Drawn with the
+    /// companion count appended, e.g. "MULTI-FILE (6)".
+    pub multifile: &'static str,
     /// Sort direction labels shown in the sort modals (toggled with X).
     pub sort_dir_asc: &'static str,
     pub sort_dir_desc: &'static str,
@@ -309,6 +313,7 @@ const EN: Strings = Strings {
     played_label: "PLAYED",
     sort_recent_played: "LAST PLAYED",
     sort_dev: "DEVELOPER",
+    multifile: "MULTI-FILE",
     sort_dir_asc: "ASCENDING",
     sort_dir_desc: "DESCENDING",
     settings_footer: "L/R:TABS   A:OK",
@@ -429,6 +434,7 @@ const FR: Strings = Strings {
     played_label: "JOU\u{00C9}",
     sort_recent_played: "DERNIER JOU\u{00C9}",
     sort_dev: "D\u{00C9}VELOPPEUR",
+    multifile: "MULTI-FICHIERS",
     sort_dir_asc: "CROISSANT",
     sort_dir_desc: "D\u{00C9}CROISSANT",
     settings_footer: "L/R:ONGLETS   A:OK",
@@ -549,6 +555,7 @@ const ES: Strings = Strings {
     played_label: "JUGADO",
     sort_recent_played: "\u{00DA}LTIMO JUGADO",
     sort_dev: "DESARROLLADOR",
+    multifile: "MULTIARCHIVO",
     sort_dir_asc: "ASCENDENTE",
     sort_dir_desc: "DESCENDENTE",
     settings_footer: "L/R:PESTA\u{00D1}AS   A:OK",
@@ -671,6 +678,7 @@ const RU: Strings = Strings {
     played_label: "СЫГРАНО",
     sort_recent_played: "НЕДАВНО ИГРАЛИ",
     sort_dev: "РАЗРАБОТЧИК",
+    multifile: "МНОГОФАЙЛОВАЯ",
     sort_dir_asc: "ПО ВОЗР.",
     sort_dir_desc: "ПО УБЫВ.",
     settings_footer: "L/R:ВКЛАДКИ   A:ОК",
