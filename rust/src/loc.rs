@@ -338,10 +338,10 @@ const EN: Strings = Strings {
     bug_ok_msg: "YOUR REPORT WAS SENT. THANKS FOR HELPING IMPROVE FLASHNX.",
     bug_fail_title: "FAILED",
     kbd_bug_header: "FlashNX - Report a bug",
-    kbd_bug_guide: "Describe the problem (display, sound, crash). Optional: add your GitHub @handle for follow-up. This opens a PUBLIC issue on the FlashNX repo. Empty = send game info only.",
+    kbd_bug_guide: "Opens a PUBLIC GitHub issue. Describe the problem. Optional: your @handle.",
     set_suggest: "MAKE A SUGGESTION",
     kbd_suggest_header: "FlashNX - Make a suggestion",
-    kbd_suggest_guide: "Your idea / feature request for FlashNX.",
+    kbd_suggest_guide: "Opens a PUBLIC GitHub issue. Your idea / feature request for FlashNX.",
 };
 
 const FR: Strings = Strings {
@@ -458,10 +458,10 @@ const FR: Strings = Strings {
     bug_ok_msg: "TON RAPPORT A \u{00C9}T\u{00C9} ENVOY\u{00C9}. MERCI DE M'AIDER \u{00C0} AM\u{00C9}LIORER FLASHNX.",
     bug_fail_title: "\u{00C9}CHEC",
     kbd_bug_header: "FlashNX - Signaler un bug",
-    kbd_bug_guide: "Decris le probleme (affichage, son, plantage). Optionnel : ajoute ton @pseudo GitHub pour un suivi. Ceci ouvre une issue PUBLIQUE sur le repo FlashNX. Vide = juste les infos du jeu.",
+    kbd_bug_guide: "Ouvre une issue GitHub PUBLIQUE. Décris le problème. Option : ton @pseudo.",
     set_suggest: "FAIRE UNE PROPOSITION",
     kbd_suggest_header: "FlashNX - Faire une proposition",
-    kbd_suggest_guide: "Ton idee / proposition de fonctionnalite pour FlashNX.",
+    kbd_suggest_guide: "Ouvre une issue GitHub PUBLIQUE. Ton idée / proposition pour FlashNX.",
 };
 
 const ES: Strings = Strings {
@@ -578,10 +578,10 @@ const ES: Strings = Strings {
     bug_ok_msg: "TU INFORME SE ENVI\u{00D3}. GRACIAS POR AYUDAR A MEJORAR FLASHNX.",
     bug_fail_title: "FALLO",
     kbd_bug_header: "FlashNX - Reportar un fallo",
-    kbd_bug_guide: "Describe el problema (pantalla, sonido, cierre). Opcional: anade tu @usuario de GitHub. Abre un issue PUBLICO en el repo FlashNX. Vacio = solo la info del juego.",
+    kbd_bug_guide: "Abre un issue PUBLICO en GitHub. Describe el problema. Opcional: tu @usuario.",
     set_suggest: "HACER UNA SUGERENCIA",
     kbd_suggest_header: "FlashNX - Hacer una sugerencia",
-    kbd_suggest_guide: "Tu idea / sugerencia de funcion para FlashNX.",
+    kbd_suggest_guide: "Abre un issue PUBLICO en GitHub. Tu idea / sugerencia para FlashNX.",
 };
 
 // Russian — UPPERCASE Cyrillic (draw_text does not case-fold non-ASCII, and
@@ -700,10 +700,10 @@ const RU: Strings = Strings {
     bug_ok_msg: "ОТЧЕТ ОТПРАВЛЕН. СПАСИБО ЧТО ПОМОГАЕТЕ УЛУЧШИТЬ FLASHNX.",
     bug_fail_title: "ОШИБКА",
     kbd_bug_header: "FlashNX - Soobshchit ob oshibke",
-    kbd_bug_guide: "Opishite problemu (ekran, zvuk, sboy). Opcionalno: dobavte vash @nik GitHub. Otkroet PUBLICHNUYU issue v repo FlashNX. Pusto = tolko info ob igre.",
+    kbd_bug_guide: "Otkroet PUBLICHNUYU issue na GitHub. Opishite problemu. @nik po zhelaniyu.",
     set_suggest: "ПРЕДЛОЖИТЬ ИДЕЮ",
     kbd_suggest_header: "FlashNX - Predlozhit ideyu",
-    kbd_suggest_guide: "Vasha ideya / predlozhenie dlya FlashNX.",
+    kbd_suggest_guide: "Otkroet PUBLICHNUYU issue na GitHub. Vasha ideya / predlozhenie.",
 };
 
 /// Current language, as a `Lang` index. Default English; overridden by

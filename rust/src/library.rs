@@ -490,6 +490,10 @@ pub(crate) struct State {
     /// can `add_path` to the local list without re-deriving.
     pub(crate) download_file_name: std::string::String,
     pub(crate) download_out_path: std::string::String,
+    /// Source URL of the in-flight download (direct `.swf`, archive.org file, or
+    /// Flashpoint GameZIP). Written to a `<game>.swf.url` sidecar on completion so
+    /// a later bug report can name where the game came from.
+    pub(crate) download_source_url: std::string::String,
     /// Set when the in-flight download is a Flashpoint GameZIP: holds the FINAL
     /// `.swf` path to extract the zip into (the download itself goes to a temp
     /// `.zip`). `None` for a normal direct/archive.org `.swf` download.
@@ -574,6 +578,7 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     remote_files: std::vec::Vec::new(),
     download_file_name: std::string::String::new(),
     download_out_path: std::string::String::new(),
+    download_source_url: std::string::String::new(),
     download_zip_extract: None,
     download_cover_url: None,
     download_title: None,
@@ -850,6 +855,22 @@ fn save_history_to_sd(history: &[std::string::String]) {
         "library: history SAVED {} url(s) + committed to {}\n",
         history.len(), HISTORY_PATH,
     ));
+}
+
+/// Write the source URL a game was imported from to a `<swf_path>.url` sidecar,
+/// so a later in-app bug report can say where it came from. No-op for an empty
+/// URL (hand-copied files). Best-effort: a failed write just leaves no sidecar.
+fn write_url_sidecar(swf_path: &str, url: &str) {
+    let url = url.trim();
+    if url.is_empty() {
+        return;
+    }
+    let path = std::format!("{}.url", swf_path);
+    if let Err(e) = std::fs::write(&path, url.as_bytes()) {
+        log(&std::format!("library: url sidecar write failed: {}\n", e));
+        return;
+    }
+    crate::sd::commit();
 }
 
 /// Push `url` onto the history. De-dups (if already present, moves to
@@ -1399,27 +1420,13 @@ fn handle_bug_picker_input(s: &mut State, button: &str, mut selection: usize, mu
 /// description, then POST the report to the relay. Hoisted from `input()` — the
 /// keyboard + synchronous HTTPS POST must NOT run under the LIBRARY lock.
 fn run_bug_report_flow(game_idx: usize) {
-    // Make sure the import history is in memory first: it lets us attribute the
-    // game's source URL, the key clue for a game imported by URL under an
-    // arbitrary name (e.g. `7k7k7k.swf`). Cheap — the history is a <2 KB file.
-    if LIBRARY.lock().map(|g| !g.history_loaded).unwrap_or(false) {
-        load_history_from_sd();
-    }
     // Snapshot the game's technical info under the lock, then release it.
     let base = match LIBRARY.lock() {
         Ok(g) => g.entries.get(game_idx).map(|e| {
-            // The import URL whose download lands on this exact filename. Empty
-            // for Flashpoint downloads (identifiable by title) and copied files.
-            let source_url = g
-                .url_history
-                .iter()
-                .find(|u| safe_name_from_url(u.as_str()) == e.basename)
-                .cloned()
-                .unwrap_or_default();
             (
                 e.display_name.clone(),
                 e.basename.clone(),
-                source_url,
+                e.path.clone(),
                 e.size_bytes,
                 e.swf_version,
                 e.compression_label,
@@ -1428,9 +1435,16 @@ fn run_bug_report_flow(game_idx: usize) {
         }),
         Err(_) => None,
     };
-    let Some((game, file, source_url, size, swf_version, compression, as3)) = base else {
+    let Some((game, file, path, size, swf_version, compression, as3)) = base else {
         return;
     };
+    // Source URL recorded at import time in a `<game>.swf.url` sidecar (direct,
+    // archive.org or Flashpoint). Empty for hand-copied files and games imported
+    // before this existed — lets a report name where an arbitrarily-named game
+    // (e.g. `7k7k7k.swf`) came from.
+    let source_url = read_sd_text(&std::format!("{}.url", path), 4096)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
     // Description is optional — cancel (None) aborts the whole report.
     let Some(description) = net::prompt_bug() else {
         return;
@@ -1757,6 +1771,7 @@ fn run_direct_download(url: &str) {
             if let Ok(mut s) = LIBRARY.lock() {
                 s.download_file_name = safe_name;
                 s.download_out_path = out_path;
+                s.download_source_url = url.to_string();
                 s.download_resume_pos = None;
                 s.screen = Screen::DistantDownloading;
             }
@@ -1899,6 +1914,7 @@ fn handle_distant_files_input(
                 Ok(()) => {
                     s.download_file_name = file.name.clone();
                     s.download_out_path = out_path;
+                    s.download_source_url = file.download_url.clone();
                     // Remember where the cursor was so we can put it back
                     // after the download finishes (otherwise the user has
                     // to rescroll through 1000s of entries to find their
@@ -2277,6 +2293,7 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
                 Ok(()) => {
                     s.download_file_name = swf_name;
                     s.download_out_path = zip_path;
+                    s.download_source_url = url.clone();
                     s.download_zip_extract = Some(swf_path);
                     // Grab this game's cover automatically once the .swf lands.
                     s.download_cover_url = Some(cand.cover_url.clone());
@@ -3341,13 +3358,14 @@ fn finish_gamezip(zip_path: &str, swf_path: &str) -> bool {
 /// item without re-typing the URL. The just-downloaded basename is
 /// tracked in `downloaded_basenames` so the list shows a `✓` next to it.
 fn on_download_finished() {
-    let (out_path, file_name, zip_extract, cover_url, real_title) = match LIBRARY.lock() {
+    let (out_path, file_name, zip_extract, cover_url, real_title, source_url) = match LIBRARY.lock() {
         Ok(g) => (
             g.download_out_path.clone(),
             g.download_file_name.clone(),
             g.download_zip_extract.clone(),
             g.download_cover_url.clone(),
             g.download_title.clone(),
+            g.download_source_url.clone(),
         ),
         Err(_) => return,
     };
@@ -3373,6 +3391,9 @@ fn on_download_finished() {
             set_distant_error(crate::loc::s().err_no_swf);
             return;
         }
+        // Record where this game came from (Flashpoint GameZIP URL) next to the
+        // extracted .swf, for later bug-report attribution.
+        write_url_sidecar(&swf_path, &source_url);
         // Auto-fetch the game's cover (logo) so JOUER shows its art right away —
         // no manual "Jaquette" step. Done WITHOUT the LIBRARY lock (synchronous
         // HTTPS); best-effort, a failure just leaves the default tile.
@@ -3428,6 +3449,9 @@ fn on_download_finished() {
     // Add to the LOCAL entries list (so when the user backs out of
     // DISTANT mode, the file appears in the LOCAL library).
     let _ = add_or_replace_path(&out_path);
+    // Record the source URL (direct .swf or archive.org file) next to the .swf,
+    // for later bug-report attribution.
+    write_url_sidecar(&out_path, &source_url);
     if let Ok(mut s) = LIBRARY.lock() {
         s.download_file_name.clear();
         s.download_out_path.clear();
