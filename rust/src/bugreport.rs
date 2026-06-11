@@ -46,6 +46,11 @@ pub struct Report {
     pub game: std::string::String,
     /// On-SD `.swf` filename — lets the dev match an exact file.
     pub file: std::string::String,
+    /// Source URL the game was imported from (recovered by matching the import
+    /// history). Empty for Flashpoint downloads (identifiable by their title)
+    /// and hand-copied files. The key clue when a URL import has an arbitrary
+    /// name like `7k7k7k.swf`.
+    pub source_url: std::string::String,
     /// SWF `file_length` header field (bytes).
     pub size: u64,
     pub swf_version: u8,

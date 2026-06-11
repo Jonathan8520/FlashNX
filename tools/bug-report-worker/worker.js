@@ -92,6 +92,7 @@ function buildIssue(r) {
   const meta = [
     ["Game", game],
     ["File", s(r.file, 200)],
+    ["Source URL", s(r.source_url, 300) || "(local file / unknown)"],
     ["Size", typeof r.size === "number" ? `${r.size} bytes` : s(r.size)],
     ["SWF version", s(r.swf_version, 8)],
     ["Compression", s(r.compression, 8)],

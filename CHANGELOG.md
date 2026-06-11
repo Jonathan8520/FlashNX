@@ -10,6 +10,10 @@ Small fix release: games that use PixelBender shaders no longer crash.
 
 - **PixelBender games no longer crash**: some games build a Flash `Shader` / `ShaderFilter` at runtime (for example **The Terminal**). They used to abort the app the moment the shader was created. They now run normally; the shader's visual effect itself is skipped (this renderer does not run PixelBender), but gameplay and input work. As a bonus, crash messages from the game thread are now captured to the crash log instead of being lost.
 
+### Changes
+
+- **Clearer bug reports**: a report now includes the game's import URL when it was added from a link, so a game imported under an arbitrary filename can still be identified. The report also reminds you that it opens a public issue on the FlashNX repository, and you can add your GitHub handle if you want a follow-up.
+
 ## v1.2.0 — 2026-06-10
 
 Big library update: a tabbed navbar, a cover-art gallery, a list-based importer, Flashpoint game downloads, library sorting, playtime, and in-app bug reports.

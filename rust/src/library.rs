@@ -1399,12 +1399,27 @@ fn handle_bug_picker_input(s: &mut State, button: &str, mut selection: usize, mu
 /// description, then POST the report to the relay. Hoisted from `input()` — the
 /// keyboard + synchronous HTTPS POST must NOT run under the LIBRARY lock.
 fn run_bug_report_flow(game_idx: usize) {
+    // Make sure the import history is in memory first: it lets us attribute the
+    // game's source URL, the key clue for a game imported by URL under an
+    // arbitrary name (e.g. `7k7k7k.swf`). Cheap — the history is a <2 KB file.
+    if LIBRARY.lock().map(|g| !g.history_loaded).unwrap_or(false) {
+        load_history_from_sd();
+    }
     // Snapshot the game's technical info under the lock, then release it.
     let base = match LIBRARY.lock() {
         Ok(g) => g.entries.get(game_idx).map(|e| {
+            // The import URL whose download lands on this exact filename. Empty
+            // for Flashpoint downloads (identifiable by title) and copied files.
+            let source_url = g
+                .url_history
+                .iter()
+                .find(|u| safe_name_from_url(u.as_str()) == e.basename)
+                .cloned()
+                .unwrap_or_default();
             (
                 e.display_name.clone(),
                 e.basename.clone(),
+                source_url,
                 e.size_bytes,
                 e.swf_version,
                 e.compression_label,
@@ -1413,7 +1428,7 @@ fn run_bug_report_flow(game_idx: usize) {
         }),
         Err(_) => None,
     };
-    let Some((game, file, size, swf_version, compression, as3)) = base else {
+    let Some((game, file, source_url, size, swf_version, compression, as3)) = base else {
         return;
     };
     // Description is optional — cancel (None) aborts the whole report.
@@ -1425,6 +1440,7 @@ fn run_bug_report_flow(game_idx: usize) {
         kind: "bug",
         game,
         file,
+        source_url,
         size,
         swf_version,
         compression: compression.to_string(),
@@ -1454,6 +1470,7 @@ fn run_suggestion_flow() {
         kind: "suggestion",
         game: std::string::String::new(),
         file: std::string::String::new(),
+        source_url: std::string::String::new(),
         size: 0,
         swf_version: 0,
         compression: std::string::String::new(),
@@ -1712,7 +1729,11 @@ fn run_fetch_for_url(url: &str, source_sel: usize) {
 /// Direct `.swf` URL import: download straight to SD, no metadata list. The
 /// filename is derived from the URL's last path segment (query/fragment
 /// stripped); a re-download just overwrites + refreshes the entry.
-fn run_direct_download(url: &str) {
+/// On-SD `.swf` filename FlashNX gives a directly-imported URL: last path
+/// segment, query/fragment stripped, path separators sanitized, `.swf`
+/// enforced. Kept standalone so the bug-report flow can recover a game's
+/// source URL by matching this against the import history (`url_history`).
+fn safe_name_from_url(url: &str) -> std::string::String {
     let tail = url.rsplit('/').next().unwrap_or("");
     let stem = tail.split(['?', '#']).next().unwrap_or(tail);
     let base = if stem.is_empty() { "download.swf" } else { stem };
@@ -1720,11 +1741,15 @@ fn run_direct_download(url: &str) {
         .chars()
         .map(|c| if matches!(c, '/' | '\\') { '_' } else { c })
         .collect();
-    let safe_name = if cleaned.to_ascii_lowercase().ends_with(".swf") {
+    if cleaned.to_ascii_lowercase().ends_with(".swf") {
         cleaned
     } else {
         std::format!("{}.swf", cleaned)
-    };
+    }
+}
+
+fn run_direct_download(url: &str) {
+    let safe_name = safe_name_from_url(url);
     let out_path = std::format!("{}/{}", USER_SD_ROOTS[0], safe_name);
     match net::start_download(url, &out_path) {
         Ok(()) => {
