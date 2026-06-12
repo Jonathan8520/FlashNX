@@ -33,6 +33,7 @@ use std::sync::{Arc, Mutex};
 use ruffle_core::backend::navigator::NullExecutor;
 use ruffle_core::events::{
     KeyDescriptor, KeyLocation, LogicalKey, MouseButton, NamedKey, PhysicalKey, PlayerEvent,
+    TextControlCode,
 };
 use ruffle_core::tag_utils::SwfMovie;
 use ruffle_core::config::Letterbox;
@@ -45,6 +46,7 @@ use backend::navigator::SidecarNavigator;
 use backend::render::SwitchRenderBackend;
 use backend::storage::SwitchStorageBackend;
 use backend::tracing::SwitchTracingSubscriber;
+use backend::ui::SwitchUiBackend;
 
 extern "C" {
     fn ruffle_log_cstr(msg: *const c_char);
@@ -254,6 +256,11 @@ pub extern "C" fn ruffle_init() -> c_int {
         .with_audio(SwitchAudioBackend::new())
         .with_log(SwitchLogBackend::new())
         .with_storage(std::boxed::Box::new(storage))
+        // Custom UI backend: its only job over NullUiBackend is to forward
+        // Ruffle's open/close-virtual-keyboard hooks (fired when an editable
+        // TextField gains/loses focus) to an atomic the C++ loop polls, so we
+        // can raise the Switch software keyboard for in-game text entry.
+        .with_ui(SwitchUiBackend::new())
         .with_autoplay(true)
         .with_viewport_dimensions(VIEWPORT_W, VIEWPORT_H, 1.0)
         // Force `ShowAll` — preserves aspect ratio + scales the SWF up
@@ -1199,6 +1206,152 @@ pub extern "C" fn ruffle_handle_mouse_button(down: bool) {
         };
         p.handle_event(event);
     }
+}
+
+/// Returns 1 (clearing the flag) if Ruffle's focus tracker asked us to raise
+/// the software keyboard since the last poll — i.e. an editable TextField just
+/// gained focus (the user clicked it, re-clicked it, or it was focused by AS
+/// code). Returns 0 otherwise. The C++ game loop polls this once per frame and,
+/// when set, runs swkbd via `ruffle_keyboard_field` + `ruffle_keyboard_submit`.
+#[no_mangle]
+pub extern "C" fn ruffle_keyboard_take_request() -> c_int {
+    if backend::ui::take_keyboard_request() {
+        1
+    } else {
+        0
+    }
+}
+
+/// Describe the focused editable TextField so C++ can configure swkbd to match
+/// it. Pre-fills `out` with the field's current text (UTF-8, NUL-terminated,
+/// truncated to `cap` on a char boundary), sets `*out_flags` (bit0 = password,
+/// bit1 = multiline, bit2 = digits-only → numeric keypad) and `*out_max` (the
+/// field's max char count, 0 = unlimited). Returns 1 if a focused editable
+/// field exists, 0 otherwise (in which case the outputs are left untouched).
+#[no_mangle]
+pub extern "C" fn ruffle_keyboard_field(
+    out: *mut c_char,
+    cap: c_int,
+    out_flags: *mut c_int,
+    out_max: *mut c_int,
+) -> c_int {
+    if out.is_null() || cap < 1 {
+        return 0;
+    }
+    let state = unsafe {
+        match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
+            Some(s) => s,
+            None => return 0,
+        }
+    };
+    let Ok(mut p) = state.player.lock() else {
+        return 0;
+    };
+    let info = p.mutate_with_update_context(|context| {
+        let et = context.focus_tracker.get_as_edit_text()?;
+        if !et.is_editable() {
+            return None;
+        }
+        let text = et.text().to_utf8_lossy().into_owned();
+        let mut flags: c_int = 0;
+        if et.is_password() {
+            flags |= 1;
+        }
+        if et.is_multiline() {
+            flags |= 2;
+        }
+        // A digits-only `restrict` is a strong hint that the field wants a
+        // numeric keypad (high-score initials are letters, but level passwords
+        // and numeric entries are often restricted to 0-9).
+        if let Some(r) = et.restrict() {
+            let r = r.to_utf8_lossy();
+            if !r.is_empty() && r.chars().all(|c| c.is_ascii_digit()) {
+                flags |= 4;
+            }
+        }
+        Some((text, flags, et.max_chars()))
+    });
+    let Some((text, flags, max_chars)) = info else {
+        return 0;
+    };
+    // Pre-fill: truncate to cap-1 bytes ending on a UTF-8 char boundary.
+    let bytes = text.as_bytes();
+    let mut n = bytes.len().min(cap as usize - 1);
+    while n > 0 && !text.is_char_boundary(n) {
+        n -= 1;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, n);
+        *out.add(n) = 0;
+        if !out_flags.is_null() {
+            *out_flags = flags;
+        }
+        if !out_max.is_null() {
+            *out_max = max_chars;
+        }
+    }
+    1
+}
+
+/// Replace the focused editable TextField's content with `text` (UTF-8, the
+/// string swkbd returned). Routed through Ruffle's normal text events
+/// (select-all, then per-character TextInput) so the SWF's change handlers fire
+/// exactly as if the user had typed — many games update on TextInput/onChanged.
+/// Newlines map to Enter (for multiline fields). Returns 0 on success, -1 if no
+/// editable field is focused (avoids a stray select-all hitting the stage).
+#[no_mangle]
+pub extern "C" fn ruffle_keyboard_submit(text: *const c_char) -> c_int {
+    if text.is_null() {
+        return -1;
+    }
+    let s = unsafe { core::ffi::CStr::from_ptr(text) };
+    let Ok(s) = s.to_str() else {
+        return -1;
+    };
+    let state = unsafe {
+        match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
+            Some(s) => s,
+            None => return -1,
+        }
+    };
+    let Ok(mut p) = state.player.lock() else {
+        return -1;
+    };
+    let has_field = p.mutate_with_update_context(|context| {
+        context
+            .focus_tracker
+            .get_as_edit_text()
+            .is_some_and(|et| et.is_editable())
+    });
+    if !has_field {
+        return -1;
+    }
+    // Select the whole field, then retype: the first inserted character
+    // replaces the selection and the rest append. If `text` is empty we delete
+    // the selection instead, clearing the field.
+    p.handle_event(PlayerEvent::TextControl {
+        code: TextControlCode::SelectAll,
+    });
+    if s.is_empty() {
+        p.handle_event(PlayerEvent::TextControl {
+            code: TextControlCode::Backspace,
+        });
+    } else {
+        for c in s.chars() {
+            match c {
+                '\r' => {}
+                '\n' => {
+                    p.handle_event(PlayerEvent::TextControl {
+                        code: TextControlCode::Enter,
+                    });
+                }
+                _ => {
+                    p.handle_event(PlayerEvent::TextInput { codepoint: c });
+                }
+            }
+        }
+    }
+    0
 }
 
 #[no_mangle]

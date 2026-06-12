@@ -39,6 +39,12 @@ extern "C" int  ruffle_touches_input(const char* button_name);
 extern "C" int  ruffle_touches_consume_dirty(void);
 extern "C" void ruffle_touches_draw(void);
 
+// In-game software keyboard (raised when a Flash TextField gains focus).
+extern "C" int  ruffle_keyboard_take_request(void);
+extern "C" int  ruffle_keyboard_field(char* out, int cap, int* out_flags, int* out_max);
+extern "C" int  ruffle_keyboard_submit(const char* text);
+extern "C" int  swkbd_prompt_game_field(const char* initial, int flags, int maxlen, char* out, int cap);
+
 // Switch key codes (must match SK_* constants in rust/src/lib.rs).
 enum SwitchKey {
     SK_NONE     = 0,
@@ -575,6 +581,27 @@ static void worker_entry(void* /*arg*/) {
         }
         zr_was_pressed = zr_pressed;
         touch_was_pressed = touch_pressed;
+
+        // In-game software keyboard. Ruffle's focus tracker raises a request
+        // when an editable TextField gains focus (e.g. the user clicked it with
+        // the cursor / touch). We suspend the game, run swkbd configured to
+        // match the field (prefill, password/numeric/multiline, max length),
+        // and feed the result back through normal text events. swkbdShow blocks,
+        // so no frames advance while it's open.
+        if (ruffle_keyboard_take_request()) {
+            char kbd_prefill[1024];
+            char kbd_out[1024];
+            int  kbd_flags = 0, kbd_max = 0;
+            if (ruffle_keyboard_field(kbd_prefill, sizeof(kbd_prefill), &kbd_flags, &kbd_max)) {
+                if (swkbd_prompt_game_field(kbd_prefill, kbd_flags, kbd_max,
+                                            kbd_out, sizeof(kbd_out)) == 0) {
+                    ruffle_keyboard_submit(kbd_out);
+                }
+            }
+            // The modal held the loop for a while; re-measure the clock so the
+            // next frame doesn't replay the elapsed interval.
+            last_tick = ruffle_tick_now();
+        }
 
         // Compute real elapsed since last iteration → microseconds.
         // tick_freq is ~19.2 MHz on Switch, so this is precise to ~50ns.
