@@ -57,7 +57,7 @@ pub fn swf_filename(title: &str) -> std::string::String {
 pub fn search_url(name: &str) -> std::string::String {
     let q = net::url_encode_path(name.trim());
     std::format!(
-        "{}?smartSearch={}&platform=Flash&filter=true&fields=id,title,developer,publisher,releaseDate,zipped",
+        "{}?smartSearch={}&platform=Flash&filter=true&fields=id,title,developer,publisher,releaseDate,zipped,launchCommand",
         SEARCH_BASE, q
     )
 }
@@ -118,6 +118,11 @@ pub fn parse_search(
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let launch_command = g
+            .get("launchCommand")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         out.push(flashpoint::CatalogEntry {
             id: id.to_string(),
             title,
@@ -125,6 +130,7 @@ pub fn parse_search(
             publisher,
             release_date,
             cover_url: flashpoint::logo_url(id),
+            launch_command,
         });
         if out.len() >= MAX {
             break;
@@ -143,14 +149,57 @@ fn inflate(comp: &[u8], expected: usize) -> Option<std::vec::Vec<u8>> {
     Some(out)
 }
 
-/// Walk a ZIP's local file headers sequentially and return the first `.swf`
-/// entry, decompressed, paired with its entry name (e.g.
-/// `content/<host>/<path>/main.swf` — used by `htdocs_base_from_entry` to find
-/// the game's companion files). Handles store (0) and deflate (8); bails on
-/// data-descriptor entries (their sizes aren't in the local header). Flashpoint
-/// GameZIPs are simple (no data descriptor, deflate) — verified byte-for-byte
-/// against a real GameZIP 2026-06-07 (CWS magic, exact uncompressed size).
-pub fn extract_first_swf(zip: &[u8]) -> Option<(std::vec::Vec<u8>, std::string::String)> {
+/// Map a Flashpoint `launchCommand` URL to its ZIP content entry name:
+/// `http://i.flipline.com/gamefiles/papalouie2/PapaLouie2_v2_1.swf?x=1`
+///   -> `content/i.flipline.com/gamefiles/papalouie2/PapaLouie2_v2_1.swf`.
+/// Returns None if empty or not a URL-shaped command.
+fn launch_entry_from_command(launch_command: &str) -> Option<std::string::String> {
+    let lc = launch_command.trim();
+    if lc.is_empty() {
+        return None;
+    }
+    let rest = lc.split_once("://").map(|(_, r)| r).unwrap_or(lc);
+    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+    if rest.is_empty() || rest.ends_with('/') {
+        return None;
+    }
+    Some(std::format!("content/{}", rest))
+}
+
+/// Write `bytes` to `<files_dir>/<rel>` (rel is a forward-slash `content/`-
+/// relative path like `host/path/file.swf`), creating parent dirs. Best-effort.
+fn write_tree_file(files_dir: &str, rel: &str, bytes: &[u8]) {
+    let full = std::format!("{}/{}", files_dir.trim_end_matches('/'), rel);
+    if let Some(slash) = full.rfind('/') {
+        let _ = std::fs::create_dir_all(&full[..slash]);
+    }
+    let _ = std::fs::write(&full, bytes);
+}
+
+/// Extract the FULL `content/<host>/<path>/<file>` tree of a Flashpoint GameZIP
+/// into `files_dir`, mirroring the host/path layout so the SidecarNavigator can
+/// serve each asset by its original URL at play time. A GameZIP bundles a game's
+/// whole asset set — alternate SWF versions, ad-network stubs (fliplineads etc.),
+/// xml/png — so extracting it ALL makes the download self-contained, instead of
+/// guessing companions from string scans (which only finds statically-referenced
+/// `.swf` siblings and misses everything loaded by absolute URL at runtime).
+///
+/// `launch_command` (the Flashpoint launchCommand, the entry SWF's URL) selects
+/// which SWF is the game's entry; the matching content entry is returned as
+/// `(bytes, entry_name)` for the caller to write as the flat library SWF. Falls
+/// back to the FIRST `.swf` when the command is empty or its entry is absent.
+/// Returns None if no SWF is found. Bails (stops) on data-descriptor entries —
+/// Flashpoint GameZIPs don't use them (verified) and their local-header sizes
+/// would be unreliable.
+pub fn extract_gamezip_tree(
+    zip: &[u8],
+    files_dir: &str,
+    launch_command: &str,
+) -> Option<(std::vec::Vec<u8>, std::string::String)> {
+    let launch_entry = launch_entry_from_command(launch_command);
+    let mut first_swf: Option<(std::vec::Vec<u8>, std::string::String)> = None;
+    let mut launch_swf: Option<(std::vec::Vec<u8>, std::string::String)> = None;
+
     let mut i = 0usize;
     while i + 30 <= zip.len() && &zip[i..i + 4] == b"PK\x03\x04" {
         let flags = u16::from_le_bytes([zip[i + 6], zip[i + 7]]);
@@ -162,31 +211,48 @@ pub fn extract_first_swf(zip: &[u8]) -> Option<(std::vec::Vec<u8>, std::string::
         let nlen = u16::from_le_bytes([zip[i + 26], zip[i + 27]]) as usize;
         let elen = u16::from_le_bytes([zip[i + 28], zip[i + 29]]) as usize;
         if flags & 0x0008 != 0 {
-            return None; // data descriptor: csize/usize not reliable here
+            break; // data descriptor: sizes not in the local header
         }
         let name_start = i + 30;
         let name_end = name_start + nlen;
         if name_end > zip.len() {
-            return None;
+            break;
         }
-        let name = std::string::String::from_utf8_lossy(&zip[name_start..name_end]);
+        let name = std::string::String::from_utf8_lossy(&zip[name_start..name_end]).into_owned();
         let data_start = name_end + elen;
         let data_end = data_start + csize;
         if data_end > zip.len() {
-            return None;
+            break;
         }
-        if name.to_ascii_lowercase().ends_with(".swf") {
+        // Only files under `content/` (skip content.json and directory entries).
+        if let Some(rel) = name.strip_prefix("content/").filter(|r| !r.is_empty() && !r.ends_with('/'))
+        {
             let comp = &zip[data_start..data_end];
             let bytes = match method {
                 0 => Some(comp.to_vec()),
                 8 => inflate(comp, usize_),
                 _ => None,
-            }?;
-            return Some((bytes, name.into_owned()));
+            };
+            if let Some(bytes) = bytes {
+                write_tree_file(files_dir, rel, &bytes);
+                if name.to_ascii_lowercase().ends_with(".swf") {
+                    let is_launch = launch_entry
+                        .as_deref()
+                        .is_some_and(|le| name.eq_ignore_ascii_case(le));
+                    // `name` is still borrowed by `rel` here, so clone it (the
+                    // entry name is short) rather than moving.
+                    if is_launch {
+                        launch_swf = Some((bytes, name.clone()));
+                        first_swf = None; // free the fallback's (large) buffer
+                    } else if first_swf.is_none() && launch_swf.is_none() {
+                        first_swf = Some((bytes, name.clone()));
+                    }
+                }
+            }
         }
         i = data_end;
     }
-    None
+    launch_swf.or(first_swf)
 }
 
 // ── Multi-file games: companion SWF fetch ─────────────────────────────────────

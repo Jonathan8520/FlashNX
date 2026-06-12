@@ -25,6 +25,11 @@ pub struct CatalogEntry {
     pub release_date: std::string::String,
     /// Fully-built logo (cover) URL for `id`.
     pub cover_url: std::string::String,
+    /// Flashpoint `launchCommand` (the URL of the game's ENTRY swf, e.g.
+    /// `http://i.flipline.com/.../PapaLouie2_v2_1.swf`). A GameZIP can bundle
+    /// several SWF versions; this says which one to launch. Empty for cover-only
+    /// hits (the cover picker doesn't request it).
+    pub launch_command: std::string::String,
 }
 
 const SEARCH_BASE: &str = "https://db-api.unstable.life/search";
@@ -98,6 +103,7 @@ pub fn search(
             publisher: std::string::String::new(),
             release_date: std::string::String::new(),
             cover_url: logo_url(id),
+            launch_command: std::string::String::new(),
         });
         // A short candidate list is all the cover-picker needs.
         if out.len() >= 12 {

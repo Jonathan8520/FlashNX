@@ -99,10 +99,32 @@ impl SidecarNavigator {
     }
 
     /// Map a resolved request URL to a local sidecar path: take the URL's path
-    /// segments (everything after the host) and join them under `sidecar_dir`.
-    /// Empty and `..` segments are dropped so a load can't escape the dir.
+    /// Host-mirrored path: `<sidecar_dir>/<host>/<path-segments>`. Matches the
+    /// layout written by `gamezip::extract_gamezip_tree` (the GameZIP's full
+    /// `content/<host>/<path>` tree), so a game that loads an asset by its
+    /// original absolute URL (e.g. `http://www.fliplineads.com/serve/data/x.xml`)
+    /// resolves to the bundled stub. Empty and `..` segments are dropped so a
+    /// load can't escape the dir.
     fn local_path(&self, url: &Url) -> PathBuf {
         let mut path = self.sidecar_dir.clone();
+        if let Some(host) = url.host_str() {
+            path.push(host);
+        }
+        self.push_segments(&mut path, url);
+        path
+    }
+
+    /// Flat path: `<sidecar_dir>/<path-segments>` (NO host). The legacy layout
+    /// for companions pulled by `fetch_siblings` from the htdocs mirror, which
+    /// land directly in `<game>.files/<leaf>.swf` (e.g. Garfield's `top.swf`).
+    /// Used as a fallback when the host-mirrored path isn't present.
+    fn flat_path(&self, url: &Url) -> PathBuf {
+        let mut path = self.sidecar_dir.clone();
+        self.push_segments(&mut path, url);
+        path
+    }
+
+    fn push_segments(&self, path: &mut PathBuf, url: &Url) {
         if let Some(segs) = url.path_segments() {
             for seg in segs {
                 if seg.is_empty() || seg == ".." {
@@ -114,8 +136,18 @@ impl SidecarNavigator {
                 path.push(seg);
             }
         }
-        path
     }
+}
+
+/// Hosts of defunct ad/analytics networks (MochiAds shut down in 2014, etc.).
+/// Games that gate their preloader on `MochiAd.showPreGameAd` expect these to be
+/// UNREACHABLE — the connection hangs, then the preloader's own ~3 s ad_timeout
+/// fires and fail-opens into the game. We let such requests hang for exactly
+/// that reason (see `fetch`), instead of erroring immediately.
+fn is_dead_ad_host(host: &str) -> bool {
+    const DEAD: &[&str] = &["mochiads.com", "mochibot.com", "mochimedia.com"];
+    DEAD.iter()
+        .any(|d| host == *d || host.ends_with(&std::format!(".{d}")))
 }
 
 impl NavigatorBackend for SidecarNavigator {
@@ -144,30 +176,50 @@ impl NavigatorBackend for SidecarNavigator {
                 )));
             }
         };
-        let path = self.local_path(&resolved);
-        match std::fs::read(&path) {
-            Ok(bytes) => {
-                tracing::info!(
-                    "sidecar: served {} ({} bytes) from {}",
-                    resolved,
-                    bytes.len(),
-                    path.display()
-                );
-                let resp: Box<dyn SuccessResponse> = Box::new(SidecarResponse {
-                    url: resolved.to_string(),
-                    bytes: Some(bytes),
-                });
-                async_return(Ok(resp))
-            }
-            Err(e) => {
-                tracing::warn!("sidecar: {} not found at {} ({e})", resolved, path.display());
-                async_return(Err(create_specific_fetch_error(
-                    "Sidecar file not found",
-                    resolved.as_str(),
-                    e,
-                )))
-            }
+        // Defunct ad/analytics hosts: mimic an unreachable server (hang) rather
+        // than erroring. Preloaders that gate on MochiAd & co. fail-open via
+        // their own timeout when the ad server is unreachable; our usual
+        // immediate "not found" error instead breaks that path and leaves the
+        // game stuck on the sponsor / "update Flash" screen (observed on
+        // Papa Louie 2's MochiAds preloader). We still never touch the network.
+        if resolved.host_str().is_some_and(is_dead_ad_host) {
+            tracing::info!("sidecar: stalling dead ad host {resolved} (mimic unreachable)");
+            return Box::pin(std::future::pending::<
+                Result<Box<dyn SuccessResponse>, ErrorResponse>,
+            >());
         }
+        // Try the host-mirrored layout first (GameZIP `content/<host>/<path>`
+        // tree), then fall back to the flat layout (htdocs-fetched companions
+        // sitting directly in `<game>.files/`).
+        let host_path = self.local_path(&resolved);
+        let (bytes, from) = match std::fs::read(&host_path) {
+            Ok(b) => (b, host_path),
+            Err(_) => {
+                let flat = self.flat_path(&resolved);
+                match std::fs::read(&flat) {
+                    Ok(b) => (b, flat),
+                    Err(e) => {
+                        tracing::warn!(
+                            "sidecar: {} not found ({}, {}) ({e})",
+                            resolved,
+                            host_path.display(),
+                            flat.display()
+                        );
+                        return async_return(Err(create_specific_fetch_error(
+                            "Sidecar file not found",
+                            resolved.as_str(),
+                            e,
+                        )));
+                    }
+                }
+            }
+        };
+        tracing::info!("sidecar: served {} ({} bytes) from {}", resolved, bytes.len(), from.display());
+        let resp: Box<dyn SuccessResponse> = Box::new(SidecarResponse {
+            url: resolved.to_string(),
+            bytes: Some(bytes),
+        });
+        async_return(Ok(resp))
     }
 
     fn resolve_url(&self, url: &str) -> Result<Url, ParseError> {

@@ -503,6 +503,10 @@ pub(crate) struct State {
     /// `.swf` path to extract the zip into (the download itself goes to a temp
     /// `.zip`). `None` for a normal direct/archive.org `.swf` download.
     pub(crate) download_zip_extract: Option<std::string::String>,
+    /// Set for a Flashpoint GameZIP download: the `launchCommand` (entry SWF URL,
+    /// e.g. `http://i.flipline.com/.../PapaLouie2_v2_1.swf`). A GameZIP can bundle
+    /// several SWF versions; this picks the right one to launch. Empty otherwise.
+    pub(crate) download_launch_command: std::string::String,
     /// Set when a Flashpoint game download is in flight: the cover/logo URL to
     /// fetch + cache automatically once the `.swf` lands (so the game shows its
     /// art in JOUER without a manual "Jaquette" step). `None` for archive.org /
@@ -603,6 +607,7 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     download_out_path: std::string::String::new(),
     download_source_url: std::string::String::new(),
     download_zip_extract: None,
+    download_launch_command: std::string::String::new(),
     download_cover_url: None,
     download_title: None,
     distant_error: std::string::String::new(),
@@ -2352,6 +2357,7 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
                     s.download_out_path = zip_path;
                     s.download_source_url = url.clone();
                     s.download_zip_extract = Some(swf_path);
+                    s.download_launch_command = cand.launch_command.clone();
                     // Grab this game's cover automatically once the .swf lands.
                     s.download_cover_url = Some(cand.cover_url.clone());
                     // Keep the REAL title so we can restore it as the display
@@ -3469,18 +3475,30 @@ pub fn render(backend: &mut SwitchRenderBackend) {
 fn extract_gamezip_main(
     zip_path: &str,
     swf_path: &str,
+    launch_command: &str,
 ) -> Option<(std::string::String, std::vec::Vec<u8>)> {
     let zip = crate::sources::gamezip::read_file_bounded(zip_path, 64 * 1024 * 1024)?;
-    let (swf, entry_name) = crate::sources::gamezip::extract_first_swf(&zip)?;
+    // Mirror the GameZIP's full `content/<host>/<path>` tree into the game's
+    // sidecar dir, so the SidecarNavigator can serve every bundled asset (alt SWF
+    // versions, ad-network stubs, xml/png) by its original URL at play time. The
+    // returned SWF is the launchCommand's entry (or the first .swf) — we write it
+    // flat as the library entry.
+    let files_dir = crate::sidecar_dir_for(Some(swf_path))
+        .to_string_lossy()
+        .into_owned();
+    let _ = std::fs::create_dir_all(&files_dir);
+    let (swf, entry_name) =
+        crate::sources::gamezip::extract_gamezip_tree(&zip, &files_dir, launch_command)?;
     if std::fs::write(swf_path, &swf).is_err() {
         log("library: gamezip .swf write failed\n");
         return None;
     }
     crate::sd::commit();
     log(&std::format!(
-        "library: gamezip extracted -> {} ({} bytes)\n",
+        "library: gamezip extracted -> {} ({} bytes); full tree -> {}\n",
         swf_path,
         swf.len(),
+        files_dir,
     ));
     Some((entry_name, swf))
 }
@@ -3635,12 +3653,13 @@ fn on_download_finished() {
     // `cover_url` / `real_title` are read from state inside
     // `finalize_gamezip_download` (also called from the companion phase), so we
     // only pull what this function uses directly here.
-    let (out_path, file_name, zip_extract, source_url) = match LIBRARY.lock() {
+    let (out_path, file_name, zip_extract, source_url, launch_command) = match LIBRARY.lock() {
         Ok(g) => (
             g.download_out_path.clone(),
             g.download_file_name.clone(),
             g.download_zip_extract.clone(),
             g.download_source_url.clone(),
+            g.download_launch_command.clone(),
         ),
         Err(_) => return,
     };
@@ -3652,7 +3671,7 @@ fn on_download_finished() {
     // Flashpoint GameZIP: the downloaded file is a `.zip`; extract its `.swf`
     // to `swf_path` and add THAT (not the zip), then delete the temp zip.
     if let Some(swf_path) = zip_extract {
-        let Some((entry_name, swf)) = extract_gamezip_main(&out_path, &swf_path) else {
+        let Some((entry_name, swf)) = extract_gamezip_main(&out_path, &swf_path, &launch_command) else {
             let _ = std::fs::remove_file(&out_path);
             if let Ok(mut s) = LIBRARY.lock() {
                 s.download_file_name.clear();
