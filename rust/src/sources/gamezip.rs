@@ -64,7 +64,9 @@ pub fn search_url(name: &str) -> std::string::String {
 
 /// Parse a db-api search response into up to 60 fetchable `CatalogEntry` hits
 /// (id = UUID for the `/get?id=` download, title, developer, cover_url). Only
-/// `zipped` games are kept — the others 404 on `/get?id=`.
+/// `zipped` games are kept — the others 404 on `/get?id=`. Deduped: db-api
+/// returns the same game several times (exact UUID repeats AND same-title
+/// alternate entries), which clutters the cover grid; we keep the first of each.
 pub fn parse_search(
     bytes: &[u8],
 ) -> Result<std::vec::Vec<flashpoint::CatalogEntry>, std::string::String> {
@@ -75,6 +77,8 @@ pub fn parse_search(
         .as_array()
         .ok_or_else(|| std::string::String::from(crate::loc::s().err_json_no_files))?;
     let mut out: std::vec::Vec<flashpoint::CatalogEntry> = std::vec::Vec::new();
+    let mut seen_ids: std::vec::Vec<std::string::String> = std::vec::Vec::new();
+    let mut seen_titles: std::vec::Vec<std::string::String> = std::vec::Vec::new();
     for g in arr {
         let id = g.get("id").and_then(|v| v.as_str()).unwrap_or("");
         if id.is_empty() {
@@ -86,6 +90,19 @@ pub fn parse_search(
             continue;
         }
         let title = g.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        // Dedup by id (exact repeats) then by title (same game, alternate rows),
+        // before the MAX cap so the grid fills with 60 DISTINCT games.
+        if seen_ids.iter().any(|s| s == id) {
+            continue;
+        }
+        let title_key = title.trim().to_ascii_lowercase();
+        if !title_key.is_empty() && seen_titles.iter().any(|s| *s == title_key) {
+            continue;
+        }
+        seen_ids.push(id.to_string());
+        if !title_key.is_empty() {
+            seen_titles.push(title_key);
+        }
         let developer = g
             .get("developer")
             .and_then(|v| v.as_str())
