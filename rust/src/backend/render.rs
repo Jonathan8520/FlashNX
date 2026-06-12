@@ -5805,6 +5805,34 @@ impl SwitchRenderBackend {
                     swf::Color::from_rgb(0xE0B24D, 255),
                 );
             }
+
+            // Favorite marker, top-left (AS3 badge is top-right). The UI font has
+            // no "*"/star glyph, so we draw the shape directly: a gold diamond on
+            // a dark chip (the chip gives contrast on bright covers). Favorites are
+            // also pinned to the top of the gallery (library::sort_entries).
+            if crate::favorites::is_favorite(&entries[idx].basename) {
+                let chip = 24.0;
+                let cx0 = tx + 4.0;
+                let cy0 = ty + 4.0;
+                let chip_m = Matrix {
+                    a: chip, b: 0.0, c: 0.0, d: chip,
+                    tx: swf::Twips::from_pixels(cx0 as f64),
+                    ty: swf::Twips::from_pixels(cy0 as f64),
+                };
+                <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xB0_00_00_00), chip_m);
+                // Gold diamond = unit square rotated 45° via the matrix, centered
+                // on the chip. (a+c)/2 = 0 so tx = center x; ty = center y - (b+d)/2.
+                let cx = cx0 + chip * 0.5;
+                let cy = cy0 + chip * 0.5;
+                let sz = 12.0_f32;
+                let cs = 0.70710678_f32; // cos/sin 45°
+                let diamond = Matrix {
+                    a: sz * cs, b: sz * cs, c: -sz * cs, d: sz * cs,
+                    tx: swf::Twips::from_pixels(cx as f64),
+                    ty: swf::Twips::from_pixels((cy - sz * cs) as f64),
+                };
+                <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), diamond);
+            }
         }
 
         // Single eased selection frame, drawn last and still inside the scissor

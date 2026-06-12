@@ -16,6 +16,7 @@
 mod backend;
 mod bugreport;
 mod covers;
+mod favorites;
 mod ffi;
 mod keymap;
 mod library;

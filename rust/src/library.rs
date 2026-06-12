@@ -141,7 +141,7 @@ pub(crate) enum Screen {
 // No "RETOUR" entry: B already backs out of the modal, so a dedicated row is
 // redundant clutter.
 pub(crate) const OPTIONS_ENTRIES: &[&str] =
-    &["TOUCHES", "RENOMMER", "JAQUETTE", "SUPPRIMER"];
+    &["FAVORI", "TOUCHES", "RENOMMER", "JAQUETTE", "SUPPRIMER"];
 
 /// Top-level navbar tabs (v1.2.0), switched with the L/R shoulder buttons.
 /// Each maps to a "home" screen. The navbar is drawn on every tab-home screen;
@@ -303,6 +303,7 @@ fn read_sort_prefs() -> (u8, bool) {
 fn ensure_prefs_loaded() {
     if !PREFS_LOADED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         crate::playtime::load();
+        crate::favorites::load();
         let (mode, rev) = read_sort_prefs();
         SORT_MODE.store(mode, std::sync::atomic::Ordering::Relaxed);
         SORT_REVERSE.store(rev, std::sync::atomic::Ordering::Relaxed);
@@ -351,6 +352,10 @@ pub(crate) fn sort_entries(entries: &mut std::vec::Vec<Entry>, mode: SortMode, r
     if reverse {
         entries.reverse();
     }
+    // Favorites pinned to the top, regardless of sort mode / reverse. A stable
+    // partition (sort_by_key on a bool: false=0 sorts first) keeps the active
+    // order within the favorites and non-favorites groups.
+    entries.sort_by_key(|e| !crate::favorites::is_favorite(&e.basename));
 }
 
 fn note_played(basename: &str, display_name: &str) {
@@ -2089,6 +2094,22 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
         }
         "A" => {
             match OPTIONS_ENTRIES[selection] {
+                "FAVORI" => {
+                    // Toggle, then re-pin: favorites jump to the top of the
+                    // gallery, so this game's index changes. Re-point the modal
+                    // at the SAME game (by basename) so it keeps showing it.
+                    if let Some(basename) = s.entries.get(game_idx).map(|e| e.basename.clone()) {
+                        crate::favorites::toggle(&basename);
+                        sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
+                        let new_idx = s
+                            .entries
+                            .iter()
+                            .position(|e| e.basename == basename)
+                            .unwrap_or(game_idx);
+                        s.screen = Screen::OptionsModal { game_idx: new_idx, selection };
+                    }
+                    return;
+                }
                 "TOUCHES" => {
                     // Initialise the keymap for THIS game so the editor's
                     // current_binding/set_binding land in the right
@@ -2646,6 +2667,9 @@ fn delete_game(s: &mut State, game_idx: usize) {
         entry.path, rc, extra,
     ));
     s.entries.remove(game_idx);
+    // Drop it from favorites too, so a re-import of the same name doesn't come
+    // back pre-starred.
+    crate::favorites::remove(&entry.basename);
     // Clear the session "downloaded" mark too. The IMPORTER green OK badge is a
     // union of `entries` (updated just above) and this set; a same-session
     // download lingering here kept the badge lit after a delete, while the
@@ -3007,9 +3031,15 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 // in input handling); display uses localized labels in the
                 // same order (TOUCHES / RENOMMER / SUPPRIMER / RETOUR).
                 let lc = crate::loc::s();
-                // Order must match OPTIONS_ENTRIES (TOUCHES/RENOMMER/JAQUETTE/
-                // SUPPRIMER). No back row — B backs out.
-                let labels = [lc.opt_keys, lc.opt_rename, lc.opt_cover, lc.opt_delete];
+                // Order must match OPTIONS_ENTRIES (FAVORI/TOUCHES/RENOMMER/
+                // JAQUETTE/SUPPRIMER). No back row — B backs out. The favorite
+                // label reflects the current state (add vs remove).
+                let fav_label = if crate::favorites::is_favorite(&entry.basename) {
+                    lc.opt_unfavorite
+                } else {
+                    lc.opt_favorite
+                };
+                let labels = [fav_label, lc.opt_keys, lc.opt_rename, lc.opt_cover, lc.opt_delete];
                 backend.draw_library_options(
                     &entry.display_name,
                     selection,
