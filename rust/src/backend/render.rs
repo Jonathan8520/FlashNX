@@ -4760,7 +4760,8 @@ impl SwitchRenderBackend {
             self.draw_text(rows_left_x, y, ROW_SCALE, btn, color);
             let value_str = binding
                 .as_deref()
-                .unwrap_or(crate::loc::s().none);
+                .map(crate::keymap::flash_key_display)
+                .unwrap_or(std::borrow::Cow::Borrowed(crate::loc::s().none));
             // Brackets around the value to suggest "editable field".
             let bracketed = std::format!("[ {} ]", value_str);
             self.draw_text(value_col_x, y, ROW_SCALE, &bracketed, color);
@@ -4885,11 +4886,15 @@ impl SwitchRenderBackend {
             if is_sel {
                 self.draw_text(opts_left_x - 30.0, y, OPT_SCALE, ">", color);
             }
-            // Index 0 is the "unbind" entry — show the localized "(none)"
-            // label instead of the raw sentinel. All other entries are
-            // technical Flash key names, never translated.
-            let label = if abs_idx == 0 { crate::loc::s().none } else { options[abs_idx] };
-            self.draw_text(opts_left_x, y, OPT_SCALE, label, color);
+            // Index 0 is the "unbind" entry. Action labels (none, mouse clicks)
+            // are localized via flash_key_display; plain Flash key names pass
+            // through unchanged.
+            let label = if abs_idx == 0 {
+                std::borrow::Cow::Borrowed(crate::loc::s().none)
+            } else {
+                crate::keymap::flash_key_display(options[abs_idx])
+            };
+            self.draw_text(opts_left_x, y, OPT_SCALE, &label, color);
         }
 
         // Scrollbar (matches the TOUCHES list scrollbar style).

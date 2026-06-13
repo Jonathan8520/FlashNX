@@ -1063,6 +1063,12 @@ pub(crate) const SK_TAB: c_int = 45;
 pub(crate) const SK_BACKSPACE: c_int = 46;
 pub(crate) const SK_CONTROL: c_int = 47;
 pub(crate) const SK_ALT: c_int = 48;
+// Pseudo-codes: NOT keyboard keys. A button bound to one of these fires a mouse
+// click at the cursor instead of a key event — the C++ in-game loop routes them
+// to `ruffle_handle_mouse_button` / `ruffle_handle_mouse_right`. `key_descriptor`
+// returns None for them, so they never reach `ruffle_handle_key`.
+pub(crate) const SK_MOUSE_LEFT: c_int = 49;
+pub(crate) const SK_MOUSE_RIGHT: c_int = 50;
 
 fn key_descriptor(code: c_int) -> Option<KeyDescriptor> {
     let (physical, logical) = match code {
@@ -1179,8 +1185,7 @@ pub extern "C" fn ruffle_handle_mouse_move(x: c_int, y: c_int) {
 
 /// Click / release the left mouse button at the current cursor position.
 /// `down = true` for press, `false` for release.
-#[no_mangle]
-pub extern "C" fn ruffle_handle_mouse_button(down: bool) {
+fn handle_mouse_button_impl(button: MouseButton, down: bool) {
     let state = unsafe {
         match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
             Some(s) => s,
@@ -1195,18 +1200,28 @@ pub extern "C" fn ruffle_handle_mouse_button(down: bool) {
             PlayerEvent::MouseDown {
                 x,
                 y,
-                button: MouseButton::Left,
+                button,
                 index: None,
             }
         } else {
-            PlayerEvent::MouseUp {
-                x,
-                y,
-                button: MouseButton::Left,
-            }
+            PlayerEvent::MouseUp { x, y, button }
         };
         p.handle_event(event);
     }
+}
+
+/// Left mouse button at the cursor. `down = true` press, `false` release.
+#[no_mangle]
+pub extern "C" fn ruffle_handle_mouse_button(down: bool) {
+    handle_mouse_button_impl(MouseButton::Left, down);
+}
+
+/// Right mouse button at the cursor (a button bound to "Clic droit"). Lets Flash
+/// games that use the right click (context actions, secondary fire) be played
+/// without a physical mouse.
+#[no_mangle]
+pub extern "C" fn ruffle_handle_mouse_right(down: bool) {
+    handle_mouse_button_impl(MouseButton::Right, down);
 }
 
 /// Returns 1 (clearing the flag) if Ruffle's focus tracker asked us to raise

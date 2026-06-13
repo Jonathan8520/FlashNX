@@ -50,6 +50,8 @@ pub const FALLBACK_BINDINGS: &[(&str, &str)] = &[
     ("R",            "Enter"),  // "Press Start" prompts
     ("Plus",         "P"),      // standard in-game pause key
     ("L",            "Escape"),
+    ("ZR",           "Clic gauche"), // primary click (also the legacy hardcoded ZR)
+    ("ZL",           "Clic droit"),  // secondary click
     ("Left",         "Left"),
     ("Right",        "Right"),
     ("Up",           "Up"),
@@ -70,9 +72,16 @@ pub const RESERVED_BUTTONS: &[&str] = &["Minus"];
 /// input layer; reserved buttons are absent on purpose.
 pub const EDITABLE_BUTTONS: &[&str] = &[
     "A", "B", "X", "Y",
-    "L", "R", "ZL", "Plus",
+    "L", "R", "ZL", "ZR", "Plus",
+    "SL", "SR",
     "Up", "Down", "Left", "Right",
     "StickLUp", "StickLDown", "StickLLeft", "StickLRight",
+    // Right stick: binding ANY of these switches the right stick from cursor to
+    // d-pad mode in-game (C++ skips the cursor path when one is set).
+    "StickRUp", "StickRDown", "StickRLeft", "StickRRight",
+    // Stick CLICKS (press the analog sticks in, L3/R3). Distinct from the
+    // directional StickL*/StickR* above — they don't affect cursor/d-pad mode.
+    "StickLPress", "StickRPress",
 ];
 
 /// Flash-key options shown in the TOUCHES dropdown. Index 0 ("(aucune)")
@@ -96,6 +105,10 @@ pub const ALL_FLASH_KEYS: &[&str] = &[
     "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
     // Digits 0-9.
     "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+    // Mouse clicks (at the cursor) — for games that need clicking from buttons
+    // rather than the touchscreen. Routed to the mouse, not a key event.
+    "Clic gauche",
+    "Clic droit",
 ];
 
 /// SWF basename the keymap was loaded for. Used by `save_sidecar` to know
@@ -121,6 +134,20 @@ fn fallback_keymap() -> Keymap {
         bindings.insert((*btn).into(), (*key).into());
     }
     Keymap { version: 1, bindings }
+}
+
+/// Fill in the FALLBACK default for any button the loaded keymap doesn't mention
+/// at all. Lets games keep getting sensible defaults as we add buttons (the
+/// ZR/ZL mouse clicks, etc.) WITHOUT rewriting every saved sidecar: an absent
+/// button gains its default; a button the user deliberately unbound is stored as
+/// "" (present) and is left as-is. Applied in-memory after every load — the file
+/// on SD is only rewritten when the user next edits a binding.
+fn merge_fallback_defaults(km: &mut Keymap) {
+    for (btn, key) in FALLBACK_BINDINGS {
+        km.bindings
+            .entry((*btn).into())
+            .or_insert_with(|| (*key).into());
+    }
 }
 
 /// User-visible SD roots, priority order. Reads scan all, first hit
@@ -241,7 +268,7 @@ pub fn init_for_swf(swf_basename: &str) {
     let default = find_user_path("keymap_default.json");
     let default_write = primary_path("keymap_default.json");
 
-    let km = if let Some(txt) = sidecar.as_deref().and_then(read_json_file) {
+    let mut km = if let Some(txt) = sidecar.as_deref().and_then(read_json_file) {
         let path_str = sidecar.as_deref().unwrap_or("?");
         log(std::format!("keymap: using per-game sidecar {}\n", path_str));
         parse_keymap(&txt, path_str).unwrap_or_else(|| {
@@ -265,6 +292,10 @@ pub fn init_for_swf(swf_basename: &str) {
         km
     };
 
+    // Backfill defaults for buttons this keymap predates (e.g. ZR/ZL clicks on a
+    // sidecar saved before they were editable), so the editor and behaviour agree.
+    merge_fallback_defaults(&mut km);
+
     if let Ok(mut g) = ACTIVE_BASENAME.lock() {
         *g = Some(swf_basename.into());
     }
@@ -281,7 +312,7 @@ pub fn init_for_swf(swf_basename: &str) {
 /// library Settings modal (Plus → DEFAULT CONTROLS).
 pub fn init_for_global_default() {
     let default = find_user_path("keymap_default.json");
-    let km = if let Some(txt) = default.as_deref().and_then(read_json_file) {
+    let mut km = if let Some(txt) = default.as_deref().and_then(read_json_file) {
         let path_str = default.as_deref().unwrap_or("?");
         log(std::format!("keymap: editing global default {}\n", path_str));
         parse_keymap(&txt, path_str).unwrap_or_else(fallback_keymap)
@@ -291,6 +322,7 @@ pub fn init_for_global_default() {
         write_default_to_sd(&primary_path("keymap_default.json"), &km);
         km
     };
+    merge_fallback_defaults(&mut km);
     if let Ok(mut g) = ACTIVE_BASENAME.lock() {
         *g = Some(GLOBAL_SENTINEL.into());
     }
@@ -316,7 +348,11 @@ pub fn reset() {
 /// gets an owned String to avoid holding the Mutex across UI work.
 pub fn current_binding(button: &str) -> Option<std::string::String> {
     let g = ACTIVE_KEYMAP.lock().ok()?;
-    g.as_ref()?.bindings.get(button).cloned()
+    g.as_ref()?
+        .bindings
+        .get(button)
+        .filter(|v| !v.is_empty()) // "" = explicitly unbound (see set_binding)
+        .cloned()
 }
 
 /// Set `button` → `flash_key` (e.g. "A" → "Space"). `None` clears the
@@ -335,7 +371,11 @@ pub fn set_binding(button: &str, flash_key: Option<&str>) -> bool {
                 km.bindings.insert(button.into(), k.into());
             }
             None => {
-                km.bindings.remove(button);
+                // Store an explicit empty marker instead of removing the key, so
+                // a deliberate unbind survives the default-merge on the next load
+                // (an ABSENT button gets its fallback default; an empty one stays
+                // off). See merge_fallback_defaults.
+                km.bindings.insert(button.into(), std::string::String::new());
             }
         }
     }
@@ -414,7 +454,40 @@ pub fn lookup(button_name: &str) -> Option<core::ffi::c_int> {
     let g = ACTIVE_KEYMAP.lock().ok()?;
     let km = g.as_ref()?;
     let key_name = km.bindings.get(button_name)?;
+    if key_name.is_empty() {
+        return Some(crate::SK_NONE); // "" = explicitly unbound
+    }
     Some(flash_key_name_to_sk(key_name))
+}
+
+/// Localised DISPLAY label for a Flash-key NAME. The stored/internal names stay
+/// language-stable (so a keymap saved in one language still resolves in another);
+/// only the label shown in the TOUCHES editor is translated. The unbind sentinel
+/// and the mouse-click pseudo-keys are action labels (translated); plain key
+/// names (Space, A-Z, digits) are universal and returned as-is.
+pub fn flash_key_display(name: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    let lc = crate::loc::s();
+    let translated: &'static str = match name {
+        "(aucune)" => lc.none,
+        "Clic gauche" => lc.flash_mouse_left,
+        "Clic droit" => lc.flash_mouse_right,
+        "Space" => lc.flash_space,
+        "Enter" => lc.flash_enter,
+        "Escape" => lc.flash_escape,
+        "Shift" => lc.flash_shift,
+        "Control" => lc.flash_control,
+        "Alt" => lc.flash_alt,
+        "Tab" => lc.flash_tab,
+        "Backspace" => lc.flash_backspace,
+        "Up" => lc.flash_up,
+        "Down" => lc.flash_down,
+        "Left" => lc.flash_left,
+        "Right" => lc.flash_right,
+        // Letters (A-Z) and digits (0-9) are universal — shown as typed.
+        other => return Cow::Borrowed(other),
+    };
+    Cow::Borrowed(translated)
 }
 
 /// Map a Flash key NAME (as written in JSON, e.g. "Space", "Z") to one of
@@ -449,6 +522,9 @@ fn flash_key_name_to_sk(name: &str) -> core::ffi::c_int {
         "3" => crate::SK_3, "4" => crate::SK_4, "5" => crate::SK_5,
         "6" => crate::SK_6, "7" => crate::SK_7, "8" => crate::SK_8,
         "9" => crate::SK_9,
+        // Mouse-click pseudo-keys (routed to the mouse, not the keyboard).
+        "Clic gauche" => crate::SK_MOUSE_LEFT,
+        "Clic droit" => crate::SK_MOUSE_RIGHT,
         other => {
             log(std::format!(
                 "keymap: unknown Flash key '{}' in bindings — ignored\n",

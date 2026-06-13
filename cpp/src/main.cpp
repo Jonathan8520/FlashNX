@@ -26,6 +26,7 @@ extern "C" void ruffle_library_reset(void);
 extern "C" void ruffle_handle_key(int code, bool down);
 extern "C" void ruffle_handle_mouse_move(int x, int y);
 extern "C" void ruffle_handle_mouse_button(bool down);
+extern "C" void ruffle_handle_mouse_right(bool down);
 extern "C" void ruffle_redraw_paused(void);
 extern "C" void ruffle_draw_menu(int selected);
 extern "C" void ruffle_menu_close_begin(void);
@@ -59,6 +60,10 @@ enum SwitchKey {
     SK_X        = 9,
     SK_SHIFT    = 10,
     SK_P        = 11,
+    // Pseudo-codes (NOT keys): a button resolving to one of these fires a mouse
+    // click at the cursor instead of a key. Must match rust/src/lib.rs.
+    SK_MOUSE_LEFT  = 49,
+    SK_MOUSE_RIGHT = 50,
 };
 
 // Joycon → key mapping is now driven by the user-editable keymap on SD:
@@ -83,10 +88,10 @@ static ButtonBinding BINDINGS[] = {
     { "L",            HidNpadButton_L,            SK_NONE },
     { "R",            HidNpadButton_R,            SK_NONE },
     { "ZL",           HidNpadButton_ZL,           SK_NONE },
-    // ZR is hardcoded as left-mouse-click below (touch fallback shares it);
-    // we still expose it here so a future keymap could repurpose it if the
-    // user disables mouse — for now ZR in the JSON is no-op (handled
-    // alongside touch in the click path).
+    // ZR is keymap-driven now (defaults to "Clic gauche"). The legacy hardcoded
+    // ZR left-click below only kicks in when ZR is UNBOUND (old sidecars), so
+    // those games don't lose their click. Touch is always left-click.
+    { "ZR",           HidNpadButton_ZR,           SK_NONE },
     { "Plus",         HidNpadButton_Plus,         SK_NONE },
     { "Left",         HidNpadButton_Left,         SK_NONE },
     { "Right",        HidNpadButton_Right,        SK_NONE },
@@ -96,8 +101,28 @@ static ButtonBinding BINDINGS[] = {
     { "StickLRight",  HidNpadButton_StickLRight,  SK_NONE },
     { "StickLUp",     HidNpadButton_StickLUp,     SK_NONE },
     { "StickLDown",   HidNpadButton_StickLDown,   SK_NONE },
+    // Joy-Con side buttons (handheld / detached). Left+right SL/SR share a
+    // generic name so a single binding covers whichever Joy-Con is in use.
+    { "SL",           HidNpadButton_LeftSL | HidNpadButton_RightSL, SK_NONE },
+    { "SR",           HidNpadButton_LeftSR | HidNpadButton_RightSR, SK_NONE },
+    // Right stick as a d-pad: the digital StickR* masks edge-detect for us, so
+    // these forward as key events like any button. Binding ANY of them flips the
+    // right stick out of cursor mode in-game (see g_right_stick_dpad below).
+    { "StickRUp",     HidNpadButton_StickRUp,     SK_NONE },
+    { "StickRDown",   HidNpadButton_StickRDown,   SK_NONE },
+    { "StickRLeft",   HidNpadButton_StickRLeft,   SK_NONE },
+    { "StickRRight",  HidNpadButton_StickRRight,  SK_NONE },
+    // Stick CLICKS (press the analog sticks, L3/R3). Not directions — they don't
+    // affect cursor/d-pad mode.
+    { "StickLPress",  HidNpadButton_StickL,        SK_NONE },
+    { "StickRPress",  HidNpadButton_StickR,        SK_NONE },
 };
 static constexpr size_t BINDINGS_COUNT = sizeof(BINDINGS) / sizeof(BINDINGS[0]);
+
+// True when the user bound any StickR* DIRECTION (not the press): the right stick
+// then acts as a d-pad (its key bindings fire) instead of moving the mouse
+// cursor. Recomputed whenever the keymap is (re)loaded.
+static bool g_right_stick_dpad = false;
 
 // Buttons forwarded to the Rust TOUCHES sub-screen / library state.
 // Names match what `keymap::EDITABLE_BUTTONS` exposes. `repeat = true`
@@ -210,6 +235,19 @@ static void menu_repeat_step(
 static void populate_bindings_from_keymap(void) {
     for (size_t i = 0; i < BINDINGS_COUNT; ++i) {
         BINDINGS[i].key = ruffle_keymap_lookup(BINDINGS[i].name);
+    }
+    // Right stick = d-pad as soon as any StickR* DIRECTION is bound; otherwise it
+    // stays the mouse cursor in-game. "StickRPress" (n[6]=='P') is excluded — the
+    // stick CLICK doesn't change the cursor/d-pad behaviour.
+    g_right_stick_dpad = false;
+    for (size_t i = 0; i < BINDINGS_COUNT; ++i) {
+        const char* n = BINDINGS[i].name;
+        const bool is_stick_r_dir =
+            n[0] == 'S' && n[1] == 't' && n[5] == 'R' && n[6] != 'P'; // "StickR{U,D,L,R}..."
+        if (is_stick_r_dir && BINDINGS[i].key != SK_NONE) {
+            g_right_stick_dpad = true;
+            break;
+        }
     }
     // Quick visibility into what the loaded keymap resolved to. Helps the
     // user confirm their edits to keymap.json took effect.
@@ -363,7 +401,6 @@ static void worker_entry(void* /*arg*/) {
     float cursor_x = VIEWPORT_W * 0.5f;
     float cursor_y = VIEWPORT_H * 0.5f;
     ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
-    bool zr_was_pressed = false;
     touch_was_pressed = false;
 
     // Real-time pacing: instead of telling Ruffle "16.6 ms elapsed" every tick,
@@ -527,25 +564,42 @@ static void worker_entry(void* /*arg*/) {
             continue;
         }
 
-        // Keyboard-style buttons via edge detection.
+        // Keyboard-style buttons via edge detection. A button bound to a mouse
+        // pseudo-code clicks at the cursor instead of sending a key event.
         for (const auto& b : BINDINGS) {
-            if (kDown & b.mask) ruffle_handle_key(b.key, true);
-            if (kUp   & b.mask) ruffle_handle_key(b.key, false);
+            const bool dn = (kDown & b.mask) != 0;
+            const bool up = (kUp   & b.mask) != 0;
+            if (!dn && !up) continue;
+            if (b.key == SK_MOUSE_LEFT) {
+                if (dn) ruffle_handle_mouse_button(true);
+                if (up) ruffle_handle_mouse_button(false);
+            } else if (b.key == SK_MOUSE_RIGHT) {
+                if (dn) ruffle_handle_mouse_right(true);
+                if (up) ruffle_handle_mouse_right(false);
+            } else {
+                if (dn) ruffle_handle_key(b.key, true);
+                if (up) ruffle_handle_key(b.key, false);
+            }
         }
 
-        // Right analog stick → cursor movement.
-        const HidAnalogStickState rs = padGetStickPos(&pad, 1);
-        const float rsx = (float)rs.x;
-        const float rsy = (float)rs.y;
+        // Right analog stick → cursor movement — UNLESS the user remapped the
+        // right stick to a d-pad (g_right_stick_dpad), in which case its StickR*
+        // key bindings already fired via the BINDINGS loop above and we leave the
+        // cursor where it is.
         bool moved = false;
-        if (rsx >  STICK_DEADZONE || rsx < -STICK_DEADZONE) {
-            cursor_x += (rsx / STICK_MAX) * CURSOR_SPEED;
-            moved = true;
-        }
-        if (rsy >  STICK_DEADZONE || rsy < -STICK_DEADZONE) {
-            // Switch right stick Y is positive-up; screen Y is positive-down.
-            cursor_y -= (rsy / STICK_MAX) * CURSOR_SPEED;
-            moved = true;
+        if (!g_right_stick_dpad) {
+            const HidAnalogStickState rs = padGetStickPos(&pad, 1);
+            const float rsx = (float)rs.x;
+            const float rsy = (float)rs.y;
+            if (rsx >  STICK_DEADZONE || rsx < -STICK_DEADZONE) {
+                cursor_x += (rsx / STICK_MAX) * CURSOR_SPEED;
+                moved = true;
+            }
+            if (rsy >  STICK_DEADZONE || rsy < -STICK_DEADZONE) {
+                // Switch right stick Y is positive-up; screen Y is positive-down.
+                cursor_y -= (rsy / STICK_MAX) * CURSOR_SPEED;
+                moved = true;
+            }
         }
 
         // Touch input — overrides stick position when active. We translate
@@ -569,17 +623,14 @@ static void worker_entry(void* /*arg*/) {
             ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
         }
 
-        // Click: ZR button or touch tap. Track edges manually since these
-        // two sources are heterogeneous.
-        const bool zr_pressed = (kHeld & HidNpadButton_ZR) != 0;
-        const bool click_pressed = zr_pressed || touch_pressed;
-        const bool click_was_pressed = zr_was_pressed || touch_was_pressed;
-        if (click_pressed && !click_was_pressed) {
+        // Click: touch tap → left mouse button. ZR (and any other button) is now
+        // fully keymap-driven (ZR defaults to "Clic gauche"), handled in the
+        // BINDINGS loop above — there's no hardcoded ZR path anymore.
+        if (touch_pressed && !touch_was_pressed) {
             ruffle_handle_mouse_button(true);
-        } else if (!click_pressed && click_was_pressed) {
+        } else if (!touch_pressed && touch_was_pressed) {
             ruffle_handle_mouse_button(false);
         }
-        zr_was_pressed = zr_pressed;
         touch_was_pressed = touch_pressed;
 
         // In-game software keyboard. Ruffle's focus tracker raises a request
