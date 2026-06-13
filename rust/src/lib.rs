@@ -1150,6 +1150,26 @@ pub extern "C" fn ruffle_handle_key(code: c_int, down: bool) {
             None => return,
         }
     };
+    // Ruffle dispatches an AVM1 button `keyPress` (and `onClipEvent(keyPress)`)
+    // for a PRINTABLE character from a TextInput event — only special keys
+    // (arrows, Enter, Escape, …) come from KeyDown (see
+    // `ButtonKeyCode::from_input_event` in ruffle_core::events). We synthesise
+    // keys from controller buttons and emit ONLY KeyDown/KeyUp, so a button
+    // bound to a letter/digit/space fed `Key.isDown` polling (movement, pickup)
+    // but never fired a game's char keyPress handler — e.g. Scooby-Doo: Mayan
+    // Monster Mayhem reads H (help) and S/T (switch inventory object) as
+    // `keyPress` conditions, so they did nothing no matter which button you
+    // mapped to them, while arrow movement + space-as-isDown worked. Emit the
+    // matching TextInput right after the KeyDown, exactly as a real keyboard
+    // would, so those keyPress handlers fire. Press only — TextInput has no up.
+    let text_codepoint = if down {
+        match &key.logical_key {
+            LogicalKey::Character(c) if ('\u{20}'..='\u{7e}').contains(c) => Some(*c),
+            _ => None,
+        }
+    } else {
+        None
+    };
     let event = if down {
         PlayerEvent::KeyDown { key }
     } else {
@@ -1157,6 +1177,9 @@ pub extern "C" fn ruffle_handle_key(code: c_int, down: bool) {
     };
     if let Ok(mut p) = state.player.lock() {
         p.handle_event(event);
+        if let Some(codepoint) = text_codepoint {
+            p.handle_event(PlayerEvent::TextInput { codepoint });
+        }
     }
 }
 
