@@ -81,8 +81,11 @@ char      g_dl_out_path[768] = {0};
 // the transfer finishes; used by the Rust layer to log specific errors.
 int       g_last_curl_result = 0;
 long      g_last_http_code   = 0;
+uint64_t  g_dl_start_tick    = 0;   // armGetSystemTick at start, for the speed log
 
 void multi_cleanup(bool delete_partial) {
+    // Drop the CPU boost we raised for the download (idempotent).
+    appletSetCpuBoostMode(ApmCpuBoostMode_Normal);
     if (g_handle) {
         if (g_multi) {
             curl_multi_remove_handle(g_multi, g_handle);
@@ -111,6 +114,25 @@ int xfer_progress(void* /*ud*/, curl_off_t dltotal, curl_off_t dlnow,
     g_bytes_done = (uint64_t)dlnow;
     g_bytes_total = (uint64_t)dltotal;
     return 0;
+}
+
+// Big page-aligned stdio buffer for the download FILE* (via setvbuf): batches SD
+// writes into large fsdev calls instead of many small ones (a classic Switch
+// bottleneck). One download in flight at a time, so one file-scope buffer is OK.
+alignas(0x1000) char g_dl_iobuf[512 * 1024];
+
+// Time spent inside fwrite() for the current download = the SD-write cost. Logged
+// against the total at completion so we can see SD vs network/TLS share.
+uint64_t g_fwrite_ticks = 0;
+
+// Download write callback: same as curl's default (fwrite to the FILE*) but times
+// the write so we can attribute the SD-card cost.
+size_t dl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    FILE* f = (FILE*)userdata;
+    const u64 t0 = armGetSystemTick();
+    const size_t w = std::fwrite(ptr, size, nmemb, f);
+    g_fwrite_ticks += armGetSystemTick() - t0;
+    return w;
 }
 
 } // namespace
@@ -287,6 +309,9 @@ extern "C" int https_download_start(const char* url, const char* out_path) {
         std::fflush(stdout);
         return -4;
     }
+    // Full buffering with a big aligned buffer: turns curl's stream of small
+    // writes into a few large fsdev writes (much faster on the Switch SD).
+    std::setvbuf(f, g_dl_iobuf, _IOFBF, sizeof(g_dl_iobuf));
     CURLM* m = curl_multi_init();
     CURL* c = curl_easy_init();
     if (!m || !c) {
@@ -304,11 +329,15 @@ extern "C" int https_download_start(const char* url, const char* out_path) {
     curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
     curl_easy_setopt(c, CURLOPT_CAINFO, CACERT_PATH);
-    curl_easy_setopt(c, CURLOPT_WRITEDATA, f);   // default WRITEFUNCTION = fwrite
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, dl_write_cb);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, f);
     curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, xfer_progress);
     curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(c, CURLOPT_TIMEOUT, 600L);
     curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 10L);
+    // 256 KB receive buffer (default is 16 KB): lets each perform() pull a lot
+    // more off the socket, which matters because we only pump per render frame.
+    curl_easy_setopt(c, CURLOPT_BUFFERSIZE, 262144L);
 
     curl_multi_add_handle(m, c);
 
@@ -319,6 +348,11 @@ extern "C" int https_download_start(const char* url, const char* out_path) {
     g_bytes_total = 0;
     g_last_curl_result = 0;
     g_last_http_code = 0;
+    g_dl_start_tick = armGetSystemTick();
+    g_fwrite_ticks = 0;
+    // Boost the CPU for the download (TLS decrypt + curl can be the limit on the
+    // base clock). Reset by multi_cleanup when the transfer ends.
+    appletSetCpuBoostMode(ApmCpuBoostMode_FastLoad);
     std::printf("https_download_start: %s -> %s\n", url, out_path);
     std::fflush(stdout);
     return 0;
@@ -331,14 +365,25 @@ extern "C" int https_download_start(const char* url, const char* out_path) {
 extern "C" int https_download_tick(void) {
     if (!g_multi) return -1;
     int still_running = 0;
-    CURLMcode mc = curl_multi_perform(g_multi, &still_running);
-    if (mc != CURLM_OK) {
-        std::printf("https_download_tick: curl_multi_perform mc=%d\n", (int)mc);
-        std::fflush(stdout);
-        multi_cleanup(true);
-        return -2;
+    // Drain the socket hard this frame instead of a single perform(): loop
+    // perform + a short poll until the transfer finishes or a ~12 ms budget is
+    // spent, then resume next frame. Pumping once per frame throttled throughput
+    // to roughly one socket buffer per 16 ms; this keeps the link saturated while
+    // the library UI still renders (~50 fps during a download).
+    const u64 deadline = armGetSystemTick() + (armGetSystemTickFreq() * 12) / 1000;
+    for (;;) {
+        CURLMcode mc = curl_multi_perform(g_multi, &still_running);
+        if (mc != CURLM_OK) {
+            std::printf("https_download_tick: curl_multi_perform mc=%d\n", (int)mc);
+            std::fflush(stdout);
+            multi_cleanup(true);
+            return -2;
+        }
+        if (still_running == 0) break;
+        if (armGetSystemTick() >= deadline) return 0; // resume next frame
+        int numfds = 0;
+        curl_multi_poll(g_multi, nullptr, 0, 3, &numfds); // up to 3 ms waiting for data
     }
-    if (still_running > 0) return 0;
 
     // Transfer finished — extract per-handle result.
     bool ok = false;
@@ -360,8 +405,14 @@ extern "C" int https_download_tick(void) {
         multi_cleanup(true);
         return -2;
     }
-    std::printf("https_download_tick: OK %ld bytes -> %s\n",
-                (long)g_bytes_done, g_dl_out_path);
+    {
+        u64 freq = armGetSystemTickFreq();
+        double secs = freq ? (double)(armGetSystemTick() - g_dl_start_tick) / (double)freq : 0.0;
+        double sd_secs = freq ? (double)g_fwrite_ticks / (double)freq : 0.0;
+        double mbps = secs > 0.0 ? ((double)g_bytes_done / (1024.0 * 1024.0)) / secs : 0.0;
+        std::printf("https_download_tick: OK %ld bytes in %.1fs = %.2f MB/s (SD write %.1fs / net+TLS %.1fs) -> %s\n",
+                    (long)g_bytes_done, secs, mbps, sd_secs, secs - sd_secs, g_dl_out_path);
+    }
     std::fflush(stdout);
     multi_cleanup(false);
     return 1;
