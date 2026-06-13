@@ -39,13 +39,13 @@ Either way: copy your **`.swf`** files into **`sdmc:/flashnx/`**, then launch **
 ## Usage
 
 **In the library**
-**L / R** = switch tabs (Play / Import / Settings) · D-pad or sticks = move in the cover gallery · **A** = play · **Y** = sort (name / added / played / size, **X** reverses) · **−** = search (filter by name) · **+** = game options (controls, rename, cover, delete). Quit, plus bug report and suggestions, from the Settings tab.
+**L / R** = switch tabs (Play / Import / Settings) · D-pad or sticks = move in the cover gallery · **A** = play · **Y** = sort (name / added / played / size, **X** reverses) · **−** = search (filter by name) · **+** = game options (favorite, controls, rename, cover, delete). Favorites stay pinned to the top of the gallery. Quit, plus bug report and suggestions, from the Settings tab.
 
 **Import tab**
 A list of your saved URLs · **A** = launch one · **+ Add a URL** row to enter a new one · **+** on a URL = edit or delete it. Accepts archive.org items and direct `.swf` URLs. **X** searches the **Flashpoint Archive** and downloads a game (cover and real title included; **+** on a result shows its details + download size).
 
 **In game**
-Left stick / D-pad = arrows · **A/B/X/Y** = Flash keys (remappable) · right stick = mouse cursor · **ZR** / touch = click · **−** = pause menu.
+Left stick / D-pad = arrows · **A/B/X/Y** = Flash keys (remappable) · right stick = mouse cursor · **ZR** / touch = left click, **ZL** = right click · clicking a text field opens the keyboard · **−** = pause menu. The control editor remaps everything to any Flash key or mouse click, and can turn the right stick into a d-pad (it also covers SL/SR and the stick presses).
 
 - **Cover art**: the library is a grid of covers, 5 per row (cropped to fill). Drop a `<game>.png` or `.jpg` next to the `.swf` to set one, or fetch artwork from the Flashpoint Archive in a game's options (pick from thumbnails).
 - **Multi-file games**: some games load companion `.swf` files (a title screen, a minigame, music). When you download a game from the **Flashpoint search (X)**, FlashNX fetches these companions automatically into a `<game>.files/` folder. For a game added another way (URL import, hand-copied), put the companions in that folder yourself (so `Foo.swf` uses `Foo.files/`, and `Foo.swf` loading `top.swf` reads `Foo.files/top.swf`).

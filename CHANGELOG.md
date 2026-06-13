@@ -2,18 +2,25 @@
 
 Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://github.com/ruffle-rs/ruffle).
 
-## v1.3.0 (2026-06-11)
+## v1.3.0 (2026-06-13)
 
-Multi-file Flash games now work: games split across several `.swf` files (a separate title screen, minigames, music) load their companion files instead of hanging on a black screen.
+A big one: multi-file games, Flashpoint downloads that actually start, an in-game keyboard, favorites, and a much more configurable control editor.
 
 ### Added
 
 - **Multi-file game support**: a game that loads other `.swf` files at runtime (`loadMovie` / `loadMovieNum` into a level) now finds them in a `<game>.files/` folder next to the `.swf`. Download a game from the Flashpoint search (X) and its companion files are fetched automatically; for a game added another way, drop the companions in that folder yourself. *Garfield's Scary Scavenger Hunt* now plays from start to finish.
 - **Multi-file indicator**: the launch screen shows a "MULTI-FILE (N)" label when a game pulls in companion files, so you can tell at a glance.
+- **Flashpoint downloads now bring the whole game**: a download from the Flashpoint search now unpacks the game's full bundled set of files (alternate versions, ad-network stubs, data files) and launches the exact version the archive intends, instead of guessing. Games that used to get stuck on a sponsor or "Download the latest Adobe Flash Player" screen (for example *Papa Louie 2: When Burgers Attack*) now start and play.
+- **In-game keyboard**: when a Flash game wants text (a player name, a level password, high-score initials, a text adventure), the Switch keyboard opens when you click the text field, pre-filled with its current text and set to the right type (numbers, password, multi-line). Games that were unplayable with a controller alone now work.
+- **Favorites**: in a game's options (**+**), mark it as a favorite. Favorites are pinned to the top of the Play gallery with a gold marker, whatever the sort order.
+- **Assignable mouse clicks**: the controls editor now has **Left click** and **Right click** actions you can bind to any button. By default **ZR** is left click and **ZL** is right click. The touchscreen still left-clicks.
+- **More mappable inputs**: SL / SR (Joy-Con side buttons), the stick presses (L3 / R3), and the **right stick as a d-pad** (bind its directions and it stops being the mouse cursor; the touchscreen stays the cursor).
+- **Translated control labels**: the keys shown in the controls editor (clicks, Space, Enter, arrows, and so on) now follow your language (English, French, Spanish, Russian).
+- **Much faster Flashpoint downloads**: downloads now batch their writes to the SD card and pump the network harder, turning what used to be a roughly two-minute download into about ten seconds for a large game.
 
 ### Fixes
 
-- **Deleting a game also removes its `<game>.files/` companion folder**, so nothing is left behind on the SD card.
+- **Deleting a game also removes its `<game>.files/` companion folder and its favorite mark**, so nothing is left behind on the SD card.
 
 ## v1.2.1 (2026-06-11)
 
