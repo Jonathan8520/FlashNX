@@ -30,6 +30,11 @@ pub struct CatalogEntry {
     /// several SWF versions; this says which one to launch. Empty for cover-only
     /// hits (the cover picker doesn't request it).
     pub launch_command: std::string::String,
+    /// True when the game has a server-built GameZIP (`/get?id=` returns a zip).
+    /// False = legacy "loose" entry not in the GameZIP server; we download those
+    /// directly from the htdocs mirror via the `launch_command` instead (single
+    /// SWF + companions). Always false for cover-only hits.
+    pub zipped: bool,
 }
 
 const SEARCH_BASE: &str = "https://db-api.unstable.life/search";
@@ -104,6 +109,7 @@ pub fn search(
             release_date: std::string::String::new(),
             cover_url: logo_url(id),
             launch_command: std::string::String::new(),
+            zipped: false,
         });
         // A short candidate list is all the cover-picker needs.
         if out.len() >= 12 {

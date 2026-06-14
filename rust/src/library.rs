@@ -529,6 +529,13 @@ pub(crate) struct State {
     /// `.swf` path to extract the zip into (the download itself goes to a temp
     /// `.zip`). `None` for a normal direct/archive.org `.swf` download.
     pub(crate) download_zip_extract: Option<std::string::String>,
+    /// Set when the in-flight download is a NON-zipped Flashpoint game: the file
+    /// downloaded straight from the htdocs mirror IS the entry `.swf` (no zip to
+    /// extract), so `on_download_finished` skips extraction, fetches companions
+    /// from htdocs, then runs the Flashpoint finalize (cover/title/base sidecar).
+    /// `download_out_path` == the final `.swf` path in this case. False for
+    /// zipped GameZIP downloads and for archive.org/direct downloads.
+    pub(crate) download_fp_direct: bool,
     /// Set for a Flashpoint GameZIP download: the `launchCommand` (entry SWF URL,
     /// e.g. `http://i.flipline.com/.../PapaLouie2_v2_1.swf`). A GameZIP can bundle
     /// several SWF versions; this picks the right one to launch. Empty otherwise.
@@ -633,6 +640,7 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     download_out_path: std::string::String::new(),
     download_source_url: std::string::String::new(),
     download_zip_extract: None,
+    download_fp_direct: false,
     download_launch_command: std::string::String::new(),
     download_cover_url: None,
     download_title: None,
@@ -1016,6 +1024,7 @@ pub fn reset() {
         s.download_file_name.clear();
         s.download_out_path.clear();
         s.download_zip_extract = None;
+        s.download_fp_direct = false;
         s.download_cover_url = None;
         s.download_title = None;
         s.distant_error.clear();
@@ -2396,14 +2405,37 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
                 return;
             }
             let swf_path = std::format!("{}/{}", USER_SD_ROOTS[0], swf_name);
-            let zip_path = std::format!("{}/.fpdl.zip", USER_SD_ROOTS[0]);
-            let url = crate::sources::gamezip::get_url(&cand.id);
-            match net::start_download(&url, &zip_path) {
+            // Zipped games come from the GameZIP server: download a temp `.zip`,
+            // then extract. Non-zipped (legacy "loose") games aren't on that
+            // server, so download their entry `.swf` straight from the htdocs
+            // mirror (derived from the launchCommand); companions are fetched
+            // afterwards, same as a GameZIP. `fp_direct` routes the finish path.
+            let (url, out_path, fp_direct) = if cand.zipped {
+                let zip_path = std::format!("{}/.fpdl.zip", USER_SD_ROOTS[0]);
+                (crate::sources::gamezip::get_url(&cand.id), zip_path, false)
+            } else {
+                match crate::sources::gamezip::htdocs_url_from_command(&cand.launch_command) {
+                    Some(u) => (u, swf_path.clone(), true),
+                    None => {
+                        // parse_search only keeps non-zipped games with a usable
+                        // command, so this is unexpected — surface an error rather
+                        // than a silent no-op.
+                        s.distant_error = crate::loc::s().err_no_swf.to_string();
+                        s.screen = Screen::DistantError;
+                        return;
+                    }
+                }
+            };
+            match net::start_download(&url, &out_path) {
                 Ok(()) => {
                     s.download_file_name = swf_name;
-                    s.download_out_path = zip_path;
+                    s.download_out_path = out_path;
                     s.download_source_url = url.clone();
+                    // Holds the FINAL .swf path for the Flashpoint finalize. For a
+                    // zipped game the download (a temp .zip) extracts INTO it; for
+                    // a non-zipped game it == download_out_path (downloaded direct).
                     s.download_zip_extract = Some(swf_path);
+                    s.download_fp_direct = fp_direct;
                     s.download_launch_command = cand.launch_command.clone();
                     // Grab this game's cover automatically once the .swf lands.
                     s.download_cover_url = Some(cand.cover_url.clone());
@@ -3717,6 +3749,7 @@ fn finalize_gamezip_download() {
         s.download_file_name.clear();
         s.download_out_path.clear();
         s.download_zip_extract = None;
+        s.download_fp_direct = false;
         s.download_cover_url = None;
         s.download_title = None;
         if let Some(title) = restored_title {
@@ -3744,13 +3777,14 @@ fn on_download_finished() {
     // `cover_url` / `real_title` are read from state inside
     // `finalize_gamezip_download` (also called from the companion phase), so we
     // only pull what this function uses directly here.
-    let (out_path, file_name, zip_extract, source_url, launch_command) = match LIBRARY.lock() {
+    let (out_path, file_name, zip_extract, source_url, launch_command, fp_direct) = match LIBRARY.lock() {
         Ok(g) => (
             g.download_out_path.clone(),
             g.download_file_name.clone(),
             g.download_zip_extract.clone(),
             g.download_source_url.clone(),
             g.download_launch_command.clone(),
+            g.download_fp_direct,
         ),
         Err(_) => return,
     };
@@ -3758,6 +3792,61 @@ fn on_download_finished() {
         return;
     }
     log(&std::format!("library: download finished -> {}\n", out_path));
+
+    // Non-zipped Flashpoint game: the downloaded file IS the entry `.swf`, already
+    // at its final path (no zip to extract). Fetch any companion `.swf` files from
+    // the same htdocs directory (flat into `<game>.files/`, where the navigator's
+    // leaf-name fallback finds them), then finalize like a GameZIP (cover/title/
+    // base sidecar/library add). Single-file games (no companions) finalize at once.
+    if fp_direct {
+        let swf_path = out_path.clone();
+        let companions = crate::sources::gamezip::read_file_bounded(&swf_path, 64 * 1024 * 1024)
+            .map(|b| crate::sources::gamezip::scan_swf_siblings(&b))
+            .unwrap_or_default();
+        // Companion base = the entry's htdocs directory (its URL minus the file).
+        let base = crate::sources::gamezip::htdocs_url_from_command(&launch_command)
+            .and_then(|u| u.rfind('/').map(|i| u[..=i].to_string()));
+        if let (Some(base), false) = (base, companions.is_empty()) {
+            let files_dir = crate::sidecar_dir_for(Some(&swf_path))
+                .to_string_lossy()
+                .into_owned();
+            let _ = std::fs::create_dir_all(&files_dir);
+            let main_name = launch_command
+                .rsplit('/')
+                .next()
+                .unwrap_or("")
+                .split(['?', '#'])
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if let Ok(mut s) = LIBRARY.lock() {
+                s.dl_companion_base = base;
+                s.dl_companion_dir = files_dir;
+                s.dl_companion_current = std::string::String::new();
+                s.dl_companion_done = 0;
+                s.dl_companion_seen = std::vec![main_name];
+                s.dl_companion_queue = std::vec::Vec::new();
+                for n in companions {
+                    let lower = n.to_ascii_lowercase();
+                    if !s.dl_companion_seen.iter().any(|x| *x == lower) {
+                        s.dl_companion_seen.push(lower);
+                        s.dl_companion_queue.push(n);
+                    }
+                }
+                s.dl_companion_active = true;
+            }
+            // Start the first companion; the DistantDownloading arm drives the
+            // rest and finalizes when the queue dries. None started → finalize now.
+            if start_next_companion() {
+                return;
+            }
+            if let Ok(mut s) = LIBRARY.lock() {
+                s.dl_companion_active = false;
+            }
+        }
+        finalize_gamezip_download();
+        return;
+    }
 
     // Flashpoint GameZIP: the downloaded file is a `.zip`; extract its `.swf`
     // to `swf_path` and add THAT (not the zip), then delete the temp zip.
@@ -3768,6 +3857,7 @@ fn on_download_finished() {
                 s.download_file_name.clear();
                 s.download_out_path.clear();
                 s.download_zip_extract = None;
+                s.download_fp_direct = false;
                 s.download_cover_url = None;
                 s.download_title = None;
                 s.download_resume_pos = None;

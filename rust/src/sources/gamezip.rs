@@ -63,8 +63,11 @@ pub fn search_url(name: &str) -> std::string::String {
 }
 
 /// Parse a db-api search response into up to 60 fetchable `CatalogEntry` hits
-/// (id = UUID for the `/get?id=` download, title, developer, cover_url). Only
-/// `zipped` games are kept — the others 404 on `/get?id=`. Deduped: db-api
+/// (id = UUID, title, developer, cover_url, launch_command, zipped). `zipped`
+/// games download from the GameZIP server (`/get?id=`); non-zipped (legacy
+/// "loose") games 404 there but are fetched directly from the htdocs mirror via
+/// their launchCommand, so they're KEPT when that command maps to a usable
+/// htdocs URL (and dropped otherwise — nothing to download). Deduped: db-api
 /// returns the same game several times (exact UUID repeats AND same-title
 /// alternate entries), which clutters the cover grid; we keep the first of each.
 pub fn parse_search(
@@ -84,9 +87,17 @@ pub fn parse_search(
         if id.is_empty() {
             continue;
         }
-        // Skip legacy games not in the GameZIP server: `/get?id=` 404s on them
-        // (verified 2026-06-07 — ~9% of hits). Only `zipped` games are fetchable.
-        if !g.get("zipped").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let zipped = g.get("zipped").and_then(|v| v.as_bool()).unwrap_or(false);
+        let launch_command = g
+            .get("launchCommand")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        // A `zipped` game is fetched from the GameZIP server (`/get?id=`). A
+        // non-zipped (legacy "loose") entry 404s there, but its files live on
+        // the htdocs mirror, reachable from the launchCommand URL — keep it only
+        // when that command maps to a usable htdocs URL (else nothing to fetch).
+        if !zipped && htdocs_url_from_command(&launch_command).is_none() {
             continue;
         }
         let title = g.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -118,11 +129,6 @@ pub fn parse_search(
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let launch_command = g
-            .get("launchCommand")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
         out.push(flashpoint::CatalogEntry {
             id: id.to_string(),
             title,
@@ -131,6 +137,7 @@ pub fn parse_search(
             release_date,
             cover_url: flashpoint::logo_url(id),
             launch_command,
+            zipped,
         });
         if out.len() >= MAX {
             break;
@@ -306,6 +313,26 @@ pub fn extract_gamezip_tree(
 /// `https://infinity.unstable.life/Flashpoint/Legacy/htdocs/<host>/<path>/`
 /// (the db-api GameZIP often ships ONLY the main SWF — the full set is here).
 /// Returns None if the entry isn't under `content/` or has no directory.
+/// Map a Flashpoint `launchCommand` URL to the FULL htdocs URL of its entry SWF,
+/// for downloading a non-zipped (legacy "loose") game directly from the mirror.
+/// `http://localflash/icytower/icy_tower.swf`
+///   -> `https://infinity.unstable.life/Flashpoint/Legacy/htdocs/localflash/icytower/icy_tower.swf`.
+/// Returns None when the command isn't a usable host/path URL (so callers can
+/// treat "no htdocs URL" as "not fetchable this way").
+pub fn htdocs_url_from_command(launch_command: &str) -> Option<std::string::String> {
+    let entry = launch_entry_from_command(launch_command)?; // content/<host>/<path>/<file>
+    let rest = entry.strip_prefix("content/")?;
+    if rest.is_empty() || rest.ends_with('/') {
+        return None;
+    }
+    Some(std::format!(
+        "https://infinity.unstable.life/Flashpoint/Legacy/htdocs/{}",
+        rest
+    ))
+}
+
+/// Base directory (companion) form of `htdocs_url_from_command`, from a GameZIP
+/// `content/<host>/<path>/<file>` entry name.
 pub fn htdocs_base_from_entry(entry: &str) -> Option<std::string::String> {
     let rest = entry.strip_prefix("content/")?;
     let slash = rest.rfind('/')?;
