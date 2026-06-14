@@ -230,12 +230,15 @@ static LIVE_GPU_SHAPES: AtomicUsize = AtomicUsize::new(0);
 // Sizing: at the crash we had ~14 MB of vertex data + ~3 MB of indices
 // in flight. We size for ~4x headroom so a long Mario 63 session has
 // plenty of slack.
-const ARENA_VBO_SIZE: GLsizeiptr = 64 * 1024 * 1024;  // 64 MB
-// IBO bumped to 32 MB after the first arena test (jetpack run 2026-05-25):
-// after ~5 minutes of Mario 63 the index arena peaked at 13 MB (81 %) —
-// uncomfortably close to OOM. 32 MB gives us 2× headroom for longer
-// sessions and more index-heavy levels.
-const ARENA_IBO_SIZE: GLsizeiptr = 32 * 1024 * 1024;  // 32 MB
+// Bumped 64 → 192 MB after The Binding of Isaac (2026-06-14): ~5170 live vector
+// shapes peaked at ~114 MB of vertices, OOMing the 64 MB arena — alloc() then
+// returned None, build_gpu_draw dropped the draw, and the art went invisible.
+// 192 MB gives ~1.7× headroom over the observed peak.
+const ARENA_VBO_SIZE: GLsizeiptr = 192 * 1024 * 1024;  // 192 MB
+// Bumped 32 → 96 MB at the same time: the Binding of Isaac index data peaked at
+// ~56 MB (the 32 MB arena would have OOMed too on a longer session). ~1.7×
+// headroom. (Earlier: 13 MB peak on a 5-minute Mario 63 jetpack run.)
+const ARENA_IBO_SIZE: GLsizeiptr = 96 * 1024 * 1024;  // 96 MB
 /// VBO alignment = one full vertex (pos.xy + rgba = 6 × f32 = 24 bytes).
 /// MUST match the vertex stride so `glDrawElementsBaseVertex(base_vertex)`
 /// can use `vbo_offset / 24` and land exactly on a vertex boundary.
@@ -259,8 +262,14 @@ struct BufferArena {
     free: Vec<(GLintptr, GLsizeiptr)>,
     /// High-water diagnostic: max bytes ever in use simultaneously.
     peak_in_use: GLsizeiptr,
-    /// Failed-allocation diagnostic: when we ran out, log it once.
+    /// Failed-allocation diagnostic: log the first OOM in detail (once)…
     oom_warned: bool,
+    /// …and keep a running count of dropped allocations, surfaced every
+    /// heartbeat as `arenaDrop*`. A silent first-only warn_once is what hid the
+    /// Binding of Isaac invisible-art bug for nine debug cycles (2026-06-14):
+    /// once the 64 MB vertex arena filled, every subsequent shape's draw was
+    /// dropped with no further trace. Keep this LOUD.
+    alloc_failures: u32,
 }
 
 impl BufferArena {
@@ -280,6 +289,7 @@ impl BufferArena {
             free: std::vec![(0 as GLintptr, capacity)],
             peak_in_use: 0,
             oom_warned: false,
+            alloc_failures: 0,
         }
     }
 
@@ -303,10 +313,13 @@ impl BufferArena {
                 return Some(alloc_off);
             }
         }
+        // Count EVERY drop (surfaced each heartbeat as arenaDrop*) and detail
+        // the first one. A dropped alloc = a dropped draw = invisible geometry.
+        self.alloc_failures = self.alloc_failures.saturating_add(1);
         if !self.oom_warned {
             self.oom_warned = true;
             let msg = std::format!(
-                "ARENA OOM: target=0x{:04X} capacity={} requested={} peak_in_use={}\n",
+                "ARENA OOM: target=0x{:04X} capacity={} requested={} peak_in_use={} — draws will be DROPPED (invisible geometry); bump ARENA_*_SIZE\n",
                 self.target, self.capacity, size, self.peak_in_use,
             );
             let mut bytes = msg.into_bytes();
@@ -8228,7 +8241,7 @@ impl RenderBackend for SwitchRenderBackend {
             let cpu_mhz = unsafe { ruffle_cpu_clock_hz() } / 1_000_000;
             let docked = unsafe { ruffle_is_docked() } != 0;
             let msg = std::format!(
-                "f{}: fps={} cpu={}MHz dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) bitmaps={} atlases={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB\n",
+                "f{}: fps={} cpu={}MHz dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB\n",
                 self.frame_count,
                 fps_str,
                 cpu_mhz,
@@ -8241,6 +8254,8 @@ impl RenderBackend for SwitchRenderBackend {
                 live_d,
                 v_used_mb, v_peak_mb, v_frag,
                 i_used_mb, i_peak_mb, i_frag,
+                self.vertex_arena.alloc_failures,
+                self.index_arena.alloc_failures,
                 self.bitmaps_registered,
                 self.atlases.len(),
                 self.bitmap_draws_emitted,
