@@ -23,6 +23,7 @@ A big one: multi-file games, Flashpoint downloads that actually start, an in-gam
 
 - **Buttons mapped to letter or number keys now trigger games that read them as keyboard shortcuts**: a controller button bound to a letter (or a digit or space) now fires a game's keyboard shortcuts, not just its held-key checks. For example *Scooby-Doo: Mayan Monster Mayhem* (H for help, S/T to switch the held item) now responds; before, only movement and pickup worked.
 - **Deleting a game also removes its `<game>.files/` companion folder and its favorite mark**, so nothing is left behind on the SD card.
+- **Games that rendered as a blank white screen now display correctly**: very art-heavy games (thousands of on-screen vector shapes at once, for example *The Binding of Isaac*) exhausted the renderer's geometry buffers, which silently dropped the extra shapes and left most of the game invisible behind a few stray text glyphs. The buffers are now much larger, and a buffer overflow is reported instead of failing silently. (#16, #23)
 
 ## v1.2.1 (2026-06-11)
 
