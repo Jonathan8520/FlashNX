@@ -124,6 +124,23 @@ impl SidecarNavigator {
         path
     }
 
+    /// Leaf-only path: `<sidecar_dir>/<last-segment>`. Companions fetched flat
+    /// from the htdocs mirror land directly in `<game>.files/<leaf>.swf`
+    /// (Garfield's top.swf, books.swf, ...). Needed because the movie runs under
+    /// its original launchCommand base URL, so a relative load ("top.swf")
+    /// resolves WITH the host path — `flat_path` (all segments) then misses the
+    /// flat companion, while this matches it.
+    fn leaf_path(&self, url: &Url) -> PathBuf {
+        let mut path = self.sidecar_dir.clone();
+        if let Some(leaf) = url
+            .path_segments()
+            .and_then(|segs| segs.filter(|s| !s.is_empty() && *s != "..").last())
+        {
+            path.push(leaf);
+        }
+        path
+    }
+
     fn push_segments(&self, path: &mut PathBuf, url: &Url) {
         if let Some(segs) = url.path_segments() {
             for seg in segs {
@@ -215,34 +232,41 @@ impl NavigatorBackend for SidecarNavigator {
                 Result<Box<dyn SuccessResponse>, ErrorResponse>,
             >());
         }
-        // Try the host-mirrored layout first (GameZIP `content/<host>/<path>`
-        // tree), then fall back to the flat layout (htdocs-fetched companions
-        // sitting directly in `<game>.files/`).
+        // Resolve in three layers (first hit wins):
+        //   1. host-mirrored  `<dir>/<host>/<path>`  (full GameZIP tree, e.g.
+        //      Super Brawl 2's extracted assets).
+        //   2. flat-with-path `<dir>/<path>`         (legacy, no host).
+        //   3. leaf-only       `<dir>/<leaf>`        (htdocs-fetched companions
+        //      land directly in `<game>.files/<leaf>.swf`, e.g. Garfield's
+        //      top.swf). This layer is REQUIRED since the movie now runs under
+        //      its original launchCommand base URL, so a relative load like
+        //      "top.swf" resolves WITH the host path and layers 1-2 miss the
+        //      flat companion. (2026-06-14 regression fix.)
         let host_path = self.local_path(&resolved);
-        let (bytes, from) = match read_sidecar_file(&host_path) {
-            Some(b) => (b, host_path),
+        let flat = self.flat_path(&resolved);
+        let leaf = self.leaf_path(&resolved);
+        let found = read_sidecar_file(&host_path).map(|b| (b, &host_path))
+            .or_else(|| read_sidecar_file(&flat).map(|b| (b, &flat)))
+            .or_else(|| read_sidecar_file(&leaf).map(|b| (b, &leaf)));
+        let (bytes, from) = match found {
+            Some((b, p)) => (b, p.clone()),
             None => {
-                let flat = self.flat_path(&resolved);
-                match read_sidecar_file(&flat) {
-                    Some(b) => (b, flat),
-                    None => {
-                        tracing::warn!(
-                            "sidecar: {} not found ({}, {})",
-                            resolved,
-                            host_path.display(),
-                            flat.display()
-                        );
-                        let e = std::io::Error::new(
-                            std::io::ErrorKind::NotFound,
-                            "sidecar file not found",
-                        );
-                        return async_return(Err(create_specific_fetch_error(
-                            "Sidecar file not found",
-                            resolved.as_str(),
-                            e,
-                        )));
-                    }
-                }
+                tracing::warn!(
+                    "sidecar: {} not found ({}, {}, {})",
+                    resolved,
+                    host_path.display(),
+                    flat.display(),
+                    leaf.display(),
+                );
+                let e = std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "sidecar file not found",
+                );
+                return async_return(Err(create_specific_fetch_error(
+                    "Sidecar file not found",
+                    resolved.as_str(),
+                    e,
+                )));
             }
         };
         tracing::info!("sidecar: served {} ({} bytes) from {}", resolved, bytes.len(), from.display());
