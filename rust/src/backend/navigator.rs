@@ -150,6 +150,33 @@ fn is_dead_ad_host(host: &str) -> bool {
         .any(|d| host == *d || host.ends_with(&std::format!(".{d}")))
 }
 
+extern "C" {
+    // C++/libnx sidecar reads (cpp/src/swf_picker.cpp). Rust's std::fs::read
+    // returns ENOENT for some files that ARE on disk on Horizon (verified
+    // 2026-06-14: C++ re-reads every extracted file fine; Rust's std::fs misses
+    // a few — same newlib-glue unreliability as the read_dir/metadata bugs).
+    fn swf_picker_file_size(path: *const core::ffi::c_char) -> i64;
+    fn swf_picker_read_file(path: *const core::ffi::c_char, buf: *mut u8, cap: u64) -> i64;
+}
+
+/// Read a sidecar file via C++/libnx (reliable on Horizon, unlike std::fs::read).
+/// Returns None if the file is absent or unreadable.
+fn read_sidecar_file(path: &std::path::Path) -> Option<std::vec::Vec<u8>> {
+    let s = path.to_str()?;
+    let c = std::ffi::CString::new(s).ok()?;
+    let sz = unsafe { swf_picker_file_size(c.as_ptr()) };
+    if sz < 0 {
+        return None;
+    }
+    let sz = sz as usize;
+    let mut buf = std::vec![0u8; sz];
+    let n = unsafe { swf_picker_read_file(c.as_ptr(), buf.as_mut_ptr(), sz as u64) };
+    if n < 0 || n as usize != sz {
+        return None;
+    }
+    Some(buf)
+}
+
 impl NavigatorBackend for SidecarNavigator {
     fn navigate_to_url(
         &self,
@@ -192,18 +219,22 @@ impl NavigatorBackend for SidecarNavigator {
         // tree), then fall back to the flat layout (htdocs-fetched companions
         // sitting directly in `<game>.files/`).
         let host_path = self.local_path(&resolved);
-        let (bytes, from) = match std::fs::read(&host_path) {
-            Ok(b) => (b, host_path),
-            Err(_) => {
+        let (bytes, from) = match read_sidecar_file(&host_path) {
+            Some(b) => (b, host_path),
+            None => {
                 let flat = self.flat_path(&resolved);
-                match std::fs::read(&flat) {
-                    Ok(b) => (b, flat),
-                    Err(e) => {
+                match read_sidecar_file(&flat) {
+                    Some(b) => (b, flat),
+                    None => {
                         tracing::warn!(
-                            "sidecar: {} not found ({}, {}) ({e})",
+                            "sidecar: {} not found ({}, {})",
                             resolved,
                             host_path.display(),
                             flat.display()
+                        );
+                        let e = std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "sidecar file not found",
                         );
                         return async_return(Err(create_specific_fetch_error(
                             "Sidecar file not found",

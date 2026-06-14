@@ -444,7 +444,21 @@ fn ensure_swf_loaded() -> Option<(std::vec::Vec<u8>, std::string::String)> {
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or("movie.swf");
-    let url = std::format!("http://flashforswitch.local/{}", basename);
+    // Host-pathed Flashpoint games ship a `<game>.swf.base` sidecar holding the
+    // original launchCommand URL (e.g. http://static.nickjr.com/.../game.swf).
+    // Use it as the movie URL so relative loads (configuration.xml, data/*.xml,
+    // assets/**/*.swf) resolve to `<host>/<path>` — exactly the layout the
+    // host-aware SidecarNavigator + the extracted `.files/<host>/<path>` tree
+    // expect. Without it the SWF runs under the flat `flashforswitch.local`
+    // base and every relative asset 404s (Super Brawl 2 stuck on a loader,
+    // 2026-06-14). Falls back to the synthetic URL for direct/single-file games.
+    let base_path = std::format!("{}.base", path);
+    let url = crate::sources::gamezip::read_file_bounded(&base_path, 4096)
+        .and_then(|b| std::string::String::from_utf8(b).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| s.starts_with("http://") || s.starts_with("https://"))
+        .unwrap_or_else(|| std::format!("http://flashforswitch.local/{}", basename));
+    log_str(&std::format!("ruffle_init: movie base url = {}\n", url));
     let entry = (bytes, url);
     if let Ok(mut g) = CACHED_SWF.lock() {
         *g = Some(entry.clone());

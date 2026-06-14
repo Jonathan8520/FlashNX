@@ -240,3 +240,83 @@ extern "C" int swf_picker_count_companions(const char* swf_path) {
     closedir(d);
     return count;
 }
+
+// Robust GameZIP-extraction file write (v1.3.0 fix). Rust's std::fs::write
+// silently fails to persist some files on Horizon (write returns Ok yet the
+// file is later unreadable; std::fs::metadata even returns a timestamp as the
+// size) — the same newlib-glue misalignment that breaks Rust's read_dir. The
+// download (net.cpp) and delete paths already use C++/libnx for reliability;
+// this brings extraction in line. Creates the parent dirs one component at a
+// time (ignoring "already exists" — Horizon's mkdir, like create_dir_all, isn't
+// otherwise idempotent across nested levels), then fopen/fwrite/fclose.
+// Returns 1 on success, 0 on failure.
+extern "C" int swf_picker_write_file(const char* path, const unsigned char* data,
+                                     unsigned int len) {
+    if (!path || !*path) return 0;
+    const size_t plen = std::strlen(path);
+    char buf[512];
+    if (plen >= sizeof(buf)) {
+        std::printf("swf_picker_write_file: path too long (%zu)\n", plen);
+        return 0;
+    }
+    std::memcpy(buf, path, plen + 1);
+    // mkdir each parent component; skip the "sdmc:" mount root (bare mount mkdir
+    // fails), and treat EEXIST as success.
+    for (size_t i = 1; i < plen; ++i) {
+        if (buf[i] != '/') continue;
+        buf[i] = '\0';
+        if (buf[i - 1] != ':') {
+            if (::mkdir(buf, 0777) != 0 && errno != EEXIST) {
+                std::printf("swf_picker_write_file: mkdir(%s) errno=%d\n", buf, errno);
+            }
+        }
+        buf[i] = '/';
+    }
+    FILE* f = std::fopen(path, "wb");
+    if (!f) {
+        std::printf("swf_picker_write_file: fopen(%s) errno=%d\n", path, errno);
+        return 0;
+    }
+    const size_t wrote = (len > 0) ? std::fwrite(data, 1, len, f) : 0;
+    std::fclose(f);
+    if (wrote != (size_t)len) {
+        std::printf("swf_picker_write_file: short write %s (%zu/%u)\n", path, wrote, len);
+        return 0;
+    }
+    return 1;
+}
+
+// Robust sidecar file read for the SidecarNavigator (v1.3.0 fix). Rust's
+// std::fs::read returns ENOENT for some files that DO exist on disk (verified
+// 2026-06-14: C++ re-reads every extracted file fine, but Rust's std::fs reads
+// a handful as missing — the same Horizon newlib-glue unreliability behind the
+// read_dir/metadata bugs). The navigator reads through here instead.
+// `swf_picker_file_size` returns the byte size, or -1 if absent/unreadable.
+extern "C" long long swf_picker_file_size(const char* path) {
+    if (!path || !*path) return -1;
+    FILE* f = std::fopen(path, "rb");
+    if (!f) return -1;
+    std::fseek(f, 0, SEEK_END);
+    const long long sz = std::ftell(f);
+    std::fclose(f);
+    return sz;
+}
+
+// Reads up to `cap` bytes of `path` into `buf`. Returns the number of bytes
+// read, or -1 on error / if the file is larger than `cap`.
+extern "C" long long swf_picker_read_file(const char* path, unsigned char* buf,
+                                          unsigned long long cap) {
+    if (!path || !*path || !buf) return -1;
+    FILE* f = std::fopen(path, "rb");
+    if (!f) return -1;
+    std::fseek(f, 0, SEEK_END);
+    const long long sz = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    if (sz < 0 || (unsigned long long)sz > cap) {
+        std::fclose(f);
+        return -1;
+    }
+    const size_t got = (sz > 0) ? std::fread(buf, 1, (size_t)sz, f) : 0;
+    std::fclose(f);
+    return (got == (size_t)sz) ? sz : -1;
+}

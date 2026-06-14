@@ -168,12 +168,32 @@ fn launch_entry_from_command(launch_command: &str) -> Option<std::string::String
 
 /// Write `bytes` to `<files_dir>/<rel>` (rel is a forward-slash `content/`-
 /// relative path like `host/path/file.swf`), creating parent dirs. Best-effort.
-fn write_tree_file(files_dir: &str, rel: &str, bytes: &[u8]) {
-    let full = std::format!("{}/{}", files_dir.trim_end_matches('/'), rel);
-    if let Some(slash) = full.rfind('/') {
-        let _ = std::fs::create_dir_all(&full[..slash]);
+extern "C" {
+    // C++/libnx file write (cpp/src/swf_picker.cpp). Creates parent dirs +
+    // writes the file. Returns 1 on success, 0 on failure. We go through C++
+    // because Rust's std::fs on Horizon silently fails to persist some files
+    // during a big multi-file extraction (write returns Ok but the file is
+    // later unreadable; std::fs::metadata even returns a timestamp as the size).
+    fn swf_picker_write_file(path: *const core::ffi::c_char, data: *const u8, len: u32) -> core::ffi::c_int;
+}
+
+fn write_tree_file(files_dir: &str, rel: &str, bytes: &[u8]) -> bool {
+    let base = files_dir.trim_end_matches('/');
+    let full = std::format!("{}/{}", base, rel);
+    // Path must be NUL-terminated for C++; reject any (pathological) interior NUL.
+    let c_path = match std::ffi::CString::new(full.clone()) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let ok = unsafe {
+        swf_picker_write_file(c_path.as_ptr(), bytes.as_ptr(), bytes.len() as u32)
+    };
+    if ok == 0 {
+        net::log(&std::format!("extract: C++ write failed {} ({} bytes)\n", full, bytes.len()));
+        false
+    } else {
+        true
     }
-    let _ = std::fs::write(&full, bytes);
 }
 
 /// Extract the FULL `content/<host>/<path>/<file>` tree of a Flashpoint GameZIP
@@ -200,6 +220,10 @@ pub fn extract_gamezip_tree(
     let mut first_swf: Option<(std::vec::Vec<u8>, std::string::String)> = None;
     let mut launch_swf: Option<(std::vec::Vec<u8>, std::string::String)> = None;
 
+    let mut entries = 0usize;
+    let mut written = 0usize;
+    let mut failed = 0usize;
+    let mut inflate_fail = 0usize;
     let mut i = 0usize;
     while i + 30 <= zip.len() && &zip[i..i + 4] == b"PK\x03\x04" {
         let flags = u16::from_le_bytes([zip[i + 6], zip[i + 7]]);
@@ -227,6 +251,7 @@ pub fn extract_gamezip_tree(
         // Only files under `content/` (skip content.json and directory entries).
         if let Some(rel) = name.strip_prefix("content/").filter(|r| !r.is_empty() && !r.ends_with('/'))
         {
+            entries += 1;
             let comp = &zip[data_start..data_end];
             let bytes = match method {
                 0 => Some(comp.to_vec()),
@@ -234,7 +259,18 @@ pub fn extract_gamezip_tree(
                 _ => None,
             };
             if let Some(bytes) = bytes {
-                write_tree_file(files_dir, rel, &bytes);
+                if write_tree_file(files_dir, rel, &bytes) {
+                    written += 1;
+                    // Flush to SD periodically: a single commit after a big
+                    // multi-file extraction (Super Brawl 2: 135 files / 109 MB)
+                    // overflows the fsdev journal and silently loses some writes
+                    // (the file reports written but later fs::read gives ENOENT).
+                    if written % 16 == 0 {
+                        crate::sd::commit();
+                    }
+                } else {
+                    failed += 1;
+                }
                 if name.to_ascii_lowercase().ends_with(".swf") {
                     let is_launch = launch_entry
                         .as_deref()
@@ -248,10 +284,17 @@ pub fn extract_gamezip_tree(
                         first_swf = Some((bytes, name.clone()));
                     }
                 }
+            } else {
+                inflate_fail += 1;
+                net::log(&std::format!("extract: inflate/method failed for {} (method {})\n", name, method));
             }
         }
         i = data_end;
     }
+    net::log(&std::format!(
+        "extract: {} entries, {} written, {} write-failed, {} inflate-failed\n",
+        entries, written, failed, inflate_fail,
+    ));
     launch_swf.or(first_swf)
 }
 

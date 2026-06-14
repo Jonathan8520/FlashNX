@@ -3528,7 +3528,17 @@ fn extract_gamezip_main(
     swf_path: &str,
     launch_command: &str,
 ) -> Option<(std::string::String, std::vec::Vec<u8>)> {
-    let zip = crate::sources::gamezip::read_file_bounded(zip_path, 64 * 1024 * 1024)?;
+    // 256 MB cap: big multi-file games (e.g. Super Brawl 2 ~108 MB, 136 files)
+    // blew past the old 64 MB limit, so read_file_bounded returned None and the
+    // download silently did nothing ("progress bar fills, nothing happens"). The
+    // zip is only held in RAM during extraction (freed before the game loads).
+    let zip = match crate::sources::gamezip::read_file_bounded(zip_path, 256 * 1024 * 1024) {
+        Some(z) => z,
+        None => {
+            log("library: gamezip read failed or exceeds 256 MB cap — not extracted\n");
+            return None;
+        }
+    };
     // Mirror the GameZIP's full `content/<host>/<path>` tree into the game's
     // sidecar dir, so the SidecarNavigator can serve every bundled asset (alt SWF
     // versions, ad-network stubs, xml/png) by its original URL at play time. The
@@ -3632,13 +3642,14 @@ fn companion_download_finished() {
 /// Reads the `download_*` state (still populated until here). Shared by the
 /// no-companion path and the companion-phase completion.
 fn finalize_gamezip_download() {
-    let (swf_path, file_name, cover_url, real_title, source_url) = match LIBRARY.lock() {
+    let (swf_path, file_name, cover_url, real_title, source_url, launch_command) = match LIBRARY.lock() {
         Ok(g) => (
             g.download_zip_extract.clone().unwrap_or_default(),
             g.download_file_name.clone(),
             g.download_cover_url.clone(),
             g.download_title.clone(),
             g.download_source_url.clone(),
+            g.download_launch_command.clone(),
         ),
         Err(_) => return,
     };
@@ -3649,6 +3660,20 @@ fn finalize_gamezip_download() {
     // Record where this game came from (Flashpoint GameZIP URL) next to the
     // extracted .swf, for later bug-report attribution.
     write_url_sidecar(&swf_path, &source_url);
+    // Record the original launchCommand URL in a `<game>.swf.base` sidecar. At
+    // launch, lib.rs uses it as the movie's base URL so the game's relative
+    // loads (configuration.xml, data/*.xml, assets/**/*.swf) resolve to the
+    // host-pathed `.files/<host>/<path>` tree the SidecarNavigator serves.
+    // Only meaningful for Flashpoint GameZIPs (host-pathed); direct/single-file
+    // imports leave it absent and keep the flat synthetic base URL.
+    if launch_command.starts_with("http://") || launch_command.starts_with("https://") {
+        let base_path = std::format!("{}.base", swf_path);
+        if let Err(e) = std::fs::write(&base_path, launch_command.as_bytes()) {
+            log(&std::format!("library: base sidecar write failed: {}\n", e));
+        } else {
+            crate::sd::commit();
+        }
+    }
     // Auto-fetch the game's cover (logo) so JOUER shows its art right away — no
     // manual "Jaquette" step. Synchronous HTTPS, best-effort.
     if let Some(url) = &cover_url {
