@@ -80,7 +80,7 @@ use std::sync::Mutex;
 /// Pause-menu labels rendered by `draw_menu_overlay`. C++ maps the selected
 /// index from this slice to an action (Resume / Touches / Restart / Quit).
 /// Keep the order in sync with the `MENU_*` constants in `cpp/src/main.cpp`.
-pub const MENU_ITEMS: &[&str] = &["REPRENDRE", "TOUCHES", "REDEMARRER", "QUITTER"];
+pub const MENU_ITEMS: &[&str] = &["REPRENDRE", "TOUCHES", "REDEMARRER", "VITESSE", "QUITTER"];
 
 /// 5×7 pixel glyphs for the pause menu. ASCII art keeps the data
 /// hand-editable: each row is exactly 5 chars wide, ' ' = off, anything
@@ -4575,9 +4575,12 @@ impl SwitchRenderBackend {
         // the panel scales in (in-game pause pop), like the library modals.
         self.fill_screen_dim(0x80_00_00_00);
 
-        // Centred panel — sized so 1280x720 fits 3 items + title comfortably.
+        // Centred panel — sized so 1280x720 fits 5 items + title comfortably.
+        // Last item (QUITTER) sits at panel_y + 130 + 4*50 = +330; the footer
+        // at PANEL_H - 40 must clear it, so PANEL_H grew from 380 (4 items) to
+        // 440 to keep the same ~70px gap above the help line.
         const PANEL_W: f32 = 520.0;
-        const PANEL_H: f32 = 380.0;
+        const PANEL_H: f32 = 440.0;
         let panel_x = (vw - PANEL_W) * 0.5;
         let panel_y = (vh - PANEL_H) * 0.5;
         let panel = Matrix {
@@ -4652,7 +4655,13 @@ impl SwitchRenderBackend {
         let lc = crate::loc::s();
         // Localized labels, same order/count as the MENU_ITEMS contract C++
         // relies on for pause-menu navigation.
-        let items = [lc.menu_resume, lc.menu_keys, lc.menu_restart, lc.menu_quit];
+        // Cursor speed shows its live value, e.g. "CURSEUR: x1.5", and cycles in
+        // place on A (C++ MENU_CURSOR_SPEED). Short label to fit the panel.
+        let m = unsafe { crate::library::ruffle_cursor_speed_mult_x10() };
+        let cursor_label = std::format!("{}: x{}.{}", lc.menu_cursor, m / 10, m % 10);
+        let items = [
+            lc.menu_resume, lc.menu_keys, lc.menu_restart, cursor_label.as_str(), lc.menu_quit,
+        ];
         debug_assert_eq!(items.len(), MENU_ITEMS.len());
         let longest = items
             .iter()

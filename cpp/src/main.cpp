@@ -267,11 +267,12 @@ static void populate_bindings_from_keymap(void) {
 // here we just need the count and per-index action enum. ORDER MUST MATCH
 // the `MENU_ITEMS` slice in [rust/src/backend/render.rs].
 enum MenuAction {
-    MENU_RESUME  = 0,
-    MENU_TOUCHES = 1,  // opens the keymap editor sub-screen (Rust-driven)
-    MENU_RESTART = 2,
-    MENU_QUIT    = 3,
-    MENU_COUNT   = 4,
+    MENU_RESUME       = 0,
+    MENU_TOUCHES      = 1,  // opens the keymap editor sub-screen (Rust-driven)
+    MENU_RESTART      = 2,
+    MENU_CURSOR_SPEED = 3,  // cycles the cursor-speed preset in place
+    MENU_QUIT         = 4,
+    MENU_COUNT        = 5,
 };
 
 // Viewport size — keep in sync with rust/src/lib.rs VIEWPORT_W/H.
@@ -281,8 +282,44 @@ static constexpr int VIEWPORT_H = 720;
 // Right-stick axis range (libnx reports -0x7FFF..0x7FFF).
 static constexpr float STICK_DEADZONE = 4000.0f;
 static constexpr float STICK_MAX      = 32767.0f;
-// Cursor speed in pixels per frame at full stick deflection.
-static constexpr float CURSOR_SPEED   = 12.0f;
+// Cursor speed in pixels per frame at full stick deflection. `CURSOR_SPEED_BASE`
+// is the x1.0 tuning; the effective `g_cursor_speed` = base * the chosen preset
+// multiplier (adjustable in REGLAGES, persisted to sdmc:/flashnx/cursor_speed).
+// Requested by DSwizzy (issue #17) for fast-mouse games like Spank the Monkey.
+static constexpr float CURSOR_SPEED_BASE = 12.0f;
+static const float CURSOR_SPEED_MULTS[] = { 0.5f, 1.0f, 1.5f, 2.0f, 2.5f };
+static constexpr int CURSOR_SPEED_COUNT = 5;
+static int   g_cursor_speed_idx = 1;                  // x1.0 by default
+static float g_cursor_speed     = CURSOR_SPEED_BASE;  // = base * mult[idx]
+
+extern "C" int flashnx_commit_sd(void); // ruffle_bridge.cpp (fsdevCommitDevice)
+
+static void cursor_speed_apply() {
+    if (g_cursor_speed_idx < 0) g_cursor_speed_idx = 0;
+    if (g_cursor_speed_idx >= CURSOR_SPEED_COUNT) g_cursor_speed_idx = CURSOR_SPEED_COUNT - 1;
+    g_cursor_speed = CURSOR_SPEED_BASE * CURSOR_SPEED_MULTS[g_cursor_speed_idx];
+}
+static void cursor_speed_load() {
+    FILE* f = std::fopen("sdmc:/flashnx/cursor_speed", "rb");
+    if (f) {
+        int v = 1;
+        if (std::fscanf(f, "%d", &v) == 1) g_cursor_speed_idx = v;
+        std::fclose(f);
+    }
+    cursor_speed_apply();
+}
+// Cycle to the next preset, apply, persist. Returns the new index.
+extern "C" int ruffle_cursor_speed_cycle(void) {
+    g_cursor_speed_idx = (g_cursor_speed_idx + 1) % CURSOR_SPEED_COUNT;
+    cursor_speed_apply();
+    FILE* f = std::fopen("sdmc:/flashnx/cursor_speed", "wb");
+    if (f) { std::fprintf(f, "%d", g_cursor_speed_idx); std::fclose(f); flashnx_commit_sd(); }
+    return g_cursor_speed_idx;
+}
+// Current multiplier x10 (5,10,15,20,25) for the UI label "x1.5".
+extern "C" int ruffle_cursor_speed_mult_x10(void) {
+    return (int)(CURSOR_SPEED_MULTS[g_cursor_speed_idx] * 10.0f + 0.5f);
+}
 
 // Register a Sphaira file association so a `.swf` in Sphaira's file browser
 // offers FlashNX as a launcher. That's what makes Sphaira's "Create a Forwarder"
@@ -600,6 +637,12 @@ static void worker_entry(void* arg) {
                     last_tick = ruffle_tick_now();
                     continue;
                 }
+                case MENU_CURSOR_SPEED:
+                    // Cycle to the next cursor-speed preset live, stay in the
+                    // menu (falls through to the re-render below with the new
+                    // value). Persists globally via the same path as REGLAGES.
+                    ruffle_cursor_speed_cycle();
+                    break;
                 case MENU_QUIT:
                     back_to_library = true;
                     break;
@@ -657,12 +700,12 @@ static void worker_entry(void* arg) {
             const float rsx = (float)rs.x;
             const float rsy = (float)rs.y;
             if (rsx >  STICK_DEADZONE || rsx < -STICK_DEADZONE) {
-                cursor_x += (rsx / STICK_MAX) * CURSOR_SPEED;
+                cursor_x += (rsx / STICK_MAX) * g_cursor_speed;
                 moved = true;
             }
             if (rsy >  STICK_DEADZONE || rsy < -STICK_DEADZONE) {
                 // Switch right stick Y is positive-up; screen Y is positive-down.
-                cursor_y -= (rsy / STICK_MAX) * CURSOR_SPEED;
+                cursor_y -= (rsy / STICK_MAX) * g_cursor_speed;
                 moved = true;
             }
         }
@@ -788,6 +831,7 @@ int main(int argc, char** argv) {
     socketInitializeDefault();
     nxlinkStdio();
     romfsInit();
+    cursor_speed_load(); // restore the saved cursor-speed preset (REGLAGES)
 
     std::printf("FlashNX: starting\n");
     std::printf("FlashNX: argc=%d", argc);

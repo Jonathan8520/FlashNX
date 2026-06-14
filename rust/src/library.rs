@@ -1374,9 +1374,9 @@ pub fn input(button: &str) -> bool {
 }
 
 /// Settings tab entries: 0 = default controls, 1 = language, 2 = report a bug,
-/// 3 = make a suggestion, 4 = quit. (No BACK — leave via L/R.)
+/// 3 = make a suggestion, 4 = cursor speed, 5 = quit. (No BACK — leave via L/R.)
 fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
-    const LAST: usize = 4;
+    const LAST: usize = 5;
     match button {
         "Up" | "StickLUp" => {
             selection = if selection == 0 { LAST } else { selection - 1 };
@@ -1409,6 +1409,11 @@ fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
                 }
                 // 3 = FAIRE UNE PROPOSITION is hoisted in input() (opens swkbd).
                 4 => {
+                    // Cursor speed: cycle to the next preset in place (C++ owns
+                    // the value + persistence; we just trigger + re-read it).
+                    unsafe { ruffle_cursor_speed_cycle() };
+                }
+                5 => {
                     // QUIT (Minus is SEARCH now). Exits the .nro.
                     s.screen = Screen::Quit;
                 }
@@ -2701,6 +2706,10 @@ fn delete_game(s: &mut State, game_idx: usize) {
 extern "C" {
     fn swf_picker_delete_game(swf_path: *const core::ffi::c_char) -> core::ffi::c_int;
     fn swf_picker_count_companions(swf_path: *const core::ffi::c_char) -> core::ffi::c_int;
+    // Cursor-speed preset (main.cpp): cycle to the next preset (returns the new
+    // index), and read the current multiplier x10 (5,10,15,20,25) for the label.
+    fn ruffle_cursor_speed_cycle() -> core::ffi::c_int;
+    pub(crate) fn ruffle_cursor_speed_mult_x10() -> core::ffi::c_int;
 }
 
 /// Search flow: open swkbd pre-filled with the current filter, submit
@@ -3078,7 +3087,13 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             // REGLAGES is a full navbar TAB now (not a popup): no dim backdrop,
             // no BACK entry — leave via L/R.
             let lc = crate::loc::s();
-            let entries = [lc.set_keys, lc.set_language, lc.set_report_bug, lc.set_suggest, lc.set_quit];
+            // Cursor speed shows its live value, e.g. "Cursor speed: x1.5".
+            let m = unsafe { ruffle_cursor_speed_mult_x10() };
+            let cursor_label = std::format!("{}: x{}.{}", lc.set_cursor_speed, m / 10, m % 10);
+            let entries = [
+                lc.set_keys, lc.set_language, lc.set_report_bug, lc.set_suggest,
+                cursor_label.as_str(), lc.set_quit,
+            ];
             backend.draw_library_settings(selection, &entries);
         }
         Screen::SettingsKeymapEditor => {

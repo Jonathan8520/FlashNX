@@ -2,7 +2,7 @@
 
 Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://github.com/ruffle-rs/ruffle).
 
-## v1.3.0 (2026-06-13)
+## v1.3.0 (2026-06-14)
 
 A big one: multi-file games, Flashpoint downloads that actually start, an in-game keyboard, favorites, and a much more configurable control editor.
 
@@ -16,6 +16,7 @@ A big one: multi-file games, Flashpoint downloads that actually start, an in-gam
 - **Assignable mouse clicks**: the controls editor now has **Left click** and **Right click** actions you can bind to any button. By default **ZR** is left click and **ZL** is right click. The touchscreen still left-clicks.
 - **More mappable inputs**: SL / SR (Joy-Con side buttons), the stick presses (L3 / R3), and the **right stick as a d-pad** (bind its directions and it stops being the mouse cursor; the touchscreen stays the cursor).
 - **Translated control labels**: the keys shown in the controls editor (clicks, Space, Enter, arrows, and so on) now follow your language (English, French, Spanish, Russian).
+- **Adjustable cursor speed**: the right-stick mouse cursor now has a speed setting (x0.5 to x2.5), in Settings and in the in-game pause menu where it cycles live as you press it. Handy for games that need fast mouse movement (for example *Spank the Monkey*). Your choice is saved across games and launches. (#17)
 - **Much faster Flashpoint downloads**: downloads now batch their writes to the SD card and pump the network harder, turning what used to be a roughly two-minute download into about ten seconds for a large game.
 - **Home-menu shortcuts for a single game**: FlashNX can now be launched straight into one game when its `.swf` path is passed as a launch argument — it skips the library and returns to the Home menu when you quit. With a homebrew forwarder tool this lets you put a specific Flash game on your Switch Home menu, with its own cover as the icon. If you use **Sphaira**, FlashNX registers a `.swf` association on launch, so you can pick a `.swf` in its file browser, choose "Create a Forwarder", select FlashNX, and the shortcut boots straight into that game.
 
