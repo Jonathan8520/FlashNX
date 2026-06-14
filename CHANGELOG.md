@@ -17,9 +17,11 @@ A big one: multi-file games, Flashpoint downloads that actually start, an in-gam
 - **More mappable inputs**: SL / SR (Joy-Con side buttons), the stick presses (L3 / R3), and the **right stick as a d-pad** (bind its directions and it stops being the mouse cursor; the touchscreen stays the cursor).
 - **Translated control labels**: the keys shown in the controls editor (clicks, Space, Enter, arrows, and so on) now follow your language (English, French, Spanish, Russian).
 - **Much faster Flashpoint downloads**: downloads now batch their writes to the SD card and pump the network harder, turning what used to be a roughly two-minute download into about ten seconds for a large game.
+- **Home-menu shortcuts for a single game**: FlashNX can now be launched straight into one game when its `.swf` path is passed as a launch argument — it skips the library and returns to the Home menu when you quit. With a homebrew forwarder tool this lets you put a specific Flash game on your Switch Home menu, with its own cover as the icon. If you use **Sphaira**, FlashNX registers a `.swf` association on launch, so you can pick a `.swf` in its file browser, choose "Create a Forwarder", select FlashNX, and the shortcut boots straight into that game.
 
 ### Fixes
 
+- **Buttons mapped to letter or number keys now trigger games that read them as keyboard shortcuts**: a controller button bound to a letter (or a digit or space) now fires a game's keyboard shortcuts, not just its held-key checks. For example *Scooby-Doo: Mayan Monster Mayhem* (H for help, S/T to switch the held item) now responds; before, only movement and pickup worked.
 - **Deleting a game also removes its `<game>.files/` companion folder and its favorite mark**, so nothing is left behind on the SD card.
 
 ## v1.2.1 (2026-06-11)

@@ -2,6 +2,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
+#include <cstring>
+#include <sys/stat.h>
 
 #include "ruffle_bridge.h"
 
@@ -282,13 +284,67 @@ static constexpr float STICK_MAX      = 32767.0f;
 // Cursor speed in pixels per frame at full stick deflection.
 static constexpr float CURSOR_SPEED   = 12.0f;
 
+// Register a Sphaira file association so a `.swf` in Sphaira's file browser
+// offers FlashNX as a launcher. That's what makes Sphaira's "Create a Forwarder"
+// entry able to build a per-game Home-menu shortcut for a Flash game: it
+// launches FlashNX with the `.swf` as argv (see the forwarder support in
+// worker_entry/main). Without this association only generic players (e.g. nxmp)
+// show up for `.swf`. We only write it when Sphaira is installed (its config dir
+// exists) so we never litter other setups, and only when the file is absent so a
+// user edit is never clobbered. `self_nro` is argv[0] (e.g.
+// "sdmc:/switch/FlashNX/FlashNX.nro"); Sphaira wants the path without the
+// "sdmc:" mount prefix. Format mirrors Sphaira's own bundled assoc .ini files
+// (plain key=value, no section header).
+static void register_sphaira_assoc(const char* self_nro) {
+    struct stat st;
+    if (stat("sdmc:/config/sphaira", &st) != 0) {
+        return; // Sphaira not installed — nothing to register with.
+    }
+    mkdir("sdmc:/config/sphaira/assoc", 0777); // no-op if it already exists
+    const char* ini = "sdmc:/config/sphaira/assoc/FlashNX.ini";
+    if (stat(ini, &st) == 0) {
+        return; // already registered — leave any user edits alone.
+    }
+    const char* nro = "/switch/FlashNX/FlashNX.nro"; // sane default
+    if (self_nro && self_nro[0]) {
+        nro = (std::strncmp(self_nro, "sdmc:", 5) == 0) ? self_nro + 5 : self_nro;
+    }
+    FILE* f = std::fopen(ini, "w");
+    if (!f) {
+        std::printf("sphaira: could not write %s\n", ini); std::fflush(stdout);
+        return;
+    }
+    std::fprintf(f, "path=%s\nsupported_extensions=swf\n", nro);
+    std::fclose(f);
+    std::printf("sphaira: registered .swf association -> %s (launcher %s)\n", ini, nro);
+    std::fflush(stdout);
+}
+
+// True if `path` ends in ".swf" (case-insensitive). Recognises a forwarder
+// launch argument — a HOME-menu shortcut (NSP forwarder) to a single game.
+static bool path_is_swf(const char* path) {
+    if (!path) return false;
+    const size_t n = std::strlen(path);
+    if (n < 4) return false;
+    const char* e = path + (n - 4);
+    return e[0] == '.'
+        && (e[1] == 's' || e[1] == 'S')
+        && (e[2] == 'w' || e[2] == 'W')
+        && (e[3] == 'f' || e[3] == 'F');
+}
+
 // All of the GL + Ruffle work runs in a dedicated worker thread with a
 // 32 MB stack (vs the default ~1 MB main-thread stack from nx-hbloader).
 // Mario 63's AS2 preload recursion + Ruffle's AVM1 interpreter + GC arena
 // traversal blew through 1 MB at frame ~40, producing a silent SIGSEGV
 // that left no Rust-panic trail. With 32 MB we should have headroom for
 // any AS2 game we'll realistically run.
-static void worker_entry(void* /*arg*/) {
+static void worker_entry(void* arg) {
+    // A non-null arg is a forwarder launch: the absolute path of a single `.swf`
+    // to boot straight into (a HOME-menu shortcut to one game), skipping the
+    // library. The pointer is an `argv[i]` from main(), valid for the whole run
+    // (main blocks on threadWaitForExit). NULL = normal launch → show library.
+    const char* forwarder_swf = static_cast<const char*>(arg);
     std::printf("worker: starting (32 MB stack)\n"); std::fflush(stdout);
 
     // DIAG (worker-TLS fault): this worker is a raw libnx thread. The kernel
@@ -339,6 +395,7 @@ static void worker_entry(void* /*arg*/) {
     // library (dropped before Ruffle's own gets built; ~96 MB GPU arena
     // per instance, never alive at the same time). On each iteration of
     // the outer loop a fresh library renderer + banner upload happens.
+    if (!forwarder_swf) {
     if (ruffle_library_init() != 0) {
         std::printf("library_init failed — exiting .nro\n");
         std::fflush(stdout);
@@ -384,6 +441,14 @@ static void worker_entry(void* /*arg*/) {
     // free BEFORE ruffle_init allocates Ruffle's own renderer. Without
     // this we'd peak at ~200 MB GPU during the cross-over second.
     ruffle_library_shutdown();
+    } else {
+        // Forwarder launch: no library UI — point the loader straight at the
+        // .swf the HOME-menu shortcut named, then boot Ruffle like a normal pick.
+        std::printf("forwarder: launching %s directly (skipping library)\n",
+                    forwarder_swf);
+        std::fflush(stdout);
+        ruffle_set_swf_path(forwarder_swf);
+    }
 
     if (ruffle_init() != 0) {
         std::printf("ruffle_init failed — exiting .nro\n");
@@ -684,11 +749,18 @@ static void worker_entry(void* /*arg*/) {
     //     button → Close, applet focus loss without resume, etc.) → full
     //     .nro exit.
     ruffle_shutdown();
-    if (back_to_library) {
+    if (back_to_library && !forwarder_swf) {
         std::printf("game: QUITTER → reset + back to library\n");
         std::fflush(stdout);
         ruffle_library_reset();
     } else {
+        // Forwarder launch (or home/close button): there's no library to return
+        // to — exit the .nro, which drops back to the HOME menu (i.e. the
+        // forwarder's tile), so the shortcut behaves like a native game.
+        if (forwarder_swf) {
+            std::printf("forwarder: game exited → back to HOME\n");
+            std::fflush(stdout);
+        }
         exit_nro = true;
     }
     } // end of outer "while (!exit_nro)"
@@ -698,13 +770,35 @@ static void worker_entry(void* /*arg*/) {
 }
 
 int main(int argc, char** argv) {
-    (void)argc; (void)argv;
+    // Forwarder support: a HOME-menu shortcut (an NSP forwarder made on-device
+    // with switch-nsp-forwarder / Sphaira) launches FlashNX.nro with a target
+    // `.swf` as an argument — exactly like a RetroArch forwarder passes a ROM
+    // path. If we were handed one, boot straight into that game and skip the
+    // library. Scan all args (argv[0] is our own NRO path under hbloader) for
+    // the first that looks like a .swf; pass it to the worker via its thread arg
+    // (argv memory outlives the thread — main blocks on threadWaitForExit).
+    const char* forwarder_swf = nullptr;
+    for (int i = 1; i < argc; ++i) {
+        if (path_is_swf(argv[i])) {
+            forwarder_swf = argv[i];
+            break;
+        }
+    }
 
     socketInitializeDefault();
     nxlinkStdio();
     romfsInit();
 
-    std::printf("FlashNX: starting\n"); std::fflush(stdout);
+    std::printf("FlashNX: starting\n");
+    std::printf("FlashNX: argc=%d", argc);
+    for (int i = 0; i < argc; ++i) {
+        std::printf(" argv[%d]=%s", i, argv[i] ? argv[i] : "(null)");
+    }
+    std::printf("\n");
+    if (forwarder_swf) {
+        std::printf("FlashNX: forwarder target = %s\n", forwarder_swf);
+    }
+    std::fflush(stdout);
 
     // CpuBoostMode FastLoad — Mario 63 is bottlenecked by Ruffle's AVM1
     // bytecode interpreter on the Cortex-A57 (Tegra X1, 1.02 GHz handheld /
@@ -747,6 +841,10 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Register our `.swf` file association with Sphaira (if installed) so a Flash
+    // game can be turned into a Home-menu shortcut from Sphaira's file browser.
+    register_sphaira_assoc(argc > 0 ? argv[0] : nullptr);
+
     // Spawn the Ruffle worker with a 32 MB stack. NULL stack_mem → libnx
     // allocates from heap, so we don't bloat .nro BSS. Priority 0x2C is the
     // libnx default; bumping it to 0x20 was tested 2026-05-25 soir and
@@ -755,7 +853,7 @@ int main(int argc, char** argv) {
     // kernel pick the least-loaded core. The CpuBoostMode_FastLoad set
     // above is the perf lever that actually moved the needle.
     Thread t;
-    Result rc = threadCreate(&t, worker_entry, nullptr,
+    Result rc = threadCreate(&t, worker_entry, (void*)forwarder_swf,
                               nullptr, 32 * 1024 * 1024,
                               0x2C, -2);
     if (R_FAILED(rc)) {

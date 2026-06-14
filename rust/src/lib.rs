@@ -180,6 +180,14 @@ pub extern "C" fn ruffle_set_swf_path(path: *const c_char) -> c_int {
     if let Ok(mut g) = OVERRIDE_SWF_PATH.lock() {
         *g = Some(std::string::String::from(string));
     }
+    // Forwarder launch (main.cpp passes a `.swf` as argv) skips the library UI,
+    // so `note_played` never runs and the pause modal's game-name subtitle would
+    // be blank. If nothing has set the active game yet, derive it from this path
+    // so the subtitle shows the right title. No-op on a normal library launch —
+    // the library already set the active game before calling here.
+    if crate::library::active_display_name().is_none() {
+        crate::library::note_played_from_path(string);
+    }
     0
 }
 

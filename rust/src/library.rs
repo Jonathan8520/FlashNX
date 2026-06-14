@@ -364,6 +364,27 @@ fn note_played(basename: &str, display_name: &str) {
     }
 }
 
+/// Set the "active game" (LAST_PLAYED → the pause modal's name subtitle) from a
+/// SWF path, for the forwarder launch that bypasses the library UI. Mirrors a
+/// normal library entry: basename = the filename, display name = the
+/// `.meta.json` real-title override (Flashpoint downloads carry one), else the
+/// basename. Called from `ruffle_set_swf_path` when no game is active yet.
+pub fn note_played_from_path(path: &str) {
+    let basename = path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .to_string();
+    if basename.is_empty() {
+        return;
+    }
+    let display_name = read_meta_sidecar(&basename)
+        .and_then(|m| m.display_name)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| basename.clone());
+    note_played(&basename, &display_name);
+}
+
 fn last_played_basename() -> Option<std::string::String> {
     LAST_PLAYED.lock().ok().and_then(|g| g.as_ref().map(|(b, _)| b.clone()))
 }
