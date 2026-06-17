@@ -65,7 +65,8 @@ flash-for-switch/
 ├── patches/
 │   ├── README.md                 # How to re-apply after git submodule update
 │   ├── 0001-mario63-zero-scale-hit-test.patch  # Fix Toad castle #6906
-│   └── 0002-pixelbender-shaderjob-run-noop.patch  # PixelBender games don't crash
+│   ├── 0002-pixelbender-shaderjob-run-noop.patch  # PixelBender games don't crash
+│   └── 0003-amf-cycle-serialize-crash.patch  # No crash on cyclic SharedObject save
 ├── third_party/
 │   ├── ruffle/                   # git submodule + patches/*.patch applied
 │   └── jpeg-decoder-switchfork/  # vendored jpeg-decoder-0.3.2, select_worker → Immediate forced

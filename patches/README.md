@@ -45,3 +45,19 @@ visible difference is the absent shader effect. Validated on The Terminal
 (failsafegames): enemies, shooting and the pause menu work; before, the
 game built a `ShaderFilter` every frame in its enterFrame/click handlers,
 so a hard error there silently broke all input.
+
+### 0003-amf-cycle-serialize-crash.patch
+
+**Stop the AMF serializer crashing/freezing on a cyclic SharedObject.**
+
+`serialize_value` (`core/src/avm2/amf.rs`) fills its reference table
+(`object_table`) only AFTER recursing into an object, so a SharedObject with a
+circular reference recurses forever: a stack overflow (crash) for a simple
+cycle, or exponential re-serialization (hang) for a branching one. This patch
+detects cycles up front — a thread-local set of the objects currently on the
+serialization stack, keyed by `as_ptr` — and returns `None` for a back-reference
+instead of recursing, plus a depth backstop for pathological acyclic nesting.
+The `.sol` save drops the cyclic back-pointer (slightly lossy) but is finite and
+valid. Validated on Hemp Tycoon, which crashed when planting (it flushes a
+cyclic save on every action): the game now plays and saves. Upstream master
+still has no guard (checked 2026-06).

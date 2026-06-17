@@ -1,0 +1,61 @@
+diff --git a/core/src/avm2/amf.rs b/core/src/avm2/amf.rs
+index 26a58d877..18f94e1a0 100644
+--- a/core/src/avm2/amf.rs
++++ b/core/src/avm2/amf.rs
+@@ -25,7 +25,55 @@ pub fn serialize_value<'gc>(
+     amf_version: AMFVersion,
+     object_table: &mut ObjectTable<'gc>,
+ ) -> Option<AmfValue> {
+-    match elem.normalize() {
++    let normalized = elem.normalize();
++
++    // FlashNX patch: cycle (+ depth) guard for the AMF serializer. Upstream fills
++    // `object_table` only AFTER recursing into an object (post-order), so a
++    // SharedObject with a circular reference recurses forever: a stack overflow
++    // (crash) for a simple cycle, or exponential re-serialization (hang) for a
++    // branching one. Hemp Tycoon hits this when it saves on each plant action.
++    // Upstream master has no guard (checked 2026-06). Break any object already on
++    // the serialization stack (a real cycle) by returning None, and keep a depth
++    // backstop for pathological acyclic nesting. The dropped back-reference makes
++    // the .sol slightly lossy but finite, instead of crashing/freezing the player.
++    thread_local! {
++        static VISITING: std::cell::RefCell<std::collections::HashSet<usize>> =
++            std::cell::RefCell::new(std::collections::HashSet::new());
++        static DEPTH: std::cell::Cell<u32> = std::cell::Cell::new(0);
++    }
++    const MAX_DEPTH: u32 = 4096;
++
++    let visiting_key = normalized.as_object().map(|o| o.as_ptr() as usize);
++    if let Some(key) = visiting_key {
++        // insert() == false means the key was already present, i.e. this object
++        // is being serialized further up the stack == a circular reference.
++        let newly_inserted = VISITING.with(|v| v.borrow_mut().insert(key));
++        if !newly_inserted {
++            return None;
++        }
++    }
++    let depth = DEPTH.with(|d| {
++        let v = d.get() + 1;
++        d.set(v);
++        v
++    });
++    struct SerGuard(Option<usize>);
++    impl Drop for SerGuard {
++        fn drop(&mut self) {
++            DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
++            if let Some(key) = self.0 {
++                VISITING.with(|v| {
++                    v.borrow_mut().remove(&key);
++                });
++            }
++        }
++    }
++    let _guard = SerGuard(visiting_key);
++    if depth > MAX_DEPTH {
++        return None;
++    }
++
++    match normalized {
+         Value::Undefined => Some(AmfValue::Undefined),
+         Value::Null => Some(AmfValue::Null),
+         Value::Bool(b) => Some(AmfValue::Bool(b)),
