@@ -175,6 +175,34 @@ fn launch_entry_from_command(launch_command: &str) -> Option<std::string::String
     Some(std::format!("content/{}", rest))
 }
 
+/// Percent-decode a path so a launchCommand with an encoded path (e.g. `%20`)
+/// matches the GameZIP's literal entry names. Flashpoint launchCommands are
+/// URL-encoded but the zip stores literal paths (real spaces), so without this a
+/// game whose entry SWF has spaces ("Five Minutes to Kill Yourself.swf") never
+/// matches `launch_entry` -> we fall back to the WRONG swf (the first in the zip,
+/// often a character/asset stub, e.g. character_bear.swf) and the game shows a
+/// blank screen with a stray sprite. Only `%XX` is decoded; other bytes are kept
+/// verbatim ('+' is a literal '+' in a path, not a space).
+fn percent_decode(s: &str) -> std::string::String {
+    let b = s.as_bytes();
+    let mut out: std::vec::Vec<u8> = std::vec::Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(hi), Some(lo)) =
+                ((b[i + 1] as char).to_digit(16), (b[i + 2] as char).to_digit(16))
+            {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    std::string::String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Write `bytes` to `<files_dir>/<rel>` (rel is a forward-slash `content/`-
 /// relative path like `host/path/file.swf`), creating parent dirs. Best-effort.
 extern "C" {
@@ -225,7 +253,10 @@ pub fn extract_gamezip_tree(
     files_dir: &str,
     launch_command: &str,
 ) -> Option<(std::vec::Vec<u8>, std::string::String)> {
-    let launch_entry = launch_entry_from_command(launch_command);
+    // Decode the launch entry up front so it matches the zip's literal (decoded)
+    // entry names; the comparison below decodes each entry name too (robust to a
+    // zip that stores encoded names).
+    let launch_entry = launch_entry_from_command(launch_command).map(|e| percent_decode(&e));
     let mut first_swf: Option<(std::vec::Vec<u8>, std::string::String)> = None;
     let mut launch_swf: Option<(std::vec::Vec<u8>, std::string::String)> = None;
 
@@ -283,7 +314,7 @@ pub fn extract_gamezip_tree(
                 if name.to_ascii_lowercase().ends_with(".swf") {
                     let is_launch = launch_entry
                         .as_deref()
-                        .is_some_and(|le| name.eq_ignore_ascii_case(le));
+                        .is_some_and(|le| percent_decode(&name).eq_ignore_ascii_case(le));
                     // `name` is still borrowed by `rel` here, so clone it (the
                     // entry name is short) rather than moving.
                     if is_launch {
