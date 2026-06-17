@@ -51,14 +51,16 @@ pub fn swf_filename(title: &str) -> std::string::String {
 
 /// Build the db-api search URL for `name`. Split from `parse_search` so the
 /// Flashpoint game search can run through the async GET path (spinner) instead
-/// of blocking the UI on a synchronous HTTP. `filter=true` applies Flashpoint's
-/// default content filter (its "Filter entries" checkbox), excluding entries the
-/// archive flags as extreme — same default the cover search in flashpoint.rs uses.
-pub fn search_url(name: &str) -> std::string::String {
+/// of blocking the UI on a synchronous HTTP. `filter` maps to Flashpoint's
+/// content filter (its "Filter entries" checkbox): `true` (the default) excludes
+/// entries the archive flags as extreme — same default the cover search in
+/// flashpoint.rs uses. The importer can flip it to `false` (ZL+ZR in the results)
+/// to surface the mature-rated catalogue, matching the official launcher.
+pub fn search_url(name: &str, filter: bool) -> std::string::String {
     let q = net::url_encode_path(name.trim());
     std::format!(
-        "{}?smartSearch={}&platform=Flash&filter=true&fields=id,title,developer,publisher,releaseDate,zipped,launchCommand",
-        SEARCH_BASE, q
+        "{}?smartSearch={}&platform=Flash&filter={}&fields=id,title,developer,publisher,releaseDate,zipped,launchCommand",
+        SEARCH_BASE, q, filter
     )
 }
 

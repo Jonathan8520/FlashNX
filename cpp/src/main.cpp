@@ -455,6 +455,19 @@ static void worker_entry(void* arg) {
         // (no repeat) — see MENU_NAV_BUTTONS.repeat flags.
         menu_repeat_step(lib_repeat, kDownLib, kUpLib, kHeldLib,
                          now_lib, tick_freq_global, ruffle_library_input);
+        // Hidden ZL+ZR chord: emit one synthetic "ZL+ZR" event on the frame the
+        // pair completes (both held now, not both held before this frame's new
+        // presses). The library only acts on it in the Flashpoint results grid
+        // (toggle the content filter, issue #33); ZL/ZR are no-ops there on their
+        // own, so the individual events menu_repeat_step also forwarded are inert.
+        {
+            const u64 ZLZR = HidNpadButton_ZL | HidNpadButton_ZR;
+            const bool both_now  = (kHeldLib & ZLZR) == ZLZR;
+            const bool both_prev = ((kHeldLib & ~kDownLib) & ZLZR) == ZLZR;
+            if (both_now && !both_prev) {
+                ruffle_library_input("ZL+ZR");
+            }
+        }
         ruffle_library_render();
         gl_context_swap();
     }

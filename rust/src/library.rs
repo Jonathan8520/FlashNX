@@ -565,8 +565,8 @@ pub(crate) struct State {
     /// Currently-displayed history index in `Screen::DistantIdle`. Cycled
     /// with L/R. None when history is empty.
     pub(crate) history_idx: Option<usize>,
-    /// Active substring filter on the DistantFiles list (X = open swkbd
-    /// to set/edit; empty input = clear). Lowercase, substring match
+    /// Active substring filter on the DistantFiles list (Minus (-) = open
+    /// swkbd to set/edit; empty input = clear). Lowercase, substring match
     /// against the lowercased filename. `None` = no filter (show all).
     pub(crate) distant_filter: Option<std::string::String>,
     /// (selection, scroll_offset) snapshot taken when the user pressed A
@@ -584,8 +584,8 @@ pub(crate) struct State {
     /// takeover) — games can't be launched (OOM). Set in `open()`. Drives the
     /// `AppletNotice` screen shown instead of the embedded red SWF (P1c).
     applet_mode: bool,
-    /// Active substring filter on the LOCAL list (X = open swkbd to set/edit;
-    /// empty input = clear). Mirrors `distant_filter`: lowercase, substring
+    /// Active substring filter on the LOCAL list (Minus (-) = open swkbd to
+    /// set/edit; empty input = clear). Mirrors `distant_filter`: lowercase, substring
     /// match against the lowercased display name OR basename. `None` = show
     /// all. While set, `Screen::List` selection/scroll index the FILTERED
     /// view (see `local_filtered_indices`).
@@ -605,6 +605,12 @@ pub(crate) struct State {
     /// instead of drawing the (still-empty) cover grid. Avoids the UI freeze the
     /// old synchronous `gamezip::search` caused.
     fp_loading: bool,
+    /// Flashpoint content filter for the importer's game search (X). `true` =
+    /// Flashpoint's default "Filter entries" (hides mature-rated entries); the
+    /// hidden ZL+ZR chord in the results grid flips it and re-runs the query.
+    /// Session-only (not persisted) so every launch starts back on the safe
+    /// default — there's deliberately no settings row exposing it.
+    fp_content_filter: bool,
     /// Incremental companion-SWF download (multi-file game, v1.3.0). After the
     /// main GameZIP lands, each sibling SWF is pulled through the normal
     /// `https_download_*` path so it shows on the SAME progress bar ("LINKED
@@ -657,6 +663,7 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     cover_msg: std::string::String::new(),
     cover_query: std::string::String::new(),
     fp_loading: false,
+    fp_content_filter: true,
     dl_companion_active: false,
     dl_companion_base: std::string::String::new(),
     dl_companion_dir: std::string::String::new(),
@@ -1211,6 +1218,12 @@ pub fn input(button: &str) -> bool {
         if let Screen::FpGallery { selection, scroll } = screen_snap {
             if button == "Plus" {
                 run_fp_info_flow(selection, scroll);
+                return true;
+            }
+            // Hidden ZL+ZR chord (synthesised in main.cpp): toggle the content
+            // filter and re-run the query. Hoisted because it starts an async GET.
+            if button == "ZL+ZR" {
+                run_fp_filter_toggle_flow();
                 return true;
             }
         }
@@ -1876,11 +1889,11 @@ fn run_direct_download(url: &str) {
 /// Reuses `cover_candidates`/`cover_msg`/`cover_query` (the cover-picker state);
 /// pre-fills the keyboard with the last query so re-searching to refine is easy.
 fn run_fp_search_flow() {
-    let initial = LIBRARY
+    let (initial, filter) = LIBRARY
         .lock()
         .ok()
-        .map(|s| s.cover_query.clone())
-        .unwrap_or_default();
+        .map(|s| (s.cover_query.clone(), s.fp_content_filter))
+        .unwrap_or((std::string::String::new(), true));
     let Some(query) = net::prompt_search(&initial) else {
         return;
     };
@@ -1896,7 +1909,7 @@ fn run_fp_search_flow() {
     // Drop any thumbnail fetch still in flight from a previous gallery so the
     // isolated handle starts clean.
     crate::backend::render::thumb_cancel_all();
-    match net::start_get_async(&crate::sources::gamezip::search_url(&query)) {
+    match net::start_get_async(&crate::sources::gamezip::search_url(&query, filter)) {
         Ok(()) => {
             if let Ok(mut s) = LIBRARY.lock() {
                 s.cover_candidates = std::vec::Vec::new();
@@ -1911,6 +1924,49 @@ fn run_fp_search_flow() {
                 s.cover_candidates = std::vec::Vec::new();
                 s.cover_msg = e;
                 s.cover_query = query;
+                s.fp_loading = false;
+                s.screen = Screen::FpGallery { selection: 0, scroll: 0 };
+            }
+        }
+    }
+}
+
+/// Hidden ZL+ZR chord in the Flashpoint results grid: flip the session content
+/// filter and re-run the LAST query, no keyboard. Lets the importer reach the
+/// mature-rated catalogue (issue #33) without ever surfacing the option in
+/// RÉGLAGES. Hoisted from `input()` — `start_get_async` must run without the
+/// LIBRARY lock, mirroring `run_fp_search_flow`. No-op if a search is already in
+/// flight or nothing has been searched yet.
+fn run_fp_filter_toggle_flow() {
+    let (query, filter) = {
+        let Ok(mut s) = LIBRARY.lock() else { return };
+        if s.fp_loading {
+            return;
+        }
+        s.fp_content_filter = !s.fp_content_filter;
+        (s.cover_query.clone(), s.fp_content_filter)
+    };
+    if query.trim().is_empty() {
+        return;
+    }
+    log(&std::format!(
+        "library: flashpoint filter toggle -> filter={} (re-search \"{}\")\n",
+        filter, query
+    ));
+    crate::backend::render::thumb_cancel_all();
+    match net::start_get_async(&crate::sources::gamezip::search_url(&query, filter)) {
+        Ok(()) => {
+            if let Ok(mut s) = LIBRARY.lock() {
+                s.cover_candidates = std::vec::Vec::new();
+                s.cover_msg = std::string::String::new();
+                s.fp_loading = true;
+                s.screen = Screen::FpGallery { selection: 0, scroll: 0 };
+            }
+        }
+        Err(e) => {
+            if let Ok(mut s) = LIBRARY.lock() {
+                s.cover_candidates = std::vec::Vec::new();
+                s.cover_msg = e;
                 s.fp_loading = false;
                 s.screen = Screen::FpGallery { selection: 0, scroll: 0 };
             }
@@ -2039,9 +2095,9 @@ fn handle_distant_files_input(
             crate::backend::render::distant_reveal_begin_collapse();
             return;
         }
-        // X = handled at the top of `input()` (hoisted because swkbd
-        // is a synchronous fullscreen applet that mustn't run under
-        // the LIBRARY lock).
+        // Minus (-) = search, handled at the top of `input()` (hoisted because
+        // swkbd is a synchronous fullscreen applet that mustn't run under the
+        // LIBRARY lock).
         _ => {}
     }
     s.screen = Screen::DistantFiles { selection, scroll_offset: scroll };
@@ -3277,15 +3333,22 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                             s.entries.iter().any(|e| e.basename == name)
                         })
                         .collect();
-                    (titles, urls, installed, s.cover_msg.clone(), s.cover_query.clone())
+                    (titles, urls, installed, s.cover_msg.clone(), s.cover_query.clone(), s.fp_content_filter)
                 });
-                if let Some((titles, urls, installed, msg, query)) = snap {
+                if let Some((titles, urls, installed, msg, query, filter)) = snap {
                     let title_refs: std::vec::Vec<&str> =
                         titles.iter().map(|x| x.as_str()).collect();
                     let url_refs: std::vec::Vec<&str> = urls.iter().map(|x| x.as_str()).collect();
+                    // Footer's ZL+ZR hint shows the live filter state: the `{}`
+                    // placeholder in `fp_footer` becomes ON (filtered, default) or
+                    // OFF (mature catalogue revealed), so the chord's effect is
+                    // legible without an extra on-screen widget.
+                    let lc = crate::loc::s();
+                    let on_off = if filter { lc.lbl_on } else { lc.lbl_off };
+                    let footer = lc.fp_footer.replace("{}", on_off);
                     backend.draw_library_fp_gallery(
                         &query, selection, scroll, &title_refs, &url_refs, &installed, &msg,
-                        crate::loc::s().fp_title, crate::loc::s().fp_footer,
+                        lc.fp_title, &footer,
                     );
                 }
             }
@@ -3913,6 +3976,40 @@ fn on_download_finished() {
     // Record the source URL (direct .swf or archive.org file) next to the .swf,
     // for later bug-report attribution.
     write_url_sidecar(&out_path, &source_url);
+    // Best-effort auto-cover for archive.org / direct imports (issue #33): unlike
+    // Flashpoint downloads (which carry an exact cover_url), these have no cover,
+    // so search Flashpoint by name and cache the logo ONLY when the search returns
+    // EXACTLY ONE match -> a confident hit. 0 or several -> skip silently (the
+    // manual OPTIONS > JAQUETTE picker stays available). Concatenated filenames
+    // like "cactusmccoy_v2_1" usually return 0 and are left alone. Runs here with
+    // NO lock held (synchronous HTTPS, same as the manual cover flow); gated on
+    // the online-covers toggle. The cache key is the saved file's basename so it
+    // matches the library entry (download_file_name can differ after sanitizing).
+    if crate::loc::covers_online() {
+        let basename = std::path::Path::new(&out_path)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let query = cover_query_from_name(&basename);
+        if !basename.is_empty() && !query.is_empty() {
+            match crate::sources::flashpoint::search(&query) {
+                Ok(cands) if cands.len() == 1 => {
+                    let url = cands[0].cover_url.clone();
+                    match crate::covers::fetch_url_and_cache(&basename, &url) {
+                        Ok(p) => {
+                            log(&std::format!("library: auto-cover (single match) cached -> {}\n", p));
+                            crate::backend::render::invalidate_cover(&basename);
+                        }
+                        Err(e) => log(&std::format!("library: auto-cover fetch failed: {}\n", e)),
+                    }
+                }
+                Ok(cands) => log(&std::format!(
+                    "library: auto-cover skipped ({} match(es) for \"{}\")\n", cands.len(), query
+                )),
+                Err(e) => log(&std::format!("library: auto-cover search failed: {}\n", e)),
+            }
+        }
+    }
     if let Ok(mut s) = LIBRARY.lock() {
         s.download_file_name.clear();
         s.download_out_path.clear();
