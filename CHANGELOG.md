@@ -2,6 +2,25 @@
 
 Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://github.com/ruffle-rs/ruffle).
 
+## v1.3.1 (2026-06-19)
+
+Local two-player, a touch-driven launcher, and a batch of game fixes.
+
+### Added
+
+- **Local two-player (two controllers)**: a second controller now drives Player 2 through its own set of key bindings, for Flash games where two players share one keyboard (for example *Fireboy & Watergirl*, *Dragon Ball Z Devolution*). The controls editor has a Player 1 / Player 2 toggle (press X), and both players' keys are saved per game. Player 2 defaults to WASD so it does not clash with Player 1's arrows. Needs two full controllers (a Pro controller or a Joy-Con pair each). (#40)
+- **Touch controls in the launcher**: in handheld mode you can drag the game gallery to scroll, tap a game to select it, and tap it again to launch it.
+- **Flashpoint content filter toggle**: press ZL+ZR in the Flashpoint search results to turn the content filter on or off. Importing a game also fetches its cover automatically. (#33)
+- **Download of non-zipped Flashpoint games**: games served loose (not as a single archive) now download through the htdocs mirror. (#26)
+
+### Fixes
+
+- **Super Smash Flash**: the announcer now plays, and the game no longer freezes on a blank screen after a fight instead of showing COMPLETE. Its voices and most of its sound effects use the Nellymoser audio format, which was not enabled. (#29)
+- **No more crash when some games save**: a game saving a self-referential object (for example *Hemp Tycoon*) used to crash the app. The save now completes. (#33)
+- **Color speckle on translucent effects fixed**: semi-transparent effects (for example the smoke in *Offroaders*) showed cyan and magenta speckle. (#38)
+- **Flashpoint games with a space in their name now launch the right file** instead of the first one found in the archive.
+- **The "&" character now shows in the menus**: it was missing from the UI font, so titles like "Fireboy & Watergirl" dropped it.
+
 ## v1.3.0 (2026-06-14)
 
 A big one: multi-file games, Flashpoint downloads that actually start, an in-game keyboard, favorites, and a much more configurable control editor.
