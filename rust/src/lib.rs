@@ -967,6 +967,14 @@ pub extern "C" fn ruffle_library_input(button_name: *const c_char) -> c_int {
     if library::input(b) { 1 } else { 0 }
 }
 
+/// Forward the current touchscreen state to the JOUER gallery: drag to scroll,
+/// tap a tile to select it, tap the selected tile again to launch. `pressed`
+/// != 0 means a finger is down at `(x, y)` in screen px; 0 means no touch.
+#[no_mangle]
+pub extern "C" fn ruffle_library_touch(x: f32, y: f32, pressed: c_int) {
+    library::touch(x, y, pressed != 0);
+}
+
 /// Render one library frame to the current GL framebuffer. C++ calls
 /// `gl_context_swap` afterwards.
 #[no_mangle]

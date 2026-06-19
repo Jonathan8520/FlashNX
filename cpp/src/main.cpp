@@ -20,6 +20,7 @@ extern "C" void ruffle_library_open(void);
 extern "C" int  ruffle_library_active(void);
 extern "C" int  ruffle_library_picked(void);
 extern "C" int  ruffle_library_input(const char* button_name);
+extern "C" void ruffle_library_touch(float x, float y, int pressed);
 extern "C" void ruffle_library_render(void);
 extern "C" int  ruffle_library_selected_path(char* out, int cap);
 extern "C" void ruffle_library_shutdown(void);
@@ -468,6 +469,13 @@ static void worker_entry(void* arg) {
                 ruffle_library_input("ZL+ZR");
             }
         }
+        // Touchscreen: drag to scroll the JOUER gallery, tap a game to select,
+        // tap the selected game again to launch. Rust owns the gesture logic.
+        hidGetTouchScreenStates(&touch_state, 1);
+        const bool lib_touch = touch_state.count > 0;
+        const float lib_tx = lib_touch ? (float)touch_state.touches[0].x : 0.0f;
+        const float lib_ty = lib_touch ? (float)touch_state.touches[0].y : 0.0f;
+        ruffle_library_touch(lib_tx, lib_ty, lib_touch ? 1 : 0);
         ruffle_library_render();
         gl_context_swap();
     }

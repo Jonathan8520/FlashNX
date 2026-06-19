@@ -1051,6 +1051,127 @@ pub fn reset() {
 }
 
 /// Forward a Switch-button down-edge from C++. Returns true if consumed.
+/// Touch gesture state for the JOUER gallery. Process-wide; only the List
+/// screen is touch-driven. Lock order is always TOUCH then LIBRARY.
+struct TouchState {
+    /// A finger was down on the previous `touch` call.
+    down: bool,
+    /// Down position (screen px). For a tap this is also the lift position.
+    start_x: f32,
+    start_y: f32,
+    /// True once the finger moved past the drag threshold this gesture.
+    dragging: bool,
+    /// Eased scroll (px) captured when the drag began.
+    start_scroll_px: f32,
+}
+
+static TOUCH: Mutex<TouchState> = Mutex::new(TouchState {
+    down: false,
+    start_x: 0.0,
+    start_y: 0.0,
+    dragging: false,
+    start_scroll_px: 0.0,
+});
+
+/// Forward the per-frame touchscreen state to the JOUER gallery: drag to scroll,
+/// tap a tile to select it, tap the already-selected tile again to launch it.
+/// `(x, y)` are screen px; `pressed` is whether a finger is down this frame.
+/// No-op on every other screen (those stay button-driven).
+pub fn touch(x: f32, y: f32, pressed: bool) {
+    use crate::backend::render as r;
+    // Movement (px) before a press is treated as a drag instead of a tap.
+    const DRAG_THRESH: f32 = 16.0;
+
+    let on_list = matches!(LIBRARY.lock().map(|s| s.screen), Ok(Screen::List { .. }));
+
+    let mut t = match TOUCH.lock() {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+
+    // Off the gallery: cancel any in-flight gesture and drop the scroll override.
+    if !on_list {
+        if t.down {
+            r::gallery_touch_scroll_set(None);
+        }
+        t.down = false;
+        t.dragging = false;
+        return;
+    }
+
+    let (scroll_px, pitch, band_top, band_bot, rows_total, rows_visible) = r::gallery_view_read();
+    let max_scroll_px = (rows_total.saturating_sub(rows_visible)) as f32 * pitch;
+
+    // Finger down: begin a gesture only inside the gallery band.
+    if pressed && !t.down {
+        if y >= band_top && y <= band_bot {
+            t.down = true;
+            t.dragging = false;
+            t.start_x = x;
+            t.start_y = y;
+            t.start_scroll_px = scroll_px;
+        }
+        return;
+    }
+
+    // Finger held: promote to a drag past the threshold, then track 1:1.
+    if pressed && t.down {
+        let dx = x - t.start_x;
+        let dy = y - t.start_y;
+        if !t.dragging && (dx * dx + dy * dy) > DRAG_THRESH * DRAG_THRESH {
+            t.dragging = true;
+        }
+        if t.dragging {
+            // Drag down (dy > 0) pulls earlier rows into view (scroll decreases).
+            let px = (t.start_scroll_px - dy).clamp(0.0, max_scroll_px);
+            r::gallery_touch_scroll_set(Some(px));
+        }
+        return;
+    }
+
+    // Finger up.
+    if t.down {
+        t.down = false;
+        if t.dragging {
+            t.dragging = false;
+            // Snap the discrete row offset to wherever the drag left the view,
+            // then release the override so the glide settles onto that row.
+            let new_off = if pitch > 0.0 {
+                (scroll_px / pitch).round() as usize
+            } else {
+                0
+            };
+            let max_off = rows_total.saturating_sub(rows_visible) as usize;
+            let new_off = new_off.min(max_off);
+            if let Ok(mut s) = LIBRARY.lock() {
+                if let Screen::List { selection, .. } = s.screen {
+                    s.screen = Screen::List { selection, scroll_offset: new_off };
+                }
+            }
+            r::gallery_touch_scroll_set(None);
+        } else if let Some(hit) = r::gallery_hit_test(t.start_x, t.start_y) {
+            // Tap: first tap on a tile selects it; tapping the already-selected
+            // tile launches it (reuse the A-press path for the reveal animation).
+            let mut launch = false;
+            if let Ok(mut s) = LIBRARY.lock() {
+                if let Screen::List { selection, scroll_offset } = s.screen {
+                    if hit == selection {
+                        launch = true;
+                    } else {
+                        s.screen = Screen::List { selection: hit, scroll_offset };
+                    }
+                }
+            }
+            if launch {
+                // input("A") re-locks LIBRARY: drop TOUCH first to keep the
+                // TOUCH-then-LIBRARY order and avoid any re-entrancy.
+                drop(t);
+                input("A");
+            }
+        }
+    }
+}
+
 pub fn input(button: &str) -> bool {
     // Suspend input during a close-out / reveal transition (brief) so screens
     // can't be re-navigated mid-animation; the deferred swap lands in render()

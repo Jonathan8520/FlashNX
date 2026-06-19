@@ -2464,6 +2464,13 @@ fn truncate_mid(s: &str, max_chars: usize) -> std::string::String {
 pub struct GalleryCell {
     pub row: u32,
     pub cx: f32,
+    /// Content-space tile rect for touch hit-testing. `x`/`w` are screen px;
+    /// `y` is PRE vertical scroll, so screen y = `y - scroll_px` (read the live
+    /// `scroll_px` from `gallery_view_read`).
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
 }
 
 fn gallery_cache() -> &'static std::sync::Mutex<(std::vec::Vec<GalleryCell>, u32)> {
@@ -2489,6 +2496,75 @@ fn gallery_sel_rect() -> &'static std::sync::Mutex<(f32, f32, f32, f32)> {
 /// The selected tile's last-rendered screen rect (for the launch/quit reveal).
 pub fn gallery_sel_rect_read() -> (f32, f32, f32, f32) {
     gallery_sel_rect().lock().map(|r| *r).unwrap_or((0.0, 0.0, 0.0, 0.0))
+}
+
+/// Live JOUER gallery viewport metrics, published each frame for the touch
+/// layer: `(scroll_px, pitch, band_top, band_bot, rows_total, rows_visible)`.
+#[derive(Clone, Copy, Default)]
+struct GalleryView {
+    scroll_px: f32,
+    pitch: f32,
+    band_top: f32,
+    band_bot: f32,
+    rows_total: u32,
+    rows_visible: u32,
+}
+
+fn gallery_view() -> &'static std::sync::Mutex<GalleryView> {
+    static V: std::sync::Mutex<GalleryView> = std::sync::Mutex::new(GalleryView {
+        scroll_px: 0.0,
+        pitch: 0.0,
+        band_top: 0.0,
+        band_bot: 0.0,
+        rows_total: 0,
+        rows_visible: 0,
+    });
+    &V
+}
+
+/// Read the last-rendered gallery viewport metrics (see `GalleryView`). All
+/// zero before the first gallery frame, so the touch layer no-ops until then.
+pub fn gallery_view_read() -> (f32, f32, f32, f32, u32, u32) {
+    gallery_view()
+        .lock()
+        .map(|v| (v.scroll_px, v.pitch, v.band_top, v.band_bot, v.rows_total, v.rows_visible))
+        .unwrap_or_default()
+}
+
+/// Touch-drag scroll override. `Some(px)` makes the gallery use this exact pixel
+/// scroll (1:1 finger tracking) instead of easing toward the row offset; cleared
+/// to `None` on finger release so the glide resumes and settles onto a row.
+fn gallery_touch_scroll() -> &'static std::sync::Mutex<Option<f32>> {
+    static T: std::sync::Mutex<Option<f32>> = std::sync::Mutex::new(None);
+    &T
+}
+
+pub fn gallery_touch_scroll_set(v: Option<f32>) {
+    if let Ok(mut t) = gallery_touch_scroll().lock() {
+        *t = v;
+    }
+}
+
+fn gallery_touch_scroll_read() -> Option<f32> {
+    gallery_touch_scroll().lock().map(|t| *t).unwrap_or(None)
+}
+
+/// Hit-test a screen-space point against the last-rendered JOUER gallery.
+/// Returns the tile index (filtered order, same space as `selection`) under the
+/// point, or `None`. Used by the touch layer for tap-to-select / tap-to-launch.
+pub fn gallery_hit_test(px: f32, py: f32) -> Option<usize> {
+    let (cells, _rows) = gallery_layout_read();
+    let (scroll_px, _pitch, band_top, band_bot, _rt, _rv) = gallery_view_read();
+    if py < band_top || py > band_bot {
+        return None;
+    }
+    for (i, c) in cells.iter().enumerate() {
+        let sy = c.y - scroll_px;
+        if px >= c.x && px <= c.x + c.w && py >= sy && py <= sy + c.h {
+            return Some(i);
+        }
+    }
+    None
 }
 
 /// Eased visual state for the JOUER gallery (v1.2.0 polish). The input layer
@@ -5686,7 +5762,14 @@ impl SwitchRenderBackend {
             let row = (idx / COLS) as u32;
             let x = LEFT + col as f32 * (cell_w + GAP_X);
             tiles.push((cover, x, cell_w, row));
-            cells.push(GalleryCell { row, cx: x + cell_w * 0.5 });
+            cells.push(GalleryCell {
+                row,
+                cx: x + cell_w * 0.5,
+                x,
+                y: TOP + row as f32 * pitch,
+                w: cell_w,
+                h: ROW_IMG_H,
+            });
         }
         let rows_total = if total == 0 { 0 } else { ((total + COLS - 1) / COLS) as u32 };
         // Publish layout for input-side 2D navigation.
@@ -5723,6 +5806,7 @@ impl SwitchRenderBackend {
         let mut frame_y = target_sel_y;
         let mut frame_w = target_sel_w;
         let mut pop = 0.0f32;
+        let touch_scroll = gallery_touch_scroll_read();
         if let Ok(mut a) = gallery_anim().lock() {
             let now = phase_ticks;
             if !a.inited {
@@ -5752,6 +5836,11 @@ impl SwitchRenderBackend {
                 a.scroll_px = ease_to(a.scroll_px, target_scroll, dt, 16.0);
                 a.pop = ease_to(a.pop, 0.0, dt, 12.0);
             }
+            // Touch drag overrides the eased scroll with 1:1 finger tracking
+            // (cleared to None on release, so the glide then settles onto a row).
+            if let Some(px) = touch_scroll {
+                a.scroll_px = px;
+            }
             scroll_px = a.scroll_px;
             frame_x = a.sel_x;
             frame_y = a.sel_y;
@@ -5766,6 +5855,18 @@ impl SwitchRenderBackend {
             if let Ok(mut r) = gallery_sel_rect().lock() {
                 *r = (target_sel_x, sel_y, target_sel_w, ROW_IMG_H);
             }
+        }
+
+        // Publish viewport metrics for the touch layer (drag-scroll + hit-test).
+        if let Ok(mut v) = gallery_view().lock() {
+            *v = GalleryView {
+                scroll_px,
+                pitch,
+                band_top,
+                band_bot,
+                rows_total,
+                rows_visible: rows_visible as u32,
+            };
         }
 
         // Clip to the gallery band. GL scissor is bottom-left origin while our
