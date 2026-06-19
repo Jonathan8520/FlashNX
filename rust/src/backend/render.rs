@@ -4797,6 +4797,7 @@ impl SwitchRenderBackend {
         scroll_offset: usize,
         bindings: &[(&str, Option<std::string::String>)],
         visible_rows: usize,
+        player: u8,
     ) {
         unsafe {
             glEnable(GL_BLEND);
@@ -4836,6 +4837,19 @@ impl SwitchRenderBackend {
             TITLE_SCALE,
             title,
             swf::Color::from_rgb(0xFFFFFF, 255),
+        );
+
+        // Player indicator (issue #40): which player's bindings are shown. X
+        // toggles P1/P2 (see the footer hint + menu::handle_list_input).
+        let pstr = if player == 2 { "P2" } else { "P1" };
+        const PLAYER_SCALE: f32 = 3.0;
+        let pw = self.measure_text(pstr, PLAYER_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - pw) * 0.5,
+            panel_y + 80.0,
+            PLAYER_SCALE,
+            pstr,
+            swf::Color::from_rgb(0xFFD740, 255),
         );
 
         // Rows.

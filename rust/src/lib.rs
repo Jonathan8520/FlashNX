@@ -325,7 +325,7 @@ pub extern "C" fn ruffle_init() -> c_int {
         .rsplit('/')
         .next()
         .unwrap_or("unknown.swf");
-    keymap::init_for_swf(basename);
+    keymap::init_for_swf(basename); // loads P1 + P2 bindings (issue #40) from one file
 
     match SwfMovie::from_data(&movie_bytes, source_label.clone(), None) {
         Ok(movie) => {
@@ -806,6 +806,21 @@ pub extern "C" fn ruffle_keymap_lookup(name: *const c_char) -> c_int {
         return SK_NONE;
     };
     keymap::lookup(button).unwrap_or(SK_NONE)
+}
+
+/// Player-2 (issue #40) equivalent of [`ruffle_keymap_lookup`]: resolve a
+/// controller-2 button name to its Flash `SK_*` code via the P2 keymap.
+#[no_mangle]
+pub extern "C" fn ruffle_keymap_lookup_p2(name: *const c_char) -> c_int {
+    if name.is_null() {
+        return SK_NONE;
+    }
+    // SAFETY: caller guarantees NUL-terminated UTF-8.
+    let s = unsafe { core::ffi::CStr::from_ptr(name) };
+    let Ok(button) = s.to_str() else {
+        return SK_NONE;
+    };
+    keymap::lookup_p2(button).unwrap_or(SK_NONE)
 }
 
 // ── TOUCHES sub-screen FFI ────────────────────────────────────────────────

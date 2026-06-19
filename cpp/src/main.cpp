@@ -36,6 +36,7 @@ extern "C" void ruffle_menu_close_begin(void);
 extern "C" int  ruffle_draw_menu_closing(int selected);
 extern "C" int  ruffle_restart(void);
 extern "C" int  ruffle_keymap_lookup(const char* button_name);
+extern "C" int  ruffle_keymap_lookup_p2(const char* button_name);
 extern "C" void ruffle_touches_open(void);
 extern "C" void ruffle_touches_close(void);
 extern "C" int  ruffle_touches_active(void);
@@ -121,6 +122,10 @@ static ButtonBinding BINDINGS[] = {
     { "StickRPress",  HidNpadButton_StickR,        SK_NONE },
 };
 static constexpr size_t BINDINGS_COUNT = sizeof(BINDINGS) / sizeof(BINDINGS[0]);
+
+// Player 2 (issue #40): resolved Flash key per BINDINGS entry for controller 2,
+// via the P2 keymap. Same buttons/masks as BINDINGS, different keys.
+static int BINDINGS_P2_KEYS[BINDINGS_COUNT];
 
 // True when the user bound any StickR* DIRECTION (not the press): the right stick
 // then acts as a d-pad (its key bindings fire) instead of moving the mouse
@@ -238,6 +243,7 @@ static void menu_repeat_step(
 static void populate_bindings_from_keymap(void) {
     for (size_t i = 0; i < BINDINGS_COUNT; ++i) {
         BINDINGS[i].key = ruffle_keymap_lookup(BINDINGS[i].name);
+        BINDINGS_P2_KEYS[i] = ruffle_keymap_lookup_p2(BINDINGS[i].name); // #40
     }
     // Right stick = d-pad as soon as any StickR* DIRECTION is bound; otherwise it
     // stays the mouse cursor in-game. "StickRPress" (n[6]=='P') is excluded — the
@@ -408,8 +414,15 @@ static void worker_entry(void* arg) {
     // screen and the in-game loop share one PadState instance. Pad config
     // doesn't change between the two phases.
     PadState pad;
-    padConfigureInput(1, HidNpadStyleSet_NpadStandard);
+    padConfigureInput(2, HidNpadStyleSet_NpadStandard); // up to 2 players (issue #40)
     padInitializeDefault(&pad);
+    // Player 2 controller (issue #40). Idle / absent = no input, so single-player
+    // is unaffected. Local 2-player Flash games (e.g. DBZ Devolution) read two
+    // key-sets on one keyboard; controller 2 feeds the P2 keymap into the same
+    // ruffle_handle_key pipeline. Needs two full controllers (Pro / dual Joy-Con);
+    // one Joy-Con each would need extra style flags (follow-up).
+    PadState pad2;
+    padInitializeWithMask(&pad2, 1UL << HidNpadIdType_No2);
 
     hidInitializeTouchScreen();
     HidTouchScreenState touch_state = {0};
@@ -573,6 +586,12 @@ static void worker_entry(void* arg) {
         const u64 kDown = padGetButtonsDown(&pad);
         const u64 kUp   = padGetButtonsUp(&pad);
         const u64 kHeld = padGetButtons(&pad);
+        // Player 2 controller (issue #40). Read every frame; only acted on
+        // during gameplay (not in the pause menu / sub-screens).
+        padUpdate(&pad2);
+        const u64 kDown2 = padGetButtonsDown(&pad2);
+        const u64 kUp2   = padGetButtonsUp(&pad2);
+        const u64 kHeld2 = padGetButtons(&pad2);
 
         if (++boost_reassert >= 30) {
             boost_reassert = 0;
@@ -690,6 +709,12 @@ static void worker_entry(void* arg) {
             for (const auto& b : BINDINGS) {
                 if (kHeld & b.mask) ruffle_handle_key(b.key, false);
             }
+            // Same for player 2's held keys (issue #40).
+            for (size_t i = 0; i < BINDINGS_COUNT; ++i) {
+                if ((kHeld2 & BINDINGS[i].mask) && BINDINGS_P2_KEYS[i] != SK_NONE) {
+                    ruffle_handle_key(BINDINGS_P2_KEYS[i], false);
+                }
+            }
             continue;
         }
 
@@ -709,6 +734,17 @@ static void worker_entry(void* arg) {
                 if (dn) ruffle_handle_key(b.key, true);
                 if (up) ruffle_handle_key(b.key, false);
             }
+        }
+
+        // Player 2 (issue #40): a 2nd controller drives the same key pipeline
+        // through the P2 keymap. No cursor / mouse / pause for P2 (one cursor,
+        // and P1 owns the menu), so we only emit key down/up here.
+        for (size_t i = 0; i < BINDINGS_COUNT; ++i) {
+            const int k = BINDINGS_P2_KEYS[i];
+            if (k == SK_NONE || k == SK_MOUSE_LEFT || k == SK_MOUSE_RIGHT) continue;
+            const u64 mask = BINDINGS[i].mask;
+            if (kDown2 & mask) ruffle_handle_key(k, true);
+            if (kUp2   & mask) ruffle_handle_key(k, false);
         }
 
         // Right analog stick → cursor movement — UNLESS the user remapped the

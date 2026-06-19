@@ -34,7 +34,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Keymap {
     pub version: u32,
+    /// Player 1 (controller 1) bindings.
     pub bindings: BTreeMap<std::string::String, std::string::String>,
+    /// Player 2 (controller 2) bindings for local 2-player (issue #40), in the
+    /// SAME file. `#[serde(default)]` so pre-#40 keymaps still load (an absent /
+    /// empty map gets the P2 defaults via `merge_fallback_defaults_p2`).
+    #[serde(default)]
+    pub bindings_p2: BTreeMap<std::string::String, std::string::String>,
 }
 
 /// Hardcoded fallback baked into the .nro. Mirrors what `cpp/src/main.cpp`
@@ -133,7 +139,11 @@ fn fallback_keymap() -> Keymap {
     for (btn, key) in FALLBACK_BINDINGS {
         bindings.insert((*btn).into(), (*key).into());
     }
-    Keymap { version: 1, bindings }
+    Keymap {
+        version: 1,
+        bindings,
+        bindings_p2: p2_default_bindings(),
+    }
 }
 
 /// Fill in the FALLBACK default for any button the loaded keymap doesn't mention
@@ -295,6 +305,7 @@ pub fn init_for_swf(swf_basename: &str) {
     // Backfill defaults for buttons this keymap predates (e.g. ZR/ZL clicks on a
     // sidecar saved before they were editable), so the editor and behaviour agree.
     merge_fallback_defaults(&mut km);
+    merge_fallback_defaults_p2(&mut km); // issue #40: ensure P2 has working defaults
 
     if let Ok(mut g) = ACTIVE_BASENAME.lock() {
         *g = Some(swf_basename.into());
@@ -323,6 +334,7 @@ pub fn init_for_global_default() {
         km
     };
     merge_fallback_defaults(&mut km);
+    merge_fallback_defaults_p2(&mut km); // issue #40: ensure P2 has working defaults
     if let Ok(mut g) = ACTIVE_BASENAME.lock() {
         *g = Some(GLOBAL_SENTINEL.into());
     }
@@ -342,15 +354,16 @@ pub fn reset() {
     if let Ok(mut g) = ACTIVE_BASENAME.lock() {
         *g = None;
     }
+    set_edit_player(1);
 }
 
 /// Current binding for `button` (e.g. "A"), or `None` if unbound. Caller
 /// gets an owned String to avoid holding the Mutex across UI work.
 pub fn current_binding(button: &str) -> Option<std::string::String> {
     let g = ACTIVE_KEYMAP.lock().ok()?;
-    g.as_ref()?
-        .bindings
-        .get(button)
+    let km = g.as_ref()?;
+    let map = if edit_player() == 2 { &km.bindings_p2 } else { &km.bindings };
+    map.get(button)
         .filter(|v| !v.is_empty()) // "" = explicitly unbound (see set_binding)
         .cloned()
 }
@@ -366,16 +379,17 @@ pub fn set_binding(button: &str, flash_key: Option<&str>) -> bool {
             Err(_) => return false,
         };
         let Some(km) = g.as_mut() else { return false };
+        let map = if edit_player() == 2 { &mut km.bindings_p2 } else { &mut km.bindings };
         match flash_key {
             Some(k) => {
-                km.bindings.insert(button.into(), k.into());
+                map.insert(button.into(), k.into());
             }
             None => {
                 // Store an explicit empty marker instead of removing the key, so
                 // a deliberate unbind survives the default-merge on the next load
                 // (an ABSENT button gets its fallback default; an empty one stays
                 // off). See merge_fallback_defaults.
-                km.bindings.insert(button.into(), std::string::String::new());
+                map.insert(button.into(), std::string::String::new());
             }
         }
     }
@@ -456,6 +470,82 @@ pub fn lookup(button_name: &str) -> Option<core::ffi::c_int> {
     let key_name = km.bindings.get(button_name)?;
     if key_name.is_empty() {
         return Some(crate::SK_NONE); // "" = explicitly unbound
+    }
+    Some(flash_key_name_to_sk(key_name))
+}
+
+// ─── Player 2 keymap (issue #40, local 2-player) ────────────────────────────
+// Flash "2-player" is just two key-sets on one keyboard, so a SECOND controller
+// feeds the SAME `ruffle_handle_key` pipeline through a separate set of bindings.
+// These live in the SAME keymap file as P1, under `bindings_p2` (one keymap per
+// game), and are edited via the TOUCHES editor's P1/P2 toggle (X). Controller 2
+// idle / absent = no input, so single-player is unaffected.
+//
+// Default movement = WASD, NOT arrows: P1's default movement is arrows, so
+// P1 (arrows) + P2 (WASD) don't collide — the standard 2-player co-op layout
+// (e.g. Fireboy & Watergirl: Fireboy = arrows, Watergirl = WASD). For games
+// where P2 uses arrows instead (e.g. DBZ Devolution P2 = arrows + 1-6), switch
+// the editor to JOUEUR 2 (X) and remap.
+pub const FALLBACK_BINDINGS_P2: &[(&str, &str)] = &[
+    ("Left", "A"),
+    ("Right", "D"),
+    ("Up", "W"),
+    ("Down", "S"),
+    ("StickLLeft", "A"),
+    ("StickLRight", "D"),
+    ("StickLUp", "W"),
+    ("StickLDown", "S"),
+    // Action buttons -> digits (covers P2 attack keys in many 2-player fighters).
+    ("A", "1"),
+    ("B", "2"),
+    ("X", "3"),
+    ("Y", "4"),
+    ("R", "5"),
+    ("L", "6"),
+];
+
+fn p2_default_bindings() -> BTreeMap<std::string::String, std::string::String> {
+    let mut m = BTreeMap::new();
+    for (btn, key) in FALLBACK_BINDINGS_P2 {
+        m.insert((*btn).into(), (*key).into());
+    }
+    m
+}
+
+/// Backfill P2 defaults for any P2 button the loaded keymap doesn't mention, so
+/// pre-#40 files (no `bindings_p2`) and partial maps still get a working P2.
+fn merge_fallback_defaults_p2(km: &mut Keymap) {
+    for (btn, key) in FALLBACK_BINDINGS_P2 {
+        km.bindings_p2
+            .entry((*btn).into())
+            .or_insert_with(|| (*key).into());
+    }
+}
+
+/// Which player the TOUCHES editor is currently editing (1 or 2). In-game input
+/// is always resolved per-player (`lookup` = P1, `lookup_p2` = P2); this only
+/// steers the editor's `current_binding` / `set_binding` to the right map.
+static EDIT_PLAYER: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
+
+pub fn edit_player() -> u8 {
+    EDIT_PLAYER.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_edit_player(player: u8) {
+    EDIT_PLAYER.store(
+        if player == 2 { 2 } else { 1 },
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// Player-2 equivalent of [`lookup`]: resolve a controller-2 button to its Flash
+/// `SK_*` code via the `bindings_p2` map of the active keymap.
+pub fn lookup_p2(button_name: &str) -> Option<core::ffi::c_int> {
+    let g = ACTIVE_KEYMAP.lock().ok()?;
+    let km = g.as_ref()?;
+    let key_name = km.bindings_p2.get(button_name)?;
+    if key_name.is_empty() {
+        return Some(crate::SK_NONE);
     }
     Some(flash_key_name_to_sk(key_name))
 }

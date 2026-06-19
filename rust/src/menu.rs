@@ -65,6 +65,8 @@ pub fn is_active() -> bool {
 }
 
 pub fn open() {
+    // Always start on Player 1 (issue #40); X toggles to Player 2 in the list.
+    keymap::set_edit_player(1);
     if let Ok(mut s) = TOUCHES.lock() {
         s.screen = Screen::List { selection: 0, scroll_offset: 0 };
     }
@@ -119,6 +121,12 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
         "Down" | "StickLDown" => {
             selection = if selection >= last { 0 } else { selection + 1 };
             scroll = clamp_scroll(scroll, selection);
+        }
+        "X" => {
+            // Toggle which player's bindings we're editing (issue #40). The
+            // list re-reads `current_binding` (player-aware) on the next draw,
+            // so the rows immediately show the other player's bindings.
+            keymap::set_edit_player(if keymap::edit_player() == 2 { 1 } else { 2 });
         }
         "A" => {
             // Open dropdown for this row. Pre-select the current binding
@@ -233,7 +241,7 @@ pub fn draw(backend: &mut SwitchRenderBackend) {
                 .iter()
                 .map(|btn| (*btn, keymap::current_binding(btn)))
                 .collect();
-            backend.draw_touches_list(selection, scroll_offset, &bindings, LIST_VISIBLE_ROWS);
+            backend.draw_touches_list(selection, scroll_offset, &bindings, LIST_VISIBLE_ROWS, keymap::edit_player());
         }
         Screen::Dropdown { button_idx, selection, scroll_offset } => {
             let btn = keymap::EDITABLE_BUTTONS[button_idx];
