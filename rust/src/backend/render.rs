@@ -1217,6 +1217,13 @@ pub struct SwitchRenderBackend {
     /// commands into a cache texture. Commands are pre-shifted by Ruffle to
     /// target-local coords, so no origin offset is needed.
     offscreen_dims: Option<(u32, u32)>,
+    /// The GL texture currently attached to `offscreen_fbo` while replaying
+    /// commands into it (set alongside `offscreen_dims`). A nested trivial blend
+    /// (Add/Subtract/Screen inside a BitmapData.draw / cache render) needs this
+    /// to RE-ATTACH the outer target after rendering its group into a pooled
+    /// temp — the temp render detaches the colour attachment, so without this we
+    /// couldn't composite the blended group back onto the enclosing offscreen.
+    offscreen_target_tex: Option<GLuint>,
     /// Global pixel translation folded into `world_matrix` for the LIBRARY UI
     /// only (v1.2.0 polish). Lets `library::render` slide a whole screen's
     /// content for tab transitions / modal pops without every draw call knowing
@@ -3189,6 +3196,7 @@ impl SwitchRenderBackend {
             index_arena,
             shape_vao,
             offscreen_dims: None,
+            offscreen_target_tex: None,
             ui_translate_x: 0.0,
             ui_translate_y: 0.0,
             ui_scale: 1.0,
@@ -3354,12 +3362,15 @@ impl SwitchRenderBackend {
         let prev_mask = self.mask;
         self.mask = MaskState::default();
         let prev_offscreen = self.offscreen_dims;
+        let prev_target_tex = self.offscreen_target_tex;
         self.offscreen_dims = Some((tex_w, tex_h));
+        self.offscreen_target_tex = Some(tex);
         self.gl_state.invalidate();
 
         commands.execute(self);
 
         self.offscreen_dims = prev_offscreen;
+        self.offscreen_target_tex = prev_target_tex;
         self.mask = prev_mask;
         unsafe {
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
@@ -3577,14 +3588,18 @@ impl SwitchRenderBackend {
     }
 
     /// Read an (x, y, w, h) sub-rect of `tex` back into a CPU RGBA buffer with
-    /// STRAIGHT alpha. `tex` is one of our offscreen renders (premultiplied,
+    /// PREMULTIPLIED alpha. `tex` is one of our offscreen renders (premultiplied,
     /// texel row 0 = Flash top): attach it to the shared offscreen FBO,
-    /// `glReadPixels` (row 0 = y=0 = texel row 0 = top — no Y-flip, exactly what
-    /// BitmapData CPU pixels and atlas uploads both expect), then un-premultiply.
-    /// Saves/restores the bound FBO since this runs during AS execution, not
-    /// inside our frame render. Buffer stride = w*4, row 0 = the region's y_min.
-    /// Shared by `resolve_sync_handle` (copyPixels readback) and
-    /// `render_offscreen` (repatriating draw() into an atlas-backed handle).
+    /// `glReadPixels` (row 0 = y=0 = texel row 0 = top — no Y-flip), and hand the
+    /// bytes back unchanged. Ruffle's BitmapData CPU pixels are PREMULTIPLIED
+    /// (`copy_pixels_to_bitmapdata` stores whatever resolve_sync_handle returns
+    /// verbatim, and wgpu's `capture` returns the raw premultiplied GPU bytes —
+    /// only image *export* un-multiplies), so we must NOT un-premultiply here. An
+    /// earlier `rgb/a` divide returned straight: a no-op for opaque pixels
+    /// (a=255, premult==straight — why tile engines worked) but for translucent
+    /// content the divide snapped low-alpha colours to channel extremes →
+    /// offroaders' cyan/magenta particle-smoke speckle. Saves/restores the bound
+    /// FBO since this runs during AS execution. Buffer stride = w*4, row 0 = y_min.
     fn readback_region_straight(&mut self, tex: GLuint, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
         let mut buf = vec![0u8; (w as usize) * (h as usize) * 4];
         if w == 0 || h == 0 {
@@ -3612,17 +3627,7 @@ impl SwitchRenderBackend {
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
             glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo as GLuint);
         }
-        // The offscreen blend accumulates PREMULTIPLIED alpha; straight-alpha
-        // consumers (BitmapData CPU pixels, atlas slots) need un-premultiply —
-        // a no-op for opaque pixels (a=255), the common tile-engine case.
-        for px in buf.chunks_exact_mut(4) {
-            let a = px[3] as u32;
-            if a != 0 && a != 255 {
-                px[0] = ((px[0] as u32 * 255) / a).min(255) as u8;
-                px[1] = ((px[1] as u32 * 255) / a).min(255) as u8;
-                px[2] = ((px[2] as u32 * 255) / a).min(255) as u8;
-            }
-        }
+        // Premultiplied already — return verbatim (no divide).
         buf
     }
 
@@ -8543,9 +8548,9 @@ impl RenderBackend for SwitchRenderBackend {
         let _pt = PrimTimer::new(&PRIM_RESOLVE_CUR);
         // The only sync handles we produce are `BitmapDataSyncHandle` (from
         // BitmapData.draw()). Read the rendered dirty region back from its temp
-        // texture (straight alpha) and hand it to Ruffle's copy closure. This is
-        // the same readback `render_offscreen` now uses to repatriate the result
-        // into an atlas-backed handle for direct-display games.
+        // texture (PREMULTIPLIED — Ruffle's BitmapData CPU pixels are
+        // premultiplied, matching wgpu's raw GPU readback) and hand it to
+        // Ruffle's copy closure.
         let sh = Box::<dyn Any>::downcast::<BitmapDataSyncHandle>(handle)
             .map_err(|_| Error::Unimplemented("resolve_sync_handle: unknown handle".into()))?;
         self.resolve_sync_calls = self.resolve_sync_calls.wrapping_add(1);
@@ -8960,15 +8965,15 @@ impl CommandHandler for SwitchRenderBackend {
             }
         };
 
-        // Nested inside another offscreen render (cache entry / outer blend /
-        // mask)? Our single shared offscreen FBO can't recurse without
-        // corrupting the outer target's color attachment, so degrade to a plain
-        // inline (Normal) composite. Top-level blends (the common case) run the
-        // full path below.
-        if self.offscreen_dims.is_some() {
-            commands.execute(self);
-            return;
-        }
+        // NOTE: the trivial Add/Subtract/Screen path below now runs even when
+        // nested inside another offscreen render (a BitmapData.draw with a
+        // blendMode, e.g. offroaders' boost trail: `screenBD.draw(carEffectBD,
+        // m, ct, "add")`). It renders the group into a pooled temp, then
+        // RE-ATTACHES the enclosing offscreen target (the temp render detaches
+        // our shared FBO's colour attachment) and composites with the matching
+        // GL blend state. Complex blends still degrade when nested — they need a
+        // backdrop snapshot + a second offscreen target our single FBO can't
+        // provide (guarded just before the complex path below).
 
         // 0..=6 must match the u_blend_mode switch in COMPLEX_BLEND_FRAG.
         let complex_mode: i32 = match mode {
@@ -8986,6 +8991,10 @@ impl CommandHandler for SwitchRenderBackend {
             }
             BlendMode::Add | BlendMode::Subtract | BlendMode::Screen => {
                 let (w, h) = self.current_target_dims();
+                // Some(..) iff we're nested inside an enclosing offscreen render
+                // (BitmapData.draw / cache entry). Captured BEFORE the temp
+                // render below, which temporarily repoints these.
+                let outer_target = self.offscreen_target_tex;
                 let Some(temp) = (if w == 0 || h == 0 { None } else { self.filter_tex_pool.acquire(w, h) }) else {
                     commands.execute(self);
                     return;
@@ -8993,6 +9002,17 @@ impl CommandHandler for SwitchRenderBackend {
                 let transparent = Color { r: 0, g: 0, b: 0, a: 0 };
                 if self.render_commands_to_texture(temp.texture, w, h, commands, Some(transparent)) {
                     self.blend_window = self.blend_window.saturating_add(1);
+                    // Nested: the temp render left our shared FBO's colour
+                    // attachment detached. Re-attach the enclosing offscreen
+                    // target + its viewport so the composite below lands on it
+                    // (top-level leaves the main framebuffer bound — no-op).
+                    if let Some(outer) = outer_target {
+                        unsafe {
+                            glBindFramebuffer(GL_FRAMEBUFFER, self.offscreen_fbo);
+                            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, outer, 0);
+                            glViewport(0, 0, w as GLsizei, h as GLsizei);
+                        }
+                    }
                     let m = mode;
                     self.draw_fullscreen_texture(temp.texture, w, h, move || unsafe {
                         // Premultiplied group temp. Alpha channel always uses
@@ -9013,11 +9033,37 @@ impl CommandHandler for SwitchRenderBackend {
                             }
                         }
                     });
+                    // Nested: draw_fullscreen_texture reset the blend to the
+                    // main-pass over-blend. Restore the offscreen accumulation
+                    // blend (set by render_commands_to_texture) so the enclosing
+                    // render's remaining draws keep compositing correctly, and
+                    // invalidate cached GL state since we poked it raw.
+                    if outer_target.is_some() {
+                        unsafe {
+                            glEnable(GL_BLEND);
+                            glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+                            glBlendFuncSeparate(
+                                GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+                                GL_ONE, GL_ONE_MINUS_SRC_ALPHA,
+                            );
+                        }
+                        self.gl_state.invalidate();
+                    }
                 }
                 self.filter_tex_pool.release(temp);
                 return;
             }
         };
+
+        // Complex blends snapshot the backdrop into one temp and the group into
+        // another, then composite both. Nested inside an offscreen render our
+        // single shared FBO can't juggle the extra targets without corrupting
+        // the enclosing target, so degrade to an inline (Normal) composite —
+        // rare, and only for Multiply/Overlay/etc., never the trivial path above.
+        if self.offscreen_dims.is_some() {
+            commands.execute(self);
+            return;
+        }
 
         // Complex path: snapshot the backdrop + render the group, then composite.
         let (w, h) = self.current_target_dims();
