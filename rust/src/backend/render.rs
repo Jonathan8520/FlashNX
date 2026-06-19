@@ -146,6 +146,7 @@ static GLYPHS: &[(char, Glyph)] = &[
     ('<', ["   # ", "  #  ", " #   ", "#    ", " #   ", "  #  ", "   # "]),
     ('+', ["     ", "  #  ", "  #  ", "#####", "  #  ", "  #  ", "     "]),
     ('%', ["##  #", "##  #", "   # ", "  #  ", " #   ", "#  ##", "#  ##"]),
+    ('&', [" ##  ", "#  # ", "#  # ", " ##  ", "# # #", "#  # ", " ## #"]),
     ('\u{2026}', ["     ", "     ", "     ", "     ", "     ", "     ", "# # #"]), // …
     // Accented uppercase Latin (French + Spanish). The letter body is
     // compressed to 6 rows so the diacritic fits on row 0.
