@@ -49,6 +49,11 @@ pub struct Keymap {
     /// `#[serde(default)]` keeps pre-v1.4.0 keymaps loading (they read as "").
     #[serde(default)]
     pub source: std::string::String,
+    /// Per-game mouse-cursor speed preset index (the in-game VITESSE cycle, #17
+    /// follow-up). `None` = use the global default. Stored here so each game
+    /// remembers its own pointer speed; read by C++ at launch.
+    #[serde(default)]
+    pub cursor_speed: Option<u8>,
 }
 
 /// Hardcoded fallback baked into the .nro. Mirrors what `cpp/src/main.cpp`
@@ -154,6 +159,7 @@ fn fallback_keymap() -> Keymap {
         bindings,
         bindings_p2: p2_default_bindings(),
         source: "default".into(),
+        cursor_speed: None,
     }
 }
 
@@ -500,10 +506,11 @@ pub fn has_backup(basename: &str) -> bool {
 /// first so `revert_profile` can bring it back. `km.source` should already say
 /// where it came from (e.g. "community:<id>"). Returns false on write failure.
 pub fn apply_keymap(basename: &str, km: &Keymap) -> bool {
-    if let Some(existing) = read_sidecar_file(basename) {
+    let existing = read_sidecar_file(basename);
+    if let Some(ref ex) = existing {
         // Back up anything that isn't already a community profile — i.e. real
         // user work, including legacy untagged sidecars (source == "").
-        if !existing.source.starts_with("community:") {
+        if !ex.source.starts_with("community:") {
             if let Some(src) = keymap_read_path(basename) {
                 // Best-effort backup; an unwritable SD still lets the apply go
                 // through (the user simply won't have a one-tap revert).
@@ -511,7 +518,13 @@ pub fn apply_keymap(basename: &str, km: &Keymap) -> bool {
             }
         }
     }
-    let ok = write_keymap_file(&keymap_write_path(basename), km);
+    // Keep the player's per-game cursor speed across a profile apply (a profile
+    // carries bindings, not pointer speed).
+    let mut km = km.clone();
+    if km.cursor_speed.is_none() {
+        km.cursor_speed = existing.and_then(|ex| ex.cursor_speed);
+    }
+    let ok = write_keymap_file(&keymap_write_path(basename), &km);
     // If this game's keymap is the one currently loaded in memory, drop it so a
     // re-entry reloads the freshly written file instead of the stale map.
     if ok {
@@ -629,6 +642,33 @@ pub fn effective_for(basename: &str) -> Keymap {
     merge_fallback_defaults(&mut km);
     merge_fallback_defaults_p2(&mut km);
     km
+}
+
+/// The active keymap's per-game cursor-speed preset index, or -1 if unset / no
+/// keymap loaded. Read by C++ at game launch to restore a per-game speed.
+pub fn cursor_speed() -> i32 {
+    ACTIVE_KEYMAP
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|k| k.cursor_speed))
+        .map(|v| v as i32)
+        .unwrap_or(-1)
+}
+
+/// Set the active keymap's per-game cursor-speed preset and persist it.
+/// `idx < 0` clears it (back to the global default). Called from the in-game
+/// VITESSE cycle so the pointer speed sticks to THIS game.
+pub fn set_cursor_speed(idx: i32) {
+    {
+        let Ok(mut g) = ACTIVE_KEYMAP.lock() else {
+            return;
+        };
+        let Some(km) = g.as_mut() else {
+            return;
+        };
+        km.cursor_speed = if idx >= 0 { Some(idx as u8) } else { None };
+    }
+    save_sidecar();
 }
 
 fn try_default_or_fallback(default_path: Option<&str>) -> Keymap {

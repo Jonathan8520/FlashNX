@@ -37,6 +37,8 @@ extern "C" int  ruffle_draw_menu_closing(int selected);
 extern "C" int  ruffle_restart(void);
 extern "C" int  ruffle_keymap_lookup(const char* button_name);
 extern "C" int  ruffle_keymap_lookup_p2(const char* button_name);
+extern "C" int  ruffle_keymap_cursor_speed(void);          // per-game speed, -1 = unset
+extern "C" void ruffle_keymap_set_cursor_speed(int idx);   // persist per-game speed
 extern "C" void ruffle_touches_open(void);
 extern "C" void ruffle_touches_close(void);
 extern "C" int  ruffle_touches_active(void);
@@ -298,9 +300,11 @@ static constexpr float STICK_MAX      = 32767.0f;
 // is the x1.0 tuning; the effective `g_cursor_speed` = base * the chosen preset
 // multiplier (adjustable in REGLAGES, persisted to sdmc:/flashnx/cursor_speed).
 // Requested by DSwizzy (issue #17) for fast-mouse games like Spank the Monkey.
+// Per-game now: the chosen preset is saved in the game's keymap (see
+// ruffle_keymap_cursor_speed); the top presets go fast for twitchy cursors.
 static constexpr float CURSOR_SPEED_BASE = 12.0f;
-static const float CURSOR_SPEED_MULTS[] = { 0.5f, 1.0f, 1.5f, 2.0f, 2.5f };
-static constexpr int CURSOR_SPEED_COUNT = 5;
+static const float CURSOR_SPEED_MULTS[] = { 0.5f, 1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 4.0f, 5.0f };
+static constexpr int CURSOR_SPEED_COUNT = 8;
 static int   g_cursor_speed_idx = 1;                  // x1.0 by default
 static float g_cursor_speed     = CURSOR_SPEED_BASE;  // = base * mult[idx]
 
@@ -324,6 +328,9 @@ static void cursor_speed_load() {
 extern "C" int ruffle_cursor_speed_cycle(void) {
     g_cursor_speed_idx = (g_cursor_speed_idx + 1) % CURSOR_SPEED_COUNT;
     cursor_speed_apply();
+    // Persist per-game (in this game's keymap) AND as the global default, so a
+    // never-adjusted game inherits the last-used speed.
+    ruffle_keymap_set_cursor_speed(g_cursor_speed_idx);
     FILE* f = std::fopen("sdmc:/flashnx/cursor_speed", "wb");
     if (f) { std::fprintf(f, "%d", g_cursor_speed_idx); std::fclose(f); flashnx_commit_sd(); }
     return g_cursor_speed_idx;
@@ -537,6 +544,15 @@ static void worker_entry(void* arg) {
     // Re-runs on each game iteration so the new pick's per-game sidecar
     // is honoured if the user back-to-library'd and picked a different SWF.
     populate_bindings_from_keymap();
+
+    // Per-game cursor speed (#17 follow-up): honour a preset saved in THIS
+    // game's keymap. -1 = unset -> fall back to the global default (re-read so
+    // an unset game doesn't inherit the previously launched game's speed).
+    {
+        int cs = ruffle_keymap_cursor_speed();
+        if (cs >= 0) { g_cursor_speed_idx = cs; cursor_speed_apply(); }
+        else { cursor_speed_load(); }
+    }
 
     // Mouse cursor — centred at start.
     float cursor_x = VIEWPORT_W * 0.5f;

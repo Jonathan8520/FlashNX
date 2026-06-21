@@ -824,6 +824,20 @@ pub extern "C" fn ruffle_keymap_lookup_p2(name: *const c_char) -> c_int {
     keymap::lookup_p2(button).unwrap_or(SK_NONE)
 }
 
+/// Per-game cursor-speed preset index for the active keymap, or -1 if unset.
+/// C++ reads this at game launch to restore a speed saved for THIS game.
+#[no_mangle]
+pub extern "C" fn ruffle_keymap_cursor_speed() -> c_int {
+    keymap::cursor_speed()
+}
+
+/// Persist the active game's cursor-speed preset into its keymap (the in-game
+/// VITESSE cycle calls this so pointer speed is per-game). `idx < 0` clears it.
+#[no_mangle]
+pub extern "C" fn ruffle_keymap_set_cursor_speed(idx: c_int) {
+    keymap::set_cursor_speed(idx);
+}
+
 // ── TOUCHES sub-screen FFI ────────────────────────────────────────────────
 //
 // Thin wrappers over `menu::*`. C++ owns the pause-main modal (Reprendre /
