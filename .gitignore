@@ -19,6 +19,9 @@ Cargo.lock
 *.swo
 .DS_Store
 
+# Cloudflare Wrangler local cache (account info, build cache) — never commit.
+.wrangler/
+
 # Third-party submodule build artefacts (the submodule itself is tracked)
 /third_party/ruffle/target/
 
