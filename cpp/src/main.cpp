@@ -328,11 +328,9 @@ static void cursor_speed_load() {
 extern "C" int ruffle_cursor_speed_cycle(void) {
     g_cursor_speed_idx = (g_cursor_speed_idx + 1) % CURSOR_SPEED_COUNT;
     cursor_speed_apply();
-    // Persist per-game (in this game's keymap) AND as the global default, so a
-    // never-adjusted game inherits the last-used speed.
+    // Persist PER-GAME only (in <basename>.cursor via Rust). No global write, so
+    // adjusting one game never bleeds its speed onto another.
     ruffle_keymap_set_cursor_speed(g_cursor_speed_idx);
-    FILE* f = std::fopen("sdmc:/flashnx/cursor_speed", "wb");
-    if (f) { std::fprintf(f, "%d", g_cursor_speed_idx); std::fclose(f); flashnx_commit_sd(); }
     return g_cursor_speed_idx;
 }
 // Current multiplier x10 (5,10,15,20,25) for the UI label "x1.5".
@@ -545,13 +543,13 @@ static void worker_entry(void* arg) {
     // is honoured if the user back-to-library'd and picked a different SWF.
     populate_bindings_from_keymap();
 
-    // Per-game cursor speed (#17 follow-up): honour a preset saved in THIS
-    // game's keymap. -1 = unset -> fall back to the global default (re-read so
-    // an unset game doesn't inherit the previously launched game's speed).
+    // Per-game cursor speed (#17 follow-up): honour the preset saved for THIS
+    // game (<basename>.cursor). -1 = unset -> default x1.0 (idx 1). No bleed
+    // from the previously launched game.
     {
         int cs = ruffle_keymap_cursor_speed();
-        if (cs >= 0) { g_cursor_speed_idx = cs; cursor_speed_apply(); }
-        else { cursor_speed_load(); }
+        g_cursor_speed_idx = (cs >= 0) ? cs : 1;
+        cursor_speed_apply();
     }
 
     // Mouse cursor — centred at start.

@@ -49,11 +49,6 @@ pub struct Keymap {
     /// `#[serde(default)]` keeps pre-v1.4.0 keymaps loading (they read as "").
     #[serde(default)]
     pub source: std::string::String,
-    /// Per-game mouse-cursor speed preset index (the in-game VITESSE cycle, #17
-    /// follow-up). `None` = use the global default. Stored here so each game
-    /// remembers its own pointer speed; read by C++ at launch.
-    #[serde(default)]
-    pub cursor_speed: Option<u8>,
 }
 
 /// Hardcoded fallback baked into the .nro. Mirrors what `cpp/src/main.cpp`
@@ -159,7 +154,6 @@ fn fallback_keymap() -> Keymap {
         bindings,
         bindings_p2: p2_default_bindings(),
         source: "default".into(),
-        cursor_speed: None,
     }
 }
 
@@ -302,11 +296,18 @@ fn write_default_to_sd(path: &str, keymap: &Keymap) {
 /// pick-different-game reloads the per-game sidecar so the user doesn't
 /// inherit the previous game's bindings.
 pub fn init_for_swf(swf_basename: &str) {
-    if let Ok(g) = ACTIVE_BASENAME.lock() {
-        if g.as_deref() == Some(swf_basename) {
-            // Same basename as last init — no-op.
-            return;
-        }
+    // Skip reloading only if it's the same game AND the keymap is still loaded.
+    // `apply_keymap` / `revert_profile` clear ACTIVE_KEYMAP but keep the
+    // basename; without the keymap check we'd short-circuit here and the TOUCHES
+    // editor would read a None keymap = empty bindings (in-game vs library
+    // mismatch after applying a community profile, #20).
+    let same_game = ACTIVE_BASENAME
+        .lock()
+        .map(|g| g.as_deref() == Some(swf_basename))
+        .unwrap_or(false);
+    let keymap_loaded = ACTIVE_KEYMAP.lock().map(|k| k.is_some()).unwrap_or(false);
+    if same_game && keymap_loaded {
+        return;
     }
     // Lookup order: new `sdmc:/flashnx/` first, then legacy
     // `sdmc:/ruffle/`. Writes (save_sidecar, default bootstrap) go to
@@ -518,13 +519,8 @@ pub fn apply_keymap(basename: &str, km: &Keymap) -> bool {
             }
         }
     }
-    // Keep the player's per-game cursor speed across a profile apply (a profile
-    // carries bindings, not pointer speed).
-    let mut km = km.clone();
-    if km.cursor_speed.is_none() {
-        km.cursor_speed = existing.and_then(|ex| ex.cursor_speed);
-    }
-    let ok = write_keymap_file(&keymap_write_path(basename), &km);
+    // (Cursor speed lives in its own per-game `.cursor` file, not the keymap.)
+    let ok = write_keymap_file(&keymap_write_path(basename), km);
     // If this game's keymap is the one currently loaded in memory, drop it so a
     // re-entry reloads the freshly written file instead of the stale map.
     if ok {
@@ -644,31 +640,43 @@ pub fn effective_for(basename: &str) -> Keymap {
     km
 }
 
-/// The active keymap's per-game cursor-speed preset index, or -1 if unset / no
-/// keymap loaded. Read by C++ at game launch to restore a per-game speed.
+/// The active game's basename, or None when no game is active / the global
+/// default is being edited. Cursor speed is per-GAME only.
+fn active_game_basename() -> Option<std::string::String> {
+    let g = ACTIVE_BASENAME.lock().ok()?;
+    match g.as_ref() {
+        Some(b) if b.as_str() != GLOBAL_SENTINEL => Some(b.clone()),
+        _ => None,
+    }
+}
+
+/// Per-game cursor-speed preset for the active game, or -1 if unset. Stored in
+/// its OWN tiny `<basename>.cursor` file (NOT the keymap) so changing pointer
+/// speed never rewrites or snapshots the key bindings. Read by C++ at launch.
 pub fn cursor_speed() -> i32 {
-    ACTIVE_KEYMAP
-        .lock()
-        .ok()
-        .and_then(|g| g.as_ref().and_then(|k| k.cursor_speed))
-        .map(|v| v as i32)
+    let Some(basename) = active_game_basename() else {
+        return -1;
+    };
+    find_user_path(&std::format!("{}.cursor", basename))
+        .and_then(|p| read_json_file(&p))
+        .and_then(|s| s.trim().parse::<i32>().ok())
         .unwrap_or(-1)
 }
 
-/// Set the active keymap's per-game cursor-speed preset and persist it.
-/// `idx < 0` clears it (back to the global default). Called from the in-game
-/// VITESSE cycle so the pointer speed sticks to THIS game.
+/// Persist the active game's cursor-speed preset to `<basename>.cursor`.
+/// `idx < 0` clears it (the game falls back to the default speed). Called from
+/// the in-game VITESSE cycle so the pointer speed sticks to THIS game.
 pub fn set_cursor_speed(idx: i32) {
-    {
-        let Ok(mut g) = ACTIVE_KEYMAP.lock() else {
-            return;
-        };
-        let Some(km) = g.as_mut() else {
-            return;
-        };
-        km.cursor_speed = if idx >= 0 { Some(idx as u8) } else { None };
+    let Some(basename) = active_game_basename() else {
+        return;
+    };
+    let path = primary_path(&std::format!("{}.cursor", basename));
+    if idx < 0 {
+        let _ = std::fs::remove_file(&path);
+    } else if std::fs::write(&path, std::format!("{}", idx).as_bytes()).is_err() {
+        return;
     }
-    save_sidecar();
+    crate::sd::commit();
 }
 
 fn try_default_or_fallback(default_path: Option<&str>) -> Keymap {

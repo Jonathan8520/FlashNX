@@ -354,8 +354,6 @@ pub fn apply(basename: &str, profile: &Profile) -> bool {
         bindings: profile.bindings.clone(),
         bindings_p2: profile.bindings_p2.clone(),
         source: std::format!("community:{}", profile.id),
-        // None → apply_keymap inherits the game's existing per-game cursor speed.
-        cursor_speed: None,
     };
     crate::keymap::apply_keymap(basename, &km)
 }

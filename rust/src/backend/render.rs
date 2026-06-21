@@ -6393,6 +6393,8 @@ impl SwitchRenderBackend {
         const OPT_SCALE: f32 = 2.5;
         let opts_top_y = panel_y + 140.0;
         let opts_left_x = panel_x + 80.0;
+        // Room from the text origin to the right inner edge of the panel.
+        let avail_w = PANEL_W - 120.0;
         for (i, opt) in options.iter().enumerate() {
             let y = opts_top_y + i as f32 * row_h;
             let is_sel = i == selection;
@@ -6404,7 +6406,15 @@ impl SwitchRenderBackend {
             if is_sel {
                 self.draw_text(opts_left_x - 30.0, y, OPT_SCALE, ">", color);
             }
-            self.draw_text(opts_left_x, y, OPT_SCALE, opt, color);
+            // Shrink a too-wide row to fit (long profile titles, or the
+            // multi-word "no profile for this game" notice).
+            let w = self.measure_text(opt, OPT_SCALE);
+            let sc = if w > avail_w {
+                OPT_SCALE * avail_w / w
+            } else {
+                OPT_SCALE
+            };
+            self.draw_text(opts_left_x, y, sc, opt, color);
         }
 
         const HELP_SCALE: f32 = 2.0;
