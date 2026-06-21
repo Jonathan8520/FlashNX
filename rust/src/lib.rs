@@ -322,11 +322,25 @@ pub extern "C" fn ruffle_init() -> c_int {
     // `sdmc:/ruffle/Super_Mario_63_2010.swf.keymap.json`. Idempotent across
     // restarts so REDEMARRER doesn't reload a different keymap mid-session,
     // but re-initialises when back-to-library picks a different game.
-    let basename = source_label
-        .rsplit('/')
-        .next()
-        .unwrap_or("unknown.swf");
-    keymap::init_for_swf(basename); // loads P1 + P2 bindings (issue #40) from one file
+    // Key the keymap by the on-SD FILE name (what the library OPTIONS > TOUCHES
+    // editor uses), NOT the movie URL `source_label`: a downloaded game carries
+    // a `<file>.base` sidecar whose launchCommand URL filename differs from the
+    // SD filename, so deriving the basename from `source_label` made the in-game
+    // and library TOUCHES editors load DIFFERENT keymap files (their controls
+    // didn't match). LAST_SWF_REAL_PATH holds the actual SD path that was loaded.
+    let keymap_basename = LAST_SWF_REAL_PATH
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .and_then(|p| p.rsplit(['/', '\\']).next().map(std::string::String::from))
+        .unwrap_or_else(|| {
+            source_label
+                .rsplit('/')
+                .next()
+                .unwrap_or("unknown.swf")
+                .to_string()
+        });
+    keymap::init_for_swf(&keymap_basename); // P1 + P2 bindings (issue #40) from one file
 
     match SwfMovie::from_data(&movie_bytes, source_label.clone(), None) {
         Ok(movie) => {
