@@ -144,6 +144,9 @@ pub(crate) enum Screen {
     /// APPLIQUER). `selection` indexes `State::profile_matches` then a trailing
     /// "revert" row when `State::profile_can_revert`. A applies / reverts.
     ProfileList { game_idx: usize, selection: usize },
+    /// Confirm before sharing a game's controls (#20, OPTIONS > PARTAGER).
+    /// A confirms (POSTs, hoisted) → ProfileResult; B cancels back to OPTIONS.
+    ProfileShareConfirm { game_idx: usize },
 }
 
 // No "RETOUR" entry: B already backs out of the modal, so a dedicated row is
@@ -1317,9 +1320,11 @@ pub fn input(button: &str) -> bool {
                 run_open_profiles_flow(game_idx);
                 return true;
             }
-            // PARTAGER = share this game's controls as a community profile (#20).
-            // Hoisted: the synchronous HTTPS POST must not run under the lock.
-            if button == "A" && OPTIONS_ENTRIES.get(selection).copied() == Some("PARTAGER") {
+            // PARTAGER opens a confirm modal first (in handle_options_input);
+            // the POST runs only once the user confirms (hoist just below).
+        }
+        if let Screen::ProfileShareConfirm { game_idx } = screen_snap {
+            if button == "A" {
                 run_share_profile_flow(game_idx);
                 return true;
             }
@@ -1545,6 +1550,14 @@ pub fn input(button: &str) -> bool {
         }
         Screen::ProfileList { game_idx, selection } => {
             handle_profile_list_input(&mut s, button, game_idx, selection);
+            true
+        }
+        Screen::ProfileShareConfirm { game_idx } => {
+            if matches!(button, "B" | "Minus") {
+                // Cancel → back to OPTIONS, cursor on PARTAGER (index 3).
+                s.screen = Screen::OptionsModal { game_idx, selection: 3 };
+            }
+            // "A" (confirm) is hoisted to run_share_profile_flow.
             true
         }
     };
@@ -2533,8 +2546,8 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                     return;
                 }
                 "PARTAGER" => {
-                    // Handled at the top of `input()` (hoisted — the share POST
-                    // is a synchronous HTTPS call). No-op here.
+                    // Ask before sending (#20). The POST happens on confirm.
+                    s.screen = Screen::ProfileShareConfirm { game_idx };
                     return;
                 }
                 "SUPPRIMER" => {
@@ -3595,6 +3608,22 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     lc.profile_footer,
                 );
             }
+        }
+        Screen::ProfileShareConfirm { game_idx } => {
+            let lc = crate::loc::s();
+            let game = LIBRARY
+                .lock()
+                .ok()
+                .and_then(|s| s.entries.get(game_idx).map(|e| e.display_name.clone()))
+                .unwrap_or_default();
+            // usize::MAX = no highlighted row (it's a yes/no prompt, not a list).
+            backend.draw_library_list_modal(
+                lc.opt_share,
+                &game,
+                usize::MAX,
+                &[lc.profile_share_confirm],
+                lc.lang_footer,
+            );
         }
         Screen::DeleteConfirm { game_idx } => {
             let snap = LIBRARY
