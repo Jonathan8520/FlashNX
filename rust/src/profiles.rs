@@ -133,6 +133,7 @@ pub enum MatchKind {
     Title,
 }
 
+#[derive(Clone)]
 pub struct Match {
     pub profile: Profile,
     pub kind: MatchKind,

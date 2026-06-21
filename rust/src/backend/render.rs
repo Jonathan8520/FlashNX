@@ -6327,6 +6327,103 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
+    /// Generic centered list modal (title + subtitle + rows + footer), same
+    /// look as `draw_library_options` but with the strings passed in. Used by
+    /// the community-profile picker (#20). `subtitle` may be empty.
+    pub fn draw_library_list_modal(
+        &mut self,
+        title: &str,
+        subtitle: &str,
+        selection: usize,
+        options: &[&str],
+        footer: &str,
+    ) {
+        unsafe {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_STENCIL_TEST);
+        }
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        self.fill_screen_dim(0xB0_00_00_00);
+
+        const PANEL_W: f32 = 640.0;
+        let row_h: f32 = 50.0;
+        let rows = options.len().max(1) as f32;
+        let panel_h = 180.0 + rows * row_h + 60.0;
+        let panel_x = (vw - PANEL_W) * 0.5;
+        let panel_y = (vh - panel_h) * 0.5;
+        let panel = Matrix {
+            a: PANEL_W, b: 0.0, c: 0.0, d: panel_h,
+            tx: swf::Twips::from_pixels(panel_x as f64),
+            ty: swf::Twips::from_pixels(panel_y as f64),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_14_20_38), panel);
+        <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(0xFFFFFF, 255), panel);
+
+        const TITLE_SCALE: f32 = 3.0;
+        let title_w = self.measure_text(title, TITLE_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - title_w) * 0.5,
+            panel_y + 25.0,
+            TITLE_SCALE,
+            title,
+            swf::Color::from_rgb(0xFFFFFF, 255),
+        );
+        if !subtitle.is_empty() {
+            const SUB_SCALE: f32 = 2.0;
+            let max_chars = 36usize;
+            let sub = if subtitle.chars().count() > max_chars {
+                let mut t: std::string::String = subtitle.chars().take(max_chars - 1).collect();
+                t.push('…');
+                t
+            } else {
+                subtitle.to_string()
+            };
+            let sub_w = self.measure_text(&sub, SUB_SCALE);
+            self.draw_text(
+                panel_x + (PANEL_W - sub_w) * 0.5,
+                panel_y + 75.0,
+                SUB_SCALE,
+                &sub,
+                swf::Color::from_rgb(0xAABFD8, 255),
+            );
+        }
+
+        const OPT_SCALE: f32 = 2.5;
+        let opts_top_y = panel_y + 140.0;
+        let opts_left_x = panel_x + 80.0;
+        for (i, opt) in options.iter().enumerate() {
+            let y = opts_top_y + i as f32 * row_h;
+            let is_sel = i == selection;
+            let color = if is_sel {
+                swf::Color::from_rgb(0xFFD740, 255)
+            } else {
+                swf::Color::from_rgb(0xCCCCCC, 255)
+            };
+            if is_sel {
+                self.draw_text(opts_left_x - 30.0, y, OPT_SCALE, ">", color);
+            }
+            self.draw_text(opts_left_x, y, OPT_SCALE, opt, color);
+        }
+
+        const HELP_SCALE: f32 = 2.0;
+        let help_w = self.measure_text(footer, HELP_SCALE);
+        self.draw_text(
+            panel_x + (PANEL_W - help_w) * 0.5,
+            panel_y + panel_h - 38.0,
+            HELP_SCALE,
+            footer,
+            swf::Color::from_rgb(0x99AABB, 255),
+        );
+
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
     /// Destructive-confirm modal for OPTIONS > SUPPRIMER. Bigger / redder
     /// than `draw_library_options` because the action is irreversible.
     pub fn draw_library_delete_confirm(

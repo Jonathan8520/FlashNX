@@ -140,12 +140,17 @@ pub(crate) enum Screen {
     /// (#20). Reuses `bug_ok`/`bug_msg` for styling + message; A/B dismiss back
     /// to the game's OPTIONS modal (not the bug flow's RÉGLAGES tab).
     ProfileResult { game_idx: usize },
+    /// Picker of community control profiles matching a game (#20, OPTIONS >
+    /// APPLIQUER). `selection` indexes `State::profile_matches` then a trailing
+    /// "revert" row when `State::profile_can_revert`. A applies / reverts.
+    ProfileList { game_idx: usize, selection: usize },
 }
 
 // No "RETOUR" entry: B already backs out of the modal, so a dedicated row is
 // redundant clutter.
-pub(crate) const OPTIONS_ENTRIES: &[&str] =
-    &["FAVORI", "TOUCHES", "PARTAGER", "RENOMMER", "JAQUETTE", "SUPPRIMER"];
+pub(crate) const OPTIONS_ENTRIES: &[&str] = &[
+    "FAVORI", "TOUCHES", "APPLIQUER", "PARTAGER", "RENOMMER", "JAQUETTE", "SUPPRIMER",
+];
 
 /// Top-level navbar tabs (v1.2.0), switched with the L/R shoulder buttons.
 /// Each maps to a "home" screen. The navbar is drawn on every tab-home screen;
@@ -598,6 +603,12 @@ pub(crate) struct State {
     /// JAQUETTE). Filled by `run_cover_search_flow`, indexed by the picker
     /// selection, consumed by `run_cover_fetch_flow`.
     cover_candidates: std::vec::Vec<crate::sources::flashpoint::CatalogEntry>,
+    /// Community control profiles matching the game in the open `ProfileList`
+    /// (#20). Filled by `run_open_profiles_flow`, indexed by the picker selection.
+    profile_matches: std::vec::Vec<crate::profiles::Match>,
+    /// Whether the open `ProfileList` shows a trailing "revert to my controls"
+    /// row (true when the game has a backup from a previously applied profile).
+    profile_can_revert: bool,
     /// Notice shown on the `CoverPicker` when there's no list to show (covers
     /// off / no results / fetch error). Empty = render the candidate list.
     cover_msg: std::string::String,
@@ -664,6 +675,8 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     applet_mode: false,
     local_filter: None,
     cover_candidates: std::vec::Vec::new(),
+    profile_matches: std::vec::Vec::new(),
+    profile_can_revert: false,
     cover_msg: std::string::String::new(),
     cover_query: std::string::String::new(),
     fp_loading: false,
@@ -1298,6 +1311,12 @@ pub fn input(button: &str) -> bool {
                 run_cover_search_flow(game_idx);
                 return true;
             }
+            // APPLIQUER = open the community-profile picker (#20). Hoisted:
+            // hashing the .swf is file I/O we keep out of the LIBRARY lock.
+            if button == "A" && OPTIONS_ENTRIES.get(selection).copied() == Some("APPLIQUER") {
+                run_open_profiles_flow(game_idx);
+                return true;
+            }
             // PARTAGER = share this game's controls as a community profile (#20).
             // Hoisted: the synchronous HTTPS POST must not run under the lock.
             if button == "A" && OPTIONS_ENTRIES.get(selection).copied() == Some("PARTAGER") {
@@ -1510,9 +1529,13 @@ pub fn input(button: &str) -> bool {
         Screen::ProfileResult { game_idx } => {
             if matches!(button, "A" | "B" | "Minus") {
                 s.bug_msg.clear();
-                // Back to the game's OPTIONS, cursor on PARTAGER (index 2).
+                // Back to the game's OPTIONS, cursor on the profile rows.
                 s.screen = Screen::OptionsModal { game_idx, selection: 2 };
             }
+            true
+        }
+        Screen::ProfileList { game_idx, selection } => {
+            handle_profile_list_input(&mut s, button, game_idx, selection);
             true
         }
     };
@@ -1769,6 +1792,86 @@ fn run_share_profile_flow(game_idx: usize) {
         s.bug_msg = msg;
         s.screen = Screen::ProfileResult { game_idx };
     }
+}
+
+/// OPTIONS > APPLIQUER: compute the community profiles matching a game and open
+/// the picker (#20). Hoisted — hashing the .swf is file I/O we keep out of the
+/// LIBRARY lock. Always opens the picker (which shows a notice when empty).
+fn run_open_profiles_flow(game_idx: usize) {
+    let snap = match LIBRARY.lock() {
+        Ok(g) => g
+            .entries
+            .get(game_idx)
+            .map(|e| (e.display_name.clone(), e.basename.clone(), e.path.clone())),
+        Err(_) => None,
+    };
+    let Some((title, basename, path)) = snap else {
+        return;
+    };
+    let swf_hash = crate::profiles::swf_hash_of(&path).unwrap_or_default();
+    // fp_uuid not persisted yet (Phase 1b) → match by hash + title for now.
+    let matches = crate::profiles::matches_for("", &swf_hash, &title);
+    let can_revert = keymap::has_backup(&basename)
+        || keymap::provenance(&basename).starts_with("community:");
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.profile_matches = matches;
+        s.profile_can_revert = can_revert;
+        s.screen = Screen::ProfileList { game_idx, selection: 0 };
+    }
+}
+
+/// Input for the community-profile picker (#20). Rows = matched profiles, then
+/// a trailing "revert" row when applicable. A applies / reverts (both are
+/// non-destructive: apply backs up the prior keymap), then shows a toast.
+fn handle_profile_list_input(s: &mut State, button: &str, game_idx: usize, mut selection: usize) {
+    let n = s.profile_matches.len();
+    let has_revert = s.profile_can_revert;
+    let row_count = n + has_revert as usize;
+    // At least one row (the "no profile" notice) so nav has somewhere to sit.
+    let last = row_count.max(1) - 1;
+    match button {
+        "Up" | "StickLUp" => {
+            selection = if selection == 0 { last } else { selection - 1 };
+        }
+        "Down" | "StickLDown" => {
+            selection = if selection >= last { 0 } else { selection + 1 };
+        }
+        "A" => {
+            let basename = s.entries.get(game_idx).map(|e| e.basename.clone());
+            if let Some(basename) = basename {
+                if selection < n {
+                    let profile = s.profile_matches[selection].profile.clone();
+                    let ok = crate::profiles::apply(&basename, &profile);
+                    s.bug_ok = ok;
+                    s.bug_msg = if ok {
+                        crate::loc::s().profile_applied_ok.to_string()
+                    } else {
+                        crate::loc::s().bug_fail_title.to_string()
+                    };
+                    s.screen = Screen::ProfileResult { game_idx };
+                    return;
+                } else if has_revert && selection == n {
+                    let ok = keymap::revert_profile(&basename);
+                    s.bug_ok = ok;
+                    s.bug_msg = if ok {
+                        crate::loc::s().profile_reverted_ok.to_string()
+                    } else {
+                        crate::loc::s().bug_fail_title.to_string()
+                    };
+                    s.screen = Screen::ProfileResult { game_idx };
+                    return;
+                }
+            }
+            // Notice row / nothing actionable — ignore A.
+        }
+        "B" | "Minus" => {
+            // Back to OPTIONS, cursor on APPLIQUER (index 2).
+            s.screen = Screen::OptionsModal { game_idx, selection: 2 };
+            return;
+        }
+        _ => {}
+    }
+    s.screen = Screen::ProfileList { game_idx, selection };
 }
 
 fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scroll: usize) {
@@ -2390,6 +2493,11 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                 "JAQUETTE" => {
                     // Handled at the top of `input()` (hoisted — Flashpoint
                     // search is a synchronous HTTPS call). No-op here.
+                    return;
+                }
+                "APPLIQUER" => {
+                    // Handled at the top of `input()` (hoisted — hashing the
+                    // .swf is file I/O). No-op here.
                     return;
                 }
                 "PARTAGER" => {
@@ -3323,9 +3431,9 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 // in input handling); display uses localized labels in the
                 // same order (TOUCHES / RENOMMER / SUPPRIMER / RETOUR).
                 let lc = crate::loc::s();
-                // Order must match OPTIONS_ENTRIES (FAVORI/TOUCHES/PARTAGER/
-                // RENOMMER/JAQUETTE/SUPPRIMER). No back row — B backs out. The
-                // favorite label reflects the current state (add vs remove).
+                // Order must match OPTIONS_ENTRIES (FAVORI/TOUCHES/APPLIQUER/
+                // PARTAGER/RENOMMER/JAQUETTE/SUPPRIMER). No back row — B backs
+                // out. The favorite label reflects the current state.
                 let fav_label = if crate::favorites::is_favorite(&entry.basename) {
                     lc.opt_unfavorite
                 } else {
@@ -3334,6 +3442,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 let labels = [
                     fav_label,
                     lc.opt_keys,
+                    lc.opt_apply,
                     lc.opt_share,
                     lc.opt_rename,
                     lc.opt_cover,
@@ -3415,6 +3524,38 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 .map(|s| (s.bug_msg.clone(), s.bug_ok))
                 .unwrap_or_default();
             backend.draw_library_bug_result(&msg, ok);
+        }
+        Screen::ProfileList { game_idx, selection } => {
+            let lc = crate::loc::s();
+            let snap = LIBRARY.lock().ok().map(|s| {
+                let game = s
+                    .entries
+                    .get(game_idx)
+                    .map(|e| e.display_name.clone())
+                    .unwrap_or_default();
+                let mut rows: std::vec::Vec<std::string::String> = s
+                    .profile_matches
+                    .iter()
+                    .map(|m| m.profile.title().to_string())
+                    .collect();
+                if s.profile_can_revert {
+                    rows.push(lc.profile_revert.to_string());
+                }
+                (game, rows)
+            });
+            if let Some((game, mut rows)) = snap {
+                if rows.is_empty() {
+                    rows.push(lc.profile_none.to_string());
+                }
+                let refs: std::vec::Vec<&str> = rows.iter().map(|r| r.as_str()).collect();
+                backend.draw_library_list_modal(
+                    lc.profile_title,
+                    &game,
+                    selection,
+                    &refs,
+                    lc.profile_footer,
+                );
+            }
         }
         Screen::DeleteConfirm { game_idx } => {
             let snap = LIBRARY
