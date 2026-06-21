@@ -218,22 +218,27 @@ fn fetch_index() -> std::vec::Vec<IndexEntry> {
             .and_then(|g| g.clone())
             .unwrap_or_default();
     }
-    INDEX_TRIED.store(true, Ordering::Relaxed);
     let url = std::format!("{}index.json", ONLINE_BASE);
-    let entries = match crate::net::http_get(&url, 64 * 1024) {
-        Ok(bytes) => std::string::String::from_utf8(bytes)
-            .ok()
-            .and_then(|t| serde_json::from_str::<std::vec::Vec<IndexEntry>>(&t).ok())
-            .unwrap_or_default(),
+    match crate::net::http_get(&url, 64 * 1024) {
+        Ok(bytes) => {
+            let entries = std::string::String::from_utf8(bytes)
+                .ok()
+                .and_then(|t| serde_json::from_str::<std::vec::Vec<IndexEntry>>(&t).ok())
+                .unwrap_or_default();
+            // Cache ONLY a successful fetch, so a transient network failure (or
+            // a not-yet-propagated raw.githubusercontent cache) retries on the
+            // next picker open instead of sticking empty for the whole session.
+            if let Ok(mut g) = ONLINE_INDEX.lock() {
+                *g = Some(entries.clone());
+            }
+            INDEX_TRIED.store(true, Ordering::Relaxed);
+            entries
+        }
         Err(e) => {
             crate::net::log(&std::format!("profiles: index fetch failed: {}\n", e));
             std::vec::Vec::new()
         }
-    };
-    if let Ok(mut g) = ONLINE_INDEX.lock() {
-        *g = Some(entries.clone());
     }
-    entries
 }
 
 /// Online profiles matching the game (one HTTPS GET per matching index entry,

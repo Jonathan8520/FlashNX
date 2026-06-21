@@ -663,9 +663,9 @@ pub fn cursor_speed() -> i32 {
         .unwrap_or(-1)
 }
 
-/// Persist the active game's cursor-speed preset to `<basename>.cursor`.
-/// `idx < 0` clears it (the game falls back to the default speed). Called from
-/// the in-game VITESSE cycle so the pointer speed sticks to THIS game.
+/// Persist the active GAME's per-game cursor-speed preset to `<basename>.cursor`.
+/// Called (only) from the in-game VITESSE cycle — C++ handles the library /
+/// RÉGLAGES global default separately. `idx < 0` clears the per-game file.
 pub fn set_cursor_speed(idx: i32) {
     let Some(basename) = active_game_basename() else {
         return;

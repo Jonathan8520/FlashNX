@@ -307,6 +307,9 @@ static const float CURSOR_SPEED_MULTS[] = { 0.5f, 1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 
 static constexpr int CURSOR_SPEED_COUNT = 8;
 static int   g_cursor_speed_idx = 1;                  // x1.0 by default
 static float g_cursor_speed     = CURSOR_SPEED_BASE;  // = base * mult[idx]
+// True while a game is actually running (vs the library UI). Decides whether the
+// VITESSE cycle saves per-game (<basename>.cursor) or the global default.
+static bool  g_in_game = false;
 
 extern "C" int flashnx_commit_sd(void); // ruffle_bridge.cpp (fsdevCommitDevice)
 
@@ -328,9 +331,15 @@ static void cursor_speed_load() {
 extern "C" int ruffle_cursor_speed_cycle(void) {
     g_cursor_speed_idx = (g_cursor_speed_idx + 1) % CURSOR_SPEED_COUNT;
     cursor_speed_apply();
-    // Persist PER-GAME only (in <basename>.cursor via Rust). No global write, so
-    // adjusting one game never bleeds its speed onto another.
-    ruffle_keymap_set_cursor_speed(g_cursor_speed_idx);
+    if (g_in_game) {
+        // In a game → save to THIS game's <basename>.cursor (via Rust). No bleed
+        // onto other games or the global default.
+        ruffle_keymap_set_cursor_speed(g_cursor_speed_idx);
+    } else {
+        // Library / RÉGLAGES → the GLOBAL default file.
+        FILE* f = std::fopen("sdmc:/flashnx/cursor_speed", "wb");
+        if (f) { std::fprintf(f, "%d", g_cursor_speed_idx); std::fclose(f); flashnx_commit_sd(); }
+    }
     return g_cursor_speed_idx;
 }
 // Current multiplier x10 (5,10,15,20,25) for the UI label "x1.5".
@@ -457,6 +466,10 @@ static void worker_entry(void* arg) {
     // per instance, never alive at the same time). On each iteration of
     // the outer loop a fresh library renderer + banner upload happens.
     if (!forwarder_swf) {
+    g_in_game = false;
+    // The library / RÉGLAGES cursor speed is the GLOBAL default — re-read it on
+    // entering the library so it doesn't show the last game's per-game speed.
+    cursor_speed_load();
     if (ruffle_library_init() != 0) {
         std::printf("library_init failed — exiting .nro\n");
         std::fflush(stdout);
@@ -543,14 +556,19 @@ static void worker_entry(void* arg) {
     // is honoured if the user back-to-library'd and picked a different SWF.
     populate_bindings_from_keymap();
 
-    // Per-game cursor speed (#17 follow-up): honour the preset saved for THIS
-    // game (<basename>.cursor). -1 = unset -> default x1.0 (idx 1). No bleed
-    // from the previously launched game.
+    // Cursor speed: honour this game's per-game preset (<basename>.cursor) if
+    // set, else fall back to the GLOBAL default (RÉGLAGES). No bleed from the
+    // previously launched game.
     {
         int cs = ruffle_keymap_cursor_speed();
-        g_cursor_speed_idx = (cs >= 0) ? cs : 1;
-        cursor_speed_apply();
+        if (cs >= 0) {
+            g_cursor_speed_idx = cs;
+            cursor_speed_apply();
+        } else {
+            cursor_speed_load(); // global default
+        }
     }
+    g_in_game = true;
 
     // Mouse cursor — centred at start.
     float cursor_x = VIEWPORT_W * 0.5f;
