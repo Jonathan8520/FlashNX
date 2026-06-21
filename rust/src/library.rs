@@ -136,12 +136,16 @@ pub(crate) enum Screen {
     /// styling, `State::bug_msg` is the (already-localized) message. A/B dismiss
     /// back to the RÉGLAGES tab.
     BugResult,
+    /// Result toast after sharing a game's controls as a community profile
+    /// (#20). Reuses `bug_ok`/`bug_msg` for styling + message; A/B dismiss back
+    /// to the game's OPTIONS modal (not the bug flow's RÉGLAGES tab).
+    ProfileResult { game_idx: usize },
 }
 
 // No "RETOUR" entry: B already backs out of the modal, so a dedicated row is
 // redundant clutter.
 pub(crate) const OPTIONS_ENTRIES: &[&str] =
-    &["FAVORI", "TOUCHES", "RENOMMER", "JAQUETTE", "SUPPRIMER"];
+    &["FAVORI", "TOUCHES", "PARTAGER", "RENOMMER", "JAQUETTE", "SUPPRIMER"];
 
 /// Top-level navbar tabs (v1.2.0), switched with the L/R shoulder buttons.
 /// Each maps to a "home" screen. The navbar is drawn on every tab-home screen;
@@ -1294,6 +1298,12 @@ pub fn input(button: &str) -> bool {
                 run_cover_search_flow(game_idx);
                 return true;
             }
+            // PARTAGER = share this game's controls as a community profile (#20).
+            // Hoisted: the synchronous HTTPS POST must not run under the lock.
+            if button == "A" && OPTIONS_ENTRIES.get(selection).copied() == Some("PARTAGER") {
+                run_share_profile_flow(game_idx);
+                return true;
+            }
         }
         // A on the CoverPicker = download + cache the chosen logo (HTTPS).
         // Minus = refine: re-type the title and re-search (swkbd + HTTPS).
@@ -1494,6 +1504,14 @@ pub fn input(button: &str) -> bool {
                 s.bug_msg.clear();
                 // Back to the RÉGLAGES tab, cursor on SIGNALER UN BUG.
                 s.screen = Screen::SettingsModal { selection: 2 };
+            }
+            true
+        }
+        Screen::ProfileResult { game_idx } => {
+            if matches!(button, "A" | "B" | "Minus") {
+                s.bug_msg.clear();
+                // Back to the game's OPTIONS, cursor on PARTAGER (index 2).
+                s.screen = Screen::OptionsModal { game_idx, selection: 2 };
             }
             true
         }
@@ -1720,6 +1738,36 @@ fn submit_and_show(report: &crate::bugreport::Report) {
         s.bug_ok = ok;
         s.bug_msg = msg;
         s.screen = Screen::BugResult;
+    }
+}
+
+/// OPTIONS > PARTAGER: send a game's current controls as a community-profile
+/// candidate (#20). Hoisted out of `input()` — the HTTPS POST must not run under
+/// the LIBRARY lock. Reuses the bug result fields + toast; dismiss returns to
+/// the game's OPTIONS modal.
+fn run_share_profile_flow(game_idx: usize) {
+    let snap = match LIBRARY.lock() {
+        Ok(g) => g
+            .entries
+            .get(game_idx)
+            .map(|e| (e.display_name.clone(), e.basename.clone(), e.path.clone())),
+        Err(_) => None,
+    };
+    let Some((title, basename, path)) = snap else {
+        return;
+    };
+    // What we share = the game's EFFECTIVE controls (its sidecar, else the
+    // defaults) + a content hash of the .swf as the match key.
+    let km = keymap::effective_for(&basename);
+    let swf_hash = crate::profiles::swf_hash_of(&path).unwrap_or_default();
+    let (ok, msg) = match crate::profiles::share(&title, "", &swf_hash, &km) {
+        Ok(()) => (true, crate::loc::s().profile_shared_ok.to_string()),
+        Err(e) => (false, e),
+    };
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.bug_ok = ok;
+        s.bug_msg = msg;
+        s.screen = Screen::ProfileResult { game_idx };
     }
 }
 
@@ -2342,6 +2390,11 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                 "JAQUETTE" => {
                     // Handled at the top of `input()` (hoisted — Flashpoint
                     // search is a synchronous HTTPS call). No-op here.
+                    return;
+                }
+                "PARTAGER" => {
+                    // Handled at the top of `input()` (hoisted — the share POST
+                    // is a synchronous HTTPS call). No-op here.
                     return;
                 }
                 "SUPPRIMER" => {
@@ -3270,15 +3323,22 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 // in input handling); display uses localized labels in the
                 // same order (TOUCHES / RENOMMER / SUPPRIMER / RETOUR).
                 let lc = crate::loc::s();
-                // Order must match OPTIONS_ENTRIES (FAVORI/TOUCHES/RENOMMER/
-                // JAQUETTE/SUPPRIMER). No back row — B backs out. The favorite
-                // label reflects the current state (add vs remove).
+                // Order must match OPTIONS_ENTRIES (FAVORI/TOUCHES/PARTAGER/
+                // RENOMMER/JAQUETTE/SUPPRIMER). No back row — B backs out. The
+                // favorite label reflects the current state (add vs remove).
                 let fav_label = if crate::favorites::is_favorite(&entry.basename) {
                     lc.opt_unfavorite
                 } else {
                     lc.opt_favorite
                 };
-                let labels = [fav_label, lc.opt_keys, lc.opt_rename, lc.opt_cover, lc.opt_delete];
+                let labels = [
+                    fav_label,
+                    lc.opt_keys,
+                    lc.opt_share,
+                    lc.opt_rename,
+                    lc.opt_cover,
+                    lc.opt_delete,
+                ];
                 backend.draw_library_options(
                     &entry.display_name,
                     selection,
@@ -3340,6 +3400,15 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             );
         }
         Screen::BugResult => {
+            let (msg, ok) = LIBRARY
+                .lock()
+                .ok()
+                .map(|s| (s.bug_msg.clone(), s.bug_ok))
+                .unwrap_or_default();
+            backend.draw_library_bug_result(&msg, ok);
+        }
+        Screen::ProfileResult { .. } => {
+            // Same toast as the bug result (reuses bug_ok/bug_msg).
             let (msg, ok) = LIBRARY
                 .lock()
                 .ok()

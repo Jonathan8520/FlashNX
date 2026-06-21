@@ -611,6 +611,26 @@ pub fn save_sidecar() -> bool {
     }
 }
 
+/// Resolve the EFFECTIVE keymap for `basename` exactly as the game would load
+/// it (per-game sidecar → global default → hardcoded fallback, defaults merged),
+/// WITHOUT touching the active in-memory keymap. Used to snapshot a game's
+/// current controls for sharing as a community profile (#20).
+pub fn effective_for(basename: &str) -> Keymap {
+    let sidecar = find_user_path(&std::format!("{}.keymap.json", basename));
+    let default = find_user_path("keymap_default.json");
+    let mut km = if let Some(txt) = sidecar.as_deref().and_then(read_json_file) {
+        parse_keymap(&txt, "share")
+            .unwrap_or_else(|| try_default_or_fallback(default.as_deref()))
+    } else if let Some(txt) = default.as_deref().and_then(read_json_file) {
+        parse_keymap(&txt, "share").unwrap_or_else(fallback_keymap)
+    } else {
+        fallback_keymap()
+    };
+    merge_fallback_defaults(&mut km);
+    merge_fallback_defaults_p2(&mut km);
+    km
+}
+
 fn try_default_or_fallback(default_path: Option<&str>) -> Keymap {
     let Some(default_path) = default_path else { return fallback_keymap(); };
     if let Some(txt) = read_json_file(default_path) {
