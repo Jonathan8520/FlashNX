@@ -52,6 +52,15 @@ serde_json = "1"
 # binary cost is ~0. Picked over the full `image` crate to keep the API
 # surface tight (we only need PNG, not BMP/TIFF/AVIF/WebP).
 png = "0.18"
+# v1.4.0 — CJK text (Chinese, issue #41; Korean/Japanese share the same path).
+# Rasterizes glyphs from the Switch SHARED system font (via the `pl` service,
+# see backend/glyphs.rs) into a GL atlas; the .nro ships no font. CRITICAL:
+# `default-features = false` to drop fontdue's `parallel`/rayon feature — rayon
+# spawns threads that crash on Switch newlib pthread (same trap as jpeg-decoder
+# below). We also drop the `simd` feature (it can pull `portable_simd`, a
+# nightly feature our build-std toolchain would choke on) and use `std` for
+# float math + maps, which build-std provides.
+fontdue = { version = "0.9", default-features = false, features = ["std"] }
 # v1.2.0 — local cover art. We decode user-dropped `.jpg` sidecars and (opt-in)
 # Flashpoint logos. jpeg-decoder is pinned via [patch.crates-io] to the Switch
 # fork. CRITICAL: `default-features = false` — the crate defaults to `rayon`,

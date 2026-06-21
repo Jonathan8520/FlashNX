@@ -21,9 +21,35 @@ extern "C" void ruffle_log_cstr(const char* msg) {
     }
 }
 
+// Hand the Rust side a pointer to the console's SHARED system font for `kind`
+// (a PlSharedFontType value; 1 = Chinese Simplified). plGetSharedFontByType
+// returns DECRYPTED TTF/OTF bytes mapped into a shared-memory region that
+// stays valid for the process lifetime, so Rust can borrow it as 'static and
+// hand it straight to fontdue (no BFTTF deobfuscation needed). Used by
+// backend/glyphs.rs to rasterize CJK glyphs the 5x7 bitmap font can't carry.
+// Returns null (and *out_size = 0) if the pl service is unavailable.
+extern "C" const unsigned char* ruffle_shared_font(int kind, unsigned int* out_size) {
+    static bool pl_inited = false;
+    if (!pl_inited) {
+        if (R_FAILED(plInitialize(PlServiceType_User))) {
+            if (out_size) *out_size = 0;
+            return nullptr;
+        }
+        pl_inited = true;
+    }
+    PlFontData fd;
+    if (R_FAILED(plGetSharedFontByType(&fd, (PlSharedFontType)kind))) {
+        if (out_size) *out_size = 0;
+        return nullptr;
+    }
+    if (out_size) *out_size = fd.size;
+    return (const unsigned char*)fd.address;
+}
+
 // Map the console's system language to FlashNX's locale index:
 //   0 = English, 1 = French, 2 = Spanish, 3 = Russian, 4 = German,
-//   5 = Italian, 6 = Portuguese, -1 = unsupported.
+//   5 = Italian, 6 = Portuguese, 7 = Chinese, -1 = unsupported.
+//   (All Chinese variants map to our Simplified UI; the user can switch.)
 // Called once from loc::init() when no settings.json language is stored.
 extern "C" int ruffle_detect_system_lang(void) {
     if (R_FAILED(setInitialize())) return -1;
@@ -44,6 +70,10 @@ extern "C" int ruffle_detect_system_lang(void) {
             case SetLanguage_IT:    idx = 5; break;
             case SetLanguage_PT:
             case SetLanguage_PTBR:  idx = 6; break;
+            case SetLanguage_ZHCN:
+            case SetLanguage_ZHHANS:
+            case SetLanguage_ZHTW:
+            case SetLanguage_ZHHANT: idx = 7; break;
             default:                idx = -1; break;
         }
     }

@@ -52,7 +52,7 @@ Left stick / D-pad = arrows · **A/B/X/Y** = Flash keys (remappable) · right st
 - **Home-menu shortcuts**: launch FlashNX with a `.swf` path as its argument and it boots straight into that game (and returns to the Home menu when you quit). With a forwarder tool you can put a single Flash game on your Switch Home menu, with its cover as the icon. **Sphaira** users: FlashNX registers a `.swf` association, so you can select a game in Sphaira's file browser and "Create a Forwarder" → FlashNX.
 - **Automatic saves** for games that save (SharedObject `.sol`), on the SD card.
 - **Built-in key editor** (48 Flash keys, configurable per game), plus a **global default** layout in the Settings tab.
-- **Languages**: English, French, Spanish, Russian, German, Italian, Portuguese, auto-detected from the console's system language, switchable from the Settings tab.
+- **Languages**: English, French, Spanish, Russian, German, Italian, Portuguese, Chinese (Simplified, rendered from the console's own shared font), auto-detected from the console's system language, switchable from the Settings tab.
 
 ## Tested games
 

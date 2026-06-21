@@ -89,6 +89,17 @@ pub const MENU_ITEMS: &[&str] = &["REPRENDRE", "TOUCHES", "REDEMARRER", "VITESSE
 /// advances). Add more entries here if a future label needs new
 /// characters.
 type Glyph = [&'static str; 7];
+
+// CJK / atlas-glyph layout knobs, in the same "units" the 5x7 bitmap font uses
+// (1 unit = `scale` px; a bitmap glyph is 7 units tall, 6 units advance). CJK
+// is rendered full-width: one square cell `CJK_ADVANCE_UNITS` wide, used by
+// BOTH `draw_text` and `measure_text` so centring matches rendering. These two
+// are the only things to tweak on hardware to align CJK with the bitmap font.
+/// Full-width cell width (and render size) for an atlas glyph.
+const CJK_ADVANCE_UNITS: f32 = 8.0;
+/// Baseline offset from the line top; raise/lower to sit CJK on the Latin line.
+const CJK_BASELINE_UNITS: f32 = 6.6;
+
 static GLYPHS: &[(char, Glyph)] = &[
     (' ', ["     ", "     ", "     ", "     ", "     ", "     ", "     "]),
     ('A', [" ### ", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"]),
@@ -1302,6 +1313,13 @@ pub struct SwitchRenderBackend {
     /// frame because the heartbeat zeroes them mid-`submit_frame`.
     frame_snapshot: FrameBreakdown,
     last_frame: FrameBreakdown,
+    /// Lazily-built CJK glyph atlas (Chinese etc.) rasterized from the Switch
+    /// shared system font. `None` until the first non-bitmap glyph is drawn;
+    /// `atlas_init_done` guards against re-trying a failed init every frame.
+    /// Declared last so it drops (freeing its GL texture) after the struct's
+    /// own `Drop` body has run, while the GL context is still alive.
+    font_atlas: Option<crate::backend::glyphs::FontAtlas>,
+    atlas_init_done: bool,
 }
 
 /// One frame's worth of per-counter activity (or the raw snapshot used to
@@ -3300,6 +3318,8 @@ impl SwitchRenderBackend {
             offscreen_depth_stencil_dims: (0, 0),
             frame_snapshot: FrameBreakdown::default(),
             last_frame: FrameBreakdown::default(),
+            font_atlas: None,
+            atlas_init_done: false,
         })
     }
 
@@ -4610,10 +4630,12 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
-    /// Draw an ASCII string with the embedded 5x7 pixel font (see `GLYPHS`).
-    /// `x`, `y` are top-left in screen pixels. Each lit glyph pixel becomes
-    /// a `scale × scale` solid rect drawn via the same path as `draw_rect`.
-    /// Unknown chars render as blank space.
+    /// Draw a string. ASCII + accented Latin + Cyrillic come from the embedded
+    /// 5x7 pixel font (see `GLYPHS`), folded to uppercase. Any other codepoint
+    /// (CJK etc.) falls back to the shared-font glyph atlas (`draw_atlas_glyph`)
+    /// as a full-width cell. `x`, `y` are top-left in screen pixels; each lit
+    /// bitmap pixel becomes a `scale × scale` solid rect (same path as
+    /// `draw_rect`). Unknown ASCII renders as blank space.
     pub fn draw_text(&mut self, x: f32, y: f32, scale: f32, text: &str, color: swf::Color) {
         let mut cur_x = x;
         for ch in text.chars() {
@@ -4637,16 +4659,101 @@ impl SwitchRenderBackend {
                         }
                     }
                 }
+                // Advance by 6 px (5-wide glyph + 1-px gap), scaled.
+                cur_x += 6.0 * scale;
+            } else if (ch as u32) >= 0x80 {
+                // Non-Latin/Cyrillic (CJK …): shared-font atlas, full-width.
+                self.draw_atlas_glyph(cur_x, y, scale, ch, color);
+                cur_x += CJK_ADVANCE_UNITS * scale;
+            } else {
+                // Unknown ASCII: blank, but keep the pen advancing as before.
+                cur_x += 6.0 * scale;
             }
-            // Advance by 6 px (5-wide glyph + 1-px gap), scaled.
-            cur_x += 6.0 * scale;
         }
     }
 
-    /// Measure rendered width of `text` in pixels at the given scale.
-    /// Lets the menu centre items horizontally.
+    /// Measure rendered width of `text` in pixels at the given scale. Mirrors
+    /// `draw_text`'s per-char advance EXACTLY (bitmap-font chars = 6 units,
+    /// CJK = full-width cell) so centring lines up with what's drawn — and so
+    /// it works without the (lazy) atlas existing yet.
     pub fn measure_text(&self, text: &str, scale: f32) -> f32 {
-        text.chars().count() as f32 * 6.0 * scale
+        let mut w = 0.0;
+        for ch in text.chars() {
+            let lookup = ch.to_ascii_uppercase();
+            if GLYPHS.iter().any(|(c, _)| *c == lookup) {
+                w += 6.0 * scale;
+            } else if (ch as u32) >= 0x80 {
+                w += CJK_ADVANCE_UNITS * scale;
+            } else {
+                w += 6.0 * scale;
+            }
+        }
+        w
+    }
+
+    /// Draw one CJK (or other non-bitmap) glyph from the shared-font atlas at
+    /// pen position `x` / line-top `y`, tinted `color`. The glyph occupies a
+    /// full-width `CJK_ADVANCE_UNITS`-wide cell; the caller advances the pen by
+    /// that width regardless of whether a glyph was actually drawn.
+    fn draw_atlas_glyph(&mut self, x: f32, y: f32, scale: f32, ch: char, color: swf::Color) {
+        // Lazily build the atlas on first use; only try once (a failed init —
+        // e.g. no pl service — must not re-run every frame).
+        if !self.atlas_init_done {
+            self.atlas_init_done = true;
+            self.font_atlas = crate::backend::glyphs::FontAtlas::new();
+        }
+        let mut uploaded = false;
+        let (tex, info) = match self.font_atlas.as_mut() {
+            Some(fa) => match fa.ensure(ch, &mut uploaded) {
+                Some(info) => (fa.texture(), info),
+                None => return,
+            },
+            None => return,
+        };
+        // A miss bound + wrote the atlas texture behind the GL state cache's
+        // back; resync so the next `use_bitmap` rebinds correctly.
+        if uploaded {
+            self.gl_state.invalidate();
+        }
+        if info.blank {
+            return;
+        }
+        // Scale the fixed-size raster down/up to the target cell. Render size is
+        // tied to the advance so a full-width glyph fills its cell.
+        let sf = (CJK_ADVANCE_UNITS * scale) / crate::backend::glyphs::RASTER_PX;
+        let gw = info.w * sf;
+        let gh = info.h * sf;
+        let gx = x + info.xmin * sf;
+        // Sit on a baseline a bit above the bitmap-font cell bottom; fontdue's
+        // `ymin` is baseline→bitmap-bottom (y-up), so screen-top = baseline -
+        // (ymin + height). CJK_BASELINE_UNITS is the tunable vertical anchor.
+        let baseline = y + CJK_BASELINE_UNITS * scale;
+        let gy = baseline - (info.ymin + info.h) * sf;
+        if gw <= 0.0 || gh <= 0.0 {
+            return;
+        }
+        let mat = Matrix {
+            a: gw,
+            b: 0.0,
+            c: 0.0,
+            d: gh,
+            tx: swf::Twips::from_pixels(gx as f64),
+            ty: swf::Twips::from_pixels(gy as f64),
+        };
+        let world = self.world_matrix(&mat);
+        // Atlas is white with alpha = coverage; tint by the text colour.
+        let mult = [
+            color.r as f32 / 255.0,
+            color.g as f32 / 255.0,
+            color.b as f32 / 255.0,
+            color.a as f32 / 255.0,
+        ];
+        let add = [0.0, 0.0, 0.0, 0.0];
+        self.use_bitmap(&world, &mult, &add, tex, &info.uv);
+        self.gl_state.bind_vao(self.bitmap_vao);
+        unsafe {
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+        }
     }
 
     /// Draw the pause-modal overlay on top of whatever's already in the

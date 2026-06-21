@@ -1,4 +1,4 @@
-//! UI string localization (EN / FR / ES / RU / DE / IT / PT).
+//! UI string localization (EN / FR / ES / RU / DE / IT / PT / ZH).
 //!
 //! All on-screen text routes through `draw_text` (render.rs), which only
 //! carries an uppercase pixel font. ASCII lowercase is folded to uppercase
@@ -28,6 +28,7 @@ pub enum Lang {
     De,
     It,
     Pt,
+    Zh,
 }
 
 impl Lang {
@@ -40,6 +41,7 @@ impl Lang {
             Lang::De => 4,
             Lang::It => 5,
             Lang::Pt => 6,
+            Lang::Zh => 7,
         }
     }
     pub fn from_index(i: usize) -> Lang {
@@ -50,6 +52,7 @@ impl Lang {
             4 => Lang::De,
             5 => Lang::It,
             6 => Lang::Pt,
+            7 => Lang::Zh,
             _ => Lang::En,
         }
     }
@@ -62,6 +65,7 @@ impl Lang {
             Lang::De => "de",
             Lang::It => "it",
             Lang::Pt => "pt",
+            Lang::Zh => "zh",
         }
     }
     pub fn from_code(s: &str) -> Option<Lang> {
@@ -73,6 +77,7 @@ impl Lang {
             "de" => Some(Lang::De),
             "it" => Some(Lang::It),
             "pt" => Some(Lang::Pt),
+            "zh" => Some(Lang::Zh),
             _ => None,
         }
     }
@@ -87,13 +92,23 @@ impl Lang {
             Lang::De => "DEUTSCH",
             Lang::It => "ITALIANO",
             Lang::Pt => "PORTUGU\u{00CA}S", // PORTUGUÊS
+            // Drawn via the shared-font atlas (CJK is not in the bitmap font).
+            Lang::Zh => "\u{4E2D}\u{6587}", // 中文
         }
     }
 }
 
 /// Order of languages in the picker (matches `Lang` index order).
-pub const PICKER_LANGS: &[Lang] =
-    &[Lang::En, Lang::Fr, Lang::Es, Lang::Ru, Lang::De, Lang::It, Lang::Pt];
+pub const PICKER_LANGS: &[Lang] = &[
+    Lang::En,
+    Lang::Fr,
+    Lang::Es,
+    Lang::Ru,
+    Lang::De,
+    Lang::It,
+    Lang::Pt,
+    Lang::Zh,
+];
 
 /// Every translatable UI string. One instance per language below.
 pub struct Strings {
@@ -1255,6 +1270,152 @@ const PT: Strings = Strings {
     kbd_suggest_guide: "Abre uma issue P\u{00DA}BLICA no GitHub. Sua ideia / sugest\u{00E3}o para o FlashNX.",
 };
 
+// Simplified Chinese (issue #41). CJK has no case, so unlike the Latin tables
+// these are written verbatim; they render through the shared-font glyph atlas
+// (backend/glyphs.rs), while the ASCII parts (button names, paths, URLs) still
+// come from the 5x7 bitmap font (folded to uppercase). Button-hint footers keep
+// ASCII ":" / spacing for parity with the other locales; prose uses Chinese
+// punctuation. The kbd_* strings go to the Switch software keyboard (full
+// Unicode), so they read as natural mixed Chinese + Latin.
+const ZH: Strings = Strings {
+    menu_resume: "继续",
+    menu_keys: "按键",
+    menu_restart: "重新开始",
+    menu_quit: "退出",
+    menu_cursor: "光标",
+    pause_title: "暂停",
+    pause_footer: "A:确定   B:取消   上/下:导航",
+    keys_title: "按键",
+    keys_footer: "A:编辑   X:玩家1/2   B:返回   上/下:导航",
+    keys_dropdown_footer: "A:确定   B:取消   上/下:导航",
+    none: "(无)",
+    flash_mouse_left: "左键单击",
+    flash_mouse_right: "右键单击",
+    flash_space: "空格",
+    flash_enter: "回车",
+    flash_escape: "Esc",
+    flash_shift: "Shift",
+    flash_control: "Ctrl",
+    flash_alt: "Alt",
+    flash_tab: "Tab",
+    flash_backspace: "退格",
+    flash_up: "上",
+    flash_down: "下",
+    flash_left: "左",
+    flash_right: "右",
+    empty_title: "没有游戏",
+    empty_l1: "将 .SWF 文件放入",
+    empty_l2: "SDMC:/FLASHNX/   或   SDMC:/SWITCH/FLASHNX/",
+    empty_l3: "然后重启 FLASHNX。",
+    empty_footer: "Y:在线导入   -:退出",
+    list_footer: "L/R:标签  A:开始  Y:排序  -:搜索  +:选项",
+    applet_title: "小程序模式",
+    applet_notice: "启动游戏需要应用的全部内存，小程序模式没有。在自制软件菜单中，按住 R 选择标题（或使用转发器）以全内存启动 FLASHNX。",
+    options_title: "选项",
+    opt_keys: "按键",
+    opt_rename: "重命名",
+    opt_edit: "编辑",
+    opt_delete: "删除",
+    opt_back: "返回",
+    options_footer: "A:确定   B:返回",
+    del_title: "删除？",
+    del_l1: ".swf 文件、存档 (.sol)、",
+    del_l2: "按键和别名都将被删除。",
+    del_l3: "此操作无法撤销。",
+    del_footer: "A: 删除     B: 取消",
+    dist_title: "在线导入",
+    dist_add: "+ 添加网址",
+    dist_list_footer: "A:启动   X:FLASHPOINT   +:选项   L/R:标签",
+    dist_subtitle: "从 ARCHIVE.ORG 下载 SWF",
+    dist_press_a: "按 A 输入网址",
+    dist_example1: "示例: HTTPS://ARCHIVE.ORG/DETAILS/<ITEM-ID>",
+    dist_example2: "或直接输入 <ITEM-ID>",
+    dist_history: "历史记录",
+    dist_hint_zr: "ZR : 直接加载此网址",
+    dist_hint_a: "A  : 输入 / 编辑网址（键盘）",
+    dist_hint_lr: "L / R : 上一个 / 下一个网址",
+    dist_footer_hist: "ZR:打开  A:编辑  ZL:删除  L/R:导航  Y:本地  -:退出",
+    dist_footer_nohist: "A:输入网址   Y:返回本地   -:退出",
+    files_title: "远程文件",
+    files_filter: "筛选",
+    files_footer: "A:下载   Y:排序   -:搜索   L/R:翻页   B:返回",
+    dl_title: "下载中",
+    dl_footer: "B:取消",
+    err_title: "错误",
+    err_footer: "A/B:确定",
+    settings_title: "设置",
+    set_keys: "默认按键",
+    set_language: "语言",
+    set_quit: "退出",
+    set_cursor_speed: "光标速度",
+    set_back: "返回",
+    set_report_bug: "报告问题",
+    tab_play: "游戏",
+    tab_import: "导入",
+    tab_settings: "设置",
+    set_covers: "在线封面",
+    lbl_on: "开",
+    lbl_off: "关",
+    opt_cover: "封面",
+    opt_favorite: "收藏",
+    opt_unfavorite: "取消收藏",
+    cover_title: "选择封面",
+    cover_footer: "A: 选择   -: 搜索   上/下: 移动   B: 返回",
+    cover_off_notice: "在设置中启用在线封面",
+    cover_none: "无结果",
+    fp_title: "FLASHPOINT",
+    fp_footer: "A:下载   Y:排序   +:信息   ZL+ZR:筛选 {}   B:返回",
+    fp_details_title: "详情",
+    fp_details_dev: "开发者",
+    fp_details_publisher: "发行商",
+    fp_details_date: "发行日期",
+    fp_details_size: "下载大小",
+    fp_details_footer: "B:返回",
+    sort_title: "排序方式",
+    sort_footer: "A:选择   X:反向   B:返回",
+    sort_alpha: "名称",
+    sort_recent: "添加时间",
+    sort_played: "最常玩",
+    sort_size: "大小",
+    played_label: "已玩",
+    sort_recent_played: "最近玩过",
+    sort_dev: "开发者",
+    multifile: "多文件",
+    sort_dir_asc: "升序",
+    sort_dir_desc: "降序",
+    settings_footer: "L/R:标签   A:确定",
+    lang_title: "语言",
+    lang_footer: "A:确定   B:取消",
+    histdel_title: "删除网址？",
+    histdel_msg: "从历史记录中移除此网址？",
+    err_too_large: "ARCHIVE.ORG 响应过大 (>4 MB)。此项目对当前版本来说太大了。",
+    err_https: "HTTPS 失败 ({})。请检查时钟、WIFI 和网址。",
+    err_json: "无法读取 ARCHIVE.ORG 的 JSON: {}",
+    err_json_no_files: "JSON 中没有 \"files\" 字段",
+    err_dl_start: "无法开始下载（代码 {}）。",
+    err_dl_failed: "下载失败（代码 {}）",
+    err_dl_cancelled: "下载已被用户取消。",
+    err_url_invalid: "网址无效。应为 ARCHIVE.ORG 网址，例如 https://archive.org/details/<id>，或直接输入 <id>。",
+    err_no_swf: "在此 ARCHIVE.ORG 项目中未找到 .SWF 文件。",
+    kbd_url_header: "FlashNX - 在线导入",
+    kbd_url_guide: "archive.org 项目网址（例如 https://archive.org/download/your-game-id）",
+    kbd_rename_header: "FlashNX - 重命名游戏",
+    kbd_rename_guide: "显示名称（留空以恢复文件名）",
+    kbd_search_header: "FlashNX - 搜索",
+    kbd_search_guide: "按文件名筛选（留空 = 显示全部）",
+    bug_pick_title: "报告问题",
+    bug_pick_footer: "A:选择   B:返回   上/下:导航",
+    bug_no_games: "暂无可报告的游戏。请先导入或放入一个 .SWF。",
+    bug_ok_title: "谢谢！",
+    bug_ok_msg: "你的报告已发送。感谢你帮助改进 FLASHNX。",
+    bug_fail_title: "失败",
+    kbd_bug_header: "FlashNX - 报告问题",
+    kbd_bug_guide: "将打开一个公开的 GitHub issue。请描述问题。可选：你的 @用户名。",
+    set_suggest: "提出建议",
+    kbd_suggest_header: "FlashNX - 提出建议",
+    kbd_suggest_guide: "将打开一个公开的 GitHub issue。你对 FlashNX 的想法 / 建议。",
+};
+
 /// Current language, as a `Lang` index. Default English; overridden by
 /// `init()` at boot from settings.json / system language.
 static CURRENT: AtomicU8 = AtomicU8::new(0);
@@ -1295,6 +1456,7 @@ pub fn s() -> &'static Strings {
         Lang::De => &DE,
         Lang::It => &IT,
         Lang::Pt => &PT,
+        Lang::Zh => &ZH,
     }
 }
 
@@ -1320,6 +1482,8 @@ pub fn files_found(n: usize) -> std::string::String {
         Lang::It => std::format!("{} FILE .SWF TROVATI", n),
         Lang::Pt if n == 1 => "1 ARQUIVO .SWF ENCONTRADO".into(),
         Lang::Pt => std::format!("{} ARQUIVOS .SWF ENCONTRADOS", n),
+        // Chinese has no plural agreement: a count phrasing reads naturally.
+        Lang::Zh => std::format!("\u{627E}\u{5230} .SWF \u{6587}\u{4EF6}: {}", n), // 找到 .SWF 文件: {}
     }
 }
 
@@ -1433,7 +1597,7 @@ pub fn save(lang: Lang) -> bool {
 
 extern "C" {
     /// Switch system language → our index (0 En, 1 Fr, 2 Es, 3 Ru, 4 De,
-    /// 5 It, 6 Pt), or -1 if unsupported / detection failed. Defined in
+    /// 5 It, 6 Pt, 7 Zh), or -1 if unsupported / detection failed. Defined in
     /// cpp/src/ruffle_bridge.cpp.
     fn ruffle_detect_system_lang() -> core::ffi::c_int;
 }
@@ -1455,7 +1619,7 @@ pub fn init() {
     }
     // 2. Otherwise follow the console's system language if we support it.
     let sys = unsafe { ruffle_detect_system_lang() };
-    if sys >= 0 && sys <= 6 {
+    if sys >= 0 && sys <= 7 {
         set(Lang::from_index(sys as usize));
         return;
     }
