@@ -25,6 +25,7 @@ mod menu;
 mod net;
 mod player;
 mod playtime;
+mod profiles;
 mod sd;
 mod sources;
 

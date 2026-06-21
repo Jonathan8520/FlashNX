@@ -41,6 +41,14 @@ pub struct Keymap {
     /// empty map gets the P2 defaults via `merge_fallback_defaults_p2`).
     #[serde(default)]
     pub bindings_p2: BTreeMap<std::string::String, std::string::String>,
+    /// Provenance of these bindings (issue #20, community control profiles), so
+    /// the UI never clobbers hand-made controls silently:
+    ///   "" / "default" = untouched fallback,
+    ///   "user"         = edited by hand in the TOUCHES editor,
+    ///   "community:<id>" = an applied shared profile.
+    /// `#[serde(default)]` keeps pre-v1.4.0 keymaps loading (they read as "").
+    #[serde(default)]
+    pub source: std::string::String,
 }
 
 /// Hardcoded fallback baked into the .nro. Mirrors what `cpp/src/main.cpp`
@@ -145,6 +153,7 @@ fn fallback_keymap() -> Keymap {
         version: 1,
         bindings,
         bindings_p2: p2_default_bindings(),
+        source: "default".into(),
     }
 }
 
@@ -415,8 +424,137 @@ pub fn set_binding(button: &str, flash_key: Option<&str>) -> bool {
                 map.insert(button.into(), std::string::String::new());
             }
         }
+        // The user just edited by hand → mark the keymap as user-authored so a
+        // later community profile (#20) asks before overwriting it.
+        km.source = "user".into();
     }
     save_sidecar()
+}
+
+// ── Community profiles (issue #20): provenance-aware apply / revert ──────────
+// These operate on a per-game sidecar FILE directly (by basename), not on the
+// active in-memory keymap — they're driven from the library OPTIONS list before
+// a game launches, so the file is what the next `init_for_swf` will read.
+
+fn keymap_read_path(basename: &str) -> Option<std::string::String> {
+    find_user_path(&std::format!("{}.keymap.json", basename))
+}
+fn keymap_write_path(basename: &str) -> std::string::String {
+    primary_path(&std::format!("{}.keymap.json", basename))
+}
+fn keymap_backup_path(basename: &str) -> std::string::String {
+    primary_path(&std::format!("{}.keymap.bak.json", basename))
+}
+
+fn read_sidecar_file(basename: &str) -> Option<Keymap> {
+    let txt = read_json_file(&keymap_read_path(basename)?)?;
+    serde_json::from_str::<Keymap>(&txt).ok()
+}
+
+fn write_keymap_file(path: &str, km: &Keymap) -> bool {
+    let json = match serde_json::to_string_pretty(km) {
+        Ok(s) => s,
+        Err(e) => {
+            log(std::format!("keymap: serialize for apply failed: {}\n", e));
+            return false;
+        }
+    };
+    match File::create(path) {
+        Ok(mut f) => {
+            let ok = f.write_all(json.as_bytes()).is_ok();
+            if ok {
+                crate::sd::commit();
+            }
+            ok
+        }
+        Err(e) => {
+            log(std::format!("keymap: create {} failed: {}\n", path, e));
+            false
+        }
+    }
+}
+
+/// Provenance of the on-disk sidecar for `basename` (see `Keymap::source`).
+/// "default" when there is no sidecar (the game runs on the fallback).
+// Wired by the library OPTIONS profile UI (#20, next increment).
+#[allow(dead_code)]
+pub fn provenance(basename: &str) -> std::string::String {
+    match read_sidecar_file(basename) {
+        Some(k) if !k.source.is_empty() => k.source,
+        // A sidecar with no source tag is a pre-v1.4.0 file; only hand edits
+        // ever wrote a per-game sidecar, so assume "user" and protect it.
+        Some(_) => "user".into(),
+        None => "default".into(),
+    }
+}
+
+/// True when a `revert_profile` would restore a hand-made keymap (a backup
+/// exists from a previous `apply_keymap` over user-authored controls).
+#[allow(dead_code)]
+pub fn has_backup(basename: &str) -> bool {
+    std::path::Path::new(&keymap_backup_path(basename)).exists()
+}
+
+/// Apply `km` as the sidecar for `basename`. NON-DESTRUCTIVE: if the existing
+/// sidecar was hand-authored ("user"), it's copied to `<basename>.keymap.bak.json`
+/// first so `revert_profile` can bring it back. `km.source` should already say
+/// where it came from (e.g. "community:<id>"). Returns false on write failure.
+pub fn apply_keymap(basename: &str, km: &Keymap) -> bool {
+    if let Some(existing) = read_sidecar_file(basename) {
+        // Back up anything that isn't already a community profile — i.e. real
+        // user work, including legacy untagged sidecars (source == "").
+        if !existing.source.starts_with("community:") {
+            if let Some(src) = keymap_read_path(basename) {
+                // Best-effort backup; an unwritable SD still lets the apply go
+                // through (the user simply won't have a one-tap revert).
+                let _ = std::fs::copy(&src, keymap_backup_path(basename));
+            }
+        }
+    }
+    let ok = write_keymap_file(&keymap_write_path(basename), km);
+    // If this game's keymap is the one currently loaded in memory, drop it so a
+    // re-entry reloads the freshly written file instead of the stale map.
+    if ok {
+        if let Ok(g) = ACTIVE_BASENAME.lock() {
+            if g.as_deref() == Some(basename) {
+                if let Ok(mut k) = ACTIVE_KEYMAP.lock() {
+                    *k = None;
+                }
+            }
+        }
+    }
+    ok
+}
+
+/// Undo an applied profile for `basename`: restore the hand-made backup if one
+/// exists, else remove the sidecar so the game falls back to the defaults.
+#[allow(dead_code)]
+pub fn revert_profile(basename: &str) -> bool {
+    let dst = keymap_write_path(basename);
+    let bak = keymap_backup_path(basename);
+    let ok = if std::path::Path::new(&bak).exists() {
+        // Restore the backup, then drop it.
+        let restored = std::fs::copy(&bak, &dst).is_ok();
+        if restored {
+            let _ = std::fs::remove_file(&bak);
+        }
+        restored
+    } else {
+        // No hand-made keymap to restore → revert to the fallback default.
+        let _ = std::fs::remove_file(&dst);
+        true
+    };
+    if ok {
+        crate::sd::commit();
+        if let Ok(g) = ACTIVE_BASENAME.lock() {
+            if g.as_deref() == Some(basename) {
+                if let Ok(mut k) = ACTIVE_KEYMAP.lock() {
+                    *k = None;
+                }
+            }
+        }
+    }
+    ok
 }
 
 /// Persist the active keymap to `sdmc:/ruffle/<basename>.keymap.json`. Auto

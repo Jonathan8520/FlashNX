@@ -87,6 +87,39 @@ function buildIssue(r) {
     };
   }
 
+  // Community control profile candidate (issue #20). The app sends a game's
+  // controls + match keys; a maintainer curates accepted ones into the catalog.
+  // The keymap JSON is fenced so it pastes straight into a profile file.
+  if (r.kind === "profile") {
+    const title = s(r.title, 120) || "(unknown game)";
+    const profile = {
+      schema: 1,
+      id: "",
+      game: { title, fp_uuid: s(r.fp_uuid, 64), swf_hash: s(r.swf_hash, 32) },
+      author: "",
+      verified: false,
+      bindings: r.bindings && typeof r.bindings === "object" ? r.bindings : {},
+      bindings_p2:
+        r.bindings_p2 && typeof r.bindings_p2 === "object" ? r.bindings_p2 : {},
+    };
+    const meta = [
+      ["Game", title],
+      ["Flashpoint UUID", s(r.fp_uuid, 64) || "(none)"],
+      ["SWF hash", s(r.swf_hash, 32) || "(none)"],
+      ["App version", s(r.app_version, 16)],
+      ["Language", s(r.lang, 8)],
+    ]
+      .map(([k, v]) => `| ${k} | ${v} |`)
+      .join("\n");
+    const body =
+      `Shared from inside FlashNX (anonymous community control profile).\n\n` +
+      `### Match keys\n\n| Field | Value |\n| --- | --- |\n${meta}\n\n` +
+      `### Profile\n\n\`\`\`json\n` +
+      JSON.stringify(profile, null, 2) +
+      `\n\`\`\`\n`;
+    return { title: `[profile] ${title}`, body, labels: ["profile"] };
+  }
+
   // Bug report (default).
   const game = s(r.game, 120) || "(unknown game)";
   const meta = [
