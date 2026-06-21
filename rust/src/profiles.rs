@@ -137,6 +137,9 @@ pub enum MatchKind {
 pub struct Match {
     pub profile: Profile,
     pub kind: MatchKind,
+    /// "Most applied" popularity count from the relay (#20, Phase 3); 0 when
+    /// unknown / the counter is unavailable.
+    pub applied: u32,
 }
 
 /// Find profiles for a game identified by its Flashpoint UUID (may be empty),
@@ -157,7 +160,7 @@ pub fn matches_for(fp_uuid: &str, swf_hash: &str, title: &str) -> std::vec::Vec<
             None
         };
         if let Some(kind) = kind {
-            matches.push(Match { profile: p, kind });
+            matches.push(Match { profile: p, kind, applied: 0 });
         }
     }
     // Exact (UUID/hash) before fuzzy (title); then verified; then completeness.
@@ -252,7 +255,7 @@ fn online_matches_for(fp_uuid: &str, swf_hash: &str, title: &str) -> std::vec::V
                     .ok()
                     .and_then(|t| serde_json::from_str::<Profile>(&t).ok())
                 {
-                    out.push(Match { profile: p, kind });
+                    out.push(Match { profile: p, kind, applied: 0 });
                 }
             }
             Err(err) => {
@@ -275,14 +278,72 @@ pub fn all_matches_for(fp_uuid: &str, swf_hash: &str, title: &str) -> std::vec::
             matches.push(m);
         }
     }
+    // Popularity signal (#20, Phase 3): tag each with its "most applied" count.
+    let counts = fetch_counts();
+    for m in matches.iter_mut() {
+        m.applied = counts.get(&m.profile.id).copied().unwrap_or(0);
+    }
     matches.sort_by(|a, b| {
         let exact = |m: &Match| m.kind != MatchKind::Title;
         exact(b)
             .cmp(&exact(a))
             .then(b.profile.verified.cmp(&a.profile.verified))
+            .then(b.applied.cmp(&a.applied))
             .then(b.profile.completeness().cmp(&a.profile.completeness()))
     });
     matches
+}
+
+// ── Phase 3: "most applied" popularity counter (via the relay Worker + KV) ───
+
+/// Build a relay URL for `path` from the bug-report endpoint (same Worker).
+fn worker_url(path: &str) -> std::string::String {
+    let ep = crate::bugreport::BUG_REPORT_ENDPOINT;
+    let base = ep.strip_suffix("/report").unwrap_or(ep);
+    std::format!("{}{}", base, path)
+}
+
+static COUNTS: std::sync::Mutex<Option<std::collections::BTreeMap<std::string::String, u32>>> =
+    std::sync::Mutex::new(None);
+static COUNTS_TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Fetch + cache the per-profile apply counts (once per session). Empty on any
+/// failure (the picker then just orders by verified + completeness).
+fn fetch_counts() -> std::collections::BTreeMap<std::string::String, u32> {
+    use std::sync::atomic::Ordering;
+    if COUNTS_TRIED.load(Ordering::Relaxed) {
+        return COUNTS.lock().ok().and_then(|g| g.clone()).unwrap_or_default();
+    }
+    COUNTS_TRIED.store(true, Ordering::Relaxed);
+    let map = match crate::net::http_get(&worker_url("/counts"), 64 * 1024) {
+        Ok(bytes) => std::string::String::from_utf8(bytes)
+            .ok()
+            .and_then(|t| {
+                serde_json::from_str::<std::collections::BTreeMap<std::string::String, u32>>(&t).ok()
+            })
+            .unwrap_or_default(),
+        Err(_) => std::collections::BTreeMap::new(),
+    };
+    if let Ok(mut g) = COUNTS.lock() {
+        *g = Some(map.clone());
+    }
+    map
+}
+
+#[derive(serde::Serialize)]
+struct AppliedBody<'a> {
+    id: &'a str,
+}
+
+/// Best-effort: bump a profile's "applied" count on the relay (#20, Phase 3).
+/// Fire-and-forget — failures (offline, counter unconfigured) are ignored. Call
+/// from a hoisted flow; the POST blocks for the round-trip.
+pub fn record_applied(id: &str) {
+    let body = match serde_json::to_string(&AppliedBody { id }) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    let _ = crate::net::post_json(&worker_url("/applied"), &body, 4096);
 }
 
 /// Apply `profile` to `basename`'s keymap sidecar (non-destructive: backs up a

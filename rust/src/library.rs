@@ -1336,6 +1336,15 @@ pub fn input(button: &str) -> bool {
                 return true;
             }
         }
+        // A on the ProfileList = apply / revert a community profile (#20).
+        // Hoisted: applying bumps the relay popularity counter (a network POST)
+        // which must not run under the LIBRARY lock.
+        if let Screen::ProfileList { game_idx, selection } = screen_snap {
+            if button == "A" {
+                run_profile_list_action(game_idx, selection);
+                return true;
+            }
+        }
         // SEARCH is on Minus (-) now (was X). Hoisted because swkbd is a
         // synchronous fullscreen applet that must not run under the LIBRARY lock.
         if matches!(screen_snap, Screen::DistantFiles { .. }) && button == "Minus" {
@@ -1837,34 +1846,8 @@ fn handle_profile_list_input(s: &mut State, button: &str, game_idx: usize, mut s
         "Down" | "StickLDown" => {
             selection = if selection >= last { 0 } else { selection + 1 };
         }
-        "A" => {
-            let basename = s.entries.get(game_idx).map(|e| e.basename.clone());
-            if let Some(basename) = basename {
-                if selection < n {
-                    let profile = s.profile_matches[selection].profile.clone();
-                    let ok = crate::profiles::apply(&basename, &profile);
-                    s.bug_ok = ok;
-                    s.bug_msg = if ok {
-                        crate::loc::s().profile_applied_ok.to_string()
-                    } else {
-                        crate::loc::s().bug_fail_title.to_string()
-                    };
-                    s.screen = Screen::ProfileResult { game_idx };
-                    return;
-                } else if has_revert && selection == n {
-                    let ok = keymap::revert_profile(&basename);
-                    s.bug_ok = ok;
-                    s.bug_msg = if ok {
-                        crate::loc::s().profile_reverted_ok.to_string()
-                    } else {
-                        crate::loc::s().bug_fail_title.to_string()
-                    };
-                    s.screen = Screen::ProfileResult { game_idx };
-                    return;
-                }
-            }
-            // Notice row / nothing actionable — ignore A.
-        }
+        // "A" (apply / revert) is hoisted to `run_profile_list_action` — it does
+        // a network POST (popularity counter) that can't run under this lock.
         "B" | "Minus" => {
             // Back to OPTIONS, cursor on APPLIQUER (index 2).
             s.screen = Screen::OptionsModal { game_idx, selection: 2 };
@@ -1873,6 +1856,54 @@ fn handle_profile_list_input(s: &mut State, button: &str, game_idx: usize, mut s
         _ => {}
     }
     s.screen = Screen::ProfileList { game_idx, selection };
+}
+
+/// A on the community-profile picker (#20). Hoisted so the popularity-counter
+/// POST runs outside the LIBRARY lock. Snapshots what the selection means,
+/// applies / reverts (both non-destructive), bumps the counter on apply, then
+/// lands on a result toast.
+fn run_profile_list_action(game_idx: usize, selection: usize) {
+    enum Act {
+        Apply(crate::profiles::Profile, std::string::String),
+        Revert(std::string::String),
+        None,
+    }
+    let act = match LIBRARY.lock() {
+        Ok(g) => {
+            let n = g.profile_matches.len();
+            match g.entries.get(game_idx).map(|e| e.basename.clone()) {
+                Some(basename) if selection < n => {
+                    Act::Apply(g.profile_matches[selection].profile.clone(), basename)
+                }
+                Some(basename) if g.profile_can_revert && selection == n => Act::Revert(basename),
+                _ => Act::None,
+            }
+        }
+        Err(_) => Act::None,
+    };
+    let lc = crate::loc::s();
+    let (ok, msg) = match act {
+        Act::Apply(profile, basename) => {
+            let ok = crate::profiles::apply(&basename, &profile);
+            if ok {
+                // Best-effort popularity bump (network; failures ignored).
+                crate::profiles::record_applied(&profile.id);
+            }
+            let msg = if ok { lc.profile_applied_ok } else { lc.bug_fail_title };
+            (ok, msg.to_string())
+        }
+        Act::Revert(basename) => {
+            let ok = keymap::revert_profile(&basename);
+            let msg = if ok { lc.profile_reverted_ok } else { lc.bug_fail_title };
+            (ok, msg.to_string())
+        }
+        Act::None => return,
+    };
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.bug_ok = ok;
+        s.bug_msg = msg;
+        s.screen = Screen::ProfileResult { game_idx };
+    }
 }
 
 fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scroll: usize) {
@@ -3537,7 +3568,14 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 let mut rows: std::vec::Vec<std::string::String> = s
                     .profile_matches
                     .iter()
-                    .map(|m| m.profile.title().to_string())
+                    .map(|m| {
+                        if m.applied > 0 {
+                            // Show the "most applied" count as a popularity hint.
+                            std::format!("{} ({})", m.profile.title(), m.applied)
+                        } else {
+                            m.profile.title().to_string()
+                        }
+                    })
                     .collect();
                 if s.profile_can_revert {
                     rows.push(lc.profile_revert.to_string());

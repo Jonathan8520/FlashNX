@@ -17,12 +17,21 @@ const MAX_BODY = 16 * 1024; // generous cap; the app sends <2 KB
 
 export default {
   async fetch(request, env) {
-    if (request.method !== "POST") {
-      return json({ ok: false, error: "POST only" }, 405);
-    }
     const url = new URL(request.url);
+
+    // Community-profile "most applied" counter (#20, Phase 3), backed by KV.
+    if (url.pathname === "/applied" && request.method === "POST") {
+      return handleApplied(request, env);
+    }
+    if (url.pathname === "/counts" && request.method === "GET") {
+      return handleCounts(env);
+    }
+
     if (url.pathname !== "/report") {
       return json({ ok: false, error: "not found" }, 404);
+    }
+    if (request.method !== "POST") {
+      return json({ ok: false, error: "POST only" }, 405);
     }
 
     // Read + size-guard the body.
@@ -143,6 +152,42 @@ function buildIssue(r) {
     `### Game info\n\n| Field | Value |\n| --- | --- |\n${meta}\n`;
 
   return { title: `[in-app] ${game}`, body, labels: ["bug"] };
+}
+
+// Increment the apply count for a profile id (#20, Phase 3). No per-install
+// dedup yet — a user re-applying the same profile bumps it slightly, which is
+// fine for a low-stakes "most applied" signal. Needs the PROFILES_KV binding
+// (see wrangler.toml); without it this no-ops so the app degrades gracefully.
+async function handleApplied(request, env) {
+  if (!env.PROFILES_KV) return json({ ok: false, error: "kv not configured" });
+  let r;
+  try {
+    r = JSON.parse(await request.text());
+  } catch {
+    return json({ ok: false, error: "bad json" }, 400);
+  }
+  const id = String(r.id || "").slice(0, 64);
+  if (!id) return json({ ok: false, error: "missing id" }, 400);
+  const key = `count:${id}`;
+  const cur = parseInt((await env.PROFILES_KV.get(key)) || "0", 10) || 0;
+  await env.PROFILES_KV.put(key, String(cur + 1));
+  return json({ ok: true, count: cur + 1 });
+}
+
+// Return { "<id>": <applyCount>, ... } for all profiles (#20, Phase 3).
+async function handleCounts(env) {
+  if (!env.PROFILES_KV) return json({});
+  const out = {};
+  let cursor;
+  do {
+    const list = await env.PROFILES_KV.list({ prefix: "count:", cursor });
+    for (const k of list.keys) {
+      const id = k.name.slice("count:".length);
+      out[id] = parseInt((await env.PROFILES_KV.get(k.name)) || "0", 10) || 0;
+    }
+    cursor = list.list_complete ? undefined : list.cursor;
+  } while (cursor);
+  return json(out);
 }
 
 function json(obj, status = 200) {
