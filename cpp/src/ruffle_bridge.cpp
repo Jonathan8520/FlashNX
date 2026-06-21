@@ -22,7 +22,8 @@ extern "C" void ruffle_log_cstr(const char* msg) {
 }
 
 // Map the console's system language to FlashNX's locale index:
-//   0 = English, 1 = French, 2 = Spanish, 3 = Russian, -1 = unsupported.
+//   0 = English, 1 = French, 2 = Spanish, 3 = Russian, 4 = German,
+//   5 = Italian, 6 = Portuguese, -1 = unsupported.
 // Called once from loc::init() when no settings.json language is stored.
 extern "C" int ruffle_detect_system_lang(void) {
     if (R_FAILED(setInitialize())) return -1;
@@ -39,6 +40,10 @@ extern "C" int ruffle_detect_system_lang(void) {
             case SetLanguage_ES:
             case SetLanguage_ES419: idx = 2; break;
             case SetLanguage_RU:    idx = 3; break;
+            case SetLanguage_DE:    idx = 4; break;
+            case SetLanguage_IT:    idx = 5; break;
+            case SetLanguage_PT:
+            case SetLanguage_PTBR:  idx = 6; break;
             default:                idx = -1; break;
         }
     }

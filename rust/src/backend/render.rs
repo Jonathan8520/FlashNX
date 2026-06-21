@@ -162,6 +162,22 @@ static GLYPHS: &[(char, Glyph)] = &[
     ('\u{00C7}', [" ####", "#    ", "#    ", "#    ", "#    ", " ####", "  #  "]), // Ç (cedilla below)
     ('\u{00BF}', ["  #  ", "     ", "  #  ", " #   ", "#    ", "#   #", " ### "]), // ¿
     ('\u{00A1}', ["  #  ", "     ", "  #  ", "  #  ", "  #  ", "  #  ", "  #  "]), // ¡
+    // Umlaut / circumflex / tilde / grave uppercase Latin for German, Italian
+    // and Portuguese. Same compressed-body convention as the French/Spanish
+    // accents above (diacritic on row 0, blank row 1, letter body on rows 2-6).
+    // The umlaut and circumflex share the row-0 " # # " mark: no single locale
+    // uses both an umlaut-X and a circumflex-X, so the glyphs never collide
+    // on screen (German Ä vs Portuguese Â, etc.).
+    ('\u{00C4}', [" # # ", "     ", " ### ", "#   #", "#####", "#   #", "#   #"]), // Ä
+    ('\u{00D6}', [" # # ", "     ", " ### ", "#   #", "#   #", "#   #", " ### "]), // Ö
+    ('\u{00DC}', [" # # ", "     ", "#   #", "#   #", "#   #", "#   #", " ### "]), // Ü
+    ('\u{00C2}', [" # # ", "     ", " ### ", "#   #", "#####", "#   #", "#   #"]), // Â
+    ('\u{00D4}', [" # # ", "     ", " ### ", "#   #", "#   #", "#   #", " ### "]), // Ô
+    ('\u{00C3}', [" ### ", "     ", " ### ", "#   #", "#####", "#   #", "#   #"]), // Ã
+    ('\u{00D5}', [" ### ", "     ", " ### ", "#   #", "#   #", "#   #", " ### "]), // Õ
+    ('\u{00CC}', [" ##  ", "     ", " ### ", "  #  ", "  #  ", "  #  ", " ### "]), // Ì
+    ('\u{00D2}', [" ##  ", "     ", " ### ", "#   #", "#   #", "#   #", " ### "]), // Ò
+    ('\u{00D9}', [" ##  ", "     ", "#   #", "#   #", "#   #", "#   #", " ### "]), // Ù
     // Cyrillic uppercase (Russian locale). draw_text does not case-fold
     // non-ASCII, so RU strings are written uppercase to hit these directly.
     ('\u{0410}', [" ### ", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"]), // А
