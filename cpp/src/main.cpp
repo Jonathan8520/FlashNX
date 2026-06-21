@@ -92,7 +92,7 @@ static ButtonBinding BINDINGS[] = {
     { "L",            HidNpadButton_L,            SK_NONE },
     { "R",            HidNpadButton_R,            SK_NONE },
     { "ZL",           HidNpadButton_ZL,           SK_NONE },
-    // ZR is keymap-driven now (defaults to "Clic gauche"). The legacy hardcoded
+    // ZR is keymap-driven now (defaults to "Left click"). The legacy hardcoded
     // ZR left-click below only kicks in when ZR is UNBOUND (old sidecars), so
     // those games don't lose their click. Touch is always left-click.
     { "ZR",           HidNpadButton_ZR,           SK_NONE },
@@ -813,7 +813,7 @@ static void worker_entry(void* arg) {
         }
 
         // Click: touch tap → left mouse button. ZR (and any other button) is now
-        // fully keymap-driven (ZR defaults to "Clic gauche"), handled in the
+        // fully keymap-driven (ZR defaults to "Left click"), handled in the
         // BINDINGS loop above — there's no hardcoded ZR path anymore.
         if (touch_pressed && !touch_was_pressed) {
             ruffle_handle_mouse_button(true);

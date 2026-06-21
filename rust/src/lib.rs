@@ -1284,7 +1284,7 @@ pub extern "C" fn ruffle_handle_mouse_button(down: bool) {
     handle_mouse_button_impl(MouseButton::Left, down);
 }
 
-/// Right mouse button at the cursor (a button bound to "Clic droit"). Lets Flash
+/// Right mouse button at the cursor (a button bound to "Right click"). Lets Flash
 /// games that use the right click (context actions, secondary fire) be played
 /// without a physical mouse.
 #[no_mangle]

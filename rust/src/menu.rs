@@ -8,7 +8,7 @@
 //!     navigate, A opens the dropdown for the focused row, B / Minus close.
 //!
 //!   - **Dropdown** — list of available Flash keys (`keymap::ALL_FLASH_KEYS`,
-//!     with index 0 = "(aucune)" to unbind). Up/down navigate, A commits
+//!     with index 0 = "(none)" to unbind). Up/down navigate, A commits
 //!     (saves sidecar immediately, sets `dirty` flag so C++ repopulates its
 //!     BINDINGS table on the next frame), B cancels back to the list.
 //!
@@ -139,7 +139,7 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
             let dropdown_sel = current
                 .as_deref()
                 .and_then(|k| keymap::ALL_FLASH_KEYS.iter().position(|x| *x == k))
-                .unwrap_or(0); // index 0 = "(aucune)"
+                .unwrap_or(0); // index 0 = "(none)"
             let dropdown_scroll = clamp_dropdown_scroll(0, dropdown_sel);
             s.screen = Screen::Dropdown {
                 button_idx: selection,

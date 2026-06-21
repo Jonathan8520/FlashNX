@@ -56,8 +56,8 @@ pub const FALLBACK_BINDINGS: &[(&str, &str)] = &[
     ("R",            "Enter"),  // "Press Start" prompts
     ("Plus",         "P"),      // standard in-game pause key
     ("L",            "Escape"),
-    ("ZR",           "Clic gauche"), // primary click (also the legacy hardcoded ZR)
-    ("ZL",           "Clic droit"),  // secondary click
+    ("ZR",           "Left click"),  // primary click (also the legacy hardcoded ZR)
+    ("ZL",           "Right click"), // secondary click
     ("Left",         "Left"),
     ("Right",        "Right"),
     ("Up",           "Up"),
@@ -90,12 +90,14 @@ pub const EDITABLE_BUTTONS: &[&str] = &[
     "StickLPress", "StickRPress",
 ];
 
-/// Flash-key options shown in the TOUCHES dropdown. Index 0 ("(aucune)")
+/// Flash-key options shown in the TOUCHES dropdown. Index 0 ("(none)")
 /// unbinds the button. Must be a superset of what `flash_key_name_to_sk`
 /// recognises — additions here without a matching `flash_key_name_to_sk`
-/// arm will log "unknown Flash key" at lookup time.
+/// arm will log "unknown Flash key" at lookup time. These are the CANONICAL,
+/// language-stable names written to the keymap file; the TOUCHES editor shows
+/// `flash_key_display(name)` (translated) but always stores the name verbatim.
 pub const ALL_FLASH_KEYS: &[&str] = &[
-    "(aucune)",
+    "(none)",
     // Common modifier / nav keys first (most used in Flash games).
     "Space",
     "Enter",
@@ -113,8 +115,8 @@ pub const ALL_FLASH_KEYS: &[&str] = &[
     "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
     // Mouse clicks (at the cursor) — for games that need clicking from buttons
     // rather than the touchscreen. Routed to the mouse, not a key event.
-    "Clic gauche",
-    "Clic droit",
+    "Left click",
+    "Right click",
 ];
 
 /// SWF basename the keymap was loaded for. Used by `save_sidecar` to know
@@ -157,6 +159,25 @@ fn merge_fallback_defaults(km: &mut Keymap) {
         km.bindings
             .entry((*btn).into())
             .or_insert_with(|| (*key).into());
+    }
+}
+
+/// v1.4.0: the mouse-click pseudo-keys used to be stored under French
+/// identifiers ("Clic gauche"/"Clic droit"). Rewrite them in-memory to the
+/// English canonical names ("Left click"/"Right click") on load, so the editor
+/// dropdown + display match and the file is rewritten to English the next time
+/// the user edits a binding. Old files keep working untouched until then —
+/// `flash_key_name_to_sk` still accepts the French names. Applied to both the
+/// P1 and P2 maps.
+fn migrate_legacy_key_names(km: &mut Keymap) {
+    for map in [&mut km.bindings, &mut km.bindings_p2] {
+        for v in map.values_mut() {
+            if v.as_str() == "Clic gauche" {
+                *v = "Left click".into();
+            } else if v.as_str() == "Clic droit" {
+                *v = "Right click".into();
+            }
+        }
     }
 }
 
@@ -210,6 +231,8 @@ fn parse_keymap(json: &str, source: &str) -> Option<Keymap> {
                     ));
                 }
             }
+            // Upgrade pre-v1.4.0 French mouse-click identifiers to English.
+            migrate_legacy_key_names(&mut km);
             Some(km)
         }
         Err(e) => {
@@ -559,7 +582,11 @@ pub fn flash_key_display(name: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
     let lc = crate::loc::s();
     let translated: &'static str = match name {
-        "(aucune)" => lc.none,
+        "(none)" => lc.none,
+        "Left click" => lc.flash_mouse_left,
+        "Right click" => lc.flash_mouse_right,
+        // Back-compat: pre-v1.4.0 keymaps stored the clicks in French. Kept so a
+        // hand-edited / not-yet-migrated value still gets a translated label.
         "Clic gauche" => lc.flash_mouse_left,
         "Clic droit" => lc.flash_mouse_right,
         "Space" => lc.flash_space,
@@ -613,6 +640,10 @@ fn flash_key_name_to_sk(name: &str) -> core::ffi::c_int {
         "6" => crate::SK_6, "7" => crate::SK_7, "8" => crate::SK_8,
         "9" => crate::SK_9,
         // Mouse-click pseudo-keys (routed to the mouse, not the keyboard).
+        "Left click" => crate::SK_MOUSE_LEFT,
+        "Right click" => crate::SK_MOUSE_RIGHT,
+        // Back-compat: pre-v1.4.0 keymaps stored these in French. Accepted so
+        // existing files keep resolving even before they're rewritten in English.
         "Clic gauche" => crate::SK_MOUSE_LEFT,
         "Clic droit" => crate::SK_MOUSE_RIGHT,
         other => {
