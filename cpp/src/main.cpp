@@ -127,10 +127,14 @@ static constexpr size_t BINDINGS_COUNT = sizeof(BINDINGS) / sizeof(BINDINGS[0]);
 // via the P2 keymap. Same buttons/masks as BINDINGS, different keys.
 static int BINDINGS_P2_KEYS[BINDINGS_COUNT];
 
-// True when the user bound any StickR* DIRECTION (not the press): the right stick
-// then acts as a d-pad (its key bindings fire) instead of moving the mouse
-// cursor. Recomputed whenever the keymap is (re)loaded.
+// True when the user bound any StickR*/StickL* DIRECTION (not the press): that
+// stick then acts as a d-pad (its key bindings fire) instead of moving the
+// mouse cursor. Both default differently — the left stick is bound to the arrow
+// keys by default (so it stays a d-pad), the right stick to nothing (so it's
+// the cursor) — but the rule is symmetric: clear a stick's directions and it
+// becomes a cursor. Recomputed whenever the keymap is (re)loaded.
 static bool g_right_stick_dpad = false;
+static bool g_left_stick_dpad = false;
 
 // Buttons forwarded to the Rust TOUCHES sub-screen / library state.
 // Names match what `keymap::EDITABLE_BUTTONS` exposes. `repeat = true`
@@ -245,18 +249,19 @@ static void populate_bindings_from_keymap(void) {
         BINDINGS[i].key = ruffle_keymap_lookup(BINDINGS[i].name);
         BINDINGS_P2_KEYS[i] = ruffle_keymap_lookup_p2(BINDINGS[i].name); // #40
     }
-    // Right stick = d-pad as soon as any StickR* DIRECTION is bound; otherwise it
-    // stays the mouse cursor in-game. "StickRPress" (n[6]=='P') is excluded — the
-    // stick CLICK doesn't change the cursor/d-pad behaviour.
+    // A stick = d-pad as soon as any of its DIRECTION sub-buttons is bound;
+    // otherwise it stays the mouse cursor in-game. "Stick?Press" (n[6]=='P') is
+    // the analog CLICK and is excluded — it doesn't change cursor/d-pad mode.
+    // n[5] is 'R'/'L' (StickR.../StickL...). All "St…" binding names are sticks.
     g_right_stick_dpad = false;
+    g_left_stick_dpad = false;
     for (size_t i = 0; i < BINDINGS_COUNT; ++i) {
         const char* n = BINDINGS[i].name;
-        const bool is_stick_r_dir =
-            n[0] == 'S' && n[1] == 't' && n[5] == 'R' && n[6] != 'P'; // "StickR{U,D,L,R}..."
-        if (is_stick_r_dir && BINDINGS[i].key != SK_NONE) {
-            g_right_stick_dpad = true;
-            break;
-        }
+        const bool is_stick_dir =
+            n[0] == 'S' && n[1] == 't' && n[6] != 'P'; // "Stick{L,R}{U,D,L,R}..."
+        if (!is_stick_dir || BINDINGS[i].key == SK_NONE) continue;
+        if (n[5] == 'R') g_right_stick_dpad = true;
+        else if (n[5] == 'L') g_left_stick_dpad = true;
     }
     // Quick visibility into what the loaded keymap resolved to. Helps the
     // user confirm their edits to keymap.json took effect.
@@ -763,6 +768,25 @@ static void worker_entry(void* arg) {
             if (rsy >  STICK_DEADZONE || rsy < -STICK_DEADZONE) {
                 // Switch right stick Y is positive-up; screen Y is positive-down.
                 cursor_y -= (rsy / STICK_MAX) * g_cursor_speed;
+                moved = true;
+            }
+        }
+
+        // Left analog stick → cursor too, when it isn't bound as a d-pad (same
+        // rule as the right stick). By default the left stick is the arrow keys
+        // (so this is skipped); clear its direction bindings in TOUCHES and it
+        // drives the cursor. Both sticks feed the one shared cursor.
+        if (!g_left_stick_dpad) {
+            const HidAnalogStickState ls = padGetStickPos(&pad, 0);
+            const float lsx = (float)ls.x;
+            const float lsy = (float)ls.y;
+            if (lsx >  STICK_DEADZONE || lsx < -STICK_DEADZONE) {
+                cursor_x += (lsx / STICK_MAX) * g_cursor_speed;
+                moved = true;
+            }
+            if (lsy >  STICK_DEADZONE || lsy < -STICK_DEADZONE) {
+                // Switch left stick Y is positive-up; screen Y is positive-down.
+                cursor_y -= (lsy / STICK_MAX) * g_cursor_speed;
                 moved = true;
             }
         }
