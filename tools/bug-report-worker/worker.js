@@ -50,6 +50,14 @@ export default {
       return json({ ok: false, error: "worker not configured" }, 500);
     }
 
+    // Community profile shares are committed STRAIGHT to the repo (#20 auto-push)
+    // instead of opening an issue, so the catalog self-updates with no manual
+    // curation — the community sorts quality out via the "most applied" counter.
+    // Requires the token to have "Contents: write" on the repo.
+    if (r.kind === "profile") {
+      return handleProfileShare(r, env);
+    }
+
     const issue = buildIssue(r);
     const ghUrl = `https://api.github.com/repos/${env.GITHUB_REPO}/issues`;
     const gh = await fetch(ghUrl, {
@@ -94,39 +102,6 @@ function buildIssue(r) {
         `### Suggestion\n\n${descBlock}${env}\n`,
       labels: ["enhancement"],
     };
-  }
-
-  // Community control profile candidate (issue #20). The app sends a game's
-  // controls + match keys; a maintainer curates accepted ones into the catalog.
-  // The keymap JSON is fenced so it pastes straight into a profile file.
-  if (r.kind === "profile") {
-    const title = s(r.title, 120) || "(unknown game)";
-    const profile = {
-      schema: 1,
-      id: "",
-      game: { title, fp_uuid: s(r.fp_uuid, 64), swf_hash: s(r.swf_hash, 32) },
-      author: "",
-      verified: false,
-      bindings: r.bindings && typeof r.bindings === "object" ? r.bindings : {},
-      bindings_p2:
-        r.bindings_p2 && typeof r.bindings_p2 === "object" ? r.bindings_p2 : {},
-    };
-    const meta = [
-      ["Game", title],
-      ["Flashpoint UUID", s(r.fp_uuid, 64) || "(none)"],
-      ["SWF hash", s(r.swf_hash, 32) || "(none)"],
-      ["App version", s(r.app_version, 16)],
-      ["Language", s(r.lang, 8)],
-    ]
-      .map(([k, v]) => `| ${k} | ${v} |`)
-      .join("\n");
-    const body =
-      `Shared from inside FlashNX (anonymous community control profile).\n\n` +
-      `### Match keys\n\n| Field | Value |\n| --- | --- |\n${meta}\n\n` +
-      `### Profile\n\n\`\`\`json\n` +
-      JSON.stringify(profile, null, 2) +
-      `\n\`\`\`\n`;
-    return { title: `[profile] ${title}`, body, labels: ["profile"] };
   }
 
   // Bug report (default).
@@ -188,6 +163,77 @@ async function handleCounts(env) {
     cursor = list.list_complete ? undefined : list.cursor;
   } while (cursor);
   return json(out);
+}
+
+// Commit a shared profile straight into community-profiles/ (#20 auto-push).
+// The GitHub Action then rebuilds index.json on push, so it goes live with no
+// manual step. Profiles land `verified: false`; the picker sorts verified +
+// "most applied" first, so the community surfaces quality on its own.
+async function handleProfileShare(r, env) {
+  const s = (v, n = 200) => String(v ?? "").slice(0, n);
+  const title = s(r.title, 120) || "Unknown game";
+  const fpUuid = s(r.fp_uuid, 64);
+  const swfHash = s(r.swf_hash, 32);
+  // Stable id: a slug of the title + a short hash/uuid suffix for uniqueness.
+  const slug =
+    title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40) || "profile";
+  const suffix = (swfHash || fpUuid || "").slice(0, 8);
+  const id = suffix ? `${slug}-${suffix}` : slug;
+
+  const profile = {
+    schema: 1,
+    id,
+    game: { title, fp_uuid: fpUuid, swf_hash: swfHash },
+    author: "",
+    verified: false,
+    bindings: r.bindings && typeof r.bindings === "object" ? r.bindings : {},
+    bindings_p2:
+      r.bindings_p2 && typeof r.bindings_p2 === "object" ? r.bindings_p2 : {},
+  };
+  const content = JSON.stringify(profile, null, 2) + "\n";
+  const path = `community-profiles/${id}.profile.json`;
+  const url = `https://api.github.com/repos/${env.GITHUB_REPO}/contents/${path}`;
+  const headers = {
+    Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "FlashNX-bug-report-worker",
+    "Content-Type": "application/json",
+  };
+  // Updating an existing file needs its blob sha.
+  let sha;
+  const head = await fetch(url, { headers });
+  if (head.ok) {
+    const j = await head.json();
+    sha = j.sha;
+  }
+  const put = await fetch(url, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({
+      message: `community profile: ${title} (${id})`,
+      content: b64utf8(content),
+      ...(sha ? { sha } : {}),
+    }),
+  });
+  if (!put.ok) {
+    const detail = await put.text();
+    return json({ ok: false, error: `github ${put.status}`, detail }, 502);
+  }
+  const data = await put.json();
+  return json({ ok: true, url: (data.content && data.content.html_url) || "" });
+}
+
+// Base64 of a UTF-8 string (btoa is Latin1-only; game titles can be CJK).
+function b64utf8(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin);
 }
 
 function json(obj, status = 200) {
