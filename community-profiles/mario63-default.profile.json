@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "id": "mario63-default",
+  "game": { "title": "Super Mario 63", "fp_uuid": "", "swf_hash": "" },
+  "author": "FlashNX",
+  "verified": true,
+  "notes": "Default platformer layout: arrows move, A jump, B/X actions, ZR/ZL mouse.",
+  "bindings": {
+    "A": "Space",
+    "B": "Z",
+    "X": "X",
+    "Y": "Shift",
+    "R": "Enter",
+    "Plus": "P",
+    "L": "Escape",
+    "ZR": "Left click",
+    "ZL": "Right click",
+    "Left": "Left",
+    "Right": "Right",
+    "Up": "Up",
+    "Down": "Down",
+    "StickLLeft": "Left",
+    "StickLRight": "Right",
+    "StickLUp": "Up",
+    "StickLDown": "Down"
+  },
+  "bindings_p2": {}
+}

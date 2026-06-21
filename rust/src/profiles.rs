@@ -171,6 +171,120 @@ pub fn matches_for(fp_uuid: &str, swf_hash: &str, title: &str) -> std::vec::Vec<
     matches
 }
 
+// ── Phase 2: online community catalog ───────────────────────────────────────
+//
+// The full catalog lives in the repo under `community-profiles/`: an
+// `index.json` (match keys + file names) plus one `*.profile.json` per entry.
+// The app fetches the index once per session, then a profile file on demand
+// when it matches the open game. Maintainer-curated (issues → files), so the
+// app only ever READS these — see `share()` for the contribution side.
+
+const ONLINE_BASE: &str =
+    "https://raw.githubusercontent.com/Jonathan8520/FlashNX/main/community-profiles/";
+
+#[derive(Debug, Clone, Deserialize)]
+struct IndexEntry {
+    id: std::string::String,
+    #[serde(default)]
+    title: std::string::String,
+    #[serde(default)]
+    fp_uuid: std::string::String,
+    #[serde(default)]
+    swf_hash: std::string::String,
+    /// File under `community-profiles/` (e.g. "mario63-default.profile.json").
+    file: std::string::String,
+    #[serde(default)]
+    verified: bool,
+}
+
+static ONLINE_INDEX: std::sync::Mutex<Option<std::vec::Vec<IndexEntry>>> =
+    std::sync::Mutex::new(None);
+static INDEX_TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Fetch + cache the online catalog index (once per session). A network failure
+/// caches an empty index so we don't re-hit it on every picker open.
+fn fetch_index() -> std::vec::Vec<IndexEntry> {
+    use std::sync::atomic::Ordering;
+    if INDEX_TRIED.load(Ordering::Relaxed) {
+        return ONLINE_INDEX
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_default();
+    }
+    INDEX_TRIED.store(true, Ordering::Relaxed);
+    let url = std::format!("{}index.json", ONLINE_BASE);
+    let entries = match crate::net::http_get(&url, 64 * 1024) {
+        Ok(bytes) => std::string::String::from_utf8(bytes)
+            .ok()
+            .and_then(|t| serde_json::from_str::<std::vec::Vec<IndexEntry>>(&t).ok())
+            .unwrap_or_default(),
+        Err(e) => {
+            crate::net::log(&std::format!("profiles: index fetch failed: {}\n", e));
+            std::vec::Vec::new()
+        }
+    };
+    if let Ok(mut g) = ONLINE_INDEX.lock() {
+        *g = Some(entries.clone());
+    }
+    entries
+}
+
+/// Online profiles matching the game (one HTTPS GET per matching index entry,
+/// usually 0–2). Network-bound — only call from a hoisted flow.
+fn online_matches_for(fp_uuid: &str, swf_hash: &str, title: &str) -> std::vec::Vec<Match> {
+    let title_norm = normalize_title(title);
+    let mut out = std::vec::Vec::new();
+    for e in fetch_index() {
+        let kind = if !fp_uuid.is_empty() && e.fp_uuid == fp_uuid {
+            MatchKind::Uuid
+        } else if !swf_hash.is_empty() && e.swf_hash == swf_hash {
+            MatchKind::Hash
+        } else if !title_norm.is_empty() && normalize_title(&e.title) == title_norm {
+            MatchKind::Title
+        } else {
+            continue;
+        };
+        let url = std::format!("{}{}", ONLINE_BASE, e.file);
+        match crate::net::http_get(&url, 16 * 1024) {
+            Ok(bytes) => {
+                if let Some(p) = std::string::String::from_utf8(bytes)
+                    .ok()
+                    .and_then(|t| serde_json::from_str::<Profile>(&t).ok())
+                {
+                    out.push(Match { profile: p, kind });
+                }
+            }
+            Err(err) => {
+                crate::net::log(&std::format!("profiles: fetch {} failed: {}\n", e.file, err))
+            }
+        }
+    }
+    out
+}
+
+/// All matches (bundled + online), deduped by profile id (bundled wins), sorted
+/// exact-before-fuzzy / verified / completeness. The entry point the picker
+/// uses; does network, so call it hoisted.
+pub fn all_matches_for(fp_uuid: &str, swf_hash: &str, title: &str) -> std::vec::Vec<Match> {
+    let mut matches = matches_for(fp_uuid, swf_hash, title); // bundled
+    let mut seen: std::collections::BTreeSet<std::string::String> =
+        matches.iter().map(|m| m.profile.id.clone()).collect();
+    for m in online_matches_for(fp_uuid, swf_hash, title) {
+        if seen.insert(m.profile.id.clone()) {
+            matches.push(m);
+        }
+    }
+    matches.sort_by(|a, b| {
+        let exact = |m: &Match| m.kind != MatchKind::Title;
+        exact(b)
+            .cmp(&exact(a))
+            .then(b.profile.verified.cmp(&a.profile.verified))
+            .then(b.profile.completeness().cmp(&a.profile.completeness()))
+    });
+    matches
+}
+
 /// Apply `profile` to `basename`'s keymap sidecar (non-destructive: backs up a
 /// hand-made keymap first). Tags the result `source = "community:<id>"`.
 pub fn apply(basename: &str, profile: &Profile) -> bool {

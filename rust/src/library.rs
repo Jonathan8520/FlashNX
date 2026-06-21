@@ -1810,7 +1810,8 @@ fn run_open_profiles_flow(game_idx: usize) {
     };
     let swf_hash = crate::profiles::swf_hash_of(&path).unwrap_or_default();
     // fp_uuid not persisted yet (Phase 1b) → match by hash + title for now.
-    let matches = crate::profiles::matches_for("", &swf_hash, &title);
+    // all_matches_for merges the bundled catalog with the online one (network).
+    let matches = crate::profiles::all_matches_for("", &swf_hash, &title);
     let can_revert = keymap::has_backup(&basename)
         || keymap::provenance(&basename).starts_with("community:");
     if let Ok(mut s) = LIBRARY.lock() {

@@ -1,0 +1,36 @@
+name: Build community profiles index
+
+# Keep community-profiles/index.json in sync with the *.profile.json files.
+# A maintainer curates an in-app share (a `profile`-labelled issue) into a new
+# community-profiles/<id>.profile.json and pushes it; this rebuilds index.json.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "community-profiles/**.profile.json"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-index:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node tools/build-profiles-index.mjs
+      - name: Commit index if it changed
+        run: |
+          if git diff --quiet -- community-profiles/index.json; then
+            echo "index.json unchanged"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add community-profiles/index.json
+            git commit -m "chore(profiles): regenerate index.json"
+            git push
+          fi
