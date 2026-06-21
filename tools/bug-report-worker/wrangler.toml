@@ -7,11 +7,15 @@ GITHUB_REPO = "Jonathan8520/FlashNX"
 # GITHUB_TOKEN is a secret, not a plain var:
 #   wrangler secret put GITHUB_TOKEN
 
-# Community-profile "most applied" counter (#20, Phase 3). Create the namespace
-# once and paste its id below, then redeploy:
-#   wrangler kv namespace create PROFILES_KV
-# Without this binding, /applied and /counts no-op gracefully (the picker just
-# falls back to verified + completeness ordering).
-[[kv_namespaces]]
-binding = "PROFILES_KV"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+# Community-profile "most applied" counter (#20, Phase 3). OPTIONAL — left
+# commented so `wrangler deploy` works without it: profile sharing + everything
+# else run fine; only the popularity counter is inactive (/applied and /counts
+# no-op, and the picker just orders by verified + completeness).
+#
+# To enable the counter:
+#   1. wrangler kv namespace create PROFILES_KV
+#   2. uncomment the 3 lines below and paste the printed id
+#   3. wrangler deploy
+# [[kv_namespaces]]
+# binding = "PROFILES_KV"
+# id = "PASTE_KV_NAMESPACE_ID_HERE"
