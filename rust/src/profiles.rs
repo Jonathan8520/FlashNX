@@ -176,14 +176,17 @@ pub fn matches_for(fp_uuid: &str, swf_hash: &str, title: &str) -> std::vec::Vec<
 
 // ── Phase 2: online community catalog ───────────────────────────────────────
 //
-// The full catalog lives in the repo under `community-profiles/`: an
-// `index.json` (match keys + file names) plus one `*.profile.json` per entry.
-// The app fetches the index once per session, then a profile file on demand
-// when it matches the open game. Maintainer-curated (issues → files), so the
-// app only ever READS these — see `share()` for the contribution side.
+// The catalog lives on the dedicated `community-profiles` branch: an
+// `index.json` (match keys + file names) plus one `<id>.profile.json` per entry,
+// at the branch root. The app fetches the index once per session, then a profile
+// file on demand when it matches the open game. Shares are auto-pushed onto this
+// branch by the relay Worker (`handleProfileShare`), which also maintains
+// index.json — the app only ever READS these (see `share()` for the upload side).
 
+// Dedicated `community-profiles` branch (orphan, code-free) so shares never
+// touch `main`. index.json + <id>.profile.json live at its root.
 const ONLINE_BASE: &str =
-    "https://raw.githubusercontent.com/Jonathan8520/FlashNX/main/community-profiles/";
+    "https://raw.githubusercontent.com/Jonathan8520/FlashNX/community-profiles/";
 
 #[derive(Debug, Clone, Deserialize)]
 struct IndexEntry {
@@ -194,7 +197,7 @@ struct IndexEntry {
     fp_uuid: std::string::String,
     #[serde(default)]
     swf_hash: std::string::String,
-    /// File under `community-profiles/` (e.g. "mario63-default.profile.json").
+    /// File at the branch root (e.g. "super-mario-63-abc12345.profile.json").
     file: std::string::String,
     #[serde(default)]
     verified: bool,
@@ -362,7 +365,8 @@ pub fn apply(basename: &str, profile: &Profile) -> bool {
 
 #[derive(serde::Serialize)]
 struct SharePayload<'a> {
-    /// Tells the relay Worker to open a `profile` issue (not a bug/suggestion).
+    /// Tells the relay Worker this is a profile share (auto-pushed), not a
+    /// bug/suggestion (which open issues).
     kind: &'a str,
     app_version: &'a str,
     lang: &'a str,
@@ -373,11 +377,11 @@ struct SharePayload<'a> {
     bindings_p2: &'a BTreeMap<std::string::String, std::string::String>,
 }
 
-/// Submit the player's current controls for a game as a community profile
-/// candidate. Goes through the SAME relay + endpoint as bug reports: the Worker
-/// opens a `profile`-labelled GitHub issue (no login, token stays server-side),
-/// which a maintainer curates into the catalog. Returns a localized error on
-/// failure.
+/// Submit the player's current controls for a game as a community profile.
+/// Goes through the SAME relay + endpoint as bug reports (no login, token stays
+/// server-side), but the Worker AUTO-PUSHES it straight onto the
+/// `community-profiles` branch (no manual curation). Returns a localized error
+/// on failure.
 pub fn share(
     title: &str,
     fp_uuid: &str,
