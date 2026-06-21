@@ -1,4 +1,4 @@
-name = "flashnx-bug-report"
+name = "flashnx"
 main = "worker.js"
 compatibility_date = "2024-11-01"
 
@@ -7,15 +7,9 @@ GITHUB_REPO = "Jonathan8520/FlashNX"
 # GITHUB_TOKEN is a secret, not a plain var:
 #   wrangler secret put GITHUB_TOKEN
 
-# Community-profile "most applied" counter (#20, Phase 3). OPTIONAL — left
-# commented so `wrangler deploy` works without it: profile sharing + everything
-# else run fine; only the popularity counter is inactive (/applied and /counts
-# no-op, and the picker just orders by verified + completeness).
-#
-# To enable the counter:
-#   1. wrangler kv namespace create PROFILES_KV
-#   2. uncomment the 3 lines below and paste the printed id
-#   3. wrangler deploy
-# [[kv_namespaces]]
-# binding = "PROFILES_KV"
-# id = "PASTE_KV_NAMESPACE_ID_HERE"
+# Community-profile "most applied" counter (#20, Phase 3). KV namespace created
+# with `wrangler kv namespace create PROFILES_KV`; backs /applied and /counts.
+# (The app degrades gracefully if this binding is ever removed.)
+[[kv_namespaces]]
+binding = "PROFILES_KV"
+id = "7e2c8186f131443595b13be6c22f5aa9"
