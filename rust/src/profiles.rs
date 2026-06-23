@@ -115,6 +115,73 @@ pub fn swf_hash_of(path: &str) -> Option<std::string::String> {
     Some(std::format!("{:016x}", hash))
 }
 
+extern "C" {
+    /// Monotonic system tick (`armGetSystemTick`). Only used here to SEED the
+    /// one-time install id — the custom getrandom backend is a fixed-seed LCG
+    /// (see `__getrandom_v03_custom` in lib.rs), so it can't give two installs
+    /// different ids on its own.
+    fn ruffle_tick_now() -> u64;
+}
+
+/// A short, per-INSTALL identifier (8 hex chars), generated once and persisted
+/// to `sdmc:/flashnx/install_id`. It's appended to every shared profile's id so
+/// two people sharing controls for the SAME game land on DIFFERENT files (they
+/// coexist in the catalog) instead of clobbering each other — while this same
+/// install re-sharing a game keeps the same id, so it UPDATES its own profile
+/// rather than piling up duplicates. Not an identity/login: it's only a dedup
+/// key, carries no personal data, and a fresh value on a reset SD is harmless.
+pub fn install_id() -> std::string::String {
+    // Reuse an existing id if one is on the SD (either root, for legacy installs).
+    for root in ["sdmc:/flashnx", "sdmc:/ruffle"] {
+        let p = std::format!("{}/install_id", root);
+        if let Some(txt) = read_small_file(&p) {
+            let t = txt.trim();
+            if t.len() >= 4 {
+                return t.chars().take(16).filter(|c| c.is_ascii_hexdigit()).collect();
+            }
+        }
+    }
+    // First run: seed an xorshift from the boot tick (differs per install/boot),
+    // mix a few rounds, keep 32 bits → 8 hex chars.
+    let mut state = unsafe { ruffle_tick_now() } ^ 0x9E37_79B9_7F4A_7C15;
+    if state == 0 {
+        state = 0x2545_F491_4F6C_DD1D; // never seed the xorshift with all-zero
+    }
+    for _ in 0..8 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+    }
+    let id = std::format!("{:08x}", state as u32);
+    // Persist best-effort. If the write fails the id just regenerates next boot
+    // (worst case: this install's future shares land as new files rather than
+    // updates — never a clobber of someone else's profile).
+    let path = "sdmc:/flashnx/install_id";
+    if std::fs::write(path, id.as_bytes()).is_ok() {
+        crate::sd::commit();
+    }
+    id
+}
+
+/// Read a tiny text file with the chunked-read workaround (Horizon newlib
+/// dislikes large `std::fs::read` buffers). Returns None if absent/unreadable.
+fn read_small_file(path: &str) -> Option<std::string::String> {
+    let mut file = File::open(path).ok()?;
+    let mut data = std::vec::Vec::new();
+    let mut buf = [0u8; 256];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => data.extend_from_slice(&buf[..n]),
+            Err(_) => return None,
+        }
+        if data.len() > 4096 {
+            break; // an install_id is 8 bytes; bail on anything absurd
+        }
+    }
+    std::string::String::from_utf8(data).ok()
+}
+
 /// Normalize a title for fuzzy matching: lowercase, keep only alphanumerics.
 /// "Super Mario 63!" and "super-mario_63" both become "supermario63".
 fn normalize_title(s: &str) -> std::string::String {
@@ -183,10 +250,69 @@ pub fn matches_for(fp_uuid: &str, swf_hash: &str, title: &str) -> std::vec::Vec<
 // branch by the relay Worker (`handleProfileShare`), which also maintains
 // index.json — the app only ever READS these (see `share()` for the upload side).
 
-// Dedicated `community-profiles` branch (orphan, code-free) so shares never
-// touch `main`. index.json + <id>.profile.json live at its root.
-const ONLINE_BASE: &str =
-    "https://raw.githubusercontent.com/Jonathan8520/FlashNX/community-profiles/";
+// We read the catalog through the GitHub **API** (contents endpoint) rather than
+// raw.githubusercontent.com. raw has BOTH a CDN cache AND an origin propagation
+// delay, so a just-shared profile wouldn't appear for seconds-to-minutes (a
+// `?cb=` busts the CDN but not the origin lag). The API reads straight from git
+// → always fresh. It returns the file as base64 JSON, which we decode.
+// Dedicated orphan `community-profiles` branch so shares never touch `main`.
+const GH_API_BASE: &str = "https://api.github.com/repos/Jonathan8520/FlashNX/contents/";
+const GH_REF: &str = "community-profiles";
+
+/// Fetch a file from the catalog branch via the GitHub API and return its text.
+/// The API responds `{ "content": "<base64>", "encoding": "base64" }`; we decode
+/// it. `_=<tick>` defeats any conditional caching. None on any failure (network,
+/// rate limit, missing file).
+fn gh_api_fetch_text(path: &str, cap: usize) -> Option<std::string::String> {
+    let url = std::format!(
+        "{}{}?ref={}&_={}",
+        GH_API_BASE,
+        path,
+        GH_REF,
+        unsafe { ruffle_tick_now() },
+    );
+    let bytes = crate::net::http_get(&url, cap).ok()?;
+    let text = std::string::String::from_utf8(bytes).ok()?;
+    #[derive(serde::Deserialize)]
+    struct ApiFile {
+        #[serde(default)]
+        content: std::string::String,
+    }
+    let f: ApiFile = serde_json::from_str(&text).ok()?;
+    let decoded = base64_decode(&f.content)?;
+    std::string::String::from_utf8(decoded).ok()
+}
+
+/// Minimal standard-base64 decoder (GitHub wraps `content` at 60 cols with
+/// newlines, which we skip). Avoids pulling a crate for this one use.
+fn base64_decode(s: &str) -> Option<std::vec::Vec<u8>> {
+    fn val(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None, // whitespace / padding → skipped
+        }
+    }
+    let mut out = std::vec::Vec::new();
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    for &c in s.as_bytes() {
+        if c == b'=' {
+            break;
+        }
+        let Some(v) = val(c) else { continue };
+        buf = (buf << 6) | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Some(out)
+}
 
 #[derive(Debug, Clone, Deserialize)]
 struct IndexEntry {
@@ -197,7 +323,9 @@ struct IndexEntry {
     fp_uuid: std::string::String,
     #[serde(default)]
     swf_hash: std::string::String,
-    /// File at the branch root (e.g. "super-mario-63-abc12345.profile.json").
+    /// Path of the profile file on the branch, relative to its root. Grouped
+    /// under a per-game folder now (e.g. "super-mario-63/super-mario-63-ab12-cd34
+    /// .profile.json"); the app just GETs it via the API, so the layout is opaque.
     file: std::string::String,
     #[serde(default)]
     verified: bool,
@@ -218,15 +346,16 @@ fn fetch_index() -> std::vec::Vec<IndexEntry> {
             .and_then(|g| g.clone())
             .unwrap_or_default();
     }
-    let url = std::format!("{}index.json", ONLINE_BASE);
-    match crate::net::http_get(&url, 64 * 1024) {
-        Ok(bytes) => {
-            let entries = std::string::String::from_utf8(bytes)
-                .ok()
-                .and_then(|t| serde_json::from_str::<std::vec::Vec<IndexEntry>>(&t).ok())
-                .unwrap_or_default();
-            // Cache ONLY a successful fetch, so a transient network failure (or
-            // a not-yet-propagated raw.githubusercontent cache) retries on the
+    // Fetch via the GitHub API (fresh; raw.githubusercontent lags new commits).
+    match gh_api_fetch_text("index.json", 256 * 1024) {
+        Some(text) => {
+            let entries =
+                serde_json::from_str::<std::vec::Vec<IndexEntry>>(&text).unwrap_or_default();
+            crate::net::log(&std::format!(
+                "profiles: index fetched ({} entries)\n",
+                entries.len(),
+            ));
+            // Cache ONLY a successful fetch, so a transient failure retries on the
             // next picker open instead of sticking empty for the whole session.
             if let Ok(mut g) = ONLINE_INDEX.lock() {
                 *g = Some(entries.clone());
@@ -234,10 +363,25 @@ fn fetch_index() -> std::vec::Vec<IndexEntry> {
             INDEX_TRIED.store(true, Ordering::Relaxed);
             entries
         }
-        Err(e) => {
-            crate::net::log(&std::format!("profiles: index fetch failed: {}\n", e));
+        None => {
+            crate::net::log("profiles: index fetch failed (api)\n");
             std::vec::Vec::new()
         }
+    }
+}
+
+/// Drop the cached online catalog + apply counts so the next picker open
+/// re-fetches them. Called after a share so the player sees their own profile
+/// appear without relaunching (we read via the GitHub API, which is fresh).
+pub fn invalidate_online_cache() {
+    use std::sync::atomic::Ordering;
+    INDEX_TRIED.store(false, Ordering::Relaxed);
+    if let Ok(mut g) = ONLINE_INDEX.lock() {
+        *g = None;
+    }
+    COUNTS_TRIED.store(false, Ordering::Relaxed);
+    if let Ok(mut g) = COUNTS.lock() {
+        *g = None;
     }
 }
 
@@ -256,19 +400,18 @@ fn online_matches_for(fp_uuid: &str, swf_hash: &str, title: &str) -> std::vec::V
         } else {
             continue;
         };
-        let url = std::format!("{}{}", ONLINE_BASE, e.file);
-        match crate::net::http_get(&url, 16 * 1024) {
-            Ok(bytes) => {
-                if let Some(p) = std::string::String::from_utf8(bytes)
-                    .ok()
-                    .and_then(|t| serde_json::from_str::<Profile>(&t).ok())
-                {
+        // Fetch the profile file via the API too (fresh): a file gets overwritten
+        // in place on re-share, and a just-shared file lags on raw — fetching it
+        // from the API means it shows up immediately.
+        match gh_api_fetch_text(&e.file, 64 * 1024) {
+            Some(text) => {
+                if let Ok(p) = serde_json::from_str::<Profile>(&text) {
                     out.push(Match { profile: p, kind, applied: 0 });
+                } else {
+                    crate::net::log(&std::format!("profiles: parse {} failed\n", e.file));
                 }
             }
-            Err(err) => {
-                crate::net::log(&std::format!("profiles: fetch {} failed: {}\n", e.file, err))
-            }
+            None => crate::net::log(&std::format!("profiles: fetch {} failed (api)\n", e.file)),
         }
     }
     out
@@ -378,6 +521,10 @@ struct SharePayload<'a> {
     title: &'a str,
     fp_uuid: &'a str,
     swf_hash: &'a str,
+    /// Per-install dedup suffix (see `install_id`): lets several people share
+    /// the same game without overwriting each other, while letting THIS install
+    /// update its own profile on a re-share.
+    install_id: &'a str,
     bindings: &'a BTreeMap<std::string::String, std::string::String>,
     bindings_p2: &'a BTreeMap<std::string::String, std::string::String>,
 }
@@ -387,12 +534,16 @@ struct SharePayload<'a> {
 /// server-side), but the Worker AUTO-PUSHES it straight onto the
 /// `community-profiles` branch (no manual curation). Returns a localized error
 /// on failure.
+/// Returns the catalog `id` the Worker assigned on success, so the caller can
+/// tag the local keymap as "this is now catalog profile <id>" (blocks pointless
+/// re-shares + marks it active in the picker).
 pub fn share(
     title: &str,
     fp_uuid: &str,
     swf_hash: &str,
     km: &Keymap,
-) -> Result<(), std::string::String> {
+) -> Result<std::string::String, std::string::String> {
+    let install = install_id();
     let payload = SharePayload {
         kind: "profile",
         app_version: crate::bugreport::APP_VERSION,
@@ -400,11 +551,37 @@ pub fn share(
         title,
         fp_uuid,
         swf_hash,
+        install_id: &install,
         bindings: &km.bindings,
         bindings_p2: &km.bindings_p2,
     };
     let body = serde_json::to_string(&payload)
         .map_err(|e| std::format!("encode failed: {}", e))?;
     crate::net::log(&std::format!("profiles: sharing '{}' ({} bytes)\n", title, body.len()));
-    crate::net::post_json(crate::bugreport::BUG_REPORT_ENDPOINT, &body, 16 * 1024).map(|_| ())
+    let resp = crate::net::post_json(crate::bugreport::BUG_REPORT_ENDPOINT, &body, 16 * 1024)?;
+    // Parse the Worker's { ok, id, error }. Previously we treated any HTTP
+    // response as success — a worker-side failure (e.g. token can't write) then
+    // showed a false "shared OK". Now an `ok:false` surfaces the real error.
+    #[derive(serde::Deserialize)]
+    struct ShareResp {
+        #[serde(default)]
+        ok: bool,
+        #[serde(default)]
+        id: std::string::String,
+        #[serde(default)]
+        error: std::string::String,
+    }
+    let parsed: ShareResp = std::string::String::from_utf8(resp)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(ShareResp { ok: false, id: std::string::String::new(), error: std::string::String::new() });
+    if parsed.ok {
+        Ok(parsed.id)
+    } else {
+        Err(if parsed.error.is_empty() {
+            crate::loc::s().bug_fail_title.to_string()
+        } else {
+            parsed.error
+        })
+    }
 }

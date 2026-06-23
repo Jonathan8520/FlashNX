@@ -282,11 +282,11 @@ static void populate_bindings_from_keymap(void) {
 // the `MENU_ITEMS` slice in [rust/src/backend/render.rs].
 enum MenuAction {
     MENU_RESUME       = 0,
-    MENU_TOUCHES      = 1,  // opens the keymap editor sub-screen (Rust-driven)
+    MENU_TOUCHES      = 1,  // opens the TOUCHES sub-menu (Rust-driven): edit /
+                           // apply / share / revert / cursor speed (#20 Opt 1)
     MENU_RESTART      = 2,
-    MENU_CURSOR_SPEED = 3,  // cycles the cursor-speed preset in place
-    MENU_QUIT         = 4,
-    MENU_COUNT        = 5,
+    MENU_QUIT         = 3,  // VITESSE moved INTO the TOUCHES sub-menu
+    MENU_COUNT        = 4,
 };
 
 // Viewport size — keep in sync with rust/src/lib.rs VIEWPORT_W/H.
@@ -714,12 +714,6 @@ static void worker_entry(void* arg) {
                     last_tick = ruffle_tick_now();
                     continue;
                 }
-                case MENU_CURSOR_SPEED:
-                    // Cycle to the next cursor-speed preset live, stay in the
-                    // menu (falls through to the re-render below with the new
-                    // value). Persists globally via the same path as REGLAGES.
-                    ruffle_cursor_speed_cycle();
-                    break;
                 case MENU_QUIT:
                     back_to_library = true;
                     break;

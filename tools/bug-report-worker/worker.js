@@ -180,16 +180,29 @@ async function handleProfileShare(r, env) {
   const title = s(r.title, 120) || "Unknown game";
   const fpUuid = s(r.fp_uuid, 64);
   const swfHash = s(r.swf_hash, 32);
-  // Stable id: a slug of the title + a short hash/uuid suffix for uniqueness.
+  // Per-INSTALL suffix (the app's `install_id`): this is what lets two people
+  // share controls for the SAME game land on DIFFERENT files (they coexist in
+  // the catalog) instead of one clobbering the other. The same install
+  // re-sharing a game reuses its id, so it UPDATES its own profile rather than
+  // accumulating duplicates.
+  const install = s(r.install_id, 16)
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "")
+    .slice(0, 8);
   const slug =
     title
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "")
       .slice(0, 40) || "profile";
-  const suffix = (swfHash || fpUuid || "").slice(0, 8);
-  const id = suffix ? `${slug}-${suffix}` : slug;
-  const file = `${id}.profile.json`;
+  const gameSuffix = (swfHash || fpUuid || "").slice(0, 8);
+  // id = slug + game-key + install-key. Joining only the non-empty parts keeps
+  // legacy bundled ids (no suffix) clean and tolerates a missing install_id.
+  const id = [slug, gameSuffix, install].filter(Boolean).join("-");
+  // Group profiles under a per-game folder so the branch is browsable when many
+  // pile up. The app fetches by the index's `file` field, so the path is opaque
+  // to it — only this folder + the index entry need to agree.
+  const file = `${slug}/${id}.profile.json`;
 
   const profile = {
     schema: 1,
@@ -201,82 +214,100 @@ async function handleProfileShare(r, env) {
     bindings_p2:
       r.bindings_p2 && typeof r.bindings_p2 === "object" ? r.bindings_p2 : {},
   };
+  const indexEntry = { id, title, fp_uuid: fpUuid, swf_hash: swfHash, file, verified: false };
 
-  // 1. The profile file.
-  const put = await putFile(
+  // ONE commit carries both the profile file AND the index.json upsert (the old
+  // Contents-API path made two separate commits per share). Git Data API.
+  const res = await commitShare(
     env,
     PROFILES_BRANCH,
     file,
     JSON.stringify(profile, null, 2) + "\n",
+    indexEntry,
     `profile: ${title} (${id})`
   );
-  if (!put.ok) return json({ ok: false, error: put.error }, 502);
-
-  // 2. Upsert its entry into index.json (same branch).
-  await upsertIndex(env, PROFILES_BRANCH, {
-    id,
-    title,
-    fp_uuid: fpUuid,
-    swf_hash: swfHash,
-    file,
-    verified: false,
-  });
-
+  if (!res.ok) return json({ ok: false, error: res.error }, 502);
   return json({ ok: true, id });
 }
 
-// PUT a UTF-8 file onto `branch` (create or update). Returns {ok} / {ok,error}.
-async function putFile(env, branch, path, content, message) {
-  const url = `https://api.github.com/repos/${env.GITHUB_REPO}/contents/${path}`;
+// Write `file` + an upserted index.json onto `branch` in a SINGLE commit, via
+// the Git Data API (ref -> base tree -> new tree -> commit -> move ref). Retries
+// on a non-fast-forward (422) when a concurrent share moved the branch tip
+// between our read and our ref update. Returns {ok} / {ok,error}.
+async function commitShare(env, branch, file, fileContent, indexEntry, message) {
   const headers = ghHeaders(env);
-  let sha;
-  const head = await fetch(`${url}?ref=${encodeURIComponent(branch)}`, { headers });
-  if (head.ok) sha = (await head.json()).sha;
-  const put = await fetch(url, {
-    method: "PUT",
-    headers,
-    body: JSON.stringify({ message, content: b64utf8(content), branch, ...(sha ? { sha } : {}) }),
-  });
-  if (!put.ok) {
-    return { ok: false, error: `github ${put.status}: ${(await put.text()).slice(0, 200)}` };
-  }
-  return { ok: true };
-}
-
-// Read index.json on `branch`, upsert `entry` (keyed by id), write it back.
-// One retry on a 409 (a concurrent share updated it between our read + write).
-async function upsertIndex(env, branch, entry) {
-  const url = `https://api.github.com/repos/${env.GITHUB_REPO}/contents/index.json`;
-  const headers = ghHeaders(env);
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const base = `https://api.github.com/repos/${env.GITHUB_REPO}`;
+  const ref = `heads/${encodeURIComponent(branch)}`;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    // 1. Current branch tip.
+    const refRes = await fetch(`${base}/git/ref/${ref}`, { headers });
+    if (!refRes.ok) {
+      return { ok: false, error: `ref ${refRes.status}: ${(await refRes.text()).slice(0, 200)}` };
+    }
+    const tipSha = (await refRes.json()).object.sha;
+    // 2. The tree that tip points at (so our new tree only changes 2 files).
+    const tipCommitRes = await fetch(`${base}/git/commits/${tipSha}`, { headers });
+    if (!tipCommitRes.ok) {
+      return { ok: false, error: `commit ${tipCommitRes.status}` };
+    }
+    const baseTree = (await tipCommitRes.json()).tree.sha;
+    // 3. Read the index.json AT THE TIP commit (pinned to tipSha, so the list we
+    //    upsert matches base_tree exactly) and upsert this entry.
     let list = [];
-    let sha;
-    const head = await fetch(`${url}?ref=${encodeURIComponent(branch)}`, { headers });
-    if (head.ok) {
-      const j = await head.json();
-      sha = j.sha;
+    const idxRes = await fetch(
+      `${base}/contents/index.json?ref=${tipSha}`,
+      { headers }
+    );
+    if (idxRes.ok) {
       try {
-        list = JSON.parse(atobUtf8(j.content));
+        list = JSON.parse(atobUtf8((await idxRes.json()).content));
       } catch {
         list = [];
       }
       if (!Array.isArray(list)) list = [];
     }
-    list = list.filter((e) => e && e.id !== entry.id);
-    list.push(entry);
+    list = list.filter((e) => e && e.id !== indexEntry.id);
+    list.push(indexEntry);
     list.sort((a, b) => String(a.id).localeCompare(String(b.id)));
-    const put = await fetch(url, {
-      method: "PUT",
+    // 4. New tree with BOTH files (content inline = blob created server-side).
+    const treeRes = await fetch(`${base}/git/trees`, {
+      method: "POST",
       headers,
       body: JSON.stringify({
-        message: `index: ${entry.id}`,
-        content: b64utf8(JSON.stringify(list, null, 2) + "\n"),
-        branch,
-        ...(sha ? { sha } : {}),
+        base_tree: baseTree,
+        tree: [
+          { path: file, mode: "100644", type: "blob", content: fileContent },
+          { path: "index.json", mode: "100644", type: "blob", content: JSON.stringify(list, null, 2) + "\n" },
+        ],
       }),
     });
-    if (put.ok || put.status !== 409) return;
+    if (!treeRes.ok) {
+      return { ok: false, error: `tree ${treeRes.status}: ${(await treeRes.text()).slice(0, 200)}` };
+    }
+    const newTree = (await treeRes.json()).sha;
+    // 5. The single commit.
+    const commitRes = await fetch(`${base}/git/commits`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ message, tree: newTree, parents: [tipSha] }),
+    });
+    if (!commitRes.ok) {
+      return { ok: false, error: `mkcommit ${commitRes.status}` };
+    }
+    const newCommit = (await commitRes.json()).sha;
+    // 6. Fast-forward the branch (refs, plural, for the update). 422 = the tip
+    //    moved under us (another share); rebuild on the new tip and retry.
+    const upd = await fetch(`${base}/git/refs/${ref}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ sha: newCommit, force: false }),
+    });
+    if (upd.ok) return { ok: true };
+    if (upd.status !== 422) {
+      return { ok: false, error: `updateref ${upd.status}: ${(await upd.text()).slice(0, 200)}` };
+    }
   }
+  return { ok: false, error: "updateref conflicted after retries" };
 }
 
 function ghHeaders(env) {
@@ -287,14 +318,6 @@ function ghHeaders(env) {
     "User-Agent": "FlashNX-bug-report-worker",
     "Content-Type": "application/json",
   };
-}
-
-// Base64 of a UTF-8 string (btoa is Latin1-only; game titles can be CJK).
-function b64utf8(str) {
-  const bytes = new TextEncoder().encode(str);
-  let bin = "";
-  for (const b of bytes) bin += String.fromCharCode(b);
-  return btoa(bin);
 }
 
 // Decode GitHub's base64 (newline-wrapped) file content as UTF-8.

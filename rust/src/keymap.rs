@@ -481,6 +481,18 @@ fn write_keymap_file(path: &str, km: &Keymap) -> bool {
     }
 }
 
+/// Tag `basename`'s keymap as catalog profile `id` (source = "community:<id>")
+/// after the user SHARES their own controls. Same tag as an APPLIED profile,
+/// because the meaning is the same: "these controls ARE catalog profile <id>".
+/// So the picker marks it active and re-sharing the unchanged keymap is blocked.
+/// Editing a key flips the source back to "user" (shareable again). Returns false
+/// on write failure.
+pub fn mark_shared(basename: &str, id: &str) -> bool {
+    let mut km = effective_for(basename);
+    km.source = std::format!("community:{}", id);
+    write_keymap_file(&keymap_write_path(basename), &km)
+}
+
 /// Provenance of the on-disk sidecar for `basename` (see `Keymap::source`).
 /// "default" when there is no sidecar (the game runs on the fallback).
 // Wired by the library OPTIONS profile UI (#20, next increment).
@@ -640,9 +652,53 @@ pub fn effective_for(basename: &str) -> Keymap {
     km
 }
 
+/// What `revert_profile` WOULD restore for `basename`, WITHOUT writing anything
+/// — used to preview the before/after of a revert. Mirrors `revert_profile`:
+/// the hand-made backup if one exists, else the global default (then fallback).
+pub fn revert_target(basename: &str) -> Keymap {
+    let bak = keymap_backup_path(basename);
+    let default = find_user_path("keymap_default.json");
+    let mut km = if std::path::Path::new(&bak).exists() {
+        read_json_file(&bak)
+            .and_then(|t| parse_keymap(&t, "share"))
+            .unwrap_or_else(|| try_default_or_fallback(default.as_deref()))
+    } else {
+        try_default_or_fallback(default.as_deref())
+    };
+    merge_fallback_defaults(&mut km);
+    merge_fallback_defaults_p2(&mut km);
+    km
+}
+
+/// Build "<button>: <current> -> <target>" diff lines for the P1 keys that differ
+/// between two binding maps (before/after of an apply or revert). Shared by the
+/// library + in-game profile previews (#20).
+pub fn binding_diff_rows(
+    current: &std::collections::BTreeMap<std::string::String, std::string::String>,
+    target: &std::collections::BTreeMap<std::string::String, std::string::String>,
+) -> std::vec::Vec<std::string::String> {
+    let none = crate::loc::s().none;
+    let disp = |k: &str| -> std::string::String {
+        if k.is_empty() {
+            none.to_string()
+        } else {
+            flash_key_display(k).into_owned()
+        }
+    };
+    let mut rows = std::vec::Vec::new();
+    for btn in EDITABLE_BUTTONS {
+        let cur = current.get(*btn).map(std::string::String::as_str).unwrap_or("");
+        let new = target.get(*btn).map(std::string::String::as_str).unwrap_or("");
+        if cur != new {
+            rows.push(std::format!("{}: {} -> {}", btn, disp(cur), disp(new)));
+        }
+    }
+    rows
+}
+
 /// The active game's basename, or None when no game is active / the global
 /// default is being edited. Cursor speed is per-GAME only.
-fn active_game_basename() -> Option<std::string::String> {
+pub(crate) fn active_game_basename() -> Option<std::string::String> {
     let g = ACTIVE_BASENAME.lock().ok()?;
     match g.as_ref() {
         Some(b) if b.as_str() != GLOBAL_SENTINEL => Some(b.clone()),
@@ -654,13 +710,33 @@ fn active_game_basename() -> Option<std::string::String> {
 /// its OWN tiny `<basename>.cursor` file (NOT the keymap) so changing pointer
 /// speed never rewrites or snapshots the key bindings. Read by C++ at launch.
 pub fn cursor_speed() -> i32 {
-    let Some(basename) = active_game_basename() else {
-        return -1;
-    };
+    match active_game_basename() {
+        Some(b) => cursor_speed_for(&b),
+        None => -1,
+    }
+}
+
+/// Per-game cursor-speed preset for an ARBITRARY game (by basename), or -1 if
+/// unset. Lets the library OPTIONS > TOUCHES sub-menu read a game's speed without
+/// that game being the active one (#20). Same `<basename>.cursor` file.
+pub fn cursor_speed_for(basename: &str) -> i32 {
     find_user_path(&std::format!("{}.cursor", basename))
         .and_then(|p| read_json_file(&p))
         .and_then(|s| s.trim().parse::<i32>().ok())
         .unwrap_or(-1)
+}
+
+/// Persist a cursor-speed preset for an ARBITRARY game (by basename). `idx < 0`
+/// clears the per-game file. Used by the library sub-menu (the in-game VITESSE
+/// uses `set_cursor_speed`, which targets the active game).
+pub fn set_cursor_speed_for(basename: &str, idx: i32) {
+    let path = primary_path(&std::format!("{}.cursor", basename));
+    if idx < 0 {
+        let _ = std::fs::remove_file(&path);
+    } else if std::fs::write(&path, std::format!("{}", idx).as_bytes()).is_err() {
+        return;
+    }
+    crate::sd::commit();
 }
 
 /// Persist the active GAME's per-game cursor-speed preset to `<basename>.cursor`.

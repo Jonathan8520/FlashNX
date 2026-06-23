@@ -80,7 +80,9 @@ use std::sync::Mutex;
 /// Pause-menu labels rendered by `draw_menu_overlay`. C++ maps the selected
 /// index from this slice to an action (Resume / Touches / Restart / Quit).
 /// Keep the order in sync with the `MENU_*` constants in `cpp/src/main.cpp`.
-pub const MENU_ITEMS: &[&str] = &["REPRENDRE", "TOUCHES", "REDEMARRER", "VITESSE", "QUITTER"];
+// VITESSE moved into the in-game TOUCHES sub-menu (#20 Option 1), so it's no
+// longer a top-level pause entry.
+pub const MENU_ITEMS: &[&str] = &["REPRENDRE", "TOUCHES", "REDEMARRER", "QUITTER"];
 
 /// 5×7 pixel glyphs for the pause menu. ASCII art keeps the data
 /// hand-editable: each row is exactly 5 chars wide, ' ' = off, anything
@@ -4780,19 +4782,18 @@ impl SwitchRenderBackend {
         // the panel scales in (in-game pause pop), like the library modals.
         self.fill_screen_dim(0x80_00_00_00);
 
-        // Centred panel — sized so 1280x720 fits 5 items + title comfortably.
-        // Last item (QUITTER) sits at panel_y + 130 + 4*50 = +330; the footer
-        // at PANEL_H - 40 must clear it, so PANEL_H grew from 380 (4 items) to
-        // 440 to keep the same ~70px gap above the help line.
+        // Centred panel, sized to the item count so it never has dead space
+        // (~60px/item: 380 for 4 items, 440 for 5, ...). Items sit at
+        // panel_y + 130 + i*50; the footer at panel_h - 40 clears the last one.
         const PANEL_W: f32 = 520.0;
-        const PANEL_H: f32 = 440.0;
+        let panel_h = 140.0 + MENU_ITEMS.len() as f32 * 60.0;
         let panel_x = (vw - PANEL_W) * 0.5;
-        let panel_y = (vh - PANEL_H) * 0.5;
+        let panel_y = (vh - panel_h) * 0.5;
         let panel = Matrix {
             a: PANEL_W,
             b: 0.0,
             c: 0.0,
-            d: PANEL_H,
+            d: panel_h,
             tx: swf::Twips::from_pixels(panel_x as f64),
             ty: swf::Twips::from_pixels(panel_y as f64),
         };
@@ -4805,7 +4806,7 @@ impl SwitchRenderBackend {
             a: PANEL_W,
             b: 0.0,
             c: 0.0,
-            d: PANEL_H,
+            d: panel_h,
             tx: swf::Twips::from_pixels(panel_x as f64),
             ty: swf::Twips::from_pixels(panel_y as f64),
         };
@@ -4859,14 +4860,9 @@ impl SwitchRenderBackend {
         // Pre-measure the longest item so all rows share a left margin.
         let lc = crate::loc::s();
         // Localized labels, same order/count as the MENU_ITEMS contract C++
-        // relies on for pause-menu navigation.
-        // Cursor speed shows its live value, e.g. "CURSEUR: x1.5", and cycles in
-        // place on A (C++ MENU_CURSOR_SPEED). Short label to fit the panel.
-        let m = unsafe { crate::library::ruffle_cursor_speed_mult_x10() };
-        let cursor_label = std::format!("{}: x{}.{}", lc.menu_cursor, m / 10, m % 10);
-        let items = [
-            lc.menu_resume, lc.menu_keys, lc.menu_restart, cursor_label.as_str(), lc.menu_quit,
-        ];
+        // relies on for pause-menu navigation. Cursor speed moved into the
+        // TOUCHES sub-menu (#20 Option 1), so it's not a top-level item anymore.
+        let items = [lc.menu_resume, lc.menu_keys, lc.menu_restart, lc.menu_quit];
         debug_assert_eq!(items.len(), MENU_ITEMS.len());
         let longest = items
             .iter()
@@ -4895,7 +4891,7 @@ impl SwitchRenderBackend {
         let help = crate::loc::s().pause_footer;
         let help_w = self.measure_text(help, HELP_SCALE);
         let help_x = panel_x + (PANEL_W - help_w) * 0.5;
-        let help_y = panel_y + PANEL_H - 40.0;
+        let help_y = panel_y + panel_h - 40.0;
         self.draw_text(
             help_x,
             help_y,
@@ -7727,6 +7723,63 @@ impl SwitchRenderBackend {
         } else {
             self.draw_centered_notice(lc.bug_fail_title, 0xFF5040, msg);
         }
+    }
+
+    /// Transient toast banner near the bottom of the screen (#20). `kind`: 0 =
+    /// success (green), 1 = error (red), 2 = info (blue). Non-blocking — drawn on
+    /// top of the current screen for a couple of seconds (the library loop counts
+    /// it down), so a share/apply/revert confirms without a full "thanks" modal.
+    pub fn draw_toast(&mut self, msg: &str, kind: u8) {
+        unsafe {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_STENCIL_TEST);
+        }
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+
+        const SCALE: f32 = 2.5;
+        const PAD: f32 = 28.0;
+        const H: f32 = 64.0;
+        let text_w = self.measure_text(msg, SCALE).max(1.0);
+        let max_w = vw - 80.0;
+        // Shrink the text if the banner would be wider than the screen allows.
+        let (scale, w) = if text_w + PAD * 2.0 > max_w {
+            (SCALE * (max_w - PAD * 2.0) / text_w, max_w)
+        } else {
+            (SCALE, text_w + PAD * 2.0)
+        };
+        let x = (vw - w) * 0.5;
+        let y = vh - H - 40.0;
+
+        // (background ARGB, border RGB) per kind.
+        let (bg, border) = match kind {
+            1 => (0xF0_3A_12_12u32, 0xFF5040u32), // error  — red
+            2 => (0xF0_10_28_3Au32, 0x2196F3u32), // info   — blue
+            _ => (0xF0_12_30_1Eu32, 0x4CAF50u32), // success — green
+        };
+        let panel = Matrix {
+            a: w, b: 0.0, c: 0.0, d: H,
+            tx: swf::Twips::from_pixels(x as f64),
+            ty: swf::Twips::from_pixels(y as f64),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(bg), panel);
+        <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(border, 255), panel);
+
+        let tw = self.measure_text(msg, scale);
+        self.draw_text(
+            x + (w - tw) * 0.5,
+            y + (H - 7.0 * scale) * 0.5,
+            scale,
+            msg,
+            swf::Color::from_rgb(0xFFFFFF, 255),
+        );
+
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
     }
 
     /// Language picker (Settings → LANGUAGE). `languages` are native display

@@ -144,6 +144,13 @@ static OVERRIDE_SWF_PATH: Mutex<Option<std::string::String>> = Mutex::new(None);
 /// multi-file game's sibling SWFs. Set on each successful read.
 static LAST_SWF_REAL_PATH: Mutex<Option<std::string::String>> = Mutex::new(None);
 
+/// On-SD path of the SWF currently loaded (the actual file, not the movie URL).
+/// Lets the in-game profiles sub-menu (#20 Option 1) hash the running game for
+/// catalog matching without a library entry. None before the first load.
+pub(crate) fn last_swf_real_path() -> Option<std::string::String> {
+    LAST_SWF_REAL_PATH.lock().ok().and_then(|g| g.clone())
+}
+
 /// Raw SWF bytes + synthesized URL. Populated by the first successful
 /// `find_and_load_swf` and reused on every subsequent `ruffle_init` for the
 /// SAME game (pause-menu REDEMARRER path) to avoid re-reading 15 MB from
@@ -864,8 +871,11 @@ pub extern "C" fn ruffle_keymap_set_cursor_speed(idx: c_int) {
 
 #[no_mangle]
 pub extern "C" fn ruffle_touches_open() {
-    menu::open();
-    // Scale the editor in, same pop as the library / pause modals.
+    // In-game, the pause TOUCHES entry now opens the sub-menu (#20 Option 1):
+    // edit / apply / share / revert / cursor speed. The library opens the editor
+    // directly via `menu::open()`.
+    menu::open_submenu();
+    // Scale the panel in, same pop as the library / pause modals.
     backend::render::modal_open_begin();
 }
 

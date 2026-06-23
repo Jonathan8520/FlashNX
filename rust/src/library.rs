@@ -136,23 +136,35 @@ pub(crate) enum Screen {
     /// styling, `State::bug_msg` is the (already-localized) message. A/B dismiss
     /// back to the RÉGLAGES tab.
     BugResult,
-    /// Result toast after sharing a game's controls as a community profile
-    /// (#20). Reuses `bug_ok`/`bug_msg` for styling + message; A/B dismiss back
-    /// to the game's OPTIONS modal (not the bug flow's RÉGLAGES tab).
-    ProfileResult { game_idx: usize },
-    /// Picker of community control profiles matching a game (#20, OPTIONS >
-    /// APPLIQUER). `selection` indexes `State::profile_matches` then a trailing
-    /// "revert" row when `State::profile_can_revert`. A applies / reverts.
+    /// TOUCHES sub-menu (#20 regroup): everything controls-related for a game in
+    /// one place. `selection` indexes [edit, apply, share, (revert)] — the revert
+    /// row is present only when `State::touches_can_revert`. Reached from OPTIONS
+    /// > TOUCHES; B returns to OPTIONS.
+    TouchesMenu { game_idx: usize, selection: usize },
+    /// Picker of community control profiles matching a game (#20, TOUCHES >
+    /// APPLIQUER). `selection` indexes `State::profile_matches`. A opens the
+    /// before/after preview; B returns to the TOUCHES sub-menu.
     ProfileList { game_idx: usize, selection: usize },
-    /// Confirm before sharing a game's controls (#20, OPTIONS > PARTAGER).
-    /// A confirms (POSTs, hoisted) → ProfileResult; B cancels back to OPTIONS.
+    /// Before/after preview of a profile (#20): the keys it changes, mine ->
+    /// profile. `profile_idx` indexes `State::profile_matches`; the diff lines are
+    /// snapshotted into `State::preview_rows`. A applies (hoisted), B → ProfileList.
+    ProfilePreview { game_idx: usize, profile_idx: usize },
+    /// Before/after preview of a REVERT (#20): current -> what revert restores
+    /// (backup or default). Diff lines in `State::preview_rows`. A reverts
+    /// (hoisted), B → TouchesMenu.
+    RevertPreview { game_idx: usize },
+    /// Confirm before sharing a game's controls (#20, TOUCHES > PARTAGER). Shows
+    /// the before/after of the player's shared profile. A confirms (POSTs,
+    /// hoisted) → toast + sub-menu; B cancels back to the sub-menu.
     ProfileShareConfirm { game_idx: usize },
 }
 
 // No "RETOUR" entry: B already backs out of the modal, so a dedicated row is
-// redundant clutter.
+// redundant clutter. APPLIQUER / PARTAGER moved OUT of here into the TOUCHES
+// sub-menu (#20 regroup) so they don't read as game-save actions next to
+// RENOMMER / JAQUETTE / SUPPRIMER.
 pub(crate) const OPTIONS_ENTRIES: &[&str] = &[
-    "FAVORI", "TOUCHES", "APPLIQUER", "PARTAGER", "RENOMMER", "JAQUETTE", "SUPPRIMER",
+    "FAVORI", "TOUCHES", "RENOMMER", "JAQUETTE", "SUPPRIMER",
 ];
 
 /// Top-level navbar tabs (v1.2.0), switched with the L/R shoulder buttons.
@@ -609,9 +621,35 @@ pub(crate) struct State {
     /// Community control profiles matching the game in the open `ProfileList`
     /// (#20). Filled by `run_open_profiles_flow`, indexed by the picker selection.
     profile_matches: std::vec::Vec<crate::profiles::Match>,
-    /// Whether the open `ProfileList` shows a trailing "revert to my controls"
-    /// row (true when the game has a backup from a previously applied profile).
-    profile_can_revert: bool,
+    /// Whether the open `TouchesMenu` shows a "revert" row (#20): true when the
+    /// game has a hand-made backup to restore OR a community profile is currently
+    /// applied (so reverting drops it). Recomputed on every entry to the sub-menu.
+    touches_can_revert: bool,
+    /// When `touches_can_revert`, whether a hand-made backup exists (revert
+    /// RESTORES it) vs none (revert resets to the default controls). Drives which
+    /// revert label is shown.
+    touches_has_backup: bool,
+    /// Snapshot of the game's per-game cursor-speed preset index for the open
+    /// TOUCHES sub-menu (#20), or -1 = unset (shows the x1.0 default). The cursor
+    /// row cycles it; persisted to `<basename>.cursor`.
+    touches_cursor_idx: i32,
+    /// Snapshotted before/after diff lines for the open `ProfilePreview` (#20),
+    /// each like "Up: Space -> W". Built by `run_open_preview_flow`.
+    preview_rows: std::vec::Vec<std::string::String>,
+    /// Id of the community profile currently applied to the game in the open
+    /// `ProfileList` (#20), so the picker can tag the active row. Empty = none.
+    /// Snapshotted by `run_open_profiles_flow` from the keymap's provenance.
+    active_profile_id: std::string::String,
+    /// For the open `ProfileShareConfirm`: whether sharing will UPDATE the
+    /// player's existing shared profile (vs create the first one). Drives the
+    /// confirm subtitle so it's clear sharing edits one slot, not piles up (#20).
+    share_is_update: bool,
+    // Transient toast (#20): a small non-blocking banner drawn over the current
+    // screen for `toast_frames` frames, instead of a full-screen "thanks" modal.
+    // `toast_kind`: 0 = success (green), 1 = error (red), 2 = info (blue).
+    toast_msg: std::string::String,
+    toast_kind: u8,
+    toast_frames: u32,
     /// Notice shown on the `CoverPicker` when there's no list to show (covers
     /// off / no results / fetch error). Empty = render the candidate list.
     cover_msg: std::string::String,
@@ -679,7 +717,15 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     local_filter: None,
     cover_candidates: std::vec::Vec::new(),
     profile_matches: std::vec::Vec::new(),
-    profile_can_revert: false,
+    touches_can_revert: false,
+    touches_has_backup: false,
+    touches_cursor_idx: -1,
+    preview_rows: std::vec::Vec::new(),
+    active_profile_id: std::string::String::new(),
+    share_is_update: false,
+    toast_msg: std::string::String::new(),
+    toast_kind: 0,
+    toast_frames: 0,
     cover_msg: std::string::String::new(),
     cover_query: std::string::String::new(),
     fp_loading: false,
@@ -1211,7 +1257,8 @@ pub fn input(button: &str) -> bool {
             if let Ok(mut s) = LIBRARY.lock() {
                 match s.screen {
                     Screen::TouchesEditor { game_idx } => {
-                        s.screen = Screen::OptionsModal { game_idx, selection: 0 };
+                        // Back to the TOUCHES sub-menu's EDIT row (#20 regroup).
+                        goto_touches_menu(&mut s, game_idx, 0);
                         dest = Some(s.screen);
                     }
                     Screen::SettingsKeymapEditor => {
@@ -1314,14 +1361,31 @@ pub fn input(button: &str) -> bool {
                 run_cover_search_flow(game_idx);
                 return true;
             }
-            // APPLIQUER = open the community-profile picker (#20). Hoisted:
-            // hashing the .swf is file I/O we keep out of the LIBRARY lock.
-            if button == "A" && OPTIONS_ENTRIES.get(selection).copied() == Some("APPLIQUER") {
+        }
+        // TOUCHES sub-menu (#20 regroup): APPLY (1) opens the picker; SHARE (2)
+        // opens the share confirm (fetches my existing shared profile for the
+        // diff); REVERT (4) opens the revert preview. All hoisted (network/I/O).
+        // EDIT (0) + CURSOR SPEED (3) are handled under the lock.
+        if let Screen::TouchesMenu { game_idx, selection } = screen_snap {
+            if button == "A" && selection == 1 {
                 run_open_profiles_flow(game_idx);
                 return true;
             }
-            // PARTAGER opens a confirm modal first (in handle_options_input);
-            // the POST runs only once the user confirms (hoist just below).
+            if button == "A" && selection == 2 {
+                run_open_share_confirm_flow(game_idx);
+                return true;
+            }
+            if button == "A" && selection == 4 {
+                run_open_revert_preview_flow(game_idx);
+                return true;
+            }
+        }
+        // A on the revert preview = actually revert (#20). Hoisted (file I/O).
+        if let Screen::RevertPreview { game_idx } = screen_snap {
+            if button == "A" {
+                run_touches_revert(game_idx);
+                return true;
+            }
         }
         if let Screen::ProfileShareConfirm { game_idx } = screen_snap {
             if button == "A" {
@@ -1341,12 +1405,19 @@ pub fn input(button: &str) -> bool {
                 return true;
             }
         }
-        // A on the ProfileList = apply / revert a community profile (#20).
-        // Hoisted: applying bumps the relay popularity counter (a network POST)
-        // which must not run under the LIBRARY lock.
+        // A on a ProfileList row = open the before/after preview (#20). Hoisted:
+        // building the diff reads the current keymap off SD.
         if let Screen::ProfileList { game_idx, selection } = screen_snap {
             if button == "A" {
-                run_profile_list_action(game_idx, selection);
+                run_open_preview_flow(game_idx, selection);
+                return true;
+            }
+        }
+        // A on the preview = apply the profile (#20). Hoisted: applying bumps the
+        // relay popularity counter (a network POST) outside the LIBRARY lock.
+        if let Screen::ProfilePreview { game_idx, profile_idx } = screen_snap {
+            if button == "A" {
+                run_profile_apply_flow(game_idx, profile_idx);
                 return true;
             }
         }
@@ -1540,22 +1611,34 @@ pub fn input(button: &str) -> bool {
             }
             true
         }
-        Screen::ProfileResult { game_idx } => {
-            if matches!(button, "A" | "B" | "Minus") {
-                s.bug_msg.clear();
-                // Back to the game's OPTIONS, cursor on the profile rows.
-                s.screen = Screen::OptionsModal { game_idx, selection: 2 };
-            }
+        Screen::TouchesMenu { game_idx, selection } => {
+            handle_touches_menu_input(&mut s, button, game_idx, selection);
             true
         }
         Screen::ProfileList { game_idx, selection } => {
             handle_profile_list_input(&mut s, button, game_idx, selection);
             true
         }
+        Screen::ProfilePreview { game_idx, profile_idx } => {
+            // A (apply) is hoisted in input(); B returns to the picker.
+            if matches!(button, "B" | "Minus") {
+                s.preview_rows.clear();
+                s.screen = Screen::ProfileList { game_idx, selection: profile_idx };
+            }
+            true
+        }
+        Screen::RevertPreview { game_idx } => {
+            // A (revert) is hoisted in input(); B returns to the sub-menu.
+            if matches!(button, "B" | "Minus") {
+                s.preview_rows.clear();
+                goto_touches_menu(&mut s, game_idx, 4); // the REVERT row
+            }
+            true
+        }
         Screen::ProfileShareConfirm { game_idx } => {
             if matches!(button, "B" | "Minus") {
-                // Cancel → back to OPTIONS, cursor on PARTAGER (index 3).
-                s.screen = Screen::OptionsModal { game_idx, selection: 3 };
+                // Cancel → back to the TOUCHES sub-menu's SHARE row (index 2).
+                goto_touches_menu(&mut s, game_idx, 2);
             }
             // "A" (confirm) is hoisted to run_share_profile_flow.
             true
@@ -1786,10 +1869,55 @@ fn submit_and_show(report: &crate::bugreport::Report) {
     }
 }
 
-/// OPTIONS > PARTAGER: send a game's current controls as a community-profile
-/// candidate (#20). Hoisted out of `input()` — the HTTPS POST must not run under
-/// the LIBRARY lock. Reuses the bug result fields + toast; dismiss returns to
-/// the game's OPTIONS modal.
+/// TOUCHES sub-menu SHARE (#20): open the share confirm showing a before/after of
+/// the player's EXISTING shared profile (if any) -> the controls about to be sent,
+/// so it's clear sharing UPDATES the player's one slot, not piles up. Hoisted
+/// (network + file I/O). If the controls already come from the catalog unchanged,
+/// flashes an info toast instead (nothing to share until edited).
+fn run_open_share_confirm_flow(game_idx: usize) {
+    let snap = match LIBRARY.lock() {
+        Ok(g) => g
+            .entries
+            .get(game_idx)
+            .map(|e| (e.basename.clone(), e.display_name.clone(), e.path.clone())),
+        Err(_) => None,
+    };
+    let Some((basename, title, path)) = snap else {
+        return;
+    };
+    // Already a catalog profile, unchanged (applied or already shared) → nothing
+    // new to send until a key is edited.
+    if keymap::provenance(&basename).starts_with("community:") {
+        if let Ok(mut s) = LIBRARY.lock() {
+            set_toast(&mut s, crate::loc::s().profile_share_dup.to_string(), TOAST_INFO);
+            goto_touches_menu(&mut s, game_idx, 2);
+        }
+        return;
+    }
+    let current = keymap::effective_for(&basename);
+    let swf_hash = crate::profiles::swf_hash_of(&path).unwrap_or_default();
+    let suffix = std::format!("-{}", crate::profiles::install_id());
+    // My existing shared profile for this game (catalog id ends with my install
+    // suffix), if any. The confirm shows its bindings -> my current ones.
+    let mine = crate::profiles::all_matches_for("", &swf_hash, &title)
+        .into_iter()
+        .find(|m| m.profile.id.ends_with(&suffix));
+    let is_update = mine.is_some();
+    let before = match mine {
+        Some(m) => m.profile.bindings,
+        None => keymap::revert_target(&basename).bindings, // ~default for a first share
+    };
+    let rows = cap_preview_rows(keymap_diff_rows(&before, &current.bindings));
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.preview_rows = rows;
+        s.share_is_update = is_update;
+        s.screen = Screen::ProfileShareConfirm { game_idx };
+    }
+}
+
+/// Confirmed SHARE (#20): send the game's current controls as a community
+/// profile. Hoisted out of `input()` — the HTTPS POST must not run under the
+/// LIBRARY lock. Flashes a toast (green/red) and returns to the sub-menu.
 fn run_share_profile_flow(game_idx: usize) {
     let snap = match LIBRARY.lock() {
         Ok(g) => g
@@ -1802,17 +1930,29 @@ fn run_share_profile_flow(game_idx: usize) {
         return;
     };
     // What we share = the game's EFFECTIVE controls (its sidecar, else the
-    // defaults) + a content hash of the .swf as the match key.
+    // defaults) + a content hash of the .swf as the match key. The install id
+    // (server-side) already keeps this to ONE slot per device per game, so a
+    // re-share UPDATES your own profile rather than piling up duplicates — no
+    // client-side content de-dup needed (it was rejecting legit variants).
     let km = keymap::effective_for(&basename);
     let swf_hash = crate::profiles::swf_hash_of(&path).unwrap_or_default();
     let (ok, msg) = match crate::profiles::share(&title, "", &swf_hash, &km) {
-        Ok(()) => (true, crate::loc::s().profile_shared_ok.to_string()),
+        Ok(id) => {
+            // Tag the local keymap as catalog profile <id>: blocks a pointless
+            // re-share of the unchanged controls and marks it active in the
+            // picker. Editing a key flips it back to "user" (shareable again).
+            keymap::mark_shared(&basename, &id);
+            // Drop the cached catalog so the picker re-fetches and shows the
+            // just-shared profile without relaunching (GitHub's CDN may still
+            // lag a minute or two server-side).
+            crate::profiles::invalidate_online_cache();
+            (true, crate::loc::s().profile_shared_ok.to_string())
+        }
         Err(e) => (false, e),
     };
     if let Ok(mut s) = LIBRARY.lock() {
-        s.bug_ok = ok;
-        s.bug_msg = msg;
-        s.screen = Screen::ProfileResult { game_idx };
+        set_toast(&mut s, msg, if ok { TOAST_OK } else { TOAST_ERR });
+        goto_touches_menu(&mut s, game_idx, 2); // back to the SHARE row
     }
 }
 
@@ -1834,24 +1974,44 @@ fn run_open_profiles_flow(game_idx: usize) {
     // fp_uuid not persisted yet (Phase 1b) → match by hash + title for now.
     // all_matches_for merges the bundled catalog with the online one (network).
     let matches = crate::profiles::all_matches_for("", &swf_hash, &title);
-    let can_revert = keymap::has_backup(&basename)
-        || keymap::provenance(&basename).starts_with("community:");
+    // Tag the ACTIVE row dynamically: the profile whose bindings EXACTLY match the
+    // game's current controls (P1 + P2). Content-based so it's right even if the
+    // provenance tag was lost; the provenance id is a fallback (covers bundled
+    // partial profiles whose merged keymap differs from the stored bindings).
+    let current = keymap::effective_for(&basename);
+    let prov_id = keymap::provenance(&basename)
+        .strip_prefix("community:")
+        .unwrap_or("")
+        .to_string();
+    let active_id = matches
+        .iter()
+        .find(|m| {
+            (m.profile.bindings == current.bindings && m.profile.bindings_p2 == current.bindings_p2)
+                || (!prov_id.is_empty() && m.profile.id == prov_id)
+        })
+        .map(|m| m.profile.id.clone())
+        .unwrap_or_default();
+    crate::net::log(&std::format!(
+        "profiles: APPLIQUER '{}' hash={} -> {} match(es), active='{}'\n",
+        title,
+        swf_hash,
+        matches.len(),
+        active_id,
+    ));
     if let Ok(mut s) = LIBRARY.lock() {
         s.profile_matches = matches;
-        s.profile_can_revert = can_revert;
+        s.active_profile_id = active_id;
         s.screen = Screen::ProfileList { game_idx, selection: 0 };
     }
 }
 
-/// Input for the community-profile picker (#20). Rows = matched profiles, then
-/// a trailing "revert" row when applicable. A applies / reverts (both are
-/// non-destructive: apply backs up the prior keymap), then shows a toast.
+/// Input for the community-profile picker (#20). Rows = matched profiles only
+/// (revert moved to the TOUCHES sub-menu). A opens the before/after preview
+/// (hoisted — it reads the current keymap off SD); B returns to the sub-menu.
 fn handle_profile_list_input(s: &mut State, button: &str, game_idx: usize, mut selection: usize) {
     let n = s.profile_matches.len();
-    let has_revert = s.profile_can_revert;
-    let row_count = n + has_revert as usize;
     // At least one row (the "no profile" notice) so nav has somewhere to sit.
-    let last = row_count.max(1) - 1;
+    let last = n.max(1) - 1;
     match button {
         "Up" | "StickLUp" => {
             selection = if selection == 0 { last } else { selection - 1 };
@@ -1859,11 +2019,10 @@ fn handle_profile_list_input(s: &mut State, button: &str, game_idx: usize, mut s
         "Down" | "StickLDown" => {
             selection = if selection >= last { 0 } else { selection + 1 };
         }
-        // "A" (apply / revert) is hoisted to `run_profile_list_action` — it does
-        // a network POST (popularity counter) that can't run under this lock.
+        // "A" (open preview) is hoisted to `run_open_preview_flow` — it reads the
+        // current keymap file to build the diff, which we keep out of this lock.
         "B" | "Minus" => {
-            // Back to OPTIONS, cursor on APPLIQUER (index 2).
-            s.screen = Screen::OptionsModal { game_idx, selection: 2 };
+            goto_touches_menu(s, game_idx, 1); // back to the sub-menu's APPLY row
             return;
         }
         _ => {}
@@ -1871,51 +2030,243 @@ fn handle_profile_list_input(s: &mut State, button: &str, game_idx: usize, mut s
     s.screen = Screen::ProfileList { game_idx, selection };
 }
 
-/// A on the community-profile picker (#20). Hoisted so the popularity-counter
-/// POST runs outside the LIBRARY lock. Snapshots what the selection means,
-/// applies / reverts (both non-destructive), bumps the counter on apply, then
-/// lands on a result toast.
-fn run_profile_list_action(game_idx: usize, selection: usize) {
-    enum Act {
-        Apply(crate::profiles::Profile, std::string::String),
-        Revert(std::string::String),
-        None,
+/// A on a profile row (#20): build the before/after diff and open the preview.
+/// Hoisted — `keymap::effective_for` reads the SD sidecar, kept out of the lock.
+/// Each diff line is "<button>: <mine> -> <profile>" for the keys that change;
+/// only P1 is shown. Shared profiles carry every button (they're made from the
+/// fully-merged effective keymap), so iterating the profile's bindings is a
+/// faithful "what this will set".
+fn run_open_preview_flow(game_idx: usize, profile_idx: usize) {
+    let snap = match LIBRARY.lock() {
+        Ok(g) => g.entries.get(game_idx).map(|e| e.basename.clone()).and_then(|b| {
+            g.profile_matches.get(profile_idx).map(|m| (b, m.profile.clone()))
+        }),
+        Err(_) => None,
+    };
+    let Some((basename, profile)) = snap else {
+        return;
+    };
+    let current = keymap::effective_for(&basename);
+    let rows = keymap_diff_rows(&current.bindings, &profile.bindings);
+    // Nothing differs → don't open a preview that offers "APPLY" for a no-op.
+    // Flash a neutral toast and stay on the picker (e.g. already-active profile).
+    if rows.is_empty() {
+        if let Ok(mut s) = LIBRARY.lock() {
+            set_toast(&mut s, crate::loc::s().profile_preview_none.to_string(), TOAST_INFO);
+            s.screen = Screen::ProfileList { game_idx, selection: profile_idx };
+        }
+        return;
     }
-    let act = match LIBRARY.lock() {
-        Ok(g) => {
-            let n = g.profile_matches.len();
-            match g.entries.get(game_idx).map(|e| e.basename.clone()) {
-                Some(basename) if selection < n => {
-                    Act::Apply(g.profile_matches[selection].profile.clone(), basename)
-                }
-                Some(basename) if g.profile_can_revert && selection == n => Act::Revert(basename),
-                _ => Act::None,
-            }
-        }
-        Err(_) => Act::None,
-    };
-    let lc = crate::loc::s();
-    let (ok, msg) = match act {
-        Act::Apply(profile, basename) => {
-            let ok = crate::profiles::apply(&basename, &profile);
-            if ok {
-                // Best-effort popularity bump (network; failures ignored).
-                crate::profiles::record_applied(&profile.id);
-            }
-            let msg = if ok { lc.profile_applied_ok } else { lc.bug_fail_title };
-            (ok, msg.to_string())
-        }
-        Act::Revert(basename) => {
-            let ok = keymap::revert_profile(&basename);
-            let msg = if ok { lc.profile_reverted_ok } else { lc.bug_fail_title };
-            (ok, msg.to_string())
-        }
-        Act::None => return,
-    };
     if let Ok(mut s) = LIBRARY.lock() {
-        s.bug_ok = ok;
-        s.bug_msg = msg;
-        s.screen = Screen::ProfileResult { game_idx };
+        s.preview_rows = cap_preview_rows(rows);
+        s.screen = Screen::ProfilePreview { game_idx, profile_idx };
+    }
+}
+
+/// TOUCHES sub-menu REVERT (#20): build the before/after of a revert and open its
+/// preview (don't revert yet). Hoisted — reads the keymap + backup off SD.
+fn run_open_revert_preview_flow(game_idx: usize) {
+    let basename = match LIBRARY.lock() {
+        Ok(g) => g.entries.get(game_idx).map(|e| e.basename.clone()),
+        Err(_) => None,
+    };
+    let Some(basename) = basename else {
+        return;
+    };
+    let current = keymap::effective_for(&basename);
+    let target = keymap::revert_target(&basename);
+    let rows = cap_preview_rows(keymap_diff_rows(&current.bindings, &target.bindings));
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.preview_rows = rows; // may be empty — revert still clears the active tag
+        s.screen = Screen::RevertPreview { game_idx };
+    }
+}
+
+/// Build "<button>: <current> -> <target>" lines for the P1 keys that differ
+/// between two binding maps (the before/after of an apply or a revert). Both maps
+/// are fully merged in practice, so iterating the editable buttons is faithful.
+fn keymap_diff_rows(
+    current: &std::collections::BTreeMap<std::string::String, std::string::String>,
+    target: &std::collections::BTreeMap<std::string::String, std::string::String>,
+) -> std::vec::Vec<std::string::String> {
+    let none = crate::loc::s().none;
+    let disp = |k: &str| -> std::string::String {
+        if k.is_empty() {
+            none.to_string()
+        } else {
+            keymap::flash_key_display(k).into_owned()
+        }
+    };
+    let mut rows = std::vec::Vec::new();
+    for btn in keymap::EDITABLE_BUTTONS {
+        let cur = current.get(*btn).map(std::string::String::as_str).unwrap_or("");
+        let new = target.get(*btn).map(std::string::String::as_str).unwrap_or("");
+        if cur != new {
+            rows.push(std::format!("{}: {} -> {}", btn, disp(cur), disp(new)));
+        }
+    }
+    rows
+}
+
+/// Cap a diff list so the auto-sized modal still fits the screen, noting overflow.
+fn cap_preview_rows(mut rows: std::vec::Vec<std::string::String>) -> std::vec::Vec<std::string::String> {
+    const MAX_PREVIEW_ROWS: usize = 8;
+    if rows.len() > MAX_PREVIEW_ROWS {
+        let extra = rows.len() - MAX_PREVIEW_ROWS;
+        rows.truncate(MAX_PREVIEW_ROWS);
+        rows.push(std::format!("(+{} ...)", extra));
+    }
+    rows
+}
+
+/// A on the preview (#20): actually apply the profile. Hoisted so the popularity
+/// counter POST runs outside the LIBRARY lock. Apply is non-destructive (it backs
+/// up a hand-made keymap first), then we land on a result toast.
+fn run_profile_apply_flow(game_idx: usize, profile_idx: usize) {
+    let snap = match LIBRARY.lock() {
+        Ok(g) => g.entries.get(game_idx).map(|e| e.basename.clone()).and_then(|b| {
+            g.profile_matches.get(profile_idx).map(|m| (b, m.profile.clone()))
+        }),
+        Err(_) => None,
+    };
+    let Some((basename, profile)) = snap else {
+        return;
+    };
+    let ok = crate::profiles::apply(&basename, &profile);
+    if ok {
+        // Best-effort popularity bump (network; failures ignored).
+        crate::profiles::record_applied(&profile.id);
+    }
+    let lc = crate::loc::s();
+    let msg = if ok { lc.profile_applied_ok } else { lc.bug_fail_title };
+    if let Ok(mut s) = LIBRARY.lock() {
+        set_toast(&mut s, msg.to_string(), if ok { TOAST_OK } else { TOAST_ERR });
+        goto_touches_menu(&mut s, game_idx, 1); // back to the sub-menu (APPLY row)
+    }
+}
+
+// Toast kinds (#20): colour of the transient banner. See `set_toast`.
+const TOAST_OK: u8 = 0; // green
+const TOAST_ERR: u8 = 1; // red
+const TOAST_INFO: u8 = 2; // blue
+/// How long a toast stays up (~2.5 s at 60 fps).
+const TOAST_FRAMES: u32 = 150;
+
+/// Flash a small non-blocking toast over the current screen instead of switching
+/// to a full-screen "thanks" modal (#20). Drawn + counted down in `render`.
+fn set_toast(s: &mut State, msg: std::string::String, kind: u8) {
+    s.toast_msg = msg;
+    s.toast_kind = kind;
+    s.toast_frames = TOAST_FRAMES;
+}
+
+/// Enter the TOUCHES sub-menu for a game (#20 regroup), recomputing whether the
+/// revert row applies + which label it needs. Called from OPTIONS > TOUCHES and
+/// from every return into the sub-menu, so revert availability is always fresh.
+/// `selection` is clamped to the rows actually present.
+fn goto_touches_menu(s: &mut State, game_idx: usize, selection: usize) {
+    let (has_backup, prov) = s
+        .entries
+        .get(game_idx)
+        .map(|e| (keymap::has_backup(&e.basename), keymap::provenance(&e.basename)))
+        .unwrap_or((false, std::string::String::new()));
+    // provenance: "default" = no per-game sidecar (pristine, on the global
+    // default). "community:*" = controls that ARE a catalog profile (applied OR
+    // shared by me — same tag, same meaning). "user" = hand-edited.
+    let is_default = prov == "default";
+    s.touches_has_backup = has_backup;
+    // Show "revert" whenever this game has ANY custom keymap (edited, applied, or
+    // shared) — i.e. there's something to undo. Predictable: it tracks "did I
+    // change this game's controls", not a stray backup file. Label adapts:
+    // restore my hand-made keys if a backup exists, else reset to the default.
+    // (The SHARE block uses the keymap provenance directly, in the share flow.)
+    s.touches_can_revert = !is_default;
+    // Snapshot the per-game cursor speed for the cursor row (read once here, not
+    // every render frame).
+    s.touches_cursor_idx = s
+        .entries
+        .get(game_idx)
+        .map(|e| keymap::cursor_speed_for(&e.basename))
+        .unwrap_or(-1);
+    let row_count = TOUCHES_MENU_FIXED_ROWS + s.touches_can_revert as usize;
+    s.screen = Screen::TouchesMenu { game_idx, selection: selection.min(row_count - 1) };
+}
+
+/// Fixed TOUCHES sub-menu rows: edit (0), apply (1), share (2), cursor speed (3).
+/// A revert row (4) is appended when `touches_can_revert`.
+const TOUCHES_MENU_FIXED_ROWS: usize = 4;
+
+/// Cursor-speed presets as x10 multipliers. MUST stay in sync with
+/// `CURSOR_SPEED_MULTS` in cpp/src/main.cpp (the C++ side owns the live value;
+/// we only display + persist the index here). Default index = 1 (x1.0).
+const CURSOR_X10: &[u32] = &[5, 10, 15, 20, 25, 30, 40, 50];
+
+/// Input for the TOUCHES sub-menu (#20). Edit (0) + cursor speed (3) are handled
+/// here; apply (1) / share (2) / revert (4) are hoisted in `input()` (file I/O /
+/// network). B returns to OPTIONS on the TOUCHES row.
+fn handle_touches_menu_input(s: &mut State, button: &str, game_idx: usize, mut selection: usize) {
+    let row_count = TOUCHES_MENU_FIXED_ROWS + s.touches_can_revert as usize;
+    let last = row_count - 1;
+    match button {
+        "Up" | "StickLUp" => {
+            selection = if selection == 0 { last } else { selection - 1 };
+        }
+        "Down" | "StickLDown" => {
+            selection = if selection >= last { 0 } else { selection + 1 };
+        }
+        "A" => {
+            // EDIT (0) + CURSOR SPEED (3) are local (file I/O only). Apply (1) /
+            // share (2) / revert (4) need network → hoisted in `input()`.
+            if selection == 0 {
+                // Init the keymap for THIS game so current_binding / set_binding
+                // land in the right sidecar, then open the editor.
+                if let Some(entry) = s.entries.get(game_idx) {
+                    keymap::init_for_swf(&entry.basename);
+                }
+                menu::open();
+                s.screen = Screen::TouchesEditor { game_idx };
+                return;
+            }
+            if selection == 3 {
+                // Cycle the per-game cursor speed in place (persist to the game's
+                // `<basename>.cursor`; applied next launch). -1/unset → start at
+                // the x1.0 default (index 1).
+                let cur = if s.touches_cursor_idx < 0 { 1 } else { s.touches_cursor_idx };
+                let next = ((cur as usize + 1) % CURSOR_X10.len()) as i32;
+                if let Some(basename) = s.entries.get(game_idx).map(|e| e.basename.clone()) {
+                    keymap::set_cursor_speed_for(&basename, next);
+                }
+                s.touches_cursor_idx = next;
+                s.screen = Screen::TouchesMenu { game_idx, selection };
+                return;
+            }
+        }
+        "B" | "Minus" => {
+            s.screen = Screen::OptionsModal { game_idx, selection: 1 }; // TOUCHES row
+            return;
+        }
+        _ => {}
+    }
+    s.screen = Screen::TouchesMenu { game_idx, selection };
+}
+
+/// TOUCHES sub-menu revert (#20). Hoisted to mirror the other profile actions
+/// (keeps file I/O off the snappy path). Restores a hand-made backup if present,
+/// else drops the applied profile back to the default controls.
+fn run_touches_revert(game_idx: usize) {
+    let basename = match LIBRARY.lock() {
+        Ok(g) => g.entries.get(game_idx).map(|e| e.basename.clone()),
+        Err(_) => None,
+    };
+    let Some(basename) = basename else {
+        return;
+    };
+    let ok = keymap::revert_profile(&basename);
+    let lc = crate::loc::s();
+    let msg = if ok { lc.profile_reverted_ok } else { lc.bug_fail_title };
+    if let Ok(mut s) = LIBRARY.lock() {
+        set_toast(&mut s, msg.to_string(), if ok { TOAST_OK } else { TOAST_ERR });
+        goto_touches_menu(&mut s, game_idx, 0); // back to the sub-menu
     }
 }
 
@@ -2519,15 +2870,9 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                     return;
                 }
                 "TOUCHES" => {
-                    // Initialise the keymap for THIS game so the editor's
-                    // current_binding/set_binding land in the right
-                    // sidecar file. Re-init is a no-op if the basename
-                    // matches the last init.
-                    if let Some(entry) = s.entries.get(game_idx) {
-                        keymap::init_for_swf(&entry.basename);
-                    }
-                    menu::open();
-                    s.screen = Screen::TouchesEditor { game_idx };
+                    // Open the TOUCHES sub-menu (edit / apply / share / revert).
+                    // #20 regroup: apply+share used to be sibling OPTIONS rows.
+                    goto_touches_menu(s, game_idx, 0);
                     return;
                 }
                 "RENOMMER" => {
@@ -2538,16 +2883,6 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                 "JAQUETTE" => {
                     // Handled at the top of `input()` (hoisted — Flashpoint
                     // search is a synchronous HTTPS call). No-op here.
-                    return;
-                }
-                "APPLIQUER" => {
-                    // Handled at the top of `input()` (hoisted — hashing the
-                    // .swf is file I/O). No-op here.
-                    return;
-                }
-                "PARTAGER" => {
-                    // Ask before sending (#20). The POST happens on confirm.
-                    s.screen = Screen::ProfileShareConfirm { game_idx };
                     return;
                 }
                 "SUPPRIMER" => {
@@ -2686,8 +3021,9 @@ fn run_cover_fetch_flow(game_idx: usize, selection: usize) {
                 s.cover_candidates.clear();
                 s.cover_msg.clear();
                 s.cover_query.clear();
-                // Back to OPTIONS on the JAQUETTE row (index 2).
-                s.screen = Screen::OptionsModal { game_idx, selection: 2 };
+                // Back to OPTIONS on the JAQUETTE row (index 3 after #20 regroup
+                // removed APPLIQUER/PARTAGER from the list).
+                s.screen = Screen::OptionsModal { game_idx, selection: 3 };
             }
         }
         Err(e) => {
@@ -2730,7 +3066,8 @@ fn handle_cover_picker_input(s: &mut State, button: &str, game_idx: usize, mut s
             s.cover_candidates.clear();
             s.cover_msg.clear();
             s.cover_query.clear();
-            s.screen = Screen::OptionsModal { game_idx, selection: 2 };
+            // JAQUETTE row (index 3 after #20 regroup).
+            s.screen = Screen::OptionsModal { game_idx, selection: 3 };
             return;
         }
         _ => {}
@@ -3123,7 +3460,7 @@ extern "C" {
     fn swf_picker_count_companions(swf_path: *const core::ffi::c_char) -> core::ffi::c_int;
     // Cursor-speed preset (main.cpp): cycle to the next preset (returns the new
     // index), and read the current multiplier x10 (5,10,15,20,25) for the label.
-    fn ruffle_cursor_speed_cycle() -> core::ffi::c_int;
+    pub(crate) fn ruffle_cursor_speed_cycle() -> core::ffi::c_int;
     pub(crate) fn ruffle_cursor_speed_mult_x10() -> core::ffi::c_int;
 }
 
@@ -3250,6 +3587,13 @@ fn modal_kind(screen: Screen) -> u8 {
         Screen::SortModal { .. } => 9,
         Screen::RemoteSortModal { .. } => 10,
         Screen::FpDetails { .. } => 11,
+        // #20 profile modals: distinct ids so each gets the scale-in "pop" when it
+        // appears (they were kind 0 = no animation, unlike every other modal).
+        Screen::TouchesMenu { .. } => 12,
+        Screen::ProfileList { .. } => 13,
+        Screen::ProfilePreview { .. } => 14,
+        Screen::RevertPreview { .. } => 15,
+        Screen::ProfileShareConfirm { .. } => 16,
         _ => 0,
     }
 }
@@ -3474,11 +3818,10 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             if let Some(entry) = entry_snapshot {
                 // OPTIONS_ENTRIES stays the stable logical key list (matched
                 // in input handling); display uses localized labels in the
-                // same order (TOUCHES / RENOMMER / SUPPRIMER / RETOUR).
+                // SAME order. Must match OPTIONS_ENTRIES exactly (FAVORI /
+                // TOUCHES / RENOMMER / JAQUETTE / SUPPRIMER) — apply+share moved
+                // into the TOUCHES sub-menu (#20 regroup), so they're NOT here.
                 let lc = crate::loc::s();
-                // Order must match OPTIONS_ENTRIES (FAVORI/TOUCHES/APPLIQUER/
-                // PARTAGER/RENOMMER/JAQUETTE/SUPPRIMER). No back row — B backs
-                // out. The favorite label reflects the current state.
                 let fav_label = if crate::favorites::is_favorite(&entry.basename) {
                     lc.opt_unfavorite
                 } else {
@@ -3487,8 +3830,6 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 let labels = [
                     fav_label,
                     lc.opt_keys,
-                    lc.opt_apply,
-                    lc.opt_share,
                     lc.opt_rename,
                     lc.opt_cover,
                     lc.opt_delete,
@@ -3561,14 +3902,40 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 .unwrap_or_default();
             backend.draw_library_bug_result(&msg, ok);
         }
-        Screen::ProfileResult { .. } => {
-            // Same toast as the bug result (reuses bug_ok/bug_msg).
-            let (msg, ok) = LIBRARY
-                .lock()
-                .ok()
-                .map(|s| (s.bug_msg.clone(), s.bug_ok))
-                .unwrap_or_default();
-            backend.draw_library_bug_result(&msg, ok);
+        Screen::TouchesMenu { game_idx, selection } => {
+            let lc = crate::loc::s();
+            let snap = LIBRARY.lock().ok().map(|s| {
+                let game = s
+                    .entries
+                    .get(game_idx)
+                    .map(|e| e.display_name.clone())
+                    .unwrap_or_default();
+                // Cursor row label, e.g. "Vitesse du curseur: x1.5" (unset → x1.0).
+                let idx = if s.touches_cursor_idx < 0 {
+                    1
+                } else {
+                    (s.touches_cursor_idx as usize).min(CURSOR_X10.len() - 1)
+                };
+                let x10 = CURSOR_X10[idx];
+                let cursor = std::format!("{}: x{}.{}", lc.set_cursor_speed, x10 / 10, x10 % 10);
+                (game, cursor, s.touches_can_revert, s.touches_has_backup)
+            });
+            if let Some((game, cursor, can_revert, has_backup)) = snap {
+                // Order MUST match the row indices in handle_touches_menu_input /
+                // the input() dispatch: edit, apply, share, cursor, (revert).
+                let mut rows: std::vec::Vec<&str> =
+                    std::vec![lc.touches_edit, lc.opt_apply, lc.opt_share, &cursor];
+                if can_revert {
+                    // Distinct label: restore my keys (a backup exists) vs reset
+                    // to the default controls (none to restore).
+                    rows.push(if has_backup {
+                        lc.profile_revert
+                    } else {
+                        lc.touches_revert_default
+                    });
+                }
+                backend.draw_library_list_modal(lc.opt_keys, &game, selection, &rows, lc.touches_footer);
+            }
         }
         Screen::ProfileList { game_idx, selection } => {
             let lc = crate::loc::s();
@@ -3578,21 +3945,23 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     .get(game_idx)
                     .map(|e| e.display_name.clone())
                     .unwrap_or_default();
-                let mut rows: std::vec::Vec<std::string::String> = s
+                let active = &s.active_profile_id;
+                let rows: std::vec::Vec<std::string::String> = s
                     .profile_matches
                     .iter()
                     .map(|m| {
-                        if m.applied > 0 {
-                            // Show the "most applied" count as a popularity hint.
-                            std::format!("{} ({})", m.profile.title(), m.applied)
-                        } else {
-                            m.profile.title().to_string()
+                        // Just the title, plus an "active" tag on the profile
+                        // currently applied to this game. (The old "(N)" applied
+                        // count was dropped — it read as a device id, not a
+                        // popularity hint.)
+                        let mut row = m.profile.title().to_string();
+                        if !active.is_empty() && m.profile.id == *active {
+                            row.push(' ');
+                            row.push_str(lc.profile_active);
                         }
+                        row
                     })
                     .collect();
-                if s.profile_can_revert {
-                    rows.push(lc.profile_revert.to_string());
-                }
                 (game, rows)
             });
             if let Some((game, mut rows)) = snap {
@@ -3609,21 +3978,66 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 );
             }
         }
-        Screen::ProfileShareConfirm { game_idx } => {
+        Screen::ProfilePreview { .. } => {
             let lc = crate::loc::s();
-            let game = LIBRARY
+            let rows = LIBRARY
                 .lock()
                 .ok()
-                .and_then(|s| s.entries.get(game_idx).map(|e| e.display_name.clone()))
+                .map(|s| s.preview_rows.clone())
                 .unwrap_or_default();
-            // usize::MAX = no highlighted row (it's a yes/no prompt, not a list).
+            let mut rows = rows;
+            if rows.is_empty() {
+                rows.push(lc.profile_preview_none.to_string());
+            }
+            let refs: std::vec::Vec<&str> = rows.iter().map(|r| r.as_str()).collect();
+            // usize::MAX = no highlighted row (it's a read-only diff, A/B only).
             backend.draw_library_list_modal(
-                lc.opt_share,
-                &game,
+                lc.profile_preview_title,
+                "",
                 usize::MAX,
-                &[lc.profile_share_confirm],
-                lc.lang_footer,
+                &refs,
+                lc.profile_preview_footer,
             );
+        }
+        Screen::RevertPreview { .. } => {
+            let lc = crate::loc::s();
+            let mut rows = LIBRARY
+                .lock()
+                .ok()
+                .map(|s| s.preview_rows.clone())
+                .unwrap_or_default();
+            if rows.is_empty() {
+                rows.push(lc.profile_preview_none.to_string());
+            }
+            let refs: std::vec::Vec<&str> = rows.iter().map(|r| r.as_str()).collect();
+            backend.draw_library_list_modal(
+                lc.revert_preview_title,
+                "",
+                usize::MAX,
+                &refs,
+                lc.revert_preview_footer,
+            );
+        }
+        Screen::ProfileShareConfirm { .. } => {
+            let lc = crate::loc::s();
+            let (is_update, mut rows) = LIBRARY
+                .lock()
+                .ok()
+                .map(|s| (s.share_is_update, s.preview_rows.clone()))
+                .unwrap_or((false, std::vec::Vec::new()));
+            // Make it explicit this UPDATES the player's one shared profile (vs
+            // creates the first), and show the before/after diff under it.
+            let subtitle = if is_update {
+                lc.share_confirm_update
+            } else {
+                lc.profile_share_confirm
+            };
+            if rows.is_empty() {
+                rows.push(lc.profile_preview_none.to_string());
+            }
+            let refs: std::vec::Vec<&str> = rows.iter().map(|r| r.as_str()).collect();
+            // usize::MAX = no highlighted row (it's a confirm, A:share / B:cancel).
+            backend.draw_library_list_modal(lc.opt_share, subtitle, usize::MAX, &refs, lc.lang_footer);
         }
         Screen::DeleteConfirm { game_idx } => {
             let snap = LIBRARY
@@ -4022,6 +4436,21 @@ pub fn render(backend: &mut SwitchRenderBackend) {
         backend.draw_navbar(tab.index());
         // Version label, bottom-right of the home screens.
         backend.draw_version_badge();
+    }
+
+    // ── Transient toast (#20) ────────────────────────────────────────────
+    // Drawn on top of everything (incl. the navbar) and counted down here, so a
+    // share/apply/revert gives quick feedback without a blocking "thanks" screen.
+    let toast = LIBRARY.lock().ok().and_then(|mut s| {
+        if s.toast_frames > 0 {
+            s.toast_frames -= 1;
+            Some((s.toast_msg.clone(), s.toast_kind))
+        } else {
+            None
+        }
+    });
+    if let Some((msg, kind)) = toast {
+        backend.draw_toast(&msg, kind);
     }
 }
 
