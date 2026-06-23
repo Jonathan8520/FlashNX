@@ -670,12 +670,18 @@ pub fn revert_target(basename: &str) -> Keymap {
     km
 }
 
-/// Build "<button>: <current> -> <target>" diff lines for the P1 keys that differ
-/// between two binding maps (before/after of an apply or revert). Shared by the
-/// library + in-game profile previews (#20).
+/// Build "<button>: <current> -> <target>" diff lines for the keys that differ
+/// between two keymaps, across BOTH players (#40). P1 rows are unprefixed (the
+/// common single-player case stays clean); P2 rows carry a "P2 " tag so a
+/// two-player change is attributed to the right pad. The single source of truth
+/// for every profile/revert/share preview (library + in-game) — diffing only P1
+/// here was the bug where editing a P2 key showed "no changes" yet still dropped
+/// the active tag.
 pub fn binding_diff_rows(
-    current: &std::collections::BTreeMap<std::string::String, std::string::String>,
-    target: &std::collections::BTreeMap<std::string::String, std::string::String>,
+    cur_p1: &std::collections::BTreeMap<std::string::String, std::string::String>,
+    tgt_p1: &std::collections::BTreeMap<std::string::String, std::string::String>,
+    cur_p2: &std::collections::BTreeMap<std::string::String, std::string::String>,
+    tgt_p2: &std::collections::BTreeMap<std::string::String, std::string::String>,
 ) -> std::vec::Vec<std::string::String> {
     let none = crate::loc::s().none;
     let disp = |k: &str| -> std::string::String {
@@ -686,11 +692,13 @@ pub fn binding_diff_rows(
         }
     };
     let mut rows = std::vec::Vec::new();
-    for btn in EDITABLE_BUTTONS {
-        let cur = current.get(*btn).map(std::string::String::as_str).unwrap_or("");
-        let new = target.get(*btn).map(std::string::String::as_str).unwrap_or("");
-        if cur != new {
-            rows.push(std::format!("{}: {} -> {}", btn, disp(cur), disp(new)));
+    for (label, cur, tgt) in [("", cur_p1, tgt_p1), ("P2 ", cur_p2, tgt_p2)] {
+        for btn in EDITABLE_BUTTONS {
+            let c = cur.get(*btn).map(std::string::String::as_str).unwrap_or("");
+            let n = tgt.get(*btn).map(std::string::String::as_str).unwrap_or("");
+            if c != n {
+                rows.push(std::format!("{}{}: {} -> {}", label, btn, disp(c), disp(n)));
+            }
         }
     }
     rows

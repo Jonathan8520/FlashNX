@@ -1248,6 +1248,26 @@ pub fn input(button: &str) -> bool {
     {
         return true;
     }
+    // Settings keymap editor: closing it (B at the editor's top level — the List
+    // screen, kind 2 — not inside a dropdown) scales the editor OUT before
+    // landing on the REGLAGES tab. Intercept B HERE, before forwarding to menu,
+    // so the menu stays active (drawable) during the scale-out; render closes it
+    // + swaps to the tab when the pop finishes. The tab itself never pops (it's a
+    // tab, not a modal). Only the Settings editor — TouchesEditor keeps its
+    // instant swap to the (modal) sub-menu, which pops in.
+    if matches!(button, "B" | "Minus") && menu::screen_kind() == 2 {
+        let is_settings_editor = LIBRARY
+            .lock()
+            .map(|s| matches!(s.screen, Screen::SettingsKeymapEditor))
+            .unwrap_or(false);
+        if is_settings_editor {
+            if let Ok(mut p) = PENDING_AFTER_CLOSE.lock() {
+                *p = Some(PendingClose::CloseMenuGoto(Screen::SettingsModal { selection: 0 }));
+            }
+            crate::backend::render::modal_close_begin();
+            return true;
+        }
+    }
     // Sub-screen: TOUCHES editor owns input while active.
     if menu::is_active() {
         let consumed = menu::input(button);
@@ -1268,10 +1288,14 @@ pub fn input(button: &str) -> bool {
                     _ => {}
                 }
             }
-            if dest.is_some() {
-                // Closing TOUCHES: scale the destination panel back in (the
-                // OPTIONS modal, or the REGLAGES tab content).
-                crate::backend::render::modal_open_begin();
+            if let Some(d) = dest {
+                // Scale the destination back in ONLY if it's a real modal (the
+                // OPTIONS / TOUCHES sub-menu). The REGLAGES destination is a TAB,
+                // not a popup, so it must NOT pop — its sub-modals animate, it
+                // doesn't. modal_kind == 0 means "not a modal".
+                if modal_kind(d) != 0 {
+                    crate::backend::render::modal_open_begin();
+                }
             }
         }
         return consumed;
@@ -1924,11 +1948,18 @@ fn run_open_share_confirm_flow(game_idx: usize) {
         .into_iter()
         .find(|m| m.profile.id.ends_with(&suffix));
     let is_update = mine.is_some();
-    let before = match mine {
-        Some(m) => m.profile.bindings,
-        None => keymap::revert_target(&basename).bindings, // ~default for a first share
+    // Both players' "before" maps, so the confirm shows P2 changes too (#40).
+    let (before_p1, before_p2) = match mine {
+        Some(m) => (m.profile.bindings, m.profile.bindings_p2),
+        None => {
+            let t = keymap::revert_target(&basename); // ~default for a first share
+            (t.bindings, t.bindings_p2)
+        }
     };
-    let rows = cap_preview_rows(keymap_diff_rows(&before, &current.bindings));
+    let rows = cap_preview_rows(keymap::binding_diff_rows(
+        &before_p1, &current.bindings,
+        &before_p2, &current.bindings_p2,
+    ));
     if let Ok(mut s) = LIBRARY.lock() {
         s.preview_rows = rows;
         s.share_is_update = is_update;
@@ -2053,10 +2084,10 @@ fn handle_profile_list_input(s: &mut State, button: &str, game_idx: usize, mut s
 
 /// A on a profile row (#20): build the before/after diff and open the preview.
 /// Hoisted — `keymap::effective_for` reads the SD sidecar, kept out of the lock.
-/// Each diff line is "<button>: <mine> -> <profile>" for the keys that change;
-/// only P1 is shown. Shared profiles carry every button (they're made from the
-/// fully-merged effective keymap), so iterating the profile's bindings is a
-/// faithful "what this will set".
+/// Each diff line is "<button>: <mine> -> <profile>" for the keys that change,
+/// across both players (P2 rows tagged "P2 "). Shared profiles carry every button
+/// (they're made from the fully-merged effective keymap), so iterating the
+/// profile's bindings is a faithful "what this will set".
 fn run_open_preview_flow(game_idx: usize, profile_idx: usize) {
     let snap = match LIBRARY.lock() {
         Ok(g) => g.entries.get(game_idx).map(|e| e.basename.clone()).and_then(|b| {
@@ -2068,7 +2099,10 @@ fn run_open_preview_flow(game_idx: usize, profile_idx: usize) {
         return;
     };
     let current = keymap::effective_for(&basename);
-    let rows = keymap_diff_rows(&current.bindings, &profile.bindings);
+    let rows = keymap::binding_diff_rows(
+        &current.bindings, &profile.bindings,
+        &current.bindings_p2, &profile.bindings_p2,
+    );
     // Nothing differs → don't open a preview that offers "APPLY" for a no-op.
     // Flash a neutral toast and stay on the picker (e.g. already-active profile).
     if rows.is_empty() {
@@ -2096,37 +2130,14 @@ fn run_open_revert_preview_flow(game_idx: usize) {
     };
     let current = keymap::effective_for(&basename);
     let target = keymap::revert_target(&basename);
-    let rows = cap_preview_rows(keymap_diff_rows(&current.bindings, &target.bindings));
+    let rows = cap_preview_rows(keymap::binding_diff_rows(
+        &current.bindings, &target.bindings,
+        &current.bindings_p2, &target.bindings_p2,
+    ));
     if let Ok(mut s) = LIBRARY.lock() {
         s.preview_rows = rows; // may be empty — revert still clears the active tag
         s.screen = Screen::RevertPreview { game_idx };
     }
-}
-
-/// Build "<button>: <current> -> <target>" lines for the P1 keys that differ
-/// between two binding maps (the before/after of an apply or a revert). Both maps
-/// are fully merged in practice, so iterating the editable buttons is faithful.
-fn keymap_diff_rows(
-    current: &std::collections::BTreeMap<std::string::String, std::string::String>,
-    target: &std::collections::BTreeMap<std::string::String, std::string::String>,
-) -> std::vec::Vec<std::string::String> {
-    let none = crate::loc::s().none;
-    let disp = |k: &str| -> std::string::String {
-        if k.is_empty() {
-            none.to_string()
-        } else {
-            keymap::flash_key_display(k).into_owned()
-        }
-    };
-    let mut rows = std::vec::Vec::new();
-    for btn in keymap::EDITABLE_BUTTONS {
-        let cur = current.get(*btn).map(std::string::String::as_str).unwrap_or("");
-        let new = target.get(*btn).map(std::string::String::as_str).unwrap_or("");
-        if cur != new {
-            rows.push(std::format!("{}: {} -> {}", btn, disp(cur), disp(new)));
-        }
-    }
-    rows
 }
 
 /// Cap a diff list so the auto-sized modal still fits the screen, noting overflow.
@@ -3629,6 +3640,10 @@ static LAST_MODAL_KIND: Mutex<u8> = Mutex::new(0);
 /// together at the very end. Set by `input`, consumed by `render`.
 enum PendingClose {
     Goto(Screen),
+    /// Like `Goto`, but also closes the `menu` module first — used by the
+    /// Settings keymap editor, whose panel is `menu`-drawn: it must stay active
+    /// (drawable) while it scales OUT, then close as the pop lands on the tab.
+    CloseMenuGoto(Screen),
     DeleteGame { game_idx: usize },
     DeleteHistory,
 }
@@ -3748,6 +3763,12 @@ pub fn render(backend: &mut SwitchRenderBackend) {
         if let Ok(mut s2) = LIBRARY.lock() {
             match pending {
                 Some(PendingClose::Goto(t)) => {
+                    s2.screen = t;
+                }
+                Some(PendingClose::CloseMenuGoto(t)) => {
+                    // The editor finished scaling out — now close the menu module
+                    // and land on the tab (which does not pop, being a tab).
+                    menu::close();
                     s2.screen = t;
                 }
                 Some(PendingClose::DeleteGame { game_idx }) => {
@@ -3962,7 +3983,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                         lc.touches_revert_default
                     });
                 }
-                backend.draw_library_list_modal(lc.opt_keys, &game, selection, &rows, lc.touches_footer);
+                backend.draw_library_list_modal(lc.opt_keys, &game, selection, &rows, lc.touches_footer, false);
             }
         }
         Screen::ProfileList { game_idx, selection } => {
@@ -4006,6 +4027,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     selection,
                     &refs,
                     lc.profile_footer,
+                    true,
                 );
             }
         }
@@ -4028,6 +4050,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 usize::MAX,
                 &refs,
                 lc.profile_preview_footer,
+                true,
             );
         }
         Screen::RevertPreview { .. } => {
@@ -4047,6 +4070,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 usize::MAX,
                 &refs,
                 lc.revert_preview_footer,
+                true,
             );
         }
         Screen::ProfileShareConfirm { .. } => {
@@ -4068,7 +4092,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             }
             let refs: std::vec::Vec<&str> = rows.iter().map(|r| r.as_str()).collect();
             // usize::MAX = no highlighted row (it's a confirm, A:share / B:cancel).
-            backend.draw_library_list_modal(lc.opt_share, subtitle, usize::MAX, &refs, lc.lang_footer);
+            backend.draw_library_list_modal(lc.opt_share, subtitle, usize::MAX, &refs, lc.lang_footer, true);
         }
         Screen::DeleteConfirm { game_idx } => {
             let snap = LIBRARY

@@ -122,6 +122,26 @@ pub fn is_active() -> bool {
         .unwrap_or(false)
 }
 
+/// Distinct id per active screen (0 = inactive). Lets the in-game caller
+/// (`ruffle_touches_draw`) re-trigger the modal scale-in "pop" on each
+/// transition, exactly like `library::modal_kind` does for the on-cover modals,
+/// so the in-game TOUCHES sub-screens animate instead of snapping in.
+pub fn screen_kind() -> u8 {
+    TOUCHES
+        .lock()
+        .map(|s| match s.screen {
+            Screen::Inactive => 0,
+            Screen::Menu { .. } => 1,
+            Screen::List { .. } => 2,
+            Screen::Dropdown { .. } => 3,
+            Screen::Profiles { .. } => 4,
+            Screen::Preview { .. } => 5,
+            Screen::ShareConfirm => 6,
+            Screen::RevertPreview => 7,
+        })
+        .unwrap_or(0)
+}
+
 /// Open the keymap EDITOR directly (library OPTIONS > TOUCHES > Éditer). The
 /// in-game pause entry uses `open_submenu` instead.
 pub fn open() {
@@ -364,7 +384,10 @@ fn run_open_preview(profile_idx: usize) {
     };
     let Some(profile) = profile else { return };
     let current = keymap::effective_for(&basename);
-    let rows = keymap::binding_diff_rows(&current.bindings, &profile.bindings);
+    let rows = keymap::binding_diff_rows(
+        &current.bindings, &profile.bindings,
+        &current.bindings_p2, &profile.bindings_p2,
+    );
     if rows.is_empty() {
         if let Ok(mut s) = TOUCHES.lock() {
             set_toast(&mut s, crate::loc::s().profile_preview_none.to_string(), TOAST_INFO);
@@ -426,11 +449,18 @@ fn run_open_share_confirm() {
         .into_iter()
         .find(|m| m.profile.id.ends_with(&suffix));
     let is_update = mine.is_some();
-    let before = match mine {
-        Some(m) => m.profile.bindings,
-        None => keymap::revert_target(&basename).bindings, // ~default for a first share
+    // Both players' "before" maps so a P2-only change is shown too (#40).
+    let (before_p1, before_p2) = match mine {
+        Some(m) => (m.profile.bindings, m.profile.bindings_p2),
+        None => {
+            let t = keymap::revert_target(&basename); // ~default for a first share
+            (t.bindings, t.bindings_p2)
+        }
     };
-    let rows = cap_rows(keymap::binding_diff_rows(&before, &current.bindings));
+    let rows = cap_rows(keymap::binding_diff_rows(
+        &before_p1, &current.bindings,
+        &before_p2, &current.bindings_p2,
+    ));
     if let Ok(mut s) = TOUCHES.lock() {
         s.preview_rows = rows;
         s.share_is_update = is_update;
@@ -467,7 +497,10 @@ fn run_open_revert_preview() {
     let Some((basename, _, _)) = game_ctx() else { return };
     let current = keymap::effective_for(&basename);
     let target = keymap::revert_target(&basename);
-    let rows = cap_rows(keymap::binding_diff_rows(&current.bindings, &target.bindings));
+    let rows = cap_rows(keymap::binding_diff_rows(
+        &current.bindings, &target.bindings,
+        &current.bindings_p2, &target.bindings_p2,
+    ));
     if let Ok(mut s) = TOUCHES.lock() {
         s.preview_rows = rows;
         s.screen = Screen::RevertPreview;
@@ -617,6 +650,9 @@ pub fn draw(backend: &mut SwitchRenderBackend) {
         Err(_) => return,
     };
     let lc = crate::loc::s();
+    // Active game name, shown as the subtitle under the header — same as the
+    // on-cover OPTIONS / profile picker (it was missing in-game).
+    let game = crate::library::active_display_name().unwrap_or_default();
     match screen {
         Screen::Inactive => {}
         Screen::Menu { selection } => {
@@ -632,7 +668,7 @@ pub fn draw(backend: &mut SwitchRenderBackend) {
             if can_revert {
                 rows.push(if has_backup { lc.profile_revert } else { lc.touches_revert_default });
             }
-            backend.draw_library_list_modal(lc.opt_keys, "", selection, &rows, lc.touches_footer);
+            backend.draw_library_list_modal(lc.opt_keys, &game, selection, &rows, lc.touches_footer, false);
         }
         Screen::List { selection, scroll_offset } => {
             let bindings: std::vec::Vec<(&'static str, Option<std::string::String>)> =
@@ -685,7 +721,7 @@ pub fn draw(backend: &mut SwitchRenderBackend) {
                 rows.push(lc.profile_none.to_string());
             }
             let refs: std::vec::Vec<&str> = rows.iter().map(|r| r.as_str()).collect();
-            backend.draw_library_list_modal(lc.profile_title, "", selection, &refs, lc.profile_footer);
+            backend.draw_library_list_modal(lc.profile_title, &game, selection, &refs, lc.profile_footer, true);
         }
         Screen::Preview { .. } => {
             let mut rows = TOUCHES.lock().map(|s| s.preview_rows.clone()).unwrap_or_default();
@@ -693,7 +729,7 @@ pub fn draw(backend: &mut SwitchRenderBackend) {
                 rows.push(lc.profile_preview_none.to_string());
             }
             let refs: std::vec::Vec<&str> = rows.iter().map(|r| r.as_str()).collect();
-            backend.draw_library_list_modal(lc.profile_preview_title, "", usize::MAX, &refs, lc.profile_preview_footer);
+            backend.draw_library_list_modal(lc.profile_preview_title, "", usize::MAX, &refs, lc.profile_preview_footer, true);
         }
         Screen::ShareConfirm => {
             let (is_update, mut rows) = TOUCHES
@@ -705,7 +741,7 @@ pub fn draw(backend: &mut SwitchRenderBackend) {
                 rows.push(lc.profile_preview_none.to_string());
             }
             let refs: std::vec::Vec<&str> = rows.iter().map(|r| r.as_str()).collect();
-            backend.draw_library_list_modal(lc.opt_share, subtitle, usize::MAX, &refs, lc.lang_footer);
+            backend.draw_library_list_modal(lc.opt_share, subtitle, usize::MAX, &refs, lc.lang_footer, true);
         }
         Screen::RevertPreview => {
             let mut rows = TOUCHES.lock().map(|s| s.preview_rows.clone()).unwrap_or_default();
@@ -713,7 +749,7 @@ pub fn draw(backend: &mut SwitchRenderBackend) {
                 rows.push(lc.profile_preview_none.to_string());
             }
             let refs: std::vec::Vec<&str> = rows.iter().map(|r| r.as_str()).collect();
-            backend.draw_library_list_modal(lc.revert_preview_title, "", usize::MAX, &refs, lc.revert_preview_footer);
+            backend.draw_library_list_modal(lc.revert_preview_title, "", usize::MAX, &refs, lc.revert_preview_footer, true);
         }
     }
     if let Some((msg, kind)) = toast {

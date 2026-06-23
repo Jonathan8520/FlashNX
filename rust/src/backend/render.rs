@@ -84,6 +84,89 @@ use std::sync::Mutex;
 // longer a top-level pause entry.
 pub const MENU_ITEMS: &[&str] = &["REPRENDRE", "TOUCHES", "REDEMARRER", "QUITTER"];
 
+// ── Unified modal style ────────────────────────────────────────────────────
+// One look for every centered popup. Before this, each modal hard-coded its own
+// width / height / font scales / dim alpha / colors, so they all drifted apart
+// (#20). Now they share these constants and the `draw_modal_frame` helper, and
+// only their *body* (rows, warnings, game name) differs. Panels size their
+// HEIGHT to the row count; the WIDTH picks one of two tiers below.
+//
+// Two width tiers, on purpose — a single width made short pickers look bloated
+// (a 4-item OPTIONS panel as wide as the screen). Long content (game names,
+// profile titles) shrinks to fit the standard width instead of forcing every
+// panel wide.
+//
+/// Standard picker width — pause, OPTIONS, sort, language, key dropdown, lists.
+/// Matches the in-game pause panel, the reference Jonathan liked.
+const MODAL_W: f32 = 520.0;
+/// Wide panel — only where the body genuinely needs the room: the two-column
+/// TOUCHES editor and the danger confirms (long warning / URL lines).
+const MODAL_W_WIDE: f32 = 720.0;
+/// Dim backdrop alpha (ARGB). The danger variant is darker to sell "stop".
+const MODAL_DIM: u32 = 0xB0_00_00_00;
+const MODAL_DIM_DANGER: u32 = 0xCC_00_00_00;
+/// Panel fill + border — calm navy vs danger red.
+const MODAL_BG: u32 = 0xF0_14_20_38;
+const MODAL_BG_DANGER: u32 = 0xF0_40_10_18;
+const MODAL_BORDER: u32 = 0xFFFFFF;
+const MODAL_BORDER_DANGER: u32 = 0xFF6060;
+/// Text scales — shared so font sizes never drift between modals again.
+const MODAL_TITLE_SCALE: f32 = 3.0;
+const MODAL_SUB_SCALE: f32 = 2.0;
+const MODAL_ROW_SCALE: f32 = 2.5;
+const MODAL_FOOTER_SCALE: f32 = 2.0;
+/// Text colors.
+const MODAL_TITLE_COL: u32 = 0xFFFFFF;
+const MODAL_TITLE_COL_DANGER: u32 = 0xFFD740; // amber title on the red panels
+const MODAL_SUB_COL: u32 = 0xAABFD8;
+const MODAL_ROW_COL: u32 = 0xCCCCCC;
+const MODAL_ROW_SEL_COL: u32 = 0xFFD740; // amber cursor row
+const MODAL_FOOTER_COL: u32 = 0x99AABB;
+/// Vertical metrics. A modal is PAD_TOP (title[+subtitle]) + rows*ROW_H +
+/// PAD_BOTTOM (footer). Fixed-height confirm modals override the total.
+const MODAL_ROW_H: f32 = 52.0;
+const MODAL_PAD_TOP: f32 = 140.0;
+const MODAL_PAD_BOTTOM: f32 = 60.0;
+/// Row layout: text left padding from the panel edge, and how far left the
+/// ">" cursor sits from that text.
+const MODAL_ROW_X: f32 = 80.0;
+const MODAL_CURSOR_DX: f32 = 30.0;
+
+/// Geometry of a drawn modal frame, returned by `draw_modal_frame` so the caller
+/// can lay its body (rows or free text) inside the shared chrome.
+#[derive(Clone, Copy)]
+struct ModalFrame {
+    x: f32,
+    y: f32,
+    w: f32,
+}
+
+impl ModalFrame {
+    /// Y of the first body row (just below the title/subtitle band).
+    fn rows_top(&self) -> f32 {
+        self.y + MODAL_PAD_TOP
+    }
+    /// Left edge of row text.
+    fn rows_left(&self) -> f32 {
+        self.x + MODAL_ROW_X
+    }
+    /// Horizontal space available for a row's text before the right edge.
+    fn rows_avail(&self) -> f32 {
+        self.w - MODAL_ROW_X * 1.5
+    }
+}
+
+/// Truncate `s` to at most `max_chars` characters, appending "…" when cut.
+fn truncate_tail(s: &str, max_chars: usize) -> std::string::String {
+    if s.chars().count() > max_chars && max_chars > 1 {
+        let mut t: std::string::String = s.chars().take(max_chars - 1).collect();
+        t.push('…');
+        t
+    } else {
+        s.to_string()
+    }
+}
+
 /// 5×7 pixel glyphs for the pause menu. ASCII art keeps the data
 /// hand-editable: each row is exactly 5 chars wide, ' ' = off, anything
 /// else = on. `draw_text` upper-cases input before lookup, so we only
@@ -4767,138 +4850,26 @@ impl SwitchRenderBackend {
     /// selected row; the selected label is rendered in yellow, others in
     /// white. Help line at the bottom describes the buttons.
     pub fn draw_menu_overlay(&mut self, selected: usize) {
-        // Re-bind blend / disable stencil, same as the cursor overlay.
-        unsafe {
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glDisable(GL_STENCIL_TEST);
-        }
-        let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
-
-        // Full-screen dim backdrop (50 % black). Hides the game so the
-        // user's eye snaps to the menu.
-        // 50% black backdrop. fill_screen_dim keeps it full-screen + still while
-        // the panel scales in (in-game pause pop), like the library modals.
-        self.fill_screen_dim(0x80_00_00_00);
-
-        // Centred panel, sized to the item count so it never has dead space
-        // (~60px/item: 380 for 4 items, 440 for 5, ...). Items sit at
-        // panel_y + 130 + i*50; the footer at panel_h - 40 clears the last one.
-        const PANEL_W: f32 = 520.0;
-        let panel_h = 140.0 + MENU_ITEMS.len() as f32 * 60.0;
-        let panel_x = (vw - PANEL_W) * 0.5;
-        let panel_y = (vh - panel_h) * 0.5;
-        let panel = Matrix {
-            a: PANEL_W,
-            b: 0.0,
-            c: 0.0,
-            d: panel_h,
-            tx: swf::Twips::from_pixels(panel_x as f64),
-            ty: swf::Twips::from_pixels(panel_y as f64),
-        };
-        // Dark blue-ish panel background (alpha 240/255 → mostly opaque).
-        // Dark navy panel at ~94% alpha so a hint of the paused frame shows
-        // through. AARRGGBB = F0 14 20 38.
-        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_14_20_38), panel);
-        // 1-px-style border via line rect at panel scale.
-        let border = Matrix {
-            a: PANEL_W,
-            b: 0.0,
-            c: 0.0,
-            d: panel_h,
-            tx: swf::Twips::from_pixels(panel_x as f64),
-            ty: swf::Twips::from_pixels(panel_y as f64),
-        };
-        <Self as CommandHandler>::draw_line_rect(
-            self,
-            swf::Color::from_rgb(0xFFFFFF, 255),
-            border,
-        );
-
-        // Title.
-        const TITLE_SCALE: f32 = 5.0;
-        let title = crate::loc::s().pause_title;
-        let title_w = self.measure_text(title, TITLE_SCALE);
-        let title_x = panel_x + (PANEL_W - title_w) * 0.5;
-        let title_y = panel_y + 30.0;
-        self.draw_text(
-            title_x,
-            title_y,
-            TITLE_SCALE,
-            title,
-            swf::Color::from_rgb(0xFFFFFF, 255),
-        );
-
-        // Game name under the title (mirrors the OPTIONS modal's sub-title).
-        if let Some(name) = crate::library::active_display_name() {
-            const SUB_SCALE: f32 = 2.0;
-            let max_chars = 30usize;
-            let sub = if name.chars().count() > max_chars {
-                let mut t: std::string::String = name.chars().take(max_chars - 1).collect();
-                t.push('\u{2026}');
-                t
-            } else {
-                name
-            };
-            let sub_w = self.measure_text(&sub, SUB_SCALE);
-            self.draw_text(
-                panel_x + (PANEL_W - sub_w) * 0.5,
-                panel_y + 80.0,
-                SUB_SCALE,
-                &sub,
-                swf::Color::from_rgb(0xAABFD8, 255),
-            );
-        }
-
-        // Menu items.
-        const ITEM_SCALE: f32 = 3.0;
-        const ITEM_SPACING: f32 = 50.0;
-        let items_y = panel_y + 130.0;
-        let item_color_selected = swf::Color::from_rgb(0xFFD740, 255); // amber
-        let item_color_normal = swf::Color::from_rgb(0xCCCCCC, 255);
-        // Pre-measure the longest item so all rows share a left margin.
+        // Shared modal chrome: game name in the subtitle slot (mirrors the
+        // OPTIONS modal). Held in a local so `as_deref()` can feed the frame.
         let lc = crate::loc::s();
+        let game = crate::library::active_display_name();
+        let frame = self.draw_modal_frame(
+            MODAL_W,
+            MENU_ITEMS.len(),
+            None,
+            false,
+            lc.pause_title,
+            game.as_deref(),
+            Some(lc.pause_footer),
+        );
+
         // Localized labels, same order/count as the MENU_ITEMS contract C++
         // relies on for pause-menu navigation. Cursor speed moved into the
         // TOUCHES sub-menu (#20 Option 1), so it's not a top-level item anymore.
         let items = [lc.menu_resume, lc.menu_keys, lc.menu_restart, lc.menu_quit];
         debug_assert_eq!(items.len(), MENU_ITEMS.len());
-        let longest = items
-            .iter()
-            .map(|s| s.chars().count())
-            .max()
-            .unwrap_or(0) as f32;
-        let block_w = (longest + 2.0) * 6.0 * ITEM_SCALE; // 2 chars left padding for ">  "
-        let items_x = panel_x + (PANEL_W - block_w) * 0.5;
-        for (i, item) in items.iter().enumerate() {
-            let y = items_y + i as f32 * ITEM_SPACING;
-            let color = if i == selected {
-                item_color_selected
-            } else {
-                item_color_normal
-            };
-            if i == selected {
-                self.draw_text(items_x, y, ITEM_SCALE, ">", color);
-            }
-            // Always render label at the same x (cursor occupies first slot).
-            let label_x = items_x + 2.0 * 6.0 * ITEM_SCALE;
-            self.draw_text(label_x, y, ITEM_SCALE, item, color);
-        }
-
-        // Footer help line.
-        const HELP_SCALE: f32 = 2.0;
-        let help = crate::loc::s().pause_footer;
-        let help_w = self.measure_text(help, HELP_SCALE);
-        let help_x = panel_x + (PANEL_W - help_w) * 0.5;
-        let help_y = panel_y + panel_h - 40.0;
-        self.draw_text(
-            help_x,
-            help_y,
-            HELP_SCALE,
-            help,
-            swf::Color::from_rgb(0x99AABB, 255),
-        );
+        self.draw_modal_rows(&frame, selected, &items);
 
         unsafe {
             glUseProgram(0);
@@ -4919,80 +4890,51 @@ impl SwitchRenderBackend {
         visible_rows: usize,
         player: u8,
     ) {
-        unsafe {
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glDisable(GL_STENCIL_TEST);
-        }
-        let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
-
-        // Same backdrop + panel framing as the pause menu — visually links the
-        // two screens. fill_screen_dim keeps it full while the panel scales in.
-        self.fill_screen_dim(0x80_00_00_00);
-
-        const PANEL_W: f32 = 720.0;
-        const PANEL_H: f32 = 600.0;
-        let panel_x = (vw - PANEL_W) * 0.5;
-        let panel_y = (vh - PANEL_H) * 0.5;
-        let panel = Matrix {
-            a: PANEL_W, b: 0.0, c: 0.0, d: PANEL_H,
-            tx: swf::Twips::from_pixels(panel_x as f64),
-            ty: swf::Twips::from_pixels(panel_y as f64),
-        };
-        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_14_20_38), panel);
-        <Self as CommandHandler>::draw_line_rect(
-            self,
-            swf::Color::from_rgb(0xFFFFFF, 255),
-            panel,
-        );
-
-        // Title.
-        const TITLE_SCALE: f32 = 4.0;
-        let title = crate::loc::s().keys_title;
-        let title_w = self.measure_text(title, TITLE_SCALE);
-        self.draw_text(
-            panel_x + (PANEL_W - title_w) * 0.5,
-            panel_y + 25.0,
-            TITLE_SCALE,
-            title,
-            swf::Color::from_rgb(0xFFFFFF, 255),
+        // Shared chrome (dim + panel + title + footer). Wide tier for the two
+        // columns; fixed 600-px height keeps the caller's LIST_VISIBLE_ROWS valid.
+        let lc = crate::loc::s();
+        let frame = self.draw_modal_frame(
+            MODAL_W_WIDE,
+            0,
+            Some(600.0),
+            false,
+            lc.keys_title,
+            None,
+            Some(lc.keys_footer),
         );
 
         // Player indicator (issue #40): which player's bindings are shown. X
-        // toggles P1/P2 (see the footer hint + menu::handle_list_input).
+        // toggles P1/P2 (see the footer hint + menu::handle_list_input). Sits in
+        // the subtitle slot but amber + bigger since it's live state, not a label.
         let pstr = if player == 2 { "P2" } else { "P1" };
         const PLAYER_SCALE: f32 = 3.0;
         let pw = self.measure_text(pstr, PLAYER_SCALE);
         self.draw_text(
-            panel_x + (PANEL_W - pw) * 0.5,
-            panel_y + 80.0,
+            frame.x + (frame.w - pw) * 0.5,
+            frame.y + 80.0,
             PLAYER_SCALE,
             pstr,
-            swf::Color::from_rgb(0xFFD740, 255),
+            swf::Color::from_rgb(MODAL_ROW_SEL_COL, 255),
         );
 
-        // Rows.
+        // Two-column rows: Switch button (left) + bracketed binding value (right).
         const ROW_SCALE: f32 = 3.0;
         const ROW_SPACING: f32 = 50.0;
-        let rows_top_y = panel_y + 130.0;
-        let rows_left_x = panel_x + 80.0;
-        // Right column = binding value, aligned to a fixed x.
-        let value_col_x = panel_x + 360.0;
-
+        let rows_top_y = frame.y + 130.0;
+        let rows_left_x = frame.rows_left();
+        let value_col_x = frame.x + 360.0;
         let total = bindings.len();
         let end = (scroll_offset + visible_rows).min(total);
         for (visible_idx, abs_idx) in (scroll_offset..end).enumerate() {
             let (btn, binding) = &bindings[abs_idx];
             let y = rows_top_y + visible_idx as f32 * ROW_SPACING;
             let is_sel = abs_idx == selection;
-            let color = if is_sel {
-                swf::Color::from_rgb(0xFFD740, 255) // amber
-            } else {
-                swf::Color::from_rgb(0xCCCCCC, 255)
-            };
+            let color = swf::Color::from_rgb(
+                if is_sel { MODAL_ROW_SEL_COL } else { MODAL_ROW_COL },
+                255,
+            );
             if is_sel {
-                self.draw_text(rows_left_x - 30.0, y, ROW_SCALE, ">", color);
+                self.draw_text(rows_left_x - MODAL_CURSOR_DX, y, ROW_SCALE, ">", color);
             }
             self.draw_text(rows_left_x, y, ROW_SCALE, btn, color);
             let value_str = binding
@@ -5004,23 +4946,20 @@ impl SwitchRenderBackend {
             self.draw_text(value_col_x, y, ROW_SCALE, &bracketed, color);
         }
 
-        // Scroll indicator on the right edge if the list is longer than
-        // what's visible.
+        // Scroll indicator on the right edge if the list overflows.
         if total > visible_rows {
-            let bar_x = panel_x + PANEL_W - 30.0;
+            let bar_x = frame.x + frame.w - 30.0;
             let bar_top_y = rows_top_y;
             let bar_h_total = visible_rows as f32 * ROW_SPACING;
             let bar_h_thumb = (bar_h_total * visible_rows as f32 / total as f32).max(20.0);
             let progress = scroll_offset as f32 / (total - visible_rows) as f32;
             let thumb_y = bar_top_y + (bar_h_total - bar_h_thumb) * progress;
-            // Bar track (faint).
             let track = Matrix {
                 a: 4.0, b: 0.0, c: 0.0, d: bar_h_total,
                 tx: swf::Twips::from_pixels(bar_x as f64),
                 ty: swf::Twips::from_pixels(bar_top_y as f64),
             };
             <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x40_99AABB), track);
-            // Thumb.
             let thumb = Matrix {
                 a: 4.0, b: 0.0, c: 0.0, d: bar_h_thumb,
                 tx: swf::Twips::from_pixels(bar_x as f64),
@@ -5028,18 +4967,6 @@ impl SwitchRenderBackend {
             };
             <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), thumb);
         }
-
-        // Footer.
-        const HELP_SCALE: f32 = 2.0;
-        let help = crate::loc::s().keys_footer;
-        let help_w = self.measure_text(help, HELP_SCALE);
-        self.draw_text(
-            panel_x + (PANEL_W - help_w) * 0.5,
-            panel_y + PANEL_H - 40.0,
-            HELP_SCALE,
-            help,
-            swf::Color::from_rgb(0x99AABB, 255),
-        );
 
         unsafe {
             glUseProgram(0);
@@ -5061,67 +4988,37 @@ impl SwitchRenderBackend {
         options: &[&str],
         visible_rows: usize,
     ) {
-        unsafe {
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glDisable(GL_STENCIL_TEST);
-        }
-        let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
-
-        // Full-screen dim (deeper than the list backdrop so the dropdown reads as
-        // a modal-over-modal). fill_screen_dim keeps it full while the panel scales.
-        self.fill_screen_dim(0xB0_00_00_00);
-
-        const PANEL_W: f32 = 480.0;
-        let row_h: f32 = 40.0;
-        // Panel sized for at most `visible_rows` rows + header + footer.
-        // No longer grows with total options count — that was the bug
-        // when ALL_FLASH_KEYS jumped from 12 to 48 entries.
-        let panel_h = 130.0 + visible_rows as f32 * row_h + 60.0;
-        let panel_x = (vw - PANEL_W) * 0.5;
-        let panel_y = (vh - panel_h) * 0.5;
-        let panel = Matrix {
-            a: PANEL_W, b: 0.0, c: 0.0, d: panel_h,
-            tx: swf::Twips::from_pixels(panel_x as f64),
-            ty: swf::Twips::from_pixels(panel_y as f64),
-        };
-        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_14_20_38), panel);
-        <Self as CommandHandler>::draw_line_rect(
-            self,
-            swf::Color::from_rgb(0xFFFFFF, 255),
-            panel,
-        );
-
-        // Title.
-        const TITLE_SCALE: f32 = 3.0;
+        // Dense 40-px rows (the full 48-key Flash keyboard) — kept distinct from
+        // MODAL_ROW_H so the caller's DROPDOWN_VISIBLE_ROWS math stays valid. The
+        // height tracks `visible_rows`, not the total (the 12->48 overflow bug).
+        const ROW_H: f32 = 40.0;
+        let panel_h = 130.0 + visible_rows as f32 * ROW_H + 60.0;
         let title = std::format!("{} ->", button_name);
-        let title_w = self.measure_text(&title, TITLE_SCALE);
-        self.draw_text(
-            panel_x + (PANEL_W - title_w) * 0.5,
-            panel_y + 25.0,
-            TITLE_SCALE,
+        let frame = self.draw_modal_frame(
+            MODAL_W,
+            0,
+            Some(panel_h),
+            false,
             &title,
-            swf::Color::from_rgb(0xFFFFFF, 255),
+            None,
+            Some(crate::loc::s().keys_dropdown_footer),
         );
 
-        // Options (windowed). Slice the list to scroll_offset..end and
-        // index back to absolute selection for the highlight check.
-        const OPT_SCALE: f32 = 2.5;
-        let opts_top_y = panel_y + 110.0;
-        let opts_left_x = panel_x + 100.0;
+        // Options (windowed). Slice to scroll_offset..end, index back to the
+        // absolute selection for the highlight check.
+        let opts_top_y = frame.y + 110.0;
+        let opts_left_x = frame.rows_left() + 20.0;
         let total = options.len();
         let end = (scroll_offset + visible_rows).min(total);
         for (visible_idx, abs_idx) in (scroll_offset..end).enumerate() {
-            let y = opts_top_y + visible_idx as f32 * row_h;
+            let y = opts_top_y + visible_idx as f32 * ROW_H;
             let is_sel = abs_idx == selection;
-            let color = if is_sel {
-                swf::Color::from_rgb(0xFFD740, 255)
-            } else {
-                swf::Color::from_rgb(0xCCCCCC, 255)
-            };
+            let color = swf::Color::from_rgb(
+                if is_sel { MODAL_ROW_SEL_COL } else { MODAL_ROW_COL },
+                255,
+            );
             if is_sel {
-                self.draw_text(opts_left_x - 30.0, y, OPT_SCALE, ">", color);
+                self.draw_text(opts_left_x - MODAL_CURSOR_DX, y, MODAL_ROW_SCALE, ">", color);
             }
             // Index 0 is the "unbind" entry. Action labels (none, mouse clicks)
             // are localized via flash_key_display; plain Flash key names pass
@@ -5131,14 +5028,14 @@ impl SwitchRenderBackend {
             } else {
                 crate::keymap::flash_key_display(options[abs_idx])
             };
-            self.draw_text(opts_left_x, y, OPT_SCALE, &label, color);
+            self.draw_text(opts_left_x, y, MODAL_ROW_SCALE, &label, color);
         }
 
         // Scrollbar (matches the TOUCHES list scrollbar style).
         if total > visible_rows {
-            let bar_x = panel_x + PANEL_W - 30.0;
+            let bar_x = frame.x + frame.w - 30.0;
             let bar_top_y = opts_top_y;
-            let bar_h_total = visible_rows as f32 * row_h;
+            let bar_h_total = visible_rows as f32 * ROW_H;
             let bar_h_thumb = (bar_h_total * visible_rows as f32 / total as f32).max(20.0);
             let progress = scroll_offset as f32 / (total - visible_rows) as f32;
             let thumb_y = bar_top_y + (bar_h_total - bar_h_thumb) * progress;
@@ -5155,18 +5052,6 @@ impl SwitchRenderBackend {
             };
             <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), thumb);
         }
-
-        // Footer.
-        const HELP_SCALE: f32 = 2.0;
-        let help = crate::loc::s().keys_dropdown_footer;
-        let help_w = self.measure_text(help, HELP_SCALE);
-        self.draw_text(
-            panel_x + (PANEL_W - help_w) * 0.5,
-            panel_y + panel_h - 35.0,
-            HELP_SCALE,
-            help,
-            swf::Color::from_rgb(0x99AABB, 255),
-        );
 
         unsafe {
             glUseProgram(0);
@@ -5588,6 +5473,123 @@ impl SwitchRenderBackend {
         self.ui_pivot_y = saved.2;
         self.ui_translate_x = saved.3;
         self.ui_translate_y = saved.4;
+    }
+
+    /// Draw the shared chrome of a centered modal: dim backdrop, panel rect,
+    /// border, centered title, optional centered subtitle, optional centered
+    /// footer. Returns the panel geometry so the caller lays out its body via
+    /// [`ModalFrame`]. The height is auto-sized to `rows` unless `fixed_h` is
+    /// given; `danger=true` switches to the red destructive-action theme.
+    fn draw_modal_frame(
+        &mut self,
+        width: f32,
+        rows: usize,
+        fixed_h: Option<f32>,
+        danger: bool,
+        title: &str,
+        subtitle: Option<&str>,
+        footer: Option<&str>,
+    ) -> ModalFrame {
+        unsafe {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_STENCIL_TEST);
+        }
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+
+        // Translate-immune backdrop so the panel can scale/drop in (modal-open
+        // pop) without the dim sliding off an edge.
+        self.fill_screen_dim(if danger { MODAL_DIM_DANGER } else { MODAL_DIM });
+
+        let w = width;
+        let h = fixed_h
+            .unwrap_or(MODAL_PAD_TOP + rows.max(1) as f32 * MODAL_ROW_H + MODAL_PAD_BOTTOM);
+        let x = (vw - w) * 0.5;
+        let y = (vh - h) * 0.5;
+        let panel = Matrix {
+            a: w, b: 0.0, c: 0.0, d: h,
+            tx: swf::Twips::from_pixels(x as f64),
+            ty: swf::Twips::from_pixels(y as f64),
+        };
+        let (bg, border) = if danger {
+            (MODAL_BG_DANGER, MODAL_BORDER_DANGER)
+        } else {
+            (MODAL_BG, MODAL_BORDER)
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(bg), panel);
+        <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(border, 255), panel);
+
+        // Title.
+        let title_col = if danger { MODAL_TITLE_COL_DANGER } else { MODAL_TITLE_COL };
+        let tw = self.measure_text(title, MODAL_TITLE_SCALE);
+        self.draw_text(
+            x + (w - tw) * 0.5,
+            y + 25.0,
+            MODAL_TITLE_SCALE,
+            title,
+            swf::Color::from_rgb(title_col, 255),
+        );
+
+        // Optional subtitle (e.g. the game name). Shrinks to fit rather than
+        // truncating with "…" — so the standard 520 width shows the whole name,
+        // just smaller, instead of cutting it off (Jonathan's no-truncation ask).
+        if let Some(sub) = subtitle {
+            let avail = w - MODAL_ROW_X;
+            let sw_full = self.measure_text(sub, MODAL_SUB_SCALE);
+            let scale = if sw_full > avail {
+                MODAL_SUB_SCALE * avail / sw_full
+            } else {
+                MODAL_SUB_SCALE
+            };
+            let sw = self.measure_text(sub, scale);
+            self.draw_text(
+                x + (w - sw) * 0.5,
+                y + 75.0,
+                scale,
+                sub,
+                swf::Color::from_rgb(MODAL_SUB_COL, 255),
+            );
+        }
+
+        // Optional footer.
+        if let Some(f) = footer {
+            let fw = self.measure_text(f, MODAL_FOOTER_SCALE);
+            self.draw_text(
+                x + (w - fw) * 0.5,
+                y + h - 38.0,
+                MODAL_FOOTER_SCALE,
+                f,
+                swf::Color::from_rgb(MODAL_FOOTER_COL, 255),
+            );
+        }
+
+        // `h` stays local — consumed by the panel rect + footer position above;
+        // callers lay their body out from y + fixed offsets, so it isn't returned.
+        ModalFrame { x, y, w }
+    }
+
+    /// Draw a vertical list of selectable rows inside a modal `frame`, with the
+    /// shared ">" cursor + amber selection. A too-wide row is shrunk to fit.
+    /// `selection == usize::MAX` draws no cursor (read-only lists).
+    fn draw_modal_rows(&mut self, frame: &ModalFrame, selection: usize, rows: &[&str]) {
+        let left = frame.rows_left();
+        let avail = frame.rows_avail();
+        let top = frame.rows_top();
+        for (i, row) in rows.iter().enumerate() {
+            let y = top + i as f32 * MODAL_ROW_H;
+            let is_sel = i == selection;
+            let color = swf::Color::from_rgb(
+                if is_sel { MODAL_ROW_SEL_COL } else { MODAL_ROW_COL },
+                255,
+            );
+            if is_sel {
+                self.draw_text(left - MODAL_CURSOR_DX, y, MODAL_ROW_SCALE, ">", color);
+            }
+            let w = self.measure_text(row, MODAL_ROW_SCALE);
+            let sc = if w > avail { MODAL_ROW_SCALE * avail / w } else { MODAL_ROW_SCALE };
+            self.draw_text(left, y, sc, row, color);
+        }
     }
 
     /// Top navbar (v1.2.0) — tab strip switched with the L/R shoulder buttons.
@@ -6230,91 +6232,17 @@ impl SwitchRenderBackend {
         selection: usize,
         options: &[&str],
     ) {
-        unsafe {
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glDisable(GL_STENCIL_TEST);
-        }
-        let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
-
-        // Dim the screen behind. Translate-immune so the panel can drop in
-        // (modal-open pop) without the backdrop sliding off an edge.
-        self.fill_screen_dim(0xB0_00_00_00);
-
-        const PANEL_W: f32 = 520.0;
-        let row_h: f32 = 50.0;
-        let panel_h = 180.0 + options.len() as f32 * row_h + 60.0;
-        let panel_x = (vw - PANEL_W) * 0.5;
-        let panel_y = (vh - panel_h) * 0.5;
-        let panel = Matrix {
-            a: PANEL_W, b: 0.0, c: 0.0, d: panel_h,
-            tx: swf::Twips::from_pixels(panel_x as f64),
-            ty: swf::Twips::from_pixels(panel_y as f64),
-        };
-        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_14_20_38), panel);
-        <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(0xFFFFFF, 255), panel);
-
-        // Header.
-        const TITLE_SCALE: f32 = 3.0;
-        let header = crate::loc::s().options_title;
-        let header_w = self.measure_text(header, TITLE_SCALE);
-        self.draw_text(
-            panel_x + (PANEL_W - header_w) * 0.5,
-            panel_y + 25.0,
-            TITLE_SCALE,
-            header,
-            swf::Color::from_rgb(0xFFFFFF, 255),
+        let lc = crate::loc::s();
+        let frame = self.draw_modal_frame(
+            MODAL_W,
+            options.len(),
+            None,
+            false,
+            lc.options_title,
+            Some(game_display_name),
+            Some(lc.options_footer),
         );
-        // Game name (sub-title).
-        const SUB_SCALE: f32 = 2.0;
-        // Truncate game name to fit the panel.
-        let max_chars = 28usize;
-        let sub = if game_display_name.chars().count() > max_chars {
-            let mut t: std::string::String = game_display_name.chars().take(max_chars - 1).collect();
-            t.push('…');
-            t
-        } else {
-            game_display_name.to_string()
-        };
-        let sub_w = self.measure_text(&sub, SUB_SCALE);
-        self.draw_text(
-            panel_x + (PANEL_W - sub_w) * 0.5,
-            panel_y + 75.0,
-            SUB_SCALE,
-            &sub,
-            swf::Color::from_rgb(0xAABFD8, 255),
-        );
-
-        // Options list.
-        const OPT_SCALE: f32 = 2.5;
-        let opts_top_y = panel_y + 140.0;
-        let opts_left_x = panel_x + 120.0;
-        for (i, opt) in options.iter().enumerate() {
-            let y = opts_top_y + i as f32 * row_h;
-            let is_sel = i == selection;
-            let color = if is_sel {
-                swf::Color::from_rgb(0xFFD740, 255)
-            } else {
-                swf::Color::from_rgb(0xCCCCCC, 255)
-            };
-            if is_sel {
-                self.draw_text(opts_left_x - 30.0, y, OPT_SCALE, ">", color);
-            }
-            self.draw_text(opts_left_x, y, OPT_SCALE, opt, color);
-        }
-
-        // Footer.
-        const HELP_SCALE: f32 = 2.0;
-        let help = crate::loc::s().options_footer;
-        let help_w = self.measure_text(help, HELP_SCALE);
-        self.draw_text(
-            panel_x + (PANEL_W - help_w) * 0.5,
-            panel_y + panel_h - 38.0,
-            HELP_SCALE,
-            help,
-            swf::Color::from_rgb(0x99AABB, 255),
-        );
+        self.draw_modal_rows(&frame, selection, options);
 
         unsafe {
             glUseProgram(0);
@@ -6325,7 +6253,9 @@ impl SwitchRenderBackend {
 
     /// Generic centered list modal (title + subtitle + rows + footer), same
     /// look as `draw_library_options` but with the strings passed in. Used by
-    /// the community-profile picker (#20). `subtitle` may be empty.
+    /// the community-profile picker (#20). `subtitle` may be empty. `wide` picks
+    /// the 720 tier for content-heavy lists (profile names, before/after diffs)
+    /// that look cramped at the standard 520; short lists pass `false`.
     pub fn draw_library_list_modal(
         &mut self,
         title: &str,
@@ -6333,95 +6263,19 @@ impl SwitchRenderBackend {
         selection: usize,
         options: &[&str],
         footer: &str,
+        wide: bool,
     ) {
-        unsafe {
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glDisable(GL_STENCIL_TEST);
-        }
-        let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
-        self.fill_screen_dim(0xB0_00_00_00);
-
-        const PANEL_W: f32 = 640.0;
-        let row_h: f32 = 50.0;
-        let rows = options.len().max(1) as f32;
-        let panel_h = 180.0 + rows * row_h + 60.0;
-        let panel_x = (vw - PANEL_W) * 0.5;
-        let panel_y = (vh - panel_h) * 0.5;
-        let panel = Matrix {
-            a: PANEL_W, b: 0.0, c: 0.0, d: panel_h,
-            tx: swf::Twips::from_pixels(panel_x as f64),
-            ty: swf::Twips::from_pixels(panel_y as f64),
-        };
-        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_14_20_38), panel);
-        <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(0xFFFFFF, 255), panel);
-
-        const TITLE_SCALE: f32 = 3.0;
-        let title_w = self.measure_text(title, TITLE_SCALE);
-        self.draw_text(
-            panel_x + (PANEL_W - title_w) * 0.5,
-            panel_y + 25.0,
-            TITLE_SCALE,
+        let sub = if subtitle.is_empty() { None } else { Some(subtitle) };
+        let frame = self.draw_modal_frame(
+            if wide { MODAL_W_WIDE } else { MODAL_W },
+            options.len(),
+            None,
+            false,
             title,
-            swf::Color::from_rgb(0xFFFFFF, 255),
+            sub,
+            Some(footer),
         );
-        if !subtitle.is_empty() {
-            const SUB_SCALE: f32 = 2.0;
-            let max_chars = 36usize;
-            let sub = if subtitle.chars().count() > max_chars {
-                let mut t: std::string::String = subtitle.chars().take(max_chars - 1).collect();
-                t.push('…');
-                t
-            } else {
-                subtitle.to_string()
-            };
-            let sub_w = self.measure_text(&sub, SUB_SCALE);
-            self.draw_text(
-                panel_x + (PANEL_W - sub_w) * 0.5,
-                panel_y + 75.0,
-                SUB_SCALE,
-                &sub,
-                swf::Color::from_rgb(0xAABFD8, 255),
-            );
-        }
-
-        const OPT_SCALE: f32 = 2.5;
-        let opts_top_y = panel_y + 140.0;
-        let opts_left_x = panel_x + 80.0;
-        // Room from the text origin to the right inner edge of the panel.
-        let avail_w = PANEL_W - 120.0;
-        for (i, opt) in options.iter().enumerate() {
-            let y = opts_top_y + i as f32 * row_h;
-            let is_sel = i == selection;
-            let color = if is_sel {
-                swf::Color::from_rgb(0xFFD740, 255)
-            } else {
-                swf::Color::from_rgb(0xCCCCCC, 255)
-            };
-            if is_sel {
-                self.draw_text(opts_left_x - 30.0, y, OPT_SCALE, ">", color);
-            }
-            // Shrink a too-wide row to fit (long profile titles, or the
-            // multi-word "no profile for this game" notice).
-            let w = self.measure_text(opt, OPT_SCALE);
-            let sc = if w > avail_w {
-                OPT_SCALE * avail_w / w
-            } else {
-                OPT_SCALE
-            };
-            self.draw_text(opts_left_x, y, sc, opt, color);
-        }
-
-        const HELP_SCALE: f32 = 2.0;
-        let help_w = self.measure_text(footer, HELP_SCALE);
-        self.draw_text(
-            panel_x + (PANEL_W - help_w) * 0.5,
-            panel_y + panel_h - 38.0,
-            HELP_SCALE,
-            footer,
-            swf::Color::from_rgb(0x99AABB, 255),
-        );
+        self.draw_modal_rows(&frame, selection, options);
 
         unsafe {
             glUseProgram(0);
@@ -6437,54 +6291,27 @@ impl SwitchRenderBackend {
         game_display_name: &str,
         basename: &str,
     ) {
-        unsafe {
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glDisable(GL_STENCIL_TEST);
-        }
-        let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
-
-        // Translate-immune backdrop (panel drops in over a fixed dim).
-        self.fill_screen_dim(0xCC_00_00_00);
-
-        const PANEL_W: f32 = 720.0;
-        const PANEL_H: f32 = 360.0;
-        let panel_x = (vw - PANEL_W) * 0.5;
-        let panel_y = (vh - PANEL_H) * 0.5;
-        let panel = Matrix {
-            a: PANEL_W, b: 0.0, c: 0.0, d: PANEL_H,
-            tx: swf::Twips::from_pixels(panel_x as f64),
-            ty: swf::Twips::from_pixels(panel_y as f64),
-        };
-        // Dark red panel to signal danger.
-        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_40_10_18), panel);
-        <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(0xFF6060, 255), panel);
-
-        const TITLE_SCALE: f32 = 4.0;
-        let header = crate::loc::s().del_title;
-        let header_w = self.measure_text(header, TITLE_SCALE);
-        self.draw_text(
-            panel_x + (PANEL_W - header_w) * 0.5,
-            panel_y + 30.0,
-            TITLE_SCALE,
-            header,
-            swf::Color::from_rgb(0xFFD740, 255),
+        // Fixed-height danger frame (red theme, amber title + shared footer).
+        // Wide tier — the warning lines are long.
+        let lc = crate::loc::s();
+        let frame = self.draw_modal_frame(
+            MODAL_W_WIDE,
+            0,
+            Some(360.0),
+            true,
+            lc.del_title,
+            None,
+            Some(lc.del_footer),
         );
 
+        // Game name + basename, centered under the title.
         const NAME_SCALE: f32 = 2.5;
-        let max_chars = 36usize;
-        let display = if game_display_name.chars().count() > max_chars {
-            let mut t: std::string::String = game_display_name.chars().take(max_chars - 1).collect();
-            t.push('…');
-            t
-        } else {
-            game_display_name.to_string()
-        };
+        let name_budget = ((frame.w - MODAL_ROW_X) / (6.0 * NAME_SCALE)) as usize;
+        let display = truncate_tail(game_display_name, name_budget);
         let dw = self.measure_text(&display, NAME_SCALE);
         self.draw_text(
-            panel_x + (PANEL_W - dw) * 0.5,
-            panel_y + 105.0,
+            frame.x + (frame.w - dw) * 0.5,
+            frame.y + 105.0,
             NAME_SCALE,
             &display,
             swf::Color::from_rgb(0xFFFFFF, 255),
@@ -6494,52 +6321,32 @@ impl SwitchRenderBackend {
         let bn = std::format!("[{}]", basename);
         let bnw = self.measure_text(&bn, SUB_SCALE);
         self.draw_text(
-            panel_x + (PANEL_W - bnw) * 0.5,
-            panel_y + 145.0,
+            frame.x + (frame.w - bnw) * 0.5,
+            frame.y + 145.0,
             SUB_SCALE,
             &bn,
             swf::Color::from_rgb(0xCCAAAA, 255),
         );
 
+        // Three warning lines (the last is red — irreversible).
         const WARN_SCALE: f32 = 2.0;
-        let warn1 = crate::loc::s().del_l1;
-        let warn2 = crate::loc::s().del_l2;
-        let w1w = self.measure_text(warn1, WARN_SCALE);
-        let w2w = self.measure_text(warn2, WARN_SCALE);
-        self.draw_text(
-            panel_x + (PANEL_W - w1w) * 0.5,
-            panel_y + 195.0,
-            WARN_SCALE,
-            warn1,
-            swf::Color::from_rgb(0xFFEEDD, 255),
-        );
-        self.draw_text(
-            panel_x + (PANEL_W - w2w) * 0.5,
-            panel_y + 225.0,
-            WARN_SCALE,
-            warn2,
-            swf::Color::from_rgb(0xFFEEDD, 255),
-        );
-        let irrev = crate::loc::s().del_l3;
-        let iw = self.measure_text(irrev, WARN_SCALE);
-        self.draw_text(
-            panel_x + (PANEL_W - iw) * 0.5,
-            panel_y + 260.0,
-            WARN_SCALE,
-            irrev,
-            swf::Color::from_rgb(0xFF9090, 255),
-        );
-
-        const HELP_SCALE: f32 = 2.5;
-        let help = crate::loc::s().del_footer;
-        let help_w = self.measure_text(help, HELP_SCALE);
-        self.draw_text(
-            panel_x + (PANEL_W - help_w) * 0.5,
-            panel_y + PANEL_H - 50.0,
-            HELP_SCALE,
-            help,
-            swf::Color::from_rgb(0xFFFFFF, 255),
-        );
+        for (i, (line, col)) in [
+            (lc.del_l1, 0xFFEEDDu32),
+            (lc.del_l2, 0xFFEEDD),
+            (lc.del_l3, 0xFF9090),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let w = self.measure_text(line, WARN_SCALE);
+            self.draw_text(
+                frame.x + (frame.w - w) * 0.5,
+                frame.y + 195.0 + i as f32 * 30.0,
+                WARN_SCALE,
+                line,
+                swf::Color::from_rgb(*col, 255),
+            );
+        }
 
         unsafe {
             glUseProgram(0);
@@ -7049,7 +6856,12 @@ impl SwitchRenderBackend {
         // Centered entry list with a gliding selection highlight (v1.2.0).
         const OPT_SCALE: f32 = 3.0;
         let row_h = 66.0;
-        let top_y = 230.0;
+        // Center the block vertically between the header rule and the footer so it
+        // stays balanced whatever the entry count (a row was added: PSEUDO #20).
+        let region_top = 185.0;
+        let region_bottom = vh - 70.0;
+        let block_h = entries.len() as f32 * row_h;
+        let top_y = (region_top + ((region_bottom - region_top) - block_h) * 0.5).max(region_top);
 
         let target_hy = top_y + selection as f32 * row_h;
         let now_hl = unsafe { ruffle_tick_now() };
@@ -7566,60 +7378,25 @@ impl SwitchRenderBackend {
         footer: &str,
         dir_label: &str,
     ) {
-        unsafe {
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glDisable(GL_STENCIL_TEST);
-        }
-        let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
-        self.fill_screen_dim(0xB0_00_00_00);
-
-        const PANEL_W: f32 = 460.0;
-        let row_h: f32 = 54.0;
-        // +40 vs before for the direction (SENS) line under the title.
-        let panel_h = 170.0 + options.len() as f32 * row_h + 46.0;
-        let panel_x = (vw - PANEL_W) * 0.5;
-        let panel_y = (vh - panel_h) * 0.5;
-        let panel = Matrix {
-            a: PANEL_W, b: 0.0, c: 0.0, d: panel_h,
-            tx: swf::Twips::from_pixels(panel_x as f64),
-            ty: swf::Twips::from_pixels(panel_y as f64),
-        };
-        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_14_20_38), panel);
-        <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(0xFFFFFF, 255), panel);
-
-        let tw = self.measure_text(title, 3.0);
-        self.draw_text(panel_x + (PANEL_W - tw) * 0.5, panel_y + 26.0, 3.0, title, swf::Color::from_rgb(0xFFFFFF, 255));
-
-        // Direction indicator (toggled with X) — teal, centered under the title.
-        let dw = self.measure_text(dir_label, 2.0);
+        let frame = self.draw_modal_frame(
+            MODAL_W,
+            options.len(),
+            None,
+            false,
+            title,
+            None,
+            Some(footer),
+        );
+        // Direction indicator (toggled with X) — teal, in the subtitle slot.
+        let dw = self.measure_text(dir_label, MODAL_SUB_SCALE);
         self.draw_text(
-            panel_x + (PANEL_W - dw) * 0.5,
-            panel_y + 66.0,
-            2.0,
+            frame.x + (frame.w - dw) * 0.5,
+            frame.y + 75.0,
+            MODAL_SUB_SCALE,
             dir_label,
             swf::Color::from_rgb(0x66DDCC, 255),
         );
-
-        let opts_top = panel_y + 130.0;
-        let opts_left = panel_x + 120.0;
-        for (i, opt) in options.iter().enumerate() {
-            let y = opts_top + i as f32 * row_h;
-            let is_sel = i == selection;
-            let color = if is_sel {
-                swf::Color::from_rgb(0xFFD740, 255)
-            } else {
-                swf::Color::from_rgb(0xCCCCCC, 255)
-            };
-            if is_sel {
-                self.draw_text(opts_left - 30.0, y, 2.5, ">", color);
-            }
-            self.draw_text(opts_left, y, 2.5, opt, color);
-        }
-
-        let hw = self.measure_text(footer, 2.0);
-        self.draw_text(panel_x + (PANEL_W - hw) * 0.5, panel_y + panel_h - 34.0, 2.0, footer, swf::Color::from_rgb(0x99AABB, 255));
+        self.draw_modal_rows(&frame, selection, options);
 
         unsafe {
             glUseProgram(0);
@@ -7786,68 +7563,38 @@ impl SwitchRenderBackend {
     /// names in `loc::PICKER_LANGS` order. The currently-active language is
     /// tinted teal even when the cursor is elsewhere.
     pub fn draw_library_language_picker(&mut self, selection: usize, languages: &[&str]) {
-        unsafe {
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glDisable(GL_STENCIL_TEST);
-        }
-        let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
-
-        const PANEL_W: f32 = 520.0;
-        let row_h: f32 = 56.0;
-        let panel_h = 140.0 + languages.len() as f32 * row_h + 60.0;
-        let panel_x = (vw - PANEL_W) * 0.5;
-        let panel_y = (vh - panel_h) * 0.5;
-        let panel = Matrix {
-            a: PANEL_W, b: 0.0, c: 0.0, d: panel_h,
-            tx: swf::Twips::from_pixels(panel_x as f64),
-            ty: swf::Twips::from_pixels(panel_y as f64),
-        };
-        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_14_20_38), panel);
-        <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(0xFFFFFF, 255), panel);
-
-        const TITLE_SCALE: f32 = 3.0;
-        let header = crate::loc::s().lang_title;
-        let header_w = self.measure_text(header, TITLE_SCALE);
-        self.draw_text(
-            panel_x + (PANEL_W - header_w) * 0.5,
-            panel_y + 28.0,
-            TITLE_SCALE,
-            header,
-            swf::Color::from_rgb(0xFFFFFF, 255),
+        let lc = crate::loc::s();
+        let frame = self.draw_modal_frame(
+            MODAL_W,
+            languages.len(),
+            None,
+            false,
+            lc.lang_title,
+            None,
+            Some(lc.lang_footer),
         );
 
+        // Rows: amber cursor row, teal for the currently-active language even
+        // when the cursor is elsewhere (custom coloring, so not draw_modal_rows).
         let active = crate::loc::current().index();
-        const OPT_SCALE: f32 = 2.5;
-        let opts_top_y = panel_y + 110.0;
-        let opts_left_x = panel_x + 120.0;
+        let left = frame.rows_left();
+        let top = frame.rows_top();
         for (i, lang) in languages.iter().enumerate() {
-            let y = opts_top_y + i as f32 * row_h;
+            let y = top + i as f32 * MODAL_ROW_H;
             let is_sel = i == selection;
-            let color = if is_sel {
-                swf::Color::from_rgb(0xFFD740, 255) // amber cursor row
+            let rgb = if is_sel {
+                MODAL_ROW_SEL_COL
             } else if i == active {
-                swf::Color::from_rgb(0x66DDCC, 255) // teal = currently active
+                0x66DDCC
             } else {
-                swf::Color::from_rgb(0xCCCCCC, 255)
+                MODAL_ROW_COL
             };
+            let color = swf::Color::from_rgb(rgb, 255);
             if is_sel {
-                self.draw_text(opts_left_x - 30.0, y, OPT_SCALE, ">", color);
+                self.draw_text(left - MODAL_CURSOR_DX, y, MODAL_ROW_SCALE, ">", color);
             }
-            self.draw_text(opts_left_x, y, OPT_SCALE, lang, color);
+            self.draw_text(left, y, MODAL_ROW_SCALE, lang, color);
         }
-
-        const HELP_SCALE: f32 = 2.0;
-        let help = crate::loc::s().lang_footer;
-        let help_w = self.measure_text(help, HELP_SCALE);
-        self.draw_text(
-            panel_x + (PANEL_W - help_w) * 0.5,
-            panel_y + panel_h - 38.0,
-            HELP_SCALE,
-            help,
-            swf::Color::from_rgb(0x99AABB, 255),
-        );
 
         unsafe {
             glUseProgram(0);
@@ -7860,78 +7607,40 @@ impl SwitchRenderBackend {
     /// Shows the URL + a confirmation prompt; reuses the red "danger" theme.
     pub fn draw_library_history_delete_confirm(&mut self, url: &str) {
         self.library_clear();
-        let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
-        unsafe {
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glDisable(GL_STENCIL_TEST);
-        }
-
-        const PANEL_W: f32 = 980.0;
-        const PANEL_H: f32 = 300.0;
-        let panel_x = (vw - PANEL_W) * 0.5;
-        let panel_y = (vh - PANEL_H) * 0.5;
-        let panel = Matrix {
-            a: PANEL_W, b: 0.0, c: 0.0, d: PANEL_H,
-            tx: swf::Twips::from_pixels(panel_x as f64),
-            ty: swf::Twips::from_pixels(panel_y as f64),
-        };
-        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xF0_40_10_18), panel);
-        <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(0xFF6060, 255), panel);
-
-        // Title.
-        const TITLE_SCALE: f32 = 3.5;
-        let header = crate::loc::s().histdel_title;
-        let header_w = self.measure_text(header, TITLE_SCALE);
-        self.draw_text(
-            panel_x + (PANEL_W - header_w) * 0.5,
-            panel_y + 28.0,
-            TITLE_SCALE,
-            header,
-            swf::Color::from_rgb(0xFFD740, 255),
+        // Fixed-height danger frame (wide tier — the URL line is long); footer
+        // reuses the generic "A: DELETE   B: CANCEL".
+        let lc = crate::loc::s();
+        let frame = self.draw_modal_frame(
+            MODAL_W_WIDE,
+            0,
+            Some(300.0),
+            true,
+            lc.histdel_title,
+            None,
+            Some(lc.del_footer),
         );
 
-        // The URL, truncated to fit the panel width.
+        // The URL, truncated to the panel width.
         const URL_SCALE: f32 = 2.0;
-        let char_w = 6.0 * URL_SCALE;
-        let max_chars = ((PANEL_W - 60.0) / char_w) as usize;
-        let mut display = url.to_string();
-        if display.chars().count() > max_chars && max_chars > 1 {
-            display = display.chars().take(max_chars - 1).collect();
-            display.push('\u{2026}');
-        }
+        let budget = ((frame.w - 60.0) / (6.0 * URL_SCALE)) as usize;
+        let display = truncate_tail(url, budget);
         let uw = self.measure_text(&display, URL_SCALE);
         self.draw_text(
-            panel_x + (PANEL_W - uw) * 0.5,
-            panel_y + 110.0,
+            frame.x + (frame.w - uw) * 0.5,
+            frame.y + 110.0,
             URL_SCALE,
             &display,
             swf::Color::from_rgb(0xFFFFFF, 255),
         );
 
         // Confirmation prompt.
-        const MSG_SCALE: f32 = 2.0;
-        let msg = crate::loc::s().histdel_msg;
-        let mw = self.measure_text(msg, MSG_SCALE);
+        let mw = self.measure_text(lc.histdel_msg, MODAL_SUB_SCALE);
         self.draw_text(
-            panel_x + (PANEL_W - mw) * 0.5,
-            panel_y + 165.0,
-            MSG_SCALE,
-            msg,
+            frame.x + (frame.w - mw) * 0.5,
+            frame.y + 165.0,
+            MODAL_SUB_SCALE,
+            lc.histdel_msg,
             swf::Color::from_rgb(0xFFEEDD, 255),
-        );
-
-        // Footer reuses the generic "A: DELETE   B: CANCEL" line.
-        const HELP_SCALE: f32 = 2.5;
-        let help = crate::loc::s().del_footer;
-        let help_w = self.measure_text(help, HELP_SCALE);
-        self.draw_text(
-            panel_x + (PANEL_W - help_w) * 0.5,
-            panel_y + PANEL_H - 50.0,
-            HELP_SCALE,
-            help,
-            swf::Color::from_rgb(0xFFFFFF, 255),
         );
 
         unsafe {

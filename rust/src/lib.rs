@@ -879,9 +879,16 @@ pub extern "C" fn ruffle_touches_open() {
     backend::render::modal_open_begin();
 }
 
+/// Last in-game TOUCHES screen kind drawn (0 = none), so `ruffle_touches_draw`
+/// fires the scale-in pop only on the frame a sub-screen first appears — the
+/// in-game mirror of `library`'s LAST_MODAL_KIND. Reset on close so reopening
+/// always pops fresh.
+static LAST_TOUCHES_KIND: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 #[no_mangle]
 pub extern "C" fn ruffle_touches_close() {
     menu::close();
+    LAST_TOUCHES_KIND.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[no_mangle]
@@ -920,9 +927,17 @@ pub extern "C" fn ruffle_touches_draw() {
     if let Some(backend) =
         <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(renderer)
     {
-        // Scale-in pop (open begun in ruffle_touches_open). The dim backdrop
+        // Scale-in pop. Re-triggered on EVERY sub-screen transition (Menu ->
+        // List -> Dropdown -> Profiles -> Preview ...), mirroring the on-cover
+        // modals (library::render's modal_kind tracking) — without this, only the
+        // first entry popped and every sub-screen snapped in. The dim backdrop
         // stays put (fill_screen_dim); only the panel scales.
         let now = unsafe { ruffle_tick_now() };
+        let kind = menu::screen_kind();
+        let last = LAST_TOUCHES_KIND.swap(kind, std::sync::atomic::Ordering::Relaxed);
+        if kind != 0 && kind != last {
+            backend::render::modal_open_begin();
+        }
         let (scale, active, _done) = backend::render::modal_scale_step(now);
         if active {
             backend.set_ui_modal_scale(scale);
