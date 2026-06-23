@@ -1446,6 +1446,11 @@ pub fn input(button: &str) -> bool {
                 run_suggestion_flow();
                 return true;
             }
+            // PSEUDO (#20): swkbd to set the community-profile nickname. Hoisted.
+            if button == "A" && selection == 5 {
+                run_pseudo_flow();
+                return true;
+            }
         }
         // `+` on a Flashpoint gallery tile = details popup. Hoisted: it does a
         // blocking HEAD to read the download size, which must not run under the
@@ -1663,9 +1668,10 @@ pub fn input(button: &str) -> bool {
 }
 
 /// Settings tab entries: 0 = default controls, 1 = language, 2 = report a bug,
-/// 3 = make a suggestion, 4 = cursor speed, 5 = quit. (No BACK — leave via L/R.)
+/// 3 = make a suggestion, 4 = cursor speed, 5 = nickname, 6 = quit. (No BACK —
+/// leave via L/R.)
 fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
-    const LAST: usize = 5;
+    const LAST: usize = 6;
     match button {
         "Up" | "StickLUp" => {
             selection = if selection == 0 { LAST } else { selection - 1 };
@@ -1702,7 +1708,8 @@ fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
                     // the value + persistence; we just trigger + re-read it).
                     unsafe { ruffle_cursor_speed_cycle() };
                 }
-                5 => {
+                // 5 = PSEUDO is hoisted in input() (opens swkbd).
+                6 => {
                     // QUIT (Minus is SEARCH now). Exits the .nro.
                     s.screen = Screen::Quit;
                 }
@@ -1854,6 +1861,20 @@ fn run_suggestion_flow() {
         description: text,
     };
     submit_and_show(&report);
+}
+
+/// RÉGLAGES > PSEUDO (#20): open swkbd (prefilled with the current nickname) to
+/// set the community-profile nickname. Hoisted from `input()` — swkbd must run
+/// without the LIBRARY lock. Empty input clears it.
+fn run_pseudo_flow() {
+    let current = crate::profiles::author_name();
+    let Some(name) = net::prompt_pseudo(&current) else {
+        return; // cancelled
+    };
+    crate::profiles::set_author_name(&name);
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.screen = Screen::SettingsModal { selection: 5 };
+    }
 }
 
 /// Submit a bug/suggestion report and land on the result screen.
@@ -3854,9 +3875,16 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             // Cursor speed shows its live value, e.g. "Cursor speed: x1.5".
             let m = unsafe { ruffle_cursor_speed_mult_x10() };
             let cursor_label = std::format!("{}: x{}.{}", lc.set_cursor_speed, m / 10, m % 10);
+            // Nickname row shows the current value (or the "(none)" placeholder).
+            let author = crate::profiles::author_name();
+            let pseudo_label = std::format!(
+                "{} : {}",
+                lc.set_pseudo,
+                if author.is_empty() { lc.none } else { author.as_str() },
+            );
             let entries = [
                 lc.set_keys, lc.set_language, lc.set_report_bug, lc.set_suggest,
-                cursor_label.as_str(), lc.set_quit,
+                cursor_label.as_str(), pseudo_label.as_str(), lc.set_quit,
             ];
             backend.draw_library_settings(selection, &entries);
         }
@@ -3950,11 +3978,14 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     .profile_matches
                     .iter()
                     .map(|m| {
-                        // Just the title, plus an "active" tag on the profile
-                        // currently applied to this game. (The old "(N)" applied
-                        // count was dropped — it read as a device id, not a
-                        // popularity hint.)
+                        // Title, then the author's nickname (so several profiles
+                        // for one game are distinguishable), then an "active" tag
+                        // on the one currently applied.
                         let mut row = m.profile.title().to_string();
+                        if !m.profile.author.is_empty() {
+                            row.push_str(" - ");
+                            row.push_str(&m.profile.author);
+                        }
                         if !active.is_empty() && m.profile.id == *active {
                             row.push(' ');
                             row.push_str(lc.profile_active);

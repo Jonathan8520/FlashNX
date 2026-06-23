@@ -182,6 +182,35 @@ fn read_small_file(path: &str) -> Option<std::string::String> {
     std::string::String::from_utf8(data).ok()
 }
 
+/// The player's chosen nickname, shown next to their shared profiles so several
+/// profiles for the same game are distinguishable. Empty if unset. It's an
+/// anonymous LABEL only, not an identity — the install id stays the dedup key, so
+/// two people picking the same nickname still never collide. Stored in
+/// `sdmc:/flashnx/author`, capped to 24 chars.
+pub fn author_name() -> std::string::String {
+    for root in ["sdmc:/flashnx", "sdmc:/ruffle"] {
+        if let Some(txt) = read_small_file(&std::format!("{}/author", root)) {
+            let t = txt.trim();
+            if !t.is_empty() {
+                return t.chars().take(24).collect();
+            }
+        }
+    }
+    std::string::String::new()
+}
+
+/// Persist the player's nickname (RÉGLAGES > PSEUDO). Empty clears it.
+pub fn set_author_name(name: &str) {
+    let clean: std::string::String = name.trim().chars().take(24).collect();
+    let path = "sdmc:/flashnx/author";
+    if clean.is_empty() {
+        let _ = std::fs::remove_file(path);
+    } else if std::fs::write(path, clean.as_bytes()).is_err() {
+        return;
+    }
+    crate::sd::commit();
+}
+
 /// Normalize a title for fuzzy matching: lowercase, keep only alphanumerics.
 /// "Super Mario 63!" and "super-mario_63" both become "supermario63".
 fn normalize_title(s: &str) -> std::string::String {
@@ -525,6 +554,9 @@ struct SharePayload<'a> {
     /// the same game without overwriting each other, while letting THIS install
     /// update its own profile on a re-share.
     install_id: &'a str,
+    /// Optional display nickname (see `author_name`): shown next to the profile in
+    /// the picker so several profiles for one game are distinguishable.
+    author: &'a str,
     bindings: &'a BTreeMap<std::string::String, std::string::String>,
     bindings_p2: &'a BTreeMap<std::string::String, std::string::String>,
 }
@@ -544,6 +576,7 @@ pub fn share(
     km: &Keymap,
 ) -> Result<std::string::String, std::string::String> {
     let install = install_id();
+    let author = author_name();
     let payload = SharePayload {
         kind: "profile",
         app_version: crate::bugreport::APP_VERSION,
@@ -552,6 +585,7 @@ pub fn share(
         fp_uuid,
         swf_hash,
         install_id: &install,
+        author: &author,
         bindings: &km.bindings,
         bindings_p2: &km.bindings_p2,
     };

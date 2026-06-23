@@ -208,7 +208,8 @@ async function handleProfileShare(r, env) {
     schema: 1,
     id,
     game: { title, fp_uuid: fpUuid, swf_hash: swfHash },
-    author: "",
+    // Optional display nickname (#20) — anonymous label, not an identity.
+    author: s(r.author, 40),
     verified: false,
     bindings: r.bindings && typeof r.bindings === "object" ? r.bindings : {},
     bindings_p2:

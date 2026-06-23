@@ -653,7 +653,18 @@ pub fn draw(backend: &mut SwitchRenderBackend) {
                     .map(|s| {
                         (
                             s.active_id.clone(),
-                            s.matches.iter().map(|m| m.profile.title().to_string()).collect(),
+                            s.matches
+                                .iter()
+                                .map(|m| {
+                                    // Title + author nickname (distinguishes profiles).
+                                    let mut r = m.profile.title().to_string();
+                                    if !m.profile.author.is_empty() {
+                                        r.push_str(" - ");
+                                        r.push_str(&m.profile.author);
+                                    }
+                                    r
+                                })
+                                .collect(),
                         )
                     })
                     .unwrap_or_default();

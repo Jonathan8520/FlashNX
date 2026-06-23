@@ -536,6 +536,31 @@ pub fn prompt_rename(initial: &str) -> Option<std::string::String> {
     std::string::String::from_utf8(buf).ok()
 }
 
+/// Short single-line prompt for the player's nickname (RÉGLAGES > PSEUDO),
+/// pre-filled with the current value. Empty return = clear the nickname.
+pub fn prompt_pseudo(initial: &str) -> Option<std::string::String> {
+    let mut buf = std::vec![0u8; 128];
+    let mut initial_owned = initial.as_bytes().to_vec();
+    initial_owned.push(0);
+    let header_c = cstr(crate::loc::s().set_pseudo);
+    let guide_c = cstr(crate::loc::s().kbd_pseudo_guide);
+    let rc = unsafe {
+        swkbd_prompt_search(
+            header_c.as_ptr() as *const c_char,
+            guide_c.as_ptr() as *const c_char,
+            initial_owned.as_ptr() as *const c_char,
+            buf.as_mut_ptr() as *mut c_char,
+            buf.len() as c_int,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    let nul = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    buf.truncate(nul);
+    std::string::String::from_utf8(buf).ok()
+}
+
 /// Generic long free-text prompt (2 KB buffer, no prefill). Reuses the generic
 /// C++ `swkbd_prompt_search` with caller-supplied header/guide. Used by the bug
 /// report and the suggestion flow. Returns None on cancel; may return an empty
