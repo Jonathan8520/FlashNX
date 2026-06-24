@@ -1171,6 +1171,19 @@ pub(crate) const SK_ALT: c_int = 48;
 // returns None for them, so they never reach `ruffle_handle_key`.
 pub(crate) const SK_MOUSE_LEFT: c_int = 49;
 pub(crate) const SK_MOUSE_RIGHT: c_int = 50;
+// Numpad digits 0-9 (Flash key codes 96-105, distinct from the top-row digits
+// 48-57). Many 2-player Flash games hard-code P2 to the keypad (Bleach vs Naruto
+// P2 = Numpad 1-6, KOF Wing). Added via PR #46 (YuQiyang).
+pub(crate) const SK_NUMPAD0: c_int = 51;
+pub(crate) const SK_NUMPAD1: c_int = 52;
+pub(crate) const SK_NUMPAD2: c_int = 53;
+pub(crate) const SK_NUMPAD3: c_int = 54;
+pub(crate) const SK_NUMPAD4: c_int = 55;
+pub(crate) const SK_NUMPAD5: c_int = 56;
+pub(crate) const SK_NUMPAD6: c_int = 57;
+pub(crate) const SK_NUMPAD7: c_int = 58;
+pub(crate) const SK_NUMPAD8: c_int = 59;
+pub(crate) const SK_NUMPAD9: c_int = 60;
 
 fn key_descriptor(code: c_int) -> Option<KeyDescriptor> {
     let (physical, logical) = match code {
@@ -1227,12 +1240,29 @@ fn key_descriptor(code: c_int) -> Option<KeyDescriptor> {
         SK_BACKSPACE => (PhysicalKey::Backspace, LogicalKey::Named(NamedKey::Backspace)),
         SK_CONTROL => (PhysicalKey::ControlLeft, LogicalKey::Named(NamedKey::Control)),
         SK_ALT => (PhysicalKey::AltLeft, LogicalKey::Named(NamedKey::Alt)),
+        // Numpad 0-9 — the KeyLocation::Numpad below makes Ruffle emit the
+        // distinct keypad codes (96-105) these games listen for.
+        SK_NUMPAD0 => (PhysicalKey::Numpad0, LogicalKey::Character('0')),
+        SK_NUMPAD1 => (PhysicalKey::Numpad1, LogicalKey::Character('1')),
+        SK_NUMPAD2 => (PhysicalKey::Numpad2, LogicalKey::Character('2')),
+        SK_NUMPAD3 => (PhysicalKey::Numpad3, LogicalKey::Character('3')),
+        SK_NUMPAD4 => (PhysicalKey::Numpad4, LogicalKey::Character('4')),
+        SK_NUMPAD5 => (PhysicalKey::Numpad5, LogicalKey::Character('5')),
+        SK_NUMPAD6 => (PhysicalKey::Numpad6, LogicalKey::Character('6')),
+        SK_NUMPAD7 => (PhysicalKey::Numpad7, LogicalKey::Character('7')),
+        SK_NUMPAD8 => (PhysicalKey::Numpad8, LogicalKey::Character('8')),
+        SK_NUMPAD9 => (PhysicalKey::Numpad9, LogicalKey::Character('9')),
         _ => return None,
+    };
+    let key_location = if (SK_NUMPAD0..=SK_NUMPAD9).contains(&code) {
+        KeyLocation::Numpad
+    } else {
+        KeyLocation::Standard
     };
     Some(KeyDescriptor {
         physical_key: physical,
         logical_key: logical,
-        key_location: KeyLocation::Standard,
+        key_location,
     })
 }
 

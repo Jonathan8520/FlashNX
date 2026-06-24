@@ -121,6 +121,10 @@ pub const ALL_FLASH_KEYS: &[&str] = &[
     "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
     // Digits 0-9.
     "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+    // Numpad digits 0-9 (distinct Flash key codes from the top-row digits — many
+    // 2-player games hard-code P2 to the keypad). PR #46 (YuQiyang).
+    "Num0", "Num1", "Num2", "Num3", "Num4",
+    "Num5", "Num6", "Num7", "Num8", "Num9",
     // Mouse clicks (at the cursor) — for games that need clicking from buttons
     // rather than the touchscreen. Routed to the mouse, not a key event.
     "Left click",
@@ -957,6 +961,12 @@ fn flash_key_name_to_sk(name: &str) -> core::ffi::c_int {
         "3" => crate::SK_3, "4" => crate::SK_4, "5" => crate::SK_5,
         "6" => crate::SK_6, "7" => crate::SK_7, "8" => crate::SK_8,
         "9" => crate::SK_9,
+        // Numpad digits (distinct keycodes from the top row). PR #46 (YuQiyang).
+        "Num0" => crate::SK_NUMPAD0, "Num1" => crate::SK_NUMPAD1,
+        "Num2" => crate::SK_NUMPAD2, "Num3" => crate::SK_NUMPAD3,
+        "Num4" => crate::SK_NUMPAD4, "Num5" => crate::SK_NUMPAD5,
+        "Num6" => crate::SK_NUMPAD6, "Num7" => crate::SK_NUMPAD7,
+        "Num8" => crate::SK_NUMPAD8, "Num9" => crate::SK_NUMPAD9,
         // Mouse-click pseudo-keys (routed to the mouse, not the keyboard).
         "Left click" => crate::SK_MOUSE_LEFT,
         "Right click" => crate::SK_MOUSE_RIGHT,
