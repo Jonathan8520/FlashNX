@@ -666,7 +666,15 @@ static void worker_entry(void* arg) {
                     populate_bindings_from_keymap();
                 }
                 ruffle_redraw_paused();
-                ruffle_touches_draw();
+                // The input above may have CLOSED the sub-menu (B). If so, drawing
+                // ruffle_touches_draw() now would draw nothing over the game — the
+                // dim vanishes for one frame and the bright game flashes through.
+                // Draw the pause menu instead so a dim is always present.
+                if (ruffle_touches_active()) {
+                    ruffle_touches_draw();
+                } else {
+                    ruffle_draw_menu(menu_selection);
+                }
                 gl_context_swap();
                 continue;
             }

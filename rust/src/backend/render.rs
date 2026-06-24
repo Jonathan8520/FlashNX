@@ -7628,15 +7628,17 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
-    /// Full-screen loading spinner for the language picker's first open — drawn
-    /// OUTSIDE the modal pop-in scale (`clear_ui_transform`) so it stays a normal
-    /// size instead of shrinking with the modal's open animation. `now` drives the
-    /// rotation. Caller dims the screen first.
-    pub fn draw_language_loading(&mut self, now: u64) {
+    /// Shared loading overlay: a full-screen dim + the standard loading panel
+    /// (title + spinner). Drawn OUTSIDE any modal pop-in scale
+    /// (`clear_ui_transform`) so it stays full size instead of shrinking with a
+    /// modal's open animation. Used by the profile network flows AND the language
+    /// picker's first open, so they all look identical. `now` drives the rotation.
+    pub fn draw_loading_overlay(&mut self, title: &str, now: u64) {
         self.clear_ui_transform();
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
-        self.draw_spinner(vw * 0.5, vh * 0.5, 44.0, now);
+        self.draw_overlay_rect(0.0, 0.0, vw, vh, 0xC8_14_20_38);
+        self.draw_loading_panel(title, now);
     }
 
     /// Confirm removing a URL from the DISTANT history (X on DistantIdle).

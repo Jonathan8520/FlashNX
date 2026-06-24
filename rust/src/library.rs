@@ -3758,8 +3758,18 @@ static NET_LOADING_LABEL: Mutex<String> = Mutex::new(String::new());
 /// loaded yet), 2 = loaded. The picker lists every language's NATIVE name incl.
 /// CJK ("中文"), which lazily pulls in the shared Switch font the first time it's
 /// drawn — slow. We draw a loading panel one frame, then the list (loading the
-/// font), then it's cached for the session. Process-lifetime, never reset.
+/// font), then it's cached. RESET on each library renderer (re)creation: launching
+/// a game drops the renderer + its GL glyph atlas, so after a game the font needs
+/// re-uploading and the panel must show again (`note_renderer_reset`).
 static LANG_FONT_WARM: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Called when the standalone library renderer is (re)created (boot + after every
+/// game quit). The new renderer has an empty glyph atlas, so the CJK font is no
+/// longer warm — reset so the next language-picker open shows the loading panel
+/// again instead of freezing on the re-upload.
+pub fn note_renderer_reset() {
+    LANG_FONT_WARM.store(0, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Stash `action` to run next frame + show the loading panel now (titled with the
 /// game name). Call from `input` instead of running the flow inline.
@@ -4052,7 +4062,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             // Backdrop = Library list frozen behind. Cheapest path: redraw
             // a dim panel + delegate to menu::draw.
             backend.draw_library_dim_backdrop();
-            menu::draw(backend);
+            menu::draw(backend, now);
         }
         Screen::SettingsModal { selection } => {
             // REGLAGES is a full navbar TAB now (not a popup): no dim backdrop,
@@ -4078,7 +4088,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             // Same as TouchesEditor — the editor edits the global default
             // (keymap module was pointed there on entry).
             backend.draw_library_dim_backdrop();
-            menu::draw(backend);
+            menu::draw(backend, now);
         }
         Screen::SettingsLanguagePicker { selection } => {
             // First open is slow: drawing the native-name list pulls in the shared
@@ -4090,7 +4100,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             LANG_FONT_WARM.store(if loading { 1 } else { 2 }, Ordering::Relaxed);
             backend.draw_library_dim_backdrop();
             if loading {
-                backend.draw_language_loading(now);
+                backend.draw_loading_overlay(crate::loc::s().lang_title, now);
             } else {
                 let names: std::vec::Vec<&str> =
                     crate::loc::PICKER_LANGS.iter().map(|l| l.native_name()).collect();
@@ -4247,13 +4257,10 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             );
         }
         Screen::ProfileLoading => {
-            // Dim + a loading panel (game name + spinner) shown for the frame
-            // before the deferred GitHub call runs (#20). The spinner can't spin
-            // during the blocking call itself, but the panel makes the wait clear.
-            let (vw, vh) = backend.screen_size();
-            backend.draw_overlay_rect(0.0, 0.0, vw, vh, 0xC8_14_20_38);
+            // Dim + loading panel (game name + spinner) shown for the frame before
+            // the deferred GitHub call runs (#20). Same overlay helper as LANGUES.
             let label = NET_LOADING_LABEL.lock().ok().map(|l| l.clone()).unwrap_or_default();
-            backend.draw_loading_panel(&label, now);
+            backend.draw_loading_overlay(&label, now);
         }
         Screen::ProfilePreview { .. } => {
             let lc = crate::loc::s();

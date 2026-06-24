@@ -944,7 +944,7 @@ pub extern "C" fn ruffle_touches_draw() {
         } else {
             backend.clear_ui_transform();
         }
-        menu::draw(backend);
+        menu::draw(backend, now);
         backend.clear_ui_transform();
     }
 }
@@ -983,6 +983,9 @@ pub extern "C" fn ruffle_library_init() -> c_int {
     if let Ok(mut slot) = LIBRARY_RENDERER.lock() {
         *slot = Some(renderer);
     }
+    // Fresh renderer = empty glyph atlas, so the CJK font is cold again: re-arm the
+    // language picker's loading panel (else it freezes on the re-upload after a game).
+    library::note_renderer_reset();
     // Phase 3.7 — write embedded CA bundle to SD so libcurl can verify
     // TLS certs. Cheap & idempotent (no-op if already present at the
     // right size). Done here once per `.nro` boot, not per library cycle.

@@ -65,6 +65,10 @@ enum Screen {
     /// Confirm deleting one of MY OWN shared profiles (X on a self-shared row in
     /// the picker). `profile_idx` indexes `matches`. A deletes (hoisted), B back.
     DeleteConfirm { profile_idx: usize },
+    /// Transient loading panel shown for one frame before a deferred profile
+    /// network flow runs (so the blocking GitHub call doesn't freeze on stale
+    /// content). `draw` runs the stashed `PendingNet` the next frame.
+    Loading,
 }
 
 struct State {
@@ -142,6 +146,7 @@ pub fn screen_kind() -> u8 {
             Screen::ShareConfirm => 6,
             Screen::RevertPreview => 7,
             Screen::DeleteConfirm { .. } => 8,
+            Screen::Loading => 9,
         })
         .unwrap_or(0)
 }
@@ -213,6 +218,57 @@ fn cap_rows(mut rows: std::vec::Vec<std::string::String>) -> std::vec::Vec<std::
     rows
 }
 
+/// A profile network flow deferred one frame so the loading panel shows BEFORE
+/// the blocking GitHub call freezes the UI (in-game mirror of `library`'s
+/// `PendingNet`). `input` stashes it + flips to `Screen::Loading`; `draw` runs it
+/// the next frame, which sets the result screen. `bool` = armed.
+enum PendingNet {
+    OpenProfiles,
+    OpenShareConfirm,
+    Apply { profile_idx: usize },
+    Share,
+    Delete { profile_idx: usize },
+}
+static PENDING_NET: std::sync::Mutex<Option<(PendingNet, bool)>> = std::sync::Mutex::new(None);
+
+/// Stash `action` (run next frame) and flip to the loading screen now. Caller
+/// holds no lock (it dropped `s` first).
+fn defer_net(action: PendingNet) {
+    if let Ok(mut p) = PENDING_NET.lock() {
+        *p = Some((action, false));
+    }
+    if let Ok(mut s) = TOUCHES.lock() {
+        s.screen = Screen::Loading;
+    }
+}
+
+/// Run a deferred flow once its loading panel has shown a frame. Called at the
+/// top of `draw`. First call arms it (panel draws this frame); the next runs the
+/// blocking flow, which transitions to the result screen.
+fn drive_pending_net() {
+    let action = {
+        let mut g = match PENDING_NET.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        match g.take() {
+            None => return,
+            Some((a, false)) => {
+                *g = Some((a, true));
+                return;
+            }
+            Some((a, true)) => a,
+        }
+    };
+    match action {
+        PendingNet::OpenProfiles => run_open_profiles(),
+        PendingNet::OpenShareConfirm => run_open_share_confirm(),
+        PendingNet::Apply { profile_idx } => run_apply(profile_idx),
+        PendingNet::Share => run_share(),
+        PendingNet::Delete { profile_idx } => run_delete(profile_idx),
+    }
+}
+
 /// Forward a Switch-button **down-edge** event from C++. Returns true if the
 /// event was consumed (input shouldn't fall through to the game / pause menu).
 pub fn input(button: &str) -> bool {
@@ -229,8 +285,21 @@ pub fn input(button: &str) -> bool {
             if button == "A" && (selection == MENU_APPLY || selection == MENU_SHARE || selection == revert_row) {
                 drop(s);
                 match selection {
-                    MENU_APPLY => run_open_profiles(),
-                    MENU_SHARE => run_open_share_confirm(),
+                    // APPLY fetches the catalog (network) → defer + loading panel.
+                    MENU_APPLY => defer_net(PendingNet::OpenProfiles),
+                    MENU_SHARE => {
+                        // Instant "already shared" (no network) → run inline so no
+                        // loading flash; else defer (fetches my shared profile).
+                        let dup = game_ctx()
+                            .map(|(b, _, _)| keymap::provenance(&b).starts_with("community:"))
+                            .unwrap_or(false);
+                        if dup {
+                            run_open_share_confirm();
+                        } else {
+                            defer_net(PendingNet::OpenShareConfirm);
+                        }
+                    }
+                    // REVERT preview is file I/O only (fast) — no panel needed.
                     _ => run_open_revert_preview(),
                 }
                 return true;
@@ -260,10 +329,10 @@ pub fn input(button: &str) -> bool {
             true
         }
         Screen::DeleteConfirm { profile_idx } => {
-            // A deletes my shared profile (HTTPS) — hoist it; B cancels.
+            // A deletes my shared profile (HTTPS) — defer + loading panel; B cancels.
             if button == "A" {
                 drop(s);
-                run_delete(profile_idx);
+                defer_net(PendingNet::Delete { profile_idx });
                 return true;
             }
             if matches!(button, "B" | "Minus") {
@@ -274,7 +343,7 @@ pub fn input(button: &str) -> bool {
         Screen::Preview { profile_idx } => {
             if button == "A" {
                 drop(s);
-                run_apply(profile_idx);
+                defer_net(PendingNet::Apply { profile_idx });
                 return true;
             }
             if matches!(button, "B" | "Minus") {
@@ -286,7 +355,7 @@ pub fn input(button: &str) -> bool {
         Screen::ShareConfirm => {
             if button == "A" {
                 drop(s);
-                run_share();
+                defer_net(PendingNet::Share);
                 return true;
             }
             if matches!(button, "B" | "Minus") {
@@ -307,6 +376,8 @@ pub fn input(button: &str) -> bool {
             }
             true
         }
+        // Transient loading frame: swallow input while the deferred flow runs.
+        Screen::Loading => true,
     }
 }
 
@@ -696,7 +767,10 @@ fn clamp_dropdown_scroll(mut scroll: usize, selection: usize) -> usize {
 }
 
 /// Draw the current TOUCHES screen + any active toast. No-op when inactive.
-pub fn draw(backend: &mut SwitchRenderBackend) {
+pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
+    // Run any deferred profile network flow now that its loading panel showed a
+    // frame. May transition the screen, so do it before snapshotting it.
+    drive_pending_net();
     // Snapshot the screen + decrement the toast under one lock.
     let (screen, toast) = match TOUCHES.lock() {
         Ok(mut g) => {
@@ -716,6 +790,11 @@ pub fn draw(backend: &mut SwitchRenderBackend) {
     let game = crate::library::active_display_name().unwrap_or_default();
     match screen {
         Screen::Inactive => {}
+        Screen::Loading => {
+            // Loading panel over the frozen game while a deferred GitHub call runs.
+            // Same overlay helper as on-cover, so it looks identical.
+            backend.draw_loading_overlay(&game, now);
+        }
         Screen::Menu { selection } => {
             // Snapshot the dynamic bits under the lock.
             let (can_revert, has_backup) = TOUCHES
