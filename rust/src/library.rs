@@ -161,6 +161,11 @@ pub(crate) enum Screen {
     /// X on a self-shared row in the picker). A confirms (DELETEs via the relay,
     /// hoisted) → toast + picker; B cancels back to the picker.
     ProfileDeleteConfirm { game_idx: usize, profile_idx: usize },
+    /// Transient "loading" panel shown for ONE frame before a deferred profile
+    /// network flow runs (#20), so a blocking GitHub call doesn't freeze on stale
+    /// content. `render` runs the stashed `PendingNet` the next frame, which sets
+    /// the real result screen. Carries no state — the action is in `PENDING_NET`.
+    ProfileLoading,
 }
 
 // No "RETOUR" entry: B already backs out of the modal, so a dedicated row is
@@ -1396,11 +1401,25 @@ pub fn input(button: &str) -> bool {
         // EDIT (0) + CURSOR SPEED (3) are handled under the lock.
         if let Screen::TouchesMenu { game_idx, selection } = screen_snap {
             if button == "A" && selection == 1 {
-                run_open_profiles_flow(game_idx);
+                defer_net(PendingNet::OpenProfiles { game_idx }, game_idx);
                 return true;
             }
             if button == "A" && selection == 2 {
-                run_open_share_confirm_flow(game_idx);
+                // PARTAGER. If the controls are already a catalog profile (unedited),
+                // this is an instant "already shared" toast — run it inline so no
+                // loading panel flashes. Otherwise it fetches my shared profile for
+                // the before/after diff (network) → defer + show the panel.
+                let dup = LIBRARY
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.entries.get(game_idx).map(|e| e.basename.clone()))
+                    .map(|b| keymap::provenance(&b).starts_with("community:"))
+                    .unwrap_or(false);
+                if dup {
+                    run_open_share_confirm_flow(game_idx);
+                } else {
+                    defer_net(PendingNet::OpenShareConfirm { game_idx }, game_idx);
+                }
                 return true;
             }
             if button == "A" && selection == 4 {
@@ -1417,7 +1436,7 @@ pub fn input(button: &str) -> bool {
         }
         if let Screen::ProfileShareConfirm { game_idx } = screen_snap {
             if button == "A" {
-                run_share_profile_flow(game_idx);
+                defer_net(PendingNet::ShareProfile { game_idx }, game_idx);
                 return true;
             }
         }
@@ -1445,7 +1464,7 @@ pub fn input(button: &str) -> bool {
         // relay popularity counter (a network POST) outside the LIBRARY lock.
         if let Screen::ProfilePreview { game_idx, profile_idx } = screen_snap {
             if button == "A" {
-                run_profile_apply_flow(game_idx, profile_idx);
+                defer_net(PendingNet::ApplyProfile { game_idx, profile_idx }, game_idx);
                 return true;
             }
         }
@@ -1453,7 +1472,7 @@ pub fn input(button: &str) -> bool {
         // DELETE is an HTTPS POST that must not run under the LIBRARY lock.
         if let Screen::ProfileDeleteConfirm { game_idx, profile_idx } = screen_snap {
             if button == "A" {
-                run_delete_profile_flow(game_idx, profile_idx);
+                defer_net(PendingNet::DeleteProfile { game_idx, profile_idx }, game_idx);
                 return true;
             }
         }
@@ -1667,6 +1686,8 @@ pub fn input(button: &str) -> bool {
             }
             true
         }
+        // Transient loading frame (#20): swallow input while the deferred flow runs.
+        Screen::ProfileLoading => true,
         Screen::ProfilePreview { game_idx, profile_idx } => {
             // A (apply) is hoisted in input(); B returns to the picker.
             if matches!(button, "B" | "Minus") {
@@ -2266,22 +2287,18 @@ fn set_toast(s: &mut State, msg: std::string::String, kind: u8) {
 /// from every return into the sub-menu, so revert availability is always fresh.
 /// `selection` is clamped to the rows actually present.
 fn goto_touches_menu(s: &mut State, game_idx: usize, selection: usize) {
-    let (has_backup, prov) = s
+    let (has_backup, can_revert) = s
         .entries
         .get(game_idx)
-        .map(|e| (keymap::has_backup(&e.basename), keymap::provenance(&e.basename)))
-        .unwrap_or((false, std::string::String::new()));
-    // provenance: "default" = no per-game sidecar (pristine, on the global
-    // default). "community:*" = controls that ARE a catalog profile (applied OR
-    // shared by me — same tag, same meaning). "user" = hand-edited.
-    let is_default = prov == "default";
+        .map(|e| (keymap::has_backup(&e.basename), keymap::has_revert(&e.basename)))
+        .unwrap_or((false, false));
     s.touches_has_backup = has_backup;
-    // Show "revert" whenever this game has ANY custom keymap (edited, applied, or
-    // shared) — i.e. there's something to undo. Predictable: it tracks "did I
-    // change this game's controls", not a stray backup file. Label adapts:
-    // restore my hand-made keys if a backup exists, else reset to the default.
-    // (The SHARE block uses the keymap provenance directly, in the share flow.)
-    s.touches_can_revert = !is_default;
+    // Show "revert" CONTENT-based: exactly when the game's effective controls
+    // differ from what a revert would restore (backup, else global default). So it
+    // appears as soon as a key really changes and HIDES once you set it back — no
+    // longer a stale flag that lingered just because a sidecar file existed. Label
+    // adapts: restore my hand-made keys if a backup exists, else reset to default.
+    s.touches_can_revert = can_revert;
     // Snapshot the per-game cursor speed for the cursor row (read once here, not
     // every render frame).
     s.touches_cursor_idx = s
@@ -3720,6 +3737,81 @@ enum PendingClose {
 
 static PENDING_AFTER_CLOSE: Mutex<Option<PendingClose>> = Mutex::new(None);
 
+/// A profile network/IO flow deferred by one frame (#20) so a "loading" panel
+/// shows BEFORE the blocking GitHub call freezes the UI thread. `input` stashes
+/// the action (via `defer_net`) + flips to `Screen::ProfileLoading`; `render`
+/// draws the panel that frame, then runs the flow the next, which sets the real
+/// result screen. Lower-tech than the archive.org async fetch, but enough: the
+/// catalog index/counts cache after the first open, so only the first click is
+/// slow. `bool` = armed (false the frame it's set, true the frame it runs).
+enum PendingNet {
+    OpenProfiles { game_idx: usize },
+    OpenShareConfirm { game_idx: usize },
+    ShareProfile { game_idx: usize },
+    ApplyProfile { game_idx: usize, profile_idx: usize },
+    DeleteProfile { game_idx: usize, profile_idx: usize },
+}
+static PENDING_NET: Mutex<Option<(PendingNet, bool)>> = Mutex::new(None);
+static NET_LOADING_LABEL: Mutex<String> = Mutex::new(String::new());
+
+/// First-open warm-up for the language picker: 0 = cold, 1 = panel shown (font not
+/// loaded yet), 2 = loaded. The picker lists every language's NATIVE name incl.
+/// CJK ("中文"), which lazily pulls in the shared Switch font the first time it's
+/// drawn — slow. We draw a loading panel one frame, then the list (loading the
+/// font), then it's cached for the session. Process-lifetime, never reset.
+static LANG_FONT_WARM: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Stash `action` to run next frame + show the loading panel now (titled with the
+/// game name). Call from `input` instead of running the flow inline.
+fn defer_net(action: PendingNet, game_idx: usize) {
+    let label = LIBRARY
+        .lock()
+        .ok()
+        .and_then(|s| s.entries.get(game_idx).map(|e| e.display_name.clone()))
+        .unwrap_or_default();
+    if let Ok(mut l) = NET_LOADING_LABEL.lock() {
+        *l = label;
+    }
+    if let Ok(mut p) = PENDING_NET.lock() {
+        *p = Some((action, false));
+    }
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.screen = Screen::ProfileLoading;
+    }
+}
+
+/// Run a deferred profile flow once its loading panel has been shown a frame.
+/// First call after `defer_net` just arms it (the panel draws this frame); the
+/// next call runs the blocking flow, which transitions to the result screen.
+/// Called at the top of `render`, before the screen is drawn.
+fn drive_pending_net() {
+    let action = {
+        let mut g = match PENDING_NET.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        match g.take() {
+            None => return,
+            Some((a, false)) => {
+                *g = Some((a, true)); // armed; panel shows this frame, run next
+                return;
+            }
+            Some((a, true)) => a, // run now (last frame's panel is on the display)
+        }
+    };
+    match action {
+        PendingNet::OpenProfiles { game_idx } => run_open_profiles_flow(game_idx),
+        PendingNet::OpenShareConfirm { game_idx } => run_open_share_confirm_flow(game_idx),
+        PendingNet::ShareProfile { game_idx } => run_share_profile_flow(game_idx),
+        PendingNet::ApplyProfile { game_idx, profile_idx } => {
+            run_profile_apply_flow(game_idx, profile_idx)
+        }
+        PendingNet::DeleteProfile { game_idx, profile_idx } => {
+            run_delete_profile_flow(game_idx, profile_idx)
+        }
+    }
+}
+
 /// Modal kinds whose close the generic interception defers for a scale-out
 /// (plain modal -> non-modal). The destructive confirms (DeleteConfirm=2,
 /// DistantHistoryConfirm=6) are handled EXPLICITLY in their own handlers instead
@@ -3799,6 +3891,9 @@ fn draw_game_reveal_window(backend: &mut SwitchRenderBackend, frac: f32, fade: f
 /// while the library is active, AFTER `glClear` (we own the entire
 /// framebuffer — no Ruffle behind us at this stage).
 pub fn render(backend: &mut SwitchRenderBackend) {
+    // Run any deferred profile network flow now that its loading panel has shown
+    // a frame (#20). May transition the screen, so do it before reading it.
+    drive_pending_net();
     let s = match LIBRARY.lock() {
         Ok(g) => g,
         Err(_) => return,
@@ -3986,10 +4081,21 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             menu::draw(backend);
         }
         Screen::SettingsLanguagePicker { selection } => {
+            // First open is slow: drawing the native-name list pulls in the shared
+            // CJK font once. Show a full-size spinner (an overlay, NOT inside the
+            // modal — so the modal's open animation doesn't shrink it) one frame;
+            // the next frame draws the list (loading the font), then it's cached.
+            use std::sync::atomic::Ordering;
+            let loading = LANG_FONT_WARM.load(Ordering::Relaxed) == 0;
+            LANG_FONT_WARM.store(if loading { 1 } else { 2 }, Ordering::Relaxed);
             backend.draw_library_dim_backdrop();
-            let names: std::vec::Vec<&str> =
-                crate::loc::PICKER_LANGS.iter().map(|l| l.native_name()).collect();
-            backend.draw_library_language_picker(selection, &names);
+            if loading {
+                backend.draw_language_loading(now);
+            } else {
+                let names: std::vec::Vec<&str> =
+                    crate::loc::PICKER_LANGS.iter().map(|l| l.native_name()).collect();
+                backend.draw_library_language_picker(selection, &names);
+            }
         }
         Screen::BugPicker { selection, scroll_offset } => {
             let names = LIBRARY
@@ -4139,6 +4245,15 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 lc.del_footer,
                 true,
             );
+        }
+        Screen::ProfileLoading => {
+            // Dim + a loading panel (game name + spinner) shown for the frame
+            // before the deferred GitHub call runs (#20). The spinner can't spin
+            // during the blocking call itself, but the panel makes the wait clear.
+            let (vw, vh) = backend.screen_size();
+            backend.draw_overlay_rect(0.0, 0.0, vw, vh, 0xC8_14_20_38);
+            let label = NET_LOADING_LABEL.lock().ok().map(|l| l.clone()).unwrap_or_default();
+            backend.draw_loading_panel(&label, now);
         }
         Screen::ProfilePreview { .. } => {
             let lc = crate::loc::s();

@@ -160,7 +160,7 @@ pub fn open() {
 /// this menu; apply/share/revert run from here too.
 pub fn open_submenu() {
     let (can_revert, has_backup) = keymap::active_game_basename()
-        .map(|b| (keymap::provenance(&b) != "default", keymap::has_backup(&b)))
+        .map(|b| (keymap::has_revert(&b), keymap::has_backup(&b)))
         .unwrap_or((false, false));
     if let Ok(mut s) = TOUCHES.lock() {
         s.submenu = true;
@@ -446,7 +446,7 @@ fn run_apply(profile_idx: usize) {
     }
     let lc = crate::loc::s();
     let msg = if ok { lc.profile_applied_ok } else { lc.bug_fail_title };
-    let can_revert = keymap::provenance(&basename) != "default";
+    let can_revert = keymap::has_revert(&basename);
     let has_backup = keymap::has_backup(&basename);
     if let Ok(mut s) = TOUCHES.lock() {
         // dirty → C++ repopulates BINDINGS so the new controls take effect now.
@@ -509,7 +509,7 @@ fn run_share() {
         }
         Err(e) => (e, TOAST_ERR),
     };
-    let can_revert = keymap::provenance(&basename) != "default";
+    let can_revert = keymap::has_revert(&basename);
     let has_backup = keymap::has_backup(&basename);
     if let Ok(mut s) = TOUCHES.lock() {
         s.can_revert = can_revert;
@@ -578,7 +578,7 @@ fn run_revert() {
     }
     let lc = crate::loc::s();
     let msg = if ok { lc.profile_reverted_ok } else { lc.bug_fail_title };
-    let can_revert = keymap::provenance(&basename) != "default";
+    let can_revert = keymap::has_revert(&basename);
     let has_backup = keymap::has_backup(&basename);
     if let Ok(mut s) = TOUCHES.lock() {
         s.dirty = ok; // refresh live bindings

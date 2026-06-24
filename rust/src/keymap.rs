@@ -685,6 +685,19 @@ pub fn revert_target(basename: &str) -> Keymap {
     km
 }
 
+/// Whether a revert would actually CHANGE this game's controls — i.e. the
+/// effective keymap differs (P1 or P2) from what `revert_target` would restore
+/// (the hand-made backup, else the global default). Drives whether the "Revenir"
+/// row appears: CONTENT-based, so it shows exactly when there's something to
+/// undo and HIDES once the controls match the target again (edit a key, then set
+/// it back). Replaces the old `provenance != "default"` test, which only checked
+/// that a sidecar FILE existed — it stayed on after you reverted a change by hand.
+pub fn has_revert(basename: &str) -> bool {
+    let cur = effective_for(basename);
+    let tgt = revert_target(basename);
+    cur.bindings != tgt.bindings || cur.bindings_p2 != tgt.bindings_p2
+}
+
 /// Build "<button>: <current> -> <target>" diff lines for the keys that differ
 /// between two keymaps, across BOTH players (#40). P1 rows are unprefixed (the
 /// common single-player case stays clean); P2 rows carry a "P2 " tag so a

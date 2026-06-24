@@ -125,7 +125,11 @@ const MODAL_FOOTER_COL: u32 = 0x99AABB;
 /// Vertical metrics. A modal is PAD_TOP (title[+subtitle]) + rows*ROW_H +
 /// PAD_BOTTOM (footer). Fixed-height confirm modals override the total.
 const MODAL_ROW_H: f32 = 52.0;
+/// Space above the first row WITH a subtitle (title + subtitle band) vs WITHOUT
+/// (title only) — the tight one drops the empty subtitle gap so a no-subtitle
+/// modal (e.g. the language picker) doesn't waste ~50 px under its title.
 const MODAL_PAD_TOP: f32 = 140.0;
+const MODAL_PAD_TOP_TIGHT: f32 = 90.0;
 const MODAL_PAD_BOTTOM: f32 = 60.0;
 /// Row layout: text left padding from the panel edge, and how far left the
 /// ">" cursor sits from that text.
@@ -139,12 +143,15 @@ struct ModalFrame {
     x: f32,
     y: f32,
     w: f32,
+    /// Distance from `y` to the first body row — `MODAL_PAD_TOP` with a subtitle,
+    /// `MODAL_PAD_TOP_TIGHT` without (no empty subtitle gap).
+    pad_top: f32,
 }
 
 impl ModalFrame {
     /// Y of the first body row (just below the title/subtitle band).
     fn rows_top(&self) -> f32 {
-        self.y + MODAL_PAD_TOP
+        self.y + self.pad_top
     }
     /// Left edge of row text.
     fn rows_left(&self) -> f32 {
@@ -5503,8 +5510,11 @@ impl SwitchRenderBackend {
         self.fill_screen_dim(if danger { MODAL_DIM_DANGER } else { MODAL_DIM });
 
         let w = width;
+        // No subtitle → tighten the title-to-rows gap (drop the empty subtitle
+        // band) so we don't waste vertical space (e.g. the language picker).
+        let pad_top = if subtitle.is_some() { MODAL_PAD_TOP } else { MODAL_PAD_TOP_TIGHT };
         let h = fixed_h
-            .unwrap_or(MODAL_PAD_TOP + rows.max(1) as f32 * MODAL_ROW_H + MODAL_PAD_BOTTOM);
+            .unwrap_or(pad_top + rows.max(1) as f32 * MODAL_ROW_H + MODAL_PAD_BOTTOM);
         let x = (vw - w) * 0.5;
         let y = (vh - h) * 0.5;
         let panel = Matrix {
@@ -5581,7 +5591,7 @@ impl SwitchRenderBackend {
 
         // `h` stays local — consumed by the panel rect + footer position above;
         // callers lay their body out from y + fixed offsets, so it isn't returned.
-        ModalFrame { x, y, w }
+        ModalFrame { x, y, w, pad_top }
     }
 
     /// Draw a vertical list of selectable rows inside a modal `frame`, with the
@@ -7399,7 +7409,7 @@ impl SwitchRenderBackend {
             None,
             false,
             title,
-            None,
+            Some(""), // reserve the subtitle band; we draw our own teal line below
             Some(footer),
         );
         // Direction indicator (toggled with X) — teal, in the subtitle slot.
@@ -7616,6 +7626,17 @@ impl SwitchRenderBackend {
             glBindVertexArray(0);
         }
         self.gl_state.invalidate();
+    }
+
+    /// Full-screen loading spinner for the language picker's first open — drawn
+    /// OUTSIDE the modal pop-in scale (`clear_ui_transform`) so it stays a normal
+    /// size instead of shrinking with the modal's open animation. `now` drives the
+    /// rotation. Caller dims the screen first.
+    pub fn draw_language_loading(&mut self, now: u64) {
+        self.clear_ui_transform();
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        self.draw_spinner(vw * 0.5, vh * 0.5, 44.0, now);
     }
 
     /// Confirm removing a URL from the DISTANT history (X on DistantIdle).
