@@ -211,6 +211,45 @@ pub fn set_author_name(name: &str) {
     crate::sd::commit();
 }
 
+/// Secret per-install token that proves ownership of this install's shared
+/// profiles (#20). SERVER-generated on the first share (trust-on-first-use) and
+/// returned in the share response; we persist it in `sdmc:/flashnx/owner_token`.
+/// Required to UPDATE or DELETE our own profiles. Unlike `install_id` (a PUBLIC
+/// dedup key, visible in every shared id), this never leaves the device except
+/// over HTTPS to the relay. Empty until the first successful share. Hex/alnum.
+fn owner_token() -> std::string::String {
+    for root in ["sdmc:/flashnx", "sdmc:/ruffle"] {
+        if let Some(txt) = read_small_file(&std::format!("{}/owner_token", root)) {
+            let t: std::string::String =
+                txt.trim().chars().take(64).filter(|c| c.is_ascii_alphanumeric()).collect();
+            if !t.is_empty() {
+                return t;
+            }
+        }
+    }
+    std::string::String::new()
+}
+
+/// Persist the owner token returned by the relay (idempotent; ignores empties).
+fn set_owner_token(token: &str) {
+    let clean: std::string::String =
+        token.chars().take(64).filter(|c| c.is_ascii_alphanumeric()).collect();
+    if clean.len() < 16 {
+        return; // ignore junk / too-short to be a real token
+    }
+    if std::fs::write("sdmc:/flashnx/owner_token", clean.as_bytes()).is_ok() {
+        crate::sd::commit();
+    }
+}
+
+/// True when `profile_id` was shared by THIS install (its id carries our
+/// install-id suffix). The picker only offers "delete" on these. The real
+/// authorization is the server-side owner-token check; this is just the UI gate.
+pub fn is_mine(profile_id: &str) -> bool {
+    let suffix = std::format!("-{}", install_id());
+    suffix.len() > 1 && profile_id.ends_with(&suffix)
+}
+
 /// Normalize a title for fuzzy matching: lowercase, keep only alphanumerics.
 /// "Super Mario 63!" and "super-mario_63" both become "supermario63".
 fn normalize_title(s: &str) -> std::string::String {
@@ -557,6 +596,10 @@ struct SharePayload<'a> {
     /// Optional display nickname (see `author_name`): shown next to the profile in
     /// the picker so several profiles for one game are distinguishable.
     author: &'a str,
+    /// Secret owner token (see `owner_token`). Empty on the very first share; the
+    /// relay then claims this install and returns a freshly-minted token. Required
+    /// to update or delete this profile afterwards.
+    owner_token: &'a str,
     bindings: &'a BTreeMap<std::string::String, std::string::String>,
     bindings_p2: &'a BTreeMap<std::string::String, std::string::String>,
 }
@@ -577,6 +620,7 @@ pub fn share(
 ) -> Result<std::string::String, std::string::String> {
     let install = install_id();
     let author = author_name();
+    let token = owner_token(); // empty on the first share; the relay mints one
     let payload = SharePayload {
         kind: "profile",
         app_version: crate::bugreport::APP_VERSION,
@@ -586,6 +630,7 @@ pub fn share(
         swf_hash,
         install_id: &install,
         author: &author,
+        owner_token: &token,
         bindings: &km.bindings,
         bindings_p2: &km.bindings_p2,
     };
@@ -593,7 +638,7 @@ pub fn share(
         .map_err(|e| std::format!("encode failed: {}", e))?;
     crate::net::log(&std::format!("profiles: sharing '{}' ({} bytes)\n", title, body.len()));
     let resp = crate::net::post_json(crate::bugreport::BUG_REPORT_ENDPOINT, &body, 16 * 1024)?;
-    // Parse the Worker's { ok, id, error }. Previously we treated any HTTP
+    // Parse the Worker's { ok, id, token, error }. Previously we treated any HTTP
     // response as success — a worker-side failure (e.g. token can't write) then
     // showed a false "shared OK". Now an `ok:false` surfaces the real error.
     #[derive(serde::Deserialize)]
@@ -602,15 +647,80 @@ pub fn share(
         ok: bool,
         #[serde(default)]
         id: std::string::String,
+        /// Owner token (#20): present on the first share for this install (and on
+        /// re-claims). Persist it so later updates/deletes can authenticate.
+        #[serde(default)]
+        token: std::string::String,
         #[serde(default)]
         error: std::string::String,
     }
     let parsed: ShareResp = std::string::String::from_utf8(resp)
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or(ShareResp { ok: false, id: std::string::String::new(), error: std::string::String::new() });
+        .unwrap_or(ShareResp {
+            ok: false,
+            id: std::string::String::new(),
+            token: std::string::String::new(),
+            error: std::string::String::new(),
+        });
     if parsed.ok {
+        if !parsed.token.is_empty() {
+            set_owner_token(&parsed.token);
+        }
         Ok(parsed.id)
+    } else {
+        Err(if parsed.error.is_empty() {
+            crate::loc::s().bug_fail_title.to_string()
+        } else {
+            parsed.error
+        })
+    }
+}
+
+/// Ask the relay to REMOVE one of our own shared profiles (#20). Ownership is
+/// proved server-side by the install's secret owner token (plus the id carrying
+/// our install suffix), so this can only ever delete profiles we shared. Returns
+/// a localized error string on failure. Call from a hoisted flow — the HTTPS POST
+/// blocks for the round-trip.
+pub fn delete(id: &str) -> Result<(), std::string::String> {
+    let install = install_id();
+    let token = owner_token();
+    if token.is_empty() {
+        // No token on this device → we never shared from here (or the SD was
+        // reset). Nothing we can prove ownership of.
+        return Err(crate::loc::s().profile_del_not_mine.to_string());
+    }
+    #[derive(serde::Serialize)]
+    struct DeletePayload<'a> {
+        kind: &'a str,
+        id: &'a str,
+        install_id: &'a str,
+        owner_token: &'a str,
+    }
+    let payload = DeletePayload {
+        kind: "profile_delete",
+        id,
+        install_id: &install,
+        owner_token: &token,
+    };
+    let body = serde_json::to_string(&payload).map_err(|e| std::format!("encode failed: {}", e))?;
+    crate::net::log(&std::format!("profiles: deleting '{}'\n", id));
+    let resp = crate::net::post_json(crate::bugreport::BUG_REPORT_ENDPOINT, &body, 4096)?;
+    #[derive(serde::Deserialize)]
+    struct DelResp {
+        #[serde(default)]
+        ok: bool,
+        #[serde(default)]
+        error: std::string::String,
+    }
+    let parsed: DelResp = std::string::String::from_utf8(resp)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(DelResp { ok: false, error: std::string::String::new() });
+    if parsed.ok {
+        // Drop the cached catalog so the picker stops showing the deleted profile.
+        invalidate_online_cache();
+        Ok(())
     } else {
         Err(if parsed.error.is_empty() {
             crate::loc::s().bug_fail_title.to_string()

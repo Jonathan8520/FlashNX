@@ -62,6 +62,9 @@ enum Screen {
     ShareConfirm,
     /// Before/after preview of a revert.
     RevertPreview,
+    /// Confirm deleting one of MY OWN shared profiles (X on a self-shared row in
+    /// the picker). `profile_idx` indexes `matches`. A deletes (hoisted), B back.
+    DeleteConfirm { profile_idx: usize },
 }
 
 struct State {
@@ -138,6 +141,7 @@ pub fn screen_kind() -> u8 {
             Screen::Preview { .. } => 5,
             Screen::ShareConfirm => 6,
             Screen::RevertPreview => 7,
+            Screen::DeleteConfirm { .. } => 8,
         })
         .unwrap_or(0)
 }
@@ -255,6 +259,18 @@ pub fn input(button: &str) -> bool {
             handle_profiles_input(&mut s, button, selection);
             true
         }
+        Screen::DeleteConfirm { profile_idx } => {
+            // A deletes my shared profile (HTTPS) — hoist it; B cancels.
+            if button == "A" {
+                drop(s);
+                run_delete(profile_idx);
+                return true;
+            }
+            if matches!(button, "B" | "Minus") {
+                s.screen = Screen::Profiles { selection: profile_idx };
+            }
+            true
+        }
         Screen::Preview { profile_idx } => {
             if button == "A" {
                 drop(s);
@@ -333,6 +349,17 @@ fn handle_profiles_input(s: &mut State, button: &str, mut selection: usize) {
     match button {
         "Up" | "StickLUp" => selection = if selection == 0 { last } else { selection - 1 },
         "Down" | "StickLDown" => selection = if selection >= last { 0 } else { selection + 1 },
+        "X" => {
+            // Delete MY OWN shared profile: only on a row this install shared.
+            if s
+                .matches
+                .get(selection)
+                .is_some_and(|m| crate::profiles::is_mine(&m.profile.id))
+            {
+                s.screen = Screen::DeleteConfirm { profile_idx: selection };
+                return;
+            }
+        }
         "B" | "Minus" => {
             s.screen = Screen::Menu { selection: MENU_APPLY };
             return;
@@ -489,6 +516,40 @@ fn run_share() {
         s.has_backup = has_backup;
         set_toast(&mut s, msg, kind);
         s.screen = Screen::Menu { selection: MENU_SHARE };
+    }
+}
+
+/// X-on-confirm: DELETE one of my own shared profiles via the relay (#20).
+/// Hoisted (HTTPS POST). Toasts the result and drops the row from the picker on
+/// success. Ownership is enforced server-side by the install's owner token.
+fn run_delete(profile_idx: usize) {
+    let id = match TOUCHES.lock() {
+        Ok(g) => g.matches.get(profile_idx).map(|m| m.profile.id.clone()),
+        Err(_) => None,
+    };
+    let Some(id) = id else {
+        return;
+    };
+    let lc = crate::loc::s();
+    let (msg, kind, ok) = match crate::profiles::delete(&id) {
+        Ok(()) => (lc.profile_del_ok.to_string(), TOAST_OK, true),
+        Err(e) => (e, TOAST_ERR, false),
+    };
+    if ok {
+        // No longer in the catalog → demote this game's keymap to "user" if it was
+        // tagged with the deleted profile, so SHARE stops saying "already exists".
+        if let Some((basename, _, _)) = game_ctx() {
+            keymap::unmark_shared(&basename, &id);
+        }
+    }
+    if let Ok(mut s) = TOUCHES.lock() {
+        if ok {
+            s.matches.retain(|m| m.profile.id != id);
+        }
+        let n = s.matches.len();
+        let selection = if n == 0 { 0 } else { profile_idx.min(n - 1) };
+        set_toast(&mut s, msg, kind);
+        s.screen = Screen::Profiles { selection };
     }
 }
 
@@ -721,7 +782,35 @@ pub fn draw(backend: &mut SwitchRenderBackend) {
                 rows.push(lc.profile_none.to_string());
             }
             let refs: std::vec::Vec<&str> = rows.iter().map(|r| r.as_str()).collect();
-            backend.draw_library_list_modal(lc.profile_title, &game, selection, &refs, lc.profile_footer, true);
+            // Append the delete hint only when sitting on your own profile.
+            let footer = if active_ids
+                .get(selection)
+                .is_some_and(|id| crate::profiles::is_mine(id))
+            {
+                std::format!("{}   {}", lc.profile_footer, lc.profile_del_hint)
+            } else {
+                lc.profile_footer.to_string()
+            };
+            backend.draw_library_list_modal(lc.profile_title, &game, selection, &refs, &footer, true);
+        }
+        Screen::DeleteConfirm { profile_idx } => {
+            let name = TOUCHES
+                .lock()
+                .ok()
+                .and_then(|s| {
+                    s.matches.get(profile_idx).map(|m| {
+                        let mut r = m.profile.title().to_string();
+                        if !m.profile.author.is_empty() {
+                            r.push_str(" - ");
+                            r.push_str(&m.profile.author);
+                        }
+                        r
+                    })
+                })
+                .unwrap_or_default();
+            let refs = [name.as_str()];
+            // usize::MAX = no cursor (confirm: A deletes / B cancels).
+            backend.draw_library_list_modal(lc.profile_del_confirm, "", usize::MAX, &refs, lc.del_footer, true);
         }
         Screen::Preview { .. } => {
             let mut rows = TOUCHES.lock().map(|s| s.preview_rows.clone()).unwrap_or_default();

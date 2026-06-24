@@ -157,6 +157,10 @@ pub(crate) enum Screen {
     /// the before/after of the player's shared profile. A confirms (POSTs,
     /// hoisted) → toast + sub-menu; B cancels back to the sub-menu.
     ProfileShareConfirm { game_idx: usize },
+    /// Confirm deleting one of YOUR OWN shared profiles from the catalog (#20,
+    /// X on a self-shared row in the picker). A confirms (DELETEs via the relay,
+    /// hoisted) → toast + picker; B cancels back to the picker.
+    ProfileDeleteConfirm { game_idx: usize, profile_idx: usize },
 }
 
 // No "RETOUR" entry: B already backs out of the modal, so a dedicated row is
@@ -1445,6 +1449,14 @@ pub fn input(button: &str) -> bool {
                 return true;
             }
         }
+        // A on the delete confirm = remove my shared profile (#20). Hoisted: the
+        // DELETE is an HTTPS POST that must not run under the LIBRARY lock.
+        if let Screen::ProfileDeleteConfirm { game_idx, profile_idx } = screen_snap {
+            if button == "A" {
+                run_delete_profile_flow(game_idx, profile_idx);
+                return true;
+            }
+        }
         // SEARCH is on Minus (-) now (was X). Hoisted because swkbd is a
         // synchronous fullscreen applet that must not run under the LIBRARY lock.
         if matches!(screen_snap, Screen::DistantFiles { .. }) && button == "Minus" {
@@ -1646,6 +1658,13 @@ pub fn input(button: &str) -> bool {
         }
         Screen::ProfileList { game_idx, selection } => {
             handle_profile_list_input(&mut s, button, game_idx, selection);
+            true
+        }
+        Screen::ProfileDeleteConfirm { game_idx, profile_idx } => {
+            // A (delete) is hoisted in input(); B cancels back to the picker.
+            if matches!(button, "B" | "Minus") {
+                s.screen = Screen::ProfileList { game_idx, selection: profile_idx };
+            }
             true
         }
         Screen::ProfilePreview { game_idx, profile_idx } => {
@@ -2073,6 +2092,17 @@ fn handle_profile_list_input(s: &mut State, button: &str, game_idx: usize, mut s
         }
         // "A" (open preview) is hoisted to `run_open_preview_flow` — it reads the
         // current keymap file to build the diff, which we keep out of this lock.
+        "X" => {
+            // Delete MY OWN shared profile: only on a row this install shared.
+            if s
+                .profile_matches
+                .get(selection)
+                .is_some_and(|m| crate::profiles::is_mine(&m.profile.id))
+            {
+                s.screen = Screen::ProfileDeleteConfirm { game_idx, profile_idx: selection };
+                return;
+            }
+        }
         "B" | "Minus" => {
             goto_touches_menu(s, game_idx, 1); // back to the sub-menu's APPLY row
             return;
@@ -2080,6 +2110,45 @@ fn handle_profile_list_input(s: &mut State, button: &str, game_idx: usize, mut s
         _ => {}
     }
     s.screen = Screen::ProfileList { game_idx, selection };
+}
+
+/// A-on-confirm (#20): DELETE one of my own shared profiles via the relay.
+/// Hoisted — the HTTPS POST must not run under the LIBRARY lock. Toasts the
+/// result and drops the row from the picker on success.
+fn run_delete_profile_flow(game_idx: usize, profile_idx: usize) {
+    let id = match LIBRARY.lock() {
+        Ok(g) => g.profile_matches.get(profile_idx).map(|m| m.profile.id.clone()),
+        Err(_) => None,
+    };
+    let Some(id) = id else {
+        return;
+    };
+    let lc = crate::loc::s();
+    let (msg, kind, ok) = match crate::profiles::delete(&id) {
+        Ok(()) => (lc.profile_del_ok.to_string(), TOAST_OK, true),
+        Err(e) => (e, TOAST_ERR, false),
+    };
+    if ok {
+        // The deleted profile is no longer in the catalog: if this game's keymap
+        // still carries its tag, demote it to "user" so SHARE works again (it was
+        // wrongly saying "already in the catalog" after a delete).
+        if let Some(basename) = LIBRARY
+            .lock()
+            .ok()
+            .and_then(|g| g.entries.get(game_idx).map(|e| e.basename.clone()))
+        {
+            keymap::unmark_shared(&basename, &id);
+        }
+    }
+    if let Ok(mut s) = LIBRARY.lock() {
+        set_toast(&mut s, msg, kind);
+        if ok {
+            s.profile_matches.retain(|m| m.profile.id != id);
+        }
+        let n = s.profile_matches.len();
+        let selection = if n == 0 { 0 } else { profile_idx.min(n - 1) };
+        s.screen = Screen::ProfileList { game_idx, selection };
+    }
 }
 
 /// A on a profile row (#20): build the before/after diff and open the preview.
@@ -3626,6 +3695,7 @@ fn modal_kind(screen: Screen) -> u8 {
         Screen::ProfilePreview { .. } => 14,
         Screen::RevertPreview { .. } => 15,
         Screen::ProfileShareConfirm { .. } => 16,
+        Screen::ProfileDeleteConfirm { .. } => 17,
         _ => 0,
     }
 }
@@ -4014,22 +4084,61 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                         row
                     })
                     .collect();
-                (game, rows)
+                // Whether the highlighted row is one this install shared (drives
+                // the "X: delete mine" footer hint).
+                let sel_is_mine = s
+                    .profile_matches
+                    .get(selection)
+                    .is_some_and(|m| crate::profiles::is_mine(&m.profile.id));
+                (game, rows, sel_is_mine)
             });
-            if let Some((game, mut rows)) = snap {
+            if let Some((game, mut rows, sel_is_mine)) = snap {
                 if rows.is_empty() {
                     rows.push(lc.profile_none.to_string());
                 }
                 let refs: std::vec::Vec<&str> = rows.iter().map(|r| r.as_str()).collect();
+                // Append the delete hint only when sitting on your own profile.
+                let footer = if sel_is_mine {
+                    std::format!("{}   {}", lc.profile_footer, lc.profile_del_hint)
+                } else {
+                    lc.profile_footer.to_string()
+                };
                 backend.draw_library_list_modal(
                     lc.profile_title,
                     &game,
                     selection,
                     &refs,
-                    lc.profile_footer,
+                    &footer,
                     true,
                 );
             }
+        }
+        Screen::ProfileDeleteConfirm { profile_idx, .. } => {
+            let lc = crate::loc::s();
+            let name = LIBRARY
+                .lock()
+                .ok()
+                .and_then(|s| {
+                    s.profile_matches.get(profile_idx).map(|m| {
+                        let mut r = m.profile.title().to_string();
+                        if !m.profile.author.is_empty() {
+                            r.push_str(" - ");
+                            r.push_str(&m.profile.author);
+                        }
+                        r
+                    })
+                })
+                .unwrap_or_default();
+            let refs = [name.as_str()];
+            // usize::MAX = no cursor (it's a confirm: A deletes / B cancels).
+            backend.draw_library_list_modal(
+                lc.profile_del_confirm,
+                "",
+                usize::MAX,
+                &refs,
+                lc.del_footer,
+                true,
+            );
         }
         Screen::ProfilePreview { .. } => {
             let lc = crate::loc::s();

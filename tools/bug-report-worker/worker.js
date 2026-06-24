@@ -57,6 +57,12 @@ export default {
     if (r.kind === "profile") {
       return handleProfileShare(r, env);
     }
+    // Remove one of the caller's OWN shared profiles (#20). Ownership is proved by
+    // the install's secret owner token (see checkOrClaimOwner), so this can't
+    // delete someone else's.
+    if (r.kind === "profile_delete") {
+      return handleProfileDelete(r, env);
+    }
 
     const issue = buildIssue(r);
     const ghUrl = `https://api.github.com/repos/${env.GITHUB_REPO}/issues`;
@@ -189,6 +195,12 @@ async function handleProfileShare(r, env) {
     .toLowerCase()
     .replace(/[^a-z0-9]/g, "")
     .slice(0, 8);
+  // Ownership (#20): claim this install on its first share (TOFU) with a strong
+  // server token, else require the stored one. Returns the authoritative token so
+  // the app can persist it; a later UPDATE or DELETE must present it. Public
+  // install_ids on the branch are already claimed by the time they're visible.
+  const owner = await checkOrClaimOwner(env, install, s(r.owner_token, 64));
+  if (!owner.ok) return json({ ok: false, error: owner.error }, owner.status || 403);
   const slug =
     title
       .toLowerCase()
@@ -228,14 +240,80 @@ async function handleProfileShare(r, env) {
     `profile: ${title} (${id})`
   );
   if (!res.ok) return json({ ok: false, error: res.error }, 502);
-  return json({ ok: true, id });
+  // Return the owner token so the app persists it (first share) — needed to
+  // update or delete this profile later.
+  return json({ ok: true, id, token: owner.token });
 }
 
-// Write `file` + an upserted index.json onto `branch` in a SINGLE commit, via
-// the Git Data API (ref -> base tree -> new tree -> commit -> move ref). Retries
-// on a non-fast-forward (422) when a concurrent share moved the branch tip
-// between our read and our ref update. Returns {ok} / {ok,error}.
-async function commitShare(env, branch, file, fileContent, indexEntry, message) {
+// Delete one of the caller's OWN shared profiles (#20). Two checks: the id must
+// carry this install's suffix (defense in depth) AND the secret owner token must
+// match the one claimed for this install (no TOFU on delete — an unclaimed
+// install can't delete anything). Removes the file + index entry in one commit.
+async function handleProfileDelete(r, env) {
+  if (!env.GITHUB_TOKEN || !env.GITHUB_REPO) {
+    return json({ ok: false, error: "worker not configured" }, 500);
+  }
+  if (!env.PROFILES_KV) {
+    return json({ ok: false, error: "ownership store unavailable" }, 500);
+  }
+  const s = (v, n = 200) => String(v ?? "").slice(0, n);
+  const id = s(r.id, 80);
+  const install = s(r.install_id, 16).toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 8);
+  const token = s(r.owner_token, 64);
+  if (!id || !install) return json({ ok: false, error: "missing id / install_id" }, 400);
+  if (!id.endsWith(`-${install}`)) return json({ ok: false, error: "not your profile" }, 403);
+  const stored = await env.PROFILES_KV.get(`owner:${install}`);
+  if (!stored || !ctEq(token, stored)) {
+    return json({ ok: false, error: "not the owner" }, 403);
+  }
+  const res = await commitDelete(env, PROFILES_BRANCH, id, `profile delete (${id})`);
+  if (!res.ok) return json({ ok: false, error: res.error }, 502);
+  // Best-effort: drop the now-orphaned apply counter.
+  try { await env.PROFILES_KV.delete(`count:${id}`); } catch {}
+  return json({ ok: true });
+}
+
+// Ownership store for #20 profiles, in PROFILES_KV under `owner:<install_id>`.
+// First share for an install CLAIMS it (trust-on-first-use) with a strong token
+// (reuse the app's if it already has one — KV-loss recovery — else mint one with
+// the runtime CSPRNG); later shares/deletes must present it. The install_id is a
+// PUBLIC dedup key (it's in every shared id); this token is the real secret and
+// never appears in any public artifact. Returns { ok, token, error?, status? }.
+// Degrades to allow (no token) when KV isn't bound, so shares still work.
+async function checkOrClaimOwner(env, install, providedToken) {
+  if (!env.PROFILES_KV || !install) return { ok: true, token: "" };
+  const key = `owner:${install}`;
+  const stored = await env.PROFILES_KV.get(key);
+  if (!stored) {
+    const token =
+      providedToken && providedToken.length >= 16
+        ? providedToken
+        : crypto.randomUUID().replace(/-/g, "");
+    await env.PROFILES_KV.put(key, token);
+    return { ok: true, token };
+  }
+  if (ctEq(providedToken, stored)) return { ok: true, token: stored };
+  return { ok: false, status: 403, error: "not the owner of this install id" };
+}
+
+// Constant-time string compare. The tokens are high-entropy so a timing oracle
+// is impractical anyway, but this costs nothing and avoids the early-out.
+function ctEq(a, b) {
+  a = String(a);
+  b = String(b);
+  if (a.length === 0 || a.length !== b.length) return false;
+  let d = 0;
+  for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return d === 0;
+}
+
+// Apply a change to `branch` in a SINGLE commit via the Git Data API
+// (ref -> base tree -> new tree -> commit -> move ref). `mutate(list)` gets the
+// current index.json array and returns { list, tree } — the new index plus the
+// file tree ops (a blob with `content` writes/overwrites; a blob with `sha: null`
+// deletes). Return { done: true } to no-op. Retries on a non-fast-forward (422)
+// when a concurrent share moved the tip between our read and our ref update.
+async function commitTreeChange(env, branch, message, mutate) {
   const headers = ghHeaders(env);
   const base = `https://api.github.com/repos/${env.GITHUB_REPO}`;
   const ref = `heads/${encodeURIComponent(branch)}`;
@@ -246,19 +324,16 @@ async function commitShare(env, branch, file, fileContent, indexEntry, message) 
       return { ok: false, error: `ref ${refRes.status}: ${(await refRes.text()).slice(0, 200)}` };
     }
     const tipSha = (await refRes.json()).object.sha;
-    // 2. The tree that tip points at (so our new tree only changes 2 files).
+    // 2. The tree that tip points at (so our new tree only changes the named files).
     const tipCommitRes = await fetch(`${base}/git/commits/${tipSha}`, { headers });
     if (!tipCommitRes.ok) {
       return { ok: false, error: `commit ${tipCommitRes.status}` };
     }
     const baseTree = (await tipCommitRes.json()).tree.sha;
-    // 3. Read the index.json AT THE TIP commit (pinned to tipSha, so the list we
-    //    upsert matches base_tree exactly) and upsert this entry.
+    // 3. Read index.json AT THE TIP commit (pinned to tipSha so our edit matches
+    //    base_tree exactly).
     let list = [];
-    const idxRes = await fetch(
-      `${base}/contents/index.json?ref=${tipSha}`,
-      { headers }
-    );
+    const idxRes = await fetch(`${base}/contents/index.json?ref=${tipSha}`, { headers });
     if (idxRes.ok) {
       try {
         list = JSON.parse(atobUtf8((await idxRes.json()).content));
@@ -267,18 +342,18 @@ async function commitShare(env, branch, file, fileContent, indexEntry, message) 
       }
       if (!Array.isArray(list)) list = [];
     }
-    list = list.filter((e) => e && e.id !== indexEntry.id);
-    list.push(indexEntry);
-    list.sort((a, b) => String(a.id).localeCompare(String(b.id)));
-    // 4. New tree with BOTH files (content inline = blob created server-side).
+    const m = mutate(list);
+    if (m.done) return { ok: true }; // nothing to change (e.g. delete of an absent profile)
+    // 4. New tree: the caller's file ops + the rewritten index (inline content =
+    //    blob created server-side; sha:null removes a path).
     const treeRes = await fetch(`${base}/git/trees`, {
       method: "POST",
       headers,
       body: JSON.stringify({
         base_tree: baseTree,
         tree: [
-          { path: file, mode: "100644", type: "blob", content: fileContent },
-          { path: "index.json", mode: "100644", type: "blob", content: JSON.stringify(list, null, 2) + "\n" },
+          ...m.tree,
+          { path: "index.json", mode: "100644", type: "blob", content: JSON.stringify(m.list, null, 2) + "\n" },
         ],
       }),
     });
@@ -296,8 +371,8 @@ async function commitShare(env, branch, file, fileContent, indexEntry, message) 
       return { ok: false, error: `mkcommit ${commitRes.status}` };
     }
     const newCommit = (await commitRes.json()).sha;
-    // 6. Fast-forward the branch (refs, plural, for the update). 422 = the tip
-    //    moved under us (another share); rebuild on the new tip and retry.
+    // 6. Fast-forward the branch. 422 = the tip moved under us (another share);
+    //    rebuild on the new tip and retry.
     const upd = await fetch(`${base}/git/refs/${ref}`, {
       method: "PATCH",
       headers,
@@ -309,6 +384,31 @@ async function commitShare(env, branch, file, fileContent, indexEntry, message) 
     }
   }
   return { ok: false, error: "updateref conflicted after retries" };
+}
+
+// Write `file` + upsert its index entry in one commit.
+function commitShare(env, branch, file, fileContent, indexEntry, message) {
+  return commitTreeChange(env, branch, message, (list) => {
+    const next = list.filter((e) => e && e.id !== indexEntry.id);
+    next.push(indexEntry);
+    next.sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    return { list: next, tree: [{ path: file, mode: "100644", type: "blob", content: fileContent }] };
+  });
+}
+
+// Remove a profile (by id) + its index entry in one commit. Idempotent: a
+// no-op success if the id isn't in the catalog. Looks the file path up from the
+// index so it stays correct whatever the per-game folder layout.
+function commitDelete(env, branch, id, message) {
+  return commitTreeChange(env, branch, message, (list) => {
+    const entry = list.find((e) => e && e.id === id);
+    if (!entry) return { done: true };
+    const next = list.filter((e) => e && e.id !== id);
+    const tree = entry.file
+      ? [{ path: entry.file, mode: "100644", type: "blob", sha: null }]
+      : [];
+    return { list: next, tree };
+  });
 }
 
 function ghHeaders(env) {

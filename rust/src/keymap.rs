@@ -493,6 +493,21 @@ pub fn mark_shared(basename: &str, id: &str) -> bool {
     write_keymap_file(&keymap_write_path(basename), &km)
 }
 
+/// Inverse of `mark_shared`/applied: when the catalog profile `id` is DELETED by
+/// its owner (#20), demote `basename`'s keymap back to "user" IF it was still
+/// tagged `community:<id>` — the controls are unchanged, just no longer published,
+/// so they become shareable again (and the "already in the catalog" share block
+/// lifts). No-op when the keymap points at a different profile or isn't tagged.
+/// Returns false on write failure.
+pub fn unmark_shared(basename: &str, id: &str) -> bool {
+    let mut km = effective_for(basename);
+    if km.source != std::format!("community:{}", id) {
+        return true; // tagged for another profile (or already "user") → leave it
+    }
+    km.source = "user".into();
+    write_keymap_file(&keymap_write_path(basename), &km)
+}
+
 /// Provenance of the on-disk sidecar for `basename` (see `Keymap::source`).
 /// "default" when there is no sidecar (the game runs on the fallback).
 // Wired by the library OPTIONS profile UI (#20, next increment).

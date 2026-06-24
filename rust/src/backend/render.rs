@@ -5520,13 +5520,21 @@ impl SwitchRenderBackend {
         <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(bg), panel);
         <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(border, 255), panel);
 
-        // Title.
+        // Title — shrinks to fit so a long title (e.g. a confirm question, or a
+        // long-language string) never overflows the panel edges.
         let title_col = if danger { MODAL_TITLE_COL_DANGER } else { MODAL_TITLE_COL };
-        let tw = self.measure_text(title, MODAL_TITLE_SCALE);
+        let avail = w - MODAL_ROW_X;
+        let tw_full = self.measure_text(title, MODAL_TITLE_SCALE);
+        let tscale = if tw_full > avail {
+            MODAL_TITLE_SCALE * avail / tw_full
+        } else {
+            MODAL_TITLE_SCALE
+        };
+        let tw = self.measure_text(title, tscale);
         self.draw_text(
             x + (w - tw) * 0.5,
             y + 25.0,
-            MODAL_TITLE_SCALE,
+            tscale,
             title,
             swf::Color::from_rgb(title_col, 255),
         );
@@ -5552,13 +5560,20 @@ impl SwitchRenderBackend {
             );
         }
 
-        // Optional footer.
+        // Optional footer — shrinks to fit too (an extra hint like "X: delete"
+        // can push it past the panel width, especially in longer languages).
         if let Some(f) = footer {
-            let fw = self.measure_text(f, MODAL_FOOTER_SCALE);
+            let fw_full = self.measure_text(f, MODAL_FOOTER_SCALE);
+            let fscale = if fw_full > avail {
+                MODAL_FOOTER_SCALE * avail / fw_full
+            } else {
+                MODAL_FOOTER_SCALE
+            };
+            let fw = self.measure_text(f, fscale);
             self.draw_text(
                 x + (w - fw) * 0.5,
                 y + h - 38.0,
-                MODAL_FOOTER_SCALE,
+                fscale,
                 f,
                 swf::Color::from_rgb(MODAL_FOOTER_COL, 255),
             );
