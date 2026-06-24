@@ -119,12 +119,13 @@ pub const ALL_FLASH_KEYS: &[&str] = &[
     // Full alphabet (A-Z). Sorted so the user can navigate by letter.
     "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
     "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
-    // Digits 0-9.
-    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
-    // Numpad digits 0-9 (distinct Flash key codes from the top-row digits — many
-    // 2-player games hard-code P2 to the keypad). PR #46 (YuQiyang).
+    // Numpad digits 0-9 FIRST — distinct Flash key codes from the top row, and the
+    // common P2 convention in 2-player fighters, so they're the more-used digits
+    // here. PR #46 (YuQiyang).
     "Num0", "Num1", "Num2", "Num3", "Num4",
     "Num5", "Num6", "Num7", "Num8", "Num9",
+    // Top-row digits 0-9.
+    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
     // Mouse clicks (at the cursor) — for games that need clicking from buttons
     // rather than the touchscreen. Routed to the mouse, not a key event.
     "Left click",
@@ -840,13 +841,16 @@ pub const FALLBACK_BINDINGS_P2: &[(&str, &str)] = &[
     ("StickLRight", "D"),
     ("StickLUp", "W"),
     ("StickLDown", "S"),
-    // Action buttons -> digits (covers P2 attack keys in many 2-player fighters).
-    ("A", "1"),
-    ("B", "2"),
-    ("X", "3"),
-    ("Y", "4"),
-    ("R", "5"),
-    ("L", "6"),
+    // Action buttons -> NUMPAD digits: the actual P2 convention in most 2-player
+    // Flash fighters (Super Smash Flash 2 P2 = Numpad 1-4, KOF Wing, etc.) — the
+    // top-row "1".."6" we used before produced the wrong key codes for them.
+    // Games that want the top row instead are remapped per-game / via a profile.
+    ("A", "Num1"),
+    ("B", "Num2"),
+    ("X", "Num3"),
+    ("Y", "Num4"),
+    ("R", "Num5"),
+    ("L", "Num6"),
 ];
 
 fn p2_default_bindings() -> BTreeMap<std::string::String, std::string::String> {
