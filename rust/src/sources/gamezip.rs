@@ -203,6 +203,52 @@ fn percent_decode(s: &str) -> std::string::String {
     std::string::String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Percent-encode a mirror `host/path` string, KEEPING the `/` separators.
+/// Normalizes first (decode then re-encode) so a launchCommand that already
+/// carries `%XX` escapes isn't double-encoded, while a raw UTF-8 path (e.g. a
+/// Japanese filename) gets encoded. Without this the htdocs mirror returns
+/// HTTP 400/404 for un-encoded non-ASCII paths — the -2 launch error on
+/// 包丁少女幻窓曲 (issue #51). ASCII paths (Garfield, Icy Tower…) are unchanged.
+fn percent_encode_path(rest: &str) -> std::string::String {
+    let decoded = percent_decode(rest);
+    let mut out = std::string::String::with_capacity(decoded.len());
+    for &b in decoded.as_bytes() {
+        let safe = matches!(b,
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+            | b'.' | b'-' | b'_' | b'~' | b'/');
+        if safe {
+            out.push(b as char);
+        } else {
+            out.push_str(&std::format!("%{:02X}", b));
+        }
+    }
+    out
+}
+
+/// Write `bytes` to an absolute sidecar path (creating parent dirs) via the
+/// C++/libnx writer, then flush to SD. Used by the navigator's on-demand mirror
+/// fetch to cache a dynamically-loaded asset so a replay is offline and a delete
+/// cleans it up. Returns true on success.
+pub fn write_sidecar_abs(abs_path: &str, bytes: &[u8]) -> bool {
+    let c_path = match std::ffi::CString::new(abs_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let ok = unsafe {
+        swf_picker_write_file(c_path.as_ptr(), bytes.as_ptr(), bytes.len() as u32) != 0
+    };
+    if ok {
+        crate::sd::commit();
+    } else {
+        net::log(&std::format!(
+            "sidecar: C++ write failed {} ({} bytes)\n",
+            abs_path,
+            bytes.len()
+        ));
+    }
+    ok
+}
+
 /// Write `bytes` to `<files_dir>/<rel>` (rel is a forward-slash `content/`-
 /// relative path like `host/path/file.swf`), creating parent dirs. Best-effort.
 extern "C" {
@@ -360,7 +406,7 @@ pub fn htdocs_url_from_command(launch_command: &str) -> Option<std::string::Stri
     }
     Some(std::format!(
         "https://infinity.unstable.life/Flashpoint/Legacy/htdocs/{}",
-        rest
+        percent_encode_path(rest)
     ))
 }
 
@@ -375,7 +421,7 @@ pub fn htdocs_base_from_entry(entry: &str) -> Option<std::string::String> {
     }
     Some(std::format!(
         "https://infinity.unstable.life/Flashpoint/Legacy/htdocs/{}/",
-        dir
+        percent_encode_path(dir)
     ))
 }
 

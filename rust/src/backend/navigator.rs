@@ -87,14 +87,65 @@ pub struct SidecarNavigator {
     base_url: String,
     /// `sdmc:/flashnx/<game-stem>.files` — where this game's sibling SWFs live.
     sidecar_dir: PathBuf,
+    /// True when the movie runs under its original Flashpoint launchCommand host
+    /// (not the synthetic `flashforswitch.local`). A missing sidecar may then be
+    /// fetched on demand from the Flashpoint "Legacy htdocs" mirror — see `fetch`.
+    /// False for the user's own local SWFs (no network).
+    htdocs_proxy: bool,
 }
 
 impl SidecarNavigator {
     pub fn new(spawner: NullSpawner, base_url: String, sidecar_dir: PathBuf) -> Self {
+        // Flashpoint games carry a real host (from their launchCommand `.base`
+        // sidecar); the synthetic `flashforswitch.local` host marks a direct /
+        // user-supplied SWF, for which we never touch the network.
+        let htdocs_proxy = Url::parse(&base_url)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h != "flashforswitch.local"))
+            .unwrap_or(false);
         Self {
             spawner,
             base_url,
             sidecar_dir,
+            htdocs_proxy,
+        }
+    }
+
+    /// On-demand fetch of a missing sidecar from the Flashpoint "Legacy htdocs"
+    /// mirror, caching it to `cache_path` (the host-mirrored sidecar layout) so a
+    /// replay is offline and a delete cleans it up. The request URL's path is
+    /// already percent-encoded by the `url` crate; the query is dropped (the
+    /// mirror serves static files). Returns the bytes, or None on any miss so the
+    /// caller falls through to the usual not-found error. CONTENT-NEUTRAL: same
+    /// mirror the GameZIP came from, only for the game the user downloaded.
+    fn fetch_from_mirror(
+        &self,
+        resolved: &Url,
+        cache_path: &std::path::Path,
+    ) -> Option<std::vec::Vec<u8>> {
+        let host = resolved.host_str()?;
+        let mirror = std::format!(
+            "https://infinity.unstable.life/Flashpoint/Legacy/htdocs/{}{}",
+            host,
+            resolved.path()
+        );
+        const CAP: usize = 16 * 1024 * 1024;
+        match crate::net::http_get(&mirror, CAP) {
+            Ok(bytes) => {
+                tracing::info!(
+                    "sidecar: fetched {} from mirror ({} bytes)",
+                    resolved,
+                    bytes.len()
+                );
+                if let Some(p) = cache_path.to_str() {
+                    crate::sources::gamezip::write_sidecar_abs(p, &bytes);
+                }
+                Some(bytes)
+            }
+            Err(e) => {
+                tracing::warn!("sidecar: mirror miss {} ({}): {}", resolved, mirror, e);
+                None
+            }
         }
     }
 
@@ -251,6 +302,21 @@ impl NavigatorBackend for SidecarNavigator {
         let (bytes, from) = match found {
             Some((b, p)) => (b, p.clone()),
             None => {
+                // Not on the SD card. For a Flashpoint game (running under its
+                // original launchCommand host) the asset may be on the Legacy
+                // htdocs mirror. Many games build asset paths dynamically in
+                // ActionScript (Racing is Magic loads `xml/config.xml` at
+                // runtime), so the static download-time prefetch can't know about
+                // them — fetch on demand, cache, and serve.
+                if self.htdocs_proxy {
+                    if let Some(b) = self.fetch_from_mirror(&resolved, &host_path) {
+                        let resp: Box<dyn SuccessResponse> = Box::new(SidecarResponse {
+                            url: resolved.to_string(),
+                            bytes: Some(b),
+                        });
+                        return async_return(Ok(resp));
+                    }
+                }
                 tracing::warn!(
                     "sidecar: {} not found ({}, {}, {})",
                     resolved,
