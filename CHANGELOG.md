@@ -2,6 +2,21 @@
 
 Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://github.com/ruffle-rs/ruffle).
 
+## v1.4.0 (2026-06-25)
+
+Community control profiles, more languages, and Flashpoint games that were impossible to import before.
+
+### Added
+
+- **Community control profiles**: share your key bindings for a game and download other players' setups (#20). In a game's options (**+**), pick "Share my controls" to publish your profile, or "Apply a profile" to browse what the community has shared for that game and try it; applying a profile is non-destructive and can be reverted. Profiles you shared can be deleted again. Verified and most-applied profiles sort to the top.
+- **More languages**: German, Italian, and Brazilian Portuguese join the menus, plus **Simplified Chinese** (#41) rendered from the Switch's own shared font.
+- **Numpad keys in the controls editor**: the editor now offers Num0–Num9 (the numeric keypad), listed first, for games that read keypad keys separately from the top-row digits. Player 2 defaults to the numpad.
+
+### Fixes
+
+- **Flashpoint games with a non-ASCII title now import and launch**: a game whose file name uses non-Latin characters (for example *包丁少女幻窓曲*) failed to download with an error -2. Its address is now encoded correctly. (#51)
+- **Flashpoint games that load their assets on the fly now play**: some games build the paths to their data and art files while running, so those files could not be fetched ahead of time and the game stayed on a blank screen (for example *Racing is Magic*). Missing files are now pulled from the Flashpoint mirror on demand and cached, for games imported from the Flashpoint search. (#51)
+
 ## v1.3.1 (2026-06-19)
 
 Local two-player, a touch-driven launcher, and a batch of game fixes.
