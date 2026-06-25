@@ -6930,6 +6930,20 @@ impl SwitchRenderBackend {
             swf::Color::from_rgb(0x99AABB, 255),
         );
 
+        // Author + version credit, bottom-right. Baked into the UI so a rebuilt
+        // or rebranded copy carries it too (removing it is a clear MIT-attribution
+        // violation, not a passive omission). ASCII only — the 5x7 font folds it.
+        const CREDIT_SCALE: f32 = 1.5;
+        let credit = std::format!("FlashNX v{} by Jonathan8520", crate::bugreport::APP_VERSION);
+        let credit_w = self.measure_text(&credit, CREDIT_SCALE);
+        self.draw_text(
+            vw - credit_w - 18.0,
+            vh - 34.0,
+            CREDIT_SCALE,
+            &credit,
+            swf::Color::from_rgb(0x66788A, 255),
+        );
+
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
