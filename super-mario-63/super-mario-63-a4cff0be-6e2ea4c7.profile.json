@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "id": "super-mario-63-a4cff0be-6e2ea4c7",
+  "game": {
+    "title": "Super Mario 63",
+    "fp_uuid": "",
+    "swf_hash": "a4cff0be9f22ab29"
+  },
+  "author": "Jonathan8520",
+  "verified": false,
+  "bindings": {
+    "A": "Space",
+    "B": "Up",
+    "Down": "Down",
+    "L": "Escape",
+    "Left": "Left",
+    "Plus": "P",
+    "R": "Enter",
+    "Right": "Right",
+    "StickLDown": "Down",
+    "StickLLeft": "Left",
+    "StickLRight": "Right",
+    "StickLUp": "Up",
+    "Up": "Up",
+    "X": "X",
+    "Y": "Z",
+    "ZL": "Right click",
+    "ZR": "Left click"
+  },
+  "bindings_p2": {
+    "A": "Num1",
+    "B": "Num2",
+    "Down": "S",
+    "L": "Num6",
+    "Left": "A",
+    "R": "Num5",
+    "Right": "D",
+    "StickLDown": "S",
+    "StickLLeft": "A",
+    "StickLRight": "D",
+    "StickLUp": "W",
+    "Up": "W",
+    "X": "Num3",
+    "Y": "Num4"
+  }
+}
