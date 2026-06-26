@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "id": "13-days-after-131953467-swf-85946783-dc84b835",
+  "game": {
+    "title": "13-days-after-131953467.swf",
+    "fp_uuid": "",
+    "swf_hash": "85946783c610bfda"
+  },
+  "author": "Dan",
+  "verified": false,
+  "bindings": {
+    "A": "Space",
+    "B": "Z",
+    "Down": "Num3",
+    "L": "Escape",
+    "Left": "Left",
+    "Plus": "P",
+    "R": "Enter",
+    "Right": "Num2",
+    "StickLDown": "Down",
+    "StickLLeft": "Left",
+    "StickLRight": "Right",
+    "StickLUp": "Up",
+    "Up": "Num1",
+    "X": "X",
+    "Y": "Shift",
+    "ZL": "Right click",
+    "ZR": "Left click"
+  },
+  "bindings_p2": {
+    "A": "Num1",
+    "B": "Num2",
+    "Down": "S",
+    "L": "Num6",
+    "Left": "A",
+    "R": "Num5",
+    "Right": "D",
+    "StickLDown": "S",
+    "StickLLeft": "A",
+    "StickLRight": "D",
+    "StickLUp": "W",
+    "Up": "W",
+    "X": "Num3",
+    "Y": "Num4"
+  }
+}
