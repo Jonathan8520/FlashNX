@@ -21,8 +21,45 @@ use ruffle_core::backend::ui::{
     DialogResultFuture, FileFilter, FontDefinition, FullscreenError, LanguageIdentifier,
     MouseCursor, NullUiBackend, UiBackend,
 };
-use ruffle_core::font::FontQuery;
+use ruffle_core::font::{FontFileData, FontQuery, FontType};
 use url::Url;
+
+// In-game device fonts (issue #54). Ruffle renders a running SWF's dynamic text
+// itself and asks the UiBackend for device fonts. NullUiBackend supplies none,
+// so any glyph outside Ruffle's bundled Latin "Noto Sans" subset — every CJK
+// character, and any font name we don't provide — renders BLANK in-game (the UI
+// menus are unaffected: those use our own draw_text/glyphs.rs path). We feed
+// Ruffle the Switch's own shared fonts (the same source glyphs.rs uses) so the
+// FontSet's per-glyph fallback can resolve Latin/JP/CJK in a running game.
+extern "C" {
+    // cpp/src/ruffle_bridge.cpp — DECRYPTED TTF/OTF for a PlSharedFontType.
+    // Returns a pointer into pl's shared memory (mapped for the whole process,
+    // so the slice is effectively 'static) + size, or null / 0 on failure.
+    fn ruffle_shared_font(kind: core::ffi::c_int, out_size: *mut u32) -> *const u8;
+}
+
+/// Switch shared fonts exposed as device fonts, in fallback order. Standard
+/// (Latin + Japanese) leads as the main font; the CJK packs cover the glyphs it
+/// lacks. `PlSharedFontType`: 0=Standard, 1=ChineseSimplified, 2=ExtChinese-
+/// Simplified, 3=ChineseTraditional, 4=Korean.
+const SHARED_DEVICE_FONTS: &[(&str, core::ffi::c_int)] = &[
+    ("FlashNX Standard", 0),
+    ("FlashNX Chinese", 1),
+    ("FlashNX Chinese Ext", 2),
+    ("FlashNX Chinese Traditional", 3),
+    ("FlashNX Korean", 4),
+];
+
+/// Borrow a Switch shared font as a `'static` byte slice (pl keeps the decrypted
+/// data mapped for the whole process), or None if pl can't provide it.
+fn shared_font_slice(kind: core::ffi::c_int) -> Option<&'static [u8]> {
+    let mut len: u32 = 0;
+    let ptr = unsafe { ruffle_shared_font(kind, &mut len) };
+    if ptr.is_null() || len == 0 {
+        return None;
+    }
+    Some(unsafe { core::slice::from_raw_parts(ptr, len as usize) })
+}
 
 /// Pending "open the software keyboard" request. Set by `open_virtual_keyboard`
 /// when an editable TextField takes focus; cleared either by
@@ -115,15 +152,48 @@ impl UiBackend for SwitchUiBackend {
     }
 
     fn load_device_font(&self, query: &FontQuery, register: &mut dyn FnMut(FontDefinition)) {
-        self.inner.load_device_font(query, register)
+        // Back the requested name with the Standard shared font so a single-font
+        // lookup (text not routed through the sorted fallback path) still finds
+        // glyphs instead of nothing.
+        if let Some(bytes) = shared_font_slice(0) {
+            register(FontDefinition::FontFile {
+                name: query.name.clone(),
+                is_bold: query.is_bold,
+                is_italic: query.is_italic,
+                data: FontFileData::new(bytes),
+                index: 0,
+            });
+        }
     }
 
     fn sort_device_fonts(
         &self,
-        query: &FontQuery,
+        _query: &FontQuery,
         register: &mut dyn FnMut(FontDefinition),
     ) -> Vec<FontQuery> {
-        self.inner.sort_device_fonts(query, register)
+        // Register the shared fonts and hand back an ordered fallback chain;
+        // FontSet::resolve_glyph walks it per character (Latin/JP from Standard,
+        // CJK from the Chinese/Korean packs). This is what makes a running game's
+        // Chinese text render instead of coming out blank (#54).
+        let mut chain = Vec::new();
+        for (name, kind) in SHARED_DEVICE_FONTS {
+            if let Some(bytes) = shared_font_slice(*kind) {
+                register(FontDefinition::FontFile {
+                    name: (*name).to_string(),
+                    is_bold: false,
+                    is_italic: false,
+                    data: FontFileData::new(bytes),
+                    index: 0,
+                });
+                chain.push(FontQuery::new(
+                    FontType::Device,
+                    (*name).to_string(),
+                    false,
+                    false,
+                ));
+            }
+        }
+        chain
     }
 
     fn display_file_open_dialog(

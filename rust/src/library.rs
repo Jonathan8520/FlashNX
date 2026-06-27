@@ -2651,6 +2651,10 @@ fn safe_name_from_url(url: &str) -> std::string::String {
 }
 
 fn run_direct_download(url: &str) {
+    // Wayback URLs need the `id_` modifier to serve the raw file instead of the
+    // HTML page wrapper (e.g. .../web/<ts>id_/...mting.swf). No-op otherwise.
+    let url = crate::sources::wayback_raw(url);
+    let url = url.as_str();
     let safe_name = safe_name_from_url(url);
     let out_path = std::format!("{}/{}", USER_SD_ROOTS[0], safe_name);
     match net::start_download(url, &out_path) {

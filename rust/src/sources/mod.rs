@@ -26,6 +26,12 @@ pub enum SourceKind {
 pub fn classify(input: &str) -> SourceKind {
     let t = input.trim();
     let lower = t.to_ascii_lowercase();
+    // Wayback Machine snapshots (web.archive.org/web/<ts>/<url>) are a DIRECT
+    // file fetch, not an archive.org item. They contain "archive.org", so this
+    // must precede the item check below or they'd wrongly hit the metadata list.
+    if lower.contains("web.archive.org") {
+        return SourceKind::DirectUrl;
+    }
     if lower.contains("archive.org") {
         return SourceKind::ArchiveOrg;
     }
@@ -35,4 +41,32 @@ pub fn classify(input: &str) -> SourceKind {
         return SourceKind::ArchiveOrg;
     }
     SourceKind::DirectUrl
+}
+
+/// Rewrite a Wayback Machine URL to its RAW-content form by inserting the `id_`
+/// modifier after the timestamp: `/web/<ts>/<url>` -> `/web/<ts>id_/<url>`.
+/// Without it Wayback serves an HTML page wrapper instead of the original file,
+/// so a `.swf` import downloads markup instead of the movie. No-op for
+/// non-Wayback URLs and ones that already carry a modifier (`id_`, `im_`, ...).
+pub fn wayback_raw(url: &str) -> std::string::String {
+    if !url.to_ascii_lowercase().contains("web.archive.org") {
+        return url.to_string();
+    }
+    const MARK: &str = "/web/";
+    if let Some(pos) = url.find(MARK) {
+        let after = pos + MARK.len();
+        let rest = &url[after..];
+        let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+        // A modifier (id_/im_/...) sits between the digits and the next '/';
+        // its absence (rest jumps straight to '/') means we must insert `id_`.
+        if digits > 0 && rest[digits..].starts_with('/') {
+            return std::format!(
+                "{}{}id_{}",
+                &url[..after],
+                &rest[..digits],
+                &rest[digits..]
+            );
+        }
+    }
+    url.to_string()
 }

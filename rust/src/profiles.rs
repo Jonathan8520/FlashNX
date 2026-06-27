@@ -29,10 +29,12 @@ use serde::Deserialize;
 
 use crate::keymap::Keymap;
 
-/// Profiles baked into the binary. Curated/known-good layouts that ship with
-/// every build so popular games work out of the box with no network. Add a
-/// JSON file under `assets/profiles/` and a line here to extend the set.
-const BUNDLED_JSON: &[&str] = &[include_str!("../../assets/profiles/mario63.profile.json")];
+/// Profiles baked into the binary. Empty on purpose: the control-profile catalog
+/// is 100% community-driven (shared via the in-game button), so we don't ship
+/// any "official" seed. The lone former entry (Super Mario 63) just duplicated
+/// the default keymap, so applying it was a no-op. To add a bundled profile,
+/// drop a JSON under `assets/profiles/` and list it here.
+const BUNDLED_JSON: &[&str] = &[];
 
 #[derive(Debug, Clone, Deserialize)]
 struct ProfileGame {

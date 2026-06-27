@@ -2,6 +2,19 @@
 
 Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://github.com/ruffle-rs/ruffle).
 
+## v1.4.1 (2026-06-28)
+
+A follow-up to the Chinese support in v1.4.0, plus wider import support.
+
+### Fixes
+
+- **Chinese (and Japanese/Korean) text now shows inside games**: v1.4.0 added Chinese to the app's own menus, but text drawn by a running game still came out blank when the game used a system font for it. Games now fall back to the Switch's built-in fonts for any character a game's font is missing, so in-game CJK text renders. (#54)
+- **Import from Wayback Machine links**: a `web.archive.org` snapshot URL of a `.swf` is now accepted and downloads the actual game (it used to be treated as an archive.org item and fail).
+
+### Changed
+
+- The control-profile catalog is now fully community-driven: the one bundled profile (Super Mario 63) was removed, as it only mirrored the default controls anyway. Share and apply profiles from a game's options as before.
+
 ## v1.4.0 (2026-06-25)
 
 Community control profiles, more languages, and Flashpoint games that were impossible to import before.
