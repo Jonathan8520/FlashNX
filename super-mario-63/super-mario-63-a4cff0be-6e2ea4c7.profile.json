@@ -12,7 +12,7 @@
     "A": "Space",
     "B": "Up",
     "Down": "Down",
-    "L": "Escape",
+    "L": "Shift",
     "Left": "Left",
     "Plus": "P",
     "R": "Enter",
@@ -24,7 +24,7 @@
     "Up": "Up",
     "X": "X",
     "Y": "Z",
-    "ZL": "Right click",
+    "ZL": "Shift",
     "ZR": "Left click"
   },
   "bindings_p2": {
