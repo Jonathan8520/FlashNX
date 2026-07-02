@@ -2,6 +2,16 @@
 
 Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://github.com/ruffle-rs/ruffle).
 
+## v1.5.0 (unreleased)
+
+A rework of the control editor: a visual keyboard, more keys, and button combos.
+
+### Added
+
+- **Visual keyboard for remapping** (#55): the control editor now shows a full PC keyboard to pick a key, instead of a long scrolling list. Navigate it with the D-pad or stick and press **A**. Ctrl, Alt, Tab and the like are now easy to find, and the board covers the whole layout.
+- **More keys**: F1-F12, the symbol keys (`-` `=` `[` `]` `;` `'` `,` `.` `/` `\` `` ` ``) and the numpad operators (`+` `-` `*` `/`) can now be bound.
+- **Combo layer** (#57): for games that need more inputs than the controller has buttons, hold a modifier button and every other button sends a second key, so `ZL + A` can send `F1`. The editor has a sub-tab (move with **L/R**) across `NORMAL / ZL / ZR / L / R`: NORMAL is the base bindings, and picking a modifier edits that player's combo layer (rows then read `ZL+A`). **X** switches the Player 1 / Player 2 tab, each with its own combo layer. A button with no combo key keeps its normal one while the modifier is held, so movement never breaks.
+
 ## v1.4.1 (2026-06-28)
 
 A follow-up to the Chinese support in v1.4.0, plus wider import support.

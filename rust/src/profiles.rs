@@ -574,6 +574,13 @@ pub fn apply(basename: &str, profile: &Profile) -> bool {
         version: 1,
         bindings: profile.bindings.clone(),
         bindings_p2: profile.bindings_p2.clone(),
+        // Community profiles (issue #20) don't carry combos yet — apply as a plain
+        // control set. This is non-destructive: apply_keymap backs up the user's
+        // whole sidecar (combos included), so a revert restores their combo layer.
+        bindings_layer2: std::collections::BTreeMap::new(),
+        bindings_layer2_p2: std::collections::BTreeMap::new(),
+        combo_modifier: std::string::String::new(),
+        combo_modifier_p2: std::string::String::new(),
         source: std::format!("community:{}", profile.id),
     };
     crate::keymap::apply_keymap(basename, &km)

@@ -41,6 +41,29 @@ pub struct Keymap {
     /// empty map gets the P2 defaults via `merge_fallback_defaults_p2`).
     #[serde(default)]
     pub bindings_p2: BTreeMap<std::string::String, std::string::String>,
+    /// Player 1 "combo layer" bindings (issue #57): the key each button sends
+    /// while the `combo_modifier` button is HELD. A mode-shift second layer (one
+    /// layer, like a keyboard Fn key) that ~doubles the reachable keys for games
+    /// with more inputs than the pad has buttons. `#[serde(default)]` keeps
+    /// pre-#57 keymaps loading (absent = empty = no combos). A button with NO
+    /// entry here falls through to its base binding while the modifier is held,
+    /// so holding the modifier never breaks movement — only remapped buttons change.
+    #[serde(default)]
+    pub bindings_layer2: BTreeMap<std::string::String, std::string::String>,
+    /// Player 2 combo layer (issue #57) — the P2 counterpart of `bindings_layer2`,
+    /// active while `combo_modifier_p2` is held on controller 2. `#[serde(default)]`
+    /// keeps pre-#57 (and P1-only) keymaps loading.
+    #[serde(default)]
+    pub bindings_layer2_p2: BTreeMap<std::string::String, std::string::String>,
+    /// Which controller button acts as the P1 combo modifier (issue #57). Empty =
+    /// combos OFF (no layer). Otherwise one of "ZL"/"ZR"/"L"/"R". Held → the
+    /// `bindings_layer2` map is active. `#[serde(default)]` = pre-#57 keymaps read "".
+    #[serde(default)]
+    pub combo_modifier: std::string::String,
+    /// Player 2 combo modifier (issue #57) — same values as `combo_modifier`, but
+    /// held on controller 2 to activate `bindings_layer2_p2`.
+    #[serde(default)]
+    pub combo_modifier_p2: std::string::String,
     /// Provenance of these bindings (issue #20, community control profiles), so
     /// the UI never clobbers hand-made controls silently:
     ///   "" / "default" = untouched fallback,
@@ -98,39 +121,97 @@ pub const EDITABLE_BUTTONS: &[&str] = &[
     "StickLPress", "StickRPress",
 ];
 
-/// Flash-key options shown in the TOUCHES dropdown. Index 0 ("(none)")
-/// unbinds the button. Must be a superset of what `flash_key_name_to_sk`
-/// recognises — additions here without a matching `flash_key_name_to_sk`
-/// arm will log "unknown Flash key" at lookup time. These are the CANONICAL,
-/// language-stable names written to the keymap file; the TOUCHES editor shows
-/// `flash_key_display(name)` (translated) but always stores the name verbatim.
-pub const ALL_FLASH_KEYS: &[&str] = &[
-    "(none)",
-    // Common modifier / nav keys first (most used in Flash games).
-    "Space",
-    "Enter",
-    "Escape",
-    "Shift",
-    "Control",
-    "Alt",
-    "Tab",
-    "Backspace",
-    "Up", "Down", "Left", "Right",
-    // Full alphabet (A-Z). Sorted so the user can navigate by letter.
-    "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
-    "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
-    // Numpad digits 0-9 FIRST — distinct Flash key codes from the top row, and the
-    // common P2 convention in 2-player fighters, so they're the more-used digits
-    // here. PR #46 (YuQiyang).
-    "Num0", "Num1", "Num2", "Num3", "Num4",
-    "Num5", "Num6", "Num7", "Num8", "Num9",
-    // Top-row digits 0-9.
-    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
-    // Mouse clicks (at the cursor) — for games that need clicking from buttons
-    // rather than the touchscreen. Routed to the mouse, not a key event.
-    "Left click",
-    "Right click",
+/// Visual keyboard layout for the TOUCHES picker (issue #55), as POSITIONED keys:
+/// `(name, row, x, w)` where `row` is the 0-based keyboard row and `x`/`w` are in
+/// "key units" (1 unit ≈ one letter key). This lets us lay out a real PC keyboard
+/// — staggered rows, a wide space bar, and the NUMPAD as a block on the RIGHT
+/// (rows 1-4, x≥16) instead of dumped at the bottom. The renderer draws each key
+/// at its slot; `menu.rs` navigates geometrically (nearest key in the pressed
+/// direction). Every `name` MUST be resolvable by `flash_key_name_to_sk` (or be
+/// the "(none)" unbind sentinel). QWERTY is fixed for every language: Flash reads
+/// US keyCodes and CJK boards are physically QWERTY too (see the #55 discussion).
+/// Labels are localised at draw time via `keyboard_label`; stored names are stable.
+pub const KEYBOARD: &[(&str, u8, f32, f32)] = &[
+    // Row 0 — Esc + function keys, grouped in fours like a real board.
+    ("Escape", 0, 0.0, 1.0),
+    ("F1", 0, 1.5, 1.0), ("F2", 0, 2.5, 1.0), ("F3", 0, 3.5, 1.0), ("F4", 0, 4.5, 1.0),
+    ("F5", 0, 5.75, 1.0), ("F6", 0, 6.75, 1.0), ("F7", 0, 7.75, 1.0), ("F8", 0, 8.75, 1.0),
+    ("F9", 0, 10.0, 1.0), ("F10", 0, 11.0, 1.0), ("F11", 0, 12.0, 1.0), ("F12", 0, 13.0, 1.0),
+    // Row 1 — number row (+ Backspace), then numpad 7 8 9 /.
+    ("`", 1, 0.0, 1.0), ("1", 1, 1.0, 1.0), ("2", 1, 2.0, 1.0), ("3", 1, 3.0, 1.0),
+    ("4", 1, 4.0, 1.0), ("5", 1, 5.0, 1.0), ("6", 1, 6.0, 1.0), ("7", 1, 7.0, 1.0),
+    ("8", 1, 8.0, 1.0), ("9", 1, 9.0, 1.0), ("0", 1, 10.0, 1.0), ("-", 1, 11.0, 1.0),
+    ("=", 1, 12.0, 1.0), ("Backspace", 1, 13.0, 2.0),
+    ("Num7", 1, 16.0, 1.0), ("Num8", 1, 17.0, 1.0), ("Num9", 1, 18.0, 1.0), ("Num/", 1, 19.0, 1.0),
+    // Row 2 — QWERTY top row, then numpad 4 5 6 *.
+    ("Tab", 2, 0.0, 1.5),
+    ("Q", 2, 1.5, 1.0), ("W", 2, 2.5, 1.0), ("E", 2, 3.5, 1.0), ("R", 2, 4.5, 1.0),
+    ("T", 2, 5.5, 1.0), ("Y", 2, 6.5, 1.0), ("U", 2, 7.5, 1.0), ("I", 2, 8.5, 1.0),
+    ("O", 2, 9.5, 1.0), ("P", 2, 10.5, 1.0), ("[", 2, 11.5, 1.0), ("]", 2, 12.5, 1.0),
+    ("\\", 2, 13.5, 1.5),
+    ("Num4", 2, 16.0, 1.0), ("Num5", 2, 17.0, 1.0), ("Num6", 2, 18.0, 1.0), ("Num*", 2, 19.0, 1.0),
+    // Row 3 — home row, then numpad 1 2 3 -.
+    ("Control", 3, 0.0, 1.75),
+    ("A", 3, 1.75, 1.0), ("S", 3, 2.75, 1.0), ("D", 3, 3.75, 1.0), ("F", 3, 4.75, 1.0),
+    ("G", 3, 5.75, 1.0), ("H", 3, 6.75, 1.0), ("J", 3, 7.75, 1.0), ("K", 3, 8.75, 1.0),
+    ("L", 3, 9.75, 1.0), (";", 3, 10.75, 1.0), ("'", 3, 11.75, 1.0), ("Enter", 3, 12.75, 2.25),
+    ("Num1", 3, 16.0, 1.0), ("Num2", 3, 17.0, 1.0), ("Num3", 3, 18.0, 1.0), ("Num-", 3, 19.0, 1.0),
+    // Row 4 — shift row, then numpad 0 . Enter +.
+    ("Shift", 4, 0.0, 2.25),
+    ("Z", 4, 2.25, 1.0), ("X", 4, 3.25, 1.0), ("C", 4, 4.25, 1.0), ("V", 4, 5.25, 1.0),
+    ("B", 4, 6.25, 1.0), ("N", 4, 7.25, 1.0), ("M", 4, 8.25, 1.0), (",", 4, 9.25, 1.0),
+    (".", 4, 10.25, 1.0), ("/", 4, 11.25, 1.0),
+    ("Num0", 4, 16.0, 1.0), ("Num.", 4, 17.0, 1.0), ("NumEnter", 4, 18.0, 1.0), ("Num+", 4, 19.0, 1.0),
+    // Row 5 — Alt + space bar + arrow cluster.
+    ("Alt", 5, 0.0, 1.5), ("Space", 5, 1.5, 6.0),
+    ("Left", 5, 8.0, 1.0), ("Up", 5, 9.0, 1.0), ("Down", 5, 10.0, 1.0), ("Right", 5, 11.0, 1.0),
+    // Unbind + mouse clicks — a horizontal row along the bottom-right, under the
+    // numpad, so they sit "under the numbers" without the lop-sided stacked look.
+    ("(none)", 6, 8.0, 3.4), ("Left click", 6, 11.6, 4.1), ("Right click", 6, 15.9, 4.1),
 ];
+
+/// Total width of the keyboard in units (max `x + w`) — the renderer scales to it.
+pub const KEYBOARD_UNITS_W: f32 = 20.0;
+/// Number of keyboard rows (0-based rows 0..=6).
+pub const KEYBOARD_ROWS_N: usize = 7;
+
+/// Short DISPLAY label for a keyboard key on the visual picker. Keeps the board
+/// compact (full names like "Backspace" would blow the key width) and localises
+/// the action keys via `flash_key_display`. Plain glyph keys (letters, digits,
+/// symbols) render as their own name.
+pub fn keyboard_label(name: &str) -> std::borrow::Cow<'static, str> {
+    use std::borrow::Cow;
+    let lc = crate::loc::s(); // 'static — the translated action labels
+    match name {
+        "Escape" => Cow::Borrowed("Esc"),
+        "Backspace" => Cow::Borrowed("Bksp"),
+        "Control" => Cow::Borrowed("Ctrl"),
+        "Enter" => Cow::Borrowed("Ent"),
+        // Numpad: compact "N" labels so the keys stay legible at cell size.
+        "Num0" => Cow::Borrowed("N0"),
+        "Num1" => Cow::Borrowed("N1"),
+        "Num2" => Cow::Borrowed("N2"),
+        "Num3" => Cow::Borrowed("N3"),
+        "Num4" => Cow::Borrowed("N4"),
+        "Num5" => Cow::Borrowed("N5"),
+        "Num6" => Cow::Borrowed("N6"),
+        "Num7" => Cow::Borrowed("N7"),
+        "Num8" => Cow::Borrowed("N8"),
+        "Num9" => Cow::Borrowed("N9"),
+        "Num+" => Cow::Borrowed("N+"),
+        "Num-" => Cow::Borrowed("N-"),
+        "Num*" => Cow::Borrowed("N*"),
+        "Num/" => Cow::Borrowed("N/"),
+        "Num." => Cow::Borrowed("N."),
+        "NumEnter" => Cow::Borrowed("NEnt"),
+        // Action keys (none / mouse clicks) are localised; everything else — the
+        // letters, digits, symbols, F-keys — shows verbatim.
+        "(none)" => Cow::Borrowed(lc.none),
+        "Left click" => Cow::Borrowed(lc.flash_mouse_left),
+        "Right click" => Cow::Borrowed(lc.flash_mouse_right),
+        other => Cow::Owned(other.to_string()),
+    }
+}
 
 /// SWF basename the keymap was loaded for. Used by `save_sidecar` to know
 /// where to write. Set by `init_for_swf` — replaced when the user goes
@@ -158,6 +239,10 @@ fn fallback_keymap() -> Keymap {
         version: 1,
         bindings,
         bindings_p2: p2_default_bindings(),
+        bindings_layer2: BTreeMap::new(), // combos start empty (opt-in per game)
+        bindings_layer2_p2: BTreeMap::new(),
+        combo_modifier: std::string::String::new(), // combos OFF by default
+        combo_modifier_p2: std::string::String::new(),
         source: "default".into(),
     }
 }
@@ -399,6 +484,7 @@ pub fn reset() {
         *g = None;
     }
     set_edit_player(1);
+    reset_edit_view();
 }
 
 /// Current binding for `button` (e.g. "A"), or `None` if unbound. Caller
@@ -406,7 +492,16 @@ pub fn reset() {
 pub fn current_binding(button: &str) -> Option<std::string::String> {
     let g = ACTIVE_KEYMAP.lock().ok()?;
     let km = g.as_ref()?;
-    let map = if edit_player() == 2 { &km.bindings_p2 } else { &km.bindings };
+    // Which of the four maps: the combo VIEW is a session flag (reset to base when
+    // the editor opens), DECOUPLED from the persisted modifier so opening the
+    // editor shows base bindings without disabling combos. `edit_combo_view()` is
+    // an atomic (no re-lock of ACTIVE_KEYMAP → no deadlock).
+    let map = match (edit_player() == 2, edit_combo_view()) {
+        (true, true) => &km.bindings_layer2_p2,
+        (false, true) => &km.bindings_layer2,
+        (true, false) => &km.bindings_p2,
+        (false, false) => &km.bindings,
+    };
     map.get(button)
         .filter(|v| !v.is_empty()) // "" = explicitly unbound (see set_binding)
         .cloned()
@@ -423,7 +518,12 @@ pub fn set_binding(button: &str, flash_key: Option<&str>) -> bool {
             Err(_) => return false,
         };
         let Some(km) = g.as_mut() else { return false };
-        let map = if edit_player() == 2 { &mut km.bindings_p2 } else { &mut km.bindings };
+        let map = match (edit_player() == 2, edit_combo_view()) {
+            (true, true) => &mut km.bindings_layer2_p2,
+            (false, true) => &mut km.bindings_layer2,
+            (true, false) => &mut km.bindings_p2,
+            (false, false) => &mut km.bindings,
+        };
         match flash_key {
             Some(k) => {
                 map.insert(button.into(), k.into());
@@ -887,6 +987,37 @@ pub fn set_edit_player(player: u8) {
     );
 }
 
+/// Whether the editor is currently VIEWING the combo layer (issue #57), PER PLAYER
+/// (index 0 = P1, 1 = P2) so switching the P1/P2 tab restores that player's own
+/// sub-tab instead of leaking P1's view onto P2. Session state, reset to `false`
+/// (NORMAL) for both when the editor opens — WITHOUT clearing the persisted
+/// modifier (combos stay enabled in-game). Steers only the editor's
+/// `current_binding` / `set_binding`; in-game resolution reads `lookup*` directly.
+static EDIT_COMBO_VIEW: [std::sync::atomic::AtomicBool; 2] = [
+    std::sync::atomic::AtomicBool::new(false),
+    std::sync::atomic::AtomicBool::new(false),
+];
+
+fn combo_view_idx() -> usize {
+    if edit_player() == 2 { 1 } else { 0 }
+}
+
+pub fn edit_combo_view() -> bool {
+    EDIT_COMBO_VIEW[combo_view_idx()].load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_edit_combo_view(on: bool) {
+    EDIT_COMBO_VIEW[combo_view_idx()].store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Reset BOTH players' combo views to NORMAL — called when the editor opens so it
+/// always starts clean, without touching the persisted per-player modifiers.
+pub fn reset_edit_view() {
+    for v in &EDIT_COMBO_VIEW {
+        v.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Player-2 equivalent of [`lookup`]: resolve a controller-2 button to its Flash
 /// `SK_*` code via the `bindings_p2` map of the active keymap.
 pub fn lookup_p2(button_name: &str) -> Option<core::ffi::c_int> {
@@ -897,6 +1028,81 @@ pub fn lookup_p2(button_name: &str) -> Option<core::ffi::c_int> {
         return Some(crate::SK_NONE);
     }
     Some(flash_key_name_to_sk(key_name))
+}
+
+/// Combo-layer (issue #57) equivalent of [`lookup`]: the key `button_name` sends
+/// while the combo modifier is held. Returns `None` when the button has NO combo
+/// binding (or an empty one) — the C++ input layer treats that as "fall through
+/// to the base key", so holding the modifier never breaks unremapped buttons.
+pub fn lookup_layer2(button_name: &str) -> Option<core::ffi::c_int> {
+    let g = ACTIVE_KEYMAP.lock().ok()?;
+    let km = g.as_ref()?;
+    let key_name = km.bindings_layer2.get(button_name)?;
+    if key_name.is_empty() {
+        return None; // no combo override → C++ uses the base binding
+    }
+    Some(flash_key_name_to_sk(key_name))
+}
+
+/// Player-2 combo layer resolution (issue #57), mirror of [`lookup_layer2`].
+pub fn lookup_layer2_p2(button_name: &str) -> Option<core::ffi::c_int> {
+    let g = ACTIVE_KEYMAP.lock().ok()?;
+    let km = g.as_ref()?;
+    let key_name = km.bindings_layer2_p2.get(button_name)?;
+    if key_name.is_empty() {
+        return None;
+    }
+    Some(flash_key_name_to_sk(key_name))
+}
+
+/// P1 combo modifier button ("" = combos off), for the C++ input layer. Owned
+/// copy so the caller doesn't hold the lock.
+pub fn combo_modifier() -> std::string::String {
+    ACTIVE_KEYMAP
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|k| k.combo_modifier.clone()))
+        .unwrap_or_default()
+}
+
+/// P2 combo modifier button ("" = combos off), for the C++ input layer.
+pub fn combo_modifier_p2() -> std::string::String {
+    ACTIVE_KEYMAP
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|k| k.combo_modifier_p2.clone()))
+        .unwrap_or_default()
+}
+
+/// The combo modifier of the player the editor is CURRENTLY editing (P1 or P2),
+/// for the editor header. `edit_player`-driven so the tab you're on shows its own
+/// modifier.
+pub fn edit_combo_modifier() -> std::string::String {
+    if edit_player() == 2 {
+        combo_modifier_p2()
+    } else {
+        combo_modifier()
+    }
+}
+
+/// Set the CURRENT edit player's combo modifier ("" / "ZL" / "ZR" / "L" / "R")
+/// and persist. Cycled with X in the editor's combo view. Marks the keymap
+/// "user"-authored.
+pub fn set_edit_combo_modifier(modifier: &str) -> bool {
+    {
+        let mut g = match ACTIVE_KEYMAP.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        let Some(km) = g.as_mut() else { return false };
+        if edit_player() == 2 {
+            km.combo_modifier_p2 = modifier.into();
+        } else {
+            km.combo_modifier = modifier.into();
+        }
+        km.source = "user".into();
+    }
+    save_sidecar()
 }
 
 /// Localised DISPLAY label for a Flash-key NAME. The stored/internal names stay
@@ -971,6 +1177,22 @@ fn flash_key_name_to_sk(name: &str) -> core::ffi::c_int {
         "Num4" => crate::SK_NUMPAD4, "Num5" => crate::SK_NUMPAD5,
         "Num6" => crate::SK_NUMPAD6, "Num7" => crate::SK_NUMPAD7,
         "Num8" => crate::SK_NUMPAD8, "Num9" => crate::SK_NUMPAD9,
+        // Function keys F1-F12.
+        "F1" => crate::SK_F1, "F2" => crate::SK_F2, "F3" => crate::SK_F3,
+        "F4" => crate::SK_F4, "F5" => crate::SK_F5, "F6" => crate::SK_F6,
+        "F7" => crate::SK_F7, "F8" => crate::SK_F8, "F9" => crate::SK_F9,
+        "F10" => crate::SK_F10, "F11" => crate::SK_F11, "F12" => crate::SK_F12,
+        // Punctuation / symbols.
+        "-" => crate::SK_MINUS, "=" => crate::SK_EQUALS,
+        "[" => crate::SK_LBRACKET, "]" => crate::SK_RBRACKET,
+        ";" => crate::SK_SEMICOLON, "'" => crate::SK_QUOTE,
+        "," => crate::SK_COMMA, "." => crate::SK_PERIOD,
+        "/" => crate::SK_SLASH, "\\" => crate::SK_BACKSLASH,
+        "`" => crate::SK_BACKQUOTE,
+        // Numpad operators.
+        "Num+" => crate::SK_NUMPAD_ADD, "Num-" => crate::SK_NUMPAD_SUB,
+        "Num*" => crate::SK_NUMPAD_MUL, "Num/" => crate::SK_NUMPAD_DIV,
+        "Num." => crate::SK_NUMPAD_DECIMAL, "NumEnter" => crate::SK_NUMPAD_ENTER,
         // Mouse-click pseudo-keys (routed to the mouse, not the keyboard).
         "Left click" => crate::SK_MOUSE_LEFT,
         "Right click" => crate::SK_MOUSE_RIGHT,

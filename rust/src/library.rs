@@ -3704,8 +3704,12 @@ fn modal_kind(screen: Screen) -> u8 {
         Screen::SettingsLanguagePicker { .. } => 4,
         Screen::DistantUrlOptions { .. } => 5,
         Screen::DistantHistoryConfirm => 6,
-        Screen::TouchesEditor { .. } => 7,
-        Screen::SettingsKeymapEditor => 8,
+        // The keymap editor delegates to `menu::*`; fold its sub-screen id in so a
+        // List -> Keyboard (etc.) transition CHANGES the kind and re-fires the
+        // scale-in "pop", exactly like the in-game `ruffle_touches_draw` path.
+        // Distinct 70-79 / 80-89 bands so they never collide with the ids above.
+        Screen::TouchesEditor { .. } => 70 + menu::screen_kind(),
+        Screen::SettingsKeymapEditor => 80 + menu::screen_kind(),
         Screen::SortModal { .. } => 9,
         Screen::RemoteSortModal { .. } => 10,
         Screen::FpDetails { .. } => 11,

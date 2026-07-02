@@ -6,8 +6,8 @@
 //!   - **Menu** — edit keys / apply a profile / share my controls / cursor speed
 //!     / revert. Apply / share / revert do HTTPS synchronously (the game is
 //!     paused, so a brief freeze is fine — no async infra here).
-//!   - **List / Dropdown** — the per-button keymap editor (also used directly by
-//!     the library via `open`).
+//!   - **List / Keyboard** — the per-button keymap editor (also used directly by
+//!     the library via `open`). The picker is a visual QWERTY board (issue #55).
 //!   - **Profiles / Preview / ShareConfirm / RevertPreview** — the profile flows,
 //!     drawn with the same generic `draw_library_list_modal` the library uses.
 //!
@@ -51,9 +51,9 @@ enum Screen {
     /// `selection` indexes `EDITABLE_BUTTONS`, `scroll_offset` is the topmost
     /// visible row (8-rows-at-a-time window).
     List { selection: usize, scroll_offset: usize },
-    /// `button_idx` indexes `EDITABLE_BUTTONS`, `selection` indexes
-    /// `ALL_FLASH_KEYS`, `scroll_offset` is the dropdown's top visible row.
-    Dropdown { button_idx: usize, selection: usize, scroll_offset: usize },
+    /// Visual keyboard picker (issue #55). `button_idx` indexes `EDITABLE_BUTTONS`;
+    /// `key_idx` indexes `keymap::KEYBOARD` (positioned keys, geometric 2D nav).
+    Keyboard { button_idx: usize, key_idx: usize },
     /// Community-profile picker (in-game apply). `selection` indexes `matches`.
     Profiles { selection: usize },
     /// Before/after preview of an apply. `profile_idx` indexes `matches`.
@@ -116,11 +116,9 @@ static TOUCHES: Mutex<State> = Mutex::new(State {
 });
 
 /// Maximum rows shown at once in the list screen. Keep in sync with the
-/// vertical space `draw_touches_list` allocates in render.rs.
+/// vertical space `draw_touches_list` allocates in render.rs (two tab rows above
+/// the list: player P1/P2 and the combo sub-tab, issue #57).
 pub const LIST_VISIBLE_ROWS: usize = 8;
-/// Maximum rows shown at once in the Flash-key dropdown (48 entries: A-Z, 0-9,
-/// mods). 10 rows × 40 px fits the 720-px screen with header + footer.
-pub const DROPDOWN_VISIBLE_ROWS: usize = 10;
 
 pub fn is_active() -> bool {
     TOUCHES
@@ -140,7 +138,7 @@ pub fn screen_kind() -> u8 {
             Screen::Inactive => 0,
             Screen::Menu { .. } => 1,
             Screen::List { .. } => 2,
-            Screen::Dropdown { .. } => 3,
+            Screen::Keyboard { .. } => 3,
             Screen::Profiles { .. } => 4,
             Screen::Preview { .. } => 5,
             Screen::ShareConfirm => 6,
@@ -154,7 +152,9 @@ pub fn screen_kind() -> u8 {
 /// Open the keymap EDITOR directly (library OPTIONS > TOUCHES > Éditer). The
 /// in-game pause entry uses `open_submenu` instead.
 pub fn open() {
-    keymap::set_edit_player(1); // always start on Player 1 (issue #40)
+    keymap::set_edit_player(1); // always start on Player 1 (issue #40)...
+    keymap::reset_edit_view(); // ...both players on the NORMAL sub-tab, without
+    // clearing the persisted modifiers (combos stay enabled in-game) (issue #57).
     if let Ok(mut s) = TOUCHES.lock() {
         s.submenu = false;
         s.screen = Screen::List { selection: 0, scroll_offset: 0 };
@@ -311,8 +311,8 @@ pub fn input(button: &str) -> bool {
             handle_list_input(&mut s, button, selection, scroll_offset);
             true
         }
-        Screen::Dropdown { button_idx, selection, scroll_offset } => {
-            handle_dropdown_input(&mut s, button, button_idx, selection, scroll_offset);
+        Screen::Keyboard { button_idx, key_idx } => {
+            handle_keyboard_input(&mut s, button, button_idx, key_idx);
             true
         }
         Screen::Profiles { selection } => {
@@ -396,6 +396,7 @@ fn handle_menu_input(s: &mut State, button: &str, mut selection: usize) {
             MENU_EDIT => {
                 // Enter the editor, KEEPING sub-menu context (B returns here).
                 keymap::set_edit_player(1);
+                keymap::reset_edit_view(); // both players start on NORMAL (#57)
                 s.screen = Screen::List { selection: 0, scroll_offset: 0 };
                 return;
             }
@@ -671,23 +672,47 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
             selection = if selection >= last { 0 } else { selection + 1 };
             scroll = clamp_scroll(scroll, selection);
         }
-        "X" => {
-            // Toggle which player's bindings we're editing (issue #40).
-            keymap::set_edit_player(if keymap::edit_player() == 2 { 1 } else { 2 });
+        // Player toggle (issue #40): X flips P1 <-> P2 (2 items, a toggle is fine).
+        "X" => keymap::set_edit_player(if keymap::edit_player() == 2 { 1 } else { 2 }),
+        // Combo sub-tab (issue #57): L/R move along [NORMAL, ZL, ZR, L, R]. NORMAL =
+        // the base bindings (view only — the persisted modifier is kept, so combos
+        // stay enabled in-game). A modifier position enters the combo VIEW and sets
+        // that player's modifier. Entering the combo view from NORMAL lands on the
+        // already-set modifier (doesn't change it). Modifier changes mark `dirty` so
+        // C++ re-reads on the next frame.
+        "L" | "R" => {
+            const POS: [&str; 5] = ["", "ZL", "ZR", "L", "R"]; // index = sub-tab slot
+            let modif = keymap::edit_combo_modifier();
+            let modif_pos = POS.iter().position(|m| *m == modif).unwrap_or(1);
+            let cur = if keymap::edit_combo_view() { modif_pos } else { 0 };
+            let new = if button == "R" {
+                if cur == 0 && !modif.is_empty() {
+                    modif_pos // enter combo on the existing modifier, unchanged
+                } else {
+                    (cur + 1).min(POS.len() - 1)
+                }
+            } else {
+                cur.saturating_sub(1)
+            };
+            if new != cur {
+                if new == 0 {
+                    keymap::set_edit_combo_view(false); // back to NORMAL, modifier kept
+                } else {
+                    keymap::set_edit_combo_view(true);
+                    if POS[new] != modif && keymap::set_edit_combo_modifier(POS[new]) {
+                        s.dirty = true;
+                    }
+                }
+            }
         }
         "A" => {
+            // Open the visual keyboard at the button's current key (or "(none)").
             let btn = keymap::EDITABLE_BUTTONS[selection];
-            let current = keymap::current_binding(btn);
-            let dropdown_sel = current
+            let key_idx = keymap::current_binding(btn)
                 .as_deref()
-                .and_then(|k| keymap::ALL_FLASH_KEYS.iter().position(|x| *x == k))
-                .unwrap_or(0); // index 0 = "(none)"
-            let dropdown_scroll = clamp_dropdown_scroll(0, dropdown_sel);
-            s.screen = Screen::Dropdown {
-                button_idx: selection,
-                selection: dropdown_sel,
-                scroll_offset: dropdown_scroll,
-            };
+                .and_then(kbd_index_of)
+                .unwrap_or_else(kbd_none_index);
+            s.screen = Screen::Keyboard { button_idx: selection, key_idx };
             return;
         }
         "B" | "Minus" => {
@@ -704,32 +729,93 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
     s.screen = Screen::List { selection, scroll_offset: scroll };
 }
 
-fn handle_dropdown_input(
-    s: &mut State,
-    button: &str,
-    button_idx: usize,
-    mut selection: usize,
-    mut scroll: usize,
-) {
-    let last = keymap::ALL_FLASH_KEYS.len().saturating_sub(1);
+/// Index of a Flash-key NAME in `keymap::KEYBOARD`, or None if it isn't on the
+/// board. Used to open the picker with the cursor on the button's current binding.
+fn kbd_index_of(name: &str) -> Option<usize> {
+    keymap::KEYBOARD.iter().position(|k| k.0 == name)
+}
+
+/// Index of the "(none)" unbind key — the picker's default cursor for an unbound
+/// button.
+fn kbd_none_index() -> usize {
+    kbd_index_of("(none)").unwrap_or(0)
+}
+
+/// Horizontal centre (in layout units) of key `i`, for geometric navigation.
+fn kbd_center(i: usize) -> f32 {
+    let (_, _, x, w) = keymap::KEYBOARD[i];
+    x + w * 0.5
+}
+
+/// Nearest key to `cx` (by centre) among those on `row`. Rows always have ≥1 key,
+/// so this never returns None for a valid row.
+fn kbd_nearest_on_row(row: u8, cx: f32) -> Option<usize> {
+    keymap::KEYBOARD
+        .iter()
+        .enumerate()
+        .filter(|(_, k)| k.1 == row)
+        .min_by(|(ia, _), (ib, _)| {
+            (kbd_center(*ia) - cx)
+                .abs()
+                .total_cmp(&(kbd_center(*ib) - cx).abs())
+        })
+        .map(|(i, _)| i)
+}
+
+fn handle_keyboard_input(s: &mut State, button: &str, button_idx: usize, mut key_idx: usize) {
+    let (name, cur_row, _, _) = keymap::KEYBOARD[key_idx];
+    let cur_cx = kbd_center(key_idx);
+    let n_rows = keymap::KEYBOARD_ROWS_N as u8;
+    // Row-scoped left/right by centre; up/down jump to the vertically adjacent row
+    // and land on the key whose centre is nearest — so the numpad column stays put.
     match button {
+        "Left" | "StickLLeft" => {
+            key_idx = keymap::KEYBOARD
+                .iter()
+                .enumerate()
+                .filter(|(_, k)| k.1 == cur_row && kbd_center_of(k) < cur_cx - 0.01)
+                .max_by(|a, b| kbd_center_of(a.1).total_cmp(&kbd_center_of(b.1)))
+                .map(|(i, _)| i)
+                // Wrap to the rightmost key on the row.
+                .or_else(|| {
+                    keymap::KEYBOARD
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, k)| k.1 == cur_row)
+                        .max_by(|a, b| kbd_center_of(a.1).total_cmp(&kbd_center_of(b.1)))
+                        .map(|(i, _)| i)
+                })
+                .unwrap_or(key_idx);
+        }
+        "Right" | "StickLRight" => {
+            key_idx = keymap::KEYBOARD
+                .iter()
+                .enumerate()
+                .filter(|(_, k)| k.1 == cur_row && kbd_center_of(k) > cur_cx + 0.01)
+                .min_by(|a, b| kbd_center_of(a.1).total_cmp(&kbd_center_of(b.1)))
+                .map(|(i, _)| i)
+                .or_else(|| {
+                    keymap::KEYBOARD
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, k)| k.1 == cur_row)
+                        .min_by(|a, b| kbd_center_of(a.1).total_cmp(&kbd_center_of(b.1)))
+                        .map(|(i, _)| i)
+                })
+                .unwrap_or(key_idx);
+        }
         "Up" | "StickLUp" => {
-            selection = if selection == 0 { last } else { selection - 1 };
-            scroll = clamp_dropdown_scroll(scroll, selection);
+            let target = if cur_row == 0 { n_rows - 1 } else { cur_row - 1 };
+            key_idx = kbd_nearest_on_row(target, cur_cx).unwrap_or(key_idx);
         }
         "Down" | "StickLDown" => {
-            selection = if selection >= last { 0 } else { selection + 1 };
-            scroll = clamp_dropdown_scroll(scroll, selection);
+            let target = if cur_row + 1 >= n_rows { 0 } else { cur_row + 1 };
+            key_idx = kbd_nearest_on_row(target, cur_cx).unwrap_or(key_idx);
         }
         "A" => {
-            let btn = keymap::EDITABLE_BUTTONS[button_idx];
-            let target = if selection == 0 {
-                None
-            } else {
-                Some(keymap::ALL_FLASH_KEYS[selection])
-            };
-            let ok = keymap::set_binding(btn, target);
-            if ok {
+            // "(none)" unbinds; every other key is a real flash-key name.
+            let target = if name == "(none)" { None } else { Some(name) };
+            if keymap::set_binding(keymap::EDITABLE_BUTTONS[button_idx], target) {
                 s.dirty = true;
             }
             let scroll = clamp_scroll(0, button_idx);
@@ -743,7 +829,12 @@ fn handle_dropdown_input(
         }
         _ => {}
     }
-    s.screen = Screen::Dropdown { button_idx, selection, scroll_offset: scroll };
+    s.screen = Screen::Keyboard { button_idx, key_idx };
+}
+
+/// Centre (units) of a `keymap::KEYBOARD` tuple `(name, row, x, w)`.
+fn kbd_center_of(k: &(&str, u8, f32, f32)) -> f32 {
+    k.2 + k.3 * 0.5
 }
 
 /// Adjust `scroll` so the row at `selection` is visible. Window = `LIST_VISIBLE_ROWS`.
@@ -752,16 +843,6 @@ fn clamp_scroll(mut scroll: usize, selection: usize) -> usize {
         scroll = selection;
     } else if selection >= scroll + LIST_VISIBLE_ROWS {
         scroll = selection + 1 - LIST_VISIBLE_ROWS;
-    }
-    scroll
-}
-
-/// Same as `clamp_scroll` but for the Flash-key dropdown window (10 rows).
-fn clamp_dropdown_scroll(mut scroll: usize, selection: usize) -> usize {
-    if selection < scroll {
-        scroll = selection;
-    } else if selection >= scroll + DROPDOWN_VISIBLE_ROWS {
-        scroll = selection + 1 - DROPDOWN_VISIBLE_ROWS;
     }
     scroll
 }
@@ -816,11 +897,26 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
                     .iter()
                     .map(|btn| (*btn, keymap::current_binding(btn)))
                     .collect();
-            backend.draw_touches_list(selection, scroll_offset, &bindings, LIST_VISIBLE_ROWS, keymap::edit_player());
+            backend.draw_touches_list(
+                selection,
+                scroll_offset,
+                &bindings,
+                LIST_VISIBLE_ROWS,
+                keymap::edit_player(),
+                keymap::edit_combo_view(),
+                &keymap::edit_combo_modifier(),
+            );
         }
-        Screen::Dropdown { button_idx, selection, scroll_offset } => {
+        Screen::Keyboard { button_idx, key_idx } => {
+            // Title shows the chord in combo view ("ZL+A"), else the bare button.
             let btn = keymap::EDITABLE_BUTTONS[button_idx];
-            backend.draw_touches_dropdown(btn, selection, scroll_offset, keymap::ALL_FLASH_KEYS, DROPDOWN_VISIBLE_ROWS);
+            let modif = keymap::edit_combo_modifier();
+            let label = if keymap::edit_combo_view() && !modif.is_empty() {
+                std::format!("{}+{}", modif, btn)
+            } else {
+                btn.to_string()
+            };
+            backend.draw_touches_keyboard(&label, key_idx);
         }
         Screen::Profiles { selection } => {
             let (active, mut rows): (std::string::String, std::vec::Vec<std::string::String>) =

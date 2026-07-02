@@ -845,6 +845,65 @@ pub extern "C" fn ruffle_keymap_lookup_p2(name: *const c_char) -> c_int {
     keymap::lookup_p2(button).unwrap_or(SK_NONE)
 }
 
+/// Combo-layer (issue #57) equivalent of [`ruffle_keymap_lookup`]: the key
+/// `name` sends while the combo modifier is held. Returns `SK_NONE` when the
+/// button has no combo override — C++ then falls through to the base key, so
+/// holding the modifier never breaks unremapped buttons (e.g. movement).
+#[no_mangle]
+pub extern "C" fn ruffle_keymap_lookup_layer2(name: *const c_char) -> c_int {
+    if name.is_null() {
+        return SK_NONE;
+    }
+    // SAFETY: caller guarantees NUL-terminated UTF-8.
+    let s = unsafe { core::ffi::CStr::from_ptr(name) };
+    let Ok(button) = s.to_str() else {
+        return SK_NONE;
+    };
+    keymap::lookup_layer2(button).unwrap_or(SK_NONE)
+}
+
+/// Which button is the combo modifier for the active keymap (issue #57), as a
+/// small int so C++ can map it to a pad mask without marshalling a string:
+/// 0 = OFF (no combos), 1 = ZL, 2 = ZR, 3 = L, 4 = R.
+#[no_mangle]
+pub extern "C" fn ruffle_keymap_combo_modifier() -> c_int {
+    match keymap::combo_modifier().as_str() {
+        "ZL" => 1,
+        "ZR" => 2,
+        "L" => 3,
+        "R" => 4,
+        _ => 0,
+    }
+}
+
+/// Player-2 combo layer resolution (issue #57), mirror of
+/// [`ruffle_keymap_lookup_layer2`].
+#[no_mangle]
+pub extern "C" fn ruffle_keymap_lookup_layer2_p2(name: *const c_char) -> c_int {
+    if name.is_null() {
+        return SK_NONE;
+    }
+    // SAFETY: caller guarantees NUL-terminated UTF-8.
+    let s = unsafe { core::ffi::CStr::from_ptr(name) };
+    let Ok(button) = s.to_str() else {
+        return SK_NONE;
+    };
+    keymap::lookup_layer2_p2(button).unwrap_or(SK_NONE)
+}
+
+/// Player-2 combo modifier for the active keymap (issue #57), same encoding as
+/// [`ruffle_keymap_combo_modifier`]: 0 = off, 1 = ZL, 2 = ZR, 3 = L, 4 = R.
+#[no_mangle]
+pub extern "C" fn ruffle_keymap_combo_modifier_p2() -> c_int {
+    match keymap::combo_modifier_p2().as_str() {
+        "ZL" => 1,
+        "ZR" => 2,
+        "L" => 3,
+        "R" => 4,
+        _ => 0,
+    }
+}
+
 /// Per-game cursor-speed preset index for the active keymap, or -1 if unset.
 /// C++ reads this at game launch to restore a speed saved for THIS game.
 #[no_mangle]
@@ -1184,6 +1243,42 @@ pub(crate) const SK_NUMPAD6: c_int = 57;
 pub(crate) const SK_NUMPAD7: c_int = 58;
 pub(crate) const SK_NUMPAD8: c_int = 59;
 pub(crate) const SK_NUMPAD9: c_int = 60;
+// Function keys F1-F12 (issue #57 — games that hard-code F1..F12 for menus /
+// hotkeys). Contiguous 61-72 so `key_descriptor` can range-match.
+pub(crate) const SK_F1: c_int = 61;
+pub(crate) const SK_F2: c_int = 62;
+pub(crate) const SK_F3: c_int = 63;
+pub(crate) const SK_F4: c_int = 64;
+pub(crate) const SK_F5: c_int = 65;
+pub(crate) const SK_F6: c_int = 66;
+pub(crate) const SK_F7: c_int = 67;
+pub(crate) const SK_F8: c_int = 68;
+pub(crate) const SK_F9: c_int = 69;
+pub(crate) const SK_F10: c_int = 70;
+pub(crate) const SK_F11: c_int = 71;
+pub(crate) const SK_F12: c_int = 72;
+// Punctuation / symbol keys on the main block — so the visual keyboard picker
+// (issue #55) can offer a full PC layout, and games reading `-`/`=`/etc. work.
+pub(crate) const SK_MINUS: c_int = 73; // `-` (Minus)
+pub(crate) const SK_EQUALS: c_int = 74; // `=`
+pub(crate) const SK_LBRACKET: c_int = 75; // `[`
+pub(crate) const SK_RBRACKET: c_int = 76; // `]`
+pub(crate) const SK_SEMICOLON: c_int = 77; // `;`
+pub(crate) const SK_QUOTE: c_int = 78; // `'`
+pub(crate) const SK_COMMA: c_int = 79; // `,`
+pub(crate) const SK_PERIOD: c_int = 80; // `.`
+pub(crate) const SK_SLASH: c_int = 81; // `/`
+pub(crate) const SK_BACKSLASH: c_int = 82; // `\`
+pub(crate) const SK_BACKQUOTE: c_int = 83; // backquote
+// Numpad operators (distinct keycodes from the main block). The picker's `+`
+// maps here (there is no lone `+` physical key — it's Shift+= on a real board),
+// which is also what most Flash zoom controls poll.
+pub(crate) const SK_NUMPAD_ADD: c_int = 84; // `+`
+pub(crate) const SK_NUMPAD_SUB: c_int = 85; // `-` (keypad)
+pub(crate) const SK_NUMPAD_MUL: c_int = 86; // `*`
+pub(crate) const SK_NUMPAD_DIV: c_int = 87; // `/` (keypad)
+pub(crate) const SK_NUMPAD_DECIMAL: c_int = 88; // `.` (keypad)
+pub(crate) const SK_NUMPAD_ENTER: c_int = 89; // keypad Enter
 
 fn key_descriptor(code: c_int) -> Option<KeyDescriptor> {
     let (physical, logical) = match code {
@@ -1252,9 +1347,44 @@ fn key_descriptor(code: c_int) -> Option<KeyDescriptor> {
         SK_NUMPAD7 => (PhysicalKey::Numpad7, LogicalKey::Character('7')),
         SK_NUMPAD8 => (PhysicalKey::Numpad8, LogicalKey::Character('8')),
         SK_NUMPAD9 => (PhysicalKey::Numpad9, LogicalKey::Character('9')),
+        // Function keys F1-F12. Physical + logical are both the named key; no
+        // printable char, so they never take the TextInput/keyPress path.
+        SK_F1 => (PhysicalKey::F1, LogicalKey::Named(NamedKey::F1)),
+        SK_F2 => (PhysicalKey::F2, LogicalKey::Named(NamedKey::F2)),
+        SK_F3 => (PhysicalKey::F3, LogicalKey::Named(NamedKey::F3)),
+        SK_F4 => (PhysicalKey::F4, LogicalKey::Named(NamedKey::F4)),
+        SK_F5 => (PhysicalKey::F5, LogicalKey::Named(NamedKey::F5)),
+        SK_F6 => (PhysicalKey::F6, LogicalKey::Named(NamedKey::F6)),
+        SK_F7 => (PhysicalKey::F7, LogicalKey::Named(NamedKey::F7)),
+        SK_F8 => (PhysicalKey::F8, LogicalKey::Named(NamedKey::F8)),
+        SK_F9 => (PhysicalKey::F9, LogicalKey::Named(NamedKey::F9)),
+        SK_F10 => (PhysicalKey::F10, LogicalKey::Named(NamedKey::F10)),
+        SK_F11 => (PhysicalKey::F11, LogicalKey::Named(NamedKey::F11)),
+        SK_F12 => (PhysicalKey::F12, LogicalKey::Named(NamedKey::F12)),
+        // Punctuation — physical drives the Flash keyCode, logical the char.
+        SK_MINUS => (PhysicalKey::Minus, LogicalKey::Character('-')),
+        SK_EQUALS => (PhysicalKey::Equal, LogicalKey::Character('=')),
+        SK_LBRACKET => (PhysicalKey::BracketLeft, LogicalKey::Character('[')),
+        SK_RBRACKET => (PhysicalKey::BracketRight, LogicalKey::Character(']')),
+        SK_SEMICOLON => (PhysicalKey::Semicolon, LogicalKey::Character(';')),
+        SK_QUOTE => (PhysicalKey::Quote, LogicalKey::Character('\'')),
+        SK_COMMA => (PhysicalKey::Comma, LogicalKey::Character(',')),
+        SK_PERIOD => (PhysicalKey::Period, LogicalKey::Character('.')),
+        SK_SLASH => (PhysicalKey::Slash, LogicalKey::Character('/')),
+        SK_BACKSLASH => (PhysicalKey::Backslash, LogicalKey::Character('\\')),
+        SK_BACKQUOTE => (PhysicalKey::Backquote, LogicalKey::Character('`')),
+        // Numpad operators (KeyLocation::Numpad below gives them the keypad codes).
+        SK_NUMPAD_ADD => (PhysicalKey::NumpadAdd, LogicalKey::Character('+')),
+        SK_NUMPAD_SUB => (PhysicalKey::NumpadSubtract, LogicalKey::Character('-')),
+        SK_NUMPAD_MUL => (PhysicalKey::NumpadMultiply, LogicalKey::Character('*')),
+        SK_NUMPAD_DIV => (PhysicalKey::NumpadDivide, LogicalKey::Character('/')),
+        SK_NUMPAD_DECIMAL => (PhysicalKey::NumpadDecimal, LogicalKey::Character('.')),
+        SK_NUMPAD_ENTER => (PhysicalKey::NumpadEnter, LogicalKey::Named(NamedKey::Enter)),
         _ => return None,
     };
-    let key_location = if (SK_NUMPAD0..=SK_NUMPAD9).contains(&code) {
+    let key_location = if (SK_NUMPAD0..=SK_NUMPAD9).contains(&code)
+        || (SK_NUMPAD_ADD..=SK_NUMPAD_ENTER).contains(&code)
+    {
         KeyLocation::Numpad
     } else {
         KeyLocation::Standard

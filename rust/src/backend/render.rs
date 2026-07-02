@@ -250,6 +250,11 @@ static GLYPHS: &[(char, Glyph)] = &[
     ('+', ["     ", "  #  ", "  #  ", "#####", "  #  ", "  #  ", "     "]),
     ('%', ["##  #", "##  #", "   # ", "  #  ", " #   ", "#  ##", "#  ##"]),
     ('&', [" ##  ", "#  # ", "#  # ", " ##  ", "# # #", "#  # ", " ## #"]),
+    // Keyboard-picker symbols (issue #55) that were missing from the font.
+    (';', ["     ", "  #  ", "  #  ", "     ", "  ## ", "  #  ", " #   "]),
+    ('\\', ["#    ", "#    ", " #   ", "  #  ", "   # ", "    #", "    #"]),
+    ('`', [" #   ", "  #  ", "     ", "     ", "     ", "     ", "     "]),
+    ('*', ["     ", "# # #", " ### ", "#####", " ### ", "# # #", "     "]),
     ('\u{2026}', ["     ", "     ", "     ", "     ", "     ", "     ", "# # #"]), // …
     // Accented uppercase Latin (French + Spanish). The letter body is
     // compressed to 6 rows so the diacritic fits on row 0.
@@ -4885,6 +4890,45 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
+    /// Draw a centred horizontal strip of tab "chips" (labels), highlighting the
+    /// `active` one in amber. Centred on the screen (which is the modal centre).
+    /// Used for the editor's player tabs, layer sub-tabs and modifier strip (#57)
+    /// so every mode is VISIBLE rather than hidden behind a button you must guess.
+    fn draw_chip_strip(&mut self, labels: &[&str], active: usize, y: f32, scale: f32, h: f32) {
+        const PAD_X: f32 = 22.0;
+        const GAP: f32 = 18.0;
+        let widths: std::vec::Vec<f32> = labels
+            .iter()
+            .map(|l| self.measure_text(l, scale) + 2.0 * PAD_X)
+            .collect();
+        let total: f32 =
+            widths.iter().sum::<f32>() + GAP * labels.len().saturating_sub(1) as f32;
+        let mut x = (self.dimensions.width as f32 - total) * 0.5;
+        for (i, lbl) in labels.iter().enumerate() {
+            let w = widths[i];
+            let cap = Matrix {
+                a: w, b: 0.0, c: 0.0, d: h,
+                tx: swf::Twips::from_pixels(x as f64),
+                ty: swf::Twips::from_pixels(y as f64),
+            };
+            let (bg, fg) = if i == active {
+                (0xFFD740u32, 0x1A1A1Au32)
+            } else {
+                (0x2A3340u32, MODAL_ROW_COL)
+            };
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(bg, 255), cap);
+            let lw = self.measure_text(lbl, scale);
+            self.draw_text(
+                x + (w - lw) * 0.5,
+                y + (h - 7.0 * scale) * 0.5,
+                scale,
+                lbl,
+                swf::Color::from_rgb(fg, 255),
+            );
+            x += w + GAP;
+        }
+    }
+
     /// TOUCHES list screen — the keymap editor. Shows up to `visible_rows`
     /// entries of `bindings` (Switch-button name + current Flash-key
     /// binding) starting at `scroll_offset`. The row at `selection` is
@@ -4896,6 +4940,12 @@ impl SwitchRenderBackend {
         bindings: &[(&str, Option<std::string::String>)],
         visible_rows: usize,
         player: u8,
+        // Combo layer (issue #57): `combo_view` = the combo sub-tab is selected
+        // (editing the combo bindings); `combo_mod` is the current player's modifier
+        // ("" = none set). The two are decoupled — combos can be enabled (modifier
+        // set) while viewing NORMAL, so we hint that below the tabs.
+        combo_view: bool,
+        combo_mod: &str,
     ) {
         // Shared chrome (dim + panel + title + footer). Wide tier for the two
         // columns; fixed 600-px height keeps the caller's LIST_VISIBLE_ROWS valid.
@@ -4910,26 +4960,51 @@ impl SwitchRenderBackend {
             Some(lc.keys_footer),
         );
 
-        // Player indicator (issue #40): which player's bindings are shown. X
-        // toggles P1/P2 (see the footer hint + menu::handle_list_input). Sits in
-        // the subtitle slot but amber + bigger since it's live state, not a label.
-        let pstr = if player == 2 { "P2" } else { "P1" };
-        const PLAYER_SCALE: f32 = 3.0;
-        let pw = self.measure_text(pstr, PLAYER_SCALE);
-        self.draw_text(
-            frame.x + (frame.w - pw) * 0.5,
-            frame.y + 80.0,
-            PLAYER_SCALE,
-            pstr,
-            swf::Color::from_rgb(MODAL_ROW_SEL_COL, 255),
+        // Two visible tab rows so nothing is hidden behind a guess-press (issue
+        // #55/#57 ergonomics):
+        //   row 1 — player tabs P1 / P2                    (X toggles)
+        //   row 2 — sub-tab NORMAL / ZL / ZR / L / R       (L/R move)
+        // NORMAL = base bindings (combos off); a modifier = combos on with that
+        // button. There's no separate "off" chip — NORMAL *is* off. The footer
+        // names each control; the amber chip is the live state.
+        self.draw_chip_strip(
+            &["P1", "P2"],
+            if player == 2 { 1 } else { 0 },
+            frame.y + 52.0,
+            2.2,
+            38.0,
+        );
+        // The active sub-tab is NORMAL unless the combo VIEW is on (then the
+        // modifier slot). Decoupled from whether combos are enabled.
+        let sub_active = if !combo_view {
+            0
+        } else {
+            match combo_mod {
+                "ZL" => 1,
+                "ZR" => 2,
+                "L" => 3,
+                "R" => 4,
+                _ => 1,
+            }
+        };
+        self.draw_chip_strip(
+            &["NORMAL", "ZL", "ZR", "L", "R"],
+            sub_active,
+            frame.y + 98.0,
+            1.9,
+            34.0,
         );
 
         // Two-column rows: Switch button (left) + bracketed binding value (right).
+        // In the combo view each row is prefixed with the modifier ("ZL+A") so it's
+        // clear these bindings fire as the chord, not the bare button.
         const ROW_SCALE: f32 = 3.0;
         const ROW_SPACING: f32 = 50.0;
-        let rows_top_y = frame.y + 130.0;
-        let rows_left_x = frame.rows_left();
-        let value_col_x = frame.x + 360.0;
+        let rows_top_y = frame.y + 140.0;
+        // Extra inset so the rows aren't cramped against the panel border (margin
+        // all around, per feedback). Cursor sits in the left margin.
+        let rows_left_x = frame.x + 64.0;
+        let value_col_x = frame.x + 380.0;
         let total = bindings.len();
         let end = (scroll_offset + visible_rows).min(total);
         for (visible_idx, abs_idx) in (scroll_offset..end).enumerate() {
@@ -4943,7 +5018,14 @@ impl SwitchRenderBackend {
             if is_sel {
                 self.draw_text(rows_left_x - MODAL_CURSOR_DX, y, ROW_SCALE, ">", color);
             }
-            self.draw_text(rows_left_x, y, ROW_SCALE, btn, color);
+            // Combo view: show the chord ("ZL+A"), not the bare button, so it's
+            // clear the binding fires when the modifier is held.
+            let btn_label = if !combo_view || combo_mod.is_empty() {
+                std::borrow::Cow::Borrowed(*btn)
+            } else {
+                std::borrow::Cow::Owned(std::format!("{}+{}", combo_mod, btn))
+            };
+            self.draw_text(rows_left_x, y, ROW_SCALE, &btn_label, color);
             let value_str = binding
                 .as_deref()
                 .map(crate::keymap::flash_key_display)
@@ -4982,27 +5064,25 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
-    /// TOUCHES dropdown — shown when the user presses A on a list row.
-    /// Scrollable window so we can fit the full 48-key Flash keyboard
-    /// without overflowing the 720-px viewport. `visible_rows` rows are
-    /// drawn at a time starting from `scroll_offset`; selection is
-    /// always within this window (caller maintains via clamp_scroll).
-    pub fn draw_touches_dropdown(
-        &mut self,
-        button_name: &str,
-        selection: usize,
-        scroll_offset: usize,
-        options: &[&str],
-        visible_rows: usize,
-    ) {
-        // Dense 40-px rows (the full 48-key Flash keyboard) — kept distinct from
-        // MODAL_ROW_H so the caller's DROPDOWN_VISIBLE_ROWS math stays valid. The
-        // height tracks `visible_rows`, not the total (the 12->48 overflow bug).
-        const ROW_H: f32 = 40.0;
-        let panel_h = 130.0 + visible_rows as f32 * ROW_H + 60.0;
+    /// TOUCHES keyboard picker (issue #55) — shown when the user presses A on a
+    /// list row. Draws a real PC keyboard from `keymap::KEYBOARD` (positioned keys,
+    /// numpad on the RIGHT) with the key at `sel_key_idx` highlighted amber. The
+    /// user navigates geometrically (menu.rs). QWERTY is fixed for every language
+    /// (Flash reads US keyCodes; CJK boards are physically QWERTY too).
+    pub fn draw_touches_keyboard(&mut self, button_name: &str, sel_key_idx: usize) {
+        let keys = crate::keymap::KEYBOARD;
+        const KEY_H: f32 = 48.0;
+        const KEY_GAP: f32 = 6.0;
+        const KEY_SCALE: f32 = 2.0;
+        const SIDE_MARGIN: f32 = 30.0;
+        // Wider than the 720 modal so the main block + right-hand numpad both fit.
+        const PANEL_W: f32 = 1120.0;
+
+        let n_rows = crate::keymap::KEYBOARD_ROWS_N as f32;
+        let panel_h = 120.0 + n_rows * (KEY_H + KEY_GAP) + 34.0;
         let title = std::format!("{} ->", button_name);
         let frame = self.draw_modal_frame(
-            MODAL_W,
+            PANEL_W,
             0,
             Some(panel_h),
             false,
@@ -5011,53 +5091,43 @@ impl SwitchRenderBackend {
             Some(crate::loc::s().keys_dropdown_footer),
         );
 
-        // Options (windowed). Slice to scroll_offset..end, index back to the
-        // absolute selection for the highlight check.
-        let opts_top_y = frame.y + 110.0;
-        let opts_left_x = frame.rows_left() + 20.0;
-        let total = options.len();
-        let end = (scroll_offset + visible_rows).min(total);
-        for (visible_idx, abs_idx) in (scroll_offset..end).enumerate() {
-            let y = opts_top_y + visible_idx as f32 * ROW_H;
-            let is_sel = abs_idx == selection;
-            let color = swf::Color::from_rgb(
-                if is_sel { MODAL_ROW_SEL_COL } else { MODAL_ROW_COL },
-                255,
-            );
-            if is_sel {
-                self.draw_text(opts_left_x - MODAL_CURSOR_DX, y, MODAL_ROW_SCALE, ">", color);
-            }
-            // Index 0 is the "unbind" entry. Action labels (none, mouse clicks)
-            // are localized via flash_key_display; plain Flash key names pass
-            // through unchanged.
-            let label = if abs_idx == 0 {
-                std::borrow::Cow::Borrowed(crate::loc::s().none)
-            } else {
-                crate::keymap::flash_key_display(options[abs_idx])
-            };
-            self.draw_text(opts_left_x, y, MODAL_ROW_SCALE, &label, color);
-        }
+        let inner_w = frame.w - 2.0 * SIDE_MARGIN;
+        let unit_w = inner_w / crate::keymap::KEYBOARD_UNITS_W;
+        let origin_x = frame.x + SIDE_MARGIN;
+        let top_y = frame.y + 108.0;
 
-        // Scrollbar (matches the TOUCHES list scrollbar style).
-        if total > visible_rows {
-            let bar_x = frame.x + frame.w - 30.0;
-            let bar_top_y = opts_top_y;
-            let bar_h_total = visible_rows as f32 * ROW_H;
-            let bar_h_thumb = (bar_h_total * visible_rows as f32 / total as f32).max(20.0);
-            let progress = scroll_offset as f32 / (total - visible_rows) as f32;
-            let thumb_y = bar_top_y + (bar_h_total - bar_h_thumb) * progress;
-            let track = Matrix {
-                a: 4.0, b: 0.0, c: 0.0, d: bar_h_total,
-                tx: swf::Twips::from_pixels(bar_x as f64),
-                ty: swf::Twips::from_pixels(bar_top_y as f64),
+        for (i, &(name, row, kx, kw)) in keys.iter().enumerate() {
+            let x = origin_x + kx * unit_w;
+            let key_w = kw * unit_w - KEY_GAP;
+            let y = top_y + row as f32 * (KEY_H + KEY_GAP);
+            let cap = Matrix {
+                a: key_w, b: 0.0, c: 0.0, d: KEY_H,
+                tx: swf::Twips::from_pixels(x as f64),
+                ty: swf::Twips::from_pixels(y as f64),
             };
-            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x40_99AABB), track);
-            let thumb = Matrix {
-                a: 4.0, b: 0.0, c: 0.0, d: bar_h_thumb,
-                tx: swf::Twips::from_pixels(bar_x as f64),
-                ty: swf::Twips::from_pixels(thumb_y as f64),
+            let (cap_col, txt_col) = if i == sel_key_idx {
+                (0xFFD740u32, 0x1A1A1Au32) // amber cap, near-black label
+            } else {
+                (0x2A3340u32, MODAL_ROW_COL) // slate cap, light label
             };
-            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), thumb);
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(cap_col, 255), cap);
+
+            // Centre the (only-if-needed shrunk) label in the cap.
+            let label = crate::keymap::keyboard_label(name);
+            let lw_full = self.measure_text(&label, KEY_SCALE);
+            let scale = if lw_full > key_w - 8.0 {
+                (KEY_SCALE * (key_w - 8.0) / lw_full).max(1.0)
+            } else {
+                KEY_SCALE
+            };
+            let lw = self.measure_text(&label, scale);
+            self.draw_text(
+                x + (key_w - lw) * 0.5,
+                y + (KEY_H - 7.0 * scale) * 0.5,
+                scale,
+                &label,
+                swf::Color::from_rgb(txt_col, 255),
+            );
         }
 
         unsafe {
