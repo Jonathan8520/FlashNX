@@ -2,7 +2,7 @@
 
 Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://github.com/ruffle-rs/ruffle).
 
-## v1.5.0 (unreleased)
+## v1.5.0 (2026-07-02)
 
 A rework of the control editor: a visual keyboard, more keys, and button combos.
 
