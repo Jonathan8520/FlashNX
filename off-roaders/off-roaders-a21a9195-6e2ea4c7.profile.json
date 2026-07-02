@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "id": "off-roaders-a21a9195-6e2ea4c7",
+  "game": {
+    "title": "off roaders",
+    "fp_uuid": "",
+    "swf_hash": "a21a9195da01b6fa"
+  },
+  "author": "Jonathan8520",
+  "verified": false,
+  "bindings": {
+    "A": "Space",
+    "B": "Z",
+    "Down": "Down",
+    "L": "Escape",
+    "Left": "Left",
+    "Plus": "P",
+    "R": "Enter",
+    "Right": "Right",
+    "StickLDown": "Down",
+    "StickLLeft": "Left",
+    "StickLRight": "Right",
+    "StickLUp": "Up",
+    "Up": "Up",
+    "X": "C",
+    "Y": "N",
+    "ZL": "Right click",
+    "ZR": "Left click"
+  },
+  "bindings_p2": {
+    "A": "Num1",
+    "B": "Num2",
+    "Down": "S",
+    "L": "Num6",
+    "Left": "A",
+    "R": "Num5",
+    "Right": "D",
+    "StickLDown": "S",
+    "StickLLeft": "A",
+    "StickLRight": "D",
+    "StickLUp": "W",
+    "Up": "W",
+    "X": "Num3",
+    "Y": "Num4"
+  }
+}
