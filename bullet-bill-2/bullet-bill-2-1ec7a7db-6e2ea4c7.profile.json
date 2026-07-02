@@ -43,9 +43,8 @@
     "X": "3",
     "Y": "4"
   },
-  "bindings_layer2": {},
-  "bindings_layer2_p2": {},
-  "combo_modifier": "",
-  "combo_modifier_p2": "",
-  "cursor_speed": 1
+  "combo_layers": {},
+  "combo_layers_p2": {},
+  "cursor_speed": 7,
+  "show_cursor": false
 }
