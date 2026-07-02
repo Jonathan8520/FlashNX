@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "id": "bullet-bill-2-1ec7a7db-6e2ea4c7",
+  "game": {
+    "title": "Bullet Bill 2",
+    "fp_uuid": "",
+    "swf_hash": "1ec7a7db2b68cc3a"
+  },
+  "author": "Jonathan8520",
+  "verified": false,
+  "bindings": {
+    "A": "Space",
+    "B": "Z",
+    "Down": "Down",
+    "L": "Escape",
+    "Left": "Left",
+    "Plus": "P",
+    "R": "Enter",
+    "Right": "Right",
+    "StickLDown": "Down",
+    "StickLLeft": "Left",
+    "StickLRight": "Right",
+    "StickLUp": "Up",
+    "Up": "Up",
+    "X": "X",
+    "Y": "Shift",
+    "ZL": "Right click",
+    "ZR": "Left click"
+  },
+  "bindings_p2": {
+    "A": "1",
+    "B": "2",
+    "Down": "S",
+    "L": "6",
+    "Left": "A",
+    "R": "5",
+    "Right": "D",
+    "StickLDown": "S",
+    "StickLLeft": "A",
+    "StickLRight": "D",
+    "StickLUp": "W",
+    "Up": "W",
+    "X": "3",
+    "Y": "4"
+  },
+  "bindings_layer2": {},
+  "bindings_layer2_p2": {},
+  "combo_modifier": "",
+  "combo_modifier_p2": "",
+  "cursor_speed": -1
+}
