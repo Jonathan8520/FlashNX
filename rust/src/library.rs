@@ -1988,18 +1988,13 @@ fn run_open_share_confirm_flow(game_idx: usize) {
         .into_iter()
         .find(|m| m.profile.id.ends_with(&suffix));
     let is_update = mine.is_some();
-    // Both players' "before" maps, so the confirm shows P2 changes too (#40).
-    let (before_p1, before_p2) = match mine {
-        Some(m) => (m.profile.bindings, m.profile.bindings_p2),
-        None => {
-            let t = keymap::revert_target(&basename); // ~default for a first share
-            (t.bindings, t.bindings_p2)
-        }
+    // "before" = the profile we'd update, else ~the default (first share). As a
+    // full Keymap so base + combos + modifier all diff (#40/#57).
+    let before = match mine {
+        Some(m) => m.profile.to_keymap(),
+        None => keymap::revert_target(&basename), // ~default for a first share
     };
-    let rows = cap_preview_rows(keymap::binding_diff_rows(
-        &before_p1, &current.bindings,
-        &before_p2, &current.bindings_p2,
-    ));
+    let rows = cap_preview_rows(keymap::binding_diff_rows(&before, &current));
     if let Ok(mut s) = LIBRARY.lock() {
         s.preview_rows = rows;
         s.share_is_update = is_update;
@@ -2079,7 +2074,7 @@ fn run_open_profiles_flow(game_idx: usize) {
     let active_id = matches
         .iter()
         .find(|m| {
-            (m.profile.bindings == current.bindings && m.profile.bindings_p2 == current.bindings_p2)
+            keymap::binding_diff_rows(&m.profile.to_keymap(), &current).is_empty()
                 || (!prov_id.is_empty() && m.profile.id == prov_id)
         })
         .map(|m| m.profile.id.clone())
@@ -2190,10 +2185,7 @@ fn run_open_preview_flow(game_idx: usize, profile_idx: usize) {
         return;
     };
     let current = keymap::effective_for(&basename);
-    let rows = keymap::binding_diff_rows(
-        &current.bindings, &profile.bindings,
-        &current.bindings_p2, &profile.bindings_p2,
-    );
+    let rows = keymap::binding_diff_rows(&current, &profile.to_keymap());
     // Nothing differs → don't open a preview that offers "APPLY" for a no-op.
     // Flash a neutral toast and stay on the picker (e.g. already-active profile).
     if rows.is_empty() {
@@ -2221,10 +2213,7 @@ fn run_open_revert_preview_flow(game_idx: usize) {
     };
     let current = keymap::effective_for(&basename);
     let target = keymap::revert_target(&basename);
-    let rows = cap_preview_rows(keymap::binding_diff_rows(
-        &current.bindings, &target.bindings,
-        &current.bindings_p2, &target.bindings_p2,
-    ));
+    let rows = cap_preview_rows(keymap::binding_diff_rows(&current, &target));
     if let Ok(mut s) = LIBRARY.lock() {
         s.preview_rows = rows; // may be empty — revert still clears the active tag
         s.screen = Screen::RevertPreview { game_idx };

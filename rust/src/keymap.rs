@@ -800,7 +800,9 @@ pub fn revert_target(basename: &str) -> Keymap {
 pub fn has_revert(basename: &str) -> bool {
     let cur = effective_for(basename);
     let tgt = revert_target(basename);
-    cur.bindings != tgt.bindings || cur.bindings_p2 != tgt.bindings_p2
+    // Full compare (base + combos + modifier, #57) so a combo-only change still
+    // surfaces the "Revenir" row.
+    !binding_diff_rows(&cur, &tgt).is_empty()
 }
 
 /// Build "<button>: <current> -> <target>" diff lines for the keys that differ
@@ -810,12 +812,7 @@ pub fn has_revert(basename: &str) -> bool {
 /// for every profile/revert/share preview (library + in-game) — diffing only P1
 /// here was the bug where editing a P2 key showed "no changes" yet still dropped
 /// the active tag.
-pub fn binding_diff_rows(
-    cur_p1: &std::collections::BTreeMap<std::string::String, std::string::String>,
-    tgt_p1: &std::collections::BTreeMap<std::string::String, std::string::String>,
-    cur_p2: &std::collections::BTreeMap<std::string::String, std::string::String>,
-    tgt_p2: &std::collections::BTreeMap<std::string::String, std::string::String>,
-) -> std::vec::Vec<std::string::String> {
+pub fn binding_diff_rows(cur: &Keymap, tgt: &Keymap) -> std::vec::Vec<std::string::String> {
     let none = crate::loc::s().none;
     let disp = |k: &str| -> std::string::String {
         if k.is_empty() {
@@ -825,14 +822,31 @@ pub fn binding_diff_rows(
         }
     };
     let mut rows = std::vec::Vec::new();
-    for (label, cur, tgt) in [("", cur_p1, tgt_p1), ("P2 ", cur_p2, tgt_p2)] {
+    // Base + combo layers, both players (issue #57): a combo-only change must show
+    // up too — otherwise the share/apply preview reports "no changes" when only the
+    // combo layer differs. Labels distinguish the four sets.
+    let sets = [
+        ("", &cur.bindings, &tgt.bindings),
+        ("P2 ", &cur.bindings_p2, &tgt.bindings_p2),
+        ("combo ", &cur.bindings_layer2, &tgt.bindings_layer2),
+        ("P2 combo ", &cur.bindings_layer2_p2, &tgt.bindings_layer2_p2),
+    ];
+    for (label, c_map, t_map) in sets {
         for btn in EDITABLE_BUTTONS {
-            let c = cur.get(*btn).map(std::string::String::as_str).unwrap_or("");
-            let n = tgt.get(*btn).map(std::string::String::as_str).unwrap_or("");
+            let c = c_map.get(*btn).map(std::string::String::as_str).unwrap_or("");
+            let n = t_map.get(*btn).map(std::string::String::as_str).unwrap_or("");
             if c != n {
                 rows.push(std::format!("{}{}: {} -> {}", label, btn, disp(c), disp(n)));
             }
         }
+    }
+    // Combo modifier changes (turning combos on/off, or swapping the button).
+    let mod_disp = |m: &str| -> String { if m.is_empty() { none.to_string() } else { m.to_string() } };
+    if cur.combo_modifier != tgt.combo_modifier {
+        rows.push(std::format!("combo mod: {} -> {}", mod_disp(&cur.combo_modifier), mod_disp(&tgt.combo_modifier)));
+    }
+    if cur.combo_modifier_p2 != tgt.combo_modifier_p2 {
+        rows.push(std::format!("P2 combo mod: {} -> {}", mod_disp(&cur.combo_modifier_p2), mod_disp(&tgt.combo_modifier_p2)));
     }
     rows
 }

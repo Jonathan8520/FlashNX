@@ -458,7 +458,7 @@ fn run_open_profiles() {
     let active_id = matches
         .iter()
         .find(|m| {
-            (m.profile.bindings == current.bindings && m.profile.bindings_p2 == current.bindings_p2)
+            keymap::binding_diff_rows(&m.profile.to_keymap(), &current).is_empty()
                 || (!prov_id.is_empty() && m.profile.id == prov_id)
         })
         .map(|m| m.profile.id.clone())
@@ -483,10 +483,7 @@ fn run_open_preview(profile_idx: usize) {
     };
     let Some(profile) = profile else { return };
     let current = keymap::effective_for(&basename);
-    let rows = keymap::binding_diff_rows(
-        &current.bindings, &profile.bindings,
-        &current.bindings_p2, &profile.bindings_p2,
-    );
+    let rows = keymap::binding_diff_rows(&current, &profile.to_keymap());
     if rows.is_empty() {
         if let Ok(mut s) = TOUCHES.lock() {
             set_toast(&mut s, crate::loc::s().profile_preview_none.to_string(), TOAST_INFO);
@@ -548,18 +545,13 @@ fn run_open_share_confirm() {
         .into_iter()
         .find(|m| m.profile.id.ends_with(&suffix));
     let is_update = mine.is_some();
-    // Both players' "before" maps so a P2-only change is shown too (#40).
-    let (before_p1, before_p2) = match mine {
-        Some(m) => (m.profile.bindings, m.profile.bindings_p2),
-        None => {
-            let t = keymap::revert_target(&basename); // ~default for a first share
-            (t.bindings, t.bindings_p2)
-        }
+    // "before" = the profile we'd update, else ~the default (first share). As a
+    // full Keymap so base + combos + modifier all diff (#40/#57).
+    let before = match mine {
+        Some(m) => m.profile.to_keymap(),
+        None => keymap::revert_target(&basename), // ~default for a first share
     };
-    let rows = cap_rows(keymap::binding_diff_rows(
-        &before_p1, &current.bindings,
-        &before_p2, &current.bindings_p2,
-    ));
+    let rows = cap_rows(keymap::binding_diff_rows(&before, &current));
     if let Ok(mut s) = TOUCHES.lock() {
         s.preview_rows = rows;
         s.share_is_update = is_update;
@@ -631,10 +623,7 @@ fn run_open_revert_preview() {
     let Some((basename, _, _)) = game_ctx() else { return };
     let current = keymap::effective_for(&basename);
     let target = keymap::revert_target(&basename);
-    let rows = cap_rows(keymap::binding_diff_rows(
-        &current.bindings, &target.bindings,
-        &current.bindings_p2, &target.bindings_p2,
-    ));
+    let rows = cap_rows(keymap::binding_diff_rows(&current, &target));
     if let Ok(mut s) = TOUCHES.lock() {
         s.preview_rows = rows;
         s.screen = Screen::RevertPreview;

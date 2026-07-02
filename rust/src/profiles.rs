@@ -96,6 +96,20 @@ impl Profile {
     fn completeness(&self) -> usize {
         self.bindings.values().filter(|v| !v.is_empty()).count()
     }
+    /// This profile's controls as a `Keymap` (base + combos), so preview diffs and
+    /// apply share one representation. Cursor speed lives outside the keymap.
+    pub fn to_keymap(&self) -> Keymap {
+        Keymap {
+            version: 1,
+            bindings: self.bindings.clone(),
+            bindings_p2: self.bindings_p2.clone(),
+            bindings_layer2: self.bindings_layer2.clone(),
+            bindings_layer2_p2: self.bindings_layer2_p2.clone(),
+            combo_modifier: self.combo_modifier.clone(),
+            combo_modifier_p2: self.combo_modifier_p2.clone(),
+            source: std::format!("community:{}", self.id),
+        }
+    }
 }
 
 /// Parse the bundled catalog (skips any entry that fails to parse, loudly).
@@ -592,19 +606,10 @@ pub fn record_applied(id: &str) {
 /// Apply `profile` to `basename`'s keymap sidecar (non-destructive: backs up a
 /// hand-made keymap first). Tags the result `source = "community:<id>"`.
 pub fn apply(basename: &str, profile: &Profile) -> bool {
-    let km = Keymap {
-        version: 1,
-        bindings: profile.bindings.clone(),
-        bindings_p2: profile.bindings_p2.clone(),
-        // Combos (issue #57) travel with the profile now. Pre-#57 catalog entries
-        // have these empty (serde default), so applying them clears combos — still
-        // non-destructive: apply_keymap backs up the user's whole sidecar first.
-        bindings_layer2: profile.bindings_layer2.clone(),
-        bindings_layer2_p2: profile.bindings_layer2_p2.clone(),
-        combo_modifier: profile.combo_modifier.clone(),
-        combo_modifier_p2: profile.combo_modifier_p2.clone(),
-        source: std::format!("community:{}", profile.id),
-    };
+    // Combos (issue #57) travel with the profile now (empty for pre-#57 entries,
+    // so applying them clears combos — still non-destructive: apply_keymap backs
+    // up the user's whole sidecar first).
+    let km = profile.to_keymap();
     let ok = crate::keymap::apply_keymap(basename, &km);
     // Cursor speed lives in its own `.cursor` file. Apply the profile's if set
     // (>= 0); leave the game's own untouched when the profile carries none (-1).
