@@ -231,12 +231,10 @@ async function handleProfileShare(r, env) {
     verified: false,
     bindings: obj(r.bindings),
     bindings_p2: obj(r.bindings_p2),
-    // Combo layer (#57) + per-game cursor speed, so a shared profile carries the
-    // whole control setup, not just the base bindings.
-    bindings_layer2: obj(r.bindings_layer2),
-    bindings_layer2_p2: obj(r.bindings_layer2_p2),
-    combo_modifier: s(r.combo_modifier, 4),
-    combo_modifier_p2: s(r.combo_modifier_p2, 4),
+    // Per-modifier combo layers (#57) + per-game cursor speed, so a shared profile
+    // carries the whole control setup, not just the base bindings.
+    combo_layers: obj(r.combo_layers),
+    combo_layers_p2: obj(r.combo_layers_p2),
     cursor_speed: cursorSpeed,
   };
   const indexEntry = { id, title, fp_uuid: fpUuid, swf_hash: swfHash, file, verified: false };

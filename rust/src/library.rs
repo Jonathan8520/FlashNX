@@ -1988,13 +1988,19 @@ fn run_open_share_confirm_flow(game_idx: usize) {
         .into_iter()
         .find(|m| m.profile.id.ends_with(&suffix));
     let is_update = mine.is_some();
+    let before_cursor = mine.as_ref().map(|m| m.profile.cursor_speed).unwrap_or(-1);
     // "before" = the profile we'd update, else ~the default (first share). As a
     // full Keymap so base + combos + modifier all diff (#40/#57).
     let before = match mine {
         Some(m) => m.profile.to_keymap(),
         None => keymap::revert_target(&basename), // ~default for a first share
     };
-    let rows = cap_preview_rows(keymap::binding_diff_rows(&before, &current));
+    let mut rows = keymap::binding_diff_rows(&before, &current);
+    // Cursor speed lives outside the keymap — append its change so it's visible.
+    if let Some(r) = keymap::cursor_diff_row(before_cursor, keymap::cursor_speed_for(&basename)) {
+        rows.push(r);
+    }
+    let rows = cap_preview_rows(rows);
     if let Ok(mut s) = LIBRARY.lock() {
         s.preview_rows = rows;
         s.share_is_update = is_update;
@@ -2185,7 +2191,10 @@ fn run_open_preview_flow(game_idx: usize, profile_idx: usize) {
         return;
     };
     let current = keymap::effective_for(&basename);
-    let rows = keymap::binding_diff_rows(&current, &profile.to_keymap());
+    let mut rows = keymap::binding_diff_rows(&current, &profile.to_keymap());
+    if let Some(r) = keymap::cursor_diff_row(keymap::cursor_speed_for(&basename), profile.cursor_speed) {
+        rows.push(r);
+    }
     // Nothing differs → don't open a preview that offers "APPLY" for a no-op.
     // Flash a neutral toast and stay on the picker (e.g. already-active profile).
     if rows.is_empty() {

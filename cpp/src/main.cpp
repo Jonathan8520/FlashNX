@@ -37,10 +37,11 @@ extern "C" int  ruffle_draw_menu_closing(int selected);
 extern "C" int  ruffle_restart(void);
 extern "C" int  ruffle_keymap_lookup(const char* button_name);
 extern "C" int  ruffle_keymap_lookup_p2(const char* button_name);
-extern "C" int  ruffle_keymap_lookup_layer2(const char* button_name); // combo layer (#57)
-extern "C" int  ruffle_keymap_combo_modifier(void); // 0=off 1=ZL 2=ZR 3=L 4=R
-extern "C" int  ruffle_keymap_lookup_layer2_p2(const char* button_name); // P2 combo (#57)
-extern "C" int  ruffle_keymap_combo_modifier_p2(void); // P2 modifier, same encoding
+// Per-modifier combo layers (#57): mod_code 1=ZL 2=ZR 3=L 4=R.
+extern "C" int  ruffle_keymap_lookup_combo(int mod_code, const char* button_name);
+extern "C" int  ruffle_keymap_lookup_combo_p2(int mod_code, const char* button_name);
+extern "C" int  ruffle_keymap_combo_active(int mod_code);    // 1 = that modifier has a layer
+extern "C" int  ruffle_keymap_combo_active_p2(int mod_code);
 extern "C" int  ruffle_keymap_cursor_speed(void);          // per-game speed, -1 = unset
 extern "C" void ruffle_keymap_set_cursor_speed(int idx);   // persist per-game speed
 extern "C" void ruffle_touches_open(void);
@@ -133,17 +134,19 @@ static constexpr size_t BINDINGS_COUNT = sizeof(BINDINGS) / sizeof(BINDINGS[0]);
 // via the P2 keymap. Same buttons/masks as BINDINGS, different keys.
 static int BINDINGS_P2_KEYS[BINDINGS_COUNT];
 
-// Combo layer (issue #57): the Flash key each button sends while the combo
-// modifier is HELD. SK_NONE = no override → we fall through to the base key, so
-// holding the modifier never breaks unremapped buttons (e.g. movement). Per
-// player: P1 reads controller 1's modifier, P2 controller 2's (both symmetric).
-static int BINDINGS_LAYER2_KEYS[BINDINGS_COUNT];
-static int BINDINGS_LAYER2_P2_KEYS[BINDINGS_COUNT];
-// Pad mask of the combo modifier button (0 = combos off), per player. Set from
-// ruffle_keymap_combo_modifier{,_p2}() at (re)load. While held, that player's
-// buttons resolve through the layer2 keys and the modifier's own base key is muted.
-static u64 g_combo_modifier_mask = 0;
-static u64 g_combo_modifier_mask_p2 = 0;
+// Per-modifier combo layers (issue #57): FOUR independent modifiers (ZL/ZR/L/R),
+// each with its own button→key layer. Holding an active modifier makes every other
+// button send that modifier's key (SK_NONE = fall through to the base key, so a
+// held modifier never breaks unremapped buttons). All four work at once, so L+A
+// and R+A can differ. Index order matches COMBO_MODS below.
+enum { CM_ZL = 0, CM_ZR, CM_L, CM_R, CM_COUNT };
+static const u64 COMBO_MOD_MASKS[CM_COUNT] = {
+    HidNpadButton_ZL, HidNpadButton_ZR, HidNpadButton_L, HidNpadButton_R,
+};
+static int  BINDINGS_COMBO_KEYS[CM_COUNT][BINDINGS_COUNT];    // P1 layers
+static int  BINDINGS_COMBO_P2_KEYS[CM_COUNT][BINDINGS_COUNT]; // P2 layers
+static bool g_combo_active[CM_COUNT];    // P1: this modifier has a layer -> it's a modifier
+static bool g_combo_active_p2[CM_COUNT];
 // The Flash key each button is CURRENTLY holding down (SK_NONE = up), per player.
 // Captured at press time so the key-up releases the SAME key even if the modifier
 // was let go in between (press ZL+A → F1 down; release ZL; release A → F1 up).
@@ -271,21 +274,17 @@ static void populate_bindings_from_keymap(void) {
     for (size_t i = 0; i < BINDINGS_COUNT; ++i) {
         BINDINGS[i].key = ruffle_keymap_lookup(BINDINGS[i].name);
         BINDINGS_P2_KEYS[i] = ruffle_keymap_lookup_p2(BINDINGS[i].name); // #40
-        BINDINGS_LAYER2_KEYS[i] = ruffle_keymap_lookup_layer2(BINDINGS[i].name); // #57
-        BINDINGS_LAYER2_P2_KEYS[i] = ruffle_keymap_lookup_layer2_p2(BINDINGS[i].name);
-    }
-    // Resolve the combo modifier buttons (issue #57) to pad masks, 0 = off.
-    auto modifier_mask = [](int code) -> u64 {
-        switch (code) {
-            case 1:  return HidNpadButton_ZL;
-            case 2:  return HidNpadButton_ZR;
-            case 3:  return HidNpadButton_L;
-            case 4:  return HidNpadButton_R;
-            default: return 0;
+        // Per-modifier combo layers (#57): mod_code = m+1 (1=ZL..4=R).
+        for (int m = 0; m < CM_COUNT; ++m) {
+            BINDINGS_COMBO_KEYS[m][i]    = ruffle_keymap_lookup_combo(m + 1, BINDINGS[i].name);
+            BINDINGS_COMBO_P2_KEYS[m][i] = ruffle_keymap_lookup_combo_p2(m + 1, BINDINGS[i].name);
         }
-    };
-    g_combo_modifier_mask    = modifier_mask(ruffle_keymap_combo_modifier());
-    g_combo_modifier_mask_p2 = modifier_mask(ruffle_keymap_combo_modifier_p2());
+    }
+    // Which modifiers have a layer (-> they act as modifiers, their own key muted).
+    for (int m = 0; m < CM_COUNT; ++m) {
+        g_combo_active[m]    = ruffle_keymap_combo_active(m + 1) != 0;
+        g_combo_active_p2[m] = ruffle_keymap_combo_active_p2(m + 1) != 0;
+    }
     // Drop any remembered held-key state so a re-remap / restart can't leave a
     // button "stuck down" against the new bindings.
     for (size_t i = 0; i < BINDINGS_COUNT; ++i) {
@@ -801,14 +800,19 @@ static void worker_entry(void* arg) {
         // Keyboard-style buttons via edge detection. A button bound to a mouse
         // pseudo-code clicks at the cursor instead of sending a key event.
         //
-        // Combo layer (issue #57): while the modifier button is HELD, each P1
-        // button resolves through BINDINGS_LAYER2_KEYS (falling back to its base
-        // key when it has no combo override). The key is chosen at PRESS time and
-        // remembered in g_p1_down_key, so the key-up releases the SAME key even if
-        // the modifier was released first (press ZL+A → F1 down; release ZL;
-        // release A → F1 up). The modifier's own base key is muted while combos on.
-        const bool combos_on = g_combo_modifier_mask != 0;
-        const bool layer_active = combos_on && (kHeld & g_combo_modifier_mask) != 0;
+        // Combo layers (issue #57, per-modifier): each ACTIVE modifier (ZL/ZR/L/R
+        // with a layer) is a dedicated modifier -> its own key is muted. The
+        // currently-HELD active modifier (priority ZL>ZR>L>R) makes every other
+        // button send THAT layer's key, falling through to the base key when the
+        // layer doesn't map it. The key is chosen at PRESS time (g_p1_down_key) so
+        // the key-up matches even if the modifier is released first.
+        u64 p1_mod_buttons = 0; // all active-modifier buttons (always muted)
+        int p1_active_mod = -1; // held active modifier whose layer applies
+        for (int m = 0; m < CM_COUNT; ++m) {
+            if (!g_combo_active[m]) continue;
+            p1_mod_buttons |= COMBO_MOD_MASKS[m];
+            if (p1_active_mod < 0 && (kHeld & COMBO_MOD_MASKS[m])) p1_active_mod = m;
+        }
         auto emit_p1 = [](int key, bool down) {
             if (key == SK_MOUSE_LEFT)       ruffle_handle_mouse_button(down);
             else if (key == SK_MOUSE_RIGHT) ruffle_handle_mouse_right(down);
@@ -816,14 +820,14 @@ static void worker_entry(void* arg) {
         };
         for (size_t i = 0; i < BINDINGS_COUNT; ++i) {
             const ButtonBinding& b = BINDINGS[i];
-            if (combos_on && b.mask == g_combo_modifier_mask) continue; // modifier is consumed
+            if (b.mask & p1_mod_buttons) continue; // this button is a modifier, muted
             const bool dn = (kDown & b.mask) != 0;
             const bool up = (kUp   & b.mask) != 0;
             if (!dn && !up) continue;
             if (dn) {
                 int key = b.key;
-                if (layer_active && BINDINGS_LAYER2_KEYS[i] != SK_NONE) {
-                    key = BINDINGS_LAYER2_KEYS[i]; // combo override for this button
+                if (p1_active_mod >= 0 && BINDINGS_COMBO_KEYS[p1_active_mod][i] != SK_NONE) {
+                    key = BINDINGS_COMBO_KEYS[p1_active_mod][i];
                 }
                 g_p1_down_key[i] = key;
                 emit_p1(key, true);
@@ -837,13 +841,16 @@ static void worker_entry(void* arg) {
         }
 
         // Player 2 (issue #40): a 2nd controller drives the same key pipeline
-        // through the P2 keymap. No cursor / mouse / pause for P2 (one cursor,
-        // and P1 owns the menu), so we only emit key down/up here. Combo layer
-        // (issue #57) mirrors P1: hold controller 2's modifier to reach P2's combo
-        // keys, chosen at press time so the key-up matches. Mouse keys are ignored
-        // for P2 (there's a single shared cursor).
-        const bool combos2_on = g_combo_modifier_mask_p2 != 0;
-        const bool layer2_active_p2 = combos2_on && (kHeld2 & g_combo_modifier_mask_p2) != 0;
+        // through the P2 keymap. No cursor / mouse / pause for P2. Per-modifier
+        // combo layers (#57) mirror P1, using controller 2's own layers. Mouse keys
+        // are ignored for P2 (one shared cursor).
+        u64 p2_mod_buttons = 0;
+        int p2_active_mod = -1;
+        for (int m = 0; m < CM_COUNT; ++m) {
+            if (!g_combo_active_p2[m]) continue;
+            p2_mod_buttons |= COMBO_MOD_MASKS[m];
+            if (p2_active_mod < 0 && (kHeld2 & COMBO_MOD_MASKS[m])) p2_active_mod = m;
+        }
         auto emit_p2 = [](int key, bool down) {
             if (key != SK_NONE && key != SK_MOUSE_LEFT && key != SK_MOUSE_RIGHT) {
                 ruffle_handle_key(key, down);
@@ -851,14 +858,14 @@ static void worker_entry(void* arg) {
         };
         for (size_t i = 0; i < BINDINGS_COUNT; ++i) {
             const u64 mask = BINDINGS[i].mask;
-            if (combos2_on && mask == g_combo_modifier_mask_p2) continue; // modifier consumed
+            if (mask & p2_mod_buttons) continue; // modifier button, muted
             const bool dn = (kDown2 & mask) != 0;
             const bool up = (kUp2   & mask) != 0;
             if (!dn && !up) continue;
             if (dn) {
                 int key = BINDINGS_P2_KEYS[i];
-                if (layer2_active_p2 && BINDINGS_LAYER2_P2_KEYS[i] != SK_NONE) {
-                    key = BINDINGS_LAYER2_P2_KEYS[i];
+                if (p2_active_mod >= 0 && BINDINGS_COMBO_P2_KEYS[p2_active_mod][i] != SK_NONE) {
+                    key = BINDINGS_COMBO_P2_KEYS[p2_active_mod][i];
                 }
                 g_p2_down_key[i] = key;
                 emit_p2(key, true);

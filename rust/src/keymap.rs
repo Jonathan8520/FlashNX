@@ -48,21 +48,27 @@ pub struct Keymap {
     /// pre-#57 keymaps loading (absent = empty = no combos). A button with NO
     /// entry here falls through to its base binding while the modifier is held,
     /// so holding the modifier never breaks movement — only remapped buttons change.
+    /// Combo layers (issue #57), ONE PER MODIFIER button. Outer key is the held
+    /// modifier ("ZL"/"ZR"/"L"/"R"); inner map is that modifier's button→key
+    /// bindings. A modifier with a non-empty layer is ACTIVE in-game: its button
+    /// becomes a modifier (its own base key muted), and holding it makes every
+    /// other button send that layer's key (falling through to the base key for
+    /// buttons the layer doesn't map). All four modifiers work independently, so
+    /// `L+A` and `R+A` can differ. `#[serde(default)]` keeps older keymaps loading.
     #[serde(default)]
+    pub combo_layers: BTreeMap<std::string::String, BTreeMap<std::string::String, std::string::String>>,
+    /// Player 2 combo layers — the P2 counterpart of `combo_layers`.
+    #[serde(default)]
+    pub combo_layers_p2: BTreeMap<std::string::String, BTreeMap<std::string::String, std::string::String>>,
+    // Legacy single-layer combo fields (pre per-modifier). READ for migration into
+    // `combo_layers` on load, then never written (`skip_serializing`).
+    #[serde(default, skip_serializing)]
     pub bindings_layer2: BTreeMap<std::string::String, std::string::String>,
-    /// Player 2 combo layer (issue #57) — the P2 counterpart of `bindings_layer2`,
-    /// active while `combo_modifier_p2` is held on controller 2. `#[serde(default)]`
-    /// keeps pre-#57 (and P1-only) keymaps loading.
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub bindings_layer2_p2: BTreeMap<std::string::String, std::string::String>,
-    /// Which controller button acts as the P1 combo modifier (issue #57). Empty =
-    /// combos OFF (no layer). Otherwise one of "ZL"/"ZR"/"L"/"R". Held → the
-    /// `bindings_layer2` map is active. `#[serde(default)]` = pre-#57 keymaps read "".
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub combo_modifier: std::string::String,
-    /// Player 2 combo modifier (issue #57) — same values as `combo_modifier`, but
-    /// held on controller 2 to activate `bindings_layer2_p2`.
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub combo_modifier_p2: std::string::String,
     /// Provenance of these bindings (issue #20, community control profiles), so
     /// the UI never clobbers hand-made controls silently:
@@ -239,9 +245,11 @@ fn fallback_keymap() -> Keymap {
         version: 1,
         bindings,
         bindings_p2: p2_default_bindings(),
-        bindings_layer2: BTreeMap::new(), // combos start empty (opt-in per game)
+        combo_layers: BTreeMap::new(), // combos start empty (opt-in per game)
+        combo_layers_p2: BTreeMap::new(),
+        bindings_layer2: BTreeMap::new(), // legacy (migration only)
         bindings_layer2_p2: BTreeMap::new(),
-        combo_modifier: std::string::String::new(), // combos OFF by default
+        combo_modifier: std::string::String::new(),
         combo_modifier_p2: std::string::String::new(),
         source: "default".into(),
     }
@@ -278,6 +286,28 @@ fn migrate_legacy_key_names(km: &mut Keymap) {
             }
         }
     }
+}
+
+/// Migrate the pre-per-modifier single combo layer (issue #57 v1) into the new
+/// per-modifier `combo_layers` map: the old `bindings_layer2` becomes the layer of
+/// the old `combo_modifier`. Clears the legacy fields so they don't get re-read.
+/// No-op once migrated (legacy fields empty).
+fn migrate_legacy_combo(km: &mut Keymap) {
+    if !km.combo_modifier.is_empty() && !km.bindings_layer2.is_empty() {
+        km.combo_layers
+            .entry(std::mem::take(&mut km.combo_modifier))
+            .or_insert_with(|| std::mem::take(&mut km.bindings_layer2));
+    }
+    if !km.combo_modifier_p2.is_empty() && !km.bindings_layer2_p2.is_empty() {
+        km.combo_layers_p2
+            .entry(std::mem::take(&mut km.combo_modifier_p2))
+            .or_insert_with(|| std::mem::take(&mut km.bindings_layer2_p2));
+    }
+    // Drop any leftover legacy state so it never leaks back.
+    km.bindings_layer2.clear();
+    km.bindings_layer2_p2.clear();
+    km.combo_modifier.clear();
+    km.combo_modifier_p2.clear();
 }
 
 /// User-visible SD roots, priority order. Reads scan all, first hit
@@ -332,6 +362,8 @@ fn parse_keymap(json: &str, source: &str) -> Option<Keymap> {
             }
             // Upgrade pre-v1.4.0 French mouse-click identifiers to English.
             migrate_legacy_key_names(&mut km);
+            // Upgrade the pre-per-modifier single combo layer (#57 v1).
+            migrate_legacy_combo(&mut km);
             Some(km)
         }
         Err(e) => {
@@ -484,7 +516,7 @@ pub fn reset() {
         *g = None;
     }
     set_edit_player(1);
-    reset_edit_view();
+    reset_edit_subtabs();
 }
 
 /// Current binding for `button` (e.g. "A"), or `None` if unbound. Caller
@@ -492,19 +524,47 @@ pub fn reset() {
 pub fn current_binding(button: &str) -> Option<std::string::String> {
     let g = ACTIVE_KEYMAP.lock().ok()?;
     let km = g.as_ref()?;
-    // Which of the four maps: the combo VIEW is a session flag (reset to base when
-    // the editor opens), DECOUPLED from the persisted modifier so opening the
-    // editor shows base bindings without disabling combos. `edit_combo_view()` is
-    // an atomic (no re-lock of ACTIVE_KEYMAP → no deadlock).
-    let map = match (edit_player() == 2, edit_combo_view()) {
-        (true, true) => &km.bindings_layer2_p2,
-        (false, true) => &km.bindings_layer2,
-        (true, false) => &km.bindings_p2,
-        (false, false) => &km.bindings,
+    // The editor's active SUB-TAB decides the map: "" = base (P1/P2), else the
+    // combo layer of that modifier (issue #57, per-modifier). `edit_subtab_*` are
+    // atomics — no re-lock of ACTIVE_KEYMAP → no deadlock.
+    let combo_mod = edit_subtab_modifier();
+    let p2 = edit_player() == 2;
+    let val = if combo_mod.is_empty() {
+        let map = if p2 { &km.bindings_p2 } else { &km.bindings };
+        map.get(button)
+    } else {
+        let layers = if p2 { &km.combo_layers_p2 } else { &km.combo_layers };
+        layers.get(combo_mod).and_then(|m| m.get(button))
     };
-    map.get(button)
-        .filter(|v| !v.is_empty()) // "" = explicitly unbound (see set_binding)
+    val.filter(|v| !v.is_empty()) // "" = explicitly unbound (see set_binding)
         .cloned()
+}
+
+/// The set of Flash-key NAMES already bound to SOME button in the map the editor
+/// is currently on (player + sub-tab). The keyboard picker tints these so the user
+/// sees a key is already in use elsewhere (they can still pick it).
+pub fn current_map_used_keys() -> std::collections::BTreeSet<std::string::String> {
+    let mut set = std::collections::BTreeSet::new();
+    if let Ok(g) = ACTIVE_KEYMAP.lock() {
+        if let Some(km) = g.as_ref() {
+            let combo_mod = edit_subtab_modifier();
+            let p2 = edit_player() == 2;
+            let map = if combo_mod.is_empty() {
+                if p2 { Some(&km.bindings_p2) } else { Some(&km.bindings) }
+            } else {
+                let layers = if p2 { &km.combo_layers_p2 } else { &km.combo_layers };
+                layers.get(combo_mod)
+            };
+            if let Some(map) = map {
+                for v in map.values() {
+                    if !v.is_empty() {
+                        set.insert(v.clone());
+                    }
+                }
+            }
+        }
+    }
+    set
 }
 
 /// Set `button` → `flash_key` (e.g. "A" → "Space"). `None` clears the
@@ -518,23 +578,18 @@ pub fn set_binding(button: &str, flash_key: Option<&str>) -> bool {
             Err(_) => return false,
         };
         let Some(km) = g.as_mut() else { return false };
-        let map = match (edit_player() == 2, edit_combo_view()) {
-            (true, true) => &mut km.bindings_layer2_p2,
-            (false, true) => &mut km.bindings_layer2,
-            (true, false) => &mut km.bindings_p2,
-            (false, false) => &mut km.bindings,
-        };
-        match flash_key {
-            Some(k) => {
-                map.insert(button.into(), k.into());
-            }
-            None => {
-                // Store an explicit empty marker instead of removing the key, so
-                // a deliberate unbind survives the default-merge on the next load
-                // (an ABSENT button gets its fallback default; an empty one stays
-                // off). See merge_fallback_defaults.
-                map.insert(button.into(), std::string::String::new());
-            }
+        let combo_mod = edit_subtab_modifier();
+        let p2 = edit_player() == 2;
+        // Empty marker (not remove) so a deliberate unbind survives the next
+        // default-merge (ABSENT button gets its fallback; empty stays off).
+        let val = flash_key.map(std::string::String::from).unwrap_or_default();
+        if combo_mod.is_empty() {
+            let map = if p2 { &mut km.bindings_p2 } else { &mut km.bindings };
+            map.insert(button.into(), val);
+        } else {
+            // Per-modifier combo layer (issue #57): create it on first bind.
+            let layers = if p2 { &mut km.combo_layers_p2 } else { &mut km.combo_layers };
+            layers.entry(combo_mod.to_string()).or_default().insert(button.into(), val);
         }
         // The user just edited by hand → mark the keymap as user-authored so a
         // later community profile (#20) asks before overwriting it.
@@ -822,16 +877,9 @@ pub fn binding_diff_rows(cur: &Keymap, tgt: &Keymap) -> std::vec::Vec<std::strin
         }
     };
     let mut rows = std::vec::Vec::new();
-    // Base + combo layers, both players (issue #57): a combo-only change must show
-    // up too — otherwise the share/apply preview reports "no changes" when only the
-    // combo layer differs. Labels distinguish the four sets.
-    let sets = [
-        ("", &cur.bindings, &tgt.bindings),
-        ("P2 ", &cur.bindings_p2, &tgt.bindings_p2),
-        ("combo ", &cur.bindings_layer2, &tgt.bindings_layer2),
-        ("P2 combo ", &cur.bindings_layer2_p2, &tgt.bindings_layer2_p2),
-    ];
-    for (label, c_map, t_map) in sets {
+    let mut diff_map = |label: &str,
+                        c_map: &BTreeMap<std::string::String, std::string::String>,
+                        t_map: &BTreeMap<std::string::String, std::string::String>| {
         for btn in EDITABLE_BUTTONS {
             let c = c_map.get(*btn).map(std::string::String::as_str).unwrap_or("");
             let n = t_map.get(*btn).map(std::string::String::as_str).unwrap_or("");
@@ -839,16 +887,46 @@ pub fn binding_diff_rows(cur: &Keymap, tgt: &Keymap) -> std::vec::Vec<std::strin
                 rows.push(std::format!("{}{}: {} -> {}", label, btn, disp(c), disp(n)));
             }
         }
-    }
-    // Combo modifier changes (turning combos on/off, or swapping the button).
-    let mod_disp = |m: &str| -> String { if m.is_empty() { none.to_string() } else { m.to_string() } };
-    if cur.combo_modifier != tgt.combo_modifier {
-        rows.push(std::format!("combo mod: {} -> {}", mod_disp(&cur.combo_modifier), mod_disp(&tgt.combo_modifier)));
-    }
-    if cur.combo_modifier_p2 != tgt.combo_modifier_p2 {
-        rows.push(std::format!("P2 combo mod: {} -> {}", mod_disp(&cur.combo_modifier_p2), mod_disp(&tgt.combo_modifier_p2)));
+    };
+    // Base bindings, both players (#40).
+    diff_map("", &cur.bindings, &tgt.bindings);
+    diff_map("P2 ", &cur.bindings_p2, &tgt.bindings_p2);
+    // Per-modifier combo layers, both players (#57): a combo-only change must show
+    // up too, and under the RIGHT modifier ("ZL+A" vs "R+A"). An absent layer diffs
+    // against an empty one, so turning a combo on/off registers.
+    let empty = BTreeMap::new();
+    for m in &SUBTAB_MODS[1..] {
+        let c1 = cur.combo_layers.get(*m).unwrap_or(&empty);
+        let t1 = tgt.combo_layers.get(*m).unwrap_or(&empty);
+        diff_map(&std::format!("{}+", m), c1, t1);
+        let c2 = cur.combo_layers_p2.get(*m).unwrap_or(&empty);
+        let t2 = tgt.combo_layers_p2.get(*m).unwrap_or(&empty);
+        diff_map(&std::format!("P2 {}+", m), c2, t2);
     }
     rows
+}
+
+/// A preview row for a cursor-speed change (issue #57 sharing), or None when
+/// `cur == tgt`. Cursor speed lives outside the keymap, so it isn't in
+/// `binding_diff_rows` — the share/apply preview appends this so the user SEES the
+/// pointer speed is part of the profile. `-1` shows as the "(none)" label.
+pub fn cursor_diff_row(cur: i32, tgt: i32) -> Option<std::string::String> {
+    if cur == tgt {
+        return None;
+    }
+    let disp = |v: i32| -> std::string::String {
+        if v < 0 {
+            crate::loc::s().none.to_string()
+        } else {
+            std::format!("#{}", v)
+        }
+    };
+    Some(std::format!(
+        "{}: {} -> {}",
+        crate::loc::s().set_cursor_speed,
+        disp(cur),
+        disp(tgt),
+    ))
 }
 
 /// The active game's basename, or None when no game is active / the global
@@ -1001,34 +1079,47 @@ pub fn set_edit_player(player: u8) {
     );
 }
 
-/// Whether the editor is currently VIEWING the combo layer (issue #57), PER PLAYER
-/// (index 0 = P1, 1 = P2) so switching the P1/P2 tab restores that player's own
-/// sub-tab instead of leaking P1's view onto P2. Session state, reset to `false`
-/// (NORMAL) for both when the editor opens — WITHOUT clearing the persisted
-/// modifier (combos stay enabled in-game). Steers only the editor's
-/// `current_binding` / `set_binding`; in-game resolution reads `lookup*` directly.
-static EDIT_COMBO_VIEW: [std::sync::atomic::AtomicBool; 2] = [
-    std::sync::atomic::AtomicBool::new(false),
-    std::sync::atomic::AtomicBool::new(false),
+/// The editor's active SUB-TAB, PER PLAYER (index 0 = P1, 1 = P2), as an index
+/// into `SUBTAB_MODS`: 0 = NORMAL (base bindings), 1..=4 = the ZL/ZR/L/R combo
+/// layer being edited (issue #57, per-modifier). Session state, reset to NORMAL
+/// for both when the editor opens (the persisted combo layers are untouched — a
+/// modifier stays active in-game as long as its layer has bindings). Steers only
+/// the editor's `current_binding` / `set_binding`; in-game uses `lookup_combo*`.
+static EDIT_SUBTAB: [std::sync::atomic::AtomicU8; 2] = [
+    std::sync::atomic::AtomicU8::new(0),
+    std::sync::atomic::AtomicU8::new(0),
 ];
 
-fn combo_view_idx() -> usize {
+/// Sub-tab index -> modifier name. Index 0 ("") = the NORMAL (base) tab.
+pub const SUBTAB_MODS: [&str; 5] = ["", "ZL", "ZR", "L", "R"];
+
+fn subtab_slot() -> usize {
     if edit_player() == 2 { 1 } else { 0 }
 }
 
-pub fn edit_combo_view() -> bool {
-    EDIT_COMBO_VIEW[combo_view_idx()].load(std::sync::atomic::Ordering::Relaxed)
+/// Current sub-tab index (0..=4) for the edit player. 0 = NORMAL.
+pub fn edit_subtab_index() -> usize {
+    EDIT_SUBTAB[subtab_slot()].load(std::sync::atomic::Ordering::Relaxed) as usize
 }
 
-pub fn set_edit_combo_view(on: bool) {
-    EDIT_COMBO_VIEW[combo_view_idx()].store(on, std::sync::atomic::Ordering::Relaxed);
+/// Set the edit player's sub-tab index (clamped to a valid slot).
+pub fn set_edit_subtab_index(idx: usize) {
+    EDIT_SUBTAB[subtab_slot()].store(
+        idx.min(SUBTAB_MODS.len() - 1) as u8,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
-/// Reset BOTH players' combo views to NORMAL — called when the editor opens so it
-/// always starts clean, without touching the persisted per-player modifiers.
-pub fn reset_edit_view() {
-    for v in &EDIT_COMBO_VIEW {
-        v.store(false, std::sync::atomic::Ordering::Relaxed);
+/// The modifier name of the edit player's current sub-tab ("" = NORMAL/base).
+pub fn edit_subtab_modifier() -> &'static str {
+    SUBTAB_MODS[edit_subtab_index()]
+}
+
+/// Reset BOTH players' sub-tabs to NORMAL — called when the editor opens so it
+/// always starts clean, without touching the persisted combo layers.
+pub fn reset_edit_subtabs() {
+    for v in &EDIT_SUBTAB {
+        v.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -1044,79 +1135,56 @@ pub fn lookup_p2(button_name: &str) -> Option<core::ffi::c_int> {
     Some(flash_key_name_to_sk(key_name))
 }
 
-/// Combo-layer (issue #57) equivalent of [`lookup`]: the key `button_name` sends
-/// while the combo modifier is held. Returns `None` when the button has NO combo
-/// binding (or an empty one) — the C++ input layer treats that as "fall through
-/// to the base key", so holding the modifier never breaks unremapped buttons.
-pub fn lookup_layer2(button_name: &str) -> Option<core::ffi::c_int> {
+/// The Flash `SK_*` a button sends while `modifier` (ZL/ZR/L/R) is held on
+/// controller 1 (issue #57, per-modifier layer). `None` = no combo override for
+/// this button → the C++ input layer falls through to the base key, so a held
+/// modifier never breaks unremapped buttons.
+pub fn lookup_combo(modifier: &str, button_name: &str) -> Option<core::ffi::c_int> {
     let g = ACTIVE_KEYMAP.lock().ok()?;
     let km = g.as_ref()?;
-    let key_name = km.bindings_layer2.get(button_name)?;
-    if key_name.is_empty() {
-        return None; // no combo override → C++ uses the base binding
-    }
-    Some(flash_key_name_to_sk(key_name))
-}
-
-/// Player-2 combo layer resolution (issue #57), mirror of [`lookup_layer2`].
-pub fn lookup_layer2_p2(button_name: &str) -> Option<core::ffi::c_int> {
-    let g = ACTIVE_KEYMAP.lock().ok()?;
-    let km = g.as_ref()?;
-    let key_name = km.bindings_layer2_p2.get(button_name)?;
+    let key_name = km.combo_layers.get(modifier)?.get(button_name)?;
     if key_name.is_empty() {
         return None;
     }
     Some(flash_key_name_to_sk(key_name))
 }
 
-/// P1 combo modifier button ("" = combos off), for the C++ input layer. Owned
-/// copy so the caller doesn't hold the lock.
-pub fn combo_modifier() -> std::string::String {
+/// Player-2 counterpart of [`lookup_combo`].
+pub fn lookup_combo_p2(modifier: &str, button_name: &str) -> Option<core::ffi::c_int> {
+    let g = ACTIVE_KEYMAP.lock().ok()?;
+    let km = g.as_ref()?;
+    let key_name = km.combo_layers_p2.get(modifier)?.get(button_name)?;
+    if key_name.is_empty() {
+        return None;
+    }
+    Some(flash_key_name_to_sk(key_name))
+}
+
+/// A combo layer is "active" if it has at least one NON-empty binding (a layer
+/// where every button is explicitly unbound counts as off).
+fn layer_has_binding(
+    layer: Option<&BTreeMap<std::string::String, std::string::String>>,
+) -> bool {
+    layer.map(|m| m.values().any(|v| !v.is_empty())).unwrap_or(false)
+}
+
+/// True when P1's `modifier` (ZL/ZR/L/R) has a live combo layer → in-game that
+/// button acts as a modifier (its own base key muted; hold it to reach the layer).
+pub fn combo_active(modifier: &str) -> bool {
     ACTIVE_KEYMAP
         .lock()
         .ok()
-        .and_then(|g| g.as_ref().map(|k| k.combo_modifier.clone()))
-        .unwrap_or_default()
+        .and_then(|g| g.as_ref().map(|k| layer_has_binding(k.combo_layers.get(modifier))))
+        .unwrap_or(false)
 }
 
-/// P2 combo modifier button ("" = combos off), for the C++ input layer.
-pub fn combo_modifier_p2() -> std::string::String {
+/// Player-2 counterpart of [`combo_active`].
+pub fn combo_active_p2(modifier: &str) -> bool {
     ACTIVE_KEYMAP
         .lock()
         .ok()
-        .and_then(|g| g.as_ref().map(|k| k.combo_modifier_p2.clone()))
-        .unwrap_or_default()
-}
-
-/// The combo modifier of the player the editor is CURRENTLY editing (P1 or P2),
-/// for the editor header. `edit_player`-driven so the tab you're on shows its own
-/// modifier.
-pub fn edit_combo_modifier() -> std::string::String {
-    if edit_player() == 2 {
-        combo_modifier_p2()
-    } else {
-        combo_modifier()
-    }
-}
-
-/// Set the CURRENT edit player's combo modifier ("" / "ZL" / "ZR" / "L" / "R")
-/// and persist. Cycled with X in the editor's combo view. Marks the keymap
-/// "user"-authored.
-pub fn set_edit_combo_modifier(modifier: &str) -> bool {
-    {
-        let mut g = match ACTIVE_KEYMAP.lock() {
-            Ok(g) => g,
-            Err(_) => return false,
-        };
-        let Some(km) = g.as_mut() else { return false };
-        if edit_player() == 2 {
-            km.combo_modifier_p2 = modifier.into();
-        } else {
-            km.combo_modifier = modifier.into();
-        }
-        km.source = "user".into();
-    }
-    save_sidecar()
+        .and_then(|g| g.as_ref().map(|k| layer_has_binding(k.combo_layers_p2.get(modifier))))
+        .unwrap_or(false)
 }
 
 /// Localised DISPLAY label for a Flash-key NAME. The stored/internal names stay

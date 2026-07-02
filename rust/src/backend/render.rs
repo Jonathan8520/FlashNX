@@ -5031,11 +5031,10 @@ impl SwitchRenderBackend {
         bindings: &[(&str, Option<std::string::String>)],
         visible_rows: usize,
         player: u8,
-        // Combo layer (issue #57): `combo_view` = the combo sub-tab is selected
-        // (editing the combo bindings); `combo_mod` is the current player's modifier
-        // ("" = none set). The two are decoupled — combos can be enabled (modifier
-        // set) while viewing NORMAL, so we hint that below the tabs.
-        combo_view: bool,
+        // Combo sub-tab (issue #57, per-modifier): `subtab` is the active slot
+        // (0 = NORMAL/base, 1..=4 = ZL/ZR/L/R), `combo_mod` its modifier ("" for
+        // NORMAL). Each modifier edits its OWN layer, so the rows show "ZL+A".
+        subtab: usize,
         combo_mod: &str,
     ) {
         // Shared chrome (dim + panel + title + footer). Wide tier for the two
@@ -5065,22 +5064,9 @@ impl SwitchRenderBackend {
             2.2,
             38.0,
         );
-        // The active sub-tab is NORMAL unless the combo VIEW is on (then the
-        // modifier slot). Decoupled from whether combos are enabled.
-        let sub_active = if !combo_view {
-            0
-        } else {
-            match combo_mod {
-                "ZL" => 1,
-                "ZR" => 2,
-                "L" => 3,
-                "R" => 4,
-                _ => 1,
-            }
-        };
         self.draw_chip_strip(
             &["NORMAL", "ZL", "ZR", "L", "R"],
-            sub_active,
+            subtab.min(4),
             frame.y + 98.0,
             1.9,
             34.0,
@@ -5111,7 +5097,7 @@ impl SwitchRenderBackend {
             }
             // Combo view: show the chord ("ZL+A"), not the bare button, so it's
             // clear the binding fires when the modifier is held.
-            let btn_label = if !combo_view || combo_mod.is_empty() {
+            let btn_label = if combo_mod.is_empty() {
                 std::borrow::Cow::Borrowed(*btn)
             } else {
                 std::borrow::Cow::Owned(std::format!("{}+{}", combo_mod, btn))
@@ -5157,10 +5143,16 @@ impl SwitchRenderBackend {
 
     /// TOUCHES keyboard picker (issue #55) — shown when the user presses A on a
     /// list row. Draws a real PC keyboard from `keymap::KEYBOARD` (positioned keys,
-    /// numpad on the RIGHT) with the key at `sel_key_idx` highlighted amber. The
-    /// user navigates geometrically (menu.rs). QWERTY is fixed for every language
-    /// (Flash reads US keyCodes; CJK boards are physically QWERTY too).
-    pub fn draw_touches_keyboard(&mut self, button_name: &str, sel_key_idx: usize) {
+    /// numpad on the RIGHT) with the key at `sel_key_idx` highlighted amber. Keys
+    /// already bound to another button in the current map (`used`) get a teal cap
+    /// so the user sees a key is already in use (they can still pick it). The user
+    /// navigates geometrically (menu.rs). QWERTY is fixed for every language.
+    pub fn draw_touches_keyboard(
+        &mut self,
+        button_name: &str,
+        sel_key_idx: usize,
+        used: &std::collections::BTreeSet<std::string::String>,
+    ) {
         let keys = crate::keymap::KEYBOARD;
         const KEY_H: f32 = 48.0;
         const KEY_GAP: f32 = 6.0;
@@ -5197,7 +5189,9 @@ impl SwitchRenderBackend {
                 ty: swf::Twips::from_pixels(y as f64),
             };
             let (cap_col, txt_col) = if i == sel_key_idx {
-                (0xFFD740u32, 0x1A1A1Au32) // amber cap, near-black label
+                (0xFFD740u32, 0x1A1A1Au32) // amber cap, near-black label (cursor)
+            } else if used.contains(name) {
+                (0x2E6E63u32, 0xEAF7F3u32) // teal cap = already bound elsewhere
             } else {
                 (0x2A3340u32, MODAL_ROW_COL) // slate cap, light label
             };

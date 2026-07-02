@@ -845,12 +845,22 @@ pub extern "C" fn ruffle_keymap_lookup_p2(name: *const c_char) -> c_int {
     keymap::lookup_p2(button).unwrap_or(SK_NONE)
 }
 
-/// Combo-layer (issue #57) equivalent of [`ruffle_keymap_lookup`]: the key
-/// `name` sends while the combo modifier is held. Returns `SK_NONE` when the
-/// button has no combo override — C++ then falls through to the base key, so
-/// holding the modifier never breaks unremapped buttons (e.g. movement).
+/// Map a C++ modifier code (1=ZL, 2=ZR, 3=L, 4=R) to its name, or "" if invalid.
+fn combo_mod_name(code: c_int) -> &'static str {
+    match code {
+        1 => "ZL",
+        2 => "ZR",
+        3 => "L",
+        4 => "R",
+        _ => "",
+    }
+}
+
+/// Combo-layer (issue #57, per-modifier) resolution: the key `name` sends while
+/// `mod_code` (1=ZL,2=ZR,3=L,4=R) is held on controller 1. `SK_NONE` = no override
+/// for that button → C++ falls through to the base key.
 #[no_mangle]
-pub extern "C" fn ruffle_keymap_lookup_layer2(name: *const c_char) -> c_int {
+pub extern "C" fn ruffle_keymap_lookup_combo(mod_code: c_int, name: *const c_char) -> c_int {
     if name.is_null() {
         return SK_NONE;
     }
@@ -859,27 +869,12 @@ pub extern "C" fn ruffle_keymap_lookup_layer2(name: *const c_char) -> c_int {
     let Ok(button) = s.to_str() else {
         return SK_NONE;
     };
-    keymap::lookup_layer2(button).unwrap_or(SK_NONE)
+    keymap::lookup_combo(combo_mod_name(mod_code), button).unwrap_or(SK_NONE)
 }
 
-/// Which button is the combo modifier for the active keymap (issue #57), as a
-/// small int so C++ can map it to a pad mask without marshalling a string:
-/// 0 = OFF (no combos), 1 = ZL, 2 = ZR, 3 = L, 4 = R.
+/// Player-2 counterpart of [`ruffle_keymap_lookup_combo`].
 #[no_mangle]
-pub extern "C" fn ruffle_keymap_combo_modifier() -> c_int {
-    match keymap::combo_modifier().as_str() {
-        "ZL" => 1,
-        "ZR" => 2,
-        "L" => 3,
-        "R" => 4,
-        _ => 0,
-    }
-}
-
-/// Player-2 combo layer resolution (issue #57), mirror of
-/// [`ruffle_keymap_lookup_layer2`].
-#[no_mangle]
-pub extern "C" fn ruffle_keymap_lookup_layer2_p2(name: *const c_char) -> c_int {
+pub extern "C" fn ruffle_keymap_lookup_combo_p2(mod_code: c_int, name: *const c_char) -> c_int {
     if name.is_null() {
         return SK_NONE;
     }
@@ -888,20 +883,20 @@ pub extern "C" fn ruffle_keymap_lookup_layer2_p2(name: *const c_char) -> c_int {
     let Ok(button) = s.to_str() else {
         return SK_NONE;
     };
-    keymap::lookup_layer2_p2(button).unwrap_or(SK_NONE)
+    keymap::lookup_combo_p2(combo_mod_name(mod_code), button).unwrap_or(SK_NONE)
 }
 
-/// Player-2 combo modifier for the active keymap (issue #57), same encoding as
-/// [`ruffle_keymap_combo_modifier`]: 0 = off, 1 = ZL, 2 = ZR, 3 = L, 4 = R.
+/// 1 when `mod_code`'s combo layer is active (has a binding) for P1 → C++ treats
+/// that shoulder as a modifier; 0 otherwise.
 #[no_mangle]
-pub extern "C" fn ruffle_keymap_combo_modifier_p2() -> c_int {
-    match keymap::combo_modifier_p2().as_str() {
-        "ZL" => 1,
-        "ZR" => 2,
-        "L" => 3,
-        "R" => 4,
-        _ => 0,
-    }
+pub extern "C" fn ruffle_keymap_combo_active(mod_code: c_int) -> c_int {
+    keymap::combo_active(combo_mod_name(mod_code)) as c_int
+}
+
+/// Player-2 counterpart of [`ruffle_keymap_combo_active`].
+#[no_mangle]
+pub extern "C" fn ruffle_keymap_combo_active_p2(mod_code: c_int) -> c_int {
+    keymap::combo_active_p2(combo_mod_name(mod_code)) as c_int
 }
 
 /// Per-game cursor-speed preset index for the active keymap, or -1 if unset.

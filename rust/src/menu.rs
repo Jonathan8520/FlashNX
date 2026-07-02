@@ -153,7 +153,7 @@ pub fn screen_kind() -> u8 {
 /// in-game pause entry uses `open_submenu` instead.
 pub fn open() {
     keymap::set_edit_player(1); // always start on Player 1 (issue #40)...
-    keymap::reset_edit_view(); // ...both players on the NORMAL sub-tab, without
+    keymap::reset_edit_subtabs(); // ...both players on the NORMAL sub-tab, without
     // clearing the persisted modifiers (combos stay enabled in-game) (issue #57).
     if let Ok(mut s) = TOUCHES.lock() {
         s.submenu = false;
@@ -396,7 +396,7 @@ fn handle_menu_input(s: &mut State, button: &str, mut selection: usize) {
             MENU_EDIT => {
                 // Enter the editor, KEEPING sub-menu context (B returns here).
                 keymap::set_edit_player(1);
-                keymap::reset_edit_view(); // both players start on NORMAL (#57)
+                keymap::reset_edit_subtabs(); // both players start on NORMAL (#57)
                 s.screen = Screen::List { selection: 0, scroll_offset: 0 };
                 return;
             }
@@ -483,7 +483,10 @@ fn run_open_preview(profile_idx: usize) {
     };
     let Some(profile) = profile else { return };
     let current = keymap::effective_for(&basename);
-    let rows = keymap::binding_diff_rows(&current, &profile.to_keymap());
+    let mut rows = keymap::binding_diff_rows(&current, &profile.to_keymap());
+    if let Some(r) = keymap::cursor_diff_row(keymap::cursor_speed_for(&basename), profile.cursor_speed) {
+        rows.push(r);
+    }
     if rows.is_empty() {
         if let Ok(mut s) = TOUCHES.lock() {
             set_toast(&mut s, crate::loc::s().profile_preview_none.to_string(), TOAST_INFO);
@@ -545,13 +548,19 @@ fn run_open_share_confirm() {
         .into_iter()
         .find(|m| m.profile.id.ends_with(&suffix));
     let is_update = mine.is_some();
+    let before_cursor = mine.as_ref().map(|m| m.profile.cursor_speed).unwrap_or(-1);
     // "before" = the profile we'd update, else ~the default (first share). As a
     // full Keymap so base + combos + modifier all diff (#40/#57).
     let before = match mine {
         Some(m) => m.profile.to_keymap(),
         None => keymap::revert_target(&basename), // ~default for a first share
     };
-    let rows = cap_rows(keymap::binding_diff_rows(&before, &current));
+    let mut rows = keymap::binding_diff_rows(&before, &current);
+    // Cursor speed lives outside the keymap — append its change so it's visible.
+    if let Some(r) = keymap::cursor_diff_row(before_cursor, keymap::cursor_speed_for(&basename)) {
+        rows.push(r);
+    }
+    let rows = cap_rows(rows);
     if let Ok(mut s) = TOUCHES.lock() {
         s.preview_rows = rows;
         s.share_is_update = is_update;
@@ -664,35 +673,19 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
         }
         // Player toggle (issue #40): X flips P1 <-> P2 (2 items, a toggle is fine).
         "X" => keymap::set_edit_player(if keymap::edit_player() == 2 { 1 } else { 2 }),
-        // Combo sub-tab (issue #57): L/R move along [NORMAL, ZL, ZR, L, R]. NORMAL =
-        // the base bindings (view only — the persisted modifier is kept, so combos
-        // stay enabled in-game). A modifier position enters the combo VIEW and sets
-        // that player's modifier. Entering the combo view from NORMAL lands on the
-        // already-set modifier (doesn't change it). Modifier changes mark `dirty` so
-        // C++ re-reads on the next frame.
+        // Combo sub-tab (issue #57, per-modifier): L/R move the VIEW along
+        // [NORMAL, ZL, ZR, L, R]. NORMAL edits base bindings; a modifier position
+        // edits THAT modifier's own combo layer. Pure view — a modifier becomes
+        // active in-game as soon as its layer gets a binding (no separate toggle).
         "L" | "R" => {
-            const POS: [&str; 5] = ["", "ZL", "ZR", "L", "R"]; // index = sub-tab slot
-            let modif = keymap::edit_combo_modifier();
-            let modif_pos = POS.iter().position(|m| *m == modif).unwrap_or(1);
-            let cur = if keymap::edit_combo_view() { modif_pos } else { 0 };
+            let cur = keymap::edit_subtab_index();
             let new = if button == "R" {
-                if cur == 0 && !modif.is_empty() {
-                    modif_pos // enter combo on the existing modifier, unchanged
-                } else {
-                    (cur + 1).min(POS.len() - 1)
-                }
+                (cur + 1).min(keymap::SUBTAB_MODS.len() - 1)
             } else {
                 cur.saturating_sub(1)
             };
             if new != cur {
-                if new == 0 {
-                    keymap::set_edit_combo_view(false); // back to NORMAL, modifier kept
-                } else {
-                    keymap::set_edit_combo_view(true);
-                    if POS[new] != modif && keymap::set_edit_combo_modifier(POS[new]) {
-                        s.dirty = true;
-                    }
-                }
+                keymap::set_edit_subtab_index(new);
             }
         }
         "A" => {
@@ -893,20 +886,21 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
                 &bindings,
                 LIST_VISIBLE_ROWS,
                 keymap::edit_player(),
-                keymap::edit_combo_view(),
-                &keymap::edit_combo_modifier(),
+                keymap::edit_subtab_index(),
+                keymap::edit_subtab_modifier(),
             );
         }
         Screen::Keyboard { button_idx, key_idx } => {
-            // Title shows the chord in combo view ("ZL+A"), else the bare button.
+            // Title shows the chord in a combo sub-tab ("ZL+A"), else the button.
             let btn = keymap::EDITABLE_BUTTONS[button_idx];
-            let modif = keymap::edit_combo_modifier();
-            let label = if keymap::edit_combo_view() && !modif.is_empty() {
-                std::format!("{}+{}", modif, btn)
-            } else {
+            let modif = keymap::edit_subtab_modifier();
+            let label = if modif.is_empty() {
                 btn.to_string()
+            } else {
+                std::format!("{}+{}", modif, btn)
             };
-            backend.draw_touches_keyboard(&label, key_idx);
+            let used = keymap::current_map_used_keys();
+            backend.draw_touches_keyboard(&label, key_idx, &used);
         }
         Screen::Profiles { selection } => {
             let (active, mut rows): (std::string::String, std::vec::Vec<std::string::String>) =
