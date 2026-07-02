@@ -12,10 +12,10 @@
     "A": "Space",
     "B": "Up",
     "Down": "Down",
-    "L": "Shift",
+    "L": "-",
     "Left": "Left",
     "Plus": "P",
-    "R": "Enter",
+    "R": "=",
     "Right": "Right",
     "StickLDown": "Down",
     "StickLLeft": "Left",
@@ -42,5 +42,9 @@
     "Up": "W",
     "X": "Num3",
     "Y": "Num4"
-  }
+  },
+  "combo_layers": {},
+  "combo_layers_p2": {},
+  "cursor_speed": 1,
+  "show_cursor": true
 }
