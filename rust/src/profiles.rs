@@ -67,6 +67,25 @@ pub struct Profile {
     pub bindings: BTreeMap<std::string::String, std::string::String>,
     #[serde(default)]
     pub bindings_p2: BTreeMap<std::string::String, std::string::String>,
+    // Combo layer (issue #57) — shared/applied like the base bindings. `#[serde(
+    // default)]` keeps pre-#57 catalog entries loading (absent = no combos).
+    #[serde(default)]
+    pub bindings_layer2: BTreeMap<std::string::String, std::string::String>,
+    #[serde(default)]
+    pub bindings_layer2_p2: BTreeMap<std::string::String, std::string::String>,
+    #[serde(default)]
+    pub combo_modifier: std::string::String,
+    #[serde(default)]
+    pub combo_modifier_p2: std::string::String,
+    /// Per-game cursor speed preset index, -1 = unset (the game keeps its own /
+    /// the default). Lives in a separate `.cursor` file locally; carried here so a
+    /// shared profile restores the author's pointer speed too.
+    #[serde(default = "default_cursor_speed")]
+    pub cursor_speed: i32,
+}
+
+fn default_cursor_speed() -> i32 {
+    -1
 }
 
 impl Profile {
@@ -577,16 +596,22 @@ pub fn apply(basename: &str, profile: &Profile) -> bool {
         version: 1,
         bindings: profile.bindings.clone(),
         bindings_p2: profile.bindings_p2.clone(),
-        // Community profiles (issue #20) don't carry combos yet — apply as a plain
-        // control set. This is non-destructive: apply_keymap backs up the user's
-        // whole sidecar (combos included), so a revert restores their combo layer.
-        bindings_layer2: std::collections::BTreeMap::new(),
-        bindings_layer2_p2: std::collections::BTreeMap::new(),
-        combo_modifier: std::string::String::new(),
-        combo_modifier_p2: std::string::String::new(),
+        // Combos (issue #57) travel with the profile now. Pre-#57 catalog entries
+        // have these empty (serde default), so applying them clears combos — still
+        // non-destructive: apply_keymap backs up the user's whole sidecar first.
+        bindings_layer2: profile.bindings_layer2.clone(),
+        bindings_layer2_p2: profile.bindings_layer2_p2.clone(),
+        combo_modifier: profile.combo_modifier.clone(),
+        combo_modifier_p2: profile.combo_modifier_p2.clone(),
         source: std::format!("community:{}", profile.id),
     };
-    crate::keymap::apply_keymap(basename, &km)
+    let ok = crate::keymap::apply_keymap(basename, &km);
+    // Cursor speed lives in its own `.cursor` file. Apply the profile's if set
+    // (>= 0); leave the game's own untouched when the profile carries none (-1).
+    if ok && profile.cursor_speed >= 0 {
+        crate::keymap::set_cursor_speed_for(basename, profile.cursor_speed);
+    }
+    ok
 }
 
 // ── Sharing (reuses the bug-report relay, issue #20) ────────────────────────
@@ -614,6 +639,14 @@ struct SharePayload<'a> {
     owner_token: &'a str,
     bindings: &'a BTreeMap<std::string::String, std::string::String>,
     bindings_p2: &'a BTreeMap<std::string::String, std::string::String>,
+    // Combo layer (issue #57) + per-game cursor speed, so a shared profile carries
+    // the WHOLE control setup, not just the base bindings. The relay Worker must
+    // store these too (worker.js) — a client-only change would be dropped there.
+    bindings_layer2: &'a BTreeMap<std::string::String, std::string::String>,
+    bindings_layer2_p2: &'a BTreeMap<std::string::String, std::string::String>,
+    combo_modifier: &'a str,
+    combo_modifier_p2: &'a str,
+    cursor_speed: i32,
 }
 
 /// Submit the player's current controls for a game as a community profile.
@@ -629,6 +662,7 @@ pub fn share(
     fp_uuid: &str,
     swf_hash: &str,
     km: &Keymap,
+    cursor_speed: i32,
 ) -> Result<std::string::String, std::string::String> {
     // Drop a trailing ".swf" so the catalog stores/shows "Super Mario 63", not
     // "Super Mario 63.swf" — keeps titles (and the worker-derived id) clean and
@@ -653,6 +687,11 @@ pub fn share(
         owner_token: &token,
         bindings: &km.bindings,
         bindings_p2: &km.bindings_p2,
+        bindings_layer2: &km.bindings_layer2,
+        bindings_layer2_p2: &km.bindings_layer2_p2,
+        combo_modifier: &km.combo_modifier,
+        combo_modifier_p2: &km.combo_modifier_p2,
+        cursor_speed,
     };
     let body = serde_json::to_string(&payload)
         .map_err(|e| std::format!("encode failed: {}", e))?;

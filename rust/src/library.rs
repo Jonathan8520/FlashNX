@@ -2028,7 +2028,8 @@ fn run_share_profile_flow(game_idx: usize) {
     // client-side content de-dup needed (it was rejecting legit variants).
     let km = keymap::effective_for(&basename);
     let swf_hash = crate::profiles::swf_hash_of(&path).unwrap_or_default();
-    let (ok, msg) = match crate::profiles::share(&title, "", &swf_hash, &km) {
+    let cursor_speed = keymap::cursor_speed_for(&basename);
+    let (ok, msg) = match crate::profiles::share(&title, "", &swf_hash, &km, cursor_speed) {
         Ok(id) => {
             // Tag the local keymap as catalog profile <id>: blocks a pointless
             // re-share of the unchanged controls and marks it active in the

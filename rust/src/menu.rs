@@ -572,8 +572,9 @@ fn run_share() {
     let Some((basename, title, path)) = game_ctx() else { return };
     let km = keymap::effective_for(&basename);
     let swf_hash = crate::profiles::swf_hash_of(&path).unwrap_or_default();
+    let cursor_speed = keymap::cursor_speed_for(&basename);
     let lc = crate::loc::s();
-    let (msg, kind) = match crate::profiles::share(&title, "", &swf_hash, &km) {
+    let (msg, kind) = match crate::profiles::share(&title, "", &swf_hash, &km, cursor_speed) {
         Ok(id) => {
             keymap::mark_shared(&basename, &id);
             crate::profiles::invalidate_online_cache();

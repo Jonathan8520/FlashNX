@@ -216,6 +216,12 @@ async function handleProfileShare(r, env) {
   // to it — only this folder + the index entry need to agree.
   const file = `${slug}/${id}.profile.json`;
 
+  const obj = (v) => (v && typeof v === "object" ? v : {});
+  // Cursor speed preset index: keep it a sane small int, else -1 (unset).
+  const cursorSpeed =
+    Number.isInteger(r.cursor_speed) && r.cursor_speed >= 0 && r.cursor_speed <= 20
+      ? r.cursor_speed
+      : -1;
   const profile = {
     schema: 1,
     id,
@@ -223,9 +229,15 @@ async function handleProfileShare(r, env) {
     // Optional display nickname (#20) — anonymous label, not an identity.
     author: s(r.author, 40),
     verified: false,
-    bindings: r.bindings && typeof r.bindings === "object" ? r.bindings : {},
-    bindings_p2:
-      r.bindings_p2 && typeof r.bindings_p2 === "object" ? r.bindings_p2 : {},
+    bindings: obj(r.bindings),
+    bindings_p2: obj(r.bindings_p2),
+    // Combo layer (#57) + per-game cursor speed, so a shared profile carries the
+    // whole control setup, not just the base bindings.
+    bindings_layer2: obj(r.bindings_layer2),
+    bindings_layer2_p2: obj(r.bindings_layer2_p2),
+    combo_modifier: s(r.combo_modifier, 4),
+    combo_modifier_p2: s(r.combo_modifier_p2, 4),
+    cursor_speed: cursorSpeed,
   };
   const indexEntry = { id, title, fp_uuid: fpUuid, swf_hash: swfHash, file, verified: false };
 
