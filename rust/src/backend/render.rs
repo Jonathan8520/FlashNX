@@ -359,11 +359,18 @@ static LIVE_GPU_SHAPES: AtomicUsize = AtomicUsize::new(0);
 // shapes peaked at ~114 MB of vertices, OOMing the 64 MB arena — alloc() then
 // returned None, build_gpu_draw dropped the draw, and the art went invisible.
 // 192 MB gives ~1.7× headroom over the observed peak.
-const ARENA_VBO_SIZE: GLsizeiptr = 192 * 1024 * 1024;  // 192 MB
-// Bumped 32 → 96 MB at the same time: the Binding of Isaac index data peaked at
-// ~56 MB (the 32 MB arena would have OOMed too on a longer session). ~1.7×
-// headroom. (Earlier: 13 MB peak on a 5-minute Mario 63 jetpack run.)
-const ARENA_IBO_SIZE: GLsizeiptr = 96 * 1024 * 1024;  // 96 MB
+// Bumped 192 → 384 MB after Infiltrating the Airship (#56, 2026-07-02): this
+// Henry Stickmin game accumulates ~19 100 unique vector shapes (thousands of
+// hand-drawn frames, never released by Ruffle), which filled the 192 MB arena at
+// ~frame 360 (~10 000 shapes) and then DROPPED every further draw (arenaDropV
+// climbed to ~9 100) — the classic white/blank screen. The arena free-lists on
+// handle drop, but Ruffle keeps them all live, so the only lever is capacity. The
+// `ram=used/total` heartbeat is the crt0-RESERVED heap (not live use), so there's
+// headroom in the 3.2 GB title heap to hold the full working set.
+const ARENA_VBO_SIZE: GLsizeiptr = 384 * 1024 * 1024;  // 384 MB
+// Bumped 96 → 192 MB at the same time: index data scaled the same ~2× (peaked at
+// ~93 MB for the first ~10 000 shapes, so ~178 MB for all ~19 100).
+const ARENA_IBO_SIZE: GLsizeiptr = 192 * 1024 * 1024;  // 192 MB
 /// VBO alignment = one full vertex (pos.xy + rgba = 6 × f32 = 24 bytes).
 /// MUST match the vertex stride so `glDrawElementsBaseVertex(base_vertex)`
 /// can use `vbo_offset / 24` and land exactly on a vertex boundary.

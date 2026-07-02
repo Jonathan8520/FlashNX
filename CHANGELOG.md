@@ -12,6 +12,10 @@ A rework of the control editor: a visual keyboard, more keys, and button combos.
 - **More keys**: F1-F12, the symbol keys (`-` `=` `[` `]` `;` `'` `,` `.` `/` `\` `` ` ``) and the numpad operators (`+` `-` `*` `/`) can now be bound.
 - **Combo layer** (#57): for games that need more inputs than the controller has buttons, hold a modifier button and every other button sends a second key, so `ZL + A` can send `F1`. The editor has a sub-tab (move with **L/R**) across `NORMAL / ZL / ZR / L / R`: NORMAL is the base bindings, and picking a modifier edits that player's combo layer (rows then read `ZL+A`). **X** switches the Player 1 / Player 2 tab, each with its own combo layer. A button with no combo key keeps its normal one while the modifier is held, so movement never breaks.
 
+### Fixes
+
+- **Very large games no longer go to a white screen** (#56): games with thousands of unique vector shapes (e.g. the Henry Stickmin titles like *Infiltrating the Airship*) filled the shape buffer partway in, after which the rest of the art stopped drawing. The buffer is now large enough to hold these, so they render fully.
+
 ## v1.4.1 (2026-06-28)
 
 A follow-up to the Chinese support in v1.4.0, plus wider import support.
