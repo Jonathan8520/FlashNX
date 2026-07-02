@@ -252,13 +252,16 @@ pub fn is_mine(profile_id: &str) -> bool {
     suffix.len() > 1 && profile_id.ends_with(&suffix)
 }
 
-/// Normalize a title for fuzzy matching: lowercase, keep only alphanumerics.
-/// "Super Mario 63!" and "super-mario_63" both become "supermario63".
+/// Normalize a title for fuzzy matching: lowercase, drop a trailing `.swf`, keep
+/// only alphanumerics. "Super Mario 63!" and "super-mario_63" both become
+/// "supermario63". Stripping `.swf` matters because the community catalog holds
+/// the same game under both "Super Mario 63" and "Super Mario 63.swf" (the extension
+/// leaked into the raw filename title) — without it they'd normalize to
+/// "supermario63" vs "supermario63swf" and never fuzzy-match each other.
 fn normalize_title(s: &str) -> std::string::String {
-    s.chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(|c| c.to_lowercase())
-        .collect()
+    let lower: std::string::String = s.chars().flat_map(|c| c.to_lowercase()).collect();
+    let base = lower.strip_suffix(".swf").unwrap_or(&lower);
+    base.chars().filter(|c| c.is_alphanumeric()).collect()
 }
 
 /// How a profile matched the local game — drives the UI (exact = offer to
@@ -627,6 +630,14 @@ pub fn share(
     swf_hash: &str,
     km: &Keymap,
 ) -> Result<std::string::String, std::string::String> {
+    // Drop a trailing ".swf" so the catalog stores/shows "Super Mario 63", not
+    // "Super Mario 63.swf" — keeps titles (and the worker-derived id) clean and
+    // lets new shares fuzzy-match older clean-titled entries for the same game.
+    let title = if title.to_ascii_lowercase().ends_with(".swf") {
+        title[..title.len() - 4].trim_end()
+    } else {
+        title
+    };
     let install = install_id();
     let author = author_name();
     let token = owner_token(); // empty on the first share; the relay mints one
