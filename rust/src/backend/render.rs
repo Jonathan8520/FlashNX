@@ -529,6 +529,31 @@ struct PendingFree {
     ibo_size: GLsizeiptr,
 }
 static PENDING_FREES: Mutex<Vec<PendingFree>> = Mutex::new(Vec::new());
+
+// Atlas release queue (issue #56b / Super Bowser World): atlas indices whose
+// owning bitmap was just dropped by Ruffle. `AtlasTicket::drop` enqueues here
+// (no backend access from Drop, same pattern as PENDING_FREES); `submit_frame`
+// drains it, decrements the atlas' live count, and frees the 16 MB texture once
+// it hits 0. Without this, atlases were append-only and a game re-caching a large
+// offscreen surface every frame leaked ~16 MB/frame until an OOM crash.
+static PENDING_ATLAS_RELEASE: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+/// One per registered atlas-backed bitmap; wrapped in `Arc` and shared by every
+/// clone of its `SwitchBitmapHandle` (incl. the per-frame draw-metadata copies),
+/// so the release fires exactly once, when the LAST reference drops — i.e. when
+/// Ruffle has released the bitmap and no draw still points at it.
+#[derive(Debug)]
+struct AtlasTicket {
+    atlas_index: usize,
+}
+impl Drop for AtlasTicket {
+    fn drop(&mut self) {
+        if let Ok(mut q) = PENDING_ATLAS_RELEASE.lock() {
+            q.push(self.atlas_index);
+        }
+    }
+}
+
 use swf::{BlendMode, Color, GradientSpread};
 
 use crate::ffi::gl::*;
@@ -632,10 +657,24 @@ struct Atlas {
     width: u32,
     height: u32,
     shelves: Vec<Shelf>,
+    /// Live bitmaps packed into this atlas (issue #56b / Super Bowser World).
+    /// Incremented per `pack_into_atlas`, decremented when the owning
+    /// `SwitchBitmapHandle` drops (via `PENDING_ATLAS_RELEASE`). At 0 the atlas is
+    /// freed (`texture` deleted, set to 0 = dead slot, reusable) so a game that
+    /// re-caches large offscreen surfaces every frame can't leak 16 MB/frame → OOM.
+    live: u32,
 }
 
 impl Atlas {
     fn new(size: u32) -> Self {
+        Self::new_wh(size, size)
+    }
+
+    /// Allocate a `width × height` atlas texture. Shared atlases are square
+    /// (`ATLAS_SIZE²`); a bitmap too large to share gets a right-sized dedicated
+    /// atlas (issue #56b) so a 1824×1174 surface costs ~8.5 MB, not a full 16 MB
+    /// 2048² — halving the memory of games that spam big offscreen surfaces.
+    fn new_wh(width: u32, height: u32) -> Self {
         let mut tex: GLuint = 0;
         unsafe {
             glGenTextures(1, &mut tex);
@@ -645,8 +684,8 @@ impl Atlas {
                 GL_TEXTURE_2D,
                 0,
                 GL_RGBA8 as GLint,
-                size as GLsizei,
-                size as GLsizei,
+                width as GLsizei,
+                height as GLsizei,
                 0,
                 GL_RGBA,
                 GL_UNSIGNED_BYTE,
@@ -660,10 +699,23 @@ impl Atlas {
         }
         Self {
             texture: tex,
-            width: size,
-            height: size,
+            width,
+            height,
             shelves: Vec::new(),
+            live: 0,
         }
+    }
+
+    /// Delete the GL texture and mark this slot DEAD (`texture == 0`) so
+    /// `pack_into_atlas` can reuse the slot for a fresh atlas. Called when the
+    /// atlas' last bitmap is released.
+    fn free_gl(&mut self) {
+        if self.texture != 0 {
+            unsafe { glDeleteTextures(1, &self.texture) };
+        }
+        self.texture = 0;
+        self.shelves.clear();
+        self.live = 0;
     }
 
     /// Try to allocate a `w×h` region (plus padding). Returns the content
@@ -798,6 +850,11 @@ struct SwitchBitmapHandle {
     v1: f32,
     width: u32,
     height: u32,
+    /// Shared release token (issue #56b). Cloning the handle (per-frame draw meta)
+    /// shares this Arc; the atlas' live count drops only when the LAST clone AND
+    /// the Ruffle-owned handle are gone. `None` only for handles built before this
+    /// existed (none in practice — every `pack_into_atlas` sets it).
+    ticket: Option<Arc<AtlasTicket>>,
 }
 impl BitmapHandleImpl for SwitchBitmapHandle {}
 
@@ -4578,44 +4635,71 @@ impl SwitchRenderBackend {
             return None;
         }
         for (idx, atlas) in self.atlases.iter_mut().enumerate() {
+            if atlas.texture == 0 {
+                continue; // freed/dead slot — reused in the new-atlas path below
+            }
             if let Some((x, y)) = atlas.pack(width, height) {
                 atlas.upload_region_padded(x, y, width, height, pixels);
-                let inv = 1.0 / ATLAS_SIZE as f32;
+                atlas.live += 1; // released when the handle's AtlasTicket drops
+                // UVs are fractions of THIS atlas' size (atlases now vary: shared
+                // 2048² vs right-sized dedicated ones, issue #56b).
+                let (aw, ah) = (atlas.width as f32, atlas.height as f32);
                 return Some(SwitchBitmapHandle {
                     atlas_index: idx,
-                    u0: x as f32 * inv,
-                    v0: y as f32 * inv,
-                    u1: (x + width) as f32 * inv,
-                    v1: (y + height) as f32 * inv,
+                    u0: x as f32 / aw,
+                    v0: y as f32 / ah,
+                    u1: (x + width) as f32 / aw,
+                    v1: (y + height) as f32 / ah,
                     width,
                     height,
+                    ticket: Some(Arc::new(AtlasTicket { atlas_index: idx })),
                 });
             }
         }
-        // No room — allocate a new atlas (16 MB GPU texture).
-        let new_atlas_index = self.atlases.len();
-        let msg = std::format!(
-            "atlas: allocating #{} (16 MB) for {}x{}\n",
-            new_atlas_index, width, height,
-        );
-        let mut bytes = msg.into_bytes();
-        bytes.push(0);
-        unsafe { ruffle_log_cstr(bytes.as_ptr() as *const _) };
-        let mut atlas = Atlas::new(ATLAS_SIZE);
+        // No room in any shared atlas. A bitmap large in either axis gets its own
+        // RIGHT-SIZED atlas (~the bitmap's bytes, not a full 16 MB 2048²) so games
+        // that spam big offscreen surfaces use ~half the memory (issue #56b). It
+        // stays atlas-backed (shape fills keep working — unlike the standalone
+        // path). Small bitmaps still get a shared 2048² so more can pack into it.
+        let big = width > ATLAS_SIZE / 2 || height > ATLAS_SIZE / 2;
+        let mut atlas = if big {
+            Atlas::new_wh(width + 2 * ATLAS_PAD, height + 2 * ATLAS_PAD)
+        } else {
+            Atlas::new(ATLAS_SIZE)
+        };
         let Some((x, y)) = atlas.pack(width, height) else {
             return None;
         };
         atlas.upload_region_padded(x, y, width, height, pixels);
-        self.atlases.push(atlas);
-        let inv = 1.0 / ATLAS_SIZE as f32;
+        atlas.live = 1;
+        let (aw, ah) = (atlas.width as f32, atlas.height as f32);
+        let bytes_mb = (atlas.width as u64 * atlas.height as u64 * 4) / (1024 * 1024);
+        let new_atlas_index = match self.atlases.iter().position(|a| a.texture == 0) {
+            Some(dead) => {
+                self.atlases[dead] = atlas; // old dead Atlas (texture 0) dropped, no-op
+                dead
+            }
+            None => {
+                self.atlases.push(atlas);
+                self.atlases.len() - 1
+            }
+        };
+        let msg = std::format!(
+            "atlas: allocating #{} ({} MB) for {}x{}\n",
+            new_atlas_index, bytes_mb, width, height,
+        );
+        let mut bytes = msg.into_bytes();
+        bytes.push(0);
+        unsafe { ruffle_log_cstr(bytes.as_ptr() as *const _) };
         Some(SwitchBitmapHandle {
             atlas_index: new_atlas_index,
-            u0: x as f32 * inv,
-            v0: y as f32 * inv,
-            u1: (x + width) as f32 * inv,
-            v1: (y + height) as f32 * inv,
+            u0: x as f32 / aw,
+            v0: y as f32 / ah,
+            u1: (x + width) as f32 / aw,
+            v1: (y + height) as f32 / ah,
             width,
             height,
+            ticket: Some(Arc::new(AtlasTicket { atlas_index: new_atlas_index })),
         })
     }
 
@@ -8243,6 +8327,22 @@ impl RenderBackend for SwitchRenderBackend {
                 self.index_arena.free_region(f.ibo_offset, f.ibo_size);
             }
         }
+        // Drain atlas releases (issue #56b): a dropped bitmap's AtlasTicket enqueued
+        // its atlas index; decrement the live count and free the 16 MB texture when
+        // it reaches 0, so re-cached large offscreen surfaces don't leak to OOM.
+        {
+            let mut pending = PENDING_ATLAS_RELEASE.lock().unwrap();
+            for idx in pending.drain(..) {
+                if let Some(atlas) = self.atlases.get_mut(idx) {
+                    if atlas.texture != 0 {
+                        atlas.live = atlas.live.saturating_sub(1);
+                        if atlas.live == 0 {
+                            atlas.free_gl(); // texture deleted, slot reusable
+                        }
+                    }
+                }
+            }
+        }
 
         // Snapshot+reset the per-frame backend-primitive timers. We're at the
         // start of submit_frame — right after player.tick() ran the AVM frame and
@@ -8494,7 +8594,7 @@ impl RenderBackend for SwitchRenderBackend {
                 self.vertex_arena.alloc_failures,
                 self.index_arena.alloc_failures,
                 self.bitmaps_registered,
-                self.atlases.len(),
+                self.atlases.iter().filter(|a| a.texture != 0).count(), // LIVE atlases (#56b)
                 self.bitmap_draws_emitted,
                 self.render_offscreen_calls,
                 self.resolve_sync_calls,
