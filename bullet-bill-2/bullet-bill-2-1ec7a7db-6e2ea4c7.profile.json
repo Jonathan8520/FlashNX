@@ -17,10 +17,10 @@
     "Plus": "P",
     "R": "Enter",
     "Right": "Right",
-    "StickLDown": "Down",
-    "StickLLeft": "Left",
-    "StickLRight": "Right",
-    "StickLUp": "Up",
+    "StickLDown": "",
+    "StickLLeft": "",
+    "StickLRight": "",
+    "StickLUp": "",
     "Up": "Up",
     "X": "X",
     "Y": "Shift",
@@ -47,5 +47,5 @@
   "bindings_layer2_p2": {},
   "combo_modifier": "",
   "combo_modifier_p2": "",
-  "cursor_speed": -1
+  "cursor_speed": 1
 }
