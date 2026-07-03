@@ -78,6 +78,11 @@ pub struct Profile {
     /// shared profile restores the author's pointer speed too.
     #[serde(default = "default_cursor_speed")]
     pub cursor_speed: i32,
+    /// Per-game "show cursor" toggle (default SHOWN), carried so a shared profile
+    /// restores the author's pointer visibility choice too. `#[serde(default …)]`
+    /// keeps pre-toggle catalog entries loading as SHOWN.
+    #[serde(default = "crate::keymap::default_show_cursor")]
+    pub show_cursor: bool,
 }
 
 fn default_cursor_speed() -> i32 {
@@ -107,6 +112,7 @@ impl Profile {
             combo_modifier: std::string::String::new(),
             combo_modifier_p2: std::string::String::new(),
             source: std::format!("community:{}", self.id),
+            show_cursor: self.show_cursor,
         }
     }
 }
@@ -649,6 +655,10 @@ struct SharePayload<'a> {
     combo_layers: &'a BTreeMap<std::string::String, BTreeMap<std::string::String, std::string::String>>,
     combo_layers_p2: &'a BTreeMap<std::string::String, BTreeMap<std::string::String, std::string::String>>,
     cursor_speed: i32,
+    /// Per-game pointer-visibility toggle (default true). The relay Worker must
+    /// store this too (worker.js) or a shared "cursor hidden" profile reverts to
+    /// shown for everyone else.
+    show_cursor: bool,
 }
 
 /// Submit the player's current controls for a game as a community profile.
@@ -692,6 +702,7 @@ pub fn share(
         combo_layers: &km.combo_layers,
         combo_layers_p2: &km.combo_layers_p2,
         cursor_speed,
+        show_cursor: km.show_cursor,
     };
     let body = serde_json::to_string(&payload)
         .map_err(|e| std::format!("encode failed: {}", e))?;

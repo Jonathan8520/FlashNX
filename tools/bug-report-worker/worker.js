@@ -236,6 +236,9 @@ async function handleProfileShare(r, env) {
     combo_layers: obj(r.combo_layers),
     combo_layers_p2: obj(r.combo_layers_p2),
     cursor_speed: cursorSpeed,
+    // Per-game "show cursor" toggle (default true when absent/unspecified), so a
+    // shared "hide the pointer" profile survives the round-trip.
+    show_cursor: r.show_cursor === false ? false : true,
   };
   const indexEntry = { id, title, fp_uuid: fpUuid, swf_hash: swfHash, file, verified: false };
 

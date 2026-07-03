@@ -660,9 +660,12 @@ fn render_frame_with_dt(dt: FloatDuration) {
     // Overlay the cursor crosshair on top of whatever Ruffle drew. We pull
     // a `&mut SwitchRenderBackend` out of the Player by downcasting the
     // trait object — `RenderBackend: Any` so this is just a vtable check.
+    // The per-game "show cursor" toggle (keymap) only hides this VISUAL — mouse
+    // moves/clicks were already dispatched above, so pointer input still works.
     let cx = state.cursor_x;
     let cy = state.cursor_y;
     let clicked = state.cursor_clicked;
+    let show_cursor = keymap::show_cursor();
     let renderer = player.renderer_mut();
     if let Some(backend) =
         <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(renderer)
@@ -670,7 +673,9 @@ fn render_frame_with_dt(dt: FloatDuration) {
         if let Some((total_us, tick_us, render_us)) = slow_frame {
             backend.log_slow_frame(total_us, tick_us, render_us);
         }
-        backend.draw_cursor_overlay(cx, cy, clicked);
+        if show_cursor {
+            backend.draw_cursor_overlay(cx, cy, clicked);
+        }
     }
 
     // Drive any loader futures the SidecarNavigator spawned this frame
@@ -702,11 +707,14 @@ pub extern "C" fn ruffle_redraw_paused() {
     let cx = state.cursor_x;
     let cy = state.cursor_y;
     let clicked = state.cursor_clicked;
+    let show_cursor = keymap::show_cursor();
     let renderer = player.renderer_mut();
     if let Some(backend) =
         <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(renderer)
     {
-        backend.draw_cursor_overlay(cx, cy, clicked);
+        if show_cursor {
+            backend.draw_cursor_overlay(cx, cy, clicked);
+        }
     }
 }
 

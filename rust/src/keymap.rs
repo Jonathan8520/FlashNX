@@ -78,6 +78,21 @@ pub struct Keymap {
     /// `#[serde(default)]` keeps pre-v1.4.0 keymaps loading (they read as "").
     #[serde(default)]
     pub source: std::string::String,
+    /// Whether the on-screen mouse pointer sprite is drawn while THIS game runs
+    /// (per-game "show cursor" toggle). When false, the C++ layer skips drawing
+    /// the pointer, but clicks still fire (right-stick / ZR / touch keep working) —
+    /// it only hides the visual, for pad/keyboard games where the pointer is just
+    /// clutter. Rides IN the keymap (not a separate file like cursor SPEED) so it
+    /// travels through share/apply/diff automatically. `default_show_cursor` keeps
+    /// pre-toggle keymaps loading as SHOWN.
+    #[serde(default = "default_show_cursor")]
+    pub show_cursor: bool,
+}
+
+/// Default for `Keymap::show_cursor`: the pointer is SHOWN unless a game's keymap
+/// explicitly turns it off. Also the value every fresh keymap starts with.
+pub(crate) fn default_show_cursor() -> bool {
+    true
 }
 
 /// Hardcoded fallback baked into the .nro. Mirrors what `cpp/src/main.cpp`
@@ -252,6 +267,7 @@ fn fallback_keymap() -> Keymap {
         combo_modifier: std::string::String::new(),
         combo_modifier_p2: std::string::String::new(),
         source: "default".into(),
+        show_cursor: true,
     }
 }
 
@@ -903,6 +919,19 @@ pub fn binding_diff_rows(cur: &Keymap, tgt: &Keymap) -> std::vec::Vec<std::strin
         let t2 = tgt.combo_layers_p2.get(*m).unwrap_or(&empty);
         diff_map(&std::format!("P2 {}+", m), c2, t2);
     }
+    // Cursor visibility (show-cursor toggle) rides IN the keymap, so a change to it
+    // must register too — otherwise hiding the pointer would read as "no changes"
+    // and drop the shareable/active tag (same class of bug as the P2/combo miss).
+    if cur.show_cursor != tgt.show_cursor {
+        let lc = crate::loc::s();
+        let onoff = |b: bool| if b { lc.cursor_shown } else { lc.cursor_hidden };
+        rows.push(std::format!(
+            "{}: {} -> {}",
+            lc.show_cursor,
+            onoff(cur.show_cursor),
+            onoff(tgt.show_cursor),
+        ));
+    }
     rows
 }
 
@@ -970,6 +999,35 @@ pub fn set_cursor_speed_for(basename: &str, idx: i32) {
         return;
     }
     crate::sd::commit();
+    mark_controls_touched(basename);
+}
+
+/// After a NON-keymap per-game change (cursor speed), a keymap still tagged as an
+/// already-shared community profile should count as user-modified again, so the
+/// share flow lifts its "already shared" block and lets you re-share the updated
+/// setup. Flips a `community:*` sidecar (and the in-memory active keymap, if it's
+/// this game) to `source = "user"`. No-op when there's no community sidecar.
+pub fn mark_controls_touched(basename: &str) {
+    if let Some(mut km) = read_sidecar_file(basename) {
+        if km.source.starts_with("community:") {
+            km.source = "user".into();
+            write_keymap_file(&keymap_write_path(basename), &km);
+        }
+    }
+    if let Ok(mut g) = ACTIVE_KEYMAP.lock() {
+        let is_this = ACTIVE_BASENAME
+            .lock()
+            .ok()
+            .and_then(|b| b.as_deref().map(|s| s == basename))
+            .unwrap_or(false);
+        if is_this {
+            if let Some(km) = g.as_mut() {
+                if km.source.starts_with("community:") {
+                    km.source = "user".into();
+                }
+            }
+        }
+    }
 }
 
 /// Persist the active GAME's per-game cursor-speed preset to `<basename>.cursor`.
@@ -986,6 +1044,52 @@ pub fn set_cursor_speed(idx: i32) {
         return;
     }
     crate::sd::commit();
+    mark_controls_touched(&basename);
+}
+
+// ── Show-cursor toggle (per-game pointer visibility) ────────────────────────
+
+/// Whether the ACTIVE game's on-screen pointer is drawn. Reads the live keymap;
+/// defaults to SHOWN when nothing's loaded. Read by C++ each frame (via FFI) to
+/// decide whether to draw the cursor sprite.
+pub fn show_cursor() -> bool {
+    ACTIVE_KEYMAP
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|k| k.show_cursor))
+        .unwrap_or(true)
+}
+
+/// Same, for an ARBITRARY game by basename — the library OPTIONS > TOUCHES menu
+/// reads/labels a game's flag without that game being active. Falls back to SHOWN.
+pub fn show_cursor_for(basename: &str) -> bool {
+    effective_for(basename).show_cursor
+}
+
+/// Toggle the ACTIVE game's "show cursor" flag, persisting to its sidecar and
+/// flipping provenance to "user" (a hand edit → shareable again). No-op when no
+/// game keymap is loaded.
+pub fn toggle_show_cursor() {
+    {
+        let mut g = match ACTIVE_KEYMAP.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        let Some(km) = g.as_mut() else { return };
+        km.show_cursor = !km.show_cursor;
+        km.source = "user".into();
+    }
+    save_sidecar();
+}
+
+/// Toggle it for an ARBITRARY game (library side, game not running): read the
+/// effective keymap, flip the flag, mark it "user", and write the sidecar so the
+/// next launch picks it up.
+pub fn toggle_show_cursor_for(basename: &str) {
+    let mut km = effective_for(basename);
+    km.show_cursor = !km.show_cursor;
+    km.source = "user".into();
+    write_keymap_file(&keymap_write_path(basename), &km);
 }
 
 fn try_default_or_fallback(default_path: Option<&str>) -> Keymap {

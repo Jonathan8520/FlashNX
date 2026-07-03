@@ -642,6 +642,9 @@ pub(crate) struct State {
     /// TOUCHES sub-menu (#20), or -1 = unset (shows the x1.0 default). The cursor
     /// row cycles it; persisted to `<basename>.cursor`.
     touches_cursor_idx: i32,
+    /// Snapshot of the game's per-game "show cursor" flag for the open TOUCHES
+    /// sub-menu (#20). The show-cursor row toggles it; persisted in the keymap.
+    touches_show_cursor: bool,
     /// Snapshotted before/after diff lines for the open `ProfilePreview` (#20),
     /// each like "Up: Space -> W". Built by `run_open_preview_flow`.
     preview_rows: std::vec::Vec<std::string::String>,
@@ -729,6 +732,7 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     touches_can_revert: false,
     touches_has_backup: false,
     touches_cursor_idx: -1,
+    touches_show_cursor: true,
     preview_rows: std::vec::Vec::new(),
     active_profile_id: std::string::String::new(),
     share_is_update: false,
@@ -1397,8 +1401,8 @@ pub fn input(button: &str) -> bool {
         }
         // TOUCHES sub-menu (#20 regroup): APPLY (1) opens the picker; SHARE (2)
         // opens the share confirm (fetches my existing shared profile for the
-        // diff); REVERT (4) opens the revert preview. All hoisted (network/I/O).
-        // EDIT (0) + CURSOR SPEED (3) are handled under the lock.
+        // diff); REVERT (5) opens the revert preview. All hoisted (network/I/O).
+        // EDIT (0) + CURSOR SPEED (3) + SHOW-CURSOR (4) are handled under the lock.
         if let Screen::TouchesMenu { game_idx, selection } = screen_snap {
             if button == "A" && selection == 1 {
                 defer_net(PendingNet::OpenProfiles { game_idx }, game_idx);
@@ -1422,7 +1426,7 @@ pub fn input(button: &str) -> bool {
                 }
                 return true;
             }
-            if button == "A" && selection == 4 {
+            if button == "A" && selection == 5 {
                 run_open_revert_preview_flow(game_idx);
                 return true;
             }
@@ -2305,22 +2309,27 @@ fn goto_touches_menu(s: &mut State, game_idx: usize, selection: usize) {
         .get(game_idx)
         .map(|e| keymap::cursor_speed_for(&e.basename))
         .unwrap_or(-1);
+    s.touches_show_cursor = s
+        .entries
+        .get(game_idx)
+        .map(|e| keymap::show_cursor_for(&e.basename))
+        .unwrap_or(true);
     let row_count = TOUCHES_MENU_FIXED_ROWS + s.touches_can_revert as usize;
     s.screen = Screen::TouchesMenu { game_idx, selection: selection.min(row_count - 1) };
 }
 
-/// Fixed TOUCHES sub-menu rows: edit (0), apply (1), share (2), cursor speed (3).
-/// A revert row (4) is appended when `touches_can_revert`.
-const TOUCHES_MENU_FIXED_ROWS: usize = 4;
+/// Fixed TOUCHES sub-menu rows: edit (0), apply (1), share (2), cursor speed (3),
+/// show-cursor toggle (4). A revert row (5) is appended when `touches_can_revert`.
+const TOUCHES_MENU_FIXED_ROWS: usize = 5;
 
 /// Cursor-speed presets as x10 multipliers. MUST stay in sync with
 /// `CURSOR_SPEED_MULTS` in cpp/src/main.cpp (the C++ side owns the live value;
 /// we only display + persist the index here). Default index = 1 (x1.0).
 const CURSOR_X10: &[u32] = &[5, 10, 15, 20, 25, 30, 40, 50];
 
-/// Input for the TOUCHES sub-menu (#20). Edit (0) + cursor speed (3) are handled
-/// here; apply (1) / share (2) / revert (4) are hoisted in `input()` (file I/O /
-/// network). B returns to OPTIONS on the TOUCHES row.
+/// Input for the TOUCHES sub-menu (#20). Edit (0) + cursor speed (3) + show-cursor
+/// toggle (4) are handled here; apply (1) / share (2) / revert (5) are hoisted in
+/// `input()` (file I/O / network). B returns to OPTIONS on the TOUCHES row.
 fn handle_touches_menu_input(s: &mut State, button: &str, game_idx: usize, mut selection: usize) {
     let row_count = TOUCHES_MENU_FIXED_ROWS + s.touches_can_revert as usize;
     let last = row_count - 1;
@@ -2332,8 +2341,9 @@ fn handle_touches_menu_input(s: &mut State, button: &str, game_idx: usize, mut s
             selection = if selection >= last { 0 } else { selection + 1 };
         }
         "A" => {
-            // EDIT (0) + CURSOR SPEED (3) are local (file I/O only). Apply (1) /
-            // share (2) / revert (4) need network → hoisted in `input()`.
+            // EDIT (0) + CURSOR SPEED (3) + SHOW-CURSOR (4) are local (file I/O
+            // only). Apply (1) / share (2) / revert (5) need network → hoisted in
+            // `input()`.
             if selection == 0 {
                 // Init the keymap for THIS game so current_binding / set_binding
                 // land in the right sidecar, then open the editor.
@@ -2354,6 +2364,16 @@ fn handle_touches_menu_input(s: &mut State, button: &str, game_idx: usize, mut s
                     keymap::set_cursor_speed_for(&basename, next);
                 }
                 s.touches_cursor_idx = next;
+                s.screen = Screen::TouchesMenu { game_idx, selection };
+                return;
+            }
+            if selection == 4 {
+                // Toggle the per-game "show cursor" flag (persists in the keymap;
+                // applied next launch). Snapshot flips so the row label updates now.
+                if let Some(basename) = s.entries.get(game_idx).map(|e| e.basename.clone()) {
+                    keymap::toggle_show_cursor_for(&basename);
+                    s.touches_show_cursor = !s.touches_show_cursor;
+                }
                 s.screen = Screen::TouchesMenu { game_idx, selection };
                 return;
             }
@@ -4160,13 +4180,20 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 };
                 let x10 = CURSOR_X10[idx];
                 let cursor = std::format!("{}: x{}.{}", lc.set_cursor_speed, x10 / 10, x10 % 10);
-                (game, cursor, s.touches_can_revert, s.touches_has_backup)
+                // Show-cursor row label, e.g. "Afficher le curseur: AFFICHÉ".
+                let show_cur = std::format!(
+                    "{}: {}",
+                    lc.show_cursor,
+                    if s.touches_show_cursor { lc.cursor_shown } else { lc.cursor_hidden },
+                );
+                (game, cursor, show_cur, s.touches_can_revert, s.touches_has_backup)
             });
-            if let Some((game, cursor, can_revert, has_backup)) = snap {
+            if let Some((game, cursor, show_cur, can_revert, has_backup)) = snap {
                 // Order MUST match the row indices in handle_touches_menu_input /
-                // the input() dispatch: edit, apply, share, cursor, (revert).
+                // the input() dispatch: edit, apply, share, cursor, show-cursor,
+                // (revert).
                 let mut rows: std::vec::Vec<&str> =
-                    std::vec![lc.touches_edit, lc.opt_apply, lc.opt_share, &cursor];
+                    std::vec![lc.touches_edit, lc.opt_apply, lc.opt_share, &cursor, &show_cur];
                 if can_revert {
                     // Distinct label: restore my keys (a backup exists) vs reset
                     // to the default controls (none to restore).

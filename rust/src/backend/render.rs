@@ -4776,30 +4776,32 @@ impl SwitchRenderBackend {
     pub fn draw_cursor_overlay(&mut self, x: f32, y: f32, clicked: bool) {
         const BAR_W: f32 = 24.0;
         const BAR_H: f32 = 4.0;
+        // Black outline thickness on each side, so the "+" stays visible over
+        // both light and dark game content.
+        const OUTLINE: f32 = 2.0;
         // Red when clicked, white otherwise. Helps confirm clicks register.
         let color = if clicked {
             swf::Color::from_rgb(0xFF1744, 255)
         } else {
             swf::Color::from_rgb(0xFFFFFF, 255)
         };
-        // Horizontal bar centred on (x, y).
-        let h_mat = Matrix {
-            a: BAR_W,
+        let outline = swf::Color::from_rgb(0x000000, 255);
+        // A `w`×`h` bar centred on (x, y).
+        let bar = |w: f32, h: f32| Matrix {
+            a: w,
             b: 0.0,
             c: 0.0,
-            d: BAR_H,
-            tx: swf::Twips::from_pixels((x - BAR_W * 0.5) as f64),
-            ty: swf::Twips::from_pixels((y - BAR_H * 0.5) as f64),
+            d: h,
+            tx: swf::Twips::from_pixels((x - w * 0.5) as f64),
+            ty: swf::Twips::from_pixels((y - h * 0.5) as f64),
         };
-        // Vertical bar.
-        let v_mat = Matrix {
-            a: BAR_H,
-            b: 0.0,
-            c: 0.0,
-            d: BAR_W,
-            tx: swf::Twips::from_pixels((x - BAR_H * 0.5) as f64),
-            ty: swf::Twips::from_pixels((y - BAR_W * 0.5) as f64),
-        };
+        // Horizontal + vertical arms of the crosshair, each with a black backing
+        // bar grown by OUTLINE on every side (drawn first, so the coloured bar on
+        // top leaves a thin black rim around the whole "+").
+        let h_out = bar(BAR_W + OUTLINE * 2.0, BAR_H + OUTLINE * 2.0);
+        let v_out = bar(BAR_H + OUTLINE * 2.0, BAR_W + OUTLINE * 2.0);
+        let h_mat = bar(BAR_W, BAR_H);
+        let v_mat = bar(BAR_H, BAR_W);
         unsafe {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -4807,6 +4809,8 @@ impl SwitchRenderBackend {
         }
         // Reuse CommandHandler's draw_rect path. It binds program + VAO and
         // uploads a fresh dynamic quad each call.
+        <Self as CommandHandler>::draw_rect(self, outline, h_out);
+        <Self as CommandHandler>::draw_rect(self, outline, v_out);
         <Self as CommandHandler>::draw_rect(self, color, h_mat);
         <Self as CommandHandler>::draw_rect(self, color, v_mat);
         unsafe {
