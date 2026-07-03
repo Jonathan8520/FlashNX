@@ -18,6 +18,7 @@ A rework of the control editor: a visual keyboard, more keys, button combos, and
 
 - **Very large games no longer go to a white screen** (#56): games with thousands of unique vector shapes (e.g. the Henry Stickmin titles like *Infiltrating the Airship*) filled the shape buffer partway in, after which the rest of the art stopped drawing. The buffer is now large enough to hold these, so they render fully.
 - **Fewer white screens / out-of-memory on heavy games** (e.g. *Super Bowser World*): the dedicated bitmap layers are now freed as soon as they empty and sized to what they actually hold, instead of piling up and exhausting memory.
+- **Water and distortion effects now render correctly**: games that ripple graphics with a displacement-map filter (e.g. underwater levels) used to show garbled stripes, or the effect did nothing. The filter is now supported, and a texture-packing bug that striped these scenes is fixed.
 - **A game no longer appears twice in the shared-profile catalog**: the `.swf` file extension is no longer part of the title used to match profiles, so entries for the same game line up instead of splitting (this was showing *Super Mario 63* twice).
 - **The on-screen cursor is easier to see**: the pointer now has a black outline so it stays visible over both light and dark game art.
 - **Changing only the cursor speed re-enables sharing**: after applying a community profile, adjusting just the pointer speed used to still say there was nothing to share; that change now counts.
