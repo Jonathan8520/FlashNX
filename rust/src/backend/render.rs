@@ -286,6 +286,10 @@ static GLYPHS: &[(char, Glyph)] = &[
     ('\u{00CC}', [" ##  ", "     ", " ### ", "  #  ", "  #  ", "  #  ", " ### "]), // Ì
     ('\u{00D2}', [" ##  ", "     ", " ### ", "#   #", "#   #", "#   #", " ### "]), // Ò
     ('\u{00D9}', [" ##  ", "     ", "#   #", "#   #", "#   #", "#   #", " ### "]), // Ù
+    // Turkish uppercase: breve-G (Ğ), cedilla-S (Ş, mirrors Ç), dotted-I (İ).
+    ('\u{011E}', [" ### ", "     ", " ####", "#    ", "#  ##", "#   #", " ####"]), // Ğ
+    ('\u{015E}', [" ####", "#    ", " ### ", "    #", "    #", "#### ", "  #  "]), // Ş
+    ('\u{0130}', ["  #  ", "     ", " ### ", "  #  ", "  #  ", "  #  ", " ### "]), // İ
     // Cyrillic uppercase (Russian locale). draw_text does not case-fold
     // non-ASCII, so RU strings are written uppercase to hit these directly.
     ('\u{0410}', [" ### ", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"]), // А
@@ -7746,38 +7750,188 @@ impl SwitchRenderBackend {
     /// Language picker (Settings → LANGUAGE). `languages` are native display
     /// names in `loc::PICKER_LANGS` order. The currently-active language is
     /// tinted teal even when the cursor is elsewhere.
+    /// Solid opaque rect at screen px, for the pixel flags. `rgb` is 0xRRGGBB.
+    fn flag_fill(&mut self, x: f32, y: f32, w: f32, h: f32, rgb: u32) {
+        self.draw_overlay_rect(x, y, w, h, 0xFF00_0000 | (rgb & 0x00FF_FFFF));
+    }
+
+    /// Filled circle centred on (cx, cy), radius r, approximated by stacked 1px
+    /// horizontal spans. Used for the round parts of flags (crescent, disc, star).
+    fn flag_disc(&mut self, cx: f32, cy: f32, r: f32, rgb: u32) {
+        let ri = r.max(1.0) as i32;
+        for dy in -ri..=ri {
+            let hw = (r * r - (dy * dy) as f32).max(0.0).sqrt();
+            if hw > 0.0 {
+                self.flag_fill(cx - hw, cy + dy as f32, hw * 2.0, 1.0, rgb);
+            }
+        }
+    }
+
+    /// 2px frame around (x,y,w,h), used to outline a flag tile.
+    fn flag_stroke(&mut self, x: f32, y: f32, w: f32, h: f32, rgb: u32) {
+        const T: f32 = 2.0;
+        self.flag_fill(x, y, w, T, rgb);
+        self.flag_fill(x, y + h - T, w, T, rgb);
+        self.flag_fill(x, y, T, h, rgb);
+        self.flag_fill(x + w - T, y, T, h, rgb);
+    }
+
+    /// A small pixel flag for `lang` filling the w×h box at (x,y). Solid rects
+    /// (+ `flag_disc` for the round flags). Deliberately simplified: the native
+    /// name is drawn under it, so the flag only has to be recognisable, not exact.
+    fn draw_flag(&mut self, lang: crate::loc::Lang, x: f32, y: f32, w: f32, h: f32) {
+        use crate::loc::Lang;
+        let third_v = w / 3.0;
+        let third_h = h / 3.0;
+        match lang {
+            Lang::Fr => {
+                self.flag_fill(x, y, third_v, h, 0x0055A4);
+                self.flag_fill(x + third_v, y, third_v, h, 0xFFFFFF);
+                self.flag_fill(x + 2.0 * third_v, y, w - 2.0 * third_v, h, 0xEF4135);
+            }
+            Lang::It => {
+                self.flag_fill(x, y, third_v, h, 0x009246);
+                self.flag_fill(x + third_v, y, third_v, h, 0xFFFFFF);
+                self.flag_fill(x + 2.0 * third_v, y, w - 2.0 * third_v, h, 0xCE2B37);
+            }
+            Lang::De => {
+                self.flag_fill(x, y, w, third_h, 0x000000);
+                self.flag_fill(x, y + third_h, w, third_h, 0xDD0000);
+                self.flag_fill(x, y + 2.0 * third_h, w, h - 2.0 * third_h, 0xFFCE00);
+            }
+            Lang::Ru => {
+                self.flag_fill(x, y, w, third_h, 0xFFFFFF);
+                self.flag_fill(x, y + third_h, w, third_h, 0x0039A6);
+                self.flag_fill(x, y + 2.0 * third_h, w, h - 2.0 * third_h, 0xD52B1E);
+            }
+            Lang::Es => {
+                self.flag_fill(x, y, w, h, 0xAA151B);
+                self.flag_fill(x, y + h * 0.25, w, h * 0.5, 0xF1BF00);
+            }
+            Lang::En => {
+                // Simplified Union Jack: blue field with a white-bordered red cross
+                // (the diagonals are dropped — unreadable at this size).
+                self.flag_fill(x, y, w, h, 0x012169);
+                self.flag_fill(x, y + h * 0.35, w, h * 0.30, 0xFFFFFF);
+                self.flag_fill(x + w * 0.35, y, w * 0.30, h, 0xFFFFFF);
+                self.flag_fill(x, y + h * 0.42, w, h * 0.16, 0xC8102E);
+                self.flag_fill(x + w * 0.42, y, w * 0.16, h, 0xC8102E);
+            }
+            Lang::Zh => {
+                self.flag_fill(x, y, w, h, 0xDE2910);
+                // One big yellow star (disc) + four small dots, upper-left quadrant.
+                self.flag_disc(x + w * 0.24, y + h * 0.34, h * 0.15, 0xFFDE00);
+                let d = (h * 0.05).max(2.0);
+                for (fx, fy) in [(0.42, 0.16), (0.50, 0.30), (0.50, 0.50), (0.42, 0.64)] {
+                    self.flag_fill(x + w * fx, y + h * fy, d, d, 0xFFDE00);
+                }
+            }
+            Lang::Tr => {
+                self.flag_fill(x, y, w, h, 0xE30A17);
+                // Crescent = white disc minus a red disc offset to the right.
+                self.flag_disc(x + w * 0.40, y + h * 0.50, h * 0.27, 0xFFFFFF);
+                self.flag_disc(x + w * 0.47, y + h * 0.50, h * 0.21, 0xE30A17);
+                // Star (approximated by a small disc).
+                self.flag_disc(x + w * 0.60, y + h * 0.50, h * 0.09, 0xFFFFFF);
+            }
+            Lang::Pt => {
+                // Brazil: green field, yellow diamond, blue disc.
+                self.flag_fill(x, y, w, h, 0x009C3B);
+                let cx = x + w * 0.5;
+                let cy = y + h * 0.5;
+                let hh = h * 0.42;
+                let hw = w * 0.42;
+                let steps = hh as i32;
+                for dy in -steps..=steps {
+                    let frac = 1.0 - (dy.abs() as f32) / hh;
+                    let rw = hw * frac;
+                    if rw > 0.0 {
+                        self.flag_fill(cx - rw, cy + dy as f32, rw * 2.0, 1.0, 0xFFDF00);
+                    }
+                }
+                self.flag_disc(cx, cy, h * 0.16, 0x002776);
+            }
+        }
+    }
+
+    /// Language picker: a grid of pixel flags, each with its native name under it
+    /// (issue: the list grew long). `selection` indexes `loc::PICKER_LANGS`;
+    /// `languages` is the parallel list of native names. The active language keeps
+    /// a teal tint even when the cursor is elsewhere.
     pub fn draw_library_language_picker(&mut self, selection: usize, languages: &[&str]) {
         let lc = crate::loc::s();
+        const COLS: usize = 3;
+        const CELL_W: f32 = 210.0;
+        const CELL_H: f32 = 104.0;
+        const FLAG_W: f32 = 96.0;
+        const FLAG_H: f32 = 64.0;
+        let n = languages.len();
+        let rows_n = n.div_ceil(COLS);
+        let grid_w = COLS as f32 * CELL_W;
+        let grid_h = rows_n as f32 * CELL_H;
+        let fixed_h = MODAL_PAD_TOP_TIGHT + grid_h + MODAL_PAD_BOTTOM;
         let frame = self.draw_modal_frame(
-            MODAL_W,
-            languages.len(),
-            None,
+            MODAL_W_WIDE,
+            0,
+            Some(fixed_h),
             false,
             lc.lang_title,
             None,
             Some(lc.lang_footer),
         );
-
-        // Rows: amber cursor row, teal for the currently-active language even
-        // when the cursor is elsewhere (custom coloring, so not draw_modal_rows).
         let active = crate::loc::current().index();
-        let left = frame.rows_left();
-        let top = frame.rows_top();
-        for (i, lang) in languages.iter().enumerate() {
-            let y = top + i as f32 * MODAL_ROW_H;
+        let grid_left = frame.x + (frame.w - grid_w) * 0.5;
+        let grid_top = frame.rows_top();
+        for (i, name) in languages.iter().enumerate() {
+            let col = i % COLS;
+            let row = i / COLS;
+            let cell_x = grid_left + col as f32 * CELL_W;
+            let cell_y = grid_top + row as f32 * CELL_H;
             let is_sel = i == selection;
-            let rgb = if is_sel {
+            let is_active = i == active;
+            // Amber tint behind the selected cell.
+            if is_sel {
+                self.draw_overlay_rect(
+                    cell_x + 4.0,
+                    cell_y,
+                    CELL_W - 8.0,
+                    CELL_H - 6.0,
+                    0x33FF_D740,
+                );
+            }
+            let fx = cell_x + (CELL_W - FLAG_W) * 0.5;
+            let fy = cell_y + 6.0;
+            if let Some(&l) = crate::loc::PICKER_LANGS.get(i) {
+                self.draw_flag(l, fx, fy, FLAG_W, FLAG_H);
+            }
+            let border = if is_sel {
                 MODAL_ROW_SEL_COL
-            } else if i == active {
+            } else if is_active {
+                0x66DDCC
+            } else {
+                0x3A4450
+            };
+            self.flag_stroke(fx, fy, FLAG_W, FLAG_H, border);
+            // Native name under the flag, centred and shrunk to fit the cell.
+            let name_col = if is_sel {
+                MODAL_ROW_SEL_COL
+            } else if is_active {
                 0x66DDCC
             } else {
                 MODAL_ROW_COL
             };
-            let color = swf::Color::from_rgb(rgb, 255);
-            if is_sel {
-                self.draw_text(left - MODAL_CURSOR_DX, y, MODAL_ROW_SCALE, ">", color);
-            }
-            self.draw_text(left, y, MODAL_ROW_SCALE, lang, color);
+            let base = 2.0;
+            let maxw = CELL_W - 16.0;
+            let full = self.measure_text(name, base);
+            let scale = if full > maxw { base * maxw / full } else { base };
+            let nw = self.measure_text(name, scale);
+            self.draw_text(
+                cell_x + (CELL_W - nw) * 0.5,
+                fy + FLAG_H + 10.0,
+                scale,
+                name,
+                swf::Color::from_rgb(name_col, 255),
+            );
         }
 
         unsafe {

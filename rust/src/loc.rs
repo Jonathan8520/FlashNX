@@ -29,6 +29,7 @@ pub enum Lang {
     It,
     Pt,
     Zh,
+    Tr,
 }
 
 impl Lang {
@@ -42,6 +43,7 @@ impl Lang {
             Lang::It => 5,
             Lang::Pt => 6,
             Lang::Zh => 7,
+            Lang::Tr => 8,
         }
     }
     pub fn from_index(i: usize) -> Lang {
@@ -53,6 +55,7 @@ impl Lang {
             5 => Lang::It,
             6 => Lang::Pt,
             7 => Lang::Zh,
+            8 => Lang::Tr,
             _ => Lang::En,
         }
     }
@@ -66,6 +69,7 @@ impl Lang {
             Lang::It => "it",
             Lang::Pt => "pt",
             Lang::Zh => "zh",
+            Lang::Tr => "tr",
         }
     }
     pub fn from_code(s: &str) -> Option<Lang> {
@@ -78,6 +82,7 @@ impl Lang {
             "it" => Some(Lang::It),
             "pt" => Some(Lang::Pt),
             "zh" => Some(Lang::Zh),
+            "tr" => Some(Lang::Tr),
             _ => None,
         }
     }
@@ -94,6 +99,7 @@ impl Lang {
             Lang::Pt => "PORTUGU\u{00CA}S", // PORTUGUÊS
             // Drawn via the shared-font atlas (CJK is not in the bitmap font).
             Lang::Zh => "\u{4E2D}\u{6587}", // 中文
+            Lang::Tr => "T\u{00DC}RK\u{00C7}E", // TÜRKÇE
         }
     }
 }
@@ -108,6 +114,7 @@ pub const PICKER_LANGS: &[Lang] = &[
     Lang::It,
     Lang::Pt,
     Lang::Zh,
+    Lang::Tr,
 ];
 
 /// Every translatable UI string. One instance per language below.
@@ -1723,6 +1730,180 @@ const ZH: Strings = Strings {
     kbd_suggest_guide: "将打开一个公开的 GitHub issue。你对 FlashNX 的想法 / 建议。",
 };
 
+// Turkish. Drawn strings are UPPERCASE with only the caps our 5x7 font carries
+// (Ç Ö Ü + the added Ğ/Ş); the dotted capital I is
+// rendered as a plain ASCII "I" (standard all-caps relaxation, avoids a glyph).
+// The `kbd_*` guides go to the Switch software keyboard, which renders full
+// Turkish diacritics, so those keep proper lowercase spelling.
+const TR: Strings = Strings {
+    menu_resume: "DEVAM ET",
+    menu_keys: "KONTROLLER",
+    menu_restart: "YEN\u{0130}DEN BA\u{015E}LAT",
+    menu_quit: "\u{00C7}IKI\u{015E}",
+    menu_cursor: "IMLE\u{00C7}",
+    pause_title: "DURAKLATILDI",
+    pause_footer: "A:TAMAM   B:IPTAL   YUKARI/A\u{015E}A\u{011E}I",
+    keys_title: "KONTROLLER",
+    keys_footer: "A:D\u{00DC}ZENLE  L/R:MOD  X:O1/O2  B:GER\u{0130}",
+    keys_dropdown_footer: "A:TAMAM   B:IPTAL   YUKARI/A\u{015E}A\u{011E}I",
+    none: "(yok)",
+    flash_mouse_left: "Sol tik",
+    flash_mouse_right: "Sa\u{011E} tik",
+    flash_space: "Bo\u{015E}luk",
+    flash_enter: "Enter",
+    flash_escape: "Esc",
+    flash_shift: "Shift",
+    flash_control: "Ctrl",
+    flash_alt: "Alt",
+    flash_tab: "Tab",
+    flash_backspace: "Geri sil",
+    flash_up: "Yukari",
+    flash_down: "A\u{015E}a\u{011E}i",
+    flash_left: "Sol",
+    flash_right: "Sa\u{011E}",
+    empty_title: "OYUN YOK",
+    empty_l1: ".SWF DOSYALARINI \u{015E}URAYA KOYUN",
+    empty_l2: "SDMC:/FLASHNX/   VEYA   SDMC:/SWITCH/FLASHNX/",
+    empty_l3: "SONRA FLASHNX'I YEN\u{0130}DEN BA\u{015E}LATIN.",
+    empty_footer: "Y:UZAKTAN AKTAR   -:\u{00C7}IKI\u{015E}",
+    list_footer: "L/R:SEKMELER  A:OYNA  Y:SIRALA  -:ARA  +:SE\u{00C7}ENEK",
+    applet_title: "APPLET MODU",
+    applet_notice: "B\u{0130}R OYUN BA\u{015E}LATMAK UYGULAMANIN T\u{00DC}M BELLE\u{011E}\u{0130}N\u{0130} GEREKT\u{0130}R\u{0130}R, APPLET MODUNDA BU BELLEK YOKTUR. HOMEBREW MEN\u{00DC}S\u{00DC}NDE B\u{0130}R OYUNA (VEYA FORWARDER'A) R TU\u{015E}UNU BASILI TUTARAK FLASHNX'I TAM BELLEKLE BA\u{015E}LATIN.",
+    options_title: "SE\u{00C7}ENEKLER",
+    opt_keys: "KONTROLLER",
+    opt_rename: "YEN\u{0130}DEN ADLANDIR",
+    opt_edit: "D\u{00DC}ZENLE",
+    opt_delete: "S\u{0130}L",
+    opt_back: "GER\u{0130}",
+    options_footer: "A:TAMAM   B:GER\u{0130}",
+    del_title: "S\u{0130}L\u{0130}NS\u{0130}N M\u{0130}?",
+    del_l1: ".swf DOSYASI, KAYITLAR (.sol),",
+    del_l2: "KONTROLLER VE TAKMA AD S\u{0130}L\u{0130}NECEK.",
+    del_l3: "BU GER\u{0130} ALINAMAZ.",
+    del_footer: "A: S\u{0130}L     B: IPTAL",
+    dist_title: "UZAKTAN AKTAR",
+    dist_add: "+ URL EKLE",
+    dist_list_footer: "A:BA\u{015E}LAT   X:FLASHPOINT   +:SE\u{00C7}ENEK   L/R:SEKME",
+    dist_subtitle: "ARCHIVE.ORG'DAN SWF IND\u{0130}R",
+    dist_press_a: "URL G\u{0130}RMEK I\u{00C7}IN A'YA BASIN",
+    dist_example1: "\u{00D6}RNEK: HTTPS://ARCHIVE.ORG/DETAILS/<ITEM-ID>",
+    dist_example2: "VEYA SADECE <ITEM-ID>",
+    dist_history: "GE\u{00C7}M\u{0130}\u{015E}",
+    dist_hint_zr: "ZR : BU URL'Y\u{0130} DO\u{011E}RUDAN Y\u{00DC}KLE",
+    dist_hint_a: "A  : URL G\u{0130}R / D\u{00DC}ZENLE (KLAVYE)",
+    dist_hint_lr: "L / R : \u{00D6}NCEK\u{0130} / SONRAK\u{0130} URL",
+    dist_footer_hist: "ZR:A\u{00C7}  A:D\u{00DC}ZENLE  ZL:S\u{0130}L  L/R:GEZ  Y:YEREL  -:\u{00C7}IK",
+    dist_footer_nohist: "A:URL G\u{0130}R   Y:YEREL   -:\u{00C7}IKI\u{015E}",
+    files_title: "UZAK DOSYALAR",
+    files_filter: "F\u{0130}LTRE",
+    files_footer: "A:IND\u{0130}R   Y:SIRALA   -:ARA   L/R:SAYFA   B:GER\u{0130}",
+    dl_title: "IND\u{0130}R\u{0130}L\u{0130}YOR",
+    dl_footer: "B:IPTAL",
+    err_title: "HATA",
+    err_footer: "A/B:TAMAM",
+    settings_title: "AYARLAR",
+    set_keys: "VARSAYILAN KONTROLLER",
+    set_language: "D\u{0130}L",
+    set_quit: "\u{00C7}IKI\u{015E}",
+    set_pseudo: "TAKMA AD",
+    kbd_pseudo_guide: "Payla\u{015F}t\u{0131}\u{011F}\u{0131}n profillerde g\u{00F6}r\u{00Fc}nen ad\u{0131}n",
+    set_cursor_speed: "IMLE\u{00C7} HIZI",
+    show_cursor: "IMLEC\u{0130} G\u{00D6}STER",
+    cursor_shown: "G\u{00D6}R\u{00DC}N\u{00DC}R",
+    cursor_hidden: "G\u{0130}ZL\u{0130}",
+    set_back: "GER\u{0130}",
+    set_report_bug: "HATA B\u{0130}LD\u{0130}R",
+    tab_play: "OYNA",
+    tab_import: "AKTAR",
+    tab_settings: "AYARLAR",
+    set_covers: "\u{00C7}EVR\u{0130}M\u{0130}\u{00C7}\u{0130} KAPAKLAR",
+    lbl_on: "A\u{00C7}IK",
+    lbl_off: "KAPALI",
+    opt_cover: "KAPAK",
+    opt_favorite: "FAVOR\u{0130}",
+    opt_unfavorite: "FAVOR\u{0130}DEN \u{00C7}IKAR",
+    opt_share: "KONTROLLER\u{0130} PAYLA\u{015E}",
+    profile_shared_ok: "KONTROLLER\u{0130}N G\u{00D6}NDER\u{0130}LD\u{0130}. TOPLULU\u{011E}A YARDIM I\u{00C7}IN TE\u{015E}EKK\u{00DC}RLER.",
+    opt_apply: "PROF\u{0130}L UYGULA",
+    profile_title: "KONTROL PROF\u{0130}LLER\u{0130}",
+    profile_footer: "A:UYGULA   B:GER\u{0130}   YUK/A\u{015E}A:GEZ",
+    profile_none: "BU OYUN I\u{00C7}IN HEN\u{00DC}Z PROF\u{0130}L YOK. KEND\u{0130}N\u{0130}NK\u{0130}N\u{0130} PAYLA\u{015E}!",
+    profile_revert: "KEND\u{0130} KONTROLLER\u{0130}ME D\u{00D6}N",
+    profile_applied_ok: "PROF\u{0130}L UYGULANDI. \u{00D6}NCEK\u{0130} KONTROLLER\u{0130}N KAYDED\u{0130}LD\u{0130}.",
+    profile_reverted_ok: "KONTROLLER\u{0130}N GER\u{0130} Y\u{00DC}KLEND\u{0130}.",
+    profile_share_confirm: "BU OYUN I\u{00C7}IN KONTROLLER\u{0130}N PAYLA\u{015E}ILSIN MI?",
+    share_confirm_update: "PAYLA\u{015E}ILAN PROF\u{0130}L\u{0130}N\u{0130} G\u{00DC}NCELLER:",
+    touches_edit: "KONTROLLER\u{0130} D\u{00DC}ZENLE",
+    touches_footer: "A:SE\u{00C7}   B:GER\u{0130}   YUK/A\u{015E}A:GEZ",
+    touches_revert_default: "VARSAYILAN KONTROLLERE D\u{00D6}N",
+    profile_preview_title: "BEN\u{0130}MK\u{0130} -> PROF\u{0130}L",
+    profile_preview_footer: "A:UYGULA   B:GER\u{0130}",
+    profile_preview_none: "BU PROF\u{0130}L H\u{0130}\u{00C7}B\u{0130}R TU\u{015E}UNU DE\u{011E}\u{0130}\u{015E}T\u{0130}RMEZ.",
+    profile_active: "(ETK\u{0130}N)",
+    profile_share_dup: "ZATEN KATALOGDA. KEND\u{0130} S\u{00DC}R\u{00DC}M\u{00DC}N\u{00DC} PAYLA\u{015E}MAK I\u{00C7}IN B\u{0130}R TU\u{015E} DE\u{011E}\u{0130}\u{015E}T\u{0130}R.",
+    profile_del_confirm: "PAYLA\u{015E}ILAN PROF\u{0130}L\u{0130}N S\u{0130}L\u{0130}NS\u{0130}N M\u{0130}?",
+    profile_del_ok: "PAYLA\u{015E}ILAN PROF\u{0130}L\u{0130}N S\u{0130}L\u{0130}ND\u{0130}.",
+    profile_del_not_mine: "S\u{0130}L\u{0130}NECEK B\u{0130}R \u{015E}EY YOK: BU KONSOLDAN PAYLA\u{015E}ILMADI.",
+    profile_del_hint: "X:S\u{0130}L",
+    revert_preview_title: "\u{015E}\u{0130}MD\u{0130} -> GER\u{0130} ALINCA",
+    revert_preview_footer: "A:GER\u{0130} AL   B:GER\u{0130}",
+    cover_title: "KAPAK SE\u{00C7}",
+    cover_footer: "A:SE\u{00C7}   -:ARA   YUK/A\u{015E}A:GEZ   B:GER\u{0130}",
+    cover_off_notice: "AYARLARDAN \u{00C7}EVR\u{0130}M\u{0130}\u{00C7}\u{0130} KAPAKLARI A\u{00C7}IN",
+    cover_none: "SONU\u{00C7} YOK",
+    fp_title: "FLASHPOINT",
+    fp_footer: "A:IND\u{0130}R  Y:SIRALA  +:B\u{0130}LG\u{0130}  ZL+ZR:F\u{0130}LTRE {}  B:GER\u{0130}",
+    fp_details_title: "AYRINTILAR",
+    fp_details_dev: "GEL\u{0130}\u{015E}T\u{0130}R\u{0130}C\u{0130}",
+    fp_details_publisher: "YAYINCI",
+    fp_details_date: "\u{00C7}IKI\u{015E} TAR\u{0130}H\u{0130}",
+    fp_details_size: "IND\u{0130}RME BOYUTU",
+    fp_details_footer: "B:GER\u{0130}",
+    sort_title: "SIRALAMA",
+    sort_footer: "A:SE\u{00C7}   X:TERS   B:GER\u{0130}",
+    sort_alpha: "AD",
+    sort_recent: "EKLENME",
+    sort_played: "EN \u{00C7}OK OYNANAN",
+    sort_size: "BOYUT",
+    played_label: "OYNANDI",
+    sort_recent_played: "SON OYNANAN",
+    sort_dev: "GEL\u{0130}\u{015E}T\u{0130}R\u{0130}C\u{0130}",
+    multifile: "\u{00C7}OK DOSYALI",
+    sort_dir_asc: "ARTAN",
+    sort_dir_desc: "AZALAN",
+    settings_footer: "L/R:SEKMELER   A:TAMAM",
+    lang_title: "D\u{0130}L",
+    lang_footer: "A:TAMAM   B:IPTAL",
+    histdel_title: "URL S\u{0130}L\u{0130}NS\u{0130}N M\u{0130}?",
+    histdel_msg: "BU URL GE\u{00C7}M\u{0130}\u{015E}TEN S\u{0130}L\u{0130}NS\u{0130}N M\u{0130}?",
+    err_too_large: "ARCHIVE.ORG YANITI \u{00C7}OK B\u{00DC}Y\u{00DC}K (>4 MB). BU S\u{00DC}R\u{00DC}M I\u{00C7}IN \u{00C7}OK B\u{00DC}Y\u{00DC}K.",
+    err_https: "HTTPS BA\u{015E}ARISIZ ({}). SAAT\u{0130}, WIFI VE URL'Y\u{0130} KONTROL ED\u{0130}N.",
+    err_json: "OKUNAMAYAN ARCHIVE.ORG JSON: {}",
+    err_json_no_files: "JSON'DA \"files\" ALANI YOK",
+    err_dl_start: "IND\u{0130}RME BA\u{015E}LATILAMADI (KOD {}).",
+    err_dl_failed: "IND\u{0130}RME BA\u{015E}ARISIZ (KOD {})",
+    err_dl_cancelled: "IND\u{0130}RME KULLANICI TARAFINDAN IPTAL ED\u{0130}LD\u{0130}.",
+    err_url_invalid: "GE\u{00C7}ERS\u{0130}Z URL. https://archive.org/details/<id> G\u{0130}B\u{0130} B\u{0130}R URL VEYA SADECE <id> BEKLEN\u{0130}YOR.",
+    err_no_swf: "BU ARCHIVE.ORG \u{00D6}\u{011E}ES\u{0130}NDE .SWF DOSYASI YOK.",
+    kbd_url_header: "FlashNX - Uzaktan i\u{00E7}e aktarma",
+    kbd_url_guide: "archive.org \u{00F6}\u{011F}e URL'si (\u{00F6}rn. https://archive.org/download/oyun-kimligi)",
+    kbd_rename_header: "FlashNX - Oyunu yeniden adland\u{0131}r",
+    kbd_rename_guide: "G\u{00F6}r\u{00FC}nen ad (dosya ad\u{0131}na d\u{00F6}nmek i\u{00E7}in bo\u{015F} b\u{0131}rak\u{0131}n)",
+    kbd_search_header: "FlashNX - Ara",
+    kbd_search_guide: "Dosya ad\u{0131}na g\u{00F6}re filtrele (bo\u{015F} = hepsini g\u{00F6}ster)",
+    bug_pick_title: "HATA B\u{0130}LD\u{0130}R",
+    bug_pick_footer: "A:SE\u{00C7}   B:GER\u{0130}   YUK/A\u{015E}A:GEZ",
+    bug_no_games: "B\u{0130}LD\u{0130}R\u{0130}LECEK OYUN YOK. \u{00D6}NCE B\u{0130}R .SWF AKTARIN.",
+    bug_ok_title: "TE\u{015E}EKK\u{00DC}RLER!",
+    bug_ok_msg: "RAPORUN G\u{00D6}NDER\u{0130}LD\u{0130}. FLASHNX'I GEL\u{0130}\u{015E}T\u{0130}RMEYE YARDIM I\u{00C7}IN TE\u{015E}EKK\u{00DC}RLER.",
+    bug_fail_title: "BA\u{015E}ARISIZ",
+    kbd_bug_header: "FlashNX - Hata bildir",
+    kbd_bug_guide: "Herkese a\u{00E7}\u{0131}k bir GitHub konusu a\u{00E7}ar. Sorunu anlat. \u{0130}ste\u{011F}e ba\u{011F}l\u{0131}: @kullan\u{0131}c\u{0131} ad\u{0131}n.",
+    set_suggest: "\u{00D6}NER\u{0130}DE BULUN",
+    kbd_suggest_header: "FlashNX - \u{00D6}neride bulun",
+    kbd_suggest_guide: "Herkese a\u{00E7}\u{0131}k bir GitHub konusu a\u{00E7}ar. FlashNX i\u{00E7}in fikrin / \u{00F6}zellik iste\u{011F}in.",
+};
+
 /// Current language, as a `Lang` index. Default English; overridden by
 /// `init()` at boot from settings.json / system language.
 static CURRENT: AtomicU8 = AtomicU8::new(0);
@@ -1764,6 +1945,7 @@ pub fn s() -> &'static Strings {
         Lang::It => &IT,
         Lang::Pt => &PT,
         Lang::Zh => &ZH,
+        Lang::Tr => &TR,
     }
 }
 
@@ -1791,6 +1973,8 @@ pub fn files_found(n: usize) -> std::string::String {
         Lang::Pt => std::format!("{} ARQUIVOS .SWF ENCONTRADOS", n),
         // Chinese has no plural agreement: a count phrasing reads naturally.
         Lang::Zh => std::format!("\u{627E}\u{5230} .SWF \u{6587}\u{4EF6}: {}", n), // 找到 .SWF 文件: {}
+        // Turkish has no plural after a number (the numeral already marks it).
+        Lang::Tr => std::format!("{} .SWF DOSYASI BULUNDU", n),
     }
 }
 

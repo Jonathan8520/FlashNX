@@ -1794,13 +1794,35 @@ fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
 /// Language picker: `selection` indexes `loc::PICKER_LANGS`. A applies +
 /// persists the choice; B/Minus cancels back to the settings modal.
 fn handle_settings_language_input(s: &mut State, button: &str, mut selection: usize) {
-    let last = crate::loc::PICKER_LANGS.len().saturating_sub(1);
+    // The picker is a 3-column grid (see draw_library_language_picker): left/right
+    // step linearly (wrapping), up/down move by a row and clamp to the last row.
+    const COLS: usize = 3;
+    let n = crate::loc::PICKER_LANGS.len();
+    let last = n.saturating_sub(1);
     match button {
-        "Up" | "StickLUp" => {
+        "Left" | "StickLLeft" => {
             selection = if selection == 0 { last } else { selection - 1 };
         }
-        "Down" | "StickLDown" => {
+        "Right" | "StickLRight" => {
             selection = if selection >= last { 0 } else { selection + 1 };
+        }
+        "Up" | "StickLUp" => {
+            selection = if selection >= COLS {
+                selection - COLS
+            } else {
+                // Wrap to the bottom of the same column (last row that has it).
+                let col = selection % COLS;
+                let rows = n.div_ceil(COLS);
+                let mut t = (rows - 1) * COLS + col;
+                if t > last {
+                    t = t.saturating_sub(COLS);
+                }
+                t
+            };
+        }
+        "Down" | "StickLDown" => {
+            let t = selection + COLS;
+            selection = if t <= last { t } else { selection % COLS };
         }
         "A" => {
             if let Some(&lang) = crate::loc::PICKER_LANGS.get(selection) {
