@@ -43,7 +43,7 @@ use ruffle_render::bitmap::{
 };
 use ruffle_render::commands::{CommandHandler, CommandList, RenderBlendMode};
 use ruffle_render::error::Error;
-use ruffle_render::filters::Filter;
+use ruffle_render::filters::{DisplacementMapFilter, DisplacementMapFilterMode, Filter};
 use ruffle_render::matrix::Matrix;
 use ruffle_render::pixel_bender::{
     PixelBenderShader, PixelBenderShaderHandle, PixelBenderShaderImpl,
@@ -900,14 +900,7 @@ impl std::fmt::Debug for StandaloneTexture {
 struct StandaloneBitmap(Arc<StandaloneTexture>);
 impl BitmapHandleImpl for StandaloneBitmap {}
 
-/// Minimal SyncHandle. Ruffle wants something back from `render_offscreen` to
-/// confirm the work was scheduled; `apply_filter` returns this since its
-/// result is read straight back via `render_bitmap`, never via a sync.
-#[derive(Debug)]
-struct NoOpSyncHandle;
-impl SyncHandle for NoOpSyncHandle {}
-
-/// SyncHandle for `BitmapData.draw()`. Holds a NON-owning GL texture id (the
+/// SyncHandle for `BitmapData.draw()` and `apply_filter`. Holds a NON-owning GL texture id (the
 /// temp the draw commands were rendered into) plus the dirty region to read
 /// back. Ruffle stores this in the BitmapData's `GpuModified` state and calls
 /// `resolve_sync_handle` on the next CPU access (e.g. `copyPixels`), which
@@ -1188,6 +1181,26 @@ impl Drop for BevelFilterProgram {
     fn drop(&mut self) { unsafe { glDeleteProgram(self.program) }; }
 }
 
+/// DisplacementMapFilter program (#42): source at unit 0, map at unit 1, plus the
+/// per-filter args (components/mode/scale/dims/offset/viewscale).
+struct DisplacementMapFilterProgram {
+    program: GLuint,
+    u_src_uv: GLint,
+    u_color: GLint,
+    u_map_remap: GLint,
+    u_comp_x: GLint,
+    u_comp_y: GLint,
+    u_mode: GLint,
+    u_scale: GLint,
+    u_source_size: GLint,
+    u_map_size: GLint,
+    u_offset: GLint,
+    u_viewscale: GLint,
+}
+impl Drop for DisplacementMapFilterProgram {
+    fn drop(&mut self) { unsafe { glDeleteProgram(self.program) }; }
+}
+
 /// Two-texture programs for `render_alpha_mask` and complex `blend` modes.
 /// Both reuse FILTER_VERT (a full-quad pass with `u_src_uv`), and sample a
 /// second texture at unit 1 in addition to `u_tex` at unit 0.
@@ -1444,6 +1457,7 @@ pub struct SwitchRenderBackend {
     blur_filter: BlurFilterProgram,
     glow_filter: GlowFilterProgram,
     bevel_filter: BevelFilterProgram,
+    displacement_filter: DisplacementMapFilterProgram,
     /// Two-texture composite programs for soft alpha masks + complex blends.
     alpha_mask_prog: AlphaMaskProgram,
     complex_blend_prog: ComplexBlendProgram,
@@ -2028,6 +2042,59 @@ void main() {\n\
     frag_color = vec4(rgb, a);\n\
 }\n\0";
 
+// DisplacementMapFilter (#42, e.g. Papa Louie 3's rippling water). Faithful port
+// of `displacement_map.wgsl`: for each dest pixel, sample the displacement map,
+// pull the two selected channels, and offset the source lookup by
+// `(component - 128) * viewscale * scale / 256`. Reuses FILTER_VERT, so `v_uv`
+// is the source content coordinate in [0,1] (the source region fills its
+// texture: source_point 0,0 + full size, which is how cacheAsBitmap sources come
+// in). Source at unit 0, map at unit 1. Wrap mode is emulated with `fract` since
+// our standalone textures are CLAMP_TO_EDGE.
+const DISPLACEMENT_MAP_FRAG: &[u8] = b"#version 330 core\n\
+in vec2 v_uv;\n\
+out vec4 frag_color;\n\
+uniform sampler2D u_tex;\n\
+uniform sampler2D u_map_tex;\n\
+uniform vec4 u_color;\n\
+uniform vec4 u_map_remap;\n\
+uniform int u_comp_x;\n\
+uniform int u_comp_y;\n\
+uniform int u_mode;\n\
+uniform vec2 u_scale;\n\
+uniform vec2 u_source_size;\n\
+uniform vec2 u_map_size;\n\
+uniform vec2 u_offset;\n\
+uniform vec2 u_viewscale;\n\
+float dm_comp(vec4 m, int c) {\n\
+    if (c == 1) return m.r * 255.0;\n\
+    if (c == 2) return m.g * 255.0;\n\
+    if (c == 4) return m.b * 255.0;\n\
+    if (c == 8) return m.a * 255.0;\n\
+    return 128.0;\n\
+}\n\
+void main() {\n\
+    vec2 source_pos = v_uv * u_source_size;\n\
+    vec2 map_uv = (source_pos - u_offset) / u_viewscale / u_map_size;\n\
+    // Map may live in a shared atlas: sample its sub-rect via u_map_remap.\n\
+    vec2 map_uv_c = clamp(map_uv, 0.0, 1.0);\n\
+    vec4 m = texture(u_map_tex, u_map_remap.xy + map_uv_c * u_map_remap.zw);\n\
+    if (map_uv.x < 0.0 || map_uv.x > 1.0 || map_uv.y < 0.0 || map_uv.y > 1.0) {\n\
+        m = vec4(0.5);\n\
+    }\n\
+    vec2 sc = u_viewscale * u_scale;\n\
+    vec2 disp = source_pos + vec2(\n\
+        (dm_comp(m, u_comp_x) - 128.0) * sc.x / 256.0,\n\
+        (dm_comp(m, u_comp_y) - 128.0) * sc.y / 256.0);\n\
+    vec2 duv = disp / u_source_size;\n\
+    bool oob = duv.x < 0.0 || duv.x > 1.0 || duv.y < 0.0 || duv.y > 1.0;\n\
+    if (u_mode == 0) { duv = fract(duv); }\n\
+    else if (u_mode == 1) { duv = clamp(duv, 0.0, 1.0); }\n\
+    else if (u_mode == 2 && oob) { duv = v_uv; }\n\
+    vec4 result = texture(u_tex, duv);\n\
+    if (u_mode == 3 && oob) { result = vec4(u_color.rgb, 1.0) * u_color.a; }\n\
+    frag_color = result;\n\
+}\n\0";
+
 // ─── Shader build helpers ─────────────────────────────────────────────────────
 
 fn compile_shader(kind: GLenum, src_nul: &[u8]) -> Option<GLuint> {
@@ -2204,6 +2271,24 @@ fn build_bevel_filter_program() -> Option<BevelFilterProgram> {
         u_strength: loc(program, b"u_strength\0"),
         u_bevel_type: loc(program, b"u_bevel_type\0"),
         u_knockout: loc(program, b"u_knockout\0"),
+        program,
+    })
+}
+
+fn build_displacement_map_filter_program() -> Option<DisplacementMapFilterProgram> {
+    let program = link_program(FILTER_VERT, DISPLACEMENT_MAP_FRAG)?;
+    Some(DisplacementMapFilterProgram {
+        u_src_uv: loc(program, b"u_src_uv\0"),
+        u_color: loc(program, b"u_color\0"),
+        u_map_remap: loc(program, b"u_map_remap\0"),
+        u_comp_x: loc(program, b"u_comp_x\0"),
+        u_comp_y: loc(program, b"u_comp_y\0"),
+        u_mode: loc(program, b"u_mode\0"),
+        u_scale: loc(program, b"u_scale\0"),
+        u_source_size: loc(program, b"u_source_size\0"),
+        u_map_size: loc(program, b"u_map_size\0"),
+        u_offset: loc(program, b"u_offset\0"),
+        u_viewscale: loc(program, b"u_viewscale\0"),
         program,
     })
 }
@@ -3357,6 +3442,7 @@ impl SwitchRenderBackend {
         let blur_filter = build_blur_filter_program()?;
         let glow_filter = build_glow_filter_program()?;
         let bevel_filter = build_bevel_filter_program()?;
+        let displacement_filter = build_displacement_map_filter_program()?;
         let alpha_mask_prog = build_alpha_mask_program()?;
         let complex_blend_prog = build_complex_blend_program()?;
 
@@ -3406,6 +3492,10 @@ impl SwitchRenderBackend {
             glUseProgram(bevel_filter.program);
             glUniform1i(loc(bevel_filter.program, b"u_tex\0"), 0);
             glUniform1i(loc(bevel_filter.program, b"u_blur_tex\0"), 1);
+            // DisplacementMap: source at unit 0, displacement map at unit 1.
+            glUseProgram(displacement_filter.program);
+            glUniform1i(loc(displacement_filter.program, b"u_tex\0"), 0);
+            glUniform1i(loc(displacement_filter.program, b"u_map_tex\0"), 1);
             // Two-texture composites: backdrop/maskee at unit 0, mask/current
             // at unit 1.
             glUseProgram(alpha_mask_prog.program);
@@ -3434,6 +3524,7 @@ impl SwitchRenderBackend {
             blur_filter,
             glow_filter,
             bevel_filter,
+            displacement_filter,
             alpha_mask_prog,
             complex_blend_prog,
             blend_window: 0,
@@ -4368,6 +4459,46 @@ impl SwitchRenderBackend {
     /// each one in a `BitmapHandle` Arc (which would tie its lifetime to
     /// the Arc rather than the pool — the perf blocker for filtered scenes).
     #[allow(clippy::too_many_arguments)]
+    /// Resolve a `BitmapHandle` to `(texture, tex_w, tex_h, base_x, base_y, is_atlas)`,
+    /// whether it's a standalone texture (base 0,0; tex dims = content; PREMULT) or
+    /// an atlas-packed bitmap (base = its atlas pixel offset; tex dims = ATLAS_SIZE;
+    /// STRAIGHT alpha). Lets `apply_filter` work on BitmapData that live in the
+    /// shared atlas, not just dedicated textures (#42: Papa Louie 3's water). The
+    /// `is_atlas` flag picks the right premult/straight blit at each boundary.
+    fn resolve_bitmap_tex(&self, handle: &BitmapHandle) -> Option<(GLuint, u32, u32, u32, u32, bool)> {
+        if let Some(s) = as_standalone_bitmap(handle) {
+            return Some((s.0.texture, s.0.width, s.0.height, 0, 0, false));
+        }
+        if let Some(b) = as_switch_bitmap(handle) {
+            let atlas = self.atlases.get(b.atlas_index)?;
+            if atlas.texture == 0 {
+                return None;
+            }
+            // Real atlas dims — right-sized dedicated atlases aren't 2048² (#42).
+            let base_x = (b.u0 * atlas.width as f32).round() as u32;
+            let base_y = (b.v0 * atlas.height as f32).round() as u32;
+            return Some((atlas.texture, atlas.width, atlas.height, base_x, base_y, true));
+        }
+        None
+    }
+
+    /// Resolve a bitmap handle for use as a SAMPLED map (displacement map): its
+    /// texture, content dims, and the UV sub-rect `[u0, v0, uw, vh]` to remap [0,1]
+    /// into (identity for a standalone, the atlas sub-rect for a packed bitmap).
+    fn resolve_bitmap_map(&self, handle: &BitmapHandle) -> Option<(GLuint, u32, u32, [f32; 4])> {
+        if let Some(s) = as_standalone_bitmap(handle) {
+            return Some((s.0.texture, s.0.width, s.0.height, [0.0, 0.0, 1.0, 1.0]));
+        }
+        if let Some(b) = as_switch_bitmap(handle) {
+            let atlas = self.atlases.get(b.atlas_index)?;
+            if atlas.texture == 0 {
+                return None;
+            }
+            return Some((atlas.texture, b.width, b.height, [b.u0, b.v0, b.u1 - b.u0, b.v1 - b.v0]));
+        }
+        None
+    }
+
     fn apply_filter_raw(
         &mut self,
         src_tex: GLuint,
@@ -4407,8 +4538,92 @@ impl SwitchRenderBackend {
                 src_tex, src_w, src_h, source_point, source_size,
                 dst_tex, dest_point, args,
             ),
+            Filter::DisplacementMapFilter(args) => self.apply_displacement_map_raw(
+                src_tex, src_w, src_h, source_point, source_size,
+                dst_tex, dest_point, args,
+            ),
             _ => false,
         }
+    }
+
+    /// Apply a DisplacementMapFilter (#42): a single full-quad pass that samples
+    /// the displacement map (unit 1) to offset the source lookup (unit 0). No-op
+    /// (returns false, so Ruffle keeps the unfiltered source) when the map bitmap
+    /// isn't a resolvable standalone texture. Assumes the source content fills its
+    /// texture (source_point 0,0 + full size), as cacheAsBitmap sources do.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_displacement_map_raw(
+        &mut self,
+        src_tex: GLuint,
+        src_w: u32,
+        src_h: u32,
+        source_point: (u32, u32),
+        source_size: (u32, u32),
+        dst_tex: GLuint,
+        dest_point: (i32, i32),
+        args: &DisplacementMapFilter,
+    ) -> bool {
+        let Some(map_handle) = args.map_bitmap.as_ref() else { return false };
+        let Some((map_tex, map_w, map_h, map_remap)) = self.resolve_bitmap_map(map_handle) else {
+            self.warn_once(b"displacement: map bitmap unresolved (skipped)\n\0");
+            return false;
+        };
+        let prog = self.displacement_filter.program;
+        let p = &self.displacement_filter;
+        let (u_src_uv, u_color, u_map_remap, u_comp_x, u_comp_y, u_mode, u_scale, u_source_size, u_map_size, u_offset, u_viewscale) = (
+            p.u_src_uv, p.u_color, p.u_map_remap, p.u_comp_x, p.u_comp_y, p.u_mode, p.u_scale,
+            p.u_source_size, p.u_map_size, p.u_offset, p.u_viewscale,
+        );
+        let color = [
+            f32::from(args.color.r) / 255.0,
+            f32::from(args.color.g) / 255.0,
+            f32::from(args.color.b) / 255.0,
+            f32::from(args.color.a) / 255.0,
+        ];
+        let comp_x = args.component_x as i32;
+        let comp_y = args.component_y as i32;
+        let mode = match args.mode {
+            DisplacementMapFilterMode::Wrap => 0,
+            DisplacementMapFilterMode::Clamp => 1,
+            DisplacementMapFilterMode::Ignore => 2,
+            DisplacementMapFilterMode::Color => 3,
+        };
+        // viewscale defaults to 0 on a freshly-`Default`ed filter; a zero would
+        // divide the map lookup to infinity, so fall back to 1.0.
+        let vsx = if args.viewscale_x.abs() > 1e-6 { args.viewscale_x } else { 1.0 };
+        let vsy = if args.viewscale_y.abs() > 1e-6 { args.viewscale_y } else { 1.0 };
+        let (sw, sh) = (source_size.0 as f32, source_size.1 as f32);
+        let (scale_x, scale_y) = (args.scale_x, args.scale_y);
+        let (off_x, off_y) = (args.map_point.0 as f32, args.map_point.1 as f32);
+        let (mw, mh) = (map_w as f32, map_h as f32);
+        unsafe {
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, map_tex);
+            glActiveTexture(GL_TEXTURE0);
+        }
+        let ok = self.draw_filter_pass(
+            prog, u_src_uv,
+            src_tex, src_w, src_h, source_point, source_size,
+            dst_tex, dest_point.0, dest_point.1, source_size.0, source_size.1,
+            move || unsafe {
+                glUniform4f(u_color, color[0], color[1], color[2], color[3]);
+                glUniform4f(u_map_remap, map_remap[0], map_remap[1], map_remap[2], map_remap[3]);
+                glUniform1i(u_comp_x, comp_x);
+                glUniform1i(u_comp_y, comp_y);
+                glUniform1i(u_mode, mode);
+                glUniform2f(u_scale, scale_x, scale_y);
+                glUniform2f(u_source_size, sw, sh);
+                glUniform2f(u_map_size, mw, mh);
+                glUniform2f(u_offset, off_x, off_y);
+                glUniform2f(u_viewscale, vsx, vsy);
+            },
+        );
+        unsafe {
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glActiveTexture(GL_TEXTURE0);
+        }
+        ok
     }
 
     /// Pixel dimensions of whatever we're currently rendering into: the main
@@ -8299,15 +8514,21 @@ impl RenderBackend for SwitchRenderBackend {
         #[derive(Clone, Copy)]
         enum Backing {
             Standalone(GLuint),
-            Atlas { tex: GLuint, base_x: u32, base_y: u32 },
+            Atlas { tex: GLuint, base_x: u32, base_y: u32, atlas_w: u32, atlas_h: u32 },
         }
         let (tex_w, tex_h, backing) = if let Some(s) = as_standalone_bitmap(&handle) {
             (s.0.width, s.0.height, Backing::Standalone(s.0.texture))
         } else if let Some(b) = as_switch_bitmap(&handle) {
-            let base_x = (b.u0 * ATLAS_SIZE as f32).round() as u32;
-            let base_y = (b.v0 * ATLAS_SIZE as f32).round() as u32;
             let Some(a) = self.atlases.get(b.atlas_index) else { return None };
-            (b.width, b.height, Backing::Atlas { tex: a.texture, base_x, base_y })
+            // Base pixel offset + normalization must use the atlas' ACTUAL dims:
+            // right-sized dedicated atlases aren't 2048² (#42 regression — hardcoding
+            // ATLAS_SIZE here sampled/wrote the wrong region → striped water).
+            let base_x = (b.u0 * a.width as f32).round() as u32;
+            let base_y = (b.v0 * a.height as f32).round() as u32;
+            (
+                b.width, b.height,
+                Backing::Atlas { tex: a.texture, base_x, base_y, atlas_w: a.width, atlas_h: a.height },
+            )
         } else {
             self.warn_once(b"render_offscreen: unknown handle\n\0");
             return None;
@@ -8349,10 +8570,10 @@ impl RenderBackend for SwitchRenderBackend {
                         temp_id, (0, 0), tex_w, tex_h,
                     );
                 }
-                Backing::Atlas { tex, base_x, base_y } => {
+                Backing::Atlas { tex, base_x, base_y, atlas_w, atlas_h } => {
                     // Atlas stores STRAIGHT alpha — premultiply it into temp.
                     self.blit_premult(
-                        tex, ATLAS_SIZE, ATLAS_SIZE, (base_x, base_y), (tex_w, tex_h),
+                        tex, atlas_w, atlas_h, (base_x, base_y), (tex_w, tex_h),
                         temp_id, (0, 0), tex_w, tex_h,
                     );
                 }
@@ -8379,7 +8600,7 @@ impl RenderBackend for SwitchRenderBackend {
                         s_tex, (0, 0), tex_w, tex_h,
                     );
                 }
-                Backing::Atlas { tex, base_x, base_y } => {
+                Backing::Atlas { tex, base_x, base_y, .. } => {
                     self.blit_unpremult(
                         temp_id, tex_w, tex_h, (0, 0), (tex_w, tex_h),
                         tex, (base_x as i32, base_y as i32), tex_w, tex_h,
@@ -8412,15 +8633,73 @@ impl RenderBackend for SwitchRenderBackend {
         filter: Filter,
     ) -> Option<Box<dyn SyncHandle>> {
         self.apply_filter_calls = self.apply_filter_calls.wrapping_add(1);
-        let Some(src) = as_standalone_bitmap(&source) else { return None };
-        let Some(dst) = as_standalone_bitmap(&destination) else { return None };
-        let (src_tex, src_w, src_h) = (src.0.texture, src.0.width, src.0.height);
-        let dst_tex = dst.0.texture;
-        let ok = self.apply_filter_raw(
-            src_tex, src_w, src_h, source_point, source_size,
-            dst_tex, dest_point, &filter,
-        );
-        if ok { Some(Box::new(NoOpSyncHandle)) } else { None }
+        let (fw, fh) = source_size;
+        if fw == 0 || fh == 0 {
+            return None;
+        }
+        // Resolve source + destination (atlas or standalone). Fail cleanly (Ruffle
+        // keeps the unfiltered pixels) if either can't be resolved.
+        let (src_tex, src_tw, src_th, src_bx, src_by, src_atlas) = self.resolve_bitmap_tex(&source)?;
+        let (dst_tex, _dst_tw, _dst_th, dst_bx, dst_by, dst_atlas) = self.resolve_bitmap_tex(&destination)?;
+        // Round-trip through two pool temps so the filter always sees a full,
+        // 0,0-based source texture (its own coordinate assumption) and never reads
+        // and writes the same atlas region at once: copy the source sub-rect into
+        // temp_src (PREMULTIPLIED, the temps' convention), filter into temp_dst,
+        // then blit temp_dst back to the dest sub-rect. The blits convert alpha at
+        // each boundary: atlas is STRAIGHT (premult on the way in, un-premult on the
+        // way out), standalone is already PREMULT (identity). The displacement is a
+        // pure spatial remap, so it's convention-agnostic in between.
+        let temp_src = self.filter_tex_pool.acquire(fw, fh)?;
+        let src_pt = (src_bx + source_point.0, src_by + source_point.1);
+        let ok_src = if src_atlas {
+            self.blit_premult(src_tex, src_tw, src_th, src_pt, (fw, fh), temp_src.texture, (0, 0), fw, fh)
+        } else {
+            self.blit_identity(src_tex, src_tw, src_th, src_pt, (fw, fh), temp_src.texture, (0, 0), fw, fh)
+        };
+        // temp_dst is where the filter writes. Use an OFFSCREEN temp (not the
+        // filter pool) so it can be RETIRED and survive until Ruffle resolves this
+        // BitmapData back to CPU pixels this tick (mirrors render_offscreen).
+        let temp_dst = match self.acquire_offscreen_temp(fw, fh) {
+            Some(t) => t,
+            None => {
+                self.filter_tex_pool.release(temp_src);
+                return None;
+            }
+        };
+        let ok_filter = ok_src
+            && self.apply_filter_raw(
+                temp_src.texture, fw, fh, (0, 0), (fw, fh),
+                temp_dst.texture, (0, 0), &filter,
+            );
+        // Write the filtered result into the destination backing for the display
+        // path (render_bitmap). Atlas stores STRAIGHT, standalone is PREMULT.
+        let ok = ok_filter && {
+            let dx = (dst_bx as i32 + dest_point.0).max(0);
+            let dy = (dst_by as i32 + dest_point.1).max(0);
+            if dst_atlas {
+                self.blit_unpremult(temp_dst.texture, fw, fh, (0, 0), (fw, fh), dst_tex, (dx, dy), fw, fh)
+            } else {
+                self.blit_identity(temp_dst.texture, fw, fh, (0, 0), (fw, fh), dst_tex, (dx, dy), fw, fh)
+            }
+        };
+        self.filter_tex_pool.release(temp_src);
+        let temp_dst_id = temp_dst.texture;
+        // Retire (don't free) so the SyncHandle's texture stays valid until
+        // submit_frame recycles it next frame.
+        self.offscreen_temp_retired.push(temp_dst);
+        if !ok {
+            return None;
+        }
+        // Hand Ruffle a resolvable handle over the PREMULT temp, so a later CPU read
+        // of this BitmapData (getPixels / a chained applyFilter) syncs the filtered
+        // pixels back — returning a NoOp handle here panicked resolve_sync_handle.
+        Some(Box::new(BitmapDataSyncHandle {
+            texture: temp_dst_id,
+            x: 0,
+            y: 0,
+            w: fw,
+            h: fh,
+        }))
     }
 
     fn is_filter_supported(&self, filter: &Filter) -> bool {
@@ -8448,6 +8727,7 @@ impl RenderBackend for SwitchRenderBackend {
                 | Filter::GlowFilter(_)
                 | Filter::DropShadowFilter(_)
                 | Filter::BevelFilter(_)
+                | Filter::DisplacementMapFilter(_)
         )
     }
 
@@ -8960,9 +9240,10 @@ impl RenderBackend for SwitchRenderBackend {
             Some(a) => a,
             None => return Err(Error::UnknownHandle(handle.clone())),
         };
-        // Compute the atlas-space pixel offset for the bitmap.
-        let base_x = (switch_bitmap.u0 * ATLAS_SIZE as f32).round() as u32;
-        let base_y = (switch_bitmap.v0 * ATLAS_SIZE as f32).round() as u32;
+        // Compute the atlas-space pixel offset from the atlas' ACTUAL dims —
+        // right-sized dedicated atlases aren't 2048² (#42 regression).
+        let base_x = (switch_bitmap.u0 * atlas.width as f32).round() as u32;
+        let base_y = (switch_bitmap.v0 * atlas.height as f32).round() as u32;
         // Start the source pointer at the region's top-left and tell GL the
         // real source row length (rgba.width()), same fix as the standalone
         // path: a partial-width region would otherwise shear.
