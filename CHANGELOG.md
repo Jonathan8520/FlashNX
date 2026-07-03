@@ -4,17 +4,23 @@ Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://
 
 ## v1.5.0 (2026-07-02)
 
-A rework of the control editor: a visual keyboard, more keys, and button combos.
+A rework of the control editor: a visual keyboard, more keys, button combos, and per-game cursor options.
 
 ### Added
 
-- **Visual keyboard for remapping** (#55): the control editor now shows a full PC keyboard to pick a key, instead of a long scrolling list. Navigate it with the D-pad or stick and press **A**. Ctrl, Alt, Tab and the like are now easy to find, and the board covers the whole layout.
+- **Visual keyboard for remapping** (#55): the control editor now shows a full PC keyboard to pick a key, instead of a long scrolling list. Navigate it with the D-pad or stick and press **A**. Ctrl, Alt, Tab and the like are now easy to find, and the board covers the whole layout. Keys already used by the current mapping are highlighted, so you can see at a glance which ones are taken.
 - **More keys**: F1-F12, the symbol keys (`-` `=` `[` `]` `;` `'` `,` `.` `/` `\` `` ` ``) and the numpad operators (`+` `-` `*` `/`) can now be bound.
-- **Combo layer** (#57): for games that need more inputs than the controller has buttons, hold a modifier button and every other button sends a second key, so `ZL + A` can send `F1`. The editor has a sub-tab (move with **L/R**) across `NORMAL / ZL / ZR / L / R`: NORMAL is the base bindings, and picking a modifier edits that player's combo layer (rows then read `ZL+A`). **X** switches the Player 1 / Player 2 tab, each with its own combo layer. A button with no combo key keeps its normal one while the modifier is held, so movement never breaks.
+- **Button combos, one layer per modifier** (#57): for games that need more inputs than the controller has buttons, hold a modifier button and every other button sends a different key, so `ZL + A` can send `F1`. Each of the four modifiers (ZL, ZR, L, R) has its **own** combo layer and they all work at once in a game, so `ZL + A` and `R + A` can be different keys. The editor has a sub-tab (move with **L/R**) across `NORMAL / ZL / ZR / L / R`: NORMAL is the base bindings, and picking a modifier edits that modifier's own layer (rows then read `ZL+A`). **X** switches the Player 1 / Player 2 tab, each with its own layers. A button with no combo key keeps its normal one while a modifier is held, so movement never breaks.
+- **Show or hide the mouse cursor per game**: a toggle in a game's controls options (TOUCHES) hides the on-screen pointer for games played with the pad or keyboard where it just gets in the way. Clicks still work, only the pointer is hidden.
+- **Shared profiles now carry the whole setup** (#20): sharing or applying a community control profile also transfers the combo layers, the cursor speed, and the show-cursor choice, not just the base bindings. The before/after preview shows these too.
 
 ### Fixes
 
 - **Very large games no longer go to a white screen** (#56): games with thousands of unique vector shapes (e.g. the Henry Stickmin titles like *Infiltrating the Airship*) filled the shape buffer partway in, after which the rest of the art stopped drawing. The buffer is now large enough to hold these, so they render fully.
+- **Fewer white screens / out-of-memory on heavy games** (e.g. *Super Bowser World*): the dedicated bitmap layers are now freed as soon as they empty and sized to what they actually hold, instead of piling up and exhausting memory.
+- **A game no longer appears twice in the shared-profile catalog**: the `.swf` file extension is no longer part of the title used to match profiles, so entries for the same game line up instead of splitting (this was showing *Super Mario 63* twice).
+- **The on-screen cursor is easier to see**: the pointer now has a black outline so it stays visible over both light and dark game art.
+- **Changing only the cursor speed re-enables sharing**: after applying a community profile, adjusting just the pointer speed used to still say there was nothing to share; that change now counts.
 
 ## v1.4.1 (2026-06-28)
 
