@@ -548,43 +548,74 @@ fn maybe_unwrap_embedded_game(bytes: &[u8]) -> Option<std::vec::Vec<u8>> {
     None
 }
 
+/// Read a SWF file with a bounded 4 KB-chunk loop. NEVER use `std::fs::read` /
+/// `read_to_end` here: on Horizon the newlib glue returns a spurious
+/// `OutOfMemory` on the single big read once the heap has fragmented after a
+/// long play session — even when it could still satisfy the incrementally-grown
+/// `Vec`. That is exactly issues #62/#63: play one game for a while, launch a
+/// DIFFERENT one (which clears `CACHED_SWF` and forces a fresh disk read), and
+/// this read failed -> `ensure_swf_loaded` returned `None` -> the embedded red
+/// fallback SWF was shown. Same mitigation the cover / storage / keymap loaders
+/// already use (`covers::read_file_bounded` etc.). `max` caps a runaway read;
+/// the largest Flash games seen are ~15 MB (Mario 63).
+fn read_swf_file_bounded(path: &str) -> Option<std::vec::Vec<u8>> {
+    use std::io::Read;
+    const MAX: usize = 64 * 1024 * 1024;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut data: std::vec::Vec<u8> = std::vec::Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                data.extend_from_slice(&buf[..n]);
+                if data.len() > MAX {
+                    return None;
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+    Some(data)
+}
+
 /// Try the runtime override path (set by C++ via `ruffle_set_swf_path`)
 /// first, then fall back to `SWF_CANDIDATES`. Returns the first file we
 /// can successfully read.
 fn find_and_load_swf_uncached() -> Option<(std::vec::Vec<u8>, std::string::String)> {
     // Snapshot the override path so we don't hold the lock across the
-    // (slow) `std::fs::read` call.
+    // (slow) file read.
     let override_path: Option<std::string::String> = OVERRIDE_SWF_PATH
         .lock()
         .ok()
         .and_then(|g| g.clone());
     if let Some(path) = override_path {
-        match std::fs::read(&path) {
-            Ok(bytes) => {
+        match read_swf_file_bounded(&path) {
+            Some(bytes) => {
                 log_str(&std::format!("scan: using override path {}\n", path));
                 if let Ok(mut g) = LAST_SWF_REAL_PATH.lock() {
                     *g = Some(path.clone());
                 }
                 return Some((bytes, path));
             }
-            Err(err) => {
+            None => {
                 log_str(&std::format!(
-                    "scan: override path {} read failed ({}), falling back to candidates\n",
-                    path, err,
+                    "scan: override path {} unreadable, falling back to candidates\n",
+                    path,
                 ));
             }
         }
     }
     for path in SWF_CANDIDATES {
-        match std::fs::read(path) {
-            Ok(bytes) => {
+        match read_swf_file_bounded(path) {
+            Some(bytes) => {
                 if let Ok(mut g) = LAST_SWF_REAL_PATH.lock() {
                     *g = Some(std::string::String::from(*path));
                 }
                 return Some((bytes, std::string::String::from(*path)));
             }
-            Err(err) => {
-                log_str(&std::format!("scan: {} not found ({})\n", path, err));
+            None => {
+                log_str(&std::format!("scan: {} not found or unreadable\n", path));
             }
         }
     }
@@ -1282,6 +1313,12 @@ pub(crate) const SK_NUMPAD_MUL: c_int = 86; // `*`
 pub(crate) const SK_NUMPAD_DIV: c_int = 87; // `/` (keypad)
 pub(crate) const SK_NUMPAD_DECIMAL: c_int = 88; // `.` (keypad)
 pub(crate) const SK_NUMPAD_ENTER: c_int = 89; // keypad Enter
+// Caps Lock (Flash keyCode 20). Niche, but some games gate a mechanic on it:
+// "This is the Only Level" stage 24 (issue #61) opens the exit gate ONLY while
+// Caps Lock is held. Ruffle maps PhysicalKey::CapsLock -> KeyCode 20 and, on a
+// synthesised KeyDown, both add_key(20) and toggle_key(20) fire — so a button
+// bound here drives Key.isDown(20) AND Key.isToggled(20) with no extra plumbing.
+pub(crate) const SK_CAPSLOCK: c_int = 90;
 
 fn key_descriptor(code: c_int) -> Option<KeyDescriptor> {
     let (physical, logical) = match code {
@@ -1338,6 +1375,9 @@ fn key_descriptor(code: c_int) -> Option<KeyDescriptor> {
         SK_BACKSPACE => (PhysicalKey::Backspace, LogicalKey::Named(NamedKey::Backspace)),
         SK_CONTROL => (PhysicalKey::ControlLeft, LogicalKey::Named(NamedKey::Control)),
         SK_ALT => (PhysicalKey::AltLeft, LogicalKey::Named(NamedKey::Alt)),
+        // Caps Lock — Flash keyCode 20. Logical mapping drives the code; a held
+        // button gives Key.isDown(20) (issue #61, "This is the Only Level" st.24).
+        SK_CAPSLOCK => (PhysicalKey::CapsLock, LogicalKey::Named(NamedKey::CapsLock)),
         // Numpad 0-9 — the KeyLocation::Numpad below makes Ruffle emit the
         // distinct keypad codes (96-105) these games listen for.
         SK_NUMPAD0 => (PhysicalKey::Numpad0, LogicalKey::Character('0')),

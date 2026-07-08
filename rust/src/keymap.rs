@@ -171,8 +171,8 @@ pub const KEYBOARD: &[(&str, u8, f32, f32)] = &[
     ("O", 2, 9.5, 1.0), ("P", 2, 10.5, 1.0), ("[", 2, 11.5, 1.0), ("]", 2, 12.5, 1.0),
     ("\\", 2, 13.5, 1.5),
     ("Num4", 2, 16.0, 1.0), ("Num5", 2, 17.0, 1.0), ("Num6", 2, 18.0, 1.0), ("Num*", 2, 19.0, 1.0),
-    // Row 3 — home row, then numpad 1 2 3 -.
-    ("Control", 3, 0.0, 1.75),
+    // Row 3 — home row (CapsLock at its real home-row-left spot), then numpad 1 2 3 -.
+    ("CapsLock", 3, 0.0, 1.75),
     ("A", 3, 1.75, 1.0), ("S", 3, 2.75, 1.0), ("D", 3, 3.75, 1.0), ("F", 3, 4.75, 1.0),
     ("G", 3, 5.75, 1.0), ("H", 3, 6.75, 1.0), ("J", 3, 7.75, 1.0), ("K", 3, 8.75, 1.0),
     ("L", 3, 9.75, 1.0), (";", 3, 10.75, 1.0), ("'", 3, 11.75, 1.0), ("Enter", 3, 12.75, 2.25),
@@ -183,8 +183,9 @@ pub const KEYBOARD: &[(&str, u8, f32, f32)] = &[
     ("B", 4, 6.25, 1.0), ("N", 4, 7.25, 1.0), ("M", 4, 8.25, 1.0), (",", 4, 9.25, 1.0),
     (".", 4, 10.25, 1.0), ("/", 4, 11.25, 1.0),
     ("Num0", 4, 16.0, 1.0), ("Num.", 4, 17.0, 1.0), ("NumEnter", 4, 18.0, 1.0), ("Num+", 4, 19.0, 1.0),
-    // Row 5 — Alt + space bar + arrow cluster.
-    ("Alt", 5, 0.0, 1.5), ("Space", 5, 1.5, 6.0),
+    // Row 5 — Ctrl + Alt + space bar + arrow cluster (Ctrl moved here from the
+    // home row now that CapsLock owns that slot; bottom-left is its real place).
+    ("Control", 5, 0.0, 1.5), ("Alt", 5, 1.5, 1.5), ("Space", 5, 3.0, 5.0),
     ("Left", 5, 8.0, 1.0), ("Up", 5, 9.0, 1.0), ("Down", 5, 10.0, 1.0), ("Right", 5, 11.0, 1.0),
     // Unbind + mouse clicks — a horizontal row along the bottom-right, under the
     // numpad, so they sit "under the numbers" without the lop-sided stacked look.
@@ -207,6 +208,7 @@ pub fn keyboard_label(name: &str) -> std::borrow::Cow<'static, str> {
         "Escape" => Cow::Borrowed("Esc"),
         "Backspace" => Cow::Borrowed("Bksp"),
         "Control" => Cow::Borrowed("Ctrl"),
+        "CapsLock" => Cow::Borrowed("Caps"),
         "Enter" => Cow::Borrowed("Ent"),
         // Numpad: compact "N" labels so the keys stay legible at cell size.
         "Num0" => Cow::Borrowed("N0"),
@@ -1336,6 +1338,7 @@ fn flash_key_name_to_sk(name: &str) -> core::ffi::c_int {
         "Shift"     => crate::SK_SHIFT,
         "Control"   => crate::SK_CONTROL,
         "Alt"       => crate::SK_ALT,
+        "CapsLock"  => crate::SK_CAPSLOCK,
         "Tab"       => crate::SK_TAB,
         "Backspace" => crate::SK_BACKSPACE,
         "Left"      => crate::SK_LEFT,
