@@ -2,6 +2,15 @@
 
 Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://github.com/ruffle-rs/ruffle).
 
+## v1.5.1 (2026-07-08)
+
+A small fixes release.
+
+### Fixes
+
+- **Games no longer turn to a red screen after a long session** (#62, #63): after playing one game for a while, launching a different one could show a full red screen. The game file was being read in a single large operation that could spuriously fail once memory had fragmented; it is now read in small chunks like the rest of the app, so the next game loads reliably.
+- **Caps Lock can now be mapped to a button** (#61): a few games use the Caps Lock key for a mechanic (for example, a stage in *This Is the Only Level* that only opens the exit while Caps Lock is held). The visual keyboard in the control editor (TOUCHES) now has a **Caps** key you can bind.
+
 ## v1.5.0 (2026-07-02)
 
 A rework of the control editor: a visual keyboard, more keys, button combos, and per-game cursor options.

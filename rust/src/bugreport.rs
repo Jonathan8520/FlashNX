@@ -32,7 +32,7 @@ pub const BUG_REPORT_ENDPOINT: &str =
 
 /// App version reported alongside each bug (the library/release line). Bump
 /// with each release so issues are attributable to a build.
-pub const APP_VERSION: &str = "1.5.0";
+pub const APP_VERSION: &str = "1.5.1";
 
 /// Everything we send about a reported game. The relay formats the GitHub
 /// issue title/body from these fields, so the client stays format-agnostic.
