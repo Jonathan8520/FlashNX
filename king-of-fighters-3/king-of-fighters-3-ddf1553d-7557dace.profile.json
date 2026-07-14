@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "id": "king-of-fighters-3-ddf1553d-7557dace",
+  "game": {
+    "title": "King_of_Fighters_3",
+    "fp_uuid": "",
+    "swf_hash": "ddf1553d66d65edc"
+  },
+  "author": "",
+  "verified": false,
+  "bindings": {
+    "A": "J",
+    "B": "U",
+    "Down": "S",
+    "L": "L",
+    "Left": "A",
+    "Plus": "P",
+    "R": "O",
+    "Right": "D",
+    "StickLDown": "Down",
+    "StickLLeft": "Left",
+    "StickLRight": "Right",
+    "StickLUp": "Up",
+    "Up": "W",
+    "X": "K",
+    "Y": "I",
+    "ZL": "Enter",
+    "ZR": "Left click"
+  },
+  "bindings_p2": {
+    "A": "Num1",
+    "B": "Num2",
+    "Down": "S",
+    "L": "Num6",
+    "Left": "A",
+    "R": "Num5",
+    "Right": "D",
+    "StickLDown": "S",
+    "StickLLeft": "A",
+    "StickLRight": "D",
+    "StickLUp": "W",
+    "Up": "W",
+    "X": "Num3",
+    "Y": "Num4"
+  },
+  "combo_layers": {},
+  "combo_layers_p2": {},
+  "cursor_speed": -1,
+  "show_cursor": true
+}
