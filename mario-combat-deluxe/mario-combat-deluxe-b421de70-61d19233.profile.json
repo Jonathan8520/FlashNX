@@ -9,8 +9,8 @@
   "author": "",
   "verified": false,
   "bindings": {
-    "A": "D",
-    "B": "A",
+    "A": "S",
+    "B": "D",
     "Down": "Down",
     "L": "Escape",
     "Left": "Left",
@@ -22,8 +22,8 @@
     "StickLRight": "Right",
     "StickLUp": "Up",
     "Up": "Up",
-    "X": "Space",
-    "Y": "S",
+    "X": "A",
+    "Y": "D",
     "ZL": "Right click",
     "ZR": "Left click"
   },
