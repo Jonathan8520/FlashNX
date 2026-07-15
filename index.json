@@ -118,5 +118,13 @@
     "swf_hash": "33faa12af7c42822",
     "file": "the-binding-of-isaac/the-binding-of-isaac-33faa12a-6e2ea4c7.profile.json",
     "verified": false
+  },
+  {
+    "id": "the-fancy-pants-adventures-world-2-31f0047e-1969d38e",
+    "title": "The Fancy Pants Adventures: World 2",
+    "fp_uuid": "",
+    "swf_hash": "31f0047e2438d187",
+    "file": "the-fancy-pants-adventures-world-2/the-fancy-pants-adventures-world-2-31f0047e-1969d38e.profile.json",
+    "verified": false
   }
 ]
