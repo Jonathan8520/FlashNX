@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "id": "mario-combat-3658400d-61d19233",
+  "game": {
+    "title": "Mario Combat",
+    "fp_uuid": "",
+    "swf_hash": "3658400d49a1889f"
+  },
+  "author": "",
+  "verified": false,
+  "bindings": {
+    "A": "Space",
+    "B": "Up",
+    "Down": "Down",
+    "L": "Escape",
+    "Left": "Left",
+    "Plus": "P",
+    "R": "Enter",
+    "Right": "Right",
+    "StickLDown": "Down",
+    "StickLLeft": "Left",
+    "StickLRight": "Right",
+    "StickLUp": "Up",
+    "Up": "Up",
+    "X": "X",
+    "Y": "A",
+    "ZL": "Right click",
+    "ZR": "Left click"
+  },
+  "bindings_p2": {
+    "A": "Num1",
+    "B": "Num2",
+    "Down": "S",
+    "L": "Num6",
+    "Left": "A",
+    "R": "Num5",
+    "Right": "D",
+    "StickLDown": "S",
+    "StickLLeft": "A",
+    "StickLRight": "D",
+    "StickLUp": "W",
+    "Up": "W",
+    "X": "Num3",
+    "Y": "Num4"
+  },
+  "combo_layers": {},
+  "combo_layers_p2": {},
+  "cursor_speed": -1,
+  "show_cursor": false
+}
