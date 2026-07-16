@@ -12,10 +12,10 @@
     "A": "Right",
     "B": "Down",
     "Down": "S",
-    "L": "Q",
+    "L": "E",
     "Left": "A",
     "Plus": "P",
-    "R": "E",
+    "R": "Q",
     "Right": "D",
     "StickLDown": "S",
     "StickLLeft": "A",
@@ -29,7 +29,7 @@
     "Up": "W",
     "X": "Up",
     "Y": "Left",
-    "ZL": "Right click",
+    "ZL": "Space",
     "ZR": "Space"
   },
   "bindings_p2": {
