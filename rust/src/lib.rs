@@ -472,7 +472,7 @@ fn ensure_swf_loaded() -> Option<(std::vec::Vec<u8>, std::string::String)> {
         None => bytes,
     };
     log_str(&std::format!(
-        "ruffle_init: loaded {} bytes from {} (cached for future restarts)\n",
+        "ruffle_init: loaded {} bytes from {}\n",
         bytes.len(),
         path,
     ));
@@ -499,8 +499,27 @@ fn ensure_swf_loaded() -> Option<(std::vec::Vec<u8>, std::string::String)> {
         .unwrap_or_else(|| std::format!("http://flashforswitch.local/{}", basename));
     log_str(&std::format!("ruffle_init: movie base url = {}\n", url));
     let entry = (bytes, url);
-    if let Ok(mut g) = CACHED_SWF.lock() {
-        *g = Some(entry.clone());
+    // Skip the restart cache for very large SWFs. The cache holds a SECOND full
+    // copy of the movie (Ruffle's SwfMovie already owns its own decompressed
+    // copy) purely to make pause-menu REDEMARRER skip the SD re-read. For an
+    // ordinary game (Mario 63 = 15 MB) that second copy is cheap and worth it,
+    // but a bitmap-heavy giant like Sonic RPG Ep.10 (284 MB uncompressed) plus
+    // its ~1.6 GB of decoded atlases already crowds the ~3.2 GB title heap;
+    // holding the redundant 284 MB tips it into OOM mid-load. For these we drop
+    // the cache and let REDEMARRER re-read from SD (the pre-cache behaviour, and
+    // only a risk for this rare class of game). `read_swf_file_bounded` is now
+    // pre-sized so that re-read is as OOM-safe as we can make it.
+    const CACHE_MAX: usize = 100 * 1024 * 1024;
+    if entry.0.len() <= CACHE_MAX {
+        if let Ok(mut g) = CACHED_SWF.lock() {
+            *g = Some(entry.clone());
+        }
+    } else {
+        log_str(&std::format!(
+            "ruffle_init: SWF is {} bytes (> {} MB), skipping restart cache to save heap\n",
+            entry.0.len(),
+            CACHE_MAX / (1024 * 1024),
+        ));
     }
     Some(entry)
 }
@@ -565,22 +584,41 @@ fn maybe_unwrap_embedded_game(bytes: &[u8]) -> Option<std::vec::Vec<u8>> {
     None
 }
 
-/// Read a SWF file with a bounded 4 KB-chunk loop. NEVER use `std::fs::read` /
-/// `read_to_end` here: on Horizon the newlib glue returns a spurious
-/// `OutOfMemory` on the single big read once the heap has fragmented after a
-/// long play session — even when it could still satisfy the incrementally-grown
-/// `Vec`. That is exactly issues #62/#63: play one game for a while, launch a
-/// DIFFERENT one (which clears `CACHED_SWF` and forces a fresh disk read), and
-/// this read failed -> `ensure_swf_loaded` returned `None` -> the embedded red
-/// fallback SWF was shown. Same mitigation the cover / storage / keymap loaders
-/// already use (`covers::read_file_bounded` etc.). `max` caps a runaway read;
-/// the largest Flash games seen are ~15 MB (Mario 63).
+/// Read a SWF file into a `Vec`, bounded by `MAX`, using a chunked read loop.
+/// NEVER use `std::fs::read` / `read_to_end` here: on Horizon the newlib glue
+/// returns a spurious `OutOfMemory` on the single big read once the heap has
+/// fragmented after a long play session. That is issues #62/#63: play one game
+/// for a while, launch a DIFFERENT one (which clears `CACHED_SWF` and forces a
+/// fresh disk read), this read failed -> `ensure_swf_loaded` returned `None` ->
+/// the embedded red fallback SWF was shown. Same mitigation the cover / storage
+/// / keymap loaders use (`covers::read_file_bounded` etc.).
+///
+/// We pre-size the buffer to the true on-disk length (via `seek`, since
+/// `std::fs::metadata` is unreliable on Horizon — see gamezip.rs) so the chunked
+/// read never grows the `Vec` by doubling; doubling up to hundreds of MB briefly
+/// holds ~2x the final size and OOMs on a fragmented heap. That matters for the
+/// rare pathologically large game: Sonic RPG Ep.10 is a 284 MB *uncompressed*
+/// (FWS) SWF, which also drove the cap up from 64 MB to 320 MB. `try_reserve_exact`
+/// fails gracefully (-> None -> caller logs) instead of aborting the process when
+/// the heap can't satisfy the allocation. `MAX` still bounds a mistaken multi-GB
+/// file (ordinary games are ~15 MB, e.g. Mario 63).
 fn read_swf_file_bounded(path: &str) -> Option<std::vec::Vec<u8>> {
-    use std::io::Read;
-    const MAX: usize = 64 * 1024 * 1024;
+    use std::io::{Read, Seek, SeekFrom};
+    const MAX: usize = 320 * 1024 * 1024;
     let mut f = std::fs::File::open(path).ok()?;
     let mut data: std::vec::Vec<u8> = std::vec::Vec::new();
-    let mut buf = [0u8; 4096];
+    // Pre-reserve the exact on-disk size so the read below never reallocates.
+    // Reject oversize files up front; fall back to a growing read if `seek`
+    // is somehow unavailable for this file.
+    if let Ok(end) = f.seek(SeekFrom::End(0)) {
+        let size = end as usize;
+        if size > MAX {
+            return None;
+        }
+        f.seek(SeekFrom::Start(0)).ok()?;
+        data.try_reserve_exact(size).ok()?;
+    }
+    let mut buf = [0u8; 64 * 1024];
     loop {
         match f.read(&mut buf) {
             Ok(0) => break,
