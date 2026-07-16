@@ -1519,6 +1519,14 @@ pub fn input(button: &str) -> bool {
                 run_fp_info_flow(selection, scroll);
                 return true;
             }
+            // X = re-edit the ACTIVE search without going back to the IMPORTER
+            // home. `run_fp_search_flow` pre-fills swkbd from `cover_query` (the
+            // current term), so the user can fix/refine it in place. Hoisted:
+            // swkbd + the async GET must run WITHOUT the LIBRARY lock.
+            if button == "X" {
+                run_fp_search_flow();
+                return true;
+            }
             // Hidden ZL+ZR chord (synthesised in main.cpp): toggle the content
             // filter and re-run the query. Hoisted because it starts an async GET.
             if button == "ZL+ZR" {
@@ -1614,7 +1622,10 @@ pub fn input(button: &str) -> bool {
             true
         }
         Screen::DistantDownloading => {
-            // B = cancel download. Any other button is ignored during DL.
+            // B = cancel download -> show the "cancelled" notice (DistantError).
+            // The download state (`download_resume_pos` / `download_zip_extract`)
+            // is left intact so DistantError's dismiss can route back to the list
+            // the download came from. Any other button is ignored during DL.
             if matches!(button, "B") {
                 net::cancel_download();
                 s.distant_error = std::string::String::from(crate::loc::s().err_dl_cancelled);
@@ -1625,7 +1636,34 @@ pub fn input(button: &str) -> bool {
         Screen::DistantError => {
             if matches!(button, "A" | "B" | "Minus") {
                 s.distant_error.clear();
-                s.screen = Screen::DistantIdle { selection: 0 };
+                // Dismiss the notice back to the LIST the download came from
+                // (Flashpoint results / archive.org file list), restoring the
+                // cursor, rather than the IMPORTER home. `download_zip_extract`
+                // = a Flashpoint GameZIP; `download_resume_pos` carries the
+                // cursor. Non-download errors (no resume pos) fall back to home.
+                let resume = s.download_resume_pos.take();
+                let was_fp = s.download_zip_extract.is_some() || s.download_fp_direct;
+                s.download_file_name.clear();
+                s.download_out_path.clear();
+                s.download_zip_extract = None;
+                s.download_fp_direct = false;
+                s.download_cover_url = None;
+                s.download_title = None;
+                match resume {
+                    Some((sel, scroll)) if was_fp => {
+                        s.screen = Screen::FpGallery { selection: sel, scroll };
+                    }
+                    Some((sel, scroll)) if !s.remote_files.is_empty() => {
+                        let filtered_len =
+                            filtered_indices(&s.remote_files, &s.distant_filter).len();
+                        let sel = sel.min(filtered_len.saturating_sub(1));
+                        let scroll = clamp_scroll(scroll, sel, DISTANT_VISIBLE_ROWS);
+                        s.screen = Screen::DistantFiles { selection: sel, scroll_offset: scroll };
+                    }
+                    _ => {
+                        s.screen = Screen::DistantIdle { selection: 0 };
+                    }
+                }
             }
             true
         }
