@@ -102,6 +102,15 @@ pub fn parse_search(
         if !zipped && htdocs_url_from_command(&launch_command).is_none() {
             continue;
         }
+        // Drop games we can't run from the grid entirely: HTML+FlashVars entries
+        // whose launchCommand is an index.html (e.g. Dragon City), not a bare
+        // `.swf`. They would only dead-end on a black screen, so hiding them keeps
+        // the results clean — and since this runs BEFORE the 60-game MAX cap, the
+        // freed slots fill with runnable games instead. (The importer also guards
+        // the download itself, as a backstop.)
+        if !launch_command_is_swf(&launch_command) {
+            continue;
+        }
         let title = g.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
         // Dedup by id (exact repeats) then by title (same game, alternate rows),
         // before the MAX cap so the grid fills with 60 DISTINCT games.
@@ -158,12 +167,30 @@ fn inflate(comp: &[u8], expected: usize) -> Option<std::vec::Vec<u8>> {
     Some(out)
 }
 
+/// Strip one pair of surrounding quotes from a Flashpoint `launchCommand`. The
+/// db wraps commands whose URL contains a space in double quotes (e.g.
+/// `"http://i.4cdn.org/f/I'm Dead.swf"`); left in, the trailing `"` sticks to the
+/// entry name and never matches the zip's literal paths (and the `.swf` sniff
+/// below fails). ~112 games in a 151k-game sample carry quoted commands.
+fn unquote(launch_command: &str) -> &str {
+    let t = launch_command.trim();
+    let b = t.as_bytes();
+    if b.len() >= 2
+        && ((b[0] == b'"' && b[b.len() - 1] == b'"')
+            || (b[0] == b'\'' && b[b.len() - 1] == b'\''))
+    {
+        t[1..t.len() - 1].trim()
+    } else {
+        t
+    }
+}
+
 /// Map a Flashpoint `launchCommand` URL to its ZIP content entry name:
 /// `http://i.flipline.com/gamefiles/papalouie2/PapaLouie2_v2_1.swf?x=1`
 ///   -> `content/i.flipline.com/gamefiles/papalouie2/PapaLouie2_v2_1.swf`.
 /// Returns None if empty or not a URL-shaped command.
 fn launch_entry_from_command(launch_command: &str) -> Option<std::string::String> {
-    let lc = launch_command.trim();
+    let lc = unquote(launch_command);
     if lc.is_empty() {
         return None;
     }
@@ -173,6 +200,18 @@ fn launch_entry_from_command(launch_command: &str) -> Option<std::string::String
         return None;
     }
     Some(std::format!("content/{}", rest))
+}
+
+/// True if a Flashpoint `launchCommand` points at a bare `.swf` entry — the only
+/// kind we can run. Games launched through an HTML page + FlashVars (e.g. Dragon
+/// City's `.../index.html`, whose page `embedSWF()`s a loader SWF that needs
+/// FlashVars and a live backend) return false. The importer refuses those up
+/// front instead of downloading a huge GameZIP that would just dead-end on a
+/// black screen / "no .swf" error.
+pub fn launch_command_is_swf(launch_command: &str) -> bool {
+    let lc = unquote(launch_command);
+    let path = lc.split(['?', '#']).next().unwrap_or(lc);
+    path.trim_end_matches('/').to_ascii_lowercase().ends_with(".swf")
 }
 
 /// Percent-decode a path so a launchCommand with an encoded path (e.g. `%20`)
@@ -547,9 +586,23 @@ pub fn fetch_siblings(
 /// `covers::read_file_bounded` — NEVER use `std::fs::read` on Horizon (newlib
 /// glue can spuriously return OutOfMemory). `max` caps a runaway read.
 pub fn read_file_bounded(path: &str, max: usize) -> Option<std::vec::Vec<u8>> {
+    use std::io::{Seek, SeekFrom};
     let mut f = std::fs::File::open(path).ok()?;
     let mut data: std::vec::Vec<u8> = std::vec::Vec::new();
-    let mut buf = [0u8; 8192];
+    // Pre-size from the true on-disk length (seek is reliable on Horizon, unlike
+    // metadata) so the chunked read never grows the Vec by doubling — which for a
+    // big GameZIP (hundreds of MB) would briefly hold ~2x the final size and OOM.
+    // Reject oversize up front; try_reserve_exact fails gracefully (-> None)
+    // instead of aborting. Falls back to a growing read if seek is unavailable.
+    if let Ok(end) = f.seek(SeekFrom::End(0)) {
+        let size = end as usize;
+        if size > max {
+            return None;
+        }
+        f.seek(SeekFrom::Start(0)).ok()?;
+        data.try_reserve_exact(size).ok()?;
+    }
+    let mut buf = [0u8; 65536];
     loop {
         match f.read(&mut buf) {
             Ok(0) => break,

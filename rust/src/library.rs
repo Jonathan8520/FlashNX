@@ -3293,6 +3293,18 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
             // server, so download their entry `.swf` straight from the htdocs
             // mirror (derived from the launchCommand); companions are fetched
             // afterwards, same as a GameZIP. `fp_direct` routes the finish path.
+            // Backstop: `parse_search` already drops HTML+FlashVars games from
+            // the grid (launchCommand is an index.html, not a bare `.swf` — e.g.
+            // Dragon City), so a selected entry is normally runnable. But guard
+            // the download here too: those games ship a huge GameZIP (344 MB for
+            // Dragon City) and would only dead-end on a black screen, so if a
+            // non-.swf entry ever reaches this point, bail with a clear message
+            // BEFORE transferring hundreds of MB.
+            if !crate::sources::gamezip::launch_command_is_swf(&cand.launch_command) {
+                s.distant_error = crate::loc::s().err_fp_html_game.to_string();
+                s.screen = Screen::DistantError;
+                return;
+            }
             let (url, out_path, fp_direct) = if cand.zipped {
                 let zip_path = std::format!("{}/.fpdl.zip", USER_SD_ROOTS[0]);
                 (crate::sources::gamezip::get_url(&cand.id), zip_path, false)
@@ -4808,14 +4820,18 @@ fn extract_gamezip_main(
     swf_path: &str,
     launch_command: &str,
 ) -> Option<(std::string::String, std::vec::Vec<u8>)> {
-    // 256 MB cap: big multi-file games (e.g. Super Brawl 2 ~108 MB, 136 files)
-    // blew past the old 64 MB limit, so read_file_bounded returned None and the
-    // download silently did nothing ("progress bar fills, nothing happens"). The
-    // zip is only held in RAM during extraction (freed before the game loads).
-    let zip = match crate::sources::gamezip::read_file_bounded(zip_path, 256 * 1024 * 1024) {
+    // 512 MB cap: big multi-file games (e.g. Super Brawl 2 ~108 MB, 136 files)
+    // blew past the old 64 MB limit; bumped 256 -> 512 MB so large legitimate SWF
+    // GameZIPs extract instead of silently doing nothing ("progress bar fills,
+    // nothing happens"). `read_file_bounded` now pre-sizes the buffer so this
+    // doesn't spike to ~2x during the read. The zip is only held in RAM during
+    // extraction (freed before the game loads); import runs on a fresh heap.
+    // HTML+FlashVars giants (Dragon City, 344 MB) are refused BEFORE the download
+    // (launch_command_is_swf), so this cap now only gates runnable .swf games.
+    let zip = match crate::sources::gamezip::read_file_bounded(zip_path, 512 * 1024 * 1024) {
         Some(z) => z,
         None => {
-            log("library: gamezip read failed or exceeds 256 MB cap — not extracted\n");
+            log("library: gamezip read failed or exceeds 512 MB cap — not extracted\n");
             return None;
         }
     };
