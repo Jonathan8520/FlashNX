@@ -279,6 +279,23 @@ pub extern "C" fn ruffle_init() -> c_int {
         // can raise the Switch software keyboard for in-game text entry.
         .with_ui(SwitchUiBackend::new())
         .with_autoplay(true)
+        // Report emulated Flash Player version 99 instead of Ruffle's
+        // default 32. Ruffle builds `$version`/`getVersion()` as
+        // "<plat> <player_version>,0,0,0", and a whole class of ~2008-era
+        // games sniff the version with a broken single-character read:
+        //   ver = Number($version.charAt(4)); if (ver < 7) showError();
+        // charAt(4) is the FIRST digit of the major, so anything with a
+        // two-digit major (10+, and Ruffle's 32) yields "1"/"3" < 7 and
+        // trips a bogus "Flash Player 7 Required" splash (issue #64,
+        // uncle-sam.swf — fails on real Flash 10+ and ruffle.rs too). A
+        // major of 99 gives charAt(4)="9" (>=7, satisfies the single-char
+        // checks) while 99 >= any real numeric `major >= N` gate, so it
+        // pleases both broken and correct sniffers. 99 is the max value
+        // that keeps the first digit at 9 (255 -> "2" would re-break them).
+        // Safe globally: every internal player_version comparison in Ruffle
+        // core (`< 7`, `<= 10`, `>= 18`) puts 99 on the same side as the
+        // old default 32, so nothing but the reported string changes.
+        .with_player_version(Some(99))
         .with_viewport_dimensions(VIEWPORT_W, VIEWPORT_H, 1.0)
         // Force `ShowAll` — preserves aspect ratio + scales the SWF up
         // to fill the 1280x720 viewport (letterbox bars left/right when
