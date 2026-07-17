@@ -6764,7 +6764,18 @@ impl SwitchRenderBackend {
     /// "+ add" row, replacing the old big CTA splash. `urls` are the history
     /// entries; `selection` indexes them and `selection == urls.len()` is the
     /// add row. A = launch (or add a URL), + = per-URL options. Windowed to fit.
-    pub fn draw_library_distant_list(&mut self, selection: usize, urls: &[&str], add_label: &str) {
+    pub fn draw_library_distant_list(
+        &mut self,
+        selection: usize,
+        urls: &[&str],
+        add_label: &str,
+        // Which URLs already have their game on SD (draws a green OK prefix).
+        installed: &[bool],
+        // True only when this is the ACTIVE IMPORTER home (not a reveal-window
+        // underlay): then it publishes row geometry for the touch layer. Underlays
+        // must NOT publish or they'd clobber the windowed list's touch metrics.
+        interactive: bool,
+    ) {
         self.library_clear();
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
@@ -6817,8 +6828,16 @@ impl SwitchRenderBackend {
                 swf::Color::from_rgb(0xCCCCCC, 255)
             };
             if i < urls.len() {
-                let shown = truncate_mid(urls[i], max_chars);
-                self.draw_text(left, y, scale, &shown, color);
+                // Green OK prefix if this URL's game is already on SD.
+                let ux = if installed.get(i).copied().unwrap_or(false) {
+                    self.draw_text(left, y + 2.0, 1.6, "OK", swf::Color::from_rgb(0x66DD66, 255));
+                    left + self.measure_text("OK", 1.6) + 10.0
+                } else {
+                    left
+                };
+                let avail = ((vw - ux - 80.0) / (6.0 * scale)) as usize;
+                let shown = truncate_mid(urls[i], avail.max(1));
+                self.draw_text(ux, y, scale, &shown, color);
             } else {
                 // Add row — teal when not selected so it stands out from URLs.
                 let c = if is_sel {
@@ -6827,6 +6846,38 @@ impl SwitchRenderBackend {
                     swf::Color::from_rgb(0x88CC99, 255)
                 };
                 self.draw_text(left, y, scale, add_label, c);
+            }
+        }
+
+        // Publish row geometry for the touch layer (tap to select / activate).
+        // Only when interactive (the active IMPORTER home, not a reveal-window
+        // underlay) so it doesn't clobber the windowed list's touch metrics. The
+        // scroll is paged (`first`), so scroll_px = first*row_h; touch here is
+        // tap-only (DistantIdle has no scroll field for a drag to write).
+        if interactive {
+            let mut cells: std::vec::Vec<GalleryCell> = std::vec::Vec::with_capacity(total);
+            for i in 0..total {
+                cells.push(GalleryCell {
+                    row: i as u32,
+                    cx: vw * 0.5,
+                    x: 0.0,
+                    y: top + i as f32 * row_h,
+                    w: vw,
+                    h: row_h,
+                });
+            }
+            if let Ok(mut g) = gallery_cache().lock() {
+                *g = (cells, total as u32);
+            }
+            if let Ok(mut v) = gallery_view().lock() {
+                *v = GalleryView {
+                    scroll_px: first as f32 * row_h,
+                    pitch: row_h,
+                    band_top: top - 8.0,
+                    band_bot: top + VISIBLE as f32 * row_h,
+                    rows_total: total as u32,
+                    rows_visible: VISIBLE as u32,
+                };
             }
         }
 
@@ -6886,6 +6937,11 @@ impl SwitchRenderBackend {
         downloaded: &[std::string::String],
         filter: Option<&str>,
         total_unfiltered: usize,
+        // Active reveal-window clip (x,y,w,h) or None in steady state. The rows
+        // get a JOUER-style glide + a band scissor INTERSECTED with this window so
+        // the smooth scroll doesn't bleed past the header/footer while the reveal
+        // still clips the whole list to its opening rectangle.
+        outer_clip: Option<(f32, f32, f32, f32)>,
     ) {
         self.library_clear();
         let vw = self.dimensions.width as f32;
@@ -6936,19 +6992,122 @@ impl SwitchRenderBackend {
         let rows_top_y = 150.0;
         let rows_left_x = 80.0;
         let total = files.len();
-        let end = (scroll_offset + visible_rows).min(total);
-        for (visible_idx, abs_idx) in (scroll_offset..end).enumerate() {
+        let pitch = ROW_SPACING;
+        let rows_total = total as u32;
+        // Content-space cells for touch hit-test (full row width; `y` is
+        // pre-scroll -> screen y = `y - scroll_px`).
+        let mut cells: std::vec::Vec<GalleryCell> = std::vec::Vec::with_capacity(total);
+        for i in 0..total {
+            cells.push(GalleryCell {
+                row: i as u32,
+                cx: vw * 0.5,
+                x: 0.0,
+                y: rows_top_y + i as f32 * pitch,
+                w: vw,
+                h: pitch,
+            });
+        }
+        if let Ok(mut g) = gallery_cache().lock() {
+            *g = (cells, rows_total);
+        }
+        // Ease a pixel scroll toward `scroll_offset` (JOUER-style glide), reusing
+        // the shared anim/view/cache singletons (only one gallery screen renders
+        // per frame). A row list has no box frame to glide, so only the scroll is
+        // eased; the selection marker/colour just rides its row.
+        let band_top = rows_top_y - 8.0;
+        let band_bot = rows_top_y + visible_rows as f32 * pitch;
+        let target_scroll = scroll_offset as f32 * pitch;
+        // Selected row's content-space y — an eased highlight bar glides toward
+        // it so the "hover" slides from row to row (like JOUER's frame), instead
+        // of the `>` marker snapping.
+        let target_hover_y = rows_top_y + selection as f32 * pitch;
+        let touch_scroll = gallery_touch_scroll_read();
+        let mut scroll_px = target_scroll;
+        let mut hover_y = target_hover_y;
+        if let Ok(mut a) = gallery_anim().lock() {
+            let now = unsafe { ruffle_tick_now() };
+            if !a.inited {
+                a.inited = true;
+                a.last_tick = now;
+                a.last_sel = selection;
+                a.scroll_px = target_scroll;
+                a.sel_x = 0.0;
+                a.sel_y = target_hover_y;
+                a.sel_w = 0.0;
+                a.pop = 0.0;
+            } else {
+                let freq = unsafe { ruffle_tick_freq() } as f32;
+                let dt = if freq > 0.0 {
+                    (now.saturating_sub(a.last_tick) as f32 / freq).min(0.1)
+                } else {
+                    1.0 / 60.0
+                };
+                a.last_tick = now;
+                a.last_sel = selection;
+                a.scroll_px = ease_to(a.scroll_px, target_scroll, dt, 16.0);
+                a.sel_y = ease_to(a.sel_y, target_hover_y, dt, 18.0);
+            }
+            if let Some(px) = touch_scroll {
+                a.scroll_px = px;
+            }
+            scroll_px = a.scroll_px;
+            hover_y = a.sel_y;
+        }
+        if let Ok(mut v) = gallery_view().lock() {
+            *v = GalleryView {
+                scroll_px,
+                pitch,
+                band_top,
+                band_bot,
+                rows_total,
+                rows_visible: visible_rows as u32,
+            };
+        }
+
+        // Band scissor for the rows, INTERSECTED with the caller's reveal window
+        // (if any) so the smooth scroll clips at the header/footer AND the reveal
+        // rectangle both. Header above was drawn under the caller's clip already.
+        let band = (0.0f32, band_top, vw, band_bot - band_top);
+        let rows_clip = match outer_clip {
+            Some((ox, oy, ow, oh)) => {
+                let x0 = band.0.max(ox);
+                let y0 = band.1.max(oy);
+                let x1 = (band.0 + band.2).min(ox + ow);
+                let y1 = (band.1 + band.3).min(oy + oh);
+                (x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
+            }
+            None => band,
+        };
+        self.set_clip(rows_clip.0, rows_clip.1, rows_clip.2, rows_clip.3);
+
+        // Gliding hover highlight behind the selected row (eased sel_y -> the bar
+        // slides from row to row like JOUER's frame). Drawn before the rows.
+        if total > 0 {
+            let hy = hover_y - scroll_px;
+            let hl = Matrix {
+                a: vw - rows_left_x - 20.0,
+                b: 0.0,
+                c: 0.0,
+                d: ROW_SPACING - 12.0,
+                tx: swf::Twips::from_pixels((rows_left_x - 40.0) as f64),
+                ty: swf::Twips::from_pixels((hy - 8.0) as f64),
+            };
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x33_FF_D7_40), hl);
+        }
+
+        for abs_idx in 0..total {
+            let y = rows_top_y + abs_idx as f32 * pitch - scroll_px;
+            // Cheap cull: skip rows fully outside the band.
+            if y + ROW_SPACING < band_top - 8.0 || y > band_bot + 8.0 {
+                continue;
+            }
             let f = &files[abs_idx];
-            let y = rows_top_y + visible_idx as f32 * ROW_SPACING;
             let is_sel = abs_idx == selection;
             let color = if is_sel {
-                swf::Color::from_rgb(0xFFD740, 255)
+                swf::Color::from_rgb(0xFFFFFF, 255)
             } else {
                 swf::Color::from_rgb(0xCCCCCC, 255)
             };
-            if is_sel {
-                self.draw_text(rows_left_x - 30.0, y, ROW_SCALE, ">", color);
-            }
             // OK badge for files already downloaded this session.
             let is_downloaded = downloaded.iter().any(|n| n == &f.name);
             let badge_w = if is_downloaded {
@@ -6979,13 +7138,20 @@ impl SwitchRenderBackend {
             self.draw_text(size_x, y, ROW_SCALE, &size_str, color);
         }
 
-        // Scrollbar if needed.
+        // Restore the caller's clip (reveal window or none) for the scrollbar.
+        match outer_clip {
+            Some((ox, oy, ow, oh)) => self.set_clip(ox, oy, ow, oh),
+            None => self.clear_clip(),
+        }
+
+        // Scrollbar if needed, tracking the eased pixel scroll.
         if total > visible_rows {
             let bar_x = vw - 30.0;
             let bar_top_y = rows_top_y;
             let bar_h_total = visible_rows as f32 * ROW_SPACING;
             let bar_h_thumb = (bar_h_total * visible_rows as f32 / total as f32).max(20.0);
-            let progress = scroll_offset as f32 / (total - visible_rows) as f32;
+            let max_scroll_px = rows_total.saturating_sub(visible_rows as u32) as f32 * pitch;
+            let progress = if max_scroll_px > 0.0 { (scroll_px / max_scroll_px).clamp(0.0, 1.0) } else { 0.0 };
             let thumb_y = bar_top_y + (bar_h_total - bar_h_thumb) * progress;
             let track = Matrix {
                 a: 4.0, b: 0.0, c: 0.0, d: bar_h_total,
@@ -7546,36 +7712,147 @@ impl SwitchRenderBackend {
         // Finish at most one async logo download this frame (never blocks).
         self.pump_thumbnail_load();
 
-        let start = scroll_row * cols;
-        let end = ((scroll_row + rows_visible) * cols).min(n);
-        for i in start..end {
-            let vis = i - start;
-            let col = (vis % cols) as f32;
-            let r = (vis / cols) as f32;
+        // Smooth-scrolled grid (JOUER-style glide + touch), replacing the old
+        // whole-row paging. The input layer still tracks a discrete first row
+        // (`scroll_row`) + tile index (`selection`); here we ease a pixel scroll
+        // toward that row and a selection frame toward the active tile, reusing
+        // the JOUER gallery's shared anim/view/cache singletons (only one gallery
+        // screen renders per frame, so sharing them is safe). A scissor clips the
+        // band so partially-scrolled rows don't bleed over the header/footer.
+        let rows_total = ((n + cols - 1) / cols) as u32;
+        let pitch = row_h;
+        // Content-space cells for touch hit-test + input 2D nav (`y` is pre-scroll;
+        // on-screen y = `y - scroll_px`). Hit region = the thumbnail rect.
+        let mut cells: std::vec::Vec<GalleryCell> = std::vec::Vec::with_capacity(n);
+        for i in 0..n {
+            let col = (i % cols) as f32;
+            let row = (i / cols) as u32;
             let cx = MARGIN + col * (cell_w + GAP);
-            let cy = grid_top + r * row_h;
-
-            // Cell backdrop (so pending / failed thumbs still show a tile).
-            let bg = Matrix {
-                a: cell_w, b: 0.0, c: 0.0, d: thumb_h,
-                tx: swf::Twips::from_pixels(cx as f64),
-                ty: swf::Twips::from_pixels(cy as f64),
+            cells.push(GalleryCell {
+                row,
+                cx: cx + cell_w * 0.5,
+                x: cx,
+                y: grid_top + row as f32 * pitch,
+                w: cell_w,
+                h: thumb_h,
+            });
+        }
+        if let Ok(mut g) = gallery_cache().lock() {
+            *g = (cells, rows_total);
+        }
+        // Clip band sits 16px ABOVE the first row so the top row's selection
+        // frame (which overhangs ~4px, more on a pop) isn't clipped by the header
+        // (same headroom JOUER uses). Still below the query subtitle (~y94).
+        let band_top = grid_top - 16.0;
+        let band_bot = grid_bottom;
+        let target_scroll = scroll_row as f32 * pitch;
+        let sel_col = (selection % cols) as f32;
+        let sel_row_u = (selection / cols) as u32;
+        let target_sel_x = MARGIN + sel_col * (cell_w + GAP);
+        let target_sel_y = grid_top + sel_row_u as f32 * pitch;
+        let mut scroll_px = target_scroll;
+        let mut frame_x = target_sel_x;
+        let mut frame_y = target_sel_y;
+        let mut frame_w = cell_w;
+        let mut pop = 0.0f32;
+        let touch_scroll = gallery_touch_scroll_read();
+        if let Ok(mut a) = gallery_anim().lock() {
+            let now = unsafe { ruffle_tick_now() };
+            if !a.inited {
+                a.inited = true;
+                a.last_tick = now;
+                a.last_sel = selection;
+                a.sel_x = target_sel_x;
+                a.sel_y = target_sel_y;
+                a.sel_w = cell_w;
+                a.scroll_px = target_scroll;
+                a.pop = 0.0;
+            } else {
+                let freq = unsafe { ruffle_tick_freq() } as f32;
+                let dt = if freq > 0.0 {
+                    (now.saturating_sub(a.last_tick) as f32 / freq).min(0.1)
+                } else {
+                    1.0 / 60.0
+                };
+                a.last_tick = now;
+                if selection != a.last_sel {
+                    a.pop = 1.0;
+                    a.last_sel = selection;
+                }
+                // Softer/slower than JOUER's 18/16: the FP grid is heavier to
+                // draw (backdrop + thumb + label per tile) so its frame rate dips
+                // during navigation; a longer time-constant draws more in-between
+                // frames, so the glide reads smoothly even at ~40 fps.
+                a.sel_x = ease_to(a.sel_x, target_sel_x, dt, 11.0);
+                a.sel_y = ease_to(a.sel_y, target_sel_y, dt, 11.0);
+                a.sel_w = ease_to(a.sel_w, cell_w, dt, 11.0);
+                a.scroll_px = ease_to(a.scroll_px, target_scroll, dt, 11.0);
+                a.pop = ease_to(a.pop, 0.0, dt, 10.0);
+            }
+            if let Some(px) = touch_scroll {
+                a.scroll_px = px;
+            }
+            scroll_px = a.scroll_px;
+            frame_x = a.sel_x;
+            frame_y = a.sel_y;
+            frame_w = a.sel_w;
+            pop = a.pop;
+        }
+        if let Ok(mut v) = gallery_view().lock() {
+            *v = GalleryView {
+                scroll_px,
+                pitch,
+                band_top,
+                band_bot,
+                rows_total,
+                rows_visible: rows_visible as u32,
             };
-            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xFF_0B_12_22), bg);
+        }
 
+        // Clip to the grid band (GL scissor is bottom-left origin; flip Y).
+        unsafe {
+            glEnable(GL_SCISSOR_TEST);
+            glScissor(
+                0,
+                (vh - band_bot).max(0.0) as GLint,
+                vw as GLsizei,
+                (band_bot - band_top).max(0.0) as GLsizei,
+            );
+        }
+
+        for i in 0..n {
+            let col = (i % cols) as f32;
+            let row = (i / cols) as u32;
+            let cx = MARGIN + col * (cell_w + GAP);
+            let cy = grid_top + row as f32 * pitch - scroll_px;
+            // Cheap cull: skip tiles fully outside the band.
+            if cy + thumb_h < band_top - 8.0 || cy > band_bot + 8.0 {
+                continue;
+            }
+
+            // A loaded cover fills the cell, so only pending/failed tiles need a
+            // backdrop (skipping it for loaded tiles halves the per-tile draws,
+            // which keeps the frame rate up so the glide stays smooth).
             match self.thumb_for(urls[i]) {
                 Some(ThumbTex::Image { tex, w, h }) => {
                     self.draw_textured_rect_cover(cx, cy, cell_w, thumb_h, tex, w, h);
                 }
-                Some(ThumbTex::Failed) => {
-                    let q = "?";
-                    let qw = self.measure_text(q, 4.0);
-                    self.draw_text(cx + (cell_w - qw) * 0.5, cy + thumb_h * 0.5 - 14.0, 4.0, q, swf::Color::from_rgb(0x55_66_77, 255));
-                }
-                None => {
-                    let d = "...";
-                    let dw = self.measure_text(d, 3.0);
-                    self.draw_text(cx + (cell_w - dw) * 0.5, cy + thumb_h * 0.5 - 10.0, 3.0, d, swf::Color::from_rgb(0x7A8A9C, 255));
+                other => {
+                    let bg = Matrix {
+                        a: cell_w, b: 0.0, c: 0.0, d: thumb_h,
+                        tx: swf::Twips::from_pixels(cx as f64),
+                        ty: swf::Twips::from_pixels(cy as f64),
+                    };
+                    <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xFF_0B_12_22), bg);
+                    if matches!(other, Some(ThumbTex::Failed)) {
+                        let q = "?";
+                        let qw = self.measure_text(q, 4.0);
+                        self.draw_text(cx + (cell_w - qw) * 0.5, cy + thumb_h * 0.5 - 14.0, 4.0, q, swf::Color::from_rgb(0x55_66_77, 255));
+                    } else {
+                        let d = "...";
+                        let dw = self.measure_text(d, 3.0);
+                        self.draw_text(cx + (cell_w - dw) * 0.5, cy + thumb_h * 0.5 - 10.0, 3.0, d, swf::Color::from_rgb(0x7A8A9C, 255));
+                    }
                 }
             }
 
@@ -7603,32 +7880,43 @@ impl SwitchRenderBackend {
                 let col_txt = if i == selection { 0xFFFFFF } else { 0x9FB0C2 };
                 self.draw_text(cx + (cell_w - lw) * 0.5, cy + thumb_h + 5.0, ls, &shown, swf::Color::from_rgb(col_txt, 255));
             }
+        }
 
-            if i == selection {
-                let p = (pulse * 0.5) + 0.5;
-                let g = (0xC0 as f32 + (0xFF - 0xC0) as f32 * p) as u32;
-                let col = swf::Color::from_rgb((0xFF << 16) | (g << 8) | 0x30, 255);
-                let b = 4.0;
-                let bars = [
-                    (cx - b, cy - b, cell_w + 2.0 * b, b),
-                    (cx - b, cy + thumb_h, cell_w + 2.0 * b, b),
-                    (cx - b, cy, b, thumb_h),
-                    (cx + cell_w, cy, b, thumb_h),
-                ];
-                for (bx, by, bw, bh) in bars {
-                    let m = Matrix {
-                        a: bw, b: 0.0, c: 0.0, d: bh,
-                        tx: swf::Twips::from_pixels(bx as f64),
-                        ty: swf::Twips::from_pixels(by as f64),
-                    };
-                    <Self as CommandHandler>::draw_rect(self, col, m);
-                }
+        // Eased selection frame (drawn last, inside the scissor; `pop` inflates
+        // it briefly on a cursor move for a tactile snap). Pulsing gold, glided.
+        {
+            let p = (pulse * 0.5) + 0.5;
+            let g = (0xC0 as f32 + (0xFF - 0xC0) as f32 * p) as u32;
+            let col = swf::Color::from_rgb((0xFF << 16) | (g << 8) | 0x30, 255);
+            let b = 4.0;
+            let grow = pop * 4.0;
+            let fx = frame_x - grow;
+            let fy = frame_y - scroll_px - grow;
+            let fw = frame_w + 2.0 * grow;
+            let fh = thumb_h + 2.0 * grow;
+            let bars = [
+                (fx - b, fy - b, fw + 2.0 * b, b),
+                (fx - b, fy + fh, fw + 2.0 * b, b),
+                (fx - b, fy, b, fh),
+                (fx + fw, fy, b, fh),
+            ];
+            for (bx, by, bw, bh) in bars {
+                let m = Matrix {
+                    a: bw, b: 0.0, c: 0.0, d: bh,
+                    tx: swf::Twips::from_pixels(bx as f64),
+                    ty: swf::Twips::from_pixels(by as f64),
+                };
+                <Self as CommandHandler>::draw_rect(self, col, m);
             }
         }
 
-        // Scrollbar (right edge) when there's more than one screenful.
-        let rows_total = (n + cols - 1) / cols;
-        if rows_total > rows_visible {
+        unsafe {
+            glDisable(GL_SCISSOR_TEST);
+        }
+
+        // Scrollbar (right edge) when there's more than one screenful, tracking
+        // the eased pixel scroll.
+        if rows_total > rows_visible as u32 {
             let track_x = vw - 14.0;
             let track_y = grid_top;
             let track_h = grid_bottom - grid_top;
@@ -7640,8 +7928,8 @@ impl SwitchRenderBackend {
             <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x40_FF_FF_FF), track);
             let frac = rows_visible as f32 / rows_total as f32;
             let thumb_h2 = (track_h * frac).max(24.0);
-            let max_scroll = (rows_total - rows_visible) as f32;
-            let pos = if max_scroll > 0.0 { scroll_row as f32 / max_scroll } else { 0.0 };
+            let max_scroll_px = rows_total.saturating_sub(rows_visible as u32) as f32 * pitch;
+            let pos = if max_scroll_px > 0.0 { (scroll_px / max_scroll_px).clamp(0.0, 1.0) } else { 0.0 };
             let thumb_y = track_y + (track_h - thumb_h2) * pos;
             let bar = Matrix {
                 a: 4.0, b: 0.0, c: 0.0, d: thumb_h2,

@@ -1161,15 +1161,25 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
     // Movement (px) before a press is treated as a drag instead of a tap.
     const DRAG_THRESH: f32 = 16.0;
 
-    let on_list = matches!(LIBRARY.lock().map(|s| s.screen), Ok(Screen::List { .. }));
+    // Touch works on the JOUER gallery, the Flashpoint results grid AND the
+    // archive.org file list (IMPORTER): all three feed the same render
+    // anim/view/cache singletons (only one renders per frame), so the gesture
+    // math is shared and only the write-back Screen variant differs.
+    let on_gallery = matches!(
+        LIBRARY.lock().map(|s| s.screen),
+        Ok(Screen::List { .. })
+            | Ok(Screen::FpGallery { .. })
+            | Ok(Screen::DistantFiles { .. })
+            | Ok(Screen::DistantIdle { .. })
+    );
 
     let mut t = match TOUCH.lock() {
         Ok(t) => t,
         Err(_) => return,
     };
 
-    // Off the gallery: cancel any in-flight gesture and drop the scroll override.
-    if !on_list {
+    // Off a touchable gallery: cancel any in-flight gesture, drop scroll override.
+    if !on_gallery {
         if t.down {
             r::gallery_touch_scroll_set(None);
         }
@@ -1223,22 +1233,59 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
             let max_off = rows_total.saturating_sub(rows_visible) as usize;
             let new_off = new_off.min(max_off);
             if let Ok(mut s) = LIBRARY.lock() {
-                if let Screen::List { selection, .. } = s.screen {
-                    s.screen = Screen::List { selection, scroll_offset: new_off };
+                match s.screen {
+                    Screen::List { selection, .. } => {
+                        s.screen = Screen::List { selection, scroll_offset: new_off };
+                    }
+                    Screen::FpGallery { selection, .. } => {
+                        s.screen = Screen::FpGallery { selection, scroll: new_off };
+                    }
+                    Screen::DistantFiles { selection, .. } => {
+                        s.screen = Screen::DistantFiles { selection, scroll_offset: new_off };
+                    }
+                    _ => {}
                 }
             }
             r::gallery_touch_scroll_set(None);
         } else if let Some(hit) = r::gallery_hit_test(t.start_x, t.start_y) {
             // Tap: first tap on a tile selects it; tapping the already-selected
-            // tile launches it (reuse the A-press path for the reveal animation).
+            // tile activates it (reuse the A-press path — launch on JOUER,
+            // download on the Flashpoint grid).
             let mut launch = false;
             if let Ok(mut s) = LIBRARY.lock() {
-                if let Screen::List { selection, scroll_offset } = s.screen {
-                    if hit == selection {
-                        launch = true;
-                    } else {
-                        s.screen = Screen::List { selection: hit, scroll_offset };
+                match s.screen {
+                    Screen::List { selection, scroll_offset } => {
+                        if hit == selection {
+                            launch = true;
+                        } else {
+                            s.screen = Screen::List { selection: hit, scroll_offset };
+                        }
                     }
+                    Screen::FpGallery { selection, scroll } => {
+                        if hit == selection {
+                            launch = true;
+                        } else {
+                            s.screen = Screen::FpGallery { selection: hit, scroll };
+                        }
+                    }
+                    Screen::DistantFiles { selection, scroll_offset } => {
+                        if hit == selection {
+                            launch = true;
+                        } else {
+                            s.screen = Screen::DistantFiles { selection: hit, scroll_offset };
+                        }
+                    }
+                    Screen::DistantIdle { selection } => {
+                        // URL list: paged (no scroll field), so tap-only. Tap a row
+                        // to select it, tap the selected row again to activate it
+                        // (fetch/download the URL, or open the add-URL keyboard).
+                        if hit == selection {
+                            launch = true;
+                        } else {
+                            s.screen = Screen::DistantIdle { selection: hit };
+                        }
+                    }
+                    _ => {}
                 }
             }
             if launch {
@@ -2735,6 +2782,14 @@ fn run_direct_download(url: &str) {
     let url = crate::sources::wayback_raw(url);
     let url = url.as_str();
     let safe_name = safe_name_from_url(url);
+    // Already on SD? Skip the re-download (the game is playable from JOUER),
+    // mirroring the Flashpoint grid's A-press guard.
+    if let Ok(s) = LIBRARY.lock() {
+        if s.entries.iter().any(|e| e.basename == safe_name) {
+            log(&std::format!("library: direct download skip - {} deja sur SD\n", safe_name));
+            return;
+        }
+    }
     let out_path = std::format!("{}/{}", USER_SD_ROOTS[0], safe_name);
     match net::start_download(url, &out_path) {
         Ok(()) => {
@@ -2778,6 +2833,9 @@ fn run_fp_search_flow() {
     // Drop any thumbnail fetch still in flight from a previous gallery so the
     // isolated handle starts clean.
     crate::backend::render::thumb_cancel_all();
+    // Fresh result set (selection jumps to 0): snap the gallery glide to the top
+    // so it doesn't streak from the previous gallery's scroll (shared anim).
+    crate::backend::render::gallery_anim_reset();
     match net::start_get_async(&crate::sources::gamezip::search_url(&query, filter)) {
         Ok(()) => {
             if let Ok(mut s) = LIBRARY.lock() {
@@ -2823,6 +2881,9 @@ fn run_fp_filter_toggle_flow() {
         filter, query
     ));
     crate::backend::render::thumb_cancel_all();
+    // Fresh result set (selection jumps to 0): snap the gallery glide to the top
+    // so it doesn't streak from the previous gallery's scroll (shared anim).
+    crate::backend::render::gallery_anim_reset();
     match net::start_get_async(&crate::sources::gamezip::search_url(&query, filter)) {
         Ok(()) => {
             if let Ok(mut s) = LIBRARY.lock() {
@@ -3539,6 +3600,8 @@ fn handle_remote_sort_modal_input(
                 if reverse {
                     s.cover_candidates.reverse();
                 }
+                // Re-ordered list: snap the glide to the top (no streak).
+                crate::backend::render::gallery_anim_reset();
                 s.screen = Screen::FpGallery { selection: 0, scroll: 0 };
             } else {
                 if selection == 1 {
@@ -3555,6 +3618,8 @@ fn handle_remote_sort_modal_input(
                 if reverse {
                     s.remote_files.reverse();
                 }
+                // Re-ordered list: snap the glide to the top.
+                crate::backend::render::gallery_anim_reset();
                 s.screen = Screen::DistantFiles { selection: 0, scroll_offset: 0 };
             }
             return;
@@ -3692,6 +3757,8 @@ fn run_distant_search_flow() {
     let trimmed = typed.trim().to_string();
     if let Ok(mut s) = LIBRARY.lock() {
         s.distant_filter = if trimmed.is_empty() { None } else { Some(trimmed) };
+        // Fresh (filtered) list: snap the glide to the top.
+        crate::backend::render::gallery_anim_reset();
         s.screen = Screen::DistantFiles { selection: 0, scroll_offset: 0 };
     }
 }
@@ -4599,14 +4666,27 @@ pub fn render(backend: &mut SwitchRenderBackend) {
         }
         // ── Phase 3.7 DISTANT mode ─────────────────────────────────────
         Screen::DistantIdle { selection } => {
-            // Snapshot the URL history; render the list (+ trailing add-row).
-            let urls = LIBRARY
+            // Snapshot the URL history + which URLs' games are already on SD (OK
+            // badge). Match `run_direct_download`'s naming so the badge tracks the
+            // actual downloaded file.
+            let (urls, installed) = LIBRARY
                 .lock()
                 .ok()
-                .map(|s| s.url_history.clone())
+                .map(|s| {
+                    let installed: std::vec::Vec<bool> = s
+                        .url_history
+                        .iter()
+                        .map(|u| {
+                            let raw = crate::sources::wayback_raw(u);
+                            let name = safe_name_from_url(raw.as_str());
+                            s.entries.iter().any(|e| e.basename == name)
+                        })
+                        .collect();
+                    (s.url_history.clone(), installed)
+                })
                 .unwrap_or_default();
             let refs: std::vec::Vec<&str> = urls.iter().map(|u| u.as_str()).collect();
-            backend.draw_library_distant_list(selection, &refs, crate::loc::s().dist_add);
+            backend.draw_library_distant_list(selection, &refs, crate::loc::s().dist_add, &installed, true);
         }
         Screen::DistantUrlOptions { url_idx, selection } => {
             let url = LIBRARY
@@ -4632,7 +4712,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 .unwrap_or_default();
             let refs: std::vec::Vec<&str> = urls.iter().map(|u| u.as_str()).collect();
             let src = crate::backend::render::distant_reveal_source_sel();
-            backend.draw_library_distant_list(src, &refs, crate::loc::s().dist_add);
+            backend.draw_library_distant_list(src, &refs, crate::loc::s().dist_add, &[], false);
             // Window: expanding (reveal active) or full screen (reveal done).
             let frac = crate::backend::render::distant_reveal_step(now)
                 .map(|(f, _, _)| f)
@@ -4662,6 +4742,8 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                             let mut g = LIBRARY.lock().ok();
                             if let Some(s) = g.as_mut() {
                                 s.remote_files = files;
+                                // Fresh list: snap the glide to the top.
+                                crate::backend::render::gallery_anim_reset();
                                 s.screen = Screen::DistantFiles { selection: 0, scroll_offset: 0 };
                                 Some(s.pending_fetch_url.clone())
                             } else {
@@ -4723,11 +4805,11 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 let ww = rw + (vw - rw) * frac;
                 let wh = rh + (vh - rh) * frac;
                 let refs: std::vec::Vec<&str> = urls.iter().map(|u| u.as_str()).collect();
-                backend.draw_library_distant_list(src, &refs, crate::loc::s().dist_add);
+                backend.draw_library_distant_list(src, &refs, crate::loc::s().dist_add, &[], false);
                 backend.set_clip(wx, wy, ww, wh);
                 backend.draw_library_distant_files(
                     selection, scroll_offset, &files, DISTANT_VISIBLE_ROWS,
-                    &marked, filter.as_deref(), total,
+                    &marked, filter.as_deref(), total, Some((wx, wy, ww, wh)),
                 );
                 backend.clear_clip();
                 // Make the opening/closing rectangle visible (same navy behind):
@@ -4744,7 +4826,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             } else {
                 backend.draw_library_distant_files(
                     selection, scroll_offset, &files, DISTANT_VISIBLE_ROWS,
-                    &marked, filter.as_deref(), total,
+                    &marked, filter.as_deref(), total, None,
                 );
             }
         }
