@@ -3392,14 +3392,16 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
             // server, so download their entry `.swf` straight from the htdocs
             // mirror (derived from the launchCommand); companions are fetched
             // afterwards, same as a GameZIP. `fp_direct` routes the finish path.
-            // Backstop: `parse_search` already drops HTML+FlashVars games from
-            // the grid (launchCommand is an index.html, not a bare `.swf` — e.g.
-            // Dragon City), so a selected entry is normally runnable. But guard
-            // the download here too: those games ship a huge GameZIP (344 MB for
-            // Dragon City) and would only dead-end on a black screen, so if a
-            // non-.swf entry ever reaches this point, bail with a clear message
-            // BEFORE transferring hundreds of MB.
-            if !crate::sources::gamezip::launch_command_is_swf(&cand.launch_command) {
+            // Backstop for `parse_search`'s runnable filter. A bare `.swf` is
+            // runnable; a zipped HTML wrapper is too (we resolve the embedded
+            // entry SWF out of the GameZIP after download — e.g. Agent P Strikes
+            // Back). A non-.swf, non-wrapper (or non-zipped HTML) entry has
+            // nothing we can launch, so bail with a clear message BEFORE
+            // transferring the GameZIP.
+            let runnable = crate::sources::gamezip::launch_command_is_swf(&cand.launch_command)
+                || (cand.zipped
+                    && crate::sources::gamezip::launch_command_is_html(&cand.launch_command));
+            if !runnable {
                 s.distant_error = crate::loc::s().err_fp_html_game.to_string();
                 s.screen = Screen::DistantError;
                 return;
@@ -5235,6 +5237,18 @@ fn on_download_finished() {
             return;
         };
         let _ = std::fs::remove_file(&out_path);
+        // HTML-wrapped game: the launchCommand pointed at the `index.html`
+        // wrapper, but extraction resolved and wrote the real entry SWF
+        // (entry_name). Rewrite the stored launchCommand to that SWF's URL so
+        // finalize's `.base` sidecar makes the game's relative loads
+        // (game_config.xml, companion SWFs) resolve against the extracted tree.
+        if !crate::sources::gamezip::launch_command_is_swf(&launch_command) {
+            if let Some(u) = crate::sources::gamezip::entry_url_from_name(&entry_name) {
+                if let Ok(mut s) = LIBRARY.lock() {
+                    s.download_launch_command = u;
+                }
+            }
+        }
         // Multi-file game: queue its companion SWFs so they download (on the same
         // progress bar) before we finalize, so they're present when the user
         // launches it. No companions → finalize straight away.

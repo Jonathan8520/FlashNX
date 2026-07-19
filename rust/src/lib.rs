@@ -40,6 +40,8 @@ use ruffle_core::events::{
 use ruffle_core::tag_utils::SwfMovie;
 use ruffle_core::config::Letterbox;
 use ruffle_core::{FloatDuration, Player, PlayerBuilder, StageAlign, StageScaleMode};
+use ruffle_core::external::{ExternalInterfaceProvider, Value as ExtValue};
+use ruffle_core::context::UpdateContext;
 use ruffle_render::backend::RenderBackend;
 
 use backend::audio::SwitchAudioBackend;
@@ -205,6 +207,97 @@ pub extern "C" fn ruffle_set_swf_path(path: *const c_char) -> c_int {
 const EMBEDDED_FALLBACK_SWF: &[u8] =
     include_bytes!("../../third_party/ruffle/swf/tests/swfs/SimpleRedBackground.swf");
 
+/// Format an ExternalInterface `Value` compactly for logging (so a hardware
+/// capture shows the exact Flash->JS call contract a game expects).
+fn fmt_ext_value(v: &ExtValue) -> std::string::String {
+    match v {
+        ExtValue::Undefined => std::string::String::from("undefined"),
+        ExtValue::Null => std::string::String::from("null"),
+        ExtValue::Bool(b) => std::format!("{}", b),
+        ExtValue::Number(n) => std::format!("{}", n),
+        ExtValue::String(s) => std::format!("{:?}", s),
+        ExtValue::Object(m) => {
+            let inner: std::vec::Vec<std::string::String> =
+                m.iter().map(|(k, val)| std::format!("{}:{}", k, fmt_ext_value(val))).collect();
+            std::format!("{{{}}}", inner.join(","))
+        }
+        ExtValue::List(l) => {
+            let inner: std::vec::Vec<std::string::String> = l.iter().map(fmt_ext_value).collect();
+            std::format!("[{}]", inner.join(","))
+        }
+    }
+}
+
+/// An ExternalInterface provider that emulates the browser "container" a Flash
+/// game expects on the other side of `ExternalInterface.call(...)`. Wiring ANY
+/// provider makes `ExternalInterface.available` return true — which is itself
+/// load-bearing: Disney/Yamago minigames (Agent P Strikes Back, Gravity Falls…)
+/// take a DIFFERENT init path when they think they're inside their JS container
+/// (`disneygames-iframe.js`) vs. standalone (where they fall back to an
+/// unpublished dev API and dead-end on a blue stage).
+///
+/// For now this LOGS every call + every callback the game registers (the exact
+/// contract we need to emulate) and returns best-effort benign values so the
+/// game's API is more likely to init offline: a Disney URL for domain/site-lock
+/// queries, `true` for readiness/registration probes, `null` otherwise. Once a
+/// hardware capture shows the real message protocol, the responses here become
+/// the actual container emulation (config, site-lock OK, LSO-backed saves).
+struct ContainerInterface;
+
+impl ExternalInterfaceProvider for ContainerInterface {
+    fn call_method(&self, _context: &mut UpdateContext<'_>, name: &str, args: &[ExtValue]) -> ExtValue {
+        let args_str: std::vec::Vec<std::string::String> = args.iter().map(fmt_ext_value).collect();
+        log_str(&std::format!("EI call: {}({})\n", name, args_str.join(", ")));
+        let lname = name.to_ascii_lowercase();
+        // Disney minigame message bus: `disneyGamesSendMessage(<type>, …)`, where
+        // the message type is the first arg and the game reads the return value
+        // synchronously. Without a container answer the game reads volume as 0 and
+        // renders muted (in-game volume toggle stuck off). Answer the audio probes.
+        if lname.contains("sendmessage") {
+            if let Some(ExtValue::String(msg)) = args.first() {
+                let m = msg.to_ascii_lowercase();
+                if m.contains("getvolume") {
+                    return ExtValue::Number(1.0); // full (SoundTransform.volume is 0..1)
+                }
+                if m.contains("mute") {
+                    return ExtValue::Bool(false); // not muted
+                }
+                if m.contains("pause") {
+                    return ExtValue::Bool(false);
+                }
+            }
+            return ExtValue::Null;
+        }
+        if lname.contains("domain")
+            || lname.contains("location")
+            || lname.contains("url")
+            || lname.contains("referrer")
+            || lname.contains("host")
+        {
+            ExtValue::String(std::string::String::from("http://play.lol.disney.com/"))
+        } else if lname.contains("available")
+            || lname.contains("isready")
+            || lname.contains("ready")
+            || lname.contains("init")
+            || lname.contains("register")
+        {
+            ExtValue::Bool(true)
+        } else {
+            ExtValue::Null
+        }
+    }
+
+    fn on_callback_available(&self, name: &str) {
+        // Callbacks the game exposes TO the container (ExternalInterface.addCallback).
+        // Logging these reveals the JS->Flash half of the bridge.
+        log_str(&std::format!("EI callback registered by game: {}\n", name));
+    }
+
+    fn get_id(&self) -> Option<std::string::String> {
+        None
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn ruffle_init() -> c_int {
     // Pipe panics through nxlink so we don't die silently. `panic = "abort"`
@@ -367,7 +460,7 @@ pub extern "C" fn ruffle_init() -> c_int {
     keymap::init_for_swf(&keymap_basename); // P1 + P2 bindings (issue #40) from one file
 
     match SwfMovie::from_data(&movie_bytes, source_label.clone(), None) {
-        Ok(movie) => {
+        Ok(mut movie) => {
             log_str(&std::format!(
                 "ruffle_init: SwfMovie parsed (version={}, dims={}x{}, frames={}, url={})\n",
                 movie.version(),
@@ -376,6 +469,36 @@ pub extern "C" fn ruffle_init() -> c_int {
                 movie.num_frames(),
                 movie.url(),
             ));
+            // TEST (Agent P): the Disney minigame engine, in production mode
+            // (see the Capabilities.playerType="PlugIn" change), reads FlashVars
+            // that the browser container `disneygames-iframe.js` normally injects
+            // to know where its API + configs live. Without them init() does
+            // Loader.load(null) -> Error #2007. Synthesize them from the movie URL
+            // (host-pathed layout the SidecarNavigator serves). Gated to Agent P.
+            if source_label.contains("phf_spl_act_agentpstrikesback") {
+                let host_root = source_label
+                    .splitn(4, '/')
+                    .take(3)
+                    .collect::<std::vec::Vec<_>>()
+                    .join("/");
+                let game_dir = source_label
+                    .rsplit_once('/')
+                    .map(|(d, _)| d.to_string())
+                    .unwrap_or_else(|| source_label.clone());
+                let gc = std::format!("{}/v1/game_container", host_root);
+                let params: std::vec::Vec<(std::string::String, std::string::String)> = std::vec![
+                    (std::string::String::from("id"), std::string::String::from("1864911")),
+                    (std::string::String::from("game"), std::string::String::from("1864911")),
+                    (std::string::String::from("gameDivId"), std::string::String::from("DisneyGame")),
+                    (std::string::String::from("fileUrl"), source_label.clone()),
+                    (std::string::String::from("type"), std::string::String::from("AS3")),
+                    (std::string::String::from("gameConfigUrl"), std::format!("{}/game_config.xml", game_dir)),
+                    (std::string::String::from("apiUrl"), std::format!("{}/swf/as3MinigameApi_2_5_6.swf", gc)),
+                    (std::string::String::from("apiConfigUrl"), std::format!("{}/xml/minigameAPIConfig.xml", gc)),
+                ];
+                log_str(&std::format!("ruffle_init: injected Disney FlashVars: {:?}\n", params));
+                movie.append_parameters(params);
+            }
             builder = builder.with_movie(movie);
         }
         Err(e) => {
@@ -407,6 +530,14 @@ pub extern "C" fn ruffle_init() -> c_int {
         source_label.clone(),
         sidecar_dir,
     ));
+
+    // Emulate the browser "container" side of ExternalInterface. This both LOGS
+    // the Flash<->JS call contract (so we can see exactly what a container-based
+    // game like Agent P Strikes Back asks for) and, by existing, makes
+    // `ExternalInterface.available` return true — which changes how Disney/Yamago
+    // minigames bootstrap their minigame API. Harmless for ordinary games (they
+    // never call ExternalInterface).
+    builder = builder.with_external_interface(std::boxed::Box::new(ContainerInterface));
 
     log(b"ruffle_init: calling PlayerBuilder::build()\n\0");
     let player = builder.build();

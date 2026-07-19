@@ -102,13 +102,18 @@ pub fn parse_search(
         if !zipped && htdocs_url_from_command(&launch_command).is_none() {
             continue;
         }
-        // Drop games we can't run from the grid entirely: HTML+FlashVars entries
-        // whose launchCommand is an index.html (e.g. Dragon City), not a bare
-        // `.swf`. They would only dead-end on a black screen, so hiding them keeps
-        // the results clean — and since this runs BEFORE the 60-game MAX cap, the
-        // freed slots fill with runnable games instead. (The importer also guards
-        // the download itself, as a backstop.)
-        if !launch_command_is_swf(&launch_command) {
+        // Keep only entries we can actually run. A bare `.swf` launchCommand is
+        // always runnable. An HTML wrapper (an `index.html` that embeds the game
+        // SWF — e.g. Disney minigames like Agent P Strikes Back) is runnable too,
+        // but ONLY for a zipped game: we read the wrapper out of the GameZIP after
+        // download to find the real entry SWF (see `resolve_html_launch_entry`).
+        // A non-zipped HTML entry has no GameZIP to read the wrapper from, so it
+        // is dropped. This runs BEFORE the 60-game MAX cap, so freed slots fill
+        // with runnable games. (The importer also guards the download, as a
+        // backstop.)
+        let runnable = launch_command_is_swf(&launch_command)
+            || (zipped && launch_command_is_html(&launch_command));
+        if !runnable {
             continue;
         }
         let title = g.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -212,6 +217,143 @@ pub fn launch_command_is_swf(launch_command: &str) -> bool {
     let lc = unquote(launch_command);
     let path = lc.split(['?', '#']).next().unwrap_or(lc);
     path.trim_end_matches('/').to_ascii_lowercase().ends_with(".swf")
+}
+
+/// True if a Flashpoint `launchCommand` points at an HTML wrapper (`index.html`
+/// / `*.htm[l]`) that embeds the real game SWF via `embedSWF()` or a config
+/// object (e.g. Disney minigames). We can run these for a ZIPPED game by reading
+/// the wrapper out of the GameZIP and resolving the SWF it references — see
+/// `resolve_html_launch_entry`. Flashpoint sometimes appends `@<params>` to the
+/// entry filename (e.g. `index.html@refOverride=na`), so the extension is checked
+/// on the leaf segment with any trailing `@...` stripped.
+pub fn launch_command_is_html(launch_command: &str) -> bool {
+    let lc = unquote(launch_command);
+    let path = lc.split(['?', '#']).next().unwrap_or(lc);
+    let seg = path.rsplit('/').next().unwrap_or(path);
+    let seg = seg.split('@').next().unwrap_or(seg);
+    let seg = seg.trim_end_matches('/').to_ascii_lowercase();
+    seg.ends_with(".html") || seg.ends_with(".htm")
+}
+
+/// Build the original game URL from a GameZIP content-entry name:
+/// `content/<host>/<path>/<file>` -> `http://<host>/<path>/<file>`. Used to set
+/// the movie's base URL for an HTML-wrapped game to its REAL entry SWF — the
+/// launchCommand pointed at the `index.html` wrapper, but we extract and launch
+/// the SWF it embeds, so the `.base` sidecar must name that SWF for its relative
+/// loads (game_config.xml, companion SWFs) to resolve against the extracted tree.
+pub fn entry_url_from_name(entry_name: &str) -> Option<std::string::String> {
+    let rest = entry_name.strip_prefix("content/")?;
+    if rest.is_empty() || rest.ends_with('/') {
+        return None;
+    }
+    Some(std::format!("http://{}", rest))
+}
+
+/// Read the entry SWF filename an HTML wrapper embeds. Handles the common cases:
+/// a config object (`"filename":"<name>.swf"`, Disney minigame container),
+/// swfobject/`embedSWF("<name>.swf", ...)`, or — as a fallback — the first
+/// quoted `*.swf` string on the page. Prefers a value anchored to a
+/// `filename`/`embedSWF` key so an ad/loader SWF quoted earlier doesn't win.
+/// Query/hash are stripped; the reference is returned verbatim (may be a
+/// relative sub-path like `swf/game.swf`, resolved by the caller).
+fn html_entry_swf(html: &[u8]) -> Option<std::string::String> {
+    let text = std::string::String::from_utf8_lossy(html);
+    let lower = text.to_ascii_lowercase();
+    let anchor = lower.find("filename").or_else(|| lower.find("embedswf"));
+    let bytes = text.as_bytes();
+    let mut first: Option<std::string::String> = None;
+    let mut anchored: Option<std::string::String> = None;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'"' || c == b'\'' {
+            let quote = c;
+            let start = i + 1;
+            let mut j = start;
+            while j < bytes.len() && bytes[j] != quote {
+                j += 1;
+            }
+            if let Ok(s) = std::str::from_utf8(&bytes[start..j.min(bytes.len())]) {
+                let path = s.split(['?', '#']).next().unwrap_or(s).trim();
+                if !path.is_empty() && path.to_ascii_lowercase().ends_with(".swf") {
+                    if first.is_none() {
+                        first = Some(path.to_string());
+                    }
+                    if let Some(a) = anchor {
+                        if start > a && anchored.is_none() {
+                            anchored = Some(path.to_string());
+                        }
+                    }
+                }
+            }
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+    anchored.or(first)
+}
+
+/// Resolve an HTML-wrapped game's real entry SWF from inside its GameZIP.
+/// `html_entry` is the (percent-decoded) `content/<host>/<path>/index.html…`
+/// entry name derived from the launchCommand. Finds that wrapper in the zip,
+/// inflates it, reads the SWF filename it embeds (`html_entry_swf`), and returns
+/// the resolved `content/<host>/<path>/<file>.swf` entry name to launch. Returns
+/// None when there's no matching wrapper or it embeds no local `.swf` (e.g. a
+/// pure-HTML5 game) — the caller then falls back to the first `.swf` in the zip.
+fn resolve_html_launch_entry(zip: &[u8], html_entry: &str) -> Option<std::string::String> {
+    // Directory of the wrapper (keeps its trailing slash), for resolving the
+    // embedded (relative) SWF reference against.
+    let dir = html_entry.rfind('/').map(|k| &html_entry[..=k]).unwrap_or("");
+    let dir_lower = dir.to_ascii_lowercase();
+    let mut i = 0usize;
+    while i + 30 <= zip.len() && &zip[i..i + 4] == b"PK\x03\x04" {
+        let flags = u16::from_le_bytes([zip[i + 6], zip[i + 7]]);
+        let method = u16::from_le_bytes([zip[i + 8], zip[i + 9]]);
+        let csize =
+            u32::from_le_bytes([zip[i + 18], zip[i + 19], zip[i + 20], zip[i + 21]]) as usize;
+        let usize_ =
+            u32::from_le_bytes([zip[i + 22], zip[i + 23], zip[i + 24], zip[i + 25]]) as usize;
+        let nlen = u16::from_le_bytes([zip[i + 26], zip[i + 27]]) as usize;
+        let elen = u16::from_le_bytes([zip[i + 28], zip[i + 29]]) as usize;
+        if flags & 0x0008 != 0 {
+            break; // data descriptor: sizes not in the local header
+        }
+        let name_start = i + 30;
+        let name_end = name_start + nlen;
+        if name_end > zip.len() {
+            break;
+        }
+        let name = std::string::String::from_utf8_lossy(&zip[name_start..name_end]).into_owned();
+        let data_start = name_end + elen;
+        let data_end = data_start + csize;
+        if data_end > zip.len() {
+            break;
+        }
+        // Match the wrapper by its exact (decoded) name, or any `index.htm[l]` in
+        // the launch directory (Flashpoint stores both `index.html` and the
+        // `index.html@<params>` launch entry — same bytes).
+        let dname = percent_decode(&name);
+        let dname_lower = dname.to_ascii_lowercase();
+        let is_wrapper = dname.eq_ignore_ascii_case(html_entry)
+            || dname_lower.starts_with(&std::format!("{}index.htm", dir_lower));
+        if is_wrapper {
+            let comp = &zip[data_start..data_end];
+            let bytes = match method {
+                0 => Some(comp.to_vec()),
+                8 => inflate(comp, usize_),
+                _ => None,
+            };
+            if let Some(bytes) = bytes {
+                if let Some(swf_ref) = html_entry_swf(&bytes) {
+                    let rel = swf_ref.trim_start_matches("./");
+                    return Some(std::format!("{}{}", dir, rel));
+                }
+            }
+        }
+        i = data_end;
+    }
+    None
 }
 
 /// Percent-decode a path so a launchCommand with an encoded path (e.g. `%20`)
@@ -342,6 +484,18 @@ pub fn extract_gamezip_tree(
     // entry names; the comparison below decodes each entry name too (robust to a
     // zip that stores encoded names).
     let launch_entry = launch_entry_from_command(launch_command).map(|e| percent_decode(&e));
+    // HTML-wrapped game (the launchCommand is an `index.html`, not a bare `.swf`):
+    // read the wrapper out of the zip to find the SWF it actually embeds, so we
+    // launch the game (e.g. Agent P Strikes Back) instead of `loader.swf` / the
+    // first `.swf`. Falls back to the raw entry (then first `.swf`) if unresolved.
+    let launch_entry = if !launch_command_is_swf(launch_command) {
+        match launch_entry.as_deref().and_then(|le| resolve_html_launch_entry(zip, le)) {
+            Some(resolved) => Some(resolved),
+            None => launch_entry,
+        }
+    } else {
+        launch_entry
+    };
     let mut first_swf: Option<(std::vec::Vec<u8>, std::string::String)> = None;
     let mut launch_swf: Option<(std::vec::Vec<u8>, std::string::String)> = None;
 
