@@ -542,6 +542,16 @@ static PENDING_FREES: Mutex<Vec<PendingFree>> = Mutex::new(Vec::new());
 // offscreen surface every frame leaked ~16 MB/frame until an OOM crash.
 static PENDING_ATLAS_RELEASE: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
+// Reusable scratch for `upload_region_padded`'s (w+2)×(h+2) edge-replicated
+// buffer. Super Bowser World registers/frees ~4500 ground-strip bitmaps in a
+// session; a fresh `vec![0u8; ~1.24 MB]` per strip churned the newlib heap into
+// fragments until a 1.2 MB alloc failed (OOM crash on the power-up spike). One
+// grow-only per-thread buffer removes that churn entirely. GL-thread-only, so a
+// thread_local is safe and lock-free.
+thread_local! {
+    static PAD_SCRATCH: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// One per registered atlas-backed bitmap; wrapped in `Arc` and shared by every
 /// clone of its `SwitchBitmapHandle` (incl. the per-frame draw-metadata copies),
 /// so the release fires exactly once, when the LAST reference drops — i.e. when
@@ -649,6 +659,27 @@ impl Drop for PrimTimer {
 
 const ATLAS_SIZE: u32 = 2048;
 const ATLAS_PAD: u32 = 1; // 1 px padding around each bitmap to avoid bleed
+
+/// GPU-side memory budget for LIVE big right-sized atlases. This is now the SOLE
+/// memory guard for the Super Bowser World class of game: the Ruffle-side CPU cap
+/// is DISABLED (refusing a BitmapData returns `undefined`, which breaks the game's
+/// blit engine into a per-frame re-render freeze — see `BITMAPDATA_BUDGET_BYTES`
+/// in ruffle_core's bitmap_data.rs). Over budget, a big bitmap is rendered
+/// invisible via a VALID `DroppedBitmap` handle — no GL texture, but the game's
+/// `getPixel`/`copyPixels` still read Ruffle's CPU pixel Vec, so collision and
+/// compositing keep working and the engine never sees a failure (no freeze). The
+/// dropped surface is simply not drawn. Bounding here also curbs the transient
+/// upload-buffer churn (`upload_region_padded`) whose 1.2 MB alloc failed on the
+/// fragmented heap at ~481 MB of live GPU strips (the death-animation crash) — so
+/// keep this comfortably under that. Tunable from the heartbeat `bigMB`.
+const BIG_ATLAS_BUDGET_BYTES: u64 = 400 * 1024 * 1024;
+
+/// A bitmap this big (in either axis, but still ≤ ATLAS_SIZE) gets its own
+/// right-sized dedicated atlas rather than sharing a 2048² one — matches the
+/// `big` test in `pack_into_atlas`. These are the surfaces the budget governs.
+fn is_big_surface(w: u32, h: u32) -> bool {
+    (w > ATLAS_SIZE / 2 || h > ATLAS_SIZE / 2) && w <= ATLAS_SIZE && h <= ATLAS_SIZE
+}
 
 struct Shelf {
     y: u32,
@@ -788,53 +819,62 @@ impl Atlas {
         if w == 0 || h == 0 {
             return;
         }
-        // Build a (w+2) × (h+2) buffer with edge replication.
+        // Build a (w+2) × (h+2) buffer with edge replication, into a REUSED
+        // per-thread scratch (grow-only) to avoid a ~1.24 MB alloc/free per call
+        // — that churn fragmented the heap to OOM under strip spam (see PAD_SCRATCH).
         let pw = (w + 2) as usize;
         let ph = (h + 2) as usize;
-        let mut buf = vec![0u8; pw * ph * 4];
-        let row_bytes = w as usize * 4;
-        // Center rows: copy each source row into the buffer with 1 px
-        // of horizontal replication on each side.
-        for src_row in 0..h as usize {
-            let src_off = src_row * row_bytes;
-            let dst_row = src_row + 1;
-            let dst_off = dst_row * pw * 4 + 4; // skip the left pad pixel
-            buf[dst_off..dst_off + row_bytes]
-                .copy_from_slice(&pixels[src_off..src_off + row_bytes]);
-            // Left pad pixel = first source pixel of this row.
-            let lpad_off = dst_row * pw * 4;
-            buf[lpad_off..lpad_off + 4].copy_from_slice(&pixels[src_off..src_off + 4]);
-            // Right pad pixel = last source pixel of this row.
-            let rpad_off = dst_row * pw * 4 + (pw - 1) * 4;
-            let last_pix_off = src_off + (w as usize - 1) * 4;
-            buf[rpad_off..rpad_off + 4]
-                .copy_from_slice(&pixels[last_pix_off..last_pix_off + 4]);
-        }
-        // Top pad row (row 0) = duplicate of first content row (row 1,
-        // already has horizontal replication baked in).
-        let row_stride = pw * 4;
-        buf.copy_within(row_stride..2 * row_stride, 0);
-        // Bottom pad row (row h+1) = duplicate of last content row (row h).
-        let last_content = h as usize * row_stride;
-        let last_pad = (h as usize + 1) * row_stride;
-        buf.copy_within(last_content..last_content + row_stride, last_pad);
+        let needed = pw * ph * 4;
+        PAD_SCRATCH.with(|cell| {
+            let mut scratch = cell.borrow_mut();
+            if scratch.len() < needed {
+                scratch.resize(needed, 0);
+            }
+            let buf = &mut scratch[..needed];
+            let row_bytes = w as usize * 4;
+            // Center rows: copy each source row into the buffer with 1 px
+            // of horizontal replication on each side.
+            for src_row in 0..h as usize {
+                let src_off = src_row * row_bytes;
+                let dst_row = src_row + 1;
+                let dst_off = dst_row * pw * 4 + 4; // skip the left pad pixel
+                buf[dst_off..dst_off + row_bytes]
+                    .copy_from_slice(&pixels[src_off..src_off + row_bytes]);
+                // Left pad pixel = first source pixel of this row.
+                let lpad_off = dst_row * pw * 4;
+                buf[lpad_off..lpad_off + 4].copy_from_slice(&pixels[src_off..src_off + 4]);
+                // Right pad pixel = last source pixel of this row.
+                let rpad_off = dst_row * pw * 4 + (pw - 1) * 4;
+                let last_pix_off = src_off + (w as usize - 1) * 4;
+                buf[rpad_off..rpad_off + 4]
+                    .copy_from_slice(&pixels[last_pix_off..last_pix_off + 4]);
+            }
+            // Top pad row (row 0) = duplicate of first content row (row 1,
+            // already has horizontal replication baked in).
+            let row_stride = pw * 4;
+            buf.copy_within(row_stride..2 * row_stride, 0);
+            // Bottom pad row (row h+1) = duplicate of last content row (row h).
+            let last_content = h as usize * row_stride;
+            let last_pad = (h as usize + 1) * row_stride;
+            buf.copy_within(last_content..last_content + row_stride, last_pad);
 
-        unsafe {
-            glBindTexture(GL_TEXTURE_2D, self.texture);
-            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-            glTexSubImage2D(
-                GL_TEXTURE_2D,
-                0,
-                (x as i32) - 1,
-                (y as i32) - 1,
-                (w + 2) as GLsizei,
-                (h + 2) as GLsizei,
-                GL_RGBA,
-                GL_UNSIGNED_BYTE,
-                buf.as_ptr() as *const _,
-            );
-            glBindTexture(GL_TEXTURE_2D, 0);
-        }
+            unsafe {
+                glBindTexture(GL_TEXTURE_2D, self.texture);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                glTexSubImage2D(
+                    GL_TEXTURE_2D,
+                    0,
+                    (x as i32) - 1,
+                    (y as i32) - 1,
+                    (w + 2) as GLsizei,
+                    (h + 2) as GLsizei,
+                    GL_RGBA,
+                    GL_UNSIGNED_BYTE,
+                    buf.as_ptr() as *const _,
+                );
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+        });
     }
 }
 
@@ -899,6 +939,21 @@ impl std::fmt::Debug for StandaloneTexture {
 #[derive(Clone, Debug)]
 struct StandaloneBitmap(Arc<StandaloneTexture>);
 impl BitmapHandleImpl for StandaloneBitmap {}
+
+/// BitmapHandle payload for a big surface we REFUSED to back with a texture
+/// because the big-atlas memory budget was exhausted (Super Bowser World
+/// cinematic OOM). Owns NO GL resource: `render_bitmap` draws nothing,
+/// `update_texture`/`render_offscreen` no-op. The surface is invisible instead
+/// of taking the whole app down with an allocation failure. Carries the
+/// intended dims only for diagnostics.
+#[derive(Clone, Debug)]
+struct DroppedBitmap {
+    #[allow(dead_code)]
+    width: u32,
+    #[allow(dead_code)]
+    height: u32,
+}
+impl BitmapHandleImpl for DroppedBitmap {}
 
 /// SyncHandle for `BitmapData.draw()` and `apply_filter`. Holds a NON-owning GL texture id (the
 /// temp the draw commands were rendered into) plus the dirty region to read
@@ -1360,6 +1415,18 @@ pub struct SwitchRenderBackend {
     bitmaps_registered: u32,
     bitmap_draws_emitted: u32,
     bitmap_render_count: u32,
+    /// Big-surface memory tracking (Super Bowser World cinematic OOM, #56b
+    /// follow-up). A "big" bitmap is one that gets a right-sized dedicated atlas
+    /// (> ATLAS_SIZE/2 in a dimension, e.g. 1824×1174 = ~8.5 MB). These dominate
+    /// memory: the game spawns dozens at the cutscene→gameplay transition. We
+    /// track live bytes to (a) decide leak-vs-genuine-demand from the logs and
+    /// (b) refuse new ones past `BIG_ATLAS_BUDGET_BYTES` so we degrade (invisible
+    /// surface) instead of an OOM hard-crash.
+    big_atlas_live_bytes: u64,
+    big_atlas_peak_bytes: u64,
+    big_atlas_alloc_total: u32,
+    big_atlas_free_total: u32,
+    big_atlas_dropped_total: u32,
     /// System tick at the start of the current heartbeat window (60 frames).
     /// Set to 0 on first heartbeat; FPS measurement skipped until we have
     /// two samples to subtract. Uses `armGetSystemTick` for high resolution
@@ -2699,6 +2766,10 @@ fn as_standalone_bitmap(handle: &BitmapHandle) -> Option<&StandaloneBitmap> {
     <dyn Any>::downcast_ref(&*handle.0)
 }
 
+fn as_dropped_bitmap(handle: &BitmapHandle) -> Option<&DroppedBitmap> {
+    <dyn Any>::downcast_ref(&*handle.0)
+}
+
 /// Cached cover texture for a library game (v1.2.0 JOUER grid). Looked up by
 /// `.swf` basename; a cover is decoded + uploaded once on first display and
 /// kept for the backend's lifetime (the GL context outlives the library UI).
@@ -3546,6 +3617,11 @@ impl SwitchRenderBackend {
             shapes_registered: 0,
             bitmaps_registered: 0,
             bitmap_draws_emitted: 0,
+            big_atlas_live_bytes: 0,
+            big_atlas_peak_bytes: 0,
+            big_atlas_alloc_total: 0,
+            big_atlas_free_total: 0,
+            big_atlas_dropped_total: 0,
             heartbeat_tick: 0,
             draw_calls_this_window: 0,
             push_mask_window: 0,
@@ -3777,6 +3853,13 @@ impl SwitchRenderBackend {
         dst_h: u32,
         setup_uniforms: impl FnOnce(),
     ) -> bool {
+        // Central safety net: FBO-attaching a 0 (freed/absent) destination texture
+        // makes Mesa update a null renderbuffer surface and crash (native DataAbort)
+        // BEFORE the completeness check below can reject it. Callers should never
+        // pass a dead texture, but bail cleanly if one slips through.
+        if dst_tex == 0 {
+            return false;
+        }
         if self.offscreen_fbo == 0 {
             unsafe {
                 let mut fbo: GLuint = 0;
@@ -4892,7 +4975,15 @@ impl SwitchRenderBackend {
         atlas.upload_region_padded(x, y, width, height, pixels);
         atlas.live = 1;
         let (aw, ah) = (atlas.width as f32, atlas.height as f32);
-        let bytes_mb = (atlas.width as u64 * atlas.height as u64 * 4) / (1024 * 1024);
+        let atlas_bytes = atlas.width as u64 * atlas.height as u64 * 4;
+        let bytes_mb = atlas_bytes / (1024 * 1024);
+        // Track live big-surface bytes so the release drain can subtract them and
+        // the budget check upstream can refuse before the heap runs out (#56b OOM).
+        if big {
+            self.big_atlas_live_bytes = self.big_atlas_live_bytes.saturating_add(atlas_bytes);
+            self.big_atlas_peak_bytes = self.big_atlas_peak_bytes.max(self.big_atlas_live_bytes);
+            self.big_atlas_alloc_total = self.big_atlas_alloc_total.wrapping_add(1);
+        }
         let new_atlas_index = match self.atlases.iter().position(|a| a.texture == 0) {
             Some(dead) => {
                 self.atlases[dead] = atlas; // old dead Atlas (texture 0) dropped, no-op
@@ -4904,8 +4995,11 @@ impl SwitchRenderBackend {
             }
         };
         let msg = std::format!(
-            "atlas: allocating #{} ({} MB) for {}x{}\n",
+            "atlas: allocating #{} ({} MB) for {}x{} [big live={}MB peak={}MB alloc={} free={}]\n",
             new_atlas_index, bytes_mb, width, height,
+            self.big_atlas_live_bytes / (1024 * 1024),
+            self.big_atlas_peak_bytes / (1024 * 1024),
+            self.big_atlas_alloc_total, self.big_atlas_free_total,
         );
         let mut bytes = msg.into_bytes();
         bytes.push(0);
@@ -8803,11 +8897,39 @@ impl RenderBackend for SwitchRenderBackend {
         enum Backing {
             Standalone(GLuint),
             Atlas { tex: GLuint, base_x: u32, base_y: u32, atlas_w: u32, atlas_h: u32 },
+            /// A budget-dropped surface: no GPU texture to seed from or write back
+            /// to. We still composite the draw() into a temp and return it, so the
+            /// draw SUCCEEDS.
+            Dropped,
         }
         let (tex_w, tex_h, backing) = if let Some(s) = as_standalone_bitmap(&handle) {
+            // A freed standalone texture id is 0 — never FBO-attach it (see below).
+            if s.0.texture == 0 {
+                return None;
+            }
             (s.0.width, s.0.height, Backing::Standalone(s.0.texture))
+        } else if let Some(d) = as_dropped_bitmap(&handle) {
+            // Budget-dropped big surface. BitmapData.draw() MUST still succeed:
+            // returning None makes Ruffle log "does not support BitmapData.draw"
+            // and the game re-issues the draw every frame, allocating a fresh
+            // ~1.2 MB Vec each time → OOM on the death/power-up effect spike (the
+            // recurring Super Bowser World crash). Compositing into a temp with no
+            // backing (seed skipped, cleared transparent) lets the draw land in
+            // Ruffle's CPU pixels via the returned sync handle — getPixel/copyPixels
+            // keep working; only the on-screen display of this surface stays blank.
+            (d.width, d.height, Backing::Dropped)
         } else if let Some(b) = as_switch_bitmap(&handle) {
             let Some(a) = self.atlases.get(b.atlas_index) else { return None };
+            // The atlas may have been FREED (texture == 0) while the strip churn
+            // recycles slots (Super Bowser World cycles ~7600 ground-strip atlases).
+            // FBO-attaching texture 0 leaves the framebuffer incomplete; Mesa then
+            // dereferences the null renderbuffer surface → native DataAbort (FAR=0xe,
+            // in st_update_renderbuffer_surface). `resolve_bitmap_tex`/`render_bitmap`
+            // already skip a dead atlas — render_offscreen must too. Bail: the draw()
+            // just no-ops (the surface is gone) instead of crashing the app.
+            if a.texture == 0 {
+                return None;
+            }
             // Base pixel offset + normalization must use the atlas' ACTUAL dims:
             // right-sized dedicated atlases aren't 2048² (#42 regression — hardcoding
             // ATLAS_SIZE here sampled/wrote the wrong region → striped water).
@@ -8865,13 +8987,21 @@ impl RenderBackend for SwitchRenderBackend {
                         temp_id, (0, 0), tex_w, tex_h,
                     );
                 }
+                // No backing to seed from — the temp is cleared in step 2 instead.
+                Backing::Dropped => {}
             }
         }
 
-        // 2. Composite the new draw() commands on top (no colour clear).
+        // 2. Composite the new draw() commands on top. Seeded backings composite
+        // with no clear; a Dropped surface had no seed, so clear the (pooled, maybe
+        // stale) temp to transparent first.
+        let clear = match backing {
+            Backing::Dropped => Some(Color { r: 0, g: 0, b: 0, a: 0 }),
+            _ => None,
+        };
         let rendered = {
             let _t = PrimTimer::new(&PRIM_OFF_RENDER_CUR);
-            self.render_commands_to_texture(temp_id, tex_w, tex_h, commands, None)
+            self.render_commands_to_texture(temp_id, tex_w, tex_h, commands, clear)
         };
         if !rendered {
             self.offscreen_temp_retired.push(temp);
@@ -8894,6 +9024,9 @@ impl RenderBackend for SwitchRenderBackend {
                         tex, (base_x as i32, base_y as i32), tex_w, tex_h,
                     );
                 }
+                // No backing texture — the result lives only in `temp`, returned
+                // as the sync handle so Ruffle reads it back into its CPU pixels.
+                Backing::Dropped => {}
             }
         }
         self.warn_once(b"render_offscreen: composite draw() -> handle\n\0");
@@ -9057,6 +9190,18 @@ impl RenderBackend for SwitchRenderBackend {
                     if atlas.texture != 0 {
                         atlas.live = atlas.live.saturating_sub(1);
                         if atlas.live == 0 {
+                            // Reclaim big-surface budget before the texture is
+                            // dropped (dims read here — free_gl zeroes them). A
+                            // dedicated big atlas is right-sized, so its dims are
+                            // never exactly 2048² like a shared one — that's how we
+                            // tell them apart (a shared atlas was never counted).
+                            if atlas.width != ATLAS_SIZE || atlas.height != ATLAS_SIZE {
+                                let bytes = atlas.width as u64 * atlas.height as u64 * 4;
+                                self.big_atlas_live_bytes =
+                                    self.big_atlas_live_bytes.saturating_sub(bytes);
+                                self.big_atlas_free_total =
+                                    self.big_atlas_free_total.wrapping_add(1);
+                            }
                             atlas.free_gl(); // texture deleted, slot reusable
                         }
                     }
@@ -9298,7 +9443,7 @@ impl RenderBackend for SwitchRenderBackend {
             let cpu_mhz = unsafe { ruffle_cpu_clock_hz() } / 1_000_000;
             let docked = unsafe { ruffle_is_docked() } != 0;
             let msg = std::format!(
-                "f{}: fps={} cpu={}MHz dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB\n",
+                "f{}: fps={} cpu={}MHz dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB\n",
                 self.frame_count,
                 fps_str,
                 cpu_mhz,
@@ -9315,6 +9460,12 @@ impl RenderBackend for SwitchRenderBackend {
                 self.index_arena.alloc_failures,
                 self.bitmaps_registered,
                 self.atlases.iter().filter(|a| a.texture != 0).count(), // LIVE atlases (#56b)
+                self.big_atlas_live_bytes / (1024 * 1024),
+                self.big_atlas_peak_bytes / (1024 * 1024),
+                self.big_atlas_alloc_total,
+                self.big_atlas_free_total,
+                self.big_atlas_dropped_total,
+                ruffle_core::bitmap::bitmap_data::bitmapdata_live_bytes() / (1024 * 1024),
                 self.bitmap_draws_emitted,
                 self.render_offscreen_calls,
                 self.resolve_sync_calls,
@@ -9441,6 +9592,32 @@ impl RenderBackend for SwitchRenderBackend {
 
     fn register_bitmap(&mut self, bitmap: Bitmap<'_>) -> Result<BitmapHandle, Error> {
         let _pt = PrimTimer::new(&PRIM_BMPUP_CUR);
+        // Big-surface budget (Super Bowser World cinematic OOM, #56b follow-up).
+        // Checked with the CHEAP dims accessor, BEFORE `bitmap_to_rgba_bytes`
+        // materialises the (here 8.5 MB) pixel buffer — that transient Vec is the
+        // exact allocation that failed at the crash. Past the budget we hand back
+        // a zero-resource `DroppedBitmap`: the surface renders invisible but the
+        // app keeps running (and stays diagnosable) instead of aborting.
+        let (dw, dh) = (bitmap.width(), bitmap.height());
+        if is_big_surface(dw, dh) {
+            let want = dw as u64 * dh as u64 * 4;
+            if self.big_atlas_live_bytes.saturating_add(want) > BIG_ATLAS_BUDGET_BYTES {
+                self.big_atlas_dropped_total = self.big_atlas_dropped_total.wrapping_add(1);
+                if self.big_atlas_dropped_total <= 4 {
+                    let msg = std::format!(
+                        "register_bitmap: GPU OVER BUDGET, invisible {}x{} (live={}MB budget={}MB dropped={}) — collision unaffected\n",
+                        dw, dh,
+                        self.big_atlas_live_bytes / (1024 * 1024),
+                        BIG_ATLAS_BUDGET_BYTES / (1024 * 1024),
+                        self.big_atlas_dropped_total,
+                    );
+                    let mut b = msg.into_bytes();
+                    b.push(0);
+                    unsafe { ruffle_log_cstr(b.as_ptr() as *const _) };
+                }
+                return Ok(BitmapHandle(Arc::new(DroppedBitmap { width: dw, height: dh })));
+            }
+        }
         let Some((bytes, w, h)) = bitmap_to_rgba_bytes(&bitmap) else {
             return Err(Error::UnknownType);
         };
@@ -9489,6 +9666,10 @@ impl RenderBackend for SwitchRenderBackend {
         region: PixelRegion,
     ) -> Result<(), Error> {
         let _pt = PrimTimer::new(&PRIM_BMPUP_CUR);
+        // Budget-dropped big surface: no texture to update, silently succeed.
+        if as_dropped_bitmap(handle).is_some() {
+            return Ok(());
+        }
         let rgba = bitmap.to_rgba();
         let w = region.x_max.saturating_sub(region.x_min);
         let h = region.y_max.saturating_sub(region.y_min);
@@ -9622,6 +9803,10 @@ impl CommandHandler for SwitchRenderBackend {
             self.mask_shape_draw_window = self.mask_shape_draw_window.saturating_add(1);
         } else if self.mask.depth > 0 {
             self.masked_draw_window = self.masked_draw_window.saturating_add(1);
+        }
+        // Budget-dropped big surface (#56b OOM guard): no texture, draw nothing.
+        if as_dropped_bitmap(&bitmap).is_some() {
+            return;
         }
         // Standalone (FBO-backed) variant: own GL texture, full [0,1]² UV.
         // Used to draw cacheAsBitmap / filter / BitmapData results back onto
