@@ -9050,13 +9050,31 @@ impl RenderBackend for SwitchRenderBackend {
             }
         }
         self.warn_once(b"render_offscreen: composite draw() -> handle\n\0");
+        // The SyncHandle must stay resolvable until Ruffle actually reads it back.
+        // For a BitmapData drawn once and read MANY frames later — Flipline's
+        // multisprite player strip is composited at level load, then copyPixels'd
+        // to the stage every frame in-game (reblitMultispritePlayer) — that read is
+        // deferred far past this call. A pooled `temp` is recycled (and, over the
+        // 64 MB pool cap, freed) within a frame or two, so a handle pointing at it
+        // resolves to an empty/reused texture → the whole player renders invisible
+        // (#14, PL2 6834x484 / 6936x88 strips read back all-zero). For a STANDALONE
+        // backing, step 3 already wrote the full composited result into the
+        // BitmapData's OWN persistent texture (premultiplied, exactly the temp's
+        // convention) — point the handle there so the deferred read resolves
+        // correctly whenever it lands. Atlas/Dropped keep the temp (the atlas is
+        // straight-alpha, a different readback convention, and those resolve in the
+        // same frame in practice).
+        let sync_tex = match backing {
+            Backing::Standalone(s_tex) => s_tex,
+            _ => temp_id,
+        };
         // Retire temp for reuse next frame (submit_frame recycles it into the
-        // pool) instead of freeing it; the SyncHandle references it by raw id.
+        // pool) instead of freeing it.
         self.offscreen_temp_retired.push(temp);
         // Read back exactly `bounds`: the resolve closure indexes its buffer
         // relative to this region's origin with stride = bounds.width().
         Some(Box::new(BitmapDataSyncHandle {
-            texture: temp_id,
+            texture: sync_tex,
             x: bounds.x_min,
             y: bounds.y_min,
             w: bounds.width(),
