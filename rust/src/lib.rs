@@ -249,6 +249,19 @@ impl ExternalInterfaceProvider for ContainerInterface {
         let args_str: std::vec::Vec<std::string::String> = args.iter().map(fmt_ext_value).collect();
         log_str(&std::format!("EI call: {}({})\n", name, args_str.join(", ")));
         let lname = name.to_ascii_lowercase();
+        // gaforflash (Google Analytics for Flash) and similar libraries call
+        // `ExternalInterface.call(<a raw JS <script> blob>)`, expecting the browser
+        // to EVAL it and hand back a JS OBJECT (e.g. `{host, language, …}`) they then
+        // read `.host` on. We can't run JS; the scalar-String answers below would make
+        // them do `.host` on a String → AVM2 #1069, aborting the movie's construction
+        // on a black stage (Pursuit of Hat 2, whose Preloader spins up a GATracker at
+        // init). A real absent container makes `ExternalInterface.call` return null,
+        // which these libs treat as "JS unavailable" and skip. A genuine container
+        // query (the Disney message bus / site-lock) is always a short method name,
+        // never a `<script>` blob — so bail to Null the moment the "name" is JS code.
+        if lname.contains("<script") || name.contains('\n') {
+            return ExtValue::Null;
+        }
         // Disney minigame message bus: `disneyGamesSendMessage(<type>, …)`, where
         // the message type is the first arg and the game reads the return value
         // synchronously. Without a container answer the game reads volume as 0 and
