@@ -4056,6 +4056,27 @@ impl SwitchRenderBackend {
         {
             return Some(self.offscreen_temp_pool.swap_remove(i));
         }
+        // Big (standalone-backed) targets: reuse a temp already RETIRED this frame,
+        // not just the recycled pool. The multisprite builder composites many big
+        // draws into ONE strip per frame — Papa Louie 3's player strip is 8007x858
+        // and takes ~8 draws/frame; without this each draw allocates a fresh ~27 MB
+        // texture (they aren't back in the pool until submit_frame), ~220 MB/frame,
+        // which exhausts the GPU (glTexImage2D OOM -> "does not support
+        // BitmapData.draw" -> stuck on the loading screen). Reusing collapses that
+        // to one live temp. Safe only because a standalone target's SyncHandle now
+        // points at the BitmapData's own persistent texture, never at this temp
+        // (see render_offscreen) — so a retired big temp is unreferenced. Small
+        // atlas-backed temps (whose handle still IS the temp, resolved same-frame)
+        // keep the old behaviour, hence the >ATLAS_SIZE gate.
+        if w > ATLAS_SIZE || h > ATLAS_SIZE {
+            if let Some(i) = self
+                .offscreen_temp_retired
+                .iter()
+                .position(|t| t.width == w && t.height == h)
+            {
+                return Some(self.offscreen_temp_retired.swap_remove(i));
+            }
+        }
         make_standalone_texture(w, h)
     }
 
