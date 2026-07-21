@@ -1004,6 +1004,11 @@ fn make_standalone_texture(width: u32, height: u32) -> Option<StandaloneTexture>
         }
         glBindTexture(GL_TEXTURE_2D, tex);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        // Drain any stale GL error so the post-alloc check below is accurate.
+        let mut drain = 0;
+        while glGetError() != GL_NO_ERROR && drain < 16 {
+            drain += 1;
+        }
         // Allocate storage with NULL data: every consumer fully overwrites the
         // texture before sampling it (render_commands_to_texture glClears it;
         // filter passes draw the whole region). The old `vec![0u8; w*h*4]`
@@ -1014,6 +1019,21 @@ fn make_standalone_texture(width: u32, height: u32) -> Option<StandaloneTexture>
             width as GLsizei, height as GLsizei, 0,
             GL_RGBA, GL_UNSIGNED_BYTE, core::ptr::null(),
         );
+        // glTexImage2D can fail with GL_OUT_OF_MEMORY on a large temp under GPU
+        // pressure (Icy Tower's ~2 MP nested render_offscreen surfaces): the id is
+        // valid but the texture has NO level-0 image, and FBO-attaching an
+        // image-less texture crashes Mesa with a NULL deref (Data Abort, FAR≈0x0e)
+        // exactly like a 0 id (glGenTextures is checked above; glTexImage2D was
+        // not). Bail so callers skip the pass (draw no-ops) instead of aborting.
+        if glGetError() != GL_NO_ERROR {
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glDeleteTextures(1, &tex);
+            ruffle_log_cstr(
+                b"make_standalone_texture: glTexImage2D failed (GPU OOM?), skipped\n\0".as_ptr()
+                    as *const _,
+            );
+            return None;
+        }
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as GLint);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as GLint);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as GLint);
@@ -9245,13 +9265,32 @@ impl RenderBackend for SwitchRenderBackend {
         // SyncHandles were resolved/dropped during this frame's tick (Ruffle
         // reads a BitmapData.draw() result back on the next CPU access, which
         // happens in the same AS frame), so the textures are safe to reuse next
-        // frame. Cap the pool so churning BitmapData sizes can't grow it without
-        // bound (excess textures drop here → glDeleteTextures).
-        const OFFSCREEN_TEMP_POOL_CAP: usize = 128;
+        // frame. Bound the pool by BYTES (not count) and KEEP THE MOST RECENTLY
+        // retired temps. The old count cap of 128 let a game that churns
+        // render_offscreen SIZES (Icy Tower re-creates scene BitmapData every
+        // frame) hoard up to 128 stale varied-size temps ≈ 330 MB of GPU —
+        // untracked (they're standalone, not atlas bytes) — exhausting texture
+        // memory → GL_OUT_OF_MEMORY, then make_standalone_texture failing →
+        // dropped draws / sprite flicker. Worse, `truncate(128)` KEPT the stale
+        // front and discarded the freshly-retired temps at the back (the ones
+        // about to be reused), so `acquire_offscreen_temp` missed every frame.
+        // `append` puts the recent temps at the tail; keep the tail within a byte
+        // budget and drop the oldest from the front (their StandaloneTexture drop
+        // = glDeleteTextures).
+        const OFFSCREEN_TEMP_POOL_MAX_BYTES: usize = 64 * 1024 * 1024;
         self.offscreen_temp_pool
             .append(&mut self.offscreen_temp_retired);
-        if self.offscreen_temp_pool.len() > OFFSCREEN_TEMP_POOL_CAP {
-            self.offscreen_temp_pool.truncate(OFFSCREEN_TEMP_POOL_CAP);
+        let mut acc: usize = 0;
+        let mut drop_before = 0usize;
+        for (i, t) in self.offscreen_temp_pool.iter().enumerate().rev() {
+            acc += (t.width as usize) * (t.height as usize) * 4;
+            if acc > OFFSCREEN_TEMP_POOL_MAX_BYTES {
+                drop_before = i + 1;
+                break;
+            }
+        }
+        if drop_before > 0 {
+            self.offscreen_temp_pool.drain(0..drop_before);
         }
         // Snapshot counters for the per-frame slow-frame breakdown (consumed
         // right after `commands.execute` below). `cache_entries` is moved by the
