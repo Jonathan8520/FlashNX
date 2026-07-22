@@ -7,7 +7,7 @@
     "swf_hash": "52d8e3f5e0b8327c"
   },
   "author": "Jonathan8520",
-  "verified": true,
+  "verified": false,
   "bindings": {
     "A": "S",
     "B": "D",
@@ -24,8 +24,8 @@
     "Up": "Up",
     "X": "Up",
     "Y": "A",
-    "ZL": "Up",
-    "ZR": "S"
+    "ZL": "Right click",
+    "ZR": "Left click"
   },
   "bindings_p2": {
     "A": "Num1",
