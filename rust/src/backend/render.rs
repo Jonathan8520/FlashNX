@@ -9120,7 +9120,7 @@ impl RenderBackend for SwitchRenderBackend {
         // Resolve source + destination (atlas or standalone). Fail cleanly (Ruffle
         // keeps the unfiltered pixels) if either can't be resolved.
         let (src_tex, src_tw, src_th, src_bx, src_by, src_atlas) = self.resolve_bitmap_tex(&source)?;
-        let (dst_tex, _dst_tw, _dst_th, dst_bx, dst_by, dst_atlas) = self.resolve_bitmap_tex(&destination)?;
+        let (dst_tex, dst_tw, dst_th, dst_bx, dst_by, dst_atlas) = self.resolve_bitmap_tex(&destination)?;
         // Round-trip through two pool temps so the filter always sees a full,
         // 0,0-based source texture (its own coordinate assumption) and never reads
         // and writes the same atlas region at once: copy the source sub-rect into
@@ -9163,23 +9163,50 @@ impl RenderBackend for SwitchRenderBackend {
             }
         };
         self.filter_tex_pool.release(temp_src);
-        let temp_dst_id = temp_dst.texture;
-        // Retire (don't free) so the SyncHandle's texture stays valid until
-        // submit_frame recycles it next frame.
+        // temp_dst held only the filtered sub-rect; its content is already blitted
+        // into the dest backing above (for the display path). Recycle it.
         self.offscreen_temp_retired.push(temp_dst);
         if !ok {
             return None;
         }
-        // Hand Ruffle a resolvable handle over the PREMULT temp, so a later CPU read
-        // of this BitmapData (getPixels / a chained applyFilter) syncs the filtered
-        // pixels back — returning a NoOp handle here panicked resolve_sync_handle.
-        Some(Box::new(BitmapDataSyncHandle {
-            texture: temp_dst_id,
-            x: 0,
-            y: 0,
-            w: fw,
-            h: fh,
-        }))
+        // Ruffle marks the WHOLE destination BitmapData dirty after applyFilter
+        // (operations.rs: `region = for_whole_size(write.width, write.height)`), then
+        // `copy_pixels_to_bitmapdata` indexes our readback buffer across that whole-dest
+        // region. A handle sized to only the filtered sub-rect (fw×fh) overruns the
+        // buffer as soon as the dest is larger than the filter output → `index out of
+        // bounds` panic (GrindCraft: a DropShadow on a small element inside a bigger
+        // canvas). So resolve the WHOLE dest — the dest backing already holds the
+        // composited result (old pixels + the filtered sub-rect blitted in above).
+        let (dest_w, dest_h) = if let Some(s) = as_standalone_bitmap(&destination) {
+            (s.0.width, s.0.height)
+        } else if let Some(b) = as_switch_bitmap(&destination) {
+            (b.width, b.height)
+        } else {
+            // Unresolvable dest (e.g. a budget-dropped surface): skip the sync rather
+            // than hand back a mismatched buffer. Ruffle keeps its CPU pixels.
+            return None;
+        };
+        if dst_atlas {
+            // The atlas stores STRAIGHT alpha at an offset; Ruffle's CPU pixels are
+            // PREMULTIPLIED. Convert the whole dest region into a premult temp and
+            // resolve that.
+            let whole = self.acquire_offscreen_temp(dest_w, dest_h)?;
+            let seeded = self.blit_premult(
+                dst_tex, dst_tw, dst_th, (dst_bx, dst_by), (dest_w, dest_h),
+                whole.texture, (0, 0), dest_w, dest_h,
+            );
+            let whole_id = whole.texture;
+            self.offscreen_temp_retired.push(whole);
+            if !seeded {
+                return None;
+            }
+            Some(Box::new(BitmapDataSyncHandle { texture: whole_id, x: 0, y: 0, w: dest_w, h: dest_h }))
+        } else {
+            // Standalone dest: its own texture IS the whole dest, premultiplied and
+            // persistent — resolve it directly (same rationale as render_offscreen's
+            // standalone handle: it survives a deferred read, unlike a pooled temp).
+            Some(Box::new(BitmapDataSyncHandle { texture: dst_tex, x: 0, y: 0, w: dest_w, h: dest_h }))
+        }
     }
 
     fn is_filter_supported(&self, filter: &Filter) -> bool {
