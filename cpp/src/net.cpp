@@ -333,7 +333,15 @@ extern "C" int https_download_start(const char* url, const char* out_path) {
     curl_easy_setopt(c, CURLOPT_WRITEDATA, f);
     curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, xfer_progress);
     curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
-    curl_easy_setopt(c, CURLOPT_TIMEOUT, 600L);
+    // NO hard total-time cap here. A multi-GB GameZIP (e.g. Super Smash Flash 2
+    // ~3.4 GB) over the Switch's WiFi legitimately takes far longer than the old
+    // 600 s limit, which aborted a perfectly-progressing transfer mid-way with a
+    // curl error (the infamous "wait ~10 min, then error -2"). Instead abort only
+    // on a genuine STALL: throughput under 4 KB/s sustained for 60 s. A healthy
+    // slow download keeps going for as long as it needs; only a dead connection
+    // (or a server that stops sending) trips it.
+    curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 4096L);
+    curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 60L);
     curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 10L);
     // 256 KB receive buffer (default is 16 KB): lets each perform() pull a lot
     // more off the socket, which matters because we only pump per render frame.

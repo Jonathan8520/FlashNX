@@ -4942,21 +4942,10 @@ fn extract_gamezip_main(
     swf_path: &str,
     launch_command: &str,
 ) -> Option<(std::string::String, std::vec::Vec<u8>)> {
-    // 512 MB cap: big multi-file games (e.g. Super Brawl 2 ~108 MB, 136 files)
-    // blew past the old 64 MB limit; bumped 256 -> 512 MB so large legitimate SWF
-    // GameZIPs extract instead of silently doing nothing ("progress bar fills,
-    // nothing happens"). `read_file_bounded` now pre-sizes the buffer so this
-    // doesn't spike to ~2x during the read. The zip is only held in RAM during
-    // extraction (freed before the game loads); import runs on a fresh heap.
-    // HTML+FlashVars giants (Dragon City, 344 MB) are refused BEFORE the download
-    // (launch_command_is_swf), so this cap now only gates runnable .swf games.
-    let zip = match crate::sources::gamezip::read_file_bounded(zip_path, 512 * 1024 * 1024) {
-        Some(z) => z,
-        None => {
-            log("library: gamezip read failed or exceeds 512 MB cap — not extracted\n");
-            return None;
-        }
-    };
+    // No whole-archive read: `extract_gamezip_tree` now STREAMS the ZIP straight
+    // off the SD card, one entry at a time (see its docs), so a multi-GB GameZIP
+    // (Super Smash Flash 2 ~3.4 GB) extracts within the ~3.2 GB heap instead of
+    // being refused by the old 512 MB in-RAM cap.
     // Mirror the GameZIP's full `content/<host>/<path>` tree into the game's
     // sidecar dir, so the SidecarNavigator can serve every bundled asset (alt SWF
     // versions, ad-network stubs, xml/png) by its original URL at play time. The
@@ -4967,7 +4956,16 @@ fn extract_gamezip_main(
         .into_owned();
     let _ = std::fs::create_dir_all(&files_dir);
     let (swf, entry_name) =
-        crate::sources::gamezip::extract_gamezip_tree(&zip, &files_dir, launch_command)?;
+        match crate::sources::gamezip::extract_gamezip_tree(zip_path, &files_dir, launch_command) {
+            Some(v) => v,
+            None => {
+                // No SWF produced (empty/corrupt zip, or every entry over the
+                // per-entry cap). Wipe the partial tree so a failed multi-GB
+                // extraction doesn't strand gigabytes on the SD card.
+                let _ = std::fs::remove_dir_all(&files_dir);
+                return None;
+            }
+        };
     if std::fs::write(swf_path, &swf).is_err() {
         log("library: gamezip .swf write failed\n");
         return None;

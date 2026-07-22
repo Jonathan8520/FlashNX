@@ -15,7 +15,7 @@
 
 use crate::net;
 use crate::sources::flashpoint;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 
 const SEARCH_BASE: &str = "https://db-api.unstable.life/search";
 const GET_BASE: &str = "https://db-api.unstable.life/get";
@@ -172,6 +172,28 @@ fn inflate(comp: &[u8], expected: usize) -> Option<std::vec::Vec<u8>> {
     Some(out)
 }
 
+/// Fill `buf` completely from the file's current cursor; false on short read /
+/// error. Mirrors the manual read loop `read_file_bounded` uses (trusted on
+/// Horizon, where a single `read`/`read_exact` can return a short count).
+fn read_full(f: &mut std::fs::File, buf: &mut [u8]) -> bool {
+    let mut done = 0usize;
+    while done < buf.len() {
+        match f.read(&mut buf[done..]) {
+            Ok(0) => return false,
+            Ok(n) => done += n,
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
+/// Seek to absolute `off`, then fill `buf`. Used to walk a GameZIP's local file
+/// headers straight off the SD card so the whole (multi-GB) archive never has to
+/// be held in RAM (only the current entry's compressed bytes are).
+fn read_at(f: &mut std::fs::File, off: u64, buf: &mut [u8]) -> bool {
+    f.seek(SeekFrom::Start(off)).is_ok() && read_full(f, buf)
+}
+
 /// Strip one pair of surrounding quotes from a Flashpoint `launchCommand`. The
 /// db wraps commands whose URL contains a space in double quotes (e.g.
 /// `"http://i.4cdn.org/f/I'm Dead.swf"`); left in, the trailing `"` sticks to the
@@ -301,35 +323,43 @@ fn html_entry_swf(html: &[u8]) -> Option<std::string::String> {
 /// the resolved `content/<host>/<path>/<file>.swf` entry name to launch. Returns
 /// None when there's no matching wrapper or it embeds no local `.swf` (e.g. a
 /// pure-HTML5 game) — the caller then falls back to the first `.swf` in the zip.
-fn resolve_html_launch_entry(zip: &[u8], html_entry: &str) -> Option<std::string::String> {
+fn resolve_html_launch_entry(
+    f: &mut std::fs::File,
+    file_len: u64,
+    html_entry: &str,
+) -> Option<std::string::String> {
     // Directory of the wrapper (keeps its trailing slash), for resolving the
     // embedded (relative) SWF reference against.
     let dir = html_entry.rfind('/').map(|k| &html_entry[..=k]).unwrap_or("");
     let dir_lower = dir.to_ascii_lowercase();
-    let mut i = 0usize;
-    while i + 30 <= zip.len() && &zip[i..i + 4] == b"PK\x03\x04" {
-        let flags = u16::from_le_bytes([zip[i + 6], zip[i + 7]]);
-        let method = u16::from_le_bytes([zip[i + 8], zip[i + 9]]);
-        let csize =
-            u32::from_le_bytes([zip[i + 18], zip[i + 19], zip[i + 20], zip[i + 21]]) as usize;
-        let usize_ =
-            u32::from_le_bytes([zip[i + 22], zip[i + 23], zip[i + 24], zip[i + 25]]) as usize;
-        let nlen = u16::from_le_bytes([zip[i + 26], zip[i + 27]]) as usize;
-        let elen = u16::from_le_bytes([zip[i + 28], zip[i + 29]]) as usize;
-        if flags & 0x0008 != 0 {
-            break; // data descriptor: sizes not in the local header
-        }
-        let name_start = i + 30;
-        let name_end = name_start + nlen;
-        if name_end > zip.len() {
+    let mut header = [0u8; 30];
+    let mut name_buf: std::vec::Vec<u8> = std::vec::Vec::new();
+    let mut comp: std::vec::Vec<u8> = std::vec::Vec::new();
+    let mut off: u64 = 0;
+    while off + 30 <= file_len {
+        if !read_at(f, off, &mut header) || &header[0..4] != b"PK\x03\x04" {
             break;
         }
-        let name = std::string::String::from_utf8_lossy(&zip[name_start..name_end]).into_owned();
-        let data_start = name_end + elen;
-        let data_end = data_start + csize;
-        if data_end > zip.len() {
+        let flags = u16::from_le_bytes([header[6], header[7]]);
+        let method = u16::from_le_bytes([header[8], header[9]]);
+        let csize = u32::from_le_bytes([header[18], header[19], header[20], header[21]]);
+        let usize_ = u32::from_le_bytes([header[22], header[23], header[24], header[25]]);
+        let nlen = u16::from_le_bytes([header[26], header[27]]) as u64;
+        let elen = u16::from_le_bytes([header[28], header[29]]) as u64;
+        if flags & 0x0008 != 0 || csize == 0xFFFF_FFFF || usize_ == 0xFFFF_FFFF {
+            break; // data descriptor / ZIP64: sizes not usable from the local header
+        }
+        let name_off = off + 30;
+        let data_off = name_off + nlen + elen;
+        let next_off = data_off + csize as u64;
+        if next_off > file_len {
             break;
         }
+        name_buf.resize(nlen as usize, 0);
+        if !read_at(f, name_off, &mut name_buf) {
+            break;
+        }
+        let name = std::string::String::from_utf8_lossy(&name_buf).into_owned();
         // Match the wrapper by its exact (decoded) name, or any `index.htm[l]` in
         // the launch directory (Flashpoint stores both `index.html` and the
         // `index.html@<params>` launch entry — same bytes).
@@ -337,12 +367,17 @@ fn resolve_html_launch_entry(zip: &[u8], html_entry: &str) -> Option<std::string
         let dname_lower = dname.to_ascii_lowercase();
         let is_wrapper = dname.eq_ignore_ascii_case(html_entry)
             || dname_lower.starts_with(&std::format!("{}index.htm", dir_lower));
-        if is_wrapper {
-            let comp = &zip[data_start..data_end];
-            let bytes = match method {
-                0 => Some(comp.to_vec()),
-                8 => inflate(comp, usize_),
-                _ => None,
+        // Wrappers are tiny HTML; cap the read so a mislabelled giant can't spike RAM.
+        if is_wrapper && csize <= 32 * 1024 * 1024 {
+            comp.resize(csize as usize, 0);
+            let bytes = if read_at(f, data_off, &mut comp) {
+                match method {
+                    0 => Some(comp.clone()),
+                    8 => inflate(&comp, usize_ as usize),
+                    _ => None,
+                }
+            } else {
+                None
             };
             if let Some(bytes) = bytes {
                 if let Some(swf_ref) = html_entry_swf(&bytes) {
@@ -351,7 +386,7 @@ fn resolve_html_launch_entry(zip: &[u8], html_entry: &str) -> Option<std::string
                 }
             }
         }
-        i = data_end;
+        off = next_off;
     }
     None
 }
@@ -476,10 +511,18 @@ fn write_tree_file(files_dir: &str, rel: &str, bytes: &[u8]) -> bool {
 /// Flashpoint GameZIPs don't use them (verified) and their local-header sizes
 /// would be unreliable.
 pub fn extract_gamezip_tree(
-    zip: &[u8],
+    zip_path: &str,
     files_dir: &str,
     launch_command: &str,
 ) -> Option<(std::vec::Vec<u8>, std::string::String)> {
+    // STREAMED extraction: walk the GameZIP's local file headers straight off the
+    // SD card, holding only ONE entry's bytes in RAM at a time. The whole archive
+    // is never read into memory, so a multi-GB GameZIP (e.g. Super Smash Flash 2
+    // ~3.4 GB) extracts within the Switch's ~3.2 GB heap. (The old path read the
+    // entire zip into a Vec, capped at 512 MB — anything bigger silently failed.)
+    let mut f = std::fs::File::open(zip_path).ok()?;
+    let file_len = f.seek(SeekFrom::End(0)).ok()?;
+
     // Decode the launch entry up front so it matches the zip's literal (decoded)
     // entry names; the comparison below decodes each entry name too (robust to a
     // zip that stores encoded names).
@@ -489,13 +532,19 @@ pub fn extract_gamezip_tree(
     // launch the game (e.g. Agent P Strikes Back) instead of `loader.swf` / the
     // first `.swf`. Falls back to the raw entry (then first `.swf`) if unresolved.
     let launch_entry = if !launch_command_is_swf(launch_command) {
-        match launch_entry.as_deref().and_then(|le| resolve_html_launch_entry(zip, le)) {
-            Some(resolved) => Some(resolved),
-            None => launch_entry,
-        }
+        launch_entry
+            .as_deref()
+            .and_then(|le| resolve_html_launch_entry(&mut f, file_len, le))
+            .or(launch_entry)
     } else {
         launch_entry
     };
+
+    // Cap a single entry's buffers so one pathological record can't OOM the heap.
+    // Peak RAM is ~the largest single entry (compressed + inflated), not the whole
+    // archive. Matches the large-SWF ceiling.
+    const PER_ENTRY_CAP: u32 = 384 * 1024 * 1024;
+
     let mut first_swf: Option<(std::vec::Vec<u8>, std::string::String)> = None;
     let mut launch_swf: Option<(std::vec::Vec<u8>, std::string::String)> = None;
 
@@ -503,39 +552,61 @@ pub fn extract_gamezip_tree(
     let mut written = 0usize;
     let mut failed = 0usize;
     let mut inflate_fail = 0usize;
-    let mut i = 0usize;
-    while i + 30 <= zip.len() && &zip[i..i + 4] == b"PK\x03\x04" {
-        let flags = u16::from_le_bytes([zip[i + 6], zip[i + 7]]);
-        let method = u16::from_le_bytes([zip[i + 8], zip[i + 9]]);
-        let csize =
-            u32::from_le_bytes([zip[i + 18], zip[i + 19], zip[i + 20], zip[i + 21]]) as usize;
-        let usize_ =
-            u32::from_le_bytes([zip[i + 22], zip[i + 23], zip[i + 24], zip[i + 25]]) as usize;
-        let nlen = u16::from_le_bytes([zip[i + 26], zip[i + 27]]) as usize;
-        let elen = u16::from_le_bytes([zip[i + 28], zip[i + 29]]) as usize;
+
+    let mut header = [0u8; 30];
+    let mut name_buf: std::vec::Vec<u8> = std::vec::Vec::new();
+    let mut comp: std::vec::Vec<u8> = std::vec::Vec::new(); // reused; peak = largest entry
+    let mut off: u64 = 0;
+
+    while off + 30 <= file_len {
+        if !read_at(&mut f, off, &mut header) || &header[0..4] != b"PK\x03\x04" {
+            break;
+        }
+        let flags = u16::from_le_bytes([header[6], header[7]]);
+        let method = u16::from_le_bytes([header[8], header[9]]);
+        let csize = u32::from_le_bytes([header[18], header[19], header[20], header[21]]);
+        let usize_ = u32::from_le_bytes([header[22], header[23], header[24], header[25]]);
+        let nlen = u16::from_le_bytes([header[26], header[27]]) as u64;
+        let elen = u16::from_le_bytes([header[28], header[29]]) as u64;
         if flags & 0x0008 != 0 {
             break; // data descriptor: sizes not in the local header
         }
-        let name_start = i + 30;
-        let name_end = name_start + nlen;
-        if name_end > zip.len() {
+        if csize == 0xFFFF_FFFF || usize_ == 0xFFFF_FFFF {
+            net::log("extract: ZIP64 entry (0xFFFFFFFF size) — unsupported, stopping\n");
             break;
         }
-        let name = std::string::String::from_utf8_lossy(&zip[name_start..name_end]).into_owned();
-        let data_start = name_end + elen;
-        let data_end = data_start + csize;
-        if data_end > zip.len() {
+        let name_off = off + 30;
+        let data_off = name_off + nlen + elen;
+        let next_off = data_off + csize as u64;
+        if next_off > file_len {
             break;
         }
+        name_buf.resize(nlen as usize, 0);
+        if !read_at(&mut f, name_off, &mut name_buf) {
+            break;
+        }
+        let name = std::string::String::from_utf8_lossy(&name_buf).into_owned();
         // Only files under `content/` (skip content.json and directory entries).
         if let Some(rel) = name.strip_prefix("content/").filter(|r| !r.is_empty() && !r.ends_with('/'))
         {
             entries += 1;
-            let comp = &zip[data_start..data_end];
-            let bytes = match method {
-                0 => Some(comp.to_vec()),
-                8 => inflate(comp, usize_),
-                _ => None,
+            if csize > PER_ENTRY_CAP || usize_ > PER_ENTRY_CAP {
+                net::log(&std::format!(
+                    "extract: entry {} over per-entry cap ({}->{} bytes), skipped\n",
+                    name, csize, usize_,
+                ));
+                off = next_off;
+                continue;
+            }
+            comp.resize(csize as usize, 0);
+            let bytes = if read_at(&mut f, data_off, &mut comp) {
+                match method {
+                    0 => Some(comp.clone()),
+                    8 => inflate(&comp, usize_ as usize),
+                    _ => None,
+                }
+            } else {
+                None
             };
             if let Some(bytes) = bytes {
                 if write_tree_file(files_dir, rel, &bytes) {
@@ -565,10 +636,10 @@ pub fn extract_gamezip_tree(
                 }
             } else {
                 inflate_fail += 1;
-                net::log(&std::format!("extract: inflate/method failed for {} (method {})\n", name, method));
+                net::log(&std::format!("extract: inflate/method/read failed for {} (method {})\n", name, method));
             }
         }
-        i = data_end;
+        off = next_off;
     }
     net::log(&std::format!(
         "extract: {} entries, {} written, {} write-failed, {} inflate-failed\n",
