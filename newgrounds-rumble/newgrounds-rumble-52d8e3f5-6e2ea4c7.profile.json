@@ -7,7 +7,7 @@
     "swf_hash": "52d8e3f5e0b8327c"
   },
   "author": "Jonathan8520",
-  "verified": false,
+  "verified": true,
   "bindings": {
     "A": "S",
     "B": "D",
@@ -28,20 +28,20 @@
     "ZR": "Left click"
   },
   "bindings_p2": {
-    "A": "Num1",
-    "B": "Num2",
+    "A": "G",
+    "B": "H",
     "Down": "S",
-    "L": "Num6",
+    "L": "F",
     "Left": "A",
-    "R": "Num5",
+    "R": "H",
     "Right": "D",
     "StickLDown": "S",
     "StickLLeft": "A",
     "StickLRight": "D",
     "StickLUp": "W",
     "Up": "W",
-    "X": "Num3",
-    "Y": "Num4"
+    "X": "W",
+    "Y": "F"
   },
   "combo_layers": {},
   "combo_layers_p2": {},
