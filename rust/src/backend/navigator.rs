@@ -218,6 +218,14 @@ fn is_dead_ad_host(host: &str) -> bool {
         .any(|d| host == *d || host.ends_with(&std::format!(".{d}")))
 }
 
+// Hosts of the legacy NewgroundsAPI v2 gateway we answer with a synthetic
+// success instead of erroring, so its games leave their preloader (Ruffle #896).
+fn is_newgrounds_gateway_host(host: &str) -> bool {
+    const NG: &[&str] = &["ngads.com", "newgrounds.com", "ungrounded.net"];
+    NG.iter()
+        .any(|d| host == *d || host.ends_with(&std::format!(".{d}")))
+}
+
 extern "C" {
     // C++/libnx sidecar reads (cpp/src/swf_picker.cpp). Rust's std::fs::read
     // returns ENOENT for some files that ARE on disk on Horizon (verified
@@ -271,6 +279,41 @@ impl NavigatorBackend for SidecarNavigator {
                 )));
             }
         };
+        // NewgroundsAPI v2 gateway (Newgrounds Rumble & co., Ruffle #896): the
+        // gateway host is dead offline. Returning a FetchError makes the AS2
+        // `connectMovie` fire its failure path ("Could not contact the API
+        // Gateway") and, crucially, never calls `reportAssetLoaded()`, so the
+        // API's `getPercentLoaded()` caps at 80% (bytes are 80%, the connect
+        // preload item is the other 20%) and the game's custom preloader keeps
+        // its "WAIT" button forever. Answer 200 with the minimal JSON the API's
+        // `onData` expects (`com.Newgrounds.JSON.decode`, routed by `command_id`
+        // which `getCommandName` returns verbatim): `success` truthy takes the
+        // `doEvent` path, and the connectMovie case only reads OPTIONAL fields
+        // before `reportAssetLoaded()` fires -> preload hits 100% -> "PLAY".
+        // Echo the requested command from the POST form so any later command
+        // (getMedals, postScore, ...) routes to its own success case too. We
+        // still never touch the network. Validated hw with Newgrounds Rumble.
+        let is_ng_gateway = resolved.host_str().is_some_and(is_newgrounds_gateway_host)
+            || resolved.path().ends_with("gateway_v2.php");
+        if is_ng_gateway {
+            let cmd = request
+                .body()
+                .as_ref()
+                .and_then(|(b, _)| {
+                    String::from_utf8_lossy(b)
+                        .split('&')
+                        .find_map(|kv| kv.strip_prefix("command_id=").map(str::to_string))
+                })
+                .unwrap_or_else(|| "connectMovie".to_string());
+            let body =
+                std::format!("{{\"success\":true,\"command_id\":\"{cmd}\"}}").into_bytes();
+            tracing::info!("sidecar: NewgroundsAPI gateway stubbed (cmd={cmd}) for {resolved}");
+            let resp: Box<dyn SuccessResponse> = Box::new(SidecarResponse {
+                url: resolved.to_string(),
+                bytes: Some(body),
+            });
+            return async_return(Ok(resp));
+        }
         // Defunct ad/analytics hosts: mimic an unreachable server (hang) rather
         // than erroring. Preloaders that gate on MochiAd & co. fail-open via
         // their own timeout when the ad server is unreachable; our usual
