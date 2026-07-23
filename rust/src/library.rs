@@ -864,7 +864,9 @@ pub fn add_path(path: &str, mtime: u64) -> bool {
 /// games have no host-pathed tree copy, so the computed path is absent and the
 /// delete is a harmless no-op.
 fn cleanup_duplicate_entries() {
-    let marker = primary_user_path(".entry_dedup1.done");
+    // v2 marker: re-runs once on installs cleaned by v1 to also prune the empty
+    // dir chains the first pass left behind.
+    let marker = primary_user_path(".entry_dedup2.done");
     if crate::sources::gamezip::read_file_bounded(&marker, 4).is_some() {
         return; // already cleaned on a previous boot
     }
@@ -894,15 +896,28 @@ fn cleanup_duplicate_entries() {
         }
         // `<game>.files/<host>/<path>/<entry>.swf` — the tree copy of the entry
         // SWF (only zipped GameZIPs have a host-pathed tree here; others no-op).
-        let files_dir = crate::sidecar_dir_for(Some(swf_path));
-        let tree_entry = std::format!(
-            "{}/{}",
-            files_dir.to_string_lossy().trim_end_matches('/'),
-            rest
-        );
+        let files_root = crate::sidecar_dir_for(Some(swf_path))
+            .to_string_lossy()
+            .trim_end_matches('/')
+            .to_string();
+        let tree_entry = std::format!("{}/{}", files_root, rest);
         if std::fs::remove_file(&tree_entry).is_ok() {
             removed += 1;
             log(&std::format!("dedup: removed redundant tree entry {}\n", tree_entry));
+        }
+        // Prune the now-empty dir chain up to (and including) `<game>.files/`.
+        // `remove_dir` (rmdir) only succeeds on an EMPTY dir, so a multi-file
+        // game's populated companion dirs are left untouched. Runs whether we
+        // removed the entry just now or a previous (v1) pass did.
+        let mut cur = std::path::Path::new(&tree_entry).parent().map(|p| p.to_path_buf());
+        while let Some(d) = cur {
+            if !d.to_string_lossy().starts_with(&files_root) {
+                break; // climbed above <game>.files/
+            }
+            if std::fs::remove_dir(&d).is_err() {
+                break; // non-empty (companions remain) or already gone
+            }
+            cur = d.parent().map(|p| p.to_path_buf());
         }
     }
     log(&std::format!(
@@ -5016,7 +5031,9 @@ fn extract_gamezip_main(
     let files_dir = crate::sidecar_dir_for(Some(swf_path))
         .to_string_lossy()
         .into_owned();
-    let _ = std::fs::create_dir_all(&files_dir);
+    // Don't pre-create `<game>.files/`: `write_tree_file` creates parent dirs on
+    // demand, so a single-SWF game (whose entry is now skipped from the tree)
+    // leaves NO empty `.files/` folder behind.
     let (swf, entry_name) =
         match crate::sources::gamezip::extract_gamezip_tree(zip_path, &files_dir, launch_command) {
             Some(v) => v,
