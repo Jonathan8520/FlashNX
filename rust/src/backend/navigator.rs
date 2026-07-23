@@ -192,6 +192,17 @@ impl SidecarNavigator {
         path
     }
 
+    /// True when `resolved` points at the movie's OWN entry SWF (its base URL).
+    /// That file is stored flat as the library `<game>.swf` (not in the tree —
+    /// see `gamezip::extract_gamezip_tree`), so `fetch`'s layer 0 serves it from
+    /// there if the running movie ever re-requests its own URL (e.g. a restart
+    /// that reloads the root SWF). Compared by host + path, ignoring the query.
+    fn is_movie_entry(&self, resolved: &Url) -> bool {
+        Url::parse(&self.base_url).ok().is_some_and(|b| {
+            b.host_str() == resolved.host_str() && b.path() == resolved.path()
+        })
+    }
+
     fn push_segments(&self, path: &mut PathBuf, url: &Url) {
         if let Some(segs) = url.path_segments() {
             for seg in segs {
@@ -336,10 +347,18 @@ impl NavigatorBackend for SidecarNavigator {
         //      its original launchCommand base URL, so a relative load like
         //      "top.swf" resolves WITH the host path and layers 1-2 miss the
         //      flat companion. (2026-06-14 regression fix.)
+        // Layer 0: the movie's own entry SWF is NOT kept in the tree (it's the
+        // flat library `<game>.swf`). Serve it from there if re-requested by URL.
+        let entry_flat = self
+            .is_movie_entry(&resolved)
+            .then(|| self.sidecar_dir.with_extension("swf"));
         let host_path = self.local_path(&resolved);
         let flat = self.flat_path(&resolved);
         let leaf = self.leaf_path(&resolved);
-        let found = read_sidecar_file(&host_path).map(|b| (b, &host_path))
+        let found = entry_flat
+            .as_ref()
+            .and_then(|p| read_sidecar_file(p).map(|b| (b, p)))
+            .or_else(|| read_sidecar_file(&host_path).map(|b| (b, &host_path)))
             .or_else(|| read_sidecar_file(&flat).map(|b| (b, &flat)))
             .or_else(|| read_sidecar_file(&leaf).map(|b| (b, &leaf)));
         let (bytes, from) = match found {

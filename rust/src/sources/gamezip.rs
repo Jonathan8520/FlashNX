@@ -609,28 +609,33 @@ pub fn extract_gamezip_tree(
                 None
             };
             if let Some(bytes) = bytes {
-                if write_tree_file(files_dir, rel, &bytes) {
-                    written += 1;
-                    // Flush to SD periodically: a single commit after a big
-                    // multi-file extraction (Super Brawl 2: 135 files / 109 MB)
-                    // overflows the fsdev journal and silently loses some writes
-                    // (the file reports written but later fs::read gives ENOENT).
-                    if written % 16 == 0 {
-                        crate::sd::commit();
-                    }
-                } else {
-                    failed += 1;
-                }
-                if name.to_ascii_lowercase().ends_with(".swf") {
-                    let is_launch = launch_entry
+                let is_swf = name.to_ascii_lowercase().ends_with(".swf");
+                let is_launch = is_swf
+                    && launch_entry
                         .as_deref()
                         .is_some_and(|le| percent_decode(&name).eq_ignore_ascii_case(le));
-                    // `name` is still borrowed by `rel` here, so clone it (the
-                    // entry name is short) rather than moving.
-                    if is_launch {
-                        launch_swf = Some((bytes, name.clone()));
-                        first_swf = None; // free the fallback's (large) buffer
-                    } else if first_swf.is_none() && launch_swf.is_none() {
+                // Skip the launch entry's tree copy: it is written flat as the
+                // library `<game>.swf`, and the SidecarNavigator serves the entry
+                // URL from that flat file (see its layer-0 fallback). Writing it
+                // here too would store the whole game twice — up to ~30 MB for a
+                // single-SWF GameZIP (e.g. Infiltrating the Airship).
+                if is_launch {
+                    launch_swf = Some((bytes, name.clone()));
+                    first_swf = None; // free the fallback's (large) buffer
+                } else {
+                    if write_tree_file(files_dir, rel, &bytes) {
+                        written += 1;
+                        // Flush to SD periodically: a single commit after a big
+                        // multi-file extraction (Super Brawl 2: 135 files / 109 MB)
+                        // overflows the fsdev journal and silently loses some writes
+                        // (the file reports written but later fs::read gives ENOENT).
+                        if written % 16 == 0 {
+                            crate::sd::commit();
+                        }
+                    } else {
+                        failed += 1;
+                    }
+                    if is_swf && first_swf.is_none() && launch_swf.is_none() {
                         first_swf = Some((bytes, name.clone()));
                     }
                 }

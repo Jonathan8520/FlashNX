@@ -854,7 +854,69 @@ pub fn add_path(path: &str, mtime: u64) -> bool {
 
 /// Transition from Inactive → List (or Empty if `entries` is empty). Called
 /// after C++ has finished scanning and the GL renderer is up.
+/// One-time cleanup (guarded by a marker file): remove the redundant copy of
+/// each game's ENTRY SWF from its `.files/` tree. The entry SWF is stored flat
+/// as `<game>.swf` and the SidecarNavigator serves the entry URL from that flat
+/// file, so the identical tree copy is dead weight — up to ~30 MB for a
+/// single-SWF GameZIP (e.g. Infiltrating the Airship). New downloads never write
+/// it (see `gamezip::extract_gamezip_tree`); this reclaims it on games already
+/// on the SD. `<game>.swf.base` gives the entry URL; non-zipped / single-file
+/// games have no host-pathed tree copy, so the computed path is absent and the
+/// delete is a harmless no-op.
+fn cleanup_duplicate_entries() {
+    let marker = primary_user_path(".entry_dedup1.done");
+    if crate::sources::gamezip::read_file_bounded(&marker, 4).is_some() {
+        return; // already cleaned on a previous boot
+    }
+    // Snapshot game paths under the lock; do the fs work without holding it.
+    let paths: std::vec::Vec<std::string::String> = match LIBRARY.lock() {
+        Ok(g) => g.entries.iter().map(|e| e.path.clone()).collect(),
+        Err(_) => return,
+    };
+    let mut removed = 0usize;
+    for swf_path in &paths {
+        let base_path = std::format!("{}.base", swf_path);
+        let Some(url) = crate::sources::gamezip::read_file_bounded(&base_path, 4096)
+            .and_then(|b| std::string::String::from_utf8(b).ok())
+        else {
+            continue; // no `.base` → single-file / non-Flashpoint game, nothing to dedup
+        };
+        let url = url.trim();
+        let Some(rest) = url
+            .strip_prefix("http://")
+            .or_else(|| url.strip_prefix("https://"))
+        else {
+            continue;
+        };
+        let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+        if rest.is_empty() || rest.ends_with('/') {
+            continue;
+        }
+        // `<game>.files/<host>/<path>/<entry>.swf` — the tree copy of the entry
+        // SWF (only zipped GameZIPs have a host-pathed tree here; others no-op).
+        let files_dir = crate::sidecar_dir_for(Some(swf_path));
+        let tree_entry = std::format!(
+            "{}/{}",
+            files_dir.to_string_lossy().trim_end_matches('/'),
+            rest
+        );
+        if std::fs::remove_file(&tree_entry).is_ok() {
+            removed += 1;
+            log(&std::format!("dedup: removed redundant tree entry {}\n", tree_entry));
+        }
+    }
+    log(&std::format!(
+        "dedup: cleaned {} redundant entry-SWF tree copies\n",
+        removed
+    ));
+    let _ = std::fs::write(&marker, b"1");
+    crate::sd::commit();
+}
+
 pub fn open() {
+    // One-time (marker-guarded): reclaim the redundant entry-SWF tree copies on
+    // games already on the SD. New downloads never write them.
+    cleanup_duplicate_entries();
     // Reload URL history from SD on each open so changes from a previous
     // .nro boot are visible. Cheap (file is <2 KB typical).
     load_history_from_sd();
