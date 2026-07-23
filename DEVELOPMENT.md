@@ -285,6 +285,8 @@ For playing common AS1/AS2 SWFs, it's functionally near-complete. Honest invento
 
 ### rust-src patches to re-apply after each `rustup update`
 
+> **Shortcut**: `bash scripts/patch-rust-src.sh` re-applies both patches below (idempotent, safe to re-run) and runs `cargo clean` if anything changed. Run it after any `rustup update` / toolchain reinstall, then `bash scripts/build.sh`.
+
 **Patch 1** — `…\nightly-x86_64-pc-windows-gnu\lib\rustlib\src\rust\library\std\build.rs`: add after the line `|| (target_vendor == "nintendo" && target_env == "newlib")`:
 
 ```rust
