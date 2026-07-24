@@ -8592,6 +8592,17 @@ impl SwitchRenderBackend {
         self.draw_loading_panel(title, now);
     }
 
+    /// A bordered, centered "Optimisation" modal (shared modal chrome) composited
+    /// OVER the live gallery during the one-time first-boot housekeeping — same
+    /// look as the other modals (light dim + visible border), not a full-screen
+    /// overlay. The caller draws the gallery first; this sits on top with a
+    /// spinner under the title.
+    pub fn draw_optimizing_modal(&mut self, title: &str, now: u64) {
+        self.clear_ui_transform();
+        let frame = self.draw_modal_frame(MODAL_W, 0, Some(200.0), false, title, None, None);
+        self.draw_spinner(frame.x + frame.w * 0.5, frame.y + 130.0, 26.0, now);
+    }
+
     /// Confirm removing a URL from the DISTANT history (X on DistantIdle).
     /// Shows the URL + a confirmation prompt; reuses the red "danger" theme.
     pub fn draw_library_history_delete_confirm(&mut self, url: &str) {

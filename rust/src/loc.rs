@@ -362,9 +362,13 @@ pub struct Strings {
     pub set_suggest: &'static str,
     pub kbd_suggest_header: &'static str,
     pub kbd_suggest_guide: &'static str,
+    // First-boot size backfill panel title (v1.5.x): shown while the one-time
+    // footprint recompute runs, so that migration isn't a black screen.
+    pub optimizing: &'static str,
 }
 
 const EN: Strings = Strings {
+    optimizing: "OPTIMIZING",
     menu_resume: "RESUME",
     menu_keys: "CONTROLS",
     menu_restart: "RESTART",
@@ -535,6 +539,7 @@ const EN: Strings = Strings {
 };
 
 const FR: Strings = Strings {
+    optimizing: "OPTIMISATION",
     menu_resume: "REPRENDRE",
     menu_keys: "TOUCHES",
     menu_restart: "RED\u{00C9}MARRER",
@@ -705,6 +710,7 @@ const FR: Strings = Strings {
 };
 
 const ES: Strings = Strings {
+    optimizing: "OPTIMIZANDO",
     menu_resume: "REANUDAR",
     menu_keys: "CONTROLES",
     menu_restart: "REINICIAR",
@@ -877,6 +883,7 @@ const ES: Strings = Strings {
 // Russian — UPPERCASE Cyrillic (draw_text does not case-fold non-ASCII, and
 // only uppercase Cyrillic glyphs were added to the font).
 const RU: Strings = Strings {
+    optimizing: "OPTIMIZATSIYA",
     menu_resume: "ПРОДОЛЖИТЬ",
     menu_keys: "КЛАВИШИ",
     menu_restart: "ЗАНОВО",
@@ -1052,6 +1059,7 @@ const RU: Strings = Strings {
 // convention). The kbd_* strings go to the Switch software keyboard, which
 // renders full Unicode, so those keep natural mixed case + lowercase accents.
 const DE: Strings = Strings {
+    optimizing: "OPTIMIERUNG",
     menu_resume: "FORTSETZEN",
     menu_keys: "STEUERUNG",
     menu_restart: "NEUSTART",
@@ -1224,6 +1232,7 @@ const DE: Strings = Strings {
 // Italian — uppercase Latin. Accented uppercase vowels (À È É Ì Ò Ù) are
 // written directly to hit the font glyphs (draw_text does not fold accents).
 const IT: Strings = Strings {
+    optimizing: "OTTIMIZZAZIONE",
     menu_resume: "RIPRENDI",
     menu_keys: "COMANDI",
     menu_restart: "RIAVVIA",
@@ -1396,6 +1405,7 @@ const IT: Strings = Strings {
 // Portuguese (Brazil) — uppercase Latin. Accented uppercase letters
 // (Á Â Ã É Ê Í Ó Ô Õ Ú Ç) are written directly to hit the font glyphs.
 const PT: Strings = Strings {
+    optimizing: "OTIMIZANDO",
     menu_resume: "CONTINUAR",
     menu_keys: "CONTROLES",
     menu_restart: "REINICIAR",
@@ -1573,6 +1583,7 @@ const PT: Strings = Strings {
 // punctuation. The kbd_* strings go to the Switch software keyboard (full
 // Unicode), so they read as natural mixed Chinese + Latin.
 const ZH: Strings = Strings {
+    optimizing: "\u{4F18}\u{5316}\u{4E2D}",
     menu_resume: "继续",
     menu_keys: "按键",
     menu_restart: "重新开始",
@@ -1748,6 +1759,7 @@ const ZH: Strings = Strings {
 // The `kbd_*` guides go to the Switch software keyboard, which renders full
 // Turkish diacritics, so those keep proper lowercase spelling.
 const TR: Strings = Strings {
+    optimizing: "OPTIMIZE EDILIYOR",
     menu_resume: "DEVAM ET",
     menu_keys: "KONTROLLER",
     menu_restart: "YEN\u{0130}DEN BA\u{015E}LAT",

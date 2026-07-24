@@ -806,13 +806,85 @@ fn log(s: &str) {
 
 /// Called from C++ once per `.swf` found during the SD scan. Parses the
 /// header inline so the library list has full metadata to display.
+extern "C" {
+    // C++/libnx: flat file size, and recursive `<stem>.files/` tree size (0 if
+    // absent). Horizon-safe (opendir/readdir/stat). The tree walk is called ONLY
+    // at download time — never on the scan (per-scan it added ~10s for SSF2).
+    fn swf_picker_file_size(path: *const core::ffi::c_char) -> i64;
+    fn swf_picker_files_dir_size(swf_path: *const core::ffi::c_char) -> i64;
+}
+
+/// Read the cached real on-SD footprint (flat SWF + `<stem>.files/` tree) from
+/// `<swf_path>.filesize`, written once at download. Direct bounded read (one
+/// open, fails fast if absent) so the scan stays cheap. None -> caller keeps the
+/// header size (single-file games + multi-file games from before this feature).
+fn read_filesize_cache(swf_path: &str) -> Option<u64> {
+    let p = std::format!("{}.filesize", swf_path);
+    read_sd_text(&p, 64).ok()?.trim().parse::<u64>().ok().filter(|&n| n > 0)
+}
+
+/// Compute a game's real on-SD footprint (flat SWF disk size + companion tree)
+/// via C++/libnx and cache it in `<swf_path>.filesize`. Called once at the end
+/// of a download so the footer shows GBs, not a 2 MB loader. NOT on the scan.
+fn cache_game_footprint(swf_path: &str) {
+    let Ok(c) = std::ffi::CString::new(swf_path) else {
+        return;
+    };
+    let tree = unsafe { swf_picker_files_dir_size(c.as_ptr()) }.max(0) as u64;
+    // Only multi-file games get a cached footprint: a single-file game has no
+    // companion tree, so its SWF-header size (shown by default) is already right.
+    if tree == 0 {
+        return;
+    }
+    let flat = unsafe { swf_picker_file_size(c.as_ptr()) }.max(0) as u64;
+    let p = std::format!("{}.filesize", swf_path);
+    if std::fs::write(&p, (flat + tree).to_string().as_bytes()).is_ok() {
+        crate::sd::commit();
+    }
+}
+
+/// One-time migration (marker-guarded): compute + cache the real footprint of
+/// EVERY already-installed multi-file game, so their footer size is correct
+/// without a re-download. This walks the `.files/` trees ONCE (blocking, a few
+/// seconds — dominated by Super Smash Flash 2's 1474 files); afterwards the scan
+/// only reads the cached `<swf>.filesize`. New downloads are cached at download
+/// time, so they're skipped here (already have the sidecar).
+fn backfill_game_sizes() {
+    let marker = primary_user_path(".filesize_backfill1.done");
+    if crate::sources::gamezip::read_file_bounded(&marker, 4).is_some() {
+        return; // already backfilled on a previous boot
+    }
+    let paths: std::vec::Vec<std::string::String> = match LIBRARY.lock() {
+        Ok(g) => g.entries.iter().map(|e| e.path.clone()).collect(),
+        Err(_) => return,
+    };
+    let mut done = 0usize;
+    for swf_path in &paths {
+        if read_filesize_cache(swf_path).is_some() {
+            continue; // already cached (new download, or a prior partial run)
+        }
+        cache_game_footprint(swf_path); // walks + writes .filesize for multi-file games
+        if let Some(sz) = read_filesize_cache(swf_path) {
+            if let Ok(mut g) = LIBRARY.lock() {
+                if let Some(e) = g.entries.iter_mut().find(|e| e.path == *swf_path) {
+                    e.size_bytes = sz; // reflect it now, without waiting for a re-scan
+                }
+            }
+            done += 1;
+        }
+    }
+    log(&std::format!("filesize: backfilled {} multi-file game footprints\n", done));
+    let _ = std::fs::write(&marker, b"1");
+    crate::sd::commit();
+}
+
 pub fn add_path(path: &str, mtime: u64) -> bool {
     let basename = path
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or(path)
         .to_string();
-    let (size_bytes, swf_version, compression_label, is_as3) = match read_swf_header(path) {
+    let (header_size, swf_version, compression_label, is_as3) = match read_swf_header(path) {
         Some(h) => (h.size_bytes, h.version, h.compression_label, h.is_as3),
         None => {
             log(&std::format!(
@@ -822,6 +894,9 @@ pub fn add_path(path: &str, mtime: u64) -> bool {
             return false;
         }
     };
+    // Prefer the cached real footprint (multi-file games); fall back to the SWF
+    // header's declared size for single-file / pre-feature games.
+    let size_bytes = read_filesize_cache(path).unwrap_or(header_size);
     let color_chip = color_from_basename(&basename);
     // Honour a per-game display-name override from the .meta.json sidecar
     // (Phase 3.4.bis RENOMMER). Sidecar absent / unparseable / empty
@@ -929,9 +1004,11 @@ fn cleanup_duplicate_entries() {
 }
 
 pub fn open() {
-    // One-time (marker-guarded): reclaim the redundant entry-SWF tree copies on
-    // games already on the SD. New downloads never write them.
-    cleanup_duplicate_entries();
+    // The one-time first-boot housekeeping (dedup + size backfill) is NOT run
+    // here: it blocks a few seconds and open() runs before the first frame, so
+    // doing it inline would be a black screen. It's deferred to `render` behind
+    // the "Optimisation" loading panel instead (see `maybe_arm_startup_migrations`
+    // / `PendingNet::RunStartupMigrations`), which shows a frame first, then runs.
     // Reload URL history from SD on each open so changes from a previous
     // .nro boot are visible. Cheap (file is <2 KB typical).
     load_history_from_sd();
@@ -3995,9 +4072,16 @@ enum PendingNet {
     ShareProfile { game_idx: usize },
     ApplyProfile { game_idx: usize, profile_idx: usize },
     DeleteProfile { game_idx: usize, profile_idx: usize },
+    /// One-time first-boot housekeeping (dedup + size backfill), run behind the
+    /// "Optimisation" loading panel instead of freezing on a black screen.
+    RunStartupMigrations,
 }
 static PENDING_NET: Mutex<Option<(PendingNet, bool)>> = Mutex::new(None);
 static NET_LOADING_LABEL: Mutex<String> = Mutex::new(String::new());
+/// True while the first-boot "Optimisation" modal should overlay the gallery:
+/// set when the housekeeping is queued, cleared once it finishes. The screen
+/// itself stays on JOUER, so the modal composites over the (dimmed) gallery.
+static OPTIMIZING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// First-open warm-up for the language picker: 0 = cold, 1 = panel shown (font not
 /// loaded yet), 2 = loaded. The picker lists every language's NATIVE name incl.
@@ -4040,6 +4124,8 @@ fn defer_net(action: PendingNet, game_idx: usize) {
 /// next call runs the blocking flow, which transitions to the result screen.
 /// Called at the top of `render`, before the screen is drawn.
 fn drive_pending_net() {
+    // First frame after boot may queue the one-time housekeeping behind the panel.
+    maybe_arm_startup_migrations();
     let action = {
         let mut g = match PENDING_NET.lock() {
             Ok(g) => g,
@@ -4055,6 +4141,16 @@ fn drive_pending_net() {
         }
     };
     match action {
+        PendingNet::RunStartupMigrations => {
+            // Order matters: dedup first (so the freed entry copy isn't counted),
+            // then the footprint backfill. Both self-guard on their own markers,
+            // so this is a fast no-op once either has already run. The modal armed
+            // last frame is on the display during this blocking work; drop it once
+            // done so this frame redraws the plain gallery.
+            cleanup_duplicate_entries();
+            backfill_game_sizes();
+            OPTIMIZING.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
         PendingNet::OpenProfiles { game_idx } => run_open_profiles_flow(game_idx),
         PendingNet::OpenShareConfirm { game_idx } => run_open_share_confirm_flow(game_idx),
         PendingNet::ShareProfile { game_idx } => run_share_profile_flow(game_idx),
@@ -4064,6 +4160,43 @@ fn drive_pending_net() {
         PendingNet::DeleteProfile { game_idx, profile_idx } => {
             run_delete_profile_flow(game_idx, profile_idx)
         }
+    }
+}
+
+/// On the first render frame of a boot, if the one-time housekeeping (entry
+/// dedup + size backfill) hasn't run yet, raise the `OPTIMIZING` overlay flag and
+/// queue `RunStartupMigrations`. The screen stays on JOUER, so a bordered
+/// "Optimisation" modal composites over the dimmed gallery. The arm-then-run
+/// cadence of `drive_pending_net` shows that modal for a frame before the
+/// blocking work runs, so it isn't a black screen. Considered once per boot; a
+/// no-op when both markers are already present.
+fn maybe_arm_startup_migrations() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static CHECKED: AtomicBool = AtomicBool::new(false);
+    if CHECKED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let has = |name: &str| {
+        crate::sources::gamezip::read_file_bounded(&primary_user_path(name), 4).is_some()
+    };
+    if has(".entry_dedup2.done") && has(".filesize_backfill1.done") {
+        return; // nothing to migrate — skip the panel entirely
+    }
+    // A fresh/empty library (or a first-ever launch) has nothing to walk: run the
+    // marker-writing no-ops inline so the panel never flashes on a new install.
+    let empty = LIBRARY.lock().map(|s| s.entries.is_empty()).unwrap_or(true);
+    if empty {
+        cleanup_duplicate_entries();
+        backfill_game_sizes();
+        return;
+    }
+    // Overlay the "Optimisation" modal on the gallery and queue the (blocking)
+    // housekeeping. The screen stays on JOUER, so the modal composites over the
+    // dimmed gallery. `drive_pending_net`'s arm-then-run cadence gives it a frame
+    // on screen before the work runs.
+    OPTIMIZING.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut p) = PENDING_NET.lock() {
+        *p = Some((PendingNet::RunStartupMigrations, false));
     }
 }
 
@@ -5005,6 +5138,14 @@ pub fn render(backend: &mut SwitchRenderBackend) {
     if let Some((msg, kind)) = toast {
         backend.draw_toast(&msg, kind);
     }
+
+    // First-boot housekeeping: a bordered "Optimisation" modal composited over
+    // the dimmed gallery while the deferred migration runs. Drawn last so it sits
+    // on top; the flag is set by `maybe_arm_startup_migrations` and cleared once
+    // `RunStartupMigrations` finishes.
+    if OPTIMIZING.load(std::sync::atomic::Ordering::Relaxed) {
+        backend.draw_optimizing_modal(crate::loc::s().optimizing, now);
+    }
 }
 
 /// Read a downloaded Flashpoint GameZIP at `zip_path`, extract its `.swf` to
@@ -5151,6 +5292,11 @@ fn finalize_gamezip_download() {
     if swf_path.is_empty() {
         return;
     }
+    // Cache the game's REAL on-SD footprint (flat SWF + companion `.files/` tree)
+    // in a `<swf>.filesize` sidecar so the footer shows GBs, not the 2 MB loader.
+    // Done once here (the tree + companions are complete) and BEFORE add_path so
+    // the new entry picks it up right away. The scan only reads the cached number.
+    cache_game_footprint(&swf_path);
     add_or_replace_path(&swf_path);
     // Record where this game came from (Flashpoint GameZIP URL) next to the
     // extracted .swf, for later bug-report attribution.

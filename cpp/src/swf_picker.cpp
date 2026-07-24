@@ -241,6 +241,50 @@ extern "C" int swf_picker_count_companions(const char* swf_path) {
     return count;
 }
 
+// Recursively sum the byte sizes of all regular files under `dir` (Horizon-safe:
+// opendir/readdir/stat, unlike Rust's read_dir/metadata). Depth-capped; the
+// extracted GameZIP tree is shallow (host/path/file).
+static long long dir_size_recursive(const char* dir, int depth) {
+    if (depth > 12) return 0;
+    DIR* d = opendir(dir);
+    if (!d) return 0;
+    long long total = 0;
+    while (struct dirent* ent = readdir(d)) {
+        const char* n = ent->d_name;
+        if (n[0] == '.' && (n[1] == '\0' || (n[1] == '.' && n[2] == '\0'))) continue; // . / ..
+        char child[600];
+        const int nl = std::snprintf(child, sizeof(child), "%s/%s", dir, n);
+        if (nl <= 0 || (size_t)nl >= sizeof(child)) continue;
+        struct stat st;
+        if (::stat(child, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) total += dir_size_recursive(child, depth + 1);
+        else total += (long long)st.st_size;
+    }
+    closedir(d);
+    return total;
+}
+
+// Total byte size of a game's `<stem>.files/` companion tree (0 if absent).
+// Called ONCE at download time to cache a multi-file game's real footprint;
+// never on the library scan (a per-scan walk of e.g. Super Smash Flash 2's 1474
+// files added ~10 s to every open).
+extern "C" long long swf_picker_files_dir_size(const char* swf_path) {
+    if (!swf_path || !*swf_path) return 0;
+    const size_t plen = std::strlen(swf_path);
+    size_t base = plen; // strip a trailing ".swf" to get "<dir><stem>"
+    if (plen >= 4) {
+        const char* e = swf_path + plen - 4;
+        if (e[0] == '.' && (e[1] == 's' || e[1] == 'S') && (e[2] == 'w' || e[2] == 'W')
+            && (e[3] == 'f' || e[3] == 'F')) {
+            base = plen - 4;
+        }
+    }
+    char filesdir[512];
+    const int nl = std::snprintf(filesdir, sizeof(filesdir), "%.*s.files", (int)base, swf_path);
+    if (nl <= 0 || (size_t)nl >= sizeof(filesdir)) return 0;
+    return dir_size_recursive(filesdir, 0);
+}
+
 // Robust GameZIP-extraction file write (v1.3.0 fix). Rust's std::fs::write
 // silently fails to persist some files on Horizon (write returns Ok yet the
 // file is later unreadable; std::fs::metadata even returns a timestamp as the
