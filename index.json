@@ -222,5 +222,13 @@
     "swf_hash": "31f0047e2438d187",
     "file": "the-fancy-pants-adventures-world-2/the-fancy-pants-adventures-world-2-31f0047e-1969d38e.profile.json",
     "verified": false
+  },
+  {
+    "id": "up-beat-be6a12e7-f236ced2",
+    "title": "Up Beat",
+    "fp_uuid": "",
+    "swf_hash": "be6a12e7fa4d27a5",
+    "file": "up-beat/up-beat-be6a12e7-f236ced2.profile.json",
+    "verified": false
   }
 ]
