@@ -197,9 +197,17 @@ impl SidecarNavigator {
     /// see `gamezip::extract_gamezip_tree`), so `fetch`'s layer 0 serves it from
     /// there if the running movie ever re-requests its own URL (e.g. a restart
     /// that reloads the root SWF). Compared by host + path, ignoring the query.
+    ///
+    /// The path compare is case-INSENSITIVE on purpose: extraction decides which
+    /// entry to keep flat with `eq_ignore_ascii_case` too (see
+    /// `gamezip::extract_gamezip_tree`). A byte-exact compare here would leave a
+    /// GameZIP whose zip entry casing differs from its launchCommand (`Game.SWF`
+    /// vs `game.swf`) with NO reachable copy of its entry SWF — skipped at
+    /// extraction, then not matched here.
     fn is_movie_entry(&self, resolved: &Url) -> bool {
         Url::parse(&self.base_url).ok().is_some_and(|b| {
-            b.host_str() == resolved.host_str() && b.path() == resolved.path()
+            b.host_str() == resolved.host_str()
+                && b.path().eq_ignore_ascii_case(resolved.path())
         })
     }
 

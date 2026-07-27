@@ -969,6 +969,13 @@ fn cleanup_duplicate_entries() {
         if rest.is_empty() || rest.ends_with('/') {
             continue;
         }
+        // Containment: a `..` segment must never walk this unlink out of the
+        // game's own `.files/` dir. No catalog entry is known to carry one, but
+        // the READ path already guards it (`SidecarNavigator::push_segments`) and
+        // a DELETE path must not be laxer than the read path.
+        if rest.split('/').any(|s| s == "..") {
+            continue;
+        }
         // `<game>.files/<host>/<path>/<entry>.swf` — the tree copy of the entry
         // SWF (only zipped GameZIPs have a host-pathed tree here; others no-op).
         let files_root = crate::sidecar_dir_for(Some(swf_path))
@@ -4140,6 +4147,13 @@ fn drive_pending_net() {
             Some((a, true)) => a, // run now (last frame's panel is on the display)
         }
     };
+    // Another deferred flow can only be in the slot if it replaced our queued
+    // migration (both write PENDING_NET). Drop the overlay in that case, so the
+    // modal can't linger over the UI for a migration that will never run; the
+    // markers stay unwritten, so the next boot simply retries.
+    if !matches!(action, PendingNet::RunStartupMigrations) {
+        OPTIMIZING.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
     match action {
         PendingNet::RunStartupMigrations => {
             // Order matters: dedup first (so the freed entry copy isn't counted),
@@ -4182,12 +4196,13 @@ fn maybe_arm_startup_migrations() {
     if has(".entry_dedup2.done") && has(".filesize_backfill1.done") {
         return; // nothing to migrate — skip the panel entirely
     }
-    // A fresh/empty library (or a first-ever launch) has nothing to walk: run the
-    // marker-writing no-ops inline so the panel never flashes on a new install.
-    let empty = LIBRARY.lock().map(|s| s.entries.is_empty()).unwrap_or(true);
-    if empty {
-        cleanup_duplicate_entries();
-        backfill_game_sizes();
+    // An empty library has nothing to migrate: skip the modal WITHOUT stamping the
+    // markers. Stamping them here would retire the migration for good, so a library
+    // restored AFTERWARDS (SD backup, FTP copy, card swap — how users actually move
+    // their games) would keep its duplicate entry SWFs and wrong footer sizes with
+    // no way to re-trigger it. Re-checked on a later boot instead; the cost when
+    // there is genuinely nothing to do is two 4-byte reads.
+    if LIBRARY.lock().map(|s| s.entries.is_empty()).unwrap_or(true) {
         return;
     }
     // Overlay the "Optimisation" modal on the gallery and queue the (blocking)
