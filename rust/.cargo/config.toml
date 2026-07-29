@@ -12,6 +12,15 @@
 [build]
 target = "aarch64-nintendo-switch-freestanding"
 rustflags = [
+    # Tune for the Switch's actual CPU. The target spec ships `cpu: None`, so
+    # LLVM was scheduling for a generic aarch64 while devkitPro compiles the C++
+    # side with `-mtune=cortex-a57` (see libnx switch_rules ARCH). That mattered:
+    # our Rust side holds Ruffle's AVM bytecode interpreter, which is the actual
+    # bottleneck in most games (Mario 63: ~40 ms of script per frame vs 16 ms of
+    # render), and a dispatch loop is exactly the workload where the scheduling
+    # model earns its keep. Feature-compatible: the spec already enables
+    # +v8a,+neon,+crypto,+crc, all of which the A57 has.
+    "-C", "target-cpu=cortex-a57",
     "--cfg", "target_family=\"unix\"",
     "--cfg", "target_env=\"newlib\"",
     # `cfg(unix)` is a well-known shortcut that's normally auto-derived from
