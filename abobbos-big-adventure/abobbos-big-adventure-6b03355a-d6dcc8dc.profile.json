@@ -10,7 +10,7 @@
   "verified": false,
   "bindings": {
     "A": "",
-    "B": "A",
+    "B": "S",
     "Down": "Down",
     "L": "M",
     "Left": "Left",
@@ -22,8 +22,8 @@
     "StickLRight": "Right",
     "StickLUp": "Up",
     "Up": "Up",
-    "X": "X",
-    "Y": "S",
+    "X": "",
+    "Y": "A",
     "ZL": "Right click",
     "ZR": "Left click"
   },
