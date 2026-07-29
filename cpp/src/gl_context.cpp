@@ -7,6 +7,10 @@
 static EGLDisplay s_display = EGL_NO_DISPLAY;
 static EGLContext s_context = EGL_NO_CONTEXT;
 static EGLSurface s_surface = EGL_NO_SURFACE;
+// Kept so the surface can be recreated at a different size without rebuilding
+// the context — see gl_context_resize.
+static EGLConfig  s_config  = nullptr;
+static NWindow*   s_win     = nullptr;
 
 extern "C" bool gl_context_init(NWindow* win) {
     s_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
@@ -37,6 +41,8 @@ extern "C" bool gl_context_init(NWindow* win) {
         std::printf("eglChooseConfig failed: 0x%x\n", eglGetError());
         return false;
     }
+    s_config = config;
+    s_win = win;
 
     s_surface = eglCreateWindowSurface(s_display, config, win, nullptr);
     if (s_surface == EGL_NO_SURFACE) {
@@ -82,4 +88,45 @@ extern "C" void gl_context_shutdown(void) {
 
 extern "C" void gl_context_swap(void) {
     eglSwapBuffers(s_display, s_surface);
+}
+
+/// Change the INTERNAL render resolution by recreating just the window surface.
+///
+/// The display scaler upscales whatever the surface is to the panel, so a smaller
+/// surface is a straight fill-rate saving. `nwindowSetDimensions` refuses to run
+/// while buffers are registered, and eglCreateWindowSurface is what registers
+/// them — hence destroy, resize, recreate.
+///
+/// Crucially the CONTEXT is preserved: in EGL, textures / shaders / VAOs belong to
+/// the context, not the surface, so nothing GPU-side is lost and callers do not
+/// have to rebuild their resources. Used to render the UI at panel resolution
+/// while games (which are the actual fill load) run lower.
+///
+/// Returns false and leaves the old surface in place if anything fails.
+extern "C" bool gl_context_resize(unsigned int w, unsigned int h) {
+    if (s_display == EGL_NO_DISPLAY || s_context == EGL_NO_CONTEXT || !s_win) {
+        return false;
+    }
+    // Release the surface before touching the window's dimensions.
+    eglMakeCurrent(s_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    if (s_surface != EGL_NO_SURFACE) {
+        eglDestroySurface(s_display, s_surface);
+        s_surface = EGL_NO_SURFACE;
+    }
+    Result rc = nwindowSetDimensions(s_win, w, h);
+    if (R_FAILED(rc)) {
+        std::printf("gl_context_resize: nwindowSetDimensions(%u,%u) failed 0x%x\n", w, h, rc);
+    }
+    s_surface = eglCreateWindowSurface(s_display, s_config, s_win, nullptr);
+    if (s_surface == EGL_NO_SURFACE) {
+        std::printf("gl_context_resize: eglCreateWindowSurface failed 0x%x\n", eglGetError());
+        return false;
+    }
+    if (!eglMakeCurrent(s_display, s_surface, s_surface, s_context)) {
+        std::printf("gl_context_resize: eglMakeCurrent failed 0x%x\n", eglGetError());
+        return false;
+    }
+    std::printf("gl_context_resize: internal resolution now %ux%u\n", w, h);
+    std::fflush(stdout);
+    return true;
 }

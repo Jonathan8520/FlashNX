@@ -627,6 +627,28 @@ static PRIM_OFF_N_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 static PRIM_OFF_PIX_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PRIM_OFF_PIX_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+// DIAG (2026-07-29, Dragon City perf): time spent in `blend()`'s EXPENSIVE paths
+// and how many groups take each. The suspicion is that a full-stage (1280x720)
+// offscreen round-trip per blend group dominates the frame: Dragon City logs ~85
+// groups/frame while render takes the whole frame. Nothing else in the frame is
+// instrumented at that level, so the SLOW line currently shows every sub-timer at
+// zero while render is huge.
+//
+// These are swapped CUR->FRAME at the END of `submit_frame`, NOT at the top like
+// the PRIM_* pair above. That matters: blends happen INSIDE submit_frame, so a
+// top-of-frame swap (which is what PRIM_* does) would always publish the previous
+// frame's value and read as ~0 for work done during the same submit.
+//
+// The inline paths (Normal/Layer/Alpha/Erase/Shader) are deliberately NOT timed —
+// they just execute the group with no extra texture, so timing them would
+// attribute ordinary drawing to "blend cost".
+static BLEND_TICKS_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BLEND_TICKS_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BLEND_N_TRIVIAL_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BLEND_N_TRIVIAL_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BLEND_N_COMPLEX_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BLEND_N_COMPLEX_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// RAII guard: adds elapsed ticks to a static on drop, covering every
 /// early-return path of the timed function automatically.
 struct PrimTimer {
@@ -3844,6 +3866,9 @@ impl SwitchRenderBackend {
             // Restore the main-framebuffer blend (non-separate is fine there).
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         }
+        // ...and the stencil, which `glDisable(GL_STENCIL_TEST)` above turned off
+        // for this pass. Without this the enclosing maskee drew unclipped.
+        self.mask_restore_gl();
         self.gl_state.invalidate();
         true
     }
@@ -5108,8 +5133,15 @@ impl SwitchRenderBackend {
         let off_upload = to_us(PRIM_OFF_UPLOAD_LAST.load(std::sync::atomic::Ordering::Relaxed));
         let off_n = PRIM_OFF_N_LAST.load(std::sync::atomic::Ordering::Relaxed);
         let off_pix = PRIM_OFF_PIX_LAST.load(std::sync::atomic::Ordering::Relaxed);
+        // Blend attribution (see the BLEND_* statics): blendMs is the ONLY timer
+        // here that covers work done inside submit_frame, so it is the one that
+        // can actually account for a large `render` with everything else at zero.
+        let blend_us = to_us(BLEND_TICKS_FRAME.load(std::sync::atomic::Ordering::Relaxed));
+        let blend_n_triv = BLEND_N_TRIVIAL_FRAME.load(std::sync::atomic::Ordering::Relaxed);
+        let blend_n_cx = BLEND_N_COMPLEX_FRAME.load(std::sync::atomic::Ordering::Relaxed);
+        let blend_pct = if render_us > 0 { blend_us.saturating_mul(100) / render_us } else { 0 };
         let msg = std::format!(
-            "SLOW f{} {}us (tick {}us render {}us) primOffs={}us primBmp={}us primRes={}us dc={} offs={} filt={}({}chains) resolve={} bmpUp={} shpReg={} blend={} pmask={} mdraw={} cacheEnt={} | offN={} offPix={} alloc={}us render={}us readback={}us upload={}us\n",
+            "SLOW f{} {}us (tick {}us render {}us) primOffs={}us primBmp={}us primRes={}us dc={} offs={} filt={}({}chains) resolve={} bmpUp={} shpReg={} blend={} pmask={} mdraw={} cacheEnt={} | offN={} offPix={} alloc={}us render={}us readback={}us upload={}us | blendUs={} ({}% of render) blendTriv={} blendCx={}\n",
             self.frame_count,
             total_us, tick_us, render_us,
             prim_offs, prim_bmp, prim_res,
@@ -5117,6 +5149,7 @@ impl SwitchRenderBackend {
             fb.resolve, fb.bmp_uploads, fb.shape_regs,
             fb.blend, fb.pushmask, fb.masked_draw, fb.cache_entries,
             off_n, off_pix, off_alloc, off_render, off_readback, off_upload,
+            blend_us, blend_pct, blend_n_triv, blend_n_cx,
         );
         let mut bytes = msg.into_bytes();
         bytes.push(0);
@@ -5785,6 +5818,14 @@ impl SwitchRenderBackend {
     }
 
     /// Scale the whole library-UI content about the screen centre (modal pop).
+    /// Frames submitted so far (wraps). Advances exactly once per `submit_frame`,
+    /// so it is a frame-rate independent clock for "was the previous draw the
+    /// frame right before this one?" — which is what the pause menu needs to tell
+    /// a fresh open from a continuation (see `ruffle_draw_menu`).
+    pub fn frame_count(&self) -> u32 {
+        self.frame_count
+    }
+
     pub fn set_ui_modal_scale(&mut self, scale: f32) {
         self.ui_scale = scale;
         self.ui_pivot_x = self.dimensions.width as f32 * 0.5;
@@ -8716,6 +8757,41 @@ impl SwitchRenderBackend {
         }
     }
 
+    /// Re-apply the GL stencil state that matches `self.mask`.
+    ///
+    /// An offscreen pass (`render_commands_to_texture`) disables the stencil
+    /// test for its own target and restores `self.mask` afterwards — but the GL
+    /// side was NOT restored, and `glEnable(GL_STENCIL_TEST)` only ever happens
+    /// in `mask_push`. So after any blend/filter pass taken while a mask was
+    /// active, the stencil stayed OFF until the next push and the maskee drew
+    /// unclipped. Calling this on the way out closes that hole.
+    fn mask_restore_gl(&self) {
+        unsafe {
+            if self.mask.depth == 0 {
+                glDisable(GL_STENCIL_TEST);
+                glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+                return;
+            }
+            glEnable(GL_STENCIL_TEST);
+            if self.mask.writing {
+                // Mid mask-shape: writing coverage, no colour. (INCR matches
+                // `mask_push`; a pass taken mid-DECR is not distinguishable and
+                // is not a case the command stream produces.)
+                glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+                glStencilMask(0xFF);
+                glStencilFunc(GL_ALWAYS, 0, 0xFF);
+                glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
+            } else {
+                // Drawing a maskee: gate at the current nesting depth.
+                glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+                glStencilMask(0);
+                let func = if DISABLE_MASK_GATING { GL_ALWAYS } else { GL_EQUAL };
+                glStencilFunc(func, self.mask.depth as GLint, 0xFF);
+                glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+            }
+        }
+    }
+
     fn mask_pop(&mut self) {
         self.mask.writing = false;
         if self.mask.depth > 0 {
@@ -9690,6 +9766,16 @@ impl RenderBackend for SwitchRenderBackend {
             cache_entries: frame_cache_entries,
             filter_chains: filter_chains_run as u32,
         };
+        // Publish this frame's blend timing/counts. Swapped HERE (end of submit)
+        // and not at the top like PRIM_*, because blends happen inside this
+        // function — a top-of-frame swap would publish the previous frame and
+        // read as ~0 (which is exactly why every existing sub-timer shows zero).
+        use std::sync::atomic::Ordering as AtomOrd;
+        BLEND_TICKS_FRAME.store(BLEND_TICKS_CUR.swap(0, AtomOrd::Relaxed), AtomOrd::Relaxed);
+        BLEND_N_TRIVIAL_FRAME
+            .store(BLEND_N_TRIVIAL_CUR.swap(0, AtomOrd::Relaxed), AtomOrd::Relaxed);
+        BLEND_N_COMPLEX_FRAME
+            .store(BLEND_N_COMPLEX_CUR.swap(0, AtomOrd::Relaxed), AtomOrd::Relaxed);
     }
 
     fn create_empty_texture(
@@ -10335,6 +10421,8 @@ impl CommandHandler for SwitchRenderBackend {
                 return;
             }
             BlendMode::Add | BlendMode::Subtract | BlendMode::Screen => {
+                let _bt = PrimTimer::new(&BLEND_TICKS_CUR);
+                BLEND_N_TRIVIAL_CUR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let (w, h) = self.current_target_dims();
                 // Some(..) iff we're nested inside an enclosing offscreen render
                 // (BitmapData.draw / cache entry). Captured BEFORE the temp
@@ -10411,6 +10499,8 @@ impl CommandHandler for SwitchRenderBackend {
         }
 
         // Complex path: snapshot the backdrop + render the group, then composite.
+        let _bt = PrimTimer::new(&BLEND_TICKS_CUR);
+        BLEND_N_COMPLEX_CUR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (w, h) = self.current_target_dims();
         let flip = if self.offscreen_dims.is_some() { 0.0 } else { 1.0 };
         let parent = if w == 0 || h == 0 { None } else { self.filter_tex_pool.acquire(w, h) };

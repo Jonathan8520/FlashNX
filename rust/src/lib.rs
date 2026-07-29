@@ -81,6 +81,7 @@ pub(crate) static TICK_TICKS_MAX: std::sync::atomic::AtomicU64 =
 pub(crate) static RENDER_TICKS_MAX: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+
 /// Snapshot of process RAM in bytes (used, total). Returns (0,0) if the
 /// underlying svcGetInfo call fails.
 pub(crate) fn query_ram() -> (u64, u64) {
@@ -112,6 +113,19 @@ struct State {
 
 static mut STATE: Option<State> = None;
 
+/// INTERNAL render resolutions — MUST match UI_VIEWPORT_* / GAME_VIEWPORT_* in
+/// cpp/src/main.cpp, which resizes the window surface at each transition
+/// (`gl_context_resize`) so the display scaler upscales to the panel.
+///
+/// The UI renders at panel size (it is cheap, and it is text and thin lines where
+/// upscaling looks bad). GAMES render lower: they are the real load, and the heavy
+/// ones are fill-bound, so shrinking the surface shrinks the main pass AND every
+/// full-stage offscreen temp — blend groups, alpha masks, cacheAsBitmap. See the
+/// long comment at the C++ constants for the measurements.
+const UI_VIEWPORT_W: u32 = 1280;
+const UI_VIEWPORT_H: u32 = 720;
+// Game viewport. Currently equal to the UI/panel size — see the long comment at
+// GAME_VIEWPORT_* in cpp/src/main.cpp for why a global reduction was reverted.
 const VIEWPORT_W: u32 = 1280;
 const VIEWPORT_H: u32 = 720;
 
@@ -1060,15 +1074,25 @@ pub extern "C" fn ruffle_draw_menu(selected: c_int) {
     {
         let idx = selected.max(0) as usize;
         // Scale-in pop on open (v1.2.0): the pause menu is C++-owned and only
-        // draws while paused, so we detect a fresh open by the gap since the last
-        // draw — a gap over a few frames means it was closed then reopened. The
-        // dim backdrop stays put (fill_screen_dim); only the panel scales.
+        // draws while paused, so a fresh open is "this draw does not directly
+        // follow the previous one". The dim backdrop stays put
+        // (fill_screen_dim); only the panel scales.
+        //
+        // Detected on the RENDER FRAME COUNTER, not wall clock. It used to compare
+        // elapsed ticks against `freq / 8` — a hardcoded 125 ms, chosen as "a few
+        // frames" at 60 fps. On a game slow enough that ONE frame exceeds 125 ms
+        // (Dragon City sits near 6 fps = ~166 ms), every continuation frame looked
+        // like a fresh open, so the pop restarted forever and the panel stayed
+        // pinned at MODAL_OPEN_FROM. The counter advances once per paused redraw
+        // (`ruffle_redraw_paused` -> `player.render()` -> `submit_frame`), so this
+        // is frame-rate independent, and it also covers reopening after TOUCHES or
+        // after a close drain, which take different C++ paths.
         let now = unsafe { ruffle_tick_now() };
-        let freq = unsafe { ruffle_tick_freq() };
-        static LAST_MENU_TICK: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(0);
-        let last = LAST_MENU_TICK.swap(now, std::sync::atomic::Ordering::Relaxed);
-        if last == 0 || (freq > 0 && now.saturating_sub(last) > freq / 8) {
+        static LAST_MENU_FRAME: std::sync::atomic::AtomicU32 =
+            std::sync::atomic::AtomicU32::new(u32::MAX);
+        let f = backend.frame_count();
+        let last = LAST_MENU_FRAME.swap(f, std::sync::atomic::Ordering::Relaxed);
+        if last == u32::MAX || f.wrapping_sub(last) > 1 {
             backend::render::modal_open_begin();
         }
         let (scale, active, _done) = backend::render::modal_scale_step(now);
@@ -1347,7 +1371,9 @@ pub extern "C" fn ruffle_library_init() -> c_int {
     // Pick the UI language (settings.json → system language → English)
     // before anything draws.
     loc::init();
-    let mut renderer = match SwitchRenderBackend::new(VIEWPORT_W, VIEWPORT_H) {
+    // UI renders at panel size (the C++ side keeps the surface there until a
+    // game launches), so the library stays sharp.
+    let mut renderer = match SwitchRenderBackend::new(UI_VIEWPORT_W, UI_VIEWPORT_H) {
         Some(r) => r,
         None => {
             log(b"library_init: SwitchRenderBackend::new failed\n\0");

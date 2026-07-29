@@ -329,9 +329,51 @@ enum MenuAction {
     MENU_COUNT        = 4,
 };
 
-// Viewport size — keep in sync with rust/src/lib.rs VIEWPORT_W/H.
-static constexpr int VIEWPORT_W = 1280;
-static constexpr int VIEWPORT_H = 720;
+// The physical panel / touchscreen coordinate space. Touch samples always arrive
+// in these units regardless of what we render at, so they need scaling into
+// render space whenever the two differ.
+static constexpr int PANEL_W = 1280;
+static constexpr int PANEL_H = 720;
+
+// TWO internal render resolutions — keep in sync with rust/src/lib.rs.
+//
+// The Switch display scaler upscales the window surface to the panel for free, so
+// rendering smaller is a straight fill-rate saving rather than a smaller picture.
+// Cost is softness, which is why the two differ:
+//
+//  - The UI (library, modals, keymap editor) renders at PANEL size. It is cheap
+//    (a few hundred draws) and it is all text and thin lines, where upscaling is
+//    immediately visible and unpleasant.
+//  - GAMES render lower. They are the actual load, and the ones that hurt are
+//    fill-bound: Dragon City spends ~76 ms of a 112 ms frame in render, with 83
+//    full-stage complex blend groups per frame. Shrinking the surface shrinks the
+//    main pass AND every full-stage offscreen temp (blend groups, alpha masks,
+//    cacheAsBitmap), quadratically. Measured 5.7 -> 8.6 fps at 960x540.
+//
+//    960x540 = 0.56x the pixels (1.8x less fill); 640x360 would be 0.25x.
+//    Games that are SCRIPT-bound (Mario 63, Agent P: 115 of 123 ms in the AVM)
+//    gain nothing from this — their cost is Ruffle's interpreter, not our fill.
+static constexpr int UI_VIEWPORT_W   = PANEL_W;
+static constexpr int UI_VIEWPORT_H   = PANEL_H;
+// Currently PANEL size: measured 2026-07-29, lowering this only helps FILL-BOUND
+// titles (Dragon City 5.7 -> 8.6 fps) while every script-bound game gains nothing
+// (Mario 63, Agent P spend ~90% of the frame in Ruffle's interpreter). Since the
+// game's render space is also what the pause menu and TOUCHES editor draw in,
+// a global reduction softened all that UI to speed up exactly one game — a bad
+// trade, so it is off. The plumbing below is kept and stays correct at any value:
+// set these lower (960x540 = 1.8x less fill, 640x360 = 4x) to re-enable, ideally
+// per-game via the keymap sidecar rather than globally.
+static constexpr int GAME_VIEWPORT_W = PANEL_W;
+static constexpr int GAME_VIEWPORT_H = PANEL_H;
+
+// Panel -> render space scale for touch, per context.
+static constexpr float UI_TOUCH_SCALE_X   = (float)UI_VIEWPORT_W / (float)PANEL_W;
+static constexpr float UI_TOUCH_SCALE_Y   = (float)UI_VIEWPORT_H / (float)PANEL_H;
+static constexpr float GAME_TOUCH_SCALE_X = (float)GAME_VIEWPORT_W / (float)PANEL_W;
+static constexpr float GAME_TOUCH_SCALE_Y = (float)GAME_VIEWPORT_H / (float)PANEL_H;
+
+// Recreate the window surface at a different size, preserving all GL objects.
+extern "C" bool gl_context_resize(unsigned int w, unsigned int h);
 
 // Right-stick axis range (libnx reports -0x7FFF..0x7FFF).
 static constexpr float STICK_DEADZONE = 4000.0f;
@@ -464,6 +506,8 @@ static void worker_entry(void* arg) {
     __asm__ volatile("msr tpidr_el0, %0" :: "r"(&s_worker_tls[0]));
 
     NWindow* win = nwindowGetDefault();
+    // Boot at PANEL size: the library UI is what shows first and it wants to be
+    // sharp. Games drop to GAME_VIEWPORT_* via gl_context_resize at launch.
     if (!gl_context_init(win)) {
         std::printf("gl_context_init failed\n"); std::fflush(stdout);
         return;
@@ -549,8 +593,9 @@ static void worker_entry(void* arg) {
         // tap the selected game again to launch. Rust owns the gesture logic.
         hidGetTouchScreenStates(&touch_state, 1);
         const bool lib_touch = touch_state.count > 0;
-        const float lib_tx = lib_touch ? (float)touch_state.touches[0].x : 0.0f;
-        const float lib_ty = lib_touch ? (float)touch_state.touches[0].y : 0.0f;
+        // Touch arrives in PANEL units; the UI renders at panel size so this is 1:1.
+        const float lib_tx = lib_touch ? (float)touch_state.touches[0].x * UI_TOUCH_SCALE_X : 0.0f;
+        const float lib_ty = lib_touch ? (float)touch_state.touches[0].y * UI_TOUCH_SCALE_Y : 0.0f;
         ruffle_library_touch(lib_tx, lib_ty, lib_touch ? 1 : 0);
         ruffle_library_render();
         gl_context_swap();
@@ -584,6 +629,15 @@ static void worker_entry(void* arg) {
         ruffle_set_swf_path(forwarder_swf);
     }
 
+    // Drop the internal resolution for gameplay (see the GAME_VIEWPORT_* comment).
+    // Done HERE: after the library's renderer is gone, before Ruffle's is built —
+    // the new renderer picks up the game viewport, and the UI never rendered at
+    // this size. Covers the forwarder path too, which joins us just above. On
+    // failure we simply keep the current surface, so a game runs at panel size.
+    if (GAME_VIEWPORT_W != UI_VIEWPORT_W || GAME_VIEWPORT_H != UI_VIEWPORT_H) {
+        gl_context_resize(GAME_VIEWPORT_W, GAME_VIEWPORT_H);
+    }
+
     if (ruffle_init() != 0) {
         std::printf("ruffle_init failed — exiting .nro\n");
         std::fflush(stdout);
@@ -611,8 +665,9 @@ static void worker_entry(void* arg) {
     g_in_game = true;
 
     // Mouse cursor — centred at start.
-    float cursor_x = VIEWPORT_W * 0.5f;
-    float cursor_y = VIEWPORT_H * 0.5f;
+    // In-game cursor: lives in the GAME's render space.
+    float cursor_x = GAME_VIEWPORT_W * 0.5f;
+    float cursor_y = GAME_VIEWPORT_H * 0.5f;
     ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
     touch_was_pressed = false;
 
@@ -642,20 +697,11 @@ static void worker_entry(void* arg) {
     MenuRepeatState touches_repeat;
     menu_repeat_reset(touches_repeat);
 
-    // CpuBoostMode re-assert counter. Hardware profiling (2026-05-30) showed
-    // the OS drops the boot-time FastLoad boost back to the 1020 MHz handheld
-    // base clock mid-gameplay (seen in the heavy water lake), and the worst fps
-    // dips (9-12 fps) lined up with those 1020 MHz windows while the same scene
-    // held ~15 fps at 1785 MHz. So we re-assert periodically to recover any
-    // transient drop. IMPORTANT FINDING: re-asserting every single frame did
-    // NOT eliminate the drops — they recur at the SAME elapsed time each run
-    // (~25-30 s into sustained load), i.e. the apm sysmodule *force-revokes*
-    // FastLoad on sustained use (it's officially a short loading-screen boost)
-    // and we cannot override that, whatever the cadence. So per-frame re-assert
-    // only spammed the IPC for no gain; every 30 frames recovers non-forced
-    // drops without the spam. NB: even pinned at 1785 MHz the lake is AVM1-bound
-    // (~15 fps) — this only recovers dropped windows, it doesn't lift Ruffle's
-    // interpreter ceiling. Still stock spec, no hardware risk.
+    // CpuBoostMode re-assert counter. A download raises FastLoad for its own
+    // duration (net.cpp) and resets it on completion, but an aborted/errored
+    // transfer could leave it raised — which now COSTS us roughly half our
+    // framerate (see the measurements at the boot-time call). Re-asserting
+    // Normal every 30 frames makes gameplay self-healing without IPC spam.
     int boost_reassert = 0;
 
     while (appletMainLoop()) {
@@ -672,7 +718,7 @@ static void worker_entry(void* arg) {
 
         if (++boost_reassert >= 30) {
             boost_reassert = 0;
-            appletSetCpuBoostMode(ApmCpuBoostMode_FastLoad);
+            appletSetCpuBoostMode(ApmCpuBoostMode_Normal);
         }
 
         if (menu_open) {
@@ -923,16 +969,17 @@ static void worker_entry(void* arg) {
         hidGetTouchScreenStates(&touch_state, 1);
         const bool touch_pressed = touch_state.count > 0;
         if (touch_pressed) {
-            cursor_x = (float)touch_state.touches[0].x;
-            cursor_y = (float)touch_state.touches[0].y;
+            // Panel units -> the game's (lower) render space.
+            cursor_x = (float)touch_state.touches[0].x * GAME_TOUCH_SCALE_X;
+            cursor_y = (float)touch_state.touches[0].y * GAME_TOUCH_SCALE_Y;
             moved = true;
         }
 
         // Clamp cursor to the viewport.
         if (cursor_x < 0)              cursor_x = 0;
         if (cursor_y < 0)              cursor_y = 0;
-        if (cursor_x > VIEWPORT_W - 1) cursor_x = VIEWPORT_W - 1;
-        if (cursor_y > VIEWPORT_H - 1) cursor_y = VIEWPORT_H - 1;
+        if (cursor_x > GAME_VIEWPORT_W - 1) cursor_x = GAME_VIEWPORT_W - 1;
+        if (cursor_y > GAME_VIEWPORT_H - 1) cursor_y = GAME_VIEWPORT_H - 1;
 
         if (moved) {
             ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
@@ -1002,6 +1049,12 @@ static void worker_entry(void* arg) {
     if (back_to_library && !forwarder_swf) {
         std::printf("game: QUITTER → reset + back to library\n");
         std::fflush(stdout);
+        // Back to panel resolution so the library UI is sharp again. After
+        // ruffle_shutdown (game renderer gone) and before library_init rebuilds
+        // the UI renderer at UI_VIEWPORT_*.
+        if (GAME_VIEWPORT_W != UI_VIEWPORT_W || GAME_VIEWPORT_H != UI_VIEWPORT_H) {
+            gl_context_resize(UI_VIEWPORT_W, UI_VIEWPORT_H);
+        }
         ruffle_library_reset();
     } else {
         // Forwarder launch (or home/close button): there's no library to return
@@ -1051,20 +1104,31 @@ int main(int argc, char** argv) {
     }
     std::fflush(stdout);
 
-    // CpuBoostMode FastLoad — Mario 63 is bottlenecked by Ruffle's AVM1
-    // bytecode interpreter on the Cortex-A57 (Tegra X1, 1.02 GHz handheld /
-    // 1.78 GHz docked). Profiling on hardware (2026-05-25 soir) showed
-    // tick=50ms/frame vs render=5ms/frame in heavy scenes → CPU-bound, not
-    // GPU. `FastLoad` (libnx name for "Type1") boosts CPU clocks and
-    // throttles the GPU to minimum, which we can afford — our render is
-    // < 5ms even worst case. Within stock clock specs; same API Nintendo's
-    // own titles use for loading screens. No hardware risk.
+    // CpuBoostMode Normal — do NOT use FastLoad.
+    //
+    // We ran FastLoad from 2026-05-25 to 2026-07-29 on the reasoning that Mario
+    // 63 is AVM1-bound (tick 50 ms vs render 5 ms), so trading the GPU for CPU
+    // clocks looked free. `FastLoad` boosts the CPU but, per libnx apm.h,
+    // "additionally throttles GPU to minimum" — and that half of the trade was
+    // never measured.
+    //
+    // Measured on hardware 2026-07-29, same session, same scenes, alternating
+    // between the two modes:
+    //     Mario 63        24.8 fps FastLoad  ->  55.3 fps Normal   (+124%)
+    //     Papa Louie 3    25.2 fps FastLoad  ->  52.2 fps Normal   (+107%)
+    //     Agent P         22.8 fps FastLoad  ->  32.0 fps Normal   (+40%)
+    // Every mode change flipped the framerate the same way, across several
+    // separate segments per game, so this is not a scene artefact. The GPU
+    // throttle costs far more than the CPU boost returns, even for the title
+    // the original choice was tuned on.
+    //
+    // Normal is the OS default; nothing here is out of spec.
     {
-        Result rc = appletSetCpuBoostMode(ApmCpuBoostMode_FastLoad);
+        Result rc = appletSetCpuBoostMode(ApmCpuBoostMode_Normal);
         if (R_FAILED(rc)) {
-            std::printf("appletSetCpuBoostMode(FastLoad) failed: 0x%x (continuing)\n", rc);
+            std::printf("appletSetCpuBoostMode(Normal) failed: 0x%x (continuing)\n", rc);
         } else {
-            std::printf("appletSetCpuBoostMode(FastLoad) OK — CPU prioritized over GPU\n");
+            std::printf("appletSetCpuBoostMode(Normal) OK — GPU not throttled\n");
         }
         std::fflush(stdout);
     }
