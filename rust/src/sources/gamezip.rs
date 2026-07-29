@@ -316,6 +316,164 @@ fn html_entry_swf(html: &[u8]) -> Option<std::string::String> {
     anchored.or(first)
 }
 
+/// Push a trimmed key/value pair, dropping empties and surrounding whitespace.
+fn push_flashvar(
+    key: &mut std::string::String,
+    val: &mut std::string::String,
+    out: &mut std::vec::Vec<(std::string::String, std::string::String)>,
+) {
+    let k = key.trim().to_string();
+    let v = val.trim().to_string();
+    key.clear();
+    val.clear();
+    if !k.is_empty() {
+        out.push((k, v));
+    }
+}
+
+/// Parse the body of a JS object literal (`"k": v, "k2": v2`) into pairs.
+/// Quote-aware and nesting-aware so a value containing `,` or `:` survives.
+fn parse_js_object(body: &str, out: &mut std::vec::Vec<(std::string::String, std::string::String)>) {
+    let (mut key, mut val) = (std::string::String::new(), std::string::String::new());
+    let mut in_key = true;
+    let mut quote: Option<char> = None;
+    let mut depth = 0i32;
+    for c in body.chars() {
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            } else if in_key {
+                key.push(c);
+            } else {
+                val.push(c);
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            ':' if in_key && depth == 0 => in_key = false,
+            ',' if depth == 0 => {
+                push_flashvar(&mut key, &mut val, out);
+                in_key = true;
+            }
+            '{' | '[' => {
+                depth += 1;
+                if !in_key {
+                    val.push(c);
+                }
+            }
+            '}' | ']' => {
+                depth -= 1;
+                if !in_key {
+                    val.push(c);
+                }
+            }
+            _ => {
+                if in_key {
+                    key.push(c)
+                } else {
+                    val.push(c)
+                }
+            }
+        }
+    }
+    push_flashvar(&mut key, &mut val, out);
+}
+
+/// Extract the FlashVars an HTML container page passes to its embedded SWF.
+///
+/// Flashpoint's HTML-wrapped games ship an `index.html` whose JavaScript hands
+/// the movie its configuration — WHICH SWF to actually load, where its assets
+/// live, feature flags. A browser runs that JS; we don't, so without this the
+/// embedded loader starts with no configuration and hangs forever on its own
+/// splash (Dragon City: `DCLoader.swf` waits on `swftoload` and never leaves
+/// "Loading").
+///
+/// Two shapes cover the common wrappers:
+///   (a) swfobject 2.x — `flashVars = { "swftoload": "flash/Base.swf", ... }`
+///   (b) classic embed — `<param name="FlashVars" value="a=1&amp;b=2">`
+///
+/// Returns the pairs in page order; empty when the page carries none (a game
+/// whose container computes them in JS at runtime, e.g. the Disney minigames,
+/// still needs its own handling).
+pub fn flashvars_from_html(
+    html: &[u8],
+) -> std::vec::Vec<(std::string::String, std::string::String)> {
+    let text = std::string::String::from_utf8_lossy(html);
+    let lower = text.to_ascii_lowercase();
+    let mut out: std::vec::Vec<(std::string::String, std::string::String)> = std::vec::Vec::new();
+
+    // (a) Object literal. Scan every "flashvars" mention: the first may be an
+    // unrelated word, and only a `{` CLOSE BEHIND it is the literal we want.
+    let mut from = 0usize;
+    while let Some(rel) = lower[from..].find("flashvars") {
+        let at = from + rel;
+        from = at + "flashvars".len();
+        let tail = &text[at..];
+        let Some(orel) = tail.find('{') else { continue };
+        if orel > 40 {
+            continue; // too far away to be this identifier's initialiser
+        }
+        let open = at + orel;
+        let mut depth = 0i32;
+        let mut close = None;
+        for (i, c) in text[open..].char_indices() {
+            if c == '{' {
+                depth += 1;
+            } else if c == '}' {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+        }
+        let Some(close) = close else { continue };
+        parse_js_object(&text[open + 1..close], &mut out);
+        if !out.is_empty() {
+            return out;
+        }
+    }
+
+    // (b) `name="FlashVars" value="a=1&b=2"`, or the same as an <embed> attr.
+    // Scan quoted runs from the START of the enclosing tag: the mention itself
+    // sits INSIDE a quoted run (`name="FlashVars"`), so pairing quotes from the
+    // mention would misalign by one and read ` value=` as the payload.
+    if let Some(at) = lower.find("flashvars") {
+        let bytes = text.as_bytes();
+        let mut i = text[..at].rfind('<').unwrap_or(0);
+        while i < bytes.len() {
+            let c = bytes[i];
+            if c == b'"' || c == b'\'' {
+                let start = i + 1;
+                let mut j = start;
+                while j < bytes.len() && bytes[j] != c {
+                    j += 1;
+                }
+                let run = &text[start..j.min(text.len())];
+                // Only a run that STARTS past the mention can be its value.
+                if start > at && run.contains('=') {
+                    for pair in run.replace("&amp;", "&").split('&') {
+                        if let Some((k, v)) = pair.split_once('=') {
+                            let k = k.trim();
+                            if !k.is_empty() {
+                                out.push((k.to_string(), v.trim().to_string()));
+                            }
+                        }
+                    }
+                    return out;
+                }
+                i = j + 1;
+            } else if c == b'>' && i > at {
+                break; // left the tag without finding a payload
+            } else {
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 /// Resolve an HTML-wrapped game's real entry SWF from inside its GameZIP.
 /// `html_entry` is the (percent-decoded) `content/<host>/<path>/index.html…`
 /// entry name derived from the launchCommand. Finds that wrapper in the zip,

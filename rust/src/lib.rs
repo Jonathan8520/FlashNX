@@ -472,6 +472,22 @@ pub extern "C" fn ruffle_init() -> c_int {
         });
     keymap::init_for_swf(&keymap_basename); // P1 + P2 bindings (issue #40) from one file
 
+    // Sidecar dir is needed BEFORE the movie is built (the HTML container's
+    // FlashVars live in the tree, see below) and again after, for the navigator.
+    let real_path = LAST_SWF_REAL_PATH
+        .lock()
+        .ok()
+        .and_then(|g| g.clone());
+    let sidecar_dir = sidecar_dir_for(real_path.as_deref());
+    log_str(&std::format!(
+        "ruffle_init: sidecar dir = {}\n",
+        sidecar_dir.display()
+    ));
+
+    // HTML-wrapped game? Its container page carries both the FlashVars (below)
+    // and the base every relative load must resolve against (the navigator).
+    let container = container_html_for(&sidecar_dir, &source_label);
+
     match SwfMovie::from_data(&movie_bytes, source_label.clone(), None) {
         Ok(mut movie) => {
             log_str(&std::format!(
@@ -511,6 +527,24 @@ pub extern "C" fn ruffle_init() -> c_int {
                 ];
                 log_str(&std::format!("ruffle_init: injected Disney FlashVars: {:?}\n", params));
                 movie.append_parameters(params);
+            } else if let Some((html, _)) = container.as_ref() {
+                // Generic HTML-wrapped game: the container page carries the
+                // FlashVars literally, so read them off it instead of hardcoding
+                // another game. Without them a loader SWF has no idea what to
+                // load and sits on its splash forever (Dragon City / DCLoader).
+                // Relative values need no rewriting here: the navigator resolves
+                // them against the same page (see `with_document_base`).
+                let vars = crate::sources::gamezip::flashvars_from_html(html);
+                if vars.is_empty() {
+                    log_str("ruffle_init: container HTML found but carries no FlashVars\n");
+                } else {
+                    log_str(&std::format!(
+                        "ruffle_init: injected {} FlashVars from container HTML: {:?}\n",
+                        vars.len(),
+                        vars
+                    ));
+                    movie.append_parameters(vars);
+                }
             }
             builder = builder.with_movie(movie);
         }
@@ -529,20 +563,21 @@ pub extern "C" fn ruffle_init() -> c_int {
     // from the real on-disk path. `executor` (kept in State) drives the loader
     // futures the navigator spawns — pumped once per frame in render_frame_with_dt.
     let executor = NullExecutor::new();
-    let real_path = LAST_SWF_REAL_PATH
-        .lock()
-        .ok()
-        .and_then(|g| g.clone());
-    let sidecar_dir = sidecar_dir_for(real_path.as_deref());
-    log_str(&std::format!(
-        "ruffle_init: sidecar dir = {}\n",
-        sidecar_dir.display()
-    ));
-    builder = builder.with_navigator(SidecarNavigator::new(
-        executor.spawner(),
-        source_label.clone(),
-        sidecar_dir,
-    ));
+    let mut navigator =
+        SidecarNavigator::new(executor.spawner(), source_label.clone(), sidecar_dir);
+    if let Some((_, page_base)) = container.as_ref() {
+        // Flash resolves relative URLs against the embedding DOCUMENT, not the
+        // SWF. Only differs for HTML-wrapped games, where the movie sits in a
+        // subdirectory of its page (Dragon City: page `.../dragoncity/`, movie
+        // `.../dragoncity/flash/`) — without this every `assets/...` request
+        // gained a spurious `flash/` and missed.
+        log_str(&std::format!(
+            "ruffle_init: navigator resolves relative loads against {}\n",
+            page_base
+        ));
+        navigator = navigator.with_document_base(page_base.clone());
+    }
+    builder = builder.with_navigator(navigator);
 
     // Emulate the browser "container" side of ExternalInterface. This both LOGS
     // the Flash<->JS call contract (so we can see exactly what a container-based
@@ -567,6 +602,62 @@ pub extern "C" fn ruffle_init() -> c_int {
     }
     0
 }
+
+/// Find the HTML container page of an HTML-wrapped game, inside its sidecar
+/// tree, and return its bytes.
+///
+/// Flashpoint curates some games with `launchCommand` pointing at an
+/// `index.html` (Disney minigames, Dragon City...). Extraction resolves the real
+/// entry SWF out of that page, but the page ALSO holds the FlashVars the movie
+/// needs, so we come back for it at play time. The tree mirrors the URL layout,
+/// so the page sits at or above the entry SWF's own directory: for
+/// `http://host/static/dragoncity/flash/DCLoader.swf` it is
+/// `<game>.files/host/static/dragoncity/index.html`, one level up.
+///
+/// Reading it at PLAY time (rather than stashing it at download time) means
+/// games already installed are covered too, with no re-download.
+/// Returns the page bytes AND the URL of the directory holding it (with a
+/// trailing `/`), which is the base relative FlashVars must resolve against.
+fn container_html_for(
+    sidecar_dir: &std::path::Path,
+    movie_url: &str,
+) -> Option<(std::vec::Vec<u8>, std::string::String)> {
+    let rest = movie_url
+        .strip_prefix("http://")
+        .or_else(|| movie_url.strip_prefix("https://"))?;
+    let rest = rest.split(['?', '#']).next()?;
+    // Host + path segments, minus the entry SWF's own filename.
+    let mut segs: std::vec::Vec<&str> = rest
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != ".." && *s != ".")
+        .collect();
+    segs.pop()?; // drop the SWF filename -> its directory
+    // Walk up from the SWF's directory looking for the container page.
+    for _ in 0..4 {
+        let mut cand = sidecar_dir.to_path_buf();
+        for s in &segs {
+            cand.push(s);
+        }
+        cand.push("index.html");
+        let bytes =
+            crate::sources::gamezip::read_file_bounded(&cand.to_string_lossy(), 256 * 1024);
+        if let Some(b) = bytes {
+            let base = std::format!("http://{}/", segs.join("/"));
+            log_str(&std::format!(
+                "ruffle_init: container HTML = {} ({} bytes, base {})\n",
+                cand.display(),
+                b.len(),
+                base
+            ));
+            return Some((b, base));
+        }
+        if segs.pop().is_none() {
+            break;
+        }
+    }
+    None
+}
+
 
 /// Per-game sidecar directory for a multi-file game's sibling SWFs:
 /// `<game-dir>/<game-stem>.files`. E.g. `sdmc:/flashnx/Foo.swf` ->

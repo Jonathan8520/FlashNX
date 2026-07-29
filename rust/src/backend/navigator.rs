@@ -82,9 +82,14 @@ impl SuccessResponse for SidecarResponse {
 /// Serves a game's sibling files from `sidecar_dir`; rejects everything else.
 pub struct SidecarNavigator {
     spawner: NullSpawner,
-    /// The movie's synthetic base URL, e.g. `http://flashforswitch.local/foo.swf`.
-    /// Relative loads are resolved against this.
+    /// The synthetic base URL relative loads are resolved against, e.g.
+    /// `http://flashforswitch.local/foo.swf`. Normally the movie's own URL, but
+    /// see `with_document_base` for HTML-wrapped games.
     base_url: String,
+    /// The MOVIE's own URL, which `base_url` may diverge from (HTML-wrapped
+    /// games resolve against their container page instead). Kept separately so
+    /// the entry-SWF check still compares against the movie itself.
+    movie_url: String,
     /// `sdmc:/flashnx/<game-stem>.files` — where this game's sibling SWFs live.
     sidecar_dir: PathBuf,
     /// True when the movie runs under its original Flashpoint launchCommand host
@@ -105,10 +110,26 @@ impl SidecarNavigator {
             .unwrap_or(false);
         Self {
             spawner,
+            movie_url: base_url.clone(),
             base_url,
             sidecar_dir,
             htdocs_proxy,
         }
+    }
+
+    /// Resolve relative loads against the container PAGE's directory instead of
+    /// the movie's own location.
+    ///
+    /// Flash resolves a relative URL against the HTML document embedding the
+    /// movie, not against the SWF file. It only matters when the two differ,
+    /// which is exactly the Flashpoint HTML-wrapped layout: Dragon City's page
+    /// is at `.../dragoncity/` while its movie lives in `.../dragoncity/flash/`,
+    /// so its `assets/...` requests were resolving to `.../dragoncity/flash/assets/...`
+    /// and missing all 2901 asset files. Only called when a container page was
+    /// actually found, so plain SWFs keep resolving against the movie.
+    pub fn with_document_base(mut self, page_base: String) -> Self {
+        self.base_url = page_base;
+        self
     }
 
     /// On-demand fetch of a missing sidecar from the Flashpoint "Legacy htdocs"
@@ -205,7 +226,7 @@ impl SidecarNavigator {
     /// vs `game.swf`) with NO reachable copy of its entry SWF — skipped at
     /// extraction, then not matched here.
     fn is_movie_entry(&self, resolved: &Url) -> bool {
-        Url::parse(&self.base_url).ok().is_some_and(|b| {
+        Url::parse(&self.movie_url).ok().is_some_and(|b| {
             b.host_str() == resolved.host_str()
                 && b.path().eq_ignore_ascii_case(resolved.path())
         })
