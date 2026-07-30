@@ -345,8 +345,49 @@ impl NavigatorBackend for SidecarNavigator {
                         .find_map(|kv| kv.strip_prefix("command_id=").map(str::to_string))
                 })
                 .unwrap_or_else(|| "connectMovie".to_string());
-            let body =
-                std::format!("{{\"success\":true,\"command_id\":\"{cmd}\"}}").into_bytes();
+            // A synthetic success is enough to get most NG API v2 games past
+            // their preloader, but not all: haunt-the-house re-issues
+            // `connectMovie` forever because our reply carries no movie identity
+            // ("Movie identified as \"undefined\"" in its own trace). That spins
+            // the AVM at 100%, so even the pause menu stops responding. The real
+            // v2 response schema is undocumented (the API is long retired), so
+            // rather than guess field names we break the LOOP: after a few
+            // attempts the request simply hangs, exactly as we already do for
+            // dead ad hosts. The game either fails open on its own timeout or at
+            // minimum stops burning the CPU, leaving the app usable and quittable.
+            const NG_CONNECT_ATTEMPTS_BEFORE_STALL: u32 = 3;
+            static NG_CONNECT_CALLS: std::sync::atomic::AtomicU32 =
+                std::sync::atomic::AtomicU32::new(0);
+            if cmd == "connectMovie" {
+                let n = NG_CONNECT_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n >= NG_CONNECT_ATTEMPTS_BEFORE_STALL {
+                    if n == NG_CONNECT_ATTEMPTS_BEFORE_STALL {
+                        tracing::warn!(
+                            "sidecar: NewgroundsAPI connectMovie looping ({n} calls), stalling further ones"
+                        );
+                    }
+                    return Box::pin(std::future::pending::<
+                        Result<Box<dyn SuccessResponse>, ErrorResponse>,
+                    >());
+                }
+            }
+            // `connectMovie` is the API handshake and the game reads a movie
+            // IDENTITY back from it; a bare success makes it log
+            // `Movie identified as "undefined"` and retry forever (43447 calls in
+            // one session). The v2 schema is undocumented, so these field names
+            // are a best guess at what the AS class reads — harmless if wrong,
+            // since the loop-breaker above still bounds the damage. Before this
+            // stub existed the request simply ERRORED and such games coped, so a
+            // wrong-shaped success is worse than no answer: never widen this stub
+            // without checking a game that used to work.
+            let body = if cmd == "connectMovie" {
+                std::format!(
+                    "{{\"success\":true,\"command_id\":\"{cmd}\",\"movie_id\":1,                     \"movie_name\":\"FlashNX\",\"movie_version\":\"1\",                     \"ad_url\":\"\",\"deny_host\":false,\"session_id\":\"flashnx\"}}"
+                )
+                .into_bytes()
+            } else {
+                std::format!("{{\"success\":true,\"command_id\":\"{cmd}\"}}").into_bytes()
+            };
             tracing::info!("sidecar: NewgroundsAPI gateway stubbed (cmd={cmd}) for {resolved}");
             let resp: Box<dyn SuccessResponse> = Box::new(SidecarResponse {
                 url: resolved.to_string(),

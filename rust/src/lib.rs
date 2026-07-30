@@ -725,6 +725,11 @@ fn ensure_swf_loaded() -> Option<(std::vec::Vec<u8>, std::string::String)> {
         bytes.len(),
         path,
     ));
+    // Size the decoded-bitmap budget against THIS movie and clear the previous
+    // game's accounting. The counter is process-global, so without the reset a
+    // second launch starts already "full" and refuses nearly every bitmap
+    // (observed on Super Smash Flash 2: white sprites, varying run to run).
+    ruffle_core::reset_bitmap_cache(bytes.len() as u64);
     // Ruffle's URL parser rejects "sdmc" as an IDN, so we synthesize an
     // http URL keyed by the basename. Stable across restarts → SharedObject
     // paths stay the same.

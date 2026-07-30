@@ -1,0 +1,554 @@
+diff --git a/core/src/avm1/globals/bitmap_data.rs b/core/src/avm1/globals/bitmap_data.rs
+index b292fd4c7..e09d1e5a6 100644
+--- a/core/src/avm1/globals/bitmap_data.rs
++++ b/core/src/avm1/globals/bitmap_data.rs
+@@ -112,6 +112,21 @@ fn constructor<'gc>(
+         return Ok(Value::Undefined);
+     }
+ 
++    // Switch OOM guard (New Super Bowser World cutscene): the game spawns dozens
++    // of ~8.5 MB surfaces and holds them all, exhausting the CPU heap. Past the
++    // budget, refuse like an invalid size — `undefined` is a value AVM1 games
++    // already cope with (they routinely `new BitmapData(0,0)`), so this drops a
++    // surface instead of aborting the whole app.
++    if crate::bitmap::bitmap_data::bitmapdata_would_exceed_budget(width, height) {
++        tracing::warn!(
++            "BitmapData OVER BUDGET: refusing {}x{} (live={} MB)",
++            width,
++            height,
++            crate::bitmap::bitmap_data::bitmapdata_live_bytes() / (1024 * 1024)
++        );
++        return Ok(Value::Undefined);
++    }
++
+     let bitmap_data = BitmapData::new(
+         activation.context.gc_context,
+         width,
+diff --git a/core/src/avm2/amf.rs b/core/src/avm2/amf.rs
+index 26a58d877..18f94e1a0 100644
+--- a/core/src/avm2/amf.rs
++++ b/core/src/avm2/amf.rs
+@@ -25,7 +25,55 @@ pub fn serialize_value<'gc>(
+     amf_version: AMFVersion,
+     object_table: &mut ObjectTable<'gc>,
+ ) -> Option<AmfValue> {
+-    match elem.normalize() {
++    let normalized = elem.normalize();
++
++    // FlashNX patch: cycle (+ depth) guard for the AMF serializer. Upstream fills
++    // `object_table` only AFTER recursing into an object (post-order), so a
++    // SharedObject with a circular reference recurses forever: a stack overflow
++    // (crash) for a simple cycle, or exponential re-serialization (hang) for a
++    // branching one. Hemp Tycoon hits this when it saves on each plant action.
++    // Upstream master has no guard (checked 2026-06). Break any object already on
++    // the serialization stack (a real cycle) by returning None, and keep a depth
++    // backstop for pathological acyclic nesting. The dropped back-reference makes
++    // the .sol slightly lossy but finite, instead of crashing/freezing the player.
++    thread_local! {
++        static VISITING: std::cell::RefCell<std::collections::HashSet<usize>> =
++            std::cell::RefCell::new(std::collections::HashSet::new());
++        static DEPTH: std::cell::Cell<u32> = std::cell::Cell::new(0);
++    }
++    const MAX_DEPTH: u32 = 4096;
++
++    let visiting_key = normalized.as_object().map(|o| o.as_ptr() as usize);
++    if let Some(key) = visiting_key {
++        // insert() == false means the key was already present, i.e. this object
++        // is being serialized further up the stack == a circular reference.
++        let newly_inserted = VISITING.with(|v| v.borrow_mut().insert(key));
++        if !newly_inserted {
++            return None;
++        }
++    }
++    let depth = DEPTH.with(|d| {
++        let v = d.get() + 1;
++        d.set(v);
++        v
++    });
++    struct SerGuard(Option<usize>);
++    impl Drop for SerGuard {
++        fn drop(&mut self) {
++            DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
++            if let Some(key) = self.0 {
++                VISITING.with(|v| {
++                    v.borrow_mut().remove(&key);
++                });
++            }
++        }
++    }
++    let _guard = SerGuard(visiting_key);
++    if depth > MAX_DEPTH {
++        return None;
++    }
++
++    match normalized {
+         Value::Undefined => Some(AmfValue::Undefined),
+         Value::Null => Some(AmfValue::Null),
+         Value::Bool(b) => Some(AmfValue::Bool(b)),
+diff --git a/core/src/avm2/globals/flash/display/BitmapData.as b/core/src/avm2/globals/flash/display/BitmapData.as
+index 952cc8f9f..1c8a0d959 100644
+--- a/core/src/avm2/globals/flash/display/BitmapData.as
++++ b/core/src/avm2/globals/flash/display/BitmapData.as
+@@ -198,14 +198,7 @@ package flash.display {
+             alphaMultiplier:uint
+         ):void;
+ 
+-        public function generateFilterRect(sourceRect:Rectangle, filter:BitmapFilter):Rectangle {
+-            // Flash always reports that a ShaderFilter affects the entire BitmapData, ignoring sourceRect.
+-            if (filter is ShaderFilter) {
+-                return this.rect.clone();
+-            }
+-            stub_method("flash.display.BitmapData", "generateFilterRect");
+-            return sourceRect.clone();
+-        }
++        public native function generateFilterRect(sourceRect:Rectangle, filter:BitmapFilter):Rectangle;
+ 
+         [API("680")]
+         public function encode(rect:Rectangle, compressor:Object, byteArray:ByteArray = null):ByteArray {
+diff --git a/core/src/avm2/globals/flash/display/bitmap_data.rs b/core/src/avm2/globals/flash/display/bitmap_data.rs
+index 57ca11ff3..1461abcf9 100644
+--- a/core/src/avm2/globals/flash/display/bitmap_data.rs
++++ b/core/src/avm2/globals/flash/display/bitmap_data.rs
+@@ -8,7 +8,7 @@ use crate::avm2::error::{
+     make_error_2027,
+ };
+ use crate::avm2::filters::FilterAvm2Ext;
+-use crate::avm2::globals::flash::display::display_object::object_to_rectangle;
++use crate::avm2::globals::flash::display::display_object::{new_rectangle, object_to_rectangle};
+ use crate::avm2::globals::flash::geom::transform::object_to_color_transform;
+ use crate::avm2::globals::flash::geom::transform::object_to_matrix;
+ use crate::avm2::globals::slots::{
+@@ -1124,6 +1124,38 @@ pub fn get_rect<'gc>(
+     Ok(Value::Undefined)
+ }
+ 
++/// Implement `BitmapData.generateFilterRect` — the rectangle `filter` expands
++/// `sourceRect` to. Games that pre-render filtered bitmaps (e.g. Disney's DIG
++/// "BitmapMovieClip" shell) size their buffers from this; the old stub returned
++/// `sourceRect` unchanged, clipping blurred/glowing sprites.
++pub fn generate_filter_rect<'gc>(
++    activation: &mut Activation<'_, 'gc>,
++    this: Value<'gc>,
++    args: &[Value<'gc>],
++) -> Result<Value<'gc>, Error<'gc>> {
++    let this = this.as_object().unwrap();
++
++    if let Some(bitmap_data) = this.as_bitmap_data() {
++        let source_rect = object_to_rectangle(args.get_object(activation, 0, "sourceRect")?);
++        let filter_obj = args.get_object(activation, 1, "filter")?;
++        let filter = Filter::from_avm2_object(activation, filter_obj)?;
++        // Flash reports a ShaderFilter as affecting the entire BitmapData.
++        let dest = if matches!(filter, Filter::ShaderFilter(_)) {
++            Rectangle {
++                x_min: Twips::ZERO,
++                x_max: Twips::from_pixels(bitmap_data.width() as f64),
++                y_min: Twips::ZERO,
++                y_max: Twips::from_pixels(bitmap_data.height() as f64),
++            }
++        } else {
++            filter.calculate_dest_rect(source_rect)
++        };
++        return new_rectangle(activation, dest);
++    }
++
++    Ok(Value::Undefined)
++}
++
+ /// Implement `BitmapData.applyFilter`
+ pub fn apply_filter<'gc>(
+     activation: &mut Activation<'_, 'gc>,
+diff --git a/core/src/avm2/globals/flash/display/display_object.rs b/core/src/avm2/globals/flash/display/display_object.rs
+index 16b2c8f84..50644e315 100644
+--- a/core/src/avm2/globals/flash/display/display_object.rs
++++ b/core/src/avm2/globals/flash/display/display_object.rs
+@@ -863,7 +863,7 @@ pub fn set_blend_mode<'gc>(
+     Ok(Value::Undefined)
+ }
+ 
+-fn new_rectangle<'gc>(
++pub(crate) fn new_rectangle<'gc>(
+     activation: &mut Activation<'_, 'gc>,
+     rectangle: Rectangle<Twips>,
+ ) -> Result<Value<'gc>, Error<'gc>> {
+diff --git a/core/src/avm2/globals/flash/display/shader_job.rs b/core/src/avm2/globals/flash/display/shader_job.rs
+index ce5e8a5d5..f69928e2e 100644
+--- a/core/src/avm2/globals/flash/display/shader_job.rs
++++ b/core/src/avm2/globals/flash/display/shader_job.rs
+@@ -324,11 +324,20 @@ pub fn start<'gc>(
+         }
+     }
+ 
+-    let output = activation
+-        .context
+-        .renderer
+-        .run_pixelbender_shader(shader_handle, &arguments, &pixel_bender_target)
+-        .expect("Failed to run shader");
++    // FlashNX patch: backend can't run PixelBender → warn + no-op instead of the
++    // `.expect` panic. (Unreachable on Switch today since compile always fails and
++    // the handle is None above, but kept correct if a backend ever compiles.)
++    let output = match activation.context.renderer.run_pixelbender_shader(
++        shader_handle,
++        &arguments,
++        &pixel_bender_target,
++    ) {
++        Ok(output) => output,
++        Err(e) => {
++            tracing::warn!("FlashNX: run_pixelbender_shader failed, ShaderJob no-op: {e:?}");
++            return Ok(Value::Undefined);
++        }
++    };
+ 
+     match output {
+         PixelBenderOutput::Bitmap(sync_handle) => {
+diff --git a/core/src/avm2/globals/flash/system/capabilities.rs b/core/src/avm2/globals/flash/system/capabilities.rs
+index f5a989cd8..205c028e9 100644
+--- a/core/src/avm2/globals/flash/system/capabilities.rs
++++ b/core/src/avm2/globals/flash/system/capabilities.rs
+@@ -58,11 +58,19 @@ pub fn get_player_type<'gc>(
+     _args: &[Value<'gc>],
+ ) -> Result<Value<'gc>, Error<'gc>> {
+     // TODO: When should "External" be returned?
++    // FlashNX runs SWFs that were authored for the browser plugin, and some
++    // games gate on `Capabilities.playerType`: Disney/Yamago minigames call
++    // `UtilsSystem.isStandalone()` (== "StandAlone") and, when true, take an
++    // internal DEV-harness launch path (loading `../../deploy/…` files that were
++    // never shipped) instead of their normal container path — dead-ending on a
++    // blank stage. Reporting "PlugIn" (what web Ruffle already reports, the
++    // best-tested target) makes them take the production path that loads
++    // game_config.xml + companions from the game dir, which we DO have.
+     let player_type = if cfg!(target_family = "wasm") {
+         "PlugIn"
+     } else {
+         match activation.context.avm2.player_runtime {
+-            PlayerRuntime::FlashPlayer => "StandAlone",
++            PlayerRuntime::FlashPlayer => "PlugIn",
+             PlayerRuntime::AIR => "Desktop",
+         }
+     };
+diff --git a/core/src/bitmap/bitmap_data.rs b/core/src/bitmap/bitmap_data.rs
+index 29eb34fdc..8eb4761bd 100644
+--- a/core/src/bitmap/bitmap_data.rs
++++ b/core/src/bitmap/bitmap_data.rs
+@@ -15,6 +15,100 @@ use std::ops::Range;
+ use swf::{Rectangle, Twips};
+ use tracing::instrument;
+ 
++// ── CPU BitmapData memory accounting (FlashNX) ────────────────────────────────
++//
++// Ruffle keeps every BitmapData's pixels in a CPU-side Vec. A cutscene-heavy game
++// can allocate hundreds of large surfaces and OOM-abort the whole process. We
++// track live bytes here so the AVM1 constructor can refuse new surfaces past a
++// budget (returning `undefined`, which AS2 code handles) instead of letting the
++// process OOM-abort. Live, not cumulative: `MemGuard` subtracts on drop, including
++// on GC sweep.
++static BITMAPDATA_LIVE_BYTES: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++
++/// Ceiling for live CPU BitmapData bytes.
++pub const BITMAPDATA_BUDGET_BYTES: u64 = 384 * 1024 * 1024;
++
++/// Live CPU bytes currently held by BitmapData pixel buffers.
++pub fn bitmapdata_live_bytes() -> u64 {
++    BITMAPDATA_LIVE_BYTES.load(std::sync::atomic::Ordering::Relaxed)
++}
++
++/// Only surfaces at least this big are ever refused. This floor is **load
++/// bearing** (see `BITMAPDATA_BUDGET_BYTES`): it MUST sit ABOVE the blit engine's
++/// working buffers, or refusing one freezes the game. Super Bowser World's screen
++/// buffer is 640x480 (~1.2 MB) and its ground strips are 1280x240 (~1.2 MB); a
++/// 1 MB floor caught those, refused them, and froze the engine into per-frame
++/// re-render (the 2 s freeze regression, hardware 2026-07-20). At 4 MB only the
++/// genuine 1824x1174 (~8.5 MB) "monsters" are refused - bounding the cutscene CPU
++/// flood without ever touching a working buffer. Ground-strip memory is bounded
++/// on the GPU side instead (`DroppedBitmap`), which never freezes because it keeps
++/// a valid handle and Ruffle's CPU pixels stay intact for collision.
++const BITMAPDATA_LARGE_SURFACE_BYTES: u64 = 4 * 1024 * 1024;
++
++/// True when allocating a `width x height` BitmapData now would push live CPU
++/// bytes past [`BITMAPDATA_BUDGET_BYTES`] - but only for individually large
++/// surfaces (see [`BITMAPDATA_LARGE_SURFACE_BYTES`]). The AVM1 constructor uses
++/// this to degrade gracefully (return `undefined`) instead of OOM-aborting.
++pub fn bitmapdata_would_exceed_budget(width: u32, height: u32) -> bool {
++    if BITMAPDATA_BUDGET_BYTES == 0 {
++        return false;
++    }
++    let want = width as u64 * height as u64 * 4;
++    // Never refuse a small surface - it can't be the OOM culprit, and refusing
++    // one risks breaking a game that needs it.
++    if want < BITMAPDATA_LARGE_SURFACE_BYTES {
++        return false;
++    }
++    BITMAPDATA_LIVE_BYTES
++        .load(std::sync::atomic::Ordering::Relaxed)
++        .saturating_add(want)
++        > BITMAPDATA_BUDGET_BYTES
++}
++
++/// True when live CPU BitmapData bytes are high enough that the incremental GC
++/// is likely to fall behind the allocation rate.
++///
++/// New Super Bowser World allocates ~1.2 MB ground strips in bursts and drops
++/// them again, so they ARE collectable — but `collect_debt()` only pays the
++/// incremental debt each frame, and hardware traces show the live total sawtoothing
++/// upward (259 -> 329 -> 349 -> 398 MB) until the heap refuses a 640x480 screen
++/// buffer. Those strips are 1.2 MB, i.e. BELOW `BITMAPDATA_LARGE_SURFACE_BYTES`,
++/// so the refusal guard can never catch them — and it must not, since the screen
++/// buffer it would also catch is exactly the same size. Forcing a full cycle when
++/// pressure is high flattens the peaks instead of refusing anything.
++pub fn bitmapdata_under_pressure() -> bool {
++    if BITMAPDATA_BUDGET_BYTES == 0 {
++        return false;
++    }
++    BITMAPDATA_LIVE_BYTES.load(std::sync::atomic::Ordering::Relaxed)
++        > BITMAPDATA_BUDGET_BYTES / 2
++}
++
++/// Zero-cost lifetime guard for a `BitmapRawData`'s pixel allocation: adds its
++/// byte size to the live counter on creation and subtracts it on drop (including
++/// GC sweep, since it lives as a plain field of the gc-managed `BitmapRawData`).
++/// `BitmapRawData` is `#[collect(no_drop)]` - that only forbids a Drop on the
++/// struct itself; a field owning a Drop type (like the `Vec` already does) is
++/// fine.
++struct MemGuard(u64);
++impl MemGuard {
++    fn new(bytes: u64) -> Self {
++        BITMAPDATA_LIVE_BYTES.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
++        MemGuard(bytes)
++    }
++}
++impl Drop for MemGuard {
++    fn drop(&mut self) {
++        BITMAPDATA_LIVE_BYTES.fetch_sub(self.0, std::sync::atomic::Ordering::Relaxed);
++    }
++}
++impl std::fmt::Debug for MemGuard {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        write!(f, "MemGuard({})", self.0)
++    }
++}
++
+ /// An implementation of the Lehmer/Park-Miller random number generator
+ /// Uses the fixed parameters m = 2,147,483,647 and a = 16,807
+ pub struct LehmerRng {
+@@ -369,6 +463,10 @@ pub struct BitmapRawData<'gc> {
+     #[collect(require_static)]
+     pixels: Vec<Color>,
+ 
++    /// Keeps `BITMAPDATA_LIVE_BYTES` in step with `pixels` for this instance.
++    #[collect(require_static)]
++    _mem: MemGuard,
++
+     width: u32,
+     height: u32,
+     transparency: bool,
+@@ -428,7 +526,7 @@ mod wrapper {
+     use ruffle_render::commands::CommandHandler;
+     use std::cell::Ref;
+ 
+-    use super::{BitmapRawData, DirtyState, copy_pixels_to_bitmapdata};
++    use super::{BitmapRawData, DirtyState, MemGuard, copy_pixels_to_bitmapdata};
+ 
+     /// A wrapper type that ensures that we always wait for a pending
+     /// GPU -> CPU sync to complete (using `sync_handle`) before accessing
+@@ -476,6 +574,7 @@ mod wrapper {
+                 mc,
+                 BitmapRawData {
+                     pixels: Vec::new(),
++                    _mem: MemGuard::new(0),
+                     width: 0,
+                     height: 0,
+                     transparency: false,
+@@ -499,6 +598,7 @@ mod wrapper {
+             let data = self.sync(renderer).borrow();
+             BitmapRawData {
+                 pixels: data.pixels.clone(),
++                _mem: MemGuard::new((data.pixels.len() * 4) as u64),
+                 width: data.width,
+                 height: data.height,
+                 transparency: data.transparency,
+@@ -734,6 +834,7 @@ impl<'gc> BitmapRawData<'gc> {
+                 Color::bgra_u32(fill_color).to_premultiplied_alpha(transparency);
+                 width as usize * height as usize
+             ],
++            _mem: MemGuard::new(width as u64 * height as u64 * 4),
+             width,
+             height,
+             transparency,
+@@ -754,6 +855,7 @@ impl<'gc> BitmapRawData<'gc> {
+         pixels: Vec<Color>,
+     ) -> Self {
+         Self {
++            _mem: MemGuard::new(pixels.len() as u64 * 4),
+             pixels,
+             width,
+             height,
+@@ -776,6 +878,7 @@ impl<'gc> BitmapRawData<'gc> {
+         self.width = 0;
+         self.height = 0;
+         self.pixels = Vec::new(); // free the CPU pixel buffer
++        self._mem = MemGuard::new(0); // release its bytes from the live counter now
+         self.bitmap_handle = None;
+         // There's no longer a handle to update
+         self.dirty_state = DirtyState::Clean;
+diff --git a/core/src/character.rs b/core/src/character.rs
+index f1843308c..0442354b7 100644
+--- a/core/src/character.rs
++++ b/core/src/character.rs
+@@ -73,7 +73,28 @@ impl<'gc> BitmapCharacter<'gc> {
+         if let Some(handle) = self.handle.get() {
+             return Ok(handle.clone());
+         }
++        // FlashNX: refuse rather than OOM-abort the process.
++        //
++        // Decoded handles are cached here FOREVER (see the FIXME below, which is
++        // upstream's own), so a movie that streams through hundreds of unique
++        // full-size frames walks the heap to death. Sonic RPG Ep.10 does exactly
++        // that: ~2.77 MB per 1363x509 frame, dead around 210-250 MB accumulated
++        // (its own SWF is already 284 MB). Returning Err degrades gracefully by
++        // design — MovieLibrarySource::bitmap_handle logs it and yields None, so
++        // the shape draws without its fill instead of killing the app, which
++        // could cost the user unsaved progress in whatever they play next.
++        let sz = self.compressed.size();
++        let want = sz.width as u64 * sz.height as u64 * 4;
++        if bitmap_cache_would_exceed(want) {
++            tracing::warn!(
++                "bitmap decode refused ({}x{}): cached-bitmap budget exhausted",
++                sz.width,
++                sz.height,
++            );
++            return Err(RenderError::TooLarge);
++        }
+         let decoded = self.compressed.decode()?;
++        CACHED_BITMAP_BYTES.fetch_add(want, std::sync::atomic::Ordering::Relaxed);
+         let new_handle = backend.register_bitmap(decoded)?;
+         // FIXME - do we ever want to release this handle, to avoid taking up GPU memory?
+         self.handle.set(new_handle.clone()).unwrap();
+@@ -96,6 +117,57 @@ pub enum CompressedBitmap {
+     Lossless(DefineBitsLossless<'static>),
+ }
+ 
++/// Bytes of DECODED bitmap held by `CompressedBitmap::bitmap_handle`'s cache.
++///
++/// That cache is never evicted (upstream FIXME in `bitmap_handle`), so this only
++/// ever grows within a session. It is NOT the same pool as
++/// `bitmap::bitmap_data::BITMAPDATA_LIVE_BYTES`, which tracks AVM-created
++/// BitmapData surfaces and is properly freed on GC.
++static CACHED_BITMAP_BYTES: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++
++/// Ceiling for that cache, in bytes. Set per movie by [`reset_bitmap_cache`] —
++/// a FIXED ceiling cannot serve both ends of the range:
++///
++///   Sonic RPG Ep.10  SWF is 284 MB resident -> died around 213-253 MB of bitmaps
++///   Super Smash Flash 2  SWF is 2 MB (assets stream from SD) -> wants far more
++///
++/// so the movie's own resident size is subtracted from a total allowance. A fixed
++/// 160 MB starved SSF2 (13121 refusals, sprites drawn white) while still being
++/// generous for Sonic.
++static CACHED_BITMAP_BUDGET_BYTES: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(DEFAULT_BITMAP_ALLOWANCE);
++
++/// Total we are willing to see resident as movie + decoded bitmaps.
++const TOTAL_BITMAP_ALLOWANCE: u64 = 450 * 1024 * 1024;
++/// Floor, so a monstrous movie still gets room to show something.
++const MIN_BITMAP_BUDGET: u64 = 96 * 1024 * 1024;
++const DEFAULT_BITMAP_ALLOWANCE: u64 = TOTAL_BITMAP_ALLOWANCE;
++
++/// Start a new movie: clear the accounting and size the budget from that movie's
++/// resident bytes. MUST be called per game — the counter is process-global, and
++/// leaving it set made a second launch of the same game refuse almost every
++/// bitmap from the first frame (observed: refusals 54 log lines in).
++pub fn reset_bitmap_cache(movie_bytes: u64) {
++    CACHED_BITMAP_BYTES.store(0, std::sync::atomic::Ordering::Relaxed);
++    let budget = TOTAL_BITMAP_ALLOWANCE
++        .saturating_sub(movie_bytes)
++        .max(MIN_BITMAP_BUDGET);
++    CACHED_BITMAP_BUDGET_BYTES.store(budget, std::sync::atomic::Ordering::Relaxed);
++    tracing::info!(
++        "bitmap cache: budget {} MB (movie {} MB)",
++        budget / (1024 * 1024),
++        movie_bytes / (1024 * 1024),
++    );
++}
++
++fn bitmap_cache_would_exceed(want: u64) -> bool {
++    CACHED_BITMAP_BYTES
++        .load(std::sync::atomic::Ordering::Relaxed)
++        .saturating_add(want)
++        > CACHED_BITMAP_BUDGET_BYTES.load(std::sync::atomic::Ordering::Relaxed)
++}
++
+ impl CompressedBitmap {
+     pub fn size(&self) -> BitmapSize {
+         match self {
+diff --git a/core/src/display_object.rs b/core/src/display_object.rs
+index 2e6e01783..c4cf84d64 100644
+--- a/core/src/display_object.rs
++++ b/core/src/display_object.rs
+@@ -2585,6 +2585,17 @@ pub trait TDisplayObject<'gc>:
+     /// Tests if a given stage position point intersects with the world bounds of this object.
+     #[no_dynamic]
+     fn hit_test_bounds(self, point: Point<Twips>) -> bool {
++        // Parity with Adobe Flash Player: a display object whose composed
++        // world transform has zero determinant (zero-scale on any axis, or
++        // degenerate skew) is not hit-testable. Without this guard, a zero-
++        // scale placeholder whose translation happens to coincide with the
++        // hit point reports a positive hit, which Mario 63 relies on NOT
++        // happening in the castle scene (#6906 — Toad NPC + ground collision
++        // checks against an offscreen placeholder MC). See the discussion at
++        // https://github.com/ruffle-rs/ruffle/issues/6906 for context.
++        if self.local_to_global_matrix().determinant().abs() <= f32::EPSILON {
++            return false;
++        }
+         self.world_bounds(BoundsMode::Engine).contains(point)
+     }
+ 
+@@ -2604,6 +2615,12 @@ pub trait TDisplayObject<'gc>:
+         point: Point<Twips>,
+         options: HitTestOptions,
+     ) -> bool {
++        // Same zero-scale guard as hit_test_bounds — see #6906. Applied here
++        // too because some hit_test_shape overrides (movie_clip, button)
++        // bypass hit_test_bounds and walk into per-shape tracing directly.
++        if self.local_to_global_matrix().determinant().abs() <= f32::EPSILON {
++            return false;
++        }
+         // Default to using bounding box.
+         (!options.contains(HitTestOptions::SKIP_INVISIBLE) || self.visible())
+             && self.hit_test_bounds(point)
+diff --git a/core/src/lib.rs b/core/src/lib.rs
+index 6e5379213..abef7d4b4 100644
+--- a/core/src/lib.rs
++++ b/core/src/lib.rs
+@@ -19,6 +19,8 @@ mod avm_rng;
+ mod binary_data;
+ pub mod bitmap;
+ mod character;
++/// FlashNX: per-movie reset + sizing of the decoded-bitmap cache budget.
++pub use character::reset_bitmap_cache;
+ pub mod context;
+ pub mod context_menu;
+ mod drawing;
+diff --git a/core/src/player.rs b/core/src/player.rs
+index edb74cccb..a44be412f 100644
+--- a/core/src/player.rs
++++ b/core/src/player.rs
+@@ -2382,7 +2382,17 @@ impl Player {
+         self.update_mouse_state(EnumSet::empty(), false, &mut false);
+ 
+         // GC
+-        self.gc_arena.borrow_mut().collect_debt();
++        //
++        // FlashNX: under BitmapData pressure, complete a whole cycle rather than
++        // just paying down the incremental debt (see `bitmapdata_under_pressure`).
++        // The full cycle costs real time, which is why it is gated — but a stall
++        // beats an OOM abort, and it only engages once a game is already holding
++        // hundreds of megabytes of collectable surfaces.
++        if crate::bitmap::bitmap_data::bitmapdata_under_pressure() {
++            self.gc_arena.borrow_mut().finish_cycle();
++        } else {
++            self.gc_arena.borrow_mut().collect_debt();
++        }
+ 
+         rval
+     }
