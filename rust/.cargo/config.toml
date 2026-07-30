@@ -48,7 +48,22 @@ rustflags = [
 
 [unstable]
 build-std = ["std", "panic_abort", "core", "alloc", "compiler_builtins"]
-build-std-features = ["compiler-builtins-mem"]
+# NOTE (2026-07-30): "compiler-builtins-mem" is deliberately NOT enabled.
+#
+# It makes compiler_builtins emit its own memcpy/memcmp/memset/strlen, which are
+# portable reference implementations — memcmp compares ONE BYTE per iteration
+# (verified by disassembling FlashNX.elf: `ldrb w8, [x0], #1`). devkitPro's newlib
+# already ships AArch64-tuned versions (memcpy 16 B/iter with ldp/stp plus a 128 B
+# fast path, memcmp 16 B/iter with ldp+ccmp) and they were never being linked:
+# compiler_builtins' object gets pulled in anyway to satisfy Rust arithmetic
+# intrinsics (__umodti3), and its WEAK memcpy then defines the symbol, so the
+# linker never has an undefined symbol to go looking for in libc.a. Link order
+# cannot fix that — the symbol has to not exist. With the feature off, the .map
+# resolves these to libg.a(libc_a-memcpy.o) etc.
+#
+# Matters because they are everywhere: 2704 `bl memcpy`, 813 `bl memcmp`, 518
+# `bl memset` call sites, hit constantly by the AVM interpreter and by texture
+# staging. If a link ever fails with an undefined mem* symbol, re-add the feature.
 
 # Phase 1.2: stdlib's build.rs (in rust-src) skips the `restricted_std` cfg
 # when target_vendor==nintendo && target_env==newlib. Our target spec doesn't
