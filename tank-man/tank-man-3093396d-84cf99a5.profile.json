@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "id": "tank-man-3093396d-84cf99a5",
+  "game": {
+    "title": "Tank Man",
+    "fp_uuid": "",
+    "swf_hash": "3093396dcd29514a"
+  },
+  "author": "",
+  "verified": false,
+  "bindings": {
+    "A": "A",
+    "B": "S",
+    "Down": "Down",
+    "L": "Escape",
+    "Left": "Left",
+    "Plus": "Q",
+    "R": "Enter",
+    "Right": "Right",
+    "StickLDown": "Down",
+    "StickLLeft": "Left",
+    "StickLRight": "Right",
+    "StickLUp": "Up",
+    "Up": "Up",
+    "X": "X",
+    "Y": "Shift",
+    "ZL": "Right click",
+    "ZR": "Left click"
+  },
+  "bindings_p2": {
+    "A": "Num1",
+    "B": "Num2",
+    "Down": "S",
+    "L": "Num6",
+    "Left": "A",
+    "R": "Num5",
+    "Right": "D",
+    "StickLDown": "S",
+    "StickLLeft": "A",
+    "StickLRight": "D",
+    "StickLUp": "W",
+    "Up": "W",
+    "X": "Num3",
+    "Y": "Num4"
+  },
+  "combo_layers": {},
+  "combo_layers_p2": {},
+  "cursor_speed": -1,
+  "show_cursor": true
+}
