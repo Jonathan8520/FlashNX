@@ -2181,6 +2181,31 @@ pub fn s() -> &'static Strings {
 
 // ── Dynamic strings ─────────────────────────────────────────────────────
 
+/// "{n} GAME(S)" under the JOUER banner. Same per-language agreement rules as
+/// `files_found` (see there for why Russian/Chinese use a count phrasing).
+pub fn games_count(n: usize) -> std::string::String {
+    match current() {
+        Lang::En if n == 1 => "1 GAME".into(),
+        Lang::En => std::format!("{} GAMES", n),
+        // French: 0 and 1 are singular.
+        Lang::Fr if n <= 1 => std::format!("{} JEU", n),
+        Lang::Fr => std::format!("{} JEUX", n),
+        Lang::Es if n == 1 => "1 JUEGO".into(),
+        Lang::Es => std::format!("{} JUEGOS", n),
+        Lang::Ru => std::format!("ИГР: {}", n),
+        // German: 0 takes the plural ("0 Spiele").
+        Lang::De if n == 1 => "1 SPIEL".into(),
+        Lang::De => std::format!("{} SPIELE", n),
+        Lang::It if n == 1 => "1 GIOCO".into(),
+        Lang::It => std::format!("{} GIOCHI", n),
+        Lang::Pt if n == 1 => "1 JOGO".into(),
+        Lang::Pt => std::format!("{} JOGOS", n),
+        Lang::Zh => std::format!("\u{6E38}\u{620F}: {}", n), // 游戏: {}
+        // Turkish has no plural after a number (the numeral already marks it).
+        Lang::Tr => std::format!("{} OYUN", n),
+    }
+}
+
 /// "{n} .SWF FILE(S) FOUND" with real singular/plural agreement per language
 /// (no literal "(s)"). Russian uses a count-style phrasing that sidesteps its
 /// 3-form agreement.

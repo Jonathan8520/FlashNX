@@ -6506,24 +6506,28 @@ impl SwitchRenderBackend {
             );
         }
 
-        // Active-filter indicator (same as the list view).
-        if let Some(f) = filter {
-            if !f.is_empty() {
-                let sub = std::format!(
-                    "{} / {} - {}: {}",
-                    entries.len(), total_unfiltered, crate::loc::s().files_filter, f,
-                );
-                let ss = 2.0;
-                let sw = self.measure_text(&sub, ss);
-                self.draw_text(
-                    (vw - sw) * 0.5,
-                    128.0,
-                    ss,
-                    &sub,
-                    swf::Color::from_rgb(0xAABFD8, 255),
-                );
-            }
-        }
+        // Sub-line under the banner: the active filter when searching, else the
+        // library size. Same slot either way, so the header height never moves.
+        let sub = match filter {
+            Some(f) if !f.is_empty() => std::format!(
+                "{} / {} - {}: {}",
+                entries.len(), total_unfiltered, crate::loc::s().files_filter, f,
+            ),
+            _ => crate::loc::games_count(entries.len()),
+        };
+        // Sits in the strip between the banner (ends at 118) and the tile band
+        // (starts at `band_top` below). At scale 2 from y=128 it was 14 px tall,
+        // so it reached into that band and the tiles, drawn after it, ran over
+        // it while scrolling. 1.8 from 120 ends at ~133, clear of the band.
+        let ss = 1.8;
+        let sw = self.measure_text(&sub, ss);
+        self.draw_text(
+            (vw - sw) * 0.5,
+            120.0,
+            ss,
+            &sub,
+            swf::Color::from_rgb(0xAABFD8, 255),
+        );
 
         // ── Cover gallery (v1.2.0) ───────────────────────────────────────
         // Fixed 5-per-row GRID. Every tile is the same size and covers are
@@ -6581,7 +6585,9 @@ impl SwitchRenderBackend {
         // top edge + its selection frame (which overhangs ~4px, more on a pop)
         // aren't rogned; the 16px headroom still leaves a gap to the banner so a
         // row scrolling UP fades out cleanly instead of overlapping it.
-        let band_top = TOP - 16.0;
+        // -12 (not -16): a tile scrolling in is still revealed gradually, but the
+        // band no longer reaches up into the count / filter line above it.
+        let band_top = TOP - 12.0;
         let band_bot = TOP + rows_visible as f32 * pitch;
         let target_scroll = scroll_offset as f32 * pitch;
         // Selected tile geometry in content space — the eased frame chases it.
