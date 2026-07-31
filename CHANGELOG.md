@@ -14,6 +14,7 @@ More games playable, a faster player, and an import tab that survives a long lis
 - **Very large games download**: the importer streams a game archive straight to the SD card one file at a time instead of holding it in memory, so multi-gigabyte entries (for example *Super Smash Flash 2*) can be fetched and extracted. Whether such a game then runs well is another matter, but it is no longer blocked at the download step.
 - **The IMPORT tab handles a real collection of URLs.** Each row now shows a readable name instead of a truncated URL, with a tag saying whether it is a single `.swf` or a list of files, and a counter of how many of that source's files are already on your SD card. `+ ADD A URL` is pinned to the top so it stays reachable, `-` searches, `Y` sorts (added, name, source, file count), and a URL can be favorited so it pins to the top like a favorited game. The list also scrolls smoothly and can be dragged with a finger.
 - **A saved URL's options show what it is**: type, files on the SD card, the date you added it, and the full URL, so you know what you are about to edit or delete.
+- **Your library size is shown under the logo** ("71 GAMES"), and it follows the search when one is active.
 - **The Flashpoint details popup (`+`) shows the cover and the game's description.**
 - **A toast confirms a finished download**, instead of the download screen simply disappearing.
 - **The library footer shows a multi-file game's real size on the card**, not the size of its small loader file.
