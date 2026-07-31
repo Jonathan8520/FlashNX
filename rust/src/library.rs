@@ -87,17 +87,19 @@ pub(crate) enum Screen {
     /// JOUER sort picker (Y): centered modal — A-Z / recent / most-played / size.
     /// `prev_sel`/`prev_scroll` restore the gallery cursor when B (cancel) is hit.
     SortModal { selection: usize, prev_sel: usize, prev_scroll: usize },
-    /// Sort picker for the DISTANT lists (Y). `fp` = Flashpoint gallery (sorts
-    /// `cover_candidates` by name — developers are unknown so there's no
-    /// developer sort) vs archive.org files (sorts `remote_files` by name/size).
-    /// `reverse` mirrors the JOUER modal's X toggle (local to this picker, not
-    /// persisted). `prev_*` restore the cursor on cancel.
-    RemoteSortModal { selection: usize, fp: bool, reverse: bool, prev_sel: usize, prev_scroll: usize },
+    /// Sort picker for the IMPORTER lists (Y). `kind` picks the target list +
+    /// option set (`SORT_TARGET_*`): archive.org files (name/size), the
+    /// Flashpoint gallery (name only — developers are unknown), or the IMPORTER
+    /// home's saved URLs (added/name/source). `reverse` mirrors the JOUER
+    /// modal's X toggle. `prev_*` restore the cursor on cancel.
+    RemoteSortModal { selection: usize, kind: u8, reverse: bool, prev_sel: usize, prev_scroll: usize },
     // ── Phase 3.7: DISTANT mode (archive.org import) ───────────────────
-    /// IMPORTER home: a navigable LIST of saved URLs + a trailing "+ add" row.
-    /// `selection` indexes [history urls.., add-row]. A launches the selected
-    /// URL (or adds one on the add-row); + opens per-URL options.
-    DistantIdle { selection: usize },
+    /// IMPORTER home: the saved-URL list. Row 0 is the "+ add" row, rows 1..
+    /// index `importer_view` (the filtered + sorted history). `scroll_offset` is
+    /// the topmost visible row — a real field, not derived from `selection`, so
+    /// a touch drag can scroll the list without moving the cursor. A launches
+    /// the selected URL (or adds one); + opens per-URL options.
+    DistantIdle { selection: usize, scroll_offset: usize },
     /// Async archive.org metadata fetch in flight (v1.2.0). The reveal window is
     /// open from the launched URL's row with a spinner; `net::tick_archive_fetch`
     /// is polled each frame in `render`. On success → DistantFiles, on error →
@@ -279,6 +281,12 @@ pub(crate) fn current_sort_reverse() -> bool {
 fn persist_sort() {
     let mode = SORT_MODE.load(std::sync::atomic::Ordering::Relaxed);
     let rev = SORT_REVERSE.load(std::sync::atomic::Ordering::Relaxed);
+    write_sort_pref(SORT_PATH, mode, rev);
+}
+
+/// Shared `digit[R]` writer for both sort prefs (JOUER's `sort.txt` and the
+/// IMPORTER's `import_sort.txt`). Best-effort.
+fn write_sort_pref(path: &str, mode: u8, rev: bool) {
     let digit = match mode {
         1 => '1',
         2 => '2',
@@ -291,7 +299,7 @@ fn persist_sort() {
     } else {
         digit.to_string()
     };
-    if std::fs::write(SORT_PATH, txt.as_bytes()).is_ok() {
+    if std::fs::write(path, txt.as_bytes()).is_ok() {
         crate::sd::commit();
     }
 }
@@ -308,11 +316,11 @@ pub(crate) fn set_sort_reverse(rev: bool) {
     persist_sort();
 }
 
-/// Read the persisted `(mode, reverse)` pair from `sort.txt`. First byte = mode
-/// digit; a trailing `R` (legacy files lacked it) = reversed.
-fn read_sort_prefs() -> (u8, bool) {
+/// Read the persisted `(mode, reverse)` pair from a `digit[R]` pref file. First
+/// byte = mode digit; a trailing `R` (legacy files lacked it) = reversed.
+fn read_sort_prefs(path: &str) -> (u8, bool) {
     use std::io::Read;
-    let mut f = match std::fs::File::open(SORT_PATH) {
+    let mut f = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return (0, false),
     };
@@ -332,15 +340,50 @@ fn read_sort_prefs() -> (u8, bool) {
     (mode, rev)
 }
 
-/// Boot-once load of persisted playtime + sort preference into memory.
+/// Boot-once load of persisted playtime + sort preferences into memory.
 fn ensure_prefs_loaded() {
     if !PREFS_LOADED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         crate::playtime::load();
         crate::favorites::load();
-        let (mode, rev) = read_sort_prefs();
+        let (mode, rev) = read_sort_prefs(SORT_PATH);
         SORT_MODE.store(mode, std::sync::atomic::Ordering::Relaxed);
         SORT_REVERSE.store(rev, std::sync::atomic::Ordering::Relaxed);
+        let (mode, rev) = read_sort_prefs(IMPORT_SORT_PATH);
+        IMPORT_SORT.store(mode, std::sync::atomic::Ordering::Relaxed);
+        IMPORT_REVERSE.store(rev, std::sync::atomic::Ordering::Relaxed);
     }
+}
+
+// ── IMPORTER home sort (Y on the saved-URL list) ─────────────────────────
+//
+// Separate from the JOUER sort: different list, different modes, and the user
+// expects each tab to keep its own choice. 0 = ADDED (most recent first — the
+// order URLs arrive in, which is what you want right after importing), 1 = NAME
+// (by the row's display label), 2 = SOURCE (grouped by host), 3 = FILES (how
+// many `.swf` the source holds).
+const IMPORT_SORT_PATH: &str = "sdmc:/flashnx/import_sort.txt";
+static IMPORT_SORT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+static IMPORT_REVERSE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+/// Number of IMPORTER sort modes (matches the labels in the sort modal).
+pub(crate) const IMPORT_SORT_MODES: usize = 4;
+
+/// 0..=3 index of the active IMPORTER sort (also the sort modal's cursor).
+pub(crate) fn import_sort_index() -> usize {
+    (IMPORT_SORT.load(std::sync::atomic::Ordering::Relaxed) as usize).min(IMPORT_SORT_MODES - 1)
+}
+
+/// Whether the active IMPORTER sort is reversed (the modal's X toggle).
+pub(crate) fn import_sort_reverse() -> bool {
+    IMPORT_REVERSE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Set + persist the IMPORTER sort mode and direction together (they're only
+/// ever changed together, when A is pressed on the sort modal).
+pub(crate) fn set_import_sort(idx: u8, rev: bool) {
+    IMPORT_SORT.store(idx, std::sync::atomic::Ordering::Relaxed);
+    IMPORT_REVERSE.store(rev, std::sync::atomic::Ordering::Relaxed);
+    write_sort_pref(IMPORT_SORT_PATH, idx, rev);
 }
 
 /// On return from a game, add its session duration to the running total.
@@ -527,6 +570,11 @@ pub(crate) struct Entry {
     /// first" sort. Relative order is reliable even with a wrong console clock
     /// (all files are stamped by the same clock).
     pub mtime: u64,
+    /// archive.org item id this game was imported from, read from the `<swf>.url`
+    /// sidecar at scan time. Empty for hand-copied files and for non-archive.org
+    /// imports. Lets the IMPORTER list count how many of an item's files are
+    /// already on SD without touching the filesystem again.
+    pub source_item: std::string::String,
 }
 
 pub(crate) struct State {
@@ -587,6 +635,11 @@ pub(crate) struct State {
     /// Last error message — shown in `Screen::DistantError` until user
     /// dismisses with A/B.
     pub(crate) distant_error: std::string::String,
+    /// URL of the import attempt that produced `distant_error`, so the error
+    /// screen can offer "Y: fix the URL" with the bad one PRE-FILLED instead of
+    /// bouncing the user back to the list to retype it. Empty = the failure
+    /// wasn't URL-level (e.g. a file download inside a valid item), so no Y.
+    pub(crate) failed_url: std::string::String,
     /// Set of basenames already downloaded this session. Used to draw a
     /// `✓` next to entries in `Screen::DistantFiles` so the user knows
     /// what's been pulled. Cleared by `reset` (back-to-library).
@@ -602,6 +655,24 @@ pub(crate) struct State {
     /// swkbd to set/edit; empty input = clear). Lowercase, substring match
     /// against the lowercased filename. `None` = no filter (show all).
     pub(crate) distant_filter: Option<std::string::String>,
+    /// Same idea for the IMPORTER HOME's saved-URL list (Minus). Matched against
+    /// the URL *and* its display label, so "mario" finds
+    /// `https://archive.org/details/super-mario-63` either way.
+    pub(crate) import_filter: Option<std::string::String>,
+    /// Blurb for the game shown in the Flashpoint details popup (`+`), fetched
+    /// per-game when the popup opens. Empty = none published / fetch failed.
+    pub(crate) fp_desc: std::string::String,
+    /// `(url, .swf count, added epoch, favorite)` side data, persisted in
+    /// `distant_history_meta.json`. Feeds the "4/13" badge, the options modal's
+    /// "added on", and the favorite pin; a URL never opened has no count yet.
+    /// Favorites live here rather than in `favorites.json` (which is keyed by
+    /// game basename) so all per-URL data stays in one file.
+    pub(crate) url_meta: std::vec::Vec<(std::string::String, u32, u64, bool)>,
+    /// True once `load_history_meta_from_sd` has a TRUSTWORTHY view of the meta
+    /// file (parsed, or confirmed absent). False after a read/parse error, which
+    /// blocks saving so we can't clobber a table we failed to read. Mirrors
+    /// `history_loaded`.
+    meta_loaded: bool,
     /// (selection, scroll_offset) snapshot taken when the user pressed A
     /// on a file in DistantFiles, so `on_download_finished` can put them
     /// back on the same row instead of jumping to the top of the list.
@@ -719,10 +790,15 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     download_cover_url: None,
     download_title: None,
     distant_error: std::string::String::new(),
+    failed_url: std::string::String::new(),
     downloaded_basenames: std::vec::Vec::new(),
     url_history: std::vec::Vec::new(),
     history_idx: None,
     distant_filter: None,
+    import_filter: None,
+    fp_desc: std::string::String::new(),
+    url_meta: std::vec::Vec::new(),
+    meta_loaded: false,
     download_resume_pos: None,
     history_loaded: false,
     applet_mode: false,
@@ -756,11 +832,22 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
 });
 
 /// Where the URL history persists across boots. Format: JSON array of
-/// strings, max 20 entries (LRU-style — newest at end, oldest dropped
-/// when we exceed). Lives in the same dir as `cacert.pem` so the user's
+/// strings, max `HISTORY_MAX` entries (LRU-style — newest at end, oldest
+/// dropped when we exceed). Lives in the same dir as `cacert.pem` so the user's
 /// `sdmc:/ruffle/` stays SWF-only.
 const HISTORY_PATH: &str = "sdmc:/switch/FlashNX/distant_history.json";
-const HISTORY_MAX: usize = 20;
+/// Runaway guard, NOT a budget. It used to be 20 and silently deleted the
+/// oldest URL every time you imported past it. The IMPORTER home now has search
+/// (Minus), sort (Y) and a scrolling window, so a long history costs nothing to
+/// live with — and losing an import you saved is never an acceptable trade.
+const HISTORY_MAX: usize = 500;
+
+/// Per-URL side data: `[url, .swf count, added epoch]`. The count comes from the
+/// last successful metadata fetch (so the list can show "4/13 on SD" without
+/// re-fetching); the epoch is when the URL was first saved. Kept OUT of
+/// `distant_history.json` so that file stays the plain URL list it has always
+/// been. A missing/corrupt file just means "unknown", never an error.
+const HISTORY_META_PATH: &str = "sdmc:/switch/FlashNX/distant_history_meta.json";
 
 /// Rows of covers visible at once in the JOUER justified gallery (v1.2.0).
 /// Must match the number of rows `draw_library_gallery` fits under the banner.
@@ -905,6 +992,10 @@ pub fn add_path(path: &str, mtime: u64) -> bool {
         .and_then(|m| m.display_name)
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| basename.clone());
+    // Which import source this game came from (its `.url` sidecar). Read here,
+    // alongside the other sidecars, so the IMPORTER list can count an item's
+    // installed files in memory instead of hitting the SD every frame.
+    let source_item = read_source_item(path);
     let entry = Entry {
         path: path.to_string(),
         display_name,
@@ -915,6 +1006,7 @@ pub fn add_path(path: &str, mtime: u64) -> bool {
         is_as3,
         color_chip,
         mtime,
+        source_item,
     };
     log(&std::format!(
         "library: added {} (SWF v{} {}, {})\n",
@@ -1107,8 +1199,158 @@ fn read_sd_text(path: &str, max: usize) -> std::io::Result<std::string::String> 
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "not utf-8"))
 }
 
+/// Read the per-URL side data.
+///
+/// Parsed FIELD BY FIELD out of a generic JSON array rather than deserialised
+/// into a fixed tuple: a row is `[url, count?, added?, favorite?]` and anything
+/// missing takes its default. Deserialising into a rigid tuple meant that adding
+/// one field to this file made every existing row fail to parse — the counts
+/// silently reset to "?" on the next build, and the first save then overwrote
+/// the file with the empty table. This shape can gain fields without ever
+/// invalidating what's already on the card.
+fn load_history_meta_from_sd() {
+    let txt = match read_sd_text(HISTORY_META_PATH, 256 * 1024) {
+        Ok(s) => s,
+        // Absent = legitimately nothing learnt yet; safe to write later.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Ok(mut s) = LIBRARY.lock() {
+                s.meta_loaded = true;
+            }
+            return;
+        }
+        Err(e) => {
+            log(&std::format!("library: history meta read failed: {}\n", e));
+            return;
+        }
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&txt) else {
+        log("library: history meta JSON unreadable (will NOT overwrite)\n");
+        return;
+    };
+    let Some(arr) = json.as_array() else {
+        log("library: history meta is not an array (will NOT overwrite)\n");
+        return;
+    };
+    let mut list: std::vec::Vec<(std::string::String, u32, u64, bool)> =
+        std::vec::Vec::with_capacity(arr.len());
+    for row in arr {
+        let Some(cells) = row.as_array() else { continue };
+        let Some(url) = cells.first().and_then(|v| v.as_str()).filter(|u| !u.is_empty()) else {
+            continue;
+        };
+        let total = cells.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let added = cells.get(2).and_then(|v| v.as_u64()).unwrap_or(0);
+        let fav = cells.get(3).and_then(|v| v.as_bool()).unwrap_or(false);
+        list.push((url.to_string(), total, added, fav));
+    }
+    if let Ok(mut s) = LIBRARY.lock() {
+        log(&std::format!("library: history meta LOADED {} entrie(s)\n", list.len()));
+        s.url_meta = list;
+        s.meta_loaded = true;
+    }
+}
+
+/// Persist the side-data table, dropping rows for URLs no longer in the history
+/// so the file can't grow forever behind the user's back. Best-effort.
+///
+/// Refuses to write when the last load ERRORED (same rule as the history file):
+/// overwriting a table we merely failed to read would turn a transient glitch
+/// into permanent data loss.
+fn save_history_meta(s: &mut State) {
+    // The prune below is only as trustworthy as the URL list it prunes against,
+    // so an unread history blocks the write too — otherwise a failed history
+    // read would make us drop every row as "no longer in the history".
+    if !s.meta_loaded || !s.history_loaded {
+        log("library: history meta not loaded cleanly — keeping the SD copy\n");
+        return;
+    }
+    let history = s.url_history.clone();
+    s.url_meta.retain(|(u, _, _, _)| history.iter().any(|h| h == u));
+    let snapshot = s.url_meta.clone();
+    match serde_json::to_string(&snapshot) {
+        Ok(json) => {
+            if std::fs::write(HISTORY_META_PATH, json.as_bytes()).is_ok() {
+                crate::sd::commit();
+            }
+        }
+        Err(e) => log(&std::format!("library: history meta serialise failed: {}\n", e)),
+    }
+}
+
+/// Remember how many `.swf` files `url` holds (learnt from a metadata fetch),
+/// keeping whatever added-date the row already carries.
+fn remember_url_total(url: &str, total: u32) {
+    let Ok(mut s) = LIBRARY.lock() else { return };
+    match s.url_meta.iter_mut().find(|(u, _, _, _)| u == url) {
+        Some(slot) => {
+            if slot.1 == total {
+                return; // unchanged — no need to rewrite the card
+            }
+            slot.1 = total;
+        }
+        None => s.url_meta.push((url.to_string(), total, now_epoch(), false)),
+    }
+    save_history_meta(&mut s);
+}
+
+/// True if the saved URL is favorited (pinned to the top of the IMPORTER list
+/// and flagged with a gold diamond, like a favorited game).
+pub(crate) fn url_is_favorite(s: &State, url: &str) -> bool {
+    s.url_meta
+        .iter()
+        .find(|(u, _, _, _)| u == url)
+        .map(|(_, _, _, f)| *f)
+        .unwrap_or(false)
+}
+
+/// Flip a saved URL's favorite state and persist. Returns the NEW state.
+fn toggle_url_favorite(s: &mut State, url: &str) -> bool {
+    let now_fav = match s.url_meta.iter_mut().find(|(u, _, _, _)| u == url) {
+        Some(slot) => {
+            slot.3 = !slot.3;
+            slot.3
+        }
+        None => {
+            s.url_meta.push((url.to_string(), 0, now_epoch(), true));
+            true
+        }
+    };
+    save_history_meta(s);
+    now_fav
+}
+
+/// Wall-clock seconds since the epoch, 0 if unavailable. The console clock can
+/// be wrong (that's a known Switch/emuNAND issue) — this only ever feeds an
+/// informational "added on" line, never a decision.
+fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// `YYYY-MM-DD` for a UNIX epoch, or empty for 0/unknown. Civil-from-days
+/// (Howard Hinnant's algorithm) — no date crate in a no_std-ish build.
+pub(crate) fn format_date(epoch: u64) -> std::string::String {
+    if epoch == 0 {
+        return std::string::String::new();
+    }
+    let z = (epoch / 86_400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    std::format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
 fn load_history_from_sd() {
-    // 256 KB cap: history is max 20 URLs (<2 KB); the cap is just a safety net.
+    load_history_meta_from_sd();
+    // 256 KB cap: the history is a few KB at most; the cap is a safety net.
     let txt = match read_sd_text(HISTORY_PATH, 256 * 1024) {
         Ok(s) => s,
         Err(e) => {
@@ -1193,8 +1435,29 @@ fn write_url_sidecar(swf_path: &str, url: &str) {
     crate::sd::commit();
 }
 
-/// Push `url` onto the history. De-dups (if already present, moves to
-/// most-recent end). Truncates to `HISTORY_MAX`. Saves to SD.
+/// archive.org item id behind a game's `<swf>.url` sidecar, lowercased. Empty
+/// when there's no sidecar (hand-copied file) or the source wasn't archive.org
+/// (a direct `.swf` URL or a Flashpoint GameZIP — those are matched by filename
+/// instead, so they need no id).
+fn read_source_item(swf_path: &str) -> std::string::String {
+    let path = std::format!("{}.url", swf_path);
+    let Ok(url) = read_sd_text(&path, 4096) else {
+        return std::string::String::new();
+    };
+    if !url.contains("archive.org") {
+        return std::string::String::new();
+    }
+    crate::net::extract_item_id(url.trim())
+        .map(|id| id.to_lowercase())
+        .unwrap_or_default()
+}
+
+/// Record `url` in the history if it's new. Saves to SD.
+///
+/// A known URL keeps its POSITION: the file's order is the "ADDED" sort, and
+/// bumping an entry to the end on every successful open silently turned that
+/// sort into "last opened" — an order the label never promised and that made
+/// the list reshuffle under the cursor just for looking at something.
 fn push_history(url: &str) {
     let url = url.trim().to_string();
     if url.is_empty() {
@@ -1202,15 +1465,29 @@ fn push_history(url: &str) {
     }
     if let Ok(mut s) = LIBRARY.lock() {
         if let Some(pos) = s.url_history.iter().position(|u| u == &url) {
-            s.url_history.remove(pos);
+            // Already known — nothing to write, just remember which row it is.
+            s.history_idx = Some(pos);
+            return;
         }
+        // New entry: stamp when it was saved (shown in its options modal).
+        s.url_meta.push((url.clone(), 0, now_epoch(), false));
         s.url_history.push(url);
-        while s.url_history.len() > HISTORY_MAX {
+        // Hard ceiling only as a runaway guard (a corrupt writer, not a user):
+        // dropping someone's oldest import to make room is never what they
+        // meant, and the list is searchable + sortable now, so it can be long.
+        if s.url_history.len() > HISTORY_MAX {
+            log(&std::format!(
+                "library: history at the {} cap — dropping the oldest URL\n",
+                HISTORY_MAX,
+            ));
             s.url_history.remove(0);
         }
         s.history_idx = Some(s.url_history.len() - 1);
         let snapshot = s.url_history.clone();
         let loaded = s.history_loaded;
+        if loaded {
+            save_history_meta(&mut s);
+        }
         drop(s);
         // Only persist when we trust our view of the file. If the last load
         // errored, keep the addition in memory but leave the SD file intact
@@ -1275,8 +1552,10 @@ pub fn reset() {
         s.download_cover_url = None;
         s.download_title = None;
         s.distant_error.clear();
+        s.failed_url.clear();
         s.downloaded_basenames.clear();
         s.distant_filter = None;
+        s.import_filter = None;
         s.download_resume_pos = None;
         // url_history + history_idx are deliberately NOT cleared — they
         // persist across back-to-library cycles AND across .nro reboots
@@ -1404,6 +1683,9 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
                     Screen::DistantFiles { selection, .. } => {
                         s.screen = Screen::DistantFiles { selection, scroll_offset: new_off };
                     }
+                    Screen::DistantIdle { selection, .. } => {
+                        s.screen = Screen::DistantIdle { selection, scroll_offset: new_off };
+                    }
                     _ => {}
                 }
             }
@@ -1436,14 +1718,14 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
                             s.screen = Screen::DistantFiles { selection: hit, scroll_offset };
                         }
                     }
-                    Screen::DistantIdle { selection } => {
-                        // URL list: paged (no scroll field), so tap-only. Tap a row
-                        // to select it, tap the selected row again to activate it
-                        // (fetch/download the URL, or open the add-URL keyboard).
+                    Screen::DistantIdle { selection, scroll_offset } => {
+                        // Tap a row to select it, tap the selected row again to
+                        // activate it (fetch/download the URL, or open the
+                        // add-URL keyboard). Dragging is handled above.
                         if hit == selection {
                             launch = true;
                         } else {
-                            s.screen = Screen::DistantIdle { selection: hit };
+                            s.screen = Screen::DistantIdle { selection: hit, scroll_offset };
                         }
                     }
                     _ => {}
@@ -1549,7 +1831,7 @@ pub fn input(button: &str) -> bool {
                                 Screen::List { selection: 0, scroll_offset: 0 }
                             }
                         }
-                        Tab::Importer => Screen::DistantIdle { selection: 0 },
+                        Tab::Importer => distant_idle_at(0),
                         Tab::Reglages => Screen::SettingsModal { selection: 0 },
                     };
                 }
@@ -1564,33 +1846,53 @@ pub fn input(button: &str) -> bool {
                 return true;
             }
         }
-        if let Screen::DistantIdle { selection } = screen_snap {
+        if let Screen::DistantIdle { selection, scroll_offset } = screen_snap {
             if button == "X" {
                 // X on the IMPORTER home = search Flashpoint for a game to
                 // download. Hoisted: swkbd + HTTPS must run WITHOUT the lock.
                 run_fp_search_flow();
                 return true;
             }
+            if button == "Minus" {
+                // Search the saved URLs — same Minus-opens-swkbd convention as
+                // the JOUER gallery and the archive.org file list.
+                run_import_search_flow();
+                return true;
+            }
             if button == "A" {
-                // A on a URL row launches it; A on the trailing "+ add" row
-                // (selection == history len, so get() is None) opens swkbd.
-                let url = LIBRARY
-                    .lock()
-                    .ok()
-                    .and_then(|s| s.url_history.get(selection).cloned());
+                // A on a URL row launches it; A on row 0 (the "+ add" row, which
+                // has no URL behind it) opens swkbd.
+                let url = LIBRARY.lock().ok().and_then(|s| {
+                    importer_abs_for_row(&s, selection)
+                        .and_then(|abs| s.url_history.get(abs).cloned())
+                });
                 match url {
                     // archive.org → async fetch + reveal (begun inside, opens the
                     // row with a spinner); direct .swf → download screen. The
                     // expand is started by `run_archive_fetch_async`, not here.
-                    Some(u) => run_fetch_for_url(&u, selection),
+                    Some(u) => run_fetch_for_url(&u, selection, scroll_offset),
                     None => run_add_url_flow(),
                 }
                 return true;
             }
         }
-        // EDIT a URL from its options modal (entry 0) — swkbd, hoisted.
+        // Y on the error notice = fix the URL that just failed, pre-filled, and
+        // retry it on the spot (typos in a long archive.org URL are THE common
+        // failure). Hoisted: swkbd + the retry fetch must run without the lock.
+        if matches!(screen_snap, Screen::DistantError) && button == "Y" {
+            let failed = LIBRARY
+                .lock()
+                .ok()
+                .map(|s| s.failed_url.clone())
+                .unwrap_or_default();
+            if !failed.is_empty() {
+                run_fix_url_flow(&failed);
+                return true;
+            }
+        }
+        // EDIT a URL from its options modal (entry 1) — swkbd, hoisted.
         if let Screen::DistantUrlOptions { url_idx, selection } = screen_snap {
-            if button == "A" && selection == 0 {
+            if button == "A" && selection == 1 {
                 run_edit_url_flow(url_idx);
                 return true;
             }
@@ -1756,7 +2058,7 @@ pub fn input(button: &str) -> bool {
         Screen::Empty => {
             match button {
                 "Minus" => { s.screen = Screen::Quit; }
-                "Y" => { s.screen = Screen::DistantIdle { selection: 0 }; }
+                "Y" => { s.screen = distant_idle_at(0); }
                 _ => {}
             }
             true
@@ -1802,12 +2104,12 @@ pub fn input(button: &str) -> bool {
             handle_sort_modal_input(&mut s, button, selection, prev_sel, prev_scroll);
             true
         }
-        Screen::RemoteSortModal { selection, fp, reverse, prev_sel, prev_scroll } => {
-            handle_remote_sort_modal_input(&mut s, button, selection, fp, reverse, prev_sel, prev_scroll);
+        Screen::RemoteSortModal { selection, kind, reverse, prev_sel, prev_scroll } => {
+            handle_remote_sort_modal_input(&mut s, button, selection, kind, reverse, prev_sel, prev_scroll);
             true
         }
-        Screen::DistantIdle { selection } => {
-            handle_distant_idle_input(&mut s, button, selection);
+        Screen::DistantIdle { selection, scroll_offset } => {
+            handle_distant_idle_input(&mut s, button, selection, scroll_offset);
             true
         }
         Screen::DistantUrlOptions { url_idx, selection } => {
@@ -1825,7 +2127,7 @@ pub fn input(button: &str) -> bool {
             // async fetch and returns to the IMPORTER list.
             if matches!(button, "B" | "Minus" | "Y") {
                 net::cancel_archive_fetch();
-                s.screen = Screen::DistantIdle { selection: 0 };
+                s.screen = distant_idle_at(0);
             }
             true
         }
@@ -1842,8 +2144,10 @@ pub fn input(button: &str) -> bool {
             true
         }
         Screen::DistantError => {
+            // Y (fix the URL) is hoisted — swkbd can't run under the lock.
             if matches!(button, "A" | "B" | "Minus") {
                 s.distant_error.clear();
+                s.failed_url.clear();
                 // Dismiss the notice back to the LIST the download came from
                 // (Flashpoint results / archive.org file list), restoring the
                 // cursor, rather than the IMPORTER home. `download_zip_extract`
@@ -1851,12 +2155,7 @@ pub fn input(button: &str) -> bool {
                 // cursor. Non-download errors (no resume pos) fall back to home.
                 let resume = s.download_resume_pos.take();
                 let was_fp = s.download_zip_extract.is_some() || s.download_fp_direct;
-                s.download_file_name.clear();
-                s.download_out_path.clear();
-                s.download_zip_extract = None;
-                s.download_fp_direct = false;
-                s.download_cover_url = None;
-                s.download_title = None;
+                clear_download_state(&mut s);
                 match resume {
                     Some((sel, scroll)) if was_fp => {
                         s.screen = Screen::FpGallery { selection: sel, scroll };
@@ -1869,7 +2168,7 @@ pub fn input(button: &str) -> bool {
                         s.screen = Screen::DistantFiles { selection: sel, scroll_offset: scroll };
                     }
                     _ => {
-                        s.screen = Screen::DistantIdle { selection: 0 };
+                        s.screen = distant_idle_at(0);
                     }
                 }
             }
@@ -1887,11 +2186,9 @@ pub fn input(button: &str) -> bool {
                 }
                 "B" | "Minus" => {
                     let idx = s.history_idx.unwrap_or(0);
-                    let n = s.url_history.len();
+                    let row = importer_row_for_abs(&s, idx);
                     if let Ok(mut p) = PENDING_AFTER_CLOSE.lock() {
-                        *p = Some(PendingClose::Goto(Screen::DistantIdle {
-                            selection: idx.min(n),
-                        }));
+                        *p = Some(PendingClose::Goto(distant_idle_at(row)));
                     }
                     crate::backend::render::modal_close_begin();
                 }
@@ -2774,32 +3071,275 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
 
 // ── Phase 3.7: DISTANT mode input handlers ────────────────────────────
 
-fn handle_distant_idle_input(s: &mut State, button: &str, mut selection: usize) {
-    // A (launch / add) is hoisted (swkbd + HTTPS). Here we just navigate the
-    // list and open per-URL options. The add-row is index `n` (== history len).
-    let n = s.url_history.len();
-    match button {
-        "Up" | "StickLUp" => {
-            if selection > 0 {
-                selection -= 1;
+// ── IMPORTER home: display rows, search + sort ─────────────────────────
+//
+// The saved-URL list used to be raw URLs in insertion order, add-row last —
+// fine for three entries, unreadable at thirty. Rows now show a NAME (the item
+// id / file the URL points at) with the host dimmed beside it, the "+ add" row
+// is pinned FIRST so it's reachable without scrolling, and the list filters
+// (Minus) + sorts (Y) like every other list in the app. `url_history` itself
+// stays in insertion order: it IS the "ADDED" sort, and reordering it on disk
+// would throw that away.
+
+/// Human-readable name for a saved import URL: the archive.org item id, or the
+/// file the URL points at, minus scheme / query / extension. Falls back to the
+/// host (then to the raw URL) so a row is never blank.
+pub(crate) fn importer_label(url: &str) -> std::string::String {
+    let raw = url.trim();
+    let no_scheme = raw.split_once("://").map(|(_, rest)| rest).unwrap_or(raw);
+    let (host, path) = match no_scheme.split_once('/') {
+        Some((h, p)) => (h, p),
+        None => (no_scheme, ""),
+    };
+    // Query + fragment never identify the game.
+    let path = path.split(['?', '#']).next().unwrap_or("");
+    let pick = if host.contains("archive.org") {
+        // /details/<id>, /download/<id>/<file>, /stream/<id> — the item id is
+        // the useful part. A bare `<id>` (no slash) lands in `host` instead.
+        let mut segs = path.split('/').filter(|s| !s.is_empty());
+        match segs.next() {
+            Some("details") | Some("download") | Some("stream") => segs.next(),
+            other => other,
+        }
+    } else {
+        // Everything else: the last segment is the file (game.swf, ...).
+        path.rsplit('/').find(|s| !s.is_empty())
+    };
+    let name = match pick {
+        Some(n) if !n.is_empty() => n,
+        _ => host,
+    };
+    // Drop a trailing file extension so ".swf" doesn't eat row width. Guarded
+    // on a short ALPHABETIC suffix so version-ish ids ("sonic_v1.2") survive.
+    let name = match name.rsplit_once('.') {
+        Some((stem, ext))
+            if !stem.is_empty()
+                && (2..=4).contains(&ext.len())
+                && ext.chars().all(|c| c.is_ascii_alphabetic()) =>
+        {
+            stem
+        }
+        _ => name,
+    };
+    if name.is_empty() {
+        raw.to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+/// Host tag drawn dimmed at the right of an IMPORTER row ("archive.org", ...).
+/// Empty for a bare archive.org item id — there's no host in it to show.
+pub(crate) fn importer_host(url: &str) -> std::string::String {
+    let Some((_, rest)) = url.trim().split_once("://") else {
+        return std::string::String::new();
+    };
+    let host = rest.split('/').next().unwrap_or("");
+    host.strip_prefix("www.").unwrap_or(host).to_string()
+}
+
+/// Absolute indices into `url_history` in the order the IMPORTER home DISPLAYS
+/// them: search filter first, then the active sort. `Screen::DistantIdle`'s
+/// `selection` is a ROW index — row 0 is the "+ add" row, rows 1.. index this.
+pub(crate) fn importer_view(s: &State) -> std::vec::Vec<usize> {
+    let needle = s
+        .import_filter
+        .as_deref()
+        .map(|f| f.trim().to_lowercase())
+        .filter(|f| !f.is_empty());
+    let mut idx: std::vec::Vec<usize> = (0..s.url_history.len())
+        .filter(|&i| match &needle {
+            None => true,
+            // Match the URL *and* the label: "mario" finds
+            // `archive.org/details/super-mario-63` either way.
+            Some(q) => {
+                let u = &s.url_history[i];
+                u.to_lowercase().contains(q) || importer_label(u).to_lowercase().contains(q)
             }
+        })
+        .collect();
+    match import_sort_index() {
+        1 => idx.sort_by_key(|&i| importer_label(&s.url_history[i]).to_lowercase()),
+        // SOURCE: grouped by host, by name inside a group.
+        2 => idx.sort_by_key(|&i| {
+            let u = &s.url_history[i];
+            (importer_host(u).to_lowercase(), importer_label(u).to_lowercase())
+        }),
+        // FILES: biggest source first. A URL never opened has no count, and
+        // sorts last rather than pretending to be empty.
+        3 => idx.sort_by_key(|&i| {
+            let u = &s.url_history[i];
+            let total = importer_progress(s, u).1;
+            (
+                std::cmp::Reverse(total.unwrap_or(0)),
+                total.is_none(),
+                importer_label(u).to_lowercase(),
+            )
+        }),
+        // ADDED: history is oldest-first, so newest-first = reversed.
+        _ => idx.reverse(),
+    }
+    if import_sort_reverse() {
+        idx.reverse();
+    }
+    // Favorites pinned on top whatever the sort, exactly like the JOUER gallery
+    // (`sort_entries`). `sort_by_key` is stable, so the active order survives
+    // inside each group — and the reverse above must not un-pin them, hence
+    // pinning LAST.
+    idx.sort_by_key(|&i| !url_is_favorite(s, &s.url_history[i]));
+    idx
+}
+
+/// Rows of the IMPORTER list visible at once. Shared by the renderer (layout),
+/// `distant_row_rect` (reveal geometry) and the scroll clamps, so they can't
+/// drift apart.
+pub const IMPORTER_VISIBLE_ROWS: usize = 10;
+
+/// Scroll the IMPORTER list was last drawn at. Every "come back to the list"
+/// path clamps from THIS rather than from 0: recomputing the scroll from the row
+/// alone dragged the view whenever the cursor sat past the first page (open `+`
+/// on row 13, come back, and the list had jumped so row 13 was the bottom one).
+static IMPORT_SCROLL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A `DistantIdle` screen parked on `row`, keeping the current scroll unless the
+/// row would be off screen. Every caller handing the cursor back to a specific
+/// row goes through this, so none of them can scroll the list out from under the
+/// user or select a row the list isn't showing.
+fn distant_idle_at(row: usize) -> Screen {
+    let cur = IMPORT_SCROLL.load(std::sync::atomic::Ordering::Relaxed);
+    Screen::DistantIdle {
+        selection: row,
+        scroll_offset: clamp_scroll(cur, row, IMPORTER_VISIBLE_ROWS),
+    }
+}
+
+/// Row index (0 = the "+ add" row) of history entry `abs` in the current view,
+/// so screens that act on an ABSOLUTE url index can hand the cursor back to the
+/// right row. Falls back to the add row when `abs` is gone or filtered out.
+fn importer_row_for_abs(s: &State, abs: usize) -> usize {
+    importer_view(s)
+        .iter()
+        .position(|&i| i == abs)
+        .map(|p| p + 1)
+        .unwrap_or(0)
+}
+
+/// Absolute `url_history` index behind IMPORTER row `row` (rows 1..), or `None`
+/// for row 0 (the "+ add" row) and out-of-range rows.
+fn importer_abs_for_row(s: &State, row: usize) -> Option<usize> {
+    if row == 0 {
+        return None;
+    }
+    importer_view(s).get(row - 1).copied()
+}
+
+/// How many of a saved URL's `.swf` files are already on SD, and how many there
+/// are in total. `None` for the total = never opened, so we don't know yet (the
+/// row then shows no count rather than a made-up one).
+///
+/// A direct `.swf` URL is one file by definition, matched by the name
+/// `run_direct_download` would give it. An archive.org item is matched by item
+/// id against the `.url` sidecar each downloaded game carries, so the count
+/// survives reboots and doesn't care which files were picked.
+fn importer_progress(s: &State, url: &str) -> (u32, Option<u32>) {
+    let raw = crate::sources::wayback_raw(url);
+    if matches!(
+        crate::sources::classify(raw.as_str()),
+        crate::sources::SourceKind::DirectUrl
+    ) {
+        let name = safe_name_from_url(raw.as_str());
+        let have = s.entries.iter().any(|e| e.basename == name);
+        return (have as u32, Some(1));
+    }
+    let total = s
+        .url_meta
+        .iter()
+        .find(|(u, _, _, _)| u == url)
+        .map(|(_, n, _, _)| *n);
+    let Some(id) = crate::net::extract_item_id(raw.as_str()).map(|i| i.to_lowercase()) else {
+        return (0, total);
+    };
+    let have = s.entries.iter().filter(|e| e.source_item == id).count() as u32;
+    // The cached total predates any file we've since downloaded, so never let
+    // the badge read "5/3" if the item grew or the cache is stale.
+    (have, total.map(|t| t.max(have)))
+}
+
+/// Per-row display data for the IMPORTER home, in view order: labels, host tags,
+/// "is this a direct .swf" flags, and the `(on SD, total)` file counts. The
+/// trailing `usize` is the UNFILTERED url count, for the "3 / 21" sub-line.
+fn importer_rows(
+    s: &State,
+) -> (
+    std::vec::Vec<std::string::String>,
+    std::vec::Vec<std::string::String>,
+    std::vec::Vec<bool>,
+    std::vec::Vec<(u32, Option<u32>)>,
+    std::vec::Vec<bool>,
+    usize,
+) {
+    let view = importer_view(s);
+    let mut labels = std::vec::Vec::with_capacity(view.len());
+    let mut hosts = std::vec::Vec::with_capacity(view.len());
+    let mut direct = std::vec::Vec::with_capacity(view.len());
+    let mut progress = std::vec::Vec::with_capacity(view.len());
+    let mut favorite = std::vec::Vec::with_capacity(view.len());
+    for &i in &view {
+        let u = &s.url_history[i];
+        labels.push(importer_label(u));
+        hosts.push(importer_host(u));
+        direct.push(matches!(
+            crate::sources::classify(crate::sources::wayback_raw(u).as_str()),
+            crate::sources::SourceKind::DirectUrl
+        ));
+        progress.push(importer_progress(s, u));
+        favorite.push(url_is_favorite(s, u));
+    }
+    (labels, hosts, direct, progress, favorite, s.url_history.len())
+}
+
+fn handle_distant_idle_input(
+    s: &mut State,
+    button: &str,
+    mut selection: usize,
+    mut scroll: usize,
+) {
+    // A (launch / add) and Minus (search) are hoisted (swkbd + HTTPS). Here we
+    // navigate, open per-URL options and the sort picker. Row 0 = "+ add".
+    let last = importer_view(s).len();
+    match button {
+        // Wrap both ways: with a long history, "up from the top" is the fastest
+        // way to the oldest entries.
+        "Up" | "StickLUp" => {
+            selection = if selection == 0 { last } else { selection - 1 };
+            scroll = clamp_scroll(scroll, selection, IMPORTER_VISIBLE_ROWS);
         }
         "Down" | "StickLDown" => {
-            if selection < n {
-                selection += 1;
-            }
+            selection = if selection >= last { 0 } else { selection + 1 };
+            scroll = clamp_scroll(scroll, selection, IMPORTER_VISIBLE_ROWS);
         }
         "Plus" => {
-            // Options on a real URL row (not the trailing add-row).
-            if selection < n {
-                s.screen = Screen::DistantUrlOptions { url_idx: selection, selection: 0 };
+            // Options on a real URL row (not the "+ add" row).
+            if let Some(abs) = importer_abs_for_row(s, selection) {
+                s.screen = Screen::DistantUrlOptions { url_idx: abs, selection: 0 };
                 return;
             }
+        }
+        "Y" => {
+            // Sort picker (cursor on the active mode, direction pre-set).
+            s.screen = Screen::RemoteSortModal {
+                selection: import_sort_index(),
+                kind: SORT_TARGET_IMPORT,
+                reverse: import_sort_reverse(),
+                prev_sel: selection,
+                prev_scroll: scroll,
+            };
+            return;
         }
         // No B "back to JOUER": the navbar (L/R) is the only inter-tab nav.
         _ => {}
     }
-    s.screen = Screen::DistantIdle { selection };
+    s.screen = Screen::DistantIdle { selection, scroll_offset: scroll };
 }
 
 /// DistantUrlOptions modal nav (Up/Down move, B back). A on entry 0 (edit) is
@@ -2810,10 +3350,12 @@ fn handle_distant_url_options_input(
     url_idx: usize,
     mut selection: usize,
 ) {
-    const LAST: usize = 1; // 0 = edit, 1 = delete (no back row — B backs out)
+    // 0 = favorite, 1 = edit, 2 = delete (no back row — B backs out).
+    const LAST: usize = 2;
     let back = |s: &mut State| {
-        let n = s.url_history.len();
-        s.screen = Screen::DistantIdle { selection: url_idx.min(n) };
+        // `url_idx` is an ABSOLUTE history index; the list is sorted/filtered, so
+        // ask the view which row that entry is on.
+        s.screen = distant_idle_at(importer_row_for_abs(s, url_idx));
     };
     match button {
         "Up" | "StickLUp" => {
@@ -2823,8 +3365,20 @@ fn handle_distant_url_options_input(
             selection = if selection >= LAST { 0 } else { selection + 1 };
         }
         "A" => {
-            // 0 (edit) is hoisted in input(); only 1 (delete) reaches here.
-            if selection == 1 {
+            // 1 (edit) is hoisted in input(); 0 (favorite) and 2 (delete) here.
+            if selection == 0 {
+                if let Some(url) = s.url_history.get(url_idx).cloned() {
+                    let now_fav = toggle_url_favorite(s, &url);
+                    let lc = crate::loc::s();
+                    let msg = if now_fav { lc.fav_added } else { lc.fav_removed };
+                    set_toast(s, msg.to_string(), TOAST_OK);
+                    // Pinning reorders the list, so hand the cursor back to the
+                    // row this URL now occupies instead of a stale index.
+                    back(s);
+                }
+                return;
+            }
+            if selection == 2 {
                 // Delete -> reuse the existing confirm screen via history_idx.
                 s.history_idx = Some(url_idx);
                 s.screen = Screen::DistantHistoryConfirm;
@@ -2868,9 +3422,65 @@ fn run_add_url_flow() {
     let Some(url) = net::prompt_url_with_initial(None) else {
         return; // user cancelled
     };
-    // The reveal grows from the trailing "+ add" row (== current history len).
-    let add_row = LIBRARY.lock().map(|s| s.url_history.len()).unwrap_or(0);
-    run_fetch_for_url(&url, add_row);
+    // The reveal grows from the "+ add" row, pinned first (row 0), which is only
+    // ever on screen at scroll 0.
+    run_fetch_for_url(&url, 0, 0);
+}
+
+/// IMPORTER home search (Minus): swkbd pre-filled with the active filter, then
+/// narrow the saved-URL list to entries matching it (URL or label). Empty input
+/// clears the filter. Called from `input()` only (swkbd needs the lock free).
+fn run_import_search_flow() {
+    let current = LIBRARY
+        .lock()
+        .ok()
+        .and_then(|s| s.import_filter.clone())
+        .unwrap_or_default();
+    let Some(typed) = net::prompt_search(&current) else {
+        return; // cancelled
+    };
+    let trimmed = typed.trim().to_string();
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.import_filter = if trimmed.is_empty() { None } else { Some(trimmed) };
+        // Fresh (filtered) list: put the cursor on its first URL row, or on the
+        // "+ add" row when nothing matched.
+        let row = if importer_view(&s).is_empty() { 0 } else { 1 };
+        s.screen = distant_idle_at(row);
+    }
+    crate::backend::render::gallery_anim_reset();
+}
+
+/// Error screen (Y): re-type the URL that just failed, pre-filled, then retry it
+/// straight away. If the bad URL was already in the history it's UPDATED in
+/// place (rather than leaving the broken one behind next to the fixed one).
+/// Called from `input()` only — swkbd + the retry fetch need the lock free.
+fn run_fix_url_flow(failed: &str) {
+    let Some(fixed) = net::prompt_url_with_initial(Some(failed)) else {
+        return; // cancelled — stay on the error notice
+    };
+    let fixed = fixed.trim().to_string();
+    if fixed.is_empty() {
+        return;
+    }
+    let row = {
+        let Ok(mut s) = LIBRARY.lock() else { return };
+        // Leave the error screen behind: clear the notice AND the half-finished
+        // download bookkeeping, exactly like the A/B dismiss path does.
+        s.distant_error.clear();
+        s.failed_url.clear();
+        clear_download_state(&mut s);
+        if let Some(pos) = s.url_history.iter().position(|u| u == failed) {
+            s.url_history[pos] = fixed.clone();
+            if s.history_loaded {
+                let snapshot = s.url_history.clone();
+                save_history_to_sd(&snapshot);
+            }
+            importer_row_for_abs(&s, pos)
+        } else {
+            0
+        }
+    };
+    run_fetch_for_url(&fixed, row, clamp_scroll(0, row, IMPORTER_VISIBLE_ROWS));
 }
 
 /// DistantUrlOptions > edit: swkbd prefilled with the existing URL. Commit
@@ -2898,8 +3508,7 @@ fn run_edit_url_flow(url_idx: usize) {
             let snapshot = s.url_history.clone();
             save_history_to_sd(&snapshot);
         }
-        let n = s.url_history.len();
-        s.screen = Screen::DistantIdle { selection: url_idx.min(n) };
+        s.screen = distant_idle_at(importer_row_for_abs(&s, url_idx));
     }
 }
 
@@ -2908,10 +3517,18 @@ fn run_edit_url_flow(url_idx: usize) {
 /// v1.2.0: routes by source shape so the IMPORTER is "globalisable" — an
 /// archive.org URL/item-id goes through the metadata file list, a direct
 /// `.swf` URL downloads straight to SD.
-fn run_fetch_for_url(url: &str, source_sel: usize) {
+fn run_fetch_for_url(url: &str, source_sel: usize, source_scroll: usize) {
+    // Remember what we're about to try: if it blows up, the error screen offers
+    // Y = re-type THIS url instead of sending the user back to the list. Cleared
+    // as soon as the URL proves good (metadata parsed / download finished).
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.failed_url = url.to_string();
+    }
     match crate::sources::classify(url) {
         crate::sources::SourceKind::DirectUrl => run_direct_download(url),
-        crate::sources::SourceKind::ArchiveOrg => run_archive_fetch_async(url, source_sel),
+        crate::sources::SourceKind::ArchiveOrg => {
+            run_archive_fetch_async(url, source_sel, source_scroll)
+        }
     }
 }
 
@@ -3068,8 +3685,9 @@ fn run_fp_filter_toggle_flow() {
 /// archive.org item import (async): start the metadata fetch + open the reveal
 /// window (with a spinner) from the launched row. `render`'s DistantLoading arm
 /// polls `net::tick_archive_fetch` each frame and switches to DistantFiles on
-/// success (no UI freeze). `source_sel` is the history row the window grows from.
-fn run_archive_fetch_async(url: &str, source_sel: usize) {
+/// success (no UI freeze). `source_sel`/`source_scroll` are the history row the
+/// window grows from and the scroll the list was at.
+fn run_archive_fetch_async(url: &str, source_sel: usize, source_scroll: usize) {
     let Some(item_id) = net::extract_item_id(url) else {
         set_distant_error(crate::loc::s().err_url_invalid);
         return;
@@ -3081,7 +3699,7 @@ fn run_archive_fetch_async(url: &str, source_sel: usize) {
                 s.pending_fetch_url = url.to_string();
                 s.screen = Screen::DistantLoading;
             }
-            crate::backend::render::distant_reveal_begin_expand(source_sel);
+            crate::backend::render::distant_reveal_begin_expand(source_sel, source_scroll);
         }
         Err(e) => set_distant_error(&e),
     }
@@ -3172,7 +3790,7 @@ fn handle_distant_files_input(
             // Sort picker for the archive.org file list (name / size).
             s.screen = Screen::RemoteSortModal {
                 selection: 0,
-                fp: false,
+                kind: SORT_TARGET_FILES,
                 reverse: false,
                 prev_sel: selection,
                 prev_scroll: scroll,
@@ -3263,6 +3881,19 @@ fn set_distant_error(msg: &str) {
         s.distant_error = msg.to_string();
         s.screen = Screen::DistantError;
     }
+}
+
+/// Drop the half-finished download bookkeeping so none of it leaks into the
+/// next one. Callers that need `download_resume_pos` must `take()` it FIRST —
+/// this clears it too.
+fn clear_download_state(s: &mut State) {
+    s.download_file_name.clear();
+    s.download_out_path.clear();
+    s.download_zip_extract = None;
+    s.download_fp_direct = false;
+    s.download_cover_url = None;
+    s.download_title = None;
+    s.download_resume_pos = None;
 }
 
 fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut selection: usize) {
@@ -3509,7 +4140,7 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
         if matches!(button, "B" | "Minus") {
             net::cancel_archive_fetch();
             s.fp_loading = false;
-            s.screen = Screen::DistantIdle { selection: 0 };
+            s.screen = distant_idle_at(0);
         }
         return;
     }
@@ -3613,7 +4244,7 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
             // Sort picker for the Flashpoint results (name only — devs unknown).
             s.screen = Screen::RemoteSortModal {
                 selection: 0,
-                fp: true,
+                kind: SORT_TARGET_FP,
                 reverse: false,
                 prev_sel: selection,
                 prev_scroll: scroll,
@@ -3625,7 +4256,7 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
             s.cover_candidates.clear();
             s.cover_msg.clear();
             s.cover_query.clear();
-            s.screen = Screen::DistantIdle { selection: 0 };
+            s.screen = distant_idle_at(0);
             return;
         }
         _ => {}
@@ -3652,10 +4283,14 @@ fn run_fp_info_flow(selection: usize, scroll: usize) {
     let Some(id) = id else { return };
     let url = crate::sources::gamezip::get_url(&id);
     let size = net::head_content_length(&url).unwrap_or(0);
+    // The game's blurb, fetched per-game (see `fetch_description`). Best-effort:
+    // an empty result just means the popup shows the facts without the text.
+    let desc = crate::sources::gamezip::fetch_description(&id);
     if let Ok(mut s) = LIBRARY.lock() {
         // Only open if we're still on the gallery (user might have navigated
         // away during the HEAD).
         if matches!(s.screen, Screen::FpGallery { .. }) {
+            s.fp_desc = desc;
             s.screen = Screen::FpDetails { selection, scroll, size };
         }
     }
@@ -3708,31 +4343,38 @@ fn handle_sort_modal_input(
     s.screen = Screen::SortModal { selection, prev_sel, prev_scroll };
 }
 
-/// Number of criteria in the DISTANT sort picker. Flashpoint exposes only NAME
-/// (developers are unknown — removed); archive.org exposes NAME + SIZE. Direction
+/// Which list a `RemoteSortModal` sorts.
+pub(crate) const SORT_TARGET_FILES: u8 = 0; // archive.org file list
+pub(crate) const SORT_TARGET_FP: u8 = 1; // Flashpoint result gallery
+pub(crate) const SORT_TARGET_IMPORT: u8 = 2; // IMPORTER home (saved URLs)
+
+/// Number of criteria in the IMPORTER sort picker, per target. Flashpoint
+/// exposes only NAME (developers are unknown — removed); archive.org exposes
+/// NAME + SIZE; the saved-URL list exposes ADDED / NAME / SOURCE. Direction
 /// (asc/desc) is a separate X toggle, not a criterion.
-fn remote_sort_count(fp: bool) -> usize {
-    if fp {
-        1
-    } else {
-        2
+fn remote_sort_count(kind: u8) -> usize {
+    match kind {
+        SORT_TARGET_FP => 1,
+        SORT_TARGET_IMPORT => IMPORT_SORT_MODES,
+        _ => 2,
     }
 }
 
-/// DISTANT sort picker (Y). `fp` selects the target list + option set:
-/// Flashpoint = name only (`cover_candidates`); archive.org = name / size
-/// (`remote_files`). X toggles direction; A applies + returns to the list
-/// (cursor top), B restores.
+/// IMPORTER sort picker (Y). `kind` selects the target list + option set (see
+/// `SORT_TARGET_*`). X toggles direction; A applies + returns to the list
+/// (cursor top), B restores. The file/gallery sorts reorder their in-memory vec
+/// and are forgotten with it; the saved-URL sort is a persisted PREFERENCE
+/// (`url_history` keeps its insertion order — that's the ADDED criterion).
 fn handle_remote_sort_modal_input(
     s: &mut State,
     button: &str,
     mut selection: usize,
-    fp: bool,
+    kind: u8,
     reverse: bool,
     prev_sel: usize,
     prev_scroll: usize,
 ) {
-    let n = remote_sort_count(fp);
+    let n = remote_sort_count(kind);
     match button {
         "Up" | "StickLUp" => {
             if selection > 0 {
@@ -3748,7 +4390,7 @@ fn handle_remote_sort_modal_input(
             // Flip the direction indicator (applied on A). Stays in the modal.
             s.screen = Screen::RemoteSortModal {
                 selection,
-                fp,
+                kind,
                 reverse: !reverse,
                 prev_sel,
                 prev_scroll,
@@ -3756,49 +4398,64 @@ fn handle_remote_sort_modal_input(
             return;
         }
         "A" => {
-            if fp {
-                // Only NAME (A-Z); X gives Z-A.
-                s.cover_candidates
-                    .sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
-                if reverse {
-                    s.cover_candidates.reverse();
+            match kind {
+                SORT_TARGET_FP => {
+                    // Only NAME (A-Z); X gives Z-A.
+                    s.cover_candidates
+                        .sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+                    if reverse {
+                        s.cover_candidates.reverse();
+                    }
+                    // Re-ordered list: snap the glide to the top (no streak).
+                    crate::backend::render::gallery_anim_reset();
+                    s.screen = Screen::FpGallery { selection: 0, scroll: 0 };
                 }
-                // Re-ordered list: snap the glide to the top (no streak).
-                crate::backend::render::gallery_anim_reset();
-                s.screen = Screen::FpGallery { selection: 0, scroll: 0 };
-            } else {
-                if selection == 1 {
-                    // SIZE: biggest first by default.
-                    s.remote_files.sort_by(|a, b| {
-                        b.size_bytes
-                            .cmp(&a.size_bytes)
-                            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-                    });
-                } else {
-                    s.remote_files
-                        .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                SORT_TARGET_IMPORT => {
+                    // Persist the choice: `importer_view` reads it every frame,
+                    // so the list is already re-ordered when we land back on it.
+                    set_import_sort(selection as u8, reverse);
+                    crate::backend::render::gallery_anim_reset();
+                    // Cursor on the first URL row (row 0 is "+ add").
+                    let row = if importer_view(s).is_empty() { 0 } else { 1 };
+                    s.screen = distant_idle_at(row);
                 }
-                if reverse {
-                    s.remote_files.reverse();
+                _ => {
+                    if selection == 1 {
+                        // SIZE: biggest first by default.
+                        s.remote_files.sort_by(|a, b| {
+                            b.size_bytes
+                                .cmp(&a.size_bytes)
+                                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                        });
+                    } else {
+                        s.remote_files
+                            .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                    }
+                    if reverse {
+                        s.remote_files.reverse();
+                    }
+                    // Re-ordered list: snap the glide to the top.
+                    crate::backend::render::gallery_anim_reset();
+                    s.screen = Screen::DistantFiles { selection: 0, scroll_offset: 0 };
                 }
-                // Re-ordered list: snap the glide to the top.
-                crate::backend::render::gallery_anim_reset();
-                s.screen = Screen::DistantFiles { selection: 0, scroll_offset: 0 };
             }
             return;
         }
         "B" => {
             // Cancel → restore the list cursor where it was.
-            if fp {
-                s.screen = Screen::FpGallery { selection: prev_sel, scroll: prev_scroll };
-            } else {
-                s.screen = Screen::DistantFiles { selection: prev_sel, scroll_offset: prev_scroll };
-            }
+            s.screen = match kind {
+                SORT_TARGET_FP => Screen::FpGallery { selection: prev_sel, scroll: prev_scroll },
+                SORT_TARGET_IMPORT => Screen::DistantIdle {
+                    selection: prev_sel,
+                    scroll_offset: prev_scroll,
+                },
+                _ => Screen::DistantFiles { selection: prev_sel, scroll_offset: prev_scroll },
+            };
             return;
         }
         _ => {}
     }
-    s.screen = Screen::RemoteSortModal { selection, fp, reverse, prev_sel, prev_scroll };
+    s.screen = Screen::RemoteSortModal { selection, kind, reverse, prev_sel, prev_scroll };
 }
 
 /// RENOMMER flow: open swkbd with the current display_name pre-filled,
@@ -4001,15 +4658,16 @@ fn gallery_scroll_for(selection: usize, scroll: usize) -> usize {
     }
 }
 
-/// Screen rect of history row `sel` in the IMPORTER list (matches the layout in
-/// `draw_library_distant_list`: top=160, row_h=50, 9 visible). Used as the
-/// expand/collapse reveal's grow-from / shrink-to box.
-fn distant_row_rect(sel: usize, vw: f32) -> (f32, f32, f32, f32) {
+/// Screen rect of history row `sel` in the IMPORTER list (mirrors the layout in
+/// `draw_library_distant_list`: top=160, row_h=50, 10 visible — keep the two in
+/// step). Used as the expand/collapse reveal's grow-from / shrink-to box.
+fn distant_row_rect(sel: usize, scroll: usize, vw: f32) -> (f32, f32, f32, f32) {
     const TOP: f32 = 160.0;
     const ROW_H: f32 = 50.0;
-    const VISIBLE: usize = 9;
-    let first = if sel < VISIBLE { 0 } else { sel + 1 - VISIBLE };
-    let row_y = TOP + (sel - first) as f32 * ROW_H;
+    // The list scrolls freely now (touch drag), so the row's screen position
+    // comes from the ACTUAL scroll offset, not one re-derived from `sel`.
+    let row_y = TOP + (sel as f32 - scroll as f32) * ROW_H;
+    let row_y = row_y.clamp(TOP, TOP + (IMPORTER_VISIBLE_ROWS - 1) as f32 * ROW_H);
     (20.0, row_y - 8.0, vw - 40.0, ROW_H + 4.0)
 }
 
@@ -4355,8 +5013,10 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 Some(PendingClose::DeleteHistory) => {
                     let idx = s2.history_idx.unwrap_or(0);
                     delete_current_history(&mut s2);
-                    let n = s2.url_history.len();
-                    s2.screen = Screen::DistantIdle { selection: idx.min(n) };
+                    // The deleted entry's absolute index now belongs to whatever
+                    // shifted into its place; park the cursor on that row.
+                    let row = importer_row_for_abs(&s2, idx);
+                    s2.screen = distant_idle_at(row);
                 }
                 None => {}
             }
@@ -4854,18 +5514,23 @@ pub fn render(backend: &mut SwitchRenderBackend) {
         }
         Screen::FpDetails { selection, size, .. } => {
             let snap = LIBRARY.lock().ok().and_then(|s| {
+                let desc = s.fp_desc.clone();
                 s.cover_candidates.get(selection).map(|c| {
                     (
                         c.title.clone(),
                         c.developer.clone(),
                         c.publisher.clone(),
                         c.release_date.clone(),
+                        c.cover_url.clone(),
+                        desc,
                     )
                 })
             });
-            if let Some((title, dev, publisher, date)) = snap {
+            if let Some((title, dev, publisher, date, cover, desc)) = snap {
                 backend.draw_library_dim_backdrop();
-                backend.draw_library_fp_details(&title, &dev, &publisher, &date, size);
+                backend.draw_library_fp_details(
+                    &title, &dev, &publisher, &date, size, &cover, &desc,
+                );
             }
         }
         Screen::SortModal { selection, .. } => {
@@ -4880,72 +5545,133 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             let dir = if current_sort_reverse() { lc.sort_dir_desc } else { lc.sort_dir_asc };
             backend.draw_library_sort_modal(selection, &labels, lc.sort_title, lc.sort_footer, dir);
         }
-        Screen::RemoteSortModal { selection, fp, reverse, .. } => {
+        Screen::RemoteSortModal { selection, kind, reverse, .. } => {
             let lc = crate::loc::s();
-            // Flashpoint: NAME only. archive.org: NAME + SIZE.
-            let labels: &[&str] = if fp {
-                &[lc.sort_alpha]
-            } else {
-                &[lc.sort_alpha, lc.sort_size]
+            // Flashpoint: NAME only. archive.org: NAME + SIZE. Saved URLs:
+            // ADDED / NAME / SOURCE (same order as `importer_view` reads).
+            let labels: &[&str] = match kind {
+                SORT_TARGET_FP => &[lc.sort_alpha],
+                SORT_TARGET_IMPORT => {
+                    &[lc.sort_recent, lc.sort_alpha, lc.sort_source, lc.sort_files]
+                }
+                _ => &[lc.sort_alpha, lc.sort_size],
             };
             let dir = if reverse { lc.sort_dir_desc } else { lc.sort_dir_asc };
             backend.draw_library_sort_modal(selection, labels, lc.sort_title, lc.sort_footer, dir);
         }
         // ── Phase 3.7 DISTANT mode ─────────────────────────────────────
-        Screen::DistantIdle { selection } => {
-            // Snapshot the URL history + which URLs' games are already on SD (OK
-            // badge). Match `run_direct_download`'s naming so the badge tracks the
-            // actual downloaded file.
-            let (urls, installed) = LIBRARY
+        Screen::DistantIdle { selection, scroll_offset } => {
+            // Remember where the list is so every "back to the list" path can
+            // restore this scroll instead of recomputing one from the row.
+            IMPORT_SCROLL.store(scroll_offset, std::sync::atomic::Ordering::Relaxed);
+            // Rows in VIEW order (search filter + active sort): a readable label,
+            // its host tag, and whether that URL's game is already on SD.
+            let (labels, hosts, direct, progress, favorite, total, filter) = LIBRARY
                 .lock()
                 .ok()
                 .map(|s| {
-                    let installed: std::vec::Vec<bool> = s
-                        .url_history
-                        .iter()
-                        .map(|u| {
-                            let raw = crate::sources::wayback_raw(u);
-                            let name = safe_name_from_url(raw.as_str());
-                            s.entries.iter().any(|e| e.basename == name)
-                        })
-                        .collect();
-                    (s.url_history.clone(), installed)
+                    let (labels, hosts, direct, progress, favorite, total) = importer_rows(&s);
+                    (labels, hosts, direct, progress, favorite, total, s.import_filter.clone())
                 })
                 .unwrap_or_default();
-            let refs: std::vec::Vec<&str> = urls.iter().map(|u| u.as_str()).collect();
-            backend.draw_library_distant_list(selection, &refs, crate::loc::s().dist_add, &installed, true);
+            let lrefs: std::vec::Vec<&str> = labels.iter().map(|u| u.as_str()).collect();
+            let hrefs: std::vec::Vec<&str> = hosts.iter().map(|u| u.as_str()).collect();
+            backend.draw_library_distant_list(
+                selection,
+                &lrefs,
+                &hrefs,
+                &direct,
+                &progress,
+                &favorite,
+                crate::loc::s().dist_add,
+                scroll_offset,
+                filter.as_deref(),
+                total,
+                true,
+            );
         }
         Screen::DistantUrlOptions { url_idx, selection } => {
-            let url = LIBRARY
-                .lock()
-                .ok()
-                .and_then(|s| s.url_history.get(url_idx).cloned())
-                .unwrap_or_default();
-            // Reuse the per-game OPTIONS modal style for the URL options.
-            // No back row — B backs out.
+            // Same modal style as the per-game OPTIONS, plus an info block: which
+            // kind of source it is, how much of it is on SD, when it was saved,
+            // and the full URL (the row only shows a short label). No back row —
+            // B backs out.
             let lc = crate::loc::s();
-            let labels = [lc.opt_edit, lc.opt_delete];
-            backend.draw_library_dim_backdrop();
-            backend.draw_library_options(&url, selection, &labels);
+            let snap = LIBRARY.lock().ok().and_then(|s| {
+                let url = s.url_history.get(url_idx).cloned()?;
+                let (have, total) = importer_progress(&s, &url);
+                let direct = matches!(
+                    crate::sources::classify(crate::sources::wayback_raw(&url).as_str()),
+                    crate::sources::SourceKind::DirectUrl
+                );
+                let added = s
+                    .url_meta
+                    .iter()
+                    .find(|(u, _, _, _)| u == &url)
+                    .map(|(_, _, t, _)| *t)
+                    .unwrap_or(0);
+                let fav = url_is_favorite(&s, &url);
+                Some((url, have, total, direct, added, fav))
+            });
+            if let Some((url, have, total, direct, added, fav)) = snap {
+                let mut info: std::vec::Vec<std::string::String> = std::vec::Vec::new();
+                info.push(std::format!(
+                    "{} : {}",
+                    lc.url_info_type,
+                    if direct { lc.url_type_swf } else { lc.url_type_list },
+                ));
+                if let Some(total) = total {
+                    info.push(std::format!("{} : {}/{}", lc.url_info_files, have, total));
+                }
+                let date = format_date(added);
+                if !date.is_empty() {
+                    info.push(std::format!("{} : {}", lc.url_info_added, date));
+                }
+                let fav_label = if fav { lc.opt_unfavorite } else { lc.opt_favorite };
+                backend.draw_library_url_options(
+                    importer_label(&url).as_str(),
+                    selection,
+                    &[fav_label, lc.opt_edit, lc.opt_delete],
+                    &info,
+                    &url,
+                    lc.options_footer,
+                );
+            }
         }
         Screen::DistantLoading => {
             // Async metadata fetch in flight: the reveal window opens from the
             // launched row with a spinner, the IMPORTER list shows behind. Poll
             // the fetch each frame and switch to DistantFiles on success.
-            let (urls, title) = LIBRARY
+            let (labels, hosts, direct, progress, favorite, total, title) = LIBRARY
                 .lock()
                 .ok()
-                .map(|s| (s.url_history.clone(), s.pending_fetch_url.clone()))
+                .map(|s| {
+                    let (labels, hosts, direct, progress, favorite, total) = importer_rows(&s);
+                    (labels, hosts, direct, progress, favorite, total, s.pending_fetch_url.clone())
+                })
                 .unwrap_or_default();
-            let refs: std::vec::Vec<&str> = urls.iter().map(|u| u.as_str()).collect();
+            let lrefs: std::vec::Vec<&str> = labels.iter().map(|u| u.as_str()).collect();
+            let hrefs: std::vec::Vec<&str> = hosts.iter().map(|u| u.as_str()).collect();
             let src = crate::backend::render::distant_reveal_source_sel();
-            backend.draw_library_distant_list(src, &refs, crate::loc::s().dist_add, &[], false);
+            let src_scroll = crate::backend::render::distant_reveal_source_scroll();
+            backend.draw_library_distant_list(
+                src,
+                &lrefs,
+                &hrefs,
+                &direct,
+                &progress,
+                &favorite,
+                crate::loc::s().dist_add,
+                src_scroll,
+                None,
+                total,
+                false,
+            );
             // Window: expanding (reveal active) or full screen (reveal done).
             let frac = crate::backend::render::distant_reveal_step(now)
                 .map(|(f, _, _)| f)
                 .unwrap_or(1.0);
             let (vw, vh) = backend.screen_size();
-            let (rx, ry, rw, rh) = distant_row_rect(src, vw);
+            let (rx, ry, rw, rh) = distant_row_rect(src, src_scroll, vw);
             let wx = rx * (1.0 - frac);
             let wy = ry * (1.0 - frac);
             let ww = rw + (vw - rw) * frac;
@@ -4965,10 +5691,13 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     if files.is_empty() {
                         set_distant_error(crate::loc::s().err_no_swf);
                     } else {
+                        let total = files.len() as u32;
                         let url = {
                             let mut g = LIBRARY.lock().ok();
                             if let Some(s) = g.as_mut() {
                                 s.remote_files = files;
+                                // The URL parsed: no "fix the URL" to offer any more.
+                                s.failed_url.clear();
                                 // Fresh list: snap the glide to the top.
                                 crate::backend::render::gallery_anim_reset();
                                 s.screen = Screen::DistantFiles { selection: 0, scroll_offset: 0 };
@@ -4979,15 +5708,28 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                         };
                         if let Some(u) = url {
                             push_history(&u);
-                            // push_history moved this URL to the most-recent END
-                            // of history — retarget the reveal so closing collapses
-                            // to its NEW row (and the cursor lands there).
-                            let new_idx = LIBRARY
+                            // Now that we know how many `.swf` this item holds,
+                            // cache it so the list can show "4/13" from now on.
+                            remember_url_total(&u, total);
+                            // A newly-added URL lands wherever the active sort
+                            // puts it, so retarget the reveal on its REAL row:
+                            // that's where the window must collapse back to.
+                            let new_row = LIBRARY
                                 .lock()
                                 .ok()
-                                .map(|s| s.url_history.len().saturating_sub(1))
+                                .map(|s| {
+                                    let abs = s
+                                        .url_history
+                                        .iter()
+                                        .position(|h| h == &u)
+                                        .unwrap_or_else(|| s.url_history.len().saturating_sub(1));
+                                    importer_row_for_abs(&s, abs)
+                                })
                                 .unwrap_or(0);
-                            crate::backend::render::distant_reveal_set_source(new_idx);
+                            crate::backend::render::distant_reveal_set_source(
+                                new_row,
+                                clamp_scroll(0, new_row, IMPORTER_VISIBLE_ROWS),
+                            );
                         }
                     }
                 }
@@ -5000,7 +5742,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             // from SD into `entries`. The latter catches files that
             // were on SD before this .nro boot — fixes the "OK badge
             // missed across sessions" report.
-            let (files, marked, filter, total, urls) = LIBRARY
+            let (files, marked, filter, total, under) = LIBRARY
                 .lock()
                 .ok()
                 .map(|s| {
@@ -5014,7 +5756,8 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     let total = s.remote_files.len();
                     let filtered: std::vec::Vec<crate::net::RemoteFile> =
                         idx.iter().map(|&i| s.remote_files[i].clone()).collect();
-                    (filtered, marked, s.distant_filter.clone(), total, s.url_history.clone())
+                    // `under` = the IMPORTER rows drawn UNDER the reveal window.
+                    (filtered, marked, s.distant_filter.clone(), total, importer_rows(&s))
                 })
                 .unwrap_or_default();
             // Expand/collapse reveal (v1.2.0): while a reveal runs, draw the
@@ -5025,14 +5768,28 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             {
                 let (vw, vh) = backend.screen_size();
                 let src = crate::backend::render::distant_reveal_source_sel();
-                let (rx, ry, rw, rh) = distant_row_rect(src, vw);
+                let src_scroll = crate::backend::render::distant_reveal_source_scroll();
+                let (rx, ry, rw, rh) = distant_row_rect(src, src_scroll, vw);
                 // Lerp the window from the row rect (frac 0) to full screen (1).
                 let wx = rx * (1.0 - frac);
                 let wy = ry * (1.0 - frac);
                 let ww = rw + (vw - rw) * frac;
                 let wh = rh + (vh - rh) * frac;
-                let refs: std::vec::Vec<&str> = urls.iter().map(|u| u.as_str()).collect();
-                backend.draw_library_distant_list(src, &refs, crate::loc::s().dist_add, &[], false);
+                let lrefs: std::vec::Vec<&str> = under.0.iter().map(|u| u.as_str()).collect();
+                let hrefs: std::vec::Vec<&str> = under.1.iter().map(|u| u.as_str()).collect();
+                backend.draw_library_distant_list(
+                    src,
+                    &lrefs,
+                    &hrefs,
+                    &under.2,
+                    &under.3,
+                    &under.4,
+                    crate::loc::s().dist_add,
+                    src_scroll,
+                    None,
+                    under.5,
+                    false,
+                );
                 backend.set_clip(wx, wy, ww, wh);
                 backend.draw_library_distant_files(
                     selection, scroll_offset, &files, DISTANT_VISIBLE_ROWS,
@@ -5046,8 +5803,10 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     if let Ok(mut s) = LIBRARY.lock() {
                         s.remote_files.clear();
                         s.distant_filter = None;
-                        let n = s.url_history.len();
-                        s.screen = Screen::DistantIdle { selection: src.min(n) };
+                        // `src` is the ROW the window collapsed to; clamp it to
+                        // the rows that exist (add row + the current view).
+                        let rows = importer_view(&s).len();
+                        s.screen = distant_idle_at(src.min(rows));
                     }
                 }
             } else {
@@ -5111,12 +5870,14 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             }
         }
         Screen::DistantError => {
-            let msg = LIBRARY
+            // A URL-level failure carries the URL that broke → the footer offers
+            // Y (re-type it). File-level failures don't, and show A/B only.
+            let (msg, can_fix) = LIBRARY
                 .lock()
                 .ok()
-                .map(|s| s.distant_error.clone())
+                .map(|s| (s.distant_error.clone(), !s.failed_url.is_empty()))
                 .unwrap_or_default();
-            backend.draw_library_distant_error(&msg);
+            backend.draw_library_distant_error(&msg, can_fix);
         }
         Screen::DistantHistoryConfirm => {
             let url = LIBRARY
@@ -5349,6 +6110,9 @@ fn finalize_gamezip_download() {
         .as_deref()
         .map(str::trim)
         .filter(|t| !t.is_empty() && *t != stem);
+    // Toast label, owned up-front: `file_name` (which `stem` borrows) is moved
+    // into `downloaded_basenames` below.
+    let shown = restored_title.unwrap_or(stem).to_string();
     if let (Some(title), false) = (restored_title, file_name.is_empty()) {
         if write_meta_sidecar(&file_name, title) {
             log(&std::format!("library: saved real title \"{}\" for {}\n", title, file_name));
@@ -5373,6 +6137,13 @@ fn finalize_gamezip_download() {
         let (sel, scroll) = s.download_resume_pos.take().unwrap_or((0, 0));
         let sel = sel.min(s.cover_candidates.len().saturating_sub(1));
         s.screen = Screen::FpGallery { selection: sel, scroll };
+        // The gallery looks identical after a download (bar the OK badge), so
+        // confirm it landed — the download screen vanishing isn't a confirmation.
+        set_toast(
+            &mut s,
+            crate::loc::s().toast_dl_ok.replace("{}", &shown),
+            TOAST_OK,
+        );
     }
 }
 
@@ -5568,11 +6339,25 @@ fn on_download_finished() {
             }
         }
     }
+    // Toast label, owned before `file_name` is moved into the session list.
+    let shown = file_name
+        .strip_suffix(".swf")
+        .unwrap_or(&file_name)
+        .to_string();
     if let Ok(mut s) = LIBRARY.lock() {
         s.download_file_name.clear();
         s.download_out_path.clear();
+        // The URL downloaded fine, so there's nothing left to "fix" on it.
+        s.failed_url.clear();
         if !file_name.is_empty() && !s.downloaded_basenames.iter().any(|n| n == &file_name) {
             s.downloaded_basenames.push(file_name);
+        }
+        if !shown.is_empty() {
+            set_toast(
+                &mut s,
+                crate::loc::s().toast_dl_ok.replace("{}", &shown),
+                TOAST_OK,
+            );
         }
         // Return to DistantFiles, NOT LOCAL — the user almost certainly
         // wants to pick more files from the same item. To go back to
@@ -5583,7 +6368,7 @@ fn on_download_finished() {
         let (sel, scroll) = s.download_resume_pos.take().unwrap_or((0, 0));
         if s.remote_files.is_empty() {
             // Direct `.swf` import (no metadata list) — back to IMPORTER home.
-            s.screen = Screen::DistantIdle { selection: 0 };
+            s.screen = distant_idle_at(0);
         } else {
             // Defensive clamp: if filter changed mid-download (it can't via
             // input lock, but if upstream code ever frees the lock) keep the

@@ -20,6 +20,9 @@ extern "C" {
     // Fills `out` with a short description of the last transfer failure
     // ("curl 60 (...) http 0"). Read after a negative `https_get_into_buf`.
     fn https_last_error_desc(out: *mut c_char, cap: c_int);
+    // Same failure as raw numbers, so we can map it to a SPECIFIC message.
+    fn https_last_curl_code() -> c_int;
+    fn https_last_http_code() -> c_int;
     fn https_download_start(url: *const c_char, out_path: *const c_char) -> c_int;
     fn https_download_tick() -> c_int;
     fn https_download_progress(done_out: *mut u64, total_out: *mut u64);
@@ -97,6 +100,45 @@ fn last_https_error() -> std::string::String {
     std::string::String::from_utf8_lossy(&buf).into_owned()
 }
 
+/// Where the failed transfer was writing. Changes what curl 23 (write error)
+/// means: in memory it's OUR cap rejecting an oversized response; to a file it's
+/// the SD card refusing the write (full / unwritable).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Sink {
+    Memory,
+    Sd,
+}
+
+/// The most SPECIFIC message we can give for the last transfer failure. One
+/// catch-all sentence ("check the clock, the WiFi and the URL") is worse than
+/// nothing: it blames the console clock for a search that merely returned too
+/// much data, and it trains the user to ignore the error. The curl code says
+/// which failure it actually was, so say that.
+pub(crate) fn https_error_message(sink: Sink) -> std::string::String {
+    let curl = unsafe { https_last_curl_code() };
+    let http = unsafe { https_last_http_code() } as i64;
+    let lc = crate::loc::s();
+    let owned = |s: &'static str| std::string::String::from(s);
+    match curl {
+        // CURLE_WRITE_ERROR — our write callback returned short.
+        23 => match sink {
+            Sink::Memory => owned(lc.err_response_big),
+            Sink::Sd => owned(lc.err_sd_write),
+        },
+        // COULDN'T_RESOLVE_PROXY / _HOST / COULDN'T_CONNECT: no usable network.
+        5 | 6 | 7 => owned(lc.err_offline),
+        // OPERATION_TIMEDOUT.
+        28 => owned(lc.err_timeout),
+        // TLS handshake / certificate problems. On Switch the usual cause is a
+        // wrong console clock (the cert reads as not-yet-valid), so THIS is the
+        // one place the clock advice belongs.
+        35 | 51 | 53 | 54 | 58 | 59 | 60 | 66 | 77 | 83 => owned(lc.err_tls),
+        // Transfer itself was fine — the server said no (404 / 403 / 429 / 5xx).
+        _ if http >= 400 => crate::loc::err_http_status(http),
+        _ => crate::loc::err_https(&last_https_error()),
+    }
+}
+
 /// Generic synchronous HTTPS GET into a freshly-allocated buffer; returns the
 /// raw response bytes (truncated to the real length). `cap` bounds the
 /// response (the C++ side returns -3 on overflow). Reuses the exact same
@@ -118,17 +160,15 @@ pub(crate) fn http_get(
         )
     };
     if n == -3 {
-        return Err(std::string::String::from(crate::loc::s().err_too_large));
+        return Err(std::string::String::from(crate::loc::s().err_response_big));
     }
     if n < 0 {
-        // -2 = transfer failed (curl/HTTP); surface the real cause. Other
-        // negatives (-1 init) carry no curl result, so show the raw code.
-        let detail = if n == -2 {
-            last_https_error()
-        } else {
-            std::format!("rc {}", n)
-        };
-        return Err(crate::loc::err_https(&detail));
+        // -2 = transfer failed (curl/HTTP); name the real cause. Other negatives
+        // (-1 init) carry no curl result, so show the raw code.
+        if n == -2 {
+            return Err(https_error_message(Sink::Memory));
+        }
+        return Err(crate::loc::err_https(&std::format!("rc {}", n)));
     }
     buf.truncate(n as usize);
     Ok(buf)
@@ -159,12 +199,10 @@ pub(crate) fn post_json(
         return Err(std::string::String::from(crate::loc::s().err_too_large));
     }
     if n < 0 {
-        let detail = if n == -2 {
-            last_https_error()
-        } else {
-            std::format!("rc {}", n)
-        };
-        return Err(crate::loc::err_https(&detail));
+        if n == -2 {
+            return Err(https_error_message(Sink::Memory));
+        }
+        return Err(crate::loc::err_https(&std::format!("rc {}", n)));
     }
     buf.truncate(n as usize);
     Ok(buf)
@@ -285,8 +323,8 @@ pub fn tick_archive_fetch() -> ArchivePoll {
         return ArchivePoll::Pending;
     }
     if rc < 0 {
-        let detail = last_https_error();
-        return ArchivePoll::Error(crate::loc::err_https(&detail));
+        log(&std::format!("net: archive fetch failed: {}\n", last_https_error()));
+        return ArchivePoll::Error(https_error_message(Sink::Memory));
     }
     // rc == 1: response ready — copy out of C++ and parse.
     const CAP: usize = 8 * 1024 * 1024;
@@ -338,13 +376,14 @@ pub fn tick_get_async() -> GetPoll {
         return GetPoll::Pending;
     }
     if rc < 0 {
-        return GetPoll::Error(crate::loc::err_https(&last_https_error()));
+        log(&std::format!("net: async GET failed: {}\n", last_https_error()));
+        return GetPoll::Error(https_error_message(Sink::Memory));
     }
     const CAP: usize = 4 * 1024 * 1024;
     let mut buf = std::vec![0u8; CAP];
     let n = unsafe { https_get_buffer(buf.as_mut_ptr() as *mut c_char, CAP as c_int) };
     if n < 0 {
-        return GetPoll::Error(std::string::String::from(crate::loc::s().err_too_large));
+        return GetPoll::Error(std::string::String::from(crate::loc::s().err_response_big));
     }
     buf.truncate(n as usize);
     GetPoll::Done(buf)
@@ -451,6 +490,12 @@ pub fn tick_download() -> Result<bool, std::string::String> {
     }
     if rc == 1 {
         return Ok(true);
+    }
+    // -2 = the transfer itself failed and the curl result was recorded; name the
+    // cause (SD full, server 404, clock/TLS...) rather than printing "code -2".
+    if rc == -2 {
+        log(&std::format!("net: download failed: {}\n", last_https_error()));
+        return Err(https_error_message(Sink::Sd));
     }
     Err(crate::loc::err_dl_failed(rc))
 }

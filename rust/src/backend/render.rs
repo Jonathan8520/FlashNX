@@ -2843,6 +2843,56 @@ pub fn invalidate_cover(basename: &str) {
 
 /// Truncate to `max_chars` glyphs, appending an ellipsis when cut. Used by the
 /// cover picker (long Flashpoint titles) and notices.
+/// Split `msg` into lines of at most `max_chars`, breaking on spaces. A single
+/// word longer than the line (a URL, a curl error blob, a space-less CJK run) is
+/// HARD-chopped instead of being allowed to run off both edges of the screen.
+fn wrap_words(msg: &str, max_chars: usize) -> std::vec::Vec<std::string::String> {
+    let max = max_chars.max(8);
+    let mut lines: std::vec::Vec<std::string::String> = std::vec::Vec::new();
+    let mut cur = std::string::String::new();
+    let mut cur_len = 0usize;
+    for word in msg.split_whitespace() {
+        let wlen = word.chars().count();
+        if wlen > max {
+            if !cur.is_empty() {
+                lines.push(core::mem::take(&mut cur));
+                cur_len = 0;
+            }
+            let mut chunk = std::string::String::new();
+            let mut chunk_len = 0usize;
+            for c in word.chars() {
+                chunk.push(c);
+                chunk_len += 1;
+                if chunk_len >= max {
+                    lines.push(core::mem::take(&mut chunk));
+                    chunk_len = 0;
+                }
+            }
+            if !chunk.is_empty() {
+                cur_len = chunk_len;
+                cur = chunk;
+            }
+            continue;
+        }
+        if cur.is_empty() {
+            cur.push_str(word);
+            cur_len = wlen;
+        } else if cur_len + 1 + wlen <= max {
+            cur.push(' ');
+            cur.push_str(word);
+            cur_len += 1 + wlen;
+        } else {
+            lines.push(core::mem::take(&mut cur));
+            cur.push_str(word);
+            cur_len = wlen;
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines
+}
+
 fn truncate_mid(s: &str, max_chars: usize) -> std::string::String {
     if s.chars().count() <= max_chars {
         s.to_string()
@@ -3261,6 +3311,10 @@ struct DistantReveal {
     last_tick: u64,
     t: f32,
     source_sel: usize,
+    /// Scroll offset the list had when the reveal started. The row's SCREEN
+    /// position is `source_sel - source_scroll`, and since the list now scrolls
+    /// freely that can't be re-derived from `source_sel` alone.
+    source_scroll: usize,
 }
 
 fn distant_reveal() -> &'static std::sync::Mutex<DistantReveal> {
@@ -3271,18 +3325,21 @@ fn distant_reveal() -> &'static std::sync::Mutex<DistantReveal> {
         last_tick: 0,
         t: 0.0,
         source_sel: 0,
+        source_scroll: 0,
     });
     &A
 }
 
-/// Begin the expand reveal (row -> full screen) from history row `source_sel`.
-pub fn distant_reveal_begin_expand(source_sel: usize) {
+/// Begin the expand reveal (row -> full screen) from history row `source_sel`,
+/// with the list scrolled to `source_scroll`.
+pub fn distant_reveal_begin_expand(source_sel: usize, source_scroll: usize) {
     if let Ok(mut a) = distant_reveal().lock() {
         a.active = true;
         a.collapsing = false;
         a.inited = false;
         a.t = 0.0;
         a.source_sel = source_sel;
+        a.source_scroll = source_scroll;
     }
 }
 
@@ -3301,17 +3358,23 @@ pub fn distant_reveal_active() -> bool {
     distant_reveal().lock().map(|a| a.active).unwrap_or(false)
 }
 
-/// The history row the reveal grows from / shrinks to.
+/// The history row the reveal grows from / shrinks to, and the scroll the list
+/// was at — the underlay must redraw at that scroll for the box to line up.
 pub fn distant_reveal_source_sel() -> usize {
     distant_reveal().lock().map(|a| a.source_sel).unwrap_or(0)
 }
 
-/// Retarget the reveal's grow-from / shrink-to row. Used after `push_history`
-/// reorders the launched URL to the most-recent end, so the collapse (and the
-/// DistantIdle cursor) land on its NEW row instead of its old one.
-pub fn distant_reveal_set_source(idx: usize) {
+pub fn distant_reveal_source_scroll() -> usize {
+    distant_reveal().lock().map(|a| a.source_scroll).unwrap_or(0)
+}
+
+/// Retarget the reveal's grow-from / shrink-to row. Used once a newly-imported
+/// URL lands in the history, so the collapse (and the DistantIdle cursor) end on
+/// its real row instead of the "+ add" row it grew from.
+pub fn distant_reveal_set_source(idx: usize, scroll: usize) {
     if let Ok(mut a) = distant_reveal().lock() {
         a.source_sel = idx;
+        a.source_scroll = scroll;
     }
 }
 
@@ -5221,20 +5284,35 @@ impl SwitchRenderBackend {
             // Uppercase fold — our font only carries A-Z.
             let lookup = ch.to_ascii_uppercase();
             if let Some((_, pattern)) = GLYPHS.iter().find(|(c, _)| *c == lookup) {
+                // One rect per horizontal RUN of lit pixels, not per pixel. Every
+                // rect is a separate draw call here, and a 5x7 glyph is ~20 lit
+                // pixels but only ~8 runs — a text-heavy screen went from >15k
+                // draw calls a frame to a third of that, which is the difference
+                // between the IMPORTER list stuttering and not.
                 for (row_idx, row_str) in pattern.iter().enumerate() {
-                    for (col_idx, pixel) in row_str.chars().enumerate() {
-                        if pixel != ' ' {
-                            let px = cur_x + col_idx as f32 * scale;
-                            let py = y + row_idx as f32 * scale;
-                            let mat = Matrix {
-                                a: scale,
-                                b: 0.0,
-                                c: 0.0,
-                                d: scale,
-                                tx: swf::Twips::from_pixels(px as f64),
-                                ty: swf::Twips::from_pixels(py as f64),
-                            };
-                            <Self as CommandHandler>::draw_rect(self, color, mat);
+                    let py = y + row_idx as f32 * scale;
+                    let mut run_start: Option<usize> = None;
+                    // `len() + 1` so a run touching the right edge gets flushed.
+                    for col_idx in 0..row_str.len() + 1 {
+                        let lit = row_str.as_bytes().get(col_idx).map_or(false, |&b| b != b' ');
+                        match (lit, run_start) {
+                            (true, None) => run_start = Some(col_idx),
+                            (false, Some(start)) => {
+                                let cols = (col_idx - start) as f32;
+                                let mat = Matrix {
+                                    a: scale * cols,
+                                    b: 0.0,
+                                    c: 0.0,
+                                    d: scale,
+                                    tx: swf::Twips::from_pixels(
+                                        (cur_x + start as f32 * scale) as f64,
+                                    ),
+                                    ty: swf::Twips::from_pixels(py as f64),
+                                };
+                                <Self as CommandHandler>::draw_rect(self, color, mat);
+                                run_start = None;
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -6830,6 +6908,81 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
+    /// Per-URL options modal (IMPORTER, `+` on a row). Same frame as the
+    /// per-game OPTIONS modal, but with an info block above the actions: the
+    /// row's short label alone doesn't tell you which URL you're about to edit
+    /// or delete, nor when you saved it. `info` lines are pre-formatted
+    /// `LABEL : value` pairs; the full URL goes last (wrapped, dimmer) since
+    /// it's the long one.
+    pub fn draw_library_url_options(
+        &mut self,
+        title: &str,
+        selection: usize,
+        options: &[&str],
+        info: &[std::string::String],
+        url: &str,
+        footer: &str,
+    ) {
+        const INFO_SCALE: f32 = 1.6;
+        let info_line_h = 7.0 * INFO_SCALE + 9.0;
+        let url_cpl = (((MODAL_W_WIDE - 80.0) / (6.0 * INFO_SCALE)) as usize).max(8);
+        let mut url_lines = wrap_words(url, url_cpl);
+        // Two lines of URL is plenty to recognise it; more would push the
+        // actions off the panel.
+        if url_lines.len() > 2 {
+            url_lines.truncate(2);
+            if let Some(last) = url_lines.last_mut() {
+                last.push('…');
+            }
+        }
+        let block_h = (info.len() + url_lines.len()) as f32 * info_line_h + 18.0;
+        // Reserve the info block by asking the frame for extra "rows" worth of
+        // height, then draw the real rows below it.
+        let extra_rows = (block_h / MODAL_ROW_H).ceil() as usize;
+        let frame = self.draw_modal_frame(
+            MODAL_W_WIDE,
+            options.len() + extra_rows,
+            None,
+            false,
+            title,
+            None,
+            Some(footer),
+        );
+        let left = frame.rows_left();
+        let mut y = frame.rows_top();
+        for line in info {
+            self.draw_text(left, y, INFO_SCALE, line, swf::Color::from_rgb(0xCCCCCC, 255));
+            y += info_line_h;
+        }
+        for line in &url_lines {
+            self.draw_text(left, y, INFO_SCALE, line, swf::Color::from_rgb(0x8899AA, 255));
+            y += info_line_h;
+        }
+        // Actions, offset past the reserved block.
+        let rows_top = frame.rows_top() + extra_rows as f32 * MODAL_ROW_H;
+        let avail = frame.rows_avail();
+        for (i, row) in options.iter().enumerate() {
+            let ry = rows_top + i as f32 * MODAL_ROW_H;
+            let is_sel = i == selection;
+            let color = swf::Color::from_rgb(
+                if is_sel { MODAL_ROW_SEL_COL } else { MODAL_ROW_COL },
+                255,
+            );
+            if is_sel {
+                self.draw_text(left - MODAL_CURSOR_DX, ry, MODAL_ROW_SCALE, ">", color);
+            }
+            let w = self.measure_text(row, MODAL_ROW_SCALE);
+            let sc = if w > avail { MODAL_ROW_SCALE * avail / w } else { MODAL_ROW_SCALE };
+            self.draw_text(left, ry, sc, row, color);
+        }
+
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
     /// Generic centered list modal (title + subtitle + rows + footer), same
     /// look as `draw_library_options` but with the strings passed in. Used by
     /// the community-profile picker (#20). `subtitle` may be empty. `wide` picks
@@ -6936,20 +7089,41 @@ impl SwitchRenderBackend {
 
     // ── Phase 3.7: DISTANT mode screens ────────────────────────────────
 
-    /// IMPORTER tab (v1.2.0) — a compact LIST of saved URLs plus a trailing
-    /// "+ add" row, replacing the old big CTA splash. `urls` are the history
-    /// entries; `selection` indexes them and `selection == urls.len()` is the
-    /// add row. A = launch (or add a URL), + = per-URL options. Windowed to fit.
+    /// IMPORTER tab — the saved-URL list. Row 0 is the "+ add" row (PINNED
+    /// first, so it stays reachable however long the history gets); rows 1.. are
+    /// `labels`/`hosts`/`installed`, already filtered + sorted by the caller.
+    /// `selection` is a ROW index. A = launch (or add a URL), + = per-URL
+    /// options, Y = sort, - = search.
     pub fn draw_library_distant_list(
         &mut self,
         selection: usize,
-        urls: &[&str],
+        // Readable name per URL (item id / file name) — the raw URL is unusable
+        // as a row label past a couple of entries.
+        labels: &[&str],
+        // Host tag drawn dimmed to the right of each label ("" = none).
+        hosts: &[&str],
+        // True = a direct `.swf` (one file, A downloads it) vs an archive.org
+        // item (A opens its file list). They behave differently on A, so the row
+        // says which it is instead of leaving the user to guess from the URL.
+        direct: &[bool],
+        // (files on SD, total files) per URL. `None` total = never opened, so
+        // the count is unknown and the row shows nothing rather than a guess.
+        progress: &[(u32, Option<u32>)],
+        // Favorited URLs: gold diamond, and pinned to the top by the caller —
+        // same treatment a favorited game gets in the JOUER gallery.
+        favorite: &[bool],
         add_label: &str,
-        // Which URLs already have their game on SD (draws a green OK prefix).
-        installed: &[bool],
+        // Topmost visible row. A real value from the screen state (not derived
+        // from `selection`) so a touch drag can scroll without moving the cursor.
+        scroll_offset: usize,
+        // Active search, echoed in the sub-line with the match count.
+        filter: Option<&str>,
+        // URL count BEFORE filtering, for the "3 / 21" sub-line.
+        total_unfiltered: usize,
         // True only when this is the ACTIVE IMPORTER home (not a reveal-window
-        // underlay): then it publishes row geometry for the touch layer. Underlays
-        // must NOT publish or they'd clobber the windowed list's touch metrics.
+        // underlay): then it drives the shared scroll/hover animation and
+        // publishes row geometry for the touch layer. An underlay must do
+        // NEITHER — the file list drawn on top owns those singletons that frame.
         interactive: bool,
     ) {
         self.library_clear();
@@ -6968,24 +7142,90 @@ impl SwitchRenderBackend {
             swf::Color::from_rgb(0xFFD740, 255),
         );
 
-        let total = urls.len() + 1; // + the trailing "add" row
-        const VISIBLE: usize = 9;
+        // Sub-line: "3 / 21 - FILTRE: mario" while searching, else the count —
+        // with a long history you need to know how much of it you're looking at.
+        let lc = crate::loc::s();
+        let sub = match filter {
+            Some(f) if !f.trim().is_empty() => std::format!(
+                "{} / {} - {}: {}",
+                labels.len(),
+                total_unfiltered,
+                lc.files_filter,
+                f
+            ),
+            _ => lc.dist_count.replace("{}", &total_unfiltered.to_string()),
+        };
+        let sub_w = self.measure_text(&sub, 2.0);
+        self.draw_text(
+            (vw - sub_w) * 0.5,
+            118.0,
+            2.0,
+            &sub,
+            swf::Color::from_rgb(0xAABFD8, 255),
+        );
+
+        let total = labels.len() + 1; // + the pinned "add" row
+        // 10 rows: the last one ends at 660, clear of the footer at vh-42.
+        // MUST match `library::IMPORTER_VISIBLE_ROWS` / `distant_row_rect`, which
+        // mirror this layout for the scroll clamp and the reveal box.
+        const VISIBLE: usize = 10;
         let row_h = 50.0;
         let top = 160.0;
         let left = 80.0;
-        let first = if selection < VISIBLE { 0 } else { selection + 1 - VISIBLE };
-        let end = (first + VISIBLE).min(total);
         let scale = 2.0;
-        let max_chars = ((vw - left - 80.0) / (6.0 * scale)) as usize;
 
-        // Gliding selection highlight (v1.2.0): a translucent bar + cursor that
-        // ease toward the selected row so moving the cursor slides instead of
-        // snapping. Key `1` ties this to the IMPORTER list (REGLAGES uses `2`),
-        // so switching tabs snaps rather than sliding across layouts.
-        let sel_vis = selection.saturating_sub(first);
-        let target_hy = top + sel_vis as f32 * row_h;
-        let now_hl = unsafe { ruffle_tick_now() };
-        let hy = eased_list_y(target_hy, 1, now_hl);
+        // Smooth scroll + gliding hover, same machinery as the archive.org file
+        // list and the JOUER gallery (shared anim/view/cache singletons — only
+        // one of those screens renders per frame). This list used to PAGE, which
+        // is why it alone felt like it snapped: the rows now ease toward
+        // `scroll_offset` and the highlight bar slides between rows.
+        let band_top = top - 8.0;
+        let band_bot = top + VISIBLE as f32 * row_h;
+        let target_scroll = scroll_offset as f32 * row_h;
+        let target_hover = top + selection as f32 * row_h;
+        let mut scroll_px = target_scroll;
+        let mut hover_y = target_hover;
+        // An underlay must not touch the animation: the file list drawn over it
+        // owns these singletons for this frame.
+        if interactive {
+            let touch_scroll = gallery_touch_scroll_read();
+            if let Ok(mut a) = gallery_anim().lock() {
+                let now = unsafe { ruffle_tick_now() };
+                if !a.inited {
+                    a.inited = true;
+                    a.last_tick = now;
+                    a.last_sel = selection;
+                    a.scroll_px = target_scroll;
+                    a.sel_x = 0.0;
+                    a.sel_y = target_hover;
+                    a.sel_w = 0.0;
+                    a.pop = 0.0;
+                } else {
+                    let freq = unsafe { ruffle_tick_freq() } as f32;
+                    let dt = if freq > 0.0 {
+                        (now.saturating_sub(a.last_tick) as f32 / freq).min(0.1)
+                    } else {
+                        1.0 / 60.0
+                    };
+                    a.last_tick = now;
+                    a.last_sel = selection;
+                    a.scroll_px = ease_to(a.scroll_px, target_scroll, dt, 16.0);
+                    a.sel_y = ease_to(a.sel_y, target_hover, dt, 18.0);
+                }
+                // A finger on the screen overrides the eased value 1:1.
+                if let Some(px) = touch_scroll {
+                    a.scroll_px = px;
+                }
+                scroll_px = a.scroll_px;
+                hover_y = a.sel_y;
+            }
+        }
+
+        // Clip the rows to their band so a mid-glide row can't bleed over the
+        // sub-line or the footer.
+        self.set_clip(0.0, band_top, vw, band_bot - band_top);
+
+        let hy = hover_y - scroll_px;
         let bar_x = left - 40.0;
         let bar = Matrix {
             a: vw - bar_x - 56.0, b: 0.0, c: 0.0, d: row_h - 12.0,
@@ -6995,26 +7235,19 @@ impl SwitchRenderBackend {
         <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x33_FF_D7_40), bar);
         self.draw_text(left - 34.0, hy, scale, ">", swf::Color::from_rgb(0xFFD740, 255));
 
-        for (vis, i) in (first..end).enumerate() {
-            let y = top + vis as f32 * row_h;
+        for i in 0..total {
+            let y = top + i as f32 * row_h - scroll_px;
+            // Cheap cull: skip rows fully outside the band.
+            if y + row_h < band_top - 8.0 || y > band_bot + 8.0 {
+                continue;
+            }
             let is_sel = i == selection;
             let color = if is_sel {
                 swf::Color::from_rgb(0xFFD740, 255)
             } else {
                 swf::Color::from_rgb(0xCCCCCC, 255)
             };
-            if i < urls.len() {
-                // Green OK prefix if this URL's game is already on SD.
-                let ux = if installed.get(i).copied().unwrap_or(false) {
-                    self.draw_text(left, y + 2.0, 1.6, "OK", swf::Color::from_rgb(0x66DD66, 255));
-                    left + self.measure_text("OK", 1.6) + 10.0
-                } else {
-                    left
-                };
-                let avail = ((vw - ux - 80.0) / (6.0 * scale)) as usize;
-                let shown = truncate_mid(urls[i], avail.max(1));
-                self.draw_text(ux, y, scale, &shown, color);
-            } else {
+            if i == 0 {
                 // Add row — teal when not selected so it stands out from URLs.
                 let c = if is_sel {
                     color
@@ -7022,14 +7255,104 @@ impl SwitchRenderBackend {
                     swf::Color::from_rgb(0x88CC99, 255)
                 };
                 self.draw_text(left, y, scale, add_label, c);
+                continue;
             }
+            let k = i - 1;
+            // Right-hand metadata first (host, then count), so the label knows
+            // how much room is left before it truncates.
+            let mut right = vw - 60.0;
+            let host = hosts.get(k).copied().unwrap_or("");
+            if !host.is_empty() {
+                let hw = self.measure_text(host, 1.5);
+                self.draw_text(
+                    right - hw,
+                    y + 5.0,
+                    1.5,
+                    host,
+                    swf::Color::from_rgb(0x66788C, 255),
+                );
+                right -= hw + 20.0;
+            }
+            // "4/13" = how much of this source is already on SD. Green once it's
+            // complete, amber while partial, grey at zero. This replaces the old
+            // all-or-nothing OK badge, which only ever lit up at 100% and so said
+            // nothing at all about a 13-file archive.org item.
+            let count = match progress.get(k).copied() {
+                Some((have, Some(total))) => Some((
+                    std::format!("{}/{}", have, total),
+                    if total > 0 && have >= total {
+                        swf::Color::from_rgb(0x66DD66, 255)
+                    } else if have > 0 {
+                        swf::Color::from_rgb(0xFFB740, 255)
+                    } else {
+                        swf::Color::from_rgb(0x778899, 255)
+                    },
+                )),
+                // Total unknown (never opened) but files from it ARE on SD:
+                // still worth saying so, with the total left as "?".
+                Some((have, None)) if have > 0 => Some((
+                    std::format!("{}/?", have),
+                    swf::Color::from_rgb(0xFFB740, 255),
+                )),
+                _ => None,
+            };
+            if let Some((txt, c)) = count {
+                let cw = self.measure_text(&txt, 1.6);
+                self.draw_text(right - cw, y + 4.0, 1.6, &txt, c);
+                right -= cw + 20.0;
+            }
+            // Type tag: a direct `.swf` downloads on A, an item opens a file
+            // list. Fixed slot on the left so the labels stay aligned.
+            let is_direct = direct.get(k).copied().unwrap_or(false);
+            let (tag, tag_c) = if is_direct {
+                ("SWF", swf::Color::from_rgb(0x7FB3FF, 255))
+            } else {
+                ("LIST", swf::Color::from_rgb(0xB08CE0, 255))
+            };
+            self.draw_text(left, y + 2.0, 1.6, tag, tag_c);
+            let mut ux = left + self.measure_text("LIST", 1.6) + 12.0;
+            // Favorite marker: the same gold diamond the gallery puts on a
+            // favorited cover (the bitmap font has no star glyph).
+            if favorite.get(k).copied().unwrap_or(false) {
+                let sz = 11.0_f32;
+                let cs = 0.70710678_f32; // cos/sin 45°
+                let diamond = Matrix {
+                    a: sz * cs, b: sz * cs, c: -sz * cs, d: sz * cs,
+                    tx: swf::Twips::from_pixels((ux + sz * 0.5) as f64),
+                    ty: swf::Twips::from_pixels((y + row_h * 0.5 - 12.0 - sz * cs) as f64),
+                };
+                <Self as CommandHandler>::draw_rect(
+                    self,
+                    swf::Color::from_rgb(0xFFD740, 255),
+                    diamond,
+                );
+                ux += sz + 12.0;
+            }
+            let avail = ((right - ux) / (6.0 * scale)) as usize;
+            let shown = truncate_mid(labels[k], avail.max(1));
+            self.draw_text(ux, y, scale, &shown, color);
         }
 
-        // Publish row geometry for the touch layer (tap to select / activate).
-        // Only when interactive (the active IMPORTER home, not a reveal-window
-        // underlay) so it doesn't clobber the windowed list's touch metrics. The
-        // scroll is paged (`first`), so scroll_px = first*row_h; touch here is
-        // tap-only (DistantIdle has no scroll field for a drag to write).
+        self.clear_clip();
+
+        // A search that matched nothing would otherwise be a blank page with a
+        // lone "+ add" row — say so.
+        if labels.is_empty() && filter.map_or(false, |f| !f.trim().is_empty()) {
+            let none = lc.cover_none;
+            let nw = self.measure_text(none, 2.0);
+            self.draw_text(
+                (vw - nw) * 0.5,
+                top + row_h * 2.0,
+                2.0,
+                none,
+                swf::Color::from_rgb(0x99AABB, 255),
+            );
+        }
+
+        // Publish row geometry + the live scroll for the touch layer (drag to
+        // scroll, tap to select / activate). Only when interactive: an underlay
+        // would clobber the windowed list's metrics. `y` is content-space
+        // (pre-scroll), matching what `gallery_hit_test` expects.
         if interactive {
             let mut cells: std::vec::Vec<GalleryCell> = std::vec::Vec::with_capacity(total);
             for i in 0..total {
@@ -7047,24 +7370,28 @@ impl SwitchRenderBackend {
             }
             if let Ok(mut v) = gallery_view().lock() {
                 *v = GalleryView {
-                    scroll_px: first as f32 * row_h,
+                    scroll_px,
                     pitch: row_h,
-                    band_top: top - 8.0,
-                    band_bot: top + VISIBLE as f32 * row_h,
+                    band_top,
+                    band_bot,
                     rows_total: total as u32,
                     rows_visible: VISIBLE as u32,
                 };
             }
         }
 
-        // Scrollbar.
+        // Scrollbar, tracking the eased pixel scroll.
         if total > VISIBLE {
             let bar_x = vw - 40.0;
             let bar_top = top;
             let bar_h = VISIBLE as f32 * row_h;
             let thumb = (bar_h * VISIBLE as f32 / total as f32).max(24.0);
-            let denom = (total - VISIBLE).max(1) as f32;
-            let progress = first as f32 / denom;
+            let max_scroll_px = (total - VISIBLE) as f32 * row_h;
+            let progress = if max_scroll_px > 0.0 {
+                (scroll_px / max_scroll_px).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             let thumb_y = bar_top + (bar_h - thumb) * progress;
             let track = Matrix {
                 a: 4.0, b: 0.0, c: 0.0, d: bar_h,
@@ -7477,8 +7804,12 @@ impl SwitchRenderBackend {
     }
 
     /// Error toast for DISTANT mode (URL parse / metadata fetch / DL fail).
-    pub fn draw_library_distant_error(&mut self, msg: &str) {
-        self.draw_centered_notice(crate::loc::s().err_title, 0xFF5040, msg);
+    /// `can_fix` = the failure carries the URL that caused it, so the footer
+    /// advertises Y (re-type it here) on top of the usual A/B dismiss.
+    pub fn draw_library_distant_error(&mut self, msg: &str, can_fix: bool) {
+        let lc = crate::loc::s();
+        let footer = if can_fix { lc.err_footer_fix } else { lc.err_footer };
+        self.draw_centered_notice_footer(lc.err_title, 0xFF5040, msg, footer);
     }
 
     /// Applet-mode notice (P1c): same centered layout as the error toast, but
@@ -7491,6 +7822,18 @@ impl SwitchRenderBackend {
     /// Shared full-screen centered notice: big title (in `title_rgb`), a
     /// word-wrapped body, and the generic dismiss footer.
     fn draw_centered_notice(&mut self, title: &str, title_rgb: u32, msg: &str) {
+        self.draw_centered_notice_footer(title, title_rgb, msg, crate::loc::s().err_footer);
+    }
+
+    /// `draw_centered_notice` with an explicit footer, for notices whose
+    /// dismiss options depend on what failed.
+    fn draw_centered_notice_footer(
+        &mut self,
+        title: &str,
+        title_rgb: u32,
+        msg: &str,
+        footer: &str,
+    ) {
         self.library_clear();
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
@@ -7512,28 +7855,12 @@ impl SwitchRenderBackend {
             swf::Color::from_rgb(title_rgb, 255),
         );
 
-        // Word-wrap the message into ~70-char lines (rough heuristic at
-        // scale 2.0). We use the simple split-on-space algorithm. Lines
-        // are centred horizontally.
+        // Word-wrapped, centred. `wrap_words` counts CHARS (not bytes, which
+        // over-wrapped every accented / Cyrillic / CJK message) and hard-chops
+        // any single word too long for a line.
         let scale_m = 2.0;
         const WRAP_AT: usize = 60;
-        let mut lines: std::vec::Vec<std::string::String> = std::vec::Vec::new();
-        let mut current = std::string::String::new();
-        for word in msg.split(' ') {
-            if current.is_empty() {
-                current.push_str(word);
-            } else if current.len() + 1 + word.len() <= WRAP_AT {
-                current.push(' ');
-                current.push_str(word);
-            } else {
-                lines.push(current.clone());
-                current.clear();
-                current.push_str(word);
-            }
-        }
-        if !current.is_empty() {
-            lines.push(current);
-        }
+        let lines = wrap_words(msg, WRAP_AT);
         let mut y = vh * 0.42;
         for line in &lines {
             let w = self.measure_text(line, scale_m);
@@ -7548,13 +7875,12 @@ impl SwitchRenderBackend {
         }
 
         const HELP_SCALE: f32 = 2.0;
-        let help = crate::loc::s().err_footer;
-        let help_w = self.measure_text(help, HELP_SCALE);
+        let help_w = self.measure_text(footer, HELP_SCALE);
         self.draw_text(
             (vw - help_w) * 0.5,
             vh - 42.0,
             HELP_SCALE,
-            help,
+            footer,
             swf::Color::from_rgb(0x99AABB, 255),
         );
         unsafe {
@@ -7861,9 +8187,18 @@ impl SwitchRenderBackend {
         self.draw_text((vw - hw) * 0.5, vh - 34.0, 2.0, footer, swf::Color::from_rgb(0x99AABB, 255));
 
         if n == 0 {
+            // Word-wrapped: this doubles as the ERROR surface for a failed
+            // search, and those messages are sentences — drawn as one centered
+            // line they ran off both edges of the screen.
             let m = if msg.is_empty() { crate::loc::s().cover_none } else { msg };
-            let mw = self.measure_text(m, 2.5);
-            self.draw_text((vw - mw) * 0.5, vh * 0.5 - 12.0, 2.5, m, swf::Color::from_rgb(0xAABFD8, 255));
+            const MS: f32 = 2.5;
+            let lines = wrap_words(m, ((vw - 80.0) / (6.0 * MS)) as usize);
+            let mut my = vh * 0.5 - 12.0 - (lines.len().saturating_sub(1) as f32) * 17.0;
+            for line in &lines {
+                let mw = self.measure_text(line, MS);
+                self.draw_text((vw - mw) * 0.5, my, MS, line, swf::Color::from_rgb(0xAABFD8, 255));
+                my += 34.0;
+            }
             unsafe {
                 glUseProgram(0);
                 glBindVertexArray(0);
@@ -8132,6 +8467,11 @@ impl SwitchRenderBackend {
         publisher: &str,
         release_date: &str,
         size_bytes: u64,
+        // The game's logo. Already in the thumbnail cache (the gallery behind
+        // this popup loaded it), so drawing it here costs nothing extra.
+        cover_url: &str,
+        // The game's blurb; empty when none was published or the fetch failed.
+        description: &str,
     ) {
         unsafe {
             glEnable(GL_BLEND);
@@ -8143,29 +8483,33 @@ impl SwitchRenderBackend {
         let lc = crate::loc::s();
 
         const PANEL_W: f32 = 840.0;
+        // Cover column on the left; the title + info rows sit beside it.
+        const COVER_W: f32 = 180.0;
+        const COVER_H: f32 = 135.0;
+        let cover = match self.thumb_for(cover_url) {
+            Some(ThumbTex::Image { tex, w, h }) if tex != 0 => Some((tex, w, h)),
+            _ => None,
+        };
+        let text_x0 = 40.0 + if cover.is_some() { COVER_W + 24.0 } else { 0.0 };
         let title_scale = 2.5;
-        let title_cpl = (((PANEL_W - 80.0) / (6.0 * title_scale)) as usize).max(8);
-
-        // Word-wrap the (possibly long) title on spaces.
-        let mut title_lines: std::vec::Vec<std::string::String> = std::vec::Vec::new();
-        let mut cur = std::string::String::new();
-        for word in title.split(' ') {
-            if cur.is_empty() {
-                cur.push_str(word);
-            } else if cur.chars().count() + 1 + word.chars().count() <= title_cpl {
-                cur.push(' ');
-                cur.push_str(word);
-            } else {
-                title_lines.push(cur.clone());
-                cur.clear();
-                cur.push_str(word);
-            }
-        }
-        if !cur.is_empty() {
-            title_lines.push(cur);
-        }
+        let title_cpl = (((PANEL_W - text_x0 - 40.0) / (6.0 * title_scale)) as usize).max(8);
+        let title_lines = wrap_words(title, title_cpl);
+        let mut title_lines = title_lines;
         if title_lines.is_empty() {
             title_lines.push(std::string::String::from("?"));
+        }
+
+        // Blurb, wrapped and capped: this is a popup, not a reader. Newlines in
+        // the source text are collapsed by the word wrapper.
+        const DESC_SCALE: f32 = 1.6;
+        const DESC_MAX_LINES: usize = 7;
+        let desc_cpl = (((PANEL_W - 80.0) / (6.0 * DESC_SCALE)) as usize).max(8);
+        let mut desc_lines = wrap_words(description, desc_cpl);
+        if desc_lines.len() > DESC_MAX_LINES {
+            desc_lines.truncate(DESC_MAX_LINES);
+            if let Some(last) = desc_lines.last_mut() {
+                last.push('…');
+            }
         }
 
         // Info rows (label, value) — skip unknown fields; size always shown.
@@ -8188,8 +8532,22 @@ impl SwitchRenderBackend {
 
         let title_line_h = 7.0 * title_scale + 10.0;
         let row_h = 40.0;
-        let panel_h = 60.0 + title_lines.len() as f32 * title_line_h + 24.0
-            + rows.len() as f32 * row_h + 64.0;
+        let desc_line_h = 7.0 * DESC_SCALE + 9.0;
+        // The text column (title + rows) and the cover sit side by side, so the
+        // block is as tall as the taller of the two.
+        let text_block_h = title_lines.len() as f32 * title_line_h + 24.0
+            + rows.len() as f32 * row_h;
+        let block_h = if cover.is_some() {
+            text_block_h.max(COVER_H + 12.0)
+        } else {
+            text_block_h
+        };
+        let desc_block_h = if desc_lines.is_empty() {
+            0.0
+        } else {
+            desc_lines.len() as f32 * desc_line_h + 20.0
+        };
+        let panel_h = 60.0 + block_h + desc_block_h + 64.0;
         let panel_x = (vw - PANEL_W) * 0.5;
         let panel_y = (vh - panel_h) * 0.5;
         let panel = Matrix {
@@ -8205,23 +8563,53 @@ impl SwitchRenderBackend {
         let hw = self.measure_text(hdr, 2.0);
         self.draw_text(panel_x + (PANEL_W - hw) * 0.5, panel_y + 22.0, 2.0, hdr, swf::Color::from_rgb(0xFFD740, 255));
 
-        // Title (centered, white).
-        let mut y = panel_y + 60.0;
+        // Cover on the left, aspect-preserved inside its slot.
+        let block_top = panel_y + 60.0;
+        if let Some((tex, cw, ch)) = cover {
+            self.draw_textured_rect_cover(
+                panel_x + 40.0,
+                block_top,
+                COVER_W,
+                COVER_H,
+                tex,
+                cw,
+                ch,
+            );
+        }
+
+        // Title, left-aligned beside the cover (centring it would leave it
+        // floating away from the rows it belongs to).
+        let text_x = panel_x + text_x0;
+        let text_w = PANEL_W - text_x0 - 40.0;
+        let mut y = block_top;
         for line in &title_lines {
-            let w = self.measure_text(line, title_scale);
-            self.draw_text(panel_x + (PANEL_W - w) * 0.5, y, title_scale, line, swf::Color::from_rgb(0xFFFFFF, 255));
+            self.draw_text(text_x, y, title_scale, line, swf::Color::from_rgb(0xFFFFFF, 255));
             y += title_line_h;
         }
         y += 24.0;
 
-        // Info rows: "LABEL : value", truncated to the panel width.
+        // Info rows: "LABEL : value", truncated to the text column.
         let row_scale = 2.0;
-        let row_cpl = (((PANEL_W - 80.0) / (6.0 * row_scale)) as usize).max(8);
-        let label_x = panel_x + 40.0;
+        let row_cpl = ((text_w / (6.0 * row_scale)) as usize).max(8);
         for (label, value) in &rows {
             let line = truncate_mid(&std::format!("{} : {}", label, value), row_cpl);
-            self.draw_text(label_x, y, row_scale, &line, swf::Color::from_rgb(0xCCCCCC, 255));
+            self.draw_text(text_x, y, row_scale, &line, swf::Color::from_rgb(0xCCCCCC, 255));
             y += row_h;
+        }
+
+        // Blurb, full panel width under the cover + facts.
+        if !desc_lines.is_empty() {
+            let mut dy = block_top + block_h + 20.0;
+            for line in &desc_lines {
+                self.draw_text(
+                    panel_x + 40.0,
+                    dy,
+                    DESC_SCALE,
+                    line,
+                    swf::Color::from_rgb(0xAABFD8, 255),
+                );
+                dy += desc_line_h;
+            }
         }
 
         // Footer.

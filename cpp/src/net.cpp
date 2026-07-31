@@ -292,6 +292,13 @@ extern "C" void https_last_error_desc(char* out, int cap) {
                   g_last_http_code);
 }
 
+// Same failure, as raw numbers. `https_last_error_desc` is for the log; these
+// let Rust MAP the cause to a specific, actionable message ("check the console
+// clock" for a TLS failure, "narrow your search" for an oversized response)
+// instead of showing one catch-all sentence for every network problem.
+extern "C" int https_last_curl_code(void) { return g_last_curl_result; }
+extern "C" int https_last_http_code(void) { return (int)g_last_http_code; }
+
 // Begin an async download. Sets up a curl multi handle so `_tick` can be
 // called once per render frame without blocking. Returns:
 //   0  on success (download is now in progress)

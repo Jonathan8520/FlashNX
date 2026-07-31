@@ -64,6 +64,37 @@ pub fn search_url(name: &str, filter: bool) -> std::string::String {
     )
 }
 
+/// Fetch ONE game's blurb by id (`originalDescription`, the text from the game's
+/// original site — verified present in the db-api payload 2026-07-31).
+///
+/// Deliberately a separate per-game request rather than another `fields=` entry
+/// on the gallery search: descriptions run to kilobytes each, and folding 60 of
+/// them into the search response would bloat it for a blurb the user only sees
+/// after pressing `+`. Blocking HTTPS — call it hoisted, like the other flows.
+pub fn fetch_description(id: &str) -> std::string::String {
+    if id.is_empty() {
+        return std::string::String::new();
+    }
+    let url = std::format!(
+        "{}?id={}&fields=id,originalDescription",
+        SEARCH_BASE,
+        net::url_encode_path(id),
+    );
+    let Ok(bytes) = net::http_get(&url, 512 * 1024) else {
+        return std::string::String::new();
+    };
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return std::string::String::new();
+    };
+    json.as_array()
+        .and_then(|a| a.first())
+        .and_then(|g| g.get("originalDescription"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
 /// Parse a db-api search response into up to 60 fetchable `CatalogEntry` hits
 /// (id = UUID, title, developer, cover_url, launch_command, zipped). `zipped`
 /// games download from the GameZIP server (`/get?id=`); non-zipped (legacy
