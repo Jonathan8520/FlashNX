@@ -450,9 +450,36 @@ impl NavigatorBackend for SidecarNavigator {
             // stub existed the request simply ERRORED and such games coped, so a
             // wrong-shaped success is worse than no answer: never widen this stub
             // without checking a game that used to work.
+            // The version we hand back is compared against the movie's OWN
+            // declared version, and a mismatch makes the API cover the running
+            // game with its "a new version of this movie is available" panel
+            // (Infiltrating the Airship: its trace read `Current version:` empty
+            // against our hardcoded `Newest version: 1`). So ECHO whatever
+            // version the request carried: that always means "you are up to
+            // date", instead of asserting a number we cannot know. The v2
+            // parameter name is undocumented, hence matching any `*version*`
+            // key; absent = empty, which also matches a movie that declares none.
+            let movie_version = request
+                .body()
+                .as_ref()
+                .and_then(|(b, _)| {
+                    String::from_utf8_lossy(b).split('&').find_map(|kv| {
+                        let (k, v) = kv.split_once('=')?;
+                        k.to_ascii_lowercase()
+                            .contains("version")
+                            .then(|| v.to_string())
+                    })
+                })
+                // Keep it JSON-safe: a version is digits/dots, never quotes.
+                .map(|v| {
+                    v.chars()
+                        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+                        .collect::<String>()
+                })
+                .unwrap_or_default();
             let body = if cmd == "connectMovie" {
                 std::format!(
-                    "{{\"success\":true,\"command_id\":\"{cmd}\",\"movie_id\":1,                     \"movie_name\":\"FlashNX\",\"movie_version\":\"1\",                     \"ad_url\":\"\",\"deny_host\":false,\"session_id\":\"flashnx\"}}"
+                    "{{\"success\":true,\"command_id\":\"{cmd}\",\"movie_id\":1,                     \"movie_name\":\"FlashNX\",\"movie_version\":\"{movie_version}\",                     \"ad_url\":\"\",\"deny_host\":false,\"session_id\":\"flashnx\"}}"
                 )
                 .into_bytes()
             } else {
