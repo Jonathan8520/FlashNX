@@ -2,6 +2,37 @@
 
 Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://github.com/ruffle-rs/ruffle).
 
+## v1.6.0 (2026-07-31)
+
+More games playable, a faster player, and an import tab that survives a long list of URLs.
+
+### Added
+
+- **Games that are packaged as a web page now run**: several Flashpoint entries do not ship a plain `.swf` but an `index.html` that feeds settings to the player. FlashNX now emulates that container, which brings in Disney/Yamago minigames (*Agent P Strikes Back*) and HTML-wrapped titles such as *Dragon City*.
+- **Newgrounds API games load again** (for example *Newgrounds Rumble*): their preloader waited forever on a Newgrounds service that no longer exists, so they sat at "WAIT" and never reached the title screen.
+- **Very large games download**: the importer streams a game archive straight to the SD card one file at a time instead of holding it in memory, so multi-gigabyte entries (for example *Super Smash Flash 2*) can be fetched and extracted. Whether such a game then runs well is another matter, but it is no longer blocked at the download step.
+- **The IMPORT tab handles a real collection of URLs.** Each row now shows a readable name instead of a truncated URL, with a tag saying whether it is a single `.swf` or a list of files, and a counter of how many of that source's files are already on your SD card. `+ ADD A URL` is pinned to the top so it stays reachable, `-` searches, `Y` sorts (added, name, source, file count), and a URL can be favorited so it pins to the top like a favorited game. The list also scrolls smoothly and can be dragged with a finger.
+- **A saved URL's options show what it is**: type, files on the SD card, the date you added it, and the full URL, so you know what you are about to edit or delete.
+- **The Flashpoint details popup (`+`) shows the cover and the game's description.**
+- **A toast confirms a finished download**, instead of the download screen simply disappearing.
+- **The library footer shows a multi-file game's real size on the card**, not the size of its small loader file.
+- **Searching Flashpoint is less of a dead end**: `X` re-edits the current search without going back, and dismissing a message returns you to the results instead of the home screen.
+
+### Fixes
+
+- **Three games no longer take the whole app down with them.** *Sonic RPG Episode 10*, *New Super Bowser World* and *haunt-the-house* each ran the console out of memory. None of them is fully playable yet, but none of them can now cost you an unsaved game elsewhere.
+- **Network errors say what actually went wrong.** Every failure used to show the same "check the clock, the WiFi and the URL" sentence, including cases that had nothing to do with any of the three. You now get the real cause: no connection, timeout, a search returning too much data, a wrong console clock (which genuinely does break HTTPS), a missing item, or a full SD card. When a URL is at fault, `Y` lets you correct it and retry on the spot.
+- **Long messages stay on screen.** Some notices were drawn as a single line and ran off both edges, and text in accented or non-Latin languages was wrapped too early.
+- **Text draws about three times cheaper**, which removes the stutter on text-heavy screens.
+- **The pause menu no longer stays stuck small on a slow game.**
+- **Faster on script-heavy games**: the code is now built for the Switch's own processor and uses its optimized memory routines. *Dragon City* in particular goes from unplayable to around 6 fps after a graphics setting that was throttling the GPU was corrected.
+- **Papa Louie's character is visible again**, and *Papa Louie 3* no longer hangs on its loading screen.
+- ***Pursuit of Hat 2* no longer starts on a black screen**, and its invisible platforms are drawn.
+- ***Icy Tower* no longer crashes**, and its HUD is complete.
+- **Games with a broken version check no longer refuse to start** with a false "Flash Player required" message (#64).
+- **Large `.swf` files load** instead of being rejected for their size.
+- **Housekeeping**: empty `.files/` folders are cleaned up and no longer created for nothing, a duplicated copy of a game's main file is no longer left behind, and the one-time first-boot migration is more robust.
+
 ## v1.5.1 (2026-07-08)
 
 A small fixes release.
