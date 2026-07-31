@@ -54,7 +54,11 @@ enum Screen {
     List { selection: usize, scroll_offset: usize },
     /// Visual keyboard picker (issue #55). `button_idx` indexes `EDITABLE_BUTTONS`;
     /// `key_idx` indexes `keymap::KEYBOARD` (positioned keys, geometric 2D nav).
-    Keyboard { button_idx: usize, key_idx: usize },
+    /// `prev_scroll` is the row list's scroll when the picker opened: closing it
+    /// must put the list back WHERE IT WAS. Rebuilding the scroll from the row
+    /// alone always parked that row on the last visible line, so binding a key
+    /// made the list jump.
+    Keyboard { button_idx: usize, key_idx: usize, prev_scroll: usize },
     /// Community-profile picker (in-game apply). `selection` indexes `matches`.
     Profiles { selection: usize },
     /// Before/after preview of an apply. `profile_idx` indexes `matches`.
@@ -312,8 +316,8 @@ pub fn input(button: &str) -> bool {
             handle_list_input(&mut s, button, selection, scroll_offset);
             true
         }
-        Screen::Keyboard { button_idx, key_idx } => {
-            handle_keyboard_input(&mut s, button, button_idx, key_idx);
+        Screen::Keyboard { button_idx, key_idx, prev_scroll } => {
+            handle_keyboard_input(&mut s, button, button_idx, key_idx, prev_scroll);
             true
         }
         Screen::Profiles { selection } => {
@@ -700,7 +704,11 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
                 .as_deref()
                 .and_then(kbd_index_of)
                 .unwrap_or_else(kbd_none_index);
-            s.screen = Screen::Keyboard { button_idx: selection, key_idx };
+            s.screen = Screen::Keyboard {
+                button_idx: selection,
+                key_idx,
+                prev_scroll: scroll,
+            };
             return;
         }
         "B" | "Minus" => {
@@ -750,7 +758,13 @@ fn kbd_nearest_on_row(row: u8, cx: f32) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
-fn handle_keyboard_input(s: &mut State, button: &str, button_idx: usize, mut key_idx: usize) {
+fn handle_keyboard_input(
+    s: &mut State,
+    button: &str,
+    button_idx: usize,
+    mut key_idx: usize,
+    prev_scroll: usize,
+) {
     let (name, cur_row, _, _) = keymap::KEYBOARD[key_idx];
     let cur_cx = kbd_center(key_idx);
     let n_rows = keymap::KEYBOARD_ROWS_N as u8;
@@ -806,18 +820,18 @@ fn handle_keyboard_input(s: &mut State, button: &str, button_idx: usize, mut key
             if keymap::set_binding(keymap::EDITABLE_BUTTONS[button_idx], target) {
                 s.dirty = true;
             }
-            let scroll = clamp_scroll(0, button_idx);
+            let scroll = clamp_scroll(prev_scroll, button_idx);
             s.screen = Screen::List { selection: button_idx, scroll_offset: scroll };
             return;
         }
         "B" | "Minus" => {
-            let scroll = clamp_scroll(0, button_idx);
+            let scroll = clamp_scroll(prev_scroll, button_idx);
             s.screen = Screen::List { selection: button_idx, scroll_offset: scroll };
             return;
         }
         _ => {}
     }
-    s.screen = Screen::Keyboard { button_idx, key_idx };
+    s.screen = Screen::Keyboard { button_idx, key_idx, prev_scroll };
 }
 
 /// Centre (units) of a `keymap::KEYBOARD` tuple `(name, row, x, w)`.
@@ -905,7 +919,7 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
                 keymap::edit_subtab_modifier(),
             );
         }
-        Screen::Keyboard { button_idx, key_idx } => {
+        Screen::Keyboard { button_idx, key_idx, .. } => {
             // Title shows the chord in a combo sub-tab ("ZL+A"), else the button.
             let btn = keymap::EDITABLE_BUTTONS[button_idx];
             let modif = keymap::edit_subtab_modifier();

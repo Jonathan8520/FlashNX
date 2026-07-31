@@ -1143,7 +1143,7 @@ pub fn open() {
             // round-trip: same entries). `gallery_scroll_for` falls back to 0 when
             // no layout exists yet (first boot). Using the old flat `clamp_scroll`
             // here put a last-row game off-screen (blank gallery on quit).
-            let scroll_offset = gallery_scroll_for(selection, 0);
+            let scroll_offset = gallery_scroll_for(selection, jouer_scroll());
             Screen::List { selection, scroll_offset }
         };
         // Returning from a game (last-played still present) → grab its identity
@@ -3214,6 +3214,17 @@ pub const IMPORTER_VISIBLE_ROWS: usize = 10;
 /// on row 13, come back, and the list had jumped so row 13 was the bottom one).
 static IMPORT_SCROLL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Same thing for the JOUER gallery, and for the same reason: quitting a game,
+/// closing OPTIONS or deleting a game all rebuilt the scroll from the row alone
+/// (`gallery_scroll_for(row, 0)`), which always parks that row on the LAST
+/// visible line — so the gallery jumped under the cursor on every return.
+static JOUER_SCROLL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Scroll the JOUER gallery was last drawn at, for those restore paths.
+fn jouer_scroll() -> usize {
+    JOUER_SCROLL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// A `DistantIdle` screen parked on `row`, keeping the current scroll unless the
 /// row would be off screen. Every caller handing the cursor back to a specific
 /// row goes through this, so none of them can scroll the list out from under the
@@ -3493,7 +3504,15 @@ fn run_fix_url_flow(failed: &str) {
             0
         }
     };
-    run_fetch_for_url(&fixed, row, clamp_scroll(0, row, IMPORTER_VISIBLE_ROWS));
+    run_fetch_for_url(
+        &fixed,
+        row,
+        clamp_scroll(
+            IMPORT_SCROLL.load(std::sync::atomic::Ordering::Relaxed),
+            row,
+            IMPORTER_VISIBLE_ROWS,
+        ),
+    );
 }
 
 /// DistantUrlOptions > edit: swkbd prefilled with the existing URL. Commit
@@ -3883,7 +3902,7 @@ fn list_screen_for_abs(s: &State, abs: usize) -> Screen {
     // layout so returning from OPTIONS lands the game's ROW on screen. (Bug
     // fix: clamp_scroll's linear value was read as a row index → games on row
     // 2/3 came back scrolled past the end, showing a blank screen.)
-    let scroll = gallery_scroll_for(pos, 0);
+    let scroll = gallery_scroll_for(pos, jouer_scroll());
     Screen::List { selection: pos, scroll_offset: scroll }
 }
 
@@ -5017,7 +5036,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     } else {
                         s2.local_filter = None;
                         let new_sel = game_idx.min(s2.entries.len() - 1);
-                        let scroll = gallery_scroll_for(new_sel, 0);
+                        let scroll = gallery_scroll_for(new_sel, jouer_scroll());
                         s2.screen = Screen::List { selection: new_sel, scroll_offset: scroll };
                         // Layout shifted (a tile is gone) — snap the glide.
                         crate::backend::render::gallery_anim_reset();
@@ -5065,6 +5084,9 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             backend.draw_library_empty();
         }
         Screen::List { selection, scroll_offset } => {
+            // Remember where the gallery is, so every path that comes BACK to it
+            // restores this scroll instead of deriving one from the row.
+            JOUER_SCROLL.store(scroll_offset, std::sync::atomic::Ordering::Relaxed);
             draw_gallery(backend, selection, scroll_offset, anim_origin);
             // Quit collapse reveal: the cover shrinks from full screen back to its
             // tile over the gallery (active only right after returning from a
@@ -5741,7 +5763,11 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                                 .unwrap_or(0);
                             crate::backend::render::distant_reveal_set_source(
                                 new_row,
-                                clamp_scroll(0, new_row, IMPORTER_VISIBLE_ROWS),
+                                clamp_scroll(
+                                    IMPORT_SCROLL.load(std::sync::atomic::Ordering::Relaxed),
+                                    new_row,
+                                    IMPORTER_VISIBLE_ROWS,
+                                ),
                             );
                         }
                     }
