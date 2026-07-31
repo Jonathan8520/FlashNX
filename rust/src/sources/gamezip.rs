@@ -427,6 +427,135 @@ fn parse_js_object(body: &str, out: &mut std::vec::Vec<(std::string::String, std
 /// Returns the pairs in page order; empty when the page carries none (a game
 /// whose container computes them in JS at runtime, e.g. the Disney minigames,
 /// still needs its own handling).
+/// Read the JS `config` object off a DISNEY container page.
+///
+/// Disney/Yamago minigames don't carry FlashVars at all: their `index.html`
+/// declares a plain object and hands it to `disneygames-iframe.js`, which is
+/// what builds the movie's parameters in the browser. That script is not
+/// archived, so we read the object ourselves. Shape (Tron Uprising: Escape from
+/// Argon City, verified against its GameZIP 2026-07-31):
+///
+/// ```text
+/// var config = {"apiVersion":"2.5","assetId":"4c766a2f...","elementId":"DisneyGame",
+///               "filename":"trnu_spl_act_escapefromargoncity.swf","techType":"AS3", ...};
+/// disneyGames.addGame(config);
+/// ```
+///
+/// Returns the raw key/value pairs, or empty when the page isn't one of these.
+/// `synthesize_disney_params` turns them into the parameters the movie reads.
+pub fn disney_config_from_html(
+    html: &[u8],
+) -> std::vec::Vec<(std::string::String, std::string::String)> {
+    let text = std::string::String::from_utf8_lossy(html);
+    let lower = text.to_ascii_lowercase();
+    let mut out: std::vec::Vec<(std::string::String, std::string::String)> = std::vec::Vec::new();
+    // Only these pages: the marker is the container script's own entry point.
+    if !lower.contains("disneygames") {
+        return out;
+    }
+    // The object initialiser of `config`/`gameConfig`, or the argument of
+    // `addGame({...})` when the page inlines it.
+    for needle in ["addgame(", "config ="] {
+        let mut from = 0usize;
+        while let Some(rel) = lower[from..].find(needle) {
+            let at = from + rel;
+            from = at + needle.len();
+            let tail = &text[at..];
+            let Some(orel) = tail.find('{') else { continue };
+            if orel > 40 {
+                continue; // too far to be this identifier's initialiser
+            }
+            let open = at + orel;
+            let mut depth = 0i32;
+            let mut close = None;
+            for (i, c) in text[open..].char_indices() {
+                if c == '{' {
+                    depth += 1;
+                } else if c == '}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(open + i);
+                        break;
+                    }
+                }
+            }
+            let Some(close) = close else { continue };
+            parse_js_object(&text[open + 1..close], &mut out);
+            if !out.is_empty() {
+                return out;
+            }
+        }
+    }
+    out
+}
+
+/// Build the parameters a Disney/Yamago minigame reads (`apiUrl`,
+/// `apiConfigUrl`, `gameConfigUrl` and friends) from its container `config` and
+/// the movie's own URL, the way `disneygames-iframe.js` would.
+///
+/// The API SWF these point at is NOT archived anywhere (checked: the Flashpoint
+/// legacy htdocs mirror 404s on `/v1/game_container/**`), so loading it fails.
+/// That is fine and is the whole point: a load that FAILS raises an IOError the
+/// game can handle, whereas the null URL it gets today throws TypeError #2007
+/// out of `Loader.load()` during construction, which kills the movie before a
+/// single frame runs. Passing plausible URLs is what buys the game its chance.
+pub fn synthesize_disney_params(
+    config: &[(std::string::String, std::string::String)],
+    movie_url: &str,
+) -> std::vec::Vec<(std::string::String, std::string::String)> {
+    let get = |k: &str| -> std::string::String {
+        config
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(k))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    };
+    // `http://host/v1/files/<id>/<dir>/game.swf` -> host root and game dir.
+    let host_root = movie_url
+        .splitn(4, '/')
+        .take(3)
+        .collect::<std::vec::Vec<_>>()
+        .join("/");
+    let game_dir = movie_url
+        .rsplit_once('/')
+        .map(|(d, _)| d.to_string())
+        .unwrap_or_else(|| movie_url.to_string());
+    let gc = std::format!("{}/v1/game_container", host_root);
+    let asset_id = get("assetId");
+    let tech = {
+        let t = get("techType");
+        if t.is_empty() { std::string::String::from("AS3") } else { t }
+    };
+    // Only the AS3 API filename has ever been observed (Agent P Strikes Back);
+    // an AS2 title would want the `MinigameAPI_*` family instead. Neither file
+    // is archived, so the exact name changes nothing beyond the log.
+    let api_swf = if tech.eq_ignore_ascii_case("AS3") {
+        "swf/as3MinigameApi_2_5_6.swf"
+    } else {
+        "swf/MinigameAPI_2_2.swf"
+    };
+    let div = {
+        let d = get("elementId");
+        if d.is_empty() { std::string::String::from("DisneyGame") } else { d }
+    };
+    std::vec![
+        (std::string::String::from("id"), asset_id.clone()),
+        (std::string::String::from("game"), asset_id),
+        (std::string::String::from("gameDivId"), div),
+        (std::string::String::from("fileUrl"), movie_url.to_string()),
+        (std::string::String::from("type"), tech),
+        (
+            std::string::String::from("gameConfigUrl"),
+            std::format!("{}/game_config.xml", game_dir),
+        ),
+        (std::string::String::from("apiUrl"), std::format!("{}/{}", gc, api_swf)),
+        (
+            std::string::String::from("apiConfigUrl"),
+            std::format!("{}/xml/minigameAPIConfig.xml", gc),
+        ),
+    ]
+}
+
 pub fn flashvars_from_html(
     html: &[u8],
 ) -> std::vec::Vec<(std::string::String, std::string::String)> {

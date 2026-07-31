@@ -186,6 +186,76 @@ impl SidecarNavigator {
         path
     }
 
+    /// Locate a SHARED Disney container asset in a SIBLING game's tree.
+    ///
+    /// `/v1/game_container/**` is Disney's common minigame runtime (the API SWF
+    /// and its XML config), identical for every one of their titles. Some
+    /// Flashpoint packages bundle it (Agent P Strikes Back ships
+    /// `as3MinigameApi_2_5_6.swf` + `minigameAPIConfig.xml`), others don't (Tron
+    /// Uprising: Escape from Argon City), and the Legacy htdocs mirror 404s on
+    /// those paths under EVERY host. A game whose package omits them can't load
+    /// its API and its preloader waits forever.
+    ///
+    /// So: look for the same `/v1/game_container/...` path in the other
+    /// `<game>.files/` trees on the card. The host directory deliberately does
+    /// NOT have to match — Agent P files them under `play.lol.disney.com` while
+    /// Tron asks for `img.lum.dolimg.com`, and it is the same asset either way.
+    ///
+    /// This only ever reads files the user already downloaded, and only for this
+    /// one path prefix. It does mean a game can depend on another being
+    /// installed, which is why the hit is logged explicitly.
+    fn shared_container_path(&self, url: &Url) -> Option<PathBuf> {
+        let mut want = PathBuf::new();
+        self.push_segments(&mut want, url);
+        // Guard: only Disney's shared container tree, never arbitrary assets.
+        let rel = want.to_string_lossy().replace('\\', "/");
+        if !rel.contains("v1/game_container/") {
+            return None;
+        }
+        // NO directory reading: `std::fs::read_dir` corrupts entry names on
+        // Horizon (see the SWF_CANDIDATES note in lib.rs — a 23-char name came
+        // back missing its first 2 bytes), which is exactly why the first
+        // attempt at this silently found nothing. Both the trees to search and
+        // the host folder inside each are therefore derived from data we already
+        // hold: the scanned game paths, and each game's `.base` sidecar (its
+        // original launchCommand, whose host names the folder).
+        let mut looked = 0usize;
+        for game in crate::library::scanned_game_paths() {
+            // Same helper the rest of the app uses: the tree REPLACES the `.swf`
+            // extension (`<game>.files`), it does not append to it.
+            let tree = crate::sidecar_dir_for(Some(&game));
+            if tree == self.sidecar_dir {
+                continue;
+            }
+            // Hosts to try inside that tree: the one the sibling was published
+            // under, and the one WE are asking for (Agent P's package carries
+            // files under both `play.lol.disney.com` and `img.lum.dolimg.com`).
+            let base = read_sidecar_file(&PathBuf::from(std::format!("{}.base", game)))
+                .and_then(|b| std::string::String::from_utf8(b).ok())
+                .and_then(|u| Url::parse(u.trim()).ok())
+                .and_then(|u| u.host_str().map(|h| h.to_string()));
+            for host in [base.as_deref(), url.host_str()].into_iter().flatten() {
+                let candidate = tree.join(host).join(&want);
+                looked += 1;
+                if let Some(bytes) = read_sidecar_file(&candidate) {
+                    tracing::info!(
+                        "shared container: {} found in {} ({} bytes)",
+                        rel,
+                        candidate.display(),
+                        bytes.len(),
+                    );
+                    return Some(candidate);
+                }
+            }
+        }
+        tracing::warn!(
+            "shared container: {} in no other game's tree ({} candidate(s) tried)",
+            rel,
+            looked,
+        );
+        None
+    }
+
     /// Flat path: `<sidecar_dir>/<path-segments>` (NO host). The legacy layout
     /// for companions pulled by `fetch_siblings` from the htdocs mirror, which
     /// land directly in `<game>.files/<leaf>.swf` (e.g. Garfield's `top.swf`).
@@ -442,6 +512,24 @@ impl NavigatorBackend for SidecarNavigator {
                 // them — fetch on demand, cache, and serve.
                 if self.htdocs_proxy {
                     if let Some(b) = self.fetch_from_mirror(&resolved, &host_path) {
+                        let resp: Box<dyn SuccessResponse> = Box::new(SidecarResponse {
+                            url: resolved.to_string(),
+                            bytes: Some(b),
+                        });
+                        return async_return(Ok(resp));
+                    }
+                }
+                // Last resort for Disney's shared minigame runtime: a sibling
+                // game's tree may carry the very same file (see
+                // `shared_container_path`).
+                if let Some(shared) = self.shared_container_path(&resolved) {
+                    if let Some(b) = read_sidecar_file(&shared) {
+                        tracing::info!(
+                            "sidecar: served {} ({} bytes) from ANOTHER game's tree {}",
+                            resolved,
+                            b.len(),
+                            shared.display(),
+                        );
                         let resp: Box<dyn SuccessResponse> = Box::new(SidecarResponse {
                             url: resolved.to_string(),
                             bytes: Some(b),

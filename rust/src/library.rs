@@ -1435,6 +1435,19 @@ fn write_url_sidecar(swf_path: &str, url: &str) {
     crate::sd::commit();
 }
 
+/// Absolute `.swf` paths of every scanned game.
+///
+/// Exists so the sidecar navigator can look for an asset in ANOTHER game's tree
+/// without listing directories: `std::fs::read_dir` corrupts entry names on
+/// Horizon (see the `SWF_CANDIDATES` note in lib.rs), so the C++ scan we already
+/// did is the only trustworthy enumeration of what sits on the card.
+pub(crate) fn scanned_game_paths() -> std::vec::Vec<std::string::String> {
+    LIBRARY
+        .lock()
+        .map(|s| s.entries.iter().map(|e| e.path.clone()).collect())
+        .unwrap_or_default()
+}
+
 /// archive.org item id behind a game's `<swf>.url` sidecar, lowercased. Empty
 /// when there's no sidecar (hand-copied file) or the source wasn't archive.org
 /// (a direct `.swf` URL or a Flashpoint GameZIP — those are matched by filename

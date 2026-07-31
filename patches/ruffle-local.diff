@@ -201,30 +201,57 @@ index ce5e8a5d5..f69928e2e 100644
      match output {
          PixelBenderOutput::Bitmap(sync_handle) => {
 diff --git a/core/src/avm2/globals/flash/system/capabilities.rs b/core/src/avm2/globals/flash/system/capabilities.rs
-index f5a989cd8..205c028e9 100644
+index f5a989cd8..e7c874052 100644
 --- a/core/src/avm2/globals/flash/system/capabilities.rs
 +++ b/core/src/avm2/globals/flash/system/capabilities.rs
-@@ -58,11 +58,19 @@ pub fn get_player_type<'gc>(
+@@ -51,6 +51,21 @@ pub fn get_version<'gc>(
+     .into())
+ }
+ 
++/// FlashNX: report `Capabilities.playerType` as "PlugIn" instead of Ruffle's
++/// default. Off unless the host turns it on for a specific game — see the note
++/// in `get_player_type`.
++static PLUGIN_PLAYER_TYPE: core::sync::atomic::AtomicBool =
++    core::sync::atomic::AtomicBool::new(false);
++
++/// Set by the host before building the player, per game.
++pub fn set_plugin_player_type(on: bool) {
++    PLUGIN_PLAYER_TYPE.store(on, core::sync::atomic::Ordering::Relaxed);
++}
++
++fn plugin_player_type() -> bool {
++    PLUGIN_PLAYER_TYPE.load(core::sync::atomic::Ordering::Relaxed)
++}
++
+ /// Implements `flash.system.Capabilities.playerType`
+ pub fn get_player_type<'gc>(
+     activation: &mut Activation<'_, 'gc>,
+@@ -58,7 +73,24 @@ pub fn get_player_type<'gc>(
      _args: &[Value<'gc>],
  ) -> Result<Value<'gc>, Error<'gc>> {
      // TODO: When should "External" be returned?
-+    // FlashNX runs SWFs that were authored for the browser plugin, and some
-+    // games gate on `Capabilities.playerType`: Disney/Yamago minigames call
-+    // `UtilsSystem.isStandalone()` (== "StandAlone") and, when true, take an
-+    // internal DEV-harness launch path (loading `../../deploy/…` files that were
-+    // never shipped) instead of their normal container path — dead-ending on a
-+    // blank stage. Reporting "PlugIn" (what web Ruffle already reports, the
-+    // best-tested target) makes them take the production path that loads
-+    // game_config.xml + companions from the game dir, which we DO have.
-     let player_type = if cfg!(target_family = "wasm") {
+-    let player_type = if cfg!(target_family = "wasm") {
++    // FlashNX: Disney/Yamago minigames branch on `UtilsSystem.isStandalone()`
++    // (playerType == "StandAlone" or "External"), and the two branches want
++    // OPPOSITE answers depending on the title:
++    //
++    //   - Agent P Strikes Back: its standalone branch loads a DEV harness
++    //     (`../../deploy/MinigameAPI_*_DEV_ONLY_DO_NOT_PUBLISH.swf`) Disney never
++    //     shipped -> blank stage. It needs "PlugIn".
++    //   - Tron Uprising: Escape from Argon City: its standalone branch is fully
++    //     OFFLINE (`onApiInit(null)`, saves through a SharedObject), while its
++    //     plugin branch loads Disney's live API and then dereferences
++    //     `api.dataStorageService` -> null offline, TypeError #1009. It needs
++    //     "StandAlone" — i.e. Ruffle's own default.
++    //
++    // So this is a per-GAME choice, not a global one. Default = stock Ruffle
++    // behaviour; the host opts a game in via `set_plugin_player_type` (see
++    // `ruffle_init`). A blanket "PlugIn" also caused the Pursuit of Hat 2 black
++    // screen (gaforflash), so the narrower the better.
++    let player_type = if cfg!(target_family = "wasm") || plugin_player_type() {
          "PlugIn"
      } else {
          match activation.context.avm2.player_runtime {
--            PlayerRuntime::FlashPlayer => "StandAlone",
-+            PlayerRuntime::FlashPlayer => "PlugIn",
-             PlayerRuntime::AIR => "Desktop",
-         }
-     };
 diff --git a/core/src/bitmap/bitmap_data.rs b/core/src/bitmap/bitmap_data.rs
 index 29eb34fdc..8eb4761bd 100644
 --- a/core/src/bitmap/bitmap_data.rs
@@ -517,10 +544,17 @@ index 2e6e01783..c4cf84d64 100644
          (!options.contains(HitTestOptions::SKIP_INVISIBLE) || self.visible())
              && self.hit_test_bounds(point)
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..abef7d4b4 100644
+index 6e5379213..ea1cfd7ef 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
-@@ -19,6 +19,8 @@ mod avm_rng;
+@@ -15,10 +15,15 @@ extern crate num_derive;
+ #[macro_use]
+ mod avm1;
+ mod avm2;
++/// FlashNX: per-game `Capabilities.playerType` override (Disney/Yamago shells
++/// need opposite answers — see `avm2::globals::flash::system::capabilities`).
++pub use avm2::globals::flash::system::capabilities::set_plugin_player_type;
+ mod avm_rng;
  mod binary_data;
  pub mod bitmap;
  mod character;

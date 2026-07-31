@@ -518,6 +518,15 @@ pub extern "C" fn ruffle_init() -> c_int {
             // to know where its API + configs live. Without them init() does
             // Loader.load(null) -> Error #2007. Synthesize them from the movie URL
             // (host-pathed layout the SidecarNavigator serves). Gated to Agent P.
+            // `Capabilities.playerType` is a PER-GAME choice for the Disney
+            // shells (see the note in Ruffle's `capabilities.rs`): Agent P needs
+            // "PlugIn" or it launches an unpublished dev harness, while Tron
+            // Uprising needs the default "StandAlone" or it takes the online
+            // branch and dies dereferencing `api.dataStorageService` offline.
+            // Opt in only the game that needs it.
+            ruffle_core::set_plugin_player_type(
+                source_label.contains("phf_spl_act_agentpstrikesback"),
+            );
             if source_label.contains("phf_spl_act_agentpstrikesback") {
                 let host_root = source_label
                     .splitn(4, '/')
@@ -548,7 +557,27 @@ pub extern "C" fn ruffle_init() -> c_int {
                 // load and sits on its splash forever (Dragon City / DCLoader).
                 // Relative values need no rewriting here: the navigator resolves
                 // them against the same page (see `with_document_base`).
-                let vars = crate::sources::gamezip::flashvars_from_html(html);
+                let mut vars = crate::sources::gamezip::flashvars_from_html(html);
+                if vars.is_empty() {
+                    // No FlashVars: this may still be a DISNEY container, which
+                    // declares a JS `config` object that `disneygames-iframe.js`
+                    // turns into the parameters in the browser. Read that object
+                    // and build the same parameters ourselves. Without them the
+                    // game's `loadConfig()` reaches `Loader.load(null)` and dies
+                    // on TypeError #2007 before the first frame (Tron Uprising:
+                    // Escape from Argon City).
+                    let cfg = crate::sources::gamezip::disney_config_from_html(html);
+                    if !cfg.is_empty() {
+                        log_str(&std::format!(
+                            "ruffle_init: Disney container config: {:?}\n",
+                            cfg
+                        ));
+                        vars = crate::sources::gamezip::synthesize_disney_params(
+                            &cfg,
+                            &source_label,
+                        );
+                    }
+                }
                 if vars.is_empty() {
                     log_str("ruffle_init: container HTML found but carries no FlashVars\n");
                 } else {
