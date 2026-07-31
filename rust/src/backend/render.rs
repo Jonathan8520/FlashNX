@@ -1340,6 +1340,43 @@ impl Drop for ComplexBlendProgram {
 /// the cached content path is the culprit. Left at false.
 const DISABLE_MASK_GATING: bool = false;
 
+/// DIAGNOSTIC (2026-07-31, Agent P level-select washed out): when true, complex
+/// blends composite with the shader's NORMAL fallback (mode 7 hits `return s;`)
+/// instead of Multiply/Overlay/HardLight. Everything else — the group temp, the
+/// backdrop snapshot, the mask clipping, the composite draw — is unchanged.
+///
+/// So: if the tiles come out CORRECT with this on, the pipeline is sound and the
+/// fault is in the blend function or the values fed to it. If the washed-out
+/// rectangle survives, the group temp itself is wrong and the blend mode is a
+/// red herring.
+///
+/// RESULT (2026-07-31): the cyan rectangle survived UNCHANGED with this on, so
+/// the blend function and its inputs are NOT the fault. Left at false, and it
+/// still works as written — mode 7 hits the shader's existing fallback, so no
+/// diagnostic branch has to live in the fragment shader for it.
+const FORCE_NORMAL_COMPLEX_BLEND: bool = false;
+
+// Two further probes ran the same day and are NOT kept, because each needed its
+// own branch in COMPLEX_BLEND_FRAG — per-pixel cost in a path that is already
+// 13-17% of this screen's render time, for code that would never run again.
+// Their results, so nobody repeats them:
+//
+//   - Painting the GROUP's alpha (shader mode 8) drew EXACTLY the level-3 number
+//     and its padlock, not a rectangle: the group temps are CORRECT, and the
+//     stencil-disabled group render is not the problem. It also showed the
+//     composite covers the WHOLE target — outside the group the screen survives
+//     only because the shader re-emits the backdrop.
+//   - Painting the BACKDROP SNAPSHOT alone (mode 9) showed a faithful copy of
+//     the screen, with the cyan rectangle ALREADY IN IT. The complex blend does
+//     not draw it.
+//
+// Conclusion: the whole blend path is exonerated. Agent P's level-select is
+// missing CONTENT (the tile-1 panel, the level 1/2 numbers), it is not
+// mis-composited — so the next investigation belongs in the display list, not
+// here. The mask/stencil restore fixed below was a real and separate bug.
+
+
+
 /// DIAGNOSTIC TOGGLE: when true, mask shapes stay invisible but the stencil
 /// gating is skipped so maskees draw unconditionally. Used to confirm whether
 /// the SMWF overworld blank screen is caused by our stencil masking. Set back
@@ -4925,9 +4962,16 @@ impl SwitchRenderBackend {
         unsafe {
             glViewport(0, 0, w as GLsizei, h as GLsizei);
             glDisable(GL_BLEND);
-            glDisable(GL_STENCIL_TEST);
+            // Keep the ACTIVE MASK in force. This composite is a FULLSCREEN
+            // quad, so disabling the stencil painted the blended result over the
+            // whole target instead of the masked region — and it left the test
+            // DISABLED on the way out, so every later maskee in the frame drew
+            // unclipped too (`mask_push` is the only place that re-enables it).
+            // Agent P's level-select runs 4 complex blends per frame inside 6
+            // masks, which is why its tiles washed out. Stencil WRITES stay
+            // masked off so the composite cannot perturb the coverage counts.
             glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-            glStencilMask(0xFF);
+            glStencilMask(0);
             glUseProgram(prog);
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, parent_tex);
@@ -4947,6 +4991,11 @@ impl SwitchRenderBackend {
             glBlendEquation(GL_FUNC_ADD);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         }
+        // Put the stencil back in sync with `self.mask` (colour mask, func, and
+        // enable/disable), exactly like `render_commands_to_texture` does on its
+        // way out. Without this the composite's raw GL state leaked into the
+        // rest of the frame.
+        self.mask_restore_gl();
         self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
         // The direct glUseProgram/bind above bypassed the state cache.
         self.gl_state.invalidate();
@@ -10921,7 +10970,11 @@ impl CommandHandler for SwitchRenderBackend {
         let transparent = Color { r: 0, g: 0, b: 0, a: 0 };
         if self.render_commands_to_texture(current.texture, w, h, commands, Some(transparent)) {
             self.blend_window = self.blend_window.saturating_add(1);
-            self.composite_complex_to_current(parent.texture, current.texture, w, h, complex_mode, flip);
+            // 7 falls through the shader's `return s;` = a plain Normal composite;
+            // 8 paints the group's alpha in red (see the flags above).
+            // 7 falls through the shader's `return s;` = a plain Normal composite.
+            let m = if FORCE_NORMAL_COMPLEX_BLEND { 7 } else { complex_mode };
+            self.composite_complex_to_current(parent.texture, current.texture, w, h, m, flip);
         }
         self.filter_tex_pool.release(parent);
         self.filter_tex_pool.release(current);
