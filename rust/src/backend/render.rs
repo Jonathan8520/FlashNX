@@ -2868,12 +2868,73 @@ fn cover_cache() -> &'static std::sync::Mutex<std::vec::Vec<(std::string::String
     &C
 }
 
+/// Full-resolution covers for the launch/quit reveal (see `cover_full_for`),
+/// kept apart from the gallery's tile-sized textures.
+fn reveal_cover_cache() -> &'static std::sync::Mutex<std::vec::Vec<(std::string::String, CoverTex)>>
+{
+    static C: std::sync::Mutex<std::vec::Vec<(std::string::String, CoverTex)>> =
+        std::sync::Mutex::new(std::vec::Vec::new());
+    &C
+}
+
+/// How many full-res reveal covers stay resident. Two: the game being launched
+/// and the one just quit.
+const REVEAL_CACHE_MAX: usize = 2;
+
+/// Append one axis-aligned quad (two triangles) in PIXEL space with a flat
+/// colour to a text batch. Layout matches the solid quad VAO: vec2 pos + vec4
+/// rgba, stride 24.
+fn push_text_quad(verts: &mut std::vec::Vec<f32>, x: f32, y: f32, w: f32, h: f32, c: [f32; 4]) {
+    let (x0, y0, x1, y1) = (x, y, x + w, y + h);
+    for (px, py) in [
+        (x0, y0), (x1, y0), (x1, y1),
+        (x0, y0), (x1, y1), (x0, y1),
+    ] {
+        verts.extend_from_slice(&[px, py, c[0], c[1], c[2], c[3]]);
+    }
+}
+
+/// Cache-only cover lookup: never touches the SD, never decodes. `None` means
+/// "not resolved yet" — the gallery draws the generated tile for this frame and
+/// lets the per-frame decode budget pick it up. Decoding a cover costs ~25 ms
+/// (read + PNG/JPEG decode + texture upload), so a 71-game library resolved
+/// eagerly cost ~1.9 s of black screen on the first frame.
+fn cover_lookup(basename: &str) -> Option<CoverTex> {
+    cover_cache()
+        .lock()
+        .ok()?
+        .iter()
+        .find(|(b, _)| b == basename)
+        .map(|(_, t)| *t)
+}
+
+/// How many covers may be decoded per gallery frame. Above this the remaining
+/// tiles show their generated tile and resolve on the following frames, so
+/// entering / scrolling the gallery never stalls on a burst of decodes.
+///
+/// ONE: a cover costs ~5 ms (small) to ~40 ms (a 1126x619 PNG) even with the
+/// resolve probes served from the scan index, so decoding three in a frame
+/// stacked into the 50-120 ms hitches measured while scrolling. At one per
+/// frame the grid still fills in over a handful of frames, and idle frames keep
+/// working through the backlog.
+const COVER_DECODES_PER_FRAME: usize = 1;
+
+/// Cumulative cover decode cost (ticks) + count, for the boot breakdown.
+static COVER_DECODE_TICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static COVER_DECODE_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+
 /// Drop a game's cached cover texture so the next frame re-resolves it (after
 /// the user sets a new cover via OPTIONS > JAQUETTE). The old GL texture handle
 /// is leaked — covers are tiny and this is rare, not worth a cross-thread
 /// delete (the GL context only frees at app exit anyway).
 pub fn invalidate_cover(basename: &str) {
     if let Ok(mut cache) = cover_cache().lock() {
+        cache.retain(|(b, _)| b != basename);
+    }
+    // The reveal's full-res copy is keyed the same way and would otherwise keep
+    // showing the previous art after a JAQUETTE change.
+    if let Ok(mut cache) = reveal_cover_cache().lock() {
         cache.retain(|(b, _)| b != basename);
     }
 }
@@ -3627,7 +3688,28 @@ pub fn thumb_cancel_all() {
 // ─── Backend implementation ───────────────────────────────────────────────────
 
 impl SwitchRenderBackend {
+    /// Full backend for a game: the mega-arenas are sized for the worst SWF we
+    /// know of (see the BufferArena block at the top of this file).
     pub fn new(width: u32, height: u32) -> Option<Self> {
+        Self::new_sized(width, height, ARENA_VBO_SIZE, ARENA_IBO_SIZE)
+    }
+
+    /// Backend for the LAUNCHER UI. Identical except for the arenas: the library
+    /// draws rects, text and textured quads, all through the static quad VAOs —
+    /// it never registers a Ruffle shape, so the full 576 MB of arena it used to
+    /// allocate was ~230 ms of boot latency for buffers nothing ever wrote to.
+    /// The small arenas keep the shape path functional (and its OOM logging
+    /// honest) rather than removing it.
+    pub fn new_ui(width: u32, height: u32) -> Option<Self> {
+        Self::new_sized(width, height, 4 * 1024 * 1024, 2 * 1024 * 1024)
+    }
+
+    fn new_sized(
+        width: u32,
+        height: u32,
+        arena_vbo_size: GLsizeiptr,
+        arena_ibo_size: GLsizeiptr,
+    ) -> Option<Self> {
         // Reset cross-instance statics so the diagnostic counters and the
         // pending-frees queue match THIS backend, not whatever the previous
         // one left behind. Without this clear, restarting the Player (e.g.
@@ -3645,6 +3727,10 @@ impl SwitchRenderBackend {
         LIVE_GPU_DRAWS.store(0, Ordering::Relaxed);
         LIVE_GPU_SHAPES.store(0, Ordering::Relaxed);
 
+        // Boot-cost instrumentation: shader compiles and the mega-arena
+        // allocation both run before the first frame can be drawn, so each one
+        // reports its own share of the launch wait.
+        let t_prog = unsafe { ruffle_tick_now() };
         let solid = build_solid_program()?;
         let bitmap_prog = build_bitmap_program()?;
         let shape_bitmap_prog = build_shape_bitmap_program()?;
@@ -3663,20 +3749,34 @@ impl SwitchRenderBackend {
         let (bitmap_vao, bitmap_vbo) = build_bitmap_quad();
         let (line_vao, line_vbo) = build_line_segment();
         let (line_rect_vao, line_rect_vbo) = build_line_rect();
+        let t_arena = unsafe { ruffle_tick_now() };
 
         // Mega-buffer arena for all shape draws — see the BufferArena
         // comment block at the top of this file for the rationale.
         let vertex_arena = BufferArena::new(
             GL_ARRAY_BUFFER,
-            ARENA_VBO_SIZE,
+            arena_vbo_size,
             ARENA_VBO_ALIGN,
         );
         let index_arena = BufferArena::new(
             GL_ELEMENT_ARRAY_BUFFER,
-            ARENA_IBO_SIZE,
+            arena_ibo_size,
             ARENA_IBO_ALIGN,
         );
         let shape_vao = build_shape_arena_vao(vertex_arena.gl_id, index_arena.gl_id);
+        {
+            let freq = unsafe { ruffle_tick_freq() } as f64;
+            let t_end = unsafe { ruffle_tick_now() };
+            let ms_prog = (t_arena.saturating_sub(t_prog) as f64) * 1000.0 / freq;
+            let ms_arena = (t_end.saturating_sub(t_arena) as f64) * 1000.0 / freq;
+            let mut m = std::format!(
+                "boot: renderer shaders {:.0} ms | arenas ({} MB) {:.0} ms\n\0",
+                ms_prog,
+                (arena_vbo_size + arena_ibo_size) / (1024 * 1024),
+                ms_arena,
+            );
+            unsafe { ruffle_log_cstr(m.as_mut_ptr() as *const _) };
+        }
 
         // The texture samplers `u_tex` in every program are always bound to
         // texture unit 0. Set them once at link time so we don't have to
@@ -5321,6 +5421,8 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
+    // (free helper for `draw_text`'s batching — see `push_text_quad` below)
+
     /// Draw a string. ASCII + accented Latin + Cyrillic come from the embedded
     /// 5x7 pixel font (see `GLYPHS`), folded to uppercase. Any other codepoint
     /// (CJK etc.) falls back to the shared-font glyph atlas (`draw_atlas_glyph`)
@@ -5328,16 +5430,27 @@ impl SwitchRenderBackend {
     /// bitmap pixel becomes a `scale × scale` solid rect (same path as
     /// `draw_rect`). Unknown ASCII renders as blank space.
     pub fn draw_text(&mut self, x: f32, y: f32, scale: f32, text: &str, color: swf::Color) {
+        // Every lit RUN of the 5x7 font used to be its own `draw_rect` — a
+        // uniform upload + glBufferData + glDrawArrays each, ~8 per character.
+        // A gallery frame carries ~250 characters, so text alone was thousands of
+        // GL calls and ~16 ms, i.e. the entire 60 fps budget before anything else
+        // was drawn. The runs are identical geometry, differing only in position,
+        // so they are baked into ONE vertex buffer in pixel space and drawn in a
+        // single call. Positions are pre-multiplied here instead of coming from
+        // the per-draw world matrix; the matrix is identity so `world_matrix`
+        // still applies the UI scale/pivot exactly as before.
+        let r = color.r as f32 / 255.0;
+        let g = color.g as f32 / 255.0;
+        let b = color.b as f32 / 255.0;
+        let a = color.a as f32 / 255.0;
+        let mut verts: std::vec::Vec<f32> = std::vec::Vec::new();
         let mut cur_x = x;
         for ch in text.chars() {
             // Uppercase fold — our font only carries A-Z.
             let lookup = ch.to_ascii_uppercase();
             if let Some((_, pattern)) = GLYPHS.iter().find(|(c, _)| *c == lookup) {
-                // One rect per horizontal RUN of lit pixels, not per pixel. Every
-                // rect is a separate draw call here, and a 5x7 glyph is ~20 lit
-                // pixels but only ~8 runs — a text-heavy screen went from >15k
-                // draw calls a frame to a third of that, which is the difference
-                // between the IMPORTER list stuttering and not.
+                // One rect per horizontal RUN of lit pixels, not per pixel: a 5x7
+                // glyph is ~20 lit pixels but only ~8 runs.
                 for (row_idx, row_str) in pattern.iter().enumerate() {
                     let py = y + row_idx as f32 * scale;
                     let mut run_start: Option<usize> = None;
@@ -5348,17 +5461,14 @@ impl SwitchRenderBackend {
                             (true, None) => run_start = Some(col_idx),
                             (false, Some(start)) => {
                                 let cols = (col_idx - start) as f32;
-                                let mat = Matrix {
-                                    a: scale * cols,
-                                    b: 0.0,
-                                    c: 0.0,
-                                    d: scale,
-                                    tx: swf::Twips::from_pixels(
-                                        (cur_x + start as f32 * scale) as f64,
-                                    ),
-                                    ty: swf::Twips::from_pixels(py as f64),
-                                };
-                                <Self as CommandHandler>::draw_rect(self, color, mat);
+                                push_text_quad(
+                                    &mut verts,
+                                    cur_x + start as f32 * scale,
+                                    py,
+                                    scale * cols,
+                                    scale,
+                                    [r, g, b, a],
+                                );
                                 run_start = None;
                             }
                             _ => {}
@@ -5368,7 +5478,10 @@ impl SwitchRenderBackend {
                 // Advance by 6 px (5-wide glyph + 1-px gap), scaled.
                 cur_x += 6.0 * scale;
             } else if (ch as u32) >= 0x80 {
-                // Non-Latin/Cyrillic (CJK …): shared-font atlas, full-width.
+                // Non-Latin/Cyrillic (CJK …): shared-font atlas, full-width. It
+                // draws through another program, so flush what's queued first and
+                // keep the on-screen order identical to the old per-run path.
+                self.flush_text_quads(&mut verts);
                 self.draw_atlas_glyph(cur_x, y, scale, ch, color);
                 cur_x += CJK_ADVANCE_UNITS * scale;
             } else {
@@ -5376,6 +5489,45 @@ impl SwitchRenderBackend {
                 cur_x += 6.0 * scale;
             }
         }
+        self.flush_text_quads(&mut verts);
+    }
+
+    /// Draw queued text quads (pixel-space positions + per-vertex colour) in one
+    /// call and clear the queue. Reuses the solid program and the static quad
+    /// VAO — same attribute layout (vec2 pos, vec4 rgba), just more vertices.
+    fn flush_text_quads(&mut self, verts: &mut std::vec::Vec<f32>) {
+        if verts.is_empty() {
+            return;
+        }
+        if self.mask.writing {
+            self.mask_shape_draw_window = self
+                .mask_shape_draw_window
+                .saturating_add((verts.len() / 36) as u32);
+        }
+        // Identity: the vertices already carry their pixel coordinates, and this
+        // still routes through `world_matrix` so the UI scale/pivot applies.
+        let ident = Matrix {
+            a: 1.0, b: 0.0, c: 0.0, d: 1.0,
+            tx: swf::Twips::ZERO,
+            ty: swf::Twips::ZERO,
+        };
+        let world = self.world_matrix(&ident);
+        const IDENT_MULT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+        const IDENT_ADD: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+        self.use_solid(&world, &IDENT_MULT, &IDENT_ADD);
+        self.gl_state.bind_vao(self.rect_vao);
+        self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
+        unsafe {
+            glBindBuffer(GL_ARRAY_BUFFER, self.rect_vbo);
+            glBufferData(
+                GL_ARRAY_BUFFER,
+                (verts.len() * core::mem::size_of::<f32>()) as GLsizeiptr,
+                verts.as_ptr() as *const _,
+                GL_DYNAMIC_DRAW,
+            );
+            glDrawArrays(GL_TRIANGLES, 0, (verts.len() / 6) as GLsizei);
+        }
+        verts.clear();
     }
 
     /// Measure rendered width of `text` in pixels at the given scale. Mirrors
@@ -6047,7 +6199,9 @@ impl SwitchRenderBackend {
         display_name: &str,
         color_chip: u32,
     ) {
-        match self.cover_for(basename) {
+        // FULL resolution here, not the gallery's tile thumbnail: this fills the
+        // screen, where a 256-wide thumbnail upscales to visible mush.
+        match self.cover_full_for(basename) {
             CoverTex::Image { tex, w: iw, h: ih } if iw > 0 && ih > 0 => {
                 // Black backdrop (the letterbox bars).
                 self.draw_overlay_rect(x, y, w, h, 0xFF_00_00_00);
@@ -6408,32 +6562,101 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
-    /// Resolve + cache a game's cover texture by basename. Decodes/uploads on
-    /// first use; returns `Default` when there's no cover image (caller draws
-    /// the generated tile).
-    fn cover_for(&mut self, basename: &str) -> CoverTex {
-        if let Ok(cache) = cover_cache().lock() {
+    /// Full-resolution cover for the launch/quit reveal, cached separately from
+    /// the gallery's tile thumbnails. Only the game being launched (and the one
+    /// just quit) ever lands here, so the cache holds `REVEAL_CACHE_MAX` entries
+    /// and deletes the texture it evicts. The full decode costs ~25 ms once,
+    /// under an animation that is already covering a game load.
+    fn cover_full_for(&mut self, basename: &str) -> CoverTex {
+        if let Ok(cache) = reveal_cover_cache().lock() {
             if let Some((_, t)) = cache.iter().find(|(b, _)| b == basename) {
                 return *t;
             }
         }
         let resolved = match crate::covers::resolve(basename) {
-            crate::covers::Cover::Image(path) => match crate::covers::decode_file(&path) {
-                Some((rgba, w, h)) => {
+            crate::covers::Cover::Image(path) => {
+                match crate::covers::decode_file(&path) {
+                    Some((rgba, w, h)) => {
+                        let tex = self.upload_rgba_texture(&rgba, w, h);
+                        if tex != 0 {
+                            CoverTex::Image { tex, w, h }
+                        } else {
+                            CoverTex::Default
+                        }
+                    }
+                    None => CoverTex::Default,
+                }
+            }
+            crate::covers::Cover::Default => CoverTex::Default,
+        };
+        let evicted = if let Ok(mut cache) = reveal_cover_cache().lock() {
+            cache.push((basename.to_string(), resolved));
+            if cache.len() > REVEAL_CACHE_MAX {
+                Some(cache.remove(0).1)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        // Full-res covers are megabytes of VRAM each — unlike the tile
+        // thumbnails, these can't just be leaked. We're on the GL thread.
+        if let Some(CoverTex::Image { tex, .. }) = evicted {
+            if tex != 0 {
+                unsafe { glDeleteTextures(1, &tex) };
+            }
+        }
+        resolved
+    }
+
+    /// Resolve + cache a game's cover texture by basename. Decodes/uploads on
+    /// first use; returns `Default` when there's no cover image (caller draws
+    /// the generated tile).
+    fn cover_for(&mut self, basename: &str) -> CoverTex {
+        if let Some(t) = cover_lookup(basename) {
+            return t;
+        }
+        let t0 = unsafe { ruffle_tick_now() };
+        let resolved = match crate::covers::resolve(basename) {
+            crate::covers::Cover::Image(path) => {
+                // Source length stamps the thumbnail, so a cover replaced on the
+                // SD invalidates it without any bookkeeping.
+                let src_len = crate::library::file_size(&path);
+                if let Some((rgba, w, h)) = crate::covers::read_thumb(basename, src_len) {
                     let tex = self.upload_rgba_texture(&rgba, w, h);
                     if tex != 0 {
                         CoverTex::Image { tex, w, h }
                     } else {
                         CoverTex::Default
                     }
+                } else {
+                    match crate::covers::read_cover_bytes(&path)
+                        .and_then(|b| crate::covers::decode_bytes(&b))
+                    {
+                        Some((rgba, w, h)) => {
+                            // Shrink to tile size, draw THAT, and leave it on the
+                            // SD so the next session skips the full decode.
+                            let (small, sw, sh) = crate::covers::downscale_for_tile(rgba, w, h);
+                            crate::covers::write_thumb(basename, src_len, &small, sw, sh);
+                            let tex = self.upload_rgba_texture(&small, sw, sh);
+                            if tex != 0 {
+                                CoverTex::Image { tex, w: sw, h: sh }
+                            } else {
+                                CoverTex::Default
+                            }
+                        }
+                        None => CoverTex::Default,
+                    }
                 }
-                None => CoverTex::Default,
-            },
+            }
             crate::covers::Cover::Default => CoverTex::Default,
         };
         if let Ok(mut cache) = cover_cache().lock() {
             cache.push((basename.to_string(), resolved));
         }
+        let dt = unsafe { ruffle_tick_now() }.saturating_sub(t0);
+        COVER_DECODE_TICKS.fetch_add(dt, Ordering::Relaxed);
+        COVER_DECODE_COUNT.fetch_add(1, Ordering::Relaxed);
         resolved
     }
 
@@ -6596,18 +6819,22 @@ impl SwitchRenderBackend {
         let pitch = ROW_IMG_H + GAP_Y;
 
         // Regular grid: tile i sits at (col = i % COLS, row = i / COLS).
-        // `tiles` = (cover, x, w, row); `cells` feeds input-side 2D navigation
+        // `tiles` = (x, w, row); `cells` feeds input-side 2D navigation
         // (which reads row + center-x, so a fixed grid works unchanged).
+        //
+        // Geometry ONLY — no cover resolution here. This pass runs over the whole
+        // library, and resolving a cover means an SD read + PNG/JPEG decode +
+        // texture upload (~25 ms each): doing it for every entry made the first
+        // frame cost ~1.9 s on a 71-game library, which is the black screen at
+        // launch. Covers are resolved in the draw pass below, visible tiles only.
         let total = entries.len();
-        let mut tiles: std::vec::Vec<(CoverTex, f32, f32, u32)> =
-            std::vec::Vec::with_capacity(total);
+        let mut tiles: std::vec::Vec<(f32, f32, u32)> = std::vec::Vec::with_capacity(total);
         let mut cells: std::vec::Vec<GalleryCell> = std::vec::Vec::with_capacity(total);
-        for (idx, entry) in entries.iter().enumerate() {
-            let cover = self.cover_for(&entry.basename);
+        for (idx, _entry) in entries.iter().enumerate() {
             let col = idx % COLS;
             let row = (idx / COLS) as u32;
             let x = LEFT + col as f32 * (cell_w + GAP_X);
-            tiles.push((cover, x, cell_w, row));
+            tiles.push((x, cell_w, row));
             cells.push(GalleryCell {
                 row,
                 cx: x + cell_w * 0.5,
@@ -6642,7 +6869,7 @@ impl SwitchRenderBackend {
         // Selected tile geometry in content space — the eased frame chases it.
         let (target_sel_x, target_sel_row, target_sel_w) = tiles
             .get(selection)
-            .map(|&(_, tx, tw, trow)| (tx, trow, tw))
+            .map(|&(tx, tw, trow)| (tx, trow, tw))
             .unwrap_or((LEFT, 0, 0.0));
         let target_sel_y = TOP + target_sel_row as f32 * pitch;
 
@@ -6734,7 +6961,9 @@ impl SwitchRenderBackend {
         // partially-scrolled rows; the scissor does the exact clipping.
         let lo_row = scroll_offset.saturating_sub(1) as u32;
         let hi_row = (scroll_offset + rows_visible + 1) as u32;
-        for (idx, &(cover, tx, tw, trow)) in tiles.iter().enumerate() {
+        // Budget of NEW cover decodes for this frame — see COVER_DECODES_PER_FRAME.
+        let mut decode_budget = COVER_DECODES_PER_FRAME;
+        for (idx, &(tx, tw, trow)) in tiles.iter().enumerate() {
             if trow < lo_row || trow > hi_row {
                 continue;
             }
@@ -6743,6 +6972,16 @@ impl SwitchRenderBackend {
             if ty + ROW_IMG_H < band_top || ty > band_bot {
                 continue;
             }
+            // Cached cover, else decode one if this frame still has budget, else
+            // the generated tile for now (it resolves on a following frame).
+            let cover = match cover_lookup(&entries[idx].basename) {
+                Some(t) => t,
+                None if decode_budget > 0 => {
+                    decode_budget -= 1;
+                    self.cover_for(&entries[idx].basename)
+                }
+                None => CoverTex::Default,
+            };
 
             match cover {
                 CoverTex::Image { tex, w, h } => {
@@ -6934,6 +7173,21 @@ impl SwitchRenderBackend {
             glBindVertexArray(0);
         }
         self.gl_state.invalidate();
+        // Boot cost attribution: report what the FIRST gallery frame spent on
+        // covers (this is what used to own the launch black screen).
+        {
+            static LOGGED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !LOGGED.swap(true, Ordering::Relaxed) {
+                let freq = unsafe { ruffle_tick_freq() } as f64;
+                let ms = (COVER_DECODE_TICKS.load(Ordering::Relaxed) as f64) * 1000.0 / freq;
+                let mut m = std::format!(
+                    "boot: first gallery frame — {} covers decoded, {:.0} ms\n\0",
+                    COVER_DECODE_COUNT.load(Ordering::Relaxed), ms,
+                );
+                unsafe { ruffle_log_cstr(m.as_mut_ptr() as *const _) };
+            }
+        }
     }
 
     /// OPTIONS modal — small panel showing the game name + per-game options.

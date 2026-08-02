@@ -41,10 +41,15 @@ fn stem(basename: &str) -> &str {
 }
 
 /// First existing path among the known SD roots for `suffix`, or None.
+///
+/// Answered from the scan's directory index when it covers that directory:
+/// `resolve` probes four sidecar names across two roots plus the cache dir, and
+/// on hardware each `Path::exists()` runs ~1.2 ms — 9 to 13 ms per game, which
+/// was the single biggest slice of a cover load regardless of image size.
 fn find_in_roots(suffix: &str) -> Option<std::string::String> {
     for root in USER_SD_ROOTS {
         let p = std::format!("{}/{}", root, suffix);
-        if std::path::Path::new(&p).exists() {
+        if crate::library::file_exists(&p) {
             return Some(p);
         }
     }
@@ -73,7 +78,7 @@ pub fn resolve(basename: &str) -> Cover {
         }
     }
     let cached = cache_path(basename);
-    if std::path::Path::new(&cached).exists() {
+    if crate::library::file_exists(&cached) {
         return Cover::Image(cached);
     }
     Cover::Default
@@ -102,8 +107,10 @@ pub fn decode_bytes(bytes: &[u8]) -> Option<(std::vec::Vec<u8>, u32, u32)> {
 fn read_file_bounded(path: &str, max: usize) -> Option<std::vec::Vec<u8>> {
     use std::io::Read;
     let mut f = std::fs::File::open(path).ok()?;
-    let mut data: std::vec::Vec<u8> = std::vec::Vec::new();
-    let mut buf = [0u8; 4096];
+    let mut data: std::vec::Vec<u8> = std::vec::Vec::with_capacity(256 * 1024);
+    // 64 KB chunks, not 4 KB: each read is an fsdev IPC round trip, and covers
+    // run a few hundred KB — the small chunk turned one cover into ~100 trips.
+    let mut buf = std::vec![0u8; 64 * 1024];
     loop {
         match f.read(&mut buf) {
             Ok(0) => break,
@@ -121,8 +128,156 @@ fn read_file_bounded(path: &str, max: usize) -> Option<std::vec::Vec<u8>> {
 
 /// Decode a cover image FILE (PNG or JPEG) to RGBA8 + dims.
 pub fn decode_file(path: &str) -> Option<(std::vec::Vec<u8>, u32, u32)> {
-    let bytes = read_file_bounded(path, 16 * 1024 * 1024)?;
+    let bytes = read_cover_bytes(path)?;
     decode_bytes(&bytes)
+}
+
+/// Read a cover file's raw bytes. Split out of `decode_file` so the caller can
+/// time the SD read and the decode separately.
+pub fn read_cover_bytes(path: &str) -> Option<std::vec::Vec<u8>> {
+    read_file_bounded(path, 16 * 1024 * 1024)
+}
+
+// ── Gallery thumbnail cache ────────────────────────────────────────────────
+//
+// A gallery tile is 227x132, but covers ship at up to 1126x619 — so drawing the
+// grid re-decoded ~700 000 pixels per game, every session, to fill 30 000.
+// Measured on hardware: 13 to 24 ms per cover of PNG decode alone, which is one
+// dropped frame per tile the first time a row scrolls into view.
+//
+// So the first decode also writes a tile-sized thumbnail next to the cover, and
+// later sessions read that instead. The file is our own container rather than a
+// PNG because it carries the SOURCE FILE'S LENGTH in its header: replace a cover
+// (in-app or by dropping a new file on the SD from a PC) and the length no
+// longer matches, so the thumbnail misses and gets rewritten. No invalidation
+// logic, no stale art, and the rewrite overwrites in place so nothing orphans.
+//
+// The full-resolution image is still what the launch/quit reveal draws — that
+// one fills the screen, where a tile-sized thumbnail would be visibly soft.
+
+/// Thumbnail box. Slightly above the 227x132 tile so the selected tile's "pop"
+/// (which inflates it a few px) still samples at or below 1:1.
+const THUMB_MAX_W: u32 = 256;
+const THUMB_MAX_H: u32 = 160;
+
+/// `magic(6) | src_len u32 LE | w u16 LE | h u16 LE`, then zlib RGBA8.
+const THUMB_MAGIC: &[u8; 6] = b"FNXTH1";
+const THUMB_HEADER: usize = 14;
+
+fn thumb_path(basename: &str) -> std::string::String {
+    std::format!("{}/{}.thumb", COVER_CACHE_DIR, basename)
+}
+
+/// Scale `rgba` down so it just covers the tile box, preserving aspect. Box
+/// average (not nearest) — covers are photos and logos, and point-sampling a
+/// 4x reduction shimmers. Returns the input untouched when it's already small
+/// enough; we never upscale into the cache.
+pub fn downscale_for_tile(
+    rgba: std::vec::Vec<u8>,
+    w: u32,
+    h: u32,
+) -> (std::vec::Vec<u8>, u32, u32) {
+    if w == 0 || h == 0 {
+        return (rgba, w, h);
+    }
+    // Crop-to-fill needs the LARGER of the two ratios: the tile is filled, then
+    // the overflow is cropped at draw time.
+    let scale = (THUMB_MAX_W as f32 / w as f32).max(THUMB_MAX_H as f32 / h as f32);
+    if scale >= 1.0 {
+        return (rgba, w, h);
+    }
+    let dw = ((w as f32 * scale).round() as u32).max(1);
+    let dh = ((h as f32 * scale).round() as u32).max(1);
+    let mut out = std::vec![0u8; (dw as usize) * (dh as usize) * 4];
+    for dy in 0..dh {
+        let y0 = (dy as u64 * h as u64 / dh as u64) as u32;
+        let y1 = (((dy + 1) as u64 * h as u64 / dh as u64) as u32).max(y0 + 1).min(h);
+        for dx in 0..dw {
+            let x0 = (dx as u64 * w as u64 / dw as u64) as u32;
+            let x1 = (((dx + 1) as u64 * w as u64 / dw as u64) as u32).max(x0 + 1).min(w);
+            let (mut r, mut g, mut b, mut a, mut n) = (0u32, 0u32, 0u32, 0u32, 0u32);
+            for sy in y0..y1 {
+                let row = (sy as usize) * (w as usize) * 4;
+                for sx in x0..x1 {
+                    let i = row + (sx as usize) * 4;
+                    r += rgba[i] as u32;
+                    g += rgba[i + 1] as u32;
+                    b += rgba[i + 2] as u32;
+                    a += rgba[i + 3] as u32;
+                    n += 1;
+                }
+            }
+            let n = n.max(1);
+            let o = ((dy as usize) * (dw as usize) + dx as usize) * 4;
+            out[o] = (r / n) as u8;
+            out[o + 1] = (g / n) as u8;
+            out[o + 2] = (b / n) as u8;
+            out[o + 3] = (a / n) as u8;
+        }
+    }
+    (out, dw, dh)
+}
+
+/// Read a game's cached thumbnail, but only if it was built from a source cover
+/// of exactly `src_len` bytes. `None` → caller decodes the full cover.
+pub fn read_thumb(basename: &str, src_len: u64) -> Option<(std::vec::Vec<u8>, u32, u32)> {
+    use std::io::Read;
+    let path = thumb_path(basename);
+    if src_len == 0 || !crate::library::file_exists(&path) {
+        return None;
+    }
+    let bytes = read_file_bounded(&path, 4 * 1024 * 1024)?;
+    if bytes.len() < THUMB_HEADER || &bytes[0..6] != THUMB_MAGIC {
+        return None;
+    }
+    let stamped = u32::from_le_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]) as u64;
+    if stamped != src_len {
+        return None; // cover changed since this thumbnail was written
+    }
+    let w = u16::from_le_bytes([bytes[10], bytes[11]]) as u32;
+    let h = u16::from_le_bytes([bytes[12], bytes[13]]) as u32;
+    let want = (w as usize) * (h as usize) * 4;
+    if want == 0 {
+        return None;
+    }
+    let mut rgba: std::vec::Vec<u8> = std::vec::Vec::with_capacity(want);
+    flate2::read::ZlibDecoder::new(&bytes[THUMB_HEADER..])
+        .read_to_end(&mut rgba)
+        .ok()?;
+    if rgba.len() != want {
+        return None;
+    }
+    Some((rgba, w, h))
+}
+
+/// Write a game's tile thumbnail, stamped with the source cover's length.
+/// Best-effort: a failure just means the next session decodes the full cover.
+pub fn write_thumb(basename: &str, src_len: u64, rgba: &[u8], w: u32, h: u32) {
+    use std::io::Write;
+    if src_len == 0 || src_len > u32::MAX as u64 || w == 0 || h == 0 {
+        return;
+    }
+    if w > u16::MAX as u32 || h > u16::MAX as u32 {
+        return;
+    }
+    let mut enc =
+        flate2::write::ZlibEncoder::new(std::vec::Vec::new(), flate2::Compression::fast());
+    if enc.write_all(rgba).is_err() {
+        return;
+    }
+    let Ok(body) = enc.finish() else { return };
+    let mut out = std::vec::Vec::with_capacity(THUMB_HEADER + body.len());
+    out.extend_from_slice(THUMB_MAGIC);
+    out.extend_from_slice(&(src_len as u32).to_le_bytes());
+    out.extend_from_slice(&(w as u16).to_le_bytes());
+    out.extend_from_slice(&(h as u16).to_le_bytes());
+    out.extend_from_slice(&body);
+    let _ = std::fs::create_dir_all(COVER_CACHE_DIR);
+    let path = thumb_path(basename);
+    if std::fs::write(&path, &out).is_ok() {
+        crate::library::note_file_created(&path);
+        crate::sd::commit();
+    }
 }
 
 /// Decode PNG bytes to RGBA8 (mirrors `library::decode_banner`, promoting any
@@ -227,6 +382,9 @@ pub fn fetch_url_and_cache(
     let _ = std::fs::create_dir_all(COVER_CACHE_DIR);
     let path = cache_path(basename);
     std::fs::write(&path, &bytes).map_err(|e| std::format!("write cover: {}", e))?;
+    // Cached after the scan listed `covers/` — tell the index, or `resolve` would
+    // keep reporting this game as cover-less for the rest of the session.
+    crate::library::note_file_created(&path);
     crate::sd::commit();
     Ok(path)
 }
@@ -240,8 +398,15 @@ pub fn fetch_url_and_cache(
 /// commits the SD. `basename` is the full `.swf` filename (e.g. `Mario.swf`).
 pub fn remove_for(basename: &str) -> u32 {
     let mut removed = 0u32;
-    // 1) Cached online cover (covers/<basename>.cover.png).
-    if std::fs::remove_file(cache_path(basename)).is_ok() {
+    // 1) Cached online cover (covers/<basename>.cover.png) + its tile thumbnail.
+    let cached = cache_path(basename);
+    if std::fs::remove_file(&cached).is_ok() {
+        crate::library::note_file_removed(&cached);
+        removed += 1;
+    }
+    let thumb = thumb_path(basename);
+    if std::fs::remove_file(&thumb).is_ok() {
+        crate::library::note_file_removed(&thumb);
         removed += 1;
     }
     // 2) Stem-named manual sidecars (the natural `<name>.png`/`.jpg` form that
@@ -251,6 +416,7 @@ pub fn remove_for(basename: &str) -> u32 {
         for ext in ["png", "jpg"] {
             let p = std::format!("{}/{}.{}", root, st, ext);
             if std::fs::remove_file(&p).is_ok() {
+                crate::library::note_file_removed(&p);
                 removed += 1;
             }
         }

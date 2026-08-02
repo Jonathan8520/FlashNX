@@ -17,15 +17,29 @@
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
+#include <string>
 #include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <vector>
 
 #include "ruffle_bridge.h"
 
 // Defined in the Rust staticlib: pushes one (path) onto the library's
 // scan list. Rust handles reading SWF header lazily. Returns 0 on success.
 extern "C" int ruffle_library_add_path(const char* path, unsigned long long mtime);
+// Records one absolute path seen during the scan (ANY file, not just `.swf`) in
+// the Rust-side directory index. Every game carries up to four sidecars
+// (`.filesize`, `.url`, `.base`, `<name>.meta.json`) that mostly DON'T exist, and
+// probing each one on the SD cost ~640 ms of the launch black screen on a
+// 71-game library. The readdir below already walks those names, so the index
+// answers "does this sidecar exist" from memory instead.
+extern "C" void ruffle_library_note_file(const char* path);
+// Marks `dir` as fully enumerated, so the index may answer "absent" for a path
+// under it. Also called for a directory that doesn't exist (ENOENT) — nothing
+// can live under it, and one of the sidecar roots (`sdmc:/ruffle/`) is missing
+// on most installs.
+extern "C" void ruffle_library_note_dir(const char* dir);
 
 namespace {
 
@@ -39,38 +53,69 @@ bool ends_with_swf(const char* name) {
 // Enumerate every `.swf` in `dir` and forward absolute paths to Rust.
 // Silent if the directory doesn't exist (SD often only has one of the two
 // candidate locations populated).
+//
+// TWO passes over one readdir: the whole listing is indexed FIRST (a sidecar
+// can appear after its game in directory order), then the `.swf` entries are
+// pushed to Rust. Only `.swf` paths are kept in memory between the passes.
 void scan_dir_all(const char* dir) {
     DIR* d = opendir(dir);
     if (!d) {
+        // ENOENT = the directory really isn't there, so the index can answer
+        // "absent" for anything under it. Any other errno (transient IO, perms)
+        // leaves it unknown and sidecar probes fall back to touching the SD.
+        if (errno == ENOENT) ruffle_library_note_dir(dir);
         std::printf("library scan: opendir(%s) failed (skip — dir absent)\n", dir);
         std::fflush(stdout);
         return;
     }
+    ruffle_library_note_dir(dir);
+    const char* sep = (dir[std::strlen(dir) - 1] == '/') ? "" : "/";
     char path[512];
-    int found = 0;
+    std::vector<std::string> swfs;
     while (struct dirent* ent = readdir(d)) {
-        if (!ends_with_swf(ent->d_name)) continue;
-        const int n = std::snprintf(path, sizeof(path), "%s%s%s",
-                                    dir,
-                                    (dir[std::strlen(dir) - 1] == '/') ? "" : "/",
-                                    ent->d_name);
+        const int n = std::snprintf(path, sizeof(path), "%s%s%s", dir, sep, ent->d_name);
         if (n <= 0 || (size_t)n >= sizeof(path)) {
             std::printf("library scan: path too long, skipping %s\n", ent->d_name);
             continue;
         }
+        ruffle_library_note_file(path);
+        if (ends_with_swf(ent->d_name)) swfs.emplace_back(path);
+    }
+    closedir(d);
+
+    int found = 0;
+    for (const std::string& swf : swfs) {
         // stat() for the regular-file check AND the mtime: the "recent" sort
         // needs a timestamp, d_type carries none (and is DT_UNKNOWN on some
         // fsdev volumes anyway), and Rust's std::fs metadata is unreliable on
         // Horizon — so the timestamp comes from here.
         struct stat st;
-        if (::stat(path, &st) != 0 || !S_ISREG(st.st_mode)) continue;
-        if (ruffle_library_add_path(path, (unsigned long long)st.st_mtime) == 0) {
+        if (::stat(swf.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        if (ruffle_library_add_path(swf.c_str(), (unsigned long long)st.st_mtime) == 0) {
             ++found;
         }
     }
-    closedir(d);
     std::printf("library scan: %s -> %d .swf\n", dir, found);
     std::fflush(stdout);
+}
+
+// Index a directory into the Rust-side lookup WITHOUT adding any game from it.
+// Used for the `covers/` subdirs: nothing there is a game, but `covers::resolve`
+// probes them per game, and on hardware each miss is a ~1.2 ms SD stat.
+void index_dir_only(const char* dir) {
+    DIR* d = opendir(dir);
+    if (!d) {
+        if (errno == ENOENT) ruffle_library_note_dir(dir);
+        return;
+    }
+    ruffle_library_note_dir(dir);
+    const char* sep = (dir[std::strlen(dir) - 1] == '/') ? "" : "/";
+    char path[512];
+    while (struct dirent* ent = readdir(d)) {
+        const int n = std::snprintf(path, sizeof(path), "%s%s%s", dir, sep, ent->d_name);
+        if (n > 0 && (size_t)n < sizeof(path)) ruffle_library_note_file(path);
+    }
+    closedir(d);
 }
 
 } // namespace
@@ -96,6 +141,14 @@ extern "C" void swf_picker_run(void) {
     };
     for (const char* dir : DIRS) {
         scan_dir_all(dir);
+    }
+    // Cover cache dirs: indexed, never scanned for games.
+    static const char* COVER_DIRS[] = {
+        "sdmc:/flashnx/covers/",
+        "sdmc:/ruffle/covers/",
+    };
+    for (const char* dir : COVER_DIRS) {
+        index_dir_only(dir);
     }
 }
 

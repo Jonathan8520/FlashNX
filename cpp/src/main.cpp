@@ -11,6 +11,14 @@ extern "C" bool gl_context_init(NWindow* win);
 extern "C" void gl_context_shutdown(void);
 extern "C" void gl_context_swap(void);
 
+// ── Boot timing (issue: ~4 s of black screen before the library shows) ──────
+// System-tick stamps so every boot phase reports its own cost instead of us
+// guessing which one owns the wait. Cheap (one armGetSystemTick per phase).
+static uint64_t g_boot_t0 = 0;
+static double boot_ms_since(uint64_t t) {
+    return (double)(armGetSystemTick() - t) * 1000.0 / (double)armGetSystemTickFreq();
+}
+
 extern "C" void swf_picker_run(void);
 
 // Phase 3.4 — library boot screen FFI (rust/src/library.rs).
@@ -490,7 +498,8 @@ static void worker_entry(void* arg) {
     // library. The pointer is an `argv[i]` from main(), valid for the whole run
     // (main blocks on threadWaitForExit). NULL = normal launch → show library.
     const char* forwarder_swf = static_cast<const char*>(arg);
-    std::printf("worker: starting (32 MB stack)\n"); std::fflush(stdout);
+    std::printf("worker: starting (32 MB stack), %.0f ms after main()\n",
+                boot_ms_since(g_boot_t0)); std::fflush(stdout);
 
     // DIAG (worker-TLS fault): this worker is a raw libnx thread. The kernel
     // sets TPIDRRO_EL0 (IPC/syscall TLS) but leaves TPIDR_EL0 (ELF/compiler
@@ -508,10 +517,13 @@ static void worker_entry(void* arg) {
     NWindow* win = nwindowGetDefault();
     // Boot at PANEL size: the library UI is what shows first and it wants to be
     // sharp. Games drop to GAME_VIEWPORT_* via gl_context_resize at launch.
+    const uint64_t t_gl = armGetSystemTick();
     if (!gl_context_init(win)) {
         std::printf("gl_context_init failed\n"); std::fflush(stdout);
         return;
     }
+    std::printf("boot: gl_context_init %.0f ms\n", boot_ms_since(t_gl));
+    std::fflush(stdout);
 
     // Pad + touch init moved BEFORE the library so both the library boot
     // screen and the in-game loop share one PadState instance. Pad config
@@ -554,17 +566,27 @@ static void worker_entry(void* arg) {
     // The library / RÉGLAGES cursor speed is the GLOBAL default — re-read it on
     // entering the library so it doesn't show the last game's per-game speed.
     cursor_speed_load();
+    const uint64_t t_libinit = armGetSystemTick();
     if (ruffle_library_init() != 0) {
         std::printf("library_init failed — exiting .nro\n");
         std::fflush(stdout);
         break;
     }
+    const double ms_libinit = boot_ms_since(t_libinit);
     // Enumerate every .swf on SD and push to the Rust library state.
+    const uint64_t t_scan = armGetSystemTick();
     swf_picker_run();
+    const double ms_scan = boot_ms_since(t_scan);
+    const uint64_t t_open = armGetSystemTick();
     ruffle_library_open();
+    std::printf("boot: library_init %.0f ms | swf scan %.0f ms | library_open %.0f ms"
+                " | total since main %.0f ms\n",
+                ms_libinit, ms_scan, boot_ms_since(t_open), boot_ms_since(g_boot_t0));
+    std::fflush(stdout);
 
     MenuRepeatState lib_repeat;
     menu_repeat_reset(lib_repeat);
+    bool first_lib_frame = true;
     while (ruffle_library_active() && appletMainLoop()) {
         padUpdate(&pad);
         const u64 kDownLib = padGetButtonsDown(&pad);
@@ -599,6 +621,12 @@ static void worker_entry(void* arg) {
         ruffle_library_touch(lib_tx, lib_ty, lib_touch ? 1 : 0);
         ruffle_library_render();
         gl_context_swap();
+        if (first_lib_frame) {
+            first_lib_frame = false;
+            std::printf("boot: FIRST LIBRARY FRAME ON SCREEN at %.0f ms after main()\n",
+                        boot_ms_since(g_boot_t0));
+            std::fflush(stdout);
+        }
     }
 
     const bool picked = ruffle_library_picked() != 0;
@@ -1088,12 +1116,14 @@ int main(int argc, char** argv) {
         }
     }
 
+    g_boot_t0 = armGetSystemTick();
     socketInitializeDefault();
     nxlinkStdio();
     romfsInit();
     cursor_speed_load(); // restore the saved cursor-speed preset (REGLAGES)
 
-    std::printf("FlashNX: starting\n");
+    std::printf("FlashNX: starting (%.0f ms in socket/romfs init)\n",
+                boot_ms_since(g_boot_t0));
     std::printf("FlashNX: argc=%d", argc);
     for (int i = 0; i < argc; ++i) {
         std::printf(" argv[%d]=%s", i, argv[i] ? argv[i] : "(null)");
@@ -1159,6 +1189,8 @@ int main(int argc, char** argv) {
     // Register our `.swf` file association with Sphaira (if installed) so a Flash
     // game can be turned into a Home-menu shortcut from Sphaira's file browser.
     register_sphaira_assoc(argc > 0 ? argv[0] : nullptr);
+    std::printf("boot: main() pre-worker done at %.0f ms\n", boot_ms_since(g_boot_t0));
+    std::fflush(stdout);
 
     // Spawn the Ruffle worker with a 32 MB stack. NULL stack_mem → libnx
     // allocates from heap, so we don't bloat .nro BSS. Priority 0x2C is the

@@ -493,7 +493,7 @@ const USER_SD_ROOTS: &[&str] = &["sdmc:/flashnx", "sdmc:/ruffle"];
 fn find_user_file(suffix: &str) -> Option<std::string::String> {
     for root in USER_SD_ROOTS {
         let p = std::format!("{}/{}", root, suffix);
-        if std::path::Path::new(&p).exists() {
+        if file_exists(&p) {
             return Some(p);
         }
     }
@@ -538,6 +538,7 @@ fn write_meta_sidecar(basename: &str, display_name: &str) -> bool {
         Ok(json) => {
             let ok = std::fs::write(&path, json.as_bytes()).is_ok();
             if ok {
+                note_file_created(&path); // renamed this session → index must see it
                 crate::sd::commit();
             }
             ok
@@ -901,12 +902,25 @@ extern "C" {
     fn swf_picker_files_dir_size(swf_path: *const core::ffi::c_char) -> i64;
 }
 
+/// Flat on-SD byte length of `path`, via C++/libnx `stat` (Rust's
+/// `fs::metadata().len()` returns garbage on Horizon — see `read_swf_header`).
+/// 0 when the file is missing or unreadable.
+pub(crate) fn file_size(path: &str) -> u64 {
+    let Ok(c) = std::ffi::CString::new(path) else {
+        return 0;
+    };
+    unsafe { swf_picker_file_size(c.as_ptr()) }.max(0) as u64
+}
+
 /// Read the cached real on-SD footprint (flat SWF + `<stem>.files/` tree) from
 /// `<swf_path>.filesize`, written once at download. Direct bounded read (one
 /// open, fails fast if absent) so the scan stays cheap. None -> caller keeps the
 /// header size (single-file games + multi-file games from before this feature).
 fn read_filesize_cache(swf_path: &str) -> Option<u64> {
     let p = std::format!("{}.filesize", swf_path);
+    if !file_exists(&p) {
+        return None; // no open() at all for the common single-file game
+    }
     read_sd_text(&p, 64).ok()?.trim().parse::<u64>().ok().filter(|&n| n > 0)
 }
 
@@ -926,6 +940,10 @@ fn cache_game_footprint(swf_path: &str) {
     let flat = unsafe { swf_picker_file_size(c.as_ptr()) }.max(0) as u64;
     let p = std::format!("{}.filesize", swf_path);
     if std::fs::write(&p, (flat + tree).to_string().as_bytes()).is_ok() {
+        // Written AFTER the scan listed this directory: without this the index
+        // would report the fresh sidecar as absent and the game we just
+        // downloaded would show its header size instead of its real footprint.
+        note_file_created(&p);
         crate::sd::commit();
     }
 }
@@ -965,13 +983,128 @@ fn backfill_game_sizes() {
     crate::sd::commit();
 }
 
+/// Every path seen by the SD scan's `readdir` (games AND sidecars), so a
+/// sidecar's existence is a memory lookup instead of an SD probe. Filled by
+/// `ruffle_library_note_file` before any `add_path` for that directory.
+///
+/// Only the SCAN populates this, so it answers for the scanned roots and
+/// nothing else: `scan_knows_dir` gates every use, and any path under a
+/// directory the scan never listed falls back to touching the SD. Sidecars
+/// written later (a download, a rename) go through `note_file_created` so the
+/// index doesn't go stale within a session.
+static SCAN_FILES: Mutex<std::collections::BTreeSet<std::string::String>> =
+    Mutex::new(std::collections::BTreeSet::new());
+
+/// Directories `readdir` actually listed. A path outside them is unknown to the
+/// index, not absent.
+static SCAN_DIRS: Mutex<std::vec::Vec<std::string::String>> = Mutex::new(std::vec::Vec::new());
+
+fn parent_dir(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(i) => &path[..i],
+        None => "",
+    }
+}
+
+/// Record one path from the scan's directory listing.
+pub fn note_file(path: &str) {
+    if let Ok(mut set) = SCAN_FILES.lock() {
+        set.insert(path.to_string());
+    }
+}
+
+/// Mark a directory as fully enumerated (listed, or confirmed absent), which is
+/// what lets `file_exists` answer "no" without touching the SD.
+pub fn note_dir(dir: &str) {
+    let dir = dir.trim_end_matches('/').to_string();
+    if let Ok(mut dirs) = SCAN_DIRS.lock() {
+        if !dirs.iter().any(|d| *d == dir) {
+            dirs.push(dir);
+        }
+    }
+}
+
+/// Keep the index truthful when we CREATE a file in a scanned directory after
+/// the scan (cover download, `.filesize` cache, rename sidecar).
+pub fn note_file_created(path: &str) {
+    if let Ok(mut set) = SCAN_FILES.lock() {
+        if !set.is_empty() {
+            set.insert(path.to_string());
+        }
+    }
+}
+
+/// Same, for a file we DELETE after the scan (cover removal, game delete).
+pub fn note_file_removed(path: &str) {
+    if let Ok(mut set) = SCAN_FILES.lock() {
+        set.remove(path);
+    }
+}
+
+/// Did the scan list the directory holding `path`? False → the index can't
+/// answer for it and the caller must hit the SD.
+fn scan_knows_dir(path: &str) -> bool {
+    let dir = parent_dir(path);
+    SCAN_DIRS
+        .lock()
+        .map(|d| d.iter().any(|x| x == dir))
+        .unwrap_or(false)
+}
+
+/// Existence check that avoids the SD when the scan already listed that
+/// directory. Same answer as `Path::exists()`, ~0 cost for the common case of a
+/// sidecar that isn't there.
+pub(crate) fn file_exists(path: &str) -> bool {
+    if scan_knows_dir(path) {
+        return SCAN_FILES
+            .lock()
+            .map(|s| s.contains(path))
+            .unwrap_or(false);
+    }
+    std::path::Path::new(path).exists()
+}
+
+/// Per-part cost of the SD scan, in system ticks. The scan runs before the
+/// first frame, so every millisecond here is black screen — this attributes it
+/// to the actual file access instead of us guessing. Dumped once by `open()`.
+static SCAN_TICKS: [core::sync::atomic::AtomicU64; 5] = [
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+];
+
+/// Time `f`, banking the elapsed ticks into `SCAN_TICKS[slot]`.
+fn scan_timed<T>(slot: usize, f: impl FnOnce() -> T) -> T {
+    let t0 = unsafe { ruffle_tick_now() };
+    let out = f();
+    let dt = unsafe { ruffle_tick_now() }.saturating_sub(t0);
+    SCAN_TICKS[slot].fetch_add(dt, core::sync::atomic::Ordering::Relaxed);
+    out
+}
+
+/// Log the scan's per-part breakdown (SWF header / sidecars / log calls).
+fn log_scan_breakdown(entries: usize) {
+    let freq = unsafe { ruffle_tick_freq() } as f64;
+    let ms = |i: usize| {
+        (SCAN_TICKS[i].load(core::sync::atomic::Ordering::Relaxed) as f64) * 1000.0 / freq
+    };
+    log(&std::format!(
+        "boot: scan {} games — swf header {:.0} ms | .filesize {:.0} ms | .meta.json {:.0} ms \
+         | .url {:.0} ms | log {:.0} ms\n",
+        entries, ms(0), ms(1), ms(2), ms(3), ms(4),
+    ));
+}
+
 pub fn add_path(path: &str, mtime: u64) -> bool {
     let basename = path
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or(path)
         .to_string();
-    let (header_size, swf_version, compression_label, is_as3) = match read_swf_header(path) {
+    let (header_size, swf_version, compression_label, is_as3) =
+        match scan_timed(0, || read_swf_header(path)) {
         Some(h) => (h.size_bytes, h.version, h.compression_label, h.is_as3),
         None => {
             log(&std::format!(
@@ -983,19 +1116,19 @@ pub fn add_path(path: &str, mtime: u64) -> bool {
     };
     // Prefer the cached real footprint (multi-file games); fall back to the SWF
     // header's declared size for single-file / pre-feature games.
-    let size_bytes = read_filesize_cache(path).unwrap_or(header_size);
+    let size_bytes = scan_timed(1, || read_filesize_cache(path)).unwrap_or(header_size);
     let color_chip = color_from_basename(&basename);
     // Honour a per-game display-name override from the .meta.json sidecar
     // (Phase 3.4.bis RENOMMER). Sidecar absent / unparseable / empty
     // display_name → fall back to basename.
-    let display_name = read_meta_sidecar(&basename)
+    let display_name = scan_timed(2, || read_meta_sidecar(&basename))
         .and_then(|m| m.display_name)
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| basename.clone());
     // Which import source this game came from (its `.url` sidecar). Read here,
     // alongside the other sidecars, so the IMPORTER list can count an item's
     // installed files in memory instead of hitting the SD every frame.
-    let source_item = read_source_item(path);
+    let source_item = scan_timed(3, || read_source_item(path));
     let entry = Entry {
         path: path.to_string(),
         display_name,
@@ -1008,11 +1141,13 @@ pub fn add_path(path: &str, mtime: u64) -> bool {
         mtime,
         source_item,
     };
-    log(&std::format!(
-        "library: added {} (SWF v{} {}, {})\n",
-        path, swf_version, compression_label,
-        if is_as3 { "AS3/AVM2" } else { "AS2/AVM1" },
-    ));
+    scan_timed(4, || {
+        log(&std::format!(
+            "library: added {} (SWF v{} {}, {})\n",
+            path, swf_version, compression_label,
+            if is_as3 { "AS3/AVM2" } else { "AS2/AVM1" },
+        ))
+    });
     if let Ok(mut s) = LIBRARY.lock() {
         s.entries.push(entry);
     }
@@ -1108,6 +1243,7 @@ pub fn open() {
     // doing it inline would be a black screen. It's deferred to `render` behind
     // the "Optimisation" loading panel instead (see `maybe_arm_startup_migrations`
     // / `PendingNet::RunStartupMigrations`), which shows a frame first, then runs.
+    log_scan_breakdown(LIBRARY.lock().map(|g| g.entries.len()).unwrap_or(0));
     // Reload URL history from SD on each open so changes from a previous
     // .nro boot are visible. Cheap (file is <2 KB typical).
     load_history_from_sd();
@@ -1432,6 +1568,7 @@ fn write_url_sidecar(swf_path: &str, url: &str) {
         log(&std::format!("library: url sidecar write failed: {}\n", e));
         return;
     }
+    note_file_created(&path); // keep the scan index truthful for this session
     crate::sd::commit();
 }
 
@@ -1454,6 +1591,9 @@ pub(crate) fn scanned_game_paths() -> std::vec::Vec<std::string::String> {
 /// instead, so they need no id).
 fn read_source_item(swf_path: &str) -> std::string::String {
     let path = std::format!("{}.url", swf_path);
+    if !file_exists(&path) {
+        return std::string::String::new();
+    }
     let Ok(url) = read_sd_text(&path, 4096) else {
         return std::string::String::new();
     };

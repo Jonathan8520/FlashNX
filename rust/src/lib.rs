@@ -1407,7 +1407,7 @@ pub extern "C" fn ruffle_library_init() -> c_int {
     loc::init();
     // UI renders at panel size (the C++ side keeps the surface there until a
     // game launches), so the library stays sharp.
-    let mut renderer = match SwitchRenderBackend::new(UI_VIEWPORT_W, UI_VIEWPORT_H) {
+    let mut renderer = match SwitchRenderBackend::new_ui(UI_VIEWPORT_W, UI_VIEWPORT_H) {
         Some(r) => r,
         None => {
             log(b"library_init: SwitchRenderBackend::new failed\n\0");
@@ -1451,6 +1451,34 @@ pub extern "C" fn ruffle_library_add_path(path: *const c_char, mtime: u64) -> c_
     let s = unsafe { core::ffi::CStr::from_ptr(path) };
     let Ok(p) = s.to_str() else { return -2 };
     if library::add_path(p, mtime) { 0 } else { -3 }
+}
+
+/// Record one path from the SD scan's directory listing (games AND sidecars),
+/// so the per-game sidecar probes resolve in memory instead of hitting the SD.
+/// Called by `scan_dir_all` for every `readdir` entry, before any `add_path`
+/// for that directory.
+#[no_mangle]
+pub extern "C" fn ruffle_library_note_file(path: *const c_char) {
+    if path.is_null() {
+        return;
+    }
+    let s = unsafe { core::ffi::CStr::from_ptr(path) };
+    if let Ok(p) = s.to_str() {
+        library::note_file(p);
+    }
+}
+
+/// Mark a scanned directory as fully enumerated (or confirmed absent), so the
+/// index may answer "this sidecar isn't there" without an SD probe.
+#[no_mangle]
+pub extern "C" fn ruffle_library_note_dir(dir: *const c_char) {
+    if dir.is_null() {
+        return;
+    }
+    let s = unsafe { core::ffi::CStr::from_ptr(dir) };
+    if let Ok(d) = s.to_str() {
+        library::note_dir(d);
+    }
 }
 
 /// Transition the library from Inactive → List/Empty. Call after the SD
