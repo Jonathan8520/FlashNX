@@ -1626,6 +1626,16 @@ pub struct SwitchRenderBackend {
     /// (~90ms/frame, 48 allocs) once the readback was moved onto the GPU.
     offscreen_temp_pool: Vec<StandaloneTexture>,
     offscreen_temp_retired: Vec<StandaloneTexture>,
+    /// Bytes of temp texture `acquire_offscreen_temp` handed out during the
+    /// current tick (hits + fresh allocs alike), and a decaying peak of it.
+    /// `submit_frame` sizes the reuse pool from the peak instead of a fixed
+    /// cap — see the recycle block there for why the cap has to follow demand.
+    offscreen_temp_demand_bytes: usize,
+    offscreen_temp_demand_peak: usize,
+    /// Budget the last recycle settled on, for the heartbeat. NB the heartbeat's
+    /// `fpool=` is the FILTER texture pool, a different pool — this one is
+    /// reported as `otpool=`.
+    offscreen_temp_pool_budget: usize,
 
     /// Per-frame perf attribution for the slow-frame detector. `frame_snapshot`
     /// is the raw counter state captured at the top of `submit_frame`;
@@ -3844,6 +3854,9 @@ impl SwitchRenderBackend {
             filter_tex_pool: FilterTexturePool::new(),
             offscreen_temp_pool: Vec::new(),
             offscreen_temp_retired: Vec::new(),
+            offscreen_temp_demand_bytes: 0,
+            offscreen_temp_demand_peak: 0,
+            offscreen_temp_pool_budget: 0,
             gl_state: GlStateCache::default(),
             rect_vao,
             rect_vbo,
@@ -4274,11 +4287,21 @@ impl SwitchRenderBackend {
     /// are stable across frames), else allocate a fresh one.
     /// `render_commands_to_texture` clears it, so stale pooled content is fine.
     fn acquire_offscreen_temp(&mut self, w: u32, h: u32) -> Option<StandaloneTexture> {
+        // Demand = bytes of DISTINCT temps this tick needs live at once, which is
+        // what `submit_frame` sizes the pool from. Charge it on the two paths that
+        // consume a distinct texture (pooled hit, fresh alloc) and NOT on the
+        // same-frame retired-reuse path below: that one hands back a temp already
+        // charged this tick, so charging it again would bill Papa Louie 3's ~8
+        // draws of one 27 MB strip as 220 MB and inflate the pool to hold strips
+        // it only ever needs one of.
+        let bytes = (w as usize) * (h as usize) * 4;
         if let Some(i) = self
             .offscreen_temp_pool
             .iter()
             .position(|t| t.width == w && t.height == h)
         {
+            self.offscreen_temp_demand_bytes =
+                self.offscreen_temp_demand_bytes.saturating_add(bytes);
             return Some(self.offscreen_temp_pool.swap_remove(i));
         }
         // Big (standalone-backed) targets: reuse a temp already RETIRED this frame,
@@ -4302,6 +4325,8 @@ impl SwitchRenderBackend {
                 return Some(self.offscreen_temp_retired.swap_remove(i));
             }
         }
+        self.offscreen_temp_demand_bytes =
+            self.offscreen_temp_demand_bytes.saturating_add(bytes);
         make_standalone_texture(w, h)
     }
 
@@ -10127,14 +10152,49 @@ impl RenderBackend for SwitchRenderBackend {
         // `append` puts the recent temps at the tail; keep the tail within a byte
         // budget and drop the oldest from the front (their StandaloneTexture drop
         // = glDeleteTextures).
-        const OFFSCREEN_TEMP_POOL_MAX_BYTES: usize = 64 * 1024 * 1024;
+        //
+        // The budget FOLLOWS DEMAND rather than being a fixed constant. A fixed
+        // 64 MB conflates two opposite situations, because bytes alone can't tell
+        // a working set from garbage:
+        //   - Icy Tower churns render_offscreen SIZES, so its pool fills with
+        //     stale temps nothing will ever ask for again. Any fixed cap is too
+        //     generous here — it just sets how much dead GPU we hold.
+        //   - catmario blits ~87 same-size 480x512 tiles into `stageBitmapdata`
+        //     per frame (~82 MB) and re-acquires EVERY ONE of them next frame.
+        //     64 MB holds exactly 68, so past 68 draws the surplus was freed and
+        //     re-created each frame: ~20 glTexImage2D/frame, 20-33 ms of alloc,
+        //     and after ~1500 frames of that churn the texture heap fragments
+        //     until glTexImage2D fails. make_standalone_texture then returns None,
+        //     render_offscreen returns None, and Ruffle aborts the whole
+        //     enterFrame handler ("does not support BitmapData.draw") — so every
+        //     remaining sprite of that frame vanishes, in batches.
+        // Sizing from the demand peak separates the two: a size that stops being
+        // requested stops being paid for (stricter than the old flat cap for Icy
+        // Tower), while a genuinely hot working set is kept whole (no churn for
+        // catmario). Decay releases the pool when a game moves past a heavy scene;
+        // MAX is the hard backstop, and overrunning it is survivable — a missing
+        // sprite, not a crash, thanks to the glTexImage2D check in
+        // make_standalone_texture.
+        const OFFSCREEN_TEMP_POOL_MIN_BYTES: usize = 16 * 1024 * 1024;
+        const OFFSCREEN_TEMP_POOL_MAX_BYTES: usize = 192 * 1024 * 1024;
+        let demand = self.offscreen_temp_demand_bytes;
+        self.offscreen_temp_demand_bytes = 0;
+        // Decay ~1/16 per frame (half-life ~11 frames) so a spike is held long
+        // enough to be reused but a quiet game gives the memory back.
+        self.offscreen_temp_demand_peak = demand.max(
+            self.offscreen_temp_demand_peak - self.offscreen_temp_demand_peak / 16,
+        );
+        // +1/8 slack: demand varies a little frame to frame (catmario swings
+        // 87-90), and being one temp short costs a full alloc.
+        let budget = (self.offscreen_temp_demand_peak + self.offscreen_temp_demand_peak / 8)
+            .clamp(OFFSCREEN_TEMP_POOL_MIN_BYTES, OFFSCREEN_TEMP_POOL_MAX_BYTES);
         self.offscreen_temp_pool
             .append(&mut self.offscreen_temp_retired);
         let mut acc: usize = 0;
         let mut drop_before = 0usize;
         for (i, t) in self.offscreen_temp_pool.iter().enumerate().rev() {
             acc += (t.width as usize) * (t.height as usize) * 4;
-            if acc > OFFSCREEN_TEMP_POOL_MAX_BYTES {
+            if acc > budget {
                 drop_before = i + 1;
                 break;
             }
@@ -10142,6 +10202,7 @@ impl RenderBackend for SwitchRenderBackend {
         if drop_before > 0 {
             self.offscreen_temp_pool.drain(0..drop_before);
         }
+        self.offscreen_temp_pool_budget = budget;
         // Snapshot counters for the per-frame slow-frame breakdown (consumed
         // right after `commands.execute` below). `cache_entries` is moved by the
         // filter loop, so grab its length up front.
@@ -10332,7 +10393,7 @@ impl RenderBackend for SwitchRenderBackend {
             let cpu_mhz = unsafe { ruffle_cpu_clock_hz() } / 1_000_000;
             let docked = unsafe { ruffle_is_docked() } != 0;
             let msg = std::format!(
-                "f{}: fps={} cpu={}MHz dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB\n",
+                "f{}: fps={} cpu={}MHz dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB\n",
                 self.frame_count,
                 fps_str,
                 cpu_mhz,
@@ -10360,6 +10421,8 @@ impl RenderBackend for SwitchRenderBackend {
                 self.resolve_sync_calls,
                 self.apply_filter_calls,
                 self.filter_tex_pool.len(),
+                self.offscreen_temp_pool.len(),
+                self.offscreen_temp_pool_budget / (1024 * 1024),
                 pushmask,
                 amask,
                 blend,
