@@ -995,22 +995,48 @@ struct PooledTemp {
     last_used_frame: u32,
 }
 
+/// A pending GPU -> CPU read for a `BitmapData.draw()` / `applyFilter` result.
+///
+/// ⚠️ `texture` MUST be storage that outlives the handle. Ruffle parks this in
+/// `DirtyState::GpuModified` and only reads it on the next CPU access, which may
+/// be many frames away (`bitmap_data.rs::sync`) — upstream's wgpu backend has no
+/// such hazard because it renders straight into the BitmapData's own texture and
+/// never uses a scratch. Pointing this at a pooled temp means the temp can be
+/// freed (#14, hearts and enemies vanishing) or handed to another same-size draw
+/// (silently reading back the WRONG sprite). So: standalone targets point at the
+/// BitmapData's own texture, atlas targets at the atlas itself, with `ticket`
+/// holding that atlas alive for as long as this handle exists.
 struct BitmapDataSyncHandle {
     texture: GLuint,
-    /// Dirty region (BitmapData/top-left coords) — must match the `bounds`
-    /// Ruffle passed to `render_offscreen`, since the readback closure indexes
-    /// the buffer relative to this region's origin.
+    /// Full size of `texture` — the atlas dimensions when atlas-backed, needed to
+    /// normalize the premultiplying blit. Not the region size.
+    tex_w: u32,
+    tex_h: u32,
+    /// Read origin IN `texture`. For an atlas that is the packed region's base
+    /// plus the dirty region; for a standalone texture just the dirty region.
     x: u32,
     y: u32,
+    /// Dirty region size — must match the `bounds` Ruffle passed, since the
+    /// readback closure indexes the buffer relative to this region's origin.
     w: u32,
     h: u32,
+    /// Atlases store STRAIGHT alpha while Ruffle's BitmapData CPU pixels are
+    /// PREMULTIPLIED, so an atlas read has to be converted. The conversion is
+    /// done on the GPU at RESOLVE time via the existing `blit_premult` into a
+    /// scratch that is consumed immediately — deliberately not by hand at
+    /// readback, which is where the offroaders speckle came from.
+    premult: bool,
+    /// Keeps the atlas slot alive while this handle is pending. `BitmapRawData`
+    /// already holds the BitmapHandle next to `dirty_state`, so this is belt and
+    /// braces, but it makes the invariant local instead of inferred.
+    _ticket: Option<Arc<AtlasTicket>>,
 }
 impl std::fmt::Debug for BitmapDataSyncHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "BitmapDataSyncHandle(tex={}, region={}x{}@{},{})",
-            self.texture, self.w, self.h, self.x, self.y
+            "BitmapDataSyncHandle(tex={}, region={}x{}@{},{}, premult={})",
+            self.texture, self.w, self.h, self.x, self.y, self.premult
         )
     }
 }
@@ -9876,36 +9902,56 @@ impl RenderBackend for SwitchRenderBackend {
             }
         }
         self.warn_once(b"render_offscreen: composite draw() -> handle\n\0");
-        // The SyncHandle must stay resolvable until Ruffle actually reads it back.
-        // For a BitmapData drawn once and read MANY frames later — Flipline's
-        // multisprite player strip is composited at level load, then copyPixels'd
-        // to the stage every frame in-game (reblitMultispritePlayer) — that read is
-        // deferred far past this call. A pooled `temp` is recycled (and, over the
-        // 64 MB pool cap, freed) within a frame or two, so a handle pointing at it
-        // resolves to an empty/reused texture → the whole player renders invisible
-        // (#14, PL2 6834x484 / 6936x88 strips read back all-zero). For a STANDALONE
-        // backing, step 3 already wrote the full composited result into the
-        // BitmapData's OWN persistent texture (premultiplied, exactly the temp's
-        // convention) — point the handle there so the deferred read resolves
-        // correctly whenever it lands. Atlas/Dropped keep the temp (the atlas is
-        // straight-alpha, a different readback convention, and those resolve in the
-        // same frame in practice).
-        let sync_tex = match backing {
-            Backing::Standalone(s_tex) => s_tex,
-            _ => temp_id,
+        // The SyncHandle must stay resolvable until Ruffle actually reads it back,
+        // which can be many frames away (`DirtyState::GpuModified` is only drained
+        // by `bitmap_data.rs::sync` on the next CPU access). `temp` is pooled, so
+        // it can be freed OR reissued to another same-size draw before then —
+        // either way the read returns the wrong pixels (#14: PL2's strips read
+        // back all-zero; hearts and enemies showing a neighbour's content). Steps
+        // 1-3 above already put the finished result in the BitmapData's OWN
+        // storage, so point the handle THERE for both real backings and never at
+        // the temp:
+        //   - Standalone: its texture is premultiplied, exactly the temp's
+        //     convention, so it reads back directly.
+        //   - Atlas: the packed region holds the result too, but in STRAIGHT
+        //     alpha, so the handle carries `premult` and the conversion happens on
+        //     the GPU at resolve time. `ticket` pins the atlas until then.
+        // Only Dropped still points at the temp, because a budget-dropped surface
+        // has no storage at all; its result is ephemeral by definition and the
+        // surface is already blank on screen, so a stale read costs nothing.
+        let atlas_ticket = as_switch_bitmap(&handle).and_then(|b| b.ticket.clone());
+        let sync = match backing {
+            Backing::Standalone(s_tex) => BitmapDataSyncHandle {
+                texture: s_tex,
+                tex_w, tex_h,
+                x: bounds.x_min, y: bounds.y_min,
+                w: bounds.width(), h: bounds.height(),
+                premult: false,
+                _ticket: None,
+            },
+            Backing::Atlas { tex, base_x, base_y, atlas_w, atlas_h } => BitmapDataSyncHandle {
+                texture: tex,
+                tex_w: atlas_w, tex_h: atlas_h,
+                x: base_x + bounds.x_min, y: base_y + bounds.y_min,
+                w: bounds.width(), h: bounds.height(),
+                premult: true,
+                _ticket: atlas_ticket,
+            },
+            Backing::Dropped => BitmapDataSyncHandle {
+                texture: temp_id,
+                tex_w, tex_h,
+                x: bounds.x_min, y: bounds.y_min,
+                w: bounds.width(), h: bounds.height(),
+                premult: false,
+                _ticket: None,
+            },
         };
         // Retire temp for reuse next frame (submit_frame recycles it into the
         // pool) instead of freeing it.
         self.offscreen_temp_retired.push(temp);
         // Read back exactly `bounds`: the resolve closure indexes its buffer
         // relative to this region's origin with stride = bounds.width().
-        Some(Box::new(BitmapDataSyncHandle {
-            texture: sync_tex,
-            x: bounds.x_min,
-            y: bounds.y_min,
-            w: bounds.width(),
-            h: bounds.height(),
-        }))
+        Some(Box::new(sync))
     }
 
     fn apply_filter(
@@ -9993,24 +10039,32 @@ impl RenderBackend for SwitchRenderBackend {
         };
         if dst_atlas {
             // The atlas stores STRAIGHT alpha at an offset; Ruffle's CPU pixels are
-            // PREMULTIPLIED. Convert the whole dest region into a premult temp and
-            // resolve that.
-            let whole = self.acquire_offscreen_temp(dest_w, dest_h)?;
-            let seeded = self.blit_premult(
-                dst_tex, dst_tw, dst_th, (dst_bx, dst_by), (dest_w, dest_h),
-                whole.texture, (0, 0), dest_w, dest_h,
-            );
-            let whole_id = whole.texture;
-            self.offscreen_temp_retired.push(whole);
-            if !seeded {
-                return None;
-            }
-            Some(Box::new(BitmapDataSyncHandle { texture: whole_id, x: 0, y: 0, w: dest_w, h: dest_h }))
+            // PREMULTIPLIED. This used to convert into a pooled temp right here and
+            // hand the temp to Ruffle, which carried render_offscreen's bug: the
+            // read can land many frames later, by which point the temp may have
+            // been freed or reissued to another same-size draw. Point at the atlas
+            // instead and let `resolve_sync_handle` do the conversion when the read
+            // actually happens; `ticket` pins the atlas until then.
+            Some(Box::new(BitmapDataSyncHandle {
+                texture: dst_tex,
+                tex_w: dst_tw, tex_h: dst_th,
+                x: dst_bx, y: dst_by,
+                w: dest_w, h: dest_h,
+                premult: true,
+                _ticket: as_switch_bitmap(&destination).and_then(|b| b.ticket.clone()),
+            }))
         } else {
             // Standalone dest: its own texture IS the whole dest, premultiplied and
             // persistent — resolve it directly (same rationale as render_offscreen's
             // standalone handle: it survives a deferred read, unlike a pooled temp).
-            Some(Box::new(BitmapDataSyncHandle { texture: dst_tex, x: 0, y: 0, w: dest_w, h: dest_h }))
+            Some(Box::new(BitmapDataSyncHandle {
+                texture: dst_tex,
+                tex_w: dest_w, tex_h: dest_h,
+                x: 0, y: 0,
+                w: dest_w, h: dest_h,
+                premult: false,
+                _ticket: None,
+            }))
         }
     }
 
@@ -10743,7 +10797,40 @@ impl RenderBackend for SwitchRenderBackend {
         if rw == 0 || rh == 0 {
             return Ok(());
         }
-        let buf = self.readback_region_straight(sh.texture, sh.x, sh.y, rw, rh);
+        // A dead texture (freed atlas / standalone) reads as id 0 — never
+        // FBO-attach that, Mesa dereferences a null renderbuffer surface and the
+        // app takes a DataAbort. Ruffle just keeps its existing CPU pixels.
+        if sh.texture == 0 {
+            return Ok(());
+        }
+        let buf = if sh.premult {
+            // Atlas source: STRAIGHT alpha, and Ruffle wants PREMULTIPLIED. Convert
+            // on the GPU with the same blit that seeds an offscreen composite,
+            // rather than by hand on the CPU buffer — hand-rolled alpha maths on
+            // this path is what produced the offroaders speckle. The scratch is
+            // used and handed straight back, never given to Ruffle, so unlike the
+            // old code no pooled temp can outlive this call.
+            let Some(scratch) = self.acquire_offscreen_temp(rw, rh) else {
+                return Ok(());
+            };
+            let scratch_id = scratch.texture;
+            let ok = self.blit_premult(
+                sh.texture, sh.tex_w, sh.tex_h, (sh.x, sh.y), (rw, rh),
+                scratch_id, (0, 0), rw, rh,
+            );
+            let buf = if ok {
+                self.readback_region_straight(scratch_id, 0, 0, rw, rh)
+            } else {
+                std::vec![0u8; (rw as usize) * (rh as usize) * 4]
+            };
+            self.offscreen_temp_retired.push(scratch);
+            if !ok {
+                return Ok(());
+            }
+            buf
+        } else {
+            self.readback_region_straight(sh.texture, sh.x, sh.y, rw, rh)
+        };
         with_rgba(&buf, rw * 4);
         Ok(())
     }
