@@ -44,9 +44,14 @@ extern "C" {
 /// Headroom `fontdue` needs to expand the shared CJK font. Probed with a
 /// FALLIBLE allocation because the parse itself has none: an allocator failure
 /// inside `fontdue::Font::from_bytes` aborts the process, which on hardware is
-/// an Atmosphere fatal (2168-0002, measured in applet mode). `query_ram` cannot
-/// answer this, it reports the heap crt0 reserved rather than what is live.
-const FONT_PARSE_HEADROOM: usize = 96 * 1024 * 1024;
+/// an Atmosphere fatal (2168-0002, measured in applet mode).
+///
+/// 192 MB because the parse was MEASURED at a 136 MB peak (counted at the
+/// global allocator; `query_ram` reads the heap crt0 reserved and reported +0).
+/// The first value here was a guessed 96 MB, which would have let the probe
+/// succeed and fontdue abort anyway. fontdue also retains nearly all of it: the
+/// parsed `Font` holds those structures for as long as the atlas lives.
+const FONT_PARSE_HEADROOM: usize = 192 * 1024 * 1024;
 
 /// Can this process afford the CJK font? Probed once and cached: the answer
 /// decides both whether the atlas is built and whether a CJK UI language is
