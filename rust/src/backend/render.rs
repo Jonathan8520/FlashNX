@@ -986,6 +986,15 @@ impl BitmapHandleImpl for DroppedBitmap {}
 /// (recycled one frame later, after Ruffle has resolved/dropped this handle in
 /// the same tick), so this struct does NOT free it on drop — avoiding a
 /// per-call texture alloc that cost ~90ms/frame on cacheAsBitmap-heavy games.
+/// A recycled `render_offscreen` temp plus the frame it was last handed out on.
+/// The stamp is what keeps a temp alive while a SyncHandle may still point at it
+/// (see `offscreen_temp_pool`), and what lets a size nobody asks for any more age
+/// out — the two things a flat byte cap could not tell apart.
+struct PooledTemp {
+    tex: StandaloneTexture,
+    last_used_frame: u32,
+}
+
 struct BitmapDataSyncHandle {
     texture: GLuint,
     /// Dirty region (BitmapData/top-left coords) — must match the `bounds`
@@ -1619,23 +1628,24 @@ pub struct SwitchRenderBackend {
 
     /// Reusable temp textures for `render_offscreen` (BitmapData.draw /
     /// cacheAsBitmap). `_pool` holds textures free for reuse; `_retired` holds
-    /// the ones handed to this frame's SyncHandles. Ruffle resolves/drops each
-    /// SyncHandle within the same tick, so `submit_frame` moves `_retired` back
-    /// into `_pool` for the next frame. This avoids a per-call glGenTextures +
+    /// the ones handed to this frame's SyncHandles; `submit_frame` moves
+    /// `_retired` back into `_pool`. This avoids a per-call glGenTextures +
     /// glTexImage2D + glDeleteTextures — which became the dominant cost
     /// (~90ms/frame, 48 allocs) once the readback was moved onto the GPU.
-    offscreen_temp_pool: Vec<StandaloneTexture>,
+    ///
+    /// ⚠️ A pooled temp can still be the target of a LIVE SyncHandle: Ruffle
+    /// parks `DirtyState::GpuModified(handle, region)` in the BitmapData and only
+    /// resolves it on the next CPU access, which may never come this frame. A
+    /// standalone-backed draw is immune (its handle points at the BitmapData's
+    /// own texture, see render_offscreen), but an atlas-backed one still points
+    /// HERE. Freeing a temp out from under such a handle reads back empty, which
+    /// is #14 (Papa Louie's missing sprites). Eviction is therefore driven by
+    /// RECENCY, not by a byte budget: a temp still in play is never freed.
+    offscreen_temp_pool: Vec<PooledTemp>,
     offscreen_temp_retired: Vec<StandaloneTexture>,
-    /// Bytes of temp texture `acquire_offscreen_temp` handed out during the
-    /// current tick (hits + fresh allocs alike), and a decaying peak of it.
-    /// `submit_frame` sizes the reuse pool from the peak instead of a fixed
-    /// cap — see the recycle block there for why the cap has to follow demand.
-    offscreen_temp_demand_bytes: usize,
-    offscreen_temp_demand_peak: usize,
-    /// Budget the last recycle settled on, for the heartbeat. NB the heartbeat's
-    /// `fpool=` is the FILTER texture pool, a different pool — this one is
-    /// reported as `otpool=`.
-    offscreen_temp_pool_budget: usize,
+    /// Bytes the pool currently holds, for the heartbeat. NB the neighbouring
+    /// `fpool=` is the FILTER texture pool, a different pool — this is `otpool=`.
+    offscreen_temp_pool_bytes: usize,
 
     /// Per-frame perf attribution for the slow-frame detector. `frame_snapshot`
     /// is the raw counter state captured at the top of `submit_frame`;
@@ -3854,9 +3864,7 @@ impl SwitchRenderBackend {
             filter_tex_pool: FilterTexturePool::new(),
             offscreen_temp_pool: Vec::new(),
             offscreen_temp_retired: Vec::new(),
-            offscreen_temp_demand_bytes: 0,
-            offscreen_temp_demand_peak: 0,
-            offscreen_temp_pool_budget: 0,
+            offscreen_temp_pool_bytes: 0,
             gl_state: GlStateCache::default(),
             rect_vao,
             rect_vbo,
@@ -4287,22 +4295,12 @@ impl SwitchRenderBackend {
     /// are stable across frames), else allocate a fresh one.
     /// `render_commands_to_texture` clears it, so stale pooled content is fine.
     fn acquire_offscreen_temp(&mut self, w: u32, h: u32) -> Option<StandaloneTexture> {
-        // Demand = bytes of DISTINCT temps this tick needs live at once, which is
-        // what `submit_frame` sizes the pool from. Charge it on the two paths that
-        // consume a distinct texture (pooled hit, fresh alloc) and NOT on the
-        // same-frame retired-reuse path below: that one hands back a temp already
-        // charged this tick, so charging it again would bill Papa Louie 3's ~8
-        // draws of one 27 MB strip as 220 MB and inflate the pool to hold strips
-        // it only ever needs one of.
-        let bytes = (w as usize) * (h as usize) * 4;
         if let Some(i) = self
             .offscreen_temp_pool
             .iter()
-            .position(|t| t.width == w && t.height == h)
+            .position(|t| t.tex.width == w && t.tex.height == h)
         {
-            self.offscreen_temp_demand_bytes =
-                self.offscreen_temp_demand_bytes.saturating_add(bytes);
-            return Some(self.offscreen_temp_pool.swap_remove(i));
+            return Some(self.offscreen_temp_pool.swap_remove(i).tex);
         }
         // Big (standalone-backed) targets: reuse a temp already RETIRED this frame,
         // not just the recycled pool. The multisprite builder composites many big
@@ -4325,8 +4323,6 @@ impl SwitchRenderBackend {
                 return Some(self.offscreen_temp_retired.swap_remove(i));
             }
         }
-        self.offscreen_temp_demand_bytes =
-            self.offscreen_temp_demand_bytes.saturating_add(bytes);
         make_standalone_texture(w, h)
     }
 
@@ -10136,73 +10132,75 @@ impl RenderBackend for SwitchRenderBackend {
             );
         }
 
-        // Recycle this frame's render_offscreen temps into the reuse pool. Their
-        // SyncHandles were resolved/dropped during this frame's tick (Ruffle
-        // reads a BitmapData.draw() result back on the next CPU access, which
-        // happens in the same AS frame), so the textures are safe to reuse next
-        // frame. Bound the pool by BYTES (not count) and KEEP THE MOST RECENTLY
-        // retired temps. The old count cap of 128 let a game that churns
-        // render_offscreen SIZES (Icy Tower re-creates scene BitmapData every
-        // frame) hoard up to 128 stale varied-size temps ≈ 330 MB of GPU —
-        // untracked (they're standalone, not atlas bytes) — exhausting texture
-        // memory → GL_OUT_OF_MEMORY, then make_standalone_texture failing →
-        // dropped draws / sprite flicker. Worse, `truncate(128)` KEPT the stale
-        // front and discarded the freshly-retired temps at the back (the ones
-        // about to be reused), so `acquire_offscreen_temp` missed every frame.
-        // `append` puts the recent temps at the tail; keep the tail within a byte
-        // budget and drop the oldest from the front (their StandaloneTexture drop
-        // = glDeleteTextures).
-        //
-        // The budget FOLLOWS DEMAND rather than being a fixed constant. A fixed
-        // 64 MB conflates two opposite situations, because bytes alone can't tell
-        // a working set from garbage:
-        //   - Icy Tower churns render_offscreen SIZES, so its pool fills with
-        //     stale temps nothing will ever ask for again. Any fixed cap is too
-        //     generous here — it just sets how much dead GPU we hold.
-        //   - catmario blits ~87 same-size 480x512 tiles into `stageBitmapdata`
-        //     per frame (~82 MB) and re-acquires EVERY ONE of them next frame.
-        //     64 MB holds exactly 68, so past 68 draws the surplus was freed and
-        //     re-created each frame: ~20 glTexImage2D/frame, 20-33 ms of alloc,
-        //     and after ~1500 frames of that churn the texture heap fragments
-        //     until glTexImage2D fails. make_standalone_texture then returns None,
-        //     render_offscreen returns None, and Ruffle aborts the whole
-        //     enterFrame handler ("does not support BitmapData.draw") — so every
-        //     remaining sprite of that frame vanishes, in batches.
-        // Sizing from the demand peak separates the two: a size that stops being
-        // requested stops being paid for (stricter than the old flat cap for Icy
-        // Tower), while a genuinely hot working set is kept whole (no churn for
-        // catmario). Decay releases the pool when a game moves past a heavy scene;
-        // MAX is the hard backstop, and overrunning it is survivable — a missing
-        // sprite, not a crash, thanks to the glTexImage2D check in
-        // make_standalone_texture.
-        const OFFSCREEN_TEMP_POOL_MIN_BYTES: usize = 16 * 1024 * 1024;
-        const OFFSCREEN_TEMP_POOL_MAX_BYTES: usize = 192 * 1024 * 1024;
-        let demand = self.offscreen_temp_demand_bytes;
-        self.offscreen_temp_demand_bytes = 0;
-        // Decay ~1/16 per frame (half-life ~11 frames) so a spike is held long
-        // enough to be reused but a quiet game gives the memory back.
-        self.offscreen_temp_demand_peak = demand.max(
-            self.offscreen_temp_demand_peak - self.offscreen_temp_demand_peak / 16,
-        );
-        // +1/8 slack: demand varies a little frame to frame (catmario swings
-        // 87-90), and being one temp short costs a full alloc.
-        let budget = (self.offscreen_temp_demand_peak + self.offscreen_temp_demand_peak / 8)
-            .clamp(OFFSCREEN_TEMP_POOL_MIN_BYTES, OFFSCREEN_TEMP_POOL_MAX_BYTES);
-        self.offscreen_temp_pool
-            .append(&mut self.offscreen_temp_retired);
-        let mut acc: usize = 0;
-        let mut drop_before = 0usize;
-        for (i, t) in self.offscreen_temp_pool.iter().enumerate().rev() {
-            acc += (t.width as usize) * (t.height as usize) * 4;
-            if acc > budget {
-                drop_before = i + 1;
-                break;
-            }
+        // Recycle this frame's render_offscreen temps into the reuse pool, then
+        // evict by RECENCY. Every byte-quota scheme tried here was wrong, because
+        // the question is not "how much may we hold" but "is anyone still using
+        // this one":
+        //   - A count cap of 128 hoarded ~330 MB of stale varied-size temps on Icy
+        //     Tower (GL_OUT_OF_MEMORY), and `truncate` kept the stale FRONT while
+        //     discarding the freshly retired tail that was about to be reused.
+        //   - A flat 64 MB byte cap held exactly 68 of catmario's 87 same-size
+        //     tiles, so the surplus was freed and re-created every frame until the
+        //     texture heap fragmented and glTexImage2D failed.
+        //   - Sizing the cap from measured demand fixed catmario but collapsed to
+        //     its floor whenever a game stopped drawing offscreen for a moment
+        //     (Papa Louie 3 sits at offN=0 during play), which freed temps a live
+        //     SyncHandle still pointed at. That is #14 all over again: an
+        //     atlas-backed handle points at the temp, Ruffle parks it in
+        //     DirtyState::GpuModified until some later CPU access, and the
+        //     readback then returns an empty texture. Hearts and enemies vanished
+        //     while the player, whose 8007px strip is standalone and therefore
+        //     immune, stayed visible.
+        // Recency answers all three at once. A temp reacquired every frame keeps
+        // its stamp refreshed and is never evicted (catmario). A temp whose size
+        // nobody asks for again ages out on its own (Icy Tower), whatever the
+        // budget would have allowed. And nothing is freed while it may still be
+        // read, as long as the grace period outlasts a deferred resolve.
+        // MAX_BYTES stays only as a backstop against a pathological game, and
+        // evicts oldest-first so it can never again throw away the hot set.
+        // Eviction only ever runs UNDER PRESSURE. Below the soft threshold the
+        // pool keeps everything indefinitely, which is what the old flat cap did
+        // in practice for a game that stops drawing offscreen (Papa Louie 3 sits
+        // at offN=0 during play, so nothing ever pushed its temps out) and is the
+        // behaviour its live SyncHandles were validated against. Freeing on a
+        // timer alone would still be more aggressive than that and could strand a
+        // late resolve, so idleness on its own must not cost a temp its life.
+        const OFFSCREEN_TEMP_SOFT_BYTES: usize = 64 * 1024 * 1024;
+        const OFFSCREEN_TEMP_HARD_BYTES: usize = 192 * 1024 * 1024;
+        const OFFSCREEN_TEMP_GRACE_FRAMES: u32 = 120;
+        let now = self.frame_count;
+        for tex in self.offscreen_temp_retired.drain(..) {
+            self.offscreen_temp_pool.push(PooledTemp { tex, last_used_frame: now });
         }
-        if drop_before > 0 {
+        let bytes_of = |t: &PooledTemp| (t.tex.width as usize) * (t.tex.height as usize) * 4;
+        let mut held: usize = self.offscreen_temp_pool.iter().map(bytes_of).sum();
+        if held > OFFSCREEN_TEMP_SOFT_BYTES {
+            // Over the threshold: drop what nobody has asked for in a while.
+            // catmario's 87 tiles all carry this frame's stamp so none qualify and
+            // the hot set survives whole; Icy Tower's stale varied sizes are
+            // exactly what this removes. `saturating_sub` keeps the first frames
+            // sane before `frame_count` passes the grace window.
+            let cutoff = now.saturating_sub(OFFSCREEN_TEMP_GRACE_FRAMES);
+            self.offscreen_temp_pool.retain(|t| t.last_used_frame >= cutoff);
+            held = self.offscreen_temp_pool.iter().map(bytes_of).sum();
+        }
+        if held > OFFSCREEN_TEMP_HARD_BYTES {
+            // Backstop for a game that keeps a genuinely huge set hot. Drop the
+            // least recently used first — never the hot set, which is how the old
+            // `truncate` got it backwards. Sorting is needed because
+            // `acquire_offscreen_temp` uses `swap_remove`, so pool order is not
+            // stamp order; it only runs in this rare branch.
+            self.offscreen_temp_pool.sort_by_key(|t| t.last_used_frame);
+            let mut drop_before = 0usize;
+            while held > OFFSCREEN_TEMP_HARD_BYTES
+                && drop_before < self.offscreen_temp_pool.len()
+            {
+                held -= bytes_of(&self.offscreen_temp_pool[drop_before]);
+                drop_before += 1;
+            }
             self.offscreen_temp_pool.drain(0..drop_before);
         }
-        self.offscreen_temp_pool_budget = budget;
+        self.offscreen_temp_pool_bytes = held;
         // Snapshot counters for the per-frame slow-frame breakdown (consumed
         // right after `commands.execute` below). `cache_entries` is moved by the
         // filter loop, so grab its length up front.
@@ -10422,7 +10420,7 @@ impl RenderBackend for SwitchRenderBackend {
                 self.apply_filter_calls,
                 self.filter_tex_pool.len(),
                 self.offscreen_temp_pool.len(),
-                self.offscreen_temp_pool_budget / (1024 * 1024),
+                self.offscreen_temp_pool_bytes / (1024 * 1024),
                 pushmask,
                 amask,
                 blend,
