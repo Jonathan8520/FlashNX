@@ -30,11 +30,73 @@ const ATLAS_DIM: usize = 1024;
 const PAD: usize = 1;
 
 extern "C" {
+    fn ruffle_log_cstr(msg: *const core::ffi::c_char);
+    /// 1 = small applet memory pool, 0 = full title-takeover heap. The shared
+    /// CJK font does not fit in the former (see `cjk_possible`).
+    fn ruffle_is_applet_mode() -> core::ffi::c_int;
     /// Pointer to the DECRYPTED shared-font bytes for `kind`
     /// (1 = Chinese Simplified, matching `PlSharedFontType`), with the length
     /// written to `out_size`; null if the font service is unavailable.
     /// Defined in cpp/src/ruffle_bridge.cpp (libnx `pl`).
     fn ruffle_shared_font(kind: core::ffi::c_int, out_size: *mut u32) -> *const u8;
+}
+
+/// Headroom `fontdue` needs to expand the shared CJK font. Probed with a
+/// FALLIBLE allocation because the parse itself has none: an allocator failure
+/// inside `fontdue::Font::from_bytes` aborts the process, which on hardware is
+/// an Atmosphere fatal (2168-0002, measured in applet mode). `query_ram` cannot
+/// answer this, it reports the heap crt0 reserved rather than what is live.
+const FONT_PARSE_HEADROOM: usize = 96 * 1024 * 1024;
+
+/// Can this process afford the CJK font? Probed once and cached: the answer
+/// decides both whether the atlas is built and whether a CJK UI language is
+/// offered at all, and those two must never disagree.
+///
+/// 0 = not probed, 1 = yes, 2 = no.
+static CJK_POSSIBLE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+pub fn cjk_possible() -> bool {
+    match CJK_POSSIBLE.load(core::sync::atomic::Ordering::Relaxed) {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+    // APPLET MODE IS REFUSED OUTRIGHT, not probed.
+    //
+    // Measured on hardware: with the UI already set to Chinese, the atlas is
+    // built on the FIRST FRAME, while the heap is still nearly empty. The
+    // free-memory probe below therefore succeeded, fontdue then asked for more
+    // than it had reserved, and the process aborted into an Atmosphere fatal.
+    // Opening the language picker later, with a loaded heap, made the same
+    // probe fail and looked "fixed" - the guard was only ever passing by
+    // accident of timing.
+    //
+    // A free-memory probe cannot answer this: it measures the moment it runs,
+    // not the peak of a parse that has no fallible allocation. The applet pool
+    // is small enough that the answer is no regardless of when we ask, so ask
+    // the mode instead. Applet mode cannot launch games anyway.
+    let applet = unsafe { ruffle_is_applet_mode() } != 0;
+    let (used, total) = crate::query_ram();
+    let ok = if applet {
+        false
+    } else {
+        let mut probe: std::vec::Vec<u8> = std::vec::Vec::new();
+        probe.try_reserve_exact(FONT_PARSE_HEADROOM).is_ok()
+    };
+    log(&std::format!(
+        "glyphs: cjk_possible={} (applet={}, pool {}/{} KB)\n",
+        ok, applet, used / 1024, total / 1024,
+    ));
+    CJK_POSSIBLE.store(if ok { 1 } else { 2 }, core::sync::atomic::Ordering::Relaxed);
+    ok
+}
+
+/// Flush-per-line logging, so the last line printed before a fatal is the step
+/// that died (the C++ side fflushes every call).
+fn log(s: &str) {
+    let mut bytes = s.as_bytes().to_vec();
+    bytes.push(0);
+    unsafe { ruffle_log_cstr(bytes.as_ptr() as *const _) };
 }
 
 /// Atlas placement + metrics for one rasterized glyph, all at `RASTER_PX`.
@@ -72,20 +134,46 @@ impl FontAtlas {
     /// the font service is unavailable or the bytes don't parse — the caller
     /// then renders CJK as blanks (graceful, no crash).
     pub fn new() -> Option<FontAtlas> {
+        // Opening the language picker in APPLET mode took the whole console
+        // down with an Atmosphere fatal (2168-0002). Measured on hardware: the
+        // shared font maps fine and reads fine, and the process dies inside
+        // `fontdue::Font::from_bytes`, on a 2 KB allocation.
+        //
+        // fontdue expands the 7.8 MB CJK font into far more than its file size,
+        // and Rust has no fallible allocation there: an allocator failure
+        // inside it ABORTS the process. Applet mode's pool cannot hold it.
+        //
+        // So probe for the headroom with an allocation that is ALLOWED to fail,
+        // and draw CJK blank when it is not there. `query_ram` is not usable
+        // for this: it reports the heap crt0 reserved, not what is live.
+        // A language name rendered blank is a bad screen; a fatal is a console
+        // reboot and a lost session.
+        if !cjk_possible() {
+            log("glyphs: not enough memory to parse the CJK font — drawing it blank\n");
+            return None;
+        }
         let bytes: &'static [u8] = unsafe {
             let mut len: u32 = 0;
             let ptr = ruffle_shared_font(1 /* PlSharedFontType_ChineseSimplified */, &mut len);
             if ptr.is_null() || len == 0 {
+                log("glyphs: shared font unavailable (null/0) — CJK will draw blank\n");
                 return None;
             }
             core::slice::from_raw_parts(ptr, len as usize)
         };
-        let font = fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()).ok()?;
+        let font = match fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()) {
+            Ok(f) => f,
+            Err(_) => {
+                log("glyphs: fontdue rejected the shared font\n");
+                return None;
+            }
+        };
 
         let mut tex: GLuint = 0;
         unsafe {
             glGenTextures(1, &mut tex);
             if tex == 0 {
+                log("glyphs: glGenTextures returned 0\n");
                 return None;
             }
             glBindTexture(GL_TEXTURE_2D, tex);

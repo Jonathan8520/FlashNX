@@ -33,6 +33,13 @@ pub enum Lang {
 }
 
 impl Lang {
+    /// True when this language's strings are drawn from the shared-font glyph
+    /// atlas rather than the embedded 5x7 bitmap font. Latin and Cyrillic are
+    /// in the bitmap font, so only CJK depends on the atlas.
+    pub fn needs_cjk(self) -> bool {
+        matches!(self, Lang::Zh)
+    }
+
     pub fn index(self) -> usize {
         match self {
             Lang::En => 0,
@@ -88,6 +95,20 @@ impl Lang {
     }
     /// Native display name shown in the language picker. Uppercase, no
     /// accents for Latin (font has none); Russian in uppercase Cyrillic.
+    /// Name for the picker. A CJK name is drawn from the shared-font atlas, so
+    /// when that font cannot be afforded it would render as a blank row: fall
+    /// back to a Latin label the bitmap font can actually draw. Picking it then
+    /// resolves to English (see `set`), which is what it will look like too.
+    pub fn picker_name(self) -> &'static str {
+        if self.needs_cjk() && !crate::backend::glyphs::cjk_possible() {
+            return match self {
+                Lang::Zh => "CHINESE (NEEDS MORE MEMORY)",
+                _ => "UNAVAILABLE",
+            };
+        }
+        self.native_name()
+    }
+
     pub fn native_name(self) -> &'static str {
         match self {
             Lang::En => "ENGLISH",
@@ -2143,6 +2164,16 @@ pub fn current() -> Lang {
 }
 
 pub fn set(lang: Lang) {
+    // A CJK language is only usable if the glyph atlas can exist: its strings
+    // are drawn ENTIRELY from the shared font, so without it the whole UI
+    // renders blank, not just a label. Applet mode cannot afford that font
+    // (see `glyphs::cjk_possible`), so fall back to English there rather than
+    // hand someone an invisible interface.
+    let lang = if lang.needs_cjk() && !crate::backend::glyphs::cjk_possible() {
+        Lang::En
+    } else {
+        lang
+    };
     CURRENT.store(lang.index() as u8, Ordering::Relaxed);
 }
 

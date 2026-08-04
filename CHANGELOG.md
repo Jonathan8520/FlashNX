@@ -32,6 +32,7 @@ More games playable, a faster player, and an import tab that survives a long lis
 - **Papa Louie's character is visible again**, and *Papa Louie 3* no longer hangs on its loading screen.
 - ***Pursuit of Hat 2* no longer starts on a black screen**, and its invisible platforms are drawn.
 - ***Icy Tower* no longer crashes**, and its HUD is complete.
+- **A Chinese interface no longer takes the console down.** Chinese is drawn with the console's own font, which is far too big for the reduced memory homebrew gets when it is started from the Album, and loading it there crashed the console outright rather than failing quietly. Started that way, the interface now falls back to English and the language list says why. Started from a HOME menu entry, where FlashNX has the full memory, Chinese works as before.
 - **Games with a broken version check no longer refuse to start** with a false "Flash Player required" message (#64).
 - **Large `.swf` files load** instead of being rejected for their size.
 - **Housekeeping**: empty `.files/` folders are cleaned up and no longer created for nothing, a duplicated copy of a game's main file is no longer left behind, and the one-time first-boot migration is more robust.

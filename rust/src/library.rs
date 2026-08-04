@@ -5474,7 +5474,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 backend.draw_loading_overlay(crate::loc::s().lang_title, now);
             } else {
                 let names: std::vec::Vec<&str> =
-                    crate::loc::PICKER_LANGS.iter().map(|l| l.native_name()).collect();
+                    crate::loc::PICKER_LANGS.iter().map(|l| l.picker_name()).collect();
                 backend.draw_library_language_picker(selection, &names);
             }
         }
