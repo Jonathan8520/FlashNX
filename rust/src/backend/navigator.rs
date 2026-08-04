@@ -97,6 +97,12 @@ pub struct SidecarNavigator {
     /// fetched on demand from the Flashpoint "Legacy htdocs" mirror — see `fetch`.
     /// False for the user's own local SWFs (no network).
     htdocs_proxy: bool,
+    /// How many `connectMovie` calls this game has made to the NewgroundsAPI
+    /// gateway stub. Bounds an in-game RETRY LOOP, so it belongs to the player,
+    /// not to the process: a per-process counter made the stub stall on the 4th
+    /// launch of a Newgrounds game in one app session, which left the game stuck
+    /// on "Connecting to the Newgrounds API Gateway...". See `fetch`.
+    ng_connect_calls: core::sync::atomic::AtomicU32,
 }
 
 impl SidecarNavigator {
@@ -114,6 +120,7 @@ impl SidecarNavigator {
             base_url,
             sidecar_dir,
             htdocs_proxy,
+            ng_connect_calls: core::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -425,11 +432,17 @@ impl NavigatorBackend for SidecarNavigator {
             // attempts the request simply hangs, exactly as we already do for
             // dead ad hosts. The game either fails open on its own timeout or at
             // minimum stops burning the CPU, leaving the app usable and quittable.
+            // The budget is PER PLAYER (`self`), not per process: it bounds one
+            // game's retry loop, and a new launch or RESTART is a new loop. As a
+            // process-wide static it summed across every game played in the app
+            // session, so the 4th Newgrounds launch stalled on its very first
+            // call and the game sat forever on "Connecting to the Newgrounds API
+            // Gateway...".
             const NG_CONNECT_ATTEMPTS_BEFORE_STALL: u32 = 3;
-            static NG_CONNECT_CALLS: std::sync::atomic::AtomicU32 =
-                std::sync::atomic::AtomicU32::new(0);
             if cmd == "connectMovie" {
-                let n = NG_CONNECT_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let n = self
+                    .ng_connect_calls
+                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 if n >= NG_CONNECT_ATTEMPTS_BEFORE_STALL {
                     if n == NG_CONNECT_ATTEMPTS_BEFORE_STALL {
                         tracing::warn!(
