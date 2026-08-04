@@ -4587,17 +4587,31 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
 }
 
 /// FpGallery `+`: show the details popup for the selected game. Snapshots the
-/// candidate's id under the lock, then (without the lock) does a blocking HEAD
-/// to read the GameZIP's download size, and opens `FpDetails`. Called from
-/// `input()` only. Size 0 = the probe failed (shown as "?" in the popup).
+/// candidate under the lock, then (without the lock) does a blocking HEAD to
+/// read the download size, and opens `FpDetails`. Called from `input()` only.
+/// Size 0 = the probe failed (shown as "?" in the popup).
 fn run_fp_info_flow(selection: usize, scroll: usize) {
-    let id = match LIBRARY.lock() {
-        Ok(g) => g.cover_candidates.get(selection).map(|c| c.id.clone()),
+    let cand = match LIBRARY.lock() {
+        Ok(g) => g
+            .cover_candidates
+            .get(selection)
+            .map(|c| (c.id.clone(), c.zipped, c.launch_command.clone())),
         Err(_) => None,
     };
-    let Some(id) = id else { return };
-    let url = crate::sources::gamezip::get_url(&id);
-    let size = net::head_content_length(&url).unwrap_or(0);
+    let Some((id, zipped, launch_command)) = cand else { return };
+    // Probe the URL the download will ACTUALLY use, mirroring the choice the
+    // `A` branch of `handle_fp_gallery_input` makes: the GameZIP server for a
+    // zipped game, the htdocs mirror for a legacy "loose" one. Probing
+    // `/get?id=` for a legacy entry always 404s, so those games used to show
+    // "?" for a size we can in fact read. `parse_search` drops non-zipped
+    // entries whose launchCommand gives no htdocs URL, so a legacy game on
+    // screen always has one.
+    let url = if zipped {
+        Some(crate::sources::gamezip::get_url(&id))
+    } else {
+        crate::sources::gamezip::htdocs_url_from_command(&launch_command)
+    };
+    let size = url.as_deref().and_then(net::head_content_length).unwrap_or(0);
     // The game's blurb, fetched per-game (see `fetch_description`). Best-effort:
     // an empty result just means the popup shows the facts without the text.
     let desc = crate::sources::gamezip::fetch_description(&id);
