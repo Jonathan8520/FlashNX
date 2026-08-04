@@ -1468,6 +1468,18 @@ pub extern "C" fn ruffle_library_note_file(path: *const c_char) {
     }
 }
 
+/// Bracket the SD scan: `begin` loads the cached scan metadata (so an unchanged
+/// game costs no file access at all), `end` rewrites it if anything missed.
+#[no_mangle]
+pub extern "C" fn ruffle_library_scan_begin() {
+    library::scan_begin();
+}
+
+#[no_mangle]
+pub extern "C" fn ruffle_library_scan_end() {
+    library::scan_end();
+}
+
 /// Mark a scanned directory as fully enumerated (or confirmed absent), so the
 /// index may answer "this sidecar isn't there" without an SD probe.
 #[no_mangle]

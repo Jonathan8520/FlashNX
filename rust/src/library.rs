@@ -522,11 +522,15 @@ fn read_meta_sidecar(basename: &str) -> Option<MetaSidecar> {
 fn write_meta_sidecar(basename: &str, display_name: &str) -> bool {
     let path = primary_user_path(&std::format!("{}.meta.json", basename));
     if display_name.trim().is_empty() {
-        let _ = std::fs::remove_file(&path);
+        if std::fs::remove_file(&path).is_ok() {
+            note_file_removed(&path);
+        }
         // Also try to clean up any legacy copy so the next library
         // boot doesn't resurrect a stale display name.
         if let Some(legacy) = find_user_file(&std::format!("{}.meta.json", basename)) {
-            let _ = std::fs::remove_file(&legacy);
+            if std::fs::remove_file(&legacy).is_ok() {
+                note_file_removed(&legacy);
+            }
         }
         crate::sd::commit();
         return true;
@@ -1064,6 +1068,135 @@ pub(crate) fn file_exists(path: &str) -> bool {
     std::path::Path::new(path).exists()
 }
 
+// ── SWF header index ──────────────────────────────────────────────────────
+//
+// The scan opened every game to read its SWF header: an open, a read and a zlib
+// inflate each, 293 ms for 71 games. That work is identical on every scan, and
+// the scan runs on each return to the library, not just at boot.
+//
+// So the parsed header is cached in one file, keyed by the game's mtime.
+//
+// DELIBERATELY LIMITED TO THE HEADER. Everything cached here is read out of the
+// `.swf` itself, so a game cannot change without its mtime changing, and the
+// mtime check alone makes a stale row impossible. Caching the sidecars too
+// (`.url`, `.meta.json`, `.filesize`) would save another 263 ms but those CAN
+// change while the `.swf` sits untouched, which would mean invalidating from
+// every writer and trusting that we found them all. Not worth a wrong name in
+// the list; the sidecars are still read on every scan.
+//
+// The file is a pure CACHE. Missing, corrupt or unparseable, it is ignored and
+// everything is read off the SD, so it needs no migration and no versioning
+// beyond a rename.
+
+/// Named for what it holds. A previous shape of this cache also mirrored the
+/// sidecars under another name; since the file is disposable, a rename is the
+/// whole migration story.
+const SCAN_INDEX_FILE: &str = "sdmc:/flashnx/.swf_header_index.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct IndexEntry {
+    path: std::string::String,
+    mtime: u64,
+    /// `file_length` from the SWF header (NOT the `.filesize` sidecar, which is
+    /// a different number and is still read every scan).
+    size: u64,
+    ver: u8,
+    /// "FWS" / "CWS" / "ZWS" — mapped back to the `&'static str` the UI holds.
+    comp: std::string::String,
+    as3: bool,
+}
+
+static SCAN_INDEX: Mutex<std::vec::Vec<IndexEntry>> = Mutex::new(std::vec::Vec::new());
+/// Rows collected by the scan in progress (hits and misses alike), which is
+/// what gets written back. Kept apart from `Entry` because the field the index
+/// stores is the SWF header's own length, while `Entry::size_bytes` may have
+/// been replaced by the `.filesize` sidecar's footprint.
+static SCAN_HEADERS: Mutex<std::vec::Vec<IndexEntry>> = Mutex::new(std::vec::Vec::new());
+/// Set when any game missed the index, so `scan_end` knows to rewrite it.
+static SCAN_INDEX_DIRTY: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+/// How many rows the index held at `scan_begin`, so a game removed since then
+/// (its row is now dead weight) also triggers a rewrite.
+static SCAN_INDEX_ROWS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+fn static_compression_label(s: &str) -> Option<&'static str> {
+    match s {
+        "FWS" => Some("FWS"),
+        "CWS" => Some("CWS"),
+        "ZWS" => Some("ZWS"),
+        _ => None,
+    }
+}
+
+/// Load the cached headers. Called once per scan, before any `add_path`.
+pub fn scan_begin() {
+    SCAN_INDEX_DIRTY.store(false, core::sync::atomic::Ordering::Relaxed);
+    let parsed = read_sd_text(SCAN_INDEX_FILE, 1024 * 1024)
+        .ok()
+        .and_then(|txt| serde_json::from_str::<std::vec::Vec<IndexEntry>>(&txt).ok())
+        .unwrap_or_default();
+    SCAN_INDEX_ROWS.store(parsed.len(), core::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut idx) = SCAN_INDEX.lock() {
+        *idx = parsed;
+    }
+    if let Ok(mut rows) = SCAN_HEADERS.lock() {
+        rows.clear();
+    }
+}
+
+/// Record one game's header for the write-back at `scan_end`.
+fn scan_note_header(path: &str, mtime: u64, size: u64, ver: u8, comp: &str, as3: bool) {
+    if let Ok(mut rows) = SCAN_HEADERS.lock() {
+        rows.push(IndexEntry {
+            path: path.to_string(),
+            mtime,
+            size,
+            ver,
+            comp: comp.to_string(),
+            as3,
+        });
+    }
+}
+
+/// Rewrite the cache from what the scan just produced, but only if a game
+/// missed it or one has gone — a steady library writes nothing here.
+pub fn scan_end() {
+    let missed = SCAN_INDEX_DIRTY.swap(false, core::sync::atomic::Ordering::Relaxed);
+    let rows: std::vec::Vec<IndexEntry> = match SCAN_HEADERS.lock() {
+        Ok(mut r) => core::mem::take(&mut *r),
+        Err(_) => return,
+    };
+    // A game removed since the last scan leaves a dead row behind, so the row
+    // count disagreeing is also a reason to rewrite.
+    let stale_rows = SCAN_INDEX_ROWS.load(core::sync::atomic::Ordering::Relaxed) != rows.len();
+    if let Ok(mut idx) = SCAN_INDEX.lock() {
+        idx.clear(); // done with it until the next scan
+    }
+    if !missed && !stale_rows {
+        return;
+    }
+    if let Ok(json) = serde_json::to_string(&rows) {
+        if std::fs::write(SCAN_INDEX_FILE, json.as_bytes()).is_ok() {
+            note_file_created(SCAN_INDEX_FILE);
+            crate::sd::commit();
+            log(&std::format!("library: swf header index written ({} games)\n", rows.len()));
+        }
+    }
+}
+
+/// Cached SWF header for `path`, if the index has it at exactly this mtime.
+fn index_lookup(path: &str, mtime: u64) -> Option<(u64, u8, &'static str, bool)> {
+    // A game whose mtime is unknown (0) can't be validated — don't trust it.
+    if mtime == 0 {
+        return None;
+    }
+    let idx = SCAN_INDEX.lock().ok()?;
+    let e = idx.iter().find(|e| e.path == path && e.mtime == mtime)?;
+    let comp = static_compression_label(&e.comp)?;
+    Some((e.size, e.ver, comp, e.as3))
+}
+
 /// Per-part cost of the SD scan, in system ticks. The scan runs before the
 /// first frame, so every millisecond here is black screen — this attributes it
 /// to the actual file access instead of us guessing. Dumped once by `open()`.
@@ -1103,17 +1236,27 @@ pub fn add_path(path: &str, mtime: u64) -> bool {
         .next()
         .unwrap_or(path)
         .to_string();
+    // The SWF header is the one part of a scan that can be cached safely: it is
+    // read out of the `.swf`, so an unchanged mtime guarantees it is current.
+    // The sidecars below are read every scan (they change on their own).
     let (header_size, swf_version, compression_label, is_as3) =
-        match scan_timed(0, || read_swf_header(path)) {
-        Some(h) => (h.size_bytes, h.version, h.compression_label, h.is_as3),
-        None => {
-            log(&std::format!(
-                "library: failed to parse SWF header for {}, skipping\n",
-                path,
-            ));
-            return false;
-        }
-    };
+        match index_lookup(path, mtime) {
+            Some(hit) => hit,
+            None => {
+                SCAN_INDEX_DIRTY.store(true, core::sync::atomic::Ordering::Relaxed);
+                match scan_timed(0, || read_swf_header(path)) {
+                    Some(h) => (h.size_bytes, h.version, h.compression_label, h.is_as3),
+                    None => {
+                        log(&std::format!(
+                            "library: failed to parse SWF header for {}, skipping\n",
+                            path,
+                        ));
+                        return false;
+                    }
+                }
+            }
+        };
+    scan_note_header(path, mtime, header_size, swf_version, compression_label, is_as3);
     // Prefer the cached real footprint (multi-file games); fall back to the SWF
     // header's declared size for single-file / pre-feature games.
     let size_bytes = scan_timed(1, || read_filesize_cache(path)).unwrap_or(header_size);
@@ -1568,7 +1711,7 @@ fn write_url_sidecar(swf_path: &str, url: &str) {
         log(&std::format!("library: url sidecar write failed: {}\n", e));
         return;
     }
-    note_file_created(&path); // keep the scan index truthful for this session
+    note_file_created(&path); // keep the directory index truthful for this session
     crate::sd::commit();
 }
 

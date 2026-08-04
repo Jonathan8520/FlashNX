@@ -40,6 +40,10 @@ extern "C" void ruffle_library_note_file(const char* path);
 // can live under it, and one of the sidecar roots (`sdmc:/ruffle/`) is missing
 // on most installs.
 extern "C" void ruffle_library_note_dir(const char* dir);
+// Bracket the scan: `begin` loads the cached per-game metadata so an unchanged
+// game costs no file access, `end` rewrites that cache if anything missed.
+extern "C" void ruffle_library_scan_begin(void);
+extern "C" void ruffle_library_scan_end(void);
 
 namespace {
 
@@ -139,9 +143,11 @@ extern "C" void swf_picker_run(void) {
         "sdmc:/switch/flashnx/",
         "sdmc:/switch/ruffle/",
     };
+    ruffle_library_scan_begin();
     for (const char* dir : DIRS) {
         scan_dir_all(dir);
     }
+    ruffle_library_scan_end();
     // Cover cache dirs: indexed, never scanned for games.
     static const char* COVER_DIRS[] = {
         "sdmc:/flashnx/covers/",
