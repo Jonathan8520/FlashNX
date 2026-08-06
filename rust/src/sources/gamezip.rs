@@ -824,10 +824,56 @@ fn write_tree_file(files_dir: &str, rel: &str, bytes: &[u8]) -> bool {
 /// `launch_command` (the Flashpoint launchCommand, the entry SWF's URL) selects
 /// which SWF is the game's entry; the matching content entry is returned as
 /// `(bytes, entry_name)` for the caller to write as the flat library SWF. Falls
-/// back to the FIRST `.swf` when the command is empty or its entry is absent.
+/// back to the BEST-RANKED `.swf` (see `fallback_rank`) when the command is empty
+/// or its entry is absent from the archive.
 /// Returns None if no SWF is found. Bails (stops) on data-descriptor entries —
 /// Flashpoint GameZIPs don't use them (verified) and their local-header sizes
 /// would be unreliable.
+/// Hosts whose bundled SWFs are ad / analytics shims, never the game itself.
+/// Flashpoint GameZIPs archive the whole page a game was served from, ad frames
+/// included, so these sit in the archive next to the real thing.
+fn is_ad_shim_entry(entry_name: &str) -> bool {
+    const AD_HOSTS: [&str; 6] = [
+        "adserver.bigwigmedia.com",
+        "ad4game.com",
+        "mochiads.com",
+        "mochibot.com",
+        "doubleclick.net",
+        "google-analytics.com",
+    ];
+    let lower = entry_name.to_ascii_lowercase();
+    AD_HOSTS.iter().any(|h| lower.contains(h))
+}
+
+/// Rank a non-launch `.swf` as a candidate for "the game", when the launchCommand
+/// entry is missing from the archive. Higher wins; ties break on the LARGER file.
+///
+/// This used to be "first `.swf` in the archive", which picks whatever the zip
+/// happens to store first. Hot Dog Bush (issue #72) is the case that shows why:
+/// db-api gives that uuid two launchCommands, and the one we keep
+/// (`localflash/hotdogbushy/...`) is not in the GameZIP, while the other
+/// (`cdn.2dplay.com/hot-dog-bush/hot-dog-bush.swf`, 3 MB) is. The archive's first
+/// entry is `adserver.bigwigmedia.com/ingamead2.swf` — 4.8 KB of in-game ad
+/// server, which we then booted INSTEAD of the game: it played an advert, asked
+/// for a banner from a host dead since 2020, traced "Ad completed" and sat there
+/// forever, because there is no game behind an ad frame.
+///
+/// Ranking rather than filtering: if an ad shim is the only `.swf` in the archive
+/// it is still returned, exactly as before.
+fn fallback_rank(entry_name: &str, launch_file: Option<&str>) -> u8 {
+    let file = entry_name.rsplit('/').next().unwrap_or("");
+    // Same file name under a different host/path — the game simply moved hosts
+    // between the launchCommand and the archived copy. Strongest signal we have.
+    if launch_file.is_some_and(|lf| file.eq_ignore_ascii_case(lf)) {
+        return 2;
+    }
+    if is_ad_shim_entry(entry_name) {
+        0
+    } else {
+        1
+    }
+}
+
 pub fn extract_gamezip_tree(
     zip_path: &str,
     files_dir: &str,
@@ -863,7 +909,13 @@ pub fn extract_gamezip_tree(
     // archive. Matches the large-SWF ceiling.
     const PER_ENTRY_CAP: u32 = 384 * 1024 * 1024;
 
-    let mut first_swf: Option<(std::vec::Vec<u8>, std::string::String)> = None;
+    // Fallback used only if the launch entry never shows up: keep the best-ranked
+    // `.swf` seen so far (bytes, entry name, rank), not the first one.
+    let launch_file = launch_entry
+        .as_deref()
+        .and_then(|e| e.rsplit('/').next())
+        .map(|s| s.to_string());
+    let mut fallback_swf: Option<(std::vec::Vec<u8>, std::string::String, u8)> = None;
     let mut launch_swf: Option<(std::vec::Vec<u8>, std::string::String)> = None;
 
     let mut entries = 0usize;
@@ -939,7 +991,7 @@ pub fn extract_gamezip_tree(
                 // single-SWF GameZIP (e.g. Infiltrating the Airship).
                 if is_launch {
                     launch_swf = Some((bytes, name.clone()));
-                    first_swf = None; // free the fallback's (large) buffer
+                    fallback_swf = None; // free the fallback's (large) buffer
                 } else {
                     if write_tree_file(files_dir, rel, &bytes) {
                         written += 1;
@@ -953,8 +1005,15 @@ pub fn extract_gamezip_tree(
                     } else {
                         failed += 1;
                     }
-                    if is_swf && first_swf.is_none() && launch_swf.is_none() {
-                        first_swf = Some((bytes, name.clone()));
+                    if is_swf && launch_swf.is_none() {
+                        let rank = fallback_rank(&name, launch_file.as_deref());
+                        let better = match &fallback_swf {
+                            None => true,
+                            Some((b, _, r)) => rank > *r || (rank == *r && bytes.len() > b.len()),
+                        };
+                        if better {
+                            fallback_swf = Some((bytes, name.clone(), rank));
+                        }
                     }
                 }
             } else {
@@ -968,7 +1027,18 @@ pub fn extract_gamezip_tree(
         "extract: {} entries, {} written, {} write-failed, {} inflate-failed\n",
         entries, written, failed, inflate_fail,
     ));
-    launch_swf.or(first_swf)
+    if launch_swf.is_none() {
+        if let Some((bytes, name, rank)) = &fallback_swf {
+            net::log(&std::format!(
+                "extract: launch entry {} absent from the zip -> falling back to {} ({} bytes, rank {})\n",
+                launch_entry.as_deref().unwrap_or("(none)"),
+                name,
+                bytes.len(),
+                rank,
+            ));
+        }
+    }
+    launch_swf.or_else(|| fallback_swf.map(|(b, n, _)| (b, n)))
 }
 
 // ── Multi-file games: companion SWF fetch ─────────────────────────────────────
