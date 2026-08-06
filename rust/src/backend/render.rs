@@ -82,7 +82,8 @@ use std::sync::Mutex;
 /// Keep the order in sync with the `MENU_*` constants in `cpp/src/main.cpp`.
 // VITESSE moved into the in-game TOUCHES sub-menu (#20 Option 1), so it's no
 // longer a top-level pause entry.
-pub const MENU_ITEMS: &[&str] = &["REPRENDRE", "TOUCHES", "AFFICHAGE", "REDEMARRER", "QUITTER"];
+pub const MENU_ITEMS: &[&str] =
+    &["REPRENDRE", "TOUCHES", "AFFICHAGE", "FILTRE", "REDEMARRER", "QUITTER"];
 
 // ── Unified modal style ────────────────────────────────────────────────────
 // One look for every centered popup. Before this, each modal hard-coded its own
@@ -1348,6 +1349,18 @@ struct BlitProgram {
     program: GLuint,
     u_src_uv: GLint,
 }
+/// Full-frame screen filter (issue #65): one pass over the finished game frame,
+/// on its way to the real framebuffer.
+struct ScreenFilterProgram {
+    program: GLuint,
+    u_src_uv: GLint,
+    u_res: GLint,
+    u_scan: GLint,
+    u_mode: GLint,
+}
+impl Drop for ScreenFilterProgram {
+    fn drop(&mut self) { unsafe { glDeleteProgram(self.program) }; }
+}
 impl Drop for BlitProgram {
     fn drop(&mut self) { unsafe { glDeleteProgram(self.program) }; }
 }
@@ -1631,6 +1644,23 @@ pub struct SwitchRenderBackend {
     /// Grows monotonically; attached once.
     offscreen_depth_stencil: GLuint,
     offscreen_depth_stencil_dims: (u32, u32),
+
+    /// Screen-filter pass (issue #65). Built and allocated ON FIRST USE, so a
+    /// player who never turns a filter on pays neither the shader compile at
+    /// launch nor the 3.5 MB render target.
+    screen_filter: Option<ScreenFilterProgram>,
+    screen_filter_fbo: GLuint,
+    screen_filter_tex: GLuint,
+    /// Own depth+stencil, NOT the shared `offscreen_depth_stencil`: stencil masks
+    /// are pushed by `commands.execute()` into whatever target is bound, so the
+    /// frame target needs its own attachment, and keeping it separate leaves the
+    /// offscreen temp machinery (and its long bug history) untouched.
+    screen_filter_rbo: GLuint,
+    screen_filter_dims: (u32, u32),
+    /// Framebuffer that was bound when the frame started, restored by the resolve
+    /// pass. Captured rather than assumed to be 0: the frame's target is whatever
+    /// the C++ side bound, exactly like the offscreen paths' `prev_fbo`.
+    screen_filter_prev_fbo: GLint,
 
     color_matrix_filter: ColorMatrixFilterProgram,
     unpremult_blit: BlitProgram,
@@ -1954,6 +1984,81 @@ out vec2 v_uv;\n\
 void main() {\n\
     gl_Position = vec4(a_pos.x * 2.0 - 1.0, a_pos.y * 2.0 - 1.0, 0.0, 1.0);\n\
     v_uv = u_src_uv.xy + a_uv * u_src_uv.zw;\n\
+}\n\0";
+
+/// Screen filter picked for the game being played: 0 none, 1 scanlines, 2 CRT.
+/// An atomic rather than backend state because the pause menu that sets it runs
+/// on the C++ side, with no borrow of the renderer available. Read once per
+/// frame; 0 means the frame path is untouched.
+static SCREEN_FILTER: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Select the screen filter. Takes effect on the very next frame, which is what
+/// makes the pause menu able to preview it on the frozen picture.
+pub fn set_screen_filter(v: u8) {
+    SCREEN_FILTER.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn screen_filter() -> u8 {
+    SCREEN_FILTER.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Vertical resolution of the game's stage, set at launch. The scanline pitch is
+/// derived from it so the pattern sits on the GAME's rows rather than on screen
+/// pixels: one dark line per screen pixel is finer than the eye resolves and just
+/// reads as a dimmer picture, which is exactly what the first version did.
+static STAGE_HEIGHT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn set_stage_height(h: u32) {
+    STAGE_HEIGHT.store(h, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Scanlines to draw over the screen height. Clamped so the pitch stays between
+/// 2 and 4 screen pixels on a 720p panel: below 2 the lines disappear again, and
+/// above 4 they stop looking like scanlines and start looking like blinds.
+fn scanline_count() -> f32 {
+    let h = STAGE_HEIGHT.load(std::sync::atomic::Ordering::Relaxed);
+    (h.max(1) as f32).clamp(180.0, 360.0)
+}
+
+// Screen filter (issue #65), applied to the whole frame after the game is drawn.
+// COLOUR ONLY, no geometry, on purpose: the mouse cursor and the touchscreen map
+// straight onto the viewport, so bending the picture (the barrel distortion that
+// makes a "CRT" look convincing) would leave what you see and what you click in
+// different places. Every effect below only reweights the pixel it is given.
+//   mode 1 SCANLINES — darken every other physical scanline.
+//   mode 2 CRT       — scanlines, plus an RGB stripe mask and a soft vignette.
+// `u_res` is the destination size in pixels, so lines and stripes land on real
+// screen pixels rather than on stage coordinates.
+const SCREEN_FILTER_FRAG: &[u8] = b"#version 330 core\n\
+in vec2 v_uv;\n\
+out vec4 frag_color;\n\
+uniform sampler2D u_tex;\n\
+uniform vec2 u_res;\n\
+uniform float u_scan;\n\
+uniform int u_mode;\n\
+void main() {\n\
+    vec3 c = texture(u_tex, v_uv).rgb;\n\
+    // One smooth period per scanline. A hard every-other-row test aliases into\n\
+    // moire as soon as the pitch is not an exact pixel multiple; a cosine keeps\n\
+    // its shape at any pitch, which matters because the pitch follows the game.\n\
+    float s = 0.5 + 0.5 * cos(6.2831853 * v_uv.y * u_scan);\n\
+    if (u_mode == 1) {\n\
+        c *= mix(0.55, 1.0, s);\n\
+    } else {\n\
+        c *= mix(0.42, 1.0, s);\n\
+        // Aperture grille on 2px stripes (6px per RGB triplet). At 1px per\n\
+        // channel the mask was below what the panel resolves and only\n\
+        // desaturated the picture.\n\
+        int col = int(mod(floor(v_uv.x * u_res.x * 0.5), 3.0));\n\
+        vec3 mask = vec3(0.88);\n\
+        if (col == 0) { mask.r = 1.16; }\n\
+        else if (col == 1) { mask.g = 1.16; }\n\
+        else { mask.b = 1.16; }\n\
+        c *= mask;\n\
+        vec2 d = v_uv - vec2(0.5);\n\
+        c *= 1.0 - 0.5 * dot(d, d);\n\
+    }\n\
+    frag_color = vec4(c, 1.0);\n\
 }\n\0";
 
 // Faithful port of `color_matrix.wgsl`. 20-float ColorMatrix as a 4×4 mat plus
@@ -2403,6 +2508,17 @@ fn build_color_matrix_filter_program() -> Option<ColorMatrixFilterProgram> {
         u_src_uv: loc(program, b"u_src_uv\0"),
         u_color_mat: loc(program, b"u_color_mat\0"),
         u_color_extra: loc(program, b"u_color_extra\0"),
+        program,
+    })
+}
+
+fn build_screen_filter_program() -> Option<ScreenFilterProgram> {
+    let program = link_program(FILTER_VERT, SCREEN_FILTER_FRAG)?;
+    Some(ScreenFilterProgram {
+        u_src_uv: loc(program, b"u_src_uv\0"),
+        u_res: loc(program, b"u_res\0"),
+        u_scan: loc(program, b"u_scan\0"),
+        u_mode: loc(program, b"u_mode\0"),
         program,
     })
 }
@@ -3878,6 +3994,12 @@ impl SwitchRenderBackend {
             shape_bitmap_prog,
             gradient_prog,
             color_matrix_filter,
+            screen_filter: None,
+            screen_filter_fbo: 0,
+            screen_filter_tex: 0,
+            screen_filter_rbo: 0,
+            screen_filter_dims: (0, 0),
+            screen_filter_prev_fbo: 0,
             unpremult_blit,
             premult_blit,
             blur_filter,
@@ -4129,6 +4251,115 @@ impl SwitchRenderBackend {
     /// overwrite rather than composite) and stencil is OFF. Restores the
     /// previous FBO/viewport. Returns false on FBO incompleteness.
     #[allow(clippy::too_many_arguments)]
+    /// Redirect this frame into the screen-filter target, creating it on demand.
+    /// Returns false on any failure, and the caller then draws straight to the
+    /// screen as before: a filter is a cosmetic option and must never cost a
+    /// frame, let alone a game.
+    fn begin_screen_filter(&mut self) -> bool {
+        let w = self.dimensions.width.max(1);
+        let h = self.dimensions.height.max(1);
+        if self.screen_filter.is_none() {
+            self.screen_filter = build_screen_filter_program();
+            if self.screen_filter.is_none() {
+                return false;
+            }
+        }
+        if self.screen_filter_dims != (w, h) {
+            unsafe {
+                if self.screen_filter_tex == 0 {
+                    let mut t: GLuint = 0;
+                    glGenTextures(1, &mut t);
+                    self.screen_filter_tex = t;
+                }
+                glBindTexture(GL_TEXTURE_2D, self.screen_filter_tex);
+                glTexImage2D(
+                    GL_TEXTURE_2D, 0, GL_RGBA as GLint, w as GLsizei, h as GLsizei, 0,
+                    GL_RGBA, GL_UNSIGNED_BYTE, core::ptr::null(),
+                );
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as GLint);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as GLint);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as GLint);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as GLint);
+                glBindTexture(GL_TEXTURE_2D, 0);
+                if self.screen_filter_rbo == 0 {
+                    let mut r: GLuint = 0;
+                    glGenRenderbuffers(1, &mut r);
+                    self.screen_filter_rbo = r;
+                }
+                glBindRenderbuffer(GL_RENDERBUFFER, self.screen_filter_rbo);
+                glRenderbufferStorage(
+                    GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w as GLsizei, h as GLsizei,
+                );
+                glBindRenderbuffer(GL_RENDERBUFFER, 0);
+                if self.screen_filter_fbo == 0 {
+                    let mut f: GLuint = 0;
+                    glGenFramebuffers(1, &mut f);
+                    self.screen_filter_fbo = f;
+                }
+            }
+            self.screen_filter_dims = (w, h);
+        }
+        unsafe {
+            let mut prev: GLint = 0;
+            glGetIntegerv(GL_FRAMEBUFFER_BINDING, &mut prev);
+            self.screen_filter_prev_fbo = prev;
+            glBindFramebuffer(GL_FRAMEBUFFER, self.screen_filter_fbo);
+            glFramebufferTexture2D(
+                GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, self.screen_filter_tex, 0,
+            );
+            // The game pushes stencil masks into whatever target is bound, so this
+            // one needs its own depth+stencil or every masked game would break the
+            // moment a filter is switched on.
+            glFramebufferRenderbuffer(
+                GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER,
+                self.screen_filter_rbo,
+            );
+            let status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+            if status != GL_FRAMEBUFFER_COMPLETE {
+                let msg = std::format!("screen filter: FBO incomplete 0x{:04X}, bypassing\n", status);
+                let mut b = msg.into_bytes();
+                b.push(0);
+                ruffle_log_cstr(b.as_ptr() as *const _);
+                glBindFramebuffer(GL_FRAMEBUFFER, prev as GLuint);
+                return false;
+            }
+        }
+        self.gl_state.invalidate();
+        true
+    }
+
+    /// Resolve the captured frame onto the real framebuffer through the filter.
+    fn end_screen_filter(&mut self, mode: u8) {
+        let Some(prog) = self.screen_filter.as_ref() else {
+            return;
+        };
+        let (program, u_src_uv, u_res, u_scan, u_mode) =
+            (prog.program, prog.u_src_uv, prog.u_res, prog.u_scan, prog.u_mode);
+        let (w, h) = self.screen_filter_dims;
+        let tex = self.screen_filter_tex;
+        unsafe {
+            glBindFramebuffer(GL_FRAMEBUFFER, self.screen_filter_prev_fbo as GLuint);
+            glViewport(0, 0, w as GLsizei, h as GLsizei);
+            glDisable(GL_BLEND);
+            glDisable(GL_STENCIL_TEST);
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            glUseProgram(program);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glUniform4f(u_src_uv, 0.0, 0.0, 1.0, 1.0);
+            glUniform2f(u_res, w as GLfloat, h as GLfloat);
+            glUniform1f(u_scan, scanline_count() as GLfloat);
+            glUniform1i(u_mode, mode as GLint);
+            glBindVertexArray(self.bitmap_vao);
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+            glBindVertexArray(0);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glUseProgram(0);
+            glEnable(GL_BLEND);
+        }
+        self.gl_state.invalidate();
+    }
+
     fn draw_filter_pass(
         &mut self,
         program: GLuint,
@@ -5694,10 +5925,16 @@ impl SwitchRenderBackend {
             lc.set_display_mode,
             crate::loc::display_mode_label(crate::keymap::display_mode()),
         );
+        let filter_label = std::format!(
+            "{}: {}",
+            lc.set_screen_filter,
+            crate::loc::screen_filter_label(crate::keymap::screen_filter()),
+        );
         let items = [
             lc.menu_resume,
             lc.menu_keys,
             display_label.as_str(),
+            filter_label.as_str(),
             lc.menu_restart,
             lc.menu_quit,
         ];
@@ -10531,6 +10768,13 @@ impl RenderBackend for SwitchRenderBackend {
             }
         }
 
+        // Screen filter (issue #65): capture the frame into our own target so the
+        // resolve below can run it through a shader. Done HERE, before the clear,
+        // so the clear and every mask land in the captured frame. Falling back to
+        // false leaves the original path byte for byte.
+        let filter_mode = screen_filter();
+        let filtered = filter_mode != 0 && self.begin_screen_filter();
+
         unsafe {
             glViewport(
                 0,
@@ -10568,6 +10812,12 @@ impl RenderBackend for SwitchRenderBackend {
             glBindTexture(GL_TEXTURE_2D, 0);
             glDisable(GL_STENCIL_TEST);
             glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        }
+        // Resolve the captured frame onto the real framebuffer through the filter
+        // shader. After this the target is the screen again, so the cursor overlay
+        // and the pause panel drawn later stay crisp and unfiltered.
+        if filtered {
+            self.end_screen_filter(filter_mode);
         }
         // Mirror the actual GL state we just wrote so the cache stays
         // truthful for any post-frame work (e.g. the cursor overlay).

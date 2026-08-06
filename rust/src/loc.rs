@@ -247,6 +247,15 @@ pub struct Strings {
     pub display_fill: &'static str,
     /// Fills the screen by distorting the picture.
     pub display_stretch: &'static str,
+    /// Screen-filter row in the pause menu, shown as "<label>: <filter>".
+    /// The other half of issue #65, which asked for "stretch and filters".
+    pub set_screen_filter: &'static str,
+    /// No filter (default).
+    pub filter_none: &'static str,
+    /// Darkens every other scanline.
+    pub filter_scanlines: &'static str,
+    /// Scanlines + RGB stripe mask + vignette.
+    pub filter_crt: &'static str,
     /// TOUCHES row + share/diff label for the per-game "show cursor" toggle.
     pub show_cursor: &'static str,
     /// Values for the show-cursor toggle (shown / hidden).
@@ -524,6 +533,10 @@ const EN: Strings = Strings {
     display_fit: "FIT",
     display_fill: "FILL",
     display_stretch: "STRETCH",
+    set_screen_filter: "FILTER",
+    filter_none: "NONE",
+    filter_scanlines: "SCANLINES",
+    filter_crt: "CRT",
     show_cursor: "SHOW CURSOR",
     cursor_shown: "SHOWN",
     cursor_hidden: "HIDDEN",
@@ -720,6 +733,10 @@ const FR: Strings = Strings {
     display_fit: "INT\u{00C9}GRAL",
     display_fill: "REMPLIR",
     display_stretch: "\u{00C9}TIRER",
+    set_screen_filter: "FILTRE",
+    filter_none: "AUCUN",
+    filter_scanlines: "LIGNES",
+    filter_crt: "CRT",
     show_cursor: "AFFICHER LE CURSEUR",
     cursor_shown: "AFFICHÉ",
     cursor_hidden: "MASQUÉ",
@@ -916,6 +933,10 @@ const ES: Strings = Strings {
     display_fit: "AJUSTAR",
     display_fill: "RELLENAR",
     display_stretch: "ESTIRAR",
+    set_screen_filter: "FILTRO",
+    filter_none: "NINGUNO",
+    filter_scanlines: "L\u{00CD}NEAS",
+    filter_crt: "CRT",
     show_cursor: "MOSTRAR CURSOR",
     cursor_shown: "VISIBLE",
     cursor_hidden: "OCULTO",
@@ -1114,6 +1135,10 @@ const RU: Strings = Strings {
     display_fit: "ВПИСАТЬ",
     display_fill: "ЗАПОЛНИТЬ",
     display_stretch: "РАСТЯНУТЬ",
+    set_screen_filter: "ФИЛЬТР",
+    filter_none: "НЕТ",
+    filter_scanlines: "ЛИНИИ",
+    filter_crt: "CRT",
     show_cursor: "ПОКАЗАТЬ КУРСОР",
     cursor_shown: "ПОКАЗАН",
     cursor_hidden: "СКРЫТ",
@@ -1315,6 +1340,10 @@ const DE: Strings = Strings {
     display_fit: "EINPASSEN",
     display_fill: "F\u{00DC}LLEN",
     display_stretch: "STRECKEN",
+    set_screen_filter: "FILTER",
+    filter_none: "KEINER",
+    filter_scanlines: "LINIEN",
+    filter_crt: "CRT",
     show_cursor: "CURSOR ZEIGEN",
     cursor_shown: "SICHTBAR",
     cursor_hidden: "VERBORGEN",
@@ -1513,6 +1542,10 @@ const IT: Strings = Strings {
     display_fit: "ADATTA",
     display_fill: "RIEMPI",
     display_stretch: "ALLARGA",
+    set_screen_filter: "FILTRO",
+    filter_none: "NESSUNO",
+    filter_scanlines: "LINEE",
+    filter_crt: "CRT",
     show_cursor: "MOSTRA CURSORE",
     cursor_shown: "VISIBILE",
     cursor_hidden: "NASCOSTO",
@@ -1711,6 +1744,10 @@ const PT: Strings = Strings {
     display_fit: "AJUSTAR",
     display_fill: "PREENCHER",
     display_stretch: "ESTICAR",
+    set_screen_filter: "FILTRO",
+    filter_none: "NENHUM",
+    filter_scanlines: "LINHAS",
+    filter_crt: "CRT",
     show_cursor: "MOSTRAR CURSOR",
     cursor_shown: "VIS\u{00CD}VEL",
     cursor_hidden: "OCULTO",
@@ -1914,6 +1951,10 @@ const ZH: Strings = Strings {
     display_fit: "适应",
     display_fill: "填满",
     display_stretch: "拉伸",
+    set_screen_filter: "滤镜",
+    filter_none: "无",
+    filter_scanlines: "扫描线",
+    filter_crt: "CRT",
     show_cursor: "显示光标",
     cursor_shown: "显示",
     cursor_hidden: "隐藏",
@@ -2115,6 +2156,10 @@ const TR: Strings = Strings {
     display_fit: "SI\u{011E}DIR",
     display_fill: "DOLDUR",
     display_stretch: "GER",
+    set_screen_filter: "F\u{0130}LTRE",
+    filter_none: "YOK",
+    filter_scanlines: "\u{00C7}\u{0130}ZG\u{0130}LER",
+    filter_crt: "CRT",
     show_cursor: "IMLEC\u{0130} G\u{00D6}STER",
     cursor_shown: "G\u{00D6}R\u{00DC}N\u{00DC}R",
     cursor_hidden: "G\u{0130}ZL\u{0130}",
@@ -2279,6 +2324,15 @@ pub fn display_mode_label(v: u8) -> &'static str {
         1 => s().display_fill,
         2 => s().display_stretch,
         _ => s().display_fit,
+    }
+}
+
+/// Display name of a screen filter. Stored per game like the scaling mode.
+pub fn screen_filter_label(v: u8) -> &'static str {
+    match v {
+        1 => s().filter_scanlines,
+        2 => s().filter_crt,
+        _ => s().filter_none,
     }
 }
 

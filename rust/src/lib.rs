@@ -502,6 +502,10 @@ pub extern "C" fn ruffle_init() -> c_int {
                 .to_string()
         });
     keymap::init_for_swf(&keymap_basename); // P1 + P2 bindings (issue #40) from one file
+    // This game's screen filter, now that the active basename is known. Set on
+    // EVERY launch, including back to 0, so a filtered game never leaves its
+    // filter behind for the next one.
+    crate::backend::render::set_screen_filter(keymap::screen_filter());
 
     // Sidecar dir is needed BEFORE the movie is built (the HTML container's
     // FlashVars live in the tree, see below) and again after, for the navigator.
@@ -529,6 +533,10 @@ pub extern "C" fn ruffle_init() -> c_int {
                 movie.num_frames(),
                 movie.url(),
             ));
+            // The screen filter spaces its scanlines on the GAME's own vertical
+            // resolution, not the screen's: at one line per screen pixel the
+            // pattern is finer than the eye resolves and reads as a flat dimming.
+            crate::backend::render::set_stage_height(movie.height().to_pixels() as u32);
             // TEST (Agent P): the Disney minigame engine, in production mode
             // (see the Capabilities.playerType="PlugIn" change), reads FlashVars
             // that the browser container `disneygames-iframe.js` normally injects
@@ -1242,6 +1250,18 @@ pub extern "C" fn ruffle_display_mode_cycle() {
             _ => StageScaleMode::ShowAll,
         });
     }
+}
+
+/// Pause-menu FILTRE row: cycle the ACTIVE game's screen filter and persist it.
+/// Unlike the scaling mode this touches no Ruffle state at all: the filter is a
+/// pass the render backend runs over the finished frame, so setting the flag is
+/// enough and the next redraw (the paused one, behind the panel) shows it.
+/// The other half of issue #65.
+#[no_mangle]
+pub extern "C" fn ruffle_screen_filter_cycle() {
+    let next = (keymap::screen_filter() + 1) % keymap::SCREEN_FILTER_COUNT;
+    keymap::set_screen_filter(next);
+    crate::backend::render::set_screen_filter(next);
 }
 
 /// Drop the current Player + renderer (Ruffle owns the SwitchRenderBackend,

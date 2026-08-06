@@ -47,6 +47,9 @@ extern "C" int  ruffle_restart(void);
 // Persists per game AND applies to the live player, so the frozen frame behind
 // the pause panel shows the result immediately.
 extern "C" void ruffle_display_mode_cycle(void);
+// Pause-menu FILTRE: next screen filter for the game being played. Persists per
+// game; the next redraw picks it up, so the paused frame previews it.
+extern "C" void ruffle_screen_filter_cycle(void);
 extern "C" int  ruffle_keymap_lookup(const char* button_name);
 extern "C" int  ruffle_keymap_lookup_p2(const char* button_name);
 // Per-modifier combo layers (#57): mod_code 1=ZL 2=ZR 3=L 4=R.
@@ -340,9 +343,11 @@ enum MenuAction {
                            // the frozen frame behind the panel is re-rendered
                            // with the new mode, so you see the crop before you
                            // commit to it (#65 / #69 / #74)
-    MENU_RESTART      = 3,
-    MENU_QUIT         = 4,  // VITESSE moved INTO the TOUCHES sub-menu
-    MENU_COUNT        = 5,
+    MENU_FILTER       = 3,  // cycles the screen filter (none / scanlines / CRT),
+                           // same live preview as AFFICHAGE (#65)
+    MENU_RESTART      = 4,
+    MENU_QUIT         = 5,  // VITESSE moved INTO the TOUCHES sub-menu
+    MENU_COUNT        = 6,
 };
 
 // The physical panel / touchscreen coordinate space. Touch samples always arrive
@@ -837,6 +842,12 @@ static void worker_entry(void* arg) {
                     // frozen game frame is re-rendered with the new scaling
                     // while the panel stays open.
                     ruffle_display_mode_cycle();
+                    break;
+                case MENU_FILTER:
+                    // Same shape as AFFICHAGE: no `continue`, so the frozen frame
+                    // below is re-rendered through the new filter with the panel
+                    // still up.
+                    ruffle_screen_filter_cycle();
                     break;
                 case MENU_RESTART: {
                     std::printf("menu: REDEMARRER → ruffle_restart()\n");

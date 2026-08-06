@@ -1013,6 +1013,42 @@ pub fn display_mode_for(basename: &str) -> u8 {
         .unwrap_or(0)
 }
 
+/// Number of screen filters: 0 = none, 1 = scanlines, 2 = CRT.
+pub const SCREEN_FILTER_COUNT: u8 = 3;
+
+/// Per-game screen filter (by basename), 0 when unset. Its own tiny
+/// `<basename>.filter` file, like `.cursor` and `.display`.
+pub fn screen_filter_for(basename: &str) -> u8 {
+    find_user_path(&std::format!("{}.filter", basename))
+        .and_then(|p| read_json_file(&p))
+        .and_then(|s| s.trim().parse::<u8>().ok())
+        .filter(|v| *v < SCREEN_FILTER_COUNT)
+        .unwrap_or(0)
+}
+
+/// Screen filter of the ACTIVE game, 0 when unset or when no game is active.
+pub fn screen_filter() -> u8 {
+    match active_game_basename() {
+        Some(b) => screen_filter_for(&b),
+        None => 0,
+    }
+}
+
+/// Persist the ACTIVE game's screen filter. Filter 0 is the default, so it
+/// clears the file rather than writing it.
+pub fn set_screen_filter(mode: u8) {
+    let Some(basename) = active_game_basename() else {
+        return;
+    };
+    let path = primary_path(&std::format!("{}.filter", basename));
+    if mode == 0 {
+        let _ = std::fs::remove_file(&path);
+    } else if std::fs::write(&path, std::format!("{}", mode).as_bytes()).is_err() {
+        return;
+    }
+    crate::sd::commit();
+}
+
 /// Stage-scaling mode of the ACTIVE game (the one being played), 0 when unset
 /// or when no game is active.
 pub fn display_mode() -> u8 {
