@@ -129,6 +129,10 @@ pub(crate) enum Screen {
     SettingsKeymapEditor,
     /// Language picker. `selection` indexes `loc::PICKER_LANGS`.
     SettingsLanguagePicker { selection: usize },
+    /// Game DEFAULTS sub-modal: 0 = display mode, 1 = screen filter, 2 = cursor
+    /// speed. Each row cycles in place. These are the values a game that was
+    /// never set from its own pause menu will use.
+    SettingsPrefsModal { selection: usize },
     // ── Bug report (RÉGLAGES → SIGNALER UN BUG) ─────────────────────────
     /// Pick which game is broken. `selection` indexes `State::entries`,
     /// `scroll_offset` is the topmost visible row. A → describe + send,
@@ -2502,6 +2506,10 @@ pub fn input(button: &str) -> bool {
             handle_settings_language_input(&mut s, button, selection);
             true
         }
+        Screen::SettingsPrefsModal { selection } => {
+            handle_settings_prefs_input(&mut s, button, selection);
+            true
+        }
         Screen::BugPicker { selection, scroll_offset } => {
             handle_bug_picker_input(&mut s, button, selection, scroll_offset);
             true
@@ -2611,9 +2619,9 @@ fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
                 }
                 // 3 = FAIRE UNE PROPOSITION is hoisted in input() (opens swkbd).
                 4 => {
-                    // Cursor speed: cycle to the next preset in place (C++ owns
-                    // the value + persistence; we just trigger + re-read it).
-                    unsafe { ruffle_cursor_speed_cycle() };
+                    // Game defaults sub-modal (display / filter / cursor speed).
+                    s.screen = Screen::SettingsPrefsModal { selection: 0 };
+                    return;
                 }
                 // 5 = PSEUDO is hoisted in input() (opens swkbd).
                 6 => {
@@ -2628,6 +2636,53 @@ fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
         _ => {}
     }
     s.screen = Screen::SettingsModal { selection };
+}
+
+/// Game DEFAULTS sub-modal (0 = display, 1 = filter, 2 = cursor speed). Every
+/// row cycles in place on A, like the in-game rows they mirror. B returns to
+/// REGLAGES on the row that opened this.
+///
+/// These are DEFAULTS, not overrides: they apply to a game that has never been
+/// set from its own pause menu. A game with its own sidecar keeps its value, and
+/// keeps it even if the default changes later.
+fn handle_settings_prefs_input(s: &mut State, button: &str, mut selection: usize) {
+    const LAST: usize = 2;
+    match button {
+        "Up" | "StickLUp" => {
+            selection = if selection == 0 { LAST } else { selection - 1 };
+        }
+        "Down" | "StickLDown" => {
+            selection = if selection >= LAST { 0 } else { selection + 1 };
+        }
+        "A" => {
+            match selection {
+                0 => {
+                    let next = (crate::loc::default_display_mode() + 1)
+                        % keymap::DISPLAY_MODE_COUNT;
+                    crate::loc::set_default_display_mode(next);
+                    crate::loc::save_current();
+                }
+                1 => {
+                    let next = (crate::loc::default_screen_filter() + 1)
+                        % keymap::SCREEN_FILTER_COUNT;
+                    crate::loc::set_default_screen_filter(next);
+                    crate::loc::save_current();
+                }
+                _ => {
+                    // Cursor speed keeps its own home: C++ owns the live value and
+                    // its `sdmc:/flashnx/cursor_speed` file, and knows on its own
+                    // that out of a game this cycles the GLOBAL default.
+                    unsafe { ruffle_cursor_speed_cycle() };
+                }
+            }
+        }
+        "B" | "Minus" => {
+            s.screen = Screen::SettingsModal { selection: 4 };
+            return;
+        }
+        _ => {}
+    }
+    s.screen = Screen::SettingsPrefsModal { selection };
 }
 
 /// Language picker: `selection` indexes `loc::PICKER_LANGS`. A applies +
@@ -5031,6 +5086,7 @@ fn modal_kind(screen: Screen) -> u8 {
         Screen::DeleteConfirm { .. } => 2,
         Screen::CoverPicker { .. } => 3,
         Screen::SettingsLanguagePicker { .. } => 4,
+        Screen::SettingsPrefsModal { .. } => 10,
         Screen::DistantUrlOptions { .. } => 5,
         Screen::DistantHistoryConfirm => 6,
         // The keymap editor delegates to `menu::*`; fold its sub-screen id in so a
@@ -5474,9 +5530,6 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             // REGLAGES is a full navbar TAB now (not a popup): no dim backdrop,
             // no BACK entry — leave via L/R.
             let lc = crate::loc::s();
-            // Cursor speed shows its live value, e.g. "Cursor speed: x1.5".
-            let m = unsafe { ruffle_cursor_speed_mult_x10() };
-            let cursor_label = std::format!("{}: x{}.{}", lc.set_cursor_speed, m / 10, m % 10);
             // Nickname row shows the current value (or the "(none)" placeholder).
             let author = crate::profiles::author_name();
             let pseudo_label = std::format!(
@@ -5486,9 +5539,33 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             );
             let entries = [
                 lc.set_keys, lc.set_language, lc.set_report_bug, lc.set_suggest,
-                cursor_label.as_str(), pseudo_label.as_str(), lc.set_quit,
+                lc.set_game_prefs, pseudo_label.as_str(), lc.set_quit,
             ];
             backend.draw_library_settings(selection, &entries);
+        }
+        Screen::SettingsPrefsModal { selection } => {
+            // Game DEFAULTS. Each row carries its live value, same shape as the
+            // in-game rows these mirror.
+            let lc = crate::loc::s();
+            let display_label = std::format!(
+                "{}: {}",
+                lc.set_display_mode,
+                crate::loc::display_mode_label(crate::loc::default_display_mode()),
+            );
+            let filter_label = std::format!(
+                "{}: {}",
+                lc.set_screen_filter,
+                crate::loc::screen_filter_label(crate::loc::default_screen_filter()),
+            );
+            let m = unsafe { ruffle_cursor_speed_mult_x10() };
+            let cursor_label = std::format!("{}: x{}.{}", lc.set_cursor_speed, m / 10, m % 10);
+            let labels = [
+                display_label.as_str(),
+                filter_label.as_str(),
+                cursor_label.as_str(),
+            ];
+            backend.draw_library_dim_backdrop();
+            backend.draw_library_options(lc.prefs_title, selection, &labels);
         }
         Screen::SettingsKeymapEditor => {
             // Same as TouchesEditor — the editor edits the global default

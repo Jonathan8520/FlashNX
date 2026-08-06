@@ -247,6 +247,12 @@ pub struct Strings {
     pub display_fill: &'static str,
     /// Fills the screen by distorting the picture.
     pub display_stretch: &'static str,
+    /// REGLAGES row opening the game-defaults sub-modal (display / filter /
+    /// cursor speed). These are DEFAULTS: a game that has been set explicitly
+    /// from its pause menu keeps its own value.
+    pub set_game_prefs: &'static str,
+    /// Title of that sub-modal.
+    pub prefs_title: &'static str,
     /// Screen-filter row in the pause menu, shown as "<label>: <filter>".
     /// The other half of issue #65, which asked for "stretch and filters".
     pub set_screen_filter: &'static str,
@@ -534,6 +540,8 @@ const EN: Strings = Strings {
     display_fill: "FILL",
     display_stretch: "STRETCH",
     set_screen_filter: "FILTER",
+    set_game_prefs: "GAME DEFAULTS",
+    prefs_title: "DEFAULT SETTINGS",
     filter_none: "NONE",
     filter_scanlines: "SCANLINES",
     filter_crt: "CRT",
@@ -734,6 +742,8 @@ const FR: Strings = Strings {
     display_fill: "REMPLIR",
     display_stretch: "\u{00C9}TIRER",
     set_screen_filter: "FILTRE",
+    set_game_prefs: "PR\u{00C9}F\u{00C9}RENCES DE JEU",
+    prefs_title: "R\u{00C9}GLAGES PAR D\u{00C9}FAUT",
     filter_none: "AUCUN",
     filter_scanlines: "LIGNES",
     filter_crt: "CRT",
@@ -934,6 +944,8 @@ const ES: Strings = Strings {
     display_fill: "RELLENAR",
     display_stretch: "ESTIRAR",
     set_screen_filter: "FILTRO",
+    set_game_prefs: "PREFERENCIAS",
+    prefs_title: "AJUSTES POR DEFECTO",
     filter_none: "NINGUNO",
     filter_scanlines: "L\u{00CD}NEAS",
     filter_crt: "CRT",
@@ -1136,6 +1148,8 @@ const RU: Strings = Strings {
     display_fill: "ЗАПОЛНИТЬ",
     display_stretch: "РАСТЯНУТЬ",
     set_screen_filter: "ФИЛЬТР",
+    set_game_prefs: "ПРЕДПОЧТЕНИЯ",
+    prefs_title: "ПО УМОЛЧАНИЮ",
     filter_none: "НЕТ",
     filter_scanlines: "ЛИНИИ",
     filter_crt: "CRT",
@@ -1341,6 +1355,8 @@ const DE: Strings = Strings {
     display_fill: "F\u{00DC}LLEN",
     display_stretch: "STRECKEN",
     set_screen_filter: "FILTER",
+    set_game_prefs: "SPIELVORGABEN",
+    prefs_title: "STANDARDWERTE",
     filter_none: "KEINER",
     filter_scanlines: "LINIEN",
     filter_crt: "CRT",
@@ -1543,6 +1559,8 @@ const IT: Strings = Strings {
     display_fill: "RIEMPI",
     display_stretch: "ALLARGA",
     set_screen_filter: "FILTRO",
+    set_game_prefs: "PREFERENZE",
+    prefs_title: "VALORI PREDEFINITI",
     filter_none: "NESSUNO",
     filter_scanlines: "LINEE",
     filter_crt: "CRT",
@@ -1745,6 +1763,8 @@ const PT: Strings = Strings {
     display_fill: "PREENCHER",
     display_stretch: "ESTICAR",
     set_screen_filter: "FILTRO",
+    set_game_prefs: "PREFER\u{00CA}NCIAS",
+    prefs_title: "PADR\u{00D5}ES",
     filter_none: "NENHUM",
     filter_scanlines: "LINHAS",
     filter_crt: "CRT",
@@ -1952,6 +1972,8 @@ const ZH: Strings = Strings {
     display_fill: "填满",
     display_stretch: "拉伸",
     set_screen_filter: "滤镜",
+    set_game_prefs: "游戏默认",
+    prefs_title: "默认设置",
     filter_none: "无",
     filter_scanlines: "扫描线",
     filter_crt: "CRT",
@@ -2157,6 +2179,8 @@ const TR: Strings = Strings {
     display_fill: "DOLDUR",
     display_stretch: "GER",
     set_screen_filter: "F\u{0130}LTRE",
+    set_game_prefs: "OYUN VARSAYILANLARI",
+    prefs_title: "VARSAYILANLAR",
     filter_none: "YOK",
     filter_scanlines: "\u{00C7}\u{0130}ZG\u{0130}LER",
     filter_crt: "CRT",
@@ -2312,6 +2336,33 @@ pub fn covers_online() -> bool {
 
 pub fn set_covers_online(v: bool) {
     COVERS_ONLINE.store(v, Ordering::Relaxed);
+}
+
+/// Default stage-scaling mode and screen filter, for games that have never been
+/// set from their own pause menu. Persisted in settings.json.
+///
+/// The rule is deliberately flat: a game WITH a sidecar wins, a game WITHOUT it
+/// follows these. No third "inherit" state is exposed anywhere, because the only
+/// way to show one honestly would be a fourth position in the in-game cycle whose
+/// meaning is abstract. The price is that a game set once stops following a later
+/// change of default, which is predictable and explainable.
+static DEFAULT_DISPLAY_MODE: AtomicU8 = AtomicU8::new(0);
+static DEFAULT_SCREEN_FILTER: AtomicU8 = AtomicU8::new(0);
+
+pub fn default_display_mode() -> u8 {
+    DEFAULT_DISPLAY_MODE.load(Ordering::Relaxed)
+}
+
+pub fn set_default_display_mode(v: u8) {
+    DEFAULT_DISPLAY_MODE.store(v, Ordering::Relaxed);
+}
+
+pub fn default_screen_filter() -> u8 {
+    DEFAULT_SCREEN_FILTER.load(Ordering::Relaxed)
+}
+
+pub fn set_default_screen_filter(v: u8) {
+    DEFAULT_SCREEN_FILTER.store(v, Ordering::Relaxed);
 }
 
 /// Display name of a stage-scaling mode. The value itself is stored PER GAME
@@ -2493,14 +2544,28 @@ fn parse_covers_online(json: &str) -> Option<bool> {
     }
 }
 
-/// Write the full settings file (language + covers toggle). Both settings
-/// persist together so saving one never drops the other.
+/// Parse a small unsigned integer setting out of settings.json. Absent or out of
+/// range → None (keep the default). Same tiny hand parser as the others.
+fn parse_u8_setting(json: &str, key: &str, max: u8) -> Option<u8> {
+    let needle = std::format!("\"{}\"", key);
+    let idx = json.find(&needle)?;
+    let rest = &json[idx + needle.len()..];
+    let colon = rest.find(':')?;
+    let after = rest[colon + 1..].trim_start();
+    let digits: std::string::String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse::<u8>().ok().filter(|v| *v < max)
+}
+
+/// Write the full settings file. Everything persists together so saving one
+/// setting never drops another.
 fn write_settings(lang: Lang, covers: bool) -> bool {
     let path = settings_write_path();
     let json = std::format!(
-        "{{\n    \"language\": \"{}\",\n    \"covers_online\": {}\n}}\n",
+        "{{\n    \"language\": \"{}\",\n    \"covers_online\": {},\n    \"display_mode\": {},\n    \"screen_filter\": {}\n}}\n",
         lang.code(),
         covers,
+        default_display_mode(),
+        default_screen_filter(),
     );
     match File::create(&path) {
         Ok(mut f) => {
@@ -2521,6 +2586,12 @@ pub fn save(lang: Lang) -> bool {
     write_settings(lang, covers_online())
 }
 
+/// Persist the current settings without changing the language. Used when a
+/// default is cycled in REGLAGES. Best-effort.
+pub fn save_current() -> bool {
+    write_settings(current(), covers_online())
+}
+
 extern "C" {
     /// Switch system language → our index (0 En, 1 Fr, 2 Es, 3 Ru, 4 De,
     /// 5 It, 6 Pt, 7 Zh), or -1 if unsupported / detection failed. Defined in
@@ -2536,6 +2607,14 @@ pub fn init() {
         if let Some(txt) = read_small_file(&path) {
             if let Some(c) = parse_covers_online(&txt) {
                 set_covers_online(c);
+            }
+            // Read BEFORE the language early-return below, or these would only be
+            // picked up on consoles whose settings.json has no language.
+            if let Some(v) = parse_u8_setting(&txt, "display_mode", 3) {
+                set_default_display_mode(v);
+            }
+            if let Some(v) = parse_u8_setting(&txt, "screen_filter", 3) {
+                set_default_screen_filter(v);
             }
             if let Some(lang) = parse_language(&txt) {
                 set(lang);

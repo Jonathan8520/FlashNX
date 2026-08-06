@@ -1010,7 +1010,7 @@ pub fn display_mode_for(basename: &str) -> u8 {
         .and_then(|p| read_json_file(&p))
         .and_then(|s| s.trim().parse::<u8>().ok())
         .filter(|v| *v < DISPLAY_MODE_COUNT)
-        .unwrap_or(0)
+        .unwrap_or_else(crate::loc::default_display_mode)
 }
 
 /// Number of screen filters: 0 = none, 1 = scanlines, 2 = CRT.
@@ -1023,7 +1023,7 @@ pub fn screen_filter_for(basename: &str) -> u8 {
         .and_then(|p| read_json_file(&p))
         .and_then(|s| s.trim().parse::<u8>().ok())
         .filter(|v| *v < SCREEN_FILTER_COUNT)
-        .unwrap_or(0)
+        .unwrap_or_else(crate::loc::default_screen_filter)
 }
 
 /// Screen filter of the ACTIVE game, 0 when unset or when no game is active.
@@ -1040,10 +1040,12 @@ pub fn set_screen_filter(mode: u8) {
     let Some(basename) = active_game_basename() else {
         return;
     };
+    // Always written, 0 included: since a missing file now means "follow the
+    // global default", deleting it on 0 would make "no filter, deliberately"
+    // indistinguishable from "never touched" and the game would drift back to the
+    // default the next time it changes.
     let path = primary_path(&std::format!("{}.filter", basename));
-    if mode == 0 {
-        let _ = std::fs::remove_file(&path);
-    } else if std::fs::write(&path, std::format!("{}", mode).as_bytes()).is_err() {
+    if std::fs::write(&path, std::format!("{}", mode).as_bytes()).is_err() {
         return;
     }
     crate::sd::commit();
@@ -1067,13 +1069,12 @@ pub fn set_display_mode(mode: u8) {
     }
 }
 
-/// Persist a game's stage-scaling mode. Mode 0 is the default, so it clears the
-/// file instead of writing it: an untouched game leaves nothing on the SD card.
+/// Persist a game's stage-scaling mode. Always written, 0 included: a missing
+/// file means "follow the global default", so clearing it on 0 would lose the
+/// difference between a deliberate INTEGRAL and a game nobody ever set.
 pub fn set_display_mode_for(basename: &str, mode: u8) {
     let path = primary_path(&std::format!("{}.display", basename));
-    if mode == 0 {
-        let _ = std::fs::remove_file(&path);
-    } else if std::fs::write(&path, std::format!("{}", mode).as_bytes()).is_err() {
+    if std::fs::write(&path, std::format!("{}", mode).as_bytes()).is_err() {
         return;
     }
     crate::sd::commit();
