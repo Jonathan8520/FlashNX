@@ -223,8 +223,17 @@ pub struct RemoteFile {
 ///   - https://archive.org/details/<id>
 ///   - https://archive.org/download/<id>[/<filename>]
 ///   - <id>                                           (bare)
+///
+/// Any `#fragment` / `?query` is cut FIRST. curl never sends a fragment, so an
+/// id that keeps one silently truncates every URL built from it afterwards: the
+/// metadata call `metadata/<id>#` still succeeds (the fragment is dropped, so the
+/// file list is correct and nothing looks wrong), but the download
+/// `download/<id>#/<file>.swf` is fetched as `download/<id>` — archive.org's HTML
+/// listing page, 200 OK — and written under the game's name. Issue #73 (5b.swf):
+/// 148 KB of HTML saved as a `.swf`, reported as a successful download, then
+/// skipped by every later scan with no way for the user to know why.
 pub fn extract_item_id(url_or_id: &str) -> Option<std::string::String> {
-    let trimmed = url_or_id.trim();
+    let trimmed = url_or_id.trim().split(['#', '?']).next().unwrap_or("").trim();
     if !trimmed.contains("://") && !trimmed.contains('/') {
         // Bare item-id.
         if trimmed.is_empty() {

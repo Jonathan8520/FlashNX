@@ -4211,6 +4211,27 @@ fn clear_download_state(s: &mut State) {
     s.download_resume_pos = None;
 }
 
+/// First `n` bytes of a file, for magic-number sniffing. Empty on any error or
+/// short file — both mean "not the file we expected", which is what callers do
+/// with it. Deliberately NOT `read_file_bounded`: this must stay cheap on a
+/// multi-GB GameZIP.
+fn file_head(path: &str, n: usize) -> std::vec::Vec<u8> {
+    use std::io::Read;
+    let mut buf = std::vec![0u8; n];
+    // Not a `match` guard: a variable bound in a pattern stays immutable until the
+    // guard ends, so `read_exact` cannot borrow the handle there.
+    match std::fs::File::open(path) {
+        Ok(mut f) => {
+            if f.read_exact(&mut buf).is_ok() {
+                buf
+            } else {
+                std::vec::Vec::new()
+            }
+        }
+        Err(_) => std::vec::Vec::new(),
+    }
+}
+
 fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut selection: usize) {
     let last = OPTIONS_ENTRIES.len().saturating_sub(1);
     match button {
@@ -6508,6 +6529,39 @@ fn on_download_finished() {
         return;
     }
     log(&std::format!("library: download finished -> {}\n", out_path));
+
+    // HTTP 200 does not mean we got the file we asked for. An URL fragment cuts
+    // the request short and archive.org answers with its HTML listing page; a dead
+    // mirror answers with an error page; a redirect can land on something else
+    // entirely. All of those used to be written under the game's name and
+    // announced as a success, then dropped in silence at the next library scan
+    // ("failed to parse SWF header ... skipping"), leaving a ghost file on the SD
+    // card and no way for the user to know what went wrong (issue #73, where the
+    // same URL was retried four times with the same mute result). Check the magic
+    // bytes here, while we still know which URL to blame.
+    let expect_zip = zip_extract.is_some();
+    let head = file_head(&out_path, 4);
+    let looks_right = if expect_zip {
+        head.starts_with(b"PK\x03\x04")
+    } else {
+        head.starts_with(b"FWS") || head.starts_with(b"CWS") || head.starts_with(b"ZWS")
+    };
+    if !looks_right {
+        log(&std::format!(
+            "library: downloaded file is not a {} (first bytes {:02X?}) -> discarding {}\n",
+            if expect_zip { "zip" } else { "swf" },
+            head,
+            out_path,
+        ));
+        let _ = std::fs::remove_file(&out_path);
+        if let Ok(mut s) = LIBRARY.lock() {
+            clear_download_state(&mut s);
+        }
+        // `failed_url` still holds this URL (only a good download clears it), so
+        // the error screen keeps offering Y = correct it and retry.
+        set_distant_error(crate::loc::s().err_dl_not_a_game);
+        return;
+    }
 
     // Non-zipped Flashpoint game: the downloaded file IS the entry `.swf`, already
     // at its final path (no zip to extract). Fetch any companion `.swf` files from

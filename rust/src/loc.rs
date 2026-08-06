@@ -392,6 +392,11 @@ pub struct Strings {
     pub err_dl_cancelled: &'static str,
     pub err_url_invalid: &'static str,
     pub err_no_swf: &'static str,
+    /// Shown when a download completed (HTTP 200) but the bytes are not the file
+    /// we asked for — an HTML listing/error page, a redirect target, a truncated
+    /// body. Without this the file was saved under the game's name, announced as a
+    /// success, and only dropped much later at the library scan, silently.
+    pub err_dl_not_a_game: &'static str,
     /// Shown when a Flashpoint game launches via an HTML page + FlashVars
     /// (launchCommand isn't a `.swf`) so it can't run as a bare SWF — refused
     /// before the (often huge) GameZIP download instead of failing after it.
@@ -592,6 +597,7 @@ const EN: Strings = Strings {
     err_dl_cancelled: "Download cancelled by the user.",
     err_url_invalid: "Invalid URL. Expected an archive.org URL like https://archive.org/details/<id> or simply <id>.",
     err_no_swf: "No .SWF file found for this game.",
+    err_dl_not_a_game: "The download did not return a game file. Check the address and try again.",
     err_fp_html_game: "This game launches from an HTML page (FlashVars) and isn't supported yet.",
     kbd_url_header: "FlashNX - Remote import",
     kbd_url_guide: "archive.org item URL (e.g. https://archive.org/download/your-game-id)",
@@ -782,6 +788,7 @@ const FR: Strings = Strings {
     err_dl_cancelled: "T\u{00C9}L\u{00C9}CHARGEMENT ANNUL\u{00C9} PAR L'UTILISATEUR.",
     err_url_invalid: "URL INVALIDE. ATTENDU UNE URL ARCHIVE.ORG TYPE https://archive.org/details/<id> OU SIMPLEMENT <id>.",
     err_no_swf: "AUCUN FICHIER .SWF TROUV\u{00C9} POUR CE JEU.",
+    err_dl_not_a_game: "LE T\u{00C9}L\u{00C9}CHARGEMENT N'A PAS RENVOY\u{00C9} UN FICHIER DE JEU. V\u{00C9}RIFIEZ L'ADRESSE.",
     err_fp_html_game: "CE JEU SE LANCE VIA UNE PAGE HTML (FLASHVARS), PAS ENCORE SUPPORT\u{00C9}.",
     kbd_url_header: "FlashNX - Import distant",
     kbd_url_guide: "URL archive.org de l'item (ex: https://archive.org/download/your-game-id)",
@@ -972,6 +979,7 @@ const ES: Strings = Strings {
     err_dl_cancelled: "DESCARGA CANCELADA POR EL USUARIO.",
     err_url_invalid: "URL INV\u{00C1}LIDA. SE ESPERABA UNA URL DE ARCHIVE.ORG TIPO https://archive.org/details/<id> O SIMPLEMENTE <id>.",
     err_no_swf: "NO SE ENCONTR\u{00D3} NING\u{00DA}N ARCHIVO .SWF PARA ESTE JUEGO.",
+    err_dl_not_a_game: "LA DESCARGA NO DEVOLVI\u{00D3} UN ARCHIVO DE JUEGO. COMPRUEBA LA DIRECCI\u{00D3}N.",
     err_fp_html_game: "ESTE JUEGO SE INICIA DESDE UNA P\u{00C1}GINA HTML (FLASHVARS); A\u{00DA}N NO COMPATIBLE.",
     kbd_url_header: "FlashNX - Importar remoto",
     kbd_url_guide: "URL del item de archive.org (ej: https://archive.org/download/your-game-id)",
@@ -1164,6 +1172,7 @@ const RU: Strings = Strings {
     err_dl_cancelled: "ЗАГРУЗКА ОТМЕНЕНА ПОЛЬЗОВАТЕЛЕМ.",
     err_url_invalid: "НЕВЕРНЫЙ URL. ОЖИДАЛСЯ URL ARCHIVE.ORG ВИДА https://archive.org/details/<id> ИЛИ ПРОСТО <id>.",
     err_no_swf: "ДЛЯ ЭТОЙ ИГРЫ НЕ НАЙДЕНО ФАЙЛОВ .SWF.",
+    err_dl_not_a_game: "ЗАГРУЗКА ВЕРНУЛА НЕ ИГРОВОЙ ФАЙЛ. ПРОВЕРЬТЕ АДРЕС.",
     err_fp_html_game: "ЭТА ИГРА ЗАПУСКАЕТСЯ ЧЕРЕЗ HTML-СТРАНИЦУ (FLASHVARS), ПОКА НЕ ПОДДЕРЖИВАЕТСЯ.",
     kbd_url_header: "FlashNX - Zagruzka po seti",
     kbd_url_guide: "URL elementa archive.org (naprimer: https://archive.org/download/your-game-id)",
@@ -1359,6 +1368,7 @@ const DE: Strings = Strings {
     err_dl_cancelled: "DOWNLOAD VOM BENUTZER ABGEBROCHEN.",
     err_url_invalid: "UNG\u{00DC}LTIGE URL. ERWARTET WIRD EINE ARCHIVE.ORG-URL WIE https://archive.org/details/<id> ODER EINFACH <id>.",
     err_no_swf: "KEINE .SWF-DATEI F\u{00DC}R DIESES SPIEL GEFUNDEN.",
+    err_dl_not_a_game: "DER DOWNLOAD HAT KEINE SPIELDATEI GELIEFERT. PR\u{00DC}FE DIE ADRESSE.",
     err_fp_html_game: "DIESES SPIEL STARTET \u{00DC}BER EINE HTML-SEITE (FLASHVARS), NOCH NICHT UNTERST\u{00DC}TZT.",
     kbd_url_header: "FlashNX - Online-Import",
     kbd_url_guide: "archive.org-Item-URL (z.B. https://archive.org/download/your-game-id)",
@@ -1551,6 +1561,7 @@ const IT: Strings = Strings {
     err_dl_cancelled: "DOWNLOAD ANNULLATO DALL'UTENTE.",
     err_url_invalid: "URL NON VALIDO. ATTESO UN URL DI ARCHIVE.ORG TIPO https://archive.org/details/<id> O SEMPLICEMENTE <id>.",
     err_no_swf: "NESSUN FILE .SWF TROVATO PER QUESTO GIOCO.",
+    err_dl_not_a_game: "IL DOWNLOAD NON HA RESTITUITO UN FILE DI GIOCO. CONTROLLA L'INDIRIZZO.",
     err_fp_html_game: "QUESTO GIOCO SI AVVIA DA UNA PAGINA HTML (FLASHVARS), NON ANCORA SUPPORTATO.",
     kbd_url_header: "FlashNX - Import remoto",
     kbd_url_guide: "URL dell'elemento archive.org (es: https://archive.org/download/your-game-id)",
@@ -1743,6 +1754,7 @@ const PT: Strings = Strings {
     err_dl_cancelled: "DOWNLOAD CANCELADO PELO USU\u{00C1}RIO.",
     err_url_invalid: "URL INV\u{00C1}LIDA. ESPERADA UMA URL DO ARCHIVE.ORG TIPO https://archive.org/details/<id> OU SIMPLESMENTE <id>.",
     err_no_swf: "NENHUM ARQUIVO .SWF ENCONTRADO PARA ESTE JOGO.",
+    err_dl_not_a_game: "O DOWNLOAD N\u{00C3}O RETORNOU UM ARQUIVO DE JOGO. VERIFIQUE O ENDERE\u{00C7}O.",
     err_fp_html_game: "ESTE JOGO INICIA POR UMA P\u{00C1}GINA HTML (FLASHVARS), AINDA N\u{00C3}O SUPORTADO.",
     kbd_url_header: "FlashNX - Importar remoto",
     kbd_url_guide: "URL do item do archive.org (ex: https://archive.org/download/your-game-id)",
@@ -1940,6 +1952,7 @@ const ZH: Strings = Strings {
     err_dl_cancelled: "下载已被用户取消。",
     err_url_invalid: "网址无效。应为 ARCHIVE.ORG 网址，例如 https://archive.org/details/<id>，或直接输入 <id>。",
     err_no_swf: "未找到此游戏的 .SWF 文件。",
+    err_dl_not_a_game: "下载返回的不是游戏文件。请检查地址。",
     err_fp_html_game: "此游戏通过 HTML 页面（FLASHVARS）启动，暂不支持。",
     kbd_url_header: "FlashNX - 在线导入",
     kbd_url_guide: "archive.org 项目网址（例如 https://archive.org/download/your-game-id）",
@@ -2135,6 +2148,7 @@ const TR: Strings = Strings {
     err_dl_cancelled: "IND\u{0130}RME KULLANICI TARAFINDAN IPTAL ED\u{0130}LD\u{0130}.",
     err_url_invalid: "GE\u{00C7}ERS\u{0130}Z URL. https://archive.org/details/<id> G\u{0130}B\u{0130} B\u{0130}R URL VEYA SADECE <id> BEKLEN\u{0130}YOR.",
     err_no_swf: "BU OYUN \u{0130}\u{00C7}\u{0130}N .SWF DOSYASI BULUNAMADI.",
+    err_dl_not_a_game: "\u{0130}ND\u{0130}RME B\u{0130}R OYUN DOSYASI D\u{00D6}ND\u{00DC}RMED\u{0130}. ADRES\u{0130} KONTROL ED\u{0130}N.",
     err_fp_html_game: "BU OYUN B\u{0130}R HTML SAYFASINDAN (FLASHVARS) BA\u{015E}LAR, HEN\u{00DC}Z DESTEKLENM\u{0130}YOR.",
     kbd_url_header: "FlashNX - Uzaktan i\u{00E7}e aktarma",
     kbd_url_guide: "archive.org \u{00F6}\u{011F}e URL'si (\u{00F6}rn. https://archive.org/download/oyun-kimligi)",
