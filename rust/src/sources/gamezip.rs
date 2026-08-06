@@ -182,7 +182,7 @@ pub fn parse_search(
             developer,
             publisher,
             release_date,
-            cover_url: flashpoint::logo_url(id),
+            cover_url: flashpoint::cover_url(id),
             launch_command,
             zipped,
         });

@@ -11,7 +11,6 @@
 //! backend + the game's color/title). Covers are metadata enrichment of games
 //! the user ALREADY owns — we never download game binaries from Flashpoint.
 
-use crate::sources::flashpoint;
 
 /// SD roots scanned for manual cover sidecars (mirrors `library::USER_SD_ROOTS`
 /// read priority: new `flashnx/` first, legacy `ruffle/` for back-compat).
@@ -358,17 +357,6 @@ fn decode_jpeg(bytes: &[u8]) -> Option<(std::vec::Vec<u8>, u32, u32)> {
 
 // ── opt-in online fetch ──────────────────────────────────────────────────────
 
-/// Fetch a cover for `basename` from Flashpoint by `search_name`, picking the
-/// candidate at `pick` (the cover-picker selection), and cache it. Returns the
-/// cached path on success. Synchronous (user-initiated via the "Jaquette"
-/// action; never auto-triggered).
-pub fn fetch_and_cache(
-    basename: &str,
-    candidate: &flashpoint::CatalogEntry,
-) -> Result<std::string::String, std::string::String> {
-    fetch_url_and_cache(basename, &candidate.cover_url)
-}
-
 /// Download a cover image from `cover_url` and cache it as `basename`'s cover.
 /// Synchronous (HTTPS GET). Used by the per-game "Jaquette" picker and by the
 /// Flashpoint game download, which grabs the cover automatically so the game
@@ -377,8 +365,26 @@ pub fn fetch_url_and_cache(
     basename: &str,
     cover_url: &str,
 ) -> Result<std::string::String, std::string::String> {
-    // Logos are PNGs (a few KB up to a few hundred KB); 4 MB cap is plenty.
-    let bytes = crate::net::http_get(cover_url, 4 * 1024 * 1024)?;
+    // A few KB up to a few hundred KB; 4 MB cap is plenty.
+    // A game can have a logo and no screenshot, or the reverse (issue #59 added
+    // the second source). When the one asked for is missing, try the other rather
+    // than leave the game blank: a badly shaped cover still beats no cover. One
+    // substitution only, and only on the sharded image URLs we built ourselves.
+    let bytes = match crate::net::http_get(cover_url, 4 * 1024 * 1024) {
+        Ok(b) => b,
+        Err(e) if cover_url.contains("/Logos/") || cover_url.contains("/Screenshots/") => {
+            let other = if cover_url.contains("/Logos/") {
+                cover_url.replace("/Logos/", "/Screenshots/")
+            } else {
+                cover_url.replace("/Screenshots/", "/Logos/")
+            };
+            crate::net::log(&std::format!(
+                "covers: {} unavailable ({}), trying {}\n", cover_url, e, other
+            ));
+            crate::net::http_get(&other, 4 * 1024 * 1024)?
+        }
+        Err(e) => return Err(e),
+    };
     let _ = std::fs::create_dir_all(COVER_CACHE_DIR);
     let path = cache_path(basename);
     std::fs::write(&path, &bytes).map_err(|e| std::format!("write cover: {}", e))?;

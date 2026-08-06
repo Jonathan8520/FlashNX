@@ -40,19 +40,41 @@ pub struct CatalogEntry {
 const SEARCH_BASE: &str = "https://db-api.unstable.life/search";
 const IMAGE_BASE: &str = "https://infinity.unstable.life/images";
 
-/// Build the Flashpoint logo (cover) URL for a game UUID. The image server
-/// shards by the first two id bytes: `Logos/<id[0:2]>/<id[2:4]>/<id>.png`.
-pub fn logo_url(id: &str) -> std::string::String {
+/// Default cover art: the game's LOGO, as it has always been. The picker offers
+/// the screenshot as an alternative (issue #59) rather than swapping the default,
+/// because a change of default would silently restyle a library already full of
+/// chosen covers.
+///
+/// Both kinds live on the same server under the same sharded scheme, at the same
+/// cost, and differ mainly in shape. Screenshots are always game-shaped, measured
+/// between 1.4:1 and 1.7:1 across a sample of the library, so they fill a tile as
+/// they are. Logos have no common format: QWOP's is a 640x76 banner, 8.4:1, which
+/// loses nearly everything to the tile crop, while Hot Dog Bush's is a 156x175
+/// badge. Which one reads better is per game, which is exactly why it is a choice
+/// and not a rule.
+pub fn cover_url(id: &str) -> std::string::String {
+    sharded_image_url("Logos", id)
+}
+
+/// The picker's Y toggle reaches the screenshot by swapping the `Logos/` segment
+/// of this URL for `Screenshots/` (see `library::cover_url_for_source`), rather
+/// than rebuilding it from the id, so the sharding rule lives in one place.
+
+/// `<base>/<kind>/<id[0:2]>/<id[2:4]>/<id>.png`. Despite the `.png`, the server
+/// actually returns JPEG for both kinds; the decoder sniffs the content, so the
+/// extension is only part of the address.
+fn sharded_image_url(kind: &str, id: &str) -> std::string::String {
     if id.len() >= 4 {
         std::format!(
-            "{}/Logos/{}/{}/{}.png",
+            "{}/{}/{}/{}/{}.png",
             IMAGE_BASE,
+            kind,
             &id[0..2],
             &id[2..4],
             id
         )
     } else {
-        std::format!("{}/Logos/{}.png", IMAGE_BASE, id)
+        std::format!("{}/{}/{}.png", IMAGE_BASE, kind, id)
     }
 }
 
@@ -107,7 +129,7 @@ pub fn search(
             // gamezip::search).
             publisher: std::string::String::new(),
             release_date: std::string::String::new(),
-            cover_url: logo_url(id),
+            cover_url: cover_url(id),
             launch_command: std::string::String::new(),
             zipped: false,
         });

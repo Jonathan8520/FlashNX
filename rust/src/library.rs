@@ -707,6 +707,11 @@ pub(crate) struct State {
     /// JAQUETTE). Filled by `run_cover_search_flow`, indexed by the picker
     /// selection, consumed by `run_cover_fetch_flow`.
     cover_candidates: std::vec::Vec<crate::sources::flashpoint::CatalogEntry>,
+    /// Cover picker showing screenshots instead of logos (Y toggles). Logos stay
+    /// the default; the screenshot is an ALTERNATIVE offered per game (issue #59),
+    /// not a new rule, because changing the default would restyle every cover
+    /// already chosen. Not persisted: a per-visit view, not a setting.
+    cover_use_shot: bool,
     /// Community control profiles matching the game in the open `ProfileList`
     /// (#20). Filled by `run_open_profiles_flow`, indexed by the picker selection.
     profile_matches: std::vec::Vec<crate::profiles::Match>,
@@ -813,6 +818,7 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     applet_mode: false,
     local_filter: None,
     cover_candidates: std::vec::Vec::new(),
+    cover_use_shot: false,
     profile_matches: std::vec::Vec::new(),
     touches_can_revert: false,
     touches_has_backup: false,
@@ -4440,6 +4446,17 @@ fn run_cover_search_with(game_idx: usize, query: std::string::String) {
     }
 }
 
+/// A Flashpoint cover URL, in the source the picker is currently showing. The
+/// two variants differ only by one path segment, so the swap is a substitution
+/// rather than a second URL to carry around.
+fn cover_url_for_source(cover_url: &str, use_shot: bool) -> std::string::String {
+    if use_shot {
+        cover_url.replace("/Logos/", "/Screenshots/")
+    } else {
+        cover_url.to_string()
+    }
+}
+
 /// CoverPicker > A: download the chosen candidate's logo and cache it as the
 /// game's cover. Called from `input()` only — synchronous HTTPS download
 /// WITHOUT the LIBRARY lock. On success, invalidates the backend cover-texture
@@ -4447,7 +4464,10 @@ fn run_cover_search_with(game_idx: usize, query: std::string::String) {
 fn run_cover_fetch_flow(game_idx: usize, selection: usize) {
     let picked = match LIBRARY.lock() {
         Ok(g) => {
-            let cand = g.cover_candidates.get(selection).cloned();
+            let cand = g
+                .cover_candidates
+                .get(selection)
+                .map(|c| cover_url_for_source(&c.cover_url, g.cover_use_shot));
             let base = g.entries.get(game_idx).map(|e| e.basename.clone());
             match (cand, base) {
                 (Some(c), Some(b)) => Some((c, b)),
@@ -4456,9 +4476,10 @@ fn run_cover_fetch_flow(game_idx: usize, selection: usize) {
         }
         Err(_) => return,
     };
-    let Some((cand, basename)) = picked else { return };
-    log(&std::format!("covers: fetch \"{}\" <- {}\n", basename, cand.cover_url));
-    match crate::covers::fetch_and_cache(&basename, &cand) {
+    // Fetch what the picker was SHOWING, not the candidate's default source.
+    let Some((url, basename)) = picked else { return };
+    log(&std::format!("covers: fetch \"{}\" <- {}\n", basename, url));
+    match crate::covers::fetch_url_and_cache(&basename, &url) {
         Ok(path) => {
             log(&std::format!("covers: cached -> {}\n", path));
             crate::backend::render::invalidate_cover(&basename);
@@ -4506,11 +4527,19 @@ fn handle_cover_picker_input(s: &mut State, button: &str, game_idx: usize, mut s
                 selection += cols;
             }
         }
+        "Y" => {
+            // Swap the whole grid between screenshots and logos. The thumbnails in
+            // flight are for the other source, so drop them rather than let them
+            // land under the new URLs.
+            s.cover_use_shot = !s.cover_use_shot;
+            crate::backend::render::thumb_cancel_all();
+        }
         "B" => {
             crate::backend::render::thumb_cancel_all();
             s.cover_candidates.clear();
             s.cover_msg.clear();
             s.cover_query.clear();
+            s.cover_use_shot = false;
             // JAQUETTE row (index 3 after #20 regroup).
             s.screen = Screen::OptionsModal { game_idx, selection: 3 };
             return;
@@ -5840,21 +5869,32 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     })
                     .collect();
                 let urls: std::vec::Vec<std::string::String> =
-                    s.cover_candidates.iter().map(|c| c.cover_url.clone()).collect();
+                    s.cover_candidates
+                        .iter()
+                        .map(|c| cover_url_for_source(&c.cover_url, s.cover_use_shot))
+                        .collect();
                 let name = s
                     .entries
                     .get(game_idx)
                     .map(|e| e.display_name.clone())
                     .unwrap_or_default();
-                (titles, urls, s.cover_msg.clone(), name)
+                (titles, urls, s.cover_msg.clone(), name, s.cover_use_shot)
             });
-            if let Some((titles, urls, msg, name)) = snap {
+            if let Some((titles, urls, msg, name, use_shot)) = snap {
                 let title_refs: std::vec::Vec<&str> = titles.iter().map(|x| x.as_str()).collect();
                 let url_refs: std::vec::Vec<&str> = urls.iter().map(|x| x.as_str()).collect();
+                let lc = crate::loc::s();
+                // The hint names what Y GIVES you, so it reads as an action rather
+                // than as a state you have to decode.
+                let footer = std::format!(
+                    "{}   {}",
+                    lc.cover_footer,
+                    if use_shot { lc.cover_show_logos } else { lc.cover_show_shots },
+                );
                 backend.draw_library_dim_backdrop();
                 backend.draw_library_cover_picker(
                     &name, selection, &title_refs, &url_refs, &msg,
-                    crate::loc::s().cover_title, crate::loc::s().cover_footer,
+                    lc.cover_title, &footer,
                 );
             }
         }
