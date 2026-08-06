@@ -421,9 +421,10 @@ pub extern "C" fn ruffle_init() -> c_int {
         // #65, #69, #74: three players in three languages asking to lose the
         // black bars). ShowAll stays the default, which is what Flash does:
         // aspect preserved, bars where the SWF does not reach 16:9.
-        //   NoBorder fills the screen keeping the aspect and crops the
-        //   overflow, which is what the requests actually want.
-        //   ExactFit fills by distorting, for those who asked literally.
+        //   ExactFit fills by distorting, and is reached FIRST because it is the
+        //   only mode that still shows the whole game.
+        //   NoBorder fills keeping the aspect and crops the overflow: nothing is
+        //   deformed, but up to a quarter of a 4:3 game's height goes off screen.
         // `force=true` in EVERY mode, for two reasons: the user's choice must
         // win over a SWF that sets `Stage.scaleMode` itself, and it is what
         // blocks `noScale` (the failure mode that left small SWFs rendering at
@@ -433,8 +434,8 @@ pub extern "C" fn ruffle_init() -> c_int {
         // canvas. The corner-rect failure mode was much worse than that.
         .with_scale_mode(
             match pending_display_mode() {
-                1 => StageScaleMode::NoBorder,
-                2 => StageScaleMode::ExactFit,
+                1 => StageScaleMode::ExactFit,
+                2 => StageScaleMode::NoBorder,
                 _ => StageScaleMode::ShowAll,
             },
             true,
@@ -458,8 +459,8 @@ pub extern "C" fn ruffle_init() -> c_int {
     crate::net::log(&std::format!(
         "ruffle_init: audio + storage backends constructed (scale_mode={} + align=centered + letterbox=On all forced)\n",
         match pending_display_mode() {
-            1 => "NoBorder",
-            2 => "ExactFit",
+            1 => "ExactFit",
+            2 => "NoBorder",
             _ => "ShowAll",
         },
     ));
@@ -1245,8 +1246,8 @@ pub extern "C" fn ruffle_display_mode_cycle() {
         // `respect_forced = false` inside, so this wins over the forced mode the
         // player was built with.
         player.set_scale_mode(match next {
-            1 => StageScaleMode::NoBorder,
-            2 => StageScaleMode::ExactFit,
+            1 => StageScaleMode::ExactFit,
+            2 => StageScaleMode::NoBorder,
             _ => StageScaleMode::ShowAll,
         });
     }

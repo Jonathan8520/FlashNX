@@ -2370,10 +2370,15 @@ pub fn set_default_screen_filter(v: u8) {
 /// costs cropping, and how much that costs depends entirely on the game. A 4:3
 /// game loses a little top and bottom; a portrait game like Flappy Bird
 /// (500x700) would lose about 60% of its playfield.
+/// Cycle order: INTEGRAL -> ETIRER -> REMPLIR. The stretch sits before the fill
+/// on purpose, because the first press should land on the mode that hides
+/// nothing: stretching distorts but still shows 100% of the game, while filling
+/// crops up to a quarter of a 4:3 game's height, which is where its score and
+/// life bars live.
 pub fn display_mode_label(v: u8) -> &'static str {
     match v {
-        1 => s().display_fill,
-        2 => s().display_stretch,
+        1 => s().display_stretch,
+        2 => s().display_fill,
         _ => s().display_fit,
     }
 }
