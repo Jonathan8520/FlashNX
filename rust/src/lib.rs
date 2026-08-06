@@ -417,18 +417,28 @@ pub extern "C" fn ruffle_init() -> c_int {
         // old default 32, so nothing but the reported string changes.
         .with_player_version(Some(99))
         .with_viewport_dimensions(VIEWPORT_W, VIEWPORT_H, 1.0)
-        // Force `ShowAll` — preserves aspect ratio + scales the SWF up
-        // to fill the 1280x720 viewport (letterbox bars left/right when
-        // the SWF is narrower than 16:9). `force=true` blocks AS code
-        // from setting `Stage.scaleMode = "noScale"` (the failure mode
-        // that left small SWFs rendering in their native size in the
-        // top-left corner — observed 2026-05-26 on Super Mario World
-        // Flash 480x320 and Flappy Bird 500x700). Trade-off: SWFs that
-        // implemented their own responsive layout via NoScale will now
-        // run as a letterboxed fixed-size canvas. The corner-rect
-        // failure mode was much worse than that, so this is the right
-        // default for a portable-console target.
-        .with_scale_mode(StageScaleMode::ShowAll, true)
+        // Stage scaling, chosen by the user in REGLAGES > AFFICHAGE (issues
+        // #65, #69, #74: three players in three languages asking to lose the
+        // black bars). ShowAll stays the default, which is what Flash does:
+        // aspect preserved, bars where the SWF does not reach 16:9.
+        //   NoBorder fills the screen keeping the aspect and crops the
+        //   overflow, which is what the requests actually want.
+        //   ExactFit fills by distorting, for those who asked literally.
+        // `force=true` in EVERY mode, for two reasons: the user's choice must
+        // win over a SWF that sets `Stage.scaleMode` itself, and it is what
+        // blocks `noScale` (the failure mode that left small SWFs rendering at
+        // native size in the top-left corner — observed 2026-05-26 on Super
+        // Mario World Flash 480x320 and Flappy Bird 500x700). Trade-off, same
+        // as before: a SWF with its own responsive layout runs as a fixed-size
+        // canvas. The corner-rect failure mode was much worse than that.
+        .with_scale_mode(
+            match pending_display_mode() {
+                1 => StageScaleMode::NoBorder,
+                2 => StageScaleMode::ExactFit,
+                _ => StageScaleMode::ShowAll,
+            },
+            true,
+        )
         // Force the empty StageAlign — Flash default = centered. SWFs
         // (e.g. Mario Forever Flash, observed 2026-05-26) sometimes set
         // `Stage.align = "L"` via AS to stick rendering to the left
@@ -445,7 +455,14 @@ pub extern "C" fn ruffle_init() -> c_int {
         // playable area. Letterboxing clips the rendering to the stage
         // rect, giving us black bars + a clean playable zone.
         .with_letterbox(Letterbox::On);
-    log(b"ruffle_init: audio + storage backends constructed (scale_mode=ShowAll + align=centered + letterbox=On all forced)\n\0");
+    crate::net::log(&std::format!(
+        "ruffle_init: audio + storage backends constructed (scale_mode={} + align=centered + letterbox=On all forced)\n",
+        match pending_display_mode() {
+            1 => "NoBorder",
+            2 => "ExactFit",
+            _ => "ShowAll",
+        },
+    ));
 
     // Look for a SWF on the SD card. First call populates `CACHED_SWF` so
     // subsequent ruffle_init invocations (e.g. menu REDEMARRER) skip the
@@ -920,6 +937,22 @@ fn read_swf_file_bounded(path: &str) -> Option<std::vec::Vec<u8>> {
 /// Try the runtime override path (set by C++ via `ruffle_set_swf_path`)
 /// first, then fall back to `SWF_CANDIDATES`. Returns the first file we
 /// can successfully read.
+/// Stage-scaling mode of the game we are ABOUT to launch, read from its
+/// `<basename>.display` sidecar. Uses `OVERRIDE_SWF_PATH`, which C++ fills when
+/// the user picks a game, because the player is built before the movie is read:
+/// `LAST_SWF_REAL_PATH` and the keymap's active basename are both still empty at
+/// that point. No override (candidate scan, forwarder without a path) → 0, the
+/// letterboxed default.
+fn pending_display_mode() -> u8 {
+    OVERRIDE_SWF_PATH
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .and_then(|p| p.rsplit(['/', '\\']).next().map(std::string::String::from))
+        .map(|b| keymap::display_mode_for(&b))
+        .unwrap_or(0)
+}
+
 fn find_and_load_swf_uncached() -> Option<(std::vec::Vec<u8>, std::string::String)> {
     // Snapshot the override path so we don't hold the lock across the
     // (slow) file read.
@@ -1180,6 +1213,34 @@ pub extern "C" fn ruffle_draw_menu_closing(selected: c_int) -> c_int {
         0
     } else {
         1
+    }
+}
+
+/// Pause-menu AFFICHAGE row: cycle the ACTIVE game's stage scaling, persist it,
+/// and apply it to the running player at once. Applying it live is the point of
+/// putting this in the pause menu rather than in the library: the frozen game
+/// frame is re-rendered behind the panel every frame, so the player sees what
+/// each mode costs on THIS game before committing to it. Cropping is what fill
+/// trades for the black bars, and how much it crops depends entirely on the
+/// game's aspect ratio. Issues #65, #69, #74.
+#[no_mangle]
+pub extern "C" fn ruffle_display_mode_cycle() {
+    let next = (keymap::display_mode() + 1) % keymap::DISPLAY_MODE_COUNT;
+    keymap::set_display_mode(next);
+    let state = unsafe {
+        match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
+            Some(s) => s,
+            None => return,
+        }
+    };
+    if let Ok(mut player) = state.player.lock() {
+        // `respect_forced = false` inside, so this wins over the forced mode the
+        // player was built with.
+        player.set_scale_mode(match next {
+            1 => StageScaleMode::NoBorder,
+            2 => StageScaleMode::ExactFit,
+            _ => StageScaleMode::ShowAll,
+        });
     }
 }
 

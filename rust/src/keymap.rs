@@ -990,6 +990,59 @@ pub fn cursor_speed_for(basename: &str) -> i32 {
         .unwrap_or(-1)
 }
 
+/// Number of stage-scaling modes: 0 = fit (aspect kept, black bars, the Flash
+/// default), 1 = fill (aspect kept, overflow cropped), 2 = stretch (fills by
+/// distorting).
+pub const DISPLAY_MODE_COUNT: u8 = 3;
+
+/// Per-game stage-scaling mode (by basename), 0 when unset. Stored in its OWN
+/// tiny `<basename>.display` file, like `.cursor`, so changing how a game fills
+/// the screen never rewrites its key bindings.
+///
+/// PER GAME rather than a global setting, because filling the screen is paid for
+/// in cropped picture and the price depends on the game: a 4:3 game loses a
+/// little top and bottom and looks better for it, while a portrait game such as
+/// Flappy Bird (500x700) would lose roughly 60% of its playfield. One global
+/// switch would have made the second case the cost of fixing the first.
+/// Issues #65, #69, #74.
+pub fn display_mode_for(basename: &str) -> u8 {
+    find_user_path(&std::format!("{}.display", basename))
+        .and_then(|p| read_json_file(&p))
+        .and_then(|s| s.trim().parse::<u8>().ok())
+        .filter(|v| *v < DISPLAY_MODE_COUNT)
+        .unwrap_or(0)
+}
+
+/// Stage-scaling mode of the ACTIVE game (the one being played), 0 when unset
+/// or when no game is active.
+pub fn display_mode() -> u8 {
+    match active_game_basename() {
+        Some(b) => display_mode_for(&b),
+        None => 0,
+    }
+}
+
+/// Persist the ACTIVE game's stage-scaling mode. Called from the in-game pause
+/// menu, which also applies it to the running player so the change is visible
+/// behind the panel straight away.
+pub fn set_display_mode(mode: u8) {
+    if let Some(b) = active_game_basename() {
+        set_display_mode_for(&b, mode);
+    }
+}
+
+/// Persist a game's stage-scaling mode. Mode 0 is the default, so it clears the
+/// file instead of writing it: an untouched game leaves nothing on the SD card.
+pub fn set_display_mode_for(basename: &str, mode: u8) {
+    let path = primary_path(&std::format!("{}.display", basename));
+    if mode == 0 {
+        let _ = std::fs::remove_file(&path);
+    } else if std::fs::write(&path, std::format!("{}", mode).as_bytes()).is_err() {
+        return;
+    }
+    crate::sd::commit();
+}
+
 /// Persist a cursor-speed preset for an ARBITRARY game (by basename). `idx < 0`
 /// clears the per-game file. Used by the library sub-menu (the in-game VITESSE
 /// uses `set_cursor_speed`, which targets the active game).

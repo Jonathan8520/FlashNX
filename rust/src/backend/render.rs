@@ -82,7 +82,7 @@ use std::sync::Mutex;
 /// Keep the order in sync with the `MENU_*` constants in `cpp/src/main.cpp`.
 // VITESSE moved into the in-game TOUCHES sub-menu (#20 Option 1), so it's no
 // longer a top-level pause entry.
-pub const MENU_ITEMS: &[&str] = &["REPRENDRE", "TOUCHES", "REDEMARRER", "QUITTER"];
+pub const MENU_ITEMS: &[&str] = &["REPRENDRE", "TOUCHES", "AFFICHAGE", "REDEMARRER", "QUITTER"];
 
 // ── Unified modal style ────────────────────────────────────────────────────
 // One look for every centered popup. Before this, each modal hard-coded its own
@@ -5687,7 +5687,20 @@ impl SwitchRenderBackend {
         // Localized labels, same order/count as the MENU_ITEMS contract C++
         // relies on for pause-menu navigation. Cursor speed moved into the
         // TOUCHES sub-menu (#20 Option 1), so it's not a top-level item anymore.
-        let items = [lc.menu_resume, lc.menu_keys, lc.menu_restart, lc.menu_quit];
+        // AFFICHAGE carries its live value: cycling it re-scales the frozen game
+        // frame behind this panel, so the label and the picture agree.
+        let display_label = std::format!(
+            "{}: {}",
+            lc.set_display_mode,
+            crate::loc::display_mode_label(crate::keymap::display_mode()),
+        );
+        let items = [
+            lc.menu_resume,
+            lc.menu_keys,
+            display_label.as_str(),
+            lc.menu_restart,
+            lc.menu_quit,
+        ];
         debug_assert_eq!(items.len(), MENU_ITEMS.len());
         self.draw_modal_rows(&frame, selected, &items);
 

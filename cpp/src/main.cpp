@@ -43,6 +43,10 @@ extern "C" void ruffle_draw_menu(int selected);
 extern "C" void ruffle_menu_close_begin(void);
 extern "C" int  ruffle_draw_menu_closing(int selected);
 extern "C" int  ruffle_restart(void);
+// Pause-menu AFFICHAGE: next stage-scaling mode for the game being played.
+// Persists per game AND applies to the live player, so the frozen frame behind
+// the pause panel shows the result immediately.
+extern "C" void ruffle_display_mode_cycle(void);
 extern "C" int  ruffle_keymap_lookup(const char* button_name);
 extern "C" int  ruffle_keymap_lookup_p2(const char* button_name);
 // Per-modifier combo layers (#57): mod_code 1=ZL 2=ZR 3=L 4=R.
@@ -332,9 +336,13 @@ enum MenuAction {
     MENU_RESUME       = 0,
     MENU_TOUCHES      = 1,  // opens the TOUCHES sub-menu (Rust-driven): edit /
                            // apply / share / revert / cursor speed (#20 Opt 1)
-    MENU_RESTART      = 2,
-    MENU_QUIT         = 3,  // VITESSE moved INTO the TOUCHES sub-menu
-    MENU_COUNT        = 4,
+    MENU_DISPLAY      = 2,  // cycles the stage scaling of THIS game, in place:
+                           // the frozen frame behind the panel is re-rendered
+                           // with the new mode, so you see the crop before you
+                           // commit to it (#65 / #69 / #74)
+    MENU_RESTART      = 3,
+    MENU_QUIT         = 4,  // VITESSE moved INTO the TOUCHES sub-menu
+    MENU_COUNT        = 5,
 };
 
 // The physical panel / touchscreen coordinate space. Touch samples always arrive
@@ -823,6 +831,13 @@ static void worker_entry(void* arg) {
                     // next frame; Rust closes itself on B/Minus.
                     ruffle_touches_open();
                     continue;
+                case MENU_DISPLAY:
+                    // Cycle + persist + apply live, then fall through to the
+                    // redraw at the bottom of this branch: no `continue`, so the
+                    // frozen game frame is re-rendered with the new scaling
+                    // while the panel stays open.
+                    ruffle_display_mode_cycle();
+                    break;
                 case MENU_RESTART: {
                     std::printf("menu: REDEMARRER → ruffle_restart()\n");
                     std::fflush(stdout);

@@ -236,6 +236,17 @@ pub struct Strings {
     pub set_language: &'static str,
     pub set_quit: &'static str,
     pub set_cursor_speed: &'static str,
+    /// Stage scaling row in a game's OPTIONS, shown as "<label>: <mode>". Issues
+    /// #65, #69 and #74: three players in three languages asking to lose the
+    /// black bars, #74 putting it best ("the menu is fullscreen but the game is
+    /// not").
+    pub set_display_mode: &'static str,
+    /// Keeps the aspect ratio, black bars where the game does not reach.
+    pub display_fit: &'static str,
+    /// Fills the screen keeping the aspect ratio, cropping what overflows.
+    pub display_fill: &'static str,
+    /// Fills the screen by distorting the picture.
+    pub display_stretch: &'static str,
     /// TOUCHES row + share/diff label for the per-game "show cursor" toggle.
     pub show_cursor: &'static str,
     /// Values for the show-cursor toggle (shown / hidden).
@@ -509,6 +520,10 @@ const EN: Strings = Strings {
     set_pseudo: "NICKNAME",
     kbd_pseudo_guide: "Your name, shown next to your shared profiles",
     set_cursor_speed: "CURSOR SPEED",
+    set_display_mode: "DISPLAY",
+    display_fit: "FIT",
+    display_fill: "FILL",
+    display_stretch: "STRETCH",
     show_cursor: "SHOW CURSOR",
     cursor_shown: "SHOWN",
     cursor_hidden: "HIDDEN",
@@ -701,6 +716,10 @@ const FR: Strings = Strings {
     set_pseudo: "PSEUDO",
     kbd_pseudo_guide: "Ton nom, affich\u{00E9} \u{00E0} c\u{00F4}t\u{00E9} de tes profils partag\u{00E9}s",
     set_cursor_speed: "VITESSE DU CURSEUR",
+    set_display_mode: "AFFICHAGE",
+    display_fit: "INT\u{00C9}GRAL",
+    display_fill: "REMPLIR",
+    display_stretch: "\u{00C9}TIRER",
     show_cursor: "AFFICHER LE CURSEUR",
     cursor_shown: "AFFICHÉ",
     cursor_hidden: "MASQUÉ",
@@ -893,6 +912,10 @@ const ES: Strings = Strings {
     set_pseudo: "APODO",
     kbd_pseudo_guide: "Tu nombre, junto a tus perfiles compartidos",
     set_cursor_speed: "VELOCIDAD DEL CURSOR",
+    set_display_mode: "PANTALLA",
+    display_fit: "AJUSTAR",
+    display_fill: "RELLENAR",
+    display_stretch: "ESTIRAR",
     show_cursor: "MOSTRAR CURSOR",
     cursor_shown: "VISIBLE",
     cursor_hidden: "OCULTO",
@@ -1087,6 +1110,10 @@ const RU: Strings = Strings {
     set_pseudo: "НИК",
     kbd_pseudo_guide: "Имя рядом с твоими профилями в каталоге",
     set_cursor_speed: "СКОРОСТЬ КУРСОРА",
+    set_display_mode: "ЭКРАН",
+    display_fit: "ВПИСАТЬ",
+    display_fill: "ЗАПОЛНИТЬ",
+    display_stretch: "РАСТЯНУТЬ",
     show_cursor: "ПОКАЗАТЬ КУРСОР",
     cursor_shown: "ПОКАЗАН",
     cursor_hidden: "СКРЫТ",
@@ -1284,6 +1311,10 @@ const DE: Strings = Strings {
     set_pseudo: "SPITZNAME",
     kbd_pseudo_guide: "Dein Name, neben deinen geteilten Profilen",
     set_cursor_speed: "CURSORGESCHWINDIGKEIT",
+    set_display_mode: "ANZEIGE",
+    display_fit: "EINPASSEN",
+    display_fill: "F\u{00DC}LLEN",
+    display_stretch: "STRECKEN",
     show_cursor: "CURSOR ZEIGEN",
     cursor_shown: "SICHTBAR",
     cursor_hidden: "VERBORGEN",
@@ -1478,6 +1509,10 @@ const IT: Strings = Strings {
     set_pseudo: "SOPRANNOME",
     kbd_pseudo_guide: "Il tuo nome, accanto ai profili condivisi",
     set_cursor_speed: "VELOCIT\u{00C0} CURSORE",
+    set_display_mode: "SCHERMO",
+    display_fit: "ADATTA",
+    display_fill: "RIEMPI",
+    display_stretch: "ALLARGA",
     show_cursor: "MOSTRA CURSORE",
     cursor_shown: "VISIBILE",
     cursor_hidden: "NASCOSTO",
@@ -1672,6 +1707,10 @@ const PT: Strings = Strings {
     set_pseudo: "APELIDO",
     kbd_pseudo_guide: "Seu nome, ao lado dos perfis compartilhados",
     set_cursor_speed: "VELOCIDADE DO CURSOR",
+    set_display_mode: "TELA",
+    display_fit: "AJUSTAR",
+    display_fill: "PREENCHER",
+    display_stretch: "ESTICAR",
     show_cursor: "MOSTRAR CURSOR",
     cursor_shown: "VIS\u{00CD}VEL",
     cursor_hidden: "OCULTO",
@@ -1871,6 +1910,10 @@ const ZH: Strings = Strings {
     set_pseudo: "昵称",
     kbd_pseudo_guide: "显示在你分享的配置旁边的名字",
     set_cursor_speed: "光标速度",
+    set_display_mode: "显示",
+    display_fit: "适应",
+    display_fill: "填满",
+    display_stretch: "拉伸",
     show_cursor: "显示光标",
     cursor_shown: "显示",
     cursor_hidden: "隐藏",
@@ -2068,6 +2111,10 @@ const TR: Strings = Strings {
     set_pseudo: "TAKMA AD",
     kbd_pseudo_guide: "Payla\u{015F}t\u{0131}\u{011F}\u{0131}n profillerde g\u{00F6}r\u{00Fc}nen ad\u{0131}n",
     set_cursor_speed: "IMLE\u{00C7} HIZI",
+    set_display_mode: "EKRAN",
+    display_fit: "SI\u{011E}DIR",
+    display_fill: "DOLDUR",
+    display_stretch: "GER",
     show_cursor: "IMLEC\u{0130} G\u{00D6}STER",
     cursor_shown: "G\u{00D6}R\u{00DC}N\u{00DC}R",
     cursor_hidden: "G\u{0130}ZL\u{0130}",
@@ -2220,6 +2267,19 @@ pub fn covers_online() -> bool {
 
 pub fn set_covers_online(v: bool) {
     COVERS_ONLINE.store(v, Ordering::Relaxed);
+}
+
+/// Display name of a stage-scaling mode. The value itself is stored PER GAME
+/// (see `keymap::display_mode_for`), not in settings.json: filling the screen
+/// costs cropping, and how much that costs depends entirely on the game. A 4:3
+/// game loses a little top and bottom; a portrait game like Flappy Bird
+/// (500x700) would lose about 60% of its playfield.
+pub fn display_mode_label(v: u8) -> &'static str {
+    match v {
+        1 => s().display_fill,
+        2 => s().display_stretch,
+        _ => s().display_fit,
+    }
 }
 
 /// The active language's string table. Short name because it's called a lot.
