@@ -6695,6 +6695,70 @@ fn on_download_finished() {
     // Record the source URL (direct .swf or archive.org file) next to the .swf,
     // for later bug-report attribution.
     write_url_sidecar(&out_path, &source_url);
+    // A `.swf` from archive.org is not always the whole game. When its levels or
+    // config live in a companion data file, the game loads that file at startup
+    // and, if it is missing, does not fail — it WAITS: BFDIA 5b (issue #73) sits
+    // on a green background at a steady 60 fps, its one `levels.txt` request
+    // having failed back at frame 13, with nothing on screen to say so. Those
+    // files are almost always in the same item as the `.swf`, so fetch the ones
+    // this SWF actually names. Only referenced names: never the whole item, which
+    // is mostly archive.org's own bookkeeping (`*_meta.xml`, `*_files.xml`,
+    // torrents, thumbnails). Synchronous like the auto-cover below — these are
+    // small data files. Anything referenced but absent is collected so the user
+    // is TOLD, instead of discovering it as a frozen game later.
+    let mut missing_assets: std::vec::Vec<std::string::String> = std::vec::Vec::new();
+    if let Some(item) = crate::net::extract_item_id(&source_url) {
+        let item_files = crate::net::archive_item_files(&item);
+        let refs = if item_files.is_empty() {
+            std::vec::Vec::new()
+        } else {
+            crate::sources::gamezip::read_file_bounded(&out_path, 64 * 1024 * 1024)
+                .map(|b| crate::sources::gamezip::scan_swf_assets(&b))
+                .unwrap_or_default()
+        };
+        if !refs.is_empty() {
+            let files_dir = crate::sidecar_dir_for(Some(&out_path))
+                .to_string_lossy()
+                .into_owned();
+            let mut got = 0usize;
+            for name in refs {
+                // Match the item's real spelling (case can differ) — the URL must
+                // use the name archive.org stores, the sidecar file too.
+                let Some(actual) = item_files.iter().find(|f| f.eq_ignore_ascii_case(&name)) else {
+                    log(&std::format!("library: asset {} referenced but not in the item\n", name));
+                    missing_assets.push(name);
+                    continue;
+                };
+                let url = std::format!("https://archive.org/download/{}/{}", item, actual);
+                match crate::net::http_get(&url, 8 * 1024 * 1024) {
+                    Ok(bytes) => {
+                        let _ = std::fs::create_dir_all(&files_dir);
+                        let dest = std::format!("{}/{}", files_dir, actual);
+                        if std::fs::write(&dest, &bytes).is_ok() {
+                            got += 1;
+                            // The SD scan already ran; without this the launcher
+                            // would not know the file exists.
+                            note_file_created(&dest);
+                            log(&std::format!(
+                                "library: asset {} ({} bytes) -> {}\n", actual, bytes.len(), dest
+                            ));
+                        } else {
+                            log(&std::format!("library: asset write failed {}\n", dest));
+                            missing_assets.push(name);
+                        }
+                    }
+                    Err(e) => {
+                        log(&std::format!("library: asset fetch {} failed: {}\n", url, e));
+                        missing_assets.push(name);
+                    }
+                }
+            }
+            if got > 0 {
+                crate::sd::commit();
+            }
+        }
+    }
+
     // Best-effort auto-cover for archive.org / direct imports (issue #33): unlike
     // Flashpoint downloads (which carry an exact cover_url), these have no cover,
     // so search Flashpoint by name and cache the logo ONLY when the search returns
@@ -6742,7 +6806,18 @@ fn on_download_finished() {
         if !file_name.is_empty() && !s.downloaded_basenames.iter().any(|n| n == &file_name) {
             s.downloaded_basenames.push(file_name);
         }
-        if !shown.is_empty() {
+        if !missing_assets.is_empty() {
+            // It downloaded, but it will ask at startup for files nobody has, and
+            // then wait on them without a word. Name them now: a frozen game
+            // twenty seconds into a launch is not a diagnosis a player can make.
+            set_toast(
+                &mut s,
+                crate::loc::s()
+                    .toast_assets_missing
+                    .replace("{}", &missing_assets.join(", ")),
+                TOAST_ERR,
+            );
+        } else if !shown.is_empty() {
             set_toast(
                 &mut s,
                 crate::loc::s().toast_dl_ok.replace("{}", &shown),

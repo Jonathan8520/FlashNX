@@ -271,6 +271,15 @@ fn parse_archive_metadata(
         .and_then(|v| v.as_array())
         .ok_or_else(|| std::string::String::from(crate::loc::s().err_json_no_files))?;
     let mut out: std::vec::Vec<RemoteFile> = std::vec::Vec::new();
+    // Remember the item's WHOLE contents before filtering: a multi-file game's
+    // data files are in here, and the importer looks them up by name later.
+    if let Ok(mut g) = FETCH_ITEM_ALL_FILES.lock() {
+        g.0 = item_id.to_string();
+        g.1 = files_json
+            .iter()
+            .filter_map(|f| f.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .collect();
+    }
     for f in files_json {
         let format = f.get("format").and_then(|v| v.as_str()).unwrap_or("");
         if format != "Shockwave Flash" {
@@ -308,6 +317,26 @@ pub enum ArchivePoll {
 /// per-file download URLs (mirrors the sync path's `item_id` argument).
 static FETCH_ITEM_ID: std::sync::Mutex<std::string::String> =
     std::sync::Mutex::new(std::string::String::new());
+
+/// EVERY file name of the last item whose metadata we parsed, paired with that
+/// item's id. The list shown to the user is SWF-only, but a game's DATA files
+/// (level tables, XML config) sit in the same item and are what make it run, so
+/// the importer needs to know they exist. Kept from the metadata we already
+/// fetched rather than re-querying.
+static FETCH_ITEM_ALL_FILES: std::sync::Mutex<(
+    std::string::String,
+    std::vec::Vec<std::string::String>,
+)> = std::sync::Mutex::new((std::string::String::new(), std::vec::Vec::new()));
+
+/// File names of archive.org item `item_id`, as seen by the last metadata fetch.
+/// Empty when the cached list belongs to a different item (or nothing has been
+/// fetched), so one item's files can never leak into another item's import.
+pub fn archive_item_files(item_id: &str) -> std::vec::Vec<std::string::String> {
+    match FETCH_ITEM_ALL_FILES.lock() {
+        Ok(g) if g.0 == item_id => g.1.clone(),
+        _ => std::vec::Vec::new(),
+    }
+}
 
 /// Start the async archive.org metadata fetch (non-blocking). Returns
 /// immediately; the C++ multi handle runs on each `tick_archive_fetch`.

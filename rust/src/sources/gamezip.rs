@@ -1092,16 +1092,54 @@ pub fn scan_swf_siblings(swf_bytes: &[u8]) -> std::vec::Vec<std::string::String>
         Ok(b) => b,
         Err(_) => return std::vec::Vec::new(),
     };
-    let data = &buf.data;
-    let n = data.len();
     let mut out: std::vec::Vec<std::string::String> = std::vec::Vec::new();
+    scan_names_with_ext(&buf.data, b"swf", &mut out);
+    out
+}
+
+/// Extensions a Flash game loads as DATA rather than code: level tables, config,
+/// dialogue. Fetched verbatim and never re-scanned, unlike companion SWFs.
+const ASSET_EXTS: [&[u8]; 6] = [b"txt", b"xml", b"json", b"dat", b"csv", b"ini"];
+
+/// Scan a (possibly compressed) SWF for the DATA files it loads (`LoadVars.load`,
+/// `XML.load`, `loadVariables`), deduped, bare leaf names, in discovery order.
+///
+/// Why this exists next to `scan_swf_siblings`: that one matches the literal
+/// bytes `.swf`, so a game whose levels live in a `.txt` looked entirely
+/// self-contained. BFDIA 5b (issue #73) is exactly that — a single
+/// `LoadVars.load("levels.txt")`. Without the file the game does not fail, it
+/// WAITS: a green background at a steady 60 fps with a 2 ms tick, forever.
+pub fn scan_swf_assets(swf_bytes: &[u8]) -> std::vec::Vec<std::string::String> {
+    let buf = match swf::decompress_swf(swf_bytes) {
+        Ok(b) => b,
+        Err(_) => return std::vec::Vec::new(),
+    };
+    let mut out: std::vec::Vec<std::string::String> = std::vec::Vec::new();
+    for ext in ASSET_EXTS {
+        scan_names_with_ext(&buf.data, ext, &mut out);
+    }
+    out
+}
+
+/// Append every `<name>.<ext>` string constant found in `data` to `out`, deduped
+/// case-insensitively. Walks back over `[A-Za-z0-9_-]` from the dot, so a load
+/// from a subdirectory yields just the leaf name — enough for the flat companion
+/// layout these games use. Requires a non-alphanumeric byte after the extension,
+/// so `.txtures` is not read as a `.txt` file.
+fn scan_names_with_ext(data: &[u8], ext: &[u8], out: &mut std::vec::Vec<std::string::String>) {
+    let n = data.len();
+    let elen = ext.len();
     let mut i = 0usize;
-    while i + 4 <= n {
-        if data[i] == b'.'
-            && data[i + 1].eq_ignore_ascii_case(&b's')
-            && data[i + 2].eq_ignore_ascii_case(&b'w')
-            && data[i + 3].eq_ignore_ascii_case(&b'f')
-        {
+    while i + 1 + elen <= n {
+        let is_ext = data[i] == b'.'
+            && data[i + 1..i + 1 + elen]
+                .iter()
+                .zip(ext)
+                .all(|(a, b)| a.eq_ignore_ascii_case(b))
+            && data
+                .get(i + 1 + elen)
+                .map_or(true, |c| !c.is_ascii_alphanumeric());
+        if is_ext {
             let mut start = i;
             while start > 0 {
                 let c = data[start - 1];
@@ -1112,18 +1150,17 @@ pub fn scan_swf_siblings(swf_bytes: &[u8]) -> std::vec::Vec<std::string::String>
                 }
             }
             if start < i {
-                if let Ok(s) = std::str::from_utf8(&data[start..i + 4]) {
+                if let Ok(s) = std::str::from_utf8(&data[start..i + 1 + elen]) {
                     if !out.iter().any(|x| x.eq_ignore_ascii_case(s)) {
                         out.push(s.to_string());
                     }
                 }
             }
-            i += 4;
+            i += 1 + elen;
         } else {
             i += 1;
         }
     }
-    out
 }
 
 /// Download a multi-file game's companion SWFs into `files_dir` (the sidecar
