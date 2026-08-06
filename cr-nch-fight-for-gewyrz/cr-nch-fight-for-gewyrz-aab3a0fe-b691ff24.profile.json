@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "id": "cr-nch-fight-for-gewyrz-aab3a0fe-b691ff24",
+  "game": {
+    "title": "Crönch Fight for Gewyrz",
+    "fp_uuid": "",
+    "swf_hash": "aab3a0fea011e43f"
+  },
+  "author": "",
+  "verified": false,
+  "bindings": {
+    "A": "S",
+    "B": "Z",
+    "Down": ".",
+    "L": "Escape",
+    "Left": "Shift",
+    "Plus": "P",
+    "R": "Enter",
+    "Right": "Right",
+    "StickLDown": "Right",
+    "StickLLeft": "Left",
+    "StickLRight": "Right",
+    "StickLUp": "Left",
+    "StickRDown": "F",
+    "StickRUp": "G",
+    "Up": "Up",
+    "X": "A",
+    "Y": "Shift",
+    "ZL": "Right click",
+    "ZR": "Left click"
+  },
+  "bindings_p2": {
+    "A": "Num1",
+    "B": "Num2",
+    "Down": "S",
+    "L": "Num6",
+    "Left": "A",
+    "R": "Num5",
+    "Right": "D",
+    "StickLDown": "S",
+    "StickLLeft": "A",
+    "StickLRight": "D",
+    "StickLUp": "W",
+    "Up": "W",
+    "X": "Num3",
+    "Y": "Num4"
+  },
+  "combo_layers": {},
+  "combo_layers_p2": {},
+  "cursor_speed": -1,
+  "show_cursor": true
+}
