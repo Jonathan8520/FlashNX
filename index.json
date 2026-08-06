@@ -88,6 +88,14 @@
     "verified": false
   },
   {
+    "id": "flappy-bird-dc4b7d5a-e0fd1d75",
+    "title": "flappy_bird",
+    "fp_uuid": "",
+    "swf_hash": "dc4b7d5ae6ebbf26",
+    "file": "flappy-bird/flappy-bird-dc4b7d5a-e0fd1d75.profile.json",
+    "verified": false
+  },
+  {
     "id": "fpaworld1-01333dbe-a0191508",
     "title": "FPAWorld1",
     "fp_uuid": "",
