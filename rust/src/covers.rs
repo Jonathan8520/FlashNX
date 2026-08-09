@@ -385,6 +385,21 @@ pub fn fetch_url_and_cache(
         }
         Err(e) => return Err(e),
     };
+    // Decoded BEFORE it is written. HTTP 200 says a body arrived, not that it is
+    // a picture: a mirror's error page, an HTML redirect or a truncated transfer
+    // all land here. Once written the file exists, so `resolve` returns it for
+    // ever, the two draw paths map the decode failure straight to the generated
+    // default with no log, and the log line says "cached" — the opposite of what
+    // happened. Retrying does exactly the same thing. Failing here instead puts
+    // the message on screen, where the cover flow already knows how to show it.
+    if decode_bytes(&bytes).is_none() {
+        crate::net::log(&std::format!(
+            "covers: {} returned {} bytes that are not a decodable image\n",
+            cover_url,
+            bytes.len(),
+        ));
+        return Err(std::string::String::from("not an image"));
+    }
     let _ = std::fs::create_dir_all(COVER_CACHE_DIR);
     let path = cache_path(basename);
     std::fs::write(&path, &bytes).map_err(|e| std::format!("write cover: {}", e))?;

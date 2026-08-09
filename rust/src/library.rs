@@ -526,18 +526,24 @@ fn read_meta_sidecar(basename: &str) -> Option<MetaSidecar> {
 fn write_meta_sidecar(basename: &str, display_name: &str) -> bool {
     let path = primary_user_path(&std::format!("{}.meta.json", basename));
     if display_name.trim().is_empty() {
-        if std::fs::remove_file(&path).is_ok() {
-            note_file_removed(&path);
-        }
+        // "Leave empty to revert" — so success here means BOTH copies are gone.
+        // It used to return true having verified neither: a sidecar that refused
+        // to unlink reported a successful revert and then resurrected the old
+        // name at the next scan. A file that was already absent is success.
+        let gone = |r: std::io::Result<()>| {
+            matches!(&r, Ok(())) || matches!(&r, Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+        };
+        let mut ok = gone(std::fs::remove_file(&path).inspect(|_| note_file_removed(&path)));
         // Also try to clean up any legacy copy so the next library
         // boot doesn't resurrect a stale display name.
         if let Some(legacy) = find_user_file(&std::format!("{}.meta.json", basename)) {
-            if std::fs::remove_file(&legacy).is_ok() {
-                note_file_removed(&legacy);
-            }
+            ok &= gone(std::fs::remove_file(&legacy).inspect(|_| note_file_removed(&legacy)));
         }
         crate::sd::commit();
-        return true;
+        if !ok {
+            log(&std::format!("library: could not remove the meta sidecar for {}\n", basename));
+        }
+        return ok;
     }
     let meta = MetaSidecar {
         display_name: Some(display_name.to_string()),
@@ -888,8 +894,11 @@ pub fn home_rows_visible() -> usize {
 /// Left/Right. Up/Down become a page jump there instead of staying inert.
 pub fn home_page_step() -> usize {
     match crate::loc::home_view() {
-        1 => 13,                       // LISTE: one screenful
-        2 | 3 => 10,                   // BANDE / ETAGERE
+        1 => 13, // LISTE: one screenful
+        // BANDE / ETAGERE: a short hop, not a page. The row shows about five
+        // covers, so a big jump loses your place entirely — four keeps one of the
+        // covers you were looking at on screen.
+        2 | 3 => 4,
         _ => GALLERY_ROWS_VISIBLE * 5, // GRILLE: one screenful of tiles
     }
 }
@@ -1583,11 +1592,15 @@ fn save_history_meta(s: &mut State) {
     s.url_meta.retain(|(u, _, _, _)| history.iter().any(|h| h == u));
     let snapshot = s.url_meta.clone();
     match serde_json::to_string(&snapshot) {
-        Ok(json) => {
-            if std::fs::write(HISTORY_META_PATH, json.as_bytes()).is_ok() {
-                crate::sd::commit();
-            }
-        }
+        Ok(json) => match std::fs::write(HISTORY_META_PATH, json.as_bytes()) {
+            Ok(()) => crate::sd::commit(),
+            // The only unlogged branch in an otherwise fully instrumented pair.
+            // This table holds the IMPORTER's favourite diamonds, and the caller
+            // has already flipped the star and toasted it green — so without this
+            // line the star reappears un-starred at the next boot, every time,
+            // with nothing written down anywhere.
+            Err(e) => log(&std::format!("library: history meta save failed: {}\n", e)),
+        },
         Err(e) => log(&std::format!("library: history meta serialise failed: {}\n", e)),
     }
 }
@@ -1877,18 +1890,14 @@ pub fn reset() {
         s.banner_w = 0;
         s.banner_h = 0;
         s.remote_files.clear();
-        s.download_file_name.clear();
-        s.download_out_path.clear();
-        s.download_zip_extract = None;
-        s.download_fp_direct = false;
-        s.download_cover_url = None;
-        s.download_title = None;
+        // Includes the companion phase, so a download abandoned by launching a
+        // game cannot arm the next one.
+        clear_download_state(&mut s);
         s.distant_error.clear();
         s.failed_url.clear();
         s.downloaded_basenames.clear();
         s.distant_filter = None;
         s.import_filter = None;
-        s.download_resume_pos = None;
         // url_history + history_idx are deliberately NOT cleared — they
         // persist across back-to-library cycles AND across .nro reboots
         // (loaded fresh from SD by load_history_from_sd at every library
@@ -3449,9 +3458,13 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
         }
         "Up" | "StickLUp" => {
             // Single-row layouts have no adjacent row for `gallery_neighbor` to
-            // find, so Up/Down would be inert there. They page instead.
+            // find, so Up/Down would be inert there. They jump instead — Up
+            // FORWARD, matching the row's own left-to-right reading order rather
+            // than a vertical list's.
             if matches!(crate::loc::home_view(), 2 | 3) {
-                selection = selection.saturating_sub(home_page_step());
+                if total > 0 {
+                    selection = (selection + home_page_step()).min(total - 1);
+                }
             } else if let Some(ns) = gallery_neighbor(selection, -1) {
                 selection = ns;
             }
@@ -3459,9 +3472,7 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
         }
         "Down" | "StickLDown" => {
             if matches!(crate::loc::home_view(), 2 | 3) {
-                if total > 0 {
-                    selection = (selection + home_page_step()).min(total - 1);
-                }
+                selection = selection.saturating_sub(home_page_step());
             } else if let Some(ns) = gallery_neighbor(selection, 1) {
                 selection = ns;
             }
@@ -4381,6 +4392,19 @@ fn clear_download_state(s: &mut State) {
     s.download_cover_url = None;
     s.download_title = None;
     s.download_resume_pos = None;
+    // The companion phase too. It was left armed: cancelling a multi-file game
+    // mid-companion kept `dl_companion_active` set with a queue still in it, so
+    // the NEXT download's completion walked into the companion branch, wrote the
+    // leftover names into the new game's `.files/` tree and finalized the wrong
+    // one. `dl_companion_done` also drives the progress line, which then counted
+    // from wherever the abandoned download had got to.
+    s.dl_companion_active = false;
+    s.dl_companion_base.clear();
+    s.dl_companion_dir.clear();
+    s.dl_companion_current.clear();
+    s.dl_companion_queue.clear();
+    s.dl_companion_seen.clear();
+    s.dl_companion_done = 0;
 }
 
 /// First `n` bytes of a file, for magic-number sniffing. Empty on any error or
@@ -5021,10 +5045,16 @@ fn run_rename_flow(game_idx: usize) {
     let new_name_trimmed = new_name.trim().to_string();
     let persisted = write_meta_sidecar(&basename, &new_name_trimmed);
     if !persisted {
-        log("library: write_meta_sidecar failed (in-memory rename only)\n");
+        log("library: write_meta_sidecar failed - rename not applied\n");
     }
-    // Update the in-memory entry.
     if let Ok(mut s) = LIBRARY.lock() {
+        if !persisted {
+            // The tile changing IS the only success signal this flow has, so
+            // showing the new name after a failed write says the rename worked;
+            // it comes back under the old name at the next scan, with no clue why.
+            set_toast(&mut s, crate::loc::s().err_sd_write.to_string(), TOAST_ERR);
+            return;
+        }
         if let Some(entry) = s.entries.get_mut(game_idx) {
             entry.display_name = if new_name_trimmed.is_empty() {
                 entry.basename.clone()
@@ -6674,7 +6704,28 @@ fn companion_download_finished() {
                     }
                 }
             }
+        } else {
+            // The queue only ever holds `.swf` names, so a body that is not a SWF
+            // is an error page or a redirect landing page. Left in place it would
+            // sit in the sidecar tree under the exact name the game asks for, and
+            // the navigator would serve it as the real thing — satisfying the
+            // request with junk instead of missing it and falling through to the
+            // mirror, which is the one path that could still repair it.
+            log(&std::format!(
+                "library: companion {} is not a SWF (first bytes {:02X?}) - removed\n",
+                current,
+                &bytes[..bytes.len().min(4)],
+            ));
+            let _ = std::fs::remove_file(&path);
         }
+    } else {
+        // Over the 16 MB scan cap, or unreadable. The file itself may be perfectly
+        // good, so it stays; only the search for ITS companions is skipped, and a
+        // game needing a second-level companion would then wait on it in silence.
+        log(&std::format!(
+            "library: companion {} not read back - its own companions were not searched\n",
+            current,
+        ));
     }
     if let Ok(mut s) = LIBRARY.lock() {
         s.dl_companion_done += 1;
@@ -6713,7 +6764,19 @@ fn finalize_gamezip_download() {
     // Done once here (the tree + companions are complete) and BEFORE add_path so
     // the new entry picks it up right away. The scan only reads the cached number.
     cache_game_footprint(&swf_path);
-    add_or_replace_path(&swf_path);
+    // Kept, because this is what decides whether the game EXISTS for the user.
+    // `add_or_replace_path` returns false when the SWF header will not parse —
+    // a truncated extraction, or an entry that only looks like a SWF — and the
+    // entry is then never created. Discarding it meant the download screen
+    // closed, a green "downloaded" toast appeared, and the game was simply
+    // absent from JOUER with no explanation available anywhere.
+    let added = add_or_replace_path(&swf_path);
+    if !added {
+        log(&std::format!(
+            "library: {} extracted but its SWF header will not parse - no entry created\n",
+            swf_path,
+        ));
+    }
     // Record where this game came from (Flashpoint GameZIP URL) next to the
     // extracted .swf, for later bug-report attribution.
     write_url_sidecar(&swf_path, &source_url);
@@ -6723,13 +6786,26 @@ fn finalize_gamezip_download() {
     // host-pathed `.files/<host>/<path>` tree the SidecarNavigator serves.
     // Only meaningful for Flashpoint GameZIPs (host-pathed); direct/single-file
     // imports leave it absent and keep the flat synthetic base URL.
+    // Unquoted FIRST. Flashpoint quotes any launchCommand containing a space, so
+    // the raw string starts with a quote and this test failed on every one of them
+    // — silently. The game then booted with the synthetic base URL, which breaks
+    // its relative asset loads AND disables the on-demand mirror repair that would
+    // have covered the miss. A deterministic trigger, not a flaky one.
+    let launch_command = crate::sources::gamezip::unquote(&launch_command).to_string();
     if launch_command.starts_with("http://") || launch_command.starts_with("https://") {
         let base_path = std::format!("{}.base", swf_path);
         if let Err(e) = std::fs::write(&base_path, launch_command.as_bytes()) {
             log(&std::format!("library: base sidecar write failed: {}\n", e));
         } else {
             crate::sd::commit();
+            log(&std::format!("library: base sidecar -> {}\n", base_path));
         }
+    } else if !launch_command.is_empty() {
+        // Says so rather than leaving the absence to be inferred from silence.
+        log(&std::format!(
+            "library: no base sidecar, launchCommand is not an http URL: {}\n",
+            launch_command,
+        ));
     }
     // Auto-fetch the game's cover (logo) so JOUER shows its art right away — no
     // manual "Jaquette" step. Synchronous HTTPS, best-effort.
@@ -6770,7 +6846,10 @@ fn finalize_gamezip_download() {
                 e.display_name = title.to_string();
             }
         }
-        if !file_name.is_empty() && !s.downloaded_basenames.iter().any(|n| n == &file_name) {
+        // Only mark it downloaded (the gallery's OK badge) if it actually became
+        // a playable entry.
+        if added && !file_name.is_empty() && !s.downloaded_basenames.iter().any(|n| n == &file_name)
+        {
             s.downloaded_basenames.push(file_name);
         }
         // Back to the Flashpoint gallery so the user can grab another game.
@@ -6779,11 +6858,15 @@ fn finalize_gamezip_download() {
         s.screen = Screen::FpGallery { selection: sel, scroll };
         // The gallery looks identical after a download (bar the OK badge), so
         // confirm it landed — the download screen vanishing isn't a confirmation.
-        set_toast(
-            &mut s,
-            crate::loc::s().toast_dl_ok.replace("{}", &shown),
-            TOAST_OK,
-        );
+        if added {
+            set_toast(
+                &mut s,
+                crate::loc::s().toast_dl_ok.replace("{}", &shown),
+                TOAST_OK,
+            );
+        } else {
+            set_toast(&mut s, crate::loc::s().err_dl_not_a_game.to_string(), TOAST_ERR);
+        }
     }
 }
 
@@ -6980,8 +7063,18 @@ fn on_download_finished() {
     }
 
     // Add to the LOCAL entries list (so when the user backs out of
-    // DISTANT mode, the file appears in the LOCAL library).
-    let _ = add_or_replace_path(&out_path);
+    // DISTANT mode, the file appears in the LOCAL library). The magic bytes were
+    // checked above, so a failure here means a SWF that starts right and then
+    // stops — truncated mid-transfer, most likely. Reported below rather than
+    // dropped: the file is on the card either way, so "it downloaded" and "you
+    // can play it" are not the same claim.
+    let added = add_or_replace_path(&out_path);
+    if !added {
+        log(&std::format!(
+            "library: {} downloaded but its SWF header will not parse - no entry created\n",
+            out_path,
+        ));
+    }
     // Record the source URL (direct .swf or archive.org file) next to the .swf,
     // for later bug-report attribution.
     write_url_sidecar(&out_path, &source_url);
@@ -7093,10 +7186,13 @@ fn on_download_finished() {
         s.download_out_path.clear();
         // The URL downloaded fine, so there's nothing left to "fix" on it.
         s.failed_url.clear();
-        if !file_name.is_empty() && !s.downloaded_basenames.iter().any(|n| n == &file_name) {
+        if added && !file_name.is_empty() && !s.downloaded_basenames.iter().any(|n| n == &file_name)
+        {
             s.downloaded_basenames.push(file_name);
         }
-        if !missing_assets.is_empty() {
+        if !added {
+            set_toast(&mut s, crate::loc::s().err_dl_not_a_game.to_string(), TOAST_ERR);
+        } else if !missing_assets.is_empty() {
             // It downloaded, but it will ask at startup for files nobody has, and
             // then wait on them without a word. Name them now: a frozen game
             // twenty seconds into a launch is not a diagnosis a player can make.

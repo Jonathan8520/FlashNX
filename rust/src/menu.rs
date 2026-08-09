@@ -819,6 +819,12 @@ fn handle_keyboard_input(
             let target = if name == "(none)" { None } else { Some(name) };
             if keymap::set_binding(keymap::EDITABLE_BUTTONS[button_idx], target) {
                 s.dirty = true;
+            } else {
+                // `set_binding` has already put the in-memory keymap back, so the
+                // list below is truthful again — but nothing on screen would have
+                // said the rebind did not take: no toast, no `dirty`, and the game
+                // silently keeps the old key.
+                set_toast(s, crate::loc::s().err_sd_write.to_string(), TOAST_ERR);
             }
             let scroll = clamp_scroll(prev_scroll, button_idx);
             s.screen = Screen::List { selection: button_idx, scroll_offset: scroll };

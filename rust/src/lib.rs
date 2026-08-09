@@ -979,13 +979,24 @@ fn find_and_load_swf_uncached() -> Option<(std::vec::Vec<u8>, std::string::Strin
                 return Some((bytes, path));
             }
             None => {
+                // TERMINAL. Falling through to the candidate list here meant the
+                // user picked one game and another one BOOTED -- with its
+                // controls, its saves and its sidecar tree, because
+                // LAST_SWF_REAL_PATH binds all three -- while the library banked
+                // the playtime against the game they actually chose, and
+                // ruffle_init still returned 0 so nothing said a word. Most
+                // reachable through the HOME forwarder, whose argv is accepted
+                // without checking the file exists, and games really do get
+                // deleted.
                 log_str(&std::format!(
-                    "scan: override path {} unreadable, falling back to candidates\n",
+                    "scan: override path {} unreadable - refusing to substitute another game\n",
                     path,
                 ));
+                return None;
             }
         }
     }
+    // Only when NO override was set: the app was opened without a chosen game.
     for path in SWF_CANDIDATES {
         match read_swf_file_bounded(path) {
             Some(bytes) => {

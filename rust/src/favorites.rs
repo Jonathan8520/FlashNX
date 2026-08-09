@@ -12,15 +12,48 @@ const PATH: &str = "sdmc:/flashnx/favorites.json";
 
 static FAVORITES: Mutex<std::vec::Vec<std::string::String>> = Mutex::new(std::vec::Vec::new());
 
-/// Load the persisted favorites from SD. Best-effort: missing / corrupt → empty.
+/// True once the table on the card is known — either read successfully, or shown
+/// not to exist. False means the in-memory table is not the file's contents, and
+/// `save` must not write: `fs::write` truncates, so one star on a table we merely
+/// FAILED to read would replace every favourite with that single entry, commit it,
+/// and look to the user like their own click erased the lot.
+///
+/// `save_history_meta` in library.rs already refuses to write for this reason.
+/// This module and playtime.rs did not, and they are the two the user notices —
+/// the stars, and every timer reading 00:00.
+static LOADED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Load the persisted favorites from SD.
+///
+/// A missing file is a normal first boot and counts as loaded (empty really is
+/// the truth). Anything else — unreadable, over the cap, not JSON, not an array —
+/// leaves the table sealed rather than quietly empty.
 pub fn load() {
+    use core::sync::atomic::Ordering::Relaxed;
+    match std::fs::metadata(PATH) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            LOADED.store(true, Relaxed);
+            return;
+        }
+        Err(e) => {
+            crate::net::log(&std::format!(
+                "favorites: {} unreadable ({}) - favorites are frozen this session\n",
+                PATH, e,
+            ));
+            return;
+        }
+        Ok(_) => {}
+    }
     let Some(bytes) = read_file_bounded(PATH, 256 * 1024) else {
+        crate::net::log("favorites: read failed or over cap - favorites are frozen this session\n");
         return;
     };
     let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        crate::net::log("favorites: file is not valid JSON - favorites are frozen this session\n");
         return;
     };
     let Some(arr) = json.as_array() else {
+        crate::net::log("favorites: file is not a JSON array - favorites are frozen this session\n");
         return;
     };
     if let Ok(mut g) = FAVORITES.lock() {
@@ -32,6 +65,7 @@ pub fn load() {
                 }
             }
         }
+        LOADED.store(true, Relaxed);
     }
 }
 
@@ -82,14 +116,21 @@ pub fn remove(basename: &str) {
 }
 
 fn save() {
+    if !LOADED.load(core::sync::atomic::Ordering::Relaxed) {
+        crate::net::log(
+            "favorites: NOT saving - the table was never read, writing would replace it\n",
+        );
+        return;
+    }
     let arr: std::vec::Vec<serde_json::Value> = match FAVORITES.lock() {
         Ok(g) => g.iter().map(|k| serde_json::Value::from(k.clone())).collect(),
         Err(_) => return,
     };
     let json = serde_json::Value::Array(arr);
     if let Ok(text) = serde_json::to_string_pretty(&json) {
-        if std::fs::write(PATH, text.as_bytes()).is_ok() {
-            crate::sd::commit();
+        match std::fs::write(PATH, text.as_bytes()) {
+            Ok(()) => crate::sd::commit(),
+            Err(e) => crate::net::log(&std::format!("favorites: save failed: {}\n", e)),
         }
     }
 }

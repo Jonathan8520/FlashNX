@@ -7907,7 +7907,6 @@ impl SwitchRenderBackend {
         const UPSCALE_MAX: f32 = 1.25;
         const VEIL: u32 = 0x0C_10_18;
         const PLAQUE: u32 = 0xFF_0E_16_24;
-        const CHIP_BG: u32 = 0xFF_1A_24_36;
         let w1 = W0 * (1.0 + GROW);
         let h1 = H0 * (1.0 + GROW);
         let cap_x = ANCHOR_CX - w1 * 0.5;
@@ -8086,56 +8085,41 @@ impl SwitchRenderBackend {
             self.draw_overlay_rect(x, 380.0, w, 3.0 + 7.0 * b, (a << 24) | 0x00_FF_D7_40);
         }
 
-        // ── Everything below is text, a colour bar, flat chips and a rail ──
+        // ── Everything below the shelf is text ──
+        // It was four evenly-spaced rounded chips and a colour bar, and it looked
+        // like a web dashboard dropped into a pixel-art launcher: six characters
+        // centred in a 251 px box, four times across the screen. Nothing else in
+        // FlashNX looks like that. The app's own idiom for secondary information
+        // is a plain line in muted blue — the count under the banner, the key
+        // hints in the footer, the facts line LISTE and BANDE already use — so
+        // this uses the same one, and the shelf stays the only object on the page.
         if let Some(e) = entries.get(selection) {
             // Named from the INTEGER selection, not from `sel_pos.round()`: A
             // launches `selection`, so naming anything else would let the facts
             // describe a different game than the one that starts.
-            self.draw_overlay_rect(cap_x - 20.0, 412.0, 8.0, 58.0, 0xFF_00_00_00 | e.color_chip);
             let (l1, l2) = self.wrap_text_2(&e.display_name, 3.2, cap_w);
-            self.draw_text(cap_x, 412.0, 3.2, &l1, swf::Color::from_rgb(0xFFD740, 255));
-            if !l2.is_empty() {
-                self.draw_text(cap_x, 448.0, 3.2, &l2, swf::Color::from_rgb(0xFFD740, 255));
+            let mut ty = 412.0;
+            for line in [l1.as_str(), l2.as_str()] {
+                if line.is_empty() {
+                    continue;
+                }
+                self.draw_text(cap_x, ty, 3.2, line, swf::Color::from_rgb(0xFFD740, 255));
+                ty += 34.0;
             }
-
-            // Four fixed slots, so nothing below reflows with the content.
-            let secs = crate::playtime::get(&e.basename);
-            let chips = [
-                format_size_pretty(e.size_bytes),
-                std::format!("SWF {}", e.swf_version),
-                std::format!(
-                    "{}  {}",
-                    e.compression_label,
-                    if e.is_as3 { "AS3" } else { "AS2" }
-                ),
-                if secs >= 60 {
-                    std::format!("{}H{:02}", secs / 3600, (secs % 3600) / 60)
-                } else {
-                    std::string::String::from("--")
-                },
-            ];
-            let chip_w = (cap_w - 3.0 * 20.0) / 4.0;
-            for (j, val) in chips.iter().enumerate() {
-                let cx0 = cap_x + j as f32 * (chip_w + 20.0);
-                self.draw_round_rect(cx0, 498.0, chip_w, 46.0, 8.0, CHIP_BG);
-                let vwid = self.measure_text(val, 2.4);
-                self.draw_text(
-                    cx0 + (chip_w - vwid) * 0.5,
-                    512.6,
-                    2.4,
-                    val,
-                    swf::Color::from_rgb(0xC9D6E6, 255),
-                );
-            }
+            let facts = Self::game_facts(e);
+            self.draw_text(cap_x, ty + 10.0, 2.0, &facts, swf::Color::from_rgb(0xAABFD8, 255));
         }
 
         // Position rail — the row shows about five games out of many, so where you
         // are in the library needs saying somewhere.
         if n > 5 {
-            self.draw_overlay_rect(cap_x, 586.0, cap_w, 4.0, 0x55_2A_36_48);
+            // Thin, and close under the text rather than stranded at the bottom of
+            // the screen: it says where you are in the row, so it belongs with the
+            // row's caption.
+            self.draw_overlay_rect(cap_x, 528.0, cap_w, 3.0, 0x55_2A_36_48);
             let tw = (cap_w * (1280.0 / PITCH) / n as f32).max(56.0);
             let tx = cap_x + (cap_w - tw) * (sel_pos / (n - 1) as f32).clamp(0.0, 1.0);
-            self.draw_overlay_rect(tx, 582.0, tw, 12.0, 0xFF_FF_D7_40);
+            self.draw_overlay_rect(tx, 527.0, tw, 5.0, 0xFF_FF_D7_40);
         }
 
         self.draw_text((vw - fw) * 0.5, vh - 42.0, 2.0, footer, swf::Color::from_rgb(0x99AABB, 255));

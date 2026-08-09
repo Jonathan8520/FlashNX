@@ -14,15 +14,42 @@ const PATH: &str = "sdmc:/flashnx/playtime.json";
 static PLAYTIME: Mutex<std::vec::Vec<(std::string::String, u64, u64)>> =
     Mutex::new(std::vec::Vec::new());
 
-/// Load the persisted map from SD. Best-effort: missing / corrupt → stays empty.
+/// True once the table on the card is known — read, or shown not to exist. While
+/// false the in-memory table is NOT the file's contents and `save` must not run:
+/// `fs::write` truncates, so the first game quit after a failed read would replace
+/// every recorded hour with that one session. Every game would read 00:00 and both
+/// MOST PLAYED and LAST PLAYED would collapse to alphabetical, with the file on the
+/// card genuinely holding nothing else. See the twin guard in favorites.rs.
+static LOADED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Load the persisted map from SD. A missing file is a normal first boot and
+/// counts as loaded; any other failure seals the table for the session.
 pub fn load() {
+    use core::sync::atomic::Ordering::Relaxed;
+    match std::fs::metadata(PATH) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            LOADED.store(true, Relaxed);
+            return;
+        }
+        Err(e) => {
+            crate::net::log(&std::format!(
+                "playtime: {} unreadable ({}) - playtime is frozen this session\n",
+                PATH, e,
+            ));
+            return;
+        }
+        Ok(_) => {}
+    }
     let Some(bytes) = read_file_bounded(PATH, 1024 * 1024) else {
+        crate::net::log("playtime: read failed or over cap - playtime is frozen this session\n");
         return;
     };
     let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        crate::net::log("playtime: file is not valid JSON - playtime is frozen this session\n");
         return;
     };
     let Some(obj) = json.as_object() else {
+        crate::net::log("playtime: file is not a JSON object - playtime is frozen this session\n");
         return;
     };
     if let Ok(mut g) = PLAYTIME.lock() {
@@ -40,6 +67,7 @@ pub fn load() {
             };
             g.push((k.clone(), secs, last));
         }
+        LOADED.store(true, Relaxed);
     }
 }
 
@@ -87,6 +115,12 @@ pub fn add(basename: &str, secs: u64) {
 }
 
 fn save() {
+    if !LOADED.load(core::sync::atomic::Ordering::Relaxed) {
+        crate::net::log(
+            "playtime: NOT saving - the table was never read, writing would replace it\n",
+        );
+        return;
+    }
     let mut obj = serde_json::Map::new();
     if let Ok(g) = PLAYTIME.lock() {
         for (k, s, l) in g.iter() {

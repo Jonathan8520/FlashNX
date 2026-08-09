@@ -590,6 +590,12 @@ pub fn current_map_used_keys() -> std::collections::BTreeSet<std::string::String
 /// across reboots. Returns false on write failure (in-memory change still
 /// applied — caller can retry / surface error).
 pub fn set_binding(button: &str, flash_key: Option<&str>) -> bool {
+    // What to put back if the write fails: (combo layer, previous value,
+    // previous source). The in-memory keymap is what the TOUCHES list draws, so
+    // leaving the new binding there after the file refused to change would show a
+    // key the game does not have — indistinguishable from a successful rebind,
+    // and gone at the next restart.
+    let undo: Option<(std::string::String, Option<std::string::String>, std::string::String)>;
     {
         let mut g = match ACTIVE_KEYMAP.lock() {
             Ok(g) => g,
@@ -601,19 +607,57 @@ pub fn set_binding(button: &str, flash_key: Option<&str>) -> bool {
         // Empty marker (not remove) so a deliberate unbind survives the next
         // default-merge (ABSENT button gets its fallback; empty stays off).
         let val = flash_key.map(std::string::String::from).unwrap_or_default();
+        let prev_source = km.source.clone();
         if combo_mod.is_empty() {
             let map = if p2 { &mut km.bindings_p2 } else { &mut km.bindings };
-            map.insert(button.into(), val);
+            let prev = map.insert(button.into(), val);
+            undo = Some((std::string::String::new(), prev, prev_source));
         } else {
             // Per-modifier combo layer (issue #57): create it on first bind.
             let layers = if p2 { &mut km.combo_layers_p2 } else { &mut km.combo_layers };
-            layers.entry(combo_mod.to_string()).or_default().insert(button.into(), val);
+            let prev = layers
+                .entry(combo_mod.to_string())
+                .or_default()
+                .insert(button.into(), val);
+            undo = Some((combo_mod.to_string(), prev, prev_source));
         }
         // The user just edited by hand → mark the keymap as user-authored so a
         // later community profile (#20) asks before overwriting it.
         km.source = "user".into();
     }
-    save_sidecar()
+    if save_sidecar() {
+        return true;
+    }
+    // The card refused the write. Put the keymap back the way it was so what the
+    // list shows is what the game will use.
+    if let Some((layer, prev, prev_source)) = undo {
+        if let Ok(mut g) = ACTIVE_KEYMAP.lock() {
+            if let Some(km) = g.as_mut() {
+                let p2 = edit_player() == 2;
+                let map = if layer.is_empty() {
+                    if p2 { &mut km.bindings_p2 } else { &mut km.bindings }
+                } else if p2 {
+                    km.combo_layers_p2.entry(layer.clone()).or_default()
+                } else {
+                    km.combo_layers.entry(layer.clone()).or_default()
+                };
+                match prev {
+                    Some(v) => {
+                        map.insert(button.into(), v);
+                    }
+                    None => {
+                        map.remove(button);
+                    }
+                }
+                km.source = prev_source;
+            }
+        }
+    }
+    log(&std::format!(
+        "keymap: rebind of {} not saved - in-memory binding rolled back\n",
+        button,
+    ));
+    false
 }
 
 // ── Community profiles (issue #20): provenance-aware apply / revert ──────────
@@ -704,7 +748,15 @@ pub fn provenance(basename: &str) -> std::string::String {
 /// exists from a previous `apply_keymap` over user-authored controls).
 #[allow(dead_code)]
 pub fn has_backup(basename: &str) -> bool {
-    std::path::Path::new(&keymap_backup_path(basename)).exists()
+    // Content, not existence. This one predicate decides whether the REVENIR row
+    // appears AND what `revert_profile` copies back over the live sidecar, so a
+    // backup that exists but holds nothing is worse than no backup at all: the
+    // row invites the user to restore, and restoring writes the empty file over
+    // the keymap they hand-made. `fs::copy` allocates fresh clusters while
+    // `write_keymap_file` truncates and reuses them, so a nearly-full card fails
+    // exactly here — the backup — while the apply it protects still succeeds.
+    let path = keymap_backup_path(basename);
+    read_json_file(&path).is_some_and(|txt| serde_json::from_str::<Keymap>(&txt).is_ok())
 }
 
 /// Apply `km` as the sidecar for `basename`. NON-DESTRUCTIVE: if the existing
@@ -719,8 +771,20 @@ pub fn apply_keymap(basename: &str, km: &Keymap) -> bool {
         if !ex.source.starts_with("community:") {
             if let Some(src) = keymap_read_path(basename) {
                 // Best-effort backup; an unwritable SD still lets the apply go
-                // through (the user simply won't have a one-tap revert).
-                let _ = std::fs::copy(&src, keymap_backup_path(basename));
+                // through (the user simply won't have a one-tap revert). Said out
+                // loud, though: the screen promises "your previous controls were
+                // saved", and this is the only place that knows whether they were.
+                // A part-written backup is cleaned up rather than left to look
+                // like a restore point — `has_backup` re-parses it for the same
+                // reason.
+                let dst = keymap_backup_path(basename);
+                if let Err(e) = std::fs::copy(&src, &dst) {
+                    log(&std::format!(
+                        "keymap: backup of {} failed ({}) - no revert point for this apply\n",
+                        basename, e,
+                    ));
+                    let _ = std::fs::remove_file(&dst);
+                }
             }
         }
     }
@@ -746,7 +810,9 @@ pub fn apply_keymap(basename: &str, km: &Keymap) -> bool {
 pub fn revert_profile(basename: &str) -> bool {
     let dst = keymap_write_path(basename);
     let bak = keymap_backup_path(basename);
-    let ok = if std::path::Path::new(&bak).exists() {
+    // `has_backup`, not `exists`: an empty or corrupt backup must not be copied
+    // over a working sidecar.
+    let ok = if has_backup(basename) {
         // Restore the backup, then drop it.
         let restored = std::fs::copy(&bak, &dst).is_ok();
         if restored {
@@ -754,9 +820,22 @@ pub fn revert_profile(basename: &str) -> bool {
         }
         restored
     } else {
-        // No hand-made keymap to restore → revert to the fallback default.
-        let _ = std::fs::remove_file(&dst);
-        true
+        // No usable backup → revert to the fallback default by removing the
+        // sidecar. Reported honestly: the screen says "your controls were
+        // restored", so a failed unlink (which leaves the applied profile in
+        // place) must not come back as success. A file that was already gone is
+        // still the desired end state.
+        match std::fs::remove_file(&dst) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(e) => {
+                log(&std::format!(
+                    "keymap: revert could not remove {} ({}) - controls unchanged\n",
+                    dst, e,
+                ));
+                false
+            }
+        }
     };
     if ok {
         crate::sd::commit();

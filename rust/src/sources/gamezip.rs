@@ -230,7 +230,7 @@ fn read_at(f: &mut std::fs::File, off: u64, buf: &mut [u8]) -> bool {
 /// `"http://i.4cdn.org/f/I'm Dead.swf"`); left in, the trailing `"` sticks to the
 /// entry name and never matches the zip's literal paths (and the `.swf` sniff
 /// below fails). ~112 games in a 151k-game sample carry quoted commands.
-fn unquote(launch_command: &str) -> &str {
+pub fn unquote(launch_command: &str) -> &str {
     let t = launch_command.trim();
     let b = t.as_bytes();
     if b.len() >= 2
