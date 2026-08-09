@@ -6461,8 +6461,16 @@ impl SwitchRenderBackend {
         // Wider than the 720 modal so the main block + right-hand numpad both fit.
         const PANEL_W: f32 = 1120.0;
 
+        // The frame clamps its width to the screen, so a turned picture gives a
+        // narrower panel; the key HEIGHT has to follow or the keys come out thin
+        // and tall, and the panel taller than it needs to be.
+        let vw = self.dimensions.width as f32;
+        let shrink = ((vw - 40.0) / PANEL_W).clamp(0.45, 1.0);
+        let key_h = KEY_H * shrink;
+        let key_gap = KEY_GAP * shrink;
+        let key_scale = KEY_SCALE * shrink;
         let n_rows = crate::keymap::KEYBOARD_ROWS_N as f32;
-        let panel_h = 120.0 + n_rows * (KEY_H + KEY_GAP) + 34.0;
+        let panel_h = 120.0 * shrink.max(0.75) + n_rows * (key_h + key_gap) + 34.0;
         let title = std::format!("{} ->", button_name);
         let frame = self.draw_modal_frame(
             PANEL_W,
@@ -6482,9 +6490,9 @@ impl SwitchRenderBackend {
         for (i, &(name, row, kx, kw)) in keys.iter().enumerate() {
             let x = origin_x + kx * unit_w;
             let key_w = kw * unit_w - KEY_GAP;
-            let y = top_y + row as f32 * (KEY_H + KEY_GAP);
+            let y = top_y + row as f32 * (key_h + key_gap);
             let cap = Matrix {
-                a: key_w, b: 0.0, c: 0.0, d: KEY_H,
+                a: key_w, b: 0.0, c: 0.0, d: key_h,
                 tx: swf::Twips::from_pixels(x as f64),
                 ty: swf::Twips::from_pixels(y as f64),
             };
@@ -6499,16 +6507,16 @@ impl SwitchRenderBackend {
 
             // Centre the (only-if-needed shrunk) label in the cap.
             let label = crate::keymap::keyboard_label(name);
-            let lw_full = self.measure_text(&label, KEY_SCALE);
+            let lw_full = self.measure_text(&label, key_scale);
             let scale = if lw_full > key_w - 8.0 {
-                (KEY_SCALE * (key_w - 8.0) / lw_full).max(1.0)
+                (key_scale * (key_w - 8.0) / lw_full).max(1.0)
             } else {
-                KEY_SCALE
+                key_scale
             };
             let lw = self.measure_text(&label, scale);
             self.draw_text(
                 x + (key_w - lw) * 0.5,
-                y + (KEY_H - 7.0 * scale) * 0.5,
+                y + (key_h - 7.0 * scale) * 0.5,
                 scale,
                 &label,
                 swf::Color::from_rgb(txt_col, 255),
@@ -6989,7 +6997,12 @@ impl SwitchRenderBackend {
         // pop) without the dim sliding off an edge.
         self.fill_screen_dim(if danger { MODAL_DIM_DANGER } else { MODAL_DIM });
 
-        let w = width;
+        // Never wider than the screen it sits on. Panel widths are written for a
+        // 1280-wide viewport, and the logical viewport is 720 wide while the
+        // picture is turned a quarter: the keyboard asks for 1120 and ran off
+        // both edges. Clamping HERE fixes every panel at once, including the ones
+        // written after this, and is a no-op at 1280.
+        let w = width.min(vw - 2.0 * 20.0);
         // No subtitle → tighten the title-to-rows gap (drop the empty subtitle
         // band) so we don't waste vertical space (e.g. the language picker).
         let pad_top = if subtitle.is_some() { MODAL_PAD_TOP } else { MODAL_PAD_TOP_TIGHT };

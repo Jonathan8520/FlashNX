@@ -370,7 +370,7 @@ pub extern "C" fn ruffle_init() -> c_int {
     log(b"ruffle_init: tracing subscriber installed (INFO level)\n\0");
 
     // Before the renderer, because the viewport below is chosen from it.
-    crate::backend::render::set_game_rotation(keymap::rotation());
+    crate::backend::render::set_game_rotation(pending_rotation());
     let renderer = match SwitchRenderBackend::new(VIEWPORT_W, VIEWPORT_H) {
         Some(r) => r,
         None => {
@@ -999,6 +999,22 @@ fn read_swf_file_bounded(path: &str) -> Option<std::vec::Vec<u8>> {
 /// `LAST_SWF_REAL_PATH` and the keymap's active basename are both still empty at
 /// that point. No override (candidate scan, forwarder without a path) → 0, the
 /// letterboxed default.
+/// Rotation of the game we are ABOUT to launch, read the same way and for the
+/// same reason as `pending_display_mode`: the viewport has to be chosen before
+/// the movie is read, and at that moment the keymap's active basename is still
+/// empty. Reading it from the keymap instead silently gave 0 for every launch,
+/// so neither the per-game value nor the global default was ever applied -- only
+/// the live cycle in the pause menu worked.
+fn pending_rotation() -> u8 {
+    OVERRIDE_SWF_PATH
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .and_then(|p| p.rsplit(['/', '\\']).next().map(std::string::String::from))
+        .map(|b| keymap::rotation_for(&b))
+        .unwrap_or_else(crate::loc::default_rotation)
+}
+
 fn pending_display_mode() -> u8 {
     OVERRIDE_SWF_PATH
         .lock()
@@ -1599,6 +1615,12 @@ static LIBRARY_RENDERER: Mutex<Option<SwitchRenderBackend>> = Mutex::new(None);
 
 #[no_mangle]
 pub extern "C" fn ruffle_library_init() -> c_int {
+    // The launcher NEVER turns, whatever the game the player just left was set
+    // to. The rotation is a global in the renderer -- one place, so that the
+    // game, its pause panel and its pointer cannot disagree -- and the price of
+    // that choice is that returning from a turned game has to put it back. It
+    // did not, so quitting Flappy Bird left the whole of FlashNX on its side.
+    crate::backend::render::set_game_rotation(0);
     // Pick the UI language (settings.json → system language → English)
     // before anything draws.
     loc::init();
