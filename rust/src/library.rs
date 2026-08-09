@@ -890,6 +890,11 @@ pub fn home_rows_visible() -> usize {
     }
 }
 
+/// Rows skipped by Left/Right in LISTE. Five, not a screenful: a screenful is
+/// what a page jump is for, and it would land on a row with none of the titles
+/// you were reading still visible.
+pub const LIST_SKIP: usize = 5;
+
 /// Games skipped by one page jump.
 ///
 /// BANDE and ETAGERE put every game on row 0, so `gallery_neighbor` — which looks
@@ -3480,11 +3485,24 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
     // No wrap-around.
     match button {
         "Left" | "StickLLeft" => {
-            if total > 0 && selection > 0 { selection -= 1; }
+            // In LISTE the rows run vertically, so Left/Right did exactly what
+            // Up/Down did — one row — and two of the four directions were dead
+            // weight. They skip instead, which is what they are for in a list.
+            if crate::loc::home_view() == 1 {
+                selection = selection.saturating_sub(LIST_SKIP);
+            } else if total > 0 && selection > 0 {
+                selection -= 1;
+            }
             scroll = gallery_scroll_for(selection, scroll);
         }
         "Right" | "StickLRight" => {
-            if total > 0 && selection + 1 < total { selection += 1; }
+            if crate::loc::home_view() == 1 {
+                if total > 0 {
+                    selection = (selection + LIST_SKIP).min(total - 1);
+                }
+            } else if total > 0 && selection + 1 < total {
+                selection += 1;
+            }
             scroll = gallery_scroll_for(selection, scroll);
         }
         "Up" | "StickLUp" => {
@@ -5538,7 +5556,13 @@ fn maybe_arm_startup_migrations() {
 /// DistantHistoryConfirm=6) are handled EXPLICITLY in their own handlers instead
 /// (they defer the mutation too — see `PendingClose`), so they're not listed here.
 fn modal_close_deferred(kind: u8) -> bool {
-    matches!(kind, 1 | 3 | 4 | 5 | 9 | 10 | 11)
+    // A hand-kept list of ids, which is why the AFFICHAGE HOME picker (18) opened
+    // with a pop and then vanished on close: adding a modal means remembering to
+    // add its number here, and nothing complains when you forget. The set is the
+    // panels that close to a NON-modal screen; the ones left out either close to
+    // another modal (which scales the new panel in itself) or carry a deferred
+    // mutation of their own. Worth deriving rather than enumerating.
+    matches!(kind, 1 | 3 | 4 | 5 | 9 | 10 | 11 | 18)
 }
 
 /// Draw the JOUER gallery (snapshot + draw) — shared by the List screen and the

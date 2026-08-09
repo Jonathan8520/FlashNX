@@ -7280,24 +7280,10 @@ impl SwitchRenderBackend {
         let ss = 1.8;
         self.draw_text(40.0, 67.7, ss, &sub, swf::Color::from_rgb(0xAABFD8, 255));
 
-        // Right flank: the active sort. It was readable only by opening the sort
-        // modal, and the same 444 px of empty banner row was there for it.
-        let lc = crate::loc::s();
-        let sort = match crate::library::sort_mode_index() {
-            1 => lc.sort_recent,
-            2 => lc.sort_recent_played,
-            3 => lc.sort_played,
-            4 => lc.sort_size,
-            _ => lc.sort_alpha,
-        };
-        let sortw = self.measure_text(sort, ss);
-        self.draw_text(
-            1240.0 - sortw,
-            67.7,
-            ss,
-            sort,
-            swf::Color::from_rgb(0x99AABB, 255),
-        );
+        // The right flank stays empty on purpose. It briefly carried the active
+        // sort, put there because the space was free — which is not a reason. The
+        // sort is already one Y away and named in the modal that changes it, so a
+        // permanent word for it was noise on every screen.
     }
 
     /// Gold diamond on a dark chip, the favourite marker. The UI font has no star
@@ -7423,12 +7409,19 @@ impl SwitchRenderBackend {
             CoverTex::Image { tex, w: iw, h: ih } if iw > 0 && ih > 0 => (iw as f32, ih as f32, Some(tex)),
             _ => (4.0, 3.0, None),
         };
-        let box_aspect = w / h.max(1.0);
+        // The art is fitted into the box MINUS the caption, not into the whole
+        // box. Fitting into `h` meant a cover as tall as its panel took all of it
+        // and the caption then landed entirely BELOW the box — in LISTE that put
+        // the facts line at y668..680 straight through the footer at y678.
+        // `caption_h` is documented as a reserve, so it has to be subtracted
+        // before the fit and not merely used to bias the centring.
+        let art_h = (h - caption_h).max(1.0);
+        let box_aspect = w / art_h;
         let img_aspect = iw / ih;
         let (mut dw, mut dh) = if img_aspect > box_aspect {
             (w, w / img_aspect)
         } else {
-            (h * img_aspect, h)
+            (art_h * img_aspect, art_h)
         };
         // Never blow a cover up more than 2x. Some logos are 156 px wide; filling
         // a 340 px box with one turns it to mush, and small-but-sharp reads better
