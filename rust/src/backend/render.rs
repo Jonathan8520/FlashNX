@@ -7749,16 +7749,11 @@ impl SwitchRenderBackend {
         }
 
         // ── Title list, clipped to its band ──
-        let vh = self.dimensions.height as f32;
-        unsafe {
-            glEnable(GL_SCISSOR_TEST);
-            glScissor(
-                0,
-                (vh - band_bot).max(0.0) as GLint,
-                vw as GLsizei,
-                (band_bot - band_top).max(0.0) as GLsizei,
-            );
-        }
+        // The top-left to bottom-left flip lives in `set_clip` alone. Spelled out
+        // per view, one wrong sign moved the clipped band by its own height and
+        // surfaced as a row bleeding over the footer in ONE layout out of four,
+        // which costs a build and a netload to see.
+        self.set_clip(0.0, band_top, vw, band_bot - band_top);
         // Highlight bar eased on its OWN track: the rows already glide with the
         // scroll, but between two rows of the same screenful the scroll does not
         // move, and a bar pinned to the discrete selection would jump while
@@ -7813,9 +7808,7 @@ impl SwitchRenderBackend {
             // the only one of the three out of line.
             self.draw_text(text_x, y + 10.0, 2.0, &label, col);
         }
-        unsafe {
-            glDisable(GL_SCISSOR_TEST);
-        }
+        self.clear_clip();
 
         // Position bar. This was the only scrolling view in the app with no
         // feedback at all — GRILLE has a scrollbar, the horizontal layouts have a
@@ -8549,17 +8542,10 @@ impl SwitchRenderBackend {
             };
         }
 
-        // Clip to the gallery band. GL scissor is bottom-left origin while our
-        // pixels are top-left, so flip: y = vh - band_bot, height = band height.
-        unsafe {
-            glEnable(GL_SCISSOR_TEST);
-            glScissor(
-                0,
-                (vh - band_bot).max(0.0) as GLint,
-                vw as GLsizei,
-                (band_bot - band_top).max(0.0) as GLsizei,
-            );
-        }
+        // Clip to the gallery band. `set_clip` owns the top-left/bottom-left
+        // conversion: every view that re-derived it had to be hunted down and
+        // re-checked whenever the band geometry moved, and it moved often.
+        self.set_clip(0.0, band_top, vw, band_bot - band_top);
 
         // Draw the rows that can intersect the band. `scroll_offset` moves at
         // most one row per input, so a ±1 window around it always covers the
@@ -8699,9 +8685,7 @@ impl SwitchRenderBackend {
             self.round_corners(fx - b, fy - b, fw + 2.0 * b, fh + 2.0 * b, 8.0);
         }
 
-        unsafe {
-            glDisable(GL_SCISSOR_TEST);
-        }
+        self.clear_clip();
 
         // Scrollbar — tracks the eased pixel scroll so the thumb glides too.
         if rows_total > rows_visible as u32 {
@@ -10247,16 +10231,11 @@ impl SwitchRenderBackend {
             };
         }
 
-        // Clip to the grid band (GL scissor is bottom-left origin; flip Y).
-        unsafe {
-            glEnable(GL_SCISSOR_TEST);
-            glScissor(
-                0,
-                (vh - band_bot).max(0.0) as GLint,
-                vw as GLsizei,
-                (band_bot - band_top).max(0.0) as GLsizei,
-            );
-        }
+        // Clip to the grid band through `set_clip`, the one place the Y flip is
+        // written down. The copy that used to sit here read `vh` from fifty lines
+        // away, so moving the band and forgetting this line clipped the wrong
+        // half of the screen with nothing to warn at compile time.
+        self.set_clip(0.0, band_top, vw, band_bot - band_top);
 
         for i in 0..n {
             let col = (i % cols) as f32;
@@ -10349,9 +10328,7 @@ impl SwitchRenderBackend {
             }
         }
 
-        unsafe {
-            glDisable(GL_SCISSOR_TEST);
-        }
+        self.clear_clip();
 
         // Scrollbar (right edge) when there's more than one screenful, tracking
         // the eased pixel scroll.
