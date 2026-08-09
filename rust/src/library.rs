@@ -589,11 +589,6 @@ pub(crate) struct Entry {
     /// first" sort. Relative order is reliable even with a wrong console clock
     /// (all files are stamped by the same clock).
     pub mtime: u64,
-    /// archive.org item id this game was imported from, read from the `<swf>.url`
-    /// sidecar at scan time. Empty for hand-copied files and for non-archive.org
-    /// imports. Lets the IMPORTER list count how many of an item's files are
-    /// already on SD without touching the filesystem again.
-    pub source_item: std::string::String,
 }
 
 pub(crate) struct State {
@@ -686,7 +681,15 @@ pub(crate) struct State {
     /// "added on", and the favorite pin; a URL never opened has no count yet.
     /// Favorites live here rather than in `favorites.json` (which is keyed by
     /// game basename) so all per-URL data stays in one file.
-    pub(crate) url_meta: std::vec::Vec<(std::string::String, u32, u64, bool)>,
+    /// Per-URL side data: `(url, total_swf, added_epoch, favorite, have)`.
+    ///
+    /// `have` is how many of the item's `.swf` files are already on the card,
+    /// counted BY NAME -- the same question the OK badge and the A-press guard
+    /// ask. It is cached because the IMPORTER home lists every saved URL without
+    /// fetching any of their file lists, so the count cannot be recomputed there;
+    /// it is refreshed each time the item's list is opened, and bumped on every
+    /// download from it.
+    pub(crate) url_meta: std::vec::Vec<(std::string::String, u32, u64, bool, u32)>,
     /// True once `load_history_meta_from_sd` has a TRUSTWORTHY view of the meta
     /// file (parsed, or confirmed absent). False after a read/parse error, which
     /// blocks saving so we can't clobber a table we failed to read. Mirrors
@@ -1300,8 +1303,8 @@ fn log_scan_breakdown(entries: usize) {
     };
     log(&std::format!(
         "boot: scan {} games — swf header {:.0} ms | .filesize {:.0} ms | .meta.json {:.0} ms \
-         | .url {:.0} ms | log {:.0} ms\n",
-        entries, ms(0), ms(1), ms(2), ms(3), ms(4),
+         | log {:.0} ms\n",
+        entries, ms(0), ms(1), ms(2), ms(4),
     ));
 }
 
@@ -1346,7 +1349,6 @@ pub fn add_path(path: &str, mtime: u64) -> bool {
     // Which import source this game came from (its `.url` sidecar). Read here,
     // alongside the other sidecars, so the IMPORTER list can count an item's
     // installed files in memory instead of hitting the SD every frame.
-    let source_item = scan_timed(3, || read_source_item(path));
     let entry = Entry {
         path: path.to_string(),
         display_name,
@@ -1357,7 +1359,6 @@ pub fn add_path(path: &str, mtime: u64) -> bool {
         is_as3,
         color_chip,
         mtime,
-        source_item,
     };
     scan_timed(4, || {
         log(&std::format!(
@@ -1585,7 +1586,7 @@ fn load_history_meta_from_sd() {
         log("library: history meta is not an array (will NOT overwrite)\n");
         return;
     };
-    let mut list: std::vec::Vec<(std::string::String, u32, u64, bool)> =
+    let mut list: std::vec::Vec<(std::string::String, u32, u64, bool, u32)> =
         std::vec::Vec::with_capacity(arr.len());
     for row in arr {
         let Some(cells) = row.as_array() else { continue };
@@ -1595,13 +1596,40 @@ fn load_history_meta_from_sd() {
         let total = cells.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         let added = cells.get(2).and_then(|v| v.as_u64()).unwrap_or(0);
         let fav = cells.get(3).and_then(|v| v.as_bool()).unwrap_or(false);
-        list.push((url.to_string(), total, added, fav));
+        // Absent in files written before the field existed: 0 until the item's
+        // list is opened once, which recomputes it.
+        let have = cells.get(4).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        list.push((url.to_string(), total, added, fav, have));
     }
     if let Ok(mut s) = LIBRARY.lock() {
         log(&std::format!("library: history meta LOADED {} entrie(s)\n", list.len()));
         s.url_meta = list;
         s.meta_loaded = true;
     }
+}
+
+/// One more file from `source_url`'s archive.org item is on the card.
+///
+/// Matched on the ITEM id rather than the URL string, because `url_meta` is keyed
+/// on what the user saved (a `/details/` link, or a bare item id) while a
+/// download carries a `/download/<item>/<file>` link.
+fn bump_url_have(source_url: &str) {
+    let Some(item) = crate::net::extract_item_id(source_url).map(|i| i.to_lowercase()) else {
+        return;
+    };
+    let Ok(mut s) = LIBRARY.lock() else { return };
+    let Some(slot) = s.url_meta.iter_mut().find(|(u, _, _, _, _)| {
+        crate::net::extract_item_id(u).map(|i| i.to_lowercase()).as_deref() == Some(item.as_str())
+    }) else {
+        return;
+    };
+    // Never past the item's own file count: the cached total can be stale, and a
+    // row reading "82 / 81" would be worse than one lagging by a file.
+    if slot.1 > 0 && slot.4 >= slot.1 {
+        return;
+    }
+    slot.4 += 1;
+    save_history_meta(&mut s);
 }
 
 /// Persist the side-data table, dropping rows for URLs no longer in the history
@@ -1619,7 +1647,7 @@ fn save_history_meta(s: &mut State) {
         return;
     }
     let history = s.url_history.clone();
-    s.url_meta.retain(|(u, _, _, _)| history.iter().any(|h| h == u));
+    s.url_meta.retain(|(u, _, _, _, _)| history.iter().any(|h| h == u));
     let snapshot = s.url_meta.clone();
     match serde_json::to_string(&snapshot) {
         Ok(json) => match std::fs::write(HISTORY_META_PATH, json.as_bytes()) {
@@ -1639,14 +1667,31 @@ fn save_history_meta(s: &mut State) {
 /// keeping whatever added-date the row already carries.
 fn remember_url_total(url: &str, total: u32) {
     let Ok(mut s) = LIBRARY.lock() else { return };
-    match s.url_meta.iter_mut().find(|(u, _, _, _)| u == url) {
+    // Recount while the item's file list IS in memory: this is the only moment
+    // the names are known, and the IMPORTER home has to show the figure later
+    // without them. By NAME, exactly like the OK badge that will be drawn from
+    // the same list one frame from now.
+    let have = s
+        .remote_files
+        .iter()
+        .filter(|f| {
+            let name: std::string::String = f
+                .name
+                .chars()
+                .map(|c| if matches!(c, '/' | '\\') { '_' } else { c })
+                .collect();
+            s.entries.iter().any(|e| e.basename == name)
+        })
+        .count() as u32;
+    match s.url_meta.iter_mut().find(|(u, _, _, _, _)| u == url) {
         Some(slot) => {
-            if slot.1 == total {
+            if slot.1 == total && slot.4 == have {
                 return; // unchanged — no need to rewrite the card
             }
             slot.1 = total;
+            slot.4 = have;
         }
-        None => s.url_meta.push((url.to_string(), total, now_epoch(), false)),
+        None => s.url_meta.push((url.to_string(), total, now_epoch(), false, have)),
     }
     save_history_meta(&mut s);
 }
@@ -1656,20 +1701,20 @@ fn remember_url_total(url: &str, total: u32) {
 pub(crate) fn url_is_favorite(s: &State, url: &str) -> bool {
     s.url_meta
         .iter()
-        .find(|(u, _, _, _)| u == url)
-        .map(|(_, _, _, f)| *f)
+        .find(|(u, _, _, _, _)| u == url)
+        .map(|(_, _, _, f, _)| *f)
         .unwrap_or(false)
 }
 
 /// Flip a saved URL's favorite state and persist. Returns the NEW state.
 fn toggle_url_favorite(s: &mut State, url: &str) -> bool {
-    let now_fav = match s.url_meta.iter_mut().find(|(u, _, _, _)| u == url) {
+    let now_fav = match s.url_meta.iter_mut().find(|(u, _, _, _, _)| u == url) {
         Some(slot) => {
             slot.3 = !slot.3;
             slot.3
         }
         None => {
-            s.url_meta.push((url.to_string(), 0, now_epoch(), true));
+            s.url_meta.push((url.to_string(), 0, now_epoch(), true, 0));
             true
         }
     };
@@ -1811,21 +1856,6 @@ pub(crate) fn scanned_game_paths() -> std::vec::Vec<std::string::String> {
 /// when there's no sidecar (hand-copied file) or the source wasn't archive.org
 /// (a direct `.swf` URL or a Flashpoint GameZIP — those are matched by filename
 /// instead, so they need no id).
-fn read_source_item(swf_path: &str) -> std::string::String {
-    let path = std::format!("{}.url", swf_path);
-    if !file_exists(&path) {
-        return std::string::String::new();
-    }
-    let Ok(url) = read_sd_text(&path, 4096) else {
-        return std::string::String::new();
-    };
-    if !url.contains("archive.org") {
-        return std::string::String::new();
-    }
-    crate::net::extract_item_id(url.trim())
-        .map(|id| id.to_lowercase())
-        .unwrap_or_default()
-}
 
 /// Record `url` in the history if it's new. Saves to SD.
 ///
@@ -1845,7 +1875,7 @@ fn push_history(url: &str) {
             return;
         }
         // New entry: stamp when it was saved (shown in its options modal).
-        s.url_meta.push((url.clone(), 0, now_epoch(), false));
+        s.url_meta.push((url.clone(), 0, now_epoch(), false, 0));
         s.url_history.push(url);
         // Hard ceiling only as a runaway guard (a corrupt writer, not a user):
         // dropping someone's oldest import to make room is never what they
@@ -3841,15 +3871,19 @@ fn importer_progress(s: &State, url: &str) -> (u32, Option<u32>) {
         let have = s.entries.iter().any(|e| e.basename == name);
         return (have as u32, Some(1));
     }
-    let total = s
-        .url_meta
-        .iter()
-        .find(|(u, _, _, _)| u == url)
-        .map(|(_, n, _, _)| *n);
-    let Some(id) = crate::net::extract_item_id(raw.as_str()).map(|i| i.to_lowercase()) else {
-        return (0, total);
-    };
-    let have = s.entries.iter().filter(|e| e.source_item == id).count() as u32;
+    // Both numbers come from the cache, because this row is drawn for every saved
+    // URL and none of their file lists are in memory.
+    //
+    // `have` used to be counted from the `.url` sidecars instead
+    // (`entries.filter(source_item == id)`), which answered a different question
+    // than the OK badge in the file list -- the badge asks whether a game of that
+    // NAME is on the card. On an 81-file item that read "2 / 81" under a dozen
+    // ticked rows. The sidecars exist for bug-report attribution, not as an
+    // inventory, and the A-press guard already treats the name as the identity,
+    // so the name is what both now count.
+    let row = s.url_meta.iter().find(|(u, _, _, _, _)| u == url);
+    let total = row.map(|(_, n, _, _, _)| *n);
+    let have = row.map(|(_, _, _, _, h)| *h).unwrap_or(0);
     // The cached total predates any file we've since downloaded, so never let
     // the badge read "5/3" if the item grew or the cache is stale.
     (have, total.map(|t| t.max(have)))
@@ -6409,8 +6443,8 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 let added = s
                     .url_meta
                     .iter()
-                    .find(|(u, _, _, _)| u == &url)
-                    .map(|(_, _, t, _)| *t)
+                    .find(|(u, _, _, _, _)| u == &url)
+                    .map(|(_, _, t, _, _)| *t)
                     .unwrap_or(0);
                 let fav = url_is_favorite(&s, &url);
                 Some((url, have, total, direct, added, fav))
@@ -6544,33 +6578,19 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             }
         }
         Screen::DistantFiles { selection, scroll_offset } => {
-            // Session-downloaded basenames, plus the games on the card that came
-            // FROM THIS ITEM. The second half used to match on the file name
-            // alone, which is how browsing an 81-file item showed a dozen "OK"
-            // badges against a counter reading 2: fifteen of that item's names —
-            // Pacxon.swf, Sonic Flash.swf, Super Mario 63.swf — also existed in
-            // the library from somewhere else entirely. The badge claimed those
-            // files were already downloaded, so the real ones would never be
-            // fetched, and fetching one would have overwritten the game already
-            // sitting under that name.
-            //
-            // `source_item` comes from the `.url` sidecar, the same question
-            // `importer_progress` asks for the "2 / 81" count, so the badge and
-            // the counter can no longer disagree. (The cross-session case the old
-            // fallback was added for still works: the sidecar outlives the boot.)
+            // A file is marked when a game of that NAME is on the card, which is
+            // the same question the A-press guard asks before refusing to
+            // download (`handle_distant_files_input`). That guard is the reason
+            // the rule has to be the name and nothing else: the app already
+            // treats "a file of this name exists" as "you have it", so a badge
+            // that disagreed would promise a download the button then refuses.
             let (files, marked, filter, total, under) = LIBRARY
                 .lock()
                 .ok()
                 .map(|s| {
-                    let item = crate::net::extract_item_id(&s.pending_fetch_url)
-                        .map(|i| i.to_lowercase())
-                        .unwrap_or_default();
                     let mut marked = s.downloaded_basenames.clone();
                     for e in &s.entries {
-                        if !item.is_empty()
-                            && e.source_item == item
-                            && !marked.iter().any(|n| n == &e.basename)
-                        {
+                        if !marked.iter().any(|n| n == &e.basename) {
                             marked.push(e.basename.clone());
                         }
                     }
@@ -7232,6 +7252,13 @@ fn on_download_finished() {
             "library: {} downloaded but its SWF header will not parse - no entry created\n",
             out_path,
         ));
+    }
+    // Keep the IMPORTER row's "4 / 81" honest between two openings of the item.
+    // It is recomputed from the file list whenever that list is fetched, but the
+    // user can download several files in a row without leaving the screen, and
+    // the row would otherwise show the figure from before any of them.
+    if added {
+        bump_url_have(&source_url);
     }
     // A `.swf` from archive.org is not always the whole game. When its levels or
     // config live in a companion data file, the game loads that file at startup
