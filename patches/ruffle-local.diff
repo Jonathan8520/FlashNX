@@ -543,6 +543,34 @@ index 2e6e01783..c4cf84d64 100644
          // Default to using bounding box.
          (!options.contains(HitTestOptions::SKIP_INVISIBLE) || self.visible())
              && self.hit_test_bounds(point)
+diff --git a/core/src/display_object/movie_clip.rs b/core/src/display_object/movie_clip.rs
+index baa4a03c5..51b5a3034 100644
+--- a/core/src/display_object/movie_clip.rs
++++ b/core/src/display_object/movie_clip.rs
+@@ -1747,6 +1747,23 @@ impl<'gc> MovieClip<'gc> {
+             }
+         }
+         let hit_target_frame = self.0.current_frame() == frame;
++        // A goto that lands somewhere else than it asked for, said out loud.
++        //
++        // `run_goto` clamps the target to `frames_loaded`, and when the clamp
++        // bites there is no error, no retry and no record: the clip is simply
++        // left where it was, already stopped by `goto_frame`. A movie that asks
++        // to leave frame 1 before frame 2 has streamed in therefore parks on
++        // frame 1 for ever, in total silence. Diagnosing that from the outside
++        // costs hours (see FlashNX issue #76), so it costs one line here.
++        if !hit_target_frame {
++            tracing::warn!(
++                "goto MISSED: wanted={} clamped={} loaded={} now={}",
++                frame,
++                clamped_frame,
++                self.0.frames_loaded(),
++                self.current_frame(),
++            );
++        }
+ 
+         if is_rewind {
+             // Remove all display objects that were created after the
 diff --git a/core/src/lib.rs b/core/src/lib.rs
 index 6e5379213..ea1cfd7ef 100644
 --- a/core/src/lib.rs
