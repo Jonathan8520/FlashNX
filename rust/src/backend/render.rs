@@ -3183,13 +3183,29 @@ fn wrap_words(msg: &str, max_chars: usize) -> std::vec::Vec<std::string::String>
 }
 
 fn truncate_mid(s: &str, max_chars: usize) -> std::string::String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let mut t: std::string::String = s.chars().take(max_chars.saturating_sub(1)).collect();
-        t.push('…');
-        t
+    let n = s.chars().count();
+    if n <= max_chars {
+        return s.to_string();
     }
+    // From the MIDDLE, which is what the name always promised and what the
+    // callers need: these are file names, and what tells two of them apart lives
+    // at the END at least as often as at the start. Cutting the tail turned the
+    // four "Scooby-Doo: Mayan Monster Mayhem Episode N - ..." into four
+    // identical rows. Keeping both ends costs nothing and keeps the episode.
+    let keep = max_chars.saturating_sub(1);
+    if keep < 4 {
+        // Too narrow to show both ends meaningfully: a head plus the mark reads
+        // better than two one-letter stubs.
+        let mut t: std::string::String = s.chars().take(keep).collect();
+        t.push('…');
+        return t;
+    }
+    let head = keep / 2;
+    let tail = keep - head;
+    let mut t: std::string::String = s.chars().take(head).collect();
+    t.push('…');
+    t.extend(s.chars().skip(n - tail));
+    t
 }
 
 /// One library tile's layout (row index + horizontal center), shared from the

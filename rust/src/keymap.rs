@@ -1124,7 +1124,14 @@ pub fn set_screen_filter(mode: u8) {
     // indistinguishable from "never touched" and the game would drift back to the
     // default the next time it changes.
     let path = primary_path(&std::format!("{}.filter", basename));
-    if std::fs::write(&path, std::format!("{}", mode).as_bytes()).is_err() {
+    if let Err(e) = std::fs::write(&path, std::format!("{}", mode).as_bytes()) {
+        // Said out loud, because a swallowed failure here looks like a dead
+        // button: the row's label is rebuilt by RE-READING this file, so it never
+        // moves, and the next value is derived from the same unchanged file, so
+        // pressing again re-applies exactly what was there. Nothing on screen
+        // distinguishes that from a control that does not respond.
+        log(&std::format!("keymap: screen filter for {} not saved: {}
+", basename, e));
         return;
     }
     crate::sd::commit();
@@ -1153,7 +1160,10 @@ pub fn set_display_mode(mode: u8) {
 /// difference between a deliberate INTEGRAL and a game nobody ever set.
 pub fn set_display_mode_for(basename: &str, mode: u8) {
     let path = primary_path(&std::format!("{}.display", basename));
-    if std::fs::write(&path, std::format!("{}", mode).as_bytes()).is_err() {
+    if let Err(e) = std::fs::write(&path, std::format!("{}", mode).as_bytes()) {
+        // Same frozen-row failure as the screen filter above.
+        log(&std::format!("keymap: display mode for {} not saved: {}
+", basename, e));
         return;
     }
     crate::sd::commit();
@@ -1233,14 +1243,11 @@ pub fn set_cursor_speed(idx: i32) {
     let Some(basename) = active_game_basename() else {
         return;
     };
-    let path = primary_path(&std::format!("{}.cursor", basename));
-    if idx < 0 {
-        let _ = std::fs::remove_file(&path);
-    } else if std::fs::write(&path, std::format!("{}", idx).as_bytes()).is_err() {
-        return;
+    // Shares `write_cursor_speed` with the by-basename variant so the two cannot
+    // drift, and so this one reports its failures like the rest.
+    if write_cursor_speed(&basename, idx) {
+        mark_controls_touched(&basename);
     }
-    crate::sd::commit();
-    mark_controls_touched(&basename);
 }
 
 // ── Show-cursor toggle (per-game pointer visibility) ────────────────────────

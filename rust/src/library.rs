@@ -919,6 +919,20 @@ fn nav_is_diagonal() -> bool {
 /// you were reading still visible.
 pub const LIST_SKIP: usize = 5;
 
+/// Games skipped by ZL / ZR: a whole SCREENFUL, not the short hop Up/Down make.
+///
+/// A 79-game library is sixteen rows of grid and the only ways across it were one
+/// tile at a time or the search. ZL and ZR were free on this screen: the only
+/// thing that reads them is the hidden ZL+ZR chord, which is acted on in the
+/// Flashpoint results grid and nowhere else.
+pub fn home_page_jump() -> usize {
+    match crate::loc::home_view() {
+        1 => 13,                       // LISTE: the rows on screen
+        2 | 3 => 5,                    // BANDE / ETAGERE: the covers on screen
+        _ => GALLERY_ROWS_VISIBLE * 5, // GRILLE: a screenful of tiles
+    }
+}
+
 /// Games skipped by one page jump.
 ///
 /// BANDE and ETAGERE put every game on row 0, so `gallery_neighbor` — which looks
@@ -3608,6 +3622,16 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
             }
             scroll = gallery_scroll_for(selection, scroll);
         }
+        "ZL" => {
+            selection = selection.saturating_sub(home_page_jump());
+            scroll = gallery_scroll_for(selection, scroll);
+        }
+        "ZR" => {
+            if total > 0 {
+                selection = (selection + home_page_jump()).min(total - 1);
+            }
+            scroll = gallery_scroll_for(selection, scroll);
+        }
         "A" => {
             let Some(&abs) = filtered.get(selection) else { return; };
             if let Some(entry) = s.entries.get(abs) {
@@ -4118,6 +4142,36 @@ fn run_fix_url_flow(failed: &str) {
 /// DistantUrlOptions > edit: swkbd prefilled with the existing URL. Commit
 /// replaces it (empty input deletes it), persists, returns to the list. Called
 /// from `input()` only.
+/// Leave a modal for `target`, scaling the panel OUT first when there is a panel
+/// to scale.
+///
+/// The generic interception lives in `input()`, on the value of `s.screen`
+/// before and after a button is handled. A flow HOISTED out of that path -- one
+/// that opens the system keyboard and then assigns `s.screen` itself -- skips it
+/// entirely, which is why editing a saved URL closed its panel with a hard cut
+/// while every other panel shrank. This is the door those flows go through
+/// instead of assigning directly.
+///
+/// Falls back to the instant swap when there is nothing to animate (the current
+/// screen is not a modal, or the target is another modal, which scales itself
+/// in). Never use it for a close that carries a MUTATION: those must run after
+/// the pop, which is what `PendingClose`'s own variants are for.
+fn close_modal_to(s: &mut State, target: Screen) {
+    let from = s.screen;
+    if modal_kind(from) != 0
+        && modal_kind(target) == 0
+        && target != from
+        && !crate::backend::render::modal_close_active()
+    {
+        if let Ok(mut p) = PENDING_AFTER_CLOSE.lock() {
+            *p = Some(PendingClose::Goto(target));
+        }
+        crate::backend::render::modal_close_begin();
+        return; // `s.screen` stays put so the panel is still drawn while it shrinks
+    }
+    s.screen = target;
+}
+
 fn run_edit_url_flow(url_idx: usize) {
     let prefill = LIBRARY
         .lock()
@@ -4140,7 +4194,8 @@ fn run_edit_url_flow(url_idx: usize) {
             let snapshot = s.url_history.clone();
             save_history_to_sd(&snapshot);
         }
-        s.screen = distant_idle_at(importer_row_for_abs(&s, url_idx));
+        let target = distant_idle_at(importer_row_for_abs(&s, url_idx));
+        close_modal_to(&mut s, target);
     }
 }
 
