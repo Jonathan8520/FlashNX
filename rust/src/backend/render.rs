@@ -7749,6 +7749,14 @@ impl SwitchRenderBackend {
     /// at all: no tiles, no rows, no cover, no word. It was only ever mitigated by
     /// the header's "0 / 77" count, which is a side effect and not a message.
     fn draw_home_empty(&mut self, band_top: f32, band_bot: f32) {
+        // Cleared FIRST. The four layouts return early from here without
+        // publishing a layout, so the cache would still hold the cells of the
+        // last non-empty frame — and `gallery_hit_test` walks exactly that list,
+        // so a tap on the empty page would select a game that is not in the list
+        // any more, then launch it on the second tap.
+        if let Ok(mut g) = gallery_cache().lock() {
+            *g = (std::vec::Vec::new(), 0);
+        }
         let msg = crate::loc::s().cover_none;
         let sc = 2.5;
         let w = self.measure_text(msg, sc);
