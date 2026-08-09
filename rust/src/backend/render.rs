@@ -7241,7 +7241,12 @@ impl SwitchRenderBackend {
         // target height so it doesn't dominate the screen.
         let banner_y = 46.0;
         if banner_tex != 0 && banner_w > 0 && banner_h > 0 {
-            let target_h = 72.0;
+            // 56, not 72. The header band was 81% bare page colour: the banner is
+            // 720×144 so the old target resolved to exactly 0.5 → 360×72, and the
+            // count line sat alone on a full-width row under it. At 56 the logo
+            // draws 280×56 and the count moves into the space beside it, which
+            // gives the content band 30 px back without losing either element.
+            let target_h = 56.0;
             let scale = (target_h / banner_h as f32).min((vw - 64.0) / banner_w as f32);
             let draw_w = banner_w as f32 * scale;
             let draw_h = banner_h as f32 * scale;
@@ -7268,17 +7273,30 @@ impl SwitchRenderBackend {
             ),
             _ => crate::loc::games_count(shown),
         };
-        // Sits between the banner (ends at 118) and the content band. At scale 2
-        // from y=128 it was 14 px tall, so it reached into that band and the tiles
-        // drawn after it ran over it while scrolling. 1.8 from 120 ends at ~133.
+        // In the banner's LEFT flank, vertically centred in the 46..102 band,
+        // rather than centred on its own row below. This line is also the only
+        // indicator that a filter is active, so it stays visible in every layout —
+        // it is not decoration that could be dropped to save the row.
         let ss = 1.8;
-        let sw = self.measure_text(&sub, ss);
+        self.draw_text(40.0, 67.7, ss, &sub, swf::Color::from_rgb(0xAABFD8, 255));
+
+        // Right flank: the active sort. It was readable only by opening the sort
+        // modal, and the same 444 px of empty banner row was there for it.
+        let lc = crate::loc::s();
+        let sort = match crate::library::sort_mode_index() {
+            1 => lc.sort_recent,
+            2 => lc.sort_recent_played,
+            3 => lc.sort_played,
+            4 => lc.sort_size,
+            _ => lc.sort_alpha,
+        };
+        let sortw = self.measure_text(sort, ss);
         self.draw_text(
-            (vw - sw) * 0.5,
-            120.0,
+            1240.0 - sortw,
+            67.7,
             ss,
-            &sub,
-            swf::Color::from_rgb(0xAABFD8, 255),
+            sort,
+            swf::Color::from_rgb(0x99AABB, 255),
         );
     }
 
