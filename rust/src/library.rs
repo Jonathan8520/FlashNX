@@ -870,13 +870,27 @@ pub const GALLERY_ROWS_VISIBLE: usize = 3;
 
 /// Rows of the JOUER content band visible at once, for the layout in use. The
 /// scroll clamp and the renderer both read this, so they cannot drift apart when
-/// the view changes: the grid fits 3 rows of covers, the list 10 rows of text,
-/// and the strip is a single row by definition.
+/// the view changes: the grid fits 3 rows of covers, the list 13 rows of text,
+/// and the single-row layouts are one row by definition.
 pub fn home_rows_visible() -> usize {
     match crate::loc::home_view() {
         1 => 13,
         2 | 3 => 1,
         _ => GALLERY_ROWS_VISIBLE,
+    }
+}
+
+/// Games skipped by one page jump.
+///
+/// BANDE and ETAGERE put every game on row 0, so `gallery_neighbor` — which looks
+/// for the nearest cell in the ADJACENT row — never finds anything and Up/Down do
+/// nothing at all in them. Crossing a 77-game library then costs 77 presses of
+/// Left/Right. Up/Down become a page jump there instead of staying inert.
+pub fn home_page_step() -> usize {
+    match crate::loc::home_view() {
+        1 => 13,                       // LISTE: one screenful
+        2 | 3 => 10,                   // BANDE / ETAGERE
+        _ => GALLERY_ROWS_VISIBLE * 5, // GRILLE: one screenful of tiles
     }
 }
 
@@ -2583,8 +2597,8 @@ pub fn input(button: &str) -> bool {
         Screen::BugResult => {
             if matches!(button, "A" | "B" | "Minus") {
                 s.bug_msg.clear();
-                // Back to the RÉGLAGES tab, cursor on SIGNALER UN BUG.
-                s.screen = Screen::SettingsModal { selection: 2 };
+                // Back to the RÉGLAGES tab, cursor on SIGNALER UN BUG (row 3).
+                s.screen = Screen::SettingsModal { selection: 3 };
             }
             true
         }
@@ -2759,7 +2773,8 @@ fn handle_settings_prefs_input(s: &mut State, button: &str, mut selection: usize
             }
         }
         "B" | "Minus" => {
-            s.screen = Screen::SettingsModal { selection: 2 };
+            // Back to REGLAGES PAR DEFAUT (row 1), the row that opened this.
+            s.screen = Screen::SettingsModal { selection: 1 };
             return;
         }
         _ => {}
@@ -2839,7 +2854,8 @@ fn handle_bug_picker_input(s: &mut State, button: &str, mut selection: usize, mu
             scroll = clamp_scroll(scroll, selection, BUG_PICKER_VISIBLE_ROWS);
         }
         "B" => {
-            s.screen = Screen::SettingsModal { selection: 2 };
+            // Back to SIGNALER UN BUG (row 3), the row that opened the picker.
+            s.screen = Screen::SettingsModal { selection: 3 };
             return;
         }
         // A is hoisted in input() (swkbd + HTTPS POST run without the lock).
@@ -3095,6 +3111,13 @@ fn run_open_profiles_flow(game_idx: usize) {
         active_id,
     ));
     if let Ok(mut s) = LIBRARY.lock() {
+        // The picker modal sizes itself to its row count and is centred, with no
+        // window and no scroll: 140 + 52*rows + 60 px tall. Past 10 rows that is
+        // taller than the 720 px screen and its top edge goes negative, so the
+        // first entries are drawn off-screen and cannot be reached. The preview
+        // list is already capped the same way (`cap_preview_rows`).
+        let mut matches = matches;
+        matches.truncate(10);
         s.profile_matches = matches;
         s.active_profile_id = active_id;
         s.screen = Screen::ProfileList { game_idx, selection: 0 };
@@ -3425,11 +3448,23 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
             scroll = gallery_scroll_for(selection, scroll);
         }
         "Up" | "StickLUp" => {
-            if let Some(ns) = gallery_neighbor(selection, -1) { selection = ns; }
+            // Single-row layouts have no adjacent row for `gallery_neighbor` to
+            // find, so Up/Down would be inert there. They page instead.
+            if matches!(crate::loc::home_view(), 2 | 3) {
+                selection = selection.saturating_sub(home_page_step());
+            } else if let Some(ns) = gallery_neighbor(selection, -1) {
+                selection = ns;
+            }
             scroll = gallery_scroll_for(selection, scroll);
         }
         "Down" | "StickLDown" => {
-            if let Some(ns) = gallery_neighbor(selection, 1) { selection = ns; }
+            if matches!(crate::loc::home_view(), 2 | 3) {
+                if total > 0 {
+                    selection = (selection + home_page_step()).min(total - 1);
+                }
+            } else if let Some(ns) = gallery_neighbor(selection, 1) {
+                selection = ns;
+            }
             scroll = gallery_scroll_for(selection, scroll);
         }
         "A" => {
@@ -6751,7 +6786,14 @@ fn on_download_finished() {
     // card and no way for the user to know what went wrong (issue #73, where the
     // same URL was retried four times with the same mute result). Check the magic
     // bytes here, while we still know which URL to blame.
-    let expect_zip = zip_extract.is_some();
+    // `download_zip_extract` is Some on BOTH Flashpoint branches: for a zipped
+    // game it is where the temp .zip will extract to, but for a non-zipped one it
+    // IS the .swf being downloaded straight from the htdocs mirror (see the
+    // comment where it is set). Deciding the expected magic from it alone tested
+    // every legacy Flashpoint game's valid FWS/CWS against PK\x03\x04, deleted the
+    // good file and reported a bad address — the whole loose-import path, killed
+    // by the check meant to protect it. `fp_direct` is the flag that separates them.
+    let expect_zip = zip_extract.is_some() && !fp_direct;
     let head = file_head(&out_path, 4);
     let looks_right = if expect_zip {
         head.starts_with(b"PK\x03\x04")

@@ -3039,9 +3039,17 @@ fn reveal_cover_cache() -> &'static std::sync::Mutex<std::vec::Vec<(std::string:
     &C
 }
 
-/// How many full-res reveal covers stay resident. Two: the game being launched
-/// and the one just quit.
-const REVEAL_CACHE_MAX: usize = 2;
+/// How many full-res covers stay resident.
+///
+/// Was two — the game being launched and the one just quit — which held while the
+/// only full-res consumer was the launch reveal. The LISTE and BANDE layouts broke
+/// that: their detail panel shows the SELECTED game at size, so moving the cursor
+/// asks for a different full-res cover every step. At two entries the cache evicted
+/// on every move and re-decoded, 13 to 24 ms of PNG/JPEG per row, outside the
+/// one-decode-per-frame budget that protects the thumbnail path — a dropped frame
+/// per step for as long as a direction is held. Eight covers a screenful, ~22 MB
+/// worst case at 1126x619.
+const REVEAL_CACHE_MAX: usize = 8;
 
 /// Append one axis-aligned quad (two triangles) in PIXEL space with a flat
 /// colour to a text batch. Layout matches the solid quad VAO: vec2 pos + vec4
@@ -7334,14 +7342,25 @@ impl SwitchRenderBackend {
     /// of a second bitmap program in the frame path. It DOES assume that flat
     /// background — this belongs to the library chrome, not to game rendering.
     fn round_corners(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32) {
+        // EXACTLY the page colour from `library_clear`: glClearColor(0.078, 0.125,
+        // 0.219) is 0x14/0x20/0x38.
+        self.round_corners_on(x, y, w, h, r, 0xFF_14_20_38);
+    }
+
+    /// Same, over a surface that is NOT the page.
+    ///
+    /// The notch colour has to be whatever is actually behind the rect, and that
+    /// is not always the page: the cover picker clears with
+    /// `draw_library_dim_backdrop` (0x0A0F1A) and lays each cell on 0xFF0B1222, so
+    /// rounding its thumbnails with the page navy left four visibly lighter
+    /// patches in every cell — the exact smudge this function's own comment warns
+    /// about.
+    fn round_corners_on(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, bg: u32) {
         let r = r.min(w * 0.5).min(h * 0.5);
         if r <= 0.5 {
             return;
         }
-        // EXACTLY the page colour from `library_clear`: glClearColor(0.078, 0.125,
-        // 0.219) is 0x14/0x20/0x38. A near-miss here does not look like rounding,
-        // it looks like a smudge in each corner.
-        const BG: u32 = 0xFF_14_20_38;
+        let bg_col = bg;
         // One sliver per pixel row of the corner: the notch is the part of the
         // square outside the quarter circle, so its width shrinks as we descend.
         let steps = r.ceil() as i32;
@@ -7353,10 +7372,10 @@ impl SwitchRenderBackend {
             }
             let yt = y + dy;
             let yb = y + h - dy - 1.0;
-            self.draw_overlay_rect(x, yt, inset, 1.0, BG);
-            self.draw_overlay_rect(x + w - inset, yt, inset, 1.0, BG);
-            self.draw_overlay_rect(x, yb, inset, 1.0, BG);
-            self.draw_overlay_rect(x + w - inset, yb, inset, 1.0, BG);
+            self.draw_overlay_rect(x, yt, inset, 1.0, bg_col);
+            self.draw_overlay_rect(x + w - inset, yt, inset, 1.0, bg_col);
+            self.draw_overlay_rect(x, yb, inset, 1.0, bg_col);
+            self.draw_overlay_rect(x + w - inset, yb, inset, 1.0, bg_col);
         }
     }
 
@@ -9762,7 +9781,7 @@ impl SwitchRenderBackend {
             match self.thumb_for(urls[i]) {
                 Some(ThumbTex::Image { tex, w, h }) => {
                     self.draw_textured_rect_cover(cx, cy, cell_w, THUMB_H, tex, w, h);
-                    self.round_corners(cx, cy, cell_w, THUMB_H, 6.0);
+                    self.round_corners_on(cx, cy, cell_w, THUMB_H, 6.0, 0xFF_0B_12_22);
                 }
                 Some(ThumbTex::Failed) => {
                     let q = "?";
