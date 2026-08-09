@@ -39,6 +39,38 @@ extern "C" {
     /// written to `out_size`; null if the font service is unavailable.
     /// Defined in cpp/src/ruffle_bridge.cpp (libnx `pl`).
     fn ruffle_shared_font(kind: core::ffi::c_int, out_size: *mut u32) -> *const u8;
+    fn ruffle_tick_now() -> u64;
+    fn ruffle_tick_freq() -> u64;
+}
+
+fn ms_since(t0: u64) -> u64 {
+    let freq = unsafe { ruffle_tick_freq() };
+    if freq == 0 {
+        return 0;
+    }
+    unsafe { ruffle_tick_now() }.saturating_sub(t0) * 1000 / freq
+}
+
+/// Total ms spent rasterizing glyphs since boot, and how many. Reported next to
+/// the parse cost so the two halves of "Chinese is slow" can be told apart:
+/// one big one-off (fontdue unfolding every glyph in the font) versus a per-
+/// character cost that the persistent `glyph_cache` already removes.
+static RASTER_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static RASTER_N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Log the running total every 50 glyphs — enough to see the shape of the cost
+/// without a line per character. A whole UI is a few hundred glyphs, so this is
+/// a handful of lines a session and none at all once the cache is warm.
+fn note_raster(ms: u64) {
+    RASTER_MS.fetch_add(ms, core::sync::atomic::Ordering::Relaxed);
+    let n = RASTER_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+    if n % 50 == 0 {
+        log(&std::format!(
+            "glyphs: rasterized {} glyphs, {} ms total\n",
+            n,
+            RASTER_MS.load(core::sync::atomic::Ordering::Relaxed),
+        ));
+    }
 }
 
 /// Headroom `fontdue` needs to expand the shared CJK font. Probed with a
@@ -121,9 +153,40 @@ pub struct GlyphInfo {
     pub blank: bool,
 }
 
+/// One rasterized glyph's ink, kept ACROSS renderer lifetimes.
+///
+/// The atlas texture belongs to a renderer and dies with it, so every game quit
+/// cost a full `fontdue::Font::from_bytes` over the 7.8 MB shared font — seconds
+/// of spinner, every time, to redraw characters that had been rasterized minutes
+/// earlier. Keeping the parsed font instead is not an option: it retains ~136 MB
+/// (see `FONT_PARSE_HEADROOM`) and a game needs that heap far more than the menus
+/// need instant Chinese. The COVERAGE is the cheap half — one byte per pixel,
+/// ~2 KB a glyph, about a megabyte for a whole UI's worth — so the font stays
+/// per-renderer and lazily parsed, and this survives everything.
+struct CachedGlyph {
+    /// 8-bit coverage, `w * h` bytes. Empty for an inkless glyph.
+    cov: std::vec::Vec<u8>,
+    w: usize,
+    h: usize,
+    xmin: f32,
+    ymin: f32,
+}
+
+/// `None` value = the font has no such glyph. Cached like a hit so a miss never
+/// re-parses the font either. A `Vec` rather than a map because `HashMap::new`
+/// is not const, and this is only consulted when the per-renderer map misses.
+fn glyph_cache() -> &'static std::sync::Mutex<std::vec::Vec<(char, Option<CachedGlyph>)>> {
+    static C: std::sync::Mutex<std::vec::Vec<(char, Option<CachedGlyph>)>> =
+        std::sync::Mutex::new(std::vec::Vec::new());
+    &C
+}
+
 /// One GL texture holding lazily-rasterized glyphs, packed shelf-style.
 pub struct FontAtlas {
-    font: fontdue::Font,
+    /// Parsed ON DEMAND, and only when `glyph_cache` cannot answer — see
+    /// `CachedGlyph`. `None` = not parsed yet OR the parse failed.
+    font: Option<fontdue::Font>,
+    font_tried: bool,
     tex: GLuint,
     /// `None` value = looked up and the font has no such glyph (or atlas full):
     /// caches the miss so we never re-rasterize it.
@@ -157,23 +220,6 @@ impl FontAtlas {
             log("glyphs: not enough memory to parse the CJK font — drawing it blank\n");
             return None;
         }
-        let bytes: &'static [u8] = unsafe {
-            let mut len: u32 = 0;
-            let ptr = ruffle_shared_font(1 /* PlSharedFontType_ChineseSimplified */, &mut len);
-            if ptr.is_null() || len == 0 {
-                log("glyphs: shared font unavailable (null/0) — CJK will draw blank\n");
-                return None;
-            }
-            core::slice::from_raw_parts(ptr, len as usize)
-        };
-        let font = match fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()) {
-            Ok(f) => f,
-            Err(_) => {
-                log("glyphs: fontdue rejected the shared font\n");
-                return None;
-            }
-        };
-
         let mut tex: GLuint = 0;
         unsafe {
             glGenTextures(1, &mut tex);
@@ -203,7 +249,8 @@ impl FontAtlas {
             glBindTexture(GL_TEXTURE_2D, 0);
         }
         Some(FontAtlas {
-            font,
+            font: None,
+            font_tried: false,
             tex,
             glyphs: HashMap::new(),
             pen_x: PAD,
@@ -225,20 +272,22 @@ impl FontAtlas {
         if let Some(cached) = self.glyphs.get(&ch) {
             return *cached;
         }
-        // Missing glyph in this font → cache the miss, draw nothing (no tofu).
-        if self.font.lookup_glyph_index(ch) == 0 {
-            self.glyphs.insert(ch, None);
-            return None;
-        }
-        let (metrics, coverage) = self.font.rasterize(ch, RASTER_PX);
+        let (gw, gh, xmin, ymin, coverage) = match self.ink(ch) {
+            Some(g) => g,
+            // Missing glyph → cache the miss, draw nothing (no tofu).
+            None => {
+                self.glyphs.insert(ch, None);
+                return None;
+            }
+        };
         // Inkless (ideographic space, etc.): advance only.
-        if metrics.width == 0 || metrics.height == 0 || coverage.is_empty() {
+        if gw == 0 || gh == 0 || coverage.is_empty() {
             let info = GlyphInfo {
                 uv: [0.0; 4],
                 w: 0.0,
                 h: 0.0,
-                xmin: metrics.xmin as f32,
-                ymin: metrics.ymin as f32,
+                xmin,
+                ymin,
                 blank: true,
             };
             self.glyphs.insert(ch, Some(info));
@@ -248,8 +297,6 @@ impl FontAtlas {
             self.glyphs.insert(ch, None);
             return None;
         }
-        let gw = metrics.width;
-        let gh = metrics.height;
         // Shelf pack: wrap to a new row when this glyph won't fit the current.
         if self.pen_x + gw + PAD > ATLAS_DIM {
             self.pen_x = PAD;
@@ -302,12 +349,95 @@ impl FontAtlas {
             ],
             w: gw as f32,
             h: gh as f32,
-            xmin: metrics.xmin as f32,
-            ymin: metrics.ymin as f32,
+            xmin,
+            ymin,
             blank: false,
         };
         self.glyphs.insert(ch, Some(info));
         Some(info)
+    }
+
+    /// Coverage + metrics for `ch`: from the process-wide cache when it has it,
+    /// otherwise rasterized (parsing the font on the spot if this is the first
+    /// character that needs it) and put there. `None` = no such glyph, or no
+    /// font at all — indistinguishable to the caller, which draws blank either
+    /// way.
+    ///
+    /// Copies the coverage out of the cache rather than borrowing it: `ensure`
+    /// then owns a plain `Vec` for the length of the upload and the cache mutex
+    /// is released immediately. A glyph is ~2 KB and this runs once per
+    /// character per renderer, so the copy is not worth borrowing gymnastics.
+    fn ink(&mut self, ch: char) -> Option<(usize, usize, f32, f32, std::vec::Vec<u8>)> {
+        if let Ok(cache) = glyph_cache().lock() {
+            if let Some((_, entry)) = cache.iter().find(|(c, _)| *c == ch) {
+                let g = entry.as_ref()?;
+                return Some((g.w, g.h, g.xmin, g.ymin, g.cov.clone()));
+            }
+        }
+        let raster = self.font().and_then(|font| {
+            if font.lookup_glyph_index(ch) == 0 {
+                return None;
+            }
+            let t0 = unsafe { ruffle_tick_now() };
+            let (metrics, coverage) = font.rasterize(ch, RASTER_PX);
+            note_raster(ms_since(t0));
+            Some((metrics, coverage))
+        });
+        // A font we could not parse is NOT cached as a miss: the next renderer
+        // may well have the heap for it, and writing `None` here would make the
+        // blank permanent for the rest of the session.
+        let (metrics, coverage) = match raster {
+            Some(r) => r,
+            None if self.font.is_none() => return None,
+            None => {
+                if let Ok(mut cache) = glyph_cache().lock() {
+                    cache.push((ch, None));
+                }
+                return None;
+            }
+        };
+        let (w, h) = (metrics.width, metrics.height);
+        let (xmin, ymin) = (metrics.xmin as f32, metrics.ymin as f32);
+        if let Ok(mut cache) = glyph_cache().lock() {
+            cache.push((
+                ch,
+                Some(CachedGlyph { cov: coverage.clone(), w, h, xmin, ymin }),
+            ));
+        }
+        Some((w, h, xmin, ymin, coverage))
+    }
+
+    /// The parsed shared font, loaded on first need. Tried ONCE per atlas: a
+    /// failure here is a missing font service or a heap that could not hold the
+    /// parse, and retrying it per character would re-run the expensive part on
+    /// every glyph of every frame.
+    fn font(&mut self) -> Option<&fontdue::Font> {
+        if self.font_tried {
+            return self.font.as_ref();
+        }
+        self.font_tried = true;
+        let bytes: &'static [u8] = unsafe {
+            let mut len: u32 = 0;
+            let ptr = ruffle_shared_font(1 /* PlSharedFontType_ChineseSimplified */, &mut len);
+            if ptr.is_null() || len == 0 {
+                log("glyphs: shared font unavailable (null/0) — CJK will draw blank\n");
+                return None;
+            }
+            core::slice::from_raw_parts(ptr, len as usize)
+        };
+        let t0 = unsafe { ruffle_tick_now() };
+        match fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()) {
+            Ok(f) => {
+                log(&std::format!(
+                    "glyphs: shared font parsed ({} KB) in {} ms\n",
+                    bytes.len() / 1024,
+                    ms_since(t0),
+                ));
+                self.font = Some(f);
+            }
+            Err(_) => log("glyphs: fontdue rejected the shared font\n"),
+        }
+        self.font.as_ref()
     }
 }
 
