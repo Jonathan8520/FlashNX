@@ -5065,10 +5065,46 @@ fn handle_delete_confirm_input(s: &mut State, button: &str, game_idx: usize) {
 /// which sidesteps the Horizon `read_dir` truncation bug). We only need
 /// to pass the .swf path — C++ derives the basename and scans the parent
 /// dir for `<basename>.*` matches.
+/// Delete the old-shape save files this game was RECORDED reading, listed one per
+/// line in `<basename>.solmap` by the storage backend.
+///
+/// Only files the game demonstrably opened are touched; nothing is inferred from
+/// a name. In the collision case two games can both have recorded the same file —
+/// deleting one then removes it, and the other keeps playing from the copy it
+/// wrote under its own key the first time it saved.
+fn delete_recorded_legacy_saves(basename: &str) {
+    let map = std::format!("{}/{}.solmap", USER_SD_ROOTS[0], basename);
+    let Some(bytes) = crate::sources::gamezip::read_file_bounded(&map, 64 * 1024) else {
+        return;
+    };
+    let Ok(text) = std::string::String::from_utf8(bytes) else {
+        return;
+    };
+    for line in text.lines() {
+        let name = line.trim();
+        // A path separator here would mean the record was tampered with; the
+        // storage backend only ever writes a bare file name.
+        if name.is_empty() || name.contains('/') || name.contains('\\') {
+            continue;
+        }
+        let path = std::format!("{}/{}", USER_SD_ROOTS[0], name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => log(&std::format!("library: removed legacy save {}\n", path)),
+            Err(e) => log(&std::format!("library: legacy save {} not removed: {}\n", path, e)),
+        }
+    }
+}
+
 fn delete_game(s: &mut State, game_idx: usize) {
     let Some(entry) = s.entries.get(game_idx).cloned() else {
         return;
     };
+    // Saves this game was seen reading under the OLD movie-keyed name. The C++
+    // sweep matches `<basename>*` and can never reach them — that is why deleting
+    // Agent P Strikes Back left its save behind, ready to be picked up again on
+    // reinstall. Removed here, BEFORE the sweep, so the sweep still takes the
+    // `.solmap` itself (it matches the prefix).
+    delete_recorded_legacy_saves(&entry.basename);
     let mut path_c = entry.path.as_bytes().to_vec();
     path_c.push(0);
     let rc = unsafe {

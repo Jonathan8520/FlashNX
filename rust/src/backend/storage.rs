@@ -133,6 +133,45 @@ impl SwitchStorageBackend {
         )))
     }
 
+    /// Remember that this game read `legacy` — one filename per line in
+    /// `<sd_basename>.solmap`, deduplicated.
+    ///
+    /// Deleting a game is supposed to delete its saves, and for the old shape it
+    /// never could: the sweep removes `<sd_basename>*`, while the legacy file is
+    /// named after the movie's own filename and does not match. Agent P Strikes
+    /// Back kept `.DIG_phf_spl_act_agentpstrikesback_STANDALONE.sol` through a
+    /// delete and picked it straight back up on reinstall.
+    ///
+    /// The name cannot be DERIVED at delete time — for the `getLocal(n, "/")`
+    /// shape the movie component is empty and the file is just `.<sol>.sol`, which
+    /// could belong to anyone. So it is RECORDED, at the only moment the link is
+    /// certain: when this game read that file. Nothing is ever guessed.
+    fn note_legacy_use(&self, legacy: &Path) {
+        let Some(basename) = crate::keymap::active_game_basename() else {
+            return;
+        };
+        let Some(name) = legacy.file_name().and_then(|n| n.to_str()) else {
+            return;
+        };
+        let map = self.flat_root.join(std::format!("{}.solmap", basename));
+        let existing = Self::read_chunked(&map)
+            .and_then(|b| std::string::String::from_utf8(b).ok())
+            .unwrap_or_default();
+        if existing.lines().any(|l| l == name) {
+            return;
+        }
+        let mut out = existing;
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(name);
+        out.push('\n');
+        if let Ok(mut f) = File::create(&map) {
+            let _ = f.write_all(out.as_bytes());
+            crate::sd::commit();
+        }
+    }
+
     /// The OLD flat path, `<flat_root>/<movie_basename>.<sol_name>.sol`. Read-only
     /// now: this is the shape that let two games share one save.
     fn flat_path(&self, name: &str) -> PathBuf {
@@ -204,6 +243,7 @@ impl StorageBackend for SwitchStorageBackend {
                 flat.display(),
                 data.len()
             );
+            self.note_legacy_use(&flat);
             return Some(data);
         }
         // Fall back to the legacy nested layout. Helps users who already
@@ -219,6 +259,7 @@ impl StorageBackend for SwitchStorageBackend {
                     legacy.display(),
                     data.len()
                 );
+                self.note_legacy_use(&legacy);
                 return Some(data);
             }
         }
