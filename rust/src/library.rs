@@ -914,6 +914,29 @@ fn nav_is_diagonal() -> bool {
     (m & 0b0011) != 0 && (m & 0b1100) != 0
 }
 
+/// Move `sel` by `delta` inside `total` rows, stopping at the edge and only
+/// crossing over on the NEXT press.
+///
+/// Shared by every text list -- the home LISTE, the saved URLs and an item's
+/// file list -- because they are the same object to a player and were three
+/// different behaviours in the code. Two rules rather than one, and the
+/// difference only shows with a step of several rows: wrapping on the same press
+/// would turn "skip five" near the end of a long list into a jump back near its
+/// end, which is not what the button says.
+pub(crate) fn list_step_wrap(sel: usize, delta: isize, total: usize) -> usize {
+    if total == 0 {
+        return 0;
+    }
+    let last = total - 1;
+    if delta < 0 {
+        if sel == 0 { last } else { sel.saturating_sub((-delta) as usize) }
+    } else if sel >= last {
+        0
+    } else {
+        (sel + delta as usize).min(last)
+    }
+}
+
 /// Rows skipped by Left/Right in LISTE. Five, not a screenful: a screenful is
 /// what a page jump is for, and it would land on a row with none of the titles
 /// you were reading still visible.
@@ -3552,20 +3575,6 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
     // STOPS at the edge first, and only the NEXT press crosses over. Wrapping on
     // the same press would turn "skip five" near the end of a 79-game library
     // into a jump back to the seventy-fourth, which is not what the button says.
-    let step_wrap = |sel: usize, delta: isize, total: usize| -> usize {
-        if total == 0 {
-            return 0;
-        }
-        let last = total - 1;
-        if delta < 0 {
-            let d = (-delta) as usize;
-            // Already home: the next press is the one that goes round.
-            if sel == 0 { last } else { sel.saturating_sub(d) }
-        } else {
-            let d = delta as usize;
-            if sel >= last { 0 } else { (sel + d).min(last) }
-        }
-    };
     match button {
         "Left" | "StickLLeft" => {
             // In LISTE the rows run vertically, so Left/Right did exactly what
@@ -3579,9 +3588,9 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
                 if nav_is_diagonal() {
                     return;
                 }
-                selection = step_wrap(selection, -(LIST_SKIP as isize), total);
+                selection = list_step_wrap(selection, -(LIST_SKIP as isize), total);
             } else if total > 0 {
-                selection = step_wrap(selection, -1, total);
+                selection = list_step_wrap(selection, -1, total);
             }
             scroll = gallery_scroll_for(selection, scroll);
         }
@@ -3590,9 +3599,9 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
                 if nav_is_diagonal() {
                     return;
                 }
-                selection = step_wrap(selection, LIST_SKIP as isize, total);
+                selection = list_step_wrap(selection, LIST_SKIP as isize, total);
             } else if total > 0 {
-                selection = step_wrap(selection, 1, total);
+                selection = list_step_wrap(selection, 1, total);
             }
             scroll = gallery_scroll_for(selection, scroll);
         }
@@ -3607,7 +3616,7 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
                 if nav_is_diagonal() {
                     return;
                 }
-                selection = step_wrap(selection, home_page_step() as isize, total);
+                selection = list_step_wrap(selection, home_page_step() as isize, total);
             } else if let Some(ns) = gallery_neighbor(selection, -1) {
                 selection = ns;
             } else if total > 0 {
@@ -3622,7 +3631,7 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
                 if nav_is_diagonal() {
                     return;
                 }
-                selection = step_wrap(selection, -(home_page_step() as isize), total);
+                selection = list_step_wrap(selection, -(home_page_step() as isize), total);
             } else if let Some(ns) = gallery_neighbor(selection, 1) {
                 selection = ns;
             } else if total > 0 {
@@ -3963,6 +3972,24 @@ fn handle_distant_idle_input(
         }
         "Down" | "StickLDown" => {
             selection = if selection >= last { 0 } else { selection + 1 };
+            scroll = clamp_scroll(scroll, selection, IMPORTER_VISIBLE_ROWS);
+        }
+        // Left/Right SKIP, the same five rows they skip in the home list. They
+        // did nothing at all here, and L/R are not available as a page jump on
+        // this screen the way they are inside an item: this is a tab home, so
+        // they switch tabs. Suppressed on a diagonal, like every other skip.
+        "Left" | "StickLLeft" => {
+            if nav_is_diagonal() {
+                return;
+            }
+            selection = list_step_wrap(selection, -(LIST_SKIP as isize), last + 1);
+            scroll = clamp_scroll(scroll, selection, IMPORTER_VISIBLE_ROWS);
+        }
+        "Right" | "StickLRight" => {
+            if nav_is_diagonal() {
+                return;
+            }
+            selection = list_step_wrap(selection, LIST_SKIP as isize, last + 1);
             scroll = clamp_scroll(scroll, selection, IMPORTER_VISIBLE_ROWS);
         }
         "Plus" => {
@@ -4427,6 +4454,18 @@ fn handle_distant_files_input(
         "Down" | "StickLDown" => {
             if total == 0 { return; }
             selection = if selection >= last { 0 } else { selection + 1 };
+            scroll = clamp_scroll(scroll, selection, DISTANT_VISIBLE_ROWS);
+        }
+        // Left/Right skip five rows, between the single step of Up/Down and the
+        // full screenful of L/R. Same five as every other list in the app.
+        "Left" | "StickLLeft" => {
+            if total == 0 || nav_is_diagonal() { return; }
+            selection = list_step_wrap(selection, -(LIST_SKIP as isize), total);
+            scroll = clamp_scroll(scroll, selection, DISTANT_VISIBLE_ROWS);
+        }
+        "Right" | "StickLRight" => {
+            if total == 0 || nav_is_diagonal() { return; }
+            selection = list_step_wrap(selection, LIST_SKIP as isize, total);
             scroll = clamp_scroll(scroll, selection, DISTANT_VISIBLE_ROWS);
         }
         "L" => {
