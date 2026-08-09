@@ -250,6 +250,20 @@ pub struct Strings {
     /// REGLAGES row opening the game-defaults sub-modal (display / filter /
     /// cursor speed). These are DEFAULTS: a game that has been set explicitly
     /// from its pause menu keeps its own value.
+    /// REGLAGES row picking the JOUER tab's layout. Sits at index 0, where the
+    /// global keymap row used to be: rows 3 and 5 are hoisted BY INDEX in
+    /// `input()`, so a row can only be added at the very start or the very end
+    /// without silently breaking them.
+    pub set_home_view: &'static str,
+    /// Cover grid, the layout since v1.2.0 and still the default.
+    pub home_grid: &'static str,
+    /// Text list of titles, cover of the selected game beside it (issue #52).
+    pub home_list: &'static str,
+    /// Covers scrolling sideways, the selected one shown large above.
+    pub home_strip: &'static str,
+    /// Console shelf: large covers on one line, the active one anchored left and
+    /// grown, its details above.
+    pub home_shelf: &'static str,
     pub set_game_prefs: &'static str,
     /// Title of that sub-modal.
     pub prefs_title: &'static str,
@@ -546,6 +560,11 @@ const EN: Strings = Strings {
     display_fill: "FILL",
     display_stretch: "STRETCH",
     set_screen_filter: "FILTER",
+    set_home_view: "HOME VIEW",
+    home_grid: "GRID",
+    home_list: "LIST",
+    home_strip: "STRIP",
+    home_shelf: "SHELF",
     set_game_prefs: "GAME DEFAULTS",
     prefs_title: "DEFAULT SETTINGS",
     filter_none: "NONE",
@@ -750,6 +769,11 @@ const FR: Strings = Strings {
     display_fill: "REMPLIR",
     display_stretch: "\u{00C9}TIRER",
     set_screen_filter: "FILTRE",
+    set_home_view: "VUE ACCUEIL",
+    home_grid: "GRILLE",
+    home_list: "LISTE",
+    home_strip: "BANDE",
+    home_shelf: "ETAGERE",
     set_game_prefs: "PR\u{00C9}F\u{00C9}RENCES DE JEU",
     prefs_title: "R\u{00C9}GLAGES PAR D\u{00C9}FAUT",
     filter_none: "AUCUN",
@@ -954,6 +978,11 @@ const ES: Strings = Strings {
     display_fill: "RELLENAR",
     display_stretch: "ESTIRAR",
     set_screen_filter: "FILTRO",
+    set_home_view: "VISTA INICIO",
+    home_grid: "CUADRÍCULA",
+    home_list: "LISTA",
+    home_strip: "TIRA",
+    home_shelf: "ESTANTE",
     set_game_prefs: "PREFERENCIAS",
     prefs_title: "AJUSTES POR DEFECTO",
     filter_none: "NINGUNO",
@@ -1160,6 +1189,11 @@ const RU: Strings = Strings {
     display_fill: "ЗАПОЛНИТЬ",
     display_stretch: "РАСТЯНУТЬ",
     set_screen_filter: "ФИЛЬТР",
+    set_home_view: "ВИД ГЛАВНОЙ",
+    home_grid: "СЕТКА",
+    home_list: "СПИСОК",
+    home_strip: "ЛЕНТА",
+    home_shelf: "ПОЛКА",
     set_game_prefs: "ПРЕДПОЧТЕНИЯ",
     prefs_title: "ПО УМОЛЧАНИЮ",
     filter_none: "НЕТ",
@@ -1369,6 +1403,11 @@ const DE: Strings = Strings {
     display_fill: "F\u{00DC}LLEN",
     display_stretch: "STRECKEN",
     set_screen_filter: "FILTER",
+    set_home_view: "STARTANSICHT",
+    home_grid: "RASTER",
+    home_list: "LISTE",
+    home_strip: "LEISTE",
+    home_shelf: "REGAL",
     set_game_prefs: "SPIELVORGABEN",
     prefs_title: "STANDARDWERTE",
     filter_none: "KEINER",
@@ -1575,6 +1614,11 @@ const IT: Strings = Strings {
     display_fill: "RIEMPI",
     display_stretch: "ALLARGA",
     set_screen_filter: "FILTRO",
+    set_home_view: "VISTA HOME",
+    home_grid: "GRIGLIA",
+    home_list: "ELENCO",
+    home_strip: "STRISCIA",
+    home_shelf: "SCAFFALE",
     set_game_prefs: "PREFERENZE",
     prefs_title: "VALORI PREDEFINITI",
     filter_none: "NESSUNO",
@@ -1781,6 +1825,11 @@ const PT: Strings = Strings {
     display_fill: "PREENCHER",
     display_stretch: "ESTICAR",
     set_screen_filter: "FILTRO",
+    set_home_view: "VISTA INÍCIO",
+    home_grid: "GRADE",
+    home_list: "LISTA",
+    home_strip: "FAIXA",
+    home_shelf: "PRATELEIRA",
     set_game_prefs: "PREFER\u{00CA}NCIAS",
     prefs_title: "PADR\u{00D5}ES",
     filter_none: "NENHUM",
@@ -1992,6 +2041,11 @@ const ZH: Strings = Strings {
     display_fill: "填满",
     display_stretch: "拉伸",
     set_screen_filter: "滤镜",
+    set_home_view: "主页视图",
+    home_grid: "网格",
+    home_list: "列表",
+    home_strip: "横条",
+    home_shelf: "书架",
     set_game_prefs: "游戏默认",
     prefs_title: "默认设置",
     filter_none: "无",
@@ -2201,6 +2255,11 @@ const TR: Strings = Strings {
     display_fill: "DOLDUR",
     display_stretch: "GER",
     set_screen_filter: "F\u{0130}LTRE",
+    set_home_view: "ANA EKRAN",
+    home_grid: "IZGARA",
+    home_list: "LİSTE",
+    home_strip: "SERİT",
+    home_shelf: "RAF",
     set_game_prefs: "OYUN VARSAYILANLARI",
     prefs_title: "VARSAYILANLAR",
     filter_none: "YOK",
@@ -2372,6 +2431,36 @@ pub fn set_covers_online(v: bool) {
 /// change of default, which is predictable and explainable.
 static DEFAULT_DISPLAY_MODE: AtomicU8 = AtomicU8::new(0);
 static DEFAULT_SCREEN_FILTER: AtomicU8 = AtomicU8::new(0);
+
+/// JOUER tab layout: 0 = cover grid (the default since v1.2.0), 1 = title list
+/// with the selected game's cover beside it (issue #52), 2 = covers scrolling
+/// sideways with the selected one shown large. Persisted in settings.json.
+///
+/// A view, not a filter: the same games, the same order, the same actions. Which
+/// one suits depends on the library and on the covers in it, so it stays a
+/// choice. The grid remains the default and nothing about it changes.
+static HOME_VIEW: AtomicU8 = AtomicU8::new(0);
+
+/// Number of layouts, for cycling the REGLAGES row.
+pub const HOME_VIEW_COUNT: u8 = 4;
+
+pub fn home_view() -> u8 {
+    HOME_VIEW.load(Ordering::Relaxed) % HOME_VIEW_COUNT
+}
+
+pub fn set_home_view(v: u8) {
+    HOME_VIEW.store(v % HOME_VIEW_COUNT, Ordering::Relaxed);
+}
+
+/// Display name of a layout, for the REGLAGES row.
+pub fn home_view_label(v: u8) -> &'static str {
+    match v % HOME_VIEW_COUNT {
+        1 => s().home_list,
+        2 => s().home_strip,
+        3 => s().home_shelf,
+        _ => s().home_grid,
+    }
+}
 
 pub fn default_display_mode() -> u8 {
     DEFAULT_DISPLAY_MODE.load(Ordering::Relaxed)
@@ -2590,11 +2679,12 @@ fn parse_u8_setting(json: &str, key: &str, max: u8) -> Option<u8> {
 fn write_settings(lang: Lang, covers: bool) -> bool {
     let path = settings_write_path();
     let json = std::format!(
-        "{{\n    \"language\": \"{}\",\n    \"covers_online\": {},\n    \"display_mode\": {},\n    \"screen_filter\": {}\n}}\n",
+        "{{\n    \"language\": \"{}\",\n    \"covers_online\": {},\n    \"display_mode\": {},\n    \"screen_filter\": {},\n    \"home_view\": {}\n}}\n",
         lang.code(),
         covers,
         default_display_mode(),
         default_screen_filter(),
+        home_view(),
     );
     match File::create(&path) {
         Ok(mut f) => {
@@ -2644,6 +2734,9 @@ pub fn init() {
             }
             if let Some(v) = parse_u8_setting(&txt, "screen_filter", 3) {
                 set_default_screen_filter(v);
+            }
+            if let Some(v) = parse_u8_setting(&txt, "home_view", HOME_VIEW_COUNT) {
+                set_home_view(v);
             }
             if let Some(lang) = parse_language(&txt) {
                 set(lang);

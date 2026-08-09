@@ -3216,6 +3216,15 @@ struct GalleryView {
     band_bot: f32,
     rows_total: u32,
     rows_visible: u32,
+    /// True when the band scrolls SIDEWAYS (the strip layout). The touch layer
+    /// reads it to know which finger axis drives the scroll; everything else in
+    /// the gesture is identical.
+    horizontal: bool,
+    /// Valid range of `scroll_px`. Vertical bands run 0..=max; the strip's offset
+    /// is negative-going, so the range is published rather than derived — the
+    /// touch layer has no business knowing a layout's geometry.
+    off_min: f32,
+    off_max: f32,
 }
 
 fn gallery_view() -> &'static std::sync::Mutex<GalleryView> {
@@ -3224,6 +3233,9 @@ fn gallery_view() -> &'static std::sync::Mutex<GalleryView> {
         pitch: 0.0,
         band_top: 0.0,
         band_bot: 0.0,
+        horizontal: false,
+        off_min: 0.0,
+        off_max: 0.0,
         rows_total: 0,
         rows_visible: 0,
     });
@@ -3237,6 +3249,14 @@ pub fn gallery_view_read() -> (f32, f32, f32, f32, u32, u32) {
         .lock()
         .map(|v| (v.scroll_px, v.pitch, v.band_top, v.band_bot, v.rows_total, v.rows_visible))
         .unwrap_or_default()
+}
+
+/// Axis + scroll range of the current band: `(horizontal, off_min, off_max)`.
+pub fn gallery_axis_read() -> (bool, f32, f32) {
+    gallery_view()
+        .lock()
+        .map(|v| (v.horizontal, v.off_min, v.off_max))
+        .unwrap_or((false, 0.0, 0.0))
 }
 
 /// Touch-drag scroll override. `Some(px)` makes the gallery use this exact pixel
@@ -3266,6 +3286,11 @@ pub fn gallery_hit_test(px: f32, py: f32) -> Option<usize> {
     if py < band_top || py > band_bot {
         return None;
     }
+    // A horizontal band carries its scroll in X, and publishes cell `y` already in
+    // screen space — subtracting the scroll there (which is what a vertical band
+    // needs) threw the test rows off screen, so no tile was ever hit.
+    let (horizontal, _, _) = gallery_axis_read();
+    let scroll_px = if horizontal { 0.0 } else { scroll_px };
     for (i, c) in cells.iter().enumerate() {
         let sy = c.y - scroll_px;
         if px >= c.x && px <= c.x + c.w && py >= sy && py <= sy + c.h {
@@ -3325,6 +3350,102 @@ pub fn gallery_anim_reset() {
 /// Frame-rate aware approach of `cur` toward `target`. `rate` ~ 1/time-constant
 /// (s^-1); `dt` is the frame delta in seconds. Linear in dt (no `exp()`: we
 /// stay off libm like `approx_sin`), which is plenty smooth at ~60 fps.
+/// Eased state for the LIST / STRIP / SHELF layouts.
+///
+/// A struct rather than repeated `eased_list_y` calls: that helper holds ONE
+/// slot keyed by a caller id, so asking it to ease a scroll and a highlight in
+/// the same frame made each call reset the other's state and nothing was damped
+/// at all. The grid has always had its own struct for exactly this reason; these
+/// layouts need the same, or they step where the grid glides.
+struct HomeAnim {
+    inited: bool,
+    last_tick: u64,
+    /// Vertical scroll of the list, in pixels.
+    scroll_px: f32,
+    /// Highlight bar, in CONTENT space (screen y = `hl_y - scroll_px`), so the
+    /// cursor glide and the scroll glide stay independent — moving inside one
+    /// screenful slides the bar, changing screenful slides the rows.
+    hl_y: f32,
+    /// Horizontal offset of the strip / shelf.
+    off: f32,
+    /// Fractional selected index: drives the magnification falloff, so arriving
+    /// on a tile swells it while the one you left settles back, continuously.
+    sel_pos: f32,
+}
+
+fn home_anim() -> &'static std::sync::Mutex<HomeAnim> {
+    static A: std::sync::Mutex<HomeAnim> = std::sync::Mutex::new(HomeAnim {
+        inited: false,
+        last_tick: 0,
+        scroll_px: 0.0,
+        hl_y: 0.0,
+        off: 0.0,
+        sel_pos: 0.0,
+    });
+    &A
+}
+
+/// Advance the layout animation toward its targets and return the eased values.
+/// Snaps on the first frame after a reset so opening a view never slides in from
+/// wherever the previous one left off.
+fn home_anim_step(
+    now: u64,
+    target_scroll: f32,
+    target_hl: f32,
+    target_off: f32,
+    target_sel: f32,
+) -> (f32, f32, f32, f32) {
+    let mut a = match home_anim().lock() {
+        Ok(g) => g,
+        Err(_) => return (target_scroll, target_hl, target_off, target_sel),
+    };
+    if !a.inited {
+        a.inited = true;
+        a.last_tick = now;
+        a.scroll_px = target_scroll;
+        a.hl_y = target_hl;
+        a.off = target_off;
+        a.sel_pos = target_sel;
+    } else {
+        let freq = unsafe { ruffle_tick_freq() } as f32;
+        let dt = if freq > 0.0 {
+            (now.saturating_sub(a.last_tick) as f32 / freq).min(0.1)
+        } else {
+            1.0 / 60.0
+        };
+        a.last_tick = now;
+        // Same rates as the grid, so the three layouts feel like one app.
+        a.scroll_px = ease_to(a.scroll_px, target_scroll, dt, 16.0);
+        a.hl_y = ease_to(a.hl_y, target_hl, dt, 18.0);
+        a.off = ease_to(a.off, target_off, dt, 16.0);
+        a.sel_pos = ease_to(a.sel_pos, target_sel, dt, 14.0);
+    }
+    (a.scroll_px, a.hl_y, a.off, a.sel_pos)
+}
+
+/// Overwrite the eased selection with the value a finger is dictating.
+///
+/// Without it `sel_pos` keeps converging on the selection from BEFORE the drag —
+/// which is only written on finger-up — so the first frame after release renders
+/// at the stale value and everything derived from it recoils at once: size, veil,
+/// the light under the shelf, the rail. With it, release eases from where the
+/// finger actually left the row.
+pub fn home_anim_set_sel(sel_pos: f32) {
+    if let Ok(mut a) = home_anim().lock() {
+        if a.inited {
+            a.sel_pos = sel_pos;
+        }
+    }
+}
+
+/// Forget the layout animation, so the next frame snaps instead of sliding in
+/// from the previous view's state.
+pub fn home_anim_reset() {
+    if let Ok(mut a) = home_anim().lock() {
+        a.inited = false;
+    }
+}
+
 fn ease_to(cur: f32, target: f32, dt: f32, rate: f32) -> f32 {
     let t = (rate * dt).clamp(0.0, 1.0);
     cur + (target - cur) * t
@@ -5812,6 +5933,61 @@ impl SwitchRenderBackend {
     /// `draw_text`'s per-char advance EXACTLY (bitmap-font chars = 6 units,
     /// CJK = full-width cell) so centring lines up with what's drawn — and so
     /// it works without the (lazy) atlas existing yet.
+    /// `text`, shortened with a trailing ellipsis until it fits `max_w`.
+    ///
+    /// Flashpoint keeps a game's full published name, so titles run long
+    /// ("Scooby-Doo: Mayan Monster Mayhem Episode 4 - The Temple of Lost Souls").
+    /// A column that lets them run does not just look untidy, it draws over
+    /// whatever sits beside it. Cuts by CHARACTER, which is what the 5x7 pixel
+    /// font measures in anyway.
+    pub fn fit_text(&self, text: &str, scale: f32, max_w: f32) -> std::string::String {
+        if self.measure_text(text, scale) <= max_w {
+            return text.to_string();
+        }
+        const ELL: &str = "...";
+        let ell_w = self.measure_text(ELL, scale);
+        let budget = max_w - ell_w;
+        if budget <= 0.0 {
+            return std::string::String::new();
+        }
+        let mut out = std::string::String::new();
+        let mut w = 0.0;
+        for ch in text.chars() {
+            let cw = self.measure_text(&ch.to_string(), scale);
+            if w + cw > budget {
+                break;
+            }
+            out.push(ch);
+            w += cw;
+        }
+        out.push_str(ELL);
+        out
+    }
+
+    /// Split `text` over at most two lines that each fit `max_w`, breaking on a
+    /// space. The detail panels show the game you are looking at, so its name is
+    /// worth two lines rather than an ellipsis: the list beside them is where a
+    /// title gets cut, because there it only has to be recognisable.
+    /// The second line is still ellipsised if even two lines are not enough.
+    pub fn wrap_text_2(&self, text: &str, scale: f32, max_w: f32) -> (std::string::String, std::string::String) {
+        if self.measure_text(text, scale) <= max_w {
+            return (text.to_string(), std::string::String::new());
+        }
+        // Longest prefix ending on a space that still fits.
+        let mut cut = 0usize;
+        for (i, ch) in text.char_indices() {
+            if ch == ' ' && self.measure_text(&text[..i], scale) <= max_w {
+                cut = i;
+            }
+        }
+        if cut == 0 {
+            // One unbroken word: cut it rather than overflow.
+            return (self.fit_text(text, scale, max_w), std::string::String::new());
+        }
+        let rest = text[cut + 1..].trim_start();
+        (text[..cut].to_string(), self.fit_text(rest, scale, max_w))
+    }
+
     pub fn measure_text(&self, text: &str, scale: f32) -> f32 {
         let mut w = 0.0;
         for ch in text.chars() {
@@ -6659,8 +6835,14 @@ impl SwitchRenderBackend {
         } else {
             (MODAL_BG, MODAL_BORDER)
         };
-        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(bg), panel);
-        <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(border, 255), panel);
+        // Rounded, and DRAWN rounded rather than masked: a modal sits over the
+        // dimmed library, so cutting its corners with a flat colour would show the
+        // wrong thing there. The border is inset by a pixel and drawn the same way,
+        // which keeps it on the curve.
+        const MODAL_R: f32 = 12.0;
+        self.draw_round_rect(x - 1.0, y - 1.0, w + 2.0, h + 2.0, MODAL_R + 1.0, 0xFF_00_00_00 | border);
+        self.draw_round_rect(x, y, w, h, MODAL_R, bg);
+        let _ = panel;
 
         // Title — shrinks to fit so a long title (e.g. a confirm question, or a
         // long-language string) never overflows the panel edges.
@@ -7034,26 +7216,21 @@ impl SwitchRenderBackend {
     /// `entries`; `scroll_offset` is the first visible item (multiple of
     /// `LIST_COLS`).
     #[allow(clippy::too_many_arguments)]
-    pub fn draw_library_gallery(
+    /// Banner + the sub-line under it (active filter, else the library size).
+    /// Shared by the three JOUER layouts so the header height is identical in all
+    /// of them and switching views never shifts what is above the content band.
+    fn draw_home_header(
         &mut self,
-        selection: usize,
-        scroll_offset: usize,
-        entries: &[crate::library::Entry],
         banner_tex: GLuint,
         banner_w: u32,
         banner_h: u32,
-        phase_ticks: u64,
+        shown: usize,
         filter: Option<&str>,
         total_unfiltered: usize,
     ) {
-        self.library_clear();
         let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
-        let phase_s = (phase_ticks as f64) / (unsafe { ruffle_tick_freq() } as f64);
-        let pulse = approx_sin(phase_s as f32 * (2.0 * core::f32::consts::PI / 1.6));
-
-        // Banner — compact, fully below the navbar strip (y 4..38). Scaled to a
-        // small target height so it doesn't dominate the screen (was full 720x144).
+        // Compact, fully below the navbar strip (y 4..38), scaled to a small
+        // target height so it doesn't dominate the screen.
         let banner_y = 46.0;
         if banner_tex != 0 && banner_w > 0 && banner_h > 0 {
             let target_h = 72.0;
@@ -7075,19 +7252,17 @@ impl SwitchRenderBackend {
             );
         }
 
-        // Sub-line under the banner: the active filter when searching, else the
-        // library size. Same slot either way, so the header height never moves.
+        // Same slot whether filtering or not, so the header height never moves.
         let sub = match filter {
             Some(f) if !f.is_empty() => std::format!(
                 "{} / {} - {}: {}",
-                entries.len(), total_unfiltered, crate::loc::s().files_filter, f,
+                shown, total_unfiltered, crate::loc::s().files_filter, f,
             ),
-            _ => crate::loc::games_count(entries.len()),
+            _ => crate::loc::games_count(shown),
         };
-        // Sits in the strip between the banner (ends at 118) and the tile band
-        // (starts at `band_top` below). At scale 2 from y=128 it was 14 px tall,
-        // so it reached into that band and the tiles, drawn after it, ran over
-        // it while scrolling. 1.8 from 120 ends at ~133, clear of the band.
+        // Sits between the banner (ends at 118) and the content band. At scale 2
+        // from y=128 it was 14 px tall, so it reached into that band and the tiles
+        // drawn after it ran over it while scrolling. 1.8 from 120 ends at ~133.
         let ss = 1.8;
         let sw = self.measure_text(&sub, ss);
         self.draw_text(
@@ -7097,6 +7272,877 @@ impl SwitchRenderBackend {
             &sub,
             swf::Color::from_rgb(0xAABFD8, 255),
         );
+    }
+
+    /// Gold diamond on a dark chip, the favourite marker. The UI font has no star
+    /// glyph, so the shape is drawn directly. Shared by every JOUER layout so a
+    /// favourite is marked the same way wherever you look at it.
+    fn draw_favorite_mark(&mut self, x: f32, y: f32, chip: f32) {
+        let chip_m = Matrix {
+            a: chip, b: 0.0, c: 0.0, d: chip,
+            tx: swf::Twips::from_pixels(x as f64),
+            ty: swf::Twips::from_pixels(y as f64),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xB0_00_00_00), chip_m);
+        // A unit square rotated 45 degrees by the matrix, centred on the chip.
+        let cx = x + chip * 0.5;
+        let cy = y + chip * 0.5;
+        let sz = chip * 0.5;
+        let cs = 0.70710678_f32;
+        let diamond = Matrix {
+            a: sz * cs, b: sz * cs, c: -sz * cs, d: sz * cs,
+            tx: swf::Twips::from_pixels(cx as f64),
+            ty: swf::Twips::from_pixels((cy - sz * cs) as f64),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), diamond);
+    }
+
+    /// Filled rounded rectangle, built from horizontal slivers.
+    ///
+    /// Unlike `round_corners`, this draws the shape instead of masking a square
+    /// one with the page colour, so it works over anything — a modal sits on a
+    /// dimmed screenshot of the library, where painting a "background" colour into
+    /// the corners would show the wrong thing.
+    fn draw_round_rect(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, rgba: u32) {
+        let r = r.min(w * 0.5).min(h * 0.5).max(0.0);
+        if r <= 0.5 {
+            self.draw_overlay_rect(x, y, w, h, rgba);
+            return;
+        }
+        // Middle block, full width.
+        self.draw_overlay_rect(x, y + r, w, h - 2.0 * r, rgba);
+        // Caps: one sliver per row, inset by the circle's horizontal offset.
+        let steps = r.ceil() as i32;
+        for i in 0..steps {
+            let dy = i as f32;
+            let inset = r - (r * r - (r - dy) * (r - dy)).max(0.0).sqrt();
+            let sw = w - 2.0 * inset;
+            if sw <= 0.0 {
+                continue;
+            }
+            self.draw_overlay_rect(x + inset, y + dy, sw, 1.0, rgba);
+            self.draw_overlay_rect(x + inset, y + h - dy - 1.0, sw, 1.0, rgba);
+        }
+    }
+
+    /// Round the corners of the rect just drawn at (x,y,w,h), by painting the
+    /// four corner notches in the page colour.
+    ///
+    /// A cut-out rather than a rounded-rect shader: every cover here is an opaque
+    /// textured quad on the launcher's flat background, so masking the corners is
+    /// indistinguishable from rounding them and costs a handful of rects instead
+    /// of a second bitmap program in the frame path. It DOES assume that flat
+    /// background — this belongs to the library chrome, not to game rendering.
+    fn round_corners(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32) {
+        let r = r.min(w * 0.5).min(h * 0.5);
+        if r <= 0.5 {
+            return;
+        }
+        // EXACTLY the page colour from `library_clear`: glClearColor(0.078, 0.125,
+        // 0.219) is 0x14/0x20/0x38. A near-miss here does not look like rounding,
+        // it looks like a smudge in each corner.
+        const BG: u32 = 0xFF_14_20_38;
+        // One sliver per pixel row of the corner: the notch is the part of the
+        // square outside the quarter circle, so its width shrinks as we descend.
+        let steps = r.ceil() as i32;
+        for i in 0..steps {
+            let dy = i as f32;
+            let inset = r - (r * r - (r - dy) * (r - dy)).max(0.0).sqrt();
+            if inset <= 0.0 {
+                continue;
+            }
+            let yt = y + dy;
+            let yb = y + h - dy - 1.0;
+            self.draw_overlay_rect(x, yt, inset, 1.0, BG);
+            self.draw_overlay_rect(x + w - inset, yt, inset, 1.0, BG);
+            self.draw_overlay_rect(x, yb, inset, 1.0, BG);
+            self.draw_overlay_rect(x + w - inset, yb, inset, 1.0, BG);
+        }
+    }
+
+    /// Draw a game's cover fitted INSIDE the box (x,y,w,h), centred, aspect kept,
+    /// and return the rect it actually occupies.
+    ///
+    /// No letterbox bars: a detail panel shows one cover at a time, so the frame
+    /// can take the shape of the image instead of the image being forced into the
+    /// frame. That is the whole reason these layouts tolerate cover art the grid
+    /// cannot — and returning the rect lets the caller put the title right under
+    /// the picture rather than under an oversized box with a hole in it.
+    /// Falls back to the colour chip + initials, which fills a 4:3 slot.
+    fn draw_cover_fitted(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        caption_h: f32,
+        basename: &str,
+        display_name: &str,
+        color_chip: u32,
+    ) -> (f32, f32, f32, f32) {
+        // Full resolution, like the launch reveal: these panels are large enough
+        // that a tile thumbnail would show as mush.
+        let (iw, ih, tex) = match self.cover_full_for(basename) {
+            CoverTex::Image { tex, w: iw, h: ih } if iw > 0 && ih > 0 => (iw as f32, ih as f32, Some(tex)),
+            _ => (4.0, 3.0, None),
+        };
+        let box_aspect = w / h.max(1.0);
+        let img_aspect = iw / ih;
+        let (mut dw, mut dh) = if img_aspect > box_aspect {
+            (w, w / img_aspect)
+        } else {
+            (h * img_aspect, h)
+        };
+        // Never blow a cover up more than 2x. Some logos are 156 px wide; filling
+        // a 340 px box with one turns it to mush, and small-but-sharp reads better
+        // than large-and-soft.
+        if tex.is_some() && dw > iw * 2.0 {
+            dw = iw * 2.0;
+            dh = ih * 2.0;
+        }
+        // The ART PLUS ITS CAPTION is centred as one block, which is why the
+        // caption's height is an argument. Centring the art alone dropped the
+        // caption into the middle of nowhere; anchoring to the top just moved the
+        // hole underneath. A short, wide cover cannot fill a tall panel, so the
+        // leftover space is split evenly above and below, where it reads as
+        // margin instead of as something missing.
+        let dx = x + (w - dw) * 0.5;
+        let dy = y + ((h - dh - caption_h) * 0.5).max(0.0);
+        match tex {
+            Some(t) => self.draw_textured_rect(dx, dy, dw, dh, t),
+            None => {
+                self.draw_overlay_rect(dx, dy, dw, dh, 0xFF_00_00_00 | color_chip);
+                let initials: std::string::String = display_name.chars().take(3).collect();
+                let isc = (dh / 36.0).clamp(3.0, 14.0);
+                let tw = self.measure_text(&initials, isc);
+                self.draw_text(
+                    dx + (dw - tw) * 0.5,
+                    dy + (dh - 7.0 * isc) * 0.5,
+                    isc,
+                    &initials,
+                    swf::Color::from_rgb(0xFFFFFF, 255),
+                );
+            }
+        }
+        (dx, dy, dw, dh)
+    }
+
+    /// One-line facts about a game for the detail panels: what a tile never had
+    /// room for. Playtime only appears once there is some, so a game you have
+    /// never played shows nothing rather than a zero.
+    fn game_facts(entry: &crate::library::Entry) -> std::string::String {
+        let mut facts = std::format!(
+            "{}   SWF {}   {}",
+            format_size_pretty(entry.size_bytes), entry.swf_version, entry.compression_label,
+        );
+        if entry.is_as3 {
+            facts.push_str("   AS3");
+        }
+        let secs = crate::playtime::get(&entry.basename);
+        if secs >= 60 {
+            facts.push_str(&std::format!("   {}H{:02}", secs / 3600, (secs % 3600) / 60));
+        }
+        facts
+    }
+
+    /// JOUER layout 1 (issue #52): titles as a text list, the selected game's
+    /// cover shown large beside them.
+    ///
+    /// The grid asks every cover to survive the same crop into the same box. Here
+    /// one cover at a time gets a panel big enough to letterbox it, so a 640x76
+    /// banner and a 156x175 badge are both fine — the shape problem the grid
+    /// cannot solve. The panel also leaves room for what a tile never had: size,
+    /// engine, and how long the game has been played.
+    ///
+    /// Publishes the same `GalleryCell` table as the grid, so 2D navigation, tap
+    /// hit-testing and the launch reveal all work unchanged. One game per row
+    /// means Up/Down step by one and Left/Right do the same, which is what a list
+    /// should do anyway.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_library_list_view(
+        &mut self,
+        selection: usize,
+        scroll_offset: usize,
+        entries: &[crate::library::Entry],
+        banner_tex: GLuint,
+        banner_w: u32,
+        banner_h: u32,
+        phase_ticks: u64,
+        filter: Option<&str>,
+        total_unfiltered: usize,
+    ) {
+        self.library_clear();
+        let vw = self.dimensions.width as f32;
+        self.draw_home_header(banner_tex, banner_w, banner_h, entries.len(), filter, total_unfiltered);
+
+        const TOP: f32 = 150.0;
+        // 40 px rows fit 13 titles between the header and the footer. The first
+        // pass used 44 and showed 10, which left a visibly empty band below.
+        const ROW_H: f32 = 40.0;
+        let rows_visible = crate::library::home_rows_visible();
+        let list_x = 40.0;
+        let list_w = (vw * 0.50 - 40.0).max(120.0);
+        let band_top = TOP - 8.0;
+        let band_bot = TOP + rows_visible as f32 * ROW_H;
+
+        let total = entries.len();
+        let mut cells: std::vec::Vec<GalleryCell> = std::vec::Vec::with_capacity(total);
+        for idx in 0..total {
+            cells.push(GalleryCell {
+                row: idx as u32,
+                cx: list_x + list_w * 0.5,
+                x: list_x,
+                y: TOP + idx as f32 * ROW_H,
+                w: list_w,
+                h: ROW_H,
+            });
+        }
+        if let Ok(mut g) = gallery_cache().lock() {
+            *g = (cells, total as u32);
+        }
+
+        // One eased scroll drives both the rows and the highlight, so they can
+        // never disagree mid-glide the way two separate easings would.
+        let (eased_scroll, hl_content_y, _, _) = home_anim_step(
+            phase_ticks,
+            scroll_offset as f32 * ROW_H,
+            TOP + selection as f32 * ROW_H,
+            0.0,
+            selection as f32,
+        );
+        let scroll_px = gallery_touch_scroll_read().unwrap_or(eased_scroll);
+        if let Ok(mut v) = gallery_view().lock() {
+            *v = GalleryView {
+                scroll_px,
+                pitch: ROW_H,
+                band_top,
+                band_bot,
+                rows_total: total as u32,
+                rows_visible: rows_visible as u32,
+                horizontal: false,
+                off_min: 0.0,
+                off_max: 0.0,
+            };
+        }
+
+        // ── Cover panel, drawn BEFORE the scissor so it is never clipped ──
+        // The BOX is generous; the art is fitted inside it and the caption follows
+        // the art, so a wide cover and a tall one both sit tight under their own
+        // picture instead of leaving a hole under a fixed-size frame.
+        let box_x = vw * 0.53;
+        let box_w = vw - box_x - 40.0;
+        let box_y = TOP + 6.0;
+        let box_h = 340.0;
+        let mut panel = (box_x, box_y, box_w, box_h);
+        if let Some(e) = entries.get(selection) {
+            // 18 px gap + the title line + the facts line under it.
+            const CAPTION_H: f32 = 88.0;
+            panel = self.draw_cover_fitted(
+                box_x, box_y, box_w, box_h, CAPTION_H,
+                &e.basename, &e.display_name, e.color_chip,
+            );
+            self.round_corners(panel.0, panel.1, panel.2, panel.3, 8.0);
+            if crate::favorites::is_favorite(&e.basename) {
+                self.draw_favorite_mark(panel.0 + 6.0, panel.1 + 6.0, 26.0);
+            }
+
+            let mut ty = panel.1 + panel.3 + 18.0;
+            let ts = 2.4;
+            let (l1, l2) = self.wrap_text_2(&e.display_name, ts, box_w);
+            for line in [l1.as_str(), l2.as_str()] {
+                if line.is_empty() {
+                    continue;
+                }
+                let lw = self.measure_text(line, ts);
+                self.draw_text(
+                    box_x + ((box_w - lw) * 0.5).max(0.0),
+                    ty,
+                    ts,
+                    line,
+                    swf::Color::from_rgb(0xFFD740, 255),
+                );
+                ty += 26.0;
+            }
+            ty += 8.0;
+            let facts = Self::game_facts(e);
+            let fs = 1.8;
+            let fw = self.measure_text(&facts, fs);
+            self.draw_text(
+                box_x + ((box_w - fw) * 0.5).max(0.0),
+                ty,
+                fs,
+                &facts,
+                swf::Color::from_rgb(0xAABFD8, 255),
+            );
+        }
+
+        // ── Title list, clipped to its band ──
+        let vh = self.dimensions.height as f32;
+        unsafe {
+            glEnable(GL_SCISSOR_TEST);
+            glScissor(
+                0,
+                (vh - band_bot).max(0.0) as GLint,
+                vw as GLsizei,
+                (band_bot - band_top).max(0.0) as GLsizei,
+            );
+        }
+        // Highlight bar eased on its OWN track: the rows already glide with the
+        // scroll, but between two rows of the same screenful the scroll does not
+        // move, and a bar pinned to the discrete selection would jump while
+        // everything around it slid. Its own easing is what makes moving through
+        // the list feel continuous rather than stepped.
+        let hl_y = hl_content_y - scroll_px;
+        if !entries.is_empty() {
+            let bar = Matrix {
+                a: list_w, b: 0.0, c: 0.0, d: ROW_H - 6.0,
+                tx: swf::Twips::from_pixels(list_x as f64),
+                ty: swf::Twips::from_pixels(hl_y as f64),
+            };
+            <Self as CommandHandler>::draw_rect(
+                self, swf::Color::from_rgba(0x33_FF_D7_40), bar,
+            );
+            self.round_corners(list_x, hl_y, list_w, ROW_H - 6.0, 6.0);
+        }
+        for (idx, e) in entries.iter().enumerate() {
+            let y = TOP + idx as f32 * ROW_H - scroll_px;
+            if y + ROW_H < band_top || y > band_bot {
+                continue;
+            }
+
+            // Colour chip: the same per-game hue the grid falls back to, kept here
+            // so a game stays recognisable between the two layouts.
+            let chip = Matrix {
+                a: 6.0, b: 0.0, c: 0.0, d: ROW_H - 14.0,
+                tx: swf::Twips::from_pixels((list_x + 6.0) as f64),
+                ty: swf::Twips::from_pixels((y + 4.0) as f64),
+            };
+            <Self as CommandHandler>::draw_rect(
+                self, swf::Color::from_rgb(e.color_chip, 255), chip,
+            );
+            let col = if idx == selection {
+                swf::Color::from_rgb(0xFFD740, 255)
+            } else {
+                swf::Color::from_rgb(0xCCCCCC, 255)
+            };
+            // Favourites also sort to the top, so the marker confirms WHY a row is
+            // up there rather than announcing something new.
+            let fav = crate::favorites::is_favorite(&e.basename);
+            let text_x = if fav {
+                self.draw_favorite_mark(list_x + 20.0, y + 6.0, ROW_H - 12.0);
+                list_x + 20.0 + (ROW_H - 12.0) + 8.0
+            } else {
+                list_x + 22.0
+            };
+            // Truncated to the column, never to the panel beside it.
+            let label = self.fit_text(&e.display_name, 2.0, list_x + list_w - text_x - 12.0);
+            self.draw_text(text_x, y + 9.0, 2.0, &label, col);
+        }
+        unsafe {
+            glDisable(GL_SCISSOR_TEST);
+        }
+
+        let help = crate::loc::s().list_footer;
+        let hw = self.measure_text(help, 2.0);
+        self.draw_text(
+            (vw - hw) * 0.5, vh - 42.0, 2.0, help,
+            swf::Color::from_rgb(0x99AABB, 255),
+        );
+
+        // The reveal grows from the COVER PANEL, not from a text row: the panel is
+        // already showing that game's art at full size, so the launch continues it.
+        if let Ok(mut r) = gallery_sel_rect().lock() {
+            *r = panel;
+        }
+    }
+
+    /// JOUER layout 2, BANDE: a large cover of the selected game with its details
+    /// beside it, over one full-width row of the whole library.
+    ///
+    /// Three rules, each fixing something an earlier pass got wrong:
+    ///
+    /// The columns are FIXED. Sizing the page from the art's own aspect made the
+    /// whole layout move every time the selection changed — a banner cover swelled
+    /// across the screen, a square one left a hole. The hero is fitted inside a box
+    /// it cannot outgrow, so the details and the row never move.
+    ///
+    /// EVERY game is drawn in the row, none skipped. Hiding the ones already
+    /// passed made tiles appear and vanish a step at a time while the row glided,
+    /// which is the popping: one discrete rule fighting one continuous one.
+    ///
+    /// The selection is anchored PART WAY IN, not at the edge, so the previous
+    /// cover stays half visible. A shelf you can only see forwards on does not
+    /// read as a shelf.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_library_shelf_view(
+        &mut self,
+        selection: usize,
+        _scroll_offset: usize,
+        entries: &[crate::library::Entry],
+        banner_tex: GLuint,
+        banner_w: u32,
+        banner_h: u32,
+        phase_ticks: u64,
+        filter: Option<&str>,
+        total_unfiltered: usize,
+    ) {
+        self.library_clear();
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        self.draw_home_header(banner_tex, banner_w, banner_h, entries.len(), filter, total_unfiltered);
+
+        const HERO_X: f32 = 56.0;
+        const HERO_Y: f32 = 148.0;
+        // Wider box than the first pass: a banner-shaped cover was being held to
+        // 440 px and looked timid next to the empty column beside it. The row moves
+        // down to keep its clearance.
+        const HERO_W: f32 = 560.0;
+        const HERO_H: f32 = 296.0;
+        const COL_X: f32 = 652.0;   // details column, to the right of the hero
+        const ROW_Y: f32 = 468.0;
+        const ROW_H: f32 = 124.0;
+        const ROW_W: f32 = 220.0;
+        const GAP: f32 = 16.0;
+        // Anchor of the selected tile. Left of it there is room for most of the
+        // previous cover, which is what makes the row feel like a shelf you are
+        // standing in the middle of rather than a queue you are at the head of.
+        const ANCHOR: f32 = 196.0;
+        let pitch = ROW_W + GAP;
+        let total = entries.len();
+
+        // One eased value drives the slide AND the fade, so they cannot disagree.
+        let (_, _, eased_off, sel_pos) = home_anim_step(
+            phase_ticks,
+            0.0,
+            0.0,
+            ANCHOR - selection as f32 * pitch,
+            selection as f32,
+        );
+        let off = gallery_touch_scroll_read().unwrap_or(eased_off);
+
+        // ── Hero cover, fitted inside its fixed box ──
+        let mut hero = (HERO_X, HERO_Y, HERO_W, HERO_H);
+        if let Some(e) = entries.get(selection) {
+            hero = self.draw_cover_fitted(
+                HERO_X, HERO_Y, HERO_W, HERO_H, 0.0,
+                &e.basename, &e.display_name, e.color_chip,
+            );
+            self.round_corners(hero.0, hero.1, hero.2, hero.3, 10.0);
+            if crate::favorites::is_favorite(&e.basename) {
+                self.draw_favorite_mark(hero.0 + 8.0, hero.1 + 8.0, 28.0);
+            }
+
+            let mut ty = HERO_Y + 6.0;
+            let ts = 2.8;
+            let (l1, l2) = self.wrap_text_2(&e.display_name, ts, vw - COL_X - 48.0);
+            for line in [l1.as_str(), l2.as_str()] {
+                if line.is_empty() {
+                    continue;
+                }
+                self.draw_text(COL_X, ty, ts, line, swf::Color::from_rgb(0xFFD740, 255));
+                ty += 32.0;
+            }
+            let facts = Self::game_facts(e);
+            self.draw_text(COL_X, ty + 14.0, 1.8, &facts, swf::Color::from_rgb(0xAABFD8, 255));
+        }
+        if let Ok(mut r) = gallery_sel_rect().lock() {
+            *r = hero;
+        }
+
+        // ── Full-width row ──
+        let mut cells: std::vec::Vec<GalleryCell> = std::vec::Vec::with_capacity(total);
+        for i in 0..total {
+            let x = off + i as f32 * pitch;
+            cells.push(GalleryCell {
+                row: 0,
+                cx: x + ROW_W * 0.5,
+                x,
+                y: ROW_Y,
+                w: ROW_W,
+                h: ROW_H,
+            });
+        }
+        if let Ok(mut g) = gallery_cache().lock() {
+            *g = (cells, if total == 0 { 0 } else { 1 });
+        }
+        if let Ok(mut v) = gallery_view().lock() {
+            *v = GalleryView {
+                scroll_px: off,
+                pitch,
+                band_top: HERO_Y,
+                band_bot: ROW_Y + ROW_H + 16.0,
+                rows_total: total as u32,
+                rows_visible: 1,
+                horizontal: true,
+                off_min: ANCHOR - (total.max(1) - 1) as f32 * pitch,
+                off_max: ANCHOR,
+            };
+        }
+
+        let mut decode_budget = COVER_DECODES_PER_FRAME;
+        for (i, e) in entries.iter().enumerate() {
+            let x = off + i as f32 * pitch;
+            if x > vw || x + ROW_W < 0.0 {
+                continue;
+            }
+            let cover = match cover_lookup(&e.basename) {
+                Some(t) => t,
+                None if decode_budget > 0 => {
+                    decode_budget -= 1;
+                    self.cover_for(&e.basename)
+                }
+                None => CoverTex::Default,
+            };
+            match cover {
+                CoverTex::Image { tex, w, h } => {
+                    self.draw_textured_rect_cover(x, ROW_Y, ROW_W, ROW_H, tex, w, h);
+                }
+                CoverTex::Default => {
+                    self.draw_overlay_rect(x, ROW_Y, ROW_W, ROW_H, 0xFF_00_00_00 | e.color_chip);
+                    let initials: std::string::String = e.display_name.chars().take(3).collect();
+                    let isc = 3.0;
+                    let iw = self.measure_text(&initials, isc);
+                    self.draw_text(
+                        x + (ROW_W - iw) * 0.5,
+                        ROW_Y + (ROW_H - 7.0 * isc) * 0.5,
+                        isc,
+                        &initials,
+                        swf::Color::from_rgb(0xFFFFFF, 255),
+                    );
+                }
+            }
+            self.round_corners(x, ROW_Y, ROW_W, ROW_H, 6.0);
+            if crate::favorites::is_favorite(&e.basename) {
+                self.draw_favorite_mark(x + 5.0, ROW_Y + 5.0, 18.0);
+            }
+            // Veil measured against the EASED selection, so it lifts and settles
+            // with the slide instead of switching at the moment the index changes.
+            let d = (i as f32 - sel_pos).abs().min(1.0);
+            let alpha = (d * 0x70 as f32) as u32;
+            if alpha > 0 {
+                self.draw_overlay_rect(x, ROW_Y, ROW_W, ROW_H, (alpha << 24) | 0x0C_10_18);
+            }
+        }
+        // Selection frame, drawn after the row so it is never veiled, and placed
+        // from the eased offset so it travels with the covers.
+        if total > 0 {
+            let fx = off + sel_pos * pitch;
+            const B: f32 = 3.0;
+            const SEL: u32 = 0xFF_FF_D7_40;
+            self.draw_overlay_rect(fx - B, ROW_Y - B, ROW_W + 2.0 * B, B, SEL);
+            self.draw_overlay_rect(fx - B, ROW_Y + ROW_H, ROW_W + 2.0 * B, B, SEL);
+            self.draw_overlay_rect(fx - B, ROW_Y, B, ROW_H, SEL);
+            self.draw_overlay_rect(fx + ROW_W, ROW_Y, B, ROW_H, SEL);
+            self.round_corners(fx - B, ROW_Y - B, ROW_W + 2.0 * B, ROW_H + 2.0 * B, 8.0);
+        }
+
+        let help = crate::loc::s().list_footer;
+        let hw = self.measure_text(help, 2.0);
+        self.draw_text(
+            (vw - hw) * 0.5, vh - 42.0, 2.0, help,
+            swf::Color::from_rgb(0x99AABB, 255),
+        );
+    }
+
+    /// JOUER layout 3, the shelf: ONE row of large covers, the selected one grown
+    /// in place, everything under it text.
+    ///
+    /// The distinction from BANDE is structural, not decorative, and it is the
+    /// whole point of this layout: BANDE is TWO objects, a fitted hero plus a
+    /// separate ribbon of small chips. Here the row IS the page. The selected
+    /// cover is not a second image drawn somewhere else, it is the member of the
+    /// row that swelled. An earlier attempt moved BANDE's hero to the left and its
+    /// row down, kept the two objects, and was rightly called the same layout.
+    ///
+    /// Load-bearing rule for whoever maintains this: nothing below the shelf may
+    /// ever become a picture. Add a thumbnail or a cover panel down there and this
+    /// collapses back into BANDE.
+    ///
+    /// Selection is marked by SIZE, by the veil lifting, and by the light under
+    /// the shelf — never by a frame, which is BANDE's mark.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_library_etagere_view(
+        &mut self,
+        selection: usize,
+        _scroll_offset: usize,
+        entries: &[crate::library::Entry],
+        banner_tex: GLuint,
+        banner_w: u32,
+        banner_h: u32,
+        phase_ticks: u64,
+        filter: Option<&str>,
+        total_unfiltered: usize,
+    ) {
+        self.library_clear();
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        self.draw_home_header(banner_tex, banner_w, banner_h, entries.len(), filter, total_unfiltered);
+
+        const W0: f32 = 248.0;              // resting tile
+        const H0: f32 = 160.0;              // box aspect 1.55 at EVERY scale
+        const GROW: f32 = 0.30;
+        const PITCH: f32 = 304.0;
+        const ANCHOR_CX: f32 = 328.0;       // fixed screen x of the active centre
+        const SHELF_Y: f32 = 368.0;         // common BOTTOM edge; growth is upward
+        const RIGHT_SLOTS: usize = 2;
+        const UPSCALE_MAX: f32 = 1.25;
+        const VEIL: u32 = 0x0C_10_18;
+        const PLAQUE: u32 = 0xFF_0E_16_24;
+        const CHIP_BG: u32 = 0xFF_1A_24_36;
+        let w1 = W0 * (1.0 + GROW);
+        let h1 = H0 * (1.0 + GROW);
+        let cap_x = ANCHOR_CX - w1 * 0.5;
+        let cap_w = 1232.0 - cap_x;
+
+        let n = entries.len();
+        let footer = crate::loc::s().list_footer;
+        let fw = self.measure_text(footer, 2.0);
+        if n == 0 {
+            if let Ok(mut g) = gallery_cache().lock() {
+                *g = (std::vec::Vec::new(), 0);
+            }
+            self.draw_text((vw - fw) * 0.5, vh - 42.0, 2.0, footer, swf::Color::from_rgb(0x99AABB, 255));
+            return;
+        }
+
+        // ONE eased number. The offset is DERIVED from it rather than eased on its
+        // own track: `home_anim_step` runs them at different rates (16 and 14), so
+        // using both let the row and everything keyed to the selection drift apart
+        // mid-slide.
+        let (_, _, _, mut sel_pos) = home_anim_step(phase_ticks, 0.0, 0.0, 0.0, selection as f32);
+        let tail = n.saturating_sub(1 + RIGHT_SLOTS) as f32;
+        let off_max = ANCHOR_CX;
+        // An exact multiple of PITCH below off_max, so a drag to the far stop lands
+        // on a whole selection and never settles back a fraction of a tile.
+        let off_min = off_max - tail * PITCH;
+        let mut off = (ANCHOR_CX - sel_pos * PITCH).clamp(off_min, off_max);
+        if let Some(px) = gallery_touch_scroll_read() {
+            off = px.clamp(off_min, off_max);
+            sel_pos = ((off_max - off) / PITCH).clamp(0.0, (n - 1) as f32);
+            home_anim_set_sel(sel_pos);
+        }
+
+        // Per-tile geometry, purely a function of `sel_pos`.
+        let bump = |i: usize| -> f32 {
+            let u = (1.0 - (i as f32 - sel_pos).abs()).max(0.0);
+            u * u * (3.0 - 2.0 * u) // smoothstep
+        };
+        // smoothstep(f) + smoothstep(1-f) == 1, so the two tiles straddling the
+        // selection always sum to the same width: the gap between neighbours is a
+        // constant 18.8 px at every phase. Nothing ever overlaps, so draw order is
+        // free and plain index order is fine.
+        let rect_of = |i: usize, b: f32| -> (f32, f32, f32, f32) {
+            let sc = 1.0 + GROW * b;
+            let w = W0 * sc;
+            let h = H0 * sc;
+            (off + i as f32 * PITCH - w * 0.5, SHELF_Y - h, w, h)
+        };
+
+        let mut cells: std::vec::Vec<GalleryCell> = std::vec::Vec::with_capacity(n);
+        for i in 0..n {
+            let (x, y, w, h) = rect_of(i, bump(i));
+            cells.push(GalleryCell { row: 0, cx: x + w * 0.5, x, y, w, h });
+        }
+        let visible: std::vec::Vec<usize> = (0..n)
+            .filter(|&i| cells[i].x + cells[i].w >= -8.0 && cells[i].x <= vw + 8.0)
+            .collect();
+        if let Ok(mut g) = gallery_cache().lock() {
+            *g = (cells.clone(), 1);
+        }
+        if let Ok(mut r) = gallery_sel_rect().lock() {
+            *r = cells
+                .get(selection)
+                .map(|c| (c.x, c.y, c.w, c.h))
+                .unwrap_or((cap_x, SHELF_Y - h1, w1, h1));
+        }
+        if let Ok(mut v) = gallery_view().lock() {
+            *v = GalleryView {
+                scroll_px: off,
+                pitch: PITCH,
+                band_top: 150.0,
+                band_bot: 392.0,
+                rows_total: n as u32,
+                rows_visible: 1,
+                horizontal: true,
+                off_min,
+                off_max,
+            };
+        }
+
+        // Decode the MISSING covers nearest the selection first. Index order would
+        // spend the frame's single decode on the half-off-screen leftmost tile
+        // instead of the one being looked at.
+        let mut misses: std::vec::Vec<usize> = visible
+            .iter()
+            .copied()
+            .filter(|&i| cover_lookup(&entries[i].basename).is_none())
+            .collect();
+        misses.sort_by(|&a, &b| {
+            (a as f32 - sel_pos)
+                .abs()
+                .partial_cmp(&(b as f32 - sel_pos).abs())
+                .unwrap_or(core::cmp::Ordering::Equal)
+        });
+        for &i in misses.iter().take(COVER_DECODES_PER_FRAME) {
+            let _ = self.cover_for(&entries[i].basename);
+        }
+
+        // ── The shelf itself ──
+        for &i in &visible {
+            let e = &entries[i];
+            let b = bump(i);
+            let (x, y, w, h) = rect_of(i, b);
+            let sc = 1.0 + GROW * b;
+            match cover_lookup(&e.basename) {
+                Some(CoverTex::Image { tex, w: iw, h: ih }) if iw > 0 && ih > 0 => {
+                    // Neutral plaque, never the colour chip: the hero's backdrop
+                    // must not change hue as the selection moves.
+                    self.draw_overlay_rect(x, y, w, h, PLAQUE);
+                    let a = iw as f32 / ih as f32;
+                    let bx = W0 / H0;
+                    let (fit_w, fit_h) = if a > bx { (w, w / a) } else { (h * a, h) };
+                    // Resting zoom floor, a per-cover CONSTANT computed at BASE
+                    // scale so it can never reflow: a cover that would have to be
+                    // blown up past UPSCALE_MAX to fill the box rests part-way
+                    // zoomed out instead of showing a magnified sliver.
+                    let (u0, u1) = if a > bx {
+                        (H0 / ih as f32, (W0 / a) / ih as f32)
+                    } else {
+                        (W0 / iw as f32, (H0 * a) / iw as f32)
+                    };
+                    let t_rest = if u0 <= UPSCALE_MAX || (u0 - u1) < 1e-3 {
+                        0.0
+                    } else {
+                        ((u0 - UPSCALE_MAX) / (u0 - u1)).clamp(0.0, 1.0)
+                    };
+                    let t = t_rest.max(b);
+                    // At t=0 the rect IS the box, so `draw_textured_rect_cover`
+                    // crops to fill; at t=1 the rect carries the image's aspect and
+                    // its UV remap degenerates to the whole image. One continuous
+                    // zoom-out, never a switch between two modes.
+                    let dw = w + (fit_w - w) * t;
+                    let dh = h + (fit_h - h) * t;
+                    self.draw_textured_rect_cover(
+                        x + (w - dw) * 0.5, y + (h - dh) * 0.5, dw, dh, tex, iw, ih,
+                    );
+                }
+                _ => {
+                    self.draw_overlay_rect(x, y, w, h, 0xFF_00_00_00 | e.color_chip);
+                    let initials: std::string::String = e.display_name.chars().take(3).collect();
+                    let isc = 4.0 + 1.6 * b;
+                    let tw = self.measure_text(&initials, isc);
+                    self.draw_text(
+                        x + (w - tw) * 0.5,
+                        y + (h - 7.0 * isc) * 0.5,
+                        isc,
+                        &initials,
+                        swf::Color::from_rgb(0xFFFFFF, 255),
+                    );
+                }
+            }
+            let veil = (0x66 as f32 * (i as f32 - sel_pos).abs().min(1.0)) as u32;
+            if veil > 0 {
+                self.draw_overlay_rect(x, y, w, h, (veil << 24) | VEIL);
+            }
+            // After the veil, so the notches end up page-coloured and not tinted.
+            self.round_corners(x, y, w, h, 10.0 * sc);
+            if crate::favorites::is_favorite(&e.basename) {
+                self.draw_favorite_mark(x + 10.0 * sc, y + 10.0 * sc, 22.0 * sc);
+            }
+        }
+
+        // ── Light under the shelf ──
+        // A dim rule, then a lit segment per tile whose brightness and thickness
+        // follow the same bump. At rest exactly one segment is lit under the active
+        // cover; mid-slide two are half-lit and the light hands over. A fixed slot
+        // bar would be the one element not derived from the eased value.
+        self.draw_overlay_rect(24.0, 380.0, 1232.0, 2.0, 0xFF_22_30_40);
+        for &i in &visible {
+            let b = bump(i);
+            if b <= 0.01 {
+                continue;
+            }
+            let (x, _, w, _) = rect_of(i, b);
+            let a = (b * 255.0) as u32;
+            self.draw_overlay_rect(x, 380.0, w, 3.0 + 7.0 * b, (a << 24) | 0x00_FF_D7_40);
+        }
+
+        // ── Everything below is text, a colour bar, flat chips and a rail ──
+        if let Some(e) = entries.get(selection) {
+            // Named from the INTEGER selection, not from `sel_pos.round()`: A
+            // launches `selection`, so naming anything else would let the facts
+            // describe a different game than the one that starts.
+            self.draw_overlay_rect(cap_x - 20.0, 412.0, 8.0, 58.0, 0xFF_00_00_00 | e.color_chip);
+            let (l1, l2) = self.wrap_text_2(&e.display_name, 3.2, cap_w);
+            self.draw_text(cap_x, 412.0, 3.2, &l1, swf::Color::from_rgb(0xFFD740, 255));
+            if !l2.is_empty() {
+                self.draw_text(cap_x, 448.0, 3.2, &l2, swf::Color::from_rgb(0xFFD740, 255));
+            }
+
+            // Four fixed slots, so nothing below reflows with the content.
+            let secs = crate::playtime::get(&e.basename);
+            let chips = [
+                format_size_pretty(e.size_bytes),
+                std::format!("SWF {}", e.swf_version),
+                std::format!(
+                    "{}  {}",
+                    e.compression_label,
+                    if e.is_as3 { "AS3" } else { "AS2" }
+                ),
+                if secs >= 60 {
+                    std::format!("{}H{:02}", secs / 3600, (secs % 3600) / 60)
+                } else {
+                    std::string::String::from("--")
+                },
+            ];
+            let chip_w = (cap_w - 3.0 * 20.0) / 4.0;
+            for (j, val) in chips.iter().enumerate() {
+                let cx0 = cap_x + j as f32 * (chip_w + 20.0);
+                self.draw_round_rect(cx0, 498.0, chip_w, 46.0, 8.0, CHIP_BG);
+                let vwid = self.measure_text(val, 2.4);
+                self.draw_text(
+                    cx0 + (chip_w - vwid) * 0.5,
+                    512.6,
+                    2.4,
+                    val,
+                    swf::Color::from_rgb(0xC9D6E6, 255),
+                );
+            }
+        }
+
+        // Position rail — the row shows about five games out of many, so where you
+        // are in the library needs saying somewhere.
+        if n > 5 {
+            self.draw_overlay_rect(cap_x, 586.0, cap_w, 4.0, 0x55_2A_36_48);
+            let tw = (cap_w * (1280.0 / PITCH) / n as f32).max(56.0);
+            let tx = cap_x + (cap_w - tw) * (sel_pos / (n - 1) as f32).clamp(0.0, 1.0);
+            self.draw_overlay_rect(tx, 582.0, tw, 12.0, 0xFF_FF_D7_40);
+        }
+
+        self.draw_text((vw - fw) * 0.5, vh - 42.0, 2.0, footer, swf::Color::from_rgb(0x99AABB, 255));
+    }
+
+    pub fn draw_library_gallery(
+        &mut self,
+        selection: usize,
+        scroll_offset: usize,
+        entries: &[crate::library::Entry],
+        banner_tex: GLuint,
+        banner_w: u32,
+        banner_h: u32,
+        phase_ticks: u64,
+        filter: Option<&str>,
+        total_unfiltered: usize,
+    ) {
+        self.library_clear();
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        let phase_s = (phase_ticks as f64) / (unsafe { ruffle_tick_freq() } as f64);
+        let pulse = approx_sin(phase_s as f32 * (2.0 * core::f32::consts::PI / 1.6));
+
+        // Banner — compact, fully below the navbar strip (y 4..38). Scaled to a
+        // small target height so it doesn't dominate the screen (was full 720x144).
+        self.draw_home_header(banner_tex, banner_w, banner_h, entries.len(), filter, total_unfiltered);
 
         // ── Cover gallery (v1.2.0) ───────────────────────────────────────
         // Fixed 5-per-row GRID. Every tile is the same size and covers are
@@ -7238,6 +8284,9 @@ impl SwitchRenderBackend {
                 band_bot,
                 rows_total,
                 rows_visible: rows_visible as u32,
+                horizontal: false,
+                off_min: 0.0,
+                off_max: 0.0,
             };
         }
 
@@ -7311,6 +8360,12 @@ impl SwitchRenderBackend {
                 }
             }
 
+            // Not the selected one: its frame is drawn after, and rounding the
+            // tile here too would trap the tile's dark notches inside that frame.
+            if idx != selection {
+                self.round_corners(tx, ty, tw, ROW_IMG_H, 6.0);
+            }
+
             if entries[idx].is_as3 {
                 let bsc = 1.5;
                 let bw = self.measure_text("AS3", bsc);
@@ -7380,6 +8435,9 @@ impl SwitchRenderBackend {
                 };
                 <Self as CommandHandler>::draw_rect(self, col, m);
             }
+            // Rounded once, frame included, so the cursor matches the tiles it
+            // travels between.
+            self.round_corners(fx - b, fy - b, fw + 2.0 * b, fh + 2.0 * b, 8.0);
         }
 
         unsafe {
@@ -7982,6 +9040,9 @@ impl SwitchRenderBackend {
                     band_bot,
                     rows_total: total as u32,
                     rows_visible: VISIBLE as u32,
+                    horizontal: false,
+                    off_min: 0.0,
+                    off_max: 0.0,
                 };
             }
         }
@@ -8170,6 +9231,9 @@ impl SwitchRenderBackend {
                 band_bot,
                 rows_total,
                 rows_visible: visible_rows as u32,
+                horizontal: false,
+                off_min: 0.0,
+                off_max: 0.0,
             };
         }
 
@@ -8698,6 +9762,7 @@ impl SwitchRenderBackend {
             match self.thumb_for(urls[i]) {
                 Some(ThumbTex::Image { tex, w, h }) => {
                     self.draw_textured_rect_cover(cx, cy, cell_w, THUMB_H, tex, w, h);
+                    self.round_corners(cx, cy, cell_w, THUMB_H, 6.0);
                 }
                 Some(ThumbTex::Failed) => {
                     let q = "?";
@@ -8923,6 +9988,9 @@ impl SwitchRenderBackend {
                 band_bot,
                 rows_total,
                 rows_visible: rows_visible as u32,
+                horizontal: false,
+                off_min: 0.0,
+                off_max: 0.0,
             };
         }
 
@@ -8953,6 +10021,7 @@ impl SwitchRenderBackend {
             match self.thumb_for(urls[i]) {
                 Some(ThumbTex::Image { tex, w, h }) => {
                     self.draw_textured_rect_cover(cx, cy, cell_w, thumb_h, tex, w, h);
+                    self.round_corners(cx, cy, cell_w, thumb_h, 6.0);
                 }
                 other => {
                     let bg = Matrix {

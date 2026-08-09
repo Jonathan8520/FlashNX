@@ -868,6 +868,18 @@ const HISTORY_META_PATH: &str = "sdmc:/switch/FlashNX/distant_history_meta.json"
 /// Must match the number of rows `draw_library_gallery` fits under the banner.
 pub const GALLERY_ROWS_VISIBLE: usize = 3;
 
+/// Rows of the JOUER content band visible at once, for the layout in use. The
+/// scroll clamp and the renderer both read this, so they cannot drift apart when
+/// the view changes: the grid fits 3 rows of covers, the list 10 rows of text,
+/// and the strip is a single row by definition.
+pub fn home_rows_visible() -> usize {
+    match crate::loc::home_view() {
+        1 => 13,
+        2 | 3 => 1,
+        _ => GALLERY_ROWS_VISIBLE,
+    }
+}
+
 /// Columns in the OPTIONS > JAQUETTE thumbnail picker grid. Shared so the
 /// renderer's layout and the input handler's 2D navigation agree.
 pub const COVER_PICKER_COLS: usize = 4;
@@ -1935,6 +1947,10 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
     }
 
     let (scroll_px, pitch, band_top, band_bot, rows_total, rows_visible) = r::gallery_view_read();
+    // The strip layout scrolls SIDEWAYS. Same gesture, same thresholds, same
+    // snap-on-release — only the axis and the clamp differ, so both share this
+    // handler rather than growing a second one that would drift out of step.
+    let (horizontal, off_min, off_max) = r::gallery_axis_read();
     let max_scroll_px = (rows_total.saturating_sub(rows_visible)) as f32 * pitch;
 
     // Finger down: begin a gesture only inside the gallery band.
@@ -1957,8 +1973,13 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
             t.dragging = true;
         }
         if t.dragging {
-            // Drag down (dy > 0) pulls earlier rows into view (scroll decreases).
-            let px = (t.start_scroll_px - dy).clamp(0.0, max_scroll_px);
+            let px = if horizontal {
+                // Drag right (dx > 0) pulls earlier tiles into view.
+                (t.start_scroll_px + dx).clamp(off_min, off_max)
+            } else {
+                // Drag down (dy > 0) pulls earlier rows into view.
+                (t.start_scroll_px - dy).clamp(0.0, max_scroll_px)
+            };
             r::gallery_touch_scroll_set(Some(px));
         }
         return;
@@ -1969,8 +1990,24 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
         t.down = false;
         if t.dragging {
             t.dragging = false;
-            // Snap the discrete row offset to wherever the drag left the view,
-            // then release the override so the glide settles onto that row.
+            // Snap to wherever the drag left the view, then release the override
+            // so the glide settles. On the strip there are no rows to land on: the
+            // offset IS the selection, so it snaps to the nearest tile instead.
+            if horizontal {
+                let sel = if pitch > 0.0 {
+                    ((off_max - scroll_px) / pitch).round().max(0.0) as usize
+                } else {
+                    0
+                };
+                let sel = sel.min(rows_total.saturating_sub(1) as usize);
+                if let Ok(mut s) = LIBRARY.lock() {
+                    if let Screen::List { scroll_offset, .. } = s.screen {
+                        s.screen = Screen::List { selection: sel, scroll_offset };
+                    }
+                }
+                r::gallery_touch_scroll_set(None);
+                return;
+            }
             let new_off = if pitch > 0.0 {
                 (scroll_px / pitch).round() as usize
             } else {
@@ -1996,6 +2033,27 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
                 }
             }
             r::gallery_touch_scroll_set(None);
+        } else if horizontal
+            // Only when no TILE was hit. In BANDE the big cover is not a cell, so
+            // this is the only way to tap it. In ETAGERE the enlarged cover IS a
+            // cell, and testing this rect first made every tap on it launch at once
+            // instead of selecting — worse, mid-slide it launched `selection` while
+            // a different tile sat under the finger. The cell table wins; this is
+            // the fallback for layouts whose hero is not in it.
+            && r::gallery_hit_test(t.start_x, t.start_y).is_none()
+            && {
+                let (rx, ry, rw, rh) = r::gallery_sel_rect_read();
+                t.start_x >= rx && t.start_x <= rx + rw && t.start_y >= ry && t.start_y <= ry + rh
+            }
+        {
+            let mut launch = false;
+            if let Ok(s) = LIBRARY.lock() {
+                launch = !s.applet_mode && !s.entries.is_empty();
+            }
+            if launch {
+                input("A");
+            }
+            return;
         } else if let Some(hit) = r::gallery_hit_test(t.start_x, t.start_y) {
             // Tap: first tap on a tile selects it; tapping the already-selected
             // tile activates it (reuse the A-press path — launch on JOUER,
@@ -2071,7 +2129,9 @@ pub fn input(button: &str) -> bool {
             .unwrap_or(false);
         if is_settings_editor {
             if let Ok(mut p) = PENDING_AFTER_CLOSE.lock() {
-                *p = Some(PendingClose::CloseMenuGoto(Screen::SettingsModal { selection: 0 }));
+                // Back to REGLAGES PAR DEFAUT, which is where the global
+                // keymap row now lives.
+                *p = Some(PendingClose::CloseMenuGoto(Screen::SettingsPrefsModal { selection: 0 }));
             }
             crate::backend::render::modal_close_begin();
             return true;
@@ -2091,7 +2151,7 @@ pub fn input(button: &str) -> bool {
                         dest = Some(s.screen);
                     }
                     Screen::SettingsKeymapEditor => {
-                        s.screen = Screen::SettingsModal { selection: 0 };
+                        s.screen = Screen::SettingsPrefsModal { selection: 0 };
                         dest = Some(s.screen);
                     }
                     _ => {}
@@ -2314,10 +2374,10 @@ pub fn input(button: &str) -> bool {
                 return true;
             }
         }
-        // A on the RÉGLAGES "FAIRE UNE PROPOSITION" row (index 3) = swkbd + POST.
+        // A on the RÉGLAGES "FAIRE UNE PROPOSITION" row (index 4) = swkbd + POST.
         // Hoisted for the same reason.
         if let Screen::SettingsModal { selection } = screen_snap {
-            if button == "A" && selection == 3 {
+            if button == "A" && selection == 4 {
                 run_suggestion_flow();
                 return true;
             }
@@ -2588,9 +2648,10 @@ pub fn input(button: &str) -> bool {
     consumed
 }
 
-/// Settings tab entries: 0 = default controls, 1 = language, 2 = report a bug,
-/// 3 = make a suggestion, 4 = cursor speed, 5 = nickname, 6 = quit. (No BACK —
-/// leave via L/R.)
+/// Settings tab entries: 0 = home layout, 1 = game defaults, 2 = language,
+/// 3 = report a bug, 4 = make a suggestion, 5 = nickname, 6 = quit. (No BACK —
+/// leave via L/R.) Rows 4 and 5 are hoisted BY INDEX in `input()` because they
+/// open the system keyboard, so any reordering has to move those two with it.
 fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
     const LAST: usize = 6;
     match button {
@@ -2603,16 +2664,27 @@ fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
         "A" => {
             match selection {
                 0 => {
-                    // Reuse the TOUCHES editor, pointed at the global default.
-                    keymap::init_for_global_default();
-                    menu::open();
-                    s.screen = Screen::SettingsKeymapEditor;
+                    // JOUER layout: cycle in place. The global keymap row that used
+                    // to sit here moved into REGLAGES PAR DEFAUT, where it belongs
+                    // (it IS a per-game default), which freed index 0 — the only
+                    // slot a new row can take without shifting the by-index hoists
+                    // on rows 3 and 5.
+                    crate::loc::set_home_view(crate::loc::home_view() + 1);
+                    crate::loc::save_current();
+                    // Forget the previous layout's eased state, or the new one
+                    // slides in from coordinates that meant something else.
+                    crate::backend::render::home_anim_reset();
                 }
                 1 => {
+                    // Game defaults sub-modal (keymap / display / filter / cursor).
+                    s.screen = Screen::SettingsPrefsModal { selection: 0 };
+                    return;
+                }
+                2 => {
                     let cur = crate::loc::current().index();
                     s.screen = Screen::SettingsLanguagePicker { selection: cur };
                 }
-                2 => {
+                3 => {
                     // SIGNALER UN BUG — pick the broken game, then describe + send.
                     // No game on SD = nothing to report; show a short notice.
                     if s.entries.is_empty() {
@@ -2623,13 +2695,8 @@ fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
                         s.screen = Screen::BugPicker { selection: 0, scroll_offset: 0 };
                     }
                 }
-                // 3 = FAIRE UNE PROPOSITION is hoisted in input() (opens swkbd).
-                4 => {
-                    // Game defaults sub-modal (display / filter / cursor speed).
-                    s.screen = Screen::SettingsPrefsModal { selection: 0 };
-                    return;
-                }
-                // 5 = PSEUDO is hoisted in input() (opens swkbd).
+                // 4 = FAIRE UNE PROPOSITION and 5 = PSEUDO are hoisted in input()
+                // (they open the swkbd).
                 6 => {
                     // QUIT (Minus is SEARCH now). Exits the .nro.
                     s.screen = Screen::Quit;
@@ -2644,15 +2711,16 @@ fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
     s.screen = Screen::SettingsModal { selection };
 }
 
-/// Game DEFAULTS sub-modal (0 = display, 1 = filter, 2 = cursor speed). Every
-/// row cycles in place on A, like the in-game rows they mirror. B returns to
-/// REGLAGES on the row that opened this.
+/// Game DEFAULTS sub-modal (0 = global keymap, 1 = display, 2 = filter,
+/// 3 = cursor speed). Rows 1-3 cycle in place on A, like the in-game rows they
+/// mirror; row 0 opens the keymap editor. B returns to REGLAGES on the row that
+/// opened this.
 ///
 /// These are DEFAULTS, not overrides: they apply to a game that has never been
 /// set from its own pause menu. A game with its own sidecar keeps its value, and
 /// keeps it even if the default changes later.
 fn handle_settings_prefs_input(s: &mut State, button: &str, mut selection: usize) {
-    const LAST: usize = 2;
+    const LAST: usize = 3;
     match button {
         "Up" | "StickLUp" => {
             selection = if selection == 0 { LAST } else { selection - 1 };
@@ -2663,12 +2731,20 @@ fn handle_settings_prefs_input(s: &mut State, button: &str, mut selection: usize
         "A" => {
             match selection {
                 0 => {
+                    // Global default keymap, moved here from the REGLAGES top
+                    // level: it is a per-game default like the three below.
+                    keymap::init_for_global_default();
+                    menu::open();
+                    s.screen = Screen::SettingsKeymapEditor;
+                    return;
+                }
+                1 => {
                     let next = (crate::loc::default_display_mode() + 1)
                         % keymap::DISPLAY_MODE_COUNT;
                     crate::loc::set_default_display_mode(next);
                     crate::loc::save_current();
                 }
-                1 => {
+                2 => {
                     let next = (crate::loc::default_screen_filter() + 1)
                         % keymap::SCREEN_FILTER_COUNT;
                     crate::loc::set_default_screen_filter(next);
@@ -2683,7 +2759,7 @@ fn handle_settings_prefs_input(s: &mut State, button: &str, mut selection: usize
             }
         }
         "B" | "Minus" => {
-            s.screen = Screen::SettingsModal { selection: 4 };
+            s.screen = Screen::SettingsModal { selection: 2 };
             return;
         }
         _ => {}
@@ -2729,11 +2805,11 @@ fn handle_settings_language_input(s: &mut State, button: &str, mut selection: us
                 crate::loc::set(lang);
                 crate::loc::save(lang);
             }
-            s.screen = Screen::SettingsModal { selection: 1 };
+            s.screen = Screen::SettingsModal { selection: 2 };
             return;
         }
         "B" | "Minus" => {
-            s.screen = Screen::SettingsModal { selection: 1 };
+            s.screen = Screen::SettingsModal { selection: 2 };
             return;
         }
         _ => {}
@@ -5082,11 +5158,12 @@ fn gallery_scroll_for(selection: usize, scroll: usize) -> usize {
     if selection >= cells.len() {
         return scroll;
     }
+    let visible = home_rows_visible();
     let sel_row = cells[selection].row as usize;
     if sel_row < scroll {
         sel_row
-    } else if sel_row >= scroll + GALLERY_ROWS_VISIBLE {
-        sel_row + 1 - GALLERY_ROWS_VISIBLE
+    } else if sel_row >= scroll + visible {
+        sel_row + 1 - visible
     } else {
         scroll
     }
@@ -5340,7 +5417,10 @@ fn draw_gallery(
     });
     if let Some((snap, filter, total_unfiltered)) = snapshot {
         let phase_ticks = unsafe { ruffle_tick_now() }.saturating_sub(anim_origin);
-        backend.draw_library_gallery(
+        // Same data, same selection, same actions — only the layout differs
+        // (REGLAGES > AFFICHAGE HOME). Each one publishes the same cell table, so
+        // navigation, touch and the launch reveal are shared.
+        let a = (
             selection,
             scroll_offset,
             &snap.entries,
@@ -5351,6 +5431,15 @@ fn draw_gallery(
             filter.as_deref(),
             total_unfiltered,
         );
+        match crate::loc::home_view() {
+            1 => backend.draw_library_list_view(a.0, a.1, a.2, a.3, a.4, a.5, a.6, a.7, a.8),
+            // BANDE is now the big-cover-plus-full-width-row layout: it was built as
+            // ETAGERE, and reads better as the strip than the strip did. The old
+            // centred-cover strip is gone rather than kept as a near-duplicate.
+            2 => backend.draw_library_shelf_view(a.0, a.1, a.2, a.3, a.4, a.5, a.6, a.7, a.8),
+            3 => backend.draw_library_etagere_view(a.0, a.1, a.2, a.3, a.4, a.5, a.6, a.7, a.8),
+            _ => backend.draw_library_gallery(a.0, a.1, a.2, a.3, a.4, a.5, a.6, a.7, a.8),
+        }
     }
 }
 
@@ -5566,9 +5655,14 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 lc.set_pseudo,
                 if author.is_empty() { lc.none } else { author.as_str() },
             );
+            let home_label = std::format!(
+                "{}: {}",
+                lc.set_home_view,
+                crate::loc::home_view_label(crate::loc::home_view()),
+            );
             let entries = [
-                lc.set_keys, lc.set_language, lc.set_report_bug, lc.set_suggest,
-                lc.set_game_prefs, pseudo_label.as_str(), lc.set_quit,
+                home_label.as_str(), lc.set_game_prefs, lc.set_language,
+                lc.set_report_bug, lc.set_suggest, pseudo_label.as_str(), lc.set_quit,
             ];
             backend.draw_library_settings(selection, &entries);
         }
@@ -5589,6 +5683,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             let m = unsafe { ruffle_cursor_speed_mult_x10() };
             let cursor_label = std::format!("{}: x{}.{}", lc.set_cursor_speed, m / 10, m % 10);
             let labels = [
+                lc.set_keys,
                 display_label.as_str(),
                 filter_label.as_str(),
                 cursor_label.as_str(),
