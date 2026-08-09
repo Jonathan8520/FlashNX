@@ -256,6 +256,14 @@ static GLYPHS: &[(char, Glyph)] = &[
     ('\\', ["#    ", "#    ", " #   ", "  #  ", "   # ", "    #", "    #"]),
     ('`', [" #   ", "  #  ", "     ", "     ", "     ", "     ", "     "]),
     ('*', ["     ", "# # #", " ### ", "#####", " ### ", "# # #", "     "]),
+    // Group separator for the facts line. Two columns, not one: a single column
+    // is 1.8 px at scale 1.8 in a muted colour — detectable on a TV across a
+    // room, not reliable. Two cost nothing, the advance stays 6 units either way.
+    // Rows 0 and 6 are blank ON PURPOSE: capitals fill all seven rows, so a
+    // full-height bar would have exactly a capital's extent and read as one more
+    // letter in the word. Cut to five it reads as furniture — the same reasoning
+    // as the LISTE row's colour chip, a mark smaller than what it separates.
+    ('|', ["     ", "  ## ", "  ## ", "  ## ", "  ## ", "  ## ", "     "]),
     ('\u{2026}', ["     ", "     ", "     ", "     ", "     ", "     ", "# # #"]), // …
     // Accented uppercase Latin (French + Spanish). The letter body is
     // compressed to 6 rows so the diacritic fits on row 0.
@@ -326,6 +334,19 @@ static GLYPHS: &[(char, Glyph)] = &[
     ('\u{042E}', ["#  # ", "# # #", "# # #", "# # #", "# # #", "# # #", "#  # "]), // Ю
     ('\u{042F}', [" ####", "#   #", "#   #", " ####", "  # #", " #  #", "#   #"]), // Я
 ];
+
+// The facts line speaks in two voices, and each carries meaning rather than
+// decoration. VALUE is the blue the line already used, so nothing that IS a
+// fact changed colour. MUTED is for everything that is NOT a fact — the
+// separators, and the word saying what the playtime number counts — so the
+// distance between two groups stops being quantitative (one space versus
+// three, which the eye cannot rank) and becomes qualitative: ink or no ink.
+// AS3 is the exact amber the grid tile's own AS3 badge uses, so the line
+// quotes the thumbnail above it instead of inventing a hierarchy of its own.
+const FACTS_VALUE: u32 = 0xAABFD8;
+const FACTS_MUTED: u32 = 0x7A8CA6;
+const FACTS_AS3: u32 = 0xE0B24D;
+
 
 /// Count of `GpuDraw`s currently alive (created minus dropped). Used to
 /// detect leaks: if this monotonically grows (and matches `shapes_registered`
@@ -7460,19 +7481,107 @@ impl SwitchRenderBackend {
     /// One-line facts about a game for the detail panels: what a tile never had
     /// room for. Playtime only appears once there is some, so a game you have
     /// never played shows nothing rather than a zero.
-    fn game_facts(entry: &crate::library::Entry) -> std::string::String {
-        let mut facts = std::format!(
-            "{}   SWF {}   {}",
-            format_size_pretty(entry.size_bytes), entry.swf_version, entry.compression_label,
-        );
-        if entry.is_as3 {
-            facts.push_str("   AS3");
+    /// The facts about a game, as coloured segments in draw order — the single
+    /// source for all four JOUER layouts.
+    ///
+    /// There used to be TWO of these: a three-space string here, and a
+    /// `//`-separated one with its own vocabulary ("SWF V10", a translated word
+    /// after the playtime) written inline in the gallery. The same information,
+    /// spelled two ways in two screens, which is what Jonathan noticed.
+    ///
+    /// Three things the old string could not say:
+    ///
+    /// - Version and compression are ONE group. They are not two facts, they are
+    ///   one — what the file is — and the eye groups "SWF 10 CWS" whatever the
+    ///   spacing, which is precisely why three spaces failed: a space INSIDE a
+    ///   fact and spaces BETWEEN facts differ only in quantity, and quantity is
+    ///   not something an eye ranks. Joined, a space means one thing and the bar
+    ///   means the other.
+    /// - The engine is ALWAYS named. The absence of "AS3" used to mean AVM1 —
+    ///   information encoded as nothing, unreadable by definition — and it made
+    ///   the line change its group COUNT from game to game. Now the flag changes
+    ///   a group's CONTENT, so nothing ever moves sideways.
+    /// - Groups are JOINED, never appended by hand. The old code pushed "   AS3"
+    ///   onto the string, which is how an unknown size (Flashpoint hits, where
+    ///   `format_size_pretty` returns "") produced a line starting with three
+    ///   spaces that `measure_text` counted, throwing the centring off by 16 px
+    ///   in the one screen where you import.
+    fn game_facts(entry: &crate::library::Entry) -> std::vec::Vec<(std::string::String, u32)> {
+        fn sep(out: &mut std::vec::Vec<(std::string::String, u32)>) {
+            // Emitted by the JOIN, so a leading or orphan separator cannot happen.
+            if !out.is_empty() {
+                out.push((std::string::String::from(" | "), FACTS_MUTED));
+            }
         }
+        let mut out: std::vec::Vec<(std::string::String, u32)> = std::vec::Vec::with_capacity(8);
+
+        let size = format_size_pretty(entry.size_bytes);
+        if !size.is_empty() {
+            out.push((size, FACTS_VALUE));
+        }
+
+        sep(&mut out);
+        out.push((
+            std::format!("SWF {} {}", entry.swf_version, entry.compression_label),
+            FACTS_VALUE,
+        ));
+
+        sep(&mut out);
+        if entry.is_as3 {
+            out.push((std::string::String::from("AS3"), FACTS_AS3));
+        } else {
+            out.push((std::string::String::from("AVM1"), FACTS_VALUE));
+        }
+
+        // The only genuinely optional group, and it is LAST: a game you have
+        // never played has no playtime, it does not have a playtime of zero. Its
+        // absence therefore cannot leave a hole or shift anything to its right.
         let secs = crate::playtime::get(&entry.basename);
         if secs >= 60 {
-            facts.push_str(&std::format!("   {}H{:02}", secs / 3600, (secs % 3600) / 60));
+            sep(&mut out);
+            out.push((
+                std::format!("{}H{:02}", secs / 3600, (secs % 3600) / 60),
+                FACTS_VALUE,
+            ));
+            // The word travels with the number: "0H02" alone does not say what it
+            // counts. The gallery already had it and the other three did not; it
+            // belongs in the muted voice, like a unit.
+            out.push((std::format!(" {}", crate::loc::s().played_label), FACTS_MUTED));
         }
-        facts
+        out
+    }
+
+    /// Width of a facts line, so the centred layouts place it the way they
+    /// already placed a plain string.
+    fn facts_width(&self, facts: &[(std::string::String, u32)], scale: f32) -> f32 {
+        facts.iter().map(|(t, _)| self.measure_text(t, scale)).sum()
+    }
+
+    /// Draw a facts line at `x`, `y` (top-left), one `draw_text` per segment.
+    ///
+    /// Segment by segment rather than two overlaid strings. The overlay trick is
+    /// cheaper by a few calls, but it silently depends on both layers advancing
+    /// identically — pure ASCII, non-ASCII last — and the day someone translates
+    /// a label or inserts one in the middle, the layers drift apart with no error
+    /// at all. Eight GL calls is on the order of 60 us against a 16.6 ms frame,
+    /// which is the right price for an invariant that cannot quietly break.
+    ///
+    /// The pen is ROUNDED at draw time while the accumulator stays exact: the bar
+    /// is two pixels of glyph, and an unrounded x rasterises it over one column or
+    /// two depending on the fraction, so the three bars on one line would not come
+    /// out the same thickness. On a pixel-art UI that is the loudest defect there is.
+    fn draw_facts(
+        &mut self,
+        x: f32,
+        y: f32,
+        scale: f32,
+        facts: &[(std::string::String, u32)],
+    ) {
+        let mut pen = x;
+        for (text, color) in facts {
+            self.draw_text(pen.round(), y, scale, text, swf::Color::from_rgb(*color, 255));
+            pen += self.measure_text(text, scale);
+        }
     }
 
     /// JOUER layout 1 (issue #52): titles as a text list, the selected game's
@@ -7612,14 +7721,8 @@ impl SwitchRenderBackend {
             ty += 8.0;
             let facts = Self::game_facts(e);
             let fs = 1.8;
-            let fw = self.measure_text(&facts, fs);
-            self.draw_text(
-                box_x + ((box_w - fw) * 0.5).max(0.0),
-                ty,
-                fs,
-                &facts,
-                swf::Color::from_rgb(0xAABFD8, 255),
-            );
+            let fw = self.facts_width(&facts, fs);
+            self.draw_facts(box_x + ((box_w - fw) * 0.5).max(0.0), ty, fs, &facts);
         }
 
         // ── Title list, clipped to its band ──
@@ -7854,7 +7957,7 @@ impl SwitchRenderBackend {
                 ty += 32.0;
             }
             let facts = Self::game_facts(e);
-            self.draw_text(COL_X, ty + 14.0, 1.8, &facts, swf::Color::from_rgb(0xAABFD8, 255));
+            self.draw_facts(COL_X, ty + 14.0, 1.8, &facts);
         }
         if let Ok(mut r) = gallery_sel_rect().lock() {
             *r = hero;
@@ -8228,7 +8331,7 @@ impl SwitchRenderBackend {
                 ty += 34.0;
             }
             let facts = Self::game_facts(e);
-            self.draw_text(cap_x, ty + 10.0, 2.0, &facts, swf::Color::from_rgb(0xAABFD8, 255));
+            self.draw_facts(cap_x, ty + 10.0, 2.0, &facts);
         }
 
         // Position rail — the row shows about five games out of many, so where you
@@ -8616,32 +8719,15 @@ impl SwitchRenderBackend {
                 &name,
                 swf::Color::from_rgb(0xFFFFFF, 255),
             );
-            let played = crate::playtime::get(&entry.basename);
-            let pt = if played > 0 {
-                std::format!(" // {} {}", format_playtime(played), crate::loc::s().played_label)
-            } else {
-                std::string::String::new()
-            };
-            let info = if entry.is_as3 {
-                std::format!(
-                    "{} // SWF V{} {} // AS3{}",
-                    format_size_pretty(entry.size_bytes), entry.swf_version, entry.compression_label, pt,
-                )
-            } else {
-                std::format!(
-                    "{} // SWF V{} {}{}",
-                    format_size_pretty(entry.size_bytes), entry.swf_version, entry.compression_label, pt,
-                )
-            };
+            // The same formatter as the other three layouts. This screen used to
+            // build its own string with "//" separators and "SWF V10" — the V says
+            // nothing "SWF" does not. The baseline and the scale are unchanged, so
+            // neither the name above nor the footer below moves, which matters
+            // here: this line ends at y668 and the footer starts at y678.
+            let facts = Self::game_facts(entry);
             let isc = 2.0;
-            let iw = self.measure_text(&info, isc);
-            self.draw_text(
-                (vw - iw) * 0.5,
-                vh - 66.0,
-                isc,
-                &info,
-                swf::Color::from_rgb(0xAABFD8, 255),
-            );
+            let iw = self.facts_width(&facts, isc);
+            self.draw_facts((vw - iw) * 0.5, vh - 66.0, isc, &facts);
         }
 
         // Footer.
@@ -11019,18 +11105,6 @@ impl SwitchRenderBackend {
     }
 }
 
-/// Human playtime: "42s", "5m", "1h03m".
-fn format_playtime(secs: u64) -> std::string::String {
-    let h = secs / 3600;
-    let m = (secs % 3600) / 60;
-    if h > 0 {
-        std::format!("{}h{:02}m", h, m)
-    } else if m > 0 {
-        std::format!("{}m", m)
-    } else {
-        std::format!("{}s", secs)
-    }
-}
 
 /// Format a byte count as a short pretty string ("3 KB", "15 MB"). Picks
 /// the largest unit that keeps the integer part ≤ 999. KiB-style (1024)
