@@ -5959,6 +5959,9 @@ impl SwitchRenderBackend {
         let b = color.b as f32 / 255.0;
         let a = color.a as f32 / 255.0;
         let mut verts: std::vec::Vec<f32> = std::vec::Vec::new();
+        // Second batch, for shared-font glyphs: same idea, different program.
+        let mut atlas_verts: std::vec::Vec<f32> = std::vec::Vec::new();
+        let mut atlas_tex: GLuint = 0;
         let mut cur_x = x;
         for ch in text.chars() {
             // Uppercase fold — our font only carries A-Z.
@@ -5993,11 +5996,22 @@ impl SwitchRenderBackend {
                 // Advance by 6 px (5-wide glyph + 1-px gap), scaled.
                 cur_x += 6.0 * scale;
             } else if (ch as u32) >= 0x80 {
-                // Non-Latin/Cyrillic (CJK …): shared-font atlas, full-width. It
-                // draws through another program, so flush what's queued first and
-                // keep the on-screen order identical to the old per-run path.
-                self.flush_text_quads(&mut verts);
-                self.draw_atlas_glyph(cur_x, y, scale, ch, color);
+                // Non-Latin/Cyrillic (CJK …): shared-font atlas, full-width.
+                // QUEUED, not drawn: they all sample the same atlas and share
+                // this call's colour, so the whole run goes out in one batch
+                // below. Queuing also means no flush of the bitmap-font batch
+                // here -- the two are drawn separately at the end, which is
+                // invisible because glyphs in a line of text never overlap.
+                if let Some((tex, quad)) = self.atlas_glyph_quad(cur_x, y, scale, ch) {
+                    if atlas_tex != 0 && atlas_tex != tex {
+                        // The atlas grew into a new texture mid-string: close the
+                        // batch before switching, rather than draw the tail with
+                        // the wrong one.
+                        self.flush_atlas_quads(&mut atlas_verts, atlas_tex, color);
+                    }
+                    atlas_tex = tex;
+                    atlas_verts.extend_from_slice(&quad);
+                }
                 cur_x += CJK_ADVANCE_UNITS * scale;
             } else {
                 // Unknown ASCII: blank, but keep the pen advancing as before.
@@ -6005,6 +6019,7 @@ impl SwitchRenderBackend {
             }
         }
         self.flush_text_quads(&mut verts);
+        self.flush_atlas_quads(&mut atlas_verts, atlas_tex, color);
     }
 
     /// Draw queued text quads (pixel-space positions + per-vertex colour) in one
@@ -6161,9 +6176,18 @@ impl SwitchRenderBackend {
     /// pen position `x` / line-top `y`, tinted `color`. The glyph occupies a
     /// full-width `CJK_ADVANCE_UNITS`-wide cell; the caller advances the pen by
     /// that width regardless of whether a glyph was actually drawn.
-    fn draw_atlas_glyph(&mut self, x: f32, y: f32, scale: f32, ch: char, color: swf::Color) {
-        // Lazily build the atlas on first use; only try once (a failed init —
-        // e.g. no pl service — must not re-run every frame).
+    /// Geometry of one shared-font glyph: its atlas texture and six vertices of
+    /// (pos.xy, uv.xy), ready to go into a batch.
+    ///
+    /// Split out of `draw_atlas_glyph` so the batched path and the single-glyph
+    /// path cannot disagree about where a character sits.
+    fn atlas_glyph_quad(
+        &mut self,
+        x: f32,
+        y: f32,
+        scale: f32,
+        ch: char,
+    ) -> Option<(GLuint, [f32; 24])> {
         if !self.atlas_init_done {
             self.atlas_init_done = true;
             self.font_atlas = crate::backend::glyphs::FontAtlas::new();
@@ -6172,55 +6196,90 @@ impl SwitchRenderBackend {
         let (tex, info) = match self.font_atlas.as_mut() {
             Some(fa) => match fa.ensure(ch, &mut uploaded) {
                 Some(info) => (fa.texture(), info),
-                None => return,
+                None => return None,
             },
-            None => return,
+            None => return None,
         };
         // A miss bound + wrote the atlas texture behind the GL state cache's
-        // back; resync so the next `use_bitmap` rebinds correctly.
+        // back; resync so the next bind is honoured.
         if uploaded {
             self.gl_state.invalidate();
         }
         if info.blank {
-            return;
+            return None;
         }
-        // Scale the fixed-size raster down/up to the target cell. Render size is
-        // tied to the advance so a full-width glyph fills its cell.
         let sf = (CJK_ADVANCE_UNITS * scale) / crate::backend::glyphs::RASTER_PX;
         let gw = info.w * sf;
         let gh = info.h * sf;
         let gx = x + info.xmin * sf;
-        // Sit on a baseline a bit above the bitmap-font cell bottom; fontdue's
-        // `ymin` is baseline→bitmap-bottom (y-up), so screen-top = baseline -
-        // (ymin + height). CJK_BASELINE_UNITS is the tunable vertical anchor.
         let baseline = y + CJK_BASELINE_UNITS * scale;
         let gy = baseline - (info.ymin + info.h) * sf;
         if gw <= 0.0 || gh <= 0.0 {
+            return None;
+        }
+        let (u0, v0, du, dv) = (info.uv[0], info.uv[1], info.uv[2], info.uv[3]);
+        let (x0, y0, x1, y1) = (gx, gy, gx + gw, gy + gh);
+        let (s0, t0, s1, t1) = (u0, v0, u0 + du, v0 + dv);
+        #[rustfmt::skip]
+        let quad = [
+            x0, y0, s0, t0,
+            x1, y0, s1, t0,
+            x1, y1, s1, t1,
+            x0, y0, s0, t0,
+            x1, y1, s1, t1,
+            x0, y1, s0, t1,
+        ];
+        Some((tex, quad))
+    }
+
+    /// Draw every queued shared-font glyph in ONE call.
+    ///
+    /// They all sample the same atlas and a `draw_text` call has a single
+    /// colour, so the whole run fits one batch. Before this, each character cost
+    /// a program setup, a uniform upload and its own `glDrawArrays`, AND forced
+    /// the bitmap-font batch to flush first -- a twenty-character Chinese label
+    /// was forty draw calls, every frame. The 5x7 font was moved off that model
+    /// in v1.6.0, which is what made the gallery smooth; this path stayed behind.
+    ///
+    /// `u_uv_remap` is the identity here so the per-vertex UVs pass through, and
+    /// the world matrix is the identity for the same reason as
+    /// `flush_text_quads`: the vertices already carry pixel coordinates, and
+    /// going through `world_matrix` keeps the UI scale and the rotation applied.
+    fn flush_atlas_quads(&mut self, verts: &mut std::vec::Vec<f32>, tex: GLuint, color: swf::Color) {
+        if verts.is_empty() || tex == 0 {
+            verts.clear();
             return;
         }
-        let mat = Matrix {
-            a: gw,
-            b: 0.0,
-            c: 0.0,
-            d: gh,
-            tx: swf::Twips::from_pixels(gx as f64),
-            ty: swf::Twips::from_pixels(gy as f64),
+        let ident = Matrix {
+            a: 1.0, b: 0.0, c: 0.0, d: 1.0,
+            tx: swf::Twips::ZERO,
+            ty: swf::Twips::ZERO,
         };
-        let world = self.world_matrix(&mat);
-        // Atlas is white with alpha = coverage; tint by the text colour.
+        let world = self.world_matrix(&ident);
         let mult = [
             color.r as f32 / 255.0,
             color.g as f32 / 255.0,
             color.b as f32 / 255.0,
             color.a as f32 / 255.0,
         ];
-        let add = [0.0, 0.0, 0.0, 0.0];
-        self.use_bitmap(&world, &mult, &add, tex, &info.uv);
+        const NO_ADD: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+        const PASSTHROUGH_UV: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+        self.use_bitmap(&world, &mult, &NO_ADD, tex, &PASSTHROUGH_UV);
         self.gl_state.bind_vao(self.bitmap_vao);
+        self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
         unsafe {
-            glDrawArrays(GL_TRIANGLES, 0, 6);
+            glBindBuffer(GL_ARRAY_BUFFER, self.bitmap_vbo);
+            glBufferData(
+                GL_ARRAY_BUFFER,
+                (verts.len() * core::mem::size_of::<f32>()) as GLsizeiptr,
+                verts.as_ptr() as *const _,
+                GL_DYNAMIC_DRAW,
+            );
+            glDrawArrays(GL_TRIANGLES, 0, (verts.len() / 4) as GLsizei);
         }
+        verts.clear();
     }
+
 
     /// Draw the pause-modal overlay on top of whatever's already in the
     /// framebuffer. The caller is expected to have re-rendered the paused
