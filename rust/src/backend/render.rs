@@ -8146,7 +8146,6 @@ impl SwitchRenderBackend {
     ) {
         self.library_clear();
         let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
         self.draw_home_header(banner_tex, banner_w, banner_h, entries.len(), filter, total_unfiltered);
 
         if entries.is_empty() {
@@ -8171,15 +8170,6 @@ impl SwitchRenderBackend {
         let cap_w = 1232.0 - cap_x;
 
         let n = entries.len();
-        let footer = crate::loc::s().list_footer;
-        let fw = self.measure_text(footer, 2.0);
-        if n == 0 {
-            if let Ok(mut g) = gallery_cache().lock() {
-                *g = (std::vec::Vec::new(), 0);
-            }
-            self.draw_text((vw - fw) * 0.5, vh - 42.0, 2.0, footer, swf::Color::from_rgb(0x99AABB, 255));
-            return;
-        }
 
         // ONE eased number. The offset is DERIVED from it rather than eased on its
         // own track: `home_anim_step` runs them at different rates (16 and 14), so
@@ -8380,7 +8370,7 @@ impl SwitchRenderBackend {
             self.draw_overlay_rect(tx, 527.0, tw, 5.0, 0xFF_FF_D7_40);
         }
 
-        self.draw_text((vw - fw) * 0.5, vh - 42.0, 2.0, footer, swf::Color::from_rgb(0x99AABB, 255));
+        self.draw_page_footer(crate::loc::s().list_footer);
     }
 
     pub fn draw_library_gallery(
@@ -8755,17 +8745,7 @@ impl SwitchRenderBackend {
             self.draw_facts((vw - iw) * 0.5, vh - 66.0, isc, &facts);
         }
 
-        // Footer.
-        let help = crate::loc::s().list_footer;
-        let hsc = 2.0;
-        let hw = self.measure_text(help, hsc);
-        self.draw_text(
-            (vw - hw) * 0.5,
-            vh - 42.0,
-            hsc,
-            help,
-            swf::Color::from_rgb(0x99AABB, 255),
-        );
+        self.draw_page_footer(crate::loc::s().list_footer);
 
         unsafe {
             glUseProgram(0);
@@ -9036,7 +9016,6 @@ impl SwitchRenderBackend {
     ) {
         self.library_clear();
         let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
 
         // Header.
         let header = crate::loc::s().dist_title;
@@ -9313,17 +9292,7 @@ impl SwitchRenderBackend {
             <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), th);
         }
 
-        // Footer.
-        let help = crate::loc::s().dist_list_footer;
-        let hsc = 2.0;
-        let hw2 = self.measure_text(help, hsc);
-        self.draw_text(
-            (vw - hw2) * 0.5,
-            vh - 42.0,
-            hsc,
-            help,
-            swf::Color::from_rgb(0x99AABB, 255),
-        );
+        self.draw_page_footer(crate::loc::s().dist_list_footer);
 
         unsafe {
             glUseProgram(0);
@@ -9354,7 +9323,6 @@ impl SwitchRenderBackend {
     ) {
         self.library_clear();
         let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
 
         // Header.
         let title = crate::loc::s().files_title;
@@ -9577,17 +9545,7 @@ impl SwitchRenderBackend {
             <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), thumb);
         }
 
-        // Footer.
-        const HELP_SCALE: f32 = 2.0;
-        let help = crate::loc::s().files_footer;
-        let help_w = self.measure_text(help, HELP_SCALE);
-        self.draw_text(
-            (vw - help_w) * 0.5,
-            vh - 42.0,
-            HELP_SCALE,
-            help,
-            swf::Color::from_rgb(0x99AABB, 255),
-        );
+        self.draw_page_footer(crate::loc::s().files_footer);
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
@@ -9781,15 +9739,7 @@ impl SwitchRenderBackend {
             y += 30.0;
         }
 
-        const HELP_SCALE: f32 = 2.0;
-        let help_w = self.measure_text(footer, HELP_SCALE);
-        self.draw_text(
-            (vw - help_w) * 0.5,
-            vh - 42.0,
-            HELP_SCALE,
-            footer,
-            swf::Color::from_rgb(0x99AABB, 255),
-        );
+        self.draw_page_footer(footer);
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
@@ -10585,7 +10535,6 @@ impl SwitchRenderBackend {
     ) {
         self.library_clear();
         let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
 
         // Header (drop shadow + amber, like the other list screens).
         let scale_t = 4.0;
@@ -10644,10 +10593,7 @@ impl SwitchRenderBackend {
             <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), thumb);
         }
 
-        // Footer.
-        const HELP_SCALE: f32 = 2.0;
-        let help_w = self.measure_text(footer, HELP_SCALE);
-        self.draw_text((vw - help_w) * 0.5, vh - 42.0, HELP_SCALE, footer, swf::Color::from_rgb(0x99AABB, 255));
+        self.draw_page_footer(footer);
 
         unsafe {
             glUseProgram(0);
