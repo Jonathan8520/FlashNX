@@ -1598,6 +1598,11 @@ pub struct SwitchRenderBackend {
     bitmap_vao: GLuint,
     bitmap_vbo: GLuint,
 
+    /// Shared-font glyph batch (pos+uv, dynamic). Its own pair on purpose —
+    /// see `build_atlas_batch`.
+    atlas_vao: GLuint,
+    atlas_vbo: GLuint,
+
     /// Unit line (pos+rgba, 2 vertices). Used by `draw_line`.
     line_vao: GLuint,
     line_vbo: GLuint,
@@ -2732,6 +2737,47 @@ fn build_bitmap_quad() -> (GLuint, GLuint) {
             QUAD.as_ptr() as *const _,
             GL_STATIC_DRAW,
         );
+        let stride = (4 * core::mem::size_of::<f32>()) as GLsizei;
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, core::ptr::null());
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(
+            1,
+            2,
+            GL_FLOAT,
+            GL_FALSE,
+            stride,
+            (2 * core::mem::size_of::<f32>()) as *const _,
+        );
+        glBindVertexArray(0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+    }
+    (vao, vbo)
+}
+
+/// Same attribute layout as `build_bitmap_quad`, but a DYNAMIC buffer that
+/// `flush_atlas_quads` refills per text run.
+///
+/// It needs its own pair, not the bitmap quad's. A VAO records the buffer that
+/// was bound when its attribute pointers were set, so a batch cannot borrow
+/// `bitmap_vao` and point it elsewhere -- it can only overwrite `bitmap_vbo`,
+/// and that buffer holds the STATIC unit quad every other bitmap draw relies
+/// on (`render_bitmap`, the covers, the banner: all of them bind the VAO and
+/// draw six vertices without uploading any). Overwriting it replaced that quad
+/// with a glyph run for the rest of the renderer's life, so every bitmap drawn
+/// afterwards got glyph geometry through a matrix built for a unit quad and
+/// landed nowhere visible. That is what emptied the gallery the moment any CJK
+/// text was drawn -- including the language picker, which lists every language
+/// under its own name. Solid draws survive the same treatment only because
+/// `draw_rect` re-uploads its vertices on every call.
+fn build_atlas_batch() -> (GLuint, GLuint) {
+    let mut vao: GLuint = 0;
+    let mut vbo: GLuint = 0;
+    unsafe {
+        glGenVertexArrays(1, &mut vao);
+        glBindVertexArray(vao);
+        glGenBuffers(1, &mut vbo);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
         let stride = (4 * core::mem::size_of::<f32>()) as GLsizei;
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, stride, core::ptr::null());
@@ -4128,6 +4174,7 @@ impl SwitchRenderBackend {
 
         let (rect_vao, rect_vbo) = build_solid_quad();
         let (bitmap_vao, bitmap_vbo) = build_bitmap_quad();
+        let (atlas_vao, atlas_vbo) = build_atlas_batch();
         let (line_vao, line_vbo) = build_line_segment();
         let (line_rect_vao, line_rect_vbo) = build_line_rect();
         let t_arena = unsafe { ruffle_tick_now() };
@@ -4237,6 +4284,8 @@ impl SwitchRenderBackend {
             rect_vbo,
             bitmap_vao,
             bitmap_vbo,
+            atlas_vao,
+            atlas_vbo,
             line_vao,
             line_vbo,
             line_rect_vao,
@@ -6265,10 +6314,10 @@ impl SwitchRenderBackend {
         const NO_ADD: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
         const PASSTHROUGH_UV: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
         self.use_bitmap(&world, &mult, &NO_ADD, tex, &PASSTHROUGH_UV);
-        self.gl_state.bind_vao(self.bitmap_vao);
+        self.gl_state.bind_vao(self.atlas_vao);
         self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
         unsafe {
-            glBindBuffer(GL_ARRAY_BUFFER, self.bitmap_vbo);
+            glBindBuffer(GL_ARRAY_BUFFER, self.atlas_vbo);
             glBufferData(
                 GL_ARRAY_BUFFER,
                 (verts.len() * core::mem::size_of::<f32>()) as GLsizeiptr,
@@ -13090,6 +13139,8 @@ impl Drop for SwitchRenderBackend {
             glDeleteVertexArrays(1, &self.rect_vao);
             glDeleteBuffers(1, &self.bitmap_vbo);
             glDeleteVertexArrays(1, &self.bitmap_vao);
+            glDeleteBuffers(1, &self.atlas_vbo);
+            glDeleteVertexArrays(1, &self.atlas_vao);
             glDeleteBuffers(1, &self.line_vbo);
             glDeleteVertexArrays(1, &self.line_vao);
             glDeleteBuffers(1, &self.line_rect_vbo);
