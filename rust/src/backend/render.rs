@@ -7427,6 +7427,29 @@ impl SwitchRenderBackend {
         }
     }
 
+    /// The amber wash painted behind the active row of a vertical list.
+    ///
+    /// Written out by hand on five screens, and the copies had already drifted:
+    /// the IMPORTER history bar and the archive.org file bar are meant to read as
+    /// the same object on the same 50 px pitch, yet one ends 4 px further right
+    /// and sits 2 px lower than the other. Nobody chose that; it is what five
+    /// independent `Matrix` literals cost. The tint was five literals too, spelled
+    /// two different ways, so any future change to it - fading the bar under an
+    /// open modal, a non-amber theme - was a five-site edit where missing one site
+    /// stays invisible until someone opens that one screen.
+    ///
+    /// `radius > 0.0` cuts the corners, which paints the PAGE colour and is
+    /// therefore only valid over a `library_clear` background, never on a modal.
+    fn draw_selection_bar(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32) {
+        // Amber at 20%: light enough that the row's own text stays the brightest
+        // thing in it, which is why the marker is a wash and not a solid fill.
+        const SEL_BAR_TINT: u32 = 0x33_FF_D7_40;
+        self.draw_overlay_rect(x, y, w, h, SEL_BAR_TINT);
+        if radius > 0.0 {
+            self.round_corners(x, y, w, h, radius);
+        }
+    }
+
     /// Draw a game's cover fitted INSIDE the box (x,y,w,h), centred, aspect kept,
     /// and return the rect it actually occupies.
     ///
@@ -7761,15 +7784,10 @@ impl SwitchRenderBackend {
         // the list feel continuous rather than stepped.
         let hl_y = hl_content_y - scroll_px;
         if !entries.is_empty() {
-            let bar = Matrix {
-                a: list_w, b: 0.0, c: 0.0, d: ROW_H - 6.0,
-                tx: swf::Twips::from_pixels(list_x as f64),
-                ty: swf::Twips::from_pixels(hl_y as f64),
-            };
-            <Self as CommandHandler>::draw_rect(
-                self, swf::Color::from_rgba(0x33_FF_D7_40), bar,
-            );
-            self.round_corners(list_x, hl_y, list_w, ROW_H - 6.0, 6.0);
+            // Rounded only here: this bar is a narrow column over the page navy,
+            // where a cut corner reads as deliberate. The full-width bars have no
+            // margin to spend on one.
+            self.draw_selection_bar(list_x, hl_y, list_w, ROW_H - 6.0, 6.0);
         }
         for (idx, e) in entries.iter().enumerate() {
             let y = TOP + idx as f32 * ROW_H - scroll_px;
@@ -9117,12 +9135,7 @@ impl SwitchRenderBackend {
 
         let hy = hover_y - scroll_px;
         let bar_x = left - 40.0;
-        let bar = Matrix {
-            a: vw - bar_x - 56.0, b: 0.0, c: 0.0, d: row_h - 12.0,
-            tx: swf::Twips::from_pixels(bar_x as f64),
-            ty: swf::Twips::from_pixels((hy - 6.0) as f64),
-        };
-        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x33_FF_D7_40), bar);
+        self.draw_selection_bar(bar_x, hy - 6.0, vw - bar_x - 56.0, row_h - 12.0, 0.0);
         self.draw_text(left - 34.0, hy, scale, ">", swf::Color::from_rgb(0xFFD740, 255));
 
         for i in 0..total {
@@ -9483,15 +9496,13 @@ impl SwitchRenderBackend {
         // slides from row to row like JOUER's frame). Drawn before the rows.
         if total > 0 {
             let hy = hover_y - scroll_px;
-            let hl = Matrix {
-                a: vw - rows_left_x - 20.0,
-                b: 0.0,
-                c: 0.0,
-                d: ROW_SPACING - 12.0,
-                tx: swf::Twips::from_pixels((rows_left_x - 40.0) as f64),
-                ty: swf::Twips::from_pixels((hy - 8.0) as f64),
-            };
-            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x33_FF_D7_40), hl);
+            self.draw_selection_bar(
+                rows_left_x - 40.0,
+                hy - 8.0,
+                vw - rows_left_x - 20.0,
+                ROW_SPACING - 12.0,
+                0.0,
+            );
         }
 
         for abs_idx in 0..total {
@@ -9834,12 +9845,7 @@ impl SwitchRenderBackend {
         let now_hl = unsafe { ruffle_tick_now() };
         let hy = eased_list_y(target_hy, 2, now_hl);
         const BAR_W: f32 = 460.0;
-        let bar = Matrix {
-            a: BAR_W, b: 0.0, c: 0.0, d: row_h - 16.0,
-            tx: swf::Twips::from_pixels(((vw - BAR_W) * 0.5) as f64),
-            ty: swf::Twips::from_pixels((hy - 8.0) as f64),
-        };
-        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x33_FF_D7_40), bar);
+        self.draw_selection_bar((vw - BAR_W) * 0.5, hy - 8.0, BAR_W, row_h - 16.0, 0.0);
         // Cursor at the eased y, x aligned to the selected entry's centering.
         if let Some(sel) = entries.get(selection) {
             let sel_ow = self.measure_text(sel, OPT_SCALE);
@@ -10863,13 +10869,10 @@ impl SwitchRenderBackend {
             let is_active = i == active;
             // Amber tint behind the selected cell.
             if is_sel {
-                self.draw_overlay_rect(
-                    cell_x + 4.0,
-                    cell_y,
-                    CELL_W - 8.0,
-                    CELL_H - 6.0,
-                    0x33FF_D740,
-                );
+                // Same tint as a list bar, on a grid cell: radius 0, because
+                // `round_corners` paints the PAGE colour and this sits on a modal
+                // panel - cutting here would leave four navy notches on the panel.
+                self.draw_selection_bar(cell_x + 4.0, cell_y, CELL_W - 8.0, CELL_H - 6.0, 0.0);
             }
             let fx = cell_x + (CELL_W - FLAG_W) * 0.5;
             let fy = cell_y + 6.0;
