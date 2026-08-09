@@ -4484,8 +4484,11 @@ impl SwitchRenderBackend {
     /// screen as before: a filter is a cosmetic option and must never cost a
     /// frame, let alone a game.
     fn begin_screen_filter(&mut self) -> bool {
-        let w = self.dimensions.width.max(1);
-        let h = self.dimensions.height.max(1);
+        // Physical: this target IS the screen, so it must be the screen's shape.
+        // The logical portrait size would capture a 720x1280 slab of a 1280x720
+        // framebuffer and present it back squeezed.
+        let (w, h) = self.physical_dims();
+        let (w, h) = (w.max(1), h.max(1));
         if self.screen_filter.is_none() {
             self.screen_filter = build_screen_filter_program();
             if self.screen_filter.is_none() {
@@ -6742,6 +6745,21 @@ impl SwitchRenderBackend {
 
     /// Reset the library-UI transform to identity (before the fixed navbar, and
     /// for screens with no transition).
+    /// Size of the real framebuffer, which never turns.
+    ///
+    /// `self.dimensions` is the LOGICAL viewport Ruffle composes for, and it is
+    /// portrait while the picture is turned a quarter. Every glViewport that
+    /// targets the screen wants THIS instead: setting the logical one squeezed
+    /// the whole frame into the left 720 columns and left the previous, unturned
+    /// frame showing in the rest.
+    fn physical_dims(&self) -> (u32, u32) {
+        if rotation_swaps_axes() {
+            (self.dimensions.height, self.dimensions.width)
+        } else {
+            (self.dimensions.width, self.dimensions.height)
+        }
+    }
+
     pub fn clear_ui_transform(&mut self) {
         self.ui_scale = 1.0;
         self.ui_pivot_x = 0.0;
@@ -12113,14 +12131,10 @@ impl RenderBackend for SwitchRenderBackend {
         // false leaves the original path byte for byte.
         let filter_mode = screen_filter();
         let filtered = filter_mode != 0 && self.begin_screen_filter();
+        let (phys_w, phys_h) = self.physical_dims();
 
         unsafe {
-            glViewport(
-                0,
-                0,
-                self.dimensions.width as GLsizei,
-                self.dimensions.height as GLsizei,
-            );
+            glViewport(0, 0, phys_w as GLsizei, phys_h as GLsizei);
             glClearColor(
                 clear.r as GLfloat / 255.0,
                 clear.g as GLfloat / 255.0,
