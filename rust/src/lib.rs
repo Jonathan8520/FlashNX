@@ -1046,6 +1046,29 @@ fn render_frame_with_dt(dt: FloatDuration) {
     let t0 = unsafe { ruffle_tick_now() };
     player.tick(dt);
     let t1 = unsafe { ruffle_tick_now() };
+    // Where the root timeline actually IS, once a second.
+    //
+    // A game that has gone quiet looks the same from the outside whatever the
+    // reason: the frame counter keeps running, the scene keeps being drawn, and
+    // the heartbeat's `tick` merely reads near zero. This says whether the root
+    // is PARKED on a frame (a preloader waiting on something that will never
+    // arrive, a menu with no script) or still advancing while its content does
+    // nothing, which are different bugs with different owners. Costs one
+    // `mutate_with` a second.
+    {
+        static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        let n = LAST.fetch_add(1, Ordering::Relaxed);
+        if n % 60 == 0 {
+            let (cur, total) = player.mutate_with_update_context(|context| {
+                let root = context.stage.root_clip();
+                match root.and_then(|r| r.as_movie_clip()) {
+                    Some(mc) => (mc.current_frame() as i32, mc.frames_loaded()),
+                    None => (0, 0),
+                }
+            });
+            log_str(&std::format!("root: frame {}/{}\n", cur, total));
+        }
+    }
     player.render();
     let t2 = unsafe { ruffle_tick_now() };
     let tick_dt = t1.saturating_sub(t0);

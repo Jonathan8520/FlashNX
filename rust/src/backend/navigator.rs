@@ -330,8 +330,25 @@ impl SidecarNavigator {
 /// fires and fail-opens into the game. We let such requests hang for exactly
 /// that reason (see `fetch`), instead of erroring immediately.
 fn is_dead_ad_host(host: &str) -> bool {
-    const DEAD: &[&str] = &["mochiads.com", "mochibot.com", "mochimedia.com"];
+    // mochibot.com is NOT in here. It is a hit counter, not an ad server: a game
+    // fires it and forgets it, so there is nothing to fail open FROM, and hanging
+    // it forever leaves a loader pending for the rest of the session. The reason
+    // this list exists -- a preloader that gates the game on an ad and needs the
+    // server to look unreachable rather than absent -- applies to the ad hosts
+    // only. Learn to Fly 2 goes silent immediately after its MochiBot ping and
+    // never runs another line of script; that is the case this split is meant to
+    // answer, and it is a HYPOTHESIS until the console says otherwise.
+    const DEAD: &[&str] = &["mochiads.com", "mochimedia.com"];
     DEAD.iter()
+        .any(|d| host == *d || host.ends_with(&std::format!(".{d}")))
+}
+
+/// Hit counters: answered with a normal "not found" straight away rather than
+/// hung, so whatever the game does next is not waiting on us.
+fn is_tracker_host(host: &str) -> bool {
+    const TRACKERS: &[&str] = &["mochibot.com"];
+    TRACKERS
+        .iter()
         .any(|d| host == *d || host.ends_with(&std::format!(".{d}")))
 }
 
@@ -511,6 +528,11 @@ impl NavigatorBackend for SidecarNavigator {
         // immediate "not found" error instead breaks that path and leaves the
         // game stuck on the sponsor / "update Flash" screen (observed on
         // Papa Louie 2's MochiAds preloader). We still never touch the network.
+        if resolved.host_str().is_some_and(is_tracker_host) {
+            tracing::info!("sidecar: tracker {resolved} refused immediately (never hung)");
+            let err = Error::FetchError(std::format!("tracker not served: {resolved}"));
+            return async_return(Err(ErrorResponse { url: resolved.to_string(), error: err }));
+        }
         if resolved.host_str().is_some_and(is_dead_ad_host) {
             tracing::info!("sidecar: stalling dead ad host {resolved} (mimic unreachable)");
             return Box::pin(std::future::pending::<
