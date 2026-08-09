@@ -4060,9 +4060,24 @@ fn run_direct_download(url: &str) {
     let safe_name = safe_name_from_url(url);
     // Already on SD? Skip the re-download (the game is playable from JOUER),
     // mirroring the Flashpoint grid's A-press guard.
-    if let Ok(s) = LIBRARY.lock() {
+    if let Ok(mut s) = LIBRARY.lock() {
         if s.entries.iter().any(|e| e.basename == safe_name) {
             log(&std::format!("library: direct download skip - {} deja sur SD\n", safe_name));
+            // Said out loud. Typing an address and landing back on the same list
+            // with no row, no toast and no error did not distinguish "you already
+            // have it" from "the button did not register" — and since identity is
+            // the last path segment alone, it also covers "a DIFFERENT game with
+            // the same file name". The URL still goes into the history: it is a
+            // valid address the user asked for, and dropping it meant the saved
+            // list quietly disagreed with what they typed.
+            let shown = safe_name.clone();
+            set_toast(
+                &mut s,
+                crate::loc::s().toast_already_imported.replace("{}", &shown),
+                TOAST_INFO,
+            );
+            drop(s);
+            push_history(url);
             return;
         }
     }
@@ -5925,7 +5940,13 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             });
             if let Some((game, mut rows, sel_is_mine)) = snap {
                 if rows.is_empty() {
-                    rows.push(lc.profile_none.to_string());
+                    // "Nobody has shared one yet" and "we could not ask" are
+                    // different facts, and only one of them is worth acting on.
+                    rows.push(if crate::profiles::catalog_unavailable() {
+                        lc.profile_catalog_offline.to_string()
+                    } else {
+                        lc.profile_none.to_string()
+                    });
                 }
                 let refs: std::vec::Vec<&str> = rows.iter().map(|r| r.as_str()).collect();
                 // Append the delete hint only when sitting on your own profile.

@@ -1163,14 +1163,39 @@ pub fn set_display_mode_for(basename: &str, mode: u8) {
 /// clears the per-game file. Used by the library sub-menu (the in-game VITESSE
 /// uses `set_cursor_speed`, which targets the active game).
 pub fn set_cursor_speed_for(basename: &str, idx: i32) {
+    if write_cursor_speed(basename, idx) {
+        mark_controls_touched(basename);
+    }
+}
+
+/// The same write WITHOUT `mark_controls_touched`, for use while applying a
+/// community profile.
+///
+/// `apply` tags the sidecar `community:<id>` and then set the cursor speed, whose
+/// mark re-read that very sidecar and rewrote the source as `"user"` — erasing
+/// the tag one line after writing it. Nothing looked wrong (the controls are
+/// correct), but the keymap then claimed to be the player's own work, so the
+/// guard that stops PARTAGER re-uploading someone else's profile under this
+/// install's id no longer fired.
+pub fn set_cursor_speed_from_profile(basename: &str, idx: i32) -> bool {
+    write_cursor_speed(basename, idx)
+}
+
+fn write_cursor_speed(basename: &str, idx: i32) -> bool {
     let path = primary_path(&std::format!("{}.cursor", basename));
     if idx < 0 {
-        let _ = std::fs::remove_file(&path);
-    } else if std::fs::write(&path, std::format!("{}", idx).as_bytes()).is_err() {
-        return;
+        if let Err(e) = std::fs::remove_file(&path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                log(&std::format!("keymap: could not clear {} ({})\n", path, e));
+                return false;
+            }
+        }
+    } else if let Err(e) = std::fs::write(&path, std::format!("{}", idx).as_bytes()) {
+        log(&std::format!("keymap: cursor speed for {} not saved: {}\n", basename, e));
+        return false;
     }
     crate::sd::commit();
-    mark_controls_touched(basename);
+    true
 }
 
 /// After a NON-keymap per-game change (cursor speed), a keymap still tagged as an

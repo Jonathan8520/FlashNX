@@ -445,6 +445,9 @@ struct IndexEntry {
 static ONLINE_INDEX: std::sync::Mutex<Option<std::vec::Vec<IndexEntry>>> =
     std::sync::Mutex::new(None);
 static INDEX_TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Whether the last catalog read succeeded. Starts true so a picker opened before
+/// any fetch does not accuse the network of anything.
+static INDEX_OK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// Fetch + cache the online catalog index (once per session). A network failure
 /// caches an empty index so we don't re-hit it on every picker open.
@@ -460,8 +463,15 @@ fn fetch_index() -> std::vec::Vec<IndexEntry> {
     // Fetch via the GitHub API (fresh; raw.githubusercontent lags new commits).
     match gh_api_fetch_text("index.json", 256 * 1024) {
         Some(text) => {
-            let entries =
-                serde_json::from_str::<std::vec::Vec<IndexEntry>>(&text).unwrap_or_default();
+            // A parse failure is NOT an empty catalog. `unwrap_or_default` made it
+            // one, logged it as "index fetched (0 entries)" and cached that as a
+            // success for the whole session — and past 1 MB the GitHub API returns
+            // an empty `content`, so this is the branch that actually fires.
+            let Ok(entries) = serde_json::from_str::<std::vec::Vec<IndexEntry>>(&text) else {
+                crate::net::log("profiles: index is not valid JSON - catalog unavailable\n");
+                INDEX_OK.store(false, Ordering::Relaxed);
+                return std::vec::Vec::new();
+            };
             crate::net::log(&std::format!(
                 "profiles: index fetched ({} entries)\n",
                 entries.len(),
@@ -471,14 +481,27 @@ fn fetch_index() -> std::vec::Vec<IndexEntry> {
             if let Ok(mut g) = ONLINE_INDEX.lock() {
                 *g = Some(entries.clone());
             }
+            INDEX_OK.store(true, Ordering::Relaxed);
             INDEX_TRIED.store(true, Ordering::Relaxed);
             entries
         }
         None => {
             crate::net::log("profiles: index fetch failed (api)\n");
+            INDEX_OK.store(false, Ordering::Relaxed);
             std::vec::Vec::new()
         }
     }
+}
+
+/// False when the last catalog read did not happen — no connection, a wrong
+/// clock (TLS), a GitHub error, a body that will not parse.
+///
+/// The pickers used to state "NO PROFILE FOR THIS GAME YET. SHARE YOURS TO HELP!"
+/// in exactly that case: a false claim about other people's work, plus an
+/// invitation to act on it, on the most ordinary trigger there is — an offline
+/// console.
+pub fn catalog_unavailable() -> bool {
+    !INDEX_OK.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Drop the cached online catalog + apply counts so the next picker open
@@ -618,8 +641,11 @@ pub fn apply(basename: &str, profile: &Profile) -> bool {
     let ok = crate::keymap::apply_keymap(basename, &km);
     // Cursor speed lives in its own `.cursor` file. Apply the profile's if set
     // (>= 0); leave the game's own untouched when the profile carries none (-1).
+    // The `_from_profile` variant: the plain one ends in `mark_controls_touched`,
+    // which would rewrite the `community:<id>` tag `apply_keymap` just set back to
+    // "user" and make this install claim someone else's profile as its own work.
     if ok && profile.cursor_speed >= 0 {
-        crate::keymap::set_cursor_speed_for(basename, profile.cursor_speed);
+        crate::keymap::set_cursor_speed_from_profile(basename, profile.cursor_speed);
     }
     ok
 }

@@ -973,7 +973,13 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
                 }
             }
             if rows.is_empty() {
-                rows.push(lc.profile_none.to_string());
+                // Twin of the on-cover picker in library.rs: an unreachable
+                // catalog must not be reported as an empty one.
+                rows.push(if crate::profiles::catalog_unavailable() {
+                    lc.profile_catalog_offline.to_string()
+                } else {
+                    lc.profile_none.to_string()
+                });
             }
             let refs: std::vec::Vec<&str> = rows.iter().map(|r| r.as_str()).collect();
             // Append the delete hint only when sitting on your own profile.

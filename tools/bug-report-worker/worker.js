@@ -283,7 +283,9 @@ async function handleProfileDelete(r, env) {
   if (!res.ok) return json({ ok: false, error: res.error }, 502);
   // Best-effort: drop the now-orphaned apply counter.
   try { await env.PROFILES_KV.delete(`count:${id}`); } catch {}
-  return json({ ok: true });
+  // `deleted` distinguishes a real removal from "that id was not in the catalog".
+  // Older clients read `ok` alone and are unaffected.
+  return json({ ok: true, deleted: res.deleted !== false });
 }
 
 // Ownership store for #20 profiles, in PROFILES_KV under `owner:<install_id>`.
@@ -345,18 +347,31 @@ async function commitTreeChange(env, branch, message, mutate) {
     const baseTree = (await tipCommitRes.json()).tree.sha;
     // 3. Read index.json AT THE TIP commit (pinned to tipSha so our edit matches
     //    base_tree exactly).
+    //    Every failure here is FATAL. It used to fall through with `list = []`,
+    //    and the share then committed a one-element array as the new index — the
+    //    sharer's own profile published fine while every other profile in the
+    //    catalog became unlisted for everyone, since the app only reads
+    //    index.json. The parse branch is the one that actually fires: past 1 MB
+    //    the contents API returns an empty `content` string. Only a real 404 may
+    //    legitimately start from an empty list (first profile ever shared).
     let list = [];
     const idxRes = await fetch(`${base}/contents/index.json?ref=${tipSha}`, { headers });
     if (idxRes.ok) {
       try {
         list = JSON.parse(atobUtf8((await idxRes.json()).content));
-      } catch {
-        list = [];
+      } catch (e) {
+        return { ok: false, error: `index parse: ${e && e.message ? e.message : e}` };
       }
-      if (!Array.isArray(list)) list = [];
+      if (!Array.isArray(list)) {
+        return { ok: false, error: "index is not an array" };
+      }
+    } else if (idxRes.status !== 404) {
+      return { ok: false, error: `index read ${idxRes.status}` };
     }
     const m = mutate(list);
-    if (m.done) return { ok: true }; // nothing to change (e.g. delete of an absent profile)
+    // Nothing to change (e.g. delete of an absent profile). `deleted` carries
+    // through so the caller does not read "we did nothing" as "we did it".
+    if (m.done) return { ok: true, deleted: m.deleted !== false };
     // 4. New tree: the caller's file ops + the rewritten index (inline content =
     //    blob created server-side; sha:null removes a path).
     const treeRes = await fetch(`${base}/git/trees`, {
@@ -415,7 +430,13 @@ function commitShare(env, branch, file, fileContent, indexEntry, message) {
 function commitDelete(env, branch, id, message) {
   return commitTreeChange(env, branch, message, (list) => {
     const entry = list.find((e) => e && e.id === id);
-    if (!entry) return { done: true };
+    // `deleted: false` so the caller can tell "already gone" from "removed". The
+    // bare `{done:true}` came back as a plain success, so the app reported "your
+    // shared profile was deleted", dropped the row and demoted the local tag while
+    // the profile was still published — and it reappeared in the picker the same
+    // session. Reachable without any GitHub failure, since an index that failed
+    // to load used to arrive here empty.
+    if (!entry) return { done: true, deleted: false };
     const next = list.filter((e) => e && e.id !== id);
     const tree = entry.file
       ? [{ path: entry.file, mode: "100644", type: "blob", sha: null }]
