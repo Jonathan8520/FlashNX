@@ -271,6 +271,12 @@ static GLYPHS: &[(char, Glyph)] = &[
     // letter in the word. Cut to five it reads as furniture — the same reasoning
     // as the LISTE row's colour chip, a mark smaller than what it separates.
     ('|', ["     ", "  ## ", "  ## ", "  ## ", "  ## ", "  ## ", "     "]),
+    // Degree sign, for the rotation labels. Without it this ONE character fell
+    // through to the shared system font -- the same path Chinese takes -- which
+    // costs over 130 MB to load, delays the panel that first shows it, and is
+    // fatal in applet mode. One glyph here instead of a font dependency for the
+    // word "90 degrees".
+    ('\u{00B0}', [" ##  ", "#  # ", " ##  ", "     ", "     ", "     ", "     "]),
     ('\u{2026}', ["     ", "     ", "     ", "     ", "     ", "     ", "# # #"]), // …
     // Accented uppercase Latin (French + Spanish). The letter body is
     // compressed to 6 rows so the diacritic fits on row 0.
@@ -6469,8 +6475,14 @@ impl SwitchRenderBackend {
         let key_h = KEY_H * shrink;
         let key_gap = KEY_GAP * shrink;
         let key_scale = KEY_SCALE * shrink;
+        // Header and footer bands shrink WITH the keys. Scaling the key block
+        // alone left the rows running past the bottom of the panel and over the
+        // "A:OK  B:ANNULER" line, because the header still reserved its landscape
+        // 108 px while the block below it had got shorter.
+        let head_h = 108.0 * shrink.max(0.7);
+        let foot_h = 54.0 * shrink.max(0.7);
         let n_rows = crate::keymap::KEYBOARD_ROWS_N as f32;
-        let panel_h = 120.0 * shrink.max(0.75) + n_rows * (key_h + key_gap) + 34.0;
+        let panel_h = head_h + n_rows * (key_h + key_gap) + foot_h;
         let title = std::format!("{} ->", button_name);
         let frame = self.draw_modal_frame(
             PANEL_W,
@@ -6485,7 +6497,7 @@ impl SwitchRenderBackend {
         let inner_w = frame.w - 2.0 * SIDE_MARGIN;
         let unit_w = inner_w / crate::keymap::KEYBOARD_UNITS_W;
         let origin_x = frame.x + SIDE_MARGIN;
-        let top_y = frame.y + 108.0;
+        let top_y = frame.y + head_h;
 
         for (i, &(name, row, kx, kw)) in keys.iter().enumerate() {
             let x = origin_x + kx * unit_w;
