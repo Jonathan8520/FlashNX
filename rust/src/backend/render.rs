@@ -347,6 +347,18 @@ const FACTS_VALUE: u32 = 0xAABFD8;
 const FACTS_MUTED: u32 = 0x7A8CA6;
 const FACTS_AS3: u32 = 0xE0B24D;
 
+// Scrollbar palette, one copy for the seven places that spelled it out inline.
+// They drifted exactly where an inline copy always drifts: the Flashpoint
+// gallery's track came out white where every other one is slate, and three of
+// the seven clamp their thumb 4 px shorter than the rest. Differences nobody
+// decided, only inherited from whichever site happened to be open that day. The
+// thumb is the selection amber on purpose: on every screen it is the cursor,
+// seen from the edge of the page.
+const SCROLLBAR_W: f32 = 4.0;
+const SCROLLBAR_MIN_THUMB: f32 = 24.0;
+const SCROLLBAR_TRACK: u32 = 0x40_99_AA_BB;
+const SCROLLBAR_THUMB: u32 = 0xFF_FF_D7_40;
+
 
 /// Count of `GpuDraw`s currently alive (created minus dropped). Used to
 /// detect leaks: if this monotonically grows (and matches `shapes_registered`
@@ -7833,22 +7845,15 @@ impl SwitchRenderBackend {
         // rail, LISTE showed 13 of 77 with nothing to say which 13. Placed in the
         // 38 px gutter between the column and the panel, so it sits against the
         // thing it measures instead of at the screen edge.
-        if entries.len() > rows_visible {
-            let bar_x = list_x + list_w + 8.0;
-            let bar_top = band_top;
-            let bar_h = band_bot - band_top;
-            let thumb_h = (bar_h * rows_visible as f32 / entries.len() as f32).max(24.0);
-            let max_scroll = entries.len().saturating_sub(rows_visible) as f32 * ROW_H;
-            let progress = if max_scroll > 0.0 { (scroll_px / max_scroll).clamp(0.0, 1.0) } else { 0.0 };
-            self.draw_overlay_rect(bar_x, bar_top, 4.0, bar_h, 0x40_99_AA_BB);
-            self.draw_overlay_rect(
-                bar_x,
-                bar_top + (bar_h - thumb_h) * progress,
-                4.0,
-                thumb_h,
-                0xFF_FF_D7_40,
-            );
-        }
+        self.draw_scrollbar(
+            list_x + list_w + 8.0,
+            band_top,
+            band_bot - band_top,
+            scroll_px,
+            ROW_H,
+            rows_visible,
+            entries.len(),
+        );
 
         self.draw_page_footer(crate::loc::s().list_footer);
 
@@ -7870,6 +7875,41 @@ impl SwitchRenderBackend {
         let vh = self.dimensions.height as f32;
         let w = self.measure_text(text, 2.0);
         self.draw_text((vw - w) * 0.5, vh - 42.0, 2.0, text, swf::Color::from_rgb(0x99AABB, 255));
+    }
+
+    /// Border width of the selection frame. It is drawn OUTSIDE the tile it
+    /// marks, so a caller that rounds the corners afterwards has to feed the same
+    /// number back in, which is why it is named instead of a `4.0` typed out four
+    /// times per site and once more in the round_corners call.
+    const SEL_FRAME_B: f32 = 4.0;
+
+    /// The breathing amber cursor drawn around the selected tile of a grid.
+    ///
+    /// Three screens draw it - the JOUER grid, the JAQUETTE picker and the
+    /// Flashpoint gallery - and each carried its own copy of the amber ramp and of
+    /// the four border bars. They were already only ALMOST the same: the growth on
+    /// a cursor move differs, and what gets rounded afterwards differs. That is
+    /// exactly how a copy keeps the old look after the cursor is restyled and
+    /// nobody notices for a whole release.
+    fn draw_pulse_frame(&mut self, x: f32, y: f32, w: f32, h: f32, pulse: f32) {
+        let p = (pulse * 0.5) + 0.5;
+        let g = (0xC0 as f32 + (0xFF - 0xC0) as f32 * p) as u32;
+        let col = swf::Color::from_rgb((0xFF << 16) | (g << 8) | 0x30, 255);
+        let b = Self::SEL_FRAME_B;
+        let bars = [
+            (x - b, y - b, w + 2.0 * b, b), // top
+            (x - b, y + h, w + 2.0 * b, b), // bottom
+            (x - b, y, b, h),               // left
+            (x + w, y, b, h),               // right
+        ];
+        for (bx, by, bw, bh) in bars {
+            let m = Matrix {
+                a: bw, b: 0.0, c: 0.0, d: bh,
+                tx: swf::Twips::from_pixels(bx as f64),
+                ty: swf::Twips::from_pixels(by as f64),
+            };
+            <Self as CommandHandler>::draw_rect(self, col, m);
+        }
     }
 
     /// Centred "NO RESULTS" for a home layout whose list came back empty.
@@ -7917,6 +7957,50 @@ impl SwitchRenderBackend {
     /// The selection is anchored PART WAY IN, not at the edge, so the previous
     /// cover stays half visible. A shelf you can only see forwards on does not
     /// read as a shelf.
+    /// The vertical scrollbar a scrolling page draws in its right-hand gutter: a
+    /// track from `top` to `top + h` at `x`, and a thumb whose length is the
+    /// visible share of `total` and whose position comes from the live pixel
+    /// scroll.
+    ///
+    /// Seven screens each carried their own copy of this - two `Matrix` literals,
+    /// a `max()`, a division guarded three different ways - and the copies stopped
+    /// agreeing on the track colour and on the thumb's minimum length. Worse, two
+    /// of them still derive their position from the integer row offset even though
+    /// the rows they measure have been gliding on an eased pixel scroll since
+    /// v1.2.0, so on those two the thumb jumps a full row while the list slides.
+    /// Taking `scroll_px` and `pitch` rather than a ready-made fraction is what
+    /// makes that last one impossible to reintroduce: there is no longer anywhere
+    /// to feed it a stale number.
+    fn draw_scrollbar(
+        &mut self,
+        x: f32,
+        top: f32,
+        h: f32,
+        scroll_px: f32,
+        pitch: f32,
+        visible: usize,
+        total: usize,
+    ) {
+        // Nothing to say when it all fits. This guard lived at all seven call
+        // sites and is the one line of the seven that never diverged.
+        if total <= visible || h <= 0.0 {
+            return;
+        }
+        // `.min(h)` is unreachable today (total > visible makes the share < 1, and
+        // h is always well over 24 px) and is there so a future short band cannot
+        // produce a thumb longer than the track it slides in, which would send the
+        // remaining travel negative.
+        let thumb_h = (h * visible as f32 / total as f32).max(SCROLLBAR_MIN_THUMB).min(h);
+        let max_scroll = (total - visible) as f32 * pitch;
+        let t = if max_scroll > 0.0 {
+            (scroll_px / max_scroll).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        self.draw_overlay_rect(x, top, SCROLLBAR_W, h, SCROLLBAR_TRACK);
+        self.draw_overlay_rect(x, top + (h - thumb_h) * t, SCROLLBAR_W, thumb_h, SCROLLBAR_THUMB);
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn draw_library_shelf_view(
         &mut self,
@@ -8388,8 +8472,7 @@ impl SwitchRenderBackend {
         self.library_clear();
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
-        let phase_s = (phase_ticks as f64) / (unsafe { ruffle_tick_freq() } as f64);
-        let pulse = approx_sin(phase_s as f32 * (2.0 * core::f32::consts::PI / 1.6));
+        let pulse = selection_pulse(phase_ticks);
 
         // Banner — compact, fully below the navbar strip (y 4..38). Scaled to a
         // small target height so it doesn't dominate the screen (was full 720x144).
@@ -8665,59 +8748,30 @@ impl SwitchRenderBackend {
         // inflates it right after a move for a little tactile "snap"; `pulse`
         // keeps the existing breathing brightness.
         if !tiles.is_empty() {
-            let p = (pulse * 0.5) + 0.5;
-            let g = (0xC0 as f32 + (0xFF - 0xC0) as f32 * p) as u32;
-            let col = swf::Color::from_rgb((0xFF << 16) | (g << 8) | 0x30, 255);
             let grow = pop * 5.0;
             let fx = frame_x - grow;
             let fy = frame_y - scroll_px - grow;
             let fw = frame_w + 2.0 * grow;
             let fh = ROW_IMG_H + 2.0 * grow;
-            let b = 4.0;
-            let bars = [
-                (fx - b, fy - b, fw + 2.0 * b, b), // top
-                (fx - b, fy + fh, fw + 2.0 * b, b), // bottom
-                (fx - b, fy, b, fh),                // left
-                (fx + fw, fy, b, fh),               // right
-            ];
-            for (bx, by, bw, bh) in bars {
-                let m = Matrix {
-                    a: bw, b: 0.0, c: 0.0, d: bh,
-                    tx: swf::Twips::from_pixels(bx as f64),
-                    ty: swf::Twips::from_pixels(by as f64),
-                };
-                <Self as CommandHandler>::draw_rect(self, col, m);
-            }
+            self.draw_pulse_frame(fx, fy, fw, fh, pulse);
             // Rounded once, frame included, so the cursor matches the tiles it
             // travels between.
+            let b = Self::SEL_FRAME_B;
             self.round_corners(fx - b, fy - b, fw + 2.0 * b, fh + 2.0 * b, 8.0);
         }
 
         self.clear_clip();
 
-        // Scrollbar — tracks the eased pixel scroll so the thumb glides too.
-        if rows_total > rows_visible as u32 {
-            let bar_x = vw - 18.0;
-            let bar_top = TOP;
-            let bar_h = rows_visible as f32 * pitch;
-            let thumb = (bar_h * rows_visible as f32 / rows_total as f32).max(24.0);
-            let denom_px =
-                (rows_total as usize).saturating_sub(rows_visible).max(1) as f32 * pitch;
-            let progress = (scroll_px / denom_px).clamp(0.0, 1.0);
-            let thumb_y = bar_top + (bar_h - thumb) * progress;
-            let track = Matrix {
-                a: 4.0, b: 0.0, c: 0.0, d: bar_h,
-                tx: swf::Twips::from_pixels(bar_x as f64),
-                ty: swf::Twips::from_pixels(bar_top as f64),
-            };
-            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x40_99AABB), track);
-            let th = Matrix {
-                a: 4.0, b: 0.0, c: 0.0, d: thumb,
-                tx: swf::Twips::from_pixels(bar_x as f64),
-                ty: swf::Twips::from_pixels(thumb_y as f64),
-            };
-            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), th);
-        }
+        // Tracks the eased pixel scroll so the thumb glides with the tiles.
+        self.draw_scrollbar(
+            vw - 18.0,
+            TOP,
+            rows_visible as f32 * pitch,
+            scroll_px,
+            pitch,
+            rows_visible,
+            rows_total as usize,
+        );
 
         // Selected-game info line (name + size · version · engine).
         if let Some(entry) = entries.get(selection) {
@@ -9052,12 +9106,13 @@ impl SwitchRenderBackend {
         );
 
         let total = labels.len() + 1; // + the pinned "add" row
-        // 10 rows: the last one ends at 660, clear of the footer at vh-42.
-        // MUST match `library::IMPORTER_VISIBLE_ROWS` / `distant_row_rect`, which
-        // mirror this layout for the scroll clamp and the reveal box.
-        const VISIBLE: usize = 10;
-        let row_h = 50.0;
-        let top = 160.0;
+        // 10 rows: the last one ends at 660, clear of the footer at vh-42. Taken
+        // from `library`, not re-typed: the scroll clamp and the reveal box are
+        // computed there from the same three numbers, and a comment asking two
+        // files to stay in step is not a mechanism.
+        const VISIBLE: usize = crate::library::IMPORTER_VISIBLE_ROWS;
+        let row_h = crate::library::IMPORTER_ROW_H;
+        let top = crate::library::IMPORTER_ROW_TOP;
         let left = 80.0;
         let scale = 2.0;
 
@@ -9265,32 +9320,8 @@ impl SwitchRenderBackend {
             }
         }
 
-        // Scrollbar, tracking the eased pixel scroll.
-        if total > VISIBLE {
-            let bar_x = vw - 40.0;
-            let bar_top = top;
-            let bar_h = VISIBLE as f32 * row_h;
-            let thumb = (bar_h * VISIBLE as f32 / total as f32).max(24.0);
-            let max_scroll_px = (total - VISIBLE) as f32 * row_h;
-            let progress = if max_scroll_px > 0.0 {
-                (scroll_px / max_scroll_px).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            let thumb_y = bar_top + (bar_h - thumb) * progress;
-            let track = Matrix {
-                a: 4.0, b: 0.0, c: 0.0, d: bar_h,
-                tx: swf::Twips::from_pixels(bar_x as f64),
-                ty: swf::Twips::from_pixels(bar_top as f64),
-            };
-            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x40_99AABB), track);
-            let th = Matrix {
-                a: 4.0, b: 0.0, c: 0.0, d: thumb,
-                tx: swf::Twips::from_pixels(bar_x as f64),
-                ty: swf::Twips::from_pixels(thumb_y as f64),
-            };
-            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), th);
-        }
+        // Tracking the eased pixel scroll.
+        self.draw_scrollbar(vw - 40.0, top, VISIBLE as f32 * row_h, scroll_px, row_h, VISIBLE, total);
 
         self.draw_page_footer(crate::loc::s().dist_list_footer);
 
@@ -9965,24 +9996,8 @@ impl SwitchRenderBackend {
             }
 
             if is_sel {
-                let p = (pulse * 0.5) + 0.5;
-                let g = (0xC0 as f32 + (0xFF - 0xC0) as f32 * p) as u32;
-                let col = swf::Color::from_rgb((0xFF << 16) | (g << 8) | 0x30, 255);
-                let b = 4.0;
-                let bars = [
-                    (cx - b, cy - b, cell_w + 2.0 * b, b),
-                    (cx - b, cy + THUMB_H, cell_w + 2.0 * b, b),
-                    (cx - b, cy, b, THUMB_H),
-                    (cx + cell_w, cy, b, THUMB_H),
-                ];
-                for (bx, by, bw, bh) in bars {
-                    let m = Matrix {
-                        a: bw, b: 0.0, c: 0.0, d: bh,
-                        tx: swf::Twips::from_pixels(bx as f64),
-                        ty: swf::Twips::from_pixels(by as f64),
-                    };
-                    <Self as CommandHandler>::draw_rect(self, col, m);
-                }
+                self.draw_pulse_frame(cx, cy, cell_w, THUMB_H, pulse);
+                let b = Self::SEL_FRAME_B;
                 // On the modal's own ground, not the page colour: this grid sits
                 // on the 0xFF0B1222 panel.
                 self.round_corners_on(
@@ -10259,29 +10274,12 @@ impl SwitchRenderBackend {
         // Eased selection frame (drawn last, inside the scissor; `pop` inflates
         // it briefly on a cursor move for a tactile snap). Pulsing gold, glided.
         {
-            let p = (pulse * 0.5) + 0.5;
-            let g = (0xC0 as f32 + (0xFF - 0xC0) as f32 * p) as u32;
-            let col = swf::Color::from_rgb((0xFF << 16) | (g << 8) | 0x30, 255);
-            let b = 4.0;
             let grow = pop * 4.0;
             let fx = frame_x - grow;
             let fy = frame_y - scroll_px - grow;
             let fw = frame_w + 2.0 * grow;
             let fh = thumb_h + 2.0 * grow;
-            let bars = [
-                (fx - b, fy - b, fw + 2.0 * b, b),
-                (fx - b, fy + fh, fw + 2.0 * b, b),
-                (fx - b, fy, b, fh),
-                (fx + fw, fy, b, fh),
-            ];
-            for (bx, by, bw, bh) in bars {
-                let m = Matrix {
-                    a: bw, b: 0.0, c: 0.0, d: bh,
-                    tx: swf::Twips::from_pixels(bx as f64),
-                    ty: swf::Twips::from_pixels(by as f64),
-                };
-                <Self as CommandHandler>::draw_rect(self, col, m);
-            }
+            self.draw_pulse_frame(fx, fy, fw, fh, pulse);
         }
 
         self.clear_clip();
@@ -11082,6 +11080,17 @@ fn format_size_pretty(bytes: u64) -> std::string::String {
 /// — accurate to ~3 decimal places, no libm dependency, branch-free except
 /// for the period fold. Plenty for visual pulses (we only use it to
 /// modulate amber → bright-amber and a 4-pixel cursor offset).
+/// Phase of the shared selection pulse, in [-1, 1], from a tick count.
+///
+/// Every cursor screen re-derived `sin(2*PI*t / 1.6)` with its own copy of the
+/// period, so the three cursors were in step only by luck: a screen that typed a
+/// different period would breathe out of time with the rest, for no reason a
+/// reader of either site could see.
+fn selection_pulse(ticks: u64) -> f32 {
+    let secs = ticks as f64 / (unsafe { ruffle_tick_freq() } as f64);
+    approx_sin(secs as f32 * (2.0 * core::f32::consts::PI / 1.6))
+}
+
 fn approx_sin(x: f32) -> f32 {
     // Fold to [-π, π].
     let two_pi = 2.0 * core::f32::consts::PI;

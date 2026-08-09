@@ -3836,6 +3836,16 @@ pub(crate) fn importer_view(s: &State) -> std::vec::Vec<usize> {
 /// drift apart.
 pub const IMPORTER_VISIBLE_ROWS: usize = 10;
 
+/// Top edge and pitch of that same list, in screen pixels.
+///
+/// The renderer laid its rows out from its own literals and `distant_row_rect`
+/// re-typed them under a comment asking that the two be kept in step, which is
+/// the failure mode and not a safeguard: the reveal animation grows from the
+/// row's box, so the day one side moves, the panel opens from a row that is no
+/// longer under the cursor, and nothing in either file says why.
+pub const IMPORTER_ROW_TOP: f32 = 160.0;
+pub const IMPORTER_ROW_H: f32 = 50.0;
+
 /// Scroll the IMPORTER list was last drawn at. Every "come back to the list"
 /// path clamps from THIS rather than from 0: recomputing the scroll from the row
 /// alone dragged the view whenever the cursor sat past the first page (open `+`
@@ -5512,12 +5522,12 @@ fn gallery_scroll_for(selection: usize, scroll: usize) -> usize {
     }
 }
 
-/// Screen rect of history row `sel` in the IMPORTER list (mirrors the layout in
-/// `draw_library_distant_list`: top=160, row_h=50, 10 visible — keep the two in
-/// step). Used as the expand/collapse reveal's grow-from / shrink-to box.
+/// Screen rect of history row `sel` in the IMPORTER list, from the SAME geometry
+/// the renderer lays the rows out with. Used as the expand/collapse reveal's
+/// grow-from / shrink-to box.
 fn distant_row_rect(sel: usize, scroll: usize, vw: f32) -> (f32, f32, f32, f32) {
-    const TOP: f32 = 160.0;
-    const ROW_H: f32 = 50.0;
+    const TOP: f32 = IMPORTER_ROW_TOP;
+    const ROW_H: f32 = IMPORTER_ROW_H;
     // The list scrolls freely now (touch drag), so the row's screen position
     // comes from the ACTUAL scroll offset, not one re-derived from `sel`.
     let row_y = TOP + (sel as f32 - scroll as f32) * ROW_H;
