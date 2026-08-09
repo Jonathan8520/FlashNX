@@ -85,12 +85,18 @@ use std::sync::Mutex;
 pub const MENU_ITEMS: &[&str] = &[
     "REPRENDRE",
     "TOUCHES",
-    "AFFICHAGE",
-    "ROTATION",
-    "FILTRE",
+    "ECRAN",
     "REDEMARRER",
     "QUITTER",
 ];
+
+/// The ECRAN sub-panel's rows, in order. AFFICHAGE / ROTATION / FILTRE used to
+/// sit at the top level, where they made the pause menu seven rows deep and put
+/// three settings of the same nature on the same footing as QUITTER. They all
+/// answer one question -- "this game does not sit right on my screen" -- and
+/// they all preview on the frozen frame behind the panel, so they belong
+/// together behind one row.
+pub const SCREEN_ITEMS: &[&str] = &["AFFICHAGE", "ROTATION", "FILTRE"];
 
 // ── Unified modal style ────────────────────────────────────────────────────
 // One look for every centered popup. Before this, each modal hard-coded its own
@@ -6355,37 +6361,66 @@ impl SwitchRenderBackend {
 
         // Localized labels, same order/count as the MENU_ITEMS contract C++
         // relies on for pause-menu navigation. Cursor speed moved into the
-        // TOUCHES sub-menu (#20 Option 1), so it's not a top-level item anymore.
-        // AFFICHAGE carries its live value: cycling it re-scales the frozen game
-        // frame behind this panel, so the label and the picture agree.
+        // TOUCHES sub-menu (#20 Option 1) and the three screen settings into
+        // ECRAN, so neither is a top-level item anymore.
+        let items = [
+            lc.menu_resume,
+            lc.menu_keys,
+            lc.menu_screen,
+            lc.menu_restart,
+            lc.menu_quit,
+        ];
+        debug_assert_eq!(items.len(), MENU_ITEMS.len());
+        self.draw_modal_rows(&frame, selected, &items);
+
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
+    /// Draw the ECRAN sub-panel: the three settings that change how the game
+    /// sits on the screen, each carrying its live value.
+    ///
+    /// Every row previews on the frozen frame behind the panel — C++ re-renders
+    /// it after each press rather than `continue`ing — so you see the crop, the
+    /// quarter turn or the scanlines on that particular game before going back
+    /// to playing. That shared behaviour is the reason these three belong on one
+    /// panel and QUITTER does not.
+    pub fn draw_screen_menu(&mut self, selected: usize) {
+        let lc = crate::loc::s();
+        let game = crate::library::active_display_name();
+        let frame = self.draw_modal_frame(
+            MODAL_W,
+            SCREEN_ITEMS.len(),
+            None,
+            false,
+            lc.menu_screen,
+            game.as_deref(),
+            Some(lc.pause_footer),
+        );
         let display_label = std::format!(
             "{}: {}",
             lc.set_display_mode,
             crate::loc::display_mode_label(crate::keymap::display_mode()),
+        );
+        let rotation_label = std::format!(
+            "{}: {}",
+            lc.set_rotation,
+            crate::loc::rotation_label(crate::keymap::rotation()),
         );
         let filter_label = std::format!(
             "{}: {}",
             lc.set_screen_filter,
             crate::loc::screen_filter_label(crate::keymap::screen_filter()),
         );
-        // Turning the picture belongs next to scaling it: both answer "this game
-        // does not fit my screen", and both show their result on the frozen frame
-        // behind the panel before you commit.
-        let rotation_label = std::format!(
-            "{}: {}",
-            lc.set_rotation,
-            crate::loc::rotation_label(crate::keymap::rotation()),
-        );
         let items = [
-            lc.menu_resume,
-            lc.menu_keys,
             display_label.as_str(),
             rotation_label.as_str(),
             filter_label.as_str(),
-            lc.menu_restart,
-            lc.menu_quit,
         ];
-        debug_assert_eq!(items.len(), MENU_ITEMS.len());
+        debug_assert_eq!(items.len(), SCREEN_ITEMS.len());
         self.draw_modal_rows(&frame, selected, &items);
 
         unsafe {
@@ -8673,7 +8708,15 @@ impl SwitchRenderBackend {
             // launches `selection`, so naming anything else would let the facts
             // describe a different game than the one that starts.
             let (l1, l2) = self.wrap_text_2(&e.display_name, 3.2, cap_w);
-            let mut ty = 388.0;
+            // 414, not 388: the lit segment above is `3.0 + 7.0 * b` tall from
+            // y=380, so at full selection it reaches y=390 and the title's first
+            // pixel row landed INSIDE it -- the name looked stuck to the light
+            // under the active cover. The clearance has to be measured against
+            // the bar's GROWN height, not its resting 3 px, which is what made
+            // this only show on the selected tile. The extra room past mere
+            // clearance is free: the page had ~170 px of nothing between the rail
+            // and the footer.
+            let mut ty = 414.0;
             for line in [l1.as_str(), l2.as_str()] {
                 if line.is_empty() {
                     continue;
@@ -8682,7 +8725,7 @@ impl SwitchRenderBackend {
                 ty += 34.0;
             }
             let facts = Self::game_facts(e);
-            self.draw_facts(cap_x, ty + 10.0, 2.0, &facts);
+            self.draw_facts(cap_x, ty + 12.0, 2.0, &facts);
         }
 
         // Position rail — the row shows about five games out of many, so where you
@@ -8691,10 +8734,12 @@ impl SwitchRenderBackend {
             // Thin, and close under the text rather than stranded at the bottom of
             // the screen: it says where you are in the row, so it belongs with the
             // row's caption.
-            self.draw_overlay_rect(cap_x, 504.0, cap_w, 3.0, 0x55_2A_36_48);
+            // Follows the caption down. A two-line title ends its facts line at
+            // y=506, so the old 503 would have been drawn THROUGH it.
+            self.draw_overlay_rect(cap_x, 548.0, cap_w, 3.0, 0x55_2A_36_48);
             let tw = (cap_w * (1280.0 / PITCH) / n as f32).max(56.0);
             let tx = cap_x + (cap_w - tw) * (sel_pos / (n - 1) as f32).clamp(0.0, 1.0);
-            self.draw_overlay_rect(tx, 503.0, tw, 5.0, 0xFF_FF_D7_40);
+            self.draw_overlay_rect(tx, 547.0, tw, 5.0, 0xFF_FF_D7_40);
         }
 
         self.draw_page_footer(crate::loc::s().list_footer);
@@ -9409,7 +9454,10 @@ impl SwitchRenderBackend {
 
         let hy = hover_y - scroll_px;
         let bar_x = left - 40.0;
-        self.draw_selection_bar(bar_x, hy - 6.0, vw - bar_x - 56.0, row_h - 12.0, 0.0);
+        // Radius 6, like JOUER's list: this screen draws straight onto the page
+        // (`library_clear`), so `round_corners` paints the right colour into the
+        // notches. The square bar was the odd one out of the four list screens.
+        self.draw_selection_bar(bar_x, hy - 6.0, vw - bar_x - 56.0, row_h - 12.0, 6.0);
         self.draw_text(left - 34.0, hy, scale, ">", swf::Color::from_rgb(0xFFD740, 255));
 
         for i in 0..total {
@@ -9737,7 +9785,7 @@ impl SwitchRenderBackend {
                 hy - 8.0,
                 vw - rows_left_x - 20.0,
                 ROW_SPACING - 12.0,
-                0.0,
+                6.0,
             );
         }
 
@@ -10063,7 +10111,7 @@ impl SwitchRenderBackend {
         let now_hl = unsafe { ruffle_tick_now() };
         let hy = eased_list_y(target_hy, 2, now_hl);
         const BAR_W: f32 = 460.0;
-        self.draw_selection_bar((vw - BAR_W) * 0.5, hy - 8.0, BAR_W, row_h - 16.0, 0.0);
+        self.draw_selection_bar((vw - BAR_W) * 0.5, hy - 8.0, BAR_W, row_h - 16.0, 6.0);
         // Cursor at the eased y, x aligned to the selected entry's centering.
         if let Some(sel) = entries.get(selection) {
             let sel_ow = self.measure_text(sel, OPT_SCALE);

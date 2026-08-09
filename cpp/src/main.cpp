@@ -28,6 +28,7 @@ extern "C" void ruffle_library_open(void);
 extern "C" int  ruffle_library_active(void);
 extern "C" int  ruffle_library_picked(void);
 extern "C" int  ruffle_library_input(const char* button_name);
+extern "C" void ruffle_nav_repeat(int is_repeat);
 extern "C" void ruffle_library_nav_held(unsigned char mask);
 extern "C" void ruffle_library_touch(float x, float y, int pressed);
 extern "C" void ruffle_library_render(void);
@@ -41,6 +42,7 @@ extern "C" void ruffle_handle_mouse_button(bool down);
 extern "C" void ruffle_handle_mouse_right(bool down);
 extern "C" void ruffle_redraw_paused(void);
 extern "C" void ruffle_draw_menu(int selected);
+extern "C" void ruffle_draw_screen_menu(int selected);
 extern "C" void ruffle_menu_close_begin(void);
 extern "C" int  ruffle_draw_menu_closing(int selected);
 extern "C" int  ruffle_restart(void);
@@ -263,10 +265,15 @@ static void menu_repeat_step(
     const u64 REPEAT_INTERVAL = ( 80ULL * tick_freq) / 1000ULL;
     for (size_t i = 0; i < MENU_NAV_COUNT; ++i) {
         const auto& nb = MENU_NAV_BUTTONS[i];
+        // Tell Rust whether each event is a fresh press or a repeat tick. Lists
+        // wrap round on a press but STOP at the end under a held direction, so
+        // holding Down reaches the end of the library instead of looping through
+        // it for ever (see `nav_may_wrap` in [rust/src/library.rs]).
         if (kDown & nb.mask) {
             rs.held_since[i] = now_tick;
             rs.last_emit[i] = now_tick;
             rs.first_repeat_done[i] = false;
+            ruffle_nav_repeat(0);
             forward(nb.name);
         } else if (kUp & nb.mask) {
             rs.held_since[i] = 0;
@@ -277,10 +284,12 @@ static void menu_repeat_step(
                 if (since_press >= INITIAL_DELAY) {
                     rs.first_repeat_done[i] = true;
                     rs.last_emit[i] = now_tick;
+                    ruffle_nav_repeat(1);
                     forward(nb.name);
                 }
             } else if (now_tick - rs.last_emit[i] >= REPEAT_INTERVAL) {
                 rs.last_emit[i] = now_tick;
+                ruffle_nav_repeat(1);
                 forward(nb.name);
             }
         }
@@ -341,18 +350,23 @@ enum MenuAction {
     MENU_RESUME       = 0,
     MENU_TOUCHES      = 1,  // opens the TOUCHES sub-menu (Rust-driven): edit /
                            // apply / share / revert / cursor speed (#20 Opt 1)
-    MENU_DISPLAY      = 2,  // cycles the stage scaling of THIS game, in place:
-                           // the frozen frame behind the panel is re-rendered
-                           // with the new mode, so you see the crop before you
-                           // commit to it (#65 / #69 / #74)
-    MENU_ROTATION     = 3,  // turns the picture a quarter clockwise (#78): the
-                            // console cannot turn its screen, and no amount of
-                            // scaling makes a portrait game fill a 16:9 one.
-    MENU_FILTER       = 4,  // cycles the screen filter (none / scanlines / CRT),
-                           // same live preview as AFFICHAGE (#65)
-    MENU_RESTART      = 5,
-    MENU_QUIT         = 6,  // VITESSE moved INTO the TOUCHES sub-menu
-    MENU_COUNT        = 7,
+    MENU_SCREEN       = 2,  // opens the ECRAN sub-panel: display mode (#65/#69/
+                            // #74), rotation (#78) and screen filter (#65). All
+                            // three preview on the frozen frame behind the panel
+                            // and all three answer the same question, so they sit
+                            // together instead of taking three of seven rows.
+    MENU_RESTART      = 3,
+    MENU_QUIT         = 4,  // VITESSE moved INTO the TOUCHES sub-menu
+    MENU_COUNT        = 5,
+};
+
+// Rows of the ECRAN sub-panel. ORDER MUST MATCH `SCREEN_ITEMS` in
+// [rust/src/backend/render.rs].
+enum ScreenAction {
+    SCREEN_DISPLAY  = 0,
+    SCREEN_ROTATION = 1,
+    SCREEN_FILTER   = 2,
+    SCREEN_COUNT    = 3,
 };
 
 // The physical panel / touchscreen coordinate space. Touch samples always arrive
@@ -751,6 +765,11 @@ static void worker_entry(void* arg) {
     // then resume the game. Keeps the close animated instead of snapping shut.
     bool menu_closing = false;
     int  menu_selection = MENU_RESUME;
+    // ECRAN sub-panel: open flag + its own row cursor, kept out of
+    // `menu_selection` so backing out lands you on ECRAN rather than on
+    // whatever row index the sub-panel happened to stop on.
+    bool screen_menu = false;
+    int  screen_selection = SCREEN_DISPLAY;
     // MENU_QUIT now means "back to library" — controlled by this flag.
     // appletMainLoop returning false (home button → Close) also exits the
     // inner loop but with back_to_library=false → full .nro exit.
@@ -829,6 +848,41 @@ static void worker_entry(void* arg) {
                 continue;
             }
 
+            // ─── Sub-screen branch: ECRAN ───────────────────────────────
+            // Display mode / rotation / filter. Each `A` cycles the selected
+            // row's value and then falls through to the redraw at the bottom
+            // of this branch — no `continue` — so the frozen game frame behind
+            // the panel is re-rendered with the new setting and you see what it
+            // does to THIS game before going back to playing. `B` returns to the
+            // pause menu, which is why nothing here calls the close pop: the
+            // panel is not being dismissed, it is being backed out of.
+            if (screen_menu) {
+                if (kDown & (HidNpadButton_Up | HidNpadButton_StickLUp | HidNpadButton_StickRUp)) {
+                    screen_selection = (screen_selection + SCREEN_COUNT - 1) % SCREEN_COUNT;
+                }
+                if (kDown & (HidNpadButton_Down | HidNpadButton_StickLDown | HidNpadButton_StickRDown)) {
+                    screen_selection = (screen_selection + 1) % SCREEN_COUNT;
+                }
+                if (kDown & (HidNpadButton_Minus | HidNpadButton_B)) {
+                    screen_menu = false;
+                    ruffle_redraw_paused();
+                    ruffle_draw_menu(menu_selection);
+                    gl_context_swap();
+                    continue;
+                }
+                if (kDown & HidNpadButton_A) {
+                    switch (screen_selection) {
+                    case SCREEN_DISPLAY:  ruffle_display_mode_cycle();   break;
+                    case SCREEN_ROTATION: ruffle_rotation_cycle();       break;
+                    case SCREEN_FILTER:   ruffle_screen_filter_cycle();  break;
+                    }
+                }
+                ruffle_redraw_paused();
+                ruffle_draw_screen_menu(screen_selection);
+                gl_context_swap();
+                continue;
+            }
+
             // ─── Pause main menu ────────────────────────────────────────
             // Edge-detected nav so a held D-pad doesn't scroll past every
             // entry. Press `-` again or `B` to dismiss (= Resume).
@@ -859,25 +913,12 @@ static void worker_entry(void* arg) {
                     // next frame; Rust closes itself on B/Minus.
                     ruffle_touches_open();
                     continue;
-                case MENU_DISPLAY:
-                    // Cycle + persist + apply live, then fall through to the
-                    // redraw at the bottom of this branch: no `continue`, so the
-                    // frozen game frame is re-rendered with the new scaling
-                    // while the panel stays open.
-                    ruffle_display_mode_cycle();
-                    break;
-                case MENU_ROTATION:
-                    // Same shape as AFFICHAGE, and for the same reason: no
-                    // `continue`, so the frozen frame is redrawn turned with the
-                    // panel still up.
-                    ruffle_rotation_cycle();
-                    break;
-                case MENU_FILTER:
-                    // Same shape as AFFICHAGE: no `continue`, so the frozen frame
-                    // below is re-rendered through the new filter with the panel
-                    // still up.
-                    ruffle_screen_filter_cycle();
-                    break;
+                case MENU_SCREEN:
+                    // Open the sub-panel on its first row and let the branch
+                    // above own the next frame.
+                    screen_menu = true;
+                    screen_selection = SCREEN_DISPLAY;
+                    continue;
                 case MENU_RESTART: {
                     std::printf("menu: REDEMARRER → ruffle_restart()\n");
                     std::fflush(stdout);
@@ -912,6 +953,9 @@ static void worker_entry(void* arg) {
         if (kDown & HidNpadButton_Minus) {
             menu_open = true;
             menu_selection = MENU_RESUME;
+            // A fresh pause always opens on the main panel, never back inside
+            // ECRAN where a previous pause happened to leave it.
+            screen_menu = false;
             // Release any held in-game keys so the player doesn't keep
             // running / jumping while paused.
             for (const auto& b : BINDINGS) {

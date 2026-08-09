@@ -1279,6 +1279,50 @@ pub extern "C" fn ruffle_draw_menu(selected: c_int) {
     }
 }
 
+/// Draw the ECRAN sub-panel (display mode / rotation / filter) over the frozen
+/// game frame. `selected` indexes `render::SCREEN_ITEMS`.
+///
+/// Its own frame counter, deliberately: entering the sub-panel interrupts
+/// `ruffle_draw_menu`'s run of consecutive frames, so this one's counter is
+/// stale on the first call and the panel pops in — and leaving it makes the
+/// main menu's counter stale in turn, so that pops back. No extra open/close
+/// FFI is needed for either direction; the same "this draw does not follow the
+/// previous one" rule the pause menu already uses carries both.
+#[no_mangle]
+pub extern "C" fn ruffle_draw_screen_menu(selected: c_int) {
+    let state = unsafe {
+        match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
+            Some(s) => s,
+            None => return,
+        }
+    };
+    let Ok(mut player) = state.player.lock() else {
+        return;
+    };
+    let renderer = player.renderer_mut();
+    if let Some(backend) =
+        <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(renderer)
+    {
+        let idx = selected.max(0) as usize;
+        let now = unsafe { ruffle_tick_now() };
+        static LAST_SCREEN_FRAME: std::sync::atomic::AtomicU32 =
+            std::sync::atomic::AtomicU32::new(u32::MAX);
+        let f = backend.frame_count();
+        let last = LAST_SCREEN_FRAME.swap(f, std::sync::atomic::Ordering::Relaxed);
+        if last == u32::MAX || f.wrapping_sub(last) > 1 {
+            backend::render::modal_open_begin();
+        }
+        let (scale, active, _done) = backend::render::modal_scale_step(now);
+        if active {
+            backend.set_ui_modal_scale(scale);
+        } else {
+            backend.clear_ui_transform();
+        }
+        backend.draw_screen_menu(idx);
+        backend.clear_ui_transform();
+    }
+}
+
 /// Begin the pause-menu close pop (scale-out). C++ calls this on dismiss
 /// (Resume / B / Minus), then keeps calling `ruffle_draw_menu_closing` until it
 /// returns 1, so the menu shrinks away before the game resumes.

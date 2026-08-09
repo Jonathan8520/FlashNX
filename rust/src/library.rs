@@ -914,6 +914,27 @@ fn nav_is_diagonal() -> bool {
     (m & 0b0011) != 0 && (m & 0b1100) != 0
 }
 
+/// Set by C++ before each forwarded nav event: 0 for a fresh press, 1 for an
+/// auto-repeat tick of a held direction.
+static NAV_REPEAT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[no_mangle]
+pub extern "C" fn ruffle_nav_repeat(is_repeat: core::ffi::c_int) {
+    NAV_REPEAT.store(is_repeat != 0, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the event being handled is allowed to cross the end of a list.
+///
+/// A held direction must STOP at the end, and only a new press may come back
+/// round to the start. Without this, wrapping and auto-repeat combine into a
+/// carousel: hold Down and the selection runs off the bottom, reappears at the
+/// top and keeps going, so you cannot use the hold to reach the end of a long
+/// library -- the one thing it is for. Stopping is also what says "this is the
+/// end", which a list that never stops can never say.
+fn nav_may_wrap() -> bool {
+    !NAV_REPEAT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Move `sel` one row up (`down = false`) or down inside a `cols`-wide grid of
 /// `total` items, clamping to the last item of a partial row and wrapping at the
 /// ends.
@@ -934,12 +955,23 @@ pub(crate) fn grid_step(sel: usize, down: bool, cols: usize, total: usize) -> us
     let col = sel % cols;
     let row = sel / cols;
     let rows = last / cols + 1;
+    // A held direction stops on the last row instead of coming round -- see
+    // `nav_may_wrap`. Staying on `row` means the step produces no move at all,
+    // which is exactly what "stopped at the end" should feel like.
     let target_row = if down {
-        if row + 1 < rows { row + 1 } else { 0 }
+        if row + 1 < rows {
+            row + 1
+        } else if nav_may_wrap() {
+            0
+        } else {
+            row
+        }
     } else if row > 0 {
         row - 1
-    } else {
+    } else if nav_may_wrap() {
         rows - 1
+    } else {
+        0
     };
     (target_row * cols + col).min(last)
 }
@@ -958,10 +990,16 @@ pub(crate) fn list_step_wrap(sel: usize, delta: isize, total: usize) -> usize {
         return 0;
     }
     let last = total - 1;
+    // The crossing itself is gated by `nav_may_wrap`: a held direction stops on
+    // the edge row, a new press comes round.
     if delta < 0 {
-        if sel == 0 { last } else { sel.saturating_sub((-delta) as usize) }
+        if sel == 0 {
+            if nav_may_wrap() { last } else { 0 }
+        } else {
+            sel.saturating_sub((-delta) as usize)
+        }
     } else if sel >= last {
-        0
+        if nav_may_wrap() { 0 } else { last }
     } else {
         (sel + delta as usize).min(last)
     }
@@ -3654,9 +3692,12 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
                 selection = list_step_wrap(selection, home_page_step() as isize, total);
             } else if let Some(ns) = gallery_neighbor(selection, -1) {
                 selection = ns;
-            } else if total > 0 {
-                // Top row of the grid: round to the LAST game rather than sit
-                // there, same as the list does at its own ends.
+            } else if total > 0 && nav_may_wrap() {
+                // Top row: round to the LAST game rather than sit there, same as
+                // the list does at its own ends. Gated like every other crossing
+                // -- this is the one that is written out by hand instead of going
+                // through `list_step_wrap`, which is how it kept looping under a
+                // held direction after the others had been fixed.
                 selection = total - 1;
             }
             scroll = gallery_scroll_for(selection, scroll);
@@ -3669,8 +3710,8 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
                 selection = list_step_wrap(selection, -(home_page_step() as isize), total);
             } else if let Some(ns) = gallery_neighbor(selection, 1) {
                 selection = ns;
-            } else if total > 0 {
-                // Bottom row of the grid: round to the first game.
+            } else if total > 0 && nav_may_wrap() {
+                // Bottom row: round to the first game, on a press only.
                 selection = 0;
             }
             scroll = gallery_scroll_for(selection, scroll);
