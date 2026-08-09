@@ -6544,18 +6544,33 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             }
         }
         Screen::DistantFiles { selection, scroll_offset } => {
-            // Union of session-downloaded basenames (filled by
-            // `on_download_finished`) and basenames already scanned
-            // from SD into `entries`. The latter catches files that
-            // were on SD before this .nro boot — fixes the "OK badge
-            // missed across sessions" report.
+            // Session-downloaded basenames, plus the games on the card that came
+            // FROM THIS ITEM. The second half used to match on the file name
+            // alone, which is how browsing an 81-file item showed a dozen "OK"
+            // badges against a counter reading 2: fifteen of that item's names —
+            // Pacxon.swf, Sonic Flash.swf, Super Mario 63.swf — also existed in
+            // the library from somewhere else entirely. The badge claimed those
+            // files were already downloaded, so the real ones would never be
+            // fetched, and fetching one would have overwritten the game already
+            // sitting under that name.
+            //
+            // `source_item` comes from the `.url` sidecar, the same question
+            // `importer_progress` asks for the "2 / 81" count, so the badge and
+            // the counter can no longer disagree. (The cross-session case the old
+            // fallback was added for still works: the sidecar outlives the boot.)
             let (files, marked, filter, total, under) = LIBRARY
                 .lock()
                 .ok()
                 .map(|s| {
+                    let item = crate::net::extract_item_id(&s.pending_fetch_url)
+                        .map(|i| i.to_lowercase())
+                        .unwrap_or_default();
                     let mut marked = s.downloaded_basenames.clone();
                     for e in &s.entries {
-                        if !marked.iter().any(|n| n == &e.basename) {
+                        if !item.is_empty()
+                            && e.source_item == item
+                            && !marked.iter().any(|n| n == &e.basename)
+                        {
                             marked.push(e.basename.clone());
                         }
                     }
@@ -7205,6 +7220,12 @@ fn on_download_finished() {
     // stops — truncated mid-transfer, most likely. Reported below rather than
     // dropped: the file is on the card either way, so "it downloaded" and "you
     // can play it" are not the same claim.
+    // The `.url` sidecar FIRST, then the entry. `add_path` reads that sidecar to
+    // fill `source_item`, so adding before writing left the new entry with an
+    // empty source: nothing could say which archive.org item the file came from
+    // until the next full scan, and the file list had to fall back on matching
+    // names to decide what you already had.
+    write_url_sidecar(&out_path, &source_url);
     let added = add_or_replace_path(&out_path);
     if !added {
         log(&std::format!(
@@ -7212,9 +7233,6 @@ fn on_download_finished() {
             out_path,
         ));
     }
-    // Record the source URL (direct .swf or archive.org file) next to the .swf,
-    // for later bug-report attribution.
-    write_url_sidecar(&out_path, &source_url);
     // A `.swf` from archive.org is not always the whole game. When its levels or
     // config live in a companion data file, the game loads that file at startup
     // and, if it is missing, does not fail — it WAITS: BFDIA 5b (issue #73) sits
