@@ -919,20 +919,6 @@ fn nav_is_diagonal() -> bool {
 /// you were reading still visible.
 pub const LIST_SKIP: usize = 5;
 
-/// Games skipped by ZL / ZR: a whole SCREENFUL, not the short hop Up/Down make.
-///
-/// A 79-game library is sixteen rows of grid and the only ways across it were one
-/// tile at a time or the search. ZL and ZR were free on this screen: the only
-/// thing that reads them is the hidden ZL+ZR chord, which is acted on in the
-/// Flashpoint results grid and nowhere else.
-pub fn home_page_jump() -> usize {
-    match crate::loc::home_view() {
-        1 => 13,                       // LISTE: the rows on screen
-        2 | 3 => 5,                    // BANDE / ETAGERE: the covers on screen
-        _ => GALLERY_ROWS_VISIBLE * 5, // GRILLE: a screenful of tiles
-    }
-}
-
 /// Games skipped by one page jump.
 ///
 /// BANDE and ETAGERE put every game on row 0, so `gallery_neighbor` — which looks
@@ -3559,7 +3545,27 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
     // v1.2.0: JOUER is a justified cover GALLERY (variable tiles per row). 2D
     // nav reads the layout the renderer publishes each frame: Left/Right =
     // prev/next tile in flow order, Up/Down = nearest tile in the adjacent row.
-    // No wrap-around.
+    //
+    // It WRAPS, the way the IMPORTER list already did: past the last game you
+    // land on the first, and the other way round. Two rules rather than one,
+    // though, and the difference matters with a step of four or five: a move
+    // STOPS at the edge first, and only the NEXT press crosses over. Wrapping on
+    // the same press would turn "skip five" near the end of a 79-game library
+    // into a jump back to the seventy-fourth, which is not what the button says.
+    let step_wrap = |sel: usize, delta: isize, total: usize| -> usize {
+        if total == 0 {
+            return 0;
+        }
+        let last = total - 1;
+        if delta < 0 {
+            let d = (-delta) as usize;
+            // Already home: the next press is the one that goes round.
+            if sel == 0 { last } else { sel.saturating_sub(d) }
+        } else {
+            let d = delta as usize;
+            if sel >= last { 0 } else { (sel + d).min(last) }
+        }
+    };
     match button {
         "Left" | "StickLLeft" => {
             // In LISTE the rows run vertically, so Left/Right did exactly what
@@ -3573,9 +3579,9 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
                 if nav_is_diagonal() {
                     return;
                 }
-                selection = selection.saturating_sub(LIST_SKIP);
-            } else if total > 0 && selection > 0 {
-                selection -= 1;
+                selection = step_wrap(selection, -(LIST_SKIP as isize), total);
+            } else if total > 0 {
+                selection = step_wrap(selection, -1, total);
             }
             scroll = gallery_scroll_for(selection, scroll);
         }
@@ -3584,11 +3590,9 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
                 if nav_is_diagonal() {
                     return;
                 }
-                if total > 0 {
-                    selection = (selection + LIST_SKIP).min(total - 1);
-                }
-            } else if total > 0 && selection + 1 < total {
-                selection += 1;
+                selection = step_wrap(selection, LIST_SKIP as isize, total);
+            } else if total > 0 {
+                selection = step_wrap(selection, 1, total);
             }
             scroll = gallery_scroll_for(selection, scroll);
         }
@@ -3603,11 +3607,13 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
                 if nav_is_diagonal() {
                     return;
                 }
-                if total > 0 {
-                    selection = (selection + home_page_step()).min(total - 1);
-                }
+                selection = step_wrap(selection, home_page_step() as isize, total);
             } else if let Some(ns) = gallery_neighbor(selection, -1) {
                 selection = ns;
+            } else if total > 0 {
+                // Top row of the grid: round to the LAST game rather than sit
+                // there, same as the list does at its own ends.
+                selection = total - 1;
             }
             scroll = gallery_scroll_for(selection, scroll);
         }
@@ -3616,19 +3622,12 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
                 if nav_is_diagonal() {
                     return;
                 }
-                selection = selection.saturating_sub(home_page_step());
+                selection = step_wrap(selection, -(home_page_step() as isize), total);
             } else if let Some(ns) = gallery_neighbor(selection, 1) {
                 selection = ns;
-            }
-            scroll = gallery_scroll_for(selection, scroll);
-        }
-        "ZL" => {
-            selection = selection.saturating_sub(home_page_jump());
-            scroll = gallery_scroll_for(selection, scroll);
-        }
-        "ZR" => {
-            if total > 0 {
-                selection = (selection + home_page_jump()).min(total - 1);
+            } else if total > 0 {
+                // Bottom row of the grid: round to the first game.
+                selection = 0;
             }
             scroll = gallery_scroll_for(selection, scroll);
         }
