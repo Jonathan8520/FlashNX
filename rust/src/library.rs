@@ -129,6 +129,10 @@ pub(crate) enum Screen {
     SettingsKeymapEditor,
     /// Language picker. `selection` indexes `loc::PICKER_LANGS`.
     SettingsLanguagePicker { selection: usize },
+    /// RÉGLAGES → AFFICHAGE HOME: pick the layout from the list instead of
+    /// cycling. Four layouts behind a forward-only cycle meant three presses to
+    /// go back one, in the one app screen that gives sort and language a picker.
+    SettingsHomeViewPicker { selection: usize },
     /// Game DEFAULTS sub-modal: 0 = display mode, 1 = screen filter, 2 = cursor
     /// speed. Each row cycles in place. These are the values a game that was
     /// never set from its own pause menu will use.
@@ -2595,6 +2599,10 @@ pub fn input(button: &str) -> bool {
             handle_settings_language_input(&mut s, button, selection);
             true
         }
+        Screen::SettingsHomeViewPicker { selection } => {
+            handle_settings_home_view_input(&mut s, button, selection);
+            true
+        }
         Screen::SettingsPrefsModal { selection } => {
             handle_settings_prefs_input(&mut s, button, selection);
             true
@@ -2692,11 +2700,9 @@ fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
                     // (it IS a per-game default), which freed index 0 — the only
                     // slot a new row can take without shifting the by-index hoists
                     // on rows 3 and 5.
-                    crate::loc::set_home_view(crate::loc::home_view() + 1);
-                    crate::loc::save_current();
-                    // Forget the previous layout's eased state, or the new one
-                    // slides in from coordinates that meant something else.
-                    crate::backend::render::home_anim_reset();
+                    let cur = crate::loc::home_view() as usize;
+                    s.screen = Screen::SettingsHomeViewPicker { selection: cur };
+                    return;
                 }
                 1 => {
                     // Game defaults sub-modal (keymap / display / filter / cursor).
@@ -2839,6 +2845,31 @@ fn handle_settings_language_input(s: &mut State, button: &str, mut selection: us
         _ => {}
     }
     s.screen = Screen::SettingsLanguagePicker { selection };
+}
+
+/// RÉGLAGES → AFFICHAGE HOME. Same shape as the language picker: move with
+/// Up/Down, A applies, B leaves it alone. Applying resets the home animation —
+/// the eased offsets belong to the layout that produced them, and a new layout
+/// reading them would slide in from coordinates that meant something else.
+fn handle_settings_home_view_input(s: &mut State, button: &str, mut selection: usize) {
+    const LAST: usize = 3;
+    match button {
+        "Up" | "StickLUp" => selection = if selection == 0 { LAST } else { selection - 1 },
+        "Down" | "StickLDown" => selection = if selection >= LAST { 0 } else { selection + 1 },
+        "A" => {
+            crate::loc::set_home_view(selection as u8);
+            crate::loc::save_current();
+            crate::backend::render::home_anim_reset();
+            s.screen = Screen::SettingsModal { selection: 0 };
+            return;
+        }
+        "B" | "Minus" => {
+            s.screen = Screen::SettingsModal { selection: 0 };
+            return;
+        }
+        _ => {}
+    }
+    s.screen = Screen::SettingsHomeViewPicker { selection };
 }
 
 /// Bug-report game picker (RÉGLAGES → SIGNALER UN BUG). A scrollable list of
@@ -5309,6 +5340,7 @@ fn modal_kind(screen: Screen) -> u8 {
         Screen::CoverPicker { .. } => 3,
         Screen::SettingsLanguagePicker { .. } => 4,
         Screen::SettingsPrefsModal { .. } => 10,
+        Screen::SettingsHomeViewPicker { .. } => 18,
         Screen::DistantUrlOptions { .. } => 5,
         Screen::DistantHistoryConfirm => 6,
         // The keymap editor delegates to `menu::*`; fold its sub-screen id in so a
@@ -5806,6 +5838,12 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             ];
             backend.draw_library_dim_backdrop();
             backend.draw_library_options(lc.prefs_title, selection, &labels);
+        }
+        Screen::SettingsHomeViewPicker { selection } => {
+            let lc = crate::loc::s();
+            let labels = [lc.home_grid, lc.home_list, lc.home_strip, lc.home_shelf];
+            backend.draw_library_dim_backdrop();
+            backend.draw_library_options(lc.set_home_view, selection, &labels);
         }
         Screen::SettingsKeymapEditor => {
             // Same as TouchesEditor — the editor edits the global default

@@ -7503,6 +7503,11 @@ impl SwitchRenderBackend {
         let list_w = (vw * 0.50 - 40.0).max(120.0);
         let band_top = TOP - 8.0;
         let band_bot = TOP + rows_visible as f32 * ROW_H;
+        if entries.is_empty() {
+            self.draw_home_empty(band_top, band_bot);
+            self.draw_page_footer(crate::loc::s().list_footer);
+            return;
+        }
 
         let total = entries.len();
         let mut cells: std::vec::Vec<GalleryCell> = std::vec::Vec::with_capacity(total);
@@ -7551,13 +7556,25 @@ impl SwitchRenderBackend {
         let box_x = vw * 0.53;
         let box_w = vw - box_x - 40.0;
         let box_y = TOP + 6.0;
-        let box_h = 340.0;
+        // 340 gave this layout the SMALLEST cover in the app — 15.4% of the
+        // screen — while ~100,000 px² sat empty below the caption, in the one
+        // layout whose whole point is the cover panel. The panel now runs to
+        // y616; the footer is at 678 and the list band is a disjoint x-range, so
+        // nothing else moves. Per-cover gain, since `draw_cover_fitted` caps
+        // upscaling at 2× native.
+        let box_h = 460.0;
         let mut panel = (box_x, box_y, box_w, box_h);
         if let Some(e) = entries.get(selection) {
-            // 18 px gap + the title line + the facts line under it.
-            const CAPTION_H: f32 = 88.0;
+            // Measured, not guessed. 88 was a fixed reserve for a caption that is
+            // 64.6 px on one title line and 90.6 on two; since `draw_cover_fitted`
+            // centres with `(h - dh - caption_h) * 0.5`, the common case pushed
+            // the art 11.7 px up for nothing. Wrapped once here and reused below,
+            // so the two cannot disagree either.
+            let (l1, l2) = self.wrap_text_2(&e.display_name, 2.4, box_w);
+            let lines = if l2.is_empty() { 1.0 } else { 2.0 };
+            let caption_h = 18.0 + lines * 26.0 + 8.0 + 12.6;
             panel = self.draw_cover_fitted(
-                box_x, box_y, box_w, box_h, CAPTION_H,
+                box_x, box_y, box_w, box_h, caption_h,
                 &e.basename, &e.display_name, e.color_chip,
             );
             self.round_corners(panel.0, panel.1, panel.2, panel.3, 8.0);
@@ -7567,7 +7584,6 @@ impl SwitchRenderBackend {
 
             let mut ty = panel.1 + panel.3 + 18.0;
             let ts = 2.4;
-            let (l1, l2) = self.wrap_text_2(&e.display_name, ts, box_w);
             for line in [l1.as_str(), l2.as_str()] {
                 if line.is_empty() {
                     continue;
@@ -7655,24 +7671,77 @@ impl SwitchRenderBackend {
             };
             // Truncated to the column, never to the panel beside it.
             let label = self.fit_text(&e.display_name, 2.0, list_x + list_w - text_x - 12.0);
-            self.draw_text(text_x, y + 9.0, 2.0, &label, col);
+            // y+10, not y+9: the 14 px glyph then centres on y+17, which is where
+            // the highlight bar and the colour chip already centre. The text was
+            // the only one of the three out of line.
+            self.draw_text(text_x, y + 10.0, 2.0, &label, col);
         }
         unsafe {
             glDisable(GL_SCISSOR_TEST);
         }
 
-        let help = crate::loc::s().list_footer;
-        let hw = self.measure_text(help, 2.0);
-        self.draw_text(
-            (vw - hw) * 0.5, vh - 42.0, 2.0, help,
-            swf::Color::from_rgb(0x99AABB, 255),
-        );
+        // Position bar. This was the only scrolling view in the app with no
+        // feedback at all — GRILLE has a scrollbar, the horizontal layouts have a
+        // rail, LISTE showed 13 of 77 with nothing to say which 13. Placed in the
+        // 38 px gutter between the column and the panel, so it sits against the
+        // thing it measures instead of at the screen edge.
+        if entries.len() > rows_visible {
+            let bar_x = list_x + list_w + 8.0;
+            let bar_top = band_top;
+            let bar_h = band_bot - band_top;
+            let thumb_h = (bar_h * rows_visible as f32 / entries.len() as f32).max(24.0);
+            let max_scroll = entries.len().saturating_sub(rows_visible) as f32 * ROW_H;
+            let progress = if max_scroll > 0.0 { (scroll_px / max_scroll).clamp(0.0, 1.0) } else { 0.0 };
+            self.draw_overlay_rect(bar_x, bar_top, 4.0, bar_h, 0x40_99_AA_BB);
+            self.draw_overlay_rect(
+                bar_x,
+                bar_top + (bar_h - thumb_h) * progress,
+                4.0,
+                thumb_h,
+                0xFF_FF_D7_40,
+            );
+        }
+
+        self.draw_page_footer(crate::loc::s().list_footer);
 
         // The reveal grows from the COVER PANEL, not from a text row: the panel is
         // already showing that game's art at full size, so the launch continues it.
         if let Ok(mut r) = gallery_sel_rect().lock() {
             *r = panel;
         }
+    }
+
+    /// The centred key-hint line every full-page screen ends with, at the one
+    /// baseline they all use.
+    ///
+    /// It was copied out at each site — measure, halve, draw at `vh - 42` in
+    /// `0x99AABB` — which is how two of them ended up at a different height than
+    /// the rest.
+    fn draw_page_footer(&mut self, text: &str) {
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        let w = self.measure_text(text, 2.0);
+        self.draw_text((vw - w) * 0.5, vh - 42.0, 2.0, text, swf::Color::from_rgb(0x99AABB, 255));
+    }
+
+    /// Centred "NO RESULTS" for a home layout whose list came back empty.
+    ///
+    /// A search that matches nothing leaves the same `Screen::List` with zero
+    /// entries, and each of the four layouts then drew its chrome around nothing
+    /// at all: no tiles, no rows, no cover, no word. It was only ever mitigated by
+    /// the header's "0 / 77" count, which is a side effect and not a message.
+    fn draw_home_empty(&mut self, band_top: f32, band_bot: f32) {
+        let msg = crate::loc::s().cover_none;
+        let sc = 2.5;
+        let w = self.measure_text(msg, sc);
+        let vw = self.dimensions.width as f32;
+        self.draw_text(
+            (vw - w) * 0.5,
+            (band_top + band_bot) * 0.5 - 7.0 * sc * 0.5,
+            sc,
+            msg,
+            swf::Color::from_rgb(0x7A8CA6, 255),
+        );
     }
 
     /// JOUER layout 2, BANDE: a large cover of the selected game with its details
@@ -7707,8 +7776,12 @@ impl SwitchRenderBackend {
     ) {
         self.library_clear();
         let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
         self.draw_home_header(banner_tex, banner_w, banner_h, entries.len(), filter, total_unfiltered);
+        if entries.is_empty() {
+            self.draw_home_empty(148.0, 592.0);
+            self.draw_page_footer(crate::loc::s().list_footer);
+            return;
+        }
 
         const HERO_X: f32 = 56.0;
         const HERO_Y: f32 = 148.0;
@@ -7793,7 +7866,17 @@ impl SwitchRenderBackend {
                 rows_total: total as u32,
                 rows_visible: 1,
                 horizontal: true,
-                off_min: ANCHOR - (total.max(1) - 1) as f32 * pitch,
+                // Three trailing slots reserved, so the last game rests at
+                // x=904 with the row still full behind it instead of sitting
+                // alone at x=196 with 864 px of nothing to its right — two
+                // thirds of the band, at the end of every library. Still an
+                // exact multiple of `pitch` below `off_max`, so dragging to the
+                // stop lands on a whole selection.
+                //
+                // Safe here in a way it would not be in ETAGERE: BANDE keys its
+                // hero and its caption to `selection`, not to a pinned screen
+                // slot, so nothing ends up described under the wrong cover.
+                off_min: ANCHOR - (total.saturating_sub(4)).max(1) as f32 * pitch,
                 off_max: ANCHOR,
             };
         }
@@ -7845,7 +7928,13 @@ impl SwitchRenderBackend {
         // Selection frame, drawn after the row so it is never veiled, and placed
         // from the eased offset so it travels with the covers.
         if total > 0 {
-            let fx = off + sel_pos * pitch;
+            // `selection`, NOT `sel_pos`. The tiles are placed from `off` alone;
+            // `home_anim_step` eases `off` at 16 and `sel_pos` at 14, so mixing
+            // the two put the frame on a geometry the covers were not following
+            // and it straddled two of them for the length of every slide. Using
+            // the tile's own expression makes disagreement impossible — this is
+            // the rule ETAGERE's header comment already states.
+            let fx = off + selection as f32 * pitch;
             const B: f32 = 3.0;
             const SEL: u32 = 0xFF_FF_D7_40;
             self.draw_overlay_rect(fx - B, ROW_Y - B, ROW_W + 2.0 * B, B, SEL);
@@ -7855,12 +7944,19 @@ impl SwitchRenderBackend {
             self.round_corners(fx - B, ROW_Y - B, ROW_W + 2.0 * B, ROW_H + 2.0 * B, 8.0);
         }
 
-        let help = crate::loc::s().list_footer;
-        let hw = self.measure_text(help, 2.0);
-        self.draw_text(
-            (vw - hw) * 0.5, vh - 42.0, 2.0, help,
-            swf::Color::from_rgb(0x99AABB, 255),
-        );
+        // Position rail: 77 covers scrolled with nothing anywhere saying where in
+        // them you are. Same idiom as the other horizontal layout, in the empty
+        // band under the row.
+        if total > 5 {
+            let track_x = 56.0;
+            let track_w = vw - 112.0;
+            self.draw_overlay_rect(track_x, 620.0, track_w, 4.0, 0x55_2A_36_48);
+            let tw = (track_w * (vw / pitch) / total as f32).max(56.0);
+            let t = (sel_pos / (total - 1) as f32).clamp(0.0, 1.0);
+            self.draw_overlay_rect(track_x + (track_w - tw) * t, 616.0, tw, 12.0, 0xFF_FF_D7_40);
+        }
+
+        self.draw_page_footer(crate::loc::s().list_footer);
     }
 
     /// JOUER layout 3, the shelf: ONE row of large covers, the selected one grown
@@ -7896,6 +7992,12 @@ impl SwitchRenderBackend {
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
         self.draw_home_header(banner_tex, banner_w, banner_h, entries.len(), filter, total_unfiltered);
+
+        if entries.is_empty() {
+            self.draw_home_empty(148.0, 560.0);
+            self.draw_page_footer(crate::loc::s().list_footer);
+            return;
+        }
 
         const W0: f32 = 248.0;              // resting tile
         const H0: f32 = 160.0;              // box aspect 1.55 at EVERY scale
@@ -8146,6 +8248,15 @@ impl SwitchRenderBackend {
         // Banner — compact, fully below the navbar strip (y 4..38). Scaled to a
         // small target height so it doesn't dominate the screen (was full 720x144).
         self.draw_home_header(banner_tex, banner_w, banner_h, entries.len(), filter, total_unfiltered);
+
+        if entries.is_empty() {
+            // GRILLE is the validated screen of the four; the guard is placed
+            // after the header and before any tile work, so a non-empty library
+            // reaches exactly the code it did before.
+            self.draw_home_empty(150.0, 630.0);
+            self.draw_page_footer(crate::loc::s().list_footer);
+            return;
+        }
 
         // ── Cover gallery (v1.2.0) ───────────────────────────────────────
         // Fixed 5-per-row GRID. Every tile is the same size and covers are
@@ -9765,7 +9876,13 @@ impl SwitchRenderBackend {
             match self.thumb_for(urls[i]) {
                 Some(ThumbTex::Image { tex, w, h }) => {
                     self.draw_textured_rect_cover(cx, cy, cell_w, THUMB_H, tex, w, h);
-                    self.round_corners_on(cx, cy, cell_w, THUMB_H, 6.0, 0xFF_0B_12_22);
+                    // Not on the selected tile: its corners are covered by the
+                    // frame below, which is rounded instead. Rounding both left
+                    // four notches trapped inside the gold border — the artefact
+                    // GRILLE already documents avoiding.
+                    if !is_sel {
+                        self.round_corners_on(cx, cy, cell_w, THUMB_H, 6.0, 0xFF_0B_12_22);
+                    }
                 }
                 Some(ThumbTex::Failed) => {
                     let q = "?";
@@ -9798,6 +9915,11 @@ impl SwitchRenderBackend {
                     };
                     <Self as CommandHandler>::draw_rect(self, col, m);
                 }
+                // On the modal's own ground, not the page colour: this grid sits
+                // on the 0xFF0B1222 panel.
+                self.round_corners_on(
+                    cx - b, cy - b, cell_w + 2.0 * b, THUMB_H + 2.0 * b, 8.0, 0xFF_0B_12_22,
+                );
             }
         }
 
