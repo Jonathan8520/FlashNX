@@ -7315,13 +7315,9 @@ impl SwitchRenderBackend {
         }
 
         // Same slot whether filtering or not, so the header height never moves.
-        let sub = match filter {
-            Some(f) if !f.is_empty() => std::format!(
-                "{} / {} - {}: {}",
-                shown, total_unfiltered, crate::loc::s().files_filter, f,
-            ),
-            _ => crate::loc::games_count(shown),
-        };
+        let sub = crate::loc::count_line(shown, total_unfiltered, filter, || {
+            crate::loc::games_count(shown)
+        });
         // In the banner's LEFT flank, vertically centred in the 46..102 band,
         // rather than centred on its own row below. This line is also the only
         // indicator that a filter is active, so it stays visible in every layout —
@@ -9086,16 +9082,9 @@ impl SwitchRenderBackend {
         // Sub-line: "3 / 21 - FILTRE: mario" while searching, else the count —
         // with a long history you need to know how much of it you're looking at.
         let lc = crate::loc::s();
-        let sub = match filter {
-            Some(f) if !f.trim().is_empty() => std::format!(
-                "{} / {} - {}: {}",
-                labels.len(),
-                total_unfiltered,
-                lc.files_filter,
-                f
-            ),
-            _ => lc.dist_count.replace("{}", &total_unfiltered.to_string()),
-        };
+        let sub = crate::loc::count_line(labels.len(), total_unfiltered, filter, || {
+            lc.dist_count.replace("{}", &total_unfiltered.to_string())
+        });
         let sub_w = self.measure_text(&sub, 2.0);
         self.draw_text(
             (vw - sub_w) * 0.5,
@@ -9376,14 +9365,11 @@ impl SwitchRenderBackend {
 
         // Sub-line shows filter status: "23/3633 — FILTRE: mario" when
         // filter is active, "3633 FICHIER(S) .SWF TROUVE(S)" otherwise.
-        let sub = match filter {
-            Some(f) if !f.is_empty() => {
-                std::format!("{} / {} - {}: {}", files.len(), total_unfiltered, crate::loc::s().files_filter, f)
-            }
-            // The pixel font now renders parentheses, so "FILE(S) FOUND" is
-            // fine across locales; the count template lives in loc.rs.
-            _ => crate::loc::files_found(files.len()),
-        };
+        // The pixel font now renders parentheses, so "FILE(S) FOUND" is fine
+        // across locales; the count template lives in loc.rs.
+        let sub = crate::loc::count_line(files.len(), total_unfiltered, filter, || {
+            crate::loc::files_found(files.len())
+        });
         let scale_s = 2.0;
         let sw = self.measure_text(&sub, scale_s);
         self.draw_text(

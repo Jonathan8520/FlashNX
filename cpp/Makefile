@@ -23,7 +23,7 @@ INCLUDES    := include
 # title/author below, and the SD data dir `switch/FlashNX/`.
 APP_TITLE   := FlashNX
 APP_AUTHOR  := Jonathan8520
-APP_VERSION := 1.6.0
+APP_VERSION := 1.7.0
 # Icon shown in hbmenu / Sphaira / forwarders. Lives in the repo root's
 # `assets/` folder so it sits next to README + the banner. devkitPro's
 # %.nro rule reads $(NROFLAGS) which we wire below — without --icon= the

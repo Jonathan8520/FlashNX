@@ -2598,6 +2598,28 @@ pub fn files_found(n: usize) -> std::string::String {
     }
 }
 
+/// "3 / 21 - FILTRE: mario", the sub-line a list screen shows while a search is
+/// active; `plain` supplies the wording used when there is none.
+///
+/// The three list screens each composed this by hand, and the copies had already
+/// drifted: two of them treated a search of nothing but spaces as an ACTIVE
+/// filter and printed a "FILTRE:" with an empty term after it, while the third
+/// trimmed first. The separator was just as free to drift, in a line the user
+/// reads on every screen of the app.
+pub fn count_line(
+    shown: usize,
+    total: usize,
+    filter: Option<&str>,
+    plain: impl FnOnce() -> std::string::String,
+) -> std::string::String {
+    match filter {
+        Some(f) if !f.trim().is_empty() => {
+            std::format!("{} / {} - {}: {}", shown, total, s().files_filter, f)
+        }
+        _ => plain(),
+    }
+}
+
 /// Substitute a single `{}` placeholder in one of the error templates.
 fn fill(template: &str, arg: &str) -> std::string::String {
     template.replacen("{}", arg, 1)
