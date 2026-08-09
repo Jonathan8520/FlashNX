@@ -6026,6 +6026,44 @@ impl SwitchRenderBackend {
     /// worth two lines rather than an ellipsis: the list beside them is where a
     /// title gets cut, because there it only has to be recognisable.
     /// The second line is still ellipsised if even two lines are not enough.
+    /// Wrap `text` onto at most `max_lines` lines of `max_w`, ellipsising only the
+    /// last one.
+    ///
+    /// `wrap_text_2` is this with `max_lines` hard-wired to two, which is why
+    /// BANDE cut "Scooby-Doo: Mayan Monster Mayhem Episode 4 - The Temple of Lost
+    /// Souls" mid-title with 220 px of empty column under it: the limit was the
+    /// helper's, not the layout's.
+    pub fn wrap_text_n(
+        &self,
+        text: &str,
+        scale: f32,
+        max_w: f32,
+        max_lines: usize,
+    ) -> std::vec::Vec<std::string::String> {
+        let mut out: std::vec::Vec<std::string::String> = std::vec::Vec::new();
+        let mut rest = text.trim().to_string();
+        while !rest.is_empty() && out.len() + 1 < max_lines {
+            if self.measure_text(&rest, scale) <= max_w {
+                break;
+            }
+            let mut cut = 0usize;
+            for (i, ch) in rest.char_indices() {
+                if ch == ' ' && self.measure_text(&rest[..i], scale) <= max_w {
+                    cut = i;
+                }
+            }
+            if cut == 0 {
+                break; // one unbroken word: the tail below cuts it
+            }
+            out.push(rest[..cut].to_string());
+            rest = rest[cut + 1..].trim_start().to_string();
+        }
+        if !rest.is_empty() {
+            out.push(self.fit_text(&rest, scale, max_w));
+        }
+        out
+    }
+
     pub fn wrap_text_2(&self, text: &str, scale: f32, max_w: f32) -> (std::string::String, std::string::String) {
         if self.measure_text(text, scale) <= max_w {
             return (text.to_string(), std::string::String::new());
@@ -7668,7 +7706,7 @@ impl SwitchRenderBackend {
         let vw = self.dimensions.width as f32;
         self.draw_home_header(banner_tex, banner_w, banner_h, entries.len(), filter, total_unfiltered);
 
-        const TOP: f32 = 150.0;
+        const TOP: f32 = 126.0;
         // 40 px rows fit 13 titles between the header and the footer. The first
         // pass used 44 and showed 10, which left a visibly empty band below.
         const ROW_H: f32 = 40.0;
@@ -8014,13 +8052,13 @@ impl SwitchRenderBackend {
         let vw = self.dimensions.width as f32;
         self.draw_home_header(banner_tex, banner_w, banner_h, entries.len(), filter, total_unfiltered);
         if entries.is_empty() {
-            self.draw_home_empty(148.0, 592.0);
+            self.draw_home_empty(124.0, 592.0);
             self.draw_page_footer(crate::loc::s().list_footer);
             return;
         }
 
         const HERO_X: f32 = 56.0;
-        const HERO_Y: f32 = 148.0;
+        const HERO_Y: f32 = 124.0;
         // Wider box than the first pass: a banner-shaped cover was being held to
         // 440 px and looked timid next to the empty column beside it. The row moves
         // down to keep its clearance.
@@ -8062,12 +8100,11 @@ impl SwitchRenderBackend {
 
             let mut ty = HERO_Y + 6.0;
             let ts = 2.8;
-            let (l1, l2) = self.wrap_text_2(&e.display_name, ts, vw - COL_X - 48.0);
-            for line in [l1.as_str(), l2.as_str()] {
-                if line.is_empty() {
-                    continue;
-                }
-                self.draw_text(COL_X, ty, ts, line, swf::Color::from_rgb(0xFFD740, 255));
+            // Three lines here, not two: the column is 580 px wide and the cover
+            // row does not start until y468, so a long title had a third line's
+            // worth of empty space under it and was ellipsised anyway.
+            for line in self.wrap_text_n(&e.display_name, ts, vw - COL_X - 48.0, 3) {
+                self.draw_text(COL_X, ty, ts, &line, swf::Color::from_rgb(0xFFD740, 255));
                 ty += 32.0;
             }
             let facts = Self::game_facts(e);
@@ -8229,7 +8266,7 @@ impl SwitchRenderBackend {
         self.draw_home_header(banner_tex, banner_w, banner_h, entries.len(), filter, total_unfiltered);
 
         if entries.is_empty() {
-            self.draw_home_empty(148.0, 560.0);
+            self.draw_home_empty(124.0, 560.0);
             self.draw_page_footer(crate::loc::s().list_footer);
             return;
         }
@@ -8239,7 +8276,7 @@ impl SwitchRenderBackend {
         const GROW: f32 = 0.30;
         const PITCH: f32 = 304.0;
         const ANCHOR_CX: f32 = 328.0;       // fixed screen x of the active centre
-        const SHELF_Y: f32 = 368.0;         // common BOTTOM edge; growth is upward
+        const SHELF_Y: f32 = 344.0;         // common BOTTOM edge; growth is upward
         const RIGHT_SLOTS: usize = 2;
         const UPSCALE_MAX: f32 = 1.25;
         const VEIL: u32 = 0x0C_10_18;
@@ -8426,7 +8463,7 @@ impl SwitchRenderBackend {
             // launches `selection`, so naming anything else would let the facts
             // describe a different game than the one that starts.
             let (l1, l2) = self.wrap_text_2(&e.display_name, 3.2, cap_w);
-            let mut ty = 412.0;
+            let mut ty = 388.0;
             for line in [l1.as_str(), l2.as_str()] {
                 if line.is_empty() {
                     continue;
@@ -8444,10 +8481,10 @@ impl SwitchRenderBackend {
             // Thin, and close under the text rather than stranded at the bottom of
             // the screen: it says where you are in the row, so it belongs with the
             // row's caption.
-            self.draw_overlay_rect(cap_x, 528.0, cap_w, 3.0, 0x55_2A_36_48);
+            self.draw_overlay_rect(cap_x, 504.0, cap_w, 3.0, 0x55_2A_36_48);
             let tw = (cap_w * (1280.0 / PITCH) / n as f32).max(56.0);
             let tx = cap_x + (cap_w - tw) * (sel_pos / (n - 1) as f32).clamp(0.0, 1.0);
-            self.draw_overlay_rect(tx, 527.0, tw, 5.0, 0xFF_FF_D7_40);
+            self.draw_overlay_rect(tx, 503.0, tw, 5.0, 0xFF_FF_D7_40);
         }
 
         self.draw_page_footer(crate::loc::s().list_footer);
@@ -8478,7 +8515,7 @@ impl SwitchRenderBackend {
             // GRILLE is the validated screen of the four; the guard is placed
             // after the header and before any tile work, so a non-empty library
             // reaches exactly the code it did before.
-            self.draw_home_empty(150.0, 630.0);
+            self.draw_home_empty(126.0, 630.0);
             self.draw_page_footer(crate::loc::s().list_footer);
             return;
         }
@@ -8494,7 +8531,11 @@ impl SwitchRenderBackend {
         const GAP_X: f32 = 16.0;
         const GAP_Y: f32 = 22.0;
         const LEFT: f32 = 40.0;
-        const TOP: f32 = 150.0;
+        // 126, not 150: the shrunk banner ends at y102 and left a 46 px gap under
+        // itself, which read as the header having lost its second line rather than
+        // as clearance. 24 px is the same air the rest of the page uses. No row
+        // count changes at any of the four layouts, so no scroll maths moves.
+        const TOP: f32 = 126.0;
         let rows_visible = crate::library::GALLERY_ROWS_VISIBLE;
         let avail_w = vw - LEFT * 2.0;
         let cell_w = ((avail_w - (COLS as f32 - 1.0) * GAP_X) / COLS as f32).max(10.0);
