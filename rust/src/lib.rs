@@ -524,6 +524,7 @@ pub extern "C" fn ruffle_init() -> c_int {
     // and the base every relative load must resolve against (the navigator).
     let container = container_html_for(&sidecar_dir, &source_label);
 
+    let movie_len = movie_bytes.len();
     match SwfMovie::from_data(&movie_bytes, source_label.clone(), None) {
         Ok(mut movie) => {
             log_str(&std::format!(
@@ -614,6 +615,40 @@ pub extern "C" fn ruffle_init() -> c_int {
                     ));
                     movie.append_parameters(vars);
                 }
+            }
+            // Do not let the movie run before it has finished preloading.
+            //
+            // Ruffle defaults to Streaming, which models a movie arriving over a
+            // network: the timeline is revealed a budget of tags per frame and
+            // scripts run against whatever has arrived so far. That is right in a
+            // browser and wrong here, because the whole file is already in memory
+            // off the SD card. Nothing is streaming, so the drip is pure fiction.
+            //
+            // The fiction has teeth. Learn to Fly 2 (issue #76) leaves its first
+            // frame ONLY through a `gotoAndStop(2)` fired from a failed analytics
+            // callback. Our request fails in zero milliseconds and the callback
+            // lands in the same host frame as the tick that started it, while one
+            // frame out of 46 has been preloaded. `run_goto` clamps the target to
+            // what is loaded and `goto_frame` has already stopped the root, so the
+            // movie parks on frame 1 for ever, silently. Against a real server the
+            // round trip takes 100 ms, the root is past frame 3 by then, and the
+            // game's own guard skips the goto -- which is why the same build runs
+            // everywhere else.
+            //
+            // `Delayed` rather than `Blocking`: same per-frame budget, so a big
+            // movie preloads over several frames instead of freezing the console
+            // in one, and the movie simply sees itself fully loaded when it starts.
+            // Kept off above 64 MB, where the wait would be long enough to want
+            // the game's own preloader animation on screen -- Super Smash Flash 2
+            // (3.4 GB) and Sonic RPG 10 (284 MB) keep today's behaviour exactly.
+            const DELAYED_MAX: usize = 64 * 1024 * 1024;
+            if movie_len <= DELAYED_MAX {
+                builder = builder.with_load_behavior(ruffle_core::LoadBehavior::Delayed);
+            } else {
+                log_str(&std::format!(
+                    "ruffle_init: {} bytes is over the delayed-load cap, streaming as before\n",
+                    movie_len,
+                ));
             }
             builder = builder.with_movie(movie);
         }
