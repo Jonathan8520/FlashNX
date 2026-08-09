@@ -28,6 +28,7 @@ extern "C" void ruffle_library_open(void);
 extern "C" int  ruffle_library_active(void);
 extern "C" int  ruffle_library_picked(void);
 extern "C" int  ruffle_library_input(const char* button_name);
+extern "C" void ruffle_library_nav_held(unsigned char mask);
 extern "C" void ruffle_library_touch(float x, float y, int pressed);
 extern "C" void ruffle_library_render(void);
 extern "C" int  ruffle_library_selected_path(char* out, int cap);
@@ -609,6 +610,24 @@ static void worker_entry(void* arg) {
         // Forward joycon edges + auto-repeat (D-pad/sticks) into the
         // library state machine. Pause / Plus / face buttons are one-shot
         // (no repeat) — see MENU_NAV_BUTTONS.repeat flags.
+        // Which nav directions are held RIGHT NOW, before any event goes out.
+        // Each direction is forwarded on its own, so a stick pushed diagonally
+        // sends two events in the same frame -- and where one of them is a
+        // multi-game jump, the pair moved five games for one flick. The Rust side
+        // suppresses the jump when the other axis is engaged, which it can only
+        // know from the held state; the events themselves carry no such context.
+        {
+            unsigned char nav = 0;
+            if (kHeldLib & (HidNpadButton_Up | HidNpadButton_StickLUp | HidNpadButton_StickRUp))
+                nav |= 1;
+            if (kHeldLib & (HidNpadButton_Down | HidNpadButton_StickLDown | HidNpadButton_StickRDown))
+                nav |= 2;
+            if (kHeldLib & (HidNpadButton_Left | HidNpadButton_StickLLeft | HidNpadButton_StickRLeft))
+                nav |= 4;
+            if (kHeldLib & (HidNpadButton_Right | HidNpadButton_StickLRight | HidNpadButton_StickRRight))
+                nav |= 8;
+            ruffle_library_nav_held(nav);
+        }
         menu_repeat_step(lib_repeat, kDownLib, kUpLib, kHeldLib,
                          now_lib, tick_freq_global, ruffle_library_input);
         // Hidden ZL+ZR chord: emit one synthetic "ZL+ZR" event on the frame the

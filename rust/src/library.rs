@@ -890,6 +890,27 @@ pub fn home_rows_visible() -> usize {
     }
 }
 
+/// Nav directions held this frame, as a bitmask: 1 = Up, 2 = Down, 4 = Left,
+/// 8 = Right. Set by the C++ library loop once per frame, BEFORE it forwards
+/// that frame's events.
+///
+/// It exists for one reason: a stick held diagonally is two directions, and the
+/// input layer forwards each one on its own. Where one of the two is a
+/// multi-game jump, a single diagonal flick moved five games. An event does not
+/// know what else is pressed, so the held state has to come from somewhere.
+static NAV_HELD: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[no_mangle]
+pub extern "C" fn ruffle_library_nav_held(mask: u8) {
+    NAV_HELD.store(mask, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// True when a vertical AND a horizontal direction are held at once.
+fn nav_is_diagonal() -> bool {
+    let m = NAV_HELD.load(std::sync::atomic::Ordering::Relaxed);
+    (m & 0b0011) != 0 && (m & 0b1100) != 0
+}
+
 /// Rows skipped by Left/Right in LISTE. Five, not a screenful: a screenful is
 /// what a page jump is for, and it would land on a row with none of the titles
 /// you were reading still visible.
@@ -3501,6 +3522,13 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
             // Up/Down did — one row — and two of the four directions were dead
             // weight. They skip instead, which is what they are for in a list.
             if crate::loc::home_view() == 1 {
+                // Not on a diagonal: the jump is what makes the stick feel
+                // twitchy there, since the other axis is already moving one row
+                // and the two land five apart. Held diagonally, the row step
+                // alone applies and the movement stays the normal one.
+                if nav_is_diagonal() {
+                    return;
+                }
                 selection = selection.saturating_sub(LIST_SKIP);
             } else if total > 0 && selection > 0 {
                 selection -= 1;
@@ -3509,6 +3537,9 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
         }
         "Right" | "StickLRight" => {
             if crate::loc::home_view() == 1 {
+                if nav_is_diagonal() {
+                    return;
+                }
                 if total > 0 {
                     selection = (selection + LIST_SKIP).min(total - 1);
                 }
@@ -3523,6 +3554,11 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
             // FORWARD, matching the row's own left-to-right reading order rather
             // than a vertical list's.
             if matches!(crate::loc::home_view(), 2 | 3) {
+                // Same rule as LISTE, other axis: here the row IS horizontal, so
+                // Left/Right is the normal path and the jump belongs to Up/Down.
+                if nav_is_diagonal() {
+                    return;
+                }
                 if total > 0 {
                     selection = (selection + home_page_step()).min(total - 1);
                 }
@@ -3533,6 +3569,9 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
         }
         "Down" | "StickLDown" => {
             if matches!(crate::loc::home_view(), 2 | 3) {
+                if nav_is_diagonal() {
+                    return;
+                }
                 selection = selection.saturating_sub(home_page_step());
             } else if let Some(ns) = gallery_neighbor(selection, 1) {
                 selection = ns;
