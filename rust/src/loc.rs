@@ -276,6 +276,12 @@ pub struct Strings {
     pub filter_scanlines: &'static str,
     /// Scanlines + RGB stripe mask + vignette.
     pub filter_crt: &'static str,
+    /// Pause row + defaults row: turn the picture a quarter at a time (#78).
+    pub set_rotation: &'static str,
+    pub rot_none: &'static str,
+    pub rot_90: &'static str,
+    pub rot_180: &'static str,
+    pub rot_270: &'static str,
     /// TOUCHES row + share/diff label for the per-game "show cursor" toggle.
     pub show_cursor: &'static str,
     /// Values for the show-cursor toggle (shown / hidden).
@@ -576,6 +582,11 @@ const EN: Strings = Strings {
     filter_none: "NONE",
     filter_scanlines: "SCANLINES",
     filter_crt: "CRT",
+    set_rotation: "ROTATION",
+    rot_none: "NONE",
+    rot_90: "90\u{00B0}",
+    rot_180: "180\u{00B0}",
+    rot_270: "270\u{00B0}",
     show_cursor: "SHOW CURSOR",
     cursor_shown: "SHOWN",
     cursor_hidden: "HIDDEN",
@@ -787,6 +798,11 @@ const FR: Strings = Strings {
     filter_none: "AUCUN",
     filter_scanlines: "LIGNES",
     filter_crt: "CRT",
+    set_rotation: "ROTATION",
+    rot_none: "AUCUNE",
+    rot_90: "90\u{00B0}",
+    rot_180: "180\u{00B0}",
+    rot_270: "270\u{00B0}",
     show_cursor: "AFFICHER LE CURSEUR",
     cursor_shown: "AFFICHÉ",
     cursor_hidden: "MASQUÉ",
@@ -998,6 +1014,11 @@ const ES: Strings = Strings {
     filter_none: "NINGUNO",
     filter_scanlines: "L\u{00CD}NEAS",
     filter_crt: "CRT",
+    set_rotation: "ROTACI\u{00D3}N",
+    rot_none: "NINGUNA",
+    rot_90: "90\u{00B0}",
+    rot_180: "180\u{00B0}",
+    rot_270: "270\u{00B0}",
     show_cursor: "MOSTRAR CURSOR",
     cursor_shown: "VISIBLE",
     cursor_hidden: "OCULTO",
@@ -1211,6 +1232,11 @@ const RU: Strings = Strings {
     filter_none: "НЕТ",
     filter_scanlines: "ЛИНИИ",
     filter_crt: "CRT",
+    set_rotation: "ПОВОРОТ",
+    rot_none: "НЕТ",
+    rot_90: "90\u{00B0}",
+    rot_180: "180\u{00B0}",
+    rot_270: "270\u{00B0}",
     show_cursor: "ПОКАЗАТЬ КУРСОР",
     cursor_shown: "ПОКАЗАН",
     cursor_hidden: "СКРЫТ",
@@ -1427,6 +1453,11 @@ const DE: Strings = Strings {
     filter_none: "KEINER",
     filter_scanlines: "LINIEN",
     filter_crt: "CRT",
+    set_rotation: "DREHUNG",
+    rot_none: "KEINE",
+    rot_90: "90\u{00B0}",
+    rot_180: "180\u{00B0}",
+    rot_270: "270\u{00B0}",
     show_cursor: "CURSOR ZEIGEN",
     cursor_shown: "SICHTBAR",
     cursor_hidden: "VERBORGEN",
@@ -1640,6 +1671,11 @@ const IT: Strings = Strings {
     filter_none: "NESSUNO",
     filter_scanlines: "LINEE",
     filter_crt: "CRT",
+    set_rotation: "ROTAZIONE",
+    rot_none: "NESSUNA",
+    rot_90: "90\u{00B0}",
+    rot_180: "180\u{00B0}",
+    rot_270: "270\u{00B0}",
     show_cursor: "MOSTRA CURSORE",
     cursor_shown: "VISIBILE",
     cursor_hidden: "NASCOSTO",
@@ -1853,6 +1889,11 @@ const PT: Strings = Strings {
     filter_none: "NENHUM",
     filter_scanlines: "LINHAS",
     filter_crt: "CRT",
+    set_rotation: "ROTA\u{00C7}\u{00C3}O",
+    rot_none: "NENHUMA",
+    rot_90: "90\u{00B0}",
+    rot_180: "180\u{00B0}",
+    rot_270: "270\u{00B0}",
     show_cursor: "MOSTRAR CURSOR",
     cursor_shown: "VIS\u{00CD}VEL",
     cursor_hidden: "OCULTO",
@@ -2071,6 +2112,11 @@ const ZH: Strings = Strings {
     filter_none: "无",
     filter_scanlines: "扫描线",
     filter_crt: "CRT",
+    set_rotation: "旋转",
+    rot_none: "无",
+    rot_90: "90\u{00B0}",
+    rot_180: "180\u{00B0}",
+    rot_270: "270\u{00B0}",
     show_cursor: "显示光标",
     cursor_shown: "显示",
     cursor_hidden: "隐藏",
@@ -2287,6 +2333,11 @@ const TR: Strings = Strings {
     filter_none: "YOK",
     filter_scanlines: "\u{00C7}\u{0130}ZG\u{0130}LER",
     filter_crt: "CRT",
+    set_rotation: "D\u{00D6}ND\u{00DC}RME",
+    rot_none: "YOK",
+    rot_90: "90\u{00B0}",
+    rot_180: "180\u{00B0}",
+    rot_270: "270\u{00B0}",
     show_cursor: "IMLEC\u{0130} G\u{00D6}STER",
     cursor_shown: "G\u{00D6}R\u{00DC}N\u{00DC}R",
     cursor_hidden: "G\u{0130}ZL\u{0130}",
@@ -2455,6 +2506,7 @@ pub fn set_covers_online(v: bool) {
 /// change of default, which is predictable and explainable.
 static DEFAULT_DISPLAY_MODE: AtomicU8 = AtomicU8::new(0);
 static DEFAULT_SCREEN_FILTER: AtomicU8 = AtomicU8::new(0);
+static DEFAULT_ROTATION: AtomicU8 = AtomicU8::new(0);
 
 /// JOUER tab layout: 0 = cover grid (the default since v1.2.0), 1 = title list
 /// with the selected game's cover beside it (issue #52), 2 = covers scrolling
@@ -2492,6 +2544,26 @@ pub fn default_display_mode() -> u8 {
 
 pub fn set_default_display_mode(v: u8) {
     DEFAULT_DISPLAY_MODE.store(v, Ordering::Relaxed);
+}
+
+pub fn default_rotation() -> u8 {
+    DEFAULT_ROTATION.load(Ordering::Relaxed)
+}
+
+pub fn set_default_rotation(v: u8) {
+    DEFAULT_ROTATION.store(v, Ordering::Relaxed);
+}
+
+/// Display name of a rotation. Stored per game like the scaling mode, because
+/// turning the picture is a property of the game: a portrait game wants it
+/// always and a landscape game never.
+pub fn rotation_label(v: u8) -> &'static str {
+    match v {
+        1 => s().rot_90,
+        2 => s().rot_180,
+        3 => s().rot_270,
+        _ => s().rot_none,
+    }
 }
 
 pub fn default_screen_filter() -> u8 {
@@ -2725,10 +2797,11 @@ fn parse_u8_setting(json: &str, key: &str, max: u8) -> Option<u8> {
 fn write_settings(lang: Lang, covers: bool) -> bool {
     let path = settings_write_path();
     let json = std::format!(
-        "{{\n    \"language\": \"{}\",\n    \"covers_online\": {},\n    \"display_mode\": {},\n    \"screen_filter\": {},\n    \"home_view\": {}\n}}\n",
+        "{{\n    \"language\": \"{}\",\n    \"covers_online\": {},\n    \"display_mode\": {},\n    \"rotation\": {},\n    \"screen_filter\": {},\n    \"home_view\": {}\n}}\n",
         lang.code(),
         covers,
         default_display_mode(),
+        default_rotation(),
         default_screen_filter(),
         home_view(),
     );
@@ -2777,6 +2850,9 @@ pub fn init() {
             // picked up on consoles whose settings.json has no language.
             if let Some(v) = parse_u8_setting(&txt, "display_mode", 3) {
                 set_default_display_mode(v);
+            }
+            if let Some(v) = parse_u8_setting(&txt, "rotation", 4) {
+                set_default_rotation(v);
             }
             if let Some(v) = parse_u8_setting(&txt, "screen_filter", 3) {
                 set_default_screen_filter(v);

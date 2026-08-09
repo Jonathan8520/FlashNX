@@ -82,8 +82,15 @@ use std::sync::Mutex;
 /// Keep the order in sync with the `MENU_*` constants in `cpp/src/main.cpp`.
 // VITESSE moved into the in-game TOUCHES sub-menu (#20 Option 1), so it's no
 // longer a top-level pause entry.
-pub const MENU_ITEMS: &[&str] =
-    &["REPRENDRE", "TOUCHES", "AFFICHAGE", "FILTRE", "REDEMARRER", "QUITTER"];
+pub const MENU_ITEMS: &[&str] = &[
+    "REPRENDRE",
+    "TOUCHES",
+    "AFFICHAGE",
+    "ROTATION",
+    "FILTRE",
+    "REDEMARRER",
+    "QUITTER",
+];
 
 // ── Unified modal style ────────────────────────────────────────────────────
 // One look for every centered popup. Before this, each modal hard-coded its own
@@ -343,6 +350,34 @@ static GLYPHS: &[(char, Glyph)] = &[
 // three, which the eye cannot rank) and becomes qualitative: ink or no ink.
 // AS3 is the exact amber the grid tile's own AS3 badge uses, so the line
 // quotes the thumbnail above it instead of inventing a hierarchy of its own.
+/// Quarter-turns CLOCKWISE applied to the game's picture, 0 to 3 (issue #78).
+///
+/// The console cannot turn its screen, so this turns the picture instead: the
+/// player holds the Switch on its side. It is the game's answer to the same
+/// problem the display modes answer for aspect ratio -- a portrait game like
+/// Flappy Bird (500 by 700) uses a third of a 16:9 screen, and no amount of
+/// scaling fixes that, only turning does.
+///
+/// Kept here, next to the one place every draw's matrix is built, because that
+/// is the only place it can be applied ONCE and be right for everything: the
+/// game, the pause panel over it, the pointer, the screen filter. Anything that
+/// rotated separately would drift from the rest.
+static GAME_ROTATION: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+pub fn set_game_rotation(quarters: u8) {
+    GAME_ROTATION.store(quarters % 4, core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn game_rotation() -> u8 {
+    GAME_ROTATION.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// True when the picture is turned onto its side, so the logical viewport is
+/// portrait while the framebuffer stays landscape.
+pub fn rotation_swaps_axes() -> bool {
+    matches!(game_rotation(), 1 | 3)
+}
+
 const FACTS_VALUE: u32 = 0xAABFD8;
 const FACTS_MUTED: u32 = 0x7A8CA6;
 const FACTS_AS3: u32 = 0xE0B24D;
@@ -4274,8 +4309,23 @@ impl SwitchRenderBackend {
         let d = m.d * s;
         let tx = m.tx.to_pixels() as f32 * s + self.ui_pivot_x * (1.0 - s) + self.ui_translate_x;
         let ty = m.ty.to_pixels() as f32 * s + self.ui_pivot_y * (1.0 - s) + self.ui_translate_y;
-        let sx = 2.0 / w;
-        let sy = if flip_y { -2.0 / h } else { 2.0 / h };
+        // Quarter-turn, composed into the affine rather than applied afterwards.
+        //
+        // `w`/`h` above are the LOGICAL viewport, which is portrait while the
+        // picture is turned; the framebuffer stays landscape whatever happens, so
+        // the NDC divisor has to be the physical one. Composing here means every
+        // draw is turned by construction -- there is no second path to forget.
+        let rot = if flip_y { game_rotation() } else { 0 };
+        let (pw, ph) = if matches!(rot, 1 | 3) { (h, w) } else { (w, h) };
+        let (a, b, c, d, tx, ty) = match rot {
+            // Clockwise: the logical top-left corner lands top-right.
+            1 => (-b, a, -d, c, pw - ty, tx),
+            2 => (-a, -b, -c, -d, pw - tx, ph - ty),
+            3 => (b, -a, d, -c, ty, ph - tx),
+            _ => (a, b, c, d, tx, ty),
+        };
+        let sx = 2.0 / pw;
+        let sy = if flip_y { -2.0 / ph } else { 2.0 / ph };
         let ty_off = if flip_y { 1.0 } else { -1.0 };
         [
             a * sx,
@@ -6201,10 +6251,19 @@ impl SwitchRenderBackend {
             lc.set_screen_filter,
             crate::loc::screen_filter_label(crate::keymap::screen_filter()),
         );
+        // Turning the picture belongs next to scaling it: both answer "this game
+        // does not fit my screen", and both show their result on the frozen frame
+        // behind the panel before you commit.
+        let rotation_label = std::format!(
+            "{}: {}",
+            lc.set_rotation,
+            crate::loc::rotation_label(crate::keymap::rotation()),
+        );
         let items = [
             lc.menu_resume,
             lc.menu_keys,
             display_label.as_str(),
+            rotation_label.as_str(),
             filter_label.as_str(),
             lc.menu_restart,
             lc.menu_quit,
@@ -11140,9 +11199,17 @@ impl RenderBackend for SwitchRenderBackend {
     }
 
     fn set_viewport_dimensions(&mut self, dimensions: ViewportDimensions) {
+        // `dimensions` is what RUFFLE composes for, and it is portrait while the
+        // picture is turned. The framebuffer never turns, so glViewport gets the
+        // physical rectangle and the matrix hook maps one onto the other.
         self.dimensions = dimensions;
+        let (pw, ph) = if rotation_swaps_axes() {
+            (dimensions.height, dimensions.width)
+        } else {
+            (dimensions.width, dimensions.height)
+        };
         unsafe {
-            glViewport(0, 0, dimensions.width as GLsizei, dimensions.height as GLsizei);
+            glViewport(0, 0, pw as GLsizei, ph as GLsizei);
         }
     }
 

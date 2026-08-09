@@ -1092,6 +1092,47 @@ pub fn display_mode_for(basename: &str) -> u8 {
         .unwrap_or_else(crate::loc::default_display_mode)
 }
 
+/// Quarter-turns of the picture: 0 = none, 1 = 90 CW, 2 = 180, 3 = 270 (#78).
+pub const ROTATION_COUNT: u8 = 4;
+
+/// Per-game rotation (by basename). Its own `<basename>.rot` file, exactly like
+/// `.display` and `.filter`: turning the picture is a property of the GAME, not
+/// of the console. A portrait game wants it always, a landscape game never.
+pub fn rotation_for(basename: &str) -> u8 {
+    find_user_path(&std::format!("{}.rot", basename))
+        .and_then(|p| read_json_file(&p))
+        .and_then(|s| s.trim().parse::<u8>().ok())
+        .filter(|v| *v < ROTATION_COUNT)
+        .unwrap_or_else(crate::loc::default_rotation)
+}
+
+/// Rotation of the ACTIVE game, 0 when nothing is playing.
+pub fn rotation() -> u8 {
+    match active_game_basename() {
+        Some(b) => rotation_for(&b),
+        None => 0,
+    }
+}
+
+pub fn set_rotation(q: u8) {
+    if let Some(b) = active_game_basename() {
+        set_rotation_for(&b, q);
+    }
+}
+
+/// Always written, 0 included, for the same reason as the display mode: a
+/// missing file means "follow the global default", so a deliberate "no rotation"
+/// has to be distinguishable from "never set".
+pub fn set_rotation_for(basename: &str, q: u8) {
+    let path = primary_path(&std::format!("{}.rot", basename));
+    if let Err(e) = std::fs::write(&path, std::format!("{}", q).as_bytes()) {
+        log(&std::format!("keymap: rotation for {} not saved: {}
+", basename, e));
+        return;
+    }
+    crate::sd::commit();
+}
+
 /// Number of screen filters: 0 = none, 1 = scanlines, 2 = CRT.
 pub const SCREEN_FILTER_COUNT: u8 = 3;
 

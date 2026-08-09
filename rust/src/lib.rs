@@ -369,6 +369,8 @@ pub extern "C" fn ruffle_init() -> c_int {
     let _ = tracing::subscriber::set_global_default(SwitchTracingSubscriber::new());
     log(b"ruffle_init: tracing subscriber installed (INFO level)\n\0");
 
+    // Before the renderer, because the viewport below is chosen from it.
+    crate::backend::render::set_game_rotation(keymap::rotation());
     let renderer = match SwitchRenderBackend::new(VIEWPORT_W, VIEWPORT_H) {
         Some(r) => r,
         None => {
@@ -416,7 +418,17 @@ pub extern "C" fn ruffle_init() -> c_int {
         // core (`< 7`, `<= 10`, `>= 18`) puts 99 on the same side as the
         // old default 32, so nothing but the reported string changes.
         .with_player_version(Some(99))
-        .with_viewport_dimensions(VIEWPORT_W, VIEWPORT_H, 1.0)
+        // Portrait viewport while the picture is turned, so Ruffle LAYS THE STAGE
+        // OUT for the shape the player will actually see. Turning the finished
+        // landscape picture instead would show a sideways letterbox with the game
+        // still using a third of the screen, which is the very problem #78 is
+        // about. The framebuffer stays landscape; the renderer maps one onto the
+        // other.
+        .with_viewport_dimensions(
+            if crate::backend::render::rotation_swaps_axes() { VIEWPORT_H } else { VIEWPORT_W },
+            if crate::backend::render::rotation_swaps_axes() { VIEWPORT_W } else { VIEWPORT_H },
+            1.0,
+        )
         // Stage scaling, chosen by the user in REGLAGES > AFFICHAGE (issues
         // #65, #69, #74: three players in three languages asking to lose the
         // black bars). ShowAll stays the default, which is what Flash does:
@@ -1322,6 +1334,40 @@ pub extern "C" fn ruffle_display_mode_cycle() {
     }
 }
 
+/// Pause-menu ROTATION row: turn the picture a quarter clockwise and persist it.
+///
+/// Unlike the display mode this cannot be applied to a running player alone: the
+/// stage has to be LAID OUT for the new shape, so the logical viewport is
+/// swapped as well. Ruffle recomputes its stage transform from it, the renderer
+/// keeps the framebuffer landscape, and the paused frame behind the panel is
+/// redrawn turned -- so the player sees the result before committing, exactly
+/// like the display and filter rows. Issue #78.
+#[no_mangle]
+pub extern "C" fn ruffle_rotation_cycle() {
+    let next = (keymap::rotation() + 1) % keymap::ROTATION_COUNT;
+    keymap::set_rotation(next);
+    crate::backend::render::set_game_rotation(next);
+    let state = unsafe {
+        match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
+            Some(s) => s,
+            None => return,
+        }
+    };
+    if let Ok(mut player) = state.player.lock() {
+        let swap = crate::backend::render::rotation_swaps_axes();
+        let (w, h) = if swap {
+            (VIEWPORT_H, VIEWPORT_W)
+        } else {
+            (VIEWPORT_W, VIEWPORT_H)
+        };
+        player.set_viewport_dimensions(ruffle_render::backend::ViewportDimensions {
+            width: w,
+            height: h,
+            scale_factor: 1.0,
+        });
+    }
+}
+
 /// Pause-menu FILTRE row: cycle the ACTIVE game's screen filter and persist it.
 /// Unlike the scaling mode this touches no Ruffle state at all: the filter is a
 /// pass the render backend runs over the finished frame, so setting the flag is
@@ -2040,8 +2086,20 @@ pub extern "C" fn ruffle_handle_mouse_move(x: c_int, y: c_int) {
             None => return,
         }
     };
-    let cx = x.clamp(0, VIEWPORT_W as c_int) as f32;
-    let cy = y.clamp(0, VIEWPORT_H as c_int) as f32;
+    // The C++ side speaks in PHYSICAL screen pixels; the player thinks in the
+    // logical viewport, which is portrait and turned. Undo the turn here, at the
+    // single point where the outside world's coordinates come in -- anything
+    // further downstream would have to know about rotation too.
+    let px = x.clamp(0, VIEWPORT_W as c_int) as f32;
+    let py = y.clamp(0, VIEWPORT_H as c_int) as f32;
+    let pw = VIEWPORT_W as f32;
+    let ph = VIEWPORT_H as f32;
+    let (cx, cy) = match crate::backend::render::game_rotation() {
+        1 => (py, pw - px),
+        2 => (pw - px, ph - py),
+        3 => (ph - py, px),
+        _ => (px, py),
+    };
     state.cursor_x = cx;
     state.cursor_y = cy;
     if let Ok(mut p) = state.player.lock() {

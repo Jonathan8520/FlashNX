@@ -51,6 +51,7 @@ extern "C" void ruffle_display_mode_cycle(void);
 // Pause-menu FILTRE: next screen filter for the game being played. Persists per
 // game; the next redraw picks it up, so the paused frame previews it.
 extern "C" void ruffle_screen_filter_cycle(void);
+extern "C" void ruffle_rotation_cycle(void);
 extern "C" int  ruffle_keymap_lookup(const char* button_name);
 extern "C" int  ruffle_keymap_lookup_p2(const char* button_name);
 // Per-modifier combo layers (#57): mod_code 1=ZL 2=ZR 3=L 4=R.
@@ -344,11 +345,14 @@ enum MenuAction {
                            // the frozen frame behind the panel is re-rendered
                            // with the new mode, so you see the crop before you
                            // commit to it (#65 / #69 / #74)
-    MENU_FILTER       = 3,  // cycles the screen filter (none / scanlines / CRT),
+    MENU_ROTATION     = 3,  // turns the picture a quarter clockwise (#78): the
+                            // console cannot turn its screen, and no amount of
+                            // scaling makes a portrait game fill a 16:9 one.
+    MENU_FILTER       = 4,  // cycles the screen filter (none / scanlines / CRT),
                            // same live preview as AFFICHAGE (#65)
-    MENU_RESTART      = 4,
-    MENU_QUIT         = 5,  // VITESSE moved INTO the TOUCHES sub-menu
-    MENU_COUNT        = 6,
+    MENU_RESTART      = 5,
+    MENU_QUIT         = 6,  // VITESSE moved INTO the TOUCHES sub-menu
+    MENU_COUNT        = 7,
 };
 
 // The physical panel / touchscreen coordinate space. Touch samples always arrive
@@ -861,6 +865,12 @@ static void worker_entry(void* arg) {
                     // frozen game frame is re-rendered with the new scaling
                     // while the panel stays open.
                     ruffle_display_mode_cycle();
+                    break;
+                case MENU_ROTATION:
+                    // Same shape as AFFICHAGE, and for the same reason: no
+                    // `continue`, so the frozen frame is redrawn turned with the
+                    // panel still up.
+                    ruffle_rotation_cycle();
                     break;
                 case MENU_FILTER:
                     // Same shape as AFFICHAGE: no `continue`, so the frozen frame
