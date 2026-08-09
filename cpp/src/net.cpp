@@ -453,6 +453,26 @@ extern "C" void https_download_cancel(void) {
 // g_get_buf instead of a file, so the UI keeps rendering (a spinner) while it
 // runs. Returns: 0 on success (in progress), -1 init, -5 if busy.
 extern "C" int https_get_start(const char* url) {
+    // A GET already in flight is SUPERSEDED, not a reason to refuse.
+    //
+    // Refusing left the slot occupied forever: the caller that got -5 shows its
+    // error and stops calling https_get_tick, so nothing ever cleans up the
+    // handles of the fetch that was running, and every later request in the
+    // session fails the same way. Measured on hardware: two Flashpoint searches
+    // in a row (X pressed while the previous result list was still loading) and
+    // the launcher had no network left at all -- searches, archive.org metadata,
+    // everything.
+    //
+    // Superseding is also what the user means: a new search replaces the old
+    // one, it does not queue behind it.
+    if ((g_multi || g_handle) && !g_dl_file) {
+        std::printf("https_get_start: superseding an in-flight GET\n");
+        std::fflush(stdout);
+        multi_cleanup(false);
+        g_get_buf.clear();
+    }
+    // A DOWNLOAD owns the slot (it writes to g_dl_file and the caller shows a
+    // progress bar). That one is not ours to cancel behind the user's back.
     if (g_multi || g_handle) {
         return -5;
     }
