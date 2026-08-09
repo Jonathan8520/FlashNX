@@ -1085,11 +1085,72 @@ pub const DISPLAY_MODE_COUNT: u8 = 3;
 /// switch would have made the second case the cost of fixing the first.
 /// Issues #65, #69, #74.
 pub fn display_mode_for(basename: &str) -> u8 {
-    find_user_path(&std::format!("{}.display", basename))
-        .and_then(|p| read_json_file(&p))
-        .and_then(|s| s.trim().parse::<u8>().ok())
+    read_pref(basename, "display")
         .filter(|v| *v < DISPLAY_MODE_COUNT)
         .unwrap_or_else(crate::loc::default_display_mode)
+}
+
+/// One file per game for the three settings the pause menu cycles, instead of
+/// three: `<basename>.prefs`, holding `key=value` lines.
+///
+/// Not a migration: `.display`, `.filter` and `.rot` all landed after v1.6.0 and
+/// have never been published, so nobody's card carries them. `.cursor` is NOT
+/// folded in -- that one shipped, and the C++ side owns its live value.
+///
+/// The reason is the SD card's directory listing, not read speed: none of these
+/// are opened during the boot scan, but the scan walks every entry in
+/// `sdmc:/flashnx/`, and 79 games times three files is up to 237 entries to step
+/// over before the first tile is drawn.
+fn prefs_path(basename: &str) -> std::string::String {
+    primary_path(&std::format!("{}.prefs", basename))
+}
+
+fn read_pref(basename: &str, key: &str) -> Option<u8> {
+    let path = find_user_path(&std::format!("{}.prefs", basename))?;
+    let text = read_json_file(&path)?;
+    for line in text.lines() {
+        let (k, v) = line.split_once('=')?;
+        if k.trim() == key {
+            return v.trim().parse::<u8>().ok();
+        }
+    }
+    None
+}
+
+/// Rewrite the file with `key` set, keeping every other key it held.
+///
+/// Read-modify-write rather than append: three settings sharing one file means a
+/// blind append would grow it without bound and leave the older value in front,
+/// where the reader above would find it first.
+fn write_pref(basename: &str, key: &str, value: u8) -> bool {
+    let mut out: std::vec::Vec<(std::string::String, u8)> = std::vec::Vec::new();
+    if let Some(path) = find_user_path(&std::format!("{}.prefs", basename)) {
+        if let Some(text) = read_json_file(&path) {
+            for line in text.lines() {
+                if let Some((k, v)) = line.split_once('=') {
+                    let k = k.trim();
+                    if k != key && !k.is_empty() {
+                        if let Ok(n) = v.trim().parse::<u8>() {
+                            out.push((k.to_string(), n));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out.push((key.to_string(), value));
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    let body: std::string::String =
+        out.iter().map(|(k, v)| std::format!("{}={}
+", k, v)).collect();
+    let path = prefs_path(basename);
+    if let Err(e) = std::fs::write(&path, body.as_bytes()) {
+        log(&std::format!("keymap: prefs for {} not saved: {}
+", basename, e));
+        return false;
+    }
+    crate::sd::commit();
+    true
 }
 
 /// Quarter-turns of the picture: 0 = none, 1 = 90 CW, 2 = 180, 3 = 270 (#78).
@@ -1099,9 +1160,7 @@ pub const ROTATION_COUNT: u8 = 4;
 /// `.display` and `.filter`: turning the picture is a property of the GAME, not
 /// of the console. A portrait game wants it always, a landscape game never.
 pub fn rotation_for(basename: &str) -> u8 {
-    find_user_path(&std::format!("{}.rot", basename))
-        .and_then(|p| read_json_file(&p))
-        .and_then(|s| s.trim().parse::<u8>().ok())
+    read_pref(basename, "rot")
         .filter(|v| *v < ROTATION_COUNT)
         .unwrap_or_else(crate::loc::default_rotation)
 }
@@ -1124,13 +1183,7 @@ pub fn set_rotation(q: u8) {
 /// missing file means "follow the global default", so a deliberate "no rotation"
 /// has to be distinguishable from "never set".
 pub fn set_rotation_for(basename: &str, q: u8) {
-    let path = primary_path(&std::format!("{}.rot", basename));
-    if let Err(e) = std::fs::write(&path, std::format!("{}", q).as_bytes()) {
-        log(&std::format!("keymap: rotation for {} not saved: {}
-", basename, e));
-        return;
-    }
-    crate::sd::commit();
+    write_pref(basename, "rot", q);
 }
 
 /// Number of screen filters: 0 = none, 1 = scanlines, 2 = CRT.
@@ -1139,9 +1192,7 @@ pub const SCREEN_FILTER_COUNT: u8 = 3;
 /// Per-game screen filter (by basename), 0 when unset. Its own tiny
 /// `<basename>.filter` file, like `.cursor` and `.display`.
 pub fn screen_filter_for(basename: &str) -> u8 {
-    find_user_path(&std::format!("{}.filter", basename))
-        .and_then(|p| read_json_file(&p))
-        .and_then(|s| s.trim().parse::<u8>().ok())
+    read_pref(basename, "filter")
         .filter(|v| *v < SCREEN_FILTER_COUNT)
         .unwrap_or_else(crate::loc::default_screen_filter)
 }
@@ -1164,18 +1215,11 @@ pub fn set_screen_filter(mode: u8) {
     // global default", deleting it on 0 would make "no filter, deliberately"
     // indistinguishable from "never touched" and the game would drift back to the
     // default the next time it changes.
-    let path = primary_path(&std::format!("{}.filter", basename));
-    if let Err(e) = std::fs::write(&path, std::format!("{}", mode).as_bytes()) {
-        // Said out loud, because a swallowed failure here looks like a dead
-        // button: the row's label is rebuilt by RE-READING this file, so it never
-        // moves, and the next value is derived from the same unchanged file, so
-        // pressing again re-applies exactly what was there. Nothing on screen
-        // distinguishes that from a control that does not respond.
-        log(&std::format!("keymap: screen filter for {} not saved: {}
-", basename, e));
-        return;
-    }
-    crate::sd::commit();
+    // A failure is reported by `write_pref`, which matters: a swallowed one
+    // looks like a DEAD BUTTON here, because the row's label is rebuilt by
+    // re-reading the file and the next value is derived from the same unchanged
+    // file, so pressing again re-applies exactly what was there.
+    write_pref(&basename, "filter", mode);
 }
 
 /// Stage-scaling mode of the ACTIVE game (the one being played), 0 when unset
@@ -1200,14 +1244,7 @@ pub fn set_display_mode(mode: u8) {
 /// file means "follow the global default", so clearing it on 0 would lose the
 /// difference between a deliberate INTEGRAL and a game nobody ever set.
 pub fn set_display_mode_for(basename: &str, mode: u8) {
-    let path = primary_path(&std::format!("{}.display", basename));
-    if let Err(e) = std::fs::write(&path, std::format!("{}", mode).as_bytes()) {
-        // Same frozen-row failure as the screen filter above.
-        log(&std::format!("keymap: display mode for {} not saved: {}
-", basename, e));
-        return;
-    }
-    crate::sd::commit();
+    write_pref(basename, "display", mode);
 }
 
 /// Persist a cursor-speed preset for an ARBITRARY game (by basename). `idx < 0`
