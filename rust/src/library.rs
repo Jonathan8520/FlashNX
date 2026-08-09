@@ -914,6 +914,36 @@ fn nav_is_diagonal() -> bool {
     (m & 0b0011) != 0 && (m & 0b1100) != 0
 }
 
+/// Move `sel` one row up (`down = false`) or down inside a `cols`-wide grid of
+/// `total` items, clamping to the last item of a partial row and wrapping at the
+/// ends.
+///
+/// Both grid screens tested `selection + cols < total`, which does the right
+/// thing only while every row is full. On a search returning 11 hits over three
+/// rows of five, pressing Down from the fourth column of the middle row asked for
+/// index 13, the test failed, and the key did NOTHING -- even though the last row
+/// was right there with one result in it. The bottom row of an odd-sized result
+/// set was reachable from column 0 only. Now the move lands on the nearest item
+/// of the target row, and past the last row it comes back to the first, the way
+/// every list in the app now does.
+pub(crate) fn grid_step(sel: usize, down: bool, cols: usize, total: usize) -> usize {
+    if total == 0 || cols == 0 {
+        return 0;
+    }
+    let last = total - 1;
+    let col = sel % cols;
+    let row = sel / cols;
+    let rows = last / cols + 1;
+    let target_row = if down {
+        if row + 1 < rows { row + 1 } else { 0 }
+    } else if row > 0 {
+        row - 1
+    } else {
+        rows - 1
+    };
+    (target_row * cols + col).min(last)
+}
+
 /// Move `sel` by `delta` inside `total` rows, stopping at the edge and only
 /// crossing over on the NEXT press.
 ///
@@ -4905,14 +4935,10 @@ fn handle_cover_picker_input(s: &mut State, button: &str, game_idx: usize, mut s
             }
         }
         "Up" | "StickLUp" => {
-            if selection >= cols {
-                selection -= cols;
-            }
+            selection = grid_step(selection, false, cols, total);
         }
         "Down" | "StickLDown" => {
-            if selection + cols < total {
-                selection += cols;
-            }
+            selection = grid_step(selection, true, cols, total);
         }
         "Y" => {
             // Swap the whole grid between screenshots and logos. The thumbnails in
@@ -4966,14 +4992,10 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
             }
         }
         "Up" | "StickLUp" => {
-            if selection >= cols {
-                selection -= cols;
-            }
+            selection = grid_step(selection, false, cols, total);
         }
         "Down" | "StickLDown" => {
-            if selection + cols < total {
-                selection += cols;
-            }
+            selection = grid_step(selection, true, cols, total);
         }
         "A" => {
             let Some(cand) = s.cover_candidates.get(selection).cloned() else {
