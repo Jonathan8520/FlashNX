@@ -7299,6 +7299,13 @@ impl SwitchRenderBackend {
         // indicator that a filter is active, so it stays visible in every layout —
         // it is not decoration that could be dropped to save the row.
         let ss = 1.8;
+        // Truncated to the flank. Centred on its own row this line could not
+        // collide with anything; beside the logo it can, and a long search term
+        // ran its last characters straight over the banner's left edge — about
+        // 25 characters was enough. The budget is x40 to the logo's edge less a
+        // 16 px gutter, and the logo is drawn centred at 280 px wide.
+        let logo_left = (vw - 280.0) * 0.5;
+        let sub = self.fit_text(&sub, ss, logo_left - 16.0 - 40.0);
         self.draw_text(40.0, 67.7, ss, &sub, swf::Color::from_rgb(0xAABFD8, 255));
 
         // The right flank stays empty on purpose. It briefly carried the active

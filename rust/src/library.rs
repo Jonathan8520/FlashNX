@@ -2670,10 +2670,22 @@ pub fn input(button: &str) -> bool {
     // target once the close pop finishes. Only plain modal -> non-modal closes
     // for the deferred kinds; modal -> modal (including -> TOUCHES editor) keeps
     // its instant swap, and render's open detection scales the new panel IN.
+    // DERIVED, not enumerated. This used to consult a hand-kept list of ids, so
+    // adding a modal meant remembering to add its number and nothing complained
+    // when you forgot — which is exactly how the AFFICHAGE HOME picker ended up
+    // opening with a pop and then vanishing on close.
+    //
+    // The rule is simply what the list was trying to spell: a panel that hands
+    // back to a NON-modal screen scales out first. Modal-to-modal keeps its
+    // instant swap (the new panel scales itself in), and the destructive
+    // confirmations are excluded by `new_screen != screen_copy` on their own,
+    // because they arm their own close and never touch `s.screen` here — their
+    // mutation has to run AFTER the pop, not before it.
     let new_screen = s.screen;
-    if modal_close_deferred(modal_kind(screen_copy))
+    if modal_kind(screen_copy) != 0
         && modal_kind(new_screen) == 0
         && new_screen != screen_copy
+        && !crate::backend::render::modal_close_active()
     {
         if let Ok(mut p) = PENDING_AFTER_CLOSE.lock() {
             *p = Some(PendingClose::Goto(new_screen));
@@ -5368,7 +5380,7 @@ fn modal_kind(screen: Screen) -> u8 {
         Screen::TouchesEditor { .. } => 70 + menu::screen_kind(),
         Screen::SettingsKeymapEditor => 80 + menu::screen_kind(),
         Screen::SortModal { .. } => 9,
-        Screen::RemoteSortModal { .. } => 10,
+        Screen::RemoteSortModal { .. } => 7,
         Screen::FpDetails { .. } => 11,
         // #20 profile modals: distinct ids so each gets the scale-in "pop" when it
         // appears (they were kind 0 = no animation, unlike every other modal).
@@ -5555,15 +5567,7 @@ fn maybe_arm_startup_migrations() {
 /// (plain modal -> non-modal). The destructive confirms (DeleteConfirm=2,
 /// DistantHistoryConfirm=6) are handled EXPLICITLY in their own handlers instead
 /// (they defer the mutation too — see `PendingClose`), so they're not listed here.
-fn modal_close_deferred(kind: u8) -> bool {
-    // A hand-kept list of ids, which is why the AFFICHAGE HOME picker (18) opened
-    // with a pop and then vanished on close: adding a modal means remembering to
-    // add its number here, and nothing complains when you forget. The set is the
-    // panels that close to a NON-modal screen; the ones left out either close to
-    // another modal (which scales the new panel in itself) or carry a deferred
-    // mutation of their own. Worth deriving rather than enumerating.
-    matches!(kind, 1 | 3 | 4 | 5 | 9 | 10 | 11 | 18)
-}
+
 
 /// Draw the JOUER gallery (snapshot + draw) — shared by the List screen and the
 /// frozen background of the `Launching` reveal.
@@ -5718,8 +5722,19 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             }
             screen = s2.screen;
         }
+        // If the close landed ON another modal, arm ITS open pop — and step the
+        // animation once in this same frame. Recording the kind without arming
+        // anything is what made the global keymap editor's parent panel appear at
+        // full size for one frame and then drop to 0.55: a visible hiccup with no
+        // cause on screen. Stepping here also stops that first frame drawing at
+        // 1.0 before the pop has started.
+        let kind = modal_kind(screen);
+        if kind != 0 {
+            crate::backend::render::modal_open_begin();
+            let _ = crate::backend::render::modal_scale_step(now);
+        }
         if let Ok(mut last) = LAST_MODAL_KIND.lock() {
-            *last = modal_kind(screen);
+            *last = kind;
         }
     }
     // Modals + the TOUCHES editor SCALE (open/close pop); tab-home content SLIDES
