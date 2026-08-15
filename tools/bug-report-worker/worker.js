@@ -13,14 +13,15 @@
 //     applet, description, log_tail }
 // Response: 200 { "ok": true, "url": "<issue html_url>" }  on success.
 
-// Headroom for `log_tail`: the app sends up to 6 KB of log, and JSON escaping
+// Headroom for `log_tail`: the app sends up to 24 KB of log, and JSON escaping
 // of the newlines inflates it further. Was 16 KB back when a report was <2 KB.
-const MAX_BODY = 48 * 1024;
+const MAX_BODY = 96 * 1024;
 
 // How much of the log tail reaches the issue. GitHub rejects an issue body over
 // 65536 characters and the log is the only unbounded part, so cap it here too
-// rather than trusting the client's own limit.
-const MAX_LOG = 12 * 1024;
+// rather than trusting the client's own limit. Leaves ~30 KB of margin for the
+// rest of the body and for a future client that sends more.
+const MAX_LOG = 32 * 1024;
 
 export default {
   async fetch(request, env) {
@@ -139,9 +140,13 @@ function buildIssue(r) {
   // `[tr/WARN]` list for the reported game. Collapsed by default: it is long,
   // and it should not bury what the player actually wrote.
   const rawLog = String(r.log_tail ?? "");
+  // Count real UTF-8 bytes, not JS string length: the log is full of accented
+  // text, and `.length` counts code units, so the header used to under-report
+  // (6005 against the 6013 the app said it sent).
+  const logBytes = new TextEncoder().encode(rawLog).length;
   const logBlock = rawLog.trim()
     ? `\n<details>\n<summary>Technical log (last ${
-        rawLog.length > MAX_LOG ? `${MAX_LOG} of ${rawLog.length}` : rawLog.length
+        rawLog.length > MAX_LOG ? `${MAX_LOG} chars of ${logBytes}` : logBytes
       } bytes of the session)</summary>\n\n` +
       "```\n" +
       rawLog.slice(-MAX_LOG).replace(/```/g, "`​``") +

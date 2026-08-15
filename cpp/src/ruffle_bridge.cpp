@@ -58,7 +58,10 @@ static FILE* trace_file(void) {
 // A ring, so it can never grow: old lines fall off the back, which also means
 // the boot-time library scan has aged out by the time anyone files a report.
 namespace {
-constexpr size_t LOG_RING_CAP = 8 * 1024;
+// 64 KB of a 3 GB heap. Sized by how far back a report needs to see, not by
+// thrift: at 8 KB the window covered only the last few seconds of play, which
+// on a bug noticed mid-session is just the walk back to the menu.
+constexpr size_t LOG_RING_CAP = 64 * 1024;
 char   g_ring[LOG_RING_CAP];
 size_t g_ring_len = 0;  // valid bytes, saturates at LOG_RING_CAP
 size_t g_ring_pos = 0;  // next write offset
@@ -100,6 +103,38 @@ bool ring_excluded(const char* msg) {
     return false;
 }
 
+// Previous line, for collapsing consecutive repeats. Bounded: a message longer
+// than this is never deduplicated, which is deliberate. Long lines here are the
+// sidecar warnings, and those differ only in a random suffix far into the
+// string — comparing a truncated prefix would merge two genuinely different
+// URLs. The lines that actually repeat ("root: frame 40/46", game traces) are
+// all short.
+char   g_prev[256];
+size_t g_prev_rep = 0;
+
+// Append raw bytes. Caller holds g_ring_mutex.
+void ring_append_locked(const char* p, size_t n) {
+    if (n > LOG_RING_CAP) { // keep the tail of an oversized single message
+        p += n - LOG_RING_CAP;
+        n = LOG_RING_CAP;
+    }
+    for (size_t i = 0; i < n; i++) {
+        g_ring[g_ring_pos] = p[i];
+        g_ring_pos = (g_ring_pos + 1) % LOG_RING_CAP;
+    }
+    g_ring_len = (g_ring_len + n > LOG_RING_CAP) ? LOG_RING_CAP : g_ring_len + n;
+}
+
+// Emit the pending "repeated N times" marker, if any. Caller holds the mutex.
+void ring_flush_repeat_locked() {
+    if (g_prev_rep == 0) return;
+    char m[72];
+    const int k = std::snprintf(m, sizeof(m),
+                                "    (line above repeated %zu more times)\n", g_prev_rep);
+    g_prev_rep = 0;
+    if (k > 0) ring_append_locked(m, (size_t)k);
+}
+
 void ring_push(const char* msg) {
     if (is_heartbeat(msg)) {
         mutexLock(&g_ring_mutex);
@@ -109,25 +144,36 @@ void ring_push(const char* msg) {
         return;
     }
     if (ring_excluded(msg)) return;
-    size_t n = std::strlen(msg);
+    const size_t n = std::strlen(msg);
     if (n == 0) return;
-    if (n > LOG_RING_CAP) { // keep the tail of an oversized single message
-        msg += n - LOG_RING_CAP;
-        n = LOG_RING_CAP;
-    }
     mutexLock(&g_ring_mutex);
-    for (size_t i = 0; i < n; i++) {
-        g_ring[g_ring_pos] = msg[i];
-        g_ring_pos = (g_ring_pos + 1) % LOG_RING_CAP;
+    // Collapse consecutive identical lines into one plus a count. Games trace
+    // the same string every frame and our own per-frame notes repeat too, so
+    // without this a handful of messages can own most of the window.
+    const bool dedupable = n < sizeof(g_prev);
+    if (dedupable && g_prev[0] != '\0' && std::strcmp(msg, g_prev) == 0) {
+        g_prev_rep++;
+        mutexUnlock(&g_ring_mutex);
+        return;
     }
-    g_ring_len = (g_ring_len + n > LOG_RING_CAP) ? LOG_RING_CAP : g_ring_len + n;
+    ring_flush_repeat_locked();
+    if (dedupable) {
+        std::memcpy(g_prev, msg, n + 1);
+    } else {
+        g_prev[0] = '\0';
+    }
+    ring_append_locked(msg, n);
     mutexUnlock(&g_ring_mutex);
 }
+
 } // namespace
 
 extern "C" int ruffle_log_tail(char* out, int cap) {
     if (!out || cap < 2) return 0;
     mutexLock(&g_ring_mutex);
+    // A run of repeats may still be open; without this the last group of
+    // collapsed lines would vanish from the report entirely.
+    ring_flush_repeat_locked();
     // Latest heartbeat first, so the reader gets framerate and memory before
     // the log itself.
     size_t w = 0;

@@ -31,7 +31,12 @@ extern "C" {
 /// How much of the log tail travels with a report. The relay fences it into a
 /// collapsed block on the issue, and GitHub caps an issue body at 65536 chars,
 /// so this stays well clear even after JSON escaping doubles the newlines.
-const LOG_TAIL_CAP: usize = 6 * 1024;
+///
+/// 6 KB was too small to be worth much: on a real report it covered ~560 lines
+/// of session, nearly all of it telemetry, and on a bug noticed mid-session it
+/// would have held only the walk back to the menu. The relay caps it again on
+/// its own side, so raising this can never produce an issue GitHub refuses.
+const LOG_TAIL_CAP: usize = 24 * 1024;
 
 /// The tail of this session's log, for `Report::log_tail`.
 fn log_tail() -> std::string::String {
