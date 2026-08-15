@@ -514,6 +514,11 @@ pub extern "C" fn ruffle_init() -> c_int {
                 .unwrap_or("unknown.swf")
                 .to_string()
         });
+    // Open this game's log window. The ring is global and a session can hold
+    // several games, so a bug report has to know WHICH game its log describes —
+    // otherwise reporting the first of five games played would attach the last
+    // one's log under the first one's name.
+    crate::bugreport::begin_game_log(&keymap_basename);
     keymap::init_for_swf(&keymap_basename); // P1 + P2 bindings (issue #40) from one file
     // This game's screen filter, now that the active basename is known. Set on
     // EVERY launch, including back to 0, so a filtered game never leaves its

@@ -49,6 +49,10 @@ void ruffle_log_cstr(const char* msg);
 /// for the reported game reach the issue.
 int ruffle_log_tail(char* out, int cap);
 
+/// Empty the log ring. Called when a game boots so the tail a bug report
+/// carries belongs to that one game's session.
+void ruffle_log_ring_reset(void);
+
 #ifdef __cplusplus
 }
 #endif

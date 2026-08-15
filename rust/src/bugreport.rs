@@ -26,6 +26,36 @@ use core::ffi::{c_char, c_int};
 extern "C" {
     /// Last few KB of the log ring (see `ruffle_log_tail` in ruffle_bridge.cpp).
     fn ruffle_log_tail(out: *mut c_char, cap: c_int) -> c_int;
+    fn ruffle_log_ring_reset();
+}
+
+/// On-SD filename of the game the log ring currently describes, or empty.
+///
+/// The ring is global and a session can hold several games, so without this the
+/// log attached to a report was simply "whatever ran most recently" — report the
+/// first of five games you played and the issue would have claimed that game's
+/// name above a log belonging to the last one. Wrong with the appearance of
+/// right, which is worse than sending nothing.
+static RING_GAME: std::sync::Mutex<std::string::String> =
+    std::sync::Mutex::new(std::string::String::new());
+
+/// Open a fresh log window for `basename`. Called from `ruffle_init` when a game
+/// boots, so the tail describes that one game's run.
+pub fn begin_game_log(basename: &str) {
+    unsafe { ruffle_log_ring_reset() };
+    if let Ok(mut g) = RING_GAME.lock() {
+        *g = basename.to_string();
+    }
+}
+
+/// True when the ring describes `file`, i.e. that game is the one still running
+/// or the last one played.
+fn ring_matches(file: &str) -> bool {
+    !file.is_empty()
+        && RING_GAME
+            .lock()
+            .map(|g| *g == file)
+            .unwrap_or(false)
 }
 
 /// How much of the log tail travels with a report. The relay fences it into a
@@ -124,9 +154,19 @@ pub fn submit(report: &Report) -> Result<(), std::string::String> {
         #[serde(skip_serializing_if = "std::string::String::is_empty")]
         log_tail: std::string::String,
     }
+    // Only when the ring actually describes the game being reported. Reporting a
+    // game you played three games ago sends no log rather than someone else's.
+    let attach = report.kind == "bug" && ring_matches(&report.file);
+    if report.kind == "bug" && !attach {
+        net::log(&std::format!(
+            "bugreport: no log attached, ring holds {:?} not {:?}\n",
+            RING_GAME.lock().map(|g| g.clone()).unwrap_or_default(),
+            report.file,
+        ));
+    }
     let wire = Wire {
         report,
-        log_tail: if report.kind == "bug" { log_tail() } else { std::string::String::new() },
+        log_tail: if attach { log_tail() } else { std::string::String::new() },
     };
     let body = serde_json::to_string(&wire)
         .map_err(|e| std::format!("encode failed: {}", e))?;

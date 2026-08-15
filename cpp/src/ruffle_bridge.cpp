@@ -168,6 +168,19 @@ void ring_push(const char* msg) {
 
 } // namespace
 
+// Start a fresh window. Called when a game boots, so the tail a bug report
+// carries is that ONE game's session and not a blend of everything played since
+// the launcher started.
+extern "C" void ruffle_log_ring_reset(void) {
+    mutexLock(&g_ring_mutex);
+    g_ring_len = 0;
+    g_ring_pos = 0;
+    g_prev[0] = '\0';
+    g_prev_rep = 0;
+    g_last_hb[0] = '\0';
+    mutexUnlock(&g_ring_mutex);
+}
+
 extern "C" int ruffle_log_tail(char* out, int cap) {
     if (!out || cap < 2) return 0;
     mutexLock(&g_ring_mutex);
