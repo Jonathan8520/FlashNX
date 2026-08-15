@@ -35,6 +35,128 @@ use ruffle_core::backend::navigator::{
 use ruffle_core::loader::Error;
 use ruffle_core::socket::{ConnectionState, SocketAction, SocketHandle};
 
+// ── Deferred failure delivery (issue #76) ─────────────────────────────────
+//
+// Our lookups hit the SD card, so a MISS fails in about zero milliseconds and
+// its callback is delivered in the SAME host frame as the tick that fired the
+// request. Content written against a real network does not expect that. Learn
+// to Fly 2 leaves its first frame only through a `gotoAndStop(2)` fired from a
+// failed analytics callback; when that lands before the root has advanced past
+// frame 1, `run_goto` clamps the target to what is loaded, `goto_frame` has
+// already stopped the root, and the movie parks on frame 1 for ever, silently.
+// Against a real server the round trip takes ~100 ms, the root is past frame 3,
+// and the game's own guard skips the goto -- which is why the same build runs
+// everywhere else.
+//
+// So give a failure the latency a real one would have had. This replaced a much
+// blunter fix (forcing `LoadBehavior::Delayed` on every movie under 64 MB),
+// which worked but finished EVERY game's preloader instantly and so removed
+// every loading screen in the launcher.
+//
+// NOT implemented by having the future wake itself: `NullExecutor::run()` is
+// `LocalPool::run_until_stalled()`, so a self-waking future is polled again
+// immediately inside the same frame and the delay would be exactly zero. The
+// future parks its waker here instead, and the frame loop calls `wake_due`
+// before running the executor.
+
+/// How long a failed fetch pretends to have spent on the wire. Long enough that
+/// the root timeline advances several frames first (the thing #76 needs), short
+/// enough to stay imperceptible on a load that was going to fail anyway.
+const FAIL_LATENCY_MS: u64 = 120;
+
+struct ParkedFailure {
+    due_tick: u64,
+    waker: core::task::Waker,
+}
+
+static PARKED: std::sync::Mutex<std::vec::Vec<ParkedFailure>> =
+    std::sync::Mutex::new(std::vec::Vec::new());
+
+extern "C" {
+    fn ruffle_tick_now() -> u64;
+    fn ruffle_tick_freq() -> u64;
+}
+
+fn now_ticks() -> u64 {
+    unsafe { ruffle_tick_now() }
+}
+
+fn ticks_from_ms(ms: u64) -> u64 {
+    let freq = unsafe { ruffle_tick_freq() };
+    freq.saturating_mul(ms) / 1000
+}
+
+/// Wake every parked failure whose latency has elapsed. Called once per frame
+/// from `render_frame_with_dt`, BEFORE the executor runs, so a woken future is
+/// polled in the same pass rather than waiting another frame.
+pub fn wake_due_failures() {
+    let now = now_ticks();
+    let mut ready: std::vec::Vec<core::task::Waker> = std::vec::Vec::new();
+    if let Ok(mut parked) = PARKED.lock() {
+        parked.retain(|p| {
+            if now >= p.due_tick {
+                ready.push(p.waker.clone());
+                false
+            } else {
+                true
+            }
+        });
+    }
+    for w in ready {
+        w.wake();
+    }
+}
+
+/// Drop anything still parked. Called when a movie is torn down so a pending
+/// failure from the previous game can never wake into the next one.
+pub fn reset_parked_failures() {
+    if let Ok(mut parked) = PARKED.lock() {
+        parked.clear();
+    }
+}
+
+/// A fetch error delivered `FAIL_LATENCY_MS` from now instead of instantly.
+struct DelayedError {
+    due_tick: u64,
+    err: Option<ErrorResponse>,
+}
+
+impl core::future::Future for DelayedError {
+    type Output = Result<Box<dyn SuccessResponse>, ErrorResponse>;
+
+    fn poll(
+        mut self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        if now_ticks() >= self.due_tick {
+            // `take` leaves None behind; a second poll after completion would be
+            // a bug in the executor, and returning Pending for ever is a much
+            // kinder failure than unwrapping a None.
+            return match self.err.take() {
+                Some(e) => core::task::Poll::Ready(Err(e)),
+                None => core::task::Poll::Pending,
+            };
+        }
+        if let Ok(mut parked) = PARKED.lock() {
+            let waker = cx.waker().clone();
+            // Replace our own previous entry rather than piling up: the executor
+            // may poll us more than once before the deadline.
+            if !parked.iter().any(|p| p.waker.will_wake(&waker)) {
+                parked.push(ParkedFailure { due_tick: self.due_tick, waker });
+            }
+        }
+        core::task::Poll::Pending
+    }
+}
+
+/// Wrap a fetch error so it arrives with a plausible round-trip latency.
+fn delayed_err(err: ErrorResponse) -> OwnedFuture<Box<dyn SuccessResponse>, ErrorResponse> {
+    Box::pin(DelayedError {
+        due_tick: now_ticks().saturating_add(ticks_from_ms(FAIL_LATENCY_MS)),
+        err: Some(err),
+    })
+}
+
 /// A [`SuccessResponse`] backed by bytes already read from the SD card.
 struct SidecarResponse {
     url: String,
@@ -529,9 +651,13 @@ impl NavigatorBackend for SidecarNavigator {
         // game stuck on the sponsor / "update Flash" screen (observed on
         // Papa Louie 2's MochiAds preloader). We still never touch the network.
         if resolved.host_str().is_some_and(is_tracker_host) {
-            tracing::info!("sidecar: tracker {resolved} refused immediately (never hung)");
+            tracing::info!("sidecar: tracker {resolved} refused after a round-trip delay");
             let err = Error::FetchError(std::format!("tracker not served: {resolved}"));
-            return async_return(Err(ErrorResponse { url: resolved.to_string(), error: err }));
+            // Refused, but NOT in zero milliseconds: this is the exact call whose
+            // instant failure strands Learn to Fly 2 on frame 1 (see #76 and
+            // `delayed_err`). A tracker is fire-and-forget for the game, so the
+            // only thing the wait costs is nothing.
+            return delayed_err(ErrorResponse { url: resolved.to_string(), error: err });
         }
         if resolved.host_str().is_some_and(is_dead_ad_host) {
             tracing::info!("sidecar: stalling dead ad host {resolved} (mimic unreachable)");
@@ -610,11 +736,15 @@ impl NavigatorBackend for SidecarNavigator {
                     std::io::ErrorKind::NotFound,
                     "sidecar file not found",
                 );
-                return async_return(Err(create_specific_fetch_error(
+                // Delayed like the tracker refusal above: a missing companion is
+                // this backend's equivalent of a 404, and content that reacts to
+                // one expects it to arrive after a round trip, not inside the
+                // frame that asked. See `delayed_err` and #76.
+                return delayed_err(create_specific_fetch_error(
                     "Sidecar file not found",
                     resolved.as_str(),
                     e,
-                )));
+                ));
             }
         };
         tracing::info!("sidecar: served {} ({} bytes) from {}", resolved, bytes.len(), from.display());

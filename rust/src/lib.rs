@@ -536,7 +536,6 @@ pub extern "C" fn ruffle_init() -> c_int {
     // and the base every relative load must resolve against (the navigator).
     let container = container_html_for(&sidecar_dir, &source_label);
 
-    let movie_len = movie_bytes.len();
     match SwfMovie::from_data(&movie_bytes, source_label.clone(), None) {
         Ok(mut movie) => {
             log_str(&std::format!(
@@ -628,40 +627,25 @@ pub extern "C" fn ruffle_init() -> c_int {
                     movie.append_parameters(vars);
                 }
             }
-            // Do not let the movie run before it has finished preloading.
+            // Load behaviour stays Ruffle's default (Streaming).
             //
-            // Ruffle defaults to Streaming, which models a movie arriving over a
-            // network: the timeline is revealed a budget of tags per frame and
-            // scripts run against whatever has arrived so far. That is right in a
-            // browser and wrong here, because the whole file is already in memory
-            // off the SD card. Nothing is streaming, so the drip is pure fiction.
+            // It was briefly forced to `Delayed` for every movie under 64 MB, to
+            // fix Learn to Fly 2 (#76). It worked, but the price was far too high:
+            // a movie that sees itself fully loaded the moment it starts finishes
+            // EVERY game's preloader instantly, so the loading screen an author
+            // wrote -- often the only art on the first screen, and sometimes the
+            // thing that gates the intro -- never plays anywhere. Fixing one game
+            // by silently removing a stage from all of them is not a trade worth
+            // making.
             //
-            // The fiction has teeth. Learn to Fly 2 (issue #76) leaves its first
-            // frame ONLY through a `gotoAndStop(2)` fired from a failed analytics
-            // callback. Our request fails in zero milliseconds and the callback
-            // lands in the same host frame as the tick that started it, while one
-            // frame out of 46 has been preloaded. `run_goto` clamps the target to
-            // what is loaded and `goto_frame` has already stopped the root, so the
-            // movie parks on frame 1 for ever, silently. Against a real server the
-            // round trip takes 100 ms, the root is past frame 3 by then, and the
-            // game's own guard skips the goto -- which is why the same build runs
-            // everywhere else.
-            //
-            // `Delayed` rather than `Blocking`: same per-frame budget, so a big
-            // movie preloads over several frames instead of freezing the console
-            // in one, and the movie simply sees itself fully loaded when it starts.
-            // Kept off above 64 MB, where the wait would be long enough to want
-            // the game's own preloader animation on screen -- Super Smash Flash 2
-            // (3.4 GB) and Sonic RPG 10 (284 MB) keep today's behaviour exactly.
-            const DELAYED_MAX: usize = 64 * 1024 * 1024;
-            if movie_len <= DELAYED_MAX {
-                builder = builder.with_load_behavior(ruffle_core::LoadBehavior::Delayed);
-            } else {
-                log_str(&std::format!(
-                    "ruffle_init: {} bytes is over the delayed-load cap, streaming as before\n",
-                    movie_len,
-                ));
-            }
+            // The underlying problem is ours and narrower than the load mode: our
+            // sidecar requests FAIL IN ZERO MILLISECONDS, so a failure callback is
+            // delivered in the same host frame as the tick that started it, before
+            // the root timeline has advanced past frame 1. A real server takes
+            // ~100 ms, by which time the root is past frame 3 and the game's own
+            // guard skips the `gotoAndStop(2)` that strands us. Giving failed
+            // requests a plausible latency would fix #76 without touching how any
+            // movie loads. See the issue before trying `Delayed` again.
             builder = builder.with_movie(movie);
         }
         Err(e) => {
@@ -679,6 +663,9 @@ pub extern "C" fn ruffle_init() -> c_int {
     // from the real on-disk path. `executor` (kept in State) drives the loader
     // futures the navigator spawns — pumped once per frame in render_frame_with_dt.
     let executor = NullExecutor::new();
+    // Fresh executor, fresh parked-failure list: a delayed failure left over from
+    // the previously played game must never wake into this one (#76).
+    crate::backend::navigator::reset_parked_failures();
     let mut navigator =
         SidecarNavigator::new(executor.spawner(), source_label.clone(), sidecar_dir);
     if let Some((_, page_base)) = container.as_ref() {
@@ -1191,6 +1178,12 @@ fn render_frame_with_dt(dt: FloatDuration) {
     // the player lock released — the futures re-lock the player to install the
     // loaded movie, so pumping them under our own guard would deadlock.
     drop(player);
+    // Release any fetch failure whose pretend round-trip has elapsed (#76),
+    // BEFORE running the executor so it resolves in this same pass instead of
+    // waiting another frame. The executor is `run_until_stalled`, which is why
+    // the delay can't be built from a self-waking future — see
+    // `backend::navigator::wake_due_failures`.
+    crate::backend::navigator::wake_due_failures();
     state.executor.run();
 }
 
