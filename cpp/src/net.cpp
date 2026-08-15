@@ -398,6 +398,20 @@ extern "C" int https_download_tick(void) {
         if (armGetSystemTick() >= deadline) return 0; // resume next frame
         int numfds = 0;
         curl_multi_poll(g_multi, nullptr, 0, 3, &numfds); // up to 3 ms waiting for data
+        if (numfds == 0) {
+            // curl_multi_poll does NOT wait here on Switch, so without this the
+            // loop busy-spins for the whole 12 ms budget, every frame.
+            //
+            // Two libnx facts combine: `socketpair()` is a hard ENOSYS stub, so
+            // curl's multi wakeup socket never exists; and `poll(NULL, 0, t)`
+            // returns -1/EFAULT instead of sleeping. When the transfer has no
+            // socket of its own either — no connection yet, or a dropped link —
+            // curl has nothing to poll and falls back to exactly that no-op
+            // wait, so it returns instantly and we re-enter curl_multi_perform
+            // (and, with the synchronous resolver, another blocking DNS lookup)
+            // as fast as the CPU allows. Sleep the wait we asked for ourselves.
+            svcSleepThread(3ULL * 1000 * 1000); // 3 ms
+        }
     }
 
     // Transfer finished — extract per-handle result.
