@@ -42,6 +42,13 @@ void ruffle_crash_dump(const char* msg);
 /// network, so a printf is invisible in exactly the situations worth tracing.
 void ruffle_log_cstr(const char* msg);
 
+/// Copy the last few KB that went through `ruffle_log_cstr` into `out`
+/// (NUL-terminated), newest-biased and starting on a line boundary. Returns
+/// the byte count. Kept in RAM (no SD cost), so it is always available — the
+/// in-app bug report attaches it, which is how Ruffle's own `[tr/WARN]` lines
+/// for the reported game reach the issue.
+int ruffle_log_tail(char* out, int cap);
+
 #ifdef __cplusplus
 }
 #endif

@@ -10,10 +10,17 @@
 //
 // Request:  POST /report   Content-Type: application/json
 //   { game, file, size, swf_version, compression, as3, app_version, lang,
-//     applet, description }
+//     applet, description, log_tail }
 // Response: 200 { "ok": true, "url": "<issue html_url>" }  on success.
 
-const MAX_BODY = 16 * 1024; // generous cap; the app sends <2 KB
+// Headroom for `log_tail`: the app sends up to 6 KB of log, and JSON escaping
+// of the newlines inflates it further. Was 16 KB back when a report was <2 KB.
+const MAX_BODY = 48 * 1024;
+
+// How much of the log tail reaches the issue. GitHub rejects an issue body over
+// 65536 characters and the log is the only unbounded part, so cap it here too
+// rather than trusting the client's own limit.
+const MAX_LOG = 12 * 1024;
 
 export default {
   async fetch(request, env) {
@@ -127,10 +134,25 @@ function buildIssue(r) {
     .map(([k, v]) => `| ${k} | ${v} |`)
     .join("\n");
 
+  // Tail of the app's own log, sent with bug reports only. Its value is that
+  // Ruffle's internal warnings go through the same sink, so this is the
+  // `[tr/WARN]` list for the reported game. Collapsed by default: it is long,
+  // and it should not bury what the player actually wrote.
+  const rawLog = String(r.log_tail ?? "");
+  const logBlock = rawLog.trim()
+    ? `\n<details>\n<summary>Technical log (last ${
+        rawLog.length > MAX_LOG ? `${MAX_LOG} of ${rawLog.length}` : rawLog.length
+      } bytes of the session)</summary>\n\n` +
+      "```\n" +
+      rawLog.slice(-MAX_LOG).replace(/```/g, "`​``") +
+      "\n```\n\n</details>\n"
+    : "";
+
   const body =
     `Reported from inside FlashNX (anonymous in-app report).\n\n` +
     `### Description\n\n${descBlock}` +
-    `### Game info\n\n| Field | Value |\n| --- | --- |\n${meta}\n`;
+    `### Game info\n\n| Field | Value |\n| --- | --- |\n${meta}\n` +
+    logBlock;
 
   return { title: `[in-app] ${game}`, body, labels: ["bug"] };
 }

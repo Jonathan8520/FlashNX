@@ -1,6 +1,7 @@
 #include "ruffle_bridge.h"
 
 #include <cstdio>
+#include <cstring>
 #include <sys/stat.h>
 #include <switch.h>
 
@@ -41,8 +42,134 @@ static FILE* trace_file(void) {
     return g_trace;
 }
 
+// ── Rolling in-memory tail of the log ─────────────────────────────────────
+//
+// The last few KB of everything that goes through this funnel, kept in RAM so
+// the in-app bug report can carry it (see `crate::bugreport`). Memory, not the
+// SD trace above: this one is ALWAYS on, and an SD write per log line would be
+// far too expensive to leave enabled for every player.
+//
+// Worth having because Ruffle's own `warn!`/`error!` events come through here
+// too (backend/tracing.rs pipes the tracing subscriber into this function), so
+// the tail of a session is exactly the `[tr/WARN]` list for the game being
+// reported — the first thing worth reading on a "this game renders wrong"
+// report, and previously visible only over nxlink.
+//
+// A ring, so it can never grow: old lines fall off the back, which also means
+// the boot-time library scan has aged out by the time anyone files a report.
+namespace {
+constexpr size_t LOG_RING_CAP = 8 * 1024;
+char   g_ring[LOG_RING_CAP];
+size_t g_ring_len = 0;  // valid bytes, saturates at LOG_RING_CAP
+size_t g_ring_pos = 0;  // next write offset
+Mutex  g_ring_mutex;    // zero-initialised == unlocked, per libnx
+
+// Most recent per-frame heartbeat ("f1234: fps=... ram=..."), kept on its own
+// instead of in the ring. One of these is genuine context for a "this game is
+// broken" report — framerate, RAM, arena occupancy — but it repeats every N
+// frames, so letting them accumulate would push out everything else.
+char g_last_hb[512];
+
+bool is_heartbeat(const char* msg) {
+    return msg[0] == 'f' && std::strstr(msg, ": fps=") != nullptr;
+}
+
+// Lines kept OUT of the ring. Two reasons, both learned from a real report
+// whose 6 KB of log turned out to be 100% telemetry and 0% diagnosis:
+//
+//  - Per-frame telemetry ("SLOW f...", the ·f tick) is ~470 bytes a line and
+//    fires hardest on slow games, which are exactly the ones people report. It
+//    flushed every Ruffle warning out of the ring before the report was sent,
+//    and it is useless to a reader anyway.
+//  - The library scan is one line per file on the card plus the saved import
+//    addresses: no diagnostic value, and the most personal thing the log holds.
+//    A report filed shortly after launch would have published the library.
+//
+// nxlink and the SD trace still receive all of it; only the ring skips it.
+bool ring_excluded(const char* msg) {
+    static const char* const PREFIXES[] = {
+        "SLOW f",
+        "\xc2\xb7" "f",  // "·f<frame>" tick, UTF-8 middle dot
+        "library: added ",
+        "library: history LOADED ",
+        "library: history meta LOADED ",
+    };
+    for (const char* p : PREFIXES) {
+        if (std::strncmp(msg, p, std::strlen(p)) == 0) return true;
+    }
+    return false;
+}
+
+void ring_push(const char* msg) {
+    if (is_heartbeat(msg)) {
+        mutexLock(&g_ring_mutex);
+        std::strncpy(g_last_hb, msg, sizeof(g_last_hb) - 1);
+        g_last_hb[sizeof(g_last_hb) - 1] = '\0';
+        mutexUnlock(&g_ring_mutex);
+        return;
+    }
+    if (ring_excluded(msg)) return;
+    size_t n = std::strlen(msg);
+    if (n == 0) return;
+    if (n > LOG_RING_CAP) { // keep the tail of an oversized single message
+        msg += n - LOG_RING_CAP;
+        n = LOG_RING_CAP;
+    }
+    mutexLock(&g_ring_mutex);
+    for (size_t i = 0; i < n; i++) {
+        g_ring[g_ring_pos] = msg[i];
+        g_ring_pos = (g_ring_pos + 1) % LOG_RING_CAP;
+    }
+    g_ring_len = (g_ring_len + n > LOG_RING_CAP) ? LOG_RING_CAP : g_ring_len + n;
+    mutexUnlock(&g_ring_mutex);
+}
+} // namespace
+
+extern "C" int ruffle_log_tail(char* out, int cap) {
+    if (!out || cap < 2) return 0;
+    mutexLock(&g_ring_mutex);
+    // Latest heartbeat first, so the reader gets framerate and memory before
+    // the log itself.
+    size_t w = 0;
+    const size_t hb = std::strlen(g_last_hb);
+    if (hb > 0 && hb + 2 < (size_t)cap) {
+        std::memcpy(out, g_last_hb, hb);
+        w = hb;
+        if (out[w - 1] != '\n') out[w++] = '\n';
+    }
+    const size_t room = (size_t)cap - 1 - w; // space left for the ring
+    size_t want = g_ring_len;
+    size_t start = (g_ring_pos + LOG_RING_CAP - want) % LOG_RING_CAP;
+    if (want > room) {
+        // Less room than ring: keep the NEWEST bytes.
+        const size_t drop = want - room;
+        start = (start + drop) % LOG_RING_CAP;
+        want -= drop;
+    }
+    const size_t ring_at = w;
+    for (size_t i = 0; i < want; i++) {
+        out[w++] = g_ring[(start + i) % LOG_RING_CAP];
+    }
+    mutexUnlock(&g_ring_mutex);
+    out[w] = '\0';
+    // The ring cuts wherever it wrapped, so its first line is usually half a
+    // line. Drop it rather than ship a fragment. Only the ring part is
+    // realigned; the heartbeat above it is already whole.
+    char* ring = out + ring_at;
+    const size_t ring_len = w - ring_at;
+    char* nl = (char*)std::memchr(ring, '\n', ring_len);
+    if (nl && (size_t)(nl - ring) + 1 < ring_len) {
+        const size_t skip = (size_t)(nl - ring) + 1;
+        std::memmove(ring, ring + skip, ring_len - skip);
+        w -= skip;
+        out[w] = '\0';
+    }
+    return (int)w;
+}
+
 extern "C" void ruffle_log_cstr(const char* msg) {
     if (msg) {
+        ring_push(msg);
         std::fputs(msg, stdout);
         // Force-flush so a subsequent abort()/panic doesn't drop the message
         // in the stdout buffer. Costs ~µs per log call, negligible vs the

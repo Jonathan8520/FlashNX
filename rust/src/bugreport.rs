@@ -21,6 +21,30 @@
 //! instead of a confusing network failure.
 
 use crate::net;
+use core::ffi::{c_char, c_int};
+
+extern "C" {
+    /// Last few KB of the log ring (see `ruffle_log_tail` in ruffle_bridge.cpp).
+    fn ruffle_log_tail(out: *mut c_char, cap: c_int) -> c_int;
+}
+
+/// How much of the log tail travels with a report. The relay fences it into a
+/// collapsed block on the issue, and GitHub caps an issue body at 65536 chars,
+/// so this stays well clear even after JSON escaping doubles the newlines.
+const LOG_TAIL_CAP: usize = 6 * 1024;
+
+/// The tail of this session's log, for `Report::log_tail`.
+fn log_tail() -> std::string::String {
+    let mut buf = std::vec![0u8; LOG_TAIL_CAP];
+    let n = unsafe { ruffle_log_tail(buf.as_mut_ptr() as *mut c_char, LOG_TAIL_CAP as c_int) };
+    if n <= 0 {
+        return std::string::String::new();
+    }
+    buf.truncate(n as usize);
+    // Lossy: the log carries game titles, which are not guaranteed UTF-8 once
+    // they come from a SWF header, and a report must never fail over that.
+    std::string::String::from_utf8_lossy(&buf).into_owned()
+}
 
 /// Relay endpoint that creates the GitHub issue. **Deploy the Worker in
 /// `tools/bug-report-worker/` and paste its URL here** (e.g.
@@ -84,11 +108,27 @@ pub fn submit(report: &Report) -> Result<(), std::string::String> {
             "Bug report endpoint not configured in this build.",
         ));
     }
-    let body = serde_json::to_string(report)
+    // The log tail rides along as an extra field rather than living in `Report`
+    // itself: it is gathered at SEND time (so it is as fresh as possible) and
+    // only a bug carries it. A suggestion is about a feature, not a failure,
+    // and has no reason to publish anything about the player's session.
+    #[derive(serde::Serialize)]
+    struct Wire<'a> {
+        #[serde(flatten)]
+        report: &'a Report,
+        #[serde(skip_serializing_if = "std::string::String::is_empty")]
+        log_tail: std::string::String,
+    }
+    let wire = Wire {
+        report,
+        log_tail: if report.kind == "bug" { log_tail() } else { std::string::String::new() },
+    };
+    let body = serde_json::to_string(&wire)
         .map_err(|e| std::format!("encode failed: {}", e))?;
     net::log(&std::format!(
-        "bugreport: POST {} bytes -> {}\n",
+        "bugreport: POST {} bytes ({} of log) -> {}\n",
         body.len(),
+        wire.log_tail.len(),
         BUG_REPORT_ENDPOINT,
     ));
     // 16 KB response cap — the relay only echoes a short JSON (issue URL).
