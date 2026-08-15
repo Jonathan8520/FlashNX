@@ -4703,6 +4703,12 @@ fn list_screen_for_abs(s: &State, abs: usize) -> Screen {
 /// Set the DistantError state + message from anywhere (used after FFI
 /// returns where we don't already hold the lock).
 fn set_distant_error(msg: &str) {
+    // The error notice is full-screen and needs input to be dismissable, so end
+    // any reveal still in flight. Without this a failure during the expand
+    // (`DistantLoading` -> here) left the animation permanently "active", and
+    // `input()` suspends every button while one is — a screen that draws fine
+    // and never answers again.
+    crate::backend::render::distant_reveal_cancel();
     if let Ok(mut s) = LIBRARY.lock() {
         s.distant_error = msg.to_string();
         s.screen = Screen::DistantError;
@@ -6889,6 +6895,12 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             }
         }
         Screen::DistantError => {
+            // Safety net for the reveal trap fixed in `set_distant_error`:
+            // several paths set this screen directly (a cancelled download, the
+            // GameZIP failures) rather than going through that helper. A notice
+            // nobody can dismiss is the worst failure mode there is, so make
+            // sure nothing is left suspending input while it's up. Idempotent.
+            crate::backend::render::distant_reveal_cancel();
             // A URL-level failure carries the URL that broke → the footer offers
             // Y (re-type it). File-level failures don't, and show A/B only.
             let (msg, can_fix) = LIBRARY

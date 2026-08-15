@@ -3889,6 +3889,27 @@ pub fn distant_reveal_active() -> bool {
     distant_reveal().lock().map(|a| a.active).unwrap_or(false)
 }
 
+/// Abandon a running reveal outright, without animating it to either end.
+///
+/// The reveal is only ever advanced by `distant_reveal_step`, which lives in
+/// the `DistantLoading` / `DistantFiles` render arms. Any screen change that
+/// leaves those two while the reveal is mid-flight therefore strands
+/// `active = true` for the rest of the session — and since `library::input`
+/// suspends ALL input while a reveal is active, the app renders perfectly and
+/// answers no button ever again. That is what a failed archive.org fetch did:
+/// `DistantLoading` -> `DistantError` with the expand still running, leaving a
+/// permanently dead error screen (easiest repro: airplane mode, then open a
+/// saved URL). Callers that jump straight to a full-screen notice call this so
+/// the notice is dismissable.
+pub fn distant_reveal_cancel() {
+    if let Ok(mut a) = distant_reveal().lock() {
+        a.active = false;
+        a.collapsing = false;
+        a.inited = false;
+        a.t = 0.0;
+    }
+}
+
 /// The history row the reveal grows from / shrinks to, and the scroll the list
 /// was at — the underlay must redraw at that scroll for the box to line up.
 pub fn distant_reveal_source_sel() -> usize {
