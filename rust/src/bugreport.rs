@@ -39,23 +39,63 @@ extern "C" {
 static RING_GAME: std::sync::Mutex<std::string::String> =
     std::sync::Mutex::new(std::string::String::new());
 
+/// Finished games' logs, `(on-SD filename, tail)`, oldest first.
+///
+/// One live window is not enough for how the app is actually used. Play three
+/// games, then report the two that misbehaved -- the natural order, since you
+/// have to quit a game to reach RÉGLAGES anyway -- and with a single window
+/// BOTH reports come out empty, because neither is the game that ran last.
+/// Measured exactly that way: Angry Birds, then Learn to Fly, then 5b, then a
+/// report on the first two. So keep the last few games instead of the last one.
+static ARCHIVE: std::sync::Mutex<
+    std::vec::Vec<(std::string::String, std::string::String)>,
+> = std::sync::Mutex::new(std::vec::Vec::new());
+
+/// How many finished games keep their log. Three covers a normal "play a few,
+/// then report" run; each entry is at most `LOG_TAIL_CAP`, so this is ~72 KB of
+/// a 3 GB heap.
+const ARCHIVE_SLOTS: usize = 3;
+
 /// Open a fresh log window for `basename`. Called from `ruffle_init` when a game
-/// boots, so the tail describes that one game's run.
+/// boots: the window that just ended is filed under the game it belonged to, and
+/// the ring restarts empty so the new game's log is its own.
 pub fn begin_game_log(basename: &str) {
+    let previous = RING_GAME.lock().map(|g| g.clone()).unwrap_or_default();
+    if !previous.is_empty() {
+        let tail = log_tail();
+        if !tail.is_empty() {
+            if let Ok(mut a) = ARCHIVE.lock() {
+                // One entry per game: replaying a game replaces its old log
+                // rather than keeping both.
+                a.retain(|(name, _)| name != &previous);
+                a.push((previous, tail));
+                while a.len() > ARCHIVE_SLOTS {
+                    a.remove(0);
+                }
+            }
+        }
+    }
     unsafe { ruffle_log_ring_reset() };
     if let Ok(mut g) = RING_GAME.lock() {
         *g = basename.to_string();
     }
 }
 
-/// True when the ring describes `file`, i.e. that game is the one still running
-/// or the last one played.
-fn ring_matches(file: &str) -> bool {
-    !file.is_empty()
-        && RING_GAME
-            .lock()
-            .map(|g| *g == file)
-            .unwrap_or(false)
+/// This session's log for `file`: the live ring when that game is the one still
+/// loaded, else its archived window, else nothing. Never another game's log.
+fn log_for(file: &str) -> std::string::String {
+    if file.is_empty() {
+        return std::string::String::new();
+    }
+    let live = RING_GAME.lock().map(|g| *g == file).unwrap_or(false);
+    if live {
+        return log_tail();
+    }
+    ARCHIVE
+        .lock()
+        .ok()
+        .and_then(|a| a.iter().find(|(name, _)| name == file).map(|(_, t)| t.clone()))
+        .unwrap_or_default()
 }
 
 /// How much of the log tail travels with a report. The relay fences it into a
@@ -154,20 +194,26 @@ pub fn submit(report: &Report) -> Result<(), std::string::String> {
         #[serde(skip_serializing_if = "std::string::String::is_empty")]
         log_tail: std::string::String,
     }
-    // Only when the ring actually describes the game being reported. Reporting a
-    // game you played three games ago sends no log rather than someone else's.
-    let attach = report.kind == "bug" && ring_matches(&report.file);
-    if report.kind == "bug" && !attach {
+    // Strictly this game's own log: the live window if it is still the loaded
+    // game, else its archived one. Never another game's, even at the cost of
+    // sending none.
+    let tail = if report.kind == "bug" {
+        log_for(&report.file)
+    } else {
+        std::string::String::new()
+    };
+    if report.kind == "bug" && tail.is_empty() {
         net::log(&std::format!(
-            "bugreport: no log attached, ring holds {:?} not {:?}\n",
-            RING_GAME.lock().map(|g| g.clone()).unwrap_or_default(),
+            "bugreport: no log for {:?} (live={:?}, archived={:?})\n",
             report.file,
+            RING_GAME.lock().map(|g| g.clone()).unwrap_or_default(),
+            ARCHIVE
+                .lock()
+                .map(|a| a.iter().map(|(n, _)| n.clone()).collect::<std::vec::Vec<_>>())
+                .unwrap_or_default(),
         ));
     }
-    let wire = Wire {
-        report,
-        log_tail: if attach { log_tail() } else { std::string::String::new() },
-    };
+    let wire = Wire { report, log_tail: tail };
     let body = serde_json::to_string(&wire)
         .map_err(|e| std::format!("encode failed: {}", e))?;
     net::log(&std::format!(
