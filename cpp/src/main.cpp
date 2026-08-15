@@ -619,7 +619,15 @@ static void worker_entry(void* arg) {
     MenuRepeatState lib_repeat;
     menu_repeat_reset(lib_repeat);
     bool first_lib_frame = true;
-    while (ruffle_library_active() && appletMainLoop()) {
+    // Keep BOTH loop conditions so the exit can be attributed. They mean very
+    // different things — `library_active=0` is the app's own state machine
+    // saying "done", `appletMainLoop=0` is the SYSTEM asking us to quit — and
+    // the code after the loop treats them identically ("user quit"), which
+    // made a system-initiated exit indistinguishable from a crash.
+    bool lib_active = true;
+    bool applet_ok = true;
+    while ((lib_active = (ruffle_library_active() != 0))
+           && (applet_ok = appletMainLoop())) {
         padUpdate(&pad);
         const u64 kDownLib = padGetButtonsDown(&pad);
         const u64 kUpLib   = padGetButtonsUp(&pad);
@@ -679,6 +687,13 @@ static void worker_entry(void* arg) {
         }
     }
 
+    {
+        char m[160];
+        std::snprintf(m, sizeof(m),
+            "main: library loop EXIT (library_active=%d appletMainLoop=%d picked=%d)\n",
+            (int)lib_active, (int)applet_ok, ruffle_library_picked());
+        ruffle_log_cstr(m); // goes to the SD trace too, unlike printf
+    }
     const bool picked = ruffle_library_picked() != 0;
     char selected_path[512] = {0};
     if (!picked || ruffle_library_selected_path(selected_path, sizeof(selected_path)) != 0) {
@@ -1216,8 +1231,18 @@ int main(int argc, char** argv) {
     }
 
     g_boot_t0 = armGetSystemTick();
-    socketInitializeDefault();
-    nxlinkStdio();
+    // Keep the Result: if the socket stack never came up, every later HTTPS
+    // call is doomed and nxlinkStdio() has nothing to connect to. It was
+    // discarded before, so a failure here surfaced much later as an opaque
+    // curl error. Not fatal — the launcher and every game still work offline,
+    // only the import/report features are unavailable.
+    const Result sock_rc = socketInitializeDefault();
+    if (R_FAILED(sock_rc)) {
+        std::printf("socketInitializeDefault failed: 0x%x (networking disabled)\n", sock_rc);
+        std::fflush(stdout);
+    } else {
+        nxlinkStdio();
+    }
     romfsInit();
     cursor_speed_load(); // restore the saved cursor-speed preset (REGLAGES)
 
@@ -1280,8 +1305,21 @@ int main(int argc, char** argv) {
             std::fclose(f);
             std::printf("=== end previous-run crash log ===\n");
             std::fflush(stdout);
-            // Truncate so we only replay each crash once.
-            std::remove("sdmc:/switch/ruffle-crash.log");
+            // Clear it so we only replay each crash once — but KEEP a copy.
+            //
+            // Deleting outright made the log unrecoverable in the one case it
+            // matters most: a crash with the WiFi off. There is no nxlink then,
+            // so the only way to read the dump is to pull the file off the SD
+            // afterwards (FTP/card reader) — and the app destroyed it the moment
+            // it was relaunched, which is exactly what you do to get the WiFi
+            // back. Rotating to `-prev` costs nothing and buys one more launch.
+            std::remove("sdmc:/switch/ruffle-crash-prev.log");
+            if (std::rename("sdmc:/switch/ruffle-crash.log",
+                            "sdmc:/switch/ruffle-crash-prev.log") != 0) {
+                // Rename unavailable/failed: fall back to deleting, otherwise
+                // this same dump replays on every future boot.
+                std::remove("sdmc:/switch/ruffle-crash.log");
+            }
         }
     }
 

@@ -35,6 +35,13 @@ uint64_t ruffle_tick_freq(void);
 /// from a panic hook — uses only libnx + stdio.
 void ruffle_crash_dump(const char* msg);
 
+/// Log a line to stdout (nxlink) AND, when
+/// `sdmc:/switch/FlashNX/trace.on` exists, to `sdmc:/switch/flashnx-trace.log`.
+/// Primarily the Rust side's log sink, but C++ should prefer it over `printf`
+/// for anything that must stay readable with the WiFi off — nxlink needs the
+/// network, so a printf is invisible in exactly the situations worth tracing.
+void ruffle_log_cstr(const char* msg);
+
 #ifdef __cplusplus
 }
 #endif

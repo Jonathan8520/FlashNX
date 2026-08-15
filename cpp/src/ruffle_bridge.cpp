@@ -1,6 +1,7 @@
 #include "ruffle_bridge.h"
 
 #include <cstdio>
+#include <sys/stat.h>
 #include <switch.h>
 
 // Bridge between C++ frontend and the Rust staticlib.
@@ -11,6 +12,35 @@
 // This translation unit also provides callbacks the Rust side calls back
 // into — printf-style logging via nxlink so panics/shader errors are visible.
 
+// ── Optional persistent trace to SD ───────────────────────────────────────
+//
+// Our logs normally go to nxlink stdout and nowhere else, which makes any
+// OFFLINE bug undebuggable by construction: turning the WiFi off to reproduce
+// also kills the only channel the logs travel on. That is exactly how the
+// "no connection" crash stayed opaque — no nxlink, no crash log, no trace.
+//
+// When `sdmc:/switch/FlashNX/trace.on` exists, mirror every log line into
+// `sdmc:/switch/flashnx-trace.log`, flushed line by line, so the LAST line in
+// the file names the last thing that ran before the process died. Truncated
+// at each boot, so the file always describes the most recent run.
+//
+// Gated on the marker so normal users pay nothing: an SD write per log line
+// is far too expensive to leave on (each fsdev op is an IPC round trip).
+// Checked once, on the first log call.
+static FILE* g_trace = nullptr;
+static bool  g_trace_checked = false;
+
+static FILE* trace_file(void) {
+    if (!g_trace_checked) {
+        g_trace_checked = true;
+        struct stat st;
+        if (::stat("sdmc:/switch/FlashNX/trace.on", &st) == 0) {
+            g_trace = std::fopen("sdmc:/switch/flashnx-trace.log", "w");
+        }
+    }
+    return g_trace;
+}
+
 extern "C" void ruffle_log_cstr(const char* msg) {
     if (msg) {
         std::fputs(msg, stdout);
@@ -18,6 +48,11 @@ extern "C" void ruffle_log_cstr(const char* msg) {
         // in the stdout buffer. Costs ~µs per log call, negligible vs the
         // network round-trip to nxlink.
         std::fflush(stdout);
+        FILE* t = trace_file();
+        if (t) {
+            std::fputs(msg, t);
+            std::fflush(t);
+        }
     }
 }
 
