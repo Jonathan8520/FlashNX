@@ -3165,8 +3165,16 @@ fn run_pseudo_flow() {
 
 /// Submit a bug/suggestion report and land on the result screen.
 fn submit_and_show(report: &crate::bugreport::Report) {
+    // The success line follows the FLOW, not the relay (#83): both go through the
+    // same endpoint, but "your report was sent" after a suggestion reads like the
+    // button sent the wrong thing.
+    let sent = if report.kind == "suggestion" {
+        crate::loc::s().suggest_ok_msg
+    } else {
+        crate::loc::s().bug_ok_msg
+    };
     let (ok, msg) = match crate::bugreport::submit(report) {
-        Ok(()) => (true, crate::loc::s().bug_ok_msg.to_string()),
+        Ok(()) => (true, sent.to_string()),
         Err(e) => (false, e),
     };
     if let Ok(mut s) = LIBRARY.lock() {

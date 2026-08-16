@@ -487,6 +487,10 @@ pub struct Strings {
     pub set_suggest: &'static str,
     pub kbd_suggest_header: &'static str,
     pub kbd_suggest_guide: &'static str,
+    /// Confirmation after a suggestion is sent. Separate from `bug_ok_msg`: the
+    /// two flows share the relay, but a player who sent an idea was being told
+    /// their "report" was sent (#83).
+    pub suggest_ok_msg: &'static str,
     // First-boot size backfill panel title (v1.5.x): shown while the one-time
     // footprint recompute runs, so that migration isn't a black screen.
     pub optimizing: &'static str,
@@ -707,6 +711,7 @@ const EN: Strings = Strings {
     set_suggest: "MAKE A SUGGESTION",
     kbd_suggest_header: "FlashNX - Make a suggestion",
     kbd_suggest_guide: "Opens a PUBLIC GitHub issue. Your idea / feature request for FlashNX.",
+    suggest_ok_msg: "YOUR SUGGESTION WAS SENT. THANKS FOR HELPING IMPROVE FLASHNX.",
 };
 
 const FR: Strings = Strings {
@@ -924,6 +929,7 @@ const FR: Strings = Strings {
     set_suggest: "FAIRE UNE PROPOSITION",
     kbd_suggest_header: "FlashNX - Faire une proposition",
     kbd_suggest_guide: "Ouvre une issue GitHub PUBLIQUE. Ton idée / proposition pour FlashNX.",
+    suggest_ok_msg: "TA PROPOSITION A \u{00C9}T\u{00C9} ENVOY\u{00C9}E. MERCI DE M'AIDER \u{00C0} AM\u{00C9}LIORER FLASHNX.",
 };
 
 const ES: Strings = Strings {
@@ -1141,6 +1147,7 @@ const ES: Strings = Strings {
     set_suggest: "HACER UNA SUGERENCIA",
     kbd_suggest_header: "FlashNX - Hacer una sugerencia",
     kbd_suggest_guide: "Abre un issue PUBLICO en GitHub. Tu idea / sugerencia para FlashNX.",
+    suggest_ok_msg: "TU SUGERENCIA SE ENVI\u{00D3}. GRACIAS POR AYUDAR A MEJORAR FLASHNX.",
 };
 
 // Russian — UPPERCASE Cyrillic (draw_text does not case-fold non-ASCII, and
@@ -1360,6 +1367,7 @@ const RU: Strings = Strings {
     set_suggest: "ПРЕДЛОЖИТЬ ИДЕЮ",
     kbd_suggest_header: "FlashNX - Predlozhit ideyu",
     kbd_suggest_guide: "Otkroet PUBLICHNUYU issue na GitHub. Vasha ideya / predlozhenie.",
+    suggest_ok_msg: "ПРЕДЛОЖЕНИЕ ОТПРАВЛЕНО. СПАСИБО ЧТО ПОМОГАЕТЕ УЛУЧШИТЬ FLASHNX.",
 };
 
 // German — uppercase Latin. draw_text folds ASCII to uppercase but NOT
@@ -1582,6 +1590,7 @@ const DE: Strings = Strings {
     set_suggest: "VORSCHLAG MACHEN",
     kbd_suggest_header: "FlashNX - Vorschlag machen",
     kbd_suggest_guide: "\u{00D6}ffnet ein \u{00F6}ffentliches GitHub-Issue. Deine Idee / dein Wunsch f\u{00FC}r FlashNX.",
+    suggest_ok_msg: "DEIN VORSCHLAG WURDE GESENDET. DANKE, DASS DU HILFST, FLASHNX ZU VERBESSERN.",
 };
 
 // Italian — uppercase Latin. Accented uppercase vowels (À È É Ì Ò Ù) are
@@ -1801,6 +1810,7 @@ const IT: Strings = Strings {
     set_suggest: "PROPONI UN'IDEA",
     kbd_suggest_header: "FlashNX - Proponi un'idea",
     kbd_suggest_guide: "Apre una issue PUBBLICA su GitHub. La tua idea / proposta per FlashNX.",
+    suggest_ok_msg: "LA TUA PROPOSTA \u{00C8} STATA INVIATA. GRAZIE PER AIUTARE A MIGLIORARE FLASHNX.",
 };
 
 // Portuguese (Brazil) — uppercase Latin. Accented uppercase letters
@@ -2020,6 +2030,7 @@ const PT: Strings = Strings {
     set_suggest: "FAZER UMA SUGEST\u{00C3}O",
     kbd_suggest_header: "FlashNX - Fazer uma sugest\u{00E3}o",
     kbd_suggest_guide: "Abre uma issue P\u{00DA}BLICA no GitHub. Sua ideia / sugest\u{00E3}o para o FlashNX.",
+    suggest_ok_msg: "SUA SUGEST\u{00C3}O FOI ENVIADA. OBRIGADO POR AJUDAR A MELHORAR O FLASHNX.",
 };
 
 // Simplified Chinese (issue #41). CJK has no case, so unlike the Latin tables
@@ -2244,6 +2255,7 @@ const ZH: Strings = Strings {
     set_suggest: "提出建议",
     kbd_suggest_header: "FlashNX - 提出建议",
     kbd_suggest_guide: "将打开一个公开的 GitHub issue。你对 FlashNX 的想法 / 建议。",
+    suggest_ok_msg: "你的建议已发送。感谢你帮助改进 FLASHNX。",
 };
 
 // Turkish. Drawn strings are UPPERCASE with only the caps our 5x7 font carries
@@ -2466,6 +2478,7 @@ const TR: Strings = Strings {
     set_suggest: "\u{00D6}NER\u{0130}DE BULUN",
     kbd_suggest_header: "FlashNX - \u{00D6}neride bulun",
     kbd_suggest_guide: "Herkese a\u{00E7}\u{0131}k bir GitHub konusu a\u{00E7}ar. FlashNX i\u{00E7}in fikrin / \u{00F6}zellik iste\u{011F}in.",
+    suggest_ok_msg: "\u{00D6}NER\u{0130}N G\u{00D6}NDER\u{0130}LD\u{0130}. FLASHNX'I GEL\u{0130}\u{015E}T\u{0130}RMEYE YARDIM I\u{00C7}IN TE\u{015E}EKK\u{00DC}RLER.",
 };
 
 /// Current language, as a `Lang` index. Default English; overridden by
