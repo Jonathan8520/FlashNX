@@ -451,6 +451,10 @@ pub struct Strings {
     pub err_sd_write: &'static str,
     /// The server answered an error status. {} = the HTTP code.
     pub err_http_status: &'static str,
+    /// 429 / 5xx: the host is up but temporarily unable, which is a different
+    /// instruction to the player than a refusal or a dead link — wait, do not
+    /// go looking for a mistake in the URL. archive.org does this under load.
+    pub err_server_busy: &'static str,
     /// HTTP 404 specifically: the URL or item id is wrong / gone.
     pub err_not_found: &'static str,
     pub err_json: &'static str,          // {} = parser detail
@@ -688,6 +692,7 @@ const EN: Strings = Strings {
     err_response_big: "Response too large for this build. Try a narrower search.",
     err_sd_write: "Could not write to the SD card. It may be full or write-protected.",
     err_http_status: "The server refused the request (HTTP {}). Try again later.",
+    err_server_busy: "The server is overloaded (HTTP {}). Your link is fine — try again in a few minutes.",
     err_not_found: "Not found (404). The URL or the item id is wrong, or it was removed.",
     err_json: "Unreadable archive.org JSON: {}",
     err_json_no_files: "JSON has no \"files\" field",
@@ -907,6 +912,7 @@ const FR: Strings = Strings {
     err_response_big: "R\u{00C9}PONSE TROP VOLUMINEUSE. ESSAYEZ UNE RECHERCHE PLUS PR\u{00C9}CISE.",
     err_sd_write: "\u{00C9}CRITURE IMPOSSIBLE SUR LA CARTE SD. ELLE EST PEUT-\u{00CA}TRE PLEINE.",
     err_http_status: "LE SERVEUR A REFUS\u{00C9} LA REQU\u{00CA}TE (HTTP {}). R\u{00C9}ESSAYEZ PLUS TARD.",
+    err_server_busy: "LE SERVEUR EST SATUR\u{00C9} (HTTP {}). VOTRE LIEN N'EST PAS EN CAUSE, R\u{00C9}ESSAYEZ DANS QUELQUES MINUTES.",
     err_not_found: "INTROUVABLE (404). L'URL OU L'IDENTIFIANT DE L'ITEM EST FAUX, OU IL A \u{00C9}T\u{00C9} SUPPRIM\u{00C9}.",
     err_json: "JSON ARCHIVE.ORG ILLISIBLE : {}",
     err_json_no_files: "JSON SANS CHAMP \"files\"",
@@ -1126,6 +1132,7 @@ const ES: Strings = Strings {
     err_response_big: "RESPUESTA DEMASIADO GRANDE. PRUEBA UNA B\u{00DA}SQUEDA M\u{00C1}S PRECISA.",
     err_sd_write: "NO SE PUDO ESCRIBIR EN LA TARJETA SD. QUIZ\u{00C1} EST\u{00C9} LLENA.",
     err_http_status: "EL SERVIDOR RECHAZ\u{00D3} LA PETICI\u{00D3}N (HTTP {}). INT\u{00C9}NTALO M\u{00C1}S TARDE.",
+    err_server_busy: "EL SERVIDOR EST\u{00C1} SATURADO (HTTP {}). TU ENLACE EST\u{00C1} BIEN, INT\u{00C9}NTALO EN UNOS MINUTOS.",
     err_not_found: "NO ENCONTRADO (404). LA URL O EL ID DEL ITEM ES INCORRECTO, O FUE ELIMINADO.",
     err_json: "JSON DE ARCHIVE.ORG ILEGIBLE: {}",
     err_json_no_files: "JSON SIN CAMPO \"files\"",
@@ -1347,6 +1354,7 @@ const RU: Strings = Strings {
     err_response_big: "ОТВЕТ СЛИШКОМ БОЛЬШОЙ. УТОЧНИТЕ ЗАПРОС.",
     err_sd_write: "НЕ УДАЛОСЬ ЗАПИСАТЬ НА SD-КАРТУ. ВОЗМОЖНО, ОНА ЗАПОЛНЕНА.",
     err_http_status: "СЕРВЕР ОТКЛОНИЛ ЗАПРОС (HTTP {}). ПОПРОБУЙТЕ ПОЗЖЕ.",
+    err_server_busy: "СЕРВЕР ПЕРЕГРУЖЕН (HTTP {}). ССЫЛКА ВЕРНА, ПОПРОБУЙТЕ ЧЕРЕЗ НЕСКОЛЬКО МИНУТ.",
     err_not_found: "НЕ НАЙДЕНО (404). НЕВЕРНЫЙ URL ИЛИ ID ЭЛЕМЕНТА, ЛИБО ОН УДАЛЁН.",
     err_json: "НЕЧИТАЕМЫЙ JSON ARCHIVE.ORG: {}",
     err_json_no_files: "В JSON НЕТ ПОЛЯ \"files\"",
@@ -1571,6 +1579,7 @@ const DE: Strings = Strings {
     err_response_big: "ANTWORT ZU GROSS. VERSUCHE EINE GENAUERE SUCHE.",
     err_sd_write: "SCHREIBEN AUF DIE SD-KARTE FEHLGESCHLAGEN. SIE IST EVENTUELL VOLL.",
     err_http_status: "DER SERVER HAT DIE ANFRAGE ABGELEHNT (HTTP {}). SP\u{00C4}TER ERNEUT VERSUCHEN.",
+    err_server_busy: "DER SERVER IST \u{00DC}BERLASTET (HTTP {}). DEIN LINK IST IN ORDNUNG, VERSUCHE ES IN EIN PAAR MINUTEN ERNEUT.",
     err_not_found: "NICHT GEFUNDEN (404). URL ODER ITEM-ID IST FALSCH, ODER ES WURDE ENTFERNT.",
     err_json: "UNLESBARES ARCHIVE.ORG-JSON: {}",
     err_json_no_files: "JSON OHNE \"files\"-FELD",
@@ -1792,6 +1801,7 @@ const IT: Strings = Strings {
     err_response_big: "RISPOSTA TROPPO GRANDE. PROVA UNA RICERCA PI\u{00D9} PRECISA.",
     err_sd_write: "IMPOSSIBILE SCRIVERE SULLA SCHEDA SD. FORSE \u{00C8} PIENA.",
     err_http_status: "IL SERVER HA RIFIUTATO LA RICHIESTA (HTTP {}). RIPROVA PI\u{00D9} TARDI.",
+    err_server_busy: "IL SERVER \u{00C8} SOVRACCARICO (HTTP {}). IL TUO LINK \u{00C8} CORRETTO, RIPROVA TRA QUALCHE MINUTO.",
     err_not_found: "NON TROVATO (404). URL O ID DELL'ELEMENTO ERRATO, OPPURE \u{00C8} STATO RIMOSSO.",
     err_json: "JSON DI ARCHIVE.ORG ILLEGGIBILE: {}",
     err_json_no_files: "JSON SENZA CAMPO \"files\"",
@@ -2013,6 +2023,7 @@ const PT: Strings = Strings {
     err_response_big: "RESPOSTA MUITO GRANDE. TENTE UMA BUSCA MAIS PRECISA.",
     err_sd_write: "N\u{00C3}O FOI POSS\u{00CD}VEL ESCREVER NO CART\u{00C3}O SD. TALVEZ ESTEJA CHEIO.",
     err_http_status: "O SERVIDOR RECUSOU O PEDIDO (HTTP {}). TENTE MAIS TARDE.",
+    err_server_busy: "O SERVIDOR EST\u{00C1} SOBRECARREGADO (HTTP {}). SEU LINK EST\u{00C1} CERTO, TENTE EM ALGUNS MINUTOS.",
     err_not_found: "N\u{00C3}O ENCONTRADO (404). A URL OU O ID DO ITEM EST\u{00C1} ERRADO, OU FOI REMOVIDO.",
     err_json: "JSON DO ARCHIVE.ORG ILEG\u{00CD}VEL: {}",
     err_json_no_files: "JSON SEM O CAMPO \"files\"",
@@ -2239,6 +2250,7 @@ const ZH: Strings = Strings {
     err_response_big: "响应过大。请使用更精确的搜索。",
     err_sd_write: "无法写入 SD 卡。可能已满或被写保护。",
     err_http_status: "服务器拒绝了请求 (HTTP {})。请稍后重试。",
+    err_server_busy: "服务器过载 (HTTP {})。链接没有问题，请过几分钟再试。",
     err_not_found: "未找到 (404)。网址或条目 ID 有误，或已被删除。",
     err_json: "无法读取 ARCHIVE.ORG 的 JSON: {}",
     err_json_no_files: "JSON 中没有 \"files\" 字段",
@@ -2463,6 +2475,7 @@ const TR: Strings = Strings {
     err_response_big: "YANIT \u{00C7}OK B\u{00DC}Y\u{00DC}K. DAHA DAR B\u{0130}R ARAMA DENEY\u{0130}N.",
     err_sd_write: "SD KARTA YAZILAMADI. DOLU OLAB\u{0130}L\u{0130}R.",
     err_http_status: "SUNUCU \u{0130}STE\u{011E}\u{0130} REDDETT\u{0130} (HTTP {}). DAHA SONRA DENEY\u{0130}N.",
+    err_server_busy: "SUNUCU A\u{015E}IRI Y\u{00DC}KL\u{00DC} (HTTP {}). BA\u{011E}LANTI DO\u{011E}RU, B\u{0130}RKA\u{00C7} DAK\u{0130}KA SONRA DENEY\u{0130}N.",
     err_not_found: "BULUNAMADI (404). URL VEYA \u{00D6}\u{011E}E K\u{0130}ML\u{0130}\u{011E}\u{0130} YANLI\u{015E} YA DA KALDIRILMI\u{015E}.",
     err_json: "OKUNAMAYAN ARCHIVE.ORG JSON: {}",
     err_json_no_files: "JSON'DA \"files\" ALANI YOK",
@@ -2751,6 +2764,13 @@ pub fn err_dl_failed(code: i32) -> std::string::String {
 pub fn err_http_status(code: i64) -> std::string::String {
     if code == 404 {
         return std::string::String::from(s().err_not_found);
+    }
+    // Up but temporarily unable, which asks the player to wait rather than to
+    // check their link. 429 is the rate limit; 500/502/503/504 are what a loaded
+    // archive.org answers, and the Wayback Machine hands out 503 by the fistful
+    // when it is busy.
+    if matches!(code, 429 | 500 | 502 | 503 | 504) {
+        return fill(s().err_server_busy, &code.to_string());
     }
     fill(s().err_http_status, &code.to_string())
 }
