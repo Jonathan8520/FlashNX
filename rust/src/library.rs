@@ -3068,23 +3068,53 @@ fn handle_bug_picker_input(s: &mut State, button: &str, mut selection: usize, mu
     s.screen = Screen::BugPicker { selection, scroll_offset: scroll };
 }
 
+/// Display order of the bug-report picker: last played first, whatever sort the
+/// library itself is on (#99). You report the game you have just been playing,
+/// so it belongs at the top of that list even when the library is showing A-Z.
+/// Returns positions into `entries`, so nothing is reordered behind the screen —
+/// the picker's row N is `bug_picker_order(..)[N]`, and both the drawing and the
+/// A press have to read it the same way or they point at two different games.
+///
+/// Favourites are NOT pinned here, unlike `sort_entries`: a starred game is not
+/// more likely to be the one you are reporting.
+fn bug_picker_order(entries: &[Entry]) -> std::vec::Vec<usize> {
+    let mut order: std::vec::Vec<usize> = (0..entries.len()).collect();
+    order.sort_by(|&a, &b| {
+        let (ea, eb) = (&entries[a], &entries[b]);
+        crate::playtime::get_last(&eb.basename)
+            .cmp(&crate::playtime::get_last(&ea.basename))
+            .then_with(|| {
+                ea.display_name
+                    .to_lowercase()
+                    .cmp(&eb.display_name.to_lowercase())
+            })
+    });
+    order
+}
+
 /// BugPicker > A: snapshot the chosen game's metadata, open swkbd for a
 /// description, then POST the report to the relay. Hoisted from `input()` — the
 /// keyboard + synchronous HTTPS POST must NOT run under the LIBRARY lock.
-fn run_bug_report_flow(game_idx: usize) {
+///
+/// `row` is a row of the picker, not a position in `entries`: the two differ
+/// since the picker has its own order.
+fn run_bug_report_flow(row: usize) {
     // Snapshot the game's technical info under the lock, then release it.
     let base = match LIBRARY.lock() {
-        Ok(g) => g.entries.get(game_idx).map(|e| {
-            (
-                e.display_name.clone(),
-                e.basename.clone(),
-                e.path.clone(),
-                e.size_bytes,
-                e.swf_version,
-                e.compression_label,
-                e.is_as3,
-            )
-        }),
+        Ok(g) => bug_picker_order(&g.entries)
+            .get(row)
+            .and_then(|&i| g.entries.get(i))
+            .map(|e| {
+                (
+                    e.display_name.clone(),
+                    e.basename.clone(),
+                    e.path.clone(),
+                    e.size_bytes,
+                    e.swf_version,
+                    e.compression_label,
+                    e.is_as3,
+                )
+            }),
         Err(_) => None,
     };
     let Some((game, file, path, size, swf_version, compression, as3)) = base else {
@@ -6172,13 +6202,15 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             }
         }
         Screen::BugPicker { selection, scroll_offset } => {
+            // Last played first (#99), through the same order `run_bug_report_flow`
+            // resolves the pressed row with.
             let names = LIBRARY
                 .lock()
                 .ok()
                 .map(|s| {
-                    s.entries
-                        .iter()
-                        .map(|e| e.display_name.clone())
+                    bug_picker_order(&s.entries)
+                        .into_iter()
+                        .filter_map(|i| s.entries.get(i).map(|e| e.display_name.clone()))
                         .collect::<std::vec::Vec<_>>()
                 })
                 .unwrap_or_default();
