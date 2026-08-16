@@ -592,10 +592,33 @@ index 6e5379213..ea1cfd7ef 100644
  pub mod context_menu;
  mod drawing;
 diff --git a/core/src/player.rs b/core/src/player.rs
-index edb74cccb..a44be412f 100644
+index edb74cccb..306170bc6 100644
 --- a/core/src/player.rs
 +++ b/core/src/player.rs
-@@ -2382,7 +2382,17 @@ impl Player {
+@@ -519,6 +519,22 @@ impl Player {
+         FloatDuration::from_millis(self.frame_time(1000.0))
+     }
+ 
++    /// Push the movie's time origin forward by `d`, hiding that interval from
++    /// `getTimer()`.
++    ///
++    /// FlashNX local patch. `getTimer()` (AVM1 and AVM2 alike) reads the wall
++    /// clock since `start_time`, while frames advance on the `dt` handed to
++    /// `tick()`. Whenever the host stops ticking but the world keeps turning —
++    /// our pause menu, the in-game software keyboard, the console's HOME menu —
++    /// the two clocks drift apart by the length of the interruption, and a game
++    /// that drives its simulation from `getTimer()` deltas replays all of it on
++    /// the first resumed frame (seen on Zuma Highspeed Challenge: a long pause
++    /// came back as a stall followed by several levels' worth of progress).
++    /// Shifting the origin by the same amount keeps both clocks in step.
++    pub fn skip_paused_time(&mut self, d: Duration) {
++        self.start_time += d;
++    }
++
+     pub fn tick(&mut self, dt: FloatDuration) {
+         if !self.is_playing() {
+             return;
+@@ -2382,7 +2398,17 @@ impl Player {
          self.update_mouse_state(EnumSet::empty(), false, &mut false);
  
          // GC

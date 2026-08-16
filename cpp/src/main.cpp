@@ -41,6 +41,13 @@ extern "C" void ruffle_handle_mouse_move(int x, int y);
 extern "C" void ruffle_handle_mouse_button(bool down);
 extern "C" void ruffle_handle_mouse_right(bool down);
 extern "C" void ruffle_redraw_paused(void);
+// Hide an interval of wall clock from the movie (#87). Frames only advance on
+// the dt we hand to ruffle_render_frame_dt, but getTimer() reads the real
+// clock, so a pause the player never simulated comes back as a jump for any
+// game that times itself from getTimer() deltas.
+extern "C" void ruffle_skip_paused_time(uint64_t us);
+// One SWF frame in microseconds (clamped), for the touch click delay (#87).
+extern "C" uint64_t ruffle_frame_interval_us(void);
 extern "C" void ruffle_draw_menu(int selected);
 extern "C" void ruffle_draw_screen_menu(int selected);
 extern "C" void ruffle_menu_close_begin(void);
@@ -763,6 +770,12 @@ static void worker_entry(void* arg) {
     float cursor_y = GAME_VIEWPORT_H * 0.5f;
     ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
     touch_was_pressed = false;
+    // Touch tap -> left click, held back until the movie has run a frame with
+    // the new cursor position (#87). `touch_press_at` is the tick that press is
+    // due on; `touch_press_held` tracks a button we still owe a release.
+    bool     touch_press_armed = false;
+    uint64_t touch_press_at    = 0;
+    bool     touch_press_held  = false;
 
     // Real-time pacing: instead of telling Ruffle "16.6 ms elapsed" every tick,
     // we measure actual wall-clock between iterations and let its frame
@@ -770,6 +783,19 @@ static void worker_entry(void* arg) {
     // Ruffle pacing model (core/src/player.rs::tick).
     const uint64_t tick_freq = ruffle_tick_freq();
     uint64_t last_tick = ruffle_tick_now();
+
+    // Leave a pause: hand the movie the interval it never simulated so
+    // getTimer() resumes where it stopped (#87), then restart the clock. Every
+    // resume path goes through here — pause menu, ECRAN, TOUCHES, in-game
+    // keyboard — because `last_tick` is only advanced by a frame that actually
+    // ticked, so `now - last_tick` IS the unplayed gap.
+    auto resume_after_pause = [&last_tick, tick_freq]() {
+        const uint64_t now = ruffle_tick_now();
+        if (tick_freq > 0 && now > last_tick) {
+            ruffle_skip_paused_time(((now - last_tick) * 1000000ULL) / tick_freq);
+        }
+        last_tick = now;
+    };
 
     // Pause-modal state. While `menu_open` is true the Ruffle frame loop is
     // skipped (we just re-render the last Player state under the overlay)
@@ -829,8 +855,9 @@ static void worker_entry(void* arg) {
                     menu_open = false;
                     menu_closing = false;
                     // Re-measure wall clock so the resumed frame doesn't catch
-                    // up by replaying the paused + closing interval.
-                    last_tick = ruffle_tick_now();
+                    // up by replaying the paused + closing interval, and hide
+                    // that interval from getTimer() as well (#87).
+                    resume_after_pause();
                 }
                 gl_context_swap();
                 continue;
@@ -944,7 +971,7 @@ static void worker_entry(void* arg) {
                         break;
                     }
                     menu_open = false;
-                    last_tick = ruffle_tick_now();
+                    resume_after_pause();
                     continue;
                 }
                 case MENU_QUIT:
@@ -1127,13 +1154,37 @@ static void worker_entry(void* arg) {
             ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
         }
 
-        // Click: touch tap → left mouse button. ZR (and any other button) is now
-        // fully keymap-driven (ZR defaults to "Left click"), handled in the
-        // BINDINGS loop above — there's no hardcoded ZR path anymore.
-        if (touch_pressed && !touch_was_pressed) {
+        // Click: touch tap → left mouse button, delivered one SWF frame AFTER
+        // the cursor lands (#87). ZR (and any other button) is fully
+        // keymap-driven (ZR defaults to "Left click"), handled in the BINDINGS
+        // loop above.
+        //
+        // A tap teleports the cursor and clicks in the same instant, which no
+        // mouse ever does: on a desktop the pointer is already sitting there
+        // frames before the button goes down. Games that aim from the position
+        // they sampled during their own last frame — Zuma's frog, Mario 63's
+        // cursor — therefore fired at where the cursor USED to be. Waiting for
+        // the movie to run one frame with the new position costs ~40 ms on a
+        // 24 fps game and hands it the same situation a mouse would.
+        bool pressed_now = false;
+        if (touch_press_armed && ruffle_tick_now() >= touch_press_at) {
             ruffle_handle_mouse_button(true);
-        } else if (!touch_pressed && touch_was_pressed) {
+            touch_press_armed = false;
+            touch_press_held  = true;
+            pressed_now = true;
+        }
+        if (touch_pressed && !touch_was_pressed) {
+            // Arm for one SWF frame from now — "next host frame" would not do,
+            // since at 24 fps most host frames run no SWF frame at all.
+            const uint64_t wait = (ruffle_frame_interval_us() * tick_freq) / 1000000ULL;
+            touch_press_at    = ruffle_tick_now() + wait;
+            touch_press_armed = true;
+        }
+        // Release once the press has actually gone out, and never in the same
+        // frame as the press — a tap can be shorter than the delay itself.
+        if (!touch_pressed && touch_press_held && !pressed_now) {
             ruffle_handle_mouse_button(false);
+            touch_press_held = false;
         }
         touch_was_pressed = touch_pressed;
 
@@ -1154,8 +1205,9 @@ static void worker_entry(void* arg) {
                 }
             }
             // The modal held the loop for a while; re-measure the clock so the
-            // next frame doesn't replay the elapsed interval.
-            last_tick = ruffle_tick_now();
+            // next frame doesn't replay the elapsed interval, and take that
+            // interval out of getTimer() too (#87).
+            resume_after_pause();
         }
 
         // Compute real elapsed since last iteration → microseconds.
@@ -1173,6 +1225,12 @@ static void worker_entry(void* arg) {
         // of AVM1 + display-list work), not catch-up replay — and only adds
         // visible slow-motion, so keep the loose cap and let the game run at
         // real-time speed (dropping rendered frames) when the sim can't keep up.
+        // Half a second between two iterations is not a slow frame, it is the
+        // app not running at all: HOME menu, sleep, an applet on top. Nobody
+        // resumes us explicitly there, so hide the gap from getTimer() here,
+        // exactly like a pause does (#87). Genuinely slow frames stay below
+        // this bar and keep their current behaviour.
+        if (dt_us > 500000ULL) ruffle_skip_paused_time(dt_us - 100000ULL);
         if (dt_us > 100000ULL) dt_us = 100000ULL;
 
         ruffle_render_frame_dt(dt_us);

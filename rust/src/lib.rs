@@ -1081,6 +1081,55 @@ pub extern "C" fn ruffle_render_frame_dt(dt_us: u64) {
     render_frame_with_dt(dt);
 }
 
+/// How long one SWF frame lasts, in microseconds, clamped to a sane band.
+///
+/// The touch path (#87) uses it to hold a tap's click back until the movie has
+/// actually run a frame with the new cursor position: at 24 fps under a 60 Hz
+/// host loop, "one host frame later" is not enough — most host frames run no
+/// SWF frame at all. Clamped so a movie declaring an absurd frame rate can't
+/// make taps feel broken either way.
+#[no_mangle]
+pub extern "C" fn ruffle_frame_interval_us() -> u64 {
+    const DEFAULT: u64 = 33_333;
+    let state = unsafe {
+        match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
+            Some(s) => s,
+            None => return DEFAULT,
+        }
+    };
+    let fps = match state.player.lock() {
+        Ok(p) => p.frame_rate(),
+        Err(_) => return DEFAULT,
+    };
+    if fps <= 0.0 || !fps.is_finite() {
+        return DEFAULT;
+    }
+    ((1_000_000.0 / fps) as u64).clamp(16_000, 60_000)
+}
+
+/// Hide `us` microseconds of wall clock from the movie (#87).
+///
+/// Frames only advance on the `dt` we hand to `tick()`, but `getTimer()` reads
+/// the real clock, so every interval where we stop ticking — pause menu,
+/// in-game keyboard, HOME menu — comes back as a jump for any game that drives
+/// its simulation from `getTimer()` deltas. The C++ side measures the gap and
+/// hands it here, so the resumed frame sees the clock it left off on.
+#[no_mangle]
+pub extern "C" fn ruffle_skip_paused_time(us: u64) {
+    if us == 0 {
+        return;
+    }
+    let state = unsafe {
+        match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
+            Some(s) => s,
+            None => return,
+        }
+    };
+    if let Ok(mut p) = state.player.lock() {
+        p.skip_paused_time(core::time::Duration::from_micros(us));
+    }
+}
+
 fn render_frame_with_dt(dt: FloatDuration) {
     let state = unsafe {
         match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
