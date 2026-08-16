@@ -2020,6 +2020,13 @@ pub(crate) const SK_NUMPAD_ENTER: c_int = 89; // keypad Enter
 // bound here drives Key.isDown(20) AND Key.isToggled(20) with no extra plumbing.
 pub(crate) const SK_CAPSLOCK: c_int = 90;
 
+// Pseudo-code, like the two mouse buttons: opens the console keyboard instead of
+// sending a key. Ruffle raises the keyboard on its own when an editable field
+// takes focus, but only for fields it recognises as focused — a game whose text
+// box it does not track leaves the player with no way in at all. Bound to a
+// button, this is that way in. `key_descriptor` returns None for it.
+pub(crate) const SK_KEYBOARD: c_int = 91;
+
 fn key_descriptor(code: c_int) -> Option<KeyDescriptor> {
     let (physical, logical) = match code {
         SK_SPACE => (PhysicalKey::Space, LogicalKey::Character(' ')),
@@ -2276,6 +2283,75 @@ pub extern "C" fn ruffle_keyboard_take_request() -> c_int {
     } else {
         0
     }
+}
+
+/// Raise the same request by hand, from a button bound to `SK_KEYBOARD`. The
+/// automatic path only fires for a field Ruffle tracks as focused; this one does
+/// not care, which is the entire point of having it.
+#[no_mangle]
+pub extern "C" fn ruffle_keyboard_request_manual() {
+    backend::ui::request_keyboard_manual();
+}
+
+/// Type `text` into the movie as if it came from a keyboard: for each character
+/// a KeyDown, the matching TextInput, then a KeyUp.
+///
+/// This is the fallback when the manual keyboard opens with no editable field
+/// focused, where `ruffle_keyboard_submit` has nothing to write into. TextInput
+/// is what an EditText consumes and also what fires an AVM1 `keyPress` handler
+/// (see the note in `ruffle_handle_key`), so a game with its own text box still
+/// receives what was typed. Returns the number of characters sent.
+#[no_mangle]
+pub extern "C" fn ruffle_keyboard_type_text(text: *const c_char) -> c_int {
+    if text.is_null() {
+        return 0;
+    }
+    let Ok(s) = (unsafe { core::ffi::CStr::from_ptr(text) }).to_str() else {
+        return 0;
+    };
+    let state = unsafe {
+        match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
+            Some(s) => s,
+            None => return 0,
+        }
+    };
+    let Ok(mut p) = state.player.lock() else {
+        return 0;
+    };
+    let mut sent = 0;
+    for c in s.chars() {
+        // The key half is best-effort: only characters that map to one of our
+        // Switch key codes carry a KeyDown/KeyUp, the rest are text only.
+        let key = char_key_code(c).and_then(key_descriptor);
+        if let Some(k) = key.clone() {
+            p.handle_event(PlayerEvent::KeyDown { key: k });
+        }
+        p.handle_event(PlayerEvent::TextInput { codepoint: c });
+        if let Some(k) = key {
+            p.handle_event(PlayerEvent::KeyUp { key: k });
+        }
+        sent += 1;
+    }
+    sent
+}
+
+/// Switch key code for a printable character, when one exists. Only the keys the
+/// mapper already knows about: letters (typed unshifted), digits, space.
+fn char_key_code(c: char) -> Option<c_int> {
+    let code = match c.to_ascii_lowercase() {
+        ' ' => SK_SPACE,
+        '\n' | '\r' => SK_ENTER,
+        'a' => SK_A, 'b' => SK_B, 'c' => SK_C, 'd' => SK_D, 'e' => SK_E,
+        'f' => SK_F, 'g' => SK_G, 'h' => SK_H, 'i' => SK_I, 'j' => SK_J,
+        'k' => SK_K, 'l' => SK_L, 'm' => SK_M, 'n' => SK_N, 'o' => SK_O,
+        'p' => SK_P, 'q' => SK_Q, 'r' => SK_R, 's' => SK_S, 't' => SK_T,
+        'u' => SK_U, 'v' => SK_V, 'w' => SK_W, 'x' => SK_X, 'y' => SK_Y,
+        'z' => SK_Z,
+        '0' => SK_0, '1' => SK_1, '2' => SK_2, '3' => SK_3, '4' => SK_4,
+        '5' => SK_5, '6' => SK_6, '7' => SK_7, '8' => SK_8, '9' => SK_9,
+        _ => return None,
+    };
+    Some(code)
 }
 
 /// Describe the focused editable TextField so C++ can configure swkbd to match

@@ -187,8 +187,13 @@ pub const KEYBOARD: &[(&str, u8, f32, f32)] = &[
     // home row now that CapsLock owns that slot; bottom-left is its real place).
     ("Control", 5, 0.0, 1.5), ("Alt", 5, 1.5, 1.5), ("Space", 5, 3.0, 5.0),
     ("Left", 5, 8.0, 1.0), ("Up", 5, 9.0, 1.0), ("Down", 5, 10.0, 1.0), ("Right", 5, 11.0, 1.0),
-    // Unbind + mouse clicks — a horizontal row along the bottom-right, under the
-    // numpad, so they sit "under the numbers" without the lop-sided stacked look.
+    // Unbind + mouse clicks + the keyboard — a horizontal row along the bottom,
+    // under the numpad, so they sit "under the numbers" without the lop-sided
+    // stacked look. KEYBOARD takes the free space to the left of (none), which
+    // keeps the three that were already there exactly where players know them.
+    // Ends at 7.8, not 8.0: the other three are spaced 0.2 apart, and a key that
+    // touches its neighbour reads as one wide key with a line through it.
+    ("Keyboard", 6, 3.7, 4.1),
     ("(none)", 6, 8.0, 3.4), ("Left click", 6, 11.6, 4.1), ("Right click", 6, 15.9, 4.1),
 ];
 
@@ -232,6 +237,7 @@ pub fn keyboard_label(name: &str) -> std::borrow::Cow<'static, str> {
         "(none)" => Cow::Borrowed(lc.none),
         "Left click" => Cow::Borrowed(lc.flash_mouse_left),
         "Right click" => Cow::Borrowed(lc.flash_mouse_right),
+        "Keyboard" => Cow::Borrowed(lc.flash_keyboard),
         other => Cow::Owned(other.to_string()),
     }
 }
@@ -1584,6 +1590,7 @@ pub fn flash_key_display(name: &str) -> std::borrow::Cow<'_, str> {
         "(none)" => lc.none,
         "Left click" => lc.flash_mouse_left,
         "Right click" => lc.flash_mouse_right,
+        "Keyboard" => lc.flash_keyboard,
         // Back-compat: pre-v1.4.0 keymaps stored the clicks in French. Kept so a
         // hand-edited / not-yet-migrated value still gets a translated label.
         "Clic gauche" => lc.flash_mouse_left,
@@ -1664,6 +1671,8 @@ fn flash_key_name_to_sk(name: &str) -> core::ffi::c_int {
         // Mouse-click pseudo-keys (routed to the mouse, not the keyboard).
         "Left click" => crate::SK_MOUSE_LEFT,
         "Right click" => crate::SK_MOUSE_RIGHT,
+        // Opens the console keyboard by hand.
+        "Keyboard" => crate::SK_KEYBOARD,
         // Back-compat: pre-v1.4.0 keymaps stored these in French. Accepted so
         // existing files keep resolving even before they're rewritten in English.
         "Clic gauche" => crate::SK_MOUSE_LEFT,

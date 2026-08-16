@@ -72,6 +72,13 @@ fn request_keyboard_open() {
     KEYBOARD_OPEN_REQUEST.store(true, Ordering::SeqCst);
 }
 
+/// Same request, raised by a button bound to the keyboard action instead of by
+/// a field taking focus. Separate entry point only so the caller reads clearly;
+/// the C++ loop consumes both through `take_keyboard_request`.
+pub fn request_keyboard_manual() {
+    request_keyboard_open();
+}
+
 /// Drop a pending request (focus left the field).
 fn cancel_keyboard_request() {
     KEYBOARD_OPEN_REQUEST.store(false, Ordering::SeqCst);

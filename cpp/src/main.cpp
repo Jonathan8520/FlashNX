@@ -81,6 +81,10 @@ extern "C" void ruffle_touches_draw(void);
 extern "C" int  ruffle_keyboard_take_request(void);
 extern "C" int  ruffle_keyboard_field(char* out, int cap, int* out_flags, int* out_max);
 extern "C" int  ruffle_keyboard_submit(const char* text);
+// Raise the keyboard from a button bound to SK_KEYBOARD, and type its result
+// into the movie when no editable field is focused to receive it.
+extern "C" void ruffle_keyboard_request_manual(void);
+extern "C" int  ruffle_keyboard_type_text(const char* text);
 extern "C" int  swkbd_prompt_game_field(const char* initial, int flags, int maxlen, char* out, int cap);
 
 // Switch key codes (must match SK_* constants in rust/src/lib.rs).
@@ -101,6 +105,9 @@ enum SwitchKey {
     // click at the cursor instead of a key. Must match rust/src/lib.rs.
     SK_MOUSE_LEFT  = 49,
     SK_MOUSE_RIGHT = 50,
+    // Opens the console keyboard, for the games whose text box Ruffle does not
+    // track as focused and which therefore never raise it on their own.
+    SK_KEYBOARD    = 91,
 };
 
 // Joycon → key mapping is now driven by the user-editable keymap on SD:
@@ -1031,6 +1038,9 @@ static void worker_entry(void* arg) {
         auto emit_p1 = [](int key, bool down) {
             if (key == SK_MOUSE_LEFT)       ruffle_handle_mouse_button(down);
             else if (key == SK_MOUSE_RIGHT) ruffle_handle_mouse_right(down);
+            // On the press only: the keyboard is a modal, and a release arriving
+            // after it closed would queue a second one.
+            else if (key == SK_KEYBOARD)  { if (down) ruffle_keyboard_request_manual(); }
             else if (key != SK_NONE)        ruffle_handle_key(key, down);
         };
         for (size_t i = 0; i < BINDINGS_COUNT; ++i) {
@@ -1067,7 +1077,10 @@ static void worker_entry(void* arg) {
             if (p2_active_mod < 0 && (kHeld2 & COMBO_MOD_MASKS[m])) p2_active_mod = m;
         }
         auto emit_p2 = [](int key, bool down) {
-            if (key != SK_NONE && key != SK_MOUSE_LEFT && key != SK_MOUSE_RIGHT) {
+            // Mouse and keyboard pseudo-keys stay with player 1: one cursor, and
+            // one modal that would suspend the game for both players.
+            if (key != SK_NONE && key != SK_MOUSE_LEFT && key != SK_MOUSE_RIGHT
+                && key != SK_KEYBOARD) {
                 ruffle_handle_key(key, down);
             }
         };
@@ -1202,6 +1215,16 @@ static void worker_entry(void* arg) {
                 if (swkbd_prompt_game_field(kbd_prefill, kbd_flags, kbd_max,
                                             kbd_out, sizeof(kbd_out)) == 0) {
                     ruffle_keyboard_submit(kbd_out);
+                }
+            } else {
+                // No field Ruffle calls focused. The automatic path stops here,
+                // because there is nothing to write into — but a button bound to
+                // the keyboard action was pressed on purpose, so open an empty
+                // one and TYPE the result into the game instead of doing nothing.
+                kbd_prefill[0] = '\0';
+                if (swkbd_prompt_game_field(kbd_prefill, 0, 0,
+                                            kbd_out, sizeof(kbd_out)) == 0) {
+                    ruffle_keyboard_type_text(kbd_out);
                 }
             }
             // The modal held the loop for a while; re-measure the clock so the
