@@ -7636,10 +7636,21 @@ impl SwitchRenderBackend {
         let sub = self.fit_text(&sub, ss, logo_left - 16.0 - 40.0);
         self.draw_text(40.0, 67.7, ss, &sub, swf::Color::from_rgb(0xAABFD8, 255));
 
-        // The right flank stays empty on purpose. It briefly carried the active
-        // sort, put there because the space was free — which is not a reason. The
-        // sort is already one Y away and named in the modal that changes it, so a
-        // permanent word for it was noise on every screen.
+        // Right flank: the current layout, mirroring the count line (#98). This
+        // is not the active sort that used to sit here and was removed as noise:
+        // the sort is one Y away and named in the modal that sets it, while the
+        // layout is changed from SETTINGS, two screens away, and the four
+        // layouts name themselves nowhere else — you can see that a grid is a
+        // grid, but not that it is called GRID.
+        let view = crate::loc::home_view_label(crate::loc::home_view());
+        let vwid = self.measure_text(view, ss);
+        self.draw_text(
+            vw - 40.0 - vwid,
+            67.7,
+            ss,
+            view,
+            swf::Color::from_rgb(0x7A8CA6, 255),
+        );
     }
 
     /// Gold diamond on a dark chip, the favourite marker. The UI font has no star
