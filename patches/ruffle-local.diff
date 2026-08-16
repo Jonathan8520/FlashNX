@@ -418,10 +418,10 @@ index 29eb34fdc..8eb4761bd 100644
          // There's no longer a handle to update
          self.dirty_state = DirtyState::Clean;
 diff --git a/core/src/character.rs b/core/src/character.rs
-index f1843308c..0442354b7 100644
+index f1843308c..1df7a120b 100644
 --- a/core/src/character.rs
 +++ b/core/src/character.rs
-@@ -73,7 +73,28 @@ impl<'gc> BitmapCharacter<'gc> {
+@@ -73,7 +73,38 @@ impl<'gc> BitmapCharacter<'gc> {
          if let Some(handle) = self.handle.get() {
              return Ok(handle.clone());
          }
@@ -437,20 +437,30 @@ index f1843308c..0442354b7 100644
 +        // could cost the user unsaved progress in whatever they play next.
 +        let sz = self.compressed.size();
 +        let want = sz.width as u64 * sz.height as u64 * 4;
-+        if bitmap_cache_would_exceed(want) {
++        let large = want >= LARGE_BITMAP_BYTES;
++        if bitmap_cache_would_exceed(want, large) {
 +            tracing::warn!(
-+                "bitmap decode refused ({}x{}): cached-bitmap budget exhausted",
++                "bitmap decode refused ({}x{}, {}): cached-bitmap budget exhausted \
++                 (total {} MB / {} MB, large {} MB / {} MB)",
 +                sz.width,
 +                sz.height,
++                if large { "large" } else { "small" },
++                CACHED_BITMAP_BYTES.load(std::sync::atomic::Ordering::Relaxed) / (1024 * 1024),
++                CACHED_BITMAP_BUDGET_BYTES.load(std::sync::atomic::Ordering::Relaxed) / (1024 * 1024),
++                CACHED_LARGE_BITMAP_BYTES.load(std::sync::atomic::Ordering::Relaxed) / (1024 * 1024),
++                LARGE_BITMAP_BUDGET_BYTES.load(std::sync::atomic::Ordering::Relaxed) / (1024 * 1024),
 +            );
 +            return Err(RenderError::TooLarge);
 +        }
          let decoded = self.compressed.decode()?;
 +        CACHED_BITMAP_BYTES.fetch_add(want, std::sync::atomic::Ordering::Relaxed);
++        if large {
++            CACHED_LARGE_BITMAP_BYTES.fetch_add(want, std::sync::atomic::Ordering::Relaxed);
++        }
          let new_handle = backend.register_bitmap(decoded)?;
          // FIXME - do we ever want to release this handle, to avoid taking up GPU memory?
          self.handle.set(new_handle.clone()).unwrap();
-@@ -96,6 +117,57 @@ pub enum CompressedBitmap {
+@@ -96,6 +127,102 @@ pub enum CompressedBitmap {
      Lossless(DefineBitsLossless<'static>),
  }
  
@@ -475,8 +485,36 @@ index f1843308c..0442354b7 100644
 +static CACHED_BITMAP_BUDGET_BYTES: std::sync::atomic::AtomicU64 =
 +    std::sync::atomic::AtomicU64::new(DEFAULT_BITMAP_ALLOWANCE);
 +
-+/// Total we are willing to see resident as movie + decoded bitmaps.
-+const TOTAL_BITMAP_ALLOWANCE: u64 = 450 * 1024 * 1024;
++/// Same, counting only the bitmaps big enough to need a large contiguous buffer
++/// to decode into, and the ceiling for those.
++///
++/// One number could not serve both shapes of movie, because the two do not fail
++/// the same way. Sonic RPG Ep.10 dies on ONE allocation: 1363x509 frames, 2.77 MB
++/// of contiguous heap each, and around 210-250 MB accumulated the next one cannot
++/// be satisfied even though plenty of total memory remains. The King of Fighters
++/// Wing (issue #102) never asks for anything contiguous: 384x224 sprites, 340 KB
++/// each, four thousand of them, and it wants some 800 MB in total. A single
++/// budget tuned for the first starves the second — 423 MB here, exhausted at
++/// frame 346, then 5137 refusals and a white screen with a few sprites on it.
++///
++/// So the strict ceiling now applies to the large ones only, where it was
++/// measured, and the total gets the room the small ones need.
++static CACHED_LARGE_BITMAP_BYTES: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++static LARGE_BITMAP_BUDGET_BYTES: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(LARGE_BITMAP_ALLOWANCE);
++
++/// A decoded bitmap at least this big counts as "large". 1 MB sits an order of
++/// magnitude clear of both examples above (340 KB vs 2.77 MB).
++const LARGE_BITMAP_BYTES: u64 = 1024 * 1024;
++
++/// Total we are willing to see resident as movie + decoded bitmaps, all sizes.
++/// The Switch title heap is ~3.2 GB and the vector arenas already hold 576 MB of
++/// it, so this leaves room for the atlases those bitmaps also fill.
++const TOTAL_BITMAP_ALLOWANCE: u64 = 1100 * 1024 * 1024;
++/// The same, for large bitmaps alone. Unchanged from the single budget this
++/// splits: it is the number Sonic RPG Ep.10 was measured against.
++const LARGE_BITMAP_ALLOWANCE: u64 = 450 * 1024 * 1024;
 +/// Floor, so a monstrous movie still gets room to show something.
 +const MIN_BITMAP_BUDGET: u64 = 96 * 1024 * 1024;
 +const DEFAULT_BITMAP_ALLOWANCE: u64 = TOTAL_BITMAP_ALLOWANCE;
@@ -487,22 +525,39 @@ index f1843308c..0442354b7 100644
 +/// bitmap from the first frame (observed: refusals 54 log lines in).
 +pub fn reset_bitmap_cache(movie_bytes: u64) {
 +    CACHED_BITMAP_BYTES.store(0, std::sync::atomic::Ordering::Relaxed);
++    CACHED_LARGE_BITMAP_BYTES.store(0, std::sync::atomic::Ordering::Relaxed);
++    // The movie's own resident bytes come off both ceilings: it is in the same
++    // heap either way, and a 284 MB movie has already spent that much of it.
 +    let budget = TOTAL_BITMAP_ALLOWANCE
 +        .saturating_sub(movie_bytes)
 +        .max(MIN_BITMAP_BUDGET);
++    let large_budget = LARGE_BITMAP_ALLOWANCE
++        .saturating_sub(movie_bytes)
++        .max(MIN_BITMAP_BUDGET)
++        .min(budget);
 +    CACHED_BITMAP_BUDGET_BYTES.store(budget, std::sync::atomic::Ordering::Relaxed);
++    LARGE_BITMAP_BUDGET_BYTES.store(large_budget, std::sync::atomic::Ordering::Relaxed);
 +    tracing::info!(
-+        "bitmap cache: budget {} MB (movie {} MB)",
++        "bitmap cache: budget {} MB total, {} MB for large bitmaps (movie {} MB)",
 +        budget / (1024 * 1024),
++        large_budget / (1024 * 1024),
 +        movie_bytes / (1024 * 1024),
 +    );
 +}
 +
-+fn bitmap_cache_would_exceed(want: u64) -> bool {
-+    CACHED_BITMAP_BYTES
++fn bitmap_cache_would_exceed(want: u64, large: bool) -> bool {
++    let total = CACHED_BITMAP_BYTES
 +        .load(std::sync::atomic::Ordering::Relaxed)
 +        .saturating_add(want)
-+        > CACHED_BITMAP_BUDGET_BYTES.load(std::sync::atomic::Ordering::Relaxed)
++        > CACHED_BITMAP_BUDGET_BYTES.load(std::sync::atomic::Ordering::Relaxed);
++    if total {
++        return true;
++    }
++    large
++        && CACHED_LARGE_BITMAP_BYTES
++            .load(std::sync::atomic::Ordering::Relaxed)
++            .saturating_add(want)
++            > LARGE_BITMAP_BUDGET_BYTES.load(std::sync::atomic::Ordering::Relaxed)
 +}
 +
  impl CompressedBitmap {
