@@ -125,8 +125,15 @@ pub(crate) fn https_error_message(sink: Sink) -> std::string::String {
             Sink::Memory => owned(lc.err_response_big),
             Sink::Sd => owned(lc.err_sd_write),
         },
-        // COULDN'T_RESOLVE_PROXY / _HOST / COULDN'T_CONNECT: no usable network.
-        5 | 6 | 7 => owned(lc.err_offline),
+        // COULDN'T_RESOLVE_PROXY / _HOST: the address never resolved. A console
+        // with its WiFi off and one whose DNS is broken fail identically here,
+        // so the message names both rather than blaming the WiFi alone — which
+        // sent a connected player checking the one thing that worked (#103).
+        5 | 6 => crate::loc::fill_one(lc.err_offline, curl),
+        // COULDN'T_CONNECT: the name DID resolve and the connection was refused.
+        // Nothing to check on the console; something between it and the server
+        // is saying no, which is a different sentence and a different fix.
+        7 => crate::loc::fill_one(lc.err_unreachable, curl),
         // OPERATION_TIMEDOUT.
         28 => owned(lc.err_timeout),
         // TLS handshake / certificate problems. On Switch the usual cause is a
