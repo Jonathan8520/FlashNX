@@ -225,6 +225,9 @@ pub struct SidecarNavigator {
     /// launch of a Newgrounds game in one app session, which left the game stuck
     /// on "Connecting to the Newgrounds API Gateway...". See `fetch`.
     ng_connect_calls: core::sync::atomic::AtomicU32,
+    /// Every file in this game's tree, indexed on the first miss so
+    /// `tail_match_path` can answer without walking the card again.
+    tree_index: core::cell::RefCell<Option<std::sync::Arc<Vec<(Vec<String>, PathBuf)>>>>,
 }
 
 impl SidecarNavigator {
@@ -243,6 +246,7 @@ impl SidecarNavigator {
             sidecar_dir,
             htdocs_proxy,
             ng_connect_calls: core::sync::atomic::AtomicU32::new(0),
+            tree_index: core::cell::RefCell::new(None),
         }
     }
 
@@ -412,6 +416,101 @@ impl SidecarNavigator {
         path
     }
 
+    /// Last local layer: any file in the game's tree whose path ENDS WITH the
+    /// requested one.
+    ///
+    /// The three layers above all assume the archived tree mirrors the URL the
+    /// movie asks with, and that is regularly untrue. Angry Birds Cheetos (#88)
+    /// asks for `<host>/external_assets/AngryBirdsCredits.swf` while its own
+    /// GameZIP stores that file under `<host>/flash/external_assets/` — one
+    /// directory deeper, because the SWF resolves against its containing page
+    /// rather than against itself. The same archive carries `flash/flash/...`
+    /// paths, so the mismatch runs both ways. The file was there all along; the
+    /// game's loader treated the miss as fatal and never left its loading screen.
+    ///
+    /// Matching on the tail keeps this specific: `external_assets/Credits.swf`
+    /// will not match some other `Credits.swf` elsewhere in the tree unless the
+    /// whole tail agrees. On a tie, the shallowest path wins, so the result does
+    /// not depend on directory iteration order. The walk happens once per game,
+    /// on the first miss, and is then reused.
+    fn tail_match_path(&self, url: &Url) -> Option<PathBuf> {
+        let wanted: Vec<String> = url
+            .path_segments()?
+            .filter(|s| !s.is_empty() && *s != "..")
+            // The tree holds literal names; the URL is encoded ("%20" for the
+            // space in a file name), so compare on the decoded form.
+            .map(|s| crate::sources::gamezip::percent_decode(s).to_ascii_lowercase())
+            .collect();
+        if wanted.is_empty() {
+            return None;
+        }
+        let index = self.tree_index();
+        // A GameZIP often carries the same asset under several hosts — this
+        // game ships an `-ru` twin of every file — so the tail alone can match
+        // twice. Rank the URL's own host first, then the shallowest path, so the
+        // answer is both right and stable.
+        let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+        let mut best: Option<((u8, usize), PathBuf)> = None;
+        for (segments, path) in index.iter() {
+            if segments.len() < wanted.len() {
+                continue;
+            }
+            if segments[segments.len() - wanted.len()..] != wanted[..] {
+                continue;
+            }
+            let same_host = segments.first().is_some_and(|s| *s == host);
+            let score = (u8::from(!same_host), segments.len());
+            if best.as_ref().is_none_or(|(s, _)| score < *s) {
+                best = Some((score, path.clone()));
+            }
+        }
+        best.map(|(_, p)| p)
+    }
+
+    /// Every file under the game's tree, as lowercased segment lists. Built once.
+    fn tree_index(&self) -> std::sync::Arc<Vec<(Vec<String>, PathBuf)>> {
+        if let Some(index) = self.tree_index.borrow().as_ref() {
+            return index.clone();
+        }
+        // Walked in C++, never with `std::fs::read_dir`: that one corrupts entry
+        // names on Horizon, and a Rust walk of this very tree reported it EMPTY
+        // while the files sat there on the card (#88). Same reason the library
+        // scan, the extraction and the sidecar reads all go through C++.
+        let mut root = self.sidecar_dir.to_string_lossy().into_owned().into_bytes();
+        root.push(0);
+        let mut buf = std::vec![0u8; 256 * 1024];
+        let n = unsafe {
+            swf_picker_list_tree(
+                root.as_ptr() as *const core::ffi::c_char,
+                buf.as_mut_ptr() as *mut core::ffi::c_char,
+                buf.len() as core::ffi::c_int,
+            )
+        };
+        let mut out: Vec<(Vec<String>, PathBuf)> = Vec::new();
+        if n > 0 {
+            let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+            let listing = std::string::String::from_utf8_lossy(&buf[..end]).into_owned();
+            for rel in listing.lines().filter(|l| !l.is_empty()) {
+                let segments: Vec<String> = rel
+                    .split('/')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_ascii_lowercase())
+                    .collect();
+                if segments.is_empty() {
+                    continue;
+                }
+                let mut path = self.sidecar_dir.clone();
+                for seg in rel.split('/').filter(|s| !s.is_empty()) {
+                    path.push(seg);
+                }
+                out.push((segments, path));
+            }
+        }
+        let index = std::sync::Arc::new(out);
+        *self.tree_index.borrow_mut() = Some(index.clone());
+        index
+    }
+
     /// True when `resolved` points at the movie's OWN entry SWF (its base URL).
     /// That file is stored flat as the library `<game>.swf` (not in the tree —
     /// see `gamezip::extract_gamezip_tree`), so `fetch`'s layer 0 serves it from
@@ -489,6 +588,14 @@ extern "C" {
     // a few — same newlib-glue unreliability as the read_dir/metadata bugs).
     fn swf_picker_file_size(path: *const core::ffi::c_char) -> i64;
     fn swf_picker_read_file(path: *const core::ffi::c_char, buf: *mut u8, cap: u64) -> i64;
+    /// Every file under `root`, one relative path per line. Same reason as the
+    /// two above: Rust cannot list a directory on Horizon without corrupting
+    /// the names.
+    fn swf_picker_list_tree(
+        root: *const core::ffi::c_char,
+        out: *mut core::ffi::c_char,
+        cap: core::ffi::c_int,
+    ) -> core::ffi::c_int;
 }
 
 /// Read a sidecar file via C++/libnx (reliable on Horizon, unlike std::fs::read).
@@ -683,12 +790,28 @@ impl NavigatorBackend for SidecarNavigator {
         let host_path = self.local_path(&resolved);
         let flat = self.flat_path(&resolved);
         let leaf = self.leaf_path(&resolved);
+        // Layer 4: the same file, deeper in the tree than the URL says (#88).
+        // Tried before the network, because a file we already have on the card
+        // beats a round trip to a mirror that will probably 404 too.
+        let tail = self.tail_match_path(&resolved);
         let found = entry_flat
             .as_ref()
             .and_then(|p| read_sidecar_file(p).map(|b| (b, p)))
             .or_else(|| read_sidecar_file(&host_path).map(|b| (b, &host_path)))
             .or_else(|| read_sidecar_file(&flat).map(|b| (b, &flat)))
-            .or_else(|| read_sidecar_file(&leaf).map(|b| (b, &leaf)));
+            .or_else(|| read_sidecar_file(&leaf).map(|b| (b, &leaf)))
+            .or_else(|| {
+                tail.as_ref().and_then(|p| {
+                    read_sidecar_file(p).map(|b| {
+                        tracing::info!(
+                            "sidecar: {} served from {} (matched by path tail)",
+                            resolved,
+                            p.display(),
+                        );
+                        (b, p)
+                    })
+                })
+            });
         let (bytes, from) = match found {
             Some((b, p)) => (b, p.clone()),
             None => {
@@ -725,12 +848,29 @@ impl NavigatorBackend for SidecarNavigator {
                         return async_return(Ok(resp));
                     }
                 }
+                // Say what the tree actually holds, not just which four paths we
+                // tried. "Not found" reads the same whether the file is one
+                // directory away or the tree was never extracted at all, and
+                // those two call for opposite fixes (#88).
+                let index = self.tree_index();
+                let sample: std::vec::Vec<std::string::String> = index
+                    .iter()
+                    .take(6)
+                    .map(|(segs, _)| segs.join("/"))
+                    .collect();
                 tracing::warn!(
-                    "sidecar: {} not found ({}, {}, {})",
+                    "sidecar: {} not found ({}, {}, {}); tree {} holds {} file(s): {}",
                     resolved,
                     host_path.display(),
                     flat.display(),
                     leaf.display(),
+                    self.sidecar_dir.display(),
+                    index.len(),
+                    if sample.is_empty() {
+                        std::string::String::from("(empty)")
+                    } else {
+                        sample.join(", ")
+                    },
                 );
                 let e = std::io::Error::new(
                     std::io::ErrorKind::NotFound,

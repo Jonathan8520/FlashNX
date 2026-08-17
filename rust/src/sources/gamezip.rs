@@ -717,7 +717,7 @@ fn resolve_html_launch_entry(
 /// often a character/asset stub, e.g. character_bear.swf) and the game shows a
 /// blank screen with a stray sprite. Only `%XX` is decoded; other bytes are kept
 /// verbatim ('+' is a literal '+' in a path, not a space).
-fn percent_decode(s: &str) -> std::string::String {
+pub(crate) fn percent_decode(s: &str) -> std::string::String {
     let b = s.as_bytes();
     let mut out: std::vec::Vec<u8> = std::vec::Vec::with_capacity(b.len());
     let mut i = 0;

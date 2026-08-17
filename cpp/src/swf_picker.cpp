@@ -344,6 +344,79 @@ extern "C" long long swf_picker_files_dir_size(const char* swf_path) {
     return dir_size_recursive(filesdir, 0);
 }
 
+// List every file under `root`, one relative path per line, into `out`.
+// Returns the number of files listed, or -1 if the root cannot be opened.
+//
+// Same reason as every other file helper here: Rust's `std::fs::read_dir`
+// corrupts entry names on Horizon (a two-byte truncation from a `dirent` layout
+// mismatch), so a Rust-side walk of a game's `.files` tree came back EMPTY even
+// though the tree was right there on the card — which is what made Angry Birds
+// Cheetos (#88) look like a failed extraction when the file it wanted was
+// present all along, one directory deeper than the URL asked for.
+//
+// Paths use '/' and are relative to `root`. Truncated at `cap`, and bounded at
+// 20000 entries so a pathological tree cannot stall the caller.
+extern "C" int swf_picker_list_tree(const char* root, char* out, int cap) {
+    if (!root || !*root || !out || cap < 2) return -1;
+    out[0] = '\0';
+    int written = 0;
+    int count = 0;
+
+    // Iterative walk: a stack of directories relative to `root` ("" = root).
+    char stack[64][384];
+    int depth = 0;
+    stack[depth][0] = '\0';
+    depth = 1;
+
+    while (depth > 0) {
+        char rel[384];
+        std::snprintf(rel, sizeof(rel), "%s", stack[--depth]);
+        char dir[512];
+        if (rel[0] == '\0') {
+            std::snprintf(dir, sizeof(dir), "%s", root);
+        } else {
+            std::snprintf(dir, sizeof(dir), "%s/%s", root, rel);
+        }
+        DIR* d = ::opendir(dir);
+        if (!d) {
+            if (rel[0] == '\0') return -1; // root itself is unreadable
+            continue;
+        }
+        while (struct dirent* e = ::readdir(d)) {
+            if (e->d_name[0] == '.' &&
+                (e->d_name[1] == '\0' || (e->d_name[1] == '.' && e->d_name[2] == '\0'))) {
+                continue;
+            }
+            char child[384];
+            if (rel[0] == '\0') {
+                std::snprintf(child, sizeof(child), "%s", e->d_name);
+            } else {
+                std::snprintf(child, sizeof(child), "%s/%s", rel, e->d_name);
+            }
+            char full[512];
+            std::snprintf(full, sizeof(full), "%s/%s", root, child);
+            struct stat st;
+            if (::stat(full, &st) != 0) continue;
+            if (S_ISDIR(st.st_mode)) {
+                if (depth < 64) {
+                    std::snprintf(stack[depth], sizeof(stack[depth]), "%s", child);
+                    depth++;
+                }
+                continue;
+            }
+            const int need = (int)std::strlen(child) + 1;
+            if (written + need >= cap || count >= 20000) {
+                ::closedir(d);
+                return count;
+            }
+            written += std::snprintf(out + written, (size_t)(cap - written), "%s\n", child);
+            count++;
+        }
+        ::closedir(d);
+    }
+    return count;
+}
+
 // Robust GameZIP-extraction file write (v1.3.0 fix). Rust's std::fs::write
 // silently fails to persist some files on Horizon (write returns Ok yet the
 // file is later unreadable; std::fs::metadata even returns a timestamp as the
