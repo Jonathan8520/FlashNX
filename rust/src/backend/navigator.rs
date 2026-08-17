@@ -272,35 +272,74 @@ impl SidecarNavigator {
     /// mirror serves static files). Returns the bytes, or None on any miss so the
     /// caller falls through to the usual not-found error. CONTENT-NEUTRAL: same
     /// mirror the GameZIP came from, only for the game the user downloaded.
+    /// The hosts to try on the mirror, in order: the one asked for, then its
+    /// `www` sibling and the bare domain.
+    ///
+    /// Deliberately generic — no site is named here. A capture keeps a file
+    /// under the host it was fetched from, and a game may well request it from
+    /// another of the site's own hosts; asking the same path of `www.<domain>`
+    /// costs one request, only ever after a miss, and covers that.
+    fn host_fallbacks_impl(host: &str) -> std::vec::Vec<std::string::String> {
+        let mut out = std::vec![std::string::String::from(host)];
+        let labels: std::vec::Vec<&str> = host.split('.').collect();
+        if labels.len() > 2 {
+            let domain = labels[labels.len() - 2..].join(".");
+            for candidate in [std::format!("www.{domain}"), domain] {
+                if !out.contains(&candidate) {
+                    out.push(candidate);
+                }
+            }
+        }
+        out
+    }
+
     fn fetch_from_mirror(
         &self,
         resolved: &Url,
         cache_path: &std::path::Path,
     ) -> Option<std::vec::Vec<u8>> {
         let host = resolved.host_str()?;
-        let mirror = std::format!(
-            "https://infinity.unstable.life/Flashpoint/Legacy/htdocs/{}{}",
-            host,
-            resolved.path()
-        );
         const CAP: usize = 16 * 1024 * 1024;
-        match crate::net::http_get(&mirror, CAP) {
-            Ok(bytes) => {
-                tracing::info!(
-                    "sidecar: fetched {} from mirror ({} bytes)",
-                    resolved,
-                    bytes.len()
-                );
-                if let Some(p) = cache_path.to_str() {
-                    crate::sources::gamezip::write_sidecar_abs(p, &bytes);
+        // The same path under a few sibling hosts, because the archive keeps a
+        // file under the host it was CAPTURED from, which is not always the host
+        // a game asks it from. Hasee Bounce (#86) requests its Neopets game
+        // system from `images.neopets.com`, where the mirror answers 404, while
+        // the very same file sits under `images50.neopets.com` and
+        // `www.neopets.com`. Only tried after the requested host has failed, so
+        // a game that asks correctly costs nothing.
+        for candidate in Self::host_fallbacks_impl(host) {
+            let mirror = std::format!(
+                "https://infinity.unstable.life/Flashpoint/Legacy/htdocs/{}{}",
+                candidate,
+                resolved.path()
+            );
+            match crate::net::http_get(&mirror, CAP) {
+                Ok(bytes) => {
+                    if candidate != host {
+                        tracing::info!(
+                            "sidecar: {} served from mirror host {} ({} bytes)",
+                            resolved,
+                            candidate,
+                            bytes.len()
+                        );
+                    } else {
+                        tracing::info!(
+                            "sidecar: fetched {} from mirror ({} bytes)",
+                            resolved,
+                            bytes.len()
+                        );
+                    }
+                    if let Some(p) = cache_path.to_str() {
+                        crate::sources::gamezip::write_sidecar_abs(p, &bytes);
+                    }
+                    return Some(bytes);
                 }
-                Some(bytes)
-            }
-            Err(e) => {
-                tracing::warn!("sidecar: mirror miss {} ({}): {}", resolved, mirror, e);
-                None
+                Err(e) => {
+                    tracing::warn!("sidecar: mirror miss {} ({}): {}", resolved, mirror, e);
+                }
             }
         }
+        None
     }
 
     /// Map a resolved request URL to a local sidecar path: take the URL's path
@@ -310,6 +349,82 @@ impl SidecarNavigator {
     /// original absolute URL (e.g. `http://www.fliplineads.com/serve/data/x.xml`)
     /// resolves to the bundled stub. Empty and `..` segments are dropped so a
     /// load can't escape the dir.
+    /// Where an archived answer to a DYNAMIC request lives, when the archive
+    /// stored it under a path built from that request's parameters.
+    ///
+    /// Flashpoint cannot keep a PHP endpoint alive, so it keeps its ANSWER as a
+    /// file — and the file's path is the query, rearranged. The Neopets game
+    /// system asks its translations from
+    /// `.../gettranslationxml.phtml?lang=en&type_id=4&item_id=1157`, and the
+    /// capture holds `www.neopets.com/transcontent/4/1157/en.xml` (#85). Every
+    /// Neopets game of that era makes this call at boot and stops on its NeoBIOS
+    /// screen when it fails, so the rewrite is worth naming explicitly rather
+    /// than hoping a generic search stumbles onto the right file.
+    fn archived_dynamic_path(&self, url: &Url, body: Option<&str>) -> Option<std::string::String> {
+        if !url.path().ends_with("gettranslationxml.phtml") {
+            return None;
+        }
+        let mut lang = None;
+        let mut type_id = None;
+        let mut item_id = None;
+        // The parameters come in the query string on the first call and in a
+        // POST body on the second — same endpoint, same answer, and the game
+        // makes both before it will leave its BIOS screen.
+        let mut take = |k: &str, v: std::string::String| match k {
+            "lang" => lang = Some(v),
+            "type_id" => type_id = Some(v),
+            "item_id" => item_id = Some(v),
+            _ => {}
+        };
+        for (k, v) in url.query_pairs() {
+            take(k.as_ref(), v.into_owned());
+        }
+        if let Some(body) = body {
+            for pair in body.split('&') {
+                if let Some((k, v)) = pair.split_once('=') {
+                    // The KEY needs decoding too, not just the value: this game
+                    // posts `type%5Fid=4&item%5Fid=1157`, where %5F is the
+                    // underscore. Comparing the raw key found nothing, which is
+                    // why the second call still failed with the body in hand.
+                    take(
+                        &crate::sources::gamezip::percent_decode(k),
+                        crate::sources::gamezip::percent_decode(v),
+                    );
+                }
+            }
+        }
+        let Some(((lang, type_id), item_id)) = lang.zip(type_id).zip(item_id) else {
+            // No parameters anywhere — logged rather than guessed, because the
+            // game calls this endpoint a second time bare and what it expects
+            // then is not something the archive shows.
+            tracing::warn!(
+                "sidecar: {} asked with no lang/type_id/item_id — body: {:?}",
+                url,
+                body.map(|b| &b[..b.len().min(200)]).unwrap_or(""),
+            );
+            return None;
+        };
+        // Lowercased: the same game asks with `lang=en` in the query and
+        // `lang=EN` in the body, and the archive holds `en.xml`. The local
+        // lookup compares without case, but the mirror does not.
+        let lang = lang.to_ascii_lowercase();
+        Some(std::format!("transcontent/{type_id}/{item_id}/{lang}.xml"))
+    }
+
+    /// The archived answer, if this game's tree holds it.
+    fn archived_dynamic_local(&self, rel: &str) -> Option<PathBuf> {
+        let index = self.tree_index();
+        let wanted: std::vec::Vec<std::string::String> =
+            rel.split('/').map(|s| s.to_ascii_lowercase()).collect();
+        index
+            .iter()
+            .find(|(segments, _)| {
+                segments.len() >= wanted.len()
+                    && segments[segments.len() - wanted.len()..] == wanted[..]
+            })
+            .map(|(_, path)| path.clone())
+    }
+
     fn local_path(&self, url: &Url) -> PathBuf {
         let mut path = self.sidecar_dir.clone();
         if let Some(host) = url.host_str() {
@@ -790,10 +905,23 @@ impl NavigatorBackend for SidecarNavigator {
         let host_path = self.local_path(&resolved);
         let flat = self.flat_path(&resolved);
         let leaf = self.leaf_path(&resolved);
-        // Layer 4: the same file, deeper in the tree than the URL says (#88).
-        // Tried before the network, because a file we already have on the card
-        // beats a round trip to a mirror that will probably 404 too.
-        let tail = self.tail_match_path(&resolved);
+        // Layer 4: the same file, deeper in the tree than the URL says (#88), or
+        // the archived answer to a dynamic request (#85). Both are tried before
+        // the network: a file we already have on the card beats a round trip to
+        // a mirror that will probably 404 too.
+        let post_body = request
+            .body()
+            .as_ref()
+            .and_then(|(bytes, _)| std::str::from_utf8(bytes).ok())
+            .map(std::string::String::from);
+        // The archived answer to a dynamic request (#85): a relative path built
+        // from the query, looked for in this game's tree and — since a game can
+        // have no tree at all, like Hasee Bounce (#86) — on the mirror too.
+        let archived_rel = self.archived_dynamic_path(&resolved, post_body.as_deref());
+        let tail = archived_rel
+            .as_deref()
+            .and_then(|rel| self.archived_dynamic_local(rel))
+            .or_else(|| self.tail_match_path(&resolved));
         let found = entry_flat
             .as_ref()
             .and_then(|p| read_sidecar_file(p).map(|b| (b, p)))
@@ -821,6 +949,29 @@ impl NavigatorBackend for SidecarNavigator {
                 // ActionScript (Racing is Magic loads `xml/config.xml` at
                 // runtime), so the static download-time prefetch can't know about
                 // them — fetch on demand, cache, and serve.
+                // The rewritten path first: the mirror answers it (verified for
+                // both Neopets games) while it 404s the PHP endpoint the game
+                // actually asked for.
+                if self.htdocs_proxy {
+                    if let Some(rel) = archived_rel.as_deref() {
+                        if let Ok(rewritten) =
+                            Url::parse(&std::format!("http://{}/{}", resolved.host_str().unwrap_or("www.neopets.com"), rel))
+                        {
+                            if let Some(b) = self.fetch_from_mirror(&rewritten, &host_path) {
+                                tracing::info!(
+                                    "sidecar: {} served from mirror as {}",
+                                    resolved,
+                                    rel
+                                );
+                                let resp: Box<dyn SuccessResponse> = Box::new(SidecarResponse {
+                                    url: resolved.to_string(),
+                                    bytes: Some(b),
+                                });
+                                return async_return(Ok(resp));
+                            }
+                        }
+                    }
+                }
                 if self.htdocs_proxy {
                     if let Some(b) = self.fetch_from_mirror(&resolved, &host_path) {
                         let resp: Box<dyn SuccessResponse> = Box::new(SidecarResponse {
