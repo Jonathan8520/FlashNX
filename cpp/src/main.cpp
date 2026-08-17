@@ -48,6 +48,9 @@ extern "C" void ruffle_redraw_paused(void);
 extern "C" void ruffle_skip_paused_time(uint64_t us);
 // One SWF frame in microseconds (clamped), for the touch click delay (#87).
 extern "C" uint64_t ruffle_frame_interval_us(void);
+// What is on stage, two levels deep, one line each. Fired once a few seconds
+// into a game (#100), so a black-screen report carries the answer.
+extern "C" void ruffle_dump_stage_children(void);
 extern "C" void ruffle_draw_menu(int selected);
 extern "C" void ruffle_draw_screen_menu(int selected);
 extern "C" void ruffle_menu_close_begin(void);
@@ -783,6 +786,8 @@ static void worker_entry(void* arg) {
     bool     touch_press_armed = false;
     uint64_t touch_press_at    = 0;
     bool     touch_press_held  = false;
+    // Frames since this game started, for the one-shot display-list dump (#100).
+    uint32_t frames_since_start = 0;
 
     // Real-time pacing: instead of telling Ruffle "16.6 ms elapsed" every tick,
     // we measure actual wall-clock between iterations and let its frame
@@ -1248,15 +1253,33 @@ static void worker_entry(void* arg) {
         // of AVM1 + display-list work), not catch-up replay — and only adds
         // visible slow-motion, so keep the loose cap and let the game run at
         // real-time speed (dropping rendered frames) when the sim can't keep up.
-        // Half a second between two iterations is not a slow frame, it is the
+        // Three seconds between two iterations is not a slow frame, it is the
         // app not running at all: HOME menu, sleep, an applet on top. Nobody
         // resumes us explicitly there, so hide the gap from getTimer() here,
-        // exactly like a pause does (#87). Genuinely slow frames stay below
-        // this bar and keep their current behaviour.
-        if (dt_us > 500000ULL) ruffle_skip_paused_time(dt_us - 100000ULL);
+        // exactly like a pause does (#87).
+        //
+        // The bar was half a second, and half a second is something a game does
+        // on its own: Peggle spends 619 ms in one frame while it unpacks its
+        // levels (#100). Taking that time off getTimer() rewinds the movie's
+        // clock under an animation engine that has already recorded when it
+        // started, and its fades never advance — every screen stayed hidden,
+        // which looks exactly like a game that never starts. Nobody comes back
+        // from the HOME menu in under three seconds, so the intent survives.
+        if (dt_us > 3000000ULL) ruffle_skip_paused_time(dt_us - 100000ULL);
         if (dt_us > 100000ULL) dt_us = 100000ULL;
 
         ruffle_render_frame_dt(dt_us);
+        // At ~8 s, then every ~15 s, four times in all. One dump is not enough
+        // for a game that only reaches its gameplay screen later: Peggle traces
+        // "Starting Level" long after the first snapshot, and the question is
+        // what the stage looks like THEN.
+        // One snapshot of the stage, ~8 s in: by then a game that is going to
+        // show something has, and one that shows a black screen has settled into
+        // whatever it is doing. Six lines, and they answer the first question a
+        // blank screen raises — is anything on stage, and is it visible?
+        if (++frames_since_start == 480) {
+            ruffle_dump_stage_children();
+        }
         gl_context_swap();
 
         if (back_to_library) break;

@@ -1684,6 +1684,11 @@ pub struct SwitchRenderBackend {
     warned_unsupported: u32,
     /// Frame counter for periodic `glGetError` polling.
     frame_count: u32,
+    /// Bounding box of this window's draws, in viewport pixels (see note_draw_extent).
+    draw_extent: Option<(f32, f32, f32, f32)>,
+    /// Largest alpha multiplier seen this window: 0 means every draw was fully
+    /// transparent, which looks exactly like drawing nothing.
+    draw_max_alpha: f32,
     /// The one texture write held back until something reads a texture.
     pending_upload: Option<PendingUpload>,
     /// Buffer handed back by the last flush, so the next write refills it
@@ -4413,6 +4418,8 @@ impl SwitchRenderBackend {
             mask: MaskState::default(),
             warned_unsupported: 0,
             frame_count: 0,
+            draw_extent: None,
+            draw_max_alpha: 0.0,
             pending_upload: None,
             upload_scratch: std::vec::Vec::new(),
             shapes_registered: 0,
@@ -4466,6 +4473,31 @@ impl SwitchRenderBackend {
     /// `render_bitmap` of this texture samples it the same way as any bitmap.
     /// Commands are pre-shifted by Ruffle to target-local coords, so no origin
     /// offset is applied here.
+    /// Where the frame's draws actually land, in viewport pixels, accumulated
+    /// across a heartbeat window.
+    ///
+    /// A game can draw hundreds of objects and show nothing, and the two reasons
+    /// need opposite fixes: the content sits outside the viewport (a transform
+    /// or a stage-size problem), or it sits in the right place and is invisible
+    /// (alpha, colour transform, a texture that never bound). The counters said
+    /// "886 draws" for a blank screen on Peggle (#100) without separating those.
+    fn note_draw_extent(&mut self, m: &Matrix) {
+        let x = m.tx.to_pixels() as f32;
+        let y = m.ty.to_pixels() as f32;
+        // Where the draw is ANCHORED, plus its transformed unit vector. For a
+        // bitmap that is the whole quad; for a shape it is the origin, since the
+        // geometry's own extent lives in the vertex buffer. Enough either way to
+        // answer the only question here: is this on the screen or not.
+        let x2 = x + m.a + m.c;
+        let y2 = y + m.b + m.d;
+        let (lo_x, hi_x) = if x <= x2 { (x, x2) } else { (x2, x) };
+        let (lo_y, hi_y) = if y <= y2 { (y, y2) } else { (y2, y) };
+        self.draw_extent = match self.draw_extent {
+            None => Some((lo_x, lo_y, hi_x, hi_y)),
+            Some((a, b, c, d)) => Some((a.min(lo_x), b.min(lo_y), c.max(hi_x), d.max(hi_y))),
+        };
+    }
+
     fn world_matrix(&self, m: &Matrix) -> [GLfloat; 9] {
         let (w, h, flip_y) = match self.offscreen_dims {
             Some((ow, oh)) => (ow.max(1) as f32, oh.max(1) as f32, false),
@@ -5679,6 +5711,7 @@ impl SwitchRenderBackend {
     /// texel row 0 = Flash top (every offscreen render we produce is).
     fn draw_fullscreen_texture(&mut self, tex: GLuint, tw: u32, th: u32, set_blend: impl FnOnce()) {
         let scaled = Matrix::scale(tw as f32, th as f32);
+        self.note_draw_extent(&scaled);
         let world = self.world_matrix(&scaled);
         const IDENT_MULT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
         const IDENT_ADD: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
@@ -12456,7 +12489,7 @@ impl RenderBackend for SwitchRenderBackend {
             let cpu_mhz = unsafe { ruffle_cpu_clock_hz() } / 1_000_000;
             let docked = unsafe { ruffle_is_docked() } != 0;
             let msg = std::format!(
-                "f{}: fps={} cpu={}MHz dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB heap={}MB\n",
+                "f{}: fps={} cpu={}MHz dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB heap={}MB drawbox={} maxalpha={:.2}\n",
                 self.frame_count,
                 fps_str,
                 cpu_mhz,
@@ -12497,6 +12530,13 @@ impl RenderBackend for SwitchRenderBackend {
                 ram_used / (1024 * 1024),
                 ram_total / (1024 * 1024),
                 unsafe { ruffle_heap_used() } / (1024 * 1024),
+                match self.draw_extent.take() {
+                    Some((x0, y0, x1, y1)) => std::format!(
+                        "{:.0},{:.0}..{:.0},{:.0}", x0, y0, x1, y1
+                    ),
+                    None => std::string::String::from("(nothing drawn)"),
+                },
+                core::mem::replace(&mut self.draw_max_alpha, 0.0),
             );
             let mut bytes = msg.into_bytes();
             bytes.push(0);
@@ -12888,6 +12928,7 @@ impl CommandHandler for SwitchRenderBackend {
                 tx: m.tx,
                 ty: m.ty,
             };
+            self.note_draw_extent(&scaled);
             let world = self.world_matrix(&scaled);
             let mult = transform.color_transform.mult_rgba_normalized();
             let add = transform.color_transform.add_rgba_normalized();
@@ -12930,8 +12971,10 @@ impl CommandHandler for SwitchRenderBackend {
             tx: m.tx,
             ty: m.ty,
         };
+        self.note_draw_extent(&scaled);
         let world = self.world_matrix(&scaled);
         let mult = transform.color_transform.mult_rgba_normalized();
+        self.draw_max_alpha = self.draw_max_alpha.max(mult[3]);
         let add = transform.color_transform.add_rgba_normalized();
         let uv_remap = [
             switch_bitmap.u0,
@@ -13002,11 +13045,13 @@ impl CommandHandler for SwitchRenderBackend {
         {
             return;
         }
+        self.note_draw_extent(&transform.matrix);
         let world = self.world_matrix(&transform.matrix);
         if world.iter().any(|v| !v.is_finite()) {
             return;
         }
         let mult = transform.color_transform.mult_rgba_normalized();
+        self.draw_max_alpha = self.draw_max_alpha.max(mult[3]);
         let add = transform.color_transform.add_rgba_normalized();
         // RELIABLE mask counters: only count once we're certain this shape
         // actually issues geometry (past all early-returns). `mask_shape` now

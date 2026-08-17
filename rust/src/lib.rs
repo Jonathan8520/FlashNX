@@ -258,6 +258,27 @@ fn fmt_ext_value(v: &ExtValue) -> std::string::String {
 /// the actual container emulation (config, site-lock OK, LSO-backed saves).
 struct ContainerInterface;
 
+/// Callbacks the movie has registered for its container to call, lowercased.
+static EI_CALLBACKS: Mutex<std::vec::Vec<std::string::String>> = Mutex::new(std::vec::Vec::new());
+/// Container callbacks waiting to be made on the next frame, with the argument
+/// the page would have passed (see `call_method`).
+static EI_PENDING: Mutex<std::vec::Vec<(std::string::String, Option<std::string::String>)>> =
+    Mutex::new(std::vec::Vec::new());
+
+/// Queue a container callback, if the movie registered one by that name.
+fn queue_container_callback(wanted: &str, arg: Option<&str>) {
+    let known: std::vec::Vec<std::string::String> =
+        EI_CALLBACKS.lock().map(|s| s.clone()).unwrap_or_default();
+    // Match without case, call with the spelling the movie registered: Ruffle
+    // looks these up case-sensitively.
+    let Some(actual) = known.iter().find(|k| k.eq_ignore_ascii_case(wanted)) else {
+        return;
+    };
+    if let Ok(mut q) = EI_PENDING.lock() {
+        q.push((actual.clone(), arg.map(std::string::String::from)));
+    }
+}
+
 impl ExternalInterfaceProvider for ContainerInterface {
     fn call_method(&self, _context: &mut UpdateContext<'_>, name: &str, args: &[ExtValue]) -> ExtValue {
         let args_str: std::vec::Vec<std::string::String> = args.iter().map(fmt_ext_value).collect();
@@ -295,6 +316,30 @@ impl ExternalInterfaceProvider for ContainerInterface {
             }
             return ExtValue::Null;
         }
+        // Portal games (PopCap's Peggle, #100) do not start themselves: the SWF
+        // tells the hosting page it is ready, and the page's JavaScript then
+        // calls BACK into the movie — `onSessionStart`, then `onGameStart` — to
+        // take it off its loading screen. With no page, the game finishes
+        // loading, parks its content off-stage (measured: `clip_game` at x=542
+        // for a 542-wide stage) and waits for ever behind a full-screen
+        // preloader. Nobody had ever played the other half of this dialogue.
+        //
+        // Queued rather than called here: we are inside a call FROM the movie,
+        // and re-entering ActionScript from an ExternalInterface handler is a
+        // good way to corrupt an AVM already in flight. The frame loop drains it.
+        // The dialogue runs in two beats, and each answer belongs to its own.
+        // Answering both at the first beat is what threw #1006 in the bundled ad
+        // API: `onGameStart` was called before the game had a level to start.
+        if lname == "setswfisready" || lname == "swfisready" {
+            queue_container_callback("onSessionStart", None);
+        }
+        // "Level built, mode 0, start level 0" — the page replies by starting the
+        // game. No argument: the movie's own calls carry XML payloads, but the
+        // handler on the other side takes none, and says so
+        // (ArgumentError #1063, "Expected 0, got 1").
+        if lname == "gameready" {
+            queue_container_callback("onGameStart", None);
+        }
         if lname.contains("domain")
             || lname.contains("location")
             || lname.contains("url")
@@ -318,6 +363,12 @@ impl ExternalInterfaceProvider for ContainerInterface {
         // Callbacks the game exposes TO the container (ExternalInterface.addCallback).
         // Logging these reveals the JS->Flash half of the bridge.
         log_str(&std::format!("EI callback registered by game: {}\n", name));
+        // Kept VERBATIM: Ruffle looks callbacks up case-sensitively, so the name
+        // we call back with has to be the one the movie registered — `onGameStart`,
+        // not `ongamestart`, which it answers with "unknown internal interface".
+        if let Ok(mut seen) = EI_CALLBACKS.lock() {
+            seen.push(std::string::String::from(name));
+        }
     }
 
     fn get_id(&self) -> Option<std::string::String> {
@@ -1111,6 +1162,23 @@ pub extern "C" fn ruffle_frame_interval_us() -> u64 {
     ((1_000_000.0 / fps) as u64).clamp(16_000, 60_000)
 }
 
+/// Two levels of the display list, one line each: what is on stage, where, and
+/// whether it is visible. Printed once a few seconds into a game, so a "black
+/// screen" report carries the answer with it.
+#[no_mangle]
+pub extern "C" fn ruffle_dump_stage_children() {
+    let state = unsafe {
+        match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
+            Some(s) => s,
+            None => return,
+        }
+    };
+    if let Ok(mut p) = state.player.lock() {
+        log_str("---- stage ----\n");
+        p.dump_stage_children();
+    }
+}
+
 /// Hide `us` microseconds of wall clock from the movie (#87).
 ///
 /// Frames only advance on the `dt` we hand to `tick()`, but `getTimer()` reads
@@ -1150,6 +1218,25 @@ fn render_frame_with_dt(dt: FloatDuration) {
     // (our backend dispatch: shape/bitmap/gradient draws to GL) so the
     // heartbeat in render.rs can show the breakdown — tells us whether
     // CPU (AVM) or GPU (draws) is the perf bottleneck in any given scene.
+    // Play the container's half of the ExternalInterface dialogue, outside any
+    // call from the movie (#100).
+    let pending: std::vec::Vec<(std::string::String, Option<std::string::String>)> =
+        match EI_PENDING.lock() {
+            Ok(mut q) if !q.is_empty() => q.drain(..).collect(),
+            _ => std::vec::Vec::new(),
+        };
+    for (name, arg) in pending {
+        log_str(&std::format!(
+            "EI container -> movie: {}({})\n",
+            name,
+            arg.as_deref().unwrap_or(""),
+        ));
+        let args: std::vec::Vec<ExtValue> = match arg {
+            Some(a) => std::vec![ExtValue::String(a)],
+            None => std::vec::Vec::new(),
+        };
+        player.call_internal_interface(&name, args);
+    }
     use std::sync::atomic::Ordering;
     let t0 = unsafe { ruffle_tick_now() };
     player.tick(dt);

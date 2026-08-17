@@ -23,14 +23,14 @@
 use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
+
 
 use ruffle_render::backend::{
     BufferUsage, Context3D, Context3DBlendFactor, Context3DCommand, Context3DCompareMode,
     Context3DProfile, Context3DTextureFormat, Context3DTriangleFace, Context3DVertexBufferFormat,
     IndexBuffer, ProgramType, ShaderModule, Texture, VertexBuffer,
 };
-use ruffle_render::bitmap::{BitmapHandle, BitmapHandleImpl};
+use ruffle_render::bitmap::BitmapHandle;
 use ruffle_render::error::Error;
 
 use naga_agal::{ParsedBytecode, VertexAttributeFormat};
