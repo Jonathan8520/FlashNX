@@ -2,6 +2,8 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <malloc.h>
 #include <sys/stat.h>
 #include <switch.h>
 
@@ -369,6 +371,55 @@ extern "C" int ruffle_query_ram(uint64_t* used_out, uint64_t* total_out) {
     *used_out  = used;
     *total_out = total;
     return 0;
+}
+
+// Bytes currently handed out by malloc, which is what a Rust allocation failure
+// actually runs out of. `ruffle_query_ram` cannot answer that: it reports the
+// heap the crt0 RESERVED (a flat 3185/3189 MB all session), so an abort like
+// "memory allocation of 3744000 bytes failed" reads as if there were 3 GB free.
+// mallinfo's fields are `int`, so this saturates rather than wrapping past 2 GB.
+extern "C" uint64_t ruffle_heap_used(void) {
+    struct mallinfo mi = mallinfo();
+    return mi.uordblks < 0 ? UINT64_C(0x7FFFFFFF) : (uint64_t)mi.uordblks;
+}
+
+// How many bytes malloc will actually hand out, found by asking until it says
+// no. Everything is freed again before returning, so this only costs the time
+// of the probe (~ms) and tells us the one number every OOM investigation so far
+// has had to guess: `ruffle_query_ram` reports the RESERVED heap (a flat
+// 3185/3189 MB), while allocations were observed failing around 1.07 GB.
+//
+// Chunked rather than one big ask, because a single huge malloc can fail for
+// want of one contiguous run while plenty of total memory remains — the sum of
+// the chunks is the number that matters to us, since our own consumers (arenas,
+// atlases, decoded frames) allocate in pieces of a few MB.
+extern "C" uint64_t ruffle_probe_heap_ceiling(uint64_t chunk_bytes, uint64_t* biggest_single_out) {
+    static void* blocks[4096];
+    size_t n = 0;
+    uint64_t total = 0;
+    while (n < sizeof(blocks) / sizeof(blocks[0])) {
+        void* p = std::malloc((size_t)chunk_bytes);
+        if (!p) break;
+        blocks[n++] = p;
+        total += chunk_bytes;
+    }
+    for (size_t i = 0; i < n; ++i) std::free(blocks[i]);
+    // Then the largest SINGLE block, halving from the total until one lands.
+    if (biggest_single_out) {
+        uint64_t want = total > 0 ? total : chunk_bytes;
+        uint64_t best = 0;
+        while (want >= 1024 * 1024) {
+            void* p = std::malloc((size_t)want);
+            if (p) {
+                std::free(p);
+                best = want;
+                break;
+            }
+            want /= 2;
+        }
+        *biggest_single_out = best;
+    }
+    return total;
 }
 
 extern "C" uint64_t ruffle_tick_now(void) {

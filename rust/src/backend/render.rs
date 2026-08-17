@@ -469,6 +469,36 @@ const ARENA_VBO_ALIGN: GLsizeiptr = 24;
 /// offset must be aligned to the index type (4 bytes for GL_UNSIGNED_INT).
 const ARENA_IBO_ALIGN: GLsizeiptr = 4;
 
+/// A texture write kept back until something actually reads that texture.
+///
+/// Ruffle decodes a BURST of video frames per tick whenever it is behind, and it
+/// is behind on any game with video (measured: `tick=3929ms` for one second of
+/// wall clock). Every decoded frame calls `update_texture`, so five or six full
+/// 1280x720 uploads land per displayed frame and all but the last are overwritten
+/// before anything can sample them. The driver keeps a transfer buffer for each:
+/// measured on hardware, 936 MB of process memory disappeared OUTSIDE the heap in
+/// one session (`malloc` ceiling 2088 -> 1152 MB while the heap held steady at
+/// ~1000 MB), until a 3.7 MB allocation could not grow the heap and the app
+/// aborted mid-scene.
+///
+/// Only the last write of a frame is observable, so only the last one is sent.
+/// `data` is reused between frames, which also removes the per-frame multi-MB
+/// allocation the conversion used to make.
+struct PendingUpload {
+    /// Standalone GL texture; 0 when the target is a region of an atlas.
+    texture: GLuint,
+    /// Atlas holding the target region, when `texture` is 0.
+    atlas_index: usize,
+    /// Destination rectangle, in the target texture's own pixels.
+    dst_x: u32,
+    dst_y: u32,
+    w: u32,
+    h: u32,
+    /// Tightly packed rows of `w` pixels — the source stride is normalised on
+    /// the way in, so the flush never needs GL_UNPACK_ROW_LENGTH.
+    data: Vec<u8>,
+}
+
 struct BufferArena {
     gl_id: GLuint,
     target: GLenum,
@@ -495,7 +525,14 @@ impl BufferArena {
         unsafe {
             glGenBuffers(1, &mut gl_id);
             glBindBuffer(target, gl_id);
-            glBufferData(target, capacity, core::ptr::null(), GL_DYNAMIC_DRAW);
+            // STATIC, not DYNAMIC. Measured: the two arenas cost 576 MB of
+            // malloc, exactly their size, on a heap that runs out around 1.07 GB
+            // — this GL keeps a CPU shadow of a DYNAMIC buffer, and we were
+            // spending half of everything on two buffers that many games never
+            // write a byte into. STATIC asks the driver to keep the
+            // storage on its side; we still write through glBufferSubData, which
+            // is legal with any hint (it is a hint, not a contract).
+            glBufferData(target, capacity, core::ptr::null(), GL_STATIC_DRAW);
             glBindBuffer(target, 0);
         }
         Self {
@@ -665,6 +702,15 @@ extern "C" {
     fn ruffle_cpu_clock_hz() -> u32;
     /// 1 when docked, 0 handheld.
     fn ruffle_is_docked() -> core::ffi::c_int;
+    /// Bytes malloc currently has handed out. The `ram=` pair next to it is the
+    /// heap the crt0 reserved, which never moves; this is the number an
+    /// allocation failure actually runs out of.
+    fn ruffle_heap_used() -> u64;
+    /// Ask malloc for chunks until it refuses, free them all, return the total.
+    /// Boot measured 3136 MB this way, yet a 3.7 MB request failed mid-game at
+    /// heap=1068 MB: the ceiling must move once the GL driver has taken its
+    /// share, and this is how we watch it move.
+    fn ruffle_probe_heap_ceiling(chunk_bytes: u64, biggest_single_out: *mut u64) -> u64;
 }
 
 fn log(nul_terminated: &[u8]) {
@@ -1622,6 +1668,11 @@ pub struct SwitchRenderBackend {
     warned_unsupported: u32,
     /// Frame counter for periodic `glGetError` polling.
     frame_count: u32,
+    /// The one texture write held back until something reads a texture.
+    pending_upload: Option<PendingUpload>,
+    /// Buffer handed back by the last flush, so the next write refills it
+    /// instead of allocating several megabytes again.
+    upload_scratch: Vec<u8>,
     /// Diagnostic counters: how many shapes/bitmaps registered so far.
     shapes_registered: u32,
     bitmaps_registered: u32,
@@ -4205,6 +4256,12 @@ impl SwitchRenderBackend {
         let (line_vao, line_vbo) = build_line_segment();
         let (line_rect_vao, line_rect_vbo) = build_line_rect();
         let t_arena = unsafe { ruffle_tick_now() };
+        // What the arenas cost in MALLOC, which is the memory that runs out (a
+        // 3.7 MB allocation failed at heap=1068 MB while the reserved-heap
+        // counter still read 3185 MB). The buffers are GL objects, but if Mesa
+        // shadows them on the CPU they are the biggest single line in our
+        // baseline — worth knowing before anyone tunes their size again.
+        let heap_before_arenas = unsafe { ruffle_heap_used() };
 
         // Mega-buffer arena for all shape draws — see the BufferArena
         // comment block at the top of this file for the rationale.
@@ -4224,11 +4281,31 @@ impl SwitchRenderBackend {
             let t_end = unsafe { ruffle_tick_now() };
             let ms_prog = (t_arena.saturating_sub(t_prog) as f64) * 1000.0 / freq;
             let ms_arena = (t_end.saturating_sub(t_arena) as f64) * 1000.0 / freq;
+            let heap_after = unsafe { ruffle_heap_used() };
+            // Same probe as boot, now that EGL, the shaders, the atlases and the
+            // arenas have all taken their share. Boot said 3136 MB; whatever this
+            // says is what a game actually has left to play with.
+            let mut biggest_now: u64 = 0;
+            let ceiling_now = unsafe {
+                ruffle_probe_heap_ceiling(32 * 1024 * 1024, &mut biggest_now as *mut u64)
+            };
+            {
+                let mut c = std::format!(
+                    "boot: malloc ceiling AFTER renderer {} MB total, biggest single {} MB\n\0",
+                    ceiling_now / (1024 * 1024),
+                    biggest_now / (1024 * 1024),
+                );
+                unsafe { ruffle_log_cstr(c.as_mut_ptr() as *const _) };
+            }
             let mut m = std::format!(
-                "boot: renderer shaders {:.0} ms | arenas ({} MB) {:.0} ms\n\0",
+                "boot: renderer shaders {:.0} ms | arenas ({} MB) {:.0} ms | \
+                 heap {} -> {} MB (arenas cost {} MB of malloc)\n\0",
                 ms_prog,
                 (arena_vbo_size + arena_ibo_size) / (1024 * 1024),
                 ms_arena,
+                heap_before_arenas / (1024 * 1024),
+                heap_after / (1024 * 1024),
+                heap_after.saturating_sub(heap_before_arenas) / (1024 * 1024),
             );
             unsafe { ruffle_log_cstr(m.as_mut_ptr() as *const _) };
         }
@@ -4320,6 +4397,8 @@ impl SwitchRenderBackend {
             mask: MaskState::default(),
             warned_unsupported: 0,
             frame_count: 0,
+            pending_upload: None,
+            upload_scratch: std::vec::Vec::new(),
             shapes_registered: 0,
             bitmaps_registered: 0,
             bitmap_draws_emitted: 0,
@@ -5890,6 +5969,95 @@ impl SwitchRenderBackend {
             self.warned_unsupported += 1;
             log(msg);
         }
+    }
+
+    /// Keep a texture write instead of sending it (see [`PendingUpload`]).
+    ///
+    /// A write to a DIFFERENT target flushes the held one first: two targets
+    /// cannot both wait, and the burst we are collapsing is always the same
+    /// texture written over and over. Rows are copied tightly packed, so the
+    /// flush never needs the source stride.
+    #[allow(clippy::too_many_arguments)]
+    fn hold_upload(
+        &mut self,
+        texture: GLuint,
+        atlas_index: usize,
+        dst_x: u32,
+        dst_y: u32,
+        w: u32,
+        h: u32,
+        src_row_px: u32,
+        src_x: u32,
+        src_y: u32,
+        src: &[u8],
+    ) {
+        let same_target = match &self.pending_upload {
+            Some(p) => p.texture == texture && p.atlas_index == atlas_index,
+            None => false,
+        };
+        if !same_target {
+            self.flush_pending_upload();
+        }
+        // Reuse a buffer rather than allocating: the video path lands here five
+        // or six times per frame at 3.7 MB a piece, and allocating each of those
+        // is half the churn we are here to stop. Either the write being replaced
+        // lends its buffer, or the last flush left one in the scratch slot.
+        let mut data = match self.pending_upload.take() {
+            Some(p) => p.data,
+            None => core::mem::take(&mut self.upload_scratch),
+        };
+        let row_bytes = (w as usize) * 4;
+        data.clear();
+        data.reserve(row_bytes * h as usize);
+        let src_stride = src_row_px as usize * 4;
+        for row in 0..h as usize {
+            let start = (src_y as usize + row) * src_stride + (src_x as usize) * 4;
+            let end = start + row_bytes;
+            if end <= src.len() {
+                data.extend_from_slice(&src[start..end]);
+            } else {
+                // Short source row: pad rather than skip, so the rectangle we
+                // promise GL is always fully backed.
+                data.resize(row_bytes * (row + 1), 0);
+            }
+        }
+        self.pending_upload = Some(PendingUpload {
+            texture,
+            atlas_index,
+            dst_x,
+            dst_y,
+            w,
+            h,
+            data,
+        });
+    }
+
+    /// Send the held write, if any. Called before anything can read a texture:
+    /// every draw goes through `submit_frame` or `render_offscreen`, and every
+    /// pixel read-back through `resolve_sync_handle`.
+    fn flush_pending_upload(&mut self) {
+        let Some(p) = self.pending_upload.take() else {
+            return;
+        };
+        if p.texture != 0 {
+            unsafe {
+                glBindTexture(GL_TEXTURE_2D, p.texture);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                glTexSubImage2D(
+                    GL_TEXTURE_2D, 0,
+                    p.dst_x as GLint, p.dst_y as GLint,
+                    p.w as GLsizei, p.h as GLsizei,
+                    GL_RGBA, GL_UNSIGNED_BYTE,
+                    p.data.as_ptr() as *const _,
+                );
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+        } else if let Some(atlas) = self.atlases.get(p.atlas_index) {
+            // Rows are already tight, so the source row length IS the width.
+            atlas.upload_region(p.dst_x, p.dst_y, p.w, p.h, p.w, &p.data);
+        }
+        // Keep the buffer for the next write instead of freeing it.
+        self.upload_scratch = p.data;
     }
 
     /// Snapshot the raw counters that feed `FrameBreakdown`, so a per-frame
@@ -11581,6 +11749,9 @@ impl RenderBackend for SwitchRenderBackend {
         bounds: PixelRegion,
     ) -> Option<Box<dyn SyncHandle>> {
         let _pt = PrimTimer::new(&PRIM_OFFSCREEN_CUR);
+        // A held write must land before anything samples its texture, and this
+        // draws into (and from) textures.
+        self.flush_pending_upload();
         self.render_offscreen_calls = self.render_offscreen_calls.wrapping_add(1);
         // Where the BitmapData's pixels live + its dimensions. BitmapData backs
         // its handle via `register_bitmap` (atlas) in the common
@@ -11934,6 +12105,10 @@ impl RenderBackend for SwitchRenderBackend {
         commands: CommandList,
         cache_entries: Vec<BitmapCacheEntry>,
     ) {
+        // Everything this frame will sample must have been written first: this
+        // is where the writes held back during the tick are sent, once each
+        // rather than once per overwritten intermediate state.
+        self.flush_pending_upload();
         // Drain any pending arena frees enqueued by `GpuDraw::drop`. Doing
         // this at frame boundaries (not from Drop itself) keeps us off the
         // hook for &mut access during arbitrary Ruffle drops, and keeps
@@ -12265,7 +12440,7 @@ impl RenderBackend for SwitchRenderBackend {
             let cpu_mhz = unsafe { ruffle_cpu_clock_hz() } / 1_000_000;
             let docked = unsafe { ruffle_is_docked() } != 0;
             let msg = std::format!(
-                "f{}: fps={} cpu={}MHz dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB\n",
+                "f{}: fps={} cpu={}MHz dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB heap={}MB\n",
                 self.frame_count,
                 fps_str,
                 cpu_mhz,
@@ -12305,6 +12480,7 @@ impl RenderBackend for SwitchRenderBackend {
                 cache_max,
                 ram_used / (1024 * 1024),
                 ram_total / (1024 * 1024),
+                unsafe { ruffle_heap_used() } / (1024 * 1024),
             );
             let mut bytes = msg.into_bytes();
             bytes.push(0);
@@ -12519,30 +12695,20 @@ impl RenderBackend for SwitchRenderBackend {
         if w == 0 || h == 0 {
             return Ok(());
         }
-        // Standalone texture: upload the sub-region directly to its GL texture.
+        // Standalone texture: hold the sub-region for its GL texture.
         if let Some(standalone) = as_standalone_bitmap(handle) {
-            unsafe {
-                glBindTexture(GL_TEXTURE_2D, standalone.0.texture);
-                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-                // The source `rgba` buffer has full-bitmap-width rows. When the
-                // dirty `region` is narrower than the bitmap, GL must skip
-                // `rgba.width()` px per source row, not `w`. Without
-                // GL_UNPACK_ROW_LENGTH it packs rows contiguously at width `w`
-                // → each row drifts → diagonal shear / stripes (Icy Tower gauge
-                // + whole-frame skew on partial-width BitmapData updates).
-                let stride = rgba.width() as usize * 4;
-                let src_offset = (region.y_min as usize) * stride + (region.x_min as usize) * 4;
-                glPixelStorei(GL_UNPACK_ROW_LENGTH, rgba.width() as GLint);
-                glTexSubImage2D(
-                    GL_TEXTURE_2D, 0,
-                    region.x_min as GLint, region.y_min as GLint,
-                    w as GLsizei, h as GLsizei,
-                    GL_RGBA, GL_UNSIGNED_BYTE,
-                    rgba.data()[src_offset..].as_ptr() as *const _,
-                );
-                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-                glBindTexture(GL_TEXTURE_2D, 0);
-            }
+            // The source `rgba` buffer has full-bitmap-width rows. When the
+            // dirty `region` is narrower than the bitmap, each row must skip
+            // `rgba.width()` px, not `w` — packing rows contiguously at width
+            // `w` makes every row drift (diagonal shear / stripes, Icy Tower's
+            // gauge and whole-frame skew on partial-width BitmapData updates).
+            // The stride is normalised here instead of at upload time, so the
+            // held copy is tightly packed and the flush stays trivial.
+            self.hold_upload(
+                standalone.0.texture, 0,
+                region.x_min, region.y_min, w, h,
+                rgba.width(), region.x_min, region.y_min, rgba.data(),
+            );
             return Ok(());
         }
         let Some(switch_bitmap) = as_switch_bitmap(handle) else {
@@ -12556,14 +12722,11 @@ impl RenderBackend for SwitchRenderBackend {
         // right-sized dedicated atlases aren't 2048² (#42 regression).
         let base_x = (switch_bitmap.u0 * atlas.width as f32).round() as u32;
         let base_y = (switch_bitmap.v0 * atlas.height as f32).round() as u32;
-        // Start the source pointer at the region's top-left and tell GL the
-        // real source row length (rgba.width()), same fix as the standalone
-        // path: a partial-width region would otherwise shear.
-        let src_offset = (region.y_min as usize) * (rgba.width() as usize) * 4
-            + (region.x_min as usize) * 4;
-        atlas.upload_region(
+        let atlas_index = switch_bitmap.atlas_index;
+        self.hold_upload(
+            0, atlas_index,
             base_x + region.x_min, base_y + region.y_min, w, h,
-            rgba.width(), &rgba.data()[src_offset..],
+            rgba.width(), region.x_min, region.y_min, rgba.data(),
         );
         Ok(())
     }
@@ -12614,6 +12777,8 @@ impl RenderBackend for SwitchRenderBackend {
         with_rgba: RgbaBufRead,
     ) -> Result<(), Error> {
         let _pt = PrimTimer::new(&PRIM_RESOLVE_CUR);
+        // Reading pixels back counts as reading a texture.
+        self.flush_pending_upload();
         // The only sync handles we produce are `BitmapDataSyncHandle` (from
         // BitmapData.draw()). Read the rendered dirty region back from its temp
         // texture (PREMULTIPLIED — Ruffle's BitmapData CPU pixels are

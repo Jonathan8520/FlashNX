@@ -1368,6 +1368,19 @@ int main(int argc, char** argv) {
         std::fflush(stdout);
     }
 
+    // What malloc will really give us, asked before anything else has taken any
+    // of it. Every memory investigation so far has reasoned from the 3185 MB the
+    // reserved-heap counter reports, and allocations were seen failing at a
+    // third of that. Freed immediately; this only runs in the dev build's boot.
+    {
+        uint64_t biggest = 0;
+        const uint64_t total = ruffle_probe_heap_ceiling(32ull * 1024 * 1024, &biggest);
+        std::printf("boot: malloc ceiling %llu MB total, biggest single block %llu MB\n",
+                    (unsigned long long)(total / (1024 * 1024)),
+                    (unsigned long long)(biggest / (1024 * 1024)));
+        std::fflush(stdout);
+    }
+
     // Boot-replay: if the previous launch crashed (Rust panic OR native
     // exception), its dump was appended to sdmc:/switch/ruffle-crash.log
     // by either the panic hook or the libnx exception handler. We print

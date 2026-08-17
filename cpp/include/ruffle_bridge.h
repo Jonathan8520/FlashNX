@@ -23,6 +23,14 @@ void ruffle_shutdown(void);
 /// (InfoType_UsedMemorySize / InfoType_TotalMemorySize, CUR_PROCESS_HANDLE).
 /// Returns 0 on success, non-zero on failure.
 int ruffle_query_ram(uint64_t* used_out, uint64_t* total_out);
+/// Bytes malloc has currently handed out (mallinfo), i.e. what actually runs
+/// out — unlike `ruffle_query_ram`, which reports the heap the crt0 reserved.
+uint64_t ruffle_heap_used(void);
+/// Ask malloc for `chunk_bytes` at a time until it refuses, free it all, and
+/// return how much it gave. `biggest_single_out` gets the largest single block
+/// it would grant. Boot-time probe: the reserved-heap figure has never matched
+/// the size at which allocations actually fail.
+uint64_t ruffle_probe_heap_ceiling(uint64_t chunk_bytes, uint64_t* biggest_single_out);
 
 /// Monotonic tick counter and its frequency (Hz). Used by the Rust side
 /// to time bitmap decodes etc. without depending on stdlib clocks.
