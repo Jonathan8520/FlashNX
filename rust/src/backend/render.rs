@@ -1065,10 +1065,10 @@ impl BitmapHandleImpl for SwitchBitmapHandle {}
 /// A GL texture that owns its storage (not atlas-packed), suitable as an FBO
 /// color attachment and as a sampling source. Owns the GL texture; the Drop
 /// frees it.
-struct StandaloneTexture {
-    texture: GLuint,
-    width: u32,
-    height: u32,
+pub(crate) struct StandaloneTexture {
+    pub(crate) texture: GLuint,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 impl Drop for StandaloneTexture {
@@ -1086,8 +1086,24 @@ impl std::fmt::Debug for StandaloneTexture {
 /// BitmapHandle payload for a standalone texture. Cheap to clone (Arc); the
 /// GL texture dies when the last Arc drops.
 #[derive(Clone, Debug)]
-struct StandaloneBitmap(Arc<StandaloneTexture>);
+pub(crate) struct StandaloneBitmap(pub(crate) Arc<StandaloneTexture>);
 impl BitmapHandleImpl for StandaloneBitmap {}
+
+/// Wrap a GL texture we already own as a bitmap handle the 2D compositor can
+/// draw. Used by the Stage3D back buffer (#88): rather than teaching every draw
+/// path about a new payload type, the 3D picture arrives as the same standalone
+/// bitmap a big `BitmapData` uses. The handle owns the texture from here on.
+pub(crate) fn standalone_bitmap_from_texture(
+    texture: GLuint,
+    width: u32,
+    height: u32,
+) -> BitmapHandle {
+    BitmapHandle(Arc::new(StandaloneBitmap(Arc::new(StandaloneTexture {
+        texture,
+        width,
+        height,
+    }))))
+}
 
 /// BitmapHandle payload for a big surface we REFUSED to back with a texture
 /// because the big-atlas memory budget was exhausted (Super Bowser World
@@ -12733,9 +12749,15 @@ impl RenderBackend for SwitchRenderBackend {
 
     fn create_context3d(
         &mut self,
-        _profile: Context3DProfile,
+        profile: Context3DProfile,
     ) -> Result<Box<dyn Context3D>, Error> {
-        Err(Error::Unimplemented("createContext3D".into()))
+        // Stage3D, issue #88. See `backend/context3d.rs` for what the subset
+        // covers; a game that needs more than it gets a visibly wrong picture
+        // rather than the loading screen it used to sit on for ever.
+        log(b"context3d: creating a Stage3D context (GL subset)\n\0");
+        Ok(Box::new(crate::backend::context3d::SwitchContext3D::new(
+            profile,
+        )))
     }
 
     fn debug_info(&self) -> Cow<'static, str> {
@@ -12926,8 +12948,43 @@ impl CommandHandler for SwitchRenderBackend {
         }
     }
 
-    fn render_stage3d(&mut self, _bitmap: BitmapHandle, _transform: Transform) {
-        self.warn_once(b"cmd: render_stage3d (skipped, no Context3D)\n\0");
+    fn render_stage3d(&mut self, bitmap: BitmapHandle, transform: Transform) {
+        // The Stage3D layer is its own command, separate from `render_bitmap`,
+        // and this used to be a no-op left over from having no Context3D at all
+        // (#88). With one, the movie rendered its whole scene into our back
+        // buffer every frame and we dropped it on the floor: 17520 triangles a
+        // second drawn, none of them shown, and a game whose 2D interface
+        // appeared over an empty grey field.
+        //
+        // The back buffer is a plain standalone bitmap, so drawing it is drawing
+        // a bitmap — no smoothing, no pixel snapping, since it is already at
+        // device resolution and the stage transform places it.
+        //
+        // Flipped vertically on the way: a framebuffer writes with its origin at
+        // the bottom left, while a texture uploaded from an image is stored top
+        // row first, and every other texture we sample came from an upload. So
+        // the 3D scene arrives upside down unless the quad is flipped here — in
+        // the composite, where the flip belongs, rather than in the AGAL shaders,
+        // where it would also invert triangle winding and break culling.
+        let Some(standalone) = as_standalone_bitmap(&bitmap) else {
+            self.warn_once(b"cmd: render_stage3d with an unexpected handle\n\0");
+            return;
+        };
+        let h = standalone.0.height as f32;
+        let m = transform.matrix;
+        let flipped = Transform {
+            matrix: Matrix {
+                a: m.a,
+                b: m.b,
+                c: -m.c,
+                d: -m.d,
+                tx: m.tx + swf::Twips::from_pixels((m.c * h) as f64),
+                ty: m.ty + swf::Twips::from_pixels((m.d * h) as f64),
+            },
+            color_transform: transform.color_transform,
+            perspective_projection: transform.perspective_projection,
+        };
+        self.render_bitmap(bitmap, flipped, false, PixelSnapping::Never);
     }
 
     fn render_shape(&mut self, shape: ShapeHandle, transform: Transform) {

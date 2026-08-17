@@ -33,6 +33,13 @@ ruffle_render = { path = "../third_party/ruffle/render", features = ["tessellato
 # out — it needs openh264, a C library, and is a container-video codec rather
 # than an embedded-stream one.
 ruffle_video_software = { path = "../third_party/ruffle/video/software" }
+# Stage3D (issue #88). `naga-agal` turns AGAL bytecode into naga IR and is
+# backend-agnostic — wgpu was simply its only consumer so far — and naga emits
+# GLSL ES from that IR, which our GL backend can compile. So the shader half of
+# a Context3D costs nothing but the wiring; `glsl-out` is the only feature we
+# add on top of the `wgsl-out` the workspace already asks for.
+naga-agal = { path = "../third_party/ruffle/render/naga-agal" }
+naga = { version = "27.0.3", features = ["glsl-out"] }
 # Same — swf::Color is the clear color in submit_frame.
 swf = { path = "../third_party/ruffle/swf" }
 # Phase 3.x — library AS3 badge. We decompress only the small prefix of each

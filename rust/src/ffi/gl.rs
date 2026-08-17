@@ -38,6 +38,22 @@ pub const GL_ARRAY_BUFFER: GLenum = 0x8892;
 pub const GL_ELEMENT_ARRAY_BUFFER: GLenum = 0x8893;
 pub const GL_STATIC_DRAW: GLenum = 0x88E4;
 pub const GL_DYNAMIC_DRAW: GLenum = 0x88E8;
+// Stage3D (issue #88): AGAL program constants arrive as a uniform block, and
+// index buffers are 16-bit there, unlike our 2D path.
+pub const GL_UNIFORM_BUFFER: GLenum = 0x8A11;
+/// What `glGetUniformBlockIndex` returns when the program has no such block.
+pub const GL_INVALID_INDEX: GLuint = 0xFFFF_FFFF;
+pub const GL_UNSIGNED_SHORT: GLenum = 0x1403;
+pub const GL_DEPTH_TEST: GLenum = 0x0B71;
+pub const GL_CULL_FACE: GLenum = 0x0B44;
+pub const GL_FRONT: GLenum = 0x0404;
+pub const GL_BACK: GLenum = 0x0405;
+pub const GL_FRONT_AND_BACK: GLenum = 0x0408;
+pub const GL_DST_ALPHA: GLenum = 0x0304;
+pub const GL_ONE_MINUS_DST_ALPHA: GLenum = 0x0305;
+pub const GL_DST_COLOR: GLenum = 0x0306;
+pub const GL_ONE_MINUS_DST_COLOR: GLenum = 0x0307;
+pub const GL_SRC_ALPHA_SATURATE: GLenum = 0x0308;
 
 pub const GL_FRAGMENT_SHADER: GLenum = 0x8B30;
 pub const GL_VERTEX_SHADER: GLenum = 0x8B31;
@@ -131,6 +147,16 @@ extern "C" {
     pub fn glStencilMask(mask: GLuint);
     pub fn glStencilFunc(func: GLenum, refr: GLint, mask: GLuint);
     pub fn glStencilOp(sfail: GLenum, dpfail: GLenum, dppass: GLenum);
+
+    // Uniform blocks (GL ES 3.0). Stage3D shaders come out of naga as GLSL ES
+    // 3.10, where the AGAL program constants (vc0.., fc0..) land in a uniform
+    // BLOCK rather than loose uniforms — so the Context3D needs UBOs.
+    pub fn glBindBufferBase(target: GLenum, index: GLuint, buffer: GLuint);
+    pub fn glDisableVertexAttribArray(index: GLuint);
+    pub fn glCullFace(mode: GLenum);
+    pub fn glGetUniformBlockIndex(program: GLuint, name: *const c_char) -> GLuint;
+    pub fn glUniformBlockBinding(program: GLuint, block_index: GLuint, binding: GLuint);
+    pub fn glUniform4fv(location: GLint, count: GLsizei, value: *const GLfloat);
 
     pub fn glGenBuffers(n: GLsizei, buffers: *mut GLuint);
     pub fn glDeleteBuffers(n: GLsizei, buffers: *const GLuint);

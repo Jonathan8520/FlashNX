@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod context3d;
 pub mod glyphs;
 pub mod log;
 pub mod navigator;

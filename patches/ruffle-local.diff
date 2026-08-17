@@ -252,6 +252,73 @@ index f5a989cd8..e7c874052 100644
          "PlugIn"
      } else {
          match activation.context.avm2.player_runtime {
+diff --git a/core/src/avm2/object/event_object.rs b/core/src/avm2/object/event_object.rs
+index 0e6f47c5c..88661652d 100644
+--- a/core/src/avm2/object/event_object.rs
++++ b/core/src/avm2/object/event_object.rs
+@@ -332,6 +332,30 @@ impl<'gc> EventObject<'gc> {
+         )
+     }
+ 
++    /// A plain `ErrorEvent`, the one Flash Player dispatches when a Stage3D
++    /// context cannot be created. FlashNX local patch: upstream leaves a TODO
++    /// there and returns silently, which tells the movie nothing at all.
++    pub fn error_event(
++        activation: &mut Activation<'_, 'gc>,
++        error_msg: &str,
++        error_code: u32,
++    ) -> EventObject<'gc> {
++        let event_name = istr!("error");
++        let error_msg = AvmString::new_utf8(activation.gc(), error_msg);
++        let error_event_cls = activation.avm2().classes().errorevent;
++        Self::from_class_and_args(
++            activation,
++            error_event_cls,
++            &[
++                event_name.into(),
++                false.into(),
++                false.into(),
++                error_msg.into(),
++                error_code.into(),
++            ],
++        )
++    }
++
+     pub fn http_status_event(
+         activation: &mut Activation<'_, 'gc>,
+         status: u16,
+diff --git a/core/src/avm2/object/stage3d_object.rs b/core/src/avm2/object/stage3d_object.rs
+index a0118157e..77d3a5b1e 100644
+--- a/core/src/avm2/object/stage3d_object.rs
++++ b/core/src/avm2/object/stage3d_object.rs
+@@ -62,7 +62,26 @@ impl<'gc> Stage3DObject<'gc> {
+                 Ok(context3d) => context3d,
+                 Err(err) => {
+                     tracing::error!("Failed to create Context3d: {}", err);
+-                    // TODO the docs say FP dispatches an "error" event here
++                    // FlashNX local patch, for upstream's TODO right here: Flash
++                    // Player dispatches an ErrorEvent when a context cannot be
++                    // made, and returning in silence has two costs on a renderer
++                    // without Stage3D (ours, and upstream's own webgl and canvas
++                    // backends). The movie never learns that 3D is unavailable,
++                    // so a game with a 2D fallback never takes it and simply
++                    // waits for ever; and the status stays `Requested`, so this
++                    // runs again on EVERY frame, failing and logging each time.
++                    // Clearing the status stops the retry loop, and the event
++                    // gives the movie the one chance it has to react.
++                    self.clear_context3d(context.gc());
++                    let event = {
++                        let mut activation = crate::avm2::Activation::from_nothing(context);
++                        EventObject::error_event(
++                            &mut activation,
++                            "Context3D is not available",
++                            3702,
++                        )
++                    };
++                    Avm2::dispatch_event(context, event, self.into());
+                     return;
+                 }
+             };
 diff --git a/core/src/bitmap/bitmap_data.rs b/core/src/bitmap/bitmap_data.rs
 index 29eb34fdc..8eb4761bd 100644
 --- a/core/src/bitmap/bitmap_data.rs
