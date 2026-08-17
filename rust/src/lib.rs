@@ -393,6 +393,10 @@ pub extern "C" fn ruffle_init() -> c_int {
     let mut builder = PlayerBuilder::new()
         .with_boxed_renderer(std::boxed::Box::new(renderer) as std::boxed::Box<dyn RenderBackend>)
         .with_audio(SwitchAudioBackend::new())
+        // Software video decoder (#89). Ruffle's own, pure Rust: without it the
+        // player gets the null backend and every embedded video renders as
+        // nothing at all, which is the white scene the report describes.
+        .with_video(ruffle_video_software::backend::SoftwareVideoBackend::new())
         .with_log(SwitchLogBackend::new())
         .with_storage(std::boxed::Box::new(storage))
         // Custom UI backend: its only job over NullUiBackend is to forward

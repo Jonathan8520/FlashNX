@@ -24,6 +24,15 @@ ruffle_core = { path = "../third_party/ruffle/core", default-features = false, f
 # transitively by ruffle_core with feature `tessellator`, but we need a direct
 # dep to name its types in src/backend/render.rs.
 ruffle_render = { path = "../third_party/ruffle/render", features = ["tessellator"] }
+# Embedded SWF video (issue #89). Without a video backend Ruffle falls back to
+# the null one, which decodes nothing: the scenes play, the sound plays, and the
+# picture stays white — 1725 `Video has no decoded frame to render` in one
+# session of the game reported there. This backend is pure Rust (h263-rs
+# and nihav-vp6, no C library, no threads) and its default features cover what
+# SWFs actually embed: Sorenson Spark (H.263), VP6 and Screen Video. H.264 stays
+# out — it needs openh264, a C library, and is a container-video codec rather
+# than an embedded-stream one.
+ruffle_video_software = { path = "../third_party/ruffle/video/software" }
 # Same — swf::Color is the clear color in submit_frame.
 swf = { path = "../third_party/ruffle/swf" }
 # Phase 3.x — library AS3 badge. We decompress only the small prefix of each
