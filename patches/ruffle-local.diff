@@ -631,10 +631,10 @@ index f1843308c..1df7a120b 100644
      pub fn size(&self) -> BitmapSize {
          match self {
 diff --git a/core/src/display_object.rs b/core/src/display_object.rs
-index 2e6e01783..c4cf84d64 100644
+index 2e6e01783..13ce92706 100644
 --- a/core/src/display_object.rs
 +++ b/core/src/display_object.rs
-@@ -2585,6 +2585,17 @@ pub trait TDisplayObject<'gc>:
+@@ -2585,6 +2585,18 @@ pub trait TDisplayObject<'gc>:
      /// Tests if a given stage position point intersects with the world bounds of this object.
      #[no_dynamic]
      fn hit_test_bounds(self, point: Point<Twips>) -> bool {
@@ -647,12 +647,13 @@ index 2e6e01783..c4cf84d64 100644
 +        // checks against an offscreen placeholder MC). See the discussion at
 +        // https://github.com/ruffle-rs/ruffle/issues/6906 for context.
 +        if self.local_to_global_matrix().determinant().abs() <= f32::EPSILON {
++            note_hit_guard(&self.path());
 +            return false;
 +        }
          self.world_bounds(BoundsMode::Engine).contains(point)
      }
  
-@@ -2604,6 +2615,12 @@ pub trait TDisplayObject<'gc>:
+@@ -2604,6 +2616,13 @@ pub trait TDisplayObject<'gc>:
          point: Point<Twips>,
          options: HitTestOptions,
      ) -> bool {
@@ -660,11 +661,38 @@ index 2e6e01783..c4cf84d64 100644
 +        // too because some hit_test_shape overrides (movie_clip, button)
 +        // bypass hit_test_bounds and walk into per-shape tracing directly.
 +        if self.local_to_global_matrix().determinant().abs() <= f32::EPSILON {
++            note_hit_guard(&self.path());
 +            return false;
 +        }
          // Default to using bounding box.
          (!options.contains(HitTestOptions::SKIP_INVISIBLE) || self.visible())
              && self.hit_test_bounds(point)
+@@ -3232,3 +3251,25 @@ impl<'gc> DisplayObjectWeak<'gc> {
+         }
+     }
+ }
++
++/// Say out loud, a bounded number of times, that the zero-determinant guard
++/// (see `hit_test_bounds`) refused a hit test, and on what.
++///
++/// The guard exists for Mario 63 and it is a local patch, which makes it a
++/// standing suspect whenever a game's collisions misbehave here but not on
++/// upstream Ruffle. A platformer whose ground stops answering is exactly the
++/// shape that suspicion takes, so the guard names its victims instead of
++/// refusing in silence.
++///
++/// Capped, because this sits in the hit-test path a game walks thousands of
++/// times a second: the first few dozen say everything, and the rest would
++/// only cost frames.
++fn note_hit_guard(path: &WString) {
++    use std::sync::atomic::{AtomicUsize, Ordering};
++    static SEEN: AtomicUsize = AtomicUsize::new(0);
++    let n = SEEN.fetch_add(1, Ordering::Relaxed);
++    if n < 40 {
++        tracing::warn!("hit test REFUSED (zero determinant) on {}", path);
++    }
++}
++
 diff --git a/core/src/display_object/movie_clip.rs b/core/src/display_object/movie_clip.rs
 index baa4a03c5..fdc96d7a1 100644
 --- a/core/src/display_object/movie_clip.rs
@@ -720,10 +748,10 @@ index 6e5379213..ea1cfd7ef 100644
  pub mod context_menu;
  mod drawing;
 diff --git a/core/src/player.rs b/core/src/player.rs
-index edb74cccb..8e49ce53f 100644
+index edb74cccb..8fa634d34 100644
 --- a/core/src/player.rs
 +++ b/core/src/player.rs
-@@ -519,6 +519,150 @@ impl Player {
+@@ -519,6 +519,151 @@ impl Player {
          FloatDuration::from_millis(self.frame_time(1000.0))
      }
  
@@ -845,8 +873,9 @@ index edb74cccb..8e49ce53f 100644
 +                continue;
 +            };
 +            println!(
-+                "{path}.{key} = [clip frame {}/{}]",
++                "{path}.{key} = [clip frame {} of {} loaded, {} total]",
 +                clip.current_frame(),
++                clip.frames_loaded(),
 +                clip.header_frames(),
 +            );
 +            if descend {
@@ -874,7 +903,7 @@ index edb74cccb..8e49ce53f 100644
      pub fn tick(&mut self, dt: FloatDuration) {
          if !self.is_playing() {
              return;
-@@ -2382,7 +2526,17 @@ impl Player {
+@@ -2382,7 +2527,17 @@ impl Player {
          self.update_mouse_state(EnumSet::empty(), false, &mut false);
  
          // GC
