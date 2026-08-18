@@ -1179,6 +1179,26 @@ pub extern "C" fn ruffle_dump_stage_children() {
     }
 }
 
+/// Every AVM1 variable the movie holds, two levels deep.
+///
+/// A stuck level is a condition that never becomes true, and the terms of that
+/// condition are ordinary variables. Printing them is the difference between
+/// guessing and reading: on a game that would not finish its ninth stage, the
+/// clear check was `enemy.hp <= 0 && enemy2.hp <= 0 && enemy3.hp <= 0`, and in
+/// SWF 8 an `undefined` term makes that false for ever.
+#[no_mangle]
+pub extern "C" fn ruffle_dump_root_vars() {
+    let state = unsafe {
+        match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
+            Some(s) => s,
+            None => return,
+        }
+    };
+    if let Ok(mut p) = state.player.lock() {
+        p.dump_root_vars();
+    }
+}
+
 /// Hide `us` microseconds of wall clock from the movie (#87).
 ///
 /// Frames only advance on the `dt` we hand to `tick()`, but `getTimer()` reads

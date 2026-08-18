@@ -666,10 +666,10 @@ index 2e6e01783..c4cf84d64 100644
          (!options.contains(HitTestOptions::SKIP_INVISIBLE) || self.visible())
              && self.hit_test_bounds(point)
 diff --git a/core/src/display_object/movie_clip.rs b/core/src/display_object/movie_clip.rs
-index baa4a03c5..51b5a3034 100644
+index baa4a03c5..fdc96d7a1 100644
 --- a/core/src/display_object/movie_clip.rs
 +++ b/core/src/display_object/movie_clip.rs
-@@ -1747,6 +1747,23 @@ impl<'gc> MovieClip<'gc> {
+@@ -1747,6 +1747,29 @@ impl<'gc> MovieClip<'gc> {
              }
          }
          let hit_target_frame = self.0.current_frame() == frame;
@@ -681,13 +681,19 @@ index baa4a03c5..51b5a3034 100644
 +        // to leave frame 1 before frame 2 has streamed in therefore parks on
 +        // frame 1 for ever, in total silence. Diagnosing that from the outside
 +        // costs hours (see FlashNX issue #76), so it costs one line here.
++        //
++        // `total` tells the two apart: loaded < total is a clip still being
++        // preloaded (ours to fix), loaded == total is a movie asking for a
++        // frame nobody ever authored (its own bug, and harmless).
 +        if !hit_target_frame {
 +            tracing::warn!(
-+                "goto MISSED: wanted={} clamped={} loaded={} now={}",
++                "goto MISSED: wanted={} clamped={} loaded={} total={} now={} who={}",
 +                frame,
 +                clamped_frame,
 +                self.0.frames_loaded(),
++                self.header_frames(),
 +                self.current_frame(),
++                self.path(),
 +            );
 +        }
  
@@ -714,10 +720,10 @@ index 6e5379213..ea1cfd7ef 100644
  pub mod context_menu;
  mod drawing;
 diff --git a/core/src/player.rs b/core/src/player.rs
-index edb74cccb..bf8f41f1e 100644
+index edb74cccb..8e49ce53f 100644
 --- a/core/src/player.rs
 +++ b/core/src/player.rs
-@@ -519,6 +519,64 @@ impl Player {
+@@ -519,6 +519,150 @@ impl Player {
          FloatDuration::from_millis(self.frame_time(1000.0))
      }
  
@@ -763,6 +769,92 @@ index edb74cccb..bf8f41f1e 100644
 +        );
 +    }
 +
++    /// Print the movie's AVM1 variables, two levels deep, one line each.
++    ///
++    /// FlashNX local patch, and a sibling to `dump_stage_children`. Ruffle owns
++    /// a perfectly good `VariableDumper`, but it is wired to a Ctrl-Alt-V
++    /// handler behind the `avm_debug` feature: a keyboard we do not have on a
++    /// console, in a build we do not ship. It also recurses without bound and
++    /// prints whole object graphs, which a 17 MB game turns into megabytes.
++    ///
++    /// This one answers the question a stuck level actually poses — what does
++    /// the game think its own state is — and answers it in a page. Primitives
++    /// print their value; movie clips print their frame and then one level of
++    /// their own variables, and no deeper. That is enough to read a condition
++    /// like `_root.enemy2.hp <= 0` from the outside and see that the term is
++    /// `undefined` rather than a number, which no amount of staring at the
++    /// screen will tell you.
++    pub fn dump_root_vars(&mut self) {
++        self.mutate_with_update_context(|context| {
++            let mut activation =
++                Activation::from_stub(context, ActivationIdentifier::root("[FlashNX var dump]"));
++            let Some(object) = activation
++                .context
++                .stage
++                .root_clip()
++                .and_then(|root| root.object1())
++            else {
++                println!("root vars: no AVM1 root");
++                return;
++            };
++            println!("root vars: begin");
++            Self::dump_vars_of(object, "_root", true, &mut activation);
++            println!("root vars: end");
++        });
++    }
++
++    fn dump_vars_of<'gc>(
++        object: Object<'gc>,
++        path: &str,
++        descend: bool,
++        activation: &mut Activation<'_, 'gc>,
++    ) {
++        for key in object.get_keys(activation, false) {
++            let Ok(value) = object.get(key, activation) else {
++                continue;
++            };
++            let child = match value {
++                Value::Object(o) => Some(o),
++                Value::MovieClip(mcr) => mcr.coerce_to_object(activation),
++                Value::Undefined => {
++                    println!("{path}.{key} = undefined");
++                    continue;
++                }
++                Value::Null => {
++                    println!("{path}.{key} = null");
++                    continue;
++                }
++                Value::Bool(b) => {
++                    println!("{path}.{key} = {b}");
++                    continue;
++                }
++                Value::Number(n) => {
++                    println!("{path}.{key} = {n}");
++                    continue;
++                }
++                Value::String(s) => {
++                    println!("{path}.{key} = \"{}\"", s.to_utf8_lossy());
++                    continue;
++                }
++            };
++            let Some(child) = child else { continue };
++            let Some(clip) = child
++                .as_display_object()
++                .and_then(|display| display.as_movie_clip())
++            else {
++                continue;
++            };
++            println!(
++                "{path}.{key} = [clip frame {}/{}]",
++                clip.current_frame(),
++                clip.header_frames(),
++            );
++            if descend {
++                Self::dump_vars_of(child, &format!("{path}.{key}"), false, activation);
++            }
++        }
++    }
++
 +    /// Push the movie's time origin forward by `d`, hiding that interval from
 +    /// `getTimer()`.
 +    ///
@@ -782,7 +874,7 @@ index edb74cccb..bf8f41f1e 100644
      pub fn tick(&mut self, dt: FloatDuration) {
          if !self.is_playing() {
              return;
-@@ -2382,7 +2440,17 @@ impl Player {
+@@ -2382,7 +2526,17 @@ impl Player {
          self.update_mouse_state(EnumSet::empty(), false, &mut false);
  
          // GC

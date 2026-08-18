@@ -51,6 +51,23 @@ extern "C" uint64_t ruffle_frame_interval_us(void);
 // What is on stage, two levels deep, one line each. Fired once a few seconds
 // into a game (#100), so a black-screen report carries the answer.
 extern "C" void ruffle_dump_stage_children(void);
+extern "C" void ruffle_dump_root_vars(void);
+
+// True when `sdmc:/switch/FlashNX/dumpvars.on` exists: the pause button then
+// also prints the movie's AVM1 variables (see the `-` handler). Same shape as
+// the `trace.on` marker in ruffle_bridge.cpp, and for the same reason — a
+// diagnostic nobody should pay for unless they asked for it. Checked once.
+static bool dump_vars_on_pause(void) {
+    static bool checked = false;
+    static bool on = false;
+    if (!checked) {
+        checked = true;
+        struct stat st;
+        on = (::stat("sdmc:/switch/FlashNX/dumpvars.on", &st) == 0);
+    }
+    return on;
+}
+
 extern "C" void ruffle_draw_menu(int selected);
 extern "C" void ruffle_draw_screen_menu(int selected);
 extern "C" void ruffle_menu_close_begin(void);
@@ -1005,6 +1022,19 @@ static void worker_entry(void* arg) {
         // `-` opens the pause modal. Captured before BINDINGS so it can't
         // also fire a key event into Ruffle.
         if (kDown & HidNpadButton_Minus) {
+            // Diagnostic: print the movie's own AVM1 variables at the exact
+            // moment the player says "this is stuck". A pause is the one
+            // instant the game state is worth reading, and `-` is the only
+            // input we know reaches us rather than the game.
+            //
+            // Gated on a marker file because the dump runs to hundreds of
+            // lines on a large movie, which nobody who is merely pausing
+            // wants — but on issue #84 it was the whole answer: three
+            // enemies the clear condition waits on, two of which no longer
+            // existed and one of which was alive with full HP and invisible.
+            if (dump_vars_on_pause()) {
+                ruffle_dump_root_vars();
+            }
             menu_open = true;
             menu_selection = MENU_RESUME;
             // A fresh pause always opens on the main panel, never back inside
