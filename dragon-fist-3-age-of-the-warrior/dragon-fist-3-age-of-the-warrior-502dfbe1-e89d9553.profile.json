@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "id": "dragon-fist-3-age-of-the-warrior-502dfbe1-e89d9553",
+  "game": {
+    "title": "dragon_fist_3_age_of_the_warrior",
+    "fp_uuid": "",
+    "swf_hash": "502dfbe1a597aaac"
+  },
+  "author": "",
+  "verified": false,
+  "bindings": {
+    "A": "U",
+    "B": "Y",
+    "Down": "S",
+    "L": "Escape",
+    "Left": "A",
+    "Plus": "P",
+    "R": "Enter",
+    "Right": "D",
+    "StickLDown": "S",
+    "StickLLeft": "A",
+    "StickLRight": "D",
+    "StickLUp": "W",
+    "Up": "W",
+    "X": "T",
+    "Y": "T",
+    "ZL": "Right click",
+    "ZR": "Left click"
+  },
+  "bindings_p2": {
+    "A": "Num1",
+    "B": "Num2",
+    "Down": "S",
+    "L": "Num6",
+    "Left": "A",
+    "R": "Num5",
+    "Right": "D",
+    "StickLDown": "S",
+    "StickLLeft": "A",
+    "StickLRight": "D",
+    "StickLUp": "W",
+    "Up": "W",
+    "X": "Num3",
+    "Y": "Num4"
+  },
+  "combo_layers": {},
+  "combo_layers_p2": {},
+  "cursor_speed": -1,
+  "show_cursor": true
+}
