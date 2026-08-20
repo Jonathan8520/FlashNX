@@ -206,6 +206,87 @@ const CJK_ADVANCE_UNITS: f32 = 8.0;
 /// Baseline offset from the line top; raise/lower to sit CJK on the Latin line.
 const CJK_BASELINE_UNITS: f32 = 6.6;
 
+/// The 5x7 bitmap pattern for `ch`, if the font carries one.
+///
+/// Latin and Cyrillic are only carried in UPPER case, the case the whole
+/// interface is drawn in, so a letter is folded before lookup. ASCII first,
+/// then the Unicode fold that turns 'e-acute' into its capital and a lowercase
+/// Cyrillic letter into its own: without that second step a French or Russian
+/// game title fell through to the shared-font atlas and came out in full-width
+/// CJK cells, a third too wide and in a different face than the rest of its own
+/// name. A fold that yields more than one character (the German sharp s) is
+/// refused -- dropping a letter is worse than a wide one.
+fn bitmap_glyph(ch: char) -> Option<&'static Glyph> {
+    let lookup = ch.to_ascii_uppercase();
+    if let Some((_, g)) = GLYPHS.iter().find(|(c, _)| *c == lookup) {
+        return Some(g);
+    }
+    if (ch as u32) >= 0x80 {
+        let mut up = ch.to_uppercase();
+        let first = up.next()?;
+        if up.next().is_none() && first != ch {
+            if let Some((_, g)) = GLYPHS.iter().find(|(c, _)| *c == first) {
+                return Some(g);
+            }
+        }
+    }
+    None
+}
+
+/// Width one character takes on a line. The single source of truth for
+/// `measure_text` and `wrap_point`, so a title can never wrap to a width it is
+/// not drawn at.
+fn char_advance(ch: char, scale: f32) -> f32 {
+    if bitmap_glyph(ch).is_some() {
+        6.0 * scale
+    } else if (ch as u32) >= 0x80 {
+        CJK_ADVANCE_UNITS * scale
+    } else {
+        // Unknown ASCII: drawn blank, but it still advances the pen.
+        6.0 * scale
+    }
+}
+
+/// Characters from a script written without spaces, where a line may break
+/// between any two of them. Ranges, not a list: this covers Han, kana, Hangul,
+/// the CJK symbol and punctuation blocks and the full-width forms.
+fn is_cjk_wrappable(c: char) -> bool {
+    matches!(c as u32,
+        0x1100..=0x11FF     // Hangul Jamo
+        | 0x2E80..=0x2FFF   // CJK radicals, Kangxi
+        | 0x3001..=0x303F   // CJK symbols and punctuation (past the ideographic space)
+        | 0x3041..=0x33FF   // kana, Hangul compatibility jamo, CJK compatibility
+        | 0x3400..=0x4DBF   // unified ideographs extension A
+        | 0x4E00..=0x9FFF   // unified ideographs
+        | 0xA000..=0xA4CF   // Yi
+        | 0xAC00..=0xD7A3   // Hangul syllables
+        | 0xF900..=0xFAFF   // compatibility ideographs
+        | 0xFF01..=0xFF60   // full-width forms
+        | 0xFFE0..=0xFFE6
+        | 0x20000..=0x3FFFD // extensions B and beyond
+    )
+}
+
+/// Punctuation that may not start a line: it belongs to the character before
+/// it. Without this a Chinese title breaks right before its comma.
+fn cjk_no_line_start(c: char) -> bool {
+    matches!(c,
+        '\u{3001}' | '\u{3002}' | '\u{FF0C}' | '\u{FF0E}' | '\u{FF01}' | '\u{FF1F}'
+        | '\u{FF1A}' | '\u{FF1B}' | '\u{FF09}' | '\u{FF3D}' | '\u{FF5D}' | '\u{300D}'
+        | '\u{300F}' | '\u{3011}' | '\u{3015}' | '\u{2019}' | '\u{201D}'
+        | ',' | '.' | '!' | '?' | ':' | ';' | ')' | ']' | '}'
+    )
+}
+
+/// The mirror image: an opening bracket may not end a line.
+fn cjk_no_line_end(c: char) -> bool {
+    matches!(c,
+        '\u{FF08}' | '\u{FF3B}' | '\u{FF5B}' | '\u{300C}' | '\u{300E}' | '\u{3010}'
+        | '\u{3014}' | '\u{2018}' | '\u{201C}'
+        | '(' | '[' | '{'
+    )
+}
+
 static GLYPHS: &[(char, Glyph)] = &[
     (' ', ["     ", "     ", "     ", "     ", "     ", "     ", "     "]),
     ('A', [" ### ", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"]),
@@ -3328,82 +3409,68 @@ pub fn invalidate_cover(basename: &str) {
     }
 }
 
-/// Truncate to `max_chars` glyphs, appending an ellipsis when cut. Used by the
-/// cover picker (long Flashpoint titles) and notices.
-/// Split `msg` into lines of at most `max_chars`, breaking on spaces. A single
-/// word longer than the line (a URL, a curl error blob, a space-less CJK run) is
-/// HARD-chopped instead of being allowed to run off both edges of the screen.
-fn wrap_words(msg: &str, max_chars: usize) -> std::vec::Vec<std::string::String> {
-    let max = max_chars.max(8);
+/// Split `msg` into lines no wider than `max_w` at `scale`, breaking on spaces.
+/// A single word too wide for a line (a URL, a curl error blob, a space-less
+/// CJK run) is HARD-chopped instead of running off both edges of the screen.
+///
+/// Widths, not character counts. Every caller had a box in pixels and divided
+/// it by 6 units a character to get one, which is only true of the bitmap font:
+/// a shared-font glyph advances 8, so a Chinese message -- a Flashpoint title,
+/// a name typed in at RENOMMER (issue #75) -- was wrapped for a box a third
+/// narrower than the one it got drawn in, and overflowed it.
+fn wrap_words(msg: &str, max_w: f32, scale: f32) -> std::vec::Vec<std::string::String> {
+    // Floor at the old eight-character minimum so a degenerate width cannot
+    // produce a line per character.
+    let max = max_w.max(48.0 * scale);
+    let space_w = char_advance(' ', scale);
+    let word_w = |w: &str| -> f32 { w.chars().map(|c| char_advance(c, scale)).sum() };
     let mut lines: std::vec::Vec<std::string::String> = std::vec::Vec::new();
     let mut cur = std::string::String::new();
-    let mut cur_len = 0usize;
+    let mut cur_w = 0.0f32;
     for word in msg.split_whitespace() {
-        let wlen = word.chars().count();
-        if wlen > max {
+        let ww = word_w(word);
+        if ww > max {
             if !cur.is_empty() {
                 lines.push(core::mem::take(&mut cur));
-                cur_len = 0;
+                cur_w = 0.0;
             }
             let mut chunk = std::string::String::new();
-            let mut chunk_len = 0usize;
+            let mut chunk_w = 0.0f32;
             for c in word.chars() {
-                chunk.push(c);
-                chunk_len += 1;
-                if chunk_len >= max {
+                // Look before pushing: the line is closed when the NEXT
+                // character would overflow, so a line always holds at least one
+                // character and never exceeds the box.
+                let cw = char_advance(c, scale);
+                if !chunk.is_empty() && chunk_w + cw > max {
                     lines.push(core::mem::take(&mut chunk));
-                    chunk_len = 0;
+                    chunk_w = 0.0;
                 }
+                chunk.push(c);
+                chunk_w += cw;
             }
             if !chunk.is_empty() {
-                cur_len = chunk_len;
+                cur_w = chunk_w;
                 cur = chunk;
             }
             continue;
         }
         if cur.is_empty() {
             cur.push_str(word);
-            cur_len = wlen;
-        } else if cur_len + 1 + wlen <= max {
+            cur_w = ww;
+        } else if cur_w + space_w + ww <= max {
             cur.push(' ');
             cur.push_str(word);
-            cur_len += 1 + wlen;
+            cur_w += space_w + ww;
         } else {
             lines.push(core::mem::take(&mut cur));
             cur.push_str(word);
-            cur_len = wlen;
+            cur_w = ww;
         }
     }
     if !cur.is_empty() {
         lines.push(cur);
     }
     lines
-}
-
-fn truncate_mid(s: &str, max_chars: usize) -> std::string::String {
-    let n = s.chars().count();
-    if n <= max_chars {
-        return s.to_string();
-    }
-    // From the MIDDLE, which is what the name always promised and what the
-    // callers need: these are file names, and what tells two of them apart lives
-    // at the END at least as often as at the start. Cutting the tail turned the
-    // four "Scooby-Doo: Mayan Monster Mayhem Episode N - ..." into four
-    // identical rows. Keeping both ends costs nothing and keeps the episode.
-    let keep = max_chars.saturating_sub(1);
-    if keep < 4 {
-        // Too narrow to show both ends meaningfully: a head plus the mark reads
-        // better than two one-letter stubs.
-        let mut t: std::string::String = s.chars().take(keep).collect();
-        t.push('…');
-        return t;
-    }
-    let head = keep / 2;
-    let tail = keep - head;
-    let mut t: std::string::String = s.chars().take(head).collect();
-    t.push('…');
-    t.extend(s.chars().skip(n - tail));
-    t
 }
 
 /// One library tile's layout (row index + horizontal center), shared from the
@@ -6278,9 +6345,8 @@ impl SwitchRenderBackend {
         let mut atlas_tex: GLuint = 0;
         let mut cur_x = x;
         for ch in text.chars() {
-            // Uppercase fold — our font only carries A-Z.
-            let lookup = ch.to_ascii_uppercase();
-            if let Some((_, pattern)) = GLYPHS.iter().find(|(c, _)| *c == lookup) {
+            // Uppercase fold — our font only carries capitals (`bitmap_glyph`).
+            if let Some(pattern) = bitmap_glyph(ch) {
                 // One rect per horizontal RUN of lit pixels, not per pixel: a 5x7
                 // glyph is ~20 lit pixels but only ~8 runs.
                 for (row_idx, row_str) in pattern.iter().enumerate() {
@@ -6325,6 +6391,26 @@ impl SwitchRenderBackend {
                     }
                     atlas_tex = tex;
                     atlas_verts.extend_from_slice(&quad);
+                } else if self.font_atlas.is_none() && is_cjk_wrappable(ch) {
+                    // No atlas AT ALL -- applet mode refuses the CJK font
+                    // outright (glyphs::cjk_possible). Draw a hollow cell so a
+                    // Chinese title reads as characters this mode cannot draw,
+                    // instead of a run of blanks that looks like a game with no
+                    // name. Only for the scripts the bitmap font could never
+                    // stand in for: a stray symbol in a Latin title still draws
+                    // as a gap, which reads better than a box in the middle of
+                    // a word. And when the atlas EXISTS, a glyph the font does
+                    // not have draws nothing: that is a font gap, not a mode.
+                    let bw = (CJK_ADVANCE_UNITS - 2.0) * scale;
+                    let bh = 5.0 * scale;
+                    let t = scale.max(1.0);
+                    let bx = cur_x + scale;
+                    let by = y + scale;
+                    let c = [r, g, b, a];
+                    push_text_quad(&mut verts, bx, by, bw, t, c);
+                    push_text_quad(&mut verts, bx, by + bh - t, bw, t, c);
+                    push_text_quad(&mut verts, bx, by, t, bh, c);
+                    push_text_quad(&mut verts, bx + bw - t, by, t, bh, c);
                 }
                 cur_x += CJK_ADVANCE_UNITS * scale;
             } else {
@@ -6398,7 +6484,9 @@ impl SwitchRenderBackend {
         let mut out = std::string::String::new();
         let mut w = 0.0;
         for ch in text.chars() {
-            let cw = self.measure_text(&ch.to_string(), scale);
+            // `char_advance`, not `measure_text(&ch.to_string())`: the old form
+            // allocated a String per character of every ellipsised label.
+            let cw = char_advance(ch, scale);
             if w + cw > budget {
                 break;
             }
@@ -6434,17 +6522,11 @@ impl SwitchRenderBackend {
             if self.measure_text(&rest, scale) <= max_w {
                 break;
             }
-            let mut cut = 0usize;
-            for (i, ch) in rest.char_indices() {
-                if ch == ' ' && self.measure_text(&rest[..i], scale) <= max_w {
-                    cut = i;
-                }
-            }
-            if cut == 0 {
+            let Some((end, next)) = self.wrap_point(&rest, scale, max_w) else {
                 break; // one unbroken word: the tail below cuts it
-            }
-            out.push(rest[..cut].to_string());
-            rest = rest[cut + 1..].trim_start().to_string();
+            };
+            out.push(rest[..end].trim_end().to_string());
+            rest = rest[next..].trim_start().to_string();
         }
         if !rest.is_empty() {
             out.push(self.fit_text(&rest, scale, max_w));
@@ -6456,34 +6538,119 @@ impl SwitchRenderBackend {
         if self.measure_text(text, scale) <= max_w {
             return (text.to_string(), std::string::String::new());
         }
-        // Longest prefix ending on a space that still fits.
-        let mut cut = 0usize;
-        for (i, ch) in text.char_indices() {
-            if ch == ' ' && self.measure_text(&text[..i], scale) <= max_w {
-                cut = i;
-            }
-        }
-        if cut == 0 {
+        // Longest first line that still fits, ending on a break opportunity.
+        let Some((end, next)) = self.wrap_point(text, scale, max_w) else {
             // One unbroken word: cut it rather than overflow.
             return (self.fit_text(text, scale, max_w), std::string::String::new());
-        }
-        let rest = text[cut + 1..].trim_start();
-        (text[..cut].to_string(), self.fit_text(rest, scale, max_w))
+        };
+        let rest = text[next..].trim_start();
+        (
+            text[..end].trim_end().to_string(),
+            self.fit_text(rest, scale, max_w),
+        )
     }
 
     pub fn measure_text(&self, text: &str, scale: f32) -> f32 {
         let mut w = 0.0;
         for ch in text.chars() {
-            let lookup = ch.to_ascii_uppercase();
-            if GLYPHS.iter().any(|(c, _)| *c == lookup) {
-                w += 6.0 * scale;
-            } else if (ch as u32) >= 0x80 {
-                w += CJK_ADVANCE_UNITS * scale;
-            } else {
-                w += 6.0 * scale;
-            }
+            w += char_advance(ch, scale);
         }
         w
+    }
+
+    /// Drop characters from the MIDDLE until `text` fits `max_w`.
+    ///
+    /// From the middle because these are game names, and what tells two of them
+    /// apart lives at the END at least as often as at the start: cutting the
+    /// tail turned the four "Scooby-Doo: Mayan Monster Mayhem Episode N - ..."
+    /// into four identical rows.
+    ///
+    /// A character budget can only be turned into a width by assuming one width
+    /// per character, and there are two: 6 units for the bitmap font, 8 for
+    /// anything drawn from the shared font. Callers that assumed 6 overflowed
+    /// their box by a third the moment a title was Chinese (issue #75).
+    fn fit_text_mid(&self, text: &str, scale: f32, max_w: f32) -> std::string::String {
+        if self.measure_text(text, scale) <= max_w {
+            return text.to_string();
+        }
+        let chars: std::vec::Vec<char> = text.chars().collect();
+        let ell_w = char_advance('\u{2026}', scale);
+        // Prefix sums: `prefix[i]` is the width of the first `i` characters, so
+        // testing a candidate head and tail is two lookups instead of two sums.
+        // This runs per visible row of a list, and re-summing per candidate made
+        // a long name in a narrow row quadratic.
+        let mut prefix = std::vec::Vec::with_capacity(chars.len() + 1);
+        prefix.push(0.0f32);
+        for c in &chars {
+            let w = prefix[prefix.len() - 1] + char_advance(*c, scale);
+            prefix.push(w);
+        }
+        let total = prefix[chars.len()];
+        // Give back one character at a time, splitting what is left between the
+        // two ends, until the whole thing plus the ellipsis fits.
+        for keep in (0..chars.len()).rev() {
+            let head = keep / 2;
+            let tail = keep - head;
+            if prefix[head] + ell_w + (total - prefix[chars.len() - tail]) <= max_w {
+                let mut out: std::string::String = chars[..head].iter().collect();
+                out.push('\u{2026}');
+                out.extend(chars[chars.len() - tail..].iter());
+                return out;
+            }
+        }
+        std::string::String::new()
+    }
+
+    /// Last break opportunity in `text` whose line still fits `max_w`, as
+    /// `(byte index the line ends at, byte index the next line starts at)`.
+    ///
+    /// Latin breaks on spaces. Chinese, Japanese and Korean are written without
+    /// any, so a title in one of those scripts offered no break at all: it was
+    /// ellipsised onto a single line under a panel with room for three (visible
+    /// as soon as issue #75 let a player type one in). In those scripts the
+    /// break sits between any two characters, minus the closing punctuation
+    /// that may not open a line and the opening brackets that may not close one.
+    ///
+    /// Widths accumulate as the scan walks the string rather than re-measuring
+    /// every prefix: with a break candidate at every single character, the
+    /// prefix-per-candidate version was quadratic in the title length.
+    fn wrap_point(&self, text: &str, scale: f32, max_w: f32) -> Option<(usize, usize)> {
+        let mut best: Option<(usize, usize)> = None;
+        let mut prev: Option<(usize, char)> = None;
+        // Width of `text[..i]` for the `i` the loop is looking at.
+        let mut w = 0.0f32;
+        for (i, ch) in text.char_indices() {
+            if let Some((pi, pc)) = prev {
+                // (line ends here, next line starts here, width of that line).
+                // A space is eaten by the break; a CJK break keeps both
+                // characters, so the line runs up to `i` included.
+                let point = if pc == ' ' {
+                    Some((pi, i, w - char_advance(pc, scale)))
+                } else if (is_cjk_wrappable(pc) || is_cjk_wrappable(ch))
+                    && ch != ' '
+                    && !cjk_no_line_start(ch)
+                    && !cjk_no_line_end(pc)
+                {
+                    Some((i, i, w))
+                } else {
+                    None
+                };
+                if let Some((end, next, line_w)) = point {
+                    if end == 0 {
+                        // Never emit an empty line: it would consume no input
+                        // and the caller's loop would not terminate.
+                    } else if line_w <= max_w {
+                        best = Some((end, next));
+                    } else {
+                        // Prefixes only grow, so nothing further out fits either.
+                        break;
+                    }
+                }
+            }
+            w += char_advance(ch, scale);
+            prev = Some((i, ch));
+        }
+        best
     }
 
     /// Draw one CJK (or other non-bitmap) glyph from the shared-font atlas at
@@ -6505,11 +6672,20 @@ impl SwitchRenderBackend {
         if !self.atlas_init_done {
             self.atlas_init_done = true;
             self.font_atlas = crate::backend::glyphs::FontAtlas::new();
+            // Building the atlas binds and unbinds texture unit 0 with raw GL,
+            // behind this cache's back. Without the resync the next bind of
+            // whatever the cache believes is already bound is skipped, and the
+            // first thing drawn after the very first non-Latin character
+            // samples the wrong texture.
+            self.gl_state.invalidate();
         }
         let mut uploaded = false;
         let (tex, info) = match self.font_atlas.as_mut() {
+            // The texture comes from the GLYPH, not from the atlas: a long
+            // Chinese library spills onto a second texture and the characters
+            // packed before it still live on the first.
             Some(fa) => match fa.ensure(ch, &mut uploaded) {
-                Some(info) => (fa.texture(), info),
+                Some(info) => (info.tex, info),
                 None => return None,
             },
             None => return None,
@@ -7358,8 +7534,9 @@ impl SwitchRenderBackend {
     pub fn draw_loading_panel(&mut self, title: &str, now: u64) {
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
-        let t = truncate_mid(title, 48);
         let ts = 2.5;
+        // The 48-character line this has always used, as the width it occupies.
+        let t = self.fit_text_mid(title, ts, 48.0 * 6.0 * ts);
         let tw = self.measure_text(&t, ts);
         self.draw_text(
             (vw - tw) * 0.5,
@@ -9410,10 +9587,11 @@ impl SwitchRenderBackend {
         // Selected-game info line (name + size · version · engine).
         if let Some(entry) = entries.get(selection) {
             let nsc = 2.5;
-            // Allow the name to use ~the full screen width before truncating
-            // (was a flat 40 chars, which cut common titles). 6 px/char at nsc.
-            let max_name = (((vw - 60.0) / (6.0 * nsc)) as usize).max(12);
-            let name = truncate_mid(&entry.display_name, max_name);
+            // Measured, not counted: the name gets the full screen width and
+            // each character is charged what `draw_text` will actually advance.
+            // A budget derived from a flat 6 px let a Chinese title run off both
+            // ends of the screen.
+            let name = self.fit_text_mid(&entry.display_name, nsc, vw - 60.0);
             let nw = self.measure_text(&name, nsc);
             self.draw_text(
                 (vw - nw) * 0.5,
@@ -9638,8 +9816,7 @@ impl SwitchRenderBackend {
     ) {
         const INFO_SCALE: f32 = 1.6;
         let info_line_h = 7.0 * INFO_SCALE + 9.0;
-        let url_cpl = (((MODAL_W_WIDE - 80.0) / (6.0 * INFO_SCALE)) as usize).max(8);
-        let mut url_lines = wrap_words(url, url_cpl);
+        let mut url_lines = wrap_words(url, MODAL_W_WIDE - 80.0, INFO_SCALE);
         // Two lines of URL is plenty to recognise it; more would push the
         // actions off the panel.
         if url_lines.len() > 2 {
@@ -9751,8 +9928,10 @@ impl SwitchRenderBackend {
 
         // Game name + basename, centered under the title.
         const NAME_SCALE: f32 = 2.5;
-        let name_budget = ((frame.w - MODAL_ROW_X) / (6.0 * NAME_SCALE)) as usize;
-        let display = truncate_tail(game_display_name, name_budget);
+        // Width, not a character count: this is the modal that asks "delete
+        // this?", so the name spilling outside the frame is the worst possible
+        // place for it. See `fit_text_mid`.
+        let display = self.fit_text_mid(game_display_name, NAME_SCALE, frame.w - MODAL_ROW_X);
         let dw = self.measure_text(&display, NAME_SCALE);
         self.draw_text(
             frame.x + (frame.w - dw) * 0.5,
@@ -10032,8 +10211,7 @@ impl SwitchRenderBackend {
                 );
                 ux += sz + 12.0;
             }
-            let avail = ((right - ux) / (6.0 * scale)) as usize;
-            let shown = truncate_mid(labels[k], avail.max(1));
+            let shown = self.fit_text_mid(labels[k], scale, right - ux);
             self.draw_text(ux, y, scale, &shown, color);
         }
 
@@ -10515,12 +10693,13 @@ impl SwitchRenderBackend {
             swf::Color::from_rgb(title_rgb, 255),
         );
 
-        // Word-wrapped, centred. `wrap_words` counts CHARS (not bytes, which
-        // over-wrapped every accented / Cyrillic / CJK message) and hard-chops
-        // any single word too long for a line.
+        // Word-wrapped, centred. `wrap_words` measures the line and hard-chops
+        // any single word too wide for it.
         let scale_m = 2.0;
-        const WRAP_AT: usize = 60;
-        let lines = wrap_words(msg, WRAP_AT);
+        // The 60-character line this notice has always used, expressed as the
+        // width it actually occupies at `scale_m`.
+        const WRAP_W: f32 = 60.0 * 6.0 * 2.0;
+        let lines = wrap_words(msg, WRAP_W, scale_m);
         let mut y = vh * 0.42;
         for line in &lines {
             let w = self.measure_text(line, scale_m);
@@ -10684,7 +10863,7 @@ impl SwitchRenderBackend {
             let tw = self.measure_text(title, 3.0);
             self.draw_text(panel_x + (PANEL_W - tw) * 0.5, panel_y + 30.0, 3.0, title, swf::Color::from_rgb(0xFFFFFF, 255));
             let m = if msg.is_empty() { crate::loc::s().cover_none } else { msg };
-            let shown = truncate_mid(m, ((PANEL_W - 120.0) / 12.0) as usize);
+            let shown = self.fit_text_mid(m, 2.0, PANEL_W - 120.0);
             let mw = self.measure_text(&shown, 2.0);
             self.draw_text(panel_x + (PANEL_W - mw) * 0.5, panel_y + 120.0, 2.0, &shown, swf::Color::from_rgb(0xAABFD8, 255));
             let help = footer;
@@ -10721,7 +10900,7 @@ impl SwitchRenderBackend {
         let title = header_title;
         let tw = self.measure_text(title, 3.0);
         self.draw_text(panel_x + (PANEL_W - tw) * 0.5, panel_y + 26.0, 3.0, title, swf::Color::from_rgb(0xFFFFFF, 255));
-        let gn = truncate_mid(game_name, 44);
+        let gn = self.fit_text_mid(game_name, 2.0, 44.0 * 6.0 * 2.0);
         let sw = self.measure_text(&gn, 2.0);
         self.draw_text(panel_x + (PANEL_W - sw) * 0.5, panel_y + 70.0, 2.0, &gn, swf::Color::from_rgb(0xFFD740, 255));
 
@@ -10785,7 +10964,7 @@ impl SwitchRenderBackend {
 
         // Selected candidate title under the grid.
         if let Some(t) = titles.get(selection) {
-            let shown = truncate_mid(t, ((PANEL_W - 80.0) / 12.0) as usize);
+            let shown = self.fit_text_mid(t, 2.0, PANEL_W - 80.0);
             let sw2 = self.measure_text(&shown, 2.0);
             self.draw_text(panel_x + (PANEL_W - sw2) * 0.5, panel_y + panel_h - 66.0, 2.0, &shown, swf::Color::from_rgb(0xCCCCCC, 255));
         }
@@ -10835,7 +11014,7 @@ impl SwitchRenderBackend {
         let tw = self.measure_text(header_title, 3.0);
         self.draw_text((vw - tw) * 0.5, 36.0, 3.0, header_title, swf::Color::from_rgb(0xFFFFFF, 255));
         if !query.is_empty() {
-            let q = truncate_mid(query, 60);
+            let q = self.fit_text_mid(query, 2.0, 60.0 * 6.0 * 2.0);
             let qw = self.measure_text(&q, 2.0);
             self.draw_text((vw - qw) * 0.5, 80.0, 2.0, &q, swf::Color::from_rgb(0xFFD740, 255));
         }
@@ -10848,7 +11027,7 @@ impl SwitchRenderBackend {
             // line they ran off both edges of the screen.
             let m = if msg.is_empty() { crate::loc::s().cover_none } else { msg };
             const MS: f32 = 2.5;
-            let lines = wrap_words(m, ((vw - 80.0) / (6.0 * MS)) as usize);
+            let lines = wrap_words(m, vw - 80.0, MS);
             let mut my = vh * 0.5 - 12.0 - (lines.len().saturating_sub(1) as f32) * 17.0;
             for line in &lines {
                 let mw = self.measure_text(line, MS);
@@ -11040,8 +11219,7 @@ impl SwitchRenderBackend {
             // Per-cell title (truncated to the cell width).
             if let Some(t) = titles.get(i) {
                 let ls = 1.5;
-                let max_chars = ((cell_w / (6.0 * ls)) as usize).max(1);
-                let shown = truncate_mid(t, max_chars);
+                let shown = self.fit_text_mid(t, ls, cell_w);
                 let lw = self.measure_text(&shown, ls);
                 let col_txt = if i == selection { 0xFFFFFF } else { 0x9FB0C2 };
                 self.draw_text(cx + (cell_w - lw) * 0.5, cy + thumb_h + 5.0, ls, &shown, swf::Color::from_rgb(col_txt, 255));
@@ -11128,8 +11306,7 @@ impl SwitchRenderBackend {
         };
         let text_x0 = 40.0 + if cover.is_some() { COVER_W + 24.0 } else { 0.0 };
         let title_scale = 2.5;
-        let title_cpl = (((PANEL_W - text_x0 - 40.0) / (6.0 * title_scale)) as usize).max(8);
-        let title_lines = wrap_words(title, title_cpl);
+        let title_lines = wrap_words(title, PANEL_W - text_x0 - 40.0, title_scale);
         let mut title_lines = title_lines;
         if title_lines.is_empty() {
             title_lines.push(std::string::String::from("?"));
@@ -11139,8 +11316,7 @@ impl SwitchRenderBackend {
         // the source text are collapsed by the word wrapper.
         const DESC_SCALE: f32 = 1.6;
         const DESC_MAX_LINES: usize = 7;
-        let desc_cpl = (((PANEL_W - 80.0) / (6.0 * DESC_SCALE)) as usize).max(8);
-        let mut desc_lines = wrap_words(description, desc_cpl);
+        let mut desc_lines = wrap_words(description, PANEL_W - 80.0, DESC_SCALE);
         if desc_lines.len() > DESC_MAX_LINES {
             desc_lines.truncate(DESC_MAX_LINES);
             if let Some(last) = desc_lines.last_mut() {
@@ -11227,9 +11403,8 @@ impl SwitchRenderBackend {
 
         // Info rows: "LABEL : value", truncated to the text column.
         let row_scale = 2.0;
-        let row_cpl = ((text_w / (6.0 * row_scale)) as usize).max(8);
         for (label, value) in &rows {
-            let line = truncate_mid(&std::format!("{} : {}", label, value), row_cpl);
+            let line = self.fit_text_mid(&std::format!("{} : {}", label, value), row_scale, text_w);
             self.draw_text(text_x, y, row_scale, &line, swf::Color::from_rgb(0xCCCCCC, 255));
             y += row_h;
         }
@@ -11336,14 +11511,11 @@ impl SwitchRenderBackend {
             if is_sel {
                 self.draw_text(rows_left_x - 30.0, y, ROW_SCALE, ">", color);
             }
-            // Truncate the name to the row width.
-            let char_w = 6.0 * ROW_SCALE;
-            let max_chars = ((vw - rows_left_x * 2.0) / char_w) as usize;
-            let mut display = names[abs_idx].to_string();
-            if display.chars().count() > max_chars && max_chars > 1 {
-                display = display.chars().take(max_chars - 1).collect();
-                display.push('…');
-            }
+            // Truncate the name to the row WIDTH, not to a character count: a
+            // character is 6 units of pen here and 8 for anything drawn from
+            // the shared font, so a Chinese title budgeted in characters ran a
+            // third past the row and under the scrollbar.
+            let display = self.fit_text(names[abs_idx], ROW_SCALE, vw - rows_left_x * 2.0);
             self.draw_text(rows_left_x, y, ROW_SCALE, &display, color);
         }
 

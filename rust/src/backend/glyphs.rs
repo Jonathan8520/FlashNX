@@ -26,6 +26,17 @@ use std::collections::HashMap;
 pub const RASTER_PX: f32 = 44.0;
 /// Atlas texture side (RGBA8).
 const ATLAS_DIM: usize = 1024;
+/// How many atlas textures we will allocate before giving up on new glyphs.
+///
+/// One 1024² atlas holds 22 shelves of 22 cells at `RASTER_PX`, so about 484
+/// distinct characters. That is plenty for a Chinese INTERFACE, and nowhere
+/// near enough for a Chinese LIBRARY: the interface alone is a few hundred, and
+/// every game title a player types in (issue #75) adds more. Past the 484th the
+/// old single atlas went permanently blind -- not a fallback glyph, nothing at
+/// all, for the rest of the session. Four textures is 16 MB of GPU memory for
+/// ~1900 characters, and none of it is allocated until the first non-Latin
+/// character is actually drawn.
+const ATLAS_MAX: usize = 4;
 /// 1px gap between packed glyphs so bilinear sampling never bleeds neighbours.
 const PAD: usize = 1;
 
@@ -139,6 +150,10 @@ fn log(s: &str) {
 /// Atlas placement + metrics for one rasterized glyph, all at `RASTER_PX`.
 #[derive(Clone, Copy)]
 pub struct GlyphInfo {
+    /// Which atlas texture holds this glyph. Carried per glyph, not read from
+    /// the atlas: once a second texture exists (see `ATLAS_MAX`) the characters
+    /// of a single word can live on different ones.
+    pub tex: GLuint,
     /// Atlas UV sub-rect `[u0, v0, du, dv]`.
     pub uv: [f32; 4],
     /// Rasterized bitmap size in px (at `RASTER_PX`).
@@ -181,13 +196,52 @@ fn glyph_cache() -> &'static std::sync::Mutex<std::vec::Vec<(char, Option<Cached
     &C
 }
 
+/// Allocate one empty `ATLAS_DIM²` RGBA8 texture. Cleared to transparent so an
+/// unwritten region can never show through a glyph's bilinear edge.
+///
+/// NOTE for the caller: this binds and unbinds texture unit 0 with raw GL, so
+/// the renderer's state cache must be invalidated afterwards.
+fn new_atlas_texture() -> Option<GLuint> {
+    let mut tex: GLuint = 0;
+    unsafe {
+        glGenTextures(1, &mut tex);
+        if tex == 0 {
+            log("glyphs: glGenTextures returned 0\n");
+            return None;
+        }
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        let zeros = std::vec![0u8; ATLAS_DIM * ATLAS_DIM * 4];
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            GL_RGBA8 as GLint,
+            ATLAS_DIM as GLsizei,
+            ATLAS_DIM as GLsizei,
+            0,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            zeros.as_ptr() as *const _,
+        );
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as GLint);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as GLint);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as GLint);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as GLint);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+    Some(tex)
+}
+
 /// One GL texture holding lazily-rasterized glyphs, packed shelf-style.
 pub struct FontAtlas {
     /// Parsed ON DEMAND, and only when `glyph_cache` cannot answer — see
     /// `CachedGlyph`. `None` = not parsed yet OR the parse failed.
     font: Option<fontdue::Font>,
     font_tried: bool,
+    /// The texture being packed into now; `texs` holds it and every earlier one
+    /// (all of them stay alive: their glyphs are still referenced).
     tex: GLuint,
+    texs: std::vec::Vec<GLuint>,
     /// `None` value = looked up and the font has no such glyph (or atlas full):
     /// caches the miss so we never re-rasterize it.
     glyphs: HashMap<char, Option<GlyphInfo>>,
@@ -220,38 +274,12 @@ impl FontAtlas {
             log("glyphs: not enough memory to parse the CJK font — drawing it blank\n");
             return None;
         }
-        let mut tex: GLuint = 0;
-        unsafe {
-            glGenTextures(1, &mut tex);
-            if tex == 0 {
-                log("glyphs: glGenTextures returned 0\n");
-                return None;
-            }
-            glBindTexture(GL_TEXTURE_2D, tex);
-            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-            // Start fully transparent so unwritten regions never show.
-            let zeros = std::vec![0u8; ATLAS_DIM * ATLAS_DIM * 4];
-            glTexImage2D(
-                GL_TEXTURE_2D,
-                0,
-                GL_RGBA8 as GLint,
-                ATLAS_DIM as GLsizei,
-                ATLAS_DIM as GLsizei,
-                0,
-                GL_RGBA,
-                GL_UNSIGNED_BYTE,
-                zeros.as_ptr() as *const _,
-            );
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as GLint);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as GLint);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as GLint);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as GLint);
-            glBindTexture(GL_TEXTURE_2D, 0);
-        }
+        let tex = new_atlas_texture()?;
         Some(FontAtlas {
             font: None,
             font_tried: false,
             tex,
+            texs: std::vec![tex],
             glyphs: HashMap::new(),
             pen_x: PAD,
             pen_y: PAD,
@@ -260,8 +288,27 @@ impl FontAtlas {
         })
     }
 
-    pub fn texture(&self) -> GLuint {
-        self.tex
+    /// Move the pen to a fresh texture. `false` = no more are allowed or GL
+    /// refused one, and the caller stops taking new glyphs.
+    fn grow(&mut self) -> bool {
+        if self.texs.len() >= ATLAS_MAX {
+            log(&std::format!(
+                "glyphs: {} atlases full ({} glyphs), no more room\n",
+                self.texs.len(),
+                self.glyphs.len(),
+            ));
+            return false;
+        }
+        let Some(tex) = new_atlas_texture() else {
+            return false;
+        };
+        self.tex = tex;
+        self.texs.push(tex);
+        self.pen_x = PAD;
+        self.pen_y = PAD;
+        self.shelf_h = 0;
+        log(&std::format!("glyphs: atlas {} opened\n", self.texs.len()));
+        true
     }
 
     /// Ensure `ch` is in the atlas and return its info. `None` = the font has
@@ -283,6 +330,7 @@ impl FontAtlas {
         // Inkless (ideographic space, etc.): advance only.
         if gw == 0 || gh == 0 || coverage.is_empty() {
             let info = GlyphInfo {
+                tex: self.tex,
                 uv: [0.0; 4],
                 w: 0.0,
                 h: 0.0,
@@ -303,7 +351,7 @@ impl FontAtlas {
             self.pen_y += self.shelf_h + PAD;
             self.shelf_h = 0;
         }
-        if self.pen_y + gh + PAD > ATLAS_DIM {
+        if self.pen_y + gh + PAD > ATLAS_DIM && !self.grow() {
             self.full = true;
             self.glyphs.insert(ch, None);
             return None;
@@ -341,6 +389,7 @@ impl FontAtlas {
         }
         let dim = ATLAS_DIM as f32;
         let info = GlyphInfo {
+            tex: self.tex,
             uv: [
                 x0 as f32 / dim,
                 y0 as f32 / dim,

@@ -2438,6 +2438,15 @@ pub extern "C" fn ruffle_keyboard_type_text(text: *const c_char) -> c_int {
         // The key half is best-effort: only characters that map to one of our
         // Switch key codes carry a KeyDown/KeyUp, the rest are text only.
         let key = char_key_code(c).and_then(key_descriptor);
+        // With no field focused, the only consumer left is the AVM1 keyPress
+        // handler, and the SWF format defines that over ASCII 32..126 only
+        // (`ButtonKeyCode::from_input_event` refuses anything else). So a
+        // character typed in Chinese lands nowhere on THIS path, and the count
+        // has to say so: the keyboard accepts the input (issue #75), a game
+        // with a real text field receives it through `ruffle_keyboard_submit`,
+        // and here it is silently dropped. Counting it as sent would be a lie
+        // the caller cannot check.
+        let deliverable = key.is_some() || matches!(c as u32, 32..=126);
         if let Some(k) = key.clone() {
             p.handle_event(PlayerEvent::KeyDown { key: k });
         }
@@ -2445,7 +2454,9 @@ pub extern "C" fn ruffle_keyboard_type_text(text: *const c_char) -> c_int {
         if let Some(k) = key {
             p.handle_event(PlayerEvent::KeyUp { key: k });
         }
-        sent += 1;
+        if deliverable {
+            sent += 1;
+        }
     }
     sent
 }

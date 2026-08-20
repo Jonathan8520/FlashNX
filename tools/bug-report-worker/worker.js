@@ -228,13 +228,17 @@ async function handleProfileShare(r, env) {
   // install_ids on the branch are already claimed by the time they're visible.
   const owner = await checkOrClaimOwner(env, install, s(r.owner_token, 64));
   if (!owner.ok) return json({ ok: false, error: owner.error }, owner.status || 403);
+  const gameSuffix = (swfHash || fpUuid || "").slice(0, 8);
+  // A title written in a non-Latin script has no [a-z0-9] left after this, and
+  // the literal "profile" fallback then put every such game in ONE folder,
+  // sharing an id prefix. Fall back to the game key instead, which is exactly
+  // as unique as the folder is meant to be.
   const slug =
     title
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "")
-      .slice(0, 40) || "profile";
-  const gameSuffix = (swfHash || fpUuid || "").slice(0, 8);
+      .slice(0, 40) || (gameSuffix ? `g-${gameSuffix}` : "profile");
   // id = slug + game-key + install-key. Joining only the non-empty parts keeps
   // legacy bundled ids (no suffix) clean and tolerates a missing install_id.
   const id = [slug, gameSuffix, install].filter(Boolean).join("-");
