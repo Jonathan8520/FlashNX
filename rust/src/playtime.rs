@@ -8,7 +8,19 @@
 
 use std::sync::Mutex;
 
-const PATH: &str = "sdmc:/flashnx/playtime.json";
+/// File name only: it lives beside the library, wherever that is (#79).
+const FILE_NAME: &str = "playtime.json";
+
+/// Read path: the games folder first, the built-in roots after, so an
+/// install from before the folder could move still finds its data.
+fn read_path() -> std::string::String {
+    crate::library::config_read_path(FILE_NAME)
+}
+
+/// Write path: always beside the library.
+fn write_path() -> std::string::String {
+    crate::library::config_write_path(FILE_NAME)
+}
 
 /// (basename, total_seconds, last_played_epoch_secs)
 static PLAYTIME: Mutex<std::vec::Vec<(std::string::String, u64, u64)>> =
@@ -26,7 +38,7 @@ static LOADED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::
 /// counts as loaded; any other failure seals the table for the session.
 pub fn load() {
     use core::sync::atomic::Ordering::Relaxed;
-    match std::fs::metadata(PATH) {
+    match std::fs::metadata(read_path()) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             LOADED.store(true, Relaxed);
             return;
@@ -34,13 +46,13 @@ pub fn load() {
         Err(e) => {
             crate::net::log(&std::format!(
                 "playtime: {} unreadable ({}) - playtime is frozen this session\n",
-                PATH, e,
+                read_path(), e,
             ));
             return;
         }
         Ok(_) => {}
     }
-    let Some(bytes) = read_file_bounded(PATH, 1024 * 1024) else {
+    let Some(bytes) = read_file_bounded(&read_path(), 1024 * 1024) else {
         crate::net::log("playtime: read failed or over cap - playtime is frozen this session\n");
         return;
     };
@@ -132,7 +144,7 @@ fn save() {
     }
     let json = serde_json::Value::Object(obj);
     if let Ok(text) = serde_json::to_string_pretty(&json) {
-        if std::fs::write(PATH, text.as_bytes()).is_ok() {
+        if std::fs::write(write_path(), text.as_bytes()).is_ok() {
             crate::sd::commit();
         }
     }

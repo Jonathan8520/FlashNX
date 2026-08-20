@@ -628,6 +628,36 @@ pub fn prompt_rename(initial: &str) -> Option<std::string::String> {
 
 /// Short single-line prompt for the player's nickname (RÉGLAGES > PSEUDO),
 /// pre-filled with the current value. Empty return = clear the nickname.
+/// swkbd with a caller-supplied header and guide, for prompts that are neither
+/// a rename nor a nickname. Same 512-byte ceiling as the others: a folder name
+/// has no business being longer, and the buffer is stack-sized on the C side.
+pub fn prompt_with(header: &str, guide: &str, initial: &str) -> Option<std::string::String> {
+    let mut buf = std::vec![0u8; 512];
+    let mut initial_owned = initial.as_bytes().to_vec();
+    initial_owned.push(0);
+    let header_c = cstr(header);
+    let guide_c = cstr(guide);
+    let rc = unsafe {
+        swkbd_prompt_rename(
+            header_c.as_ptr() as *const c_char,
+            guide_c.as_ptr() as *const c_char,
+            initial_owned.as_ptr() as *const c_char,
+            buf.as_mut_ptr() as *mut c_char,
+            buf.len() as c_int,
+        )
+    };
+    // The C bridge returns 0 on success and -1 on failure — NOT a length.
+    // Reading it as "positive means text" turned every accepted keyboard into a
+    // silent cancel, which is exactly how it looked from the outside: press X,
+    // type a name, nothing happens.
+    if rc != 0 {
+        return None;
+    }
+    let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+    let text = std::string::String::from_utf8_lossy(&buf[..end]).trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
 pub fn prompt_pseudo(initial: &str) -> Option<std::string::String> {
     let mut buf = std::vec![0u8; 128];
     let mut initial_owned = initial.as_bytes().to_vec();

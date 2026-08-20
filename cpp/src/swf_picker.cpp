@@ -136,14 +136,55 @@ void index_dir_only(const char* dir) {
 //
 // Same file present in two dirs would produce two list entries (deduped
 // on basename later via `add_or_replace_path`).
+// The player's chosen games folder, or nullptr when they never picked one.
+//
+// Read here rather than passed in from Rust: the scan runs before the library
+// module has any state, and a games folder that the scan does not know about
+// would receive downloads that never appear in the list — the one failure this
+// feature must not have (#79). Same file Rust writes in `set_primary_root`.
+static const char* chosen_games_dir(void) {
+    // Re-read on EVERY call, never cached.
+    //
+    // Caching this cost an afternoon: changing the games folder rescans right
+    // away, the cache still held the PREVIOUS folder, so the scan walked the
+    // one the games had just left and reported "0 .swf". The library came back
+    // empty and only restarting the app fixed it. One small read per scan is
+    // nothing beside walking the card, and it cannot go stale.
+    static char buf[512];
+    buf[0] = '\0';
+    FILE* f = std::fopen("sdmc:/switch/FlashNX/games_dir", "rb");
+    // Installs that chose a folder before the pointer moved still have it in
+    // the old spot; Rust migrates it on the next write.
+    if (!f) f = std::fopen("sdmc:/flashnx/games_dir", "rb");
+    if (!f) return nullptr;
+    const size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+    std::fclose(f);
+    buf[n] = '\0';
+    // Trim trailing newline / whitespace / slash so it concatenates cleanly.
+    size_t len = std::strlen(buf);
+    while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r' ||
+                       buf[len - 1] == ' ' || buf[len - 1] == '/')) {
+        buf[--len] = '\0';
+    }
+    return buf[0] ? buf : nullptr;
+}
+
 extern "C" void swf_picker_run(void) {
+    // `sdmc:/switch/` holds homebrew BINARIES; a games library has no business
+    // there, and scanning it made the app answer to two conventions at once.
+    // Games live in the folder the player chose, or in the default beside it.
     static const char* DIRS[] = {
         "sdmc:/flashnx/",
         "sdmc:/ruffle/",
-        "sdmc:/switch/flashnx/",
-        "sdmc:/switch/ruffle/",
     };
     ruffle_library_scan_begin();
+    // Chosen folder first: it is where new games land, so it should also be
+    // the first place they are found.
+    if (const char* chosen = chosen_games_dir()) {
+        char withslash[520];
+        std::snprintf(withslash, sizeof(withslash), "%s/", chosen);
+        scan_dir_all(withslash);
+    }
     for (const char* dir : DIRS) {
         scan_dir_all(dir);
     }
@@ -153,6 +194,13 @@ extern "C" void swf_picker_run(void) {
         "sdmc:/flashnx/covers/",
         "sdmc:/ruffle/covers/",
     };
+    // The cache travels with the library (#79), so index it where the library
+    // actually is, in addition to the built-in spots a pre-move install used.
+    if (const char* chosen = chosen_games_dir()) {
+        char covers[540];
+        std::snprintf(covers, sizeof(covers), "%s/covers/", chosen);
+        index_dir_only(covers);
+    }
     for (const char* dir : COVER_DIRS) {
         index_dir_only(dir);
     }
@@ -417,6 +465,114 @@ extern "C" int swf_picker_list_tree(const char* root, char* out, int cap) {
     return count;
 }
 
+
+
+// True when `path` names a directory that can actually be opened.
+//
+// Rust's `std::fs::metadata` answers this wrongly on Horizon — it reports a
+// perfectly good folder as absent, which made the games folder fall back to the
+// default on every read and quietly undid the user's choice (#79). Directory
+// questions go through libnx here, like every other directory operation in this
+// file.
+// Top-level FILE names of `dir`, newline-separated. One readdir, no descent.
+//
+// The whole-tree walk was being used for this and then filtered down to the
+// entries with no separator in them — so listing ~400 files in a games folder
+// meant visiting the thousands inside its `<game>.files/` companion trees
+// first. That is where the several-second freeze before a move came from, and
+// it grew with the size of the library rather than with the work to be done.
+extern "C" int swf_picker_list_files(const char* dir, char* out, int cap) {
+    if (!dir || !*dir || !out || cap < 2) return -1;
+    out[0] = '\0';
+    DIR* d = ::opendir(dir);
+    if (!d) return -1;
+    int written = 0;
+    int count = 0;
+    while (struct dirent* e = ::readdir(d)) {
+        if (e->d_name[0] == '.' &&
+            (e->d_name[1] == '\0' || (e->d_name[1] == '.' && e->d_name[2] == '\0'))) {
+            continue;
+        }
+        char full[768];
+        std::snprintf(full, sizeof(full), "%s/%s", dir, e->d_name);
+        struct stat st;
+        if (::stat(full, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) continue;
+        const int need = (int)std::strlen(e->d_name) + 1;
+        if (written + need >= cap) break;
+        written += std::snprintf(out + written, (size_t)(cap - written), "%s\n", e->d_name);
+        count++;
+    }
+    ::closedir(d);
+    return count;
+}
+
+extern "C" int swf_picker_dir_exists(const char* path) {
+    if (!path || !*path) return 0;
+    struct stat st;
+    if (::stat(path, &st) == 0) {
+        return S_ISDIR(st.st_mode) ? 1 : 0;
+    }
+    // `stat` can fail on a mount root that `opendir` still handles.
+    DIR* d = ::opendir(path);
+    if (!d) return 0;
+    ::closedir(d);
+    return 1;
+}
+// One level of subdirectory names under `dir`, newline-separated, sorted.
+//
+// The whole-tree walk above is the wrong shape for a folder picker: a full SD
+// can hold tens of thousands of entries, and the picker only ever shows one
+// level at a time. This reads that level and nothing more, so opening a folder
+// costs what that folder costs.
+//
+// Directories only — the picker chooses a destination for games, and files
+// would be noise. Hidden entries are skipped for the same reason. Returns the
+// count written, or -1 if `dir` cannot be read at all.
+extern "C" int swf_picker_list_dirs(const char* dir, char* out, int cap) {
+    if (!dir || !*dir || !out || cap < 2) return -1;
+    out[0] = '\0';
+    DIR* d = ::opendir(dir);
+    if (!d) return -1;
+
+    // Collected first so the picker gets a stable alphabetical order rather
+    // than whatever order the filesystem hands back.
+    static char names[512][256];
+    int count = 0;
+    while (struct dirent* e = ::readdir(d)) {
+        if (e->d_name[0] == '.') continue;
+        char full[768];
+        std::snprintf(full, sizeof(full), "%s/%s", dir, e->d_name);
+        struct stat st;
+        if (::stat(full, &st) != 0) continue;
+        if (!S_ISDIR(st.st_mode)) continue;
+        if (count >= 512) break;
+        std::snprintf(names[count], sizeof(names[count]), "%s", e->d_name);
+        count++;
+    }
+    ::closedir(d);
+
+    for (int i = 1; i < count; i++) {
+        char key[256];
+        std::snprintf(key, sizeof(key), "%s", names[i]);
+        int j = i - 1;
+        while (j >= 0 && ::strcasecmp(names[j], key) > 0) {
+            std::snprintf(names[j + 1], sizeof(names[j + 1]), "%s", names[j]);
+            j--;
+        }
+        std::snprintf(names[j + 1], sizeof(names[j + 1]), "%s", key);
+    }
+
+    int written = 0;
+    int emitted = 0;
+    for (int i = 0; i < count; i++) {
+        const int need = (int)std::strlen(names[i]) + 1;
+        if (written + need >= cap) break;
+        written += std::snprintf(out + written, (size_t)(cap - written), "%s\n", names[i]);
+        emitted++;
+    }
+    return emitted;
+}
 // Robust GameZIP-extraction file write (v1.3.0 fix). Rust's std::fs::write
 // silently fails to persist some files on Horizon (write returns Ok yet the
 // file is later unreadable; std::fs::metadata even returns a timestamp as the

@@ -125,6 +125,17 @@ pub(crate) enum Screen {
     /// Global settings. `selection` indexes the 3 entries: 0 = default
     /// controls, 1 = language, 2 = back.
     SettingsModal { selection: usize },
+    /// RÉGLAGES → DOSSIER JEUX (#79): browse the card one level at a time and
+    /// choose where new downloads land. `path` is the folder being shown,
+    /// `selection` indexes `dir_browse` with 0 = "choose this folder".
+    GamesDirPicker { selection: usize, scroll: usize },
+    /// Confirm moving the library into the folder held in `dir_path`. Asked
+    /// because a move is not undone by pressing B: it renames real files.
+    GamesDirConfirm { selection: usize },
+    /// The move itself, with a real count behind it. A library of a hundred
+    /// games is a hundred renames plus their sidecars, and a frozen screen with
+    /// no explanation is how a user learns to fear a feature.
+    GamesDirMoving,
     /// Editing the GLOBAL DEFAULT keymap via the reused `menu::*` editor.
     SettingsKeymapEditor,
     /// Language picker. `selection` indexes `loc::PICKER_LANGS`.
@@ -253,7 +264,9 @@ static SORT_REVERSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 /// One-shot guard: load playtime + sort prefs once per boot (not every open()).
 static PREFS_LOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-const SORT_PATH: &str = "sdmc:/flashnx/sort.txt";
+/// Names of the app's own files. Their FOLDER is wherever the library lives —
+/// see `config_read_path` / `config_write_path`.
+const SORT_FILE: &str = "sort.txt";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SortMode {
@@ -289,7 +302,7 @@ pub(crate) fn current_sort_reverse() -> bool {
 fn persist_sort() {
     let mode = SORT_MODE.load(std::sync::atomic::Ordering::Relaxed);
     let rev = SORT_REVERSE.load(std::sync::atomic::Ordering::Relaxed);
-    write_sort_pref(SORT_PATH, mode, rev);
+    write_sort_pref(&config_write_path(SORT_FILE), mode, rev);
 }
 
 /// Shared `digit[R]` writer for both sort prefs (JOUER's `sort.txt` and the
@@ -353,10 +366,10 @@ fn ensure_prefs_loaded() {
     if !PREFS_LOADED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         crate::playtime::load();
         crate::favorites::load();
-        let (mode, rev) = read_sort_prefs(SORT_PATH);
+        let (mode, rev) = read_sort_prefs(&config_read_path(SORT_FILE));
         SORT_MODE.store(mode, std::sync::atomic::Ordering::Relaxed);
         SORT_REVERSE.store(rev, std::sync::atomic::Ordering::Relaxed);
-        let (mode, rev) = read_sort_prefs(IMPORT_SORT_PATH);
+        let (mode, rev) = read_sort_prefs(&config_read_path(IMPORT_SORT_FILE));
         IMPORT_SORT.store(mode, std::sync::atomic::Ordering::Relaxed);
         IMPORT_REVERSE.store(rev, std::sync::atomic::Ordering::Relaxed);
     }
@@ -369,7 +382,7 @@ fn ensure_prefs_loaded() {
 // order URLs arrive in, which is what you want right after importing), 1 = NAME
 // (by the row's display label), 2 = SOURCE (grouped by host), 3 = FILES (how
 // many `.swf` the source holds).
-const IMPORT_SORT_PATH: &str = "sdmc:/flashnx/import_sort.txt";
+const IMPORT_SORT_FILE: &str = "import_sort.txt";
 static IMPORT_SORT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 static IMPORT_REVERSE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -391,7 +404,7 @@ pub(crate) fn import_sort_reverse() -> bool {
 pub(crate) fn set_import_sort(idx: u8, rev: bool) {
     IMPORT_SORT.store(idx, std::sync::atomic::Ordering::Relaxed);
     IMPORT_REVERSE.store(rev, std::sync::atomic::Ordering::Relaxed);
-    write_sort_pref(IMPORT_SORT_PATH, idx, rev);
+    write_sort_pref(&config_write_path(IMPORT_SORT_FILE), idx, rev);
 }
 
 /// On return from a game, add its session duration to the running total.
@@ -488,18 +501,141 @@ pub(crate) struct MetaSidecar {
     pub display_name: Option<std::string::String>,
 }
 
-/// User-facing SD roots. Order = priority for lookup (read). Writes
-/// always go to entry 0 (the new `sdmc:/flashnx/`). The legacy
-/// `sdmc:/ruffle/` is kept for backward compat — users coming from
-/// pre-rename builds still see their saves/sidecars without manual
-/// migration.
+/// Built-in SD roots, in lookup priority order. The legacy `sdmc:/ruffle/` is
+/// kept for backward compat — users coming from pre-rename builds still see
+/// their saves and sidecars without manual migration.
 const USER_SD_ROOTS: &[&str] = &["sdmc:/flashnx", "sdmc:/ruffle"];
+
+/// Where the player has asked new games to live, one line, no trailing slash.
+/// Absent = the built-in default. Same shape as `cursor_speed`: a tiny file
+/// beside the library rather than an entry in a settings blob, so it can be
+/// inspected and fixed from a card reader when something goes wrong.
+/// Where the games folder is recorded — beside the `.nro`, not beside the
+/// games.
+///
+/// A lone file in an otherwise empty `sdmc:/flashnx/` reads as leftovers, and
+/// deleting leftovers is exactly what a tidy person does; the app would then
+/// forget where its library went. `sdmc:/switch/FlashNX/` is the homebrew's own
+/// folder, next to the `.nro` and the diagnostic markers, and nobody empties
+/// that. It is also the one path that can never itself be moved.
+const GAMES_DIR_FILE: &str = "sdmc:/switch/FlashNX/games_dir";
+
+/// Where the pointer used to live. Read-only, and migrated on the first
+/// write: an install that already chose a folder must not lose it just
+/// because the bookkeeping moved.
+const GAMES_DIR_FILE_LEGACY: &str = "sdmc:/flashnx/games_dir";
+
+/// The root that RECEIVES new games and new sidecars.
+///
+/// Defaults to `sdmc:/flashnx`, and follows the player's choice once they pick
+/// a folder in REGLAGES (#79: SD cards laid out for emulation frontends want
+/// `roms/flashnx`, and others want something else entirely, so this is a path
+/// and not a switch between two conventions).
+///
+/// Read from disk on every call rather than cached: it changes at most once in
+/// a session, from a menu, and a stale cache here would write a download into
+/// the old folder while the library scans the new one.
+/// Cached answer, because this is read from drawing code.
+///
+/// The REGLAGES row and the folder picker both show the current folder, so an
+/// uncached read meant two file opens and a `stat` on every frame — a few
+/// milliseconds of SD I/O per frame on Horizon, where each of those is an IPC
+/// round trip. It was enough to make the console's screenshot capture fail on
+/// that screen. Invalidated by `set_primary_root`, the only writer.
+static PRIMARY_ROOT_CACHE: Mutex<Option<std::string::String>> = Mutex::new(None);
+
+pub(crate) fn primary_root() -> std::string::String {
+    if let Ok(g) = PRIMARY_ROOT_CACHE.lock() {
+        if let Some(v) = g.as_ref() {
+            return v.clone();
+        }
+    }
+    let v = primary_root_uncached();
+    if let Ok(mut g) = PRIMARY_ROOT_CACHE.lock() {
+        *g = Some(v.clone());
+    }
+    v
+}
+
+fn primary_root_uncached() -> std::string::String {
+    let recorded = read_small_file(GAMES_DIR_FILE)
+        .or_else(|| read_small_file(GAMES_DIR_FILE_LEGACY));
+    if let Some(raw) = recorded {
+        let chosen = raw.trim().trim_end_matches('/');
+        // A folder that no longer exists (card swapped, folder deleted) must not
+        // strand downloads: fall back rather than fail, and say so in the log.
+        if !chosen.is_empty() {
+            if dir_exists(chosen) {
+                return chosen.into();
+            }
+            crate::net::log(&std::format!(
+                "games dir: {} is gone, falling back to {}\n",
+                chosen, USER_SD_ROOTS[0],
+            ));
+        }
+    }
+    USER_SD_ROOTS[0].into()
+}
+
+/// Record the player's chosen games folder. Empty string restores the default.
+pub(crate) fn set_primary_root(path: &str) {
+    let trimmed = path.trim().trim_end_matches('/');
+    // Drop the cache first: everything below re-reads through `primary_root`.
+    if let Ok(mut g) = PRIMARY_ROOT_CACHE.lock() {
+        *g = None;
+    }
+    // The old copy goes either way, so the two can never disagree.
+    let _ = std::fs::remove_file(GAMES_DIR_FILE_LEGACY);
+    if trimmed.is_empty() || trimmed == USER_SD_ROOTS[0] {
+        let _ = std::fs::remove_file(GAMES_DIR_FILE);
+        return;
+    }
+    let _ = std::fs::create_dir_all("sdmc:/switch/FlashNX");
+    let _ = std::fs::write(GAMES_DIR_FILE, trimmed.as_bytes());
+}
+
+/// Every root worth SEARCHING, chosen folder first, then the built-ins. The
+/// chosen one leads because that is where the current session writes; the
+/// built-ins stay so a half-finished move never hides a game.
+fn search_roots() -> std::vec::Vec<std::string::String> {
+    let mut roots: std::vec::Vec<std::string::String> = std::vec::Vec::with_capacity(3);
+    let primary = primary_root();
+    if !USER_SD_ROOTS.iter().any(|r| *r == primary) {
+        roots.push(primary);
+    }
+    for r in USER_SD_ROOTS {
+        roots.push((*r).into());
+    }
+    roots
+}
+
+/// Where to READ one of the app's own files: the games folder first, then the
+/// built-in roots so an install that predates the move still finds its settings
+/// and migrates them on the next write.
+pub(crate) fn config_read_path(name: &str) -> std::string::String {
+    for root in search_roots() {
+        let p = std::format!("{}/{}", root, name);
+        if file_exists(&p) {
+            return p;
+        }
+    }
+    std::format!("{}/{}", primary_root(), name)
+}
+
+/// Where to WRITE one of the app's own files: always beside the library.
+///
+/// Everything the app owns travels with the games, because "moved" should mean
+/// moved. Exactly one file cannot: `games_dir`, which records where the library
+/// went — a pointer that lived with the thing it points at would be unfindable.
+pub(crate) fn config_write_path(name: &str) -> std::string::String {
+    std::format!("{}/{}", primary_root(), name)
+}
 
 /// Find a user-facing sidecar / config file by suffix (e.g.
 /// "Super_Mario_63_2010.swf.meta.json") under one of the known SD
 /// roots. Returns the first existing path, or None.
 fn find_user_file(suffix: &str) -> Option<std::string::String> {
-    for root in USER_SD_ROOTS {
+    for root in search_roots() {
         let p = std::format!("{}/{}", root, suffix);
         if file_exists(&p) {
             return Some(p);
@@ -508,10 +644,9 @@ fn find_user_file(suffix: &str) -> Option<std::string::String> {
     None
 }
 
-/// Where to WRITE a user-facing sidecar / config. Always the primary
-/// root (entry 0 of `USER_SD_ROOTS`) — new state goes to `flashnx/`.
+/// Where to WRITE a user-facing sidecar / config: the player's games folder.
 fn primary_user_path(suffix: &str) -> std::string::String {
-    std::format!("{}/{}", USER_SD_ROOTS[0], suffix)
+    std::format!("{}/{}", primary_root(), suffix)
 }
 
 fn read_meta_sidecar(basename: &str) -> Option<MetaSidecar> {
@@ -599,6 +734,18 @@ pub(crate) struct State {
     selected_path: Option<std::string::String>,
     /// GL texture id for the FlashNX banner image (assets/banner.png decoded
     /// at init). 0 = not loaded (decode failed or init not called yet).
+    /// Folder currently shown by `GamesDirPicker`, and its subfolder names.
+    /// `Screen` is `Copy`, so the path cannot ride in the variant; both live
+    /// here and are filled when a level opens, so drawing never touches the SD.
+    pub(crate) dir_path: std::string::String,
+    pub(crate) dir_browse: std::vec::Vec<std::string::String>,
+    /// Games folder the user just accepted. Picked up by `input()` once the
+    /// library lock is released, which queues the move; the move itself then
+    /// advances a slice per frame from `render`. Everything about this has to
+    /// happen outside the lock — the rescan at the end re-enters the library,
+    /// and doing it in the handler deadlocks the app instead of changing a
+    /// setting.
+    pub(crate) pending_games_dir: Option<std::string::String>,
     pub(crate) banner_tex: u32,
     pub(crate) banner_w: u32,
     pub(crate) banner_h: u32,
@@ -800,6 +947,9 @@ pub(crate) struct State {
 }
 
 static LIBRARY: Mutex<State> = Mutex::new(State {
+    dir_path: std::string::String::new(),
+    dir_browse: std::vec::Vec::new(),
+    pending_games_dir: None,
     screen: Screen::Inactive,
     entries: std::vec::Vec::new(),
     selected_path: None,
@@ -1237,6 +1387,110 @@ pub(crate) fn file_exists(path: &str) -> bool {
     std::path::Path::new(path).exists()
 }
 
+
+extern "C" {
+    fn swf_picker_list_dirs(dir: *const core::ffi::c_char, out: *mut u8, cap: i32) -> i32;
+    /// Directory existence via libnx: `std::fs::metadata` gets this wrong on
+    /// Horizon and reports live folders as absent.
+    fn swf_picker_dir_exists(path: *const core::ffi::c_char) -> i32;
+}
+
+/// Does this file exist ON THE CARD, right now?
+///
+/// `file_exists` answers from the scan index when it knows the directory, which
+/// is right for a sidecar probe and wrong the moment files are being moved: the
+/// index still describes where things were. A whole folder move once reported
+/// "0 moved, 419 already there" and did nothing at all, because every
+/// destination looked occupied to a cache that had not caught up.
+pub(crate) fn file_exists_now(path: &str) -> bool {
+    let c = std::format!("{}\0", path);
+    unsafe { swf_picker_file_size(c.as_ptr() as *const core::ffi::c_char) >= 0 }
+}
+
+/// Subfolder names of `dir`, alphabetical. Empty when the folder cannot be read.
+///
+/// Goes through C++ because Rust's `read_dir` corrupts entry names on Horizon —
+/// the same reason the library scan lives there. One level only: a folder picker
+/// never shows more, and a full card holds tens of thousands of entries.
+pub(crate) fn list_dirs(dir: &str) -> std::vec::Vec<std::string::String> {
+    let mut buf = std::vec![0u8; 64 * 1024];
+    let c = std::format!("{}\0", dir);
+    let n = unsafe {
+        swf_picker_list_dirs(c.as_ptr() as *const core::ffi::c_char, buf.as_mut_ptr(), buf.len() as i32)
+    };
+    if n <= 0 {
+        return std::vec::Vec::new();
+    }
+    let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+    std::string::String::from_utf8_lossy(&buf[..end])
+        .lines()
+        .filter(|l| !l.is_empty() && !is_our_bookkeeping(l))
+        .map(|l| l.to_string())
+        .collect()
+}
+
+/// Every subfolder of `dir`, including the `<game>.files/` trees the picker
+/// hides. The move needs the real contents, not the tidied view.
+pub(crate) fn list_dirs_all(dir: &str) -> std::vec::Vec<std::string::String> {
+    let mut buf = std::vec![0u8; 64 * 1024];
+    let c = std::format!("{}\0", dir);
+    let n = unsafe {
+        swf_picker_list_dirs(c.as_ptr() as *const core::ffi::c_char, buf.as_mut_ptr(), buf.len() as i32)
+    };
+    if n <= 0 {
+        return std::vec::Vec::new();
+    }
+    let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+    std::string::String::from_utf8_lossy(&buf[..end])
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect()
+}
+
+/// Folders FlashNX manages itself, which are never a place to put games: the
+/// `<game>.files/` companion trees of multi-file titles, and the cover cache.
+/// Listing them buries the card's real folders under one row per installed
+/// game, which is exactly what the picker is trying to help with.
+fn is_our_bookkeeping(name: &str) -> bool {
+    name.eq_ignore_ascii_case("covers") || name.to_ascii_lowercase().ends_with(".files")
+}
+
+/// The folder above `path`, or None at the top of the card.
+///
+/// Distinct from `parent_dir` above, which is a plain string trim used by the
+/// scan index. `sdmc:/foo` sits one level under the root, and its parent is
+/// `sdmc:/`, not `sdmc:` — an SD path keeps the slash. Getting this wrong made
+/// the root unreachable: the picker decided there was no parent and closed.
+fn browse_parent(path: &str) -> Option<std::string::String> {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed == "sdmc:" {
+        return None;
+    }
+    match trimmed.rfind('/') {
+        Some(i) if i > "sdmc:".len() => Some(trimmed[..i].to_string()),
+        Some(_) => Some("sdmc:/".to_string()),
+        None => None,
+    }
+}
+
+/// True when `path` exists AND is a directory.
+///
+/// Goes through C++ for the same reason the scan does: Rust's `std::fs` is not
+/// reliable on Horizon. `metadata()` reported the freshly created
+/// `roms/flashnx` as absent, so the games folder fell back to the default on
+/// every read and the user's choice never took effect (#79).
+pub(crate) fn dir_exists(path: &str) -> bool {
+    let c = std::format!("{}\0", path);
+    unsafe { swf_picker_dir_exists(c.as_ptr() as *const core::ffi::c_char) != 0 }
+}
+
+/// Read a short single-line config file (a path, a number). None when absent or
+/// unreadable — every caller has a default, and a missing file is the normal
+/// case rather than an error worth reporting.
+pub(crate) fn read_small_file(path: &str) -> Option<std::string::String> {
+    std::fs::read_to_string(path).ok()
+}
 // ── SWF header index ──────────────────────────────────────────────────────
 //
 // The scan opened every game to read its SWF header: an open, a read and a zlib
@@ -1260,7 +1514,7 @@ pub(crate) fn file_exists(path: &str) -> bool {
 /// Named for what it holds. A previous shape of this cache also mirrored the
 /// sidecars under another name; since the file is disposable, a rename is the
 /// whole migration story.
-const SCAN_INDEX_FILE: &str = "sdmc:/flashnx/.swf_header_index.json";
+const SCAN_INDEX_NAME: &str = ".swf_header_index.json";
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct IndexEntry {
@@ -1301,7 +1555,7 @@ fn static_compression_label(s: &str) -> Option<&'static str> {
 /// Load the cached headers. Called once per scan, before any `add_path`.
 pub fn scan_begin() {
     SCAN_INDEX_DIRTY.store(false, core::sync::atomic::Ordering::Relaxed);
-    let parsed = read_sd_text(SCAN_INDEX_FILE, 1024 * 1024)
+    let parsed = read_sd_text(&config_read_path(SCAN_INDEX_NAME), 1024 * 1024)
         .ok()
         .and_then(|txt| serde_json::from_str::<std::vec::Vec<IndexEntry>>(&txt).ok())
         .unwrap_or_default();
@@ -1346,8 +1600,9 @@ pub fn scan_end() {
         return;
     }
     if let Ok(json) = serde_json::to_string(&rows) {
-        if std::fs::write(SCAN_INDEX_FILE, json.as_bytes()).is_ok() {
-            note_file_created(SCAN_INDEX_FILE);
+        let index_path = config_write_path(SCAN_INDEX_NAME);
+        if std::fs::write(&index_path, json.as_bytes()).is_ok() {
+            note_file_created(&index_path);
             crate::sd::commit();
             log(&std::format!("library: swf header index written ({} games)\n", rows.len()));
         }
@@ -2550,6 +2805,14 @@ pub fn input(button: &str) -> bool {
         }
         // A on the RÉGLAGES "FAIRE UNE PROPOSITION" row (index 4) = swkbd + POST.
         // Hoisted for the same reason.
+        // X in the folder picker = create a subfolder here. Hoisted because the
+        // swkbd blocks, and blocking under the library lock freezes the app.
+        if let Screen::GamesDirPicker { .. } = screen_snap {
+            if button == "X" {
+                run_new_folder_flow();
+                return true;
+            }
+        }
         if let Screen::SettingsModal { selection } = screen_snap {
             if button == "A" && selection == 4 {
                 run_suggestion_flow();
@@ -2740,6 +3003,16 @@ pub fn input(button: &str) -> bool {
             handle_settings_input(&mut s, button, selection);
             true
         }
+        Screen::GamesDirPicker { selection, scroll } => {
+            handle_games_dir_input(&mut s, button, selection, scroll);
+            true
+        }
+        Screen::GamesDirConfirm { selection } => {
+            handle_games_dir_confirm_input(&mut s, button, selection);
+            true
+        }
+        // Renames are running; nothing here should react to a button.
+        Screen::GamesDirMoving => true,
         // Owned by the reused menu::* editor (handled at the top of input()).
         Screen::SettingsKeymapEditor => false,
         Screen::SettingsLanguagePicker { selection } => {
@@ -2835,6 +3108,14 @@ pub fn input(button: &str) -> bool {
         s.screen = screen_copy;
         crate::backend::render::modal_close_begin();
     }
+    let games_dir = s.pending_games_dir.take();
+    drop(s);
+    // Queued here, outside the lock; `drive_pending_move` does the work a few
+    // entries at a time so the progress bar is a progress bar and not a
+    // screenshot taken after the fact.
+    if let Some(dest) = games_dir {
+        start_move(&dest);
+    }
     consumed
 }
 
@@ -2843,7 +3124,7 @@ pub fn input(button: &str) -> bool {
 /// leave via L/R.) Rows 4 and 5 are hoisted BY INDEX in `input()` because they
 /// open the system keyboard, so any reordering has to move those two with it.
 fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
-    const LAST: usize = 6;
+    const LAST: usize = 7;
     match button {
         "Up" | "StickLUp" => {
             selection = if selection == 0 { LAST } else { selection - 1 };
@@ -2886,6 +3167,16 @@ fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
                 // 4 = FAIRE UNE PROPOSITION and 5 = PSEUDO are hoisted in input()
                 // (they open the swkbd).
                 6 => {
+                    // GAMES FOLDER (#79): browse the card and pick where new
+                    // downloads land. Starts at the folder in use, so the row
+                    // opens on what it describes.
+                    let start = primary_root();
+                    s.dir_browse = list_dirs(&start);
+                    s.dir_path = start;
+                    s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 };
+                    return;
+                }
+                7 => {
                     // QUIT (Minus is SEARCH now). Exits the .nro.
                     s.screen = Screen::Quit;
                 }
@@ -3036,36 +3327,339 @@ fn handle_settings_home_view_input(s: &mut State, button: &str, mut selection: u
     s.screen = Screen::SettingsHomeViewPicker { selection };
 }
 
-/// Bug-report game picker (RÉGLAGES → SIGNALER UN BUG). A scrollable list of
-/// the local games; A (hoisted) describes + sends, B returns to RÉGLAGES.
-/// `selection`/`scroll` index `entries` directly (no filter here).
-fn handle_bug_picker_input(s: &mut State, button: &str, mut selection: usize, mut scroll: usize) {
-    let total = s.entries.len();
-    let last = total.saturating_sub(1);
+
+
+/// A games-folder move in flight, advanced a few entries per frame.
+///
+/// Doing the whole sweep inside `input()` was simpler and wrong: the frame that
+/// pressed the button is the frame that ran every rename, so the app froze for
+/// as long as the move took and the progress bar was only ever drawn once, at
+/// 100%, after the freeze. A user cannot tell that apart from a crash. Slicing
+/// it lets the bar mean what it says.
+struct MoveJob {
+    src: std::string::String,
+    dest: std::string::String,
+    /// Top-level file names, then subfolder names; `idx` walks both in order.
+    files: std::vec::Vec<std::string::String>,
+    dirs: std::vec::Vec<std::string::String>,
+    idx: usize,
+    moved: usize,
+    skipped: usize,
+}
+
+static MOVE_JOB: Mutex<Option<MoveJob>> = Mutex::new(None);
+
+/// How far the games-folder move has got: (done, total) entries.
+///
+/// Atomics rather than `State`, because the move runs with the library lock
+/// released — that is the whole reason it can be shown at all.
+static MOVE_DONE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static MOVE_TOTAL: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Progress of the running move, for the drawing side.
+pub(crate) fn move_progress() -> (usize, usize) {
+    (
+        MOVE_DONE.load(core::sync::atomic::Ordering::Relaxed),
+        MOVE_TOTAL.load(core::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+extern "C" {
+    /// The C++ SD scan. Re-run after the games folder changes so the list
+    /// reflects the new roots without a trip back to the home menu.
+    fn swf_picker_run();
+    /// Top-level file names of one directory (see navigator.rs: Rust cannot
+    /// list a directory on Horizon without corrupting the names).
+    fn swf_picker_list_files(
+        dir: *const core::ffi::c_char,
+        out: *mut core::ffi::c_char,
+        cap: core::ffi::c_int,
+    ) -> core::ffi::c_int;
+}
+
+/// Top-level file names of `dir`, straight from one `readdir`.
+///
+/// Was built on the recursive tree walk and filtered afterwards, which meant
+/// enumerating every file inside every `<game>.files/` companion tree to obtain
+/// the four hundred names at the top — several seconds of frozen screen before
+/// a move could even start, growing with the library rather than with the job.
+fn list_files_top(dir: &str) -> std::vec::Vec<std::string::String> {
+    let mut buf = std::vec![0u8; 256 * 1024];
+    let c = std::format!("{}\0", dir);
+    let n = unsafe {
+        swf_picker_list_files(
+            c.as_ptr() as *const core::ffi::c_char,
+            buf.as_mut_ptr() as *mut core::ffi::c_char,
+            buf.len() as core::ffi::c_int,
+        )
+    };
+    if n <= 0 {
+        return std::vec::Vec::new();
+    }
+    let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+    std::string::String::from_utf8_lossy(&buf[..end])
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect()
+}
+
+/// Files that must NOT follow the library.
+///
+/// Every one of these is read from a HARDCODED `sdmc:/flashnx/...` path
+/// elsewhere in the app, so moving it does not relocate a setting — it deletes
+/// it. Grep for `"sdmc:/flashnx/` before adding a file to the app, and add it
+/// here if it turns up.
+const MOVE_STAYS: &[&str] = &[
+    // The ONLY file that cannot travel: it records where the library went, and a
+    // pointer stored inside the thing it points at is unfindable. Everything
+    // else the app owns follows the games, because a folder you were told was
+    // emptied should be empty — leaving settings behind invites deleting them.
+    "games_dir",
+];
+
+/// Queue a move of the whole games folder into `dest`.
+///
+/// Moving the library means moving the WHOLE folder, not the parts this code
+/// happens to recognise. Matching games and their sidecars by name looked
+/// thorough and was not: the oldest saves carry the movie's URL-encoded name
+/// (`Super%20Mario%2063.swf...` beside a game called `Super Mario 63.swf`),
+/// nothing claimed them, and 37 of them stayed behind on the first real move —
+/// unreachable afterwards, because saves are read from the games folder. Taking
+/// everything removes the whole class of "which files did we forget", and means
+/// the app never has to read two folders to find one save.
+fn start_move(dest: &str) -> bool {
+    let src = primary_root();
+    if src == dest {
+        return false;
+    }
+    let _ = std::fs::create_dir_all(dest);
+    let files = list_files_top(&src);
+    let dirs = list_dirs_all(&src);
+    MOVE_DONE.store(0, core::sync::atomic::Ordering::Relaxed);
+    MOVE_TOTAL.store(files.len() + dirs.len(), core::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut g) = MOVE_JOB.lock() {
+        *g = Some(MoveJob {
+            src,
+            dest: dest.to_string(),
+            files,
+            dirs,
+            idx: 0,
+            moved: 0,
+            skipped: 0,
+        });
+        true
+    } else {
+        false
+    }
+}
+
+/// Move one entry. Returns false once the job is finished.
+///
+/// A rename inside one card is a directory update — `fsdev_rename` maps to
+/// Horizon's `RenameFile`/`RenameDirectory` — so a 300 MB game moves as fast as
+/// a 300 KB one, and a slice of a few entries always fits inside a frame.
+fn step_move(job: &mut MoveJob) -> bool {
+    let n_files = job.files.len();
+    if job.idx >= n_files + job.dirs.len() {
+        return false;
+    }
+    let i = job.idx;
+    job.idx += 1;
+    MOVE_DONE.store(job.idx, core::sync::atomic::Ordering::Relaxed);
+
+    if i < n_files {
+        let name = job.files[i].clone();
+        if MOVE_STAYS.contains(&name.as_str()) {
+            return true;
+        }
+        let to = std::format!("{}/{}", job.dest, name);
+        // NEVER overwrite. A file of the same name in the destination is someone
+        // else's — its own game, its own progress — and Horizon's rename gives no
+        // portable promise about what it does to it, so this does not find out
+        // the hard way. It stays put and gets named in the log.
+        if file_exists_now(&to) {
+            log(&std::format!("games dir: {} already there, left in place
+", name));
+            job.skipped += 1;
+            return true;
+        }
+        let from = std::format!("{}/{}", job.src, name);
+        if std::fs::rename(&from, &to).is_err() {
+            log(&std::format!("games dir: could not move {}
+", name));
+            return true;
+        }
+        if name.to_ascii_lowercase().ends_with(".swf") {
+            job.moved += 1;
+        }
+        return true;
+    }
+
+    // Companion trees, the cover cache, and any other folder the library owns.
+    // Every folder goes, `covers/` included: the cover cache is read from
+    // beside the library now, so leaving it behind would strand 150 images and
+    // make the source folder look stubbornly non-empty.
+    let name = job.dirs[i - n_files].clone();
+    let to = std::format!("{}/{}", job.dest, name);
+    if dir_exists(&to) {
+        log(&std::format!("games dir: {}/ already there, left in place
+", name));
+        return true;
+    }
+    let from = std::format!("{}/{}", job.src, name);
+    if std::fs::rename(&from, &to).is_err() {
+        log(&std::format!("games dir: could not move {}/
+", name));
+    }
+    true
+}
+
+/// Advance a queued move, then finish it. Called once per frame from `render`,
+/// before the library lock is taken.
+fn drive_pending_move() {
+    // A slice, not the lot: enough that a big library still moves in a second or
+    // two, small enough that the frame this runs in still gets drawn.
+    const PER_FRAME: usize = 8;
+    let finished = {
+        let mut g = match MOVE_JOB.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        let Some(job) = g.as_mut() else { return };
+        let mut alive = true;
+        for _ in 0..PER_FRAME {
+            alive = step_move(job);
+            if !alive {
+                break;
+            }
+        }
+        if alive {
+            return; // more to do; the bar moves on the next frame
+        }
+        let done = g.take().expect("checked above");
+        (done.dest, done.moved, done.skipped)
+    };
+    let (dest, moved, skipped) = finished;
+
+    set_primary_root(&dest);
+    log(&std::format!(
+        "games dir: now {} ({} moved, {} already there)
+",
+        dest, moved, skipped,
+    ));
+    // Rebuild the list: `add_path` PUSHES, and the boot scan relies on starting
+    // from an empty one, so rescanning in place left every game listed twice —
+    // once at an address that no longer exists.
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.entries.clear();
+    }
+    unsafe { swf_picker_run() };
+    if let Ok(mut s) = LIBRARY.lock() {
+        // The sort is applied in `open()` and nowhere else, so a list rebuilt
+        // mid-session came back in raw scan order and stayed that way until the
+        // user opened the sort menu and picked the mode it was already set to.
+        let (mode, rev) = (current_sort_mode(), current_sort_reverse());
+        sort_entries(&mut s.entries, mode, rev);
+        // Back where the user pressed the button. Nothing else leaves this
+        // screen, and it swallows input on purpose, so forgetting this left the
+        // app frozen on a finished progress bar.
+        s.screen = if s.entries.is_empty() {
+            Screen::Empty
+        } else {
+            Screen::SettingsModal { selection: 6 }
+        };
+    }
+}
+/// Folder picker for RÉGLAGES → DOSSIER JEUX (#79).
+///
+/// Row 0 chooses the folder currently shown; the rows below descend into its
+/// subfolders. B goes back UP a level rather than out, which is what a file
+/// browser is expected to do — leaving happens from the top level, or with `-`.
+fn handle_games_dir_input(s: &mut State, button: &str, mut selection: usize, mut scroll: usize) {
+    let path = s.dir_path.clone();
+    // Rows: 0 = choose this folder, then "up" unless we are at the card root,
+    // then one row per subfolder. `up` is a row and not just a B shortcut so
+    // that going up is visible rather than folklore.
+    let up = if browse_parent(&path).is_some() { 1 } else { 0 };
+    let last = up + s.dir_browse.len();
+    // Must match the drawing side, or the cursor scrolls out of view.
+    const VISIBLE: usize = 6;
     match button {
-        "Up" | "StickLUp" => {
-            if total == 0 {
+        "Up" | "StickLUp" => selection = if selection == 0 { last } else { selection - 1 },
+        "Down" | "StickLDown" => selection = if selection >= last { 0 } else { selection + 1 },
+        "A" => {
+            if selection == 0 {
+                // Chosen. Ask about the games already on the card before writing
+                // anything: the answer decides whether this is a redirect or a
+                // migration, and both are legitimate.
+                // Choosing a folder moves the library into it. There is no
+                // "leave them" option: the old folder stays scanned either way,
+                // so leaving them changed nothing a user could see except
+                // splitting the library across two folders, one of which the app
+                // would never write to again — an extra screen, an extra state,
+                // and the way the misplaced-saves bug stayed hidden.
+                if path == primary_root() {
+                    // Already the games folder: nothing to confirm, nothing to do.
+                    s.dir_browse.clear();
+                    s.screen = Screen::SettingsModal { selection: 6 };
+                } else {
+                    s.screen = Screen::GamesDirConfirm { selection: 0 };
+                }
                 return;
             }
-            selection = if selection == 0 { last } else { selection - 1 };
-            scroll = clamp_scroll(scroll, selection, BUG_PICKER_VISIBLE_ROWS);
-        }
-        "Down" | "StickLDown" => {
-            if total == 0 {
+            if up == 1 && selection == 1 {
+                if let Some(parent) = browse_parent(&path) {
+                    s.dir_browse = list_dirs(&parent);
+                    s.dir_path = parent;
+                    s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 };
+                }
                 return;
             }
-            selection = if selection >= last { 0 } else { selection + 1 };
-            scroll = clamp_scroll(scroll, selection, BUG_PICKER_VISIBLE_ROWS);
-        }
-        "B" => {
-            // Back to SIGNALER UN BUG (row 3), the row that opened the picker.
-            s.screen = Screen::SettingsModal { selection: 3 };
+            let child_name = &s.dir_browse[selection - 1 - up];
+            // `sdmc:/` already ends in a separator; anything else needs one.
+            let child = if path.ends_with('/') {
+                std::format!("{}{}", path, child_name)
+            } else {
+                std::format!("{}/{}", path, child_name)
+            };
+            s.dir_browse = list_dirs(&child);
+            s.dir_path = child;
+            s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 };
             return;
         }
-        // A is hoisted in input() (swkbd + HTTPS POST run without the lock).
+        "B" => {
+            // Same as the "up" row, and leaves the picker once at the root.
+            match browse_parent(&path) {
+                Some(parent) => {
+                    s.dir_browse = list_dirs(&parent);
+                    s.dir_path = parent;
+                    s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 };
+                }
+                None => {
+                    s.dir_browse.clear();
+                    s.screen = Screen::SettingsModal { selection: 6 };
+                }
+            }
+            return;
+        }
+        "Minus" => {
+            s.dir_browse.clear();
+            s.screen = Screen::SettingsModal { selection: 6 };
+            return;
+        }
         _ => {}
     }
-    s.screen = Screen::BugPicker { selection, scroll_offset: scroll };
+    // Only the subfolder rows scroll; rows 0 and "up" stay pinned above them.
+    let first_scrolling = 1 + up;
+    if selection < first_scrolling {
+        scroll = 0;
+    } else if selection < scroll + first_scrolling {
+        scroll = selection - first_scrolling;
+    } else if selection >= scroll + first_scrolling + VISIBLE {
+        scroll = selection + 1 - first_scrolling - VISIBLE;
+    }
+    s.screen = Screen::GamesDirPicker { selection, scroll };
 }
 
 /// Display order of the bug-report picker: last played first, whatever sort the
@@ -3182,6 +3776,120 @@ fn run_suggestion_flow() {
 /// RÉGLAGES > PSEUDO (#20): open swkbd (prefilled with the current nickname) to
 /// set the community-profile nickname. Hoisted from `input()` — swkbd must run
 /// without the LIBRARY lock. Empty input clears it.
+/// Bug-report game picker (RÉGLAGES → SIGNALER UN BUG). A scrollable list of
+/// the local games; A (hoisted) describes + sends, B returns to RÉGLAGES.
+/// `selection`/`scroll` index `entries` directly (no filter here).
+fn handle_bug_picker_input(s: &mut State, button: &str, mut selection: usize, mut scroll: usize) {
+    let total = s.entries.len();
+    let last = total.saturating_sub(1);
+    match button {
+        "Up" | "StickLUp" => {
+            if total == 0 {
+                return;
+            }
+            selection = if selection == 0 { last } else { selection - 1 };
+            scroll = clamp_scroll(scroll, selection, BUG_PICKER_VISIBLE_ROWS);
+        }
+        "Down" | "StickLDown" => {
+            if total == 0 {
+                return;
+            }
+            selection = if selection >= last { 0 } else { selection + 1 };
+            scroll = clamp_scroll(scroll, selection, BUG_PICKER_VISIBLE_ROWS);
+        }
+        "B" => {
+            // Back to SIGNALER UN BUG (row 3), the row that opened the picker.
+            s.screen = Screen::SettingsModal { selection: 3 };
+            return;
+        }
+        // A is hoisted in input() (swkbd + HTTPS POST run without the lock).
+        _ => {}
+    }
+    s.screen = Screen::BugPicker { selection, scroll_offset: scroll };
+}
+
+/// Display order of the bug-report picker: last played first, whatever sort the
+/// library itself is on (#99). You report the game you have just been playing,
+/// so it belongs at the top of that list even when the library is showing A-Z.
+/// Returns positions into `entries`, so nothing is reordered behind the screen —
+/// the picker's row N is `bug_picker_order(..)[N]`, and both the drawing and the
+/// A press have to read it the same way or they point at two different games.
+///
+/// Favourites are NOT pinned here, unlike `sort_entries`: a starred game is not
+/// more likely to be the one you are reporting.
+/// "Move the whole library here?" — row 0 confirms, row 1 goes back to the
+/// picker. The work itself is recorded and run outside the lock, like every
+/// other action here that touches the SD.
+fn handle_games_dir_confirm_input(s: &mut State, button: &str, mut selection: usize) {
+    match button {
+        "Up" | "StickLUp" | "Down" | "StickLDown" => selection = 1 - selection.min(1),
+        "A" => {
+            if selection == 0 {
+                s.pending_games_dir = Some(s.dir_path.clone());
+                s.dir_browse.clear();
+                s.screen = Screen::GamesDirMoving;
+            } else {
+                s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 };
+            }
+            return;
+        }
+        "B" | "Minus" => {
+            s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 };
+            return;
+        }
+        _ => {}
+    }
+    s.screen = Screen::GamesDirConfirm { selection };
+}
+
+/// Create a subfolder in the folder the picker is showing (#79).
+///
+/// Saves a trip to a file manager for the common case: someone laying their
+/// card out as `roms/flashnx` can make that folder from inside the picker that
+/// is asking them to choose it.
+fn run_new_folder_flow() {
+    let here = match LIBRARY.lock() {
+        Ok(s) => s.dir_path.clone(),
+        Err(_) => return,
+    };
+    crate::net::log(&std::format!("games dir: new folder in {}
+", here));
+    let lc = crate::loc::s();
+    let Some(name) = net::prompt_with(lc.games_dir_new, lc.kbd_newdir_guide, "") else {
+        crate::net::log("games dir: new folder cancelled or keyboard unavailable
+");
+        return;
+    };
+    // Separators would silently create a tree, or escape the folder entirely.
+    let safe: std::string::String = name
+        .chars()
+        .filter(|c| !matches!(*c, '/' | ':' | '\\'))
+        .collect();
+    let safe = safe.trim();
+    if safe.is_empty() {
+        return;
+    }
+    let path = if here.ends_with('/') {
+        std::format!("{}{}", here, safe)
+    } else {
+        std::format!("{}/{}", here, safe)
+    };
+    if let Err(e) = std::fs::create_dir_all(&path) {
+        crate::net::log(&std::format!("games dir: could not create {}: {}
+", path, e));
+        return;
+    }
+    // Show it straight away, with the cursor on it: the point of creating a
+    // folder here is to then choose it.
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.dir_browse = list_dirs(&here);
+        let idx = s.dir_browse.iter().position(|d| d == safe);
+        let up = if browse_parent(&here).is_some() { 1 } else { 0 };
+        let selection = idx.map(|i| i + 1 + up).unwrap_or(0);
+        s.screen = Screen::GamesDirPicker { selection, scroll: 0 };
+    }
+}
+
 fn run_pseudo_flow() {
     let current = crate::profiles::author_name();
     let Some(name) = net::prompt_pseudo(&current) else {
@@ -4420,7 +5128,7 @@ fn run_direct_download(url: &str) {
             return;
         }
     }
-    let out_path = std::format!("{}/{}", USER_SD_ROOTS[0], safe_name);
+    let out_path = std::format!("{}/{}", primary_root(), safe_name);
     match net::start_download(url, &out_path) {
         Ok(()) => {
             push_history(url);
@@ -4617,7 +5325,7 @@ fn handle_distant_files_input(
                 .chars()
                 .map(|c| if matches!(c, '/' | '\\') { '_' } else { c })
                 .collect();
-            let out_path = std::format!("{}/{}", USER_SD_ROOTS[0], safe_name);
+            let out_path = std::format!("{}/{}", primary_root(), safe_name);
             // If the file is already on SD (entry exists from boot scan),
             // block the download entirely — the OK badge is the signal,
             // re-downloading would just waste bandwidth + overwrite the
@@ -5097,7 +5805,7 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
                 log(&std::format!("library: A ignore — {} deja sur SD\n", swf_name));
                 return;
             }
-            let swf_path = std::format!("{}/{}", USER_SD_ROOTS[0], swf_name);
+            let swf_path = std::format!("{}/{}", primary_root(), swf_name);
             // Zipped games come from the GameZIP server: download a temp `.zip`,
             // then extract. Non-zipped (legacy "loose") games aren't on that
             // server, so download their entry `.swf` straight from the htdocs
@@ -5118,7 +5826,7 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
                 return;
             }
             let (url, out_path, fp_direct) = if cand.zipped {
-                let zip_path = std::format!("{}/.fpdl.zip", USER_SD_ROOTS[0]);
+                let zip_path = std::format!("{}/.fpdl.zip", primary_root());
                 (crate::sources::gamezip::get_url(&cand.id), zip_path, false)
             } else {
                 match crate::sources::gamezip::htdocs_url_from_command(&cand.launch_command) {
@@ -5467,7 +6175,7 @@ fn handle_delete_confirm_input(s: &mut State, button: &str, game_idx: usize) {
 /// deleting one then removes it, and the other keeps playing from the copy it
 /// wrote under its own key the first time it saved.
 fn delete_recorded_legacy_saves(basename: &str) {
-    let map = std::format!("{}/{}.solmap", USER_SD_ROOTS[0], basename);
+    let map = std::format!("{}/{}.solmap", primary_root(), basename);
     let Some(bytes) = crate::sources::gamezip::read_file_bounded(&map, 64 * 1024) else {
         return;
     };
@@ -5481,7 +6189,7 @@ fn delete_recorded_legacy_saves(basename: &str) {
         if name.is_empty() || name.contains('/') || name.contains('\\') {
             continue;
         }
-        let path = std::format!("{}/{}", USER_SD_ROOTS[0], name);
+        let path = std::format!("{}/{}", primary_root(), name);
         match std::fs::remove_file(&path) {
             Ok(()) => log(&std::format!("library: removed legacy save {}\n", path)),
             Err(e) => log(&std::format!("library: legacy save {} not removed: {}\n", path, e)),
@@ -5678,6 +6386,12 @@ fn modal_kind(screen: Screen) -> u8 {
         Screen::RevertPreview { .. } => 15,
         Screen::ProfileShareConfirm { .. } => 16,
         Screen::ProfileDeleteConfirm { .. } => 17,
+        // Games-folder screens (#79). Kind 0 means "not a modal", which is how
+        // these opened and closed with no scale pop while every other panel in
+        // the app animates — distinct ids so moving between the picker and its
+        // confirmation re-fires the pop, as the keymap sub-screens do.
+        Screen::GamesDirPicker { .. } => 19,
+        Screen::GamesDirConfirm { .. } => 20,
         _ => 0,
     }
 }
@@ -5943,12 +6657,22 @@ pub fn render(backend: &mut SwitchRenderBackend) {
     // Run any deferred profile network flow now that its loading panel has shown
     // a frame (#20). May transition the screen, so do it before reading it.
     drive_pending_net();
+    drive_pending_move();
     let s = match LIBRARY.lock() {
         Ok(g) => g,
         Err(_) => return,
     };
     let mut screen = s.screen;
     let anim_origin = s.anim_origin_ticks;
+    // The folder picker draws from state the lock owns, so snapshot it here
+    // rather than reach back for it after the guard is gone.
+    let (dir_path, dir_browse) = match s.screen {
+        Screen::GamesDirPicker { .. } | Screen::GamesDirConfirm { .. } => {
+            (s.dir_path.clone(), s.dir_browse.clone())
+        }
+        _ => (std::string::String::new(), std::vec::Vec::new()),
+    };
+    let game_count = s.entries.len();
     drop(s);
 
     let now = unsafe { ruffle_tick_now() };
@@ -6135,9 +6859,17 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 lc.set_home_view,
                 crate::loc::home_view_label(crate::loc::home_view()),
             );
+            // The games folder shows its current value, like the rows above it.
+            let games_dir = primary_root();
+            let games_label = std::format!(
+                "{} : {}",
+                lc.set_games_dir,
+                games_dir.trim_start_matches("sdmc:"),
+            );
             let entries = [
                 home_label.as_str(), lc.set_game_prefs, lc.set_language,
-                lc.set_report_bug, lc.set_suggest, pseudo_label.as_str(), lc.set_quit,
+                lc.set_report_bug, lc.set_suggest, pseudo_label.as_str(),
+                games_label.as_str(), lc.set_quit,
             ];
             backend.draw_library_settings(selection, &entries);
         }
@@ -6177,6 +6909,81 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             let labels = [lc.home_grid, lc.home_list, lc.home_strip, lc.home_shelf];
             backend.draw_library_dim_backdrop();
             backend.draw_library_options(lc.set_home_view, selection, &labels);
+        }
+        Screen::GamesDirPicker { selection, scroll } => {
+            let lc = crate::loc::s();
+            let shown = if dir_path == "sdmc:/" {
+                "/"
+            } else {
+                dir_path.trim_start_matches("sdmc:")
+            };
+            let up = if browse_parent(&dir_path).is_some() { 1 } else { 0 };
+            // Six folders a page, not eight: with the two action rows above them
+            // the panel reached the full height of the screen, which reads as a
+            // wall rather than a menu. Scrolling handles the rest.
+            const VISIBLE: usize = 6;
+            let active = primary_root();
+            let mut labels: std::vec::Vec<std::string::String> =
+                std::vec::Vec::with_capacity(VISIBLE + 2);
+            labels.push(std::format!("{} : {}", lc.games_dir_pick, shown));
+            if up == 1 {
+                labels.push(std::format!("{} ..", lc.games_dir_up));
+            }
+            for name in dir_browse.iter().skip(scroll).take(VISIBLE) {
+                // Mark the folder the library actually uses. Without it the
+                // listing is a wall of identical names and nothing says which one
+                // you are already in.
+                let full = if dir_path.ends_with('/') {
+                    std::format!("{}{}", dir_path, name)
+                } else {
+                    std::format!("{}/{}", dir_path, name)
+                };
+                if full == active {
+                    labels.push(std::format!("{}/  ({})", name, lc.games_dir_current));
+                } else {
+                    labels.push(std::format!("{}/", name));
+                }
+            }
+            let refs: std::vec::Vec<&str> = labels.iter().map(|l| l.as_str()).collect();
+            let drawn = if selection < 1 + up { selection } else { selection - scroll };
+            backend.draw_library_dim_backdrop();
+            backend.draw_library_folder_picker(
+                lc.set_games_dir,
+                shown,
+                drawn.min(refs.len().saturating_sub(1)),
+                &refs,
+                lc.games_dir_footer,
+                false,
+                1 + up,
+            );
+        }
+        Screen::GamesDirMoving => {
+            // Drawn for the frame between "yes" and the work starting, and by any
+            // frame the move gives back. Shows a real count, not a spinner that
+            // says only "something is happening".
+            let lc = crate::loc::s();
+            let (done, total) = move_progress();
+            backend.draw_library_move_progress(lc.games_dir_moving, done, total);
+        }
+        Screen::GamesDirConfirm { selection } => {
+            // Moving a whole library is not undoable by pressing B afterwards, so
+            // it is asked once — and it says HOW MANY games and WHERE, because
+            // "move the library?" tells you nothing about what you are agreeing
+            // to.
+            let lc = crate::loc::s();
+            let labels = [lc.games_dir_confirm_yes, lc.games_dir_confirm_no];
+            let count = crate::loc::fill_one(lc.games_dir_confirm_n, game_count as i32);
+            let detail = std::format!("{}  {}", count, dir_path.trim_start_matches("sdmc:"));
+            backend.draw_library_dim_backdrop();
+            backend.draw_library_folder_picker(
+                lc.games_dir_confirm,
+                &detail,
+                selection,
+                &labels,
+                lc.options_footer,
+                true,
+                0,
+            );
         }
         Screen::SettingsKeymapEditor => {
             // Same as TouchesEditor — the editor edits the global default

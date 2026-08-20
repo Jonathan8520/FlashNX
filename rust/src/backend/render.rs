@@ -9391,6 +9391,143 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
+    /// Progress of the games-folder move (#79): a title, a bar, and a plain
+    /// count of entries.
+    ///
+    /// Not the download panel, which this first reused: that one is headed
+    /// TÉLÉCHARGEMENT, formats its numbers as bytes — "104 B / 111 B" for a
+    /// hundred files — and offers a cancel that does not exist here, because a
+    /// half-cancelled rename sweep is worse than a finished one.
+    pub fn draw_library_move_progress(&mut self, title: &str, done: usize, total: usize) {
+        self.library_clear();
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+
+        let scale_t = 4.0;
+        let tw = self.measure_text(title, scale_t);
+        self.draw_text(
+            (vw - tw) * 0.5,
+            vh * 0.30,
+            scale_t,
+            title,
+            swf::Color::from_rgb(0xFFD740, 255),
+        );
+
+        // Bar. Empty at 0 of 0 rather than full: a move that has not started
+        // should not look finished.
+        const BAR_W: f32 = 720.0;
+        const BAR_H: f32 = 26.0;
+        let x = (vw - BAR_W) * 0.5;
+        let y = vh * 0.48;
+        let frac = if total == 0 {
+            0.0
+        } else {
+            (done as f32 / total as f32).clamp(0.0, 1.0)
+        };
+        self.draw_selection_bar(x - 3.0, y - 3.0, BAR_W + 6.0, BAR_H + 6.0, 5.0);
+        let fill = Matrix {
+            a: BAR_W * frac, b: 0.0, c: 0.0, d: BAR_H,
+            tx: swf::Twips::from_pixels(x as f64),
+            ty: swf::Twips::from_pixels(y as f64),
+        };
+        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), fill);
+
+        let label = std::format!("{} / {}", done, total);
+        let scale_c = 2.0;
+        let lw = self.measure_text(&label, scale_c);
+        self.draw_text(
+            (vw - lw) * 0.5,
+            y + BAR_H + 26.0,
+            scale_c,
+            &label,
+            swf::Color::from_rgb(0xCCCCCC, 255),
+        );
+
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
+    /// Folder picker (RÉGLAGES → DOSSIER JEUX, #79).
+    ///
+    /// Its own entry point rather than `draw_library_options`, which titles every
+    /// panel "OPTIONS" and prints a two-action footer. Neither fits here: the
+    /// panel is not about a game, and the picker has a third action — create a
+    /// folder — that nobody discovers unless it is written down.
+    ///
+    /// `danger` switches to the warning frame — used for the confirmation, which
+    /// is about to rename a whole library and cannot be undone with B.
+    pub fn draw_library_folder_picker(
+        &mut self,
+        title: &str,
+        path: &str,
+        selection: usize,
+        rows: &[&str],
+        footer: &str,
+        danger: bool,
+        // How many leading rows are ACTIONS rather than folders.
+        actions: usize,
+    ) {
+        // The wide frame: folder names and paths are long, and the narrow panel
+        // shrank them to fit rather than giving them room.
+        let frame = self.draw_modal_frame(
+            MODAL_W_WIDE,
+            rows.len(),
+            None,
+            danger,
+            title,
+            Some(path),
+            Some(footer),
+        );
+
+        // Actions and folders are not the same kind of row, and reading them as
+        // one list was the complaint: "CHOISIR" and "REMONTER" act on the folder
+        // you are in, while the rest are places you can go. They get the accent
+        // colour and a rule beneath them; the listing stays neutral grey.
+        let left = frame.rows_left();
+        let avail = frame.rows_avail();
+        let top = frame.rows_top();
+        for (i, row) in rows.iter().enumerate() {
+            let y = top + i as f32 * MODAL_ROW_H;
+            let is_sel = i == selection;
+            let is_action = i < actions;
+            let color = swf::Color::from_rgb(
+                if is_sel {
+                    MODAL_ROW_SEL_COL
+                } else if is_action {
+                    0xE8C36A // dimmer amber: an action, but not the cursor
+                } else {
+                    MODAL_ROW_COL
+                },
+                255,
+            );
+            if is_sel {
+                self.draw_text(left - MODAL_CURSOR_DX, y, MODAL_ROW_SCALE, ">", color);
+            }
+            let w = self.measure_text(row, MODAL_ROW_SCALE);
+            let sc = if w > avail { MODAL_ROW_SCALE * avail / w } else { MODAL_ROW_SCALE };
+            self.draw_text(left, y, sc, row, color);
+        }
+        // Separator, only when there is something on both sides of it.
+        if actions > 0 && rows.len() > actions {
+            let rule_y = top + actions as f32 * MODAL_ROW_H - MODAL_ROW_H * 0.30;
+            let rule = Matrix {
+                a: avail, b: 0.0, c: 0.0, d: 1.0,
+                tx: swf::Twips::from_pixels(left as f64),
+                ty: swf::Twips::from_pixels(rule_y as f64),
+            };
+            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x60_99_AA_BB), rule);
+        }
+
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
     /// Per-URL options modal (IMPORTER, `+` on a row). Same frame as the
     /// per-game OPTIONS modal, but with an info block above the actions: the
     /// row's short label alone doesn't tell you which URL you're about to edit
@@ -10348,19 +10485,32 @@ impl SwitchRenderBackend {
 
         // Centered entry list with a gliding selection highlight (v1.2.0).
         const OPT_SCALE: f32 = 3.0;
-        let row_h = 66.0;
         // Center the block vertically between the header rule and the footer so it
         // stays balanced whatever the entry count (a row was added: PSEUDO #20).
         let region_top = 185.0;
         let region_bottom = vh - 70.0;
+        // Rows tighten rather than overflow. At the comfortable 66 px the list
+        // outgrew its region the moment an eighth row arrived (DOSSIER JEUX,
+        // #79) and the last entry landed on top of the footer hint. Dividing the
+        // region instead keeps every row on screen, and keeps doing so for the
+        // next row someone adds.
+        let row_h = (66.0f32).min((region_bottom - region_top) / entries.len().max(1) as f32);
         let block_h = entries.len() as f32 * row_h;
         let top_y = (region_top + ((region_bottom - region_top) - block_h) * 0.5).max(region_top);
 
         let target_hy = top_y + selection as f32 * row_h;
         let now_hl = unsafe { ruffle_tick_now() };
         let hy = eased_list_y(target_hy, 2, now_hl);
-        const BAR_W: f32 = 460.0;
-        self.draw_selection_bar((vw - BAR_W) * 0.5, hy - 8.0, BAR_W, row_h - 16.0, 6.0);
+        // Wide enough for the LONGEST row, not a fixed 460 px. Rows carry their
+        // value now — "DOSSIER JEUX : /ROMS/FLASHNX" — and a fixed bar let the
+        // text hang out of its own highlight. Sized on the widest entry rather
+        // than the selected one so the bar keeps still as the cursor moves.
+        let widest = entries
+            .iter()
+            .map(|e| self.measure_text(e, OPT_SCALE))
+            .fold(0.0f32, f32::max);
+        let bar_w = (widest + 56.0).clamp(460.0, vw - 80.0);
+        self.draw_selection_bar((vw - bar_w) * 0.5, hy - 8.0, bar_w, row_h - 16.0, 6.0);
         // Cursor at the eased y, x aligned to the selected entry's centering.
         if let Some(sel) = entries.get(selection) {
             let sel_ow = self.measure_text(sel, OPT_SCALE);

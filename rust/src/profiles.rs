@@ -172,8 +172,8 @@ extern "C" {
 /// key, carries no personal data, and a fresh value on a reset SD is harmless.
 pub fn install_id() -> std::string::String {
     // Reuse an existing id if one is on the SD (either root, for legacy installs).
-    for root in ["sdmc:/flashnx", "sdmc:/ruffle"] {
-        let p = std::format!("{}/install_id", root);
+    {
+        let p = crate::library::config_read_path("install_id");
         if let Some(txt) = read_small_file(&p) {
             let t = txt.trim();
             if t.len() >= 4 {
@@ -228,8 +228,8 @@ fn read_small_file(path: &str) -> Option<std::string::String> {
 /// two people picking the same nickname still never collide. Stored in
 /// `sdmc:/flashnx/author`, capped to 24 chars.
 pub fn author_name() -> std::string::String {
-    for root in ["sdmc:/flashnx", "sdmc:/ruffle"] {
-        if let Some(txt) = read_small_file(&std::format!("{}/author", root)) {
+    {
+        if let Some(txt) = read_small_file(&crate::library::config_read_path("author")) {
             let t = txt.trim();
             if !t.is_empty() {
                 return t.chars().take(24).collect();
@@ -258,8 +258,8 @@ pub fn set_author_name(name: &str) {
 /// dedup key, visible in every shared id), this never leaves the device except
 /// over HTTPS to the relay. Empty until the first successful share. Hex/alnum.
 fn owner_token() -> std::string::String {
-    for root in ["sdmc:/flashnx", "sdmc:/ruffle"] {
-        if let Some(txt) = read_small_file(&std::format!("{}/owner_token", root)) {
+    {
+        if let Some(txt) = read_small_file(&crate::library::config_read_path("owner_token")) {
             let t: std::string::String =
                 txt.trim().chars().take(64).filter(|c| c.is_ascii_alphanumeric()).collect();
             if !t.is_empty() {

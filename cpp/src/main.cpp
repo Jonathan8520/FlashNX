@@ -474,8 +474,37 @@ static void cursor_speed_apply() {
     if (g_cursor_speed_idx >= CURSOR_SPEED_COUNT) g_cursor_speed_idx = CURSOR_SPEED_COUNT - 1;
     g_cursor_speed = CURSOR_SPEED_BASE * CURSOR_SPEED_MULTS[g_cursor_speed_idx];
 }
+
+// Path of one of the app's own files, beside the library wherever it lives.
+//
+// `games_dir` is the one file that never moves — it is the pointer that says
+// where everything else went (#79). Everything else follows the games, so that
+// a folder the user was told is empty really is.
+static const char* app_file_path(const char* name) {
+    static char out[600];
+    char root[512];
+    root[0] = '\0';
+    FILE* gd = std::fopen("sdmc:/switch/FlashNX/games_dir", "rb");
+    if (!gd) gd = std::fopen("sdmc:/flashnx/games_dir", "rb");
+    if (gd) {
+        const size_t n = std::fread(root, 1, sizeof(root) - 1, gd);
+        std::fclose(gd);
+        root[n] = '\0';
+        size_t len = std::strlen(root);
+        while (len > 0 && (root[len - 1] == '\n' || root[len - 1] == '\r' ||
+                           root[len - 1] == ' ' || root[len - 1] == '/')) {
+            root[--len] = '\0';
+        }
+    }
+    if (!root[0]) {
+        std::snprintf(root, sizeof(root), "%s", "sdmc:/flashnx");
+    }
+    std::snprintf(out, sizeof(out), "%s/%s", root, name);
+    return out;
+}
+
 static void cursor_speed_load() {
-    FILE* f = std::fopen("sdmc:/flashnx/cursor_speed", "rb");
+    FILE* f = std::fopen(app_file_path("cursor_speed"), "rb");
     if (f) {
         int v = 1;
         if (std::fscanf(f, "%d", &v) == 1) g_cursor_speed_idx = v;
@@ -493,7 +522,7 @@ extern "C" int ruffle_cursor_speed_cycle(void) {
         ruffle_keymap_set_cursor_speed(g_cursor_speed_idx);
     } else {
         // Library / RÉGLAGES → the GLOBAL default file.
-        FILE* f = std::fopen("sdmc:/flashnx/cursor_speed", "wb");
+        FILE* f = std::fopen(app_file_path("cursor_speed"), "wb");
         if (f) { std::fprintf(f, "%d", g_cursor_speed_idx); std::fclose(f); flashnx_commit_sd(); }
     }
     return g_cursor_speed_idx;

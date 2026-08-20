@@ -339,8 +339,27 @@ fn migrate_legacy_combo(km: &mut Keymap) {
 /// — duplicated here to keep keymap a leaf module (no library dep).
 const USER_SD_ROOTS: &[&str] = &["sdmc:/flashnx", "sdmc:/ruffle"];
 
+/// The roots to search, the player's games folder first (#79).
+///
+/// This module keeps its own copy of the built-in roots, which was fine
+/// while there was only ever one games folder. Now that the folder moves,
+/// a private list means per-game key mappings (`<game>.swf.keymap.json`) travel WITH the games,
+/// but were still looked for in the folder they left — invisible until the
+/// player moved everything back. The same trap already cost the saves.
+fn roots() -> std::vec::Vec<std::string::String> {
+    let mut v: std::vec::Vec<std::string::String> = std::vec::Vec::new();
+    let primary = crate::library::primary_root();
+    if !USER_SD_ROOTS.iter().any(|r| *r == primary) {
+        v.push(primary);
+    }
+    for r in USER_SD_ROOTS {
+        v.push((*r).into());
+    }
+    v
+}
+
 fn find_user_path(suffix: &str) -> Option<std::string::String> {
-    for root in USER_SD_ROOTS {
+    for root in roots() {
         let p = std::format!("{}/{}", root, suffix);
         if std::path::Path::new(&p).exists() {
             return Some(p);
@@ -350,7 +369,7 @@ fn find_user_path(suffix: &str) -> Option<std::string::String> {
 }
 
 fn primary_path(suffix: &str) -> std::string::String {
-    std::format!("{}/{}", USER_SD_ROOTS[0], suffix)
+    std::format!("{}/{}", crate::library::primary_root(), suffix)
 }
 
 /// Read a small JSON file using chunked 4 KB reads — same workaround as

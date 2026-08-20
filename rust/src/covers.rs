@@ -16,9 +16,31 @@
 /// read priority: new `flashnx/` first, legacy `ruffle/` for back-compat).
 const USER_SD_ROOTS: &[&str] = &["sdmc:/flashnx", "sdmc:/ruffle"];
 
+/// The roots to search, the player's games folder first (#79).
+///
+/// This module keeps its own copy of the built-in roots, which was fine
+/// while there was only ever one games folder. Now that the folder moves,
+/// a private list means manual cover sidecars sit next to the game they illustrate,
+/// but were still looked for in the folder they left — invisible until the
+/// player moved everything back. The same trap already cost the saves.
+fn roots() -> std::vec::Vec<std::string::String> {
+    let mut v: std::vec::Vec<std::string::String> = std::vec::Vec::new();
+    let primary = crate::library::primary_root();
+    if !USER_SD_ROOTS.iter().any(|r| *r == primary) {
+        v.push(primary);
+    }
+    for r in USER_SD_ROOTS {
+        v.push((*r).into());
+    }
+    v
+}
+
 /// Where online covers are cached. Kept separate from the game `.swf`s so a
 /// user browsing `flashnx/` sees only their games.
-const COVER_CACHE_DIR: &str = "sdmc:/flashnx/covers";
+/// Cover cache, beside the library so it travels with it (#79).
+fn cover_cache_dir() -> std::string::String {
+    std::format!("{}/covers", crate::library::primary_root())
+}
 
 /// Resolved cover for a game. `Default` → render the generated tile.
 pub enum Cover {
@@ -46,7 +68,7 @@ fn stem(basename: &str) -> &str {
 /// on hardware each `Path::exists()` runs ~1.2 ms — 9 to 13 ms per game, which
 /// was the single biggest slice of a cover load regardless of image size.
 fn find_in_roots(suffix: &str) -> Option<std::string::String> {
-    for root in USER_SD_ROOTS {
+    for root in roots() {
         let p = std::format!("{}/{}", root, suffix);
         if crate::library::file_exists(&p) {
             return Some(p);
@@ -57,7 +79,7 @@ fn find_in_roots(suffix: &str) -> Option<std::string::String> {
 
 /// Cache path for a game's online-fetched cover.
 fn cache_path(basename: &str) -> std::string::String {
-    std::format!("{}/{}.cover.png", COVER_CACHE_DIR, basename)
+    std::format!("{}/{}.cover.png", cover_cache_dir(), basename)
 }
 
 /// Resolve the cover IMAGE for a game (by `.swf` basename), or `Default`.
@@ -164,7 +186,7 @@ const THUMB_MAGIC: &[u8; 6] = b"FNXTH1";
 const THUMB_HEADER: usize = 14;
 
 fn thumb_path(basename: &str) -> std::string::String {
-    std::format!("{}/{}.thumb", COVER_CACHE_DIR, basename)
+    std::format!("{}/{}.thumb", cover_cache_dir(), basename)
 }
 
 /// Scale `rgba` down so it just covers the tile box, preserving aspect. Box
@@ -271,7 +293,7 @@ pub fn write_thumb(basename: &str, src_len: u64, rgba: &[u8], w: u32, h: u32) {
     out.extend_from_slice(&(w as u16).to_le_bytes());
     out.extend_from_slice(&(h as u16).to_le_bytes());
     out.extend_from_slice(&body);
-    let _ = std::fs::create_dir_all(COVER_CACHE_DIR);
+    let _ = std::fs::create_dir_all(cover_cache_dir());
     let path = thumb_path(basename);
     if std::fs::write(&path, &out).is_ok() {
         crate::library::note_file_created(&path);
@@ -400,7 +422,7 @@ pub fn fetch_url_and_cache(
         ));
         return Err(std::string::String::from("not an image"));
     }
-    let _ = std::fs::create_dir_all(COVER_CACHE_DIR);
+    let _ = std::fs::create_dir_all(cover_cache_dir());
     let path = cache_path(basename);
     std::fs::write(&path, &bytes).map_err(|e| std::format!("write cover: {}", e))?;
     // Cached after the scan listed `covers/` — tell the index, or `resolve` would
@@ -433,7 +455,7 @@ pub fn remove_for(basename: &str) -> u32 {
     // 2) Stem-named manual sidecars (the natural `<name>.png`/`.jpg` form that
     //    `resolve` accepts) across the SD roots.
     let st = stem(basename);
-    for root in USER_SD_ROOTS {
+    for root in roots() {
         for ext in ["png", "jpg"] {
             let p = std::format!("{}/{}.{}", root, st, ext);
             if std::fs::remove_file(&p).is_ok() {

@@ -437,7 +437,11 @@ pub extern "C" fn ruffle_init() -> c_int {
     // `sdmc:/ruffle/saves/<host>/<basename>/<sol_name>.sol` (or the
     // brief intermediate `sdmc:/flashnx/saves/...`) are still read via
     // the backend's read-fallback path.
-    let flat_root = std::path::PathBuf::from("sdmc:/flashnx");
+    // Follows the player's games folder (#79): a save belongs beside the game
+    // it came from. Hardcoding the default here meant a moved library kept
+    // writing its `.sol` files back into the old folder, so the games lived in
+    // one place and their progress in another.
+    let flat_root = std::path::PathBuf::from(crate::library::primary_root());
     let legacy_root = std::path::PathBuf::from("sdmc:/ruffle/saves");
     let storage = SwitchStorageBackend::new(flat_root, legacy_root);
 
