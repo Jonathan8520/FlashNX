@@ -3222,8 +3222,8 @@ enum CoverTex {
 /// Process-wide cover-texture cache. A function-local `static` keeps the GL
 /// handles out of the (cloned) library snapshot; a plain Vec is fine for the
 /// handful of games shown per session.
-fn cover_cache() -> &'static std::sync::Mutex<std::vec::Vec<(std::string::String, CoverTex)>> {
-    static C: std::sync::Mutex<std::vec::Vec<(std::string::String, CoverTex)>> =
+fn cover_cache() -> &'static std::sync::Mutex<std::vec::Vec<(std::string::String, CoverTex, u64)>> {
+    static C: std::sync::Mutex<std::vec::Vec<(std::string::String, CoverTex, u64)>> =
         std::sync::Mutex::new(std::vec::Vec::new());
     &C
 }
@@ -3268,12 +3268,33 @@ fn push_text_quad(verts: &mut std::vec::Vec<f32>, x: f32, y: f32, w: f32, h: f32
 /// (read + PNG/JPEG decode + texture upload), so a 71-game library resolved
 /// eagerly cost ~1.9 s of black screen on the first frame.
 fn cover_lookup(basename: &str) -> Option<CoverTex> {
+    cover_ready(basename).map(|(t, _)| t)
+}
+
+/// The cover AND the tick it became available, for the fade-in.
+fn cover_ready(basename: &str) -> Option<(CoverTex, u64)> {
     cover_cache()
         .lock()
         .ok()?
         .iter()
-        .find(|(b, _)| b == basename)
-        .map(|(_, t)| *t)
+        .find(|(b, _, _)| b == basename)
+        .map(|(_, t, at)| (*t, *at))
+}
+
+/// How far into its fade a cover is: 0 the frame it lands, 1 once settled.
+///
+/// A tile decodes on some later frame than the one that first drew it, so the
+/// generated placeholder was being replaced by the artwork between two frames —
+/// which reads as a blink, one per cover, all the way down a scroll.
+fn cover_fade(ready_at: u64) -> f32 {
+    const FADE_TICKS: u64 = 19_200_000 / 100; // ~180 ms at the 19.2 MHz tick
+    let now = unsafe { ruffle_tick_now() };
+    let dt = now.saturating_sub(ready_at);
+    if dt >= FADE_TICKS {
+        1.0
+    } else {
+        dt as f32 / FADE_TICKS as f32
+    }
 }
 
 /// How many covers may be decoded per gallery frame. Above this the remaining
@@ -3298,7 +3319,7 @@ static COVER_DECODE_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 /// delete (the GL context only frees at app exit anyway).
 pub fn invalidate_cover(basename: &str) {
     if let Ok(mut cache) = cover_cache().lock() {
-        cache.retain(|(b, _)| b != basename);
+        cache.retain(|(b, _, _)| b != basename);
     }
     // The reveal's full-res copy is keyed the same way and would otherwise keep
     // showing the previous art after a JAQUETTE change.
@@ -7009,6 +7030,9 @@ impl SwitchRenderBackend {
         tex: GLuint,
         img_w: u32,
         img_h: u32,
+        // 0 = invisible, 1 = fully drawn. Used to fade a cover in over the
+        // generated tile: swapping between two frames reads as a flicker.
+        alpha: f32,
     ) {
         if tex == 0 || w <= 0.0 || h <= 0.0 || img_w == 0 || img_h == 0 {
             return;
@@ -7033,12 +7057,24 @@ impl SwitchRenderBackend {
             ty: swf::Twips::from_pixels(y as f64),
         };
         let world = self.world_matrix(&mat);
-        let mult = [1.0, 1.0, 1.0, 1.0];
+        let a = alpha.clamp(0.0, 1.0);
+        // Premultiplied: the bitmap shader writes what it is given, so the
+        // colour has to come down with the alpha or a half-faded cover washes
+        // out bright instead of appearing.
+        let mult = [a, a, a, a];
         let add = [0.0, 0.0, 0.0, 0.0];
+        if a <= 0.0 {
+            return;
+        }
+        unsafe {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        }
         self.use_bitmap(&world, &mult, &add, tex, &uv_remap);
         self.gl_state.bind_vao(self.bitmap_vao);
         unsafe {
             glDrawArrays(GL_TRIANGLES, 0, 6);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         }
     }
 
@@ -7709,7 +7745,7 @@ impl SwitchRenderBackend {
             crate::covers::Cover::Default => CoverTex::Default,
         };
         if let Ok(mut cache) = cover_cache().lock() {
-            cache.push((basename.to_string(), resolved));
+            cache.push((basename.to_string(), resolved, unsafe { ruffle_tick_now() }));
         }
         let dt = unsafe { ruffle_tick_now() }.saturating_sub(t0);
         COVER_DECODE_TICKS.fetch_add(dt, Ordering::Relaxed);
@@ -8664,7 +8700,7 @@ impl SwitchRenderBackend {
             };
             match cover {
                 CoverTex::Image { tex, w, h } => {
-                    self.draw_textured_rect_cover(x, ROW_Y, ROW_W, ROW_H, tex, w, h);
+                    self.draw_textured_rect_cover(x, ROW_Y, ROW_W, ROW_H, tex, w, h, 1.0);
                 }
                 CoverTex::Default => {
                     self.draw_overlay_rect(x, ROW_Y, ROW_W, ROW_H, 0xFF_00_00_00 | e.color_chip);
@@ -8901,6 +8937,7 @@ impl SwitchRenderBackend {
                     let dh = h + (fit_h - h) * t;
                     self.draw_textured_rect_cover(
                         x + (w - dw) * 0.5, y + (h - dh) * 0.5, dw, dh, tex, iw, ih,
+                        1.0,
                     );
                 }
                 _ => {
@@ -9186,6 +9223,46 @@ impl SwitchRenderBackend {
         let hi_row = (scroll_offset + rows_visible + 1) as u32;
         // Budget of NEW cover decodes for this frame — see COVER_DECODES_PER_FRAME.
         let mut decode_budget = COVER_DECODES_PER_FRAME;
+        // Work AHEAD of the eye. Only the rows on screen used to be decoded, so
+        // scrolling down met a fresh row of generated tiles every time and each
+        // cover popped in behind the movement. Two rows of margin on each side
+        // are decoded first, in the same one-per-frame budget, so an idle moment
+        // buys the row you are about to reach.
+        //
+        // Not a fixed window: the NEAREST undecoded tile in the WHOLE list, one
+        // per frame. Stopping at a couple of rows meant a fast scroll outran the
+        // decoder and covers kept landing one by one behind the movement. Working
+        // outwards instead means a second spent looking at the gallery quietly
+        // finishes the rest of the library, and by the time you scroll there is
+        // nothing left to decode. Costs nothing at startup — this only runs while
+        // the gallery is on screen, and never more than one decode per frame.
+        if decode_budget > 0 {
+            // From the TOP of what is on screen, downwards, then below the fold,
+            // then the rest. Starting from the middle of the band filled the grid
+            // outwards from its centre, which reads as tiles popping upwards and
+            // matches nothing the player can see.
+            let mut best: Option<(u8, u32, usize)> = None;
+            for (idx, &(_, _, trow)) in tiles.iter().enumerate() {
+                if cover_lookup(&entries[idx].basename).is_some() {
+                    continue;
+                }
+                let band = if trow >= lo_row && trow <= hi_row {
+                    0
+                } else if trow > hi_row {
+                    1
+                } else {
+                    2
+                };
+                let key = (band, trow, idx);
+                if best.map_or(true, |b| key < b) {
+                    best = Some(key);
+                }
+            }
+            if let Some((_, _, idx)) = best {
+                decode_budget -= 1;
+                let _ = self.cover_for(&entries[idx].basename);
+            }
+        }
         for (idx, &(tx, tw, trow)) in tiles.iter().enumerate() {
             if trow < lo_row || trow > hi_row {
                 continue;
@@ -9197,20 +9274,36 @@ impl SwitchRenderBackend {
             }
             // Cached cover, else decode one if this frame still has budget, else
             // the generated tile for now (it resolves on a following frame).
-            let cover = match cover_lookup(&entries[idx].basename) {
-                Some(t) => t,
+            let (cover, ready_at) = match cover_ready(&entries[idx].basename) {
+                Some(v) => v,
                 None if decode_budget > 0 => {
                     decode_budget -= 1;
-                    self.cover_for(&entries[idx].basename)
+                    let t = self.cover_for(&entries[idx].basename);
+                    (t, unsafe { ruffle_tick_now() })
                 }
-                None => CoverTex::Default,
+                None => (CoverTex::Default, 0),
             };
+            let fade = cover_fade(ready_at);
 
             match cover {
-                CoverTex::Image { tex, w, h } => {
+                CoverTex::Image { tex, w, h } if fade >= 1.0 => {
                     // Crop-to-fill the uniform cell (object-fit: cover) so the
                     // grid stays aligned regardless of the cover's native aspect.
-                    self.draw_textured_rect_cover(tx, ty, tw, ROW_IMG_H, tex, w, h);
+                    self.draw_textured_rect_cover(tx, ty, tw, ROW_IMG_H, tex, w, h, 1.0);
+                }
+                CoverTex::Image { tex, w, h } => {
+                    // Mid-fade: the generated tile underneath, the cover over it.
+                    let bg = Matrix {
+                        a: tw, b: 0.0, c: 0.0, d: ROW_IMG_H,
+                        tx: swf::Twips::from_pixels(tx as f64),
+                        ty: swf::Twips::from_pixels(ty as f64),
+                    };
+                    <Self as CommandHandler>::draw_rect(
+                        self,
+                        swf::Color::from_rgb(entries[idx].color_chip, 255),
+                        bg,
+                    );
+                    self.draw_textured_rect_cover(tx, ty, tw, ROW_IMG_H, tex, w, h, fade);
                 }
                 CoverTex::Default => {
                     let bg = Matrix {
@@ -10658,7 +10751,7 @@ impl SwitchRenderBackend {
 
             match self.thumb_for(urls[i]) {
                 Some(ThumbTex::Image { tex, w, h }) => {
-                    self.draw_textured_rect_cover(cx, cy, cell_w, THUMB_H, tex, w, h);
+                    self.draw_textured_rect_cover(cx, cy, cell_w, THUMB_H, tex, w, h, 1.0);
                     // Not on the selected tile: its corners are covered by the
                     // frame below, which is rounded instead. Rounding both left
                     // four notches trapped inside the gold border — the artefact
@@ -10907,7 +11000,7 @@ impl SwitchRenderBackend {
             // which keeps the frame rate up so the glide stays smooth).
             match self.thumb_for(urls[i]) {
                 Some(ThumbTex::Image { tex, w, h }) => {
-                    self.draw_textured_rect_cover(cx, cy, cell_w, thumb_h, tex, w, h);
+                    self.draw_textured_rect_cover(cx, cy, cell_w, thumb_h, tex, w, h, 1.0);
                     self.round_corners(cx, cy, cell_w, thumb_h, 6.0);
                 }
                 other => {
@@ -11117,6 +11210,7 @@ impl SwitchRenderBackend {
                 tex,
                 cw,
                 ch,
+                1.0,
             );
         }
 
