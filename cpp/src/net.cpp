@@ -742,6 +742,19 @@ extern "C" long long https_head_content_length(const char* url) {
     return len;
 }
 
+// swkbd counts its length limit in CHARACTERS; our buffers are sized in BYTES.
+// While every prompt was Latin-only the two were interchangeable, so the limit
+// was simply `cap - 1`. With the CJK keyboards enabled (issue #75) a character
+// is up to four bytes, and that limit becomes a promise the buffer cannot keep:
+// libnx truncates the UTF-16 to UTF-8 conversion to fit, and the Rust side then
+// hands a cut string to String::from_utf8, which drops the entire entry. Budget
+// the UTF-8 maximum per character instead, so anything the keyboard accepts
+// comes back whole. Callers size their buffers 4x the character count they want.
+static u32 swkbd_char_limit(int cap) {
+    u32 lim = (u32)((cap - 1) / 4);
+    return lim < 1 ? 1 : lim;
+}
+
 // Generic swkbd prompt for a display name (Phase 3.4.bis RENOMMER). Pre-
 // fills with `initial` if non-NULL, otherwise empty. The header / guide
 // strings are RENOMMER-specific; if we end up needing yet another swkbd
@@ -757,13 +770,19 @@ extern "C" int swkbd_prompt_rename(const char* header, const char* guide, const 
         return -1;
     }
     swkbdConfigMakePresetDefault(&kbd);
-    swkbdConfigSetType(&kbd, SwkbdType_QWERTY);
+    // SwkbdType_All, not QWERTY: the preset's QWERTY means "Latin keyboard
+    // only", with no way to reach the Chinese / Korean input methods even on a
+    // console whose system language is Chinese. A player renaming a Chinese
+    // game could only type its name in Latin (issue #75). The launcher renders
+    // whatever comes back: draw_text sends every codepoint the 5x7 bitmap font
+    // lacks to the shared-font atlas (backend/glyphs.rs).
+    swkbdConfigSetType(&kbd, SwkbdType_All);
     if (header && *header) swkbdConfigSetHeaderText(&kbd, header);
     if (guide && *guide) swkbdConfigSetGuideText(&kbd, guide);
     if (initial && *initial) {
         swkbdConfigSetInitialText(&kbd, initial);
     }
-    swkbdConfigSetStringLenMax(&kbd, (u32)(cap - 1));
+    swkbdConfigSetStringLenMax(&kbd, swkbd_char_limit(cap));
     rc = swkbdShow(&kbd, out, (size_t)cap);
     swkbdClose(&kbd);
     if (R_FAILED(rc)) {
@@ -786,12 +805,16 @@ extern "C" int swkbd_prompt_url(const char* header, const char* guide, const cha
         return -1;
     }
     swkbdConfigMakePresetDefault(&kbd);
+    // Stays QWERTY while the others moved to SwkbdType_All (issue #75): a URL
+    // typed here goes straight into an HTTP request, and an input method that
+    // composes Chinese would only produce a link no server can answer. The
+    // Latin keyboards still carry the accented letters an IDN might need.
     swkbdConfigSetType(&kbd, SwkbdType_QWERTY);
     if (guide && *guide) swkbdConfigSetGuideText(&kbd, guide);
     if (header && *header) swkbdConfigSetHeaderText(&kbd, header);
     const char* prefill = (initial && *initial) ? initial : "https://archive.org/download/";
     swkbdConfigSetInitialText(&kbd, prefill);
-    swkbdConfigSetStringLenMax(&kbd, (u32)(cap - 1));
+    swkbdConfigSetStringLenMax(&kbd, swkbd_char_limit(cap));
     rc = swkbdShow(&kbd, out, (size_t)cap);
     swkbdClose(&kbd);
     if (R_FAILED(rc)) {
@@ -814,13 +837,16 @@ extern "C" int swkbd_prompt_search(const char* header, const char* guide, const 
         return -1;
     }
     swkbdConfigMakePresetDefault(&kbd);
-    swkbdConfigSetType(&kbd, SwkbdType_QWERTY);
+    // All keyboards (issue #75). This helper serves the search filter, the
+    // nickname and the bug-report description, and every one of them can
+    // legitimately be written in a non-Latin script.
+    swkbdConfigSetType(&kbd, SwkbdType_All);
     if (header && *header) swkbdConfigSetHeaderText(&kbd, header);
     if (guide && *guide) swkbdConfigSetGuideText(&kbd, guide);
     if (initial && *initial) {
         swkbdConfigSetInitialText(&kbd, initial);
     }
-    swkbdConfigSetStringLenMax(&kbd, (u32)(cap - 1));
+    swkbdConfigSetStringLenMax(&kbd, swkbd_char_limit(cap));
     rc = swkbdShow(&kbd, out, (size_t)cap);
     swkbdClose(&kbd);
     if (R_FAILED(rc)) {
@@ -847,7 +873,11 @@ extern "C" int swkbd_prompt_game_field(const char* initial, int flags, int maxle
         return -1;
     }
     swkbdConfigMakePresetDefault(&kbd);
-    swkbdConfigSetType(&kbd, (flags & 4) ? SwkbdType_NumPad : SwkbdType_QWERTY);
+    // All keyboards for free text (issue #75). A game's own text fields can be
+    // Chinese too, and Ruffle can draw the result: SHARED_DEVICE_FONTS in
+    // backend/ui.rs hands it the Switch CJK fonts as device fonts (issue #54).
+    // Numeric fields keep the number pad, which has no script to choose.
+    swkbdConfigSetType(&kbd, (flags & 4) ? SwkbdType_NumPad : SwkbdType_All);
     if (flags & 1) {
         // Masked entry for password fields.
         swkbdConfigSetPasswordFlag(&kbd, 1);
@@ -861,8 +891,10 @@ extern "C" int swkbd_prompt_game_field(const char* initial, int flags, int maxle
     if (initial && *initial) {
         swkbdConfigSetInitialText(&kbd, initial);
     }
-    // Cap to the field's max (when set) and always to our buffer size.
-    u32 lim = (u32)(cap - 1);
+    // Cap to the field's max (when set) and always to our buffer size. The
+    // field's own maximum is a character count, which is exactly what swkbd
+    // wants; ours is a byte budget, hence swkbd_char_limit.
+    u32 lim = swkbd_char_limit(cap);
     if (maxlen > 0 && (u32)maxlen < lim) lim = (u32)maxlen;
     swkbdConfigSetStringLenMax(&kbd, lim);
     rc = swkbdShow(&kbd, out, (size_t)cap);

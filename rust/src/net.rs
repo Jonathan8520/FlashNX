@@ -44,6 +44,12 @@ extern "C" {
     // Synchronous HEAD → Content-Length (or -1). Flashpoint details popup.
     fn https_head_content_length(url: *const c_char) -> i64;
     // header/guide are localized prompt strings supplied by Rust (loc.rs).
+    //
+    // BUFFER SIZING: the C side limits the keyboard to `(cap - 1) / 4`
+    // CHARACTERS, because a UTF-8 character is up to four bytes and these
+    // keyboards can now type Chinese (issue #75). So every buffer below is
+    // four times the number of characters that prompt means to allow, and a
+    // Latin user sees exactly the ceiling they saw before.
     fn swkbd_prompt_url(header: *const c_char, guide: *const c_char, initial: *const c_char, out: *mut c_char, cap: c_int) -> c_int;
     fn swkbd_prompt_rename(header: *const c_char, guide: *const c_char, initial: *const c_char, out: *mut c_char, cap: c_int) -> c_int;
     fn swkbd_prompt_search(header: *const c_char, guide: *const c_char, initial: *const c_char, out: *mut c_char, cap: c_int) -> c_int;
@@ -567,7 +573,7 @@ pub fn cancel_download() {
 /// Synchronous — the keyboard applet takes over the whole screen until
 /// the user submits or cancels. Returns None if cancelled.
 pub fn prompt_url_with_initial(initial: Option<&str>) -> Option<std::string::String> {
-    let mut buf = std::vec![0u8; 1024];
+    let mut buf = std::vec![0u8; 4096];
     // Build NUL-terminated initial string (or NULL ptr if None).
     let initial_owned: Option<std::vec::Vec<u8>> = initial.map(|s| {
         let mut v = s.as_bytes().to_vec();
@@ -602,7 +608,7 @@ pub fn prompt_url_with_initial(initial: Option<&str>) -> Option<std::string::Str
 /// away. Returns the typed text (which may be empty — meaning "revert
 /// to basename") on commit, None on cancel.
 pub fn prompt_rename(initial: &str) -> Option<std::string::String> {
-    let mut buf = std::vec![0u8; 512];
+    let mut buf = std::vec![0u8; 2048];
     let mut initial_owned = initial.as_bytes().to_vec();
     initial_owned.push(0);
     let header_c = cstr(crate::loc::s().kbd_rename_header);
@@ -629,10 +635,10 @@ pub fn prompt_rename(initial: &str) -> Option<std::string::String> {
 /// Short single-line prompt for the player's nickname (RÉGLAGES > PSEUDO),
 /// pre-filled with the current value. Empty return = clear the nickname.
 /// swkbd with a caller-supplied header and guide, for prompts that are neither
-/// a rename nor a nickname. Same 512-byte ceiling as the others: a folder name
-/// has no business being longer, and the buffer is stack-sized on the C side.
+/// a rename nor a nickname. Same ceiling as the others: a folder name has no
+/// business being longer.
 pub fn prompt_with(header: &str, guide: &str, initial: &str) -> Option<std::string::String> {
-    let mut buf = std::vec![0u8; 512];
+    let mut buf = std::vec![0u8; 2048];
     let mut initial_owned = initial.as_bytes().to_vec();
     initial_owned.push(0);
     let header_c = cstr(header);
@@ -659,7 +665,7 @@ pub fn prompt_with(header: &str, guide: &str, initial: &str) -> Option<std::stri
 }
 
 pub fn prompt_pseudo(initial: &str) -> Option<std::string::String> {
-    let mut buf = std::vec![0u8; 128];
+    let mut buf = std::vec![0u8; 512];
     let mut initial_owned = initial.as_bytes().to_vec();
     initial_owned.push(0);
     let header_c = cstr(crate::loc::s().set_pseudo);
@@ -681,12 +687,12 @@ pub fn prompt_pseudo(initial: &str) -> Option<std::string::String> {
     std::string::String::from_utf8(buf).ok()
 }
 
-/// Generic long free-text prompt (2 KB buffer, no prefill). Reuses the generic
+/// Generic long free-text prompt (~2000 characters, no prefill). Reuses the generic
 /// C++ `swkbd_prompt_search` with caller-supplied header/guide. Used by the bug
 /// report and the suggestion flow. Returns None on cancel; may return an empty
 /// string (caller decides whether that's allowed).
 pub fn prompt_long(header: &str, guide: &str) -> Option<std::string::String> {
-    let mut buf = std::vec![0u8; 2048];
+    let mut buf = std::vec![0u8; 8192];
     let initial = [0u8]; // empty prefill
     let header_c = cstr(header);
     let guide_c = cstr(guide);
@@ -718,7 +724,7 @@ pub fn prompt_bug() -> Option<std::string::String> {
 /// Returns the typed text on commit (empty string = clear filter), None
 /// on cancel.
 pub fn prompt_search(initial: &str) -> Option<std::string::String> {
-    let mut buf = std::vec![0u8; 256];
+    let mut buf = std::vec![0u8; 1024];
     let mut initial_owned = initial.as_bytes().to_vec();
     initial_owned.push(0);
     let header_c = cstr(crate::loc::s().kbd_search_header);

@@ -1272,8 +1272,8 @@ static void worker_entry(void* arg) {
         // and feed the result back through normal text events. swkbdShow blocks,
         // so no frames advance while it's open.
         if (ruffle_keyboard_take_request()) {
-            char kbd_prefill[1024];
-            char kbd_out[1024];
+            char kbd_prefill[4096];
+            char kbd_out[4096];
             int  kbd_flags = 0, kbd_max = 0;
             if (ruffle_keyboard_field(kbd_prefill, sizeof(kbd_prefill), &kbd_flags, &kbd_max)) {
                 if (swkbd_prompt_game_field(kbd_prefill, kbd_flags, kbd_max,
