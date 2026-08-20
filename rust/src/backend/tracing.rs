@@ -63,7 +63,17 @@ impl Subscriber for SwitchTracingSubscriber {
             visitor.message,
         );
         if line.len() > 800 {
-            line.truncate(800);
+            // 800 is a BYTE offset and `String::truncate` panics unless it
+            // lands on a character boundary. Everything upstream can now carry
+            // non-ASCII -- a Chinese game title in a path, text the player
+            // typed into a field (issue #75), a lossy U+FFFD from a filename --
+            // and a panic here is an abort, i.e. a console fatal, raised by the
+            // logger of all things. Walk back at most three bytes instead.
+            let mut cut = 800;
+            while cut > 0 && !line.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            line.truncate(cut);
             line.push('\n');
         }
         let mut bytes = line.into_bytes();

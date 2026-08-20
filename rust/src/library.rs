@@ -5570,8 +5570,19 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
 /// Build a Flashpoint search query from a game's display name: drop a trailing
 /// `.swf`, turn `_`/`-` into spaces so "Super_Mario_63" matches "Super Mario 63".
 fn cover_query_from_name(name: &str) -> std::string::String {
-    let base = if name.len() > 4 && name[name.len() - 4..].eq_ignore_ascii_case(".swf") {
-        &name[..name.len() - 4]
+    // `is_char_boundary` BEFORE the slice: `name` is the display name, i.e.
+    // whatever the RENOMMER keyboard wrote, and since issue #75 that can be
+    // Chinese. `name[name.len() - 4..]` on a five-character Han title indexes
+    // into the middle of the fourth character, and a &str slice off a boundary
+    // panics -- with `panic = "abort"`, straight to an Atmosphere fatal. The
+    // second slice needs no guard: it only runs once the tail compared equal to
+    // the ASCII ".swf", which puts the cut on a boundary by construction.
+    let cut = name.len().wrapping_sub(4);
+    let base = if name.len() > 4
+        && name.is_char_boundary(cut)
+        && name[cut..].eq_ignore_ascii_case(".swf")
+    {
+        &name[..cut]
     } else {
         name
     };
