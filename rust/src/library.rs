@@ -281,6 +281,9 @@ const SORT_FILE: &str = "sort.txt";
 /// them rather than one file per shelf — the games folder is walked by the boot
 /// scan, and that is exactly why `.display`/`.rot`/`.filter` were folded into a
 /// single `.prefs` per game.
+///
+/// ACCUEIL files its own under `ROOT_SORT_KEY`. TOUS has no line here: its sort
+/// IS the home's, in `sort.txt`.
 const FOLDER_SORT_FILE: &str = "sort_folders.txt";
 static FOLDER_SORTS: Mutex<std::vec::Vec<(std::string::String, u8, bool)>> =
     Mutex::new(std::vec::Vec::new());
@@ -310,18 +313,29 @@ pub(crate) fn set_active_folder(folder: Option<&str>) {
     });
 }
 
-/// The shelf whose sort applies, or `None` for the home's own.
+/// The shelf whose sort applies, or `None` for TOUS, which uses the home's.
 ///
-/// TOUS and ACCUEIL both use the home sort: one is the whole library and the
-/// other is the library minus its shelves, and neither is a shelf you can give
-/// a rule of its own. Only a NAMED folder gets one.
+/// ACCUEIL counts as a shelf and keeps its own rule, like any named folder: it
+/// holds a different set of games from TOUS, and a set you look at on its own
+/// deserves an order you chose on its own. Only TOUS -- the whole library, the
+/// thing the home sort was always about -- falls through to the global.
 fn sorting_folder() -> Option<std::string::String> {
-    ACTIVE_FOLDER
-        .lock()
-        .ok()
-        .and_then(|g| g.clone())
-        .filter(|f| !f.is_empty())
+    let f = ACTIVE_FOLDER.lock().ok().and_then(|g| g.clone())?;
+    Some(if f.is_empty() {
+        ROOT_SORT_KEY.to_string()
+    } else {
+        f
+    })
 }
+
+/// The key ACCUEIL's sort is filed under in `sort_folders.txt`.
+///
+/// A lone slash, because that is the one thing a folder name can never be: FAT
+/// forbids it in a directory name, so this can never collide with a real shelf.
+/// The empty string would have worked too and produced a line reading `=2R`,
+/// which is unreadable to anyone opening the file from a PC — and that file
+/// exists to be readable, like every other preference on the card.
+const ROOT_SORT_KEY: &str = "/";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SortMode {
@@ -7482,6 +7496,7 @@ fn draw_gallery(
         crate::backend::render::set_home_has_folders(
             s.entries.iter().any(|e| !e.folder.is_empty()),
         );
+        crate::backend::render::set_home_library_total(s.entries.len());
         let idx = local_filtered_indices(&s.entries, &s.local_filter, &s.folder_filter);
         let entries: std::vec::Vec<Entry> = idx.iter().map(|&i| s.entries[i].clone()).collect();
         (
@@ -7492,6 +7507,15 @@ fn draw_gallery(
                 banner_h: s.banner_h,
             },
             s.local_filter.clone(),
+            // The open shelf's DISPLAY name, for the frame drawn after the view.
+            // ACCUEIL has no directory name of its own, so it borrows its label.
+            s.folder_filter.as_deref().map(|f| {
+                if f.is_empty() {
+                    crate::loc::s().folder_root.to_string()
+                } else {
+                    f.to_string()
+                }
+            }),
             // The denominator of the header's "n / N" is the size of what the
             // player is LOOKING AT before their search, i.e. the open shelf —
             // not the library. On a six-game shelf, "0 / 214" for a search that
@@ -7499,7 +7523,7 @@ fn draw_gallery(
             local_filtered_indices(&s.entries, &None, &s.folder_filter).len(),
         )
     });
-    if let Some((snap, filter, total_unfiltered)) = snapshot {
+    if let Some((snap, filter, folder_open, total_unfiltered)) = snapshot {
         let phase_ticks = unsafe { ruffle_tick_now() }.saturating_sub(anim_origin);
         // Same data, same selection, same actions — only the layout differs
         // (REGLAGES > AFFICHAGE HOME). Each one publishes the same cell table, so
@@ -7523,6 +7547,12 @@ fn draw_gallery(
             2 => backend.draw_library_shelf_view(a.0, a.1, a.2, a.3, a.4, a.5, a.6, a.7, a.8),
             3 => backend.draw_library_etagere_view(a.0, a.1, a.2, a.3, a.4, a.5, a.6, a.7, a.8),
             _ => backend.draw_library_gallery(a.0, a.1, a.2, a.3, a.4, a.5, a.6, a.7, a.8),
+        }
+        // A shelf is a SUBSET, and it has to look like one. Drawn after the view
+        // so it can read the content band the view just published, which is what
+        // lets one piece of code frame all four layouts.
+        if let Some(f) = folder_open {
+            backend.draw_folder_frame(&f);
         }
     }
 }

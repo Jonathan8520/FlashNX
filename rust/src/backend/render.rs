@@ -539,6 +539,15 @@ pub fn set_home_has_folders(any: bool) {
     HOME_HAS_FOLDERS.store(any, core::sync::atomic::Ordering::Relaxed);
 }
 
+/// Size of the WHOLE library, for the one line that needs to compare a shelf to
+/// it. Everything else on screen counts what is in front of the player.
+static HOME_LIBRARY_TOTAL: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+pub fn set_home_library_total(n: usize) {
+    HOME_LIBRARY_TOTAL.store(n, core::sync::atomic::Ordering::Relaxed);
+}
+
 /// Free zoom on the game's picture, in percent of the fitted size (issue #101),
 /// with the framing offset that goes with it, in PHYSICAL screen pixels.
 ///
@@ -8099,6 +8108,88 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
+    /// Frame the content band and name the open shelf on the frame itself.
+    ///
+    /// Being inside a folder was legible in exactly one place: a line of small
+    /// text in the top-left corner, above a grid that looked identical either
+    /// way. A player could scroll a shelf for a minute wondering where their
+    /// games had gone. A subset of the library has to LOOK like a subset.
+    ///
+    /// So the page gets a rule above and below its content, and the top one
+    /// carries a plaque with the shelf's name, the way a labelled group has been
+    /// drawn since forms had legends. It reads instantly and it says WHICH.
+    ///
+    /// Drawn AFTER the view, at fixed heights that fall in the gaps all four
+    /// layouts already leave, so not one of them had to move a pixel to make
+    /// room.
+    pub fn draw_folder_frame(&mut self, name: &str) {
+        let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
+        // TWO HORIZONTAL RULES, no sides.
+        //
+        // A box was the obvious shape and it was wrong. BANDE and ETAGERE scroll
+        // SIDEWAYS and let their tiles run off both edges on purpose -- that
+        // bleed is what says there is more to the left and right -- so vertical
+        // borders cut straight through the artwork, and BANDE's position rail
+        // sat outside the box it was supposed to be in.
+        //
+        // These two lines sit in the gaps every layout already leaves, so
+        // nothing is ever crossed whatever scrolls past horizontally.
+        //
+        // The top one: the banner ends at y102 and the earliest content starts
+        // at y124 (BANDE's hero), so y110 is clear in all four.
+        //
+        // The bottom one is the tight one, and GRILLE sets it: its facts line
+        // ends at y660 and the footer starts at y678. y670 sits between them.
+        // The footer cannot be pushed down to make more room -- the corner
+        // stamps are six pixels under it -- so what little was needed came from
+        // raising the name and the facts, as little as would do.
+        const TOP_Y: f32 = 110.0;
+        let bot_y = vh - 50.0;
+        const M: f32 = 20.0;
+        const B: f32 = 2.0;
+        const ACCENT: u32 = 0xFF_FF_D7_40;
+        unsafe {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        }
+        // The plaque interrupts the top rule, so it is drawn in two pieces with
+        // a gap for the text rather than a line through the word.
+        let ls = 1.8;
+        let label = self.fit_text(name, ls, vw - 200.0);
+        let lw = self.measure_text(&label, ls);
+        let gap_x0 = M + 14.0;
+        let gap_x1 = gap_x0 + lw + 24.0;
+        self.draw_overlay_rect(M, TOP_Y, (gap_x0 - M).max(0.0), B, ACCENT);
+        self.draw_overlay_rect(gap_x1, TOP_Y, (vw - M - gap_x1).max(0.0), B, ACCENT);
+        self.draw_overlay_rect(M, bot_y, vw - 2.0 * M, B, ACCENT);
+        // An opaque plate under the word, in the page's own navy.
+        //
+        // The plaque sits at the very top of the scrolling band, so a cover
+        // riding up under it turned amber text on a white logo into nothing at
+        // all. A legend on a frame is not a caption over the content: it needs
+        // its own ground, exactly like the gap it interrupts.
+        let ly = TOP_Y - 7.0 * ls * 0.5 + B * 0.5;
+        self.draw_overlay_rect(
+            gap_x0,
+            ly - 3.0,
+            (gap_x1 - gap_x0).max(0.0),
+            7.0 * ls + 6.0,
+            0xFF_14_20_38,
+        );
+        self.draw_text(
+            gap_x0 + 12.0,
+            ly,
+            ls,
+            &label,
+            swf::Color::from_rgb(0xFFD740, 255),
+        );
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
     /// Draw a cover in the box `(x, y, w, h)`, zoomed out by `t`.
     ///
     /// At `t = 0` the drawn rect IS the box, so `draw_textured_rect_cover` crops
@@ -8374,12 +8465,13 @@ impl SwitchRenderBackend {
             // concluded their library had no match, one ZR away from it.
             // `total_unfiltered` is the shelf's size, not the library's — see
             // the caller.
-            (Some(f), Some(name)) if !f.trim().is_empty() => std::format!(
-                "{} / {} - {}: {} - {}: {}",
+            // A search INSIDE a shelf: the denominator is the shelf, because
+            // that is what the search looked at. The shelf's own name is on the
+            // frame around the games, so it is not repeated here.
+            (Some(f), Some(_)) if !f.trim().is_empty() => std::format!(
+                "{} / {} - {}: {}",
                 shown,
                 total_unfiltered,
-                crate::loc::s().home_folder,
-                name,
                 crate::loc::s().files_filter,
                 f,
             ),
@@ -8388,12 +8480,16 @@ impl SwitchRenderBackend {
                     crate::loc::games_count(shown)
                 })
             }
-            (_, Some(name)) => std::format!(
-                "{} / {} - {}: {}",
+            // A shelf with no search: against the WHOLE LIBRARY, which is the
+            // only comparison left worth making. It used to read "85 / 85" --
+            // the shelf measured against itself, two identical numbers that
+            // answered nothing. "85 / 87" says how much of the library this is.
+            (_, Some(_)) => std::format!(
+                "{} / {}",
                 shown,
-                total_unfiltered,
-                crate::loc::s().home_folder,
-                name,
+                HOME_LIBRARY_TOTAL
+                    .load(core::sync::atomic::Ordering::Relaxed)
+                    .max(shown),
             ),
             // Nothing else on the home says folders exist, and the buttons that
             // walk them are on the back of the console. So the count line names
@@ -9978,20 +10074,28 @@ impl SwitchRenderBackend {
             let nw = self.measure_text(&name, nsc);
             self.draw_text(
                 (vw - nw) * 0.5,
-                vh - 96.0,
+                // Raised from vh-96 to open the band under the facts line: the
+                // shelf's bottom rule has to fit between them and the footer,
+                // and the footer cannot move down -- the corner stamps sit six
+                // pixels below it. The tile rows end at y588, so there is room
+                // above and none below. Six pixels, no more than the rule needs.
+                vh - 102.0,
                 nsc,
                 &name,
                 swf::Color::from_rgb(0xFFFFFF, 255),
             );
             // The same formatter as the other three layouts. This screen used to
             // build its own string with "//" separators and "SWF V10" — the V says
-            // nothing "SWF" does not. The baseline and the scale are unchanged, so
-            // neither the name above nor the footer below moves, which matters
-            // here: this line ends at y668 and the footer starts at y678.
+            // nothing "SWF" does not.
+            //
+            // Raised from vh-66 with the name above it: this line used to end at
+            // y668 against a footer starting at y678, ten pixels with the
+            // shelf's bottom rule to fit inside. It now ends at y660, the rule
+            // sits at y670, and the footer has not moved.
             let facts = Self::game_facts(entry);
             let isc = 2.0;
             let iw = self.facts_width(&facts, isc);
-            self.draw_facts((vw - iw) * 0.5, vh - 66.0, isc, &facts);
+            self.draw_facts((vw - iw) * 0.5, vh - 74.0, isc, &facts);
         }
 
         self.draw_page_footer(crate::loc::s().list_footer);
