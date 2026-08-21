@@ -115,13 +115,18 @@ pub fn resolve(basename: &str) -> Cover {
 /// Decode cover image BYTES (PNG or JPEG) to RGBA8 + dims. Dispatches on magic
 /// bytes, not extension, so a mislabelled file / `?type=` URL still works.
 pub fn decode_bytes(bytes: &[u8]) -> Option<(std::vec::Vec<u8>, u32, u32)> {
+    // BY THE BYTES, never by the name: Flashpoint serves WebP at `.png` URLs.
     if bytes.len() >= 4 && &bytes[0..4] == b"\x89PNG" {
         decode_png(bytes)
     } else if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xD8 {
         decode_jpeg(bytes)
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        decode_webp(bytes)
     } else {
-        // Last resort: try PNG then JPEG (some servers omit a clean header).
-        decode_png(bytes).or_else(|| decode_jpeg(bytes))
+        // Last resort: try each in turn (some servers omit a clean header).
+        decode_png(bytes)
+            .or_else(|| decode_jpeg(bytes))
+            .or_else(|| decode_webp(bytes))
     }
 }
 
@@ -308,6 +313,33 @@ pub fn write_thumb(basename: &str, src_len: u64, rgba: &[u8], w: u32, h: u32) {
 
 /// Decode PNG bytes to RGBA8 (mirrors `library::decode_banner`, promoting any
 /// color type to RGBA; indexed PNGs are rejected).
+/// WebP, which arrives here wearing a `.png` name.
+///
+/// Flashpoint's Infinity CDN serves a minority of game logos as WebP at a
+/// `.png` URL — the bytes start `RIFF....WEBP`, not `\x89PNG`. Nothing said so:
+/// the PNG decoder returned None and the game got the "?" tile, which is the
+/// same thing a game with no art at all gets.
+fn decode_webp(bytes: &[u8]) -> Option<(std::vec::Vec<u8>, u32, u32)> {
+    let mut d = image_webp::WebPDecoder::new(std::io::Cursor::new(bytes)).ok()?;
+    let (w, h) = d.dimensions();
+    // Ask for RGBA whatever the file holds, so the caller gets the one layout
+    // every other decoder here already returns.
+    let mut rgba = std::vec![0u8; (w as usize).checked_mul(h as usize)?.checked_mul(4)?];
+    if d.has_alpha() {
+        d.read_image(&mut rgba).ok()?;
+    } else {
+        let mut rgb = std::vec![0u8; (w as usize).checked_mul(h as usize)?.checked_mul(3)?];
+        d.read_image(&mut rgb).ok()?;
+        for (i, px) in rgb.chunks_exact(3).enumerate() {
+            rgba[i * 4] = px[0];
+            rgba[i * 4 + 1] = px[1];
+            rgba[i * 4 + 2] = px[2];
+            rgba[i * 4 + 3] = 0xFF;
+        }
+    }
+    Some((rgba, w, h))
+}
+
 fn decode_png(bytes: &[u8]) -> Option<(std::vec::Vec<u8>, u32, u32)> {
     let cursor = std::io::Cursor::new(bytes);
     let mut decoder = png::Decoder::new(cursor);

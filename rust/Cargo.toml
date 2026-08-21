@@ -66,8 +66,14 @@ serde_json = "1"
 # and uploaded as a GL texture for the library UI title). `png` 0.18.x is
 # already pulled transitively by ruffle_render and `image`, so direct-dep
 # binary cost is ~0. Picked over the full `image` crate to keep the API
-# surface tight (we only need PNG, not BMP/TIFF/AVIF/WebP).
+# surface tight (we only need PNG, not BMP/TIFF/AVIF).
 png = "0.18"
+# WebP, for ONE reason: Flashpoint's Infinity CDN serves some game logos as
+# WebP under a `.png` URL. The file really is `RIFF....WEBPVP8L`, our decoder
+# read the extension's promise, failed, and the game showed the "?" tile with
+# nothing said. Rare -- eleven of twelve sampled logos are PNG and the twelfth
+# is JPEG -- but a silent hole. Pure Rust, so nothing new to cross-compile.
+image-webp = "0.2"
 # v1.4.0 — CJK text (Chinese, issue #41; Korean/Japanese share the same path).
 # Rasterizes glyphs from the Switch SHARED system font (via the `pl` service,
 # see backend/glyphs.rs) into a GL atlas; the .nro ships no font. CRITICAL:
