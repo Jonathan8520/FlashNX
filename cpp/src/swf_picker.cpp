@@ -54,6 +54,32 @@ bool ends_with_swf(const char* name) {
     return strcasecmp(name + n - 4, ".swf") == 0;
 }
 
+// Directories that belong to US, not to the player, and must never be walked
+// looking for games (issue #68). `covers/` is the thumbnail cache; every
+// `<game>.files/` is one game's companion assets, and descending into one would
+// list its inner `.swf` fragments as if they were games of their own.
+//
+// Mirrors `is_our_bookkeeping` in rust/src/library.rs. Kept as its own copy
+// rather than crossing the FFI: this runs once per directory in the hot boot
+// scan, and the test is two string compares.
+bool is_our_bookkeeping(const char* name) {
+    if (!name) return true;
+    if (strcasecmp(name, "covers") == 0) return true;
+    const size_t n = std::strlen(name);
+    return n >= 6 && strcasecmp(name + n - 6, ".files") == 0;
+}
+
+// How deep below the games folder a game may sit and still be found.
+//
+// Folders are how people organise a card, and until this the scan stopped at
+// the top level: a game moved into `flashnx/Mario/` simply vanished from the
+// library, with nothing said. Three levels covers organising by series and then
+// by sub-series, which is past what anyone does, and the bound matters because
+// every `opendir` is an IPC round trip on Horizon -- the whole boot scan is 325
+// ms and unbounded recursion on a card with a deep tree elsewhere would spend it
+// all again.
+constexpr int MAX_SCAN_DEPTH = 3;
+
 // Enumerate every `.swf` in `dir` and forward absolute paths to Rust.
 // Silent if the directory doesn't exist (SD often only has one of the two
 // candidate locations populated).
@@ -61,7 +87,9 @@ bool ends_with_swf(const char* name) {
 // TWO passes over one readdir: the whole listing is indexed FIRST (a sidecar
 // can appear after its game in directory order), then the `.swf` entries are
 // pushed to Rust. Only `.swf` paths are kept in memory between the passes.
-void scan_dir_all(const char* dir) {
+void scan_dir_all(const char* dir, int depth = 0);
+
+void scan_dir_all(const char* dir, int depth) {
     DIR* d = opendir(dir);
     if (!d) {
         // ENOENT = the directory really isn't there, so the index can answer
@@ -76,6 +104,10 @@ void scan_dir_all(const char* dir) {
     const char* sep = (dir[std::strlen(dir) - 1] == '/') ? "" : "/";
     char path[512];
     std::vector<std::string> swfs;
+    // Subfolders are collected during the SAME readdir and walked after it
+    // closes: keeping a second DIR handle open per level while recursing is what
+    // fsdev is worst at, and the listing is already in hand.
+    std::vector<std::string> subdirs;
     while (struct dirent* ent = readdir(d)) {
         const int n = std::snprintf(path, sizeof(path), "%s%s%s", dir, sep, ent->d_name);
         if (n <= 0 || (size_t)n >= sizeof(path)) {
@@ -83,7 +115,24 @@ void scan_dir_all(const char* dir) {
             continue;
         }
         ruffle_library_note_file(path);
-        if (ends_with_swf(ent->d_name)) swfs.emplace_back(path);
+        if (ends_with_swf(ent->d_name)) {
+            swfs.emplace_back(path);
+        } else if (depth + 1 < MAX_SCAN_DEPTH
+                   && std::strcmp(ent->d_name, ".") != 0
+                   && std::strcmp(ent->d_name, "..") != 0
+                   && !is_our_bookkeeping(ent->d_name)) {
+            // `d_type` is the cheap answer and fsdev does fill it in (the
+            // recursive delete below has relied on it since v1.3.0). DT_UNKNOWN
+            // is documented as possible on some volumes though, and a folder
+            // silently skipped there would take a player's whole shelf with it,
+            // so fall back to a stat -- which in practice never runs.
+            bool is_dir = ent->d_type == DT_DIR;
+            if (ent->d_type == DT_UNKNOWN) {
+                struct stat ds;
+                is_dir = ::stat(path, &ds) == 0 && S_ISDIR(ds.st_mode);
+            }
+            if (is_dir) subdirs.emplace_back(path);
+        }
     }
     closedir(d);
 
@@ -101,6 +150,10 @@ void scan_dir_all(const char* dir) {
     }
     std::printf("library scan: %s -> %d .swf\n", dir, found);
     std::fflush(stdout);
+
+    for (const std::string& sub : subdirs) {
+        scan_dir_all(sub.c_str(), depth + 1);
+    }
 }
 
 // Index a directory into the Rust-side lookup WITHOUT adding any game from it.
@@ -240,7 +293,46 @@ static int remove_dir_recursive(const char* path) {
 //
 // Returns the number of files actually removed, or -1 on parameter /
 // opendir failure. Missing matches are not an error (idempotent).
-extern "C" int swf_picker_delete_game(const char* swf_path) {
+// Unlink every entry of `dir` whose name is `basename` or starts with
+// `basename.`. Returns the count, or -1 if the directory could not be opened.
+// Split out so a game's companions can be swept in TWO places: beside the .swf
+// and at the root of the games folder (issue #68).
+static int sweep_basename(const char* dir, const char* basename, size_t blen,
+                          bool allow_exact) {
+    DIR* d = opendir(dir);
+    if (!d) {
+        std::printf("swf_picker_delete_game: opendir(%s) failed errno=%d\n", dir, errno);
+        std::fflush(stdout);
+        return -1;
+    }
+    int removed = 0;
+    char path[512];
+    while (struct dirent* ent = readdir(d)) {
+        const char* n = ent->d_name;
+        const bool exact = (std::strcmp(n, basename) == 0);
+        const bool prefixed =
+            !exact && std::strncmp(n, basename, blen) == 0 && n[blen] == '.';
+        // An EXACT match away from the game's own directory is a DIFFERENT GAME
+        // that happens to share a file name (issue #68 made that possible), not
+        // a companion. Deleting one game would have deleted the other's `.swf`.
+        if (exact && !allow_exact) continue;
+        if (!exact && !prefixed) continue;
+        if (ent->d_type == DT_DIR) continue; // defensive
+        const int nl = std::snprintf(path, sizeof(path), "%s%s", dir, n);
+        if (nl <= 0 || (size_t)nl >= sizeof(path)) continue;
+        if (::unlink(path) == 0) {
+            std::printf("swf_picker_delete_game: removed %s\n", path);
+            ++removed;
+        } else {
+            std::printf("swf_picker_delete_game: unlink(%s) failed errno=%d\n",
+                        path, errno);
+        }
+    }
+    closedir(d);
+    return removed;
+}
+
+extern "C" int swf_picker_delete_game(const char* swf_path, const char* also_dir) {
     if (!swf_path || !*swf_path) return -1;
     const char* slash = std::strrchr(swf_path, '/');
     if (!slash) return -1;
@@ -255,32 +347,27 @@ extern "C" int swf_picker_delete_game(const char* swf_path) {
     std::memcpy(basename, slash + 1, blen);
     basename[blen] = '\0';
 
-    DIR* d = opendir(dir);
-    if (!d) {
-        std::printf("swf_picker_delete_game: opendir(%s) failed errno=%d\n", dir, errno);
-        std::fflush(stdout);
-        return -1;
-    }
-    int removed = 0;
-    char path[512];
-    while (struct dirent* ent = readdir(d)) {
-        const char* n = ent->d_name;
-        const bool exact = (std::strcmp(n, basename) == 0);
-        const bool prefixed =
-            !exact && std::strncmp(n, basename, blen) == 0 && n[blen] == '.';
-        if (!exact && !prefixed) continue;
-        if (ent->d_type == DT_DIR) continue; // defensive
-        const int nl = std::snprintf(path, sizeof(path), "%s%s", dir, n);
-        if (nl <= 0 || (size_t)nl >= sizeof(path)) continue;
-        if (::unlink(path) == 0) {
-            std::printf("swf_picker_delete_game: removed %s\n", path);
-            ++removed;
-        } else {
-            std::printf("swf_picker_delete_game: unlink(%s) failed errno=%d\n",
-                        path, errno);
+    int removed = sweep_basename(dir, basename, blen, true);
+    if (removed < 0) return -1;
+    // A game may now live in a SUBFOLDER (issue #68) while every companion
+    // except its `.files/` tree stays keyed by file name at the ROOT of the
+    // games folder. Sweeping only the .swf's own directory would delete the
+    // game and leave its saves, its controls, its cover and its name behind
+    // for good -- invisible, since nothing lists them.
+    if (also_dir && *also_dir) {
+        char root[512];
+        const size_t rl = std::strlen(also_dir);
+        if (rl + 2 < sizeof(root)) {
+            std::snprintf(root, sizeof(root), "%s%s", also_dir,
+                          also_dir[rl - 1] == '/' ? "" : "/");
+            if (std::strcmp(root, dir) != 0) {
+                // `false`: companions only. The file named exactly like this
+                // game at the root is another game, not part of this one.
+                const int extra = sweep_basename(root, basename, blen, false);
+                if (extra > 0) removed += extra;
+            }
         }
     }
-    closedir(d);
 
     // Multi-file games (v1.3.0): also remove the companion folder
     // `<stem>.files/` (sibling SWFs fetched by gamezip::fetch_siblings, plus any

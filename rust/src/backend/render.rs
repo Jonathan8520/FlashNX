@@ -473,6 +473,38 @@ pub fn rotation_swaps_axes() -> bool {
     matches!(game_rotation(), 1 | 3)
 }
 
+/// Folder the home is currently showing (issue #68); `None` = all of them.
+///
+/// A static rather than a tenth argument through all four view renderers. It is
+/// read in exactly ONE place -- `draw_home_header`, to name the open shelf in
+/// the slot the active filter already uses -- and threading it would have meant
+/// four signatures and a dispatch tuple changed to move one line of text. The
+/// four views themselves never learn folders exist: they are handed the games
+/// that survived the filter, as they always were.
+static HOME_FOLDER: std::sync::Mutex<Option<std::string::String>> =
+    std::sync::Mutex::new(None);
+
+/// Whether the library has any folder at all, so the header can ADVERTISE the
+/// shoulder buttons. Nothing on the home says folders exist otherwise, and an
+/// unadvertised button is a feature nobody finds.
+static HOME_HAS_FOLDERS: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+pub fn set_home_folder(folder: Option<&str>) {
+    if let Ok(mut g) = HOME_FOLDER.lock() {
+        // Compared before writing: this is called once per gallery frame, and
+        // the shelf changes about once a minute. Two allocations a frame for a
+        // string that is almost always the same one is not free at 60 Hz.
+        if g.as_deref() != folder {
+            *g = folder.map(|s| s.to_string());
+        }
+    }
+}
+
+pub fn set_home_has_folders(any: bool) {
+    HOME_HAS_FOLDERS.store(any, core::sync::atomic::Ordering::Relaxed);
+}
+
 /// Free zoom on the game's picture, in percent of the fitted size (issue #101),
 /// with the framing offset that goes with it, in PHYSICAL screen pixels.
 ///
@@ -8246,9 +8278,50 @@ impl SwitchRenderBackend {
         }
 
         // Same slot whether filtering or not, so the header height never moves.
-        let sub = crate::loc::count_line(shown, total_unfiltered, filter, || {
-            crate::loc::games_count(shown)
-        });
+        // The open folder (issue #68) takes that same slot when no search is
+        // running: it narrows the list exactly as a search does, and the player
+        // is owed the same one line saying why they are not seeing everything.
+        // A search wins the slot because a search also ignores the folder.
+        let folder_open = HOME_FOLDER.lock().ok().and_then(|g| g.clone());
+        let sub = match (filter, folder_open.as_deref()) {
+            // BOTH, when both narrow. A search runs INSIDE the open shelf, so a
+            // line naming only the search claims a scope it does not have: on a
+            // six-game shelf it read "0 / 214 - FILTRE: sonic" and the player
+            // concluded their library had no match, one ZR away from it.
+            // `total_unfiltered` is the shelf's size, not the library's — see
+            // the caller.
+            (Some(f), Some(name)) if !f.trim().is_empty() => std::format!(
+                "{} / {} - {}: {} - {}: {}",
+                shown,
+                total_unfiltered,
+                crate::loc::s().home_folder,
+                name,
+                crate::loc::s().files_filter,
+                f,
+            ),
+            (Some(f), _) if !f.trim().is_empty() => {
+                crate::loc::count_line(shown, total_unfiltered, filter, || {
+                    crate::loc::games_count(shown)
+                })
+            }
+            (_, Some(name)) => std::format!(
+                "{} / {} - {}: {}",
+                shown,
+                total_unfiltered,
+                crate::loc::s().home_folder,
+                name,
+            ),
+            // Nothing else on the home says folders exist, and the buttons that
+            // walk them are on the back of the console. So the count line names
+            // them, but ONLY while the library actually has one -- a hint for a
+            // feature you are not using is noise on every other player's screen.
+            _ if HOME_HAS_FOLDERS.load(core::sync::atomic::Ordering::Relaxed) => std::format!(
+                "{}    ZL/ZR: {}",
+                crate::loc::games_count(shown),
+                crate::loc::s().home_folder,
+            ),
+            _ => crate::loc::games_count(shown),
+        };
         // In the banner's LEFT flank, vertically centred in the 46..102 band,
         // rather than centred on its own row below. This line is also the only
         // indicator that a filter is active, so it stays visible in every layout —

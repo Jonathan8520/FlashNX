@@ -68,6 +68,11 @@ fn stem(basename: &str) -> &str {
 /// on hardware each `Path::exists()` runs ~1.2 ms — 9 to 13 ms per game, which
 /// was the single biggest slice of a cover load regardless of image size.
 fn find_in_roots(suffix: &str) -> Option<std::string::String> {
+    // NOT searched: the folders games can now sit in (issue #68). This function
+    // is handed a file NAME and never the game it belongs to, so probing every
+    // shelf would hand one game's cover to another of the same name, and shadow
+    // a cover sitting at the root. A manual cover therefore goes at the root of
+    // the games folder, as it always has; the online cache is unaffected.
     for root in roots() {
         let p = std::format!("{}/{}", root, suffix);
         if crate::library::file_exists(&p) {
