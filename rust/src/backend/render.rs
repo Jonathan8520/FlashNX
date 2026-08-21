@@ -7463,23 +7463,28 @@ impl SwitchRenderBackend {
         };
         let world = self.world_matrix(&mat);
         let a = alpha.clamp(0.0, 1.0);
-        // Premultiplied: the bitmap shader writes what it is given, so the
-        // colour has to come down with the alpha or a half-faded cover washes
-        // out bright instead of appearing.
-        let mult = [a, a, a, a];
+        // STRAIGHT alpha, and the fade applied to the alpha channel alone.
+        //
+        // This used to premultiply (`mult = [a,a,a,a]` with `GL_ONE`), which is
+        // right only for a texture that is already premultiplied. A cover comes
+        // from a decoded PNG and is not: with `GL_ONE` its transparent pixels
+        // were added at full strength, so wherever a cover had an alpha channel
+        // its see-through corners came out as solid white blocks. Nearly every
+        // cover is opaque, which is why it took a logo with cut corners to show
+        // it (Super Smash Flash 2, reported 2026-08-21).
+        let mult = [1.0, 1.0, 1.0, a];
         let add = [0.0, 0.0, 0.0, 0.0];
         if a <= 0.0 {
             return;
         }
         unsafe {
             glEnable(GL_BLEND);
-            glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         }
         self.use_bitmap(&world, &mult, &add, tex, &uv_remap);
         self.gl_state.bind_vao(self.bitmap_vao);
         unsafe {
             glDrawArrays(GL_TRIANGLES, 0, 6);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         }
     }
 
