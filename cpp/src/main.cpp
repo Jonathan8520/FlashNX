@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 #include <sys/stat.h>
 
 #include "ruffle_bridge.h"
@@ -81,6 +82,16 @@ extern "C" void ruffle_display_mode_cycle(void);
 // game; the next redraw picks it up, so the paused frame previews it.
 extern "C" void ruffle_screen_filter_cycle(void);
 extern "C" void ruffle_rotation_cycle(void);
+// Free zoom + framing (issue #101). Unlike the three rows above, ZOOM does not
+// cycle a value on `A`: it opens a mode where the panel gives way to the picture
+// and the buttons drive the framing until A or B.
+extern "C" void ruffle_zoom_begin(void);
+extern "C" void ruffle_zoom_adjust(int d_percent, int dx, int dy);
+extern "C" int  ruffle_zoom_percent(void);
+extern "C" void ruffle_zoom_reset(void);
+extern "C" void ruffle_zoom_commit(void);
+extern "C" void ruffle_zoom_cancel(void);
+extern "C" void ruffle_draw_zoom_overlay(void);
 extern "C" int  ruffle_keymap_lookup(const char* button_name);
 extern "C" int  ruffle_keymap_lookup_p2(const char* button_name);
 // Per-modifier combo layers (#57): mod_code 1=ZL 2=ZR 3=L 4=R.
@@ -399,8 +410,9 @@ enum MenuAction {
 enum ScreenAction {
     SCREEN_DISPLAY  = 0,
     SCREEN_ROTATION = 1,
-    SCREEN_FILTER   = 2,
-    SCREEN_COUNT    = 3,
+    SCREEN_ZOOM     = 2,  // geometry, so next to the rotation; the filter is colour
+    SCREEN_FILTER   = 3,
+    SCREEN_COUNT    = 4,
 };
 
 // The physical panel / touchscreen coordinate space. Touch samples always arrive
@@ -869,6 +881,25 @@ static void worker_entry(void* arg) {
     // whatever row index the sub-panel happened to stop on.
     bool screen_menu = false;
     int  screen_selection = SCREEN_DISPLAY;
+    // ZOOM framing mode (issue #101): a state INSIDE the ECRAN branch, because
+    // backing out of it must land on the ECRAN rows, not on the game.
+    bool zoom_mode = false;
+    // Frames the zoom keys have been held, so a long press accelerates. One
+    // percent a frame is the right grain to land on a value and much too slow to
+    // cross the whole range, which is what this fixes.
+    int  zoom_hold = 0;
+    // Drag state for framing with a finger: the previous sample, and whether
+    // there IS one. Without the flag, lifting and putting the finger down
+    // elsewhere would jump the framing by the gap between the two.
+    bool zoom_touching = false;
+    int  zoom_touch_x = 0, zoom_touch_y = 0;
+    // Pinch state: whether two fingers were down last frame and how far apart.
+    bool  zoom_pinching = false;
+    float zoom_pinch_dist = 0.0f;
+    // Frames the d-pad has been held, so a tap stays one pixel and a hold ramps.
+    int  pan_hold = 0;
+    // Same, for the fine zoom on X / Y: a tap is one percent.
+    int  zoom_fine_hold = 0;
     // MENU_QUIT now means "back to library" — controlled by this flag.
     // appletMainLoop returning false (home button → Close) also exits the
     // inner loop but with back_to_library=false → full .nro exit.
@@ -956,6 +987,173 @@ static void worker_entry(void* arg) {
             // does to THIS game before going back to playing. `B` returns to the
             // pause menu, which is why nothing here calls the close pop: the
             // panel is not being dismissed, it is being backed out of.
+            // ─── ZOOM framing mode ──────────────────────────────────────
+            // The panel is gone and the picture is untouched: what the player
+            // is judging here IS the framing, so nothing is laid over it but
+            // two letterbox bands carrying the legend. Everything is live and
+            // nothing is written until `A`.
+            if (screen_menu && zoom_mode) {
+                // COARSE zoom on the shoulders, FINE zoom on X / Y -- the same
+                // split as the sticks and the d-pad below, so each pair of
+                // controls means the same thing on both axes of the mode.
+                const u64 ZOOM_IN  = HidNpadButton_ZR | HidNpadButton_R;
+                const u64 ZOOM_OUT = HidNpadButton_ZL | HidNpadButton_L;
+                int dz = 0;
+                if (kHeld & (ZOOM_IN | ZOOM_OUT)) {
+                    // Both directions down at once is the reversal the `else`
+                    // below would have caught had the player let go first.
+                    // Restart the ramp, so the surviving direction eases out at
+                    // one percent instead of inheriting five.
+                    if ((kHeld & ZOOM_IN) && (kHeld & ZOOM_OUT)) zoom_hold = 0;
+                    zoom_hold++;
+                    const int step = zoom_hold > 90 ? 5 : (zoom_hold > 30 ? 3 : 1);
+                    if (kHeld & ZOOM_IN)  dz += step;
+                    if (kHeld & ZOOM_OUT) dz -= step;
+                } else {
+                    zoom_hold = 0;
+                }
+                // X / Y: one percent a tap, nothing for the first 0.4 s of a
+                // hold, then a ramp. Landing on a chosen value is otherwise
+                // impossible -- a shoulder tap already lasts several frames.
+                const u64 FINE_MASK = HidNpadButton_X | HidNpadButton_Y;
+                if (kDown & HidNpadButton_X) dz += 1;
+                if (kDown & HidNpadButton_Y) dz -= 1;
+                if (kHeld & FINE_MASK) {
+                    if ((kHeld & HidNpadButton_X) && (kHeld & HidNpadButton_Y)) zoom_fine_hold = 0;
+                    zoom_fine_hold++;
+                    if (zoom_fine_hold > 25) {
+                        const int step = zoom_fine_hold > 90 ? 3 : (zoom_fine_hold > 55 ? 2 : 1);
+                        if (kHeld & HidNpadButton_X) dz += step;
+                        if (kHeld & HidNpadButton_Y) dz -= step;
+                    }
+                } else {
+                    zoom_fine_hold = 0;
+                }
+                // EITHER stick frames it, camera-style: pushing right shows what
+                // is on the right, so the picture slides the other way. Both
+                // sticks because there is nothing else for them to do in this
+                // mode, and a player who reaches for the wrong one should not
+                // find it dead.
+                int dx = 0, dy = 0;
+                static constexpr float PAN_SPEED = 14.0f;
+                for (int si = 0; si < 2; si++) {
+                    const HidAnalogStickState zs = padGetStickPos(&pad, si);
+                    const float zx = (float)zs.x;
+                    const float zy = (float)zs.y;
+                    if (zx > STICK_DEADZONE || zx < -STICK_DEADZONE) {
+                        dx += -(int)((zx / STICK_MAX) * PAN_SPEED);
+                    }
+                    // Stick Y is positive-up, screen Y positive-down.
+                    if (zy > STICK_DEADZONE || zy < -STICK_DEADZONE) {
+                        dy += (int)((zy / STICK_MAX) * PAN_SPEED);
+                    }
+                }
+                // The d-pad is the FINE control, the one that makes "one pixel
+                // to the left" possible at all: a tap is exactly one pixel, and
+                // only a long hold ramps up so a long trip is still bearable. A
+                // stick cannot do this -- its smallest useful deflection is
+                // already several pixels a frame.
+                const u64 PAD_MASK = HidNpadButton_Left | HidNpadButton_Right
+                                   | HidNpadButton_Up   | HidNpadButton_Down;
+                if (kDown & HidNpadButton_Left)  dx += 1;
+                if (kDown & HidNpadButton_Right) dx -= 1;
+                if (kDown & HidNpadButton_Up)    dy += 1;
+                if (kDown & HidNpadButton_Down)  dy -= 1;
+                if (kHeld & PAD_MASK) {
+                    pan_hold++;
+                    // Nothing for the first ~0.4 s, so a tap stays a tap.
+                    if (pan_hold > 25) {
+                        const int step = pan_hold > 90 ? 6 : (pan_hold > 55 ? 3 : 1);
+                        if (kHeld & HidNpadButton_Left)  dx += step;
+                        if (kHeld & HidNpadButton_Right) dx -= step;
+                        if (kHeld & HidNpadButton_Up)    dy += step;
+                        if (kHeld & HidNpadButton_Down)  dy -= step;
+                    }
+                } else {
+                    pan_hold = 0;
+                }
+                // The touchscreen: one finger frames, two fingers zoom.
+                //
+                // Note the SIGN of the drag: a finger pulls the PICTURE, which
+                // follows it, where a stick moves the CAMERA and the picture
+                // goes the other way. Those are the conventions of the two
+                // devices and matching each one is what makes both feel right.
+                //
+                // The pinch is PROPORTIONAL (see ruffle_zoom_percent): spreading
+                // two fingers by a tenth adds a tenth, at 100 % as at 500 %.
+                hidGetTouchScreenStates(&touch_state, 1);
+                const int tcount = (int)touch_state.count;
+                if (tcount >= 2) {
+                    const float ax = (float)touch_state.touches[0].x * GAME_TOUCH_SCALE_X;
+                    const float ay = (float)touch_state.touches[0].y * GAME_TOUCH_SCALE_Y;
+                    const float bx = (float)touch_state.touches[1].x * GAME_TOUCH_SCALE_X;
+                    const float by = (float)touch_state.touches[1].y * GAME_TOUCH_SCALE_Y;
+                    const float d  = std::sqrt((ax - bx) * (ax - bx) + (ay - by) * (ay - by));
+                    const int   mx = (int)((ax + bx) * 0.5f);
+                    const int   my = (int)((ay + by) * 0.5f);
+                    if (zoom_pinching && zoom_pinch_dist > 1.0f) {
+                        const float ratio = d / zoom_pinch_dist - 1.0f;
+                        dz += (int)std::lround((double)ruffle_zoom_percent() * (double)ratio);
+                        // The midpoint frames at the same time, so a pinch that
+                        // drifts across the screen takes the picture with it.
+                        dx += mx - zoom_touch_x;
+                        dy += my - zoom_touch_y;
+                    }
+                    zoom_pinch_dist = d;
+                    zoom_touch_x = mx;
+                    zoom_touch_y = my;
+                    zoom_pinching = true;
+                    zoom_touching = true;
+                } else if (tcount == 1) {
+                    const int tx = (int)((float)touch_state.touches[0].x * GAME_TOUCH_SCALE_X);
+                    const int ty = (int)((float)touch_state.touches[0].y * GAME_TOUCH_SCALE_Y);
+                    // Lifting one finger out of a pinch: re-anchor, or the
+                    // framing would jump from the midpoint to the survivor.
+                    if (zoom_pinching) {
+                        zoom_pinching = false;
+                        zoom_touching = false;
+                    }
+                    if (zoom_touching) {
+                        dx += tx - zoom_touch_x;
+                        dy += ty - zoom_touch_y;
+                    }
+                    zoom_touch_x = tx;
+                    zoom_touch_y = ty;
+                    zoom_touching = true;
+                } else {
+                    // Fingers up: the next touch starts a fresh gesture rather
+                    // than jumping the framing by the gap between them.
+                    zoom_touching = false;
+                    zoom_pinching = false;
+                }
+                if (dz || dx || dy) ruffle_zoom_adjust(dz, dx, dy);
+                // Landing exactly back on an untouched picture is otherwise
+                // impossible once you have nudged by one percent at a time.
+                if (kDown & HidNpadButton_StickL) ruffle_zoom_reset();
+                // Leaving the mode changes what sits under the crosshair, and
+                // the cursor block that would recompute it is far below, past
+                // the `continue` this branch takes every frame. So re-send the
+                // pointer here: without it the FIRST click after a zoom lands
+                // where the old magnification put it -- a third of a screen away
+                // at 300% -- and only heals when the stick is next nudged.
+                if (kDown & HidNpadButton_A) {
+                    ruffle_zoom_commit();
+                    ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
+                    zoom_mode = false;
+                    zoom_hold = 0;
+                } else if (kDown & (HidNpadButton_B | HidNpadButton_Minus)) {
+                    ruffle_zoom_cancel();
+                    ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
+                    zoom_mode = false;
+                    zoom_hold = 0;
+                }
+                ruffle_redraw_paused();
+                if (zoom_mode) ruffle_draw_zoom_overlay();
+                else           ruffle_draw_screen_menu(screen_selection);
+                gl_context_swap();
+                continue;
+            }
+
             if (screen_menu) {
                 if (kDown & (HidNpadButton_Up | HidNpadButton_StickLUp | HidNpadButton_StickRUp)) {
                     screen_selection = (screen_selection + SCREEN_COUNT - 1) % SCREEN_COUNT;
@@ -973,7 +1171,27 @@ static void worker_entry(void* arg) {
                 if (kDown & HidNpadButton_A) {
                     switch (screen_selection) {
                     case SCREEN_DISPLAY:  ruffle_display_mode_cycle();   break;
-                    case SCREEN_ROTATION: ruffle_rotation_cycle();       break;
+                    case SCREEN_ROTATION:
+                        ruffle_rotation_cycle();
+                        // Turning changes the basis the pointer is mapped
+                        // through AND recentres the framing, so the stage point
+                        // under the crosshair moves. Same reason as the zoom
+                        // arms above.
+                        ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
+                        break;
+                    case SCREEN_ZOOM:
+                        // Opens a mode instead of cycling a value: a free
+                        // percentage has no next entry to step to.
+                        ruffle_zoom_begin();
+                        zoom_mode = true;
+                        zoom_hold = 0;
+                        // The finger that tapped this row must not read as the
+                        // start of a drag on the first frame of the mode.
+                        zoom_touching = false;
+                        zoom_pinching = false;
+                        pan_hold = 0;
+                        zoom_fine_hold = 0;
+                        break;
                     case SCREEN_FILTER:   ruffle_screen_filter_cycle();  break;
                     }
                 }
@@ -1018,6 +1236,7 @@ static void worker_entry(void* arg) {
                     // above own the next frame.
                     screen_menu = true;
                     screen_selection = SCREEN_DISPLAY;
+                    zoom_mode = false;
                     continue;
                 case MENU_RESTART: {
                     std::printf("menu: REDEMARRER → ruffle_restart()\n");

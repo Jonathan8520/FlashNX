@@ -1130,16 +1130,34 @@ fn prefs_path(basename: &str) -> std::string::String {
     primary_path(&std::format!("{}.prefs", basename))
 }
 
-fn read_pref(basename: &str, key: &str) -> Option<u8> {
+/// Values are read and written as `i32`, not `u8`: the free zoom (issue #101)
+/// stores a percentage up to 500 and a framing offset that is signed and runs
+/// into the hundreds. The u8-shaped helpers below sit on top of these, so the
+/// cycling settings keep their narrow type where they are used.
+///
+/// This matters beyond the zoom's own two keys: `write_pref_many` rewrites the
+/// whole file from what it parsed, so a parse that could not hold a value would
+/// silently DROP that line. Cycling the rotation would have erased the zoom.
+fn read_pref_i32(basename: &str, key: &str) -> Option<i32> {
     let path = find_user_path(&std::format!("{}.prefs", basename))?;
     let text = read_json_file(&path)?;
     for line in text.lines() {
-        let (k, v) = line.split_once('=')?;
+        // `continue`, not `?`: one malformed line used to abandon the whole
+        // lookup, so a stray blank hid every key after it.
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
         if k.trim() == key {
-            return v.trim().parse::<u8>().ok();
+            return v.trim().parse::<i32>().ok();
         }
     }
     None
+}
+
+fn read_pref(basename: &str, key: &str) -> Option<u8> {
+    read_pref_i32(basename, key)
+        .filter(|v| (0..=255).contains(v))
+        .map(|v| v as u8)
 }
 
 /// Rewrite the file with `key` set, keeping every other key it held.
@@ -1148,14 +1166,22 @@ fn read_pref(basename: &str, key: &str) -> Option<u8> {
 /// blind append would grow it without bound and leave the older value in front,
 /// where the reader above would find it first.
 fn write_pref(basename: &str, key: &str, value: u8) -> bool {
-    let mut out: std::vec::Vec<(std::string::String, u8)> = std::vec::Vec::new();
+    write_pref_many(basename, &[(key, value as i32)])
+}
+
+/// Same, for several keys at once. The zoom writes three of them (the
+/// percentage and the two framing offsets) and they describe one state, so
+/// writing them one at a time would mean three SD rewrites for one validation
+/// and a window where the file held half a framing.
+fn write_pref_many(basename: &str, pairs: &[(&str, i32)]) -> bool {
+    let mut out: std::vec::Vec<(std::string::String, i32)> = std::vec::Vec::new();
     if let Some(path) = find_user_path(&std::format!("{}.prefs", basename)) {
         if let Some(text) = read_json_file(&path) {
             for line in text.lines() {
                 if let Some((k, v)) = line.split_once('=') {
                     let k = k.trim();
-                    if k != key && !k.is_empty() {
-                        if let Ok(n) = v.trim().parse::<u8>() {
+                    if !k.is_empty() && !pairs.iter().any(|(pk, _)| *pk == k) {
+                        if let Ok(n) = v.trim().parse::<i32>() {
                             out.push((k.to_string(), n));
                         }
                     }
@@ -1163,7 +1189,9 @@ fn write_pref(basename: &str, key: &str, value: u8) -> bool {
             }
         }
     }
-    out.push((key.to_string(), value));
+    for (k, v) in pairs {
+        out.push((k.to_string(), *v));
+    }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     let body: std::string::String =
         out.iter().map(|(k, v)| std::format!("{}={}
@@ -1209,6 +1237,58 @@ pub fn set_rotation(q: u8) {
 /// has to be distinguishable from "never set".
 pub fn set_rotation_for(basename: &str, q: u8) {
     write_pref(basename, "rot", q);
+}
+
+/// Per-game free zoom (issue #101): the percentage and the framing offset that
+/// belongs to it, in physical screen pixels.
+///
+/// Per game like every other row of ECRAN, and for the same reason: how much a
+/// picture needs magnifying is a property of the SWF's own layout, not of the
+/// console. The offset is stored with the percentage because it is meaningless
+/// without it -- a framing set at 300% would throw the picture off the screen
+/// if it were replayed at 120%. Both are re-clamped on load anyway.
+pub fn zoom_for(basename: &str) -> u16 {
+    read_pref_i32(basename, "zoom")
+        .filter(|v| (100..=500).contains(v))
+        .map(|v| v as u16)
+        // No value of its own = follow the global default from REGLAGES, exactly
+        // like the display mode and the rotation above.
+        .unwrap_or_else(crate::loc::default_zoom)
+}
+
+pub fn zoom_pan_for(basename: &str) -> (i32, i32) {
+    (
+        read_pref_i32(basename, "panx").unwrap_or(0),
+        read_pref_i32(basename, "pany").unwrap_or(0),
+    )
+}
+
+/// Zoom of the ACTIVE game, 100 (untouched) when nothing is playing.
+pub fn zoom() -> u16 {
+    match active_game_basename() {
+        Some(b) => zoom_for(&b),
+        None => 100,
+    }
+}
+
+pub fn zoom_pan() -> (i32, i32) {
+    match active_game_basename() {
+        Some(b) => zoom_pan_for(&b),
+        None => (0, 0),
+    }
+}
+
+pub fn set_zoom(percent: u16, pan_x: i32, pan_y: i32) {
+    if let Some(b) = active_game_basename() {
+        write_pref_many(
+            &b,
+            &[
+                ("zoom", percent as i32),
+                ("panx", pan_x),
+                ("pany", pan_y),
+            ],
+        );
+    }
 }
 
 /// Number of screen filters: 0 = none, 1 = scanlines, 2 = CRT.

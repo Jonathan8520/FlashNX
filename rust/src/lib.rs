@@ -106,6 +106,17 @@ struct State {
     /// without a preceding move (e.g. touch tap).
     cursor_x: f32,
     cursor_y: f32,
+    /// The STAGE point under that pointer, which is a different thing as soon as
+    /// the free zoom is on (issue #101): the pair above says where to DRAW the
+    /// crosshair, this one says what it is pointing AT. Equal at 100%.
+    ///
+    /// Two fields rather than one because the pointer lives in screen space --
+    /// the stick moves it in physical pixels -- while the game only ever hears
+    /// about stage coordinates. Collapsing them would either park the crosshair
+    /// somewhere the stick did not put it, or hand the game a click from a place
+    /// nothing was clicked.
+    cursor_stage_x: f32,
+    cursor_stage_y: f32,
     /// Last reported mouse-button state (left only for now). Used purely to
     /// tint the cursor overlay so the user gets feedback on click.
     cursor_clicked: bool,
@@ -422,6 +433,13 @@ pub extern "C" fn ruffle_init() -> c_int {
 
     // Before the renderer, because the viewport below is chosen from it.
     crate::backend::render::set_game_rotation(pending_rotation());
+    // The framing this game was left with. Re-clamped by `set_game_zoom`, which
+    // is what keeps a framing saved at 400% from throwing the picture off the
+    // screen if the percentage were ever read back smaller.
+    {
+        let (z, ox, oy) = pending_zoom();
+        crate::backend::render::set_game_zoom(z, ox, oy, VIEWPORT_W as f32, VIEWPORT_H as f32);
+    }
     let renderer = match SwitchRenderBackend::new(VIEWPORT_W, VIEWPORT_H) {
         Some(r) => r,
         None => {
@@ -764,6 +782,8 @@ pub extern "C" fn ruffle_init() -> c_int {
             executor,
             cursor_x: VIEWPORT_W as f32 * 0.5,
             cursor_y: VIEWPORT_H as f32 * 0.5,
+            cursor_stage_x: VIEWPORT_W as f32 * 0.5,
+            cursor_stage_y: VIEWPORT_H as f32 * 0.5,
             cursor_clicked: false,
         });
     }
@@ -1064,6 +1084,24 @@ fn pending_rotation() -> u8 {
         .and_then(|p| p.rsplit(['/', '\\']).next().map(std::string::String::from))
         .map(|b| keymap::rotation_for(&b))
         .unwrap_or_else(crate::loc::default_rotation)
+}
+
+/// The zoom + framing the game was left with, from its `.prefs` (issue #101).
+/// Same shape as `pending_rotation`: the basename is only known through the
+/// override path at this point in the launch.
+fn pending_zoom() -> (u16, i32, i32) {
+    let base = OVERRIDE_SWF_PATH
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .and_then(|p| p.rsplit(['/', '\\']).next().map(std::string::String::from));
+    match base {
+        Some(b) => {
+            let (ox, oy) = keymap::zoom_pan_for(&b);
+            (keymap::zoom_for(&b), ox, oy)
+        }
+        None => (100, 0, 0),
+    }
 }
 
 fn pending_display_mode() -> u8 {
@@ -1556,6 +1594,94 @@ pub extern "C" fn ruffle_display_mode_cycle() {
     }
 }
 
+/// The zoom + framing the ECRAN panel was showing when ZOOM was opened, so `B`
+/// can put it back. `None` when the framing mode is not running.
+static ZOOM_SNAPSHOT: std::sync::Mutex<Option<(u16, i32, i32)>> = std::sync::Mutex::new(None);
+
+/// Enter the framing mode (issue #101): remember what to go back to.
+#[no_mangle]
+pub extern "C" fn ruffle_zoom_begin() {
+    if let Ok(mut s) = ZOOM_SNAPSHOT.lock() {
+        let (ox, oy) = backend::render::game_pan();
+        *s = Some((backend::render::game_zoom_percent(), ox, oy));
+    }
+}
+
+/// Nudge the zoom by `d_percent` and the framing by `(dx, dy)` screen pixels.
+/// Applied live, never persisted: the frozen frame behind is redrawn with it, so
+/// the player is judging the real thing before committing.
+#[no_mangle]
+pub extern "C" fn ruffle_zoom_adjust(d_percent: c_int, dx: c_int, dy: c_int) {
+    let cur = backend::render::game_zoom_percent() as i32;
+    let next = (cur + d_percent).clamp(
+        backend::render::ZOOM_MIN as i32,
+        backend::render::ZOOM_MAX as i32,
+    ) as u16;
+    let (ox, oy) = backend::render::game_pan();
+    backend::render::set_game_zoom(
+        next,
+        ox + dx,
+        oy + dy,
+        VIEWPORT_W as f32,
+        VIEWPORT_H as f32,
+    );
+}
+
+/// The live percentage, for the pinch: a two-finger spread has to change the
+/// zoom IN PROPORTION to what it already is, or the same gesture would move it
+/// by a fifth at 100% and by a twentieth at 500%.
+#[no_mangle]
+pub extern "C" fn ruffle_zoom_percent() -> c_int {
+    backend::render::game_zoom_percent() as c_int
+}
+
+/// Back to an untouched picture. There is no other way to land exactly on 100%
+/// once you have been nudging by one percent at a time.
+#[no_mangle]
+pub extern "C" fn ruffle_zoom_reset() {
+    backend::render::set_game_zoom(100, 0, 0, VIEWPORT_W as f32, VIEWPORT_H as f32);
+}
+
+/// `A`: keep it, and write it to the game's `.prefs` so it is there next launch.
+#[no_mangle]
+pub extern "C" fn ruffle_zoom_commit() {
+    let (ox, oy) = backend::render::game_pan();
+    keymap::set_zoom(backend::render::game_zoom_percent(), ox, oy);
+    if let Ok(mut s) = ZOOM_SNAPSHOT.lock() {
+        *s = None;
+    }
+}
+
+/// `B`: put back what the panel was showing on the way in, and persist nothing.
+#[no_mangle]
+pub extern "C" fn ruffle_zoom_cancel() {
+    let snap = ZOOM_SNAPSHOT.lock().ok().and_then(|mut s| s.take());
+    if let Some((z, ox, oy)) = snap {
+        backend::render::set_game_zoom(z, ox, oy, VIEWPORT_W as f32, VIEWPORT_H as f32);
+    }
+}
+
+/// Draw the framing legend over the frozen frame. Separate from the panel draw
+/// because in this mode there IS no panel: the picture is what is being judged.
+#[no_mangle]
+pub extern "C" fn ruffle_draw_zoom_overlay() {
+    let state = unsafe {
+        match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
+            Some(s) => s,
+            None => return,
+        }
+    };
+    let mut player = match state.player.lock() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let percent = backend::render::game_zoom_percent();
+    let renderer = player.renderer_mut();
+    if let Some(backend) = <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(renderer) {
+        backend.draw_zoom_overlay(percent);
+    }
+}
+
 /// Pause-menu ROTATION row: turn the picture a quarter clockwise and persist it.
 ///
 /// Unlike the display mode this cannot be applied to a running player alone: the
@@ -1569,6 +1695,25 @@ pub extern "C" fn ruffle_rotation_cycle() {
     let next = (keymap::rotation() + 1) % keymap::ROTATION_COUNT;
     keymap::set_rotation(next);
     crate::backend::render::set_game_rotation(next);
+    // Turning the picture re-frames it, so the framing offset goes back to
+    // centred while the magnification stays (issue #101).
+    //
+    // Not a shortcut: the quarter-turn swaps the LOGICAL viewport, which makes
+    // Ruffle lay the stage out afresh. Flappy Bird fitted into 1280x720 is 514
+    // wide and pillarboxed; into 720x1280 it is 720 wide and letterboxed. The
+    // picture is a different size in a different place, so a framing offset
+    // measured in screen pixels no longer points at what it was pointing at,
+    // and no transform of that offset can recover it -- turning the vector a
+    // quarter with it would only be a prettier guess.
+    //
+    // The magnification survives because it answers a question about the GAME
+    // ("this is too small to read"), which the turn does not change. The framing
+    // answers a question about the layout, which it does.
+    {
+        let z = crate::backend::render::game_zoom_percent();
+        crate::backend::render::set_game_zoom(z, 0, 0, VIEWPORT_W as f32, VIEWPORT_H as f32);
+        keymap::set_zoom(z, 0, 0);
+    }
     let state = unsafe {
         match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
             Some(s) => s,
@@ -1827,6 +1972,9 @@ pub extern "C" fn ruffle_library_init() -> c_int {
     // that choice is that returning from a turned game has to put it back. It
     // did not, so quitting Flappy Bird left the whole of FlashNX on its side.
     crate::backend::render::set_game_rotation(0);
+    // Same for the zoom, and for the same reason: it is a global on the game's
+    // layer, and the launcher is not the game.
+    crate::backend::render::set_game_zoom(100, 0, 0, VIEWPORT_W as f32, VIEWPORT_H as f32);
     // Pick the UI language (settings.json → system language → English)
     // before anything draws.
     loc::init();
@@ -2329,18 +2477,38 @@ pub extern "C" fn ruffle_handle_mouse_move(x: c_int, y: c_int) {
     let py = y.clamp(0, VIEWPORT_H as c_int) as f32;
     let pw = VIEWPORT_W as f32;
     let ph = VIEWPORT_H as f32;
-    let (cx, cy) = match crate::backend::render::game_rotation() {
-        1 => (py, pw - px),
-        2 => (pw - px, ph - py),
-        3 => (ph - py, px),
-        _ => (px, py),
+    let unrotate = |ax: f32, ay: f32| match crate::backend::render::game_rotation() {
+        1 => (ay, pw - ax),
+        2 => (pw - ax, ph - ay),
+        3 => (ph - ay, ax),
+        _ => (ax, ay),
     };
+    // Where to DRAW the crosshair: exactly where the stick put it.
+    let (cx, cy) = unrotate(px, py);
     state.cursor_x = cx;
     state.cursor_y = cy;
+    // What it POINTS AT: undo the free zoom first, in physical screen space,
+    // because that is the order `world_matrix` composed it in (zoom after turn).
+    // Skipping this is not a subtle error -- at 200% every click lands at half
+    // its distance from the middle of the screen.
+    let zp = crate::backend::render::game_zoom_percent();
+    let (sx, sy) = if zp == 100 {
+        (px, py)
+    } else {
+        let z = zp as f32 / 100.0;
+        let (ox, oy) = crate::backend::render::game_pan();
+        (
+            (px - ox as f32 - pw * 0.5 * (1.0 - z)) / z,
+            (py - oy as f32 - ph * 0.5 * (1.0 - z)) / z,
+        )
+    };
+    let (gx, gy) = unrotate(sx, sy);
+    state.cursor_stage_x = gx;
+    state.cursor_stage_y = gy;
     if let Ok(mut p) = state.player.lock() {
         p.handle_event(PlayerEvent::MouseMove {
-            x: cx as f64,
-            y: cy as f64,
+            x: gx as f64,
+            y: gy as f64,
         });
     }
 }
@@ -2355,8 +2523,9 @@ fn handle_mouse_button_impl(button: MouseButton, down: bool) {
         }
     };
     state.cursor_clicked = down;
-    let x = state.cursor_x as f64;
-    let y = state.cursor_y as f64;
+    // The STAGE point, not the screen one: see `cursor_stage_x`.
+    let x = state.cursor_stage_x as f64;
+    let y = state.cursor_stage_y as f64;
     if let Ok(mut p) = state.player.lock() {
         let event = if down {
             PlayerEvent::MouseDown {

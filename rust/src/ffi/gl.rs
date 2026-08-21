@@ -232,6 +232,7 @@ extern "C" {
     pub fn glUniform1i(location: GLint, v0: GLint);
     pub fn glUniform1f(location: GLint, v0: GLfloat);
     pub fn glUniform2f(location: GLint, v0: GLfloat, v1: GLfloat);
+    pub fn glUniform3f(location: GLint, v0: GLfloat, v1: GLfloat, v2: GLfloat);
     pub fn glUniform4f(location: GLint, x: GLfloat, y: GLfloat, z: GLfloat, w: GLfloat);
     pub fn glUniformMatrix4fv(
         location: GLint,

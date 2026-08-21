@@ -96,7 +96,9 @@ pub const MENU_ITEMS: &[&str] = &[
 /// answer one question -- "this game does not sit right on my screen" -- and
 /// they all preview on the frozen frame behind the panel, so they belong
 /// together behind one row.
-pub const SCREEN_ITEMS: &[&str] = &["AFFICHAGE", "ROTATION", "FILTRE"];
+/// ZOOM sits between ROTATION and FILTRE: the first three are geometry, the
+/// filter is colour.
+pub const SCREEN_ITEMS: &[&str] = &["AFFICHAGE", "ROTATION", "ZOOM", "FILTRE"];
 
 // ── Unified modal style ────────────────────────────────────────────────────
 // One look for every centered popup. Before this, each modal hard-coded its own
@@ -469,6 +471,68 @@ pub fn game_rotation() -> u8 {
 /// portrait while the framebuffer stays landscape.
 pub fn rotation_swaps_axes() -> bool {
     matches!(game_rotation(), 1 | 3)
+}
+
+/// Free zoom on the game's picture, in percent of the fitted size (issue #101),
+/// with the framing offset that goes with it, in PHYSICAL screen pixels.
+///
+/// The three display modes decide how the stage fills the screen and can do
+/// nothing about a margin baked into the stage itself: a 800x600 game whose
+/// action happens in the middle 400x300 stays small in all three. This
+/// magnifies the picture on top of whichever mode is set, and the pan says
+/// which part of it to keep.
+///
+/// Applied in `world_matrix` right AFTER the quarter-turn, which is what makes
+/// the pan physical: pushing the stick right moves the picture right on the
+/// screen, whatever the rotation. Applying it before would have tied the axes
+/// to the turned frame, so a turned picture would have panned sideways.
+///
+/// The GAME LAYER ONLY, unlike the rotation. A turned console means the player
+/// is holding the Switch sideways, so the panel and the pointer turn with it; a
+/// magnified picture means nothing of the sort, and a pause panel that grew with
+/// the zoom would be unreadable at 400%.
+static GAME_ZOOM: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(100);
+static GAME_PAN_X: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+static GAME_PAN_Y: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+
+/// 100 = fitted, the floor. Below it the picture would only gain black bars,
+/// which is of use to exactly one setup (a TV that eats its own edges) and of
+/// none to anyone else.
+pub const ZOOM_MIN: u16 = 100;
+pub const ZOOM_MAX: u16 = 500;
+
+pub fn game_zoom_percent() -> u16 {
+    GAME_ZOOM.load(core::sync::atomic::Ordering::Relaxed).clamp(ZOOM_MIN, ZOOM_MAX)
+}
+
+pub fn game_pan() -> (i32, i32) {
+    (
+        GAME_PAN_X.load(core::sync::atomic::Ordering::Relaxed),
+        GAME_PAN_Y.load(core::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// Set the zoom and its framing. The pan is clamped so the magnified picture
+/// always covers the screen: past that edge there is nothing to show but the
+/// clear colour, and a player who panned into it would think the game had
+/// crashed.
+pub fn set_game_zoom(percent: u16, pan_x: i32, pan_y: i32, screen_w: f32, screen_h: f32) {
+    let z = percent.clamp(ZOOM_MIN, ZOOM_MAX);
+    let (cx, cy) = pan_limits(z, screen_w, screen_h);
+    GAME_ZOOM.store(z, core::sync::atomic::Ordering::Relaxed);
+    GAME_PAN_X.store(pan_x.clamp(-cx, cx), core::sync::atomic::Ordering::Relaxed);
+    GAME_PAN_Y.store(pan_y.clamp(-cy, cy), core::sync::atomic::Ordering::Relaxed);
+}
+
+/// How far the framing may travel on each axis at `percent`, in screen pixels:
+/// half the slack the magnification created. Zero at 100%, where there is
+/// nothing outside the screen to go looking for.
+pub fn pan_limits(percent: u16, screen_w: f32, screen_h: f32) -> (i32, i32) {
+    let z = percent.clamp(ZOOM_MIN, ZOOM_MAX) as f32 / 100.0;
+    (
+        ((screen_w * (z - 1.0)) * 0.5).max(0.0) as i32,
+        ((screen_h * (z - 1.0)) * 0.5).max(0.0) as i32,
+    )
 }
 
 const FACTS_VALUE: u32 = 0xAABFD8;
@@ -1592,6 +1656,9 @@ struct ComplexBlendProgram {
     u_src_uv: GLint,
     u_blend_mode: GLint,
     u_current_flip: GLint,
+    /// `(zoom, pan_x / width, pan_y / height)` — the free zoom (issue #101) as
+    /// this composite has to undo it. Identity `(1, 0, 0)` everywhere else.
+    u_cur_zoom: GLint,
 }
 impl Drop for AlphaMaskProgram {
     fn drop(&mut self) { unsafe { glDeleteProgram(self.program) }; }
@@ -1959,6 +2026,11 @@ pub struct SwitchRenderBackend {
     /// own `Drop` body has run, while the GL context is still alive.
     font_atlas: Option<crate::backend::glyphs::FontAtlas>,
     atlas_init_done: bool,
+    /// True only while the GAME's display list is being replayed to the screen,
+    /// which is the one thing the free zoom (issue #101) applies to. Everything
+    /// drawn around it -- the pause panel, the pointer, the zoom legend -- runs
+    /// with this false and keeps its size.
+    game_layer: bool,
 }
 
 /// One frame's worth of per-counter activity (or the raw snapshot used to
@@ -2542,6 +2614,7 @@ uniform sampler2D u_tex;\n\
 uniform sampler2D u_current_tex;\n\
 uniform int u_blend_mode;\n\
 uniform float u_current_flip;\n\
+uniform vec3 u_cur_zoom;\n\
 vec3 blend_func(vec3 s, vec3 d) {\n\
     if (u_blend_mode == 0) { return s * d; }\n\
     if (u_blend_mode == 1) { return max(s, d); }\n\
@@ -2567,6 +2640,8 @@ vec3 blend_func(vec3 s, vec3 d) {\n\
 void main() {\n\
     vec2 cuv = vec2(v_uv.x, mix(v_uv.y, 1.0 - v_uv.y, u_current_flip));\n\
     vec4 dst = texture(u_tex, v_uv);\n\
+    cuv = (cuv - 0.5) / u_cur_zoom.x + 0.5 - u_cur_zoom.yz / u_cur_zoom.x;\n\
+    if (any(lessThan(cuv, vec2(0.0))) || any(greaterThan(cuv, vec2(1.0)))) { frag_color = dst; return; }\n\
     vec4 src = texture(u_current_tex, cuv);\n\
     if (src.a <= 0.0) { frag_color = dst; return; }\n\
     vec3 s_un = src.rgb / src.a;\n\
@@ -2853,6 +2928,7 @@ fn build_complex_blend_program() -> Option<ComplexBlendProgram> {
         u_src_uv: loc(program, b"u_src_uv\0"),
         u_blend_mode: loc(program, b"u_blend_mode\0"),
         u_current_flip: loc(program, b"u_current_flip\0"),
+        u_cur_zoom: loc(program, b"u_cur_zoom\0"),
         program,
     })
 }
@@ -4548,6 +4624,7 @@ impl SwitchRenderBackend {
             last_frame: FrameBreakdown::default(),
             font_atlas: None,
             atlas_init_done: false,
+            game_layer: false,
         })
     }
 
@@ -4620,6 +4697,25 @@ impl SwitchRenderBackend {
             2 => (-a, -b, -c, -d, pw - tx, ph - ty),
             3 => (b, -a, d, -c, ty, ph - tx),
             _ => (a, b, c, d, tx, ty),
+        };
+        // Free zoom (issue #101), about the middle of the SCREEN and after the
+        // turn, so the pan is in the frame the player's stick is in. Gated on
+        // `game_layer` because only the game grows: the pause panel, the pointer
+        // and the zoom legend are all drawn outside it.
+        let zp = game_zoom_percent();
+        let (a, b, c, d, tx, ty) = if flip_y && self.game_layer && zp != 100 {
+            let z = zp as f32 / 100.0;
+            let (ox, oy) = game_pan();
+            (
+                a * z,
+                b * z,
+                c * z,
+                d * z,
+                tx * z + pw * 0.5 * (1.0 - z) + ox as f32,
+                ty * z + ph * 0.5 * (1.0 - z) + oy as f32,
+            )
+        } else {
+            (a, b, c, d, tx, ty)
         };
         let sx = 2.0 / pw;
         let sy = if flip_y { -2.0 / ph } else { 2.0 / ph };
@@ -5866,6 +5962,32 @@ impl SwitchRenderBackend {
         let u_src_uv = self.complex_blend_prog.u_src_uv;
         let u_blend_mode = self.complex_blend_prog.u_blend_mode;
         let u_current_flip = self.complex_blend_prog.u_current_flip;
+        let u_cur_zoom = self.complex_blend_prog.u_cur_zoom;
+        // THE ZOOM HAS TO BE UNDONE HERE BY HAND (issue #101).
+        //
+        // Every other draw is magnified by `world_matrix`. This one is not: the
+        // group was rasterized into a temp with `offscreen_dims` set, so it came
+        // out at plain screen scale, and the composite is a raw NDC quad through
+        // `FILTER_VERT`, which has no world matrix at all. Left alone, a
+        // Multiply or Overlay group stays at 100% and unpanned over a picture
+        // magnified around the screen centre -- a ghost in the wrong place and a
+        // hole where it belonged, growing to a full screen width at 500%.
+        //
+        // So the shader samples the GROUP through the inverse mapping while the
+        // backdrop stays 1:1 (it is a snapshot of the already-zoomed
+        // framebuffer). `flip` is 1 only on the main framebuffer, which is the
+        // only target the zoom exists on.
+        let (cz, cpx, cpy) = if flip != 0.0 && self.game_layer && game_zoom_percent() != 100 {
+            let z = game_zoom_percent() as f32 / 100.0;
+            let (ox, oy) = game_pan();
+            (
+                z,
+                ox as f32 / w.max(1) as f32,
+                oy as f32 / h.max(1) as f32,
+            )
+        } else {
+            (1.0, 0.0, 0.0)
+        };
         unsafe {
             glViewport(0, 0, w as GLsizei, h as GLsizei);
             glDisable(GL_BLEND);
@@ -5887,6 +6009,7 @@ impl SwitchRenderBackend {
             glUniform4f(u_src_uv, 0.0, 0.0, 1.0, 1.0);
             glUniform1i(u_blend_mode, mode);
             glUniform1f(u_current_flip, flip);
+            glUniform3f(u_cur_zoom, cz, cpx, cpy);
             glBindVertexArray(self.bitmap_vao);
             glDrawArrays(GL_TRIANGLES, 0, 6);
             glBindVertexArray(0);
@@ -6845,6 +6968,7 @@ impl SwitchRenderBackend {
             lc.set_rotation,
             crate::loc::rotation_label(crate::keymap::rotation()),
         );
+        let zoom_label = std::format!("{}: {} %", lc.set_zoom, game_zoom_percent());
         let filter_label = std::format!(
             "{}: {}",
             lc.set_screen_filter,
@@ -6853,10 +6977,83 @@ impl SwitchRenderBackend {
         let items = [
             display_label.as_str(),
             rotation_label.as_str(),
+            zoom_label.as_str(),
             filter_label.as_str(),
         ];
         debug_assert_eq!(items.len(), SCREEN_ITEMS.len());
         self.draw_modal_rows(&frame, selected, &items);
+
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
+    /// Draw `text` with a dark outline around it, for the one case where text
+    /// has to sit directly on the game's picture with no plate under it: it must
+    /// stay readable over a white sky and over a black cave, and any plate wide
+    /// enough to guarantee that would hide the thing being looked at.
+    ///
+    /// Four offset copies rather than a single drop shadow, because a shadow
+    /// only rescues the two edges it falls on.
+    fn draw_text_outlined(&mut self, x: f32, y: f32, scale: f32, text: &str, color: swf::Color) {
+        let o = (scale * 0.9).max(2.0);
+        let edge = swf::Color::from_rgba(0xE6_00_00_00);
+        for (dx, dy) in [(-o, 0.0), (o, 0.0), (0.0, -o), (0.0, o)] {
+            self.draw_text(x + dx, y + dy, scale, text, edge);
+        }
+        self.draw_text(x, y, scale, text, color);
+    }
+
+    /// Zoom-adjust mode (issue #101): the framing legend, over an untouched
+    /// picture.
+    ///
+    /// NOTHING is laid over the picture but the two lines of text themselves.
+    /// What the player is judging here IS the framing, to the pixel, so every
+    /// band, plate or tint is a piece of the answer taken away -- and a tint
+    /// would fight whatever they set in FILTRE one row down. The signal that the
+    /// buttons have stopped driving the game is that the panel is gone and the
+    /// legend has taken its place.
+    ///
+    /// Drawn outside `game_layer`, so the text keeps its size while the picture
+    /// behind it grows.
+    pub fn draw_zoom_overlay(&mut self, percent: u16) {
+        let lc = crate::loc::s();
+        let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
+        unsafe {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        }
+        // The WHOLE framing state, not just the percentage: the offset is half
+        // of what is being set, it is what a rotation resets, and it is what
+        // lands in the game's `.prefs` as `panx` / `pany`. Showing only the
+        // magnification meant the other half could move without anything on
+        // screen saying so.
+        let (ox, oy) = game_pan();
+        let head = std::format!("{}  {} %    X {}    Y {}", lc.set_zoom, percent, ox, oy);
+        let hs = 2.2;
+        let hw = self.measure_text(&head, hs);
+        self.draw_text_outlined(
+            (vw - hw) * 0.5,
+            14.0,
+            hs,
+            &head,
+            swf::Color::from_rgb(0xFFD740, 255),
+        );
+
+        // What every button does now. Fitted rather than counted, because this
+        // line is translated and some languages run long.
+        let ls = 1.6;
+        let legend = self.fit_text(lc.zoom_legend, ls, vw - 40.0);
+        let lw = self.measure_text(&legend, ls);
+        self.draw_text_outlined(
+            (vw - lw) * 0.5,
+            vh - 14.0 - 7.0 * ls,
+            ls,
+            &legend,
+            swf::Color::from_rgb(0xFFFFFF, 255),
+        );
 
         unsafe {
             glUseProgram(0);
@@ -13018,7 +13215,12 @@ impl RenderBackend for SwitchRenderBackend {
         // unconditionally re-binds.
         self.gl_state.invalidate();
 
+        // The game's own display list, and nothing else, carries the free zoom
+        // (issue #101). The clear above and the filter resolve below stay at
+        // screen scale, as do the pointer and the pause panel drawn after.
+        self.game_layer = true;
         commands.execute(self);
+        self.game_layer = false;
 
         unsafe {
             glUseProgram(0);

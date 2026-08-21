@@ -302,6 +302,13 @@ pub struct Strings {
     pub set_game_prefs: &'static str,
     /// Title of that sub-modal.
     pub prefs_title: &'static str,
+    /// Free-zoom row in the pause menu, shown as "<label>: <percent> %", and
+    /// again as the heading of the framing mode it opens. Issue #101.
+    pub set_zoom: &'static str,
+    /// The one line of the zoom-adjust mode: what each button does while the
+    /// picture is being framed. Button names (A, B, ZL, ZR, L3) stay as they
+    /// are printed on the console; only the verbs are translated.
+    pub zoom_legend: &'static str,
     /// Screen-filter row in the pause menu, shown as "<label>: <filter>".
     /// The other half of issue #65, which asked for "stretch and filters".
     pub set_screen_filter: &'static str,
@@ -624,6 +631,8 @@ const EN: Strings = Strings {
     display_fit: "FIT",
     display_fill: "FILL",
     display_stretch: "STRETCH",
+    set_zoom: "ZOOM",
+    zoom_legend: "ZL/L: -   ZR/R: +   X/Y AND PAD: FINE   STICK/TOUCH: FRAME   2 FINGERS: ZOOM   L3: RESET   A: OK   B: CANCEL",
     set_screen_filter: "FILTER",
     set_home_view: "HOME VIEW",
     set_games_dir: "GAMES FOLDER",
@@ -861,6 +870,8 @@ const FR: Strings = Strings {
     display_fit: "INT\u{00C9}GRAL",
     display_fill: "REMPLIR",
     display_stretch: "\u{00C9}TIRER",
+    set_zoom: "ZOOM",
+    zoom_legend: "ZL/L: -   ZR/R: +   X/Y ET CROIX: PRECIS   STICK/DOIGT: CADRER   2 DOIGTS: ZOOM   L3: 100 %   A: OK   B: ANNULER",
     set_screen_filter: "FILTRE",
     set_home_view: "VUE ACCUEIL",
     set_games_dir: "DOSSIER JEUX",
@@ -1098,6 +1109,8 @@ const ES: Strings = Strings {
     display_fit: "AJUSTAR",
     display_fill: "RELLENAR",
     display_stretch: "ESTIRAR",
+    set_zoom: "ZOOM",
+    zoom_legend: "ZL/L: -   ZR/R: +   X/Y Y CRUZ: PRECISO   STICK/DEDO: ENCUADRAR   2 DEDOS: ZOOM   L3: 100 %   A: OK   B: CANCELAR",
     set_screen_filter: "FILTRO",
     set_home_view: "VISTA INICIO",
     set_games_dir: "CARPETA JUEGOS",
@@ -1337,6 +1350,8 @@ const RU: Strings = Strings {
     display_fit: "ВПИСАТЬ",
     display_fill: "ЗАПОЛНИТЬ",
     display_stretch: "РАСТЯНУТЬ",
+    set_zoom: "\u{041C}\u{0410}\u{0421}\u{0428}\u{0422}\u{0410}\u{0411}",
+    zoom_legend: "ZL/L: -   ZR/R: +   X/Y, \u{041A}\u{0420}\u{0415}\u{0421}\u{0422}: \u{0422}\u{041E}\u{0427}\u{041D}\u{041E}   \u{0421}\u{0422}\u{0418}\u{041A}/\u{041F}\u{0410}\u{041B}\u{0415}\u{0426}: \u{041A}\u{0410}\u{0414}\u{0420}   2 \u{041F}\u{0410}\u{041B}\u{042C}\u{0426}\u{0410}: ZOOM   L3: 100 %   A: OK   B: \u{041E}\u{0422}\u{041C}\u{0415}\u{041D}\u{0410}",
     set_screen_filter: "ФИЛЬТР",
     set_home_view: "ВИД ГЛАВНОЙ",
     set_games_dir: "ПАПКА ИГР",
@@ -1579,6 +1594,8 @@ const DE: Strings = Strings {
     display_fit: "EINPASSEN",
     display_fill: "F\u{00DC}LLEN",
     display_stretch: "STRECKEN",
+    set_zoom: "ZOOM",
+    zoom_legend: "ZL/L: -   ZR/R: +   X/Y UND KREUZ: FEIN   STICK/FINGER: AUSSCHNITT   2 FINGER: ZOOM   L3: 100 %   A: OK   B: ABBRECHEN",
     set_screen_filter: "FILTER",
     set_home_view: "STARTANSICHT",
     set_games_dir: "SPIELE-ORDNER",
@@ -1818,6 +1835,8 @@ const IT: Strings = Strings {
     display_fit: "ADATTA",
     display_fill: "RIEMPI",
     display_stretch: "ALLARGA",
+    set_zoom: "ZOOM",
+    zoom_legend: "ZL/L: -   ZR/R: +   X/Y E CROCE: PRECISO   STICK/DITO: INQUADRA   2 DITA: ZOOM   L3: 100 %   A: OK   B: ANNULLA",
     set_screen_filter: "FILTRO",
     set_home_view: "VISTA HOME",
     set_games_dir: "CARTELLA GIOCHI",
@@ -2057,6 +2076,8 @@ const PT: Strings = Strings {
     display_fit: "AJUSTAR",
     display_fill: "PREENCHER",
     display_stretch: "ESTICAR",
+    set_zoom: "ZOOM",
+    zoom_legend: "ZL/L: -   ZR/R: +   X/Y E CRUZ: PRECISO   STICK/DEDO: ENQUADRAR   2 DEDOS: ZOOM   L3: 100 %   A: OK   B: CANCELAR",
     set_screen_filter: "FILTRO",
     set_home_view: "VISTA INÍCIO",
     set_games_dir: "PASTA DE JOGOS",
@@ -2301,6 +2322,8 @@ const ZH: Strings = Strings {
     display_fit: "适应",
     display_fill: "填满",
     display_stretch: "拉伸",
+    set_zoom: "\u{7f29}\u{653e}",
+    zoom_legend: "ZL/L: -   ZR/R: +   X/Y \u{548c}\u{65b9}\u{5411}\u{952e}: \u{5fae}\u{8c03}   \u{6447}\u{6746}/\u{89e6}\u{6478}: \u{53d6}\u{666f}   \u{53cc}\u{6307}: \u{7f29}\u{653e}   L3: 100 %   A: \u{786e}\u{5b9a}   B: \u{53d6}\u{6d88}",
     set_screen_filter: "滤镜",
     set_home_view: "主页视图",
     set_games_dir: "游戏文件夹",
@@ -2543,6 +2566,8 @@ const TR: Strings = Strings {
     display_fit: "SI\u{011E}DIR",
     display_fill: "DOLDUR",
     display_stretch: "GER",
+    set_zoom: "ZOOM",
+    zoom_legend: "ZL/L: -   ZR/R: +   X/Y VE Y\u{00D6}N TU\u{015E}U: HASSAS   \u{00C7}UBUK/DOKUNMA: KADRAJ   2 PARMAK: ZOOM   L3: 100 %   A: TAMAM   B: \u{0130}PTAL",
     set_screen_filter: "F\u{0130}LTRE",
     set_home_view: "ANA EKRAN",
     set_games_dir: "OYUN KLASORU",
@@ -2747,6 +2772,7 @@ pub fn set_covers_online(v: bool) {
 static DEFAULT_DISPLAY_MODE: AtomicU8 = AtomicU8::new(0);
 static DEFAULT_SCREEN_FILTER: AtomicU8 = AtomicU8::new(0);
 static DEFAULT_ROTATION: AtomicU8 = AtomicU8::new(0);
+static DEFAULT_ZOOM: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(100);
 
 /// JOUER tab layout: 0 = cover grid (the default since v1.2.0), 1 = title list
 /// with the selected game's cover beside it (issue #52), 2 = covers scrolling
@@ -2804,6 +2830,37 @@ pub fn rotation_label(v: u8) -> &'static str {
         3 => s().rot_270,
         _ => s().rot_none,
     }
+}
+
+/// Zoom a game starts at when it has never been framed itself (issue #101).
+///
+/// PRESETS, not the free percentage the pause menu gives. There is no picture
+/// on screen in REGLAGES to judge one against, and a value picked blind is not
+/// a value anybody chose -- so this offers the handful worth defaulting to, and
+/// leaves the pixel-by-pixel work to the game it applies to.
+///
+/// The framing offset has NO global default and never will: it is measured in
+/// screen pixels against one particular picture, and means nothing away from it.
+pub const DEFAULT_ZOOM_STEPS: &[u16] = &[100, 110, 125, 150, 175, 200, 250, 300];
+
+pub fn default_zoom() -> u16 {
+    DEFAULT_ZOOM.load(Ordering::Relaxed)
+}
+
+pub fn set_default_zoom(v: u16) {
+    DEFAULT_ZOOM.store(v, Ordering::Relaxed);
+}
+
+/// Step to the next preset, wrapping. A value that is not one of them (hand
+/// edited into settings.json) lands on the first.
+pub fn cycle_default_zoom() {
+    let cur = default_zoom();
+    let idx = DEFAULT_ZOOM_STEPS.iter().position(|v| *v == cur);
+    let next = match idx {
+        Some(i) => DEFAULT_ZOOM_STEPS[(i + 1) % DEFAULT_ZOOM_STEPS.len()],
+        None => DEFAULT_ZOOM_STEPS[0],
+    };
+    set_default_zoom(next);
 }
 
 pub fn default_screen_filter() -> u8 {
@@ -3045,16 +3102,31 @@ fn parse_u8_setting(json: &str, key: &str, max: u8) -> Option<u8> {
     digits.parse::<u8>().ok().filter(|v| *v < max)
 }
 
+/// Same, for a value that does not fit in a byte. The zoom is a percentage that
+/// runs to 500 (issue #101), and `lo`/`hi` are INCLUSIVE here because a
+/// percentage has a meaningful upper value, unlike the counts above where `max`
+/// is one past the last valid index.
+fn parse_u16_setting(json: &str, key: &str, lo: u16, hi: u16) -> Option<u16> {
+    let needle = std::format!("\"{}\"", key);
+    let idx = json.find(&needle)?;
+    let rest = &json[idx + needle.len()..];
+    let colon = rest.find(':')?;
+    let after = rest[colon + 1..].trim_start();
+    let digits: std::string::String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse::<u16>().ok().filter(|v| (lo..=hi).contains(v))
+}
+
 /// Write the full settings file. Everything persists together so saving one
 /// setting never drops another.
 fn write_settings(lang: Lang, covers: bool) -> bool {
     let path = settings_write_path();
     let json = std::format!(
-        "{{\n    \"language\": \"{}\",\n    \"covers_online\": {},\n    \"display_mode\": {},\n    \"rotation\": {},\n    \"screen_filter\": {},\n    \"home_view\": {}\n}}\n",
+        "{{\n    \"language\": \"{}\",\n    \"covers_online\": {},\n    \"display_mode\": {},\n    \"rotation\": {},\n    \"zoom\": {},\n    \"screen_filter\": {},\n    \"home_view\": {}\n}}\n",
         lang.code(),
         covers,
         default_display_mode(),
         default_rotation(),
+        default_zoom(),
         default_screen_filter(),
         home_view(),
     );
@@ -3106,6 +3178,9 @@ pub fn init() {
             }
             if let Some(v) = parse_u8_setting(&txt, "rotation", 4) {
                 set_default_rotation(v);
+            }
+            if let Some(v) = parse_u16_setting(&txt, "zoom", 100, 500) {
+                set_default_zoom(v);
             }
             if let Some(v) = parse_u8_setting(&txt, "screen_filter", 3) {
                 set_default_screen_filter(v);

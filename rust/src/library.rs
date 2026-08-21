@@ -3199,7 +3199,7 @@ fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
 /// set from its own pause menu. A game with its own sidecar keeps its value, and
 /// keeps it even if the default changes later.
 fn handle_settings_prefs_input(s: &mut State, button: &str, mut selection: usize) {
-    const LAST: usize = 4;
+    const LAST: usize = 5;
     match button {
         "Up" | "StickLUp" => {
             selection = if selection == 0 { LAST } else { selection - 1 };
@@ -3229,6 +3229,12 @@ fn handle_settings_prefs_input(s: &mut State, button: &str, mut selection: usize
                     crate::loc::save_current();
                 }
                 3 => {
+                    // Presets, not the free percentage the pause menu gives:
+                    // there is no picture here to judge one against.
+                    crate::loc::cycle_default_zoom();
+                    crate::loc::save_current();
+                }
+                4 => {
                     let next = (crate::loc::default_screen_filter() + 1)
                         % keymap::SCREEN_FILTER_COUNT;
                     crate::loc::set_default_screen_filter(next);
@@ -6898,6 +6904,8 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 lc.set_rotation,
                 crate::loc::rotation_label(crate::loc::default_rotation()),
             );
+            let zoom_label =
+                std::format!("{}: {} %", lc.set_zoom, crate::loc::default_zoom());
             let filter_label = std::format!(
                 "{}: {}",
                 lc.set_screen_filter,
@@ -6909,6 +6917,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 lc.set_keys,
                 display_label.as_str(),
                 rotation_label.as_str(),
+                zoom_label.as_str(),
                 filter_label.as_str(),
                 cursor_label.as_str(),
             ];
