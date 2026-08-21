@@ -6251,13 +6251,38 @@ fn folder_dir_of(name: &str) -> std::string::String {
 /// Do the move and put the library back in a truthful state without a rescan:
 /// the entry's path and folder are the only two things that changed on the card.
 pub(crate) fn apply_game_folder(s: &mut State, game_idx: usize, target: &str) {
-    let Some((path, basename)) = s
+    let Some((path, basename, folder)) = s
         .entries
         .get(game_idx)
-        .map(|e| (e.path.clone(), e.basename.clone()))
+        .map(|e| (e.path.clone(), e.basename.clone(), e.folder.clone()))
     else {
         return;
     };
+    // The row of the shelf being aimed at, in the list as it stands. Computed
+    // ONCE, up front, because every exit below lands on it: refusing, failing
+    // and succeeding must all leave the cursor on the row the player pressed A
+    // on. Sending it back to the top was the "it does the same thing" report --
+    // the refusal path did exactly that.
+    let row_of = |s: &State, target: &str| -> usize {
+        if target.is_empty() {
+            0
+        } else {
+            folder_counts(&s.entries)
+                .iter()
+                .position(|(n, _)| n == target)
+                .map_or(0, |i| i + 1)
+        }
+    };
+    // Already there. `move_game_to_folder` returns the same path for this and
+    // everything downstream then reports a successful move -- so picking the
+    // shelf the game is already on looked exactly like moving it there, and a
+    // player checking their work could not tell the two apart.
+    if folder == target {
+        let row = row_of(s, target);
+        set_toast(s, crate::loc::s().toast_folder_same.to_string(), TOAST_ERR);
+        s.screen = Screen::GameFolderPicker { game_idx, selection: row };
+        return;
+    }
     match move_game_to_folder(&path, &basename, target) {
         Some(new_path) => {
             // The scan index still holds the old path; a stale "this file is
@@ -6297,12 +6322,18 @@ pub(crate) fn apply_game_folder(s: &mut State, game_idx: usize, target: &str) {
                 .iter()
                 .position(|e| e.path == new_path)
                 .unwrap_or(game_idx);
-            s.screen = Screen::GameFolderPicker { game_idx: idx, selection: 0 };
+            // Land on the shelf just chosen, and re-derive the row from the list
+            // AS IT NOW STANDS: the destination may be a folder that did not
+            // exist a moment ago, and the one the game left may have vanished
+            // with it, so every row below it has shifted.
+            let row = row_of(s, target);
+            s.screen = Screen::GameFolderPicker { game_idx: idx, selection: row };
             return;
         }
         None => set_toast(s, crate::loc::s().err_sd_write.to_string(), TOAST_ERR),
     }
-    s.screen = Screen::GameFolderPicker { game_idx, selection: 0 };
+    let row = row_of(s, target);
+    s.screen = Screen::GameFolderPicker { game_idx, selection: row };
 }
 
 fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut selection: usize) {
@@ -7822,8 +7853,13 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 // to. Not drawn in the danger colour: nothing is destroyed here.
                 let lc = crate::loc::s();
                 let labels = [lc.games_dir_confirm_yes, lc.games_dir_confirm_no];
+                // No arrow. `games_dir_confirm_n` already ends in a colon, so it
+                // said the same thing twice -- and U+2192 is not in the 5x7 font,
+                // so drawing it reached for the shared-font atlas, whose first
+                // use parses 7.6 MB of system font: about two seconds before
+                // this panel could appear, for one glyph.
                 let detail = std::format!(
-                    "{}  \u{2192}  {}",
+                    "{}  {}",
                     crate::loc::fill_one(lc.games_dir_confirm_n, *count as i32),
                     lc.folder_root,
                 );

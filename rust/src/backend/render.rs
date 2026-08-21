@@ -203,6 +203,39 @@ type Glyph = [&'static str; 7];
 // is rendered full-width: one square cell `CJK_ADVANCE_UNITS` wide, used by
 // BOTH `draw_text` and `measure_text` so centring matches rendering. These two
 // are the only things to tweak on hardware to align CJK with the bitmap font.
+/// Which grid tile is opening its cover, which one is closing, and when the
+/// changeover started. `(selection, previous, tick)`.
+///
+/// The obvious implementation reads the animated selection FRAME and opens
+/// whatever tile it is near. That is wrong in two dimensions: on a diagonal the
+/// frame flies past the two tiles that share a row or a column with the ends,
+/// and they blink open as it goes by. The player sees the cursor "touch" games
+/// it never selected. Only two tiles are ever involved in a move, so name them.
+static GRID_COVER_ANIM: Mutex<(usize, usize, u64)> = Mutex::new((usize::MAX, usize::MAX, 0));
+
+/// How long a grid cover takes to open or close, in milliseconds. Matched to
+/// the selection frame's own travel so the art and the cursor settle together.
+const GRID_COVER_MS: u64 = 190;
+
+/// `(opening, closing, t)` for this frame: which tile is revealing its art,
+/// which is folding back, and how far along. `t` runs 0..1 and is smoothstepped
+/// by the caller.
+fn grid_cover_phase(selection: usize) -> (usize, usize, f32) {
+    let now = unsafe { ruffle_tick_now() };
+    let freq = unsafe { ruffle_tick_freq() }.max(1);
+    let Ok(mut g) = GRID_COVER_ANIM.lock() else {
+        return (selection, usize::MAX, 1.0);
+    };
+    if g.0 != selection {
+        // First ever draw opens instantly rather than animating from nothing.
+        let prev = if g.0 == usize::MAX { usize::MAX } else { g.0 };
+        *g = (selection, prev, now);
+    }
+    let elapsed_ms = now.saturating_sub(g.2) * 1000 / freq;
+    let t = (elapsed_ms as f32 / GRID_COVER_MS as f32).clamp(0.0, 1.0);
+    (g.0, g.1, t)
+}
+
 /// Full-width cell width (and render size) for an atlas glyph.
 const CJK_ADVANCE_UNITS: f32 = 8.0;
 /// Baseline offset from the line top; raise/lower to sit CJK on the Latin line.
@@ -8066,6 +8099,52 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
+    /// Draw a cover in the box `(x, y, w, h)`, zoomed out by `t`.
+    ///
+    /// At `t = 0` the drawn rect IS the box, so `draw_textured_rect_cover` crops
+    /// to fill it and the grid stays aligned. At `t = 1` the rect carries the
+    /// image's own aspect and fits inside the box, so its UV remap degenerates
+    /// to the whole image and NOTHING is cropped: the art is finally seen whole.
+    /// In between it is one continuous zoom-out, never a switch between two
+    /// modes — which is the difference between this and a tile that pops.
+    ///
+    /// Lifted out of ETAGERE, where it has always been what makes the selected
+    /// shelf tile read as "this one". ETAGERE keeps its own copy: it adds a
+    /// per-cover resting floor for art that would need blowing up past 1.25x to
+    /// fill the box, which is a shelf concern and not a grid one.
+    fn draw_cover_zoomed_out(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        tex: GLuint,
+        iw: u32,
+        ih: u32,
+        t: f32,
+        alpha: f32,
+    ) {
+        if iw == 0 || ih == 0 {
+            return;
+        }
+        let a = iw as f32 / ih as f32;
+        let bx = w / h;
+        let (fit_w, fit_h) = if a > bx { (w, w / a) } else { (h * a, h) };
+        let t = t.clamp(0.0, 1.0);
+        let dw = w + (fit_w - w) * t;
+        let dh = h + (fit_h - h) * t;
+        self.draw_textured_rect_cover(
+            x + (w - dw) * 0.5,
+            y + (h - dh) * 0.5,
+            dw,
+            dh,
+            tex,
+            iw,
+            ih,
+            alpha,
+        );
+    }
+
     /// Full-resolution cover for the launch/quit reveal, cached separately from
     /// the gallery's tile thumbnails. Only the game being launched (and the one
     /// just quit) ever lands here, so the cache holds `REVEAL_CACHE_MAX` entries
@@ -9142,6 +9221,12 @@ impl SwitchRenderBackend {
             if x > vw || x + ROW_W < 0.0 {
                 continue;
             }
+            // From the SAME eased distance the veil below already uses, so the
+            // cover opens up and brightens as one movement across a slide
+            // instead of snapping at the frame the index changes.
+            let u = (1.0 - (i as f32 - sel_pos).abs()).max(0.0);
+            let b = u * u * (3.0 - 2.0 * u); // smoothstep, as ETAGERE's bump uses
+            let (ry, rw, rh) = (ROW_Y, ROW_W, ROW_H);
             let cover = match cover_lookup(&e.basename) {
                 Some(t) => t,
                 None if decode_budget > 0 => {
@@ -9152,32 +9237,32 @@ impl SwitchRenderBackend {
             };
             match cover {
                 CoverTex::Image { tex, w, h } => {
-                    self.draw_textured_rect_cover(x, ROW_Y, ROW_W, ROW_H, tex, w, h, 1.0);
+                    self.draw_cover_zoomed_out(x, ry, rw, rh, tex, w, h, b, 1.0);
                 }
                 CoverTex::Default => {
-                    self.draw_overlay_rect(x, ROW_Y, ROW_W, ROW_H, 0xFF_00_00_00 | e.color_chip);
+                    self.draw_overlay_rect(x, ry, rw, rh, 0xFF_00_00_00 | e.color_chip);
                     let initials: std::string::String = e.display_name.chars().take(3).collect();
                     let isc = 3.0;
                     let iw = self.measure_text(&initials, isc);
                     self.draw_text(
-                        x + (ROW_W - iw) * 0.5,
-                        ROW_Y + (ROW_H - 7.0 * isc) * 0.5,
+                        x + (rw - iw) * 0.5,
+                        ry + (rh - 7.0 * isc) * 0.5,
                         isc,
                         &initials,
                         swf::Color::from_rgb(0xFFFFFF, 255),
                     );
                 }
             }
-            self.round_corners(x, ROW_Y, ROW_W, ROW_H, 6.0);
+            self.round_corners(x, ry, rw, rh, 6.0);
             if crate::favorites::is_favorite(&e.basename) {
-                self.draw_favorite_mark(x + 5.0, ROW_Y + 5.0, 18.0);
+                self.draw_favorite_mark(x + 5.0, ry + 5.0, 18.0);
             }
             // Veil measured against the EASED selection, so it lifts and settles
             // with the slide instead of switching at the moment the index changes.
             let d = (i as f32 - sel_pos).abs().min(1.0);
             let alpha = (d * 0x70 as f32) as u32;
             if alpha > 0 {
-                self.draw_overlay_rect(x, ROW_Y, ROW_W, ROW_H, (alpha << 24) | 0x0C_10_18);
+                self.draw_overlay_rect(x, ry, rw, rh, (alpha << 24) | 0x0C_10_18);
             }
         }
         // Selection frame, drawn after the row so it is never veiled, and placed
@@ -9190,13 +9275,16 @@ impl SwitchRenderBackend {
             // the tile's own expression makes disagreement impossible — this is
             // the rule ETAGERE's header comment already states.
             let fx = off + selection as f32 * pitch;
+            let fy = ROW_Y;
+            let fw = ROW_W;
+            let fh = ROW_H;
             const B: f32 = 3.0;
             const SEL: u32 = 0xFF_FF_D7_40;
-            self.draw_overlay_rect(fx - B, ROW_Y - B, ROW_W + 2.0 * B, B, SEL);
-            self.draw_overlay_rect(fx - B, ROW_Y + ROW_H, ROW_W + 2.0 * B, B, SEL);
-            self.draw_overlay_rect(fx - B, ROW_Y, B, ROW_H, SEL);
-            self.draw_overlay_rect(fx + ROW_W, ROW_Y, B, ROW_H, SEL);
-            self.round_corners(fx - B, ROW_Y - B, ROW_W + 2.0 * B, ROW_H + 2.0 * B, 8.0);
+            self.draw_overlay_rect(fx - B, fy - B, fw + 2.0 * B, B, SEL);
+            self.draw_overlay_rect(fx - B, fy + fh, fw + 2.0 * B, B, SEL);
+            self.draw_overlay_rect(fx - B, fy, B, fh, SEL);
+            self.draw_overlay_rect(fx + fw, fy, B, fh, SEL);
+            self.round_corners(fx - B, fy - B, fw + 2.0 * B, fh + 2.0 * B, 8.0);
         }
 
         // Position rail: 77 covers scrolled with nothing anywhere saying where in
@@ -9715,6 +9803,7 @@ impl SwitchRenderBackend {
                 let _ = self.cover_for(&entries[idx].basename);
             }
         }
+        let (cover_open, cover_close, cover_t) = grid_cover_phase(selection);
         for (idx, &(tx, tw, trow)) in tiles.iter().enumerate() {
             if trow < lo_row || trow > hi_row {
                 continue;
@@ -9724,6 +9813,24 @@ impl SwitchRenderBackend {
             if ty + ROW_IMG_H < band_top || ty > band_bot {
                 continue;
             }
+            let th = ROW_IMG_H;
+            // How SELECTED this tile is, from the EASED frame rather than from
+            // the index: the frame is already animated between the old cell and
+            // the new one, so reading it gives the zoom-out below a continuous
+            // 0..1 with no state of its own and no pop. One cell away = 0.
+            // Exactly two tiles move: the one being selected opens, the one
+            // being left folds back. Everything else is 0, whatever the
+            // travelling frame passes over.
+            let b = {
+                let u = if idx == cover_open {
+                    cover_t
+                } else if idx == cover_close {
+                    1.0 - cover_t
+                } else {
+                    0.0
+                };
+                u * u * (3.0 - 2.0 * u) // smoothstep, as ETAGERE's bump uses
+            };
             // Cached cover, else decode one if this frame still has budget, else
             // the generated tile for now (it resolves on a following frame).
             let (cover, ready_at) = match cover_ready(&entries[idx].basename) {
@@ -9741,12 +9848,12 @@ impl SwitchRenderBackend {
                 CoverTex::Image { tex, w, h } if fade >= 1.0 => {
                     // Crop-to-fill the uniform cell (object-fit: cover) so the
                     // grid stays aligned regardless of the cover's native aspect.
-                    self.draw_textured_rect_cover(tx, ty, tw, ROW_IMG_H, tex, w, h, 1.0);
+                    self.draw_cover_zoomed_out(tx, ty, tw, th, tex, w, h, b, 1.0);
                 }
                 CoverTex::Image { tex, w, h } => {
                     // Mid-fade: the generated tile underneath, the cover over it.
                     let bg = Matrix {
-                        a: tw, b: 0.0, c: 0.0, d: ROW_IMG_H,
+                        a: tw, b: 0.0, c: 0.0, d: th,
                         tx: swf::Twips::from_pixels(tx as f64),
                         ty: swf::Twips::from_pixels(ty as f64),
                     };
@@ -9755,11 +9862,11 @@ impl SwitchRenderBackend {
                         swf::Color::from_rgb(entries[idx].color_chip, 255),
                         bg,
                     );
-                    self.draw_textured_rect_cover(tx, ty, tw, ROW_IMG_H, tex, w, h, fade);
+                    self.draw_cover_zoomed_out(tx, ty, tw, th, tex, w, h, b, fade);
                 }
                 CoverTex::Default => {
                     let bg = Matrix {
-                        a: tw, b: 0.0, c: 0.0, d: ROW_IMG_H,
+                        a: tw, b: 0.0, c: 0.0, d: th,
                         tx: swf::Twips::from_pixels(tx as f64),
                         ty: swf::Twips::from_pixels(ty as f64),
                     };
@@ -9774,7 +9881,7 @@ impl SwitchRenderBackend {
                     let iw = self.measure_text(&initials, isc);
                     self.draw_text(
                         tx + (tw - iw) * 0.5,
-                        ty + (ROW_IMG_H - 7.0 * isc) * 0.5,
+                        ty + (th - 7.0 * isc) * 0.5,
                         isc,
                         &initials,
                         swf::Color::from_rgb(0xFFFFFF, 255),
@@ -9785,7 +9892,7 @@ impl SwitchRenderBackend {
             // Not the selected one: its frame is drawn after, and rounding the
             // tile here too would trap the tile's dark notches inside that frame.
             if idx != selection {
-                self.round_corners(tx, ty, tw, ROW_IMG_H, 6.0);
+                self.round_corners(tx, ty, tw, th, 6.0);
             }
 
             if entries[idx].is_as3 {
