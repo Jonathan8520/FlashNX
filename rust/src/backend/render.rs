@@ -476,8 +476,9 @@ static GLYPHS: &[(char, Glyph)] = &[
 // separators, and the word saying what the playtime number counts — so the
 // distance between two groups stops being quantitative (one space versus
 // three, which the eye cannot rank) and becomes qualitative: ink or no ink.
-// AS3 is the exact amber the grid tile's own AS3 badge uses, so the line
-// quotes the thumbnail above it instead of inventing a hierarchy of its own.
+// The engine used to be amber here, quoting an amber badge on the tile above.
+// Both are gone: an engine name is a fact like the others and gets the others'
+// colour. Whether a game runs stopped depending on which one it was written in.
 /// Quarter-turns CLOCKWISE applied to the game's picture, 0 to 3 (issue #78).
 ///
 /// The console cannot turn its screen, so this turns the picture instead: the
@@ -602,7 +603,6 @@ pub fn pan_limits(percent: u16, screen_w: f32, screen_h: f32) -> (i32, i32) {
 
 const FACTS_VALUE: u32 = 0xAABFD8;
 const FACTS_MUTED: u32 = 0x7A8CA6;
-const FACTS_AS3: u32 = 0xE0B24D;
 
 // Scrollbar palette, one copy for the seven places that spelled it out inline.
 // They drifted exactly where an inline copy always drifts: the Flashpoint
@@ -8679,12 +8679,14 @@ impl SwitchRenderBackend {
             FACTS_VALUE,
         ));
 
+        // Named, not flagged. Both engines get the SAME colour as every other
+        // fact on the line: the amber one said "careful with this game", and
+        // that is no longer true of AS3 in particular.
         sep(&mut out);
-        if entry.is_as3 {
-            out.push((std::string::String::from("AS3"), FACTS_AS3));
-        } else {
-            out.push((std::string::String::from("AVM1"), FACTS_VALUE));
-        }
+        out.push((
+            std::string::String::from(if entry.is_as3 { "AS3" } else { "AVM1" }),
+            FACTS_VALUE,
+        ));
 
         // The only genuinely optional group, and it is LAST: a game you have
         // never played has no playtime, it does not have a playtime of zero. Its
@@ -9895,19 +9897,18 @@ impl SwitchRenderBackend {
                 self.round_corners(tx, ty, tw, th, 6.0);
             }
 
-            if entries[idx].is_as3 {
-                let bsc = 1.5;
-                let bw = self.measure_text("AS3", bsc);
-                self.draw_text(
-                    tx + tw - bw - 6.0,
-                    ty + 6.0,
-                    bsc,
-                    "AS3",
-                    swf::Color::from_rgb(0xE0B24D, 255),
-                );
-            }
+            // NO AS3 BADGE. It used to sit here, in amber, on every AS3 tile.
+            //
+            // It was put there when AVM2 was the riskier engine and the badge
+            // was an honest warning. It is not one any more: game after game has
+            // been made to run, and whether a given SWF works now has nothing to
+            // do with which ActionScript it was written in. Marking a third of
+            // the library with a warning colour for a property that no longer
+            // predicts anything told players their game was fragile when it was
+            // not. The engine is still named in the facts line under the
+            // selection, where it belongs: a fact, not a verdict.
 
-            // Favorite marker, top-left (AS3 badge is top-right). The UI font has
+            // Favorite marker, top-left. The UI font has
             // no "*"/star glyph, so we draw the shape directly: a gold diamond on
             // a dark chip (the chip gives contrast on bright covers). Favorites are
             // also pinned to the top of the gallery (library::sort_entries).

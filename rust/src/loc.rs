@@ -412,6 +412,9 @@ pub struct Strings {
     pub toast_already_imported: &'static str,
     /// Toast when a game is moved onto the shelf it is already on (issue #68).
     pub toast_folder_same: &'static str,
+    /// Title of the confirmation that empties a shelf (issue #68). One {}: the
+    /// folder's name.
+    pub folder_del_title: &'static str,
     /// Confirm prompt for deleting one of your OWN shared profiles (#20).
     pub profile_del_confirm: &'static str,
     /// Toast after your shared profile is removed from the catalog.
@@ -714,6 +717,7 @@ const EN: Strings = Strings {
     profile_share_dup: "ALREADY IN THE CATALOG. EDIT A KEY TO SHARE YOUR OWN VERSION.",
     toast_already_imported: "{} IS ALREADY IN YOUR LIBRARY.",
     toast_folder_same: "ALREADY IN THIS FOLDER.",
+    folder_del_title: "DELETE FOLDER {}",
     profile_del_confirm: "DELETE YOUR SHARED PROFILE?",
     profile_del_ok: "YOUR SHARED PROFILE WAS DELETED.",
     profile_del_not_mine: "NOTHING TO DELETE: NOT SHARED FROM THIS CONSOLE.",
@@ -957,6 +961,7 @@ const FR: Strings = Strings {
     profile_share_dup: "D\u{00C9}J\u{00C0} DANS LE CATALOGUE. MODIFIE UNE TOUCHE POUR PARTAGER TA VERSION.",
     toast_already_imported: "{} EST D\u{00C9}J\u{00C0} DANS TA LUDOTH\u{00C8}QUE.",
     toast_folder_same: "D\u{00C9}J\u{00C0} DANS CE DOSSIER.",
+    folder_del_title: "SUPPRIMER LE DOSSIER {}",
     profile_del_confirm: "SUPPRIMER TON PROFIL PARTAG\u{00C9} ?",
     profile_del_ok: "TON PROFIL PARTAG\u{00C9} A \u{00C9}T\u{00C9} SUPPRIM\u{00C9}.",
     profile_del_not_mine: "RIEN \u{00C0} SUPPRIMER : PAS PARTAG\u{00C9} DEPUIS CETTE CONSOLE.",
@@ -1200,6 +1205,7 @@ const ES: Strings = Strings {
     profile_share_dup: "YA EST\u{00C1} EN EL CAT\u{00C1}LOGO. CAMBIA UNA TECLA PARA COMPARTIR TU VERSI\u{00D3}N.",
     toast_already_imported: "{} YA EST\u{00C1} EN TU BIBLIOTECA.",
     toast_folder_same: "YA EST\u{00C1} EN ESTA CARPETA.",
+    folder_del_title: "BORRAR LA CARPETA {}",
     profile_del_confirm: "\u{00BF}BORRAR TU PERFIL COMPARTIDO?",
     profile_del_ok: "TU PERFIL COMPARTIDO FUE BORRADO.",
     profile_del_not_mine: "NADA QUE BORRAR DESDE ESTA CONSOLA.",
@@ -1445,6 +1451,7 @@ const RU: Strings = Strings {
     profile_share_dup: "УЖЕ В КАТАЛОГЕ. ИЗМЕНИ КЛАВИШУ, ЧТОБЫ ПОДЕЛИТЬСЯ СВОЕЙ ВЕРСИЕЙ.",
     toast_already_imported: "{} УЖЕ В ВАШЕЙ БИБЛИОТЕКЕ.",
     toast_folder_same: "\u{0423}\u{0416}\u{0415} \u{0412} \u{042D}\u{0422}\u{041E}\u{0419} \u{041F}\u{0410}\u{041F}\u{041A}\u{0415}.",
+    folder_del_title: "\u{0423}\u{0414}\u{0410}\u{041B}\u{0418}\u{0422}\u{042C} \u{041F}\u{0410}\u{041F}\u{041A}\u{0423} {}",
     profile_del_confirm: "УДАЛИТЬ ВАШ ПРОФИЛЬ?",
     profile_del_ok: "ВАШ ПРОФИЛЬ УДАЛЕН ИЗ КАТАЛОГА.",
     profile_del_not_mine: "НЕЧЕГО УДАЛЯТЬ: НЕ ОПУБЛИКОВАНО С ЭТОЙ КОНСОЛИ.",
@@ -1693,6 +1700,7 @@ const DE: Strings = Strings {
     profile_share_dup: "BEREITS IM KATALOG. \u{00C4}NDERE EINE TASTE, UM DEINE VERSION ZU TEILEN.",
     toast_already_imported: "{} IST BEREITS IN DEINER BIBLIOTHEK.",
     toast_folder_same: "BEREITS IN DIESEM ORDNER.",
+    folder_del_title: "ORDNER {} L\u{00D6}SCHEN",
     profile_del_confirm: "DEIN GETEILTES PROFIL L\u{00D6}SCHEN?",
     profile_del_ok: "DEIN GETEILTES PROFIL WURDE GEL\u{00D6}SCHT.",
     profile_del_not_mine: "NICHTS ZU L\u{00D6}SCHEN VON DIESER KONSOLE.",
@@ -1938,6 +1946,7 @@ const IT: Strings = Strings {
     profile_share_dup: "GI\u{00C0} NEL CATALOGO. CAMBIA UN TASTO PER CONDIVIDERE LA TUA VERSIONE.",
     toast_already_imported: "{} \u{00C8} GI\u{00C0} NELLA TUA LIBRERIA.",
     toast_folder_same: "GI\u{00C0} IN QUESTA CARTELLA.",
+    folder_del_title: "ELIMINA LA CARTELLA {}",
     profile_del_confirm: "ELIMINARE IL TUO PROFILO CONDIVISO?",
     profile_del_ok: "IL TUO PROFILO CONDIVISO \u{00C8} STATO ELIMINATO.",
     profile_del_not_mine: "NIENTE DA ELIMINARE DA QUESTA CONSOLE.",
@@ -2183,6 +2192,7 @@ const PT: Strings = Strings {
     profile_share_dup: "J\u{00C1} EST\u{00C1} NO CAT\u{00C1}LOGO. MUDE UMA TECLA PARA COMPARTILHAR SUA VERS\u{00C3}O.",
     toast_already_imported: "{} J\u{00C1} EST\u{00C1} NA SUA BIBLIOTECA.",
     toast_folder_same: "J\u{00C1} EST\u{00C1} NESTA PASTA.",
+    folder_del_title: "EXCLUIR A PASTA {}",
     profile_del_confirm: "REMOVER SEU PERFIL COMPARTILHADO?",
     profile_del_ok: "SEU PERFIL COMPARTILHADO FOI REMOVIDO.",
     profile_del_not_mine: "NADA A REMOVER DESTE CONSOLE.",
@@ -2433,6 +2443,7 @@ const ZH: Strings = Strings {
     profile_share_dup: "已在目录中。修改一个按键即可分享你的版本。",
     toast_already_imported: "{} 已经在你的库中。",
     toast_folder_same: "\u{5DF2}\u{5728}\u{6B64}\u{6587}\u{4EF6}\u{5939}\u{4E2D}\u{3002}",
+    folder_del_title: "\u{5220}\u{9664}\u{6587}\u{4EF6}\u{5939} {}",
     profile_del_confirm: "删除你分享的配置？",
     profile_del_ok: "你分享的配置已从目录中删除。",
     profile_del_not_mine: "这台主机没有可删除的内容。",
@@ -2681,6 +2692,7 @@ const TR: Strings = Strings {
     profile_share_dup: "ZATEN KATALOGDA. KEND\u{0130} S\u{00DC}R\u{00DC}M\u{00DC}N\u{00DC} PAYLA\u{015E}MAK I\u{00C7}IN B\u{0130}R TU\u{015E} DE\u{011E}\u{0130}\u{015E}T\u{0130}R.",
     toast_already_imported: "{} ZATEN K\u{00DC}T\u{00DC}PHANENDE.",
     toast_folder_same: "ZATEN BU KLAS\u{00D6}RDE.",
+    folder_del_title: "{} KLAS\u{00D6}R\u{00DC}N\u{00DC} S\u{0130}L",
     profile_del_confirm: "PAYLA\u{015E}ILAN PROF\u{0130}L\u{0130}N S\u{0130}L\u{0130}NS\u{0130}N M\u{0130}?",
     profile_del_ok: "PAYLA\u{015E}ILAN PROF\u{0130}L\u{0130}N S\u{0130}L\u{0130}ND\u{0130}.",
     profile_del_not_mine: "S\u{0130}L\u{0130}NECEK B\u{0130}R \u{015E}EY YOK: BU KONSOLDAN PAYLA\u{015E}ILMADI.",
@@ -3046,6 +3058,11 @@ fn fill(template: &str, arg: &str) -> std::string::String {
 /// most reports arrive without a log (#103).
 pub fn fill_one(template: &'static str, value: i32) -> std::string::String {
     fill(template, &value.to_string())
+}
+
+/// Same, for a one-placeholder message whose argument is a name.
+pub fn fill_name(template: &'static str, name: &str) -> std::string::String {
+    fill(template, name)
 }
 
 pub fn err_https(detail: &str) -> std::string::String {

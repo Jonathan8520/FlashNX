@@ -856,11 +856,14 @@ pub(crate) struct Entry {
     pub swf_version: u8,
     /// 0 = uncompressed FWS, 1 = zlib CWS, 2 = lzma ZWS.
     pub compression_label: &'static str,
-    /// True if the movie is ActionScript 3 (AVM2). Surfaced as a neutral "AS3"
-    /// tag in the library — Ruffle's AVM2 is less complete than AVM1, so it's
-    /// the riskier engine, but it's informational only: many AS3 games run fine
-    /// (Mario Forever) while others don't (Pursuit of Hat), so we flag the
-    /// engine rather than claim a game is broken.
+    /// True if the movie is ActionScript 3 (AVM2). Named in the facts line under
+    /// the selection, in the same colour as every other fact, and NOWHERE else.
+    ///
+    /// It used to carry an amber badge on the tile as well, from a time when
+    /// AVM2 really was the riskier engine. It is not one now: enough has been
+    /// fixed that whether a game runs has stopped tracking which ActionScript it
+    /// was written in, and a warning colour on a third of the library was
+    /// telling players their game was fragile when it was not.
     pub is_as3: bool,
     /// 0xRRGGBB derived from a hash of the basename — drives the per-game
     /// color chip in the list. Same hash always produces the same color
@@ -2161,25 +2164,38 @@ pub fn open() {
     let mut collapse_info: Option<(std::string::String, std::string::String, u32)> = None;
     if let Ok(mut s) = LIBRARY.lock() {
         s.applet_mode = applet;
-        // Fresh open = no filter, so `want`'s absolute index below is a valid
-        // filtered-view position (view == full list).
+        // Fresh open = no search filter.
         s.local_filter = None;
-        // And no open folder (issue #68). A shelf is where you ARE, not a
-        // setting: coming back from a game to a library showing a third of
-        // itself, for a reason chosen before the game started, reads as games
-        // having gone missing.
-        s.folder_filter = None;
-        set_active_folder(None);
+        // The OPEN SHELF SURVIVES (issue #68). Quitting a game is a RETURN, not
+        // a fresh start: you left from a shelf, you come back to it, the same
+        // way the cursor comes back to the game you played. Dropping it sent
+        // the player to TOUS and made them walk back every time.
+        //
+        // Validated against the entries that were just rescanned, because a
+        // shelf can have ceased to exist while the game was running -- emptied
+        // from its own OPTIONS, or the card reorganised from a PC.
+        if let Some(f) = s.folder_filter.clone() {
+            let still_there = f.is_empty() || s.entries.iter().any(|e| e.folder == f);
+            if !still_there {
+                s.folder_filter = None;
+            }
+        }
+        set_active_folder(s.folder_filter.as_deref());
         s.anim_origin_ticks = unsafe { ruffle_tick_now() };
         // Apply the active sort BEFORE the cursor position is computed below.
         sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
         s.screen = if s.entries.is_empty() {
             Screen::Empty
         } else {
-            let selection = want
+            // ABSOLUTE index of the game just played, then translated into the
+            // shelf's view: `Screen::List` counts rows of what is on screen, and
+            // with a shelf open those are not the same number.
+            let abs = want
                 .as_deref()
                 .and_then(|b| s.entries.iter().position(|e| e.basename == b))
                 .unwrap_or(0);
+            let shown = local_filtered_indices(&s.entries, &s.local_filter, &s.folder_filter);
+            let selection = shown.iter().position(|&i| i == abs).unwrap_or(0);
             // The JOUER gallery scrolls by ROWS (not flat index), and a tile's
             // row depends on the justified layout — so derive the scroll from the
             // layout the last render published (still valid across a quit->library
@@ -7863,14 +7879,22 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     crate::loc::fill_one(lc.games_dir_confirm_n, *count as i32),
                     lc.folder_root,
                 );
+                // Says what it DOES, not what it is about. A panel titled with a
+                // folder's name asks nothing; a panel titled "delete the folder
+                // MARIO" is a question with an answer.
+                let title = crate::loc::fill_name(lc.folder_del_title, name);
                 backend.draw_library_dim_backdrop();
                 backend.draw_library_folder_picker(
-                    name,
+                    &title,
                     &detail,
                     selection,
                     &labels,
                     lc.options_footer,
-                    false,
+                    // Red. Nothing is destroyed -- the games come home -- but one
+                    // press undoes as many deliberate moves as the shelf holds,
+                    // and a panel that looks like every other one gets answered
+                    // like every other one.
+                    true,
                     0,
                 );
             }
