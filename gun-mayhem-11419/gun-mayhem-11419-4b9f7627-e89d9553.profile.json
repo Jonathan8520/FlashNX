@@ -9,7 +9,7 @@
   "author": "",
   "verified": false,
   "bindings": {
-    "A": "[",
+    "A": "]",
     "B": "Up",
     "Down": "Down",
     "L": "Escape",
