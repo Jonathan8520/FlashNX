@@ -282,8 +282,9 @@ const SORT_FILE: &str = "sort.txt";
 /// scan, and that is exactly why `.display`/`.rot`/`.filter` were folded into a
 /// single `.prefs` per game.
 ///
-/// ACCUEIL files its own under `ROOT_SORT_KEY`. TOUS has no line here: its sort
-/// IS the home's, in `sort.txt`.
+/// TOUS has no line here: its sort IS the home's, in `sort.txt`. Cards written
+/// before the ACCUEIL stop was dropped may still carry a `/` line; it is read
+/// without complaint and never written again.
 const FOLDER_SORT_FILE: &str = "sort_folders.txt";
 static FOLDER_SORTS: Mutex<std::vec::Vec<(std::string::String, u8, bool)>> =
     Mutex::new(std::vec::Vec::new());
@@ -304,21 +305,17 @@ pub(crate) fn set_active_folder(folder: Option<&str>) {
             *g = folder.map(|s| s.to_string());
         }
     }
-    // The ACCUEIL stop is a real shelf and has to be named like one; publishing
-    // its empty key would make it look like TOUS in the header.
-    crate::backend::render::set_home_folder(match folder {
-        None => None,
-        Some("") => Some(crate::loc::s().folder_root),
-        Some(f) => Some(f),
-    });
+    // The open shelf, named for the header. There is no empty-key stop any
+    // more, so a shelf either has a name or there is no shelf open.
+    crate::backend::render::set_home_folder(folder.filter(|f| !f.is_empty()));
 }
 
 /// The shelf whose sort applies, or `None` for TOUS, which uses the home's.
 ///
-/// ACCUEIL counts as a shelf and keeps its own rule, like any named folder: it
-/// holds a different set of games from TOUS, and a set you look at on its own
-/// deserves an order you chose on its own. Only TOUS -- the whole library, the
-/// thing the home sort was always about -- falls through to the global.
+/// Every named shelf keeps its own rule: it holds a different set of games from
+/// TOUS, and a set you look at on its own deserves an order you chose on its
+/// own. Only TOUS -- the whole library, the thing the home sort was always
+/// about -- falls through to the global.
 fn sorting_folder() -> Option<std::string::String> {
     let f = ACTIVE_FOLDER.lock().ok().and_then(|g| g.clone())?;
     Some(if f.is_empty() {
@@ -328,7 +325,10 @@ fn sorting_folder() -> Option<std::string::String> {
     })
 }
 
-/// The key ACCUEIL's sort is filed under in `sort_folders.txt`.
+/// Legacy key for the sort of the ACCUEIL stop, which no longer exists.
+///
+/// Kept because cards in the wild already carry a `/=<digit>` line and reading
+/// one must not become a parse error. Nothing writes it any more.
 ///
 /// A lone slash, because that is the one thing a folder name can never be: FAT
 /// forbids it in a directory name, so this can never collide with a real shelf.
@@ -409,8 +409,53 @@ fn store_active_sort(mode: u8, rev: bool) {
     }
 }
 
+/// Set only when `load_folder_sorts` actually READ the file (or established that
+/// there is none). A failed read leaves the table empty, which is indistinguishable
+/// from "no shelf has a sort of its own" — and the first sort change after that
+/// would rewrite the file from that empty table, wiping every other shelf's
+/// choice for good. This says which of the two it was.
+static FOLDER_SORTS_LOADED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Drop the stored sort of every shelf that no longer exists.
+///
+/// A shelf is not a thing you create and destroy: it exists exactly as long as
+/// a game is on it. So its sort line has to be swept by the same rule, or
+/// `sort_folders.txt` grows one orphan per reorganisation and -- worse --
+/// recreating a shelf of the same name later makes it inherit an order chosen
+/// in a previous life. Emptying a shelf already did this; taking the last label
+/// off one, and deleting its last game, did not.
+///
+/// Never runs on an EMPTY library. A scan that failed, or a games folder just
+/// pointed somewhere else, both present as "no shelf exists any more" and would
+/// take every sort with them -- the same trap that made `tags::prune` a bad
+/// idea at boot.
+fn prune_folder_sorts(entries: &[Entry]) {
+    if entries.is_empty() {
+        return;
+    }
+    let live = folder_counts(entries);
+    let changed = match FOLDER_SORTS.lock() {
+        Ok(mut g) => {
+            let before = g.len();
+            g.retain(|(n, _, _)| live.iter().any(|(l, _)| l == n));
+            before != g.len()
+        }
+        Err(_) => false,
+    };
+    if changed {
+        persist_folder_sorts();
+    }
+}
+
 /// `name=digit[R]` lines, one per shelf that has been given a sort of its own.
 fn persist_folder_sorts() {
+    // Never write a whole file out of a table we failed to fill. One shelf's new
+    // sort is not worth every other shelf's.
+    if !FOLDER_SORTS_LOADED.load(std::sync::atomic::Ordering::Relaxed) {
+        log("library: sort_folders.txt was never read; refusing to overwrite it\n");
+        return;
+    }
     let Ok(g) = FOLDER_SORTS.lock() else {
         return;
     };
@@ -426,12 +471,27 @@ fn persist_folder_sorts() {
 
 fn load_folder_sorts() {
     let path = config_read_path(FOLDER_SORT_FILE);
-    let Ok(txt) = std::fs::read_to_string(&path) else {
-        return;
+    // Bounded read, NOT `read_to_string`: that one pre-reserves a buffer sized
+    // from fstat, and in APPLET mode the size comes back bogus, so the reserve
+    // fails with OutOfMemory and a 300-byte file reads as an error. Same trap the
+    // URL history fell into, and the same fix as `read_meta_sidecar`.
+    let txt = match read_sd_text(&path, 64 * 1024) {
+        Ok(t) => t,
+        Err(e) => {
+            // A file that is not there yet is not a failure: there is simply
+            // nothing to keep, and writing one later is safe.
+            if e.kind() == std::io::ErrorKind::NotFound {
+                FOLDER_SORTS_LOADED.store(true, std::sync::atomic::Ordering::Relaxed);
+            } else {
+                log(&std::format!("library: sort_folders.txt unreadable: {}\n", e));
+            }
+            return;
+        }
     };
     let Ok(mut g) = FOLDER_SORTS.lock() else {
         return;
     };
+    FOLDER_SORTS_LOADED.store(true, std::sync::atomic::Ordering::Relaxed);
     g.clear();
     for line in txt.lines() {
         // Split on the LAST '=': a folder is free to have one in its name.
@@ -520,6 +580,7 @@ fn ensure_prefs_loaded() {
     if !PREFS_LOADED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         crate::playtime::load();
         crate::favorites::load();
+        crate::tags::load();
         let (mode, rev) = read_sort_prefs(&config_read_path(SORT_FILE));
         SORT_MODE.store(mode, std::sync::atomic::Ordering::Relaxed);
         SORT_REVERSE.store(rev, std::sync::atomic::Ordering::Relaxed);
@@ -860,11 +921,25 @@ fn write_meta_sidecar(basename: &str, display_name: &str) -> bool {
 pub(crate) struct Entry {
     pub path: std::string::String,
     pub basename: std::string::String,
-    /// Folder this game sits in, relative to the games root, empty at the root
-    /// (issue #68). Only the FIRST segment: a game three levels down belongs to
-    /// its top-level folder as far as the library is concerned, because that is
-    /// the shelf a player thinks in. Nothing here is a key -- see `basename`.
+    /// Folder this game sits in ON THE CARD, relative to the games root, empty
+    /// at the root (issue #68). Only the FIRST segment: a game three levels down
+    /// belongs to its top-level folder as far as the library is concerned,
+    /// because that is the shelf a player thinks in. Nothing here is a key --
+    /// see `basename`.
+    ///
+    /// This is the PHYSICAL half of shelf membership and is what the move and
+    /// empty code acts on. It is NOT the answer to "is this game on shelf X" --
+    /// ask `on_shelf`, which also weighs the labels below.
     pub folder: std::string::String,
+    /// Shelf LABELS from `tags.json`, keyed by basename. The other half: a game
+    /// is on the union of its directory and these, which is what lets one game
+    /// sit on several shelves without anything being copied.
+    ///
+    /// Snapshotted into the entry at scan time rather than looked up per frame:
+    /// the gallery asks about shelf membership for every game on every draw, and
+    /// that is not a question worth taking a mutex for sixty times a second.
+    /// `refresh_tags` puts it back in step after any change.
+    pub tags: std::vec::Vec<std::string::String>,
     pub display_name: std::string::String,
     pub size_bytes: u64,
     pub swf_version: u8,
@@ -1857,6 +1932,20 @@ fn folder_of(path: &str) -> std::string::String {
     std::string::String::new()
 }
 
+/// Where a game ended up after a move attempt.
+enum MoveOutcome {
+    /// It travelled. This is its new path.
+    Moved(std::string::String),
+    /// Nothing moved, or everything that moved was put back. The game is exactly
+    /// where it was and the caller must not touch its recorded path.
+    Refused,
+    /// The move broke part way AND the undo broke too. The `.swf` is at this
+    /// path now; the caller must record it even while reporting the failure,
+    /// because an entry that names a file which is not there is worse than one
+    /// that names a game in the wrong folder.
+    Stranded(std::string::String),
+}
+
 /// Move ONE game onto a shelf: its `.swf` and, if it has one, its `.files/`
 /// companion tree (issue #68). `folder` empty = back to the root.
 ///
@@ -1876,10 +1965,16 @@ fn folder_of(path: &str) -> std::string::String {
 ///  - `<path>.url` (import source) and `<path>.filesize` (real footprint, whose
 ///    backfill is marker-guarded and would never recompute).
 ///
-/// Returns the new path on success. Refuses rather than overwrite: a name
-/// already taken in the destination means two different games, and silently
-/// merging them would cost the player one of the two.
-fn move_game_to_folder(path: &str, basename: &str, folder: &str) -> Option<std::string::String> {
+/// Refuses rather than overwrite: a name already taken in the destination means
+/// two different games, and silently merging them would cost the player one of
+/// the two.
+///
+/// Every outcome says where the `.swf` IS, because the caller stores that path
+/// and `delete_game` later derives from it the directory whose `<basename>.*`
+/// it sweeps. A rollback that fails silently is how an entry comes to name a
+/// path with no file on it, and how SUPPRIMER then deletes a game's save while
+/// leaving the game.
+fn move_game_to_folder(path: &str, basename: &str, folder: &str) -> MoveOutcome {
     let root = primary_root();
     let dest_dir = if folder.is_empty() {
         root.clone()
@@ -1888,21 +1983,38 @@ fn move_game_to_folder(path: &str, basename: &str, folder: &str) -> Option<std::
     };
     let dest = std::format!("{}/{}", dest_dir, basename);
     if dest == path {
-        return Some(dest); // already there
+        return MoveOutcome::Moved(dest); // already there
+    }
+    // A shelf is a NAME, and `folder_of` recognises that name under any search
+    // root, so one shelf on screen can span two roots. Checking only the primary
+    // one let a game land on a shelf that already holds a namesake under
+    // `sdmc:/ruffle`: two rows with one file name, sharing one save file, one
+    // keymap and one cover. Ask every root the shelf could be living under.
+    for r in search_roots() {
+        let r = r.trim_end_matches('/');
+        let twin = if folder.is_empty() {
+            std::format!("{}/{}", r, basename)
+        } else {
+            std::format!("{}/{}/{}", r, folder, basename)
+        };
+        if twin != path && file_exists_now(&twin) {
+            log(&std::format!("library: {} already exists, move refused\n", twin));
+            return MoveOutcome::Refused;
+        }
     }
     if !folder.is_empty() && !dir_exists(&dest_dir) {
         if std::fs::create_dir_all(&dest_dir).is_err() {
             log(&std::format!("library: could not create {}\n", dest_dir));
-            return None;
+            return MoveOutcome::Refused;
         }
     }
     if file_exists_now(&dest) {
         log(&std::format!("library: {} already exists, move refused\n", dest));
-        return None;
+        return MoveOutcome::Refused;
     }
     if std::fs::rename(path, &dest).is_err() {
         log(&std::format!("library: move {} -> {} failed\n", path, dest));
-        return None;
+        return MoveOutcome::Refused;
     }
     // The companion tree, when the game has one. Its absence is the normal case
     // (single-file games), so a missing source is not a failure.
@@ -1915,9 +2027,15 @@ fn move_game_to_folder(path: &str, basename: &str, folder: &str) -> Option<std::
     // with no extension, so `Path::file_stem` — which is what lib.rs builds the
     // tree name from — returns `.swf` whole. Stripping it here would look for
     // `.files` and never find `.swf.files`.
+    // `is_char_boundary` for the same reason the rename path checks it (#75,
+    // Chinese titles): slicing a `&str` off a byte boundary is a panic, and
+    // `panic = "abort"` makes that a console fatal. Today the invariant holds --
+    // every entry comes from a name the C++ scan accepted as ending in `.swf` --
+    // but that invariant lives in another language, in another file.
     let cut = |s: &str| -> std::string::String {
-        if s.len() > 4 && s[s.len() - 4..].eq_ignore_ascii_case(".swf") {
-            s[..s.len() - 4].to_string()
+        let at = s.len().saturating_sub(4);
+        if s.len() > 4 && s.is_char_boundary(at) && s[at..].eq_ignore_ascii_case(".swf") {
+            s[..at].to_string()
         } else {
             s.to_string()
         }
@@ -1933,9 +2051,22 @@ fn move_game_to_folder(path: &str, basename: &str, folder: &str) -> Option<std::
         if std::fs::rename(&src_files, &moved_files_dest).is_err() {
             // The `.swf` is already across. Put it back rather than leave a game
             // separated from the assets it needs to run.
-            let _ = std::fs::rename(&dest, path);
+            //
+            // And if putting it back ALSO fails, say where it really is. Throwing
+            // that result away left the entry pointing at a path with no file on
+            // it, and `delete_game` derives the directory to sweep from that
+            // path: SUPPRIMER then took the saves, the controls and the cover
+            // while the `.swf` itself, being elsewhere, survived and came back at
+            // the next scan with nothing in it.
+            if std::fs::rename(&dest, path).is_err() {
+                log(&std::format!(
+                    "library: {} could not be put back; it is at {}\n",
+                    path, dest
+                ));
+                return MoveOutcome::Stranded(dest);
+            }
             log(&std::format!("library: move of {} failed, game put back\n", src_files));
-            return None;
+            return MoveOutcome::Refused;
         }
         files_travelled = true;
     }
@@ -1953,12 +2084,28 @@ fn move_game_to_folder(path: &str, basename: &str, folder: &str) -> Option<std::
             note_file_removed(&base_src);
             note_file_created(&base_dst);
         } else {
-            if files_travelled {
-                let _ = std::fs::rename(&moved_files_dest, &src_files);
+            // The asset tree comes back FIRST, and the `.swf` only follows it if
+            // it made the trip. A game and its `<stem>.files/` have to end up in
+            // the same place: `lib.rs` derives the tree's path from the `.swf`'s,
+            // so a `.swf` back at its old path with its assets stuck at the
+            // destination is a game that starts and never loads anything.
+            // Leaving both across is the lesser of the two broken states.
+            if files_travelled && std::fs::rename(&moved_files_dest, &src_files).is_err() {
+                log(&std::format!(
+                    "library: {} could not be put back; the game stays at {}\n",
+                    moved_files_dest, dest
+                ));
+                return MoveOutcome::Stranded(dest);
             }
-            let _ = std::fs::rename(&dest, path);
+            if std::fs::rename(&dest, path).is_err() {
+                log(&std::format!(
+                    "library: {} could not be put back; it is at {}\n",
+                    path, dest
+                ));
+                return MoveOutcome::Stranded(dest);
+            }
             log(&std::format!("library: {} not moved, game put back\n", base_src));
-            return None;
+            return MoveOutcome::Refused;
         }
     }
     for suffix in [".url", ".filesize"] {
@@ -1976,7 +2123,7 @@ fn move_game_to_folder(path: &str, basename: &str, folder: &str) -> Option<std::
     }
     crate::sd::commit();
     log(&std::format!("library: moved {} -> {}\n", path, dest));
-    Some(dest)
+    MoveOutcome::Moved(dest)
 }
 
 pub fn add_path(path: &str, mtime: u64) -> bool {
@@ -2021,11 +2168,15 @@ pub fn add_path(path: &str, mtime: u64) -> bool {
     // alongside the other sidecars, so the IMPORTER list can count an item's
     // installed files in memory instead of hitting the SD every frame.
     let folder = folder_of(path);
+    // Snapshotted here, once per scan, for the same reason every other per-game
+    // fact is: the gallery asks about shelf membership on every draw.
+    let tags = crate::tags::tags_for(&basename);
     let entry = Entry {
         path: path.to_string(),
         display_name,
         basename,
         folder,
+        tags,
         size_bytes,
         swf_version,
         compression_label,
@@ -2063,7 +2214,7 @@ pub fn add_path(path: &str, mtime: u64) -> bool {
         }
         if let Some(other) = s.entries.iter().find(|e| e.basename == entry.basename) {
             log(&std::format!(
-                "library: WARNING two games named {} ({} and {}); they share saves and keys\n",
+                "library: WARNING two games named {} ({} and {}); they share saves, keys and shelf labels\n",
                 entry.basename, other.path, entry.path,
             ));
         }
@@ -2167,6 +2318,24 @@ pub fn open() {
     load_history_from_sd();
     // Boot-once: load persisted playtime + sort preference.
     ensure_prefs_loaded();
+    // The scan runs BEFORE this (main.cpp calls `swf_picker_run` then
+    // `ruffle_library_open`), so every entry was built while `tags.json` was
+    // still unread and got an empty label list. Put them in step now, or every
+    // label is invisible until the player happens to toggle one.
+    //
+    // Here rather than by loading tags earlier: `ensure_prefs_loaded` is where
+    // every persisted table is read, and moving one of them out of it to suit
+    // the scan would be the kind of ordering nobody can see from the code.
+    //
+    // Nothing is PRUNED here, deliberately. Dropping the labels of games the
+    // scan did not find looks tidy and is a trap: a card that failed to mount,
+    // a games folder just pointed somewhere else, or a scan cut short would all
+    // present as "these games no longer exist" and take every label with them.
+    // A stale line costs a few bytes; `favorites.json` has never pruned either,
+    // for the same reason. In-app deletes clear their own labels (`delete_game`).
+    if let Ok(mut s) = LIBRARY.lock() {
+        refresh_tags(&mut s.entries);
+    }
     // Returning from a game? Bank that session's playtime before we re-sort.
     bank_playtime();
     // If we're re-opening after quitting a game, land the cursor back on
@@ -2189,7 +2358,7 @@ pub fn open() {
         // shelf can have ceased to exist while the game was running -- emptied
         // from its own OPTIONS, or the card reorganised from a PC.
         if let Some(f) = s.folder_filter.clone() {
-            let still_there = f.is_empty() || s.entries.iter().any(|e| e.folder == f);
+            let still_there = f.is_empty() || s.entries.iter().any(|e| on_shelf(e, &f));
             if !still_there {
                 s.folder_filter = None;
             }
@@ -2715,6 +2884,154 @@ static TOUCH: Mutex<TouchState> = Mutex::new(TouchState {
 /// tap a tile to select it, tap the already-selected tile again to launch it.
 /// `(x, y)` are screen px; `pressed` is whether a finger is down this frame.
 /// No-op on every other screen (those stay button-driven).
+/// A tap landed off the gallery: find the row under it and act.
+///
+/// Tap a row to put the cursor on it, tap the row the cursor is already on to
+/// activate it — the same two-step the gallery has always used, and for the same
+/// reason: a single tap that activated would fire on whatever your thumb landed
+/// on, with no chance to see what you were about to do.
+///
+/// The activation is `input("A")`, never a copy of what A does. Every screen's
+/// A already knows how to open, confirm, rebind or delete; duplicating any of
+/// that here is how a touch path drifts away from the button path.
+fn tap_ui_row(x: f32, y: f32) {
+    // The kind of the screen that is up RIGHT NOW, read from the lock rather
+    // than from the render stamp: C++ serves buttons before touch in the same
+    // frame, so on the frame a button changes screens the stamp still names the
+    // old one -- and would match its stale table exactly.
+    let kind = match LIBRARY.lock() {
+        Ok(s) => touch_kind(s.screen),
+        Err(_) => return,
+    };
+    let Some(hit) = crate::backend::render::ui_cells_hit(kind, x, y) else {
+        return;
+    };
+    // The keymap editor keeps its selection in the `menu` module, not here.
+    if matches!(kind, 70..=89) {
+        if menu::touch_select(hit) {
+            input("A");
+        }
+        return;
+    }
+    let mut activate = false;
+    if let Ok(mut s) = LIBRARY.lock() {
+        activate = set_screen_selection(&mut s, hit);
+    }
+    if activate {
+        input("A");
+    }
+}
+
+/// A row-list drag finished: store where it left the list, and bring the cursor
+/// along. `offset` is in the screen's own scroll space; `sel_lo..=sel_hi` are the
+/// rows now on screen, in the space `selection` is counted in.
+///
+/// A cursor left behind off-screen is not a cursor: the next press of Down would
+/// scroll the list back to it and undo the whole gesture in one frame.
+fn commit_row_scroll(offset: usize, sel_lo: usize, sel_hi: usize) {
+    let hi = sel_hi.max(sel_lo);
+    // The rows above the scrolling part, if any (the directory tree pins two).
+    let base = sel_lo - offset.min(sel_lo);
+    let screen = match LIBRARY.lock() {
+        Ok(s) => s.screen,
+        Err(_) => return,
+    };
+    // The keymap editor keeps its list in the `menu` module, and taking the
+    // LIBRARY lock across that call would put the two locks in the wrong order.
+    if matches!(screen, Screen::TouchesEditor { .. } | Screen::SettingsKeymapEditor) {
+        menu::touch_scroll(offset, sel_lo, hi);
+        return;
+    }
+    let Ok(mut s) = LIBRARY.lock() else { return };
+    match screen {
+        Screen::BugPicker { selection, .. } => {
+            s.screen = Screen::BugPicker {
+                selection: selection.clamp(sel_lo, hi),
+                scroll_offset: offset,
+            };
+        }
+        Screen::GamesDirPicker { selection, .. } => {
+            // CHOISIR and REMONTER are pinned above the listing and never leave
+            // the screen, so a cursor parked on one of them is still visible and
+            // must not be dragged down into the listing.
+            let sel = if selection < base { selection } else { selection.clamp(sel_lo, hi) };
+            s.screen = Screen::GamesDirPicker { selection: sel, scroll: offset };
+        }
+        // The shelf picker has no scroll of its own: its window is DERIVED from
+        // the cursor, which the formula pins to the window's LAST row. Putting
+        // the cursor there is the only way to say where the list should rest.
+        Screen::GameFolderPicker { game_idx, .. } => {
+            s.screen = Screen::GameFolderPicker { game_idx, selection: hi };
+        }
+        _ => {}
+    }
+}
+
+/// Move the current screen's cursor to `idx`. Returns true when it was ALREADY
+/// there, which is the caller's signal to activate instead.
+///
+/// `idx` is a row of the table the LIVE screen published (`ui_cells_hit` refuses
+/// anything else), so it is in range for that screen's own rows. The one thing
+/// that is not guaranteed is a screen whose renderer publishes NO table at all:
+/// nothing republishes, the previous panel's table stays up, and a hit resolves
+/// against geometry that belongs to something else. Those screens are listed
+/// below and answer `false` rather than moving a cursor they cannot place.
+fn set_screen_selection(s: &mut State, idx: usize) -> bool {
+    macro_rules! put {
+        ($cur:expr, $mk:expr) => {{
+            if $cur == idx {
+                return true;
+            }
+            s.screen = $mk;
+            return false;
+        }};
+    }
+    match s.screen {
+        Screen::OptionsModal { game_idx, selection } => {
+            put!(selection, Screen::OptionsModal { game_idx, selection: idx })
+        }
+        Screen::GameFolderPicker { game_idx, selection } => {
+            put!(selection, Screen::GameFolderPicker { game_idx, selection: idx })
+        }
+        Screen::GameFolderDelete { game_idx, folder_idx, selection } => put!(
+            selection,
+            Screen::GameFolderDelete { game_idx, folder_idx, selection: idx }
+        ),
+        Screen::SettingsModal { selection } => {
+            put!(selection, Screen::SettingsModal { selection: idx })
+        }
+        Screen::SettingsPrefsModal { selection } => {
+            put!(selection, Screen::SettingsPrefsModal { selection: idx })
+        }
+        Screen::SettingsLanguagePicker { selection } => {
+            put!(selection, Screen::SettingsLanguagePicker { selection: idx })
+        }
+        Screen::SettingsHomeViewPicker { selection } => {
+            put!(selection, Screen::SettingsHomeViewPicker { selection: idx })
+        }
+        Screen::GamesDirPicker { selection, scroll } => {
+            put!(selection, Screen::GamesDirPicker { selection: idx, scroll })
+        }
+        Screen::GamesDirConfirm { selection } => {
+            put!(selection, Screen::GamesDirConfirm { selection: idx })
+        }
+        Screen::SortModal { selection, prev_sel, prev_scroll } => put!(
+            selection,
+            Screen::SortModal { selection: idx, prev_sel, prev_scroll }
+        ),
+        Screen::BugPicker { selection, scroll_offset } => {
+            put!(selection, Screen::BugPicker { selection: idx, scroll_offset })
+        }
+        Screen::TouchesMenu { game_idx, selection } => {
+            put!(selection, Screen::TouchesMenu { game_idx, selection: idx })
+        }
+        Screen::CoverPicker { game_idx, selection } => {
+            put!(selection, Screen::CoverPicker { game_idx, selection: idx })
+        }
+        _ => false,
+    }
+}
+
 pub fn touch(x: f32, y: f32, pressed: bool) {
     use crate::backend::render as r;
     // Movement (px) before a press is treated as a drag instead of a tap.
@@ -2740,12 +3057,41 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
     // Off a touchable gallery: cancel any in-flight gesture, drop scroll override.
     if !on_gallery {
         if t.down {
+            t.down = false;
+            t.dragging = false;
             r::gallery_touch_scroll_set(None);
         }
-        t.down = false;
-        t.dragging = false;
+        // Everything else IS touchable now: modals, the language grid, the
+        // report list, the folder tree, the keyboard. They publish their rows
+        // the way the gallery publishes its tiles, so one handler serves all of
+        // them and no layout is known here either.
+        //
+        // The gesture itself lives in `render`, because the in-game keymap
+        // editor feeds the same one from a different entry point and two copies
+        // would drift apart the first time either was touched. It decides
+        // between a tap and a drag; a list too short to scroll only ever
+        // produces taps.
+        //
+        // `input` re-locks LIBRARY, so the gesture lock goes first: the house
+        // rule is TOUCH then LIBRARY, never the other way.
+        drop(t);
+        match r::row_touch_feed(x, y, pressed) {
+            r::RowTouch::Tap(sx, sy) => tap_ui_row(sx, sy),
+            r::RowTouch::Scrolled { offset, sel_lo, sel_hi } => {
+                commit_row_scroll(offset, sel_lo, sel_hi)
+            }
+            _ => {}
+        }
         return;
     }
+
+    // On a gallery the row gesture is not fed at all, so anything it had in
+    // flight has to be dropped here. Left alone, a finger that went down on a
+    // modal and lifted after a B took us back to the gallery stayed `down`
+    // forever; the next non-gallery screen's first sample took the `!pressed &&
+    // down` branch and produced a phantom tap at coordinates from minutes ago --
+    // and a phantom tap on the row the cursor already sits on is an `input("A")`.
+    r::row_touch_cancel();
 
     let (scroll_px, pitch, band_top, band_bot, rows_total, rows_visible) = r::gallery_view_read();
     // The strip layout scrolls SIDEWAYS. Same gesture, same thresholds, same
@@ -3958,6 +4304,21 @@ fn drive_pending_move() {
     }
     unsafe { swf_picker_run() };
     if let Ok(mut s) = LIBRARY.lock() {
+        // Every entry was just rebuilt by the scan, which cannot know about
+        // the labels: `add_path` reads them, but this is the one rebuild that
+        // does not go back through `open()`. Without this the shelves that
+        // exist only as labels vanish until the next boot -- and the shelf
+        // check below would then judge them gone.
+        refresh_tags(&mut s.entries);
+        // The open shelf, revalidated against the library as it now stands: the
+        // games folder just changed, so a shelf that lived under the old one is
+        // no longer scanned and no longer exists.
+        if let Some(f) = s.folder_filter.clone() {
+            if !f.is_empty() && !s.entries.iter().any(|e| on_shelf(e, &f)) {
+                s.folder_filter = None;
+                set_active_folder(None);
+            }
+        }
         // The sort is applied in `open()` and nowhere else, so a list rebuilt
         // mid-session came back in raw scan order and stayed that way until the
         // user opened the sort menu and picked the mode it was already set to.
@@ -3978,6 +4339,43 @@ fn drive_pending_move() {
 /// Row 0 chooses the folder currently shown; the rows below descend into its
 /// subfolders. B goes back UP a level rather than out, which is what a file
 /// browser is expected to do — leaving happens from the top level, or with `-`.
+/// Climb one level of the browse tree and land the cursor on the folder just
+/// left, rather than at the top of the parent.
+///
+/// Walking out of a folder and being dropped on row zero means finding your
+/// place again by eye every single time — and the folder you just came out of
+/// is the one thing you are certain to be looking for. Shared by the REMONTER
+/// row and by B, which is how most people actually go back up.
+fn browse_go_up(s: &mut State, path: &str) {
+    let Some(parent) = browse_parent(path) else {
+        return;
+    };
+    let leaving = path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .to_string();
+    let listing = list_dirs(&parent);
+    // Rows are CHOISIR, then REMONTER when the parent has a parent of its own,
+    // then the listing — hence the offset applied to a listing index.
+    let up_next = if browse_parent(&parent).is_some() { 1 } else { 0 };
+    let pos = listing.iter().position(|d| *d == leaving);
+    let sel = pos.map_or(0, |i| i + 1 + up_next);
+    // Scroll the parent's listing so the folder we just left is ON SCREEN.
+    // Landing on it is the whole point, and a cursor parked on row 30 of a
+    // window showing rows 0-5 is a cursor nobody can see. Must match the
+    // drawing side's window (VISIBLE in `handle_games_dir_input`).
+    const VISIBLE: usize = 6;
+    let scroll = pos.map_or(0, |i| {
+        i.saturating_sub(VISIBLE - 1)
+            .min(listing.len().saturating_sub(VISIBLE))
+    });
+    s.dir_browse = listing;
+    s.dir_path = parent;
+    s.screen = Screen::GamesDirPicker { selection: sel, scroll };
+}
+
 fn handle_games_dir_input(s: &mut State, button: &str, mut selection: usize, mut scroll: usize) {
     let path = s.dir_path.clone();
     // Rows: 0 = choose this folder, then "up" unless we are at the card root,
@@ -4011,11 +4409,7 @@ fn handle_games_dir_input(s: &mut State, button: &str, mut selection: usize, mut
                 return;
             }
             if up == 1 && selection == 1 {
-                if let Some(parent) = browse_parent(&path) {
-                    s.dir_browse = list_dirs(&parent);
-                    s.dir_path = parent;
-                    s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 };
-                }
+                browse_go_up(s, &path);
                 return;
             }
             let child_name = &s.dir_browse[selection - 1 - up];
@@ -4031,17 +4425,14 @@ fn handle_games_dir_input(s: &mut State, button: &str, mut selection: usize, mut
             return;
         }
         "B" => {
-            // Same as the "up" row, and leaves the picker once at the root.
-            match browse_parent(&path) {
-                Some(parent) => {
-                    s.dir_browse = list_dirs(&parent);
-                    s.dir_path = parent;
-                    s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 };
-                }
-                None => {
-                    s.dir_browse.clear();
-                    s.screen = Screen::SettingsModal { selection: 6 };
-                }
+            // Same as the "up" row — including landing on the folder just left,
+            // which is the way most people go back up and the reason the fix on
+            // the row alone was invisible.
+            if browse_parent(&path).is_some() {
+                browse_go_up(s, &path);
+            } else {
+                s.dir_browse.clear();
+                s.screen = Screen::SettingsModal { selection: 6 };
             }
             return;
         }
@@ -4279,7 +4670,19 @@ fn run_new_game_folder_flow(game_idx: usize) {
         return;
     }
     if let Ok(mut s) = LIBRARY.lock() {
-        apply_game_folder(&mut s, game_idx, &safe);
+        // A name that is ALREADY one of this game's shelves would be toggled
+        // OFF by `apply_game_folder`, because A is a bascule now. A row called
+        // "new shelf" that quietly takes the game off one is the opposite of
+        // what it says, so it is refused here instead.
+        let already = s
+            .entries
+            .get(game_idx)
+            .is_some_and(|e| on_shelf(e, &safe));
+        if already {
+            set_toast(&mut s, crate::loc::s().toast_folder_same.to_string(), TOAST_ERR);
+        } else {
+            apply_game_folder(&mut s, game_idx, &safe);
+        }
         // `apply_game_folder` already lands on the picker and has re-found the
         // game's index; only the cursor row is ours to set, onto the shelf that
         // was just created.
@@ -4992,16 +5395,22 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
             // against the shelf you were on, and carrying it over would show a
             // handful of rows with no visible reason.
             s.local_filter = None;
-            // The ring is: TOUS, then ACCUEIL, then one stop per folder.
-            // `None` (TOUS) and `Some("")` (ACCUEIL) are both real stops --
-            // "everything" and "everything that is on no shelf" are different
-            // questions, and without the second there is no way to ask it.
+            // The ring is: TOUS, then one stop per shelf.
+            //
+            // There used to be an ACCUEIL stop between them -- "everything on
+            // no shelf". It earned its place when filing meant MOVING a file:
+            // it was the list of what you had not sorted yet, and it shrank as
+            // you worked. Now that filing is one button press, most libraries
+            // label a handful of games and ACCUEIL is TOUS minus a few: a
+            // near-copy of the stop next to it, costing a press on every turn of
+            // the ring, to answer a question almost nobody asks. The picker
+            // still has its row, which is a different thing -- taking a game OFF
+            // its shelves, not looking at the ones that have none.
             let cur = match s.folder_filter.as_deref() {
                 None => 0,
-                Some("") => 1,
-                Some(f) => folders.iter().position(|(n, _)| n == f).map_or(0, |i| i + 2),
+                Some(f) => folders.iter().position(|(n, _)| n == f).map_or(0, |i| i + 1),
             };
-            let n = folders.len() + 2;
+            let n = folders.len() + 1;
             let next = if button == "ZR" {
                 (cur + 1) % n
             } else {
@@ -5009,8 +5418,7 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
             };
             s.folder_filter = match next {
                 0 => None,
-                1 => Some(std::string::String::new()),
-                i => Some(folders[i - 2].0.clone()),
+                i => Some(folders[i - 1].0.clone()),
             };
             set_active_folder(s.folder_filter.as_deref());
             // Each shelf keeps its own sort (falling back to the home's), so the
@@ -5931,7 +6339,7 @@ pub(crate) fn local_filtered_indices(
             .enumerate()
             .filter(|(_, e)| match folder.as_deref() {
                 None => true,
-                Some(f) => e.folder == f,
+                Some(f) => on_shelf(e, f),
             })
             .filter(|(_, e)| {
                 e.display_name.to_lowercase().contains(&q)
@@ -5942,21 +6350,11 @@ pub(crate) fn local_filtered_indices(
     }
     match folder.as_deref() {
         None => (0..entries.len()).collect(),
-        // ACCUEIL: the games on no shelf at all. An empty answer here is a REAL
-        // answer -- "every game you own is filed" -- so it must not fall back to
-        // the whole library the way a vanished shelf does, or the one stop whose
-        // job is to exclude the folders would show them all.
-        Some("") => entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.folder.is_empty())
-            .map(|(i, _)| i)
-            .collect(),
         Some(f) => {
             let picked: std::vec::Vec<usize> = entries
                 .iter()
                 .enumerate()
-                .filter(|(_, e)| e.folder == f)
+                .filter(|(_, e)| on_shelf(e, f))
                 .map(|(i, _)| i)
                 .collect();
             // A named folder that holds nothing does not exist -- the strip is
@@ -5977,9 +6375,51 @@ pub(crate) fn local_filtered_indices(
     }
 }
 
-/// Is there ANOTHER listed game with this file name, somewhere else? Folders
-/// (issue #68) made that possible, and it changes what deleting one may touch:
-/// the companions keyed by name are then shared, not owned.
+/// Is this game on the shelf named `name`?
+///
+/// The ONE place that answers it, because there are two ways to be on a shelf
+/// and only one of them is visible in a path. A game is on `name` if it sits in
+/// a directory called that, OR if it carries that label. Asking `e.folder ==
+/// name` anywhere else is asking only half the question.
+///
+/// An empty `name` is not a shelf: it is ACCUEIL, "on no shelf at all", and has
+/// its own test below.
+pub(crate) fn on_shelf(e: &Entry, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    e.folder == name || e.tags.iter().any(|t| t == name)
+}
+
+/// Is this game on NO shelf? Neither filed in a directory nor labelled.
+pub(crate) fn on_no_shelf(e: &Entry) -> bool {
+    e.folder.is_empty() && e.tags.is_empty()
+}
+
+/// Every shelf this game is on, directory first. Deduplicated: a game inside
+/// `MARIO/` that is also labelled MARIO is on one shelf, not two.
+pub(crate) fn shelves_of(e: &Entry) -> std::vec::Vec<std::string::String> {
+    let mut out: std::vec::Vec<std::string::String> = std::vec::Vec::new();
+    if !e.folder.is_empty() {
+        out.push(e.folder.clone());
+    }
+    for t in &e.tags {
+        if !out.iter().any(|x| x == t) {
+            out.push(t.clone());
+        }
+    }
+    out
+}
+
+/// Re-read every entry's labels from `tags.json` into the in-memory snapshot.
+/// Called after anything that changes them, since the entries carry a copy so
+/// the gallery does not take a mutex per game per frame.
+pub(crate) fn refresh_tags(entries: &mut [Entry]) {
+    for e in entries.iter_mut() {
+        e.tags = crate::tags::tags_for(&e.basename);
+    }
+}
+
 /// Is there ANOTHER listed game with this file name, somewhere else? Folders
 /// (issue #68) made that possible, and it changes what deleting one may touch:
 /// the companions keyed by name are then shared, not owned.
@@ -5999,16 +6439,26 @@ fn twin_basename_exists(entries: &[Entry], basename: &str, path: &str) -> bool {
 pub(crate) fn folder_counts(entries: &[Entry]) -> std::vec::Vec<(std::string::String, usize)> {
     let mut out: std::vec::Vec<(std::string::String, usize)> = std::vec::Vec::new();
     for e in entries {
-        if e.folder.is_empty() {
-            continue;
-        }
-        match out.iter_mut().find(|(n, _)| *n == e.folder) {
-            Some((_, c)) => *c += 1,
-            None => out.push((e.folder.clone(), 1)),
+        // Every shelf this game is on, not just the directory it sits in: a
+        // labelled game counts toward each shelf it was put on, which is the
+        // whole point of the labels. `shelves_of` deduplicates, so a game inside
+        // `MARIO/` that also carries the MARIO label is counted once.
+        for name in shelves_of(e) {
+            match out.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, c)) => *c += 1,
+                None => out.push((name, 1)),
+            }
         }
     }
     out.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
     out
+}
+
+/// Does a shelf of this name exist as a real DIRECTORY holding at least one
+/// game? Emptying it then has files to move; a shelf that is only a label has
+/// nothing but the label.
+pub(crate) fn shelf_has_directory(entries: &[Entry], name: &str) -> bool {
+    !name.is_empty() && entries.iter().any(|e| e.folder == name)
 }
 
 /// Build a `Screen::List` positioned on the entry at ABSOLUTE index `abs`,
@@ -6102,6 +6552,13 @@ fn handle_game_folder_input(s: &mut State, button: &str, game_idx: usize, mut se
     let folders = game_folder_rows(s);
     // root + folders + "new folder"
     let last = folders.len() + 1;
+    // CLAMPED before anything reads it. `selection` does not only come from the
+    // D-pad: the touch layer writes it from the table the PREVIOUS frame
+    // published, and A is a toggle now, so one press can make a row disappear
+    // while that table still lists it. A row index one past the end reaching
+    // `folders[selection - 1]` is not a wrong menu entry, it is an out-of-range
+    // index -- and `panic = "abort"` makes that a console fatal.
+    selection = selection.min(last);
     match button {
         "Up" | "StickLUp" => {
             selection = if selection == 0 { last } else { selection - 1 };
@@ -6118,7 +6575,12 @@ fn handle_game_folder_input(s: &mut State, button: &str, game_idx: usize, mut se
             let target = if selection == 0 {
                 std::string::String::new()
             } else {
-                folders[selection - 1].clone()
+                // Belt and braces with the clamp above: this is the one place
+                // that indexes, so it is the one place that must never trust.
+                match folders.get(selection - 1) {
+                    Some(n) => n.clone(),
+                    None => return,
+                }
             };
             apply_game_folder(s, game_idx, &target);
             return;
@@ -6181,7 +6643,9 @@ fn handle_game_folder_delete_input(
     s.screen = Screen::GameFolderDelete { game_idx, folder_idx, selection };
 }
 
-/// Send every game on a shelf back to ACCUEIL, then remove the empty folder.
+/// Take every game off a shelf: the ones physically inside its directory move
+/// back to the root, the ones there by label lose the label. Then remove the
+/// directory, if there was one.
 ///
 /// Not destructive: this is the move that was already validated, run backwards
 /// once per game. A game that refuses to move keeps the folder alive, and the
@@ -6199,12 +6663,18 @@ fn empty_folder(s: &mut State, folder_idx: usize, pinned: usize) -> usize {
     let Some((name, _)) = folders.get(folder_idx).cloned() else {
         return pinned;
     };
+    // Is this shelf backed by a real directory at all? Asked BEFORE the moves,
+    // which are what empty it.
+    let had_directory = shelf_has_directory(&s.entries, &name);
     // Followed ACROSS the moves below, which rewrite it.
     let mut pinned_path = s.entries.get(pinned).map(|e| e.path.clone());
     let victims: std::vec::Vec<usize> = s
         .entries
         .iter()
         .enumerate()
+        // Only the games PHYSICALLY in the directory are moved. A game that is
+        // on this shelf because of a label has no file to move: its membership
+        // is taken off wholesale below, in one write.
         .filter(|(_, e)| e.folder == name)
         .map(|(i, _)| i)
         .collect();
@@ -6214,25 +6684,48 @@ fn empty_folder(s: &mut State, folder_idx: usize, pinned: usize) -> usize {
         else {
             continue;
         };
-        if let Some(new_path) = move_game_to_folder(&path, &basename, "") {
+        // A stranded game counts as MOVED for the bookkeeping even though the
+        // operation failed: its `.swf` really is at that path now, and the entry
+        // has to say so. It just does not count toward the tally the toast
+        // reports, which is about work that went cleanly.
+        let (new_path, clean) = match move_game_to_folder(&path, &basename, "") {
+            MoveOutcome::Moved(p) => (Some(p), true),
+            MoveOutcome::Stranded(p) => (Some(p), false),
+            MoveOutcome::Refused => (None, false),
+        };
+        if let Some(new_path) = new_path {
             note_file_removed(&path);
             note_file_created(&new_path);
             if pinned_path.as_deref() == Some(path.as_str()) {
                 pinned_path = Some(new_path.clone());
             }
             if let Some(e) = s.entries.get_mut(i) {
+                e.folder = folder_of(&new_path);
                 e.path = new_path;
-                e.folder.clear();
             }
-            moved += 1;
+            if clean {
+                moved += 1;
+            }
         }
+    }
+    // The label half of the shelf, in one write. Emptying a shelf has to empty
+    // it whichever way a game got onto it, or a shelf would refuse to disappear
+    // and nobody could see why.
+    // `None` = the table could not be written, so the labels are still on the
+    // card and this shelf has NOT been emptied. The verdict below asks the
+    // library, which still carries them, so it reports the failure on its own.
+    if crate::tags::remove_tag_everywhere(&name).unwrap_or(0) > 0 {
+        refresh_tags(&mut s.entries);
     }
     // Removed where the games ACTUALLY were, not where the primary root is: a
     // shelf found under a legacy root lives there, and `remove_dir` on the
-    // primary would fail while the real directory stayed behind — reporting an
-    // SD error for a move that worked.
-    let dir = folder_dir_of(&name);
-    let gone = std::fs::remove_dir(&dir).is_ok();
+    // primary would fail while the real directory stayed behind.
+    //
+    // Only if there IS one. A shelf that exists purely as a label has no
+    // directory to remove, and asking for one would be a guess at a path that
+    // was never involved.
+    let dir = if had_directory { folder_dir_of(&name) } else { std::string::String::new() };
+    let gone = !dir.is_empty() && std::fs::remove_dir(&dir).is_ok();
     crate::sd::commit();
     log(&std::format!(
         "library: folder {} emptied ({} game(s) home, dir {} removed={})\n",
@@ -6255,8 +6748,17 @@ fn empty_folder(s: &mut State, folder_idx: usize, pinned: usize) -> usize {
     // Say what actually happened. A game whose destination name is already taken
     // is refused (`move_game_to_folder`), which keeps the shelf alive -- and a
     // green "moved" over a shelf still sitting there is worse than no message.
-    if moved > 0 && gone {
-        set_toast(s, crate::loc::s().games_dir_moved.to_string(), TOAST_OK);
+    // Did the shelf actually go? Asked of the LIBRARY, not of `remove_dir`.
+    // A shelf can hold a subdirectory of its own (the scan goes three deep) or
+    // a stray readme, and `remove_dir` refuses a directory that is not empty --
+    // so a move where every single game came home reported a red SD error
+    // because a `MARIO/NES/` folder was left behind. What the player asked for
+    // is that no game be on this shelf any more; that is what we check.
+    let empty_now = !s.entries.iter().any(|e| on_shelf(e, &name));
+    if empty_now {
+        // `folder_emptied`, not `games_dir_moved`: a shelf can empty with nothing
+        // having moved at all, when every game on it was there by label.
+        set_toast(s, crate::loc::s().folder_emptied.to_string(), TOAST_OK);
     } else {
         set_toast(s, crate::loc::s().err_sd_write.to_string(), TOAST_ERR);
     }
@@ -6278,8 +6780,17 @@ fn folder_dir_of(name: &str) -> std::string::String {
     std::format!("{}/{}", primary_root(), name)
 }
 
-/// Do the move and put the library back in a truthful state without a rescan:
-/// the entry's path and folder are the only two things that changed on the card.
+/// Put a game on a shelf, or take it off one.
+///
+/// Nothing is MOVED here any more. A shelf membership is a label in
+/// [crate::tags], so this toggles: press A on a shelf the game is already on and
+/// it comes off. That is what lets one game sit on several shelves at once,
+/// which a directory could never express because a file is in one place.
+///
+/// The one exception is ACCUEIL (an empty `target`), which means "on no shelf at
+/// all". Labels alone cannot deliver that for a game that physically lives in a
+/// directory, so that row -- and only that row -- still moves the file back to
+/// the root. It is the only thing in the app that writes to the card's layout.
 pub(crate) fn apply_game_folder(s: &mut State, game_idx: usize, target: &str) {
     let Some((path, basename, folder)) = s
         .entries
@@ -6289,10 +6800,10 @@ pub(crate) fn apply_game_folder(s: &mut State, game_idx: usize, target: &str) {
         return;
     };
     // The row of the shelf being aimed at, in the list as it stands. Computed
-    // ONCE, up front, because every exit below lands on it: refusing, failing
-    // and succeeding must all leave the cursor on the row the player pressed A
-    // on. Sending it back to the top was the "it does the same thing" report --
-    // the refusal path did exactly that.
+    // fresh at each exit, because toggling a label can CREATE a shelf or make
+    // the last one vanish, and every row below it then shifts. Every exit --
+    // refusing, failing and succeeding -- has to land on the row the player
+    // pressed A on.
     let row_of = |s: &State, target: &str| -> usize {
         if target.is_empty() {
             0
@@ -6303,67 +6814,150 @@ pub(crate) fn apply_game_folder(s: &mut State, game_idx: usize, target: &str) {
                 .map_or(0, |i| i + 1)
         }
     };
-    // Already there. `move_game_to_folder` returns the same path for this and
-    // everything downstream then reports a successful move -- so picking the
-    // shelf the game is already on looked exactly like moving it there, and a
-    // player checking their work could not tell the two apart.
-    if folder == target {
-        let row = row_of(s, target);
-        set_toast(s, crate::loc::s().toast_folder_same.to_string(), TOAST_ERR);
-        s.screen = Screen::GameFolderPicker { game_idx, selection: row };
-        return;
-    }
-    match move_game_to_folder(&path, &basename, target) {
-        Some(new_path) => {
-            // The scan index still holds the old path; a stale "this file is
-            // absent" answer there would make the game unlaunchable until the
-            // next boot.
-            note_file_removed(&path);
-            note_file_created(&new_path);
-            if let Some(e) = s.entries.get_mut(game_idx) {
-                e.path = new_path.clone();
-                e.folder = target.to_string();
-            }
-            // STAY on the shelf the player is standing on.
-            //
-            // Sweeping back to TOUS was wrong twice over: the game they just
-            // filed leaves the list, which is the truthful outcome and needs no
-            // help, and any search they had running would silently widen from
-            // "in this shelf" to "in the whole library" — a filter changing
-            // meaning because of an unrelated action. Only a NAMED shelf that
-            // just lost its last game has to be left, because it no longer
-            // exists; ACCUEIL always does.
-            let vanished = match s.folder_filter.as_deref() {
-                Some(f) if !f.is_empty() => !s.entries.iter().any(|e| e.folder == f),
-                _ => false,
+    // Keep the open shelf honest after a change: a shelf that just lost its last
+    // game no longer exists, and leaving the filter on it would show the whole
+    // library under a header naming something that is gone.
+    let settle = |s: &mut State| {
+        // A toggle can take the last game off a shelf, which ends it.
+        prune_folder_sorts(&s.entries);
+        let vanished = match s.folder_filter.as_deref() {
+            Some(f) if !f.is_empty() => !s.entries.iter().any(|e| on_shelf(e, f)),
+            _ => false,
+        };
+        if vanished {
+            s.folder_filter = None;
+            set_active_folder(None);
+            sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
+        }
+    };
+
+    // ── ACCUEIL: off every shelf ────────────────────────────────
+    if target.is_empty() {
+        // Nothing physical to do: the labels ARE the whole membership.
+        if folder.is_empty() {
+            let Some(had_labels) = crate::tags::clear_for(&basename) else {
+                set_toast(s, crate::loc::s().err_sd_write.to_string(), TOAST_ERR);
+                let row = row_of(s, target);
+                s.screen = Screen::GameFolderPicker { game_idx, selection: row };
+                return;
             };
-            if vanished {
-                s.folder_filter = None;
-                set_active_folder(None);
-                sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
+            if had_labels == 0 {
+                // Already on no shelf: say so rather than report work that did
+                // not happen.
+                let row = row_of(s, target);
+                set_toast(s, crate::loc::s().toast_folder_same.to_string(), TOAST_ERR);
+                s.screen = Screen::GameFolderPicker { game_idx, selection: row };
+                return;
             }
-            set_toast(s, crate::loc::s().games_dir_moved.to_string(), TOAST_OK);
-            // `game_idx` is an index into `entries`, and a re-sort moves entries
-            // around. Re-find the game by PATH before handing the index back to
-            // a modal, or OPTIONS reopens on whichever game inherited the slot —
-            // and every row of it, SUPPRIMER included, would act on that one.
-            let idx = s
-                .entries
-                .iter()
-                .position(|e| e.path == new_path)
-                .unwrap_or(game_idx);
-            // Land on the shelf just chosen, and re-derive the row from the list
-            // AS IT NOW STANDS: the destination may be a folder that did not
-            // exist a moment ago, and the one the game left may have vanished
-            // with it, so every row below it has shifted.
+            refresh_tags(&mut s.entries);
+            settle(s);
+            set_toast(s, crate::loc::s().toast_folder_off.to_string(), TOAST_OK);
+            // By PATH: `settle` may have re-sorted the library under us, and the
+            // sort mode itself depends on which shelf is open.
+            let idx = s.entries.iter().position(|e| e.path == path).unwrap_or(game_idx);
             let row = row_of(s, target);
             s.screen = Screen::GameFolderPicker { game_idx: idx, selection: row };
             return;
         }
-        None => set_toast(s, crate::loc::s().err_sd_write.to_string(), TOAST_ERR),
+        // Physically filed. MOVE FIRST, strip the labels only once the file has
+        // actually come home.
+        //
+        // The other way round loses them for nothing: `move_game_to_folder`
+        // refuses whenever a namesake already sits at the root -- the ordinary
+        // two-games-one-file-name case this whole design accepts -- and the
+        // labels were already erased from the card by then, under a red toast
+        // saying the operation had failed.
+        let outcome = move_game_to_folder(&path, &basename, "");
+        // Where the `.swf` ended up, whatever the verdict. A stranded game is a
+        // FAILURE the player must be told about, but its file really has moved,
+        // and an entry naming a path with no file on it is worse: `delete_game`
+        // sweeps the directory it reads off that path.
+        let landed = match outcome {
+            MoveOutcome::Moved(ref np) | MoveOutcome::Stranded(ref np) => Some(np.clone()),
+            MoveOutcome::Refused => None,
+        };
+        let Some(new_path) = landed else {
+            // Nothing moved and nothing was erased. The game is exactly as it
+            // was, which is the only state worth leaving it in.
+            set_toast(s, crate::loc::s().err_sd_write.to_string(), TOAST_ERR);
+            let row = row_of(s, target);
+            s.screen = Screen::GameFolderPicker { game_idx, selection: row };
+            return;
+        };
+        // The scan index still holds the old path; a stale "this file is absent"
+        // answer there would make the game unlaunchable until the next boot.
+        note_file_removed(&path);
+        note_file_created(&new_path);
+        let now_in = folder_of(&new_path);
+        if let Some(e) = s.entries.get_mut(game_idx) {
+            e.path = new_path.clone();
+            e.folder = now_in;
+        }
+        // The file is home; the labels can go now.
+        let cleared = crate::tags::clear_for(&basename).is_some();
+        if cleared {
+            refresh_tags(&mut s.entries);
+        }
+        settle(s);
+        let ok = matches!(outcome, MoveOutcome::Moved(_)) && cleared;
+        set_toast(
+            s,
+            if ok {
+                crate::loc::s().toast_folder_off.to_string()
+            } else {
+                crate::loc::s().err_sd_write.to_string()
+            },
+            if ok { TOAST_OK } else { TOAST_ERR },
+        );
+        let idx = s
+            .entries
+            .iter()
+            .position(|e| e.path == new_path)
+            .unwrap_or(game_idx);
+        let row = row_of(s, target);
+        s.screen = Screen::GameFolderPicker { game_idx: idx, selection: row };
+        return;
     }
+
+    // ── A named shelf: toggle the label ─────────────────────────────────────
+    //
+    // A game that sits in a REAL directory of this name is on this shelf because
+    // of where it is, and no label can take it off. Say that instead of quietly
+    // doing nothing, or of adding a label that changes nothing.
+    if folder == target {
+        let row = row_of(s, target);
+        set_toast(s, crate::loc::s().toast_folder_physical.to_string(), TOAST_ERR);
+        s.screen = Screen::GameFolderPicker { game_idx, selection: row };
+        return;
+    }
+    // `None` = nothing was written, so nothing may be shown as done. The table
+    // is sealed when `tags.json` exists but could not be read, and a green toast
+    // over a label that will be gone at the next boot is the worst of both.
+    let Some(now_on) = crate::tags::toggle(&basename, target) else {
+        set_toast(s, crate::loc::s().err_sd_write.to_string(), TOAST_ERR);
+        let row = row_of(s, target);
+        s.screen = Screen::GameFolderPicker { game_idx, selection: row };
+        return;
+    };
+    refresh_tags(&mut s.entries);
+    settle(s);
+    set_toast(
+        s,
+        if now_on {
+            crate::loc::fill_name(crate::loc::s().toast_folder_on, target)
+        } else {
+            crate::loc::fill_name(crate::loc::s().toast_folder_off_of, target)
+        },
+        TOAST_OK,
+    );
+    // Re-find the game by PATH: `settle` may have re-sorted the library under us.
+    let idx = s
+        .entries
+        .iter()
+        .position(|e| e.path == path)
+        .unwrap_or(game_idx);
     let row = row_of(s, target);
-    s.screen = Screen::GameFolderPicker { game_idx, selection: row };
+    s.screen = Screen::GameFolderPicker { game_idx: idx, selection: row };
 }
 
 fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut selection: usize) {
@@ -6376,7 +6970,13 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
             selection = if selection >= last { 0 } else { selection + 1 };
         }
         "A" => {
-            match OPTIONS_ENTRIES[selection] {
+            // `.get`, not `[..]`: `selection` can arrive from the touch layer,
+            // and with `panic = "abort"` a row that is out of range is a console
+            // fatal rather than a wrong menu entry.
+            let Some(&entry) = OPTIONS_ENTRIES.get(selection) else {
+                return;
+            };
+            match entry {
                 "FAVORI" => {
                     // Toggle, then re-pin: favorites jump to the top of the
                     // gallery, so this game's index changes. Re-point the modal
@@ -7081,12 +7681,22 @@ fn delete_game(s: &mut State, game_idx: usize) {
     let Some(entry) = s.entries.get(game_idx).cloned() else {
         return;
     };
+    // Does another game share this file name? Asked FIRST, because everything
+    // below that touches a name-keyed file has to know.
+    let twins = twin_basename_exists(&s.entries, &entry.basename, &entry.path);
     // Saves this game was seen reading under the OLD movie-keyed name. The C++
     // sweep matches `<basename>*` and can never reach them — that is why deleting
     // Agent P Strikes Back left its save behind, ready to be picked up again on
     // reinstall. Removed here, BEFORE the sweep, so the sweep still takes the
     // `.solmap` itself (it matches the prefix).
-    delete_recorded_legacy_saves(&entry.basename);
+    //
+    // Not when a namesake exists. The `.solmap` this reads is `<basename>.solmap`
+    // at the root: two games with one file name write into the SAME file and
+    // accumulate both their lists in it, so deleting either would unlink the
+    // other's legacy saves.
+    if !twins {
+        delete_recorded_legacy_saves(&entry.basename);
+    }
     let mut path_c = entry.path.as_bytes().to_vec();
     path_c.push(0);
     // Second directory to sweep: the root of the games folder. A game inside a
@@ -7098,7 +7708,6 @@ fn delete_game(s: &mut State, game_idx: usize) {
     // one would take the other's saves, controls, title and cover with it. When
     // that happens the companions are left behind — orphaned files cost disk,
     // and the alternative costs someone else's save.
-    let twins = twin_basename_exists(&s.entries, &entry.basename, &entry.path);
     let mut root_c = if twins {
         log(&std::format!(
             "library: {} has a namesake elsewhere; its shared sidecars are kept\n",
@@ -7118,11 +7727,23 @@ fn delete_game(s: &mut State, game_idx: usize) {
     // The C++ scan only sees the .swf's own directory; clean up the cached
     // cover (covers/ subdir) and stem-named sidecars it can't reach, then
     // commit so the unlinks (C++ + Rust) actually persist to the SD card.
-    let extra = crate::covers::remove_for(&entry.basename);
-    // Drop the renderer's cached cover TEXTURE (keyed by basename) too: deleting
-    // the file alone left a re-import of the same name showing the old cover
-    // straight from GPU memory. Mirrors run_cover_fetch_flow's invalidate.
-    crate::backend::render::invalidate_cover(&entry.basename);
+    //
+    // Skipped for a shared file name, exactly like the sweep above. The cover is
+    // `covers/<basename>.cover.png` and the manual overrides are `<stem>.png`
+    // across every root: not one component of either is the path, so both belong
+    // to the namesake as much as to this game. The sweep had been taught this
+    // and these three lines had not, so a delete still took the survivor's cover
+    // and its star while the log said the shared sidecars were kept.
+    let extra = if twins {
+        0
+    } else {
+        let n = crate::covers::remove_for(&entry.basename);
+        // Drop the renderer's cached cover TEXTURE (keyed by basename) too:
+        // deleting the file alone left a re-import of the same name showing the
+        // old cover straight from GPU memory. Mirrors run_cover_fetch_flow's.
+        crate::backend::render::invalidate_cover(&entry.basename);
+        n
+    };
     crate::sd::commit();
     log(&std::format!(
         "library: SUPPRIMER {} -> rc={} (+{} cover/sidecar)\n",
@@ -7130,8 +7751,17 @@ fn delete_game(s: &mut State, game_idx: usize) {
     ));
     s.entries.remove(game_idx);
     // Drop it from favorites too, so a re-import of the same name doesn't come
-    // back pre-starred.
-    crate::favorites::remove(&entry.basename);
+    // back pre-starred. Not when a namesake survives: `favorites.json` is
+    // indexed by file name, so its star is the same star.
+    if !twins {
+        crate::favorites::remove(&entry.basename);
+        // Its shelf labels go the same way, and for the same reason:
+        // `tags.json` is keyed by file name too, so a namesake is standing on
+        // those shelves as much as this game was. Without this, reinstalling a
+        // game under a name used before puts it straight back on shelves
+        // nobody chose for it.
+        crate::tags::remove(&entry.basename);
+    }
     // Clear the session "downloaded" mark too. The IMPORTER green OK badge is a
     // union of `entries` (updated just above) and this set; a same-session
     // download lingering here kept the badge lit after a delete, while the
@@ -7265,6 +7895,24 @@ fn distant_row_rect(sel: usize, scroll: usize, vw: f32) -> (f32, f32, f32, f32) 
 /// the scale-in "pop" exactly once when a modal is first shown. Full-screen
 /// notices (AppletNotice / DistantError / Downloading) are NOT modals here — no
 /// panel to scale. The TOUCHES editors ARE modals (scale in like the rest).
+/// Id of the list on screen, for the touch tables. Never zero for a screen that
+/// has tappable rows.
+///
+/// Separate from `modal_kind` on purpose: that one decides which screens get the
+/// modal scale-in, and full pages like REGLAGES and the bug-report list are
+/// deliberately not modals. Reusing it made both of them untouchable, because a
+/// table tagged 0 is refused by the hit test — the guard that stops a stale
+/// table from being hit.
+fn touch_kind(screen: Screen) -> u32 {
+    match screen {
+        // Full pages, ids of their own well clear of the modal ones.
+        Screen::SettingsModal { .. } => 100,
+        Screen::BugPicker { .. } => 101,
+        // The keymap editor carries its sub-screen in the 70/80 bands already.
+        other => modal_kind(other) as u32,
+    }
+}
+
 fn modal_kind(screen: Screen) -> u8 {
     match screen {
         Screen::OptionsModal { .. } => 1,
@@ -7493,8 +8141,10 @@ fn draw_gallery(
         // the entries, so the line can never describe a different list than the
         // one being drawn.
         set_active_folder(s.folder_filter.as_deref());
+        // "Are there any shelves at all?" -- a labelled game makes one just as
+        // much as a directory does, so the strip appears for either.
         crate::backend::render::set_home_has_folders(
-            s.entries.iter().any(|e| !e.folder.is_empty()),
+            s.entries.iter().any(|e| !e.folder.is_empty() || !e.tags.is_empty()),
         );
         crate::backend::render::set_home_library_total(s.entries.len());
         let idx = local_filtered_indices(&s.entries, &s.local_filter, &s.folder_filter);
@@ -7508,14 +8158,7 @@ fn draw_gallery(
             },
             s.local_filter.clone(),
             // The open shelf's DISPLAY name, for the frame drawn after the view.
-            // ACCUEIL has no directory name of its own, so it borrows its label.
-            s.folder_filter.as_deref().map(|f| {
-                if f.is_empty() {
-                    crate::loc::s().folder_root.to_string()
-                } else {
-                    f.to_string()
-                }
-            }),
+            s.folder_filter.clone(),
             // The denominator of the header's "n / N" is the size of what the
             // player is LOOKING AT before their search, i.e. the open shelf —
             // not the library. On a six-game shelf, "0 / 214" for a search that
@@ -7664,7 +8307,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                         // library, so testing the result would never fire.
                         let gone = match s2.folder_filter.as_deref() {
                             Some(f) if !f.is_empty() => {
-                                !s2.entries.iter().any(|e| e.folder == f)
+                                !s2.entries.iter().any(|e| on_shelf(e, f))
                             }
                             _ => false,
                         };
@@ -7677,6 +8320,9 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                                 current_sort_reverse(),
                             );
                         }
+                        // The deleted game may have been the last on its shelf,
+                        // wherever the cursor happened to be.
+                        prune_folder_sorts(&s2.entries);
                         let shown = local_filtered_indices(
                             &s2.entries,
                             &s2.local_filter,
@@ -7723,6 +8369,29 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             *last = kind;
         }
     }
+    // Stamped for the touch tables, EVERY frame: whatever list draws next tags
+    // its rows with it, so a tap can only ever act on the panel actually up.
+    // (It used to sit inside the close-pop branch above, which meant the stamp
+    // only ever landed on the frame a modal finished closing -- every other
+    // frame the tables carried a stale id, or 0.)
+    //
+    // NOT `modal_kind`. That one drives the scale-in pop, so a screen has to
+    // earn a place in it by being a modal -- REGLAGES and the report list are
+    // full pages and answer 0 there, and a table tagged 0 is ignored by the hit
+    // test. That is exactly why those two stayed dead to the touch.
+    //
+    // A panel scaling OUT is stamped 0: its rows are still drawn, but shrinking
+    // away from where they were, so a tap landing on them would act on a panel
+    // the user has already dismissed.
+    // The same goes for a tab slide: the rows are mid-translation, the table is
+    // not.
+    crate::backend::render::set_ui_screen_kind(
+        if closing || modal_active || crate::backend::render::tab_slide_active() {
+            0
+        } else {
+            touch_kind(screen)
+        },
+    );
     // Modals + the TOUCHES editor SCALE (open/close pop); tab-home content SLIDES
     // on an L/R switch. `modal_active` = an in-flight scale pop; a settled modal
     // stays full; a tab-home slides while a tab slide runs; else identity.
@@ -7816,44 +8485,70 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             let snap = LIBRARY.lock().ok().map(|s| {
                 (
                     s.entries.get(game_idx).map(|e| {
-                        // The "you are here" marker must reflect where the game
-                        // ACTUALLY is. A game found under a legacy root has no
-                        // folder either, but it is not in the games folder, so
-                        // marking the root row would promise a move that the
-                        // row would then really perform. `None` = mark nothing.
-                        let root = primary_root();
-                        let under_primary = e.path.replace('\\', "/")
-                            .starts_with(&std::format!("{}/", root.trim_end_matches('/')));
-                        let here = if under_primary { Some(e.folder.clone()) } else { None };
-                        (e.display_name.clone(), here)
+                        // EVERY shelf this game is on, so each row can be marked
+                        // on its own: a game can be on several now, and one
+                        // "you are here" would have to pick a winner among them.
+                        //
+                        // `physical` is the shelf it is on because of WHERE ITS
+                        // FILE IS. That row cannot be toggled off with a label,
+                        // so the picker has to be able to tell the two apart.
+                        // A game found under a legacy root has no folder either,
+                        // but it is not in the games folder, so the root row must
+                        // not be marked: that would promise a move the row would
+                        // then really perform.
+                        // The shelf it is on because of WHERE ITS FILE IS. No
+                        // label can take it off that one, so the row has to be
+                        // marked differently from a label -- otherwise the
+                        // picker offers an action that then refuses.
+                        //
+                        // Asked of `e.folder` alone, with no test on which root
+                        // the game was found under. `folder_of` recognises a
+                        // directory under ANY search root, and `apply_game_folder`
+                        // refuses on `folder == target` with no such test either:
+                        // a game filed under a legacy root was being marked as a
+                        // label the picker promised to remove, and A then said no.
+                        let physical = if e.folder.is_empty() {
+                            None
+                        } else {
+                            Some(e.folder.clone())
+                        };
+                        let on: std::vec::Vec<std::string::String> = shelves_of(e);
+                        let bare = on_no_shelf(e);
+                        (e.display_name.clone(), on, physical, bare)
                     }),
                     folder_counts(&s.entries),
                 )
             });
-            if let Some((Some((name, cur)), folders)) = snap {
+            if let Some((Some((name, on, physical, bare)), folders)) = snap {
                 let lc = crate::loc::s();
                 // Root first, then the shelves that exist, then the keyboard.
-                // Each row says how many games it holds, and the one the game is
-                // on already is marked, so "move it" never has to be guessed at.
+                // Each row says how many games it holds, and EVERY shelf this
+                // game is on is marked, because it can be on several. A row
+                // marked with the arrow is a row A will take it OFF.
                 let mut labels: std::vec::Vec<std::string::String> = std::vec::Vec::new();
-                let mark = |is: bool| if is { "  <" } else { "" };
                 labels.push(std::format!(
                     "{}{}",
                     lc.folder_root,
-                    mark(cur.as_deref() == Some("")),
+                    // No arrow here. `<` means "a label, and A takes it off",
+                    // and this row takes nothing off: it is where a game with no
+                    // shelf at all already stands.
+                    if bare { "  ." } else { "" },
                 ));
                 for (n, count) in &folders {
-                    labels.push(std::format!(
-                        "{} ({}){}",
-                        n,
-                        count,
-                        mark(cur.as_deref() == Some(n.as_str())),
-                    ));
+                    // Two different marks, because they are two different
+                    // situations. `<` is a label, and A takes it off. `#` is
+                    // the DIRECTORY the file sits in: A cannot take that off,
+                    // only ACCUEIL can, by moving the file. Showing them the
+                    // same would promise an action that then refuses.
+                    let m = if physical.as_deref() == Some(n.as_str()) {
+                        "  #"
+                    } else if on.iter().any(|x| x == n) {
+                        "  <"
+                    } else {
+                        ""
+                    };
+                    labels.push(std::format!("{} ({}){}", n, count, m));
                 }
-                // Marked with a `+`: ACCUEIL and NOUVEAU DOSSIER are both rows
-                // that are not shelves, and side by side in a list of shelves
-                // they read as two of the same kind. One is a destination, the
-                // other makes one.
                 labels.push(std::format!("+  {}", lc.games_dir_new));
                 // A long shelf list would grow the modal past the screen, so the
                 // rows scroll: a window that follows the cursor, exactly like
@@ -7865,25 +8560,28 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 let start = selection
                     .saturating_sub(WINDOW - 1)
                     .min(labels.len().saturating_sub(WINDOW));
-                let end = (start + WINDOW).min(labels.len());
-                let refs: std::vec::Vec<&str> =
-                    labels[start..end].iter().map(|s| s.as_str()).collect();
+                let refs: std::vec::Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
                 // Drawn through the folder picker rather than the options modal
-                // so the footer can advertise X, which is the only way to know
-                // a shelf can be emptied.
-                let footer = std::format!("{}   {}", lc.options_footer, lc.profile_del_hint);
+                // so the footer can advertise BOTH X, the only way to know a shelf
+                // can be emptied, and that A is a toggle rather than a move.
+                let footer = lc.folder_picker_footer;
                 backend.draw_library_dim_backdrop();
                 backend.draw_library_folder_picker(
                     &name,
                     lc.opt_folder,
-                    selection - start,
+                    selection,
                     &refs,
-                    &footer,
+                    footer,
                     false,
                     // ACCUEIL is an ACTION row, not a shelf: it gets the accent
                     // and the rule under it, so the list below reads as the
-                    // folders and only the folders. Only while it is on screen.
-                    if start == 0 { 1 } else { 0 },
+                    // folders and only the folders.
+                    1,
+                    // Nothing pinned: with one action row and a short list, the
+                    // panel reads better scrolling as one piece.
+                    0,
+                    start,
+                    WINDOW,
                 );
             }
         }
@@ -7894,24 +8592,21 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 .map(|s| folder_counts(&s.entries))
                 .unwrap_or_default();
             if let Some((name, count)) = folders.get(folder_idx) {
-                // Says WHICH shelf and HOW MANY games come home, because
-                // "delete the folder?" tells you nothing about what you agreed
-                // to. Not drawn in the danger colour: nothing is destroyed here.
+                // Says WHICH shelf and HOW MANY games leave it, because
+                // "empty the shelf?" tells you nothing about what you agreed to.
+                // Not drawn in the danger colour: nothing is destroyed here.
+                //
+                // "leave this shelf", not "come back to ACCUEIL". The count is
+                // the UNION, and only the games physically in a directory are
+                // moved -- one that is here by label and also on RETRO stays on
+                // RETRO. Promising ACCUEIL was promising a place half of them
+                // will not end up in.
                 let lc = crate::loc::s();
                 let labels = [lc.games_dir_confirm_yes, lc.games_dir_confirm_no];
-                // No arrow. `games_dir_confirm_n` already ends in a colon, so it
-                // said the same thing twice -- and U+2192 is not in the 5x7 font,
-                // so drawing it reached for the shared-font atlas, whose first
-                // use parses 7.6 MB of system font: about two seconds before
-                // this panel could appear, for one glyph.
-                let detail = std::format!(
-                    "{}  {}",
-                    crate::loc::fill_one(lc.games_dir_confirm_n, *count as i32),
-                    lc.folder_root,
-                );
+                let detail = crate::loc::fill_count(lc.folder_leave_1, lc.folder_leave_n, *count as i32);
                 // Says what it DOES, not what it is about. A panel titled with a
-                // folder's name asks nothing; a panel titled "delete the folder
-                // MARIO" is a question with an answer.
+                // shelf name asks nothing; a panel titled "empty the shelf MARIO"
+                // is a question with an answer.
                 let title = crate::loc::fill_name(lc.folder_del_title, name);
                 backend.draw_library_dim_backdrop();
                 backend.draw_library_folder_picker(
@@ -7920,12 +8615,15 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     selection,
                     &labels,
                     lc.options_footer,
-                    // Red. Nothing is destroyed -- the games come home -- but one
-                    // press undoes as many deliberate moves as the shelf holds,
+                    // Red. Nothing is destroyed -- no game is deleted -- but one
+                    // press undoes as many deliberate filings as the shelf holds,
                     // and a panel that looks like every other one gets answered
                     // like every other one.
                     true,
                     0,
+                    0,
+                    0,
+                    labels.len(),
                 );
             }
         }
@@ -8024,7 +8722,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             if up == 1 {
                 labels.push(std::format!("{} ..", lc.games_dir_up));
             }
-            for name in dir_browse.iter().skip(scroll).take(VISIBLE) {
+            for name in dir_browse.iter() {
                 // Mark the folder the library actually uses. Without it the
                 // listing is a wall of identical names and nothing says which one
                 // you are already in.
@@ -8040,16 +8738,20 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 }
             }
             let refs: std::vec::Vec<&str> = labels.iter().map(|l| l.as_str()).collect();
-            let drawn = if selection < 1 + up { selection } else { selection - scroll };
             backend.draw_library_dim_backdrop();
             backend.draw_library_folder_picker(
                 lc.set_games_dir,
                 shown,
-                drawn.min(refs.len().saturating_sub(1)),
+                selection.min(refs.len().saturating_sub(1)),
                 &refs,
                 lc.games_dir_footer,
                 false,
                 1 + up,
+                // CHOISIR and REMONTER act on the folder you are IN, so they stay
+                // put while the listing under them scrolls.
+                1 + up,
+                scroll,
+                1 + up + VISIBLE,
             );
         }
         Screen::GamesDirMoving => {
@@ -8067,7 +8769,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             // to.
             let lc = crate::loc::s();
             let labels = [lc.games_dir_confirm_yes, lc.games_dir_confirm_no];
-            let count = crate::loc::fill_one(lc.games_dir_confirm_n, game_count as i32);
+            let count = crate::loc::fill_count(lc.games_dir_confirm_1, lc.games_dir_confirm_n, game_count as i32);
             let detail = std::format!("{}  {}", count, dir_path.trim_start_matches("sdmc:"));
             backend.draw_library_dim_backdrop();
             backend.draw_library_folder_picker(
@@ -8078,6 +8780,9 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 lc.options_footer,
                 true,
                 0,
+                0,
+                0,
+                labels.len(),
             );
         }
         Screen::SettingsKeymapEditor => {

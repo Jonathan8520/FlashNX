@@ -132,6 +132,89 @@ pub fn is_active() -> bool {
         .unwrap_or(false)
 }
 
+/// Put the editor's cursor on the row or key a finger just landed on.
+///
+/// Returns true when it was ALREADY there, which the caller reads as "activate"
+/// — the same double-tap the gallery has always used. A key that fired on the
+/// first tap would rebind a button before the player could see which key their
+/// thumb had covered, and on a keyboard of a hundred caps a thumb covers four.
+///
+/// Only the two screens that publish a touch table answer: the per-button row
+/// list and the keyboard. The rest keep their buttons.
+pub fn touch_select(idx: usize) -> bool {
+    let Ok(mut s) = TOUCHES.lock() else {
+        return false;
+    };
+    match s.screen {
+        Screen::Keyboard { button_idx, key_idx, prev_scroll } => {
+            if idx >= crate::keymap::KEYBOARD.len() {
+                return false;
+            }
+            if key_idx == idx {
+                return true;
+            }
+            s.screen = Screen::Keyboard { button_idx, key_idx: idx, prev_scroll };
+            false
+        }
+        // Every arm BOUNDS `idx` before storing it, the way the one above does.
+        // `idx` is a row of the published table, and the table outlives the panel
+        // that published it by one frame: C++ serves buttons before touch, so a
+        // button that changes screens leaves the finger to be hit-tested against
+        // the previous screen's rows. A row of the 92-key keyboard stored as a
+        // row of the 25-entry button list is not a wrong cursor, it is
+        // `EDITABLE_BUTTONS[60]` on the next A -- and `panic = "abort"` makes
+        // that a console fatal, not an exception.
+        Screen::List { selection, scroll_offset } => {
+            if idx >= crate::keymap::EDITABLE_BUTTONS.len() {
+                return false;
+            }
+            if selection == idx {
+                return true;
+            }
+            s.screen = Screen::List { selection: idx, scroll_offset };
+            false
+        }
+        // The rows of the sub-menu and the profile picker are drawn by the
+        // shared `draw_modal_rows`, which publishes its table like every other
+        // modal in the app -- so they answer a finger for the same reason the
+        // library's modals do.
+        Screen::Menu { selection } => {
+            // Same count `handle_menu_input` bounds its cursor with.
+            if idx > MENU_FIXED_ROWS - 1 + s.can_revert as usize {
+                return false;
+            }
+            if selection == idx {
+                return true;
+            }
+            s.screen = Screen::Menu { selection: idx };
+            false
+        }
+        Screen::Profiles { selection } => {
+            if idx >= s.matches.len() {
+                return false;
+            }
+            if selection == idx {
+                return true;
+            }
+            s.screen = Screen::Profiles { selection: idx };
+            false
+        }
+        _ => false,
+    }
+}
+
+/// A touch drag left the keymap list at `offset`; bring the cursor along so the
+/// next press of Down does not scroll straight back to where it was left.
+pub fn touch_scroll(offset: usize, sel_lo: usize, sel_hi: usize) {
+    let Ok(mut s) = TOUCHES.lock() else { return };
+    if let Screen::List { selection, .. } = s.screen {
+        s.screen = Screen::List {
+            selection: selection.clamp(sel_lo, sel_hi.max(sel_lo)),
+            scroll_offset: offset,
+        };
+    }
+}
+
 /// Distinct id per active screen (0 = inactive). Lets the in-game caller
 /// (`ruffle_touches_draw`) re-trigger the modal scale-in "pop" on each
 /// transition, exactly like `library::modal_kind` does for the on-cover modals,
@@ -699,7 +782,12 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
         }
         "A" => {
             // Open the visual keyboard at the button's current key (or "(none)").
-            let btn = keymap::EDITABLE_BUTTONS[selection];
+            // `.get`, not `[..]`: with `panic = "abort"` an out-of-range row here
+            // is a console fatal, and this index arrives from a cursor several
+            // screens and one touch table away from where it is bounded.
+            let Some(&btn) = keymap::EDITABLE_BUTTONS.get(selection) else {
+                return;
+            };
             let key_idx = keymap::current_binding(btn)
                 .as_deref()
                 .and_then(kbd_index_of)
@@ -817,7 +905,10 @@ fn handle_keyboard_input(
         "A" => {
             // "(none)" unbinds; every other key is a real flash-key name.
             let target = if name == "(none)" { None } else { Some(name) };
-            if keymap::set_binding(keymap::EDITABLE_BUTTONS[button_idx], target) {
+            let Some(&edit_btn) = keymap::EDITABLE_BUTTONS.get(button_idx) else {
+                return;
+            };
+            if keymap::set_binding(edit_btn, target) {
                 s.dirty = true;
             } else {
                 // `set_binding` has already put the in-memory keymap back, so the
@@ -927,7 +1018,9 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
         }
         Screen::Keyboard { button_idx, key_idx, .. } => {
             // Title shows the chord in a combo sub-tab ("ZL+A"), else the button.
-            let btn = keymap::EDITABLE_BUTTONS[button_idx];
+            let btn = *keymap::EDITABLE_BUTTONS
+                .get(button_idx)
+                .unwrap_or(&"");
             let modif = keymap::edit_subtab_modifier();
             let label = if modif.is_empty() {
                 btn.to_string()

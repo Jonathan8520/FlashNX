@@ -107,6 +107,7 @@ extern "C" int  ruffle_touches_active(void);
 extern "C" int  ruffle_touches_input(const char* button_name);
 extern "C" int  ruffle_touches_consume_dirty(void);
 extern "C" void ruffle_touches_draw(void);
+extern "C" void ruffle_menu_touch(float x, float y, int pressed);
 
 // In-game software keyboard (raised when a Flash TextField gains focus).
 extern "C" int  ruffle_keyboard_take_request(void);
@@ -960,6 +961,17 @@ static void worker_entry(void* arg) {
                 menu_repeat_step(touches_repeat, kDown, kUp, kHeld,
                                  ruffle_tick_now(), tick_freq_global,
                                  ruffle_touches_input);
+                // Touchscreen, same contract as the launcher: tap a row to move
+                // the cursor, tap it again to take it. The panels here are drawn
+                // by the same renderers as the launcher's and publish the same
+                // tables; they simply had nothing feeding them, so the on-screen
+                // keyboard could only be reached with a stick.
+                hidGetTouchScreenStates(&touch_state, 1);
+                const bool menu_touch = touch_state.count > 0;
+                ruffle_menu_touch(
+                    menu_touch ? (float)touch_state.touches[0].x * UI_TOUCH_SCALE_X : 0.0f,
+                    menu_touch ? (float)touch_state.touches[0].y * UI_TOUCH_SCALE_Y : 0.0f,
+                    menu_touch ? 1 : 0);
                 // If a binding was committed, refresh our runtime BINDINGS
                 // so the change applies immediately (no need to REDEMARRER).
                 if (ruffle_touches_consume_dirty()) {

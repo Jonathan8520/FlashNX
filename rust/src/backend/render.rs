@@ -152,6 +152,21 @@ const MODAL_PAD_BOTTOM: f32 = 60.0;
 const MODAL_ROW_X: f32 = 80.0;
 const MODAL_CURSOR_DX: f32 = 30.0;
 
+/// First id of the selection-glide slots (`eased_list_y`'s `key`).
+///
+/// One number per LIST, not per screen: the easer holds a single position and
+/// snaps whenever the key changes, so two lists sharing an id would send the
+/// cursor sliding across the gap between them when you moved from one to the
+/// other. Based well clear of the ids REGLAGES and the pickers already use.
+const MODAL_GLIDE_BASE: u32 = 40;
+/// Glide slots for the lists that draw their own rows instead of going through
+/// `draw_modal_rows`.
+const GLIDE_KEY_LANG: u32 = 50;
+const GLIDE_KEY_BUG: u32 = 51;
+const GLIDE_KEY_KEYS: u32 = 53;
+// 52 and 54 used to be the folder picker's; it derives its own keys from the
+// path it is showing, so a step into another folder snaps instead of sliding.
+
 /// Geometry of a drawn modal frame, returned by `draw_modal_frame` so the caller
 /// can lay its body (rows or free text) inside the shared chrome.
 #[derive(Clone, Copy)]
@@ -4114,6 +4129,381 @@ fn list_hl() -> &'static std::sync::Mutex<ListHl> {
     &A
 }
 
+/// Tappable rows of whatever list drew last, in SCREEN pixels.
+///
+/// The gallery has had a cell table since v1.2.0 (`gallery_cache`) and it is why
+/// the home is touchable while every modal in the app is not. This is the same
+/// contract for everything else: the renderer publishes the rectangles it just
+/// drew, the touch layer reads them and never learns a layout.
+///
+/// `kind` is the drawing screen's `modal_kind`, so a tap can only ever act on
+/// the list actually on screen — a stale table from the panel before cannot be
+/// hit, which is the bug the gallery's own `draw_home_empty` had to fix.
+static UI_CELLS: std::sync::Mutex<(u32, std::vec::Vec<(f32, f32, f32, f32)>)> =
+    std::sync::Mutex::new((0, std::vec::Vec::new()));
+
+pub fn ui_cells_publish(kind: u32, rects: std::vec::Vec<(f32, f32, f32, f32)>) {
+    if let Ok(mut g) = UI_CELLS.lock() {
+        *g = (kind, rects);
+    }
+}
+
+/// Index of the row under `(x, y)`, but only if the published table belongs to
+/// `live` — the screen that is up RIGHT NOW, read by the caller from the state
+/// it owns.
+///
+/// Two things this must not be, both of which it has been:
+///
+/// - the table's own tag (`UI_CELLS.0`). That is what both callers used to pass,
+///   so the test compared the tag with itself and only `kind == 0` ever rejected
+///   anything. The check the comment promised did not exist.
+/// - the stamp `ui_screen_kind()`. That is written during RENDER, and C++ serves
+///   buttons before touch in the same frame, so on the frame a button changes
+///   screens the stamp still names the old one and matches its stale table
+///   exactly. One frame of lag is all it takes: the finger is hit-tested against
+///   the previous screen's geometry and the index lands in the new screen's
+///   selection.
+///
+/// Read from the live state, it cannot lag and cannot be laundered into a
+/// tautology.
+pub fn ui_cells_hit(live: u32, x: f32, y: f32) -> Option<usize> {
+    if live == 0 {
+        return None;
+    }
+    let g = UI_CELLS.lock().ok()?;
+    if g.0 != live {
+        return None;
+    }
+    // A ZERO-SIZE rect is how the paging lists mark a row that is scrolled out
+    // of view, and the test below is inclusive at both edges -- so every one of
+    // them sat at the origin waiting for a tap on the very first pixel. That is
+    // a real press coordinate, not a theoretical one: touch arrives in panel
+    // units, and `row_touch_feed` reports the PRESS position.
+    g.1.iter().position(|(rx, ry, rw, rh)| {
+        *rw > 0.0 && *rh > 0.0 && x >= *rx && x <= rx + rw && y >= *ry && y <= ry + rh
+    })
+}
+
+/// Eased SCROLL offset, in pixels, for lists that page by whole rows.
+///
+/// Their `scroll_offset` is an integer count, so the whole list jumped a row at
+/// a time while the cursor inside it glided — the two halves of one movement
+/// disagreeing. This eases the pixel offset the rows are drawn at; the integer
+/// stays the source of truth, nothing about the input side changes.
+/// Four slots, not one: a modal that pages by rows is drawn OVER a screen that
+/// also does (the keymap editor sits on the games list), and a single slot would
+/// have the two of them stealing the key from each other every frame — both
+/// snapping, neither easing. Four covers every stack we draw; a fifth list would
+/// evict the oldest, which merely costs it one snap.
+fn list_scroll() -> &'static std::sync::Mutex<[ListHl; 4]> {
+    const EMPTY: ListHl = ListHl {
+        inited: false,
+        key: 0,
+        last_tick: 0,
+        y: 0.0,
+    };
+    static A: std::sync::Mutex<[ListHl; 4]> = std::sync::Mutex::new([EMPTY; 4]);
+    &A
+}
+
+fn eased_scroll_px(target: f32, key: u32, now: u64) -> f32 {
+    // A finger on the list wins over the easing: it tracks 1:1, and the slot is
+    // dragged along with it so releasing does not snap back to where the eased
+    // value had got to before the drag started.
+    let held = match row_touch_scroll_read() {
+        Some((k, px)) if k == key => Some(px),
+        _ => None,
+    };
+    let mut slots = match list_scroll().lock() {
+        Ok(g) => g,
+        Err(_) => return held.unwrap_or(target),
+    };
+    // Ours if it exists; otherwise the first free slot, otherwise the one that
+    // has gone longest without being drawn.
+    let idx = match slots.iter().position(|s| s.inited && s.key == key) {
+        Some(i) => i,
+        None => match slots.iter().position(|s| !s.inited) {
+            Some(i) => i,
+            None => {
+                let mut oldest = 0;
+                for i in 1..slots.len() {
+                    if slots[i].last_tick < slots[oldest].last_tick {
+                        oldest = i;
+                    }
+                }
+                oldest
+            }
+        },
+    };
+    let a = &mut slots[idx];
+    // A finger beats the easing outright, and the slot is dragged along with it:
+    // without that write, releasing would snap back to wherever the easing had
+    // got to before the drag began.
+    if let Some(px) = held {
+        a.inited = true;
+        a.key = key;
+        a.last_tick = now;
+        a.y = px;
+        return px;
+    }
+    if !a.inited || a.key != key {
+        a.inited = true;
+        a.key = key;
+        a.last_tick = now;
+        a.y = target;
+        return target;
+    }
+    let freq = unsafe { ruffle_tick_freq() } as f32;
+    let dt = if freq > 0.0 {
+        (now.saturating_sub(a.last_tick) as f32 / freq).min(0.1)
+    } else {
+        1.0 / 60.0
+    };
+    a.last_tick = now;
+    a.y = ease_to(a.y, target, dt, 18.0);
+    a.y
+}
+
+/// Live geometry of the row list drawn this frame, so a finger can drag it the
+/// way it drags the gallery. Published by the paging lists themselves: the touch
+/// layer has no business knowing where a panel puts its rows, and the geometry
+/// here is responsive (the keymap panel shrinks with the picture).
+#[derive(Clone, Copy, Default)]
+pub struct RowView {
+    /// Glide key of the list, so an override can name the list it belongs to.
+    pub key: u32,
+    /// Touch-table id of the screen that published this, checked against the
+    /// live one before any gesture acts: a stale view from the last paging list
+    /// is still sitting here when a panel with no scrolling is up.
+    pub kind: u32,
+    pub band_top: f32,
+    pub band_bot: f32,
+    pub row_h: f32,
+    /// Where the list is drawn right now, in px.
+    pub scroll_px: f32,
+    /// Largest legal `scroll_px`. Zero means the list fits and cannot scroll.
+    pub max_off: f32,
+    pub total: u32,
+    pub visible: u32,
+    /// Absolute row index of scrolling row 0. Nonzero only where a panel keeps
+    /// rows pinned above the scrolling part (the directory tree's CHOISIR and
+    /// REMONTER), so `offset` stays in the space the caller stores it in while
+    /// the cursor bounds come back in the space the caller's `selection` uses.
+    pub base: u32,
+}
+
+fn row_view() -> &'static std::sync::Mutex<RowView> {
+    static V: std::sync::Mutex<RowView> = std::sync::Mutex::new(RowView {
+        key: 0,
+        kind: 0,
+        band_top: 0.0,
+        band_bot: 0.0,
+        row_h: 0.0,
+        scroll_px: 0.0,
+        max_off: 0.0,
+        total: 0,
+        visible: 0,
+        base: 0,
+    });
+    &V
+}
+
+fn row_view_publish(v: RowView) {
+    if let Ok(mut g) = row_view().lock() {
+        *g = v;
+    }
+}
+
+/// Touch-drag scroll override for a row list: `(glide key, px)`. While a finger
+/// is down the list draws at exactly this offset (1:1 tracking) instead of
+/// easing toward the integer row; cleared on release so the glide settles.
+fn row_touch_scroll() -> &'static std::sync::Mutex<Option<(u32, f32)>> {
+    static T: std::sync::Mutex<Option<(u32, f32)>> = std::sync::Mutex::new(None);
+    &T
+}
+
+fn row_touch_scroll_read() -> Option<(u32, f32)> {
+    row_touch_scroll().lock().map(|t| *t).unwrap_or(None)
+}
+
+/// What one touch sample did to a row list.
+pub enum RowTouch {
+    /// Nothing to act on this sample.
+    None,
+    /// A drag is in flight; the list is following the finger.
+    Dragging,
+    /// The finger lifted without dragging: a tap, at the press position.
+    Tap(f32, f32),
+    /// A drag ended: commit this integer row offset, and pull the cursor into
+    /// the window it left the list on (`sel_lo..=sel_hi`, inclusive).
+    Scrolled { offset: usize, sel_lo: usize, sel_hi: usize },
+}
+
+/// Gesture state for the row-list drag. Its own, not the library's: the in-game
+/// keymap editor feeds the same gesture from a different entry point, and two
+/// copies of this would drift apart the first time either was touched.
+struct RowDrag {
+    down: bool,
+    dragging: bool,
+    start_x: f32,
+    start_y: f32,
+    start_px: f32,
+    key: u32,
+}
+
+fn row_drag() -> &'static std::sync::Mutex<RowDrag> {
+    static D: std::sync::Mutex<RowDrag> = std::sync::Mutex::new(RowDrag {
+        down: false,
+        dragging: false,
+        start_x: 0.0,
+        start_y: 0.0,
+        start_px: 0.0,
+        key: 0,
+    });
+    &D
+}
+
+/// Feed one touchscreen sample to the row-list gesture. Drag inside a scrolling
+/// band to scroll it; lift without dragging and it is a tap on a row.
+///
+/// Movement past the threshold in EITHER axis kills the tap even when the list
+/// cannot scroll: a finger that travelled 60 px across a panel was not pointing
+/// at the row it happens to be over when it lifts.
+pub fn row_touch_feed(x: f32, y: f32, pressed: bool) -> RowTouch {
+    const DRAG_THRESH: f32 = 16.0;
+    let view = row_view().lock().map(|v| *v).unwrap_or_default();
+    // A view is only worth acting on while the screen that published it is still
+    // the screen on display.
+    let live = view.kind != 0 && view.kind == ui_screen_kind() && view.max_off > 0.0
+        && view.row_h > 0.0;
+    let Ok(mut d) = row_drag().lock() else {
+        return RowTouch::None;
+    };
+    if pressed && !d.down {
+        d.down = true;
+        d.dragging = false;
+        d.start_x = x;
+        d.start_y = y;
+        d.start_px = view.scroll_px;
+        // Only a press that lands INSIDE the band can scroll it. Remembering the
+        // key here rather than reading it on release is what keeps a drag bound
+        // to the list it started on.
+        d.key = if live && y >= view.band_top && y <= view.band_bot { view.key } else { 0 };
+        return RowTouch::None;
+    }
+    if pressed && d.down {
+        let dx = x - d.start_x;
+        let dy = y - d.start_y;
+        if !d.dragging && (dx * dx + dy * dy) > DRAG_THRESH * DRAG_THRESH {
+            d.dragging = true;
+        }
+        if d.dragging && d.key != 0 && live && d.key == view.key {
+            // Drag down pulls earlier rows into view, like every list on the
+            // console and unlike a scrollbar.
+            let px = (d.start_px - dy).clamp(0.0, view.max_off);
+            if let Ok(mut t) = row_touch_scroll().lock() {
+                *t = Some((d.key, px));
+            }
+            return RowTouch::Dragging;
+        }
+        return RowTouch::None;
+    }
+    if !pressed && d.down {
+        d.down = false;
+        let was_drag = d.dragging;
+        let key = d.key;
+        // The PRESS position, not this sample's: the release frame carries no
+        // finger, so C++ hands us (0,0) there.
+        let (sx, sy) = (d.start_x, d.start_y);
+        d.dragging = false;
+        d.key = 0;
+        drop(d);
+        if !was_drag {
+            return RowTouch::Tap(sx, sy);
+        }
+        let px = row_touch_scroll_read();
+        if let Ok(mut t) = row_touch_scroll().lock() {
+            *t = None;
+        }
+        let Some((k, px)) = px else { return RowTouch::None };
+        if k != key || !live || k != view.key {
+            return RowTouch::None;
+        }
+        // Land on a whole row: half a row showing at each edge is the state a
+        // list should pass through, not the one it rests in.
+        let max_row = (view.max_off / view.row_h).round().max(0.0) as usize;
+        let offset = ((px / view.row_h).round().max(0.0) as usize).min(max_row);
+        let vis = view.visible.max(1) as usize;
+        let base = view.base as usize;
+        let sel_lo = base + offset;
+        let sel_hi = (sel_lo + vis - 1).min(base + view.total.saturating_sub(1) as usize);
+        return RowTouch::Scrolled { offset, sel_lo, sel_hi };
+    }
+    RowTouch::None
+}
+
+/// Abandon any in-flight row drag (screen changed under the finger).
+pub fn row_touch_cancel() {
+    if let Ok(mut d) = row_drag().lock() {
+        d.down = false;
+        d.dragging = false;
+        d.key = 0;
+    }
+    if let Ok(mut t) = row_touch_scroll().lock() {
+        *t = None;
+    }
+}
+
+/// The screen being drawn this frame, stamped by `library::render` from
+/// `modal_kind`. Lets a shared row renderer tag its touch table without every
+/// caller having to pass an id down.
+static UI_SCREEN_KIND: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+pub fn set_ui_screen_kind(kind: u32) {
+    UI_SCREEN_KIND.store(kind, core::sync::atomic::Ordering::Relaxed);
+}
+
+fn ui_screen_kind() -> u32 {
+    UI_SCREEN_KIND.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// The same, for the X axis, so a GRID of choices can glide too — the language
+/// picker moves sideways as often as it moves down. A second static rather than
+/// a field on the first: the two are independent, and every existing caller is a
+/// plain vertical list that must keep costing one lock.
+fn list_hl_x() -> &'static std::sync::Mutex<ListHl> {
+    static A: std::sync::Mutex<ListHl> = std::sync::Mutex::new(ListHl {
+        inited: false,
+        key: 0,
+        last_tick: 0,
+        y: 0.0,
+    });
+    &A
+}
+
+fn eased_list_x(target_x: f32, key: u32, now: u64) -> f32 {
+    let mut a = match list_hl_x().lock() {
+        Ok(g) => g,
+        Err(_) => return target_x,
+    };
+    if !a.inited || a.key != key {
+        a.inited = true;
+        a.key = key;
+        a.last_tick = now;
+        a.y = target_x;
+        return target_x;
+    }
+    let freq = unsafe { ruffle_tick_freq() } as f32;
+    let dt = if freq > 0.0 {
+        (now.saturating_sub(a.last_tick) as f32 / freq).min(0.1)
+    } else {
+        1.0 / 60.0
+    };
+    a.last_tick = now;
+    a.y = ease_to(a.y, target_x, dt, 20.0);
+    a.y
+}
+
 /// Advance + return the eased top-y of a list's selection highlight. Snaps to
 /// `target_y` on the first frame or when `key` changes (different list).
 fn eased_list_y(target_y: f32, key: u32, now: u64) -> f32 {
@@ -7003,7 +7393,7 @@ impl SwitchRenderBackend {
             lc.menu_quit,
         ];
         debug_assert_eq!(items.len(), MENU_ITEMS.len());
-        self.draw_modal_rows(&frame, selected, &items);
+        self.draw_modal_rows(&frame, selected, &items, MODAL_GLIDE_BASE + 1);
 
         unsafe {
             glUseProgram(0);
@@ -7055,7 +7445,7 @@ impl SwitchRenderBackend {
             filter_label.as_str(),
         ];
         debug_assert_eq!(items.len(), SCREEN_ITEMS.len());
-        self.draw_modal_rows(&frame, selected, &items);
+        self.draw_modal_rows(&frame, selected, &items, MODAL_GLIDE_BASE + 2);
 
         unsafe {
             glUseProgram(0);
@@ -7238,10 +7628,50 @@ impl SwitchRenderBackend {
         let rows_left_x = frame.x + 64.0;
         let value_col_x = frame.x + 380.0;
         let total = bindings.len();
-        let end = (scroll_offset + visible_rows).min(total);
-        for (visible_idx, abs_idx) in (scroll_offset..end).enumerate() {
+        // Same eased pixel offset as the report list: the integer `scroll_offset`
+        // stays the source of truth, the rows just travel to it instead of
+        // teleporting a row at a time. A scissor over the band lets the row
+        // arriving at each edge slide in rather than appear.
+        let now = unsafe { ruffle_tick_now() };
+        let band_top = rows_top_y - 12.0;
+        let band_bot = rows_top_y + visible_rows as f32 * ROW_SPACING - 4.0;
+        let max_off = total.saturating_sub(visible_rows) as f32 * ROW_SPACING;
+        let scroll_off = eased_scroll_px(
+            (scroll_offset as f32 * ROW_SPACING).min(max_off),
+            GLIDE_KEY_KEYS,
+            now,
+        );
+        let first = (scroll_off / ROW_SPACING).floor().max(0.0) as usize;
+        let end = (first + visible_rows + 2).min(total);
+        // The rows are hit-testable now: the keymap editor was reachable only by
+        // the stick, on a screen where every other panel answers a finger.
+        let mut cells: std::vec::Vec<(f32, f32, f32, f32)> = std::vec![(0.0, 0.0, 0.0, 0.0); total];
+        row_view_publish(RowView {
+            key: GLIDE_KEY_KEYS,
+            kind: ui_screen_kind(),
+            band_top,
+            band_bot,
+            row_h: ROW_SPACING,
+            scroll_px: scroll_off,
+            max_off,
+            total: total as u32,
+            visible: visible_rows as u32,
+            base: 0,
+        });
+        self.set_clip(frame.x, band_top, frame.w, band_bot - band_top);
+        for abs_idx in first..end {
             let (btn, binding) = &bindings[abs_idx];
-            let y = rows_top_y + visible_idx as f32 * ROW_SPACING;
+            let y = rows_top_y + abs_idx as f32 * ROW_SPACING - scroll_off;
+            // The scissor decides what is SEEN; this decides what is TOUCHABLE,
+            // so a row caught halfway through an edge takes no tap.
+            if y >= rows_top_y - 1.0 && y + ROW_SPACING <= band_bot + 12.0 {
+                cells[abs_idx] = (
+                    rows_left_x - MODAL_CURSOR_DX,
+                    y - 8.0,
+                    frame.x + frame.w - 40.0 - (rows_left_x - MODAL_CURSOR_DX),
+                    ROW_SPACING,
+                );
+            }
             let is_sel = abs_idx == selection;
             let color = swf::Color::from_rgb(
                 if is_sel { MODAL_ROW_SEL_COL } else { MODAL_ROW_COL },
@@ -7266,6 +7696,8 @@ impl SwitchRenderBackend {
             let bracketed = std::format!("[ {} ]", value_str);
             self.draw_text(value_col_x, y, ROW_SCALE, &bracketed, color);
         }
+        self.clear_clip();
+        ui_cells_publish(ui_screen_kind(), cells);
 
         // Scroll indicator on the right edge if the list overflows.
         if total > visible_rows {
@@ -7273,7 +7705,8 @@ impl SwitchRenderBackend {
             let bar_top_y = rows_top_y;
             let bar_h_total = visible_rows as f32 * ROW_SPACING;
             let bar_h_thumb = (bar_h_total * visible_rows as f32 / total as f32).max(20.0);
-            let progress = scroll_offset as f32 / (total - visible_rows) as f32;
+            // Follows the EASED offset so the thumb travels with the rows.
+            let progress = if max_off > 0.0 { (scroll_off / max_off).clamp(0.0, 1.0) } else { 0.0 };
             let thumb_y = bar_top_y + (bar_h_total - bar_h_thumb) * progress;
             let track = Matrix {
                 a: 4.0, b: 0.0, c: 0.0, d: bar_h_total,
@@ -7348,10 +7781,17 @@ impl SwitchRenderBackend {
         let origin_x = frame.x + SIDE_MARGIN;
         let top_y = frame.y + head_h;
 
+        // The caps are hit-testable now. The rects were already being computed
+        // here and thrown away at the end of each iteration; they are exactly
+        // the numbers a tap needs, and the layout is responsive (`shrink`), so
+        // they could never have been constants somewhere else.
+        let mut cells: std::vec::Vec<(f32, f32, f32, f32)> =
+            std::vec::Vec::with_capacity(keys.len());
         for (i, &(name, row, kx, kw)) in keys.iter().enumerate() {
             let x = origin_x + kx * unit_w;
             let key_w = kw * unit_w - KEY_GAP;
             let y = top_y + row as f32 * (key_h + key_gap);
+            cells.push((x, y, key_w, key_h));
             let cap = Matrix {
                 a: key_w, b: 0.0, c: 0.0, d: key_h,
                 tx: swf::Twips::from_pixels(x as f64),
@@ -7383,6 +7823,7 @@ impl SwitchRenderBackend {
                 swf::Color::from_rgb(txt_col, 255),
             );
         }
+        ui_cells_publish(ui_screen_kind(), cells);
 
         unsafe {
             glUseProgram(0);
@@ -7662,19 +8103,45 @@ impl SwitchRenderBackend {
         (self.dimensions.width as f32, self.dimensions.height as f32)
     }
 
-    /// Clip subsequent draws to the screen-space rect (x,y,w,h), top-left origin.
+    /// Clip subsequent draws to the LOGICAL rect (x,y,w,h), top-left origin.
     /// Used by the IMPORTER reveal to open/close the file list through a window
-    /// (the window's `library_clear` glClear is confined to it, too). GL scissor
-    /// is bottom-left origin, so flip Y.
+    /// (the window's `library_clear` glClear is confined to it, too), and by the
+    /// scrolling row lists to hold their rows inside their band.
+    ///
+    /// The turn has to be undone here. `world_matrix` composes `game_rotation()`
+    /// into every on-screen draw, so a panel drawn over a turned game lands
+    /// somewhere the caller's logical rect does not describe; the scissor is
+    /// axis-aligned in the FRAMEBUFFER, which never turns. This was harmless
+    /// while the only caller was the launcher (where the rotation is forced back
+    /// to 0), and stopped being harmless the moment the in-game keymap list
+    /// started clipping its own band.
+    ///
+    /// A quarter-turn of an axis-aligned rect is still axis-aligned, so mapping
+    /// the two corners is exact rather than a conservative bounding box.
     pub fn set_clip(&mut self, x: f32, y: f32, w: f32, h: f32) {
-        let vh = self.dimensions.height as f32;
+        let (pw, ph) = self.physical_dims();
+        let (pw, ph) = (pw as f32, ph as f32);
+        // Logical rect corners -> physical, top-left origin. Same mapping as the
+        // translation half of `world_matrix`.
+        let (x0, y0, x1, y1) = (x, y, x + w, y + h);
+        let (px0, py0, px1, py1) = match game_rotation() {
+            1 => (pw - y1, x0, pw - y0, x1),
+            2 => (pw - x1, ph - y1, pw - x0, ph - y0),
+            3 => (y0, ph - x1, y1, ph - x0),
+            _ => (x0, y0, x1, y1),
+        };
+        // Clamp to the framebuffer, then convert to GL's bottom-left origin.
+        let cx0 = px0.max(0.0).min(pw);
+        let cx1 = px1.max(0.0).min(pw);
+        let cy0 = py0.max(0.0).min(ph);
+        let cy1 = py1.max(0.0).min(ph);
         unsafe {
             glEnable(GL_SCISSOR_TEST);
             glScissor(
-                x.max(0.0) as GLint,
-                (vh - (y + h)).max(0.0) as GLint,
-                w.max(0.0) as GLsizei,
-                h.max(0.0) as GLsizei,
+                cx0 as GLint,
+                (ph - cy1) as GLint,
+                (cx1 - cx0).max(0.0) as GLsizei,
+                (cy1 - cy0).max(0.0) as GLsizei,
             );
         }
     }
@@ -7978,10 +8445,43 @@ impl SwitchRenderBackend {
     /// Draw a vertical list of selectable rows inside a modal `frame`, with the
     /// shared ">" cursor + amber selection. A too-wide row is shrunk to fit.
     /// `selection == usize::MAX` draws no cursor (read-only lists).
-    fn draw_modal_rows(&mut self, frame: &ModalFrame, selection: usize, rows: &[&str]) {
+    /// `key` distinguishes one list from another for the glide below: two lists
+    /// sharing it would have the cursor slide across the gap between them
+    /// instead of appearing where it belongs. Callers pass their modal kind.
+    fn draw_modal_rows(&mut self, frame: &ModalFrame, selection: usize, rows: &[&str], key: u32) {
+        // Which screen these rows belong to, for the touch table. Read from the
+        // one place that knows -- `library::render` stamps it every frame --
+        // rather than threaded through five call sites that would each have to
+        // be told something they have no other use for.
+        let touch_kind = ui_screen_kind();
         let left = frame.rows_left();
         let avail = frame.rows_avail();
         let top = frame.rows_top();
+        // The cursor GLIDES between rows, and a bar travels with it.
+        //
+        // The `>` used to jump from row to row with nothing in between, in every
+        // modal in the app, while REGLAGES right next door had had a gliding
+        // highlight since v1.2.0. Same helper, same easing: the movement is now
+        // the app's, not each screen's.
+        //
+        // `usize::MAX` is the "no selection" convention some callers use for a
+        // read-only list; it must not be turned into a bar somewhere off-screen.
+        if selection < rows.len() {
+            let now = unsafe { ruffle_tick_now() };
+            let hy = eased_list_y(top + selection as f32 * MODAL_ROW_H, key, now);
+            let bar_x = left - MODAL_CURSOR_DX - 10.0;
+            let bar_w = (frame.x + frame.w - 28.0 - bar_x).max(0.0);
+            self.draw_selection_bar(bar_x, hy - 9.0, bar_w, MODAL_ROW_H - 12.0, 6.0);
+            self.draw_text(
+                left - MODAL_CURSOR_DX,
+                hy,
+                MODAL_ROW_SCALE,
+                ">",
+                swf::Color::from_rgb(MODAL_ROW_SEL_COL, 255),
+            );
+        }
+        let mut cells: std::vec::Vec<(f32, f32, f32, f32)> =
+            std::vec::Vec::with_capacity(rows.len());
         for (i, row) in rows.iter().enumerate() {
             let y = top + i as f32 * MODAL_ROW_H;
             let is_sel = i == selection;
@@ -7989,13 +8489,19 @@ impl SwitchRenderBackend {
                 if is_sel { MODAL_ROW_SEL_COL } else { MODAL_ROW_COL },
                 255,
             );
-            if is_sel {
-                self.draw_text(left - MODAL_CURSOR_DX, y, MODAL_ROW_SCALE, ">", color);
-            }
             let w = self.measure_text(row, MODAL_ROW_SCALE);
             let sc = if w > avail { MODAL_ROW_SCALE * avail / w } else { MODAL_ROW_SCALE };
             self.draw_text(left, y, sc, row, color);
+            // The whole width of the panel, not the width of the text: a row is
+            // a target, and aiming at four letters with a thumb is not a target.
+            cells.push((
+                frame.x + 8.0,
+                y - 10.0,
+                (frame.w - 16.0).max(0.0),
+                MODAL_ROW_H,
+            ));
         }
+        ui_cells_publish(touch_kind, cells);
     }
 
     /// Top navbar (v1.2.0) — tab strip switched with the L/R shoulder buttons.
@@ -10140,7 +10646,7 @@ impl SwitchRenderBackend {
             Some(game_display_name),
             Some(lc.options_footer),
         );
-        self.draw_modal_rows(&frame, selection, options);
+        self.draw_modal_rows(&frame, selection, options, MODAL_GLIDE_BASE + 3);
 
         unsafe {
             glUseProgram(0);
@@ -10221,18 +10727,34 @@ impl SwitchRenderBackend {
         &mut self,
         title: &str,
         path: &str,
+        // ABSOLUTE index into `rows`, not into the visible window.
         selection: usize,
+        // The WHOLE list. The panel windows it itself so the rows can travel in
+        // pixels; handing it a pre-cut slice is what made the listing change
+        // wholesale under a cursor that had moved one line.
         rows: &[&str],
         footer: &str,
         danger: bool,
         // How many leading rows are ACTIONS rather than folders.
         actions: usize,
+        // How many leading rows stay PINNED at the top instead of scrolling.
+        // The directory tree pins "CHOISIR"/"REMONTER" — they act on the folder
+        // you are in, so scrolling them away leaves no way to act on it.
+        pinned: usize,
+        // First scrolling row on screen, counted from `rows[pinned]`.
+        scroll: usize,
+        // Rows the panel is tall enough for, pinned ones included.
+        visible: usize,
     ) {
+        let pinned = pinned.min(rows.len());
+        let n_scroll = rows.len() - pinned;
+        let vis_scroll = visible.saturating_sub(pinned).min(n_scroll);
+        let shown = pinned + vis_scroll;
         // The wide frame: folder names and paths are long, and the narrow panel
         // shrank them to fit rather than giving them room.
         let frame = self.draw_modal_frame(
             MODAL_W_WIDE,
-            rows.len(),
+            shown,
             None,
             danger,
             title,
@@ -10247,8 +10769,79 @@ impl SwitchRenderBackend {
         let left = frame.rows_left();
         let avail = frame.rows_avail();
         let top = frame.rows_top();
-        for (i, row) in rows.iter().enumerate() {
-            let y = top + i as f32 * MODAL_ROW_H;
+        let now = unsafe { ruffle_tick_now() };
+        // Both glides are keyed on the PATH, because a glide is only honest
+        // while the rows keep meaning the same thing. Walking into a folder
+        // replaces every row at once; sliding across that change would show the
+        // new listing streaking past under a cursor travelling to a row it was
+        // never on. A new key snaps instead.
+        let mut h: u32 = 2166136261;
+        for b in path.as_bytes() {
+            h ^= *b as u32;
+            h = h.wrapping_mul(16777619);
+        }
+        // Top two bits set them apart from each other and from the small
+        // hand-assigned keys the rest of the app uses.
+        let key_cursor = 0x8000_0000 | (h & 0x00FF_FFFF);
+        let key_scroll = 0xC000_0000 | (h & 0x00FF_FFFF);
+        // Eased pixel offset for the scrolling part. The caller's integer stays
+        // the source of truth; only the drawing catches up to it over a few
+        // frames.
+        let max_off = n_scroll.saturating_sub(vis_scroll) as f32 * MODAL_ROW_H;
+        let scroll_off = eased_scroll_px(
+            (scroll as f32 * MODAL_ROW_H).min(max_off),
+            key_scroll,
+            now,
+        );
+        // Where a row ends up on screen: pinned rows sit still, the rest ride
+        // the offset below them.
+        let row_y = |i: usize| -> f32 {
+            if i < pinned {
+                top + i as f32 * MODAL_ROW_H
+            } else {
+                top + i as f32 * MODAL_ROW_H - scroll_off
+            }
+        };
+        let band_top = top + pinned as f32 * MODAL_ROW_H - MODAL_ROW_H * 0.34;
+        let band_bot = top + shown as f32 * MODAL_ROW_H - MODAL_ROW_H * 0.34;
+        // Gliding bar, under the rows, same as every other list in the app.
+        if selection < rows.len() {
+            let hy = eased_list_y(row_y(selection), key_cursor, now);
+            let bar_x = left - MODAL_CURSOR_DX - 10.0;
+            let bar_w = (frame.x + frame.w - 28.0 - bar_x).max(0.0);
+            // Clipped for a scrolling row so the bar cannot outrun the band while
+            // it eases; a pinned row is never outside it.
+            if selection >= pinned {
+                self.set_clip(frame.x, band_top, frame.w, band_bot - band_top);
+            }
+            self.draw_selection_bar(bar_x, hy - 9.0, bar_w, MODAL_ROW_H - 12.0, 6.0);
+            if selection >= pinned {
+                self.clear_clip();
+            }
+        }
+        // Absolute index space, and only for the rows actually inside the panel:
+        // an off-screen row must not take a tap aimed at the row that replaced it.
+        let mut cells: std::vec::Vec<(f32, f32, f32, f32)> =
+            std::vec![(0.0, 0.0, 0.0, 0.0); rows.len()];
+        let first = pinned + (scroll_off / MODAL_ROW_H).floor().max(0.0) as usize;
+        let last = (first + vis_scroll + 2).min(rows.len());
+        // The scrolling part only. `total`/`visible` are counted in the same
+        // space as `scroll`, i.e. from `rows[pinned]`, so the caller gets back an
+        // offset it can store without translating it.
+        row_view_publish(RowView {
+            key: key_scroll,
+            kind: ui_screen_kind(),
+            band_top,
+            band_bot,
+            row_h: MODAL_ROW_H,
+            scroll_px: scroll_off,
+            max_off,
+            total: n_scroll as u32,
+            visible: vis_scroll as u32,
+            base: pinned as u32,
+        });
+        let mut draw_row = |s: &mut Self, i: usize| {
+            let y = row_y(i);
             let is_sel = i == selection;
             let is_action = i < actions;
             let color = swf::Color::from_rgb(
@@ -10261,22 +10854,45 @@ impl SwitchRenderBackend {
                 },
                 255,
             );
-            if is_sel {
-                self.draw_text(left - MODAL_CURSOR_DX, y, MODAL_ROW_SCALE, ">", color);
+            if i < pinned || (y >= band_top - 1.0 && y + MODAL_ROW_H <= band_bot + MODAL_ROW_H * 0.34)
+            {
+                cells[i] = (
+                    frame.x + 8.0,
+                    y - 10.0,
+                    (frame.w - 16.0).max(0.0),
+                    MODAL_ROW_H,
+                );
             }
-            let w = self.measure_text(row, MODAL_ROW_SCALE);
+            if is_sel {
+                s.draw_text(left - MODAL_CURSOR_DX, y, MODAL_ROW_SCALE, ">", color);
+            }
+            let row = rows[i];
+            let w = s.measure_text(row, MODAL_ROW_SCALE);
             let sc = if w > avail { MODAL_ROW_SCALE * avail / w } else { MODAL_ROW_SCALE };
-            self.draw_text(left, y, sc, row, color);
+            s.draw_text(left, y, sc, row, color);
+        };
+        for i in 0..pinned {
+            draw_row(self, i);
         }
+        self.set_clip(frame.x, band_top, frame.w, band_bot - band_top);
+        for i in first..last {
+            draw_row(self, i);
+        }
+        self.clear_clip();
+        ui_cells_publish(ui_screen_kind(), cells);
         // Separator, only when there is something on both sides of it.
         if actions > 0 && rows.len() > actions {
-            let rule_y = top + actions as f32 * MODAL_ROW_H - MODAL_ROW_H * 0.30;
-            let rule = Matrix {
-                a: avail, b: 0.0, c: 0.0, d: 1.0,
-                tx: swf::Twips::from_pixels(left as f64),
-                ty: swf::Twips::from_pixels(rule_y as f64),
-            };
-            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x60_99_AA_BB), rule);
+            let rule_y = row_y(actions) - MODAL_ROW_H * 0.30;
+            // A rule that belongs to a scrolling row travels with it, so it only
+            // draws while that row is inside the band.
+            if actions <= pinned || (rule_y >= band_top && rule_y <= band_bot) {
+                let rule = Matrix {
+                    a: avail, b: 0.0, c: 0.0, d: 1.0,
+                    tx: swf::Twips::from_pixels(left as f64),
+                    ty: swf::Twips::from_pixels(rule_y as f64),
+                };
+                <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x60_99_AA_BB), rule);
+            }
         }
 
         unsafe {
@@ -10384,7 +11000,7 @@ impl SwitchRenderBackend {
             sub,
             Some(footer),
         );
-        self.draw_modal_rows(&frame, selection, options);
+        self.draw_modal_rows(&frame, selection, options, MODAL_GLIDE_BASE + 4);
 
         unsafe {
             glUseProgram(0);
@@ -11270,6 +11886,13 @@ impl SwitchRenderBackend {
             .fold(0.0f32, f32::max);
         let bar_w = (widest + 56.0).clamp(460.0, vw - 80.0);
         self.draw_selection_bar((vw - bar_w) * 0.5, hy - 8.0, bar_w, row_h - 16.0, 6.0);
+        // Tappable rows, the width of the bar they light up.
+        ui_cells_publish(
+            ui_screen_kind(),
+            (0..entries.len())
+                .map(|i| ((vw - bar_w) * 0.5, top_y + i as f32 * row_h - 8.0, bar_w, row_h))
+                .collect(),
+        );
         // Cursor at the eased y, x aligned to the selected entry's centering.
         if let Some(sel) = entries.get(selection) {
             let sel_ow = self.measure_text(sel, OPT_SCALE);
@@ -11400,6 +12023,24 @@ impl SwitchRenderBackend {
 
         let grid_top = panel_y + 110.0;
         let grid_left = panel_x + MARGIN;
+        // This panel published NOTHING, which left the OPTIONS modal's table --
+        // six rows across the middle of the screen -- standing behind it. Tapping
+        // a thumbnail resolved against those rows and fetched the wrong cover.
+        // The hit test refuses a table that is not the live screen's now, but the
+        // grid may as well answer the finger it was silently mis-answering.
+        ui_cells_publish(
+            ui_screen_kind(),
+            (0..n)
+                .map(|i| {
+                    (
+                        grid_left + (i % cols) as f32 * (cell_w + CELL_GAP),
+                        grid_top + (i / cols) as f32 * (THUMB_H + CELL_GAP),
+                        cell_w,
+                        THUMB_H,
+                    )
+                })
+                .collect(),
+        );
         for i in 0..n {
             let col = (i % cols) as f32;
             let row = (i / cols) as f32;
@@ -11950,7 +12591,7 @@ impl SwitchRenderBackend {
             dir_label,
             swf::Color::from_rgb(0x66DDCC, 255),
         );
-        self.draw_modal_rows(&frame, selection, options);
+        self.draw_modal_rows(&frame, selection, options, MODAL_GLIDE_BASE + 5);
 
         unsafe {
             glUseProgram(0);
@@ -11986,18 +12627,70 @@ impl SwitchRenderBackend {
         let rows_top_y = 150.0;
         let rows_left_x = 80.0;
         let total = names.len();
-        let end = (scroll_offset + visible_rows).min(total);
-        for (visible_idx, abs_idx) in (scroll_offset..end).enumerate() {
-            let y = rows_top_y + visible_idx as f32 * ROW_SPACING;
+        let now = unsafe { ruffle_tick_now() };
+        // The list SLIDES to its new page instead of jumping a whole row at a
+        // time. `scroll_off` is the eased pixel offset the rows are drawn
+        // against; a scissor over the band turns the row arriving at each edge
+        // into something that visibly slides in rather than appearing.
+        let band_top = rows_top_y - 12.0;
+        let band_bot = rows_top_y + visible_rows as f32 * ROW_SPACING - 4.0;
+        let max_off = total.saturating_sub(visible_rows) as f32 * ROW_SPACING;
+        let scroll_off = eased_scroll_px(
+            (scroll_offset as f32 * ROW_SPACING).min(max_off),
+            GLIDE_KEY_BUG,
+            now,
+        );
+        let first = (scroll_off / ROW_SPACING).floor().max(0.0) as usize;
+        let end = (first + visible_rows + 2).min(total);
+        row_view_publish(RowView {
+            key: GLIDE_KEY_BUG,
+            kind: ui_screen_kind(),
+            band_top,
+            band_bot,
+            row_h: ROW_SPACING,
+            scroll_px: scroll_off,
+            max_off,
+            total: total as u32,
+            visible: visible_rows as u32,
+            base: 0,
+        });
+        self.set_clip(0.0, band_top, vw, band_bot - band_top);
+        // Gliding bar + cursor, drawn under the rows, in the same eased space.
+        if selection < total {
+            let hy = rows_top_y + selection as f32 * ROW_SPACING - scroll_off;
+            let bar_x = rows_left_x - 40.0;
+            self.draw_selection_bar(bar_x, hy - 8.0, vw - bar_x - 40.0, ROW_SPACING - 12.0, 6.0);
+            self.draw_text(
+                rows_left_x - 30.0,
+                hy,
+                ROW_SCALE,
+                ">",
+                swf::Color::from_rgb(0xFFD740, 255),
+            );
+        }
+        // Rows are published in ABSOLUTE index space -- the ones scrolled out of
+        // view get a zero-size rect -- so a hit is directly the index the input
+        // handler and the selection already speak in.
+        let mut cells: std::vec::Vec<(f32, f32, f32, f32)> = std::vec![(0.0, 0.0, 0.0, 0.0); total];
+        for abs_idx in first..end {
+            let y = rows_top_y + abs_idx as f32 * ROW_SPACING - scroll_off;
+            // The scissor decides what is SEEN; this decides what is TOUCHABLE.
+            // A row caught halfway through an edge would otherwise take a tap
+            // aimed at the header or at the row below it.
+            if y >= rows_top_y - 1.0 && y + ROW_SPACING <= band_bot + 12.0 {
+                cells[abs_idx] = (
+                    rows_left_x - 40.0,
+                    y - 8.0,
+                    vw - (rows_left_x - 40.0) - 40.0,
+                    ROW_SPACING,
+                );
+            }
             let is_sel = abs_idx == selection;
             let color = if is_sel {
                 swf::Color::from_rgb(0xFFD740, 255)
             } else {
                 swf::Color::from_rgb(0xCCCCCC, 255)
             };
-            if is_sel {
-                self.draw_text(rows_left_x - 30.0, y, ROW_SCALE, ">", color);
-            }
             // Truncate the name to the row WIDTH, not to a character count: a
             // character is 6 units of pen here and 8 for anything drawn from
             // the shared font, so a Chinese title budgeted in characters ran a
@@ -12005,6 +12698,9 @@ impl SwitchRenderBackend {
             let display = self.fit_text(names[abs_idx], ROW_SCALE, vw - rows_left_x * 2.0);
             self.draw_text(rows_left_x, y, ROW_SCALE, &display, color);
         }
+        self.clear_clip();
+
+        ui_cells_publish(ui_screen_kind(), cells);
 
         // Scrollbar if needed.
         if total > visible_rows {
@@ -12012,7 +12708,9 @@ impl SwitchRenderBackend {
             let bar_top_y = rows_top_y;
             let bar_h_total = visible_rows as f32 * ROW_SPACING;
             let bar_h_thumb = (bar_h_total * visible_rows as f32 / total as f32).max(20.0);
-            let progress = scroll_offset as f32 / (total - visible_rows) as f32;
+            // Follows the EASED offset, so the thumb travels with the rows
+            // instead of snapping a page ahead of them.
+            let progress = if max_off > 0.0 { (scroll_off / max_off).clamp(0.0, 1.0) } else { 0.0 };
             let thumb_y = bar_top_y + (bar_h_total - bar_h_thumb) * progress;
             let track = Matrix {
                 a: 4.0, b: 0.0, c: 0.0, d: bar_h_total,
@@ -12241,6 +12939,32 @@ impl SwitchRenderBackend {
         let active = crate::loc::current().index();
         let grid_left = frame.x + (frame.w - grid_w) * 0.5;
         let grid_top = frame.rows_top();
+        // ONE tint, eased in both axes and drawn before the cells: this is a
+        // grid, so the cursor moves sideways as often as it moves down, and a
+        // tint that only slid vertically would have looked broken half the time.
+        if selection < n {
+            let now = unsafe { ruffle_tick_now() };
+            let tx = grid_left + (selection % COLS) as f32 * CELL_W;
+            let ty = grid_top + (selection / COLS) as f32 * CELL_H;
+            let hx = eased_list_x(tx, GLIDE_KEY_LANG, now);
+            let hy = eased_list_y(ty, GLIDE_KEY_LANG, now);
+            // Radius 0: `round_corners` paints the PAGE colour, and this sits on
+            // a modal panel — cutting here would leave four navy notches on it.
+            self.draw_selection_bar(hx + 4.0, hy, CELL_W - 8.0, CELL_H - 6.0, 0.0);
+        }
+        ui_cells_publish(
+            ui_screen_kind(),
+            (0..n)
+                .map(|i| {
+                    (
+                        grid_left + (i % COLS) as f32 * CELL_W,
+                        grid_top + (i / COLS) as f32 * CELL_H,
+                        CELL_W,
+                        CELL_H,
+                    )
+                })
+                .collect(),
+        );
         for (i, name) in languages.iter().enumerate() {
             let col = i % COLS;
             let row = i / COLS;
@@ -12248,13 +12972,6 @@ impl SwitchRenderBackend {
             let cell_y = grid_top + row as f32 * CELL_H;
             let is_sel = i == selection;
             let is_active = i == active;
-            // Amber tint behind the selected cell.
-            if is_sel {
-                // Same tint as a list bar, on a grid cell: radius 0, because
-                // `round_corners` paints the PAGE colour and this sits on a modal
-                // panel - cutting here would leave four navy notches on the panel.
-                self.draw_selection_bar(cell_x + 4.0, cell_y, CELL_W - 8.0, CELL_H - 6.0, 0.0);
-            }
             let fx = cell_x + (CELL_W - FLAG_W) * 0.5;
             let fy = cell_y + 6.0;
             if let Some(&l) = crate::loc::PICKER_LANGS.get(i) {

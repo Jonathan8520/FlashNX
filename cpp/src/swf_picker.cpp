@@ -297,8 +297,21 @@ static int remove_dir_recursive(const char* path) {
 // `basename.`. Returns the count, or -1 if the directory could not be opened.
 // Split out so a game's companions can be swept in TWO places: beside the .swf
 // and at the root of the games folder (issue #68).
+// Suffixes that travel WITH the .swf (written next to it, keyed by its full
+// path) as opposed to the ones keyed by file name alone at the root of the games
+// folder. Only these may be swept beside a game whose file name is shared with
+// another game: the rest belong to both of them.
+static bool is_path_keyed_suffix(const char* suffix) {
+    return std::strcmp(suffix, "base") == 0 || std::strcmp(suffix, "url") == 0 ||
+           std::strcmp(suffix, "filesize") == 0;
+}
+
+// `keep_shared`: this game's file name is shared with another game, so sweep
+// only what belongs to THIS copy -- the .swf itself and the companions written
+// beside it. Its saves, controls, cover, title and playtime are keyed by file
+// name alone and are the other game's too.
 static int sweep_basename(const char* dir, const char* basename, size_t blen,
-                          bool allow_exact) {
+                          bool allow_exact, bool keep_shared = false) {
     DIR* d = opendir(dir);
     if (!d) {
         std::printf("swf_picker_delete_game: opendir(%s) failed errno=%d\n", dir, errno);
@@ -317,6 +330,12 @@ static int sweep_basename(const char* dir, const char* basename, size_t blen,
         // a companion. Deleting one game would have deleted the other's `.swf`.
         if (exact && !allow_exact) continue;
         if (!exact && !prefixed) continue;
+        // A shared file name: the .swf goes, and so do the sidecars written
+        // beside it, but nothing keyed by the name alone. Without this the guard
+        // was a no-op for any game sitting AT the root of the games folder --
+        // there, the game's own directory IS the root, so this very sweep took
+        // the saves the caller had just decided to preserve.
+        if (keep_shared && !exact && !is_path_keyed_suffix(n + blen + 1)) continue;
         if (ent->d_type == DT_DIR) continue; // defensive
         const int nl = std::snprintf(path, sizeof(path), "%s%s", dir, n);
         if (nl <= 0 || (size_t)nl >= sizeof(path)) continue;
@@ -347,7 +366,11 @@ extern "C" int swf_picker_delete_game(const char* swf_path, const char* also_dir
     std::memcpy(basename, slash + 1, blen);
     basename[blen] = '\0';
 
-    int removed = sweep_basename(dir, basename, blen, true);
+    // An empty `also_dir` is how Rust says "another game shares this file name":
+    // it withholds the root sweep. That was not enough on its own, because a
+    // game that lives at the root has the root as its OWN directory.
+    const bool keep_shared = !(also_dir && *also_dir);
+    int removed = sweep_basename(dir, basename, blen, true, keep_shared);
     if (removed < 0) return -1;
     // A game may now live in a SUBFOLDER (issue #68) while every companion
     // except its `.files/` tree stays keyed by file name at the ROOT of the

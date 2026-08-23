@@ -28,6 +28,7 @@ mod playtime;
 mod profiles;
 mod sd;
 mod sources;
+mod tags;
 
 use core::ffi::{c_char, c_int};
 use std::sync::{Arc, Mutex};
@@ -1949,8 +1950,68 @@ pub extern "C" fn ruffle_touches_draw() {
         } else {
             backend.clear_ui_transform();
         }
+        // Tag the touch tables the panels below are about to publish. Same 70-89
+        // band the library uses for these screens, so one routing rule covers
+        // both entrances to the editor. Zero while the panel is scaling: the rows
+        // are drawn somewhere other than where the table says they are.
+        backend::render::set_ui_screen_kind(if active || kind == 0 { 0 } else { 70 + kind as u32 });
         menu::draw(backend, now);
         backend.clear_ui_transform();
+    }
+}
+
+/// Touchscreen for the IN-GAME pause editor (TOUCHES). The launcher has had
+/// `ruffle_library_touch` since v1.2.0; the pause panels drew the same lists
+/// through the same renderers and simply had nothing feeding them, so the
+/// on-screen keyboard could only be reached with a stick.
+///
+/// Drag a list to scroll it, tap a row to move the cursor, tap the same row
+/// again to take it (which is `menu::input("A")`, not a copy of what A does).
+/// The gesture itself is `render::row_touch_feed`, the same one the launcher
+/// uses, so the two entrances to this editor cannot behave differently.
+#[no_mangle]
+pub extern "C" fn ruffle_menu_touch(x: f32, y: f32, pressed: c_int) {
+    // Only while the editor owns the screen. The published table outlives the
+    // panel that published it, and the last one standing before a game launched
+    // was the launcher's.
+    if !menu::is_active() {
+        backend::render::row_touch_cancel();
+        return;
+    }
+    // C++ hands us PHYSICAL screen pixels; the panel's rows were published in the
+    // LOGICAL viewport, which is portrait while the picture is turned. Undo the
+    // turn here, at the single point where the outside world's coordinates come
+    // in, exactly as `ruffle_handle_mouse_move` does.
+    //
+    // The zoom is NOT undone, unlike there: `world_matrix` gates it on
+    // `game_layer`, and the pause panel is drawn outside that layer. Undoing it
+    // would move the panel's hit boxes with a zoom the panel never had.
+    let pw = VIEWPORT_W as f32;
+    let ph = VIEWPORT_H as f32;
+    let (x, y) = match backend::render::game_rotation() {
+        1 => (y, pw - x),
+        2 => (pw - x, ph - y),
+        3 => (ph - y, x),
+        _ => (x, y),
+    };
+    match backend::render::row_touch_feed(x, y, pressed != 0) {
+        backend::render::RowTouch::Tap(sx, sy) => {
+            // The sub-screen that is up RIGHT NOW, in the same 70-89 band the
+            // library uses. Read from the menu module rather than from the
+            // render stamp: the stamp is written at draw time, and C++ serves
+            // buttons before touch, so it lags by a frame on exactly the frame
+            // that matters.
+            let live = 70 + menu::screen_kind() as u32;
+            if let Some(hit) = backend::render::ui_cells_hit(live, sx, sy) {
+                if menu::touch_select(hit) {
+                    menu::input("A");
+                }
+            }
+        }
+        backend::render::RowTouch::Scrolled { offset, sel_lo, sel_hi } => {
+            menu::touch_scroll(offset, sel_lo, sel_hi);
+        }
+        _ => {}
     }
 }
 

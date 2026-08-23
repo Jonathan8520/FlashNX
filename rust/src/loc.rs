@@ -226,8 +226,10 @@ pub struct Strings {
     /// Label naming the open folder in the home sub-line, in the slot the
     /// active filter uses (issue #68). Shown as "12 / 77 - <label>: MARIO".
     pub home_folder: &'static str,
-    /// The root of the games folder, as a destination row and as a folder stop
-    /// on the home strip (issue #68). Not a real directory name.
+    /// First row of the shelf picker: take this game off every shelf. Describes
+    /// a STATE, not a destination -- it used to say ACCUEIL, which promised a
+    /// place to go, and the only thing it moves is a game that is physically
+    /// filed in a directory (back to the root of the games folder).
     pub folder_root: &'static str,
     pub files_footer: &'static str,
     // Download
@@ -289,6 +291,10 @@ pub struct Strings {
     /// Confirmation detail: how many games are about to move, and
     /// where. `{}` takes the count.
     pub games_dir_confirm_n: &'static str,
+    /// The same message for exactly one game. Two fields rather than a
+    /// "game(s)" that fits neither: a count in brackets is a form no
+    /// language actually uses when speaking.
+    pub games_dir_confirm_1: &'static str,
     pub games_dir_confirm_yes: &'static str,
     pub games_dir_confirm_no: &'static str,
     /// Ask whether the games already on the card should follow.
@@ -412,6 +418,27 @@ pub struct Strings {
     pub toast_already_imported: &'static str,
     /// Toast when a game is moved onto the shelf it is already on (issue #68).
     pub toast_folder_same: &'static str,
+    /// Toast after a game is put ON a shelf. One {}: the shelf name.
+    pub toast_folder_on: &'static str,
+    /// Toast after a game is taken OFF a shelf. One {}: the shelf name.
+    pub toast_folder_off_of: &'static str,
+    /// Toast after a game is taken off every shelf at once (the ACCUEIL row).
+    pub toast_folder_off: &'static str,
+    /// Toast when A is pressed on a shelf the game is on because its FILE sits
+    /// in a directory of that name: no label can take it off, only moving it.
+    pub toast_folder_physical: &'static str,
+    /// Toast after a shelf is emptied. Not `games_dir_moved`: a shelf can empty
+    /// with nothing having moved at all, when every member was there by label.
+    pub folder_emptied: &'static str,
+    /// Confirmation detail for emptying a shelf. One {}: how many games leave it.
+    pub folder_leave_n: &'static str,
+    /// The same message for exactly one game. Two fields rather than a
+    /// "game(s)" that fits neither: a count in brackets is a form no
+    /// language actually uses when speaking.
+    pub folder_leave_1: &'static str,
+    /// Footer of the shelf picker. Says all three actions, B included: it is the
+    /// only way out and it had stopped being written down.
+    pub folder_picker_footer: &'static str,
     /// Title of the confirmation that empties a shelf (issue #68). One {}: the
     /// folder's name.
     pub folder_del_title: &'static str,
@@ -627,7 +654,7 @@ const EN: Strings = Strings {
     files_title: "REMOTE FILES",
     files_filter: "FILTER",
     home_folder: "FOLDER",
-    folder_root: "HOME",
+    folder_root: "NO FOLDER",
     files_footer: "A:DOWNLOAD   Y:SORT   -:SEARCH   L/R:PAGE   B:BACK",
     dl_title: "DOWNLOADING",
     dl_footer: "B:CANCEL",
@@ -658,7 +685,8 @@ const EN: Strings = Strings {
     games_dir_footer: "A:CHOOSE  B:UP  X:NEW FOLDER",
     games_dir_current: "in use",
     games_dir_confirm: "Move the whole library here?",
-    games_dir_confirm_n: "{} game(s) will be moved to:",
+    games_dir_confirm_n: "{} games will be moved to:",
+    games_dir_confirm_1: "{} game will be moved to:",
     games_dir_confirm_yes: "Move",
     games_dir_confirm_no: "Cancel",
     kbd_newdir_guide: "Name of the folder to create",
@@ -717,6 +745,14 @@ const EN: Strings = Strings {
     profile_share_dup: "ALREADY IN THE CATALOG. EDIT A KEY TO SHARE YOUR OWN VERSION.",
     toast_already_imported: "{} IS ALREADY IN YOUR LIBRARY.",
     toast_folder_same: "ALREADY IN THIS FOLDER.",
+    toast_folder_on: "ADDED TO {}.",
+    toast_folder_off_of: "REMOVED FROM {}.",
+    toast_folder_off: "OFF EVERY FOLDER",
+    toast_folder_physical: "IN THIS FOLDER ON THE CARD. MOVE IT TO TAKE IT OFF.",
+    folder_emptied: "Folder emptied",
+    folder_leave_n: "{} games leave this folder",
+    folder_leave_1: "{} game leaves this folder",
+    folder_picker_footer: "A:ON/OFF  X:EMPTY  B:BACK",
     folder_del_title: "DELETE FOLDER {}",
     profile_del_confirm: "DELETE YOUR SHARED PROFILE?",
     profile_del_ok: "YOUR SHARED PROFILE WAS DELETED.",
@@ -871,7 +907,7 @@ const FR: Strings = Strings {
     files_title: "FICHIERS DISTANTS",
     files_filter: "FILTRE",
     home_folder: "DOSSIER",
-    folder_root: "ACCUEIL",
+    folder_root: "AUCUN DOSSIER",
     files_footer: "A:T\u{00C9}L\u{00C9}CHARGER   Y:TRIER   -:RECHERCHE   L/R:PAGE   B:RETOUR",
     dl_title: "T\u{00C9}L\u{00C9}CHARGEMENT",
     dl_footer: "B:ANNULER",
@@ -902,7 +938,8 @@ const FR: Strings = Strings {
     games_dir_footer: "A:CHOISIR  B:REMONTER  X:NOUVEAU",
     games_dir_current: "actuel",
     games_dir_confirm: "D\u{00C9}placer toute la biblioth\u{00C8}que ici ?",
-    games_dir_confirm_n: "{} jeu(x) seront d\u{00C9}plac\u{00C9}s vers :",
+    games_dir_confirm_n: "{} jeux seront d\u{00E9}plac\u{00E9}s vers :",
+    games_dir_confirm_1: "{} jeu sera d\u{00E9}plac\u{00E9} vers :",
     games_dir_confirm_yes: "D\u{00C9}placer",
     games_dir_confirm_no: "Annuler",
     kbd_newdir_guide: "Nom du dossier \u{00E0} cr\u{00E9}er",
@@ -961,6 +998,14 @@ const FR: Strings = Strings {
     profile_share_dup: "D\u{00C9}J\u{00C0} DANS LE CATALOGUE. MODIFIE UNE TOUCHE POUR PARTAGER TA VERSION.",
     toast_already_imported: "{} EST D\u{00C9}J\u{00C0} DANS TA LUDOTH\u{00C8}QUE.",
     toast_folder_same: "D\u{00C9}J\u{00C0} DANS CE DOSSIER.",
+    toast_folder_on: "AJOUT\u{00C9} \u{00C0} {}.",
+    toast_folder_off_of: "RETIR\u{00C9} DE {}.",
+    toast_folder_off: "RETIR\u{00C9} DE TOUS LES DOSSIERS",
+    toast_folder_physical: "DANS CE DOSSIER SUR LA CARTE. D\u{00C9}PLACEZ-LE POUR LE SORTIR.",
+    folder_emptied: "Dossier vid\u{00E9}",
+    folder_leave_n: "{} jeux quittent ce dossier",
+    folder_leave_1: "{} jeu quitte ce dossier",
+    folder_picker_footer: "A:AJOUTER/RETIRER  X:VIDER  B:RETOUR",
     folder_del_title: "SUPPRIMER LE DOSSIER {}",
     profile_del_confirm: "SUPPRIMER TON PROFIL PARTAG\u{00C9} ?",
     profile_del_ok: "TON PROFIL PARTAG\u{00C9} A \u{00C9}T\u{00C9} SUPPRIM\u{00C9}.",
@@ -1115,7 +1160,7 @@ const ES: Strings = Strings {
     files_title: "ARCHIVOS REMOTOS",
     files_filter: "FILTRO",
     home_folder: "CARPETA",
-    folder_root: "INICIO",
+    folder_root: "SIN CARPETA",
     files_footer: "A:DESCARGAR   Y:ORDENAR   -:BUSCAR   L/R:P\u{00C1}GINA   B:VOLVER",
     dl_title: "DESCARGANDO",
     dl_footer: "B:CANCELAR",
@@ -1146,7 +1191,8 @@ const ES: Strings = Strings {
     games_dir_footer: "A:ELEGIR  B:SUBIR  X:NUEVA",
     games_dir_current: "en uso",
     games_dir_confirm: "Mover toda la biblioteca aqui?",
-    games_dir_confirm_n: "{} juego(s) se moveran a:",
+    games_dir_confirm_n: "{} juegos se moveran a:",
+    games_dir_confirm_1: "{} juego se movera a:",
     games_dir_confirm_yes: "Mover",
     games_dir_confirm_no: "Cancelar",
     kbd_newdir_guide: "Nombre de la carpeta a crear",
@@ -1205,6 +1251,14 @@ const ES: Strings = Strings {
     profile_share_dup: "YA EST\u{00C1} EN EL CAT\u{00C1}LOGO. CAMBIA UNA TECLA PARA COMPARTIR TU VERSI\u{00D3}N.",
     toast_already_imported: "{} YA EST\u{00C1} EN TU BIBLIOTECA.",
     toast_folder_same: "YA EST\u{00C1} EN ESTA CARPETA.",
+    toast_folder_on: "A\u{00D1}ADIDO A {}.",
+    toast_folder_off_of: "QUITADO DE {}.",
+    toast_folder_off: "FUERA DE TODAS LAS CARPETAS",
+    toast_folder_physical: "EN ESTA CARPETA EN LA TARJETA. MU\u{00C9}VELO PARA SACARLO.",
+    folder_emptied: "Carpeta vaciada",
+    folder_leave_n: "{} juegos salen de esta carpeta",
+    folder_leave_1: "{} juego sale de esta carpeta",
+    folder_picker_footer: "A:PONER/QUITAR  X:VACIAR  B:VOLVER",
     folder_del_title: "BORRAR LA CARPETA {}",
     profile_del_confirm: "\u{00BF}BORRAR TU PERFIL COMPARTIDO?",
     profile_del_ok: "TU PERFIL COMPARTIDO FUE BORRADO.",
@@ -1361,7 +1415,7 @@ const RU: Strings = Strings {
     files_title: "ФАЙЛЫ ПО СЕТИ",
     files_filter: "ФИЛЬТР",
     home_folder: "\u{041F}\u{0410}\u{041F}\u{041A}\u{0410}",
-    folder_root: "ГЛАВНАЯ",
+    folder_root: "\u{0411}\u{0415}\u{0417} \u{041F}\u{0410}\u{041F}\u{041A}\u{0418}",
     files_footer: "A:ЗАГРУЗИТЬ   Y:СОРТ   -:ПОИСК   L/R:СТРАНИЦА   B:НАЗАД",
     dl_title: "ЗАГРУЗКА",
     dl_footer: "B:ОТМЕНА",
@@ -1392,7 +1446,8 @@ const RU: Strings = Strings {
     games_dir_footer: "A:ВЫБРАТЬ  B:ВВЕРХ  X:НОВАЯ",
     games_dir_current: "текущая",
     games_dir_confirm: "Переместить всю библиотеку сюда?",
-    games_dir_confirm_n: "{} игр(ы) будут перемещены в:",
+    games_dir_confirm_n: "{} \u{0438}\u{0433}\u{0440} \u{0431}\u{0443}\u{0434}\u{0435}\u{0442} \u{043F}\u{0435}\u{0440}\u{0435}\u{043C}\u{0435}\u{0449}\u{0435}\u{043D}\u{043E} \u{0432}:",
+    games_dir_confirm_1: "{} \u{0438}\u{0433}\u{0440}\u{0430} \u{0431}\u{0443}\u{0434}\u{0435}\u{0442} \u{043F}\u{0435}\u{0440}\u{0435}\u{043C}\u{0435}\u{0449}\u{0435}\u{043D}\u{0430} \u{0432}:",
     games_dir_confirm_yes: "Переместить",
     games_dir_confirm_no: "Отмена",
     kbd_newdir_guide: "Имя создаваемой папки",
@@ -1451,6 +1506,14 @@ const RU: Strings = Strings {
     profile_share_dup: "УЖЕ В КАТАЛОГЕ. ИЗМЕНИ КЛАВИШУ, ЧТОБЫ ПОДЕЛИТЬСЯ СВОЕЙ ВЕРСИЕЙ.",
     toast_already_imported: "{} УЖЕ В ВАШЕЙ БИБЛИОТЕКЕ.",
     toast_folder_same: "\u{0423}\u{0416}\u{0415} \u{0412} \u{042D}\u{0422}\u{041E}\u{0419} \u{041F}\u{0410}\u{041F}\u{041A}\u{0415}.",
+    toast_folder_on: "\u{0414}\u{041E}\u{0411}\u{0410}\u{0412}\u{041B}\u{0415}\u{041D}\u{041E} \u{0412} {}.",
+    toast_folder_off_of: "\u{0423}\u{0411}\u{0420}\u{0410}\u{041D}\u{041E} \u{0418}\u{0417} {}.",
+    toast_folder_off: "\u{0423}\u{0411}\u{0420}\u{0410}\u{041D}\u{041E} \u{0418}\u{0417} \u{0412}\u{0421}\u{0415}\u{0425} \u{041F}\u{0410}\u{041F}\u{041E}\u{041A}",
+    toast_folder_physical: "\u{0412} \u{042D}\u{0422}\u{041E}\u{0419} \u{041F}\u{0410}\u{041F}\u{041A}\u{0415} \u{041D}\u{0410} \u{041A}\u{0410}\u{0420}\u{0422}\u{0415}. \u{041F}\u{0415}\u{0420}\u{0415}\u{041C}\u{0415}\u{0421}\u{0422}\u{0418}\u{0422}\u{0415} \u{0415}\u{0413}\u{041E}.",
+    folder_emptied: "\u{041F}\u{0430}\u{043F}\u{043A}\u{0430} \u{043E}\u{0447}\u{0438}\u{0449}\u{0435}\u{043D}\u{0430}",
+    folder_leave_n: "{} \u{0438}\u{0433}\u{0440} \u{043F}\u{043E}\u{043A}\u{0438}\u{0434}\u{0430}\u{044E}\u{0442} \u{043F}\u{0430}\u{043F}\u{043A}\u{0443}",
+    folder_leave_1: "{} \u{0438}\u{0433}\u{0440}\u{0430} \u{043F}\u{043E}\u{043A}\u{0438}\u{0434}\u{0430}\u{0435}\u{0442} \u{043F}\u{0430}\u{043F}\u{043A}\u{0443}",
+    folder_picker_footer: "A:\u{0412}\u{041A}\u{041B}/\u{0412}\u{042B}\u{041A}\u{041B}  X:\u{041E}\u{0427}\u{0418}\u{0421}\u{0422}  B:\u{041D}\u{0410}\u{0417}\u{0410}\u{0414}",
     folder_del_title: "\u{0423}\u{0414}\u{0410}\u{041B}\u{0418}\u{0422}\u{042C} \u{041F}\u{0410}\u{041F}\u{041A}\u{0423} {}",
     profile_del_confirm: "УДАЛИТЬ ВАШ ПРОФИЛЬ?",
     profile_del_ok: "ВАШ ПРОФИЛЬ УДАЛЕН ИЗ КАТАЛОГА.",
@@ -1610,7 +1673,7 @@ const DE: Strings = Strings {
     files_title: "ENTFERNTE DATEIEN",
     files_filter: "FILTER",
     home_folder: "ORDNER",
-    folder_root: "START",
+    folder_root: "KEIN ORDNER",
     files_footer: "A:LADEN   Y:SORT.   -:SUCHE   L/R:SEITE   B:ZUR\u{00DC}CK",
     dl_title: "WIRD GELADEN",
     dl_footer: "B:ABBRECHEN",
@@ -1641,7 +1704,8 @@ const DE: Strings = Strings {
     games_dir_footer: "A:W\u{00C4}HLEN  B:ZUR\u{00DC}CK  X:NEU",
     games_dir_current: "aktuell",
     games_dir_confirm: "Ganze Bibliothek hierher verschieben?",
-    games_dir_confirm_n: "{} Spiel(e) werden verschoben nach:",
+    games_dir_confirm_n: "{} Spiele werden verschoben nach:",
+    games_dir_confirm_1: "{} Spiel wird verschoben nach:",
     games_dir_confirm_yes: "Verschieben",
     games_dir_confirm_no: "Abbrechen",
     kbd_newdir_guide: "Name des neuen Ordners",
@@ -1700,6 +1764,14 @@ const DE: Strings = Strings {
     profile_share_dup: "BEREITS IM KATALOG. \u{00C4}NDERE EINE TASTE, UM DEINE VERSION ZU TEILEN.",
     toast_already_imported: "{} IST BEREITS IN DEINER BIBLIOTHEK.",
     toast_folder_same: "BEREITS IN DIESEM ORDNER.",
+    toast_folder_on: "ZU {} HINZUGEF\u{00DC}GT.",
+    toast_folder_off_of: "AUS {} ENTFERNT.",
+    toast_folder_off: "AUS ALLEN ORDNERN ENTFERNT",
+    toast_folder_physical: "AUF DER KARTE IN DIESEM ORDNER. ZUM ENTFERNEN VERSCHIEBEN.",
+    folder_emptied: "Ordner geleert",
+    folder_leave_n: "{} Spiele verlassen diesen Ordner",
+    folder_leave_1: "{} Spiel verl\u{00E4}sst diesen Ordner",
+    folder_picker_footer: "A:EIN/AUS  X:LEEREN  B:ZUR\u{00DC}CK",
     folder_del_title: "ORDNER {} L\u{00D6}SCHEN",
     profile_del_confirm: "DEIN GETEILTES PROFIL L\u{00D6}SCHEN?",
     profile_del_ok: "DEIN GETEILTES PROFIL WURDE GEL\u{00D6}SCHT.",
@@ -1856,7 +1928,7 @@ const IT: Strings = Strings {
     files_title: "FILE REMOTI",
     files_filter: "FILTRO",
     home_folder: "CARTELLA",
-    folder_root: "HOME",
+    folder_root: "NESSUNA CARTELLA",
     files_footer: "A:SCARICA   Y:ORDINA   -:CERCA   L/R:PAGINA   B:INDIETRO",
     dl_title: "SCARICAMENTO",
     dl_footer: "B:ANNULLA",
@@ -1887,7 +1959,8 @@ const IT: Strings = Strings {
     games_dir_footer: "A:SCEGLI  B:SU  X:NUOVA",
     games_dir_current: "in uso",
     games_dir_confirm: "Spostare qui tutta la libreria?",
-    games_dir_confirm_n: "{} gioco/i saranno spostati in:",
+    games_dir_confirm_n: "{} giochi saranno spostati in:",
+    games_dir_confirm_1: "{} gioco sar\u{00E0} spostato in:",
     games_dir_confirm_yes: "Sposta",
     games_dir_confirm_no: "Annulla",
     kbd_newdir_guide: "Nome della cartella da creare",
@@ -1946,6 +2019,14 @@ const IT: Strings = Strings {
     profile_share_dup: "GI\u{00C0} NEL CATALOGO. CAMBIA UN TASTO PER CONDIVIDERE LA TUA VERSIONE.",
     toast_already_imported: "{} \u{00C8} GI\u{00C0} NELLA TUA LIBRERIA.",
     toast_folder_same: "GI\u{00C0} IN QUESTA CARTELLA.",
+    toast_folder_on: "AGGIUNTO A {}.",
+    toast_folder_off_of: "RIMOSSO DA {}.",
+    toast_folder_off: "RIMOSSO DA TUTTE LE CARTELLE",
+    toast_folder_physical: "IN QUESTA CARTELLA SULLA SCHEDA. SPOSTALO PER TOGLIERLO.",
+    folder_emptied: "Cartella svuotata",
+    folder_leave_n: "{} giochi lasciano questa cartella",
+    folder_leave_1: "{} gioco lascia questa cartella",
+    folder_picker_footer: "A:METTI/TOGLI  X:SVUOTA  B:INDIETRO",
     folder_del_title: "ELIMINA LA CARTELLA {}",
     profile_del_confirm: "ELIMINARE IL TUO PROFILO CONDIVISO?",
     profile_del_ok: "IL TUO PROFILO CONDIVISO \u{00C8} STATO ELIMINATO.",
@@ -2102,7 +2183,7 @@ const PT: Strings = Strings {
     files_title: "ARQUIVOS REMOTOS",
     files_filter: "FILTRO",
     home_folder: "PASTA",
-    folder_root: "IN\u{00CD}CIO",
+    folder_root: "SEM PASTA",
     files_footer: "A:BAIXAR   Y:ORDENAR   -:BUSCAR   L/R:P\u{00C1}GINA   B:VOLTAR",
     dl_title: "BAIXANDO",
     dl_footer: "B:CANCELAR",
@@ -2133,7 +2214,8 @@ const PT: Strings = Strings {
     games_dir_footer: "A:ESCOLHER  B:SUBIR  X:NOVA",
     games_dir_current: "em uso",
     games_dir_confirm: "Mover toda a biblioteca para ca?",
-    games_dir_confirm_n: "{} jogo(s) serao movidos para:",
+    games_dir_confirm_n: "{} jogos serao movidos para:",
+    games_dir_confirm_1: "{} jogo sera movido para:",
     games_dir_confirm_yes: "Mover",
     games_dir_confirm_no: "Cancelar",
     kbd_newdir_guide: "Nome da pasta a criar",
@@ -2192,6 +2274,14 @@ const PT: Strings = Strings {
     profile_share_dup: "J\u{00C1} EST\u{00C1} NO CAT\u{00C1}LOGO. MUDE UMA TECLA PARA COMPARTILHAR SUA VERS\u{00C3}O.",
     toast_already_imported: "{} J\u{00C1} EST\u{00C1} NA SUA BIBLIOTECA.",
     toast_folder_same: "J\u{00C1} EST\u{00C1} NESTA PASTA.",
+    toast_folder_on: "ADICIONADO A {}.",
+    toast_folder_off_of: "REMOVIDO DE {}.",
+    toast_folder_off: "FORA DE TODAS AS PASTAS",
+    toast_folder_physical: "NESTA PASTA NO CART\u{00C3}O. MOVA-O PARA TIRAR.",
+    folder_emptied: "Pasta esvaziada",
+    folder_leave_n: "{} jogos saem desta pasta",
+    folder_leave_1: "{} jogo sai desta pasta",
+    folder_picker_footer: "A:POR/TIRAR  X:ESVAZIAR  B:VOLTAR",
     folder_del_title: "EXCLUIR A PASTA {}",
     profile_del_confirm: "REMOVER SEU PERFIL COMPARTILHADO?",
     profile_del_ok: "SEU PERFIL COMPARTILHADO FOI REMOVIDO.",
@@ -2353,7 +2443,7 @@ const ZH: Strings = Strings {
     files_title: "远程文件",
     files_filter: "筛选",
     home_folder: "\u{6587}\u{4EF6}\u{5939}",
-    folder_root: "主页",
+    folder_root: "\u{65E0}\u{6587}\u{4EF6}\u{5939}",
     files_footer: "A:下载   Y:排序   -:搜索   L/R:翻页   B:返回",
     dl_title: "下载中",
     dl_footer: "B:取消",
@@ -2384,7 +2474,8 @@ const ZH: Strings = Strings {
     games_dir_footer: "A:选择  B:上一级  X:新建",
     games_dir_current: "使用中",
     games_dir_confirm: "将整个游戏库移动到这里？",
-    games_dir_confirm_n: "{} 个游戏将被移动到：",
+    games_dir_confirm_n: "{} \u{4E2A}\u{6E38}\u{620F}\u{5C06}\u{79FB}\u{52A8}\u{5230}\u{FF1A}",
+    games_dir_confirm_1: "{} \u{4E2A}\u{6E38}\u{620F}\u{5C06}\u{79FB}\u{52A8}\u{5230}\u{FF1A}",
     games_dir_confirm_yes: "移动",
     games_dir_confirm_no: "取消",
     kbd_newdir_guide: "要创建的文件夹名称",
@@ -2443,6 +2534,14 @@ const ZH: Strings = Strings {
     profile_share_dup: "已在目录中。修改一个按键即可分享你的版本。",
     toast_already_imported: "{} 已经在你的库中。",
     toast_folder_same: "\u{5DF2}\u{5728}\u{6B64}\u{6587}\u{4EF6}\u{5939}\u{4E2D}\u{3002}",
+    toast_folder_on: "\u{5DF2}\u{52A0}\u{5165} {}\u{3002}",
+    toast_folder_off_of: "\u{5DF2}\u{79FB}\u{51FA} {}\u{3002}",
+    toast_folder_off: "\u{5DF2}\u{79FB}\u{51FA}\u{6240}\u{6709}\u{6587}\u{4EF6}\u{5939}",
+    toast_folder_physical: "\u{5361}\u{4E0A}\u{4F4D}\u{4E8E}\u{6B64}\u{6587}\u{4EF6}\u{5939}\u{3002}\u{9700}\u{79FB}\u{52A8}\u{6587}\u{4EF6}\u{624D}\u{80FD}\u{79FB}\u{51FA}\u{3002}",
+    folder_emptied: "\u{6587}\u{4EF6}\u{5939}\u{5DF2}\u{6E05}\u{7A7A}",
+    folder_leave_n: "{} \u{4E2A}\u{6E38}\u{620F}\u{79BB}\u{5F00}\u{6B64}\u{6587}\u{4EF6}\u{5939}",
+    folder_leave_1: "{} \u{4E2A}\u{6E38}\u{620F}\u{79BB}\u{5F00}\u{6B64}\u{6587}\u{4EF6}\u{5939}",
+    folder_picker_footer: "A:\u{52A0}\u{5165}/\u{79FB}\u{51FA}  X:\u{6E05}\u{7A7A}  B:\u{8FD4}\u{56DE}",
     folder_del_title: "\u{5220}\u{9664}\u{6587}\u{4EF6}\u{5939} {}",
     profile_del_confirm: "删除你分享的配置？",
     profile_del_ok: "你分享的配置已从目录中删除。",
@@ -2602,7 +2701,7 @@ const TR: Strings = Strings {
     files_title: "UZAK DOSYALAR",
     files_filter: "F\u{0130}LTRE",
     home_folder: "KLAS\u{00D6}R",
-    folder_root: "ANA SAYFA",
+    folder_root: "KLAS\u{00D6}RS\u{00DC}Z",
     files_footer: "A:IND\u{0130}R   Y:SIRALA   -:ARA   L/R:SAYFA   B:GER\u{0130}",
     dl_title: "IND\u{0130}R\u{0130}L\u{0130}YOR",
     dl_footer: "B:IPTAL",
@@ -2633,7 +2732,8 @@ const TR: Strings = Strings {
     games_dir_footer: "A:SEC  B:YUKARI  X:YENI",
     games_dir_current: "kullanimda",
     games_dir_confirm: "Tum kutuphane buraya tasinsin mi?",
-    games_dir_confirm_n: "{} oyun su konuma tasinacak:",
+    games_dir_confirm_n: "{} oyun \u{015F}uraya ta\u{015F}\u{0131}nacak:",
+    games_dir_confirm_1: "{} oyun \u{015F}uraya ta\u{015F}\u{0131}nacak:",
     games_dir_confirm_yes: "Tasi",
     games_dir_confirm_no: "Iptal",
     kbd_newdir_guide: "Olusturulacak klasorun adi",
@@ -2692,6 +2792,14 @@ const TR: Strings = Strings {
     profile_share_dup: "ZATEN KATALOGDA. KEND\u{0130} S\u{00DC}R\u{00DC}M\u{00DC}N\u{00DC} PAYLA\u{015E}MAK I\u{00C7}IN B\u{0130}R TU\u{015E} DE\u{011E}\u{0130}\u{015E}T\u{0130}R.",
     toast_already_imported: "{} ZATEN K\u{00DC}T\u{00DC}PHANENDE.",
     toast_folder_same: "ZATEN BU KLAS\u{00D6}RDE.",
+    toast_folder_on: "{} KLAS\u{00D6}R\u{00DC}NE EKLEND\u{0130}",
+    toast_folder_off_of: "{} KLAS\u{00D6}R\u{00DC}NDEN \u{00C7}IKARILDI",
+    toast_folder_off: "T\u{00DC}M KLAS\u{00D6}RLERDEN \u{00C7}IKARILDI",
+    toast_folder_physical: "KARTTA BU KLAS\u{00D6}RDE. \u{00C7}IKARMAK \u{0130}\u{00C7}\u{0130}N TA\u{015E}IYIN.",
+    folder_emptied: "Klas\u{00F6}r bo\u{015F}alt\u{0131}ld\u{0131}",
+    folder_leave_n: "{} oyun bu klas\u{00F6}rden \u{00E7}\u{0131}kar\u{0131}ld\u{0131}",
+    folder_leave_1: "{} oyun bu klas\u{00F6}rden \u{00E7}\u{0131}kar\u{0131}ld\u{0131}",
+    folder_picker_footer: "A:EKLE/\u{00C7}IKAR  X:BO\u{015E}ALT  B:GER\u{0130}",
     folder_del_title: "{} KLAS\u{00D6}R\u{00DC}N\u{00DC} S\u{0130}L",
     profile_del_confirm: "PAYLA\u{015E}ILAN PROF\u{0130}L\u{0130}N S\u{0130}L\u{0130}NS\u{0130}N M\u{0130}?",
     profile_del_ok: "PAYLA\u{015E}ILAN PROF\u{0130}L\u{0130}N S\u{0130}L\u{0130}ND\u{0130}.",
@@ -3050,6 +3158,21 @@ pub fn count_line(
 /// Substitute a single `{}` placeholder in one of the error templates.
 fn fill(template: &str, arg: &str) -> std::string::String {
     template.replacen("{}", arg, 1)
+}
+
+/// A counted message, in the form the count actually calls for.
+///
+/// English, French, Spanish, German, Italian and Portuguese all inflect on one
+/// versus many, and writing "jeu(x)" to dodge that is a form nobody says out
+/// loud. Chinese and Turkish do not inflect at all and simply pass the same
+/// string twice.
+///
+/// Russian really wants three forms (1, 2-4, 5+); it gets the nominative for one
+/// and the genitive plural for the rest, which is right everywhere except 2-4.
+/// Correcting that means a third field for one language, and it is a smaller
+/// error than the brackets it replaces.
+pub fn fill_count(one: &'static str, many: &'static str, n: i32) -> std::string::String {
+    fill(if n == 1 { one } else { many }, &n.to_string())
 }
 
 /// Fill a one-placeholder message with a number. The code goes ON SCREEN on
