@@ -10,7 +10,7 @@
   "verified": false,
   "bindings": {
     "A": "[",
-    "B": "]",
+    "B": "Up",
     "Down": "Down",
     "L": "Escape",
     "Left": "Left",
