@@ -226,6 +226,12 @@ impl Tab {
             Tab::Reglages => 2,
         }
     }
+    /// The tab a navbar cell stands for. `None` for anything out of range --
+    /// the strip has three cells and the hit test can only answer within it,
+    /// but a bound that is checked is a bound that cannot become a panic.
+    pub(crate) fn from_index(i: usize) -> Option<Tab> {
+        Tab::ORDER.get(i).copied()
+    }
     fn next(self) -> Tab {
         Tab::ORDER[(self.index() + 1) % Tab::ORDER.len()]
     }
@@ -246,12 +252,50 @@ pub(crate) fn screen_tab(screen: Screen) -> Option<Tab> {
     }
 }
 
-/// The game most recently launched, as `(basename, display_name)`. Set on
+/// Switch to `target`, sliding its content in from `dir` (-1 = from the left).
+///
+/// One body for the shoulders and for a tap on the strip: two copies would
+/// drift, and the slide direction is the only thing that differs between them.
+pub(crate) fn goto_tab(target: Tab, dir: f32) {
+    // Belt and braces with the gate in `input()` and in the navbar branch of
+    // `touch()`: a reveal left armed with nobody to step it pins
+    // `game_reveal_active()` true and every button after it is swallowed. The
+    // gates stop us getting here mid-reveal; this makes sure that a path added
+    // later cannot resurrect the trap.
+    crate::backend::render::game_reveal_cancel();
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.screen = match target {
+            Tab::Jouer => {
+                if s.entries.is_empty() {
+                    Screen::Empty
+                } else {
+                    Screen::List { selection: 0, scroll_offset: 0 }
+                }
+            }
+            Tab::Importer => distant_idle_at(0),
+            Tab::Reglages => Screen::SettingsModal { selection: 0 },
+        };
+    }
+    // Slide the incoming tab's content in from the side asked for; the navbar
+    // stays fixed. (Tabs slide; modals and editors scale.)
+    crate::backend::render::tab_transition_begin(dir);
+    // Snap the JOUER glide so the gallery lands on its (reset) top instead of
+    // gliding from a stale cursor.
+    crate::backend::render::gallery_anim_reset();
+}
+
+/// The game most recently launched, as `(path, basename, display_name)`. Set on
 /// pick (JOUER), and deliberately NOT cleared by `reset()` so that:
 ///   1. quitting a game back to the library restores the cursor to that
 ///      row (instead of jumping to the top), and
 ///   2. the in-game pause menu can show the game's name under "PAUSE".
-static LAST_PLAYED: Mutex<Option<(std::string::String, std::string::String)>> = Mutex::new(None);
+///
+/// The PATH is the identity. Folders (#68) let two games share a file name, and
+/// finding the row by name alone landed the cursor -- and the closing fade -- on
+/// whichever namesake the sort happened to put first. The basename is kept
+/// beside it because the playtime and the pause title are keyed by name.
+static LAST_PLAYED: Mutex<Option<(std::string::String, std::string::String, std::string::String)>> =
+    Mutex::new(None);
 
 /// System tick captured when a game is launched; `open()` (return to library)
 /// subtracts it to bank the session's playtime. NOT cleared by `reset()` so it
@@ -671,9 +715,9 @@ pub(crate) fn sort_entries(entries: &mut std::vec::Vec<Entry>, mode: SortMode, r
     entries.sort_by_key(|e| !crate::favorites::is_favorite(&e.basename));
 }
 
-fn note_played(basename: &str, display_name: &str) {
+fn note_played(path: &str, basename: &str, display_name: &str) {
     if let Ok(mut g) = LAST_PLAYED.lock() {
-        *g = Some((basename.into(), display_name.into()));
+        *g = Some((path.into(), basename.into(), display_name.into()));
     }
 }
 
@@ -695,17 +739,22 @@ pub fn note_played_from_path(path: &str) {
         .and_then(|m| m.display_name)
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| basename.clone());
-    note_played(&basename, &display_name);
+    note_played(path, &basename, &display_name);
 }
 
 fn last_played_basename() -> Option<std::string::String> {
-    LAST_PLAYED.lock().ok().and_then(|g| g.as_ref().map(|(b, _)| b.clone()))
+    LAST_PLAYED.lock().ok().and_then(|g| g.as_ref().map(|(_, b, _)| b.clone()))
+}
+
+/// Path of the game last launched. The identity to re-find it by.
+fn last_played_path() -> Option<std::string::String> {
+    LAST_PLAYED.lock().ok().and_then(|g| g.as_ref().map(|(p, _, _)| p.clone()))
 }
 
 /// Display name of the currently/last launched game — used by the pause
 /// menu (`render::draw_menu_overlay`) to show the title under "PAUSE".
 pub fn active_display_name() -> Option<std::string::String> {
-    LAST_PLAYED.lock().ok().and_then(|g| g.as_ref().map(|(_, n)| n.clone()))
+    LAST_PLAYED.lock().ok().and_then(|g| g.as_ref().map(|(_, _, n)| n.clone()))
 }
 
 /// Sidecar JSON written next to the SWF — gives a display name override
@@ -1938,7 +1987,13 @@ enum MoveOutcome {
     Moved(std::string::String),
     /// Nothing moved, or everything that moved was put back. The game is exactly
     /// where it was and the caller must not touch its recorded path.
-    Refused,
+    ///
+    /// `name_taken` says WHY, because the two reasons want different words. A
+    /// file of that name already at the destination is a diagnosis -- another
+    /// game owns that name there -- and telling the player the card refused to
+    /// write is both false and useless. Anything else really is a write that
+    /// failed.
+    Refused { name_taken: bool },
     /// The move broke part way AND the undo broke too. The `.swf` is at this
     /// path now; the caller must record it even while reporting the failure,
     /// because an entry that names a file which is not there is worse than one
@@ -1999,22 +2054,22 @@ fn move_game_to_folder(path: &str, basename: &str, folder: &str) -> MoveOutcome 
         };
         if twin != path && file_exists_now(&twin) {
             log(&std::format!("library: {} already exists, move refused\n", twin));
-            return MoveOutcome::Refused;
+            return MoveOutcome::Refused { name_taken: true };
         }
     }
     if !folder.is_empty() && !dir_exists(&dest_dir) {
         if std::fs::create_dir_all(&dest_dir).is_err() {
             log(&std::format!("library: could not create {}\n", dest_dir));
-            return MoveOutcome::Refused;
+            return MoveOutcome::Refused { name_taken: false };
         }
     }
     if file_exists_now(&dest) {
         log(&std::format!("library: {} already exists, move refused\n", dest));
-        return MoveOutcome::Refused;
+        return MoveOutcome::Refused { name_taken: true };
     }
     if std::fs::rename(path, &dest).is_err() {
         log(&std::format!("library: move {} -> {} failed\n", path, dest));
-        return MoveOutcome::Refused;
+        return MoveOutcome::Refused { name_taken: false };
     }
     // The companion tree, when the game has one. Its absence is the normal case
     // (single-file games), so a missing source is not a failure.
@@ -2066,7 +2121,7 @@ fn move_game_to_folder(path: &str, basename: &str, folder: &str) -> MoveOutcome 
                 return MoveOutcome::Stranded(dest);
             }
             log(&std::format!("library: move of {} failed, game put back\n", src_files));
-            return MoveOutcome::Refused;
+            return MoveOutcome::Refused { name_taken: false };
         }
         files_travelled = true;
     }
@@ -2105,7 +2160,7 @@ fn move_game_to_folder(path: &str, basename: &str, folder: &str) -> MoveOutcome 
                 return MoveOutcome::Stranded(dest);
             }
             log(&std::format!("library: {} not moved, game put back\n", base_src));
-            return MoveOutcome::Refused;
+            return MoveOutcome::Refused { name_taken: false };
         }
     }
     for suffix in [".url", ".filesize"] {
@@ -2312,6 +2367,9 @@ pub fn open() {
     // doing it inline would be a black screen. It's deferred to `render` behind
     // the "Optimisation" loading panel instead (see `maybe_arm_startup_migrations`
     // / `PendingNet::RunStartupMigrations`), which shows a frame first, then runs.
+    // Any finger business from before a game launched is over.
+    navbar_press_cancel();
+    crate::backend::render::row_touch_cancel();
     log_scan_breakdown(LIBRARY.lock().map(|g| g.entries.len()).unwrap_or(0));
     // Reload URL history from SD on each open so changes from a previous
     // .nro boot are visible. Cheap (file is <2 KB typical).
@@ -2341,6 +2399,11 @@ pub fn open() {
     // If we're re-opening after quitting a game, land the cursor back on
     // that game's row instead of the top of the list.
     let want = last_played_basename();
+    // By PATH first. Two games can share a file name now, and the one the
+    // player just quit is a particular file, not whichever namesake the sort
+    // put first. The name stays as a fallback for the case the path no longer
+    // exists -- the game was moved or renamed while it ran.
+    let want_path = last_played_path();
     let applet = unsafe { ruffle_is_applet_mode() } != 0;
     log(&std::format!("library: open applet_mode={}\n", applet));
     // Identity of the just-played game, for the quit "close" reveal below.
@@ -2367,33 +2430,51 @@ pub fn open() {
         s.anim_origin_ticks = unsafe { ruffle_tick_now() };
         // Apply the active sort BEFORE the cursor position is computed below.
         sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
+        // ABSOLUTE index of the game just played. By PATH first: folders (#68)
+        // let two games share a file name, and the one just quit is a particular
+        // FILE, not whichever namesake the sort put first. The name is the
+        // fallback, for when the path is gone -- moved or renamed while it ran.
+        //
+        // Computed here rather than inside the branch below, because the closing
+        // fade has to grow from the same tile the cursor lands on.
+        // Kept UNDEFAULTED as well as defaulted, because the two readers below
+        // want different things from a miss. The cursor has to land somewhere,
+        // so it falls back to the top. The closing fade must NOT: "no game was
+        // played" and "the game played is row 0" are different states, and
+        // conflating them made a cold boot -- where nothing has been played at
+        // all -- shrink game number one from full screen into the top-left
+        // corner, over a tile rect that had never been published.
+        let found = want_path
+            .as_deref()
+            .and_then(|p| s.entries.iter().position(|e| e.path == p))
+            .or_else(|| {
+                want.as_deref()
+                    .and_then(|b| s.entries.iter().position(|e| e.basename == b))
+            });
+        let abs = found.unwrap_or(0);
         s.screen = if s.entries.is_empty() {
             Screen::Empty
         } else {
-            // ABSOLUTE index of the game just played, then translated into the
-            // shelf's view: `Screen::List` counts rows of what is on screen, and
-            // with a shelf open those are not the same number.
-            let abs = want
-                .as_deref()
-                .and_then(|b| s.entries.iter().position(|e| e.basename == b))
-                .unwrap_or(0);
+            // Translated into the shelf's view: `Screen::List` counts rows of
+            // what is on screen, and with a shelf open those are not the same
+            // number.
             let shown = local_filtered_indices(&s.entries, &s.local_filter, &s.folder_filter);
             let selection = shown.iter().position(|&i| i == abs).unwrap_or(0);
             // The JOUER gallery scrolls by ROWS (not flat index), and a tile's
-            // row depends on the justified layout — so derive the scroll from the
-            // layout the last render published (still valid across a quit->library
-            // round-trip: same entries). `gallery_scroll_for` falls back to 0 when
-            // no layout exists yet (first boot). Using the old flat `clamp_scroll`
-            // here put a last-row game off-screen (blank gallery on quit).
+            // row depends on the justified layout -- so derive the scroll from
+            // the layout the last render published (still valid across a
+            // quit->library round-trip: same entries). `gallery_scroll_for`
+            // falls back to 0 when no layout exists yet (first boot). Using the
+            // old flat `clamp_scroll` here put a last-row game off-screen.
             let scroll_offset = gallery_scroll_for(selection, jouer_scroll());
             Screen::List { selection, scroll_offset }
         };
-        // Returning from a game (last-played still present) → grab its identity
-        // so we can play the cover shrinking back to its tile.
-        if let Some(b) = want.as_deref() {
-            if let Some(e) = s.entries.iter().find(|e| e.basename == b) {
-                collapse_info = Some((e.basename.clone(), e.display_name.clone(), e.color_chip));
-            }
+        // Returning from a game (last-played still present) -> grab its identity
+        // so we can play the cover shrinking back to its tile. `found`, never
+        // `abs`: a boot with nothing played, or a last-played game deleted from a
+        // PC between sessions, must play NO collapse rather than someone else's.
+        if let Some(e) = found.and_then(|i| s.entries.get(i)) {
+            collapse_info = Some((e.basename.clone(), e.display_name.clone(), e.color_chip));
         }
     }
     // Snap the gallery glide to wherever the cursor lands (last-played row),
@@ -2868,6 +2949,10 @@ struct TouchState {
     start_y: f32,
     /// True once the finger moved past the drag threshold this gesture.
     dragging: bool,
+    /// Set when the press landed on the navbar. The strip is drawn OVER the
+    /// screen, so a press there belongs to it whatever is underneath, and no
+    /// gallery or row gesture may start.
+    nav_press: Option<usize>,
     /// Eased scroll (px) captured when the drag began.
     start_scroll_px: f32,
 }
@@ -2878,6 +2963,7 @@ static TOUCH: Mutex<TouchState> = Mutex::new(TouchState {
     start_y: 0.0,
     dragging: false,
     start_scroll_px: 0.0,
+    nav_press: None,
 });
 
 /// Forward the per-frame touchscreen state to the JOUER gallery: drag to scroll,
@@ -3032,6 +3118,20 @@ fn set_screen_selection(s: &mut State, idx: usize) -> bool {
     }
 }
 
+/// Forget a press that landed on the navbar.
+///
+/// A press arms `nav_press` and a RELEASE spends it, and anything can happen in
+/// between: a button opens a modal, a game launches and quits. The release then
+/// arrives on a screen nobody pressed anything on. `screen_tab` already refuses
+/// while a modal is up, but a game round-trip lands back on JOUER with the strip
+/// drawn again -- and C++ sends a no-finger sample every frame, so the first one
+/// back would spend the stale press and switch tabs on its own.
+fn navbar_press_cancel() {
+    if let Ok(mut t) = TOUCH.lock() {
+        t.nav_press = None;
+    }
+}
+
 pub fn touch(x: f32, y: f32, pressed: bool) {
     use crate::backend::render as r;
     // Movement (px) before a press is treated as a drag instead of a tap.
@@ -3048,6 +3148,64 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
             | Ok(Screen::DistantFiles { .. })
             | Ok(Screen::DistantIdle { .. })
     );
+
+    // ── The navbar is asked FIRST ────────────────────────────────────────
+    // It sits on top of every tab-home screen, so a finger in the strip is
+    // aimed at it and not at the gallery behind. Answered on RELEASE like
+    // every other tap; the press only remembers which tab was under it.
+    {
+        // The SAME suspend window `input()` opens with (see the gate below the
+        // button dispatch). A screen must not be re-navigated mid-animation, and
+        // here that is not a cosmetic rule:
+        //
+        // `game_reveal.active` is cleared in exactly one place, inside
+        // `game_reveal_step`, and for a quit-collapse that runs only from the
+        // `Screen::List` arm of `render`. Switching tabs mid-collapse leaves the
+        // animation with nobody to step it, so `game_reveal_active()` stays true
+        // for ever -- and `input()` then answers every button by swallowing it.
+        // The launcher draws perfectly and nothing responds.
+        if r::modal_close_active() || r::distant_reveal_active() || r::game_reveal_active() {
+            return;
+        }
+        let Ok(mut t) = TOUCH.lock() else { return };
+        if pressed && !t.down && t.nav_press.is_none() {
+            if let Some(tab) = r::navbar_hit(x, y) {
+                t.nav_press = Some(tab);
+                return;
+            }
+        } else if t.nav_press.is_some() {
+            if pressed {
+                // Still held: the finger may have wandered off the strip, and a
+                // press you can slide away from to cancel is how every button
+                // on every touchscreen behaves. Disarmed here rather than
+                // second-guessed on release, which carries no position at all
+                // (C++ reports a lifted finger as (0, 0)).
+                if r::navbar_hit(x, y).is_none() {
+                    t.nav_press = None;
+                }
+                return;
+            }
+            let tab = t.nav_press.take();
+            // `goto_tab` re-locks LIBRARY, so the gesture lock goes first: the
+            // house rule is TOUCH then LIBRARY, never the other way.
+            drop(t);
+            if let Some(idx) = tab {
+                let cur = LIBRARY
+                    .lock()
+                    .ok()
+                    .and_then(|s| screen_tab(s.screen))
+                    .map(|t| t.index());
+                if let (Some(cur), Some(target)) = (cur, Tab::from_index(idx)) {
+                    // Already there: a tap on the tab you are on does nothing,
+                    // rather than resetting its cursor to the top.
+                    if cur != idx {
+                        goto_tab(target, if idx > cur { 1.0 } else { -1.0 });
+                    }
+                }
+            }
+            return;
+        }
+    }
 
     let mut t = match TOUCH.lock() {
         Ok(t) => t,
@@ -3335,27 +3493,7 @@ pub fn input(button: &str) -> bool {
         if matches!(button, "L" | "R") {
             if let Some(tab) = screen_tab(screen_snap) {
                 let target = if button == "L" { tab.prev() } else { tab.next() };
-                if let Ok(mut s) = LIBRARY.lock() {
-                    s.screen = match target {
-                        Tab::Jouer => {
-                            if s.entries.is_empty() {
-                                Screen::Empty
-                            } else {
-                                Screen::List { selection: 0, scroll_offset: 0 }
-                            }
-                        }
-                        Tab::Importer => distant_idle_at(0),
-                        Tab::Reglages => Screen::SettingsModal { selection: 0 },
-                    };
-                }
-                // Slide the incoming tab's content in from the side pressed
-                // (L = from the left, R = from the right); the navbar stays fixed.
-                // (Tabs slide; modals/editors scale.)
-                let dir = if button == "L" { -1.0 } else { 1.0 };
-                crate::backend::render::tab_transition_begin(dir);
-                // Snap the JOUER glide so the gallery lands on its (reset) top
-                // instead of gliding from a stale cursor.
-                crate::backend::render::gallery_anim_reset();
+                goto_tab(target, if button == "L" { -1.0 } else { 1.0 });
                 return true;
             }
         }
@@ -5324,7 +5462,7 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
                 s.selected_path = Some(entry.path.clone());
                 // Remember it so quit-to-library lands back on this row and
                 // the pause menu can show the title.
-                note_played(&entry.basename, &entry.display_name);
+                note_played(&entry.path, &entry.basename, &entry.display_name);
                 if let Ok(mut g) = LAUNCH_TICK.lock() {
                     *g = Some(unsafe { ruffle_tick_now() });
                 }
@@ -6691,7 +6829,7 @@ fn empty_folder(s: &mut State, folder_idx: usize, pinned: usize) -> usize {
         let (new_path, clean) = match move_game_to_folder(&path, &basename, "") {
             MoveOutcome::Moved(p) => (Some(p), true),
             MoveOutcome::Stranded(p) => (Some(p), false),
-            MoveOutcome::Refused => (None, false),
+            MoveOutcome::Refused { .. } => (None, false),
         };
         if let Some(new_path) = new_path {
             note_file_removed(&path);
@@ -6874,12 +7012,25 @@ pub(crate) fn apply_game_folder(s: &mut State, game_idx: usize, target: &str) {
         // sweeps the directory it reads off that path.
         let landed = match outcome {
             MoveOutcome::Moved(ref np) | MoveOutcome::Stranded(ref np) => Some(np.clone()),
-            MoveOutcome::Refused => None,
+            MoveOutcome::Refused { .. } => None,
         };
         let Some(new_path) = landed else {
             // Nothing moved and nothing was erased. The game is exactly as it
             // was, which is the only state worth leaving it in.
-            set_toast(s, crate::loc::s().err_sd_write.to_string(), TOAST_ERR);
+            // Say WHICH failure. A name already taken at the root is a
+            // diagnosis the player can act on -- another game owns that file
+            // name there -- and reporting it as a card that refused to write is
+            // both false and useless.
+            let taken = matches!(outcome, MoveOutcome::Refused { name_taken: true });
+            set_toast(
+                s,
+                if taken {
+                    crate::loc::fill_name(crate::loc::s().toast_name_taken, &basename)
+                } else {
+                    crate::loc::s().err_sd_write.to_string()
+                },
+                TOAST_ERR,
+            );
             let row = row_of(s, target);
             s.screen = Screen::GameFolderPicker { game_idx, selection: row };
             return;
@@ -9576,6 +9727,11 @@ pub fn render(backend: &mut SwitchRenderBackend) {
         backend.draw_navbar(tab.index());
         // Version label, bottom-right of the home screens.
         backend.draw_version_badge();
+    } else {
+        // No strip on a sub-screen, so nothing on it may be tapped. Without
+        // this the cells published by the last home screen stayed live, and a
+        // finger in the top 38 px of a modal switched tabs out from under it.
+        crate::backend::render::navbar_clear();
     }
 
     // ── Transient toast (#20) ────────────────────────────────────────────

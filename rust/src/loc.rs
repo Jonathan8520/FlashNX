@@ -427,6 +427,10 @@ pub struct Strings {
     /// Toast when A is pressed on a shelf the game is on because its FILE sits
     /// in a directory of that name: no label can take it off, only moving it.
     pub toast_folder_physical: &'static str,
+    /// Toast when a game cannot come back to the root because another game
+    /// already holds that file name there. One {}: the file name. NOT an SD
+    /// error -- the card is fine, the name is taken.
+    pub toast_name_taken: &'static str,
     /// Toast after a shelf is emptied. Not `games_dir_moved`: a shelf can empty
     /// with nothing having moved at all, when every member was there by label.
     pub folder_emptied: &'static str,
@@ -749,6 +753,7 @@ const EN: Strings = Strings {
     toast_folder_off_of: "REMOVED FROM {}.",
     toast_folder_off: "OFF EVERY FOLDER",
     toast_folder_physical: "IN THIS FOLDER ON THE CARD. MOVE IT TO TAKE IT OFF.",
+    toast_name_taken: "{} ALREADY EXISTS AT THE ROOT.",
     folder_emptied: "Folder emptied",
     folder_leave_n: "{} games leave this folder",
     folder_leave_1: "{} game leaves this folder",
@@ -1002,6 +1007,7 @@ const FR: Strings = Strings {
     toast_folder_off_of: "RETIR\u{00C9} DE {}.",
     toast_folder_off: "RETIR\u{00C9} DE TOUS LES DOSSIERS",
     toast_folder_physical: "DANS CE DOSSIER SUR LA CARTE. D\u{00C9}PLACEZ-LE POUR LE SORTIR.",
+    toast_name_taken: "{} EXISTE D\u{00C9}J\u{00C0} \u{00C0} LA RACINE.",
     folder_emptied: "Dossier vid\u{00E9}",
     folder_leave_n: "{} jeux quittent ce dossier",
     folder_leave_1: "{} jeu quitte ce dossier",
@@ -1255,6 +1261,7 @@ const ES: Strings = Strings {
     toast_folder_off_of: "QUITADO DE {}.",
     toast_folder_off: "FUERA DE TODAS LAS CARPETAS",
     toast_folder_physical: "EN ESTA CARPETA EN LA TARJETA. MU\u{00C9}VELO PARA SACARLO.",
+    toast_name_taken: "{} YA EXISTE EN LA RA\u{00CD}Z.",
     folder_emptied: "Carpeta vaciada",
     folder_leave_n: "{} juegos salen de esta carpeta",
     folder_leave_1: "{} juego sale de esta carpeta",
@@ -1510,6 +1517,7 @@ const RU: Strings = Strings {
     toast_folder_off_of: "\u{0423}\u{0411}\u{0420}\u{0410}\u{041D}\u{041E} \u{0418}\u{0417} {}.",
     toast_folder_off: "\u{0423}\u{0411}\u{0420}\u{0410}\u{041D}\u{041E} \u{0418}\u{0417} \u{0412}\u{0421}\u{0415}\u{0425} \u{041F}\u{0410}\u{041F}\u{041E}\u{041A}",
     toast_folder_physical: "\u{0412} \u{042D}\u{0422}\u{041E}\u{0419} \u{041F}\u{0410}\u{041F}\u{041A}\u{0415} \u{041D}\u{0410} \u{041A}\u{0410}\u{0420}\u{0422}\u{0415}. \u{041F}\u{0415}\u{0420}\u{0415}\u{041C}\u{0415}\u{0421}\u{0422}\u{0418}\u{0422}\u{0415} \u{0415}\u{0413}\u{041E}.",
+    toast_name_taken: "{} \u{0423}\u{0416}\u{0415} \u{0415}\u{0421}\u{0422}\u{042C} \u{0412} \u{041A}\u{041E}\u{0420}\u{041D}\u{0415}.",
     folder_emptied: "\u{041F}\u{0430}\u{043F}\u{043A}\u{0430} \u{043E}\u{0447}\u{0438}\u{0449}\u{0435}\u{043D}\u{0430}",
     folder_leave_n: "{} \u{0438}\u{0433}\u{0440} \u{043F}\u{043E}\u{043A}\u{0438}\u{0434}\u{0430}\u{044E}\u{0442} \u{043F}\u{0430}\u{043F}\u{043A}\u{0443}",
     folder_leave_1: "{} \u{0438}\u{0433}\u{0440}\u{0430} \u{043F}\u{043E}\u{043A}\u{0438}\u{0434}\u{0430}\u{0435}\u{0442} \u{043F}\u{0430}\u{043F}\u{043A}\u{0443}",
@@ -1768,6 +1776,7 @@ const DE: Strings = Strings {
     toast_folder_off_of: "AUS {} ENTFERNT.",
     toast_folder_off: "AUS ALLEN ORDNERN ENTFERNT",
     toast_folder_physical: "AUF DER KARTE IN DIESEM ORDNER. ZUM ENTFERNEN VERSCHIEBEN.",
+    toast_name_taken: "{} EXISTIERT BEREITS IM STAMMVERZEICHNIS.",
     folder_emptied: "Ordner geleert",
     folder_leave_n: "{} Spiele verlassen diesen Ordner",
     folder_leave_1: "{} Spiel verl\u{00E4}sst diesen Ordner",
@@ -2023,6 +2032,7 @@ const IT: Strings = Strings {
     toast_folder_off_of: "RIMOSSO DA {}.",
     toast_folder_off: "RIMOSSO DA TUTTE LE CARTELLE",
     toast_folder_physical: "IN QUESTA CARTELLA SULLA SCHEDA. SPOSTALO PER TOGLIERLO.",
+    toast_name_taken: "{} ESISTE GI\u{00C0} NELLA RADICE.",
     folder_emptied: "Cartella svuotata",
     folder_leave_n: "{} giochi lasciano questa cartella",
     folder_leave_1: "{} gioco lascia questa cartella",
@@ -2278,6 +2288,7 @@ const PT: Strings = Strings {
     toast_folder_off_of: "REMOVIDO DE {}.",
     toast_folder_off: "FORA DE TODAS AS PASTAS",
     toast_folder_physical: "NESTA PASTA NO CART\u{00C3}O. MOVA-O PARA TIRAR.",
+    toast_name_taken: "{} J\u{00C1} EXISTE NA RAIZ.",
     folder_emptied: "Pasta esvaziada",
     folder_leave_n: "{} jogos saem desta pasta",
     folder_leave_1: "{} jogo sai desta pasta",
@@ -2538,6 +2549,7 @@ const ZH: Strings = Strings {
     toast_folder_off_of: "\u{5DF2}\u{79FB}\u{51FA} {}\u{3002}",
     toast_folder_off: "\u{5DF2}\u{79FB}\u{51FA}\u{6240}\u{6709}\u{6587}\u{4EF6}\u{5939}",
     toast_folder_physical: "\u{5361}\u{4E0A}\u{4F4D}\u{4E8E}\u{6B64}\u{6587}\u{4EF6}\u{5939}\u{3002}\u{9700}\u{79FB}\u{52A8}\u{6587}\u{4EF6}\u{624D}\u{80FD}\u{79FB}\u{51FA}\u{3002}",
+    toast_name_taken: "{} \u{5DF2}\u{5728}\u{6839}\u{76EE}\u{5F55}\u{4E2D}\u{3002}",
     folder_emptied: "\u{6587}\u{4EF6}\u{5939}\u{5DF2}\u{6E05}\u{7A7A}",
     folder_leave_n: "{} \u{4E2A}\u{6E38}\u{620F}\u{79BB}\u{5F00}\u{6B64}\u{6587}\u{4EF6}\u{5939}",
     folder_leave_1: "{} \u{4E2A}\u{6E38}\u{620F}\u{79BB}\u{5F00}\u{6B64}\u{6587}\u{4EF6}\u{5939}",
@@ -2796,6 +2808,7 @@ const TR: Strings = Strings {
     toast_folder_off_of: "{} KLAS\u{00D6}R\u{00DC}NDEN \u{00C7}IKARILDI",
     toast_folder_off: "T\u{00DC}M KLAS\u{00D6}RLERDEN \u{00C7}IKARILDI",
     toast_folder_physical: "KARTTA BU KLAS\u{00D6}RDE. \u{00C7}IKARMAK \u{0130}\u{00C7}\u{0130}N TA\u{015E}IYIN.",
+    toast_name_taken: "{} K\u{00D6}K D\u{0130}Z\u{0130}NDE ZATEN VAR.",
     folder_emptied: "Klas\u{00F6}r bo\u{015F}alt\u{0131}ld\u{0131}",
     folder_leave_n: "{} oyun bu klas\u{00F6}rden \u{00E7}\u{0131}kar\u{0131}ld\u{0131}",
     folder_leave_1: "{} oyun bu klas\u{00F6}rden \u{00E7}\u{0131}kar\u{0131}ld\u{0131}",

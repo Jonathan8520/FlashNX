@@ -152,18 +152,12 @@ const MODAL_PAD_BOTTOM: f32 = 60.0;
 const MODAL_ROW_X: f32 = 80.0;
 const MODAL_CURSOR_DX: f32 = 30.0;
 
-/// First id of the selection-glide slots (`eased_list_y`'s `key`).
-///
-/// One number per LIST, not per screen: the easer holds a single position and
-/// snaps whenever the key changes, so two lists sharing an id would send the
-/// cursor sliding across the gap between them when you moved from one to the
-/// other. Based well clear of the ids REGLAGES and the pickers already use.
-const MODAL_GLIDE_BASE: u32 = 40;
 /// Glide slots for the lists that draw their own rows instead of going through
 /// `draw_modal_rows`.
 const GLIDE_KEY_LANG: u32 = 50;
 const GLIDE_KEY_BUG: u32 = 51;
 const GLIDE_KEY_KEYS: u32 = 53;
+const GLIDE_KEY_COVER: u32 = 55;
 // 52 and 54 used to be the folder picker's; it derives its own keys from the
 // path it is showing, so a step into another folder snaps instead of sliding.
 
@@ -4148,6 +4142,39 @@ pub fn ui_cells_publish(kind: u32, rects: std::vec::Vec<(f32, f32, f32, f32)>) {
     }
 }
 
+/// Where the three navbar tabs are, and whether the strip is even on screen.
+///
+/// Its OWN table, not `UI_CELLS`: the navbar is drawn OVER a screen that has
+/// published rows of its own, and one table cannot hold both. It is also the
+/// only thing on screen that is not part of the screen, so it is asked first.
+static NAVBAR_CELLS: std::sync::Mutex<(bool, [(f32, f32, f32, f32); 3])> =
+    std::sync::Mutex::new((false, [(0.0, 0.0, 0.0, 0.0); 3]));
+
+pub fn navbar_publish(rects: [(f32, f32, f32, f32); 3]) {
+    if let Ok(mut g) = NAVBAR_CELLS.lock() {
+        *g = (true, rects);
+    }
+}
+
+/// The strip is not drawn on sub-screens; say so, or a tap would switch tabs
+/// from inside a modal that has no tabs.
+pub fn navbar_clear() {
+    if let Ok(mut g) = NAVBAR_CELLS.lock() {
+        g.0 = false;
+    }
+}
+
+/// Which tab is under `(x, y)`, or `None`.
+pub fn navbar_hit(x: f32, y: f32) -> Option<usize> {
+    let g = NAVBAR_CELLS.lock().ok()?;
+    if !g.0 {
+        return None;
+    }
+    g.1.iter().position(|(rx, ry, rw, rh)| {
+        *rw > 0.0 && *rh > 0.0 && x >= *rx && x <= rx + rw && y >= *ry && y <= ry + rh
+    })
+}
+
 /// Index of the row under `(x, y)`, but only if the published table belongs to
 /// `live` — the screen that is up RIGHT NOW, read by the caller from the state
 /// it owns.
@@ -4727,6 +4754,21 @@ pub fn game_reveal_begin(
         a.basename = basename.to_string();
         a.display_name = display_name.to_string();
         a.color_chip = color_chip;
+    }
+}
+
+/// Abandon a launch/quit reveal in flight.
+///
+/// The animation is stepped by `game_reveal_step`, which only runs from the
+/// `List` and `Launching` arms of `library::render`. Anything that navigates
+/// away from those mid-reveal leaves it armed with nobody to finish it, and
+/// `game_reveal_active()` then answers true for ever -- which `input()` reads as
+/// "suspend every button". The launcher keeps drawing and stops responding.
+///
+/// The same net `distant_reveal_cancel` provides for the IMPORTER reveal.
+pub fn game_reveal_cancel() {
+    if let Ok(mut a) = game_reveal().lock() {
+        a.active = false;
     }
 }
 
@@ -7393,7 +7435,7 @@ impl SwitchRenderBackend {
             lc.menu_quit,
         ];
         debug_assert_eq!(items.len(), MENU_ITEMS.len());
-        self.draw_modal_rows(&frame, selected, &items, MODAL_GLIDE_BASE + 1);
+        self.draw_modal_rows(&frame, selected, &items);
 
         unsafe {
             glUseProgram(0);
@@ -7445,7 +7487,7 @@ impl SwitchRenderBackend {
             filter_label.as_str(),
         ];
         debug_assert_eq!(items.len(), SCREEN_ITEMS.len());
-        self.draw_modal_rows(&frame, selected, &items, MODAL_GLIDE_BASE + 2);
+        self.draw_modal_rows(&frame, selected, &items);
 
         unsafe {
             glUseProgram(0);
@@ -7659,6 +7701,32 @@ impl SwitchRenderBackend {
             base: 0,
         });
         self.set_clip(frame.x, band_top, frame.w, band_bot - band_top);
+        // A gliding bar under the rows, like every other list in the app. The
+        // keymap editor was the last one still jumping its cursor from row to
+        // row, inside a list that had just learnt to slide.
+        if selection < total {
+            // Eased in CONTENT space, THEN scrolled -- not the other way round.
+            // Easing the already-scrolled position eases the same movement
+            // twice: during a scroll the rows travel at the scroll speed while
+            // the bar chases them one step behind, which is the exact lag the
+            // glide exists to remove. In content space the bar rides the scroll
+            // exactly, and eases only when the SELECTION moves.
+            let hy = eased_list_y(rows_top_y + selection as f32 * ROW_SPACING, GLIDE_KEY_KEYS, now)
+                - scroll_off;
+            let bar_x = rows_left_x - MODAL_CURSOR_DX - 10.0;
+            let bar_w = (frame.x + frame.w - 28.0 - bar_x).max(0.0);
+            self.draw_selection_bar(bar_x, hy - 9.0, bar_w, ROW_SPACING - 12.0, 6.0);
+            // The cursor rides WITH the bar. Drawn inside the row loop it sat
+            // at the row's exact position while the bar glided toward it, so
+            // for the length of every move the two pointed at different rows.
+            self.draw_text(
+                rows_left_x - MODAL_CURSOR_DX,
+                hy,
+                ROW_SCALE,
+                ">",
+                swf::Color::from_rgb(MODAL_ROW_SEL_COL, 255),
+            );
+        }
         for abs_idx in first..end {
             let (btn, binding) = &bindings[abs_idx];
             let y = rows_top_y + abs_idx as f32 * ROW_SPACING - scroll_off;
@@ -7677,9 +7745,6 @@ impl SwitchRenderBackend {
                 if is_sel { MODAL_ROW_SEL_COL } else { MODAL_ROW_COL },
                 255,
             );
-            if is_sel {
-                self.draw_text(rows_left_x - MODAL_CURSOR_DX, y, ROW_SCALE, ">", color);
-            }
             // Combo view: show the chord ("ZL+A"), not the bare button, so it's
             // clear the binding fires when the modifier is held.
             let btn_label = if combo_mod.is_empty() {
@@ -8448,7 +8513,7 @@ impl SwitchRenderBackend {
     /// `key` distinguishes one list from another for the glide below: two lists
     /// sharing it would have the cursor slide across the gap between them
     /// instead of appearing where it belongs. Callers pass their modal kind.
-    fn draw_modal_rows(&mut self, frame: &ModalFrame, selection: usize, rows: &[&str], key: u32) {
+    fn draw_modal_rows(&mut self, frame: &ModalFrame, selection: usize, rows: &[&str]) {
         // Which screen these rows belong to, for the touch table. Read from the
         // one place that knows -- `library::render` stamps it every frame --
         // rather than threaded through five call sites that would each have to
@@ -8468,7 +8533,17 @@ impl SwitchRenderBackend {
         // read-only list; it must not be turned into a bar somewhere off-screen.
         if selection < rows.len() {
             let now = unsafe { ruffle_tick_now() };
-            let hy = eased_list_y(top + selection as f32 * MODAL_ROW_H, key, now);
+            // The glide key is the SCREEN, not a number the caller picked.
+            // `draw_library_options` alone is used by three different modals,
+            // and they all passed the same constant, so the cursor flew in from
+            // whichever one you had open last -- a row of a panel that is no
+            // longer on screen. One key per screen is the honest mapping, and it
+            // is already computed: it is the id the touch table is tagged with.
+            //
+            // It also snaps rather than glides on the frame a modal opens: the
+            // stamp is 0 while the panel scales in, and a key change snaps. A
+            // cursor that is simply THERE when the panel arrives is right.
+            let hy = eased_list_y(top + selection as f32 * MODAL_ROW_H, touch_kind, now);
             let bar_x = left - MODAL_CURSOR_DX - 10.0;
             let bar_w = (frame.x + frame.w - 28.0 - bar_x).max(0.0);
             self.draw_selection_bar(bar_x, hy - 9.0, bar_w, MODAL_ROW_H - 12.0, 6.0);
@@ -8540,6 +8615,17 @@ impl SwitchRenderBackend {
         ];
         let total: f32 = widths.iter().sum::<f32>() + gap * (tabs.len() as f32 - 1.0);
         let mut x = (vw - total) * 0.5;
+        // Hit boxes: the full HEIGHT of the strip and half the gap on each side,
+        // because a label two characters wide is not a target for a thumb.
+        let mut cells = [(0.0f32, 0.0f32, 0.0f32, 0.0f32); 3];
+        {
+            let mut hx = x;
+            for k in 0..tabs.len() {
+                cells[k] = (hx - gap * 0.5, nav_y, widths[k] + gap, nav_h);
+                hx += widths[k] + gap;
+            }
+        }
+        navbar_publish(cells);
         for (i, t) in tabs.iter().enumerate() {
             let is_active = i == active;
             let color = if is_active {
@@ -10646,7 +10732,7 @@ impl SwitchRenderBackend {
             Some(game_display_name),
             Some(lc.options_footer),
         );
-        self.draw_modal_rows(&frame, selection, options, MODAL_GLIDE_BASE + 3);
+        self.draw_modal_rows(&frame, selection, options);
 
         unsafe {
             glUseProgram(0);
@@ -11000,7 +11086,7 @@ impl SwitchRenderBackend {
             sub,
             Some(footer),
         );
-        self.draw_modal_rows(&frame, selection, options, MODAL_GLIDE_BASE + 4);
+        self.draw_modal_rows(&frame, selection, options);
 
         unsafe {
             glUseProgram(0);
@@ -12015,7 +12101,8 @@ impl SwitchRenderBackend {
         self.draw_text(panel_x + (PANEL_W - sw) * 0.5, panel_y + 70.0, 2.0, &gn, swf::Color::from_rgb(0xFFD740, 255));
 
         // Phase from the system tick for a subtle selection pulse.
-        let phase_s = (unsafe { ruffle_tick_now() } as f64) / (unsafe { ruffle_tick_freq() } as f64);
+        let now_t = unsafe { ruffle_tick_now() };
+        let phase_s = (now_t as f64) / (unsafe { ruffle_tick_freq() } as f64);
         let pulse = approx_sin(phase_s as f32 * (2.0 * core::f32::consts::PI / 1.6));
 
         // Finish at most one async logo download this frame (never blocks).
@@ -12023,6 +12110,21 @@ impl SwitchRenderBackend {
 
         let grid_top = panel_y + 110.0;
         let grid_left = panel_x + MARGIN;
+        // The eased frame position, computed BEFORE the tiles so each tile can
+        // ask whether the frame is over IT rather than over the selected index.
+        // Keyed to the index, the tile being moved TO kept square corners for
+        // the whole glide while the one being left rounded up instantly -- both
+        // of them wrong for as long as the movement lasted.
+        let (frame_x, frame_y) = if selection < n {
+            let tx = grid_left + (selection % cols) as f32 * (cell_w + CELL_GAP);
+            let ty = grid_top + (selection / cols) as f32 * (THUMB_H + CELL_GAP);
+            (
+                eased_list_x(tx, GLIDE_KEY_COVER, now_t),
+                eased_list_y(ty, GLIDE_KEY_COVER, now_t),
+            )
+        } else {
+            (0.0, 0.0)
+        };
         // This panel published NOTHING, which left the OPTIONS modal's table --
         // six rows across the middle of the screen -- standing behind it. Tapping
         // a thumbnail resolved against those rows and fetched the wrong cover.
@@ -12046,8 +12148,6 @@ impl SwitchRenderBackend {
             let row = (i / cols) as f32;
             let cx = grid_left + col * (cell_w + CELL_GAP);
             let cy = grid_top + row * (THUMB_H + CELL_GAP);
-            let is_sel = i == selection;
-
             // Cell backdrop (so pending / failed thumbs still show a tile).
             let bg = Matrix {
                 a: cell_w, b: 0.0, c: 0.0, d: THUMB_H,
@@ -12063,7 +12163,11 @@ impl SwitchRenderBackend {
                     // frame below, which is rounded instead. Rounding both left
                     // four notches trapped inside the gold border — the artefact
                     // GRILLE already documents avoiding.
-                    if !is_sel {
+                    // Under the frame right now? Then leave the corners square,
+                    // because the frame covers them. Measured against the eased
+                    // position, so the answer changes as the frame travels.
+                    let under = (cx - frame_x).abs() < 1.0 && (cy - frame_y).abs() < 1.0;
+                    if !under {
                         self.round_corners_on(cx, cy, cell_w, THUMB_H, 6.0, 0xFF_0B_12_22);
                     }
                 }
@@ -12079,13 +12183,29 @@ impl SwitchRenderBackend {
                 }
             }
 
-            if is_sel {
-                self.draw_pulse_frame(cx, cy, cell_w, THUMB_H, pulse);
+        }
+
+        // The selection frame, drawn AFTER the tiles and at an eased position,
+        // so it travels to the tile the cursor moved to instead of appearing on
+        // it. Out of the loop for that reason: inside, it could only ever be at
+        // one tile's exact coordinates.
+        //
+        // Both axes, because this is a grid: the cursor moves sideways as often
+        // as it moves down, and a frame that only slid vertically would look
+        // broken half the time.
+        if selection < n {
+            self.draw_pulse_frame(frame_x, frame_y, cell_w, THUMB_H, pulse);
+            // The rounded corners are painted with the PANEL colour, so while
+            // the frame travels they land as four dark chips on whatever
+            // thumbnail it happens to be over. Only once it has arrived is
+            // there a tile underneath for them to belong to.
+            let tx = grid_left + (selection % cols) as f32 * (cell_w + CELL_GAP);
+            let ty = grid_top + (selection / cols) as f32 * (THUMB_H + CELL_GAP);
+            if (frame_x - tx).abs() < 1.0 && (frame_y - ty).abs() < 1.0 {
                 let b = Self::SEL_FRAME_B;
-                // On the modal's own ground, not the page colour: this grid sits
-                // on the 0xFF0B1222 panel.
                 self.round_corners_on(
-                    cx - b, cy - b, cell_w + 2.0 * b, THUMB_H + 2.0 * b, 8.0, 0xFF_0B_12_22,
+                    frame_x - b, frame_y - b, cell_w + 2.0 * b, THUMB_H + 2.0 * b, 8.0,
+                    0xFF_0B_12_22,
                 );
             }
         }
@@ -12292,6 +12412,13 @@ impl SwitchRenderBackend {
         // half of the screen with nothing to warn at compile time.
         self.set_clip(0.0, band_top, vw, band_bot - band_top);
 
+        // Same hover as the JOUER grid: the cover of the tile being selected
+        // FOLDS OUT to its natural aspect while the one being left folds back,
+        // and the selected tile keeps square corners because the frame covers
+        // them. Exactly two tiles move; every other one is 0, whatever the
+        // travelling frame passes over.
+        let (cover_open, cover_close, cover_t) = grid_cover_phase(selection);
+
         for i in 0..n {
             let col = (i % cols) as f32;
             let row = (i / cols) as u32;
@@ -12307,8 +12434,23 @@ impl SwitchRenderBackend {
             // which keeps the frame rate up so the glide stays smooth).
             match self.thumb_for(urls[i]) {
                 Some(ThumbTex::Image { tex, w, h }) => {
-                    self.draw_textured_rect_cover(cx, cy, cell_w, thumb_h, tex, w, h, 1.0);
-                    self.round_corners(cx, cy, cell_w, thumb_h, 6.0);
+                    let b = {
+                        let u = if i == cover_open {
+                            cover_t
+                        } else if i == cover_close {
+                            1.0 - cover_t
+                        } else {
+                            0.0
+                        };
+                        u * u * (3.0 - 2.0 * u) // smoothstep, as JOUER uses
+                    };
+                    self.draw_cover_zoomed_out(cx, cy, cell_w, thumb_h, tex, w, h, b, 1.0);
+                    // Not the selected tile: its corners are covered by the
+                    // frame, which is rounded instead. Rounding both leaves four
+                    // notches trapped inside the gold border.
+                    if i != selection {
+                        self.round_corners(cx, cy, cell_w, thumb_h, 6.0);
+                    }
                 }
                 other => {
                     let bg = Matrix {
@@ -12363,6 +12505,13 @@ impl SwitchRenderBackend {
             let fw = frame_w + 2.0 * grow;
             let fh = thumb_h + 2.0 * grow;
             self.draw_pulse_frame(fx, fy, fw, fh, pulse);
+            // Rounded once, frame included, so the cursor matches the tiles it
+            // travels between. This was the whole difference with the JOUER
+            // grid: the tiles were already rounded here, the cursor around them
+            // was not, so the one square-cornered thing on screen was the thing
+            // the eye follows.
+            let b = Self::SEL_FRAME_B;
+            self.round_corners(fx - b, fy - b, fw + 2.0 * b, fh + 2.0 * b, 8.0);
         }
 
         self.clear_clip();
@@ -12591,7 +12740,7 @@ impl SwitchRenderBackend {
             dir_label,
             swf::Color::from_rgb(0x66DDCC, 255),
         );
-        self.draw_modal_rows(&frame, selection, options, MODAL_GLIDE_BASE + 5);
+        self.draw_modal_rows(&frame, selection, options);
 
         unsafe {
             glUseProgram(0);
@@ -12656,8 +12805,22 @@ impl SwitchRenderBackend {
         });
         self.set_clip(0.0, band_top, vw, band_bot - band_top);
         // Gliding bar + cursor, drawn under the rows, in the same eased space.
+        //
+        // The GLIDE is eased on top of the eased scroll, not instead of it. They
+        // are two different movements: the list travelling to a new page, and
+        // the cursor travelling to a new row. Dropping the second when the first
+        // arrived left the bar jumping from row to row inside a list that slid
+        // smoothly underneath it -- the two halves of one movement disagreeing,
+        // which is the exact complaint the glide was added for.
         if selection < total {
-            let hy = rows_top_y + selection as f32 * ROW_SPACING - scroll_off;
+            // Eased in CONTENT space, THEN scrolled -- not the other way round.
+            // Easing the already-scrolled position eases the same movement
+            // twice: during a scroll the rows travel at the scroll speed while
+            // the bar chases them one step behind, which is the exact lag the
+            // glide exists to remove. In content space the bar rides the scroll
+            // exactly, and eases only when the SELECTION moves.
+            let hy = eased_list_y(rows_top_y + selection as f32 * ROW_SPACING, GLIDE_KEY_BUG, now)
+                - scroll_off;
             let bar_x = rows_left_x - 40.0;
             self.draw_selection_bar(bar_x, hy - 8.0, vw - bar_x - 40.0, ROW_SPACING - 12.0, 6.0);
             self.draw_text(
