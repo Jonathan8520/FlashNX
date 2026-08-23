@@ -3022,10 +3022,11 @@ fn commit_row_scroll(offset: usize, sel_lo: usize, sel_hi: usize) {
         Ok(s) => s.screen,
         Err(_) => return,
     };
-    // The keymap editor keeps its list in the `menu` module, and taking the
-    // LIBRARY lock across that call would put the two locks in the wrong order.
+    // The keymap editor is a pad: every control is on screen at once, so it
+    // publishes no scrolling row view and a drag over it produces no offset to
+    // commit. Guarded rather than left to fall through, because the arms below
+    // would read a LIBRARY selection that screen does not own.
     if matches!(screen, Screen::TouchesEditor { .. } | Screen::SettingsKeymapEditor) {
-        menu::touch_scroll(offset, sel_lo, hi);
         return;
     }
     let Ok(mut s) = LIBRARY.lock() else { return };

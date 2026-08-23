@@ -202,6 +202,194 @@ pub const KEYBOARD_UNITS_W: f32 = 20.0;
 /// Number of keyboard rows (0-based rows 0..=6).
 pub const KEYBOARD_ROWS_N: usize = 7;
 
+// ── TOUCHES pad view ────────────────────────────────────────────────────
+//
+// The keymap editor draws a CONTROLLER, not a scrolling list. The list showed
+// eight of twenty-five bindings at a time, so reading one keymap meant four
+// screens — times five combo layers, times two players. The pad shows all
+// twenty-five at once, and answers "which one is ZL again?" by pointing at it.
+//
+// Same idea as `KEYBOARD` above: geometry in ABSTRACT UNITS, so one table
+// describes the layout and the renderer scales it to whatever the panel got.
+// The pad is scaled from BOTH axes (the keyboard only needed width), because
+// twenty-five rows of chips is a height budget, not a width one.
+
+/// How a control is DRAWN on the pad picture.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PadIcon {
+    /// Rounded rectangle: the shoulders, the rail buttons, a d-pad arm.
+    Slab,
+    /// Circle: the face buttons and Plus.
+    Disc,
+    /// Analog stick — a ring with a nub inside. The nub is pushed toward the
+    /// direction this slot binds, so the five slots that share one stick are
+    /// told apart by where the thumb would be.
+    Stick(Nub),
+}
+
+/// Which way a stick slot pushes the nub. Not a pair of floats: the four
+/// directions and the click are the whole set, and naming them keeps the table
+/// readable where two anonymous numbers would not.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Nub {
+    Up,
+    Down,
+    Left,
+    Right,
+    Press,
+}
+
+/// One remappable control, as the pad view lays it out.
+pub struct PadSlot {
+    /// Button name — the same string `EDITABLE_BUTTONS` and the keymap use.
+    pub name: &'static str,
+    /// Badge at the head of the value chip: what the player actually presses.
+    pub glyph: &'static str,
+    /// Value chip `(x, y, w, h)` in pad units — the row carrying the binding.
+    pub chip: (f32, f32, f32, f32),
+    /// The control's own place on the pad picture, in pad units. The five slots
+    /// of one stick deliberately share a rect: they ARE one stick.
+    pub icon: (f32, f32, f32, f32),
+    pub shape: PadIcon,
+}
+
+/// Width and height of the pad layout, in units. The renderer picks ONE scale
+/// from `min(inner_w / W, inner_h / H)` so the picture keeps its proportions on
+/// a narrow panel (a turned picture gives a portrait viewport).
+pub const PAD_UNITS_W: f32 = 46.0;
+pub const PAD_UNITS_H: f32 = 22.0;
+
+/// The shell: two grips, then the body over them. `(x, y, w, h, radius)`.
+/// Drawn FIRST, so every control sits on top of it.
+pub const PAD_SHELL: &[(f32, f32, f32, f32, f32)] = &[
+    (15.0, 14.5, 4.0, 5.0, 1.8), // left grip
+    (27.0, 14.5, 4.0, 5.0, 1.8), // right grip
+    (14.4, 7.8, 17.2, 9.0, 2.2), // body
+];
+
+/// Minus, drawn greyed with no chip and no cursor.
+///
+/// It is the one button the runtime keeps (`RESERVED_BUTTONS`) because it opens
+/// the pause menu, and a pad that simply omitted it would have a hole where a
+/// button the player can see on the console in their hands should be. Drawing
+/// it locked answers the question the old list left open: not "where is Minus",
+/// but "why can I not bind it".
+pub const PAD_MINUS: (f32, f32, f32, f32) = (21.3, 10.0, 1.2, 1.2);
+
+/// Every remappable control, in reading order down the left column then the
+/// right. `selection` on the editor screen indexes THIS table.
+///
+/// The two chip columns flank the picture and follow the hand: every row in the
+/// left column is worked by the left thumb or index, every row in the right by
+/// the right. Rows sit on a fixed 1.66-unit pitch from y = 0.5, which is what
+/// makes thirteen of them fit twice over without a scrollbar.
+pub const PAD_SLOTS: &[PadSlot] = &[
+    // ── Left hand ────────────────────────────────────────────────────────
+    PadSlot { name: "ZL", glyph: "ZL", chip: (0.4, 0.50, 13.2, 1.4),
+              icon: (15.4, 5.2, 3.6, 1.1), shape: PadIcon::Slab },
+    PadSlot { name: "L", glyph: "L", chip: (0.4, 2.16, 13.2, 1.4),
+              icon: (15.4, 6.5, 3.6, 1.1), shape: PadIcon::Slab },
+    PadSlot { name: "SL", glyph: "SL", chip: (0.4, 3.82, 13.2, 1.4),
+              icon: (13.9, 10.2, 0.7, 2.2), shape: PadIcon::Slab },
+    PadSlot { name: "StickLUp", glyph: "LS\u{2191}", chip: (0.4, 5.48, 13.2, 1.4),
+              icon: (16.0, 8.8, 3.4, 3.4), shape: PadIcon::Stick(Nub::Up) },
+    PadSlot { name: "StickLDown", glyph: "LS\u{2193}", chip: (0.4, 7.14, 13.2, 1.4),
+              icon: (16.0, 8.8, 3.4, 3.4), shape: PadIcon::Stick(Nub::Down) },
+    PadSlot { name: "StickLLeft", glyph: "LS\u{2190}", chip: (0.4, 8.80, 13.2, 1.4),
+              icon: (16.0, 8.8, 3.4, 3.4), shape: PadIcon::Stick(Nub::Left) },
+    PadSlot { name: "StickLRight", glyph: "LS\u{2192}", chip: (0.4, 10.46, 13.2, 1.4),
+              icon: (16.0, 8.8, 3.4, 3.4), shape: PadIcon::Stick(Nub::Right) },
+    PadSlot { name: "StickLPress", glyph: "LS", chip: (0.4, 12.12, 13.2, 1.4),
+              icon: (16.0, 8.8, 3.4, 3.4), shape: PadIcon::Stick(Nub::Press) },
+    PadSlot { name: "Up", glyph: "\u{2191}", chip: (0.4, 13.78, 13.2, 1.4),
+              icon: (17.85, 13.10, 1.10, 1.30), shape: PadIcon::Slab },
+    PadSlot { name: "Down", glyph: "\u{2193}", chip: (0.4, 15.44, 13.2, 1.4),
+              icon: (17.85, 14.40, 1.10, 1.30), shape: PadIcon::Slab },
+    PadSlot { name: "Left", glyph: "\u{2190}", chip: (0.4, 17.10, 13.2, 1.4),
+              icon: (17.10, 13.85, 1.30, 1.10), shape: PadIcon::Slab },
+    PadSlot { name: "Right", glyph: "\u{2192}", chip: (0.4, 18.76, 13.2, 1.4),
+              icon: (18.40, 13.85, 1.30, 1.10), shape: PadIcon::Slab },
+    // ── Right hand ───────────────────────────────────────────────────────
+    PadSlot { name: "ZR", glyph: "ZR", chip: (32.4, 0.50, 13.2, 1.4),
+              icon: (27.0, 5.2, 3.6, 1.1), shape: PadIcon::Slab },
+    PadSlot { name: "R", glyph: "R", chip: (32.4, 2.16, 13.2, 1.4),
+              icon: (27.0, 6.5, 3.6, 1.1), shape: PadIcon::Slab },
+    PadSlot { name: "SR", glyph: "SR", chip: (32.4, 3.82, 13.2, 1.4),
+              icon: (31.4, 10.2, 0.7, 2.2), shape: PadIcon::Slab },
+    PadSlot { name: "X", glyph: "X", chip: (32.4, 5.48, 13.2, 1.4),
+              icon: (26.85, 8.10, 1.5, 1.5), shape: PadIcon::Disc },
+    PadSlot { name: "Y", glyph: "Y", chip: (32.4, 7.14, 13.2, 1.4),
+              icon: (25.10, 9.85, 1.5, 1.5), shape: PadIcon::Disc },
+    PadSlot { name: "A", glyph: "A", chip: (32.4, 8.80, 13.2, 1.4),
+              icon: (28.60, 9.85, 1.5, 1.5), shape: PadIcon::Disc },
+    PadSlot { name: "B", glyph: "B", chip: (32.4, 10.46, 13.2, 1.4),
+              icon: (26.85, 11.60, 1.5, 1.5), shape: PadIcon::Disc },
+    PadSlot { name: "Plus", glyph: "+", chip: (32.4, 12.12, 13.2, 1.4),
+              icon: (23.5, 10.0, 1.2, 1.2), shape: PadIcon::Disc },
+    PadSlot { name: "StickRUp", glyph: "RS\u{2191}", chip: (32.4, 13.78, 13.2, 1.4),
+              icon: (25.4, 13.30, 3.2, 3.2), shape: PadIcon::Stick(Nub::Up) },
+    PadSlot { name: "StickRDown", glyph: "RS\u{2193}", chip: (32.4, 15.44, 13.2, 1.4),
+              icon: (25.4, 13.30, 3.2, 3.2), shape: PadIcon::Stick(Nub::Down) },
+    PadSlot { name: "StickRLeft", glyph: "RS\u{2190}", chip: (32.4, 17.10, 13.2, 1.4),
+              icon: (25.4, 13.30, 3.2, 3.2), shape: PadIcon::Stick(Nub::Left) },
+    PadSlot { name: "StickRRight", glyph: "RS\u{2192}", chip: (32.4, 18.76, 13.2, 1.4),
+              icon: (25.4, 13.30, 3.2, 3.2), shape: PadIcon::Stick(Nub::Right) },
+    PadSlot { name: "StickRPress", glyph: "RS", chip: (32.4, 20.42, 13.2, 1.4),
+              icon: (25.4, 13.30, 3.2, 3.2), shape: PadIcon::Stick(Nub::Press) },
+];
+
+/// Byte-wise string equality usable in a const block.
+const fn const_str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// `PAD_SLOTS` is the VIEW of `EDITABLE_BUTTONS`: the same set of buttons, laid
+/// out on a controller. Drift between the two is SILENT  a button added to one
+/// and not the other simply cannot be bound any more, with nothing on screen to
+/// say so  so it is caught here, when the crate is compiled, rather than by a
+/// player who eventually notices SR has no row.
+///
+/// Equal lengths, every slot naming a real button, and no button twice: together
+/// those three say the two tables hold the same set.
+const _: () = {
+    assert!(
+        PAD_SLOTS.len() == EDITABLE_BUTTONS.len(),
+        "the pad and the editable-button list disagree on how many buttons there are"
+    );
+    let mut i = 0;
+    while i < PAD_SLOTS.len() {
+        let mut found = false;
+        let mut j = 0;
+        while j < EDITABLE_BUTTONS.len() {
+            if const_str_eq(PAD_SLOTS[i].name, EDITABLE_BUTTONS[j]) {
+                found = true;
+            }
+            j += 1;
+        }
+        assert!(found, "a pad slot names a button that cannot be bound");
+        let mut k = i + 1;
+        while k < PAD_SLOTS.len() {
+            assert!(
+                !const_str_eq(PAD_SLOTS[i].name, PAD_SLOTS[k].name),
+                "a button appears on the pad twice"
+            );
+            k += 1;
+        }
+        i += 1;
+    }
+};
+
 /// Short DISPLAY label for a keyboard key on the visual picker. Keeps the board
 /// compact (full names like "Backspace" would blow the key width) and localises
 /// the action keys via `flash_key_display`. Plain glyph keys (letters, digits,
@@ -1650,12 +1838,24 @@ pub fn lookup_combo_p2(modifier: &str, button_name: &str) -> Option<core::ffi::c
     Some(flash_key_name_to_sk(key_name))
 }
 
-/// A combo layer is "active" if it has at least one NON-empty binding (a layer
-/// where every button is explicitly unbound counts as off).
+/// A combo layer is "active" if it holds at least one NON-empty binding that can
+/// actually fire. Two things do not count:
+///
+///  * a binding explicitly unbound (empty value)  a layer where every button is
+///    cleared is off, not on-with-nothing-in-it;
+///  * a binding on the layer's OWN modifier. Holding ZL and pressing ZL is one
+///    press, so a ZL layer holding nothing but a ZL binding does nothing at all,
+///    and counting it would mute ZL everywhere (`p1_mod_buttons` in main.cpp) in
+///    exchange for a chord that cannot happen. The pre-#57 migration can hand us
+///    exactly that keymap: the old single layer was edited from a list that
+///    offered the modifier as a row like any other.
 fn layer_has_binding(
+    modifier: &str,
     layer: Option<&BTreeMap<std::string::String, std::string::String>>,
 ) -> bool {
-    layer.map(|m| m.values().any(|v| !v.is_empty())).unwrap_or(false)
+    layer
+        .map(|m| m.iter().any(|(btn, v)| btn != modifier && !v.is_empty()))
+        .unwrap_or(false)
 }
 
 /// True when P1's `modifier` (ZL/ZR/L/R) has a live combo layer → in-game that
@@ -1664,8 +1864,41 @@ pub fn combo_active(modifier: &str) -> bool {
     ACTIVE_KEYMAP
         .lock()
         .ok()
-        .and_then(|g| g.as_ref().map(|k| layer_has_binding(k.combo_layers.get(modifier))))
+        .and_then(|g| g.as_ref().map(|k| layer_has_binding(modifier, k.combo_layers.get(modifier))))
         .unwrap_or(false)
+}
+
+/// Whether the pad row for `button` is a MODIFIER rather than a key, in the
+/// layer now open  in which case it cannot be bound, because pressing it can
+/// never send anything.
+///
+/// Two ways that happens, and they are different:
+///
+///  * `button` is the open layer's OWN modifier. Holding ZL and pressing ZL is
+///    one press, so ZL+ZL is not a chord that exists. Structural: true even
+///    while the layer is still empty.
+///  * `button` is an ACTIVE modifier (its layer has a binding). `main.cpp` mutes
+///    every modifier button outright  `if (b.mask & p1_mod_buttons) continue` 
+///    in EVERY layer, NORMAL included. So the moment a ZL layer takes its first
+///    binding, ZL stops sending its own key everywhere, and the old list showed
+///    "ZL | RIGHT CLICK" for a click that could no longer happen.
+///
+/// Making a button a modifier costs you that button as a key. Emptying its layer
+/// gives it back, which is the way out and the reason this is not a dead end.
+pub fn slot_is_modifier(button: &str) -> bool {
+    let open = edit_subtab_modifier();
+    if !open.is_empty() && open == button {
+        return true;
+    }
+    // Only ZL/ZR/L/R can ever be modifiers; every other button skips the lock.
+    if !SUBTAB_MODS[1..].contains(&button) {
+        return false;
+    }
+    if edit_player() == 2 {
+        combo_active_p2(button)
+    } else {
+        combo_active(button)
+    }
 }
 
 /// Player-2 counterpart of [`combo_active`].
@@ -1673,7 +1906,7 @@ pub fn combo_active_p2(modifier: &str) -> bool {
     ACTIVE_KEYMAP
         .lock()
         .ok()
-        .and_then(|g| g.as_ref().map(|k| layer_has_binding(k.combo_layers_p2.get(modifier))))
+        .and_then(|g| g.as_ref().map(|k| layer_has_binding(modifier, k.combo_layers_p2.get(modifier))))
         .unwrap_or(false)
 }
 

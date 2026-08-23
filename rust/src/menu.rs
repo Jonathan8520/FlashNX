@@ -49,16 +49,14 @@ enum Screen {
     Inactive,
     /// In-game TOUCHES sub-menu (edit / apply / share / cursor / revert).
     Menu { selection: usize },
-    /// `selection` indexes `EDITABLE_BUTTONS`, `scroll_offset` is the topmost
-    /// visible row (8-rows-at-a-time window).
-    List { selection: usize, scroll_offset: usize },
-    /// Visual keyboard picker (issue #55). `button_idx` indexes `EDITABLE_BUTTONS`;
-    /// `key_idx` indexes `keymap::KEYBOARD` (positioned keys, geometric 2D nav).
-    /// `prev_scroll` is the row list's scroll when the picker opened: closing it
-    /// must put the list back WHERE IT WAS. Rebuilding the scroll from the row
-    /// alone always parked that row on the last visible line, so binding a key
-    /// made the list jump.
-    Keyboard { button_idx: usize, key_idx: usize, prev_scroll: usize },
+    /// The pad view — the keymap editor. `selection` indexes `keymap::PAD_SLOTS`.
+    /// No scroll: the pad shows all twenty-five controls at once, so there is no
+    /// window for a cursor to fall out of and nothing to put back on the way in.
+    List { selection: usize },
+    /// Visual keyboard picker (issue #55). `button_idx` indexes
+    /// `keymap::PAD_SLOTS`; `key_idx` indexes `keymap::KEYBOARD` (positioned
+    /// keys, geometric 2D nav).
+    Keyboard { button_idx: usize, key_idx: usize },
     /// Community-profile picker (in-game apply). `selection` indexes `matches`.
     Profiles { selection: usize },
     /// Before/after preview of an apply. `profile_idx` indexes `matches`.
@@ -120,11 +118,6 @@ static TOUCHES: Mutex<State> = Mutex::new(State {
     toast_frames: 0,
 });
 
-/// Maximum rows shown at once in the list screen. Keep in sync with the
-/// vertical space `draw_touches_list` allocates in render.rs (two tab rows above
-/// the list: player P1/P2 and the combo sub-tab, issue #57).
-pub const LIST_VISIBLE_ROWS: usize = 8;
-
 pub fn is_active() -> bool {
     TOUCHES
         .lock()
@@ -146,14 +139,14 @@ pub fn touch_select(idx: usize) -> bool {
         return false;
     };
     match s.screen {
-        Screen::Keyboard { button_idx, key_idx, prev_scroll } => {
+        Screen::Keyboard { button_idx, key_idx } => {
             if idx >= crate::keymap::KEYBOARD.len() {
                 return false;
             }
             if key_idx == idx {
                 return true;
             }
-            s.screen = Screen::Keyboard { button_idx, key_idx: idx, prev_scroll };
+            s.screen = Screen::Keyboard { button_idx, key_idx: idx };
             false
         }
         // Every arm BOUNDS `idx` before storing it, the way the one above does.
@@ -161,17 +154,27 @@ pub fn touch_select(idx: usize) -> bool {
         // that published it by one frame: C++ serves buttons before touch, so a
         // button that changes screens leaves the finger to be hit-tested against
         // the previous screen's rows. A row of the 92-key keyboard stored as a
-        // row of the 25-entry button list is not a wrong cursor, it is
-        // `EDITABLE_BUTTONS[60]` on the next A -- and `panic = "abort"` makes
-        // that a console fatal, not an exception.
-        Screen::List { selection, scroll_offset } => {
-            if idx >= crate::keymap::EDITABLE_BUTTONS.len() {
+        // row of the 25-slot pad is not a wrong cursor, it is `PAD_SLOTS[60]`
+        // on the next A -- and `panic = "abort"` makes that a console fatal,
+        // not an exception.
+        Screen::List { selection } => {
+            if idx >= crate::keymap::PAD_SLOTS.len() {
+                return false;
+            }
+            // A modifier row takes no cursor from a finger either, and returning
+            // false means the tap is simply ignored rather than counted as the
+            // first half of a double-tap that would then activate it.
+            if crate::keymap::PAD_SLOTS
+                .get(idx)
+                .map(|s| crate::keymap::slot_is_modifier(s.name))
+                .unwrap_or(false)
+            {
                 return false;
             }
             if selection == idx {
                 return true;
             }
-            s.screen = Screen::List { selection: idx, scroll_offset };
+            s.screen = Screen::List { selection: idx };
             false
         }
         // The rows of the sub-menu and the profile picker are drawn by the
@@ -203,18 +206,6 @@ pub fn touch_select(idx: usize) -> bool {
     }
 }
 
-/// A touch drag left the keymap list at `offset`; bring the cursor along so the
-/// next press of Down does not scroll straight back to where it was left.
-pub fn touch_scroll(offset: usize, sel_lo: usize, sel_hi: usize) {
-    let Ok(mut s) = TOUCHES.lock() else { return };
-    if let Screen::List { selection, .. } = s.screen {
-        s.screen = Screen::List {
-            selection: selection.clamp(sel_lo, sel_hi.max(sel_lo)),
-            scroll_offset: offset,
-        };
-    }
-}
-
 /// Distinct id per active screen (0 = inactive). Lets the in-game caller
 /// (`ruffle_touches_draw`) re-trigger the modal scale-in "pop" on each
 /// transition, exactly like `library::modal_kind` does for the on-cover modals,
@@ -243,9 +234,14 @@ pub fn open() {
     keymap::set_edit_player(1); // always start on Player 1 (issue #40)...
     keymap::reset_edit_subtabs(); // ...both players on the NORMAL sub-tab, without
     // clearing the persisted modifiers (combos stay enabled in-game) (issue #57).
+    // Row 0 is ZL, and ZL is locked the moment it has a combo layer -- so the
+    // editor could OPEN with its cursor on a row that takes no A. Resolved
+    // before the lock, not inside it, to keep this off the TOUCHES -> keymap
+    // nesting entirely.
+    let start = unstick_cursor(0);
     if let Ok(mut s) = TOUCHES.lock() {
         s.submenu = false;
-        s.screen = Screen::List { selection: 0, scroll_offset: 0 };
+        s.screen = Screen::List { selection: start };
     }
 }
 
@@ -395,12 +391,12 @@ pub fn input(button: &str) -> bool {
             handle_menu_input(&mut s, button, selection);
             true
         }
-        Screen::List { selection, scroll_offset } => {
-            handle_list_input(&mut s, button, selection, scroll_offset);
+        Screen::List { selection } => {
+            handle_list_input(&mut s, button, selection);
             true
         }
-        Screen::Keyboard { button_idx, key_idx, prev_scroll } => {
-            handle_keyboard_input(&mut s, button, button_idx, key_idx, prev_scroll);
+        Screen::Keyboard { button_idx, key_idx } => {
+            handle_keyboard_input(&mut s, button, button_idx, key_idx);
             true
         }
         Screen::Profiles { selection } => {
@@ -485,7 +481,7 @@ fn handle_menu_input(s: &mut State, button: &str, mut selection: usize) {
                 // Enter the editor, KEEPING sub-menu context (B returns here).
                 keymap::set_edit_player(1);
                 keymap::reset_edit_subtabs(); // both players start on NORMAL (#57)
-                s.screen = Screen::List { selection: 0, scroll_offset: 0 };
+                s.screen = Screen::List { selection: unstick_cursor(0) };
                 return;
             }
             MENU_CURSOR => {
@@ -752,19 +748,138 @@ fn run_revert() {
     }
 }
 
-fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scroll: usize) {
-    let last = keymap::EDITABLE_BUTTONS.len().saturating_sub(1);
+/// Direction of one cursor step on the pad.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PadDir {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+/// Centre of slot `i`'s value chip, in pad units.
+///
+/// `.get`, not `[..]`: with `panic = "abort"` an out-of-range index is a console
+/// fatal, and a cursor reaches here from a touch table that outlives its panel.
+fn pad_center(i: usize) -> (f32, f32) {
+    keymap::PAD_SLOTS
+        .get(i)
+        .map(|s| (s.chip.0 + s.chip.2 * 0.5, s.chip.1 + s.chip.3 * 0.5))
+        .unwrap_or((0.0, 0.0))
+}
+
+/// Move the pad cursor one step, on the chips' own centres.
+///
+/// Geometric rather than an index step, because the chips are two columns and
+/// what the player means by Right is "the other hand, same height" — which an
+/// index step would turn into "thirteen rows down". It also means the table in
+/// keymap.rs can be re-laid-out without a matching edit here.
+fn pad_step(cur: usize, dir: PadDir) -> usize {
+    let n = keymap::PAD_SLOTS.len();
+    if n == 0 {
+        return cur;
+    }
+    let (cx, cy) = pad_center(cur);
+    // Same column = same chip x. The two columns are thirty-two units apart, so
+    // half a unit of tolerance is generous and still cannot confuse them.
+    let same_col = |x: f32| (x - cx).abs() < 0.5;
+    let mut best: Option<(usize, f32)> = None;
+    for i in 0..n {
+        if i == cur || slot_locked(i) {
+            continue;
+        }
+        let (x, y) = pad_center(i);
+        let cost = match dir {
+            PadDir::Up if same_col(x) && y < cy - 0.01 => cy - y,
+            PadDir::Down if same_col(x) && y > cy + 0.01 => y - cy,
+            // Across columns, the chip at the nearest HEIGHT; the x distance is
+            // only a tie-break, and with two columns there is never a tie.
+            PadDir::Left if x < cx - 0.5 => (y - cy).abs() * 100.0 + (cx - x),
+            PadDir::Right if x > cx + 0.5 => (y - cy).abs() * 100.0 + (x - cx),
+            _ => continue,
+        };
+        if best.map_or(true, |(_, b)| cost < b) {
+            best = Some((i, cost));
+        }
+    }
+    if let Some((i, _)) = best {
+        return i;
+    }
+    // Nothing that way. Up and Down wrap inside their own column, the way the
+    // list they replace wrapped; a cursor that stops dead at the top of a column
+    // reads as a stuck stick. Left and Right at the outer edge stay put — there
+    // is no third column to wrap to.
+    let want_max = match dir {
+        PadDir::Up => true,
+        PadDir::Down => false,
+        _ => return cur,
+    };
+    let mut wrap = cur;
+    let mut edge = cy;
+    for i in 0..n {
+        if slot_locked(i) {
+            continue;
+        }
+        let (x, y) = pad_center(i);
+        if same_col(x) && ((want_max && y > edge) || (!want_max && y < edge)) {
+            edge = y;
+            wrap = i;
+        }
+    }
+    wrap
+}
+
+/// Whether slot `i` is a modifier in the open layer, and so takes no cursor.
+fn slot_locked(i: usize) -> bool {
+    keymap::PAD_SLOTS
+        .get(i)
+        .map(|s| keymap::slot_is_modifier(s.name))
+        .unwrap_or(false)
+}
+
+/// Put the cursor on a row that can actually be edited.
+///
+/// Called after anything that changes which rows are locked: switching layer
+/// with L/R, switching player with X, and binding a key (the binding that makes
+/// ZL a modifier is what locks ZL everywhere else). Without it the cursor sits
+/// on a row it can no longer open, and A does nothing with no explanation.
+fn unstick_cursor(mut selection: usize) -> usize {
+    let n = keymap::PAD_SLOTS.len();
+    if n == 0 || !slot_locked(selection) {
+        return selection;
+    }
+    // Bounded: at most four buttons can ever be modifiers, so a lap of the
+    // column always finds a free row -- but the loop is capped anyway rather
+    // than trusting that to stay true.
+    for _ in 0..n {
+        let next = pad_step(selection, PadDir::Down);
+        if next == selection {
+            break;
+        }
+        selection = next;
+        if !slot_locked(selection) {
+            return selection;
+        }
+    }
+    (0..n).find(|&i| !slot_locked(i)).unwrap_or(selection)
+}
+
+fn handle_list_input(s: &mut State, button: &str, mut selection: usize) {
     match button {
-        "Up" | "StickLUp" => {
-            selection = if selection == 0 { last } else { selection - 1 };
-            scroll = clamp_scroll(scroll, selection);
-        }
-        "Down" | "StickLDown" => {
-            selection = if selection >= last { 0 } else { selection + 1 };
-            scroll = clamp_scroll(scroll, selection);
-        }
+        "Up" | "StickLUp" => selection = pad_step(selection, PadDir::Up),
+        "Down" | "StickLDown" => selection = pad_step(selection, PadDir::Down),
+        // Left and Right finally mean something on this screen: the pad has two
+        // columns, and they cross to the other hand at the same height. The
+        // SHOULDER L/R still change the combo layer, as they always did.
+        "Left" | "StickLLeft" => selection = pad_step(selection, PadDir::Left),
+        "Right" | "StickLRight" => selection = pad_step(selection, PadDir::Right),
         // Player toggle (issue #40): X flips P1 <-> P2 (2 items, a toggle is fine).
-        "X" => keymap::set_edit_player(if keymap::edit_player() == 2 { 1 } else { 2 }),
+        // P1 and P2 have their OWN combo layers, so the swap can lock or free the
+        // row under the cursor.
+        "X" => {
+            keymap::set_edit_player(if keymap::edit_player() == 2 { 1 } else { 2 });
+            selection = unstick_cursor(selection);
+        }
         // Combo sub-tab (issue #57, per-modifier): L/R move the VIEW along
         // [NORMAL, ZL, ZR, L, R]. NORMAL edits base bindings; a modifier position
         // edits THAT modifier's own combo layer. Pure view — a modifier becomes
@@ -778,6 +893,9 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
             };
             if new != cur {
                 keymap::set_edit_subtab_index(new);
+                // The new layer's own modifier is not bindable in it, and the
+                // cursor may be sitting exactly there.
+                selection = unstick_cursor(selection);
             }
         }
         "A" => {
@@ -785,18 +903,25 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
             // `.get`, not `[..]`: with `panic = "abort"` an out-of-range row here
             // is a console fatal, and this index arrives from a cursor several
             // screens and one touch table away from where it is bounded.
-            let Some(&btn) = keymap::EDITABLE_BUTTONS.get(selection) else {
+            let Some(slot) = keymap::PAD_SLOTS.get(selection) else {
                 return;
             };
-            let key_idx = keymap::current_binding(btn)
+            // Reachable even though the cursor skips locked rows: a tap, or a
+            // layer switched while the cursor sat here, can put it on one.
+            if keymap::slot_is_modifier(slot.name) {
+                set_toast(
+                    s,
+                    std::format!("{} : {}", slot.name, crate::loc::s().keys_modifier),
+                    TOAST_INFO,
+                );
+                s.screen = Screen::List { selection };
+                return;
+            }
+            let key_idx = keymap::current_binding(slot.name)
                 .as_deref()
                 .and_then(kbd_index_of)
                 .unwrap_or_else(kbd_none_index);
-            s.screen = Screen::Keyboard {
-                button_idx: selection,
-                key_idx,
-                prev_scroll: scroll,
-            };
+            s.screen = Screen::Keyboard { button_idx: selection, key_idx };
             return;
         }
         "B" | "Minus" => {
@@ -810,7 +935,7 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
         }
         _ => {}
     }
-    s.screen = Screen::List { selection, scroll_offset: scroll };
+    s.screen = Screen::List { selection };
 }
 
 /// Index of a Flash-key NAME in `keymap::KEYBOARD`, or None if it isn't on the
@@ -851,7 +976,6 @@ fn handle_keyboard_input(
     button: &str,
     button_idx: usize,
     mut key_idx: usize,
-    prev_scroll: usize,
 ) {
     let (name, cur_row, _, _) = keymap::KEYBOARD[key_idx];
     let cur_cx = kbd_center(key_idx);
@@ -905,7 +1029,7 @@ fn handle_keyboard_input(
         "A" => {
             // "(none)" unbinds; every other key is a real flash-key name.
             let target = if name == "(none)" { None } else { Some(name) };
-            let Some(&edit_btn) = keymap::EDITABLE_BUTTONS.get(button_idx) else {
+            let Some(edit_btn) = keymap::PAD_SLOTS.get(button_idx).map(|s| s.name) else {
                 return;
             };
             if keymap::set_binding(edit_btn, target) {
@@ -917,33 +1041,24 @@ fn handle_keyboard_input(
                 // silently keeps the old key.
                 set_toast(s, crate::loc::s().err_sd_write.to_string(), TOAST_ERR);
             }
-            let scroll = clamp_scroll(prev_scroll, button_idx);
-            s.screen = Screen::List { selection: button_idx, scroll_offset: scroll };
+            // The binding just made may have turned some button into a modifier
+            // (the FIRST binding in a layer does), which locks that button's row
+            // in every layer -- possibly the one we are returning to.
+            s.screen = Screen::List { selection: unstick_cursor(button_idx) };
             return;
         }
         "B" | "Minus" => {
-            let scroll = clamp_scroll(prev_scroll, button_idx);
-            s.screen = Screen::List { selection: button_idx, scroll_offset: scroll };
+            s.screen = Screen::List { selection: unstick_cursor(button_idx) };
             return;
         }
         _ => {}
     }
-    s.screen = Screen::Keyboard { button_idx, key_idx, prev_scroll };
+    s.screen = Screen::Keyboard { button_idx, key_idx };
 }
 
 /// Centre (units) of a `keymap::KEYBOARD` tuple `(name, row, x, w)`.
 fn kbd_center_of(k: &(&str, u8, f32, f32)) -> f32 {
     k.2 + k.3 * 0.5
-}
-
-/// Adjust `scroll` so the row at `selection` is visible. Window = `LIST_VISIBLE_ROWS`.
-fn clamp_scroll(mut scroll: usize, selection: usize) -> usize {
-    if selection < scroll {
-        scroll = selection;
-    } else if selection >= scroll + LIST_VISIBLE_ROWS {
-        scroll = selection + 1 - LIST_VISIBLE_ROWS;
-    }
-    scroll
 }
 
 /// Draw the current TOUCHES screen + any active toast. No-op when inactive.
@@ -1000,27 +1115,27 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
             }
             backend.draw_library_list_modal(lc.opt_keys, &game, selection, &rows, lc.touches_footer, false);
         }
-        Screen::List { selection, scroll_offset } => {
-            let bindings: std::vec::Vec<(&'static str, Option<std::string::String>)> =
-                keymap::EDITABLE_BUTTONS
-                    .iter()
-                    .map(|btn| (*btn, keymap::current_binding(btn)))
-                    .collect();
-            backend.draw_touches_list(
+        Screen::List { selection } => {
+            // Parallel to PAD_SLOTS, which is both the order the pad lays out
+            // and the order `selection` counts in. `true` = this button is a
+            // modifier in the open layer and sends no key of its own.
+            let bindings: std::vec::Vec<(Option<std::string::String>, bool)> = keymap::PAD_SLOTS
+                .iter()
+                .map(|slot| (keymap::current_binding(slot.name), keymap::slot_is_modifier(slot.name)))
+                .collect();
+            backend.draw_touches_pad(
                 selection,
-                scroll_offset,
                 &bindings,
-                LIST_VISIBLE_ROWS,
                 keymap::edit_player(),
                 keymap::edit_subtab_index(),
-                keymap::edit_subtab_modifier(),
             );
         }
-        Screen::Keyboard { button_idx, key_idx, .. } => {
+        Screen::Keyboard { button_idx, key_idx } => {
             // Title shows the chord in a combo sub-tab ("ZL+A"), else the button.
-            let btn = *keymap::EDITABLE_BUTTONS
+            let btn = keymap::PAD_SLOTS
                 .get(button_idx)
-                .unwrap_or(&"");
+                .map(|s| s.name)
+                .unwrap_or("");
             let modif = keymap::edit_subtab_modifier();
             let label = if modif.is_empty() {
                 btn.to_string()

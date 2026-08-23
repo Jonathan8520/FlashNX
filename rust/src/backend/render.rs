@@ -408,6 +408,15 @@ static GLYPHS: &[(char, Glyph)] = &[
     // fatal in applet mode. One glyph here instead of a font dependency for the
     // word "90 degrees".
     ('\u{00B0}', [" ##  ", "#  # ", " ##  ", "     ", "     ", "     ", "     "]),
+    // Arrows, for the d-pad and stick directions on the TOUCHES pad view.
+    // Same reasoning as the degree sign above: without them these four fall
+    // through to the shared system font, which is fatal in applet mode. The
+    // pad names a direction two dozen times on one panel, so it is exactly
+    // the screen that must not depend on a 130 MB font load.
+    ('\u{2191}', ["  #  ", " ### ", "# # #", "  #  ", "  #  ", "  #  ", "  #  "]),
+    ('\u{2193}', ["  #  ", "  #  ", "  #  ", "  #  ", "# # #", " ### ", "  #  "]),
+    ('\u{2190}', ["     ", "  #  ", " #   ", "#####", " #   ", "  #  ", "     "]),
+    ('\u{2192}', ["     ", "  #  ", "   # ", "#####", "   # ", "  #  ", "     "]),
     ('\u{2026}', ["     ", "     ", "     ", "     ", "     ", "     ", "# # #"]), // …
     // Accented uppercase Latin (French + Spanish). The letter body is
     // compressed to 6 rows so the diacritic fits on row 0.
@@ -7607,43 +7616,102 @@ impl SwitchRenderBackend {
         }
     }
 
-    /// TOUCHES list screen — the keymap editor. Shows up to `visible_rows`
-    /// entries of `bindings` (Switch-button name + current Flash-key
-    /// binding) starting at `scroll_offset`. The row at `selection` is
-    /// highlighted in amber with a `>` cursor.
-    pub fn draw_touches_list(
+    /// Largest scale at or below `want` that fits `text` in a `w`-wide box, or
+    /// None when even scale 1 overflows — the renderer's way of saying "this
+    /// shape is too small to label", which is true of the SL/SR rail buttons.
+    fn label_scale(&self, text: &str, w: f32, want: f32) -> Option<f32> {
+        let full = self.measure_text(text, want);
+        if full <= w {
+            return Some(want);
+        }
+        let s = want * w / full;
+        if s >= 1.0 {
+            Some(s)
+        } else {
+            None
+        }
+    }
+
+    /// TOUCHES pad view — the keymap editor.
+    ///
+    /// Draws the controller from `keymap::PAD_SLOTS` (positioned controls in
+    /// abstract units) with one value chip per control, in two columns flanking
+    /// the picture, and lights the selected control in BOTH places at once: the
+    /// chip you are reading and the button you would press.
+    ///
+    /// That pairing is the point of the screen. The list this replaced could
+    /// tell you a binding but never where the button was, and it showed eight of
+    /// twenty-five at a time — so reading one keymap took four screens, times
+    /// five combo layers, times two players. Nothing here scrolls.
+    ///
+    /// `bindings` is parallel to `PAD_SLOTS`: `(binding, is_modifier)`. A slot
+    /// flagged `is_modifier` sends no key of its own  either it is the open
+    /// layer's own modifier, or it is a modifier everywhere because its layer has
+    /// a binding (see `keymap::slot_is_modifier`). Those rows are drawn dimmed
+    /// with the word MODIFIER where the key would be, and their button goes teal
+    /// on the picture, so a combo layer looks like what it is instead of being a
+    /// word in a tab strip.
+    pub fn draw_touches_pad(
         &mut self,
         selection: usize,
-        scroll_offset: usize,
-        bindings: &[(&str, Option<std::string::String>)],
-        visible_rows: usize,
+        bindings: &[(Option<std::string::String>, bool)],
         player: u8,
-        // Combo sub-tab (issue #57, per-modifier): `subtab` is the active slot
-        // (0 = NORMAL/base, 1..=4 = ZL/ZR/L/R), `combo_mod` its modifier ("" for
-        // NORMAL). Each modifier edits its OWN layer, so the rows show "ZL+A".
         subtab: usize,
-        combo_mod: &str,
     ) {
-        // Shared chrome (dim + panel + title + footer). Wide tier for the two
-        // columns; fixed 600-px height keeps the caller's LIST_VISIBLE_ROWS valid.
+        use crate::keymap::{Nub, PadIcon};
+        // Amber is the cursor everywhere in this app. Teal marks a button that
+        // is a MODIFIER rather than a key  the same teal the keyboard picker
+        // uses for "in play", and the same meaning: this one is spoken for.
+        const SHELL_COL: u32 = 0xFF_1E2735;
+        const ICON_COL: u32 = 0xFF_3A4657;
+        const ICON_NUB_COL: u32 = 0xFF_5A6A80;
+        const ICON_SEL_COL: u32 = 0xFF_FFD740;
+        const ICON_SEL_NUB: u32 = 0xFF_1A1A1A;
+        const ICON_MOD_COL: u32 = 0xFF_2E6E63;
+        const ICON_MOD_NUB: u32 = 0xFF_58C0AE;
+        const ICON_LOCK_COL: u32 = 0xFF_2A3038;
+        const CHIP_COL: u32 = 0xFF_2A3340;
+        const CHIP_LOCK_COL: u32 = 0xFF_222A34;
+        const SEP_COL: u32 = 0xFF_4A5568;
+        const LOCK_TXT_COL: u32 = 0x6E7B8C;
+        const SEL_WASH: u32 = 0x33_FF_D7_40;
+
         let lc = crate::loc::s();
+        const PANEL_W: f32 = 1180.0;
+        const SIDE_MARGIN: f32 = 26.0;
+        // Title + the two chip strips above, the legend below. Both bands are
+        // fixed pixels, so the pad takes whatever is left — which is exactly
+        // what the scale below is measured from.
+        const HEAD_H: f32 = 150.0;
+        const FOOT_H: f32 = 56.0;
+
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        // The same clamp `draw_modal_frame` applies, run BEFORE the call: the
+        // panel's height depends on the scale, and the scale depends on the
+        // width it will actually get. A turned picture gives a 720-wide viewport,
+        // and a pad laid out for 1180 would run off both edges of it.
+        let w = PANEL_W.min(vw - 40.0);
+        let inner_w = w - 2.0 * SIDE_MARGIN;
+        let avail_h = (vh - 40.0 - HEAD_H - FOOT_H).max(80.0);
+        // ONE scale taken from BOTH axes. The keyboard could scale on width
+        // alone because it is a block of rows; this is a picture of an object,
+        // and letting the axes disagree would stretch the controller.
+        let u = (inner_w / crate::keymap::PAD_UNITS_W).min(avail_h / crate::keymap::PAD_UNITS_H);
+        let pad_w = crate::keymap::PAD_UNITS_W * u;
+        let pad_h = crate::keymap::PAD_UNITS_H * u;
+
         let frame = self.draw_modal_frame(
-            MODAL_W_WIDE,
+            PANEL_W,
             0,
-            Some(600.0),
+            Some(HEAD_H + pad_h + FOOT_H),
             false,
             lc.keys_title,
             None,
             Some(lc.keys_footer),
         );
-
-        // Two visible tab rows so nothing is hidden behind a guess-press (issue
-        // #55/#57 ergonomics):
-        //   row 1 — player tabs P1 / P2                    (X toggles)
-        //   row 2 — sub-tab NORMAL / ZL / ZR / L / R       (L/R move)
-        // NORMAL = base bindings (combos off); a modifier = combos on with that
-        // button. There's no separate "off" chip — NORMAL *is* off. The footer
-        // names each control; the amber chip is the live state.
+        // Two visible tab rows, as the list had: nothing about the mode you are
+        // editing should need a guess-press to discover (issue #55/#57).
         self.draw_chip_strip(
             &["P1", "P2"],
             if player == 2 { 1 } else { 0 },
@@ -7659,133 +7727,240 @@ impl SwitchRenderBackend {
             34.0,
         );
 
-        // Two-column rows: Switch button (left) + bracketed binding value (right).
-        // In the combo view each row is prefixed with the modifier ("ZL+A") so it's
-        // clear these bindings fire as the chord, not the bare button.
-        const ROW_SCALE: f32 = 3.0;
-        const ROW_SPACING: f32 = 50.0;
-        let rows_top_y = frame.y + 140.0;
-        // Extra inset so the rows aren't cramped against the panel border (margin
-        // all around, per feedback). Cursor sits in the left margin.
-        let rows_left_x = frame.x + 64.0;
-        let value_col_x = frame.x + 380.0;
-        let total = bindings.len();
-        // Same eased pixel offset as the report list: the integer `scroll_offset`
-        // stays the source of truth, the rows just travel to it instead of
-        // teleporting a row at a time. A scissor over the band lets the row
-        // arriving at each edge slide in rather than appear.
-        let now = unsafe { ruffle_tick_now() };
-        let band_top = rows_top_y - 12.0;
-        let band_bot = rows_top_y + visible_rows as f32 * ROW_SPACING - 4.0;
-        let max_off = total.saturating_sub(visible_rows) as f32 * ROW_SPACING;
-        let scroll_off = eased_scroll_px(
-            (scroll_offset as f32 * ROW_SPACING).min(max_off),
-            GLIDE_KEY_KEYS,
-            now,
-        );
-        let first = (scroll_off / ROW_SPACING).floor().max(0.0) as usize;
-        let end = (first + visible_rows + 2).min(total);
-        // The rows are hit-testable now: the keymap editor was reachable only by
-        // the stick, on a screen where every other panel answers a finger.
-        let mut cells: std::vec::Vec<(f32, f32, f32, f32)> = std::vec![(0.0, 0.0, 0.0, 0.0); total];
-        row_view_publish(RowView {
-            key: GLIDE_KEY_KEYS,
-            kind: ui_screen_kind(),
-            band_top,
-            band_bot,
-            row_h: ROW_SPACING,
-            scroll_px: scroll_off,
-            max_off,
-            total: total as u32,
-            visible: visible_rows as u32,
-            base: 0,
-        });
-        self.set_clip(frame.x, band_top, frame.w, band_bot - band_top);
-        // A gliding bar under the rows, like every other list in the app. The
-        // keymap editor was the last one still jumping its cursor from row to
-        // row, inside a list that had just learnt to slide.
-        if selection < total {
-            // Eased in CONTENT space, THEN scrolled -- not the other way round.
-            // Easing the already-scrolled position eases the same movement
-            // twice: during a scroll the rows travel at the scroll speed while
-            // the bar chases them one step behind, which is the exact lag the
-            // glide exists to remove. In content space the bar rides the scroll
-            // exactly, and eases only when the SELECTION moves.
-            let hy = eased_list_y(rows_top_y + selection as f32 * ROW_SPACING, GLIDE_KEY_KEYS, now)
-                - scroll_off;
-            let bar_x = rows_left_x - MODAL_CURSOR_DX - 10.0;
-            let bar_w = (frame.x + frame.w - 28.0 - bar_x).max(0.0);
-            self.draw_selection_bar(bar_x, hy - 9.0, bar_w, ROW_SPACING - 12.0, 6.0);
-            // The cursor rides WITH the bar. Drawn inside the row loop it sat
-            // at the row's exact position while the bar glided toward it, so
-            // for the length of every move the two pointed at different rows.
-            self.draw_text(
-                rows_left_x - MODAL_CURSOR_DX,
-                hy,
-                ROW_SCALE,
-                ">",
-                swf::Color::from_rgb(MODAL_ROW_SEL_COL, 255),
-            );
+        let ox = frame.x + (frame.w - pad_w) * 0.5;
+        let oy = frame.y + HEAD_H;
+        // Units -> pixels. Every rect below goes through these two, so the table
+        // in keymap.rs is the only place the layout is written down.
+        let px = |ux: f32| ox + ux * u;
+        let py = |uy: f32| oy + uy * u;
+
+        // ── The shell ────────────────────────────────────────────────────
+        // Grips first, body over them, one colour: it is a silhouette, and a
+        // seam between the three would read as three objects.
+        for &(sx, sy, sw, sh, r) in crate::keymap::PAD_SHELL {
+            self.draw_round_rect(px(sx), py(sy), sw * u, sh * u, r * u, SHELL_COL);
         }
-        for abs_idx in first..end {
-            let (btn, binding) = &bindings[abs_idx];
-            let y = rows_top_y + abs_idx as f32 * ROW_SPACING - scroll_off;
-            // The scissor decides what is SEEN; this decides what is TOUCHABLE,
-            // so a row caught halfway through an edge takes no tap.
-            if y >= rows_top_y - 1.0 && y + ROW_SPACING <= band_bot + 12.0 {
-                cells[abs_idx] = (
-                    rows_left_x - MODAL_CURSOR_DX,
-                    y - 8.0,
-                    frame.x + frame.w - 40.0 - (rows_left_x - MODAL_CURSOR_DX),
-                    ROW_SPACING,
+
+        // ── Minus, locked ────────────────────────────────────────────────
+        {
+            let (mx, my, mw, mh) = crate::keymap::PAD_MINUS;
+            let (x, y, d) = (px(mx), py(my), mw * u);
+            self.draw_round_rect(x, y, d, mh * u, d * 0.5, ICON_LOCK_COL);
+            if let Some(s) = self.label_scale("-", d - 3.0, 1.6) {
+                let lw = self.measure_text("-", s);
+                self.draw_text(
+                    x + (d - lw) * 0.5,
+                    y + (mh * u - 7.0 * s) * 0.5,
+                    s,
+                    "-",
+                    swf::Color::from_rgb(ICON_NUB_COL, 255),
                 );
             }
-            let is_sel = abs_idx == selection;
-            let color = swf::Color::from_rgb(
-                if is_sel { MODAL_ROW_SEL_COL } else { MODAL_ROW_COL },
+        }
+
+        // ── The controls on the picture ──────────────────────────────────
+        // The five slots of one stick share a rect on purpose, so a stick must
+        // be drawn ONCE — with the nub of whichever of the five is selected.
+        // Drawn per-slot they would overdraw each other, and the last one in the
+        // table would always win. Same reason the selected control is drawn in a
+        // second pass: the d-pad arms meet, and the one under the cursor has to
+        // be the one on top.
+        let sel_slot = crate::keymap::PAD_SLOTS.get(selection);
+        for pass in 0..2 {
+            for (i, slot) in crate::keymap::PAD_SLOTS.iter().enumerate() {
+                let is_mod = bindings.get(i).map(|b| b.1).unwrap_or(false);
+                let is_sel = i == selection;
+                if is_sel != (pass == 1) {
+                    continue;
+                }
+                let (ix, iy, iw, ih) = slot.icon;
+                let (x, y, w, h) = (px(ix), py(iy), iw * u, ih * u);
+                let (body, nub) = if is_sel {
+                    (ICON_SEL_COL, ICON_SEL_NUB)
+                } else if is_mod {
+                    (ICON_MOD_COL, ICON_MOD_NUB)
+                } else {
+                    (ICON_COL, ICON_NUB_COL)
+                };
+                match slot.shape {
+                    PadIcon::Stick(n) => {
+                        // Only the first slot of the group draws the ring, and
+                        // only when the cursor is elsewhere: a selected slot owns
+                        // its stick and draws it in pass 1 with its own nub.
+                        let group_head = crate::keymap::PAD_SLOTS
+                            .iter()
+                            .position(|o| {
+                                matches!(o.shape, PadIcon::Stick(_)) && o.icon == slot.icon
+                            })
+                            .unwrap_or(i);
+                        let owner = sel_slot
+                            .filter(|s| matches!(s.shape, PadIcon::Stick(_)) && s.icon == slot.icon)
+                            .is_some();
+                        if (owner && !is_sel) || (!owner && i != group_head) {
+                            continue;
+                        }
+                        let n = if is_sel { n } else { Nub::Press };
+                        self.draw_round_rect(x, y, w, h, w * 0.5, body);
+                        let nd = w * 0.52;
+                        let off = w * 0.20;
+                        let (dx, dy) = match n {
+                            Nub::Up => (0.0, -off),
+                            Nub::Down => (0.0, off),
+                            Nub::Left => (-off, 0.0),
+                            Nub::Right => (off, 0.0),
+                            Nub::Press => (0.0, 0.0),
+                        };
+                        self.draw_round_rect(
+                            x + w * 0.5 + dx - nd * 0.5,
+                            y + h * 0.5 + dy - nd * 0.5,
+                            nd,
+                            nd,
+                            nd * 0.5,
+                            nub,
+                        );
+                    }
+                    PadIcon::Disc => {
+                        self.draw_round_rect(x, y, w, h, w.min(h) * 0.5, body);
+                    }
+                    PadIcon::Slab => {
+                        self.draw_round_rect(x, y, w, h, w.min(h) * 0.34, body);
+                    }
+                }
+                // The glyph, when the shape is big enough to carry one. The rail
+                // buttons are 0.7 units wide and never are; they are named by
+                // their chip and found by lighting up.
+                if !matches!(slot.shape, PadIcon::Stick(_)) {
+                    // Selected wins. The cursor should never be on a modifier
+                    // row -- menu.rs steps over them and refuses them to a
+                    // finger -- but a layer can change under a resting cursor,
+                    // and a label that turned invisible for one frame would be
+                    // a worse answer than one that stays readable.
+                    let txt = if is_sel {
+                        0x1A1A1A
+                    } else if is_mod {
+                        0xEAF7F3
+                    } else {
+                        0xE8EEF6
+                    };
+                    if let Some(s) = self.label_scale(slot.glyph, w - 4.0, 2.0) {
+                        let lw = self.measure_text(slot.glyph, s);
+                        self.draw_text(
+                            x + (w - lw) * 0.5,
+                            y + (h - 7.0 * s) * 0.5,
+                            s,
+                            slot.glyph,
+                            swf::Color::from_rgb(txt, 255),
+                        );
+                    }
+                }
+            }
+        }
+
+        // ── The value chips ──────────────────────────────────────────────
+        // Backgrounds first, then the eased wash, then every label: the wash has
+        // to sit ON the chip it marks and UNDER the text it marks it for, and a
+        // chip drawn after it would paint over it.
+        let chip_h = crate::keymap::PAD_SLOTS
+            .first()
+            .map(|s| s.chip.3 * u)
+            .unwrap_or(0.0);
+        let chip_r = (chip_h * 0.25).min(5.0);
+        let badge_w = 3.4 * u;
+        let txt_scale = (chip_h / 16.0).clamp(1.0, 2.2);
+        let mut cells: std::vec::Vec<(f32, f32, f32, f32)> =
+            std::vec::Vec::with_capacity(crate::keymap::PAD_SLOTS.len());
+        for (i, slot) in crate::keymap::PAD_SLOTS.iter().enumerate() {
+            let locked = bindings.get(i).map(|b| b.1).unwrap_or(false);
+            let (cx, cy, cw, ch) = slot.chip;
+            let (x, y, w, h) = (px(cx), py(cy), cw * u, ch * u);
+            cells.push((x, y, w, h));
+            self.draw_round_rect(x, y, w, h, chip_r, if locked { CHIP_LOCK_COL } else { CHIP_COL });
+            // A hairline instead of a second filled box behind the badge: the
+            // separator says "name | value" for the price of one rect, and this
+            // panel draws twenty-five of everything.
+            self.draw_overlay_rect(x + badge_w, y + h * 0.22, 2.0, h * 0.56, SEP_COL);
+        }
+
+        let now = unsafe { ruffle_tick_now() };
+        if let Some(slot) = sel_slot {
+            let (cx, cy, cw, ch) = slot.chip;
+            // Eased on BOTH axes with one key, like the language grid: the
+            // cursor crosses columns here, and a jump from the left column to
+            // the right is the move that most needs to be followed by eye.
+            let bx = eased_list_x(px(cx), GLIDE_KEY_KEYS, now);
+            let by = eased_list_y(py(cy), GLIDE_KEY_KEYS, now);
+            // Drawn, not masked: `draw_selection_bar` cuts its corners with the
+            // PAGE colour, which over a chip on a modal would leave four notches
+            // of the wrong navy in the chip itself.
+            self.draw_round_rect(bx, by, cw * u, ch * u, chip_r, SEL_WASH);
+        }
+
+        for (i, slot) in crate::keymap::PAD_SLOTS.iter().enumerate() {
+            let (cx, cy, cw, ch) = slot.chip;
+            let (x, y, w, h) = (px(cx), py(cy), cw * u, ch * u);
+            let locked = bindings.get(i).map(|b| b.1).unwrap_or(false);
+            let is_sel = i == selection;
+            let col = swf::Color::from_rgb(
+                if locked {
+                    LOCK_TXT_COL
+                } else if is_sel {
+                    MODAL_ROW_SEL_COL
+                } else {
+                    MODAL_ROW_COL
+                },
                 255,
             );
-            // Combo view: show the chord ("ZL+A"), not the bare button, so it's
-            // clear the binding fires when the modifier is held.
-            let btn_label = if combo_mod.is_empty() {
-                std::borrow::Cow::Borrowed(*btn)
+            // Badge: what you press. Centred in its half so the arrows line up
+            // down the column instead of drifting with the word beside them.
+            if let Some(s) = self.label_scale(slot.glyph, badge_w - 10.0, txt_scale) {
+                let lw = self.measure_text(slot.glyph, s);
+                self.draw_text(
+                    x + (badge_w - lw) * 0.5,
+                    y + (h - 7.0 * s) * 0.5,
+                    s,
+                    slot.glyph,
+                    swf::Color::from_rgb(
+                        if locked {
+                            LOCK_TXT_COL
+                        } else if is_sel {
+                            MODAL_ROW_SEL_COL
+                        } else {
+                            0xFFFFFF
+                        },
+                        255,
+                    ),
+                );
+            }
+            // Value: what it does. Shrinks rather than truncating, the way every
+            // other box in this app does — a binding cut to "RIGHT CLI" is worse
+            // than a small one.
+            // Not the stored binding: it is still in the keymap, and it will
+            // work again the day the layer is emptied, but showing it here would
+            // promise a key press that `main.cpp` mutes.
+            let value = if locked {
+                std::borrow::Cow::Borrowed(lc.keys_modifier)
             } else {
-                std::borrow::Cow::Owned(std::format!("{}+{}", combo_mod, btn))
+                bindings
+                    .get(i)
+                    .and_then(|b| b.0.as_deref())
+                    .map(crate::keymap::flash_key_display)
+                    .unwrap_or(std::borrow::Cow::Borrowed(lc.none))
             };
-            self.draw_text(rows_left_x, y, ROW_SCALE, &btn_label, color);
-            let value_str = binding
-                .as_deref()
-                .map(crate::keymap::flash_key_display)
-                .unwrap_or(std::borrow::Cow::Borrowed(crate::loc::s().none));
-            // Brackets around the value to suggest "editable field".
-            let bracketed = std::format!("[ {} ]", value_str);
-            self.draw_text(value_col_x, y, ROW_SCALE, &bracketed, color);
+            let avail = w - badge_w - 18.0;
+            // Floor of 1: below that a 5x7 bitmap font is mush, so the rule the
+            // keyboard picker already follows applies here — shrink to 1, then
+            // let it run. At scale 1 the value column takes thirty-odd
+            // characters and the longest binding name is half that.
+            let s = self.label_scale(&value, avail, txt_scale).unwrap_or(1.0);
+            self.draw_text(
+                x + badge_w + 12.0,
+                y + (h - 7.0 * s) * 0.5,
+                s,
+                &value,
+                col,
+            );
         }
-        self.clear_clip();
         ui_cells_publish(ui_screen_kind(), cells);
-
-        // Scroll indicator on the right edge if the list overflows.
-        if total > visible_rows {
-            let bar_x = frame.x + frame.w - 30.0;
-            let bar_top_y = rows_top_y;
-            let bar_h_total = visible_rows as f32 * ROW_SPACING;
-            let bar_h_thumb = (bar_h_total * visible_rows as f32 / total as f32).max(20.0);
-            // Follows the EASED offset so the thumb travels with the rows.
-            let progress = if max_off > 0.0 { (scroll_off / max_off).clamp(0.0, 1.0) } else { 0.0 };
-            let thumb_y = bar_top_y + (bar_h_total - bar_h_thumb) * progress;
-            let track = Matrix {
-                a: 4.0, b: 0.0, c: 0.0, d: bar_h_total,
-                tx: swf::Twips::from_pixels(bar_x as f64),
-                ty: swf::Twips::from_pixels(bar_top_y as f64),
-            };
-            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x40_99AABB), track);
-            let thumb = Matrix {
-                a: 4.0, b: 0.0, c: 0.0, d: bar_h_thumb,
-                tx: swf::Twips::from_pixels(bar_x as f64),
-                ty: swf::Twips::from_pixels(thumb_y as f64),
-            };
-            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), thumb);
-        }
 
         unsafe {
             glUseProgram(0);
@@ -7795,7 +7970,7 @@ impl SwitchRenderBackend {
     }
 
     /// TOUCHES keyboard picker (issue #55) — shown when the user presses A on a
-    /// list row. Draws a real PC keyboard from `keymap::KEYBOARD` (positioned keys,
+    /// control of the pad. Draws a real PC keyboard from `keymap::KEYBOARD` (positioned keys,
     /// numpad on the RIGHT) with the key at `sel_key_idx` highlighted amber. Keys
     /// already bound to another button in the current map (`used`) get a teal cap
     /// so the user sees a key is already in use (they can still pick it). The user

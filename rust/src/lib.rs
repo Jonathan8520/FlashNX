@@ -2008,9 +2008,10 @@ pub extern "C" fn ruffle_menu_touch(x: f32, y: f32, pressed: c_int) {
                 }
             }
         }
-        backend::render::RowTouch::Scrolled { offset, sel_lo, sel_hi } => {
-            menu::touch_scroll(offset, sel_lo, sel_hi);
-        }
+        // No Scrolled arm: the editor is a pad now and the keyboard picker was
+        // never a list, so neither publishes a scrolling row view and a drag
+        // over them has nothing to commit. Both answer taps, which is the arm
+        // above.
         _ => {}
     }
 }
