@@ -724,6 +724,17 @@ const ARENA_IBO_ALIGN: GLsizeiptr = 4;
 struct PendingUpload {
     /// Standalone GL texture; 0 when the target is a region of an atlas.
     texture: GLuint,
+    /// Keeps that standalone texture ALIVE until the write is sent.
+    ///
+    /// The write is now deferred to the start of the next frame, so between
+    /// holding it and flushing it Ruffle can free the BitmapData -- and
+    /// `StandaloneTexture::drop` calls `glDeleteTextures` straight away. The
+    /// flush would then write to a dead name: silently ignored at best, and at
+    /// worst `glGenTextures` has already recycled that name for something
+    /// created in between, so the rectangle lands in an unrelated texture.
+    /// Holding the `Arc` closes the window; `None` on the atlas path, whose
+    /// atlases outlive the frame anyway.
+    keep: Option<std::sync::Arc<StandaloneTexture>>,
     /// Atlas holding the target region, when `texture` is 0.
     atlas_index: usize,
     /// Destination rectangle, in the target texture's own pixels.
@@ -6756,6 +6767,7 @@ impl SwitchRenderBackend {
     fn hold_upload(
         &mut self,
         texture: GLuint,
+        keep: Option<std::sync::Arc<StandaloneTexture>>,
         atlas_index: usize,
         dst_x: u32,
         dst_y: u32,
@@ -6766,8 +6778,24 @@ impl SwitchRenderBackend {
         src_y: u32,
         src: &[u8],
     ) {
+        // The destination RECTANGLE is part of the identity, not just the
+        // texture. On the atlas path `texture` is always 0, so without the rect
+        // two different BitmapData packed into the same atlas looked like the
+        // same target: no flush, then `data.clear()` below threw the first
+        // one's pixels away. It never reached the GPU, and Ruffle had already
+        // marked the bitmap clean, so the tile simply stopped updating -- with
+        // no GL error and nothing in a log. The #89 case (same texture, same
+        // full rectangle, once per decoded video frame) still coalesces; every
+        // other pair falls back to a flush, which is what it did before.
         let same_target = match &self.pending_upload {
-            Some(p) => p.texture == texture && p.atlas_index == atlas_index,
+            Some(p) => {
+                p.texture == texture
+                    && p.atlas_index == atlas_index
+                    && p.dst_x == dst_x
+                    && p.dst_y == dst_y
+                    && p.w == w
+                    && p.h == h
+            }
             None => false,
         };
         if !same_target {
@@ -6798,6 +6826,7 @@ impl SwitchRenderBackend {
         }
         self.pending_upload = Some(PendingUpload {
             texture,
+            keep,
             atlas_index,
             dst_x,
             dst_y,
@@ -6814,9 +6843,13 @@ impl SwitchRenderBackend {
         let Some(p) = self.pending_upload.take() else {
             return;
         };
-        if p.texture != 0 {
+        // The id comes from the texture we KEPT ALIVE, not from a copy taken
+        // when the write was held: that is the whole point of the `keep` field,
+        // and reading it here is what makes the guarantee load-bearing rather
+        // than incidental.
+        if let Some(keep) = p.keep.as_ref() {
             unsafe {
-                glBindTexture(GL_TEXTURE_2D, p.texture);
+                glBindTexture(GL_TEXTURE_2D, keep.texture);
                 glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
                 glTexSubImage2D(
                     GL_TEXTURE_2D, 0,
@@ -14807,7 +14840,7 @@ impl RenderBackend for SwitchRenderBackend {
             // The stride is normalised here instead of at upload time, so the
             // held copy is tightly packed and the flush stays trivial.
             self.hold_upload(
-                standalone.0.texture, 0,
+                standalone.0.texture, Some(standalone.0.clone()), 0,
                 region.x_min, region.y_min, w, h,
                 rgba.width(), region.x_min, region.y_min, rgba.data(),
             );
@@ -14826,7 +14859,7 @@ impl RenderBackend for SwitchRenderBackend {
         let base_y = (switch_bitmap.v0 * atlas.height as f32).round() as u32;
         let atlas_index = switch_bitmap.atlas_index;
         self.hold_upload(
-            0, atlas_index,
+            0, None, atlas_index,
             base_x + region.x_min, base_y + region.y_min, w, h,
             rgba.width(), region.x_min, region.y_min, rgba.data(),
         );
