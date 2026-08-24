@@ -11368,6 +11368,8 @@ impl SwitchRenderBackend {
         // Favorited URLs: gold diamond, and pinned to the top by the caller —
         // same treatment a favorited game gets in the JOUER gallery.
         favorite: &[bool],
+        // The two pinned action rows, in the order they are drawn.
+        search_label: &str,
         add_label: &str,
         // Topmost visible row. A real value from the screen state (not derived
         // from `selection`) so a touch drag can scroll without moving the cursor.
@@ -11400,19 +11402,38 @@ impl SwitchRenderBackend {
         // Sub-line: "3 / 21 - FILTRE: mario" while searching, else the count —
         // with a long history you need to know how much of it you're looking at.
         let lc = crate::loc::s();
-        let sub = crate::loc::count_line(labels.len(), total_unfiltered, filter, || {
-            lc.dist_count.replace("{}", &total_unfiltered.to_string())
-        });
-        let sub_w = self.measure_text(&sub, 2.0);
+        // With nothing saved yet, "0" is a fact nobody needed. The line says what
+        // the two rows below it are for instead -- which this page has not done
+        // since it stopped being an archive.org URL box, and the strings written
+        // for that job went unread in loc.rs ever since.
+        let empty = total_unfiltered == 0 && filter.map_or(true, |f| f.trim().is_empty());
+        let sub = if empty {
+            std::borrow::Cow::Borrowed(lc.dist_empty_hint)
+        } else {
+            std::borrow::Cow::Owned(crate::loc::count_line(
+                labels.len(),
+                total_unfiltered,
+                filter,
+                || lc.dist_count.replace("{}", &total_unfiltered.to_string()),
+            ))
+        };
+        // Shrunk to fit rather than truncated: the hint is a sentence, and a
+        // sentence cut in half is worse than a small one. It is the longest thing
+        // this header ever draws, and longest of all in German.
+        let sub_scale = {
+            let full = self.measure_text(&sub, 2.0);
+            if full > vw - 80.0 { 2.0 * (vw - 80.0) / full } else { 2.0 }
+        };
+        let sub_w = self.measure_text(&sub, sub_scale);
         self.draw_text(
             (vw - sub_w) * 0.5,
             118.0,
-            2.0,
+            sub_scale,
             &sub,
             swf::Color::from_rgb(0xAABFD8, 255),
         );
 
-        let total = labels.len() + 1; // + the pinned "add" row
+        let total = labels.len() + crate::library::IMPORTER_PINNED_ROWS;
         // 10 rows: the last one ends at 660, clear of the footer at vh-42. Taken
         // from `library`, not re-typed: the scroll clamp and the reveal box are
         // computed there from the same three numbers, and a comment asking two
@@ -11428,10 +11449,24 @@ impl SwitchRenderBackend {
         // one of those screens renders per frame). This list used to PAGE, which
         // is why it alone felt like it snapped: the rows now ease toward
         // `scroll_offset` and the highlight bar slides between rows.
+        // The rule only exists when there is something under it, so on a fresh
+        // library nothing shifts and the page is simply two rows.
+        let gap = if labels.is_empty() {
+            0.0
+        } else {
+            crate::library::IMPORTER_SECTION_GAP
+        };
+        // Content-space y of row `i`. One pitch throughout, plus a constant step
+        // for the rows below the rule -- the drag-scroll and the touch cells are
+        // built on the pitch, so it must stay the same on both sides.
+        let row_y = |i: usize| {
+            top + i as f32 * row_h
+                + if i >= crate::library::IMPORTER_PINNED_ROWS { gap } else { 0.0 }
+        };
         let band_top = top - 8.0;
-        let band_bot = top + VISIBLE as f32 * row_h;
+        let band_bot = top + VISIBLE as f32 * row_h + gap;
         let target_scroll = scroll_offset as f32 * row_h;
-        let target_hover = top + selection as f32 * row_h;
+        let target_hover = row_y(selection);
         let mut scroll_px = target_scroll;
         let mut hover_y = target_hover;
         // An underlay must not touch the animation: the file list drawn over it
@@ -11483,7 +11518,7 @@ impl SwitchRenderBackend {
         self.draw_text(left - 34.0, hy, scale, ">", swf::Color::from_rgb(0xFFD740, 255));
 
         for i in 0..total {
-            let y = top + i as f32 * row_h - scroll_px;
+            let y = row_y(i) - scroll_px;
             // Cheap cull: skip rows fully outside the band.
             if y + row_h < band_top - 8.0 || y > band_bot + 8.0 {
                 continue;
@@ -11494,17 +11529,35 @@ impl SwitchRenderBackend {
             } else {
                 swf::Color::from_rgb(0xCCCCCC, 255)
             };
-            if i == 0 {
-                // Add row — teal when not selected so it stands out from URLs.
+            if i < crate::library::IMPORTER_PINNED_ROWS {
+                // The two actions — teal when not selected so they stand out
+                // from the URLs below. One colour for both: they are one kind of
+                // thing (do something) against another (a source you saved).
                 let c = if is_sel {
                     color
                 } else {
                     swf::Color::from_rgb(0x88CC99, 255)
                 };
-                self.draw_text(left, y, scale, add_label, c);
+                let lbl = if i == 0 { search_label } else { add_label };
+                self.draw_text(left, y, scale, lbl, c);
+                // The search row carries a source tag in the same column and the
+                // same dimmed style a URL row uses for its host, so "where does
+                // this come from" is answered the same way down the whole list.
+                // Not localised: it is the name of the project.
+                {
+                    let src = if i == 0 { "FLASHPOINT" } else { "ARCHIVE.ORG" };
+                    let tw = self.measure_text(src, 1.5);
+                    self.draw_text(
+                        vw - 60.0 - tw,
+                        y + 5.0,
+                        1.5,
+                        src,
+                        swf::Color::from_rgb(0x66788C, 255),
+                    );
+                }
                 continue;
             }
-            let k = i - 1;
+            let k = i - crate::library::IMPORTER_PINNED_ROWS;
             // Right-hand metadata first (host, then count), so the label knows
             // how much room is left before it truncates.
             let mut right = vw - 60.0;
@@ -11579,6 +11632,36 @@ impl SwitchRenderBackend {
             self.draw_text(ux, y, scale, &shown, color);
         }
 
+        // The rule between the two halves: what you can do, and what you have
+        // saved. Drawn inside the clip and in content space, so it travels with
+        // the rows instead of hanging in the header when the list scrolls.
+        if !labels.is_empty() {
+            let sep_y = top + crate::library::IMPORTER_PINNED_ROWS as f32 * row_h
+                + (gap - 24.0) * 0.5
+                - scroll_px;
+            if sep_y > band_top && sep_y < band_bot {
+                const RULE_COL: u32 = 0xFF_364356;
+                let head = lc.dist_sources;
+                let hw = self.measure_text(head, 1.5);
+                let cx = vw * 0.5;
+                let x0 = left - 40.0;
+                let x1 = vw - 56.0;
+                // Broken around the heading, like a legend on a frame: an
+                // unbroken rule with a word floating over it reads as two things
+                // that happen to overlap.
+                self.draw_overlay_rect(x0, sep_y, (cx - hw * 0.5 - 16.0 - x0).max(0.0), 2.0, RULE_COL);
+                let right_x = cx + hw * 0.5 + 16.0;
+                self.draw_overlay_rect(right_x, sep_y, (x1 - right_x).max(0.0), 2.0, RULE_COL);
+                self.draw_text(
+                    cx - hw * 0.5,
+                    sep_y - 5.0,
+                    1.5,
+                    head,
+                    swf::Color::from_rgb(0x8FA3BC, 255),
+                );
+            }
+        }
+
         self.clear_clip();
 
         // A search that matched nothing would otherwise be a blank page with a
@@ -11606,7 +11689,7 @@ impl SwitchRenderBackend {
                     row: i as u32,
                     cx: vw * 0.5,
                     x: 0.0,
-                    y: top + i as f32 * row_h,
+                    y: row_y(i),
                     w: vw,
                     h: row_h,
                 });

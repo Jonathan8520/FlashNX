@@ -3512,8 +3512,14 @@ pub fn input(button: &str) -> bool {
                 return true;
             }
             if button == "A" {
-                // A on a URL row launches it; A on row 0 (the "+ add" row, which
-                // has no URL behind it) opens swkbd.
+                // Row 0 is the Flashpoint search  the same flow X runs, so the
+                // shortcut and the row cannot drift apart.
+                if selection == 0 {
+                    run_fp_search_flow();
+                    return true;
+                }
+                // A on a URL row launches it; A on the "+ add" row, which has no
+                // URL behind it, opens swkbd.
                 let url = LIBRARY.lock().ok().and_then(|s| {
                     importer_abs_for_row(&s, selection)
                         .and_then(|abs| s.url_history.get(abs).cloned())
@@ -5706,7 +5712,28 @@ pub(crate) fn importer_view(s: &State) -> std::vec::Vec<usize> {
 /// Rows of the IMPORTER list visible at once. Shared by the renderer (layout),
 /// `distant_row_rect` (reveal geometry) and the scroll clamps, so they can't
 /// drift apart.
-pub const IMPORTER_VISIBLE_ROWS: usize = 10;
+pub const IMPORTER_VISIBLE_ROWS: usize = 9;
+
+/// Blank space opened under the pinned actions, for the rule that separates them
+/// from the saved sources.
+///
+/// A constant OFFSET applied to the rows below it, never a second row height:
+/// the drag-to-scroll and the touch cells are both built on one pitch, and a row
+/// that was taller than the pitch would put what you see and what you tap in two
+/// different places. One row of the ten went to pay for it, so the last row still
+/// ends clear of the footer.
+pub const IMPORTER_SECTION_GAP: f32 = 22.0;
+
+/// Action rows pinned above the saved URLs: search Flashpoint, then add a URL.
+///
+/// Flashpoint comes FIRST because it is the only import path that needs no URL:
+/// you type a name and pick a cover. The tab was built around archive.org URLs
+/// and kept that shape long after, so on a fresh install the whole screen said
+/// "paste an address" and the easy path was one letter in the footer legend.
+///
+/// Every row <-> URL conversion goes through `importer_row_for_abs` and
+/// `importer_abs_for_row`, so this number is the only place the offset lives.
+pub const IMPORTER_PINNED_ROWS: usize = 2;
 
 /// Top edge and pitch of that same list, in screen pixels.
 ///
@@ -5754,17 +5781,17 @@ fn importer_row_for_abs(s: &State, abs: usize) -> usize {
     importer_view(s)
         .iter()
         .position(|&i| i == abs)
-        .map(|p| p + 1)
+        .map(|p| p + IMPORTER_PINNED_ROWS)
         .unwrap_or(0)
 }
 
-/// Absolute `url_history` index behind IMPORTER row `row` (rows 1..), or `None`
-/// for row 0 (the "+ add" row) and out-of-range rows.
+/// Absolute `url_history` index behind an IMPORTER row, or `None` for the two
+/// pinned action rows at the top and for out-of-range rows.
 fn importer_abs_for_row(s: &State, row: usize) -> Option<usize> {
-    if row == 0 {
+    if row < IMPORTER_PINNED_ROWS {
         return None;
     }
-    importer_view(s).get(row - 1).copied()
+    importer_view(s).get(row - IMPORTER_PINNED_ROWS).copied()
 }
 
 /// How many of a saved URL's `.swf` files are already on SD, and how many there
@@ -5843,8 +5870,9 @@ fn handle_distant_idle_input(
     mut scroll: usize,
 ) {
     // A (launch / add) and Minus (search) are hoisted (swkbd + HTTPS). Here we
-    // navigate, open per-URL options and the sort picker. Row 0 = "+ add".
-    let last = importer_view(s).len();
+    // navigate, open per-URL options and the sort picker. Rows 0 and 1 are the
+    // pinned actions; `last` is the last INDEX, not the count.
+    let last = importer_view(s).len() + IMPORTER_PINNED_ROWS - 1;
     match button {
         // Wrap both ways: with a long history, "up from the top" is the fastest
         // way to the oldest entries.
@@ -9402,6 +9430,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 &direct,
                 &progress,
                 &favorite,
+                crate::loc::s().dist_search_games,
                 crate::loc::s().dist_add,
                 scroll_offset,
                 filter.as_deref(),
@@ -9479,6 +9508,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 &direct,
                 &progress,
                 &favorite,
+                crate::loc::s().dist_search_games,
                 crate::loc::s().dist_add,
                 src_scroll,
                 None,
@@ -9608,6 +9638,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     &under.2,
                     &under.3,
                     &under.4,
+                    crate::loc::s().dist_search_games,
                     crate::loc::s().dist_add,
                     src_scroll,
                     None,
