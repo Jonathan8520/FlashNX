@@ -7030,8 +7030,8 @@ impl SwitchRenderBackend {
                     atlas_tex = tex;
                     atlas_verts.extend_from_slice(&quad);
                 } else if self.font_atlas.is_none() && is_cjk_wrappable(ch) {
-                    // No atlas AT ALL -- applet mode refuses the CJK font
-                    // outright (glyphs::cjk_possible). Draw a hollow cell so a
+                    // No atlas AT ALL -- no shared font service, or not enough
+                    // room for one (glyphs::cjk_possible). Draw a hollow cell so a
                     // Chinese title reads as characters this mode cannot draw,
                     // instead of a run of blanks that looks like a game with no
                     // name. Only for the scripts the bitmap font could never

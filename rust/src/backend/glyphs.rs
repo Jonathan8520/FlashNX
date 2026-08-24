@@ -98,6 +98,14 @@ fn note_raster(ms: u64) {
     }
 }
 
+/// Room asked for before offering a CJK language: two atlas textures' worth.
+///
+/// Tied to a real cost, unlike the 96 MB then 192 MB that fontdue's expansion
+/// needed and never reliably got. One atlas is 4 MB and the second only opens
+/// past ~440 distinct characters, which a Chinese INTERFACE never reaches — so
+/// this asks for the interface plus one library's worth of headroom.
+const ATLAS_HEADROOM: usize = 2 * ATLAS_DIM * ATLAS_DIM * 4;
+
 /// Can this process afford the CJK font? Decided once and cached: the answer
 /// decides both whether the atlas is built and whether a CJK UI language is
 /// offered at all, and those two must never disagree.
@@ -111,35 +119,33 @@ pub fn cjk_possible() -> bool {
         2 => return false,
         _ => {}
     }
-    // APPLET MODE IS REFUSED OUTRIGHT, not probed.
+    // APPLET MODE IS NO LONGER REFUSED — history first, because the refusal was
+    // written from a console fatal and deserves to be undone on the record.
     //
-    // Measured on hardware: with the UI already set to Chinese, the atlas is
-    // built on the FIRST FRAME, while the heap is still nearly empty. The
-    // free-memory probe below therefore succeeded, fontdue then asked for more
-    // than it had reserved, and the process aborted into an Atmosphere fatal.
-    // Opening the language picker later, with a loaded heap, made the same
-    // probe fail and looked "fixed" - the guard was only ever passing by
-    // accident of timing.
+    // Measured then: with the UI already in Chinese the atlas is built on the
+    // FIRST FRAME, heap still nearly empty, so the free-memory probe passed,
+    // `fontdue::Font::from_bytes` then asked for more than it had reserved, and
+    // the process aborted into an Atmosphere fatal (2168-0002). Opening the
+    // picker later with a loaded heap made the same probe fail and looked
+    // "fixed" — it had only ever been passing by accident of timing. The lesson
+    // was that a free-memory probe cannot guard an allocation that cannot fail,
+    // so we asked the MODE instead.
     //
-    // A free-memory probe cannot answer this: it measures the moment it runs,
-    // not the peak of a parse that has no fallible allocation. The applet pool
-    // is small enough that the answer is no regardless of when we ask, so ask
-    // the mode instead. Applet mode cannot launch games anyway.
-    // The free-memory probe that used to guard the non-applet case is GONE with
-    // fontdue: there is no longer a 136 MB unfallible expansion to guard. The
-    // peak is now per glyph and transient (a ~9 KB scratch buffer, ~2 KB of
-    // coverage), so any threshold picked here would refuse Chinese on a loaded
-    // heap for a cost that no longer exists — which is the same mistake the
-    // first guessed 96 MB made, in the other direction.
+    // That whole shape is gone. ttf-parser expands nothing, and the atlas
+    // staging above is fallible now, so there is no unfallible allocation left
+    // on this path to guard. What remains is a real and BOUNDED cost — one
+    // 1024² RGBA atlas is 4 MB, up to `ATLAS_MAX` of them — so a probe is
+    // legitimate again, for a number that means something this time rather than
+    // the 96 MB that was invented for fontdue and passed anyway.
     //
-    // The applet refusal STAYS for now, deliberately. The parse is cheap, but
-    // the atlas itself is still up to 16 MB of GPU memory, the applet graphics
-    // pool is small too, and that has never been measured. Lifting it is one
-    // line here plus its own hardware test; doing it in the same change as the
-    // rasterizer swap would leave two suspects if the screen went wrong.
+    // It is a tripwire, not a guarantee, and that is now an acceptable thing to
+    // be: if it passes and GL still refuses, `new_atlas_texture` returns None,
+    // `draw_text` falls back to hollow cells, and the screen reads as "this
+    // mode cannot draw these characters" instead of rebooting the console.
     let applet = unsafe { ruffle_is_applet_mode() } != 0;
     let (used, total) = crate::query_ram();
-    let ok = !applet;
+    let mut probe: std::vec::Vec<u8> = std::vec::Vec::new();
+    let ok = probe.try_reserve_exact(ATLAS_HEADROOM).is_ok();
     log(&std::format!(
         "glyphs: cjk_possible={} (applet={}, pool {}/{} KB)\n",
         ok, applet, used / 1024, total / 1024,
@@ -215,6 +221,23 @@ fn glyph_cache() -> &'static std::sync::Mutex<std::vec::Vec<(char, Option<Cached
 /// NOTE for the caller: this binds and unbinds texture unit 0 with raw GL, so
 /// the renderer's state cache must be invalidated afterwards.
 fn new_atlas_texture() -> Option<GLuint> {
+    // Cleared in STRIPS, from a buffer that is ALLOWED to fail.
+    //
+    // This used to stage the whole 1024² image: a 4 MB `vec![0u8; ..]` with no
+    // fallible path, and under `panic = "abort"` an allocation the pool cannot
+    // serve is a console fatal, not an error. It was tolerable only while a
+    // 136 MB font parse stood in front of it and applet mode was refused
+    // outright — with both of those gone it became the largest thing left on
+    // this path that could still take the console down. 64 rows is 256 KB,
+    // uploaded sixteen times.
+    const STRIP_ROWS: usize = 64;
+    let strip = ATLAS_DIM * STRIP_ROWS * 4;
+    let mut zeros: std::vec::Vec<u8> = std::vec::Vec::new();
+    if zeros.try_reserve_exact(strip).is_err() {
+        log("glyphs: no room to stage the atlas — CJK will draw hollow cells\n");
+        return None;
+    }
+    zeros.resize(strip, 0);
     let mut tex: GLuint = 0;
     unsafe {
         glGenTextures(1, &mut tex);
@@ -224,7 +247,8 @@ fn new_atlas_texture() -> Option<GLuint> {
         }
         glBindTexture(GL_TEXTURE_2D, tex);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        let zeros = std::vec![0u8; ATLAS_DIM * ATLAS_DIM * 4];
+        // Storage first, contents second: a null pointer allocates the texture
+        // without reading anything, so the 4 MB never has to exist on our side.
         glTexImage2D(
             GL_TEXTURE_2D,
             0,
@@ -234,8 +258,26 @@ fn new_atlas_texture() -> Option<GLuint> {
             0,
             GL_RGBA,
             GL_UNSIGNED_BYTE,
-            zeros.as_ptr() as *const _,
+            core::ptr::null(),
         );
+        // Then zero it. An unwritten region is undefined, and it would show
+        // through the bilinear edge of the first glyph packed next to it.
+        let mut row = 0usize;
+        while row < ATLAS_DIM {
+            let rows = STRIP_ROWS.min(ATLAS_DIM - row);
+            glTexSubImage2D(
+                GL_TEXTURE_2D,
+                0,
+                0,
+                row as GLint,
+                ATLAS_DIM as GLsizei,
+                rows as GLsizei,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                zeros.as_ptr() as *const _,
+            );
+            row += rows;
+        }
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as GLint);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as GLint);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as GLint);
