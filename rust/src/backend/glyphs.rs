@@ -10,12 +10,25 @@
 //! Font source: libnx `pl` service, exposed via the C++ FFI
 //! `ruffle_shared_font`. `plGetSharedFontByType` returns DECRYPTED TTF/OTF
 //! bytes (the `pl` sysmodule unwraps Nintendo's BFTTF container for us), so
-//! fontdue parses them directly — there is no XOR deobfuscation to do here.
+//! ttf-parser reads them directly — there is no XOR deobfuscation to do here.
 //!
 //! Glyphs are rasterized once at a fixed `RASTER_PX` and scaled with GL_LINEAR
 //! at draw time. CJK is treated as full-width / monospace (`draw_text` uses a
-//! fixed cell advance, not fontdue's per-glyph advance) so `measure_text` and
+//! fixed cell advance, not the font's per-glyph advance) so `measure_text` and
 //! `draw_text` agree on widths without the atlas needing to exist yet.
+//!
+//! **The outline half is `ttf-parser`, the ink half is `ab_glyph_rasterizer`,
+//! and both replaced `fontdue` in v1.8 for one measured reason:** fontdue
+//! unfolded all 28 944 glyphs of the 7.8 MB shared font on parse — 1942 ms and
+//! 136 MB retained — to serve the ~100 a session draws, and paid it again at
+//! every renderer teardown. Rasterizing itself was already free (50 glyphs,
+//! 0 ms), so nothing about the DRAWING needed fixing; the parse did. The same
+//! parse now measures 0 ms on hardware.
+//!
+//! `Sink` and `raster_gid` were checked on a PC against `simsun` before they
+//! ever reached hardware, because a missing Y flip and an unbalanced contour
+//! both produce garbage that is obvious as ASCII art and expensive to find over
+//! a 5-minute build and a netload.
 
 use crate::ffi::gl::*;
 use std::collections::HashMap;
@@ -63,9 +76,10 @@ fn ms_since(t0: u64) -> u64 {
 }
 
 /// Total ms spent rasterizing glyphs since boot, and how many. Reported next to
-/// the parse cost so the two halves of "Chinese is slow" can be told apart:
-/// one big one-off (fontdue unfolding every glyph in the font) versus a per-
-/// character cost that the persistent `glyph_cache` already removes.
+/// the parse cost so the two halves of "Chinese is slow" can be told apart: one
+/// big one-off (which is what fontdue's up-front unfolding was) versus a
+/// per-character cost that the persistent `glyph_cache` already removes. Kept
+/// after the swap precisely because it is what proves the cost moved.
 static RASTER_MS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static RASTER_N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
@@ -84,19 +98,7 @@ fn note_raster(ms: u64) {
     }
 }
 
-/// Headroom `fontdue` needs to expand the shared CJK font. Probed with a
-/// FALLIBLE allocation because the parse itself has none: an allocator failure
-/// inside `fontdue::Font::from_bytes` aborts the process, which on hardware is
-/// an Atmosphere fatal (2168-0002, measured in applet mode).
-///
-/// 192 MB because the parse was MEASURED at a 136 MB peak (counted at the
-/// global allocator; `query_ram` reads the heap crt0 reserved and reported +0).
-/// The first value here was a guessed 96 MB, which would have let the probe
-/// succeed and fontdue abort anyway. fontdue also retains nearly all of it: the
-/// parsed `Font` holds those structures for as long as the atlas lives.
-const FONT_PARSE_HEADROOM: usize = 192 * 1024 * 1024;
-
-/// Can this process afford the CJK font? Probed once and cached: the answer
+/// Can this process afford the CJK font? Decided once and cached: the answer
 /// decides both whether the atlas is built and whether a CJK UI language is
 /// offered at all, and those two must never disagree.
 ///
@@ -123,14 +125,21 @@ pub fn cjk_possible() -> bool {
     // not the peak of a parse that has no fallible allocation. The applet pool
     // is small enough that the answer is no regardless of when we ask, so ask
     // the mode instead. Applet mode cannot launch games anyway.
+    // The free-memory probe that used to guard the non-applet case is GONE with
+    // fontdue: there is no longer a 136 MB unfallible expansion to guard. The
+    // peak is now per glyph and transient (a ~9 KB scratch buffer, ~2 KB of
+    // coverage), so any threshold picked here would refuse Chinese on a loaded
+    // heap for a cost that no longer exists — which is the same mistake the
+    // first guessed 96 MB made, in the other direction.
+    //
+    // The applet refusal STAYS for now, deliberately. The parse is cheap, but
+    // the atlas itself is still up to 16 MB of GPU memory, the applet graphics
+    // pool is small too, and that has never been measured. Lifting it is one
+    // line here plus its own hardware test; doing it in the same change as the
+    // rasterizer swap would leave two suspects if the screen went wrong.
     let applet = unsafe { ruffle_is_applet_mode() } != 0;
     let (used, total) = crate::query_ram();
-    let ok = if applet {
-        false
-    } else {
-        let mut probe: std::vec::Vec<u8> = std::vec::Vec::new();
-        probe.try_reserve_exact(FONT_PARSE_HEADROOM).is_ok()
-    };
+    let ok = !applet;
     log(&std::format!(
         "glyphs: cjk_possible={} (applet={}, pool {}/{} KB)\n",
         ok, applet, used / 1024, total / 1024,
@@ -159,8 +168,9 @@ pub struct GlyphInfo {
     /// Rasterized bitmap size in px (at `RASTER_PX`).
     pub w: f32,
     pub h: f32,
-    /// fontdue bearings (px at `RASTER_PX`): `xmin` = left bearing,
-    /// `ymin` = baseline-to-bitmap-bottom (y-up).
+    /// Bearings (px at `RASTER_PX`): `xmin` = left bearing, `ymin` =
+    /// baseline-to-bitmap-bottom, y-UP, so it is negative whenever ink descends
+    /// below the baseline — which for CJK is most of the time.
     pub xmin: f32,
     pub ymin: f32,
     /// True when the glyph has no ink (e.g. an ideographic space): the caller
@@ -171,13 +181,16 @@ pub struct GlyphInfo {
 /// One rasterized glyph's ink, kept ACROSS renderer lifetimes.
 ///
 /// The atlas texture belongs to a renderer and dies with it, so every game quit
-/// cost a full `fontdue::Font::from_bytes` over the 7.8 MB shared font — seconds
-/// of spinner, every time, to redraw characters that had been rasterized minutes
-/// earlier. Keeping the parsed font instead is not an option: it retains ~136 MB
-/// (see `FONT_PARSE_HEADROOM`) and a game needs that heap far more than the menus
-/// need instant Chinese. The COVERAGE is the cheap half — one byte per pixel,
-/// ~2 KB a glyph, about a megabyte for a whole UI's worth — so the font stays
-/// per-renderer and lazily parsed, and this survives everything.
+/// used to cost a full `fontdue::Font::from_bytes` over the 7.8 MB shared font:
+/// seconds of spinner, every time, to redraw characters that had been
+/// rasterized minutes earlier. This cache was the answer to that, and it is why
+/// only two parses were paid across five renderers instead of five.
+///
+/// It stays now that the parse is cheap. The coverage is still the expensive
+/// half per character (outlining and sweeping a dense ideogram is real work,
+/// even if it no longer registers against a 2-second parse), it is one byte per
+/// pixel — ~2 KB a glyph, about a megabyte for a whole UI's worth — and it is
+/// the only thing here that survives a renderer at all.
 struct CachedGlyph {
     /// 8-bit coverage, `w * h` bytes. Empty for an inkless glyph.
     cov: std::vec::Vec<u8>,
@@ -236,8 +249,15 @@ fn new_atlas_texture() -> Option<GLuint> {
 pub struct FontAtlas {
     /// Parsed ON DEMAND, and only when `glyph_cache` cannot answer — see
     /// `CachedGlyph`. `None` = not parsed yet OR the parse failed.
-    font: Option<fontdue::Font>,
+    ///
+    /// BORROWS the `pl` mapping rather than owning a copy of it; `load_font`
+    /// explains why that is sound and what would break it.
+    font: Option<ttf_parser::Face<'static>>,
     font_tried: bool,
+    /// Coverage scratch for one glyph, kept here so its buffer is allocated
+    /// once and `reset` reuses it instead of every character paying for a
+    /// fresh one.
+    raster: ab_glyph_rasterizer::Rasterizer,
     /// The texture being packed into now; `texs` holds it and every earlier one
     /// (all of them stay alive: their glyphs are still referenced).
     tex: GLuint,
@@ -256,20 +276,15 @@ impl FontAtlas {
     /// the font service is unavailable or the bytes don't parse — the caller
     /// then renders CJK as blanks (graceful, no crash).
     pub fn new() -> Option<FontAtlas> {
-        // Opening the language picker in APPLET mode took the whole console
-        // down with an Atmosphere fatal (2168-0002). Measured on hardware: the
-        // shared font maps fine and reads fine, and the process dies inside
-        // `fontdue::Font::from_bytes`, on a 2 KB allocation.
-        //
-        // fontdue expands the 7.8 MB CJK font into far more than its file size,
-        // and Rust has no fallible allocation there: an allocator failure
-        // inside it ABORTS the process. Applet mode's pool cannot hold it.
-        //
-        // So probe for the headroom with an allocation that is ALLOWED to fail,
-        // and draw CJK blank when it is not there. `query_ram` is not usable
-        // for this: it reports the heap crt0 reserved, not what is live.
-        // A language name rendered blank is a bad screen; a fatal is a console
-        // reboot and a lost session.
+        // History, because it is why this guard exists at all: opening the
+        // language picker in APPLET mode took the whole console down with an
+        // Atmosphere fatal (2168-0002). The shared font mapped and read fine;
+        // the process died inside `fontdue::Font::from_bytes` on a 2 KB
+        // allocation, because fontdue expanded the 7.8 MB font into far more
+        // than its file size with no fallible allocation anywhere — and under
+        // `panic = "abort"` a failed allocation is not a degradation, it is a
+        // console reboot. See `cjk_possible` for what the guard checks now that
+        // the parse is no longer the thing to be afraid of.
         if !cjk_possible() {
             log("glyphs: not enough memory to parse the CJK font — drawing it blank\n");
             return None;
@@ -278,6 +293,8 @@ impl FontAtlas {
         Some(FontAtlas {
             font: None,
             font_tried: false,
+            // Zero-sized until the first glyph sizes it; four floats until then.
+            raster: ab_glyph_rasterizer::Rasterizer::new(0, 0),
             tex,
             texs: std::vec![tex],
             glyphs: HashMap::new(),
@@ -356,9 +373,17 @@ impl FontAtlas {
             self.glyphs.insert(ch, None);
             return None;
         }
+        // `grow` reset the pen, but a glyph taller or wider than a whole atlas
+        // still would not fit, and the upload below would write past 1024 px
+        // without GL saying a word. Cheap, and the box we size from is now the
+        // control hull, which is a little wider than the one fontdue reported.
+        if self.pen_x + gw + PAD > ATLAS_DIM || self.pen_y + gh + PAD > ATLAS_DIM {
+            self.glyphs.insert(ch, None);
+            return None;
+        }
         let x0 = self.pen_x;
         let y0 = self.pen_y;
-        // fontdue gives 8-bit coverage; expand to white RGBA with alpha=coverage
+        // The rasterizer gives 8-bit coverage; expand to white RGBA with alpha
         // so a draw with `mult = text colour` tints it (see draw_atlas_glyph).
         let mut rgba = std::vec![0u8; gw * gh * 4];
         for i in 0..gw * gh {
@@ -423,19 +448,18 @@ impl FontAtlas {
                 return Some((g.w, g.h, g.xmin, g.ymin, g.cov.clone()));
             }
         }
-        let raster = self.font().and_then(|font| {
-            if font.lookup_glyph_index(ch) == 0 {
-                return None;
-            }
-            let t0 = unsafe { ruffle_tick_now() };
-            let (metrics, coverage) = font.rasterize(ch, RASTER_PX);
-            note_raster(ms_since(t0));
-            Some((metrics, coverage))
-        });
+        self.load_font();
+        // Two fields borrowed separately on purpose: `font` read, `raster`
+        // mutated. Routing this through a `&mut self` method instead does not
+        // borrow-check, which is why `load_font` returns nothing.
+        let raster = match self.font.as_ref() {
+            Some(face) => raster_glyph(face, &mut self.raster, ch),
+            None => None,
+        };
         // A font we could not parse is NOT cached as a miss: the next renderer
         // may well have the heap for it, and writing `None` here would make the
         // blank permanent for the rest of the session.
-        let (metrics, coverage) = match raster {
+        let (w, h, xmin, ymin, coverage) = match raster {
             Some(r) => r,
             None if self.font.is_none() => return None,
             None => {
@@ -445,8 +469,6 @@ impl FontAtlas {
                 return None;
             }
         };
-        let (w, h) = (metrics.width, metrics.height);
-        let (xmin, ymin) = (metrics.xmin as f32, metrics.ymin as f32);
         if let Ok(mut cache) = glyph_cache().lock() {
             cache.push((
                 ch,
@@ -456,13 +478,15 @@ impl FontAtlas {
         Some((w, h, xmin, ymin, coverage))
     }
 
-    /// The parsed shared font, loaded on first need. Tried ONCE per atlas: a
-    /// failure here is a missing font service or a heap that could not hold the
-    /// parse, and retrying it per character would re-run the expensive part on
-    /// every glyph of every frame.
-    fn font(&mut self) -> Option<&fontdue::Font> {
+    /// Parse the shared font, ONCE per atlas. A failure here is a missing font
+    /// service or bytes we cannot read, and retrying it per character would
+    /// re-run it on every glyph of every frame.
+    ///
+    /// Returns nothing: callers need `self.font` and another field at the same
+    /// time, and a `&mut self` accessor would hold the whole struct borrowed.
+    fn load_font(&mut self) {
         if self.font_tried {
-            return self.font.as_ref();
+            return;
         }
         self.font_tried = true;
         let bytes: &'static [u8] = unsafe {
@@ -470,30 +494,230 @@ impl FontAtlas {
             let ptr = ruffle_shared_font(1 /* PlSharedFontType_ChineseSimplified */, &mut len);
             if ptr.is_null() || len == 0 {
                 log("glyphs: shared font unavailable (null/0) — CJK will draw blank\n");
-                return None;
+                return;
             }
+            // `'static` is honest here, and load-bearing in a way it was not
+            // under fontdue: ruffle_bridge.cpp calls `plInitialize` once behind
+            // a `static bool` and never calls `plExit`, so the mapping outlives
+            // the process. fontdue COPIED everything out at parse time; this
+            // `Face` POINTS INTO that mapping for its whole life. Adding any
+            // `pl` cleanup on the C++ side turns it into a dangling pointer.
             core::slice::from_raw_parts(ptr, len as usize)
         };
         let t0 = unsafe { ruffle_tick_now() };
-        match fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()) {
+        match ttf_parser::Face::parse(bytes, 0) {
             Ok(f) => {
+                // Three things we cannot learn from a PC, answered in one line
+                // on the first hardware run: the em size (the whole scale hangs
+                // off it), whether the outlines are `glyf` or CFF (a CFF with a
+                // non-standard FontMatrix would need handling `outline_glyph`
+                // does not do), and whether the blob is a collection where face
+                // 0 might be the wrong one.
                 log(&std::format!(
-                    "glyphs: shared font parsed ({} KB) in {} ms\n",
+                    "glyphs: shared font parsed ({} KB, {} upem, {} glyphs, glyf={}, faces={}) in {} ms\n",
                     bytes.len() / 1024,
+                    f.units_per_em(),
+                    f.number_of_glyphs(),
+                    f.tables().glyf.is_some(),
+                    ttf_parser::fonts_in_collection(bytes).unwrap_or(1),
                     ms_since(t0),
                 ));
                 self.font = Some(f);
             }
-            Err(_) => log("glyphs: fontdue rejected the shared font\n"),
+            Err(e) => log(&std::format!("glyphs: ttf-parser rejected the shared font: {}\n", e)),
         }
-        self.font.as_ref()
     }
+}
+
+/// An outline sink that keeps nothing.
+///
+/// `outline_glyph` returns the glyph's bounding box as its RESULT, so running it
+/// once with this builder is how we size the pixel grid before rasterizing into
+/// it. The alternative — buffering the segments from a single pass — would
+/// allocate per glyph, and not allocating is the entire point of the swap.
+struct BBoxOnly;
+
+impl ttf_parser::OutlineBuilder for BBoxOnly {
+    fn move_to(&mut self, _: f32, _: f32) {}
+    fn line_to(&mut self, _: f32, _: f32) {}
+    fn quad_to(&mut self, _: f32, _: f32, _: f32, _: f32) {}
+    fn curve_to(&mut self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+    fn close(&mut self) {}
+}
+
+/// Feeds a glyph's outline to the rasterizer, converting font units to the
+/// bitmap's own pixel frame on the way through.
+struct Sink<'r> {
+    r: &'r mut ab_glyph_rasterizer::Rasterizer,
+    /// Pixels per font unit: `RASTER_PX / units_per_em`.
+    scale: f32,
+    /// Bitmap left edge, in scaled px from the pen. Also the glyph's `xmin`.
+    x0: f32,
+    /// Bitmap TOP edge, in scaled px above the baseline. Also `ymin + h`.
+    y1: f32,
+    start: ab_glyph_rasterizer::Point,
+    last: ab_glyph_rasterizer::Point,
+    open: bool,
+}
+
+impl<'r> Sink<'r> {
+    /// Font units (y up from the baseline) to bitmap pixels (y down from the
+    /// top-left). The Y flip lives here and nowhere else.
+    #[inline]
+    fn map(&self, x: f32, y: f32) -> ab_glyph_rasterizer::Point {
+        ab_glyph_rasterizer::point(x * self.scale - self.x0, self.y1 - y * self.scale)
+    }
+
+    /// Draw the closing edge back to the contour's first point.
+    ///
+    /// The rasterizer does NOT close contours for us, and its accumulator is a
+    /// running signed area swept left to right: an unclosed contour never
+    /// balances, so the ink does not merely look wrong, it SMEARS across every
+    /// pixel to its right for the rest of the row. Called from `close()` and
+    /// again from `move_to`, so a contour the font left open cannot leak into
+    /// the next one; `open` makes it idempotent.
+    fn close_contour(&mut self) {
+        if self.open {
+            self.r.draw_line(self.last, self.start);
+            self.open = false;
+        }
+    }
+}
+
+impl<'r> ttf_parser::OutlineBuilder for Sink<'r> {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.close_contour();
+        let p = self.map(x, y);
+        self.start = p;
+        self.last = p;
+        self.open = true;
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        let p = self.map(x, y);
+        self.r.draw_line(self.last, p);
+        self.last = p;
+    }
+
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        let (c, p) = (self.map(x1, y1), self.map(x, y));
+        self.r.draw_quad(self.last, c, p);
+        self.last = p;
+    }
+
+    /// CFF/CFF2 only — the `glyf` path emits move/line/quad/close and never a
+    /// cubic. Implemented anyway because which of the two the Switch ships is
+    /// not knowable from a PC; the log in `load_font` answers it.
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        let (c1, c2, p) = (self.map(x1, y1), self.map(x2, y2), self.map(x, y));
+        self.r.draw_cubic(self.last, c1, c2, p);
+        self.last = p;
+    }
+
+    fn close(&mut self) {
+        self.close_contour();
+    }
+}
+
+/// `None` = the font has no such character, which is a cacheable miss. A
+/// character that EXISTS but has no ink (an ideographic space) comes back as a
+/// zero-sized tuple instead, because those two are different verdicts: one is
+/// remembered as absent, the other advances the pen and draws nothing.
+fn raster_glyph(
+    face: &ttf_parser::Face<'static>,
+    raster: &mut ab_glyph_rasterizer::Rasterizer,
+    ch: char,
+) -> Option<(usize, usize, f32, f32, std::vec::Vec<u8>)> {
+    // fontdue answered 0 for an absent character; ttf-parser answers None. Take
+    // GlyphId(0) as absent too: that is `.notdef`, and rasterizing it would
+    // draw the tofu box the old `== 0` test existed to prevent.
+    let gid = match face.glyph_index(ch) {
+        Some(g) if g.0 != 0 => g,
+        _ => return None,
+    };
+    let t0 = unsafe { ruffle_tick_now() };
+    let out = raster_gid(face, raster, gid);
+    // Still measured around ONE glyph and never around the parse. This is the
+    // counter that separated "the parse costs 1942 ms" from "50 glyphs cost
+    // 0 ms", and it is how we can tell whether the cost actually moved.
+    note_raster(ms_since(t0));
+    Some(out)
+}
+
+/// Outline to 8-bit coverage, in exactly the units `ink` hands back.
+///
+/// Validated on the host before it ever reached hardware (see the harness note
+/// in the module header): `一` comes out a horizontal stroke, `国` a closed
+/// frame with its compartments open, U+3000 inkless, and a Latin `A` the right
+/// way up — the four things a Y flip or an unbalanced contour would each break
+/// differently.
+fn raster_gid(
+    face: &ttf_parser::Face<'static>,
+    raster: &mut ab_glyph_rasterizer::Rasterizer,
+    gid: ttf_parser::GlyphId,
+) -> (usize, usize, f32, f32, std::vec::Vec<u8>) {
+    let blank = || (0usize, 0usize, 0.0f32, 0.0f32, std::vec::Vec::new());
+    // No outline at all: an ideographic space. NOT a miss — `ensure` must take
+    // its `blank: true` branch so the pen advances and nothing is packed.
+    let Some(bbox) = face.outline_glyph(gid, &mut BBoxOnly) else {
+        return blank();
+    };
+    // `RASTER_PX` is PIXELS PER EM, which is what fontdue's `scale_factor`
+    // meant too — not a bitmap height and not a cap height. `render.rs` divides
+    // by `RASTER_PX` to size the quad, so any other normalisation (line height,
+    // ascender, ascent+descent) would resize every CJK glyph on screen without
+    // a single constant changing. `units_per_em` is guaranteed 16..=16384 by
+    // `head` parsing, which `Face::parse` already ran, so it cannot be zero.
+    let scale = RASTER_PX / face.units_per_em() as f32;
+    // Integer grid, rounded OUTWARDS on both sides. `x0`/`y0` are the bearings:
+    // floor of the scaled box minimum, exactly what fontdue reported. The width
+    // is algebraically fontdue's `ceil(width + fract(xmin))`, which is what
+    // keeps a column of ink from being lost on an off-grid glyph.
+    let x0 = (bbox.x_min as f32 * scale).floor();
+    let y0 = (bbox.y_min as f32 * scale).floor();
+    let x1 = (bbox.x_max as f32 * scale).ceil();
+    let y1 = (bbox.y_max as f32 * scale).ceil();
+    let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+    // Degenerate, or bigger than a shelf can ever hold. The old code had no
+    // size check at all: it trusted fontdue never to exceed ~RASTER_PX, and a
+    // `glTexSubImage2D` running past 1024 px would have been silent corruption.
+    if w == 0 || h == 0 || w > ATLAS_DIM - 2 * PAD || h > ATLAS_DIM - 2 * PAD {
+        return blank();
+    }
+    raster.reset(w, h);
+    {
+        let mut sink = Sink {
+            r: raster,
+            scale,
+            x0,
+            y1,
+            start: ab_glyph_rasterizer::point(0.0, 0.0),
+            last: ab_glyph_rasterizer::point(0.0, 0.0),
+            open: false,
+        };
+        face.outline_glyph(gid, &mut sink);
+        // A font is not obliged to emit a final `close`.
+        sink.close_contour();
+    }
+    // Exactly `w * h` bytes, row-major, row 0 = the TOP row, no stride —
+    // `ensure` indexes it as `coverage[i]` for `i in 0..gw * gh`, so a short
+    // buffer would panic and `panic = "abort"` makes that a console fatal.
+    let mut cov = std::vec![0u8; w * h];
+    raster.for_each_pixel(|i, a| {
+        cov[i] = (a * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
+    });
+    (w, h, x0, y0, cov)
 }
 
 impl Drop for FontAtlas {
     fn drop(&mut self) {
-        if self.tex != 0 {
-            unsafe { glDeleteTextures(1, &self.tex) };
+        // EVERY texture, not just the current one. `grow` keeps up to
+        // `ATLAS_MAX` alive and only `self.tex` was ever deleted, so a session
+        // that opened a second atlas leaked 4 MB of GPU memory per game quit.
+        for tex in &self.texs {
+            if *tex != 0 {
+                unsafe { glDeleteTextures(1, tex) };
+            }
         }
     }
 }

@@ -76,13 +76,28 @@ png = "0.18"
 image-webp = "0.2"
 # v1.4.0 — CJK text (Chinese, issue #41; Korean/Japanese share the same path).
 # Rasterizes glyphs from the Switch SHARED system font (via the `pl` service,
-# see backend/glyphs.rs) into a GL atlas; the .nro ships no font. CRITICAL:
-# `default-features = false` to drop fontdue's `parallel`/rayon feature — rayon
-# spawns threads that crash on Switch newlib pthread (same trap as jpeg-decoder
-# below). We also drop the `simd` feature (it can pull `portable_simd`, a
-# nightly feature our build-std toolchain would choke on) and use `std` for
-# float math + maps, which build-std provides.
-fontdue = { version = "0.9", default-features = false, features = ["std"] }
+# see backend/glyphs.rs) into a GL atlas; the .nro ships no font.
+#
+# ttf-parser replaced fontdue in v1.8 for one measured reason:
+# `fontdue::Font::from_bytes` unfolded all 28 944 glyphs of the 7.8 MB shared
+# font up front — 1942 ms and a 136 MB retained peak, paid again at every
+# renderer teardown (so once per game quit), for the ~100 glyphs a session
+# actually draws. ttf-parser borrows the bytes and outlines ONE glyph on
+# demand: measured on hardware at 0 ms for the same parse.
+# Version 0.25 on purpose: ruffle_core already depends on `ttf-parser = "0.25"`,
+# so this compiles the copy that is in the .nro anyway and costs no binary
+# size — while fontdue had pulled a SECOND copy (0.21.1) that now leaves the
+# tree. Default features are safe: none of them pulls threads, SIMD or
+# `no-std-float`.
+ttf-parser = "0.25"
+# The other half of what fontdue did: outlines in, 8-bit coverage out. Exact
+# signed-area rasterization (the font-rs algorithm), one scratch buffer, zero
+# dependencies. Its `std::sync::Once` and its avx2/sse4 paths are all behind
+# `cfg(any(target_arch = "x86", target_arch = "x86_64"))`, so on our aarch64 it
+# compiles down to one scalar function: no pthread to crash on newlib, no
+# nightly SIMD to break build-std. Validated on the host against simsun before
+# it ever reached hardware — see the note in backend/glyphs.rs.
+ab_glyph_rasterizer = "0.1"
 # v1.2.0 — local cover art. We decode user-dropped `.jpg` sidecars and (opt-in)
 # Flashpoint logos. jpeg-decoder is pinned via [patch.crates-io] to the Switch
 # fork. CRITICAL: `default-features = false` — the crate defaults to `rayon`,
