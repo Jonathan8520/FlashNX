@@ -148,6 +148,14 @@ pub(crate) fn https_error_message(sink: Sink) -> std::string::String {
         35 | 51 | 53 | 54 | 58 | 59 | 60 | 66 | 77 | 83 => owned(lc.err_tls),
         // Transfer itself was fine — the server said no (404 / 403 / 429 / 5xx).
         _ if http >= 400 => crate::loc::err_http_status(http),
+        // Everything else: the transfer broke on its way, mid-connection.
+        // This arm is reached only AFTER 5, 6 and 7 -- the three codes that mean
+        // "no network" -- have been taken above, so the WiFi is the one thing
+        // the code has just ruled out, and it used to be the only thing this
+        // sentence accused (#103). It also asked to check a URL, which the
+        // IMPORTER search user never typed: they typed a game name. The curl
+        // detail stays in the parentheses, because that is what makes a report
+        // diagnosable.
         _ => crate::loc::err_https(&last_https_error()),
     }
 }
