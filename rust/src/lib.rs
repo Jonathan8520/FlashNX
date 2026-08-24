@@ -2848,6 +2848,19 @@ pub extern "C" fn ruffle_shutdown() {
     unsafe {
         STATE = None;
     }
+    // The ExternalInterface tables belong to the MOVIE, not to the process, and
+    // these two outlived it: the launcher tears the player down between games
+    // and builds a new one, so game B started with game A's registered callback
+    // names still listed and, worse, with anything still queued for A waiting to
+    // be called on B's first frame. `queue_container_callback` matches by name
+    // without case, so a name two games happen to share was enough to fire a
+    // callback into a movie that never asked for it.
+    if let Ok(mut c) = EI_CALLBACKS.lock() {
+        c.clear();
+    }
+    if let Ok(mut q) = EI_PENDING.lock() {
+        q.clear();
+    }
 }
 
 #[no_mangle]

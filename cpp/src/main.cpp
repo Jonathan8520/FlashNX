@@ -1260,7 +1260,15 @@ static void worker_entry(void* arg) {
                         break;
                     }
                     menu_open = false;
-                    resume_after_pause();
+                    // NOT resume_after_pause() here, unlike every other resume:
+                    // ruffle_restart() destroyed the Player and built a new one,
+                    // whose clock starts NOW. There is no unplayed gap to hide,
+                    // and handing it one pushes its start_time into the FUTURE
+                    // by however long the menu was open -- getTimer() then reads
+                    // 0 for exactly that long (Instant::duration_since saturates
+                    // rather than panicking), which is the frozen-animation
+                    // failure mode of #100 reachable from any game's menu.
+                    last_tick = ruffle_tick_now();
                     continue;
                 }
                 case MENU_QUIT:
@@ -1559,10 +1567,6 @@ static void worker_entry(void* arg) {
         if (dt_us > 100000ULL) dt_us = 100000ULL;
 
         ruffle_render_frame_dt(dt_us);
-        // At ~8 s, then every ~15 s, four times in all. One dump is not enough
-        // for a game that only reaches its gameplay screen later: Peggle traces
-        // "Starting Level" long after the first snapshot, and the question is
-        // what the stage looks like THEN.
         // One snapshot of the stage, ~8 s in: by then a game that is going to
         // show something has, and one that shows a black screen has settled into
         // whatever it is doing. Six lines, and they answer the first question a
