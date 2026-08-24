@@ -196,8 +196,8 @@ pub fn install_id() -> std::string::String {
     // Persist best-effort. If the write fails the id just regenerates next boot
     // (worst case: this install's future shares land as new files rather than
     // updates — never a clobber of someone else's profile).
-    let path = "sdmc:/flashnx/install_id";
-    if std::fs::write(path, id.as_bytes()).is_ok() {
+    let path = crate::library::config_write_path("install_id");
+    if std::fs::write(&path, id.as_bytes()).is_ok() {
         crate::sd::commit();
     }
     id
@@ -242,10 +242,14 @@ pub fn author_name() -> std::string::String {
 /// Persist the player's nickname (RÉGLAGES > PSEUDO). Empty clears it.
 pub fn set_author_name(name: &str) {
     let clean: std::string::String = name.trim().chars().take(24).collect();
-    let path = "sdmc:/flashnx/author";
+    // Beside the LIBRARY, like everything else the app owns. These three files
+    // were the last ones still writing to a hardcoded root while reading through
+    // `config_read_path`: after a library move (#79) the nickname was written
+    // where nothing would ever read it again, so it simply could not be changed.
     if clean.is_empty() {
-        let _ = std::fs::remove_file(path);
-    } else if std::fs::write(path, clean.as_bytes()).is_err() {
+        crate::library::config_remove_everywhere("author");
+    } else if std::fs::write(crate::library::config_write_path("author"), clean.as_bytes()).is_err()
+    {
         return;
     }
     crate::sd::commit();
@@ -253,7 +257,8 @@ pub fn set_author_name(name: &str) {
 
 /// Secret per-install token that proves ownership of this install's shared
 /// profiles (#20). SERVER-generated on the first share (trust-on-first-use) and
-/// returned in the share response; we persist it in `sdmc:/flashnx/owner_token`.
+/// returned in the share response; we persist it in an `owner_token` file beside
+/// the library.
 /// Required to UPDATE or DELETE our own profiles. Unlike `install_id` (a PUBLIC
 /// dedup key, visible in every shared id), this never leaves the device except
 /// over HTTPS to the relay. Empty until the first successful share. Hex/alnum.
@@ -277,7 +282,7 @@ fn set_owner_token(token: &str) {
     if clean.len() < 16 {
         return; // ignore junk / too-short to be a real token
     }
-    if std::fs::write("sdmc:/flashnx/owner_token", clean.as_bytes()).is_ok() {
+    if std::fs::write(crate::library::config_write_path("owner_token"), clean.as_bytes()).is_ok() {
         crate::sd::commit();
     }
 }

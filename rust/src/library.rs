@@ -887,6 +887,18 @@ pub(crate) fn config_read_path(name: &str) -> std::string::String {
     std::format!("{}/{}", primary_root(), name)
 }
 
+/// Delete one of the app's own files from EVERY root it could be sitting in.
+///
+/// Clearing a setting has to clear it everywhere, not just where we would write
+/// it: a file written before the library moved is still on the old root, and
+/// `config_read_path` would find it again the moment the new one is gone. The
+/// setting would come back by itself, which reads as the app ignoring you.
+pub(crate) fn config_remove_everywhere(name: &str) {
+    for root in search_roots() {
+        let _ = std::fs::remove_file(std::format!("{}/{}", root, name));
+    }
+}
+
 /// Where to WRITE one of the app's own files: always beside the library.
 ///
 /// Everything the app owns travels with the games, because "moved" should mean
