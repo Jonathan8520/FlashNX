@@ -61,3 +61,38 @@ The `.sol` save drops the cyclic back-pointer (slightly lossy) but is finite and
 valid. Validated on Hemp Tycoon, which crashed when planting (it flushes a
 cyclic save on every action): the game now plays and saves. Upstream master
 still has no guard (checked 2026-06).
+
+### Not carried as numbered patches
+
+`ruffle-local.diff` is the full snapshot of `third_party/ruffle` and is the
+only complete record. Several fixes live there without a numbered patch,
+because their file already carries unrelated local changes that a standalone
+`.patch` would duplicate. The notable ones:
+
+**`core/src/character.rs` — decoded-bitmap budget, and `decode_or_stand_in`.**
+
+The budget refuses a bitmap once the movie's decoded-bitmap allowance is
+spent, so a huge SWF loses sprites instead of the process losing its heap.
+`reset_bitmap_cache` re-sizes it per movie; FlashNX calls it from
+`ensure_swf_loaded` on both the cached and uncached paths (a RESTART that
+skipped it left the counter full and refused nearly every bitmap: 5163
+refusals on Super Smash Flash 2, against 45 once fixed).
+
+`decode_or_stand_in` exists because decoding allocates width x height x 4
+bytes and is therefore among the first things to fail on an exhausted heap,
+while three upstream call sites unwrap it: `library.rs`
+(`instantiate_display_object`), `avm2/globals/flash/display/bitmap_data.rs`
+(`fill_bitmap_data_from_symbol`) and `avm1/globals/bitmap_data.rs`. All three
+now take a 1x1 transparent stand-in instead of killing the process. The
+stand-in is deliberate and `None` is not an option: `clone_sprite` in
+`avm1/globals/movie_clip.rs` unwraps that `Option`, so returning `None` would
+merely move the panic to `duplicateMovieClip`.
+
+**`core/src/player.rs` — GC and frame-pacing probes.**
+
+`flashnx_gc_probe` publishes, per host frame, the number of SWF frames the
+tick actually ran, the collector phase, the arena's total allocation and the
+microseconds spent inside the collector. Added to settle whether a periodic
+28-frame stall was the collector or frame catch-up; it was neither, it was
+newlib's `free`. Diagnostic only, and a candidate for removal once the
+allocator work is finished.

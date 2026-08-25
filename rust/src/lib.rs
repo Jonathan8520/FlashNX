@@ -13,6 +13,327 @@
 
 #![feature(restricted_std)]
 
+/// Counting global allocator (2026-08-25, periodic-spike hunt).
+///
+/// The GC phase probe showed Mario 63's castle spending ~48% of its wall clock
+/// inside gc-arena's SWEEP, sweeping about 10 MB per cycle at an implausible
+/// ~6 MB/s. A linear traversal cannot be that slow, so the suspicion is what
+/// the traversal *calls*: `free()`. Nothing here defines an allocator, so Rust
+/// hands every allocation to newlib's malloc, and newlib's is not fast.
+///
+/// This wrapper only counts — no clock is read per call, because two FFI reads
+/// on every dealloc would cost more than the thing being measured. Pair the
+/// per-frame dealloc count with the collector timing (`gcUs`) and the answer
+/// falls out: 100k frees for 300 ms means ~3 us per free, which is newlib's
+/// problem and therefore ours to fix; a low count means the cost is inside
+/// gc-arena's own traversal, which is upstream's.
+mod counting_alloc {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+
+    pub static ALLOC_N: AtomicU64 = AtomicU64::new(0);
+    pub static DEALLOC_N: AtomicU64 = AtomicU64::new(0);
+    pub static ALLOC_TICKS: AtomicU64 = AtomicU64::new(0);
+    pub static DEALLOC_TICKS: AtomicU64 = AtomicU64::new(0);
+    /// Allocations served from the region rather than newlib.
+    pub static SMALL_N: AtomicU64 = AtomicU64::new(0);
+
+    /// The ARM generic timer, read inline. Deliberately NOT `ruffle_tick_now()`:
+    /// that is an FFI call, and paying one on both sides of every allocation
+    /// would cost more than the allocation being measured.
+    ///
+    /// It must be `cntpct_el0`, the PHYSICAL counter — exactly what libnx's
+    /// `armGetSystemTick` reads. Horizon traps `cntvct_el0` from EL0: reading
+    /// it aborts on the very first Rust allocation.
+    ///
+    /// No `nomem`/`pure`: this must stay a real side-effecting read so the two
+    /// calls around an allocation cannot be merged into one.
+    #[inline(always)]
+    fn now() -> u64 {
+        let t: u64;
+        unsafe { core::arch::asm!("mrs {}, cntpct_el0", out(reg) t, options(nostack)) };
+        t
+    }
+
+    // ─── Small-object cache in front of newlib ────────────────────────────
+    //
+    // Why: measured 2026-08-25, Mario 63's castle does 48 870 mallocs and
+    // 43 705 frees PER FRAME, costing 63.7 ms of a 110 ms frame — 58% of the
+    // wall clock. newlib's `free()` degrades from 0.13 us at rest to 1.22 us
+    // during a GC sweep at identical call counts: dlmalloc coalescing walking
+    // a fragmented free list. Caching small blocks took the castle from 9.1 to
+    // 13.1 fps and removed all 119 frames over 150 ms.
+    //
+    // ONE fixed region, reserved once, carved with a bump pointer, with a
+    // per-class free list on top. Blocks that do not fit in the region go to
+    // newlib exactly as before.
+    //
+    // Two earlier designs failed, and both failures are the reason this one
+    // looks the way it does:
+    //
+    //  * A global bump region that never released anything held 279 MB after
+    //    Super Smash Flash 2, and still held it while a later, lighter game
+    //    ran. Retention has to be bounded.
+    //
+    //  * Per-slab release with 64 KB slabs ALIGNED to 64 KB fixed retention
+    //    but turned a 256-byte request into a 64 KB aligned request. On SSF2,
+    //    which legitimately sits at 2.7 GB, newlib could no longer satisfy
+    //    that while a plain malloc(256) still could — and the code then
+    //    aborted instead of degrading. It crashed on entering a fight.
+    //
+    // Hence: reserve once, at the first small allocation, while memory is
+    // still plentiful, and NEVER ask the system for a large block again. The
+    // region is bounded, so retention is bounded by construction, with no list
+    // surgery and no per-slab bookkeeping.
+    //
+    // The invariant that makes it safe is a RANGE TEST, not the layout:
+    // `dealloc` asks "is this pointer inside the region?". A block served by
+    // newlib because the region was full is recognised as newlib's and handed
+    // back to newlib. That is what lets the fallback exist at all — the
+    // previous design could not fall back without corrupting memory.
+
+    const GRAN: usize = 16;
+    const CLASSES: usize = 16;
+    const MAX_SMALL: usize = GRAN * CLASSES; // 256
+    /// The cache GROWS. It reserves nothing up front and takes another chunk
+    /// only when the previous one is used up.
+    ///
+    /// A fixed 32 MB region was tried and it was a regression, measured on
+    /// Super Smash Flash 2: capped, the region saturated at once, the hit rate
+    /// collapsed from 93% to 12%, `malloc` went from 0.16 to 0.43 us, and the
+    /// heap share of the frame doubled. The game then died at 2894 MB where an
+    /// uncapped cache had carried it to 3038 MB.
+    ///
+    /// The lesson is that those megabytes are not overhead. They are memory
+    /// the game needs for its small objects either way; serving them from a
+    /// pool instead of newlib is also what stops 850 000 allocations per frame
+    /// from churning newlib's free list into confetti. Starving the cache
+    /// makes the heap WORSE, not better.
+    ///
+    /// So: grow on demand, pay nothing when unused, and stop at a ceiling that
+    /// is generous rather than cautious.
+    const CHUNK: usize = 32 * 1024 * 1024;
+    const MAX_CHUNKS: usize = 16; // 512 MB ceiling
+
+    /// Size class for a layout, or `None` when newlib should handle it.
+    /// Alignment above 16 goes to `System`: region blocks are only 16-aligned.
+    #[inline(always)]
+    fn class_of(l: Layout) -> Option<usize> {
+        if l.align() > GRAN || l.size() == 0 || l.size() > MAX_SMALL {
+            return None;
+        }
+        Some((l.size() + GRAN - 1) / GRAN - 1)
+    }
+
+    static LOCK: AtomicBool = AtomicBool::new(false);
+    static HEADS: [AtomicUsize; CLASSES] = [const { AtomicUsize::new(0) }; CLASSES];
+    /// The chunks we own, appended under LOCK and never moved or released.
+    /// `NCHUNKS` is published with Release AFTER its bounds are stored, and
+    /// read with Acquire, so a concurrent `dealloc` can never see a chunk
+    /// count that outruns the bounds it would read.
+    static CH_BASE: [AtomicUsize; MAX_CHUNKS] = [const { AtomicUsize::new(0) }; MAX_CHUNKS];
+    static CH_END: [AtomicUsize; MAX_CHUNKS] = [const { AtomicUsize::new(0) }; MAX_CHUNKS];
+    static NCHUNKS: AtomicUsize = AtomicUsize::new(0);
+    /// Bump pointer inside the newest chunk.
+    static BUMP: AtomicUsize = AtomicUsize::new(0);
+    static BUMP_END: AtomicUsize = AtomicUsize::new(0);
+    /// Bytes handed out of the region and not returned, reported as `slabMB`.
+    pub static SLAB_BYTES: AtomicU64 = AtomicU64::new(0);
+    /// Kill switch, set from C++ at boot when `sdmc:/switch/FlashNX/noalloc.on`
+    /// exists — before the worker thread starts, so before any Rust allocation.
+    /// With it on, the region is never reserved and every block goes to newlib:
+    /// byte for byte the behaviour that predates this module, for A/B testing a
+    /// game against it. Safe to flip at any time in principle, because
+    /// `dealloc` decides by ADDRESS: blocks already carved keep being returned
+    /// to the region, blocks served afterwards go back to newlib.
+    pub static FORCE_OFF: AtomicBool = AtomicBool::new(false);
+
+    #[inline(always)]
+    fn lock() {
+        while LOCK
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+    }
+    #[inline(always)]
+    fn unlock() {
+        LOCK.store(false, Ordering::Release);
+    }
+
+    /// Take another chunk. Called under LOCK when the bump pointer runs out.
+    /// Returns false when the ceiling is reached, the kill switch is on, or
+    /// the system refuses — in every case the caller falls through to newlib,
+    /// which is exactly the behaviour that predates this module.
+    fn grow() -> bool {
+        if FORCE_OFF.load(Ordering::Relaxed) {
+            return false;
+        }
+        let n = NCHUNKS.load(Ordering::Relaxed);
+        if n >= MAX_CHUNKS {
+            return false;
+        }
+        let p = unsafe { System.alloc(Layout::from_size_align_unchecked(CHUNK, GRAN)) };
+        if p.is_null() {
+            return false;
+        }
+        let base = p as usize;
+        CH_BASE[n].store(base, Ordering::Relaxed);
+        CH_END[n].store(base + CHUNK, Ordering::Relaxed);
+        // Bounds first, count last: see the note on NCHUNKS.
+        NCHUNKS.store(n + 1, Ordering::Release);
+        BUMP.store(base, Ordering::Relaxed);
+        BUMP_END.store(base + CHUNK, Ordering::Relaxed);
+        true
+    }
+
+    /// True when `p` was carved from one of our chunks. Scans newest first,
+    /// because the newest chunk is where the live blocks are concentrated.
+    /// At most `MAX_CHUNKS` pairs of comparisons on data that stays in L1, and
+    /// it does not care what the layout says — which is what lets blocks that
+    /// newlib served (ceiling reached) be handed back to newlib correctly.
+    #[inline(always)]
+    fn in_region(p: *mut u8) -> bool {
+        let a = p as usize;
+        let n = NCHUNKS.load(Ordering::Acquire);
+        let mut i = n;
+        while i > 0 {
+            i -= 1;
+            if a >= CH_BASE[i].load(Ordering::Relaxed) && a < CH_END[i].load(Ordering::Relaxed) {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub struct Counting;
+
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+            let t0 = now();
+            let p = match class_of(l) {
+                Some(c) => {
+                    lock();
+                    let head = HEADS[c].load(Ordering::Relaxed) as *mut u8;
+                    let p = if !head.is_null() {
+                        // Pop. The freed block's first 8 bytes hold the link.
+                        let next = unsafe { *(head as *mut *mut u8) };
+                        HEADS[c].store(next as usize, Ordering::Relaxed);
+                        SMALL_N.fetch_add(1, Ordering::Relaxed);
+                        head
+                    } else {
+                        let want = (c + 1) * GRAN;
+                        let mut b = BUMP.load(Ordering::Relaxed);
+                        if b == 0 || b + want > BUMP_END.load(Ordering::Relaxed) {
+                            // Current chunk exhausted (or none yet).
+                            if grow() {
+                                b = BUMP.load(Ordering::Relaxed);
+                            } else {
+                                b = 0;
+                            }
+                        }
+                        if b != 0 {
+                            BUMP.store(b + want, Ordering::Relaxed);
+                            SLAB_BYTES.fetch_add(want as u64, Ordering::Relaxed);
+                            SMALL_N.fetch_add(1, Ordering::Relaxed);
+                            b as *mut u8
+                        } else {
+                            // Ceiling reached, or the system refused a chunk.
+                            // Newlib serves it; `dealloc`'s range test will
+                            // send it back to newlib. No abort, no corruption.
+                            core::ptr::null_mut()
+                        }
+                    };
+                    unlock();
+                    if p.is_null() {
+                        unsafe { System.alloc(l) }
+                    } else {
+                        p
+                    }
+                }
+                None => unsafe { System.alloc(l) },
+            };
+            ALLOC_TICKS.fetch_add(now().wrapping_sub(t0), Ordering::Relaxed);
+            ALLOC_N.fetch_add(1, Ordering::Relaxed);
+            p
+        }
+
+        unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+            let t0 = now();
+            if in_region(p) {
+                // Only region blocks come back here, and they were allocated
+                // with this same layout, so the class is the one they were
+                // carved for.
+                let c = match class_of(l) {
+                    Some(c) => c,
+                    // Cannot happen: nothing outside a small class is ever
+                    // carved from the region. Leak the block rather than
+                    // corrupt a list if it somehow does.
+                    None => {
+                        DEALLOC_TICKS.fetch_add(now().wrapping_sub(t0), Ordering::Relaxed);
+                        DEALLOC_N.fetch_add(1, Ordering::Relaxed);
+                        return;
+                    }
+                };
+                lock();
+                unsafe { *(p as *mut *mut u8) = HEADS[c].load(Ordering::Relaxed) as *mut u8 };
+                HEADS[c].store(p as usize, Ordering::Relaxed);
+                unlock();
+            } else {
+                unsafe { System.dealloc(p, l) };
+            }
+            DEALLOC_TICKS.fetch_add(now().wrapping_sub(t0), Ordering::Relaxed);
+            DEALLOC_N.fetch_add(1, Ordering::Relaxed);
+        }
+
+        unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
+            let new_l = unsafe { Layout::from_size_align_unchecked(n, l.align()) };
+            // `System.realloc` is only valid when BOTH ends are newlib's. The
+            // old end is decided by where the pointer lives, the new one by
+            // whether it could be served from the region at all.
+            if !in_region(p) && class_of(new_l).is_none() {
+                let t0 = now();
+                let q = unsafe { System.realloc(p, l, n) };
+                ALLOC_TICKS.fetch_add(now().wrapping_sub(t0), Ordering::Relaxed);
+                ALLOC_N.fetch_add(1, Ordering::Relaxed);
+                q
+            } else {
+                // No counters here: alloc/dealloc below tally themselves.
+                let q = unsafe { self.alloc(new_l) };
+                if !q.is_null() {
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(p, q, core::cmp::min(l.size(), n));
+                        self.dealloc(p, l);
+                    }
+                }
+                q
+            }
+        }
+    }
+}
+
+#[global_allocator]
+static GLOBAL: counting_alloc::Counting = counting_alloc::Counting;
+
+/// Total bytes held in slabs by the small-object cache.
+pub(crate) fn slab_bytes() -> u64 {
+    counting_alloc::SLAB_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Allocations, frees, and the system ticks spent inside each, since process
+/// start. The `SLOW` line publishes the per-frame deltas.
+pub(crate) fn alloc_counters() -> (u64, u64, u64, u64, u64) {
+    use std::sync::atomic::Ordering;
+    (
+        counting_alloc::ALLOC_N.load(Ordering::Relaxed),
+        counting_alloc::DEALLOC_N.load(Ordering::Relaxed),
+        counting_alloc::ALLOC_TICKS.load(Ordering::Relaxed),
+        counting_alloc::DEALLOC_TICKS.load(Ordering::Relaxed),
+        counting_alloc::SMALL_N.load(Ordering::Relaxed),
+    )
+}
+
 mod backend;
 mod bugreport;
 mod covers;
@@ -880,6 +1201,14 @@ pub(crate) fn sidecar_dir_for(real_path: Option<&str>) -> std::path::PathBuf {
 fn ensure_swf_loaded() -> Option<(std::vec::Vec<u8>, std::string::String)> {
     if let Ok(g) = CACHED_SWF.lock() {
         if let Some(cached) = g.as_ref() {
+            // The budget reset lives at the bottom of this function, on the
+            // path that reads from the card — so REDEMARRER, which returns
+            // here instead, never reset it. The counter is process-global, so
+            // the restarted movie started already full and refused nearly
+            // every bitmap: measured on Super Smash Flash 2, 5163 refusals,
+            // 9 atlases instead of 84 and 852 bitmaps instead of 4947, which
+            // is the extreme form of the missing-sprite report. Reset here too.
+            ruffle_core::reset_bitmap_cache(cached.0.len() as u64);
             // ~15 MB clone — measured at ~30 ms on Switch CPU. Acceptable
             // overhead for the back-to-library use case; pause-menu
             // REDEMARRER still benefits from skipping the SD read.
@@ -2889,4 +3218,14 @@ fn log_str(s: &str) {
     let mut bytes = s.as_bytes().to_vec();
     bytes.push(0);
     unsafe { ruffle_log_cstr(bytes.as_ptr() as *const c_char) };
+}
+
+/// Turn the small-object cache off for the whole process. Called from C++ at
+/// boot when `sdmc:/switch/FlashNX/noalloc.on` exists, before the worker thread
+/// starts — so before any Rust allocation, and therefore before the region
+/// would have been reserved. Exists so a game can be measured with and without
+/// the cache without swapping builds.
+#[no_mangle]
+pub extern "C" fn ruffle_alloc_force_off() {
+    counting_alloc::FORCE_OFF.store(true, std::sync::atomic::Ordering::Relaxed);
 }

@@ -1,5 +1,5 @@
 diff --git a/core/src/avm1/globals/bitmap_data.rs b/core/src/avm1/globals/bitmap_data.rs
-index b292fd4c7..e09d1e5a6 100644
+index b292fd4c7..ac9c40ed7 100644
 --- a/core/src/avm1/globals/bitmap_data.rs
 +++ b/core/src/avm1/globals/bitmap_data.rs
 @@ -112,6 +112,21 @@ fn constructor<'gc>(
@@ -24,6 +24,16 @@ index b292fd4c7..e09d1e5a6 100644
      let bitmap_data = BitmapData::new(
          activation.context.gc_context,
          width,
+@@ -1313,7 +1328,8 @@ fn load_bitmap<'gc>(
+     let Some((_id, Character::Bitmap(bitmap))) = character else {
+         return Ok(Value::Undefined);
+     };
+-    let bitmap = bitmap.compressed().decode().unwrap();
++    // FlashNX: never unwrap this — see `decode_or_stand_in`.
++    let bitmap = bitmap.compressed().decode_or_stand_in();
+ 
+     let transparency = true;
+     let bitmap_data = BitmapData::new_with_pixels(
 diff --git a/core/src/avm2/amf.rs b/core/src/avm2/amf.rs
 index 26a58d877..18f94e1a0 100644
 --- a/core/src/avm2/amf.rs
@@ -106,7 +116,7 @@ index 952cc8f9f..1c8a0d959 100644
          [API("680")]
          public function encode(rect:Rectangle, compressor:Object, byteArray:ByteArray = null):ByteArray {
 diff --git a/core/src/avm2/globals/flash/display/bitmap_data.rs b/core/src/avm2/globals/flash/display/bitmap_data.rs
-index 57ca11ff3..1461abcf9 100644
+index 57ca11ff3..730d2b331 100644
 --- a/core/src/avm2/globals/flash/display/bitmap_data.rs
 +++ b/core/src/avm2/globals/flash/display/bitmap_data.rs
 @@ -8,7 +8,7 @@ use crate::avm2::error::{
@@ -118,7 +128,17 @@ index 57ca11ff3..1461abcf9 100644
  use crate::avm2::globals::flash::geom::transform::object_to_color_transform;
  use crate::avm2::globals::flash::geom::transform::object_to_matrix;
  use crate::avm2::globals::slots::{
-@@ -1124,6 +1124,38 @@ pub fn get_rect<'gc>(
+@@ -73,7 +73,8 @@ pub fn fill_bitmap_data_from_symbol<'gc>(
+     activation: &mut Activation<'_, 'gc>,
+     bd: &CompressedBitmap,
+ ) -> BitmapData<'gc> {
+-    let bitmap = bd.decode().expect("Failed to decode BitmapData");
++    // FlashNX: never expect this — see `decode_or_stand_in`.
++    let bitmap = bd.decode_or_stand_in();
+     BitmapData::new_with_pixels(
+         activation.context.gc_context,
+         bitmap.width(),
+@@ -1124,6 +1125,38 @@ pub fn get_rect<'gc>(
      Ok(Value::Undefined)
  }
  
@@ -485,7 +505,7 @@ index 29eb34fdc..8eb4761bd 100644
          // There's no longer a handle to update
          self.dirty_state = DirtyState::Clean;
 diff --git a/core/src/character.rs b/core/src/character.rs
-index f1843308c..1df7a120b 100644
+index f1843308c..c574725b4 100644
 --- a/core/src/character.rs
 +++ b/core/src/character.rs
 @@ -73,7 +73,38 @@ impl<'gc> BitmapCharacter<'gc> {
@@ -630,6 +650,55 @@ index f1843308c..1df7a120b 100644
  impl CompressedBitmap {
      pub fn size(&self) -> BitmapSize {
          match self {
+@@ -109,6 +236,48 @@ impl CompressedBitmap {
+             },
+         }
+     }
++    /// FlashNX: `decode` on a heap that has nothing left.
++    ///
++    /// Decoding allocates width × height × 4 bytes, so it is one of the first
++    /// things to fail once memory runs out — and three upstream call sites
++    /// `unwrap` it, which turns "one sprite could not be decoded" into a dead
++    /// process. Measured on Super Smash Flash 2: entering a fight panics at
++    /// `library.rs:258` with `InvalidZlibCompression(Kind(OutOfMemory))` while
++    /// the heap sits around 2.8 GB. A missing sprite is a far better outcome
++    /// than losing the session.
++    ///
++    /// The stand-in is 1×1 transparent RGBA on purpose. Returning `None` from
++    /// `Library::instantiate_display_object` is NOT an option: `clone_sprite`
++    /// in `avm1/globals/movie_clip.rs` unwraps that `Option`, so the panic
++    /// would simply move to `duplicateMovieClip`.
++    ///
++    /// Logging is capped: the caller is out of memory, and formatting a
++    /// message allocates.
++    pub fn decode_or_stand_in(&self) -> RenderBitmap<'static> {
++        match self.decode() {
++            Ok(b) => b,
++            Err(_) => {
++                use std::sync::atomic::{AtomicU32, Ordering};
++                static LOGGED: AtomicU32 = AtomicU32::new(0);
++                let n = LOGGED.fetch_add(1, Ordering::Relaxed);
++                if n < 8 {
++                    let size = self.size();
++                    tracing::warn!(
++                        "bitmap decode failed ({}x{}), substituting a blank — out of memory",
++                        size.width,
++                        size.height
++                    );
++                }
++                RenderBitmap::new(
++                    1,
++                    1,
++                    ruffle_render::bitmap::BitmapFormat::Rgba,
++                    std::vec![0u8; 4],
++                )
++            }
++        }
++    }
++
+     pub fn decode(&self) -> Result<RenderBitmap<'static>, RenderError> {
+         match self {
+             CompressedBitmap::Jpeg {
 diff --git a/core/src/display_object.rs b/core/src/display_object.rs
 index 2e6e01783..13ce92706 100644
 --- a/core/src/display_object.rs
@@ -728,7 +797,7 @@ index baa4a03c5..fdc96d7a1 100644
          if is_rewind {
              // Remove all display objects that were created after the
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..ea1cfd7ef 100644
+index 6e5379213..3a92603ce 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
 @@ -15,10 +15,15 @@ extern crate num_derive;
@@ -747,11 +816,82 @@ index 6e5379213..ea1cfd7ef 100644
  pub mod context;
  pub mod context_menu;
  mod drawing;
+@@ -63,6 +68,9 @@ pub use events::PlayerEvent;
+ pub use indexmap;
+ pub use loader::LoadBehavior;
+ pub use player::{Player, PlayerBuilder, PlayerMode, PlayerRuntime, StaticCallstack};
++/// FlashNX: last tick's SWF-frame count + collector phase + arena allocation,
++/// for the periodic-spike hunt (see `player::flashnx_gc_probe`).
++pub use player::flashnx_gc_probe;
+ pub use ruffle_common::duration::FloatDuration;
+ pub use ruffle_render::backend::ViewportDimensions;
+ pub use swf;
+diff --git a/core/src/library.rs b/core/src/library.rs
+index 7cf6c74de..533f83471 100644
+--- a/core/src/library.rs
++++ b/core/src/library.rs
+@@ -255,7 +255,8 @@ impl<'gc> MovieLibrary<'gc> {
+         match character {
+             Character::Bitmap(bitmap) => {
+                 let avm2_class = bitmap.avm2_class();
+-                let bitmap = bitmap.compressed().decode().unwrap();
++                // FlashNX: never unwrap this — see `decode_or_stand_in`.
++                let bitmap = bitmap.compressed().decode_or_stand_in();
+                 let bitmap = Bitmap::new(mc, id, bitmap, self.swf.clone());
+                 bitmap.set_avm2_bitmapdata_class(mc, avm2_class);
+                 Some(bitmap.instantiate(mc))
 diff --git a/core/src/player.rs b/core/src/player.rs
-index edb74cccb..8fa634d34 100644
+index edb74cccb..ef39347c4 100644
 --- a/core/src/player.rs
 +++ b/core/src/player.rs
-@@ -519,6 +519,151 @@ impl Player {
+@@ -74,6 +74,7 @@ use std::fmt;
+ use std::ops::{Deref, DerefMut};
+ use std::rc::{Rc, Weak as RcWeak};
+ use std::str::FromStr;
++use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
+ use std::sync::{Arc, Mutex, Weak};
+ use std::time::Duration;
+ use tracing::instrument;
+@@ -276,6 +277,38 @@ impl<'gc> GcRootData<'gc> {
+ 
+ type GcArena = gc_arena::Arena<Rootable![GcRoot<'_>]>;
+ 
++/// FlashNX instrumentation for the periodic tick spike (2026-08-24).
++///
++/// Mario 63 shows packets of 4-7 frames at 300-500 ms of `tick`, returning
++/// every ~28 frames, entirely inside `Player::tick`. Two mechanisms can produce
++/// that shape and we cannot tell them apart from the outside:
++///
++///   A. the gc-arena cycle — `Sleeping` does no work until the Gc heap has
++///      grown 50%, then `Marking`/`Sweeping` cost time proportional to the
++///      live set, then back to sleep;
++///   B. frame catch-up — `tick` may run up to `MAX_FRAMES_PER_TICK` = 5 SWF
++///      frames in one call, and 5 x 60 ms lands squarely in the observed range.
++///
++/// These three counters make the difference visible on the `SLOW` line. Kept as
++/// statics rather than `Player` fields so `PlayerBuilder` is untouched; there is
++/// exactly one `Player` alive at a time in FlashNX.
++static FLASHNX_FRAMES_RUN: AtomicU32 = AtomicU32::new(0);
++static FLASHNX_GC_PHASE: AtomicU8 = AtomicU8::new(0);
++static FLASHNX_GC_ALLOC: AtomicU64 = AtomicU64::new(0);
++static FLASHNX_GC_US: AtomicU64 = AtomicU64::new(0);
++
++/// Snapshot of the last `tick`: SWF frames actually run, collector phase
++/// (0 sleeping, 1 marking, 2 marked, 3 sweeping), total arena allocation, and
++/// microseconds spent inside the collector call itself.
++pub fn flashnx_gc_probe() -> (u32, u8, u64, u64) {
++    (
++        FLASHNX_FRAMES_RUN.load(Ordering::Relaxed),
++        FLASHNX_GC_PHASE.load(Ordering::Relaxed),
++        FLASHNX_GC_ALLOC.load(Ordering::Relaxed),
++        FLASHNX_GC_US.load(Ordering::Relaxed),
++    )
++}
++
+ #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+ enum RunState {
+     Playing,
+@@ -519,11 +552,158 @@ impl Player {
          FloatDuration::from_millis(self.frame_time(1000.0))
      }
  
@@ -903,7 +1043,25 @@ index edb74cccb..8fa634d34 100644
      pub fn tick(&mut self, dt: FloatDuration) {
          if !self.is_playing() {
              return;
-@@ -2382,7 +2527,17 @@ impl Player {
+         }
+ 
++        FLASHNX_GC_US.store(0, Ordering::Relaxed);
++
+         self.frame_accumulator += dt;
+         let frame_duration = self.frame_duration();
+ 
+@@ -554,6 +734,10 @@ impl Player {
+             }
+         }
+ 
++        // FlashNX: publish how many SWF frames this tick actually ran, so the
++        // Switch frontend can tell a catch-up burst from a collector pause.
++        FLASHNX_FRAMES_RUN.store(frame, Ordering::Relaxed);
++
+         // Now that we're done running code,
+         // we can stop pretending that more time passed than actually did.
+         // Note: update_timers(dt) doesn't need to see this either.
+@@ -2382,7 +2566,47 @@ impl Player {
          self.update_mouse_state(EnumSet::empty(), false, &mut false);
  
          // GC
@@ -914,10 +1072,40 @@ index edb74cccb..8fa634d34 100644
 +        // The full cycle costs real time, which is why it is gated — but a stall
 +        // beats an OOM abort, and it only engages once a game is already holding
 +        // hundreds of megabytes of collectable surfaces.
++        // Timed (2026-08-25): the phase probe showed SWEEP frames costing 156 ms
++        // against 49 ms in SLEEP, i.e. ~48% of Mario 63's castle wall clock.
++        // The phase is only *correlated* with the tick cost, though — this
++        // measures the collector call itself, so the sweep can be charged
++        // directly instead of inferred.
++        let gc_t0 = Instant::now();
 +        if crate::bitmap::bitmap_data::bitmapdata_under_pressure() {
 +            self.gc_arena.borrow_mut().finish_cycle();
 +        } else {
 +            self.gc_arena.borrow_mut().collect_debt();
++        }
++        // ACCUMULATE, never store: `update()` runs several times per host frame
++        // (run_frame, update_timers, StreamManager, ...) and each one steps the
++        // collector. Storing published only the last call, which is the one
++        // that finds no debt left to pay and therefore reads ~0 — the reason
++        // the first capture showed gcUs at zero on 292 ms frames. Reset at the
++        // top of `tick`.
++        FLASHNX_GC_US.fetch_add(gc_t0.elapsed().as_micros() as u64, Ordering::Relaxed);
++
++        // FlashNX: publish where the collector stopped, and how much the arena
++        // is holding. Read once per host frame by the `SLOW` line.
++        {
++            use gc_arena::arena::CollectionPhase;
++            let arena = self.gc_arena.borrow();
++            FLASHNX_GC_PHASE.store(
++                match arena.collection_phase() {
++                    CollectionPhase::Sleeping => 0,
++                    CollectionPhase::Marking => 1,
++                    CollectionPhase::Marked => 2,
++                    CollectionPhase::Sweeping => 3,
++                },
++                Ordering::Relaxed,
++            );
++            FLASHNX_GC_ALLOC.store(arena.metrics().total_allocation() as u64, Ordering::Relaxed);
 +        }
  
          rval

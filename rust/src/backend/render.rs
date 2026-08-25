@@ -1024,6 +1024,29 @@ static BLEND_N_TRIVIAL_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::
 static BLEND_N_COMPLEX_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static BLEND_N_COMPLEX_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Render-target rebinds this frame (2026-08-24). A glow chain costs 6 of these
+/// to draw 5 half-res quads, and the measured 105 ms at 23 chains works out to
+/// ~0.77 ms per rebind — i.e. the filter cost is the target switching, not the
+/// fill. Counted so the effect of giving filter passes their own colour-only
+/// FBO can be read directly instead of inferred from total render time.
+/// Same CUR/FRAME swap-at-end-of-submit discipline as BLEND_* above.
+static RT_BIND_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RT_BIND_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Allocator traffic per frame (2026-08-25). Running totals from the counting
+/// global allocator are differenced once per `submit_frame`; the deltas land
+/// on the `SLOW` line as `alloc=` / `free=`.
+static ALLOC_N_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FREE_N_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ALLOC_D_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FREE_D_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ALLOC_T_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FREE_T_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static ALLOC_T_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FREE_T_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SMALL_N_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SMALL_D_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// RAII guard: adds elapsed ticks to a static on drop, covering every
 /// early-return path of the timed function automatically.
 struct PrimTimer {
@@ -2052,6 +2075,21 @@ pub struct SwitchRenderBackend {
     /// Grows monotonically; attached once.
     offscreen_depth_stencil: GLuint,
     offscreen_depth_stencil_dims: (u32, u32),
+    /// Colour-only FBO for filter passes (lazy; 0 = not created).
+    ///
+    /// Filter passes used to share `offscreen_fbo`, which carries the
+    /// depth+stencil renderbuffer above. That renderbuffer only ever grows and
+    /// is attached for the process lifetime, so once any offscreen render had
+    /// asked for a large target, every later filter pass ran against a
+    /// full-size D24S8 — while `draw_filter_pass` had just disabled the stencil
+    /// test and needed neither buffer. On a tile-based GPU that is what turns a
+    /// 200x100 quad into a full tile-configuration cycle.
+    ///
+    /// Measured 2026-08-24: 23 chains cost 105 ms of render, ~0.77 ms per
+    /// render-target rebind, with the fill itself already half-res and capped
+    /// at one blur pass. The rebind is the unit of cost, so the attachment it
+    /// drags along is what to remove. Nothing is ever attached here but colour.
+    filter_fbo: GLuint,
 
     /// Screen-filter pass (issue #65). Built and allocated ON FIRST USE, so a
     /// player who never turns a filter on pays neither the shader compile at
@@ -4903,11 +4941,39 @@ pub fn thumb_cancel_all() {
 
 // ─── Backend implementation ───────────────────────────────────────────────────
 
+/// True when `sdmc:/switch/FlashNX/<name>` exists. Same convention as the
+/// C++ side's `trace.on` / `dumpvars.on` / `noalloc.on`: an experiment is a
+/// file you drop on the card, never a default and never a menu entry.
+fn marker_present(name: &str) -> bool {
+    std::path::Path::new(&std::format!("sdmc:/switch/FlashNX/{}", name)).exists()
+}
+
 impl SwitchRenderBackend {
     /// Full backend for a game: the mega-arenas are sized for the worst SWF we
     /// know of (see the BufferArena block at the top of this file).
     pub fn new(width: u32, height: u32) -> Option<Self> {
-        Self::new_sized(width, height, ARENA_VBO_SIZE, ARENA_IBO_SIZE)
+        // `sdmc:/switch/FlashNX/arena.small` cuts the reservation by a third,
+        // as an experiment only — never as a default.
+        //
+        // The 576 MB reserved here is the single largest block of memory
+        // FlashNX holds, and Super Smash Flash 2 dies of exhaustion with only
+        // ~98 MB of margin while using 36 MB of it. Across 70 captured logs the
+        // worst arena use ever observed is 144 + 64 MB, and `arenaDropV` has
+        // never been non-zero since the mega-arena landed.
+        //
+        // It is NOT a free win, which is why it is behind a marker: 192 MB of
+        // VBO already failed once, on Infiltrating the Airship (#56) at ~10 000
+        // shapes, and the failure mode is a silent white screen rather than a
+        // crash. 256 MB clears that by only a third. Sweep Infiltrating the
+        // Airship, Binding of Isaac and Henry Stickmin, watching `arena_v=`
+        // peak and `arenaDropV`, before this is ever made the default.
+        let (vbo, ibo) = if marker_present("arena.small") {
+            log(b"arena: arena.small present -> 256/128 MB instead of 384/192\n\0");
+            (256 * 1024 * 1024, 128 * 1024 * 1024)
+        } else {
+            (ARENA_VBO_SIZE, ARENA_IBO_SIZE)
+        };
+        Self::new_sized(width, height, vbo, ibo)
     }
 
     /// Backend for the LAUNCHER UI. Identical except for the arenas: the library
@@ -5146,6 +5212,7 @@ impl SwitchRenderBackend {
             offscreen_fbo: 0,
             offscreen_depth_stencil: 0,
             offscreen_depth_stencil_dims: (0, 0),
+            filter_fbo: 0,
             frame_snapshot: FrameBreakdown::default(),
             last_frame: FrameBreakdown::default(),
             font_atlas: None,
@@ -5318,6 +5385,7 @@ impl SwitchRenderBackend {
         unsafe {
             glGetIntegerv(GL_FRAMEBUFFER_BINDING, &mut prev_fbo);
             glGetIntegerv(GL_VIEWPORT, prev_vp.as_mut_ptr());
+            RT_BIND_CUR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             glBindFramebuffer(GL_FRAMEBUFFER, self.offscreen_fbo);
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
         }
@@ -5533,11 +5601,15 @@ impl SwitchRenderBackend {
         if dst_tex == 0 {
             return false;
         }
-        if self.offscreen_fbo == 0 {
+        // Colour-only FBO, deliberately NOT `offscreen_fbo`: see `filter_fbo`.
+        // A filter pass disables the stencil test two statements below and
+        // never reads depth, so it must not drag the shared (and monotonically
+        // growing) D24S8 renderbuffer along for the ride.
+        if self.filter_fbo == 0 {
             unsafe {
                 let mut fbo: GLuint = 0;
                 glGenFramebuffers(1, &mut fbo);
-                self.offscreen_fbo = fbo;
+                self.filter_fbo = fbo;
             }
         }
         let mut prev_fbo: GLint = 0;
@@ -5545,12 +5617,10 @@ impl SwitchRenderBackend {
         unsafe {
             glGetIntegerv(GL_FRAMEBUFFER_BINDING, &mut prev_fbo);
             glGetIntegerv(GL_VIEWPORT, prev_vp.as_mut_ptr());
-            glBindFramebuffer(GL_FRAMEBUFFER, self.offscreen_fbo);
+            RT_BIND_CUR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            glBindFramebuffer(GL_FRAMEBUFFER, self.filter_fbo);
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dst_tex, 0);
         }
-        let need_w = (dst_x.max(0) as u32).saturating_add(dst_w);
-        let need_h = (dst_y.max(0) as u32).saturating_add(dst_h);
-        self.ensure_offscreen_depth_stencil(need_w, need_h);
         unsafe {
             let status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
             if status != GL_FRAMEBUFFER_COMPLETE {
@@ -5751,17 +5821,22 @@ impl SwitchRenderBackend {
         if w == 0 || h == 0 {
             return buf;
         }
-        if self.offscreen_fbo == 0 {
+        // Colour-only FBO: a readback rasterises nothing, so there is no reason
+        // to bind the one carrying the shared depth+stencil renderbuffer. Papa
+        // Louie 3 pays this path once per frame (`primRes` ~3.1 ms of a 65 ms
+        // frame, measured 2026-08-24), which is the one backend cost it has.
+        if self.filter_fbo == 0 {
             unsafe {
                 let mut fbo: GLuint = 0;
                 glGenFramebuffers(1, &mut fbo);
-                self.offscreen_fbo = fbo;
+                self.filter_fbo = fbo;
             }
         }
         let mut prev_fbo: GLint = 0;
         unsafe {
             glGetIntegerv(GL_FRAMEBUFFER_BINDING, &mut prev_fbo);
-            glBindFramebuffer(GL_FRAMEBUFFER, self.offscreen_fbo);
+            RT_BIND_CUR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            glBindFramebuffer(GL_FRAMEBUFFER, self.filter_fbo);
             glFramebufferTexture2D(
                 GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0,
             );
@@ -6040,11 +6115,11 @@ impl SwitchRenderBackend {
                     return false;
                 };
                 // Pool entries may hold stale data — clear to transparent.
-                if self.offscreen_fbo == 0 {
+                if self.filter_fbo == 0 {
                     unsafe {
                         let mut fbo: GLuint = 0;
                         glGenFramebuffers(1, &mut fbo);
-                        self.offscreen_fbo = fbo;
+                        self.filter_fbo = fbo;
                     }
                 }
                 unsafe {
@@ -6052,7 +6127,8 @@ impl SwitchRenderBackend {
                     let mut prev_vp: [GLint; 4] = [0; 4];
                     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &mut prev_fbo);
                     glGetIntegerv(GL_VIEWPORT, prev_vp.as_mut_ptr());
-                    glBindFramebuffer(GL_FRAMEBUFFER, self.offscreen_fbo);
+                    RT_BIND_CUR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    glBindFramebuffer(GL_FRAMEBUFFER, self.filter_fbo);
                     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, empty.texture, 0);
                     glClearColor(0.0, 0.0, 0.0, 0.0);
                     glClear(GL_COLOR_BUFFER_BIT);
@@ -6144,11 +6220,11 @@ impl SwitchRenderBackend {
                 let Some(empty) = self.filter_tex_pool.acquire(source_size.0, source_size.1) else {
                     return false;
                 };
-                if self.offscreen_fbo == 0 {
+                if self.filter_fbo == 0 {
                     unsafe {
                         let mut fbo: GLuint = 0;
                         glGenFramebuffers(1, &mut fbo);
-                        self.offscreen_fbo = fbo;
+                        self.filter_fbo = fbo;
                     }
                 }
                 unsafe {
@@ -6156,7 +6232,8 @@ impl SwitchRenderBackend {
                     let mut prev_vp: [GLint; 4] = [0; 4];
                     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &mut prev_fbo);
                     glGetIntegerv(GL_VIEWPORT, prev_vp.as_mut_ptr());
-                    glBindFramebuffer(GL_FRAMEBUFFER, self.offscreen_fbo);
+                    RT_BIND_CUR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    glBindFramebuffer(GL_FRAMEBUFFER, self.filter_fbo);
                     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, empty.texture, 0);
                     glClearColor(0.0, 0.0, 0.0, 0.0);
                     glClear(GL_COLOR_BUFFER_BIT);
@@ -6919,10 +6996,43 @@ impl SwitchRenderBackend {
         let blend_n_triv = BLEND_N_TRIVIAL_FRAME.load(std::sync::atomic::Ordering::Relaxed);
         let blend_n_cx = BLEND_N_COMPLEX_FRAME.load(std::sync::atomic::Ordering::Relaxed);
         let blend_pct = if render_us > 0 { blend_us.saturating_mul(100) / render_us } else { 0 };
+        // Periodic-spike probes (2026-08-24). `swf=` is how many SWF frames the
+        // tick actually ran: 1 means the game is in slow motion, 5 means a
+        // catch-up burst. `gc=` is where the collector stopped (SLEEP/MARK/
+        // MARKD/SWEEP) and `gcMB=` what the arena holds — a spike landing on
+        // MARK/SWEEP while the quiet frames sit on SLEEP is the collector.
+        // `rtBind=` is render-target rebinds, the unit the filter cost is
+        // actually paid in.
+        let (swf_frames, gc_phase, gc_alloc, gc_us) = ruffle_core::flashnx_gc_probe();
+        let gc_name = match gc_phase {
+            0 => "SLEEP",
+            1 => "MARK",
+            2 => "MARKD",
+            _ => "SWEEP",
+        };
+        let rt_binds = RT_BIND_FRAME.load(std::sync::atomic::Ordering::Relaxed);
+        // Per-frame allocator traffic, differenced in submit_frame (which runs
+        // every frame) rather than here (which runs only on slow ones, so the
+        // delta would silently span the gap). `free=` next to `gcUs=` is the
+        // whole point: it says whether the sweep's cost is the frees it issues
+        // or the traversal that issues them.
+        let d_alloc = ALLOC_D_FRAME.load(std::sync::atomic::Ordering::Relaxed);
+        let d_free = FREE_D_FRAME.load(std::sync::atomic::Ordering::Relaxed);
+        let alloc_us = to_us(ALLOC_T_FRAME.load(std::sync::atomic::Ordering::Relaxed));
+        let free_us = to_us(FREE_T_FRAME.load(std::sync::atomic::Ordering::Relaxed));
+        let d_small = SMALL_D_FRAME.load(std::sync::atomic::Ordering::Relaxed);
+        let small_pct = if d_alloc > 0 { d_small.saturating_mul(100) / d_alloc } else { 0 };
+        // Share of the frame that newlib's malloc/free own outright.
+        let heap_pct = if total_us > 0 {
+            (alloc_us + free_us).saturating_mul(100) / total_us
+        } else {
+            0
+        };
         let msg = std::format!(
-            "SLOW f{} {}us (tick {}us render {}us) primOffs={}us primBmp={}us primRes={}us dc={} offs={} filt={}({}chains) resolve={} bmpUp={} shpReg={} blend={} pmask={} mdraw={} cacheEnt={} | offN={} offPix={} alloc={}us render={}us readback={}us upload={}us | blendUs={} ({}% of render) blendTriv={} blendCx={}\n",
+            "SLOW f{} {}us (tick {}us render {}us) swf={} gc={} gcUs={} gcMB={} alloc={}/{}us({}%sm) free={}/{}us heap={}%  rtBind={} primOffs={}us primBmp={}us primRes={}us dc={} offs={} filt={}({}chains) resolve={} bmpUp={} shpReg={} blend={} pmask={} mdraw={} cacheEnt={} | offN={} offPix={} alloc={}us render={}us readback={}us upload={}us | blendUs={} ({}% of render) blendTriv={} blendCx={}\n",
             self.frame_count,
             total_us, tick_us, render_us,
+            swf_frames, gc_name, gc_us, gc_alloc / (1024 * 1024), d_alloc, alloc_us, small_pct, d_free, free_us, heap_pct, rt_binds,
             prim_offs, prim_bmp, prim_res,
             fb.draw_calls, fb.offscreen, fb.filter, fb.filter_chains,
             fb.resolve, fb.bmp_uploads, fb.shape_regs,
@@ -14563,7 +14673,7 @@ impl RenderBackend for SwitchRenderBackend {
             let cpu_mhz = unsafe { ruffle_cpu_clock_hz() } / 1_000_000;
             let docked = unsafe { ruffle_is_docked() } != 0;
             let msg = std::format!(
-                "f{}: fps={} cpu={}MHz dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB heap={}MB drawbox={} maxalpha={:.2}\n",
+                "f{}: fps={} cpu={}MHz dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB heap={}MB slabMB={} drawbox={} maxalpha={:.2}\n",
                 self.frame_count,
                 fps_str,
                 cpu_mhz,
@@ -14604,6 +14714,7 @@ impl RenderBackend for SwitchRenderBackend {
                 ram_used / (1024 * 1024),
                 ram_total / (1024 * 1024),
                 unsafe { ruffle_heap_used() } / (1024 * 1024),
+                crate::slab_bytes() / (1024 * 1024),
                 match self.draw_extent.take() {
                     Some((x0, y0, x1, y1)) => std::format!(
                         "{:.0},{:.0}..{:.0},{:.0}", x0, y0, x1, y1
@@ -14728,6 +14839,15 @@ impl RenderBackend for SwitchRenderBackend {
             .store(BLEND_N_TRIVIAL_CUR.swap(0, AtomOrd::Relaxed), AtomOrd::Relaxed);
         BLEND_N_COMPLEX_FRAME
             .store(BLEND_N_COMPLEX_CUR.swap(0, AtomOrd::Relaxed), AtomOrd::Relaxed);
+        RT_BIND_FRAME.store(RT_BIND_CUR.swap(0, AtomOrd::Relaxed), AtomOrd::Relaxed);
+        {
+            let (a, f, at, ft, sm) = crate::alloc_counters();
+            ALLOC_D_FRAME.store(a.saturating_sub(ALLOC_N_LAST.swap(a, AtomOrd::Relaxed)), AtomOrd::Relaxed);
+            FREE_D_FRAME.store(f.saturating_sub(FREE_N_LAST.swap(f, AtomOrd::Relaxed)), AtomOrd::Relaxed);
+            ALLOC_T_FRAME.store(at.saturating_sub(ALLOC_T_LAST.swap(at, AtomOrd::Relaxed)), AtomOrd::Relaxed);
+            FREE_T_FRAME.store(ft.saturating_sub(FREE_T_LAST.swap(ft, AtomOrd::Relaxed)), AtomOrd::Relaxed);
+            SMALL_D_FRAME.store(sm.saturating_sub(SMALL_N_LAST.swap(sm, AtomOrd::Relaxed)), AtomOrd::Relaxed);
+        }
     }
 
     fn create_empty_texture(
@@ -15461,6 +15581,7 @@ impl CommandHandler for SwitchRenderBackend {
                     // (top-level leaves the main framebuffer bound — no-op).
                     if let Some(outer) = outer_target {
                         unsafe {
+                            RT_BIND_CUR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             glBindFramebuffer(GL_FRAMEBUFFER, self.offscreen_fbo);
                             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, outer, 0);
                             glViewport(0, 0, w as GLsizei, h as GLsizei);
@@ -15574,6 +15695,9 @@ impl Drop for SwitchRenderBackend {
             glDeleteVertexArrays(1, &self.shape_vao);
             if self.offscreen_fbo != 0 {
                 glDeleteFramebuffers(1, &self.offscreen_fbo);
+            }
+            if self.filter_fbo != 0 {
+                glDeleteFramebuffers(1, &self.filter_fbo);
             }
             if self.offscreen_depth_stencil != 0 {
                 glDeleteRenderbuffers(1, &self.offscreen_depth_stencil);
