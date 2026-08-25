@@ -948,6 +948,13 @@ extern "C" {
     /// Actual current CPU clock in Hz (clkrst). 0 if unavailable. Lets the
     /// heartbeat confirm whether CpuBoostMode is holding the A57 at 1785 MHz.
     fn ruffle_cpu_clock_hz() -> u32;
+    /// Actual current GPU clock in Hz (clkrst). The power mode never touches
+    /// the GPU, so anything but the OS default here means something else did.
+    fn ruffle_gpu_clock_hz() -> u32;
+    /// Times the OS took a pinned clock back from under us. Without this the
+    /// question is undecidable: the re-assert is deliberately silent, so a
+    /// revoke followed by our own repair leaves no trace either way.
+    fn flashnx_clock_drift() -> u32;
     /// 1 when docked, 0 handheld.
     fn ruffle_is_docked() -> core::ffi::c_int;
     /// Bytes malloc currently has handed out. The `ram=` pair next to it is the
@@ -14671,12 +14678,16 @@ impl RenderBackend for SwitchRenderBackend {
             // CpuBoostMode is holding the A57 at 1785 MHz during heavy AVM1
             // scenes (the water lake) — confirming if any CPU headroom remains.
             let cpu_mhz = unsafe { ruffle_cpu_clock_hz() } / 1_000_000;
+            let gpu_mhz = unsafe { ruffle_gpu_clock_hz() } / 1_000_000;
+            let drift = unsafe { flashnx_clock_drift() };
             let docked = unsafe { ruffle_is_docked() } != 0;
             let msg = std::format!(
-                "f{}: fps={} cpu={}MHz dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB heap={}MB slabMB={}{} drawbox={} maxalpha={:.2}\n",
+                "f{}: fps={} cpu={}MHz gpu={}MHz drift={} dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB heap={}MB slabMB={}{} drawbox={} maxalpha={:.2}\n",
                 self.frame_count,
                 fps_str,
                 cpu_mhz,
+                gpu_mhz,
+                drift,
                 docked,
                 tick_ms,
                 render_ms,

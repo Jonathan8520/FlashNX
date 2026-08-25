@@ -914,6 +914,23 @@ static void worker_entry(void* arg) {
     // inner loop but with back_to_library=false → full .nro exit.
     bool back_to_library = false;
 
+    // Power mode, until it earns a REGLAGES row (which needs nine languages).
+    //
+    // It used to be ZL+ZR in the pause menu, and that was a real hazard: the
+    // neighbouring SCREEN panel binds zoom to ZR|R and ZL|L, so a player who
+    // had learned "the triggers zoom" could raise the console's clock without
+    // ever knowing it happened. A marker file cannot be pressed by accident.
+    //
+    // HIGH raises the CPU to 1785 MHz and leaves the GPU exactly where the OS
+    // put it. See the measurement in ruffle_bridge.cpp for why the GPU half of
+    // the old FULL mode was dropped: it was worth -1.7% of framerate.
+    {
+        struct stat st;
+        if (::stat("sdmc:/switch/FlashNX/power.high", &st) == 0) {
+            flashnx_set_clock_mode(1);
+        }
+    }
+
     // Hold-to-repeat state for the in-game TOUCHES editor (16 entries
     // scrollable list — benefits a lot from D-pad auto-repeat).
     MenuRepeatState touches_repeat;
@@ -940,12 +957,19 @@ static void worker_entry(void* arg) {
 
         if (++boost_reassert >= 30) {
             boost_reassert = 0;
-            appletSetCpuBoostMode(ApmCpuBoostMode_Normal);
-            // The clock experiment, if the player raised it, has to be
-            // re-applied on the same cadence: waking from sleep or coming back
-            // from HOME resets the rates, which is the known failure mode of
-            // every homebrew that pins clocks. No-op in mode 0.
-            flashnx_clocks_reassert();
+            if (flashnx_clock_mode() == 0) {
+                appletSetCpuBoostMode(ApmCpuBoostMode_Normal);
+            } else {
+                // Do NOT poke apm while we are holding a clkrst rate. These two
+                // ran one line apart, thirty times a second, for the whole
+                // session: apm being told "Normal" while clkrst held 1785 MHz
+                // made the revocation question undecidable, because a revoke
+                // followed by our own repair leaves no trace either way.
+                // A raised clock has to be re-applied on some cadence anyway:
+                // waking from sleep or returning from HOME resets it, which is
+                // the known failure mode of every homebrew that pins clocks.
+                flashnx_clocks_reassert();
+            }
         }
 
         if (menu_open) {
@@ -1231,15 +1255,6 @@ static void worker_entry(void* arg) {
             // entry. Press `-` again or `B` to dismiss (= Resume).
             // Right stick navigates too (it's the mouse cursor only when the
             // menu is closed — this branch `continue`s before the cursor code).
-            // ZL+ZR cycles the clock experiment (2026-08-24). Deliberately a
-            // hidden combo in the pause menu and not a menu row: this is an
-            // instrument for one measurement session, not a feature. Pausing
-            // freezes the scene, so the same spot can be compared across all
-            // three modes. The heartbeat's `cpu=` line confirms what took.
-            if ((kDown & (HidNpadButton_ZL | HidNpadButton_ZR))
-                && (kHeld & HidNpadButton_ZL) && (kHeld & HidNpadButton_ZR)) {
-                flashnx_set_clock_mode((flashnx_clock_mode() + 1) % 3);
-            }
             if (kDown & (HidNpadButton_Up | HidNpadButton_StickLUp | HidNpadButton_StickRUp)) {
                 menu_selection = (menu_selection + MENU_COUNT - 1) % MENU_COUNT;
             }

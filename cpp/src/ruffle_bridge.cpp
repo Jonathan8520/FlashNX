@@ -429,29 +429,16 @@ extern "C" uint64_t ruffle_tick_now(void) {
 extern "C" uint64_t ruffle_tick_freq(void) {
     return armGetSystemTickFreq();
 }
-
-// Actual current CPU clock in Hz, read from the clkrst sysmodule (firmware
-// 8.0+). Lets the heartbeat CONFIRM whether CpuBoostMode(FastLoad) is really
-// holding the A57 at its boosted 1785 MHz during heavy AVM1 scenes (the water
-// lake) — i.e. whether there's any CPU headroom left, or the lag is just the
-// interpreter maxing a stock-clocked core. Returns 0 if the service is
-// unavailable. Service is opened lazily once and left open for the process
-// lifetime (cleaned up on exit).
-extern "C" uint32_t ruffle_cpu_clock_hz(void) {
-    static bool inited = false;
-    if (!inited) {
-        if (R_FAILED(clkrstInitialize())) return 0;
-        inited = true;
-    }
-    ClkrstSession session;
-    // PcvModuleId_CpuBus = the Cortex-A57 cluster clock. The trailing arg is
-    // the clkrst "unk" device-id (3 is what Nintendo/atmosphère use here).
-    if (R_FAILED(clkrstOpenSession(&session, PcvModuleId_CpuBus, 3))) return 0;
-    uint32_t hz = 0;
-    Result rc = clkrstGetClockRate(&session, &hz);
-    clkrstCloseSession(&session);
-    return R_SUCCEEDED(rc) ? hz : 0;
-}
+// Actual current CPU and GPU clocks in Hz, straight from the clkrst sysmodule
+// (firmware 8.0+), so the heartbeat reports what the hardware IS doing rather
+// than what we asked for. `gpu=` matters as much as `cpu=`: the power mode only
+// ever touches the CPU, so a GPU reading that is not the OS default would mean
+// something else moved it. Both are defined with the clock code below, sharing
+// its one lazy clkrst init: two separate inits meant the diagnostic could go
+// dark at the same instant the feature did, for the same reason, and read as
+// two unrelated problems.
+extern "C" uint32_t ruffle_cpu_clock_hz(void);
+extern "C" uint32_t ruffle_gpu_clock_hz(void);
 
 // 1 when docked (AppletOperationMode_Console), 0 handheld. Pairs with the CPU
 // clock so a low clock can be read as "handheld + boost dropped" vs "expected".
@@ -459,35 +446,60 @@ extern "C" int ruffle_is_docked(void) {
     return appletGetOperationMode() == AppletOperationMode_Console ? 1 : 0;
 }
 
-// ─── Clock experiment (2026-08-24) ────────────────────────────────────────
+// ─── CPU power mode ───────────────────────────────────────────────────────
 //
-// MEASUREMENT ONLY. Mode 0 is the default and nothing below runs unless the
-// player asks for it from the pause menu (ZL+ZR). Nothing is persisted.
+// Two modes, and only the CPU is ever touched:
 //
-// Why this exists at all: `appletSetCpuBoostMode` cannot raise the CPU without
-// throttling the GPU to minimum, which is what forced us back to Normal on
-// 2026-07-30. That trade is an artefact of the applet API, not of the hardware:
-// the clkrst sysmodule sets each clock independently, which is what Tico's
-// emulator cores do (Dolphin pins 1785 MHz CPU + 768 MHz GPU together).
+//   0  NORMAL   the OS profile, untouched (1020 MHz CPU / 307.2 MHz GPU handheld)
+//   1  HIGH     CPU 1785 MHz, GPU left exactly where the OS put it
 //
-// Measured 2026-08-24, the two games sit on opposite sides of this:
-//   Papa Louie 3  84% AVM2, render 5 ms  -> only the CPU clock moves it
-//   Mario 63      one scene 90% render   -> only the GPU clock moves that scene
-// so a single fixed choice cannot serve both, and an adaptive one oscillates
-// (tried 2026-07-30: the mode changes the measurement that picks the mode).
-// Hence: measure both, on both games, in one session, then decide.
+// Why only the CPU. Measured 2026-08-25 on the one clean three-way A/B in the
+// corpus (temp/mesure.txt, Papa Louie 3, identical scene, dc/win pinned at
+// 4680, controller idle):
 //
-// Rates are validated against clkrstGetPossibleClockRates rather than trusted
-// as constants, and the originals are restored by flashnx_clocks_restore().
-// 1785 MHz CPU is Nintendo's own boost clock; 768 MHz GPU is the docked clock.
-// Holding both in handheld is above the handheld profile, and it heats up.
+//     NORMAL 1020/307.2   15.15 fps   tick 60.06 ms   render 4.47 ms
+//     GPU    1020/460.8   14.89 fps   tick 61.01 ms   render 4.57 ms
+//     BOTH   1785/768     24.45 fps   tick 36.53 ms   render 3.50 ms
+//
+// Raising the GPU alone costs 1.7% of the framerate, i.e. nothing, in the wrong
+// direction. Of the 25.1 ms per frame that raising BOTH buys, 23.53 ms (93.7%)
+// is tick. A CPU-only mode therefore keeps ~90% of the gain. On Mario 63 the
+// `render` timer even follows the CPU clock rather than the GPU one (10.0 ms ->
+// 5.74 ms, against 5.71 ms predicted by the CPU ratio alone), because most of
+// what it measures is command submission, not the GPU.
+//
+// Why not the GPU too, for that last 10%. 1785 MHz CPU on battery in handheld
+// is capped by nobody: not sys-clk, not sys-clk-OC, not Horizon OC, and no
+// hardware failure has ever been attributed to it. 768 MHz GPU on battery in
+// handheld is blocked by all of them on Erista (sys-clk caps the handheld GPU
+// at 460.8 there, 614.4 on Mariko, and allows 768 only on a charger), and it is
+// the configuration the recurring battery-swelling reports point at. Nintendo
+// itself never pairs the two: in its own profile table 1785 always comes with
+// the GPU throttled to 76.8, and 768 only ever appears docked with a 1020 CPU.
+// Four percent of framerate does not buy console-model detection, charger
+// detection, and a configuration every other project refuses.
+//
+// What this does NOT protect against. Handheld thermal response on Horizon is
+// not throttling, it is SLEEP: skin at 58C arms a 60-second timer, 63C sleeps
+// immediately, and the handheld fan table is capped near 60%. Nothing here
+// reads a temperature. The longest sustained raised-clock run ever captured by
+// this project is 118 seconds, which is nowhere near thermal steady state, so
+// "no drift observed" means "not measured". A thermal guard belongs here later,
+// reading tcGetSkinTemperatureMilliC in the 30-frame slot that already exists.
 
-static bool     s_clk_inited      = false;
-static bool     s_clk_saved       = false;
-static uint32_t s_clk_orig_cpu    = 0;
-static uint32_t s_clk_orig_gpu    = 0;
-static int      s_clk_mode        = 0;
+static bool     s_clk_inited   = false;
+static uint32_t s_clk_orig_cpu = 0;   // captured fresh on every raise
+static int      s_clk_mode     = 0;
+static uint32_t s_clk_drift    = 0;   // times the OS took the clock back
 
+// 1785 MHz: Nintendo's own boost clock, and an entry in the rate list the
+// sysmodule advertises. Never invent a frequency; clk_set refuses anything the
+// hardware does not list.
+static const uint32_t CPU_HIGH_HZ = 1785000000u;
+
+// One clkrst session for the whole process. `ruffle_cpu_clock_hz` used to carry
+// its own separate lazy init, which meant the diagnostic could go dark at the
+// same moment the feature did, for the same reason, and look like two problems.
 static bool clk_init_once(void) {
     if (!s_clk_inited) {
         if (R_FAILED(clkrstInitialize())) return false;
@@ -500,6 +512,8 @@ static bool clk_init_once(void) {
 static uint32_t clk_get(PcvModuleId mod) {
     if (!clk_init_once()) return 0;
     ClkrstSession s;
+    // The trailing arg is the clkrst "unk" device-id; 3 is what Nintendo and
+    // Atmosphere use here.
     if (R_FAILED(clkrstOpenSession(&s, mod, 3))) return 0;
     uint32_t hz = 0;
     Result rc = clkrstGetClockRate(&s, &hz);
@@ -508,8 +522,13 @@ static uint32_t clk_get(PcvModuleId mod) {
 }
 
 // Set one module's rate, but only to a value the sysmodule itself lists as
-// possible. Refusing an unlisted rate is the whole safety story here: we never
-// invent a frequency, we pick one the hardware already advertises.
+// possible.
+//
+// Read that guarantee narrowly: the list is the raw DVFS table. It encodes no
+// power, thermal, dock or charger policy, and it contains rates every fork
+// blocks on battery. It stops us inventing a frequency the silicon does not
+// have; it is not a safety argument on its own. The safety argument here is
+// that we only ever touch the CPU, and only to 1785.
 static bool clk_set(PcvModuleId mod, uint32_t hz, const char* what, bool verbose = true) {
     if (!clk_init_once()) return false;
     ClkrstSession s;
@@ -521,18 +540,23 @@ static bool clk_set(PcvModuleId mod, uint32_t hz, const char* what, bool verbose
         return false;
     }
     uint32_t rates[32] = {0};
-    PcvClockRatesListType type;
+    PcvClockRatesListType type = PcvClockRatesListType_Discrete;
     int32_t count = 0;
     bool allowed = false;
     if (R_SUCCEEDED(clkrstGetPossibleClockRates(&s, rates, 32, &type, &count))) {
-        for (int32_t i = 0; i < count && i < 32; ++i) {
-            if (rates[i] == hz) { allowed = true; break; }
+        // Only a discrete list can be searched entry by entry. A Range list
+        // means rates[] is {min, max} and the old code would have read it as
+        // two discrete values; refuse rather than guess.
+        if (type == PcvClockRatesListType_Discrete) {
+            for (int32_t i = 0; i < count && i < 32; ++i) {
+                if (rates[i] == hz) { allowed = true; break; }
+            }
         }
     }
     if (!allowed) {
         if (verbose) {
-            std::printf("clocks: %s %u Hz NOT in the %d advertised rates — refused\n",
-                        what, (unsigned)hz, (int)count);
+            std::printf("clocks: %s %u Hz not offered (list type %d, %d entries) — refused\n",
+                        what, (unsigned)hz, (int)type, (int)count);
             std::fflush(stdout);
         }
         clkrstCloseSession(&s);
@@ -547,68 +571,68 @@ static bool clk_set(PcvModuleId mod, uint32_t hz, const char* what, bool verbose
     return R_SUCCEEDED(rc);
 }
 
-// 0 = leave the OS alone, 1 = GPU only, 2 = CPU + GPU.
+// 0 = leave the OS alone, 1 = CPU 1785 MHz.
 extern "C" void flashnx_set_clock_mode(int mode) {
     if (!clk_init_once()) {
         std::printf("clocks: clkrst unavailable, staying on OS defaults\n");
         std::fflush(stdout);
         return;
     }
-    if (!s_clk_saved) {
-        s_clk_orig_cpu = clk_get(PcvModuleId_CpuBus);
-        s_clk_orig_gpu = clk_get(PcvModuleId_GPU);
-        s_clk_saved = (s_clk_orig_cpu != 0 && s_clk_orig_gpu != 0);
-        std::printf("clocks: originals cpu=%u gpu=%u saved=%d\n",
-                    (unsigned)s_clk_orig_cpu, (unsigned)s_clk_orig_gpu, (int)s_clk_saved);
-        std::fflush(stdout);
-        if (!s_clk_saved) return;   // can't restore -> don't touch anything
+    mode = (mode == 1) ? 1 : 0;
+    if (mode == s_clk_mode) return;
+
+    if (mode == 1) {
+        // Capture the rate to come back to at the moment of raising, never
+        // once per process. A single boot-time latch would freeze whatever apm
+        // happened to have raised at an uncontrolled instant and write it back
+        // for the rest of the session. Re-reading here also means a dock change
+        // between two raises cannot pin a stale value.
+        uint32_t orig = clk_get(PcvModuleId_CpuBus);
+        if (orig == 0) {
+            std::printf("clocks: cannot read the current CPU rate, staying on OS defaults\n");
+            std::fflush(stdout);
+            return;
+        }
+        s_clk_orig_cpu = orig;
+        if (!clk_set(PcvModuleId_CpuBus, CPU_HIGH_HZ, "cpu")) return;
+        s_clk_mode = 1;
+        std::printf("clocks: power mode HIGH (was %u Hz)\n", (unsigned)orig);
+    } else {
+        if (s_clk_orig_cpu != 0) {
+            clk_set(PcvModuleId_CpuBus, s_clk_orig_cpu, "cpu(restore)");
+        }
+        s_clk_mode = 0;
+        std::printf("clocks: power mode NORMAL\n");
     }
-    switch (mode) {
-    case 1:   // GPU only. CPU deliberately untouched.
-        clk_set(PcvModuleId_CpuBus, s_clk_orig_cpu, "cpu(restore)");
-        clk_set(PcvModuleId_GPU, 460800000, "gpu");
-        break;
-    case 2:   // Tico's pairing.
-        clk_set(PcvModuleId_CpuBus, 1785000000, "cpu");
-        clk_set(PcvModuleId_GPU, 768000000, "gpu");
-        break;
-    default:  // Back to whatever the OS had at launch.
-        clk_set(PcvModuleId_CpuBus, s_clk_orig_cpu, "cpu(restore)");
-        clk_set(PcvModuleId_GPU, s_clk_orig_gpu, "gpu(restore)");
-        mode = 0;
-        break;
-    }
-    s_clk_mode = mode;
-    static const char* NAMES[3] = { "NORMAL", "GPU", "FULL" };
-    std::printf("clocks: mode now %s\n", NAMES[mode]);
     std::fflush(stdout);
 }
 
 extern "C" int flashnx_clock_mode(void) { return s_clk_mode; }
 
+// Times the OS took the clock back from under us, published in the heartbeat.
+// Until this exists the revocation question cannot be answered: the re-assert
+// is deliberately silent, so a revoke followed by a repair leaves no trace at
+// all. apm force-revoked CpuBoostMode(FastLoad) after 25-30 s of sustained load
+// in 2026-05, whatever the cadence, so the same must be assumed of clkrst until
+// this counter says otherwise.
+extern "C" uint32_t flashnx_clock_drift(void) { return s_clk_drift; }
+
 // Silent, cheap re-assert for the in-game loop. Waking from sleep or returning
-// from HOME resets the rates, so a pinned clock has to be re-applied — but the
-// re-apply must not itself show up in the capture, which is why nothing here
-// prints and why a write only happens when the rate has actually drifted.
-// Two clkrst reads every 30 frames (~2 s) when the experiment is on, none when
-// it is off.
+// from HOME resets the rate, so a raised clock has to be re-applied. Nothing
+// here prints, and a write only happens when the rate has actually drifted,
+// because this runs inside the capture it is meant to serve.
 extern "C" void flashnx_clocks_reassert(void) {
-    if (s_clk_mode == 0 || !s_clk_saved) return;
-    const uint32_t want_cpu = (s_clk_mode == 2) ? 1785000000u : s_clk_orig_cpu;
-    const uint32_t want_gpu = (s_clk_mode == 2) ? 768000000u  : 460800000u;
-    if (clk_get(PcvModuleId_CpuBus) != want_cpu) {
-        clk_set(PcvModuleId_CpuBus, want_cpu, "cpu", false);
-    }
-    if (clk_get(PcvModuleId_GPU) != want_gpu) {
-        clk_set(PcvModuleId_GPU, want_gpu, "gpu", false);
+    if (s_clk_mode != 1) return;
+    if (clk_get(PcvModuleId_CpuBus) != CPU_HIGH_HZ) {
+        s_clk_drift++;
+        clk_set(PcvModuleId_CpuBus, CPU_HIGH_HZ, "cpu", false);
     }
 }
 
-// Put the console back where we found it. Called on the way out of a game and
-// again before the .nro exits, so a crash mid-session is the only way to leave
-// a raised clock behind (and the OS resets those on its own anyway).
+// Put the console back where we found it, on the way out of a game and again
+// before the .nro exits. A crash mid-session is the only way to leave a raised
+// clock behind, and Horizon resets clkrst state when the process dies.
 extern "C" void flashnx_clocks_restore(void) {
-    if (!s_clk_saved) return;
     flashnx_set_clock_mode(0);
 }
 
@@ -645,3 +669,6 @@ extern "C" int flashnx_commit_sd(void) {
     }
     return 0;
 }
+
+extern "C" uint32_t ruffle_cpu_clock_hz(void) { return clk_get(PcvModuleId_CpuBus); }
+extern "C" uint32_t ruffle_gpu_clock_hz(void) { return clk_get(PcvModuleId_GPU); }
