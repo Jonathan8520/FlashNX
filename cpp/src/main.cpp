@@ -53,6 +53,14 @@ extern "C" uint64_t ruffle_frame_interval_us(void);
 // into a game (#100), so a black-screen report carries the answer.
 extern "C" void ruffle_dump_stage_children(void);
 extern "C" void ruffle_dump_root_vars(void);
+extern "C" void ruffle_alloc_force_off(void);
+
+// Clock experiment (2026-08-24), measurement only — see ruffle_bridge.cpp.
+// Default is mode 0, which touches nothing; ZL+ZR in the pause menu cycles.
+extern "C" void flashnx_set_clock_mode(int mode);
+extern "C" int  flashnx_clock_mode(void);
+extern "C" void flashnx_clocks_reassert(void);
+extern "C" void flashnx_clocks_restore(void);
 
 // True when `sdmc:/switch/FlashNX/dumpvars.on` exists: the pause button then
 // also prints the movie's AVM1 variables (see the `-` handler). Same shape as
@@ -933,6 +941,11 @@ static void worker_entry(void* arg) {
         if (++boost_reassert >= 30) {
             boost_reassert = 0;
             appletSetCpuBoostMode(ApmCpuBoostMode_Normal);
+            // The clock experiment, if the player raised it, has to be
+            // re-applied on the same cadence: waking from sleep or coming back
+            // from HOME resets the rates, which is the known failure mode of
+            // every homebrew that pins clocks. No-op in mode 0.
+            flashnx_clocks_reassert();
         }
 
         if (menu_open) {
@@ -1218,6 +1231,15 @@ static void worker_entry(void* arg) {
             // entry. Press `-` again or `B` to dismiss (= Resume).
             // Right stick navigates too (it's the mouse cursor only when the
             // menu is closed — this branch `continue`s before the cursor code).
+            // ZL+ZR cycles the clock experiment (2026-08-24). Deliberately a
+            // hidden combo in the pause menu and not a menu row: this is an
+            // instrument for one measurement session, not a feature. Pausing
+            // freezes the scene, so the same spot can be compared across all
+            // three modes. The heartbeat's `cpu=` line confirms what took.
+            if ((kDown & (HidNpadButton_ZL | HidNpadButton_ZR))
+                && (kHeld & HidNpadButton_ZL) && (kHeld & HidNpadButton_ZR)) {
+                flashnx_set_clock_mode((flashnx_clock_mode() + 1) % 3);
+            }
             if (kDown & (HidNpadButton_Up | HidNpadButton_StickLUp | HidNpadButton_StickRUp)) {
                 menu_selection = (menu_selection + MENU_COUNT - 1) % MENU_COUNT;
             }
@@ -1586,6 +1608,11 @@ static void worker_entry(void* arg) {
     //     button → Close, applet focus loss without resume, etc.) → full
     //     .nro exit.
     ruffle_shutdown();
+    // Leaving a game always puts the clocks back where they were found, so the
+    // experiment can never follow the player into the library or into the next
+    // game. No-op unless it was raised. (The OS resets these on its own too,
+    // but not until the process dies.)
+    flashnx_clocks_restore();
     if (back_to_library && !forwarder_swf) {
         std::printf("game: QUITTER → reset + back to library\n");
         std::fflush(stdout);
@@ -1609,6 +1636,7 @@ static void worker_entry(void* arg) {
     } // end of outer "while (!exit_nro)"
 
     gl_context_shutdown();
+    flashnx_clocks_restore();
     std::printf("worker: exiting\n"); std::fflush(stdout);
 }
 
@@ -1634,12 +1662,28 @@ int main(int argc, char** argv) {
     // discarded before, so a failure here surfaced much later as an opaque
     // curl error. Not fatal — the launcher and every game still work offline,
     // only the import/report features are unavailable.
+    static bool g_noalloc_marker = false;
+    // A/B switch for the small-object allocator cache (2026-08-25). Read here,
+    // before the worker thread starts, because the flag has to be set before
+    // the first Rust allocation reserves the region.
+    {
+        struct stat st;
+        if (::stat("sdmc:/switch/FlashNX/noalloc.on", &st) == 0) {
+            ruffle_alloc_force_off();
+            g_noalloc_marker = true;   // announced below, once nxlink is up
+            std::fflush(stdout);
+        }
+    }
     const Result sock_rc = socketInitializeDefault();
     if (R_FAILED(sock_rc)) {
         std::printf("socketInitializeDefault failed: 0x%x (networking disabled)\n", sock_rc);
         std::fflush(stdout);
     } else {
         nxlinkStdio();
+        if (g_noalloc_marker) {
+            std::printf("alloc: noalloc.on present -> small-object cache DISABLED\n");
+            std::fflush(stdout);
+        }
     }
     romfsInit();
     cursor_speed_load(); // restore the saved cursor-speed preset (REGLAGES)

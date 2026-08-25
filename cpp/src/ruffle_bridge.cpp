@@ -459,6 +459,159 @@ extern "C" int ruffle_is_docked(void) {
     return appletGetOperationMode() == AppletOperationMode_Console ? 1 : 0;
 }
 
+// ─── Clock experiment (2026-08-24) ────────────────────────────────────────
+//
+// MEASUREMENT ONLY. Mode 0 is the default and nothing below runs unless the
+// player asks for it from the pause menu (ZL+ZR). Nothing is persisted.
+//
+// Why this exists at all: `appletSetCpuBoostMode` cannot raise the CPU without
+// throttling the GPU to minimum, which is what forced us back to Normal on
+// 2026-07-30. That trade is an artefact of the applet API, not of the hardware:
+// the clkrst sysmodule sets each clock independently, which is what Tico's
+// emulator cores do (Dolphin pins 1785 MHz CPU + 768 MHz GPU together).
+//
+// Measured 2026-08-24, the two games sit on opposite sides of this:
+//   Papa Louie 3  84% AVM2, render 5 ms  -> only the CPU clock moves it
+//   Mario 63      one scene 90% render   -> only the GPU clock moves that scene
+// so a single fixed choice cannot serve both, and an adaptive one oscillates
+// (tried 2026-07-30: the mode changes the measurement that picks the mode).
+// Hence: measure both, on both games, in one session, then decide.
+//
+// Rates are validated against clkrstGetPossibleClockRates rather than trusted
+// as constants, and the originals are restored by flashnx_clocks_restore().
+// 1785 MHz CPU is Nintendo's own boost clock; 768 MHz GPU is the docked clock.
+// Holding both in handheld is above the handheld profile, and it heats up.
+
+static bool     s_clk_inited      = false;
+static bool     s_clk_saved       = false;
+static uint32_t s_clk_orig_cpu    = 0;
+static uint32_t s_clk_orig_gpu    = 0;
+static int      s_clk_mode        = 0;
+
+static bool clk_init_once(void) {
+    if (!s_clk_inited) {
+        if (R_FAILED(clkrstInitialize())) return false;
+        s_clk_inited = true;
+    }
+    return true;
+}
+
+// Read one module's current rate. 0 on any failure.
+static uint32_t clk_get(PcvModuleId mod) {
+    if (!clk_init_once()) return 0;
+    ClkrstSession s;
+    if (R_FAILED(clkrstOpenSession(&s, mod, 3))) return 0;
+    uint32_t hz = 0;
+    Result rc = clkrstGetClockRate(&s, &hz);
+    clkrstCloseSession(&s);
+    return R_SUCCEEDED(rc) ? hz : 0;
+}
+
+// Set one module's rate, but only to a value the sysmodule itself lists as
+// possible. Refusing an unlisted rate is the whole safety story here: we never
+// invent a frequency, we pick one the hardware already advertises.
+static bool clk_set(PcvModuleId mod, uint32_t hz, const char* what, bool verbose = true) {
+    if (!clk_init_once()) return false;
+    ClkrstSession s;
+    if (R_FAILED(clkrstOpenSession(&s, mod, 3))) {
+        if (verbose) {
+            std::printf("clocks: %s open failed\n", what);
+            std::fflush(stdout);
+        }
+        return false;
+    }
+    uint32_t rates[32] = {0};
+    PcvClockRatesListType type;
+    int32_t count = 0;
+    bool allowed = false;
+    if (R_SUCCEEDED(clkrstGetPossibleClockRates(&s, rates, 32, &type, &count))) {
+        for (int32_t i = 0; i < count && i < 32; ++i) {
+            if (rates[i] == hz) { allowed = true; break; }
+        }
+    }
+    if (!allowed) {
+        if (verbose) {
+            std::printf("clocks: %s %u Hz NOT in the %d advertised rates — refused\n",
+                        what, (unsigned)hz, (int)count);
+            std::fflush(stdout);
+        }
+        clkrstCloseSession(&s);
+        return false;
+    }
+    Result rc = clkrstSetClockRate(&s, hz);
+    clkrstCloseSession(&s);
+    if (verbose) {
+        std::printf("clocks: %s -> %u Hz rc=0x%x\n", what, (unsigned)hz, rc);
+        std::fflush(stdout);
+    }
+    return R_SUCCEEDED(rc);
+}
+
+// 0 = leave the OS alone, 1 = GPU only, 2 = CPU + GPU.
+extern "C" void flashnx_set_clock_mode(int mode) {
+    if (!clk_init_once()) {
+        std::printf("clocks: clkrst unavailable, staying on OS defaults\n");
+        std::fflush(stdout);
+        return;
+    }
+    if (!s_clk_saved) {
+        s_clk_orig_cpu = clk_get(PcvModuleId_CpuBus);
+        s_clk_orig_gpu = clk_get(PcvModuleId_GPU);
+        s_clk_saved = (s_clk_orig_cpu != 0 && s_clk_orig_gpu != 0);
+        std::printf("clocks: originals cpu=%u gpu=%u saved=%d\n",
+                    (unsigned)s_clk_orig_cpu, (unsigned)s_clk_orig_gpu, (int)s_clk_saved);
+        std::fflush(stdout);
+        if (!s_clk_saved) return;   // can't restore -> don't touch anything
+    }
+    switch (mode) {
+    case 1:   // GPU only. CPU deliberately untouched.
+        clk_set(PcvModuleId_CpuBus, s_clk_orig_cpu, "cpu(restore)");
+        clk_set(PcvModuleId_GPU, 460800000, "gpu");
+        break;
+    case 2:   // Tico's pairing.
+        clk_set(PcvModuleId_CpuBus, 1785000000, "cpu");
+        clk_set(PcvModuleId_GPU, 768000000, "gpu");
+        break;
+    default:  // Back to whatever the OS had at launch.
+        clk_set(PcvModuleId_CpuBus, s_clk_orig_cpu, "cpu(restore)");
+        clk_set(PcvModuleId_GPU, s_clk_orig_gpu, "gpu(restore)");
+        mode = 0;
+        break;
+    }
+    s_clk_mode = mode;
+    static const char* NAMES[3] = { "NORMAL", "GPU", "FULL" };
+    std::printf("clocks: mode now %s\n", NAMES[mode]);
+    std::fflush(stdout);
+}
+
+extern "C" int flashnx_clock_mode(void) { return s_clk_mode; }
+
+// Silent, cheap re-assert for the in-game loop. Waking from sleep or returning
+// from HOME resets the rates, so a pinned clock has to be re-applied — but the
+// re-apply must not itself show up in the capture, which is why nothing here
+// prints and why a write only happens when the rate has actually drifted.
+// Two clkrst reads every 30 frames (~2 s) when the experiment is on, none when
+// it is off.
+extern "C" void flashnx_clocks_reassert(void) {
+    if (s_clk_mode == 0 || !s_clk_saved) return;
+    const uint32_t want_cpu = (s_clk_mode == 2) ? 1785000000u : s_clk_orig_cpu;
+    const uint32_t want_gpu = (s_clk_mode == 2) ? 768000000u  : 460800000u;
+    if (clk_get(PcvModuleId_CpuBus) != want_cpu) {
+        clk_set(PcvModuleId_CpuBus, want_cpu, "cpu", false);
+    }
+    if (clk_get(PcvModuleId_GPU) != want_gpu) {
+        clk_set(PcvModuleId_GPU, want_gpu, "gpu", false);
+    }
+}
+
+// Put the console back where we found it. Called on the way out of a game and
+// again before the .nro exits, so a crash mid-session is the only way to leave
+// a raised clock behind (and the OS resets those on its own anyway).
+extern "C" void flashnx_clocks_restore(void) {
+    if (!s_clk_saved) return;
+    flashnx_set_clock_mode(0);
+}
+
 // 1 when running with the SMALL applet memory pool (~448-560 MB), 0 when we
 // have the full title-takeover application heap (~3.2 GB). Ruffle + our
 // backend need the full heap; in applet mode launching a SWF OOMs and falls
