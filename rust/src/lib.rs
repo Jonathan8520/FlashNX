@@ -147,6 +147,9 @@ mod counting_alloc {
     /// `dealloc` decides by ADDRESS: blocks already carved keep being returned
     /// to the region, blocks served afterwards go back to newlib.
     pub static FORCE_OFF: AtomicBool = AtomicBool::new(false);
+    /// Set once the region has failed to grow, so the diagnostic is printed a
+    /// single time and also stays readable from a bug report.
+    pub static GREW_FAILED: AtomicBool = AtomicBool::new(false);
 
     #[inline(always)]
     fn lock() {
@@ -176,6 +179,22 @@ mod counting_alloc {
         }
         let p = unsafe { System.alloc(Layout::from_size_align_unchecked(CHUNK, GRAN)) };
         if p.is_null() {
+            // Loudly, once. This is the cache's one silent failure mode and it
+            // is expensive: measured on Super Smash Flash 2, the fight-loading
+            // frame served 96% of its 853 000 allocations from the region when
+            // a chunk was available and 15% when one was not, which is a 16x
+            // difference in allocator cost on the same work — and the run that
+            // could not grow is the run that died. Without this line the only
+            // symptom is a framerate that collapses for no visible reason.
+            //
+            // Note what it means: the system could not find 32 MB CONTIGUOUS,
+            // not that it is out of memory. A run has died on a 256-byte
+            // request at 2761 MB while another lived at 3038.
+            // Raise a flag and nothing else. Logging here would be a deadlock:
+            // `grow` runs while holding LOCK, and the log helper allocates, so
+            // it would re-enter `alloc` and spin on the lock it already holds.
+            // The heartbeat prints it, outside the lock, with the size.
+            GREW_FAILED.store(true, Ordering::Relaxed);
             return false;
         }
         let base = p as usize;
@@ -319,6 +338,23 @@ static GLOBAL: counting_alloc::Counting = counting_alloc::Counting;
 /// Total bytes held in slabs by the small-object cache.
 pub(crate) fn slab_bytes() -> u64 {
     counting_alloc::SLAB_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// True once the small-object region has failed to obtain another 32 MB chunk.
+///
+/// This is NOT "out of memory" on its own: it means no CONTIGUOUS 32 MB was
+/// available. A run has died on a 256-byte request at 2761 MB of heap while
+/// another lived at 3038, so the wall is the largest usable block and not the
+/// total.
+///
+/// It matters because the fallback is expensive and otherwise invisible.
+/// Measured on Super Smash Flash 2's fight-loading frame: 96% of its 853 000
+/// allocations served from the region when a chunk was available, 15% when it
+/// was not, i.e. sixteen times the allocator cost on identical work — and the
+/// run that could not grow is the run that died. Before this flag existed the
+/// only symptom was a framerate collapsing for no stated reason.
+pub(crate) fn region_grow_failed() -> bool {
+    counting_alloc::GREW_FAILED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Allocations, frees, and the system ticks spent inside each, since process

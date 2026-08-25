@@ -14673,7 +14673,7 @@ impl RenderBackend for SwitchRenderBackend {
             let cpu_mhz = unsafe { ruffle_cpu_clock_hz() } / 1_000_000;
             let docked = unsafe { ruffle_is_docked() } != 0;
             let msg = std::format!(
-                "f{}: fps={} cpu={}MHz dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB heap={}MB slabMB={} drawbox={} maxalpha={:.2}\n",
+                "f{}: fps={} cpu={}MHz dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB heap={}MB slabMB={}{} drawbox={} maxalpha={:.2}\n",
                 self.frame_count,
                 fps_str,
                 cpu_mhz,
@@ -14715,6 +14715,9 @@ impl RenderBackend for SwitchRenderBackend {
                 ram_total / (1024 * 1024),
                 unsafe { ruffle_heap_used() } / (1024 * 1024),
                 crate::slab_bytes() / (1024 * 1024),
+                // Sticky: no contiguous 32 MB was available at some point, so
+                // small blocks are falling back to newlib. See `region_grow_failed`.
+                if crate::region_grow_failed() { "!STARVED" } else { "" },
                 match self.draw_extent.take() {
                     Some((x0, y0, x1, y1)) => std::format!(
                         "{:.0},{:.0}..{:.0},{:.0}", x0, y0, x1, y1
