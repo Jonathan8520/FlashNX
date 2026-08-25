@@ -19,7 +19,7 @@ PROFILE="release"
 CARGO_FLAG="--release"
 if [[ "${1:-}" == "--dev" ]]; then
     PROFILE="release-dev"
-    CARGO_FLAG="--profile release-dev"
+    CARGO_FLAG="--profile release-dev --features instr"
 fi
 
 export PATH="$USERPROFILE/.cargo/bin:$PATH"

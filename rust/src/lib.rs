@@ -49,10 +49,30 @@ mod counting_alloc {
     /// No `nomem`/`pure`: this must stay a real side-effecting read so the two
     /// calls around an allocation cannot be merged into one.
     #[inline(always)]
+    #[cfg(feature = "instr")]
     fn now() -> u64 {
         let t: u64;
         unsafe { core::arch::asm!("mrs {}, cntpct_el0", out(reg) t, options(nostack)) };
         t
+    }
+
+    /// Without the `instr` feature the clock is never read and every tally
+    /// below compiles away, so a release build pays nothing per allocation.
+    /// That matters: at ~50 000 allocations per frame, two counter reads and
+    /// three atomics each were measured at 1 to 3 % of the frame.
+    #[cfg(not(feature = "instr"))]
+    #[inline(always)]
+    fn now() -> u64 {
+        0
+    }
+
+    /// Add to a diagnostic counter, or nothing at all in a release build.
+    #[inline(always)]
+    fn tally(c: &AtomicU64, v: u64) {
+        #[cfg(feature = "instr")]
+        c.fetch_add(v, Ordering::Relaxed);
+        #[cfg(not(feature = "instr"))]
+        let _ = (c, v);
     }
 
     // ─── Small-object cache in front of newlib ────────────────────────────
@@ -239,7 +259,7 @@ mod counting_alloc {
                         // Pop. The freed block's first 8 bytes hold the link.
                         let next = unsafe { *(head as *mut *mut u8) };
                         HEADS[c].store(next as usize, Ordering::Relaxed);
-                        SMALL_N.fetch_add(1, Ordering::Relaxed);
+                        tally(&SMALL_N, 1);
                         head
                     } else {
                         let want = (c + 1) * GRAN;
@@ -255,7 +275,7 @@ mod counting_alloc {
                         if b != 0 {
                             BUMP.store(b + want, Ordering::Relaxed);
                             SLAB_BYTES.fetch_add(want as u64, Ordering::Relaxed);
-                            SMALL_N.fetch_add(1, Ordering::Relaxed);
+                            tally(&SMALL_N, 1);
                             b as *mut u8
                         } else {
                             // Ceiling reached, or the system refused a chunk.
@@ -273,8 +293,8 @@ mod counting_alloc {
                 }
                 None => unsafe { System.alloc(l) },
             };
-            ALLOC_TICKS.fetch_add(now().wrapping_sub(t0), Ordering::Relaxed);
-            ALLOC_N.fetch_add(1, Ordering::Relaxed);
+            tally(&ALLOC_TICKS, now().wrapping_sub(t0));
+            tally(&ALLOC_N, 1);
             p
         }
 
@@ -290,8 +310,8 @@ mod counting_alloc {
                     // carved from the region. Leak the block rather than
                     // corrupt a list if it somehow does.
                     None => {
-                        DEALLOC_TICKS.fetch_add(now().wrapping_sub(t0), Ordering::Relaxed);
-                        DEALLOC_N.fetch_add(1, Ordering::Relaxed);
+                        tally(&DEALLOC_TICKS, now().wrapping_sub(t0));
+                        tally(&DEALLOC_N, 1);
                         return;
                     }
                 };
@@ -302,8 +322,8 @@ mod counting_alloc {
             } else {
                 unsafe { System.dealloc(p, l) };
             }
-            DEALLOC_TICKS.fetch_add(now().wrapping_sub(t0), Ordering::Relaxed);
-            DEALLOC_N.fetch_add(1, Ordering::Relaxed);
+            tally(&DEALLOC_TICKS, now().wrapping_sub(t0));
+            tally(&DEALLOC_N, 1);
         }
 
         unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
@@ -314,8 +334,8 @@ mod counting_alloc {
             if !in_region(p) && class_of(new_l).is_none() {
                 let t0 = now();
                 let q = unsafe { System.realloc(p, l, n) };
-                ALLOC_TICKS.fetch_add(now().wrapping_sub(t0), Ordering::Relaxed);
-                ALLOC_N.fetch_add(1, Ordering::Relaxed);
+                tally(&ALLOC_TICKS, now().wrapping_sub(t0));
+                tally(&ALLOC_N, 1);
                 q
             } else {
                 // No counters here: alloc/dealloc below tally themselves.
@@ -788,6 +808,9 @@ pub extern "C" fn ruffle_init() -> c_int {
 
     let _ = tracing::subscriber::set_global_default(SwitchTracingSubscriber::new());
     log(b"ruffle_init: tracing subscriber installed (INFO level)\n\0");
+    // Say it out loud, because otherwise the zeros look like measurements.
+    #[cfg(not(feature = "instr"))]
+    log(b"alloc: instrumentation compiled out, alloc=/free=/%sm read zero\n\0");
 
     // Before the renderer, because the viewport below is chosen from it.
     crate::backend::render::set_game_rotation(pending_rotation());

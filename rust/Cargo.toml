@@ -121,6 +121,13 @@ encoding_rs = "0.8.35"
 async-channel = "2.5.0"
 indexmap = "2.13.0"
 
+# Per-allocation instrumentation. OFF by default, so a release build carries
+# none of it: at ~50 000 allocations per frame, two counter reads and three
+# atomics each cost 1 to 3 % of the frame. `scripts/build.sh --dev` turns it
+# on. See `counting_alloc` in src/lib.rs.
+[features]
+instr = []
+
 [profile.release]
 opt-level = 3
 lto = true
