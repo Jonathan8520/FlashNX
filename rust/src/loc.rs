@@ -344,6 +344,22 @@ pub struct Strings {
     pub filter_scanlines: &'static str,
     /// Scanlines + RGB stripe mask + vignette.
     pub filter_crt: &'static str,
+    /// Pause row + defaults row: raise the CPU clock for heavy games.
+    pub set_overclock: &'static str,
+    /// The console's own profile, untouched.
+    pub overclock_off: &'static str,
+    /// CPU 1785 MHz. The GPU is never touched.
+    pub overclock_on: &'static str,
+    /// One line under the row. Says the two things the evidence actually
+    /// supports: it drains the battery faster and it runs hotter. It does NOT
+    /// claim hardware damage, because nothing in the record supports that, and
+    /// dressing folklore as a warning is worse than saying nothing.
+    pub overclock_hint: &'static str,
+    /// Replaces the hint when the console refused the raise. Seen for real on
+    /// 2026-08-26 at 7% charge: psm reports the pack out of its Normal voltage
+    /// state and the raise is refused, which without this line is a button
+    /// pressed eight times with nothing happening and no reason given.
+    pub overclock_refused: &'static str,
     /// Pause row + defaults row: turn the picture a quarter at a time (#78).
     pub set_rotation: &'static str,
     pub rot_none: &'static str,
@@ -724,6 +740,11 @@ const EN: Strings = Strings {
     filter_none: "NONE",
     filter_scanlines: "SCANLINES",
     filter_crt: "CRT",
+    set_overclock: "OVERCLOCK",
+    overclock_off: "OFF",
+    overclock_on: "ON",
+    overclock_hint: "ON: more battery used, more heat.",
+    overclock_refused: "Overclock unavailable: battery too low.",
     set_rotation: "ROTATION",
     rot_none: "NONE",
     rot_90: "90\u{00B0}",
@@ -982,6 +1003,11 @@ const FR: Strings = Strings {
     filter_none: "AUCUN",
     filter_scanlines: "LIGNES",
     filter_crt: "CRT",
+    set_overclock: "OVERCLOCK",
+    overclock_off: "INACTIF",
+    overclock_on: "ACTIF",
+    overclock_hint: "ACTIF : plus de batterie, plus de chaleur.",
+    overclock_refused: "Overclock indisponible : batterie trop faible.",
     set_rotation: "ROTATION",
     rot_none: "AUCUNE",
     rot_90: "90\u{00B0}",
@@ -1240,6 +1266,11 @@ const ES: Strings = Strings {
     filter_none: "NINGUNO",
     filter_scanlines: "L\u{00CD}NEAS",
     filter_crt: "CRT",
+    set_overclock: "OVERCLOCK",
+    overclock_off: "INACTIVO",
+    overclock_on: "ACTIVO",
+    overclock_hint: "ACTIVO: m\u{00E1}s bater\u{00ED}a, m\u{00E1}s calor.",
+    overclock_refused: "Overclock no disponible: bater\u{00ED}a muy baja.",
     set_rotation: "ROTACI\u{00D3}N",
     rot_none: "NINGUNA",
     rot_90: "90\u{00B0}",
@@ -1500,6 +1531,11 @@ const RU: Strings = Strings {
     filter_none: "НЕТ",
     filter_scanlines: "ЛИНИИ",
     filter_crt: "CRT",
+    set_overclock: "РАЗГОН",
+    overclock_off: "ВЫКЛ",
+    overclock_on: "ВКЛ",
+    overclock_hint: "ВКЛ: больше расход батареи и нагрев.",
+    overclock_refused: "Разгон недоступен: батарея разряжена.",
     set_rotation: "ПОВОРОТ",
     rot_none: "НЕТ",
     rot_90: "90\u{00B0}",
@@ -1763,6 +1799,11 @@ const DE: Strings = Strings {
     filter_none: "KEINER",
     filter_scanlines: "LINIEN",
     filter_crt: "CRT",
+    set_overclock: "OVERCLOCK",
+    overclock_off: "AUS",
+    overclock_on: "EIN",
+    overclock_hint: "EIN: mehr Akkuverbrauch, mehr W\u{00E4}rme.",
+    overclock_refused: "Overclock nicht verf\u{00FC}gbar: Akku zu schwach.",
     set_rotation: "DREHUNG",
     rot_none: "KEINE",
     rot_90: "90\u{00B0}",
@@ -2023,6 +2064,11 @@ const IT: Strings = Strings {
     filter_none: "NESSUNO",
     filter_scanlines: "LINEE",
     filter_crt: "CRT",
+    set_overclock: "OVERCLOCK",
+    overclock_off: "INATTIVO",
+    overclock_on: "ATTIVO",
+    overclock_hint: "ATTIVO: pi\u{00F9} batteria, pi\u{00F9} calore.",
+    overclock_refused: "Overclock non disponibile: batteria troppo bassa.",
     set_rotation: "ROTAZIONE",
     rot_none: "NESSUNA",
     rot_90: "90\u{00B0}",
@@ -2283,6 +2329,11 @@ const PT: Strings = Strings {
     filter_none: "NENHUM",
     filter_scanlines: "LINHAS",
     filter_crt: "CRT",
+    set_overclock: "OVERCLOCK",
+    overclock_off: "INATIVO",
+    overclock_on: "ATIVO",
+    overclock_hint: "ATIVO: mais bateria, mais calor.",
+    overclock_refused: "Overclock indispon\u{00ED}vel: bateria fraca.",
     set_rotation: "ROTA\u{00C7}\u{00C3}O",
     rot_none: "NENHUMA",
     rot_90: "90\u{00B0}",
@@ -2548,6 +2599,11 @@ const ZH: Strings = Strings {
     filter_none: "无",
     filter_scanlines: "扫描线",
     filter_crt: "CRT",
+    set_overclock: "超频",
+    overclock_off: "关闭",
+    overclock_on: "开启",
+    overclock_hint: "开启：更耗电，发热更多。",
+    overclock_refused: "超频不可用：电量过低。",
     set_rotation: "旋转",
     rot_none: "无",
     rot_90: "90\u{00B0}",
@@ -2811,6 +2867,11 @@ const TR: Strings = Strings {
     filter_none: "YOK",
     filter_scanlines: "\u{00C7}\u{0130}ZG\u{0130}LER",
     filter_crt: "CRT",
+    set_overclock: "OVERCLOCK",
+    overclock_off: "KAPALI",
+    overclock_on: "A\u{00C7}IK",
+    overclock_hint: "A\u{00C7}IK: daha \u{00E7}ok pil, daha \u{00E7}ok \u{0131}s\u{0131}.",
+    overclock_refused: "Overclock kullan\u{0131}lamaz: pil \u{00E7}ok d\u{00FC}\u{015F}\u{00FC}k.",
     set_rotation: "D\u{00D6}ND\u{00DC}RME",
     rot_none: "YOK",
     rot_90: "90\u{00B0}",
@@ -2998,6 +3059,9 @@ pub fn set_covers_online(v: bool) {
 /// change of default, which is predictable and explainable.
 static DEFAULT_DISPLAY_MODE: AtomicU8 = AtomicU8::new(0);
 static DEFAULT_SCREEN_FILTER: AtomicU8 = AtomicU8::new(0);
+/// Default power mode. 0 = NORMAL, and it stays 0: a player who never opens the
+/// menu runs on an untouched OS profile.
+static DEFAULT_POWER_MODE: AtomicU8 = AtomicU8::new(0);
 static DEFAULT_ROTATION: AtomicU8 = AtomicU8::new(0);
 static DEFAULT_ZOOM: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(100);
 
@@ -3096,6 +3160,23 @@ pub fn default_screen_filter() -> u8 {
 
 pub fn set_default_screen_filter(v: u8) {
     DEFAULT_SCREEN_FILTER.store(v, Ordering::Relaxed);
+}
+
+pub fn default_power_mode() -> u8 {
+    DEFAULT_POWER_MODE.load(Ordering::Relaxed)
+}
+
+pub fn set_default_power_mode(v: u8) {
+    DEFAULT_POWER_MODE.store(v, Ordering::Relaxed);
+}
+
+/// Display name of a power mode. Stored PER GAME (`keymap::power_mode_for`);
+/// this side is only the default a game without its own value follows.
+pub fn overclock_label(mode: u8) -> &'static str {
+    match mode {
+        1 => s().overclock_on,
+        _ => s().overclock_off,
+    }
 }
 
 /// Display name of a stage-scaling mode. The value itself is stored PER GAME
@@ -3368,13 +3449,14 @@ fn parse_u16_setting(json: &str, key: &str, lo: u16, hi: u16) -> Option<u16> {
 fn write_settings(lang: Lang, covers: bool) -> bool {
     let path = settings_write_path();
     let json = std::format!(
-        "{{\n    \"language\": \"{}\",\n    \"covers_online\": {},\n    \"display_mode\": {},\n    \"rotation\": {},\n    \"zoom\": {},\n    \"screen_filter\": {},\n    \"home_view\": {}\n}}\n",
+        "{{\n    \"language\": \"{}\",\n    \"covers_online\": {},\n    \"display_mode\": {},\n    \"rotation\": {},\n    \"zoom\": {},\n    \"screen_filter\": {},\n    \"power_mode\": {},\n    \"home_view\": {}\n}}\n",
         lang.code(),
         covers,
         default_display_mode(),
         default_rotation(),
         default_zoom(),
         default_screen_filter(),
+        default_power_mode(),
         home_view(),
     );
     match File::create(&path) {
@@ -3431,6 +3513,9 @@ pub fn init() {
             }
             if let Some(v) = parse_u8_setting(&txt, "screen_filter", 3) {
                 set_default_screen_filter(v);
+            }
+            if let Some(v) = parse_u8_setting(&txt, "power_mode", 2) {
+                set_default_power_mode(v);
             }
             if let Some(v) = parse_u8_setting(&txt, "home_view", HOME_VIEW_COUNT) {
                 set_home_view(v);

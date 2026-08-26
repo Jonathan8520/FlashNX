@@ -86,6 +86,7 @@ pub const MENU_ITEMS: &[&str] = &[
     "REPRENDRE",
     "TOUCHES",
     "ECRAN",
+    "OVERCLOCK",
     "REDEMARRER",
     "QUITTER",
 ];
@@ -955,6 +956,26 @@ extern "C" {
     /// question is undecidable: the re-assert is deliberately silent, so a
     /// revoke followed by our own repair leaves no trace either way.
     fn flashnx_clock_drift() -> u32;
+    /// Ask for a power mode (0 NORMAL / 1 HIGH). Returns the mode actually in
+    /// force, which is not always the one asked for: clkrst can be unavailable
+    /// and a raise is refused outright when the battery has left its Normal
+    /// voltage state.
+    fn flashnx_set_clock_mode(mode: core::ffi::c_int) -> core::ffi::c_int;
+    /// The mode currently in force. Reads NORMAL whenever the hardware does not
+    /// agree with what was asked for.
+    fn flashnx_clock_mode() -> core::ffi::c_int;
+    /// Skin temperature in milli-C, 0 when unavailable. Compare against the
+    /// thresholds Horizon itself uses: 53000 (fan pinned at 60%), 58000 (60 s
+    /// sleep timer), 61000 (10 s timer), 63000 (immediate sleep). In handheld
+    /// the OS response is SLEEP, never throttling, so this is the number that
+    /// says whether a long session is at risk of dropping the player out.
+    fn flashnx_skin_temp_mc() -> i32;
+    /// Battery cell temperature in milli-C, 0 when unavailable.
+    fn flashnx_batt_temp_mc() -> i32;
+    /// Charge in per-mille (1000 = full), 0 when unavailable. Two readings far
+    /// enough apart are the only route to a power figure: psm exposes no
+    /// instantaneous current at all.
+    fn flashnx_batt_permille() -> i32;
     /// 1 when docked, 0 handheld.
     fn ruffle_is_docked() -> core::ffi::c_int;
     /// Bytes malloc currently has handed out. The `ram=` pair next to it is the
@@ -2454,6 +2475,37 @@ static SCREEN_FILTER: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8:
 /// makes the pause menu able to preview it on the frozen picture.
 pub fn set_screen_filter(v: u8) {
     SCREEN_FILTER.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Ask for a power mode and report back the one actually in force.
+///
+/// Always read the answer rather than assuming the request took. clkrst can be
+/// unavailable, and a raise is refused outright when psm says the battery has
+/// left its Normal voltage state, which is the one case where the OS is telling
+/// us in so many words that a boost must not be entered.
+/// Set when a raise was ASKED FOR and did not take. Drives the footer line, so
+/// the row can say why instead of looking like a dead button: this happened for
+/// real on 2026-08-26, eight presses at 7% charge with psm refusing every one
+/// and nothing on screen to explain it.
+static POWER_REFUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn apply_power_mode(mode: u8) -> u8 {
+    let want = if mode == 1 { 1 } else { 0 };
+    let got = unsafe { flashnx_set_clock_mode(want) };
+    let got = if got == 1 { 1 } else { 0 };
+    POWER_REFUSED.store(want == 1 && got == 0, std::sync::atomic::Ordering::Relaxed);
+    got
+}
+
+/// True when the last raise request was turned down.
+pub fn overclock_refused() -> bool {
+    POWER_REFUSED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The power mode in force right now, straight from the hardware side.
+pub fn current_power_mode() -> u8 {
+    let m = unsafe { flashnx_clock_mode() };
+    if m == 1 { 1 } else { 0 }
 }
 
 pub fn screen_filter() -> u8 {
@@ -7572,6 +7624,20 @@ impl SwitchRenderBackend {
         // OPTIONS modal). Held in a local so `as_deref()` can feed the frame.
         let lc = crate::loc::s();
         let game = crate::library::active_display_name();
+        // The footer carries the power note while that row is highlighted, and
+        // goes back to the button legend everywhere else. A row whose effect is
+        // invisible on the frozen frame behind the panel is the one row that has
+        // to say what it costs, and a footer says it without a modal nobody else
+        // in this family of homebrews puts up.
+        let footer = if MENU_ITEMS.get(selected) == Some(&"OVERCLOCK") {
+            if overclock_refused() {
+                lc.overclock_refused
+            } else {
+                lc.overclock_hint
+            }
+        } else {
+            lc.pause_footer
+        };
         let frame = self.draw_modal_frame(
             MODAL_W,
             MENU_ITEMS.len(),
@@ -7579,17 +7645,34 @@ impl SwitchRenderBackend {
             false,
             lc.pause_title,
             game.as_deref(),
-            Some(lc.pause_footer),
+            Some(footer),
         );
 
         // Localized labels, same order/count as the MENU_ITEMS contract C++
         // relies on for pause-menu navigation. Cursor speed moved into the
         // TOUCHES sub-menu (#20 Option 1) and the three screen settings into
         // ECRAN, so neither is a top-level item anymore.
+        //
+        // OVERCLOCK stays at the top level rather than joining ECRAN, even
+        // though it is a setting and ECRAN is where settings went: every ECRAN
+        // row previews on the frozen frame, and this one cannot. Buried a level
+        // down it would be undiscoverable, and it is the largest single lever
+        // the app has (roughly 1.5x on interpreter-bound games).
+        //
+        // It reads back `flashnx_clock_mode()`, not the stored preference: a
+        // raise can be refused (clkrst unavailable, battery out of its Normal
+        // voltage state) and a row claiming HIGH while the console sits at 1020
+        // is a support ticket.
+        let power_label = std::format!(
+            "{}: {}",
+            lc.set_overclock,
+            crate::loc::overclock_label(current_power_mode()),
+        );
         let items = [
             lc.menu_resume,
             lc.menu_keys,
             lc.menu_screen,
+            power_label.as_str(),
             lc.menu_restart,
             lc.menu_quit,
         ];
@@ -14681,13 +14764,35 @@ impl RenderBackend for SwitchRenderBackend {
             let gpu_mhz = unsafe { ruffle_gpu_clock_hz() } / 1_000_000;
             let drift = unsafe { flashnx_clock_drift() };
             let docked = unsafe { ruffle_is_docked() } != 0;
+            // Skin temperature, battery temperature, battery charge. The whole
+            // reason the power setting and this probe ship together: nobody has
+            // ever run a raised clock long enough on this console to see a
+            // thermal plateau, so a guard written today would be a threshold
+            // nobody has calibrated.
+            //
+            // Read `skin` against the numbers Horizon itself uses: 53000 (fan
+            // pinned at 60% in handheld), 58000 (60 s sleep timer), 61000 (10 s
+            // timer), 63000 (immediate sleep). The handheld response is SLEEP,
+            // never throttling, so the failure this is watching for is the
+            // console dropping the player out mid-game, not damage.
+            //
+            // `bat` is in per-mille and is the only route to a power figure at
+            // all: psm exposes no instantaneous current, and the I2C helper that
+            // does live inside a sysmodule with its own NPDM. Two readings far
+            // enough apart give %/h, and ~16 Wh nominal turns that into watts.
+            let skin_mc = unsafe { flashnx_skin_temp_mc() };
+            let batt_mc = unsafe { flashnx_batt_temp_mc() };
+            let batt_pm = unsafe { flashnx_batt_permille() };
             let msg = std::format!(
-                "f{}: fps={} cpu={}MHz gpu={}MHz drift={} dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB heap={}MB slabMB={}{} drawbox={} maxalpha={:.2}\n",
+                "f{}: fps={} cpu={}MHz gpu={}MHz drift={} skin={} batC={} bat={} dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB heap={}MB slabMB={}{} drawbox={} maxalpha={:.2}\n",
                 self.frame_count,
                 fps_str,
                 cpu_mhz,
                 gpu_mhz,
                 drift,
+                skin_mc,
+                batt_mc,
+                batt_pm,
                 docked,
                 tick_ms,
                 render_ms,

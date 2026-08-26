@@ -802,6 +802,10 @@ pub extern "C" fn ruffle_init() -> c_int {
         // got swallowed by the kernel TCP buffer when the process died
         // before nxlink finished sending.
         unsafe { ruffle_crash_dump(bytes.as_ptr() as *const c_char) };
+        // Hand the CPU clock back before the abort. `panic = "abort"` means
+        // nothing else downstream will get the chance, and closing a clkrst
+        // session demonstrably does not release the rate on its own.
+        crate::backend::render::apply_power_mode(0);
     }));
 
     log_str(&std::format!("phase 1.5: ruffle_init starting\n"));
@@ -982,6 +986,12 @@ pub extern "C" fn ruffle_init() -> c_int {
     // EVERY launch, including back to 0, so a filtered game never leaves its
     // filter behind for the next one.
     crate::backend::render::set_screen_filter(keymap::screen_filter());
+    // Same for the power mode, and for the same reason it is set on EVERY
+    // launch including back to 0: one game asking for a raised clock must never
+    // leave the next one running raised. The way back down also happens on the
+    // way out of a game (flashnx_clocks_restore in main.cpp), so this is the
+    // second of two guards, not the only one.
+    crate::backend::render::apply_power_mode(keymap::power_mode());
 
     // Sidecar dir is needed BEFORE the movie is built (the HTML container's
     // FlashVars live in the tree, see below) and again after, for the navigator.
@@ -2134,6 +2144,29 @@ pub extern "C" fn ruffle_screen_filter_cycle() {
     let next = (keymap::screen_filter() + 1) % keymap::SCREEN_FILTER_COUNT;
     keymap::set_screen_filter(next);
     crate::backend::render::set_screen_filter(next);
+}
+
+/// Pause-menu OVERCLOCK row: cycle the ACTIVE game's power mode and persist it.
+///
+/// What gets persisted is what the hardware actually accepted, not what was
+/// asked for. A raise can be refused (clkrst unavailable, or psm reporting the
+/// battery out of its Normal voltage state), and storing the request in that
+/// case would leave the game marked HIGH forever while running at 1020, with
+/// the row saying one thing and the console doing another.
+#[no_mangle]
+pub extern "C" fn ruffle_power_mode_cycle() {
+    let next = (keymap::power_mode() + 1) % keymap::POWER_MODE_COUNT;
+    let got = crate::backend::render::apply_power_mode(next);
+    keymap::set_power_mode(got);
+    // Say what was asked for AND what was granted. A refusal is silent on the
+    // clkrst side by design, and without this line the only trace of a press
+    // that did nothing is the absence of a `clocks:` line, which is not a trace.
+    log_str(&std::format!(
+        "menu: OVERCLOCK asked={} got={}{}\n",
+        next,
+        got,
+        if next != got { " (REFUSED)" } else { "" },
+    ));
 }
 
 /// Drop the current Player + renderer (Ruffle owns the SwitchRenderBackend,

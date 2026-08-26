@@ -1515,6 +1515,48 @@ pub fn set_screen_filter(mode: u8) {
     write_pref(&basename, "filter", mode);
 }
 
+/// Number of power modes: 0 = NORMAL (the OS profile, untouched), 1 = HIGH
+/// (CPU 1785 MHz, GPU left alone).
+pub const POWER_MODE_COUNT: u8 = 2;
+
+/// Per-game power mode (by basename), falling back to the global default.
+///
+/// PER GAME rather than one global switch, for the same reason as the scaling
+/// mode: the benefit is not uniform. Mario 63 and Papa Louie 3 gain roughly
+/// 1.5x because they are interpreter-bound; a game already hitting its nominal
+/// frame rate gains exactly nothing and would only be paying battery for it.
+///
+/// Default NORMAL, deliberately. Every homebrew that offers the choice ships it
+/// off (RetroArch, both melonDS forks); the two that ship it on are the two
+/// that offer no control at all. Someone who never opens the menu stays on an
+/// untouched OS profile, which is the only configuration with millions of
+/// console-hours behind it.
+pub fn power_mode_for(basename: &str) -> u8 {
+    read_pref(basename, "power")
+        .filter(|v| *v < POWER_MODE_COUNT)
+        .unwrap_or_else(crate::loc::default_power_mode)
+}
+
+/// Power mode of the ACTIVE game, 0 when unset or when no game is active.
+pub fn power_mode() -> u8 {
+    match active_game_basename() {
+        Some(b) => power_mode_for(&b),
+        None => 0,
+    }
+}
+
+/// Persist the ACTIVE game's power mode.
+///
+/// Written for 0 as well, like the screen filter: a missing key means "follow
+/// the global default", so deleting it would make "normal, deliberately"
+/// indistinguishable from "never touched".
+pub fn set_power_mode(mode: u8) {
+    let Some(basename) = active_game_basename() else {
+        return;
+    };
+    write_pref(&basename, "power", mode);
+}
+
 /// Stage-scaling mode of the ACTIVE game (the one being played), 0 when unset
 /// or when no game is active.
 pub fn display_mode() -> u8 {

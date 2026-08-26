@@ -28,6 +28,9 @@ alignas(16) static u8 g_exception_stack[32 * 1024];
 u8* __nx_exception_stack = g_exception_stack + sizeof(g_exception_stack);
 u64 __nx_exception_stack_size = sizeof(g_exception_stack);
 
+// Defined in ruffle_bridge.cpp. Puts the CPU clock back where it was found.
+void flashnx_clocks_restore(void);
+
 // `__libnx_exception_handler` is a weak symbol in libnx; defining it here
 // overrides the default (which just re-aborts). The kernel populates the
 // passed-in dump with the faulting thread's registers + fault info.
@@ -41,6 +44,25 @@ void __libnx_exception_handler(ThreadExceptionDump* ctx) {
     static volatile bool s_handling = false;
     if (s_handling) return;
     s_handling = true;
+
+    // Hand the CPU clock back FIRST, before anything here formats a string or
+    // dereferences a register out of the dump.
+    //
+    // It used to be the last thing done, after the stack scan below. That was
+    // wrong in exactly the two cases this handler exists for. The scan reads
+    // the FAULTING thread's sp, so a misaligned-SP fault (0x103) or a stack
+    // overflow makes the scan itself fault, which re-enters here, hits the
+    // guard above and returns, and the restore never runs. The private 32 KB
+    // handler stack lets the HANDLER run; it does nothing for a scan reading
+    // someone else's broken sp. The crash captured on 2026-08-26
+    // (temp/test1.txt) was a data abort with a healthy sp, i.e. the easy case,
+    // and it is what made the old order look correct.
+    //
+    // This also stops leaning on "Horizon resets clkrst state when the process
+    // dies", which is unverified and whose mechanism our own instrument
+    // contradicts: the clock code closes its session right after every write,
+    // and every later read opens a fresh one and still sees 1785 MHz.
+    flashnx_clocks_restore();
 
     // Format the whole dump into a single stack buffer so the fputs/file
     // write happens as one shot (less chance of being torn by another

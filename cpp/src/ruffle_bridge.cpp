@@ -453,49 +453,89 @@ extern "C" int ruffle_is_docked(void) {
 //   0  NORMAL   the OS profile, untouched (1020 MHz CPU / 307.2 MHz GPU handheld)
 //   1  HIGH     CPU 1785 MHz, GPU left exactly where the OS put it
 //
-// Why only the CPU. Measured 2026-08-25 on the one clean three-way A/B in the
-// corpus (temp/mesure.txt, Papa Louie 3, identical scene, dc/win pinned at
-// 4680, controller idle):
+// Why only the CPU. The one A/B in the corpus that is same-session, same-binary
+// and same-scene is temp/maj2.txt + temp/power.txt (Papa Louie 3, dc/win pinned
+// at 4680, controller idle), both post small-object-cache:
 //
-//     NORMAL 1020/307.2   15.15 fps   tick 60.06 ms   render 4.47 ms
-//     GPU    1020/460.8   14.89 fps   tick 61.01 ms   render 4.57 ms
-//     BOTH   1785/768     24.45 fps   tick 36.53 ms   render 3.50 ms
+//     NORMAL  1020/307.2   15.33 fps   tick 59.68 ms   render 3.94 ms
+//     BOTH    1785/768     25.12 fps   tick 36.06 ms   render 2.87 ms
+//     CPU     1785/307.2   25.15 fps   tick 36.04 ms   render 2.83 ms
 //
-// Raising the GPU alone costs 1.7% of the framerate, i.e. nothing, in the wrong
-// direction. Of the 25.1 ms per frame that raising BOTH buys, 23.53 ms (93.7%)
-// is tick. A CPU-only mode therefore keeps ~90% of the gain. On Mario 63 the
-// `render` timer even follows the CPU clock rather than the GPU one (10.0 ms ->
-// 5.74 ms, against 5.71 ms predicted by the CPU ratio alone), because most of
-// what it measures is command submission, not the GPU.
+// CPU-only and CPU+GPU are indistinguishable: 0.1% of framerate, inside the
+// window-to-window spread. The GPU half buys nothing measurable and costs
+// nothing measurable. Do not write "we measured it and it was worse"; an
+// earlier revision of this comment did, on figures that turned out to compare
+// two different binaries, and that does not survive a check.
 //
-// Why not the GPU too, for that last 10%. 1785 MHz CPU on battery in handheld
-// is capped by nobody: not sys-clk, not sys-clk-OC, not Horizon OC, and no
-// hardware failure has ever been attributed to it. 768 MHz GPU on battery in
-// handheld is blocked by all of them on Erista (sys-clk caps the handheld GPU
-// at 460.8 there, 614.4 on Mariko, and allows 768 only on a charger), and it is
-// the configuration the recurring battery-swelling reports point at. Nintendo
-// itself never pairs the two: in its own profile table 1785 always comes with
-// the GPU throttled to 76.8, and 768 only ever appears docked with a 1020 CPU.
-// Four percent of framerate does not buy console-model detection, charger
-// detection, and a configuration every other project refuses.
+// That the gain is the clock and not the scene: the tick ratio 59.68/36.04 =
+// 1.656 tracks the clock ratio 1785/1020 = 1.750 to within 5%. Mario 63 gives
+// 18.30 -> 27.30 fps, tick ratio 1.479, but that pair is cross-session and
+// cross-binary, so treat 1.49x as a floor.
 //
-// What this does NOT protect against. Handheld thermal response on Horizon is
-// not throttling, it is SLEEP: skin at 58C arms a 60-second timer, 63C sleeps
-// immediately, and the handheld fan table is capped near 60%. Nothing here
-// reads a temperature. The longest sustained raised-clock run ever captured by
-// this project is 118 seconds, which is nowhere near thermal steady state, so
-// "no drift observed" means "not measured". A thermal guard belongs here later,
-// reading tcGetSkinTemperatureMilliC in the 30-frame slot that already exists.
+// Why not the GPU too. It buys nothing, so it is all downside: 768 MHz GPU on
+// battery in handheld is refused by sys-clk (460.8 Erista, 614.4 Mariko, 768
+// only on a charger) and by every fork, and it is the only clock the community
+// consistently reports hitting a wall on. The CPU rail is the cheap one.
+//
+// Read that narrowly: this code never WRITES the GPU, it does not refuse to
+// coexist with a GPU the OS itself raised. Dock the console while HIGH is on
+// and apm sets 768 on its own, then the periodic check puts our 1785 back, and
+// the console sits at 1785 + 768 for as long as it stays docked. Measured
+// 2026-08-26 (`temp/test2_trace.log`, 16 heartbeats): skin FELL to 36.9-38.2C
+// there, against 41-42C handheld, because docked means mains power and a fan
+// that is no longer pinned at 60%. It is the coolest state in that whole
+// session. Docking must not silently cancel what the player asked for, so this
+// is deliberate, not an oversight.
+//
+// What is true about 1785, and what is not. Upstream sys-clk caps no CPU rate
+// in any profile. sys-clk-OC pins CPU_SAFE_MAX to exactly 1785 on Erista, in
+// its *safe* tier, in every profile including handheld-on-battery. But Horizon
+// OC does clamp it: hoc-clk/sysmodule/src/mgr/clock_manager.cpp:136-141 returns
+// 1581000000 for handheld-on-battery on Erista. 1581 is the Erista DFLL tbreak
+// (the same constant is used for SetDfllTunings in that file), and the same
+// project publishes "Max Safe Clocks on Battery: CPU 1785 MHz" in its own
+// guide, so the clamp is at least as likely to be about undervolt tuning above
+// the breakpoint as about 1785 being unsafe. Unexplained by any commit or
+// issue. Do not write "capped by nobody"; that was wrong.
+//
+// Nintendo ships 1785 in exactly two of its sixteen performance configurations,
+// 0x92220009 and 0x9222000A, and both pair it with the GPU throttled to 76.8.
+// (1785, 307.2) is in no Horizon profile at all. The honest reading, which is
+// still favourable: a high CPU with a floored GPU is a shipped, sanctioned
+// shape, and this adds 230 MHz on the cheap rail. It is not "inside a Nintendo
+// profile".
+//
+// What this does NOT protect against, and cannot. Handheld thermal response on
+// Horizon is not throttling, it is SLEEP: skin below 58C clears the timers,
+// 58-61C arms a 60 s timer, 61-63C arms a 10 s timer, 63C sleeps at once, and
+// SoC or PCB at 84C sleeps at once in either mode. The handheld fan table pins
+// at 60% from 53C. So the risk here is not damage, it is the console sleeping
+// mid-game and the player losing progress. Horizon IS the thermal guard, the
+// `tc` service has no clock command at all, and clkrst cannot defeat it.
+//
+// The longest raised-clock run ever captured by this project is 121 s, roughly
+// 7% of the way to a thermal plateau, with no sleep, no HOME and no dock in it.
+// "No drift observed" therefore means "not measured". flashnx_skin_temp_mc and
+// friends below exist to close that, and a guard belongs here only once the
+// curve is known: a threshold nobody has calibrated is a mechanism that can
+// oscillate and drop the clock for no reason.
 
 static bool     s_clk_inited   = false;
-static uint32_t s_clk_orig_cpu = 0;   // captured fresh on every raise
-static int      s_clk_mode     = 0;
-static uint32_t s_clk_drift    = 0;   // times the OS took the clock back
+static bool     s_psm_inited   = false;
+static bool     s_tc_inited    = false;
+static uint32_t s_clk_orig_cpu = 0;    // rate to come back to, latched on raise
+static int      s_clk_mode     = 0;    // the mode we WANT
+static bool     s_clk_applied  = true; // whether the hardware agrees with it
+static uint32_t s_clk_drift    = 0;    // times the OS took the clock back
+static bool     s_clk_hooked   = false;
+static AppletHookCookie s_clk_hook_cookie;
 
-// 1785 MHz: Nintendo's own boost clock, and an entry in the rate list the
-// sysmodule advertises. Never invent a frequency; clk_set refuses anything the
-// hardware does not list.
+// 1785 MHz: an entry in the rate list the sysmodule advertises. Never invent a
+// frequency; clk_set refuses anything the hardware does not list.
 static const uint32_t CPU_HIGH_HZ = 1785000000u;
+// The handheld and docked stock CPU rate, and the only sane fallback when the
+// rate we read at raise time is not something to come back to.
+static const uint32_t CPU_STOCK_HZ = 1020000000u;
 
 // One clkrst session for the whole process. `ruffle_cpu_clock_hz` used to carry
 // its own separate lazy init, which meant the diagnostic could go dark at the
@@ -521,15 +561,20 @@ static uint32_t clk_get(PcvModuleId mod) {
     return R_SUCCEEDED(rc) ? hz : 0;
 }
 
-// Set one module's rate, but only to a value the sysmodule itself lists as
-// possible.
+// Set one module's rate.
 //
-// Read that guarantee narrowly: the list is the raw DVFS table. It encodes no
-// power, thermal, dock or charger policy, and it contains rates every fork
-// blocks on battery. It stops us inventing a frequency the silicon does not
-// have; it is not a safety argument on its own. The safety argument here is
-// that we only ever touch the CPU, and only to 1785.
-static bool clk_set(PcvModuleId mod, uint32_t hz, const char* what, bool verbose = true) {
+// `require_listed` asks the sysmodule for its rate list first and refuses
+// anything absent from it. Read that guarantee narrowly: the list is the raw
+// DVFS table, it encodes no power, thermal, dock or charger policy, and it
+// contains rates every fork blocks on battery. It stops us inventing a
+// frequency the silicon does not have; it is not a safety argument on its own.
+//
+// It is asked for when RAISING and deliberately not when LOWERING. Applied to
+// the way down it points backwards: a transient failure of
+// clkrstGetPossibleClockRates, or a Range-typed list, would refuse the safe
+// direction and leave the console at 1785.
+static bool clk_set(PcvModuleId mod, uint32_t hz, const char* what,
+                    bool verbose = true, bool require_listed = true) {
     if (!clk_init_once()) return false;
     ClkrstSession s;
     if (R_FAILED(clkrstOpenSession(&s, mod, 3))) {
@@ -539,28 +584,30 @@ static bool clk_set(PcvModuleId mod, uint32_t hz, const char* what, bool verbose
         }
         return false;
     }
-    uint32_t rates[32] = {0};
-    PcvClockRatesListType type = PcvClockRatesListType_Discrete;
-    int32_t count = 0;
-    bool allowed = false;
-    if (R_SUCCEEDED(clkrstGetPossibleClockRates(&s, rates, 32, &type, &count))) {
-        // Only a discrete list can be searched entry by entry. A Range list
-        // means rates[] is {min, max} and the old code would have read it as
-        // two discrete values; refuse rather than guess.
-        if (type == PcvClockRatesListType_Discrete) {
-            for (int32_t i = 0; i < count && i < 32; ++i) {
-                if (rates[i] == hz) { allowed = true; break; }
+    if (require_listed) {
+        uint32_t rates[32] = {0};
+        PcvClockRatesListType type = PcvClockRatesListType_Discrete;
+        int32_t count = 0;
+        bool allowed = false;
+        if (R_SUCCEEDED(clkrstGetPossibleClockRates(&s, rates, 32, &type, &count))) {
+            // Only a discrete list can be searched entry by entry. A Range list
+            // means rates[] is {min, max} and reading it as two discrete values
+            // would be a guess; refuse instead.
+            if (type == PcvClockRatesListType_Discrete) {
+                for (int32_t i = 0; i < count && i < 32; ++i) {
+                    if (rates[i] == hz) { allowed = true; break; }
+                }
             }
         }
-    }
-    if (!allowed) {
-        if (verbose) {
-            std::printf("clocks: %s %u Hz not offered (list type %d, %d entries) — refused\n",
-                        what, (unsigned)hz, (int)type, (int)count);
-            std::fflush(stdout);
+        if (!allowed) {
+            if (verbose) {
+                std::printf("clocks: %s %u Hz not offered (list type %d, %d entries), refused\n",
+                            what, (unsigned)hz, (int)type, (int)count);
+                std::fflush(stdout);
+            }
+            clkrstCloseSession(&s);
+            return false;
         }
-        clkrstCloseSession(&s);
-        return false;
     }
     Result rc = clkrstSetClockRate(&s, hz);
     clkrstCloseSession(&s);
@@ -571,69 +618,359 @@ static bool clk_set(PcvModuleId mod, uint32_t hz, const char* what, bool verbose
     return R_SUCCEEDED(rc);
 }
 
-// 0 = leave the OS alone, 1 = CPU 1785 MHz.
-extern "C" void flashnx_set_clock_mode(int mode) {
+static bool psm_init_once(void) {
+    if (!s_psm_inited) {
+        if (R_FAILED(psmInitialize())) return false;
+        s_psm_inited = true;
+    }
+    return true;
+}
+
+// True when the pack is healthy enough to carry a raised clock.
+//
+// Frame this honestly: it is an anti-brownout guard, not a battery-health one.
+// These states fire once the pack has already sagged under load, and all of the
+// wear accumulates inside `Normal`. NoPerformanceBoost is literally documented
+// as "performance boost modes cannot be entered", so entering one against it is
+// the one case where this would be contradicting the OS outright.
+static bool batt_allows_boost(void) {
+    if (!psm_init_once()) return true;   // no reading is not a reason to refuse
+    PsmBatteryVoltageState st;
+    if (R_FAILED(psmGetBatteryVoltageState(&st))) return true;
+    return st == PsmBatteryVoltageState_Normal;
+}
+
+// Drive the hardware towards the mode we want.
+//
+// Every path goes through here so there is exactly one place that decides what
+// the CPU rate should be. `count_drift` is false for a deliberate mode change
+// and true for the periodic check, so the counter only ever means "the OS moved
+// it under us", never "we moved it ourselves".
+static void clk_drive(bool verbose, bool count_drift) {
+    if (!clk_init_once()) return;
+    uint32_t want = (s_clk_mode == 1) ? CPU_HIGH_HZ : s_clk_orig_cpu;
+    if (want == 0) { s_clk_applied = true; return; }   // nothing to restore to
+
+    uint32_t cur = clk_get(PcvModuleId_CpuBus);
+    if (cur == want) { s_clk_applied = true; return; }
+    if (count_drift && cur != 0 && s_clk_applied) s_clk_drift++;
+
+    const bool raising = (s_clk_mode == 1);
+    s_clk_applied = clk_set(PcvModuleId_CpuBus, want,
+                            raising ? "cpu" : "cpu(restore)", verbose,
+                            /*require_listed=*/raising);
+    if (!s_clk_applied && !raising && verbose) {
+        // The console is still raised while the rest of the program believes it
+        // is not. Say so, and leave the desired mode where it is so the
+        // periodic check keeps retrying the way down.
+        std::printf("clocks: RESTORE FAILED, cpu still at %u Hz, will retry\n", (unsigned)cur);
+        std::fflush(stdout);
+    }
+}
+
+// Called by the applet hook on dock, undock, performance-mode change and
+// resume. apm reprograms pcv on each of those, so both the current rate and the
+// rate latched to come back to are stale. Re-latch from the known stock rate
+// rather than from a read, because a read taken after our own re-assert would
+// hand back 1785 as the thing to restore.
+static void clk_reapply_after_transition(void) {
+    if (s_clk_orig_cpu == CPU_HIGH_HZ || s_clk_orig_cpu == 0) {
+        s_clk_orig_cpu = CPU_STOCK_HZ;
+    }
+    s_clk_applied = true;   // whatever the OS just did is not our drift
+    clk_drive(/*verbose=*/false, /*count_drift=*/false);
+}
+
+static void clk_applet_hook(AppletHookType type, void* param) {
+    (void)param;
+    switch (type) {
+        case AppletHookType_OnOperationMode:
+        case AppletHookType_OnPerformanceMode:
+        case AppletHookType_OnResume:
+            clk_reapply_after_transition();
+            break;
+        case AppletHookType_OnFocusState:
+            // Give the clock back while we are not the foreground app, and take
+            // it again on the way back. Three of the four homebrews that ship a
+            // CPU raise do exactly this. Horizon resets the rate on suspend
+            // anyway; this covers the window before that, and the case where we
+            // keep running without focus.
+            if (appletGetFocusState() == AppletFocusState_InFocus) {
+                clk_reapply_after_transition();
+            } else if (s_clk_mode == 1) {
+                uint32_t back = (s_clk_orig_cpu && s_clk_orig_cpu != CPU_HIGH_HZ)
+                              ? s_clk_orig_cpu : CPU_STOCK_HZ;
+                clk_set(PcvModuleId_CpuBus, back, "cpu(unfocus)", false,
+                        /*require_listed=*/false);
+                s_clk_applied = false;   // the periodic check will take it back
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+// 0 = leave the OS alone, 1 = CPU 1785 MHz. Returns the mode actually in force,
+// which is not always the one asked for: the caller is a menu row and must not
+// print HIGH while the console sits at 1020.
+extern "C" int flashnx_set_clock_mode(int mode) {
     if (!clk_init_once()) {
         std::printf("clocks: clkrst unavailable, staying on OS defaults\n");
         std::fflush(stdout);
-        return;
+        return 0;
+    }
+    if (!s_clk_hooked) {
+        appletHook(&s_clk_hook_cookie, clk_applet_hook, nullptr);
+        s_clk_hooked = true;
     }
     mode = (mode == 1) ? 1 : 0;
-    if (mode == s_clk_mode) return;
+    if (mode == s_clk_mode && s_clk_applied) return s_clk_mode;
 
     if (mode == 1) {
-        // Capture the rate to come back to at the moment of raising, never
-        // once per process. A single boot-time latch would freeze whatever apm
-        // happened to have raised at an uncontrolled instant and write it back
-        // for the rest of the session. Re-reading here also means a dock change
-        // between two raises cannot pin a stale value.
+        if (!batt_allows_boost()) {
+            std::printf("clocks: battery not in Normal voltage state, refusing to raise\n");
+            std::fflush(stdout);
+            return s_clk_mode;
+        }
+        // Latch the rate to come back to at the moment of raising, never once
+        // per process: a boot-time latch would freeze whatever apm happened to
+        // have raised at an uncontrolled instant and write it back for the rest
+        // of the session.
+        //
+        // But never latch 1785 itself. An aborted download leaves
+        // appletSetCpuBoostMode(FastLoad) stuck (see net.cpp), and latching its
+        // boosted rate would make "restore" write 1785 back and then stop
+        // watching, leaving the console raised in the library with nothing
+        // re-asserting anything.
+        // Clear any apm boost ONCE, here, on the way up, and READ THE RATE
+        // BEFORE clearing it.
+        //
+        // The order matters and used to be wrong. Clearing first and reading
+        // second made the `orig == CPU_HIGH_HZ` guard below unreachable by
+        // construction: apm had already been told Normal two lines earlier, so
+        // the read could never come back boosted, and a guard that cannot fire
+        // is not a guard. Reading first turns it into a permanent instrument
+        // that names what was actually held, at the cost of one extra IPC on a
+        // path taken once per game.
+        //
+        // What this is NOT for, despite what the old comment here and the one
+        // at main.cpp said: an aborted download. That was folklore with a
+        // traceable origin. Commit 9a61fbc (2026-06-14) added the FastLoad
+        // raise and its drop in the same diff; the 30-frame apm loop predates
+        // it (5060196, 2026-05-31) and re-asserted FastLoad, for apm's own
+        // forced revocation, nothing to do with transfers. 4da02ac
+        // (2026-07-30) flipped that line and rewrote the comment around it as
+        // "an aborted transfer COULD leave it raised", and the "could" became
+        // "can" in later copies with no observation behind it. Every exit from
+        // a transfer in net.cpp runs multi_cleanup, whose FIRST statement drops
+        // the boost, and Screen::DistantDownloading accepts only B.
+        //
+        // What it IS for: an apm/pcv race, and a resident overclocking
+        // sysmodule (sys-clk, Switch-OC-Suite), which is a real user setup.
+        uint32_t before_apm = clk_get(PcvModuleId_CpuBus);
+        appletSetCpuBoostMode(ApmCpuBoostMode_Normal);
+
         uint32_t orig = clk_get(PcvModuleId_CpuBus);
         if (orig == 0) {
             std::printf("clocks: cannot read the current CPU rate, staying on OS defaults\n");
             std::fflush(stdout);
-            return;
+            return s_clk_mode;
+        }
+        if (orig == CPU_HIGH_HZ) {
+            std::printf("clocks: cpu already at %u Hz (stuck boost?), will restore to %u\n",
+                        (unsigned)orig, (unsigned)CPU_STOCK_HZ);
+            orig = CPU_STOCK_HZ;
         }
         s_clk_orig_cpu = orig;
-        if (!clk_set(PcvModuleId_CpuBus, CPU_HIGH_HZ, "cpu")) return;
         s_clk_mode = 1;
-        std::printf("clocks: power mode HIGH (was %u Hz)\n", (unsigned)orig);
-    } else {
-        if (s_clk_orig_cpu != 0) {
-            clk_set(PcvModuleId_CpuBus, s_clk_orig_cpu, "cpu(restore)");
+        s_clk_applied = true;             // do not count this change as drift
+        clk_drive(/*verbose=*/true, /*count_drift=*/false);
+        if (!s_clk_applied) {             // the raise itself failed
+            s_clk_mode = 0;
+            std::printf("clocks: raise failed, staying NORMAL\n");
+        } else {
+            // Two values on purpose. They differ only when something else was
+            // holding the CPU up and apm let go of it synchronously, which is
+            // the observation the old single-value line could never produce.
+            std::printf("clocks: power mode HIGH (was %u Hz, %u before apm purge)\n",
+                        (unsigned)orig, (unsigned)before_apm);
         }
+    } else {
         s_clk_mode = 0;
-        std::printf("clocks: power mode NORMAL\n");
+        s_clk_applied = true;
+        clk_drive(/*verbose=*/true, /*count_drift=*/false);
+        // s_clk_applied is now the truth about the hardware. A failed restore
+        // deliberately does NOT flip the desired mode back to 1: NORMAL is what
+        // is wanted, and leaving it there is what makes the periodic check keep
+        // retrying the way down instead of re-raising.
+        std::printf("clocks: power mode NORMAL%s\n",
+                    s_clk_applied ? "" : " (WRITE FAILED, still raised)");
     }
     std::fflush(stdout);
+    return s_clk_mode;
 }
 
-extern "C" int flashnx_clock_mode(void) { return s_clk_mode; }
+// The mode actually in force. Reads as NORMAL whenever the hardware does not
+// agree with what was asked for, so a menu row can never claim a raise that did
+// not happen.
+extern "C" int flashnx_clock_mode(void) {
+    return (s_clk_mode == 1 && s_clk_applied) ? 1 : 0;
+}
 
 // Times the OS took the clock back from under us, published in the heartbeat.
-// Until this exists the revocation question cannot be answered: the re-assert
-// is deliberately silent, so a revoke followed by a repair leaves no trace at
-// all. apm force-revoked CpuBoostMode(FastLoad) after 25-30 s of sustained load
-// in 2026-05, whatever the cadence, so the same must be assumed of clkrst until
-// this counter says otherwise.
+// Until this existed the revocation question could not be answered: the
+// re-assert is deliberately silent, so a revoke followed by a repair leaves no
+// trace at all. apm force-revoked CpuBoostMode(FastLoad) after 25-30 s of
+// sustained load in 2026-05, so the same had to be assumed of clkrst until this
+// counter said otherwise. It has since read 0 over 121 s and 115 s of
+// continuous hold, with no sleep, no HOME and no dock in either window.
 extern "C" uint32_t flashnx_clock_drift(void) { return s_clk_drift; }
 
-// Silent, cheap re-assert for the in-game loop. Waking from sleep or returning
-// from HOME resets the rate, so a raised clock has to be re-applied. Nothing
-// here prints, and a write only happens when the rate has actually drifted,
-// because this runs inside the capture it is meant to serve.
-extern "C" void flashnx_clocks_reassert(void) {
-    if (s_clk_mode != 1) return;
-    if (clk_get(PcvModuleId_CpuBus) != CPU_HIGH_HZ) {
-        s_clk_drift++;
-        clk_set(PcvModuleId_CpuBus, CPU_HIGH_HZ, "cpu", false);
+// Silent, cheap periodic check for the in-game loop. Waking from sleep or
+// returning from HOME resets the rate, so a raised clock has to be re-applied,
+// and a failed restore has to be retried. Nothing here prints, and a write only
+// happens when the rate actually disagrees, because this runs inside the
+// capture it is meant to serve.
+//
+// Confirmed on hardware 2026-08-26 (`temp/test2_trace.log`), after four
+// sessions in which `drift` never left 0 and this looked like dead code. It is
+// not: returning from HOME took the rate back (drift 0 -> 1, a 26 s window
+// where the others are 3.8 s) and so did waking from sleep (1 -> 2, a 200 s
+// window). Both were repaired inside one check.
+//
+// What does NOT take it: a dock transition on its own. The undock, seen alone
+// and cleanly, produced no drift at all, which fits, since CpuBus is 1020 in
+// both the handheld and the docked profile and apm has nothing to rewrite. It
+// is suspension that costs the rate, not the dock.
+//
+// Note the cadence is 30 frames, not 0.5 s: at the 25-27 fps these games run at
+// it is 1.1-1.2 s, and 2.6 s in the worst heartbeat of the corpus.
+// Returns 1 while it is managing the rate (a raise to hold, or a restore that
+// failed and has to be retried), 0 when it is idle. The caller uses that to
+// decide whether apm may be told "Normal": telling apm anything while clkrst
+// holds a rate makes both undecidable.
+extern "C" int flashnx_clocks_reassert(void) {
+    // Not the foreground app: leave the clock alone. The focus hook has just
+    // handed it back, and without this the two would fight, the hook lowering
+    // it and this raising it again a second later for as long as the HOME menu
+    // stayed open. Still reports 1 so apm is not poked either.
+    if (appletGetFocusState() != AppletFocusState_InFocus) {
+        return (s_clk_mode == 1 || !s_clk_applied) ? 1 : 0;
+    }
+    if (s_clk_mode == 1 && !batt_allows_boost()) {
+        std::printf("clocks: battery left Normal voltage state, dropping to NORMAL\n");
+        std::fflush(stdout);
+        flashnx_set_clock_mode(0);
+        return s_clk_applied ? 0 : 1;
+    }
+    if (s_clk_mode == 0 && s_clk_applied) return 0;   // nothing to hold
+    clk_drive(/*verbose=*/false, /*count_drift=*/true);
+    // A restore that has come through is the end of it: nothing left to hold.
+    return (s_clk_mode == 1 || !s_clk_applied) ? 1 : 0;
+}
+
+// Put the console back where we found it, on the way out of a game, before the
+// .nro exits, and from the crash paths.
+//
+// The crash paths matter and used to be waved away here with "Horizon resets
+// clkrst state when the process dies". That is UNVERIFIED, and the mechanism it
+// leans on is contradicted by our own instrument: clk_set closes its session
+// immediately and every later read opens a fresh one and still sees 1785, so
+// closing a session plainly does not hand the rate back. What actually restores
+// on a stock console is apm reprogramming pcv at its next performance
+// transition, which is precisely why sys-clk has to run resident and reapply on
+// a timer. Until someone forces a panic and reads the clock from another
+// homebrew, assume nothing, and call this from the handlers.
+extern "C" void flashnx_clocks_restore(void) {
+    // apm FIRST, and unconditionally. flashnx_set_clock_mode(0) early-returns
+    // when the mode already reads NORMAL and is applied, so on that path it
+    // touches nothing at all. That left a real hole neither half of the audit
+    // saw on its own, because it sits exactly between them: die during a
+    // download and FastLoad stays raised whichever net runs, including the one
+    // validated on hardware. net_shutdown (net.cpp) is the function that would
+    // have dropped it, and it has no caller anywhere in the project.
+    appletSetCpuBoostMode(ApmCpuBoostMode_Normal);
+    flashnx_set_clock_mode(0);
+}
+
+// Last thing this process runs, on EVERY exit.
+//
+// libnx calls the weak `userAppExit` from `__appExit` before it tears anything
+// down, so sm and pcv are still alive here. That matters because it is the only
+// hook that covers the death this app actually dies of: a Rust allocation
+// failure does not panic. The language calls handle_alloc_error, which reaches
+// default_alloc_error_hook, which runs NO user code, then abort(), whose
+// raise() is a no-op on Switch (ENOSYS), then _exit -> __libnx_exit ->
+// svcExitProcess. No CPU exception, so __libnx_exception_handler never fires;
+// no unwind, so the Rust panic hook never fires. Five deaths of exactly this
+// shape are already in this project's own logs (temp/slab2.txt, slab.txt,
+// maj3.txt, ab.txt, region.txt), and the slab2 one was running overclocked.
+//
+// No printf: on the OOM path the heap is gone. Raw clkrst rather than
+// flashnx_set_clock_mode, which allocates nothing but does log.
+//
+// What it does NOT cover: svcBreak and diagAbortWithResult. Nothing can, and
+// libnx uses them internally, so a libnx failure under memory pressure still
+// dies with no exit path at all.
+extern "C" void userAppExit(void) {
+    appletSetCpuBoostMode(ApmCpuBoostMode_Normal);
+    if (s_clk_orig_cpu != 0 && s_clk_orig_cpu != CPU_HIGH_HZ) {
+        ClkrstSession s;
+        if (R_SUCCEEDED(clkrstOpenSession(&s, PcvModuleId_CpuBus, 3))) {
+            clkrstSetClockRate(&s, s_clk_orig_cpu);
+            clkrstCloseSession(&s);
+        }
     }
 }
 
-// Put the console back where we found it, on the way out of a game and again
-// before the .nro exits. A crash mid-session is the only way to leave a raised
-// clock behind, and Horizon resets clkrst state when the process dies.
-extern "C" void flashnx_clocks_restore(void) {
-    flashnx_set_clock_mode(0);
+// ─── Thermal and battery instrumentation ──────────────────────────────────
+//
+// Read-only, published in the heartbeat. This is the whole point of shipping
+// the setting and the probe in the same build: the 30-minute soak that nobody
+// has run yet is what decides whether a guard is needed and where its threshold
+// goes.
+//
+// Compare skin against the numbers the OS itself uses: 53000 (fan pinned at
+// 60%), 58000 (60 s sleep timer), 61000 (10 s timer), 63000 (immediate sleep).
+// tcGetSkinTemperatureMilliC is guarded only by hosversionBefore(5,0,0) and has
+// no removal bound, unlike tsGetTemperature (dead >= 17.0.0) and
+// tsGetTemperatureMilliC (dead >= 14.0.0), which is why neither is used here.
+//
+// Never touch tcDisableFanControl. It is the one function in this whole family
+// that libnx bothers to put a @warning on, and it is the only way an app can
+// actually damage the console.
+extern "C" int32_t flashnx_skin_temp_mc(void) {
+    if (!s_tc_inited) {
+        if (R_FAILED(tcInitialize())) return 0;
+        s_tc_inited = true;
+    }
+    s32 mc = 0;
+    return R_SUCCEEDED(tcGetSkinTemperatureMilliC(&mc)) ? (int32_t)mc : 0;
+}
+
+// Battery cell temperature in milli-C. The second axis, and the one that
+// matters for the pack rather than for the sleep decision.
+extern "C" int32_t flashnx_batt_temp_mc(void) {
+    if (!psm_init_once()) return 0;
+    PsmBatteryChargeInfoFields f;
+    if (R_FAILED(psmGetBatteryChargeInfoFields(&f))) return 0;
+    return (int32_t)f.temperature_celcius;
+}
+
+// Charge in per-mille, i.e. 1000 = full.
+//
+// This is the only route to a power figure: psm exposes no instantaneous
+// current (PsmBatteryChargeInfoFields carries a voltage and three current
+// *limits*), and max17050PowerNow is an I2C helper inside a sysmodule with its
+// own NPDM, out of reach of an NRO. Two readings twenty minutes apart in each
+// mode on the same SWF give %/h, and with ~16 Wh nominal, average watts.
+extern "C" int32_t flashnx_batt_permille(void) {
+    if (!psm_init_once()) return 0;
+    double pct = 0.0;
+    if (R_FAILED(psmGetRawBatteryChargePercentage(&pct))) return 0;
+    if (pct < 0.0) pct = 0.0;
+    if (pct > 100.0) pct = 100.0;
+    return (int32_t)(pct * 10.0 + 0.5);
 }
 
 // 1 when running with the SMALL applet memory pool (~448-560 MB), 0 when we

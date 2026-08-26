@@ -55,11 +55,16 @@ extern "C" void ruffle_dump_stage_children(void);
 extern "C" void ruffle_dump_root_vars(void);
 extern "C" void ruffle_alloc_force_off(void);
 
-// Clock experiment (2026-08-24), measurement only — see ruffle_bridge.cpp.
-// Default is mode 0, which touches nothing; ZL+ZR in the pause menu cycles.
-extern "C" void flashnx_set_clock_mode(int mode);
+// CPU power mode — see ruffle_bridge.cpp for what it does and what the
+// evidence for it is. Default is mode 0, which touches nothing. The value is
+// per game, applied on the Rust side at load, and the pause menu's OVERCLOCK
+// row toggles it. Setters report the mode ACTUALLY in force, which is not
+// always the one asked for.
+extern "C" int  flashnx_set_clock_mode(int mode);
 extern "C" int  flashnx_clock_mode(void);
-extern "C" void flashnx_clocks_reassert(void);
+extern "C" int  flashnx_clocks_reassert(void);
+extern "C" uint32_t ruffle_cpu_clock_hz(void);
+extern "C" uint32_t ruffle_gpu_clock_hz(void);
 extern "C" void flashnx_clocks_restore(void);
 
 // True when `sdmc:/switch/FlashNX/dumpvars.on` exists: the pause button then
@@ -89,6 +94,11 @@ extern "C" void ruffle_display_mode_cycle(void);
 // Pause-menu FILTRE: next screen filter for the game being played. Persists per
 // game; the next redraw picks it up, so the paused frame previews it.
 extern "C" void ruffle_screen_filter_cycle(void);
+// Pause-menu OVERCLOCK: on <-> off for the game being played. Persists
+// per game, and persists what the hardware ACCEPTED rather than what was asked
+// for, so a refused raise cannot leave a game marked ON while it runs at
+// 1020 MHz.
+extern "C" void ruffle_power_mode_cycle(void);
 extern "C" void ruffle_rotation_cycle(void);
 // Free zoom + framing (issue #101). Unlike the three rows above, ZOOM does not
 // cycle a value on `A`: it opens a mode where the panel gives way to the picture
@@ -409,9 +419,16 @@ enum MenuAction {
                             // three preview on the frozen frame behind the panel
                             // and all three answer the same question, so they sit
                             // together instead of taking three of seven rows.
-    MENU_RESTART      = 3,
-    MENU_QUIT         = 4,  // VITESSE moved INTO the TOUCHES sub-menu
-    MENU_COUNT        = 5,
+    MENU_POWER        = 3,  // OVERCLOCK ON / OFF, toggled in place on the row.
+                            // Top level and NOT inside ECRAN: every ECRAN row
+                            // previews on the frozen frame behind the panel and
+                            // this one cannot, so buried a level down it would
+                            // be undiscoverable. It is also the largest lever
+                            // the app has, roughly 1.5x on the games that are
+                            // interpreter-bound.
+    MENU_RESTART      = 4,
+    MENU_QUIT         = 5,  // VITESSE moved INTO the TOUCHES sub-menu
+    MENU_COUNT        = 6,
 };
 
 // Rows of the ECRAN sub-panel. ORDER MUST MATCH `SCREEN_ITEMS` in
@@ -710,8 +727,18 @@ static void worker_entry(void* arg) {
     // made a system-initiated exit indistinguishable from a crash.
     bool lib_active = true;
     bool applet_ok = true;
+    // Same 30-frame slot as the in-game loop, for the one case that can reach
+    // here with the clock still raised: a restore that failed on the way out of
+    // a game. Without this the library is the one place a raised clock could
+    // sit forever with nothing coming back to finish the job, and the library
+    // is exactly where a console is left sitting.
+    int lib_clock_check = 0;
     while ((lib_active = (ruffle_library_active() != 0))
            && (applet_ok = appletMainLoop())) {
+        if (++lib_clock_check >= 30) {
+            lib_clock_check = 0;
+            flashnx_clocks_reassert();
+        }
         padUpdate(&pad);
         const u64 kDownLib = padGetButtonsDown(&pad);
         const u64 kUpLib   = padGetButtonsUp(&pad);
@@ -914,22 +941,17 @@ static void worker_entry(void* arg) {
     // inner loop but with back_to_library=false → full .nro exit.
     bool back_to_library = false;
 
-    // Power mode, until it earns a REGLAGES row (which needs nine languages).
+    // Power mode is applied on the Rust side, from this game's own preference,
+    // next to its screen filter (`ruffle_init`). Nothing to do here.
     //
-    // It used to be ZL+ZR in the pause menu, and that was a real hazard: the
-    // neighbouring SCREEN panel binds zoom to ZR|R and ZL|L, so a player who
-    // had learned "the triggers zoom" could raise the console's clock without
-    // ever knowing it happened. A marker file cannot be pressed by accident.
-    //
-    // HIGH raises the CPU to 1785 MHz and leaves the GPU exactly where the OS
-    // put it. See the measurement in ruffle_bridge.cpp for why the GPU half of
-    // the old FULL mode was dropped: it was worth -1.7% of framerate.
-    {
-        struct stat st;
-        if (::stat("sdmc:/switch/FlashNX/power.high", &st) == 0) {
-            flashnx_set_clock_mode(1);
-        }
-    }
+    // There is deliberately no marker file and no button combination. ZL+ZR
+    // used to do it and that was a real hazard: the neighbouring SCREEN panel
+    // binds zoom to ZR|R and ZL|L, so a player who had learned "the triggers
+    // zoom" could raise the console's clock without ever knowing it happened.
+    // A `power.high` marker replaced it and was no better in the end, just
+    // quieter: a file left on the card silently forces every game to a raised
+    // clock, with nothing on screen ever saying so. A labelled row, reached
+    // with UP/DOWN and confirmed with A, is the whole point.
 
     // Hold-to-repeat state for the in-game TOUCHES editor (16 entries
     // scrollable list — benefits a lot from D-pad auto-repeat).
@@ -957,18 +979,29 @@ static void worker_entry(void* arg) {
 
         if (++boost_reassert >= 30) {
             boost_reassert = 0;
-            if (flashnx_clock_mode() == 0) {
+            // The clock code gets its slot unconditionally and answers whether
+            // it is holding anything: a raised rate to keep, a failed restore
+            // to retry, or nothing at all. Asking it first is what closes the
+            // hole where a restore that failed reported NORMAL, so nothing ever
+            // came back to finish it.
+            //
+            // apm is only told "Normal" when clkrst is idle. Do NOT poke apm
+            // while a clkrst rate is held: these two ran one line apart, thirty
+            // times a second, for a whole session, and apm being told "Normal"
+            // while clkrst held 1785 MHz made the revocation question
+            // undecidable, because a revoke followed by our own repair leaves
+            // no trace either way.
+            //
+            // A raised clock has to be re-applied on some cadence anyway:
+            // waking from sleep or returning from HOME resets it, which is the
+            // known failure mode of every homebrew that pins clocks. Note the
+            // cadence is 30 FRAMES, not half a second: at the 25-27 fps these
+            // games run at it is 1.1-1.2 s.
+            if (flashnx_clocks_reassert() == 0) {
+                // Nothing pinned, so the self-healing apm re-assert is back on:
+                // an aborted download can leave FastLoad raised (net.cpp), and
+                // FastLoad additionally throttles the GPU to its minimum.
                 appletSetCpuBoostMode(ApmCpuBoostMode_Normal);
-            } else {
-                // Do NOT poke apm while we are holding a clkrst rate. These two
-                // ran one line apart, thirty times a second, for the whole
-                // session: apm being told "Normal" while clkrst held 1785 MHz
-                // made the revocation question undecidable, because a revoke
-                // followed by our own repair leaves no trace either way.
-                // A raised clock has to be re-applied on some cadence anyway:
-                // waking from sleep or returning from HOME resets it, which is
-                // the known failure mode of every homebrew that pins clocks.
-                flashnx_clocks_reassert();
             }
         }
 
@@ -1264,6 +1297,11 @@ static void worker_entry(void* arg) {
             if (kDown & (HidNpadButton_Minus | HidNpadButton_B)) {
                 // Scale the menu out (drained at the top of this branch over the
                 // next frames), then resume.
+                // "dismissed", not "cancelled": B and `-` resume the game, they
+                // do not undo whatever the player just changed on the row they
+                // happen to be standing on.
+                std::printf("menu: pause CLOSE (row=%d, dismissed)\n", menu_selection);
+                std::fflush(stdout);
                 ruffle_menu_close_begin();
                 menu_closing = true;
                 continue;
@@ -1271,6 +1309,8 @@ static void worker_entry(void* arg) {
             if (kDown & HidNpadButton_A) {
                 switch (menu_selection) {
                 case MENU_RESUME:
+                    std::printf("menu: pause CLOSE (REPRENDRE)\n");
+                    std::fflush(stdout);
                     ruffle_menu_close_begin();
                     menu_closing = true;
                     continue;
@@ -1286,6 +1326,12 @@ static void worker_entry(void* arg) {
                     screen_menu = true;
                     screen_selection = SCREEN_DISPLAY;
                     zoom_mode = false;
+                    continue;
+                case MENU_POWER:
+                    // Toggles in place, like the ECRAN rows: the panel stays
+                    // open and the row redraws with the mode actually in force,
+                    // which is not always the one asked for.
+                    ruffle_power_mode_cycle();
                     continue;
                 case MENU_RESTART: {
                     std::printf("menu: REDEMARRER → ruffle_restart()\n");
@@ -1356,6 +1402,13 @@ static void worker_entry(void* arg) {
                     ruffle_handle_key(BINDINGS_P2_KEYS[i], false);
                 }
             }
+            // Leave a trace. Until this line the pause modal was INVISIBLE in a
+            // log: unless the player happened to change the power mode, nothing
+            // said the game had even been paused. That turned "did the modal
+            // break my game?" into an argument from absence, which is the same
+            // shape of blind spot `drift=` was added to close.
+            std::printf("menu: pause OPEN (frame paused)\n");
+            std::fflush(stdout);
             continue;
         }
 
@@ -1700,6 +1753,32 @@ int main(int argc, char** argv) {
             std::fflush(stdout);
         }
     }
+    // The CPU rate we INHERITED, printed before anything here touches it.
+    //
+    // This is the instrument for the one claim in the clock code still written
+    // as a fact without being one: that Horizon hands the rate back when a
+    // process dies. Crash the app while the overclock is on, relaunch, and read
+    // this line. 1785 means the rate outlived the process and a crash leaves the
+    // console raised; 1020 means something put it back, though not necessarily
+    // process death, since apm reprograms pcv on its own transitions too.
+    //
+    // Useful beyond that test: it also catches a stuck apm boost left behind by
+    // an aborted download, which is otherwise invisible until a game starts.
+    // Through ruffle_log_cstr, NOT printf: only lines going through that funnel
+    // are mirrored into the SD trace, and a probe that reaches nxlink but not
+    // the card is useless in exactly the case it exists for, a relaunch after a
+    // crash with no PC attached. Cost one run of the test to find out.
+    {
+        char line[64];
+        // The GPU is what makes this line self-diagnosing rather than just a
+        // number. 1785 + 76 names apm, whose FastLoad throttles the GPU to its
+        // minimum; 1785 + 307 names clkrst, which never touches the GPU. Read
+        // alone, the CPU rate cannot tell those two apart.
+        std::snprintf(line, sizeof(line), "boot: cpu clock at entry = %u Hz, gpu %u Hz\n",
+                      ruffle_cpu_clock_hz(), ruffle_gpu_clock_hz());
+        ruffle_log_cstr(line);
+    }
+
     romfsInit();
     cursor_speed_load(); // restore the saved cursor-speed preset (REGLAGES)
 

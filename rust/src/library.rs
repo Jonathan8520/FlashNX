@@ -4098,7 +4098,7 @@ fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
 /// set from its own pause menu. A game with its own sidecar keeps its value, and
 /// keeps it even if the default changes later.
 fn handle_settings_prefs_input(s: &mut State, button: &str, mut selection: usize) {
-    const LAST: usize = 5;
+    const LAST: usize = 6;
     match button {
         "Up" | "StickLUp" => {
             selection = if selection == 0 { LAST } else { selection - 1 };
@@ -4137,6 +4137,15 @@ fn handle_settings_prefs_input(s: &mut State, button: &str, mut selection: usize
                     let next = (crate::loc::default_screen_filter() + 1)
                         % keymap::SCREEN_FILTER_COUNT;
                     crate::loc::set_default_screen_filter(next);
+                    crate::loc::save_current();
+                }
+                5 => {
+                    // The DEFAULT only. No clock is touched from here: there is
+                    // no game running, and a raise outside gameplay would be
+                    // spent entirely on drawing a menu.
+                    let next = (crate::loc::default_power_mode() + 1)
+                        % keymap::POWER_MODE_COUNT;
+                    crate::loc::set_default_power_mode(next);
                     crate::loc::save_current();
                 }
                 _ => {
@@ -8876,6 +8885,11 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 lc.set_screen_filter,
                 crate::loc::screen_filter_label(crate::loc::default_screen_filter()),
             );
+            let power_label = std::format!(
+                "{}: {}",
+                lc.set_overclock,
+                crate::loc::overclock_label(crate::loc::default_power_mode()),
+            );
             let m = unsafe { ruffle_cursor_speed_mult_x10() };
             let cursor_label = std::format!("{}: x{}.{}", lc.set_cursor_speed, m / 10, m % 10);
             let labels = [
@@ -8884,6 +8898,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 rotation_label.as_str(),
                 zoom_label.as_str(),
                 filter_label.as_str(),
+                power_label.as_str(),
                 cursor_label.as_str(),
             ];
             backend.draw_library_dim_backdrop();
