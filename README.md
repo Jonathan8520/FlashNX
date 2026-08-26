@@ -101,7 +101,7 @@ Plug in a second controller and you get **two players**, each with their own bin
 **In game**
 
 - **Automatic saves** on the SD card for games that save (SharedObject `.sol`).
-- **Pause menu** (**−**): resume, controls, screen, restart, quit. The SCREEN panel holds how the game uses the display (fit, stretch, fill), a quarter-turn rotation, a scanline or CRT filter, a free zoom, and a per-game overclock. Each choice is kept for that game alone.
+- **Pause menu** (**−**): resume, controls and cursor, screen, overclock, restart, quit. The SCREEN panel holds how the game uses the display (fit, stretch, fill), a quarter-turn rotation, a free zoom and a scanline or CRT filter. Every one of these, overclock included, is kept for that game alone, and SETTINGS > GAME DEFAULTS sets what a game you have never touched will use.
 - **Multi-file games**: some games load companion `.swf` files. A Flashpoint download fetches them automatically into a `<game>.files/` folder; for a game added another way, put them there yourself.
 - **Games packaged as a web page**: a few Flashpoint entries ship an `index.html` instead of a plain `.swf`. FlashNX reads its configuration and runs the game, which covers Disney/Yamago minigames (*Agent P Strikes Back*, *Tron Uprising*) and titles such as *Dragon City*.
 
@@ -118,7 +118,7 @@ How fast a game runs varies a lot, and can vary between scenes of the same game:
 
 ## Known limitations
 
-- **Heavy games**: frame-rate drops come from **Ruffle's AVM1/AVM2 interpreter** (CPU-bound, no JIT), not from our rendering. Out-of-app lever: CPU overclock (sys-clk).
+- **Heavy games**: frame-rate drops come from **Ruffle's AVM1/AVM2 interpreter** (CPU-bound, no JIT), not from our rendering. The pause menu has an OVERCLOCK row for that, no external tool needed. It is worth 1.41x on average and nothing at all on a game that was never CPU-bound, which is why it is off by default and set per game.
 - **AS3 compatibility**: partial, inherited from Ruffle (see [Ruffle compatibility](https://ruffle.rs/compatibility)). AS3 games show a badge in the library.
 - **No savestate or rewind**: Ruffle does not expose a snapshot of the execution state. Games' native `.sol` saves do work.
 - **Audio**: occasional light crackle on *very* dense scenes.
