@@ -23,6 +23,7 @@ static double boot_ms_since(uint64_t t) {
 extern "C" void swf_picker_run(void);
 
 // Phase 3.4 — library boot screen FFI (rust/src/library.rs).
+extern "C" void ruffle_loc_init(void);
 extern "C" int  ruffle_library_init(void);
 extern "C" int  ruffle_library_add_path(const char* path, unsigned long long mtime);
 extern "C" void ruffle_library_open(void);
@@ -694,6 +695,22 @@ static void worker_entry(void* arg) {
     // library (dropped before Ruffle's own gets built; ~96 MB GPU arena
     // per instance, never alive at the same time). On each iteration of
     // the outer loop a fresh library renderer + banner upload happens.
+    // Global defaults, on BOTH paths.
+    //
+    // `loc::init` used to run only inside `ruffle_library_init` below, i.e.
+    // only when the library phase happens. A forwarder launch skips that whole
+    // block, so a game started from a HOME-menu shortcut ran with none of the
+    // player's REGLAGES defaults: not just the UI language, but the display
+    // mode, the rotation, the zoom, the screen filter and the overclock, each
+    // falling back to 0. Per-game values still worked, because those come from
+    // the game's own `.prefs`; it was the fallback underneath them that was
+    // missing, which is why it looked like nothing more than "the menus are in
+    // English". Reported from a Sphaira shortcut on 2026-08-26.
+    //
+    // Costs one small file read, and the library path re-reads it a moment
+    // later, which is harmless.
+    ruffle_loc_init();
+
     if (!forwarder_swf) {
     g_in_game = false;
     // The library / RÉGLAGES cursor speed is the GLOBAL default — re-read it on

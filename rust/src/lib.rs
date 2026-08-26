@@ -2447,6 +2447,25 @@ pub extern "C" fn ruffle_menu_touch(x: f32, y: f32, pressed: c_int) {
 
 static LIBRARY_RENDERER: Mutex<Option<SwitchRenderBackend>> = Mutex::new(None);
 
+/// Read `settings.json` and nothing else.
+///
+/// Exists for the forwarder launch path. `ruffle_library_init` calls `loc::init`
+/// on its way up, but a forwarder launch skips the whole library phase
+/// (`cpp/src/main.cpp`, the `if (!forwarder_swf)` block), so it never ran. That
+/// is not only the UI language: `loc::init` is where EVERY global default comes
+/// from, so a game started from a HOME-menu shortcut fell back to 0 for the
+/// display mode, the rotation, the zoom, the screen filter and the overclock,
+/// ignoring whatever the player had set in REGLAGES. Per-game values were fine,
+/// because those are read from the game's own `.prefs`; it was the fallback
+/// underneath them that was missing.
+///
+/// Cheap and idempotent: one small file read, storing into atomics. The library
+/// path calls `loc::init` again a moment later and that is harmless.
+#[no_mangle]
+pub extern "C" fn ruffle_loc_init() {
+    loc::init();
+}
+
 #[no_mangle]
 pub extern "C" fn ruffle_library_init() -> c_int {
     // The launcher NEVER turns, whatever the game the player just left was set
