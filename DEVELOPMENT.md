@@ -125,7 +125,7 @@ The Makefile has `libruffle_switch.a` as an explicit dependency of the `.elf`, s
 
 ## Testing on Switch
 
-1. Copy your `.swf` files to the SD card in **`sdmc:/flashnx/`** (or `sdmc:/switch/flashnx/`). Any file name works. The legacy `sdmc:/ruffle/` is also scanned for backward-compat. At boot the `.nro` opens the **FlashNX library**: list of detected `.swf` files with banner + per-game color chip.
+1. Copy your `.swf` files to the SD card in **`sdmc:/flashnx/`** (or wherever you pointed SETTINGS > GAMES FOLDER). Any file name works. The legacy `sdmc:/ruffle/` is also scanned for backward-compat. At boot the `.nro` opens the **FlashNX library**: list of detected `.swf` files with banner + per-game color chip.
    - **LOCAL inputs**: up/down = navigate (D-pad **or left stick or right stick** — **hold to scroll fast**), **A** = PLAY, **X** = OPTIONS (TOUCHES + RENAME + BACK), **Y** = toggle to REMOTE mode (archive.org import), **−** = quit the `.nro`.
    - **REMOTE mode**: **A** = enter an archive.org URL via the soft keyboard (`swkbd`); on DistantIdle the history is shown, **L/R** cycle through it, **ZR** = directly fetch the displayed URL without reopening the keyboard. On the remote file list, an `OK` badge next to the ones already on SD, **A** starts the download (silent no-op on the `OK` ones). Live progress bar, **B** cancels in progress.
    - **Empty state**: if the SD card is empty, the library shows "NO GAME" + instructions on where to put the `.swf` files. **Y** lets you go to REMOTE to download.
@@ -246,7 +246,7 @@ For playing common AS1/AS2 SWFs, it's functionally near-complete. Honest invento
 | **`BitmapData.draw()`**: clear-transparent (no composite over the existing content), temp texture per call (no pool) | OK for the tile-engine pattern (SMWF), not faithful for all BitmapData uses. |
 | **Blend modes** Alpha / Erase (need layer tracking); nested blend (non-recursive offscreen FBO) | Trivial (Add/Screen…) and Complex (Multiply/Overlay…) are done. |
 | **Filter perf in menu transitions** (N FBO passes/frame) | Hiccups on heavily filtered menus (Mario 63). Bounded by budget/frame + pool TTL. Real fix = batching the passes. |
-| **Context3D / Stage3D** (AS3) | Not implemented (stubs). Near-zero for 2D AS1/2 Flash. |
+| **Context3D / Stage3D** (AS3) | Implemented since v1.8.0: AGAL shaders are translated to GLSL ES and run on the GL backend. |
 | **PixelBender** (AS3 `Shader` / `ShaderFilter` / `ShaderJob`) | No GL execution (wgpu-only upstream). Degrades gracefully: `compile_pixelbender_shader` returns a parsed-shader handle so AVM2 construction succeeds, the renderer skips `Filter::ShaderFilter`, `ShaderJob` no-ops (patch 0002). The effect is absent but the game runs (e.g. The Terminal). |
 
 ### Ruffle core (out of our scope)

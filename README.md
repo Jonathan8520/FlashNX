@@ -86,7 +86,9 @@ Plug in a second controller and you get **two players**, each with their own bin
 
 **Your library**
 
-- **Cover art**: a grid of covers, 5 per row. Drop a `<game>.png` or `.jpg` next to the `.swf`, or fetch artwork from the Flashpoint Archive in a game's options and pick from thumbnails. Games without one get a generated tile.
+- **Four ways to lay it out**: a grid of covers, a list with the selected cover shown whole beside it, a strip, or a shelf. Pick one in SETTINGS and it is remembered.
+- **Folders**: file games into shelves with ZL and ZR. A shelf is a label, not a directory, so filing a game leaves its file where it is and one game can be on several shelves at once. Folders you made yourself on the card show up as shelves too.
+- **Cover art**: Drop a `<game>.png` or `.jpg` next to the `.swf`, or fetch artwork from the Flashpoint Archive in a game's options and pick from thumbnails. Games without one get a generated tile.
 - **Favorites** pinned to the top, **playtime** tracked per game, and sorting by name, date added, last played, most played or size.
 - **Rename** a game for display without touching the file, and deleting one cleans up everything it left on the card.
 - **Touch**: in handheld, drag the gallery to scroll, tap a game to select it, tap again to launch.
@@ -99,7 +101,7 @@ Plug in a second controller and you get **two players**, each with their own bin
 **In game**
 
 - **Automatic saves** on the SD card for games that save (SharedObject `.sol`).
-- **Pause menu** (**−**): resume, controls, restart, quit.
+- **Pause menu** (**−**): resume, controls, screen, restart, quit. The SCREEN panel holds how the game uses the display (fit, stretch, fill), a quarter-turn rotation, a scanline or CRT filter, a free zoom, and a per-game overclock. Each choice is kept for that game alone.
 - **Multi-file games**: some games load companion `.swf` files. A Flashpoint download fetches them automatically into a `<game>.files/` folder; for a game added another way, put them there yourself.
 - **Games packaged as a web page**: a few Flashpoint entries ship an `index.html` instead of a plain `.swf`. FlashNX reads its configuration and runs the game, which covers Disney/Yamago minigames (*Agent P Strikes Back*, *Tron Uprising*) and titles such as *Dragon City*.
 
