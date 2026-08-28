@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "id": "arcuz-behind-the-dark-9c7224d5-3cedaec4",
+  "game": {
+    "title": "Arcuz: Behind the Dark",
+    "fp_uuid": "",
+    "swf_hash": "9c7224d557726541"
+  },
+  "author": "Gabula",
+  "verified": false,
+  "bindings": {
+    "A": "J",
+    "B": "K",
+    "Down": "N",
+    "L": "B",
+    "Left": "1",
+    "Plus": ",",
+    "R": "M",
+    "Right": "3",
+    "StickLDown": "Down",
+    "StickLLeft": "Left",
+    "StickLPress": "C",
+    "StickLRight": "Right",
+    "StickLUp": "Up",
+    "StickRPress": "V",
+    "Up": "2",
+    "X": "L",
+    "Y": "I",
+    "ZL": "Right click",
+    "ZR": "Left click"
+  },
+  "bindings_p2": {
+    "A": "Num1",
+    "B": "Num2",
+    "Down": "S",
+    "L": "Num6",
+    "Left": "A",
+    "R": "Num5",
+    "Right": "D",
+    "StickLDown": "S",
+    "StickLLeft": "A",
+    "StickLRight": "D",
+    "StickLUp": "W",
+    "Up": "W",
+    "X": "Num3",
+    "Y": "Num4"
+  },
+  "combo_layers": {},
+  "combo_layers_p2": {},
+  "cursor_speed": -1,
+  "show_cursor": true
+}
