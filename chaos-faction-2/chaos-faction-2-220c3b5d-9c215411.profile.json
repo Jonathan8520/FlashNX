@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "id": "chaos-faction-2-220c3b5d-9c215411",
+  "game": {
+    "title": "Chaos Faction 2",
+    "fp_uuid": "",
+    "swf_hash": "220c3b5d28b5f70d"
+  },
+  "author": "",
+  "verified": false,
+  "bindings": {
+    "A": "Z",
+    "B": "X",
+    "Down": "Down",
+    "L": "Left click",
+    "Left": "Left",
+    "Plus": "Space",
+    "R": "Right click",
+    "Right": "Right",
+    "StickLDown": "Down",
+    "StickLLeft": "Left",
+    "StickLRight": "Right",
+    "StickLUp": "Up",
+    "Up": "Up",
+    "X": "Shift",
+    "Y": "O",
+    "ZL": "P",
+    "ZR": "T"
+  },
+  "bindings_p2": {
+    "A": "Num1",
+    "B": "Num3",
+    "Down": "Num2",
+    "L": "",
+    "Left": "Num4",
+    "Plus": "Space",
+    "R": "",
+    "Right": "Num6",
+    "StickLDown": "",
+    "StickLLeft": "",
+    "StickLRight": "",
+    "StickLUp": "",
+    "Up": "Num8",
+    "X": "Num+",
+    "Y": "Num0",
+    "ZL": "Num5",
+    "ZR": "Num7"
+  },
+  "combo_layers": {},
+  "combo_layers_p2": {},
+  "cursor_speed": -1,
+  "show_cursor": true
+}
