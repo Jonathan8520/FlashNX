@@ -69,14 +69,49 @@ size_t g_ring_len = 0;  // valid bytes, saturates at LOG_RING_CAP
 size_t g_ring_pos = 0;  // next write offset
 Mutex  g_ring_mutex;    // zero-initialised == unlocked, per libnx
 
-// Most recent per-frame heartbeat ("f1234: fps=... ram=..."), kept on its own
-// instead of in the ring. One of these is genuine context for a "this game is
-// broken" report — framerate, RAM, arena occupancy — but it repeats every N
-// frames, so letting them accumulate would push out everything else.
-char g_last_hb[512];
+// Per-frame heartbeat ("f1234: fps=... ram=..."), kept on its own instead of in
+// the ring. One of these is genuine context for a "this game is broken" report —
+// framerate, RAM, arena occupancy — but it repeats every N frames, so letting
+// them accumulate would push out everything else.
+//
+// The buffer MUST hold a whole line. It was 512 and the line is longer than
+// that: every heartbeat in the three reports filed against 1.8.0 was cut at
+// exactly 511 characters, and what a heartbeat ends with is precisely what a
+// reader needs — the `!STARVED` marker (the small-object cache's one silent
+// failure mode), `drawbox=` (whose "(nothing drawn)" is the black-screen
+// signature) and `maxalpha=`. Sized with room to spare rather than measured, so
+// a field appended to the format string later does not silently re-truncate it.
+constexpr size_t HB_CAP = 1024;
+char g_last_hb[HB_CAP];
+
+// The SLOWEST heartbeat of the session, kept alongside the most recent one.
+//
+// `g_last_hb` alone cannot answer a performance report. It is the state at the
+// moment the player quit, which is the menu or a calm scene — issue #109 ("game
+// slows down if too many enemies on screen") arrived carrying `fps=59.9`, the
+// one number that could not describe the complaint. The worst sample is the one
+// the reporter is talking about, and keeping it costs a second buffer.
+char g_worst_hb[HB_CAP];
+double g_worst_fps = 0.0;
 
 bool is_heartbeat(const char* msg) {
     return msg[0] == 'f' && std::strstr(msg, ": fps=") != nullptr;
+}
+
+// Frame number of a heartbeat line ("f1234: fps=..."), or 0 if unreadable.
+unsigned long hb_frame(const char* msg) {
+    return std::strtoul(msg + 1, nullptr, 10);
+}
+
+// FPS of a heartbeat line, or -1 when it is not a number. The very first
+// heartbeat of a session prints "—" (no previous tick to subtract from).
+double hb_fps(const char* msg) {
+    const char* p = std::strstr(msg, ": fps=");
+    if (!p) return -1.0;
+    p += 6;
+    char* end = nullptr;
+    const double v = std::strtod(p, &end);
+    return (end == p) ? -1.0 : v;
 }
 
 // Lines kept OUT of the ring. Two reasons, both learned from a real report
@@ -140,8 +175,20 @@ void ring_flush_repeat_locked() {
 void ring_push(const char* msg) {
     if (is_heartbeat(msg)) {
         mutexLock(&g_ring_mutex);
-        std::strncpy(g_last_hb, msg, sizeof(g_last_hb) - 1);
-        g_last_hb[sizeof(g_last_hb) - 1] = '\0';
+        std::strncpy(g_last_hb, msg, HB_CAP - 1);
+        g_last_hb[HB_CAP - 1] = '\0';
+        // Slowest so far, ignoring the first seconds: a game loads its assets
+        // there and every session's true minimum would be that, which says
+        // nothing about how the game PLAYS. 180 frames is 3 s of nominal 60 Hz
+        // and the frame number stays in the line, so a reader can still see
+        // which part of the session the sample came from.
+        const double fps = hb_fps(msg);
+        if (fps >= 0.0 && hb_frame(msg) >= 180 &&
+            (g_worst_hb[0] == '\0' || fps < g_worst_fps)) {
+            std::strncpy(g_worst_hb, msg, HB_CAP - 1);
+            g_worst_hb[HB_CAP - 1] = '\0';
+            g_worst_fps = fps;
+        }
         mutexUnlock(&g_ring_mutex);
         return;
     }
@@ -180,6 +227,8 @@ extern "C" void ruffle_log_ring_reset(void) {
     g_prev[0] = '\0';
     g_prev_rep = 0;
     g_last_hb[0] = '\0';
+    g_worst_hb[0] = '\0';
+    g_worst_fps = 0.0;
     mutexUnlock(&g_ring_mutex);
 }
 
@@ -189,13 +238,29 @@ extern "C" int ruffle_log_tail(char* out, int cap) {
     // A run of repeats may still be open; without this the last group of
     // collapsed lines would vanish from the report entirely.
     ring_flush_repeat_locked();
-    // Latest heartbeat first, so the reader gets framerate and memory before
-    // the log itself.
+    // Heartbeats first, so the reader gets framerate and memory before the log
+    // itself: the last one (state on leaving) then the slowest one (the moment
+    // a performance report is actually about). The slowest is skipped when it
+    // IS the last one, which is the normal case for a game that never slowed.
+    // Each is LABELLED. Both lines have the identical `f<N>: fps=...` shape, and
+    // whoever triaged a 1.8.0 report learned that the first line is the state at
+    // teardown; an unlabelled second line with a lower frame number and entirely
+    // different arena and bitmap counts reads as a later frame, and its
+    // mid-session figures get attributed to the moment the player quit.
     size_t w = 0;
-    const size_t hb = std::strlen(g_last_hb);
-    if (hb > 0 && hb + 2 < (size_t)cap) {
-        std::memcpy(out, g_last_hb, hb);
-        w = hb;
+    const char* const hbs[2] = { g_last_hb, g_worst_hb };
+    const char* const tags[2] = { "last: ", "slowest window: " };
+    for (int i = 0; i < 2; i++) {
+        if (i == 1 && (g_worst_hb[0] == '\0' || std::strcmp(g_worst_hb, g_last_hb) == 0)) {
+            continue;
+        }
+        const size_t hb = std::strlen(hbs[i]);
+        const size_t tg = std::strlen(tags[i]);
+        if (hb == 0 || w + tg + hb + 2 >= (size_t)cap) continue;
+        std::memcpy(out + w, tags[i], tg);
+        w += tg;
+        std::memcpy(out + w, hbs[i], hb);
+        w += hb;
         if (out[w - 1] != '\n') out[w++] = '\n';
     }
     const size_t room = (size_t)cap - 1 - w; // space left for the ring
