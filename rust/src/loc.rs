@@ -344,6 +344,25 @@ pub struct Strings {
     pub filter_scanlines: &'static str,
     /// Scanlines + RGB stripe mask + vignette.
     pub filter_crt: &'static str,
+    /// Texture-sampling row in the pause menu, shown as "<label>: <value>"
+    /// (issue #108). Named after what it acts on, not after what it does: a
+    /// "FILTERING" row directly under the screen filter's "FILTER" is two rows
+    /// one word apart on the same panel, and "FILTRAGE" under "FILTRE" is
+    /// worse. What it acts on is the pixels of the game's own bitmaps, which
+    /// the free zoom magnifies -- which is how a player noticed at all.
+    pub set_pixel_filter: &'static str,
+    /// Follow the SWF's own smoothing flag. What Flash Player did, so the
+    /// default.
+    pub pixels_auto: &'static str,
+    /// Force bilinear on every bitmap.
+    pub pixels_smooth: &'static str,
+    /// Force nearest-neighbour on every bitmap.
+    pub pixels_sharp: &'static str,
+    /// One line under the row while it is selected, like `overclock_hint`.
+    /// AUTO and SMOOTH draw the same picture on every game whose bitmaps all
+    /// ask for smoothing, which is most of them, so without this two of the
+    /// three positions look like a dead button.
+    pub pixels_hint: &'static str,
     /// Pause row + defaults row: raise the CPU clock for heavy games.
     pub set_overclock: &'static str,
     /// The console's own profile, untouched.
@@ -360,6 +379,13 @@ pub struct Strings {
     /// state and the raise is refused, which without this line is a button
     /// pressed eight times with nothing happening and no reason given.
     pub overclock_refused: &'static str,
+    /// ECRAN row + defaults row: show the frame rate over the running game (#111).
+    pub set_fps: &'static str,
+    /// One line under that row. It has to say what the SECOND number is, because
+    /// nothing here declares 60 (Mario 63 asks for 32, Papa Louie 3 for 30, Icy
+    /// Tower for 24) and a lone "15" means half speed on one of those and full
+    /// speed on none of them.
+    pub fps_hint: &'static str,
     /// Pause row + defaults row: turn the picture a quarter at a time (#78).
     pub set_rotation: &'static str,
     pub rot_none: &'static str,
@@ -740,11 +766,18 @@ const EN: Strings = Strings {
     filter_none: "NONE",
     filter_scanlines: "SCANLINES",
     filter_crt: "CRT",
+    set_pixel_filter: "PIXELS",
+    pixels_auto: "AUTO",
+    pixels_smooth: "SMOOTH",
+    pixels_sharp: "SHARP",
+    pixels_hint: "AUTO: as the game asks. SHARP: no blur.",
     set_overclock: "OVERCLOCK",
     overclock_off: "OFF",
     overclock_on: "ON",
     overclock_hint: "ON: more battery used, more heat.",
     overclock_refused: "Overclock unavailable: battery too low.",
+    set_fps: "FPS COUNTER",
+    fps_hint: "Frames per second, then the rate the game asks for.",
     set_rotation: "ROTATION",
     rot_none: "NONE",
     rot_90: "90\u{00B0}",
@@ -1003,11 +1036,18 @@ const FR: Strings = Strings {
     filter_none: "AUCUN",
     filter_scanlines: "LIGNES",
     filter_crt: "CRT",
+    set_pixel_filter: "PIXELS",
+    pixels_auto: "AUTO",
+    pixels_smooth: "LISS\u{00C9}S",
+    pixels_sharp: "NETS",
+    pixels_hint: "AUTO : comme le jeu le demande. NETS : aucun flou.",
     set_overclock: "OVERCLOCK",
     overclock_off: "INACTIF",
     overclock_on: "ACTIF",
     overclock_hint: "ACTIF : plus de batterie, plus de chaleur.",
     overclock_refused: "Overclock indisponible : batterie trop faible.",
+    set_fps: "COMPTEUR FPS",
+    fps_hint: "Images par seconde, puis la cadence demand\u{00E9}e par le jeu.",
     set_rotation: "ROTATION",
     rot_none: "AUCUNE",
     rot_90: "90\u{00B0}",
@@ -1266,11 +1306,18 @@ const ES: Strings = Strings {
     filter_none: "NINGUNO",
     filter_scanlines: "L\u{00CD}NEAS",
     filter_crt: "CRT",
+    set_pixel_filter: "P\u{00CD}XELES",
+    pixels_auto: "AUTO",
+    pixels_smooth: "SUAVES",
+    pixels_sharp: "N\u{00CD}TIDOS",
+    pixels_hint: "AUTO: como pide el juego. N\u{00CD}TIDOS: sin desenfoque.",
     set_overclock: "OVERCLOCK",
     overclock_off: "INACTIVO",
     overclock_on: "ACTIVO",
     overclock_hint: "ACTIVO: m\u{00E1}s bater\u{00ED}a, m\u{00E1}s calor.",
     overclock_refused: "Overclock no disponible: bater\u{00ED}a muy baja.",
+    set_fps: "CONTADOR FPS",
+    fps_hint: "Fotogramas por segundo, y la tasa que pide el juego.",
     set_rotation: "ROTACI\u{00D3}N",
     rot_none: "NINGUNA",
     rot_90: "90\u{00B0}",
@@ -1531,11 +1578,18 @@ const RU: Strings = Strings {
     filter_none: "НЕТ",
     filter_scanlines: "ЛИНИИ",
     filter_crt: "CRT",
+    set_pixel_filter: "ПИКСЕЛИ",
+    pixels_auto: "АВТО",
+    pixels_smooth: "СГЛАЖЕННЫЕ",
+    pixels_sharp: "ЧЁТКИЕ",
+    pixels_hint: "АВТО: как просит игра. ЧЁТКИЕ: без размытия.",
     set_overclock: "РАЗГОН",
     overclock_off: "ВЫКЛ",
     overclock_on: "ВКЛ",
     overclock_hint: "ВКЛ: больше расход батареи и нагрев.",
     overclock_refused: "Разгон недоступен: батарея разряжена.",
+    set_fps: "СЧЁТЧИК FPS",
+    fps_hint: "Кадров в секунду и частота, которую запрашивает игра.",
     set_rotation: "ПОВОРОТ",
     rot_none: "НЕТ",
     rot_90: "90\u{00B0}",
@@ -1799,11 +1853,18 @@ const DE: Strings = Strings {
     filter_none: "KEINER",
     filter_scanlines: "LINIEN",
     filter_crt: "CRT",
+    set_pixel_filter: "PIXEL",
+    pixels_auto: "AUTO",
+    pixels_smooth: "WEICH",
+    pixels_sharp: "SCHARF",
+    pixels_hint: "AUTO: wie das Spiel es verlangt. SCHARF: keine Unsch\u{00E4}rfe.",
     set_overclock: "OVERCLOCK",
     overclock_off: "AUS",
     overclock_on: "EIN",
     overclock_hint: "EIN: mehr Akkuverbrauch, mehr W\u{00E4}rme.",
     overclock_refused: "Overclock nicht verf\u{00FC}gbar: Akku zu schwach.",
+    set_fps: "FPS-ANZEIGE",
+    fps_hint: "Bilder pro Sekunde, dann die vom Spiel geforderte Rate.",
     set_rotation: "DREHUNG",
     rot_none: "KEINE",
     rot_90: "90\u{00B0}",
@@ -2064,11 +2125,18 @@ const IT: Strings = Strings {
     filter_none: "NESSUNO",
     filter_scanlines: "LINEE",
     filter_crt: "CRT",
+    set_pixel_filter: "PIXEL",
+    pixels_auto: "AUTO",
+    pixels_smooth: "MORBIDI",
+    pixels_sharp: "NITIDI",
+    pixels_hint: "AUTO: come chiede il gioco. NITIDI: nessuna sfocatura.",
     set_overclock: "OVERCLOCK",
     overclock_off: "INATTIVO",
     overclock_on: "ATTIVO",
     overclock_hint: "ATTIVO: pi\u{00F9} batteria, pi\u{00F9} calore.",
     overclock_refused: "Overclock non disponibile: batteria troppo bassa.",
+    set_fps: "CONTATORE FPS",
+    fps_hint: "Fotogrammi al secondo, poi la frequenza richiesta dal gioco.",
     set_rotation: "ROTAZIONE",
     rot_none: "NESSUNA",
     rot_90: "90\u{00B0}",
@@ -2329,11 +2397,18 @@ const PT: Strings = Strings {
     filter_none: "NENHUM",
     filter_scanlines: "LINHAS",
     filter_crt: "CRT",
+    set_pixel_filter: "PIXELS",
+    pixels_auto: "AUTO",
+    pixels_smooth: "SUAVES",
+    pixels_sharp: "N\u{00CD}TIDOS",
+    pixels_hint: "AUTO: como o jogo pede. N\u{00CD}TIDOS: sem desfoque.",
     set_overclock: "OVERCLOCK",
     overclock_off: "INATIVO",
     overclock_on: "ATIVO",
     overclock_hint: "ATIVO: mais bateria, mais calor.",
     overclock_refused: "Overclock indispon\u{00ED}vel: bateria fraca.",
+    set_fps: "CONTADOR FPS",
+    fps_hint: "Quadros por segundo, e a taxa que o jogo pede.",
     set_rotation: "ROTA\u{00C7}\u{00C3}O",
     rot_none: "NENHUMA",
     rot_90: "90\u{00B0}",
@@ -2599,11 +2674,18 @@ const ZH: Strings = Strings {
     filter_none: "无",
     filter_scanlines: "扫描线",
     filter_crt: "CRT",
+    set_pixel_filter: "像素",
+    pixels_auto: "自动",
+    pixels_smooth: "平滑",
+    pixels_sharp: "锐利",
+    pixels_hint: "自动：按游戏的要求。锐利：不模糊。",
     set_overclock: "超频",
     overclock_off: "关闭",
     overclock_on: "开启",
     overclock_hint: "开启：更耗电，发热更多。",
     overclock_refused: "超频不可用：电量过低。",
+    set_fps: "帧率显示",
+    fps_hint: "每秒帧数，以及游戏要求的帧率。",
     set_rotation: "旋转",
     rot_none: "无",
     rot_90: "90\u{00B0}",
@@ -2867,11 +2949,18 @@ const TR: Strings = Strings {
     filter_none: "YOK",
     filter_scanlines: "\u{00C7}\u{0130}ZG\u{0130}LER",
     filter_crt: "CRT",
+    set_pixel_filter: "P\u{0130}KSELLER",
+    pixels_auto: "OTOMAT\u{0130}K",
+    pixels_smooth: "YUMU\u{015E}AK",
+    pixels_sharp: "KESK\u{0130}N",
+    pixels_hint: "OTOMAT\u{0130}K: oyunun istedi\u{011F}i gibi. KESK\u{0130}N: bulan\u{0131}kl\u{0131}k yok.",
     set_overclock: "OVERCLOCK",
     overclock_off: "KAPALI",
     overclock_on: "A\u{00C7}IK",
     overclock_hint: "A\u{00C7}IK: daha \u{00E7}ok pil, daha \u{00E7}ok \u{0131}s\u{0131}.",
     overclock_refused: "Overclock kullan\u{0131}lamaz: pil \u{00E7}ok d\u{00FC}\u{015F}\u{00FC}k.",
+    set_fps: "FPS SAYACI",
+    fps_hint: "Saniyedeki kare say\u{0131}s\u{0131} ve oyunun istedi\u{011F}i h\u{0131}z.",
     set_rotation: "D\u{00D6}ND\u{00DC}RME",
     rot_none: "YOK",
     rot_90: "90\u{00B0}",
@@ -3059,6 +3148,12 @@ pub fn set_covers_online(v: bool) {
 /// change of default, which is predictable and explainable.
 static DEFAULT_DISPLAY_MODE: AtomicU8 = AtomicU8::new(0);
 static DEFAULT_SCREEN_FILTER: AtomicU8 = AtomicU8::new(0);
+/// Default texture sampling (issue #108). 0 = AUTO, and it stays 0: AUTO is the
+/// only value that is not a preference but a fidelity guarantee, since it is
+/// what Flash Player itself did with the SWF's `smoothing` flag. A player who
+/// wants every game sharp can move this; nobody gets moved off faithful by
+/// never opening the menu.
+static DEFAULT_PIXEL_FILTER: AtomicU8 = AtomicU8::new(0);
 /// Default power mode. 0 = NORMAL, and it stays 0: a player who never opens the
 /// menu runs on an untouched OS profile.
 static DEFAULT_POWER_MODE: AtomicU8 = AtomicU8::new(0);
@@ -3162,12 +3257,41 @@ pub fn set_default_screen_filter(v: u8) {
     DEFAULT_SCREEN_FILTER.store(v, Ordering::Relaxed);
 }
 
+pub fn default_pixel_filter() -> u8 {
+    DEFAULT_PIXEL_FILTER.load(Ordering::Relaxed)
+}
+
+pub fn set_default_pixel_filter(v: u8) {
+    DEFAULT_PIXEL_FILTER.store(v, Ordering::Relaxed);
+}
+
 pub fn default_power_mode() -> u8 {
     DEFAULT_POWER_MODE.load(Ordering::Relaxed)
 }
 
 pub fn set_default_power_mode(v: u8) {
     DEFAULT_POWER_MODE.store(v, Ordering::Relaxed);
+}
+
+/// Default for the FPS counter (issue #111). 0 = hidden, and it stays 0: a
+/// counter is an instrument, and an instrument nobody asked for is furniture
+/// over the corner of every game they own.
+static DEFAULT_FPS_COUNTER: AtomicU8 = AtomicU8::new(0);
+
+pub fn default_fps_counter() -> u8 {
+    DEFAULT_FPS_COUNTER.load(Ordering::Relaxed)
+}
+
+pub fn set_default_fps_counter(v: u8) {
+    DEFAULT_FPS_COUNTER.store(v, Ordering::Relaxed);
+}
+
+/// Display name for the FPS counter row. Borrows the show-cursor pair rather
+/// than adding a second set of nine translations that would say the same thing:
+/// the question is identical (something drawn over the game is shown or it is
+/// not) and so is the answer in every language we ship.
+pub fn fps_counter_label(v: u8) -> &'static str {
+    if v == 1 { s().cursor_shown } else { s().cursor_hidden }
 }
 
 /// Display name of a power mode. Stored PER GAME (`keymap::power_mode_for`);
@@ -3203,6 +3327,23 @@ pub fn screen_filter_label(v: u8) -> &'static str {
         1 => s().filter_scanlines,
         2 => s().filter_crt,
         _ => s().filter_none,
+    }
+}
+
+/// Display name of a texture-sampling mode (issue #108). Stored per game like
+/// the scaling mode, because which games are hurt by bilinear is a property of
+/// the ART: a global SHARP would trade the blur on pixel-art games for hard
+/// edges on the vector-drawn ones, which are most of the library.
+///
+/// Cycle order AUTO -> SMOOTH -> SHARP. AUTO first because it is the faithful
+/// value and the one a game comes back to; SMOOTH before SHARP because SMOOTH
+/// is what the player was already getting, so the first press off AUTO changes
+/// nothing visible and the second is the one that answers the complaint.
+pub fn pixel_filter_label(v: u8) -> &'static str {
+    match v {
+        1 => s().pixels_smooth,
+        2 => s().pixels_sharp,
+        _ => s().pixels_auto,
     }
 }
 
@@ -3449,14 +3590,16 @@ fn parse_u16_setting(json: &str, key: &str, lo: u16, hi: u16) -> Option<u16> {
 fn write_settings(lang: Lang, covers: bool) -> bool {
     let path = settings_write_path();
     let json = std::format!(
-        "{{\n    \"language\": \"{}\",\n    \"covers_online\": {},\n    \"display_mode\": {},\n    \"rotation\": {},\n    \"zoom\": {},\n    \"screen_filter\": {},\n    \"power_mode\": {},\n    \"home_view\": {}\n}}\n",
+        "{{\n    \"language\": \"{}\",\n    \"covers_online\": {},\n    \"display_mode\": {},\n    \"rotation\": {},\n    \"zoom\": {},\n    \"pixel_filter\": {},\n    \"screen_filter\": {},\n    \"power_mode\": {},\n    \"fps_counter\": {},\n    \"home_view\": {}\n}}\n",
         lang.code(),
         covers,
         default_display_mode(),
         default_rotation(),
         default_zoom(),
+        default_pixel_filter(),
         default_screen_filter(),
         default_power_mode(),
+        default_fps_counter(),
         home_view(),
     );
     match File::create(&path) {
@@ -3511,11 +3654,21 @@ pub fn init() {
             if let Some(v) = parse_u16_setting(&txt, "zoom", 100, 500) {
                 set_default_zoom(v);
             }
+            // `pixel_filter` is the texture sampling (issue #108) and
+            // `screen_filter` the CRT post-process. Two keys, two settings; the
+            // names are one word apart on purpose so a hand-edited file cannot
+            // set one thinking it set the other.
+            if let Some(v) = parse_u8_setting(&txt, "pixel_filter", 3) {
+                set_default_pixel_filter(v);
+            }
             if let Some(v) = parse_u8_setting(&txt, "screen_filter", 3) {
                 set_default_screen_filter(v);
             }
             if let Some(v) = parse_u8_setting(&txt, "power_mode", 2) {
                 set_default_power_mode(v);
+            }
+            if let Some(v) = parse_u8_setting(&txt, "fps_counter", 2) {
+                set_default_fps_counter(v);
             }
             if let Some(v) = parse_u8_setting(&txt, "home_view", HOME_VIEW_COUNT) {
                 set_home_view(v);

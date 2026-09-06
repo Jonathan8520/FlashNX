@@ -99,7 +99,19 @@ pub const MENU_ITEMS: &[&str] = &[
 /// together behind one row.
 /// ZOOM sits between ROTATION and FILTRE: the first three are geometry, the
 /// filter is colour.
-pub const SCREEN_ITEMS: &[&str] = &["AFFICHAGE", "ROTATION", "ZOOM", "FILTRE"];
+/// PIXELS (issue #108) sits between the two groups because it belongs to
+/// neither: it decides how the picture is RESAMPLED once the geometry has fixed
+/// its size, so it reads as the last step of the geometry and the first thing
+/// the eye judges. It goes directly under ZOOM because the free zoom is what
+/// magnified the blur enough for a player to report it.
+/// FPS sits last: the first three are geometry, the filter is colour, and this
+/// one is neither -- it adds something to the screen rather than changing what
+/// is already on it. It belongs on this panel all the same, because it obeys
+/// ECRAN's membership rule: it previews on the frozen frame behind the panel
+/// (`ruffle_redraw_paused` draws it), so pressing A shows you exactly what you
+/// are turning on, on this game's own picture.
+pub const SCREEN_ITEMS: &[&str] =
+    &["AFFICHAGE", "ROTATION", "ZOOM", "PIXELS", "FILTRE", "FPS"];
 
 // ── Unified modal style ────────────────────────────────────────────────────
 // One look for every centered popup. Before this, each modal hard-coded its own
@@ -1563,11 +1575,19 @@ enum DrawKind {
         /// Identity `[0,0,1,1]` for a standalone fill (the texture IS the
         /// whole bitmap).
         uv_remap: [f32; 4],
+        /// Half a texel of the SOURCE bitmap, expressed in the [0,1] local UV
+        /// space (`0.5 / width`, `0.5 / height`). Computed from the BITMAP's
+        /// pixel size, never from an atlas dimension: after `uv_remap.zw` has
+        /// scaled it, half a local texel and half an atlas texel are the same
+        /// distance, and this way nothing here can repeat the #42 regression of
+        /// assuming 2048 for an atlas that is right-sized.
+        uv_inset: [f32; 2],
         /// 3x3 column-major matrix mapping `a_pos` (shape pixels) to UV
         /// in [0, 1] of the source bitmap. Pre-inverted by
         /// `swf_bitmap_to_gl_matrix`.
         local_matrix: [GLfloat; 9],
-        #[allow(dead_code)]
+        /// The SWF fill style's smoothing flag. A file that says "do not smooth
+        /// this" is asking for point sampling, and Flash gave it point sampling.
         is_smoothed: bool,
         is_repeating: bool,
         /// Set for fills whose source bitmap is too big for the 2048² atlas
@@ -1677,6 +1697,9 @@ struct ShapeBitmapProgram {
     u_tex: GLint,
     u_uv: GLint,
     u_uv_remap: GLint,
+    /// Half a texel of the SOURCE bitmap, in the [0,1] local UV the clamp
+    /// branch works in. See the doc comment on `SHAPE_BITMAP_VERT`.
+    u_uv_inset: GLint,
     u_wrap_mode: GLint,
 }
 
@@ -1903,6 +1926,15 @@ struct GlStateCache {
     last_texture: Cell<GLuint>,
     last_wrap_mode: Cell<i32>,
     last_vao: Cell<GLuint>,
+    /// Sampler object on texture unit 0. 0 means "none", so GL falls back to
+    /// the texture's own parameters — which are LINEAR + CLAMP_TO_EDGE for
+    /// every texture this project creates, making 0 exactly the behaviour that
+    /// shipped before per-draw filtering existed.
+    ///
+    /// Unlike the fields above, this one is not only a mirror: a sampler really
+    /// stays bound until something unbinds it, so `invalidate` has to put it
+    /// back rather than merely forget it.
+    last_sampler: Cell<GLuint>,
 }
 
 impl GlStateCache {
@@ -1914,6 +1946,29 @@ impl GlStateCache {
         self.last_texture.set(0);
         self.last_wrap_mode.set(-1);
         self.last_vao.set(0);
+        // Not just forgotten: released. Every invalidate marks a hand-off to raw
+        // GL, and a point sampler left on unit 0 would follow whoever runs next.
+        self.clear_sampler();
+    }
+
+    /// Choose the sampler object for texture unit 0. 0 = none, i.e. keep the
+    /// texture's own filtering.
+    fn bind_sampler(&self, sampler: GLuint) {
+        if self.last_sampler.get() != sampler {
+            unsafe { glBindSampler(0, sampler) };
+            self.last_sampler.set(sampler);
+        }
+    }
+
+    /// Drop back to the texture's own filtering on unit 0.
+    ///
+    /// Any raw-GL pass that samples a texture without going through the `use_*`
+    /// helpers must call this first. Filter passes are the ones that cannot
+    /// survive a leaked point sampler: a blur interpolates between texels by
+    /// construction, so sampling it NEAREST does not give a slightly different
+    /// blur, it gives a mosaic.
+    fn clear_sampler(&self) {
+        self.bind_sampler(0);
     }
 
     fn use_program(&self, prog: GLuint) {
@@ -1959,6 +2014,11 @@ pub struct SwitchRenderBackend {
 
     /// Mesa-Switch GL state cache. See `GlStateCache` docs above.
     gl_state: GlStateCache,
+
+    /// Point-sampling sampler object, bound on unit 0 for the draws that ask for
+    /// it (see `sampler_for`). 0 if `glGenSamplers` failed, which simply leaves
+    /// every draw on the texture's LINEAR, i.e. the old picture.
+    sampler_sharp: GLuint,
 
     /// Solid unit quad (pos+rgba, 6 vertices). Used by `draw_rect`.
     rect_vao: GLuint,
@@ -2374,6 +2434,23 @@ void main() {\n\
 /// atlas places multiple bitmaps in one texture and remapping an out-of-
 /// range UV would index into a neighbour bitmap (visible bug: Mario 63's
 /// ground tile showed Mario's hat sprite).
+///
+/// The clamp branch stops half a texel short of each edge (`u_uv_inset`), which
+/// is where the slot's texel CENTRES are. `clamp(.., 0.0, 1.0)` returning
+/// exactly 1.0 — which it does for every tessellated triangle that overruns the
+/// bitmap rect — lands a NEAREST sample on the first ATLAS_PAD texel, one past
+/// the content. `upload_region_padded` seeds that pad with a copy of the edge
+/// pixel, so the colour was right; but `update_texture` writes only the content
+/// rect (`flush_pending_upload` -> `upload_region`), so on any bitmap Ruffle
+/// rewrites the pad goes stale and keeps whatever it held at registration. Under
+/// LINEAR that was half of one row and nobody ever saw it. Under NEAREST it is
+/// the whole row. The inset is what CLAMP_TO_EDGE would do if the bitmap owned
+/// its own texture, and it is a no-op under LINEAR whenever the pad is fresh
+/// (the pad IS the edge pixel, so blending the two changes nothing).
+///
+/// The fract branch gets no inset, deliberately: `fract` is in [0, 1), so it can
+/// never reach the pad, and a repeating fill must keep sampling the true first
+/// and last texel at the seam.
 const SHAPE_BITMAP_VERT: &[u8] = b"#version 330 core\n\
 layout(location = 0) in vec2 a_pos;\n\
 uniform mat3 u_world;\n\
@@ -2393,9 +2470,10 @@ uniform sampler2D u_tex;\n\
 uniform vec4 u_mult;\n\
 uniform vec4 u_add;\n\
 uniform vec4 u_uv_remap;\n\
+uniform vec2 u_uv_inset;\n\
 uniform int u_wrap_mode;\n\
 void main() {\n\
-    vec2 local = (u_wrap_mode == 1) ? fract(v_uv_local) : clamp(v_uv_local, 0.0, 1.0);\n\
+    vec2 local = (u_wrap_mode == 1) ? fract(v_uv_local) : clamp(v_uv_local, u_uv_inset, 1.0 - u_uv_inset);\n\
     vec2 atlas_uv = u_uv_remap.xy + local * u_uv_remap.zw;\n\
     vec4 c = texture(u_tex, atlas_uv);\n\
     frag_color = clamp(c * u_mult + u_add, 0.0, 1.0);\n\
@@ -2477,6 +2555,47 @@ pub fn set_screen_filter(v: u8) {
     SCREEN_FILTER.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Texture sampling picked for the game being played: 0 AUTO, 1 SMOOTH (force
+/// bilinear), 2 SHARP (force nearest). Issue #108. An atomic for the same
+/// reason as the screen filter above -- the pause menu that sets it runs on the
+/// C++ side, with no borrow of the renderer to hand.
+///
+/// AUTO is 0 so a game nobody has set gets the FAITHFUL behaviour, not a
+/// preference: Ruffle hands `render_bitmap` the SWF's own `smoothing` flag, and
+/// a pixel-art SWF sets it false precisely so the player point-samples. Forcing
+/// bilinear on those is a difference from Flash Player, not only a missing
+/// option.
+static PIXEL_FILTER: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Select the texture sampling. Read per draw, so it takes effect on the very
+/// next frame -- which is what lets the pause menu preview it on the frozen
+/// picture, like every other ECRAN row.
+pub fn set_pixel_filter(v: u8) {
+    PIXEL_FILTER.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The mode the sampling code resolves against the per-bitmap `smoothing` flag:
+/// 1 forces linear, 2 forces nearest, 0 follows the flag.
+pub fn pixel_filter() -> u8 {
+    PIXEL_FILTER.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// How SWF bitmaps are filtered. AUTO is the faithful setting, not the neutral
+/// one: a SWF states per bitmap whether it wants smoothing, Flash point-sampled
+/// the ones that said no, and we smoothed all of them regardless, which is why
+/// pixel art has always come out of FlashNX soft. The two overrides exist
+/// because plenty of files leave the flag at a default that contradicts what
+/// they obviously wanted.
+pub const TEXTURE_FILTER_AUTO: u8 = 0;
+pub const TEXTURE_FILTER_SMOOTH: u8 = 1;
+pub const TEXTURE_FILTER_SHARP: u8 = 2;
+
+// The three constants above name the VALUES of `PIXEL_FILTER`, declared just
+// under it. There was briefly a second atomic here holding the same setting, and
+// it was inert: every writer in the tree stores into `PIXEL_FILTER` while the
+// resolver read the other one, so the mode never left AUTO and both overrides
+// silently did nothing. One atomic, one setter, one getter.
+
 /// Ask for a power mode and report back the one actually in force.
 ///
 /// Always read the answer rather than assuming the request took. clkrst can be
@@ -2493,7 +2612,11 @@ pub fn apply_power_mode(mode: u8) -> u8 {
     let want = if mode == 1 { 1 } else { 0 };
     let got = unsafe { flashnx_set_clock_mode(want) };
     let got = if got == 1 { 1 } else { 0 };
-    POWER_REFUSED.store(want == 1 && got == 0, std::sync::atomic::Ordering::Relaxed);
+    let refused = want == 1 && got == 0;
+    POWER_REFUSED.store(refused, std::sync::atomic::Ordering::Relaxed);
+    if refused {
+        POWER_REFUSED_EVER.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     got
 }
 
@@ -2501,6 +2624,28 @@ pub fn apply_power_mode(mode: u8) -> u8 {
 pub fn overclock_refused() -> bool {
     POWER_REFUSED.load(std::sync::atomic::Ordering::Relaxed)
 }
+
+/// True when ANY raise was turned down since the current game was launched.
+///
+/// Separate from `overclock_refused`, which describes the LAST request and is
+/// what the pause-menu footer wants. A bug report needs the other question:
+/// psm refuses a raise while the battery is out of its Normal voltage state
+/// (observed for real at 7% charge, eight presses in a row), so a player can
+/// have OVERCLOCK set to ON, play the whole session at 1020 MHz, and file a
+/// report about how slow it is. Publishing the SETTING alone would put "boost:
+/// ON" at the top of a report about stock-clock performance, and that is the
+/// first fact any frame rate is read against.
+pub fn overclock_ever_refused() -> bool {
+    POWER_REFUSED_EVER.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Cleared per launch from `ruffle_init`: the question is about this game.
+pub fn clear_overclock_refused_ever() {
+    POWER_REFUSED_EVER.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+static POWER_REFUSED_EVER: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// The power mode in force right now, straight from the hardware side.
 pub fn current_power_mode() -> u8 {
@@ -2510,6 +2655,194 @@ pub fn current_power_mode() -> u8 {
 
 pub fn screen_filter() -> u8 {
     SCREEN_FILTER.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+// ── FPS counter (issue #111) ───────────────────────────────────────────────
+
+/// Whether the counter is drawn for the game being played, mirrored out of that
+/// game's `.prefs` at launch. An atomic for exactly the reason the screen filter
+/// above is one: the stored value is a file on the SD card, and the paths that
+/// need this one run every frame.
+static FPS_COUNTER: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The open measuring window: the system tick it started on (0 = none open) and
+/// the SWF frames counted into it so far.
+///
+/// A TIME window, which is the whole difference from the `fps=` figure in the
+/// heartbeat. That one divides by a fixed 60 FRAMES, so on a game at 9 fps it
+/// refreshes once every 6.7 seconds -- right for a log line meant to be
+/// compared between sessions, useless as something a player watches. The
+/// heartbeat is deliberately untouched; this is a second, independent
+/// measurement that happens to answer the same question at a usable cadence.
+static FPS_WINDOW_START: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static FPS_WINDOW_FRAMES: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
+/// Last closed window's measured rate and the rate the movie declares, both
+/// times ten so one decimal survives without float formatting (the same trick
+/// as the heartbeat's `fps_x10`). Real 0 = no window has closed yet; nominal
+/// 0 = no movie has said what it wants.
+static FPS_REAL_X10: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+static FPS_NOMINAL_X10: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
+/// Window length as a divisor of the tick frequency. Half a second: short
+/// enough that the number follows a scene change, long enough that a game down
+/// at 3 fps still has frames in it to divide by.
+const FPS_WINDOW_DIV: u64 = 2;
+
+pub fn fps_counter_on() -> bool {
+    FPS_COUNTER.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Turn the counter on or off, throwing away the MEASURED rate but keeping the
+/// movie's nominal one.
+///
+/// Called on EVERY game launch (like the screen filter and the power mode) and
+/// from the ECRAN row. Clearing the measured rate is the point in both cases:
+/// without it the first half second of a new game shows the PREVIOUS game's
+/// speed, printed under the new game's nominal rate.
+///
+/// The nominal rate is deliberately NOT cleared here, and clearing it was a real
+/// bug: only `fps_sample` writes it, `fps_sample` runs only from the live tick,
+/// and the pause loop does not tick. So turning the row on from ECRAN zeroed the
+/// nominal and `fps_readout` then refused to draw anything, which made the row
+/// look dead exactly where it is supposed to preview itself on the frozen frame.
+/// A new game invalidates the nominal, so `ruffle_init` is where it is cleared.
+pub fn set_fps_counter(on: bool) {
+    FPS_COUNTER.store(on, std::sync::atomic::Ordering::Relaxed);
+    FPS_REAL_X10.store(0, std::sync::atomic::Ordering::Relaxed);
+    FPS_HAVE_READING.store(false, std::sync::atomic::Ordering::Relaxed);
+    fps_window_reset();
+}
+
+/// Forget the movie's nominal rate. Called from `ruffle_init`, the one moment
+/// the previous value stops describing anything.
+pub fn clear_fps_nominal() {
+    FPS_NOMINAL_X10.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Drop the open TELEMETRY window too, so the next heartbeat prints `fps=—`
+/// rather than 60 frames divided by a stretch of wall clock the console spent
+/// asleep.
+///
+/// The heartbeat has always mismeasured that window; it did not matter while the
+/// line was one sample among a scrolling log. It matters now: a bug report keeps
+/// the SLOWEST heartbeat of the session, so a single HOME-menu press was enough
+/// to latch a fabricated "1.4 fps" as the headline number of every report filed
+/// afterwards. `fps=—` is not a candidate (`hb_fps` in ruffle_bridge.cpp refuses
+/// a non-numeric rate), so one window is skipped and nothing is invented.
+pub fn heartbeat_window_reset() {
+    HEARTBEAT_RESET.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Set by `heartbeat_window_reset`, consumed by the next heartbeat.
+static HEARTBEAT_RESET: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Fold one `Player::tick` into the open window.
+///
+/// `frames_run` is how many SWF frames that tick ACTUALLY advanced, not how
+/// many frames we drew. The two agree only once a frame costs more than its
+/// nominal duration; below that the host loop sits at the display's 60 Hz while
+/// a 30 fps movie advances 30 times, so a counter built on our own frames would
+/// print "60 / 30" for a game running at exactly the right speed.
+///
+/// `now` is the tick already read for the tick/render profile, so this costs no
+/// second clock read.
+pub fn fps_sample(frames_run: u32, nominal_x10: u32, now: u64) {
+    FPS_NOMINAL_X10.store(nominal_x10, std::sync::atomic::Ordering::Relaxed);
+    let start = FPS_WINDOW_START.load(std::sync::atomic::Ordering::Relaxed);
+    // No window open: the counter was just switched on, or a pause was left
+    // (`fps_window_reset`). Open one here instead of measuring across the gap.
+    if start == 0 {
+        FPS_WINDOW_START.store(now.max(1), std::sync::atomic::Ordering::Relaxed);
+        // ZERO, not `frames_run`: those frames were advanced by the tick that
+        // has just finished, so they happened BEFORE `now`. Seeding them into a
+        // window whose clock starts here divides them by an interval they are
+        // not inside, which reads as a spike on the first half second after
+        // every resume -- exactly where Ruffle catches up several frames at once.
+        FPS_WINDOW_FRAMES.store(0, std::sync::atomic::Ordering::Relaxed);
+        return;
+    }
+    let frames = FPS_WINDOW_FRAMES
+        .fetch_add(frames_run, std::sync::atomic::Ordering::Relaxed)
+        .saturating_add(frames_run);
+    let freq = unsafe { ruffle_tick_freq() };
+    let dt = now.saturating_sub(start);
+    if freq == 0 || dt < freq / FPS_WINDOW_DIV {
+        return;
+    }
+    // The window closes on wall clock but counts WHOLE movie frames, so its
+    // resolution is one frame per window: at half a second that is +/- 2 fps,
+    // which is nothing at 30 and a third of the reading at 3. The counter exists
+    // for the games that run at 3, and a number that swings by a third with
+    // nothing changing on screen is worse than a slower one. So also wait for a
+    // few frames, with a ceiling so a game that has genuinely stopped still
+    // reports its stop instead of freezing on the last good reading.
+    const MIN_FRAMES: u32 = 4;
+    const MAX_WINDOW_SECS: u64 = 3;
+    if frames < MIN_FRAMES && dt < freq * MAX_WINDOW_SECS {
+        return;
+    }
+    FPS_REAL_X10.store(
+        ((frames as u64 * freq * 10) / dt).min(u32::MAX as u64) as u32,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    FPS_HAVE_READING.store(true, std::sync::atomic::Ordering::Relaxed);
+    FPS_WINDOW_START.store(now.max(1), std::sync::atomic::Ordering::Relaxed);
+    FPS_WINDOW_FRAMES.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Drop the open window, keeping the last reading on screen.
+///
+/// Hung off `ruffle_skip_paused_time`, which every resume path already goes
+/// through -- pause menu, ECRAN, TOUCHES, the in-game keyboard, and the
+/// three-second gap that means the HOME menu or sleep. Without it the first
+/// window after a pause spans the pause, so thirty seconds in a menu comes back
+/// as a game running at one frame per second.
+pub fn fps_window_reset() {
+    FPS_WINDOW_START.store(0, std::sync::atomic::Ordering::Relaxed);
+    FPS_WINDOW_FRAMES.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Last completed reading as `(measured x10, nominal x10)`.
+///
+/// `measured` is `None` until the first window closes, which is a different
+/// thing from a measured zero: a game that has genuinely stopped reads 0, and
+/// showing that as the "not measured yet" placeholder would hide the one state
+/// the counter is most useful in. A shared sentinel conflated the two.
+///
+/// `nominal` is `None` when the movie declares no usable rate. Ruffle takes the
+/// SWF header value verbatim, so a malformed file can leave it at 0; that used
+/// to make the whole counter draw nothing, which reads as a setting that did not
+/// take. Without a denominator there is no ratio, but the measured rate on its
+/// own is still worth showing.
+pub fn fps_readout() -> (Option<u32>, Option<u32>) {
+    let nominal = FPS_NOMINAL_X10.load(std::sync::atomic::Ordering::Relaxed);
+    let measured = if FPS_HAVE_READING.load(std::sync::atomic::Ordering::Relaxed) {
+        Some(FPS_REAL_X10.load(std::sync::atomic::Ordering::Relaxed))
+    } else {
+        None
+    };
+    (measured, if nominal == 0 { None } else { Some(nominal) })
+}
+
+/// Set when a window has closed, so a measured 0 is not read as "no reading".
+static FPS_HAVE_READING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// One rate as text: whole where the movie declared a whole number (nearly all
+/// of them do), one decimal where it did not -- a SWF header can hold 12.5.
+fn fps_rate_str(x10: u32) -> std::string::String {
+    if x10 % 10 == 0 {
+        std::format!("{}", x10 / 10)
+    } else {
+        std::format!("{}.{}", x10 / 10, x10 % 10)
+    }
 }
 
 /// Vertical resolution of the game's stage, set at launch. The scanline pitch is
@@ -2995,6 +3328,7 @@ fn build_shape_bitmap_program() -> Option<ShapeBitmapProgram> {
         u_tex: loc(program, b"u_tex\0"),
         u_uv: loc(program, b"u_uv\0"),
         u_uv_remap: loc(program, b"u_uv_remap\0"),
+        u_uv_inset: loc(program, b"u_uv_inset\0"),
         u_wrap_mode: loc(program, b"u_wrap_mode\0"),
         program,
     })
@@ -3419,20 +3753,31 @@ fn upload_draw(
                 b.matrix[1][0], b.matrix[1][1], b.matrix[1][2],
                 b.matrix[2][0], b.matrix[2][1], b.matrix[2][2],
             ];
+            // Half a texel of the source bitmap, in local UV. `max(1)` because a
+            // degenerate 0-wide bitmap would otherwise send an infinity into the
+            // shader's clamp.
+            let inset_of = |w: u32, h: u32| -> [f32; 2] {
+                [0.5 / w.max(1) as f32, 0.5 / h.max(1) as f32]
+            };
             match (bitmap_meta, standalone) {
                 // Common case: the fill bitmap is atlas-packed.
                 (Some(meta), _) => DrawKind::Bitmap {
                     atlas_index: meta.atlas_index,
                     uv_remap: [meta.u0, meta.v0, meta.u1 - meta.u0, meta.v1 - meta.v0],
+                    uv_inset: inset_of(meta.width, meta.height),
                     local_matrix,
                     is_smoothed: b.is_smoothed,
                     is_repeating: b.is_repeating,
                     standalone: None,
                 },
                 // >2048 fill: sample its standalone texture directly (full UV).
+                // It owns its texture, so CLAMP_TO_EDGE would already keep a
+                // NEAREST sample inside it; the inset is passed anyway because it
+                // resolves to the same texel centres and keeps one code path.
                 (None, Some(tex)) => DrawKind::Bitmap {
                     atlas_index: 0,
                     uv_remap: [0.0, 0.0, 1.0, 1.0],
+                    uv_inset: inset_of(tex.width, tex.height),
                     local_matrix,
                     is_smoothed: b.is_smoothed,
                     is_repeating: b.is_repeating,
@@ -5091,6 +5436,29 @@ impl SwitchRenderBackend {
         let (atlas_vao, atlas_vbo) = build_atlas_batch();
         let (line_vao, line_vbo) = build_line_segment();
         let (line_rect_vao, line_rect_vbo) = build_line_rect();
+        // One sampler object for point sampling, bound per draw (see
+        // `sampler_for`). It has to be a sampler and not texture parameters,
+        // because the bitmaps that want it share a 2048 atlas with bitmaps that
+        // do not: one texture object, hundreds of bitmaps, nowhere to put a
+        // per-bitmap filter. glTexParameteri around each draw was the other
+        // option and loses twice — it mutates the SHARED atlas, and it is the
+        // per-frame texparam churn that bisection on 2026-05-24 implicated in a
+        // Mario 63 driver-side issue (see `use_shape_bitmap`).
+        //
+        // A sampler supersedes the texture's WRAP as well as its filter, and its
+        // own defaults are GL_REPEAT + GL_NEAREST_MIPMAP_LINEAR while no texture
+        // here has a mipmap chain. Both wrap modes and a non-mipmap MIN filter
+        // are restated for that reason, not for tidiness.
+        let mut sampler_sharp: GLuint = 0;
+        unsafe {
+            glGenSamplers(1, &mut sampler_sharp);
+            if sampler_sharp != 0 {
+                glSamplerParameteri(sampler_sharp, GL_TEXTURE_MIN_FILTER, GL_NEAREST as GLint);
+                glSamplerParameteri(sampler_sharp, GL_TEXTURE_MAG_FILTER, GL_NEAREST as GLint);
+                glSamplerParameteri(sampler_sharp, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as GLint);
+                glSamplerParameteri(sampler_sharp, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as GLint);
+            }
+        }
         let t_arena = unsafe { ruffle_tick_now() };
         // What the arenas cost in MALLOC, which is the memory that runs out (a
         // 3.7 MB allocation failed at heap=1068 MB while the reserved-heap
@@ -5220,6 +5588,7 @@ impl SwitchRenderBackend {
             offscreen_temp_retired: Vec::new(),
             offscreen_temp_pool_bytes: 0,
             gl_state: GlStateCache::default(),
+            sampler_sharp,
             rect_vao,
             rect_vbo,
             bitmap_vao,
@@ -5614,6 +5983,9 @@ impl SwitchRenderBackend {
             (prog.program, prog.u_src_uv, prog.u_res, prog.u_scan, prog.u_mode);
         let (w, h) = self.screen_filter_dims;
         let tex = self.screen_filter_tex;
+        // Raw bind below, so the sampler from the frame's last bitmap draw is
+        // still live. Scanlines and CRT both sample between texels.
+        self.gl_state.clear_sampler();
         unsafe {
             glBindFramebuffer(GL_FRAMEBUFFER, self.screen_filter_prev_fbo as GLuint);
             glViewport(0, 0, w as GLsizei, h as GLsizei);
@@ -5660,6 +6032,13 @@ impl SwitchRenderBackend {
         if dst_tex == 0 {
             return false;
         }
+        // Every filter, blit, alpha-mask composite and blur funnels through here,
+        // and all of them bind their source texture raw instead of going through
+        // `use_bitmap`. The state cache only invalidates on the way OUT, so a
+        // sharp sampler left by the preceding bitmap draw would still be on unit
+        // 0 for this pass's taps. A NEAREST blur is not a softer blur, it is a
+        // mosaic.
+        self.gl_state.clear_sampler();
         // Colour-only FBO, deliberately NOT `offscreen_fbo`: see `filter_fbo`.
         // A filter pass disables the stencil test two statements below and
         // never reads depth, so it must not drag the shared (and monotonically
@@ -6562,7 +6941,7 @@ impl SwitchRenderBackend {
         const IDENT_MULT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
         const IDENT_ADD: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
         let uv_remap = [0.0, 0.0, 1.0, 1.0];
-        self.use_bitmap(&world, &IDENT_MULT, &IDENT_ADD, tex, &uv_remap);
+        self.use_bitmap(&world, &IDENT_MULT, &IDENT_ADD, tex, &uv_remap, 0);
         self.gl_state.bind_vao(self.bitmap_vao);
         self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
         set_blend();
@@ -6620,6 +6999,10 @@ impl SwitchRenderBackend {
         mode: i32,
         flip: f32,
     ) {
+        // Raw binds below (backdrop on unit 0, group on unit 1), so unit 0 still
+        // carries whatever the last bitmap draw chose. Unit 1 never gets a
+        // sampler, so it keeps the texture's own LINEAR either way.
+        self.gl_state.clear_sampler();
         let prog = self.complex_blend_prog.program;
         let u_src_uv = self.complex_blend_prog.u_src_uv;
         let u_blend_mode = self.complex_blend_prog.u_blend_mode;
@@ -6702,6 +7085,28 @@ impl SwitchRenderBackend {
         }
     }
 
+    /// The sampler a SWF bitmap draw should use: `sampler_sharp` to point-sample,
+    /// or 0 to keep the texture's LINEAR.
+    ///
+    /// `smoothing` is Ruffle's per-bitmap flag, which a pixel-art SWF sets false
+    /// on purpose and which this backend used to discard. Returning 0 rather
+    /// than a second "smooth" sampler object is deliberate: the SMOOTH path then
+    /// issues no sampler state at all and is byte-for-byte what shipped before,
+    /// and a failed `glGenSamplers` degrades to that same old picture instead of
+    /// to a black one.
+    fn sampler_for(&self, smoothing: bool) -> GLuint {
+        let sharp = match pixel_filter() {
+            TEXTURE_FILTER_SMOOTH => false,
+            TEXTURE_FILTER_SHARP => true,
+            _ => !smoothing,
+        };
+        if sharp {
+            self.sampler_sharp
+        } else {
+            0
+        }
+    }
+
     fn use_bitmap(
         &self,
         world: &[GLfloat; 9],
@@ -6709,11 +7114,17 @@ impl SwitchRenderBackend {
         add: &[f32; 4],
         tex: GLuint,
         uv_remap: &[f32; 4],
+        sampler_obj: GLuint,
     ) {
-        // Sampler binding (u_tex = 0) set once at program link; no per-draw
-        // glUniform1i(u_tex) needed here.
+        // Sampler UNIFORM (u_tex = 0) set once at program link; no per-draw
+        // glUniform1i(u_tex) needed here. `sampler_obj` is the unrelated sampler
+        // OBJECT, and it is a per-draw choice on purpose: this one helper draws
+        // SWF bitmaps out of a shared atlas AND launcher art (banner, covers,
+        // glyph runs) out of its own textures, and only the first kind may ever
+        // be point-sampled. Non-SWF callers pass 0 and keep LINEAR.
         self.gl_state.use_program(self.bitmap_prog.program);
         self.gl_state.bind_texture_unit0(tex);
+        self.gl_state.bind_sampler(sampler_obj);
         unsafe {
             glUniformMatrix3fv(self.bitmap_prog.u_world, 1, GL_FALSE, world.as_ptr());
             glUniform4f(self.bitmap_prog.u_mult, mult[0], mult[1], mult[2], mult[3]);
@@ -6733,16 +7144,24 @@ impl SwitchRenderBackend {
         tex: GLuint,
         uv_matrix: &[GLfloat; 9],
         uv_remap: &[f32; 4],
+        uv_inset: &[f32; 2],
         is_repeating: bool,
+        sampler_obj: GLuint,
     ) {
-        // Atlas texture parameters are set once at atlas creation; no per-
+        // Atlas texture parameters are STILL set once at atlas creation; no per-
         // draw glTexParameteri (avoids per-frame state churn that bisection
         // on 2026-05-24 implicated in a Mario 63 driver-side issue).
         // u_wrap_mode and u_tex sampler are routed through the GL state
         // cache so identical-state runs of draws (very common for atlas
         // bitmap fills) only hit the driver once.
+        //
+        // The per-draw filter rides a sampler OBJECT for the same reason: it is
+        // one bind through that cache instead of texparam churn, and it leaves
+        // the shared atlas untouched, which glTexParameteri could not — the next
+        // draw out of the same atlas usually wants the other filter.
         self.gl_state.use_program(self.shape_bitmap_prog.program);
         self.gl_state.bind_texture_unit0(tex);
+        self.gl_state.bind_sampler(sampler_obj);
         // u_wrap_mode: 0 = clamp (default for non-repeating fills),
         // 1 = fract (for tile/repeat fills like Mario 63 ground).
         self.gl_state.set_wrap_mode(
@@ -6758,6 +7177,7 @@ impl SwitchRenderBackend {
                 self.shape_bitmap_prog.u_uv_remap,
                 uv_remap[0], uv_remap[1], uv_remap[2], uv_remap[3],
             );
+            glUniform2f(self.shape_bitmap_prog.u_uv_inset, uv_inset[0], uv_inset[1]);
         }
     }
 
@@ -6774,6 +7194,11 @@ impl SwitchRenderBackend {
     ) {
         self.gl_state.use_program(self.gradient_prog.program);
         self.gl_state.bind_texture_unit0(tex);
+        // Said explicitly because the sampler on unit 0 is whatever the last
+        // bitmap draw left there. The ramp is a 256x1 texture whose entire job
+        // is to be interpolated; point-sampling it turns every gradient in the
+        // frame into 256 hard bands.
+        self.gl_state.bind_sampler(0);
         unsafe {
             glUniformMatrix3fv(self.gradient_prog.u_world, 1, GL_FALSE, world.as_ptr());
             glUniform4f(self.gradient_prog.u_mult, mult[0], mult[1], mult[2], mult[3]);
@@ -7594,7 +8019,7 @@ impl SwitchRenderBackend {
         ];
         const NO_ADD: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
         const PASSTHROUGH_UV: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
-        self.use_bitmap(&world, &mult, &NO_ADD, tex, &PASSTHROUGH_UV);
+        self.use_bitmap(&world, &mult, &NO_ADD, tex, &PASSTHROUGH_UV, 0);
         self.gl_state.bind_vao(self.atlas_vao);
         self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
         unsafe {
@@ -7697,6 +8122,21 @@ impl SwitchRenderBackend {
     pub fn draw_screen_menu(&mut self, selected: usize) {
         let lc = crate::loc::s();
         let game = crate::library::active_display_name();
+        // PIXELS carries a hint while it is the selected row, the way OVERCLOCK
+        // does on the pause panel one level up. Every other row here proves
+        // itself on the frozen frame; this one has a position that cannot.
+        // AUTO and SMOOTH draw an identical picture on any game whose bitmaps
+        // all ask for smoothing, which is most of them, so two of the three
+        // positions would read as a dead button with nothing to say why.
+        // FPS needs one for a different reason: "15 / 30" is not
+        // self-explanatory the first time it appears, and the alternative --
+        // a second line under the counter itself, over the game -- is exactly
+        // what the framing legend's comment rules out.
+        let footer = match SCREEN_ITEMS.get(selected) {
+            Some(&"PIXELS") => lc.pixels_hint,
+            Some(&"FPS") => lc.fps_hint,
+            _ => lc.pause_footer,
+        };
         let frame = self.draw_modal_frame(
             MODAL_W,
             SCREEN_ITEMS.len(),
@@ -7704,7 +8144,7 @@ impl SwitchRenderBackend {
             false,
             lc.menu_screen,
             game.as_deref(),
-            Some(lc.pause_footer),
+            Some(footer),
         );
         let display_label = std::format!(
             "{}: {}",
@@ -7717,16 +8157,36 @@ impl SwitchRenderBackend {
             crate::loc::rotation_label(crate::keymap::rotation()),
         );
         let zoom_label = std::format!("{}: {} %", lc.set_zoom, game_zoom_percent());
+        // Read back from the game's `.prefs` rather than from the renderer's
+        // atomic, exactly like the four rows around it: the file is what the
+        // player is editing, and a row rebuilt from it says so even if a write
+        // failed.
+        let pixels_label = std::format!(
+            "{}: {}",
+            lc.set_pixel_filter,
+            crate::loc::pixel_filter_label(crate::keymap::pixel_filter()),
+        );
         let filter_label = std::format!(
             "{}: {}",
             lc.set_screen_filter,
             crate::loc::screen_filter_label(crate::keymap::screen_filter()),
         );
+        // Reads back the atomic, not the stored preference, for the reason the
+        // OVERCLOCK row reads back the hardware: this is what is in force right
+        // now, and it costs nothing, where `keymap::fps_counter()` would open a
+        // file on the SD card on every frame the panel is up.
+        let fps_label = std::format!(
+            "{}: {}",
+            lc.set_fps,
+            crate::loc::fps_counter_label(if fps_counter_on() { 1 } else { 0 }),
+        );
         let items = [
             display_label.as_str(),
             rotation_label.as_str(),
             zoom_label.as_str(),
+            pixels_label.as_str(),
             filter_label.as_str(),
+            fps_label.as_str(),
         ];
         debug_assert_eq!(items.len(), SCREEN_ITEMS.len());
         self.draw_modal_rows(&frame, selected, &items);
@@ -7803,6 +8263,101 @@ impl SwitchRenderBackend {
             swf::Color::from_rgb(0xFFFFFF, 255),
         );
 
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+
+    /// FPS counter (issue #111): what the movie is actually running at, against
+    /// what it asks for.
+    ///
+    /// A bare number answers nothing on this console. Nothing here declares 60:
+    /// Mario 63 asks for 32, Papa Louie 3 and Agent P for 30, Icy Tower for 24.
+    /// So the reading is shown against the movie's own rate and the ratio is
+    /// spelled out, because the ratio is the thing the player actually feels --
+    /// Papa Louie 3 at 15.1 of 30 is an in-game stopwatch reading 5 s while 10 s
+    /// of real time goes past.
+    ///
+    /// Drawn OUTSIDE `game_layer`, like the pointer and the framing legend, so
+    /// the free zoom (issue #101) leaves it alone. Nothing has to undo the zoom
+    /// by hand here, unlike the pointer: `world_matrix` only folds it in while
+    /// that flag is set, and `submit_frame` clears it before this is reached. At
+    /// 400% a counter that scaled with the picture would be off the screen.
+    ///
+    /// No plate behind it, for the reason the framing legend has none: it sits
+    /// on a running game, and a band wide enough to guarantee contrast hides a
+    /// corner of the thing being measured. `draw_text_outlined` buys the
+    /// legibility instead, over a white sky and over a black cave alike.
+    ///
+    /// Every character is in the 5x7 bitmap font -- digits, '/', '.', 'X' and
+    /// the three letters of FPS -- so this pulls no shared-font glyph and stays
+    /// safe in applet mode, where loading that font is fatal.
+    pub fn draw_fps_overlay(&mut self) {
+        let (measured, nominal) = fps_readout();
+        unsafe {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_STENCIL_TEST);
+        }
+        let (text, color) = if let (Some(real_x10), None) = (measured, nominal) {
+            // The movie declares no usable rate, so there is no denominator and
+            // no ratio. The measured rate alone still answers "is this running".
+            (
+                std::format!("FPS {}", fps_rate_str(real_x10)),
+                swf::Color::from_rgb(0xFFFFFF, 255),
+            )
+        } else if measured.is_none() {
+            // No window has closed yet. Show the nominal if we have one, so the
+            // counter is visibly alive instead of looking like a setting that
+            // did not take. NOT the same as a measured zero, which is a real
+            // reading and gets the red treatment below.
+            (
+                match nominal {
+                    Some(n) => std::format!("FPS -- / {}", fps_rate_str(n)),
+                    None => std::string::String::from("FPS --"),
+                },
+                swf::Color::from_rgb(0xFFFFFF, 255),
+            )
+        } else {
+            let real_x10 = measured.unwrap_or(0);
+            let nominal_x10 = nominal.unwrap_or(0);
+            // Percent of nominal, in hundredths. `fps_readout` guarantees a
+            // non-zero denominator.
+            let pct = (real_x10 as u64 * 100 / nominal_x10 as u64) as u32;
+            // Green at full speed, amber where the slowdown is noticeable, red
+            // below two thirds. The two thresholds are a reading aid layered on
+            // top of numbers that stay exact -- they exist so a glance is enough
+            // while both hands are on the game.
+            let color = match pct {
+                0..=65 => swf::Color::from_rgb(0xFF5040, 255),
+                66..=94 => swf::Color::from_rgb(0xFFD740, 255),
+                _ => swf::Color::from_rgb(0x4CAF50, 255),
+            };
+            (
+                std::format!(
+                    "FPS {} / {}   {}.{:02}X",
+                    fps_rate_str(real_x10),
+                    fps_rate_str(nominal_x10),
+                    pct / 100,
+                    pct % 100,
+                ),
+                color,
+            )
+        };
+        const SCALE: f32 = 2.0;
+        const MARGIN: f32 = 16.0;
+        // The LOGICAL viewport, which is portrait while the picture is turned
+        // (#78) -- `world_matrix` composes the quarter-turn itself, so a corner
+        // named here is that corner of the turned picture.
+        let vw = self.dimensions.width as f32;
+        let w = self.measure_text(&text, SCALE);
+        // Pinned to the RIGHT edge. The left one moves by a character every time
+        // the rate crosses a ten, and a number that slides sideways is harder to
+        // read than one that grows. Top corner because the pause panel is
+        // centred and the framing legend owns the middle of both edges.
+        self.draw_text_outlined(vw - w - MARGIN, MARGIN, SCALE, &text, color);
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
@@ -8370,7 +8925,7 @@ impl SwitchRenderBackend {
         let mult = [1.0, 1.0, 1.0, 1.0];
         let add = [0.0, 0.0, 0.0, 0.0];
         let uv_remap = [0.0, 0.0, 1.0, 1.0];
-        self.use_bitmap(&world, &mult, &add, tex, &uv_remap);
+        self.use_bitmap(&world, &mult, &add, tex, &uv_remap, 0);
         self.gl_state.bind_vao(self.bitmap_vao);
         unsafe {
             glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -8437,7 +8992,7 @@ impl SwitchRenderBackend {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         }
-        self.use_bitmap(&world, &mult, &add, tex, &uv_remap);
+        self.use_bitmap(&world, &mult, &add, tex, &uv_remap, 0);
         self.gl_state.bind_vao(self.bitmap_vao);
         unsafe {
             glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -14697,6 +15252,13 @@ impl RenderBackend for SwitchRenderBackend {
             // don't have a previous tick to subtract from.
             let now_tick = unsafe { ruffle_tick_now() };
             let tick_freq = unsafe { ruffle_tick_freq() };
+            // A window the console spent asleep or behind the HOME menu is not a
+            // measurement. Dropping the previous tick sends this one down the
+            // "—" path below, which is also what keeps it out of the worst-case
+            // slot a bug report now carries.
+            if HEARTBEAT_RESET.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                self.heartbeat_tick = 0;
+            }
             let fps_str = if self.heartbeat_tick != 0 && tick_freq > 0 {
                 let dt_ticks = now_tick.saturating_sub(self.heartbeat_tick);
                 if dt_ticks > 0 {
@@ -14783,8 +15345,17 @@ impl RenderBackend for SwitchRenderBackend {
             let skin_mc = unsafe { flashnx_skin_temp_mc() };
             let batt_mc = unsafe { flashnx_batt_temp_mc() };
             let batt_pm = unsafe { flashnx_batt_permille() };
+            // What the small-object cache HOLDS, next to what it has handed
+            // out. `slabMB` is the second of those and was the only one
+            // reported, so the tens of megabytes the cache keeps between its
+            // free lists never appeared anywhere in a bug report's memory
+            // picture. Printed as n/max because the ceiling is the cache's
+            // other silent failure: at 16/16 it stops growing and every new
+            // small block falls back to newlib, and that path sets no flag —
+            // `!STARVED` covers the refusal, nothing covered the cap.
+            let (slab_chunks, slab_chunks_max) = crate::slab_chunks();
             let msg = std::format!(
-                "f{}: fps={} cpu={}MHz gpu={}MHz drift={} skin={} batC={} bat={} dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB heap={}MB slabMB={}{} drawbox={} maxalpha={:.2}\n",
+                "f{}: fps={} cpu={}MHz gpu={}MHz drift={} skin={} batC={} bat={} dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB heap={}MB slabMB={} slabChunks={}/{}{} drawbox={} maxalpha={:.2}\n",
                 self.frame_count,
                 fps_str,
                 cpu_mhz,
@@ -14831,6 +15402,8 @@ impl RenderBackend for SwitchRenderBackend {
                 ram_total / (1024 * 1024),
                 unsafe { ruffle_heap_used() } / (1024 * 1024),
                 crate::slab_bytes() / (1024 * 1024),
+                slab_chunks,
+                slab_chunks_max,
                 // Sticky: no contiguous 32 MB was available at some point, so
                 // small blocks are falling back to newlib. See `region_grow_failed`.
                 if crate::region_grow_failed() { "!STARVED" } else { "" },
@@ -15217,7 +15790,7 @@ impl CommandHandler for SwitchRenderBackend {
         &mut self,
         bitmap: BitmapHandle,
         transform: Transform,
-        _smoothing: bool,
+        smoothing: bool,
         pixel_snapping: PixelSnapping,
     ) {
         if self.mask.writing {
@@ -15252,7 +15825,12 @@ impl CommandHandler for SwitchRenderBackend {
             let add = transform.color_transform.add_rgba_normalized();
             let uv_remap = [0.0, 0.0, 1.0, 1.0];
             self.bitmap_render_count = self.bitmap_render_count.wrapping_add(1);
-            self.use_bitmap(&world, &mult, &add, tex, &uv_remap);
+            // A cacheAsBitmap or filter result is still a Bitmap as far as the
+            // movie is concerned, and Flash filtered it by the same flag, so it
+            // goes through `sampler_for` like any other bitmap. It needs no UV
+            // inset: it owns its texture and CLAMP_TO_EDGE already keeps a
+            // NEAREST sample inside it.
+            self.use_bitmap(&world, &mult, &add, tex, &uv_remap, self.sampler_for(smoothing));
             self.gl_state.bind_vao(self.bitmap_vao);
             self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
             // Standalone cache textures store PREMULTIPLIED alpha (the offscreen
@@ -15301,7 +15879,13 @@ impl CommandHandler for SwitchRenderBackend {
             switch_bitmap.v1 - switch_bitmap.v0,
         ];
         self.bitmap_render_count = self.bitmap_render_count.wrapping_add(1);
-        self.use_bitmap(&world, &mult, &add, tex, &uv_remap);
+        // No UV inset here, unlike the shape fill: `a_uv` comes straight off the
+        // static unit quad and is only ever interpolated at covered sample
+        // points, so it stays strictly inside (0,1) and a NEAREST sample lands in
+        // [x, x+w-1] of the slot. The 1 px replicated ATLAS_PAD is what makes
+        // that safe at the very edge, and it is the reason this path can be left
+        // alone while the shape shader, whose clamp really does reach 1.0, cannot.
+        self.use_bitmap(&world, &mult, &add, tex, &uv_remap, self.sampler_for(smoothing));
         self.gl_state.bind_vao(self.bitmap_vao);
         self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
         unsafe {
@@ -15318,8 +15902,13 @@ impl CommandHandler for SwitchRenderBackend {
         // appeared over an empty grey field.
         //
         // The back buffer is a plain standalone bitmap, so drawing it is drawing
-        // a bitmap — no smoothing, no pixel snapping, since it is already at
-        // device resolution and the stage transform places it.
+        // a bitmap — no pixel snapping, since it is already at device resolution
+        // and the stage transform places it.
+        //
+        // Smoothing is passed as TRUE, and that is now load-bearing rather than
+        // decorative: `render_bitmap` used to throw the flag away, so this call
+        // said `false` to mean "nothing to smooth". With AUTO honouring the flag,
+        // `false` would point-sample an entire 3D scene.
         //
         // Flipped vertically on the way: a framebuffer writes with its origin at
         // the bottom left, while a texture uploaded from an image is stored top
@@ -15345,7 +15934,7 @@ impl CommandHandler for SwitchRenderBackend {
             color_transform: transform.color_transform,
             perspective_projection: transform.perspective_projection,
         };
-        self.render_bitmap(bitmap, flipped, false, PixelSnapping::Never);
+        self.render_bitmap(bitmap, flipped, true, PixelSnapping::Never);
     }
 
     fn render_shape(&mut self, shape: ShapeHandle, transform: Transform) {
@@ -15410,8 +15999,9 @@ impl CommandHandler for SwitchRenderBackend {
                 DrawKind::Bitmap {
                     atlas_index,
                     uv_remap,
+                    uv_inset,
                     local_matrix,
-                    is_smoothed: _,
+                    is_smoothed,
                     is_repeating,
                     standalone,
                 } => {
@@ -15435,7 +16025,9 @@ impl CommandHandler for SwitchRenderBackend {
                         tex,
                         local_matrix,
                         uv_remap,
+                        uv_inset,
                         *is_repeating,
+                        self.sampler_for(*is_smoothed),
                     );
                 }
             }
@@ -15812,6 +16404,9 @@ impl Drop for SwitchRenderBackend {
             glDeleteBuffers(1, &self.line_rect_vbo);
             glDeleteVertexArrays(1, &self.line_rect_vao);
             glDeleteVertexArrays(1, &self.shape_vao);
+            if self.sampler_sharp != 0 {
+                glDeleteSamplers(1, &self.sampler_sharp);
+            }
             if self.offscreen_fbo != 0 {
                 glDeleteFramebuffers(1, &self.offscreen_fbo);
             }

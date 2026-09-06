@@ -1515,6 +1515,48 @@ pub fn set_screen_filter(mode: u8) {
     write_pref(&basename, "filter", mode);
 }
 
+/// Number of texture-sampling modes: 0 = AUTO (follow the SWF's own `smoothing`
+/// flag), 1 = SMOOTH (force bilinear), 2 = SHARP (force nearest). Issue #108.
+pub const PIXEL_FILTER_COUNT: u8 = 3;
+
+/// Per-game texture sampling (by basename). Same `<basename>.prefs` file as the
+/// four rows above, under the key `pixels`.
+///
+/// NOT `filter`: that key has been the CRT screen filter since it landed, and
+/// reusing it would have made cycling one row silently move the other -- two
+/// settings whose names are one word apart, sharing one file, is exactly where
+/// that mistake gets made.
+///
+/// PER GAME because which games this rescues is a property of the ART, not of
+/// the console: the report that opened the issue was "some games that use pixel
+/// art just look kinda shitty with bilinear". One global switch would have paid
+/// for those with hard edges on the vector-drawn games, which are most of the
+/// library.
+pub fn pixel_filter_for(basename: &str) -> u8 {
+    read_pref(basename, "pixels")
+        .filter(|v| *v < PIXEL_FILTER_COUNT)
+        .unwrap_or_else(crate::loc::default_pixel_filter)
+}
+
+/// Texture sampling of the ACTIVE game, AUTO when nothing is playing.
+pub fn pixel_filter() -> u8 {
+    match active_game_basename() {
+        Some(b) => pixel_filter_for(&b),
+        None => 0,
+    }
+}
+
+/// Persist the ACTIVE game's texture sampling. Always written, AUTO included,
+/// for the same reason as the screen filter above: a missing key means "follow
+/// the global default", so a deliberate AUTO has to stay distinguishable from a
+/// game nobody ever set.
+pub fn set_pixel_filter(mode: u8) {
+    let Some(basename) = active_game_basename() else {
+        return;
+    };
+    write_pref(&basename, "pixels", mode);
+}
+
 /// Number of power modes: 0 = NORMAL (the OS profile, untouched), 1 = HIGH
 /// (CPU 1785 MHz, GPU left alone).
 pub const POWER_MODE_COUNT: u8 = 2;
@@ -1555,6 +1597,49 @@ pub fn set_power_mode(mode: u8) {
         return;
     };
     write_pref(&basename, "power", mode);
+}
+
+/// Number of FPS-counter states: 0 = hidden, 1 = shown. Spelled as a count like
+/// the settings above so the ECRAN row cycles through the same expression they
+/// all use, rather than being the one row with a bespoke toggle.
+pub const FPS_COUNTER_COUNT: u8 = 2;
+
+/// Per-game FPS counter (issue #111), falling back to the global default.
+///
+/// PER GAME, and the argument for a single global switch was weighed and lost.
+/// It runs: the right answer does not depend on the game, only on whether the
+/// player is diagnosing right now. What decides it the other way is that ECRAN
+/// is captioned with the game's own name and every other row on it is a
+/// property of that game, so one global row sitting under that caption would be
+/// lying; and that the default mechanism already answers "I want it on
+/// everywhere" in one press in REGLAGES, while a global switch cannot answer
+/// "everywhere except this one, where it sits on the score".
+pub fn fps_counter_for(basename: &str) -> u8 {
+    read_pref(basename, "fps")
+        .filter(|v| *v < FPS_COUNTER_COUNT)
+        .unwrap_or_else(crate::loc::default_fps_counter)
+}
+
+/// FPS counter of the ACTIVE game, 0 when nothing is playing.
+///
+/// Read at LAUNCH only, never per frame: this walks the SD card. The per-frame
+/// answer is `render::fps_counter_on()`, mirrored from here.
+pub fn fps_counter() -> u8 {
+    match active_game_basename() {
+        Some(b) => fps_counter_for(&b),
+        None => 0,
+    }
+}
+
+/// Persist the ACTIVE game's FPS counter. Written for 0 as well, like the power
+/// mode and the screen filter: a missing key means "follow the global default",
+/// so deleting it would lose the difference between a deliberate no and a game
+/// nobody ever touched.
+pub fn set_fps_counter(mode: u8) {
+    let Some(basename) = active_game_basename() else {
+        return;
+    };
+    write_pref(&basename, "fps", mode);
 }
 
 /// Stage-scaling mode of the ACTIVE game (the one being played), 0 when unset

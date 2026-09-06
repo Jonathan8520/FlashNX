@@ -162,10 +162,15 @@ pub(crate) enum Screen {
     /// `scroll_offset` is the topmost visible row. A → describe + send,
     /// B → back to the RÉGLAGES tab.
     BugPicker { selection: usize, scroll_offset: usize },
-    /// Result of a bug submission. `State::bug_ok` picks the success/failure
-    /// styling, `State::bug_msg` is the (already-localized) message. A/B dismiss
-    /// back to the RÉGLAGES tab.
-    BugResult,
+    /// Result of a bug OR suggestion submission. `State::bug_ok` picks the
+    /// success/failure styling, `State::bug_msg` is the (already-localized)
+    /// message. A/B dismiss back to the RÉGLAGES tab.
+    ///
+    /// `from_row` is the RÉGLAGES row the flow started on (3 = SIGNALER UN BUG,
+    /// 4 = FAIRE UNE PROPOSITION). ONE screen serves both, so the row has to be
+    /// carried rather than assumed: dismissing a sent suggestion used to land the
+    /// cursor on SIGNALER UN BUG, one row above the button just pressed (#113).
+    BugResult { from_row: usize },
     /// TOUCHES sub-menu (#20 regroup): everything controls-related for a game in
     /// one place. `selection` indexes [edit, apply, share, (revert)] — the revert
     /// row is present only when `State::touches_can_revert`. Reached from OPTIONS
@@ -1512,6 +1517,10 @@ extern "C" {
     /// 1 = small applet memory pool (can't launch games — see P1c notice),
     /// 0 = full title-takeover heap. Defined in cpp/src/ruffle_bridge.cpp.
     fn ruffle_is_applet_mode() -> core::ffi::c_int;
+    /// 1 = docked, 0 = handheld. Same symbol render.rs reads for the telemetry
+    /// line, redeclared here because that extern block is private — the same
+    /// per-module duplication `ruffle_tick_now` and `ruffle_log_cstr` already use.
+    fn ruffle_is_docked() -> core::ffi::c_int;
 }
 
 fn log(s: &str) {
@@ -3930,11 +3939,14 @@ pub fn input(button: &str) -> bool {
             handle_bug_picker_input(&mut s, button, selection, scroll_offset);
             true
         }
-        Screen::BugResult => {
+        Screen::BugResult { from_row } => {
             if matches!(button, "A" | "B" | "Minus") {
                 s.bug_msg.clear();
-                // Back to the RÉGLAGES tab, cursor on SIGNALER UN BUG (row 3).
-                s.screen = Screen::SettingsModal { selection: 3 };
+                // Back to the RÉGLAGES tab, on the row that OPENED this. Row 3 was
+                // hardcoded here, and since the suggestion flow ends on the same
+                // screen, sending one put the cursor back one row above the button
+                // that had just been pressed (#113).
+                s.screen = Screen::SettingsModal { selection: from_row };
             }
             true
         }
@@ -4019,9 +4031,11 @@ pub fn input(button: &str) -> bool {
 }
 
 /// Settings tab entries: 0 = home layout, 1 = game defaults, 2 = language,
-/// 3 = report a bug, 4 = make a suggestion, 5 = nickname, 6 = quit. (No BACK —
-/// leave via L/R.) Rows 4 and 5 are hoisted BY INDEX in `input()` because they
-/// open the system keyboard, so any reordering has to move those two with it.
+/// 3 = report a bug, 4 = make a suggestion, 5 = nickname, 6 = games folder,
+/// 7 = quit. (No BACK — leave via L/R.) Rows 4 and 5 are hoisted BY INDEX in
+/// `input()` because they open the system keyboard, so any reordering has to
+/// move those two with it. Rows 3 and 4 are written by index a second time, into
+/// `Screen::BugResult { from_row }` (#113) and by `handle_bug_picker_input`'s B.
 fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
     const LAST: usize = 7;
     match button {
@@ -4058,7 +4072,8 @@ fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
                     if s.entries.is_empty() {
                         s.bug_ok = false;
                         s.bug_msg = crate::loc::s().bug_no_games.to_string();
-                        s.screen = Screen::BugResult;
+                        // Opened from this very row, so dismissing comes back to it.
+                        s.screen = Screen::BugResult { from_row: 3 };
                     } else {
                         s.screen = Screen::BugPicker { selection: 0, scroll_offset: 0 };
                     }
@@ -4089,16 +4104,18 @@ fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
     s.screen = Screen::SettingsModal { selection };
 }
 
-/// Game DEFAULTS sub-modal (0 = global keymap, 1 = display, 2 = filter,
-/// 3 = cursor speed). Rows 1-3 cycle in place on A, like the in-game rows they
-/// mirror; row 0 opens the keymap editor. B returns to REGLAGES on the row that
-/// opened this.
+/// Game DEFAULTS sub-modal (0 = global keymap, 1 = display, 2 = rotation,
+/// 3 = zoom, 4 = pixels, 5 = filter, 6 = fps counter, 7 = overclock,
+/// 8 = cursor speed). Rows 1-8
+/// cycle in place on A, in the order the in-game ECRAN panel uses so the two
+/// screens can be read against each other; row 0 opens the keymap editor. B
+/// returns to REGLAGES on the row that opened this.
 ///
 /// These are DEFAULTS, not overrides: they apply to a game that has never been
 /// set from its own pause menu. A game with its own sidecar keeps its value, and
 /// keeps it even if the default changes later.
 fn handle_settings_prefs_input(s: &mut State, button: &str, mut selection: usize) {
-    const LAST: usize = 6;
+    const LAST: usize = 8;
     match button {
         "Up" | "StickLUp" => {
             selection = if selection == 0 { LAST } else { selection - 1 };
@@ -4134,12 +4151,32 @@ fn handle_settings_prefs_input(s: &mut State, button: &str, mut selection: usize
                     crate::loc::save_current();
                 }
                 4 => {
+                    // Texture sampling (issue #108). Sits above the screen
+                    // filter here for the same reason it does in ECRAN, and the
+                    // two are kept in the same order on both screens because
+                    // their names are close enough that a different order would
+                    // be read as a different setting.
+                    let next = (crate::loc::default_pixel_filter() + 1)
+                        % keymap::PIXEL_FILTER_COUNT;
+                    crate::loc::set_default_pixel_filter(next);
+                    crate::loc::save_current();
+                }
+                5 => {
                     let next = (crate::loc::default_screen_filter() + 1)
                         % keymap::SCREEN_FILTER_COUNT;
                     crate::loc::set_default_screen_filter(next);
                     crate::loc::save_current();
                 }
-                5 => {
+                6 => {
+                    // The DEFAULT only, and nothing is drawn here to preview it
+                    // on: there is no game running, so the first sight of the
+                    // counter is the next game that follows this default.
+                    let next = (crate::loc::default_fps_counter() + 1)
+                        % keymap::FPS_COUNTER_COUNT;
+                    crate::loc::set_default_fps_counter(next);
+                    crate::loc::save_current();
+                }
+                7 => {
                     // The DEFAULT only. No clock is touched from here: there is
                     // no game running, and a raise outside gameplay would be
                     // spent entirely on drawing a menu.
@@ -4680,26 +4717,87 @@ fn run_bug_report_flow(row: usize) {
     let source_url = read_sd_text(&std::format!("{}.url", path), 4096)
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
+    // Both size numbers, kept apart. `Entry::size_bytes` is the `.filesize`
+    // footprint when the game has one and the SWF header's `file_length`
+    // otherwise, and the issue never said which: #112 showed 3.9 MB (a header)
+    // next to #110's 3.38 GB (a card footprint).
+    //
+    // Free for a single-file game, whose `size` already IS the header length.
+    // Only a game whose number was replaced by the footprint pays the re-open,
+    // and that is an 8-byte read plus at most a 64-byte inflate, not a rescan.
+    let disk_size = read_filesize_cache(&path).unwrap_or(0);
+    let header_size = if disk_size == 0 {
+        size
+    } else {
+        read_swf_header(&path).map(|h| h.size_bytes).unwrap_or(0)
+    };
+    // Shape of the companion folder, read at its ROOT only.
+    //
+    // Two numbers rather than one because `swf_picker_count_companions` counts
+    // flat `.swf` files and skips directories, while a Flashpoint GameZIP writes
+    // `<stem>.files/<host>/<path>/...` — so on its own it reports 0 for a
+    // healthy multi-file game and would flag every one of them as broken.
+    //
+    // -1 is "no companion folder at all", which is what separates a plain
+    // single-file game from #112: there the folder was present and EMPTY and the
+    // game sat on its loading screen forever. `extract_gamezip_tree` never
+    // leaves an empty one behind (it creates parent dirs on demand), so 0/0 is
+    // always a half-written or half-lost install.
+    //
+    // Root level, deliberately: `swf_picker_files_dir_size` walks the whole tree,
+    // which is seconds on Super Smash Flash 2's 1474 files. Sending a bug report
+    // must not feel like the app has hung.
+    let files_dir = crate::sidecar_dir_for(Some(&path))
+        .to_string_lossy()
+        .into_owned();
+    let (companions, companion_dirs) = if dir_exists(&files_dir) {
+        let mut p = path.as_bytes().to_vec();
+        p.push(0);
+        let flat =
+            unsafe { swf_picker_count_companions(p.as_ptr() as *const core::ffi::c_char) };
+        (flat.max(0), list_dirs_all(&files_dir).len() as i32)
+    } else {
+        (-1, -1)
+    };
+    // The OVERCLOCK that was in force for THIS game, per-game value already
+    // folded with the REGLAGES default. #109 arrived as a performance report with
+    // no way to tell whether the boost was on.
+    //
+    // NOT `overclock_refused()`: that flag is session-global and belongs to the
+    // last raise that was ASKED FOR, whichever game that was, so pinning it on
+    // this one would be wrong with the appearance of right.
+    let power_mode = keymap::power_mode_for(&file);
+    // And whether the console actually granted it: the setting and what ran are
+    // not the same fact when the battery veto fires.
+    let power_refused = crate::backend::render::overclock_ever_refused();
     // Description is optional — cancel (None) aborts the whole report.
     let Some(description) = net::prompt_bug() else {
         return;
     };
     let applet = unsafe { ruffle_is_applet_mode() } != 0;
+    let docked = unsafe { ruffle_is_docked() } != 0;
     let report = crate::bugreport::Report {
         kind: "bug",
         game,
         file,
         source_url,
-        size,
+        size: header_size,
+        disk_size,
         swf_version,
         compression: compression.to_string(),
         as3,
         app_version: crate::bugreport::APP_VERSION,
         lang: crate::loc::current().code(),
         applet,
+        companions,
+        companion_dirs,
+        power_mode,
+        power_refused,
+        docked,
         description: description.trim().to_string(),
     };
-    submit_and_show(&report);
+    // Row 3 = SIGNALER UN BUG: the picker this came through has no other way in.
+    submit_and_show(&report, 3);
 }
 
 /// RÉGLAGES > FAIRE UNE PROPOSITION: open swkbd for a free-text idea and POST it
@@ -4721,15 +4819,26 @@ fn run_suggestion_flow() {
         file: std::string::String::new(),
         source_url: std::string::String::new(),
         size: 0,
+        disk_size: 0,
         swf_version: 0,
         compression: std::string::String::new(),
         as3: false,
         app_version: crate::bugreport::APP_VERSION,
         lang: crate::loc::current().code(),
         applet: unsafe { ruffle_is_applet_mode() } != 0,
+        // Empty on purpose: the relay's suggestion branch renders none of the
+        // game fields, and there is no game to measure. -1 is the truthful
+        // "no companion folder", and a dock state read here would describe the
+        // menu the idea was typed in, which explains nothing.
+        companions: -1,
+        companion_dirs: -1,
+        power_mode: 0,
+        power_refused: false,
+        docked: false,
         description: text,
     };
-    submit_and_show(&report);
+    // Row 4 = FAIRE UNE PROPOSITION, the only row that reaches this flow.
+    submit_and_show(&report, 4);
 }
 
 /// RÉGLAGES > PSEUDO (#20): open swkbd (prefilled with the current nickname) to
@@ -4917,7 +5026,13 @@ fn run_pseudo_flow() {
 }
 
 /// Submit a bug/suggestion report and land on the result screen.
-fn submit_and_show(report: &crate::bugreport::Report) {
+///
+/// `from_row` is the RÉGLAGES row the flow started on, carried through so the
+/// dismissal puts the cursor back on the button that was pressed (#113). Passed
+/// in rather than derived from `report.kind`: the row is a fact about the menu,
+/// and a third caller POSTing a "bug" from somewhere else would silently
+/// reintroduce the same wrong-row landing.
+fn submit_and_show(report: &crate::bugreport::Report, from_row: usize) {
     // The success line follows the FLOW, not the relay (#83): both go through the
     // same endpoint, but "your report was sent" after a suggestion reads like the
     // button sent the wrong thing.
@@ -4933,7 +5048,7 @@ fn submit_and_show(report: &crate::bugreport::Report) {
     if let Ok(mut s) = LIBRARY.lock() {
         s.bug_ok = ok;
         s.bug_msg = msg;
-        s.screen = Screen::BugResult;
+        s.screen = Screen::BugResult { from_row };
     }
 }
 
@@ -8880,10 +8995,20 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             );
             let zoom_label =
                 std::format!("{}: {} %", lc.set_zoom, crate::loc::default_zoom());
+            let pixels_label = std::format!(
+                "{}: {}",
+                lc.set_pixel_filter,
+                crate::loc::pixel_filter_label(crate::loc::default_pixel_filter()),
+            );
             let filter_label = std::format!(
                 "{}: {}",
                 lc.set_screen_filter,
                 crate::loc::screen_filter_label(crate::loc::default_screen_filter()),
+            );
+            let fps_label = std::format!(
+                "{}: {}",
+                lc.set_fps,
+                crate::loc::fps_counter_label(crate::loc::default_fps_counter()),
             );
             let power_label = std::format!(
                 "{}: {}",
@@ -8892,12 +9017,17 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             );
             let m = unsafe { ruffle_cursor_speed_mult_x10() };
             let cursor_label = std::format!("{}: x{}.{}", lc.set_cursor_speed, m / 10, m % 10);
+            // FPS after FILTRE, so this list stays in ECRAN's order down its
+            // whole shared stretch. The two panels drifting apart is how a
+            // player ends up looking for a row where the other panel puts it.
             let labels = [
                 lc.set_keys,
                 display_label.as_str(),
                 rotation_label.as_str(),
                 zoom_label.as_str(),
+                pixels_label.as_str(),
                 filter_label.as_str(),
+                fps_label.as_str(),
                 power_label.as_str(),
                 cursor_label.as_str(),
             ];
@@ -9039,7 +9169,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 lc.bug_pick_footer,
             );
         }
-        Screen::BugResult => {
+        Screen::BugResult { .. } => {
             let (msg, ok) = LIBRARY
                 .lock()
                 .ok()

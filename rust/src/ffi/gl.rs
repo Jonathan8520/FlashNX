@@ -269,6 +269,19 @@ extern "C" {
         pixels: *const c_void,
     );
     pub fn glTexParameteri(target: GLenum, pname: GLenum, param: GLint);
+    // Sampler objects. Filtering has to be a per-DRAW choice, not a per-texture
+    // one: a 2048 atlas holds hundreds of bitmaps and each carries its own
+    // smoothing flag, so there is nowhere on the atlas texture object to put it.
+    //
+    // A sampler bound on a unit supersedes the texture's MIN/MAG *and* its WRAP
+    // state, and a fresh sampler's own defaults are GL_REPEAT with a MIPMAP min
+    // filter while nothing here has a mipmap chain. So anything created through
+    // these must restate all four values, or an atlas slot tiles into its
+    // neighbours and samples an incomplete chain (black).
+    pub fn glGenSamplers(n: GLsizei, samplers: *mut GLuint);
+    pub fn glDeleteSamplers(n: GLsizei, samplers: *const GLuint);
+    pub fn glBindSampler(unit: GLuint, sampler: GLuint);
+    pub fn glSamplerParameteri(sampler: GLuint, pname: GLenum, param: GLint);
     pub fn glPixelStorei(pname: GLenum, param: GLint);
     /// Copy a rectangle of the currently-bound read framebuffer into the
     /// currently-bound texture (must already have storage allocated). Used to

@@ -132,8 +132,8 @@ mod counting_alloc {
     ///
     /// So: grow on demand, pay nothing when unused, and stop at a ceiling that
     /// is generous rather than cautious.
-    const CHUNK: usize = 32 * 1024 * 1024;
-    const MAX_CHUNKS: usize = 16; // 512 MB ceiling
+    pub const CHUNK: usize = 32 * 1024 * 1024;
+    pub const MAX_CHUNKS: usize = 16; // 512 MB ceiling
 
     /// Size class for a layout, or `None` when newlib should handle it.
     /// Alignment above 16 goes to `System`: region blocks are only 16-aligned.
@@ -153,7 +153,7 @@ mod counting_alloc {
     /// count that outruns the bounds it would read.
     static CH_BASE: [AtomicUsize; MAX_CHUNKS] = [const { AtomicUsize::new(0) }; MAX_CHUNKS];
     static CH_END: [AtomicUsize; MAX_CHUNKS] = [const { AtomicUsize::new(0) }; MAX_CHUNKS];
-    static NCHUNKS: AtomicUsize = AtomicUsize::new(0);
+    pub static NCHUNKS: AtomicUsize = AtomicUsize::new(0);
     /// Bump pointer inside the newest chunk.
     static BUMP: AtomicUsize = AtomicUsize::new(0);
     static BUMP_END: AtomicUsize = AtomicUsize::new(0);
@@ -170,6 +170,72 @@ mod counting_alloc {
     /// Set once the region has failed to grow, so the diagnostic is printed a
     /// single time and also stays readable from a bug report.
     pub static GREW_FAILED: AtomicBool = AtomicBool::new(false);
+
+    // ─── Per-chunk census, instrumentation only ──────────────────────────
+    //
+    // Chunks are never released, so a session that ran one heavy game keeps
+    // holding what that game needed. Three 1.8.0 reports measured it: slabMB
+    // 23 / 97 / 301 against a heap of 194 / 292 / 482 MB at the moment the
+    // launcher rebuilds its renderer, i.e. the same 162 MB of launcher once
+    // whole 32 MB chunks are subtracted.
+    //
+    // Giving those chunks back is only worth its risk if they are EMPTY at
+    // that moment, and no existing counter can say whether they are: one live
+    // block pins its whole 32 MB, and the launcher does hold long-lived small
+    // objects. So count, and only count. Nothing here decides anything, and a
+    // release build compiles all of it away — the pop path would otherwise pay
+    // a `chunk_of` scan it does not pay today, on the ~93 % of allocations the
+    // free list serves.
+    #[cfg(feature = "instr")]
+    static LIVE: [AtomicUsize; MAX_CHUNKS] = [const { AtomicUsize::new(0) }; MAX_CHUNKS];
+    #[cfg(feature = "instr")]
+    static CARVED: [AtomicUsize; MAX_CHUNKS] = [const { AtomicUsize::new(0) }; MAX_CHUNKS];
+
+    /// One block handed out of chunk `i`. `carved` separates a block cut fresh
+    /// from the bump from one popped off a free list, because only the first
+    /// grew the chunk's footprint.
+    #[inline(always)]
+    fn census_out(i: usize, carved: bool) {
+        #[cfg(feature = "instr")]
+        {
+            LIVE[i].fetch_add(1, Ordering::Relaxed);
+            if carved {
+                CARVED[i].fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        #[cfg(not(feature = "instr"))]
+        let _ = (i, carved);
+    }
+
+    /// One block back on chunk `i`'s free list.
+    #[inline(always)]
+    fn census_back(i: usize) {
+        #[cfg(feature = "instr")]
+        LIVE[i].fetch_sub(1, Ordering::Relaxed);
+        #[cfg(not(feature = "instr"))]
+        let _ = i;
+    }
+
+    /// `(chunks, live, carved)` for the census line, in blocks.
+    ///
+    /// Reads plain atomics, takes no lock and allocates nothing, on purpose:
+    /// `grow` already records why anything inside this module that allocates
+    /// deadlocks, so the formatting and the logging happen in the caller. The
+    /// one caller is a teardown point where nothing else is allocating, so an
+    /// unlocked read is a consistent read there.
+    pub fn census() -> (usize, [usize; MAX_CHUNKS], [usize; MAX_CHUNKS]) {
+        let n = NCHUNKS.load(Ordering::Acquire);
+        #[allow(unused_mut)]
+        let mut live = [0usize; MAX_CHUNKS];
+        #[allow(unused_mut)]
+        let mut carved = [0usize; MAX_CHUNKS];
+        #[cfg(feature = "instr")]
+        for i in 0..n {
+            live[i] = LIVE[i].load(Ordering::Relaxed);
+            carved[i] = CARVED[i].load(Ordering::Relaxed);
+        }
+        (n, live, carved)
+    }
 
     #[inline(always)]
     fn lock() {
@@ -227,23 +293,35 @@ mod counting_alloc {
         true
     }
 
-    /// True when `p` was carved from one of our chunks. Scans newest first,
-    /// because the newest chunk is where the live blocks are concentrated.
-    /// At most `MAX_CHUNKS` pairs of comparisons on data that stays in L1, and
-    /// it does not care what the layout says — which is what lets blocks that
-    /// newlib served (ceiling reached) be handed back to newlib correctly.
+    /// Which of our chunks `p` was carved from, or `None` for a block newlib
+    /// served. Scans newest first, because the newest chunk is where the live
+    /// blocks are concentrated. At most `MAX_CHUNKS` pairs of comparisons on
+    /// data that stays in L1, and it does not care what the layout says —
+    /// which is what lets blocks that newlib served (ceiling reached) be
+    /// handed back to newlib correctly.
+    ///
+    /// It returns the index rather than a bool because the census needs to
+    /// attribute the block to a chunk, and the scan that answers "ours?"
+    /// already knows which one. In a release build the index is dropped and
+    /// this is the same code it has always been.
     #[inline(always)]
-    fn in_region(p: *mut u8) -> bool {
+    fn chunk_of(p: *mut u8) -> Option<usize> {
         let a = p as usize;
         let n = NCHUNKS.load(Ordering::Acquire);
         let mut i = n;
         while i > 0 {
             i -= 1;
             if a >= CH_BASE[i].load(Ordering::Relaxed) && a < CH_END[i].load(Ordering::Relaxed) {
-                return true;
+                return Some(i);
             }
         }
-        false
+        None
+    }
+
+    /// The question `realloc` asks, which does not care which chunk.
+    #[inline(always)]
+    fn in_region(p: *mut u8) -> bool {
+        chunk_of(p).is_some()
     }
 
     pub struct Counting;
@@ -251,11 +329,29 @@ mod counting_alloc {
     unsafe impl GlobalAlloc for Counting {
         unsafe fn alloc(&self, l: Layout) -> *mut u8 {
             let t0 = now();
+            // A block popped off a free list, remembered so the census can
+            // attribute it AFTER the timing window closes.
+            //
+            // The list does not record which chunk a block came from, so the
+            // census has to scan for it, and the free list serves the large
+            // majority of allocations (96 % on SSF2's fight-loading frame).
+            // Scanning inside the window charged that to `malloc` and quietly
+            // broke the one measurement this project has tuned against for
+            // months: the µs-per-malloc figures that found the 58 %-of-frame
+            // wall are only comparable between builds if the meter measures the
+            // same work. It is instr-only either way, so this costs a release
+            // build nothing.
+            #[cfg(feature = "instr")]
+            let mut popped: *mut u8 = core::ptr::null_mut();
             let p = match class_of(l) {
                 Some(c) => {
                     lock();
                     let head = HEADS[c].load(Ordering::Relaxed) as *mut u8;
                     let p = if !head.is_null() {
+                        #[cfg(feature = "instr")]
+                        {
+                            popped = head;
+                        }
                         // Pop. The freed block's first 8 bytes hold the link.
                         let next = unsafe { *(head as *mut *mut u8) };
                         HEADS[c].store(next as usize, Ordering::Relaxed);
@@ -276,6 +372,16 @@ mod counting_alloc {
                             BUMP.store(b + want, Ordering::Relaxed);
                             SLAB_BYTES.fetch_add(want as u64, Ordering::Relaxed);
                             tally(&SMALL_N, 1);
+                            // The bump only ever carves from the newest chunk,
+                            // so the index needs no lookup. `b != 0` means one
+                            // exists, so the subtraction cannot underflow; it
+                            // saturates anyway rather than risk a panic inside
+                            // the allocator, which would abort while holding
+                            // LOCK and hang every other thread.
+                            census_out(
+                                NCHUNKS.load(Ordering::Relaxed).saturating_sub(1),
+                                true,
+                            );
                             b as *mut u8
                         } else {
                             // Ceiling reached, or the system refused a chunk.
@@ -295,12 +401,21 @@ mod counting_alloc {
             };
             tally(&ALLOC_TICKS, now().wrapping_sub(t0));
             tally(&ALLOC_N, 1);
+            // Outside the window, and outside LOCK: `chunk_of` only reads
+            // atomics, and `NCHUNKS` only ever grows, so a chunk that held this
+            // pointer a moment ago still holds it.
+            #[cfg(feature = "instr")]
+            if !popped.is_null() {
+                if let Some(i) = chunk_of(popped) {
+                    census_out(i, false);
+                }
+            }
             p
         }
 
         unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
             let t0 = now();
-            if in_region(p) {
+            if let Some(chunk) = chunk_of(p) {
                 // Only region blocks come back here, and they were allocated
                 // with this same layout, so the class is the one they were
                 // carved for.
@@ -318,6 +433,13 @@ mod counting_alloc {
                 lock();
                 unsafe { *(p as *mut *mut u8) = HEADS[c].load(Ordering::Relaxed) as *mut u8 };
                 HEADS[c].store(p as usize, Ordering::Relaxed);
+                // Note what the `None` arm above does NOT do: a block that
+                // leaks there is never credited back, so its chunk keeps
+                // counting it as live forever. That is the direction an
+                // accounting bug has to fail in — a chunk that looks occupied
+                // is 32 MB kept, a chunk that wrongly looks empty is memory
+                // handed back under a live pointer.
+                census_back(chunk);
                 unlock();
             } else {
                 unsafe { System.dealloc(p, l) };
@@ -358,6 +480,86 @@ static GLOBAL: counting_alloc::Counting = counting_alloc::Counting;
 /// Total bytes held in slabs by the small-object cache.
 pub(crate) fn slab_bytes() -> u64 {
     counting_alloc::SLAB_BYTES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The small-object cache's per-chunk state, as one log line.
+///
+/// It exists because the retention finding was INFERRED, not measured: three
+/// 1.8.0 reports gave slabMB 23 / 97 / 301 against a heap of 194 / 292 / 482 MB
+/// at the renderer rebuild, and rounding slabMB up to whole 32 MB chunks left
+/// the same 162 MB of launcher every time. That inference has a hole — slabMB
+/// is read from the last in-game heartbeat and the heap from after teardown, so
+/// the chunk count it implies is a LOWER bound. This prints the count instead
+/// of implying it, so nobody has to redo that arithmetic.
+///
+/// The number it exists for is the one no report can contain: how many chunks
+/// hold ZERO live blocks. A chunk with one live block pins its whole 32 MB, so
+/// that count is the entire value of ever releasing anything, and live blocks
+/// on chunk 0 are expected — the launcher's own long-lived small objects were
+/// carved at boot, out of the first chunk.
+pub(crate) fn log_alloc_census(when: &str) {
+    let (n, live, carved) = counting_alloc::census();
+    let mb = counting_alloc::CHUNK / (1024 * 1024);
+    let mut s = std::format!(
+        "alloc census ({}): {} chunks, {} MB held, slab {} MB",
+        when,
+        n,
+        n * mb,
+        slab_bytes() / (1024 * 1024),
+    );
+    #[cfg(feature = "instr")]
+    {
+        let mut empty = 0usize;
+        let mut live_total = 0usize;
+        let mut per = std::string::String::new();
+        for i in 0..n {
+            live_total += live[i];
+            if live[i] == 0 {
+                empty += 1;
+            }
+            per.push_str(&std::format!(" {}:{}/{}", i, live[i], carved[i]));
+        }
+        // "no live blocks", NOT "reclaimable". A chunk nobody is holding a block
+        // from is still threaded by every block ever freed out of it, since the
+        // per-class free lists interleave nodes from all chunks; and the newest
+        // chunk additionally carries the live bump pointer. Freeing one on the
+        // strength of this number would leave `HEADS` pointing into returned
+        // memory, which is the corruption the census exists to help avoid, so
+        // the line must not name a figure that invites it.
+        s.push_str(&std::format!(
+            ", {} chunk(s) with no live block ({} MB, NOT directly reclaimable), \
+             {} live blocks | live/carved{}",
+            empty,
+            empty * mb,
+            live_total,
+            per,
+        ));
+    }
+    #[cfg(not(feature = "instr"))]
+    let _ = (live, carved);
+    s.push('\n');
+    log_str(&s);
+}
+
+/// Chunks the cache has taken from newlib, and the ceiling it can take.
+///
+/// 32 MB each and never released, so this is heap the game will not get back
+/// and `slab_bytes` does not describe: the cache can be holding 192 MB while
+/// having handed out 40, and a report that only carries `slabMB` leaves that
+/// difference unattributed.
+///
+/// The ceiling travels with the count because reaching it is a failure mode of
+/// its own, and a silent one. `!STARVED` fires when the system REFUSES a chunk;
+/// at `MAX_CHUNKS` the cache stops asking, every new small block goes to newlib
+/// at newlib's price, and `grow` sets no flag on that path.
+///
+/// Relaxed: the count is read to be printed, never to index `CH_BASE` — the
+/// Acquire load in `in_region` is what the bounds need, and this is not it.
+pub(crate) fn slab_chunks() -> (usize, usize) {
+    (
+        counting_alloc::NCHUNKS.load(std::sync::atomic::Ordering::Relaxed),
+        counting_alloc::MAX_CHUNKS,
+    )
 }
 
 /// True once the small-object region has failed to obtain another 32 MB chunk.
@@ -981,11 +1183,42 @@ pub extern "C" fn ruffle_init() -> c_int {
     // otherwise reporting the first of five games played would attach the last
     // one's log under the first one's name.
     crate::bugreport::begin_game_log(&keymap_basename);
+    // One unmistakable line where a session begins, because the tail is read top
+    // to bottom by someone who was not there. #109 opened on a heartbeat
+    // ("f3420: ...") with nothing saying whether that frame count belonged to
+    // this run, to the run before REDEMARRER, or to the launcher afterwards —
+    // and a number that could mean three things means none of them. Emitted
+    // right after `begin_game_log`, which has just reset the ring, so it is the
+    // first line of the window it names; `ruffle_shutdown` closes it.
+    let restarted = RESTARTING.swap(false, std::sync::atomic::Ordering::Relaxed);
+    log_str(&std::format!(
+        "=== SESSION START: {} ({}) ===\n",
+        keymap_basename,
+        if restarted { "REDEMARRER, frame counters restart at 0" } else { "launch" },
+    ));
     keymap::init_for_swf(&keymap_basename); // P1 + P2 bindings (issue #40) from one file
     // This game's screen filter, now that the active basename is known. Set on
     // EVERY launch, including back to 0, so a filtered game never leaves its
     // filter behind for the next one.
     crate::backend::render::set_screen_filter(keymap::screen_filter());
+    // Same for the FPS counter (#111), set on EVERY launch including back to
+    // off: the flag lives in an atomic that outlives the game that set it, so a
+    // game with the counter on would otherwise hand it to the next one, whose
+    // own preference says no.
+    crate::backend::render::set_fps_counter(keymap::fps_counter() == 1);
+    // Same for the texture sampling (issue #108), same reason, and early enough
+    // to be safe whichever way the GL side resolves it: nothing has been
+    // uploaded yet at this point in the launch, so even a sampling decided at
+    // texture-creation time sees the right value for the first bitmap.
+    crate::backend::render::set_pixel_filter(keymap::pixel_filter());
+    // A new movie invalidates the nominal frame rate the counter divides by, and
+    // this is the only moment that is true. `set_fps_counter` must NOT clear it:
+    // it also runs from the ECRAN row, where the pause loop never ticks, so
+    // clearing there left the counter with nothing to draw.
+    crate::backend::render::clear_fps_nominal();
+    // Same scope: "was a raise refused" is a question about THIS game, and the
+    // answer travels in its bug reports.
+    crate::backend::render::clear_overclock_refused_ever();
     // Same for the power mode, and for the same reason it is set on EVERY
     // launch including back to 0: one game asking for a raised clock must never
     // leave the next one running raised. The way back down also happens on the
@@ -1658,6 +1891,17 @@ pub extern "C" fn ruffle_skip_paused_time(us: u64) {
             None => return,
         }
     };
+    // The FPS counter's window has to be dropped for the same reason and at the
+    // same moment (#111): every resume path in main.cpp funnels through here, so
+    // this is the one place that knows a stretch of wall clock went by with no
+    // frames in it. Left open, the first window after a menu would divide the
+    // frames of half a second by the length of the whole pause.
+    crate::backend::render::fps_window_reset();
+    // And the telemetry window, for the same reason but a worse consequence: a
+    // bug report keeps the SLOWEST heartbeat of the session, so a window that
+    // straddles a HOME-menu press would latch a fabricated frame rate as the
+    // headline number of every report filed afterwards.
+    crate::backend::render::heartbeat_window_reset();
     if let Ok(mut p) = state.player.lock() {
         p.skip_paused_time(core::time::Duration::from_micros(us));
     }
@@ -1702,6 +1946,26 @@ fn render_frame_with_dt(dt: FloatDuration) {
     let t0 = unsafe { ruffle_tick_now() };
     player.tick(dt);
     let t1 = unsafe { ruffle_tick_now() };
+    // FPS counter (#111). Sampled here because this is the one place that holds
+    // both halves of the answer: the tick that just ran, and the movie's own
+    // declared rate. Gated on the toggle, so a player who never turns it on pays
+    // one relaxed atomic load a frame and nothing else.
+    //
+    // `flashnx_gc_probe().0` is how many SWF frames `Player::tick` actually
+    // advanced -- the counter already published for the SLOW line. NOT the
+    // frames we drew: those two agree only once a frame costs more than its
+    // nominal duration, and counting ours would print "60 / 30" for a 30 fps
+    // game keeping up perfectly under a 60 Hz host loop.
+    //
+    // `frame_rate()` is the same value the "Loaded SWF version ... @ N FPS" line
+    // prints, re-read every frame rather than cached at load: AS3 can move it
+    // with `Stage.frameRate`, and a counter measuring against a rate the movie
+    // has stopped asking for would be quietly wrong.
+    if backend::render::fps_counter_on() {
+        let (swf_frames, _, _, _) = ruffle_core::flashnx_gc_probe();
+        let nominal_x10 = (player.frame_rate() * 10.0) as u32;
+        backend::render::fps_sample(swf_frames, nominal_x10, t1);
+    }
     // Where the root timeline actually IS, once a second.
     //
     // A game that has gone quiet looks the same from the outside whatever the
@@ -1777,6 +2041,12 @@ fn render_frame_with_dt(dt: FloatDuration) {
         if show_cursor {
             backend.draw_cursor_overlay(cx, cy, clicked);
         }
+        // After the pointer, so the two never argue over the same pixels if a
+        // player parks the crosshair in the corner: the number wins, because it
+        // is the thing being read.
+        if backend::render::fps_counter_on() {
+            backend.draw_fps_overlay();
+        }
     }
 
     // Drive any loader futures the SidecarNavigator spawned this frame
@@ -1815,12 +2085,27 @@ pub extern "C" fn ruffle_redraw_paused() {
     let cy = state.cursor_y;
     let clicked = state.cursor_clicked;
     let show_cursor = keymap::show_cursor();
+    // The counter, but NOT while the framing mode owns the screen (issue #101).
+    // What is being judged there is the picture itself -- `draw_zoom_overlay`
+    // says in so many words that nothing is laid over it but its own two lines
+    // -- and a counter in the corner is one more thing between the player and
+    // the framing. On a turned picture the two boxes would also overlap
+    // outright, the legend being centred on a 720-wide viewport.
+    let framing = ZOOM_SNAPSHOT.lock().map(|s| s.is_some()).unwrap_or(false);
+    let show_fps = !framing && backend::render::fps_counter_on();
     let renderer = player.renderer_mut();
     if let Some(backend) =
         <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(renderer)
     {
         if show_cursor {
             backend.draw_cursor_overlay(cx, cy, clicked);
+        }
+        // The reading freezes with the picture, which is right: no frame is
+        // being run, so there is no new speed to report. It is also what gives
+        // the ECRAN row its preview -- press A and the corner changes on this
+        // game's own frame.
+        if show_fps {
+            backend.draw_fps_overlay();
         }
     }
 }
@@ -2146,6 +2431,35 @@ pub extern "C" fn ruffle_screen_filter_cycle() {
     crate::backend::render::set_screen_filter(next);
 }
 
+/// Pause-menu ECRAN > FPS row: show or hide the counter for the game being
+/// played, and persist it (#111).
+///
+/// Touches no Ruffle state at all, like FILTRE above: the counter is something
+/// we draw after the frame, so flipping the flag is the whole change and the
+/// paused redraw behind the panel previews it on the next call.
+#[no_mangle]
+pub extern "C" fn ruffle_fps_counter_cycle() {
+    let next = (keymap::fps_counter() + 1) % keymap::FPS_COUNTER_COUNT;
+    keymap::set_fps_counter(next);
+    crate::backend::render::set_fps_counter(next == 1);
+}
+
+/// Pause-menu PIXELS row: cycle the ACTIVE game's texture sampling and persist
+/// it. Issue #108.
+///
+/// Touches no Ruffle state either, for the same reason as the filter above: the
+/// sampling is decided by the render backend at draw time, so storing the mode
+/// is the whole of it and the next redraw -- the paused one, behind the panel --
+/// shows the result. That preview is the point of putting the row here: whether
+/// bilinear is helping or smearing is not a question anyone can answer from a
+/// word in a menu.
+#[no_mangle]
+pub extern "C" fn ruffle_pixel_filter_cycle() {
+    let next = (keymap::pixel_filter() + 1) % keymap::PIXEL_FILTER_COUNT;
+    keymap::set_pixel_filter(next);
+    crate::backend::render::set_pixel_filter(next);
+}
+
 /// Pause-menu OVERCLOCK row: cycle the ACTIVE game's power mode and persist it.
 ///
 /// What gets persisted is what the hardware actually accepted, not what was
@@ -2169,6 +2483,17 @@ pub extern "C" fn ruffle_power_mode_cycle() {
     ));
 }
 
+/// Set by `ruffle_restart`, consumed by the SESSION START marker in
+/// `ruffle_init`.
+///
+/// A REDEMARRER opens a brand new log window exactly like a launch does —
+/// `begin_game_log` resets the ring either way — and the window it closes is
+/// archived under the same basename, where `log_for` never looks again because
+/// the live one wins. So the marker is the only trace a restart happened, and
+/// without this flag it would call the restart a launch and leave a reader
+/// reading a 40-second frame count as the whole session's.
+static RESTARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Drop the current Player + renderer (Ruffle owns the SwitchRenderBackend,
 /// so its Drop frees VAOs/VBOs/atlases/programs) and re-run `ruffle_init`
 /// to load the SWF afresh. The C++-managed GL context stays alive across
@@ -2181,7 +2506,14 @@ pub extern "C" fn ruffle_restart() -> c_int {
         STATE = None;
     }
     log(b"ruffle_restart: re-initialising\n\0");
-    ruffle_init()
+    RESTARTING.store(true, std::sync::atomic::Ordering::Relaxed);
+    let rc = ruffle_init();
+    // An init that failed early (no renderer, no SWF) returned before the marker
+    // that consumes this, and a flag left standing would label the NEXT game's
+    // launch a restart it never made. Clearing unconditionally is safe: on the
+    // success path the marker has already taken it.
+    RESTARTING.store(false, std::sync::atomic::Ordering::Relaxed);
+    rc
 }
 
 /// Look up the Flash key bound to a Switch button by NAME (e.g. "A",
@@ -2477,6 +2809,10 @@ pub extern "C" fn ruffle_library_init() -> c_int {
     // Same for the zoom, and for the same reason: it is a global on the game's
     // layer, and the launcher is not the game.
     crate::backend::render::set_game_zoom(100, 0, 0, VIEWPORT_W as f32, VIEWPORT_H as f32);
+    // And the texture sampling (issue #108). Covers and UI plates are drawn at
+    // arbitrary scales and are not pixel art, so a game left on SHARP must not
+    // hand the gallery its own taste on the way out.
+    crate::backend::render::set_pixel_filter(0);
     // Pick the UI language (settings.json → system language → English)
     // before anything draws.
     loc::init();
@@ -2661,6 +2997,13 @@ pub extern "C" fn ruffle_library_reset() {
     if let Ok(mut g) = OVERRIDE_SWF_PATH.lock() {
         *g = None;
     }
+    // Last: the emptiest the process ever gets between two games. `ruffle_
+    // shutdown` has already dropped the player (and with it the audio worker
+    // thread, so this is the single-threaded moment too), the resets above
+    // have freed what the launcher held for the game that just ended, and the
+    // library has not begun rebuilding itself yet. Anything still live in a
+    // chunk here is live for the rest of the session.
+    log_alloc_census("teardown");
 }
 
 /// Switch button codes shared with `cpp/src/main.cpp`. Keep these in sync.
@@ -3288,6 +3631,15 @@ pub extern "C" fn ruffle_shutdown() {
     unsafe {
         STATE = None;
     }
+    // Closes the window the SESSION START marker opened. The ring does not stop
+    // at the end of a game — SIGNALER UN BUG is only reachable by quitting one,
+    // so every report's tail ends in launcher traffic — and nothing said where
+    // the game's own lines stopped. Logged after the teardown, not before, so
+    // whatever the Player drops on its way out still counts as the game's.
+    log_str(&std::format!(
+        "=== SESSION END: {} (everything below is the launcher) ===\n",
+        crate::bugreport::ring_game(),
+    ));
     // The ExternalInterface tables belong to the MOVIE, not to the process, and
     // these two outlived it: the launcher tears the player down between games
     // and builds a new one, so game B started with game A's registered callback

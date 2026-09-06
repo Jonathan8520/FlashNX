@@ -21,6 +21,9 @@ static double boot_ms_since(uint64_t t) {
 }
 
 extern "C" void swf_picker_run(void);
+// The `.swf` embedded in this `.nro` (issue #106), or nullptr on a normal
+// build. Only meaningful after romfsInit(); see cpp/src/swf_picker.cpp.
+extern "C" const char* swf_picker_embedded_swf(void);
 
 // Phase 3.4 — library boot screen FFI (rust/src/library.rs).
 extern "C" void ruffle_loc_init(void);
@@ -95,6 +98,15 @@ extern "C" void ruffle_display_mode_cycle(void);
 // Pause-menu FILTRE: next screen filter for the game being played. Persists per
 // game; the next redraw picks it up, so the paused frame previews it.
 extern "C" void ruffle_screen_filter_cycle(void);
+// Pause-menu FPS: show / hide the frame-rate counter for the game being played
+// (#111). Persists per game and, like FILTRE, needs nothing but the flag: the
+// counter is drawn after the frame, so the paused redraw previews it.
+extern "C" void ruffle_fps_counter_cycle(void);
+// Pause-menu PIXELS: next texture sampling (auto / smooth / sharp) for the game
+// being played. A DIFFERENT setting from the row above -- this one is how the
+// game's own bitmaps are sampled, that one is the CRT pass over the finished
+// frame. Persists per game; the next redraw previews it.
+extern "C" void ruffle_pixel_filter_cycle(void);
 // Pause-menu OVERCLOCK: on <-> off for the game being played. Persists
 // per game, and persists what the hardware ACCEPTED rather than what was asked
 // for, so a refused raise cannot leave a game marked ON while it runs at
@@ -438,8 +450,11 @@ enum ScreenAction {
     SCREEN_DISPLAY  = 0,
     SCREEN_ROTATION = 1,
     SCREEN_ZOOM     = 2,  // geometry, so next to the rotation; the filter is colour
-    SCREEN_FILTER   = 3,
-    SCREEN_COUNT    = 4,
+    SCREEN_PIXELS   = 3,  // resampling: the last step of the geometry, under ZOOM
+    SCREEN_FILTER   = 4,
+    SCREEN_FPS      = 5,  // adds something to the screen rather than changing
+                          // what is on it, so it goes after the ones that do
+    SCREEN_COUNT    = 6,
 };
 
 // The physical panel / touchscreen coordinate space. Touch samples always arrive
@@ -627,10 +642,13 @@ static bool path_is_swf(const char* path) {
 // that left no Rust-panic trail. With 32 MB we should have headroom for
 // any AS2 game we'll realistically run.
 static void worker_entry(void* arg) {
-    // A non-null arg is a forwarder launch: the absolute path of a single `.swf`
-    // to boot straight into (a HOME-menu shortcut to one game), skipping the
-    // library. The pointer is an `argv[i]` from main(), valid for the whole run
-    // (main blocks on threadWaitForExit). NULL = normal launch → show library.
+    // A non-null arg means "boot this single `.swf` and skip the library". Two
+    // things produce one: a HOME-menu shortcut (NSP forwarder) that named a game
+    // on the command line, and a self-contained build carrying its game in the
+    // .nro's RomFS (#106, path `romfs:/<name>.swf`). Both hand over a pointer
+    // that outlives the thread -- an `argv[i]` from main, or the static buffer
+    // in swf_picker.cpp -- and main blocks on threadWaitForExit anyway.
+    // NULL = normal launch → show library.
     const char* forwarder_swf = static_cast<const char*>(arg);
     std::printf("worker: starting (32 MB stack), %.0f ms after main()\n",
                 boot_ms_since(g_boot_t0)); std::fflush(stdout);
@@ -1291,7 +1309,9 @@ static void worker_entry(void* arg) {
                         pan_hold = 0;
                         zoom_fine_hold = 0;
                         break;
+                    case SCREEN_PIXELS:   ruffle_pixel_filter_cycle();   break;
                     case SCREEN_FILTER:   ruffle_screen_filter_cycle();  break;
+                    case SCREEN_FPS:      ruffle_fps_counter_cycle();    break;
                     }
                 }
                 ruffle_redraw_paused();
@@ -1797,6 +1817,23 @@ int main(int argc, char** argv) {
     }
 
     romfsInit();
+    // Self-contained build (issue #106): a `.swf` baked into this `.nro` boots
+    // like a forwarder target -- straight into the game, no library, no card
+    // scan. Read AFTER romfsInit, which is what mounts `romfs:/`.
+    //
+    // Routed through `forwarder_swf` on purpose rather than as a second
+    // mechanism: that variable already carries "boot this one file and skip the
+    // library" through the whole worker, including the REGLAGES defaults the
+    // library phase would otherwise be the one to apply, and QUITTER exiting to
+    // HOME instead of returning to a library that was never built.
+    //
+    // argv wins when both exist: a shortcut naming a game is an explicit
+    // request, and it leaves a way to try another `.swf` against an embedded
+    // build without rebuilding it.
+    const char* embedded_swf = swf_picker_embedded_swf();
+    if (embedded_swf && !forwarder_swf) {
+        forwarder_swf = embedded_swf;
+    }
     cursor_speed_load(); // restore the saved cursor-speed preset (REGLAGES)
 
     std::printf("FlashNX: starting (%.0f ms in socket/romfs init)\n",
@@ -1807,7 +1844,10 @@ int main(int argc, char** argv) {
     }
     std::printf("\n");
     if (forwarder_swf) {
-        std::printf("FlashNX: forwarder target = %s\n", forwarder_swf);
+        // Which of the two sources won matters when reading a log from a
+        // self-contained build: the same variable now has two origins.
+        std::printf("FlashNX: boot target = %s (%s)\n", forwarder_swf,
+                    (forwarder_swf == embedded_swf) ? "embedded" : "forwarder argv");
     }
     std::fflush(stdout);
 
@@ -1891,7 +1931,15 @@ int main(int argc, char** argv) {
 
     // Register our `.swf` file association with Sphaira (if installed) so a Flash
     // game can be turned into a Home-menu shortcut from Sphaira's file browser.
-    register_sphaira_assoc(argc > 0 ? argv[0] : nullptr);
+    //
+    // Never from a self-contained build (#106): that .nro plays the one game it
+    // carries and ignores any other path, so claiming the association would
+    // point every Flash file on the console at an app that cannot open them --
+    // and it would stick, because the registration only writes when no assoc
+    // file exists yet and then leaves it alone forever.
+    if (!embedded_swf) {
+        register_sphaira_assoc(argc > 0 ? argv[0] : nullptr);
+    }
     std::printf("boot: main() pre-worker done at %.0f ms\n", boot_ms_since(g_boot_t0));
     std::fflush(stdout);
 
