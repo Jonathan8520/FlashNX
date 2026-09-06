@@ -32,6 +32,20 @@ APP_VERSION := 1.8.0
 # explicitly via NROFLAGS).
 ICON        := ../assets/icon.jpg
 
+# Optional embedded game (issue #106). A `.swf` dropped into `cpp/romfs/` is
+# built into the .nro as a RomFS by elf2nro and booted directly, so one Flash
+# game can ship as its own homebrew app. Left UNSET when that folder is missing
+# or empty, which is every normal build: once `--romfsdir=` is on the elf2nro
+# line it is unconditional, and pointing it at a folder that isn't there breaks
+# the final step for everyone who never asked for this feature.
+#
+# $(TOPDIR) and not $(CURDIR): this file is re-read by the recursive make from
+# inside `build/`, where $(CURDIR) is the build dir, not cpp/.
+ROMFS_DIR := $(TOPDIR)/romfs
+ifneq ($(wildcard $(ROMFS_DIR)/*),)
+ROMFS     := romfs
+endif
+
 #---------------------------------------------------------------------------------
 ARCH     := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 
@@ -103,12 +117,30 @@ export LIBPATHS   := $(foreach dir,$(LIBDIRS),-L$(dir)/lib) \
 export APP_ICON  := $(TOPDIR)/$(ICON)
 export NROFLAGS  += --nacp=$(CURDIR)/$(TARGET).nacp --icon=$(APP_ICON)
 
+# elf2nro builds the RomFS image itself out of the folder (build_romfs is linked
+# into it), so there is no intermediate image to produce first. Same $(CURDIR)
+# absolute-path rule as the two flags above.
+ifneq ($(strip $(ROMFS)),)
+export NROFLAGS  += --romfsdir=$(CURDIR)/$(ROMFS)
+endif
+
 .PHONY: $(BUILD) clean all
 
 all: $(BUILD)
 
 $(BUILD):
 	@[ -d $@ ] || mkdir -p $@
+# Force the elf2nro step every time, so the .nro tracks $(NROFLAGS) rather than
+# only the .elf. Swapping the embedded .swf changes neither the .elf nor any .o,
+# so make had nothing to do and the PREVIOUS game stayed baked in -- silently,
+# which is the worst way to lose an hour.
+#
+# UNCONDITIONAL on purpose, and this was a bug when it was not: guarded by
+# `ifneq ($(strip $(ROMFS)),)` it only fired while a romfs existed, so going the
+# other way -- deleting cpp/romfs to get the normal launcher back -- skipped the
+# rm, nothing else had changed either, and the "normal" build shipped the
+# embedded game. elf2nro costs about a second against build.sh's minutes.
+	@rm -f $(TARGET).nro
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
 
 clean:

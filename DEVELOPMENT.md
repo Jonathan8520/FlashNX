@@ -26,7 +26,8 @@ cpp/ (devkitPro)  →  rust staticlib (Ruffle + backends)  →  switch-mesa GL  
 ```
 flash-for-switch/
 ├── cpp/
-│   ├── Makefile                  # template devkitPro switch + APP_TITLE/AUTHOR/VERSION + --icon/--nacp
+│   ├── Makefile                  # template devkitPro switch + APP_TITLE/AUTHOR/VERSION + --icon/--nacp + optional --romfsdir
+│   ├── romfs/                    # absent by default; one .swf here = self-contained single-game .nro (#106)
 │   ├── src/
 │   │   ├── main.cpp              # libnx init + worker thread + applet loop + joycon/touch input
 │   │   ├── gl_context.cpp        # EGL/GL via switch-mesa, EGL_STENCIL_SIZE=8
@@ -85,6 +86,57 @@ The UI/Video backends use the `Null*` implementations provided by default by `ru
 | `assets/cacert.pem` | PEM | — | Mozilla CA bundle for libcurl HTTPS (archive.org import), embedded via `include_bytes!` + written to SD on first boot. |
 
 `assets/screenshots/` is only used by the README — not embedded in the `.nro`.
+
+## Self-contained build: ship one game as its own `.nro` (#106)
+
+A `.swf` dropped into **`cpp/romfs/`** is built into the binary and booted
+directly: no library, no SD card scan, the game is on screen as soon as Ruffle
+is up. It is the same code path a Sphaira forwarder takes, with the game read
+from `romfs:/` instead of the card.
+
+```bash
+mkdir -p cpp/romfs
+cp ~/games/MyGame.swf cpp/romfs/     # exactly one .swf at the root
+./scripts/build.sh                   # cpp/FlashNX.nro now embeds it
+```
+
+`cpp/romfs/` is absent from a fresh clone and git-ignored, so the normal build is
+unaffected: the Makefile only adds `--romfsdir=` to the `elf2nro` line when that
+folder exists **and** holds something.
+
+To make it look like its own app rather than a copy of FlashNX, edit the identity
+block at the top of [cpp/Makefile](cpp/Makefile): `TARGET` (the output file
+name), `APP_TITLE`, `APP_AUTHOR`, `APP_VERSION`, `ICON`.
+
+Multi-file games work: put the companions in `cpp/romfs/<name>.files/`, exactly
+the layout the `SidecarNavigator` already expects on the SD card.
+
+What to know before shipping one:
+
+- **The file name is the identity.** Per-game controls, display mode, zoom,
+  cursor speed and play time are filed on the SD card under the SWF's basename
+  (`sdmc:/flashnx/<name>.prefs`, `<name>.keymap.json`, ...), never inside the
+  RomFS, which is read-only. Two self-contained apps built from files with the
+  same name would share those files on one console, so give the game a name of
+  its own. That is also why the boot code scans `romfs:/` instead of expecting a
+  fixed `game.swf`.
+- **Global settings are still shared.** `sdmc:/switch/FlashNX/` is hardcoded
+  throughout, so UI language and the global REGLAGES defaults come from the same
+  files FlashNX itself uses. Only the per-game layer is separate.
+- **A launch argument still wins.** A `.swf` passed on the command line (a
+  Sphaira forwarder) overrides the embedded game, which is a cheap way to test
+  another file against the build without rebuilding it.
+- **QUITTER exits to the HOME menu**, since there is no library to return to.
+- **The Sphaira `.swf` association is not registered** by a self-contained build:
+  it can only play the game it carries.
+- **Size.** The SWF is stored uncompressed, so the `.nro` grows by roughly the
+  size of the game on top of the ~16 MB player. It is read out of the `.nro`
+  file at load time, not held in memory before that, so RAM use matches reading
+  the same game off the card.
+- **Swapping the game re-runs `elf2nro` on its own.** With a RomFS configured the
+  Makefile drops the `.nro` before recursing, because neither the `.elf` nor any
+  `.o` changes when you replace the `.swf` and make would otherwise report
+  nothing to do while shipping the old game.
 
 ## Build & netload
 

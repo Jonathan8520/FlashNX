@@ -762,3 +762,59 @@ extern "C" long long swf_picker_read_file(const char* path, unsigned char* buf,
     std::fclose(f);
     return (got == (size_t)sz) ? sz : -1;
 }
+
+// The single `.swf` baked into this `.nro`, or nullptr when there is none
+// (issue #106). A game dropped into `cpp/romfs/` makes elf2nro build a RomFS
+// from that folder into the binary; libnx mounts it at `romfs:/` and main()
+// boots it straight away, so one Flash game can ship as its own homebrew app.
+// A normal build carries no RomFS at all: `opendir` fails and we answer
+// nullptr, which is "show the library".
+//
+// Called once from main(), before any thread exists and only after romfsInit(),
+// which is what makes `romfs:/` resolvable in the first place. The returned
+// pointer is a static buffer that outlives everything: main() hands it to the
+// worker thread as its argument, exactly like a forwarder's argv path, and that
+// thread reads it for the whole run.
+//
+// We SCAN rather than hardcode `romfs:/game.swf` because the file NAME is the
+// identity every sidecar is filed under on the CARD -- `<basename>.prefs`,
+// `<basename>.keymap.json`, `<basename>.cursor`, play time, favourites (see
+// keymap::primary_path). A fixed name would make every self-contained build on
+// a console share one set of those files, so two such apps would silently
+// overwrite each other's controls and settings.
+//
+// Top level only, lowest name wins if a folder somehow holds several: a
+// multi-file game keeps its companions in `romfs:/<name>.files/`, and recursing
+// would let one of those inner fragments be picked as the game itself.
+extern "C" const char* swf_picker_embedded_swf(void) {
+    static char s_path[512] = {0};
+    static bool s_scanned = false;
+    if (s_scanned) return s_path[0] ? s_path : nullptr;
+    s_scanned = true;
+
+    DIR* d = opendir("romfs:/");
+    if (!d) return nullptr; // no RomFS in this .nro -- the normal build
+
+    char best[256] = {0};
+    int seen = 0;
+    while (struct dirent* ent = readdir(d)) {
+        if (!ends_with_swf(ent->d_name)) continue;
+        ++seen;
+        if (best[0] == '\0' || strcasecmp(ent->d_name, best) < 0) {
+            std::snprintf(best, sizeof(best), "%s", ent->d_name);
+        }
+    }
+    closedir(d);
+
+    if (best[0] == '\0') {
+        // A RomFS with no game at its root is a packaging mistake whose only
+        // other symptom is the library opening as if nothing were embedded.
+        std::printf("romfs: mounted but no .swf at its root -- no embedded game\n");
+        std::fflush(stdout);
+        return nullptr;
+    }
+    std::snprintf(s_path, sizeof(s_path), "romfs:/%s", best);
+    std::printf("romfs: embedded game = %s (%d .swf at root)\n", s_path, seen);
+    std::fflush(stdout);
+    return s_path;
+}

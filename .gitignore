@@ -32,3 +32,8 @@ Cargo.lock
 
 # Bundled test/sample SWFs are copyrighted games — keep them off the repo.
 *.swf
+
+# Self-contained build input (#106): whatever a developer drops in here is a
+# game plus its companions, never repo content. `*.swf` above already covers the
+# game itself; this also covers `<name>.files/` and anything beside it.
+/cpp/romfs/
