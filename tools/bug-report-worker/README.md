@@ -54,9 +54,18 @@ holds a token scoped to "create issues on one repo" and nothing else.
 ```sh
 curl -X POST "$WORKER_URL/report" \
   -H "Content-Type: application/json" \
-  -d '{"game":"Test Game","file":"test.swf","size":123,"swf_version":9,"compression":"CWS","as3":true,"app_version":"1.2.0","lang":"fr","applet":false,"description":"sanity check, please close"}'
+  -d '{"game":"Test Game","file":"test.swf","size":123,"disk_size":0,"swf_version":9,"compression":"CWS","as3":true,"app_version":"1.2.0","lang":"fr","applet":false,"companions":-1,"companion_dirs":-1,"power_mode":1,"docked":false,"description":"sanity check, please close"}'
 # -> {"ok":true,"url":"https://github.com/.../issues/NN"}
 ```
+
+## Deploy order (Worker first)
+
+The Worker tolerates a report that omits `disk_size`, `companions`,
+`companion_dirs`, `power_mode` and `docked`: a copy of the app already installed
+on someone's card keeps posting the 1.8.0 shape forever, and those rows are simply
+left off its issues rather than filled with defaults nobody measured. So deploy
+this Worker **before** releasing the app build that sends them: the reverse order
+silently drops the new fields on the floor and the issue looks unchanged.
 
 ## Abuse notes
 

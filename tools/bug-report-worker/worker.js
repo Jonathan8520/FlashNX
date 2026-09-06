@@ -9,8 +9,12 @@
 //   GITHUB_REPO   (var)     e.g. "Jonathan8520/FlashNX"   (owner/name)
 //
 // Request:  POST /report   Content-Type: application/json
-//   { game, file, size, swf_version, compression, as3, app_version, lang,
-//     applet, description, log_tail }
+//   { game, file, size, disk_size, swf_version, compression, as3, app_version,
+//     lang, applet, companions, companion_dirs, power_mode, docked,
+//     description, log_tail }
+// Every field added after 1.8.0 is OPTIONAL here: a copy of the app already on
+// someone's SD card keeps posting the old shape, and this Worker has to keep
+// turning that into a usable issue rather than a table of invented defaults.
 // Response: 200 { "ok": true, "url": "<issue html_url>" }  on success.
 
 // Headroom for `log_tail`: the app sends up to 24 KB of log, and JSON escaping
@@ -108,7 +112,7 @@ function buildIssue(r) {
 
   // Suggestion / feature request — no game metadata.
   if (r.kind === "suggestion") {
-    const snippet = desc.split("\n")[0].slice(0, 60) || "(idea)";
+    const snippet = firstLine(desc, 60) || "(idea)";
     return {
       title: `[suggestion] ${snippet}`,
       body:
@@ -120,19 +124,99 @@ function buildIssue(r) {
 
   // Bug report (default).
   const game = s(r.game, 120) || "(unknown game)";
+
+  // `size` used to be whichever number the library happened to hold: the SWF
+  // header's file_length for a single-file game, the `.filesize` sidecar's card
+  // footprint for a multi-file one. #112 read 3.9 MB and #110 read 3.38 GB under
+  // one label with nothing saying they were different quantities.
+  //
+  // A client that sends `disk_size` has separated them at the source. One that
+  // does not is pre-1.9 and its `size` is still the ambiguous number, so it keeps
+  // the old label: relabelling it would turn a vague field into a false claim.
+  const sizeRows =
+    typeof r.disk_size === "number"
+      ? [
+          ["SWF size", r.size ? bytes(r.size) : "(header unreadable)"],
+          [
+            "On-SD footprint",
+            r.disk_size
+              ? `${bytes(r.disk_size)} (SWF + companion tree)`
+              : // 0 means "no `.filesize` sidecar", which is NOT the same as
+                // "single file". That sidecar is only written by the GameZIP
+                // download path and by a one-shot backfill, so a game imported
+                // from archive.org afterwards has a real companion tree and no
+                // sidecar. Saying "single file" there would contradict the
+                // Companions row two lines below, on the same game.
+                Number(r.companions) >= 0
+                ? "(not measured)"
+                : "(single file, same as above)",
+          ],
+        ]
+      : [["Size", typeof r.size === "number" ? `${r.size} bytes` : s(r.size)]];
+
+  // #112 was a game stuck on its loading screen whose companion folder had been
+  // left EMPTY by a half-written install. From outside that looks exactly like a
+  // healthy single-file game, so the app reports the two apart: -1 = no folder,
+  // 0 flat SWF AND 0 sub-folders = the folder is there and holds nothing. The
+  // sub-folder count matters because a Flashpoint GameZIP stores everything under
+  // `<host>/<path>/`, so its flat SWF count is legitimately 0.
+  const compRows =
+    typeof r.companions === "number"
+      ? [
+          [
+            "Companions",
+            r.companions < 0
+              ? "none (single-file game, no companion folder)"
+              : r.companions === 0 && (Number(r.companion_dirs) || 0) === 0
+              ? "**companion folder present but EMPTY** (broken install)"
+              : `${r.companions} flat SWF, ${Number(r.companion_dirs) || 0} sub-folder(s)`,
+          ],
+        ]
+      : [];
+
+  // Absent from a pre-1.9 client. Printing "OFF / handheld" then would invent the
+  // very fact #109 was missing, which is worse than still missing it.
+  const clockRows =
+    typeof r.power_mode === "number"
+      ? [
+          [
+            // The SETTING and what actually ran are different facts. psm turns a
+            // raise down while the battery is out of its Normal voltage state, so
+            // a report can say ON about a session spent entirely at 1020 MHz, and
+            // a reader would discount a genuine slowness report as already boosted.
+            "Overclock",
+            r.power_mode === 1
+              ? r.power_refused
+                ? "**ON, but REFUSED by the console** (battery); ran at stock clock"
+                : "ON"
+              : r.power_mode === 0
+              ? "OFF"
+              : `mode ${r.power_mode}`,
+          ],
+          ["Dock state", r.docked ? "docked" : "handheld"],
+        ]
+      : [];
+
   const meta = [
     ["Game", game],
     ["File", s(r.file, 200)],
     ["Source URL", s(r.source_url, 300) || "(local file / unknown)"],
-    ["Size", typeof r.size === "number" ? `${r.size} bytes` : s(r.size)],
+    ...sizeRows,
     ["SWF version", s(r.swf_version, 8)],
     ["Compression", s(r.compression, 8)],
     ["ActionScript 3", r.as3 ? "yes" : "no"],
+    ...compRows,
     ["App version", s(r.app_version, 16)],
     ["Language", s(r.lang, 8)],
     ["Applet mode", r.applet ? "yes" : "no"],
+    ...clockRows,
   ]
-    .map(([k, v]) => `| ${k} | ${v} |`)
+    // A value is player-supplied text (a file name, a title): a `|` in it would
+    // split the row into two cells and a newline would end the table outright.
+    .map(
+      ([k, v]) =>
+        `| ${k} | ${String(v).replace(/\r?\n/g, " ").replace(/\|/g, "\\|")} |`
+    )
     .join("\n");
 
   // Tail of the app's own log, sent with bug reports only. Its value is that
@@ -159,7 +243,50 @@ function buildIssue(r) {
     `### Game info\n\n| Field | Value |\n| --- | --- |\n${meta}\n` +
     logBlock;
 
-  return { title: `[in-app] ${game}`, body, labels: ["bug"] };
+  // Every in-app bug arrived as "[in-app] <file name>", so a page of them was a
+  // column of file names with nothing to tell them apart, and triage had to open
+  // each one to learn what it was about. The first line the player typed is the
+  // only part of a report that says what went wrong, so it goes in the title.
+  const note = firstLine(desc, 60);
+  return {
+    title: note ? `[in-app] ${game}: ${note}` : `[in-app] ${game}`,
+    body,
+    labels: ["bug"],
+  };
+}
+
+// First non-blank line of `text`, collapsed onto one line and cut to `max` CODE
+// POINTS, with an ellipsis when it was cut.
+//
+// Code points, not `.length`: that counts UTF-16 units, so a cut can land in the
+// middle of a surrogate pair and leave a lone surrogate in an issue title. An
+// emoji in the player's note is enough to hit it, and the GitHub API rejects the
+// whole issue rather than trimming it.
+//
+// Skipping blank lines matters too: a note that starts with a newline used to
+// title the issue "(idea)" while the text sat one line below.
+function firstLine(text, max) {
+  const line = String(text ?? "")
+    .split("\n")
+    .map((l) => l.trim())
+    .find(Boolean);
+  if (!line) return "";
+  const chars = [...line.replace(/\s+/g, " ")];
+  return chars.length > max ? chars.slice(0, max).join("") + "…" : chars.join("");
+}
+
+// "3562343178 bytes" is unreadable at a glance, and a glance is the entire point
+// of the header table. Keep the exact figure, add the human one beside it.
+function bytes(n) {
+  const v = Number(n) || 0;
+  const units = ["bytes", "KiB", "MiB", "GiB"];
+  let i = 0;
+  let x = v;
+  while (x >= 1024 && i < units.length - 1) {
+    x /= 1024;
+    i++;
+  }
+  return i === 0 ? `${v} bytes` : `${v} bytes (${x.toFixed(2)} ${units[i]})`;
 }
 
 // Increment the apply count for a profile id (#20, Phase 3). No per-install

@@ -81,6 +81,15 @@ pub fn begin_game_log(basename: &str) {
     }
 }
 
+/// The game the live log window describes, empty before the first launch.
+///
+/// Named by the SESSION END marker in `ruffle_shutdown` so that marker is
+/// self-contained: a tail long enough to have wrapped past its START line still
+/// says which game stopped there.
+pub fn ring_game() -> std::string::String {
+    RING_GAME.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
 /// This session's log for `file`: the live ring when that game is the one still
 /// loaded, else its archived window, else nothing. Never another game's log.
 fn log_for(file: &str) -> std::string::String {
@@ -150,8 +159,19 @@ pub struct Report {
     /// and hand-copied files. The key clue when a URL import has an arbitrary
     /// name like `7k7k7k.swf`.
     pub source_url: std::string::String,
-    /// SWF `file_length` header field (bytes).
+    /// SWF `file_length` header field (bytes). ALWAYS the header's own number,
+    /// never the card footprint; 0 when the header could not be re-read.
+    ///
+    /// This used to be whichever of the two the library happened to be holding,
+    /// and nothing on the issue said which: #112 reported 3.9 MB (a header) and
+    /// #110 reported 3.38 GB (a card footprint) under the same "Size" label.
+    /// They travel as separate fields now and the relay labels both.
     pub size: u64,
+    /// Real on-SD footprint of the game (the flat `.swf` plus its
+    /// `<stem>.files/` tree), from the `.filesize` sidecar. 0 when there is no
+    /// sidecar, which is the normal single-file case: `size` is then the whole
+    /// story, and the relay says so rather than printing the same number twice.
+    pub disk_size: u64,
     pub swf_version: u8,
     /// "FWS" / "CWS" / "ZWS".
     pub compression: std::string::String,
@@ -162,6 +182,40 @@ pub struct Report {
     pub lang: &'static str,
     /// True when running in the small applet-memory pool.
     pub applet: bool,
+    /// Companion SWFs sitting FLAT in `<stem>.files/`, or -1 when the game has
+    /// no companion folder at all.
+    ///
+    /// 0 and -1 are different diagnoses, and that is the entire point. #112 was
+    /// a game frozen on its loading screen whose companion folder existed and
+    /// was empty; in the header table that was indistinguishable from a healthy
+    /// single-file game, so the answer only ever came out of reading the log.
+    pub companions: i32,
+    /// Sub-folders of `<stem>.files/`, or -1 when there is no companion folder.
+    ///
+    /// Counted apart from `companions` because a Flashpoint GameZIP puts
+    /// NOTHING flat in that folder: its assets live under `<host>/<path>/`, so
+    /// the flat SWF count alone reads 0 for a perfectly healthy multi-file game
+    /// and would have cried wolf on every one of them.
+    pub companion_dirs: i32,
+    /// Per-game OVERCLOCK in force for the reported game (0 = normal,
+    /// 1 = CPU 1785 MHz), already folded with the REGLAGES default. #109 came in
+    /// as a performance report with no way to tell whether the boost was on,
+    /// which is the first question any frame-rate number raises.
+    pub power_mode: u8,
+    /// True when a raise was REFUSED at least once during the reported game.
+    ///
+    /// psm turns one down while the battery is out of its Normal voltage state,
+    /// so `power_mode` alone can say ON about a session that ran entirely at
+    /// 1020 MHz. Reporting the setting without this turned a stock-clock
+    /// performance report into one a reader would discount as already boosted.
+    pub power_refused: bool,
+    /// Docked (true) or handheld (false). The two do not run the same clocks, so
+    /// a frame rate means little without it.
+    ///
+    /// Read when the report is SENT, not while the game ran: the player has quit
+    /// to REGLAGES by then. Same console seconds later, so it is right unless
+    /// somebody undocks between quitting and sending.
+    pub docked: bool,
     /// Free-text problem description typed by the player (may be empty).
     pub description: std::string::String,
 }
