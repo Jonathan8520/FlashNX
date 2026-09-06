@@ -1,3 +1,44 @@
+diff --git a/core/src/avm1/activation.rs b/core/src/avm1/activation.rs
+index bec5d438f..041e7c14d 100644
+--- a/core/src/avm1/activation.rs
++++ b/core/src/avm1/activation.rs
+@@ -2717,7 +2717,35 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+ 
+         // Finally! It's a plain old variable name.
+         // Resolve using scope chain, as normal.
+-        self.resolve(path)
++        //
++        // FlashNX: backport of upstream PR #18885, which fixes ruffle#10582
++        // (Super Mario 63's final battle never appears, issue #114 here).
++        //
++        // The fight's setup calls `CharCode()` from a clip that `_root
++        // .gotoAndStop("Courseframe")` has just destroyed. With the clip gone
++        // its scope chain no longer resolves the name, so the call returns
++        // Undefined, the terrain is never attached, and the log fills with
++        // "Tried to instantiate non-registered character 8-16MidBG". Flash
++        // Player falls back to the root here; Ruffle did not.
++        //
++        // Kept as a local patch because the PR has been waiting on review
++        // upstream since 2024 while the issue stays open (opened 2023-04-06,
++        // still open). Revert by dropping this block, not by touching
++        // `resolve`: `patches/ruffle-local.diff` carries it with the others.
++        match self.resolve(path)? {
++            CallableValue::UnCallable(Value::Undefined) => {
++                // The PR reads `.object().coerce_to_object(self)`; this tree has
++                // since replaced that pair with `object1_or_bare`, which is what
++                // the two other call sites in this file use (lines 1804, 3052).
++                let obj = self.target_clip_or_root().object1_or_bare(self.gc());
++                if obj.has_property(self, path) {
++                    obj.get(path, self).map(|v| CallableValue::Callable(obj, v))
++                } else {
++                    Ok(CallableValue::UnCallable(Value::Undefined))
++                }
++            }
++            val => Ok(val),
++        }
+     }
+ 
+     /// Sets the value referenced by a target path string.
 diff --git a/core/src/avm1/globals/bitmap_data.rs b/core/src/avm1/globals/bitmap_data.rs
 index b292fd4c7..ac9c40ed7 100644
 --- a/core/src/avm1/globals/bitmap_data.rs

@@ -2,6 +2,30 @@
 
 Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://github.com/ruffle-rs/ruffle).
 
+## v1.8.1 (2026-09-06)
+
+Pixel art that looks like pixel art, a frame counter that says how far behind a game is running, and a bug report that finally carries the one line it kept cutting off.
+
+### Added
+
+- **Pixel art is no longer blurred** (#108): every texture was sampled with bilinear filtering, and Flash bitmaps carry a flag saying whether they want that. FlashNX read the flag and threw it away, so a game drawn as pixel art came out soft, which the free zoom added in 1.8.0 made obvious. The SCREEN panel gains a PIXELS row with three values: AUTO follows the game's own flag, which is what Flash Player did, SMOOTH forces the old behaviour, and SHARP forces point sampling on everything. It is kept per game like the display mode and the framing. Expect a visible change on a lot of the library the first time you open it: `smoothing = false` is the default for most Flash bitmaps, so AUTO is a change of look, not a change of nothing.
+- **A frame counter** (#111): the SCREEN panel gains an FPS row. It shows the measured rate against the rate the game asks for, so `15 / 30` says the game is running at half speed rather than leaving you to guess what a bare number means. It is measured over half a second of real time rather than over a fixed number of frames, which is what stops it from updating once every seven seconds on the games slow enough to need it.
+- **A game can ship as its own homebrew app** (#106): a `.swf` dropped into `cpp/romfs/` before building is embedded in the `.nro` and booted straight away, with no library and no card scan. The build is unchanged when that folder is absent, which is every normal build. See [DEVELOPMENT.md](DEVELOPMENT.md) for what to expect around per-game settings and size.
+
+### Fixes
+
+- **Super Mario 63's final battle appears** (#114): the fight against Bowser set up its arena and then drew nothing, with the log filling up with `Tried to instantiate non-registered character 8-16MidBG` and a dozen siblings. The game calls a function from a clip that `gotoAndStop` has just destroyed, and with the clip gone the name no longer resolved, so the terrain was never attached. Flash Player falls back to the root in that case. This is Ruffle's own bug, open since April 2023 and reported by a good number of people; the fix is a pull request that has been waiting for review upstream for over a year, and it is carried here as a local patch until it lands.
+- **Sending a suggestion no longer moves the cursor to the wrong row** (#113): SETTINGS shows REPORT A BUG and MAKE A SUGGESTION one above the other, and both end on the same confirmation screen. That screen sent you back to REPORT A BUG whichever one you had pressed, so a sent suggestion left the cursor one row above the button you had just used.
+
+### Changed
+
+- **A bug report no longer cuts off the line that diagnoses it.** The per-frame telemetry line is copied into a fixed buffer that was too small for it, so every report filed against 1.8.0 was cut at exactly 511 characters. What a report loses at that point is the end of the line, which is where the memory allocator's starvation marker, the drawn-area box and the maximum alpha all sit. The first of those is the only warning that small allocations have fallen back to the slow path, and the second is what tells a black screen from a game that is drawing normally.
+- **A performance report now carries the moment it is about.** A report kept the last telemetry line of the session, which is the state when the player quit: a menu, or a calm scene. So #109, "game slows down if too many enemies on screen", arrived carrying `fps=59.9`. Reports now keep the slowest line of the session as well as the last one.
+- **The log says where a game started and stopped.** A report's log ended in launcher activity with nothing marking the boundary, and a restart from the pause menu opened a new window that looked exactly like a fresh launch. Both transitions are now named in the log.
+- **The report header answers three questions it used to leave to the log.** How many companion files a game has, which separates a single-file game from one whose companion folder exists and is empty, which is what a game frozen on its loading screen usually turns out to be (#112). Whether the per-game overclock was on, which is the first thing any frame rate raises. Docked or handheld, since the two do not run the same clocks. The size field also said two different things depending on the game, the SWF's own length or its footprint on the card, with nothing saying which; both are now sent and labelled.
+- **In-app reports have readable titles.** Every one was titled with the game's file name, so a list of them was a column of file names. The first line of what the player typed is now part of the title.
+- **The memory the small-object cache holds is now reported**, alongside how much it has handed out. Those are different numbers and only the second was ever visible.
+
 ## v1.8.0 (2026-08-26)
 
 Games you can file away, a controls screen that looks like the controller in your hands, and the single biggest speed win FlashNX has had: the memory allocator was eating more than half of every frame.
