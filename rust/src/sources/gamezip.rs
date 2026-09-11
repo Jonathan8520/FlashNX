@@ -874,10 +874,22 @@ fn fallback_rank(entry_name: &str, launch_file: Option<&str>) -> u8 {
     }
 }
 
+/// `on_progress(consumed, total)` is called once per entry, in bytes of the ZIP
+/// walked so far. It exists because this function BLOCKS for as long as the
+/// download did on a big game: Super Smash Flash 2 is 3.1 GB of archive, and the
+/// screen stayed on a full download bar for minutes with nothing moving, which
+/// reads as a freeze. A player reported it as "not downloading, gets stuck at
+/// 3.9G" (#117); the download had in fact finished.
+///
+/// A closure rather than a renderer handle, so this module keeps knowing nothing
+/// about drawing. The caller decides how often a call is worth a frame: one draw
+/// per entry would be 1474 vsync waits on SSF2, which is 24 seconds spent
+/// waiting for the display rather than extracting.
 pub fn extract_gamezip_tree(
     zip_path: &str,
     files_dir: &str,
     launch_command: &str,
+    on_progress: &mut dyn FnMut(u64, u64),
 ) -> Option<(std::vec::Vec<u8>, std::string::String)> {
     // STREAMED extraction: walk the GameZIP's local file headers straight off the
     // SD card, holding only ONE entry's bytes in RAM at a time. The whole archive
@@ -929,6 +941,7 @@ pub fn extract_gamezip_tree(
     let mut off: u64 = 0;
 
     while off + 30 <= file_len {
+        on_progress(off, file_len);
         if !read_at(&mut f, off, &mut header) || &header[0..4] != b"PK\x03\x04" {
             break;
         }

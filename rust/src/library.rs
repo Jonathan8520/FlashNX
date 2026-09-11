@@ -1521,6 +1521,11 @@ extern "C" {
     /// line, redeclared here because that extern block is private — the same
     /// per-module duplication `ruffle_tick_now` and `ruffle_log_cstr` already use.
     fn ruffle_is_docked() -> core::ffi::c_int;
+    /// Present what has just been drawn. Normally the C++ frame loop owns this,
+    /// and nothing in Rust needs it; the GameZIP extraction does, because it
+    /// blocks that loop for minutes and has to put its own frames on screen
+    /// while it runs (#117). Defined in cpp/src/gl_context.cpp.
+    fn gl_context_swap();
 }
 
 fn log(s: &str) {
@@ -9876,7 +9881,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 backend.draw_library_distant_downloading(&file_name, done, total);
                 match net::tick_download() {
                     Ok(false) => {}
-                    Ok(true) => on_download_finished(),
+                    Ok(true) => on_download_finished(backend),
                     Err(msg) => set_distant_error(&msg),
                 }
             }
@@ -9958,6 +9963,7 @@ fn extract_gamezip_main(
     zip_path: &str,
     swf_path: &str,
     launch_command: &str,
+    backend: &mut SwitchRenderBackend,
 ) -> Option<(std::string::String, std::vec::Vec<u8>)> {
     // No whole-archive read: `extract_gamezip_tree` now STREAMS the ZIP straight
     // off the SD card, one entry at a time (see its docs), so a multi-GB GameZIP
@@ -9974,8 +9980,41 @@ fn extract_gamezip_main(
     // Don't pre-create `<game>.files/`: `write_tree_file` creates parent dirs on
     // demand, so a single-SWF game (whose entry is now skipped from the tree)
     // leaves NO empty `.files/` folder behind.
+    // Draw the extraction's own frames while it runs. It blocks the frame loop
+    // for as long as the download took on a big game, and the screen used to sit
+    // on a full download bar the whole time, which is indistinguishable from a
+    // freeze (#117: "not downloading, gets stuck at 3.9G" — it had downloaded).
+    //
+    // Throttled on WALL CLOCK, not on entries: `gl_context_swap` waits for
+    // vsync, so drawing on every one of Super Smash Flash 2's 1474 entries would
+    // spend 24 seconds waiting for the display. Ten frames a second is smooth to
+    // read and costs well under 1 % of an extraction measured in minutes.
+    let freq = unsafe { ruffle_tick_freq() };
+    let period = if freq == 0 { u64::MAX } else { freq / 10 };
+    let mut last_draw: u64 = 0;
+    let mut draw_progress = |done: u64, total: u64| {
+        let now = unsafe { ruffle_tick_now() };
+        if now.saturating_sub(last_draw) < period {
+            return;
+        }
+        last_draw = now;
+        // MB rather than bytes: `draw_library_move_progress` takes usize, and a
+        // multi-GB count would overflow it on a 32-bit target. The bar only needs
+        // the ratio.
+        backend.draw_library_move_progress(
+            crate::loc::s().extracting,
+            (done / (1024 * 1024)) as usize,
+            (total / (1024 * 1024)).max(1) as usize,
+        );
+        unsafe { gl_context_swap() };
+    };
     let (swf, entry_name) =
-        match crate::sources::gamezip::extract_gamezip_tree(zip_path, &files_dir, launch_command) {
+        match crate::sources::gamezip::extract_gamezip_tree(
+            zip_path,
+            &files_dir,
+            launch_command,
+            &mut draw_progress,
+        ) {
             Some(v) => v,
             None => {
                 // No SWF produced (empty/corrupt zip, or every entry over the
@@ -10229,7 +10268,7 @@ fn finalize_gamezip_download() {
 /// so the user can keep picking other files from the same archive.org
 /// item without re-typing the URL. The just-downloaded basename is
 /// tracked in `downloaded_basenames` so the list shows a `✓` next to it.
-fn on_download_finished() {
+fn on_download_finished(backend: &mut SwitchRenderBackend) {
     // `cover_url` / `real_title` are read from state inside
     // `finalize_gamezip_download` (also called from the companion phase), so we
     // only pull what this function uses directly here.
@@ -10347,7 +10386,7 @@ fn on_download_finished() {
     // Flashpoint GameZIP: the downloaded file is a `.zip`; extract its `.swf`
     // to `swf_path` and add THAT (not the zip), then delete the temp zip.
     if let Some(swf_path) = zip_extract {
-        let Some((entry_name, swf)) = extract_gamezip_main(&out_path, &swf_path, &launch_command) else {
+        let Some((entry_name, swf)) = extract_gamezip_main(&out_path, &swf_path, &launch_command, backend) else {
             let _ = std::fs::remove_file(&out_path);
             if let Ok(mut s) = LIBRARY.lock() {
                 s.download_file_name.clear();
