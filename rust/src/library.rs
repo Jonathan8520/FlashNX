@@ -208,7 +208,7 @@ pub(crate) enum Screen {
 // sub-menu (#20 regroup) so they don't read as game-save actions next to
 // RENOMMER / JAQUETTE / SUPPRIMER.
 pub(crate) const OPTIONS_ENTRIES: &[&str] = &[
-    "FAVORI", "TOUCHES", "RENOMMER", "JAQUETTE", "DOSSIER", "SUPPRIMER",
+    "FAVORI", "TOUCHES", "RENOMMER", "JAQUETTE", "DOSSIER", "RACCOURCI", "SUPPRIMER",
 ];
 
 /// Top-level navbar tabs (v1.2.0), switched with the L/R shoulder buttons.
@@ -1521,6 +1521,13 @@ extern "C" {
     /// line, redeclared here because that extern block is private — the same
     /// per-module duplication `ruffle_tick_now` and `ruffle_log_cstr` already use.
     fn ruffle_is_docked() -> core::ffi::c_int;
+    /// Write a HOME-menu shortcut for one game. 1 on success, negative on
+    /// failure (see cpp/src/shortcut.cpp). Cheap: 144 KB copied and patched.
+    fn shortcut_write(
+        swf_path: *const core::ffi::c_char,
+        display_name: *const core::ffi::c_char,
+        out_path: *const core::ffi::c_char,
+    ) -> core::ffi::c_int;
     /// Present what has just been drawn. Normally the C++ frame loop owns this,
     /// and nothing in Rust needs it; the GameZIP extraction does, because it
     /// blocks that loop for minutes and has to put its own frames on screen
@@ -4331,6 +4338,10 @@ extern "C" {
         out: *mut core::ffi::c_char,
         cap: core::ffi::c_int,
     ) -> core::ffi::c_int;
+    /// Remove a game's shortcut, but only if the file really is one of ours
+    /// (it is checked for our marker first). 1 = removed, 0 = absent or
+    /// somebody else's homebrew of the same name, left alone.
+    fn shortcut_delete(path: *const core::ffi::c_char) -> core::ffi::c_int;
 }
 
 /// Top-level file names of `dir`, straight from one `readdir`.
@@ -7281,6 +7292,21 @@ pub(crate) fn apply_game_folder(s: &mut State, game_idx: usize, target: &str) {
     s.screen = Screen::GameFolderPicker { game_idx: idx, selection: row };
 }
 
+/// Where a game's HOME-menu shortcut goes: `sdmc:/switch/<title>.nro`.
+///
+/// That folder and not ours, because it is the one hbmenu scans and the one
+/// Sphaira lists (`menu-list.c` walks `sdmc:/switch/`); a shortcut under
+/// `sdmc:/flashnx/` would appear nowhere and be worse than not writing it.
+///
+/// The name is folded the same way a downloaded game's is (`swf_filename`), so
+/// a title with a slash or a colon cannot escape the folder, and the file is the
+/// same identity the NACP inside it shows.
+fn shortcut_path_for(title: &str) -> std::string::String {
+    let base = crate::sources::gamezip::swf_filename(title);
+    let stem = base.strip_suffix(".swf").unwrap_or(&base);
+    std::format!("sdmc:/switch/{}.nro", stem)
+}
+
 fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut selection: usize) {
     let last = OPTIONS_ENTRIES.len().saturating_sub(1);
     match button {
@@ -7325,6 +7351,36 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                     // Open the TOUCHES sub-menu (edit / apply / share / revert).
                     // #20 regroup: apply+share used to be sibling OPTIONS rows.
                     goto_touches_menu(s, game_idx, 0);
+                    return;
+                }
+                "RACCOURCI" => {
+                    // Write a `.nro` into `sdmc:/switch/` that launches this one
+                    // game, so hbmenu and Sphaira list it under its own name
+                    // instead of "FlashNX | angry-birds.swf".
+                    //
+                    // Done inline rather than hoisted like RENOMMER: this is a
+                    // 144 KB buffer patched in memory and one file write, with no
+                    // keyboard and no network, so it fits in a frame.
+                    let Some(e) = s.entries.get(game_idx) else { return };
+                    let (path, title) = (e.path.clone(), e.display_name.clone());
+                    let out = shortcut_path_for(&title);
+                    let rc = match (
+                        std::ffi::CString::new(path.as_str()),
+                        std::ffi::CString::new(title.as_str()),
+                        std::ffi::CString::new(out.as_str()),
+                    ) {
+                        (Ok(p), Ok(t), Ok(o)) => unsafe {
+                            shortcut_write(p.as_ptr(), t.as_ptr(), o.as_ptr())
+                        },
+                        _ => -4,
+                    };
+                    if rc == 1 {
+                        crate::sd::commit();
+                        set_toast(s, crate::loc::s().shortcut_ok.to_string(), TOAST_OK);
+                    } else {
+                        log(&std::format!("shortcut: write failed rc={} -> {}\n", rc, out));
+                        set_toast(s, crate::loc::s().shortcut_err.to_string(), TOAST_ERR);
+                    }
                     return;
                 }
                 "RENOMMER" => {
@@ -8045,6 +8101,17 @@ fn delete_game(s: &mut State, game_idx: usize) {
             root_c.as_ptr() as *const core::ffi::c_char,
         )
     };
+    // And its HOME-menu shortcut, if it made one: a shortcut left behind points
+    // at a `.swf` that no longer exists, and the player only finds out by
+    // launching it from hbmenu and landing on an error.
+    //
+    // The C++ side refuses to delete a file that does not carry our marker, so a
+    // game titled like somebody's existing homebrew cannot take it down with it.
+    if let Ok(sc) = std::ffi::CString::new(shortcut_path_for(&entry.display_name)) {
+        if unsafe { shortcut_delete(sc.as_ptr()) } == 1 {
+            log(&std::format!("library: removed shortcut for {}\n", entry.display_name));
+        }
+    }
     // The C++ scan only sees the .swf's own directory; clean up the cached
     // cover (covers/ subdir) and stem-named sidecars it can't reach, then
     // commit so the unlinks (C++ + Rust) actually persist to the SD card.
@@ -8787,12 +8854,15 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 } else {
                     lc.opt_favorite
                 };
+                // Same order as OPTIONS_ENTRIES, with SUPPRIMER kept last: the
+                // destructive row should not move because a new one arrived.
                 let labels = [
                     fav_label,
                     lc.opt_keys,
                     lc.opt_rename,
                     lc.opt_cover,
                     lc.opt_folder,
+                    lc.opt_shortcut,
                     lc.opt_delete,
                 ];
                 backend.draw_library_options(

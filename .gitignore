@@ -37,3 +37,10 @@ Cargo.lock
 # game plus its companions, never repo content. `*.swf` above already covers the
 # game itself; this also covers `<name>.files/` and anything beside it.
 /cpp/romfs/
+
+# Shortcut stub: built from stub/source/ at every FlashNX build, then turned into
+# a byte array by bin2s. Both are artifacts, never edited by hand.
+/stub/build/
+/stub/flashnx_stub.elf
+/stub/flashnx_stub.nro
+/cpp/src/flashnx_stub.s
