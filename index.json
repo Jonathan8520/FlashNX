@@ -606,5 +606,13 @@
     "swf_hash": "be6a12e7fa4d27a5",
     "file": "up-beat/up-beat-be6a12e7-f236ced2.profile.json",
     "verified": false
+  },
+  {
+    "id": "vox-populi-vox-dei-88854004-a09f7680",
+    "title": "Vox Populi Vox Dei",
+    "fp_uuid": "",
+    "swf_hash": "88854004ac73e7e6",
+    "file": "vox-populi-vox-dei/vox-populi-vox-dei-88854004-a09f7680.profile.json",
+    "verified": false
   }
 ]
