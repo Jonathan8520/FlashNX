@@ -1527,6 +1527,8 @@ extern "C" {
         swf_path: *const core::ffi::c_char,
         display_name: *const core::ffi::c_char,
         out_path: *const core::ffi::c_char,
+        icon_jpeg: *const u8,
+        icon_len: u32,
     ) -> core::ffi::c_int;
     /// Present what has just been drawn. Normally the C++ frame loop owns this,
     /// and nothing in Rust needs it; the GameZIP extraction does, because it
@@ -4342,6 +4344,10 @@ extern "C" {
     /// (it is checked for our marker first). 1 = removed, 0 = absent or
     /// somebody else's homebrew of the same name, left alone.
     fn shortcut_delete(path: *const core::ffi::c_char) -> core::ffi::c_int;
+    /// 1 when one of OUR shortcuts already sits at this path. Somebody else's
+    /// homebrew of the same name reads as 0, so the row offers to create rather
+    /// than to remove theirs.
+    fn shortcut_exists(path: *const core::ffi::c_char) -> core::ffi::c_int;
 }
 
 /// Top-level file names of `dir`, straight from one `readdir`.
@@ -7301,6 +7307,21 @@ pub(crate) fn apply_game_folder(s: &mut State, game_idx: usize, target: &str) {
 /// The name is folded the same way a downloaded game's is (`swf_filename`), so
 /// a title with a slash or a colon cannot escape the folder, and the file is the
 /// same identity the NACP inside it shows.
+/// True when this game already has one of OUR shortcuts.
+///
+/// Takes the raw `display_name` and strips the extension the same way the write
+/// path does, so the question and the answer describe the same file.
+fn shortcut_here(display_name: &str) -> bool {
+    let title = display_name
+        .strip_suffix(".swf")
+        .or_else(|| display_name.strip_suffix(".SWF"))
+        .unwrap_or(display_name);
+    match std::ffi::CString::new(shortcut_path_for(title)) {
+        Ok(c) => (unsafe { shortcut_exists(c.as_ptr()) }) == 1,
+        Err(_) => false,
+    }
+}
+
 fn shortcut_path_for(title: &str) -> std::string::String {
     let base = crate::sources::gamezip::swf_filename(title);
     let stem = base.strip_suffix(".swf").unwrap_or(&base);
@@ -7362,15 +7383,52 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                     // 144 KB buffer patched in memory and one file write, with no
                     // keyboard and no network, so it fits in a frame.
                     let Some(e) = s.entries.get(game_idx) else { return };
-                    let (path, title) = (e.path.clone(), e.display_name.clone());
+                    // Without the extension: `display_name` is the on-SD file
+                    // name when the game has no rename override, and hbmenu shows
+                    // this string verbatim under the tile. The first shortcut
+                    // ever made read "Agent P Strikes Back.swf" on the home
+                    // screen, which is a file name, not a game.
+                    let basename = e.basename.clone();
+                    let (path, title) = (
+                        e.path.clone(),
+                        e.display_name
+                            .strip_suffix(".swf")
+                            .or_else(|| e.display_name.strip_suffix(".SWF"))
+                            .unwrap_or(&e.display_name)
+                            .to_string(),
+                    );
                     let out = shortcut_path_for(&title);
+                    let Ok(out_c) = std::ffi::CString::new(out.as_str()) else { return };
+                    // A toggle, not an add. Pressed twice it used to rewrite the
+                    // same file and say "added" again, which reads as piling up
+                    // duplicates when there has only ever been one.
+                    if unsafe { shortcut_exists(out_c.as_ptr()) } == 1 {
+                        let removed = unsafe { shortcut_delete(out_c.as_ptr()) } == 1;
+                        crate::sd::commit();
+                        let lc = crate::loc::s();
+                        set_toast(
+                            s,
+                            if removed { lc.shortcut_removed } else { lc.shortcut_err }.to_string(),
+                            if removed { TOAST_OK } else { TOAST_ERR },
+                        );
+                        return;
+                    }
+                    // The game's box art, as the 256x256 JPEG hbmenu wants. None
+                    // when the game has no cover, which is fine: the shortcut is
+                    // written anyway and the launcher draws its placeholder.
+                    let icon = crate::covers::shortcut_icon_jpeg(&basename);
                     let rc = match (
                         std::ffi::CString::new(path.as_str()),
                         std::ffi::CString::new(title.as_str()),
-                        std::ffi::CString::new(out.as_str()),
                     ) {
-                        (Ok(p), Ok(t), Ok(o)) => unsafe {
-                            shortcut_write(p.as_ptr(), t.as_ptr(), o.as_ptr())
+                        (Ok(p), Ok(t)) => unsafe {
+                            shortcut_write(
+                                p.as_ptr(),
+                                t.as_ptr(),
+                                out_c.as_ptr(),
+                                icon.as_ref().map_or(core::ptr::null(), |v| v.as_ptr()),
+                                icon.as_ref().map_or(0, |v| v.len() as u32),
+                            )
                         },
                         _ => -4,
                     };
@@ -8854,6 +8912,15 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 } else {
                     lc.opt_favorite
                 };
+                // Two states, like FAVORI just above: the row wrote the same
+                // file again on every press and still said "added", which reads
+                // as piling up duplicates. It toggles now, and the label says
+                // which way it will go.
+                let sc_label = if shortcut_here(&entry.display_name) {
+                    lc.opt_shortcut_del
+                } else {
+                    lc.opt_shortcut
+                };
                 // Same order as OPTIONS_ENTRIES, with SUPPRIMER kept last: the
                 // destructive row should not move because a new one arrived.
                 let labels = [
@@ -8862,7 +8929,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     lc.opt_rename,
                     lc.opt_cover,
                     lc.opt_folder,
-                    lc.opt_shortcut,
+                    sc_label,
                     lc.opt_delete,
                 ];
                 backend.draw_library_options(

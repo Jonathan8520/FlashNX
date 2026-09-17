@@ -57,6 +57,11 @@ constexpr size_t NACP_LANG_COUNT = 16;
 constexpr size_t NACP_LANG_STRIDE = 0x300;
 constexpr size_t NACP_NAME_CAP = 0x200;
 constexpr size_t NACP_AUTHOR_CAP = 0x100;
+// `char display_version[0x10]`, after lang[16] plus the fixed block that follows
+// it. hbmenu prints it under the author, and an empty one reads as a half-built
+// file rather than as "no version".
+constexpr size_t NACP_DISPLAY_VERSION_OFF = 0x3060;
+constexpr size_t NACP_DISPLAY_VERSION_CAP = 0x10;
 
 void put_le32(u8* p, u32 v) {
     p[0] = (u8)(v);
@@ -79,7 +84,9 @@ void put_le64(u8* p, u64 v) {
 /// marker (it was built wrong), -4 the file could not be written.
 extern "C" int shortcut_write(const char* swf_path,
                               const char* display_name,
-                              const char* out_path) {
+                              const char* out_path,
+                              const unsigned char* icon_jpeg,
+                              unsigned int icon_len) {
     if (!swf_path || !display_name || !out_path) return -4;
 
     const size_t stub_len = (size_t)(flashnx_stub_nro_end - flashnx_stub_nro);
@@ -91,9 +98,10 @@ extern "C" int shortcut_write(const char* swf_path,
 
     // One buffer: the stub, then the asset header, then the NACP. The stub is
     // built with no asset section of its own, so this only ever appends.
+    const size_t icon_size = (icon_jpeg && icon_len) ? (size_t)icon_len : 0;
     std::string out;
     out.assign((const char*)flashnx_stub_nro, stub_len);
-    out.append(ASET_HEADER_SIZE + NACP_SIZE, '\0');
+    out.append(ASET_HEADER_SIZE + icon_size + NACP_SIZE, '\0');
     u8* buf = (u8*)&out[0];
 
     // Searched, never a fixed offset: the offset moves with every rebuild of the
@@ -110,31 +118,37 @@ extern "C" int shortcut_write(const char* swf_path,
     std::memset(target, 0, TARGET_CAP - MARKER_LEN);
     std::memcpy(target, swf_path, path_len);
 
+    // The icon is the game's box art as 256x256 JPEG (see `shortcut_icon_jpeg`
+    // in covers.rs). JPEG specifically: hbmenu decodes tile icons with
+    // libjpeg-turbo and draws nothing for anything else. A game with no cover
+    // passes none, the fields stay zero, and the launcher shows its placeholder.
+    const size_t nacp_off = ASET_HEADER_SIZE + icon_size;
     u8* aset = buf + stub_len;
     put_le32(aset + 0x00, ASET_MAGIC);
     put_le32(aset + 0x04, 0);
-    put_le64(aset + 0x08, 0); // icon offset
-    put_le64(aset + 0x10, 0); // icon size: none, see below
-    put_le64(aset + 0x18, ASET_HEADER_SIZE);
+    put_le64(aset + 0x08, icon_size ? ASET_HEADER_SIZE : 0);
+    put_le64(aset + 0x10, icon_size);
+    put_le64(aset + 0x18, nacp_off);
     put_le64(aset + 0x20, NACP_SIZE);
     put_le64(aset + 0x28, 0); // no romfs
     put_le64(aset + 0x30, 0);
-
-    // No icon, deliberately. A `.nro` icon is expected to be JPEG 256x256; our
-    // box art is PNG and we ship a decoder but no encoder. A PNG in this slot was
-    // tried on hardware (2026-08-26) and it does display, badly: non-square art,
-    // white bands, wrong crop. An absent icon is valid and the launcher falls
-    // back to its default, which is honest rather than wrong.
+    if (icon_size) {
+        std::memcpy(aset + ASET_HEADER_SIZE, icon_jpeg, icon_size);
+    }
 
     // The name goes into ALL sixteen language slots, which is what nacptool
     // does: a launcher reads the slot for the console's own language, so filling
     // one would leave the entry blank on every other system setting.
-    u8* nacp = aset + ASET_HEADER_SIZE;
+    u8* nacp = aset + nacp_off;
     for (size_t i = 0; i < NACP_LANG_COUNT; i++) {
         u8* e = nacp + i * NACP_LANG_STRIDE;
         std::snprintf((char*)e, NACP_NAME_CAP, "%s", display_name);
         std::snprintf((char*)e + NACP_NAME_CAP, NACP_AUTHOR_CAP, "%s", "FlashNX");
     }
+    // The player's version, not the game's: it says which FlashNX wrote this
+    // shortcut, which is the useful fact when one stops working.
+    std::snprintf((char*)nacp + NACP_DISPLAY_VERSION_OFF, NACP_DISPLAY_VERSION_CAP,
+                  "%s", FLASHNX_VERSION);
 
     // Through the C++ writer, like every other file this app puts on the card:
     // Rust's `std::fs::write` reports success on Horizon and the file then reads
@@ -186,4 +200,26 @@ extern "C" int shortcut_delete(const char* path) {
         return 0;
     }
     return std::remove(path) == 0 ? 1 : -1;
+}
+
+/// Does a shortcut of OURS already sit at `path`? 1 yes, 0 no.
+///
+/// Same marker test as `shortcut_delete`, read-only: a homebrew of somebody
+/// else's that happens to share the name must read as "no shortcut here", so the
+/// menu offers to create one rather than to remove theirs.
+extern "C" int shortcut_exists(const char* path) {
+    if (!path || !*path) return 0;
+    FILE* f = std::fopen(path, "rb");
+    if (!f) return 0;
+    static char buf[256 * 1024];
+    const size_t n = std::fread(buf, 1, sizeof(buf), f);
+    std::fclose(f);
+    if (n == 0) return 0;
+    char marker[64];
+    std::snprintf(marker, sizeof(marker), "%s%s", "FLASHNX_SHORTCUT_", "TARGET_V1:");
+    const size_t mlen = std::strlen(marker);
+    for (size_t i = 0; i + mlen <= n; i++) {
+        if (std::memcmp(buf + i, marker, mlen) == 0) return 1;
+    }
+    return 0;
 }

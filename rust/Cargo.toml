@@ -107,6 +107,14 @@ ab_glyph_rasterizer = "0.1"
 # dep) re-introduced the crash on any SWF with an embedded JPEG. We only use the
 # single-threaded API (Decoder::new/decode/info), so no features are needed.
 jpeg-decoder = { version = "0.3", default-features = false }
+
+# Encoding, for the icon of a HOME-menu shortcut. hbmenu decodes tile icons
+# with libjpeg-turbo and accepts nothing else, while our box art is PNG, so a
+# shortcut had no icon at all. Default features keep `std` and leave `simd`
+# off: this runs once per shortcut on a 256x256 image, so speed is irrelevant,
+# and the crate spawns no threads -- which is the trap that forced the
+# jpeg-decoder fork below.
+jpeg-encoder = "0.7"
 # v1.2.x — multi-file SWF games. The sidecar NavigatorBackend in
 # src/backend/navigator.rs serves a game's sibling SWFs off the SD card so
 # loadMovie / GetURL-into-_levelN works (e.g. Garfield's Scary Scavenger Hunt

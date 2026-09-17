@@ -49,6 +49,9 @@ endif
 #---------------------------------------------------------------------------------
 ARCH     := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 
+# The version reaches C++ too: a shortcut writes it into its NACP, so a tile
+# that stops working says which FlashNX produced it. One source of truth.
+DEFINES  += -DFLASHNX_VERSION=\"$(APP_VERSION)\"
 CFLAGS   := -g -Wall -O2 -ffunction-sections $(ARCH) $(DEFINES) -D__SWITCH__
 CFLAGS   += $(INCLUDE)
 

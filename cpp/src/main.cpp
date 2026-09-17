@@ -24,6 +24,10 @@ extern "C" void swf_picker_run(void);
 // The `.swf` embedded in this `.nro` (issue #106), or nullptr on a normal
 // build. Only meaningful after romfsInit(); see cpp/src/swf_picker.cpp.
 extern "C" const char* swf_picker_embedded_swf(void);
+// 1 when we only have the album's small memory pool. Defined in
+// cpp/src/ruffle_bridge.cpp; the library flow already refuses to launch a game
+// on it, and the forwarder path has to do the same.
+extern "C" int ruffle_is_applet_mode(void);
 
 // Phase 3.4 — library boot screen FFI (rust/src/library.rs).
 extern "C" void ruffle_loc_init(void);
@@ -650,6 +654,22 @@ static void worker_entry(void* arg) {
     // in swf_picker.cpp -- and main blocks on threadWaitForExit anyway.
     // NULL = normal launch → show library.
     const char* forwarder_swf = static_cast<const char*>(arg);
+    // ...unless we only have the ALBUM's memory pool, in which case launching
+    // anything would run out of heap. The notice that explains this to the
+    // player lives in the library flow (`Screen::AppletNotice`), and a forwarder
+    // skips that flow entirely, so this path had no guard at all and simply
+    // OOM'd. Dropping the target falls through to the library, which says why.
+    //
+    // Present since forwarder launches shipped in v1.3.0 and never hit, because
+    // making a shortcut meant going through Sphaira on purpose. The in-app
+    // "create a shortcut" row changes that: hbmenu is usually opened from the
+    // album, and now it has game entries sitting in it.
+    if (forwarder_swf && ruffle_is_applet_mode()) {
+        std::printf("boot: applet memory pool — ignoring '%s', opening the library "
+                    "so the takeover notice is shown\n", forwarder_swf);
+        std::fflush(stdout);
+        forwarder_swf = nullptr;
+    }
     std::printf("worker: starting (32 MB stack), %.0f ms after main()\n",
                 boot_ms_since(g_boot_t0)); std::fflush(stdout);
 

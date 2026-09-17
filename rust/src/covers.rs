@@ -503,3 +503,83 @@ pub fn remove_for(basename: &str) -> u32 {
     }
     removed
 }
+
+// ── HOME-menu shortcut icon ────────────────────────────────────────────────
+
+/// The game's box art as a 256x256 JPEG, for a shortcut `.nro`'s icon slot.
+///
+/// JPEG and not PNG because hbmenu decodes tile icons with libjpeg-turbo and
+/// accepts nothing else; a PNG in that slot is simply not drawn. 256x256 is the
+/// size the format expects.
+///
+/// CENTRE-CROPPED to a square before scaling, never letterboxed. Box art is
+/// taller than it is wide, and fitting it into a square leaves white bands and a
+/// picture too small to recognise — observed on hardware on 2026-08-26, the
+/// first time a cover was put in front of one of these. Cropping loses the top
+/// and bottom of a tall cover, which is where box art has its least information.
+///
+/// Returns None when the game has no cover, or when anything in the chain fails:
+/// a shortcut with no icon is valid and the launcher draws its own placeholder,
+/// so nothing here is worth failing the whole action over.
+pub fn shortcut_icon_jpeg(basename: &str) -> Option<std::vec::Vec<u8>> {
+    const SIDE: u32 = 256;
+    let path = match resolve(basename) {
+        Cover::Image(p) => p,
+        Cover::Default => return None,
+    };
+    let (rgba, w, h) = decode_file(&path)?;
+    if w == 0 || h == 0 {
+        return None;
+    }
+
+    // Centre square in the SOURCE, then one box-filter pass straight into the
+    // destination: averaging every source pixel that lands in a destination cell
+    // rather than point-sampling, because a 600x800 cover reduced by nearest
+    // neighbour shimmers on the diagonal edges box art is full of.
+    let side = w.min(h);
+    let ox = (w - side) / 2;
+    let oy = (h - side) / 2;
+    let mut out = std::vec![0u8; (SIDE * SIDE * 3) as usize];
+    for dy in 0..SIDE {
+        // Source rows covered by this destination row, at least one.
+        let sy0 = oy + (dy * side) / SIDE;
+        let sy1 = (oy + ((dy + 1) * side) / SIDE).max(sy0 + 1).min(oy + side);
+        for dx in 0..SIDE {
+            let sx0 = ox + (dx * side) / SIDE;
+            let sx1 = (ox + ((dx + 1) * side) / SIDE).max(sx0 + 1).min(ox + side);
+            let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+            for sy in sy0..sy1 {
+                for sx in sx0..sx1 {
+                    let i = ((sy * w + sx) * 4) as usize;
+                    if i + 3 >= rgba.len() {
+                        continue;
+                    }
+                    // Composite on white: JPEG has no alpha channel, and a cover
+                    // with a transparent margin would otherwise come out with a
+                    // black frame around it.
+                    let a = rgba[i + 3] as u32;
+                    r += (rgba[i] as u32 * a + 255 * (255 - a)) / 255;
+                    g += (rgba[i + 1] as u32 * a + 255 * (255 - a)) / 255;
+                    b += (rgba[i + 2] as u32 * a + 255 * (255 - a)) / 255;
+                    n += 1;
+                }
+            }
+            if n == 0 {
+                continue;
+            }
+            let o = ((dy * SIDE + dx) * 3) as usize;
+            out[o] = (r / n) as u8;
+            out[o + 1] = (g / n) as u8;
+            out[o + 2] = (b / n) as u8;
+        }
+    }
+
+    // Quality 85: the icon is 256x256 and lands in a file that is already 144 KB,
+    // so there is no reason to squeeze it, and box art with flat colour areas
+    // bands visibly below about 80.
+    let mut jpeg: std::vec::Vec<u8> = std::vec::Vec::new();
+    let enc = jpeg_encoder::Encoder::new(&mut jpeg, 85);
+    enc.encode(&out, SIDE as u16, SIDE as u16, jpeg_encoder::ColorType::Rgb)
+        .ok()?;
+    Some(jpeg)
+}
