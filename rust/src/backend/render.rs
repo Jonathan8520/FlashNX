@@ -1042,6 +1042,68 @@ static PRIM_OFF_N_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 static PRIM_OFF_PIX_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PRIM_OFF_PIX_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+// DIAG (2026-09-18, Mario 63 level 8-13): the BitmapCacheEntry loop is the
+// single biggest block of `submit_frame` and had no timer at all, so a slow
+// frame printed `render 68000us` with every sub-timer reading zero and there
+// was nothing to attribute it to.
+//
+// That gap is why this file has twice accumulated a per-rebind cost that was
+// never actually measured. Both the 0.77 ms below and the ~0.30 ms it was
+// replaced by are `total render / rebind count`, which assigns the whole of
+// `render` to rebinds by construction. The one controlled measurement we have
+// (5b0a9bb, moving filter passes to a colour-only FBO) says a rebind went from
+// 0.46 to 0.39 ms and concludes the attachments were not the story: "it is the
+// 6 to 10 switches per chain that cost". Regressing the 8-13 log agrees that
+// `render` tracks `rtBind` (r2 = 0.64, ~0.32 ms each) but `rtBind` is 0.93
+// collinear with the number of filter CHAINS, and at a fixed chain count the
+// slope collapses to zero or goes negative. So "0.3 ms per rebind" and "1.45 ms
+// per chain" fit the same data equally well, and the same rtBind buys wildly
+// different render times in different parts of the log (rtBind = 178 costs
+// 20.2 ms at f1197 and 61.9 ms at f4428).
+//
+// These two timers are what separates the two readings, and nothing here should
+// be treated as settled until a log carries them:
+//   CACHE  = the whole cache_entries loop, so its share of `render` is read
+//            rather than inferred.
+//   RTBIND = the bind/attach/validate prologue ONLY, stopped before the pass
+//            draws. `rtbindUs / rtBind` is then a real per-rebind cost, and
+//            `cacheUs - rtbindUs` is what the passes themselves cost. If the
+//            first is small and the second large, the cost is per chain and
+//            shaving rebinds is the wrong lever.
+static PRIM_CACHE_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_CACHE_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_RTBIND_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_RTBIND_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many more `glCheckFramebufferStatus` calls to actually issue.
+///
+/// Every render-target switch used to validate the framebuffer, and a filtered
+/// scene does 139 to 286 of those per frame (Mario 63's level 8-13: 16 blurred
+/// meteors whose `onEnterFrame` rotates them, so `BitmapCache::is_dirty` — which
+/// compares matrix a/b/c/d — fires on all of them every single frame).
+///
+/// This is NOT claimed to be where the time goes; see the DIAG note on
+/// `PRIM_RTBIND_CUR` for why no per-rebind cost in this file has ever been
+/// measured cleanly. It is dropped because the call cannot tell us anything new
+/// after the first few, whatever it costs: there are exactly two FBOs here, both
+/// with fixed formats (RGBA8 colour, plus D24S8 for the offscreen one), and
+/// completeness does not depend on the attachment's SIZE under GL 3.0+, which
+/// dropped `FRAMEBUFFER_INCOMPLETE_DIMENSIONS`. So validate while both FBOs are
+/// being shaken out, then stop. A genuine failure past that still shows up: the
+/// draw raises a GL error and the once-a-second drain logs it.
+static FBO_VALIDATE_BUDGET: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(64);
+
+fn fbo_should_validate() -> bool {
+    FBO_VALIDATE_BUDGET
+        .fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |n| if n == 0 { None } else { Some(n - 1) },
+        )
+        .is_ok()
+}
+
 // DIAG (2026-07-29, Dragon City perf): time spent in `blend()`'s EXPENSIVE paths
 // and how many groups take each. The suspicion is that a full-stage (1280x720)
 // offscreen round-trip per blend group dominates the frame: Dragon City logs ~85
@@ -1671,6 +1733,9 @@ struct BitmapProgram {
     u_add: GLint,
     u_tex: GLint,
     u_uv_remap: GLint,
+    /// 0 = straight alpha (atlas, launcher art), 1 = premultiplied (standalone
+    /// cache / filter / `BitmapData.draw` textures). See `BITMAP_FRAG`.
+    u_premult: GLint,
 }
 
 struct GradientProgram {
@@ -1925,6 +1990,10 @@ struct GlStateCache {
     last_program: Cell<GLuint>,
     last_texture: Cell<GLuint>,
     last_wrap_mode: Cell<i32>,
+    /// Mirror of `BITMAP_FRAG`'s `u_premult`. Nearly every draw in a frame is
+    /// straight-alpha, so the handful of standalone draws are the only ones
+    /// that ever reach the driver with this.
+    last_premult: Cell<i32>,
     last_vao: Cell<GLuint>,
     /// Sampler object on texture unit 0. 0 means "none", so GL falls back to
     /// the texture's own parameters — which are LINEAR + CLAMP_TO_EDGE for
@@ -1945,6 +2014,7 @@ impl GlStateCache {
         self.last_program.set(0);
         self.last_texture.set(0);
         self.last_wrap_mode.set(-1);
+        self.last_premult.set(-1);
         self.last_vao.set(0);
         // Not just forgotten: released. Every invalidate marks a hand-off to raw
         // GL, and a point sampler left on unit 0 would follow whoever runs next.
@@ -1992,6 +2062,17 @@ impl GlStateCache {
         if self.last_wrap_mode.get() != mode {
             unsafe { glUniform1i(location, mode) };
             self.last_wrap_mode.set(mode);
+        }
+    }
+
+    /// Alpha convention of the texture bound for `BITMAP_FRAG`. Same deal as
+    /// `set_wrap_mode`: one `glUniform1i` only when the run of draws changes
+    /// convention, which in practice is a few times a frame.
+    fn set_premult(&self, location: GLint, premult: bool) {
+        let v = i32::from(premult);
+        if self.last_premult.get() != v {
+            unsafe { glUniform1i(location, v) };
+            self.last_premult.set(v);
         }
     }
 
@@ -2402,15 +2483,47 @@ void main() {\n\
     v_uv = u_uv_remap.xy + a_uv * u_uv_remap.zw;\n\
 }\n\0";
 
+/// `u_premult` says which alpha convention the bound texture uses, and that
+/// changes the colour-transform MATHS, not just the blend.
+///
+/// Atlas bitmaps hold STRAIGHT alpha, so `colour * mult + add` is already the
+/// Flash formula and the straight-alpha blend applies coverage afterwards.
+/// Standalone textures (cacheAsBitmap, filter results, `BitmapData.draw`) hold
+/// PREMULTIPLIED alpha and are drawn with `glBlendFunc(GL_ONE, ...)`, which
+/// adds the fragment's RGB to the target with no coverage weighting at all.
+/// Running the straight-alpha formula on one of those wrote `u_add` over the
+/// whole quad, transparent margin included: Mario 63's level 8-13 tints its
+/// meteor layer by +31 (`8-13BG`, character 5893, places its child with
+/// `add = [31, 31, 31, 0]`) and every blurred meteor under it — a filter forces
+/// a bitmap cache, so each one comes back through here — sat inside a flat
+/// #1F1F1F rectangle the size of its cache texture. 31 / 255 = 0.1216, which is
+/// exactly the grey that showed up on screen.
+///
+/// The premultiplied branch therefore does what BOTH upstream backends do
+/// (wgpu `bitmap.wgsl`, webgl `bitmap.frag`): unmultiply, transform, remultiply,
+/// the whole thing skipped when alpha is zero. Skipping is what removes the
+/// rectangle; unmultiplying is what stops the same `add` washing out the blurred
+/// edge, which is the identical bug one alpha step further in.
+///
+/// The branch is uniform across a draw, so it costs a predicated jump and
+/// nothing else — which matters, since this is the hottest fragment shader here.
 const BITMAP_FRAG: &[u8] = b"#version 330 core\n\
 in vec2 v_uv;\n\
 out vec4 frag_color;\n\
 uniform sampler2D u_tex;\n\
 uniform vec4 u_mult;\n\
 uniform vec4 u_add;\n\
+uniform int u_premult;\n\
 void main() {\n\
     vec4 c = texture(u_tex, v_uv);\n\
-    frag_color = clamp(c * u_mult + u_add, 0.0, 1.0);\n\
+    if (u_premult == 0) {\n\
+        frag_color = clamp(c * u_mult + u_add, 0.0, 1.0);\n\
+    } else if (c.a > 0.0) {\n\
+        vec4 s = clamp(vec4(c.rgb / c.a, c.a) * u_mult + u_add, 0.0, 1.0);\n\
+        frag_color = vec4(s.rgb * s.a, s.a);\n\
+    } else {\n\
+        frag_color = c;\n\
+    }\n\
 }\n\0";
 
 /// Vertex shader for gradient draws: just like solid except we forward the
@@ -3315,6 +3428,7 @@ fn build_bitmap_program() -> Option<BitmapProgram> {
         u_add: loc(program, b"u_add\0"),
         u_tex: loc(program, b"u_tex\0"),
         u_uv_remap: loc(program, b"u_uv_remap\0"),
+        u_premult: loc(program, b"u_premult\0"),
         program,
     })
 }
@@ -5810,6 +5924,7 @@ impl SwitchRenderBackend {
         }
         let mut prev_fbo: GLint = 0;
         let mut prev_vp: [GLint; 4] = [0; 4];
+        let bind_timer = PrimTimer::new(&PRIM_RTBIND_CUR);
         unsafe {
             glGetIntegerv(GL_FRAMEBUFFER_BINDING, &mut prev_fbo);
             glGetIntegerv(GL_VIEWPORT, prev_vp.as_mut_ptr());
@@ -5819,14 +5934,16 @@ impl SwitchRenderBackend {
         }
         self.ensure_offscreen_depth_stencil(tex_w, tex_h);
         unsafe {
-            let status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-            if status != GL_FRAMEBUFFER_COMPLETE {
-                let msg = std::format!("offscreen: FBO incomplete 0x{:04X} ({}x{})\n", status, tex_w, tex_h);
-                let mut b = msg.into_bytes();
-                b.push(0);
-                ruffle_log_cstr(b.as_ptr() as *const _);
-                glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo as GLuint);
-                return false;
+            if fbo_should_validate() {
+                let status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+                if status != GL_FRAMEBUFFER_COMPLETE {
+                    let msg = std::format!("offscreen: FBO incomplete 0x{:04X} ({}x{})\n", status, tex_w, tex_h);
+                    let mut b = msg.into_bytes();
+                    b.push(0);
+                    ruffle_log_cstr(b.as_ptr() as *const _);
+                    glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo as GLuint);
+                    return false;
+                }
             }
             glViewport(0, 0, tex_w as GLsizei, tex_h as GLsizei);
             glClearStencil(0);
@@ -5858,6 +5975,10 @@ impl SwitchRenderBackend {
             glStencilMask(0xFF);
         }
 
+        // DIAG: the target switch is done; everything past here is the pass
+        // itself, which `cacheUs` already covers.
+        drop(bind_timer);
+
         let prev_mask = self.mask;
         self.mask = MaskState::default();
         let prev_offscreen = self.offscreen_dims;
@@ -5872,7 +5993,11 @@ impl SwitchRenderBackend {
         self.offscreen_target_tex = prev_target_tex;
         self.mask = prev_mask;
         unsafe {
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+            // No explicit colour detach: rebinding this FBO always overwrites
+            // attachment 0, and GL detaches automatically if the texture is
+            // deleted while still attached. It was one more attachment change
+            // per render-target switch, and there are 180-240 of those a frame
+            // in Mario 63's 8-13.
             glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo as GLuint);
             glViewport(prev_vp[0], prev_vp[1], prev_vp[2], prev_vp[3]);
             // Restore the main-framebuffer blend (non-separate is fine there).
@@ -6052,6 +6177,7 @@ impl SwitchRenderBackend {
         }
         let mut prev_fbo: GLint = 0;
         let mut prev_vp: [GLint; 4] = [0; 4];
+        let bind_timer = PrimTimer::new(&PRIM_RTBIND_CUR);
         unsafe {
             glGetIntegerv(GL_FRAMEBUFFER_BINDING, &mut prev_fbo);
             glGetIntegerv(GL_VIEWPORT, prev_vp.as_mut_ptr());
@@ -6060,14 +6186,16 @@ impl SwitchRenderBackend {
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dst_tex, 0);
         }
         unsafe {
-            let status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-            if status != GL_FRAMEBUFFER_COMPLETE {
-                let msg = std::format!("filter pass: FBO incomplete 0x{:04X}\n", status);
-                let mut b = msg.into_bytes();
-                b.push(0);
-                ruffle_log_cstr(b.as_ptr() as *const _);
-                glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo as GLuint);
-                return false;
+            if fbo_should_validate() {
+                let status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+                if status != GL_FRAMEBUFFER_COMPLETE {
+                    let msg = std::format!("filter pass: FBO incomplete 0x{:04X}\n", status);
+                    let mut b = msg.into_bytes();
+                    b.push(0);
+                    ruffle_log_cstr(b.as_ptr() as *const _);
+                    glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo as GLuint);
+                    return false;
+                }
             }
             glViewport(dst_x, dst_y, dst_w as GLsizei, dst_h as GLsizei);
             glDisable(GL_BLEND);
@@ -6083,6 +6211,10 @@ impl SwitchRenderBackend {
             let sh = src_size.1 as f32 / src_h.max(1) as f32;
             glUniform4f(u_src_uv_loc, su, sv, sw, sh);
         }
+        // DIAG: stop the clock before the quad, so `rtbindUs` means the target
+        // switch alone. Whatever is left in `cacheUs` after subtracting it is
+        // the actual drawing, and the two answer different questions.
+        drop(bind_timer);
         setup_uniforms();
         unsafe {
             glBindVertexArray(self.bitmap_vao);
@@ -6090,7 +6222,9 @@ impl SwitchRenderBackend {
             glBindVertexArray(0);
             glBindTexture(GL_TEXTURE_2D, 0);
             glEnable(GL_BLEND);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+            // No explicit colour detach — see `render_commands_to_texture`. This
+            // is the hotter of the two: five of the six rebinds an entry costs
+            // come through here.
             glBindFramebuffer(GL_FRAMEBUFFER, prev_fbo as GLuint);
             glViewport(prev_vp[0], prev_vp[1], prev_vp[2], prev_vp[3]);
         }
@@ -6941,7 +7075,7 @@ impl SwitchRenderBackend {
         const IDENT_MULT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
         const IDENT_ADD: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
         let uv_remap = [0.0, 0.0, 1.0, 1.0];
-        self.use_bitmap(&world, &IDENT_MULT, &IDENT_ADD, tex, &uv_remap, 0);
+        self.use_bitmap(&world, &IDENT_MULT, &IDENT_ADD, tex, &uv_remap, 0, true);
         self.gl_state.bind_vao(self.bitmap_vao);
         self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
         set_blend();
@@ -7107,6 +7241,11 @@ impl SwitchRenderBackend {
         }
     }
 
+    /// `premult` must be true exactly when `tex` holds premultiplied alpha,
+    /// i.e. for the standalone (FBO-backed) textures Ruffle hands back for
+    /// cacheAsBitmap / filtered objects / `BitmapData.draw`. Everything else
+    /// here — the SWF atlas, banner, covers, glyph runs — is straight alpha.
+    /// Getting this wrong is not cosmetic: see the `BITMAP_FRAG` doc comment.
     fn use_bitmap(
         &self,
         world: &[GLfloat; 9],
@@ -7115,6 +7254,7 @@ impl SwitchRenderBackend {
         tex: GLuint,
         uv_remap: &[f32; 4],
         sampler_obj: GLuint,
+        premult: bool,
     ) {
         // Sampler UNIFORM (u_tex = 0) set once at program link; no per-draw
         // glUniform1i(u_tex) needed here. `sampler_obj` is the unrelated sampler
@@ -7125,6 +7265,7 @@ impl SwitchRenderBackend {
         self.gl_state.use_program(self.bitmap_prog.program);
         self.gl_state.bind_texture_unit0(tex);
         self.gl_state.bind_sampler(sampler_obj);
+        self.gl_state.set_premult(self.bitmap_prog.u_premult, premult);
         unsafe {
             glUniformMatrix3fv(self.bitmap_prog.u_world, 1, GL_FALSE, world.as_ptr());
             glUniform4f(self.bitmap_prog.u_mult, mult[0], mult[1], mult[2], mult[3]);
@@ -7473,6 +7614,13 @@ impl SwitchRenderBackend {
         let off_upload = to_us(PRIM_OFF_UPLOAD_LAST.load(std::sync::atomic::Ordering::Relaxed));
         let off_n = PRIM_OFF_N_LAST.load(std::sync::atomic::Ordering::Relaxed);
         let off_pix = PRIM_OFF_PIX_LAST.load(std::sync::atomic::Ordering::Relaxed);
+        // The cache_entries loop and, inside it, the render-target switches
+        // alone. `cacheUs` is the share of `render` the filtered-object path
+        // really owns; `rtbindUs / rtBind` is what one switch costs; the
+        // difference is drawing. Before these two, a Mario 63 8-13 frame printed
+        // `render 68000us` with every other sub-timer at zero.
+        let cache_us = to_us(PRIM_CACHE_LAST.load(std::sync::atomic::Ordering::Relaxed));
+        let rtbind_us = to_us(PRIM_RTBIND_LAST.load(std::sync::atomic::Ordering::Relaxed));
         // Blend attribution (see the BLEND_* statics): blendMs is the ONLY timer
         // here that covers work done inside submit_frame, so it is the one that
         // can actually account for a large `render` with everything else at zero.
@@ -7513,10 +7661,11 @@ impl SwitchRenderBackend {
             0
         };
         let msg = std::format!(
-            "SLOW f{} {}us (tick {}us render {}us) swf={} gc={} gcUs={} gcMB={} alloc={}/{}us({}%sm) free={}/{}us heap={}%  rtBind={} primOffs={}us primBmp={}us primRes={}us dc={} offs={} filt={}({}chains) resolve={} bmpUp={} shpReg={} blend={} pmask={} mdraw={} cacheEnt={} | offN={} offPix={} alloc={}us render={}us readback={}us upload={}us | blendUs={} ({}% of render) blendTriv={} blendCx={}\n",
+            "SLOW f{} {}us (tick {}us render {}us) swf={} gc={} gcUs={} gcMB={} alloc={}/{}us({}%sm) free={}/{}us heap={}%  rtBind={} cacheUs={}us rtbindUs={}us primOffs={}us primBmp={}us primRes={}us dc={} offs={} filt={}({}chains) resolve={} bmpUp={} shpReg={} blend={} pmask={} mdraw={} cacheEnt={} | offN={} offPix={} alloc={}us render={}us readback={}us upload={}us | blendUs={} ({}% of render) blendTriv={} blendCx={}\n",
             self.frame_count,
             total_us, tick_us, render_us,
             swf_frames, gc_name, gc_us, gc_alloc / (1024 * 1024), d_alloc, alloc_us, small_pct, d_free, free_us, heap_pct, rt_binds,
+            cache_us, rtbind_us,
             prim_offs, prim_bmp, prim_res,
             fb.draw_calls, fb.offscreen, fb.filter, fb.filter_chains,
             fb.resolve, fb.bmp_uploads, fb.shape_regs,
@@ -8019,7 +8168,7 @@ impl SwitchRenderBackend {
         ];
         const NO_ADD: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
         const PASSTHROUGH_UV: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
-        self.use_bitmap(&world, &mult, &NO_ADD, tex, &PASSTHROUGH_UV, 0);
+        self.use_bitmap(&world, &mult, &NO_ADD, tex, &PASSTHROUGH_UV, 0, false);
         self.gl_state.bind_vao(self.atlas_vao);
         self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
         unsafe {
@@ -8925,7 +9074,7 @@ impl SwitchRenderBackend {
         let mult = [1.0, 1.0, 1.0, 1.0];
         let add = [0.0, 0.0, 0.0, 0.0];
         let uv_remap = [0.0, 0.0, 1.0, 1.0];
-        self.use_bitmap(&world, &mult, &add, tex, &uv_remap, 0);
+        self.use_bitmap(&world, &mult, &add, tex, &uv_remap, 0, false);
         self.gl_state.bind_vao(self.bitmap_vao);
         unsafe {
             glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -8992,7 +9141,7 @@ impl SwitchRenderBackend {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         }
-        self.use_bitmap(&world, &mult, &add, tex, &uv_remap, 0);
+        self.use_bitmap(&world, &mult, &add, tex, &uv_remap, 0, false);
         self.gl_state.bind_vao(self.bitmap_vao);
         unsafe {
             glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -15152,6 +15301,9 @@ impl RenderBackend for SwitchRenderBackend {
         //      final filter texture back into entry.handle (so the cache
         //      texture sees the filtered result).
         self.cache_entries_max_window = self.cache_entries_max_window.max(cache_entries.len() as u32);
+        // DIAG: time the whole loop (`cacheUs=` on the SLOW line). Dropped at the
+        // end of this block, right before the counters are snapshotted.
+        let cache_timer = PrimTimer::new(&PRIM_CACHE_CUR);
         // Age out filter-pool textures not reused recently (TTL eviction).
         self.filter_tex_pool.begin_frame(self.frame_count as u64);
         // Per-frame filter budget. Each filtered cache entry costs ~3-5
@@ -15204,7 +15356,56 @@ impl RenderBackend for SwitchRenderBackend {
             // to the shaders (the old crash).
             let mut current_tex = dst_tex;
             let mut current_owned: Option<StandaloneTexture> = None;
-            for filter in entry.filters {
+            let n_filters = entry.filters.len();
+            for (i, filter) in entry.filters.into_iter().enumerate() {
+                // When the LAST link of the chain is a real Blur, aim it straight
+                // at `entry.handle` instead of one more pool temp. `run_blur_to_temp`
+                // seeds its own temps from the source before anything writes to the
+                // destination, so source and destination are allowed to be the same
+                // texture here — and that deletes both the pool round trip and step
+                // 3's blit below.
+                //
+                // That blit was a full-surface pass: bind, attach, viewport, one
+                // screen-filling quad. Removing it is worth having whichever way
+                // the cost of this loop turns out to break down, since it is one
+                // fewer render-target switch AND one fewer pass in the chain, and
+                // those are the two candidate units (see the `PRIM_RTBIND_CUR`
+                // note). A single-Blur entry goes from 6 passes to 5.
+                //
+                // Blur only. ColorMatrix, and the glow/bevel family which re-read
+                // the source in their final combine pass, would sample and write one
+                // texture within a single pass, which is undefined.
+                //
+                // The strength test mirrors `run_blur_to_temp`'s own bail-out: below
+                // it that function returns None and `apply_blur_raw` falls back to a
+                // source → destination blit, which with both sides equal would be a
+                // self-blit. Upstream's `filters.retain(|f| !f.impotent())` already
+                // drops those, but it runs BEFORE `filter.scale(stage)`, so a stage
+                // that scaled DOWN could still produce one. Cheap to just check.
+                let blur_lands_in_place = i + 1 == n_filters
+                    && match &filter {
+                        Filter::BlurFilter(b) => {
+                            b.blur_x.to_f32().min(255.0) > 1.0
+                                || b.blur_y.to_f32().min(255.0) > 1.0
+                        }
+                        _ => false,
+                    };
+                if blur_lands_in_place {
+                    let ok = self.apply_filter_raw(
+                        current_tex, w, h, (0, 0), (w, h),
+                        dst_tex, (0, 0), &filter,
+                    );
+                    if ok {
+                        // Result is already in entry.handle: drop any temp we were
+                        // carrying and leave `current_owned` empty so step 3 is a
+                        // no-op. On failure we keep it, and step 3 blits as before.
+                        if let Some(prev) = current_owned.take() {
+                            self.filter_tex_pool.release(prev);
+                        }
+                        current_tex = dst_tex;
+                    }
+                    continue;
+                }
                 let Some(next) = self.filter_tex_pool.acquire(w, h) else { break };
                 let next_tex = next.texture;
                 let ok = self.apply_filter_raw(
@@ -15231,6 +15432,20 @@ impl RenderBackend for SwitchRenderBackend {
                 self.filter_tex_pool.release(final_owned);
             }
         }
+        // DIAG: these two accumulate INSIDE submit_frame, i.e. after the
+        // snapshot block near the top of this function has already run, so they
+        // cannot ride the same CUR -> LAST hand-off as the tick-side timers —
+        // that would print the previous frame's number. Publish them here, where
+        // the work is finished and `log_slow_frame` has not read anything yet.
+        drop(cache_timer);
+        PRIM_CACHE_LAST.store(
+            PRIM_CACHE_CUR.swap(0, std::sync::atomic::Ordering::Relaxed),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        PRIM_RTBIND_LAST.store(
+            PRIM_RTBIND_CUR.swap(0, std::sync::atomic::Ordering::Relaxed),
+            std::sync::atomic::Ordering::Relaxed,
+        );
 
         // Drain GL errors once per second, plus a one-line heartbeat with
         // running counters every 2 seconds. Quiet otherwise.
@@ -15830,7 +16045,14 @@ impl CommandHandler for SwitchRenderBackend {
             // goes through `sampler_for` like any other bitmap. It needs no UV
             // inset: it owns its texture and CLAMP_TO_EDGE already keeps a
             // NEAREST sample inside it.
-            self.use_bitmap(&world, &mult, &add, tex, &uv_remap, self.sampler_for(smoothing));
+            // `premult = true`: this texture holds premultiplied alpha, so the
+            // colour transform has to be unmultiplied around (and skipped
+            // entirely on fully transparent texels). Without that, `u_add` lands
+            // on the whole quad — the grey rectangle around Mario 63's meteors.
+            // See the `BITMAP_FRAG` doc comment.
+            self.use_bitmap(
+                &world, &mult, &add, tex, &uv_remap, self.sampler_for(smoothing), true,
+            );
             self.gl_state.bind_vao(self.bitmap_vao);
             self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
             // Standalone cache textures store PREMULTIPLIED alpha (the offscreen
@@ -15840,10 +16062,33 @@ impl CommandHandler for SwitchRenderBackend {
             // second time, producing alpha² output — too faint for filter
             // results like DropShadow. Switch to premultiplied "over" blend
             // for the standalone draw, then restore.
+            //
+            // "Restore" has to mean whatever the ENCLOSING pass was using, not
+            // an unconditional straight-alpha blend. Inside an offscreen pass
+            // (`render_commands_to_texture`) the enclosing blend is the SEPARATE
+            // one that accumulates alpha additively, and putting plain
+            // `glBlendFunc` back there reverted the alpha channel to `a²` for
+            // every remaining draw of that pass.
+            //
+            // Reached whenever a cached object is drawn INSIDE another cache
+            // entry's content pass, i.e. a filtered object under a filtered
+            // ancestor. Found while chasing the grey rectangle rather than from
+            // a report, so no game is named here: Mario 63 has 47 such nested
+            // placements, but in 5-1FrontGFX and 5-9BackGFX, NOT in the 8-13
+            // backdrop this fix came from. Correct on its own terms, untested
+            // against a specific symptom.
+            let restore_separate = self.offscreen_dims.is_some();
             unsafe {
                 glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
                 glDrawArrays(GL_TRIANGLES, 0, 6);
-                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                if restore_separate {
+                    glBlendFuncSeparate(
+                        GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+                        GL_ONE, GL_ONE_MINUS_SRC_ALPHA,
+                    );
+                } else {
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                }
             }
             return;
         }
@@ -15885,7 +16130,12 @@ impl CommandHandler for SwitchRenderBackend {
         // [x, x+w-1] of the slot. The 1 px replicated ATLAS_PAD is what makes
         // that safe at the very edge, and it is the reason this path can be left
         // alone while the shape shader, whose clamp really does reach 1.0, cannot.
-        self.use_bitmap(&world, &mult, &add, tex, &uv_remap, self.sampler_for(smoothing));
+        // `premult = false`: atlas slots hold STRAIGHT alpha, so `c * mult + add`
+        // is already the Flash formula here and the straight-alpha blend below
+        // supplies the coverage. Nothing to undo.
+        self.use_bitmap(
+            &world, &mult, &add, tex, &uv_remap, self.sampler_for(smoothing), false,
+        );
         self.gl_state.bind_vao(self.bitmap_vao);
         self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
         unsafe {
