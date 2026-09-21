@@ -30,19 +30,26 @@ export PATH="$USERPROFILE/scoop/apps/mingw/current/bin:$PATH"
 echo "[1/2] Building Rust no_std staticlib (profile: $PROFILE)..."
 (cd "$ROOT/rust" && cargo build $CARGO_FLAG)
 
-# The shortcut stub, turned into a byte array the C++ build links in.
+# The tile forwarder, turned into a byte array the C++ build links in.
+#
+# `make` here produces forwarder.nsp, which is not an installable NSP but the
+# ExeFS partition of one: `main` (the loader) and `main.npdm` (its permissions
+# and its identity). cpp/src/nsp.cpp wraps that into an NCA at install time.
 #
 # HERE and not in cpp/Makefile, and the ordering is the whole point: that
 # Makefile picks up sources with a wildcard evaluated when it is READ, so a .s
 # produced by one of its own targets does not exist yet and never enters the
 # link. The binary then comes out silently missing the feature, which is exactly
 # what happened.
-echo "[1.5/2] Building the shortcut stub..."
+echo "[1.5/2] Building the tile forwarder..."
 /c/devkitPro/msys2/usr/bin/bash.exe -lc "
     export DEVKITPRO=/opt/devkitpro
     export DEVKITA64=/opt/devkitpro/devkitA64
-    cd '$ROOT/stub' && make
-    /opt/devkitpro/tools/bin/bin2s flashnx_stub.nro > '$ROOT/cpp/src/flashnx_stub.s'
+    cd '$ROOT/forwarder' && make
+    # Renamed before bin2s because bin2s names the symbol after the file, and
+    # nsp.cpp declares flashnx_forwarder_nsp.
+    cp forwarder.nsp flashnx_forwarder.nsp
+    /opt/devkitpro/tools/bin/bin2s flashnx_forwarder.nsp > '$ROOT/cpp/src/flashnx_forwarder.s'
 "
 
 echo "[2/2] Building C++ wrapper and linking .nro via devkitPro MSYS2..."

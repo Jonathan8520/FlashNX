@@ -627,7 +627,7 @@ static void register_sphaira_assoc(const char* self_nro) {
 }
 
 // True if `path` ends in ".swf" (case-insensitive). Recognises a forwarder
-// launch argument — a HOME-menu shortcut (NSP forwarder) to a single game.
+// launch argument — a HOME-menu tile, or a forwarder built by hand.
 static bool path_is_swf(const char* path) {
     if (!path) return false;
     const size_t n = std::strlen(path);
@@ -637,6 +637,58 @@ static bool path_is_swf(const char* path) {
         && (e[1] == 's' || e[1] == 'S')
         && (e[2] == 'w' || e[2] == 'W')
         && (e[3] == 'f' || e[3] == 'F');
+}
+
+// True if `path` ends in ".cfg", which is how a HOME-menu tile names its game.
+static bool path_is_tile_cfg(const char* path) {
+    if (!path) return false;
+    const size_t n = std::strlen(path);
+    if (n < 4) return false;
+    const char* e = path + (n - 4);
+    return e[0] == '.'
+        && (e[1] == 'c' || e[1] == 'C')
+        && (e[2] == 'f' || e[2] == 'F')
+        && (e[3] == 'g' || e[3] == 'G');
+}
+
+// Read the `.swf` path a HOME-menu tile stored for itself, or nullptr.
+//
+// A tile passes THIS file's path and not the game's, because the homebrew ABI
+// hands argv over as one string that gets re-split on spaces and plenty of games
+// have spaces in their names. A path under `tiles/` is named after a program ID,
+// so it never does. See forwarder/source/main.c.
+//
+// The buffer is static because the pointer outlives this call: it goes to the
+// worker thread, exactly like an `argv[i]` would.
+static const char* resolve_tile_cfg(const char* cfg_path) {
+    static char swf[768];
+    FILE* f = std::fopen(cfg_path, "rb");
+    if (!f) {
+        std::printf("tile: no config at %s\n", cfg_path);
+        std::fflush(stdout);
+        return nullptr;
+    }
+    const size_t n = std::fread(swf, 1, sizeof(swf) - 1, f);
+    std::fclose(f);
+    swf[n] = '\0';
+    // One line: anything from the first newline on is not part of the path.
+    for (size_t i = 0; i < n; i++) {
+        if (swf[i] == '\r' || swf[i] == '\n') {
+            swf[i] = '\0';
+            break;
+        }
+    }
+    if (!path_is_swf(swf)) {
+        // A tile whose game was deleted, or a file somebody edited. Falling
+        // through to the library is the useful failure: the player lands
+        // somewhere they can pick a game rather than on an error.
+        std::printf("tile: %s does not name a .swf\n", cfg_path);
+        std::fflush(stdout);
+        return nullptr;
+    }
+    std::printf("tile: %s -> %s\n", cfg_path, swf);
+    std::fflush(stdout);
+    return swf;
 }
 
 // All of the GL + Ruffle work runs in a dedicated worker thread with a
@@ -1775,7 +1827,12 @@ int main(int argc, char** argv) {
     // (argv memory outlives the thread — main blocks on threadWaitForExit).
     const char* forwarder_swf = nullptr;
     for (int i = 1; i < argc; ++i) {
-        if (path_is_swf(argv[i])) {
+        // A HOME-menu tile passes its config file; a hand-built forwarder, or
+        // `nxlink --args`, passes the game directly. Both still work.
+        if (path_is_tile_cfg(argv[i])) {
+            forwarder_swf = resolve_tile_cfg(argv[i]);
+            if (forwarder_swf) break;
+        } else if (path_is_swf(argv[i])) {
             forwarder_swf = argv[i];
             break;
         }
@@ -1986,5 +2043,6 @@ int main(int argc, char** argv) {
 
     romfsExit();
     socketExit();
+
     return EXIT_SUCCESS;
 }

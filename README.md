@@ -30,7 +30,7 @@
 
 **Hold R while opening a game from the Home menu**, then pick FlashNX in the Homebrew Menu.
 
-Opened the usual way from the Album, homebrew only gets a small share of the console's memory, which is not enough to run a Flash game: FlashNX starts but refuses to launch anything and tells you why. Holding R gives it the whole console instead. A forwarder does the same, and **[Sphaira](https://github.com/ITotalJustice/sphaira)** users can go further: FlashNX registers a `.swf` association, so you can pick a game in Sphaira's file browser and create a Home menu shortcut that boots straight into it, cover art as the icon.
+Opened the usual way from the Album, homebrew only gets a small share of the console's memory, which is not enough to run a Flash game: FlashNX starts but refuses to launch anything and tells you why. Holding R gives it the whole console instead, and so does a Home menu tile. Any game in your library can get one from its own menu: it appears on the console's home screen under its own name with its own cover art, and pressing it boots straight into that game. Installing a tile needs signature patches, the same as any other homebrew title on the home screen. **[Sphaira](https://github.com/ITotalJustice/sphaira)** users keep a second route: FlashNX registers a `.swf` association, so a game can also be picked in Sphaira's file browser.
 
 ## Getting games
 

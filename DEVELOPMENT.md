@@ -35,9 +35,13 @@ flash-for-switch/
 │   │   ├── audio.cpp             # libnx audren wrapper + worker thread
 │   │   ├── exception.cpp         # native __libnx_exception_handler (symbolizable crash log)
 │   │   ├── swf_picker.cpp        # SD scan via opendir/readdir (works around the Horizon read_dir bug)
+│   │   ├── nsp.cpp               # HOME-menu tiles: builds the three NCAs and installs them via ncm/ns
 │   │   ├── net.cpp               # swkbd prompts + HTTPS: sync GET/POST, async download + metadata GET + isolated thumbnail GET + HEAD size
 │   │   └── ruffle_bridge.cpp     # ruffle_log_cstr + getrandom + sysconf stubs + svcGetInfo RAM
 │   └── include/ruffle_bridge.h
+├── forwarder/                    # the program a HOME-menu tile runs: nx-hbloader (ISC) pointed at FlashNX
+│   ├── forwarder.json            # NPDM for npdmtool; the program ID here is a placeholder, rewritten per tile
+│   └── source/main.c             # the only change from upstream: which NRO to load, and with which argument
 ├── rust/
 │   ├── Cargo.toml                # crate-type = ["staticlib"], ruffle_core features=[audio,mp3,default_font] + jpeg-decoder patch
 │   ├── rust-toolchain.toml       # nightly-x86_64-pc-windows-gnu + rust-src
@@ -137,6 +141,82 @@ What to know before shipping one:
   Makefile drops the `.nro` before recursing, because neither the `.elf` nor any
   `.o` changes when you replace the `.swf` and make would otherwise report
   nothing to do while shipping the old game.
+
+## HOME-menu tiles
+
+A tile is a real installed title, not an entry in a homebrew launcher. `cpp/src/nsp.cpp`
+builds three NCAs and hands them to `ncm`, then adds an application record through `ns`,
+which is what the home screen actually reads.
+
+- **program**: two sections. An ExeFS, built by `forwarder/` and embedded with `bin2s` by
+  `scripts/build.sh`, and a RomFS holding the game's path. The binary is the same for
+  every tile and holds no game path: it reads its own program ID and passes
+  `sdmc:/switch/FlashNX/tiles/<id>.cfg` to FlashNX, which reads the `.swf` path out of
+  that file. Argv is re-split on spaces by the homebrew ABI and game names have spaces in
+  them; a program ID never does.
+- **control**: a RomFS with `control.nacp` (the name) and the cover as a 256x256 JPEG.
+- **meta**: a PFS0 with the `.cnmt` listing the other two.
+
+Five things cost a whole debugging session each. They share one symptom, which is why:
+the install succeeds, the tile appears with its name and its cover, and launching it does
+nothing at all -- no process is ever created, so there is no crash report either.
+
+**The program NCA needs a RomFS, not just an ExeFS.** Both working forwarders on hand
+carry one (Sphaira: ExeFS + RomFS; hacBrewPack's: ExeFS + RomFS + logo). The logo really
+is optional -- hacBrewPack documents `--nologo`.
+
+**`forwarder.json` descends from `hbl.json`, and HBL runs as an applet.** It therefore
+declares `"application_type": 2` (Applet). An installed application needs **1**. In the
+built NPDM this is the `MiscParams` capability.
+
+**An IVFC hash layer is declared at its padded size**, `0x4000`, not at the size of the
+hashes it holds, and the master hash covers that whole padded block. The data layer keeps
+its real size. The bytes are identical either way, so anything reading them back the way
+they were written agrees with itself -- the console does not.
+
+**The CNMT exists in two shapes.** The one inside the meta NCA has a 0x20 header, carries
+a hash per content, and does not list the meta NCA itself; its content records are a 0x20
+hash followed by an `NcmContentInfo`, so `attr` is at 0x35 and `content_type` at 0x36. The
+one handed to `ncmContentMetaDatabaseSet` has a 0x8 header, no hashes, does list the meta
+NCA, and has those fields one byte earlier.
+
+**The NACP is read before the process is created.** `rating_age` set to 0xFF everywhere
+means "rated nowhere", which parental control has nothing to compare against. `logo_type`,
+`logo_handling`, `seed_for_pseudo_device_id` and `local_communication_id` are all copied
+from a forwarder the console accepts rather than reasoned about.
+
+Program IDs use the `0x05` prefix, which is what Sphaira uses today. DBI warns that such an
+ID "belongs to an add-on"; that warning also fires on forwarders that launch perfectly, so
+it is not a lead.
+
+### Known limitation: quitting shows an error
+
+Closing a game from a tile returns to the HOME menu, but the console shows "the software
+was closed because an error occurred" first. This is the long-standing complaint about NSP
+forwarders generally. The cause is structural: nx-hbloader has a hand-written `__appInit`
+that never opens an applet session, because it is normally loaded by an applet that
+already owns one. A tile IS the application, so once FlashNX closes its own session on the
+way out, the process briefly exists holding none.
+
+Sphaira's forwarder does not have the problem: its loader is a plain libnx program, which
+opens a session at startup. Simply opening one in `forwarder/` does not work -- the loader
+and FlashNX each link their own libnx, so FlashNX then asks for a second session in the
+same process and fails to start at all. Replacing nx-hbloader with a minimal loader would
+hit the same wall. Whatever Sphaira's 20 KB loader does, it is not that, and finding out
+means disassembling it.
+
+### Checking the output without installing it
+
+Create `sdmc:/switch/FlashNX/nsp_dump.on`. Installing a tile then also writes
+`sdmc:/switch/FlashNX/tiles/<id>.nsp`, before anything touches the console's storage, so
+the file exists even when the install that follows fails. Copy it off and run `hactool`
+over it: an independent implementation reading the same bytes is the point, which is why
+there is no home-grown verifier here. It also installs with any other tool, which
+separates "the file is wrong" from "this console would not take it".
+
+The faster move, when a tile misbehaves, is to dump a forwarder that works (DBI, "dump to
+SD card") and compare the two files field by field. Every one of the five above was found
+that way, and none of them by reasoning about the format.
 
 ## Build & netload
 

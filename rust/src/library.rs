@@ -1521,14 +1521,30 @@ extern "C" {
     /// line, redeclared here because that extern block is private — the same
     /// per-module duplication `ruffle_tick_now` and `ruffle_log_cstr` already use.
     fn ruffle_is_docked() -> core::ffi::c_int;
-    /// Write a HOME-menu shortcut for one game. 1 on success, negative on
-    /// failure (see cpp/src/shortcut.cpp). Cheap: 144 KB copied and patched.
-    fn shortcut_write(
+    /// Build a HOME-menu tile for one game and install it. 1 on success, 0 on
+    /// failure with `err` filled in (see cpp/src/nsp.cpp).
+    ///
+    /// Not cheap, unlike the `.nro` shortcut this replaced: it builds three NCAs
+    /// and writes them through `ncm`, so it takes a moment and it talks to
+    /// services. It still fits in one press because nothing here waits on the
+    /// network and the whole payload is under a megabyte.
+    fn nsp_install_tile(
+        program_id: u64,
+        title: *const core::ffi::c_char,
         swf_path: *const core::ffi::c_char,
-        display_name: *const core::ffi::c_char,
-        out_path: *const core::ffi::c_char,
         icon_jpeg: *const u8,
         icon_len: u32,
+        err: *mut core::ffi::c_char,
+        err_cap: u32,
+    ) -> core::ffi::c_int;
+    /// Write a file to the card, creating parent directories. Used here for a
+    /// tile's config file, and the same writer every other file goes through:
+    /// Rust's `std::fs::write` reports success on Horizon and the file then
+    /// reads back ENOENT on some writes.
+    fn swf_picker_write_file(
+        path: *const core::ffi::c_char,
+        data: *const u8,
+        len: u32,
     ) -> core::ffi::c_int;
     /// Present what has just been drawn. Normally the C++ frame loop owns this,
     /// and nothing in Rust needs it; the GameZIP extraction does, because it
@@ -4340,14 +4356,17 @@ extern "C" {
         out: *mut core::ffi::c_char,
         cap: core::ffi::c_int,
     ) -> core::ffi::c_int;
-    /// Remove a game's shortcut, but only if the file really is one of ours
-    /// (it is checked for our marker first). 1 = removed, 0 = absent or
-    /// somebody else's homebrew of the same name, left alone.
-    fn shortcut_delete(path: *const core::ffi::c_char) -> core::ffi::c_int;
-    /// 1 when one of OUR shortcuts already sits at this path. Somebody else's
-    /// homebrew of the same name reads as 0, so the row offers to create rather
-    /// than to remove theirs.
-    fn shortcut_exists(path: *const core::ffi::c_char) -> core::ffi::c_int;
+    /// The program ID a game's tile owns, derived from the game's path.
+    ///
+    /// Derived and not stored: the same game always resolves to the same tile,
+    /// so installing twice replaces rather than duplicates, and removing one
+    /// needs no file to remember what it was called.
+    fn nsp_program_id_for(swf_path: *const core::ffi::c_char) -> u64;
+    /// Uninstall a tile: its record, its content and its save slot.
+    /// 1 when one was removed.
+    fn nsp_remove_tile(program_id: u64) -> core::ffi::c_int;
+    /// 1 when a tile for this program ID is installed on the console.
+    fn nsp_tile_exists(program_id: u64) -> core::ffi::c_int;
 }
 
 /// Top-level file names of `dir`, straight from one `readdir`.
@@ -7298,34 +7317,49 @@ pub(crate) fn apply_game_folder(s: &mut State, game_idx: usize, target: &str) {
     s.screen = Screen::GameFolderPicker { game_idx: idx, selection: row };
 }
 
-/// Where a game's HOME-menu shortcut goes: `sdmc:/switch/<title>.nro`.
+/// The tile a game owns, or None when its path cannot cross FFI.
+fn tile_id_for(swf_path: &str) -> Option<u64> {
+    let c = std::ffi::CString::new(swf_path).ok()?;
+    Some(unsafe { nsp_program_id_for(c.as_ptr()) })
+}
+
+/// Where a failed install leaves its reason, for reading back over FTP.
+const TILE_ERROR_PATH: &str = "sdmc:/switch/FlashNX/tile_error.txt";
+
+/// Where a tile records which game it launches.
 ///
-/// That folder and not ours, because it is the one hbmenu scans and the one
-/// Sphaira lists (`menu-list.c` walks `sdmc:/switch/`); a shortcut under
-/// `sdmc:/flashnx/` would appear nowhere and be worse than not writing it.
+/// Named after the program ID and not the game, for one reason: the tile hands
+/// this path to FlashNX as a command-line argument, and the homebrew ABI splits
+/// arguments on spaces. Sixteen hex digits never contain one; `Papa Louie 2`
+/// does. See forwarder/source/main.c.
+fn tile_cfg_path(program_id: u64) -> std::string::String {
+    std::format!("sdmc:/switch/FlashNX/tiles/{:016X}.cfg", program_id)
+}
+
+/// True when this game already has a tile on the HOME menu.
 ///
-/// The name is folded the same way a downloaded game's is (`swf_filename`), so
-/// a title with a slash or a colon cannot escape the folder, and the file is the
-/// same identity the NACP inside it shows.
-/// True when this game already has one of OUR shortcuts.
-///
-/// Takes the raw `display_name` and strips the extension the same way the write
-/// path does, so the question and the answer describe the same file.
-fn shortcut_here(display_name: &str) -> bool {
-    let title = display_name
-        .strip_suffix(".swf")
-        .or_else(|| display_name.strip_suffix(".SWF"))
-        .unwrap_or(display_name);
-    match std::ffi::CString::new(shortcut_path_for(title)) {
-        Ok(c) => (unsafe { shortcut_exists(c.as_ptr()) }) == 1,
-        Err(_) => false,
+/// Asked of the console rather than of the card: somebody can uninstall a tile
+/// from the HOME menu itself, and the row has to say what is actually there.
+fn shortcut_here(swf_path: &str) -> bool {
+    match tile_id_for(swf_path) {
+        Some(id) => (unsafe { nsp_tile_exists(id) }) == 1,
+        None => false,
     }
 }
 
-fn shortcut_path_for(title: &str) -> std::string::String {
-    let base = crate::sources::gamezip::swf_filename(title);
-    let stem = base.strip_suffix(".swf").unwrap_or(&base);
-    std::format!("sdmc:/switch/{}.nro", stem)
+/// Uninstall a game's tile and drop its config file. True when one went away.
+fn tile_remove(swf_path: &str) -> bool {
+    let Some(id) = tile_id_for(swf_path) else { return false };
+    if unsafe { nsp_tile_exists(id) } != 1 {
+        return false;
+    }
+    let removed = unsafe { nsp_remove_tile(id) } == 1;
+    if removed {
+        // The config outlives the tile otherwise, and the next game whose path
+        // hashes here would inherit it.
+        let _ = std::fs::remove_file(tile_cfg_path(id));
+    }
+    removed
 }
 
 fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut selection: usize) {
@@ -7379,9 +7413,8 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                     // game, so hbmenu and Sphaira list it under its own name
                     // instead of "FlashNX | angry-birds.swf".
                     //
-                    // Done inline rather than hoisted like RENOMMER: this is a
-                    // 144 KB buffer patched in memory and one file write, with no
-                    // keyboard and no network, so it fits in a frame.
+                    // Done inline rather than hoisted like RENOMMER: no keyboard
+                    // and no network, so it still fits in one press.
                     let Some(e) = s.entries.get(game_idx) else { return };
                     // Without the extension: `display_name` is the on-SD file
                     // name when the game has no rename override, and hbmenu shows
@@ -7397,15 +7430,15 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                             .unwrap_or(&e.display_name)
                             .to_string(),
                     );
-                    let out = shortcut_path_for(&title);
-                    let Ok(out_c) = std::ffi::CString::new(out.as_str()) else { return };
-                    // A toggle, not an add. Pressed twice it used to rewrite the
-                    // same file and say "added" again, which reads as piling up
-                    // duplicates when there has only ever been one.
-                    if unsafe { shortcut_exists(out_c.as_ptr()) } == 1 {
-                        let removed = unsafe { shortcut_delete(out_c.as_ptr()) } == 1;
+                    let Some(program_id) = tile_id_for(&path) else { return };
+                    let lc = crate::loc::s();
+
+                    // A toggle, not an add: pressed twice it used to say "added"
+                    // again, which reads as piling up duplicates when there has
+                    // only ever been one.
+                    if unsafe { nsp_tile_exists(program_id) } == 1 {
+                        let removed = tile_remove(&path);
                         crate::sd::commit();
-                        let lc = crate::loc::s();
                         set_toast(
                             s,
                             if removed { lc.shortcut_removed } else { lc.shortcut_err }.to_string(),
@@ -7413,31 +7446,86 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                         );
                         return;
                     }
-                    // The game's box art, as the 256x256 JPEG hbmenu wants. None
-                    // when the game has no cover, which is fine: the shortcut is
-                    // written anyway and the launcher draws its placeholder.
+
+                    // The config first: the tile is what the player sees, so it
+                    // must never appear pointing at a file that is not there.
+                    let cfg = tile_cfg_path(program_id);
+                    let bytes = path.as_bytes();
+                    let wrote_cfg = match std::ffi::CString::new(cfg.as_str()) {
+                        Ok(c) => {
+                            let rc = unsafe {
+                                swf_picker_write_file(
+                                    c.as_ptr(),
+                                    bytes.as_ptr(),
+                                    bytes.len() as u32,
+                                )
+                            };
+                            rc == 1
+                        }
+                        Err(_) => false,
+                    };
+                    if !wrote_cfg {
+                        log(&std::format!("tile: could not write {}\n", cfg));
+                        set_toast(s, lc.shortcut_err.to_string(), TOAST_ERR);
+                        return;
+                    }
+
+                    // The game's box art, as a 256x256 JPEG. None when the game
+                    // has no cover, which is fine: the tile installs anyway and
+                    // the HOME menu draws its own placeholder.
                     let icon = crate::covers::shortcut_icon_jpeg(&basename);
+                    let mut err = [0u8; 96];
                     let rc = match (
-                        std::ffi::CString::new(path.as_str()),
                         std::ffi::CString::new(title.as_str()),
+                        std::ffi::CString::new(path.as_str()),
                     ) {
-                        (Ok(p), Ok(t)) => unsafe {
-                            shortcut_write(
-                                p.as_ptr(),
+                        (Ok(t), Ok(p)) => unsafe {
+                            nsp_install_tile(
+                                program_id,
                                 t.as_ptr(),
-                                out_c.as_ptr(),
+                                p.as_ptr(),
                                 icon.as_ref().map_or(core::ptr::null(), |v| v.as_ptr()),
                                 icon.as_ref().map_or(0, |v| v.len() as u32),
+                                err.as_mut_ptr() as *mut core::ffi::c_char,
+                                err.len() as u32,
                             )
                         },
-                        _ => -4,
+                        _ => 0,
                     };
+                    let reason = std::ffi::CStr::from_bytes_until_nul(&err)
+                        .ok()
+                        .and_then(|c| c.to_str().ok())
+                        .unwrap_or("?")
+                        .to_string();
                     if rc == 1 {
                         crate::sd::commit();
-                        set_toast(s, crate::loc::s().shortcut_ok.to_string(), TOAST_OK);
+                        set_toast(s, lc.shortcut_ok.to_string(), TOAST_OK);
                     } else {
-                        log(&std::format!("shortcut: write failed rc={} -> {}\n", rc, out));
-                        set_toast(s, crate::loc::s().shortcut_err.to_string(), TOAST_ERR);
+                        // The config would otherwise sit there naming a tile
+                        // that does not exist.
+                        let _ = std::fs::remove_file(&cfg);
+                        log(&std::format!("tile: install failed for {} ({})\n", path, reason));
+                        // And on the card, because the toast is gone in three
+                        // seconds and the log only exists when somebody is
+                        // watching over nxlink. A failure that leaves a file
+                        // behind can be read afterwards, over FTP, by whoever is
+                        // trying to work out what happened.
+                        let note = std::format!("{}\n{}\n{}\n", path, title, reason);
+                        if let Ok(c) = std::ffi::CString::new(TILE_ERROR_PATH) {
+                            let b = note.as_bytes();
+                            unsafe {
+                                swf_picker_write_file(c.as_ptr(), b.as_ptr(), b.len() as u32)
+                            };
+                        }
+                        // The reason is in the toast and not only in the log: a
+                        // console without signature patches and a full card fail
+                        // the same way from the menu, and the player is the one
+                        // who has to tell them apart.
+                        set_toast(
+                            s,
+                            std::format!("{} ({})", lc.shortcut_err, reason),
+                            TOAST_ERR,
+                        );
                     }
                     return;
                 }
@@ -8159,16 +8247,15 @@ fn delete_game(s: &mut State, game_idx: usize) {
             root_c.as_ptr() as *const core::ffi::c_char,
         )
     };
-    // And its HOME-menu shortcut, if it made one: a shortcut left behind points
-    // at a `.swf` that no longer exists, and the player only finds out by
-    // launching it from hbmenu and landing on an error.
+    // And its HOME-menu tile, if it has one: a tile left behind points at a
+    // `.swf` that no longer exists, and the player only finds out by pressing it
+    // and landing back in the library.
     //
-    // The C++ side refuses to delete a file that does not carry our marker, so a
-    // game titled like somebody's existing homebrew cannot take it down with it.
-    if let Ok(sc) = std::ffi::CString::new(shortcut_path_for(&entry.display_name)) {
-        if unsafe { shortcut_delete(sc.as_ptr()) } == 1 {
-            log(&std::format!("library: removed shortcut for {}\n", entry.display_name));
-        }
+    // The ID comes from the path, so this can only ever name the tile this game
+    // installed. It is checked before it is removed, which keeps a game that
+    // never had a tile from asking the console to uninstall anything.
+    if tile_remove(&entry.path) {
+        log(&std::format!("library: removed tile for {}\n", entry.display_name));
     }
     // The C++ scan only sees the .swf's own directory; clean up the cached
     // cover (covers/ subdir) and stem-named sidecars it can't reach, then
@@ -8916,7 +9003,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 // file again on every press and still said "added", which reads
                 // as piling up duplicates. It toggles now, and the label says
                 // which way it will go.
-                let sc_label = if shortcut_here(&entry.display_name) {
+                let sc_label = if shortcut_here(&entry.path) {
                     lc.opt_shortcut_del
                 } else {
                     lc.opt_shortcut
