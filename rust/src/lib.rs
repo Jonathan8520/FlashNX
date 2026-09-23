@@ -1717,9 +1717,17 @@ fn maybe_unwrap_embedded_game(bytes: &[u8]) -> Option<std::vec::Vec<u8>> {
 /// fails gracefully (-> None -> caller logs) instead of aborting the process when
 /// the heap can't satisfy the allocation. `MAX` still bounds a mistaken multi-GB
 /// file (ordinary games are ~15 MB, e.g. Mario 63).
+///
+/// 1 GiB since #116: New Super Smash Flash is a 416 MB FWS SWF (v8, AS2). It ran
+/// on the releases that read with `std::fs::read`, and every cap since (64 MB in
+/// v1.5.1, 320 MB after) turned it away before Ruffle ever saw it: the red
+/// fallback screen, reported as "doesn't boot anymore". Loading it costs about
+/// twice its size at peak (this buffer, then Ruffle's own copy), which the ~2.3 GB
+/// left once the renderer is up can hold. The reservation above is what guards
+/// the heap; this cap is only there against a file that is not a game.
 fn read_swf_file_bounded(path: &str) -> Option<std::vec::Vec<u8>> {
     use std::io::{Read, Seek, SeekFrom};
-    const MAX: usize = 320 * 1024 * 1024;
+    const MAX: usize = 1024 * 1024 * 1024;
     let mut f = std::fs::File::open(path).ok()?;
     let mut data: std::vec::Vec<u8> = std::vec::Vec::new();
     // Pre-reserve the exact on-disk size so the read below never reallocates.
@@ -1727,11 +1735,26 @@ fn read_swf_file_bounded(path: &str) -> Option<std::vec::Vec<u8>> {
     // is somehow unavailable for this file.
     if let Ok(end) = f.seek(SeekFrom::End(0)) {
         let size = end as usize;
+        // Said out loud: the caller can only report the file as unreadable, and
+        // "unreadable" is how #116 hid a size cap for two releases.
         if size > MAX {
+            log_str(&std::format!(
+                "swf: {} is {} MB, over the {} MB cap\n",
+                path,
+                size / (1024 * 1024),
+                MAX / (1024 * 1024),
+            ));
             return None;
         }
         f.seek(SeekFrom::Start(0)).ok()?;
-        data.try_reserve_exact(size).ok()?;
+        if data.try_reserve_exact(size).is_err() {
+            log_str(&std::format!(
+                "swf: {} is {} MB and the heap cannot hold it in one block\n",
+                path,
+                size / (1024 * 1024),
+            ));
+            return None;
+        }
     }
     let mut buf = [0u8; 64 * 1024];
     loop {
