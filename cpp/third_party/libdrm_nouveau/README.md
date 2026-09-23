@@ -17,10 +17,12 @@ FlashNX in place of devkitPro's `-ldrm_nouveau`.
 ## What FlashNX changes
 
 Only `nouveau.c` and `private.h`, and only to add a buffer-object cache: freed
-colour-tiled BOs of at most 1 MiB are kept and handed back to the next request of
-the same size, alignment, kind and coherence. The block comment above
+colour-tiled BOs of at most 8 MiB are kept and handed back to the next request
+of the same alignment, kind and coherence whose size they cover by no more than
+25 % (the smallest such, an exact size first). The block comment above
 `nouveau_bo_del` in `nouveau.c` explains why and what makes a recycled BO
-indistinguishable from a fresh one.
+indistinguishable from a fresh one: a larger one is still a whole BO, zeroed
+entirely, and returns to the cache at its own size.
 
 If a fresh allocation fails, the cache is emptied and the allocation retried
 once, so parked blocks can never be why one fails. The same holds outside
@@ -39,5 +41,15 @@ Three functions are exported for the Rust side:
   is full.
 - `flashnx_boc_stats(uint64_t *out, int n)` returns running counters, then the
   number of entries and the bytes held.
+- `flashnx_boc_set_limits(max_bo_bytes, max_bytes, slack_pct)` changes the
+  largest BO kept, the most bytes held and the slack, evicting what no longer
+  fits. Unused in the shipped code; the profiling build's A/B used it to put
+  1 MiB / 16 MiB / exact size (what shipped first) against the current values.
+
+The limits moved on 2026-09-24, after the sampling profiler (`cpp/src/prof.cpp`)
+showed texture creation still at 7 to 15 % of Mario 63's heavy frames, nearly
+all IPC to nvservices: the cache was holding ~66 entries, far below its limits,
+while ~6.4 requests a frame missed on sizes a few percent off every entry and
+~4.8 entries a frame aged out unused.
 
 Every other line is upstream's.

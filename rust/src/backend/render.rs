@@ -1131,6 +1131,9 @@ static PRIM_MKTEX_N_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 // frame. The fix lives below GL, in our copy of that library
 // (cpp/third_party/libdrm_nouveau, see its README): freed buffer objects are
 // recycled by size. Measured over eight levels, `render` fell from 61 to 14 ms.
+// Since 2026-09-24 a slightly larger one will do (up to 25 %), and BOs up to
+// 8 MiB are kept: the sampling profiler still found the misses at 7-15 % of the
+// heavy frames.
 //
 // A GL-level pool keyed by exact texture size was tried first and measured
 // useless on top of it (+2.9 ms): the sizes that change every frame only match
@@ -1139,7 +1142,7 @@ static PRIM_MKTEX_N_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 
 /// `flashnx_boc_stats` layout: running totals, `_T` in ticks, then the entries
 /// and bytes held. Must match the enum in cpp/third_party/libdrm_nouveau/nouveau.c.
-const BOC_STATS: usize = 14;
+const BOC_STATS: usize = 19;
 const BOC_NEW_N: usize = 0;
 const BOC_NEW_T: usize = 1;
 const BOC_HIT: usize = 2;
@@ -1152,8 +1155,13 @@ const BOC_BUSY: usize = 8;
 const BOC_IPC: usize = 9;
 const BOC_NEW_FAIL: usize = 10;
 const BOC_RETRY_OK: usize = 11;
-const BOC_HELD_N: usize = 12;
-const BOC_HELD_BYTES: usize = 13;
+const BOC_BIG_N: usize = 12;
+const BOC_BIG_T: usize = 13;
+const BOC_BIG_BYTES: usize = 14;
+const BOC_OTHER_N: usize = 15;
+const BOC_SLACK_HIT: usize = 16;
+const BOC_HELD_N: usize = 17;
+const BOC_HELD_BYTES: usize = 18;
 
 fn boc_stats_now() -> [u64; BOC_STATS] {
     let mut now = [0u64; BOC_STATS];
@@ -7913,7 +7921,10 @@ impl SwitchRenderBackend {
         // land; `evict=` is how many it let go. The `bo*=` fields are the libdrm
         // side: buffer-object creates and deletes with their time inside libdrm,
         // cache hits, the zeroing a hit costs, hits refused because the GPU still
-        // used the BO, fence IPCs, and what the cache holds.
+        // used the BO, fence IPCs, and what the cache holds. Since 2026-09-24:
+        // `boBig=` colour BOs too big to cache, made fresh (count/time/KB),
+        // `boOther=` BOs of another kind, `boSlack=` hits served by a larger BO,
+        // and `ab=` the profiling build's A/B window (see `ruffle_ab_regime`).
         use std::sync::atomic::Ordering::Relaxed as R;
         let b = self.boc_frame;
         let make_n = TEX_MAKE_N_LAST.load(R);
@@ -7931,7 +7942,7 @@ impl SwitchRenderBackend {
         let prev_swap_us = to_us(unsafe { flashnx_prev_swap_ticks() });
         let prev_period_us = to_us(unsafe { flashnx_prev_period_ticks() });
         let msg = std::format!(
-            "SLOW f{} {}us (tick {}us render {}us) swf={} gc={} gcUs={} gcMB={} alloc={}/{}us({}%sm) free={}/{}us heap={}%  rtBind={} cacheUs={}us rtbindUs={}us contentUs={}us filtUs={}us mktex={}/{}us budget={} primOffs={}us primBmp={}us primRes={}us dc={} offs={} filt={}({}chains) resolve={} bmpUp={} shpReg={} blend={} pmask={} mdraw={} cacheEnt={} | offN={} offPix={} alloc={}us render={}us readback={}us upload={}us | blendUs={} ({}% of render) blendTriv={} blendCx={} | make={}/{}us del={}/{}us bf={}us evict={} stTex={} pool={} prevSwapUs={} prevPeriodUs={} | boNew={}/{}us boHit={} boZeroUs={} boDel={}/{}us boKept={} boEvict={} boBusy={} boIpc={} boFail={} boRetryOk={} boc={}/{}KB | avm1={}/{}us/{}us mcref={} {}/{}/{}us\n",
+            "SLOW f{} {}us (tick {}us render {}us) swf={} gc={} gcUs={} gcMB={} alloc={}/{}us({}%sm) free={}/{}us heap={}%  rtBind={} cacheUs={}us rtbindUs={}us contentUs={}us filtUs={}us mktex={}/{}us budget={} primOffs={}us primBmp={}us primRes={}us dc={} offs={} filt={}({}chains) resolve={} bmpUp={} shpReg={} blend={} pmask={} mdraw={} cacheEnt={} | offN={} offPix={} alloc={}us render={}us readback={}us upload={}us | blendUs={} ({}% of render) blendTriv={} blendCx={} | make={}/{}us del={}/{}us bf={}us evict={} stTex={} pool={} prevSwapUs={} prevPeriodUs={} | boNew={}/{}us boHit={} boZeroUs={} boDel={}/{}us boKept={} boEvict={} boBusy={} boIpc={} boFail={} boRetryOk={} boc={}/{}KB boBig={}/{}us/{}KB boOther={} boSlack={} ab={} | avm1={}/{}us/{}us mcref={} {}/{}/{}us\n",
             self.frame_count,
             total_us, tick_us, render_us,
             swf_frames, gc_name, gc_us, gc_alloc / (1024 * 1024), d_alloc, alloc_us, small_pct, d_free, free_us, heap_pct, rt_binds,
@@ -7948,6 +7959,9 @@ impl SwitchRenderBackend {
             b[BOC_DEL_N], to_us(b[BOC_DEL_T]), b[BOC_DEL_CACHED], b[BOC_EVICT],
             b[BOC_BUSY], b[BOC_IPC], b[BOC_NEW_FAIL], b[BOC_RETRY_OK],
             b[BOC_HELD_N], b[BOC_HELD_BYTES] / 1024,
+            b[BOC_BIG_N], to_us(b[BOC_BIG_T]), b[BOC_BIG_BYTES] / 1024, b[BOC_OTHER_N],
+            b[BOC_SLACK_HIT],
+            crate::AB_REGIME.load(R),
             avm1_actions, to_us(avm1_decode), to_us(avm1_total),
             if mcref_on { "on" } else { "off" }, mcref_calls, mcref_hits, to_us(mcref_ticks),
         );

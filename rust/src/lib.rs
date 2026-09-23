@@ -37,7 +37,7 @@ mod counting_alloc {
         fn flashnx_boc_trim() -> u64;
     }
 
-    /// Newlib refused a block. The GPU buffer-object cache parks up to 16 MB of
+    /// Newlib refused a block. The GPU buffer-object cache parks up to 48 MB of
     /// freed textures in this same heap, and only libdrm's own allocations used
     /// to empty it when full, so a Rust allocation could abort with that memory
     /// sitting idle. Give it back and say whether a retry is worth it. Cold: it

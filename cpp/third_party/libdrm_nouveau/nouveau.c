@@ -365,15 +365,14 @@ nouveau_bo_fence_wait(struct nouveau_bo *bo, uint32_t access)
  *  - it is only handed out once the GPU is done with it (its fence passed), so
  *    the CPU-side reset below cannot race a GPU still reading it;
  *  - it is zeroed like a fresh one, and its fence and access are reset;
- *  - only colour-tiled BOs (kind 0xfe, generic 16Bx2) of at most 1 MiB, never
+ *  - only colour-tiled BOs (kind 0xfe, generic 16Bx2) of at most
+ *    boc_max_bo_bytes (8 MiB), never
  *    one whose nvmap id left the process (name_get: display buffers) and never
  *    a CONTIG one. No compressible kinds, so no compression tags to worry about.
  * Freed entries idle for BOC_MAX_AGE_MS go back to the heap, and the cache is
  * flushed before the address space closes.
  * ------------------------------------------------------------------------- */
 #define BOC_MAX_ENTRIES   128
-#define BOC_MAX_BYTES     (16u << 20)
-#define BOC_MAX_BO_BYTES  (1u << 20)
 #define BOC_MAX_AGE_MS    3000
 #define BOC_AGE_OUT_BATCH 4
 
@@ -383,6 +382,11 @@ enum {
 	BOC_ST_BUSY, BOC_ST_IPC,
 	BOC_ST_NEW_FAIL,    /* nouveau_bo_new gave up */
 	BOC_ST_RETRY_OK,    /* ... or succeeded only after emptying the cache */
+	BOC_ST_BIG_N,       /* colour BOs over boc_max_bo_bytes, made fresh */
+	BOC_ST_BIG_T,       /* ... the ticks spent making them */
+	BOC_ST_BIG_BYTES,   /* ... and their total size */
+	BOC_ST_OTHER_N,     /* BOs of another kind (or CONTIG), never cached */
+	BOC_ST_SLACK_HIT,   /* hits served by a larger BO (boc_slack_pct) */
 	BOC_ST_COUNT
 };
 
@@ -398,6 +402,22 @@ static uint32_t boc_done_id;
 static uint32_t boc_done_value;
 /* 1 = cache on (what ships). The instr build flips it for its A/B. */
 static int boc_on = 1;
+/* Largest BO kept, and most bytes held. 1 MiB / 16 MiB shipped first; the
+ * sampling profiler (2026-09-24) then found colour BOs over 1 MiB (full-screen
+ * filter targets) made fresh every time, ~0.4 ms of IPC a frame on Mario 63's
+ * 8-16. The cache holds only a few MB in practice: 48 MiB is a ceiling, and
+ * every allocation that finds the heap full empties it first anyway. */
+static uint64_t boc_max_bo_bytes = 8u << 20;
+static uint64_t boc_max_bytes = 48u << 20;
+/* How much larger than asked a reused BO may be, in percent; exact sizes only
+ * shipped first. The profiler found why exact is not enough: the cache held
+ * ~66 entries, far below its limits, yet ~4.8 a frame aged out unused while
+ * ~6.4 requests a frame missed. Rotating filtered sprites ask for a slightly
+ * different size nearly every frame, so a freed BO waited 3 s for a twin that
+ * never came while its neighbour sizes were made fresh. With 25 %: misses
+ * 2.6 -> 1.7 a frame, time making BOs 2.2 -> 1.5 ms a frame (in-session A/B,
+ * Mario 63 world 8, 2026-09-24), and nothing seen on screen. */
+static uint32_t boc_slack_pct = 25;
 
 static uint64_t
 boc_ms_to_ticks(uint64_t ms)
@@ -483,7 +503,7 @@ static bool
 boc_cacheable(struct nouveau_bo_priv *nvbo)
 {
 	return nvbo->kind == NvKind_Generic_16BX2
-		&& nvbo->base.size <= BOC_MAX_BO_BYTES
+		&& nvbo->base.size <= boc_max_bo_bytes
 		&& nvbo->map_addr != NULL
 		&& !nvbo->shared
 		&& !(nvbo->base.flags & NOUVEAU_BO_CONTIG);
@@ -497,25 +517,38 @@ boc_take(struct nouveau_device *dev, uint64_t size, uint32_t align, uint32_t kin
 	struct nouveau_bo_priv *found = NULL;
 	int i;
 
+	uint64_t limit = size + size * boc_slack_pct / 100;
+	int best = -1;
+
 	mutexLock(&boc_lock);
 	boc_age_out();
+	/* The smallest entry that fits (the first of equals: the oldest, the most
+	 * likely done); an exact size cannot be beaten, so it ends the search.
+	 * With no slack this is the first exact match, as it always was. A bigger
+	 * BO is still a whole BO: it is zeroed entirely, keeps its real size, and
+	 * comes back here at that size. Mesa lays the texture out itself. */
 	for (i = 0; i < boc_n; i++) {
 		struct nouveau_bo_priv *nvbo = boc[i];
-		if (nvbo->base.device != dev || nvbo->base.size != size || nvbo->align != align
-		    || nvbo->kind != kind
+		if (nvbo->base.device != dev || nvbo->base.size < size || nvbo->base.size > limit
+		    || nvbo->align != align || nvbo->kind != kind
 		    || ((nvbo->base.flags ^ flags) & NOUVEAU_BO_COHERENT))
 			continue;
-		if (!boc_fence_done(nvbo, true)) {
-			/* Stop at the first match still in flight. The array is in
-			 * release order, not fence order, so a later entry could be
-			 * done, but each probe of an unpassed fence costs a couple of
-			 * IPCs and a wait: past one, a miss is cheaper. */
-			boc_st[BOC_ST_BUSY]++;
+		if (best < 0 || nvbo->base.size < boc[best]->base.size)
+			best = i;
+		if (nvbo->base.size == size)
 			break;
+	}
+	if (best >= 0) {
+		struct nouveau_bo_priv *nvbo = boc[best];
+		if (!boc_fence_done(nvbo, true)) {
+			/* Still in flight: a miss. The array is in release order, not
+			 * fence order, so another candidate could be done, but each probe
+			 * of an unpassed fence costs a couple of IPCs and a wait. */
+			boc_st[BOC_ST_BUSY]++;
+		} else {
+			boc_remove_at(best);
+			found = nvbo;
 		}
-		boc_remove_at(i);
-		found = nvbo;
-		break;
 	}
 	mutexUnlock(&boc_lock);
 	return found;
@@ -532,9 +565,9 @@ boc_put(struct nouveau_bo_priv *nvbo)
 	mutexLock(&boc_lock);
 	boc_age_out();
 	while (boc_n > 0 && (boc_n >= BOC_MAX_ENTRIES
-	                     || boc_bytes + nvbo->base.size > BOC_MAX_BYTES))
+	                     || boc_bytes + nvbo->base.size > boc_max_bytes))
 		boc_evict_oldest();
-	if (boc_n < BOC_MAX_ENTRIES && boc_bytes + nvbo->base.size <= BOC_MAX_BYTES) {
+	if (boc_n < BOC_MAX_ENTRIES && boc_bytes + nvbo->base.size <= boc_max_bytes) {
 		nvbo->cached_at = armGetSystemTick();
 		boc[boc_n++] = nvbo;
 		boc_bytes += nvbo->base.size;
@@ -599,6 +632,33 @@ flashnx_boc_set(int on)
 	boc_on = on;
 }
 
+/* Change the largest BO kept, the most bytes held, and how much larger than
+ * asked a reused BO may be (see boc_slack_pct). Entries over the new limits go
+ * back to the heap now, so a smaller setting takes effect at once. */
+void
+flashnx_boc_set_limits(uint64_t max_bo_bytes, uint64_t max_bytes, uint32_t slack_pct)
+{
+	int i;
+
+	mutexLock(&boc_lock);
+	boc_max_bo_bytes = max_bo_bytes;
+	boc_max_bytes = max_bytes;
+	boc_slack_pct = slack_pct;
+	for (i = 0; i < boc_n;) {
+		if (boc[i]->base.size > boc_max_bo_bytes) {
+			struct nouveau_bo_priv *nvbo = boc[i];
+			boc_remove_at(i);
+			boc_st[BOC_ST_EVICT]++;
+			boc_destroy(nvbo);
+		} else {
+			i++;
+		}
+	}
+	while (boc_n > 0 && boc_bytes > boc_max_bytes)
+		boc_evict_oldest();
+	mutexUnlock(&boc_lock);
+}
+
 /* Running totals (ticks for the _T entries), then entries and bytes held. */
 void
 flashnx_boc_stats(uint64_t *out, int n)
@@ -654,8 +714,14 @@ nouveau_bo_new(struct nouveau_device *dev, uint32_t flags, uint32_t align,
 
 	/* FlashNX: a cached BO of the same shape, reset to exactly what a fresh
 	 * one would be (see the cache above). */
-	if (boc_on && kind == NvKind_Generic_16BX2 && size <= BOC_MAX_BO_BYTES
-	    && !(flags & NOUVEAU_BO_CONTIG)) {
+	/* What kind of miss this will be, if it is one (see the stats enum). */
+	int miss_class = 0; /* 0 = cacheable shape, 1 = too big, 2 = other kind */
+	if (kind != NvKind_Generic_16BX2 || (flags & NOUVEAU_BO_CONTIG))
+		miss_class = 2;
+	else if (size > boc_max_bo_bytes)
+		miss_class = 1;
+
+	if (boc_on && miss_class == 0) {
 		struct nouveau_bo_priv *hit = boc_take(dev, size, align, kind, flags);
 		if (hit) {
 			struct nouveau_bo *hbo = &hit->base;
@@ -675,6 +741,8 @@ nouveau_bo_new(struct nouveau_device *dev, uint32_t flags, uint32_t align,
 				memset(&hbo->config, 0, sizeof(hbo->config));
 			*pbo = hbo;
 			boc_st[BOC_ST_HIT]++;
+			if (hbo->size != size)
+				boc_st[BOC_ST_SLACK_HIT]++;
 			boc_st[BOC_ST_NEW_T] += armGetSystemTick() - t0;
 			return 0;
 		}
@@ -746,7 +814,15 @@ nouveau_bo_new(struct nouveau_device *dev, uint32_t flags, uint32_t align,
 	if (config)
 		bo->config = *config;
 	*pbo = bo;
-	boc_st[BOC_ST_NEW_T] += armGetSystemTick() - t0;
+	uint64_t spent = armGetSystemTick() - t0;
+	boc_st[BOC_ST_NEW_T] += spent;
+	if (miss_class == 1) {
+		boc_st[BOC_ST_BIG_N]++;
+		boc_st[BOC_ST_BIG_T] += spent;
+		boc_st[BOC_ST_BIG_BYTES] += size;
+	} else if (miss_class == 2) {
+		boc_st[BOC_ST_OTHER_N]++;
+	}
 	return 0;
 }
 
