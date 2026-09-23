@@ -8,6 +8,7 @@
 # Usage:
 #   scripts/build.sh           # release profile (LTO=full, ~3 min, smaller .nro)
 #   scripts/build.sh --dev     # release-dev profile (LTO=thin, ~30 s, dev iterations)
+#   scripts/build.sh --prof    # release-dev + frame pointers, for cpp/src/prof.cpp
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -17,9 +18,17 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # is slightly larger (~5-15%) but behaves identically modulo LLVM LTO bugs.
 PROFILE="release"
 CARGO_FLAG="--release"
+CARGO_CONFIG=()
 if [[ "${1:-}" == "--dev" ]]; then
     PROFILE="release-dev"
     CARGO_FLAG="--profile release-dev --features instr"
+elif [[ "${1:-}" == "--prof" ]]; then
+    # No `instr`: its per-action timers would show up in the profile. The
+    # rustflag is appended to the ones in .cargo/config.toml (a --config array
+    # merges, an env RUSTFLAGS would replace them all).
+    PROFILE="release-prof"
+    CARGO_FLAG="--profile release-prof"
+    CARGO_CONFIG=(--config 'build.rustflags=["-C", "force-frame-pointers=yes"]')
 fi
 
 export PATH="$USERPROFILE/.cargo/bin:$PATH"
@@ -28,7 +37,20 @@ export PATH="$USERPROFILE/.cargo/bin:$PATH"
 export PATH="$USERPROFILE/scoop/apps/mingw/current/bin:$PATH"
 
 echo "[1/2] Building Rust no_std staticlib (profile: $PROFILE)..."
-(cd "$ROOT/rust" && cargo build $CARGO_FLAG)
+(cd "$ROOT/rust" && cargo build $CARGO_FLAG "${CARGO_CONFIG[@]}")
+
+# The .elf depends on the staticlib of the profile it was linked with, so going
+# back to a profile whose library is OLDER than the last link would not relink,
+# and the .nro would silently stay the other build. Relink on every change.
+STAMP="$ROOT/cpp/build/.rust_profile"
+if [[ "$(cat "$STAMP" 2>/dev/null)" != "$PROFILE" ]]; then
+    rm -f "$ROOT/cpp/FlashNX.elf"
+    # prof.cpp and main.cpp are compiled differently for --prof (see
+    # cpp/Makefile, FLASHNX_PROF_ALWAYS).
+    touch "$ROOT/cpp/src/prof.cpp" "$ROOT/cpp/src/main.cpp"
+    mkdir -p "$ROOT/cpp/build"
+    echo "$PROFILE" > "$STAMP"
+fi
 
 # The tile forwarder, turned into a byte array the C++ build links in.
 #

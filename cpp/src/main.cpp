@@ -32,6 +32,15 @@ static uint64_t g_prev_period_ticks = 0;
 extern "C" uint64_t flashnx_prev_swap_ticks(void) { return g_prev_swap_ticks; }
 extern "C" uint64_t flashnx_prev_period_ticks(void) { return g_prev_period_ticks; }
 
+// Sampling profiler (cpp/src/prof.cpp). Inert unless `prof.on` is on the card.
+extern "C" void prof_boot(Thread* worker);
+extern "C" void prof_game_active(int active);
+extern "C" void prof_frame(void);
+extern "C" void prof_shutdown(void);
+extern "C" void prof_set_regime(int regime);
+// The profiling build's A/B switch (rust/src/lib.rs).
+extern "C" void ruffle_ab_regime(int regime);
+
 extern "C" void swf_picker_run(void);
 // The `.swf` embedded in this `.nro` (issue #106), or nullptr on a normal
 // build. Only meaningful after romfsInit(); see cpp/src/swf_picker.cpp.
@@ -986,6 +995,7 @@ static void worker_entry(void* arg) {
         }
     }
     g_in_game = true;
+    prof_game_active(1);
 
     // Mouse cursor — centred at start.
     // In-game cursor: lives in the GAME's render space.
@@ -1778,6 +1788,17 @@ static void worker_entry(void* arg) {
         if (dt_us > 3000000ULL) ruffle_skip_paused_time(dt_us - 100000ULL);
         if (dt_us > 100000ULL) dt_us = 100000ULL;
 
+        prof_frame();
+#ifdef FLASHNX_PROF_ALWAYS
+        // The profiling build's in-session A/B: 240-frame windows alternate
+        // what ruffle_ab_regime switches, and every sample carries its window,
+        // so one session gives both the gain and where the time went.
+        {
+            const int regime = (int)((frames_since_start / 240) & 1);
+            ruffle_ab_regime(regime);
+            prof_set_regime(regime);
+        }
+#endif
         ruffle_render_frame_dt(dt_us);
         // One snapshot of the stage, ~8 s in: by then a game that is going to
         // show something has, and one that shows a black screen has settled into
@@ -1799,6 +1820,7 @@ static void worker_entry(void* arg) {
     //   - back_to_library == false: appletMainLoop() returned false (home
     //     button → Close, applet focus loss without resume, etc.) → full
     //     .nro exit.
+    prof_game_active(0);
     ruffle_shutdown();
     // Leaving a game always puts the clocks back where they were found, so the
     // experiment can never follow the player into the library or into the next
@@ -2052,8 +2074,10 @@ int main(int argc, char** argv) {
         socketExit();
         return EXIT_FAILURE;
     }
+    prof_boot(&t);
     threadStart(&t);
     threadWaitForExit(&t);
+    prof_shutdown();
     threadClose(&t);
 
     romfsExit();

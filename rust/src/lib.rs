@@ -1929,6 +1929,27 @@ pub extern "C" fn ruffle_dump_root_vars() {
     }
 }
 
+/// Regime of the profiling build's in-session A/B (cpp/src/main.cpp, 240-frame
+/// windows): 1 = the optimizations under test on, 0 = off. Printed as `ab=` on
+/// the SLOW line, and stamped on every profiler sample. Never changes in any
+/// other build, where those optimizations keep their defaults.
+pub(crate) static AB_REGIME: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+/// Profiling build only: the hook of its in-session A/B. main.cpp calls it
+/// every frame with the regime of the current 240-frame window, and the sampler
+/// stamps each sample with it, so one session gives both the gain and where the
+/// time went (`scripts/prof_report.py --regime`). Put here whatever should
+/// differ between the two windows; empty, both windows run the same code.
+///
+/// What it has switched: the libdrm BO cache's limits and slack (kept,
+/// `flashnx_boc_set_limits`), and a child-name filter and a mouse-pick bounds
+/// map in our Ruffle (dropped, see patches/README.md), all 2026-09-24.
+#[no_mangle]
+pub extern "C" fn ruffle_ab_regime(regime: i32) {
+    use core::sync::atomic::Ordering::Relaxed;
+    AB_REGIME.store((regime != 0) as u64, Relaxed);
+}
+
 /// Hide `us` microseconds of wall clock from the movie (#87).
 ///
 /// Frames only advance on the `dt` we hand to `tick()`, but `getTimer()` reads

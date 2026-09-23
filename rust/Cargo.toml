@@ -155,6 +155,16 @@ codegen-units = 16
 # Keep symbols so panics resolve to source lines in dev sessions.
 strip = "none"
 
+# The sampling profiler's build (`scripts/build.sh --prof`, see cpp/src/prof.cpp):
+# release-dev plus frame pointers, which build.sh adds as a rustflag so std gets
+# them too. Its own directory, so switching to it never rebuilds release-dev.
+[profile.release-prof]
+inherits = "release-dev"
+# Line tables only: `addr2line -i` then names the functions inlined into a
+# sampled address (most of the AVM1 action handlers live inside `do_action`).
+# Debug info stays in the .elf; the .nro loads none of it.
+debug = "line-tables-only"
+
 [profile.dev]
 panic = "abort"
 

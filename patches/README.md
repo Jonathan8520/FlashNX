@@ -121,3 +121,25 @@ Per-action exclusive time and count (a called function's body is charged to
 its own actions), decode time, and child-by-name lookups. Compiled out of
 release builds; the Switch dev build prints the hottest actions every 240
 frames. It is what found the cache above.
+
+### Tried and dropped (2026-09-24)
+
+Measured with the sampling profiler (`cpp/src/prof.cpp`) in an in-session A/B
+on Super Mario 63, 71 window pairs: 1.0 +- 0.9 ms, noise. Neither is in the
+snapshot. Recorded so they are not tried again blind.
+
+- **A child-name filter in `ChildContainer::get_name`** (a 256-bit bloom of the
+  children's case-folded names, so a lookup for a name no child carries skips
+  the scan). Killed by its invalidation: the rename epoch was global, and
+  `set_default_instance_name` names every object a timeline places after
+  attaching it, so every animated shape staled every filter several times a
+  frame and the filter cost 2.5 % on its own. An epoch per parent (a counter in
+  the parent's `DisplayObjectBase`, read by `child_by_name`, the only caller of
+  `get_name`) would fix that, for about 0.8 ms at best.
+- **A per-pick map of world bounds for `MovieClip::mouse_pick_avm1`** (one walk
+  down per pick instead of one `world_bounds` per clip). Mario 63's tree is flat:
+  filling the map cost as much as the calls it saved. Note that upstream master
+  (`03fc070fa`, `hitArea`) has since removed that `world_bounds` check from the
+  pick and calls `is_button_mode` on every clip instead, which allocates eight
+  strings and runs seven property lookups each time: expect the pick to get
+  slower, not faster, with the next Ruffle update.
