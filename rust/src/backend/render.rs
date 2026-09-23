@@ -1096,7 +1096,7 @@ static FBO_VALIDATE_BUDGET: std::sync::atomic::AtomicU32 =
 
 fn fbo_should_validate() -> bool {
     FBO_VALIDATE_BUDGET
-        .fetch_update(
+        .try_update(
             std::sync::atomic::Ordering::Relaxed,
             std::sync::atomic::Ordering::Relaxed,
             |n| if n == 0 { None } else { Some(n - 1) },
@@ -1223,7 +1223,7 @@ struct Atlas {
 }
 
 impl Atlas {
-    fn new(size: u32) -> Self {
+    fn new(size: u32) -> Option<Self> {
         Self::new_wh(size, size)
     }
 
@@ -1231,12 +1231,30 @@ impl Atlas {
     /// (`ATLAS_SIZE²`); a bitmap too large to share gets a right-sized dedicated
     /// atlas (issue #56b) so a 1824×1174 surface costs ~8.5 MB, not a full 16 MB
     /// 2048² — halving the memory of games that spam big offscreen surfaces.
-    fn new_wh(width: u32, height: u32) -> Self {
+    ///
+    /// None when the GPU heap has no room. The texture NAME exists either way,
+    /// but a failed glTexImage2D leaves it without a level-0 image, and the first
+    /// `BitmapData.draw` that attaches such an atlas to an FBO dies in Mesa's
+    /// `st_update_renderbuffer_surface` (DataAbort, FAR=0xe). That exact crash,
+    /// same registers (x2 = x6 = 0x800, the atlas width), ended Super Smash
+    /// Flash 2 three times: twice in August and once on 2026-09-23, each right
+    /// after an `atlas: allocating` under memory exhaustion.
+    /// `make_standalone_texture` has checked this since `9aa951a`; atlases never
+    /// did.
+    fn new_wh(width: u32, height: u32) -> Option<Self> {
         let mut tex: GLuint = 0;
         unsafe {
             glGenTextures(1, &mut tex);
+            if tex == 0 {
+                return None;
+            }
             glBindTexture(GL_TEXTURE_2D, tex);
             glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            // Drain stale errors so the check below reads this call only.
+            let mut drain = 0;
+            while glGetError() != GL_NO_ERROR && drain < 16 {
+                drain += 1;
+            }
             glTexImage2D(
                 GL_TEXTURE_2D,
                 0,
@@ -1248,19 +1266,24 @@ impl Atlas {
                 GL_UNSIGNED_BYTE,
                 core::ptr::null(),
             );
+            if glGetError() != GL_NO_ERROR {
+                glBindTexture(GL_TEXTURE_2D, 0);
+                glDeleteTextures(1, &tex);
+                return None;
+            }
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as GLint);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR as GLint);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE as GLint);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as GLint);
             glBindTexture(GL_TEXTURE_2D, 0);
         }
-        Self {
+        Some(Self {
             texture: tex,
             width,
             height,
             shelves: Vec::new(),
             live: 0,
-        }
+        })
     }
 
     /// Delete the GL texture and mark this slot DEAD (`texture == 0`) so
@@ -1601,10 +1624,20 @@ fn make_standalone_texture(width: u32, height: u32) -> Option<StandaloneTexture>
         if glGetError() != GL_NO_ERROR {
             glBindTexture(GL_TEXTURE_2D, 0);
             glDeleteTextures(1, &tex);
-            ruffle_log_cstr(
-                b"make_standalone_texture: glTexImage2D failed (GPU OOM?), skipped\n\0".as_ptr()
-                    as *const _,
-            );
+            // With the size, and not every time: SSF2 logged 16 769 of these in
+            // one session, ~9 ms each (Mesa drains the GPU and retries before
+            // giving up), and the log line itself goes over the network.
+            static FAILS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = FAILS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if n <= 20 || n % 500 == 0 {
+                let msg = std::format!(
+                    "make_standalone_texture: glTexImage2D failed for {}x{} ({} KB), skipped (GPU OOM?, failures={})\n",
+                    width, height, width as u64 * height as u64 * 4 / 1024, n,
+                );
+                let mut b = msg.into_bytes();
+                b.push(0);
+                ruffle_log_cstr(b.as_ptr() as *const _);
+            }
             return None;
         }
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR as GLint);
@@ -2154,6 +2187,8 @@ pub struct SwitchRenderBackend {
     big_atlas_alloc_total: u32,
     big_atlas_free_total: u32,
     big_atlas_dropped_total: u32,
+    /// New atlases the GPU heap had no room for (`pack_into_atlas` fell back).
+    atlas_alloc_failures: u32,
     /// System tick at the start of the current heartbeat window (60 frames).
     /// Set to 0 on first heartbeat; FPS measurement skipped until we have
     /// two samples to subtract. Uses `armGetSystemTick` for high resolution
@@ -5524,6 +5559,18 @@ impl SwitchRenderBackend {
         //     nonsense in heartbeat logs. Worse, the bogus free regions
         //     would alias with future allocs and silently corrupt draws.
         PENDING_FREES.lock().unwrap().clear();
+        // Same bug, other queue. Ruffle's Player drops its renderer BEFORE its GC
+        // arena (player.rs: `renderer` is declared ahead of `gc_arena`), so every
+        // atlas bitmap of the game being left releases its ticket after that
+        // backend is gone. Nothing drains the queue until the NEXT game's first
+        // submit_frame, which then decrements ITS atlases at the stale indices
+        // and can free one that live handles still point at: sprites vanishing
+        // or showing another bitmap in the second game of a session, or after
+        // REDEMARRER. The old atlases died with the old backend; the indices
+        // mean nothing now.
+        if let Ok(mut q) = PENDING_ATLAS_RELEASE.lock() {
+            q.clear();
+        }
         LIVE_GPU_DRAWS.store(0, Ordering::Relaxed);
         LIVE_GPU_SHAPES.store(0, Ordering::Relaxed);
 
@@ -5728,6 +5775,7 @@ impl SwitchRenderBackend {
             big_atlas_alloc_total: 0,
             big_atlas_free_total: 0,
             big_atlas_dropped_total: 0,
+            atlas_alloc_failures: 0,
             heartbeat_tick: 0,
             draw_calls_this_window: 0,
             push_mask_window: 0,
@@ -5947,6 +5995,20 @@ impl SwitchRenderBackend {
             }
             glViewport(0, 0, tex_w as GLsizei, tex_h as GLsizei);
             glClearStencil(0);
+            // The clear below must reach every texel: a recycled cache texture
+            // still holds its previous owner's picture, where a fresh one used to
+            // come out of the driver zeroed. A mask can leave the colour mask off
+            // (mask_push / mask_deactivate), and Stage3D's SetScissorRectangle can
+            // leave the scissor on. The colour mask is restored on the way out by
+            // `mask_restore_gl`, the scissor right after the clear. The stencil
+            // mask is deliberately NOT forced: a nested blend inside a masked
+            // region relies on this clear leaving the enclosing mask's stencil
+            // alone, and the stencil is not part of the recycled texture anyway.
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            let scissor_was_on = glIsEnabled(GL_SCISSOR_TEST) == GL_TRUE;
+            if scissor_was_on {
+                glDisable(GL_SCISSOR_TEST);
+            }
             // `Some(color)` = fresh target (clear to color). `None` = composite
             // mode: the temp was pre-seeded with the BitmapData's existing
             // content (render_offscreen's FreshWithTexture semantics), so keep
@@ -5961,6 +6023,9 @@ impl SwitchRenderBackend {
                 glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
             } else {
                 glClear(GL_STENCIL_BUFFER_BIT);
+            }
+            if scissor_was_on {
+                glEnable(GL_SCISSOR_TEST);
             }
             // Premultiplied-alpha-correct accumulation: standard blend for RGB
             // but accumulate the alpha channel additively, otherwise a cache
@@ -6643,6 +6708,17 @@ impl SwitchRenderBackend {
                 );
                 self.filter_tex_pool.release(result);
                 ok
+            }
+            // The in-place blur of the cache loop passes the same texture on both
+            // sides, and `run_blur_to_temp` also returns None when it could not
+            // get its temps. Blitting a texture onto itself samples the render
+            // target, which is undefined; leaving the content unblurred is the
+            // same as the pass-through this branch means.
+            None if src_tex == dst_tex
+                && source_point.0 as i32 == dest_point.0
+                && source_point.1 as i32 == dest_point.1 =>
+            {
+                true
             }
             None => self.blit_identity(
                 src_tex, src_w, src_h, source_point, source_size,
@@ -7400,10 +7476,28 @@ impl SwitchRenderBackend {
         // stays atlas-backed (shape fills keep working — unlike the standalone
         // path). Small bitmaps still get a shared 2048² so more can pack into it.
         let big = width > ATLAS_SIZE / 2 || height > ATLAS_SIZE / 2;
-        let mut atlas = if big {
+        let new_atlas = if big {
             Atlas::new_wh(width + 2 * ATLAS_PAD, height + 2 * ATLAS_PAD)
         } else {
             Atlas::new(ATLAS_SIZE)
+        };
+        // No room for a new atlas: say so, and let register_bitmap fall back to
+        // a standalone texture of the bitmap's own size, which is checked and
+        // far smaller than the 16 MB an atlas asks for. Never an atlas without
+        // storage (see `Atlas::new_wh`).
+        let Some(mut atlas) = new_atlas else {
+            self.atlas_alloc_failures = self.atlas_alloc_failures.wrapping_add(1);
+            if self.atlas_alloc_failures <= 8 || self.atlas_alloc_failures % 256 == 0 {
+                let msg = std::format!(
+                    "atlas: no GPU memory for a new {} atlas ({}x{} bitmap), falling back (failures={})\n",
+                    if big { "right-sized" } else { "2048" },
+                    width, height, self.atlas_alloc_failures,
+                );
+                let mut b = msg.into_bytes();
+                b.push(0);
+                unsafe { ruffle_log_cstr(b.as_ptr() as *const _) };
+            }
+            return None;
         };
         let Some((x, y)) = atlas.pack(width, height) else {
             return None;
@@ -15326,6 +15420,15 @@ impl RenderBackend for SwitchRenderBackend {
         // down if a heavy menu hitches.
         const FILTER_CHAINS_PER_FRAME_BUDGET: usize = 48;
         let mut filter_chains_run: usize = 0;
+        // No scissor anywhere in the loop, not only around step 1's clear: the
+        // filter passes write their whole target through `draw_filter_pass`,
+        // which never touches it. A Stage3D game can leave one on
+        // (SetScissorRectangle), and a pooled temp holds another object's
+        // pixels outside it, which the blur would then sample and carry on screen.
+        let loop_scissor_was_on = unsafe { glIsEnabled(GL_SCISSOR_TEST) == GL_TRUE };
+        if loop_scissor_was_on {
+            unsafe { glDisable(GL_SCISSOR_TEST) };
+        }
         for entry in cache_entries {
             let Some(standalone) = as_standalone_bitmap(&entry.handle) else {
                 self.warn_once(b"cache_entry: non-standalone handle (skipped)\n\0");
@@ -15437,6 +15540,9 @@ impl RenderBackend for SwitchRenderBackend {
         // cannot ride the same CUR -> LAST hand-off as the tick-side timers —
         // that would print the previous frame's number. Publish them here, where
         // the work is finished and `log_slow_frame` has not read anything yet.
+        if loop_scissor_was_on {
+            unsafe { glEnable(GL_SCISSOR_TEST) };
+        }
         drop(cache_timer);
         PRIM_CACHE_LAST.store(
             PRIM_CACHE_CUR.swap(0, std::sync::atomic::Ordering::Relaxed),
@@ -15835,7 +15941,9 @@ impl RenderBackend for SwitchRenderBackend {
             );
             glBindTexture(GL_TEXTURE_2D, 0);
         }
-        self.warn_once(b"register_bitmap: >2048 bitmap -> standalone texture (no crash)\n\0");
+        // Also reached when there was no GPU memory for a new atlas: a texture of
+        // the bitmap's own size is far more likely to fit than 16 MB of atlas.
+        self.warn_once(b"register_bitmap: >2048 bitmap or no room for an atlas -> standalone texture (no crash)\n\0");
         self.bitmaps_registered = self.bitmaps_registered.wrapping_add(1);
         Ok(BitmapHandle(Arc::new(StandaloneBitmap(Arc::new(standalone)))))
     }
