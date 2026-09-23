@@ -956,6 +956,20 @@ extern "C" {
     fn ruffle_log_cstr(msg: *const core::ffi::c_char);
     /// Monotonic tick counter (armGetSystemTick). Used for FPS heartbeat.
     fn ruffle_tick_now() -> u64;
+    /// The PREVIOUS frame's `eglSwapBuffers` and its whole loop period, in ticks
+    /// (main.cpp). The SLOW line's total is tick + render only, and on this
+    /// driver a texture deleted while the pending pushbuffer still uses it is
+    /// freed at the next flush, after a blocking wait for that submission: a cost
+    /// that can move out of `render` into the swap without leaving the frame.
+    fn flashnx_prev_swap_ticks() -> u64;
+    fn flashnx_prev_period_ticks() -> u64;
+    /// Running counters of the buffer-object cache in our libdrm_nouveau copy
+    /// (cpp/third_party/libdrm_nouveau), see `BOC_STATS`.
+    fn flashnx_boc_stats(out: *mut u64, n: core::ffi::c_int);
+    /// Turn that cache on or off (on by default; off empties it).
+    fn flashnx_boc_set(on: core::ffi::c_int);
+    /// Return every parked BO to the heap; the cache keeps working afterwards.
+    fn flashnx_boc_trim() -> u64;
     /// Tick frequency in Hz (~19.2 MHz on Switch). Constant after boot.
     fn ruffle_tick_freq() -> u64;
     /// Actual current CPU clock in Hz (clkrst). 0 if unavailable. Lets the
@@ -1074,6 +1088,100 @@ static PRIM_CACHE_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 static PRIM_CACHE_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PRIM_RTBIND_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PRIM_RTBIND_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+// DIAG round 2 (2026-09-22). Round 1 answered the question it was built for:
+// on Mario 63's 8-13, over 1102 slow frames, a render-target rebind costs
+// 8.7 us (min 7.8, max 11.3) and all 154 of them together are 3 % of `render`.
+// The 0.77 ms this file used to quote was 88x too high, and the two rebind
+// optimisations shipped alongside those counters are worth approximately
+// nothing. What it did NOT answer is where the other 97 % sits:
+//
+//   cacheUs 24027 us (56 % of render), of which the passes are 22687 us (53 %)
+//   and 18532 us (44 %) is outside the loop entirely.
+//
+// Fill is already ruled out by arithmetic: the meteor shape is 22.25 px, the
+// stage matrix scales 2.844, the blur grows it 5.7 px a side, so a cache
+// texture is ~75x75 and the blur runs at half resolution, i.e. 37x37 = 1369
+// pixels a pass. ~190 us per pass cannot be that. It is CPU overhead per pass.
+//
+// So this round splits the two big blocks:
+//   CONTENT = step 1 only, replaying the object's own draw commands.
+//   FILTER  = steps 2 and 3, the chain.
+//   MKTEX   = `create_empty_texture`, which Ruffle calls from `render_base`
+//             BEFORE submit_frame, so its 20-34 calls a frame land in the 44 %
+//             outside the loop, not in cacheUs. Round 1 filed it in the wrong
+//             place; this measures it where it actually happens.
+static PRIM_CONTENT_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_CONTENT_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_FILTCHAIN_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_FILTCHAIN_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_MKTEX_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_MKTEX_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_MKTEX_N_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRIM_MKTEX_N_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+// ─── Texture churn (2026-09-23) ───────────────────────────────────────────────
+//
+// On this driver a GL texture is not cheap to make or to free: devkitPro's
+// libdrm_nouveau gave each one its own buffer object, made with a memalign,
+// three nvmap ioctls, an address-space map (every ioctl an IPC to nvservices)
+// and a memset, and freed after an untimed fence wait plus two more IPCs.
+// Super Mario 63's world 8 made and freed 58 to 85 of them a frame (filtered
+// meteors that rotate change their cache size every frame), ~50 ms of a 100 ms
+// frame. The fix lives below GL, in our copy of that library
+// (cpp/third_party/libdrm_nouveau, see its README): freed buffer objects are
+// recycled by size. Measured over eight levels, `render` fell from 61 to 14 ms.
+//
+// A GL-level pool keyed by exact texture size was tried first and measured
+// useless on top of it (+2.9 ms): the sizes that change every frame only match
+// once rounded to the driver's tiles, which is what the libdrm cache keys on.
+// The counters below stay, because they are what showed where the time went.
+
+/// `flashnx_boc_stats` layout: running totals, `_T` in ticks, then the entries
+/// and bytes held. Must match the enum in cpp/third_party/libdrm_nouveau/nouveau.c.
+const BOC_STATS: usize = 14;
+const BOC_NEW_N: usize = 0;
+const BOC_NEW_T: usize = 1;
+const BOC_HIT: usize = 2;
+const BOC_ZERO_T: usize = 3;
+const BOC_DEL_N: usize = 4;
+const BOC_DEL_T: usize = 5;
+const BOC_DEL_CACHED: usize = 6;
+const BOC_EVICT: usize = 7;
+const BOC_BUSY: usize = 8;
+const BOC_IPC: usize = 9;
+const BOC_NEW_FAIL: usize = 10;
+const BOC_RETRY_OK: usize = 11;
+const BOC_HELD_N: usize = 12;
+const BOC_HELD_BYTES: usize = 13;
+
+fn boc_stats_now() -> [u64; BOC_STATS] {
+    let mut now = [0u64; BOC_STATS];
+    unsafe { flashnx_boc_stats(now.as_mut_ptr(), BOC_STATS as core::ffi::c_int) };
+    now
+}
+
+/// Standalone textures alive right now, every origin (`stTex=`).
+static LIVE_STANDALONE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+// Per-frame texture traffic, CUR -> LAST at the END of submit_frame like BLEND_*:
+// a frame's creates happen in render_base and its deletes anywhere from the GC
+// in the tick to the main command list, so only the end of submit sees them all.
+static TEX_MAKE_N_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static TEX_MAKE_N_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static TEX_MAKE_T_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static TEX_MAKE_T_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static TEX_DEL_N_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static TEX_DEL_N_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static TEX_DEL_T_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static TEX_DEL_T_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Filter-pool textures let go by the two-frame TTL in `begin_frame`.
+static TEX_EVICT_N_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static TEX_EVICT_N_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// `begin_frame` alone. It runs inside `cacheUs`, and round 2's "loop overhead"
+/// (6.9 ms at 48 chains) turned out to be exactly its TTL deletions.
+static TEX_BF_T_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static TEX_BF_T_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// How many more `glCheckFramebufferStatus` calls to actually issue.
 ///
@@ -1469,6 +1577,9 @@ pub(crate) struct StandaloneTexture {
 
 impl Drop for StandaloneTexture {
     fn drop(&mut self) {
+        let _pt = PrimTimer::new(&TEX_DEL_T_CUR);
+        TEX_DEL_N_CUR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        LIVE_STANDALONE.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         unsafe { glDeleteTextures(1, &self.texture) };
     }
 }
@@ -1494,6 +1605,8 @@ pub(crate) fn standalone_bitmap_from_texture(
     width: u32,
     height: u32,
 ) -> BitmapHandle {
+    // Its Drop counts it out like any other, so it has to be counted in.
+    LIVE_STANDALONE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     BitmapHandle(Arc::new(StandaloneBitmap(Arc::new(StandaloneTexture {
         texture,
         width,
@@ -1587,6 +1700,8 @@ fn make_standalone_texture(width: u32, height: u32) -> Option<StandaloneTexture>
     if width == 0 || height == 0 {
         return None;
     }
+    let _pt = PrimTimer::new(&TEX_MAKE_T_CUR);
+    TEX_MAKE_N_CUR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut tex: GLuint = 0;
     unsafe {
         glGenTextures(1, &mut tex);
@@ -1646,6 +1761,7 @@ fn make_standalone_texture(width: u32, height: u32) -> Option<StandaloneTexture>
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE as GLint);
         glBindTexture(GL_TEXTURE_2D, 0);
     }
+    LIVE_STANDALONE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Some(StandaloneTexture { texture: tex, width, height })
 }
 
@@ -2216,6 +2332,9 @@ pub struct SwitchRenderBackend {
     /// spike (e.g. once/sec) means an HUD/text element is re-caching + (with
     /// filters on) re-filtering on a timer — the idle-stutter suspect.
     cache_entries_max_window: u32,
+    /// DIAG round 2: which filter-chain budget this frame actually ran under,
+    /// printed on the SLOW line so each frame can be bucketed by regime.
+    filter_budget_this_frame: u32,
     /// How many times Ruffle has called `render_offscreen` since boot —
     /// non-zero means something on stage uses `cacheAsBitmap` or a filter.
     /// Logged every heartbeat so we can correlate spikes with crashes.
@@ -2331,6 +2450,10 @@ pub struct SwitchRenderBackend {
     /// glGenTextures + glTexImage2D + glDeleteTextures per filter per
     /// frame, which was the main fps killer in Phase 2.3's first try.
     filter_tex_pool: FilterTexturePool,
+    /// libdrm buffer-object cache counters: the last running totals read, and
+    /// this frame's share of them (the two held counts are levels, not deltas).
+    boc_prev: [u64; BOC_STATS],
+    boc_frame: [u64; BOC_STATS],
 
     /// Reusable temp textures for `render_offscreen` (BitmapData.draw /
     /// cacheAsBitmap). `_pool` holds textures free for reuse; `_retired` holds
@@ -2405,6 +2528,9 @@ struct FrameBreakdown {
     cache_entries: u32,
     /// Filter chains actually run this frame (bounded by the per-frame budget).
     filter_chains: u32,
+    /// DIAG round 2: the budget this frame ran under, so the alternating probe
+    /// can be bucketed by regime when reading the log back.
+    filter_budget: u32,
 }
 
 /// Pool of `StandaloneTexture` keyed by `(width, height)`. Acquire pulls an
@@ -2440,14 +2566,18 @@ impl FilterTexturePool {
     /// Reclaim textures not reused within `FILTER_POOL_TTL_FRAMES`. Called once
     /// per `submit_frame` before the cache_entries filter chain runs.
     fn begin_frame(&mut self, frame: u64) {
+        let _pt = PrimTimer::new(&TEX_BF_T_CUR);
         self.current_frame = frame;
         let keep_from = frame.saturating_sub(FILTER_POOL_TTL_FRAMES - 1);
+        let mut evicted = 0u64;
         for bucket in self.buckets.values_mut() {
             let before = bucket.len();
             bucket.retain(|(_, f)| *f >= keep_from); // dropped entries free their GL texture
             self.pooled -= before - bucket.len();
+            evicted += (before - bucket.len()) as u64;
         }
         self.buckets.retain(|_, v| !v.is_empty());
+        TEX_EVICT_N_CUR.fetch_add(evicted, std::sync::atomic::Ordering::Relaxed);
     }
     fn acquire(&mut self, w: u32, h: u32) -> Option<StandaloneTexture> {
         if let Some(bucket) = self.buckets.get_mut(&(w, h)) {
@@ -5571,6 +5701,17 @@ impl SwitchRenderBackend {
         if let Ok(mut q) = PENDING_ATLAS_RELEASE.lock() {
             q.clear();
         }
+        // A new backend means a new working set (a game starting, REDEMARRER,
+        // back to the library): the blocks the last one parked in libdrm's BO
+        // cache would only hold heap the next one may need.
+        unsafe { flashnx_boc_trim() };
+        // `sdmc:/switch/FlashNX/bocache.off` turns that cache off, to compare a
+        // game with and without it on the same binary. An experiment, never a
+        // default (see `marker_present`).
+        if marker_present("bocache.off") {
+            unsafe { flashnx_boc_set(0) };
+            log(b"bocache: bocache.off present -> libdrm buffer-object cache DISABLED\n\0");
+        }
         LIVE_GPU_DRAWS.store(0, Ordering::Relaxed);
         LIVE_GPU_SHAPES.store(0, Ordering::Relaxed);
 
@@ -5745,6 +5886,9 @@ impl SwitchRenderBackend {
             complex_blend_prog,
             blend_window: 0,
             filter_tex_pool: FilterTexturePool::new(),
+            // Counted from here, not from the process start.
+            boc_prev: boc_stats_now(),
+            boc_frame: [0; BOC_STATS],
             offscreen_temp_pool: Vec::new(),
             offscreen_temp_retired: Vec::new(),
             offscreen_temp_pool_bytes: 0,
@@ -5783,6 +5927,7 @@ impl SwitchRenderBackend {
             masked_draw_window: 0,
             mask_shape_draw_window: 0,
             cache_entries_max_window: 0,
+            filter_budget_this_frame: 0,
             render_offscreen_calls: 0,
             apply_filter_calls: 0,
             resolve_sync_calls: 0,
@@ -7682,6 +7827,7 @@ impl SwitchRenderBackend {
             masked_draw: self.masked_draw_window,
             cache_entries: 0,
             filter_chains: 0,
+            filter_budget: 0,
         }
     }
 
@@ -7715,6 +7861,13 @@ impl SwitchRenderBackend {
         // `render 68000us` with every other sub-timer at zero.
         let cache_us = to_us(PRIM_CACHE_LAST.load(std::sync::atomic::Ordering::Relaxed));
         let rtbind_us = to_us(PRIM_RTBIND_LAST.load(std::sync::atomic::Ordering::Relaxed));
+        // Round 2: `cacheUs` split into step 1 vs the chain, plus the texture
+        // creation that happens outside the loop. `budget=` labels the frame so
+        // the alternating probe can be bucketed.
+        let content_us = to_us(PRIM_CONTENT_LAST.load(std::sync::atomic::Ordering::Relaxed));
+        let filtchain_us = to_us(PRIM_FILTCHAIN_LAST.load(std::sync::atomic::Ordering::Relaxed));
+        let mktex_us = to_us(PRIM_MKTEX_LAST.load(std::sync::atomic::Ordering::Relaxed));
+        let mktex_n = PRIM_MKTEX_N_LAST.load(std::sync::atomic::Ordering::Relaxed);
         // Blend attribution (see the BLEND_* statics): blendMs is the ONLY timer
         // here that covers work done inside submit_frame, so it is the one that
         // can actually account for a large `render` with everything else at zero.
@@ -7754,18 +7907,42 @@ impl SwitchRenderBackend {
         } else {
             0
         };
+        // Texture churn (2026-09-23). `make=`/`del=` count and time every
+        // standalone texture made or freed this frame, all origins; `bf=` is
+        // `begin_frame`, inside cacheUs, where the filter pool's TTL deletions
+        // land; `evict=` is how many it let go. The `bo*=` fields are the libdrm
+        // side: buffer-object creates and deletes with their time inside libdrm,
+        // cache hits, the zeroing a hit costs, hits refused because the GPU still
+        // used the BO, fence IPCs, and what the cache holds.
+        use std::sync::atomic::Ordering::Relaxed as R;
+        let b = self.boc_frame;
+        let make_n = TEX_MAKE_N_LAST.load(R);
+        let make_us = to_us(TEX_MAKE_T_LAST.load(R));
+        let del_n = TEX_DEL_N_LAST.load(R);
+        let del_us = to_us(TEX_DEL_T_LAST.load(R));
+        let bf_us = to_us(TEX_BF_T_LAST.load(R));
+        let evict_n = TEX_EVICT_N_LAST.load(R);
+        let st_live = LIVE_STANDALONE.load(R);
+        let prev_swap_us = to_us(unsafe { flashnx_prev_swap_ticks() });
+        let prev_period_us = to_us(unsafe { flashnx_prev_period_ticks() });
         let msg = std::format!(
-            "SLOW f{} {}us (tick {}us render {}us) swf={} gc={} gcUs={} gcMB={} alloc={}/{}us({}%sm) free={}/{}us heap={}%  rtBind={} cacheUs={}us rtbindUs={}us primOffs={}us primBmp={}us primRes={}us dc={} offs={} filt={}({}chains) resolve={} bmpUp={} shpReg={} blend={} pmask={} mdraw={} cacheEnt={} | offN={} offPix={} alloc={}us render={}us readback={}us upload={}us | blendUs={} ({}% of render) blendTriv={} blendCx={}\n",
+            "SLOW f{} {}us (tick {}us render {}us) swf={} gc={} gcUs={} gcMB={} alloc={}/{}us({}%sm) free={}/{}us heap={}%  rtBind={} cacheUs={}us rtbindUs={}us contentUs={}us filtUs={}us mktex={}/{}us budget={} primOffs={}us primBmp={}us primRes={}us dc={} offs={} filt={}({}chains) resolve={} bmpUp={} shpReg={} blend={} pmask={} mdraw={} cacheEnt={} | offN={} offPix={} alloc={}us render={}us readback={}us upload={}us | blendUs={} ({}% of render) blendTriv={} blendCx={} | make={}/{}us del={}/{}us bf={}us evict={} stTex={} pool={} prevSwapUs={} prevPeriodUs={} | boNew={}/{}us boHit={} boZeroUs={} boDel={}/{}us boKept={} boEvict={} boBusy={} boIpc={} boFail={} boRetryOk={} boc={}/{}KB\n",
             self.frame_count,
             total_us, tick_us, render_us,
             swf_frames, gc_name, gc_us, gc_alloc / (1024 * 1024), d_alloc, alloc_us, small_pct, d_free, free_us, heap_pct, rt_binds,
-            cache_us, rtbind_us,
+            cache_us, rtbind_us, content_us, filtchain_us, mktex_n, mktex_us, fb.filter_budget,
             prim_offs, prim_bmp, prim_res,
             fb.draw_calls, fb.offscreen, fb.filter, fb.filter_chains,
             fb.resolve, fb.bmp_uploads, fb.shape_regs,
             fb.blend, fb.pushmask, fb.masked_draw, fb.cache_entries,
             off_n, off_pix, off_alloc, off_render, off_readback, off_upload,
             blend_us, blend_pct, blend_n_triv, blend_n_cx,
+            make_n, make_us, del_n, del_us, bf_us, evict_n,
+            st_live, self.filter_tex_pool.len(), prev_swap_us, prev_period_us,
+            b[BOC_NEW_N], to_us(b[BOC_NEW_T]), b[BOC_HIT], to_us(b[BOC_ZERO_T]),
+            b[BOC_DEL_N], to_us(b[BOC_DEL_T]), b[BOC_DEL_CACHED], b[BOC_EVICT],
+            b[BOC_BUSY], b[BOC_IPC], b[BOC_NEW_FAIL], b[BOC_RETRY_OK],
+            b[BOC_HELD_N], b[BOC_HELD_BYTES] / 1024,
         );
         let mut bytes = msg.into_bytes();
         bytes.push(0);
@@ -15419,6 +15596,12 @@ impl RenderBackend for SwitchRenderBackend {
         // transitions for the reflections no longer dropping in and out. Tune
         // down if a heavy menu hitches.
         const FILTER_CHAINS_PER_FRAME_BUDGET: usize = 48;
+        // Round 2 alternated this with a cap of 8 under `instr` and measured
+        // 659 us a chain on 8-13. Most of that was texture churn in libdrm, now
+        // gone (`filtUs` 23 -> 6 ms with the buffer-object cache), so a lower
+        // cap would cost glows for little. `budget=` stays on the SLOW line.
+        let budget = FILTER_CHAINS_PER_FRAME_BUDGET;
+        self.filter_budget_this_frame = budget as u32;
         let mut filter_chains_run: usize = 0;
         // No scissor anywhere in the loop, not only around step 1's clear: the
         // filter passes write their whole target through `draw_filter_pass`,
@@ -15439,17 +15622,21 @@ impl RenderBackend for SwitchRenderBackend {
             let h = standalone.0.height;
 
             // Step 1: render the content into entry.handle (ALWAYS — see above).
-            self.render_commands_to_texture(dst_tex, w, h, entry.commands, Some(entry.clear));
+            {
+                let _pt = PrimTimer::new(&PRIM_CONTENT_CUR);
+                self.render_commands_to_texture(dst_tex, w, h, entry.commands, Some(entry.clear));
+            }
             if entry.filters.is_empty() {
                 continue;
             }
             // Over the per-frame filter budget → leave this entry unfiltered for
             // this frame: text/shape is still present (step 1), just without the
             // bevel/glow border this frame.
-            if filter_chains_run >= FILTER_CHAINS_PER_FRAME_BUDGET {
+            if filter_chains_run >= budget {
                 continue;
             }
             filter_chains_run += 1;
+            let _chain_timer = PrimTimer::new(&PRIM_FILTCHAIN_CUR);
 
             // Step 2: filter chain using the (now bounded) FilterTexturePool.
             // The first source is entry.handle.texture itself; each successful
@@ -15552,6 +15739,20 @@ impl RenderBackend for SwitchRenderBackend {
             PRIM_RTBIND_CUR.swap(0, std::sync::atomic::Ordering::Relaxed),
             std::sync::atomic::Ordering::Relaxed,
         );
+        // Same hand-off for the round-2 split. MKTEX is the odd one: it fills up
+        // during `render_base`, which runs earlier in the same `player.render()`,
+        // so publishing it here still catches THIS frame.
+        for (cur, last) in [
+            (&PRIM_CONTENT_CUR, &PRIM_CONTENT_LAST),
+            (&PRIM_FILTCHAIN_CUR, &PRIM_FILTCHAIN_LAST),
+            (&PRIM_MKTEX_CUR, &PRIM_MKTEX_LAST),
+            (&PRIM_MKTEX_N_CUR, &PRIM_MKTEX_N_LAST),
+        ] {
+            last.store(
+                cur.swap(0, std::sync::atomic::Ordering::Relaxed),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
 
         // Drain GL errors once per second, plus a one-line heartbeat with
         // running counters every 2 seconds. Quiet otherwise.
@@ -15676,7 +15877,7 @@ impl RenderBackend for SwitchRenderBackend {
             // `!STARVED` covers the refusal, nothing covered the cap.
             let (slab_chunks, slab_chunks_max) = crate::slab_chunks();
             let msg = std::format!(
-                "f{}: fps={} cpu={}MHz gpu={}MHz drift={} skin={} batC={} bat={} dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB heap={}MB slabMB={} slabChunks={}/{}{} drawbox={} maxalpha={:.2}\n",
+                "f{}: fps={} cpu={}MHz gpu={}MHz drift={} skin={} batC={} bat={} dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} stTex={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB heap={}MB slabMB={} slabChunks={}/{}{} drawbox={} maxalpha={:.2}\n",
                 self.frame_count,
                 fps_str,
                 cpu_mhz,
@@ -15709,6 +15910,7 @@ impl RenderBackend for SwitchRenderBackend {
                 self.resolve_sync_calls,
                 self.apply_filter_calls,
                 self.filter_tex_pool.len(),
+                LIVE_STANDALONE.load(std::sync::atomic::Ordering::Relaxed),
                 self.offscreen_temp_pool.len(),
                 self.offscreen_temp_pool_bytes / (1024 * 1024),
                 pushmask,
@@ -15841,6 +16043,7 @@ impl RenderBackend for SwitchRenderBackend {
             masked_draw: self.masked_draw_window.saturating_sub(s.masked_draw),
             cache_entries: frame_cache_entries,
             filter_chains: filter_chains_run as u32,
+            filter_budget: self.filter_budget_this_frame,
         };
         // Publish this frame's blend timing/counts. Swapped HERE (end of submit)
         // and not at the top like PRIM_*, because blends happen inside this
@@ -15853,6 +16056,29 @@ impl RenderBackend for SwitchRenderBackend {
         BLEND_N_COMPLEX_FRAME
             .store(BLEND_N_COMPLEX_CUR.swap(0, AtomOrd::Relaxed), AtomOrd::Relaxed);
         RT_BIND_FRAME.store(RT_BIND_CUR.swap(0, AtomOrd::Relaxed), AtomOrd::Relaxed);
+        // Texture traffic of the whole frame, from the tick's GC drops to the
+        // main command list above.
+        for (cur, last) in [
+            (&TEX_MAKE_N_CUR, &TEX_MAKE_N_LAST),
+            (&TEX_MAKE_T_CUR, &TEX_MAKE_T_LAST),
+            (&TEX_DEL_N_CUR, &TEX_DEL_N_LAST),
+            (&TEX_DEL_T_CUR, &TEX_DEL_T_LAST),
+            (&TEX_EVICT_N_CUR, &TEX_EVICT_N_LAST),
+            (&TEX_BF_T_CUR, &TEX_BF_T_LAST),
+        ] {
+            last.store(cur.swap(0, AtomOrd::Relaxed), AtomOrd::Relaxed);
+        }
+        {
+            let now = boc_stats_now();
+            for i in 0..BOC_STATS {
+                self.boc_frame[i] = if i == BOC_HELD_N || i == BOC_HELD_BYTES {
+                    now[i]
+                } else {
+                    now[i].wrapping_sub(self.boc_prev[i])
+                };
+            }
+            self.boc_prev = now;
+        }
         {
             let (a, f, at, ft, sm) = crate::alloc_counters();
             ALLOC_D_FRAME.store(a.saturating_sub(ALLOC_N_LAST.swap(a, AtomOrd::Relaxed)), AtomOrd::Relaxed);
@@ -15871,6 +16097,13 @@ impl RenderBackend for SwitchRenderBackend {
         // Standalone (FBO-attachable) texture — Ruffle hands this to
         // `render_offscreen` / cache_entries for cacheAsBitmap + filtered
         // display objects, then draws it back via `render_bitmap`.
+        // Ruffle calls this from `render_base`, once per object whose
+        // post-filter pixel size changed, which for anything rotating is nearly
+        // every frame (20 to 40 calls a frame on Mario 63's world 8). Each one
+        // used to cost ~450 us in libdrm; see "Texture churn" at the top of the
+        // file for why it no longer does.
+        let _pt = PrimTimer::new(&PRIM_MKTEX_CUR);
+        PRIM_MKTEX_N_CUR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let standalone = make_standalone_texture(width.get(), height.get())
             .ok_or(Error::TooLarge)?;
         self.bitmaps_registered = self.bitmaps_registered.wrapping_add(1);

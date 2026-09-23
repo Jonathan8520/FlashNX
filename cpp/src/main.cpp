@@ -20,6 +20,18 @@ static double boot_ms_since(uint64_t t) {
     return (double)(armGetSystemTick() - t) * 1000.0 / (double)armGetSystemTickFreq();
 }
 
+// ── Whole-frame timing for the SLOW line ─────────────────────────────────────
+// The SLOW line adds up tick + render, and the swap sits outside both. On this
+// GL driver a texture freed while the pending command buffer still uses it is
+// released at the next flush, after a blocking wait on that submission, which
+// is normally inside eglSwapBuffers. These two let the Rust side print the
+// previous frame's swap and its full loop period, so a cost that moves out of
+// `render` into the swap is still seen. Game loop only; ticks.
+static uint64_t g_prev_swap_ticks = 0;
+static uint64_t g_prev_period_ticks = 0;
+extern "C" uint64_t flashnx_prev_swap_ticks(void) { return g_prev_swap_ticks; }
+extern "C" uint64_t flashnx_prev_period_ticks(void) { return g_prev_period_ticks; }
+
 extern "C" void swf_picker_run(void);
 // The `.swf` embedded in this `.nro` (issue #106), or nullptr on a normal
 // build. Only meaningful after romfsInit(); see cpp/src/swf_picker.cpp.
@@ -1740,6 +1752,7 @@ static void worker_entry(void* arg) {
         const uint64_t now_tick = ruffle_tick_now();
         const uint64_t dt_ticks = now_tick - last_tick;
         last_tick = now_tick;
+        g_prev_period_ticks = dt_ticks;
         // dt_us = dt_ticks * 1e6 / tick_freq, but avoid overflow on big stalls.
         uint64_t dt_us = (tick_freq > 0)
             ? ((dt_ticks * 1000000ULL) / tick_freq)
@@ -1773,7 +1786,9 @@ static void worker_entry(void* arg) {
         if (++frames_since_start == 480) {
             ruffle_dump_stage_children();
         }
+        const uint64_t swap_t0 = ruffle_tick_now();
         gl_context_swap();
+        g_prev_swap_ticks = ruffle_tick_now() - swap_t0;
 
         if (back_to_library) break;
     }

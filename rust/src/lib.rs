@@ -31,6 +31,46 @@ mod counting_alloc {
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
+    extern "C" {
+        /// libdrm's buffer-object cache (cpp/third_party/libdrm_nouveau): empty
+        /// it, and return the bytes given back to the heap.
+        fn flashnx_boc_trim() -> u64;
+    }
+
+    /// Newlib refused a block. The GPU buffer-object cache parks up to 16 MB of
+    /// freed textures in this same heap, and only libdrm's own allocations used
+    /// to empty it when full, so a Rust allocation could abort with that memory
+    /// sitting idle. Give it back and say whether a retry is worth it. Cold: it
+    /// only ever runs on the way to what would otherwise be an abort.
+    #[cold]
+    #[inline(never)]
+    fn reclaim_gpu_cache() -> bool {
+        static LOGGED: AtomicUsize = AtomicUsize::new(0);
+        let freed = unsafe { flashnx_boc_trim() };
+        if LOGGED.fetch_add(1, Ordering::Relaxed) < 4 {
+            // Constant strings: formatting would allocate, which is the one
+            // thing that cannot be done here.
+            let msg: &[u8] = if freed > 0 {
+                b"alloc: heap exhausted, gave the GPU buffer-object cache back and retried\n\0"
+            } else {
+                b"alloc: heap exhausted, GPU buffer-object cache already empty\n\0"
+            };
+            unsafe { super::ruffle_log_cstr(msg.as_ptr() as *const _) };
+        }
+        freed > 0
+    }
+
+    /// `System.alloc`, with one retry after `reclaim_gpu_cache`.
+    #[inline(always)]
+    unsafe fn sys_alloc(l: Layout) -> *mut u8 {
+        let q = unsafe { System.alloc(l) };
+        if q.is_null() && reclaim_gpu_cache() {
+            unsafe { System.alloc(l) }
+        } else {
+            q
+        }
+    }
+
     pub static ALLOC_N: AtomicU64 = AtomicU64::new(0);
     pub static DEALLOC_N: AtomicU64 = AtomicU64::new(0);
     pub static ALLOC_TICKS: AtomicU64 = AtomicU64::new(0);
@@ -392,12 +432,12 @@ mod counting_alloc {
                     };
                     unlock();
                     if p.is_null() {
-                        unsafe { System.alloc(l) }
+                        unsafe { sys_alloc(l) }
                     } else {
                         p
                     }
                 }
-                None => unsafe { System.alloc(l) },
+                None => unsafe { sys_alloc(l) },
             };
             tally(&ALLOC_TICKS, now().wrapping_sub(t0));
             tally(&ALLOC_N, 1);
@@ -455,7 +495,12 @@ mod counting_alloc {
             // whether it could be served from the region at all.
             if !in_region(p) && class_of(new_l).is_none() {
                 let t0 = now();
-                let q = unsafe { System.realloc(p, l, n) };
+                let mut q = unsafe { System.realloc(p, l, n) };
+                // A failed realloc leaves the old block intact, so the retry
+                // after giving the GPU cache back is safe.
+                if q.is_null() && reclaim_gpu_cache() {
+                    q = unsafe { System.realloc(p, l, n) };
+                }
                 tally(&ALLOC_TICKS, now().wrapping_sub(t0));
                 tally(&ALLOC_N, 1);
                 q

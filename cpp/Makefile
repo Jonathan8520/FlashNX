@@ -14,8 +14,11 @@ include $(DEVKITPRO)/libnx/switch_rules
 #---------------------------------------------------------------------------------
 TARGET      := FlashNX
 BUILD       := build
-SOURCES     := src
-INCLUDES    := include
+# third_party/libdrm_nouveau: our copy of devkitPro's libdrm_nouveau (MIT), the
+# layer between Mesa and the GPU driver, built in place of -ldrm_nouveau so it
+# can cache buffer objects. See its README.md.
+SOURCES     := src third_party/libdrm_nouveau
+INCLUDES    := include third_party/libdrm_nouveau
 
 # User-facing name = "FlashNX" (rebrand 2026-05-26, fully applied at v1.0.0).
 # The repo + Cargo lib name stay `flash-for-switch` (dev-facing, stable); every
@@ -56,6 +59,9 @@ CFLAGS   := -g -Wall -O2 -ffunction-sections $(ARCH) $(DEFINES) -D__SWITCH__
 CFLAGS   += $(INCLUDE)
 
 CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++17
+# The only C in this project is the libdrm_nouveau copy, which the installed
+# package was built without asserts. Added after CXXFLAGS so C++ keeps them.
+CFLAGS   += -DNDEBUG
 
 ASFLAGS  := -g $(ARCH)
 LDFLAGS  := -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
@@ -80,7 +86,10 @@ RUST_STATICLIB := $(RUST_LIB_DIR)/libruffle_switch.a
 # CURLOPT_ACCEPT_ENCODING and the SWF CWS inflate (already pulled by Rust
 # but switch-zlib provides the .a). nx must stay last so libnx exports
 # resolve. usbhsfs and friends aren't needed.
-LIBS    := -lruffle_switch -lEGL -lglapi -ldrm_nouveau -lGLESv2 \
+# No -ldrm_nouveau: third_party/libdrm_nouveau is compiled in instead. Leaving it
+# here would still link (our objects come first), but a symbol missing from our
+# copy would then be silently taken from the stock one.
+LIBS    := -lruffle_switch -lEGL -lglapi -lGLESv2 \
            -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz \
            -lnx
 LIBDIRS := $(PORTLIBS) $(LIBNX)
