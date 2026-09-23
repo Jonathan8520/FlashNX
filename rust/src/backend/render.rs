@@ -15883,6 +15883,23 @@ impl RenderBackend for SwitchRenderBackend {
             // small block falls back to newlib, and that path sets no flag —
             // `!STARVED` covers the refusal, nothing covered the cap.
             let (slab_chunks, slab_chunks_max) = crate::slab_chunks();
+            // `heap=` comes from mallinfo, which walks every free list of
+            // newlib's heap: ~10 ms a call once the heap is fragmented
+            // (sampling profiler on Super Mario 63, 2026-09-23), so reading it
+            // on every heartbeat was a hitch every 60 frames in every game.
+            // Read on the first heartbeat and every 30th after it; the ones in
+            // between repeat that reading.
+            let heap_used = {
+                use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+                static HEAP_USED: AtomicU64 = AtomicU64::new(0);
+                if (self.frame_count / 60) % 30 == 1 || HEAP_USED.load(Relaxed) == 0 {
+                    let used = unsafe { ruffle_heap_used() };
+                    HEAP_USED.store(used, Relaxed);
+                    used
+                } else {
+                    HEAP_USED.load(Relaxed)
+                }
+            };
             let msg = std::format!(
                 "f{}: fps={} cpu={}MHz gpu={}MHz drift={} skin={} batC={} bat={} dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} stTex={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB heap={}MB slabMB={} slabChunks={}/{}{} drawbox={} maxalpha={:.2}\n",
                 self.frame_count,
@@ -15930,7 +15947,7 @@ impl RenderBackend for SwitchRenderBackend {
                 cache_max,
                 ram_used / (1024 * 1024),
                 ram_total / (1024 * 1024),
-                unsafe { ruffle_heap_used() } / (1024 * 1024),
+                heap_used / (1024 * 1024),
                 crate::slab_bytes() / (1024 * 1024),
                 slab_chunks,
                 slab_chunks_max,
