@@ -134,7 +134,7 @@ indexmap = "2.13.0"
 # atomics each cost 1 to 3 % of the frame. `scripts/build.sh --dev` turns it
 # on. See `counting_alloc` in src/lib.rs.
 [features]
-instr = []
+instr = ["ruffle_core/flashnx_instr"]
 
 [profile.release]
 opt-level = 3

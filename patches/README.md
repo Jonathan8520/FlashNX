@@ -96,3 +96,28 @@ microseconds spent inside the collector. Added to settle whether a periodic
 28-frame stall was the collector or frame catch-up; it was neither, it was
 newlib's `free`. Diagnostic only, and a candidate for removal once the
 allocator work is finished.
+
+**`core/src/avm1/object_reference.rs` + `display_object/movie_clip.rs` — the
+clip-reference cache.**
+
+Every time a MovieClip lands on the AVM1 stack (a register or `this` pushed,
+a GetMember or GetVariable result), `MovieClipReference::try_from_stage_object`
+rebuilt the clip's dotted path string, re-split it and allocated a new
+reference, all of it garbage for the collector. Upstream master still does.
+Each MovieClip now keeps the last reference built for it, reused while a
+64-bit fingerprint of its path (the names up the parent chain, then the root's
+level) is unchanged, while it was built for this very clip (`MovieClipData` is
+cloned by `instantiate`), and while it still holds its weak link to the clip:
+one that fell back to walking its path is never handed out again. Sharing a
+reference is invisible because `Value` compares them by path, never by
+pointer. On Super Mario 63's world 8 it took the frame from 57 to 37 ms and the
+collector from 8.4 to 0.8 ms (A/B in one session, 2026-09-23). FlashNX turns
+it off only for an `mcref.off` marker on the SD card.
+
+**`core/src/avm1/activation.rs`, `display_object/container.rs` — AVM1
+profiling, behind the `flashnx_instr` feature.**
+
+Per-action exclusive time and count (a called function's body is charged to
+its own actions), decode time, and child-by-name lookups. Compiled out of
+release builds; the Switch dev build prints the hottest actions every 240
+frames. It is what found the cache above.

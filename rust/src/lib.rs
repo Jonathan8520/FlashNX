@@ -1441,6 +1441,17 @@ pub extern "C" fn ruffle_init() -> c_int {
     // never call ExternalInterface).
     builder = builder.with_external_interface(std::boxed::Box::new(ContainerInterface));
 
+    // `sdmc:/switch/FlashNX/mcref.off` turns off the AVM1 clip-reference cache
+    // (FLASHNX_MCREF_CACHE in our Ruffle's avm1/object_reference.rs), to check
+    // whether an AS2 game misbehaves because of it, on the same binary. An
+    // experiment, never a default. Read at every launch, so removing the file
+    // turns the cache back on for the next game.
+    let mcref_cache = !backend::render::marker_present("mcref.off");
+    ruffle_core::flashnx_set_mcref_cache(mcref_cache);
+    if !mcref_cache {
+        log(b"mcref: mcref.off present -> AVM1 clip-reference cache DISABLED\n\0");
+    }
+
     log(b"ruffle_init: calling PlayerBuilder::build()\n\0");
     let player = builder.build();
     log(b"ruffle_init: PlayerBuilder::build() returned\n\0");
@@ -1952,6 +1963,86 @@ pub extern "C" fn ruffle_skip_paused_time(us: u64) {
     }
 }
 
+/// AVM1 name of an action code, for the instr build's hot-action dump.
+#[cfg(feature = "instr")]
+fn avm1_op_name(op: usize) -> &'static str {
+    match op {
+        0x00 => "End", 0x04 => "NextFrame", 0x05 => "PrevFrame", 0x06 => "Play", 0x07 => "Stop",
+        0x0A => "Add", 0x0B => "Subtract", 0x0C => "Multiply", 0x0D => "Divide", 0x0E => "Equals",
+        0x0F => "Less", 0x10 => "And", 0x11 => "Or", 0x12 => "Not", 0x13 => "StringEquals",
+        0x14 => "StringLength", 0x15 => "StringExtract", 0x17 => "Pop", 0x18 => "ToInteger",
+        0x1C => "GetVariable", 0x1D => "SetVariable", 0x20 => "SetTarget2", 0x21 => "StringAdd",
+        0x22 => "GetProperty", 0x23 => "SetProperty", 0x24 => "CloneSprite", 0x25 => "RemoveSprite",
+        0x26 => "Trace", 0x2A => "Throw", 0x2B => "CastOp", 0x30 => "RandomNumber", 0x34 => "GetTime",
+        0x3A => "Delete", 0x3B => "Delete2", 0x3C => "DefineLocal", 0x3D => "CallFunction",
+        0x3E => "Return", 0x3F => "Modulo", 0x40 => "NewObject", 0x41 => "DefineLocal2",
+        0x42 => "InitArray", 0x43 => "InitObject", 0x44 => "TypeOf", 0x45 => "TargetPath",
+        0x46 => "Enumerate", 0x47 => "Add2", 0x48 => "Less2", 0x49 => "Equals2", 0x4A => "ToNumber",
+        0x4B => "ToString", 0x4C => "PushDuplicate", 0x4D => "StackSwap", 0x4E => "GetMember",
+        0x4F => "SetMember", 0x50 => "Increment", 0x51 => "Decrement", 0x52 => "CallMethod",
+        0x53 => "NewMethod", 0x54 => "InstanceOf", 0x55 => "Enumerate2", 0x60 => "BitAnd",
+        0x61 => "BitOr", 0x62 => "BitXor", 0x63 => "BitLShift", 0x64 => "BitRShift",
+        0x65 => "BitURShift", 0x66 => "StrictEquals", 0x67 => "Greater", 0x68 => "StringGreater",
+        0x69 => "Extends", 0x81 => "GotoFrame", 0x83 => "GetUrl", 0x87 => "StoreRegister",
+        0x88 => "ConstantPool", 0x8B => "SetTarget", 0x8C => "GotoLabel", 0x8E => "DefineFunction2",
+        0x8F => "Try", 0x94 => "With", 0x96 => "Push", 0x99 => "Jump", 0x9A => "GetUrl2",
+        0x9B => "DefineFunction", 0x9D => "If", 0x9E => "Call", 0x9F => "GotoFrame2",
+        _ => "?",
+    }
+}
+
+/// instr build only (2026-09-23): every 240 frames, the AVM1 actions that cost
+/// the most EXCLUSIVE time since the last dump (a called function's body is
+/// charged to its own actions, not to the call), and what child-by-name lookups
+/// cost. Answers where the ~860 ns an action goes, which nothing had measured.
+/// It is what found the clip-reference cache (Push and GetMember rebuilding a
+/// path string per clip), and where to look for the next lever.
+#[cfg(feature = "instr")]
+fn dump_avm1_hot_ops() {
+    thread_local! {
+        static PREV: core::cell::RefCell<([u64; 256], [u64; 256], (u64, u64, u64))> =
+            const { core::cell::RefCell::new(([0; 256], [0; 256], (0, 0, 0))) };
+    }
+    let (ticks, counts) = ruffle_core::flashnx_avm1_ops();
+    let gn = ruffle_core::flashnx_getname_probe();
+    let freq = unsafe { ruffle_tick_freq() }.max(1);
+    let us = |t: u64| t.saturating_mul(1_000_000) / freq;
+    PREV.with(|prev| {
+        let mut prev = prev.borrow_mut();
+        let mut rows: std::vec::Vec<(u64, u64, usize)> = (0..256)
+            .map(|i| (ticks[i].wrapping_sub(prev.0[i]), counts[i].wrapping_sub(prev.1[i]), i))
+            .filter(|r| r.1 > 0)
+            .collect();
+        let total: u64 = rows.iter().map(|r| r.0).sum();
+        let actions: u64 = rows.iter().map(|r| r.1).sum();
+        rows.sort_by(|a, b| b.0.cmp(&a.0));
+        let mut out = std::format!(
+            "avm1ops: last 240 frames, mcref={}, {} actions, {} us exclusive\n",
+            if ruffle_core::flashnx_mcref_probe().0 { "on" } else { "off" },
+            actions, us(total),
+        );
+        for &(t, c, i) in rows.iter().take(15) {
+            out.push_str(&std::format!(
+                "avm1op 0x{:02X} {:<15} n={:<8} us={:<8} ns/op={:<6} share={}%\n",
+                i, avm1_op_name(i), c, us(t),
+                t.saturating_mul(1_000_000_000) / freq / c.max(1),
+                t.saturating_mul(100) / total.max(1),
+            ));
+        }
+        let (calls, scanned, gt) =
+            (gn.0.wrapping_sub(prev.2.0), gn.1.wrapping_sub(prev.2.1), gn.2.wrapping_sub(prev.2.2));
+        out.push_str(&std::format!(
+            "getname: calls={} scanned={} avg={} us={} ns/call={}\n",
+            calls, scanned, scanned / calls.max(1), us(gt),
+            gt.saturating_mul(1_000_000_000) / freq / calls.max(1),
+        ));
+        log_str(&out);
+        prev.0 = ticks;
+        prev.1 = counts;
+        prev.2 = gn;
+    });
+}
+
 fn render_frame_with_dt(dt: FloatDuration) {
     let state = unsafe {
         match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
@@ -1988,6 +2079,13 @@ fn render_frame_with_dt(dt: FloatDuration) {
         player.call_internal_interface(&name, args);
     }
     use std::sync::atomic::Ordering;
+    #[cfg(feature = "instr")]
+    {
+        static DUMP_N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        if DUMP_N.fetch_add(1, Ordering::Relaxed) % 240 == 239 {
+            dump_avm1_hot_ops();
+        }
+    }
     let t0 = unsafe { ruffle_tick_now() };
     player.tick(dt);
     let t1 = unsafe { ruffle_tick_now() };

@@ -5627,7 +5627,7 @@ pub fn thumb_cancel_all() {
 /// True when `sdmc:/switch/FlashNX/<name>` exists. Same convention as the
 /// C++ side's `trace.on` / `dumpvars.on` / `noalloc.on`: an experiment is a
 /// file you drop on the card, never a default and never a menu entry.
-fn marker_present(name: &str) -> bool {
+pub(crate) fn marker_present(name: &str) -> bool {
     std::path::Path::new(&std::format!("sdmc:/switch/FlashNX/{}", name)).exists()
 }
 
@@ -7923,10 +7923,15 @@ impl SwitchRenderBackend {
         let bf_us = to_us(TEX_BF_T_LAST.load(R));
         let evict_n = TEX_EVICT_N_LAST.load(R);
         let st_live = LIVE_STANDALONE.load(R);
+        // AVM1 (2026-09-23): actions run, time decoding them, time in bytecode
+        // at all; then the clip-reference cache: on or off (`mcref.off`),
+        // references handed out, how many it served, time spent.
+        let (avm1_actions, avm1_decode, avm1_total) = ruffle_core::flashnx_avm1_probe();
+        let (mcref_on, mcref_calls, mcref_hits, mcref_ticks) = ruffle_core::flashnx_mcref_probe();
         let prev_swap_us = to_us(unsafe { flashnx_prev_swap_ticks() });
         let prev_period_us = to_us(unsafe { flashnx_prev_period_ticks() });
         let msg = std::format!(
-            "SLOW f{} {}us (tick {}us render {}us) swf={} gc={} gcUs={} gcMB={} alloc={}/{}us({}%sm) free={}/{}us heap={}%  rtBind={} cacheUs={}us rtbindUs={}us contentUs={}us filtUs={}us mktex={}/{}us budget={} primOffs={}us primBmp={}us primRes={}us dc={} offs={} filt={}({}chains) resolve={} bmpUp={} shpReg={} blend={} pmask={} mdraw={} cacheEnt={} | offN={} offPix={} alloc={}us render={}us readback={}us upload={}us | blendUs={} ({}% of render) blendTriv={} blendCx={} | make={}/{}us del={}/{}us bf={}us evict={} stTex={} pool={} prevSwapUs={} prevPeriodUs={} | boNew={}/{}us boHit={} boZeroUs={} boDel={}/{}us boKept={} boEvict={} boBusy={} boIpc={} boFail={} boRetryOk={} boc={}/{}KB\n",
+            "SLOW f{} {}us (tick {}us render {}us) swf={} gc={} gcUs={} gcMB={} alloc={}/{}us({}%sm) free={}/{}us heap={}%  rtBind={} cacheUs={}us rtbindUs={}us contentUs={}us filtUs={}us mktex={}/{}us budget={} primOffs={}us primBmp={}us primRes={}us dc={} offs={} filt={}({}chains) resolve={} bmpUp={} shpReg={} blend={} pmask={} mdraw={} cacheEnt={} | offN={} offPix={} alloc={}us render={}us readback={}us upload={}us | blendUs={} ({}% of render) blendTriv={} blendCx={} | make={}/{}us del={}/{}us bf={}us evict={} stTex={} pool={} prevSwapUs={} prevPeriodUs={} | boNew={}/{}us boHit={} boZeroUs={} boDel={}/{}us boKept={} boEvict={} boBusy={} boIpc={} boFail={} boRetryOk={} boc={}/{}KB | avm1={}/{}us/{}us mcref={} {}/{}/{}us\n",
             self.frame_count,
             total_us, tick_us, render_us,
             swf_frames, gc_name, gc_us, gc_alloc / (1024 * 1024), d_alloc, alloc_us, small_pct, d_free, free_us, heap_pct, rt_binds,
@@ -7943,6 +7948,8 @@ impl SwitchRenderBackend {
             b[BOC_DEL_N], to_us(b[BOC_DEL_T]), b[BOC_DEL_CACHED], b[BOC_EVICT],
             b[BOC_BUSY], b[BOC_IPC], b[BOC_NEW_FAIL], b[BOC_RETRY_OK],
             b[BOC_HELD_N], b[BOC_HELD_BYTES] / 1024,
+            avm1_actions, to_us(avm1_decode), to_us(avm1_total),
+            if mcref_on { "on" } else { "off" }, mcref_calls, mcref_hits, to_us(mcref_ticks),
         );
         let mut bytes = msg.into_bytes();
         bytes.push(0);

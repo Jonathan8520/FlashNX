@@ -1,8 +1,196 @@
+diff --git a/core/Cargo.toml b/core/Cargo.toml
+index ddc2ef98c..d7cca2ff7 100644
+--- a/core/Cargo.toml
++++ b/core/Cargo.toml
+@@ -94,6 +94,8 @@ default_compatibility_rules = []
+ egui = ["dep:egui", "dep:egui_extras", "png"]
+ jpegxr = ["dep:jpegxr", "lzma"]
+ default_font = []
++# FlashNX: per-action AVM1 timing for the Switch measurement build only.
++flashnx_instr = []
+ serde = ["serde/derive"]
+ 
+ [build-dependencies]
+diff --git a/core/src/avm1.rs b/core/src/avm1.rs
+index 3bd126464..8fa516068 100644
+--- a/core/src/avm1.rs
++++ b/core/src/avm1.rs
+@@ -10,6 +10,11 @@ mod function;
+ mod property_decl;
+ 
+ mod activation;
++#[cfg(feature = "flashnx_instr")]
++pub(crate) use activation::{
++    FLASHNX_AVM1_ACTIONS, FLASHNX_AVM1_DECODE_TICKS, FLASHNX_AVM1_TOTAL_TICKS, FLASHNX_OP_COUNT,
++    FLASHNX_OP_TICKS, flashnx_ticks,
++};
+ mod callable_value;
+ mod clamp;
+ mod debug;
+@@ -19,6 +24,11 @@ mod fscommand;
+ pub(crate) mod globals;
+ mod object;
+ mod object_reference;
++pub(crate) use object_reference::{
++    MovieClipReference, flashnx_mcref_cache_on, flashnx_set_mcref_cache,
++};
++#[cfg(feature = "flashnx_instr")]
++pub(crate) use object_reference::{FLASHNX_MCREF_CALLS, FLASHNX_MCREF_HITS, FLASHNX_MCREF_TICKS};
+ mod parameters;
+ mod property;
+ mod property_map;
 diff --git a/core/src/avm1/activation.rs b/core/src/avm1/activation.rs
-index bec5d438f..041e7c14d 100644
+index bec5d438f..cd9485b08 100644
 --- a/core/src/avm1/activation.rs
 +++ b/core/src/avm1/activation.rs
-@@ -2717,7 +2717,35 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -29,6 +29,58 @@ use web_time::Instant;
+ 
+ use super::object_reference::MovieClipReference;
+ 
++// FlashNX (2026-09-23): what decoding the bytecode costs, measured inside the
++// interpreter. AVM1 re-decodes every action each time it runs (upstream still
++// does on master); a cache of decoded actions is what upstream #3432 has been
++// asking for since 2021, and these say how much it could save before anyone
++// writes one. Only with the `flashnx_instr` feature (the Switch dev build).
++#[cfg(feature = "flashnx_instr")]
++pub(crate) static FLASHNX_AVM1_ACTIONS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++#[cfg(feature = "flashnx_instr")]
++pub(crate) static FLASHNX_AVM1_DECODE_TICKS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++#[cfg(feature = "flashnx_instr")]
++pub(crate) static FLASHNX_AVM1_TOTAL_TICKS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++/// `run_actions` nests (function calls): the outermost one feeds the total.
++#[cfg(feature = "flashnx_instr")]
++static FLASHNX_AVM1_DEPTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
++/// Exclusive time and count per action code (the first byte of the action).
++/// "Exclusive" because a nested `run_actions` (the body of a function the
++/// action called) is subtracted from the action that called it.
++#[cfg(feature = "flashnx_instr")]
++pub(crate) static FLASHNX_OP_TICKS: [std::sync::atomic::AtomicU64; 256] =
++    [const { std::sync::atomic::AtomicU64::new(0) }; 256];
++#[cfg(feature = "flashnx_instr")]
++pub(crate) static FLASHNX_OP_COUNT: [std::sync::atomic::AtomicU64; 256] =
++    [const { std::sync::atomic::AtomicU64::new(0) }; 256];
++/// Time spent in `run_actions` nested under an action running at depth `d`,
++/// indexed by `d`.
++#[cfg(feature = "flashnx_instr")]
++const FLASHNX_MAX_DEPTH: usize = 64;
++#[cfg(feature = "flashnx_instr")]
++static FLASHNX_CHILD_TICKS: [std::sync::atomic::AtomicU64; FLASHNX_MAX_DEPTH] =
++    [const { std::sync::atomic::AtomicU64::new(0) }; FLASHNX_MAX_DEPTH];
++
++/// The ARM generic timer, read inline: an FFI call per action would cost more
++/// than the decode being measured. No `nomem`/`pure`, so two reads around a
++/// call cannot be merged into one.
++#[cfg(feature = "flashnx_instr")]
++#[inline(always)]
++pub(crate) fn flashnx_ticks() -> u64 {
++    #[cfg(target_arch = "aarch64")]
++    {
++        let v: u64;
++        unsafe { std::arch::asm!("mrs {}, cntpct_el0", out(reg) v, options(nostack)) };
++        v
++    }
++    #[cfg(not(target_arch = "aarch64"))]
++    {
++        0
++    }
++}
++
+ macro_rules! avm_debug {
+     ($avm: expr, $($arg:tt)*) => (
+         if $avm.show_debug_output() {
+@@ -408,16 +460,34 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+     }
+ 
+     pub fn run_actions(&mut self, code: SwfSlice) -> Result<ReturnType<'gc>, Error<'gc>> {
++        #[cfg(feature = "flashnx_instr")]
++        let depth = FLASHNX_AVM1_DEPTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
++        #[cfg(feature = "flashnx_instr")]
++        let t0 = flashnx_ticks();
++
+         let mut read = Reader::new(&code.movie.data()[code.start..], self.swf_version());
+ 
+-        loop {
++        let result = loop {
+             let result = self.do_action(&code, &mut read);
+             match result {
+                 Ok(FrameControl::Return(return_type)) => break Ok(return_type),
+                 Ok(FrameControl::Continue) => {}
+                 Err(e) => break Err(e),
+             }
++        };
++
++        #[cfg(feature = "flashnx_instr")]
++        {
++            FLASHNX_AVM1_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
++            let spent = flashnx_ticks().wrapping_sub(t0);
++            if depth == 1 {
++                FLASHNX_AVM1_TOTAL_TICKS.fetch_add(spent, std::sync::atomic::Ordering::Relaxed);
++            } else {
++                let parent = (depth as usize - 1).min(FLASHNX_MAX_DEPTH - 1);
++                FLASHNX_CHILD_TICKS[parent].fetch_add(spent, std::sync::atomic::Ordering::Relaxed);
++            }
+         }
++        result
+     }
+ 
+     /// Run a single action from a given action reader.
+@@ -438,14 +508,31 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+             //Executing beyond the end of a function constitutes an implicit return.
+             Ok(FrameControl::Return(ReturnType::Implicit))
+         } else {
++            #[cfg(feature = "flashnx_instr")]
++            let op = reader.get_ref().first().copied().unwrap_or(0) as usize;
++            #[cfg(feature = "flashnx_instr")]
++            let depth = (FLASHNX_AVM1_DEPTH.load(std::sync::atomic::Ordering::Relaxed) as usize)
++                .min(FLASHNX_MAX_DEPTH - 1);
++            #[cfg(feature = "flashnx_instr")]
++            let nested0 = FLASHNX_CHILD_TICKS[depth].load(std::sync::atomic::Ordering::Relaxed);
++            #[cfg(feature = "flashnx_instr")]
++            let d0 = flashnx_ticks();
+             let action = reader.read_action()?;
++            #[cfg(feature = "flashnx_instr")]
++            {
++                FLASHNX_AVM1_DECODE_TICKS.fetch_add(
++                    flashnx_ticks().wrapping_sub(d0),
++                    std::sync::atomic::Ordering::Relaxed,
++                );
++                FLASHNX_AVM1_ACTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++            }
+             avm_debug!(
+                 self.context.avm1,
+                 "({}) Action: {action:?}",
+                 self.id.depth(),
+             );
+ 
+-            match action {
++            let result = match action {
+                 Action::Add => self.action_add(),
+                 Action::Add2 => self.action_add_2(),
+                 Action::And => self.action_and(),
+@@ -547,7 +634,18 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+                 Action::WaitForFrame2(action) => self.action_wait_for_frame_2(action, reader),
+                 Action::With(action) => self.action_with(action, data),
+                 Action::Unknown(action) => self.action_unknown(action),
++            };
++            #[cfg(feature = "flashnx_instr")]
++            {
++                let spent = flashnx_ticks().wrapping_sub(d0);
++                let nested = FLASHNX_CHILD_TICKS[depth]
++                    .load(std::sync::atomic::Ordering::Relaxed)
++                    .wrapping_sub(nested0);
++                FLASHNX_OP_TICKS[op]
++                    .fetch_add(spent.saturating_sub(nested), std::sync::atomic::Ordering::Relaxed);
++                FLASHNX_OP_COUNT[op].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+             }
++            result
+         }
+     }
+ 
+@@ -2717,7 +2815,35 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
          // Finally! It's a plain old variable name.
          // Resolve using scope chain, as normal.
@@ -75,6 +263,144 @@ index b292fd4c7..ac9c40ed7 100644
  
      let transparency = true;
      let bitmap_data = BitmapData::new_with_pixels(
+diff --git a/core/src/avm1/object_reference.rs b/core/src/avm1/object_reference.rs
+index 6cfdf6706..806c24b97 100644
+--- a/core/src/avm1/object_reference.rs
++++ b/core/src/avm1/object_reference.rs
+@@ -6,6 +6,70 @@ use crate::{
+ use gc_arena::lock::Lock;
+ use gc_arena::{Collect, Gc, Mutation};
+ use ruffle_macros::istr;
++use std::sync::atomic::{AtomicBool, Ordering};
++
++/// FlashNX (2026-09-23): reuse a clip's `MovieClipReference` while its path is
++/// unchanged. Every time a MovieClip lands on the AVM1 stack (a register or
++/// `this` pushed, a GetMember or GetVariable result), `try_from_stage_object`
++/// used to rebuild the whole dotted path string (one allocation per level plus
++/// a `format!` for `_levelN`), re-split it into segments, and allocate a new
++/// reference: garbage for the GC every time. Upstream master still does. On
++/// Super Mario 63 Push measured 897 ns per action and GetMember 2.1 us, and the
++/// cache took world 8 from 57 to 37 ms a frame. Always on; FlashNX turns it off
++/// only for an `mcref.off` marker on the SD card, to compare a game without it.
++static FLASHNX_MCREF_CACHE: AtomicBool = AtomicBool::new(true);
++
++pub fn flashnx_set_mcref_cache(on: bool) {
++    FLASHNX_MCREF_CACHE.store(on, Ordering::Relaxed);
++}
++
++pub fn flashnx_mcref_cache_on() -> bool {
++    FLASHNX_MCREF_CACHE.load(Ordering::Relaxed)
++}
++
++#[cfg(feature = "flashnx_instr")]
++pub(crate) static FLASHNX_MCREF_CALLS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++#[cfg(feature = "flashnx_instr")]
++pub(crate) static FLASHNX_MCREF_HITS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++#[cfg(feature = "flashnx_instr")]
++pub(crate) static FLASHNX_MCREF_TICKS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++
++/// A fingerprint of exactly what `DisplayObject::path` would build: the name of
++/// every link up to the root, then the root's level. Reads names, allocates
++/// nothing. Two different paths colliding on 64 bits is not a realistic risk.
++fn flashnx_path_signature(object: DisplayObject<'_>) -> u64 {
++    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
++    let mut mix = |v: u64| {
++        h ^= v;
++        h = h.wrapping_mul(0x0000_0100_0000_01b3);
++    };
++    let mut current = object;
++    loop {
++        match current.avm1_parent() {
++            Some(parent) => {
++                match current.name() {
++                    Some(name) => {
++                        // Length first, so "ab"+"c" and "a"+"bc" differ.
++                        mix(name.len() as u64 + 1);
++                        for unit in name.iter() {
++                            mix(unit as u64);
++                        }
++                    }
++                    None => mix(0),
++                }
++                current = parent;
++            }
++            None => {
++                mix(0xFFFF_0000_0000 | (current.depth() as u32 as u64));
++                break;
++            }
++        }
++    }
++    h
++}
+ 
+ #[derive(Clone, Debug, Collect)]
+ #[collect(no_drop)]
+@@ -73,9 +137,59 @@ impl<'gc> MovieClipReference<'gc> {
+     ) -> Option<Self> {
+         // We can't use as_display_object here as we explicitly don't want to convert `SuperObjects`
+         let display_object = object.as_display_object_no_super()?;
+-        let (path, cached) = if let DisplayObject::MovieClip(mc) = display_object {
+-            (mc.path(), display_object.object1()?)
+-        } else if activation.swf_version() <= 5 {
++
++        // FlashNX: a MovieClip whose path has not changed since its reference
++        // was built gets that same reference back (see `FLASHNX_MCREF_CACHE`).
++        // It is the same value a fresh build would produce: same path, and a
++        // weak cache of this very clip's object (set once, never replaced).
++        // Sharing it is invisible: `Value` compares references by path, never
++        // by pointer.
++        if let DisplayObject::MovieClip(mc) = display_object {
++            #[cfg(feature = "flashnx_instr")]
++            let t0 = super::activation::flashnx_ticks();
++            let cached = display_object.object1()?;
++            let cache_on = FLASHNX_MCREF_CACHE.load(Ordering::Relaxed);
++            let sig = if cache_on { flashnx_path_signature(display_object) } else { 0 };
++            // Except a reference that has dropped its object: resolving it while
++            // the clip was off the stage made it walk its path by name from then
++            // on, where a fresh one would still go straight to the clip.
++            let hit = if cache_on {
++                mc.flashnx_cached_ref(sig)
++                    .filter(|reference| reference.0.cached_object.get().is_some())
++            } else {
++                None
++            };
++            let reference = match hit {
++                Some(reference) => reference,
++                None => {
++                    let reference = Self(Gc::new(
++                        activation.gc(),
++                        MovieClipReferenceData {
++                            path: MovieClipPath::new_from_path(activation.gc(), mc.path()),
++                            cached_object: Some(cached.as_weak()).into(),
++                        },
++                    ));
++                    if cache_on {
++                        mc.flashnx_set_cached_ref(activation.gc(), reference, sig);
++                    }
++                    reference
++                }
++            };
++            #[cfg(feature = "flashnx_instr")]
++            {
++                FLASHNX_MCREF_CALLS.fetch_add(1, Ordering::Relaxed);
++                if hit.is_some() {
++                    FLASHNX_MCREF_HITS.fetch_add(1, Ordering::Relaxed);
++                }
++                FLASHNX_MCREF_TICKS.fetch_add(
++                    super::activation::flashnx_ticks().wrapping_sub(t0),
++                    Ordering::Relaxed,
++                );
++            }
++            return Some(reference);
++        }
++
++        let (path, cached) = if activation.swf_version() <= 5 {
+             let display_object = Self::process_swf5_references(activation, display_object)?;
+ 
+             (display_object.path(), display_object.object1()?)
 diff --git a/core/src/avm2/amf.rs b/core/src/avm2/amf.rs
 index 26a58d877..18f94e1a0 100644
 --- a/core/src/avm2/amf.rs
@@ -741,10 +1067,21 @@ index f1843308c..c574725b4 100644
          match self {
              CompressedBitmap::Jpeg {
 diff --git a/core/src/display_object.rs b/core/src/display_object.rs
-index 2e6e01783..13ce92706 100644
+index 2e6e01783..12d389387 100644
 --- a/core/src/display_object.rs
 +++ b/core/src/display_object.rs
-@@ -2585,6 +2585,18 @@ pub trait TDisplayObject<'gc>:
+@@ -32,6 +32,10 @@ mod avm1_button;
+ mod avm2_button;
+ mod bitmap;
+ mod container;
++#[cfg(feature = "flashnx_instr")]
++pub(crate) use container::{
++    FLASHNX_GETNAME_CALLS, FLASHNX_GETNAME_SCANNED, FLASHNX_GETNAME_TICKS,
++};
+ mod edit_text;
+ mod graphic;
+ mod interactive;
+@@ -2585,6 +2589,18 @@ pub trait TDisplayObject<'gc>:
      /// Tests if a given stage position point intersects with the world bounds of this object.
      #[no_dynamic]
      fn hit_test_bounds(self, point: Point<Twips>) -> bool {
@@ -763,7 +1100,7 @@ index 2e6e01783..13ce92706 100644
          self.world_bounds(BoundsMode::Engine).contains(point)
      }
  
-@@ -2604,6 +2616,13 @@ pub trait TDisplayObject<'gc>:
+@@ -2604,6 +2620,13 @@ pub trait TDisplayObject<'gc>:
          point: Point<Twips>,
          options: HitTestOptions,
      ) -> bool {
@@ -777,7 +1114,7 @@ index 2e6e01783..13ce92706 100644
          // Default to using bounding box.
          (!options.contains(HitTestOptions::SKIP_INVISIBLE) || self.visible())
              && self.hit_test_bounds(point)
-@@ -3232,3 +3251,25 @@ impl<'gc> DisplayObjectWeak<'gc> {
+@@ -3232,3 +3255,25 @@ impl<'gc> DisplayObjectWeak<'gc> {
          }
      }
  }
@@ -803,11 +1140,129 @@ index 2e6e01783..13ce92706 100644
 +    }
 +}
 +
+diff --git a/core/src/display_object/container.rs b/core/src/display_object/container.rs
+index 61b8459b8..88fa7bc9d 100644
+--- a/core/src/display_object/container.rs
++++ b/core/src/display_object/container.rs
+@@ -24,6 +24,16 @@ use std::fmt::Debug;
+ use std::ops::{Bound, RangeBounds};
+ use std::rc::Rc;
+ 
++#[cfg(feature = "flashnx_instr")]
++pub(crate) static FLASHNX_GETNAME_CALLS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++#[cfg(feature = "flashnx_instr")]
++pub(crate) static FLASHNX_GETNAME_SCANNED: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++#[cfg(feature = "flashnx_instr")]
++pub(crate) static FLASHNX_GETNAME_TICKS: std::sync::atomic::AtomicU64 =
++    std::sync::atomic::AtomicU64::new(0);
++
+ /// Dispatch the `removedFromStage` event on a child and all of it's
+ /// grandchildren, recursively.
+ pub fn dispatch_removed_from_stage_event<'gc>(
+@@ -887,6 +897,38 @@ impl<'gc> ChildContainer<'gc> {
+     /// If multiple children with the same name exist, the one that occurs
+     /// first in the render list wins.
+     fn get_name(&self, name: &WStr, case_sensitive: bool) -> Option<DisplayObject<'gc>> {
++        // FlashNX (2026-09-23): how often AVM1 resolves a child by name and how
++        // many children the linear scan below compares each time (upstream's own
++        // TODO). Only with the `flashnx_instr` feature.
++        #[cfg(feature = "flashnx_instr")]
++        let t0 = crate::avm1::flashnx_ticks();
++        let found = self.get_name_scan(name, case_sensitive);
++        #[cfg(feature = "flashnx_instr")]
++        {
++            use std::sync::atomic::Ordering::Relaxed;
++            let t1 = crate::avm1::flashnx_ticks();
++            // Compared: every child on a miss or with pending removals, else
++            // up to and including the match. Counted after `t1`, off the clock.
++            let scanned = if self.has_pending_removals {
++                self.depth_list.len()
++            } else {
++                match found {
++                    Some(f) => self
++                        .render_list
++                        .iter()
++                        .position(|c| DisplayObject::ptr_eq(*c, f))
++                        .map_or(self.render_list.len(), |p| p + 1),
++                    None => self.render_list.len(),
++                }
++            };
++            FLASHNX_GETNAME_CALLS.fetch_add(1, Relaxed);
++            FLASHNX_GETNAME_SCANNED.fetch_add(scanned as u64, Relaxed);
++            FLASHNX_GETNAME_TICKS.fetch_add(t1.wrapping_sub(t0), Relaxed);
++        }
++        found
++    }
++
++    fn get_name_scan(&self, name: &WStr, case_sensitive: bool) -> Option<DisplayObject<'gc>> {
+         if self.has_pending_removals {
+             // Find matching children by searching the depth list
+             let mut matching_render_children = if case_sensitive {
 diff --git a/core/src/display_object/movie_clip.rs b/core/src/display_object/movie_clip.rs
-index baa4a03c5..fdc96d7a1 100644
+index baa4a03c5..e6a67f975 100644
 --- a/core/src/display_object/movie_clip.rs
 +++ b/core/src/display_object/movie_clip.rs
-@@ -1747,6 +1747,29 @@ impl<'gc> MovieClip<'gc> {
+@@ -193,6 +193,16 @@ pub struct MovieClipData<'gc> {
+     /// `None` in an AVM2 movie.
+     next_avm1_clip: Lock<Option<MovieClip<'gc>>>,
+ 
++    /// FlashNX (2026-09-23): the last AVM1 `MovieClipReference` built for this
++    /// clip, reused while the path it encodes is unchanged. See
++    /// `MovieClipReference::try_from_stage_object`.
++    flashnx_ref: Lock<Option<crate::avm1::MovieClipReference<'gc>>>,
++    /// Fingerprint of the path `flashnx_ref` encodes, and the address of the
++    /// data it was built for: `MovieClipData` is `Clone` (`instantiate`), and a
++    /// clone must never inherit a reference whose cached object is the original.
++    flashnx_ref_sig: Cell<u64>,
++    flashnx_ref_owner: Cell<usize>,
++
+     audio_stream: Cell<Option<SoundInstanceHandle>>,
+ 
+     #[collect(require_static)]
+@@ -262,6 +272,9 @@ impl<'gc> MovieClipData<'gc> {
+             hit_area: Lock::new(None),
+             attached_audio: Lock::new(None),
+             next_avm1_clip: Lock::new(None),
++            flashnx_ref: Lock::new(None),
++            flashnx_ref_sig: Cell::new(0),
++            flashnx_ref_owner: Cell::new(0),
+         }
+     }
+ 
+@@ -411,6 +424,30 @@ impl<'gc> MovieClip<'gc> {
+         unlock!(Gc::write(mc, self.0), MovieClipData, next_avm1_clip).set(node);
+     }
+ 
++    /// FlashNX: the cached AVM1 reference, if it was built for this very clip
++    /// (not the one its data was cloned from) and for the path whose
++    /// fingerprint is `sig`.
++    pub fn flashnx_cached_ref(self, sig: u64) -> Option<crate::avm1::MovieClipReference<'gc>> {
++        if self.0.flashnx_ref_owner.get() == Gc::as_ptr(self.0) as usize
++            && self.0.flashnx_ref_sig.get() == sig
++        {
++            self.0.flashnx_ref.get()
++        } else {
++            None
++        }
++    }
++
++    pub fn flashnx_set_cached_ref(
++        self,
++        mc: &Mutation<'gc>,
++        reference: crate::avm1::MovieClipReference<'gc>,
++        sig: u64,
++    ) {
++        unlock!(Gc::write(mc, self.0), MovieClipData, flashnx_ref).set(Some(reference));
++        self.0.flashnx_ref_sig.set(sig);
++        self.0.flashnx_ref_owner.set(Gc::as_ptr(self.0) as usize);
++    }
++
+     pub fn call_on_construct_handler(self, context: &mut UpdateContext<'gc>) {
+         let Some(object) = self.0.object1.get() else {
+             return;
+@@ -1747,6 +1784,29 @@ impl<'gc> MovieClip<'gc> {
              }
          }
          let hit_target_frame = self.0.current_frame() == frame;
@@ -838,7 +1293,7 @@ index baa4a03c5..fdc96d7a1 100644
          if is_rewind {
              // Remove all display objects that were created after the
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..3a92603ce 100644
+index 6e5379213..6207f76b1 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
 @@ -15,10 +15,15 @@ extern crate num_derive;
@@ -857,13 +1312,19 @@ index 6e5379213..3a92603ce 100644
  pub mod context;
  pub mod context_menu;
  mod drawing;
-@@ -63,6 +68,9 @@ pub use events::PlayerEvent;
+@@ -63,6 +68,15 @@ pub use events::PlayerEvent;
  pub use indexmap;
  pub use loader::LoadBehavior;
  pub use player::{Player, PlayerBuilder, PlayerMode, PlayerRuntime, StaticCallstack};
 +/// FlashNX: last tick's SWF-frame count + collector phase + arena allocation,
 +/// for the periodic-spike hunt (see `player::flashnx_gc_probe`).
 +pub use player::flashnx_gc_probe;
++/// FlashNX: the AVM1 clip-reference cache switch, and the AVM1 probes the
++/// Switch measurement build reads (zeros without `flashnx_instr`).
++pub use player::{
++    flashnx_avm1_ops, flashnx_avm1_probe, flashnx_getname_probe, flashnx_mcref_probe,
++    flashnx_set_mcref_cache,
++};
  pub use ruffle_common::duration::FloatDuration;
  pub use ruffle_render::backend::ViewportDimensions;
  pub use swf;
@@ -882,7 +1343,7 @@ index 7cf6c74de..533f83471 100644
                  bitmap.set_avm2_bitmapdata_class(mc, avm2_class);
                  Some(bitmap.instantiate(mc))
 diff --git a/core/src/player.rs b/core/src/player.rs
-index edb74cccb..ef39347c4 100644
+index edb74cccb..888ab97fe 100644
 --- a/core/src/player.rs
 +++ b/core/src/player.rs
 @@ -74,6 +74,7 @@ use std::fmt;
@@ -893,7 +1354,7 @@ index edb74cccb..ef39347c4 100644
  use std::sync::{Arc, Mutex, Weak};
  use std::time::Duration;
  use tracing::instrument;
-@@ -276,6 +277,38 @@ impl<'gc> GcRootData<'gc> {
+@@ -276,6 +277,116 @@ impl<'gc> GcRootData<'gc> {
  
  type GcArena = gc_arena::Arena<Rootable![GcRoot<'_>]>;
  
@@ -929,10 +1390,88 @@ index edb74cccb..ef39347c4 100644
 +    )
 +}
 +
++/// FlashNX: AVM1 actions run this tick, and the ticks (ARM generic timer)
++/// spent decoding them and running bytecode at all. Zeros unless the
++/// `flashnx_instr` feature is on.
++pub fn flashnx_avm1_probe() -> (u64, u64, u64) {
++    #[cfg(feature = "flashnx_instr")]
++    {
++        use crate::avm1 as a;
++        (
++            a::FLASHNX_AVM1_ACTIONS.load(Ordering::Relaxed),
++            a::FLASHNX_AVM1_DECODE_TICKS.load(Ordering::Relaxed),
++            a::FLASHNX_AVM1_TOTAL_TICKS.load(Ordering::Relaxed),
++        )
++    }
++    #[cfg(not(feature = "flashnx_instr"))]
++    {
++        (0, 0, 0)
++    }
++}
++
++/// FlashNX: cumulative exclusive ticks and counts per AVM1 action code (never
++/// reset; the caller differences them). Zeros unless `flashnx_instr`.
++pub fn flashnx_avm1_ops() -> ([u64; 256], [u64; 256]) {
++    // Filled only with `flashnx_instr`.
++    #[allow(unused_mut)]
++    let mut ticks = [0u64; 256];
++    #[allow(unused_mut)]
++    let mut counts = [0u64; 256];
++    #[cfg(feature = "flashnx_instr")]
++    for i in 0..256 {
++        ticks[i] = crate::avm1::FLASHNX_OP_TICKS[i].load(Ordering::Relaxed);
++        counts[i] = crate::avm1::FLASHNX_OP_COUNT[i].load(Ordering::Relaxed);
++    }
++    (ticks, counts)
++}
++
++/// FlashNX: cumulative child-by-name lookups, children compared, and ticks.
++pub fn flashnx_getname_probe() -> (u64, u64, u64) {
++    #[cfg(feature = "flashnx_instr")]
++    {
++        use crate::display_object as d;
++        (
++            d::FLASHNX_GETNAME_CALLS.load(Ordering::Relaxed),
++            d::FLASHNX_GETNAME_SCANNED.load(Ordering::Relaxed),
++            d::FLASHNX_GETNAME_TICKS.load(Ordering::Relaxed),
++        )
++    }
++    #[cfg(not(feature = "flashnx_instr"))]
++    {
++        (0, 0, 0)
++    }
++}
++
++/// FlashNX: turn the AVM1 clip-reference cache on or off (on by default; see
++/// `FLASHNX_MCREF_CACHE` in avm1/object_reference.rs).
++pub fn flashnx_set_mcref_cache(on: bool) {
++    crate::avm1::flashnx_set_mcref_cache(on);
++}
++
++/// FlashNX: whether that cache is on, then this tick's clip references handed
++/// out, how many came from the cache, and the ticks spent (instr only).
++pub fn flashnx_mcref_probe() -> (bool, u64, u64, u64) {
++    let on = crate::avm1::flashnx_mcref_cache_on();
++    #[cfg(feature = "flashnx_instr")]
++    {
++        use crate::avm1 as a;
++        (
++            on,
++            a::FLASHNX_MCREF_CALLS.load(Ordering::Relaxed),
++            a::FLASHNX_MCREF_HITS.load(Ordering::Relaxed),
++            a::FLASHNX_MCREF_TICKS.load(Ordering::Relaxed),
++        )
++    }
++    #[cfg(not(feature = "flashnx_instr"))]
++    {
++        (on, 0, 0, 0)
++    }
++}
++
  #[derive(Copy, Clone, Debug, Eq, PartialEq)]
  enum RunState {
      Playing,
-@@ -519,11 +552,158 @@ impl Player {
+@@ -519,11 +630,168 @@ impl Player {
          FloatDuration::from_millis(self.frame_time(1000.0))
      }
  
@@ -1087,11 +1626,21 @@ index edb74cccb..ef39347c4 100644
          }
  
 +        FLASHNX_GC_US.store(0, Ordering::Relaxed);
++        #[cfg(feature = "flashnx_instr")]
++        {
++            use crate::avm1 as a;
++            a::FLASHNX_AVM1_ACTIONS.store(0, Ordering::Relaxed);
++            a::FLASHNX_AVM1_DECODE_TICKS.store(0, Ordering::Relaxed);
++            a::FLASHNX_AVM1_TOTAL_TICKS.store(0, Ordering::Relaxed);
++            a::FLASHNX_MCREF_CALLS.store(0, Ordering::Relaxed);
++            a::FLASHNX_MCREF_HITS.store(0, Ordering::Relaxed);
++            a::FLASHNX_MCREF_TICKS.store(0, Ordering::Relaxed);
++        }
 +
          self.frame_accumulator += dt;
          let frame_duration = self.frame_duration();
  
-@@ -554,6 +734,10 @@ impl Player {
+@@ -554,6 +822,10 @@ impl Player {
              }
          }
  
@@ -1102,7 +1651,7 @@ index edb74cccb..ef39347c4 100644
          // Now that we're done running code,
          // we can stop pretending that more time passed than actually did.
          // Note: update_timers(dt) doesn't need to see this either.
-@@ -2382,7 +2566,47 @@ impl Player {
+@@ -2382,7 +2654,47 @@ impl Player {
          self.update_mouse_state(EnumSet::empty(), false, &mut false);
  
          // GC
