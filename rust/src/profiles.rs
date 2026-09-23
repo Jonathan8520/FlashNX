@@ -134,12 +134,37 @@ pub fn bundled() -> std::vec::Vec<Profile> {
 
 /// Stable 64-bit content hash (FNV-1a, hex) of a `.swf` file, used as a match
 /// key. NOT cryptographic — only the app ever computes it (on both the share
-/// and the lookup side), so it just has to be deterministic across builds.
-/// Reads in 8 KB chunks (Horizon newlib `read` dislikes huge buffers).
+/// and the lookup side), so it just has to be deterministic across builds:
+/// the value must never change, or every shared profile stops matching.
+///
+/// It reads the whole file, which the controls menu did on every visit: on New
+/// Super Smash Flash (416 MB) a search sat for a long while (#116). So reads
+/// are 256 KB (they were 8 KB: 32x the calls into the SD driver, for the same
+/// bytes), and the result is kept for the session, per path and size. Nothing
+/// is written anywhere, so a file changed between two sessions is hashed anew;
+/// the size is taken from the open file, `std::fs::metadata` being unreliable
+/// on Horizon.
 pub fn swf_hash_of(path: &str) -> Option<std::string::String> {
+    use std::io::{Seek, SeekFrom};
+    static SESSION: std::sync::Mutex<std::vec::Vec<(std::string::String, u64, std::string::String)>> =
+        std::sync::Mutex::new(std::vec::Vec::new());
+
     let mut file = File::open(path).ok()?;
+    let size = file.seek(SeekFrom::End(0)).ok()?;
+    file.seek(SeekFrom::Start(0)).ok()?;
+    let cached = SESSION.lock().ok().and_then(|cache| {
+        cache
+            .iter()
+            .find(|(p, s, _)| p == path && *s == size)
+            .map(|(_, _, hash)| hash.clone())
+    });
+    if cached.is_some() {
+        return cached;
+    }
+
+    let started = unsafe { ruffle_tick_now() };
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV offset basis
-    let mut buf = [0u8; 8192];
+    let mut buf = std::vec![0u8; 256 * 1024];
     loop {
         match file.read(&mut buf) {
             Ok(0) => break,
@@ -152,7 +177,23 @@ pub fn swf_hash_of(path: &str) -> Option<std::string::String> {
             Err(_) => return None,
         }
     }
-    Some(std::format!("{:016x}", hash))
+    let hash = std::format!("{:016x}", hash);
+    // Once per file and session: the key a shared profile needs, and what the
+    // read cost, which is the whole wait on a big game.
+    let ticks = unsafe { ruffle_tick_now() }.wrapping_sub(started);
+    let freq = unsafe { ruffle_tick_freq() }.max(1);
+    crate::net::log(&std::format!(
+        "profiles: swf hash {} for {} ({} MB in {} ms)\n",
+        hash,
+        path,
+        size / (1024 * 1024),
+        ticks.saturating_mul(1000) / freq,
+    ));
+    if let Ok(mut cache) = SESSION.lock() {
+        cache.retain(|(p, _, _)| p != path);
+        cache.push((std::string::String::from(path), size, hash.clone()));
+    }
+    Some(hash)
 }
 
 extern "C" {
@@ -161,6 +202,8 @@ extern "C" {
     /// (see `__getrandom_v03_custom` in lib.rs), so it can't give two installs
     /// different ids on its own.
     fn ruffle_tick_now() -> u64;
+    /// Ticks per second of the same clock (`armGetSystemTickFreq`).
+    fn ruffle_tick_freq() -> u64;
 }
 
 /// A short, per-INSTALL identifier (8 hex chars), generated once and persisted
