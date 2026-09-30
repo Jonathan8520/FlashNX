@@ -1072,7 +1072,9 @@ pub extern "C" fn ruffle_init() -> c_int {
         let (z, ox, oy) = pending_zoom();
         crate::backend::render::set_game_zoom(z, ox, oy, VIEWPORT_W as f32, VIEWPORT_H as f32);
     }
-    let renderer = match SwitchRenderBackend::new(VIEWPORT_W, VIEWPORT_H) {
+    // The game's path sizes the shape arenas from what it used last time.
+    let game_path = OVERRIDE_SWF_PATH.lock().ok().and_then(|g| g.clone());
+    let renderer = match SwitchRenderBackend::new(VIEWPORT_W, VIEWPORT_H, game_path.as_deref()) {
         Some(r) => r,
         None => {
             log(b"ruffle_init: SwitchRenderBackend::new failed\n\0");

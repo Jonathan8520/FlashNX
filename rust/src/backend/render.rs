@@ -706,6 +706,68 @@ const ARENA_VBO_SIZE: GLsizeiptr = 384 * 1024 * 1024;  // 384 MB
 // Bumped 96 → 192 MB at the same time: index data scaled the same ~2× (peaked at
 // ~93 MB for the first ~10 000 shapes, so ~178 MB for all ~19 100).
 const ARENA_IBO_SIZE: GLsizeiptr = 192 * 1024 * 1024;  // 192 MB
+
+// ─── Arena sized per game ──
+//
+// Those 576 MB are reserved for the worst game known, and they come straight out
+// of malloc, which is what runs out: Super Smash Flash 2 uses 25 + 11 MB of them
+// and dies of memory exhaustion loading a fight, while the largest peak in every
+// September log is 45 MB. So each game records the peak it reached in
+// `<game>.swf.arena` (beside the .swf, like `.url`), and its next launch reserves
+// four times that, never less than the floors below, never more than the default.
+// A game with no record (first launch, or one that never passed 4 MB) gets the
+// default. An arena that overflows marks the record `full`, and that game gets
+// the default from then on: one session of dropped draws at worst, never twice.
+const ARENA_RECORD_FLOOR_V: GLsizeiptr = 128 * 1024 * 1024;
+const ARENA_RECORD_FLOOR_I: GLsizeiptr = 64 * 1024 * 1024;
+
+/// `(vertex MB, index MB, full)` from `<game>.swf.arena`, e.g. `v=25 i=11 full=0`.
+fn read_arena_record(path: &str) -> Option<(u64, u64, bool)> {
+    use std::io::Read;
+    // A bounded loop, not `read_to_string`: on Horizon that preallocates from
+    // fstat and has failed with OutOfMemory on files of a few bytes.
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut buf = [0u8; 128];
+    let n = file.read(&mut buf).ok()?;
+    let text = core::str::from_utf8(&buf[..n]).ok()?;
+    let (mut v, mut i, mut full) = (None, None, false);
+    for field in text.split_whitespace() {
+        match field.split_once('=') {
+            Some(("v", x)) => v = x.parse().ok(),
+            Some(("i", x)) => i = x.parse().ok(),
+            Some(("full", x)) => full = x == "1",
+            _ => {}
+        }
+    }
+    Some((v?, i?, full))
+}
+
+fn write_arena_record(path: &str, v_mb: u64, i_mb: u64, full: bool) {
+    let body = std::format!("v={} i={} full={}\n", v_mb, i_mb, full as u8);
+    let mut path_c = path.as_bytes().to_vec();
+    path_c.push(0);
+    unsafe {
+        swf_picker_write_file(
+            path_c.as_ptr() as *const core::ffi::c_char,
+            body.as_ptr(),
+            body.len() as u32,
+        );
+    }
+}
+
+/// Arena sizes for a game with this record: 4x its peak, floored, capped.
+fn arena_sizes_for(record: Option<(u64, u64, bool)>) -> (GLsizeiptr, GLsizeiptr) {
+    match record {
+        Some((v_mb, i_mb, false)) => {
+            let mb = 1024 * 1024;
+            (
+                (4 * v_mb as GLsizeiptr * mb).clamp(ARENA_RECORD_FLOOR_V, ARENA_VBO_SIZE),
+                (4 * i_mb as GLsizeiptr * mb).clamp(ARENA_RECORD_FLOOR_I, ARENA_IBO_SIZE),
+            )
+        }
+        _ => (ARENA_VBO_SIZE, ARENA_IBO_SIZE),
+    }
+}
 /// VBO alignment = one full vertex (pos.xy + rgba = 6 × f32 = 24 bytes).
 /// MUST match the vertex stride so `glDrawElementsBaseVertex(base_vertex)`
 /// can use `vbo_offset / 24` and land exactly on a vertex boundary.
@@ -954,6 +1016,14 @@ use crate::query_ram;
 
 extern "C" {
     fn ruffle_log_cstr(msg: *const core::ffi::c_char);
+    /// The card writer every other file goes through (cpp/src/swf_picker.cpp):
+    /// Rust's `std::fs::write` reports success on Horizon and the file then
+    /// reads back ENOENT on some writes.
+    fn swf_picker_write_file(
+        path: *const core::ffi::c_char,
+        data: *const u8,
+        len: u32,
+    ) -> core::ffi::c_int;
     /// Monotonic tick counter (armGetSystemTick). Used for FPS heartbeat.
     fn ruffle_tick_now() -> u64;
     /// The PREVIOUS frame's `eglSwapBuffers` and its whole loop period, in ticks
@@ -1017,6 +1087,12 @@ extern "C" {
 
 fn log(nul_terminated: &[u8]) {
     unsafe { ruffle_log_cstr(nul_terminated.as_ptr() as *const _) };
+}
+
+fn log_str(s: &str) {
+    let mut b = s.as_bytes().to_vec();
+    b.push(0);
+    log(&b);
 }
 
 // ─── Per-frame backend-primitive timing (FPS-spike attribution) ──────────────
@@ -2368,6 +2444,11 @@ pub struct SwitchRenderBackend {
     vertex_arena: BufferArena,
     /// Single global IBO for all shape draws.
     index_arena: BufferArena,
+    /// `<game>.swf.arena` for the game this backend runs (see `ARENA_RECORD_*`),
+    /// None for the launcher.
+    arena_record_path: Option<std::string::String>,
+    /// What that file holds now, so a heartbeat writes only when it changes.
+    arena_record_written: (u64, u64, bool),
     /// Single VAO used for every shape draw. Pre-configured at boot to
     /// read (pos.xy, rgba) from `vertex_arena` with stride 24, and to use
     /// `index_arena` as the element buffer. Each draw shifts the read
@@ -5641,8 +5722,11 @@ pub(crate) fn marker_present(name: &str) -> bool {
 
 impl SwitchRenderBackend {
     /// Full backend for a game: the mega-arenas are sized for the worst SWF we
-    /// know of (see the BufferArena block at the top of this file).
-    pub fn new(width: u32, height: u32) -> Option<Self> {
+    /// know of (see the BufferArena block at the top of this file), or from
+    /// what this game recorded in `<game_path>.arena` (see `ARENA_RECORD_*`).
+    pub fn new(width: u32, height: u32, game_path: Option<&str>) -> Option<Self> {
+        let record_path = game_path.map(|p| std::format!("{}.arena", p));
+        let record = record_path.as_deref().and_then(read_arena_record);
         // `sdmc:/switch/FlashNX/arena.small` cuts the reservation by a third,
         // as an experiment only — never as a default.
         //
@@ -5662,9 +5746,46 @@ impl SwitchRenderBackend {
             log(b"arena: arena.small present -> 256/128 MB instead of 384/192\n\0");
             (256 * 1024 * 1024, 128 * 1024 * 1024)
         } else {
-            (ARENA_VBO_SIZE, ARENA_IBO_SIZE)
+            let (vbo, ibo) = arena_sizes_for(record);
+            if let Some((v, i, full)) = record {
+                log_str(&std::format!(
+                    "arena: record v={}MB i={}MB full={} -> {}/{} MB\n",
+                    v,
+                    i,
+                    full as u8,
+                    vbo / (1024 * 1024),
+                    ibo / (1024 * 1024)
+                ));
+            }
+            (vbo, ibo)
         };
-        Self::new_sized(width, height, vbo, ibo)
+        let mut backend = Self::new_sized(width, height, vbo, ibo)?;
+        backend.arena_record_path = record_path;
+        backend.arena_record_written = record.unwrap_or((0, 0, false));
+        Some(backend)
+    }
+
+    /// Keep `<game>.swf.arena` up to date: called every heartbeat, writes only
+    /// on news (an overflow, or a peak at least 4 MB past the file), so a
+    /// session that crashes later still leaves its peak behind.
+    fn arena_record_update(&mut self, v_peak_mb: u64, i_peak_mb: u64) {
+        let Some(path) = self.arena_record_path.as_deref() else {
+            return;
+        };
+        let (wv, wi, wfull) = self.arena_record_written;
+        let full = wfull
+            || self.vertex_arena.alloc_failures > 0
+            || self.index_arena.alloc_failures > 0;
+        let (v, i) = (v_peak_mb.max(wv), i_peak_mb.max(wi));
+        if full == wfull && v < wv + 4 && i < wi + 4 {
+            return;
+        }
+        write_arena_record(path, v, i, full);
+        log_str(&std::format!(
+            "arena: recorded v={}MB i={}MB full={} in {}\n",
+            v, i, full as u8, path
+        ));
+        self.arena_record_written = (v, i, full);
     }
 
     /// Backend for the LAUNCHER UI. Identical except for the arenas: the library
@@ -5944,6 +6065,8 @@ impl SwitchRenderBackend {
             atlases: Vec::new(),
             vertex_arena,
             index_arena,
+            arena_record_path: None,
+            arena_record_written: (0, 0, false),
             shape_vao,
             offscreen_dims: None,
             offscreen_target_tex: None,
@@ -15870,6 +15993,7 @@ impl RenderBackend for SwitchRenderBackend {
             let v_peak_mb = self.vertex_arena.peak_in_use / (1024 * 1024);
             let i_used_mb = self.index_arena.in_use_bytes() / (1024 * 1024);
             let i_peak_mb = self.index_arena.peak_in_use / (1024 * 1024);
+            self.arena_record_update(v_peak_mb as u64, i_peak_mb as u64);
             let v_frag = self.vertex_arena.free.len();
             let i_frag = self.index_arena.free.len();
             // Actual CPU clock (MHz) + dock state, so we can read whether

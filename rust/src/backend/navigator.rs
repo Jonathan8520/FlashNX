@@ -681,8 +681,13 @@ fn is_dead_ad_host(host: &str) -> bool {
 
 /// Hit counters: answered with a normal "not found" straight away rather than
 /// hung, so whatever the game does next is not waiting on us.
+///
+/// google-analytics.com: Super Smash Flash 2 posts to `/collect` while it loads
+/// a fight, and each post used to cost three synchronous HTTPS misses on the
+/// Flashpoint mirror, on the worker thread, inside the frame that already runs
+/// close to the script timeout. No mirror will ever hold an analytics endpoint.
 fn is_tracker_host(host: &str) -> bool {
-    const TRACKERS: &[&str] = &["mochibot.com"];
+    const TRACKERS: &[&str] = &["mochibot.com", "google-analytics.com"];
     TRACKERS
         .iter()
         .any(|d| host == *d || host.ends_with(&std::format!(".{d}")))

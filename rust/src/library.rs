@@ -2214,7 +2214,7 @@ fn move_game_to_folder(path: &str, basename: &str, folder: &str) -> MoveOutcome 
             return MoveOutcome::Refused { name_taken: false };
         }
     }
-    for suffix in [".url", ".filesize"] {
+    for suffix in [".url", ".filesize", ".arena"] {
         let src = std::format!("{}{}", path, suffix);
         if !file_exists_now(&src) {
             continue;
