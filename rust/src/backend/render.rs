@@ -16047,6 +16047,23 @@ impl RenderBackend for SwitchRenderBackend {
                         self.frame_count, gotos, run, skipped
                     ));
                 }
+                // Which event sounds were started, and how often: a sound
+                // restarted every frame, or one asked to loop forever.
+                let starts = ruffle_core::backend::audio::take_sound_start_stats();
+                if !starts.is_empty() {
+                    let total: u32 = starts.iter().map(|s| s.1).sum();
+                    let top: std::vec::Vec<std::string::String> = starts
+                        .iter()
+                        .take(5)
+                        .map(|(id, n, loops)| std::format!("#{:x} x{} loops={}", id, n, loops))
+                        .collect();
+                    log_str(&std::format!(
+                        "sounds: f{} last 300 frames: {} starts; top {}\n",
+                        self.frame_count,
+                        total,
+                        top.join(", ")
+                    ));
+                }
             }
             let v_frag = self.vertex_arena.free.len();
             let i_frag = self.index_arena.free.len();

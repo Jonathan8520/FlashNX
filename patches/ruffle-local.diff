@@ -728,6 +728,54 @@ index a0118157e..77d3a5b1e 100644
                      return;
                  }
              };
+diff --git a/core/src/backend/audio/mixer.rs b/core/src/backend/audio/mixer.rs
+index b98eb3f76..f1dd7e6e5 100644
+--- a/core/src/backend/audio/mixer.rs
++++ b/core/src/backend/audio/mixer.rs
+@@ -9,6 +9,35 @@ use ruffle_common::duration::FloatDuration;
+ use slotmap::SlotMap;
+ use std::io::Cursor;
+ use std::sync::{Arc, Mutex, RwLock};
++
++/// FlashNX: event-sound starts since the last `take_sound_start_stats`, as
++/// (sound id, starts, largest loop count asked for). Tells a sound restarted
++/// every frame from a single one looping forever (a "beep" repeating after a
++/// hit on Mr. Game & Watch in Super Smash Flash 2, 2026-10-01).
++static SOUND_STARTS: Mutex<Vec<(u64, u32, u16)>> = Mutex::new(Vec::new());
++
++fn count_sound_start(handle: SoundHandle, num_loops: u16) {
++    use slotmap::Key;
++    let id = handle.data().as_ffi();
++    if let Ok(mut starts) = SOUND_STARTS.lock() {
++        if let Some(entry) = starts.iter_mut().find(|e| e.0 == id) {
++            entry.1 += 1;
++            entry.2 = entry.2.max(num_loops);
++        } else if starts.len() < 256 {
++            starts.push((id, 1, num_loops));
++        }
++    }
++}
++
++/// See `SOUND_STARTS`. Most-started first.
++pub fn take_sound_start_stats() -> Vec<(u64, u32, u16)> {
++    let mut starts = SOUND_STARTS
++        .lock()
++        .map(|mut s| std::mem::take(&mut *s))
++        .unwrap_or_default();
++    starts.sort_by(|a, b| b.1.cmp(&a.1));
++    starts
++}
+ use swf::AudioCompression;
+ 
+ /// Holds the last 2048 output audio frames. Frames can be written to it one by
+@@ -605,6 +634,7 @@ impl AudioMixer {
+             .lock()
+             .expect("Cannot be called reentrant");
+         let handle = sound_instances.insert(SoundInstance::new_sound(sound_handle, stream));
++        count_sound_start(sound_handle, settings.num_loops);
+         Ok(handle)
+     }
+ 
 diff --git a/core/src/bitmap/bitmap_data.rs b/core/src/bitmap/bitmap_data.rs
 index 29eb34fdc..8eb4761bd 100644
 --- a/core/src/bitmap/bitmap_data.rs
@@ -893,6 +941,106 @@ index 29eb34fdc..8eb4761bd 100644
          self.bitmap_handle = None;
          // There's no longer a handle to update
          self.dirty_state = DirtyState::Clean;
+diff --git a/core/src/bitmap/operations.rs b/core/src/bitmap/operations.rs
+index 92bb2f430..02ea50d89 100644
+--- a/core/src/bitmap/operations.rs
++++ b/core/src/bitmap/operations.rs
+@@ -551,7 +551,6 @@ pub fn threshold<'gc>(
+     // The number of modified pixels
+     // This doesn't seem to include pixels changed due to copy_source
+     let mut modified_count = 0;
+-    let mut dirty_area: Option<PixelRegion> = None;
+ 
+     let mut source_region =
+         PixelRegion::for_whole_size(source_bitmap.width(), source_bitmap.height());
+@@ -576,48 +575,52 @@ pub fn threshold<'gc>(
+     let target = target.sync(renderer);
+     let mut write = target.borrow_mut(mc);
+ 
+-    // Check each pixel
++    // FlashNX: the same pixels, visited in the same order, with the same
++    // result, minus the per-pixel overhead that made this 14 % of a Super Smash
++    // Flash 2 fight frame: the colour was converted to premultiplied alpha for
++    // every matching pixel, the dirty area grown one pixel at a time (it always
++    // ends up as `dest_region`), and every read and write recomputed its index.
++    // Rows are now slices; when the source is the target itself, each pixel is
++    // still read just before its own write, so an overlap behaves as before.
++    // [NA] Spot the bug? We don't set the alpha to 0xFF for opaque BMDs. Yay flash.
++    let fill = Color::from(colour).to_premultiplied_alpha(true);
++    let width = dest_region.width() as usize;
++    let dest_stride = write.width() as usize;
+     for y in 0..dest_region.height() {
+-        for x in 0..dest_region.width() {
+-            let dest_x = dest_region.x_min + x;
+-            let dest_y = dest_region.y_min + y;
+-            let src_x = source_region.x_min + x;
+-            let src_y = source_region.y_min + y;
+-
+-            // Extract source colour
+-            let source_color = if let Some(source) = &source {
+-                source.get_pixel32_raw(src_x, src_y)
+-            } else {
+-                write.get_pixel32_raw(src_x, src_y)
+-            };
+-
+-            // If the test, as defined by the operation pass then set to input colour
+-            if operation.matches(u32::from(source_color) & mask, masked_threshold) {
+-                modified_count += 1;
+-                // [NA] Spot the bug? We don't set the alpha to 0xFF for opaque BMDs. Yay flash.
+-                write.set_pixel32_raw(
+-                    dest_x,
+-                    dest_y,
+-                    Color::from(colour).to_premultiplied_alpha(true),
+-                );
+-            } else {
+-                // If the test fails, but copy_source is true then take the colour from the source
+-                if copy_source {
+-                    // [NA] Spot the bug? We don't set the alpha to 0xFF for opaque BMDs. Yay flash.
+-                    write.set_pixel32_raw(dest_x, dest_y, source_color);
++        let dest_start = (dest_region.y_min + y) as usize * dest_stride + dest_region.x_min as usize;
++        if let Some(source) = &source {
++            let src_stride = source.width() as usize;
++            let src_start =
++                (source_region.y_min + y) as usize * src_stride + source_region.x_min as usize;
++            let src_row = &source.raw_pixels()[src_start..src_start + width];
++            let dest_row = &mut write.raw_pixels_mut()[dest_start..dest_start + width];
++            for (dest, &source_color) in dest_row.iter_mut().zip(src_row) {
++                if operation.matches(u32::from(source_color) & mask, masked_threshold) {
++                    modified_count += 1;
++                    *dest = fill;
++                } else if copy_source {
++                    *dest = source_color;
+                 }
+             }
+-            if let Some(dirty_area) = &mut dirty_area {
+-                dirty_area.encompass(dest_x, dest_y);
+-            } else {
+-                dirty_area = Some(PixelRegion::for_pixel(dest_x, dest_y));
++        } else {
++            let src_start =
++                (source_region.y_min + y) as usize * dest_stride + source_region.x_min as usize;
++            let pixels = write.raw_pixels_mut();
++            for x in 0..width {
++                let source_color = pixels[src_start + x];
++                if operation.matches(u32::from(source_color) & mask, masked_threshold) {
++                    modified_count += 1;
++                    pixels[dest_start + x] = fill;
++                } else if copy_source {
++                    pixels[dest_start + x] = source_color;
++                }
+             }
+         }
+     }
+ 
+-    if let Some(dirty_area) = dirty_area {
+-        write.set_cpu_dirty(mc, dirty_area);
+-    }
++    // Every visited pixel counted towards the dirty area, so it is the whole
++    // destination region (never empty here: that returned early above).
++    write.set_cpu_dirty(mc, dest_region);
+ 
+     modified_count
+ }
 diff --git a/core/src/character.rs b/core/src/character.rs
 index f1843308c..d5a9a0af7 100644
 --- a/core/src/character.rs
