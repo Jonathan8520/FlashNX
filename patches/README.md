@@ -98,6 +98,22 @@ stand-in is deliberate and `None` is not an option: `clone_sprite` in
 `avm1/globals/movie_clip.rs` unwraps that `Option`, so returning `None` would
 merely move the panic to `duplicateMovieClip`.
 
+**`core/src/display_object/graphic.rs` — static shapes registered on first
+draw.**
+
+Upstream registers every DefineShape with the renderer while the movie
+preloads, which decodes and uploads every bitmap its fills use, whether the
+shape is ever shown or not. Measured on Super Smash Flash 2 (`atlasIdle:`
+lines): 79 of 81 atlases (1 049 MB) held images never drawn once, and still
+553 MB after menus and a whole fight. `GraphicShared::render_handle` is now a
+`OnceCell` filled by `Graphic::base_handle` the first time `render_self` needs
+it, through the same `context.library` the re-tessellation path already
+used. Morph shapes, glyphs and drawings were already lazy. Result on SSF2:
+1-3 atlases in the menus instead of 81, 21 (281 MB) after three fights
+instead of 88 (1 193 MB), no bitmap refused, heap 1.6-2.1 GB instead of 3.0.
+Super Mario 63 unchanged to the eye, 60 fps, a few 40-58 ms frames where new
+areas first appear.
+
 **`core/src/display_object/movie_clip.rs`, `core/src/context.rs` — the
 movie's own script timeout.**
 

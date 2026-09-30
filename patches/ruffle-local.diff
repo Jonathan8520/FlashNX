@@ -1297,6 +1297,88 @@ index 61b8459b8..88fa7bc9d 100644
          if self.has_pending_removals {
              // Find matching children by searching the depth list
              let mut matching_render_children = if case_sensitive {
+diff --git a/core/src/display_object/graphic.rs b/core/src/display_object/graphic.rs
+index 2a73ff9c2..4be4c5cb0 100644
+--- a/core/src/display_object/graphic.rs
++++ b/core/src/display_object/graphic.rs
+@@ -53,15 +53,17 @@ impl<'gc> Graphic<'gc> {
+         swf_shape: swf::Shape,
+         movie: Arc<SwfMovie>,
+     ) -> Self {
+-        let library = context.library.library_for_movie(movie.clone()).unwrap();
++        // FlashNX: the shape is registered with the renderer the first time it
++        // is drawn, not here. Upstream tessellates every DefineShape while the
++        // movie preloads, which decodes every bitmap the fills use and uploads
++        // it: Super Smash Flash 2 had 79 of its 81 atlases (1 049 MB) holding
++        // images never shown once, and still 553 MB after a whole fight, on a
++        // console where that memory is what runs out. Morph shapes, glyphs and
++        // drawings are already registered on first use.
+         let shared = GraphicShared {
+             id: swf_shape.id,
+             bounds: swf_shape.shape_bounds,
+-            render_handle: Some(
+-                context
+-                    .renderer
+-                    .register_shape((&swf_shape).into(), &MovieLibrarySource { library }),
+-            ),
++            render_handle: OnceCell::new(),
+             shape: swf_shape,
+             movie,
+             scaled_handle: RefCell::new(TessellationCache::new()),
+@@ -84,7 +86,7 @@ impl<'gc> Graphic<'gc> {
+         let shared = GraphicShared {
+             id: 0,
+             bounds: Default::default(),
+-            render_handle: None,
++            render_handle: OnceCell::from(None),
+             shape: swf::Shape {
+                 version: 32,
+                 id: 0,
+@@ -171,6 +173,24 @@ impl<'gc> Graphic<'gc> {
+     }
+ }
+ 
++impl<'gc> Graphic<'gc> {
++    /// The shape's renderer handle, registering it on the first call.
++    fn base_handle(self, context: &mut RenderContext) -> Option<ShapeHandle> {
++        let shared = self.0.shared.get();
++        shared
++            .render_handle
++            .get_or_init(|| {
++                let library = context.library.library_for_movie(shared.movie.clone())?;
++                Some(
++                    context
++                        .renderer
++                        .register_shape((&shared.shape).into(), &MovieLibrarySource { library }),
++                )
++            })
++            .clone()
++    }
++}
++
+ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
+     fn base(self) -> Gc<'gc, DisplayObjectBase<'gc>> {
+         HasPrefixField::as_prefix_gc(self.0)
+@@ -249,7 +269,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
+ 
+         if let Some(drawing) = self.0.drawing.get() {
+             drawing.borrow().render(context);
+-        } else if let Some(base_handle) = self.0.shared.get().render_handle.clone() {
++        } else if let Some(base_handle) = self.base_handle(context) {
+             let transform = context.transform_stack.transform();
+ 
+             // Calculate the current scale from the transform, to determine if
+@@ -332,7 +352,9 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
+ struct GraphicShared {
+     id: CharacterId,
+     shape: swf::Shape,
+-    render_handle: Option<ShapeHandle>,
++    /// Registered on first draw (see `Graphic::base_handle`); `None` inside
++    /// when there is nothing to register (an empty Graphic, or no library).
++    render_handle: OnceCell<Option<ShapeHandle>>,
+     bounds: Rectangle<Twips>,
+     movie: Arc<SwfMovie>,
+     #[collect(require_static)]
 diff --git a/core/src/display_object/movie_clip.rs b/core/src/display_object/movie_clip.rs
 index baa4a03c5..ff1f0bfdf 100644
 --- a/core/src/display_object/movie_clip.rs

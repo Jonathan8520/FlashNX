@@ -1412,6 +1412,10 @@ struct Atlas {
     /// freed (`texture` deleted, set to 0 = dead slot, reusable) so a game that
     /// re-caches large offscreen surfaces every frame can't leak 16 MB/frame → OOM.
     live: u32,
+    /// Last frame a draw sampled this atlas (0 = never), for `atlasIdle=`: how
+    /// much GPU memory holds images nothing has shown for a while. Measured
+    /// before building any eviction, to know what it could give back.
+    last_draw_frame: Cell<u32>,
 }
 
 impl Atlas {
@@ -1475,6 +1479,7 @@ impl Atlas {
             height,
             shelves: Vec::new(),
             live: 0,
+            last_draw_frame: Cell::new(0),
         })
     }
 
@@ -5763,6 +5768,45 @@ impl SwitchRenderBackend {
         backend.arena_record_path = record_path;
         backend.arena_record_written = record.unwrap_or((0, 0, false));
         Some(backend)
+    }
+
+    /// `atlasIdle:` how many live atlases (and MB) no draw has sampled for 30 s
+    /// and for 2 min, and how many were never drawn at all. Atlases fill up in
+    /// the order images are first decoded, so a game that shows its menus, then
+    /// a fight, leaves the menu images in atlases the fight never touches: this
+    /// is the most an eviction of unused images could give back.
+    fn log_atlas_idle(&self) {
+        let now = self.frame_count;
+        let (mut live, mut live_mb) = (0u32, 0u64);
+        let (mut idle30, mut idle30_mb, mut idle120, mut idle120_mb) = (0u32, 0u64, 0u32, 0u64);
+        let (mut never, mut never_mb) = (0u32, 0u64);
+        for a in &self.atlases {
+            if a.texture == 0 {
+                continue;
+            }
+            let mb = a.width as u64 * a.height as u64 * 4 / (1024 * 1024);
+            live += 1;
+            live_mb += mb;
+            let last = a.last_draw_frame.get();
+            if last == 0 {
+                never += 1;
+                never_mb += mb;
+                continue;
+            }
+            let age = now.saturating_sub(last);
+            if age >= 1800 {
+                idle30 += 1;
+                idle30_mb += mb;
+            }
+            if age >= 7200 {
+                idle120 += 1;
+                idle120_mb += mb;
+            }
+        }
+        log_str(&std::format!(
+            "atlasIdle: f{} live={} ({}MB) idle30s={} ({}MB) idle2min={} ({}MB) neverDrawn={} ({}MB)\n",
+            now, live, live_mb, idle30, idle30_mb, idle120, idle120_mb, never, never_mb
+        ));
     }
 
     /// Keep `<game>.swf.arena` up to date: called every heartbeat, writes only
@@ -15994,6 +16038,9 @@ impl RenderBackend for SwitchRenderBackend {
             let i_used_mb = self.index_arena.in_use_bytes() / (1024 * 1024);
             let i_peak_mb = self.index_arena.peak_in_use / (1024 * 1024);
             self.arena_record_update(v_peak_mb as u64, i_peak_mb as u64);
+            if self.frame_count % 300 == 0 {
+                self.log_atlas_idle();
+            }
             let v_frag = self.vertex_arena.free.len();
             let i_frag = self.index_arena.free.len();
             // Actual CPU clock (MHz) + dock state, so we can read whether
@@ -16612,6 +16659,7 @@ impl CommandHandler for SwitchRenderBackend {
         let Some(atlas) = self.atlases.get(switch_bitmap.atlas_index) else {
             return;
         };
+        atlas.last_draw_frame.set(self.frame_count.max(1));
         let tex = atlas.texture;
         let mut m = transform.matrix;
         pixel_snapping.apply(&mut m);
@@ -16778,6 +16826,7 @@ impl CommandHandler for SwitchRenderBackend {
                         let Some(atlas) = self.atlases.get(*atlas_index) else {
                             continue;
                         };
+                        atlas.last_draw_frame.set(self.frame_count.max(1));
                         atlas.texture
                     };
                     self.bitmap_draws_emitted = self.bitmap_draws_emitted.wrapping_add(1);
