@@ -1164,7 +1164,7 @@ index 0926945e0..844b86e46 100644
      /// A tracker for the current keyboard focused element
      pub focus_tracker: FocusTracker<'gc>,
 diff --git a/core/src/display_object.rs b/core/src/display_object.rs
-index 2e6e01783..12d389387 100644
+index 2e6e01783..6bb8bac28 100644
 --- a/core/src/display_object.rs
 +++ b/core/src/display_object.rs
 @@ -32,6 +32,10 @@ mod avm1_button;
@@ -1178,7 +1178,52 @@ index 2e6e01783..12d389387 100644
  mod edit_text;
  mod graphic;
  mod interactive;
-@@ -2585,6 +2589,18 @@ pub trait TDisplayObject<'gc>:
+@@ -683,6 +687,15 @@ impl<'gc> DisplayObjectBase<'gc> {
+         self.set_flag(DisplayObjectFlags::SKIP_NEXT_ENTER_FRAME, skip);
+     }
+ 
++    /// FlashNX: see `DisplayObjectFlags::LIFECYCLE_DIRTY`.
++    pub fn lifecycle_dirty(&self) -> bool {
++        self.contains_flag(DisplayObjectFlags::LIFECYCLE_DIRTY)
++    }
++
++    pub fn set_lifecycle_dirty(&self, value: bool) {
++        self.set_flag(DisplayObjectFlags::LIFECYCLE_DIRTY, value);
++    }
++
+     fn set_avm1_removed(&self, value: bool) {
+         self.set_flag(DisplayObjectFlags::AVM1_REMOVED, value);
+     }
+@@ -931,6 +944,17 @@ struct DrawCacheInfo {
+     filters: Vec<Filter>,
+ }
+ 
++/// FlashNX: flag the top of `obj`'s display tree as holding work for the next
++/// inner goto (see `run_inner_goto_frame`). A walk up the parent chain, a few
++/// pointer reads.
++pub fn mark_lifecycle_dirty<'gc>(obj: DisplayObject<'gc>) {
++    let mut top = obj;
++    while let Some(parent) = top.parent() {
++        top = parent;
++    }
++    top.base().set_lifecycle_dirty(true);
++}
++
+ pub fn render_base<'gc>(
+     this: DisplayObject<'gc>,
+     context: &mut RenderContext<'_, 'gc>,
+@@ -1873,6 +1897,10 @@ pub trait TDisplayObject<'gc>:
+         let write = Gc::write(context.gc(), self.base());
+         DisplayObjectBase::set_parent_ignoring_orphan_list(write, parent);
+         let parent_removed = had_parent && parent.is_none();
++        // FlashNX: a new child (and its whole subtree) may need constructing.
++        if let Some(parent) = parent {
++            mark_lifecycle_dirty(parent);
++        }
+ 
+         if parent_removed {
+             if let Some(int) = self.as_interactive() {
+@@ -2585,6 +2613,18 @@ pub trait TDisplayObject<'gc>:
      /// Tests if a given stage position point intersects with the world bounds of this object.
      #[no_dynamic]
      fn hit_test_bounds(self, point: Point<Twips>) -> bool {
@@ -1197,7 +1242,7 @@ index 2e6e01783..12d389387 100644
          self.world_bounds(BoundsMode::Engine).contains(point)
      }
  
-@@ -2604,6 +2620,13 @@ pub trait TDisplayObject<'gc>:
+@@ -2604,6 +2644,13 @@ pub trait TDisplayObject<'gc>:
          point: Point<Twips>,
          options: HitTestOptions,
      ) -> bool {
@@ -1211,7 +1256,20 @@ index 2e6e01783..12d389387 100644
          // Default to using bounding box.
          (!options.contains(HitTestOptions::SKIP_INVISIBLE) || self.visible())
              && self.hit_test_bounds(point)
-@@ -3232,3 +3255,25 @@ impl<'gc> DisplayObjectWeak<'gc> {
+@@ -2995,6 +3042,12 @@ bitflags! {
+         /// (they need to be instantiated "manually" by
+         /// `Sprite.constructChildren`).
+         const MANUAL_FRAME_CONSTRUCT  = 1 << 16;
++
++        /// FlashNX: set on the TOP of a display tree (an orphan, or the stage)
++        /// when something in that tree may give an inner goto work to do: a
++        /// frame changed, a child was added, a frame script or a goto was
++        /// queued. See `mark_lifecycle_dirty` and `run_inner_goto_frame`.
++        const LIFECYCLE_DIRTY         = 1 << 17;
+     }
+ }
+ 
+@@ -3232,3 +3285,25 @@ impl<'gc> DisplayObjectWeak<'gc> {
          }
      }
  }
@@ -1380,7 +1438,7 @@ index 2a73ff9c2..4be4c5cb0 100644
      movie: Arc<SwfMovie>,
      #[collect(require_static)]
 diff --git a/core/src/display_object/movie_clip.rs b/core/src/display_object/movie_clip.rs
-index baa4a03c5..ff1f0bfdf 100644
+index baa4a03c5..4aff8fd57 100644
 --- a/core/src/display_object/movie_clip.rs
 +++ b/core/src/display_object/movie_clip.rs
 @@ -193,6 +193,16 @@ pub struct MovieClipData<'gc> {
@@ -1410,7 +1468,15 @@ index baa4a03c5..ff1f0bfdf 100644
          }
      }
  
-@@ -411,6 +424,30 @@ impl<'gc> MovieClip<'gc> {
+@@ -375,6 +388,7 @@ impl<'gc> MovieClip<'gc> {
+         is_root: bool,
+         loader_info: Option<LoaderInfoObject<'gc>>,
+     ) {
++        crate::display_object::mark_lifecycle_dirty(self.into());
+         let write = Gc::write(context.gc(), self.0);
+         let movie =
+             movie.unwrap_or_else(|| Arc::new(SwfMovie::empty(write.movie().version(), None)));
+@@ -411,6 +425,30 @@ impl<'gc> MovieClip<'gc> {
          unlock!(Gc::write(mc, self.0), MovieClipData, next_avm1_clip).set(node);
      }
  
@@ -1441,7 +1507,7 @@ index baa4a03c5..ff1f0bfdf 100644
      pub fn call_on_construct_handler(self, context: &mut UpdateContext<'gc>) {
          let Some(object) = self.0.object1.get() else {
              return;
-@@ -558,7 +595,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -558,7 +596,7 @@ impl<'gc> MovieClip<'gc> {
                  TagCode::FrameLabel => shared.frame_label(reader),
                  TagCode::JpegTables => shared.jpeg_tables(context, reader),
                  TagCode::ShowFrame => shared.show_frame(reader, tag_len),
@@ -1450,7 +1516,39 @@ index baa4a03c5..ff1f0bfdf 100644
                  TagCode::SoundStreamHead => shared.sound_stream_head(reader, 1),
                  TagCode::SoundStreamHead2 => shared.sound_stream_head(reader, 2),
                  TagCode::VideoFrame => shared.preload_video_frame(context, reader),
-@@ -1747,6 +1784,29 @@ impl<'gc> MovieClip<'gc> {
+@@ -913,6 +951,7 @@ impl<'gc> MovieClip<'gc> {
+                 // the current frame, the goto is properly queued.
+ 
+                 self.0.queued_goto_frame.set(Some(frame));
++                crate::display_object::mark_lifecycle_dirty(self.into());
+ 
+                 // If we have a frame script on that frame, add ourselves to the
+                 // frame script cleanup queue so that that frame script is
+@@ -1144,6 +1183,7 @@ impl<'gc> MovieClip<'gc> {
+     /// This sets the current frame of this MovieClip to a given number.
+     pub fn set_current_frame(self, current_frame: FrameNumber) {
+         self.0.current_frame.set(current_frame);
++        crate::display_object::mark_lifecycle_dirty(self.into());
+     }
+ 
+     /// The amount of frames loaded in this movieclip.
+@@ -1486,6 +1526,7 @@ impl<'gc> MovieClip<'gc> {
+             // in the meantime, it should absolutely run again.
+             self.set_last_queued_script_frame(None);
+         }
++        crate::display_object::mark_lifecycle_dirty(self.into());
+     }
+ 
+     /// Instantiate a given child object on the timeline at a given depth.
+@@ -1626,6 +1667,7 @@ impl<'gc> MovieClip<'gc> {
+     }
+ 
+     fn run_goto(mut self, context: &mut UpdateContext<'gc>, frame: FrameNumber, is_implicit: bool) {
++        crate::display_object::mark_lifecycle_dirty(self.into());
+         if cfg!(feature = "timeline_debug") {
+             tracing::debug!(
+                 "[{}]: {} from frame {} to frame {}",
+@@ -1747,6 +1789,29 @@ impl<'gc> MovieClip<'gc> {
              }
          }
          let hit_target_frame = self.0.current_frame() == frame;
@@ -1480,7 +1578,15 @@ index baa4a03c5..ff1f0bfdf 100644
  
          if is_rewind {
              // Remove all display objects that were created after the
-@@ -3968,11 +4028,35 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -2149,6 +2214,7 @@ impl<'gc> MovieClip<'gc> {
+         context: &mut UpdateContext<'gc>,
+     ) {
+         let current_frame = self.current_frame();
++        crate::display_object::mark_lifecycle_dirty(self.into());
+ 
+         let write = unlock!(Gc::write(context.gc(), self.0), MovieClipData, cell);
+         let mut frame_scripts = RefMut::map(write.borrow_mut(), |r| &mut r.frame_scripts);
+@@ -3968,11 +4034,35 @@ impl<'gc, 'a> MovieClipShared<'gc> {
      }
  
      #[inline]
@@ -1520,11 +1626,95 @@ index baa4a03c5..ff1f0bfdf 100644
  
          Ok(())
      }
+diff --git a/core/src/frame_lifecycle.rs b/core/src/frame_lifecycle.rs
+index 91bdb52df..f9f00f75d 100644
+--- a/core/src/frame_lifecycle.rs
++++ b/core/src/frame_lifecycle.rs
+@@ -18,6 +18,29 @@ use crate::loader::LoadManager;
+ use crate::orphan_manager::OrphanManager;
+ use tracing::instrument;
+ 
++use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
++
++/// FlashNX: whether an inner goto may skip orphans whose tree has not changed
++/// since they were last processed (see `run_inner_goto_frame`). On by default;
++/// off to compare, from FlashNX's `gotoskip.off` marker.
++static ORPHAN_SKIP: AtomicBool = AtomicBool::new(true);
++static INNER_GOTOS: AtomicU64 = AtomicU64::new(0);
++static ORPHANS_RUN: AtomicU64 = AtomicU64::new(0);
++static ORPHANS_SKIPPED: AtomicU64 = AtomicU64::new(0);
++
++pub fn set_orphan_skip(enabled: bool) {
++    ORPHAN_SKIP.store(enabled, Ordering::Relaxed);
++}
++
++/// (inner gotos, orphans processed by them, orphans skipped) since the last call.
++pub fn take_inner_goto_stats() -> (u64, u64, u64) {
++    (
++        INNER_GOTOS.swap(0, Ordering::Relaxed),
++        ORPHANS_RUN.swap(0, Ordering::Relaxed),
++        ORPHANS_SKIPPED.swap(0, Ordering::Relaxed),
++    )
++}
++
+ /// Which phase of the frame we're currently in.
+ ///
+ /// AVM2 frames exist in one of four phases: `Enter`, `Construct`,
+@@ -92,6 +115,7 @@ pub fn run_all_phases_avm2(context: &mut UpdateContext<'_>) {
+ 
+     *context.frame_phase = FramePhase::FrameScripts;
+     OrphanManager::each_orphan_obj(context, |orphan, context| {
++        orphan.base().set_lifecycle_dirty(false);
+         orphan.run_frame_scripts(context);
+     });
+     stage.run_frame_scripts(context);
+@@ -143,9 +167,25 @@ pub fn run_inner_goto_frame<'gc>(
+ 
+     // Note - we do *not* call `enter_frame` or dispatch an `enterFrame` event
+ 
++    // FlashNX: every inner goto used to walk the whole tree of every orphan,
++    // twice (construct, then frame scripts), whatever the goto touched. On an
++    // orphan whose tree has not changed since it was last processed, both
++    // walks are no-ops: every object is constructed, every frame script of
++    // its current frame has run. Super Smash Flash 2 keeps a growing crowd of
++    // orphans and fires gotos all frame long; that walk was 54 % of a fight
++    // frame, and fights slowed down one after the other (ruffle#24509 is the
++    // same wall on desktop). A tree is dirty from the moment something in it
++    // changes frame, gains a child, or queues a frame script or a goto
++    // (`mark_lifecycle_dirty`), until its frame scripts run. The stage is
++    // still walked every time.
++    let skip = ORPHAN_SKIP.load(Ordering::Relaxed);
++    INNER_GOTOS.fetch_add(1, Ordering::Relaxed);
++
+     *context.frame_phase = FramePhase::Construct;
+     OrphanManager::each_orphan_obj(context, |orphan, context| {
+-        orphan.construct_frame(context);
++        if !skip || orphan.base().lifecycle_dirty() {
++            orphan.construct_frame(context);
++        }
+     });
+     stage.construct_frame(context);
+     broadcast_frame_constructed(context);
+@@ -153,7 +193,13 @@ pub fn run_inner_goto_frame<'gc>(
+     *context.frame_phase = FramePhase::FrameScripts;
+     stage.run_frame_scripts(context);
+     OrphanManager::each_orphan_obj(context, |orphan, context| {
+-        orphan.run_frame_scripts(context);
++        if !skip || orphan.base().lifecycle_dirty() {
++            orphan.base().set_lifecycle_dirty(false);
++            ORPHANS_RUN.fetch_add(1, Ordering::Relaxed);
++            orphan.run_frame_scripts(context);
++        } else {
++            ORPHANS_SKIPPED.fetch_add(1, Ordering::Relaxed);
++        }
+     });
+ 
+     for child in removed_frame_scripts {
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..6207f76b1 100644
+index 6e5379213..1ee281d64 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
-@@ -15,10 +15,15 @@ extern crate num_derive;
+@@ -15,10 +15,16 @@ extern crate num_derive;
  #[macro_use]
  mod avm1;
  mod avm2;
@@ -1537,10 +1727,11 @@ index 6e5379213..6207f76b1 100644
  mod character;
 +/// FlashNX: per-movie reset + sizing of the decoded-bitmap cache budget.
 +pub use character::reset_bitmap_cache;
++pub use frame_lifecycle::{set_orphan_skip, take_inner_goto_stats};
  pub mod context;
  pub mod context_menu;
  mod drawing;
-@@ -63,6 +68,15 @@ pub use events::PlayerEvent;
+@@ -63,6 +69,15 @@ pub use events::PlayerEvent;
  pub use indexmap;
  pub use loader::LoadBehavior;
  pub use player::{Player, PlayerBuilder, PlayerMode, PlayerRuntime, StaticCallstack};
@@ -1570,6 +1761,20 @@ index 7cf6c74de..533f83471 100644
                  let bitmap = Bitmap::new(mc, id, bitmap, self.swf.clone());
                  bitmap.set_avm2_bitmapdata_class(mc, avm2_class);
                  Some(bitmap.instantiate(mc))
+diff --git a/core/src/orphan_manager.rs b/core/src/orphan_manager.rs
+index a231dc080..0ab4c0826 100644
+--- a/core/src/orphan_manager.rs
++++ b/core/src/orphan_manager.rs
+@@ -31,6 +31,9 @@ impl<'gc> OrphanManager<'gc> {
+     /// behavior. This should not be called manually - `movie_clip` will
+     /// call it when necessary.
+     pub fn add_orphan_obj(&mut self, dobj: DisplayObject<'gc>) {
++        // FlashNX: a new (or returning) orphan is processed by the next inner
++        // goto at least once.
++        dobj.base().set_lifecycle_dirty(true);
+         // Note: comparing pointers is correct because GcWeak keeps its allocation alive,
+         // so the pointers can't overlap by accident.
+         if self
 diff --git a/core/src/player.rs b/core/src/player.rs
 index edb74cccb..9a698ea6c 100644
 --- a/core/src/player.rs

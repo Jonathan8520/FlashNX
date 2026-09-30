@@ -16040,6 +16040,13 @@ impl RenderBackend for SwitchRenderBackend {
             self.arena_record_update(v_peak_mb as u64, i_peak_mb as u64);
             if self.frame_count % 300 == 0 {
                 self.log_atlas_idle();
+                let (gotos, run, skipped) = ruffle_core::take_inner_goto_stats();
+                if gotos > 0 {
+                    log_str(&std::format!(
+                        "gotos: f{} last 300 frames: {} inner gotos, orphans walked {} skipped {}\n",
+                        self.frame_count, gotos, run, skipped
+                    ));
+                }
             }
             let v_frag = self.vertex_arena.free.len();
             let i_frag = self.index_arena.free.len();

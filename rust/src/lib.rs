@@ -1453,6 +1453,14 @@ pub extern "C" fn ruffle_init() -> c_int {
     if !mcref_cache {
         log(b"mcref: mcref.off present -> AVM1 clip-reference cache DISABLED\n\0");
     }
+    // `sdmc:/switch/FlashNX/gotoskip.off`: inner gotos walk every orphan again,
+    // as upstream does (see `run_inner_goto_frame` in our Ruffle). Same kind of
+    // experiment switch as mcref.off.
+    let goto_skip = !backend::render::marker_present("gotoskip.off");
+    ruffle_core::set_orphan_skip(goto_skip);
+    if !goto_skip {
+        log(b"gotos: gotoskip.off present -> inner gotos walk every orphan\n\0");
+    }
 
     log(b"ruffle_init: calling PlayerBuilder::build()\n\0");
     let player = builder.build();

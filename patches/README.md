@@ -98,6 +98,28 @@ stand-in is deliberate and `None` is not an option: `clone_sprite` in
 `avm1/globals/movie_clip.rs` unwraps that `Option`, so returning `None` would
 merely move the panic to `duplicateMovieClip`.
 
+**`core/src/frame_lifecycle.rs`, `display_object.rs`, `orphan_manager.rs`,
+`display_object/movie_clip.rs` — inner gotos skip unchanged orphans.**
+
+Every AVM2 goto (no-op ones included, on purpose: Flash shows their side
+effects) runs a nested construct + frame-script pass over the stage and over
+the whole tree of every orphan. Super Smash Flash 2 keeps ~600-800 orphans
+and fires 4 000 to 36 000 gotos per 300 frames in a fight: that walk was 54 %
+of a fight frame, and fights slowed down one after the other (upstream
+ruffle#24509, open, is the same wall on desktop). A `LIFECYCLE_DIRTY` flag now
+sits on the top of each display tree: set by `mark_lifecycle_dirty` when
+something in it changes frame (`run_frame_internal`, `run_goto`,
+`set_current_frame`), gains a parent-child link (`set_parent`), queues a frame
+script or a goto, loads a movie, or joins the orphan list; cleared just
+before that orphan's frame scripts run. An inner goto skips the orphans whose
+flag is clear: for them both walks were no-ops. Normal frames still walk
+every orphan, and so does every inner goto with FlashNX's `gotoskip.off`
+marker. Ruffle's own suite (host build, GNU toolchain): 1059 AVM2 and 702
+AVM1 tests pass; the two failures are `stage3d_rotating_cube` (no GPU in the
+harness) and `movieclip_hittest` (patch 0001, deliberate). On SSF2: 99.8 % of
+orphan walks skipped, first fight loads in 6.4 s instead of 12.6-16.6 and
+runs at 45-60 fps instead of 9-23.
+
 **`core/src/display_object/graphic.rs` — static shapes registered on first
 draw.**
 
