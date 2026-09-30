@@ -40,7 +40,7 @@ index 3bd126464..8fa516068 100644
  mod property;
  mod property_map;
 diff --git a/core/src/avm1/activation.rs b/core/src/avm1/activation.rs
-index bec5d438f..cd9485b08 100644
+index bec5d438f..c080adf86 100644
 --- a/core/src/avm1/activation.rs
 +++ b/core/src/avm1/activation.rs
 @@ -29,6 +29,58 @@ use web_time::Instant;
@@ -138,6 +138,15 @@ index bec5d438f..cd9485b08 100644
      }
  
      /// Run a single action from a given action reader.
+@@ -429,7 +499,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+         *self.context.actions_since_timeout_check += 1;
+         if *self.context.actions_since_timeout_check >= 2000 {
+             *self.context.actions_since_timeout_check = 0;
+-            if self.context.update_start.elapsed() >= self.context.max_execution_duration {
++            if self.context.update_start.elapsed() >= *self.context.max_execution_duration {
+                 return Err(Error::ExecutionTimeout);
+             }
+         }
 @@ -438,14 +508,31 @@ impl<'a, 'gc> Activation<'a, 'gc> {
              //Executing beyond the end of a function constitutes an implicit return.
              Ok(FrameControl::Return(ReturnType::Implicit))
@@ -401,6 +410,19 @@ index 6cfdf6706..806c24b97 100644
              let display_object = Self::process_swf5_references(activation, display_object)?;
  
              (display_object.path(), display_object.object1()?)
+diff --git a/core/src/avm2/activation.rs b/core/src/avm2/activation.rs
+index ed1ff3034..7a450a680 100644
+--- a/core/src/avm2/activation.rs
++++ b/core/src/avm2/activation.rs
+@@ -946,7 +946,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+         *self.context.actions_since_timeout_check += 1;
+         if *self.context.actions_since_timeout_check >= 10000 {
+             *self.context.actions_since_timeout_check = 0;
+-            if self.context.update_start.elapsed() >= self.context.max_execution_duration {
++            if self.context.update_start.elapsed() >= *self.context.max_execution_duration {
+                 return Err(
+                     "A script in this movie has taken too long to execute and has been terminated."
+                         .into(),
 diff --git a/core/src/avm2/amf.rs b/core/src/avm2/amf.rs
 index 26a58d877..18f94e1a0 100644
 --- a/core/src/avm2/amf.rs
@@ -1124,6 +1146,23 @@ index f1843308c..d5a9a0af7 100644
      pub fn decode(&self) -> Result<RenderBitmap<'static>, RenderError> {
          match self {
              CompressedBitmap::Jpeg {
+diff --git a/core/src/context.rs b/core/src/context.rs
+index 0926945e0..844b86e46 100644
+--- a/core/src/context.rs
++++ b/core/src/context.rs
+@@ -184,7 +184,11 @@ pub struct UpdateContext<'gc> {
+ 
+     /// The maximum amount of time that can be called before a `Error::ExecutionTimeout`
+     /// is raised. This defaults to 15 seconds but can be changed.
+-    pub max_execution_duration: Duration,
++    ///
++    /// FlashNX: a reference to the Player's value rather than a copy, so a
++    /// `ScriptLimits` tag met while preloading raises it for good, not just for
++    /// the update that read the tag.
++    pub max_execution_duration: &'gc mut Duration,
+ 
+     /// A tracker for the current keyboard focused element
+     pub focus_tracker: FocusTracker<'gc>,
 diff --git a/core/src/display_object.rs b/core/src/display_object.rs
 index 2e6e01783..12d389387 100644
 --- a/core/src/display_object.rs
@@ -1259,7 +1298,7 @@ index 61b8459b8..88fa7bc9d 100644
              // Find matching children by searching the depth list
              let mut matching_render_children = if case_sensitive {
 diff --git a/core/src/display_object/movie_clip.rs b/core/src/display_object/movie_clip.rs
-index baa4a03c5..e6a67f975 100644
+index baa4a03c5..ff1f0bfdf 100644
 --- a/core/src/display_object/movie_clip.rs
 +++ b/core/src/display_object/movie_clip.rs
 @@ -193,6 +193,16 @@ pub struct MovieClipData<'gc> {
@@ -1320,6 +1359,15 @@ index baa4a03c5..e6a67f975 100644
      pub fn call_on_construct_handler(self, context: &mut UpdateContext<'gc>) {
          let Some(object) = self.0.object1.get() else {
              return;
+@@ -558,7 +595,7 @@ impl<'gc> MovieClip<'gc> {
+                 TagCode::FrameLabel => shared.frame_label(reader),
+                 TagCode::JpegTables => shared.jpeg_tables(context, reader),
+                 TagCode::ShowFrame => shared.show_frame(reader, tag_len),
+-                TagCode::ScriptLimits => shared.script_limits(reader, context.avm1),
++                TagCode::ScriptLimits => shared.script_limits(context, reader),
+                 TagCode::SoundStreamHead => shared.sound_stream_head(reader, 1),
+                 TagCode::SoundStreamHead2 => shared.sound_stream_head(reader, 2),
+                 TagCode::VideoFrame => shared.preload_video_frame(context, reader),
 @@ -1747,6 +1784,29 @@ impl<'gc> MovieClip<'gc> {
              }
          }
@@ -1350,6 +1398,46 @@ index baa4a03c5..e6a67f975 100644
  
          if is_rewind {
              // Remove all display objects that were created after the
+@@ -3968,11 +4028,35 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+     }
+ 
+     #[inline]
+-    fn script_limits(&self, reader: &mut SwfStream<'a>, avm: &mut Avm1<'gc>) -> Result<(), Error> {
++    fn script_limits(
++        &self,
++        context: &mut UpdateContext<'gc>,
++        reader: &mut SwfStream<'a>,
++    ) -> Result<(), Error> {
+         let max_recursion_depth = reader.read_u16()?;
+-        let _timeout_in_seconds = reader.read_u16()?;
+-
+-        avm.set_max_recursion_depth(max_recursion_depth);
++        let timeout_in_seconds = reader.read_u16()?;
++
++        context.avm1.set_max_recursion_depth(max_recursion_depth);
++
++        // FlashNX: honour the script timeout the movie asks for, as Flash does.
++        // Upstream reads it and drops it, so every movie gets the 15 s default.
++        // Super Smash Flash 2 asks for 60 s, and the frame that loads a fight
++        // runs about 15.6 s on the Switch: killed a fraction of a second short,
++        // which is the black screen on entering every fight (ruffle#24726 is the
++        // same wall on desktop). Only ever raised, so a movie asking for less
++        // than the default is not cut sooner than it is today, and capped at
++        // 60 s: the timeout is the only bound on how long a stuck script can
++        // freeze the console. The largest value seen wins, so a SWF loaded
++        // later with the IDE default cannot lower it again.
++        let requested = std::time::Duration::from_secs(u64::from(timeout_in_seconds.min(60)));
++        if requested > *context.max_execution_duration {
++            tracing::info!(
++                "ScriptLimits: script timeout raised to {} s (movie asked for {} s)",
++                requested.as_secs(),
++                timeout_in_seconds
++            );
++            *context.max_execution_duration = requested;
++        }
+ 
+         Ok(())
+     }
 diff --git a/core/src/lib.rs b/core/src/lib.rs
 index 6e5379213..6207f76b1 100644
 --- a/core/src/lib.rs
@@ -1401,7 +1489,7 @@ index 7cf6c74de..533f83471 100644
                  bitmap.set_avm2_bitmapdata_class(mc, avm2_class);
                  Some(bitmap.instantiate(mc))
 diff --git a/core/src/player.rs b/core/src/player.rs
-index edb74cccb..888ab97fe 100644
+index edb74cccb..9a698ea6c 100644
 --- a/core/src/player.rs
 +++ b/core/src/player.rs
 @@ -74,6 +74,7 @@ use std::fmt;
@@ -1709,6 +1797,15 @@ index edb74cccb..888ab97fe 100644
          // Now that we're done running code,
          // we can stop pretending that more time passed than actually did.
          // Note: update_timers(dt) doesn't need to see this either.
+@@ -2296,7 +2568,7 @@ impl Player {
+                 external_interface,
+                 start_time: this.start_time,
+                 update_start: Instant::now(),
+-                max_execution_duration: this.max_execution_duration,
++                max_execution_duration: &mut this.max_execution_duration,
+                 focus_tracker: stage.focus_tracker(),
+                 times_get_time_called: 0,
+                 time_offset: &mut this.time_offset,
 @@ -2382,7 +2654,47 @@ impl Player {
          self.update_mouse_state(EnumSet::empty(), false, &mut false);
  

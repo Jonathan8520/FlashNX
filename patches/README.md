@@ -98,6 +98,19 @@ stand-in is deliberate and `None` is not an option: `clone_sprite` in
 `avm1/globals/movie_clip.rs` unwraps that `Option`, so returning `None` would
 merely move the panic to `duplicateMovieClip`.
 
+**`core/src/display_object/movie_clip.rs`, `core/src/context.rs` — the
+movie's own script timeout.**
+
+Upstream reads the `ScriptLimits` tag's timeout and drops it, so every movie
+is cut at 15 s. Flash honours it. Super Smash Flash 2 asks for 60 s, and its
+fight-loading frame runs 14.8 to 15.6 s on the Switch: killed just short, a
+black screen on entering every fight (ruffle#24726 is the same wall on
+desktop, labelled as a performance issue). The update context now holds a
+reference to the Player's timeout instead of a copy, and the tag raises it:
+never below the 15 s default, capped at 60 s since the timeout is the only
+bound on how long a stuck script freezes the console, largest value seen
+wins so a SWF loaded later cannot lower it.
+
 **`core/src/player.rs` — GC and frame-pacing probes.**
 
 `flashnx_gc_probe` publishes, per host frame, the number of SWF frames the
