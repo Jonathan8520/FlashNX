@@ -872,7 +872,7 @@ index 29eb34fdc..8eb4761bd 100644
          // There's no longer a handle to update
          self.dirty_state = DirtyState::Clean;
 diff --git a/core/src/character.rs b/core/src/character.rs
-index f1843308c..c574725b4 100644
+index f1843308c..d5a9a0af7 100644
 --- a/core/src/character.rs
 +++ b/core/src/character.rs
 @@ -73,7 +73,38 @@ impl<'gc> BitmapCharacter<'gc> {
@@ -914,7 +914,7 @@ index f1843308c..c574725b4 100644
          let new_handle = backend.register_bitmap(decoded)?;
          // FIXME - do we ever want to release this handle, to avoid taking up GPU memory?
          self.handle.set(new_handle.clone()).unwrap();
-@@ -96,6 +127,102 @@ pub enum CompressedBitmap {
+@@ -96,6 +127,160 @@ pub enum CompressedBitmap {
      Lossless(DefineBitsLossless<'static>),
  }
  
@@ -973,6 +973,45 @@ index f1843308c..c574725b4 100644
 +const MIN_BITMAP_BUDGET: u64 = 96 * 1024 * 1024;
 +const DEFAULT_BITMAP_ALLOWANCE: u64 = TOTAL_BITMAP_ALLOWANCE;
 +
++/// Past its budget, a movie at least this big may keep decoding while the heap
++/// can still hand out one [`HEAP_ROOM_PROBE_BYTES`] block.
++///
++/// Subtracting the movie's size is a proxy for heap pressure, and for a huge
++/// movie it is the proxy, not the heap, that says no. New Super Smash Flash is
++/// a 397 MB movie: its large-bitmap budget sits on the 96 MB floor, 219 images
++/// (545 MB decoded) were refused, among them the stage backgrounds (5120x432,
++/// 1236x4000), whose shapes then draw white. Decoding them all peaked the heap
++/// at 2.5 GB of 3.1 in a test session. Everything smaller keeps the fixed
++/// budget untouched: Super Smash Flash 2 is a 1 MB movie that also fills its
++/// large budget, and enters a fight with about 98 MB of margin, so letting it
++/// decode more would cost exactly that margin.
++const HEAP_ROOM_MIN_MOVIE: u64 = 100 * 1024 * 1024;
++/// Size of the block that must still be free. Sonic RPG Ep.10 (284 MB, also
++/// eligible) died on a 2.77 MB contiguous block; this gives up long before.
++const HEAP_ROOM_PROBE_BYTES: usize = 512 * 1024 * 1024;
++static HEAP_ROOM_ELIGIBLE: std::sync::atomic::AtomicBool =
++    std::sync::atomic::AtomicBool::new(false);
++static HEAP_ROOM_GRANTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
++
++/// Can newlib still hand out one block this big? Asked of `malloc` directly:
++/// FlashNX's Rust allocator answers a failure by emptying the GPU buffer cache
++/// and retrying, which a probe must not trigger.
++fn heap_has_room(bytes: usize) -> bool {
++    use std::ffi::c_void;
++    unsafe extern "C" {
++        fn malloc(size: usize) -> *mut c_void;
++        fn free(ptr: *mut c_void);
++    }
++    unsafe {
++        let p = malloc(bytes);
++        if p.is_null() {
++            return false;
++        }
++        free(p);
++    }
++    true
++}
++
 +/// Start a new movie: clear the accounting and size the budget from that movie's
 +/// resident bytes. MUST be called per game — the counter is process-global, and
 +/// leaving it set made a second launch of the same game refuse almost every
@@ -991,11 +1030,15 @@ index f1843308c..c574725b4 100644
 +        .min(budget);
 +    CACHED_BITMAP_BUDGET_BYTES.store(budget, std::sync::atomic::Ordering::Relaxed);
 +    LARGE_BITMAP_BUDGET_BYTES.store(large_budget, std::sync::atomic::Ordering::Relaxed);
++    let eligible = movie_bytes >= HEAP_ROOM_MIN_MOVIE;
++    HEAP_ROOM_ELIGIBLE.store(eligible, std::sync::atomic::Ordering::Relaxed);
++    HEAP_ROOM_GRANTED.store(0, std::sync::atomic::Ordering::Relaxed);
 +    tracing::info!(
-+        "bitmap cache: budget {} MB total, {} MB for large bitmaps (movie {} MB)",
++        "bitmap cache: budget {} MB total, {} MB for large bitmaps (movie {} MB){}",
 +        budget / (1024 * 1024),
 +        large_budget / (1024 * 1024),
 +        movie_bytes / (1024 * 1024),
++        if eligible { ", past it while the heap has a 512 MB block" } else { "" },
 +    );
 +}
 +
@@ -1004,20 +1047,35 @@ index f1843308c..c574725b4 100644
 +        .load(std::sync::atomic::Ordering::Relaxed)
 +        .saturating_add(want)
 +        > CACHED_BITMAP_BUDGET_BYTES.load(std::sync::atomic::Ordering::Relaxed);
-+    if total {
-+        return true;
++    let over = total
++        || (large
++            && CACHED_LARGE_BITMAP_BYTES
++                .load(std::sync::atomic::Ordering::Relaxed)
++                .saturating_add(want)
++                > LARGE_BITMAP_BUDGET_BYTES.load(std::sync::atomic::Ordering::Relaxed));
++    if !over
++        || !HEAP_ROOM_ELIGIBLE.load(std::sync::atomic::Ordering::Relaxed)
++        || !heap_has_room(HEAP_ROOM_PROBE_BYTES)
++    {
++        return over;
 +    }
-+    large
-+        && CACHED_LARGE_BITMAP_BYTES
-+            .load(std::sync::atomic::Ordering::Relaxed)
-+            .saturating_add(want)
-+            > LARGE_BITMAP_BUDGET_BYTES.load(std::sync::atomic::Ordering::Relaxed)
++    let n = HEAP_ROOM_GRANTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
++    if n == 1 || n % 50 == 0 {
++        tracing::info!(
++            "bitmap cache: over budget but the heap still has a 512 MB block, decoding anyway \
++             ({} so far, total {} MB, large {} MB)",
++            n,
++            CACHED_BITMAP_BYTES.load(std::sync::atomic::Ordering::Relaxed) / (1024 * 1024),
++            CACHED_LARGE_BITMAP_BYTES.load(std::sync::atomic::Ordering::Relaxed) / (1024 * 1024),
++        );
++    }
++    false
 +}
 +
  impl CompressedBitmap {
      pub fn size(&self) -> BitmapSize {
          match self {
-@@ -109,6 +236,48 @@ impl CompressedBitmap {
+@@ -109,6 +294,48 @@ impl CompressedBitmap {
              },
          }
      }

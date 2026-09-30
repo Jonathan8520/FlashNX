@@ -78,6 +78,16 @@ spent, so a huge SWF loses sprites instead of the process losing its heap.
 skipped it left the counter full and refused nearly every bitmap: 5163
 refusals on Super Smash Flash 2, against 45 once fixed).
 
+The budget subtracts the movie's own size, a proxy for heap pressure. For a
+movie of 100 MB or more that proxy is what refuses, not the heap, so past the
+budget such a movie keeps decoding while newlib can still hand out one 512 MB
+block (`heap_has_room`, which calls `malloc` directly so a failed probe does
+not set off FlashNX's allocator retry path). New Super Smash Flash (397 MB)
+went from 219 refused images, its stage backgrounds among them, drawn white,
+to none: heap peak 2.52 GB of 3.1 through fights, about 6 s more loading.
+Smaller movies are untouched on purpose: Super Smash Flash 2 (1 MB) also
+fills its large budget and enters a fight with about 98 MB of margin.
+
 `decode_or_stand_in` exists because decoding allocates width x height x 4
 bytes and is therefore among the first things to fail on an exhausted heap,
 while three upstream call sites unwrap it: `library.rs`
