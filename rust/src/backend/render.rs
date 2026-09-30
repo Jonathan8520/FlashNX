@@ -14763,6 +14763,16 @@ impl SwitchRenderBackend {
     // back, so no per-push full-buffer clear is needed. This replaced an
     // earlier bit-OR + REPLACE scheme whose written value didn't match the
     // EQUAL gate, leaving every maskee rejected (SMWF overworld was blank).
+    //
+    // Each pixel is counted ONCE per mask: the write only increments where
+    // the stencil still equals depth-1 (and the clear only decrements where
+    // it equals depth), like upstream Ruffle's wgpu backend. With a plain
+    // ALWAYS+INCR, a mask shape whose fills or strokes overlap (one draw per
+    // fill style) pushed the overlap to depth+1 and the EQUAL gate rejected
+    // it: New Super Smash Flash's character-select portraits are masked by
+    // their frame shape (black square + inset gradient square + outline), so
+    // only the one-pixel ring outside the gradient survived and the boxes
+    // looked empty (#116).
     fn mask_push(&mut self) {
         self.push_mask_window = self.push_mask_window.saturating_add(1);
         self.mask.writing = true;
@@ -14772,7 +14782,7 @@ impl SwitchRenderBackend {
             // Mask shape writes stencil only (no color): increment coverage.
             glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
             glStencilMask(0xFF);
-            glStencilFunc(GL_ALWAYS, 0, 0xFF);
+            glStencilFunc(GL_EQUAL, self.mask.depth as GLint - 1, 0xFF);
             glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
         }
     }
@@ -14796,7 +14806,7 @@ impl SwitchRenderBackend {
         unsafe {
             glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
             glStencilMask(0xFF);
-            glStencilFunc(GL_ALWAYS, 0, 0xFF);
+            glStencilFunc(GL_EQUAL, self.mask.depth as GLint, 0xFF);
             glStencilOp(GL_KEEP, GL_KEEP, GL_DECR);
         }
     }
@@ -14823,7 +14833,7 @@ impl SwitchRenderBackend {
                 // is not a case the command stream produces.)
                 glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
                 glStencilMask(0xFF);
-                glStencilFunc(GL_ALWAYS, 0, 0xFF);
+                glStencilFunc(GL_EQUAL, self.mask.depth as GLint - 1, 0xFF);
                 glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
             } else {
                 // Drawing a maskee: gate at the current nesting depth.
