@@ -942,7 +942,7 @@ index 29eb34fdc..8eb4761bd 100644
          // There's no longer a handle to update
          self.dirty_state = DirtyState::Clean;
 diff --git a/core/src/bitmap/operations.rs b/core/src/bitmap/operations.rs
-index 92bb2f430..02ea50d89 100644
+index 92bb2f430..a90831e5a 100644
 --- a/core/src/bitmap/operations.rs
 +++ b/core/src/bitmap/operations.rs
 @@ -551,7 +551,6 @@ pub fn threshold<'gc>(
@@ -1041,6 +1041,20 @@ index 92bb2f430..02ea50d89 100644
  
      modified_count
  }
+@@ -809,7 +812,12 @@ pub fn hit_test_point(
+             .read_area(PixelRegion::for_pixel(x, y), renderer)
+             .get_pixel32_raw(x, y)
+             .alpha()
+-            >= alpha_threshold
++            // If `alpha_threshold` is 0, consider it to be 1.
++            // FlashNX: backport of upstream ruffle#23870 (closes #19253): with
++            // 0, a fully transparent pixel counted as a hit, so the whole
++            // bounding box of a Super Smash Flash 2 platform became solid
++            // floor, standing on air next to the drawn ledge.
++            >= alpha_threshold.max(1)
+     } else {
+         false
+     }
 diff --git a/core/src/character.rs b/core/src/character.rs
 index f1843308c..d5a9a0af7 100644
 --- a/core/src/character.rs
@@ -1312,7 +1326,7 @@ index 0926945e0..844b86e46 100644
      /// A tracker for the current keyboard focused element
      pub focus_tracker: FocusTracker<'gc>,
 diff --git a/core/src/display_object.rs b/core/src/display_object.rs
-index 2e6e01783..6bb8bac28 100644
+index 2e6e01783..c218220ca 100644
 --- a/core/src/display_object.rs
 +++ b/core/src/display_object.rs
 @@ -32,6 +32,10 @@ mod avm1_button;
@@ -1326,7 +1340,15 @@ index 2e6e01783..6bb8bac28 100644
  mod edit_text;
  mod graphic;
  mod interactive;
-@@ -683,6 +687,15 @@ impl<'gc> DisplayObjectBase<'gc> {
+@@ -55,6 +59,7 @@ pub use bitmap::{Bitmap, BitmapClass};
+ pub use edit_text::LayoutDebugBoxesFlag;
+ pub use edit_text::{AutoSizeMode, EditText, TextSelection};
+ pub use graphic::Graphic;
++pub use graphic::set_lazy_shapes;
+ pub use interactive::{Avm2MousePick, InteractiveObject, TInteractiveObject};
+ pub use loader_display::LoaderDisplay;
+ pub use morph_shape::MorphShape;
+@@ -683,6 +688,15 @@ impl<'gc> DisplayObjectBase<'gc> {
          self.set_flag(DisplayObjectFlags::SKIP_NEXT_ENTER_FRAME, skip);
      }
  
@@ -1342,7 +1364,7 @@ index 2e6e01783..6bb8bac28 100644
      fn set_avm1_removed(&self, value: bool) {
          self.set_flag(DisplayObjectFlags::AVM1_REMOVED, value);
      }
-@@ -931,6 +944,17 @@ struct DrawCacheInfo {
+@@ -931,6 +945,34 @@ struct DrawCacheInfo {
      filters: Vec<Filter>,
  }
  
@@ -1355,12 +1377,29 @@ index 2e6e01783..6bb8bac28 100644
 +        top = parent;
 +    }
 +    top.base().set_lifecycle_dirty(true);
++    if top.as_stage().is_none() {
++        bump_orphan_mark_epoch();
++    }
++}
++
++/// FlashNX: bumped every time a tree that is not the stage's gets marked (see
++/// `mark_lifecycle_dirty`). When it has not moved since the last pass that
++/// left every orphan clean, an inner goto has no orphan to visit and skips
++/// iterating the list at all.
++static ORPHAN_MARK_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++
++pub fn bump_orphan_mark_epoch() {
++    ORPHAN_MARK_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++}
++
++pub fn orphan_mark_epoch() -> u64 {
++    ORPHAN_MARK_EPOCH.load(std::sync::atomic::Ordering::Relaxed)
 +}
 +
  pub fn render_base<'gc>(
      this: DisplayObject<'gc>,
      context: &mut RenderContext<'_, 'gc>,
-@@ -1873,6 +1897,10 @@ pub trait TDisplayObject<'gc>:
+@@ -1873,6 +1915,10 @@ pub trait TDisplayObject<'gc>:
          let write = Gc::write(context.gc(), self.base());
          DisplayObjectBase::set_parent_ignoring_orphan_list(write, parent);
          let parent_removed = had_parent && parent.is_none();
@@ -1371,7 +1410,7 @@ index 2e6e01783..6bb8bac28 100644
  
          if parent_removed {
              if let Some(int) = self.as_interactive() {
-@@ -2585,6 +2613,18 @@ pub trait TDisplayObject<'gc>:
+@@ -2585,6 +2631,18 @@ pub trait TDisplayObject<'gc>:
      /// Tests if a given stage position point intersects with the world bounds of this object.
      #[no_dynamic]
      fn hit_test_bounds(self, point: Point<Twips>) -> bool {
@@ -1390,7 +1429,7 @@ index 2e6e01783..6bb8bac28 100644
          self.world_bounds(BoundsMode::Engine).contains(point)
      }
  
-@@ -2604,6 +2644,13 @@ pub trait TDisplayObject<'gc>:
+@@ -2604,6 +2662,13 @@ pub trait TDisplayObject<'gc>:
          point: Point<Twips>,
          options: HitTestOptions,
      ) -> bool {
@@ -1404,7 +1443,7 @@ index 2e6e01783..6bb8bac28 100644
          // Default to using bounding box.
          (!options.contains(HitTestOptions::SKIP_INVISIBLE) || self.visible())
              && self.hit_test_bounds(point)
-@@ -2995,6 +3042,12 @@ bitflags! {
+@@ -2995,6 +3060,12 @@ bitflags! {
          /// (they need to be instantiated "manually" by
          /// `Sprite.constructChildren`).
          const MANUAL_FRAME_CONSTRUCT  = 1 << 16;
@@ -1417,7 +1456,7 @@ index 2e6e01783..6bb8bac28 100644
      }
  }
  
-@@ -3232,3 +3285,25 @@ impl<'gc> DisplayObjectWeak<'gc> {
+@@ -3232,3 +3303,25 @@ impl<'gc> DisplayObjectWeak<'gc> {
          }
      }
  }
@@ -1504,14 +1543,18 @@ index 61b8459b8..88fa7bc9d 100644
              // Find matching children by searching the depth list
              let mut matching_render_children = if case_sensitive {
 diff --git a/core/src/display_object/graphic.rs b/core/src/display_object/graphic.rs
-index 2a73ff9c2..4be4c5cb0 100644
+index 2a73ff9c2..3bb91ecbc 100644
 --- a/core/src/display_object/graphic.rs
 +++ b/core/src/display_object/graphic.rs
-@@ -53,15 +53,17 @@ impl<'gc> Graphic<'gc> {
+@@ -53,15 +53,27 @@ impl<'gc> Graphic<'gc> {
          swf_shape: swf::Shape,
          movie: Arc<SwfMovie>,
      ) -> Self {
 -        let library = context.library.library_for_movie(movie.clone()).unwrap();
+-        let shared = GraphicShared {
+-            id: swf_shape.id,
+-            bounds: swf_shape.shape_bounds,
+-            render_handle: Some(
 +        // FlashNX: the shape is registered with the renderer the first time it
 +        // is drawn, not here. Upstream tessellates every DefineShape while the
 +        // movie preloads, which decodes every bitmap the fills use and uploads
@@ -1519,19 +1562,25 @@ index 2a73ff9c2..4be4c5cb0 100644
 +        // images never shown once, and still 553 MB after a whole fight, on a
 +        // console where that memory is what runs out. Morph shapes, glyphs and
 +        // drawings are already registered on first use.
-         let shared = GraphicShared {
-             id: swf_shape.id,
-             bounds: swf_shape.shape_bounds,
--            render_handle: Some(
--                context
--                    .renderer
--                    .register_shape((&swf_shape).into(), &MovieLibrarySource { library }),
++        let render_handle = OnceCell::new();
++        if !LAZY_SHAPES.load(std::sync::atomic::Ordering::Relaxed) {
++            // FlashNX `lazyshape.off`: register now, as upstream does.
++            let library = context.library.library_for_movie(movie.clone()).unwrap();
++            let _ = render_handle.set(Some(
+                 context
+                     .renderer
+                     .register_shape((&swf_shape).into(), &MovieLibrarySource { library }),
 -            ),
-+            render_handle: OnceCell::new(),
++            ));
++        }
++        let shared = GraphicShared {
++            id: swf_shape.id,
++            bounds: swf_shape.shape_bounds,
++            render_handle,
              shape: swf_shape,
              movie,
              scaled_handle: RefCell::new(TessellationCache::new()),
-@@ -84,7 +86,7 @@ impl<'gc> Graphic<'gc> {
+@@ -84,7 +96,7 @@ impl<'gc> Graphic<'gc> {
          let shared = GraphicShared {
              id: 0,
              bounds: Default::default(),
@@ -1540,10 +1589,18 @@ index 2a73ff9c2..4be4c5cb0 100644
              shape: swf::Shape {
                  version: 32,
                  id: 0,
-@@ -171,6 +173,24 @@ impl<'gc> Graphic<'gc> {
+@@ -171,6 +183,32 @@ impl<'gc> Graphic<'gc> {
      }
  }
  
++/// FlashNX: register static shapes on first draw (default), or while the movie
++/// preloads as upstream does (`lazyshape.off` marker, to compare).
++static LAZY_SHAPES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
++
++pub fn set_lazy_shapes(enabled: bool) {
++    LAZY_SHAPES.store(enabled, std::sync::atomic::Ordering::Relaxed);
++}
++
 +impl<'gc> Graphic<'gc> {
 +    /// The shape's renderer handle, registering it on the first call.
 +    fn base_handle(self, context: &mut RenderContext) -> Option<ShapeHandle> {
@@ -1565,7 +1622,7 @@ index 2a73ff9c2..4be4c5cb0 100644
  impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
      fn base(self) -> Gc<'gc, DisplayObjectBase<'gc>> {
          HasPrefixField::as_prefix_gc(self.0)
-@@ -249,7 +269,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
+@@ -249,7 +287,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
  
          if let Some(drawing) = self.0.drawing.get() {
              drawing.borrow().render(context);
@@ -1574,7 +1631,7 @@ index 2a73ff9c2..4be4c5cb0 100644
              let transform = context.transform_stack.transform();
  
              // Calculate the current scale from the transform, to determine if
-@@ -332,7 +352,9 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
+@@ -332,7 +370,9 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
  struct GraphicShared {
      id: CharacterId,
      shape: swf::Shape,
@@ -1775,10 +1832,10 @@ index baa4a03c5..4aff8fd57 100644
          Ok(())
      }
 diff --git a/core/src/frame_lifecycle.rs b/core/src/frame_lifecycle.rs
-index 91bdb52df..f9f00f75d 100644
+index 91bdb52df..fdf16f8fc 100644
 --- a/core/src/frame_lifecycle.rs
 +++ b/core/src/frame_lifecycle.rs
-@@ -18,6 +18,29 @@ use crate::loader::LoadManager;
+@@ -18,6 +18,36 @@ use crate::loader::LoadManager;
  use crate::orphan_manager::OrphanManager;
  use tracing::instrument;
  
@@ -1791,32 +1848,44 @@ index 91bdb52df..f9f00f75d 100644
 +static INNER_GOTOS: AtomicU64 = AtomicU64::new(0);
 +static ORPHANS_RUN: AtomicU64 = AtomicU64::new(0);
 +static ORPHANS_SKIPPED: AtomicU64 = AtomicU64::new(0);
++/// The orphan mark epoch at the start of the last frame-script pass that
++/// processed every dirty orphan with no new mark arriving meanwhile: while the
++/// epoch still equals it, every orphan is clean. `u64::MAX` = unknown.
++static ORPHANS_CLEAN_AT: AtomicU64 = AtomicU64::new(u64::MAX);
++static GOTOS_LIST_SKIPPED: AtomicU64 = AtomicU64::new(0);
 +
 +pub fn set_orphan_skip(enabled: bool) {
 +    ORPHAN_SKIP.store(enabled, Ordering::Relaxed);
 +}
 +
-+/// (inner gotos, orphans processed by them, orphans skipped) since the last call.
-+pub fn take_inner_goto_stats() -> (u64, u64, u64) {
++/// (inner gotos, orphans processed by them, orphans skipped, gotos that did not
++/// even iterate the orphan list) since the last call.
++pub fn take_inner_goto_stats() -> (u64, u64, u64, u64) {
 +    (
 +        INNER_GOTOS.swap(0, Ordering::Relaxed),
 +        ORPHANS_RUN.swap(0, Ordering::Relaxed),
 +        ORPHANS_SKIPPED.swap(0, Ordering::Relaxed),
++        GOTOS_LIST_SKIPPED.swap(0, Ordering::Relaxed),
 +    )
 +}
 +
  /// Which phase of the frame we're currently in.
  ///
  /// AVM2 frames exist in one of four phases: `Enter`, `Construct`,
-@@ -92,6 +115,7 @@ pub fn run_all_phases_avm2(context: &mut UpdateContext<'_>) {
+@@ -91,9 +121,12 @@ pub fn run_all_phases_avm2(context: &mut UpdateContext<'_>) {
+     broadcast_frame_constructed(context);
  
      *context.frame_phase = FramePhase::FrameScripts;
++    let epoch = crate::display_object::orphan_mark_epoch();
      OrphanManager::each_orphan_obj(context, |orphan, context| {
 +        orphan.base().set_lifecycle_dirty(false);
          orphan.run_frame_scripts(context);
      });
++    note_orphans_clean_if_unmarked(epoch);
      stage.run_frame_scripts(context);
-@@ -143,9 +167,25 @@ pub fn run_inner_goto_frame<'gc>(
+     run_frame_script_cleanup(context);
+ 
+@@ -143,18 +176,54 @@ pub fn run_inner_goto_frame<'gc>(
  
      // Note - we do *not* call `enter_frame` or dispatch an `enterFrame` event
  
@@ -1834,35 +1903,69 @@ index 91bdb52df..f9f00f75d 100644
 +    let skip = ORPHAN_SKIP.load(Ordering::Relaxed);
 +    INNER_GOTOS.fetch_add(1, Ordering::Relaxed);
 +
++    // Every orphan clean and none marked since: the list need not even be
++    // iterated (it is ~800 weak references in an SSF2 fight, twice per goto).
++    let all_clean = |epoch: u64| skip && ORPHANS_CLEAN_AT.load(Ordering::Relaxed) == epoch;
++
      *context.frame_phase = FramePhase::Construct;
-     OrphanManager::each_orphan_obj(context, |orphan, context| {
+-    OrphanManager::each_orphan_obj(context, |orphan, context| {
 -        orphan.construct_frame(context);
-+        if !skip || orphan.base().lifecycle_dirty() {
-+            orphan.construct_frame(context);
-+        }
-     });
+-    });
++    if all_clean(crate::display_object::orphan_mark_epoch()) {
++        GOTOS_LIST_SKIPPED.fetch_add(1, Ordering::Relaxed);
++    } else {
++        OrphanManager::each_orphan_obj(context, |orphan, context| {
++            if !skip || orphan.base().lifecycle_dirty() {
++                orphan.construct_frame(context);
++            }
++        });
++    }
      stage.construct_frame(context);
      broadcast_frame_constructed(context);
-@@ -153,7 +193,13 @@ pub fn run_inner_goto_frame<'gc>(
+ 
      *context.frame_phase = FramePhase::FrameScripts;
      stage.run_frame_scripts(context);
-     OrphanManager::each_orphan_obj(context, |orphan, context| {
+-    OrphanManager::each_orphan_obj(context, |orphan, context| {
 -        orphan.run_frame_scripts(context);
-+        if !skip || orphan.base().lifecycle_dirty() {
-+            orphan.base().set_lifecycle_dirty(false);
-+            ORPHANS_RUN.fetch_add(1, Ordering::Relaxed);
-+            orphan.run_frame_scripts(context);
-+        } else {
-+            ORPHANS_SKIPPED.fetch_add(1, Ordering::Relaxed);
+-    });
++    let epoch = crate::display_object::orphan_mark_epoch();
++    if !all_clean(epoch) {
++        OrphanManager::each_orphan_obj(context, |orphan, context| {
++            if !skip || orphan.base().lifecycle_dirty() {
++                orphan.base().set_lifecycle_dirty(false);
++                ORPHANS_RUN.fetch_add(1, Ordering::Relaxed);
++                orphan.run_frame_scripts(context);
++            } else {
++                ORPHANS_SKIPPED.fetch_add(1, Ordering::Relaxed);
++            }
++        });
++        if skip {
++            note_orphans_clean_if_unmarked(epoch);
 +        }
-     });
++    }
  
      for child in removed_frame_scripts {
+         child.run_frame_scripts(context);
+@@ -173,6 +242,14 @@ pub fn run_inner_goto_frame<'gc>(
+     *context.frame_phase = old_phase;
+ }
+ 
++/// FlashNX: a frame-script pass over the orphans just cleaned every dirty one.
++/// If nothing got marked while it ran, every orphan is clean as of `epoch`.
++fn note_orphans_clean_if_unmarked(epoch: u64) {
++    if crate::display_object::orphan_mark_epoch() == epoch {
++        ORPHANS_CLEAN_AT.store(epoch, Ordering::Relaxed);
++    }
++}
++
+ /// Broadcast a `enterFrame` event to all `DisplayObject`s.
+ pub fn broadcast_frame_entered<'gc>(context: &mut UpdateContext<'gc>) {
+     let enter_frame_evt = EventObject::bare_default_event(context, "enterFrame");
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..1ee281d64 100644
+index 6e5379213..c54710c95 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
-@@ -15,10 +15,16 @@ extern crate num_derive;
+@@ -15,10 +15,17 @@ extern crate num_derive;
  #[macro_use]
  mod avm1;
  mod avm2;
@@ -1876,16 +1979,18 @@ index 6e5379213..1ee281d64 100644
 +/// FlashNX: per-movie reset + sizing of the decoded-bitmap cache budget.
 +pub use character::reset_bitmap_cache;
 +pub use frame_lifecycle::{set_orphan_skip, take_inner_goto_stats};
++pub use display_object::set_lazy_shapes;
  pub mod context;
  pub mod context_menu;
  mod drawing;
-@@ -63,6 +69,15 @@ pub use events::PlayerEvent;
+@@ -63,6 +70,16 @@ pub use events::PlayerEvent;
  pub use indexmap;
  pub use loader::LoadBehavior;
  pub use player::{Player, PlayerBuilder, PlayerMode, PlayerRuntime, StaticCallstack};
 +/// FlashNX: last tick's SWF-frame count + collector phase + arena allocation,
 +/// for the periodic-spike hunt (see `player::flashnx_gc_probe`).
 +pub use player::flashnx_gc_probe;
++pub use player::set_bitmap_cache;
 +/// FlashNX: the AVM1 clip-reference cache switch, and the AVM1 probes the
 +/// Switch measurement build reads (zeros without `flashnx_instr`).
 +pub use player::{
@@ -1910,21 +2015,22 @@ index 7cf6c74de..533f83471 100644
                  bitmap.set_avm2_bitmapdata_class(mc, avm2_class);
                  Some(bitmap.instantiate(mc))
 diff --git a/core/src/orphan_manager.rs b/core/src/orphan_manager.rs
-index a231dc080..0ab4c0826 100644
+index a231dc080..716c91dcd 100644
 --- a/core/src/orphan_manager.rs
 +++ b/core/src/orphan_manager.rs
-@@ -31,6 +31,9 @@ impl<'gc> OrphanManager<'gc> {
+@@ -31,6 +31,10 @@ impl<'gc> OrphanManager<'gc> {
      /// behavior. This should not be called manually - `movie_clip` will
      /// call it when necessary.
      pub fn add_orphan_obj(&mut self, dobj: DisplayObject<'gc>) {
 +        // FlashNX: a new (or returning) orphan is processed by the next inner
 +        // goto at least once.
 +        dobj.base().set_lifecycle_dirty(true);
++        crate::display_object::bump_orphan_mark_epoch();
          // Note: comparing pointers is correct because GcWeak keeps its allocation alive,
          // so the pointers can't overlap by accident.
          if self
 diff --git a/core/src/player.rs b/core/src/player.rs
-index edb74cccb..9a698ea6c 100644
+index edb74cccb..7fa5f572e 100644
 --- a/core/src/player.rs
 +++ b/core/src/player.rs
 @@ -74,6 +74,7 @@ use std::fmt;
@@ -1935,7 +2041,7 @@ index edb74cccb..9a698ea6c 100644
  use std::sync::{Arc, Mutex, Weak};
  use std::time::Duration;
  use tracing::instrument;
-@@ -276,6 +277,116 @@ impl<'gc> GcRootData<'gc> {
+@@ -276,6 +277,125 @@ impl<'gc> GcRootData<'gc> {
  
  type GcArena = gc_arena::Arena<Rootable![GcRoot<'_>]>;
  
@@ -1962,6 +2068,15 @@ index edb74cccb..9a698ea6c 100644
 +/// Snapshot of the last `tick`: SWF frames actually run, collector phase
 +/// (0 sleeping, 1 marking, 2 marked, 3 sweeping), total arena allocation, and
 +/// microseconds spent inside the collector call itself.
++/// FlashNX: cacheAsBitmap on (default), or every display object drawn directly
++/// (`bitmapcache.off` marker), to tell whether a misplaced graphic comes from
++/// the cached-bitmap path.
++static BITMAP_CACHE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
++
++pub fn set_bitmap_cache(enabled: bool) {
++    BITMAP_CACHE.store(enabled, std::sync::atomic::Ordering::Relaxed);
++}
++
 +pub fn flashnx_gc_probe() -> (u32, u8, u64, u64) {
 +    (
 +        FLASHNX_FRAMES_RUN.load(Ordering::Relaxed),
@@ -2052,7 +2167,7 @@ index edb74cccb..9a698ea6c 100644
  #[derive(Copy, Clone, Debug, Eq, PartialEq)]
  enum RunState {
      Playing,
-@@ -519,11 +630,168 @@ impl Player {
+@@ -519,11 +639,168 @@ impl Player {
          FloatDuration::from_millis(self.frame_time(1000.0))
      }
  
@@ -2221,7 +2336,7 @@ index edb74cccb..9a698ea6c 100644
          self.frame_accumulator += dt;
          let frame_duration = self.frame_duration();
  
-@@ -554,6 +822,10 @@ impl Player {
+@@ -554,6 +831,10 @@ impl Player {
              }
          }
  
@@ -2232,7 +2347,16 @@ index edb74cccb..9a698ea6c 100644
          // Now that we're done running code,
          // we can stop pretending that more time passed than actually did.
          // Note: update_timers(dt) doesn't need to see this either.
-@@ -2296,7 +2568,7 @@ impl Player {
+@@ -2058,7 +2339,7 @@ impl Player {
+                 library: &gc_root.library,
+                 transform_stack: &mut this.transform_stack,
+                 is_offscreen: false,
+-                use_bitmap_cache: true,
++                use_bitmap_cache: BITMAP_CACHE.load(std::sync::atomic::Ordering::Relaxed),
+                 stage,
+             };
+ 
+@@ -2296,7 +2577,7 @@ impl Player {
                  external_interface,
                  start_time: this.start_time,
                  update_start: Instant::now(),
@@ -2241,7 +2365,7 @@ index edb74cccb..9a698ea6c 100644
                  focus_tracker: stage.focus_tracker(),
                  times_get_time_called: 0,
                  time_offset: &mut this.time_offset,
-@@ -2382,7 +2654,47 @@ impl Player {
+@@ -2382,7 +2663,47 @@ impl Player {
          self.update_mouse_state(EnumSet::empty(), false, &mut false);
  
          // GC

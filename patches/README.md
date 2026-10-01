@@ -98,8 +98,30 @@ stand-in is deliberate and `None` is not an option: `clone_sprite` in
 `avm1/globals/movie_clip.rs` unwraps that `Option`, so returning `None` would
 merely move the panic to `duplicateMovieClip`.
 
+**`core/src/bitmap/operations.rs` — backport of upstream ruffle#23870.**
+
+`hit_test_point` treats an `alpha_threshold` of 0 as 1, as Flash does. With 0,
+a fully transparent pixel counted as a hit, so Super Smash Flash 2's
+collision bitmaps (vector terrain drawn into BitmapData, then point-tested)
+were solid over their whole bounding box: characters stood on air beside the
+drawn ledges (ruffle#19253, fixed upstream on 2026-06-21, after our base).
+
+**Experiment switches (`graphic.rs`, `player.rs`), read from FlashNX markers.**
+`set_lazy_shapes(false)` (`lazyshape.off`) registers static shapes at preload
+as upstream does; `set_bitmap_cache(false)` (`bitmapcache.off`) ignores
+cacheAsBitmap in the main render. Defaults unchanged. They ruled out both
+paths for the SSF2 invisible floors before the upstream ticket was found.
+
 **`core/src/frame_lifecycle.rs`, `display_object.rs`, `orphan_manager.rs`,
 `display_object/movie_clip.rs` — inner gotos skip unchanged orphans.**
+
+Follow-up: an orphan mark epoch (`ORPHAN_MARK_EPOCH`, bumped whenever a tree
+other than the stage's gets marked or an object joins the orphan list).
+After a frame-script pass that cleaned every dirty orphan with no mark
+arriving meanwhile, gotos skip iterating the orphan list altogether until
+the epoch moves (the list itself, ~800 weak references iterated twice per
+goto, was 7.7 % + 1.8 % of an SSF2 level 3 frame). Full suite: 3351 passed,
+the same two known failures.
 
 Every AVM2 goto (no-op ones included, on purpose: Flash shows their side
 effects) runs a nested construct + frame-script pass over the stage and over

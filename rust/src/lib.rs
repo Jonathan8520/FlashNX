@@ -1461,6 +1461,22 @@ pub extern "C" fn ruffle_init() -> c_int {
     if !goto_skip {
         log(b"gotos: gotoskip.off present -> inner gotos walk every orphan\n\0");
     }
+    // `sdmc:/switch/FlashNX/lazyshape.off`: static shapes are registered while
+    // the movie preloads, as upstream does, instead of on first draw. Same kind
+    // of experiment switch, to tell whether a missing graphic comes from it.
+    let lazy_shapes = !backend::render::marker_present("lazyshape.off");
+    ruffle_core::set_lazy_shapes(lazy_shapes);
+    if !lazy_shapes {
+        log(b"shapes: lazyshape.off present -> shapes registered at preload\n\0");
+    }
+    // `sdmc:/switch/FlashNX/bitmapcache.off`: cacheAsBitmap ignored, every
+    // object drawn directly. To tell whether a misplaced graphic comes from the
+    // cached-bitmap path.
+    let bitmap_cache = !backend::render::marker_present("bitmapcache.off");
+    ruffle_core::set_bitmap_cache(bitmap_cache);
+    if !bitmap_cache {
+        log(b"render: bitmapcache.off present -> cacheAsBitmap ignored\n\0");
+    }
 
     log(b"ruffle_init: calling PlayerBuilder::build()\n\0");
     let player = builder.build();

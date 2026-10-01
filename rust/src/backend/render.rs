@@ -16040,11 +16040,11 @@ impl RenderBackend for SwitchRenderBackend {
             self.arena_record_update(v_peak_mb as u64, i_peak_mb as u64);
             if self.frame_count % 300 == 0 {
                 self.log_atlas_idle();
-                let (gotos, run, skipped) = ruffle_core::take_inner_goto_stats();
+                let (gotos, run, skipped, list_skipped) = ruffle_core::take_inner_goto_stats();
                 if gotos > 0 {
                     log_str(&std::format!(
-                        "gotos: f{} last 300 frames: {} inner gotos, orphans walked {} skipped {}\n",
-                        self.frame_count, gotos, run, skipped
+                        "gotos: f{} last 300 frames: {} inner gotos ({} without touching the orphan list), orphans walked {} skipped {}\n",
+                        self.frame_count, gotos, list_skipped, run, skipped
                     ));
                 }
                 // Which event sounds were started, and how often: a sound
