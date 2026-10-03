@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "id": "nitrome-must-die-nitrome-must-die-e1cdbea9-766390d0",
+  "game": {
+    "title": "Nitrome Must Die_Nitrome_Must_Die",
+    "fp_uuid": "",
+    "swf_hash": "e1cdbea9093377e7"
+  },
+  "author": "Stray",
+  "verified": false,
+  "bindings": {
+    "A": "Space",
+    "B": "Z",
+    "Down": "Q",
+    "L": "Escape",
+    "Left": "Q",
+    "Plus": "P",
+    "R": "Enter",
+    "Right": "Q",
+    "StickLDown": "D",
+    "StickLLeft": "S",
+    "StickLRight": "W",
+    "StickLUp": "A",
+    "Up": "Q",
+    "X": "X",
+    "Y": "Shift",
+    "ZL": "Right click",
+    "ZR": "Left click"
+  },
+  "bindings_p2": {
+    "A": "Num1",
+    "B": "Num2",
+    "Down": "/",
+    "L": "Num6",
+    "Left": "/",
+    "R": "Num5",
+    "Right": "/",
+    "StickLDown": "Left",
+    "StickLLeft": "Up",
+    "StickLRight": "Down",
+    "StickLUp": "Right",
+    "Up": "/",
+    "X": "Num3",
+    "Y": "Num4"
+  },
+  "combo_layers": {},
+  "combo_layers_p2": {},
+  "cursor_speed": -1,
+  "show_cursor": true
+}
