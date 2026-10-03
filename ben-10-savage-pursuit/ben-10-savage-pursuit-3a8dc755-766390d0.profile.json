@@ -10,7 +10,7 @@
   "verified": false,
   "bindings": {
     "A": "Z",
-    "B": "Z",
+    "B": "Space",
     "Down": "Down",
     "L": "Escape",
     "Left": "Left",
@@ -23,7 +23,7 @@
     "StickLUp": "Up",
     "Up": "Up",
     "X": "Z",
-    "Y": "Z",
+    "Y": "Space",
     "ZL": "Right click",
     "ZR": "Left click"
   },
