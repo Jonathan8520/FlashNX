@@ -28,8 +28,8 @@
     "ZR": "Left click"
   },
   "bindings_p2": {
-    "A": "Num1",
-    "B": "Num2",
+    "A": "/",
+    "B": "/",
     "Down": "/",
     "L": "Num6",
     "Left": "/",
@@ -39,9 +39,13 @@
     "StickLLeft": "Up",
     "StickLRight": "Down",
     "StickLUp": "Right",
+    "StickRDown": "Left",
+    "StickRLeft": "Up",
+    "StickRRight": "Down",
+    "StickRUp": "Right",
     "Up": "/",
-    "X": "Num3",
-    "Y": "Num4"
+    "X": "/",
+    "Y": "/"
   },
   "combo_layers": {},
   "combo_layers_p2": {},
