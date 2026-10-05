@@ -1,16 +1,147 @@
 diff --git a/core/Cargo.toml b/core/Cargo.toml
-index ddc2ef98c..d7cca2ff7 100644
+index ddc2ef98c..43329c8d0 100644
 --- a/core/Cargo.toml
 +++ b/core/Cargo.toml
-@@ -94,6 +94,8 @@ default_compatibility_rules = []
+@@ -94,6 +94,11 @@ default_compatibility_rules = []
  egui = ["dep:egui", "dep:egui_extras", "png"]
  jpegxr = ["dep:jpegxr", "lzma"]
  default_font = []
 +# FlashNX: per-action AVM1 timing for the Switch measurement build only.
 +flashnx_instr = []
++# FlashNX: live-object census per AVM2 class (`census:` line). Costs a lock on
++# every AVM2 object created and freed, so it is NOT part of flashnx_instr.
++flashnx_census = []
  serde = ["serde/derive"]
  
  [build-dependencies]
+diff --git a/core/common/src/tag_utils.rs b/core/common/src/tag_utils.rs
+index 371775c28..8fb40a099 100644
+--- a/core/common/src/tag_utils.rs
++++ b/core/common/src/tag_utils.rs
+@@ -17,7 +17,7 @@ pub struct SwfMovie {
+     header: HeaderExt,
+ 
+     /// Uncompressed SWF data.
+-    data: Vec<u8>,
++    data: MovieData,
+ 
+     /// The URL the SWF was downloaded from.
+     url: String,
+@@ -50,6 +50,42 @@ pub struct SwfMovie {
+     sandbox_type: SandboxType,
+ }
+ 
++/// FlashNX: a movie's data, counted while it lives (`live_movie_stats`), to tell
++/// on the console whether loaded SWFs are ever freed.
++struct MovieData(Vec<u8>);
++
++static LIVE_MOVIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++static LIVE_MOVIE_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++
++impl MovieData {
++    fn new(data: Vec<u8>) -> Self {
++        use std::sync::atomic::Ordering::Relaxed;
++        LIVE_MOVIES.fetch_add(1, Relaxed);
++        LIVE_MOVIE_BYTES.fetch_add(data.len() as u64, Relaxed);
++        Self(data)
++    }
++}
++
++impl Clone for MovieData {
++    fn clone(&self) -> Self {
++        Self::new(self.0.clone())
++    }
++}
++
++impl Drop for MovieData {
++    fn drop(&mut self) {
++        use std::sync::atomic::Ordering::Relaxed;
++        LIVE_MOVIES.fetch_sub(1, Relaxed);
++        LIVE_MOVIE_BYTES.fetch_sub(self.0.len() as u64, Relaxed);
++    }
++}
++
++/// FlashNX: (movies alive, bytes of SWF data they hold).
++pub fn live_movie_stats() -> (u64, u64) {
++    use std::sync::atomic::Ordering::Relaxed;
++    (LIVE_MOVIES.load(Relaxed), LIVE_MOVIE_BYTES.load(Relaxed))
++}
++
+ impl SwfMovie {
+     /// Construct an empty movie.
+     pub fn empty(swf_version: u8, loader_url: Option<String>) -> Self {
+@@ -60,7 +96,7 @@ impl SwfMovie {
+         let sandbox_type = SandboxType::infer(url.as_str(), &header);
+         Self {
+             header,
+-            data: vec![],
++            data: MovieData::new(vec![]),
+             url,
+             loader_url,
+             parameters: Vec::new(),
+@@ -89,7 +125,7 @@ impl SwfMovie {
+         Self {
+             header,
+             compressed_len,
+-            data: Vec::new(),
++            data: MovieData::new(Vec::new()),
+             url,
+             loader_url,
+             parameters: Vec::new(),
+@@ -115,7 +151,7 @@ impl SwfMovie {
+         Self {
+             header,
+             compressed_len: compressed_data.len(),
+-            data: compressed_data,
++            data: MovieData::new(compressed_data),
+             url,
+             loader_url,
+             parameters: Vec::new(),
+@@ -138,7 +174,7 @@ impl SwfMovie {
+         let sandbox_type = SandboxType::infer(movie_url.as_str(), &header);
+         Self {
+             header,
+-            data: vec![],
++            data: MovieData::new(vec![]),
+             url: movie_url,
+             loader_url: None,
+             parameters: Vec::new(),
+@@ -162,7 +198,7 @@ impl SwfMovie {
+         let sandbox_type = SandboxType::infer(url.as_str(), &swf_buf.header);
+         let mut movie = Self {
+             header: swf_buf.header,
+-            data: swf_buf.data,
++            data: MovieData::new(swf_buf.data),
+             url,
+             loader_url,
+             parameters: Vec::new(),
+@@ -185,7 +221,7 @@ impl SwfMovie {
+         let sandbox_type = SandboxType::infer(url.as_str(), &header);
+         let mut movie = Self {
+             header,
+-            data: vec![],
++            data: MovieData::new(vec![]),
+             url,
+             loader_url: None,
+             parameters: Vec::new(),
+@@ -225,7 +261,7 @@ impl SwfMovie {
+     }
+ 
+     pub fn data(&self) -> &[u8] {
+-        &self.data
++        &self.data.0
+     }
+ 
+     /// Returns the suggested string encoding for the given SWF version.
+@@ -319,7 +355,7 @@ impl Debug for SwfMovie {
+     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+         f.debug_struct("SwfMovie")
+             .field("header", &self.header)
+-            .field("data", &self.data.len())
++            .field("data", &self.data.0.len())
+             .field("url", &self.url)
+             .field("loader_url", &self.loader_url)
+             .field("parameters", &self.parameters)
 diff --git a/core/src/avm1.rs b/core/src/avm1.rs
 index 3bd126464..8fa516068 100644
 --- a/core/src/avm1.rs
@@ -410,11 +541,43 @@ index 6cfdf6706..806c24b97 100644
              let display_object = Self::process_swf5_references(activation, display_object)?;
  
              (display_object.path(), display_object.object1()?)
+diff --git a/core/src/avm2.rs b/core/src/avm2.rs
+index 563ffbb03..ba6970ad5 100644
+--- a/core/src/avm2.rs
++++ b/core/src/avm2.rs
+@@ -373,6 +373,11 @@ impl<'gc> Avm2<'gc> {
+     ///
+     /// Attempts to register the same listener for the same event will also do
+     /// nothing.
++    /// FlashNX: entries in all broadcast lists (`census:` line).
++    pub fn broadcast_len(&self) -> usize {
++        self.broadcast_list.values().map(|v| v.len()).sum()
++    }
++
+     pub fn register_broadcast_listener(
+         context: &mut UpdateContext<'gc>,
+         object: Object<'gc>,
 diff --git a/core/src/avm2/activation.rs b/core/src/avm2/activation.rs
-index ed1ff3034..7a450a680 100644
+index ed1ff3034..0ad8550d8 100644
 --- a/core/src/avm2/activation.rs
 +++ b/core/src/avm2/activation.rs
-@@ -946,7 +946,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -214,8 +214,13 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+         method: Method<'gc>,
+         user_arguments: FunctionArgs<'_, 'gc>,
+         signature: &[ResolvedParamConfig<'gc>],
+-    ) -> Result<Vec<Value<'gc>>, Error<'gc>> {
+-        let mut arguments_list = Vec::new();
++    ) -> Result<smallvec::SmallVec<[Value<'gc>; 8]>, Error<'gc>> {
++        // FlashNX: inline storage for up to 8 arguments. Upstream allocates a
++        // Vec here on every native call that takes an argument (setters,
++        // addEventListener, dispatchEvent, hitTest...); ruffle#24542 removes
++        // it by reworking every native's signature, this gets the same "no heap
++        // allocation" without touching them.
++        let mut arguments_list = smallvec::SmallVec::new();
+         for (arg, param_config) in user_arguments.iter().zip(signature.iter()) {
+             let coerced_arg = if let Some(param_class) = param_config.param_type {
+                 arg.coerce_to_type(self, param_class)?
+@@ -946,7 +951,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          *self.context.actions_since_timeout_check += 1;
          if *self.context.actions_since_timeout_check >= 10000 {
              *self.context.actions_since_timeout_check = 0;
@@ -423,6 +586,110 @@ index ed1ff3034..7a450a680 100644
                  return Err(
                      "A script in this movie has taken too long to execute and has been terminated."
                          .into(),
+@@ -2023,6 +2028,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+                     ((n1 as i64 + n2 as i64) as f64).into()
+                 }
+             }
++            // FlashNX: backport of upstream ruffle#24211 (mixed int/Number
++            // fast paths, inlined abstract_lt, exact results kept as int).
++            (Value::Integer(n1), Value::Number(n2)) => (n1 as f64 + n2).into(),
++            (Value::Number(n1), Value::Integer(n2)) => (n1 + n2 as f64).into(),
+             (Value::Number(n1), Value::Number(n2)) => (n1 + n2).into(),
+             (Value::String(s), value2) => Value::String(AvmString::concat(
+                 self.gc(),
+@@ -2072,11 +2081,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+         Ok(())
+     }
+ 
++    // FlashNX: backport of upstream ruffle#23840 (integer fast paths for
++    // add_i/subtract_i, coerce_a as a nop, int/uint/Number merge to Number).
+     fn op_add_i(&mut self) -> Result<(), Error<'gc>> {
+-        let value2 = self.pop_stack().coerce_to_i32(self)?;
+-        let value1 = self.pop_stack().coerce_to_i32(self)?;
++        let value2 = self.pop_stack();
++        let value1 = self.pop_stack();
+ 
+-        self.push_stack(value1.wrapping_add(value2));
++        let sum_value = match (value1, value2) {
++            (Value::Integer(n1), Value::Integer(n2)) => n1.wrapping_add(n2),
++            (value1, value2) => {
++                let value1 = value1.coerce_to_i32(self)?;
++                let value2 = value2.coerce_to_i32(self)?;
++
++                value1.wrapping_add(value2)
++            }
++        };
++
++        self.push_stack(sum_value);
+ 
+         Ok(())
+     }
+@@ -2134,8 +2155,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+ 
+     fn op_decrement(&mut self) -> Result<(), Error<'gc>> {
+         let value = self.pop_stack().coerce_to_number(self)?;
++        let result = Value::from(value - 1.0);
+ 
+-        self.push_stack(value - 1.0);
++        self.push_stack(result.try_promote_number());
+ 
+         Ok(())
+     }
+@@ -2151,8 +2173,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+     fn op_divide(&mut self) -> Result<(), Error<'gc>> {
+         let value2 = self.pop_stack().coerce_to_number(self)?;
+         let value1 = self.pop_stack().coerce_to_number(self)?;
++        let result = Value::from(value1 / value2);
+ 
+-        self.push_stack(value1 / value2);
++        self.push_stack(result.try_promote_number());
+ 
+         Ok(())
+     }
+@@ -2175,8 +2198,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+ 
+     fn op_increment(&mut self) -> Result<(), Error<'gc>> {
+         let value = self.pop_stack().coerce_to_number(self)?;
++        let result = Value::from(value + 1.0);
+ 
+-        self.push_stack(value + 1.0);
++        self.push_stack(result.try_promote_number());
+ 
+         Ok(())
+     }
+@@ -2274,6 +2298,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+                     ((n1 as i64 - n2 as i64) as f64).into()
+                 }
+             }
++            (Value::Integer(n1), Value::Number(n2)) => (n1 as f64 - n2).into(),
++            (Value::Number(n1), Value::Integer(n2)) => (n1 - n2 as f64).into(),
+             (Value::Number(n1), Value::Number(n2)) => (n1 - n2).into(),
+             _ => {
+                 let value2 = value2.coerce_to_number(self)?;
+@@ -2288,10 +2314,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+     }
+ 
+     fn op_subtract_i(&mut self) -> Result<(), Error<'gc>> {
+-        let value2 = self.pop_stack().coerce_to_i32(self)?;
+-        let value1 = self.pop_stack().coerce_to_i32(self)?;
++        let value2 = self.pop_stack();
++        let value1 = self.pop_stack();
+ 
+-        self.push_stack(value1.wrapping_sub(value2));
++        let sum_value = match (value1, value2) {
++            (Value::Integer(n1), Value::Integer(n2)) => n1.wrapping_sub(n2),
++            (value1, value2) => {
++                let value1 = value1.coerce_to_i32(self)?;
++                let value2 = value2.coerce_to_i32(self)?;
++
++                value1.wrapping_sub(value2)
++            }
++        };
++
++        self.push_stack(sum_value);
+ 
+         Ok(())
+     }
 diff --git a/core/src/avm2/amf.rs b/core/src/avm2/amf.rs
 index 26a58d877..18f94e1a0 100644
 --- a/core/src/avm2/amf.rs
@@ -484,6 +751,28 @@ index 26a58d877..18f94e1a0 100644
          Value::Undefined => Some(AmfValue::Undefined),
          Value::Null => Some(AmfValue::Null),
          Value::Bool(b) => Some(AmfValue::Bool(b)),
+diff --git a/core/src/avm2/function.rs b/core/src/avm2/function.rs
+index 27fc0f88c..adac3bfac 100644
+--- a/core/src/avm2/function.rs
++++ b/core/src/avm2/function.rs
+@@ -200,6 +200,17 @@ pub fn exec<'gc>(
+ 
+     let caller_dxns = activation.default_xml_namespace();
+ 
++    // FlashNX: per-method timing, off unless `as3prof.on` (see flashnx_as3prof).
++    let _as3prof = crate::flashnx_as3prof::Guard::enter(
++        method.flashnx_key(),
++        matches!(method.method_kind(), MethodKind::Native { .. }),
++        || {
++            let mut name = WString::new();
++            display_function(&mut name, method);
++            name.to_utf8_lossy().into_owned()
++        },
++    );
++
+     let ret = match method.method_kind() {
+         MethodKind::Native { native_method, .. } => {
+             let caller_domain = activation.caller_domain();
 diff --git a/core/src/avm2/globals/flash/display/BitmapData.as b/core/src/avm2/globals/flash/display/BitmapData.as
 index 952cc8f9f..1c8a0d959 100644
 --- a/core/src/avm2/globals/flash/display/BitmapData.as
@@ -609,6 +898,20 @@ index ce5e8a5d5..f69928e2e 100644
  
      match output {
          PixelBenderOutput::Bitmap(sync_handle) => {
+diff --git a/core/src/avm2/globals/flash/system/System.as b/core/src/avm2/globals/flash/system/System.as
+index a6c0f2139..bc35902c5 100644
+--- a/core/src/avm2/globals/flash/system/System.as
++++ b/core/src/avm2/globals/flash/system/System.as
+@@ -4,7 +4,8 @@ package flash.system {
+         import __ruffle__.stub_method;
+         import __ruffle__.stub_getter;
+ 
+-        public static function gc():void {}
++        // FlashNX: native, see `system::gc`.
++        public static native function gc():void;
+ 
+         public static function pauseForGCIfCollectionImminent(imminence:Number = 0.75):void {
+             stub_method("flash.system.System", "pauseForGCIfCollectionImminent");
 diff --git a/core/src/avm2/globals/flash/system/capabilities.rs b/core/src/avm2/globals/flash/system/capabilities.rs
 index f5a989cd8..e7c874052 100644
 --- a/core/src/avm2/globals/flash/system/capabilities.rs
@@ -661,6 +964,50 @@ index f5a989cd8..e7c874052 100644
          "PlugIn"
      } else {
          match activation.context.avm2.player_runtime {
+diff --git a/core/src/avm2/globals/flash/system/system.rs b/core/src/avm2/globals/flash/system/system.rs
+index b02aecf7d..498fa59ab 100644
+--- a/core/src/avm2/globals/flash/system/system.rs
++++ b/core/src/avm2/globals/flash/system/system.rs
+@@ -5,6 +5,23 @@ use crate::avm2::activation::Activation;
+ use crate::avm2::parameters::ParametersExt;
+ use crate::avm2::value::Value;
+ 
++/// FlashNX: `flash.system.System.gc`, a full collection after this update.
++///
++/// Upstream leaves it empty (release Flash Players ignore it). Super Smash
++/// Flash 2 calls it when it tears a match down, right before loading the next
++/// stage and fighters, which is the moment a 3 GB console runs out: the
++/// incremental collector is paced per frame and still holds the old match's
++/// garbage then. The same request as the open upstream PR ruffle#23897, rate
++/// limited by `request_full_gc` since some games call it every frame.
++pub fn gc<'gc>(
++    _activation: &mut Activation<'_, 'gc>,
++    _this: Value<'gc>,
++    _args: &[Value<'gc>],
++) -> Result<Value<'gc>, Error<'gc>> {
++    crate::player::request_full_gc();
++    Ok(Value::Undefined)
++}
++
+ /// Implements `flash.system.System.setClipboard` method
+ pub fn set_clipboard<'gc>(
+     activation: &mut Activation<'_, 'gc>,
+diff --git a/core/src/avm2/method.rs b/core/src/avm2/method.rs
+index dcbb88f37..fdcb08342 100644
+--- a/core/src/avm2/method.rs
++++ b/core/src/avm2/method.rs
+@@ -153,6 +153,11 @@ impl core::fmt::Debug for Method<'_> {
+ }
+ 
+ impl<'gc> Method<'gc> {
++    /// FlashNX: identity of this method for the AS3 profiler (`flashnx_as3prof`).
++    pub fn flashnx_key(&self) -> usize {
++        Gc::as_ptr(self.0) as usize
++    }
++
+     /// Construct a `Method` from an `AbcFile` and method index.
+     pub fn from_method_index(
+         txunit: TranslationUnit<'gc>,
 diff --git a/core/src/avm2/object/event_object.rs b/core/src/avm2/object/event_object.rs
 index 0e6f47c5c..88661652d 100644
 --- a/core/src/avm2/object/event_object.rs
@@ -696,6 +1043,33 @@ index 0e6f47c5c..88661652d 100644
      pub fn http_status_event(
          activation: &mut Activation<'_, 'gc>,
          status: u16,
+diff --git a/core/src/avm2/object/script_object.rs b/core/src/avm2/object/script_object.rs
+index 8e8934e23..6358c6dbc 100644
+--- a/core/src/avm2/object/script_object.rs
++++ b/core/src/avm2/object/script_object.rs
+@@ -76,6 +76,11 @@ pub struct ScriptObjectData<'gc> {
+ 
+     /// The table used for non-dynamic property lookups.
+     vtable: Lock<VTable<'gc>>,
++
++    /// FlashNX: counts this object under its class (`census:` line).
++    #[cfg(feature = "flashnx_census")]
++    #[collect(require_static)]
++    _census: crate::flashnx_census::ObjectGuard,
+ }
+ 
+ impl<'gc> TObject<'gc> for ScriptObject<'gc> {
+@@ -164,6 +169,10 @@ impl<'gc> ScriptObjectData<'gc> {
+             slots,
+             bound_methods: RefLock::new(Vec::new()),
+             proto: Lock::new(proto),
++            #[cfg(feature = "flashnx_census")]
++            _census: crate::flashnx_census::ObjectGuard::new(instance_class.as_ptr() as usize, || {
++                instance_class.name().to_qualified_name_no_mc().to_string()
++            }),
+             instance_class,
+             vtable: Lock::new(vtable),
+         }
 diff --git a/core/src/avm2/object/stage3d_object.rs b/core/src/avm2/object/stage3d_object.rs
 index a0118157e..77d3a5b1e 100644
 --- a/core/src/avm2/object/stage3d_object.rs
@@ -728,6 +1102,324 @@ index a0118157e..77d3a5b1e 100644
                      return;
                  }
              };
+diff --git a/core/src/avm2/op.rs b/core/src/avm2/op.rs
+index 222c7addb..f2cc8d5f6 100644
+--- a/core/src/avm2/op.rs
++++ b/core/src/avm2/op.rs
+@@ -382,11 +382,15 @@ impl Op<'_> {
+ 
+     pub fn is_nop(&self) -> bool {
+         if cfg!(feature = "avm_debug") {
+-            matches!(self, Op::Nop)
++            matches!(self, Op::Nop | Op::CoerceA)
+         } else {
+             matches!(
+                 self,
+-                Op::Nop | Op::Debug { .. } | Op::DebugFile { .. } | Op::DebugLine { .. }
++                Op::Nop
++                    | Op::CoerceA
++                    | Op::Debug { .. }
++                    | Op::DebugFile { .. }
++                    | Op::DebugLine { .. }
+             )
+         }
+     }
+diff --git a/core/src/avm2/optimizer/type_aware.rs b/core/src/avm2/optimizer/type_aware.rs
+index e5b808b2e..02aa10fbe 100644
+--- a/core/src/avm2/optimizer/type_aware.rs
++++ b/core/src/avm2/optimizer/type_aware.rs
+@@ -118,7 +118,11 @@ impl<'gc> OptValue<'gc> {
+         }
+     }
+ 
+-    pub fn merged_with(self, other: OptValue<'gc>) -> OptValue<'gc> {
++    pub fn merged_with(
++        self,
++        activation: &mut Activation<'_, 'gc>,
++        other: OptValue<'gc>,
++    ) -> OptValue<'gc> {
+         let mut created_value = OptValue::any();
+ 
+         if self.class == other.class {
+@@ -139,22 +143,35 @@ impl<'gc> OptValue<'gc> {
+                 created_value.class = other.class;
+             }
+         } else if let (Some(self_class), Some(other_class)) = (self.class, other.class) {
+-            // Check for a common superclass.
+-            // FIXME: Make this faster?
+-            let mut other_class = Some(other_class);
+-            'outer: while let Some(current_other_class) = other_class {
+-                let mut self_class = Some(self_class);
+-                while let Some(current_self_class) = self_class {
+-                    if current_other_class == current_self_class {
+-                        // Found a common superclass; we're done
+-                        created_value.class = Some(current_self_class);
+-                        break 'outer;
++            let self_is_numeric = self_class.is_builtin_int()
++                || self_class.is_builtin_uint()
++                || self_class.is_builtin_number();
++
++            let other_is_numeric = other_class.is_builtin_int()
++                || other_class.is_builtin_uint()
++                || other_class.is_builtin_number();
++
++            if self_is_numeric && other_is_numeric {
++                // int/uint/Number merged with int/uint/Number becomes Number
++                created_value.class = Some(activation.avm2().class_defs().number);
++            } else {
++                // Check for a common superclass.
++                // FIXME: Make this faster?
++                let mut other_class = Some(other_class);
++                'outer: while let Some(current_other_class) = other_class {
++                    let mut self_class = Some(self_class);
++                    while let Some(current_self_class) = self_class {
++                        if current_other_class == current_self_class {
++                            // Found a common superclass; we're done
++                            created_value.class = Some(current_self_class);
++                            break 'outer;
++                        }
++
++                        self_class = current_self_class.super_class();
+                     }
+ 
+-                    self_class = current_self_class.super_class();
++                    other_class = current_other_class.super_class();
+                 }
+-
+-                other_class = current_other_class.super_class();
+             }
+         }
+ 
+@@ -512,7 +529,7 @@ impl<'gc> AbstractState<'gc> {
+             let our_local = self.locals.at(i);
+             let other_local = other.locals.at(i);
+ 
+-            let merged = our_local.merged_with(other_local);
++            let merged = our_local.merged_with(activation, other_local);
+             self.locals.set(i, merged);
+             if merged != our_local {
+                 changed = true;
+@@ -532,7 +549,7 @@ impl<'gc> AbstractState<'gc> {
+             let our_entry = self.stack.at(i);
+             let other_entry = other.stack.at(i);
+ 
+-            let merged = our_entry.merged_with(other_entry);
++            let merged = our_entry.merged_with(activation, other_entry);
+             self.stack.set(i, merged);
+             if merged != our_entry {
+                 changed = true;
+@@ -556,7 +573,7 @@ impl<'gc> AbstractState<'gc> {
+                 return Err(make_error_1068(activation));
+             }
+ 
+-            let merged = our_scope.0.merged_with(other_scope.0);
++            let merged = our_scope.0.merged_with(activation, other_scope.0);
+             self.scope_stack.set(i, merged, our_scope.1);
+             if merged != our_scope.0 {
+                 changed = true;
+@@ -2153,7 +2170,19 @@ fn maybe_optimize_static_call<'gc>(
+ 
+     let declared_params = speculated_method.resolved_param_config();
+ 
+-    if receiver.class.is_some_and(|c| c.is_final())
++    // FlashNX: backport of upstream ruffle#24660 (Vector.<T> methods become
++    // CallNative).
++    let is_static_call = receiver.class.is_some_and(|c| {
++        // The speculated method is known to be the right method if either
++        //  - the class of the receiver is final, as final classes cannot have
++        //    subclasses with different methods
++        //  - the class is a parametrized vector class, as parametrized vector
++        //    classes do not have subclasses with different methods
++
++        c.is_final() || c.param().is_some()
++    });
++
++    if is_static_call
+         && let MethodKind::Native {
+             native_method,
+             fast_call: true,
+diff --git a/core/src/avm2/value.rs b/core/src/avm2/value.rs
+index 008863dec..03c1e9796 100644
+--- a/core/src/avm2/value.rs
++++ b/core/src/avm2/value.rs
+@@ -493,6 +493,17 @@ pub fn abc_default_value<'gc>(
+     }
+ }
+ 
++/// Given an `f64`, return an `i32` value that losslessly represents it, or
++/// `None` if there is no such `i32` value.
++fn try_promote_f64(value: f64) -> Option<i32> {
++    let i = value as i32;
++    if value.to_bits() == (i as f64).to_bits() {
++        Some(i)
++    } else {
++        None
++    }
++}
++
+ impl<'gc> Value<'gc> {
+     /// Do the best effort of converting the [`usize`] value to [`Value`].
+     ///
+@@ -524,8 +535,7 @@ impl<'gc> Value<'gc> {
+     pub fn normalize(self) -> Self {
+         match self {
+             Value::Number(n) => {
+-                let i = n as i32;
+-                if n.to_bits() == (i as f64).to_bits() && fits_in_value_integer_i32(i) {
++                if let Some(i) = try_promote_f64(n).filter(|i| fits_in_value_integer_i32(*i)) {
+                     Value::Integer(i)
+                 } else {
+                     self
+@@ -542,6 +552,16 @@ impl<'gc> Value<'gc> {
+         }
+     }
+ 
++    /// If this `Value` is a `Value::Number` that can be losslessly represented
++    /// as a `Value::Integer`, return that `Value::Integer`. Otherwise return
++    /// the original value.
++    pub fn try_promote_number(self) -> Self {
++        match self {
++            Value::Number(n) if let Some(i) = try_promote_f64(n) => Value::Integer(i),
++            _ => self,
++        }
++    }
++
+     /// Get the numerical portion of the value, if it exists.
+     ///
+     /// This function performs no numerical coercion, nor are any methods called.
+@@ -737,8 +757,9 @@ impl<'gc> Value<'gc> {
+     /// ToUint32 algorithm which appears to match AVM2.
+     ///
+     /// This function can be very hot, so we inline a fast-path for
+-    /// `Value::Number` and `Value::Integer`, and fall back to a non-inlined
+-    /// slow-path handling the rest of the cases if necessary.
++    /// `Value::Integer` and fall back to a non-inlined slow path handling the
++    /// rest of the cases if necessary.
++    #[inline]
+     pub fn coerce_to_u32(&self, activation: &mut Activation<'_, 'gc>) -> Result<u32, Error<'gc>> {
+         // Full coerce-to-u32 implementation. This is the slow-path.
+         #[inline(never)]
+@@ -747,7 +768,8 @@ impl<'gc> Value<'gc> {
+             activation: &mut Activation<'_, 'gc>,
+         ) -> Result<u32, Error<'gc>> {
+             Ok(match value {
+-                Value::Integer(_) | Value::Number(_) => unreachable!("Handled by fast path"),
++                Value::Integer(_) => unreachable!("Handled by fast path"),
++                Value::Number(n) => f64_to_wrapping_u32(*n),
+                 Value::Bool(b) => *b as u32,
+                 Value::Undefined | Value::Null => 0,
+                 Value::String(_) | Value::Object(_) => {
+@@ -757,7 +779,6 @@ impl<'gc> Value<'gc> {
+         }
+ 
+         match self {
+-            Value::Number(n) => Ok(f64_to_wrapping_u32(*n)),
+             Value::Integer(i) => Ok(*i as u32),
+             _ => {
+                 // Fall back to slow path
+@@ -775,8 +796,9 @@ impl<'gc> Value<'gc> {
+     /// ToInt32 algorithm which appears to match AVM2.
+     ///
+     /// This function can be very hot, so we inline a fast-path for
+-    /// `Value::Number` and `Value::Integer`, and fall back to a non-inlined
+-    /// slow-path handling the rest of the cases if necessary.
++    /// `Value::Integer` and fall back to a non-inlined slow path handling the
++    /// rest of the cases if necessary.
++    #[inline]
+     pub fn coerce_to_i32(&self, activation: &mut Activation<'_, 'gc>) -> Result<i32, Error<'gc>> {
+         // Full coerce-to-i32 implementation. This is the slow-path.
+         #[inline(never)]
+@@ -785,7 +807,8 @@ impl<'gc> Value<'gc> {
+             activation: &mut Activation<'_, 'gc>,
+         ) -> Result<i32, Error<'gc>> {
+             Ok(match value {
+-                Value::Integer(_) | Value::Number(_) => unreachable!("Handled by fast path"),
++                Value::Integer(_) => unreachable!("Handled by fast path"),
++                Value::Number(n) => f64_to_wrapping_i32(*n),
+                 Value::Bool(b) => *b as i32,
+                 Value::Undefined | Value::Null => 0,
+                 Value::String(_) | Value::Object(_) => {
+@@ -795,7 +818,6 @@ impl<'gc> Value<'gc> {
+         }
+ 
+         match self {
+-            Value::Number(n) => Ok(f64_to_wrapping_i32(*n)),
+             Value::Integer(i) => Ok(*i),
+             _ => {
+                 // Fall back to slow path
+@@ -1878,30 +1900,62 @@ impl<'gc> Value<'gc> {
+     /// This abstract relational comparison algorithm is intended to match
+     /// ECMA-262 3rd edition, section 11.8.5. It returns `true`, `false`, *or*
+     /// `undefined` (to signal NaN), the latter of which we represent as `None`.
++    ///
++    /// This function can be very hot, so we try to inline this fast-path and
++    /// fall back to a non-inlined slow-path if necessary.
+     pub fn abstract_lt(
+         &self,
+         other: &Value<'gc>,
+         activation: &mut Activation<'_, 'gc>,
+     ) -> Result<Option<bool>, Error<'gc>> {
++        // Full abstract-lt implementation. This is the slow-path.
++        #[inline(never)]
++        fn abstract_lt_slow<'gc>(
++            self_value: &Value<'gc>,
++            other_value: &Value<'gc>,
++            activation: &mut Activation<'_, 'gc>,
++        ) -> Result<Option<bool>, Error<'gc>> {
++            let prim_self = self_value.coerce_to_primitive(Some(Hint::Number), activation)?;
++            let prim_other = other_value.coerce_to_primitive(Some(Hint::Number), activation)?;
++
++            if let (Value::String(s), Value::String(o)) = (&prim_self, &prim_other) {
++                return Ok(Some(s.as_wstr() < o.as_wstr()));
++            }
++
++            let num_self = prim_self.coerce_to_number(activation)?;
++            let num_other = prim_other.coerce_to_number(activation)?;
++
++            if num_self.is_nan() || num_other.is_nan() {
++                return Ok(None);
++            }
++
++            Ok(Some(num_self < num_other))
++        }
++
+         match (self, other) {
+             (Value::Integer(a), Value::Integer(b)) => Ok(Some(a < b)),
+-            _ => {
+-                let prim_self = self.coerce_to_primitive(Some(Hint::Number), activation)?;
+-                let prim_other = other.coerce_to_primitive(Some(Hint::Number), activation)?;
+-
+-                if let (Value::String(s), Value::String(o)) = (&prim_self, &prim_other) {
+-                    return Ok(Some(s.as_wstr() < o.as_wstr()));
++            (Value::Integer(a), Value::Number(b)) => {
++                if b.is_nan() {
++                    return Ok(None);
+                 }
+ 
+-                let num_self = prim_self.coerce_to_number(activation)?;
+-                let num_other = prim_other.coerce_to_number(activation)?;
++                Ok(Some((*a as f64) < *b))
++            }
++            (Value::Number(a), Value::Integer(b)) => {
++                if a.is_nan() {
++                    return Ok(None);
++                }
+ 
+-                if num_self.is_nan() || num_other.is_nan() {
++                Ok(Some(*a < *b as f64))
++            }
++            (Value::Number(a), Value::Number(b)) => {
++                if a.is_nan() || b.is_nan() {
+                     return Ok(None);
+                 }
+ 
+-                Ok(Some(num_self < num_other))
++                Ok(Some(a < b))
+             }
++            _ => abstract_lt_slow(self, other, activation),
+         }
+     }
+ }
 diff --git a/core/src/backend/audio/mixer.rs b/core/src/backend/audio/mixer.rs
 index b98eb3f76..f1dd7e6e5 100644
 --- a/core/src/backend/audio/mixer.rs
@@ -777,7 +1469,7 @@ index b98eb3f76..f1dd7e6e5 100644
      }
  
 diff --git a/core/src/bitmap/bitmap_data.rs b/core/src/bitmap/bitmap_data.rs
-index 29eb34fdc..8eb4761bd 100644
+index 29eb34fdc..c4126f3c2 100644
 --- a/core/src/bitmap/bitmap_data.rs
 +++ b/core/src/bitmap/bitmap_data.rs
 @@ -15,6 +15,100 @@ use std::ops::Range;
@@ -892,7 +1584,58 @@ index 29eb34fdc..8eb4761bd 100644
      width: u32,
      height: u32,
      transparency: bool,
-@@ -428,7 +526,7 @@ mod wrapper {
+@@ -397,6 +495,18 @@ pub struct BitmapRawData<'gc> {
+     #[collect(require_static)]
+     dirty_state: DirtyState,
+ 
++    /// FlashNX: bumped by every access that may change a pixel (CPU writes,
++    /// GPU-side draws, dispose), so an operation can tell that the bitmap is
++    /// exactly as it left it. See `ThresholdMemo`.
++    #[collect(require_static)]
++    generation: u64,
++
++    /// FlashNX: `threshold` calls on this bitmap that changed nothing, as of
++    /// `generation` (see `bitmap::operations::threshold`). Allocated on the
++    /// first such call only.
++    #[collect(require_static)]
++    threshold_memo: Option<Box<ThresholdMemo>>,
++
+     /// Holds an egui texture handle, used for rendering this Bitmap in the debug ui.
+     /// This is automatically set to `None` when the texture is updated (either from
+     /// marking the CPU side dirty, or from performing a GPU -> CPU sync).
+@@ -404,6 +514,31 @@ pub struct BitmapRawData<'gc> {
+     pub egui_texture: std::cell::RefCell<Option<egui::TextureHandle>>,
+ }
+ 
++/// FlashNX: arguments of a `threshold` of a bitmap onto itself that matched
++/// no pixel, all of them: the same call on the same pixels matches none again.
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++pub struct ThresholdKey {
++    pub src_rect: (i32, i32, i32, i32),
++    pub dest_point: (i32, i32),
++    pub operation: u8,
++    pub threshold: u32,
++    pub colour: u32,
++    pub mask: u32,
++    pub copy_source: bool,
++}
++
++/// FlashNX: the `ThresholdKey`s known to change nothing at `generation`.
++/// Super Smash Flash 2 recolours every fighter pose each frame with one
++/// `threshold` per palette colour; 93 % of 157 000 calls in 300 frames
++/// changed nothing (2026-10-05), each one scanning the whole bitmap.
++pub struct ThresholdMemo {
++    generation: u64,
++    keys: Vec<ThresholdKey>,
++}
++
++/// Enough for a palette; past it the memo simply stops learning.
++const THRESHOLD_MEMO_KEYS: usize = 64;
++
+ #[derive(Clone, Debug)]
+ pub enum DirtyState {
+     // Both the CPU and GPU pixels are up to date. We do not need to wait for any syncs to complete
+@@ -428,7 +563,7 @@ mod wrapper {
      use ruffle_render::commands::CommandHandler;
      use std::cell::Ref;
  
@@ -901,7 +1644,7 @@ index 29eb34fdc..8eb4761bd 100644
  
      /// A wrapper type that ensures that we always wait for a pending
      /// GPU -> CPU sync to complete (using `sync_handle`) before accessing
-@@ -476,6 +574,7 @@ mod wrapper {
+@@ -476,6 +611,7 @@ mod wrapper {
                  mc,
                  BitmapRawData {
                      pixels: Vec::new(),
@@ -909,7 +1652,16 @@ index 29eb34fdc..8eb4761bd 100644
                      width: 0,
                      height: 0,
                      transparency: false,
-@@ -499,6 +598,7 @@ mod wrapper {
+@@ -484,6 +620,8 @@ mod wrapper {
+                     avm2_object: None,
+                     display_objects: vec![],
+                     dirty_state: DirtyState::Clean,
++                    generation: 0,
++                    threshold_memo: None,
+                     #[cfg(feature = "egui")]
+                     egui_texture: Default::default(),
+                 }
+@@ -499,6 +637,7 @@ mod wrapper {
              let data = self.sync(renderer).borrow();
              BitmapRawData {
                  pixels: data.pixels.clone(),
@@ -917,7 +1669,16 @@ index 29eb34fdc..8eb4761bd 100644
                  width: data.width,
                  height: data.height,
                  transparency: data.transparency,
-@@ -734,6 +834,7 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -508,6 +647,8 @@ mod wrapper {
+                 display_objects: vec![],
+                 // We have no GPU texture, so there's no need to mark as dirty
+                 dirty_state: DirtyState::Clean,
++                generation: 0,
++                threshold_memo: None,
+                 #[cfg(feature = "egui")]
+                 egui_texture: Default::default(),
+             }
+@@ -734,6 +875,7 @@ impl<'gc> BitmapRawData<'gc> {
                  Color::bgra_u32(fill_color).to_premultiplied_alpha(transparency);
                  width as usize * height as usize
              ],
@@ -925,7 +1686,16 @@ index 29eb34fdc..8eb4761bd 100644
              width,
              height,
              transparency,
-@@ -754,6 +855,7 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -742,6 +884,8 @@ impl<'gc> BitmapRawData<'gc> {
+             avm2_object: None,
+             display_objects: vec![],
+             dirty_state: DirtyState::Clean,
++            generation: 0,
++            threshold_memo: None,
+             #[cfg(feature = "egui")]
+             egui_texture: Default::default(),
+         }
+@@ -754,6 +898,7 @@ impl<'gc> BitmapRawData<'gc> {
          pixels: Vec<Color>,
      ) -> Self {
          Self {
@@ -933,7 +1703,20 @@ index 29eb34fdc..8eb4761bd 100644
              pixels,
              width,
              height,
-@@ -776,6 +878,7 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -762,6 +907,8 @@ impl<'gc> BitmapRawData<'gc> {
+             avm2_object: None,
+             disposed: false,
+             dirty_state: DirtyState::Clean,
++            generation: 0,
++            threshold_memo: None,
+             display_objects: vec![],
+             #[cfg(feature = "egui")]
+             egui_texture: Default::default(),
+@@ -773,9 +920,11 @@ impl<'gc> BitmapRawData<'gc> {
+     }
+ 
+     pub fn dispose(&mut self) {
++        self.generation += 1;
          self.width = 0;
          self.height = 0;
          self.pixels = Vec::new(); // free the CPU pixel buffer
@@ -941,8 +1724,92 @@ index 29eb34fdc..8eb4761bd 100644
          self.bitmap_handle = None;
          // There's no longer a handle to update
          self.dirty_state = DirtyState::Clean;
+@@ -823,11 +972,13 @@ impl<'gc> BitmapRawData<'gc> {
+         sync_handle: Box<dyn SyncHandle>,
+         region: PixelRegion,
+     ) {
++        self.generation += 1;
+         self.dirty_state = DirtyState::GpuModified(sync_handle, region);
+         self.inform_display_objects(gc_context);
+     }
+ 
+     pub fn set_cpu_dirty(&mut self, gc_context: &Mutation<'gc>, region: PixelRegion) {
++        self.generation += 1;
+         debug_assert!(region.x_max <= self.width);
+         debug_assert!(region.y_max <= self.height);
+ 
+@@ -873,11 +1024,13 @@ impl<'gc> BitmapRawData<'gc> {
+ 
+     #[inline]
+     pub fn set_pixel32_raw(&mut self, x: u32, y: u32, color: Color) {
++        self.generation += 1;
+         self.pixels[(x + y * self.width) as usize] = color;
+     }
+ 
+     #[inline]
+     pub fn set_pixel32_row_raw(&mut self, x1: u32, x2: u32, y: u32, color: Color) {
++        self.generation += 1;
+         let p1 = (x1 + y * self.width) as usize;
+         let p2 = (x2 + y * self.width) as usize;
+         let slice = &mut self.pixels[p1..p2];
+@@ -886,6 +1039,7 @@ impl<'gc> BitmapRawData<'gc> {
+ 
+     #[inline]
+     pub fn fill(&mut self, color: Color) {
++        self.generation += 1;
+         self.pixels.fill(color);
+     }
+ 
+@@ -895,9 +1049,47 @@ impl<'gc> BitmapRawData<'gc> {
+     }
+ 
+     pub fn raw_pixels_mut(&mut self) -> &mut Vec<Color> {
++        self.generation += 1;
+         &mut self.pixels
+     }
+ 
++    /// FlashNX: see `generation`.
++    pub fn generation(&self) -> u64 {
++        self.generation
++    }
++
++    /// FlashNX: put back the generation an operation read before taking
++    /// `raw_pixels_mut`, once it has checked that it changed no pixel.
++    pub fn restore_generation(&mut self, generation: u64) {
++        self.generation = generation;
++    }
++
++    /// FlashNX: whether this exact `threshold` already changed nothing on
++    /// these very pixels.
++    pub fn threshold_known_noop(&self, key: &ThresholdKey) -> bool {
++        self.threshold_memo
++            .as_ref()
++            .is_some_and(|m| m.generation == self.generation && m.keys.contains(key))
++    }
++
++    /// FlashNX: remember that `key` changed nothing at the current generation.
++    pub fn note_threshold_noop(&mut self, key: ThresholdKey) {
++        let generation = self.generation;
++        let memo = self.threshold_memo.get_or_insert_with(|| {
++            Box::new(ThresholdMemo {
++                generation,
++                keys: Vec::new(),
++            })
++        });
++        if memo.generation != generation {
++            memo.generation = generation;
++            memo.keys.clear();
++        }
++        if memo.keys.len() < THRESHOLD_MEMO_KEYS && !memo.keys.contains(&key) {
++            memo.keys.push(key);
++        }
++    }
++
+     pub fn raw_pixels(&self) -> &[Color] {
+         &self.pixels
+     }
 diff --git a/core/src/bitmap/operations.rs b/core/src/bitmap/operations.rs
-index 92bb2f430..a90831e5a 100644
+index 92bb2f430..45fb42866 100644
 --- a/core/src/bitmap/operations.rs
 +++ b/core/src/bitmap/operations.rs
 @@ -551,7 +551,6 @@ pub fn threshold<'gc>(
@@ -953,11 +1820,45 @@ index 92bb2f430..a90831e5a 100644
  
      let mut source_region =
          PixelRegion::for_whole_size(source_bitmap.width(), source_bitmap.height());
-@@ -576,48 +575,52 @@ pub fn threshold<'gc>(
-     let target = target.sync(renderer);
-     let mut write = target.borrow_mut(mc);
+@@ -567,61 +566,127 @@ pub fn threshold<'gc>(
+         return 0;
+     }
  
+-    let source = if source_bitmap.ptr_eq(target) {
++    let self_source = source_bitmap.ptr_eq(target);
++    let source = if self_source {
+         None
+     } else {
+         Some(source_bitmap.read_area(source_region, renderer))
+     };
+ 
+     let target = target.sync(renderer);
++    // FlashNX: a bitmap thresholded onto itself, with exactly the arguments
++    // of a call that matched nothing, and not touched since: it matches
++    // nothing again, so skip the scan (see `ThresholdMemo`). Only onto itself,
++    // where those arguments and these pixels are all there is to the result.
++    let memo_key = self_source.then_some(crate::bitmap::bitmap_data::ThresholdKey {
++        src_rect,
++        dest_point,
++        operation: operation as u8,
++        threshold,
++        colour,
++        mask,
++        copy_source,
++    });
++    if let Some(key) = &memo_key {
++        if target.borrow().threshold_known_noop(key) {
++            THRESHOLD_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++            THRESHOLD_UNCHANGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++            THRESHOLD_MEMO_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++            return 0;
++        }
++    }
+     let mut write = target.borrow_mut(mc);
+-
 -    // Check each pixel
++    let generation_before = write.generation();
++
 +    // FlashNX: the same pixels, visited in the same order, with the same
 +    // result, minus the per-pixel overhead that made this 14 % of a Super Smash
 +    // Flash 2 fight frame: the colour was converted to premultiplied alpha for
@@ -1034,14 +1935,56 @@ index 92bb2f430..a90831e5a 100644
  
 -    if let Some(dirty_area) = dirty_area {
 -        write.set_cpu_dirty(mc, dirty_area);
--    }
 +    // Every visited pixel counted towards the dirty area, so it is the whole
 +    // destination region (never empty here: that returned early above).
-+    write.set_cpu_dirty(mc, dest_region);
++    //
++    // FlashNX: unless nothing was written. Super Smash Flash 2 recolours each
++    // fighter every frame with one `threshold(bmd, rect, pt, "==", colour,
++    // replacement, mask, copySource=true)` per palette colour, on the pose's
++    // bitmap itself; after the first pass no pixel matches any more and the
++    // copy is the bitmap onto itself, yet the dirty mark sent the whole bitmap
++    // back to the GPU every call. No match and no copy, or a copy of the region
++    // onto itself, leaves every pixel as it was.
++    let unchanged = modified_count == 0
++        && (!copy_source || (source.is_none() && source_region == dest_region));
++    THRESHOLD_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++    if unchanged {
++        THRESHOLD_UNCHANGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++        // The scan took `raw_pixels_mut`, which bumps the generation; no pixel
++        // changed, so the bitmap is still the one it was before.
++        write.restore_generation(generation_before);
++        if let (Some(key), true) = (memo_key, modified_count == 0) {
++            write.note_threshold_noop(key);
++        }
++    } else {
++        write.set_cpu_dirty(mc, dest_region);
+     }
  
      modified_count
  }
-@@ -809,7 +812,12 @@ pub fn hit_test_point(
+ 
++static THRESHOLD_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++static THRESHOLD_UNCHANGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++static THRESHOLD_MEMO_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++
++/// FlashNX: `threshold` calls answered by the memo since the last call.
++pub fn take_threshold_memo_hits() -> u64 {
++    THRESHOLD_MEMO_HITS.swap(0, std::sync::atomic::Ordering::Relaxed)
++}
++
++/// FlashNX: (`threshold` calls, of which changed nothing) since the last call.
++pub fn take_threshold_stats() -> (u64, u64) {
++    use std::sync::atomic::Ordering::Relaxed;
++    (
++        THRESHOLD_CALLS.swap(0, Relaxed),
++        THRESHOLD_UNCHANGED.swap(0, Relaxed),
++    )
++}
++
+ pub fn scroll<'gc>(
+     mc: &Mutation<'gc>,
+     renderer: &mut dyn RenderBackend,
+@@ -809,7 +874,12 @@ pub fn hit_test_point(
              .read_area(PixelRegion::for_pixel(x, y), renderer)
              .get_pixel32_raw(x, y)
              .alpha()
@@ -1055,11 +1998,85 @@ index 92bb2f430..a90831e5a 100644
      } else {
          false
      }
+@@ -1335,12 +1405,16 @@ fn copy_on_cpu<'gc>(
+                 // Copying an entire texture that's the same size and type? Just replace the whole thing
+                 dest.raw_pixels_mut().copy_from_slice(source.raw_pixels());
+             } else {
++                // FlashNX: backport of upstream ruffle#24490 (copyPixels by row slices
++                // instead of per-pixel get/set, both branches of copy_on_cpu).
++                let width = dest_region.width() as usize;
+                 for y in 0..dest_region.height() {
+-                    for x in 0..dest_region.width() {
+-                        let color = source
+-                            .get_pixel32_raw(source_region.x_min + x, source_region.y_min + y);
+-                        dest.set_pixel32_raw(dest_region.x_min + x, dest_region.y_min + y, color);
+-                    }
++                    let src_start =
++                        (source_region.x_min + (source_region.y_min + y) * source.width()) as usize;
++                    let dest_start =
++                        (dest_region.x_min + (dest_region.y_min + y) * dest.width()) as usize;
++                    dest.raw_pixels_mut()[dest_start..dest_start + width]
++                        .copy_from_slice(&source.raw_pixels()[src_start..src_start + width]);
+                 }
+             }
+         } else {
+@@ -1349,19 +1423,31 @@ fn copy_on_cpu<'gc>(
+ 
+             let opaque = !dest.transparency();
+ 
++            let width = dest_region.width() as usize;
+             for y in 0..dest_region.height() {
+-                for x in 0..dest_region.width() {
+-                    let mut color =
+-                        source.get_pixel32_raw(source_region.x_min + x, source_region.y_min + y);
+-                    if blend {
+-                        color = dest
+-                            .get_pixel32_raw(dest_region.x_min + x, dest_region.y_min + y)
+-                            .blend_over(&color);
++                let src_start =
++                    (source_region.x_min + (source_region.y_min + y) * source.width()) as usize;
++                let dest_start =
++                    (dest_region.x_min + (dest_region.y_min + y) * dest.width()) as usize;
++                let dest_row = &mut dest.raw_pixels_mut()[dest_start..dest_start + width];
++                let src_row = &source.raw_pixels()[src_start..src_start + width];
++                if blend {
++                    // Keep the `opaque` check inside the loop: LLVM if-converts it and
++                    // vectorizes the whole body, measurably better than two split loops.
++                    for (dest, src) in dest_row.iter_mut().zip(src_row) {
++                        let mut color = dest.blend_over(src);
++                        if opaque {
++                            color = color.with_alpha(255);
++                        }
++                        *dest = color;
+                     }
+-                    if opaque {
+-                        color = color.with_alpha(255);
++                } else {
++                    // `!blend` with a transparent dest always takes the copy branch
++                    // above, so the dest is opaque here.
++                    debug_assert!(opaque);
++                    for (dest, src) in dest_row.iter_mut().zip(src_row) {
++                        *dest = src.to_un_multiplied_alpha().with_alpha(255);
+                     }
+-                    dest.set_pixel32_raw(dest_region.x_min + x, dest_region.y_min + y, color);
+                 }
+             }
+         }
 diff --git a/core/src/character.rs b/core/src/character.rs
-index f1843308c..d5a9a0af7 100644
+index f1843308c..885eeaf17 100644
 --- a/core/src/character.rs
 +++ b/core/src/character.rs
-@@ -73,7 +73,38 @@ impl<'gc> BitmapCharacter<'gc> {
+@@ -12,6 +12,9 @@ use gc_arena::{Collect, Gc, Mutation};
+ use ruffle_render::backend::RenderBackend;
+ use ruffle_render::bitmap::{Bitmap as RenderBitmap, BitmapHandle, BitmapSize};
+ use ruffle_render::error::Error as RenderError;
++use ruffle_common::tag_utils::SwfSlice;
++use std::borrow::Cow;
++use std::sync::Arc;
+ use swf::DefineBitsLossless;
+ 
+ #[derive(Copy, Clone, Collect, Debug)]
+@@ -73,8 +76,46 @@ impl<'gc> BitmapCharacter<'gc> {
          if let Some(handle) = self.handle.get() {
              return Ok(handle.clone());
          }
@@ -1091,17 +2108,107 @@ index f1843308c..d5a9a0af7 100644
 +            return Err(RenderError::TooLarge);
 +        }
          let decoded = self.compressed.decode()?;
+-        let new_handle = backend.register_bitmap(decoded)?;
 +        CACHED_BITMAP_BYTES.fetch_add(want, std::sync::atomic::Ordering::Relaxed);
 +        if large {
 +            CACHED_LARGE_BITMAP_BYTES.fetch_add(want, std::sync::atomic::Ordering::Relaxed);
 +        }
-         let new_handle = backend.register_bitmap(decoded)?;
++        // FlashNX: the image never changes and its bytes stay in the movie, so
++        // the renderer may drop its texture when nothing has drawn it for a
++        // while and decode it again on the next draw (see
++        // `flashnx_bitmap_residency`).
++        let compressed = self.compressed.clone();
++        let reload: std::rc::Rc<dyn Fn() -> Option<RenderBitmap<'static>>> =
++            std::rc::Rc::new(move || compressed.decode().ok());
++        let new_handle = backend.register_bitmap_reloadable(decoded, reload)?;
          // FIXME - do we ever want to release this handle, to avoid taking up GPU memory?
          self.handle.set(new_handle.clone()).unwrap();
-@@ -96,6 +127,160 @@ pub enum CompressedBitmap {
-     Lossless(DefineBitsLossless<'static>),
- }
- 
+         Ok(new_handle)
+@@ -88,12 +129,269 @@ impl<'gc> BitmapCharacter<'gc> {
+ #[derive(Clone, Debug)]
+ pub enum CompressedBitmap {
+     Jpeg {
+-        data: Vec<u8>,
+-        alpha: Option<Vec<u8>>,
++        data: BitmapBytes,
++        /// FlashNX: the movie's JPEGTables, for a DefineBits (JPEG1) tag. They
++        /// are glued in front of `data` at decode time; upstream glues them at
++        /// preload and keeps the glued copy.
++        tables: Option<Arc<[u8]>>,
++        alpha: Option<BitmapBytes>,
+         width: u32,
+         height: u32,
+     },
+-    Lossless(DefineBitsLossless<'static>),
++    /// FlashNX: the fields of `DefineBitsLossless`, with the pixel data kept
++    /// as `BitmapBytes` instead of an owned copy.
++    Lossless {
++        version: u8,
++        id: swf::CharacterId,
++        format: swf::BitmapFormat,
++        width: u16,
++        height: u16,
++        data: BitmapBytes,
++    },
++}
++
++/// FlashNX: the compressed bytes of a bitmap tag.
++///
++/// Upstream copies every DefineBits* payload out of the movie at preload, while
++/// the movie itself (`SwfMovie`) stays alive as long as its clips do, so every
++/// image of a loaded SWF is held twice. Super Smash Flash 2 loads its stages and
++/// characters as ~50 SWFs whose bytes are 80-90 % images (DAT220: 5.0 of
++/// 6.2 MB; DAT252: 3.0 of 3.8 MB), about 110 MB of duplicates by the 4th
++/// Classic level, where the heap ran out (2026-10-01). A tag that lies inside
++/// the movie data now just references it.
++#[derive(Clone, Debug)]
++pub enum BitmapBytes {
++    Owned(Vec<u8>),
++    Movie(SwfSlice),
++}
++
++static BITMAP_BYTES_SHARED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++static BITMAP_BYTES_COPIED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++
++/// FlashNX: bytes of bitmap tags that referenced their movie / that were copied,
++/// since boot (`census:` line).
++pub fn bitmap_bytes_stats() -> (u64, u64) {
++    use std::sync::atomic::Ordering::Relaxed;
++    (
++        BITMAP_BYTES_SHARED.load(Relaxed),
++        BITMAP_BYTES_COPIED.load(Relaxed),
++    )
++}
++
++impl BitmapBytes {
++    /// References `data` inside `swf`'s movie when it lies there, else copies it.
++    pub fn from_movie(swf: &SwfSlice, data: &[u8]) -> Self {
++        use std::sync::atomic::Ordering::Relaxed;
++        let slice = swf.to_unbounded_subslice(data);
++        if !data.is_empty()
++            && slice.end - slice.start == data.len()
++            && slice.end <= slice.movie.data().len()
++        {
++            BITMAP_BYTES_SHARED.fetch_add(data.len() as u64, Relaxed);
++            Self::Movie(slice)
++        } else {
++            BITMAP_BYTES_COPIED.fetch_add(data.len() as u64, Relaxed);
++            Self::Owned(data.to_vec())
++        }
++    }
++}
++
++impl std::ops::Deref for BitmapBytes {
++    type Target = [u8];
++
++    fn deref(&self) -> &[u8] {
++        match self {
++            Self::Owned(data) => data,
++            Self::Movie(slice) => slice.data(),
++        }
++    }
++}
++
 +/// Bytes of DECODED bitmap held by `CompressedBitmap::bitmap_handle`'s cache.
 +///
 +/// That cache is never evicted (upstream FIXME in `bitmap_handle`), so this only
@@ -1183,10 +2290,19 @@ index f1843308c..d5a9a0af7 100644
 +fn heap_has_room(bytes: usize) -> bool {
 +    use std::ffi::c_void;
 +    unsafe extern "C" {
++        #[cfg(not(target_os = "horizon"))]
 +        fn malloc(size: usize) -> *mut c_void;
++        #[cfg(target_os = "horizon")]
++        fn memalign(align: usize, size: usize) -> *mut c_void;
 +        fn free(ptr: *mut c_void);
 +    }
 +    unsafe {
++        // On the Switch, big blocks (decoded images among them) come from the
++        // top of the heap (FlashNX's cpp/src/flashnx_heap.c): ask there, by
++        // asking the way they are asked for.
++        #[cfg(target_os = "horizon")]
++        let p = memalign(4096, bytes);
++        #[cfg(not(target_os = "horizon"))]
 +        let p = malloc(bytes);
 +        if p.is_null() {
 +            return false;
@@ -1194,6 +2310,30 @@ index f1843308c..d5a9a0af7 100644
 +        free(p);
 +    }
 +    true
++}
++
++/// FlashNX: the renderer dropped (`resident == false`) or rebuilt the texture of
++/// a decoded SWF image registered through `register_bitmap_reloadable`. The
++/// budget above counts what is RESIDENT: without this, a game that cycles
++/// through more images than the budget over a session would end up refused
++/// (invisible sprites) although the evicted ones hold no memory any more.
++pub fn flashnx_bitmap_residency(bytes: u64, resident: bool) {
++    use std::sync::atomic::Ordering::Relaxed;
++    let large = bytes >= LARGE_BITMAP_BYTES;
++    if resident {
++        CACHED_BITMAP_BYTES.fetch_add(bytes, Relaxed);
++        if large {
++            CACHED_LARGE_BITMAP_BYTES.fetch_add(bytes, Relaxed);
++        }
++    } else {
++        // Load then store: only the player thread touches these counters.
++        let v = CACHED_BITMAP_BYTES.load(Relaxed);
++        CACHED_BITMAP_BYTES.store(v.saturating_sub(bytes), Relaxed);
++        if large {
++            let v = CACHED_LARGE_BITMAP_BYTES.load(Relaxed);
++            CACHED_LARGE_BITMAP_BYTES.store(v.saturating_sub(bytes), Relaxed);
++        }
++    }
 +}
 +
 +/// Start a new movie: clear the accounting and size the budget from that movie's
@@ -1254,12 +2394,19 @@ index f1843308c..d5a9a0af7 100644
 +        );
 +    }
 +    false
-+}
-+
+ }
+ 
  impl CompressedBitmap {
-     pub fn size(&self) -> BitmapSize {
-         match self {
-@@ -109,6 +294,48 @@ impl CompressedBitmap {
+@@ -103,23 +401,81 @@ impl CompressedBitmap {
+                 width: *width,
+                 height: *height,
+             },
+-            CompressedBitmap::Lossless(define_bits_lossless) => BitmapSize {
+-                width: define_bits_lossless.width.into(),
+-                height: define_bits_lossless.height.into(),
++            CompressedBitmap::Lossless { width, height, .. } => BitmapSize {
++                width: (*width).into(),
++                height: (*height).into(),
              },
          }
      }
@@ -1308,6 +2455,36 @@ index f1843308c..d5a9a0af7 100644
      pub fn decode(&self) -> Result<RenderBitmap<'static>, RenderError> {
          match self {
              CompressedBitmap::Jpeg {
+                 data,
++                tables,
+                 alpha,
+                 width: _,
+                 height: _,
+-            } => ruffle_render::utils::decode_define_bits_jpeg(data, alpha.as_deref()),
+-            CompressedBitmap::Lossless(define_bits_lossless) => {
+-                ruffle_render::utils::decode_define_bits_lossless(define_bits_lossless)
++            } => {
++                let data = ruffle_render::utils::glue_tables_to_jpeg(data, tables.as_deref());
++                ruffle_render::utils::decode_define_bits_jpeg(&data, alpha.as_deref())
+             }
++            CompressedBitmap::Lossless {
++                version,
++                id,
++                format,
++                width,
++                height,
++                data,
++            } => ruffle_render::utils::decode_define_bits_lossless(&DefineBitsLossless {
++                version: *version,
++                id: *id,
++                format: *format,
++                width: *width,
++                height: *height,
++                data: Cow::Borrowed(data),
++            }),
+         }
+     }
+ }
 diff --git a/core/src/context.rs b/core/src/context.rs
 index 0926945e0..844b86e46 100644
 --- a/core/src/context.rs
@@ -1326,7 +2503,7 @@ index 0926945e0..844b86e46 100644
      /// A tracker for the current keyboard focused element
      pub focus_tracker: FocusTracker<'gc>,
 diff --git a/core/src/display_object.rs b/core/src/display_object.rs
-index 2e6e01783..c218220ca 100644
+index 2e6e01783..df8dbdd1b 100644
 --- a/core/src/display_object.rs
 +++ b/core/src/display_object.rs
 @@ -32,6 +32,10 @@ mod avm1_button;
@@ -1348,7 +2525,27 @@ index 2e6e01783..c218220ca 100644
  pub use interactive::{Avm2MousePick, InteractiveObject, TInteractiveObject};
  pub use loader_display::LoaderDisplay;
  pub use morph_shape::MorphShape;
-@@ -683,6 +688,15 @@ impl<'gc> DisplayObjectBase<'gc> {
+@@ -257,6 +262,10 @@ pub enum RenderMask<'gc> {
+ // Ensure this always has the same alignment as its subclasses (needed for `Gc` casts).
+ #[repr(align(8))]
+ pub struct DisplayObjectBase<'gc> {
++    /// FlashNX: counts live display objects (`census:` line).
++    #[cfg(feature = "flashnx_census")]
++    #[collect(require_static)]
++    _census: crate::flashnx_census::DisplayGuard,
+     cell: RefCell<DisplayObjectBaseMut>,
+     parent: Lock<Option<DisplayObject<'gc>>>,
+     place_frame: Cell<u16>,
+@@ -332,6 +341,8 @@ struct DisplayObjectBaseMut {
+ impl Default for DisplayObjectBase<'_> {
+     fn default() -> Self {
+         Self {
++            #[cfg(feature = "flashnx_census")]
++            _census: Default::default(),
+             cell: RefCell::new(DisplayObjectBaseMut {
+                 filters: Default::default(),
+                 blend_shader: None,
+@@ -683,6 +694,15 @@ impl<'gc> DisplayObjectBase<'gc> {
          self.set_flag(DisplayObjectFlags::SKIP_NEXT_ENTER_FRAME, skip);
      }
  
@@ -1364,21 +2561,130 @@ index 2e6e01783..c218220ca 100644
      fn set_avm1_removed(&self, value: bool) {
          self.set_flag(DisplayObjectFlags::AVM1_REMOVED, value);
      }
-@@ -931,6 +945,34 @@ struct DrawCacheInfo {
+@@ -931,6 +951,143 @@ struct DrawCacheInfo {
      filters: Vec<Filter>,
  }
  
-+/// FlashNX: flag the top of `obj`'s display tree as holding work for the next
-+/// inner goto (see `run_inner_goto_frame`). A walk up the parent chain, a few
-+/// pointer reads.
++/// FlashNX: flag `obj` and every ancestor up to the top of its display tree
++/// as holding work for the next inner goto (see `run_inner_goto_frame`). The
++/// flag on the top lets a goto skip a whole orphan tree, the flags below it let
++/// it skip the unchanged subtrees of the stage (`skipping_clean_subtrees`). A
++/// walk up the parent chain, a few pointer reads and flag writes.
 +pub fn mark_lifecycle_dirty<'gc>(obj: DisplayObject<'gc>) {
 +    let mut top = obj;
++    top.base().set_lifecycle_dirty(true);
 +    while let Some(parent) = top.parent() {
 +        top = parent;
++        top.base().set_lifecycle_dirty(true);
 +    }
-+    top.base().set_lifecycle_dirty(true);
 +    if top.as_stage().is_none() {
 +        bump_orphan_mark_epoch();
++        queue_dirty_orphan(top);
++    }
++}
++
++thread_local! {
++    /// FlashNX: addresses of the tops of non-stage trees (orphans) marked
++    /// dirty since an inner goto last collected them, with a set to keep each
++    /// address once. Addresses, not references: the marks happen with no
++    /// `UpdateContext` at hand, and `OrphanManager::resolve_dirty` turns them
++    /// back into objects through the weak references it already keeps.
++    ///
++    /// Without this, every inner goto iterated the whole orphan list to find
++    /// the few dirty ones: ~800 weak references, twice per goto, ~100 gotos per
++    /// frame in a Super Smash Flash 2 fight (2026-10-02: `nextFrame` measured
++    /// at 74-131 us a call, ~9 ms of a fight frame).
++    static DIRTY_ORPHANS: RefCell<(Vec<usize>, fnv::FnvHashSet<usize>)> =
++        RefCell::new((Vec::new(), fnv::FnvHashSet::default()));
++}
++
++/// FlashNX: queue a parentless, non-stage object that is dirty (see above).
++#[inline]
++pub fn queue_dirty_orphan(obj: DisplayObject<'_>) {
++    let addr = obj.as_ptr() as usize;
++    DIRTY_ORPHANS.with(|q| {
++        if let Ok(mut q) = q.try_borrow_mut() {
++            if q.1.insert(addr) {
++                q.0.push(addr);
++            }
++        }
++    });
++}
++
++/// FlashNX: everything queued since the last call, in queuing order.
++pub fn take_dirty_orphans() -> Vec<usize> {
++    DIRTY_ORPHANS.with(|q| {
++        let mut q = q.borrow_mut();
++        q.1.clear();
++        std::mem::take(&mut q.0)
++    })
++}
++
++/// FlashNX: true while an inner goto walks the display lists. Then
++/// `construct_frame` and `run_frame_scripts` pass over every child whose
++/// subtree is clean: nothing in it changed frame, was added, queued a goto or a
++/// frame script since its last frame-script pass (`mark_lifecycle_dirty`), and
++/// that pass left it fully constructed with no frame script outstanding
++/// (`settle_lifecycle_dirty`). On such a subtree both walks are no-ops.
++///
++/// Super Smash Flash 2 steps every clip of its stage itself, every tick, with
++/// `nextFrame`/`gotoAndStop`: 50 to 80 inner gotos a frame in a fight, each of
++/// which walked the whole stage twice. That was 15.8 % of the frame of a slow
++/// level (sampling profile, 2026-10-01). ruffle#23876 proposes the same idea
++/// ("a fully constructed flag") and ruffle#24509 reports the same wall.
++static SKIP_CLEAN_SUBTREES: std::sync::atomic::AtomicBool =
++    std::sync::atomic::AtomicBool::new(false);
++
++/// Kill switch for the above (`stageskip.off` marker on the SD card).
++static STAGE_SKIP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
++
++static SUBTREES_SKIPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++
++pub fn set_stage_skip(enabled: bool) {
++    STAGE_SKIP.store(enabled, std::sync::atomic::Ordering::Relaxed);
++}
++
++pub fn skipping_clean_subtrees() -> bool {
++    SKIP_CLEAN_SUBTREES.load(std::sync::atomic::Ordering::Relaxed)
++}
++
++/// Turns skipping on (if allowed) or off, returning the previous state so a
++/// nested inner goto can restore it.
++pub fn set_skipping_clean_subtrees(on: bool) -> bool {
++    let on = on && STAGE_SKIP.load(std::sync::atomic::Ordering::Relaxed);
++    SKIP_CLEAN_SUBTREES.swap(on, std::sync::atomic::Ordering::Relaxed)
++}
++
++/// Whether a walk may pass over `child` (and count it).
++#[inline]
++pub fn skip_clean_child(child: DisplayObject<'_>) -> bool {
++    if skipping_clean_subtrees() && !child.base().lifecycle_dirty() {
++        SUBTREES_SKIPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++        true
++    } else {
++        false
++    }
++}
++
++/// Subtrees passed over since the last call.
++pub fn take_subtrees_skipped() -> u64 {
++    SUBTREES_SKIPPED.swap(0, std::sync::atomic::Ordering::Relaxed)
++}
++
++/// FlashNX: end of `run_frame_scripts` on an object whose flag was cleared at
++/// its start. It stays dirty if work remains in it (`unfinished`: not yet
++/// constructed, a frame script still to run) or in a child; a mark made while
++/// its scripts ran has already set it again. Bottom-up, so a dirty object
++/// always has dirty ancestors and no walk can pass over it.
++#[inline]
++pub fn settle_lifecycle_dirty(obj: DisplayObject<'_>, unfinished: bool, child_dirty: bool) {
++    if unfinished || child_dirty {
++        obj.base().set_lifecycle_dirty(true);
++        // The top of an orphan tree that stays dirty must be found again by
++        // the next inner goto.
++        if obj.parent().is_none() && obj.as_stage().is_none() {
++            queue_dirty_orphan(obj);
++        }
 +    }
 +}
 +
@@ -1399,18 +2705,39 @@ index 2e6e01783..c218220ca 100644
  pub fn render_base<'gc>(
      this: DisplayObject<'gc>,
      context: &mut RenderContext<'_, 'gc>,
-@@ -1873,6 +1915,10 @@ pub trait TDisplayObject<'gc>:
+@@ -1873,6 +2030,11 @@ pub trait TDisplayObject<'gc>:
          let write = Gc::write(context.gc(), self.base());
          DisplayObjectBase::set_parent_ignoring_orphan_list(write, parent);
          let parent_removed = had_parent && parent.is_none();
 +        // FlashNX: a new child (and its whole subtree) may need constructing.
-+        if let Some(parent) = parent {
-+            mark_lifecycle_dirty(parent);
++        // Marking the child marks the parent's chain too.
++        if parent.is_some() {
++            mark_lifecycle_dirty(self.into());
 +        }
  
          if parent_removed {
              if let Some(int) = self.as_interactive() {
-@@ -2585,6 +2631,18 @@ pub trait TDisplayObject<'gc>:
+@@ -2393,11 +2555,19 @@ pub trait TDisplayObject<'gc>:
+ 
+     /// Run any frame scripts (if they exist and this object needs to run them).
+     fn run_frame_scripts(self, context: &mut UpdateContext<'gc>) {
++        // FlashNX: lifecycle flags, see `settle_lifecycle_dirty`.
++        self.base().set_lifecycle_dirty(false);
++        let mut child_dirty = false;
+         if let Some(container) = self.as_container() {
+             for child in container.iter_render_list() {
++                if skip_clean_child(child) {
++                    continue;
++                }
+                 child.run_frame_scripts(context);
++                child_dirty |= child.base().lifecycle_dirty();
+             }
+         }
++        settle_lifecycle_dirty(self.into(), self.object2().is_none(), child_dirty);
+     }
+ 
+     /// Called before the child is about to be rendered.
+@@ -2585,6 +2755,18 @@ pub trait TDisplayObject<'gc>:
      /// Tests if a given stage position point intersects with the world bounds of this object.
      #[no_dynamic]
      fn hit_test_bounds(self, point: Point<Twips>) -> bool {
@@ -1429,7 +2756,7 @@ index 2e6e01783..c218220ca 100644
          self.world_bounds(BoundsMode::Engine).contains(point)
      }
  
-@@ -2604,6 +2662,13 @@ pub trait TDisplayObject<'gc>:
+@@ -2604,6 +2786,13 @@ pub trait TDisplayObject<'gc>:
          point: Point<Twips>,
          options: HitTestOptions,
      ) -> bool {
@@ -1443,7 +2770,7 @@ index 2e6e01783..c218220ca 100644
          // Default to using bounding box.
          (!options.contains(HitTestOptions::SKIP_INVISIBLE) || self.visible())
              && self.hit_test_bounds(point)
-@@ -2995,6 +3060,12 @@ bitflags! {
+@@ -2995,6 +3184,12 @@ bitflags! {
          /// (they need to be instantiated "manually" by
          /// `Sprite.constructChildren`).
          const MANUAL_FRAME_CONSTRUCT  = 1 << 16;
@@ -1456,7 +2783,7 @@ index 2e6e01783..c218220ca 100644
      }
  }
  
-@@ -3232,3 +3303,25 @@ impl<'gc> DisplayObjectWeak<'gc> {
+@@ -3232,3 +3427,25 @@ impl<'gc> DisplayObjectWeak<'gc> {
          }
      }
  }
@@ -1482,6 +2809,24 @@ index 2e6e01783..c218220ca 100644
 +    }
 +}
 +
+diff --git a/core/src/display_object/avm2_button.rs b/core/src/display_object/avm2_button.rs
+index 56277523b..393d057cb 100644
+--- a/core/src/display_object/avm2_button.rs
++++ b/core/src/display_object/avm2_button.rs
+@@ -564,6 +564,13 @@ impl<'gc> TDisplayObject<'gc> for Avm2Button<'gc> {
+         for state in self.all_state_children(self.0.weird_framescript_order.take()) {
+             state.run_frame_scripts(context);
+         }
++        // FlashNX: a button is never passed over by an inner goto (see
++        // `skipping_clean_subtrees`), nor anything above it: its inactive
++        // states have no parent, so a change inside them would not mark it.
++        self.base().set_lifecycle_dirty(true);
++        if self.parent().is_none() {
++            crate::display_object::queue_dirty_orphan(self.into());
++        }
+     }
+ 
+     fn render_self(self, context: &mut RenderContext<'_, 'gc>) {
 diff --git a/core/src/display_object/container.rs b/core/src/display_object/container.rs
 index 61b8459b8..88fa7bc9d 100644
 --- a/core/src/display_object/container.rs
@@ -1642,11 +2987,50 @@ index 2a73ff9c2..3bb91ecbc 100644
      bounds: Rectangle<Twips>,
      movie: Arc<SwfMovie>,
      #[collect(require_static)]
+diff --git a/core/src/display_object/loader_display.rs b/core/src/display_object/loader_display.rs
+index 280bb9954..0b2f9ba22 100644
+--- a/core/src/display_object/loader_display.rs
++++ b/core/src/display_object/loader_display.rs
+@@ -115,6 +115,10 @@ impl<'gc> TDisplayObject<'gc> for LoaderDisplay<'gc> {
+ 
+     fn construct_frame(self, context: &mut UpdateContext<'gc>) {
+         for child in self.iter_render_list() {
++            // FlashNX: an inner goto passes over unchanged subtrees.
++            if crate::display_object::skip_clean_child(child) {
++                continue;
++            }
+             child.construct_frame(context);
+         }
+     }
 diff --git a/core/src/display_object/movie_clip.rs b/core/src/display_object/movie_clip.rs
-index baa4a03c5..4aff8fd57 100644
+index baa4a03c5..5879a4f97 100644
 --- a/core/src/display_object/movie_clip.rs
 +++ b/core/src/display_object/movie_clip.rs
-@@ -193,6 +193,16 @@ pub struct MovieClipData<'gc> {
+@@ -16,7 +16,7 @@ use crate::backend::audio::{AudioManager, SoundInstanceHandle};
+ use crate::backend::navigator::Request;
+ use crate::backend::ui::MouseCursor;
+ use crate::binary_data::BinaryData;
+-use crate::character::{BitmapCharacter, Character, CompressedBitmap};
++use crate::character::{BitmapBytes, BitmapCharacter, Character, CompressedBitmap};
+ use crate::context::{ActionType, RenderContext, UpdateContext};
+ use crate::display_object::container::{ChildContainer, dispatch_removed_event};
+ use crate::display_object::interactive::{
+@@ -48,13 +48,12 @@ use ruffle_common::utils::HasPrefixField;
+ use ruffle_macros::istr;
+ use ruffle_render::perspective_projection::PerspectiveProjection;
+ use smallvec::SmallVec;
+-use std::borrow::Cow;
+ use std::cell::{Cell, OnceCell, Ref, RefCell, RefMut};
+ use std::cmp::max;
+ use std::collections::HashMap;
+ use std::sync::Arc;
+ use swf::extensions::ReadSwfExt;
+-use swf::{ClipEventFlag, DefineBitsLossless, FrameLabelData, TagCode, UTF_8};
++use swf::{ClipEventFlag, FrameLabelData, TagCode, UTF_8};
+ 
+ use super::BitmapClass;
+ use super::interactive::Avm2MousePick;
+@@ -193,6 +192,16 @@ pub struct MovieClipData<'gc> {
      /// `None` in an AVM2 movie.
      next_avm1_clip: Lock<Option<MovieClip<'gc>>>,
  
@@ -1663,7 +3047,7 @@ index baa4a03c5..4aff8fd57 100644
      audio_stream: Cell<Option<SoundInstanceHandle>>,
  
      #[collect(require_static)]
-@@ -262,6 +272,9 @@ impl<'gc> MovieClipData<'gc> {
+@@ -262,6 +271,9 @@ impl<'gc> MovieClipData<'gc> {
              hit_area: Lock::new(None),
              attached_audio: Lock::new(None),
              next_avm1_clip: Lock::new(None),
@@ -1673,7 +3057,7 @@ index baa4a03c5..4aff8fd57 100644
          }
      }
  
-@@ -375,6 +388,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -375,6 +387,7 @@ impl<'gc> MovieClip<'gc> {
          is_root: bool,
          loader_info: Option<LoaderInfoObject<'gc>>,
      ) {
@@ -1681,7 +3065,7 @@ index baa4a03c5..4aff8fd57 100644
          let write = Gc::write(context.gc(), self.0);
          let movie =
              movie.unwrap_or_else(|| Arc::new(SwfMovie::empty(write.movie().version(), None)));
-@@ -411,6 +425,30 @@ impl<'gc> MovieClip<'gc> {
+@@ -411,6 +424,30 @@ impl<'gc> MovieClip<'gc> {
          unlock!(Gc::write(mc, self.0), MovieClipData, next_avm1_clip).set(node);
      }
  
@@ -1712,7 +3096,7 @@ index baa4a03c5..4aff8fd57 100644
      pub fn call_on_construct_handler(self, context: &mut UpdateContext<'gc>) {
          let Some(object) = self.0.object1.get() else {
              return;
-@@ -558,7 +596,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -558,7 +595,7 @@ impl<'gc> MovieClip<'gc> {
                  TagCode::FrameLabel => shared.frame_label(reader),
                  TagCode::JpegTables => shared.jpeg_tables(context, reader),
                  TagCode::ShowFrame => shared.show_frame(reader, tag_len),
@@ -1721,7 +3105,7 @@ index baa4a03c5..4aff8fd57 100644
                  TagCode::SoundStreamHead => shared.sound_stream_head(reader, 1),
                  TagCode::SoundStreamHead2 => shared.sound_stream_head(reader, 2),
                  TagCode::VideoFrame => shared.preload_video_frame(context, reader),
-@@ -913,6 +951,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -913,6 +950,7 @@ impl<'gc> MovieClip<'gc> {
                  // the current frame, the goto is properly queued.
  
                  self.0.queued_goto_frame.set(Some(frame));
@@ -1729,7 +3113,7 @@ index baa4a03c5..4aff8fd57 100644
  
                  // If we have a frame script on that frame, add ourselves to the
                  // frame script cleanup queue so that that frame script is
-@@ -1144,6 +1183,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -1144,6 +1182,7 @@ impl<'gc> MovieClip<'gc> {
      /// This sets the current frame of this MovieClip to a given number.
      pub fn set_current_frame(self, current_frame: FrameNumber) {
          self.0.current_frame.set(current_frame);
@@ -1737,7 +3121,7 @@ index baa4a03c5..4aff8fd57 100644
      }
  
      /// The amount of frames loaded in this movieclip.
-@@ -1486,6 +1526,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -1486,6 +1525,7 @@ impl<'gc> MovieClip<'gc> {
              // in the meantime, it should absolutely run again.
              self.set_last_queued_script_frame(None);
          }
@@ -1745,7 +3129,7 @@ index baa4a03c5..4aff8fd57 100644
      }
  
      /// Instantiate a given child object on the timeline at a given depth.
-@@ -1626,6 +1667,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -1626,6 +1666,7 @@ impl<'gc> MovieClip<'gc> {
      }
  
      fn run_goto(mut self, context: &mut UpdateContext<'gc>, frame: FrameNumber, is_implicit: bool) {
@@ -1753,7 +3137,7 @@ index baa4a03c5..4aff8fd57 100644
          if cfg!(feature = "timeline_debug") {
              tracing::debug!(
                  "[{}]: {} from frame {} to frame {}",
-@@ -1747,6 +1789,29 @@ impl<'gc> MovieClip<'gc> {
+@@ -1747,6 +1788,29 @@ impl<'gc> MovieClip<'gc> {
              }
          }
          let hit_target_frame = self.0.current_frame() == frame;
@@ -1783,7 +3167,7 @@ index baa4a03c5..4aff8fd57 100644
  
          if is_rewind {
              // Remove all display objects that were created after the
-@@ -2149,6 +2214,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -2149,6 +2213,7 @@ impl<'gc> MovieClip<'gc> {
          context: &mut UpdateContext<'gc>,
      ) {
          let current_frame = self.current_frame();
@@ -1791,7 +3175,129 @@ index baa4a03c5..4aff8fd57 100644
  
          let write = unlock!(Gc::write(context.gc(), self.0), MovieClipData, cell);
          let mut frame_scripts = RefMut::map(write.borrow_mut(), |r| &mut r.frame_scripts);
-@@ -3968,11 +4034,35 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -2494,6 +2559,26 @@ impl<'gc> MovieClip<'gc> {
+         }
+     }
+ 
++    /// FlashNX: a frame script of the current frame that has not run for it
++    /// yet. Either one `run_local_frame_scripts` would still run (held back
++    /// while this clip is already running one), or one registered during the
++    /// frame-script phase: that one waits in `frame_script_cleanup_queue`
++    /// without being marked pending, and an inner goto empties that queue and
++    /// relies on its walk to run it (timeline/frame_script_cleanup_goto2).
++    /// `has_pending_script` alone stays set after the script has run.
++    fn frame_script_outstanding(self) -> bool {
++        let current = self.0.current_frame.get();
++        if self.last_queued_script_frame() != Some(current) && self.frame_script(current).is_some()
++        {
++            return true;
++        }
++        if !self.has_pending_script() {
++            return false;
++        }
++        let frame_id = self.0.queued_script_frame.get();
++        self.last_queued_script_frame() != Some(frame_id) && self.frame_script(frame_id).is_some()
++    }
++
+     fn check_has_pending_script(self) {
+         let has_pending_script = self.has_frame_script(self.0.current_frame.get());
+         self.set_has_pending_script(has_pending_script);
+@@ -2601,6 +2686,10 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+                     .0
+                     .contains_flag(MovieClipFlags::RUNNING_CONSTRUCT_FRAME);
+                 for child in self.iter_render_list() {
++                    // FlashNX: an inner goto passes over unchanged subtrees.
++                    if crate::display_object::skip_clean_child(child) {
++                        continue;
++                    }
+                     // Under some conditions, we won't run `construct_frame` on
+                     // a not-yet-constructed child
+                     if child.object2().is_none() {
+@@ -2635,11 +2724,20 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+     }
+ 
+     fn run_frame_scripts(self, context: &mut UpdateContext<'gc>) {
++        // FlashNX: lifecycle flags, see `settle_lifecycle_dirty`.
++        self.base().set_lifecycle_dirty(false);
+         self.run_local_frame_scripts(context);
+ 
++        let mut child_dirty = false;
+         for child in self.iter_render_list() {
++            if crate::display_object::skip_clean_child(child) {
++                continue;
++            }
+             child.run_frame_scripts(context);
++            child_dirty |= child.base().lifecycle_dirty();
+         }
++        let unfinished = self.object2().is_none() || self.frame_script_outstanding();
++        crate::display_object::settle_lifecycle_dirty(self.into(), unfinished, child_dirty);
+     }
+ 
+     fn render_self(self, context: &mut RenderContext<'_, 'gc>) {
+@@ -3437,14 +3535,15 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+         let define_bits_lossless = reader.read_define_bits_lossless(version)?;
+         let bitmap = Gc::new(
+             context.gc(),
+-            BitmapCharacter::new(CompressedBitmap::Lossless(DefineBitsLossless {
++            // FlashNX: the pixel data stays in the movie (see `BitmapBytes`).
++            BitmapCharacter::new(CompressedBitmap::Lossless {
+                 id: define_bits_lossless.id,
+                 format: define_bits_lossless.format,
+                 width: define_bits_lossless.width,
+                 height: define_bits_lossless.height,
+                 version: define_bits_lossless.version,
+-                data: Cow::Owned(define_bits_lossless.data.into_owned()),
+-            })),
++                data: BitmapBytes::from_movie(&self.swf, &define_bits_lossless.data),
++            }),
+         );
+         self.library_mut(context)
+             .register_character(define_bits_lossless.id, Character::Bitmap(bitmap));
+@@ -3562,13 +3661,17 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+         let library = self.library_mut(context);
+         let (id, jpeg_data) = reader.read_define_bits()?;
+         let jpeg_tables = library.jpeg_tables();
+-        let jpeg_data =
+-            ruffle_render::utils::glue_tables_to_jpeg(jpeg_data, jpeg_tables).into_owned();
+-        let (width, height) = ruffle_render::utils::decode_define_bits_jpeg_dimensions(&jpeg_data)?;
++        // FlashNX: glue only to read the dimensions; the bitmap keeps the tag
++        // bytes in the movie plus the shared tables, and glues them at decode.
++        let glued = ruffle_render::utils::glue_tables_to_jpeg(jpeg_data, jpeg_tables);
++        let (width, height) = ruffle_render::utils::decode_define_bits_jpeg_dimensions(&glued)?;
++        drop(glued);
++        let tables = library.jpeg_tables_shared();
+         let bitmap = Character::Bitmap(Gc::new(
+             mc,
+             BitmapCharacter::new(CompressedBitmap::Jpeg {
+-                data: jpeg_data,
++                data: BitmapBytes::from_movie(&self.swf, jpeg_data),
++                tables,
+                 alpha: None,
+                 width,
+                 height,
+@@ -3589,7 +3692,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+         let bitmap = Character::Bitmap(Gc::new(
+             context.gc(),
+             BitmapCharacter::new(CompressedBitmap::Jpeg {
+-                data: jpeg_data.to_owned(),
++                data: BitmapBytes::from_movie(&self.swf, jpeg_data),
++                tables: None,
+                 alpha: None,
+                 width,
+                 height,
+@@ -3612,8 +3716,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+         let bitmap = Character::Bitmap(Gc::new(
+             context.gc(),
+             BitmapCharacter::new(CompressedBitmap::Jpeg {
+-                data: jpeg.data.to_owned(),
+-                alpha: Some(jpeg.alpha_data.to_owned()),
++                data: BitmapBytes::from_movie(&self.swf, jpeg.data),
++                tables: None,
++                alpha: Some(BitmapBytes::from_movie(&self.swf, jpeg.alpha_data)),
+                 width,
+                 height,
+             }),
+@@ -3968,11 +4073,35 @@ impl<'gc, 'a> MovieClipShared<'gc> {
      }
  
      #[inline]
@@ -1831,8 +3337,407 @@ index baa4a03c5..4aff8fd57 100644
  
          Ok(())
      }
+diff --git a/core/src/display_object/stage.rs b/core/src/display_object/stage.rs
+index 46fe8deb6..d2cc47a7e 100644
+--- a/core/src/display_object/stage.rs
++++ b/core/src/display_object/stage.rs
+@@ -865,6 +865,10 @@ impl<'gc> TDisplayObject<'gc> for Stage<'gc> {
+ 
+     fn construct_frame(self, context: &mut UpdateContext<'gc>) {
+         for child in self.iter_render_list() {
++            // FlashNX: an inner goto passes over unchanged subtrees.
++            if crate::display_object::skip_clean_child(child) {
++                continue;
++            }
+             child.construct_frame(context);
+         }
+     }
+diff --git a/core/src/flashnx_as3prof.rs b/core/src/flashnx_as3prof.rs
+new file mode 100644
+index 000000000..0a3e04218
+--- /dev/null
++++ b/core/src/flashnx_as3prof.rs
+@@ -0,0 +1,212 @@
++//! FlashNX: per-method AVM2 profiler.
++//!
++//! The sampling profiler sees the interpreter (`run_actions`, `op_call_prop_void`)
++//! but never WHICH ActionScript function it is running. Super Smash Flash 2
++//! spends 40-50 ms of a 60 ms fight frame inside its own code (its whole engine
++//! runs from `Event.RENDER`), and the first fight runs at 45-60 fps while the
++//! next ones run at 16-18: the question is which of the game's functions grow.
++//!
++//! Every call that goes through `function::exec` (bytecode and native methods)
++//! is timed with the CPU's counter: exclusive time (own code, callees removed),
++//! inclusive time, call count. `report()` prints the top entries and resets.
++//!
++//! Off unless `sdmc:/switch/FlashNX/as3prof.on` exists at game launch: when off,
++//! the cost is one relaxed atomic load per call.
++
++use fnv::FnvHashMap;
++use std::cell::RefCell;
++use std::sync::atomic::{AtomicBool, Ordering};
++
++static ENABLED: AtomicBool = AtomicBool::new(false);
++
++pub fn set_as3_profiler(on: bool) {
++    ENABLED.store(on, Ordering::Relaxed);
++    STATE.with(|s| {
++        if let Ok(mut s) = s.try_borrow_mut() {
++            *s = State::default();
++        }
++    });
++}
++
++#[inline]
++pub fn enabled() -> bool {
++    ENABLED.load(Ordering::Relaxed)
++}
++
++#[cfg(target_arch = "aarch64")]
++#[inline]
++fn now() -> u64 {
++    let t: u64;
++    unsafe { std::arch::asm!("mrs {}, cntpct_el0", out(reg) t, options(nomem, nostack)) };
++    t
++}
++
++#[cfg(target_arch = "aarch64")]
++fn ticks_per_us() -> f64 {
++    let f: u64;
++    unsafe { std::arch::asm!("mrs {}, cntfrq_el0", out(reg) f, options(nomem, nostack)) };
++    f as f64 / 1_000_000.0
++}
++
++#[cfg(not(target_arch = "aarch64"))]
++#[inline]
++fn now() -> u64 {
++    use std::sync::OnceLock;
++    static T0: OnceLock<std::time::Instant> = OnceLock::new();
++    T0.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64
++}
++
++#[cfg(not(target_arch = "aarch64"))]
++fn ticks_per_us() -> f64 {
++    1000.0
++}
++
++struct Entry {
++    name: String,
++    native: bool,
++    calls: u64,
++    excl: u64,
++    incl: u64,
++}
++
++struct Frame {
++    entry: u32,
++    start: u64,
++    child: u64,
++}
++
++#[derive(Default)]
++struct State {
++    index: FnvHashMap<usize, u32>,
++    entries: Vec<Entry>,
++    stack: Vec<Frame>,
++    /// Time spent in outermost calls only (no double counting).
++    top_level: u64,
++    calls: u64,
++}
++
++thread_local! {
++    static STATE: RefCell<State> = RefCell::new(State::default());
++}
++
++/// Ends the timing of one call when dropped (also on early `return Err`).
++pub struct Guard {
++    active: bool,
++}
++
++impl Guard {
++    /// `key` identifies the method (its `Gc` address); `name` is only built
++    /// the first time a method is seen.
++    #[inline]
++    pub fn enter(key: usize, native: bool, name: impl FnOnce() -> String) -> Guard {
++        if !enabled() {
++            return Guard { active: false };
++        }
++        let active = STATE.with(|s| {
++            let Ok(mut s) = s.try_borrow_mut() else {
++                return false;
++            };
++            let s = &mut *s;
++            let entry = match s.index.get(&key) {
++                Some(&i) => i,
++                None => {
++                    let i = s.entries.len() as u32;
++                    s.entries.push(Entry {
++                        name: name(),
++                        native,
++                        calls: 0,
++                        excl: 0,
++                        incl: 0,
++                    });
++                    s.index.insert(key, i);
++                    i
++                }
++            };
++            s.stack.push(Frame {
++                entry,
++                start: now(),
++                child: 0,
++            });
++            true
++        });
++        Guard { active }
++    }
++}
++
++impl Drop for Guard {
++    #[inline]
++    fn drop(&mut self) {
++        if !self.active {
++            return;
++        }
++        let t = now();
++        STATE.with(|s| {
++            let Ok(mut s) = s.try_borrow_mut() else {
++                return;
++            };
++            let s = &mut *s;
++            let Some(f) = s.stack.pop() else {
++                return;
++            };
++            let elapsed = t.saturating_sub(f.start);
++            let e = &mut s.entries[f.entry as usize];
++            e.calls += 1;
++            e.incl += elapsed;
++            e.excl += elapsed.saturating_sub(f.child);
++            s.calls += 1;
++            match s.stack.last_mut() {
++                Some(parent) => parent.child += elapsed,
++                None => s.top_level += elapsed,
++            }
++        });
++    }
++}
++
++/// Top `n` methods by exclusive time since the last report, then reset the
++/// counters (names are kept). Empty when the profiler is off or idle.
++pub fn report(n: usize) -> String {
++    if !enabled() {
++        return String::new();
++    }
++    STATE.with(|s| {
++        let Ok(mut s) = s.try_borrow_mut() else {
++            return String::new();
++        };
++        let s = &mut *s;
++        if s.calls == 0 {
++            return String::new();
++        }
++        let tpu = ticks_per_us();
++        let ms = |t: u64| t as f64 / tpu / 1000.0;
++        let mut order: Vec<usize> = (0..s.entries.len())
++            .filter(|&i| s.entries[i].calls > 0)
++            .collect();
++        order.sort_by(|&a, &b| s.entries[b].excl.cmp(&s.entries[a].excl));
++        let mut out = format!(
++            "as3prof: {} calls, {:.0} ms in AS3 (outermost calls), {} methods seen\n",
++            s.calls,
++            ms(s.top_level),
++            order.len()
++        );
++        for &i in order.iter().take(n) {
++            let e = &s.entries[i];
++            out.push_str(&format!(
++                "as3prof:   excl {:7.1} ms  incl {:7.1} ms  calls {:8}  {:6.2} us/call  {}{}\n",
++                ms(e.excl),
++                ms(e.incl),
++                e.calls,
++                ms(e.excl) * 1000.0 / e.calls as f64,
++                if e.native { "[native] " } else { "" },
++                e.name
++            ));
++        }
++        for e in &mut s.entries {
++            e.calls = 0;
++            e.excl = 0;
++            e.incl = 0;
++        }
++        s.top_level = 0;
++        s.calls = 0;
++        out
++    })
++}
+diff --git a/core/src/flashnx_census.rs b/core/src/flashnx_census.rs
+new file mode 100644
+index 000000000..9fa8c33ea
+--- /dev/null
++++ b/core/src/flashnx_census.rs
+@@ -0,0 +1,160 @@
++//! FlashNX: census of live objects, for the `census:` heartbeat line.
++//!
++//! Super Smash Flash 2's GC heap grows by ~100 MB per Classic level (130 MB at
++//! the first fight, 450 MB at the 4th, where the heap ran out on 2026-10-01),
++//! and the orphan list and the frame time grow with it. These counters say WHAT
++//! accumulates: movies, display objects, and AVM2 objects per class.
++//!
++//! The per-object guards only exist with the `flashnx_census` feature: they are
++//! a field of every AVM2 object and every display object, and the class table
++//! takes a lock on every AVM2 allocation and free.
++
++#[cfg(feature = "flashnx_census")]
++mod imp {
++    use std::collections::HashMap;
++    use std::sync::atomic::{AtomicI64, AtomicU64, Ordering::Relaxed};
++    use std::sync::Mutex;
++
++    static LIVE_DISPLAY_OBJECTS: AtomicI64 = AtomicI64::new(0);
++    static ORPHANS: AtomicU64 = AtomicU64::new(0);
++    static BROADCAST: AtomicU64 = AtomicU64::new(0);
++
++    struct Entry {
++        name: String,
++        live: i64,
++        last: i64,
++    }
++
++    /// Live AVM2 objects, keyed by their class pointer.
++    static CLASSES: Mutex<Option<HashMap<usize, Entry>>> = Mutex::new(None);
++
++    fn with_classes<R>(f: impl FnOnce(&mut HashMap<usize, Entry>) -> R) -> R {
++        let mut guard = CLASSES.lock().unwrap_or_else(|e| e.into_inner());
++        f(guard.get_or_insert_with(HashMap::new))
++    }
++
++    /// Field of every `ScriptObjectData`: counts it under its class.
++    #[derive(Debug)]
++    pub struct ObjectGuard(usize);
++
++    impl ObjectGuard {
++        pub fn new(class_key: usize, name: impl FnOnce() -> String) -> Self {
++            with_classes(|map| {
++                map.entry(class_key)
++                    .or_insert_with(|| Entry {
++                        name: name(),
++                        live: 0,
++                        last: 0,
++                    })
++                    .live += 1;
++            });
++            Self(class_key)
++        }
++    }
++
++    impl Clone for ObjectGuard {
++        fn clone(&self) -> Self {
++            with_classes(|map| {
++                if let Some(e) = map.get_mut(&self.0) {
++                    e.live += 1;
++                }
++            });
++            Self(self.0)
++        }
++    }
++
++    impl Drop for ObjectGuard {
++        fn drop(&mut self) {
++            with_classes(|map| {
++                if let Some(e) = map.get_mut(&self.0) {
++                    e.live -= 1;
++                }
++            });
++        }
++    }
++
++    /// Field of every `DisplayObjectBase`.
++    #[derive(Debug)]
++    pub struct DisplayGuard;
++
++    impl Default for DisplayGuard {
++        fn default() -> Self {
++            LIVE_DISPLAY_OBJECTS.fetch_add(1, Relaxed);
++            Self
++        }
++    }
++
++    impl Clone for DisplayGuard {
++        fn clone(&self) -> Self {
++            Self::default()
++        }
++    }
++
++    impl Drop for DisplayGuard {
++        fn drop(&mut self) {
++            LIVE_DISPLAY_OBJECTS.fetch_sub(1, Relaxed);
++        }
++    }
++
++    pub fn note_frame(orphans: usize, broadcast: usize) {
++        ORPHANS.store(orphans as u64, Relaxed);
++        BROADCAST.store(broadcast as u64, Relaxed);
++    }
++
++    pub fn report() -> String {
++        let (movies, movie_bytes) = ruffle_common::tag_utils::live_movie_stats();
++        let (shared, copied) = crate::character::bitmap_bytes_stats();
++        let mb = |b: u64| b / (1024 * 1024);
++        with_classes(|map| {
++            let total: i64 = map.values().map(|e| e.live).sum();
++            let mut entries: Vec<&Entry> = map.values().filter(|e| e.live != 0).collect();
++            entries.sort_by_key(|e| -e.live);
++            let top: Vec<String> = entries
++                .iter()
++                .take(12)
++                .map(|e| format!("{} {}({:+})", e.name, e.live, e.live - e.last))
++                .collect();
++            entries.sort_by_key(|e| -(e.live - e.last));
++            let grew: Vec<String> = entries
++                .iter()
++                .take(8)
++                .filter(|e| e.live > e.last)
++                .map(|e| format!("{} {:+}", e.name, e.live - e.last))
++                .collect();
++            for e in map.values_mut() {
++                e.last = e.live;
++            }
++            format!(
++                "movies={} ({}MB) bitmapBytes shared={}MB copied={}MB displayObjects={} orphans={} broadcast={} avm2={} | top: {} | grew: {}",
++                movies,
++                mb(movie_bytes),
++                mb(shared),
++                mb(copied),
++                LIVE_DISPLAY_OBJECTS.load(Relaxed),
++                ORPHANS.load(Relaxed),
++                BROADCAST.load(Relaxed),
++                total,
++                top.join(", "),
++                grew.join(", "),
++            )
++        })
++    }
++}
++
++#[cfg(feature = "flashnx_census")]
++pub use imp::{note_frame, report, DisplayGuard, ObjectGuard};
++
++/// Without `flashnx_census`, only the counters that cost nothing per object.
++#[cfg(not(feature = "flashnx_census"))]
++pub fn report() -> String {
++    let (movies, movie_bytes) = ruffle_common::tag_utils::live_movie_stats();
++    let (shared, copied) = crate::character::bitmap_bytes_stats();
++    let mb = |b: u64| b / (1024 * 1024);
++    format!(
++        "movies={} ({}MB) bitmapBytes shared={}MB copied={}MB",
++        movies,
++        mb(movie_bytes),
++        mb(shared),
++        mb(copied),
++    )
++}
 diff --git a/core/src/frame_lifecycle.rs b/core/src/frame_lifecycle.rs
-index 91bdb52df..fdf16f8fc 100644
+index 91bdb52df..e099d2fcd 100644
 --- a/core/src/frame_lifecycle.rs
 +++ b/core/src/frame_lifecycle.rs
 @@ -18,6 +18,36 @@ use crate::loader::LoadManager;
@@ -1872,20 +3777,34 @@ index 91bdb52df..fdf16f8fc 100644
  /// Which phase of the frame we're currently in.
  ///
  /// AVM2 frames exist in one of four phases: `Enter`, `Construct`,
-@@ -91,9 +121,12 @@ pub fn run_all_phases_avm2(context: &mut UpdateContext<'_>) {
+@@ -77,6 +107,9 @@ pub fn run_all_phases_avm2(context: &mut UpdateContext<'_>) {
+         return;
+     }
+ 
++    #[cfg(feature = "flashnx_census")]
++    crate::flashnx_census::note_frame(context.orphan_manager.len(), context.avm2.broadcast_len());
++
+     *context.frame_phase = FramePhase::Enter;
+     OrphanManager::each_orphan_obj(context, |orphan, context| {
+         orphan.enter_frame(context);
+@@ -91,9 +124,16 @@ pub fn run_all_phases_avm2(context: &mut UpdateContext<'_>) {
      broadcast_frame_constructed(context);
  
      *context.frame_phase = FramePhase::FrameScripts;
 +    let epoch = crate::display_object::orphan_mark_epoch();
++    let mut left_dirty = false;
      OrphanManager::each_orphan_obj(context, |orphan, context| {
 +        orphan.base().set_lifecycle_dirty(false);
          orphan.run_frame_scripts(context);
++        left_dirty |= orphan.base().lifecycle_dirty();
      });
-+    note_orphans_clean_if_unmarked(epoch);
++    if !left_dirty {
++        note_orphans_clean_if_unmarked(epoch);
++    }
      stage.run_frame_scripts(context);
      run_frame_script_cleanup(context);
  
-@@ -143,18 +176,54 @@ pub fn run_inner_goto_frame<'gc>(
+@@ -143,18 +183,64 @@ pub fn run_inner_goto_frame<'gc>(
  
      // Note - we do *not* call `enter_frame` or dispatch an `enterFrame` event
  
@@ -1903,53 +3822,115 @@ index 91bdb52df..fdf16f8fc 100644
 +    let skip = ORPHAN_SKIP.load(Ordering::Relaxed);
 +    INNER_GOTOS.fetch_add(1, Ordering::Relaxed);
 +
-+    // Every orphan clean and none marked since: the list need not even be
-+    // iterated (it is ~800 weak references in an SSF2 fight, twice per goto).
-+    let all_clean = |epoch: u64| skip && ORPHANS_CLEAN_AT.load(Ordering::Relaxed) == epoch;
-+
++    // FlashNX: only the dirty orphans, found through the queue their marks
++    // fill (`queue_dirty_orphan`), in orphan-list order: the same objects in
++    // the same order as iterating the list and passing over the clean ones,
++    // without iterating it (~800 weak references in an SSF2 fight, twice per
++    // goto). And inside the trees it does walk, the stage's included, pass
++    // over every unchanged subtree (`skipping_clean_subtrees`). Only around
++    // the walks: the broadcasts in between run as before.
      *context.frame_phase = FramePhase::Construct;
 -    OrphanManager::each_orphan_obj(context, |orphan, context| {
 -        orphan.construct_frame(context);
 -    });
-+    if all_clean(crate::display_object::orphan_mark_epoch()) {
-+        GOTOS_LIST_SKIPPED.fetch_add(1, Ordering::Relaxed);
++    let was_skipping = crate::display_object::set_skipping_clean_subtrees(skip);
++    if skip {
++        let done = for_each_dirty_orphan(context, |orphan, context| {
++            orphan.construct_frame(context);
++        });
++        if done.is_empty() {
++            GOTOS_LIST_SKIPPED.fetch_add(1, Ordering::Relaxed);
++        }
++        // Constructing does not clean them: the frame-script pass below must
++        // find them again.
++        for orphan in done {
++            crate::display_object::queue_dirty_orphan(orphan);
++        }
 +    } else {
 +        OrphanManager::each_orphan_obj(context, |orphan, context| {
-+            if !skip || orphan.base().lifecycle_dirty() {
-+                orphan.construct_frame(context);
-+            }
++            orphan.construct_frame(context);
 +        });
 +    }
      stage.construct_frame(context);
++    crate::display_object::set_skipping_clean_subtrees(was_skipping);
      broadcast_frame_constructed(context);
  
      *context.frame_phase = FramePhase::FrameScripts;
++    let was_skipping = crate::display_object::set_skipping_clean_subtrees(skip);
      stage.run_frame_scripts(context);
 -    OrphanManager::each_orphan_obj(context, |orphan, context| {
--        orphan.run_frame_scripts(context);
++    let run_scripts = |orphan: DisplayObject<'gc>, context: &mut UpdateContext<'gc>| {
++        orphan.base().set_lifecycle_dirty(false);
++        ORPHANS_RUN.fetch_add(1, Ordering::Relaxed);
+         orphan.run_frame_scripts(context);
 -    });
-+    let epoch = crate::display_object::orphan_mark_epoch();
-+    if !all_clean(epoch) {
-+        OrphanManager::each_orphan_obj(context, |orphan, context| {
-+            if !skip || orphan.base().lifecycle_dirty() {
-+                orphan.base().set_lifecycle_dirty(false);
-+                ORPHANS_RUN.fetch_add(1, Ordering::Relaxed);
-+                orphan.run_frame_scripts(context);
-+            } else {
-+                ORPHANS_SKIPPED.fetch_add(1, Ordering::Relaxed);
-+            }
-+        });
-+        if skip {
-+            note_orphans_clean_if_unmarked(epoch);
-+        }
++    };
++    if skip {
++        for_each_dirty_orphan(context, run_scripts);
++    } else {
++        OrphanManager::each_orphan_obj(context, run_scripts);
 +    }
++    crate::display_object::set_skipping_clean_subtrees(was_skipping);
  
      for child in removed_frame_scripts {
          child.run_frame_scripts(context);
-@@ -173,6 +242,14 @@ pub fn run_inner_goto_frame<'gc>(
+@@ -168,11 +254,66 @@ pub fn run_inner_goto_frame<'gc>(
+     // Instead, we do one cleanup at the end of the frame.
+     // This performs special handling of clips which became orphaned as
+     // a result of a RemoveObject tag - see `cleanup_dead_orphans` for details.
+-    context.orphan_manager.cleanup_dead_orphans(context.gc());
++    // FlashNX: only when such an orphan was added; dead and re-parented
++    // entries are passed over by every walk and go at the frame's end.
++    if !skip || context.orphan_manager.needs_cleanup() {
++        context.orphan_manager.cleanup_dead_orphans(context.gc());
++    }
+ 
      *context.frame_phase = old_phase;
  }
  
++/// FlashNX: run `f` on every dirty orphan, in orphan-list order, without
++/// iterating the list. An orphan that becomes dirty while this runs is taken
++/// in if it comes later in the list (iterating the list would have reached
++/// it), left queued for the next pass otherwise (iterating would have passed
++/// it already). Returns the orphans `f` ran on.
++fn for_each_dirty_orphan<'gc>(
++    context: &mut UpdateContext<'gc>,
++    mut f: impl FnMut(DisplayObject<'gc>, &mut UpdateContext<'gc>),
++) -> Vec<DisplayObject<'gc>> {
++    use crate::display_object::{queue_dirty_orphan, take_dirty_orphans};
++    let mut pending = context
++        .orphan_manager
++        .resolve_dirty(context.gc(), &take_dirty_orphans());
++    let mut done = Vec::with_capacity(pending.len());
++    let mut late = Vec::new();
++    let mut i = 0;
++    while i < pending.len() {
++        let (seq, orphan) = pending[i];
++        i += 1;
++        f(orphan, context);
++        done.push(orphan);
++        let fresh = take_dirty_orphans();
++        if fresh.is_empty() {
++            continue;
++        }
++        for (s, o) in context.orphan_manager.resolve_dirty(context.gc(), &fresh) {
++            if s > seq {
++                let ahead = &pending[i..];
++                if !ahead.iter().any(|e| e.0 == s) {
++                    let at = i + ahead.partition_point(|e| e.0 < s);
++                    pending.insert(at, (s, o));
++                }
++            } else {
++                late.push(o);
++            }
++        }
++    }
++    for o in late {
++        queue_dirty_orphan(o);
++    }
++    done
++}
++
 +/// FlashNX: a frame-script pass over the orphans just cleaned every dirty one.
 +/// If nothing got marked while it ran, every orphan is clean as of `epoch`.
 +fn note_orphans_clean_if_unmarked(epoch: u64) {
@@ -1962,10 +3943,10 @@ index 91bdb52df..fdf16f8fc 100644
  pub fn broadcast_frame_entered<'gc>(context: &mut UpdateContext<'gc>) {
      let enter_frame_evt = EventObject::bare_default_event(context, "enterFrame");
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..c54710c95 100644
+index 6e5379213..444271273 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
-@@ -15,10 +15,17 @@ extern crate num_derive;
+@@ -15,10 +15,21 @@ extern crate num_derive;
  #[macro_use]
  mod avm1;
  mod avm2;
@@ -1977,13 +3958,26 @@ index 6e5379213..c54710c95 100644
  pub mod bitmap;
  mod character;
 +/// FlashNX: per-movie reset + sizing of the decoded-bitmap cache budget.
-+pub use character::reset_bitmap_cache;
++pub use character::{flashnx_bitmap_residency, reset_bitmap_cache};
++pub use flashnx_census::report as census_report;
++pub use flashnx_as3prof::{report as as3prof_report, set_as3_profiler};
++pub use bitmap::operations::{take_threshold_memo_hits, take_threshold_stats};
 +pub use frame_lifecycle::{set_orphan_skip, take_inner_goto_stats};
 +pub use display_object::set_lazy_shapes;
++pub use display_object::{set_stage_skip, take_subtrees_skipped};
  pub mod context;
  pub mod context_menu;
  mod drawing;
-@@ -63,6 +70,16 @@ pub use events::PlayerEvent;
+@@ -26,6 +37,8 @@ mod ecma_conversions;
+ pub mod events;
+ pub mod focus_tracker;
+ pub mod font;
++mod flashnx_as3prof;
++mod flashnx_census;
+ mod frame_lifecycle;
+ mod html;
+ mod input;
+@@ -63,6 +76,16 @@ pub use events::PlayerEvent;
  pub use indexmap;
  pub use loader::LoadBehavior;
  pub use player::{Player, PlayerBuilder, PlayerMode, PlayerRuntime, StaticCallstack};
@@ -2001,10 +3995,22 @@ index 6e5379213..c54710c95 100644
  pub use ruffle_render::backend::ViewportDimensions;
  pub use swf;
 diff --git a/core/src/library.rs b/core/src/library.rs
-index 7cf6c74de..533f83471 100644
+index 7cf6c74de..251d9abf4 100644
 --- a/core/src/library.rs
 +++ b/core/src/library.rs
-@@ -255,7 +255,8 @@ impl<'gc> MovieLibrary<'gc> {
+@@ -123,7 +123,10 @@ pub struct MovieLibrary<'gc> {
+     characters: HashMap<CharacterId, Character<'gc>>,
+     export_characters: Avm1PropertyMap<'gc, CharacterId>,
+     imported_assets: HashMap<AvmString<'gc>, CharacterId>,
+-    jpeg_tables: Option<Vec<u8>>,
++    /// FlashNX: shared, so a DefineBits bitmap can keep a reference to the
++    /// tables and glue them in when it is decoded, instead of storing its own
++    /// glued copy of the image for the life of the movie.
++    jpeg_tables: Option<Arc<[u8]>>,
+     fonts: FontMap<'gc>,
+     avm2_domain: Option<Avm2Domain<'gc>>,
+ }
+@@ -255,7 +258,8 @@ impl<'gc> MovieLibrary<'gc> {
          match character {
              Character::Bitmap(bitmap) => {
                  let avm2_class = bitmap.avm2_class();
@@ -2014,13 +4020,59 @@ index 7cf6c74de..533f83471 100644
                  let bitmap = Bitmap::new(mc, id, bitmap, self.swf.clone());
                  bitmap.set_avm2_bitmapdata_class(mc, avm2_class);
                  Some(bitmap.instantiate(mc))
+@@ -337,12 +341,17 @@ impl<'gc> MovieLibrary<'gc> {
+         self.jpeg_tables = if data.is_empty() {
+             None
+         } else {
+-            Some(remove_invalid_jpeg_data(data).to_vec())
++            Some(Arc::from(remove_invalid_jpeg_data(data).as_ref()))
+         }
+     }
+ 
+     pub fn jpeg_tables(&self) -> Option<&[u8]> {
+-        self.jpeg_tables.as_ref().map(|data| &data[..])
++        self.jpeg_tables.as_deref()
++    }
++
++    /// FlashNX: the same tables, as a handle a bitmap can keep.
++    pub fn jpeg_tables_shared(&self) -> Option<Arc<[u8]>> {
++        self.jpeg_tables.clone()
+     }
+ 
+     pub fn set_avm2_domain(&mut self, avm2_domain: Avm2Domain<'gc>) {
 diff --git a/core/src/orphan_manager.rs b/core/src/orphan_manager.rs
-index a231dc080..716c91dcd 100644
+index a231dc080..d38d9c027 100644
 --- a/core/src/orphan_manager.rs
 +++ b/core/src/orphan_manager.rs
-@@ -31,6 +31,10 @@ impl<'gc> OrphanManager<'gc> {
+@@ -18,6 +18,19 @@ use std::rc::Rc;
+ #[collect(no_drop)]
+ pub struct OrphanManager<'gc> {
+     orphans: Rc<Vec<DisplayObjectWeak<'gc>>>,
++    /// FlashNX: the same orphans by address, each with the order it was
++    /// pushed in, so the dirty ones queued by address
++    /// (`display_object::queue_dirty_orphan`) can be found and processed in
++    /// list order without iterating the list. Kept in step with `orphans`.
++    index: fnv::FnvHashMap<usize, (u64, DisplayObjectWeak<'gc>)>,
++    #[collect(require_static)]
++    next_seq: u64,
++    /// FlashNX: an orphan that only a frame-end cleanup removes (one a
++    /// RemoveObject tag orphaned, see `cleanup_dead_orphans`) was added since
++    /// the last cleanup. Without one, the cleanup an inner goto runs has
++    /// nothing to remove and is skipped (it iterated the whole list).
++    #[collect(require_static)]
++    needs_cleanup: bool,
+ }
+ 
+ impl<'gc> OrphanManager<'gc> {
+@@ -30,16 +43,49 @@ impl<'gc> OrphanManager<'gc> {
+     /// multiple SWFS rely on this behavior, so we need to match Flash's
      /// behavior. This should not be called manually - `movie_clip` will
      /// call it when necessary.
++    /// FlashNX: orphans currently listed, dead or alive (`census:` line).
++    pub fn len(&self) -> usize {
++        self.orphans.len()
++    }
++
      pub fn add_orphan_obj(&mut self, dobj: DisplayObject<'gc>) {
 +        // FlashNX: a new (or returning) orphan is processed by the next inner
 +        // goto at least once.
@@ -2028,20 +4080,108 @@ index a231dc080..716c91dcd 100644
 +        crate::display_object::bump_orphan_mark_epoch();
          // Note: comparing pointers is correct because GcWeak keeps its allocation alive,
          // so the pointers can't overlap by accident.
-         if self
+-        if self
+-            .orphans
+-            .iter()
+-            .all(|d| !std::ptr::eq(d.as_ptr(), dobj.as_ptr()))
+-        {
++        // FlashNX: by the address index instead of a scan of the whole list
++        // (this ran on every removal from a display list).
++        let addr = dobj.as_ptr() as usize;
++        if !self.index.contains_key(&addr) {
++            let seq = self.next_seq;
++            self.next_seq += 1;
++            self.index.insert(addr, (seq, dobj.downgrade()));
+             self.orphans_mut().push(dobj.downgrade());
+         }
++        if !dobj.placed_by_avm2_script() {
++            self.needs_cleanup = true;
++        }
++        crate::display_object::queue_dirty_orphan(dobj);
++    }
++
++    /// FlashNX: the queued addresses that are listed orphans, still valid and
++    /// still dirty, with their list order, sorted by it.
++    pub fn resolve_dirty(
++        &self,
++        mc: &Mutation<'gc>,
++        addrs: &[usize],
++    ) -> Vec<(u64, DisplayObject<'gc>)> {
++        let mut out: Vec<(u64, DisplayObject<'gc>)> = addrs
++            .iter()
++            .filter_map(|a| self.index.get(a))
++            .filter_map(|(seq, weak)| valid_orphan(*weak, mc).map(|d| (*seq, d)))
++            .filter(|(_, d)| d.base().lifecycle_dirty())
++            .collect();
++        out.sort_unstable_by_key(|e| e.0);
++        out.dedup_by_key(|e| e.0);
++        out
+     }
+ 
+     pub fn each_orphan_obj(
+@@ -62,8 +108,29 @@ impl<'gc> OrphanManager<'gc> {
+     /// Called at the end of `run_all_phases_avm2` - removes any movies
+     /// that have been garbage collected, or are no longer orphans
+     /// (they've since acquired a parent).
++    /// FlashNX: whether a cleanup could remove anything an inner goto must
++    /// not see again (see `needs_cleanup`).
++    pub fn needs_cleanup(&self) -> bool {
++        self.needs_cleanup
++    }
++
+     pub fn cleanup_dead_orphans(&mut self, mc: &Mutation<'gc>) {
+-        self.orphans_mut().retain(|d| {
++        self.needs_cleanup = false;
++        let mut removed: Vec<usize> = Vec::new();
++        Rc::make_mut(&mut self.orphans).retain(|d| {
++            let keep = Self::keep_orphan(d, mc);
++            if !keep {
++                removed.push(d.as_ptr() as usize);
++            }
++            keep
++        });
++        for addr in removed {
++            self.index.remove(&addr);
++        }
++    }
++
++    fn keep_orphan(d: &DisplayObjectWeak<'gc>, mc: &Mutation<'gc>) -> bool {
++        {
+             if let Some(dobj) = valid_orphan(*d, mc) {
+                 // All clips that become orphaned (have their parent removed, or start out with no parent)
+                 // get added to the orphan list. However, there's a distinction between clips
+@@ -89,7 +156,7 @@ impl<'gc> OrphanManager<'gc> {
+             } else {
+                 false
+             }
+-        });
++        }
+     }
+ }
+ 
+@@ -97,6 +164,9 @@ impl<'gc> Default for OrphanManager<'gc> {
+     fn default() -> Self {
+         Self {
+             orphans: Rc::new(Vec::new()),
++            index: Default::default(),
++            next_seq: 0,
++            needs_cleanup: false,
+         }
+     }
+ }
 diff --git a/core/src/player.rs b/core/src/player.rs
-index edb74cccb..7fa5f572e 100644
+index edb74cccb..904f7466c 100644
 --- a/core/src/player.rs
 +++ b/core/src/player.rs
 @@ -74,6 +74,7 @@ use std::fmt;
  use std::ops::{Deref, DerefMut};
  use std::rc::{Rc, Weak as RcWeak};
  use std::str::FromStr;
-+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
++use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
  use std::sync::{Arc, Mutex, Weak};
  use std::time::Duration;
  use tracing::instrument;
-@@ -276,6 +277,125 @@ impl<'gc> GcRootData<'gc> {
+@@ -276,6 +277,156 @@ impl<'gc> GcRootData<'gc> {
  
  type GcArena = gc_arena::Arena<Rootable![GcRoot<'_>]>;
  
@@ -2075,6 +4215,37 @@ index edb74cccb..7fa5f572e 100644
 +
 +pub fn set_bitmap_cache(enabled: bool) {
 +    BITMAP_CACHE.store(enabled, std::sync::atomic::Ordering::Relaxed);
++}
++
++/// FlashNX: set by AS3 `System.gc()`, consumed by the next `update`.
++static FULL_GC_REQUESTED: AtomicBool = AtomicBool::new(false);
++
++/// FlashNX: arena size past which `GC_TIGHT_PACING` replaces the default.
++const GC_TIGHT_BYTES: usize = 256 * 1024 * 1024;
++/// Shorter sleep, and 0.7x the default work factors (each allocated byte buys
++/// more collection), so a cycle finishes after less allocation.
++const GC_TIGHT_PACING: gc_arena::metrics::Pacing = gc_arena::metrics::Pacing {
++    sleep_factor: 0.25,
++    min_sleep: 4096,
++    mark_factor: 0.07,
++    trace_factor: 0.28,
++    keep_factor: 0.035,
++    drop_factor: 0.14,
++    free_factor: 0.21,
++};
++
++/// FlashNX: ask for a full collection after the current update, at most once
++/// every 10 s: some games call `System.gc()` every frame, and a full cycle of
++/// a few hundred MB costs the Switch a second or more.
++pub fn request_full_gc() {
++    static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
++    static LAST_MS: AtomicU64 = AtomicU64::new(u64::MAX);
++    let now_ms = ORIGIN.get_or_init(Instant::now).elapsed().as_millis() as u64;
++    let last = LAST_MS.load(Ordering::Relaxed);
++    if last == u64::MAX || now_ms.saturating_sub(last) >= 10_000 {
++        LAST_MS.store(now_ms, Ordering::Relaxed);
++        FULL_GC_REQUESTED.store(true, Ordering::Relaxed);
++    }
 +}
 +
 +pub fn flashnx_gc_probe() -> (u32, u8, u64, u64) {
@@ -2167,7 +4338,7 @@ index edb74cccb..7fa5f572e 100644
  #[derive(Copy, Clone, Debug, Eq, PartialEq)]
  enum RunState {
      Playing,
-@@ -519,11 +639,168 @@ impl Player {
+@@ -519,11 +670,168 @@ impl Player {
          FloatDuration::from_millis(self.frame_time(1000.0))
      }
  
@@ -2336,7 +4507,7 @@ index edb74cccb..7fa5f572e 100644
          self.frame_accumulator += dt;
          let frame_duration = self.frame_duration();
  
-@@ -554,6 +831,10 @@ impl Player {
+@@ -554,6 +862,10 @@ impl Player {
              }
          }
  
@@ -2347,7 +4518,7 @@ index edb74cccb..7fa5f572e 100644
          // Now that we're done running code,
          // we can stop pretending that more time passed than actually did.
          // Note: update_timers(dt) doesn't need to see this either.
-@@ -2058,7 +2339,7 @@ impl Player {
+@@ -2058,7 +2370,7 @@ impl Player {
                  library: &gc_root.library,
                  transform_stack: &mut this.transform_stack,
                  is_offscreen: false,
@@ -2356,7 +4527,7 @@ index edb74cccb..7fa5f572e 100644
                  stage,
              };
  
-@@ -2296,7 +2577,7 @@ impl Player {
+@@ -2296,7 +2608,7 @@ impl Player {
                  external_interface,
                  start_time: this.start_time,
                  update_start: Instant::now(),
@@ -2365,7 +4536,7 @@ index edb74cccb..7fa5f572e 100644
                  focus_tracker: stage.focus_tracker(),
                  times_get_time_called: 0,
                  time_offset: &mut this.time_offset,
-@@ -2382,7 +2663,47 @@ impl Player {
+@@ -2382,7 +2694,71 @@ impl Player {
          self.update_mouse_state(EnumSet::empty(), false, &mut false);
  
          // GC
@@ -2382,9 +4553,33 @@ index edb74cccb..7fa5f572e 100644
 +        // measures the collector call itself, so the sweep can be charged
 +        // directly instead of inferred.
 +        let gc_t0 = Instant::now();
++        let full_gc_requested = FULL_GC_REQUESTED.swap(false, Ordering::Relaxed);
 +        if crate::bitmap::bitmap_data::bitmapdata_under_pressure() {
 +            self.gc_arena.borrow_mut().finish_cycle();
++        } else if full_gc_requested {
++            let before = self.gc_arena.borrow().metrics().total_allocation();
++            self.gc_arena.borrow_mut().finish_cycle();
++            let after = self.gc_arena.borrow().metrics().total_allocation();
++            tracing::info!(
++                "System.gc(): full collection in {} ms, {} -> {} MB",
++                gc_t0.elapsed().as_millis(),
++                before / (1024 * 1024),
++                after / (1024 * 1024)
++            );
 +        } else {
++            // FlashNX: past GC_TIGHT_BYTES of live arena, collect sooner and
++            // faster. With gc-arena's default pacing the garbage waiting for a
++            // collection reaches about the size of the live heap (sleep 0.5 of
++            // it, then the cycle itself allocates ~0.6 of it before it frees
++            // anything): Super Smash Flash 2's arena swung 300 -> 450 MB in
++            // late Classic levels, on a heap that dies at 3.0 GB. Here it is
++            // ~0.6 of it, for ~1.6x the collector's time, only on such heaps.
++            {
++                let arena = self.gc_arena.borrow();
++                let metrics = arena.metrics();
++                let tight = metrics.total_gc_allocation() > GC_TIGHT_BYTES;
++                metrics.set_pacing(if tight { GC_TIGHT_PACING } else { gc_arena::metrics::Pacing::DEFAULT });
++            }
 +            self.gc_arena.borrow_mut().collect_debt();
 +        }
 +        // ACCUMULATE, never store: `update()` runs several times per host frame
@@ -2414,3 +4609,28 @@ index edb74cccb..7fa5f572e 100644
  
          rval
      }
+diff --git a/render/src/backend.rs b/render/src/backend.rs
+index 80ecf0517..001395fb7 100644
+--- a/render/src/backend.rs
++++ b/render/src/backend.rs
+@@ -94,6 +94,20 @@ pub trait RenderBackend: Any {
+     ) -> Result<BitmapHandle, Error>;
+ 
+     fn register_bitmap(&mut self, bitmap: Bitmap<'_>) -> Result<BitmapHandle, Error>;
++
++    /// FlashNX: register an image that never changes and that `reload` can
++    /// decode again at any time (a SWF bitmap tag). A backend may then drop
++    /// the texture of an image nothing has drawn for a while and rebuild it on
++    /// the next draw. The default keeps it for ever, like `register_bitmap`.
++    fn register_bitmap_reloadable(
++        &mut self,
++        bitmap: Bitmap<'_>,
++        reload: Rc<dyn Fn() -> Option<Bitmap<'static>>>,
++    ) -> Result<BitmapHandle, Error> {
++        let _ = reload;
++        self.register_bitmap(bitmap)
++    }
++
+     fn update_texture(
+         &mut self,
+         handle: &BitmapHandle,

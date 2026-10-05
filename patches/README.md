@@ -205,6 +205,58 @@ its own actions), decode time, and child-by-name lookups. Compiled out of
 release builds; the Switch dev build prints the hottest actions every 240
 frames. It is what found the cache above.
 
+**Super Smash Flash 2, October 2026: memory and speed.** Measured on the
+console over a dozen sessions; the full suite (host build, GNU toolchain)
+passes 4063 tests with the same two known failures after each step. The
+Switch side (allocator, renderer) is in FlashNX itself, not in this diff.
+
+- `core/src/character.rs`, `library.rs`, `display_object/movie_clip.rs`:
+  a bitmap tag that lies inside its movie keeps a slice of the movie's bytes
+  (`BitmapBytes::Movie`) instead of a copy, and a JPEG1 tag shares the movie's
+  `JPEGTables` (glued at decode time). Every image of a loaded SWF used to be
+  held twice: 97 MB by the 4th Classic level.
+- `render/src/backend.rs` (`register_bitmap_reloadable`, default = keep for
+  ever), `core/src/character.rs` (`BitmapCharacter::bitmap_handle` passes a
+  closure that decodes the tag again, `flashnx_bitmap_residency` keeps the
+  decoded-bitmap budget in step): the renderer may drop the texture of a SWF
+  image nothing has drawn for a while and rebuild it on the next draw.
+- `core/src/bitmap/operations.rs`, `bitmap_data.rs`: backport of upstream
+  ruffle#24490 (copyPixels by rows). `threshold` no longer marks the bitmap
+  dirty when it changed no pixel, and a bitmap thresholded onto itself
+  remembers the calls that matched nothing (`ThresholdMemo`, valid while the
+  bitmap's new `generation` counter has not moved; every pixel write path bumps
+  it). SSF2 recolours each fighter every frame with one `threshold` per palette
+  colour: up to 93 % of 157 000 calls in 300 frames changed nothing.
+- `core/src/avm2/activation.rs`, `op.rs`, `value.rs`,
+  `optimizer/type_aware.rs`: backports of upstream ruffle#23840, #24211 and
+  #24660 (integer fast paths, Vector methods called directly), and
+  `resolve_parameters` builds native arguments in a `SmallVec` instead of a
+  `Vec` per call (the cheap half of ruffle#24542).
+- `core/src/avm2/globals/flash/system/System.as`, `system.rs`,
+  `core/src/player.rs`: `System.gc()` runs a full collection after the update,
+  at most once every 10 s (as in upstream PR #23897, still open). Past 256 MB
+  of live arena the collector also sleeps less and works faster per allocated
+  byte (`GC_TIGHT_PACING`): the garbage waiting for a cycle swung SSF2's arena
+  from 300 to 450 MB in late levels.
+- `core/src/display_object.rs`, `display_object/stage.rs`,
+  `loader_display.rs`, `avm2_button.rs`, `frame_lifecycle.rs`: an inner goto
+  also passes over every unchanged subtree of the stage (the
+  `LIFECYCLE_DIRTY` flag now marks the whole ancestor chain and is settled
+  bottom-up at the end of `run_frame_scripts`; buttons always stay dirty).
+  `stageskip.off` marker to compare.
+- `core/src/display_object.rs`, `orphan_manager.rs`, `frame_lifecycle.rs`:
+  the dirty orphans are queued by address when marked and an inner goto runs
+  only those, in orphan-list order (the list is indexed by address and push
+  order), instead of iterating ~800 weak references twice per goto. The
+  cleanup at the end of an inner goto only runs when an orphan that only a
+  cleanup removes (one a RemoveObject tag orphaned) was added. `nextFrame`
+  went from 74-131 us to 39-50 us a call in an SSF2 fight.
+- `core/src/flashnx_as3prof.rs` (with `function::exec`): per-function AS3
+  timing, exclusive and inclusive, printed every 300 frames when FlashNX's
+  `as3prof.on` marker is present; one relaxed load per call otherwise.
+  `core/src/flashnx_census.rs` (feature `flashnx_census`, off by default):
+  live AVM2 objects per class.
+
 ### Tried and dropped (2026-09-24)
 
 Measured with the sampling profiler (`cpp/src/prof.cpp`) in an in-session A/B

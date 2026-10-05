@@ -981,7 +981,7 @@ static PENDING_FREES: Mutex<Vec<PendingFree>> = Mutex::new(Vec::new());
 // drains it, decrements the atlas' live count, and frees the 16 MB texture once
 // it hits 0. Without this, atlases were append-only and a game re-caching a large
 // offscreen surface every frame leaked ~16 MB/frame until an OOM crash.
-static PENDING_ATLAS_RELEASE: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+static PENDING_ATLAS_RELEASE: Mutex<Vec<(usize, [u32; 4])>> = Mutex::new(Vec::new());
 
 // Reusable scratch for `upload_region_padded`'s (w+2)×(h+2) edge-replicated
 // buffer. Super Bowser World registers/frees ~4500 ground-strip bitmaps in a
@@ -1000,11 +1000,14 @@ thread_local! {
 #[derive(Debug)]
 struct AtlasTicket {
     atlas_index: usize,
+    /// The slot it occupies, `[x, y, w, h]`: content origin, then the size
+    /// with padding. Given back to the atlas (`Atlas::free_slots`) on release.
+    slot: [u32; 4],
 }
 impl Drop for AtlasTicket {
     fn drop(&mut self) {
         if let Ok(mut q) = PENDING_ATLAS_RELEASE.lock() {
-            q.push(self.atlas_index);
+            q.push((self.atlas_index, self.slot));
         }
     }
 }
@@ -1040,6 +1043,10 @@ extern "C" {
     fn flashnx_boc_set(on: core::ffi::c_int);
     /// Return every parked BO to the heap; the cache keeps working afterwards.
     fn flashnx_boc_trim() -> u64;
+    /// The top-of-heap region for big blocks (cpp/src/flashnx_heap.c): region,
+    /// bytes in blocks, blocks, holes, biggest block it could give now, room
+    /// between newlib's break and it, big requests refused, of which newlib served.
+    fn flashnx_heap_stats(out: *mut u64);
     /// Tick frequency in Hz (~19.2 MHz on Switch). Constant after boot.
     fn ruffle_tick_freq() -> u64;
     /// Actual current CPU clock in Hz (clkrst). 0 if unavailable. Lets the
@@ -1416,6 +1423,18 @@ struct Atlas {
     /// much GPU memory holds images nothing has shown for a while. Measured
     /// before building any eviction, to know what it could give back.
     last_draw_frame: Cell<u32>,
+    /// Holds only SWF images that can be decoded again (see `ReloadSlot`), so
+    /// that emptying it frees it. Never mixed with BitmapData surfaces.
+    reloadable: bool,
+    /// The images packed here, when `reloadable`.
+    members: Vec<SlotLink>,
+    /// Slots whose bitmap was released while the atlas lives on, `[x, y, w,
+    /// h]` as in `AtlasTicket::slot`. The shelves never give space back: Super
+    /// Smash Flash 2 creates and drops BitmapData every frame (one shadow per
+    /// character), and a few long-lived ones pinned ~11 atlases (~200 MB)
+    /// holding ~23 MB of live BitmapData (2026-10-02). New bitmaps take these
+    /// first.
+    free_slots: Vec<[u32; 4]>,
 }
 
 impl Atlas {
@@ -1480,6 +1499,9 @@ impl Atlas {
             shelves: Vec::new(),
             live: 0,
             last_draw_frame: Cell::new(0),
+            reloadable: false,
+            members: Vec::new(),
+            free_slots: Vec::new(),
         })
     }
 
@@ -1493,22 +1515,42 @@ impl Atlas {
         self.texture = 0;
         self.shelves.clear();
         self.live = 0;
+        self.members.clear();
+        self.free_slots.clear();
     }
 
     /// Try to allocate a `w×h` region (plus padding). Returns the content
-    /// origin (without padding).
-    fn pack(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
+    /// origin (without padding) and the slot it takes (see `AtlasTicket::slot`).
+    fn pack(&mut self, w: u32, h: u32) -> Option<(u32, u32, [u32; 4])> {
         let w_full = w + 2 * ATLAS_PAD;
         let h_full = h + 2 * ATLAS_PAD;
         if w_full > self.width || h_full > self.height {
             return None;
+        }
+        // A released slot first: the smallest that fits, and not one more
+        // than four times the size (a big hole is better left to a big bitmap;
+        // what a smaller tenant leaves unused comes back with it).
+        let need = w_full as u64 * h_full as u64;
+        let mut best: Option<(usize, u64)> = None;
+        for (i, f) in self.free_slots.iter().enumerate() {
+            if f[2] >= w_full && f[3] >= h_full {
+                let area = f[2] as u64 * f[3] as u64;
+                if area <= need * 4 && best.is_none_or(|(_, a)| area < a) {
+                    best = Some((i, area));
+                }
+            }
+        }
+        if let Some((i, _)) = best {
+            SLOTS_REUSED.fetch_add(1, Ordering::Relaxed);
+            let slot = self.free_slots.swap_remove(i);
+            return Some((slot[0], slot[1], slot));
         }
         for shelf in &mut self.shelves {
             if shelf.height >= h_full && shelf.used_w + w_full <= self.width {
                 let x = shelf.used_w + ATLAS_PAD;
                 let y = shelf.y + ATLAS_PAD;
                 shelf.used_w += w_full;
-                return Some((x, y));
+                return Some((x, y, [x, y, w_full, h_full]));
             }
         }
         let next_y = self.shelves.last().map(|s| s.y + s.height).unwrap_or(0);
@@ -1520,7 +1562,8 @@ impl Atlas {
             height: h_full,
             used_w: w_full,
         });
-        Some((ATLAS_PAD, next_y + ATLAS_PAD))
+        let (x, y) = (ATLAS_PAD, next_y + ATLAS_PAD);
+        Some((x, y, [x, y, w_full, h_full]))
     }
 
     /// `src_row_len_px` = the row length (in pixels) of the SOURCE `pixels`
@@ -1644,6 +1687,83 @@ struct SwitchBitmapHandle {
 }
 impl BitmapHandleImpl for SwitchBitmapHandle {}
 
+// ─── Evictable SWF images ─────────────────────────────────────────────────────
+//
+// Every image a SWF shows gets decoded into an atlas the first time it is drawn
+// and stayed there for the rest of the session (upstream's FIXME in
+// `BitmapCharacter::bitmap_handle`). Super Smash Flash 2 decodes 1.5 GB of
+// images across the ~50 files it loads (DAT102 alone, the menus: 406 MB), and
+// its atlases grew by 150-240 MB per Classic level, 637 MB by level 4 where the
+// heap ran out (2026-10-01 logs). Nothing ever drew most of them again.
+//
+// A SWF bitmap tag never changes and its bytes stay in the movie, so its
+// texture can be dropped and decoded again. Such images arrive through
+// `register_bitmap_reloadable` (Ruffle's `BitmapCharacter::bitmap_handle`) and
+// only ever reach us as shape fills (`register_shape`). They are packed into
+// atlases of their own (`Atlas::reloadable`): an atlas mixed with BitmapData
+// surfaces could never be freed. `evict_idle_images` empties atlases whose
+// images have not been drawn for a while; `render_shape` decodes an evicted
+// image again when a shape draws it.
+
+/// Where an image sits in an atlas.
+#[derive(Clone, Copy, Debug)]
+struct AtlasPlace {
+    atlas_index: usize,
+    u0: f32,
+    v0: f32,
+    u1: f32,
+    v1: f32,
+}
+
+struct ReloadSlot {
+    /// `None` once evicted.
+    place: Cell<Option<AtlasPlace>>,
+    /// Holds the atlas (its `live` count) while the image is resident.
+    ticket: core::cell::RefCell<Option<Arc<AtlasTicket>>>,
+    width: u32,
+    height: u32,
+    /// Last host frame a shape drew it.
+    last_draw: Cell<u32>,
+    /// Frame of the last failed reload, so a failure is not retried every draw.
+    failed_at: Cell<u32>,
+    reload: std::rc::Rc<dyn Fn() -> Option<Bitmap<'static>>>,
+}
+
+impl std::fmt::Debug for ReloadSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ReloadSlot({}x{}, {:?})", self.width, self.height, self.place.get())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ReloadableBitmap(std::rc::Rc<ReloadSlot>);
+impl BitmapHandleImpl for ReloadableBitmap {}
+
+/// An atlas' weak link to one of its images. The backend sits in a `static
+/// Mutex`, so it has to be `Send`; the slots it points to are created, drawn,
+/// evicted and dropped by the player thread only (Ruffle's handles are not
+/// `Send` either), which is the thread that owns a game's backend.
+struct SlotLink(std::rc::Weak<ReloadSlot>);
+unsafe impl Send for SlotLink {}
+
+/// Bitmaps packed into a released atlas slot (`Atlas::free_slots`), for the
+/// `evict:` line.
+static SLOTS_REUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Eviction starts once the reloadable atlases hold this much...
+const EVICT_START_BYTES: u64 = 128 * 1024 * 1024;
+/// ...and only touches images nothing has drawn for this many host frames
+/// (20 s at 60 Hz; a slow game frame is still one host frame).
+const EVICT_IDLE_FRAMES: u32 = 1200;
+/// An atlas is emptied even if some of its images are still in use: they are
+/// decoded again on their next draw, a few ms each. At most this many per
+/// pass, so a pass in the middle of a fight costs a few frames at worst...
+const EVICT_MAX_HOT: usize = 24;
+/// ...and no more than this in all.
+const EVICT_MAX_HOT_BYTES: u64 = 4 * 1024 * 1024;
+/// Atlases emptied per pass, so a pass never turns into a long frame.
+const EVICT_MAX_PER_PASS: usize = 4;
+
 // ─── Standalone (FBO-attachable) textures ─────────────────────────────────────
 //
 // The atlas system above packs many bitmaps into shared GL textures, which is
@@ -1662,6 +1782,54 @@ pub(crate) struct StandaloneTexture {
     pub(crate) texture: GLuint,
     pub(crate) width: u32,
     pub(crate) height: u32,
+    /// What it is for (`ST_*`), for the `stTexMB` breakdown.
+    kind: usize,
+}
+
+/// What a standalone texture is for. `stTex=` only counted them, and Super
+/// Smash Flash 2 ran out of memory at 1758 of them (2026-10-01) with no way to
+/// tell how many MB they held or whose they were.
+pub(crate) const ST_FILTER: usize = 0; // filter pool, and anything untagged
+pub(crate) const ST_OFFSCREEN: usize = 1; // render_offscreen temps
+pub(crate) const ST_CACHE: usize = 2; // cacheAsBitmap / filter caches (create_empty_texture)
+pub(crate) const ST_BITMAPDATA: usize = 3; // a bitmap too big for an atlas
+pub(crate) const ST_STAGE3D: usize = 4;
+const ST_KINDS: usize = 5;
+static ST_N: [std::sync::atomic::AtomicI64; ST_KINDS] =
+    [const { std::sync::atomic::AtomicI64::new(0) }; ST_KINDS];
+static ST_BYTES: [std::sync::atomic::AtomicI64; ST_KINDS] =
+    [const { std::sync::atomic::AtomicI64::new(0) }; ST_KINDS];
+
+fn st_count(kind: usize, width: u32, height: u32, sign: i64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    ST_N[kind].fetch_add(sign, Relaxed);
+    ST_BYTES[kind].fetch_add(sign * width as i64 * height as i64 * 4, Relaxed);
+}
+
+impl StandaloneTexture {
+    /// Re-files this texture under `kind` (it starts as `ST_FILTER`).
+    pub(crate) fn tagged(mut self, kind: usize) -> Self {
+        st_count(self.kind, self.width, self.height, -1);
+        st_count(kind, self.width, self.height, 1);
+        self.kind = kind;
+        self
+    }
+}
+
+/// `stTexMB=` total, then per kind `n/MB`.
+fn standalone_breakdown() -> std::string::String {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mb = |k: usize| ST_BYTES[k].load(Relaxed) / (1024 * 1024);
+    let total: i64 = (0..ST_KINDS).map(mb).sum();
+    std::format!(
+        "{} (filter {}/{} offscreen {}/{} cache {}/{} bitmapdata {}/{} stage3d {}/{})",
+        total,
+        ST_N[ST_FILTER].load(Relaxed), mb(ST_FILTER),
+        ST_N[ST_OFFSCREEN].load(Relaxed), mb(ST_OFFSCREEN),
+        ST_N[ST_CACHE].load(Relaxed), mb(ST_CACHE),
+        ST_N[ST_BITMAPDATA].load(Relaxed), mb(ST_BITMAPDATA),
+        ST_N[ST_STAGE3D].load(Relaxed), mb(ST_STAGE3D),
+    )
 }
 
 impl Drop for StandaloneTexture {
@@ -1669,6 +1837,7 @@ impl Drop for StandaloneTexture {
         let _pt = PrimTimer::new(&TEX_DEL_T_CUR);
         TEX_DEL_N_CUR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         LIVE_STANDALONE.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        st_count(self.kind, self.width, self.height, -1);
         unsafe { glDeleteTextures(1, &self.texture) };
     }
 }
@@ -1696,10 +1865,12 @@ pub(crate) fn standalone_bitmap_from_texture(
 ) -> BitmapHandle {
     // Its Drop counts it out like any other, so it has to be counted in.
     LIVE_STANDALONE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    st_count(ST_STAGE3D, width, height, 1);
     BitmapHandle(Arc::new(StandaloneBitmap(Arc::new(StandaloneTexture {
         texture,
         width,
         height,
+        kind: ST_STAGE3D,
     }))))
 }
 
@@ -1851,7 +2022,8 @@ fn make_standalone_texture(width: u32, height: u32) -> Option<StandaloneTexture>
         glBindTexture(GL_TEXTURE_2D, 0);
     }
     LIVE_STANDALONE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    Some(StandaloneTexture { texture: tex, width, height })
+    st_count(ST_FILTER, width, height, 1);
+    Some(StandaloneTexture { texture: tex, width, height, kind: ST_FILTER })
 }
 
 /// What kind of draw call this is (chooses the shader program).
@@ -1896,6 +2068,10 @@ enum DrawKind {
         /// outlives this draw (its `Drop` deletes the GL texture). Without this
         /// the fill fell back to `Solid` and rendered as a white block.
         standalone: Option<Arc<StandaloneTexture>>,
+        /// An evictable SWF image: `atlas_index`/`uv_remap` are then unused,
+        /// the draw reads where the image is NOW (it may have been evicted and
+        /// decoded again elsewhere since this shape was registered).
+        slot: Option<std::rc::Rc<ReloadSlot>>,
     },
 }
 
@@ -2394,6 +2570,17 @@ pub struct SwitchRenderBackend {
     big_atlas_dropped_total: u32,
     /// New atlases the GPU heap had no room for (`pack_into_atlas` fell back).
     atlas_alloc_failures: u32,
+    /// Evictable SWF images (see `ReloadSlot`); `evict.off` turns them off.
+    evict_on: bool,
+    /// Since the last `evict:` line: atlases emptied, images and bytes evicted,
+    /// images decoded again (bytes, time), decodes that failed.
+    evict_atlases: u32,
+    evict_images: u32,
+    evict_bytes: u64,
+    evict_reloads: u32,
+    evict_reload_bytes: u64,
+    evict_reload_ticks: u64,
+    evict_reload_fail: u32,
     /// System tick at the start of the current heartbeat window (60 frames).
     /// Set to 0 on first heartbeat; FPS measurement skipped until we have
     /// two samples to subtract. Uses `armGetSystemTick` for high resolution
@@ -4040,6 +4227,7 @@ fn upload_draw(
     gradient_textures: &[GLuint],
     bitmap_meta: Option<&SwitchBitmapHandle>,
     standalone: Option<Arc<StandaloneTexture>>,
+    slot: Option<std::rc::Rc<ReloadSlot>>,
     vertex_arena: &mut BufferArena,
     index_arena: &mut BufferArena,
 ) -> Option<GpuDraw> {
@@ -4133,6 +4321,20 @@ fn upload_draw(
                 [0.5 / w.max(1) as f32, 0.5 / h.max(1) as f32]
             };
             match (bitmap_meta, standalone) {
+                // An evictable SWF image: located at draw time.
+                _ if slot.is_some() => {
+                    let (w, h) = slot.as_ref().map_or((1, 1), |s| (s.width, s.height));
+                    DrawKind::Bitmap {
+                        atlas_index: 0,
+                        uv_remap: [0.0, 0.0, 1.0, 1.0],
+                        uv_inset: inset_of(w, h),
+                        local_matrix,
+                        is_smoothed: b.is_smoothed,
+                        is_repeating: b.is_repeating,
+                        standalone: None,
+                        slot,
+                    }
+                }
                 // Common case: the fill bitmap is atlas-packed.
                 (Some(meta), _) => DrawKind::Bitmap {
                     atlas_index: meta.atlas_index,
@@ -4142,6 +4344,7 @@ fn upload_draw(
                     is_smoothed: b.is_smoothed,
                     is_repeating: b.is_repeating,
                     standalone: None,
+                    slot: None,
                 },
                 // >2048 fill: sample its standalone texture directly (full UV).
                 // It owns its texture, so CLAMP_TO_EDGE would already keep a
@@ -4155,6 +4358,7 @@ fn upload_draw(
                     is_smoothed: b.is_smoothed,
                     is_repeating: b.is_repeating,
                     standalone: Some(tex),
+                    slot: None,
                 },
                 // Bitmap never resolved → solid (degenerate; e.g. budget cut).
                 (None, None) => DrawKind::Solid,
@@ -4281,6 +4485,10 @@ fn as_standalone_bitmap(handle: &BitmapHandle) -> Option<&StandaloneBitmap> {
 }
 
 fn as_dropped_bitmap(handle: &BitmapHandle) -> Option<&DroppedBitmap> {
+    <dyn Any>::downcast_ref(&*handle.0)
+}
+
+fn as_reloadable_bitmap(handle: &BitmapHandle) -> Option<&ReloadableBitmap> {
     <dyn Any>::downcast_ref(&*handle.0)
 }
 
@@ -5809,6 +6017,179 @@ impl SwitchRenderBackend {
         ));
     }
 
+    /// Pack an evictable image into a reloadable atlas and record where it
+    /// went. False when there is no room (the caller falls back).
+    fn pack_reloadable(
+        &mut self,
+        pixels: &[u8],
+        width: u32,
+        height: u32,
+        slot: &std::rc::Rc<ReloadSlot>,
+    ) -> bool {
+        let Some(meta) = self.pack_into_atlas(pixels, width, height, true) else {
+            return false;
+        };
+        slot.place.set(Some(AtlasPlace {
+            atlas_index: meta.atlas_index,
+            u0: meta.u0,
+            v0: meta.v0,
+            u1: meta.u1,
+            v1: meta.v1,
+        }));
+        *slot.ticket.borrow_mut() = meta.ticket.clone();
+        if let Some(a) = self.atlases.get_mut(meta.atlas_index) {
+            a.members.push(SlotLink(std::rc::Rc::downgrade(slot)));
+        }
+        true
+    }
+
+    /// Where an evictable image is, decoding it again first if it was evicted.
+    /// None when that fails (the draw is skipped; retried a second later).
+    fn ensure_resident(&mut self, slot: &std::rc::Rc<ReloadSlot>) -> Option<AtlasPlace> {
+        let now = self.frame_count.max(1);
+        slot.last_draw.set(now);
+        if let Some(p) = slot.place.get() {
+            return Some(p);
+        }
+        let failed = slot.failed_at.get();
+        if failed != 0 && now.wrapping_sub(failed) < 60 {
+            return None;
+        }
+        let t0 = unsafe { ruffle_tick_now() };
+        let decoded = (slot.reload)().and_then(|b| bitmap_to_rgba_bytes(&b));
+        let ok = match decoded {
+            Some((bytes, w, h)) if w == slot.width && h == slot.height => {
+                self.pack_reloadable(&bytes, w, h, slot)
+            }
+            _ => false,
+        };
+        self.evict_reload_ticks = self
+            .evict_reload_ticks
+            .wrapping_add(unsafe { ruffle_tick_now() }.wrapping_sub(t0));
+        // The upload bound (and unbound) a texture behind the cache's back,
+        // possibly mid-draw: the next draw must bind for real.
+        self.gl_state.invalidate();
+        if !ok {
+            slot.failed_at.set(now);
+            self.evict_reload_fail = self.evict_reload_fail.wrapping_add(1);
+            return None;
+        }
+        let bytes = slot.width as u64 * slot.height as u64 * 4;
+        ruffle_core::flashnx_bitmap_residency(bytes, true);
+        self.evict_reloads = self.evict_reloads.wrapping_add(1);
+        self.evict_reload_bytes = self.evict_reload_bytes.wrapping_add(bytes);
+        slot.place.get()
+    }
+
+    /// Empty the reloadable atlases nothing has drawn from for a while, once
+    /// they hold more than `EVICT_START_BYTES`. An atlas is only emptied whole
+    /// (that is what frees it): every image in it must be idle, give or take
+    /// `EVICT_MAX_HOT` that are decoded again on their next draw. Runs right
+    /// before the release drain, which then frees the emptied atlases.
+    fn evict_idle_images(&mut self) {
+        if !self.evict_on {
+            return;
+        }
+        let now = self.frame_count;
+        let atlas_bytes = |a: &Atlas| a.width as u64 * a.height as u64 * 4;
+        let mut total: u64 = self
+            .atlases
+            .iter()
+            .filter(|a| a.texture != 0 && a.reloadable)
+            .map(atlas_bytes)
+            .sum();
+        if total <= EVICT_START_BYTES {
+            return;
+        }
+        let mut order: std::vec::Vec<(u32, usize)> = self
+            .atlases
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.texture != 0 && a.reloadable)
+            .map(|(i, a)| (a.last_draw_frame.get(), i))
+            .collect();
+        order.sort_unstable();
+        let mut emptied = 0;
+        // What this pass may still send back to the decoder.
+        let (mut hot_left, mut hot_bytes_left) = (EVICT_MAX_HOT, EVICT_MAX_HOT_BYTES);
+        for (_, idx) in order {
+            if emptied >= EVICT_MAX_PER_PASS || total <= EVICT_START_BYTES {
+                break;
+            }
+            let atlas = &self.atlases[idx];
+            let members: std::vec::Vec<std::rc::Rc<ReloadSlot>> = atlas
+                .members
+                .iter()
+                .filter_map(|w| w.0.upgrade())
+                .filter(|m| m.place.get().is_some_and(|p| p.atlas_index == idx))
+                .collect();
+            // Something else still holds a place here (a release not drained
+            // yet): emptying would not free it. Next pass.
+            if members.is_empty() || atlas.live as usize != members.len() {
+                continue;
+            }
+            let (mut hot, mut hot_bytes) = (0usize, 0u64);
+            for m in &members {
+                if now.saturating_sub(m.last_draw.get()) < EVICT_IDLE_FRAMES {
+                    hot += 1;
+                    hot_bytes += m.width as u64 * m.height as u64 * 4;
+                }
+            }
+            if hot > hot_left || hot_bytes > hot_bytes_left {
+                continue;
+            }
+            hot_left -= hot;
+            hot_bytes_left -= hot_bytes;
+            let freed = atlas_bytes(atlas);
+            for m in &members {
+                m.place.set(None);
+                // Dropping the ticket queues the release the drain applies.
+                m.ticket.borrow_mut().take();
+                ruffle_core::flashnx_bitmap_residency(
+                    m.width as u64 * m.height as u64 * 4,
+                    false,
+                );
+            }
+            self.evict_images = self.evict_images.wrapping_add(members.len() as u32);
+            self.atlases[idx].members.clear();
+            self.evict_atlases = self.evict_atlases.wrapping_add(1);
+            self.evict_bytes = self.evict_bytes.wrapping_add(freed);
+            total = total.saturating_sub(freed);
+            emptied += 1;
+        }
+    }
+
+    /// `evict:` line, every 300 frames, then reset.
+    fn log_evict(&mut self) {
+        if !self.evict_on {
+            return;
+        }
+        let (mut n, mut mb) = (0u32, 0u64);
+        for a in &self.atlases {
+            if a.texture != 0 && a.reloadable {
+                n += 1;
+                mb += a.width as u64 * a.height as u64 * 4 / (1024 * 1024);
+            }
+        }
+        let ms = self.evict_reload_ticks as f64 * 1000.0 / unsafe { ruffle_tick_freq() }.max(1) as f64;
+        log_str(&std::format!(
+            "evict: f{} reloadable atlases {} ({}MB), other atlases {}; last 300 frames: emptied {} atlases ({}MB, {} images), decoded again {} ({}MB, {:.0} ms), failed {}, released slots reused {}\n",
+            self.frame_count, n, mb,
+            self.atlases.iter().filter(|a| a.texture != 0 && !a.reloadable).count(),
+            self.evict_atlases, self.evict_bytes / (1024 * 1024), self.evict_images,
+            self.evict_reloads, self.evict_reload_bytes / (1024 * 1024), ms,
+            self.evict_reload_fail,
+            SLOTS_REUSED.swap(0, Ordering::Relaxed),
+        ));
+        self.evict_atlases = 0;
+        self.evict_images = 0;
+        self.evict_bytes = 0;
+        self.evict_reloads = 0;
+        self.evict_reload_bytes = 0;
+        self.evict_reload_ticks = 0;
+        self.evict_reload_fail = 0;
+    }
+
     /// Keep `<game>.swf.arena` up to date: called every heartbeat, writes only
     /// on news (an overflow, or a peak at least 4 MB past the file), so a
     /// session that crashes later still leaves its peak behind.
@@ -6093,6 +6474,14 @@ impl SwitchRenderBackend {
             big_atlas_free_total: 0,
             big_atlas_dropped_total: 0,
             atlas_alloc_failures: 0,
+            evict_on: !marker_present("evict.off"),
+            evict_atlases: 0,
+            evict_images: 0,
+            evict_bytes: 0,
+            evict_reloads: 0,
+            evict_reload_bytes: 0,
+            evict_reload_ticks: 0,
+            evict_reload_fail: 0,
             heartbeat_tick: 0,
             draw_calls_this_window: 0,
             push_mask_window: 0,
@@ -6757,7 +7146,7 @@ impl SwitchRenderBackend {
                 return Some(self.offscreen_temp_retired.swap_remove(i));
             }
         }
-        make_standalone_texture(w, h)
+        make_standalone_texture(w, h).map(|t| t.tagged(ST_OFFSCREEN))
     }
 
     /// Read an (x, y, w, h) sub-rect of `tex` back into a CPU RGBA buffer with
@@ -7755,6 +8144,7 @@ impl SwitchRenderBackend {
         pixels: &[u8],
         width: u32,
         height: u32,
+        reloadable: bool,
     ) -> Option<SwitchBitmapHandle> {
         // A bitmap bigger than the atlas in either axis can NEVER be packed.
         // Bail out here — before the new-atlas path below would allocate a
@@ -7772,7 +8162,11 @@ impl SwitchRenderBackend {
             if atlas.texture == 0 {
                 continue; // freed/dead slot — reused in the new-atlas path below
             }
-            if let Some((x, y)) = atlas.pack(width, height) {
+            // Evictable SWF images and everything else never share an atlas.
+            if atlas.reloadable != reloadable {
+                continue;
+            }
+            if let Some((x, y, slot)) = atlas.pack(width, height) {
                 atlas.upload_region_padded(x, y, width, height, pixels);
                 atlas.live += 1; // released when the handle's AtlasTicket drops
                 // UVs are fractions of THIS atlas' size (atlases now vary: shared
@@ -7786,7 +8180,7 @@ impl SwitchRenderBackend {
                     v1: (y + height) as f32 / ah,
                     width,
                     height,
-                    ticket: Some(Arc::new(AtlasTicket { atlas_index: idx })),
+                    ticket: Some(Arc::new(AtlasTicket { atlas_index: idx, slot })),
                 });
             }
         }
@@ -7819,11 +8213,12 @@ impl SwitchRenderBackend {
             }
             return None;
         };
-        let Some((x, y)) = atlas.pack(width, height) else {
+        let Some((x, y, slot)) = atlas.pack(width, height) else {
             return None;
         };
         atlas.upload_region_padded(x, y, width, height, pixels);
         atlas.live = 1;
+        atlas.reloadable = reloadable;
         let (aw, ah) = (atlas.width as f32, atlas.height as f32);
         let atlas_bytes = atlas.width as u64 * atlas.height as u64 * 4;
         let bytes_mb = atlas_bytes / (1024 * 1024);
@@ -7862,7 +8257,7 @@ impl SwitchRenderBackend {
             v1: (y + height) as f32 / ah,
             width,
             height,
-            ticket: Some(Arc::new(AtlasTicket { atlas_index: new_atlas_index })),
+            ticket: Some(Arc::new(AtlasTicket { atlas_index: new_atlas_index, slot })),
         })
     }
 
@@ -15140,6 +15535,9 @@ impl RenderBackend for SwitchRenderBackend {
         // fill; both None means the fill renders solid (degenerate).
         let mut bitmap_standalones: Vec<Option<Arc<StandaloneTexture>>> =
             Vec::with_capacity(mesh.draws.len());
+        // Parallel too: an evictable SWF image (see `ReloadSlot`).
+        let mut bitmap_slots: Vec<Option<std::rc::Rc<ReloadSlot>>> =
+            Vec::with_capacity(mesh.draws.len());
         let bitmap_fill_count = mesh
             .draws
             .iter()
@@ -15147,6 +15545,7 @@ impl RenderBackend for SwitchRenderBackend {
             .count();
         let resolve_bitmaps = bitmap_fill_count <= PER_SHAPE_BITMAP_BUDGET;
         for draw in &mesh.draws {
+            let mut slot = None;
             let (meta, standalone) = if resolve_bitmaps {
                 if let DrawType::Bitmap(b) = &draw.draw_type {
                     match bitmap_source.bitmap_handle(b.bitmap_id, self) {
@@ -15157,6 +15556,9 @@ impl RenderBackend for SwitchRenderBackend {
                                 (Some(sw.clone()), None)
                             } else if let Some(st) = as_standalone_bitmap(&h) {
                                 (None, Some(st.0.clone()))
+                            } else if let Some(r) = as_reloadable_bitmap(&h) {
+                                slot = Some(r.0.clone());
+                                (None, None)
                             } else {
                                 (None, None)
                             }
@@ -15171,17 +15573,20 @@ impl RenderBackend for SwitchRenderBackend {
             };
             bitmap_metas.push(meta);
             bitmap_standalones.push(standalone);
+            bitmap_slots.push(slot);
         }
 
         let mut draws: Vec<GpuDraw> = Vec::with_capacity(mesh.draws.len());
         for (idx, draw) in mesh.draws.iter().enumerate() {
             let meta_ref = bitmap_metas[idx].as_ref();
             let standalone = bitmap_standalones[idx].clone();
+            let slot = bitmap_slots[idx].clone();
             if let Some(mut gpu) = upload_draw(
                 draw,
                 &gradient_textures,
                 meta_ref,
                 standalone,
+                slot,
                 &mut self.vertex_arena,
                 &mut self.index_arena,
             ) {
@@ -15616,15 +16021,26 @@ impl RenderBackend for SwitchRenderBackend {
                 self.index_arena.free_region(f.ibo_offset, f.ibo_size);
             }
         }
+        // Evictable SWF images: empty idle atlases once a second, just before
+        // the drain below frees them.
+        if self.frame_count % 60 == 0 {
+            self.evict_idle_images();
+        }
         // Drain atlas releases (issue #56b): a dropped bitmap's AtlasTicket enqueued
         // its atlas index; decrement the live count and free the 16 MB texture when
         // it reaches 0, so re-cached large offscreen surfaces don't leak to OOM.
         {
             let mut pending = PENDING_ATLAS_RELEASE.lock().unwrap();
-            for idx in pending.drain(..) {
+            for (idx, slot) in pending.drain(..) {
                 if let Some(atlas) = self.atlases.get_mut(idx) {
                     if atlas.texture != 0 {
                         atlas.live = atlas.live.saturating_sub(1);
+                        if atlas.live > 0 {
+                            // The slot is free for the next bitmap. Held texture
+                            // writes were flushed at the top of submit_frame,
+                            // before this drain, so none can still land in it.
+                            atlas.free_slots.push(slot);
+                        }
                         if atlas.live == 0 {
                             // Reclaim big-surface budget before the texture is
                             // dropped (dims read here — free_gl zeroes them). A
@@ -16041,10 +16457,11 @@ impl RenderBackend for SwitchRenderBackend {
             if self.frame_count % 300 == 0 {
                 self.log_atlas_idle();
                 let (gotos, run, skipped, list_skipped) = ruffle_core::take_inner_goto_stats();
+                let subtrees_skipped = ruffle_core::take_subtrees_skipped();
                 if gotos > 0 {
                     log_str(&std::format!(
-                        "gotos: f{} last 300 frames: {} inner gotos ({} without touching the orphan list), orphans walked {} skipped {}\n",
-                        self.frame_count, gotos, list_skipped, run, skipped
+                        "gotos: f{} last 300 frames: {} inner gotos ({} without touching the orphan list), orphans walked {} skipped {}, unchanged subtrees passed over {}\n",
+                        self.frame_count, gotos, list_skipped, run, skipped, subtrees_skipped
                     ));
                 }
                 // Which event sounds were started, and how often: a sound
@@ -16064,6 +16481,45 @@ impl RenderBackend for SwitchRenderBackend {
                         top.join(", ")
                     ));
                 }
+                self.log_evict();
+                // How the heap is split: big blocks at the top, newlib below.
+                {
+                    let mut h = [0u64; 8];
+                    unsafe { flashnx_heap_stats(h.as_mut_ptr()) };
+                    let mb = |b: u64| b / (1024 * 1024);
+                    log_str(&std::format!(
+                        "heap: f{} top region {}MB ({}MB in {} blocks, {} holes), biggest free {}MB, room below {}MB, big refused {} (newlib served {})\n",
+                        self.frame_count, mb(h[0]), mb(h[1]), h[2], h[3], mb(h[4]), mb(h[5]), h[6], h[7]
+                    ));
+                }
+                // Which ActionScript 3 functions took the time (as3prof.on).
+                let as3 = ruffle_core::as3prof_report(25);
+                if !as3.is_empty() {
+                    log_str(&std::format!("as3prof: f{} last 300 frames\n{}", self.frame_count, as3));
+                }
+                // What is alive: movies, display objects, AVM2 objects per
+                // class (empty unless Ruffle is built with flashnx_instr).
+                let census = ruffle_core::census_report();
+                if !census.is_empty() {
+                    log_str(&std::format!("census: f{} {}\n", self.frame_count, census));
+                }
+                // BitmapData.threshold calls that changed nothing, and so no
+                // longer send their bitmap back to the GPU.
+                let (thr_calls, thr_unchanged) = ruffle_core::take_threshold_stats();
+                let thr_memo = ruffle_core::take_threshold_memo_hits();
+                if thr_calls > 0 {
+                    log_str(&std::format!(
+                        "threshold: f{} last 300 frames: {} calls, {} changed nothing ({} answered without scanning)\n",
+                        self.frame_count, thr_calls, thr_unchanged, thr_memo
+                    ));
+                }
+                // Standalone textures by origin, in MB (atlases are on the
+                // atlasIdle line).
+                log_str(&std::format!(
+                    "textures: f{} stTexMB={}\n",
+                    self.frame_count,
+                    standalone_breakdown()
+                ));
             }
             let v_frag = self.vertex_arena.free.len();
             let i_frag = self.index_arena.free.len();
@@ -16120,7 +16576,7 @@ impl RenderBackend for SwitchRenderBackend {
                 }
             };
             let msg = std::format!(
-                "f{}: fps={} cpu={}MHz gpu={}MHz drift={} skin={} batC={} bat={} dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} stTex={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB heap={}MB slabMB={} slabChunks={}/{}{} drawbox={} maxalpha={:.2}\n",
+                "f{}: fps={} cpu={}MHz gpu={}MHz drift={} skin={} batC={} bat={} dock={} tick={}ms render={}ms dc/win={} shapes={}(live {}) draws_live={} arena_v={}MB/peak{}MB(frag {}) arena_i={}MB/peak{}MB(frag {}) arenaDropV={} arenaDropI={} bitmaps={} atlases={} bigMB={}/{} bigA/F/D={}/{}/{} bdMB={} bitmap_draws={} offscreen={} sync={} filter={} fpool={} stTex={} otpool={}/{}MB pushmask={} amask={} blend={} maskeddraw={} maskshape={} tickMax={}ms rndMax={}ms cacheMax={} ram={}MB/{}MB heap={}MB slabMB={} slabChunks={}/{}{} dlMB={}/{}({}) drawbox={} maxalpha={:.2}\n",
                 self.frame_count,
                 fps_str,
                 cpu_mhz,
@@ -16173,6 +16629,10 @@ impl RenderBackend for SwitchRenderBackend {
                 // Sticky: no contiguous 32 MB was available at some point, so
                 // small blocks are falling back to newlib. See `region_grow_failed`.
                 if crate::region_grow_failed() { "!STARVED" } else { "" },
+                // dlmalloc: MB in use / MB of segments held (segments).
+                crate::dl_segments().0 / (1024 * 1024),
+                crate::dl_segments().1 / (1024 * 1024),
+                crate::dl_segments().2,
                 match self.draw_extent.take() {
                     Some((x0, y0, x1, y1)) => std::format!(
                         "{:.0},{:.0}..{:.0},{:.0}", x0, y0, x1, y1
@@ -16348,7 +16808,8 @@ impl RenderBackend for SwitchRenderBackend {
         let _pt = PrimTimer::new(&PRIM_MKTEX_CUR);
         PRIM_MKTEX_N_CUR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let standalone = make_standalone_texture(width.get(), height.get())
-            .ok_or(Error::TooLarge)?;
+            .ok_or(Error::TooLarge)?
+            .tagged(ST_CACHE);
         self.bitmaps_registered = self.bitmaps_registered.wrapping_add(1);
         Ok(BitmapHandle(Arc::new(StandaloneBitmap(Arc::new(standalone)))))
     }
@@ -16390,7 +16851,7 @@ impl RenderBackend for SwitchRenderBackend {
         // what keeps Tegra's texture count sane. Keeping ALL bitmaps standalone
         // broke the SMWF sky (a shape with a JPEG fill → no atlas variant) — so
         // the atlas path is the default.
-        if let Some(meta) = self.pack_into_atlas(&bytes, w, h) {
+        if let Some(meta) = self.pack_into_atlas(&bytes, w, h, false) {
             self.bitmaps_registered = self.bitmaps_registered.wrapping_add(1);
             return Ok(BitmapHandle(Arc::new(meta)));
         }
@@ -16401,12 +16862,18 @@ impl RenderBackend for SwitchRenderBackend {
         // Give it a standalone GL texture instead (good up to GL_MAX ≈ 16384,
         // and FBO-attachable — exactly what BitmapData.draw wants), with the
         // pixels uploaded. As a shape FILL it'd fall back to solid (no atlas
-        // variant), but it never crashes. Genuine GL OOM / over GL_MAX still
-        // returns TooLarge (Ruffle handles a None handle there without us
-        // forcing it through the expect path on every frame).
+        // variant), but it never crashes.
+        //
+        // No texture at all (GPU memory exhausted, or over GL_MAX): hand back
+        // the same invisible `DroppedBitmap` as the big-surface budget above,
+        // not `Err`. `BitmapData::bitmap_handle` in Ruffle `expect`s this call,
+        // so an `Err` for one 32x38 sprite panicked Super Smash Flash 2 thirty
+        // seconds into its first fight (2026-09-30), once the GPU had nothing
+        // left. One sprite missing beats losing the session.
         let Some(standalone) = make_standalone_texture(w, h) else {
-            return Err(Error::TooLarge);
+            return Ok(BitmapHandle(Arc::new(DroppedBitmap { width: w, height: h })));
         };
+        let standalone = standalone.tagged(ST_BITMAPDATA);
         unsafe {
             glBindTexture(GL_TEXTURE_2D, standalone.texture);
             glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -16422,6 +16889,47 @@ impl RenderBackend for SwitchRenderBackend {
         self.warn_once(b"register_bitmap: >2048 bitmap or no room for an atlas -> standalone texture (no crash)\n\0");
         self.bitmaps_registered = self.bitmaps_registered.wrapping_add(1);
         Ok(BitmapHandle(Arc::new(StandaloneBitmap(Arc::new(standalone)))))
+    }
+
+    fn register_bitmap_reloadable(
+        &mut self,
+        bitmap: Bitmap<'_>,
+        reload: std::rc::Rc<dyn Fn() -> Option<Bitmap<'static>>>,
+    ) -> Result<BitmapHandle, Error> {
+        let (dw, dh) = (bitmap.width(), bitmap.height());
+        // Bigger than an atlas: the standalone path, kept for ever as before.
+        if !self.evict_on || dw == 0 || dh == 0 || dw > ATLAS_SIZE || dh > ATLAS_SIZE {
+            return self.register_bitmap(bitmap);
+        }
+        // A big one still answers to the big-surface budget (register_bitmap
+        // hands back an invisible DroppedBitmap past it).
+        if is_big_surface(dw, dh)
+            && self.big_atlas_live_bytes.saturating_add(dw as u64 * dh as u64 * 4)
+                > BIG_ATLAS_BUDGET_BYTES
+        {
+            return self.register_bitmap(bitmap);
+        }
+        let Some((bytes, w, h)) = bitmap_to_rgba_bytes(&bitmap) else {
+            return Err(Error::UnknownType);
+        };
+        let slot = std::rc::Rc::new(ReloadSlot {
+            place: Cell::new(None),
+            ticket: core::cell::RefCell::new(None),
+            width: w,
+            height: h,
+            last_draw: Cell::new(self.frame_count.max(1)),
+            failed_at: Cell::new(0),
+            reload,
+        });
+        {
+            let _pt = PrimTimer::new(&PRIM_BMPUP_CUR);
+            if !self.pack_reloadable(&bytes, w, h, &slot) {
+                drop(bytes);
+                return self.register_bitmap(bitmap);
+            }
+        }
+        self.bitmaps_registered = self.bitmaps_registered.wrapping_add(1);
+        Ok(BitmapHandle(Arc::new(ReloadableBitmap(slot))))
     }
 
     fn update_texture(
@@ -16839,13 +17347,30 @@ impl CommandHandler for SwitchRenderBackend {
                     is_smoothed,
                     is_repeating,
                     standalone,
+                    slot,
                 } => {
                     if local_matrix.iter().any(|v| !v.is_finite()) {
                         continue;
                     }
+                    let mut remap = *uv_remap;
                     // >2048 fill: sample its own texture. Otherwise the atlas.
                     let tex = if let Some(s) = standalone {
                         s.texture
+                    } else if let Some(slot) = slot {
+                        // Evictable image: wherever it is now, decoded again
+                        // if it was evicted. Nothing drawn if that fails.
+                        let Some(place) = self.ensure_resident(slot) else {
+                            continue;
+                        };
+                        let Some(atlas) = self.atlases.get(place.atlas_index) else {
+                            continue;
+                        };
+                        if atlas.texture == 0 {
+                            continue;
+                        }
+                        atlas.last_draw_frame.set(self.frame_count.max(1));
+                        remap = [place.u0, place.v0, place.u1 - place.u0, place.v1 - place.v0];
+                        atlas.texture
                     } else {
                         let Some(atlas) = self.atlases.get(*atlas_index) else {
                             continue;
@@ -16860,7 +17385,7 @@ impl CommandHandler for SwitchRenderBackend {
                         &add,
                         tex,
                         local_matrix,
-                        uv_remap,
+                        &remap,
                         uv_inset,
                         *is_repeating,
                         self.sampler_for(*is_smoothed),
