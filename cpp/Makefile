@@ -70,6 +70,11 @@ CFLAGS   += -DNDEBUG
 
 ASFLAGS  := -g $(ARCH)
 LDFLAGS  := -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+# Big page-aligned blocks at the top of the heap, newlib below (src/flashnx_heap.c).
+# Wrapping these entry points catches the public names too: newlib's memalign,
+# aligned_alloc, posix_memalign, free, realloc and mallinfo all call them.
+LDFLAGS  += -Wl,--wrap=_sbrk_r,--wrap=_memalign_r,--wrap=_free_r,--wrap=_realloc_r
+LDFLAGS  += -Wl,--wrap=_malloc_usable_size_r,--wrap=_mallinfo_r
 
 #---------------------------------------------------------------------------------
 # Rust staticlib + switch-mesa GL stack + libnx

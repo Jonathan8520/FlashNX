@@ -83,6 +83,10 @@ extern "C" uint64_t ruffle_frame_interval_us(void);
 extern "C" void ruffle_dump_stage_children(void);
 extern "C" void ruffle_dump_root_vars(void);
 extern "C" void ruffle_alloc_force_off(void);
+extern "C" bool ruffle_dlmalloc_force_off(void);
+// src/flashnx_heap.c: how the heap is split between newlib and the top region.
+extern "C" void flashnx_heap_stats(uint64_t* out);
+extern "C" int malloc_trim(size_t pad);
 
 // CPU power mode — see ruffle_bridge.cpp for what it does and what the
 // evidence for it is. Default is mode 0, which touches nothing. The value is
@@ -1882,6 +1886,7 @@ int main(int argc, char** argv) {
     // curl error. Not fatal — the launcher and every game still work offline,
     // only the import/report features are unavailable.
     static bool g_noalloc_marker = false;
+    static int g_dlmalloc_marker = 0;   // 1 = honoured, -1 = came too late
     // A/B switch for the small-object allocator cache (2026-08-25). Read here,
     // before the worker thread starts, because the flag has to be set before
     // the first Rust allocation reserves the region.
@@ -1892,6 +1897,10 @@ int main(int argc, char** argv) {
             g_noalloc_marker = true;   // announced below, once nxlink is up
             std::fflush(stdout);
         }
+        // Same for the medium-block allocator (dlmalloc, 2026-10-01).
+        if (::stat("sdmc:/switch/FlashNX/dlmalloc.off", &st) == 0) {
+            g_dlmalloc_marker = ruffle_dlmalloc_force_off() ? 1 : -1;
+        }
     }
     const Result sock_rc = socketInitializeDefault();
     if (R_FAILED(sock_rc)) {
@@ -1901,6 +1910,12 @@ int main(int argc, char** argv) {
         nxlinkStdio();
         if (g_noalloc_marker) {
             std::printf("alloc: noalloc.on present -> small-object cache DISABLED\n");
+            std::fflush(stdout);
+        }
+        if (g_dlmalloc_marker != 0) {
+            std::printf(g_dlmalloc_marker > 0
+                ? "alloc: dlmalloc.off present -> medium blocks go to newlib\n"
+                : "alloc: dlmalloc.off present but too late, IGNORED\n");
             std::fflush(stdout);
         }
     }
@@ -2004,6 +2019,16 @@ int main(int argc, char** argv) {
         std::printf("boot: malloc ceiling %llu MB total, biggest single block %llu MB\n",
                     (unsigned long long)(total / (1024 * 1024)),
                     (unsigned long long)(biggest / (1024 * 1024)));
+        // The probe walked newlib up to the end of the heap. Hand that back,
+        // or the top region for big blocks (src/flashnx_heap.c) would find no
+        // room above newlib's break and every big block would fall back to
+        // newlib, as before it existed.
+        malloc_trim(0);
+        uint64_t h[8];
+        flashnx_heap_stats(h);
+        std::printf("boot: top region %llu MB, room between newlib and it %llu MB\n",
+                    (unsigned long long)(h[0] / (1024 * 1024)),
+                    (unsigned long long)(h[5] / (1024 * 1024)));
         std::fflush(stdout);
     }
 
