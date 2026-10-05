@@ -35,6 +35,19 @@ mod counting_alloc {
         /// libdrm's buffer-object cache (cpp/third_party/libdrm_nouveau): empty
         /// it, and return the bytes given back to the heap.
         fn flashnx_boc_trim() -> u64;
+        /// newlib's, wrapped by cpp/src/flashnx_heap.c.
+        fn memalign(align: usize, size: usize) -> *mut core::ffi::c_void;
+    }
+
+    /// A page-aligned block. From 256 KB up, cpp/src/flashnx_heap.c serves it
+    /// from the top of the heap, away from the small objects newlib keeps at
+    /// the bottom: our big blocks, the region's chunks and dlmalloc's segments
+    /// then share their holes with the GPU's buffers instead of being nibbled
+    /// by small allocations (a 16 MB block was refused on ~95 MB of scattered
+    /// free space, 2026-10-05). `free` gives it back like any other block.
+    #[inline(always)]
+    unsafe fn top_alloc(size: usize, align: usize) -> *mut u8 {
+        unsafe { memalign(core::cmp::max(align, 4096), size) as *mut u8 }
     }
 
     /// Newlib refused a block. The GPU buffer-object cache parks up to 48 MB of
@@ -60,12 +73,20 @@ mod counting_alloc {
         freed > 0
     }
 
-    /// `System.alloc`, with one retry after `reclaim_gpu_cache`.
+    /// `System.alloc` (or `top_alloc` for a big block), with one retry after
+    /// `reclaim_gpu_cache`.
     #[inline(always)]
     unsafe fn sys_alloc(l: Layout) -> *mut u8 {
-        let q = unsafe { System.alloc(l) };
+        let get = || unsafe {
+            if l.size() >= BIG {
+                top_alloc(l.size(), l.align())
+            } else {
+                System.alloc(l)
+            }
+        };
+        let q = get();
         if q.is_null() && reclaim_gpu_cache() {
-            unsafe { System.alloc(l) }
+            get()
         } else {
             q
         }
@@ -183,6 +204,186 @@ mod counting_alloc {
             return None;
         }
         Some((l.size() + GRAN - 1) / GRAN - 1)
+    }
+
+    // ─── Medium blocks: dlmalloc 2.8 between Rust and newlib ──────────────
+    //
+    // Why: measured 2026-10-01 on Super Smash Flash 2. The region above fills
+    // (16/16 chunks) during the first fight, and from then on every block that
+    // is not a small one, or that the full region cannot take, is newlib's.
+    // newlib's malloc is dlmalloc 2.6: `free` files every chunk of 512 bytes or
+    // more into a SORTED bin by walking it, and so does every coalesced
+    // neighbour. On a 2.8 GB heap holding a million objects that walk is the
+    // whole cost: in the frame that loaded the 4th Classic level, 1 845 839
+    // frees took 66.5 s (36 us each), 7.8 million took 22.9 s at the 3rd, and a
+    // fight frame of the 3rd level spent 48 % of its 75 ms in the allocator.
+    // Level loads stretched to 38 and 67 s, every level after the first lagged.
+    //
+    // dlmalloc 2.8 (the `dlmalloc` crate) keeps large chunks in bitwise tries,
+    // so a free costs O(log n) however fragmented the heap is. It gets its
+    // memory from newlib in segments of at least SEGMENT bytes, so newlib only
+    // sees a few hundred large blocks next to Mesa's own allocations.
+    //
+    // Routing is a pure function of the Layout, like `class_of`: below BIG,
+    // dlmalloc; from BIG up, newlib, as before (SWF data, decoded images,
+    // vertex buffers: few blocks, short bins). A small block the region cannot
+    // take (region full, alignment above 16) goes to dlmalloc as well, and
+    // `dealloc`, finding it outside the region, sends it back there by the same
+    // size test.
+    //
+    // dlmalloc keeps what is freed inside its segments and hands a segment back
+    // to newlib only once it is entirely free. Memory freed by Rust is then
+    // reusable by Rust's next medium blocks but not by the GPU, exactly like the
+    // region's chunks; `dlMB=` on the heartbeat shows how much it holds.
+
+    const BIG: usize = 256 * 1024;
+    const SEGMENT: usize = 8 * 1024 * 1024;
+
+    /// Bytes and count of the segments dlmalloc holds (`dlMB=`).
+    pub static DL_SEG_BYTES: AtomicU64 = AtomicU64::new(0);
+    pub static DL_SEGS: AtomicUsize = AtomicUsize::new(0);
+    /// Bytes Rust holds in dlmalloc blocks right now (requested sizes, so a
+    /// little under what the chunks take). Against DL_SEG_BYTES, it says how
+    /// much of the segments is free space dlmalloc keeps for itself.
+    pub static DL_INUSE: AtomicU64 = AtomicU64::new(0);
+    /// Kill switch, the `dlmalloc.off` marker: medium blocks go to newlib as
+    /// they did before. Only honoured until dlmalloc has served a block, since
+    /// `dealloc` routes by size and a block must go back where it came from.
+    static DL_OFF: AtomicBool = AtomicBool::new(false);
+    static DL_USED: AtomicBool = AtomicBool::new(false);
+
+    /// Returns false if dlmalloc has already served a block (switch refused).
+    pub fn dl_force_off() -> bool {
+        if DL_USED.load(Ordering::Relaxed) {
+            return false;
+        }
+        DL_OFF.store(true, Ordering::Relaxed);
+        true
+    }
+
+    /// dlmalloc's source of memory: newlib, in large blocks.
+    struct Segments;
+
+    unsafe impl dlmalloc::Allocator for Segments {
+        fn alloc(&self, size: usize) -> (*mut u8, usize, u32) {
+            // Big first: fewer blocks for newlib to keep, fewer segments for
+            // dlmalloc to walk. Late in a heavy session no contiguous SEGMENT
+            // may be left, so then exactly what was asked, then the same after
+            // giving the GPU cache back.
+            let mut want = core::cmp::max(size, SEGMENT);
+            let mut p = unsafe { top_alloc(want, 4096) };
+            if p.is_null() && want != size {
+                want = size;
+                p = unsafe { top_alloc(want, 4096) };
+            }
+            if p.is_null() && reclaim_gpu_cache() {
+                p = unsafe { top_alloc(want, 4096) };
+            }
+            if p.is_null() {
+                return (core::ptr::null_mut(), 0, 0);
+            }
+            DL_SEG_BYTES.fetch_add(want as u64, Ordering::Relaxed);
+            DL_SEGS.fetch_add(1, Ordering::Relaxed);
+            (p, want, 0)
+        }
+
+        fn remap(&self, _ptr: *mut u8, _old: usize, _new: usize, _can_move: bool) -> *mut u8 {
+            core::ptr::null_mut()
+        }
+
+        /// newlib cannot shrink a block in place.
+        fn free_part(&self, _ptr: *mut u8, _old: usize, _new: usize) -> bool {
+            false
+        }
+
+        fn free(&self, ptr: *mut u8, size: usize) -> bool {
+            unsafe { System.dealloc(ptr, Layout::from_size_align_unchecked(size, GRAN)) };
+            DL_SEG_BYTES.fetch_sub(size as u64, Ordering::Relaxed);
+            DL_SEGS.fetch_sub(1, Ordering::Relaxed);
+            true
+        }
+
+        /// True so that wholly free segments go back to newlib (dlmalloc asks
+        /// this before `free` as well as before `free_part`).
+        fn can_release_part(&self, _flags: u32) -> bool {
+            true
+        }
+
+        fn allocates_zeros(&self) -> bool {
+            false
+        }
+
+        fn page_size(&self) -> usize {
+            4096
+        }
+    }
+
+    struct Dl(core::cell::UnsafeCell<dlmalloc::Dlmalloc<Segments>>);
+    // Only touched under DL_LOCK.
+    unsafe impl Sync for Dl {}
+    static DL: Dl = Dl(core::cell::UnsafeCell::new(dlmalloc::Dlmalloc::new_with_allocator(Segments)));
+    static DL_LOCK: AtomicBool = AtomicBool::new(false);
+
+    #[inline(always)]
+    fn dl_lock() {
+        while DL_LOCK
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Whether a block of this layout, outside the region, is dlmalloc's.
+    #[inline(always)]
+    fn is_dl(l: Layout) -> bool {
+        l.size() < BIG && !DL_OFF.load(Ordering::Relaxed)
+    }
+
+    /// The layout-free entry points on purpose: the sized ones `assert!` the
+    /// size against the chunk header, and a panic inside the global allocator
+    /// would allocate to format its message and spin on the lock it holds.
+    #[inline(always)]
+    unsafe fn dl_alloc(l: Layout) -> *mut u8 {
+        DL_USED.store(true, Ordering::Relaxed);
+        dl_lock();
+        let dl = unsafe { &mut *DL.0.get() };
+        let p = if l.align() <= GRAN {
+            unsafe { dl.c_malloc(l.size()) }
+        } else {
+            unsafe { dl.c_memalign(l.align(), l.size()) }
+        };
+        DL_LOCK.store(false, Ordering::Release);
+        if !p.is_null() {
+            DL_INUSE.fetch_add(l.size() as u64, Ordering::Relaxed);
+        }
+        p
+    }
+
+    #[inline(always)]
+    unsafe fn dl_free(p: *mut u8) {
+        dl_lock();
+        unsafe { (*DL.0.get()).c_free(p) };
+        DL_LOCK.store(false, Ordering::Release);
+    }
+
+    /// Only for alignment <= 16, where `c_realloc` keeps the guarantee.
+    #[inline(always)]
+    unsafe fn dl_realloc(p: *mut u8, n: usize) -> *mut u8 {
+        dl_lock();
+        let q = unsafe { (*DL.0.get()).c_realloc(p, n) };
+        DL_LOCK.store(false, Ordering::Release);
+        q
+    }
+
+    /// Everything outside the region: dlmalloc below BIG, newlib from BIG up.
+    #[inline(always)]
+    unsafe fn outside_alloc(l: Layout) -> *mut u8 {
+        if is_dl(l) {
+            unsafe { dl_alloc(l) }
+        } else {
+            unsafe { sys_alloc(l) }
+        }
     }
 
     static LOCK: AtomicBool = AtomicBool::new(false);
@@ -303,7 +504,7 @@ mod counting_alloc {
         if n >= MAX_CHUNKS {
             return false;
         }
-        let p = unsafe { System.alloc(Layout::from_size_align_unchecked(CHUNK, GRAN)) };
+        let p = unsafe { top_alloc(CHUNK, 4096) };
         if p.is_null() {
             // Loudly, once. This is the cache's one silent failure mode and it
             // is expensive: measured on Super Smash Flash 2, the fight-loading
@@ -432,12 +633,12 @@ mod counting_alloc {
                     };
                     unlock();
                     if p.is_null() {
-                        unsafe { sys_alloc(l) }
+                        unsafe { outside_alloc(l) }
                     } else {
                         p
                     }
                 }
-                None => unsafe { sys_alloc(l) },
+                None => unsafe { outside_alloc(l) },
             };
             tally(&ALLOC_TICKS, now().wrapping_sub(t0));
             tally(&ALLOC_N, 1);
@@ -481,6 +682,9 @@ mod counting_alloc {
                 // handed back under a live pointer.
                 census_back(chunk);
                 unlock();
+            } else if is_dl(l) {
+                unsafe { dl_free(p) };
+                DL_INUSE.fetch_sub(l.size() as u64, Ordering::Relaxed);
             } else {
                 unsafe { System.dealloc(p, l) };
             }
@@ -490,10 +694,22 @@ mod counting_alloc {
 
         unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
             let new_l = unsafe { Layout::from_size_align_unchecked(n, l.align()) };
-            // `System.realloc` is only valid when BOTH ends are newlib's. The
-            // old end is decided by where the pointer lives, the new one by
-            // whether it could be served from the region at all.
-            if !in_region(p) && class_of(new_l).is_none() {
+            // `System.realloc` is only valid when BOTH ends are newlib's, and
+            // `dl_realloc` when both are dlmalloc's. The old end is decided by
+            // where the pointer lives and its size, the new one by whether the
+            // region could serve it at all and its size.
+            let outside = !in_region(p) && class_of(new_l).is_none();
+            if outside && is_dl(l) && is_dl(new_l) && l.align() <= GRAN {
+                let t0 = now();
+                let q = unsafe { dl_realloc(p, n) };
+                if !q.is_null() {
+                    DL_INUSE.fetch_add(n as u64, Ordering::Relaxed);
+                    DL_INUSE.fetch_sub(l.size() as u64, Ordering::Relaxed);
+                }
+                tally(&ALLOC_TICKS, now().wrapping_sub(t0));
+                tally(&ALLOC_N, 1);
+                q
+            } else if outside && !is_dl(l) && !is_dl(new_l) {
                 let t0 = now();
                 let mut q = unsafe { System.realloc(p, l, n) };
                 // A failed realloc leaves the old block intact, so the retry
@@ -1461,6 +1677,14 @@ pub extern "C" fn ruffle_init() -> c_int {
     if !goto_skip {
         log(b"gotos: gotoskip.off present -> inner gotos walk every orphan\n\0");
     }
+    // `sdmc:/switch/FlashNX/stageskip.off`: inner gotos walk the whole stage
+    // again instead of passing over its unchanged subtrees (the orphan skip
+    // above is separate). Same kind of experiment switch.
+    let stage_skip = !backend::render::marker_present("stageskip.off");
+    ruffle_core::set_stage_skip(stage_skip);
+    if !stage_skip {
+        log(b"gotos: stageskip.off present -> inner gotos walk the whole stage\n\0");
+    }
     // `sdmc:/switch/FlashNX/lazyshape.off`: static shapes are registered while
     // the movie preloads, as upstream does, instead of on first draw. Same kind
     // of experiment switch, to tell whether a missing graphic comes from it.
@@ -1476,6 +1700,14 @@ pub extern "C" fn ruffle_init() -> c_int {
     ruffle_core::set_bitmap_cache(bitmap_cache);
     if !bitmap_cache {
         log(b"render: bitmapcache.off present -> cacheAsBitmap ignored\n\0");
+    }
+    // `sdmc:/switch/FlashNX/as3prof.on`: time every ActionScript 3 function
+    // the game runs (exclusive/inclusive ms, calls), printed as `as3prof:`
+    // lines every 300 frames. A measurement switch, off by default.
+    let as3prof = backend::render::marker_present("as3prof.on");
+    ruffle_core::set_as3_profiler(as3prof);
+    if as3prof {
+        log(b"as3prof: as3prof.on present -> per-function AS3 timing ON\n\0");
     }
 
     log(b"ruffle_init: calling PlayerBuilder::build()\n\0");
@@ -3904,4 +4136,24 @@ fn log_str(s: &str) {
 #[no_mangle]
 pub extern "C" fn ruffle_alloc_force_off() {
     counting_alloc::FORCE_OFF.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Send medium blocks back to newlib instead of dlmalloc, for an A/B on the
+/// same build: `sdmc:/switch/FlashNX/dlmalloc.off`, read at boot like
+/// `noalloc.on`. Returns false when it came too late (dlmalloc had already
+/// served a block) and was ignored.
+#[no_mangle]
+pub extern "C" fn ruffle_dlmalloc_force_off() -> bool {
+    counting_alloc::dl_force_off()
+}
+
+/// dlmalloc: (bytes in use by Rust, bytes of segments held, segment count),
+/// printed as `dlMB=used/held(count)`.
+pub(crate) fn dl_segments() -> (u64, u64, usize) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        counting_alloc::DL_INUSE.load(Relaxed),
+        counting_alloc::DL_SEG_BYTES.load(Relaxed),
+        counting_alloc::DL_SEGS.load(Relaxed),
+    )
 }

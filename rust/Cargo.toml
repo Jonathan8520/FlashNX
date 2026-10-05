@@ -48,6 +48,12 @@ swf = { path = "../third_party/ruffle/swf" }
 # is already in the dep tree (the `swf` crate uses it for CWS), so direct-dep
 # binary cost is ~0.
 flate2 = "1"
+# Medium-block allocator (2026-10-01): dlmalloc 2.8 between Rust and newlib for
+# blocks under 256 KB, see `counting_alloc` in lib.rs. newlib's own malloc is
+# dlmalloc 2.6, whose `free` walks sorted bins: 36 us per free on Super Smash
+# Flash 2's 2.8 GB heap, 67 s for one level load. No default features: we feed
+# it segments from newlib ourselves.
+dlmalloc = { version = "0.2.14", default-features = false }
 # Needed to declare `__getrandom_v03_custom` with the correct Error type;
 # the cfg flag in .cargo/config.toml puts getrandom in "custom backend" mode.
 getrandom = "0.3"
