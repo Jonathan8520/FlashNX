@@ -551,11 +551,22 @@ extern "C" int swf_picker_list_tree(const char* root, char* out, int cap) {
             } else {
                 std::snprintf(child, sizeof(child), "%s/%s", rel, e->d_name);
             }
-            char full[512];
-            std::snprintf(full, sizeof(full), "%s/%s", root, child);
-            struct stat st;
-            if (::stat(full, &st) != 0) continue;
-            if (S_ISDIR(st.st_mode)) {
+            // `d_type`, not a stat per entry: fsdev fills it in from the
+            // directory listing itself (fsdev_dirnext sets st_mode, newlib's
+            // readdir turns it into d_type), and each stat is an open, a size,
+            // a timestamp and a close on the SD card. Super Smash Flash 2's
+            // tree is ~1500 files: the first sidecar lookup that needed this
+            // index held a level load for 2.3 seconds (2026-10-06 profile).
+            // stat only where the device leaves the type unknown.
+            bool is_dir = e->d_type == DT_DIR;
+            if (e->d_type == DT_UNKNOWN) {
+                char full[512];
+                std::snprintf(full, sizeof(full), "%s/%s", root, child);
+                struct stat st;
+                if (::stat(full, &st) != 0) continue;
+                is_dir = S_ISDIR(st.st_mode);
+            }
+            if (is_dir) {
                 if (depth < 64) {
                     std::snprintf(stack[depth], sizeof(stack[depth]), "%s", child);
                     depth++;
@@ -603,11 +614,15 @@ extern "C" int swf_picker_list_files(const char* dir, char* out, int cap) {
             (e->d_name[1] == '\0' || (e->d_name[1] == '.' && e->d_name[2] == '\0'))) {
             continue;
         }
-        char full[768];
-        std::snprintf(full, sizeof(full), "%s/%s", dir, e->d_name);
-        struct stat st;
-        if (::stat(full, &st) != 0) continue;
-        if (S_ISDIR(st.st_mode)) continue;
+        // `d_type` first, stat only when unknown (see swf_picker_list_tree).
+        if (e->d_type == DT_DIR) continue;
+        if (e->d_type == DT_UNKNOWN) {
+            char full[768];
+            std::snprintf(full, sizeof(full), "%s/%s", dir, e->d_name);
+            struct stat st;
+            if (::stat(full, &st) != 0) continue;
+            if (S_ISDIR(st.st_mode)) continue;
+        }
         const int need = (int)std::strlen(e->d_name) + 1;
         if (written + need >= cap) break;
         written += std::snprintf(out + written, (size_t)(cap - written), "%s\n", e->d_name);
