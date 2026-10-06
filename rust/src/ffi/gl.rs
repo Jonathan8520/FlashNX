@@ -19,6 +19,9 @@ pub type GLsizei = c_int;
 pub type GLsizeiptr = isize;
 pub type GLintptr = isize;
 pub type GLuint = c_uint;
+pub type GLuint64 = u64;
+/// Opaque fence object (`glFenceSync`).
+pub type GLsync = *const c_void;
 
 pub const GL_FALSE: GLboolean = 0;
 pub const GL_TRUE: GLboolean = 1;
@@ -38,6 +41,16 @@ pub const GL_ARRAY_BUFFER: GLenum = 0x8892;
 pub const GL_ELEMENT_ARRAY_BUFFER: GLenum = 0x8893;
 pub const GL_STATIC_DRAW: GLenum = 0x88E4;
 pub const GL_DYNAMIC_DRAW: GLenum = 0x88E8;
+
+pub const GL_MAP_WRITE_BIT: GLbitfield = 0x0002;
+pub const GL_MAP_UNSYNCHRONIZED_BIT: GLbitfield = 0x0020;
+
+pub const GL_SYNC_GPU_COMMANDS_COMPLETE: GLenum = 0x9117;
+pub const GL_SYNC_FLUSH_COMMANDS_BIT: GLbitfield = 0x0000_0001;
+pub const GL_ALREADY_SIGNALED: GLenum = 0x911A;
+pub const GL_TIMEOUT_EXPIRED: GLenum = 0x911B;
+pub const GL_CONDITION_SATISFIED: GLenum = 0x911C;
+pub const GL_WAIT_FAILED: GLenum = 0x911D;
 // Stage3D (issue #88): AGAL program constants arrive as a uniform block, and
 // index buffers are 16-bit there, unlike our 2D path.
 pub const GL_UNIFORM_BUFFER: GLenum = 0x8A11;
@@ -168,6 +181,17 @@ extern "C" {
         size: GLsizeiptr,
         data: *const c_void,
     );
+    pub fn glMapBufferRange(
+        target: GLenum,
+        offset: GLintptr,
+        length: GLsizeiptr,
+        access: GLbitfield,
+    ) -> *mut c_void;
+    pub fn glUnmapBuffer(target: GLenum) -> GLboolean;
+    pub fn glFenceSync(condition: GLenum, flags: GLbitfield) -> GLsync;
+    pub fn glClientWaitSync(sync: GLsync, flags: GLbitfield, timeout: GLuint64) -> GLenum;
+    pub fn glDeleteSync(sync: GLsync);
+    pub fn glFinish();
     /// Like `glDrawElements`, but adds `base_vertex` to each fetched index
     /// before reading from the bound VBO. Lets us pack many shapes into a
     /// single VBO with each shape using local indices 0..N.

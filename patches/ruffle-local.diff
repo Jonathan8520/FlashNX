@@ -868,6 +868,43 @@ index 26a58d877..18f94e1a0 100644
          Value::Undefined => Some(AmfValue::Undefined),
          Value::Null => Some(AmfValue::Null),
          Value::Bool(b) => Some(AmfValue::Bool(b)),
+diff --git a/core/src/avm2/array.rs b/core/src/avm2/array.rs
+index 0f9e82491..fb42c1c94 100644
+--- a/core/src/avm2/array.rs
++++ b/core/src/avm2/array.rs
+@@ -6,6 +6,9 @@ use std::collections::BTreeMap;
+ 
+ const MIN_SPARSE_LENGTH: usize = 32;
+ const MAX_DENSE_LENGTH: usize = 1 << 28;
++/// FlashNX: up to this length, growing a dense array (`length = n`, `new
++/// Array(n)`) keeps it dense. See `set_length`.
++const MAX_DENSE_GROW: usize = 1 << 16;
+ 
+ /// The array storage portion of an array object.
+ ///
+@@ -250,7 +253,21 @@ impl<'gc> ArrayStorage<'gc> {
+                     }
+                 }
+ 
+-                if Self::should_convert_to_sparse(size, *occupied_count) {
++                // FlashNX (2026-10-06): growing the length keeps a dense
++                // array dense, up to `MAX_DENSE_GROW` slots. avmplus
++                // (ArrayObject::setLength) only moves `m_length` and never
++                // turns an array sparse by growing it: the slots past the
++                // dense part are implicit holes, and filling them in order
++                // keeps it dense. Here the holes are slots, so `new Array(n)`
++                // with n > 32 had none used out of n and went sparse at once,
++                // for good (sparse arrays never come back): every later access
++                // was a BTreeMap search and every write an insertion.
++                // Box2DFlash creates its pools that way and new ones on every
++                // step (b2World.Solve, b2Island): Fireboy & Watergirl 2 ran at
++                // 8-10 fps of 25. Past the limit, as before (a slot is 16
++                // bytes and `new Array(100000000)` must not allocate them).
++                let growing = size > storage.len() && size <= MAX_DENSE_GROW;
++                if !growing && Self::should_convert_to_sparse(size, *occupied_count) {
+                     self.convert_to_sparse();
+                     if let ArrayStorage::Sparse { .. } = self {
+                         self.set_length(size);
 diff --git a/core/src/avm2/bytearray.rs b/core/src/avm2/bytearray.rs
 index 7fc6b14d6..258df12af 100644
 --- a/core/src/avm2/bytearray.rs
@@ -3255,7 +3292,7 @@ index 29eb34fdc..7e81a7964 100644
  
      // Updates the data stored with our `BitmapHandle` if this `BitmapRawData`
 diff --git a/core/src/bitmap/operations.rs b/core/src/bitmap/operations.rs
-index 92bb2f430..45fb42866 100644
+index 92bb2f430..39487ab6b 100644
 --- a/core/src/bitmap/operations.rs
 +++ b/core/src/bitmap/operations.rs
 @@ -551,7 +551,6 @@ pub fn threshold<'gc>(
@@ -3266,7 +3303,7 @@ index 92bb2f430..45fb42866 100644
  
      let mut source_region =
          PixelRegion::for_whole_size(source_bitmap.width(), source_bitmap.height());
-@@ -567,61 +566,127 @@ pub fn threshold<'gc>(
+@@ -567,61 +566,176 @@ pub fn threshold<'gc>(
          return 0;
      }
  
@@ -3316,6 +3353,23 @@ index 92bb2f430..45fb42866 100644
 +    let fill = Color::from(colour).to_premultiplied_alpha(true);
 +    let width = dest_region.width() as usize;
 +    let dest_stride = write.width() as usize;
++    // FlashNX: onto itself at the same place (Super Smash Flash 2's palette
++    // recolouring, ~8 % of its heavy frames), a non-matching pixel copied onto
++    // itself is unchanged: only the matches are written, in a loop specialised
++    // for the operation (`threshold_in_place`). Same pixels, same count.
++    if source.is_none() && source_region == dest_region {
++        let pixels = write.raw_pixels_mut();
++        for y in 0..dest_region.height() {
++            let start = (dest_region.y_min + y) as usize * dest_stride + dest_region.x_min as usize;
++            modified_count += threshold_in_place(
++                &mut pixels[start..start + width],
++                operation,
++                mask,
++                masked_threshold,
++                fill,
++            );
++        }
++    } else {
      for y in 0..dest_region.height() {
 -        for x in 0..dest_region.width() {
 -            let dest_x = dest_region.x_min + x;
@@ -3378,6 +3432,7 @@ index 92bb2f430..45fb42866 100644
              }
          }
      }
++    }
  
 -    if let Some(dirty_area) = dirty_area {
 -        write.set_cpu_dirty(mc, dirty_area);
@@ -3409,6 +3464,37 @@ index 92bb2f430..45fb42866 100644
      modified_count
  }
  
++/// FlashNX: one row of an in-place `threshold`, the operation chosen once per
++/// row instead of once per pixel. Returns the pixels matched (and filled).
++fn threshold_in_place(
++    row: &mut [Color],
++    operation: ThresholdOperation,
++    mask: u32,
++    masked_threshold: u32,
++    fill: Color,
++) -> u32 {
++    #[inline(always)]
++    fn run(row: &mut [Color], mask: u32, fill: Color, hit: impl Fn(u32) -> bool) -> u32 {
++        let mut count = 0;
++        for pixel in row {
++            if hit(u32::from(*pixel) & mask) {
++                *pixel = fill;
++                count += 1;
++            }
++        }
++        count
++    }
++    let t = masked_threshold;
++    match operation {
++        ThresholdOperation::Equals => run(row, mask, fill, |v| v == t),
++        ThresholdOperation::NotEquals => run(row, mask, fill, |v| v != t),
++        ThresholdOperation::LessThan => run(row, mask, fill, |v| v < t),
++        ThresholdOperation::LessThanOrEquals => run(row, mask, fill, |v| v <= t),
++        ThresholdOperation::GreaterThan => run(row, mask, fill, |v| v > t),
++        ThresholdOperation::GreaterThanOrEquals => run(row, mask, fill, |v| v >= t),
++    }
++}
++
 +static THRESHOLD_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 +static THRESHOLD_UNCHANGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 +static THRESHOLD_MEMO_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -3430,7 +3516,7 @@ index 92bb2f430..45fb42866 100644
  pub fn scroll<'gc>(
      mc: &Mutation<'gc>,
      renderer: &mut dyn RenderBackend,
-@@ -809,7 +874,12 @@ pub fn hit_test_point(
+@@ -809,7 +923,12 @@ pub fn hit_test_point(
              .read_area(PixelRegion::for_pixel(x, y), renderer)
              .get_pixel32_raw(x, y)
              .alpha()
@@ -3444,7 +3530,7 @@ index 92bb2f430..45fb42866 100644
      } else {
          false
      }
-@@ -1335,12 +1405,16 @@ fn copy_on_cpu<'gc>(
+@@ -1335,12 +1454,16 @@ fn copy_on_cpu<'gc>(
                  // Copying an entire texture that's the same size and type? Just replace the whole thing
                  dest.raw_pixels_mut().copy_from_slice(source.raw_pixels());
              } else {
@@ -3466,7 +3552,7 @@ index 92bb2f430..45fb42866 100644
                  }
              }
          } else {
-@@ -1349,19 +1423,31 @@ fn copy_on_cpu<'gc>(
+@@ -1349,19 +1472,31 @@ fn copy_on_cpu<'gc>(
  
              let opaque = !dest.transparency();
  
@@ -5587,7 +5673,7 @@ index 91bdb52df..e099d2fcd 100644
  pub fn broadcast_frame_entered<'gc>(context: &mut UpdateContext<'gc>) {
      let enter_frame_evt = EventObject::bare_default_event(context, "enterFrame");
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..4eb247acd 100644
+index 6e5379213..31ee63932 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
 @@ -15,10 +15,22 @@ extern crate num_derive;
@@ -5628,7 +5714,7 @@ index 6e5379213..4eb247acd 100644
  pub use player::{Player, PlayerBuilder, PlayerMode, PlayerRuntime, StaticCallstack};
 +/// FlashNX: last tick's SWF-frame count + collector phase + arena allocation,
 +/// for the periodic-spike hunt (see `player::flashnx_gc_probe`).
-+pub use player::flashnx_gc_probe;
++pub use player::{flashnx_frame_accumulator_us, flashnx_gc_probe, set_render_cost};
 +pub use player::set_bitmap_cache;
 +/// FlashNX: the AVM1 clip-reference cache switch, and the AVM1 probes the
 +/// Switch measurement build reads (zeros without `flashnx_instr`).
@@ -6208,7 +6294,7 @@ index a231dc080..d38d9c027 100644
      }
  }
 diff --git a/core/src/player.rs b/core/src/player.rs
-index edb74cccb..3ba384eb0 100644
+index edb74cccb..733f074bc 100644
 --- a/core/src/player.rs
 +++ b/core/src/player.rs
 @@ -43,6 +43,7 @@ use crate::frame_lifecycle::{FramePhase, run_all_phases_avm2};
@@ -6227,7 +6313,7 @@ index edb74cccb..3ba384eb0 100644
  use std::sync::{Arc, Mutex, Weak};
  use std::time::Duration;
  use tracing::instrument;
-@@ -276,6 +278,156 @@ impl<'gc> GcRootData<'gc> {
+@@ -276,6 +278,175 @@ impl<'gc> GcRootData<'gc> {
  
  type GcArena = gc_arena::Arena<Rootable![GcRoot<'_>]>;
  
@@ -6250,6 +6336,11 @@ index edb74cccb..3ba384eb0 100644
 +static FLASHNX_GC_PHASE: AtomicU8 = AtomicU8::new(0);
 +static FLASHNX_GC_ALLOC: AtomicU64 = AtomicU64::new(0);
 +static FLASHNX_GC_US: AtomicU64 = AtomicU64::new(0);
++/// FlashNX: the frame accumulator after the last `tick`, in microseconds: wall
++/// time received but not yet turned into frames. The FPS counter adds its
++/// change over a window to the frames it counted, so the reading is not
++/// rounded to whole frames (a game keeping up exactly read x1.03 at times).
++static FLASHNX_FRAME_ACC_US: AtomicU64 = AtomicU64::new(0);
 +
 +/// Snapshot of the last `tick`: SWF frames actually run, collector phase
 +/// (0 sleeping, 1 marking, 2 marked, 3 sweeping), total arena allocation, and
@@ -6292,6 +6383,20 @@ index edb74cccb..3ba384eb0 100644
 +        LAST_MS.store(now_ms, Ordering::Relaxed);
 +        FULL_GC_REQUESTED.store(true, Ordering::Relaxed);
 +    }
++}
++
++/// FlashNX: whether the `render` handlers count in a frame's cost for
++/// catch-up (see `Player::render`). Off from FlashNX's `rendercost.off`
++/// marker, to compare.
++static RENDER_COST: AtomicBool = AtomicBool::new(true);
++
++pub fn set_render_cost(enabled: bool) {
++    RENDER_COST.store(enabled, Ordering::Relaxed);
++}
++
++/// FlashNX: see `FLASHNX_FRAME_ACC_US`.
++pub fn flashnx_frame_accumulator_us() -> u64 {
++    FLASHNX_FRAME_ACC_US.load(Ordering::Relaxed)
 +}
 +
 +pub fn flashnx_gc_probe() -> (u32, u8, u64, u64) {
@@ -6384,7 +6489,7 @@ index edb74cccb..3ba384eb0 100644
  #[derive(Copy, Clone, Debug, Eq, PartialEq)]
  enum RunState {
      Playing,
-@@ -519,11 +671,168 @@ impl Player {
+@@ -519,11 +690,168 @@ impl Player {
          FloatDuration::from_millis(self.frame_time(1000.0))
      }
  
@@ -6553,7 +6658,7 @@ index edb74cccb..3ba384eb0 100644
          self.frame_accumulator += dt;
          let frame_duration = self.frame_duration();
  
-@@ -554,6 +863,10 @@ impl Player {
+@@ -554,6 +882,10 @@ impl Player {
              }
          }
  
@@ -6564,7 +6669,52 @@ index edb74cccb..3ba384eb0 100644
          // Now that we're done running code,
          // we can stop pretending that more time passed than actually did.
          // Note: update_timers(dt) doesn't need to see this either.
-@@ -2058,7 +2371,7 @@ impl Player {
+@@ -577,6 +909,10 @@ impl Player {
+                 .audio_skew_time(context.audio, cur_frame_offset)
+         });
+         self.frame_accumulator += FloatDuration::from_secs(audio_skew);
++        FLASHNX_FRAME_ACC_US.store(
++            (self.frame_accumulator.as_millis() * 1000.0).max(0.0) as u64,
++            Ordering::Relaxed,
++        );
+ 
+         self.update_sockets();
+         self.update_net_connections();
+@@ -2038,10 +2374,33 @@ impl Player {
+         let invalidated = self.enter_arena(|_, gc_root, _| gc_root.stage.invalidated());
+ 
+         if invalidated {
++            let timer = Instant::now();
+             self.update(|context| {
+                 let stage = context.stage;
+                 stage.broadcast_render(context);
+             });
++            // FlashNX: the `render` handlers are part of what the frame that
++            // asked for them (`stage.invalidate()`) costs, so they count in the
++            // timings `max_frames_per_tick` decides catch-up from. They ran
++            // after the frame's own timing was taken: added to it here. Super
++            // Smash Flash 2 runs its whole engine in a `render` handler (its
++            // `enterFrame` handler only calls `stage.invalidate()`): ~10 ms of
++            // frame and ~33 ms of handler in a fight on the Switch, measured as
++            // 10 ms, so 2 or 3 frames ran per tick. The handler runs once per
++            // render, not once per frame: the extra frames moved its timelines
++            // on without the engine, which itself advanced once per image drawn
++            // (~17 a second while the counter read 30), and they cost a quarter
++            // of every tick. Counted, the cost is over a frame's duration, one
++            // frame runs per tick and every one of them is drawn and gets its
++            // `render` event, which is what Flash Player does: it slows down,
++            // it does not skip images. Movies with no heavy `render` handler
++            // are not affected.
++            let elapsed = timer.elapsed().as_secs_f64() * 1000.0;
++            if RENDER_COST.load(Ordering::Relaxed)
++                && let Some(last) = self.recent_run_frame_timings.back_mut()
++            {
++                *last += elapsed;
++            }
+         }
+ 
+         let mut background_color = Color::WHITE;
+@@ -2058,7 +2417,7 @@ impl Player {
                  library: &gc_root.library,
                  transform_stack: &mut this.transform_stack,
                  is_offscreen: false,
@@ -6573,7 +6723,7 @@ index edb74cccb..3ba384eb0 100644
                  stage,
              };
  
-@@ -2296,7 +2609,7 @@ impl Player {
+@@ -2296,7 +2655,7 @@ impl Player {
                  external_interface,
                  start_time: this.start_time,
                  update_start: Instant::now(),
@@ -6582,7 +6732,7 @@ index edb74cccb..3ba384eb0 100644
                  focus_tracker: stage.focus_tracker(),
                  times_get_time_called: 0,
                  time_offset: &mut this.time_offset,
-@@ -2355,6 +2668,42 @@ impl Player {
+@@ -2355,6 +2714,42 @@ impl Player {
          self.debug_ui.borrow_mut()
      }
  
@@ -6625,7 +6775,7 @@ index edb74cccb..3ba384eb0 100644
      /// Update the current state of the player.
      ///
      /// The given function will be called with the current stage root, current
-@@ -2382,7 +2731,75 @@ impl Player {
+@@ -2382,7 +2777,75 @@ impl Player {
          self.update_mouse_state(EnumSet::empty(), false, &mut false);
  
          // GC
@@ -6702,7 +6852,7 @@ index edb74cccb..3ba384eb0 100644
  
          rval
      }
-@@ -3173,6 +3590,36 @@ pub struct DragObject<'gc> {
+@@ -3173,6 +3636,36 @@ pub struct DragObject<'gc> {
      pub constraint: Rectangle<Twips>,
  }
  

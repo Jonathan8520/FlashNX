@@ -843,6 +843,25 @@ struct BufferArena {
     /// once the 64 MB vertex arena filled, every subsequent shape's draw was
     /// dropped with no further trace. Keep this LOUD.
     alloc_failures: u32,
+    /// FlashNX (2026-10-06): regions freed since the last fence, then batches
+    /// of them each behind the fence (a `GLsync`, as an address) put after
+    /// the last command that could read them. A region goes back to `free`
+    /// only once its fence has signalled, which is what lets `upload` write
+    /// without waiting for the GPU (see there).
+    retired: Vec<(GLintptr, GLsizeiptr)>,
+    quarantine: std::collections::VecDeque<(usize, Vec<(GLintptr, GLsizeiptr)>)>,
+    quarantined_bytes: GLsizeiptr,
+    /// Allocations that found the arena full and waited for a quarantined
+    /// batch (`gpu:` line). Expected 0 outside of a full arena.
+    quarantine_waits: u32,
+}
+
+/// FlashNX: writes into the shape arenas without waiting for the GPU (see
+/// `BufferArena::upload`). Off from the `unsyncvbo.off` marker, to compare.
+static UNSYNC_ARENA: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_unsync_arena(enabled: bool) {
+    UNSYNC_ARENA.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
 impl BufferArena {
@@ -870,12 +889,105 @@ impl BufferArena {
             peak_in_use: 0,
             oom_warned: false,
             alloc_failures: 0,
+            retired: Vec::new(),
+            quarantine: std::collections::VecDeque::new(),
+            quarantined_bytes: 0,
+            quarantine_waits: 0,
+        }
+    }
+
+    /// FlashNX: a region of a dropped shape. Whatever the GPU has been sent
+    /// may still read it, so it waits behind the next fence (`fence_retired`)
+    /// instead of going straight back to `free`.
+    fn retire(&mut self, offset: GLintptr, size: GLsizeiptr) {
+        if !UNSYNC_ARENA.load(std::sync::atomic::Ordering::Relaxed) {
+            self.free_region(offset, size);
+            return;
+        }
+        self.quarantined_bytes += ((size + self.align - 1) / self.align) * self.align;
+        self.retired.push((offset, size));
+    }
+
+    /// FlashNX: put a fence after everything sent so far and file the regions
+    /// retired since the last one behind it, then give back every batch whose
+    /// fence has signalled. Once per frame (`submit_frame`).
+    fn fence_retired(&mut self) {
+        if !self.retired.is_empty() {
+            let fence = unsafe { glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0) };
+            let batch = core::mem::take(&mut self.retired);
+            if fence.is_null() {
+                // No fence: wait for the GPU outright, the regions are safe.
+                unsafe { glFinish() };
+                self.release(batch);
+            } else {
+                self.quarantine.push_back((fence as usize, batch));
+            }
+        }
+        while self.reclaim_front(false) {}
+    }
+
+    /// Give back the oldest quarantined batch if its fence has signalled, or,
+    /// with `block`, once it has. False when there is none to give back.
+    fn reclaim_front(&mut self, block: bool) -> bool {
+        let Some(&(fence, _)) = self.quarantine.front() else {
+            return false;
+        };
+        let fence = fence as GLsync;
+        let signalled = |r: GLenum| r == GL_ALREADY_SIGNALED || r == GL_CONDITION_SATISFIED;
+        let mut r = unsafe { glClientWaitSync(fence, 0, 0) };
+        if !signalled(r) {
+            if !block {
+                return false;
+            }
+            // A second at a time, flushing so the fence can be reached.
+            loop {
+                r = unsafe { glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, 1_000_000_000) };
+                if r != GL_TIMEOUT_EXPIRED {
+                    break;
+                }
+            }
+            if !signalled(r) {
+                // GL_WAIT_FAILED: wait for everything instead.
+                unsafe { glFinish() };
+            }
+        }
+        let (_, batch) = self.quarantine.pop_front().unwrap();
+        unsafe { glDeleteSync(fence) };
+        self.release(batch);
+        true
+    }
+
+    fn release(&mut self, batch: Vec<(GLintptr, GLsizeiptr)>) {
+        for (offset, size) in batch {
+            self.quarantined_bytes -= ((size + self.align - 1) / self.align) * self.align;
+            self.free_region(offset, size);
         }
     }
 
     /// Allocate `size` bytes (rounded up to `self.align`). First-fit. Returns
     /// the byte offset, or `None` if the arena is full.
     fn alloc(&mut self, size: GLsizeiptr) -> Option<GLintptr> {
+        loop {
+            if let Some(offset) = self.alloc_free(size) {
+                return Some(offset);
+            }
+            // FlashNX: full, but regions may only be waiting for the GPU to
+            // be done with them (`retire`): wait for the oldest batch rather
+            // than drop the draw. The ones retired this frame have no fence
+            // yet: give them one first.
+            if !self.retired.is_empty() {
+                self.fence_retired();
+                continue;
+            }
+            if !self.reclaim_front(true) {
+                break;
+            }
+            self.quarantine_waits = self.quarantine_waits.saturating_add(1);
+        }
+        self.alloc_fail(size)
+    }
+
+    fn alloc_free(&mut self, size: GLsizeiptr) -> Option<GLintptr> {
         let size = ((size + self.align - 1) / self.align) * self.align;
         for i in 0..self.free.len() {
             let (off, sz) = self.free[i];
@@ -893,6 +1005,11 @@ impl BufferArena {
                 return Some(alloc_off);
             }
         }
+        None
+    }
+
+    fn alloc_fail(&mut self, size: GLsizeiptr) -> Option<GLintptr> {
+        let size = ((size + self.align - 1) / self.align) * self.align;
         // Count EVERY drop (surfaced each heartbeat as arenaDrop*) and detail
         // the first one. A dropped alloc = a dropped draw = invisible geometry.
         self.alloc_failures = self.alloc_failures.saturating_add(1);
@@ -935,9 +1052,36 @@ impl BufferArena {
         }
     }
 
+    /// FlashNX (2026-10-06): mapped unsynchronized, not `glBufferSubData`.
+    /// Our Mesa (devkitPro's 20.1, `nouveau_buffer_transfer_map`) keeps every
+    /// buffer in GART on the Switch (no VRAM), and maps it with
+    /// `nouveau_bo_map(.., NOUVEAU_BO_WR)` unless the map is unsynchronized:
+    /// that waits until the GPU is done with the WHOLE buffer, every draw sent
+    /// that uses any shape. Mesa skips the wait only for a range never written
+    /// before (`valid_buffer_range`), so it started as soon as freed regions
+    /// were reused. catmario redraws its vector graphics inside ~90
+    /// `BitmapData.draw` a frame at the end of its first level: 62 % of those
+    /// frames were spent in that wait (sampling profile), 40 ms a frame for a
+    /// 24 fps game. The wait protected nothing we need: a region is written
+    /// only when newly allocated, and a freed region comes back to `free` only
+    /// once the GPU has passed the fence put after the last command that could
+    /// read it (`retire`, `fence_retired`).
     fn upload(&self, offset: GLintptr, data: &[u8]) {
         unsafe {
             glBindBuffer(self.target, self.gl_id);
+            if UNSYNC_ARENA.load(std::sync::atomic::Ordering::Relaxed) {
+                let p = glMapBufferRange(
+                    self.target,
+                    offset,
+                    data.len() as GLsizeiptr,
+                    GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT,
+                );
+                if !p.is_null() {
+                    core::ptr::copy_nonoverlapping(data.as_ptr(), p as *mut u8, data.len());
+                    glUnmapBuffer(self.target);
+                    return;
+                }
+            }
             glBufferSubData(
                 self.target,
                 offset,
@@ -958,6 +1102,9 @@ impl BufferArena {
 
 impl Drop for BufferArena {
     fn drop(&mut self) {
+        for (fence, _) in self.quarantine.drain(..) {
+            unsafe { glDeleteSync(fence as GLsync) };
+        }
         unsafe { glDeleteBuffers(1, &self.gl_id) };
     }
 }
@@ -1145,6 +1292,13 @@ static PRIM_OFF_UPLOAD_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::A
 static PRIM_OFF_N_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PRIM_OFF_N_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static PRIM_OFF_PIX_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// FlashNX: `render_offscreen` copies only the region a draw can change (see
+/// there). Off from the `offbounds.off` marker, to compare.
+static OFFSCREEN_BOUNDS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_offscreen_bounds(enabled: bool) {
+    OFFSCREEN_BOUNDS.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
 static PRIM_OFF_PIX_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 // DIAG (2026-09-18, Mario 63 level 8-13): the BitmapCacheEntry loop is the
@@ -3246,6 +3400,9 @@ static FPS_WINDOW_START: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 static FPS_WINDOW_FRAMES: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(0);
+/// Ruffle's frame accumulator (us) when the window opened, see `fps_sample`.
+static FPS_WINDOW_ACC_US: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// Last closed window's measured rate and the rate the movie declares, both
 /// times ten so one decimal survives without float formatting (the same trick
@@ -3319,8 +3476,9 @@ static HEARTBEAT_RESET: std::sync::atomic::AtomicBool =
 /// print "60 / 30" for a game running at exactly the right speed.
 ///
 /// `now` is the tick already read for the tick/render profile, so this costs no
-/// second clock read.
-pub fn fps_sample(frames_run: u32, nominal_x10: u32, now: u64) {
+/// second clock read. `acc_us` is Ruffle's frame accumulator after that tick
+/// (`flashnx_frame_accumulator_us`).
+pub fn fps_sample(frames_run: u32, nominal_x10: u32, now: u64, acc_us: u64) {
     FPS_NOMINAL_X10.store(nominal_x10, std::sync::atomic::Ordering::Relaxed);
     let start = FPS_WINDOW_START.load(std::sync::atomic::Ordering::Relaxed);
     // No window open: the counter was just switched on, or a pause was left
@@ -3337,6 +3495,7 @@ pub fn fps_sample(frames_run: u32, nominal_x10: u32, now: u64) {
         // not inside, which reads as a spike on the first half second after
         // every resume -- exactly where Ruffle catches up several frames at once.
         FPS_WINDOW_FRAMES.store(0, std::sync::atomic::Ordering::Relaxed);
+        FPS_WINDOW_ACC_US.store(acc_us, std::sync::atomic::Ordering::Relaxed);
         return;
     }
     let frames = FPS_WINDOW_FRAMES
@@ -3368,13 +3527,25 @@ pub fn fps_sample(frames_run: u32, nominal_x10: u32, now: u64) {
     if frames_run == 0 && dt < freq * MAX_WINDOW_SECS {
         return;
     }
+    // Whole frames still round: the wall time of the window is the frames run
+    // plus what Ruffle's accumulator gained over it (time received, not yet a
+    // frame), minus any time it threw away. A game keeping up exactly read
+    // x1.03 when a window happened to close on a tick that spent time banked
+    // before it opened (2026-10-06). Adding the accumulator's change makes the
+    // reading the frames' worth of time over the wall time: x1.00 when nothing
+    // is thrown away, below it by exactly what is.
+    let acc_start = FPS_WINDOW_ACC_US.load(std::sync::atomic::Ordering::Relaxed);
+    let frames_x10 = (frames as i64 * 10
+        + (acc_us as i64 - acc_start as i64) * nominal_x10 as i64 / 1_000_000)
+        .max(0) as u64;
     FPS_REAL_X10.store(
-        ((frames as u64 * freq * 10) / dt).min(u32::MAX as u64) as u32,
+        ((frames_x10 * freq) / dt).min(u32::MAX as u64) as u32,
         std::sync::atomic::Ordering::Relaxed,
     );
     FPS_HAVE_READING.store(true, std::sync::atomic::Ordering::Relaxed);
     FPS_WINDOW_START.store(now.max(1), std::sync::atomic::Ordering::Relaxed);
     FPS_WINDOW_FRAMES.store(0, std::sync::atomic::Ordering::Relaxed);
+    FPS_WINDOW_ACC_US.store(acc_us, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Drop the open window, keeping the last reading on screen.
@@ -7139,10 +7310,27 @@ impl SwitchRenderBackend {
     /// are stable across frames), else allocate a fresh one.
     /// `render_commands_to_texture` clears it, so stale pooled content is fine.
     fn acquire_offscreen_temp(&mut self, w: u32, h: u32) -> Option<StandaloneTexture> {
+        // FlashNX (2026-10-06): any temp at least this big serves, the smallest
+        // one, within 4x the area asked so a small draw does not take a big
+        // target away; new temps are made in 64-pixel steps so the next draw of
+        // a nearby size finds one. Only an exact size used to match, and Super
+        // Smash Flash 2 draws into BitmapData of every size: each miss is a GPU
+        // object made (nvMapCreate and two mappings, 1-2 ms) and later destroyed,
+        // and 389 frames of a session lost 20 ms or more to that. The callers
+        // draw into the top-left (w, h) corner and pass the temp's own size
+        // wherever they read it as a source.
+        let fits = |t: &StandaloneTexture| {
+            let area = t.width as u64 * t.height as u64;
+            t.width >= w && t.height >= h && area <= 4 * (w as u64 * h as u64).max(64 * 64)
+        };
+        let area_of = |t: &StandaloneTexture| t.width as u64 * t.height as u64;
         if let Some(i) = self
             .offscreen_temp_pool
             .iter()
-            .position(|t| t.tex.width == w && t.tex.height == h)
+            .enumerate()
+            .filter(|(_, t)| fits(&t.tex))
+            .min_by_key(|(_, t)| area_of(&t.tex))
+            .map(|(i, _)| i)
         {
             return Some(self.offscreen_temp_pool.swap_remove(i).tex);
         }
@@ -7162,12 +7350,19 @@ impl SwitchRenderBackend {
             if let Some(i) = self
                 .offscreen_temp_retired
                 .iter()
-                .position(|t| t.width == w && t.height == h)
+                .enumerate()
+                .filter(|(_, t)| fits(t))
+                .min_by_key(|(_, t)| area_of(t))
+                .map(|(i, _)| i)
             {
                 return Some(self.offscreen_temp_retired.swap_remove(i));
             }
         }
-        make_standalone_texture(w, h).map(|t| t.tagged(ST_OFFSCREEN))
+        let step = |n: u32| {
+            let up = n.div_ceil(64) * 64;
+            if up <= 16384 { up } else { n }
+        };
+        make_standalone_texture(step(w), step(h)).map(|t| t.tagged(ST_OFFSCREEN))
     }
 
     /// Read an (x, y, w, h) sub-rect of `tex` back into a CPU RGBA buffer with
@@ -15760,8 +15955,30 @@ impl RenderBackend for SwitchRenderBackend {
         // `temp` is also returned as the SyncHandle, so copyPixels/getPixel
         // (SMWF's tile-engine readback) still resolve from the full result.
         PRIM_OFF_N_CUR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // FlashNX (2026-10-06): steps 1 and 3 copy only the region the draw can
+        // change, not the whole BitmapData. That region is `bounds`: Ruffle's
+        // `operations::draw` passes the source's bounds without filters
+        // (`BoundsMode::Engine`, and a draw renders no filter: no cacheAsBitmap
+        // in it) times the matrix, rounded outwards, clamped to the bitmap,
+        // plus any region still waiting to be read back; it is also all that
+        // Ruffle reads back. Two pixels more for antialiasing. catmario blits
+        // ~90 sprites a frame into a full-screen BitmapData: each draw copied
+        // the 480x420 bitmap twice (6 full-screen passes per sprite with the
+        // render, ~22 Mpx a frame), and once the CPU stopped waiting on vertex
+        // uploads the GPU was the wall (17 ms of a 33 ms frame waiting on it at
+        // the swap). `offbounds.off` marker: whole bitmap again, to compare.
+        let (rx, ry, rw, rh) = if OFFSCREEN_BOUNDS.load(std::sync::atomic::Ordering::Relaxed) {
+            const MARGIN: u32 = 2;
+            let x0 = bounds.x_min.saturating_sub(MARGIN).min(tex_w);
+            let y0 = bounds.y_min.saturating_sub(MARGIN).min(tex_h);
+            let x1 = bounds.x_max.saturating_add(MARGIN).min(tex_w).max(x0);
+            let y1 = bounds.y_max.saturating_add(MARGIN).min(tex_h).max(y0);
+            (x0, y0, x1 - x0, y1 - y0)
+        } else {
+            (0, 0, tex_w, tex_h)
+        };
         PRIM_OFF_PIX_CUR.fetch_add(
-            (tex_w as u64) * (tex_h as u64),
+            (rw as u64) * (rh as u64),
             std::sync::atomic::Ordering::Relaxed,
         );
         let temp = {
@@ -15769,23 +15986,28 @@ impl RenderBackend for SwitchRenderBackend {
             self.acquire_offscreen_temp(tex_w, tex_h)?
         };
         let temp_id = temp.texture;
+        // FlashNX: may be bigger than (tex_w, tex_h) (`acquire_offscreen_temp`);
+        // everything below draws into its top-left corner, and reads it with
+        // its own size.
+        let (temp_w, temp_h) = (temp.width, temp.height);
 
         // 1. Seed temp with the BitmapData's current content (premultiplied).
         {
             let _t = PrimTimer::new(&PRIM_OFF_READBACK_CUR);
             match backing {
+                _ if rw == 0 || rh == 0 => {}
                 Backing::Standalone(s_tex) => {
                     // Standalone already stores premultiplied — straight copy.
                     self.blit_identity(
-                        s_tex, tex_w, tex_h, (0, 0), (tex_w, tex_h),
-                        temp_id, (0, 0), tex_w, tex_h,
+                        s_tex, tex_w, tex_h, (rx, ry), (rw, rh),
+                        temp_id, (rx as i32, ry as i32), rw, rh,
                     );
                 }
                 Backing::Atlas { tex, base_x, base_y, atlas_w, atlas_h } => {
                     // Atlas stores STRAIGHT alpha — premultiply it into temp.
                     self.blit_premult(
-                        tex, atlas_w, atlas_h, (base_x, base_y), (tex_w, tex_h),
-                        temp_id, (0, 0), tex_w, tex_h,
+                        tex, atlas_w, atlas_h, (base_x + rx, base_y + ry), (rw, rh),
+                        temp_id, (rx as i32, ry as i32), rw, rh,
                     );
                 }
                 // No backing to seed from — the temp is cleared in step 2 instead.
@@ -15813,16 +16035,17 @@ impl RenderBackend for SwitchRenderBackend {
         {
             let _t = PrimTimer::new(&PRIM_OFF_UPLOAD_CUR);
             match backing {
+                _ if rw == 0 || rh == 0 => {}
                 Backing::Standalone(s_tex) => {
                     self.blit_identity(
-                        temp_id, tex_w, tex_h, (0, 0), (tex_w, tex_h),
-                        s_tex, (0, 0), tex_w, tex_h,
+                        temp_id, temp_w, temp_h, (rx, ry), (rw, rh),
+                        s_tex, (rx as i32, ry as i32), rw, rh,
                     );
                 }
                 Backing::Atlas { tex, base_x, base_y, .. } => {
                     self.blit_unpremult(
-                        temp_id, tex_w, tex_h, (0, 0), (tex_w, tex_h),
-                        tex, (base_x as i32, base_y as i32), tex_w, tex_h,
+                        temp_id, temp_w, temp_h, (rx, ry), (rw, rh),
+                        tex, ((base_x + rx) as i32, (base_y + ry) as i32), rw, rh,
                     );
                 }
                 // No backing texture — the result lives only in `temp`, returned
@@ -15868,7 +16091,8 @@ impl RenderBackend for SwitchRenderBackend {
             },
             Backing::Dropped => BitmapDataSyncHandle {
                 texture: temp_id,
-                tex_w, tex_h,
+                tex_w: temp_w,
+                tex_h: temp_h,
                 x: bounds.x_min, y: bounds.y_min,
                 w: bounds.width(), h: bounds.height(),
                 premult: false,
@@ -15936,10 +16160,12 @@ impl RenderBackend for SwitchRenderBackend {
         let ok = ok_filter && {
             let dx = (dst_bx as i32 + dest_point.0).max(0);
             let dy = (dst_by as i32 + dest_point.1).max(0);
+            // FlashNX: temp_dst may be bigger than (fw, fh): read with its own size.
+            let (tw, th) = (temp_dst.width, temp_dst.height);
             if dst_atlas {
-                self.blit_unpremult(temp_dst.texture, fw, fh, (0, 0), (fw, fh), dst_tex, (dx, dy), fw, fh)
+                self.blit_unpremult(temp_dst.texture, tw, th, (0, 0), (fw, fh), dst_tex, (dx, dy), fw, fh)
             } else {
-                self.blit_identity(temp_dst.texture, fw, fh, (0, 0), (fw, fh), dst_tex, (dx, dy), fw, fh)
+                self.blit_identity(temp_dst.texture, tw, th, (0, 0), (fw, fh), dst_tex, (dx, dy), fw, fh)
             }
         };
         self.filter_tex_pool.release(temp_src);
@@ -16054,10 +16280,13 @@ impl RenderBackend for SwitchRenderBackend {
         {
             let mut pending = PENDING_FREES.lock().unwrap();
             for f in pending.drain(..) {
-                self.vertex_arena.free_region(f.vbo_offset, f.vbo_size);
-                self.index_arena.free_region(f.ibo_offset, f.ibo_size);
+                self.vertex_arena.retire(f.vbo_offset, f.vbo_size);
+                self.index_arena.retire(f.ibo_offset, f.ibo_size);
             }
         }
+        // Behind a fence until the GPU is done with them (`upload`).
+        self.vertex_arena.fence_retired();
+        self.index_arena.fence_retired();
         // Evictable SWF images: empty idle atlases once a second, just before
         // the drain below frees them.
         if self.frame_count % 60 == 0 {
@@ -16528,10 +16757,16 @@ impl RenderBackend for SwitchRenderBackend {
                 // GPU objects against nvdrv's bookkeeping ceiling (~2 KB per
                 // handle in its transfer memory, see nouveau.c).
                 log_str(&std::format!(
-                    "gpu: f{} nvmap handles {} (bookkeeping {} MB)\n",
+                    "gpu: f{} nvmap handles {} (bookkeeping {} MB), shape regions waiting for the GPU {}+{} KB in {}+{} batches, full-arena waits {}+{}\n",
                     self.frame_count,
                     unsafe { flashnx_nvmap_live() },
-                    unsafe { __nx_nv_transfermem_size } / (1024 * 1024)
+                    unsafe { __nx_nv_transfermem_size } / (1024 * 1024),
+                    self.vertex_arena.quarantined_bytes / 1024,
+                    self.index_arena.quarantined_bytes / 1024,
+                    self.vertex_arena.quarantine.len(),
+                    self.index_arena.quarantine.len(),
+                    self.vertex_arena.quarantine_waits,
+                    self.index_arena.quarantine_waits,
                 ));
                 // dlmalloc's wholly free segments back to the top region.
                 let trimmed = crate::dl_trim();

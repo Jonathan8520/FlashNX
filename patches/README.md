@@ -322,6 +322,48 @@ BOs too; `rust/src/lib.rs` keeps dlmalloc's segments apart so that an empty one
 can go back to the heap (none did in SSF2: a few long-lived blocks pin each); `rust/src/heapprof.rs` and `scripts/heapprof_report.py` are
 the heap profiler.
 
+**Frame rate, October 2026.** Measured with the sampling profiler on the
+console, one change at a time, each with an SD-card marker to turn it off.
+
+- `core/src/player.rs`: the time spent in `render` event handlers counts in
+  the cost of the frame that asked for them (`stage.invalidate()`), so
+  `max_frames_per_tick` (ruffle#3068: catch up only when it can be afforded)
+  sees it. Super Smash Flash 2 runs its whole engine in a `render` handler,
+  which Ruffle fires once per image drawn, not once per frame (ruffle#9339):
+  frames measured at 10 ms for ~43 real ones made Ruffle run 2 or 3 of them
+  per tick, moving the timelines on without the engine, while the frame
+  counter read 30 for an engine stepping ~17 times a second. Now one frame
+  runs per tick and each gets its `render` event, as Flash Player slows down
+  rather than skipping images. Marker `rendercost.off`. The frame
+  accumulator is also published (`flashnx_frame_accumulator_us`) so the FPS
+  counter is not rounded to whole frames (it read x1.03 at times).
+- `core/src/bitmap/operations.rs`: `threshold` onto itself at the same place
+  writes only the matching pixels, in a loop chosen once per row for the
+  operation (SSF2's palette recolouring, ~8 % of its heavy frames).
+- `core/src/avm2/array.rs`: growing a dense array's length keeps it dense, up
+  to 65536 slots. avmplus (`ArrayObject::setLength`) only moves `m_length`;
+  here the holes are slots, so `new Array(n)` with n > 32 went sparse at once
+  and for good, and every access became a `BTreeMap` search. Box2DFlash
+  allocates its pools that way and new arrays on every step: Fireboy &
+  Watergirl 2's heavy frames went from 101 to 80 ms (median).
+
+FlashNX's side (not in this diff), in `rust/src/backend/render.rs`:
+
+- Shape vertices are written with an unsynchronized `glMapBufferRange`. The
+  Switch's Mesa (devkitPro's 20.1) keeps every buffer in GART and maps it
+  with `NOUVEAU_BO_WR`, which waits for the GPU to be done with the whole
+  buffer, except for a range never written before. Once freed regions were
+  reused, catmario spent 62 % of its heavy frames in that wait. Freed regions
+  now go back to the arena only after a fence put behind the last command
+  that could read them. Marker `unsyncvbo.off`.
+- `render_offscreen` copies only the region a `BitmapData.draw` can change
+  (the `bounds` Ruffle passes, plus two pixels), not the whole bitmap in and
+  out of its temp for every draw: catmario's end of level 1 went from 24 to
+  ~60 images a second. Marker `offbounds.off`.
+- Offscreen temps are reused by best fit (up to 4x the area) and made in
+  64-pixel steps, instead of matching sizes exactly: GPU-object creation
+  spikes in SSF2 fell by about 60 %.
+
 ### Tried and dropped (2026-10-06)
 
 - **The small-object region at 1 GB instead of 512 MB.** SSF2 then ended with

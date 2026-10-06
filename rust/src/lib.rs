@@ -1733,6 +1733,30 @@ pub extern "C" fn ruffle_init() -> c_int {
     if !goto_skip {
         log(b"gotos: gotoskip.off present -> inner gotos walk every orphan\n\0");
     }
+    // `sdmc:/switch/FlashNX/offbounds.off`: BitmapData.draw copies the whole
+    // bitmap in and out of its temp again (see `render_offscreen` in
+    // render.rs). Same kind of experiment switch.
+    let off_bounds = !backend::render::marker_present("offbounds.off");
+    backend::render::set_offscreen_bounds(off_bounds);
+    if !off_bounds {
+        log(b"offscreen: offbounds.off present -> draws copy the whole bitmap\n\0");
+    }
+    // `sdmc:/switch/FlashNX/unsyncvbo.off`: shapes written into the arenas
+    // with glBufferSubData again, waiting for the GPU (see
+    // `BufferArena::upload` in render.rs). Same kind of experiment switch.
+    let unsync_vbo = !backend::render::marker_present("unsyncvbo.off");
+    backend::render::set_unsync_arena(unsync_vbo);
+    if !unsync_vbo {
+        log(b"arena: unsyncvbo.off present -> shape uploads wait for the GPU\n\0");
+    }
+    // `sdmc:/switch/FlashNX/rendercost.off`: catch-up decided from the frames'
+    // own cost again, without the `render` handlers they ask for, as upstream
+    // does (see `Player::render` in our Ruffle). Same kind of experiment switch.
+    let render_cost = !backend::render::marker_present("rendercost.off");
+    ruffle_core::set_render_cost(render_cost);
+    if !render_cost {
+        log(b"frames: rendercost.off present -> render handlers left out of catch-up\n\0");
+    }
     // `sdmc:/switch/FlashNX/stageskip.off`: inner gotos walk the whole stage
     // again instead of passing over its unchanged subtrees (the orphan skip
     // above is separate). Same kind of experiment switch.
@@ -2465,7 +2489,12 @@ fn render_frame_with_dt(dt: FloatDuration) {
     if backend::render::fps_counter_on() {
         let (swf_frames, _, _, _) = ruffle_core::flashnx_gc_probe();
         let nominal_x10 = (player.frame_rate() * 10.0) as u32;
-        backend::render::fps_sample(swf_frames, nominal_x10, t1);
+        backend::render::fps_sample(
+            swf_frames,
+            nominal_x10,
+            t1,
+            ruffle_core::flashnx_frame_accumulator_us(),
+        );
     }
     // Where the root timeline actually IS, once a second.
     //
