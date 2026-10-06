@@ -1757,6 +1757,14 @@ pub extern "C" fn ruffle_init() -> c_int {
     if !render_cost {
         log(b"frames: rendercost.off present -> render handlers left out of catch-up\n\0");
     }
+    // `sdmc:/switch/FlashNX/frameskip.off`: every frame walks the whole display
+    // list again in enterFrame, frame construction and frame scripts (see
+    // `set_full_frame_skip` in our Ruffle). Same kind of experiment switch.
+    let frame_skip = !backend::render::marker_present("frameskip.off");
+    ruffle_core::set_full_frame_skip(frame_skip);
+    if !frame_skip {
+        log(b"frames: frameskip.off present -> full frames walk the whole display list\n\0");
+    }
     // `sdmc:/switch/FlashNX/stageskip.off`: inner gotos walk the whole stage
     // again instead of passing over its unchanged subtrees (the orphan skip
     // above is separate). Same kind of experiment switch.

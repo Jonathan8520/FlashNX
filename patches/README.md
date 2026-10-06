@@ -345,7 +345,22 @@ console, one change at a time, each with an SD-card marker to turn it off.
   here the holes are slots, so `new Array(n)` with n > 32 went sparse at once
   and for good, and every access became a `BTreeMap` search. Box2DFlash
   allocates its pools that way and new arrays on every step: Fireboy &
-  Watergirl 2's heavy frames went from 101 to 80 ms (median).
+  Watergirl 2's heavy frames at the start of a level went from 97.5 to
+  91-94 ms (median of the first 300, three sessions). The rest of that
+  frame is the interpreter itself.
+
+- `core/src/display_object.rs`, `frame_lifecycle.rs`, `movie_clip.rs`: full
+  frames pass over unchanged subtrees too. Every frame walked the whole
+  display list three times (enter, construct, frame scripts), and each visit
+  is pointer chasing through separate allocations: Agent P Strikes Back spent
+  ~70 % of its frames there for ~3 % of ActionScript (ruffle#23315, #22192
+  and #23876 show the same profile on desktop; #23876 proposes a "fully
+  constructed" flag). Construction and frame scripts now skip clean
+  subtrees as inner gotos already did. `enter_frame` skips quiet ones
+  (`ENTER_QUIET`: no clip playing, no frame-skip flag, no queued tag,
+  nothing marked since the last visit), set from the bottom up by the visit
+  and cleared up to the top by every mark, `play()` and the frame-skip flag.
+  Agent P went from 14.5 to ~60 images a second. Marker `frameskip.off`.
 
 FlashNX's side (not in this diff), in `rust/src/backend/render.rs`:
 
