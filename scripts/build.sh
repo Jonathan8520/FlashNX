@@ -9,6 +9,7 @@
 #   scripts/build.sh           # release profile (LTO=full, ~3 min, smaller .nro)
 #   scripts/build.sh --dev     # release-dev profile (LTO=thin, ~30 s, dev iterations)
 #   scripts/build.sh --prof    # release-dev + frame pointers, for cpp/src/prof.cpp
+#   scripts/build.sh --memprof # --prof + counters + heap profiler (rust/src/heapprof.rs)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -22,6 +23,14 @@ CARGO_CONFIG=()
 if [[ "${1:-}" == "--dev" ]]; then
     PROFILE="release-dev"
     CARGO_FLAG="--profile release-dev --features instr"
+elif [[ "${1:-}" == "--memprof" ]]; then
+    # The sampling profiler's build (frame pointers, FLASHNX_PROF_ALWAYS) plus
+    # the usual counters and the heap profiler (rust/src/heapprof.rs), whose
+    # stack walk needs those frame pointers. One session answers where the
+    # time AND the bytes go.
+    PROFILE="release-prof"
+    CARGO_FLAG="--profile release-prof --features instr,heapprof"
+    CARGO_CONFIG=(--config 'build.rustflags=["-C", "force-frame-pointers=yes"]')
 elif [[ "${1:-}" == "--prof" ]]; then
     # No `instr`: its per-action timers would show up in the profile. The
     # rustflag is appended to the ones in .cargo/config.toml (a --config array

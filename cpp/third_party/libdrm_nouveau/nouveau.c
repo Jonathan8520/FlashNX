@@ -365,8 +365,8 @@ nouveau_bo_fence_wait(struct nouveau_bo *bo, uint32_t access)
  *  - it is only handed out once the GPU is done with it (its fence passed), so
  *    the CPU-side reset below cannot race a GPU still reading it;
  *  - it is zeroed like a fresh one, and its fence and access are reset;
- *  - only colour-tiled BOs (kind 0xfe, generic 16Bx2) of at most
- *    boc_max_bo_bytes (8 MiB), never
+ *  - only colour-tiled BOs (kind 0xfe, generic 16Bx2) and pitch BOs (see
+ *    boc_kind_cached) of at most boc_max_bo_bytes (8 MiB), never
  *    one whose nvmap id left the process (name_get: display buffers) and never
  *    a CONTIG one. No compressible kinds, so no compression tags to worry about.
  * Freed entries idle for BOC_MAX_AGE_MS go back to the heap, and the cache is
@@ -419,6 +419,21 @@ static uint64_t boc_max_bytes = 48u << 20;
  * Mario 63 world 8, 2026-09-24), and nothing seen on screen. */
 static uint32_t boc_slack_pct = 25;
 
+/* Kinds the cache keeps. Colour-tiled textures first; then pitch (linear) BOs
+ * too, 2026-10-05: every glTexSubImage2D into a tiled texture goes through a
+ * linear staging BO of the region's size (nvc0_miptree_transfer_map), made
+ * fresh and destroyed once its fence passes (nouveau_fence_unref_bo). In a
+ * Super Smash Flash 2 fight that was ~7 of the ~12 BOs a frame, and the
+ * sampling profiler put 7 % of the heaviest frames in nvIoctl, 61 % of it
+ * under texture uploads. Same guarantees as for the colour BOs: handed out
+ * only once its fence has passed, zeroed, never shared, never CONTIG, and a
+ * request only ever gets a BO of its own kind. */
+static bool
+boc_kind_cached(uint32_t kind)
+{
+	return kind == NvKind_Generic_16BX2 || kind == NvKind_Pitch;
+}
+
 static uint64_t
 boc_ms_to_ticks(uint64_t ms)
 {
@@ -451,6 +466,27 @@ boc_fence_done(struct nouveau_bo_priv *nvbo, bool may_ipc)
 	return true;
 }
 
+/* FlashNX: the bookkeeping nvdrv keeps for every nvmap handle (one per BO) lives
+ * in the transfer memory libnx hands it at nvInitialize(), 8 MB by default:
+ * about 4000 handles. Past that, nvMapCreate fails with 0x235C
+ * (LibnxNvidiaError_SharedMemoryTooSmall) whatever the size asked, even 12 KB,
+ * with the heap far from full. Super Smash Flash 2 got there 36 minutes in
+ * (2026-10-06): ~1300 standalone textures plus the atlases, staging buffers
+ * and Mesa's own, then every texture failed, `BitmapData.draw` threw and the
+ * game froze with its music playing. Other Mesa ports on Horizon hit the same
+ * wall and raise it (nfsmw-nx, MKVDCU-Recomp at 32 MB). It costs 24 MB more of
+ * the heap; libnx's symbol is weak, this definition replaces it. */
+u32 __nx_nv_transfermem_size = 32 * 1024 * 1024;
+
+/* FlashNX: nvmap handles alive, to see the ceiling coming (`gpu:` line). */
+static volatile int64_t g_nvmap_live;
+
+int64_t
+flashnx_nvmap_live(void)
+{
+	return __atomic_load_n(&g_nvmap_live, __ATOMIC_RELAXED);
+}
+
 /* The original nouveau_bo_del, minus the fence IPC when the fence is already
  * known to have passed (only while the cache is on, so the "off" windows of the
  * A/B are exactly the old code). */
@@ -464,6 +500,7 @@ boc_destroy(struct nouveau_bo_priv *nvbo)
 		nouveau_bo_fence_wait(bo, 0);
 	nvAddressSpaceUnmap(&nvdev->addr_space, bo->offset);
 	nvMapClose(&nvbo->map);
+	__atomic_sub_fetch(&g_nvmap_live, 1, __ATOMIC_RELAXED);
 	if (nvbo->map_addr)
 		free(nvbo->map_addr);
 	free(nvbo);
@@ -502,7 +539,7 @@ boc_age_out(void)
 static bool
 boc_cacheable(struct nouveau_bo_priv *nvbo)
 {
-	return nvbo->kind == NvKind_Generic_16BX2
+	return boc_kind_cached(nvbo->kind)
 		&& nvbo->base.size <= boc_max_bo_bytes
 		&& nvbo->map_addr != NULL
 		&& !nvbo->shared
@@ -716,7 +753,7 @@ nouveau_bo_new(struct nouveau_device *dev, uint32_t flags, uint32_t align,
 	 * one would be (see the cache above). */
 	/* What kind of miss this will be, if it is one (see the stats enum). */
 	int miss_class = 0; /* 0 = cacheable shape, 1 = too big, 2 = other kind */
-	if (kind != NvKind_Generic_16BX2 || (flags & NOUVEAU_BO_CONTIG))
+	if (!boc_kind_cached(kind) || (flags & NOUVEAU_BO_CONTIG))
 		miss_class = 2;
 	else if (size > boc_max_bo_bytes)
 		miss_class = 1;
@@ -797,6 +834,7 @@ nouveau_bo_new(struct nouveau_device *dev, uint32_t flags, uint32_t align,
 		}
 		if (attempt > 0)
 			boc_st[BOC_ST_RETRY_OK]++;
+		__atomic_add_fetch(&g_nvmap_live, 1, __ATOMIC_RELAXED);
 		break;
 	}
 
@@ -885,6 +923,7 @@ nouveau_bo_name_ref(struct nouveau_device *dev, uint32_t name,
 	bo->flags = NOUVEAU_BO_GART;
 	nvbo->fence.id = UINT32_MAX;
 	nvbo->shared = true; /* FlashNX: another process's memory, never recycle */
+	__atomic_add_fetch(&g_nvmap_live, 1, __ATOMIC_RELAXED);
 	*pbo = bo;
 
 	bo->config.nvc0.memtype = kind;

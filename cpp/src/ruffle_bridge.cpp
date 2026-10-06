@@ -443,6 +443,16 @@ extern "C" int ruffle_query_ram(uint64_t* used_out, uint64_t* total_out) {
 // heap the crt0 RESERVED (a flat 3185/3189 MB all session), so an abort like
 // "memory allocation of 3744000 bytes failed" reads as if there were 3 GB free.
 // mallinfo's fields are `int`, so this saturates rather than wrapping past 2 GB.
+// End of the memory mapping that holds `sp`: the ceiling a frame-pointer walk
+// on the calling thread must stay under (rust/src/heapprof.rs). One syscall,
+// no allocation: it runs inside the global allocator.
+extern "C" uintptr_t flashnx_stack_ceiling(uintptr_t sp) {
+    MemoryInfo info;
+    u32 page_info;
+    if (R_FAILED(svcQueryMemory(&info, &page_info, sp))) return sp;
+    return (uintptr_t)(info.addr + info.size);
+}
+
 extern "C" uint64_t ruffle_heap_used(void) {
     struct mallinfo mi = mallinfo();
     return mi.uordblks < 0 ? UINT64_C(0x7FFFFFFF) : (uint64_t)mi.uordblks;

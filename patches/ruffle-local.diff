@@ -15,7 +15,7 @@ index ddc2ef98c..43329c8d0 100644
  
  [build-dependencies]
 diff --git a/core/common/src/tag_utils.rs b/core/common/src/tag_utils.rs
-index 371775c28..8fb40a099 100644
+index 371775c28..a7ad1dff1 100644
 --- a/core/common/src/tag_utils.rs
 +++ b/core/common/src/tag_utils.rs
 @@ -17,7 +17,7 @@ pub struct SwfMovie {
@@ -27,29 +27,116 @@ index 371775c28..8fb40a099 100644
  
      /// The URL the SWF was downloaded from.
      url: String,
-@@ -50,6 +50,42 @@ pub struct SwfMovie {
+@@ -50,6 +50,129 @@ pub struct SwfMovie {
      sandbox_type: SandboxType,
  }
  
-+/// FlashNX: a movie's data, counted while it lives (`live_movie_stats`), to tell
-+/// on the console whether loaded SWFs are ever freed.
-+struct MovieData(Vec<u8>);
++/// FlashNX: a range of a byte buffer shared, without a copy, between a
++/// ByteArray and what is made of it: another ByteArray it is written into, and
++/// the movie `Loader.loadBytes` loads from it (`SwfMovie::from_shared_data`).
++/// Each holder that writes takes a private copy first.
++///
++/// Super Smash Flash 2 keeps every DAT file it downloads as a ByteArray
++/// (`URLLoader.data`), copies the SWF inside into a second ByteArray and loads
++/// that one: the same bytes three times, plus a copy per step of the load. The
++/// SWFs inside are uncompressed, so a movie's tags were byte for byte the
++/// ByteArray's: 212 MB of ByteArrays next to 224 MB of movies when it ran out
++/// of memory (2026-10-06).
++#[derive(Clone)]
++pub struct SharedBytes {
++    buf: Arc<Vec<u8>>,
++    start: usize,
++    end: usize,
++}
++
++impl SharedBytes {
++    pub fn new(buf: Vec<u8>) -> Self {
++        let end = buf.len();
++        Self {
++            buf: Arc::new(buf),
++            start: 0,
++            end,
++        }
++    }
++
++    #[inline]
++    pub fn as_slice(&self) -> &[u8] {
++        &self.buf[self.start..self.end]
++    }
++
++    #[inline]
++    pub fn len(&self) -> usize {
++        self.end - self.start
++    }
++
++    #[inline]
++    pub fn is_empty(&self) -> bool {
++        self.end == self.start
++    }
++
++    /// Bytes `start..end` of this range, clamped to it.
++    pub fn sub(&self, start: usize, end: usize) -> Self {
++        let end = end.min(self.len());
++        let start = start.min(end);
++        Self {
++            buf: self.buf.clone(),
++            start: self.start + start,
++            end: self.start + end,
++        }
++    }
++}
++
++impl Debug for SharedBytes {
++    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
++        write!(f, "SharedBytes({} bytes)", self.len())
++    }
++}
++
++/// FlashNX: a movie's data, its own or shared with a ByteArray (`SharedBytes`),
++/// counted while it lives (`live_movie_stats`), to tell on the console whether
++/// loaded SWFs are ever freed.
++struct MovieData(MovieBytes);
++
++enum MovieBytes {
++    Owned(Vec<u8>),
++    Shared(SharedBytes),
++}
 +
 +static LIVE_MOVIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 +static LIVE_MOVIE_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 +
 +impl MovieData {
 +    fn new(data: Vec<u8>) -> Self {
++        Self::counted(MovieBytes::Owned(data))
++    }
++
++    fn shared(data: SharedBytes) -> Self {
++        Self::counted(MovieBytes::Shared(data))
++    }
++
++    fn counted(bytes: MovieBytes) -> Self {
 +        use std::sync::atomic::Ordering::Relaxed;
++        let data = Self(bytes);
 +        LIVE_MOVIES.fetch_add(1, Relaxed);
-+        LIVE_MOVIE_BYTES.fetch_add(data.len() as u64, Relaxed);
-+        Self(data)
++        LIVE_MOVIE_BYTES.fetch_add(data.as_slice().len() as u64, Relaxed);
++        data
++    }
++
++    #[inline]
++    fn as_slice(&self) -> &[u8] {
++        match &self.0 {
++            MovieBytes::Owned(data) => data,
++            MovieBytes::Shared(data) => data.as_slice(),
++        }
 +    }
 +}
 +
 +impl Clone for MovieData {
 +    fn clone(&self) -> Self {
-+        Self::new(self.0.clone())
++        match &self.0 {
++            MovieBytes::Owned(data) => Self::new(data.clone()),
++            MovieBytes::Shared(data) => Self::shared(data.clone()),
++        }
 +    }
 +}
 +
@@ -57,7 +144,7 @@ index 371775c28..8fb40a099 100644
 +    fn drop(&mut self) {
 +        use std::sync::atomic::Ordering::Relaxed;
 +        LIVE_MOVIES.fetch_sub(1, Relaxed);
-+        LIVE_MOVIE_BYTES.fetch_sub(self.0.len() as u64, Relaxed);
++        LIVE_MOVIE_BYTES.fetch_sub(self.as_slice().len() as u64, Relaxed);
 +    }
 +}
 +
@@ -70,7 +157,7 @@ index 371775c28..8fb40a099 100644
  impl SwfMovie {
      /// Construct an empty movie.
      pub fn empty(swf_version: u8, loader_url: Option<String>) -> Self {
-@@ -60,7 +96,7 @@ impl SwfMovie {
+@@ -60,7 +183,7 @@ impl SwfMovie {
          let sandbox_type = SandboxType::infer(url.as_str(), &header);
          Self {
              header,
@@ -79,7 +166,7 @@ index 371775c28..8fb40a099 100644
              url,
              loader_url,
              parameters: Vec::new(),
-@@ -89,7 +125,7 @@ impl SwfMovie {
+@@ -89,7 +212,7 @@ impl SwfMovie {
          Self {
              header,
              compressed_len,
@@ -88,7 +175,7 @@ index 371775c28..8fb40a099 100644
              url,
              loader_url,
              parameters: Vec::new(),
-@@ -115,7 +151,7 @@ impl SwfMovie {
+@@ -115,7 +238,7 @@ impl SwfMovie {
          Self {
              header,
              compressed_len: compressed_data.len(),
@@ -97,7 +184,7 @@ index 371775c28..8fb40a099 100644
              url,
              loader_url,
              parameters: Vec::new(),
-@@ -138,7 +174,7 @@ impl SwfMovie {
+@@ -138,7 +261,7 @@ impl SwfMovie {
          let sandbox_type = SandboxType::infer(movie_url.as_str(), &header);
          Self {
              header,
@@ -106,7 +193,7 @@ index 371775c28..8fb40a099 100644
              url: movie_url,
              loader_url: None,
              parameters: Vec::new(),
-@@ -162,7 +198,7 @@ impl SwfMovie {
+@@ -162,7 +285,7 @@ impl SwfMovie {
          let sandbox_type = SandboxType::infer(url.as_str(), &swf_buf.header);
          let mut movie = Self {
              header: swf_buf.header,
@@ -115,7 +202,37 @@ index 371775c28..8fb40a099 100644
              url,
              loader_url,
              parameters: Vec::new(),
-@@ -185,7 +221,7 @@ impl SwfMovie {
+@@ -176,6 +299,29 @@ impl SwfMovie {
+         Ok(movie)
+     }
+ 
++    /// FlashNX: `from_data`, for bytes shared with a ByteArray (`SharedBytes`):
++    /// an uncompressed movie keeps its tags in that buffer instead of a copy.
++    /// `decompress_swf` only strips the headers of an uncompressed movie, so
++    /// its tags are the input's last bytes; checked byte for byte before the
++    /// copy is let go.
++    pub fn from_shared_data(
++        bytes: &SharedBytes,
++        url: String,
++        loader_url: Option<String>,
++    ) -> Result<Self, swf::error::Error> {
++        let mut movie = Self::from_data(bytes.as_slice(), url, loader_url)?;
++        let input = bytes.as_slice();
++        let tags = movie.data.as_slice();
++        let start = input.len().checked_sub(tags.len());
++        if let Some(start) = start
++            && input.starts_with(b"FWS")
++            && input[start..] == *tags
++        {
++            movie.data = MovieData::shared(bytes.sub(start, input.len()));
++        }
++        Ok(movie)
++    }
++
+     /// Construct a movie based on a loaded image (JPEG, GIF or PNG).
+     pub fn from_loaded_image(url: String, length: usize, width: u32, height: u32) -> Self {
+         let stage_size = Rectangle::ZERO
+@@ -185,7 +331,7 @@ impl SwfMovie {
          let sandbox_type = SandboxType::infer(url.as_str(), &header);
          let mut movie = Self {
              header,
@@ -124,21 +241,21 @@ index 371775c28..8fb40a099 100644
              url,
              loader_url: None,
              parameters: Vec::new(),
-@@ -225,7 +261,7 @@ impl SwfMovie {
+@@ -225,7 +371,7 @@ impl SwfMovie {
      }
  
      pub fn data(&self) -> &[u8] {
 -        &self.data
-+        &self.data.0
++        self.data.as_slice()
      }
  
      /// Returns the suggested string encoding for the given SWF version.
-@@ -319,7 +355,7 @@ impl Debug for SwfMovie {
+@@ -319,7 +465,7 @@ impl Debug for SwfMovie {
      fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
          f.debug_struct("SwfMovie")
              .field("header", &self.header)
 -            .field("data", &self.data.len())
-+            .field("data", &self.data.0.len())
++            .field("data", &self.data.as_slice().len())
              .field("url", &self.url)
              .field("loader_url", &self.loader_url)
              .field("parameters", &self.parameters)
@@ -751,6 +868,499 @@ index 26a58d877..18f94e1a0 100644
          Value::Undefined => Some(AmfValue::Undefined),
          Value::Null => Some(AmfValue::Null),
          Value::Bool(b) => Some(AmfValue::Bool(b)),
+diff --git a/core/src/avm2/bytearray.rs b/core/src/avm2/bytearray.rs
+index 7fc6b14d6..258df12af 100644
+--- a/core/src/avm2/bytearray.rs
++++ b/core/src/avm2/bytearray.rs
+@@ -3,6 +3,7 @@ use crate::avm2::Error;
+ use crate::avm2::error::{make_error_2006, make_error_2030};
+ use crate::context::UpdateContext;
+ use crate::string::{FromWStr, WStr};
++use crate::tag_utils::SharedBytes;
+ use flate2::Compression;
+ use flate2::read::*;
+ use gc_arena::Collect;
+@@ -78,9 +79,14 @@ pub enum ObjectEncoding {
+ 
+ #[derive(Clone, Debug)]
+ pub struct ByteArrayStorage {
+-    /// Underlying ByteArray
++    /// Underlying ByteArray (empty while `shared` holds the bytes)
+     bytes: Vec<u8>,
+ 
++    /// FlashNX: while set, the bytes are this range of a buffer shared with
++    /// another ByteArray or a loaded movie (`SharedBytes`). Every write takes
++    /// a private copy first (`unshare`).
++    shared: Option<SharedBytes>,
++
+     /// The current position to read/write from
+     position: Cell<usize>,
+ 
+@@ -96,6 +102,7 @@ impl ByteArrayStorage {
+     pub fn new(context: &mut UpdateContext<'_>) -> ByteArrayStorage {
+         ByteArrayStorage {
+             bytes: Vec::new(),
++            shared: None,
+             position: Cell::new(0),
+             endian: Endian::Big,
+             object_encoding: context.avm2.default_bytearray_encoding,
+@@ -106,12 +113,50 @@ impl ByteArrayStorage {
+     pub fn from_vec(context: &mut UpdateContext<'_>, bytes: Vec<u8>) -> ByteArrayStorage {
+         ByteArrayStorage {
+             bytes,
++            shared: None,
+             position: Cell::new(0),
+             endian: Endian::Big,
+             object_encoding: context.avm2.default_bytearray_encoding,
+         }
+     }
+ 
++    /// FlashNX: the bytes, shared or not.
++    #[inline]
++    fn data(&self) -> &[u8] {
++        match &self.shared {
++            Some(shared) => shared.as_slice(),
++            None => &self.bytes,
++        }
++    }
++
++    /// FlashNX: a write is coming: shared bytes become a private copy first.
++    /// Every writer below goes through here.
++    #[inline]
++    fn unshare(&mut self) {
++        if let Some(shared) = self.shared.take() {
++            self.bytes = shared.as_slice().to_vec();
++        }
++    }
++
++    /// FlashNX: these bytes as a shared range, without a copy: this ByteArray
++    /// keeps them too, and copies them before its next write (`SharedBytes`).
++    pub fn share(&mut self) -> SharedBytes {
++        if let Some(shared) = &self.shared {
++            return shared.clone();
++        }
++        let shared = SharedBytes::new(std::mem::take(&mut self.bytes));
++        self.shared = Some(shared.clone());
++        shared
++    }
++
++    /// FlashNX: what `write_bytes(bytes)` does to an empty ByteArray, without
++    /// copying them.
++    pub fn set_shared(&mut self, bytes: SharedBytes) {
++        self.bytes = Vec::new();
++        self.position.set(bytes.len());
++        self.shared = Some(bytes);
++    }
++
+     /// Write bytes at the next position in the ByteArray, growing if needed.
+     #[inline]
+     pub fn write_bytes(&mut self, buf: &[u8]) -> Result<(), ByteArrayError> {
+@@ -152,7 +197,7 @@ impl ByteArrayStorage {
+     /// Reads any amount of bytes at any offset in the ByteArray
+     #[inline]
+     pub fn read_at(&self, amnt: usize, offset: usize) -> Result<&[u8], ByteArrayError> {
+-        self.bytes
++        self.data()
+             .get(offset..)
+             .and_then(|bytes| bytes.get(..amnt))
+             .ok_or(ByteArrayError::EndOfFile)
+@@ -170,6 +215,7 @@ impl ByteArrayStorage {
+         if self.len() < new_len {
+             self.set_length(new_len);
+         }
++        self.unshare();
+         self.bytes
+             .get_mut(offset..new_len)
+             .expect("ByteArray write out of bounds")
+@@ -180,6 +226,7 @@ impl ByteArrayStorage {
+     /// Write bytes at any offset in the ByteArray
+     /// Will return an error if the new buffer does not fit the ByteArray
+     pub fn write_at_nongrowing(&mut self, buf: &[u8], offset: usize) -> Result<(), ByteArrayError> {
++        self.unshare();
+         self.bytes
+             .get_mut(offset..)
+             .and_then(|bytes| bytes.get_mut(..buf.len()))
+@@ -213,6 +260,7 @@ impl ByteArrayStorage {
+             self.set_length(new_len);
+         }
+ 
++        self.unshare();
+         self.bytes.copy_within(start..end, offset);
+         Ok(())
+     }
+@@ -224,15 +272,15 @@ impl ByteArrayStorage {
+             CompressionAlgorithm::Zlib => {
+                 // Note: some content is sensitive to compression type
+                 // (as it's visible in the header)
+-                let mut encoder = ZlibEncoder::new(&*self.bytes, Compression::best());
++                let mut encoder = ZlibEncoder::new(self.data(), Compression::best());
+                 encoder.read_to_end(&mut buffer).err().map(|e| e.into())
+             }
+             CompressionAlgorithm::Deflate => {
+-                let mut encoder = DeflateEncoder::new(&*self.bytes, Compression::best());
++                let mut encoder = DeflateEncoder::new(self.data(), Compression::best());
+                 encoder.read_to_end(&mut buffer).err().map(|e| e.into())
+             }
+             #[cfg(feature = "lzma")]
+-            CompressionAlgorithm::Lzma => lzma_rs::lzma_compress(&mut &*self.bytes, &mut buffer)
++            CompressionAlgorithm::Lzma => lzma_rs::lzma_compress(&mut self.data(), &mut buffer)
+                 .err()
+                 .map(|e| e.into()),
+             #[cfg(not(feature = "lzma"))]
+@@ -251,15 +299,15 @@ impl ByteArrayStorage {
+         let mut buffer = Vec::new();
+         let error: Option<Box<dyn std::error::Error>> = match algorithm {
+             CompressionAlgorithm::Zlib => {
+-                let mut decoder = ZlibDecoder::new(&*self.bytes);
++                let mut decoder = ZlibDecoder::new(self.data());
+                 decoder.read_to_end(&mut buffer).err().map(|e| e.into())
+             }
+             CompressionAlgorithm::Deflate => {
+-                let mut decoder = DeflateDecoder::new(&*self.bytes);
++                let mut decoder = DeflateDecoder::new(self.data());
+                 decoder.read_to_end(&mut buffer).err().map(|e| e.into())
+             }
+             #[cfg(feature = "lzma")]
+-            CompressionAlgorithm::Lzma => lzma_rs::lzma_decompress(&mut &*self.bytes, &mut buffer)
++            CompressionAlgorithm::Lzma => lzma_rs::lzma_decompress(&mut self.data(), &mut buffer)
+                 .err()
+                 .map(|e| e.into()),
+             #[cfg(not(feature = "lzma"))]
+@@ -299,6 +347,7 @@ impl ByteArrayStorage {
+ 
+     #[inline]
+     pub fn clear(&mut self) {
++        self.shared = None;
+         self.bytes.clear();
+         self.position.set(0)
+     }
+@@ -310,15 +359,25 @@ impl ByteArrayStorage {
+ 
+     #[inline]
+     pub fn set_length(&mut self, new_len: usize) {
++        // FlashNX: shortening shared bytes only shortens the range.
++        if let Some(shared) = &self.shared
++            && new_len <= shared.len()
++        {
++            self.shared = Some(shared.sub(0, new_len));
++            self.position.set(self.position().min(new_len));
++            return;
++        }
++        self.unshare();
+         self.bytes.resize(new_len, 0);
+         self.position.set(self.position().min(new_len));
+     }
+ 
+     pub fn get(&self, pos: usize) -> Option<u8> {
+-        self.bytes.get(pos).copied()
++        self.data().get(pos).copied()
+     }
+ 
+     pub fn set(&mut self, item: usize, value: u8) {
++        self.unshare();
+         if self.len() < (item + 1) {
+             self.bytes.resize(item + 1, 0)
+         }
+@@ -330,15 +389,21 @@ impl ByteArrayStorage {
+     /// method sets the bytearray's `position` to 0.
+     pub fn swap_storage_with(&mut self, new_data: &mut Vec<u8>) {
+         self.position.set(0);
++        // FlashNX: `new_data` receives the old bytes as its own.
++        self.unshare();
+         std::mem::swap(&mut self.bytes, new_data);
+     }
+ 
+     /// Write a single byte at any offset in the bytearray, panicking if out of bounds.
+     pub fn set_nongrowing(&mut self, item: usize, value: u8) {
++        self.unshare();
+         self.bytes[item] = value;
+     }
+ 
+     pub fn delete(&mut self, item: usize) {
++        if item < self.len() {
++            self.unshare();
++        }
+         if let Some(i) = self.bytes.get_mut(item) {
+             *i = 0;
+         }
+@@ -346,17 +411,18 @@ impl ByteArrayStorage {
+ 
+     #[inline]
+     pub fn bytes(&self) -> &[u8] {
+-        &self.bytes
++        self.data()
+     }
+ 
+     #[inline]
+     pub fn bytes_mut(&mut self) -> &mut [u8] {
++        self.unshare();
+         &mut self.bytes
+     }
+ 
+     #[inline]
+     pub fn len(&self) -> usize {
+-        self.bytes.len()
++        self.data().len()
+     }
+ 
+     #[inline]
+diff --git a/core/src/avm2/class.rs b/core/src/avm2/class.rs
+index 27daaf6bc..340265324 100644
+--- a/core/src/avm2/class.rs
++++ b/core/src/avm2/class.rs
+@@ -241,6 +241,11 @@ impl<'gc> ClassData<'gc> {
+ }
+ 
+ impl<'gc> Class<'gc> {
++    /// FlashNX: see `Avm2ClassRegistry::resurrect_movie` in library.rs.
++    pub fn resurrect(self, fc: &gc_arena::Finalization<'gc>) {
++        Gc::resurrect(fc, self.0)
++    }
++
+     pub fn as_ptr(self) -> *const () {
+         Gc::as_ptr(self.0).cast()
+     }
+@@ -999,6 +1004,12 @@ impl<'gc> Class<'gc> {
+         *self.0.vtable.get().expect("VTable not yet initialized!")
+     }
+ 
++    /// FlashNX: the vtable if it has been built already (see
++    /// `VTableBuild::finish`).
++    pub fn vtable_if_initialized(self) -> Option<VTable<'gc>> {
++        self.0.vtable.get().copied()
++    }
++
+     pub fn dollar_removed_name(self, mc: &Mutation<'gc>) -> QName<'gc> {
+         let name = self.name();
+ 
+diff --git a/core/src/avm2/domain.rs b/core/src/avm2/domain.rs
+index c90ef4e51..31f974f4e 100644
+--- a/core/src/avm2/domain.rs
++++ b/core/src/avm2/domain.rs
+@@ -69,6 +69,11 @@ struct DomainDataMut<'gc> {
+ const MIN_DOMAIN_MEMORY_LENGTH: usize = 1024;
+ 
+ impl<'gc> Domain<'gc> {
++    /// FlashNX: see `MovieLibrary::in_use` in library.rs.
++    pub fn is_dead(self, fc: &gc_arena::Finalization<'gc>) -> bool {
++        Gc::is_dead(fc, self.0)
++    }
++
+     fn cell(self) -> Ref<'gc, DomainDataMut<'gc>> {
+         Gc::as_ref(self.0).cell.borrow()
+     }
+diff --git a/core/src/avm2/dynamic_map.rs b/core/src/avm2/dynamic_map.rs
+index 6a0c92a11..d0777428a 100644
+--- a/core/src/avm2/dynamic_map.rs
++++ b/core/src/avm2/dynamic_map.rs
+@@ -30,18 +30,24 @@ pub enum DynamicKey<'gc> {
+ ///
+ /// Uses `HashTable` directly to expose stable bucket indices, which are
+ /// needed for correct iteration when entries are added or removed mid-iteration.
++///
++/// FlashNX: 16 bytes instead of 48. Every AS3 object holds one, and nearly all
++/// of them, instances of sealed classes, never get a dynamic property: the
++/// table is allocated with the first one, and the iteration indices are 32
++/// bits. Super Smash Flash 2 keeps millions of small objects (its hitbox
++/// caches) and ran out of memory with 600-800 MB of AS3 heap (2026-10-06).
+ #[derive(Debug, Clone, Collect)]
+ #[collect(no_drop)]
+ pub struct DynamicMap<K, V> {
+-    table: HashTable<(K, DynamicProperty<V>)>,
++    table: Option<Box<HashTable<(K, DynamicProperty<V>)>>>,
+     #[collect(require_static)]
+     hasher: FnvBuildHasher,
+     // The last index that was given back to flash
+     #[collect(require_static)]
+-    public_index: Cell<usize>,
++    public_index: Cell<u32>,
+     // The actual bucket index that represents where an item is in the table
+     #[collect(require_static)]
+-    real_index: Cell<usize>,
++    real_index: Cell<u32>,
+ }
+ 
+ impl<K: Eq + Hash, V> Default for DynamicMap<K, V> {
+@@ -57,7 +63,7 @@ impl<K: Eq + Hash, V> DynamicMap<K, V> {
+ 
+     pub fn new() -> Self {
+         Self {
+-            table: HashTable::new(),
++            table: None,
+             hasher: FnvBuildHasher::default(),
+             public_index: Cell::new(0),
+             real_index: Cell::new(0),
+@@ -65,41 +71,53 @@ impl<K: Eq + Hash, V> DynamicMap<K, V> {
+     }
+ 
+     pub fn get(&self, key: &K) -> Option<&DynamicProperty<V>> {
++        let table = self.table.as_ref()?;
+         let hash = self.hash_key(key);
+ 
+-        self.table.find(hash, |(k, _)| k == key).map(|(_, v)| v)
++        table.find(hash, |(k, _)| k == key).map(|(_, v)| v)
+     }
+ 
+     pub fn contains_key(&self, key: &K) -> bool {
++        let Some(table) = &self.table else {
++            return false;
++        };
+         let hash = self.hash_key(key);
+ 
+-        self.table.find(hash, |(k, _)| k == key).is_some()
++        table.find(hash, |(k, _)| k == key).is_some()
+     }
+ 
+     pub fn iter(&self) -> impl Iterator<Item = (&K, &DynamicProperty<V>)> {
+-        self.table.iter().map(|(k, v)| (k, v))
++        self.table.iter().flat_map(|table| table.iter()).map(|(k, v)| (k, v))
+     }
+ 
+     pub fn keys(&self) -> impl Iterator<Item = &K> {
+-        self.table.iter().map(|(k, _)| k)
++        self.table.iter().flat_map(|table| table.iter()).map(|(k, _)| k)
+     }
+ 
+     pub fn len(&self) -> usize {
+-        self.table.len()
++        self.table.as_ref().map_or(0, |table| table.len())
+     }
+ 
+     pub fn is_empty(&self) -> bool {
+-        self.table.is_empty()
++        self.table.as_ref().is_none_or(|table| table.is_empty())
++    }
++
++    fn num_buckets(&self) -> usize {
++        self.table.as_ref().map_or(0, |table| table.num_buckets())
++    }
++
++    fn get_bucket(&self, index: usize) -> Option<&(K, DynamicProperty<V>)> {
++        self.table.as_ref()?.get_bucket(index)
+     }
+ 
+     /// Gets the bucket index from the current public index.
+     /// Returns `None` if the index is out of bounds.
+     fn public_to_real_index(&self, index: usize) -> Option<usize> {
+         let mut count = 0;
+-        let num_buckets = self.table.num_buckets();
++        let num_buckets = self.num_buckets();
+ 
+         for i in 0..num_buckets {
+-            if let Some((_, v)) = self.table.get_bucket(i)
++            if let Some((_, v)) = self.get_bucket(i)
+                 && v.enumerable
+             {
+                 count += 1;
+@@ -115,11 +133,10 @@ impl<K: Eq + Hash, V> DynamicMap<K, V> {
+ 
+     pub fn insert(&mut self, key: K, new_value: V) {
+         let hash = self.hash_key(&key);
++        let hasher = &self.hasher;
++        let table = self.table.get_or_insert_with(|| Box::new(HashTable::new()));
+ 
+-        match self
+-            .table
+-            .entry(hash, |(k, _)| *k == key, |(k, _)| self.hasher.hash_one(k))
+-        {
++        match table.entry(hash, |(k, _)| *k == key, |(k, _)| hasher.hash_one(k)) {
+             Entry::Occupied(mut occupied) => {
+                 // NOTE: When inserting a new value into an already-occupied entry,
+                 // the value of the `enumerable` field isn't reset to `true`
+@@ -139,8 +156,9 @@ impl<K: Eq + Hash, V> DynamicMap<K, V> {
+ 
+     pub fn remove(&mut self, key: &K) -> Option<DynamicProperty<V>> {
+         let hash = self.hash_key(key);
++        let table = self.table.as_mut()?;
+ 
+-        match self.table.find_entry(hash, |(k, _)| k == key) {
++        match table.find_entry(hash, |(k, _)| k == key) {
+             Ok(occupied) => Some(occupied.remove().0.1),
+             Err(_) => None,
+         }
+@@ -157,7 +175,7 @@ impl<K: Eq + Hash, V> DynamicMap<K, V> {
+         // Start iteration from the beginning
+         if index == 0 {
+             if let Some(real) = self.public_to_real_index(1) {
+-                self.real_index.set(real);
++                self.real_index.set(real as u32);
+                 self.public_index.set(1);
+                 return Some(1);
+             } else {
+@@ -170,12 +188,12 @@ impl<K: Eq + Hash, V> DynamicMap<K, V> {
+         // if index != self.public_index, then we are enumerating twice OR we mutated while enumerating.
+         //
+         // Regardless of the reason, we just need to sync the supplied index to the real index.
+-        if self.public_index.get() == 0 || index != self.public_index.get() {
++        if self.public_index.get() == 0 || index != self.public_index.get() as usize {
+             if let Some(real) = self.public_to_real_index(index) {
+                 // Pick up where we left off in the iteration
+                 // See https://github.com/adobe/avmplus/blob/858d034a3bd3a54d9b70909386435cf4aec81d21/core/avmplusHashtable.cpp#L395
+-                self.real_index.set(real);
+-                self.public_index.set(index);
++                self.real_index.set(real as u32);
++                self.public_index.set(index as u32);
+             } else {
+                 self.public_index.set(0);
+                 self.real_index.set(0);
+@@ -183,17 +201,17 @@ impl<K: Eq + Hash, V> DynamicMap<K, V> {
+             }
+         }
+ 
+-        let real = self.real_index.get() + 1;
+-        let num_buckets = self.table.num_buckets();
++        let real = self.real_index.get() as usize + 1;
++        let num_buckets = self.num_buckets();
+ 
+-        if !self.table.is_empty() && real < num_buckets {
++        if !self.is_empty() && real < num_buckets {
+             for i in real..num_buckets {
+-                if let Some((_, v)) = self.table.get_bucket(i)
++                if let Some((_, v)) = self.get_bucket(i)
+                     && v.enumerable
+                 {
+-                    self.real_index.set(i);
++                    self.real_index.set(i as u32);
+                     self.public_index.set(self.public_index.get() + 1);
+-                    return Some(self.public_index.get());
++                    return Some(self.public_index.get() as usize);
+                 }
+             }
+         }
+@@ -202,13 +220,14 @@ impl<K: Eq + Hash, V> DynamicMap<K, V> {
+     }
+ 
+     pub fn pair_at(&self, index: usize) -> Option<&(K, DynamicProperty<V>)> {
+-        let real_index = if self.public_index.get() == 0 || self.public_index.get() != index {
+-            self.public_to_real_index(index)?
+-        } else {
+-            self.real_index.get()
+-        };
++        let real_index =
++            if self.public_index.get() == 0 || self.public_index.get() as usize != index {
++                self.public_to_real_index(index)?
++            } else {
++                self.real_index.get() as usize
++            };
+ 
+-        self.table.get_bucket(real_index)
++        self.get_bucket(real_index)
+     }
+ 
+     pub fn key_at(&self, index: usize) -> Option<&K> {
+@@ -222,7 +241,11 @@ impl<K: Eq + Hash, V> DynamicMap<K, V> {
+     pub fn set_enumerable(&mut self, key: &K, enumerable: bool) {
+         let hash = self.hash_key(key);
+ 
+-        if let Some((_, prop)) = self.table.find_mut(hash, |(k, _)| k == key) {
++        if let Some((_, prop)) = self
++            .table
++            .as_mut()
++            .and_then(|table| table.find_mut(hash, |(k, _)| k == key))
++        {
+             prop.enumerable = enumerable;
+         }
+     }
 diff --git a/core/src/avm2/function.rs b/core/src/avm2/function.rs
 index 27fc0f88c..adac3bfac 100644
 --- a/core/src/avm2/function.rs
@@ -793,8 +1403,21 @@ index 952cc8f9f..1c8a0d959 100644
  
          [API("680")]
          public function encode(rect:Rectangle, compressor:Object, byteArray:ByteArray = null):ByteArray {
+diff --git a/core/src/avm2/globals/flash/display/bitmap.rs b/core/src/avm2/globals/flash/display/bitmap.rs
+index 008a63c5c..fd29872da 100644
+--- a/core/src/avm2/globals/flash/display/bitmap.rs
++++ b/core/src/avm2/globals/flash/display/bitmap.rs
+@@ -50,7 +50,7 @@ pub fn bitmap_allocator<'gc>(
+                 .library_for_movie_mut(movie)
+                 .character_by_id(symbol)
+         {
+-            let new_bitmap_data = fill_bitmap_data_from_symbol(activation, bitmap.compressed());
++            let new_bitmap_data = fill_bitmap_data_from_symbol(activation, &bitmap);
+             let bitmap_data_obj =
+                 BitmapDataObject::from_bitmap_data(activation.context, new_bitmap_data);
+             new_bitmap_data.init_object2(activation.gc(), bitmap_data_obj);
 diff --git a/core/src/avm2/globals/flash/display/bitmap_data.rs b/core/src/avm2/globals/flash/display/bitmap_data.rs
-index 57ca11ff3..730d2b331 100644
+index 57ca11ff3..842bd6416 100644
 --- a/core/src/avm2/globals/flash/display/bitmap_data.rs
 +++ b/core/src/avm2/globals/flash/display/bitmap_data.rs
 @@ -8,7 +8,7 @@ use crate::avm2::error::{
@@ -806,17 +1429,49 @@ index 57ca11ff3..730d2b331 100644
  use crate::avm2::globals::flash::geom::transform::object_to_color_transform;
  use crate::avm2::globals::flash::geom::transform::object_to_matrix;
  use crate::avm2::globals::slots::{
-@@ -73,7 +73,8 @@ pub fn fill_bitmap_data_from_symbol<'gc>(
+@@ -23,7 +23,7 @@ use crate::avm2_stub_method;
+ use crate::bitmap::bitmap_data::{BitmapData, ChannelOptions, ThresholdOperation};
+ use crate::bitmap::bitmap_data::{BitmapDataDrawError, IBitmapDrawable};
+ use crate::bitmap::{is_size_valid, operations};
+-use crate::character::{Character, CompressedBitmap};
++use crate::character::Character;
+ use crate::ecma_conversions::round_to_even;
+ use crate::swf::BlendMode;
+ use ruffle_render::filters::Filter;
+@@ -71,19 +71,11 @@ fn get_rectangle_x_y_width_height<'gc>(
+ /// class named by `name`.
+ pub fn fill_bitmap_data_from_symbol<'gc>(
      activation: &mut Activation<'_, 'gc>,
-     bd: &CompressedBitmap,
+-    bd: &CompressedBitmap,
++    bitmap: &crate::character::BitmapCharacter<'gc>,
  ) -> BitmapData<'gc> {
 -    let bitmap = bd.decode().expect("Failed to decode BitmapData");
-+    // FlashNX: never expect this — see `decode_or_stand_in`.
-+    let bitmap = bd.decode_or_stand_in();
-     BitmapData::new_with_pixels(
-         activation.context.gc_context,
-         bitmap.width(),
-@@ -1124,6 +1125,38 @@ pub fn get_rect<'gc>(
+-    BitmapData::new_with_pixels(
+-        activation.context.gc_context,
+-        bitmap.width(),
+-        bitmap.height(),
+-        true,
+-        bitmap
+-            .as_colors()
+-            .map(crate::bitmap::bitmap_data::Color::from)
+-            .collect(),
+-    )
++    // FlashNX: the symbol's decoded pixels, shared until a pixel changes
++    // (`SharedPixels`), instead of a fresh decode and copy per instance.
++    BitmapData::new_with_shared_pixels(activation.context.gc_context, bitmap.shared_pixels())
+ }
+ 
+ /// Implements `flash.display.BitmapData`'s 'init' method (invoked from the AS3 constructor)
+@@ -113,7 +105,7 @@ pub fn init<'gc>(
+ 
+     let new_bitmap_data = if let Some(Character::Bitmap(bitmap)) = character {
+         // Instantiating BitmapData from an Animate-style bitmap asset
+-        fill_bitmap_data_from_symbol(activation, bitmap.compressed())
++        fill_bitmap_data_from_symbol(activation, &bitmap)
+     } else {
+         if character.is_some() {
+             //TODO: Determine if mismatched symbols will still work as a
+@@ -1124,6 +1116,38 @@ pub fn get_rect<'gc>(
      Ok(Value::Undefined)
  }
  
@@ -868,6 +1523,20 @@ index 16b2c8f84..50644e315 100644
      activation: &mut Activation<'_, 'gc>,
      rectangle: Rectangle<Twips>,
  ) -> Result<Value<'gc>, Error<'gc>> {
+diff --git a/core/src/avm2/globals/flash/display/loader.rs b/core/src/avm2/globals/flash/display/loader.rs
+index 20ed31f55..4f5ece21d 100644
+--- a/core/src/avm2/globals/flash/display/loader.rs
++++ b/core/src/avm2/globals/flash/display/loader.rs
+@@ -237,7 +237,8 @@ pub fn load_bytes<'gc>(
+     let this = this.as_object().unwrap();
+ 
+     let arg0 = args.get_object(activation, 0, "data")?;
+-    let bytes = arg0.as_bytearray().unwrap().bytes().to_vec();
++    // FlashNX: the loaded movie shares the ByteArray's bytes (`SharedBytes`).
++    let bytes = arg0.as_bytearray_mut().unwrap().share();
+     let context = args.try_get_object(1);
+ 
+     let loader_info = this
 diff --git a/core/src/avm2/globals/flash/display/shader_job.rs b/core/src/avm2/globals/flash/display/shader_job.rs
 index ce5e8a5d5..f69928e2e 100644
 --- a/core/src/avm2/globals/flash/display/shader_job.rs
@@ -992,6 +1661,85 @@ index b02aecf7d..498fa59ab 100644
  /// Implements `flash.system.System.setClipboard` method
  pub fn set_clipboard<'gc>(
      activation: &mut Activation<'_, 'gc>,
+diff --git a/core/src/avm2/globals/flash/utils/byte_array.rs b/core/src/avm2/globals/flash/utils/byte_array.rs
+index 23ae3533b..81df1bfb8 100644
+--- a/core/src/avm2/globals/flash/utils/byte_array.rs
++++ b/core/src/avm2/globals/flash/utils/byte_array.rs
+@@ -76,6 +76,33 @@ pub fn write_bytes<'gc>(
+     let length = args.get_u32(2) as usize;
+ 
+     if !Object::ptr_eq(this, bytearray) {
++        // FlashNX: a big range of another ByteArray written into an empty one
++        // is shared rather than copied (`SharedBytes`); the first write to
++        // either copies it then. Super Smash Flash 2 copies the SWF out of every
++        // DAT file it loads this way.
++        const SHARE_MIN: usize = 64 * 1024;
++        let this_empty = this
++            .as_bytearray()
++            .is_some_and(|b| b.len() == 0 && b.position() == 0);
++        if this_empty {
++            let mut src = bytearray
++                .as_bytearray_mut()
++                .expect("Parameter must be a bytearray");
++            let amnt = if length != 0 {
++                length
++            } else {
++                src.len().saturating_sub(offset)
++            };
++            if amnt >= SHARE_MIN && offset.checked_add(amnt).is_some_and(|end| end <= src.len()) {
++                let shared = src.share().sub(offset, offset + amnt);
++                drop(src);
++                if let Some(mut dst) = this.as_bytearray_mut() {
++                    dst.set_shared(shared);
++                }
++                return Ok(Value::Undefined);
++            }
++        }
++
+         // The ByteArray we are reading from is different than the ByteArray we are writing to,
+         // so we are allowed to borrow both at the same time without worrying about a panic
+ 
+@@ -739,11 +766,10 @@ pub fn compress<'gc>(
+             Ok(algorithm) => algorithm,
+             Err(_) => return Err(make_error_2058(activation)),
+         };
+-        let buffer = bytearray.compress(algorithm);
+-        bytearray.clear();
+-        bytearray
+-            .write_bytes(&buffer)
+-            .map_err(|e| e.to_avm(activation))?;
++        let mut buffer = bytearray.compress(algorithm);
++        // FlashNX: take the result as the storage (see `uncompress`).
++        buffer.shrink_to_fit();
++        bytearray.swap_storage_with(&mut buffer);
+         bytearray.set_position(bytearray.len());
+     }
+ 
+@@ -763,14 +789,19 @@ pub fn uncompress<'gc>(
+             Ok(algorithm) => algorithm,
+             Err(_) => return Err(make_error_2058(activation)),
+         };
+-        let buffer = match bytearray.decompress(algorithm) {
++        let mut buffer = match bytearray.decompress(algorithm) {
+             Some(buffer) => buffer,
+             None => return Err(make_error_2058(activation)),
+         };
+-        bytearray.clear();
+-        bytearray
+-            .write_bytes(&buffer)
+-            .map_err(|e| e.to_avm(activation))?;
++        // FlashNX: the decompressed bytes BECOME the storage, at their exact
++        // size. Clearing the old storage and writing them back kept its
++        // capacity and grew it by doubling from there: a game file that barely
++        // compresses (Super Smash Flash 2's DAT files, 126 MB -> 136 MB) ended
++        // up holding ~1.85x its size, 341 MB of ByteArrays for ~184 MB of data
++        // in a heap profile (2026-10-05). `read_to_end` leaves slack of its
++        // own, hence the shrink.
++        buffer.shrink_to_fit();
++        bytearray.swap_storage_with(&mut buffer);
+         bytearray.set_position(0);
+     }
+ 
 diff --git a/core/src/avm2/method.rs b/core/src/avm2/method.rs
 index dcbb88f37..fdcb08342 100644
 --- a/core/src/avm2/method.rs
@@ -1043,11 +1791,41 @@ index 0e6f47c5c..88661652d 100644
      pub fn http_status_event(
          activation: &mut Activation<'_, 'gc>,
          status: u16,
+diff --git a/core/src/avm2/object/loaderinfo_object.rs b/core/src/avm2/object/loaderinfo_object.rs
+index 9906b5dcf..fb06810fd 100644
+--- a/core/src/avm2/object/loaderinfo_object.rs
++++ b/core/src/avm2/object/loaderinfo_object.rs
+@@ -264,6 +264,12 @@ impl<'gc> LoaderInfoObject<'gc> {
+     }
+ 
+     pub fn unload(self, context: &mut UpdateContext<'gc>) {
++        // FlashNX: the unloaded movie's library is kept only while something
++        // still uses the movie (see `Library::release_movie`).
++        if let LoaderStream::Swf(movie, root) = &*self.loader_stream() {
++            context.library.release_movie(movie, root.as_movie_clip());
++        }
++
+         // Reset properties
+         let movie = &context.root_swf;
+         let empty_swf = Arc::new(SwfMovie::empty(movie.version(), Some(movie.url().into())));
 diff --git a/core/src/avm2/object/script_object.rs b/core/src/avm2/object/script_object.rs
-index 8e8934e23..6358c6dbc 100644
+index 8e8934e23..004e6639f 100644
 --- a/core/src/avm2/object/script_object.rs
 +++ b/core/src/avm2/object/script_object.rs
-@@ -76,6 +76,11 @@ pub struct ScriptObjectData<'gc> {
+@@ -66,7 +66,11 @@ pub struct ScriptObjectData<'gc> {
+     slots: Box<[Lock<Value<'gc>>]>,
+ 
+     /// Methods stored on this object.
+-    bound_methods: RefLock<Vec<Option<FunctionObject<'gc>>>>,
++    ///
++    /// FlashNX: allocated with the first one; most objects never bind a
++    /// method, and the empty `Vec` cost every AS3 object 24 bytes (see
++    /// `DynamicMap` for the same reason).
++    bound_methods: RefLock<Option<Box<Vec<Option<FunctionObject<'gc>>>>>>,
+ 
+     /// Implicit prototype of this script object.
+     proto: Lock<Option<Object<'gc>>>,
+@@ -76,6 +80,11 @@ pub struct ScriptObjectData<'gc> {
  
      /// The table used for non-dynamic property lookups.
      vtable: Lock<VTable<'gc>>,
@@ -1059,9 +1837,12 @@ index 8e8934e23..6358c6dbc 100644
  }
  
  impl<'gc> TObject<'gc> for ScriptObject<'gc> {
-@@ -164,6 +169,10 @@ impl<'gc> ScriptObjectData<'gc> {
+@@ -162,8 +171,12 @@ impl<'gc> ScriptObjectData<'gc> {
+         ScriptObjectData {
+             values: RefLock::new(Default::default()),
              slots,
-             bound_methods: RefLock::new(Vec::new()),
+-            bound_methods: RefLock::new(Vec::new()),
++            bound_methods: RefLock::new(None),
              proto: Lock::new(proto),
 +            #[cfg(feature = "flashnx_census")]
 +            _census: crate::flashnx_census::ObjectGuard::new(instance_class.as_ptr() as usize, || {
@@ -1070,6 +1851,30 @@ index 8e8934e23..6358c6dbc 100644
              instance_class,
              vtable: Lock::new(vtable),
          }
+@@ -186,15 +199,20 @@ impl<'gc> ScriptObjectWrapper<'gc> {
+         unlock!(Gc::write(mc, self.0), ScriptObjectData, values).borrow_mut()
+     }
+ 
+-    fn bound_methods(&self) -> Ref<'_, Vec<Option<FunctionObject<'gc>>>> {
+-        self.0.bound_methods.borrow()
++    fn bound_methods(&self) -> Ref<'_, [Option<FunctionObject<'gc>>]> {
++        Ref::map(self.0.bound_methods.borrow(), |methods| {
++            methods.as_deref().map_or(&[][..], |methods| methods.as_slice())
++        })
+     }
+ 
+     fn bound_methods_mut(
+         &self,
+         mc: &Mutation<'gc>,
+     ) -> RefMut<'_, Vec<Option<FunctionObject<'gc>>>> {
+-        unlock!(Gc::write(mc, self.0), ScriptObjectData, bound_methods).borrow_mut()
++        RefMut::map(
++            unlock!(Gc::write(mc, self.0), ScriptObjectData, bound_methods).borrow_mut(),
++            |methods| &mut **methods.get_or_insert_with(Default::default),
++        )
+     }
+ 
+     pub fn get_property_local(
 diff --git a/core/src/avm2/object/stage3d_object.rs b/core/src/avm2/object/stage3d_object.rs
 index a0118157e..77d3a5b1e 100644
 --- a/core/src/avm2/object/stage3d_object.rs
@@ -1238,6 +2043,141 @@ index e5b808b2e..02aa10fbe 100644
          && let MethodKind::Native {
              native_method,
              fast_call: true,
+diff --git a/core/src/avm2/property.rs b/core/src/avm2/property.rs
+index 34403555f..56e6095e8 100644
+--- a/core/src/avm2/property.rs
++++ b/core/src/avm2/property.rs
+@@ -11,7 +11,7 @@ use ruffle_macros::istr;
+ 
+ use super::class::Class;
+ 
+-#[derive(Debug, Collect, Clone, Copy)]
++#[derive(Debug, Collect, Clone, Copy, PartialEq, Eq)]
+ #[collect(no_drop)]
+ pub enum Property {
+     Virtual {
+diff --git a/core/src/avm2/property_map.rs b/core/src/avm2/property_map.rs
+index 674918a87..6f2683781 100644
+--- a/core/src/avm2/property_map.rs
++++ b/core/src/avm2/property_map.rs
+@@ -24,10 +24,16 @@ use std::mem::swap;
+ /// The internal structure of the `PropertyMap` technically allows storage of
+ /// multiple values per `QName`. It's implementation enforces the invariant
+ /// that each `QName` only have one associated `V`.
+-#[derive(Clone, Debug, Collect)]
++///
++/// FlashNX: one entry inline per local name instead of two. Nearly every local
++/// name has a single namespace, and the second inline slot made each entry
++/// 96 bytes instead of 56 (measured): ~40 % of every class's vtable map, of
++/// which Super Smash Flash 2 keeps thousands. A name with more namespaces
++/// moves its list to the heap, as it did past two.
++#[derive(Clone, Debug, Collect, PartialEq)]
+ #[collect(no_drop)]
+ pub struct PropertyMap<'gc, V>(
+-    HashMap<AvmString<'gc>, SmallVec<[(Namespace<'gc>, V); 2]>, FnvBuildHasher>,
++    HashMap<AvmString<'gc>, SmallVec<[(Namespace<'gc>, V); 1]>, FnvBuildHasher>,
+ );
+ 
+ impl<V> Default for PropertyMap<'_, V> {
+diff --git a/core/src/avm2/regexp.rs b/core/src/avm2/regexp.rs
+index 8c4a1efa9..7734df5b4 100644
+--- a/core/src/avm2/regexp.rs
++++ b/core/src/avm2/regexp.rs
+@@ -2,6 +2,7 @@
+ 
+ use std::borrow::Cow;
+ use std::num::NonZero;
++use std::sync::{Arc, Mutex};
+ 
+ use crate::avm2::Error;
+ use crate::avm2::activation::Activation;
+@@ -26,11 +27,64 @@ pub struct RegExp<'gc> {
+     flags: RegExpFlags,
+     last_index: usize,
+ 
++    /// FlashNX: shared with every RegExp of the same pattern (`compile_shared`).
+     #[collect(require_static)]
+-    cached_regex: Option<Result<regress::Regex, ()>>,
++    cached_regex: Option<Result<Arc<regress::Regex>, ()>>,
+     cached_text: Option<CachedText<'gc>>,
+ }
+ 
++/// FlashNX: compiled patterns, by source and the flags that change the
++/// compilation (`g` does not).
++///
++/// A regex literal builds a new RegExp every time it is evaluated, and each
++/// one compiled its pattern again on first use. Super Smash Flash 2 tests
++/// every object of a stage against a dozen literals while it loads the stage
++/// (`StageData`): in a 14-second loading frame, ~21 % of the time went to
++/// compiling the same few patterns, and every discarded RegExp kept its
++/// program alive until the collector ran, which it cannot do in the middle of
++/// a script (2026-10-05). A compiled pattern never changes, so one copy
++/// serves them all. Bounded: patterns built from data (`new RegExp(s)`) can
++/// be endless, so the cache starts over past `MAX`.
++fn compile_shared(source: &str, flags: RegExpFlags) -> Result<Arc<regress::Regex>, ()> {
++    type Cache = fnv::FnvHashMap<u8, fnv::FnvHashMap<Box<str>, Result<Arc<regress::Regex>, ()>>>;
++    static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
++    const MAX: usize = 512;
++
++    let key_flags = (flags - RegExpFlags::GLOBAL).bits();
++    let compile = || {
++        regress::Regex::with_flags(
++            source,
++            regress::Flags {
++                icase: flags.contains(RegExpFlags::IGNORE_CASE),
++                multiline: flags.contains(RegExpFlags::MULTILINE),
++                dot_all: flags.contains(RegExpFlags::DOTALL),
++                extended: flags.contains(RegExpFlags::EXTENDED),
++                no_opt: false,
++                unicode: false,
++                unicode_sets: false,
++            },
++        )
++        .map(Arc::new)
++        .map_err(drop)
++    };
++    let Ok(mut guard) = CACHE.lock() else {
++        return compile();
++    };
++    let cache = guard.get_or_insert_with(Default::default);
++    if let Some(hit) = cache.get(&key_flags).and_then(|by_source| by_source.get(source)) {
++        return hit.clone();
++    }
++    let compiled = compile();
++    if cache.values().map(|by_source| by_source.len()).sum::<usize>() >= MAX {
++        cache.clear();
++    }
++    cache
++        .entry(key_flags)
++        .or_default()
++        .insert(Box::from(source), compiled.clone());
++    compiled
++}
++
+ impl Clone for RegExp<'_> {
+     fn clone(&self) -> Self {
+         Self {
+@@ -96,19 +150,7 @@ impl<'gc> RegExp<'gc> {
+         F: FnOnce(&mut CachedText<'gc>, regress::Match) -> T,
+     {
+         if self.cached_regex.is_none() {
+-            let re = regress::Regex::with_flags(
+-                &self.source.to_utf8_lossy(),
+-                regress::Flags {
+-                    icase: self.flags.contains(RegExpFlags::IGNORE_CASE),
+-                    multiline: self.flags.contains(RegExpFlags::MULTILINE),
+-                    dot_all: self.flags.contains(RegExpFlags::DOTALL),
+-                    extended: self.flags.contains(RegExpFlags::EXTENDED),
+-                    no_opt: false,
+-                    unicode: false,
+-                    unicode_sets: false,
+-                },
+-            );
+-            self.cached_regex = Some(re.map_err(drop));
++            self.cached_regex = Some(compile_shared(&self.source.to_utf8_lossy(), self.flags));
+         }
+ 
+         let regex = match self.cached_regex.as_mut() {
 diff --git a/core/src/avm2/value.rs b/core/src/avm2/value.rs
 index 008863dec..03c1e9796 100644
 --- a/core/src/avm2/value.rs
@@ -1420,8 +2360,220 @@ index 008863dec..03c1e9796 100644
          }
      }
  }
+diff --git a/core/src/avm2/vtable.rs b/core/src/avm2/vtable.rs
+index 8bbda9662..11f66a221 100644
+--- a/core/src/avm2/vtable.rs
++++ b/core/src/avm2/vtable.rs
+@@ -20,14 +20,21 @@ use std::collections::HashMap;
+ #[collect(no_drop)]
+ pub struct VTable<'gc>(Gc<'gc, VTableData<'gc>>);
+ 
+-#[derive(Collect, Default)]
++#[derive(Collect)]
+ #[collect(no_drop)]
+ struct VTableData<'gc> {
+     scope: Option<ScopeChain<'gc>>,
+ 
+     protected_namespace: Option<Namespace<'gc>>,
+ 
+-    resolved_traits: PropertyMap<'gc, Property>,
++    /// FlashNX: shared. Every class gets its traits resolved twice with the
++    /// same inputs: for its `Class` (`TranslationUnit::load_class`) and again
++    /// for its `ClassObject` (`init_instance_vtable`, `into_finished_class`),
++    /// and a script's global class likewise. The second map is identical, so
++    /// it reuses the first (see `VTableBuild::finish`). Never changed once
++    /// built. A heap profile of Super Smash Flash 2 (thousands of symbol
++    /// classes, each copying ~400 inherited entries) had ~400 MB in these maps.
++    resolved_traits: Gc<'gc, PropertyMap<'gc, Property>>,
+ 
+     /// Use hashmaps for the metadata tables because metadata will rarely be present on traits
+     slot_metadata_table: HashMap<usize, Box<[Metadata<'gc>]>>,
+@@ -70,9 +77,55 @@ impl<'gc> ClassBoundMethod<'gc> {
+     }
+ }
+ 
++/// FlashNX: a `VTableData` being built: its traits are still a plain map,
++/// turned into a shared one by `finish`.
++struct VTableBuild<'gc> {
++    scope: Option<ScopeChain<'gc>>,
++    protected_namespace: Option<Namespace<'gc>>,
++    resolved_traits: PropertyMap<'gc, Property>,
++    slot_metadata_table: HashMap<usize, Box<[Metadata<'gc>]>>,
++    disp_metadata_table: HashMap<usize, Box<[Metadata<'gc>]>>,
++    slot_table: Box<[SlotInfo<'gc>]>,
++    method_table: Box<[ClassBoundMethod<'gc>]>,
++}
++
++impl<'gc> VTableBuild<'gc> {
++    /// Reuse the traits map the defining class already has when this one
++    /// came out equal (always, for the second resolution of a class), else
++    /// keep this one.
++    fn finish(self, defining_class_def: Class<'gc>, mc: &Mutation<'gc>) -> VTableData<'gc> {
++        let resolved_traits = match defining_class_def.vtable_if_initialized() {
++            Some(existing) if *existing.resolved_traits() == self.resolved_traits => {
++                existing.0.resolved_traits
++            }
++            _ => Gc::new(mc, self.resolved_traits),
++        };
++        VTableData {
++            scope: self.scope,
++            protected_namespace: self.protected_namespace,
++            resolved_traits,
++            slot_metadata_table: self.slot_metadata_table,
++            disp_metadata_table: self.disp_metadata_table,
++            slot_table: self.slot_table,
++            method_table: self.method_table,
++        }
++    }
++}
++
+ impl<'gc> VTable<'gc> {
+     pub fn empty(mc: &Mutation<'gc>) -> Self {
+-        VTable(Gc::new(mc, VTableData::default()))
++        VTable(Gc::new(
++            mc,
++            VTableData {
++                scope: None,
++                protected_namespace: None,
++                resolved_traits: Gc::new(mc, PropertyMap::new()),
++                slot_metadata_table: HashMap::new(),
++                disp_metadata_table: HashMap::new(),
++                slot_table: Box::new([]),
++                method_table: Box::new([]),
++            },
++        ))
+     }
+ 
+     /// Builds a new vtable by calculating the flattened list of instance traits
+@@ -90,7 +143,7 @@ impl<'gc> VTable<'gc> {
+             scope,
+             superclass_vtable,
+         )?;
+-        Ok(VTable(Gc::new(mc, this)))
++        Ok(VTable(Gc::new(mc, this.finish(defining_class_def, mc))))
+     }
+ 
+     /// Like `VTable::new`, but also copies properties from the defining class' interfaces.
+@@ -109,11 +162,14 @@ impl<'gc> VTable<'gc> {
+         )?;
+         Self::copy_interface_properties(&mut this, defining_class_def, context);
+ 
+-        Ok(VTable(Gc::new(context.gc(), this)))
++        Ok(VTable(Gc::new(
++            context.gc(),
++            this.finish(defining_class_def, context.gc()),
++        )))
+     }
+ 
+     pub fn resolved_traits(self) -> &'gc PropertyMap<'gc, Property> {
+-        &Gc::as_ref(self.0).resolved_traits
++        Gc::as_ref(Gc::as_ref(self.0).resolved_traits)
+     }
+ 
+     pub fn get_metadata_for_slot(self, slot_id: usize) -> Option<&'gc [Metadata<'gc>]> {
+@@ -228,7 +284,7 @@ impl<'gc> VTable<'gc> {
+         super_class_obj: Option<ClassObject<'gc>>,
+         scope: Option<ScopeChain<'gc>>,
+         superclass_vtable: Option<Self>,
+-    ) -> Result<VTableData<'gc>, VTableInitError> {
++    ) -> Result<VTableBuild<'gc>, VTableInitError> {
+         // Let's talk about slot_ids and disp_ids.
+         // Specification is one thing, but reality is another.
+ 
+@@ -532,7 +588,7 @@ impl<'gc> VTable<'gc> {
+             }
+         }
+ 
+-        Ok(VTableData {
++        Ok(VTableBuild {
+             scope,
+             protected_namespace: defining_class_def.protected_namespace(),
+             resolved_traits,
+@@ -544,7 +600,7 @@ impl<'gc> VTable<'gc> {
+     }
+ 
+     fn copy_interface_properties(
+-        this: &mut VTableData<'gc>,
++        this: &mut VTableBuild<'gc>,
+         class: Class<'gc>,
+         context: &UpdateContext<'gc>,
+     ) {
+diff --git a/core/src/backend/audio.rs b/core/src/backend/audio.rs
+index 6bed987b7..b321b6e76 100644
+--- a/core/src/backend/audio.rs
++++ b/core/src/backend/audio.rs
+@@ -80,6 +80,32 @@ impl From<swf::SoundStreamHead> for SoundStreamInfo {
+     }
+ }
+ 
++static SOUND_BYTES_SHARED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++static SOUND_BYTES_COPIED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++
++/// FlashNX: counts the bytes of an embedded sound the mixer referenced in its
++/// movie (`shared`) or copied.
++#[cfg_attr(not(feature = "audio"), expect(dead_code))]
++pub(crate) fn note_sound_bytes(shared: bool, len: usize) {
++    use std::sync::atomic::Ordering::Relaxed;
++    let counter = if shared {
++        &SOUND_BYTES_SHARED
++    } else {
++        &SOUND_BYTES_COPIED
++    };
++    counter.fetch_add(len as u64, Relaxed);
++}
++
++/// FlashNX: bytes of embedded sounds that referenced their movie / that were
++/// copied, since boot (`census:` line).
++pub fn sound_bytes_stats() -> (u64, u64) {
++    use std::sync::atomic::Ordering::Relaxed;
++    (
++        SOUND_BYTES_SHARED.load(Relaxed),
++        SOUND_BYTES_COPIED.load(Relaxed),
++    )
++}
++
+ #[derive(Debug, Error)]
+ pub enum RegisterError {
+     #[error("MP3 sound is too short")]
+@@ -93,6 +119,21 @@ pub trait AudioBackend: Any {
+     /// Registers an sound embedded in an SWF.
+     fn register_sound(&mut self, swf_sound: &swf::Sound) -> Result<SoundHandle, RegisterError>;
+ 
++    /// FlashNX: registers a sound embedded in `movie`. A backend that keeps the
++    /// sound's bytes may reference them in the movie instead of copying them
++    /// (the mixer does); the others just register it.
++    fn register_sound_from_movie(
++        &mut self,
++        swf_sound: &swf::Sound,
++        _movie: &crate::tag_utils::SwfSlice,
++    ) -> Result<SoundHandle, RegisterError> {
++        self.register_sound(swf_sound)
++    }
++
++    /// FlashNX: forgets a sound of a library that was dropped (see
++    /// `Library::finalize_released`). Instances still playing finish.
++    fn unregister_sound(&mut self, _sound: SoundHandle) {}
++
+     /// Registers MP3 audio from an external source.
+     fn register_mp3(&mut self, data: &[u8]) -> Result<SoundHandle, DecodeError>;
+ 
+diff --git a/core/src/backend/audio/decoders.rs b/core/src/backend/audio/decoders.rs
+index 20950aefc..09870c8ba 100644
+--- a/core/src/backend/audio/decoders.rs
++++ b/core/src/backend/audio/decoders.rs
+@@ -43,6 +43,10 @@ pub enum Error {
+ 
+     #[error("Too many sounds are playing")]
+     TooManySounds,
++
++    /// FlashNX: see `AudioBackend::unregister_sound`.
++    #[error("Sound is no longer registered")]
++    UnregisteredSound,
+ }
+ 
+ /// An audio decoder. Can be used as an `Iterator` to return stereo sample frames.
 diff --git a/core/src/backend/audio/mixer.rs b/core/src/backend/audio/mixer.rs
-index b98eb3f76..f1dd7e6e5 100644
+index b98eb3f76..345782817 100644
 --- a/core/src/backend/audio/mixer.rs
 +++ b/core/src/backend/audio/mixer.rs
 @@ -9,6 +9,35 @@ use ruffle_common::duration::FloatDuration;
@@ -1460,7 +2612,103 @@ index b98eb3f76..f1dd7e6e5 100644
  use swf::AudioCompression;
  
  /// Holds the last 2048 output audio frames. Frames can be written to it one by
-@@ -605,6 +634,7 @@ impl AudioMixer {
+@@ -150,7 +179,7 @@ struct Sound {
+     /// The audio data of this sound.
+     ///
+     /// This will be compressed in the format indicated by `format.compression`.
+-    data: Arc<[u8]>,
++    data: SoundBytes,
+ 
+     /// Number of samples in this audio.
+     /// This does not include `skip_sample_frames`.
+@@ -298,7 +327,7 @@ impl AudioMixer {
+     ///  * ActionScript sounds that may have a custom start and loop setting
+     fn make_seekable_decoder(
+         format: &swf::SoundFormat,
+-        data: Cursor<ArcAsRef>,
++        data: Cursor<SoundBytes>,
+     ) -> Result<Box<dyn SeekableDecoder>, decoders::Error> {
+         let decoder: Box<dyn SeekableDecoder> = match format.compression {
+             AudioCompression::UncompressedUnknownEndian => {
+@@ -359,7 +388,7 @@ impl AudioMixer {
+         &self,
+         sound: &Sound,
+         settings: &swf::SoundInfo,
+-        data: Cursor<ArcAsRef>,
++        data: Cursor<SoundBytes>,
+     ) -> Result<Box<dyn Stream>, DecodeError> {
+         // Instantiate a decoder for the compression that the sound data uses.
+         let decoder = Self::make_seekable_decoder(&sound.format, data)?;
+@@ -511,6 +540,24 @@ impl AudioMixer {
+ 
+     /// Registers an embedded SWF sound with the audio mixer.
+     pub fn register_sound(&mut self, swf_sound: &swf::Sound) -> Result<SoundHandle, RegisterError> {
++        self.register_swf_sound(swf_sound, None)
++    }
++
++    /// FlashNX: registers a sound embedded in `movie`, referencing its bytes
++    /// there rather than copying them (see `SoundBytes`).
++    pub fn register_sound_from_movie(
++        &mut self,
++        swf_sound: &swf::Sound,
++        movie: &SwfSlice,
++    ) -> Result<SoundHandle, RegisterError> {
++        self.register_swf_sound(swf_sound, Some(movie))
++    }
++
++    fn register_swf_sound(
++        &mut self,
++        swf_sound: &swf::Sound,
++        movie: Option<&SwfSlice>,
++    ) -> Result<SoundHandle, RegisterError> {
+         // Slice off latency seek for MP3 data.
+         let (skip_sample_frames, data) = if swf_sound.format.compression == AudioCompression::Mp3 {
+             if swf_sound.data.len() < 2 {
+@@ -524,13 +571,19 @@ impl AudioMixer {
+ 
+         let sound = Sound {
+             format: swf_sound.format.clone(),
+-            data: Arc::from(data),
++            data: SoundBytes::new(data, movie),
+             num_sample_frames: swf_sound.num_samples,
+             skip_sample_frames,
+         };
+         Ok(self.sounds.insert(sound))
+     }
+ 
++    /// FlashNX: see `AudioBackend::unregister_sound`. Instances still playing
++    /// hold their own reference to the data.
++    pub fn unregister_sound(&mut self, sound: SoundHandle) {
++        self.sounds.remove(sound);
++    }
++
+     /// Registers an external MP3 with the audio mixer.
+     #[cfg(feature = "mp3")]
+     pub fn register_mp3(&mut self, data: &[u8]) -> Result<SoundHandle, DecodeError> {
+@@ -544,7 +597,7 @@ impl AudioMixer {
+                 is_stereo: true,
+                 is_16_bit: true,
+             },
+-            data,
++            data: SoundBytes::Owned(data),
+             num_sample_frames: metadata.num_sample_frames,
+             skip_sample_frames: 0,
+         };
+@@ -583,8 +636,11 @@ impl AudioMixer {
+         sound_handle: SoundHandle,
+         settings: &swf::SoundInfo,
+     ) -> Result<SoundInstanceHandle, DecodeError> {
+-        let sound = &self.sounds[sound_handle];
+-        let data = Cursor::new(ArcAsRef(Arc::clone(&sound.data)));
++        // FlashNX: `get`, the sound may have been unregistered.
++        let Some(sound) = self.sounds.get(sound_handle) else {
++            return Err(decoders::Error::UnregisteredSound);
++        };
++        let data = Cursor::new(sound.data.clone());
+         // Create a stream that decodes and resamples the sound.
+         let stream = if sound.skip_sample_frames == 0
+             && settings.in_sample.is_none()
+@@ -605,6 +661,7 @@ impl AudioMixer {
              .lock()
              .expect("Cannot be called reentrant");
          let handle = sound_instances.insert(SoundInstance::new_sound(sound_handle, stream));
@@ -1468,11 +2716,103 @@ index b98eb3f76..f1dd7e6e5 100644
          Ok(handle)
      }
  
+@@ -684,7 +741,7 @@ impl AudioMixer {
+     }
+ 
+     pub fn get_sound_size(&self, sound: SoundHandle) -> Option<u32> {
+-        self.sounds.get(sound).map(|s| s.data.len() as u32)
++        self.sounds.get(sound).map(|s| s.data.as_ref().len() as u32)
+     }
+ 
+     pub fn get_sound_format(&self, sound: SoundHandle) -> Option<&swf::SoundFormat> {
+@@ -765,20 +822,54 @@ impl AudioMixerProxy {
+     }
+ }
+ 
+-/// A dummy wrapper struct to implement `AsRef<[u8]>` for `Arc<Vec<u8>>`.
+-/// Not having this trait causes problems when trying to use `Cursor<Vec<u8>>`.
+-struct ArcAsRef(Arc<[u8]>);
++/// FlashNX: the bytes of a registered sound (upstream: `ArcAsRef`, a copy).
++///
++/// Upstream copies every DefineSound payload out of its movie, which stays
++/// alive anyway (a loaded movie is never freed: its `MovieLibrary` holds it),
++/// so every embedded sound was held twice, as the images were (`BitmapBytes`).
++/// Super Smash Flash 2 had ~55 MB of such copies in a heap profile
++/// (2026-10-05). A sound that lies inside its movie now references it. Should
++/// movies become freeable (ruffle PRs #22908, #23071), the mixer, which never
++/// drops a sound, would keep them alive through this: copy again then, or
++/// unregister the sounds of a freed movie.
++#[derive(Clone)]
++enum SoundBytes {
++    Owned(Arc<[u8]>),
++    Movie(SwfSlice),
++}
++
++impl SoundBytes {
++    /// References `data` inside `movie` when it lies there, else copies it.
++    fn new(data: &[u8], movie: Option<&SwfSlice>) -> Self {
++        if let Some(movie) = movie {
++            let slice = movie.to_unbounded_subslice(data);
++            if !data.is_empty()
++                && slice.end - slice.start == data.len()
++                && slice.end <= slice.movie.data().len()
++            {
++                crate::backend::audio::note_sound_bytes(true, data.len());
++                return Self::Movie(slice);
++            }
++        }
++        crate::backend::audio::note_sound_bytes(false, data.len());
++        Self::Owned(Arc::from(data))
++    }
++}
+ 
+-impl AsRef<[u8]> for ArcAsRef {
++impl AsRef<[u8]> for SoundBytes {
+     #[inline]
+     fn as_ref(&self) -> &[u8] {
+-        &self.0
++        match self {
++            Self::Owned(data) => data,
++            Self::Movie(slice) => slice.data(),
++        }
+     }
+ }
+ 
+-impl Default for ArcAsRef {
++/// Needed by `Cursor`-based decoders (ADPCM's `reset`).
++impl Default for SoundBytes {
+     fn default() -> Self {
+-        ArcAsRef(Arc::new([]))
++        Self::Owned(Arc::new([]))
+     }
+ }
+ 
+@@ -1078,6 +1169,20 @@ macro_rules! impl_audio_mixer_backend {
+             self.$mixer.register_sound(swf_sound)
+         }
+ 
++        #[inline]
++        fn register_sound_from_movie(
++            &mut self,
++            swf_sound: &swf::Sound,
++            movie: &$crate::tag_utils::SwfSlice,
++        ) -> Result<SoundHandle, RegisterError> {
++            self.$mixer.register_sound_from_movie(swf_sound, movie)
++        }
++
++        #[inline]
++        fn unregister_sound(&mut self, sound: SoundHandle) {
++            self.$mixer.unregister_sound(sound)
++        }
++
+         #[inline]
+         fn register_mp3(&mut self, data: &[u8]) -> Result<SoundHandle, DecodeError> {
+             self.$mixer.register_mp3(data)
 diff --git a/core/src/bitmap/bitmap_data.rs b/core/src/bitmap/bitmap_data.rs
-index 29eb34fdc..c4126f3c2 100644
+index 29eb34fdc..7e81a7964 100644
 --- a/core/src/bitmap/bitmap_data.rs
 +++ b/core/src/bitmap/bitmap_data.rs
-@@ -15,6 +15,100 @@ use std::ops::Range;
+@@ -15,6 +15,133 @@ use std::ops::Range;
  use swf::{Rectangle, Twips};
  use tracing::instrument;
  
@@ -1553,6 +2893,39 @@ index 29eb34fdc..c4126f3c2 100644
 +/// struct itself; a field owning a Drop type (like the `Vec` already does) is
 +/// fine.
 +struct MemGuard(u64);
++
++/// FlashNX: the decoded pixels of a library bitmap, shared by every BitmapData
++/// made from it until one of them changes a pixel: Flash Player 10.1's
++/// "BitmapData single reference" (Adobe: "When multiple instances of the same
++/// image are created, a single version of the bitmap is used for all
++/// BitmapData instances", and a method that modifies pixels gives that
++/// instance its own copy). Upstream decoded and copied the image for every
++/// instance, so a library bitmap placed by a goto was inflated again each
++/// time: ~9 % of a 14-second Super Smash Flash 2 loading frame (2026-10-05).
++/// Counted once in `BITMAPDATA_LIVE_BYTES`. See `BitmapCharacter::shared_pixels`.
++pub struct SharedPixels {
++    width: u32,
++    height: u32,
++    colors: Box<[Color]>,
++    _mem: MemGuard,
++}
++
++impl SharedPixels {
++    pub fn new(width: u32, height: u32, colors: Vec<Color>) -> std::sync::Arc<Self> {
++        std::sync::Arc::new(Self {
++            width,
++            height,
++            _mem: MemGuard::new(colors.len() as u64 * 4),
++            colors: colors.into_boxed_slice(),
++        })
++    }
++}
++
++impl std::fmt::Debug for SharedPixels {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        write!(f, "SharedPixels({}x{})", self.width, self.height)
++    }
++}
 +impl MemGuard {
 +    fn new(bytes: u64) -> Self {
 +        BITMAPDATA_LIVE_BYTES.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
@@ -1573,10 +2946,35 @@ index 29eb34fdc..c4126f3c2 100644
  /// An implementation of the Lehmer/Park-Miller random number generator
  /// Uses the fixed parameters m = 2,147,483,647 and a = 16,807
  pub struct LehmerRng {
-@@ -369,6 +463,10 @@ pub struct BitmapRawData<'gc> {
+@@ -251,6 +378,15 @@ impl<'gc> BitmapData<'gc> {
+         Self(data)
+     }
+ 
++    /// FlashNX: a transparent BitmapData on a library bitmap's shared pixels
++    /// (`SharedPixels`).
++    pub fn new_with_shared_pixels(mc: &Mutation<'gc>, shared: std::sync::Arc<SharedPixels>) -> Self {
++        let mut data =
++            BitmapRawData::new_with_pixels(shared.width, shared.height, true, Vec::new());
++        data.shared = Some(shared);
++        Self(BitmapRawDataWrapper::new(Gc::new(mc, data.into())))
++    }
++
+     pub fn dummy(mc: &Mutation<'gc>) -> Self {
+         Self(BitmapRawDataWrapper::dummy(mc))
+     }
+@@ -366,9 +502,19 @@ impl<'gc> BitmapData<'gc> {
+ #[collect(no_drop)]
+ pub struct BitmapRawData<'gc> {
+     /// The pixels in the bitmap, stored as a array of pre-multiplied ARGB colour values
++    /// (empty while `shared` holds them).
      #[collect(require_static)]
      pixels: Vec<Color>,
  
++    /// FlashNX: the pixels of the library bitmap this was made from, until a
++    /// pixel changes (`SharedPixels`, `unshare`).
++    #[collect(require_static)]
++    shared: Option<std::sync::Arc<SharedPixels>>,
++
 +    /// Keeps `BITMAPDATA_LIVE_BYTES` in step with `pixels` for this instance.
 +    #[collect(require_static)]
 +    _mem: MemGuard,
@@ -1584,7 +2982,7 @@ index 29eb34fdc..c4126f3c2 100644
      width: u32,
      height: u32,
      transparency: bool,
-@@ -397,6 +495,18 @@ pub struct BitmapRawData<'gc> {
+@@ -397,6 +543,18 @@ pub struct BitmapRawData<'gc> {
      #[collect(require_static)]
      dirty_state: DirtyState,
  
@@ -1603,7 +3001,7 @@ index 29eb34fdc..c4126f3c2 100644
      /// Holds an egui texture handle, used for rendering this Bitmap in the debug ui.
      /// This is automatically set to `None` when the texture is updated (either from
      /// marking the CPU side dirty, or from performing a GPU -> CPU sync).
-@@ -404,6 +514,31 @@ pub struct BitmapRawData<'gc> {
+@@ -404,6 +562,31 @@ pub struct BitmapRawData<'gc> {
      pub egui_texture: std::cell::RefCell<Option<egui::TextureHandle>>,
  }
  
@@ -1635,7 +3033,7 @@ index 29eb34fdc..c4126f3c2 100644
  #[derive(Clone, Debug)]
  pub enum DirtyState {
      // Both the CPU and GPU pixels are up to date. We do not need to wait for any syncs to complete
-@@ -428,7 +563,7 @@ mod wrapper {
+@@ -428,7 +611,7 @@ mod wrapper {
      use ruffle_render::commands::CommandHandler;
      use std::cell::Ref;
  
@@ -1644,7 +3042,7 @@ index 29eb34fdc..c4126f3c2 100644
  
      /// A wrapper type that ensures that we always wait for a pending
      /// GPU -> CPU sync to complete (using `sync_handle`) before accessing
-@@ -476,6 +611,7 @@ mod wrapper {
+@@ -476,6 +659,7 @@ mod wrapper {
                  mc,
                  BitmapRawData {
                      pixels: Vec::new(),
@@ -1652,16 +3050,17 @@ index 29eb34fdc..c4126f3c2 100644
                      width: 0,
                      height: 0,
                      transparency: false,
-@@ -484,6 +620,8 @@ mod wrapper {
+@@ -484,6 +668,9 @@ mod wrapper {
                      avm2_object: None,
                      display_objects: vec![],
                      dirty_state: DirtyState::Clean,
 +                    generation: 0,
 +                    threshold_memo: None,
++                    shared: None,
                      #[cfg(feature = "egui")]
                      egui_texture: Default::default(),
                  }
-@@ -499,6 +637,7 @@ mod wrapper {
+@@ -499,6 +686,7 @@ mod wrapper {
              let data = self.sync(renderer).borrow();
              BitmapRawData {
                  pixels: data.pixels.clone(),
@@ -1669,16 +3068,17 @@ index 29eb34fdc..c4126f3c2 100644
                  width: data.width,
                  height: data.height,
                  transparency: data.transparency,
-@@ -508,6 +647,8 @@ mod wrapper {
+@@ -508,6 +696,9 @@ mod wrapper {
                  display_objects: vec![],
                  // We have no GPU texture, so there's no need to mark as dirty
                  dirty_state: DirtyState::Clean,
 +                generation: 0,
 +                threshold_memo: None,
++                shared: data.shared.clone(),
                  #[cfg(feature = "egui")]
                  egui_texture: Default::default(),
              }
-@@ -734,6 +875,7 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -734,6 +925,7 @@ impl<'gc> BitmapRawData<'gc> {
                  Color::bgra_u32(fill_color).to_premultiplied_alpha(transparency);
                  width as usize * height as usize
              ],
@@ -1686,16 +3086,17 @@ index 29eb34fdc..c4126f3c2 100644
              width,
              height,
              transparency,
-@@ -742,6 +884,8 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -742,6 +934,9 @@ impl<'gc> BitmapRawData<'gc> {
              avm2_object: None,
              display_objects: vec![],
              dirty_state: DirtyState::Clean,
 +            generation: 0,
 +            threshold_memo: None,
++            shared: None,
              #[cfg(feature = "egui")]
              egui_texture: Default::default(),
          }
-@@ -754,6 +898,7 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -754,6 +949,7 @@ impl<'gc> BitmapRawData<'gc> {
          pixels: Vec<Color>,
      ) -> Self {
          Self {
@@ -1703,16 +3104,17 @@ index 29eb34fdc..c4126f3c2 100644
              pixels,
              width,
              height,
-@@ -762,6 +907,8 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -762,6 +958,9 @@ impl<'gc> BitmapRawData<'gc> {
              avm2_object: None,
              disposed: false,
              dirty_state: DirtyState::Clean,
 +            generation: 0,
 +            threshold_memo: None,
++            shared: None,
              display_objects: vec![],
              #[cfg(feature = "egui")]
              egui_texture: Default::default(),
-@@ -773,9 +920,11 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -773,9 +972,12 @@ impl<'gc> BitmapRawData<'gc> {
      }
  
      pub fn dispose(&mut self) {
@@ -1720,11 +3122,12 @@ index 29eb34fdc..c4126f3c2 100644
          self.width = 0;
          self.height = 0;
          self.pixels = Vec::new(); // free the CPU pixel buffer
++        self.shared = None;
 +        self._mem = MemGuard::new(0); // release its bytes from the live counter now
          self.bitmap_handle = None;
          // There's no longer a handle to update
          self.dirty_state = DirtyState::Clean;
-@@ -823,11 +972,13 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -823,11 +1025,13 @@ impl<'gc> BitmapRawData<'gc> {
          sync_handle: Box<dyn SyncHandle>,
          region: PixelRegion,
      ) {
@@ -1738,33 +3141,73 @@ index 29eb34fdc..c4126f3c2 100644
          debug_assert!(region.x_max <= self.width);
          debug_assert!(region.y_max <= self.height);
  
-@@ -873,11 +1024,13 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -853,11 +1057,30 @@ impl<'gc> BitmapRawData<'gc> {
+     }
+ 
+     pub fn pixels(&self) -> &[Color] {
+-        &self.pixels
++        self.colors()
+     }
+ 
+     pub fn pixels_rgba(&self) -> &[u8] {
+-        Color::slice_as_rgba(&self.pixels)
++        Color::slice_as_rgba(self.colors())
++    }
++
++    /// FlashNX: the pixels, shared (`SharedPixels`) or not.
++    #[inline]
++    fn colors(&self) -> &[Color] {
++        match &self.shared {
++            Some(shared) => &shared.colors,
++            None => &self.pixels,
++        }
++    }
++
++    /// FlashNX: a pixel is about to change: the shared pixels become this
++    /// bitmap's own copy first. Every writer below goes through here.
++    #[inline]
++    fn unshare(&mut self) {
++        if let Some(shared) = self.shared.take() {
++            self.pixels = shared.colors.to_vec();
++            self._mem = MemGuard::new(self.pixels.len() as u64 * 4);
++        }
+     }
+ 
+     pub fn width(&self) -> u32 {
+@@ -873,11 +1096,15 @@ impl<'gc> BitmapRawData<'gc> {
  
      #[inline]
      pub fn set_pixel32_raw(&mut self, x: u32, y: u32, color: Color) {
 +        self.generation += 1;
++        self.unshare();
          self.pixels[(x + y * self.width) as usize] = color;
      }
  
      #[inline]
      pub fn set_pixel32_row_raw(&mut self, x1: u32, x2: u32, y: u32, color: Color) {
 +        self.generation += 1;
++        self.unshare();
          let p1 = (x1 + y * self.width) as usize;
          let p2 = (x2 + y * self.width) as usize;
          let slice = &mut self.pixels[p1..p2];
-@@ -886,6 +1039,7 @@ impl<'gc> BitmapRawData<'gc> {
+@@ -886,20 +1113,61 @@ impl<'gc> BitmapRawData<'gc> {
  
      #[inline]
      pub fn fill(&mut self, color: Color) {
 +        self.generation += 1;
++        self.unshare();
          self.pixels.fill(color);
      }
  
-@@ -895,9 +1049,47 @@ impl<'gc> BitmapRawData<'gc> {
+     #[inline]
+     pub fn get_pixel32_raw(&self, x: u32, y: u32) -> Color {
+-        self.pixels[(x + y * self.width()) as usize]
++        self.colors()[(x + y * self.width()) as usize]
      }
  
      pub fn raw_pixels_mut(&mut self) -> &mut Vec<Color> {
 +        self.generation += 1;
++        self.unshare();
          &mut self.pixels
      }
  
@@ -1806,8 +3249,11 @@ index 29eb34fdc..c4126f3c2 100644
 +    }
 +
      pub fn raw_pixels(&self) -> &[Color] {
-         &self.pixels
+-        &self.pixels
++        self.colors()
      }
+ 
+     // Updates the data stored with our `BitmapHandle` if this `BitmapRawData`
 diff --git a/core/src/bitmap/operations.rs b/core/src/bitmap/operations.rs
 index 92bb2f430..45fb42866 100644
 --- a/core/src/bitmap/operations.rs
@@ -2063,10 +3509,10 @@ index 92bb2f430..45fb42866 100644
              }
          }
 diff --git a/core/src/character.rs b/core/src/character.rs
-index f1843308c..885eeaf17 100644
+index f1843308c..876d7e637 100644
 --- a/core/src/character.rs
 +++ b/core/src/character.rs
-@@ -12,6 +12,9 @@ use gc_arena::{Collect, Gc, Mutation};
+@@ -12,8 +12,30 @@ use gc_arena::{Collect, Gc, Mutation};
  use ruffle_render::backend::RenderBackend;
  use ruffle_render::bitmap::{Bitmap as RenderBitmap, BitmapHandle, BitmapSize};
  use ruffle_render::error::Error as RenderError;
@@ -2075,8 +3521,71 @@ index f1843308c..885eeaf17 100644
 +use std::sync::Arc;
  use swf::DefineBitsLossless;
  
++impl<'gc> Character<'gc> {
++    /// FlashNX: whether an instance of this symbol is alive, in a collection
++    /// about to sweep (see `MovieLibrary::in_use` in library.rs). Instances
++    /// share the `shared` data of the library's copy. A character whose
++    /// instances keep nothing of it answers false.
++    pub fn has_live_instances(&self, fc: &gc_arena::Finalization<'gc>) -> bool {
++        match self {
++            Character::MovieClip(c) => c.shared_alive(fc),
++            Character::Graphic(c) => c.shared_alive(fc),
++            Character::EditText(c) => c.shared_alive(fc),
++            Character::Text(c) => c.shared_alive(fc),
++            Character::MorphShape(c) => c.shared_alive(fc),
++            Character::Avm1Button(c) => c.shared_alive(fc),
++            Character::Avm2Button(c) => c.shared_alive(fc),
++            _ => false,
++        }
++    }
++}
++
  #[derive(Copy, Clone, Collect, Debug)]
-@@ -73,8 +76,46 @@ impl<'gc> BitmapCharacter<'gc> {
+ #[collect(no_drop)]
+ pub enum Character<'gc> {
+@@ -42,6 +64,10 @@ pub struct BitmapCharacter<'gc> {
+     /// The bitmap class set by `SymbolClass` - this is used when we instantaite
+     /// a `Bitmap` displayobject.
+     avm2_class: Lock<BitmapClass<'gc>>,
++    /// FlashNX: the decoded pixels that BitmapData made from this symbol share,
++    /// alive while one of them still does (see `shared_pixels`).
++    #[collect(require_static)]
++    shared_pixels: std::cell::RefCell<std::sync::Weak<crate::bitmap::bitmap_data::SharedPixels>>,
+ }
+ 
+ impl<'gc> BitmapCharacter<'gc> {
+@@ -50,9 +76,30 @@ impl<'gc> BitmapCharacter<'gc> {
+             compressed,
+             handle: OnceCell::default(),
+             avm2_class: Lock::new(BitmapClass::NoSubclass),
++            shared_pixels: Default::default(),
+         }
+     }
+ 
++    /// FlashNX: the symbol's decoded pixels, for a new BitmapData to share
++    /// (`SharedPixels`). Decoded again only once no BitmapData holds them.
++    pub fn shared_pixels(&self) -> Arc<crate::bitmap::bitmap_data::SharedPixels> {
++        if let Some(shared) = self.shared_pixels.borrow().upgrade() {
++            return shared;
++        }
++        // Never expect this: see `decode_or_stand_in`.
++        let bitmap = self.compressed.decode_or_stand_in();
++        let shared = crate::bitmap::bitmap_data::SharedPixels::new(
++            bitmap.width(),
++            bitmap.height(),
++            bitmap
++                .as_colors()
++                .map(crate::bitmap::bitmap_data::Color::from)
++                .collect(),
++        );
++        *self.shared_pixels.borrow_mut() = Arc::downgrade(&shared);
++        shared
++    }
++
+     pub fn compressed(&self) -> &CompressedBitmap {
+         &self.compressed
+     }
+@@ -73,8 +120,46 @@ impl<'gc> BitmapCharacter<'gc> {
          if let Some(handle) = self.handle.get() {
              return Ok(handle.clone());
          }
@@ -2124,7 +3633,7 @@ index f1843308c..885eeaf17 100644
          // FIXME - do we ever want to release this handle, to avoid taking up GPU memory?
          self.handle.set(new_handle.clone()).unwrap();
          Ok(new_handle)
-@@ -88,12 +129,269 @@ impl<'gc> BitmapCharacter<'gc> {
+@@ -88,12 +173,269 @@ impl<'gc> BitmapCharacter<'gc> {
  #[derive(Clone, Debug)]
  pub enum CompressedBitmap {
      Jpeg {
@@ -2397,7 +3906,7 @@ index f1843308c..885eeaf17 100644
  }
  
  impl CompressedBitmap {
-@@ -103,23 +401,81 @@ impl CompressedBitmap {
+@@ -103,23 +445,81 @@ impl CompressedBitmap {
                  width: *width,
                  height: *height,
              },
@@ -2809,11 +4318,39 @@ index 2e6e01783..df8dbdd1b 100644
 +    }
 +}
 +
+diff --git a/core/src/display_object/avm1_button.rs b/core/src/display_object/avm1_button.rs
+index 238c81e3f..5eb353ad4 100644
+--- a/core/src/display_object/avm1_button.rs
++++ b/core/src/display_object/avm1_button.rs
+@@ -63,6 +63,11 @@ struct Avm1ButtonDataMut<'gc> {
+ }
+ 
+ impl<'gc> Avm1Button<'gc> {
++    /// FlashNX: see `Character::has_live_instances`.
++    pub fn shared_alive(self, fc: &gc_arena::Finalization<'gc>) -> bool {
++        !Gc::is_dead(fc, self.0.shared)
++    }
++
+     pub fn from_swf_tag(button: &swf::Button, source_movie: &SwfSlice, mc: &Mutation<'gc>) -> Self {
+         let actions = button
+             .actions
 diff --git a/core/src/display_object/avm2_button.rs b/core/src/display_object/avm2_button.rs
-index 56277523b..393d057cb 100644
+index 56277523b..45db02987 100644
 --- a/core/src/display_object/avm2_button.rs
 +++ b/core/src/display_object/avm2_button.rs
-@@ -564,6 +564,13 @@ impl<'gc> TDisplayObject<'gc> for Avm2Button<'gc> {
+@@ -100,6 +100,11 @@ pub struct Avm2ButtonData<'gc> {
+ }
+ 
+ impl<'gc> Avm2Button<'gc> {
++    /// FlashNX: see `Character::has_live_instances`.
++    pub fn shared_alive(self, fc: &gc_arena::Finalization<'gc>) -> bool {
++        !Gc::is_dead(fc, self.0.shared)
++    }
++
+     pub fn from_swf_tag(
+         button: &swf::Button,
+         source_movie: &SwfSlice,
+@@ -564,6 +569,13 @@ impl<'gc> TDisplayObject<'gc> for Avm2Button<'gc> {
          for state in self.all_state_children(self.0.weird_framescript_order.take()) {
              state.run_frame_scripts(context);
          }
@@ -2887,11 +4424,38 @@ index 61b8459b8..88fa7bc9d 100644
          if self.has_pending_removals {
              // Find matching children by searching the depth list
              let mut matching_render_children = if case_sensitive {
+diff --git a/core/src/display_object/edit_text.rs b/core/src/display_object/edit_text.rs
+index 23f60ca4d..3e4374c3a 100644
+--- a/core/src/display_object/edit_text.rs
++++ b/core/src/display_object/edit_text.rs
+@@ -246,6 +246,11 @@ impl EditTextData<'_> {
+ impl<'gc> EditText<'gc> {
+     const ANY_NEWLINE: [char; 2] = ['\n', '\r'];
+ 
++    /// FlashNX: see `Character::has_live_instances`.
++    pub fn shared_alive(self, fc: &gc_arena::Finalization<'gc>) -> bool {
++        !Gc::is_dead(fc, self.0.shared)
++    }
++
+     // This seems to be OS-independent
+     const INPUT_NEWLINE: char = '\r';
+ 
 diff --git a/core/src/display_object/graphic.rs b/core/src/display_object/graphic.rs
-index 2a73ff9c2..3bb91ecbc 100644
+index 2a73ff9c2..052811b50 100644
 --- a/core/src/display_object/graphic.rs
 +++ b/core/src/display_object/graphic.rs
-@@ -53,15 +53,27 @@ impl<'gc> Graphic<'gc> {
+@@ -47,21 +47,38 @@ pub struct GraphicData<'gc> {
+ }
+ 
+ impl<'gc> Graphic<'gc> {
++    /// FlashNX: see `Character::has_live_instances`.
++    pub fn shared_alive(self, fc: &gc_arena::Finalization<'gc>) -> bool {
++        !Gc::is_dead(fc, self.0.shared.get())
++    }
++
+     /// Construct a `Graphic` from it's associated `Shape` tag.
+     pub fn from_swf_tag(
+         context: &mut UpdateContext<'gc>,
          swf_shape: swf::Shape,
          movie: Arc<SwfMovie>,
      ) -> Self {
@@ -2925,7 +4489,7 @@ index 2a73ff9c2..3bb91ecbc 100644
              shape: swf_shape,
              movie,
              scaled_handle: RefCell::new(TessellationCache::new()),
-@@ -84,7 +96,7 @@ impl<'gc> Graphic<'gc> {
+@@ -84,7 +101,7 @@ impl<'gc> Graphic<'gc> {
          let shared = GraphicShared {
              id: 0,
              bounds: Default::default(),
@@ -2934,7 +4498,7 @@ index 2a73ff9c2..3bb91ecbc 100644
              shape: swf::Shape {
                  version: 32,
                  id: 0,
-@@ -171,6 +183,32 @@ impl<'gc> Graphic<'gc> {
+@@ -171,6 +188,32 @@ impl<'gc> Graphic<'gc> {
      }
  }
  
@@ -2967,7 +4531,7 @@ index 2a73ff9c2..3bb91ecbc 100644
  impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
      fn base(self) -> Gc<'gc, DisplayObjectBase<'gc>> {
          HasPrefixField::as_prefix_gc(self.0)
-@@ -249,7 +287,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
+@@ -249,7 +292,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
  
          if let Some(drawing) = self.0.drawing.get() {
              drawing.borrow().render(context);
@@ -2976,7 +4540,7 @@ index 2a73ff9c2..3bb91ecbc 100644
              let transform = context.transform_stack.transform();
  
              // Calculate the current scale from the transform, to determine if
-@@ -332,7 +370,9 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
+@@ -332,7 +375,9 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
  struct GraphicShared {
      id: CharacterId,
      shape: swf::Shape,
@@ -3002,8 +4566,24 @@ index 280bb9954..0b2f9ba22 100644
              child.construct_frame(context);
          }
      }
+diff --git a/core/src/display_object/morph_shape.rs b/core/src/display_object/morph_shape.rs
+index c4f4a8880..a5d6b5763 100644
+--- a/core/src/display_object/morph_shape.rs
++++ b/core/src/display_object/morph_shape.rs
+@@ -40,6 +40,11 @@ pub struct MorphShapeData<'gc> {
+ }
+ 
+ impl<'gc> MorphShape<'gc> {
++    /// FlashNX: see `Character::has_live_instances`.
++    pub fn shared_alive(self, fc: &gc_arena::Finalization<'gc>) -> bool {
++        !Gc::is_dead(fc, self.0.shared.get())
++    }
++
+     pub fn from_swf_tag(
+         gc_context: &Mutation<'gc>,
+         tag: swf::DefineMorphShape,
 diff --git a/core/src/display_object/movie_clip.rs b/core/src/display_object/movie_clip.rs
-index baa4a03c5..5879a4f97 100644
+index baa4a03c5..a27e63138 100644
 --- a/core/src/display_object/movie_clip.rs
 +++ b/core/src/display_object/movie_clip.rs
 @@ -16,7 +16,7 @@ use crate::backend::audio::{AudioManager, SoundInstanceHandle};
@@ -3030,7 +4610,19 @@ index baa4a03c5..5879a4f97 100644
  
  use super::BitmapClass;
  use super::interactive::Avm2MousePick;
-@@ -193,6 +192,16 @@ pub struct MovieClipData<'gc> {
+@@ -140,6 +139,11 @@ impl fmt::Debug for MovieClip<'_> {
+ pub struct MovieClipWeak<'gc>(GcWeak<'gc, MovieClipData<'gc>>);
+ 
+ impl<'gc> MovieClipWeak<'gc> {
++    /// FlashNX: see `MovieLibrary::in_use` in library.rs.
++    pub fn is_dead(self, fc: &gc_arena::Finalization<'gc>) -> bool {
++        self.0.is_dead(fc)
++    }
++
+     pub fn upgrade(self, mc: &Mutation<'gc>) -> Option<MovieClip<'gc>> {
+         self.0.upgrade(mc).map(MovieClip)
+     }
+@@ -193,6 +197,16 @@ pub struct MovieClipData<'gc> {
      /// `None` in an AVM2 movie.
      next_avm1_clip: Lock<Option<MovieClip<'gc>>>,
  
@@ -3047,7 +4639,7 @@ index baa4a03c5..5879a4f97 100644
      audio_stream: Cell<Option<SoundInstanceHandle>>,
  
      #[collect(require_static)]
-@@ -262,6 +271,9 @@ impl<'gc> MovieClipData<'gc> {
+@@ -262,6 +276,9 @@ impl<'gc> MovieClipData<'gc> {
              hit_area: Lock::new(None),
              attached_audio: Lock::new(None),
              next_avm1_clip: Lock::new(None),
@@ -3057,7 +4649,19 @@ index baa4a03c5..5879a4f97 100644
          }
      }
  
-@@ -375,6 +387,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -276,6 +293,11 @@ impl<'gc> MovieClip<'gc> {
+         MovieClipWeak(Gc::downgrade(self.0))
+     }
+ 
++    /// FlashNX: see `Character::has_live_instances`.
++    pub fn shared_alive(self, fc: &gc_arena::Finalization<'gc>) -> bool {
++        !Gc::is_dead(fc, self.0.shared.get())
++    }
++
+     pub fn new(movie: Arc<SwfMovie>, mc: &Mutation<'gc>) -> Self {
+         let shared = MovieClipShared::empty(movie);
+         MovieClip(Gc::new(mc, MovieClipData::new(shared, mc)))
+@@ -375,6 +397,7 @@ impl<'gc> MovieClip<'gc> {
          is_root: bool,
          loader_info: Option<LoaderInfoObject<'gc>>,
      ) {
@@ -3065,7 +4669,7 @@ index baa4a03c5..5879a4f97 100644
          let write = Gc::write(context.gc(), self.0);
          let movie =
              movie.unwrap_or_else(|| Arc::new(SwfMovie::empty(write.movie().version(), None)));
-@@ -411,6 +424,30 @@ impl<'gc> MovieClip<'gc> {
+@@ -411,6 +434,30 @@ impl<'gc> MovieClip<'gc> {
          unlock!(Gc::write(mc, self.0), MovieClipData, next_avm1_clip).set(node);
      }
  
@@ -3096,7 +4700,7 @@ index baa4a03c5..5879a4f97 100644
      pub fn call_on_construct_handler(self, context: &mut UpdateContext<'gc>) {
          let Some(object) = self.0.object1.get() else {
              return;
-@@ -558,7 +595,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -558,7 +605,7 @@ impl<'gc> MovieClip<'gc> {
                  TagCode::FrameLabel => shared.frame_label(reader),
                  TagCode::JpegTables => shared.jpeg_tables(context, reader),
                  TagCode::ShowFrame => shared.show_frame(reader, tag_len),
@@ -3105,7 +4709,7 @@ index baa4a03c5..5879a4f97 100644
                  TagCode::SoundStreamHead => shared.sound_stream_head(reader, 1),
                  TagCode::SoundStreamHead2 => shared.sound_stream_head(reader, 2),
                  TagCode::VideoFrame => shared.preload_video_frame(context, reader),
-@@ -913,6 +950,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -913,6 +960,7 @@ impl<'gc> MovieClip<'gc> {
                  // the current frame, the goto is properly queued.
  
                  self.0.queued_goto_frame.set(Some(frame));
@@ -3113,7 +4717,7 @@ index baa4a03c5..5879a4f97 100644
  
                  // If we have a frame script on that frame, add ourselves to the
                  // frame script cleanup queue so that that frame script is
-@@ -1144,6 +1182,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -1144,6 +1192,7 @@ impl<'gc> MovieClip<'gc> {
      /// This sets the current frame of this MovieClip to a given number.
      pub fn set_current_frame(self, current_frame: FrameNumber) {
          self.0.current_frame.set(current_frame);
@@ -3121,7 +4725,7 @@ index baa4a03c5..5879a4f97 100644
      }
  
      /// The amount of frames loaded in this movieclip.
-@@ -1486,6 +1525,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -1486,6 +1535,7 @@ impl<'gc> MovieClip<'gc> {
              // in the meantime, it should absolutely run again.
              self.set_last_queued_script_frame(None);
          }
@@ -3129,7 +4733,7 @@ index baa4a03c5..5879a4f97 100644
      }
  
      /// Instantiate a given child object on the timeline at a given depth.
-@@ -1626,6 +1666,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -1626,6 +1676,7 @@ impl<'gc> MovieClip<'gc> {
      }
  
      fn run_goto(mut self, context: &mut UpdateContext<'gc>, frame: FrameNumber, is_implicit: bool) {
@@ -3137,7 +4741,7 @@ index baa4a03c5..5879a4f97 100644
          if cfg!(feature = "timeline_debug") {
              tracing::debug!(
                  "[{}]: {} from frame {} to frame {}",
-@@ -1747,6 +1788,29 @@ impl<'gc> MovieClip<'gc> {
+@@ -1747,6 +1798,29 @@ impl<'gc> MovieClip<'gc> {
              }
          }
          let hit_target_frame = self.0.current_frame() == frame;
@@ -3167,7 +4771,7 @@ index baa4a03c5..5879a4f97 100644
  
          if is_rewind {
              // Remove all display objects that were created after the
-@@ -2149,6 +2213,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -2149,6 +2223,7 @@ impl<'gc> MovieClip<'gc> {
          context: &mut UpdateContext<'gc>,
      ) {
          let current_frame = self.current_frame();
@@ -3175,7 +4779,7 @@ index baa4a03c5..5879a4f97 100644
  
          let write = unlock!(Gc::write(context.gc(), self.0), MovieClipData, cell);
          let mut frame_scripts = RefMut::map(write.borrow_mut(), |r| &mut r.frame_scripts);
-@@ -2494,6 +2559,26 @@ impl<'gc> MovieClip<'gc> {
+@@ -2494,6 +2569,26 @@ impl<'gc> MovieClip<'gc> {
          }
      }
  
@@ -3202,7 +4806,7 @@ index baa4a03c5..5879a4f97 100644
      fn check_has_pending_script(self) {
          let has_pending_script = self.has_frame_script(self.0.current_frame.get());
          self.set_has_pending_script(has_pending_script);
-@@ -2601,6 +2686,10 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2601,6 +2696,10 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
                      .0
                      .contains_flag(MovieClipFlags::RUNNING_CONSTRUCT_FRAME);
                  for child in self.iter_render_list() {
@@ -3213,7 +4817,7 @@ index baa4a03c5..5879a4f97 100644
                      // Under some conditions, we won't run `construct_frame` on
                      // a not-yet-constructed child
                      if child.object2().is_none() {
-@@ -2635,11 +2724,20 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2635,11 +2734,20 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
      }
  
      fn run_frame_scripts(self, context: &mut UpdateContext<'gc>) {
@@ -3234,7 +4838,7 @@ index baa4a03c5..5879a4f97 100644
      }
  
      fn render_self(self, context: &mut RenderContext<'_, 'gc>) {
-@@ -3437,14 +3535,15 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3437,14 +3545,15 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let define_bits_lossless = reader.read_define_bits_lossless(version)?;
          let bitmap = Gc::new(
              context.gc(),
@@ -3253,7 +4857,7 @@ index baa4a03c5..5879a4f97 100644
          );
          self.library_mut(context)
              .register_character(define_bits_lossless.id, Character::Bitmap(bitmap));
-@@ -3562,13 +3661,17 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3562,13 +3671,17 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let library = self.library_mut(context);
          let (id, jpeg_data) = reader.read_define_bits()?;
          let jpeg_tables = library.jpeg_tables();
@@ -3275,7 +4879,7 @@ index baa4a03c5..5879a4f97 100644
                  alpha: None,
                  width,
                  height,
-@@ -3589,7 +3692,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3589,7 +3702,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let bitmap = Character::Bitmap(Gc::new(
              context.gc(),
              BitmapCharacter::new(CompressedBitmap::Jpeg {
@@ -3285,7 +4889,7 @@ index baa4a03c5..5879a4f97 100644
                  alpha: None,
                  width,
                  height,
-@@ -3612,8 +3716,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3612,8 +3726,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let bitmap = Character::Bitmap(Gc::new(
              context.gc(),
              BitmapCharacter::new(CompressedBitmap::Jpeg {
@@ -3297,7 +4901,17 @@ index baa4a03c5..5879a4f97 100644
                  width,
                  height,
              }),
-@@ -3968,11 +4073,35 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3842,7 +3957,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+         reader: &mut SwfStream<'a>,
+     ) -> Result<(), Error> {
+         let sound = reader.read_define_sound()?;
+-        if let Ok(handle) = context.audio.register_sound(&sound) {
++        // FlashNX: the mixer references the sound in the movie (`SoundBytes`).
++        if let Ok(handle) = context.audio.register_sound_from_movie(&sound, &self.swf) {
+             self.library_mut(context)
+                 .register_character(sound.id, Character::Sound(handle));
+         } else {
+@@ -3968,11 +4084,35 @@ impl<'gc, 'a> MovieClipShared<'gc> {
      }
  
      #[inline]
@@ -3352,6 +4966,22 @@ index 46fe8deb6..d2cc47a7e 100644
              child.construct_frame(context);
          }
      }
+diff --git a/core/src/display_object/text.rs b/core/src/display_object/text.rs
+index 7c7047526..45fe4f773 100644
+--- a/core/src/display_object/text.rs
++++ b/core/src/display_object/text.rs
+@@ -40,6 +40,11 @@ pub struct TextData<'gc> {
+ }
+ 
+ impl<'gc> Text<'gc> {
++    /// FlashNX: see `Character::has_live_instances`.
++    pub fn shared_alive(self, fc: &gc_arena::Finalization<'gc>) -> bool {
++        !Gc::is_dead(fc, self.0.shared.get())
++    }
++
+     pub fn from_swf_tag(
+         context: &mut UpdateContext<'gc>,
+         swf: Arc<SwfMovie>,
 diff --git a/core/src/flashnx_as3prof.rs b/core/src/flashnx_as3prof.rs
 new file mode 100644
 index 000000000..0a3e04218
@@ -3572,10 +5202,10 @@ index 000000000..0a3e04218
 +}
 diff --git a/core/src/flashnx_census.rs b/core/src/flashnx_census.rs
 new file mode 100644
-index 000000000..9fa8c33ea
+index 000000000..292909795
 --- /dev/null
 +++ b/core/src/flashnx_census.rs
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,174 @@
 +//! FlashNX: census of live objects, for the `census:` heartbeat line.
 +//!
 +//! Super Smash Flash 2's GC heap grows by ~100 MB per Classic level (130 MB at
@@ -3682,6 +5312,8 @@ index 000000000..9fa8c33ea
 +    pub fn report() -> String {
 +        let (movies, movie_bytes) = ruffle_common::tag_utils::live_movie_stats();
 +        let (shared, copied) = crate::character::bitmap_bytes_stats();
++        let (snd_shared, snd_copied) = crate::backend::audio::sound_bytes_stats();
++        let (released, dropped, kept) = crate::library::movie_free_stats();
 +        let mb = |b: u64| b / (1024 * 1024);
 +        with_classes(|map| {
 +            let total: i64 = map.values().map(|e| e.live).sum();
@@ -3703,11 +5335,16 @@ index 000000000..9fa8c33ea
 +                e.last = e.live;
 +            }
 +            format!(
-+                "movies={} ({}MB) bitmapBytes shared={}MB copied={}MB displayObjects={} orphans={} broadcast={} avm2={} | top: {} | grew: {}",
++                "movies={} ({}MB) released={} dropped={} kept={} bitmapBytes shared={}MB copied={}MB soundBytes shared={}MB copied={}MB displayObjects={} orphans={} broadcast={} avm2={} | top: {} | grew: {}",
 +                movies,
 +                mb(movie_bytes),
++                released,
++                dropped,
++                kept,
 +                mb(shared),
 +                mb(copied),
++                mb(snd_shared),
++                mb(snd_copied),
 +                LIVE_DISPLAY_OBJECTS.load(Relaxed),
 +                ORPHANS.load(Relaxed),
 +                BROADCAST.load(Relaxed),
@@ -3727,13 +5364,20 @@ index 000000000..9fa8c33ea
 +pub fn report() -> String {
 +    let (movies, movie_bytes) = ruffle_common::tag_utils::live_movie_stats();
 +    let (shared, copied) = crate::character::bitmap_bytes_stats();
++    let (snd_shared, snd_copied) = crate::backend::audio::sound_bytes_stats();
++    let (released, dropped, kept) = crate::library::movie_free_stats();
 +    let mb = |b: u64| b / (1024 * 1024);
 +    format!(
-+        "movies={} ({}MB) bitmapBytes shared={}MB copied={}MB",
++        "movies={} ({}MB) released={} dropped={} kept={} bitmapBytes shared={}MB copied={}MB soundBytes shared={}MB copied={}MB",
 +        movies,
 +        mb(movie_bytes),
++        released,
++        dropped,
++        kept,
 +        mb(shared),
 +        mb(copied),
++        mb(snd_shared),
++        mb(snd_copied),
 +    )
 +}
 diff --git a/core/src/frame_lifecycle.rs b/core/src/frame_lifecycle.rs
@@ -3943,10 +5587,10 @@ index 91bdb52df..e099d2fcd 100644
  pub fn broadcast_frame_entered<'gc>(context: &mut UpdateContext<'gc>) {
      let enter_frame_evt = EventObject::bare_default_event(context, "enterFrame");
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..444271273 100644
+index 6e5379213..4eb247acd 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
-@@ -15,10 +15,21 @@ extern crate num_derive;
+@@ -15,10 +15,22 @@ extern crate num_derive;
  #[macro_use]
  mod avm1;
  mod avm2;
@@ -3960,6 +5604,7 @@ index 6e5379213..444271273 100644
 +/// FlashNX: per-movie reset + sizing of the decoded-bitmap cache budget.
 +pub use character::{flashnx_bitmap_residency, reset_bitmap_cache};
 +pub use flashnx_census::report as census_report;
++pub use library::set_movie_free;
 +pub use flashnx_as3prof::{report as as3prof_report, set_as3_profiler};
 +pub use bitmap::operations::{take_threshold_memo_hits, take_threshold_stats};
 +pub use frame_lifecycle::{set_orphan_skip, take_inner_goto_stats};
@@ -3968,7 +5613,7 @@ index 6e5379213..444271273 100644
  pub mod context;
  pub mod context_menu;
  mod drawing;
-@@ -26,6 +37,8 @@ mod ecma_conversions;
+@@ -26,6 +38,8 @@ mod ecma_conversions;
  pub mod events;
  pub mod focus_tracker;
  pub mod font;
@@ -3977,7 +5622,7 @@ index 6e5379213..444271273 100644
  mod frame_lifecycle;
  mod html;
  mod input;
-@@ -63,6 +76,16 @@ pub use events::PlayerEvent;
+@@ -63,6 +77,16 @@ pub use events::PlayerEvent;
  pub use indexmap;
  pub use loader::LoadBehavior;
  pub use player::{Player, PlayerBuilder, PlayerMode, PlayerRuntime, StaticCallstack};
@@ -3995,10 +5640,98 @@ index 6e5379213..444271273 100644
  pub use ruffle_render::backend::ViewportDimensions;
  pub use swf;
 diff --git a/core/src/library.rs b/core/src/library.rs
-index 7cf6c74de..251d9abf4 100644
+index 7cf6c74de..73221b047 100644
 --- a/core/src/library.rs
 +++ b/core/src/library.rs
-@@ -123,7 +123,10 @@ pub struct MovieLibrary<'gc> {
+@@ -3,13 +3,13 @@ use crate::avm2::{Class as Avm2Class, Domain as Avm2Domain};
+ use crate::backend::audio::SoundHandle;
+ use crate::character::Character;
+ 
+-use crate::display_object::{Bitmap, Graphic, MorphShape, Text};
++use crate::display_object::{Bitmap, Graphic, MorphShape, MovieClip, MovieClipWeak, Text};
+ use crate::font::{Font, FontDescriptor, FontLike, FontQuery, FontType};
+ use crate::prelude::*;
+ use crate::string::AvmString;
+ use crate::tag_utils::SwfMovie;
+ use gc_arena::collect::Trace;
+-use gc_arena::{Collect, Mutation};
++use gc_arena::{Collect, Finalization, Gc, GcWeak, Mutation};
+ use ruffle_render::backend::RenderBackend;
+ use ruffle_render::bitmap::BitmapHandle;
+ use ruffle_render::utils::remove_invalid_jpeg_data;
+@@ -18,6 +18,7 @@ use crate::backend::ui::{FontDefinition, UiBackend};
+ use crate::font::DefaultFont;
+ use fnv::{FnvHashMap, FnvHashSet};
+ use std::collections::HashMap;
++use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
+ use std::sync::{Arc, Weak};
+ use weak_table::{PtrWeakKeyHashMap, WeakValueHashMap, traits::WeakElement};
+ 
+@@ -49,12 +50,22 @@ pub struct Avm2ClassRegistry<'gc> {
+     /// A list of AVM2 class objects and the character IDs they are expected to
+     /// instantiate.
+     class_map: WeakValueHashMap<Avm2Class<'gc>, WeakMovieSymbol>,
++
++    /// FlashNX: the movies whose library was released (`Library::release_movie`),
++    /// by address. Their classes are not traced from here: a class holds its
++    /// movie through its code, so tracing them would keep the movie in use
++    /// for good. `Library::finalize_released` keeps or drops them.
++    released: FnvHashSet<usize>,
+ }
+ 
+ unsafe impl<'gc> Collect<'gc> for Avm2ClassRegistry<'gc> {
+     fn trace<C: Trace<'gc>>(&self, cc: &mut C) {
+-        for (k, _) in self.class_map.iter() {
+-            cc.trace(k);
++        for (k, symbol) in self.class_map.iter() {
++            if self.released.is_empty()
++                || !self.released.contains(&(Arc::as_ptr(&symbol.0) as usize))
++            {
++                cc.trace(k);
++            }
+         }
+     }
+ }
+@@ -69,9 +80,38 @@ impl<'gc> Avm2ClassRegistry<'gc> {
+     pub fn new() -> Self {
+         Self {
+             class_map: WeakValueHashMap::new(),
++            released: FnvHashSet::default(),
++        }
++    }
++
++    /// FlashNX: keeps the classes of `movie`, released but still in use, alive
++    /// for the current collection (see `Library::finalize_released`).
++    fn resurrect_movie(&self, fc: &Finalization<'gc>, movie: &Arc<SwfMovie>) {
++        for (class, symbol) in self.class_map.iter() {
++            if Arc::ptr_eq(&symbol.0, movie) {
++                class.resurrect(fc);
++            }
+         }
+     }
+ 
++    /// FlashNX: forgets the classes of a released movie whose library is
++    /// dropped. They are about to be freed: none may stay in the map. By key:
++    /// weak_table's `retain` can pass over the entry that its backward-shift
++    /// deletion moves into a slot it has already visited (found by the same
++    /// work upstream, see `Library::release_movie`).
++    fn remove_movie(&mut self, movie: &Arc<SwfMovie>) {
++        let classes: Vec<Avm2Class<'gc>> = self
++            .class_map
++            .iter()
++            .filter(|(_, symbol)| Arc::ptr_eq(&symbol.0, movie))
++            .map(|(class, _)| *class)
++            .collect();
++        for class in classes {
++            self.class_map.remove(&class);
++        }
++        self.released.remove(&(Arc::as_ptr(movie) as usize));
++    }
++
+     /// Retrieve the library symbol for a given AVM2 class object.
+     ///
+     /// A value of `None` indicates that this AVM2 class is not associated with
+@@ -123,9 +163,19 @@ pub struct MovieLibrary<'gc> {
      characters: HashMap<CharacterId, Character<'gc>>,
      export_characters: Avm1PropertyMap<'gc, CharacterId>,
      imported_assets: HashMap<AvmString<'gc>, CharacterId>,
@@ -4009,8 +5742,43 @@ index 7cf6c74de..251d9abf4 100644
 +    jpeg_tables: Option<Arc<[u8]>>,
      fonts: FontMap<'gc>,
      avm2_domain: Option<Avm2Domain<'gc>>,
++    /// FlashNX: set once the Loader that loaded this movie unloaded it
++    /// (`Library::release_movie`), with the root clip it had then.
++    released: bool,
++    released_root: Option<MovieClipWeak<'gc>>,
++    /// FlashNX: resurrected in the current collection (`finalize_released`).
++    #[collect(require_static)]
++    kept: std::cell::Cell<bool>,
  }
-@@ -255,7 +258,8 @@ impl<'gc> MovieLibrary<'gc> {
+ 
+ impl<'gc> MovieLibrary<'gc> {
+@@ -138,9 +188,25 @@ impl<'gc> MovieLibrary<'gc> {
+             jpeg_tables: None,
+             fonts: Default::default(),
+             avm2_domain: None,
++            released: false,
++            released_root: None,
++            kept: std::cell::Cell::new(false),
+         }
+     }
+ 
++    /// FlashNX: whether anything outside this released (so untraced) library
++    /// still uses its movie, in a collection about to sweep: its AVM2 domain
++    /// (every live object, class or function of the movie's code reaches it),
++    /// its root clip, or an instance of one of its symbols.
++    fn in_use(&self, fc: &Finalization<'gc>) -> bool {
++        self.avm2_domain.is_some_and(|domain| !domain.is_dead(fc))
++            || self.released_root.is_some_and(|root| !root.is_dead(fc))
++            || self
++                .characters
++                .values()
++                .any(|character| character.has_live_instances(fc))
++    }
++
+     /// Registers a character; returns `true` if successful, or `false` if a character with
+     /// the given ID already exists.
+     pub fn register_character(&mut self, id: CharacterId, character: Character<'gc>) -> bool {
+@@ -255,7 +321,8 @@ impl<'gc> MovieLibrary<'gc> {
          match character {
              Character::Bitmap(bitmap) => {
                  let avm2_class = bitmap.avm2_class();
@@ -4020,7 +5788,7 @@ index 7cf6c74de..251d9abf4 100644
                  let bitmap = Bitmap::new(mc, id, bitmap, self.swf.clone());
                  bitmap.set_avm2_bitmapdata_class(mc, avm2_class);
                  Some(bitmap.instantiate(mc))
-@@ -337,12 +341,17 @@ impl<'gc> MovieLibrary<'gc> {
+@@ -337,12 +404,17 @@ impl<'gc> MovieLibrary<'gc> {
          self.jpeg_tables = if data.is_empty() {
              None
          } else {
@@ -4040,6 +5808,276 @@ index 7cf6c74de..251d9abf4 100644
      }
  
      pub fn set_avm2_domain(&mut self, avm2_domain: Avm2Domain<'gc>) {
+@@ -398,11 +470,64 @@ unsafe impl<'gc> Collect<'gc> for MovieLibraries<'gc> {
+     #[inline]
+     fn trace<C: Trace<'gc>>(&self, cc: &mut C) {
+         for (_, val) in self.0.iter() {
+-            cc.trace(val);
++            if val.released {
++                // FlashNX: a released library holds its contents only while
++                // something else uses its movie: `Library::finalize_released`
++                // resurrects or drops it before every sweep. Its weak pointers
++                // are traced as such, so they stay valid.
++                val.trace(&mut WeakOnly(&mut *cc));
++            } else {
++                cc.trace(val);
++            }
+         }
+     }
+ }
+ 
++/// FlashNX: passes on only the weak pointers (see `MovieLibraries::trace`).
++struct WeakOnly<'a, C>(&'a mut C);
++
++impl<'gc, C: Trace<'gc>> Trace<'gc> for WeakOnly<'_, C> {
++    fn trace_gc(&mut self, _gc: Gc<'gc, ()>) {}
++
++    fn trace_gc_weak(&mut self, gc: GcWeak<'gc, ()>) {
++        self.0.trace_gc_weak(gc)
++    }
++}
++
++/// FlashNX: keeps every pointer it is shown alive for the current collection
++/// (see `Library::finalize_released`), and through them all they hold. Weak
++/// pointers need nothing: they were traced as such.
++struct Resurrect<'a, 'gc>(&'a Finalization<'gc>);
++
++impl<'gc> Trace<'gc> for Resurrect<'_, 'gc> {
++    fn trace_gc(&mut self, gc: Gc<'gc, ()>) {
++        Gc::resurrect(self.0, gc)
++    }
++
++    fn trace_gc_weak(&mut self, _gc: GcWeak<'gc, ()>) {}
++}
++
++/// FlashNX: `moviefree.off` marker (see `Library::release_movie`).
++static MOVIE_FREE: AtomicBool = AtomicBool::new(true);
++static MOVIES_RELEASED: AtomicU32 = AtomicU32::new(0);
++static MOVIES_DROPPED: AtomicU32 = AtomicU32::new(0);
++static MOVIES_KEPT: AtomicU32 = AtomicU32::new(0);
++
++/// FlashNX: whether the libraries of unloaded movies may be dropped.
++pub fn set_movie_free(enabled: bool) {
++    MOVIE_FREE.store(enabled, Relaxed);
++}
++
++/// FlashNX: movies released since boot, libraries dropped since boot, and
++/// released ones still in use at the last collection (`census:` line).
++pub fn movie_free_stats() -> (u32, u32, u32) {
++    (
++        MOVIES_RELEASED.load(Relaxed),
++        MOVIES_DROPPED.load(Relaxed),
++        MOVIES_KEPT.load(Relaxed),
++    )
++}
++
+ impl<'gc> MovieLibraries<'gc> {
+     fn new() -> Self {
+         Self(PtrWeakKeyHashMap::new())
+@@ -482,6 +607,100 @@ impl<'gc> Library<'gc> {
+         self.movie_libraries.known_movies()
+     }
+ 
++    /// FlashNX: called when a Loader unloads `movie` (`LoaderInfoObject::unload`).
++    ///
++    /// Upstream never frees a loaded movie: its library holds it, and the
++    /// libraries are held for good. Super Smash Flash 2 unloads its oldest
++    /// characters and stages past 12 and 10 (`Resource.unload`,
++    /// `unloadAndStop`) and loads them again when needed: each load was a new
++    /// movie kept forever, until the heap ran out in a second Classic run
++    /// (2026-10-05). A released library is no longer traced; each collection
++    /// keeps it whole while anything else uses the movie, and drops it
++    /// otherwise (`finalize_released`), after which the collector frees all
++    /// that only it held. Upstream's work on the same leak: ruffle PRs #22908
++    /// and #23071, open.
++    pub fn release_movie(&mut self, movie: &Arc<SwfMovie>, root: Option<MovieClip<'gc>>) {
++        if !MOVIE_FREE.load(Relaxed) {
++            return;
++        }
++        let Some(library) = self.movie_libraries.0.get_mut(movie) else {
++            return;
++        };
++        if library.released {
++            return;
++        }
++        library.released = true;
++        library.released_root = root.map(|root| root.downgrade());
++        self.avm2_class_registry
++            .released
++            .insert(Arc::as_ptr(movie) as usize);
++        MOVIES_RELEASED.fetch_add(1, Relaxed);
++    }
++
++    /// FlashNX: whether a collection has released libraries to finalize.
++    pub fn has_released(&self) -> bool {
++        !self.avm2_class_registry.released.is_empty()
++    }
++
++    /// FlashNX: one finalization pass, run with the arena fully marked; the
++    /// passes run to their end before EVERY sweep (`finalize_released_libraries`
++    /// in player.rs): a released library is not traced, so one left in place
++    /// without being resurrected would point at freed objects.
++    ///
++    /// Resurrects, whole, each released library not yet kept in this
++    /// collection whose movie is in use (`MovieLibrary::in_use`), and returns
++    /// true if it did: what it holds may reach another released library's
++    /// anchors (a kept movie holding a class of another), which `is_dead` only
++    /// shows once marking has run again, so another pass must follow. A pass
++    /// that resurrects nothing is the last: it drops the released libraries
++    /// not kept, with their symbol classes, and returns their sounds for the
++    /// audio backend to forget.
++    pub fn finalize_released(&mut self, fc: &Finalization<'gc>) -> (bool, Vec<SoundHandle>) {
++        let mut resurrected = false;
++        for (movie, library) in self.movie_libraries.0.iter() {
++            if library.released && !library.kept.get() && library.in_use(fc) {
++                library.trace(&mut Resurrect(fc));
++                self.avm2_class_registry.resurrect_movie(fc, &movie);
++                library.kept.set(true);
++                resurrected = true;
++            }
++        }
++        if resurrected {
++            return (true, Vec::new());
++        }
++        let mut dead = Vec::new();
++        let mut kept = 0;
++        for (movie, library) in self.movie_libraries.0.iter() {
++            if !library.released {
++                continue;
++            }
++            if library.kept.replace(false) {
++                kept += 1;
++            } else {
++                dead.push(movie);
++            }
++        }
++        MOVIES_KEPT.store(kept, Relaxed);
++        let mut sounds = Vec::new();
++        for movie in dead {
++            self.avm2_class_registry.remove_movie(&movie);
++            if let Some(library) = self.movie_libraries.0.remove(&movie) {
++                sounds.extend(library.characters.values().filter_map(|c| match c {
++                    Character::Sound(sound) => Some(*sound),
++                    _ => None,
++                }));
++                tracing::info!(
++                    "moviefree: dropped the library of an unloaded movie ({} KB, {} characters, {} still released)",
++                    movie.data().len() / 1024,
++                    library.characters.len(),
++                    kept,
++                );
++            }
++            MOVIES_DROPPED.fetch_add(1, Relaxed);
++        }
++        (false, sounds)
++    }
++
+     /// Returns the default Font implementations behind the built in names (ie `_sans`)
+     pub fn default_font(
+         &mut self,
+diff --git a/core/src/loader.rs b/core/src/loader.rs
+index 0018203a0..ff955cecd 100644
+--- a/core/src/loader.rs
++++ b/core/src/loader.rs
+@@ -33,7 +33,7 @@ use crate::limits::ExecutionLimit;
+ use crate::player::{Player, PostFrameCallback};
+ use crate::streams::{NetStream, NetStreamHandle};
+ use crate::string::{AvmString, StringContext};
+-use crate::tag_utils::SwfMovie;
++use crate::tag_utils::{SharedBytes, SwfMovie};
+ use crate::vminterface::Instantiator;
+ use chardetng::EncodingDetector;
+ use encoding_rs::{UTF_8, WINDOWS_1252};
+@@ -393,7 +393,7 @@ impl<'gc> LoadManager<'gc> {
+     pub fn load_movie_into_clip_bytes(
+         context: &mut UpdateContext<'gc>,
+         target_clip: DisplayObject<'gc>,
+-        bytes: Vec<u8>,
++        bytes: SharedBytes,
+         vm_data: MovieLoaderVMData<'gc>,
+     ) -> Result<(), Error> {
+         let loader = MovieLoader {
+@@ -820,6 +820,7 @@ impl<'gc> MovieLoader<'gc> {
+                 status,
+                 redirected,
+                 loader_url,
++                None,
+             )
+         })?;
+         Ok(())
+@@ -859,7 +860,7 @@ impl<'gc> MovieLoader<'gc> {
+     pub fn movie_loader_bytes(
+         handle: LoaderHandle,
+         uc: &mut UpdateContext<'gc>,
+-        bytes: Vec<u8>,
++        bytes: SharedBytes,
+     ) -> Result<(), Error> {
+         let clip = match uc.load_manager.get_loader(handle) {
+             Some(Self { target_clip, .. }) => *target_clip,
+@@ -882,9 +883,9 @@ impl<'gc> MovieLoader<'gc> {
+         let loader_url = Some(uc.root_swf.url().to_string());
+ 
+         if replacing_root_movie {
+-            ContentType::sniff(&bytes).expect(ContentType::Swf)?;
++            ContentType::sniff(bytes.as_slice()).expect(ContentType::Swf)?;
+ 
+-            let movie = SwfMovie::from_data(&bytes, "file:///".into(), loader_url)?;
++            let movie = SwfMovie::from_shared_data(&bytes, "file:///".into(), loader_url)?;
+             avm2_stub_method_context!(
+                 uc,
+                 "flash.display.Loader",
+@@ -895,7 +896,16 @@ impl<'gc> MovieLoader<'gc> {
+             return Ok(());
+         }
+ 
+-        MovieLoader::movie_loader_data(handle, uc, &bytes, "file:///".into(), 0, false, loader_url)
++        MovieLoader::movie_loader_data(
++            handle,
++            uc,
++            bytes.as_slice(),
++            "file:///".into(),
++            0,
++            false,
++            loader_url,
++            Some(&bytes),
++        )
+     }
+ }
+ 
+@@ -1600,6 +1610,8 @@ impl<'gc> MovieLoader<'gc> {
+         status: u16,
+         redirected: bool,
+         loader_url: Option<String>,
++        // FlashNX: `data` as a buffer shared with a ByteArray (`loadBytes`).
++        shared: Option<&SharedBytes>,
+     ) -> Result<(), Error> {
+         let sniffed_type = ContentType::sniff(data);
+         let length = data.len();
+@@ -1607,7 +1619,9 @@ impl<'gc> MovieLoader<'gc> {
+         if sniffed_type == ContentType::Unknown
+             && let Ok(data) = extract_swz(data)
+         {
+-            return Self::movie_loader_data(handle, uc, &data, url, status, redirected, loader_url);
++            return Self::movie_loader_data(
++                handle, uc, &data, url, status, redirected, loader_url, None,
++            );
+         }
+         let (clip, vm_data, from_bytes) = match uc.load_manager.get_loader(handle) {
+             Some(Self {
+@@ -1648,7 +1662,12 @@ impl<'gc> MovieLoader<'gc> {
+ 
+         let movie = match sniffed_type {
+             ContentType::Swf => {
+-                let mut movie = SwfMovie::from_data(data, url.clone(), loader_url.clone())?;
++                let mut movie = match shared {
++                    Some(shared) => {
++                        SwfMovie::from_shared_data(shared, url.clone(), loader_url.clone())?
++                    }
++                    None => SwfMovie::from_data(data, url.clone(), loader_url.clone())?,
++                };
+ 
+                 if matches!(vm_data, MovieLoaderVMData::Avm1 { .. }) {
+                     // If AVM1 loads a SWF, that SWF is always interpreted as
 diff --git a/core/src/orphan_manager.rs b/core/src/orphan_manager.rs
 index a231dc080..d38d9c027 100644
 --- a/core/src/orphan_manager.rs
@@ -4170,10 +6208,18 @@ index a231dc080..d38d9c027 100644
      }
  }
 diff --git a/core/src/player.rs b/core/src/player.rs
-index edb74cccb..904f7466c 100644
+index edb74cccb..3ba384eb0 100644
 --- a/core/src/player.rs
 +++ b/core/src/player.rs
-@@ -74,6 +74,7 @@ use std::fmt;
+@@ -43,6 +43,7 @@ use crate::frame_lifecycle::{FramePhase, run_all_phases_avm2};
+ use crate::input::InputEvent;
+ use crate::input::InputManager;
+ use crate::library::Library;
++use crate::backend::audio::SoundHandle;
+ use crate::limits::ExecutionLimit;
+ use crate::loader::{LoadBehavior, LoadManager};
+ use crate::local_connection::LocalConnections;
+@@ -74,6 +75,7 @@ use std::fmt;
  use std::ops::{Deref, DerefMut};
  use std::rc::{Rc, Weak as RcWeak};
  use std::str::FromStr;
@@ -4181,7 +6227,7 @@ index edb74cccb..904f7466c 100644
  use std::sync::{Arc, Mutex, Weak};
  use std::time::Duration;
  use tracing::instrument;
-@@ -276,6 +277,156 @@ impl<'gc> GcRootData<'gc> {
+@@ -276,6 +278,156 @@ impl<'gc> GcRootData<'gc> {
  
  type GcArena = gc_arena::Arena<Rootable![GcRoot<'_>]>;
  
@@ -4338,7 +6384,7 @@ index edb74cccb..904f7466c 100644
  #[derive(Copy, Clone, Debug, Eq, PartialEq)]
  enum RunState {
      Playing,
-@@ -519,11 +670,168 @@ impl Player {
+@@ -519,11 +671,168 @@ impl Player {
          FloatDuration::from_millis(self.frame_time(1000.0))
      }
  
@@ -4507,7 +6553,7 @@ index edb74cccb..904f7466c 100644
          self.frame_accumulator += dt;
          let frame_duration = self.frame_duration();
  
-@@ -554,6 +862,10 @@ impl Player {
+@@ -554,6 +863,10 @@ impl Player {
              }
          }
  
@@ -4518,7 +6564,7 @@ index edb74cccb..904f7466c 100644
          // Now that we're done running code,
          // we can stop pretending that more time passed than actually did.
          // Note: update_timers(dt) doesn't need to see this either.
-@@ -2058,7 +2370,7 @@ impl Player {
+@@ -2058,7 +2371,7 @@ impl Player {
                  library: &gc_root.library,
                  transform_stack: &mut this.transform_stack,
                  is_offscreen: false,
@@ -4527,7 +6573,7 @@ index edb74cccb..904f7466c 100644
                  stage,
              };
  
-@@ -2296,7 +2608,7 @@ impl Player {
+@@ -2296,7 +2609,7 @@ impl Player {
                  external_interface,
                  start_time: this.start_time,
                  update_start: Instant::now(),
@@ -4536,7 +6582,50 @@ index edb74cccb..904f7466c 100644
                  focus_tracker: stage.focus_tracker(),
                  times_get_time_called: 0,
                  time_offset: &mut this.time_offset,
-@@ -2382,7 +2694,71 @@ impl Player {
+@@ -2355,6 +2668,42 @@ impl Player {
+         self.debug_ui.borrow_mut()
+     }
+ 
++    /// FlashNX: pays the collector's debt. Every collection goes through here
++    /// or `collect_full`, which finalize released movie libraries
++    /// (`finalize_released_libraries`) whenever the arena is fully marked: a
++    /// sweep must never follow a marking that skipped it. `cycle_debt` stops at
++    /// the end of a cycle, so a new cycle can only get marked in `mark_debt`.
++    /// Returns the sounds of the libraries dropped.
++    fn collect_debt(&mut self) -> Vec<SoundHandle> {
++        use gc_arena::arena::CollectionPhase;
++        let mut arena = self.gc_arena.borrow_mut();
++        if arena.mark_debt().is_some() {
++            let sounds = finalize_released_libraries(&mut arena);
++            arena.cycle_debt();
++            sounds
++        } else {
++            if arena.collection_phase() == CollectionPhase::Sweeping {
++                arena.cycle_debt();
++            }
++            Vec::new()
++        }
++    }
++
++    /// FlashNX: a whole collection (what `finish_cycle` did), finalized like
++    /// `collect_debt`.
++    fn collect_full(&mut self) -> Vec<SoundHandle> {
++        use gc_arena::arena::CollectionPhase;
++        let mut arena = self.gc_arena.borrow_mut();
++        // Marking cannot start mid-sweep: end the sweep first. From Sweeping,
++        // `finish_cycle` stops at Sleeping, it does not start a new cycle.
++        if arena.collection_phase() == CollectionPhase::Sweeping {
++            arena.finish_cycle();
++        }
++        let sounds = finalize_released_libraries(&mut arena);
++        arena.finish_cycle();
++        sounds
++    }
++
+     /// Update the current state of the player.
+     ///
+     /// The given function will be called with the current stage root, current
+@@ -2382,7 +2731,75 @@ impl Player {
          self.update_mouse_state(EnumSet::empty(), false, &mut false);
  
          // GC
@@ -4554,11 +6643,12 @@ index edb74cccb..904f7466c 100644
 +        // directly instead of inferred.
 +        let gc_t0 = Instant::now();
 +        let full_gc_requested = FULL_GC_REQUESTED.swap(false, Ordering::Relaxed);
++        let dropped_sounds;
 +        if crate::bitmap::bitmap_data::bitmapdata_under_pressure() {
-+            self.gc_arena.borrow_mut().finish_cycle();
++            dropped_sounds = self.collect_full();
 +        } else if full_gc_requested {
 +            let before = self.gc_arena.borrow().metrics().total_allocation();
-+            self.gc_arena.borrow_mut().finish_cycle();
++            dropped_sounds = self.collect_full();
 +            let after = self.gc_arena.borrow().metrics().total_allocation();
 +            tracing::info!(
 +                "System.gc(): full collection in {} ms, {} -> {} MB",
@@ -4580,7 +6670,10 @@ index edb74cccb..904f7466c 100644
 +                let tight = metrics.total_gc_allocation() > GC_TIGHT_BYTES;
 +                metrics.set_pacing(if tight { GC_TIGHT_PACING } else { gc_arena::metrics::Pacing::DEFAULT });
 +            }
-+            self.gc_arena.borrow_mut().collect_debt();
++            dropped_sounds = self.collect_debt();
++        }
++        for sound in dropped_sounds {
++            self.audio.unregister_sound(sound);
 +        }
 +        // ACCUMULATE, never store: `update()` runs several times per host frame
 +        // (run_frame, update_timers, StreamManager, ...) and each one steps the
@@ -4609,6 +6702,56 @@ index edb74cccb..904f7466c 100644
  
          rval
      }
+@@ -3173,6 +3590,36 @@ pub struct DragObject<'gc> {
+     pub constraint: Rectangle<Twips>,
+ }
+ 
++/// FlashNX: marks the arena to its end and runs `Library::finalize_released`
++/// passes, marking again after each pass that resurrected a library, until
++/// one does not (that one drops the unused libraries). Must run before every
++/// sweep. Returns the sounds of the libraries dropped.
++fn finalize_released_libraries(arena: &mut GcArena) -> Vec<SoundHandle> {
++    let mut sounds = Vec::new();
++    loop {
++        // Not sweeping (`collect_debt`, `collect_full`), so this marks to the
++        // end and stops there.
++        let Some(marked) = arena.finish_marking() else {
++            unreachable!("finalize_released_libraries while sweeping");
++        };
++        let (again, dropped) = marked.finalize(finalize_pass);
++        sounds.extend(dropped);
++        if !again {
++            return sounds;
++        }
++    }
++}
++
++fn finalize_pass<'gc>(
++    fc: &'gc gc_arena::Finalization<'gc>,
++    root: &'gc GcRoot<'gc>,
++) -> (bool, Vec<SoundHandle>) {
++    if !root.data.borrow().library.has_released() {
++        return (false, Vec::new());
++    }
++    root.data.borrow_mut(fc).library.finalize_released(fc)
++}
++
+ fn run_mouse_pick<'gc>(
+     context: &mut UpdateContext<'gc>,
+     require_button_mode: bool,
+diff --git a/core/src/tag_utils.rs b/core/src/tag_utils.rs
+index 0b826d7c0..fa94d0771 100644
+--- a/core/src/tag_utils.rs
++++ b/core/src/tag_utils.rs
+@@ -3,7 +3,7 @@
+ use swf::{CharacterId, TagCode};
+ use thiserror::Error;
+ 
+-pub use ruffle_common::tag_utils::{SwfMovie, SwfSlice, SwfStream};
++pub use ruffle_common::tag_utils::{SharedBytes, SwfMovie, SwfSlice, SwfStream};
+ 
+ #[derive(Error, Debug)]
+ pub enum Error {
 diff --git a/render/src/backend.rs b/render/src/backend.rs
 index 80ecf0517..001395fb7 100644
 --- a/render/src/backend.rs

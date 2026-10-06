@@ -194,7 +194,14 @@ mod counting_alloc {
     /// So: grow on demand, pay nothing when unused, and stop at a ceiling that
     /// is generous rather than cautious.
     pub const CHUNK: usize = 32 * 1024 * 1024;
-    pub const MAX_CHUNKS: usize = 16; // 512 MB ceiling
+    // 512 MB ceiling. 32 (1 GB) was tried on 2026-10-06 and taken back: with it,
+    // Super Smash Flash 2 ended with 1023 MB here plus 656 in dlmalloc, against
+    // 511 + 856 with 16 chunks, ~300 MB more held for the same game. A chunk
+    // only serves its own size classes, while dlmalloc's free space serves any
+    // size: the small-block peak of a loading frame (where the collector cannot
+    // run) stays reserved here for good, whereas past this ceiling it goes to
+    // dlmalloc and the medium blocks reuse it afterwards.
+    pub const MAX_CHUNKS: usize = 16;
 
     /// Size class for a layout, or `None` when newlib should handle it.
     /// Alignment above 16 goes to `System`: region blocks are only 16-aligned.
@@ -284,7 +291,17 @@ mod counting_alloc {
             }
             DL_SEG_BYTES.fetch_add(want as u64, Ordering::Relaxed);
             DL_SEGS.fetch_add(1, Ordering::Relaxed);
-            (p, want, 0)
+            // A flag of its own for every segment. dlmalloc merges a new segment
+            // into an existing one it touches when their flags are equal, and
+            // the top region hands out blocks that touch: the segments became a
+            // few giant ones, never wholly free, so never given back. When Super
+            // Smash Flash 2 ran out (2026-10-05), dlmalloc held 1248 MB for
+            // 560-700 MB of blocks, 392 MB of it taken in one loading frame.
+            // Apart, a segment goes back to the top region as soon as it empties
+            // (dlmalloc's own release checks, and `dl_trim`).
+            static NEXT_FLAG: AtomicUsize = AtomicUsize::new(0);
+            let flag = (NEXT_FLAG.fetch_add(1, Ordering::Relaxed) & 0x3FFF_FFFF) as u32;
+            (p, want, flag)
         }
 
         fn remap(&self, _ptr: *mut u8, _old: usize, _new: usize, _can_move: bool) -> *mut u8 {
@@ -358,6 +375,20 @@ mod counting_alloc {
             DL_INUSE.fetch_add(l.size() as u64, Ordering::Relaxed);
         }
         p
+    }
+
+    /// Hands dlmalloc's wholly free segments back to the top region. dlmalloc
+    /// does it by itself every few thousand frees of large chunks; this is the
+    /// safety net, every 300 frames and after a game. Bytes given back.
+    pub fn dl_trim() -> u64 {
+        if !DL_USED.load(Ordering::Relaxed) {
+            return 0;
+        }
+        let before = DL_SEG_BYTES.load(Ordering::Relaxed);
+        dl_lock();
+        unsafe { (*DL.0.get()).trim(0) };
+        DL_LOCK.store(false, Ordering::Release);
+        before.saturating_sub(DL_SEG_BYTES.load(Ordering::Relaxed))
     }
 
     #[inline(always)]
@@ -651,10 +682,14 @@ mod counting_alloc {
                     census_out(i, false);
                 }
             }
+            #[cfg(feature = "heapprof")]
+            crate::heapprof::on_alloc(p, l.size());
             p
         }
 
         unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+            #[cfg(feature = "heapprof")]
+            crate::heapprof::on_free(p);
             let t0 = now();
             if let Some(chunk) = chunk_of(p) {
                 // Only region blocks come back here, and they were allocated
@@ -705,6 +740,11 @@ mod counting_alloc {
                 if !q.is_null() {
                     DL_INUSE.fetch_add(n as u64, Ordering::Relaxed);
                     DL_INUSE.fetch_sub(l.size() as u64, Ordering::Relaxed);
+                    #[cfg(feature = "heapprof")]
+                    {
+                        crate::heapprof::on_free(p);
+                        crate::heapprof::on_alloc(q, n);
+                    }
                 }
                 tally(&ALLOC_TICKS, now().wrapping_sub(t0));
                 tally(&ALLOC_N, 1);
@@ -716,6 +756,11 @@ mod counting_alloc {
                 // after giving the GPU cache back is safe.
                 if q.is_null() && reclaim_gpu_cache() {
                     q = unsafe { System.realloc(p, l, n) };
+                }
+                #[cfg(feature = "heapprof")]
+                if !q.is_null() {
+                    crate::heapprof::on_free(p);
+                    crate::heapprof::on_alloc(q, n);
                 }
                 tally(&ALLOC_TICKS, now().wrapping_sub(t0));
                 tally(&ALLOC_N, 1);
@@ -855,6 +900,9 @@ pub(crate) fn alloc_counters() -> (u64, u64, u64, u64, u64) {
 
 mod backend;
 mod bugreport;
+/// Who holds the live memory, by call stack (`build.sh --memprof` only).
+#[cfg(feature = "heapprof")]
+pub(crate) mod heapprof;
 mod covers;
 mod favorites;
 mod ffi;
@@ -1672,6 +1720,14 @@ pub extern "C" fn ruffle_init() -> c_int {
     // `sdmc:/switch/FlashNX/gotoskip.off`: inner gotos walk every orphan again,
     // as upstream does (see `run_inner_goto_frame` in our Ruffle). Same kind of
     // experiment switch as mcref.off.
+    // `sdmc:/switch/FlashNX/moviefree.off`: SWFs unloaded by a Loader are kept
+    // for good again, as upstream does (see `Library::release_movie` in our
+    // Ruffle). Same kind of experiment switch as mcref.off.
+    let movie_free = !backend::render::marker_present("moviefree.off");
+    ruffle_core::set_movie_free(movie_free);
+    if !movie_free {
+        log(b"moviefree: moviefree.off present -> unloaded SWFs are kept for good\n\0");
+    }
     let goto_skip = !backend::render::marker_present("gotoskip.off");
     ruffle_core::set_orphan_skip(goto_skip);
     if !goto_skip {
@@ -2914,7 +2970,13 @@ pub extern "C" fn ruffle_pixel_filter_cycle() {
 /// the row saying one thing and the console doing another.
 #[no_mangle]
 pub extern "C" fn ruffle_power_mode_cycle() {
-    let next = (keymap::power_mode() + 1) % keymap::POWER_MODE_COUNT;
+    // Flip what the row SHOWS, which is the mode in force, not the stored
+    // preference: the two part ways whenever the hardware is not where the
+    // preference says (a raise dropped for the battery, the second after HOME
+    // before the periodic check takes the clock back). Stepping from the
+    // preference then asked for the mode already in force, and the press did
+    // nothing visible (2026-10-05: "un clic ne fait rien").
+    let next = if crate::backend::render::current_power_mode() == 1 { 0 } else { 1 };
     let got = crate::backend::render::apply_power_mode(next);
     keymap::set_power_mode(got);
     // Say what was asked for AND what was granted. A refusal is silent on the
@@ -3448,6 +3510,15 @@ pub extern "C" fn ruffle_library_reset() {
     // have freed what the launcher held for the game that just ended, and the
     // library has not begun rebuilding itself yet. Anything still live in a
     // chunk here is live for the rest of the session.
+    let trimmed = dl_trim();
+    let (dl_used, dl_held, dl_segs) = dl_segments();
+    log_str(&std::format!(
+        "teardown: dlmalloc gave back {} MB, holds {} MB in {} segments for {} MB of blocks\n",
+        trimmed / (1024 * 1024),
+        dl_held / (1024 * 1024),
+        dl_segs,
+        dl_used / (1024 * 1024)
+    ));
     log_alloc_census("teardown");
 }
 
@@ -4149,6 +4220,11 @@ pub extern "C" fn ruffle_dlmalloc_force_off() -> bool {
 
 /// dlmalloc: (bytes in use by Rust, bytes of segments held, segment count),
 /// printed as `dlMB=used/held(count)`.
+/// See `counting_alloc::dl_trim`.
+pub(crate) fn dl_trim() -> u64 {
+    counting_alloc::dl_trim()
+}
+
 pub(crate) fn dl_segments() -> (u64, u64, usize) {
     use std::sync::atomic::Ordering::Relaxed;
     (

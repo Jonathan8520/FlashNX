@@ -718,8 +718,11 @@ const ARENA_IBO_SIZE: GLsizeiptr = 192 * 1024 * 1024;  // 192 MB
 // A game with no record (first launch, or one that never passed 4 MB) gets the
 // default. An arena that overflows marks the record `full`, and that game gets
 // the default from then on: one session of dropped draws at worst, never twice.
-const ARENA_RECORD_FLOOR_V: GLsizeiptr = 128 * 1024 * 1024;
-const ARENA_RECORD_FLOOR_I: GLsizeiptr = 64 * 1024 * 1024;
+// Floors lowered from 128 / 64 MB (2026-10-06): four times the recorded peak
+// is the margin; the floors only matter to games whose peak is small, and they
+// held 192 MB for Super Smash Flash 2's 25 + 11 MB, on a heap it fills.
+const ARENA_RECORD_FLOOR_V: GLsizeiptr = 48 * 1024 * 1024;
+const ARENA_RECORD_FLOOR_I: GLsizeiptr = 24 * 1024 * 1024;
 
 /// `(vertex MB, index MB, full)` from `<game>.swf.arena`, e.g. `v=25 i=11 full=0`.
 fn read_arena_record(path: &str) -> Option<(u64, u64, bool)> {
@@ -1039,6 +1042,11 @@ extern "C" {
     /// Running counters of the buffer-object cache in our libdrm_nouveau copy
     /// (cpp/third_party/libdrm_nouveau), see `BOC_STATS`.
     fn flashnx_boc_stats(out: *mut u64, n: core::ffi::c_int);
+    /// nvmap handles alive (cpp/third_party/libdrm_nouveau/nouveau.c).
+    fn flashnx_nvmap_live() -> i64;
+    /// Bytes of transfer memory nvdrv keeps its handles in (libnx symbol,
+    /// set in nouveau.c).
+    static __nx_nv_transfermem_size: u32;
     /// Turn that cache on or off (on by default; off empties it).
     fn flashnx_boc_set(on: core::ffi::c_int);
     /// Return every parked BO to the heap; the cache keeps working afterwards.
@@ -3316,8 +3324,12 @@ pub fn fps_sample(frames_run: u32, nominal_x10: u32, now: u64) {
     FPS_NOMINAL_X10.store(nominal_x10, std::sync::atomic::Ordering::Relaxed);
     let start = FPS_WINDOW_START.load(std::sync::atomic::Ordering::Relaxed);
     // No window open: the counter was just switched on, or a pause was left
-    // (`fps_window_reset`). Open one here instead of measuring across the gap.
+    // (`fps_window_reset`). Open one here instead of measuring across the gap,
+    // on a tick that advanced the movie (see the close below).
     if start == 0 {
+        if frames_run == 0 {
+            return;
+        }
         FPS_WINDOW_START.store(now.max(1), std::sync::atomic::Ordering::Relaxed);
         // ZERO, not `frames_run`: those frames were advanced by the tick that
         // has just finished, so they happened BEFORE `now`. Seeding them into a
@@ -3345,6 +3357,15 @@ pub fn fps_sample(frames_run: u32, nominal_x10: u32, now: u64) {
     const MIN_FRAMES: u32 = 4;
     const MAX_WINDOW_SECS: u64 = 3;
     if frames < MIN_FRAMES && dt < freq * MAX_WINDOW_SECS {
+        return;
+    }
+    // Close on a tick that advanced the movie, as the window opened on one: it
+    // then spans exactly `frames` frame intervals. Closing on any tick past the
+    // half second counted whole frames over a span that could hold one more
+    // frame than intervals: a game at exactly 30 read "31 / 30" every few
+    // windows (16 frames in 31 vsyncs, Super Smash Flash 2, 2026-10-05). The
+    // ceiling still closes the window of a game that has stopped.
+    if frames_run == 0 && dt < freq * MAX_WINDOW_SECS {
         return;
     }
     FPS_REAL_X10.store(
@@ -9295,7 +9316,7 @@ impl SwitchRenderBackend {
     /// legibility instead, over a white sky and over a black cave alike.
     ///
     /// Every character is in the 5x7 bitmap font -- digits, '/', '.', 'X' and
-    /// the three letters of FPS -- so this pulls no shared-font glyph and stays
+    /// the letters of FPS and OC -- so this pulls no shared-font glyph and stays
     /// safe in applet mode, where loading that font is fatal.
     pub fn draw_fps_overlay(&mut self) {
         let (measured, nominal) = fps_readout();
@@ -9361,6 +9382,22 @@ impl SwitchRenderBackend {
         // read than one that grows. Top corner because the pause panel is
         // centred and the framing legend owns the middle of both edges.
         self.draw_text_outlined(vw - w - MARGIN, MARGIN, SCALE, &text, color);
+        // "OC" to its left while the overclock is IN FORCE (the mode the
+        // hardware holds, not the stored preference): a raise dropped for the
+        // battery, or not yet taken back after HOME, then shows as its absence
+        // next to the number it explains. Its own colour, apart from the speed
+        // colours, so it never reads as part of the rating.
+        if current_power_mode() == 1 {
+            const GAP: f32 = 14.0;
+            let ow = self.measure_text("OC", SCALE);
+            self.draw_text_outlined(
+                vw - w - MARGIN - GAP - ow,
+                MARGIN,
+                SCALE,
+                "OC",
+                swf::Color::from_rgb(0x40C4FF, 255),
+            );
+        }
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
@@ -16482,6 +16519,29 @@ impl RenderBackend for SwitchRenderBackend {
                     ));
                 }
                 self.log_evict();
+                // Live memory by call stack, every 1200 frames (heapprof build).
+                #[cfg(feature = "heapprof")]
+                if self.frame_count % 1200 == 0 {
+                    crate::heapprof::dump("sdmc:/switch/FlashNX/heapprof.bin");
+                    log_str(&std::format!("heapprof: f{} written\n", self.frame_count));
+                }
+                // GPU objects against nvdrv's bookkeeping ceiling (~2 KB per
+                // handle in its transfer memory, see nouveau.c).
+                log_str(&std::format!(
+                    "gpu: f{} nvmap handles {} (bookkeeping {} MB)\n",
+                    self.frame_count,
+                    unsafe { flashnx_nvmap_live() },
+                    unsafe { __nx_nv_transfermem_size } / (1024 * 1024)
+                ));
+                // dlmalloc's wholly free segments back to the top region.
+                let trimmed = crate::dl_trim();
+                if trimmed > 0 {
+                    log_str(&std::format!(
+                        "dl: f{} gave back {} MB of empty segments\n",
+                        self.frame_count,
+                        trimmed / (1024 * 1024)
+                    ));
+                }
                 // How the heap is split: big blocks at the top, newlib below.
                 {
                     let mut h = [0u64; 8];

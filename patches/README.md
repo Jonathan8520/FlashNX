@@ -257,6 +257,78 @@ Switch side (allocator, renderer) is in FlashNX itself, not in this diff.
   `core/src/flashnx_census.rs` (feature `flashnx_census`, off by default):
   live AVM2 objects per class.
 
+**Super Smash Flash 2, October 2026, continued: what a long session holds.**
+Classic mode used to die at the first level of a second run; it now runs about
+three and a half Classic runs in a row (SSF2's own staff advised restarting
+every 3 to 6 matches even on Flash Player: its hitbox caches are never
+cleared). Heap profiles on the console (`--memprof` build) drove every step.
+
+- `core/src/library.rs`, `character.rs`, `avm2/class.rs`, `avm2/domain.rs`,
+  `avm2/object/loaderinfo_object.rs`, `display_object/*.rs`, `player.rs`: a
+  movie a `Loader` unloads is no longer kept for good. Its library is
+  released: no longer traced, and at the end of every marking phase
+  (gc-arena's finalization) it is kept whole while anything outside it still
+  uses the movie (its AVM2 domain, its root clip, or an instance of one of
+  its symbols, which shares the symbol's `shared` data), and dropped
+  otherwise, with its symbol classes and sounds. Finalization runs to a fixed
+  point, since a kept library can make another one's anchors live. Every
+  collection goes through `Player::collect_debt` / `collect_full`, so no
+  sweep follows a marking that skipped it. Same model as upstream PRs #22908
+  and #23071 (open), smaller. `moviefree.off` marker to compare.
+- `core/src/avm2/vtable.rs`, `class.rs`, `property.rs`, `property_map.rs`:
+  a class's resolved traits were built twice with the same inputs (for its
+  `Class` and its `ClassObject`); the second vtable now shares the first's
+  map. `PropertyMap` keeps one namespace inline per name instead of two
+  (56 bytes an entry instead of 96). About 280 MB less on SSF2.
+- `core/common/src/tag_utils.rs` (`SharedBytes`, `SwfMovie::from_shared_data`),
+  `core/src/avm2/bytearray.rs`, `avm2/globals/flash/utils/byte_array.rs`,
+  `avm2/globals/flash/display/loader.rs`, `loader.rs`: a ByteArray's bytes can
+  be shared, copy on write, with another ByteArray they are written into
+  whole (`writeBytes` into an empty one, from 64 KB) and with the movie
+  `Loader.loadBytes` loads from them. An uncompressed movie keeps its tags in
+  that buffer (checked byte for byte). SSF2 keeps every DAT file it downloads
+  as a ByteArray and loads the SWF inside: 212 MB of ByteArrays next to
+  224 MB of movies, the same bytes. `uncompress` / `compress` also take the
+  result as the storage at its exact size (the old storage kept its capacity
+  and doubled from there: ~1.85x the data).
+- `core/src/backend/audio.rs`, `audio/mixer.rs`, `audio/decoders.rs`,
+  `display_object/movie_clip.rs`: the mixer references an embedded sound in
+  its movie instead of copying it (`SoundBytes`), and forgets the sounds of a
+  dropped library (`AudioBackend::unregister_sound`, default no-op).
+- `core/src/bitmap/bitmap_data.rs`, `character.rs`,
+  `avm2/globals/flash/display/bitmap.rs`, `bitmap_data.rs`: Flash Player
+  10.1's "BitmapData single reference". Every BitmapData made from a library
+  bitmap shares its decoded pixels (`SharedPixels`, held weakly by the
+  symbol) until one of them changes a pixel; every writer goes through
+  `unshare`. A bitmap placed by a goto used to be inflated and copied each
+  time (~9 % of a 14-second SSF2 loading frame).
+- `core/src/avm2/regexp.rs`: compiled patterns are shared by source and flags
+  (`g` excluded), up to 512 of them. A regex literal builds a new RegExp each
+  time it runs, and each compiled its pattern again: ~21 % of the same frame,
+  and every discarded RegExp held its program until the next collection,
+  which cannot run in the middle of a script.
+- `core/src/avm2/dynamic_map.rs`, `avm2/object/script_object.rs`: every AS3
+  object carried an empty dynamic-property table (48 bytes) and an empty
+  bound-method `Vec` (24 bytes). Both are now allocated on first use, and
+  the enumeration indices are 32 bits: about 48 bytes less per object, of
+  which SSF2 keeps 1.7 million.
+
+FlashNX's side of the same work (not in this diff): `cpp/third_party/
+libdrm_nouveau/nouveau.c` gives nvdrv 32 MB of transfer memory instead of
+libnx's 8 MB (`__nx_nv_transfermem_size`; every nvmap handle is booked there,
+and past ~4000 of them `nvMapCreate` fails with 0x235C whatever the size, which
+froze SSF2 after 36 minutes with 5600 handles live) and caches pitch staging
+BOs too; `rust/src/lib.rs` keeps dlmalloc's segments apart so that an empty one
+can go back to the heap (none did in SSF2: a few long-lived blocks pin each); `rust/src/heapprof.rs` and `scripts/heapprof_report.py` are
+the heap profiler.
+
+### Tried and dropped (2026-10-06)
+
+- **The small-object region at 1 GB instead of 512 MB.** SSF2 then ended with
+  1023 MB there plus 656 MB in dlmalloc, against 511 + 856: a region chunk only
+  serves its own size classes, so the small-block peak of a loading frame
+  stayed reserved for good. Back to 512 MB.
+
 ### Tried and dropped (2026-09-24)
 
 Measured with the sampling profiler (`cpp/src/prof.cpp`) in an in-session A/B

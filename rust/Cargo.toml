@@ -141,6 +141,9 @@ indexmap = "2.13.0"
 # on. See `counting_alloc` in src/lib.rs.
 [features]
 instr = ["ruffle_core/flashnx_instr"]
+# Heap profiler (src/heapprof.rs): needs the frame pointers of the release-prof
+# profile, see scripts/build.sh --memprof. Its tables take ~15 MB of BSS.
+heapprof = []
 
 [profile.release]
 opt-level = 3
