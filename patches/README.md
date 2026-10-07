@@ -362,6 +362,40 @@ console, one change at a time, each with an SD-card marker to turn it off.
   and cleared up to the top by every mark, `play()` and the frame-skip flag.
   Agent P went from 14.5 to ~60 images a second. Marker `frameskip.off`.
 
+- `core/src/avm2/activation_jit.rs` (new), `activation.rs`, `method.rs`,
+  `stack.rs`, `object/script_object.rs`: **a baseline JIT for AVM2 bytecode**
+  (feature `flashnx_jit`, AArch64, the Switch build only). Fireboy & Watergirl
+  2 runs 2.65 million AVM2 ops a frame at ~57 cycles each; the interpreter pays
+  one shared, badly predicted indirect branch per op and keeps its stack
+  pointer in memory. On its second call a method is compiled: the stack depth
+  of every op is known, so stack slots are fixed offsets from x19; locals,
+  constants, `Pop`, `Dup`, `Swap` and branches are a few instructions; every
+  other op calls `h_op::<K>`, one instantiation per op kind that runs the
+  interpreter's own handler and checks the depth it left (a mismatch hands the
+  method back to the interpreter at the next op, for good). Inline fast paths:
+  `getslot` on objects, `iftrue`/`iffalse` on a `Bool`, `+ - *` and the
+  comparisons when both operands are `Number`s or both `int`s (same results as
+  the interpreter's fast paths, `int` overflow and NaN included), `IncrementI`,
+  `DecrementI`, `CoerceI`, `CoerceD`. The layout they read (tags of `Value`,
+  payload at byte 8, `Gc` box to object data, the slots' fat pointer) is
+  measured on real values before use; an object type not checked takes the
+  helper. Methods with `try`/`catch`, `lookupswitch` or `Timestamp` stay
+  interpreted. Code memory: 16 MB from libnx's `jitCreate` (CodeMemory, which
+  hbloader allows on Mesosphere), `cpp/src/flashnx_jit.c`, reused by each new
+  game (`jit_reset`). Fireboy 2's light temple: 13.0 to 16.9 images a second
+  (same session, 16 window pairs), no AS3 error in six other games. Marker
+  `jit.off`; `jit:` line every 300 frames.
+- `core/src/avm2/activation.rs`, `function.rs`, `stack.rs`: **a cheaper AVM2
+  call path** (`set_fast_calls`). A bytecode activation keeps its method
+  instead of cloning an `Arc<SwfMovie>` per call (two atomic loops on the
+  Switch's ARMv8.0 cores, no LSE), the receiver check is left to debug builds,
+  and a new frame clears only its locals (the verifier rejects any pop without
+  a push of the same frame, so the operand part is never read stale). -2.8 ms a
+  frame on Fireboy 2. Marker `fastcall.off`.
+- `core/src/flashnx_avm2ops.rs` (new): AVM2 opcode census (`avm2ops:` lines,
+  feature `flashnx_opcount`, not in any default build: its pair table costs
+  ~14 % of an AS3-bound frame).
+
 FlashNX's side (not in this diff), in `rust/src/backend/render.rs`:
 
 - Shape vertices are written with an unsynchronized `glMapBufferRange`. The

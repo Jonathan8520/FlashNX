@@ -16793,6 +16793,16 @@ impl RenderBackend for SwitchRenderBackend {
                 if !as3.is_empty() {
                     log_str(&std::format!("as3prof: f{} last 300 frames\n{}", self.frame_count, as3));
                 }
+                // AVM2 JIT: compiled, rejected (why), handed back (which op).
+                let jit = ruffle_core::jit_report();
+                if !jit.is_empty() {
+                    log_str(&std::format!("jit: f{} {}\n", self.frame_count, jit));
+                }
+                // How many AVM2 ops ran, their pairs, callee sizes (opcount only).
+                let ops = ruffle_core::avm2ops_report(300);
+                if !ops.is_empty() {
+                    log_str(&std::format!("avm2ops: f{} last 300 frames\n{}", self.frame_count, ops));
+                }
                 // What is alive: movies, display objects, AVM2 objects per
                 // class (empty unless Ruffle is built with flashnx_instr).
                 let census = ruffle_core::census_report();

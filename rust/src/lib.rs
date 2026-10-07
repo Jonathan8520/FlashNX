@@ -1757,6 +1757,22 @@ pub extern "C" fn ruffle_init() -> c_int {
     if !render_cost {
         log(b"frames: rendercost.off present -> render handlers left out of catch-up\n\0");
     }
+    // `sdmc:/switch/FlashNX/fastcall.off`: upstream's AVM2 call path (an Arc
+    // clone per call, the receiver check, the whole new frame cleared), see
+    // `set_fast_calls` in our Ruffle.
+    let fast_calls = !backend::render::marker_present("fastcall.off");
+    ruffle_core::set_fast_calls(fast_calls);
+    if !fast_calls {
+        log(b"calls: fastcall.off present -> upstream AVM2 call path\n\0");
+    }
+    // `sdmc:/switch/FlashNX/jit.off`: AVM2 bytecode stays interpreted.
+    let jit = !backend::render::marker_present("jit.off");
+    ruffle_core::set_jit(jit);
+    // The previous game's player is gone: so is all the code compiled for it.
+    ruffle_core::jit_reset();
+    if !jit {
+        log(b"jit: jit.off present -> AVM2 bytecode interpreted\n\0");
+    }
     // `sdmc:/switch/FlashNX/frameskip.off`: every frame walks the whole display
     // list again in enterFrame, frame construction and frame scripts (see
     // `set_full_frame_skip` in our Ruffle). Same kind of experiment switch.
@@ -2317,6 +2333,9 @@ pub(crate) static AB_REGIME: core::sync::atomic::AtomicU64 = core::sync::atomic:
 pub extern "C" fn ruffle_ab_regime(regime: i32) {
     use core::sync::atomic::Ordering::Relaxed;
     AB_REGIME.store((regime != 0) as u64, Relaxed);
+    // 2026-10-07: the AVM2 JIT of our Ruffle (`set_jit`). Before it, the
+    // cheaper call path (`set_fast_calls`, -2.8 ms a frame on Fireboy 2).
+    ruffle_core::set_jit(regime != 0);
 }
 
 /// Hide `us` microseconds of wall clock from the movie (#87).

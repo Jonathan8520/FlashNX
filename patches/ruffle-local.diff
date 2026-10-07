@@ -1,8 +1,8 @@
 diff --git a/core/Cargo.toml b/core/Cargo.toml
-index ddc2ef98c..43329c8d0 100644
+index ddc2ef98c..0e2ee1adf 100644
 --- a/core/Cargo.toml
 +++ b/core/Cargo.toml
-@@ -94,6 +94,11 @@ default_compatibility_rules = []
+@@ -94,6 +94,17 @@ default_compatibility_rules = []
  egui = ["dep:egui", "dep:egui_extras", "png"]
  jpegxr = ["dep:jpegxr", "lzma"]
  default_font = []
@@ -11,6 +11,12 @@ index ddc2ef98c..43329c8d0 100644
 +# FlashNX: live-object census per AVM2 class (`census:` line). Costs a lock on
 +# every AVM2 object created and freed, so it is NOT part of flashnx_instr.
 +flashnx_census = []
++# FlashNX: AVM2 opcode census (`avm2ops:` lines). Costs ~14 % of an AS3-bound
++# frame (a 256 KB pair table), so it is NOT part of flashnx_instr.
++flashnx_opcount = []
++# FlashNX: baseline JIT for AVM2 bytecode (src/avm2/activation_jit.rs). Needs
++# AArch64 and cpp/src/flashnx_jit.c: the Switch build only.
++flashnx_jit = []
  serde = ["serde/derive"]
  
  [build-dependencies]
@@ -675,10 +681,105 @@ index 563ffbb03..ba6970ad5 100644
          context: &mut UpdateContext<'gc>,
          object: Object<'gc>,
 diff --git a/core/src/avm2/activation.rs b/core/src/avm2/activation.rs
-index ed1ff3034..0ad8550d8 100644
+index ed1ff3034..cc2f5faa7 100644
 --- a/core/src/avm2/activation.rs
 +++ b/core/src/avm2/activation.rs
-@@ -214,8 +214,13 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -57,7 +57,8 @@ pub struct Activation<'a, 'gc: 'a> {
+     /// The movie that called this builtin method.
+     /// This is intended to be used only for builtin methods- if this activation's method
+     /// is a bytecode method, the movie will instead be the movie that the bytecode method came from.
+-    caller_movie: Option<Arc<SwfMovie>>,
++    /// FlashNX: kept as the method itself for bytecode activations, see `CallerMovie`.
++    caller_movie: CallerMovie<'gc>,
+ 
+     /// The superclass of the class that yielded the currently executing method.
+     ///
+@@ -102,6 +103,66 @@ pub struct Activation<'a, 'gc: 'a> {
+     pub context: &'a mut UpdateContext<'gc>,
+ }
+ 
++/// FlashNX: where `Activation::caller_movie()` comes from. Upstream stores an
++/// `Arc<SwfMovie>` cloned from the method on EVERY bytecode call and drops it
++/// when the call returns: two atomic read-modify-write loops per call on the
++/// Switch's ARMv8.0 cores (no LSE atomics), ~2 % of Fireboy & Watergirl 2's
++/// frame at 47 000 calls per frame. The method is kept instead, and the movie
++/// is only looked up when a builtin actually asks for it.
++#[derive(Clone)]
++pub enum CallerMovie<'gc> {
++    None,
++    Method(Method<'gc>),
++    Movie(Arc<SwfMovie>),
++}
++
++/// FlashNX: the cheaper AVM2 call path (`CallerMovie`, the receiver check left
++/// to debug builds, only the locals of a new stack frame cleared). On by
++/// default; the `fastcall.off` marker or the profiling build's A/B turn it off.
++static FAST_CALLS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
++
++pub fn set_fast_calls(on: bool) {
++    FAST_CALLS.store(on, std::sync::atomic::Ordering::Relaxed);
++}
++
++#[inline(always)]
++pub fn fast_calls() -> bool {
++    FAST_CALLS.load(std::sync::atomic::Ordering::Relaxed)
++}
++
++/// FlashNX: baseline JIT for AVM2 bytecode, see `activation_jit.rs`.
++#[cfg(feature = "flashnx_jit")]
++#[path = "activation_jit.rs"]
++mod jit;
++
++/// FlashNX: run compiled methods (on by default; `jit.off` marker, or the
++/// profiling build's A/B). Methods already compiled are kept either way.
++pub fn set_jit(on: bool) {
++    #[cfg(feature = "flashnx_jit")]
++    jit::set_enabled(on);
++    #[cfg(not(feature = "flashnx_jit"))]
++    let _ = on;
++}
++
++/// FlashNX: a new game starts, the JIT's code memory is free again (call it
++/// only once the previous game's player is gone).
++pub fn jit_reset() {
++    #[cfg(feature = "flashnx_jit")]
++    jit::reset();
++}
++
++/// FlashNX: one line of JIT counters (`jit:`), empty without the JIT.
++pub fn jit_report() -> String {
++    #[cfg(feature = "flashnx_jit")]
++    {
++        jit::report()
++    }
++    #[cfg(not(feature = "flashnx_jit"))]
++    {
++        String::new()
++    }
++}
++
+ impl<'gc> HasStringContext<'gc> for Activation<'_, 'gc> {
+     #[inline(always)]
+     fn strings_ref(&self) -> &StringContext<'gc> {
+@@ -135,7 +196,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+             num_locals: 0,
+             outer: ScopeChain::new(context.avm2.stage_domain),
+             caller_domain: None,
+-            caller_movie: None,
++            caller_movie: CallerMovie::None,
+             bound_superclass_object: None,
+             stack: StackFrame::empty(),
+             scope_depth: context.avm2.scope_stack.len(),
+@@ -159,7 +220,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+             num_locals: 0,
+             outer: ScopeChain::new(context.avm2.stage_domain),
+             caller_domain: Some(domain),
+-            caller_movie: None,
++            caller_movie: CallerMovie::None,
+             bound_superclass_object: None,
+             stack: StackFrame::empty(),
+             scope_depth: context.avm2.scope_stack.len(),
+@@ -214,8 +275,13 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          method: Method<'gc>,
          user_arguments: FunctionArgs<'_, 'gc>,
          signature: &[ResolvedParamConfig<'gc>],
@@ -694,7 +795,98 @@ index ed1ff3034..0ad8550d8 100644
          for (arg, param_config) in user_arguments.iter().zip(signature.iter()) {
              let coerced_arg = if let Some(param_class) = param_config.param_type {
                  arg.coerce_to_type(self, param_class)?
-@@ -946,7 +951,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -343,14 +409,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+         let num_locals = body.num_locals as usize;
+         let has_rest_or_args = method.is_variadic();
+ 
+-        if let Some(bound_class) = method.bound_class() {
+-            assert!(this.is_of_type(bound_class));
++        let fast = fast_calls();
++        if !fast || cfg!(debug_assertions) {
++            if let Some(bound_class) = method.bound_class() {
++                assert!(this.is_of_type(bound_class));
++            }
+         }
+ 
+         self.num_locals = num_locals;
+         self.outer = outer;
+         self.caller_domain = Some(outer.domain());
+-        self.caller_movie = Some(method.owner_movie());
++        self.caller_movie = if fast {
++            CallerMovie::Method(method)
++        } else {
++            CallerMovie::Movie(method.owner_movie())
++        };
+         self.bound_superclass_object = bound_superclass_object;
+         self.stack = stack_frame;
+         self.scope_depth = self.context.avm2.scope_stack.len();
+@@ -438,7 +511,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+         bound_superclass_object: Option<ClassObject<'gc>>,
+         outer: ScopeChain<'gc>,
+         caller_domain: Option<Domain<'gc>>,
+-        caller_movie: Option<Arc<SwfMovie>>,
++        caller_movie: CallerMovie<'gc>,
+         caller_dxns: Option<AvmString<'gc>>,
+     ) -> Self {
+         Self {
+@@ -519,6 +592,16 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+     /// Returns the movie of the original AS3 caller. This will be `None`
+     /// if this activation was constructed with `from_nothing`
+     pub fn caller_movie(&self) -> Option<Arc<SwfMovie>> {
++        match &self.caller_movie {
++            CallerMovie::None => None,
++            CallerMovie::Method(method) => Some(method.owner_movie()),
++            CallerMovie::Movie(movie) => Some(movie.clone()),
++        }
++    }
++
++    /// FlashNX: what a builtin called from here gets as its caller movie,
++    /// without cloning the `Arc` when it is a bytecode method's.
++    pub fn caller_movie_source(&self) -> CallerMovie<'gc> {
+         self.caller_movie.clone()
+     }
+ 
+@@ -643,6 +726,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+     }
+ 
+     pub fn run_actions(&mut self, method: Method<'gc>) -> Result<Value<'gc>, Error<'gc>> {
++        #[cfg(feature = "flashnx_jit")]
++        if jit::enabled() {
++            match jit::run(self, method) {
++                jit::Outcome::Done(result) => return result,
++                // The JIT handed over mid-method: the stack is the interpreter's.
++                jit::Outcome::Resume(ip) => return self.run_actions_from(method, ip),
++                jit::Outcome::Interpret => {}
++            }
++        }
++        self.run_actions_from(method, 0)
++    }
++
++    fn run_actions_from(
++        &mut self,
++        method: Method<'gc>,
++        start_ip: usize,
++    ) -> Result<Value<'gc>, Error<'gc>> {
+         // The method must be verified at this point
+ 
+         let verified_info = method.get_verified_info();
+@@ -650,12 +750,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+ 
+         self.timeout_check()?;
+ 
+-        let mut ip = 0;
++        let mut ip = start_ip;
+ 
+         loop {
+             let op = &opcodes[ip];
+             ip += 1;
+             avm_debug!(self.avm2(), "Opcode: {op:?}");
++            #[cfg(feature = "flashnx_opcount")]
++            crate::flashnx_avm2ops::count(core::intrinsics::discriminant_value(op) as usize, op);
+ 
+             let result = match op {
+                 Op::PushDouble { value } => self.op_push_double(*value),
+@@ -946,7 +1048,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          *self.context.actions_since_timeout_check += 1;
          if *self.context.actions_since_timeout_check >= 10000 {
              *self.context.actions_since_timeout_check = 0;
@@ -703,7 +895,7 @@ index ed1ff3034..0ad8550d8 100644
                  return Err(
                      "A script in this movie has taken too long to execute and has been terminated."
                          .into(),
-@@ -2023,6 +2028,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2023,6 +2125,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                      ((n1 as i64 + n2 as i64) as f64).into()
                  }
              }
@@ -714,7 +906,7 @@ index ed1ff3034..0ad8550d8 100644
              (Value::Number(n1), Value::Number(n2)) => (n1 + n2).into(),
              (Value::String(s), value2) => Value::String(AvmString::concat(
                  self.gc(),
-@@ -2072,11 +2081,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2072,11 +2178,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          Ok(())
      }
  
@@ -725,8 +917,7 @@ index ed1ff3034..0ad8550d8 100644
 -        let value1 = self.pop_stack().coerce_to_i32(self)?;
 +        let value2 = self.pop_stack();
 +        let value1 = self.pop_stack();
- 
--        self.push_stack(value1.wrapping_add(value2));
++
 +        let sum_value = match (value1, value2) {
 +            (Value::Integer(n1), Value::Integer(n2)) => n1.wrapping_add(n2),
 +            (value1, value2) => {
@@ -736,12 +927,13 @@ index ed1ff3034..0ad8550d8 100644
 +                value1.wrapping_add(value2)
 +            }
 +        };
-+
+ 
+-        self.push_stack(value1.wrapping_add(value2));
 +        self.push_stack(sum_value);
  
          Ok(())
      }
-@@ -2134,8 +2155,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2134,8 +2252,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
      fn op_decrement(&mut self) -> Result<(), Error<'gc>> {
          let value = self.pop_stack().coerce_to_number(self)?;
@@ -752,7 +944,7 @@ index ed1ff3034..0ad8550d8 100644
  
          Ok(())
      }
-@@ -2151,8 +2173,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2151,8 +2270,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      fn op_divide(&mut self) -> Result<(), Error<'gc>> {
          let value2 = self.pop_stack().coerce_to_number(self)?;
          let value1 = self.pop_stack().coerce_to_number(self)?;
@@ -763,7 +955,7 @@ index ed1ff3034..0ad8550d8 100644
  
          Ok(())
      }
-@@ -2175,8 +2198,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2175,8 +2295,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
      fn op_increment(&mut self) -> Result<(), Error<'gc>> {
          let value = self.pop_stack().coerce_to_number(self)?;
@@ -774,7 +966,7 @@ index ed1ff3034..0ad8550d8 100644
  
          Ok(())
      }
-@@ -2274,6 +2298,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2274,6 +2395,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                      ((n1 as i64 - n2 as i64) as f64).into()
                  }
              }
@@ -783,7 +975,7 @@ index ed1ff3034..0ad8550d8 100644
              (Value::Number(n1), Value::Number(n2)) => (n1 - n2).into(),
              _ => {
                  let value2 = value2.coerce_to_number(self)?;
-@@ -2288,10 +2314,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2288,10 +2411,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      }
  
      fn op_subtract_i(&mut self) -> Result<(), Error<'gc>> {
@@ -807,6 +999,1293 @@ index ed1ff3034..0ad8550d8 100644
  
          Ok(())
      }
+diff --git a/core/src/avm2/activation_jit.rs b/core/src/avm2/activation_jit.rs
+new file mode 100644
+index 000000000..1169f77cc
+--- /dev/null
++++ b/core/src/avm2/activation_jit.rs
+@@ -0,0 +1,1281 @@
++//! FlashNX: a baseline JIT for AVM2 bytecode (AArch64, Switch build only).
++//!
++//! Fireboy & Watergirl 2 runs 2.65 million AVM2 ops per frame at ~57 CPU
++//! cycles each: the interpreter loop pays one shared, badly predicted indirect
++//! branch per op, and reloads and stores its stack pointer from memory on every
++//! push and pop. Flash Player compiled ActionScript to machine code instead.
++//!
++//! This is the simplest compiler that removes both costs, the "baseline JIT"
++//! of the literature (template / copy-and-patch JITs):
++//!
++//! - The stack depth of every op is known before running (the verifier
++//!   guarantees it, we recompute it), so each stack slot is a fixed offset from
++//!   the frame base kept in x19: no stack pointer at all in compiled code.
++//! - Locals, constants, `Pop`, `Dup`, `Swap` and branches are a few inline
++//!   instructions (`ldr q0` / `str q0` of the 16-byte `Value`).
++//! - Every other op calls `h_op::<K>`, one instantiation per op kind: it sets
++//!   the interpreter's stack pointer, runs the very same `op_*` handler as the
++//!   interpreter, and checks the depth it left against the one we computed.
++//!   Behaviour is the interpreter's by construction, and a wrong entry in
++//!   `effect` is caught at the first run: the method goes back to the
++//!   interpreter at the next op, and is never compiled again.
++//!
++//! Some ops also have an inline fast path, because their helper was the cost:
++//! `getslot` on an object (13 % of Fireboy's frame through its helper),
++//! `iftrue` / `iffalse` on a `Bool`, and arithmetic, comparisons and int
++//! coercions when both operands are `Number`s or both `int`s (the exact
++//! results of the interpreter's own fast paths, overflow and NaN included). They read Ruffle's data in place, so the
++//! layout they rely on is measured on real values first (`Layout`): a type
++//! of object whose layout was not checked takes the helper.
++//!
++//! Methods with exception handlers, `lookupswitch` or unknown ops stay
++//! interpreted. Code memory comes from libnx's `jitCreate` (CodeMemory, which
++//! hbloader allows on Mesosphère), see `cpp/src/flashnx_jit.c`.
++
++use super::*;
++use crate::avm2::object::ScriptObjectData;
++use fnv::FnvHashMap;
++use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
++
++unsafe extern "C" {
++    fn flashnx_jit_init(size: usize, rw: *mut *mut u8, rx: *mut *mut u8) -> u32;
++    fn flashnx_jit_flush(rw: *mut u8, rx: *mut u8, len: usize);
++}
++
++const REJECTED: usize = usize::MAX;
++/// Compile on the second call: one-shot initializers stay interpreted.
++const THRESHOLD: usize = 2;
++/// Code memory, taken once from the heap and reused by every game (`reset`).
++/// Super Smash Flash 2, the biggest seen, compiles ~6 MB of it.
++const CODE_SIZE: usize = 16 << 20;
++/// Helper table: 0..KINDS = `h_op::<K>`, then the special helpers.
++const KINDS: usize = 160;
++const H_GENERIC: usize = 250;
++const H_TRUTHY: usize = 251;
++const H_TIMEOUT: usize = 252;
++const H_RETURN: usize = 253;
++
++static ENABLED: AtomicBool = AtomicBool::new(true);
++
++pub fn set_enabled(on: bool) {
++    ENABLED.store(on, AtomicOrdering::Relaxed);
++}
++
++#[inline(always)]
++pub fn enabled() -> bool {
++    ENABLED.load(AtomicOrdering::Relaxed)
++}
++
++type Act = Activation<'static, 'static>;
++
++/// What the compiled code and the helpers share. Only `frame` and `helpers`
++/// are read by machine code (offsets 0 and 8).
++#[repr(C)]
++struct Ctx {
++    frame: *mut Value<'static>,
++    helpers: *const usize,
++    act: *mut Act,
++    ops: *const Op<'static>,
++    num_locals: usize,
++    result: Option<Result<Value<'static>, Error<'static>>>,
++    resume_ip: usize,
++}
++
++pub(super) enum Outcome<'gc> {
++    Done(Result<Value<'gc>, Error<'gc>>),
++    Resume(usize),
++    Interpret,
++}
++
++struct State {
++    init: i32,
++    init_rc: u32,
++    rw: *mut u8,
++    rx: *mut u8,
++    used: usize,
++    helpers: [usize; 256],
++    compiled: u64,
++    rejected: u64,
++    reasons: FnvHashMap<String, u64>,
++    deopts: u64,
++    deopt_ops: FnvHashMap<String, u64>,
++    runs: u64,
++    layout: Layout,
++}
++
++/// What the inline fast paths assume about Ruffle's data, measured.
++#[derive(Clone, Default)]
++struct Layout {
++    /// `Value::Bool`: tag in byte 0, the bool in byte `bool_off`.
++    bool_ok: bool,
++    bool_tag: u8,
++    bool_off: usize,
++    /// First 8 bytes of a `Value::Bool` (the tag), when `bool_off` >= 8.
++    bool_word: u64,
++    /// `Value::Number`: tag in byte 0, the f64 at `num_off`; `Value::Integer`:
++    /// tag in byte 0, the i32 at `int_off`.
++    num_ok: bool,
++    num_tag: u8,
++    num_off: usize,
++    int_tag: u8,
++    int_off: usize,
++    /// `Value::Object`: tags of the object types checked so far, and where the
++    /// slots' pointer and length are from the `Gc` box pointer at byte 8.
++    obj_tags: Vec<u8>,
++    slots_ptr_off: usize,
++    slots_len_off: usize,
++    probes: u32,
++    obj_fail: &'static str,
++}
++
++static mut STATE: Option<State> = None;
++
++fn state() -> &'static mut State {
++    // Single-threaded: AVM2 only runs on the Ruffle worker.
++    unsafe {
++        let s = &mut *(&raw mut STATE);
++        s.get_or_insert_with(|| State {
++            init: 0,
++            init_rc: 0,
++            rw: std::ptr::null_mut(),
++            rx: std::ptr::null_mut(),
++            used: 0,
++            helpers: [0; 256],
++            compiled: 0,
++            rejected: 0,
++            reasons: FnvHashMap::default(),
++            deopts: 0,
++            deopt_ops: FnvHashMap::default(),
++            runs: 0,
++            layout: Layout::default(),
++        })
++    }
++}
++
++fn op_name(op: &Op<'_>) -> String {
++    let full = format!("{op:?}");
++    let end = full.find([' ', '{', '(']).unwrap_or(full.len());
++    full[..end].to_string()
++}
++
++#[inline(always)]
++fn kind(op: &Op<'_>) -> usize {
++    core::intrinsics::discriminant_value(op) as usize
++}
++
++fn init(s: &mut State) {
++    if s.init != 0 {
++        return;
++    }
++    s.init = -1;
++    if std::mem::size_of::<Value<'static>>() != 16 {
++        s.init_rc = 0xBAD1;
++        return;
++    }
++    let (mut rw, mut rx) = (std::ptr::null_mut(), std::ptr::null_mut());
++    let rc = unsafe { flashnx_jit_init(CODE_SIZE, &mut rw, &mut rx) };
++    s.init_rc = rc;
++    if rc != 0 || rw.is_null() || rx.is_null() {
++        return;
++    }
++    s.rw = rw;
++    s.rx = rx;
++    fill_helpers(&mut s.helpers);
++    probe_bool(&mut s.layout);
++    probe_numbers(&mut s.layout);
++    s.init = 1;
++}
++
++fn bytes8(v: Value<'_>) -> [u8; 16] {
++    let w = bytes_of(v);
++    let mut b = [0u8; 16];
++    b[..8].copy_from_slice(&w[0].to_le_bytes());
++    b[8..].copy_from_slice(&w[1].to_le_bytes());
++    b
++}
++
++fn primitive_tags() -> [u8; 5] {
++    [
++        bytes8(Value::Undefined)[0],
++        bytes8(Value::Null)[0],
++        bytes8(Value::Integer(0))[0],
++        bytes8(Value::Number(0.0))[0],
++        bytes8(Value::Bool(false))[0],
++    ]
++}
++
++fn probe_bool(l: &mut Layout) {
++    // The bytes around a payload are padding, with whatever was there: only
++    // the candidate places of the bool are compared (on the Switch build and
++    // on the PC alike, Ruffle's `Value` keeps every payload at byte 8).
++    let f = bytes8(Value::Bool(false));
++    let t = bytes8(Value::Bool(true));
++    let others = [bytes8(Value::Undefined)[0], bytes8(Value::Null)[0], bytes8(Value::Integer(0))[0], bytes8(Value::Number(0.0))[0]];
++    if f[0] != t[0] || others.contains(&f[0]) {
++        return;
++    }
++    let hits: Vec<usize> = [8usize, 1, 4].into_iter().filter(|&o| f[o] == 0 && t[o] == 1).collect();
++    if hits.len() != 1 {
++        return;
++    }
++    l.bool_tag = f[0];
++    l.bool_off = hits[0];
++    l.bool_ok = true;
++    // A bool written by the JIT: this word (the tag), then the byte.
++    l.bool_word = if l.bool_off >= 8 { f[0] as u64 } else { 0 };
++}
++
++fn probe_numbers(l: &mut Layout) {
++    let n = bytes8(Value::Number(1.5));
++    let i = bytes8(Value::Integer(0x1234_5678));
++    let others = [bytes8(Value::Undefined)[0], bytes8(Value::Null)[0], bytes8(Value::Bool(false))[0]];
++    if n[0] == i[0] || others.contains(&n[0]) || others.contains(&i[0]) {
++        return;
++    }
++    let bits = 1.5f64.to_bits().to_le_bytes();
++    let Some(num_off) = (8..=8).step_by(8).find(|&o| n[o..o + 8] == bits) else { return };
++    let ib = 0x1234_5678i32.to_le_bytes();
++    let Some(int_off) = (4..=12).step_by(4).find(|&o| i[o..o + 4] == ib) else { return };
++    l.num_tag = n[0];
++    l.num_off = num_off;
++    l.int_tag = i[0];
++    l.int_off = int_off;
++    l.num_ok = l.bool_ok && l.bool_off >= 8;
++}
++
++/// Learn the layout of one more type of object from a live one: Ruffle's own
++/// accessors (`gc_base`, the slots) against the raw bytes the JIT would read.
++fn probe_object(l: &mut Layout, v: Value<'_>) {
++    l.probes += 1;
++    let Value::Object(o) = v else { return };
++    let raw = bytes_of(v);
++    let tag = (raw[0] & 0xff) as u8;
++    if l.obj_tags.contains(&tag) {
++        return;
++    }
++    if primitive_tags().contains(&tag) {
++        l.obj_fail = "tag";
++        return;
++    }
++    if std::mem::size_of::<gc_arena::lock::Lock<Value<'static>>>() != 16 {
++        l.obj_fail = "slot size";
++        return;
++    }
++    let box_ptr = raw[1] as usize;
++    let base = o.gc_base();
++    let value = Gc::as_ptr(base) as usize;
++    if value < box_ptr || value - box_ptr > 64 {
++        l.obj_fail = "box";
++        return;
++    }
++    let (sp, sl) = base.flashnx_slots();
++    if sl == 0 || sp == sl {
++        return; // cannot tell the pointer from the length on this one
++    }
++    let field = value - box_ptr + ScriptObjectData::FLASHNX_SLOTS_OFFSET;
++    let words = unsafe { *((box_ptr + field) as *const [usize; 2]) };
++    let (ptr_off, len_off) = if words == [sp, sl] {
++        (field, field + 8)
++    } else if words == [sl, sp] {
++        (field + 8, field)
++    } else {
++        l.obj_fail = "slots";
++        return;
++    };
++    if ptr_off % 8 != 0 || ptr_off > 32000 {
++        l.obj_fail = "offset";
++        return;
++    }
++    if !l.obj_tags.is_empty() && (l.slots_ptr_off != ptr_off || l.slots_len_off != len_off) {
++        l.obj_fail = "mismatch";
++        return;
++    }
++    l.slots_ptr_off = ptr_off;
++    l.slots_len_off = len_off;
++    if l.obj_tags.len() < 4 {
++        l.obj_tags.push(tag);
++    }
++}
++
++// ---------------------------------------------------------------- assembler
++
++#[derive(Clone, Copy)]
++enum Target {
++    Op(usize),
++    Exit,
++    /// An instruction index of this method's code.
++    Code(usize),
++}
++
++#[derive(Clone, Copy)]
++enum Fix {
++    B,
++    /// cbz (false) / cbnz (true) on w<rt>.
++    Cb(bool, u32),
++    BCond(u32),
++}
++
++const EQ: u32 = 0;
++const NE: u32 = 1;
++const MI: u32 = 4;
++const VS: u32 = 6;
++const LS: u32 = 9;
++const GE: u32 = 10;
++const LT: u32 = 11;
++const GT: u32 = 12;
++const LE: u32 = 13;
++
++struct Asm {
++    code: Vec<u32>,
++    fixups: Vec<(usize, Target, Fix)>,
++}
++
++const X0: u32 = 0;
++const X16: u32 = 16;
++const X19: u32 = 19;
++const X20: u32 = 20;
++const X21: u32 = 21;
++const XZR: u32 = 31;
++const SP: u32 = 31;
++
++impl Asm {
++    fn e(&mut self, i: u32) {
++        self.code.push(i);
++    }
++    /// ldr q<rt>, [x<rn>, #off] (off multiple of 16, < 65536)
++    fn ldr_q(&mut self, rt: u32, rn: u32, off: usize) {
++        self.e(0x3DC0_0000 | ((off / 16) as u32) << 10 | rn << 5 | rt);
++    }
++    /// str q<rt>, [x<rn>, #off]
++    fn str_q(&mut self, rt: u32, rn: u32, off: usize) {
++        self.e(0x3D80_0000 | ((off / 16) as u32) << 10 | rn << 5 | rt);
++    }
++    /// str x<rt>, [x<rn>, #off] (off multiple of 8, < 32768)
++    fn str_x(&mut self, rt: u32, rn: u32, off: usize) {
++        self.e(0xF900_0000 | ((off / 8) as u32) << 10 | rn << 5 | rt);
++    }
++    /// ldr x<rt>, [x<rn>, #off]
++    fn ldr_x(&mut self, rt: u32, rn: u32, off: usize) {
++        self.e(0xF940_0000 | ((off / 8) as u32) << 10 | rn << 5 | rt);
++    }
++    /// ldrb w<rt>, [x<rn>, #off] (off < 4096)
++    fn ldrb(&mut self, rt: u32, rn: u32, off: usize) {
++        self.e(0x3940_0000 | (off as u32) << 10 | rn << 5 | rt);
++    }
++    /// cmp w<rn>, #imm (imm < 4096)
++    fn cmp_w(&mut self, rn: u32, imm: u32) {
++        self.e(0x7100_001F | imm << 10 | rn << 5);
++    }
++    /// cmp x<rn>, #imm (imm < 4096)
++    fn cmp_x(&mut self, rn: u32, imm: u32) {
++        self.e(0xF100_001F | imm << 10 | rn << 5);
++    }
++    /// ldr d<rt>, [x<rn>, #off] (off multiple of 8)
++    fn ldr_d(&mut self, rt: u32, rn: u32, off: usize) {
++        self.e(0xFD40_0000 | ((off / 8) as u32) << 10 | rn << 5 | rt);
++    }
++    fn str_d(&mut self, rt: u32, rn: u32, off: usize) {
++        self.e(0xFD00_0000 | ((off / 8) as u32) << 10 | rn << 5 | rt);
++    }
++    /// ldr w<rt>, [x<rn>, #off] (off multiple of 4)
++    fn ldr_w(&mut self, rt: u32, rn: u32, off: usize) {
++        self.e(0xB940_0000 | ((off / 4) as u32) << 10 | rn << 5 | rt);
++    }
++    fn str_w(&mut self, rt: u32, rn: u32, off: usize) {
++        self.e(0xB900_0000 | ((off / 4) as u32) << 10 | rn << 5 | rt);
++    }
++    /// strb w<rt>, [x<rn>, #off] (off < 4096)
++    fn strb(&mut self, rt: u32, rn: u32, off: usize) {
++        self.e(0x3900_0000 | (off as u32) << 10 | rn << 5 | rt);
++    }
++    /// cset w<rd>, cond
++    fn cset(&mut self, rd: u32, cond: u32) {
++        self.e(0x1A9F_07E0 | (cond ^ 1) << 12 | rd);
++    }
++    fn here(&self) -> usize {
++        self.code.len()
++    }
++    /// A branch whose target is set later with `set`; returns its fixup.
++    fn fwd(&mut self, fix: Fix) -> usize {
++        self.branch(fix, Target::Code(usize::MAX));
++        self.fixups.len() - 1
++    }
++    fn set(&mut self, fixup: usize, to: usize) {
++        self.fixups[fixup].1 = Target::Code(to);
++    }
++    /// movz w<rd>, #imm16
++    fn movz_w(&mut self, rd: u32, imm: u32) {
++        self.e(0x5280_0000 | (imm & 0xFFFF) << 5 | rd);
++    }
++    /// x<rd> = v; returns the register holding v (xzr for 0).
++    fn mov_x(&mut self, rd: u32, v: u64) -> u32 {
++        if v == 0 {
++            return XZR;
++        }
++        let mut first = true;
++        for hw in 0..4u32 {
++            let part = ((v >> (hw * 16)) & 0xFFFF) as u32;
++            if part == 0 {
++                continue;
++            }
++            let base = if first { 0xD280_0000 } else { 0xF280_0000 };
++            self.e(base | hw << 21 | part << 5 | rd);
++            first = false;
++        }
++        rd
++    }
++    /// Store the 16 bytes `v` at [x19 + off].
++    fn store_const(&mut self, off: usize, v: [u64; 2]) {
++        let r0 = self.mov_x(0, v[0]);
++        let r1 = self.mov_x(1, v[1]);
++        self.str_x(r0, X19, off);
++        self.str_x(r1, X19, off + 8);
++    }
++    fn branch(&mut self, fix: Fix, t: Target) {
++        self.fixups.push((self.code.len(), t, fix));
++        self.e(match fix {
++            Fix::B => 0x1400_0000,
++            Fix::Cb(false, rt) => 0x3400_0000 | rt,
++            Fix::Cb(true, rt) => 0x3500_0000 | rt,
++            Fix::BCond(cond) => 0x5400_0000 | cond,
++        });
++    }
++    /// x0 = ctx, w1..w3 = args, call helpers[h]; on a non-zero status, leave.
++    fn call(&mut self, h: usize, a1: usize, a2: usize, a3: usize, exit_on_status: bool) {
++        self.e(0xAA00_03E0 | X21 << 16 | X0); // mov x0, x21
++        self.movz_w(1, a1 as u32);
++        self.movz_w(2, a2 as u32);
++        self.movz_w(3, a3 as u32);
++        self.ldr_x(X16, X20, h * 8);
++        self.e(0xD63F_0000 | X16 << 5); // blr x16
++        if exit_on_status {
++            self.branch(Fix::Cb(true, 0), Target::Exit);
++        }
++    }
++    fn prologue(&mut self) {
++        self.e(0xA9BD_7BFD); // stp x29, x30, [sp, #-48]!
++        self.e(0x9100_03FD); // mov x29, sp
++        self.e(0xA901_53F3); // stp x19, x20, [sp, #16]
++        self.str_x(X21, SP, 32);
++        self.e(0xAA00_03E0 | X0 << 16 | X21); // mov x21, x0
++        self.ldr_x(X19, X0, 0);
++        self.ldr_x(X20, X0, 8);
++    }
++    fn epilogue(&mut self) {
++        self.ldr_x(X21, SP, 32);
++        self.e(0xA941_53F3); // ldp x19, x20, [sp, #16]
++        self.e(0xA8C3_7BFD); // ldp x29, x30, [sp], #48
++        self.e(0xD65F_03C0); // ret
++    }
++    fn resolve(&mut self, labels: &[usize], exit: usize) -> bool {
++        for &(at, t, fix) in &self.fixups {
++            let to = match t {
++                Target::Op(i) => match labels.get(i) {
++                    Some(&l) if l != usize::MAX => l,
++                    _ => return false,
++                },
++                Target::Exit => exit,
++                Target::Code(c) if c != usize::MAX => c,
++                Target::Code(_) => return false,
++            };
++            let delta = to as i64 - at as i64;
++            self.code[at] |= match fix {
++                Fix::B => (delta as u32) & 0x03FF_FFFF,
++                Fix::Cb(..) | Fix::BCond(_) => ((delta as u32) & 0x7FFFF) << 5,
++            };
++        }
++        true
++    }
++}
++
++/// The 16 bytes of `v` as the interpreter would store them in a stack slot.
++fn bytes_of(v: Value<'_>) -> [u64; 2] {
++    let mut buf = std::mem::MaybeUninit::<[u64; 2]>::zeroed();
++    unsafe {
++        (buf.as_mut_ptr() as *mut Value<'_>).write(v);
++        buf.assume_init()
++    }
++}
++
++fn lazy(m: &Gc<'_, Multiname<'_>>) -> usize {
++    m.has_lazy_name() as usize + m.has_lazy_ns() as usize
++}
++
++/// (values popped, values pushed). `None`: never compiled.
++fn effect(op: &Op<'_>) -> Option<(usize, usize)> {
++    use Op::*;
++    Some(match op {
++        PushDouble { .. } | PushFalse | PushInt { .. } | PushNamespace { .. } | PushNull
++        | PushString { .. } | PushTrue | PushUint { .. } | PushUndefined => (0, 1),
++        Pop => (1, 0),
++        Dup => (1, 2),
++        Swap => (2, 2),
++        GetLocal { .. } => (0, 1),
++        SetLocal { .. } => (1, 0),
++        StoreLocal { .. } => (1, 1),
++        Kill { .. } | IncLocal { .. } | IncLocalI { .. } | DecLocal { .. } | DecLocalI { .. } => (0, 0),
++        Call { num_args } => (2 + *num_args as usize, 1),
++        CallMethod { num_args, push_return_value, .. }
++        | CallNative { num_args, push_return_value, .. } => {
++            (1 + *num_args as usize, *push_return_value as usize)
++        }
++        CallProperty { multiname, num_args } | CallPropLex { multiname, num_args } => {
++            (1 + *num_args as usize + lazy(multiname), 1)
++        }
++        CallPropVoid { multiname, num_args } => (1 + *num_args as usize + lazy(multiname), 0),
++        CallStatic { num_args, .. } => (1 + *num_args as usize, 1),
++        CallSuper { multiname, num_args } => (1 + *num_args as usize + lazy(multiname), 1),
++        GetPropertyStatic { multiname } | GetPropertyFast { multiname } | GetPropertySlow { multiname } => {
++            (1 + lazy(multiname), 1)
++        }
++        SetPropertyStatic { multiname } | SetPropertyFast { multiname } | SetPropertySlow { multiname }
++        | InitProperty { multiname } => (2 + lazy(multiname), 0),
++        DeleteProperty { multiname } | GetSuper { multiname } | GetDescendants { multiname } => {
++            (1 + lazy(multiname), 1)
++        }
++        SetSuper { multiname } => (2 + lazy(multiname), 0),
++        FindProperty { multiname } | FindPropStrict { multiname } => (lazy(multiname), 1),
++        FindDef { .. } => (0, 1),
++        In | HasNext | NextName | NextValue | IsTypeLate | AsTypeLate | InstanceOf => (2, 1),
++        PushScope | PushWith | SetGlobalSlot { .. } | DxnsLate => (1, 0),
++        PopScope | Nop | Dxns { .. } | Debug { .. } | DebugFile { .. } | DebugLine { .. } | Bkpt
++        | BkptLine { .. } => (0, 0),
++        GetOuterScope { .. } | GetScopeObject { .. } | GetScriptGlobals { .. }
++        | NewActivation { .. } | NewFunction { .. } | HasNext2 { .. } => (0, 1),
++        GetSlot { .. } => (1, 1),
++        SetSlot { .. } | SetSlotCoerceI { .. } | SetSlotNoCoerce { .. } => (2, 0),
++        Construct { num_args } | ConstructSlot { num_args, .. } => (1 + *num_args as usize, 1),
++        ConstructProp { multiname, num_args } => (1 + *num_args as usize + lazy(multiname), 1),
++        ConstructSuper { num_args } => (1 + *num_args as usize, 0),
++        NewObject { num_args } => (2 * *num_args as usize, 1),
++        NewClass { .. } => (1, 1),
++        ApplyType { num_types } => (1 + *num_types as usize, 1),
++        NewArray { num_args } => (*num_args as usize, 1),
++        CoerceA | CoerceB | CoerceD | CoerceI | CoerceO | CoerceS | CoerceU | ConvertO | ConvertS
++        | Coerce { .. } | AsType { .. } | IsType { .. } | TypeOf | Not | Negate | NegateI | BitNot
++        | Increment | IncrementI | Decrement | DecrementI | EscXAttr | EscXElem | CheckFilter
++        | Lf32 | Lf64 | Li16 | Li32 | Li8 | Sxi1 | Sxi16 | Sxi8 => (1, 1),
++        CoerceDSwapPop | CoerceISwapPop | CoerceUSwapPop | CoerceSwapPop { .. } => (2, 1),
++        Add | AddI | BitAnd | BitOr | BitXor | Divide | LShift | Modulo | Multiply | MultiplyI
++        | RShift | Subtract | SubtractI | URShift | StrictEquals | Equals | GreaterEquals
++        | GreaterThan | LessEquals | LessThan => (2, 1),
++        Sf32 | Sf64 | Si16 | Si32 | Si8 => (2, 0),
++        Throw => (1, 0),
++        Jump { .. } => (0, 0),
++        IfTrue { .. } | IfFalse { .. } | PopJump { .. } => (1, 0),
++        ReturnValue { .. } => (1, 0),
++        ReturnVoid { .. } => (0, 0),
++        Timestamp | LookupSwitch(_) | NewCatch { .. } => return None,
++    })
++}
++
++// ---------------------------------------------------------------- compiler
++
++fn compile(s: &mut State, method: Method<'_>) -> Result<usize, String> {
++    init(s);
++    if s.init != 1 {
++        return Err("no code memory".into());
++    }
++    let info = method.get_verified_info();
++    if !info.exceptions.is_empty() {
++        return Err("try/catch".into());
++    }
++    let ops = &info.parsed_code;
++    let body = method.body().ok_or("no body")?;
++    let nl = body.num_locals as usize;
++    let ms = body.max_stack as usize;
++    let n = ops.len();
++    if n == 0 || n > 0xFFFF || nl + ms > 2000 {
++        return Err("size".into());
++    }
++
++    // Stack depth before every reachable op.
++    let mut depth = vec![u32::MAX; n];
++    depth[0] = 0;
++    let mut work = vec![0usize];
++    while let Some(i) = work.pop() {
++        let d = depth[i] as usize;
++        let op = &ops[i];
++        let (pops, pushes) = effect(op).ok_or_else(|| op_name(op))?;
++        if d < pops {
++            return Err("underflow".into());
++        }
++        let nd = d - pops + pushes;
++        if nd > ms {
++            return Err("overflow".into());
++        }
++        let succ: [Option<usize>; 2] = match op {
++            Op::Jump { offset } | Op::PopJump { offset } => [Some(*offset), None],
++            Op::IfTrue { offset } | Op::IfFalse { offset } => [Some(i + 1), Some(*offset)],
++            Op::ReturnValue { .. } | Op::ReturnVoid { .. } | Op::Throw => [None, None],
++            _ => [Some(i + 1), None],
++        };
++        for t in succ.into_iter().flatten() {
++            if t >= n {
++                return Err("falls off".into());
++            }
++            if depth[t] == u32::MAX {
++                depth[t] = nd as u32;
++                work.push(t);
++            } else if depth[t] as usize != nd {
++                return Err("depth merge".into());
++            }
++        }
++    }
++
++    let lay = s.layout.clone();
++    let slot = |d: usize| (nl + d) * 16;
++    let mut a = Asm {
++        code: Vec::with_capacity(n * 4 + 16),
++        fixups: Vec::new(),
++    };
++    a.prologue();
++    let mut labels = vec![usize::MAX; n];
++    for i in 0..n {
++        labels[i] = a.code.len();
++        if depth[i] == u32::MAX {
++            continue;
++        }
++        let d = depth[i] as usize;
++        let op = &ops[i];
++        match op {
++            Op::GetLocal { index } => {
++                a.ldr_q(0, X19, *index as usize * 16);
++                a.str_q(0, X19, slot(d));
++            }
++            Op::SetLocal { index } | Op::StoreLocal { index } => {
++                a.ldr_q(0, X19, slot(d - 1));
++                a.str_q(0, X19, *index as usize * 16);
++            }
++            Op::Kill { index } => a.store_const(*index as usize * 16, bytes_of(Value::Undefined)),
++            Op::PushInt { value } => a.store_const(slot(d), bytes_of(Value::from(*value))),
++            Op::PushUint { value } => a.store_const(slot(d), bytes_of(Value::from(*value))),
++            Op::PushDouble { value } => a.store_const(slot(d), bytes_of(Value::from(*value))),
++            Op::PushTrue => a.store_const(slot(d), bytes_of(Value::from(true))),
++            Op::PushFalse => a.store_const(slot(d), bytes_of(Value::from(false))),
++            Op::PushNull => a.store_const(slot(d), bytes_of(Value::Null)),
++            Op::PushUndefined => a.store_const(slot(d), bytes_of(Value::Undefined)),
++            Op::Pop | Op::Nop | Op::CoerceA => {}
++            Op::Dup => {
++                a.ldr_q(0, X19, slot(d - 1));
++                a.str_q(0, X19, slot(d));
++            }
++            Op::Swap => {
++                a.ldr_q(0, X19, slot(d - 2));
++                a.ldr_q(1, X19, slot(d - 1));
++                a.str_q(1, X19, slot(d - 2));
++                a.str_q(0, X19, slot(d - 1));
++            }
++            Op::Jump { offset } | Op::PopJump { offset } => {
++                if *offset <= i {
++                    a.call(H_TIMEOUT, 0, 0, 0, true);
++                }
++                a.branch(Fix::B, Target::Op(*offset));
++            }
++            Op::IfTrue { offset } | Op::IfFalse { offset } => {
++                if *offset <= i {
++                    a.call(H_TIMEOUT, 0, 0, 0, true);
++                }
++                let nz = matches!(op, Op::IfTrue { .. });
++                let top = slot(d - 1);
++                if lay.bool_ok && top + lay.bool_off < 4096 {
++                    // A Bool decides in place; anything else asks the helper.
++                    a.ldrb(9, X19, top);
++                    a.cmp_w(9, lay.bool_tag as u32);
++                    let to_slow = a.fwd(Fix::BCond(NE));
++                    a.ldrb(9, X19, top + lay.bool_off);
++                    a.branch(Fix::Cb(nz, 9), Target::Op(*offset));
++                    let to_done = a.fwd(Fix::B);
++                    let slow = a.here();
++                    a.set(to_slow, slow);
++                    a.call(H_TRUTHY, d, 0, 0, false);
++                    a.branch(Fix::Cb(nz, 0), Target::Op(*offset));
++                    let done = a.here();
++                    a.set(to_done, done);
++                } else {
++                    a.call(H_TRUTHY, d, 0, 0, false);
++                    a.branch(Fix::Cb(nz, 0), Target::Op(*offset));
++                }
++            }
++            Op::Add | Op::Subtract | Op::Multiply | Op::LessThan | Op::GreaterThan
++            | Op::LessEquals | Op::GreaterEquals | Op::Equals
++                if lay.num_ok && d >= 2 && slot(d - 1) + 16 < 4096 =>
++            {
++                // Both Numbers or both ints: the interpreter's fast paths, in
++                // place in the first operand's slot. Anything else: helper.
++                let (v1, v2) = (slot(d - 2), slot(d - 1));
++                let compare = !matches!(op, Op::Add | Op::Subtract | Op::Multiply);
++                let mut to_slow = Vec::new();
++                let mut to_done = Vec::new();
++                let mut to_write = Vec::new();
++                a.ldrb(9, X19, v1);
++                a.ldrb(10, X19, v2);
++                a.cmp_w(9, lay.num_tag as u32);
++                let to_int = a.fwd(Fix::BCond(NE));
++                a.cmp_w(10, lay.num_tag as u32);
++                to_slow.push(a.fwd(Fix::BCond(NE)));
++                a.ldr_d(0, X19, v1 + lay.num_off);
++                a.ldr_d(1, X19, v2 + lay.num_off);
++                if compare {
++                    a.e(0x1E60_2000 | 1 << 16); // fcmp d0, d1
++                    // Ordered conditions: a NaN makes every one of them false.
++                    a.cset(12, match op {
++                        Op::LessThan => MI,
++                        Op::GreaterThan => GT,
++                        Op::LessEquals => LS,
++                        Op::GreaterEquals => GE,
++                        _ => EQ,
++                    });
++                    to_write.push(a.fwd(Fix::B));
++                } else {
++                    a.e(match op {
++                        Op::Add => 0x1E60_2800,
++                        Op::Subtract => 0x1E60_3800,
++                        _ => 0x1E60_0800,
++                    } | 1 << 16); // fadd / fsub / fmul d0, d0, d1
++                    a.str_d(0, X19, v1 + lay.num_off);
++                    to_done.push(a.fwd(Fix::B));
++                }
++                let int_path = a.here();
++                a.set(to_int, int_path);
++                a.cmp_w(9, lay.int_tag as u32);
++                to_slow.push(a.fwd(Fix::BCond(NE)));
++                a.cmp_w(10, lay.int_tag as u32);
++                to_slow.push(a.fwd(Fix::BCond(NE)));
++                a.ldr_w(10, X19, v1 + lay.int_off);
++                a.ldr_w(11, X19, v2 + lay.int_off);
++                if compare {
++                    a.e(0x6B0B_015F); // cmp w10, w11
++                    a.cset(12, match op {
++                        Op::LessThan => LT,
++                        Op::GreaterThan => GT,
++                        Op::LessEquals => LE,
++                        Op::GreaterEquals => GE,
++                        _ => EQ,
++                    });
++                    let write = a.here();
++                    for f in to_write.drain(..) {
++                        a.set(f, write);
++                    }
++                    // The Bool replaces the first operand: tag word, then the bool.
++                    let r = a.mov_x(9, lay.bool_word);
++                    a.str_x(r, X19, v1);
++                    a.strb(12, X19, v1 + lay.bool_off);
++                } else {
++                    match op {
++                        Op::Add => a.e(0x2B0B_014A),      // adds w10, w10, w11
++                        Op::Subtract => a.e(0x6B0B_014A), // subs w10, w10, w11
++                        _ => {
++                            a.e(0x9B2B_7D4A); // smull x10, w10, w11
++                            a.e(0xEB2A_C15F); // cmp x10, w10, sxtw
++                        }
++                    }
++                    // Overflow: the interpreter's answer is a Number.
++                    to_slow.push(a.fwd(Fix::BCond(if matches!(op, Op::Multiply) { NE } else { VS })));
++                    a.str_w(10, X19, v1 + lay.int_off);
++                }
++                to_done.push(a.fwd(Fix::B));
++                let slow = a.here();
++                for f in to_slow {
++                    a.set(f, slow);
++                }
++                a.call(kind(op), d, i, d - 1, true);
++                let done = a.here();
++                for f in to_done {
++                    a.set(f, done);
++                }
++            }
++            Op::IncrementI | Op::DecrementI | Op::CoerceI | Op::CoerceD
++                if lay.num_ok && slot(d - 1) + 16 < 4096 =>
++            {
++                let v = slot(d - 1);
++                a.ldrb(9, X19, v);
++                let tag = if matches!(op, Op::CoerceD) { lay.num_tag } else { lay.int_tag };
++                a.cmp_w(9, tag as u32);
++                let to_slow = a.fwd(Fix::BCond(NE));
++                match op {
++                    Op::IncrementI | Op::DecrementI => {
++                        a.ldr_w(10, X19, v + lay.int_off);
++                        a.e(if matches!(op, Op::IncrementI) { 0x1100_054A } else { 0x5100_054A }); // add/sub w10, w10, #1
++                        a.str_w(10, X19, v + lay.int_off);
++                    }
++                    _ => {} // already the right type
++                }
++                let to_done = a.fwd(Fix::B);
++                let slow = a.here();
++                a.set(to_slow, slow);
++                a.call(kind(op), d, i, d, true);
++                let done = a.here();
++                a.set(to_done, done);
++            }
++            Op::GetSlot { index }
++                if !lay.obj_tags.is_empty() && slot(d - 1) < 4096 && *index < 4096 =>
++            {
++                // An object of a checked type: its slot, in place. Anything else
++                // (null, a primitive, another type, out of range) takes the
++                // helper, which raises the interpreter's own errors.
++                let top = slot(d - 1);
++                let mut to_slow = Vec::new();
++                a.ldrb(9, X19, top);
++                if lay.obj_tags.len() == 1 {
++                    a.cmp_w(9, lay.obj_tags[0] as u32);
++                    to_slow.push(a.fwd(Fix::BCond(NE)));
++                } else {
++                    let mut to_fast = Vec::new();
++                    for &t in &lay.obj_tags {
++                        a.cmp_w(9, t as u32);
++                        to_fast.push(a.fwd(Fix::BCond(EQ)));
++                    }
++                    to_slow.push(a.fwd(Fix::B));
++                    let fast = a.here();
++                    for f in to_fast {
++                        a.set(f, fast);
++                    }
++                }
++                a.ldr_x(10, X19, top + 8);
++                a.ldr_x(11, 10, lay.slots_len_off);
++                a.cmp_x(11, *index as u32);
++                to_slow.push(a.fwd(Fix::BCond(LS)));
++                a.ldr_x(11, 10, lay.slots_ptr_off);
++                a.ldr_q(0, 11, *index * 16);
++                a.str_q(0, X19, top);
++                let to_done = a.fwd(Fix::B);
++                let slow = a.here();
++                for f in to_slow {
++                    a.set(f, slow);
++                }
++                a.call(kind(op), d, i, d, true);
++                let done = a.here();
++                a.set(to_done, done);
++            }
++            Op::ReturnValue { .. } | Op::ReturnVoid { .. } => a.call(H_RETURN, d, i, 0, true),
++            _ => {
++                let (pops, pushes) = effect(op).unwrap();
++                let k = kind(op);
++                let h = if k < KINDS { k } else { H_GENERIC };
++                a.call(h, d, i, d - pops + pushes, true);
++            }
++        }
++    }
++    // Verified code never gets here; leave with status 4 if it did.
++    a.movz_w(0, 4);
++    a.branch(Fix::B, Target::Exit);
++    let exit = a.code.len();
++    a.epilogue();
++    if !a.resolve(&labels, exit) {
++        return Err("bad branch".into());
++    }
++
++    let bytes = a.code.len() * 4;
++    if s.used + bytes > CODE_SIZE {
++        return Err("code memory full".into());
++    }
++    unsafe {
++        let dst = s.rw.add(s.used);
++        std::ptr::copy_nonoverlapping(a.code.as_ptr() as *const u8, dst, bytes);
++        flashnx_jit_flush(dst, s.rx.add(s.used), bytes);
++    }
++    let addr = s.rx as usize + s.used;
++    s.used += (bytes + 15) & !15;
++    Ok(addr)
++}
++
++// ---------------------------------------------------------------- helpers
++
++#[inline(always)]
++unsafe fn finish(c: &mut Ctx, act: &mut Act, r: Result<(), Error<'static>>, idx: u32, post: u32) -> u32 {
++    match r {
++        Ok(()) => {
++            if act.stack.len() == c.num_locals + post as usize {
++                0
++            } else {
++                // `effect` is wrong for this op: the interpreter's own stack
++                // pointer is right, so it takes over at the next op.
++                c.resume_ip = idx as usize + 1;
++                let s = state();
++                s.deopts += 1;
++                let name = op_name(unsafe { &*c.ops.add(idx as usize) });
++                *s.deopt_ops.entry(name).or_insert(0) += 1;
++                3
++            }
++        }
++        Err(e) => {
++            c.result = Some(Err(e));
++            1
++        }
++    }
++}
++
++unsafe extern "C" fn h_op<const K: usize>(ctx: *mut Ctx, depth: u32, idx: u32, post: u32) -> u32 {
++    unsafe {
++        let c = &mut *ctx;
++        let act = &mut *c.act;
++        act.stack.set_stack_pointer(c.num_locals + depth as usize);
++        let op = &*c.ops.add(idx as usize);
++        if K < KINDS {
++            // One copy per op kind: the match below folds to one arm, and
++            // each call site in compiled code has its own predictable branch.
++            std::hint::assert_unchecked(kind(op) == K);
++        }
++        let r = act.flashnx_exec_simple(op);
++        finish(c, act, r, idx, post)
++    }
++}
++
++unsafe extern "C" fn h_truthy(ctx: *mut Ctx, depth: u32, _: u32, _: u32) -> u32 {
++    unsafe {
++        let c = &mut *ctx;
++        let act = &mut *c.act;
++        act.stack.set_stack_pointer(c.num_locals + depth as usize);
++        act.check_if_true() as u32
++    }
++}
++
++unsafe extern "C" fn h_timeout(ctx: *mut Ctx, _: u32, _: u32, _: u32) -> u32 {
++    unsafe {
++        let c = &mut *ctx;
++        let act = &mut *c.act;
++        match act.timeout_check() {
++            Ok(()) => 0,
++            Err(e) => {
++                c.result = Some(Err(e));
++                1
++            }
++        }
++    }
++}
++
++unsafe extern "C" fn h_return(ctx: *mut Ctx, depth: u32, idx: u32, _: u32) -> u32 {
++    unsafe {
++        let c = &mut *ctx;
++        let act = &mut *c.act;
++        act.stack.set_stack_pointer(c.num_locals + depth as usize);
++        let r = match &*c.ops.add(idx as usize) {
++            Op::ReturnValue { return_type } => act.return_value(*return_type),
++            Op::ReturnVoid { return_type } => Ok(act.return_void(*return_type)),
++            _ => unreachable!(),
++        };
++        let status = if r.is_ok() { 2 } else { 1 };
++        c.result = Some(r);
++        status
++    }
++}
++
++macro_rules! fill_kinds {
++    ($t:ident; $($k:literal)*) => {
++        $( $t[$k] = h_op::<$k> as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize; )*
++    };
++}
++
++fn fill_helpers(t: &mut [usize; 256]) {
++    fill_kinds!(t;
++        0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29
++        30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59
++        60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89
++        90 91 92 93 94 95 96 97 98 99 100 101 102 103 104 105 106 107 108 109 110 111 112 113 114
++        115 116 117 118 119 120 121 122 123 124 125 126 127 128 129 130 131 132 133 134 135 136 137
++        138 139 140 141 142 143 144 145 146 147 148 149 150 151 152 153 154 155 156 157 158 159);
++    t[H_GENERIC] = h_op::<H_GENERIC> as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
++    t[H_TRUTHY] = h_truthy as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
++    t[H_TIMEOUT] = h_timeout as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
++    t[H_RETURN] = h_return as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
++}
++
++// ---------------------------------------------------------------- entry
++
++pub(super) fn run<'a, 'gc>(act: &mut Activation<'a, 'gc>, method: Method<'gc>) -> Outcome<'gc> {
++    let cell = method.flashnx_jit();
++    let st = cell.get();
++    let code = if st == REJECTED {
++        return Outcome::Interpret;
++    } else if st > 0xFFFF {
++        st
++    } else if st + 1 < THRESHOLD {
++        cell.set(st + 1);
++        return Outcome::Interpret;
++    } else {
++        let s = state();
++        if s.layout.obj_tags.len() < 4 && s.layout.probes < 100_000 {
++            probe_object(&mut s.layout, act.stack.value_at(0));
++        }
++        match compile(s, method) {
++            Ok(addr) => {
++                s.compiled += 1;
++                cell.set(addr);
++                addr
++            }
++            Err(reason) => {
++                s.rejected += 1;
++                *s.reasons.entry(reason).or_insert(0) += 1;
++                cell.set(REJECTED);
++                return Outcome::Interpret;
++            }
++        }
++    };
++    if let Err(e) = act.timeout_check() {
++        return Outcome::Done(Err(e));
++    }
++    state().runs += 1;
++    let ops = method.get_verified_info().parsed_code.as_ptr();
++    let mut ctx = Ctx {
++        frame: act.stack.base_ptr() as *mut Value<'static>,
++        helpers: state().helpers.as_ptr(),
++        act: act as *mut Activation<'a, 'gc> as *mut Act,
++        ops: ops as *const Op<'static>,
++        num_locals: act.num_locals,
++        result: None,
++        resume_ip: 0,
++    };
++    let status = unsafe {
++        let f: unsafe extern "C" fn(*mut Ctx) -> u32 = std::mem::transmute(code);
++        f(&mut ctx)
++    };
++    match status {
++        1 | 2 => {
++            let r = ctx.result.take().expect("JIT status without a result");
++            Outcome::Done(unsafe {
++                std::mem::transmute::<Result<Value<'static>, Error<'static>>, Result<Value<'gc>, Error<'gc>>>(r)
++            })
++        }
++        3 => {
++            cell.set(REJECTED);
++            Outcome::Resume(ctx.resume_ip)
++        }
++        _ => {
++            cell.set(REJECTED);
++            Outcome::Done(Err("FlashNX JIT: compiled code ran off its end".into()))
++        }
++    }
++}
++
++/// A new game starts: the previous one's player, and every method compiled
++/// for it, are gone, so its code memory is free again. The measured layout
++/// is Ruffle's, not the game's: it stays.
++pub fn reset() {
++    let s = state();
++    s.used = 0;
++    s.compiled = 0;
++    s.rejected = 0;
++    s.reasons.clear();
++    s.deopts = 0;
++    s.deopt_ops.clear();
++    s.runs = 0;
++}
++
++/// Counters since the last call, then reset (the totals stay).
++pub fn report() -> String {
++    let s = state();
++    if s.init == 0 {
++        return String::new();
++    }
++    let top = |m: &FnvHashMap<String, u64>| {
++        let mut v: Vec<_> = m.iter().collect();
++        v.sort_by(|a, b| b.1.cmp(a.1));
++        v.iter().take(8).map(|(k, n)| format!("{k} x{n}")).collect::<Vec<_>>().join(", ")
++    };
++    let l = &s.layout;
++    let out = format!(
++        "{} (rc=0x{:x}, bool {}, numbers {}, getslot {:?} slots@{}/{} {}), {} methods compiled ({} KB), {} rejected [{}], {} deopts [{}], {} runs",
++        if s.init == 1 { "on" } else { "UNAVAILABLE" },
++        s.init_rc,
++        if l.bool_ok { "inline" } else { "helper" },
++        if l.num_ok { "inline" } else { "helper" },
++        l.obj_tags,
++        l.slots_ptr_off,
++        l.slots_len_off,
++        l.obj_fail,
++        s.compiled,
++        s.used / 1024,
++        s.rejected,
++        top(&s.reasons),
++        s.deopts,
++        top(&s.deopt_ops),
++        s.runs
++    );
++    s.runs = 0;
++    out
++}
++
++impl<'a, 'gc> Activation<'a, 'gc> {
++    /// Every op that is not control flow, exactly as `run_actions_from` runs it.
++    #[inline(always)]
++    fn flashnx_exec_simple(&mut self, op: &Op<'gc>) -> Result<(), Error<'gc>> {
++        match op {
++                Op::PushDouble { value } => self.op_push_double(*value),
++                Op::PushFalse => self.op_push_false(),
++                Op::PushInt { value } => self.op_push_int(*value),
++                Op::PushNamespace { namespace } => self.op_push_namespace(*namespace),
++                Op::PushNull => self.op_push_null(),
++                Op::PushString { string } => self.op_push_string(*string),
++                Op::PushTrue => self.op_push_true(),
++                Op::PushUint { value } => self.op_push_uint(*value),
++                Op::PushUndefined => self.op_push_undefined(),
++                Op::Pop => self.op_pop(),
++                Op::Dup => self.op_dup(),
++                Op::GetLocal { index } => self.op_get_local(*index),
++                Op::SetLocal { index } => self.op_set_local(*index),
++                Op::StoreLocal { index } => self.op_store_local(*index),
++                Op::Kill { index } => self.op_kill(*index),
++                Op::Call { num_args } => self.op_call(*num_args),
++                Op::CallMethod {
++                    index,
++                    num_args,
++                    push_return_value,
++                } => self.op_call_method(*index, *num_args, *push_return_value),
++                Op::CallNative {
++                    method,
++                    num_args,
++                    push_return_value,
++                } => self.op_call_native(*method, *num_args, *push_return_value),
++                Op::CallProperty {
++                    multiname,
++                    num_args,
++                } => self.op_call_property(*multiname, *num_args),
++                Op::CallPropLex {
++                    multiname,
++                    num_args,
++                } => self.op_call_prop_lex(*multiname, *num_args),
++                Op::CallPropVoid {
++                    multiname,
++                    num_args,
++                } => self.op_call_prop_void(*multiname, *num_args),
++                Op::CallStatic { method, num_args } => self.op_call_static(*method, *num_args),
++                Op::CallSuper {
++                    multiname,
++                    num_args,
++                } => self.op_call_super(*multiname, *num_args),
++                Op::GetPropertyStatic { multiname } => self.op_get_property_static(*multiname),
++                Op::GetPropertyFast { multiname } => self.op_get_property_fast(*multiname),
++                Op::GetPropertySlow { multiname } => self.op_get_property_slow(*multiname),
++                Op::SetPropertyStatic { multiname } => self.op_set_property_static(*multiname),
++                Op::SetPropertyFast { multiname } => self.op_set_property_fast(*multiname),
++                Op::SetPropertySlow { multiname } => self.op_set_property_slow(*multiname),
++                Op::InitProperty { multiname } => self.op_init_property(*multiname),
++                Op::DeleteProperty { multiname } => self.op_delete_property(*multiname),
++                Op::GetSuper { multiname } => self.op_get_super(*multiname),
++                Op::SetSuper { multiname } => self.op_set_super(*multiname),
++                Op::In => self.op_in(),
++                Op::PushScope => self.op_push_scope(),
++                Op::NewCatch { .. } => unreachable!("NewCatch is never compiled"),
++                Op::PushWith => self.op_push_with(),
++                Op::PopScope => self.op_pop_scope(),
++                Op::GetOuterScope { index } => self.op_get_outer_scope(*index),
++                Op::GetScopeObject { index } => self.op_get_scope_object(*index),
++                Op::FindDef { multiname } => self.op_find_def(*multiname),
++                Op::FindProperty { multiname } => self.op_find_property(*multiname),
++                Op::FindPropStrict { multiname } => self.op_find_prop_strict(*multiname),
++                Op::GetScriptGlobals { script } => self.op_get_script_globals(*script),
++                Op::GetDescendants { multiname } => self.op_get_descendants(*multiname),
++                Op::GetSlot { index } => self.op_get_slot(*index),
++                Op::SetSlot { index } => self.op_set_slot(*index),
++                Op::SetSlotCoerceI { index } => self.op_set_slot_coerce_i(*index),
++                Op::SetSlotNoCoerce { index } => self.op_set_slot_no_coerce(*index),
++                Op::SetGlobalSlot { index } => self.op_set_global_slot(*index),
++                Op::Construct { num_args } => self.op_construct(*num_args),
++                Op::ConstructProp {
++                    multiname,
++                    num_args,
++                } => self.op_construct_prop(*multiname, *num_args),
++                Op::ConstructSlot { index, num_args } => self.op_construct_slot(*index, *num_args),
++                Op::ConstructSuper { num_args } => self.op_construct_super(*num_args),
++                Op::NewActivation { activation_class } => self.op_new_activation(*activation_class),
++                Op::NewObject { num_args } => self.op_new_object(*num_args),
++                Op::NewFunction { method } => self.op_new_function(*method),
++                Op::NewClass { class } => self.op_new_class(*class),
++                Op::ApplyType { num_types } => self.op_apply_type(*num_types),
++                Op::NewArray { num_args } => self.op_new_array(*num_args),
++                Op::CoerceA => Ok(()),
++                Op::CoerceB => self.op_coerce_b(),
++                Op::CoerceD => self.op_coerce_d(),
++                Op::CoerceDSwapPop => self.op_coerce_d_swap_pop(),
++                Op::CoerceI => self.op_coerce_i(),
++                Op::CoerceISwapPop => self.op_coerce_i_swap_pop(),
++                Op::CoerceO => self.op_coerce_o(),
++                Op::CoerceS => self.op_coerce_s(),
++                Op::CoerceU => self.op_coerce_u(),
++                Op::CoerceUSwapPop => self.op_coerce_u_swap_pop(),
++                Op::ConvertO => self.op_convert_o(),
++                Op::ConvertS => self.op_convert_s(),
++                Op::Add => self.op_add(),
++                Op::AddI => self.op_add_i(),
++                Op::BitAnd => self.op_bitand(),
++                Op::BitNot => self.op_bitnot(),
++                Op::BitOr => self.op_bitor(),
++                Op::BitXor => self.op_bitxor(),
++                Op::DecLocal { index } => self.op_declocal(*index),
++                Op::DecLocalI { index } => self.op_declocal_i(*index),
++                Op::Decrement => self.op_decrement(),
++                Op::DecrementI => self.op_decrement_i(),
++                Op::Divide => self.op_divide(),
++                Op::IncLocal { index } => self.op_inclocal(*index),
++                Op::IncLocalI { index } => self.op_inclocal_i(*index),
++                Op::Increment => self.op_increment(),
++                Op::IncrementI => self.op_increment_i(),
++                Op::LShift => self.op_lshift(),
++                Op::Modulo => self.op_modulo(),
++                Op::Multiply => self.op_multiply(),
++                Op::MultiplyI => self.op_multiply_i(),
++                Op::Negate => self.op_negate(),
++                Op::NegateI => self.op_negate_i(),
++                Op::RShift => self.op_rshift(),
++                Op::Subtract => self.op_subtract(),
++                Op::SubtractI => self.op_subtract_i(),
++                Op::Swap => self.op_swap(),
++                Op::URShift => self.op_urshift(),
++                Op::StrictEquals => self.op_strict_equals(),
++                Op::Equals => self.op_equals(),
++                Op::GreaterEquals => self.op_greater_equals(),
++                Op::GreaterThan => self.op_greater_than(),
++                Op::LessEquals => self.op_less_equals(),
++                Op::LessThan => self.op_less_than(),
++                Op::Nop => Ok(()),
++                Op::Not => self.op_not(),
++                Op::HasNext => self.op_has_next(),
++                Op::HasNext2 {
++                    object_register,
++                    index_register,
++                } => self.op_has_next_2(*object_register, *index_register),
++                Op::NextName => self.op_next_name(),
++                Op::NextValue => self.op_next_value(),
++                Op::IsType { class } => self.op_is_type(*class),
++                Op::IsTypeLate => self.op_is_type_late(),
++                Op::AsType { class } => self.op_as_type(*class),
++                Op::AsTypeLate => self.op_as_type_late(),
++                Op::InstanceOf => self.op_instance_of(),
++                Op::Debug {
++                    is_local_register,
++                    register_name,
++                    register,
++                } => self.op_debug(*is_local_register, *register_name, *register),
++                Op::DebugFile { file_name } => self.op_debug_file(*file_name),
++                Op::DebugLine { line_num } => self.op_debug_line(*line_num),
++                Op::Bkpt => self.op_bkpt(),
++                Op::BkptLine { line_num } => self.op_bkpt_line(*line_num),
++                Op::Timestamp => self.op_timestamp(),
++                Op::TypeOf => self.op_type_of(),
++                Op::Dxns { string } => self.op_dxns(*string),
++                Op::DxnsLate => self.op_dxns_late(),
++                Op::EscXAttr => self.op_esc_xattr(),
++                Op::EscXElem => self.op_esc_elem(),
++                Op::Coerce { class } => self.op_coerce(*class),
++                Op::CoerceSwapPop { class } => self.op_coerce_swap_pop(*class),
++                Op::CheckFilter => self.op_check_filter(),
++                Op::Si8 => self.op_si8(),
++                Op::Si16 => self.op_si16(),
++                Op::Si32 => self.op_si32(),
++                Op::Sf32 => self.op_sf32(),
++                Op::Sf64 => self.op_sf64(),
++                Op::Li8 => self.op_li8(),
++                Op::Li16 => self.op_li16(),
++                Op::Li32 => self.op_li32(),
++                Op::Lf32 => self.op_lf32(),
++                Op::Lf64 => self.op_lf64(),
++                Op::Sxi1 => self.op_sxi1(),
++                Op::Sxi8 => self.op_sxi8(),
++                Op::Sxi16 => self.op_sxi16(),
++                Op::Throw => self.op_throw(),
++
++                _ => unreachable!("control flow is compiled inline"),
++            }
++        }
++    }
 diff --git a/core/src/avm2/amf.rs b/core/src/avm2/amf.rs
 index 26a58d877..18f94e1a0 100644
 --- a/core/src/avm2/amf.rs
@@ -1399,10 +2878,10 @@ index 6a0c92a11..d0777428a 100644
          }
      }
 diff --git a/core/src/avm2/function.rs b/core/src/avm2/function.rs
-index 27fc0f88c..adac3bfac 100644
+index 27fc0f88c..9939aacca 100644
 --- a/core/src/avm2/function.rs
 +++ b/core/src/avm2/function.rs
-@@ -200,6 +200,17 @@ pub fn exec<'gc>(
+@@ -200,10 +200,21 @@ pub fn exec<'gc>(
  
      let caller_dxns = activation.default_xml_namespace();
  
@@ -1420,6 +2899,31 @@ index 27fc0f88c..adac3bfac 100644
      let ret = match method.method_kind() {
          MethodKind::Native { native_method, .. } => {
              let caller_domain = activation.caller_domain();
+-            let caller_movie = activation.caller_movie();
++            let caller_movie = activation.caller_movie_source();
+             let mut activation = Activation::from_builtin(
+                 activation.context,
+                 bound_superclass,
+@@ -238,6 +249,9 @@ pub fn exec<'gc>(
+ 
+             activation.context.avm2.push_call(mc, method);
+ 
++            #[cfg(feature = "flashnx_opcount")]
++            crate::flashnx_avm2ops::native_call();
++
+             native_method(&mut activation, receiver, &arguments)
+         }
+         MethodKind::Bytecode { .. } => {
+@@ -282,6 +296,9 @@ pub fn exec<'gc>(
+ 
+             activation.context.avm2.push_call(mc, method);
+ 
++            #[cfg(feature = "flashnx_opcount")]
++            crate::flashnx_avm2ops::bytecode_call(method.get_verified_info().parsed_code.len());
++
+             let result = activation.run_actions(method);
+ 
+             activation.cleanup();
 diff --git a/core/src/avm2/globals/flash/display/BitmapData.as b/core/src/avm2/globals/flash/display/BitmapData.as
 index 952cc8f9f..1c8a0d959 100644
 --- a/core/src/avm2/globals/flash/display/BitmapData.as
@@ -1787,10 +3291,22 @@ index 23ae3533b..81df1bfb8 100644
      }
  
 diff --git a/core/src/avm2/method.rs b/core/src/avm2/method.rs
-index dcbb88f37..fdcb08342 100644
+index dcbb88f37..14f084afb 100644
 --- a/core/src/avm2/method.rs
 +++ b/core/src/avm2/method.rs
-@@ -153,6 +153,11 @@ impl core::fmt::Debug for Method<'_> {
+@@ -136,6 +136,11 @@ struct MethodData<'gc> {
+     /// This is true when the method is a free-standing function and none of the
+     /// declared arguments have a type or a default value.
+     is_unchecked: bool,
++
++    /// FlashNX: JIT state (`activation_jit.rs`): calls so far, then the address
++    /// of the compiled code, or `usize::MAX` once rejected.
++    #[collect(require_static)]
++    flashnx_jit: std::cell::Cell<usize>,
+ }
+ 
+ impl PartialEq for Method<'_> {
+@@ -153,6 +158,16 @@ impl core::fmt::Debug for Method<'_> {
  }
  
  impl<'gc> Method<'gc> {
@@ -1799,9 +3315,22 @@ index dcbb88f37..fdcb08342 100644
 +        Gc::as_ptr(self.0) as usize
 +    }
 +
++    /// FlashNX: this method's JIT state (see `activation_jit.rs`).
++    pub fn flashnx_jit(&self) -> &std::cell::Cell<usize> {
++        &self.0.flashnx_jit
++    }
++
      /// Construct a `Method` from an `AbcFile` and method index.
      pub fn from_method_index(
          txunit: TranslationUnit<'gc>,
+@@ -220,6 +235,7 @@ impl<'gc> Method<'gc> {
+                 association: OnceLock::new(),
+                 is_function,
+                 is_unchecked: is_function && all_params_unchecked,
++                flashnx_jit: std::cell::Cell::new(0),
+             },
+         )))
+     }
 diff --git a/core/src/avm2/object/event_object.rs b/core/src/avm2/object/event_object.rs
 index 0e6f47c5c..88661652d 100644
 --- a/core/src/avm2/object/event_object.rs
@@ -1855,7 +3384,7 @@ index 9906b5dcf..fb06810fd 100644
          let movie = &context.root_swf;
          let empty_swf = Arc::new(SwfMovie::empty(movie.version(), Some(movie.url().into())));
 diff --git a/core/src/avm2/object/script_object.rs b/core/src/avm2/object/script_object.rs
-index 8e8934e23..004e6639f 100644
+index 8e8934e23..e65423cb9 100644
 --- a/core/src/avm2/object/script_object.rs
 +++ b/core/src/avm2/object/script_object.rs
 @@ -66,7 +66,11 @@ pub struct ScriptObjectData<'gc> {
@@ -1883,7 +3412,23 @@ index 8e8934e23..004e6639f 100644
  }
  
  impl<'gc> TObject<'gc> for ScriptObject<'gc> {
-@@ -162,8 +171,12 @@ impl<'gc> ScriptObjectData<'gc> {
+@@ -130,6 +139,15 @@ impl<'gc> ScriptObject<'gc> {
+ }
+ 
+ impl<'gc> ScriptObjectData<'gc> {
++    /// FlashNX: where `slots` sits in every AS3 object (each object type
++    /// starts with this struct), for the JIT's inline `getslot`.
++    pub const FLASHNX_SLOTS_OFFSET: usize = std::mem::offset_of!(ScriptObjectData<'gc>, slots);
++
++    /// FlashNX: the slots as the JIT will find them in memory (pointer, length).
++    pub fn flashnx_slots(&self) -> (usize, usize) {
++        (self.slots.as_ptr() as usize, self.slots.len())
++    }
++
+     /// Create new object data of a given class.
+     /// This is a low-level function used to implement things like object allocators.
+     pub fn new(instance_of: ClassObject<'gc>) -> Self {
+@@ -162,8 +180,12 @@ impl<'gc> ScriptObjectData<'gc> {
          ScriptObjectData {
              values: RefLock::new(Default::default()),
              slots,
@@ -1897,7 +3442,7 @@ index 8e8934e23..004e6639f 100644
              instance_class,
              vtable: Lock::new(vtable),
          }
-@@ -186,15 +199,20 @@ impl<'gc> ScriptObjectWrapper<'gc> {
+@@ -186,15 +208,20 @@ impl<'gc> ScriptObjectWrapper<'gc> {
          unlock!(Gc::write(mc, self.0), ScriptObjectData, values).borrow_mut()
      }
  
@@ -2224,8 +3769,46 @@ index 8c4a1efa9..7734df5b4 100644
          }
  
          let regex = match self.cached_regex.as_mut() {
+diff --git a/core/src/avm2/stack.rs b/core/src/avm2/stack.rs
+index 62ff9a7e9..b44604e72 100644
+--- a/core/src/avm2/stack.rs
++++ b/core/src/avm2/stack.rs
+@@ -64,7 +64,18 @@ impl<'gc> Stack<'gc> {
+         // Ensure the StackFrame returned to the caller does not have any
+         // old values on it, as these may contain Gc pointers that have already
+         // been collected.
+-        for value in subslice {
++        //
++        // FlashNX: with fast calls, only the locals. The operand stack part is
++        // always written before it is read (the verifier rejects any pop without
++        // a push of the same frame, errors #1023/#1024), and nothing traces this
++        // stack (see `Collect for StackData`), so stale values above the locals
++        // are never seen.
++        let clear = if crate::avm2::activation::fast_calls() {
++            body.num_locals as usize
++        } else {
++            frame_size
++        };
++        for value in &subslice[..clear] {
+             value.set(Value::Undefined);
+         }
+ 
+@@ -136,6 +147,13 @@ impl<'a, 'gc> StackFrame<'a, 'gc> {
+         &self.data[self.stack_pointer.get() - 1]
+     }
+ 
++    /// FlashNX: address of local 0 of this frame, for the JIT (a
++    /// `Cell<Value>` has the layout of a `Value`).
++    #[inline(always)]
++    pub fn base_ptr(&self) -> *mut Value<'gc> {
++        self.data.as_ptr() as *mut Value<'gc>
++    }
++
+     #[inline(always)]
+     pub fn value_at(&self, index: usize) -> Value<'gc> {
+         self.data[index].get()
 diff --git a/core/src/avm2/value.rs b/core/src/avm2/value.rs
-index 008863dec..03c1e9796 100644
+index 008863dec..387f4dea5 100644
 --- a/core/src/avm2/value.rs
 +++ b/core/src/avm2/value.rs
 @@ -493,6 +493,17 @@ pub fn abc_default_value<'gc>(
@@ -2406,6 +3989,11 @@ index 008863dec..03c1e9796 100644
          }
      }
  }
+@@ -1918,3 +1972,4 @@ mod tests {
+         );
+     }
+ }
++
 diff --git a/core/src/avm2/vtable.rs b/core/src/avm2/vtable.rs
 index 8bbda9662..11f66a221 100644
 --- a/core/src/avm2/vtable.rs
@@ -5463,6 +7051,149 @@ index 000000000..0a3e04218
 +        out
 +    })
 +}
+diff --git a/core/src/flashnx_avm2ops.rs b/core/src/flashnx_avm2ops.rs
+new file mode 100644
+index 000000000..37c4b2b27
+--- /dev/null
++++ b/core/src/flashnx_avm2ops.rs
+@@ -0,0 +1,137 @@
++//! FlashNX: AVM2 opcode census for the measurement build (`flashnx_instr`).
++//!
++//! Fireboy & Watergirl 2 spends 84 ms of a 90 ms frame in ActionScript, and the
++//! sampling profiler puts the time in the interpreter's machinery (dispatch,
++//! stack traffic, calls) rather than in any one opcode. What it cannot say is
++//! how MANY opcodes run, which pairs come back most often (the candidates for
++//! fused opcodes, like avmplus' `peephole.tbl`), and how small the called
++//! methods are (the candidates for inlining). This counts all three.
++//!
++//! Single-threaded by construction: AVM2 only runs on the Ruffle worker.
++
++const N: usize = 256;
++
++static mut COUNTS: [u64; N] = [0; N];
++static mut PAIRS: [u32; N * N] = [0; N * N];
++static mut PREV: usize = 0;
++static mut NAMES: [Option<&'static str>; N] = [None; N];
++/// Bytecode calls by size of the callee's optimized body, in ops:
++/// <=4, <=8, <=16, <=32, <=64, more.
++static mut BODY: [u64; 6] = [0; 6];
++static mut NATIVE_CALLS: u64 = 0;
++
++/// `i` is the op's discriminant; `op` is only formatted the first time.
++#[inline(always)]
++pub fn count(i: usize, op: &dyn core::fmt::Debug) {
++    let i = i & (N - 1);
++    unsafe {
++        let counts = &raw mut COUNTS;
++        if (*counts)[i] == 0 {
++            name(i, op);
++        }
++        (*counts)[i] += 1;
++        let pairs = &raw mut PAIRS;
++        let p = (&raw mut PREV).read() * N + i;
++        (*pairs)[p] = (*pairs)[p].wrapping_add(1);
++        (&raw mut PREV).write(i);
++    }
++}
++
++#[cold]
++#[inline(never)]
++fn name(i: usize, op: &dyn core::fmt::Debug) {
++    if unsafe { (*(&raw const NAMES))[i].is_some() } {
++        return;
++    }
++    let full = format!("{op:?}");
++    let end = full.find([' ', '{', '(']).unwrap_or(full.len());
++    let short: &'static str = Box::leak(full[..end].to_string().into_boxed_str());
++    unsafe { (*(&raw mut NAMES))[i] = Some(short) };
++}
++
++/// One bytecode method entered, with `ops` ops in its optimized body.
++#[inline(always)]
++pub fn bytecode_call(ops: usize) {
++    let b = match ops {
++        0..=4 => 0,
++        5..=8 => 1,
++        9..=16 => 2,
++        17..=32 => 3,
++        33..=64 => 4,
++        _ => 5,
++    };
++    unsafe { (*(&raw mut BODY))[b] += 1 };
++}
++
++#[inline(always)]
++pub fn native_call() {
++    unsafe { *(&raw mut NATIVE_CALLS) += 1 };
++}
++
++/// Totals since the last report over `frames` frames, then reset.
++pub fn report(frames: u64) -> String {
++    let frames = frames.max(1);
++    unsafe {
++        let counts = &mut *(&raw mut COUNTS);
++        let pairs = &mut *(&raw mut PAIRS);
++        let names = &*(&raw const NAMES);
++        let body = &mut *(&raw mut BODY);
++        let native = &mut *(&raw mut NATIVE_CALLS);
++        let total: u64 = counts.iter().sum();
++        if total == 0 {
++            return String::new();
++        }
++        let nm = |i: usize| names[i].unwrap_or("?");
++        let calls: u64 = body.iter().sum();
++        let mut out = format!(
++            "avm2ops: {} ops ({}/frame), {} bytecode calls ({}/frame, one per {} ops), {} native calls ({}/frame)\n",
++            total,
++            total / frames,
++            calls,
++            calls / frames,
++            total / calls.max(1),
++            *native,
++            *native / frames
++        );
++        out.push_str(&format!(
++            "avm2calls: callee body <=4 ops {:.1}%, <=8 {:.1}%, <=16 {:.1}%, <=32 {:.1}%, <=64 {:.1}%, more {:.1}%\n",
++            body[0] as f64 * 100.0 / calls.max(1) as f64,
++            body[1] as f64 * 100.0 / calls.max(1) as f64,
++            body[2] as f64 * 100.0 / calls.max(1) as f64,
++            body[3] as f64 * 100.0 / calls.max(1) as f64,
++            body[4] as f64 * 100.0 / calls.max(1) as f64,
++            body[5] as f64 * 100.0 / calls.max(1) as f64,
++        ));
++        let mut order: Vec<usize> = (0..N).filter(|&i| counts[i] > 0).collect();
++        order.sort_by(|&a, &b| counts[b].cmp(&counts[a]));
++        for &i in order.iter().take(40) {
++            out.push_str(&format!(
++                "avm2op {:<22} n={:<11} share={:.2}%\n",
++                nm(i),
++                counts[i],
++                counts[i] as f64 * 100.0 / total as f64
++            ));
++        }
++        let mut top: Vec<(u32, usize)> = pairs
++            .iter()
++            .enumerate()
++            .filter(|&(_, &n)| n > 0)
++            .map(|(p, &n)| (n, p))
++            .collect();
++        top.sort_unstable_by(|a, b| b.0.cmp(&a.0));
++        for &(n, p) in top.iter().take(50) {
++            out.push_str(&format!(
++                "avm2pair {:>22} > {:<22} n={:<11} share={:.2}%\n",
++                nm(p / N),
++                nm(p % N),
++                n,
++                n as f64 * 100.0 / total as f64
++            ));
++        }
++        counts.iter_mut().for_each(|c| *c = 0);
++        pairs.iter_mut().for_each(|c| *c = 0);
++        body.iter_mut().for_each(|c| *c = 0);
++        *native = 0;
++        out
++    }
++}
 diff --git a/core/src/flashnx_census.rs b/core/src/flashnx_census.rs
 new file mode 100644
 index 000000000..292909795
@@ -5887,10 +7618,20 @@ index 91bdb52df..33230aaf1 100644
  pub fn broadcast_frame_entered<'gc>(context: &mut UpdateContext<'gc>) {
      let enter_frame_evt = EventObject::bare_default_event(context, "enterFrame");
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..07771246a 100644
+index 6e5379213..e1e61aef9 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
-@@ -15,10 +15,22 @@ extern crate num_derive;
+@@ -4,6 +4,9 @@
+ // This lint is good in theory, but in AVMs we often need to do `let x = args.get(0); let y = args.get(1);` etc.
+ // It'd make those much less readable and consistent.
+ #![allow(clippy::get_first)]
++// FlashNX: the measurement build reads an op's discriminant to count it.
++#![cfg_attr(any(feature = "flashnx_opcount", feature = "flashnx_jit"), feature(core_intrinsics))]
++#![cfg_attr(any(feature = "flashnx_opcount", feature = "flashnx_jit"), allow(internal_features))]
+ 
+ #[macro_use]
+ mod display_object;
+@@ -15,10 +18,37 @@ extern crate num_derive;
  #[macro_use]
  mod avm1;
  mod avm2;
@@ -5906,6 +7647,21 @@ index 6e5379213..07771246a 100644
 +pub use flashnx_census::report as census_report;
 +pub use library::set_movie_free;
 +pub use flashnx_as3prof::{report as as3prof_report, set_as3_profiler};
++pub use avm2::activation::{jit_report, jit_reset, set_fast_calls, set_jit};
++
++/// FlashNX: AVM2 opcode census over the last `frames` frames, then reset
++/// (`avm2ops:` lines). Empty unless built with `flashnx_opcount`.
++pub fn avm2ops_report(frames: u64) -> String {
++    #[cfg(feature = "flashnx_opcount")]
++    {
++        flashnx_avm2ops::report(frames)
++    }
++    #[cfg(not(feature = "flashnx_opcount"))]
++    {
++        let _ = frames;
++        String::new()
++    }
++}
 +pub use bitmap::operations::{take_threshold_memo_hits, take_threshold_stats};
 +pub use frame_lifecycle::{set_orphan_skip, take_inner_goto_stats};
 +pub use display_object::set_lazy_shapes;
@@ -5913,16 +7669,18 @@ index 6e5379213..07771246a 100644
  pub mod context;
  pub mod context_menu;
  mod drawing;
-@@ -26,6 +38,8 @@ mod ecma_conversions;
+@@ -26,6 +56,10 @@ mod ecma_conversions;
  pub mod events;
  pub mod focus_tracker;
  pub mod font;
 +mod flashnx_as3prof;
 +mod flashnx_census;
++#[cfg(feature = "flashnx_opcount")]
++mod flashnx_avm2ops;
  mod frame_lifecycle;
  mod html;
  mod input;
-@@ -63,6 +77,16 @@ pub use events::PlayerEvent;
+@@ -63,6 +97,16 @@ pub use events::PlayerEvent;
  pub use indexmap;
  pub use loader::LoadBehavior;
  pub use player::{Player, PlayerBuilder, PlayerMode, PlayerRuntime, StaticCallstack};
