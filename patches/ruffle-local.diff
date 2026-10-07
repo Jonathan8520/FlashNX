@@ -681,7 +681,7 @@ index 563ffbb03..ba6970ad5 100644
          context: &mut UpdateContext<'gc>,
          object: Object<'gc>,
 diff --git a/core/src/avm2/activation.rs b/core/src/avm2/activation.rs
-index ed1ff3034..cc2f5faa7 100644
+index ed1ff3034..cdfd81068 100644
 --- a/core/src/avm2/activation.rs
 +++ b/core/src/avm2/activation.rs
 @@ -57,7 +57,8 @@ pub struct Activation<'a, 'gc: 'a> {
@@ -694,7 +694,7 @@ index ed1ff3034..cc2f5faa7 100644
  
      /// The superclass of the class that yielded the currently executing method.
      ///
-@@ -102,6 +103,66 @@ pub struct Activation<'a, 'gc: 'a> {
+@@ -102,6 +103,75 @@ pub struct Activation<'a, 'gc: 'a> {
      pub context: &'a mut UpdateContext<'gc>,
  }
  
@@ -739,6 +739,15 @@ index ed1ff3034..cc2f5faa7 100644
 +    let _ = on;
 +}
 +
++/// FlashNX: compiled `callmethod` enters compiled callees directly (on by
++/// default; the profiling build's A/B switches it).
++pub fn set_jit_direct_calls(on: bool) {
++    #[cfg(feature = "flashnx_jit")]
++    jit::set_direct_calls(on);
++    #[cfg(not(feature = "flashnx_jit"))]
++    let _ = on;
++}
++
 +/// FlashNX: a new game starts, the JIT's code memory is free again (call it
 +/// only once the previous game's player is gone).
 +pub fn jit_reset() {
@@ -761,7 +770,7 @@ index ed1ff3034..cc2f5faa7 100644
  impl<'gc> HasStringContext<'gc> for Activation<'_, 'gc> {
      #[inline(always)]
      fn strings_ref(&self) -> &StringContext<'gc> {
-@@ -135,7 +196,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -135,7 +205,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
              num_locals: 0,
              outer: ScopeChain::new(context.avm2.stage_domain),
              caller_domain: None,
@@ -770,7 +779,7 @@ index ed1ff3034..cc2f5faa7 100644
              bound_superclass_object: None,
              stack: StackFrame::empty(),
              scope_depth: context.avm2.scope_stack.len(),
-@@ -159,7 +220,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -159,7 +229,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
              num_locals: 0,
              outer: ScopeChain::new(context.avm2.stage_domain),
              caller_domain: Some(domain),
@@ -779,7 +788,7 @@ index ed1ff3034..cc2f5faa7 100644
              bound_superclass_object: None,
              stack: StackFrame::empty(),
              scope_depth: context.avm2.scope_stack.len(),
-@@ -214,8 +275,13 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -214,8 +284,13 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          method: Method<'gc>,
          user_arguments: FunctionArgs<'_, 'gc>,
          signature: &[ResolvedParamConfig<'gc>],
@@ -795,7 +804,7 @@ index ed1ff3034..cc2f5faa7 100644
          for (arg, param_config) in user_arguments.iter().zip(signature.iter()) {
              let coerced_arg = if let Some(param_class) = param_config.param_type {
                  arg.coerce_to_type(self, param_class)?
-@@ -343,14 +409,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -343,14 +418,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          let num_locals = body.num_locals as usize;
          let has_rest_or_args = method.is_variadic();
  
@@ -820,7 +829,7 @@ index ed1ff3034..cc2f5faa7 100644
          self.bound_superclass_object = bound_superclass_object;
          self.stack = stack_frame;
          self.scope_depth = self.context.avm2.scope_stack.len();
-@@ -438,7 +511,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -438,7 +520,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          bound_superclass_object: Option<ClassObject<'gc>>,
          outer: ScopeChain<'gc>,
          caller_domain: Option<Domain<'gc>>,
@@ -829,7 +838,7 @@ index ed1ff3034..cc2f5faa7 100644
          caller_dxns: Option<AvmString<'gc>>,
      ) -> Self {
          Self {
-@@ -519,6 +592,16 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -519,6 +601,16 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      /// Returns the movie of the original AS3 caller. This will be `None`
      /// if this activation was constructed with `from_nothing`
      pub fn caller_movie(&self) -> Option<Arc<SwfMovie>> {
@@ -846,7 +855,7 @@ index ed1ff3034..cc2f5faa7 100644
          self.caller_movie.clone()
      }
  
-@@ -643,6 +726,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -643,6 +735,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      }
  
      pub fn run_actions(&mut self, method: Method<'gc>) -> Result<Value<'gc>, Error<'gc>> {
@@ -870,7 +879,7 @@ index ed1ff3034..cc2f5faa7 100644
          // The method must be verified at this point
  
          let verified_info = method.get_verified_info();
-@@ -650,12 +750,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -650,12 +759,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
          self.timeout_check()?;
  
@@ -886,7 +895,7 @@ index ed1ff3034..cc2f5faa7 100644
  
              let result = match op {
                  Op::PushDouble { value } => self.op_push_double(*value),
-@@ -946,7 +1048,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -946,7 +1057,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          *self.context.actions_since_timeout_check += 1;
          if *self.context.actions_since_timeout_check >= 10000 {
              *self.context.actions_since_timeout_check = 0;
@@ -895,7 +904,7 @@ index ed1ff3034..cc2f5faa7 100644
                  return Err(
                      "A script in this movie has taken too long to execute and has been terminated."
                          .into(),
-@@ -2023,6 +2125,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2023,6 +2134,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                      ((n1 as i64 + n2 as i64) as f64).into()
                  }
              }
@@ -906,7 +915,7 @@ index ed1ff3034..cc2f5faa7 100644
              (Value::Number(n1), Value::Number(n2)) => (n1 + n2).into(),
              (Value::String(s), value2) => Value::String(AvmString::concat(
                  self.gc(),
-@@ -2072,11 +2178,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2072,11 +2187,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          Ok(())
      }
  
@@ -917,7 +926,8 @@ index ed1ff3034..cc2f5faa7 100644
 -        let value1 = self.pop_stack().coerce_to_i32(self)?;
 +        let value2 = self.pop_stack();
 +        let value1 = self.pop_stack();
-+
+ 
+-        self.push_stack(value1.wrapping_add(value2));
 +        let sum_value = match (value1, value2) {
 +            (Value::Integer(n1), Value::Integer(n2)) => n1.wrapping_add(n2),
 +            (value1, value2) => {
@@ -927,13 +937,12 @@ index ed1ff3034..cc2f5faa7 100644
 +                value1.wrapping_add(value2)
 +            }
 +        };
- 
--        self.push_stack(value1.wrapping_add(value2));
++
 +        self.push_stack(sum_value);
  
          Ok(())
      }
-@@ -2134,8 +2252,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2134,8 +2261,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
      fn op_decrement(&mut self) -> Result<(), Error<'gc>> {
          let value = self.pop_stack().coerce_to_number(self)?;
@@ -944,7 +953,7 @@ index ed1ff3034..cc2f5faa7 100644
  
          Ok(())
      }
-@@ -2151,8 +2270,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2151,8 +2279,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      fn op_divide(&mut self) -> Result<(), Error<'gc>> {
          let value2 = self.pop_stack().coerce_to_number(self)?;
          let value1 = self.pop_stack().coerce_to_number(self)?;
@@ -955,7 +964,7 @@ index ed1ff3034..cc2f5faa7 100644
  
          Ok(())
      }
-@@ -2175,8 +2295,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2175,8 +2304,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
      fn op_increment(&mut self) -> Result<(), Error<'gc>> {
          let value = self.pop_stack().coerce_to_number(self)?;
@@ -966,7 +975,7 @@ index ed1ff3034..cc2f5faa7 100644
  
          Ok(())
      }
-@@ -2274,6 +2395,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2274,6 +2404,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                      ((n1 as i64 - n2 as i64) as f64).into()
                  }
              }
@@ -975,7 +984,7 @@ index ed1ff3034..cc2f5faa7 100644
              (Value::Number(n1), Value::Number(n2)) => (n1 - n2).into(),
              _ => {
                  let value2 = value2.coerce_to_number(self)?;
-@@ -2288,10 +2411,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2288,10 +2420,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      }
  
      fn op_subtract_i(&mut self) -> Result<(), Error<'gc>> {
@@ -1001,10 +1010,10 @@ index ed1ff3034..cc2f5faa7 100644
      }
 diff --git a/core/src/avm2/activation_jit.rs b/core/src/avm2/activation_jit.rs
 new file mode 100644
-index 000000000..1169f77cc
+index 000000000..3a56dade4
 --- /dev/null
 +++ b/core/src/avm2/activation_jit.rs
-@@ -0,0 +1,1281 @@
+@@ -0,0 +1,1589 @@
 +//! FlashNX: a baseline JIT for AVM2 bytecode (AArch64, Switch build only).
 +//!
 +//! Fireboy & Watergirl 2 runs 2.65 million AVM2 ops per frame at ~57 CPU
@@ -1035,12 +1044,26 @@ index 000000000..1169f77cc
 +//! layout they rely on is measured on real values first (`Layout`): a type
 +//! of object whose layout was not checked takes the helper.
 +//!
++//! `callmethod` from compiled code goes straight into the callee's compiled
++//! code when that is safe (`fast_call`, the way avmplus' JIT calls an
++//! early-bound method through its `_implGPR`): callee compiled, no
++//! `arguments` / `...rest`, as many arguments as parameters, and arguments
++//! that already have their parameter's type (or only need `int` -> `Number`
++//! or `undefined` -> `null`). It skips the generic `call_method_with_args` ->
++//! `exec` -> `init_from_method` path, which re-checks and re-coerces
++//! everything on each of Fireboy's 42 000 calls a frame.
++//!
++//! `getproperty` with an int index on a dense `Array` has its own helper
++//! (no dynamic dispatch, no borrow counting); `setslot` without coercion is
++//! inline when the object is not black for the GC (a black object takes the
++//! helper, whose `Gc::write` runs gc-arena's barrier).
++//!
 +//! Methods with exception handlers, `lookupswitch` or unknown ops stay
 +//! interpreted. Code memory comes from libnx's `jitCreate` (CodeMemory, which
 +//! hbloader allows on Mesosphère), see `cpp/src/flashnx_jit.c`.
 +
 +use super::*;
-+use crate::avm2::object::ScriptObjectData;
++use crate::avm2::object::{Object, ScriptObjectData};
 +use fnv::FnvHashMap;
 +use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 +
@@ -1057,12 +1080,21 @@ index 000000000..1169f77cc
 +const CODE_SIZE: usize = 16 << 20;
 +/// Helper table: 0..KINDS = `h_op::<K>`, then the special helpers.
 +const KINDS: usize = 160;
++const H_ARRAY_GET: usize = 248;
++const H_CALL: usize = 249;
 +const H_GENERIC: usize = 250;
 +const H_TRUTHY: usize = 251;
 +const H_TIMEOUT: usize = 252;
 +const H_RETURN: usize = 253;
 +
 +static ENABLED: AtomicBool = AtomicBool::new(true);
++/// `callmethod` straight into compiled code (`fast_call`); the profiling
++/// build's A/B switches it.
++static DIRECT_CALLS: AtomicBool = AtomicBool::new(true);
++
++pub fn set_direct_calls(on: bool) {
++    DIRECT_CALLS.store(on, AtomicOrdering::Relaxed);
++}
 +
 +pub fn set_enabled(on: bool) {
 +    ENABLED.store(on, AtomicOrdering::Relaxed);
@@ -1107,6 +1139,9 @@ index 000000000..1169f77cc
 +    deopts: u64,
 +    deopt_ops: FnvHashMap<String, u64>,
 +    runs: u64,
++    /// `callmethod` from compiled code: entered directly / through `exec`.
++    calls_direct: u64,
++    calls_slow: u64,
 +    layout: Layout,
 +}
 +
@@ -1133,6 +1168,11 @@ index 000000000..1169f77cc
 +    slots_len_off: usize,
 +    probes: u32,
 +    obj_fail: &'static str,
++    /// Offset of `GcBoxHeader::tagged_vtable` from the box (its 2 low bits are
++    /// the GC color, 3 = black), measured on two fresh arrays.
++    header_ok: bool,
++    header_probed: bool,
++    vtable_word: usize,
 +}
 +
 +static mut STATE: Option<State> = None;
@@ -1154,6 +1194,8 @@ index 000000000..1169f77cc
 +            deopts: 0,
 +            deopt_ops: FnvHashMap::default(),
 +            runs: 0,
++            calls_direct: 0,
++            calls_slow: 0,
 +            layout: Layout::default(),
 +        })
 +    }
@@ -1248,6 +1290,40 @@ index 000000000..1169f77cc
 +    l.int_tag = i[0];
 +    l.int_off = int_off;
 +    l.num_ok = l.bool_ok && l.bool_off >= 8;
++}
++
++/// Where the GC color lives in a box header: two fresh objects of the same
++/// type share their (tagged) vtable pointer, not their `next` pointer, and
++/// gc-arena links each new box in front of the previous one (`allocate`:
++/// `header.set_next(self.all)`), so the second one's `next` IS the first box.
++/// Anything else and `setslot` keeps its helper (and gc-arena's barrier).
++fn probe_header(l: &mut Layout, act: &mut Activation<'_, '_>) {
++    l.header_probed = true;
++    let a1 = ArrayObject::empty(act.context);
++    let a2 = ArrayObject::empty(act.context);
++    let b1 = bytes_of(Value::Object(a1.into()))[1] as usize;
++    let b2 = bytes_of(Value::Object(a2.into()))[1] as usize;
++    if b1 == 0 || b2 == 0 || b1 % 8 != 0 || b2 % 8 != 0 {
++        return;
++    }
++    let w = |b: usize, k: usize| unsafe { *((b + 8 * k) as *const usize) };
++    let mut hit = None;
++    for k in 0..2 {
++        let (x, y) = (w(b1, k) & !0xF, w(b2, k) & !0xF);
++        let other = 1 - k;
++        if x != 0 && x == y && w(b1, other) != w(b2, other) {
++            if hit.is_some() {
++                return;
++            }
++            hit = Some(k);
++        }
++    }
++    if let Some(k) = hit
++        && w(b2, 1 - k) == b1
++    {
++        l.vtable_word = 8 * k;
++        l.header_ok = true;
++    }
 +}
 +
 +/// Learn the layout of one more type of object from a live one: Ruffle's own
@@ -1856,6 +1932,56 @@ index 000000000..1169f77cc
 +                a.set(to_done, done);
 +            }
 +            Op::ReturnValue { .. } | Op::ReturnVoid { .. } => a.call(H_RETURN, d, i, 0, true),
++            Op::GetPropertyFast { multiname } if multiname.has_lazy_name() && !multiname.has_lazy_ns() => {
++                a.call(H_ARRAY_GET, d, i, d - 1, true);
++            }
++            Op::SetSlotNoCoerce { index }
++                if lay.header_ok && !lay.obj_tags.is_empty() && slot(d - 1) + 16 < 4096 && *index < 4096 =>
++            {
++                // Object of a checked type, not black for the GC, slot in
++                // range: store in place. Otherwise the helper (barrier, errors).
++                let (obj, val) = (slot(d - 2), slot(d - 1));
++                let mut to_slow = Vec::new();
++                a.ldrb(9, X19, obj);
++                if lay.obj_tags.len() == 1 {
++                    a.cmp_w(9, lay.obj_tags[0] as u32);
++                    to_slow.push(a.fwd(Fix::BCond(NE)));
++                } else {
++                    let mut to_fast = Vec::new();
++                    for &t in &lay.obj_tags {
++                        a.cmp_w(9, t as u32);
++                        to_fast.push(a.fwd(Fix::BCond(EQ)));
++                    }
++                    to_slow.push(a.fwd(Fix::B));
++                    let fast = a.here();
++                    for f in to_fast {
++                        a.set(f, fast);
++                    }
++                }
++                a.ldr_x(10, X19, obj + 8);
++                a.ldr_x(11, 10, lay.vtable_word);
++                a.e(0x1200_056B); // and w11, w11, #3
++                a.cmp_w(11, 3);
++                to_slow.push(a.fwd(Fix::BCond(EQ)));
++                a.ldr_x(12, 10, lay.slots_len_off);
++                a.cmp_x(12, *index as u32);
++                to_slow.push(a.fwd(Fix::BCond(LS)));
++                a.ldr_x(12, 10, lay.slots_ptr_off);
++                a.ldr_q(0, X19, val);
++                a.str_q(0, 12, *index * 16);
++                let to_done = a.fwd(Fix::B);
++                let slow = a.here();
++                for f in to_slow {
++                    a.set(f, slow);
++                }
++                a.call(kind(op), d, i, d - 2, true);
++                let done = a.here();
++                a.set(to_done, done);
++            }
++            Op::CallMethod { num_args, push_return_value, .. } => {
++                let post = d - 1 - *num_args as usize + *push_return_value as usize;
++                a.call(H_CALL, d, i, post, true);
++            }
 +            _ => {
 +                let (pops, pushes) = effect(op).unwrap();
 +                let k = kind(op);
@@ -1968,6 +2094,181 @@ index 000000000..1169f77cc
 +    }
 +}
 +
++/// `getproperty` with a runtime name: an int index into a dense `Array` is
++/// read here (what `op_get_property_fast` ends up doing for it, minus the
++/// dynamic dispatch and the borrow counting); anything else is that handler.
++unsafe extern "C" fn h_array_get(ctx: *mut Ctx, depth: u32, idx: u32, post: u32) -> u32 {
++    unsafe {
++        let c = &mut *ctx;
++        let obj_slot = c.num_locals + depth as usize - 2;
++        let o = *c.frame.add(obj_slot);
++        let n = *c.frame.add(obj_slot + 1);
++        if let (Value::Object(Object::ArrayObject(array)), Value::Integer(i)) = (o, n)
++            && i >= 0
++            && let Some(ArrayStorage::Dense { storage, .. }) = array.flashnx_storage_unguarded()
++            && let Some(Some(v)) = storage.get(i as usize)
++        {
++            *c.frame.add(obj_slot) = *v;
++            return 0;
++        }
++        let act = &mut *c.act;
++        act.stack.set_stack_pointer(c.num_locals + depth as usize);
++        let r = match &*c.ops.add(idx as usize) {
++            Op::GetPropertyFast { multiname } => act.op_get_property_fast(*multiname),
++            _ => unreachable!(),
++        };
++        finish(c, act, r, idx, post)
++    }
++}
++
++unsafe extern "C" fn h_call_method(ctx: *mut Ctx, depth: u32, idx: u32, post: u32) -> u32 {
++    unsafe {
++        let c = &mut *ctx;
++        let act = &mut *c.act;
++        let (index, num_args, push) = match &*c.ops.add(idx as usize) {
++            Op::CallMethod { index, num_args, push_return_value } => (*index, *num_args, *push_return_value),
++            _ => unreachable!(),
++        };
++        let recv = c.num_locals + depth as usize - num_args as usize - 1;
++        if let Some(r) = fast_call(act, c.frame, recv, index, num_args as usize) {
++            state().calls_direct += 1;
++            return match r {
++                Ok(v) => {
++                    if push {
++                        *c.frame.add(recv) = v;
++                    }
++                    0
++                }
++                Err(e) => {
++                    c.result = Some(Err(e));
++                    1
++                }
++            };
++        }
++        state().calls_slow += 1;
++        act.stack.set_stack_pointer(c.num_locals + depth as usize);
++        let r = act.op_call_method(index, num_args, push);
++        finish(c, act, r, idx, post)
++    }
++}
++
++/// `callmethod` straight into the callee's compiled code, or `None` when any
++/// condition is not met (the caller then takes the interpreter's path, which
++/// does the very same thing in the general case).
++///
++/// This is `call_method_with_args` + `exec` + `init_from_method` for the case
++/// the JIT can see is simple, step for step: same vtable lookup, same bound
++/// method check, same stack frame, same activation fields, same call stack,
++/// same cleanup. Arguments are only taken when `coerce_to_type` would give
++/// them back unchanged, or convert them in one of two trivial ways.
++unsafe fn fast_call(
++    act: &mut Act,
++    frame: *mut Value<'static>,
++    recv: usize,
++    index: usize,
++    n: usize,
++) -> Option<Result<Value<'static>, Error<'static>>> {
++    if n > 16 || !DIRECT_CALLS.load(AtomicOrdering::Relaxed) || !fast_calls() || crate::flashnx_as3prof::enabled() {
++        return None;
++    }
++    let receiver = unsafe { *frame.add(recv) };
++    let Value::Object(obj) = receiver else { return None };
++    if obj.get_bound_method(index).is_some() {
++        return None;
++    }
++    let full = obj.vtable().get_full_method(index)?;
++    let method = full.method;
++    let code = method.flashnx_jit().get();
++    if code == REJECTED || code <= 0xFFFF {
++        return None;
++    }
++    if method.needs_arguments_object() || method.is_variadic() {
++        return None;
++    }
++    let num_locals = method.body()?.num_locals as usize;
++    let signature = method.resolved_param_config();
++    if signature.len() != n || num_locals < n + 1 {
++        return None;
++    }
++    // 0: as is, 1: int -> Number, 2: undefined -> null (what coerce_to_type does).
++    let mut conv = [0u8; 16];
++    for (i, param) in signature.iter().enumerate() {
++        let v = unsafe { *frame.add(recv + 1 + i) };
++        let Some(class) = param.param_type else { continue };
++        conv[i] = if class.is_builtin_int() {
++            if !matches!(v, Value::Integer(_)) {
++                return None;
++            }
++            0
++        } else if class.is_builtin_uint() {
++            if !matches!(v, Value::Integer(x) if x >= 0) {
++                return None;
++            }
++            0
++        } else if class.is_builtin_number() {
++            match v {
++                Value::Number(_) => 0,
++                Value::Integer(_) => 1,
++                _ => return None,
++            }
++        } else if class.is_builtin_boolean() {
++            if !matches!(v, Value::Bool(_)) {
++                return None;
++            }
++            0
++        } else if class.is_builtin_void() {
++            return None;
++        } else {
++            match v {
++                Value::Null => 0,
++                Value::Undefined => 2,
++                Value::String(_) if class.is_builtin_string() => 0,
++                _ if class.is_builtin_object() => 0,
++                Value::Object(o) if o.is_of_type(class) => 0,
++                _ => return None,
++            }
++        };
++    }
++
++    // exec(), bytecode branch, with init_from_method's work inline.
++    let mc = act.gc();
++    let caller_dxns = act.default_xml_namespace();
++    let stack = act.context.avm2.stack;
++    let stack_frame = stack.get_stack_frame(method);
++    let mut callee = Activation::from_nothing(act.context);
++    callee.num_locals = num_locals;
++    callee.outer = full.scope();
++    callee.caller_domain = Some(callee.outer.domain());
++    callee.caller_movie = CallerMovie::Method(method);
++    callee.bound_superclass_object = full.super_class_obj;
++    callee.stack = stack_frame;
++    callee.scope_depth = callee.context.avm2.scope_stack.len();
++    callee.is_interpreter = method.is_interpreted();
++    callee.push_stack(receiver);
++    for i in 0..n {
++        let v = unsafe { *frame.add(recv + 1 + i) };
++        callee.push_stack(match (conv[i], v) {
++            (1, Value::Integer(x)) => Value::Number(x as f64),
++            (2, _) => Value::Null,
++            _ => v,
++        });
++    }
++    callee.reset_stack();
++    if !method.sets_dxns() {
++        callee.default_xml_namespace = caller_dxns;
++    }
++    callee.context.avm2.push_call(mc, method);
++    let result = match run_compiled(&mut callee, method, code) {
++        Outcome::Done(r) => r,
++        Outcome::Resume(ip) => callee.run_actions_from(method, ip),
++        Outcome::Interpret => callee.run_actions_from(method, 0),
++    };
++    callee.cleanup();
++    drop(callee);
++    act.context.avm2.pop_call(mc);
++    Some(result)
++}
++
 +macro_rules! fill_kinds {
 +    ($t:ident; $($k:literal)*) => {
 +        $( $t[$k] = h_op::<$k> as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize; )*
@@ -1983,6 +2284,8 @@ index 000000000..1169f77cc
 +        115 116 117 118 119 120 121 122 123 124 125 126 127 128 129 130 131 132 133 134 135 136 137
 +        138 139 140 141 142 143 144 145 146 147 148 149 150 151 152 153 154 155 156 157 158 159);
 +    t[H_GENERIC] = h_op::<H_GENERIC> as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
++    t[H_CALL] = h_call_method as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
++    t[H_ARRAY_GET] = h_array_get as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
 +    t[H_TRUTHY] = h_truthy as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
 +    t[H_TIMEOUT] = h_timeout as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
 +    t[H_RETURN] = h_return as unsafe extern "C" fn(*mut Ctx, u32, u32, u32) -> u32 as usize;
@@ -2005,6 +2308,9 @@ index 000000000..1169f77cc
 +        if s.layout.obj_tags.len() < 4 && s.layout.probes < 100_000 {
 +            probe_object(&mut s.layout, act.stack.value_at(0));
 +        }
++        if !s.layout.header_probed {
++            probe_header(&mut s.layout, act);
++        }
 +        match compile(s, method) {
 +            Ok(addr) => {
 +                s.compiled += 1;
@@ -2019,6 +2325,12 @@ index 000000000..1169f77cc
 +            }
 +        }
 +    };
++    run_compiled(act, method, code)
++}
++
++/// Run `method`'s compiled code at `code` in `act` (set up as `exec` does).
++fn run_compiled<'a, 'gc>(act: &mut Activation<'a, 'gc>, method: Method<'gc>, code: usize) -> Outcome<'gc> {
++    let cell = method.flashnx_jit();
 +    if let Err(e) = act.timeout_check() {
 +        return Outcome::Done(Err(e));
 +    }
@@ -2082,11 +2394,12 @@ index 000000000..1169f77cc
 +    };
 +    let l = &s.layout;
 +    let out = format!(
-+        "{} (rc=0x{:x}, bool {}, numbers {}, getslot {:?} slots@{}/{} {}), {} methods compiled ({} KB), {} rejected [{}], {} deopts [{}], {} runs",
++        "{} (rc=0x{:x}, bool {}, numbers {}, setslot {}, getslot {:?} slots@{}/{} {}), {} methods compiled ({} KB), {} rejected [{}], {} deopts [{}], {} runs, calls {} direct / {} slow",
 +        if s.init == 1 { "on" } else { "UNAVAILABLE" },
 +        s.init_rc,
 +        if l.bool_ok { "inline" } else { "helper" },
 +        if l.num_ok { "inline" } else { "helper" },
++        if l.header_ok { "inline" } else { "helper" },
 +        l.obj_tags,
 +        l.slots_ptr_off,
 +        l.slots_len_off,
@@ -2097,9 +2410,13 @@ index 000000000..1169f77cc
 +        top(&s.reasons),
 +        s.deopts,
 +        top(&s.deopt_ops),
-+        s.runs
++        s.runs,
++        s.calls_direct,
++        s.calls_slow
 +    );
 +    s.runs = 0;
++    s.calls_direct = 0;
++    s.calls_slow = 0;
 +    out
 +}
 +
@@ -3330,6 +3647,27 @@ index dcbb88f37..14f084afb 100644
 +                flashnx_jit: std::cell::Cell::new(0),
              },
          )))
+     }
+diff --git a/core/src/avm2/object/array_object.rs b/core/src/avm2/object/array_object.rs
+index 852754058..ea218ca7e 100644
+--- a/core/src/avm2/object/array_object.rs
++++ b/core/src/avm2/object/array_object.rs
+@@ -127,6 +127,16 @@ impl<'gc> ArrayObject<'gc> {
+         Gc::as_ref(self.0).array.borrow()
+     }
+ 
++    /// FlashNX: the storage for one read, without touching the borrow
++    /// counter (the JIT's array helper); `None` while it is mutably borrowed.
++    ///
++    /// # Safety
++    /// The reference must be dropped before any code that could mutate the
++    /// array runs.
++    pub unsafe fn flashnx_storage_unguarded(self) -> Option<&'gc ArrayStorage<'gc>> {
++        unsafe { Gc::as_ref(self.0).array.as_ref_cell().try_borrow_unguarded().ok() }
++    }
++
+     pub fn storage_mut(self, mc: &Mutation<'gc>) -> RefMut<'gc, ArrayStorage<'gc>> {
+         unlock!(Gc::write(mc, self.0), ArrayObjectData, array).borrow_mut()
      }
 diff --git a/core/src/avm2/object/event_object.rs b/core/src/avm2/object/event_object.rs
 index 0e6f47c5c..88661652d 100644
@@ -7618,7 +7956,7 @@ index 91bdb52df..33230aaf1 100644
  pub fn broadcast_frame_entered<'gc>(context: &mut UpdateContext<'gc>) {
      let enter_frame_evt = EventObject::bare_default_event(context, "enterFrame");
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..e1e61aef9 100644
+index 6e5379213..0f4639782 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
 @@ -4,6 +4,9 @@
@@ -7647,7 +7985,7 @@ index 6e5379213..e1e61aef9 100644
 +pub use flashnx_census::report as census_report;
 +pub use library::set_movie_free;
 +pub use flashnx_as3prof::{report as as3prof_report, set_as3_profiler};
-+pub use avm2::activation::{jit_report, jit_reset, set_fast_calls, set_jit};
++pub use avm2::activation::{jit_report, jit_reset, set_fast_calls, set_jit, set_jit_direct_calls};
 +
 +/// FlashNX: AVM2 opcode census over the last `frames` frames, then reset
 +/// (`avm2ops:` lines). Empty unless built with `flashnx_opcount`.

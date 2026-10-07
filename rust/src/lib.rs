@@ -2333,8 +2333,10 @@ pub(crate) static AB_REGIME: core::sync::atomic::AtomicU64 = core::sync::atomic:
 pub extern "C" fn ruffle_ab_regime(regime: i32) {
     use core::sync::atomic::Ordering::Relaxed;
     AB_REGIME.store((regime != 0) as u64, Relaxed);
-    // 2026-10-07: the AVM2 JIT of our Ruffle (`set_jit`). Before it, the
-    // cheaper call path (`set_fast_calls`, -2.8 ms a frame on Fireboy 2).
+    // The whole AVM2 JIT of our Ruffle (`set_jit`). Measured before with this
+    // switch: the JIT alone (-17.5 ms a frame on Fireboy 2), direct calls
+    // between compiled methods (`set_jit_direct_calls`, -3.3 ms), the cheaper
+    // call path (`set_fast_calls`, -2.8 ms).
     ruffle_core::set_jit(regime != 0);
 }
 

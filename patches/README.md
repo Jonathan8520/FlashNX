@@ -385,6 +385,20 @@ console, one change at a time, each with an SD-card marker to turn it off.
   game (`jit_reset`). Fireboy 2's light temple: 13.0 to 16.9 images a second
   (same session, 16 window pairs), no AS3 error in six other games. Marker
   `jit.off`; `jit:` line every 300 frames.
+  Then, the way avmplus' JIT calls an early-bound method (`emitTypedCall`,
+  `coerceArgs`, the callee's `_implGPR`): a compiled `callmethod` enters a
+  compiled callee directly (`fast_call`: same vtable lookup, frame, activation
+  fields, call stack and cleanup as `exec`, taken only when the callee has no
+  `arguments`/rest, gets as many arguments as parameters and they already
+  have their parameter's type, or only need `int` to `Number` or `undefined`
+  to `null`); 99.7 % of Fireboy's calls, -3.3 ms a frame. `getproperty` with
+  an int index on a dense `Array` has its own helper (no dynamic dispatch, no
+  borrow counting, `ArrayObject::flashnx_storage_unguarded`). `setslot`
+  without coercion stores in place when the object is not black for the GC
+  (color bits of the box header, located on two fresh arrays and confirmed by
+  gc-arena's allocation chaining); a black object takes the helper, whose
+  `Gc::write` runs the barrier. All together: 13.0 to 18.5 images a second
+  (-23 ms a frame, same session).
 - `core/src/avm2/activation.rs`, `function.rs`, `stack.rs`: **a cheaper AVM2
   call path** (`set_fast_calls`). A bytecode activation keeps its method
   instead of cloning an `Arc<SwfMovie>` per call (two atomic loops on the
