@@ -406,6 +406,17 @@ console, one change at a time, each with an SD-card marker to turn it off.
   and a new frame clears only its locals (the verifier rejects any pop without
   a push of the same frame, so the operand part is never read stale). -2.8 ms a
   frame on Fireboy 2. Marker `fastcall.off`.
+- `core/src/avm2/property_map.rs`, `domain.rs`: backport of upstream
+  ruffle#23253 (merged 2026-07-10, after our base). When a subclass declares a
+  field with the same local name as a private or internal field of its
+  superclass, a bracket lookup (`this["field"]`) now finds the subclass's one
+  first, as Flash Player 32 does: `PropertyMap::insert` puts a new entry at the
+  front of its name's list, application domains keep the old order
+  (`insert_at_end`). Our `scope.rs` still uses `insert_with_namespace`
+  (removed upstream by 5087eca85), which already appends, the order the fix
+  keeps for scope caches. A game whose dropdowns failed to build (error #1009
+  in their constructor) had a dead main menu; it now starts. The fix's five
+  `property_priority*` tests are in the snapshot and pass.
 - `core/src/flashnx_avm2ops.rs` (new): AVM2 opcode census (`avm2ops:` lines,
   feature `flashnx_opcount`, not in any default build: its pair table costs
   ~14 % of an AS3-bound frame).

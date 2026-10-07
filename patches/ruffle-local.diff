@@ -2967,7 +2967,7 @@ index 27daaf6bc..340265324 100644
          let name = self.name();
  
 diff --git a/core/src/avm2/domain.rs b/core/src/avm2/domain.rs
-index c90ef4e51..31f974f4e 100644
+index c90ef4e51..a14f61426 100644
 --- a/core/src/avm2/domain.rs
 +++ b/core/src/avm2/domain.rs
 @@ -69,6 +69,11 @@ struct DomainDataMut<'gc> {
@@ -2982,6 +2982,24 @@ index c90ef4e51..31f974f4e 100644
      fn cell(self) -> Ref<'gc, DomainDataMut<'gc>> {
          Gc::as_ref(self.0).cell.borrow()
      }
+@@ -335,7 +340,7 @@ impl<'gc> Domain<'gc> {
+             return;
+         }
+ 
+-        self.cell_mut(mc).defs.insert(name, script);
++        self.cell_mut(mc).defs.insert_at_end(name, script);
+     }
+ 
+     /// Export a class into the current application domain.
+@@ -345,7 +350,7 @@ impl<'gc> Domain<'gc> {
+         if self.has_class(export_name) {
+             return;
+         }
+-        self.cell_mut(mc).classes.insert(export_name, class);
++        self.cell_mut(mc).classes.insert_at_end(export_name, class);
+     }
+ 
+     pub fn defs(&self) -> Ref<'_, PropertyMap<'gc, Script<'gc>>> {
 diff --git a/core/src/avm2/dynamic_map.rs b/core/src/avm2/dynamic_map.rs
 index 6a0c92a11..d0777428a 100644
 --- a/core/src/avm2/dynamic_map.rs
@@ -3986,10 +4004,18 @@ index 34403555f..56e6095e8 100644
  pub enum Property {
      Virtual {
 diff --git a/core/src/avm2/property_map.rs b/core/src/avm2/property_map.rs
-index 674918a87..6f2683781 100644
+index 674918a87..67062c822 100644
 --- a/core/src/avm2/property_map.rs
 +++ b/core/src/avm2/property_map.rs
-@@ -24,10 +24,16 @@ use std::mem::swap;
+@@ -8,7 +8,6 @@ use fnv::FnvBuildHasher;
+ use gc_arena::Collect;
+ use smallvec::SmallVec;
+ use std::collections::HashMap;
+-use std::mem::swap;
+ 
+ /// Type which represents named properties on an object.
+ ///
+@@ -24,10 +23,16 @@ use std::mem::swap;
  /// The internal structure of the `PropertyMap` technically allows storage of
  /// multiple values per `QName`. It's implementation enforces the invariant
  /// that each `QName` only have one associated `V`.
@@ -4008,6 +4034,68 @@ index 674918a87..6f2683781 100644
  );
  
  impl<V> Default for PropertyMap<'_, V> {
+@@ -107,35 +112,52 @@ impl<'gc, V> PropertyMap<'gc, V> {
+             .flat_map(|(k, vs)| vs.iter().map(|(ns, v)| (*k, *ns, v)))
+     }
+ 
+-    pub fn insert(&mut self, name: QName<'gc>, mut value: V) -> Option<V> {
++    pub fn insert(&mut self, name: QName<'gc>, value: V) -> Option<V> {
++        let bucket = self.0.entry(name.local_name()).or_default();
++
++        if let Some(position) = bucket
++            .iter()
++            .position(|(n, _)| n.matches_ns(name.namespace()))
++        {
++            let (_, old_value) = bucket.remove(position);
++            bucket.insert(0, (name.namespace(), value));
++
++            Some(old_value)
++        } else {
++            bucket.insert(0, (name.namespace(), value));
++
++            None
++        }
++    }
++
++    /// Preserves Flash Player ordering in scope caches and application domains.
++    pub fn insert_at_end(&mut self, name: QName<'gc>, value: V) -> Option<V> {
+         let bucket = self.0.entry(name.local_name()).or_default();
+ 
+         if let Some((_, old_value)) = bucket
+             .iter_mut()
+             .find(|(n, _)| n.matches_ns(name.namespace()))
+         {
+-            swap(old_value, &mut value);
+-
+-            Some(value)
++            Some(std::mem::replace(old_value, value))
+         } else {
+             bucket.push((name.namespace(), value));
+-
+             None
+         }
+     }
+ 
++    /// FlashNX: still used by our `scope.rs` (removed upstream in 5087eca85,
++    /// which `insert_at_end` replaces): appends, like `insert_at_end`, which is
++    /// the order ruffle#23253 keeps for scope caches.
+     pub fn insert_with_namespace(
+         &mut self,
+         ns: Namespace<'gc>,
+         name: AvmString<'gc>,
+-        mut value: V,
++        value: V,
+     ) -> Option<V> {
+         let bucket = self.0.entry(name).or_default();
+ 
+         if let Some((_, old_value)) = bucket.iter_mut().find(|(n, _)| n.matches_ns(ns)) {
+-            swap(old_value, &mut value);
+-
+-            Some(value)
++            Some(std::mem::replace(old_value, value))
+         } else {
+             bucket.push((ns, value));
+ 
 diff --git a/core/src/avm2/regexp.rs b/core/src/avm2/regexp.rs
 index 8c4a1efa9..7734df5b4 100644
 --- a/core/src/avm2/regexp.rs
@@ -9246,3 +9334,294 @@ index 80ecf0517..001395fb7 100644
      fn update_texture(
          &mut self,
          handle: &BitmapHandle,
+diff --git a/tests/tests/swfs/avm2/getter_different_namespace_setter/test.toml b/tests/tests/swfs/avm2/getter_different_namespace_setter/test.toml
+index b010ec115..62d6148dd 100644
+--- a/tests/tests/swfs/avm2/getter_different_namespace_setter/test.toml
++++ b/tests/tests/swfs/avm2/getter_different_namespace_setter/test.toml
+@@ -1,3 +1,7 @@
+ # Note: The p-code in the SWF included here is edited to ensure that we
+ # properly test lookups with Multinames.
+ num_frames = 1
++
++# Correct handling requires per-vtable lookup; with flattened vtables, overridden
++# traits would need to be hackily promoted ahead of inherited traits.
++known_failure = true
+diff --git a/tests/tests/swfs/avm2/property_priority/Base.as b/tests/tests/swfs/avm2/property_priority/Base.as
+new file mode 100644
+index 000000000..317de39a8
+--- /dev/null
++++ b/tests/tests/swfs/avm2/property_priority/Base.as
+@@ -0,0 +1,19 @@
++package {
++    public class Base {
++        private var field:String = "base_private";
++
++        public function Base() {
++            trace("///Base()");
++            trace(this.field);
++            trace(this["field"]);
++        }
++
++        public function getFieldBracket():String {
++            return this["field"];
++        }
++
++        public function getFieldDirect():String {
++            return this.field;
++        }
++    }
++}
+diff --git a/tests/tests/swfs/avm2/property_priority/Child.as b/tests/tests/swfs/avm2/property_priority/Child.as
+new file mode 100644
+index 000000000..ff4589777
+--- /dev/null
++++ b/tests/tests/swfs/avm2/property_priority/Child.as
+@@ -0,0 +1,17 @@
++package {
++    public class Child extends Base {
++        public var field:String = "child_public";
++
++        public function Child() {
++            trace("///Child pre-super");
++            trace(this.field);
++            trace(this["field"]);
++            super();
++            trace("///Child post-super");
++            trace(this.field);
++            trace(this["field"]);
++            trace(getFieldBracket());
++            trace(getFieldDirect());
++        }
++    }
++}
+diff --git a/tests/tests/swfs/avm2/property_priority/Sub2.as b/tests/tests/swfs/avm2/property_priority/Sub2.as
+new file mode 100644
+index 000000000..f8873f4e7
+--- /dev/null
++++ b/tests/tests/swfs/avm2/property_priority/Sub2.as
+@@ -0,0 +1,14 @@
++package {
++    import pkg.Base2;
++    public class Sub2 extends Base2 {
++        public var value:String = "sub2_public";
++
++        public function Sub2() {
++            trace("///Sub2()");
++            trace(this.value);
++            trace(this["value"]);
++            trace(getValueBracket());
++            trace(getValueDirect());
++        }
++    }
++}
+diff --git a/tests/tests/swfs/avm2/property_priority/Test.as b/tests/tests/swfs/avm2/property_priority/Test.as
+new file mode 100644
+index 000000000..ed12d5023
+--- /dev/null
++++ b/tests/tests/swfs/avm2/property_priority/Test.as
+@@ -0,0 +1,13 @@
++package {
++    import flash.display.Sprite;
++
++    public class Test extends Sprite {
++        public function Test() {
++            trace("///new Child()");
++            var child:Child = new Child();
++            trace("");
++            trace("///new Sub2()");
++            var sub2:Sub2 = new Sub2();
++        }
++    }
++}
+diff --git a/tests/tests/swfs/avm2/property_priority/output.txt b/tests/tests/swfs/avm2/property_priority/output.txt
+new file mode 100644
+index 000000000..288327d43
+--- /dev/null
++++ b/tests/tests/swfs/avm2/property_priority/output.txt
+@@ -0,0 +1,22 @@
++///new Child()
++///Child pre-super
++child_public
++child_public
++///Base()
++base_private
++child_public
++///Child post-super
++child_public
++child_public
++child_public
++base_private
++
++///new Sub2()
++///Base2()
++base2_internal
++sub2_public
++///Sub2()
++sub2_public
++sub2_public
++sub2_public
++base2_internal
+diff --git a/tests/tests/swfs/avm2/property_priority/pkg/Base2.as b/tests/tests/swfs/avm2/property_priority/pkg/Base2.as
+new file mode 100644
+index 000000000..3bf691ac6
+--- /dev/null
++++ b/tests/tests/swfs/avm2/property_priority/pkg/Base2.as
+@@ -0,0 +1,19 @@
++package pkg {
++    public class Base2 {
++        internal var value:String = "base2_internal";
++
++        public function Base2() {
++            trace("///Base2()");
++            trace(this.value);
++            trace(this["value"]);
++        }
++
++        public function getValueBracket():String {
++            return this["value"];
++        }
++
++        public function getValueDirect():String {
++            return this.value;
++        }
++    }
++}
+diff --git a/tests/tests/swfs/avm2/property_priority/test.swf b/tests/tests/swfs/avm2/property_priority/test.swf
+new file mode 100644
+index 000000000..1661317c0
+Binary files /dev/null and b/tests/tests/swfs/avm2/property_priority/test.swf differ
+diff --git a/tests/tests/swfs/avm2/property_priority/test.toml b/tests/tests/swfs/avm2/property_priority/test.toml
+new file mode 100644
+index 000000000..dbee897f5
+--- /dev/null
++++ b/tests/tests/swfs/avm2/property_priority/test.toml
+@@ -0,0 +1 @@
++num_frames = 1
+diff --git a/tests/tests/swfs/avm2/property_priority_chained/output.txt b/tests/tests/swfs/avm2/property_priority_chained/output.txt
+new file mode 100644
+index 000000000..b1087d5cf
+--- /dev/null
++++ b/tests/tests/swfs/avm2/property_priority_chained/output.txt
+@@ -0,0 +1,4 @@
++subclass-field1
++subclass-field1
++subclass-field2
++subclass-field2
+diff --git a/tests/tests/swfs/avm2/property_priority_chained/test.swf b/tests/tests/swfs/avm2/property_priority_chained/test.swf
+new file mode 100644
+index 000000000..9d44f0a02
+Binary files /dev/null and b/tests/tests/swfs/avm2/property_priority_chained/test.swf differ
+diff --git a/tests/tests/swfs/avm2/property_priority_chained/test.toml b/tests/tests/swfs/avm2/property_priority_chained/test.toml
+new file mode 100644
+index 000000000..dbee897f5
+--- /dev/null
++++ b/tests/tests/swfs/avm2/property_priority_chained/test.toml
+@@ -0,0 +1 @@
++num_frames = 1
+diff --git a/tests/tests/swfs/avm2/property_priority_definition_names_order/Test.as b/tests/tests/swfs/avm2/property_priority_definition_names_order/Test.as
+new file mode 100644
+index 000000000..97d504b28
+--- /dev/null
++++ b/tests/tests/swfs/avm2/property_priority_definition_names_order/Test.as
+@@ -0,0 +1,21 @@
++// Build from this directory:
++// compc -source-path=. -include-sources p1/Same.as p2/Same.as -output definitions.swc
++// mxmlc -source-path=. -include-libraries=definitions.swc -o test.swf -debug Test.as
++
++package {
++    import flash.display.MovieClip;
++    import flash.system.ApplicationDomain;
++
++    public class Test extends MovieClip {
++        public function Test() {
++            var names:Vector.<String> =
++                ApplicationDomain.currentDomain.getQualifiedDefinitionNames();
++
++            for each (var name:String in names) {
++                if (name == "p1::Same" || name == "p2::Same") {
++                    trace(name);
++                }
++            }
++        }
++    }
++}
+diff --git a/tests/tests/swfs/avm2/property_priority_definition_names_order/output.txt b/tests/tests/swfs/avm2/property_priority_definition_names_order/output.txt
+new file mode 100644
+index 000000000..e15131d38
+--- /dev/null
++++ b/tests/tests/swfs/avm2/property_priority_definition_names_order/output.txt
+@@ -0,0 +1,2 @@
++p1::Same
++p2::Same
+diff --git a/tests/tests/swfs/avm2/property_priority_definition_names_order/p1/Same.as b/tests/tests/swfs/avm2/property_priority_definition_names_order/p1/Same.as
+new file mode 100644
+index 000000000..841629860
+--- /dev/null
++++ b/tests/tests/swfs/avm2/property_priority_definition_names_order/p1/Same.as
+@@ -0,0 +1,4 @@
++package p1 {
++    public class Same {
++    }
++}
+diff --git a/tests/tests/swfs/avm2/property_priority_definition_names_order/p2/Same.as b/tests/tests/swfs/avm2/property_priority_definition_names_order/p2/Same.as
+new file mode 100644
+index 000000000..cf0ebe94f
+--- /dev/null
++++ b/tests/tests/swfs/avm2/property_priority_definition_names_order/p2/Same.as
+@@ -0,0 +1,4 @@
++package p2 {
++    public class Same {
++    }
++}
+diff --git a/tests/tests/swfs/avm2/property_priority_definition_names_order/test.swf b/tests/tests/swfs/avm2/property_priority_definition_names_order/test.swf
+new file mode 100644
+index 000000000..57998788c
+Binary files /dev/null and b/tests/tests/swfs/avm2/property_priority_definition_names_order/test.swf differ
+diff --git a/tests/tests/swfs/avm2/property_priority_definition_names_order/test.toml b/tests/tests/swfs/avm2/property_priority_definition_names_order/test.toml
+new file mode 100644
+index 000000000..cf6123969
+--- /dev/null
++++ b/tests/tests/swfs/avm2/property_priority_definition_names_order/test.toml
+@@ -0,0 +1 @@
++num_ticks = 1
+diff --git a/tests/tests/swfs/avm2/property_priority_scope_cache_order/output.txt b/tests/tests/swfs/avm2/property_priority_scope_cache_order/output.txt
+new file mode 100644
+index 000000000..2b167b580
+--- /dev/null
++++ b/tests/tests/swfs/avm2/property_priority_scope_cache_order/output.txt
+@@ -0,0 +1 @@
++inner-value
+diff --git a/tests/tests/swfs/avm2/property_priority_scope_cache_order/test.swf b/tests/tests/swfs/avm2/property_priority_scope_cache_order/test.swf
+new file mode 100644
+index 000000000..59c18cf3a
+Binary files /dev/null and b/tests/tests/swfs/avm2/property_priority_scope_cache_order/test.swf differ
+diff --git a/tests/tests/swfs/avm2/property_priority_scope_cache_order/test.toml b/tests/tests/swfs/avm2/property_priority_scope_cache_order/test.toml
+new file mode 100644
+index 000000000..cf6123969
+--- /dev/null
++++ b/tests/tests/swfs/avm2/property_priority_scope_cache_order/test.toml
+@@ -0,0 +1 @@
++num_ticks = 1
+diff --git a/tests/tests/swfs/avm2/property_priority_three_level/output.txt b/tests/tests/swfs/avm2/property_priority_three_level/output.txt
+new file mode 100644
+index 000000000..aed07d152
+--- /dev/null
++++ b/tests/tests/swfs/avm2/property_priority_three_level/output.txt
+@@ -0,0 +1,6 @@
++child-public
++child-public
++child-public
++child-public
++child-public
++child-public
+diff --git a/tests/tests/swfs/avm2/property_priority_three_level/test.swf b/tests/tests/swfs/avm2/property_priority_three_level/test.swf
+new file mode 100644
+index 000000000..6c3f47a37
+Binary files /dev/null and b/tests/tests/swfs/avm2/property_priority_three_level/test.swf differ
+diff --git a/tests/tests/swfs/avm2/property_priority_three_level/test.toml b/tests/tests/swfs/avm2/property_priority_three_level/test.toml
+new file mode 100644
+index 000000000..dbee897f5
+--- /dev/null
++++ b/tests/tests/swfs/avm2/property_priority_three_level/test.toml
+@@ -0,0 +1 @@
++num_frames = 1
