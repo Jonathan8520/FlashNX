@@ -494,6 +494,18 @@ FlashNX's side (not in this diff), in `rust/src/backend/render.rs`:
 
 ### Tried and dropped (2026-10-08)
 
+- **Keeping the textures of emptied dedicated atlases for reuse** (FlashNX
+  side, `render.rs`). Super Bowser World makes ~5 ground strips of 1280x240 or
+  1440x240 a frame, each a new texture, and drops them when the collector
+  reclaims their BitmapData, ~100 at a time every few seconds. A pool of
+  exact-size textures (reused 3 frames after parking at the earliest) reused
+  ~15 % of them at 16 MB and ~70 % at 96 MB, but uploads only went from 10.2
+  to 9.4 ms a frame (in-session A/B): making the texture was cheap, copying 6
+  MB of pixels a frame into the GPU's layout is what costs. Not worth holding
+  up to 96 MB that a game at the edge of its memory (SSF2) may need. What
+  stayed: the `atlas: allocating` line is no longer printed for every strip
+  (it was 1.4 % of the frame), and `evict:` counts the atlases made.
+
 - **The AVM1 property-name hash kept in the string** (`AvmStringRepr` field,
   `PropertyMap` hashing a precomputed u64, as ruffle#3432 suggests). The
   hashing left the profile, but lookups only went from ~12.8 % to ~11 % of the

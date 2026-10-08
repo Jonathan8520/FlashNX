@@ -2732,6 +2732,8 @@ pub struct SwitchRenderBackend {
     big_atlas_dropped_total: u32,
     /// New atlases the GPU heap had no room for (`pack_into_atlas` fell back).
     atlas_alloc_failures: u32,
+    /// Atlases made since the last `evict:` line.
+    atlas_created: u32,
     /// Evictable SWF images (see `ReloadSlot`); `evict.off` turns them off.
     evict_on: bool,
     /// Since the last `evict:` line: atlases emptied, images and bytes evicted,
@@ -6365,14 +6367,16 @@ impl SwitchRenderBackend {
         }
         let ms = self.evict_reload_ticks as f64 * 1000.0 / unsafe { ruffle_tick_freq() }.max(1) as f64;
         log_str(&std::format!(
-            "evict: f{} reloadable atlases {} ({}MB), other atlases {}; last 300 frames: emptied {} atlases ({}MB, {} images), decoded again {} ({}MB, {:.0} ms), failed {}, released slots reused {}\n",
+            "evict: f{} reloadable atlases {} ({}MB), other atlases {}; last 300 frames: emptied {} atlases ({}MB, {} images), decoded again {} ({}MB, {:.0} ms), failed {}, released slots reused {}, atlases made {}\n",
             self.frame_count, n, mb,
             self.atlases.iter().filter(|a| a.texture != 0 && !a.reloadable).count(),
             self.evict_atlases, self.evict_bytes / (1024 * 1024), self.evict_images,
             self.evict_reloads, self.evict_reload_bytes / (1024 * 1024), ms,
             self.evict_reload_fail,
             SLOTS_REUSED.swap(0, Ordering::Relaxed),
+            self.atlas_created,
         ));
+        self.atlas_created = 0;
         self.evict_atlases = 0;
         self.evict_images = 0;
         self.evict_bytes = 0;
@@ -6666,6 +6670,7 @@ impl SwitchRenderBackend {
             big_atlas_free_total: 0,
             big_atlas_dropped_total: 0,
             atlas_alloc_failures: 0,
+            atlas_created: 0,
             evict_on: !marker_present("evict.off"),
             evict_atlases: 0,
             evict_images: 0,
@@ -8415,6 +8420,7 @@ impl SwitchRenderBackend {
         // a standalone texture of the bitmap's own size, which is checked and
         // far smaller than the 16 MB an atlas asks for. Never an atlas without
         // storage (see `Atlas::new_wh`).
+        self.atlas_created = self.atlas_created.wrapping_add(1);
         let Some(mut atlas) = new_atlas else {
             self.atlas_alloc_failures = self.atlas_alloc_failures.wrapping_add(1);
             if self.atlas_alloc_failures <= 8 || self.atlas_alloc_failures % 256 == 0 {
@@ -8455,16 +8461,21 @@ impl SwitchRenderBackend {
                 self.atlases.len() - 1
             }
         };
-        let msg = std::format!(
-            "atlas: allocating #{} ({} MB) for {}x{} [big live={}MB peak={}MB alloc={} free={}]\n",
-            new_atlas_index, bytes_mb, width, height,
-            self.big_atlas_live_bytes / (1024 * 1024),
-            self.big_atlas_peak_bytes / (1024 * 1024),
-            self.big_atlas_alloc_total, self.big_atlas_free_total,
-        );
-        let mut bytes = msg.into_bytes();
-        bytes.push(0);
-        unsafe { ruffle_log_cstr(bytes.as_ptr() as *const _) };
+        // Not for every dedicated one: Super Bowser World makes ~5 a frame
+        // (its ground strips) and this line alone was 1.4 % of its frames
+        // (2026-10-08). The `evict:` line counts them all.
+        if !big || self.big_atlas_alloc_total <= 64 || self.big_atlas_alloc_total % 500 == 0 {
+            let msg = std::format!(
+                "atlas: allocating #{} ({} MB) for {}x{} [big live={}MB peak={}MB alloc={} free={}]\n",
+                new_atlas_index, bytes_mb, width, height,
+                self.big_atlas_live_bytes / (1024 * 1024),
+                self.big_atlas_peak_bytes / (1024 * 1024),
+                self.big_atlas_alloc_total, self.big_atlas_free_total,
+            );
+            let mut bytes = msg.into_bytes();
+            bytes.push(0);
+            unsafe { ruffle_log_cstr(bytes.as_ptr() as *const _) };
+        }
         Some(SwitchBitmapHandle {
             atlas_index: new_atlas_index,
             u0: x as f32 / aw,
