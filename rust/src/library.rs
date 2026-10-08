@@ -1199,6 +1199,9 @@ pub(crate) struct State {
     /// Snapshot of the game's per-game "show cursor" flag for the open TOUCHES
     /// sub-menu (#20). The show-cursor row toggles it; persisted in the keymap.
     touches_show_cursor: bool,
+    /// Same, for the gyroscope cursor row (#119), a `keymap::GYRO_*` mode;
+    /// persisted in `<basename>.prefs`.
+    touches_gyro: u8,
     /// Snapshotted before/after diff lines for the open `ProfilePreview` (#20),
     /// each like "Up: Space -> W". Built by `run_open_preview_flow`.
     preview_rows: std::vec::Vec<std::string::String>,
@@ -1297,6 +1300,7 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     touches_has_backup: false,
     touches_cursor_idx: -1,
     touches_show_cursor: true,
+    touches_gyro: keymap::GYRO_OFF,
     preview_rows: std::vec::Vec::new(),
     active_profile_id: std::string::String::new(),
     share_is_update: false,
@@ -3660,7 +3664,7 @@ pub fn input(button: &str) -> bool {
                 }
                 return true;
             }
-            if button == "A" && selection == 5 {
+            if button == "A" && selection == 6 {
                 run_open_revert_preview_flow(game_idx);
                 return true;
             }
@@ -4009,7 +4013,7 @@ pub fn input(button: &str) -> bool {
             // A (revert) is hoisted in input(); B returns to the sub-menu.
             if matches!(button, "B" | "Minus") {
                 s.preview_rows.clear();
-                goto_touches_menu(&mut s, game_idx, 4); // the REVERT row
+                goto_touches_menu(&mut s, game_idx, 6); // the REVERT row
             }
             true
         }
@@ -5462,13 +5466,18 @@ fn goto_touches_menu(s: &mut State, game_idx: usize, selection: usize) {
         .get(game_idx)
         .map(|e| keymap::show_cursor_for(&e.basename))
         .unwrap_or(true);
+    s.touches_gyro = s
+        .entries
+        .get(game_idx)
+        .map_or(keymap::GYRO_OFF, |e| keymap::gyro_mode_for(&e.basename));
     let row_count = TOUCHES_MENU_FIXED_ROWS + s.touches_can_revert as usize;
     s.screen = Screen::TouchesMenu { game_idx, selection: selection.min(row_count - 1) };
 }
 
 /// Fixed TOUCHES sub-menu rows: edit (0), apply (1), share (2), cursor speed (3),
-/// show-cursor toggle (4). A revert row (5) is appended when `touches_can_revert`.
-const TOUCHES_MENU_FIXED_ROWS: usize = 5;
+/// show-cursor toggle (4), gyroscope cursor (5). A revert row (6) is appended
+/// when `touches_can_revert`.
+const TOUCHES_MENU_FIXED_ROWS: usize = 6;
 
 /// Cursor-speed presets as x10 multipliers. MUST stay in sync with
 /// `CURSOR_SPEED_MULTS` in cpp/src/main.cpp (the C++ side owns the live value;
@@ -5521,6 +5530,14 @@ fn handle_touches_menu_input(s: &mut State, button: &str, game_idx: usize, mut s
                 if let Some(basename) = s.entries.get(game_idx).map(|e| e.basename.clone()) {
                     keymap::toggle_show_cursor_for(&basename);
                     s.touches_show_cursor = !s.touches_show_cursor;
+                }
+                s.screen = Screen::TouchesMenu { game_idx, selection };
+                return;
+            }
+            if selection == 5 {
+                // Gyroscope cursor (#119), per game, applied next launch.
+                if let Some(basename) = s.entries.get(game_idx).map(|e| e.basename.clone()) {
+                    s.touches_gyro = keymap::cycle_gyro_for(&basename);
                 }
                 s.screen = Screen::TouchesMenu { game_idx, selection };
                 return;
@@ -9434,14 +9451,19 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     lc.show_cursor,
                     if s.touches_show_cursor { lc.cursor_shown } else { lc.cursor_hidden },
                 );
-                (game, cursor, show_cur, s.touches_can_revert, s.touches_has_backup)
+                let gyro = std::format!(
+                    "{}: {}",
+                    lc.set_gyro,
+                    crate::loc::gyro_mode_label(s.touches_gyro),
+                );
+                (game, cursor, show_cur, gyro, s.touches_can_revert, s.touches_has_backup)
             });
-            if let Some((game, cursor, show_cur, can_revert, has_backup)) = snap {
+            if let Some((game, cursor, show_cur, gyro, can_revert, has_backup)) = snap {
                 // Order MUST match the row indices in handle_touches_menu_input /
                 // the input() dispatch: edit, apply, share, cursor, show-cursor,
-                // (revert).
+                // gyroscope, (revert).
                 let mut rows: std::vec::Vec<&str> =
-                    std::vec![lc.touches_edit, lc.opt_apply, lc.opt_share, &cursor, &show_cur];
+                    std::vec![lc.touches_edit, lc.opt_apply, lc.opt_share, &cursor, &show_cur, &gyro];
                 if can_revert {
                     // Distinct label: restore my keys (a backup exists) vs reset
                     // to the default controls (none to restore).

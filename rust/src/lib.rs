@@ -1541,6 +1541,8 @@ pub extern "C" fn ruffle_init() -> c_int {
     // (`clock_auto::apply_setting`).
     crate::clock_auto::begin_game();
     crate::clock_auto::apply_setting(keymap::power_mode());
+    // The gyroscope cursor (#119) follows the game too.
+    keymap::refresh_gyro();
 
     // Sidecar dir is needed BEFORE the movie is built (the HTML container's
     // FlashVars live in the tree, see below) and again after, for the navigator.
@@ -3057,6 +3059,14 @@ pub extern "C" fn ruffle_pixel_filter_cycle() {
     crate::backend::render::set_pixel_filter(next);
 }
 
+/// The running game's gyroscope cursor mode (#119): `keymap::GYRO_OFF`,
+/// `GYRO_MARBLE` or `GYRO_POINTER`. Read by the C++ loop every frame, so an
+/// atomic, not the prefs file.
+#[no_mangle]
+pub extern "C" fn ruffle_gyro_mode() -> c_int {
+    keymap::GYRO_MODE.load(core::sync::atomic::Ordering::Relaxed) as c_int
+}
+
 /// Pause-menu OVERCLOCK row: cycle the ACTIVE game's power mode and persist it.
 ///
 /// What gets persisted is what the hardware actually accepted, not what was
@@ -4246,6 +4256,7 @@ pub extern "C" fn ruffle_shutdown() {
     }
     // Before the SESSION END marker, so its summary line counts as the game's.
     crate::clock_auto::end_game();
+    keymap::GYRO_MODE.store(keymap::GYRO_OFF, core::sync::atomic::Ordering::Relaxed);
     // Profiling build only (the map is empty otherwise): where each compiled
     // op of this game starts, for `temp/perf-tools/jit_ops.py`. Overwritten by
     // every game, so it describes the last one.

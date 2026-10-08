@@ -32,8 +32,9 @@ const MENU_APPLY: usize = 1;
 const MENU_SHARE: usize = 2;
 const MENU_CURSOR: usize = 3;
 const MENU_SHOWCURSOR: usize = 4;
-const MENU_REVERT: usize = 5;
-const MENU_FIXED_ROWS: usize = 5;
+const MENU_GYRO: usize = 5;
+const MENU_REVERT: usize = 6;
+const MENU_FIXED_ROWS: usize = 6;
 
 // Toast kinds (match `SwitchRenderBackend::draw_toast`): 0 green, 1 red, 2 blue.
 const TOAST_OK: u8 = 0;
@@ -491,6 +492,11 @@ fn handle_menu_input(s: &mut State, button: &str, mut selection: usize) {
             MENU_SHOWCURSOR => {
                 // Toggle the per-game pointer visibility (persists in the keymap).
                 keymap::toggle_show_cursor();
+            }
+            MENU_GYRO => {
+                // Per-game gyroscope cursor (#119), OFF -> MARBLE -> POINTER;
+                // the C++ loop picks it up on the next frame.
+                keymap::cycle_gyro();
             }
             _ => {}
         },
@@ -1103,12 +1109,18 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
                 lc.show_cursor,
                 if keymap::show_cursor() { lc.cursor_shown } else { lc.cursor_hidden },
             );
+            let gyro = std::format!(
+                "{}: {}",
+                lc.set_gyro,
+                crate::loc::gyro_mode_label(keymap::gyro_mode()),
+            );
             let mut rows: std::vec::Vec<&str> = std::vec![
                 lc.touches_edit,
                 lc.opt_apply,
                 lc.opt_share,
                 cursor.as_str(),
                 show_cur.as_str(),
+                gyro.as_str(),
             ];
             if can_revert {
                 rows.push(if has_backup { lc.profile_revert } else { lc.touches_revert_default });

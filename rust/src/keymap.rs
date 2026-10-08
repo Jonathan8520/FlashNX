@@ -1611,6 +1611,55 @@ pub fn set_power_mode(mode: u8) {
     write_pref(&basename, "power", mode);
 }
 
+/// Gyroscope cursor (#119), per game, `gyro` in `<basename>.prefs`. Off by
+/// default: in a game that does not use the cursor it would only drift it.
+pub const GYRO_OFF: u8 = 0;
+/// MARBLE: the cursor moves like a marble on the screen while the controller
+/// moves (raise the bottom edge and it goes up), and stops when it does.
+pub const GYRO_MARBLE: u8 = 1;
+/// POINTER, like a Wii remote: the cursor goes where the controller points.
+/// In both modes, tilting past an edge then back brings the cursor to the
+/// same place, and the sticks and touch move it as usual; the gyroscope
+/// carries on from there.
+pub const GYRO_POINTER: u8 = 2;
+pub const GYRO_MODE_COUNT: u8 = 3;
+
+pub fn gyro_mode_for(basename: &str) -> u8 {
+    read_pref(basename, "gyro")
+        .filter(|&m| m < GYRO_MODE_COUNT)
+        .unwrap_or(GYRO_OFF)
+}
+
+/// Step a game's setting OFF -> MARBLE -> POINTER (library OPTIONS > TOUCHES);
+/// returns the new value.
+pub fn cycle_gyro_for(basename: &str) -> u8 {
+    let mode = (gyro_mode_for(basename) + 1) % GYRO_MODE_COUNT;
+    write_pref(basename, "gyro", mode);
+    mode
+}
+
+/// The running game's setting, mirrored for the C++ loop, which reads it every
+/// frame (`ruffle_gyro_mode`).
+pub static GYRO_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(GYRO_OFF);
+
+/// The ACTIVE game's setting (OFF when no game is active).
+pub fn gyro_mode() -> u8 {
+    active_game_basename().map_or(GYRO_OFF, |b| gyro_mode_for(&b))
+}
+
+/// Re-read the active game's setting into `GYRO_MODE` (launch, change).
+pub fn refresh_gyro() {
+    GYRO_MODE.store(gyro_mode(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Step the ACTIVE game's setting (pause menu > TOUCHES).
+pub fn cycle_gyro() {
+    if let Some(b) = active_game_basename() {
+        cycle_gyro_for(&b);
+    }
+    refresh_gyro();
+}
+
 /// Number of FPS-counter states: 0 = hidden, 1 = shown. Spelled as a count like
 /// the settings above so the ECRAN row cycles through the same expression they
 /// all use, rather than being the one row with a bespoke toggle.

@@ -409,6 +409,14 @@ pub struct Strings {
     pub rot_270: &'static str,
     /// TOUCHES row + share/diff label for the per-game "show cursor" toggle.
     pub show_cursor: &'static str,
+    /// TOUCHES row (#119): moving the controller moves the cursor. Values:
+    /// `overclock_off` (the same OFF word), `gyro_marble`, `gyro_pointer`.
+    pub set_gyro: &'static str,
+    /// Gyroscope like a marble on the screen: the cursor rolls toward the
+    /// edge that goes down, while the controller moves.
+    pub gyro_marble: &'static str,
+    /// Gyroscope like a Wii remote: the cursor goes where the controller points.
+    pub gyro_pointer: &'static str,
     /// Values for the show-cursor toggle (shown / hidden).
     pub cursor_shown: &'static str,
     pub cursor_hidden: &'static str,
@@ -806,6 +814,9 @@ const EN: Strings = Strings {
     rot_180: "180\u{00B0}",
     rot_270: "270\u{00B0}",
     show_cursor: "SHOW CURSOR",
+    set_gyro: "GYROSCOPE",
+    gyro_marble: "MARBLE",
+    gyro_pointer: "POINTER",
     cursor_shown: "SHOWN",
     cursor_hidden: "HIDDEN",
     set_back: "BACK",
@@ -1083,6 +1094,9 @@ const FR: Strings = Strings {
     rot_180: "180\u{00B0}",
     rot_270: "270\u{00B0}",
     show_cursor: "AFFICHER LE CURSEUR",
+    set_gyro: "GYROSCOPE",
+    gyro_marble: "BILLE",
+    gyro_pointer: "VIS\u{00C9}E",
     cursor_shown: "AFFICHÉ",
     cursor_hidden: "MASQUÉ",
     set_back: "RETOUR",
@@ -1360,6 +1374,9 @@ const ES: Strings = Strings {
     rot_180: "180\u{00B0}",
     rot_270: "270\u{00B0}",
     show_cursor: "MOSTRAR CURSOR",
+    set_gyro: "GIROSCOPIO",
+    gyro_marble: "CANICA",
+    gyro_pointer: "PUNTERO",
     cursor_shown: "VISIBLE",
     cursor_hidden: "OCULTO",
     set_back: "VOLVER",
@@ -1639,6 +1656,9 @@ const RU: Strings = Strings {
     rot_180: "180\u{00B0}",
     rot_270: "270\u{00B0}",
     show_cursor: "ПОКАЗАТЬ КУРСОР",
+    set_gyro: "ГИРОСКОП",
+    gyro_marble: "ШАРИК",
+    gyro_pointer: "ПРИЦЕЛ",
     cursor_shown: "ПОКАЗАН",
     cursor_hidden: "СКРЫТ",
     set_back: "НАЗАД",
@@ -1921,6 +1941,9 @@ const DE: Strings = Strings {
     rot_180: "180\u{00B0}",
     rot_270: "270\u{00B0}",
     show_cursor: "CURSOR ZEIGEN",
+    set_gyro: "GYROSKOP",
+    gyro_marble: "MURMEL",
+    gyro_pointer: "ZEIGER",
     cursor_shown: "SICHTBAR",
     cursor_hidden: "VERBORGEN",
     set_back: "ZUR\u{00DC}CK",
@@ -2200,6 +2223,9 @@ const IT: Strings = Strings {
     rot_180: "180\u{00B0}",
     rot_270: "270\u{00B0}",
     show_cursor: "MOSTRA CURSORE",
+    set_gyro: "GIROSCOPIO",
+    gyro_marble: "BIGLIA",
+    gyro_pointer: "PUNTATORE",
     cursor_shown: "VISIBILE",
     cursor_hidden: "NASCOSTO",
     set_back: "INDIETRO",
@@ -2479,6 +2505,9 @@ const PT: Strings = Strings {
     rot_180: "180\u{00B0}",
     rot_270: "270\u{00B0}",
     show_cursor: "MOSTRAR CURSOR",
+    set_gyro: "GIROSC\u{00D3}PIO",
+    gyro_marble: "BOLINHA",
+    gyro_pointer: "PONTEIRO",
     cursor_shown: "VIS\u{00CD}VEL",
     cursor_hidden: "OCULTO",
     set_back: "VOLTAR",
@@ -2763,6 +2792,9 @@ const ZH: Strings = Strings {
     rot_180: "180\u{00B0}",
     rot_270: "270\u{00B0}",
     show_cursor: "显示光标",
+    set_gyro: "陀螺仪",
+    gyro_marble: "弹珠",
+    gyro_pointer: "指针",
     cursor_shown: "显示",
     cursor_hidden: "隐藏",
     set_back: "返回",
@@ -3045,6 +3077,9 @@ const TR: Strings = Strings {
     rot_180: "180\u{00B0}",
     rot_270: "270\u{00B0}",
     show_cursor: "IMLEC\u{0130} G\u{00D6}STER",
+    set_gyro: "J\u{0130}ROSKOP",
+    gyro_marble: "B\u{0130}LYE",
+    gyro_pointer: "\u{0130}\u{015E}ARET\u{00C7}\u{0130}",
     cursor_shown: "G\u{00D6}R\u{00DC}N\u{00DC}R",
     cursor_hidden: "G\u{0130}ZL\u{0130}",
     set_back: "GER\u{0130}",
@@ -3265,6 +3300,15 @@ pub fn home_view_label(v: u8) -> &'static str {
         2 => s().home_strip,
         3 => s().home_shelf,
         _ => s().home_grid,
+    }
+}
+
+/// Value of the TOUCHES > GYROSCOPE row (#119), for `keymap::GYRO_*`.
+pub fn gyro_mode_label(mode: u8) -> &'static str {
+    match mode {
+        crate::keymap::GYRO_MARBLE => s().gyro_marble,
+        crate::keymap::GYRO_POINTER => s().gyro_pointer,
+        _ => s().overclock_off,
     }
 }
 
