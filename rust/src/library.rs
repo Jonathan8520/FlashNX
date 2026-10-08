@@ -756,19 +756,41 @@ fn last_played_path() -> Option<std::string::String> {
     LAST_PLAYED.lock().ok().and_then(|g| g.as_ref().map(|(p, _, _)| p.clone()))
 }
 
-/// (basename, display name) of every game in the library, once each. Empty
-/// when the library is not loaded (a game launched from its HOME tile) or busy.
-/// For the COPY FROM ANOTHER GAME list; never call it with LIBRARY held.
+/// (basename, display name) of every game in the library, once each. For the
+/// COPY FROM ANOTHER GAME list; never call it with LIBRARY held.
+///
+/// A game launched from its HOME tile runs without the library: then the
+/// games that have controls of their own are read off the card instead, from
+/// their `<basename>.keymap.json` sidecars, named as the scan would name them.
 pub fn owned_games() -> std::vec::Vec<(std::string::String, std::string::String)> {
-    let Ok(g) = LIBRARY.try_lock() else {
-        return std::vec::Vec::new();
-    };
     let mut seen = std::collections::BTreeSet::new();
-    g.entries
-        .iter()
-        .filter(|e| seen.insert(e.basename.clone()))
-        .map(|e| (e.basename.clone(), e.display_name.clone()))
-        .collect()
+    if let Ok(g) = LIBRARY.try_lock() {
+        if !g.entries.is_empty() {
+            return g
+                .entries
+                .iter()
+                .filter(|e| seen.insert(e.basename.clone()))
+                .map(|e| (e.basename.clone(), e.display_name.clone()))
+                .collect();
+        }
+    }
+    let mut out = std::vec::Vec::new();
+    for root in search_roots() {
+        for file in list_files_top(&root) {
+            let Some(basename) = file.strip_suffix(".keymap.json") else {
+                continue;
+            };
+            if basename.is_empty() || !seen.insert(basename.to_string()) {
+                continue;
+            }
+            let name = read_meta_sidecar(basename)
+                .and_then(|m| m.display_name)
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| basename.to_string());
+            out.push((basename.to_string(), name));
+        }
+    }
+    out
 }
 
 /// Display name of the currently/last launched game — used by the pause
@@ -5290,12 +5312,9 @@ fn run_open_profiles_flow(game_idx: usize) {
         None
     };
     if let Ok(mut s) = LIBRARY.lock() {
-        // The picker modal sizes itself to its row count and is centred, with no
-        // window and no scroll: 140 + 52*rows + 60 px tall. Past 10 rows that is
-        // taller than the 720 px screen and its top edge goes negative, so the
-        // first entries are drawn off-screen and cannot be reached. The preview
-        // list is already capped the same way (`cap_preview_rows`). Nine
-        // profiles at most, then the COPY FROM ANOTHER GAME row.
+        // Every profile, then the COPY FROM ANOTHER GAME row. The picker used
+        // to keep ten (its modal did not scroll and grew 52 px a row); it now
+        // shows a scrolling window (`draw_library_list_modal_window`).
         s.profile_matches = crate::profiles::with_copy_row(matches);
         s.profile_copy_mode = false;
         s.profile_saved_matches.clear();
@@ -9620,13 +9639,14 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 } else {
                     lc.profile_footer.to_string()
                 };
-                backend.draw_library_list_modal(
+                backend.draw_library_list_modal_window(
                     if copy_mode { lc.profile_copy_row } else { lc.profile_title },
                     &game,
                     selection,
                     &refs,
                     &footer,
                     true,
+                    crate::profiles::PICKER_VISIBLE_ROWS,
                 );
             }
         }

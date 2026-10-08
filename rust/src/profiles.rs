@@ -369,8 +369,10 @@ fn normalize_title(s: &str) -> std::string::String {
 /// Id of the COPY FROM ANOTHER GAME row (never a real profile id).
 pub const COPY_ROW_ID: &str = "\u{1}copy-from-game";
 const LOCAL_PREFIX: &str = "local:";
-/// The picker modal does not scroll and fits 10 rows (see the library picker).
-const PICKER_ROWS: usize = 10;
+/// Rows the picker shows at once; longer lists scroll
+/// (`draw_library_list_modal_window`). Ten made the modal as tall as the
+/// screen (140 + 52 per row + 60 px), touching its top and bottom edges.
+pub const PICKER_VISIBLE_ROWS: usize = 8;
 
 pub fn is_copy_row(id: &str) -> bool {
     id == COPY_ROW_ID
@@ -397,10 +399,9 @@ fn blank_profile(id: std::string::String, title: std::string::String) -> Profile
     }
 }
 
-/// The community matches as the picker shows them: at most nine, then the
-/// COPY FROM ANOTHER GAME row.
+/// The community matches as the picker shows them, then the COPY FROM
+/// ANOTHER GAME row.
 pub fn with_copy_row(mut matches: std::vec::Vec<Match>) -> std::vec::Vec<Match> {
-    matches.truncate(PICKER_ROWS - 1);
     matches.push(Match {
         profile: blank_profile(COPY_ROW_ID.into(), crate::loc::s().profile_copy_row.into()),
         kind: MatchKind::Title,
@@ -420,7 +421,7 @@ fn title_words(s: &str) -> std::vec::Vec<std::string::String> {
 
 /// The player's other games with controls of their own, as local profiles:
 /// sequels first (most title words in common with `title`), then the most
-/// recently played, ten at most. Skips `basename` itself, games whose sidecar
+/// recently played, every one of them. Skips `basename` itself, games whose sidecar
 /// is still the default controls, and games whose controls already equal this
 /// one's (copying them would change nothing).
 pub fn local_copies(basename: &str, title: &str) -> std::vec::Vec<Match> {
@@ -452,7 +453,7 @@ pub fn local_copies(basename: &str, title: &str) -> std::vec::Vec<Match> {
         scored.push((shared, crate::playtime::get_last(&other), Match { profile: p, kind: MatchKind::Title, applied: 0 }));
     }
     scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
-    scored.into_iter().take(PICKER_ROWS).map(|(_, _, m)| m).collect()
+    scored.into_iter().map(|(_, _, m)| m).collect()
 }
 
 /// How a profile matched the local game — drives the UI (exact = offer to

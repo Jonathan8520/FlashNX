@@ -201,6 +201,15 @@ impl ModalFrame {
     }
 }
 
+/// First row shown by `draw_library_list_modal_window`: the window of
+/// `max_rows` stays centred on `selection`, clamped to the list's ends.
+pub fn list_window_start(selection: usize, len: usize, max_rows: usize) -> usize {
+    if len <= max_rows {
+        return 0;
+    }
+    selection.saturating_sub(max_rows / 2).min(len - max_rows)
+}
+
 /// Truncate `s` to at most `max_chars` characters, appending "…" when cut.
 fn truncate_tail(s: &str, max_chars: usize) -> std::string::String {
     if s.chars().count() > max_chars && max_chars > 1 {
@@ -13306,6 +13315,30 @@ impl SwitchRenderBackend {
             glBindVertexArray(0);
         }
         self.gl_state.invalidate();
+    }
+
+    /// `draw_library_list_modal` for a list that may be longer than the screen:
+    /// at most `max_rows` rows show, a window kept centred on the selection, and
+    /// the title then says where the cursor is ("4/24"). The touch table holds
+    /// the VISIBLE rows; `list_window_start` turns one back into a list index.
+    pub fn draw_library_list_modal_window(
+        &mut self,
+        title: &str,
+        subtitle: &str,
+        selection: usize,
+        options: &[&str],
+        footer: &str,
+        wide: bool,
+        max_rows: usize,
+    ) {
+        if options.len() <= max_rows {
+            self.draw_library_list_modal(title, subtitle, selection, options, footer, wide);
+            return;
+        }
+        let start = list_window_start(selection, options.len(), max_rows);
+        let shown = &options[start..start + max_rows];
+        let titled = std::format!("{}  {}/{}", title, selection.min(options.len() - 1) + 1, options.len());
+        self.draw_library_list_modal(&titled, subtitle, selection - start, shown, footer, wide);
     }
 
     /// Destructive-confirm modal for OPTIONS > SUPPRIMER. Bigger / redder

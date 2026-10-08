@@ -200,6 +200,12 @@ pub fn touch_select(idx: usize) -> bool {
             false
         }
         Screen::Profiles { selection } => {
+            // `idx` is a VISIBLE row: the picker shows a scrolling window.
+            let idx = crate::backend::render::list_window_start(
+                selection,
+                s.matches.len(),
+                crate::profiles::PICKER_VISIBLE_ROWS,
+            ) + idx;
             if idx >= s.matches.len() {
                 return false;
             }
@@ -1273,7 +1279,15 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
             };
             let copy_mode = TOUCHES.lock().map(|s| s.copy_mode).unwrap_or(false);
             let title = if copy_mode { lc.profile_copy_row } else { lc.profile_title };
-            backend.draw_library_list_modal(title, &game, selection, &refs, &footer, true);
+            backend.draw_library_list_modal_window(
+                title,
+                &game,
+                selection,
+                &refs,
+                &footer,
+                true,
+                crate::profiles::PICKER_VISIBLE_ROWS,
+            );
         }
         Screen::DeleteConfirm { profile_idx } => {
             let name = TOUCHES
