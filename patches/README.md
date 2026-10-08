@@ -129,6 +129,18 @@ instead of keeping the object, as Flash does when two clips share a name; the
 gnash test `opcode_guard_test2` passes and is no longer a known failure.
 Electricman 2 targets `_root.em` this way while two clips are named `em`.
 
+**`core/src/local_connection.rs`: a game from the SD card is on `localhost`.**
+
+FlashNX runs a SWF from the SD card under the made-up host
+`flashforswitch.local`, and `LocalConnection.domain` answered that host. A
+local file answers `localhost` in Flash, and many sitelocks accept it for
+their authors' own tests. Super Smash Flash 2 Portable (the official
+`SSF2Portable.swf`) authorizes `localhost`, `127.0.0.1`, its AIR app id and
+its own sites, and showed "Looks like you're trying to play SSF2 on an
+unofficial website" for anything else (FlashNX #112). It now loads its
+`data/` from `SSF2Portable.files/` and plays. Games from Flashpoint keep
+their original host and are unaffected.
+
 **Experiment switches (`graphic.rs`, `player.rs`), read from FlashNX markers.**
 `set_lazy_shapes(false)` (`lazyshape.off`) registers static shapes at preload
 as upstream does; `set_bitmap_cache(false)` (`bitmapcache.off`) ignores
