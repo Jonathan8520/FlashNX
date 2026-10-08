@@ -753,7 +753,7 @@ index 563ffbb03..ba6970ad5 100644
          context: &mut UpdateContext<'gc>,
          object: Object<'gc>,
 diff --git a/core/src/avm2/activation.rs b/core/src/avm2/activation.rs
-index ed1ff3034..cdfd81068 100644
+index ed1ff3034..61bed51da 100644
 --- a/core/src/avm2/activation.rs
 +++ b/core/src/avm2/activation.rs
 @@ -57,7 +57,8 @@ pub struct Activation<'a, 'gc: 'a> {
@@ -766,7 +766,7 @@ index ed1ff3034..cdfd81068 100644
  
      /// The superclass of the class that yielded the currently executing method.
      ///
-@@ -102,6 +103,75 @@ pub struct Activation<'a, 'gc: 'a> {
+@@ -102,6 +103,117 @@ pub struct Activation<'a, 'gc: 'a> {
      pub context: &'a mut UpdateContext<'gc>,
  }
  
@@ -827,6 +827,48 @@ index ed1ff3034..cdfd81068 100644
 +    jit::reset();
 +}
 +
++/// FlashNX: the stack cache of compiled code (on by default; `jittos.off`).
++pub fn set_jit_tos_cache(on: bool) {
++    #[cfg(feature = "flashnx_jit")]
++    jit::set_tos_cache(on);
++    #[cfg(not(feature = "flashnx_jit"))]
++    let _ = on;
++}
++
++/// FlashNX, profiling build: compile every method a second time without the
++/// stack cache (`dual`), and run that second code (`alt`) in the A/B's other
++/// windows.
++pub fn set_jit_ab(dual: bool, alt: bool) {
++    #[cfg(feature = "flashnx_jit")]
++    {
++        jit::set_dual(dual);
++        jit::set_alt(alt);
++    }
++    #[cfg(not(feature = "flashnx_jit"))]
++    let _ = (dual, alt);
++}
++
++/// FlashNX: keep where each compiled op's code starts (profiling build).
++pub fn set_jit_map(on: bool) {
++    #[cfg(feature = "flashnx_jit")]
++    jit::set_map(on);
++    #[cfg(not(feature = "flashnx_jit"))]
++    let _ = on;
++}
++
++/// FlashNX: `<address hex> <op>` per compiled op since the last reset, for
++/// the profiler to name the ops its samples in compiled code fall in.
++pub fn jit_map_text() -> String {
++    #[cfg(feature = "flashnx_jit")]
++    {
++        jit::map_text()
++    }
++    #[cfg(not(feature = "flashnx_jit"))]
++    {
++        String::new()
++    }
++}
++
 +/// FlashNX: one line of JIT counters (`jit:`), empty without the JIT.
 +pub fn jit_report() -> String {
 +    #[cfg(feature = "flashnx_jit")]
@@ -842,7 +884,7 @@ index ed1ff3034..cdfd81068 100644
  impl<'gc> HasStringContext<'gc> for Activation<'_, 'gc> {
      #[inline(always)]
      fn strings_ref(&self) -> &StringContext<'gc> {
-@@ -135,7 +205,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -135,7 +247,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
              num_locals: 0,
              outer: ScopeChain::new(context.avm2.stage_domain),
              caller_domain: None,
@@ -851,7 +893,7 @@ index ed1ff3034..cdfd81068 100644
              bound_superclass_object: None,
              stack: StackFrame::empty(),
              scope_depth: context.avm2.scope_stack.len(),
-@@ -159,7 +229,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -159,7 +271,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
              num_locals: 0,
              outer: ScopeChain::new(context.avm2.stage_domain),
              caller_domain: Some(domain),
@@ -860,7 +902,7 @@ index ed1ff3034..cdfd81068 100644
              bound_superclass_object: None,
              stack: StackFrame::empty(),
              scope_depth: context.avm2.scope_stack.len(),
-@@ -214,8 +284,13 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -214,8 +326,13 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          method: Method<'gc>,
          user_arguments: FunctionArgs<'_, 'gc>,
          signature: &[ResolvedParamConfig<'gc>],
@@ -876,7 +918,7 @@ index ed1ff3034..cdfd81068 100644
          for (arg, param_config) in user_arguments.iter().zip(signature.iter()) {
              let coerced_arg = if let Some(param_class) = param_config.param_type {
                  arg.coerce_to_type(self, param_class)?
-@@ -343,14 +418,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -343,14 +460,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          let num_locals = body.num_locals as usize;
          let has_rest_or_args = method.is_variadic();
  
@@ -901,7 +943,7 @@ index ed1ff3034..cdfd81068 100644
          self.bound_superclass_object = bound_superclass_object;
          self.stack = stack_frame;
          self.scope_depth = self.context.avm2.scope_stack.len();
-@@ -438,7 +520,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -438,7 +562,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          bound_superclass_object: Option<ClassObject<'gc>>,
          outer: ScopeChain<'gc>,
          caller_domain: Option<Domain<'gc>>,
@@ -910,7 +952,7 @@ index ed1ff3034..cdfd81068 100644
          caller_dxns: Option<AvmString<'gc>>,
      ) -> Self {
          Self {
-@@ -519,6 +601,16 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -519,6 +643,16 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      /// Returns the movie of the original AS3 caller. This will be `None`
      /// if this activation was constructed with `from_nothing`
      pub fn caller_movie(&self) -> Option<Arc<SwfMovie>> {
@@ -927,7 +969,7 @@ index ed1ff3034..cdfd81068 100644
          self.caller_movie.clone()
      }
  
-@@ -643,6 +735,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -643,6 +777,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      }
  
      pub fn run_actions(&mut self, method: Method<'gc>) -> Result<Value<'gc>, Error<'gc>> {
@@ -951,7 +993,7 @@ index ed1ff3034..cdfd81068 100644
          // The method must be verified at this point
  
          let verified_info = method.get_verified_info();
-@@ -650,12 +759,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -650,12 +801,14 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
          self.timeout_check()?;
  
@@ -967,7 +1009,7 @@ index ed1ff3034..cdfd81068 100644
  
              let result = match op {
                  Op::PushDouble { value } => self.op_push_double(*value),
-@@ -946,7 +1057,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -946,7 +1099,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          *self.context.actions_since_timeout_check += 1;
          if *self.context.actions_since_timeout_check >= 10000 {
              *self.context.actions_since_timeout_check = 0;
@@ -976,7 +1018,7 @@ index ed1ff3034..cdfd81068 100644
                  return Err(
                      "A script in this movie has taken too long to execute and has been terminated."
                          .into(),
-@@ -2023,6 +2134,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2023,6 +2176,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                      ((n1 as i64 + n2 as i64) as f64).into()
                  }
              }
@@ -987,7 +1029,7 @@ index ed1ff3034..cdfd81068 100644
              (Value::Number(n1), Value::Number(n2)) => (n1 + n2).into(),
              (Value::String(s), value2) => Value::String(AvmString::concat(
                  self.gc(),
-@@ -2072,11 +2187,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2072,11 +2229,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          Ok(())
      }
  
@@ -998,14 +1040,14 @@ index ed1ff3034..cdfd81068 100644
 -        let value1 = self.pop_stack().coerce_to_i32(self)?;
 +        let value2 = self.pop_stack();
 +        let value1 = self.pop_stack();
- 
--        self.push_stack(value1.wrapping_add(value2));
++
 +        let sum_value = match (value1, value2) {
 +            (Value::Integer(n1), Value::Integer(n2)) => n1.wrapping_add(n2),
 +            (value1, value2) => {
 +                let value1 = value1.coerce_to_i32(self)?;
 +                let value2 = value2.coerce_to_i32(self)?;
-+
+ 
+-        self.push_stack(value1.wrapping_add(value2));
 +                value1.wrapping_add(value2)
 +            }
 +        };
@@ -1014,7 +1056,7 @@ index ed1ff3034..cdfd81068 100644
  
          Ok(())
      }
-@@ -2134,8 +2261,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2134,8 +2303,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
      fn op_decrement(&mut self) -> Result<(), Error<'gc>> {
          let value = self.pop_stack().coerce_to_number(self)?;
@@ -1025,7 +1067,7 @@ index ed1ff3034..cdfd81068 100644
  
          Ok(())
      }
-@@ -2151,8 +2279,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2151,8 +2321,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      fn op_divide(&mut self) -> Result<(), Error<'gc>> {
          let value2 = self.pop_stack().coerce_to_number(self)?;
          let value1 = self.pop_stack().coerce_to_number(self)?;
@@ -1036,7 +1078,7 @@ index ed1ff3034..cdfd81068 100644
  
          Ok(())
      }
-@@ -2175,8 +2304,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2175,8 +2346,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
      fn op_increment(&mut self) -> Result<(), Error<'gc>> {
          let value = self.pop_stack().coerce_to_number(self)?;
@@ -1047,7 +1089,7 @@ index ed1ff3034..cdfd81068 100644
  
          Ok(())
      }
-@@ -2274,6 +2404,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2274,6 +2446,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                      ((n1 as i64 - n2 as i64) as f64).into()
                  }
              }
@@ -1056,7 +1098,7 @@ index ed1ff3034..cdfd81068 100644
              (Value::Number(n1), Value::Number(n2)) => (n1 - n2).into(),
              _ => {
                  let value2 = value2.coerce_to_number(self)?;
-@@ -2288,10 +2420,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2288,10 +2462,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      }
  
      fn op_subtract_i(&mut self) -> Result<(), Error<'gc>> {
@@ -1064,14 +1106,14 @@ index ed1ff3034..cdfd81068 100644
 -        let value1 = self.pop_stack().coerce_to_i32(self)?;
 +        let value2 = self.pop_stack();
 +        let value1 = self.pop_stack();
- 
--        self.push_stack(value1.wrapping_sub(value2));
++
 +        let sum_value = match (value1, value2) {
 +            (Value::Integer(n1), Value::Integer(n2)) => n1.wrapping_sub(n2),
 +            (value1, value2) => {
 +                let value1 = value1.coerce_to_i32(self)?;
 +                let value2 = value2.coerce_to_i32(self)?;
-+
+ 
+-        self.push_stack(value1.wrapping_sub(value2));
 +                value1.wrapping_sub(value2)
 +            }
 +        };
@@ -1082,10 +1124,10 @@ index ed1ff3034..cdfd81068 100644
      }
 diff --git a/core/src/avm2/activation_jit.rs b/core/src/avm2/activation_jit.rs
 new file mode 100644
-index 000000000..3a56dade4
+index 000000000..51abbd491
 --- /dev/null
 +++ b/core/src/avm2/activation_jit.rs
-@@ -0,0 +1,1589 @@
+@@ -0,0 +1,1840 @@
 +//! FlashNX: a baseline JIT for AVM2 bytecode (AArch64, Switch build only).
 +//!
 +//! Fireboy & Watergirl 2 runs 2.65 million AVM2 ops per frame at ~57 CPU
@@ -1168,6 +1210,27 @@ index 000000000..3a56dade4
 +    DIRECT_CALLS.store(on, AtomicOrdering::Relaxed);
 +}
 +
++/// The one-entry stack cache of compiled code (`Tos`); off from the
++/// `jittos.off` marker.
++static TOS_CACHE: AtomicBool = AtomicBool::new(true);
++/// Profiling build: every method is compiled twice, the second time without
++/// the stack cache, so the A/B windows can run either (`ALT`).
++static DUAL: AtomicBool = AtomicBool::new(false);
++/// Run the second compilation where there is one.
++static ALT: AtomicBool = AtomicBool::new(false);
++
++pub fn set_tos_cache(on: bool) {
++    TOS_CACHE.store(on, AtomicOrdering::Relaxed);
++}
++
++pub fn set_dual(on: bool) {
++    DUAL.store(on, AtomicOrdering::Relaxed);
++}
++
++pub fn set_alt(on: bool) {
++    ALT.store(on, AtomicOrdering::Relaxed);
++}
++
 +pub fn set_enabled(on: bool) {
 +    ENABLED.store(on, AtomicOrdering::Relaxed);
 +}
@@ -1215,6 +1278,29 @@ index 000000000..3a56dade4
 +    calls_direct: u64,
 +    calls_slow: u64,
 +    layout: Layout,
++    /// Where each compiled op's code starts (address, op name), kept only
++    /// when `set_map` asked for it: the profiling build's attribution of
++    /// samples in compiled code to the ops that produced it.
++    map: Vec<(usize, String)>,
++}
++
++/// Keep the op address map (`map`); off unless the profiling build asks.
++static MAP: AtomicBool = AtomicBool::new(false);
++
++pub fn set_map(on: bool) {
++    MAP.store(on, AtomicOrdering::Relaxed);
++}
++
++/// The op address map of the code compiled since the last `reset`, one
++/// `<address hex> <op>` line per op, in address order.
++pub fn map_text() -> String {
++    let s = state();
++    let mut out = String::with_capacity(s.map.len() * 24);
++    for (addr, name) in &s.map {
++        out.push_str(&format!("{addr:x} {name}
++"));
++    }
++    out
 +}
 +
 +/// What the inline fast paths assume about Ruffle's data, measured.
@@ -1269,6 +1355,7 @@ index 000000000..3a56dade4
 +            calls_direct: 0,
 +            calls_slow: 0,
 +            layout: Layout::default(),
++            map: Vec::new(),
 +        })
 +    }
 +}
@@ -1778,7 +1865,112 @@ index 000000000..3a56dade4
 +        }
 +    }
 +
++    // Branch targets: the stack cache is empty there (`Tos`).
++    let mut target = vec![false; n];
++    for op in ops.iter() {
++        if let Op::Jump { offset } | Op::PopJump { offset } | Op::IfTrue { offset } | Op::IfFalse { offset } = op
++            && *offset < n
++        {
++            target[*offset] = true;
++        }
++    }
 +    let lay = s.layout.clone();
++    let cache = TOS_CACHE.load(AtomicOrdering::Relaxed);
++    let (main, main_labels, main_exit) = emit(&lay, ops, &depth, &target, nl, cache)?;
++    let alt = if DUAL.load(AtomicOrdering::Relaxed) {
++        Some(emit(&lay, ops, &depth, &target, nl, false)?)
++    } else {
++        None
++    };
++
++    // A 16-byte header (the address of the code `ALT` runs: the second
++    // compilation, or this one when there is none), the code, the other code.
++    let main_bytes = (main.len() * 4 + 15) & !15;
++    let alt_bytes = alt.as_ref().map_or(0, |a| a.0.len() * 4);
++    let total = 16 + main_bytes + alt_bytes;
++    if s.used + total > CODE_SIZE {
++        return Err("code memory full".into());
++    }
++    let addr = s.rx as usize + s.used + 16;
++    let alt_addr = if alt.is_some() { addr + main_bytes } else { addr };
++    unsafe {
++        let base = s.rw.add(s.used);
++        (base as *mut usize).write(alt_addr);
++        std::ptr::copy_nonoverlapping(main.as_ptr() as *const u8, base.add(16), main.len() * 4);
++        if let Some((code, _, _)) = &alt {
++            std::ptr::copy_nonoverlapping(code.as_ptr() as *const u8, base.add(16 + main_bytes), alt_bytes);
++        }
++        flashnx_jit_flush(base, s.rx.add(s.used), total);
++    }
++    s.used += (total + 15) & !15;
++    if MAP.load(AtomicOrdering::Relaxed) {
++        push_map(s, addr, ops, &depth, &main_labels, main_exit);
++        if let Some((_, labels, exit)) = &alt {
++            push_map(s, alt_addr, ops, &depth, labels, *exit);
++        }
++    }
++    Ok(addr)
++}
++
++fn push_map(s: &mut State, addr: usize, ops: &[Op<'_>], depth: &[u32], labels: &[usize], exit: usize) {
++    s.map.push((addr, "(prologue)".into()));
++    for (i, op) in ops.iter().enumerate() {
++        if depth[i] != u32::MAX {
++            s.map.push((addr + labels[i] * 4, op_name(op)));
++        }
++    }
++    s.map.push((addr + exit * 4, "(epilogue)".into()));
++}
++
++/// FlashNX: where the top of the AVM2 operand stack is at the start of an op
++/// in compiled code: a one-entry stack cache, after the virtual stack of
++/// SpiderMonkey's baseline compiler (BaselineFrameInfo) and Ertl's stack
++/// caching. Without it every op wrote its result to the frame and the next op
++/// read it straight back; on Happy Wheels `GetLocal -> GetSlot` alone was 10 %
++/// of the frame and `GetSlot -> GetSlot` 6 %, much of it a load waiting on the
++/// store just before it.
++///
++/// Only the top entry is ever cached, and only between ops that know about
++/// it: every other op, every helper call, every branch and every branch
++/// target sees it written back first (`flush`), so the frame is exactly what
++/// the interpreter would hold wherever anything else can look at it. The
++/// registers only ever hold a value between two ops, where no collection can
++/// run.
++#[derive(Clone, Copy, PartialEq)]
++enum Tos {
++    /// In its frame slot.
++    Mem,
++    /// Not written yet: it is the local at this frame offset (`GetLocal`).
++    Local(usize),
++    /// Not written yet: its two words are in x14 (tag) and x15 (payload).
++    Regs,
++}
++
++/// Write the cached top of the stack to its frame slot at `at`.
++fn flush(a: &mut Asm, tos: Tos, at: usize) {
++    match tos {
++        Tos::Mem => {}
++        Tos::Local(off) => {
++            a.ldr_q(0, X19, off);
++            a.str_q(0, X19, at);
++        }
++        Tos::Regs => {
++            a.str_x(14, X19, at);
++            a.str_x(15, X19, at + 8);
++        }
++    }
++}
++
++/// The code of one method: words, the start of each op, the exit.
++fn emit(
++    lay: &Layout,
++    ops: &[Op<'_>],
++    depth: &[u32],
++    target: &[bool],
++    nl: usize,
++    cache: bool,
++) -> Result<(Vec<u32>, Vec<usize>, usize), String> {
++    let n = ops.len();
 +    let slot = |d: usize| (nl + d) * 16;
 +    let mut a = Asm {
 +        code: Vec::with_capacity(n * 4 + 16),
@@ -1786,21 +1978,68 @@ index 000000000..3a56dade4
 +    };
 +    a.prologue();
 +    let mut labels = vec![usize::MAX; n];
++    let mut tos = Tos::Mem;
 +    for i in 0..n {
-+        labels[i] = a.code.len();
 +        if depth[i] == u32::MAX {
++            labels[i] = a.code.len();
++            tos = Tos::Mem;
 +            continue;
 +        }
 +        let d = depth[i] as usize;
++        // Jumps arrive with nothing cached: write it back on the way in.
++        if target[i] && tos != Tos::Mem {
++            flush(&mut a, tos, slot(d - 1));
++            tos = Tos::Mem;
++        }
++        labels[i] = a.code.len();
 +        let op = &ops[i];
++        let consumer = cache
++            && match op {
++                Op::GetLocal { .. } | Op::SetLocal { .. } | Op::StoreLocal { .. } | Op::Pop => true,
++                Op::GetSlot { index } => !lay.obj_tags.is_empty() && slot(d - 1) < 4096 && *index < 4096,
++                Op::SetSlotNoCoerce { index } => {
++                    lay.header_ok && !lay.obj_tags.is_empty() && slot(d - 1) + 16 < 4096 && *index < 4096
++                }
++                _ => false,
++            };
++        if !consumer && tos != Tos::Mem {
++            flush(&mut a, tos, slot(d - 1));
++            tos = Tos::Mem;
++        }
 +        match op {
++            Op::GetLocal { index } if cache => {
++                // The previous top is no longer the top: write it back.
++                if tos != Tos::Mem {
++                    flush(&mut a, tos, slot(d - 1));
++                }
++                tos = Tos::Local(*index as usize * 16);
++            }
 +            Op::GetLocal { index } => {
 +                a.ldr_q(0, X19, *index as usize * 16);
 +                a.str_q(0, X19, slot(d));
 +            }
 +            Op::SetLocal { index } | Op::StoreLocal { index } => {
-+                a.ldr_q(0, X19, slot(d - 1));
-+                a.str_q(0, X19, *index as usize * 16);
++                let dst = *index as usize * 16;
++                match tos {
++                    Tos::Mem => {
++                        a.ldr_q(0, X19, slot(d - 1));
++                        a.str_q(0, X19, dst);
++                    }
++                    Tos::Local(src) => {
++                        if src != dst {
++                            a.ldr_q(0, X19, src);
++                            a.str_q(0, X19, dst);
++                        }
++                    }
++                    Tos::Regs => {
++                        a.str_x(14, X19, dst);
++                        a.str_x(15, X19, dst + 8);
++                    }
++                }
++                // StoreLocal leaves the value on the stack, where it is.
++                if matches!(op, Op::SetLocal { .. }) {
++                    tos = Tos::Mem;
++                }
 +            }
 +            Op::Kill { index } => a.store_const(*index as usize * 16, bytes_of(Value::Undefined)),
 +            Op::PushInt { value } => a.store_const(slot(d), bytes_of(Value::from(*value))),
@@ -1810,7 +2049,8 @@ index 000000000..3a56dade4
 +            Op::PushFalse => a.store_const(slot(d), bytes_of(Value::from(false))),
 +            Op::PushNull => a.store_const(slot(d), bytes_of(Value::Null)),
 +            Op::PushUndefined => a.store_const(slot(d), bytes_of(Value::Undefined)),
-+            Op::Pop | Op::Nop | Op::CoerceA => {}
++            Op::Pop => tos = Tos::Mem,
++            Op::Nop | Op::CoerceA => {}
 +            Op::Dup => {
 +                a.ldr_q(0, X19, slot(d - 1));
 +                a.str_q(0, X19, slot(d));
@@ -1969,9 +2209,27 @@ index 000000000..3a56dade4
 +                // An object of a checked type: its slot, in place. Anything else
 +                // (null, a primitive, another type, out of range) takes the
 +                // helper, which raises the interpreter's own errors.
++                //
++                // The object comes from the stack cache when it is there (a
++                // local, or the previous GetSlot's x14/x15), and the slot's
++                // value goes to x14/x15, not to the frame.
 +                let top = slot(d - 1);
++                if let Tos::Local(off) = tos
++                    && off >= 4096
++                {
++                    flush(&mut a, tos, top);
++                    tos = Tos::Mem;
++                }
++                let src = match tos {
++                    Tos::Mem => Some(top),
++                    Tos::Local(off) => Some(off),
++                    Tos::Regs => None,
++                };
 +                let mut to_slow = Vec::new();
-+                a.ldrb(9, X19, top);
++                match src {
++                    Some(off) => a.ldrb(9, X19, off),
++                    None => a.e(0x5300_1C00 | 14 << 5 | 9), // uxtb w9, w14
++                }
 +                if lay.obj_tags.len() == 1 {
 +                    a.cmp_w(9, lay.obj_tags[0] as u32);
 +                    to_slow.push(a.fwd(Fix::BCond(NE)));
@@ -1987,21 +2245,38 @@ index 000000000..3a56dade4
 +                        a.set(f, fast);
 +                    }
 +                }
-+                a.ldr_x(10, X19, top + 8);
++                match src {
++                    Some(off) => a.ldr_x(10, X19, off + 8),
++                    None => a.e(0xAA0F_03EA), // mov x10, x15
++                }
 +                a.ldr_x(11, 10, lay.slots_len_off);
 +                a.cmp_x(11, *index as u32);
 +                to_slow.push(a.fwd(Fix::BCond(LS)));
 +                a.ldr_x(11, 10, lay.slots_ptr_off);
-+                a.ldr_q(0, 11, *index * 16);
-+                a.str_q(0, X19, top);
++                let regs = cache && *index * 16 + 8 < 32768;
++                if regs {
++                    a.ldr_x(14, 11, *index * 16);
++                    a.ldr_x(15, 11, *index * 16 + 8);
++                } else {
++                    a.ldr_q(0, 11, *index * 16);
++                    a.str_q(0, X19, top);
++                }
 +                let to_done = a.fwd(Fix::B);
 +                let slow = a.here();
 +                for f in to_slow {
 +                    a.set(f, slow);
 +                }
++                // The helper works on the frame: the object goes there first,
++                // and the result comes back from there.
++                flush(&mut a, tos, top);
 +                a.call(kind(op), d, i, d, true);
++                if regs {
++                    a.ldr_x(14, X19, top);
++                    a.ldr_x(15, X19, top + 8);
++                }
 +                let done = a.here();
 +                a.set(to_done, done);
++                tos = if regs { Tos::Regs } else { Tos::Mem };
 +            }
 +            Op::ReturnValue { .. } | Op::ReturnVoid { .. } => a.call(H_RETURN, d, i, 0, true),
 +            Op::GetPropertyFast { multiname } if multiname.has_lazy_name() && !multiname.has_lazy_ns() => {
@@ -2039,16 +2314,38 @@ index 000000000..3a56dade4
 +                a.cmp_x(12, *index as u32);
 +                to_slow.push(a.fwd(Fix::BCond(LS)));
 +                a.ldr_x(12, 10, lay.slots_ptr_off);
-+                a.ldr_q(0, X19, val);
-+                a.str_q(0, 12, *index * 16);
++                // The value is the top of the stack, maybe still cached (the
++                // object below it never is).
++                let dst = *index * 16;
++                match tos {
++                    Tos::Mem => {
++                        a.ldr_q(0, X19, val);
++                        a.str_q(0, 12, dst);
++                    }
++                    Tos::Local(off) => {
++                        a.ldr_q(0, X19, off);
++                        a.str_q(0, 12, dst);
++                    }
++                    Tos::Regs if dst + 8 < 32768 => {
++                        a.str_x(14, 12, dst);
++                        a.str_x(15, 12, dst + 8);
++                    }
++                    Tos::Regs => {
++                        flush(&mut a, tos, val);
++                        a.ldr_q(0, X19, val);
++                        a.str_q(0, 12, dst);
++                    }
++                }
 +                let to_done = a.fwd(Fix::B);
 +                let slow = a.here();
 +                for f in to_slow {
 +                    a.set(f, slow);
 +                }
++                flush(&mut a, tos, val);
 +                a.call(kind(op), d, i, d - 2, true);
 +                let done = a.here();
 +                a.set(to_done, done);
++                tos = Tos::Mem;
 +            }
 +            Op::CallMethod { num_args, push_return_value, .. } => {
 +                let post = d - 1 - *num_args as usize + *push_return_value as usize;
@@ -2070,19 +2367,7 @@ index 000000000..3a56dade4
 +    if !a.resolve(&labels, exit) {
 +        return Err("bad branch".into());
 +    }
-+
-+    let bytes = a.code.len() * 4;
-+    if s.used + bytes > CODE_SIZE {
-+        return Err("code memory full".into());
-+    }
-+    unsafe {
-+        let dst = s.rw.add(s.used);
-+        std::ptr::copy_nonoverlapping(a.code.as_ptr() as *const u8, dst, bytes);
-+        flashnx_jit_flush(dst, s.rx.add(s.used), bytes);
-+    }
-+    let addr = s.rx as usize + s.used;
-+    s.used += (bytes + 15) & !15;
-+    Ok(addr)
++    Ok((a.code, labels, exit))
 +}
 +
 +// ---------------------------------------------------------------- helpers
@@ -2403,6 +2688,13 @@ index 000000000..3a56dade4
 +/// Run `method`'s compiled code at `code` in `act` (set up as `exec` does).
 +fn run_compiled<'a, 'gc>(act: &mut Activation<'a, 'gc>, method: Method<'gc>, code: usize) -> Outcome<'gc> {
 +    let cell = method.flashnx_jit();
++    // The profiling build's other A/B window: the code in the header (see
++    // `compile`), which is this one when there is no second compilation.
++    let code = if ALT.load(AtomicOrdering::Relaxed) {
++        unsafe { *((code - 16) as *const usize) }
++    } else {
++        code
++    };
 +    if let Err(e) = act.timeout_check() {
 +        return Outcome::Done(Err(e));
 +    }
@@ -2451,6 +2743,7 @@ index 000000000..3a56dade4
 +    s.deopts = 0;
 +    s.deopt_ops.clear();
 +    s.runs = 0;
++    s.map.clear();
 +}
 +
 +/// Counters since the last call, then reset (the totals stay).
@@ -8525,7 +8818,7 @@ index 91bdb52df..33230aaf1 100644
  pub fn broadcast_frame_entered<'gc>(context: &mut UpdateContext<'gc>) {
      let enter_frame_evt = EventObject::bare_default_event(context, "enterFrame");
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..c3a88da17 100644
+index 6e5379213..c7e7c3fd3 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
 @@ -4,6 +4,9 @@
@@ -8538,7 +8831,7 @@ index 6e5379213..c3a88da17 100644
  
  #[macro_use]
  mod display_object;
-@@ -15,10 +18,38 @@ extern crate num_derive;
+@@ -15,10 +18,41 @@ extern crate num_derive;
  #[macro_use]
  mod avm1;
  mod avm2;
@@ -8554,7 +8847,10 @@ index 6e5379213..c3a88da17 100644
 +pub use flashnx_census::report as census_report;
 +pub use library::set_movie_free;
 +pub use flashnx_as3prof::{report as as3prof_report, set_as3_profiler};
-+pub use avm2::activation::{jit_report, jit_reset, set_fast_calls, set_jit, set_jit_direct_calls};
++pub use avm2::activation::{
++    jit_map_text, jit_report, jit_reset, set_fast_calls, set_jit, set_jit_ab, set_jit_direct_calls, set_jit_map,
++    set_jit_tos_cache,
++};
 +pub use avm1::set_avm1_fast_push;
 +
 +/// FlashNX: AVM2 opcode census over the last `frames` frames, then reset
@@ -8577,7 +8873,7 @@ index 6e5379213..c3a88da17 100644
  pub mod context;
  pub mod context_menu;
  mod drawing;
-@@ -26,6 +57,10 @@ mod ecma_conversions;
+@@ -26,6 +60,10 @@ mod ecma_conversions;
  pub mod events;
  pub mod focus_tracker;
  pub mod font;
@@ -8588,7 +8884,7 @@ index 6e5379213..c3a88da17 100644
  mod frame_lifecycle;
  mod html;
  mod input;
-@@ -63,6 +98,17 @@ pub use events::PlayerEvent;
+@@ -63,6 +101,17 @@ pub use events::PlayerEvent;
  pub use indexmap;
  pub use loader::LoadBehavior;
  pub use player::{Player, PlayerBuilder, PlayerMode, PlayerRuntime, StaticCallstack};

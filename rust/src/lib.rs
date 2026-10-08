@@ -944,6 +944,8 @@ use backend::ui::SwitchUiBackend;
 
 extern "C" {
     fn ruffle_log_cstr(msg: *const c_char);
+    /// The card writer every other file goes through (cpp/src/swf_picker.cpp).
+    fn swf_picker_write_file(path: *const c_char, data: *const u8, len: u32) -> c_int;
     fn ruffle_query_ram(used_out: *mut u64, total_out: *mut u64) -> c_int;
     /// Writes `msg` to `sdmc:/switch/ruffle-crash.log` AND nxlink stdout, then
     /// sleeps ~150 ms so the TCP buffer drains before abort() races us. Used
@@ -1789,6 +1791,13 @@ pub extern "C" fn ruffle_init() -> c_int {
     if !jit {
         log(b"jit: jit.off present -> AVM2 bytecode interpreted\n\0");
     }
+    // `sdmc:/switch/FlashNX/jittos.off`: compiled code writes every op's
+    // result to the frame, as before the stack cache (`set_jit_tos_cache`).
+    let jit_tos = !backend::render::marker_present("jittos.off");
+    ruffle_core::set_jit_tos_cache(jit_tos);
+    if !jit_tos {
+        log(b"jit: jittos.off present -> no stack cache in compiled code\n\0");
+    }
     // `sdmc:/switch/FlashNX/frameskip.off`: every frame walks the whole display
     // list again in enterFrame, frame construction and frame scripts (see
     // `set_full_frame_skip` in our Ruffle). Same kind of experiment switch.
@@ -2349,13 +2358,19 @@ pub(crate) static AB_REGIME: core::sync::atomic::AtomicU64 = core::sync::atomic:
 pub extern "C" fn ruffle_ab_regime(regime: i32) {
     use core::sync::atomic::Ordering::Relaxed;
     AB_REGIME.store((regime != 0) as u64, Relaxed);
-    // 2026-10-08: the collector's longer sleep on small heaps
-    // (`set_gc_small_pacing`). Before: AVM1 pushes decoded without their Vec
-    // (`set_avm1_fast_push`, -10 % on an AS2 game), the AVM2 JIT (`set_jit`,
-    // -17.5 ms a frame on Fireboy 2), direct calls between compiled methods
-    // (`set_jit_direct_calls`, -3.3 ms), the cheaper call path
-    // (`set_fast_calls`, -2.8 ms).
-    ruffle_core::set_gc_small_pacing(regime != 0);
+    // 2026-10-08: the JIT's stack cache. Every method is compiled twice and
+    // window 0 runs the copy without it (`set_jit_ab`). Measured before with
+    // this switch: the collector's longer sleep on small heaps
+    // (`set_gc_small_pacing`, -2 ms a frame on Happy Wheels), AVM1 pushes
+    // decoded without their Vec (`set_avm1_fast_push`, -10 % on an AS2 game),
+    // the AVM2 JIT (`set_jit`, -17.5 ms a frame on Fireboy 2), direct calls
+    // between compiled methods (`set_jit_direct_calls`, -3.3 ms), the cheaper
+    // call path (`set_fast_calls`, -2.8 ms).
+    ruffle_core::set_jit_ab(true, regime == 0);
+    // Only this build calls here: keep the JIT's op address map, written to
+    // the card when the game ends (`ruffle_shutdown`), so the profile can
+    // name the ops behind its samples in compiled code.
+    ruffle_core::set_jit_map(true);
 }
 
 /// Hide `us` microseconds of wall clock from the movie (#87).
@@ -4231,6 +4246,20 @@ pub extern "C" fn ruffle_shutdown() {
     }
     // Before the SESSION END marker, so its summary line counts as the game's.
     crate::clock_auto::end_game();
+    // Profiling build only (the map is empty otherwise): where each compiled
+    // op of this game starts, for `temp/perf-tools/jit_ops.py`. Overwritten by
+    // every game, so it describes the last one.
+    let map = ruffle_core::jit_map_text();
+    if !map.is_empty() {
+        let rc = unsafe {
+            swf_picker_write_file(
+                c"sdmc:/switch/FlashNX/jitmap.txt".as_ptr(),
+                map.as_ptr(),
+                map.len() as u32,
+            )
+        };
+        log_str(&std::format!("jit: op map {} bytes written rc={}\n", map.len(), rc));
+    }
     // Closes the window the SESSION START marker opened. The ring does not stop
     // at the end of a game — SIGNALER UN BUG is only reachable by quitting one,
     // so every report's tail ends in launcher traffic — and nothing said where

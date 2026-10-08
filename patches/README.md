@@ -443,6 +443,24 @@ console, one change at a time, each with an SD-card marker to turn it off.
   73 -> 81 MB (in-session A/B, ~4,600 frames). What remains is dropping and
   freeing each dead object, which a longer sleep does not change. Marker
   `gcsmall.off`.
+- `core/src/avm2/activation_jit.rs`: **a one-entry stack cache in compiled
+  code** (`Tos`), after the virtual stack of SpiderMonkey's baseline compiler
+  and Ertl's stack caching. A profile split by compiled op (the profiling
+  build writes a `jitmap.txt` of where each op's code starts) put
+  `GetLocal -> GetSlot` at 10 % of a Happy Wheels frame and
+  `GetSlot -> GetSlot` at 6 %, partly loads waiting on the store just before
+  them. The top of the operand stack can now stay a local (`GetLocal` emits
+  nothing) or two registers (`GetSlot`'s result) until an op that knows about
+  it consumes it (`GetSlot`, `SetSlotNoCoerce`, `SetLocal`, `StoreLocal`,
+  `Pop`); every other op, helper call, branch and branch target sees it
+  written back first, so the frame is what the interpreter would hold
+  wherever anything else can read it. Compiled code per heavy frame: Happy
+  Wheels 17.4 -> 16.4 ms, Fireboy 2 17.1 -> 12.8 ms (in-session A/B, the
+  profiling build compiles every method twice and its windows alternate);
+  8 AS3 games played, no deopt, nothing new in the logs. Most of what
+  `GetSlot` still costs (~70 %) is cache misses on the object and on its
+  separately allocated slots, which only a change of Ruffle's object layout
+  would remove. Marker `jittos.off`.
 - `core/src/bitmap/turbulence.rs`, `operations.rs`: **`perlinNoise` does the
   per-call and per-point work once.** `turbulence` redid the stitching setup
   (four divisions, four roundings) for every pixel and every channel, and the
