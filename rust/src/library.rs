@@ -756,6 +756,21 @@ fn last_played_path() -> Option<std::string::String> {
     LAST_PLAYED.lock().ok().and_then(|g| g.as_ref().map(|(p, _, _)| p.clone()))
 }
 
+/// (basename, display name) of every game in the library, once each. Empty
+/// when the library is not loaded (a game launched from its HOME tile) or busy.
+/// For the COPY FROM ANOTHER GAME list; never call it with LIBRARY held.
+pub fn owned_games() -> std::vec::Vec<(std::string::String, std::string::String)> {
+    let Ok(g) = LIBRARY.try_lock() else {
+        return std::vec::Vec::new();
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    g.entries
+        .iter()
+        .filter(|e| seen.insert(e.basename.clone()))
+        .map(|e| (e.basename.clone(), e.display_name.clone()))
+        .collect()
+}
+
 /// Display name of the currently/last launched game — used by the pause
 /// menu (`render::draw_menu_overlay`) to show the title under "PAUSE".
 pub fn active_display_name() -> Option<std::string::String> {
@@ -1184,6 +1199,11 @@ pub(crate) struct State {
     /// Community control profiles matching the game in the open `ProfileList`
     /// (#20). Filled by `run_open_profiles_flow`, indexed by the picker selection.
     profile_matches: std::vec::Vec<crate::profiles::Match>,
+    /// True while the picker lists the player's other games to copy from
+    /// (COPY FROM ANOTHER GAME); `profile_saved_matches` keeps the community
+    /// list for B.
+    profile_copy_mode: bool,
+    profile_saved_matches: std::vec::Vec<crate::profiles::Match>,
     /// Whether the open `TouchesMenu` shows a "revert" row (#20): true when the
     /// game has a hand-made backup to restore OR a community profile is currently
     /// applied (so reverting drops it). Recomputed on every entry to the sub-menu.
@@ -1296,6 +1316,8 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     cover_candidates: std::vec::Vec::new(),
     cover_use_shot: false,
     profile_matches: std::vec::Vec::new(),
+    profile_copy_mode: false,
+    profile_saved_matches: std::vec::Vec::new(),
     touches_can_revert: false,
     touches_has_backup: false,
     touches_cursor_idx: -1,
@@ -3698,7 +3720,22 @@ pub fn input(button: &str) -> bool {
         // building the diff reads the current keymap off SD.
         if let Screen::ProfileList { game_idx, selection } = screen_snap {
             if button == "A" {
-                run_open_preview_flow(game_idx, selection);
+                // The COPY FROM ANOTHER GAME row opens the list of the player's
+                // other games instead (reads their keymaps, so hoisted too).
+                let copy_row = LIBRARY
+                    .lock()
+                    .ok()
+                    .and_then(|g| {
+                        g.profile_matches
+                            .get(selection)
+                            .map(|m| crate::profiles::is_copy_row(&m.profile.id))
+                    })
+                    .unwrap_or(false);
+                if copy_row {
+                    run_open_copies_flow(game_idx, selection);
+                } else {
+                    run_open_preview_flow(game_idx, selection);
+                }
                 return true;
             }
         }
@@ -5241,16 +5278,62 @@ fn run_open_profiles_flow(game_idx: usize) {
         matches.len(),
         active_id,
     ));
+    // The list never comes up empty any more (the copy row ends it), so the
+    // "no profile" / "offline" notice it used to show becomes a toast.
+    let notice = if matches.is_empty() {
+        Some(if crate::profiles::catalog_unavailable() {
+            crate::loc::s().profile_catalog_offline
+        } else {
+            crate::loc::s().profile_none
+        })
+    } else {
+        None
+    };
     if let Ok(mut s) = LIBRARY.lock() {
         // The picker modal sizes itself to its row count and is centred, with no
         // window and no scroll: 140 + 52*rows + 60 px tall. Past 10 rows that is
         // taller than the 720 px screen and its top edge goes negative, so the
         // first entries are drawn off-screen and cannot be reached. The preview
-        // list is already capped the same way (`cap_preview_rows`).
-        let mut matches = matches;
-        matches.truncate(10);
-        s.profile_matches = matches;
+        // list is already capped the same way (`cap_preview_rows`). Nine
+        // profiles at most, then the COPY FROM ANOTHER GAME row.
+        s.profile_matches = crate::profiles::with_copy_row(matches);
+        s.profile_copy_mode = false;
+        s.profile_saved_matches.clear();
         s.active_profile_id = active_id;
+        if let Some(msg) = notice {
+            set_toast(&mut s, msg.to_string(), TOAST_INFO);
+        }
+        s.screen = Screen::ProfileList { game_idx, selection: 0 };
+    }
+}
+
+/// COPY FROM ANOTHER GAME: list the player's other games with controls of
+/// their own, in place of the community profiles (same picker, preview and
+/// apply). Hoisted: it reads every candidate's keymap off SD. `row` is the copy
+/// row, where the cursor stays when there is nothing to copy.
+fn run_open_copies_flow(game_idx: usize, row: usize) {
+    let snap = match LIBRARY.lock() {
+        Ok(g) => g.entries.get(game_idx).map(|e| (e.basename.clone(), e.display_name.clone())),
+        Err(_) => None,
+    };
+    let Some((basename, title)) = snap else {
+        return;
+    };
+    // `local_copies` takes the LIBRARY lock itself (owned_games): not held here.
+    let copies = crate::profiles::local_copies(&basename, &title);
+    crate::net::log(&std::format!(
+        "profiles: COPY FROM ANOTHER GAME '{}' -> {} game(s)\n",
+        title,
+        copies.len(),
+    ));
+    if let Ok(mut s) = LIBRARY.lock() {
+        if copies.is_empty() {
+            set_toast(&mut s, crate::loc::s().profile_copy_none.to_string(), TOAST_INFO);
+            s.screen = Screen::ProfileList { game_idx, selection: row };
+            return;
+        }
+        s.profile_saved_matches = std::mem::replace(&mut s.profile_matches, copies);
+        s.profile_copy_mode = true;
         s.screen = Screen::ProfileList { game_idx, selection: 0 };
     }
 }
@@ -5283,6 +5366,14 @@ fn handle_profile_list_input(s: &mut State, button: &str, game_idx: usize, mut s
             }
         }
         "B" | "Minus" => {
+            // From the copy list, back to the community list, on the copy row.
+            if s.profile_copy_mode {
+                s.profile_copy_mode = false;
+                s.profile_matches = std::mem::take(&mut s.profile_saved_matches);
+                let last = s.profile_matches.len().max(1) - 1;
+                s.screen = Screen::ProfileList { game_idx, selection: last };
+                return;
+            }
             goto_touches_menu(s, game_idx, 1); // back to the sub-menu's APPLY row
             return;
         }
@@ -9510,9 +9601,9 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     .profile_matches
                     .get(selection)
                     .is_some_and(|m| crate::profiles::is_mine(&m.profile.id));
-                (game, rows, sel_is_mine)
+                (game, rows, sel_is_mine, s.profile_copy_mode)
             });
-            if let Some((game, mut rows, sel_is_mine)) = snap {
+            if let Some((game, mut rows, sel_is_mine, copy_mode)) = snap {
                 if rows.is_empty() {
                     // "Nobody has shared one yet" and "we could not ask" are
                     // different facts, and only one of them is worth acting on.
@@ -9530,7 +9621,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     lc.profile_footer.to_string()
                 };
                 backend.draw_library_list_modal(
-                    lc.profile_title,
+                    if copy_mode { lc.profile_copy_row } else { lc.profile_title },
                     &game,
                     selection,
                     &refs,

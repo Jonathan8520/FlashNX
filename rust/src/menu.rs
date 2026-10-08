@@ -91,6 +91,10 @@ struct State {
     has_backup: bool,
     /// Profiles matching the running game (in-game apply picker).
     matches: std::vec::Vec<crate::profiles::Match>,
+    /// True while the picker lists the player's other games to copy from
+    /// (COPY FROM ANOTHER GAME); `saved_matches` keeps the community list for B.
+    copy_mode: bool,
+    saved_matches: std::vec::Vec<crate::profiles::Match>,
     /// Id of the profile whose bindings match the current keymap (the active tag).
     active_id: std::string::String,
     /// Snapshotted before/after diff lines for the open Preview / ShareConfirm /
@@ -111,6 +115,8 @@ static TOUCHES: Mutex<State> = Mutex::new(State {
     can_revert: false,
     has_backup: false,
     matches: std::vec::Vec::new(),
+    copy_mode: false,
+    saved_matches: std::vec::Vec::new(),
     active_id: std::string::String::new(),
     preview_rows: std::vec::Vec::new(),
     share_is_update: false,
@@ -402,10 +408,18 @@ pub fn input(button: &str) -> bool {
         }
         Screen::Profiles { selection } => {
             // A opens the before/after preview (reads the keymap) — hoist it.
+            // On the COPY FROM ANOTHER GAME row, it opens the list of the
+            // player's other games instead (reads their keymaps).
             if button == "A" {
                 let n = s.matches.len();
+                let copy_row = s
+                    .matches
+                    .get(selection)
+                    .is_some_and(|m| crate::profiles::is_copy_row(&m.profile.id));
                 drop(s);
-                if selection < n {
+                if copy_row {
+                    run_open_copies(selection);
+                } else if selection < n {
                     run_open_preview(selection);
                 }
                 return true;
@@ -527,12 +541,42 @@ fn handle_profiles_input(s: &mut State, button: &str, mut selection: usize) {
             }
         }
         "B" | "Minus" => {
+            // From the copy list, back to the community list, on the copy row.
+            if s.copy_mode {
+                s.copy_mode = false;
+                s.matches = std::mem::take(&mut s.saved_matches);
+                s.screen = Screen::Profiles { selection: s.matches.len().max(1) - 1 };
+                return;
+            }
             s.screen = Screen::Menu { selection: MENU_APPLY };
             return;
         }
         _ => {}
     }
     s.screen = Screen::Profiles { selection };
+}
+
+/// COPY FROM ANOTHER GAME: list the player's other games with controls of
+/// their own, in place of the community profiles. `row` is the copy row, where
+/// the cursor stays when there is nothing to copy.
+fn run_open_copies(row: usize) {
+    let Some((basename, title, _)) = game_ctx() else { return };
+    let copies = crate::profiles::local_copies(&basename, &title);
+    crate::net::log(&std::format!(
+        "menu: in-game COPY FROM ANOTHER GAME '{}' -> {} game(s)\n",
+        title,
+        copies.len(),
+    ));
+    if let Ok(mut s) = TOUCHES.lock() {
+        if copies.is_empty() {
+            set_toast(&mut s, crate::loc::s().profile_copy_none.to_string(), TOAST_INFO);
+            s.screen = Screen::Profiles { selection: row };
+            return;
+        }
+        s.saved_matches = std::mem::replace(&mut s.matches, copies);
+        s.copy_mode = true;
+        s.screen = Screen::Profiles { selection: 0 };
+    }
 }
 
 // ── In-game profile actions (run WITHOUT the TOUCHES lock held) ─────────────
@@ -561,9 +605,25 @@ fn run_open_profiles() {
         "menu: in-game APPLIQUER '{}' hash={} -> {} match(es)\n",
         title, swf_hash, matches.len(),
     ));
+    // The list never comes up empty any more (the copy row ends it), so the
+    // "no profile" / "offline" notice it used to show becomes a toast.
+    let notice = if matches.is_empty() {
+        Some(if crate::profiles::catalog_unavailable() {
+            crate::loc::s().profile_catalog_offline
+        } else {
+            crate::loc::s().profile_none
+        })
+    } else {
+        None
+    };
     if let Ok(mut s) = TOUCHES.lock() {
-        s.matches = matches;
+        s.matches = crate::profiles::with_copy_row(matches);
+        s.copy_mode = false;
+        s.saved_matches.clear();
         s.active_id = active_id;
+        if let Some(msg) = notice {
+            set_toast(&mut s, msg.to_string(), TOAST_INFO);
+        }
         s.screen = Screen::Profiles { selection: 0 };
     }
 }
@@ -1211,7 +1271,9 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
             } else {
                 lc.profile_footer.to_string()
             };
-            backend.draw_library_list_modal(lc.profile_title, &game, selection, &refs, &footer, true);
+            let copy_mode = TOUCHES.lock().map(|s| s.copy_mode).unwrap_or(false);
+            let title = if copy_mode { lc.profile_copy_row } else { lc.profile_title };
+            backend.draw_library_list_modal(title, &game, selection, &refs, &footer, true);
         }
         Screen::DeleteConfirm { profile_idx } => {
             let name = TOUCHES

@@ -111,7 +111,12 @@ impl Profile {
             bindings_layer2_p2: BTreeMap::new(),
             combo_modifier: std::string::String::new(),
             combo_modifier_p2: std::string::String::new(),
-            source: std::format!("community:{}", self.id),
+            // A copy from another game is the player's own controls, tagged
+            // with where they came from (see `local_copies`).
+            source: match self.id.strip_prefix(LOCAL_PREFIX) {
+                Some(b) => std::format!("copy:{}", b),
+                None => std::format!("community:{}", self.id),
+            },
             show_cursor: self.show_cursor,
         }
     }
@@ -348,6 +353,106 @@ fn normalize_title(s: &str) -> std::string::String {
     let lower: std::string::String = s.chars().flat_map(|c| c.to_lowercase()).collect();
     let base = lower.strip_suffix(".swf").unwrap_or(&lower);
     base.chars().filter(|c| c.is_alphanumeric()).collect()
+}
+
+// ── Copy from another game (2026-10-09) ─────────────────────────────────────
+// The APPLY picker ends with a COPY FROM ANOTHER GAME row. Picking it swaps the
+// community list for the player's own games whose controls were set up, each
+// wrapped as a local profile (`local:<basename>`), so the preview, the
+// non-destructive apply and REVERT work on them unchanged. Applied, a copy is
+// tagged `copy:<basename>`: still the player's own controls (sharing stays
+// open), but `apply_keymap` does not back it up as user work, so a second copy
+// never overwrites the backup of the controls the first one replaced. Sequels
+// usually share their controls (Super Smash Flash 1 and 2, Papa Louie 2 and
+// 3), and even Steam Input has no way to copy a layout between games.
+
+/// Id of the COPY FROM ANOTHER GAME row (never a real profile id).
+pub const COPY_ROW_ID: &str = "\u{1}copy-from-game";
+const LOCAL_PREFIX: &str = "local:";
+/// The picker modal does not scroll and fits 10 rows (see the library picker).
+const PICKER_ROWS: usize = 10;
+
+pub fn is_copy_row(id: &str) -> bool {
+    id == COPY_ROW_ID
+}
+
+pub fn is_local(id: &str) -> bool {
+    id.starts_with(LOCAL_PREFIX)
+}
+
+fn blank_profile(id: std::string::String, title: std::string::String) -> Profile {
+    Profile {
+        schema: 1,
+        id,
+        game: ProfileGame { title, fp_uuid: std::string::String::new(), swf_hash: std::string::String::new() },
+        author: std::string::String::new(),
+        verified: false,
+        notes: std::string::String::new(),
+        bindings: BTreeMap::new(),
+        bindings_p2: BTreeMap::new(),
+        combo_layers: BTreeMap::new(),
+        combo_layers_p2: BTreeMap::new(),
+        cursor_speed: -1,
+        show_cursor: true,
+    }
+}
+
+/// The community matches as the picker shows them: at most nine, then the
+/// COPY FROM ANOTHER GAME row.
+pub fn with_copy_row(mut matches: std::vec::Vec<Match>) -> std::vec::Vec<Match> {
+    matches.truncate(PICKER_ROWS - 1);
+    matches.push(Match {
+        profile: blank_profile(COPY_ROW_ID.into(), crate::loc::s().profile_copy_row.into()),
+        kind: MatchKind::Title,
+        applied: 0,
+    });
+    matches
+}
+
+fn title_words(s: &str) -> std::vec::Vec<std::string::String> {
+    let lower: std::string::String = s.chars().flat_map(|c| c.to_lowercase()).collect();
+    let base = lower.strip_suffix(".swf").unwrap_or(&lower);
+    base.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_string())
+        .collect()
+}
+
+/// The player's other games with controls of their own, as local profiles:
+/// sequels first (most title words in common with `title`), then the most
+/// recently played, ten at most. Skips `basename` itself, games whose sidecar
+/// is still the default controls, and games whose controls already equal this
+/// one's (copying them would change nothing).
+pub fn local_copies(basename: &str, title: &str) -> std::vec::Vec<Match> {
+    let current = crate::keymap::effective_for(basename);
+    let current_speed = crate::keymap::cursor_speed_for(basename);
+    let default = crate::keymap::default_effective();
+    let words = title_words(title);
+    let mut scored: std::vec::Vec<(usize, u64, Match)> = std::vec::Vec::new();
+    for (other, name) in crate::library::owned_games() {
+        if other == basename || !crate::keymap::has_own_keymap(&other) {
+            continue;
+        }
+        let km = crate::keymap::effective_for(&other);
+        let speed = crate::keymap::cursor_speed_for(&other);
+        if crate::keymap::binding_diff_rows(&km, &default).is_empty() && speed < 0 && km.show_cursor {
+            continue;
+        }
+        if crate::keymap::binding_diff_rows(&km, &current).is_empty() && speed == current_speed {
+            continue;
+        }
+        let shared = title_words(&name).iter().filter(|w| words.contains(w)).count();
+        let mut p = blank_profile(std::format!("{}{}", LOCAL_PREFIX, other), name);
+        p.bindings = km.bindings;
+        p.bindings_p2 = km.bindings_p2;
+        p.combo_layers = km.combo_layers;
+        p.combo_layers_p2 = km.combo_layers_p2;
+        p.cursor_speed = speed;
+        p.show_cursor = km.show_cursor;
+        scored.push((shared, crate::playtime::get_last(&other), Match { profile: p, kind: MatchKind::Title, applied: 0 }));
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    scored.into_iter().take(PICKER_ROWS).map(|(_, _, m)| m).collect()
 }
 
 /// How a profile matched the local game — drives the UI (exact = offer to
@@ -672,6 +777,10 @@ struct AppliedBody<'a> {
 /// Fire-and-forget — failures (offline, counter unconfigured) are ignored. Call
 /// from a hoisted flow; the POST blocks for the round-trip.
 pub fn record_applied(id: &str) {
+    // A copy from one of the player's own games is not a catalog profile.
+    if is_local(id) || is_copy_row(id) {
+        return;
+    }
     let body = match serde_json::to_string(&AppliedBody { id }) {
         Ok(b) => b,
         Err(_) => return,

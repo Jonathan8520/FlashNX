@@ -980,8 +980,10 @@ pub fn apply_keymap(basename: &str, km: &Keymap) -> bool {
     let existing = read_sidecar_file(basename);
     if let Some(ref ex) = existing {
         // Back up anything that isn't already a community profile — i.e. real
-        // user work, including legacy untagged sidecars (source == "").
-        if !ex.source.starts_with("community:") {
+        // user work, including legacy untagged sidecars (source == ""). Nor a
+        // copy from another game (`copy:`): a second copy must not overwrite
+        // the backup of the controls the first one replaced.
+        if !ex.source.starts_with("community:") && !ex.source.starts_with("copy:") {
             if let Some(src) = keymap_read_path(basename) {
                 // Best-effort backup; an unwritable SD still lets the apply go
                 // through (the user simply won't have a one-tap revert). Said out
@@ -1132,6 +1134,22 @@ pub fn effective_for(basename: &str) -> Keymap {
     } else {
         fallback_keymap()
     };
+    merge_fallback_defaults(&mut km);
+    merge_fallback_defaults_p2(&mut km);
+    km
+}
+
+/// Whether `basename` has controls of its own: a per-game sidecar, not just the
+/// global default.
+pub fn has_own_keymap(basename: &str) -> bool {
+    find_user_path(&std::format!("{}.keymap.json", basename)).is_some()
+}
+
+/// The controls a game without a sidecar gets (global default, else the
+/// fallback, defaults merged): what "nothing set up" looks like.
+pub fn default_effective() -> Keymap {
+    let default = find_user_path("keymap_default.json");
+    let mut km = try_default_or_fallback(default.as_deref());
     merge_fallback_defaults(&mut km);
     merge_fallback_defaults_p2(&mut km);
     km
