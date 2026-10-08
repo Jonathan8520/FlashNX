@@ -303,7 +303,7 @@ index 3bd126464..3649753cf 100644
  pub use error::Error;
  pub use flv::FlvValueAvm1Ext;
 diff --git a/core/src/avm1/activation.rs b/core/src/avm1/activation.rs
-index bec5d438f..7577fa7c5 100644
+index bec5d438f..8321536d3 100644
 --- a/core/src/avm1/activation.rs
 +++ b/core/src/avm1/activation.rs
 @@ -29,6 +29,66 @@ use web_time::Instant;
@@ -525,7 +525,71 @@ index bec5d438f..7577fa7c5 100644
      }
  
      fn action_push_duplicate(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-@@ -2717,7 +2862,35 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -1907,10 +2052,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+             return Ok(FrameControl::Continue);
+         }
+ 
++        // Backport of ruffle 9f4bd1014 ("Fix SetTarget2 movie clip selection",
++        // 2026-06-12): SetTarget2 goes by the clip's path, not the object, so
++        // two clips sharing a name target the same one, as in Flash (gnash
++        // test opcode_guard_test2).
+         match target {
+-            Value::String(target) => {
+-                return self.set_target(&target);
+-            }
+             Value::Undefined => {
+                 // In SWF6 and below, SetTarget2 on an undefined object resets the target to the base clip
+                 if self.swf_version() > 6 {
+@@ -1919,27 +2065,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+                     self.set_target_clip(Some(base_clip));
+                 }
+             }
+-            Value::Object(o) => {
+-                if let Some(clip) = o.as_display_object() {
+-                    // MovieClips can be targeted directly.
+-                    self.set_target_clip(Some(clip));
+-                } else {
+-                    // Other objects get coerced to string.
+-                    let target = target.coerce_to_string(self)?;
+-                    return self.set_target(&target);
+-                }
+-            }
+-            Value::MovieClip(_) => {
+-                let o = target.coerce_to_object_or_bare(self)?;
+-                if let Some(clip) = o.as_display_object() {
+-                    // MovieClips can be targeted directly.
+-                    self.set_target_clip(Some(clip));
+-                } else {
+-                    // Other objects get coerced to string.
+-                    let target = target.coerce_to_string(self)?;
+-                    return self.set_target(&target);
+-                }
+-            }
+             _ => {
+                 let target = target.coerce_to_string(self)?;
+                 return self.set_target(&target);
+@@ -2488,6 +2613,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+             return Ok(Some(o));
+         }
+ 
++        // FlashNX (2026-10-08): a reference to a clip that no longer exists
++        // names no clip. Its string form is "", and with `allow_empty` an empty
++        // path is the start clip, which right after `removeMovieClip(this)` is
++        // `_root`: Electricman 2 ends every fight with
++        // `removeMovieClip(this); unloadMovie(this);` and so unloaded the whole
++        // movie (black screen, ruffle#23193, still open upstream). Before
++        // ruffle#22221 such a reference reached the callers as a bare object,
++        // which named nothing either.
++        if let Value::MovieClip(mcr) = target
++            && mcr.coerce_to_object(self).is_none()
++        {
++            return Ok(None);
++        }
++
+         // Otherwise, we coerce it into a string and try to resolve it as a path.
+         // This means that values like `undefined` will resolve to clips with an instance name of
+         // `"undefined"`, for example.
+@@ -2717,7 +2856,35 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
          // Finally! It's a plain old variable name.
          // Resolve using scope chain, as normal.
@@ -10572,3 +10636,40 @@ index 000000000..dbee897f5
 +++ b/tests/tests/swfs/avm2/property_priority_three_level/test.toml
 @@ -0,0 +1 @@
 +num_frames = 1
+diff --git a/tests/tests/swfs/from_gnash/misc-swfc.all/opcode_guard_test2/output.ruffle.txt b/tests/tests/swfs/from_gnash/misc-swfc.all/opcode_guard_test2/output.ruffle.txt
+deleted file mode 100644
+index 19829ca08..000000000
+--- a/tests/tests/swfs/from_gnash/misc-swfc.all/opcode_guard_test2/output.ruffle.txt
++++ /dev/null
+@@ -1,24 +0,0 @@
+-PASSED: typeof(_root.dup1) == movieclip  [opcode_guard_test2.sc:61]
+-PASSED: typeof(_root.dup2) == movieclip  [opcode_guard_test2.sc:62]
+-PASSED: typeof(_root.dup1) == undefined  [opcode_guard_test2.sc:69]
+-PASSED: testVar ==   [opcode_guard_test2.sc:70]
+-PASSED: typeof(_root.dup2) == undefined  [opcode_guard_test2.sc:77]
+-PASSED: testVar ==   [opcode_guard_test2.sc:78]
+-PASSED: typeof(_root.dup3) == movieclip  [opcode_guard_test2.sc:85]
+-PASSED: testVar == dup3_var  [opcode_guard_test2.sc:86]
+-PASSED: testvar == true  [opcode_guard_test2.sc:132]
+-PASSED: mc100Ref.testvar == 100  [opcode_guard_test2.sc:144]
+-PASSED: mc101Ref.testvar == 101  [opcode_guard_test2.sc:145]
+-PASSED: testvar == 100  [opcode_guard_test2.sc:148]
+-FAILED: testvar: expected: "100" , obtained: "101"  [opcode_guard_test2.sc:153]
+-FAILED: testvar: expected: "100" , obtained: "101"  [opcode_guard_test2.sc:158]
+-PASSED: mc99Ref.testvar == 99  [opcode_guard_test2.sc:161]
+-PASSED: ref200.getDepth() == -32969  [opcode_guard_test2.sc:170]
+-PASSED: ref201.getDepth() == 201  [opcode_guard_test2.sc:171]
+-PASSED: testvar == 200  [opcode_guard_test2.sc:173]
+-FAILED: testvar: expected: "200" , obtained: "201"  [opcode_guard_test2.sc:177]
+-PASSED: _target == /  [opcode_guard_test2.sc:189]
+-Total tests run: 20 typeof expected: number
+-#passed: 17
+-#failed: 3
+-__END_OF_TEST__
+diff --git a/tests/tests/swfs/from_gnash/misc-swfc.all/opcode_guard_test2/test.toml b/tests/tests/swfs/from_gnash/misc-swfc.all/opcode_guard_test2/test.toml
+index 11e963f5a..f4f16330e 100644
+--- a/tests/tests/swfs/from_gnash/misc-swfc.all/opcode_guard_test2/test.toml
++++ b/tests/tests/swfs/from_gnash/misc-swfc.all/opcode_guard_test2/test.toml
+@@ -1,2 +1 @@
+ num_frames = 30
+-known_failure = true

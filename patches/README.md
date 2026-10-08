@@ -106,6 +106,29 @@ collision bitmaps (vector terrain drawn into BitmapData, then point-tested)
 were solid over their whole bounding box: characters stood on air beside the
 drawn ledges (ruffle#19253, fixed upstream on 2026-06-21, after our base).
 
+**`core/src/avm1/activation.rs`: a removed clip's reference names no clip,
+and SetTarget2 by path.**
+
+`resolve_target_display_object` returns `None` for a `MovieClip` value whose
+clip no longer exists. Such a reference reads as `""`, and with `allow_empty`
+an empty path is the start clip, which right after `removeMovieClip(this)` is
+`_root`. Electricman 2 ends every fight with `removeMovieClip(this);
+unloadMovie(this);` from clips at positive depths, so it unloaded the whole
+movie: black screen instead of the results (ruffle#23193, still open
+upstream). ruffle#22221 caused it: before, `unloadMovie` turned a dead
+reference into a bare object, which named nothing. The check covers every
+caller with `allow_empty` (`unloadMovie`, `loadMovie`, `MovieClipLoader`,
+`removeMovieClip`, `getProperty`/`setProperty`, `startDrag`,
+`duplicateMovieClip`). The `swapDepths: Invalid target` warnings the game
+prints by the hundred are unrelated: it swaps with `_root.bounder`, which
+never exists.
+
+Same file, backport of upstream `9f4bd1014` (2026-06-12, after our base):
+`SetTarget2` (`tellTarget` with an expression) resolves the clip's path
+instead of keeping the object, as Flash does when two clips share a name; the
+gnash test `opcode_guard_test2` passes and is no longer a known failure.
+Electricman 2 targets `_root.em` this way while two clips are named `em`.
+
 **Experiment switches (`graphic.rs`, `player.rs`), read from FlashNX markers.**
 `set_lazy_shapes(false)` (`lazyshape.off`) registers static shapes at preload
 as upstream does; `set_bitmap_cache(false)` (`bitmapcache.off`) ignores
