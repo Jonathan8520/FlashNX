@@ -417,6 +417,16 @@ console, one change at a time, each with an SD-card marker to turn it off.
   keeps for scope caches. A game whose dropdowns failed to build (error #1009
   in their constructor) had a dead main menu; it now starts. The fix's five
   `property_priority*` tests are in the snapshot and pass.
+- `swf/src/avm1/read.rs`, `types.rs`, `core/src/avm1/activation.rs`: **AVM1
+  pushes without their `Vec`**. Every `ActionPush` was decoded into a new
+  `Vec` (`read_push`) and freed right after: an AS2 game that runs ~50,000
+  pushes a frame spent ~14 % of it in the allocator for them.
+  `Reader::flashnx_read_push` decodes into an uninitialized 16-slot buffer on
+  the stack (same decoding, errors and length check as `read_action`; more
+  values than that take the old path), then the values are pushed as before.
+  The first version zeroed that buffer (384 bytes a push) and gained nothing;
+  `MaybeUninit` did. -8 ms a frame (-10 %) on an AS2 game at 21 images a
+  second (same session, profile split by A/B window). Marker `avm1push.off`.
 - `core/src/flashnx_avm2ops.rs` (new): AVM2 opcode census (`avm2ops:` lines,
   feature `flashnx_opcount`, not in any default build: its pair table costs
   ~14 % of an AS3-bound frame).
@@ -437,6 +447,16 @@ FlashNX's side (not in this diff), in `rust/src/backend/render.rs`:
 - Offscreen temps are reused by best fit (up to 4x the area) and made in
   64-pixel steps, instead of matching sizes exactly: GPU-object creation
   spikes in SSF2 fell by about 60 %.
+
+### Tried and dropped (2026-10-08)
+
+- **The AVM1 property-name hash kept in the string** (`AvmStringRepr` field,
+  `PropertyMap` hashing a precomputed u64, as ruffle#3432 suggests). The
+  hashing left the profile, but lookups only went from ~12.8 % to ~11 % of the
+  frame: what remains is comparing the characters (the constant pool makes new
+  strings each time a block runs, so pointers never match), and the field cost
+  8 bytes on every string of every movie, AS3 included (Super Smash Flash 2 is
+  short of memory). Not kept.
 
 ### Tried and dropped (2026-10-06)
 

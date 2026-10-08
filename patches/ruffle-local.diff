@@ -266,7 +266,7 @@ index 371775c28..a7ad1dff1 100644
              .field("loader_url", &self.loader_url)
              .field("parameters", &self.parameters)
 diff --git a/core/src/avm1.rs b/core/src/avm1.rs
-index 3bd126464..8fa516068 100644
+index 3bd126464..3649753cf 100644
 --- a/core/src/avm1.rs
 +++ b/core/src/avm1.rs
 @@ -10,6 +10,11 @@ mod function;
@@ -293,11 +293,20 @@ index 3bd126464..8fa516068 100644
  mod parameters;
  mod property;
  mod property_map;
+@@ -27,7 +37,7 @@ mod scope;
+ mod value;
+ mod xml;
+ 
+-pub use activation::{Activation, ActivationIdentifier};
++pub use activation::{Activation, ActivationIdentifier, set_avm1_fast_push};
+ pub use debug::VariableDumper;
+ pub use error::Error;
+ pub use flv::FlvValueAvm1Ext;
 diff --git a/core/src/avm1/activation.rs b/core/src/avm1/activation.rs
-index bec5d438f..c080adf86 100644
+index bec5d438f..7577fa7c5 100644
 --- a/core/src/avm1/activation.rs
 +++ b/core/src/avm1/activation.rs
-@@ -29,6 +29,58 @@ use web_time::Instant;
+@@ -29,6 +29,66 @@ use web_time::Instant;
  
  use super::object_reference::MovieClipReference;
  
@@ -335,6 +344,14 @@ index bec5d438f..c080adf86 100644
 +static FLASHNX_CHILD_TICKS: [std::sync::atomic::AtomicU64; FLASHNX_MAX_DEPTH] =
 +    [const { std::sync::atomic::AtomicU64::new(0) }; FLASHNX_MAX_DEPTH];
 +
++/// FlashNX: decode `ActionPush` without its `Vec` (`Reader::flashnx_read_push`).
++/// On by default; `avm1push.off` or the profiling build's A/B turn it off.
++static FLASHNX_FAST_PUSH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
++
++pub fn set_avm1_fast_push(on: bool) {
++    FLASHNX_FAST_PUSH.store(on, std::sync::atomic::Ordering::Relaxed);
++}
++
 +/// The ARM generic timer, read inline: an FFI call per action would cost more
 +/// than the decode being measured. No `nomem`/`pure`, so two reads around a
 +/// call cannot be merged into one.
@@ -356,7 +373,7 @@ index bec5d438f..c080adf86 100644
  macro_rules! avm_debug {
      ($avm: expr, $($arg:tt)*) => (
          if $avm.show_debug_output() {
-@@ -408,16 +460,34 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -408,16 +468,34 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      }
  
      pub fn run_actions(&mut self, code: SwfSlice) -> Result<ReturnType<'gc>, Error<'gc>> {
@@ -392,7 +409,7 @@ index bec5d438f..c080adf86 100644
      }
  
      /// Run a single action from a given action reader.
-@@ -429,7 +499,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -429,7 +507,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          *self.context.actions_since_timeout_check += 1;
          if *self.context.actions_since_timeout_check >= 2000 {
              *self.context.actions_since_timeout_check = 0;
@@ -401,7 +418,7 @@ index bec5d438f..c080adf86 100644
                  return Err(Error::ExecutionTimeout);
              }
          }
-@@ -438,14 +508,31 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -438,14 +516,61 @@ impl<'a, 'gc> Activation<'a, 'gc> {
              //Executing beyond the end of a function constitutes an implicit return.
              Ok(FrameControl::Return(ReturnType::Implicit))
          } else {
@@ -414,6 +431,36 @@ index bec5d438f..c080adf86 100644
 +            let nested0 = FLASHNX_CHILD_TICKS[depth].load(std::sync::atomic::Ordering::Relaxed);
 +            #[cfg(feature = "flashnx_instr")]
 +            let d0 = flashnx_ticks();
++            if FLASHNX_FAST_PUSH.load(std::sync::atomic::Ordering::Relaxed) {
++                let mut buf =
++                    [const { std::mem::MaybeUninit::<swf::avm1::types::Value<'_>>::uninit() }; 16];
++                if let Some(read) = reader.flashnx_read_push(&mut buf) {
++                    let n = read?;
++                    #[cfg(feature = "flashnx_instr")]
++                    {
++                        FLASHNX_AVM1_DECODE_TICKS.fetch_add(
++                            flashnx_ticks().wrapping_sub(d0),
++                            std::sync::atomic::Ordering::Relaxed,
++                        );
++                        FLASHNX_AVM1_ACTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++                    }
++                    for value in &buf[..n] {
++                        // SAFETY: `flashnx_read_push` wrote the first `n`.
++                        self.flashnx_push_swf_value(unsafe { value.assume_init() });
++                    }
++                    #[cfg(feature = "flashnx_instr")]
++                    {
++                        let spent = flashnx_ticks().wrapping_sub(d0);
++                        let nested = FLASHNX_CHILD_TICKS[depth]
++                            .load(std::sync::atomic::Ordering::Relaxed)
++                            .wrapping_sub(nested0);
++                        FLASHNX_OP_TICKS[op]
++                            .fetch_add(spent.saturating_sub(nested), std::sync::atomic::Ordering::Relaxed);
++                        FLASHNX_OP_COUNT[op].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++                    }
++                    return Ok(FrameControl::Continue);
++                }
++            }
              let action = reader.read_action()?;
 +            #[cfg(feature = "flashnx_instr")]
 +            {
@@ -434,7 +481,7 @@ index bec5d438f..c080adf86 100644
                  Action::Add => self.action_add(),
                  Action::Add2 => self.action_add_2(),
                  Action::And => self.action_and(),
-@@ -547,7 +634,18 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -547,7 +672,18 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                  Action::WaitForFrame2(action) => self.action_wait_for_frame_2(action, reader),
                  Action::With(action) => self.action_with(action, data),
                  Action::Unknown(action) => self.action_unknown(action),
@@ -453,7 +500,32 @@ index bec5d438f..c080adf86 100644
          }
      }
  
-@@ -2717,7 +2815,35 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -1742,6 +1878,16 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+ 
+     fn action_push(&mut self, action: Push) -> Result<FrameControl<'gc>, Error<'gc>> {
+         for value in action.values {
++            self.flashnx_push_swf_value(value);
++        }
++        Ok(FrameControl::Continue)
++    }
++
++    /// One value of an `ActionPush` onto the stack (FlashNX: shared by
++    /// `action_push` and the Vec-free path in `do_action`).
++    #[inline]
++    fn flashnx_push_swf_value(&mut self, value: swf::avm1::types::Value<'_>) {
++        {
+             use swf::avm1::types::Value as SwfValue;
+             let value = match value {
+                 SwfValue::Undefined => Value::Undefined,
+@@ -1768,7 +1914,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+             };
+             self.stack_push(value); // Needs to handle MovieClipReferences, in case pushing a register
+         }
+-        Ok(FrameControl::Continue)
+     }
+ 
+     fn action_push_duplicate(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
+@@ -2717,7 +2862,35 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
          // Finally! It's a plain old variable name.
          // Resolve using scope chain, as normal.
@@ -8044,7 +8116,7 @@ index 91bdb52df..33230aaf1 100644
  pub fn broadcast_frame_entered<'gc>(context: &mut UpdateContext<'gc>) {
      let enter_frame_evt = EventObject::bare_default_event(context, "enterFrame");
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..0f4639782 100644
+index 6e5379213..a91249011 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
 @@ -4,6 +4,9 @@
@@ -8057,7 +8129,7 @@ index 6e5379213..0f4639782 100644
  
  #[macro_use]
  mod display_object;
-@@ -15,10 +18,37 @@ extern crate num_derive;
+@@ -15,10 +18,38 @@ extern crate num_derive;
  #[macro_use]
  mod avm1;
  mod avm2;
@@ -8074,6 +8146,7 @@ index 6e5379213..0f4639782 100644
 +pub use library::set_movie_free;
 +pub use flashnx_as3prof::{report as as3prof_report, set_as3_profiler};
 +pub use avm2::activation::{jit_report, jit_reset, set_fast_calls, set_jit, set_jit_direct_calls};
++pub use avm1::set_avm1_fast_push;
 +
 +/// FlashNX: AVM2 opcode census over the last `frames` frames, then reset
 +/// (`avm2ops:` lines). Empty unless built with `flashnx_opcount`.
@@ -8095,7 +8168,7 @@ index 6e5379213..0f4639782 100644
  pub mod context;
  pub mod context_menu;
  mod drawing;
-@@ -26,6 +56,10 @@ mod ecma_conversions;
+@@ -26,6 +57,10 @@ mod ecma_conversions;
  pub mod events;
  pub mod focus_tracker;
  pub mod font;
@@ -8106,7 +8179,7 @@ index 6e5379213..0f4639782 100644
  mod frame_lifecycle;
  mod html;
  mod input;
-@@ -63,6 +97,16 @@ pub use events::PlayerEvent;
+@@ -63,6 +98,16 @@ pub use events::PlayerEvent;
  pub use indexmap;
  pub use loader::LoadBehavior;
  pub use player::{Player, PlayerBuilder, PlayerMode, PlayerRuntime, StaticCallstack};
@@ -9334,6 +9407,96 @@ index 80ecf0517..001395fb7 100644
      fn update_texture(
          &mut self,
          handle: &BitmapHandle,
+diff --git a/swf/src/avm1/read.rs b/swf/src/avm1/read.rs
+index 107e0364d..4fb573889 100644
+--- a/swf/src/avm1/read.rs
++++ b/swf/src/avm1/read.rs
+@@ -72,6 +72,71 @@ impl<'a> Reader<'a> {
+         action
+     }
+ 
++    /// FlashNX: the next action if it is an `ActionPush`, its values decoded
++    /// into `buf` instead of the `Vec` `read_push` allocates (an allocation
++    /// and a free for every push an AS2 game runs, tens of thousands a frame).
++    /// Same decoding, errors and length check as `read_action`. `None`, with
++    /// nothing consumed, when the next action is not a push or holds more
++    /// values than `buf`.
++    /// `buf` is left uninitialized past the returned count (a zeroed buffer
++    /// cost more than the `Vec` it replaces).
++    pub fn flashnx_read_push(
++        &mut self,
++        buf: &mut [std::mem::MaybeUninit<Value<'a>>; 16],
++    ) -> Option<Result<usize>> {
++        if self.input.first() != Some(&(OpCode::Push as u8)) {
++            return None;
++        }
++        let saved = self.input;
++        let (opcode, length) = match self.read_opcode_and_length() {
++            Ok(v) => v,
++            Err(e) => return Some(Err(e)),
++        };
++        let start = self.input;
++        let end_pos = (start.as_ptr() as usize + length) as *const u8;
++        let mut n = 0;
++        while self.input.as_ptr() < end_pos {
++            let value = match self.flashnx_read_push_value() {
++                Ok(Some(v)) => v,
++                Ok(None) => continue,
++                Err(e) => return Some(Err(Error::avm1_parse_error_with_source(opcode, e))),
++            };
++            if n == buf.len() {
++                self.input = saved;
++                return None;
++            }
++            buf[n].write(value);
++            n += 1;
++        }
++        if !std::ptr::eq(self.input.as_ptr(), end_pos) {
++            self.input = &start[length.min(start.len())..];
++            log::warn!("Length mismatch in AVM1 action: {}", OpCode::format(opcode));
++        }
++        Some(Ok(n))
++    }
++
++    /// One value of an `ActionPush`, as `read_push` decodes it (`None`: an
++    /// invalid type, skipped like `read_push` does).
++    #[inline]
++    fn flashnx_read_push_value(&mut self) -> Result<Option<Value<'a>>> {
++        Ok(Some(match self.read_u8()? {
++            0 => Value::Str(self.read_str()?),
++            1 => Value::Float(self.read_f32()?),
++            2 => Value::Null,
++            3 => Value::Undefined,
++            4 => Value::Register(self.read_u8()?),
++            5 => Value::Bool(self.read_u8()? != 0),
++            6 => Value::Double(self.read_f64_me()?),
++            7 => Value::Int(self.read_i32()?),
++            8 => Value::ConstantPool(self.read_u8()?.into()),
++            9 => Value::ConstantPool(self.read_u16()?),
++            type_ => {
++                log::warn!("Invalid value type in ActionPush: {type_}");
++                return Ok(None);
++            }
++        }))
++    }
++
+     pub fn read_opcode_and_length(&mut self) -> Result<(u8, usize)> {
+         let opcode = self.read_u8()?;
+         let length = if opcode >= 0x80 {
+diff --git a/swf/src/avm1/types.rs b/swf/src/avm1/types.rs
+index 59aa92105..b003a6d7a 100644
+--- a/swf/src/avm1/types.rs
++++ b/swf/src/avm1/types.rs
+@@ -288,7 +288,8 @@ pub struct Push<'a> {
+     pub values: Vec<Value<'a>>,
+ }
+ 
+-#[derive(Clone, Debug, PartialEq)]
++// FlashNX: `Copy` (every variant is) for `Reader::flashnx_read_push`.
++#[derive(Clone, Copy, Debug, PartialEq)]
+ pub enum Value<'a> {
+     Undefined,
+     Null,
 diff --git a/tests/tests/swfs/avm2/getter_different_namespace_setter/test.toml b/tests/tests/swfs/avm2/getter_different_namespace_setter/test.toml
 index b010ec115..62d6148dd 100644
 --- a/tests/tests/swfs/avm2/getter_different_namespace_setter/test.toml

@@ -1765,6 +1765,12 @@ pub extern "C" fn ruffle_init() -> c_int {
     if !fast_calls {
         log(b"calls: fastcall.off present -> upstream AVM2 call path\n\0");
     }
+    // `sdmc:/switch/FlashNX/avm1push.off`: AVM1 pushes decoded into a Vec.
+    let fast_push = !backend::render::marker_present("avm1push.off");
+    ruffle_core::set_avm1_fast_push(fast_push);
+    if !fast_push {
+        log(b"avm1: avm1push.off present -> pushes decoded into a Vec\n\0");
+    }
     // `sdmc:/switch/FlashNX/jit.off`: AVM2 bytecode stays interpreted.
     let jit = !backend::render::marker_present("jit.off");
     ruffle_core::set_jit(jit);
@@ -2333,11 +2339,12 @@ pub(crate) static AB_REGIME: core::sync::atomic::AtomicU64 = core::sync::atomic:
 pub extern "C" fn ruffle_ab_regime(regime: i32) {
     use core::sync::atomic::Ordering::Relaxed;
     AB_REGIME.store((regime != 0) as u64, Relaxed);
-    // The whole AVM2 JIT of our Ruffle (`set_jit`). Measured before with this
-    // switch: the JIT alone (-17.5 ms a frame on Fireboy 2), direct calls
-    // between compiled methods (`set_jit_direct_calls`, -3.3 ms), the cheaper
-    // call path (`set_fast_calls`, -2.8 ms).
-    ruffle_core::set_jit(regime != 0);
+    // 2026-10-08: AVM1 pushes decoded without their Vec (`set_avm1_fast_push`).
+    // Measured before with this switch: the AVM2 JIT (`set_jit`, -17.5 ms a
+    // frame on Fireboy 2), direct calls between compiled methods
+    // (`set_jit_direct_calls`, -3.3 ms), the cheaper call path
+    // (`set_fast_calls`, -2.8 ms).
+    ruffle_core::set_avm1_fast_push(regime != 0);
 }
 
 /// Hide `us` microseconds of wall clock from the movie (#87).
