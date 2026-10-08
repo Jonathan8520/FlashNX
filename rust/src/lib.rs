@@ -1764,6 +1764,13 @@ pub extern "C" fn ruffle_init() -> c_int {
     if !render_cost {
         log(b"frames: rendercost.off present -> render handlers left out of catch-up\n\0");
     }
+    // `sdmc:/switch/FlashNX/trackmirror.off`: no Playtomic in the tracker list,
+    // and no memory of mirror misses (`backend::navigator`).
+    let track_mirror = !backend::render::marker_present("trackmirror.off");
+    crate::backend::navigator::set_mirror_guards(track_mirror);
+    if !track_mirror {
+        log(b"navigator: trackmirror.off present -> Playtomic and repeat misses go to the mirror\n\0");
+    }
     // `sdmc:/switch/FlashNX/gcsmall.off`: the collector sleeps 0.5x the live
     // heap whatever its size, as upstream (`set_gc_small_pacing` in our Ruffle).
     let gc_small = !backend::render::marker_present("gcsmall.off");

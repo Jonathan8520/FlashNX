@@ -228,6 +228,8 @@ pub struct SidecarNavigator {
     /// Every file in this game's tree, indexed on the first miss so
     /// `tail_match_path` can answer without walking the card again.
     tree_index: core::cell::RefCell<Option<std::sync::Arc<Vec<(Vec<String>, PathBuf)>>>>,
+    /// `host + path` the mirror had nothing for, this game (see `fetch_from_mirror`).
+    mirror_misses: core::cell::RefCell<std::collections::HashSet<String>>,
 }
 
 impl SidecarNavigator {
@@ -247,6 +249,7 @@ impl SidecarNavigator {
             htdocs_proxy,
             ng_connect_calls: core::sync::atomic::AtomicU32::new(0),
             tree_index: core::cell::RefCell::new(None),
+            mirror_misses: core::cell::RefCell::new(std::collections::HashSet::new()),
         }
     }
 
@@ -299,6 +302,14 @@ impl SidecarNavigator {
         cache_path: &std::path::Path,
     ) -> Option<std::vec::Vec<u8>> {
         let host = resolved.host_str()?;
+        // A host and path the mirror already answered "not here" for, this
+        // session: asking again would only freeze the frame for the same three
+        // misses. The query is left out of the key, as it is out of the mirror
+        // URL below, so a game polling a dead endpoint costs one attempt.
+        let miss_key = std::format!("{}{}", host, resolved.path());
+        if mirror_guards() && self.mirror_misses.borrow().contains(&miss_key) {
+            return None;
+        }
         const CAP: usize = 16 * 1024 * 1024;
         // The same path under a few sibling hosts, because the archive keeps a
         // file under the host it was CAPTURED from, which is not always the host
@@ -338,6 +349,9 @@ impl SidecarNavigator {
                     tracing::warn!("sidecar: mirror miss {} ({}): {}", resolved, mirror, e);
                 }
             }
+        }
+        if mirror_guards() {
+            self.mirror_misses.borrow_mut().insert(miss_key);
         }
         None
     }
@@ -686,11 +700,29 @@ fn is_dead_ad_host(host: &str) -> bool {
 /// a fight, and each post used to cost three synchronous HTTPS misses on the
 /// Flashpoint mirror, on the worker thread, inside the frame that already runs
 /// close to the script timeout. No mirror will ever hold an analytics endpoint.
+///
+/// playtomic.com (and swfstats.com, its earlier name): Burrito Bison reports to
+/// Playtomic every few seconds, its queue growing since nothing ever arrives,
+/// and each report cost the same three HTTPS misses inside a frame, about
+/// 300 ms frozen; half the time of the slow frames in a profiled run
+/// (2026-10-09). The service closed in 2014.
 fn is_tracker_host(host: &str) -> bool {
     const TRACKERS: &[&str] = &["mochibot.com", "google-analytics.com"];
-    TRACKERS
-        .iter()
-        .any(|d| host == *d || host.ends_with(&std::format!(".{d}")))
+    const LATER: &[&str] = &["playtomic.com", "swfstats.com"];
+    let is = |d: &&str| host == *d || host.ends_with(&std::format!(".{d}"));
+    TRACKERS.iter().any(is) || (mirror_guards() && LATER.iter().any(is))
+}
+
+/// The two guards added on 2026-10-09 (Playtomic in the tracker list, and the
+/// memory of mirror misses), on unless `trackmirror.off`.
+static MIRROR_GUARDS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+pub fn set_mirror_guards(on: bool) {
+    MIRROR_GUARDS.store(on, core::sync::atomic::Ordering::Relaxed);
+}
+
+fn mirror_guards() -> bool {
+    MIRROR_GUARDS.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 // Hosts of the legacy NewgroundsAPI v2 gateway we answer with a synthetic
