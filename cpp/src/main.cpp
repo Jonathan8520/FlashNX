@@ -721,11 +721,18 @@ static int gyro_cursor_delta(float* dx, float* dy) {
         if (g_gyro_handle_count) gyro_stop();
         return GYRO_OFF;
     }
-    u32 style = hidGetNpadStyleSet(HidNpadIdType_Handheld);
-    if (!style) style = hidGetNpadStyleSet(HidNpadIdType_No1);
+    // The controller in the hand first: a detached one (player 1) before the
+    // console, so a Joy-Con taken off to aim is the one read even while the
+    // other stays on its rail as the handheld controller.
+    u32 style = hidGetNpadStyleSet(HidNpadIdType_No1);
+    if (!style) style = hidGetNpadStyleSet(HidNpadIdType_Handheld);
     if (style != g_gyro_style) gyro_acquire(style);
     if (!g_gyro_handle_count) return mode;
-    const HidSixAxisSensorHandle h = g_gyro_handles[g_gyro_handle_count == 2 ? 1 : 0];
+    // A Joy-Con pair: the right one, or the left one when it is alone.
+    int which = 0;
+    if (g_gyro_handle_count == 2)
+        which = (hidGetNpadDeviceType(HidNpadIdType_No1) & HidDeviceTypeBits_JoyRight) ? 1 : 0;
+    const HidSixAxisSensorHandle h = g_gyro_handles[which];
     HidSixAxisSensorState st[16];
     const size_t n = hidGetSixAxisSensorStates(h, st, 16);
     // After a gap (pause menu, HOME, a sensor just started) the samples are
@@ -1031,6 +1038,12 @@ static void worker_entry(void* arg) {
     // doesn't change between the two phases.
     PadState pad;
     padConfigureInput(2, HidNpadStyleSet_NpadStandard); // up to 2 players (issue #40)
+    // One Joy-Con on the console is enough for handheld mode. By default the
+    // console wants both: with the right one taken off to play at a distance,
+    // the left one still on its rail gave nothing at all (`pads:` log,
+    // 2026-10-08). Now the attached one stays the handheld controller, the
+    // detached one is player 1, and `pad` reads both. Only for this process.
+    hidSetNpadHandheldActivationMode(HidNpadHandheldActivationMode_Single);
     padInitializeDefault(&pad);
     // Player 2 controller (issue #40). Idle / absent = no input, so single-player
     // is unaffected. Local 2-player Flash games (e.g. DBZ Devolution) read two
@@ -1361,6 +1374,28 @@ static void worker_entry(void* arg) {
         const u64 kDown2 = padGetButtonsDown(&pad2);
         const u64 kUp2   = padGetButtonsUp(&pad2);
         const u64 kHeld2 = padGetButtons(&pad2);
+        // Which controller the console puts where, whenever that changes:
+        // style (1 Pro, 2 handheld, 4 Joy-Con pair, 8 left alone, 16 right
+        // alone), device type and Joy-Con assignment of players 1 and 2 and of
+        // the handheld slot, and what each PadState sees (2026-10-08: the
+        // left Joy-Con did nothing once the right one was taken off).
+        {
+            static u32 s_pads_last[10] = {~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u, ~0u};
+            const u32 cur[10] = {
+                hidGetNpadStyleSet(HidNpadIdType_No1), hidGetNpadDeviceType(HidNpadIdType_No1),
+                (u32)hidGetNpadJoyAssignment(HidNpadIdType_No1),
+                hidGetNpadStyleSet(HidNpadIdType_No2), hidGetNpadDeviceType(HidNpadIdType_No2),
+                (u32)hidGetNpadJoyAssignment(HidNpadIdType_No2),
+                hidGetNpadStyleSet(HidNpadIdType_Handheld), hidGetNpadDeviceType(HidNpadIdType_Handheld),
+                padGetAttributes(&pad), padGetAttributes(&pad2),
+            };
+            if (std::memcmp(cur, s_pads_last, sizeof(cur)) != 0) {
+                std::memcpy(s_pads_last, cur, sizeof(cur));
+                std::printf("pads: No1 style 0x%x dev 0x%x assign %u | No2 style 0x%x dev 0x%x assign %u | "
+                            "Handheld style 0x%x dev 0x%x | pad1 attr 0x%x, pad2 attr 0x%x\n",
+                            cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], cur[6], cur[7], cur[8], cur[9]);
+                std::fflush(stdout);
+            }
         }
 
         if (++boost_reassert >= 30) {
