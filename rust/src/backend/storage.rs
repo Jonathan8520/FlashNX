@@ -48,6 +48,46 @@ use std::path::{Component, Path, PathBuf};
 
 use ruffle_core::backend::storage::StorageBackend;
 
+// ── Saves written off the game thread (2026-10-09) ──────────────────────────
+// A save on the SD card costs ~50 ms (open, write, close in a folder of
+// hundreds of files, then the commit). Burrito Bison saves its achievements
+// during a run, and each save froze a frame; four at the end of a run froze
+// ~200 ms. `put` now hands the bytes to a C++ worker (`save_writer.cpp`) and
+// returns; `RECENT` keeps the newest bytes of every save queued this session so
+// `get` sees a write that may not be on the card yet. The worker does the same
+// file operations and the same commit; `drain_saves` waits for it when a game
+// ends. Off with `sdmc:/switch/FlashNX/asyncsave.off`.
+
+extern "C" {
+    fn flashnx_save_async(path: *const core::ffi::c_char, data: *const u8, len: usize) -> core::ffi::c_int;
+    fn flashnx_save_drain();
+}
+
+static ASYNC_SAVES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static RECENT: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Vec<u8>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+/// Larger saves stay synchronous: the copy kept in `RECENT` is meant for
+/// SharedObjects of a few KB, not to double a big one in memory.
+const ASYNC_MAX_BYTES: usize = 1 << 20;
+
+pub fn set_async_saves(on: bool) {
+    ASYNC_SAVES.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Wait until every save queued so far is on the card, then forget the
+/// in-memory copies. Called once the player is gone (its own last flushes go
+/// through the queue too).
+pub fn drain_saves() {
+    unsafe { flashnx_save_drain() };
+    if let Ok(mut r) = RECENT.lock() {
+        r.clear();
+    }
+}
+
+fn recent(path: &Path) -> Option<Vec<u8>> {
+    RECENT.lock().ok().and_then(|r| r.get(path).cloned())
+}
+
 pub struct SwitchStorageBackend {
     /// Flat root where new saves are written, e.g. `sdmc:/flashnx/`.
     flat_root: PathBuf,
@@ -216,6 +256,10 @@ impl StorageBackend for SwitchStorageBackend {
         // The game-keyed path first: the only one that cannot belong to another game.
         if let Some(path) = self.game_path(name) {
             if Self::is_path_allowed(&path) {
+                // A save queued this session, possibly not written yet.
+                if let Some(data) = recent(&path) {
+                    return Some(data);
+                }
                 if let Some(data) = Self::read_chunked(&path) {
                     tracing::info!(
                         "storage.get({}) HIT game path={} {}B",
@@ -233,6 +277,9 @@ impl StorageBackend for SwitchStorageBackend {
         if !Self::is_path_allowed(&flat) {
             tracing::warn!("storage.get({}) path not allowed", name);
             return None;
+        }
+        if let Some(data) = recent(&flat) {
+            return Some(data);
         }
         if let Some(data) = Self::read_chunked(&flat) {
             tracing::warn!(
@@ -283,6 +330,20 @@ impl StorageBackend for SwitchStorageBackend {
                 }
             }
         }
+        if ASYNC_SAVES.load(std::sync::atomic::Ordering::Relaxed) && value.len() <= ASYNC_MAX_BYTES {
+            if let Some(c) = path.to_str().and_then(|p| std::ffi::CString::new(p).ok()) {
+                // In `RECENT` first, so a read straight after this sees it.
+                if let Ok(mut r) = RECENT.lock() {
+                    r.insert(path.clone(), value.to_vec());
+                }
+                if unsafe { flashnx_save_async(c.as_ptr(), value.as_ptr(), value.len()) } == 1 {
+                    tracing::info!("storage.put({}) queued path={} {}B", name, path.display(), value.len());
+                    return true;
+                }
+                // No worker: write it here as before (the copy in `RECENT` is
+                // the same bytes, so it stays right).
+            }
+        }
         match File::create(&path) {
             Ok(mut f) => match f.write_all(value) {
                 Ok(()) => {
@@ -310,6 +371,8 @@ impl StorageBackend for SwitchStorageBackend {
     }
 
     fn remove_key(&mut self, name: &str) {
+        // A queued write must not land after the delete and bring it back.
+        drain_saves();
         // Remove both the new flat path AND the legacy nested path so a
         // delete really wipes the save (otherwise the legacy read-
         // fallback would resurrect a "removed" save next session).

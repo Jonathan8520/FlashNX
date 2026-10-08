@@ -1764,6 +1764,13 @@ pub extern "C" fn ruffle_init() -> c_int {
     if !render_cost {
         log(b"frames: rendercost.off present -> render handlers left out of catch-up\n\0");
     }
+    // `sdmc:/switch/FlashNX/asyncsave.off`: saves written in the frame that
+    // makes them, as before `save_writer.cpp`.
+    let async_saves = !backend::render::marker_present("asyncsave.off");
+    crate::backend::storage::set_async_saves(async_saves);
+    if !async_saves {
+        log(b"storage: asyncsave.off present -> saves written on the game thread\n\0");
+    }
     // `sdmc:/switch/FlashNX/trackmirror.off`: no Playtomic in the tracker list,
     // and no memory of mirror misses (`backend::navigator`).
     let track_mirror = !backend::render::marker_present("trackmirror.off");
@@ -3126,6 +3133,8 @@ pub extern "C" fn ruffle_restart() -> c_int {
     unsafe {
         STATE = None;
     }
+    // Its last saves are on the card before the new player reads them.
+    crate::backend::storage::drain_saves();
     log(b"ruffle_restart: re-initialising\n\0");
     RESTARTING.store(true, std::sync::atomic::Ordering::Relaxed);
     let rc = ruffle_init();
@@ -4261,6 +4270,9 @@ pub extern "C" fn ruffle_shutdown() {
     unsafe {
         STATE = None;
     }
+    // Every save the game queued, its last flushes included, is on the card
+    // before anything else (the library, a delete, the app quitting) runs.
+    crate::backend::storage::drain_saves();
     // Before the SESSION END marker, so its summary line counts as the game's.
     crate::clock_auto::end_game();
     keymap::GYRO_MODE.store(keymap::GYRO_OFF, core::sync::atomic::Ordering::Relaxed);
