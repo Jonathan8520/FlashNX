@@ -1614,13 +1614,14 @@ pub fn set_power_mode(mode: u8) {
 /// Gyroscope cursor (#119), per game, `gyro` in `<basename>.prefs`. Off by
 /// default: in a game that does not use the cursor it would only drift it.
 pub const GYRO_OFF: u8 = 0;
-/// MARBLE: the cursor moves like a marble on the screen while the controller
-/// moves (raise the bottom edge and it goes up), and stops when it does.
+/// MARBLE: the screen is a board and the cursor sits where a marble would
+/// have rolled, toward the edge that goes down, as far as the board is tilted
+/// (raise the bottom edge and it goes up). Turning on the spot does nothing.
 pub const GYRO_MARBLE: u8 = 1;
 /// POINTER, like a Wii remote: the cursor goes where the controller points.
-/// In both modes, tilting past an edge then back brings the cursor to the
-/// same place, and the sticks and touch move it as usual; the gyroscope
-/// carries on from there.
+/// In both modes, going past an edge then back brings the cursor to the same
+/// place, and the sticks and touch move it as usual; the gyroscope carries on
+/// from there.
 pub const GYRO_POINTER: u8 = 2;
 pub const GYRO_MODE_COUNT: u8 = 3;
 

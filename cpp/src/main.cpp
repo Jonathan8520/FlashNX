@@ -591,19 +591,25 @@ static const char* app_file_path(const char* name) {
 
 // ─── Gyroscope cursor (#119) ────────────────────────────────────────────────
 // Moving the controller moves the cursor, on top of the sticks, in the mode the
-// game's TOUCHES panel picks (`ruffle_gyro_mode`). POINTER, like a Wii remote:
-// the cursor goes where the controller points. MARBLE goes the other way round,
-// like a marble on the screen: toward the edge that goes down (raise the bottom
-// edge and it goes up). Both move only while the controller moves, and both
-// keep an aim point that may go half a screen past the edges, so tilting away
-// and back lands on the same spot instead of the motion past an edge being
-// lost; a stick or a touch moves the cursor as usual and the aim carries on
-// from there, so no button is taken for recentring. Sensor: the handheld
-// console, a Pro Controller, or the RIGHT Joy-Con of a pair. Every new sample
-// is used exactly once, its angular velocity times its own interval, so the
-// cursor follows an ANGLE whatever the frame rate: 30 degrees cross the game's
-// whole width. The per-game cursor speed is the sticks' alone: scaled by it,
-// a game set to x5 for its stick crossed the screen in 9 degrees (2026-10-08).
+// game's TOUCHES panel picks (`ruffle_gyro_mode`). A stick or a touch moves the
+// cursor as usual and the gyroscope carries on from there, so no button is
+// taken for recentring. Sensor: the handheld console, a Pro Controller, or the
+// RIGHT Joy-Con of a pair; every new sample is used exactly once, with its own
+// interval, so nothing depends on the frame rate. 30 degrees cross the game's
+// whole width. The per-game cursor speed is the sticks' alone: scaled by it, a
+// game set to x5 for its stick crossed the screen in 9 degrees (2026-10-08).
+//
+// POINTER, like a Wii remote: the cursor goes where the controller points,
+// from the rotation. It keeps an aim point that may go half a screen past the
+// edges, so pointing away and back lands on the same spot.
+//
+// MARBLE: the screen is a board, the cursor sits where a marble would have
+// rolled to: toward the edge that goes down (raise the bottom edge and it goes
+// up), as far as the board is tilted from how it was held when the mode came
+// on or the cursor was last moved by hand. It reads the TILT, not the turn:
+// turning on the spot does nothing, the same tilt is always the same place,
+// and nothing drifts. "Position control" in Constantin and MacKenzie's tilt
+// study (2014), the faster of the two mappings in their marble maze.
 //
 // Axes (nn::hid, as chiaki-ng converts them for a PlayStation pad): x points
 // right (pitch), y forward along the controller (roll), z out of its face (the
@@ -620,7 +626,7 @@ static u64 g_gyro_last_tick = 0;
 // Gravity in controller axes (G), smoothed over about 0.1 s.
 static float g_grav[3] = {0.0f, 0.0f, 0.0f};
 static bool g_grav_valid = false;
-// The aim point, in game pixels; up to half a screen past each edge.
+// POINTER's aim point, in game pixels; up to half a screen past each edge.
 static float g_aim_x = 0.0f, g_aim_y = 0.0f;
 static bool g_aim_valid = false;
 // Once a second while it is on: samples, their intervals, gravity, the signed
@@ -638,6 +644,38 @@ static constexpr float GYRO_DEADZONE_RPS = 0.007f;
 // GyroWiki's yaw relax factor: the turn may take up to ~45 degrees' worth of
 // the other axis, for a controller held anywhere between flat and upright.
 static constexpr float GYRO_YAW_RELAX = 1.41f;
+// MARBLE: which way is down, in controller axes (unit vector). Turned by the
+// gyroscope between samples and pulled toward the accelerometer (a
+// complementary filter): the gyroscope keeps it steady through hand jolts, the
+// accelerometer keeps it from drifting.
+static float g_down[3] = {0.0f, 0.0f, -1.0f};
+static bool g_down_valid = false;
+// Samples since `g_down` started. The first states after the sensor starts
+// can be a default (lying flat): seen on hardware 2026-10-08, the first level
+// was 35 degrees off. So the tilt is not used before 0.2 s, and is pulled
+// hard toward the accelerometer until then.
+static u32 g_down_n = 0;
+static constexpr u32 TILT_SETTLE_SAMPLES = 40;
+// The tilt when the cursor was last placed by hand (radians), and where.
+static float g_tilt0[2] = {0.0f, 0.0f};
+static float g_tilt_anchor_x = 0.0f, g_tilt_anchor_y = 0.0f;
+static bool g_tilt_anchor_valid = false;
+// Pull toward the accelerometer per 5 ms sample: about a quarter of a second.
+static constexpr float TILT_ACCEL_PULL = 0.02f;
+
+// The board's tilt (radians): [0] the right edge below the left, [1] the board
+// pitched about its x axis, the bottom edge rising positive. Read from `g_down`
+// as two angles, so it answers the same whether the console is held upright
+// or flat. False before the first sample.
+static bool gyro_tilt(float out[2]) {
+    if (!g_down_valid || g_down_n < TILT_SETTLE_SAMPLES) return false;
+    float nx = g_down[0];
+    if (nx > 1.0f) nx = 1.0f;
+    if (nx < -1.0f) nx = -1.0f;
+    out[0] = std::asin(nx);
+    out[1] = std::atan2(g_down[2], g_down[1]);
+    return true;
+}
 
 static void gyro_stop() {
     for (int i = 0; i < g_gyro_handle_count; ++i) hidStopSixAxisSensor(g_gyro_handles[i]);
@@ -646,6 +684,8 @@ static void gyro_stop() {
     g_gyro_last_sample = 0;
     g_grav_valid = false;
     g_aim_valid = false;
+    g_down_valid = false;
+    g_tilt_anchor_valid = false;
 }
 
 static void gyro_acquire(u32 style) {
@@ -694,6 +734,12 @@ static int gyro_cursor_delta(float* dx, float* dy) {
     const bool resync = g_gyro_last_sample == 0
                      || armTicksToNs(now - g_gyro_last_tick) > 100000000ull;
     g_gyro_last_tick = now;
+    // Back from a gap the controller may be held another way: MARBLE starts
+    // again from wherever the cursor is.
+    if (resync) {
+        g_down_valid = false;
+        g_tilt_anchor_valid = false;
+    }
     u64 newest = g_gyro_last_sample;
     float turn = 0.0f, tilt = 0.0f;
     for (size_t i = 0; i < n; ++i) {
@@ -703,6 +749,12 @@ static int gyro_cursor_delta(float* dx, float* dy) {
         for (int k = 0; k < 3; ++k)
             g_grav[k] = g_grav_valid ? g_grav[k] + (a[k] - g_grav[k]) * 0.05f : a[k];
         g_grav_valid = true;
+        const float alen = std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+        if (!g_down_valid && alen > 0.5f) {
+            for (int k = 0; k < 3; ++k) g_down[k] = a[k] / alen;
+            g_down_valid = true;
+            g_down_n = 0;
+        }
         if (resync) continue;
         // `delta_time` in nanoseconds; outside 1-50 ms it is not trusted and
         // one sample at 200 Hz is assumed instead.
@@ -713,6 +765,24 @@ static int gyro_cursor_delta(float* dx, float* dy) {
         const float wx = st[i].angular_velocity.x;
         const float wy = st[i].angular_velocity.y;
         const float wz = st[i].angular_velocity.z;
+        if (g_down_valid) {
+            // A direction fixed in the world turns the other way in controller
+            // axes: d -= (w x d) dt, w in radians.
+            const float r = 6.2831853f * dt;
+            const float ox = wx * r, oy = wy * r, oz = wz * r;
+            const float d0 = g_down[0], d1 = g_down[1], d2 = g_down[2];
+            g_down[0] = d0 - (oy * d2 - oz * d1);
+            g_down[1] = d1 - (oz * d0 - ox * d2);
+            g_down[2] = d2 - (ox * d1 - oy * d0);
+            // Toward the accelerometer, unless the hand is jolting it.
+            const float pull = g_down_n < TILT_SETTLE_SAMPLES ? 0.2f : TILT_ACCEL_PULL;
+            if (alen > 0.7f && alen < 1.3f)
+                for (int k = 0; k < 3; ++k) g_down[k] += (a[k] / alen - g_down[k]) * pull;
+            g_down_n++;
+            const float dl = std::sqrt(g_down[0] * g_down[0] + g_down[1] * g_down[1] + g_down[2] * g_down[2]);
+            if (dl > 0.0f)
+                for (int k = 0; k < 3; ++k) g_down[k] /= dl;
+        }
         // The turn: rotation about the world's vertical (opposite of gravity),
         // from the roll and face axes only, capped as GyroWiki does.
         float yaw = wz;  // no usable gravity (free fall, no data): held flat
@@ -736,26 +806,26 @@ static int gyro_cursor_delta(float* dx, float* dy) {
     // 30 degrees (1/12 revolution) across the width. Right-handed axes: a
     // positive turn about the vertical is to the LEFT, a positive pitch raises
     // the top edge; screen x grows rightwards and y downwards.
+    // POINTER's motion; MARBLE places the cursor itself (`gyro_tilt`).
     const float scale = (float)GAME_VIEWPORT_W * 12.0f;
-    *dx = -turn * scale;
-    *dy = -tilt * scale;
-    // MARBLE goes the other way round from aiming on both axes
-    // (tested 2026-10-08): tilting the board's right edge down turns the
-    // console to the LEFT about the vertical, and the marble rolls right.
-    if (mode == GYRO_MARBLE) {
-        *dx = -*dx;
-        *dy = -*dy;
+    if (mode == GYRO_POINTER) {
+        *dx = -turn * scale;
+        *dy = -tilt * scale;
     }
     g_gyro_trace_px[0] += *dx;
     g_gyro_trace_px[1] += *dy;
     if (armTicksToNs(now - g_gyro_trace_tick) >= 1000000000ull) {
         if (g_gyro_trace_n) {
+            float t[2] = {0.0f, 0.0f};
+            gyro_tilt(t);
             std::printf("gyro: 1 s: mode %d, %u samples, interval %llu..%llu ns, gravity %+.2f %+.2f %+.2f G, "
-                        "rotation x %+.3f y %+.3f z %+.3f rev, cursor %+.0f %+.0f px\n",
+                        "rotation x %+.3f y %+.3f z %+.3f rev, cursor %+.0f %+.0f px, "
+                        "tilt %+.1f %+.1f deg (from %+.1f %+.1f)\n",
                         mode, g_gyro_trace_n, (unsigned long long)g_gyro_trace_dt_min,
                         (unsigned long long)g_gyro_trace_dt_max, g_grav[0], g_grav[1], g_grav[2],
                         g_gyro_trace_rot[0], g_gyro_trace_rot[1], g_gyro_trace_rot[2],
-                        g_gyro_trace_px[0], g_gyro_trace_px[1]);
+                        g_gyro_trace_px[0], g_gyro_trace_px[1],
+                        t[0] * 57.2958f, t[1] * 57.2958f, g_tilt0[0] * 57.2958f, g_tilt0[1] * 57.2958f);
             std::fflush(stdout);
         }
         g_gyro_trace_tick = now;
@@ -1291,6 +1361,7 @@ static void worker_entry(void* arg) {
         const u64 kDown2 = padGetButtonsDown(&pad2);
         const u64 kUp2   = padGetButtonsUp(&pad2);
         const u64 kHeld2 = padGetButtons(&pad2);
+        }
 
         if (++boost_reassert >= 30) {
             boost_reassert = 0;
@@ -1860,7 +1931,30 @@ static void worker_entry(void* arg) {
             const bool by_stick = moved;
             float gdx, gdy;
             const int gmode = gyro_cursor_delta(&gdx, &gdy);
-            if (gmode != GYRO_OFF) {
+            float tilt_now[2];
+            if (gmode == GYRO_MARBLE && gyro_tilt(tilt_now)) {
+                // Placed by hand (or just switched on): this tilt is level.
+                if (!g_tilt_anchor_valid || by_stick) {
+                    g_tilt_anchor_x = cursor_x;
+                    g_tilt_anchor_y = cursor_y;
+                    g_tilt0[0] = tilt_now[0];
+                    g_tilt0[1] = tilt_now[1];
+                    g_tilt_anchor_valid = true;
+                } else {
+                    float dv = tilt_now[1] - g_tilt0[1];
+                    if (dv > 3.14159265f) dv -= 6.28318531f;
+                    if (dv < -3.14159265f) dv += 6.28318531f;
+                    // 30 degrees across the width, as POINTER.
+                    const float px_per_rad = (float)GAME_VIEWPORT_W * 12.0f / 6.28318531f;
+                    const float nx = g_tilt_anchor_x + (tilt_now[0] - g_tilt0[0]) * px_per_rad;
+                    const float ny = g_tilt_anchor_y - dv * px_per_rad;
+                    if (std::fabs(nx - cursor_x) > 0.25f || std::fabs(ny - cursor_y) > 0.25f) {
+                        cursor_x = nx;
+                        cursor_y = ny;
+                        moved = true;
+                    }
+                }
+            } else if (gmode == GYRO_POINTER) {
                 // The aim starts where the cursor is, and again whenever a stick
                 // (or, below, a touch) moved it: the gyroscope carries on from
                 // wherever the player put the cursor.
@@ -1894,7 +1988,8 @@ static void worker_entry(void* arg) {
             cursor_x = (float)touch_state.touches[0].x * GAME_TOUCH_SCALE_X;
             cursor_y = (float)touch_state.touches[0].y * GAME_TOUCH_SCALE_Y;
             moved = true;
-            g_aim_valid = false;  // the gyroscope re-aims from the touch
+            g_aim_valid = false;  // the gyroscope carries on from the touch
+            g_tilt_anchor_valid = false;
         }
 
         // Clamp cursor to the viewport.

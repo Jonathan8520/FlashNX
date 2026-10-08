@@ -412,8 +412,8 @@ pub struct Strings {
     /// TOUCHES row (#119): moving the controller moves the cursor. Values:
     /// `overclock_off` (the same OFF word), `gyro_marble`, `gyro_pointer`.
     pub set_gyro: &'static str,
-    /// Gyroscope like a marble on the screen: the cursor rolls toward the
-    /// edge that goes down, while the controller moves.
+    /// Gyroscope like a marble on the screen: the cursor goes toward the edge
+    /// that goes down, as far as the console is tilted.
     pub gyro_marble: &'static str,
     /// Gyroscope like a Wii remote: the cursor goes where the controller points.
     pub gyro_pointer: &'static str,
