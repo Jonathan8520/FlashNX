@@ -40,6 +40,8 @@ extern "C" void prof_shutdown(void);
 extern "C" void prof_set_regime(int regime);
 // The profiling build's A/B switch (rust/src/lib.rs).
 extern "C" void ruffle_ab_regime(int regime);
+// libnx (weak, 0 by default): how `appletExit` leaves, see the end of main().
+extern "C" u32 __nx_applet_exit_mode;
 
 extern "C" void swf_picker_run(void);
 // The `.swf` embedded in this `.nro` (issue #106), or nullptr on a normal
@@ -2107,6 +2109,24 @@ int main(int argc, char** argv) {
 
     romfsExit();
     socketExit();
+
+    // A HOME-menu tile runs us as the APPLICATION itself, and an application
+    // has to tell the OS it is leaving (ISelfController::Exit) before its
+    // process ends. libnx only does that for an NSO (`envIsNso()`), and we are
+    // an NRO loaded by the tile's nx-hbloader, so quitting left the OS to find
+    // a dead application and say "the software was closed because an error
+    // occurred". Exit mode 1 makes `appletExit` register `_appletExitProcess`
+    // as the exit routine, which reopens the applet session and sends that
+    // request, the way nx.js's forwarder (bootstrap/launcher-nsp) and nxmp do.
+    // Not when the OS runs us as an applet (hbmenu, Sphaira's file browser):
+    // there the library applet's version would end the process instead of
+    // handing back to the menu.
+    if (forwarder_swf) {
+        const AppletType type = appletGetAppletType();
+        if (type == AppletType_Application || type == AppletType_SystemApplication) {
+            __nx_applet_exit_mode = 1;
+        }
+    }
 
     return EXIT_SUCCESS;
 }
