@@ -1124,10 +1124,10 @@ index ed1ff3034..61bed51da 100644
      }
 diff --git a/core/src/avm2/activation_jit.rs b/core/src/avm2/activation_jit.rs
 new file mode 100644
-index 000000000..51abbd491
+index 000000000..3ca3f8326
 --- /dev/null
 +++ b/core/src/avm2/activation_jit.rs
-@@ -0,0 +1,1840 @@
+@@ -0,0 +1,1855 @@
 +//! FlashNX: a baseline JIT for AVM2 bytecode (AArch64, Switch build only).
 +//!
 +//! Fireboy & Watergirl 2 runs 2.65 million AVM2 ops per frame at ~57 CPU
@@ -1721,9 +1721,24 @@ index 000000000..51abbd491
 +                Target::Code(_) => return false,
 +            };
 +            let delta = to as i64 - at as i64;
++            // A branch that does not reach is a method that cannot be compiled,
++            // never a truncated offset: `cbz`/`cbnz`/`b.cond` reach +-1 MB and
++            // `b` +-128 MB, and the masks below would silently wrap. Every
++            // helper call is followed by `cbnz w0, <exit>`, which jumps to the
++            // END of the method, so a method of more than 1 MB of code sent its
++            // first early return into whatever lay 1 MB away: haunt the house,
++            // loading a level, executed zeroed code memory (2026-10-08).
++            let (bits, ok) = match fix {
++                Fix::B => (26, (-(1i64 << 25)..(1i64 << 25)).contains(&delta)),
++                Fix::Cb(..) | Fix::BCond(_) => (19, (-(1i64 << 18)..(1i64 << 18)).contains(&delta)),
++            };
++            if !ok {
++                return false;
++            }
++            let field = (delta as u32) & ((1u32 << bits) - 1);
 +            self.code[at] |= match fix {
-+                Fix::B => (delta as u32) & 0x03FF_FFFF,
-+                Fix::Cb(..) | Fix::BCond(_) => ((delta as u32) & 0x7FFFF) << 5,
++                Fix::B => field,
++                Fix::Cb(..) | Fix::BCond(_) => field << 5,
 +            };
 +        }
 +        true

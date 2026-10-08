@@ -461,6 +461,14 @@ console, one change at a time, each with an SD-card marker to turn it off.
   `GetSlot` still costs (~70 %) is cache misses on the object and on its
   separately allocated slots, which only a change of Ruffle's object layout
   would remove. Marker `jittos.off`.
+- `core/src/avm2/activation_jit.rs`: **a branch that does not reach rejects the
+  method.** `cbz`/`cbnz`/`b.cond` reach +-1 MB and `b` +-128 MB, and the
+  branch patching masked the offset into its field without checking it. Every
+  helper call is followed by a `cbnz` to the method's exit, at its end, so in a
+  method of more than 1 MB of code the first early return jumped into
+  whatever lay 1 MB away: haunt the house executed zeroed code memory while
+  loading a level (InstrAbort). Such a method now counts as `bad branch` in
+  the `jit:` line and is interpreted; the game plays through the level.
 - `core/src/bitmap/turbulence.rs`, `operations.rs`: **`perlinNoise` does the
   per-call and per-point work once.** `turbulence` redid the stitching setup
   (four divisions, four roundings) for every pixel and every channel, and the
