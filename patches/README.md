@@ -430,6 +430,32 @@ console, one change at a time, each with an SD-card marker to turn it off.
 - `core/src/flashnx_avm2ops.rs` (new): AVM2 opcode census (`avm2ops:` lines,
   feature `flashnx_opcount`, not in any default build: its pair table costs
   ~14 % of an AS3-bound frame).
+- `core/src/player.rs`: **the collector sleeps longer on small heaps**
+  (`gc_pacing`). gc-arena's default sleeps 0.5x the live heap whatever its
+  size; Flash Player's own collector (MMgc `GCPolicyManager`) let a heap grow
+  by a load factor that shrinks with its size (2.5x under 10 MB, 1.125x past
+  300 MB). Under 32 MB of live arena the sleep is now 2x the live heap, under
+  64 MB 1x, the default up to 256 MB and the tight pacing past it. The live
+  size is the arena left when a cycle finishes, not the current total, which
+  swings with the garbage of the cycle in progress. Happy Wheels (Box2D, a
+  29-37 MB arena) had the collector awake in three frames out of four:
+  collector 6.0 -> 4.8 ms a frame, the frame -2 ms (-3.5 to -4 %), arena peak
+  73 -> 81 MB (in-session A/B, ~4,600 frames). What remains is dropping and
+  freeing each dead object, which a longer sleep does not change. Marker
+  `gcsmall.off`.
+- `core/src/bitmap/turbulence.rs`, `operations.rs`: **`perlinNoise` does the
+  per-call and per-point work once.** `turbulence` redid the stitching setup
+  (four divisions, four roundings) for every pixel and every channel, and the
+  lattice of a point for every channel, though neither depends on the channel.
+  `TurbulenceSetup` is built once per call and `turbulence_channels` does all
+  the channels of a point on one lattice. Same numbers bit for bit: the old
+  `turbulence` is kept under `cfg(test)` and a test compares the two on 600
+  random calls (seeds, sizes, frequencies, octaves, offsets, stitching,
+  fractal sums, 1 to 4 channels); `avm1/bitmap_data_thorough/perlinNoise`
+  passes. Happy Wheels makes two stage-sized, 10-octave gray-and-alpha calls
+  while loading its menu: that frame went from 3.25 s to 2.74 s at 1020 MHz
+  (the two calls ~2.2 -> ~1.7 s). Less than hoped: most of the time is the
+  gradient half, done for each channel.
 
 FlashNX's side (not in this diff), in `rust/src/backend/render.rs`:
 

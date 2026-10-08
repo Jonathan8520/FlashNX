@@ -5387,10 +5387,138 @@ index 29eb34fdc..7e81a7964 100644
  
      // Updates the data stored with our `BitmapHandle` if this `BitmapRawData`
 diff --git a/core/src/bitmap/operations.rs b/core/src/bitmap/operations.rs
-index 92bb2f430..39487ab6b 100644
+index 92bb2f430..ad8be9381 100644
 --- a/core/src/bitmap/operations.rs
 +++ b/core/src/bitmap/operations.rs
-@@ -551,7 +551,6 @@ pub fn threshold<'gc>(
+@@ -6,7 +6,7 @@ use crate::bitmap::bitmap_data::{
+     BitmapData, BitmapDataDrawError, BitmapRawData, ChannelOptions, Color, IBitmapDrawable,
+     LehmerRng, ThresholdOperation,
+ };
+-use crate::bitmap::turbulence::Turbulence;
++use crate::bitmap::turbulence::{Turbulence, TurbulenceSetup};
+ use crate::context::{RenderContext, UpdateContext};
+ use crate::display_object::{RenderOptions, TDisplayObject};
+ use gc_arena::Mutation;
+@@ -273,73 +273,63 @@ pub fn perlin_noise<'gc>(
+         if base.1 == 0.0 { 0.0 } else { 1.0 / base.1 },
+     );
+ 
++    // FlashNX: the stitching setup and the list of channels are the same for
++    // every pixel, and one `turbulence_channels` call per pixel does every
++    // channel (see `Turbulence::turbulence_channels`, same numbers).
++    let setup = TurbulenceSetup::new(
++        base_freq,
++        stitch,
++        (0.0, 0.0),
++        (write.width() as f64, write.height() as f64),
++    );
++    let gray_alpha = channel_options.contains(ChannelOptions::ALPHA);
++    // Flash seems to pass the `color_channel` parameter to `turbulence`
++    // somewhat strangely. It's not always r=0, g=1, b=2, a=3; instead,
++    // it skips incrementing the parameter after channels that are
++    // not included in `channel_options`: the n included channels, in
++    // order, get the noise of `turbulence` channels 0..n.
++    let mut color_dest: Vec<usize> = Vec::with_capacity(4);
++    for c in 0..4 {
++        // `c` is always in 0..4, so `1 << c` is never actually truncated here
++        if channel_options.contains(ChannelOptions::from_bits_truncate(1 << c)) {
++            color_dest.push(c);
++        }
++    }
++    let channels: &[usize] = if grayscale {
++        if gray_alpha { &[0, 1] } else { &[0] }
++    } else {
++        &[0, 1, 2, 3][..color_dest.len()]
++    };
++
+     for y in 0..write.height() {
+         for x in 0..write.width() {
+             let px = x as f64;
+             let py = y as f64;
+ 
+             let mut noise = [0.0; 4];
++            let mut out = [0.0; 4];
++            turb.turbulence_channels(
++                channels,
++                (px, py),
++                &setup,
++                num_octaves,
++                fractal_noise,
++                &offsets,
++                &mut out,
++            );
+ 
+             // grayscale mode is different enough to warrant its own branch
+             if grayscale {
+-                noise[0] = turb.turbulence(
+-                    0,
+-                    (px, py),
+-                    base_freq,
+-                    num_octaves,
+-                    fractal_noise,
+-                    stitch,
+-                    (0.0, 0.0),
+-                    (write.width() as f64, write.height() as f64),
+-                    &offsets,
+-                );
+-
++                noise[0] = out[0];
+                 noise[1] = noise[0];
+                 noise[2] = noise[0];
+-
+-                noise[3] = if channel_options.contains(ChannelOptions::ALPHA) {
+-                    turb.turbulence(
+-                        1,
+-                        (px, py),
+-                        base_freq,
+-                        num_octaves,
+-                        fractal_noise,
+-                        stitch,
+-                        (0.0, 0.0),
+-                        (write.width() as f64, write.height() as f64),
+-                        &offsets,
+-                    )
+-                } else {
+-                    1.0
+-                };
++                noise[3] = if gray_alpha { out[1] } else { 1.0 };
+             } else {
+-                // Flash seems to pass the `color_channel` parameter to `turbulence`
+-                // somewhat strangely. It's not always r=0, g=1, b=2, a=3; instead,
+-                // it skips incrementing the parameter after channels that are
+-                // not included in `channel_options`.
+-                let mut channel = 0;
+-
+-                for (c, noise_c) in noise.iter_mut().enumerate() {
+-                    // this will work both in fractal_sum and turbulence "modes",
+-                    // because of the saturating conversion to u8
+-                    *noise_c = if c == 3 { 1.0 } else { -1.0 };
+-
+-                    // `c` is always in 0..4, so `1 << c` is never actually truncated here
+-                    let c = ChannelOptions::from_bits_truncate(1 << c);
+-                    if channel_options.contains(c) {
+-                        *noise_c = turb.turbulence(
+-                            channel,
+-                            (px, py),
+-                            base_freq,
+-                            num_octaves,
+-                            fractal_noise,
+-                            stitch,
+-                            (0.0, 0.0),
+-                            (write.width() as f64, write.height() as f64),
+-                            &offsets,
+-                        );
+-                        channel += 1;
+-                    }
++                // this will work both in fractal_sum and turbulence "modes",
++                // because of the saturating conversion to u8
++                noise = [-1.0, -1.0, -1.0, 1.0];
++                for (k, &c) in color_dest.iter().enumerate() {
++                    noise[c] = out[k];
+                 }
+             }
+ 
+@@ -551,7 +541,6 @@ pub fn threshold<'gc>(
      // The number of modified pixels
      // This doesn't seem to include pixels changed due to copy_source
      let mut modified_count = 0;
@@ -5398,7 +5526,7 @@ index 92bb2f430..39487ab6b 100644
  
      let mut source_region =
          PixelRegion::for_whole_size(source_bitmap.width(), source_bitmap.height());
-@@ -567,61 +566,176 @@ pub fn threshold<'gc>(
+@@ -567,61 +556,176 @@ pub fn threshold<'gc>(
          return 0;
      }
  
@@ -5611,7 +5739,7 @@ index 92bb2f430..39487ab6b 100644
  pub fn scroll<'gc>(
      mc: &Mutation<'gc>,
      renderer: &mut dyn RenderBackend,
-@@ -809,7 +923,12 @@ pub fn hit_test_point(
+@@ -809,7 +913,12 @@ pub fn hit_test_point(
              .read_area(PixelRegion::for_pixel(x, y), renderer)
              .get_pixel32_raw(x, y)
              .alpha()
@@ -5625,7 +5753,7 @@ index 92bb2f430..39487ab6b 100644
      } else {
          false
      }
-@@ -1335,12 +1454,16 @@ fn copy_on_cpu<'gc>(
+@@ -1335,12 +1444,16 @@ fn copy_on_cpu<'gc>(
                  // Copying an entire texture that's the same size and type? Just replace the whole thing
                  dest.raw_pixels_mut().copy_from_slice(source.raw_pixels());
              } else {
@@ -5647,7 +5775,7 @@ index 92bb2f430..39487ab6b 100644
                  }
              }
          } else {
-@@ -1349,19 +1472,31 @@ fn copy_on_cpu<'gc>(
+@@ -1349,19 +1462,31 @@ fn copy_on_cpu<'gc>(
  
              let opaque = !dest.transparency();
  
@@ -5689,6 +5817,287 @@ index 92bb2f430..39487ab6b 100644
                  }
              }
          }
+diff --git a/core/src/bitmap/turbulence.rs b/core/src/bitmap/turbulence.rs
+index 340b92b82..2219a7075 100644
+--- a/core/src/bitmap/turbulence.rs
++++ b/core/src/bitmap/turbulence.rs
+@@ -113,6 +113,9 @@ impl Turbulence {
+         }
+     }
+ 
++    /// FlashNX: kept as the reference `turbulence_channels` is tested against
++    /// (bit for bit); `perlin_noise` no longer calls it.
++    #[cfg(test)]
+     fn noise2(
+         &self,
+         color_channel: usize,
+@@ -177,6 +180,8 @@ impl Turbulence {
+         lerp(sy, a, b)
+     }
+ 
++    /// FlashNX: the reference, see `noise2`.
++    #[cfg(test)]
+     #[expect(clippy::too_many_arguments)]
+     pub fn turbulence(
+         &self,
+@@ -245,4 +250,257 @@ impl Turbulence {
+         }
+         sum
+     }
++
++    /// FlashNX: the half of `noise2` that does not depend on the color
++    /// channel, verbatim.
++    fn lattice(&self, vec: (f64, f64), stitch_info: Option<StitchInfo>) -> Lattice {
++        let t = vec.0 + PERLIN_N as f64;
++        let mut bx0 = t as i32;
++        let mut bx1 = bx0 + 1;
++        let rx0 = t - (t as i32) as f64;
++        let rx1 = rx0 - 1.0;
++
++        let t = vec.1 + PERLIN_N as f64;
++        let mut by0 = t as i32;
++        let mut by1 = by0 + 1;
++        let ry0 = t - (t as i32) as f64;
++        let ry1 = ry0 - 1.0;
++
++        // If stitching, adjust lattice points accordingly.
++        if let Some(stitch_info) = stitch_info {
++            if bx0 >= stitch_info.wrap_x {
++                bx0 -= stitch_info.width;
++            }
++            if bx1 >= stitch_info.wrap_x {
++                bx1 -= stitch_info.width;
++            }
++            if by0 >= stitch_info.wrap_y {
++                by0 -= stitch_info.height;
++            }
++            if by1 >= stitch_info.wrap_y {
++                by1 -= stitch_info.height;
++            }
++        }
++
++        bx0 &= BM;
++        bx1 &= BM;
++        by0 &= BM;
++        by1 &= BM;
++
++        let i = self.lattice_selector[bx0 as usize];
++        let j = self.lattice_selector[bx1 as usize];
++        Lattice {
++            b00: self.lattice_selector[(i + by0) as usize] as usize,
++            b10: self.lattice_selector[(j + by0) as usize] as usize,
++            b01: self.lattice_selector[(i + by1) as usize] as usize,
++            b11: self.lattice_selector[(j + by1) as usize] as usize,
++            rx0,
++            rx1,
++            ry0,
++            ry1,
++            sx: s_curve(rx0),
++            sy: s_curve(ry0),
++        }
++    }
++
++    /// FlashNX: the other half of `noise2`, for one color channel, verbatim.
++    fn noise_at(&self, color_channel: usize, l: &Lattice) -> f64 {
++        let q = self.gradient[color_channel][l.b00];
++        let u = l.rx0 * q[0] + l.ry0 * q[1];
++        let q = self.gradient[color_channel][l.b10];
++        let v = l.rx1 * q[0] + l.ry0 * q[1];
++        let a = lerp(l.sx, u, v);
++
++        let q = self.gradient[color_channel][l.b01];
++        let u = l.rx0 * q[0] + l.ry1 * q[1];
++        let q = self.gradient[color_channel][l.b11];
++        let v = l.rx1 * q[0] + l.ry1 * q[1];
++        let b = lerp(l.sx, u, v);
++
++        lerp(l.sy, a, b)
++    }
++
++    /// FlashNX: `turbulence` for up to four color channels of one point, into
++    /// `out[..channels.len()]`, with the same numbers bit for bit (tested
++    /// below). `turbulence` redid the stitching setup for every pixel and every
++    /// channel, and the lattice for every channel, though neither depends on
++    /// the channel: Happy Wheels' two `perlinNoise` calls (stage size, 10
++    /// octaves, gray + alpha) took 1.1 s each on the Switch (2026-10-08).
++    #[allow(clippy::too_many_arguments)]
++    pub fn turbulence_channels(
++        &self,
++        channels: &[usize],
++        point: (f64, f64),
++        setup: &TurbulenceSetup,
++        num_octaves: usize,
++        fractal_sum: bool,
++        octave_offsets: &[(f64, f64)],
++        out: &mut [f64; 4],
++    ) {
++        let base_freq = setup.base_freq;
++        let mut stitch_info = setup.stitch_info;
++        let mut sums = [0.0; 4];
++        let mut ratio = 1.0;
++        for octave in 0..num_octaves {
++            let offset = octave_offsets.get(octave).unwrap();
++            let vec = (
++                (point.0 + offset.0) * base_freq.0 * ratio,
++                (point.1 + offset.1) * base_freq.1 * ratio,
++            );
++            let lattice = self.lattice(vec, stitch_info);
++            for (sum, &channel) in sums.iter_mut().zip(channels) {
++                let noise = self.noise_at(channel, &lattice);
++                *sum += if fractal_sum { noise } else { noise.abs() } / ratio;
++            }
++            ratio *= 2.0;
++            if let Some(ref mut stitch_info) = stitch_info {
++                stitch_info.width *= 2;
++                stitch_info.wrap_x = 2 * stitch_info.wrap_x - PERLIN_N;
++                stitch_info.height *= 2;
++                stitch_info.wrap_y = 2 * stitch_info.wrap_y - PERLIN_N;
++            }
++        }
++        out[..channels.len()].copy_from_slice(&sums[..channels.len()]);
++    }
++}
++
++/// FlashNX: see `Turbulence::lattice`.
++struct Lattice {
++    b00: usize,
++    b10: usize,
++    b01: usize,
++    b11: usize,
++    rx0: f64,
++    rx1: f64,
++    ry0: f64,
++    ry1: f64,
++    sx: f64,
++    sy: f64,
++}
++
++/// FlashNX: the stitching setup of `turbulence`, done once per call to
++/// `perlinNoise` instead of per pixel: it only depends on the call's
++/// parameters. The body is `turbulence`'s, verbatim.
++#[derive(Copy, Clone)]
++pub struct TurbulenceSetup {
++    base_freq: (f64, f64),
++    stitch_info: Option<StitchInfo>,
++}
++
++impl TurbulenceSetup {
++    pub fn new(
++        mut base_freq: (f64, f64),
++        do_stitching: bool,
++        tile_pos: (f64, f64),
++        tile_size: (f64, f64),
++    ) -> Self {
++        let mut stitch_info: Option<StitchInfo> = None; // Not stitching when None.
++        // Adjust the base frequencies if necessary for stitching.
++        if do_stitching {
++            // When stitching tiled turbulence, the frequencies must be adjusted
++            // so that the tile borders will be continuous.
++            if base_freq.0 != 0.0 {
++                let lo_freq = (tile_size.0 * base_freq.0).floor() / tile_size.0;
++                let hi_freq = (tile_size.0 * base_freq.0).ceil() / tile_size.0;
++                base_freq.0 = if base_freq.0 / lo_freq < hi_freq / base_freq.0 {
++                    lo_freq
++                } else {
++                    hi_freq
++                };
++            }
++            if base_freq.1 != 0.0 {
++                let lo_freq = (tile_size.1 * base_freq.0).floor() / tile_size.1;
++                let hi_freq = (tile_size.1 * base_freq.1).ceil() / tile_size.1;
++                base_freq.1 = if base_freq.1 / lo_freq < hi_freq / base_freq.1 {
++                    lo_freq
++                } else {
++                    hi_freq
++                };
++            }
++            // Set up initial stitch values.
++            let w = (tile_size.0 * base_freq.0 + 0.5) as i32;
++            let h = (tile_size.1 * base_freq.1 + 0.5) as i32;
++            stitch_info = Some(StitchInfo {
++                width: w,
++                height: h,
++                wrap_x: (tile_pos.0 * base_freq.0) as i32 + PERLIN_N + w,
++                wrap_y: (tile_pos.1 * base_freq.1) as i32 + PERLIN_N + h,
++            });
++        }
++        TurbulenceSetup {
++            base_freq,
++            stitch_info,
++        }
++    }
++}
++
++#[cfg(test)]
++mod flashnx_tests {
++    use super::*;
++
++    /// `turbulence_channels` against `turbulence`, bit for bit, over seeds,
++    /// sizes, frequencies (zero, below and above one), octave counts, offsets,
++    /// stitching and fractal sums, and every channel subset `perlin_noise` uses.
++    #[test]
++    fn turbulence_channels_matches_turbulence() {
++        let mut r: u64 = 0x9E37_79B9_7F4A_7C15;
++        let mut next = move || {
++            r ^= r << 13;
++            r ^= r >> 7;
++            r ^= r << 17;
++            r
++        };
++        let mut checked = 0u64;
++        for case in 0..600 {
++            let seed = (next() % 200_000) as i64 - 100_000;
++            let turb = Turbulence::from_seed(seed);
++            let w = (1 + next() % 400) as f64;
++            let h = (1 + next() % 400) as f64;
++            let mut base = || match next() % 6 {
++                0 => 0.0,
++                1 => 1.0,
++                2 => w,
++                3 => (next() % 100_000) as f64 / 1000.0,
++                4 => 0.37,
++                _ => (next() % 900) as f64 + 0.5,
++            };
++            let (bx, by) = (base(), base());
++            let base_freq = (
++                if bx == 0.0 { 0.0 } else { 1.0 / bx },
++                if by == 0.0 { 0.0 } else { 1.0 / by },
++            );
++            let octaves = (next() % 11) as usize;
++            let stitch = next() % 2 == 0;
++            let fractal = next() % 2 == 0;
++            let offsets: Vec<(f64, f64)> = (0..octaves)
++                .map(|_| {
++                    (
++                        (next() % 2_000_000) as f64 / 1000.0 - 1000.0,
++                        (next() % 2_000_000) as f64 / 1000.0 - 1000.0,
++                    )
++                })
++                .collect();
++            let n = 1 + (case % 4);
++            let channels: Vec<usize> = (0..n).collect();
++            let setup = TurbulenceSetup::new(base_freq, stitch, (0.0, 0.0), (w, h));
++            for _ in 0..40 {
++                let p = ((next() % w as u64) as f64, (next() % h as u64) as f64);
++                let mut out = [0.0; 4];
++                turb.turbulence_channels(&channels, p, &setup, octaves, fractal, &offsets, &mut out);
++                for (k, &c) in channels.iter().enumerate() {
++                    let want = turb.turbulence(
++                        c, p, base_freq, octaves, fractal, stitch, (0.0, 0.0), (w, h), &offsets,
++                    );
++                    assert_eq!(
++                        want.to_bits(),
++                        out[k].to_bits(),
++                        "case {case} channel {c} point {p:?}: {want} vs {}",
++                        out[k]
++                    );
++                    checked += 1;
++                }
++            }
++        }
++        assert!(checked > 50_000);
++    }
+ }
 diff --git a/core/src/character.rs b/core/src/character.rs
 index f1843308c..876d7e637 100644
 --- a/core/src/character.rs
@@ -8116,7 +8525,7 @@ index 91bdb52df..33230aaf1 100644
  pub fn broadcast_frame_entered<'gc>(context: &mut UpdateContext<'gc>) {
      let enter_frame_evt = EventObject::bare_default_event(context, "enterFrame");
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..a91249011 100644
+index 6e5379213..c3a88da17 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
 @@ -4,6 +4,9 @@
@@ -8179,7 +8588,7 @@ index 6e5379213..a91249011 100644
  mod frame_lifecycle;
  mod html;
  mod input;
-@@ -63,6 +98,16 @@ pub use events::PlayerEvent;
+@@ -63,6 +98,17 @@ pub use events::PlayerEvent;
  pub use indexmap;
  pub use loader::LoadBehavior;
  pub use player::{Player, PlayerBuilder, PlayerMode, PlayerRuntime, StaticCallstack};
@@ -8187,6 +8596,7 @@ index 6e5379213..a91249011 100644
 +/// for the periodic-spike hunt (see `player::flashnx_gc_probe`).
 +pub use player::{flashnx_frame_accumulator_us, flashnx_gc_probe, set_render_cost};
 +pub use player::set_bitmap_cache;
++pub use player::set_gc_small_pacing;
 +/// FlashNX: the AVM1 clip-reference cache switch, and the AVM1 probes the
 +/// Switch measurement build reads (zeros without `flashnx_instr`).
 +pub use player::{
@@ -8774,7 +9184,7 @@ index a231dc080..d38d9c027 100644
      }
  }
 diff --git a/core/src/player.rs b/core/src/player.rs
-index edb74cccb..733f074bc 100644
+index edb74cccb..94a04fb4d 100644
 --- a/core/src/player.rs
 +++ b/core/src/player.rs
 @@ -43,6 +43,7 @@ use crate::frame_lifecycle::{FramePhase, run_all_phases_avm2};
@@ -8793,7 +9203,7 @@ index edb74cccb..733f074bc 100644
  use std::sync::{Arc, Mutex, Weak};
  use std::time::Duration;
  use tracing::instrument;
-@@ -276,6 +278,175 @@ impl<'gc> GcRootData<'gc> {
+@@ -276,6 +278,220 @@ impl<'gc> GcRootData<'gc> {
  
  type GcArena = gc_arena::Arena<Rootable![GcRoot<'_>]>;
  
@@ -8850,6 +9260,51 @@ index edb74cccb..733f074bc 100644
 +    drop_factor: 0.14,
 +    free_factor: 0.21,
 +};
++
++/// FlashNX: live arena below which `gc_small_pacing` lets the collector sleep
++/// longer. Flash Player's own collector (MMgc `GCPolicyManager`) let a heap
++/// grow by a load factor that shrinks with its size, 2.5x under 10 MB down to
++/// 1.125x past 300 MB, and loosened it further whenever collecting took over a
++/// quarter of the time. gc-arena's default sleeps 0.5x the live heap whatever
++/// its size, so a game that allocates fast on a small heap never lets it rest:
++/// Happy Wheels (Box2D, a 29-37 MB arena) had the collector awake in three
++/// frames out of four, 6.3 ms of a 60 ms frame (2026-10-08).
++const GC_SMALL_BYTES: usize = 32 * 1024 * 1024;
++const GC_MID_BYTES: usize = 64 * 1024 * 1024;
++
++/// FlashNX: live arena size when the last cycle finished (0 before the first).
++/// The pacing is chosen on this rather than on the current total, which
++/// swings with the garbage of the cycle in progress and would switch the
++/// pacing back and forth between cycles.
++static FLASHNX_GC_LIVE: AtomicU64 = AtomicU64::new(0);
++
++/// FlashNX: `gc_small_pacing` on (default) or off (`gcsmall.off` marker, and
++/// the profiling build's A/B).
++static GC_SMALL: AtomicBool = AtomicBool::new(true);
++
++pub fn set_gc_small_pacing(enabled: bool) {
++    GC_SMALL.store(enabled, Ordering::Relaxed);
++}
++
++/// FlashNX: the pacing for an arena of `total` bytes, `live` of them alive
++/// after the last cycle. Sleeping 2x the live heap leaves about 6x the live
++/// heap allocated at the end of a cycle (192 MB at 32 MB live), 1x about 4x
++/// (256 MB at 64 MB live); past that the default, then the tight pacing.
++fn gc_pacing(total: usize, live: usize) -> gc_arena::metrics::Pacing {
++    use gc_arena::metrics::Pacing;
++    if total > GC_TIGHT_BYTES {
++        return GC_TIGHT_PACING;
++    }
++    if GC_SMALL.load(Ordering::Relaxed) && live != 0 {
++        if live < GC_SMALL_BYTES {
++            return Pacing { sleep_factor: 2.0, ..Pacing::DEFAULT };
++        }
++        if live < GC_MID_BYTES {
++            return Pacing { sleep_factor: 1.0, ..Pacing::DEFAULT };
++        }
++    }
++    Pacing::DEFAULT
++}
 +
 +/// FlashNX: ask for a full collection after the current update, at most once
 +/// every 10 s: some games call `System.gc()` every frame, and a full cycle of
@@ -8969,7 +9424,7 @@ index edb74cccb..733f074bc 100644
  #[derive(Copy, Clone, Debug, Eq, PartialEq)]
  enum RunState {
      Playing,
-@@ -519,11 +690,168 @@ impl Player {
+@@ -519,11 +735,168 @@ impl Player {
          FloatDuration::from_millis(self.frame_time(1000.0))
      }
  
@@ -9138,7 +9593,7 @@ index edb74cccb..733f074bc 100644
          self.frame_accumulator += dt;
          let frame_duration = self.frame_duration();
  
-@@ -554,6 +882,10 @@ impl Player {
+@@ -554,6 +927,10 @@ impl Player {
              }
          }
  
@@ -9149,7 +9604,7 @@ index edb74cccb..733f074bc 100644
          // Now that we're done running code,
          // we can stop pretending that more time passed than actually did.
          // Note: update_timers(dt) doesn't need to see this either.
-@@ -577,6 +909,10 @@ impl Player {
+@@ -577,6 +954,10 @@ impl Player {
                  .audio_skew_time(context.audio, cur_frame_offset)
          });
          self.frame_accumulator += FloatDuration::from_secs(audio_skew);
@@ -9160,7 +9615,7 @@ index edb74cccb..733f074bc 100644
  
          self.update_sockets();
          self.update_net_connections();
-@@ -2038,10 +2374,33 @@ impl Player {
+@@ -2038,10 +2419,33 @@ impl Player {
          let invalidated = self.enter_arena(|_, gc_root, _| gc_root.stage.invalidated());
  
          if invalidated {
@@ -9194,7 +9649,7 @@ index edb74cccb..733f074bc 100644
          }
  
          let mut background_color = Color::WHITE;
-@@ -2058,7 +2417,7 @@ impl Player {
+@@ -2058,7 +2462,7 @@ impl Player {
                  library: &gc_root.library,
                  transform_stack: &mut this.transform_stack,
                  is_offscreen: false,
@@ -9203,7 +9658,7 @@ index edb74cccb..733f074bc 100644
                  stage,
              };
  
-@@ -2296,7 +2655,7 @@ impl Player {
+@@ -2296,7 +2700,7 @@ impl Player {
                  external_interface,
                  start_time: this.start_time,
                  update_start: Instant::now(),
@@ -9212,7 +9667,7 @@ index edb74cccb..733f074bc 100644
                  focus_tracker: stage.focus_tracker(),
                  times_get_time_called: 0,
                  time_offset: &mut this.time_offset,
-@@ -2355,6 +2714,42 @@ impl Player {
+@@ -2355,6 +2759,42 @@ impl Player {
          self.debug_ui.borrow_mut()
      }
  
@@ -9255,7 +9710,7 @@ index edb74cccb..733f074bc 100644
      /// Update the current state of the player.
      ///
      /// The given function will be called with the current stage root, current
-@@ -2382,7 +2777,75 @@ impl Player {
+@@ -2382,7 +2822,83 @@ impl Player {
          self.update_mouse_state(EnumSet::empty(), false, &mut false);
  
          // GC
@@ -9294,11 +9749,14 @@ index edb74cccb..733f074bc 100644
 +            // anything): Super Smash Flash 2's arena swung 300 -> 450 MB in
 +            // late Classic levels, on a heap that dies at 3.0 GB. Here it is
 +            // ~0.6 of it, for ~1.6x the collector's time, only on such heaps.
++            // Small heaps go the other way (`gc_pacing`).
 +            {
 +                let arena = self.gc_arena.borrow();
 +                let metrics = arena.metrics();
-+                let tight = metrics.total_gc_allocation() > GC_TIGHT_BYTES;
-+                metrics.set_pacing(if tight { GC_TIGHT_PACING } else { gc_arena::metrics::Pacing::DEFAULT });
++                metrics.set_pacing(gc_pacing(
++                    metrics.total_gc_allocation(),
++                    FLASHNX_GC_LIVE.load(Ordering::Relaxed) as usize,
++                ));
 +            }
 +            dropped_sounds = self.collect_debt();
 +        }
@@ -9318,21 +9776,36 @@ index edb74cccb..733f074bc 100644
 +        {
 +            use gc_arena::arena::CollectionPhase;
 +            let arena = self.gc_arena.borrow();
-+            FLASHNX_GC_PHASE.store(
-+                match arena.collection_phase() {
-+                    CollectionPhase::Sleeping => 0,
-+                    CollectionPhase::Marking => 1,
-+                    CollectionPhase::Marked => 2,
-+                    CollectionPhase::Sweeping => 3,
-+                },
-+                Ordering::Relaxed,
-+            );
++            let phase = match arena.collection_phase() {
++                CollectionPhase::Sleeping => 0,
++                CollectionPhase::Marking => 1,
++                CollectionPhase::Marked => 2,
++                CollectionPhase::Sweeping => 3,
++            };
++            // A cycle has just finished: what is left is what was alive.
++            if phase == 0 && FLASHNX_GC_PHASE.load(Ordering::Relaxed) != 0 {
++                FLASHNX_GC_LIVE.store(
++                    arena.metrics().total_gc_allocation() as u64,
++                    Ordering::Relaxed,
++                );
++            }
++            FLASHNX_GC_PHASE.store(phase, Ordering::Relaxed);
 +            FLASHNX_GC_ALLOC.store(arena.metrics().total_allocation() as u64, Ordering::Relaxed);
 +        }
  
          rval
      }
-@@ -3173,6 +3636,36 @@ pub struct DragObject<'gc> {
+@@ -2956,6 +3472,9 @@ impl PlayerBuilder {
+     pub fn build(self) -> Arc<Mutex<Player>> {
+         use crate::backend::*;
+         use ruffle_video::null;
++        // FlashNX: a new arena, nothing measured about it yet.
++        FLASHNX_GC_LIVE.store(0, Ordering::Relaxed);
++        FLASHNX_GC_PHASE.store(0, Ordering::Relaxed);
+         let audio = self
+             .audio
+             .unwrap_or_else(|| Box::new(audio::NullAudioBackend::new()));
+@@ -3173,6 +3692,36 @@ pub struct DragObject<'gc> {
      pub constraint: Rectangle<Twips>,
  }
  

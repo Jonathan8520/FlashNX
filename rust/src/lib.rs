@@ -1760,6 +1760,13 @@ pub extern "C" fn ruffle_init() -> c_int {
     if !render_cost {
         log(b"frames: rendercost.off present -> render handlers left out of catch-up\n\0");
     }
+    // `sdmc:/switch/FlashNX/gcsmall.off`: the collector sleeps 0.5x the live
+    // heap whatever its size, as upstream (`set_gc_small_pacing` in our Ruffle).
+    let gc_small = !backend::render::marker_present("gcsmall.off");
+    ruffle_core::set_gc_small_pacing(gc_small);
+    if !gc_small {
+        log(b"gc: gcsmall.off present -> default pacing on small heaps\n\0");
+    }
     // `sdmc:/switch/FlashNX/fastcall.off`: upstream's AVM2 call path (an Arc
     // clone per call, the receiver check, the whole new frame cleared), see
     // `set_fast_calls` in our Ruffle.
@@ -2342,12 +2349,13 @@ pub(crate) static AB_REGIME: core::sync::atomic::AtomicU64 = core::sync::atomic:
 pub extern "C" fn ruffle_ab_regime(regime: i32) {
     use core::sync::atomic::Ordering::Relaxed;
     AB_REGIME.store((regime != 0) as u64, Relaxed);
-    // 2026-10-08: AVM1 pushes decoded without their Vec (`set_avm1_fast_push`,
-    // -10 % on an AS2 game). Before: the AVM2 JIT (`set_jit`, -17.5 ms a
-    // frame on Fireboy 2), direct calls between compiled methods
+    // 2026-10-08: the collector's longer sleep on small heaps
+    // (`set_gc_small_pacing`). Before: AVM1 pushes decoded without their Vec
+    // (`set_avm1_fast_push`, -10 % on an AS2 game), the AVM2 JIT (`set_jit`,
+    // -17.5 ms a frame on Fireboy 2), direct calls between compiled methods
     // (`set_jit_direct_calls`, -3.3 ms), the cheaper call path
     // (`set_fast_calls`, -2.8 ms).
-    ruffle_core::set_avm1_fast_push(regime != 0);
+    ruffle_core::set_gc_small_pacing(regime != 0);
 }
 
 /// Hide `us` microseconds of wall clock from the movie (#87).
