@@ -390,6 +390,10 @@ pub struct Strings {
     /// state and the raise is refused, which without this line is a button
     /// pressed eight times with nothing happening and no reason given.
     pub overclock_refused: &'static str,
+    /// Replaces `overclock_hint` while the row reads AUTO: the raise comes and
+    /// goes on its own, so the row has to say when. Its label is `pixels_auto`,
+    /// the same word in every language we ship.
+    pub overclock_auto_hint: &'static str,
     /// ECRAN row + defaults row: show the frame rate over the running game (#111).
     pub set_fps: &'static str,
     /// One line under that row. It has to say what the SECOND number is, because
@@ -793,6 +797,7 @@ const EN: Strings = Strings {
     overclock_on: "ON",
     overclock_hint: "ON: more battery used, more heat.",
     overclock_refused: "Overclock unavailable: battery too low.",
+    overclock_auto_hint: "AUTO: speeds up only slow games.",
     set_fps: "FPS COUNTER",
     fps_hint: "Frames per second, then the rate the game asks for.",
     set_rotation: "ROTATION",
@@ -1069,6 +1074,7 @@ const FR: Strings = Strings {
     overclock_on: "ACTIF",
     overclock_hint: "ACTIF : plus de batterie, plus de chaleur.",
     overclock_refused: "Overclock indisponible : batterie trop faible.",
+    overclock_auto_hint: "AUTO : seulement si le jeu ralentit.",
     set_fps: "COMPTEUR FPS",
     fps_hint: "Images par seconde, puis la cadence demand\u{00E9}e par le jeu.",
     set_rotation: "ROTATION",
@@ -1345,6 +1351,7 @@ const ES: Strings = Strings {
     overclock_on: "ACTIVO",
     overclock_hint: "ACTIVO: m\u{00E1}s bater\u{00ED}a, m\u{00E1}s calor.",
     overclock_refused: "Overclock no disponible: bater\u{00ED}a muy baja.",
+    overclock_auto_hint: "AUTO: solo si el juego va lento.",
     set_fps: "CONTADOR FPS",
     fps_hint: "Fotogramas por segundo, y la tasa que pide el juego.",
     set_rotation: "ROTACI\u{00D3}N",
@@ -1623,6 +1630,7 @@ const RU: Strings = Strings {
     overclock_on: "ВКЛ",
     overclock_hint: "ВКЛ: больше расход батареи и нагрев.",
     overclock_refused: "Разгон недоступен: батарея разряжена.",
+    overclock_auto_hint: "АВТО: только если игра тормозит.",
     set_fps: "СЧЁТЧИК FPS",
     fps_hint: "Кадров в секунду и частота, которую запрашивает игра.",
     set_rotation: "ПОВОРОТ",
@@ -1904,6 +1912,7 @@ const DE: Strings = Strings {
     overclock_on: "EIN",
     overclock_hint: "EIN: mehr Akkuverbrauch, mehr W\u{00E4}rme.",
     overclock_refused: "Overclock nicht verf\u{00FC}gbar: Akku zu schwach.",
+    overclock_auto_hint: "AUTO: nur bei langsamen Spielen.",
     set_fps: "FPS-ANZEIGE",
     fps_hint: "Bilder pro Sekunde, dann die vom Spiel geforderte Rate.",
     set_rotation: "DREHUNG",
@@ -2182,6 +2191,7 @@ const IT: Strings = Strings {
     overclock_on: "ATTIVO",
     overclock_hint: "ATTIVO: pi\u{00F9} batteria, pi\u{00F9} calore.",
     overclock_refused: "Overclock non disponibile: batteria troppo bassa.",
+    overclock_auto_hint: "AUTO: solo se il gioco rallenta.",
     set_fps: "CONTATORE FPS",
     fps_hint: "Fotogrammi al secondo, poi la frequenza richiesta dal gioco.",
     set_rotation: "ROTAZIONE",
@@ -2460,6 +2470,7 @@ const PT: Strings = Strings {
     overclock_on: "ATIVO",
     overclock_hint: "ATIVO: mais bateria, mais calor.",
     overclock_refused: "Overclock indispon\u{00ED}vel: bateria fraca.",
+    overclock_auto_hint: "AUTO: s\u{00F3} se o jogo ficar lento.",
     set_fps: "CONTADOR FPS",
     fps_hint: "Quadros por segundo, e a taxa que o jogo pede.",
     set_rotation: "ROTA\u{00C7}\u{00C3}O",
@@ -2743,6 +2754,7 @@ const ZH: Strings = Strings {
     overclock_on: "开启",
     overclock_hint: "开启：更耗电，发热更多。",
     overclock_refused: "超频不可用：电量过低。",
+    overclock_auto_hint: "自动：仅在游戏变慢时提速。",
     set_fps: "帧率显示",
     fps_hint: "每秒帧数，以及游戏要求的帧率。",
     set_rotation: "旋转",
@@ -3024,6 +3036,7 @@ const TR: Strings = Strings {
     overclock_on: "A\u{00C7}IK",
     overclock_hint: "A\u{00C7}IK: daha \u{00E7}ok pil, daha \u{00E7}ok \u{0131}s\u{0131}.",
     overclock_refused: "Overclock kullan\u{0131}lamaz: pil \u{00E7}ok d\u{00FC}\u{015F}\u{00FC}k.",
+    overclock_auto_hint: "OTOMAT\u{0130}K: yaln\u{0131}zca oyun yava\u{015F}larsa.",
     set_fps: "FPS SAYACI",
     fps_hint: "Saniyedeki kare say\u{0131}s\u{0131} ve oyunun istedi\u{011F}i h\u{0131}z.",
     set_rotation: "D\u{00D6}ND\u{00DC}RME",
@@ -3219,9 +3232,9 @@ static DEFAULT_SCREEN_FILTER: AtomicU8 = AtomicU8::new(0);
 /// wants every game sharp can move this; nobody gets moved off faithful by
 /// never opening the menu.
 static DEFAULT_PIXEL_FILTER: AtomicU8 = AtomicU8::new(0);
-/// Default power mode. 0 = NORMAL, and it stays 0: a player who never opens the
-/// menu runs on an untouched OS profile.
-static DEFAULT_POWER_MODE: AtomicU8 = AtomicU8::new(0);
+/// Default power setting. AUTO since 2026-10-08 (it was OFF): see
+/// `keymap::power_mode_for`.
+static DEFAULT_POWER_MODE: AtomicU8 = AtomicU8::new(crate::keymap::POWER_AUTO);
 static DEFAULT_ROTATION: AtomicU8 = AtomicU8::new(0);
 static DEFAULT_ZOOM: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(100);
 
@@ -3364,6 +3377,7 @@ pub fn fps_counter_label(v: u8) -> &'static str {
 pub fn overclock_label(mode: u8) -> &'static str {
     match mode {
         1 => s().overclock_on,
+        crate::keymap::POWER_AUTO => s().pixels_auto,
         _ => s().overclock_off,
     }
 }
@@ -3655,7 +3669,7 @@ fn parse_u16_setting(json: &str, key: &str, lo: u16, hi: u16) -> Option<u16> {
 fn write_settings(lang: Lang, covers: bool) -> bool {
     let path = settings_write_path();
     let json = std::format!(
-        "{{\n    \"language\": \"{}\",\n    \"covers_online\": {},\n    \"display_mode\": {},\n    \"rotation\": {},\n    \"zoom\": {},\n    \"pixel_filter\": {},\n    \"screen_filter\": {},\n    \"power_mode\": {},\n    \"fps_counter\": {},\n    \"home_view\": {}\n}}\n",
+        "{{\n    \"language\": \"{}\",\n    \"covers_online\": {},\n    \"display_mode\": {},\n    \"rotation\": {},\n    \"zoom\": {},\n    \"pixel_filter\": {},\n    \"screen_filter\": {},\n    \"overclock\": {},\n    \"fps_counter\": {},\n    \"home_view\": {}\n}}\n",
         lang.code(),
         covers,
         default_display_mode(),
@@ -3729,8 +3743,15 @@ pub fn init() {
             if let Some(v) = parse_u8_setting(&txt, "screen_filter", 3) {
                 set_default_screen_filter(v);
             }
-            if let Some(v) = parse_u8_setting(&txt, "power_mode", 2) {
+            // `overclock` (0 OFF, 1 ON, 2 AUTO) replaced `power_mode` (0/1) when
+            // AUTO became the default. A `power_mode` of 0 was written by every
+            // save of this file whether or not the player ever touched the row,
+            // so it says nothing and leaves the new default in place; a 1 was
+            // always a choice, and is kept.
+            if let Some(v) = parse_u8_setting(&txt, "overclock", crate::keymap::POWER_MODE_COUNT) {
                 set_default_power_mode(v);
+            } else if parse_u8_setting(&txt, "power_mode", 2) == Some(1) {
+                set_default_power_mode(1);
             }
             if let Some(v) = parse_u8_setting(&txt, "fps_counter", 2) {
                 set_default_fps_counter(v);

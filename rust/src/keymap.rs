@@ -1557,22 +1557,34 @@ pub fn set_pixel_filter(mode: u8) {
     write_pref(&basename, "pixels", mode);
 }
 
-/// Number of power modes: 0 = NORMAL (the OS profile, untouched), 1 = HIGH
-/// (CPU 1785 MHz, GPU left alone).
-pub const POWER_MODE_COUNT: u8 = 2;
+/// Number of power settings: 0 = OFF (the OS profile, untouched), 1 = ON (CPU
+/// 1785 MHz held, GPU left alone), 2 = AUTO (1785 only while the game falls
+/// behind and the raise helps it, see `clock_auto`).
+pub const POWER_MODE_COUNT: u8 = 3;
+pub const POWER_AUTO: u8 = 2;
 
-/// Per-game power mode (by basename), falling back to the global default.
+/// The setting one press of the OVERCLOCK row moves to: OFF -> AUTO -> ON ->
+/// OFF. From AUTO, the default, the first press goes to the faster one.
+pub fn next_power_setting(cur: u8) -> u8 {
+    match cur {
+        0 => POWER_AUTO,
+        POWER_AUTO => 1,
+        _ => 0,
+    }
+}
+
+/// Per-game power setting (by basename), falling back to the global default.
 ///
 /// PER GAME rather than one global switch, for the same reason as the scaling
 /// mode: the benefit is not uniform. Mario 63 and Papa Louie 3 gain roughly
 /// 1.5x because they are interpreter-bound; a game already hitting its nominal
 /// frame rate gains exactly nothing and would only be paying battery for it.
 ///
-/// Default NORMAL, deliberately. Every homebrew that offers the choice ships it
-/// off (RetroArch, both melonDS forks); the two that ship it on are the two
-/// that offer no control at all. Someone who never opens the menu stays on an
-/// untouched OS profile, which is the only configuration with millions of
-/// console-hours behind it.
+/// Default AUTO since 2026-10-08 (it was OFF): a player who never opens the
+/// menu gets the raise on the games that fall behind and only there, and the
+/// stock clock everywhere else. The default used to be OFF because every
+/// homebrew that offers the choice ships it off; none of them offers a mode
+/// that only raises when it measurably helps.
 pub fn power_mode_for(basename: &str) -> u8 {
     read_pref(basename, "power")
         .filter(|v| *v < POWER_MODE_COUNT)

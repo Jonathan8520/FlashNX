@@ -10,7 +10,7 @@
 //
 // Request:  POST /report   Content-Type: application/json
 //   { game, file, size, disk_size, swf_version, compression, as3, app_version,
-//     lang, applet, companions, companion_dirs, power_mode, docked,
+//     lang, applet, companions, companion_dirs, power_mode, power_auto_pct, docked,
 //     description, log_tail }
 // Every field added after 1.8.0 is OPTIONAL here: a copy of the app already on
 // someone's SD card keeps posting the old shape, and this Worker has to keep
@@ -191,6 +191,14 @@ function buildIssue(r) {
                 : "ON"
               : r.power_mode === 0
               ? "OFF"
+              : r.power_mode === 2
+              ? // AUTO raises the clock only while the game falls behind, so the
+                // setting alone does not say which clock a frame rate was
+                // measured at; the share of the AUTO time spent raised does.
+                typeof r.power_auto_pct === "number" && r.power_auto_pct >= 0
+                ? `AUTO (raised ${r.power_auto_pct}% of the time` +
+                  (r.power_refused ? ", a raise REFUSED by the console (battery))" : ")")
+                : "AUTO"
               : `mode ${r.power_mode}`,
           ],
           ["Dock state", r.docked ? "docked" : "handheld"],

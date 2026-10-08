@@ -900,6 +900,7 @@ pub(crate) fn alloc_counters() -> (u64, u64, u64, u64, u64) {
 
 mod backend;
 mod bugreport;
+mod clock_auto;
 /// Who holds the live memory, by call stack (`build.sh --memprof` only).
 #[cfg(feature = "heapprof")]
 pub(crate) mod heapprof;
@@ -1534,8 +1535,10 @@ pub extern "C" fn ruffle_init() -> c_int {
     // launch including back to 0: one game asking for a raised clock must never
     // leave the next one running raised. The way back down also happens on the
     // way out of a game (flashnx_clocks_restore in main.cpp), so this is the
-    // second of two guards, not the only one.
-    crate::backend::render::apply_power_mode(keymap::power_mode());
+    // second of two guards, not the only one. AUTO starts at the stock clock
+    // (`clock_auto::apply_setting`).
+    crate::clock_auto::begin_game();
+    crate::clock_auto::apply_setting(keymap::power_mode());
 
     // Sidecar dir is needed BEFORE the movie is built (the HTML container's
     // FlashVars live in the tree, see below) and again after, for the navigator.
@@ -2376,6 +2379,9 @@ pub extern "C" fn ruffle_skip_paused_time(us: u64) {
     // straddles a HOME-menu press would latch a fabricated frame rate as the
     // headline number of every report filed afterwards.
     crate::backend::render::heartbeat_window_reset();
+    // And OVERCLOCK: AUTO's, which would read the pause as a game at 0x speed
+    // and raise the clock for it.
+    crate::clock_auto::window_reset();
     if let Ok(mut p) = state.player.lock() {
         p.skip_paused_time(core::time::Duration::from_micros(us));
     }
@@ -2563,6 +2569,8 @@ fn render_frame_with_dt(dt: FloatDuration) {
     RENDER_TICKS_ACCUM.fetch_add(render_dt, Ordering::Relaxed);
     TICK_TICKS_MAX.fetch_max(tick_dt, Ordering::Relaxed);
     RENDER_TICKS_MAX.fetch_max(render_dt, Ordering::Relaxed);
+    // OVERCLOCK: AUTO decides on the same two halves of the frame.
+    clock_auto::sample(t1, tick_dt, render_dt, player.frame_rate());
 
     // Slow-frame detector. A frame whose wall time (tick + render) blows the
     // FPS budget gets a one-line breakdown of what it did, so an FPS spike can
@@ -3040,9 +3048,10 @@ pub extern "C" fn ruffle_power_mode_cycle() {
     // preference says (a raise dropped for the battery, the second after HOME
     // before the periodic check takes the clock back). Stepping from the
     // preference then asked for the mode already in force, and the press did
-    // nothing visible (2026-10-05: "un clic ne fait rien").
-    let next = if crate::backend::render::current_power_mode() == 1 { 0 } else { 1 };
-    let got = crate::backend::render::apply_power_mode(next);
+    // nothing visible (2026-10-05: "un clic ne fait rien"). On AUTO the row
+    // shows AUTO whatever the clock is doing at that moment.
+    let next = keymap::next_power_setting(crate::clock_auto::shown_mode());
+    let got = crate::clock_auto::apply_setting(next);
     keymap::set_power_mode(got);
     // Say what was asked for AND what was granted. A refusal is silent on the
     // clkrst side by design, and without this line the only trace of a press
@@ -4212,6 +4221,8 @@ pub extern "C" fn ruffle_shutdown() {
     unsafe {
         STATE = None;
     }
+    // Before the SESSION END marker, so its summary line counts as the game's.
+    crate::clock_auto::end_game();
     // Closes the window the SESSION START marker opened. The ring does not stop
     // at the end of a game — SIGNALER UN BUG is only reachable by quitting one,
     // so every report's tail ends in launcher traffic — and nothing said where

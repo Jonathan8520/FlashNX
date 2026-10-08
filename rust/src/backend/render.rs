@@ -9273,9 +9273,12 @@ impl SwitchRenderBackend {
         // invisible on the frozen frame behind the panel is the one row that has
         // to say what it costs, and a footer says it without a modal nobody else
         // in this family of homebrews puts up.
+        let power_shown = crate::clock_auto::shown_mode();
         let footer = if MENU_ITEMS.get(selected) == Some(&"OVERCLOCK") {
             if overclock_refused() {
                 lc.overclock_refused
+            } else if power_shown == crate::keymap::POWER_AUTO {
+                lc.overclock_auto_hint
             } else {
                 lc.overclock_hint
             }
@@ -9306,11 +9309,12 @@ impl SwitchRenderBackend {
         // It reads back `flashnx_clock_mode()`, not the stored preference: a
         // raise can be refused (clkrst unavailable, battery out of its Normal
         // voltage state) and a row claiming HIGH while the console sits at 1020
-        // is a support ticket.
+        // is a support ticket. AUTO reads AUTO: whether it holds the raise at
+        // this instant is the "OC" next to the FPS counter.
         let power_label = std::format!(
             "{}: {}",
             lc.set_overclock,
-            crate::loc::overclock_label(current_power_mode()),
+            crate::loc::overclock_label(power_shown),
         );
         let items = [
             lc.menu_resume,

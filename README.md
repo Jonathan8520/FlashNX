@@ -118,7 +118,7 @@ How fast a game runs varies a lot, and can vary between scenes of the same game:
 
 ## Known limitations
 
-- **Heavy games**: frame-rate drops come from **Ruffle's AVM1/AVM2 interpreter** (CPU-bound, no JIT), not from our rendering. The pause menu has an OVERCLOCK row for that, no external tool needed. It is worth 1.41x on average and nothing at all on a game that was never CPU-bound, which is why it is off by default and set per game.
+- **Heavy games**: frame-rate drops come from **Ruffle's AVM1/AVM2 virtual machines** (CPU-bound: AS3 goes through a basic JIT, AS2 is interpreted), not from our rendering. The pause menu has an OVERCLOCK row for that, no external tool needed. It is worth 1.41x on average and nothing at all on a game that was never CPU-bound, so the default, AUTO, raises the CPU only while a game falls behind its own frame rate and the raise measurably helps, and drops back once the game keeps up without it. ON holds it for the whole session, OFF never raises it, and the choice is kept per game.
 - **AS3 compatibility**: partial, inherited from Ruffle (see [Ruffle compatibility](https://ruffle.rs/compatibility)). AS3 games show a badge in the library.
 - **No savestate or rewind**: Ruffle does not expose a snapshot of the execution state. Games' native `.sol` saves do work.
 - **Audio**: occasional light crackle on *very* dense scenes.

@@ -4210,8 +4210,8 @@ fn handle_settings_prefs_input(s: &mut State, button: &str, mut selection: usize
                     // The DEFAULT only. No clock is touched from here: there is
                     // no game running, and a raise outside gameplay would be
                     // spent entirely on drawing a menu.
-                    let next = (crate::loc::default_power_mode() + 1)
-                        % keymap::POWER_MODE_COUNT;
+                    // Same order as the pause-menu row.
+                    let next = keymap::next_power_setting(crate::loc::default_power_mode());
                     crate::loc::set_default_power_mode(next);
                     crate::loc::save_current();
                 }
@@ -4811,6 +4811,10 @@ fn run_bug_report_flow(row: usize) {
     // And whether the console actually granted it: the setting and what ran are
     // not the same fact when the battery veto fires.
     let power_refused = crate::backend::render::overclock_ever_refused();
+    // On AUTO the setting says nothing about the clock the game ran at: how much
+    // of its AUTO time it spent raised. Same scope as `overclock_ever_refused`,
+    // the last game launched.
+    let power_auto_pct = crate::clock_auto::high_share_pct();
     // Description is optional — cancel (None) aborts the whole report.
     let Some(description) = net::prompt_bug() else {
         return;
@@ -4834,6 +4838,7 @@ fn run_bug_report_flow(row: usize) {
         companion_dirs,
         power_mode,
         power_refused,
+        power_auto_pct,
         docked,
         description: description.trim().to_string(),
     };
@@ -4875,6 +4880,7 @@ fn run_suggestion_flow() {
         companion_dirs: -1,
         power_mode: 0,
         power_refused: false,
+        power_auto_pct: -1,
         docked: false,
         description: text,
     };

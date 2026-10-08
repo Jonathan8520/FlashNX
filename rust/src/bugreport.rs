@@ -198,7 +198,7 @@ pub struct Report {
     /// and would have cried wolf on every one of them.
     pub companion_dirs: i32,
     /// Per-game OVERCLOCK in force for the reported game (0 = normal,
-    /// 1 = CPU 1785 MHz), already folded with the REGLAGES default. #109 came in
+    /// 1 = CPU 1785 MHz, 2 = AUTO), already folded with the REGLAGES default. #109 came in
     /// as a performance report with no way to tell whether the boost was on,
     /// which is the first question any frame-rate number raises.
     pub power_mode: u8,
@@ -209,6 +209,10 @@ pub struct Report {
     /// 1020 MHz. Reporting the setting without this turned a stock-clock
     /// performance report into one a reader would discount as already boosted.
     pub power_refused: bool,
+    /// AUTO only: percent of the game's AUTO time spent at 1785 MHz, -1 when it
+    /// never ran on AUTO. On AUTO `power_mode` alone cannot say which clock a
+    /// frame rate in the report was measured at.
+    pub power_auto_pct: i32,
     /// Docked (true) or handheld (false). The two do not run the same clocks, so
     /// a frame rate means little without it.
     ///

@@ -892,6 +892,18 @@ extern "C" int flashnx_clock_mode(void) {
     return (s_clk_mode == 1 && s_clk_applied) ? 1 : 0;
 }
 
+// The mode WANTED, applied or not. OVERCLOCK: AUTO (rust/src/clock_auto.rs)
+// reads this rather than flashnx_clock_mode to tell the battery veto, which
+// sets it back to 0, from the second after HOME where the rate is not yet
+// re-applied and the wanted mode is still 1.
+extern "C" int flashnx_clock_mode_wanted(void) { return s_clk_mode; }
+
+// AUTO only raises while we are the foreground app. The focus hook hands the
+// clock back on the way out; a raise decided in that window would undo it.
+extern "C" int flashnx_has_focus(void) {
+    return appletGetFocusState() == AppletFocusState_InFocus ? 1 : 0;
+}
+
 // Times the OS took the clock back from under us, published in the heartbeat.
 // Until this existed the revocation question could not be answered: the
 // re-assert is deliberately silent, so a revoke followed by a repair leaves no
