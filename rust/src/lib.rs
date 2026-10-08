@@ -2339,8 +2339,8 @@ pub(crate) static AB_REGIME: core::sync::atomic::AtomicU64 = core::sync::atomic:
 pub extern "C" fn ruffle_ab_regime(regime: i32) {
     use core::sync::atomic::Ordering::Relaxed;
     AB_REGIME.store((regime != 0) as u64, Relaxed);
-    // 2026-10-08: AVM1 pushes decoded without their Vec (`set_avm1_fast_push`).
-    // Measured before with this switch: the AVM2 JIT (`set_jit`, -17.5 ms a
+    // 2026-10-08: AVM1 pushes decoded without their Vec (`set_avm1_fast_push`,
+    // -10 % on an AS2 game). Before: the AVM2 JIT (`set_jit`, -17.5 ms a
     // frame on Fireboy 2), direct calls between compiled methods
     // (`set_jit_direct_calls`, -3.3 ms), the cheaper call path
     // (`set_fast_calls`, -2.8 ms).

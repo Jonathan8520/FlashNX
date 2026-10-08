@@ -453,10 +453,14 @@ FlashNX's side (not in this diff), in `rust/src/backend/render.rs`:
 - **The AVM1 property-name hash kept in the string** (`AvmStringRepr` field,
   `PropertyMap` hashing a precomputed u64, as ruffle#3432 suggests). The
   hashing left the profile, but lookups only went from ~12.8 % to ~11 % of the
-  frame: what remains is comparing the characters (the constant pool makes new
-  strings each time a block runs, so pointers never match), and the field cost
-  8 bytes on every string of every movie, AS3 included (Super Smash Flash 2 is
-  short of memory). Not kept.
+  frame: what remains is probing the table and comparing the characters, and
+  the field cost 8 bytes on every string of every movie, AS3 included (Super
+  Smash Flash 2 is short of memory). Not kept. NB: constant pool strings are
+  interned (`action_constant_pool`), so a key and a query are often the same
+  pointer: comparing addresses before characters was tried next, same day,
+  in-session A/B: lookups 13.1 % -> 13.9 % of the frame (noise), timings
+  equal. The cost is walking the table (hashing, probing, memory), not the
+  string comparison. Not kept either.
 
 ### Tried and dropped (2026-10-06)
 
