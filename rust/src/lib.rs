@@ -1778,6 +1778,13 @@ pub extern "C" fn ruffle_init() -> c_int {
     if !track_mirror {
         log(b"navigator: trackmirror.off present -> Playtomic and repeat misses go to the mirror\n\0");
     }
+    // `sdmc:/switch/FlashNX/maskfix.off`: masks as upstream Ruffle draws and
+    // picks them (filters kept in a mask, no clicks inside a clip layer).
+    let mask_fixes = !backend::render::marker_present("maskfix.off");
+    ruffle_core::set_flashnx_mask_fixes(mask_fixes);
+    if !mask_fixes {
+        log(b"masks: maskfix.off present -> upstream mask drawing and picking\n\0");
+    }
     // `sdmc:/switch/FlashNX/gcsmall.off`: the collector sleeps 0.5x the live
     // heap whatever its size, as upstream (`set_gc_small_pacing` in our Ruffle).
     let gc_small = !backend::render::marker_present("gcsmall.off");

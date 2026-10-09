@@ -6974,7 +6974,7 @@ index 0926945e0..844b86e46 100644
      /// A tracker for the current keyboard focused element
      pub focus_tracker: FocusTracker<'gc>,
 diff --git a/core/src/display_object.rs b/core/src/display_object.rs
-index 2e6e01783..ef920e954 100644
+index 2e6e01783..fba19043f 100644
 --- a/core/src/display_object.rs
 +++ b/core/src/display_object.rs
 @@ -32,6 +32,10 @@ mod avm1_button;
@@ -7041,7 +7041,7 @@ index 2e6e01783..ef920e954 100644
      fn set_avm1_removed(&self, value: bool) {
          self.set_flag(DisplayObjectFlags::AVM1_REMOVED, value);
      }
-@@ -931,6 +960,207 @@ struct DrawCacheInfo {
+@@ -931,6 +960,221 @@ struct DrawCacheInfo {
      filters: Vec<Filter>,
  }
  
@@ -7246,10 +7246,44 @@ index 2e6e01783..ef920e954 100644
 +    ORPHAN_MARK_EPOCH.load(std::sync::atomic::Ordering::Relaxed)
 +}
 +
++/// FlashNX (2026-10-09): masks behave as in Flash Player for content that puts
++/// buttons and filters inside a clip layer (Stick War's mission screen, FlashNX
++/// #80, ruffle#5126 and ruffle#12115). See `render_base` and
++/// `MovieClip::mouse_pick_avm1`. On unless FlashNX finds `maskfix.off`.
++static FLASHNX_MASK_FIXES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
++
++pub fn set_flashnx_mask_fixes(on: bool) {
++    FLASHNX_MASK_FIXES.store(on, std::sync::atomic::Ordering::Relaxed);
++}
++
++pub fn flashnx_mask_fixes() -> bool {
++    FLASHNX_MASK_FIXES.load(std::sync::atomic::Ordering::Relaxed)
++}
++
  pub fn render_base<'gc>(
      this: DisplayObject<'gc>,
      context: &mut RenderContext<'_, 'gc>,
-@@ -1873,6 +2103,11 @@ pub trait TDisplayObject<'gc>:
+@@ -953,7 +1197,18 @@ pub fn render_base<'gc>(
+         None
+     };
+ 
+-    let cache_info = if context.use_bitmap_cache && this.is_bitmap_cached() {
++    // FlashNX: an object drawn AS A MASK leaves the bitmap cache, and so its
++    // filters, out. Flash Player uses a mask's filters (and color transform)
++    // only when the maskee is cached as a bitmap too (kjarosh, ruffle#15103);
++    // otherwise the mask is its vector shapes. Ruffle has no bitmap masks at
++    // all, so a cached mask became the stencil of its whole rectangle: Stick
++    // War's mission screen is the mask of the art behind it, and the drop
++    // shadow on its START button (button-record filters, applied since
++    // ruffle#11891) turned the button into a black box (ruffle#12115).
++    let cached = context.use_bitmap_cache
++        && this.is_bitmap_cached()
++        && !(flashnx_mask_fixes() && context.commands.drawing_mask());
++    let cache_info = if cached {
+         let mut cache_info: Option<DrawCacheInfo> = None;
+         let base_transform = context.transform_stack.transform();
+         let bounds: Rectangle<Twips> = this.render_bounds_with_transform(
+@@ -1873,6 +2128,11 @@ pub trait TDisplayObject<'gc>:
          let write = Gc::write(context.gc(), self.base());
          DisplayObjectBase::set_parent_ignoring_orphan_list(write, parent);
          let parent_removed = had_parent && parent.is_none();
@@ -7261,7 +7295,7 @@ index 2e6e01783..ef920e954 100644
  
          if parent_removed {
              if let Some(int) = self.as_interactive() {
-@@ -2393,11 +2628,19 @@ pub trait TDisplayObject<'gc>:
+@@ -2393,11 +2653,19 @@ pub trait TDisplayObject<'gc>:
  
      /// Run any frame scripts (if they exist and this object needs to run them).
      fn run_frame_scripts(self, context: &mut UpdateContext<'gc>) {
@@ -7281,7 +7315,7 @@ index 2e6e01783..ef920e954 100644
      }
  
      /// Called before the child is about to be rendered.
-@@ -2585,6 +2828,18 @@ pub trait TDisplayObject<'gc>:
+@@ -2585,6 +2853,18 @@ pub trait TDisplayObject<'gc>:
      /// Tests if a given stage position point intersects with the world bounds of this object.
      #[no_dynamic]
      fn hit_test_bounds(self, point: Point<Twips>) -> bool {
@@ -7300,7 +7334,7 @@ index 2e6e01783..ef920e954 100644
          self.world_bounds(BoundsMode::Engine).contains(point)
      }
  
-@@ -2604,6 +2859,13 @@ pub trait TDisplayObject<'gc>:
+@@ -2604,6 +2884,13 @@ pub trait TDisplayObject<'gc>:
          point: Point<Twips>,
          options: HitTestOptions,
      ) -> bool {
@@ -7314,7 +7348,7 @@ index 2e6e01783..ef920e954 100644
          // Default to using bounding box.
          (!options.contains(HitTestOptions::SKIP_INVISIBLE) || self.visible())
              && self.hit_test_bounds(point)
-@@ -2995,6 +3257,20 @@ bitflags! {
+@@ -2995,6 +3282,20 @@ bitflags! {
          /// (they need to be instantiated "manually" by
          /// `Sprite.constructChildren`).
          const MANUAL_FRAME_CONSTRUCT  = 1 << 16;
@@ -7335,7 +7369,7 @@ index 2e6e01783..ef920e954 100644
      }
  }
  
-@@ -3232,3 +3508,25 @@ impl<'gc> DisplayObjectWeak<'gc> {
+@@ -3232,3 +3533,25 @@ impl<'gc> DisplayObjectWeak<'gc> {
          }
      }
  }
@@ -7636,7 +7670,7 @@ index c4f4a8880..a5d6b5763 100644
          gc_context: &Mutation<'gc>,
          tag: swf::DefineMorphShape,
 diff --git a/core/src/display_object/movie_clip.rs b/core/src/display_object/movie_clip.rs
-index baa4a03c5..01f9b12c0 100644
+index baa4a03c5..7c7a60fd1 100644
 --- a/core/src/display_object/movie_clip.rs
 +++ b/core/src/display_object/movie_clip.rs
 @@ -16,7 +16,7 @@ use crate::backend::audio::{AudioManager, SoundInstanceHandle};
@@ -7957,7 +7991,32 @@ index baa4a03c5..01f9b12c0 100644
      }
  
      fn render_self(self, context: &mut RenderContext<'_, 'gc>) {
-@@ -3437,14 +3568,15 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3019,6 +3150,24 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
+                             result = None;
+                         }
+                     }
++                    // FlashNX: a clip layer's own buttons take clicks, as in
++                    // Flash Player. Stick War's START button sits in the
++                    // screen that masks the mission art, and nothing could
++                    // start a battle (ruffle#5126, open since 2021). Only when
++                    // nothing above was hit: a masked object still wins inside
++                    // its mask and is still refused outside it, which is what
++                    // the 2021 attempt (ruffle#5247, reverted in #5471 over
++                    // Steppenwolf, #5470) lost by picking into the mask first.
++                    if result.is_none()
++                        && crate::display_object::flashnx_mask_fixes()
++                        && let Some(mask) = child.as_interactive()
++                        && !mask.as_displayobject().movie().is_action_script_3()
++                    {
++                        result = mask.mouse_pick_avm1(context, point, require_button_mode);
++                        if result.is_some() {
++                            hit_depth = child.depth();
++                        }
++                    }
+                 } else if result.is_none() {
+                     if let Some(child) = child.as_interactive() {
+                         result = if !child.as_displayobject().movie().is_action_script_3() {
+@@ -3437,14 +3586,15 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let define_bits_lossless = reader.read_define_bits_lossless(version)?;
          let bitmap = Gc::new(
              context.gc(),
@@ -7976,7 +8035,7 @@ index baa4a03c5..01f9b12c0 100644
          );
          self.library_mut(context)
              .register_character(define_bits_lossless.id, Character::Bitmap(bitmap));
-@@ -3562,13 +3694,17 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3562,13 +3712,17 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let library = self.library_mut(context);
          let (id, jpeg_data) = reader.read_define_bits()?;
          let jpeg_tables = library.jpeg_tables();
@@ -7998,7 +8057,7 @@ index baa4a03c5..01f9b12c0 100644
                  alpha: None,
                  width,
                  height,
-@@ -3589,7 +3725,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3589,7 +3743,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let bitmap = Character::Bitmap(Gc::new(
              context.gc(),
              BitmapCharacter::new(CompressedBitmap::Jpeg {
@@ -8008,7 +8067,7 @@ index baa4a03c5..01f9b12c0 100644
                  alpha: None,
                  width,
                  height,
-@@ -3612,8 +3749,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3612,8 +3767,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let bitmap = Character::Bitmap(Gc::new(
              context.gc(),
              BitmapCharacter::new(CompressedBitmap::Jpeg {
@@ -8020,7 +8079,7 @@ index baa4a03c5..01f9b12c0 100644
                  width,
                  height,
              }),
-@@ -3842,7 +3980,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3842,7 +3998,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          reader: &mut SwfStream<'a>,
      ) -> Result<(), Error> {
          let sound = reader.read_define_sound()?;
@@ -8030,7 +8089,7 @@ index baa4a03c5..01f9b12c0 100644
              self.library_mut(context)
                  .register_character(sound.id, Character::Sound(handle));
          } else {
-@@ -3968,11 +4107,35 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3968,11 +4125,35 @@ impl<'gc, 'a> MovieClipShared<'gc> {
      }
  
      #[inline]
@@ -8897,7 +8956,7 @@ index 91bdb52df..33230aaf1 100644
  pub fn broadcast_frame_entered<'gc>(context: &mut UpdateContext<'gc>) {
      let enter_frame_evt = EventObject::bare_default_event(context, "enterFrame");
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..c7e7c3fd3 100644
+index 6e5379213..e45157e4a 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
 @@ -4,6 +4,9 @@
@@ -8963,7 +9022,7 @@ index 6e5379213..c7e7c3fd3 100644
  mod frame_lifecycle;
  mod html;
  mod input;
-@@ -63,6 +101,17 @@ pub use events::PlayerEvent;
+@@ -63,6 +101,18 @@ pub use events::PlayerEvent;
  pub use indexmap;
  pub use loader::LoadBehavior;
  pub use player::{Player, PlayerBuilder, PlayerMode, PlayerRuntime, StaticCallstack};
@@ -8972,6 +9031,7 @@ index 6e5379213..c7e7c3fd3 100644
 +pub use player::{flashnx_frame_accumulator_us, flashnx_gc_probe, set_render_cost};
 +pub use player::set_bitmap_cache;
 +pub use player::set_gc_small_pacing;
++pub use display_object::set_flashnx_mask_fixes;
 +/// FlashNX: the AVM1 clip-reference cache switch, and the AVM1 probes the
 +/// Switch measurement build reads (zeros without `flashnx_instr`).
 +pub use player::{

@@ -141,6 +141,20 @@ unofficial website" for anything else (FlashNX #112). It now loads its
 `data/` from `SSF2Portable.files/` and plays. Games from Flashpoint keep
 their original host and are unaffected.
 
+**`display_object.rs`, `display_object/movie_clip.rs`: masks drawn and
+picked as in Flash Player.** Stick War's mission screen is a clip layer: the
+sprite holding the START button masks the art behind it. Two upstream bugs
+met there. Drawn as a mask, an object now skips the bitmap cache and so its
+filters: Flash Player uses a mask's filters only when the maskee is cached
+as a bitmap too (kjarosh, ruffle#15103), and Ruffle has no bitmap masks, so
+the START button's drop shadow (button-record filters, applied since
+ruffle#11891) stenciled a black rectangle (ruffle#12115). And in AVM1 a
+clip layer's own buttons now take clicks when nothing above them was hit, so
+START starts the battle (ruffle#5126, open since 2021); the masked-hit rule
+is untouched (a masked object wins inside its mask, is refused outside it),
+which is what the 2021 attempt (ruffle#5247, reverted in #5471 over
+Steppenwolf) lost. Marker `maskfix.off`. FlashNX #80.
+
 **Experiment switches (`graphic.rs`, `player.rs`), read from FlashNX markers.**
 `set_lazy_shapes(false)` (`lazyshape.off`) registers static shapes at preload
 as upstream does; `set_bitmap_cache(false)` (`bitmapcache.off`) ignores
