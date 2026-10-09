@@ -88,6 +88,44 @@ fn recent(path: &Path) -> Option<Vec<u8>> {
     RECENT.lock().ok().and_then(|r| r.get(path).cloned())
 }
 
+/// `<save>.tmp`: where a save's new version is written before it replaces the
+/// save (`write_atomic` here, `write_one` in `save_writer.cpp`).
+fn tmp_path(path: &Path) -> PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(".tmp");
+    PathBuf::from(s)
+}
+
+/// A whole `.sol`: `00 BF`, then the length of the rest of the file on four
+/// bytes (flash-lso's `write_header`). Tells a `.tmp` that was written to the
+/// end from one cut short.
+fn sol_complete(data: &[u8]) -> bool {
+    if data.len() < 6 || data[0] != 0x00 || data[1] != 0xBF {
+        return false;
+    }
+    let n = [data[2], data[3], data[4], data[5]];
+    let rest = data.len() - 6;
+    u32::from_be_bytes(n) as usize == rest || u32::from_le_bytes(n) as usize == rest
+}
+
+/// Write `value` as the save at `path` without ever leaving a truncated file:
+/// to `<path>.tmp` first, committed, then swapped in. A power cut leaves the old
+/// save or the new one whole; until now a cut while the save was being
+/// rewritten in place could lose it entirely.
+fn write_atomic(path: &Path, value: &[u8]) -> std::io::Result<()> {
+    let tmp = tmp_path(path);
+    {
+        let mut f = File::create(&tmp)?;
+        f.write_all(value)?;
+    }
+    crate::sd::commit();
+    // fsdev's rename does not replace an existing file.
+    let _ = fs::remove_file(path);
+    fs::rename(&tmp, path)?;
+    crate::sd::commit();
+    Ok(())
+}
+
 pub struct SwitchStorageBackend {
     /// Flat root where new saves are written, e.g. `sdmc:/flashnx/`.
     flat_root: PathBuf,
@@ -249,6 +287,27 @@ impl SwitchStorageBackend {
         }
         Some(data)
     }
+
+    /// The save at `path`; if it is missing, its complete `<path>.tmp`. That is
+    /// a power cut after the old save was removed and before the new one took
+    /// its name (`write_atomic` / `save_writer.cpp`). A `.tmp` cut short, or
+    /// one left beside an existing save, is ignored: the save wins.
+    fn read_save(path: &Path) -> Option<std::vec::Vec<u8>> {
+        if let Some(data) = Self::read_chunked(path) {
+            return Some(data);
+        }
+        let tmp = tmp_path(path);
+        let data = Self::read_chunked(&tmp)?;
+        if !sol_complete(&data) {
+            return None;
+        }
+        tracing::warn!(
+            "storage: {} was missing, read its complete {} (an interrupted save)",
+            path.display(),
+            tmp.display()
+        );
+        Some(data)
+    }
 }
 
 impl StorageBackend for SwitchStorageBackend {
@@ -260,7 +319,7 @@ impl StorageBackend for SwitchStorageBackend {
                 if let Some(data) = recent(&path) {
                     return Some(data);
                 }
-                if let Some(data) = Self::read_chunked(&path) {
+                if let Some(data) = Self::read_save(&path) {
                     tracing::info!(
                         "storage.get({}) HIT game path={} {}B",
                         name,
@@ -281,7 +340,7 @@ impl StorageBackend for SwitchStorageBackend {
         if let Some(data) = recent(&flat) {
             return Some(data);
         }
-        if let Some(data) = Self::read_chunked(&flat) {
+        if let Some(data) = Self::read_save(&flat) {
             tracing::warn!(
                 "storage.get({}) HIT LEGACY movie-keyed path={} {}B — this file is \
                  keyed on the movie's own filename, so it may belong to another \
@@ -344,27 +403,20 @@ impl StorageBackend for SwitchStorageBackend {
                 // the same bytes, so it stays right).
             }
         }
-        match File::create(&path) {
-            Ok(mut f) => match f.write_all(value) {
-                Ok(()) => {
-                    // Flush so the save survives a mode switch / abrupt exit
-                    // (libnx fsdev buffers writes — see crate::sd).
-                    crate::sd::commit();
-                    tracing::info!(
-                        "storage.put({}) OK path={} {}B",
-                        name,
-                        path.display(),
-                        value.len()
-                    );
-                    true
-                }
-                Err(e) => {
-                    tracing::warn!("storage.put({}) write failed: {}", name, e);
-                    false
-                }
-            },
+        // Committed inside (libnx fsdev buffers writes — see crate::sd), so the
+        // save survives a mode switch or an abrupt exit.
+        match write_atomic(&path, value) {
+            Ok(()) => {
+                tracing::info!(
+                    "storage.put({}) OK path={} {}B",
+                    name,
+                    path.display(),
+                    value.len()
+                );
+                true
+            }
             Err(e) => {
-                tracing::warn!("storage.put({}) create failed: {}", name, e);
+                tracing::warn!("storage.put({}) write failed: {} (previous save kept)", name, e);
                 false
             }
         }

@@ -7,8 +7,8 @@
 // four saves at the end of a run froze ~200 ms (sampling profiler + as3prof,
 // `SharedObject/flush()` 46-54 ms for one call). Saves are now queued here and
 // written by this worker; the Rust storage backend keeps the latest bytes of
-// each one in memory, so a read right after a write sees it. Same file
-// operations and the same commit as before, only on another thread.
+// each one in memory, so a read right after a write sees it. Each save is
+// written beside the old one and swapped in once committed (`write_one`).
 //
 // A save still being written when the game is quit is waited for
 // (`flashnx_save_drain`, called once the player is gone). A second save of the
@@ -41,16 +41,35 @@ double ms_since(u64 t0) {
     return (double)armTicksToNs(armGetSystemTick() - t0) / 1e6;
 }
 
+// Never over the save itself: the new version goes to `<save>.tmp`, is
+// committed, and only then takes the save's place. A power cut at any point
+// leaves either the old save or the new one whole, never a truncated file (the
+// way it used to be written, over the old file, a cut in the middle lost the
+// whole save). fsdev's rename does not replace an existing file, hence the
+// remove first; between the two, the complete `.tmp` is what a read falls back
+// to (`storage.rs`, `read_save`).
 void write_one(const Job& j) {
     const u64 t0 = armGetSystemTick();
+    const std::string tmp = j.path + ".tmp";
     bool ok = false;
-    FILE* f = std::fopen(j.path.c_str(), "wb");
+    FILE* f = std::fopen(tmp.c_str(), "wb");
     if (f) {
         ok = std::fwrite(j.data.data(), 1, j.data.size(), f) == j.data.size();
         ok = (std::fclose(f) == 0) && ok;
     }
-    std::printf("save: %s %s (%zu bytes) in %.1f ms off the game thread\n",
-                ok ? "wrote" : "FAILED to write", j.path.c_str(), j.data.size(), ms_since(t0));
+    if (!ok) {
+        std::remove(tmp.c_str());
+        std::printf("save: FAILED to write %s (%zu bytes), previous save kept\n", tmp.c_str(), j.data.size());
+        std::fflush(stdout);
+        return;
+    }
+    fsdevCommitDevice("sdmc");
+    std::remove(j.path.c_str());
+    const bool moved = std::rename(tmp.c_str(), j.path.c_str()) == 0;
+    const Result rc = fsdevCommitDevice("sdmc");
+    std::printf("save: %s %s (%zu bytes) in %.1f ms off the game thread, commit rc=0x%x\n",
+                moved ? "wrote" : "wrote (left as .tmp, rename failed)", j.path.c_str(),
+                j.data.size(), ms_since(t0), (unsigned)rc);
     std::fflush(stdout);
 }
 
@@ -63,19 +82,9 @@ void worker(void*) {
         g_busy = true;
         mutexUnlock(&g_mutex);
 
+        // Commits included (0.1 ms each, measured): they are what makes a save
+        // survive a crash or a power cut (libnx buffers sdmc writes).
         write_one(j);
-
-        mutexLock(&g_mutex);
-        const bool last = g_queue.empty();
-        mutexUnlock(&g_mutex);
-        // One commit per burst of saves, after the last one: it is what makes
-        // them survive a crash or a power cut (libnx buffers sdmc writes).
-        if (last) {
-            const u64 t0 = armGetSystemTick();
-            const Result rc = fsdevCommitDevice("sdmc");
-            std::printf("save: committed in %.1f ms rc=0x%x\n", ms_since(t0), (unsigned)rc);
-            std::fflush(stdout);
-        }
 
         mutexLock(&g_mutex);
         g_busy = false;
