@@ -383,7 +383,7 @@ For playing common AS1/AS2 SWFs, it's functionally near-complete. Honest invento
 
 ### Ruffle core (out of our scope)
 
-- **Perf of heavy games** — limit of the **Ruffle interpreter** (no JIT). On Mario 63 in a dense scene, the simulation `tick` can reach hundreds of ms/frame and grows over time (Mario 63 object/memory leak + Ruffle documented upstream); our rendering stays at ~5-15 ms/frame. **Not fixable from the backend** (web-verified: Ruffle lags even on an i7). Out-of-code lever: CPU overclock (dock mode / sys-clk).
+- **Perf of heavy games**: what is left is mostly script execution. AS3 is compiled to native ARM code (a baseline JIT, see `patches/README.md`), AS2 still runs in Ruffle's interpreter, and the pause menu's OVERCLOCK (AUTO by default) raises the CPU when a game falls behind. Two known walls: physics-heavy AS3 (Box2D) is bound by memory accesses to Ruffle's objects, and games that draw into a BitmapData and read it back every frame pay a GPU round trip (Super Bowser World).
 - **AS3 / AVM2** — partially supported by Ruffle, worse perf (no JIT). `AS3` badge in the library.
 
 ### Platform / distribution

@@ -26,7 +26,7 @@ INCLUDES    := include third_party/libdrm_nouveau
 # title/author below, and the SD data dir `switch/FlashNX/`.
 APP_TITLE   := FlashNX
 APP_AUTHOR  := Jonathan8520
-APP_VERSION := 1.8.1
+APP_VERSION := 1.9.0
 # Icon shown in hbmenu / Sphaira / forwarders. Lives in the repo root's
 # `assets/` folder so it sits next to README + the banner. devkitPro's
 # %.nro rule reads $(NROFLAGS) which we wire below — without --icon= the

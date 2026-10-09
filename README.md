@@ -92,16 +92,19 @@ Plug in a second controller and you get **two players**, each with their own bin
 - **Favorites** pinned to the top, **playtime** tracked per game, and sorting by name, date added, last played, most played or size.
 - **Rename** a game for display without touching the file, and deleting one cleans up everything it left on the card.
 - **Touch**: in handheld, drag the gallery to scroll, tap a game to select it, tap again to launch.
+- **A tile on the HOME menu**: the HOME MENU row of a game's menu installs it as its own icon on the console's home screen, with its name and cover, and the icon starts the game directly. Quitting returns to the HOME menu like any other game. The tile holds no copy of the engine, so updating FlashNX updates every tile. It needs signature patches, like any homebrew title on the home screen.
 
 **Controls**
 
 - **Community control profiles**: share your bindings for a game and download what other players have shared for it. Applying a profile is non-destructive and can be reverted, and verified or most-applied ones come first. Your combo layers and cursor settings travel with it.
+- **Copy from another game**: start a game's controls from the ones you set for another, sequels first.
 - **Cursor**: adjustable speed (x0.5 to x2.5, cycling live from the pause menu) and a per-game show or hide toggle for games played entirely on the pad.
+- **Gyroscope cursor**: per game, aim like a Wii remote (POINTER) or tilt the console like a tray with a marble on it (MARBLE).
 
 **In game**
 
 - **Automatic saves** on the SD card for games that save (SharedObject `.sol`).
-- **Pause menu** (**−**): resume, controls and cursor, screen, overclock, restart, quit. The SCREEN panel holds how the game uses the display (fit, stretch, fill), a quarter-turn rotation, a free zoom and a scanline or CRT filter. Every one of these, overclock included, is kept for that game alone, and SETTINGS > GAME DEFAULTS sets what a game you have never touched will use.
+- **Pause menu** (**−**): resume, controls and cursor, screen, overclock, restart, quit. The SCREEN panel holds how the game uses the display (fit, stretch, fill), a quarter-turn rotation, a free zoom, a scanline or CRT filter, how bitmaps are sampled (AUTO follows the game's own smoothing flag, as Flash Player did, or force SMOOTH or SHARP for pixel art) and a frame counter that shows the measured rate against the rate the game asks for. Every one of these, overclock included, is kept for that game alone, and SETTINGS > GAME DEFAULTS sets what a game you have never touched will use.
 - **Multi-file games**: some games load companion `.swf` files. A Flashpoint download fetches them automatically into a `<game>.files/` folder; for a game added another way, put them there yourself.
 - **Games packaged as a web page**: a few Flashpoint entries ship an `index.html` instead of a plain `.swf`. FlashNX reads its configuration and runs the game, which covers Disney/Yamago minigames (*Agent P Strikes Back*, *Tron Uprising*) and titles such as *Dragon City*.
 
@@ -114,7 +117,7 @@ Plug in a second controller and you get **two players**, each with their own bin
 
 Super Mario 63 · Super Mario World Flash · Mario Forever · Tetris'd · Flappy Bird · Mario 3D Racing · Icy Tower · Papa Louie 2 and 3 · Newgrounds Rumble · Garfield's Scary Scavenger Hunt · Scooby-Doo: Mayan Monster Mayhem · The Binding of Isaac · Super Smash Flash · Super Brawl 2 · Infiltrating the Airship · This Is the Only Level · Fireboy & Watergirl 2 · Cat Mario · Agent P Strikes Back · Dragon City · Hemp Tycoon · Tron Uprising
 
-How fast a game runs varies a lot, and can vary between scenes of the same game: some are smooth throughout, others drop well below their nominal frame rate. See the first limitation below for why.
+Most of the games measured for 1.9.0 run at full speed (see the table in [CHANGELOG.md](CHANGELOG.md)), but it still varies between games and between scenes of the same game. See the first limitation below for why.
 
 ## Known limitations
 
