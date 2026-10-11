@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "id": "shatter-bot-92158ba3-0b0bf21d",
+  "game": {
+    "title": "shatter bot",
+    "fp_uuid": "",
+    "swf_hash": "92158ba3d1c1a893"
+  },
+  "author": "Evernight",
+  "verified": false,
+  "bindings": {
+    "A": "3",
+    "B": "Up",
+    "Down": "Down",
+    "L": "Escape",
+    "Left": "Left",
+    "Plus": "Enter",
+    "R": "",
+    "Right": "Right",
+    "StickLDown": "Down",
+    "StickLLeft": "Left",
+    "StickLRight": "Right",
+    "StickLUp": "Up",
+    "Up": "Up",
+    "X": "2",
+    "Y": "1",
+    "ZL": "Right click",
+    "ZR": "Left click"
+  },
+  "bindings_p2": {
+    "A": "Num1",
+    "B": "Num2",
+    "Down": "S",
+    "L": "Num6",
+    "Left": "A",
+    "R": "Num5",
+    "Right": "D",
+    "StickLDown": "S",
+    "StickLLeft": "A",
+    "StickLRight": "D",
+    "StickLUp": "W",
+    "Up": "W",
+    "X": "Num3",
+    "Y": "Num4"
+  },
+  "combo_layers": {},
+  "combo_layers_p2": {},
+  "cursor_speed": 2,
+  "show_cursor": true
+}
