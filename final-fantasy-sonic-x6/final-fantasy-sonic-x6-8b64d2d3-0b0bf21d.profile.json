@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "id": "final-fantasy-sonic-x6-8b64d2d3-0b0bf21d",
+  "game": {
+    "title": "final fantasy sonic x6",
+    "fp_uuid": "",
+    "swf_hash": "8b64d2d35032d431"
+  },
+  "author": "Evernight",
+  "verified": false,
+  "bindings": {
+    "A": "Space",
+    "B": "Space",
+    "Down": "Down",
+    "L": "Escape",
+    "Left": "Left",
+    "Plus": "P",
+    "R": "Enter",
+    "Right": "Right",
+    "StickLDown": "Down",
+    "StickLLeft": "Left",
+    "StickLRight": "Right",
+    "StickLUp": "Up",
+    "Up": "Up",
+    "X": "X",
+    "Y": "Shift",
+    "ZL": "Right click",
+    "ZR": "Left click"
+  },
+  "bindings_p2": {
+    "A": "Num1",
+    "B": "Num2",
+    "Down": "S",
+    "L": "Num6",
+    "Left": "A",
+    "R": "Num5",
+    "Right": "D",
+    "StickLDown": "S",
+    "StickLLeft": "A",
+    "StickLRight": "D",
+    "StickLUp": "W",
+    "Up": "W",
+    "X": "Num3",
+    "Y": "Num4"
+  },
+  "combo_layers": {},
+  "combo_layers_p2": {},
+  "cursor_speed": 3,
+  "show_cursor": true
+}
