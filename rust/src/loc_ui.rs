@@ -2918,7 +2918,7 @@ const ZH: Ui = Ui {
     help_quit: "返回游戏库。游戏未保存的进度将丢失。",
     help_display: "“适应”显示整个游戏，“拉伸”会变形铺满屏幕，“填满”会裁掉边缘。",
     help_rotation: "按四分之一圈旋转画面，适合竖屏游戏。",
-    help_zoom: "放大画面：左右键每次 10\u{a0}%，按 A 用摇杆取景。",
+    help_zoom: "放大画面：左右键每次 10%，按 A 用摇杆取景。",
     help_filter: "在画面上叠加扫描线或 CRT 效果。",
     zoom_coarse: "缩放",
     zoom_fine: "微调",
