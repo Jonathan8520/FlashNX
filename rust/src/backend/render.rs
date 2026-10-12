@@ -11673,14 +11673,19 @@ impl SwitchRenderBackend {
         use theme::{col, size};
         self.clear_ui_transform();
         self.fill_screen_dim(0x60_05_0A_16);
-        let vh = self.dimensions.height as f32;
+        let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
         let area = (right - left).max(200.0);
         let t = self.kit_fit(label, size::BODY, area - 96.0);
         let tw = self.kit_measure(&t, size::BODY);
         let w = (tw + 48.0).max(260.0).min(area - 32.0);
         let h = 128.0;
         let x = (left + (area - w) * 0.5).round();
-        let y = ((vh - h) * 0.5).round();
+        // In portrait the pause's panels hug their rows at the top
+        // (`kit::sheet`): the card goes in the picture under them, rather than
+        // over the help of the page the player is on.
+        let below = kit::sheet::cascade_bottom();
+        let top = if vh > vw && below > 0.0 && below + h + 32.0 <= vh { below } else { 0.0 };
+        let y = (top + (vh - top - h) * 0.5).round();
         self.kit_panel(x, y, w, h, false);
         self.draw_spinner(x + w * 0.5, y + 46.0, 22.0, now);
         self.kit_text_mid((x + (w - tw) * 0.5).round(), y + 94.0, size::BODY, &t, col::TEXT2);
