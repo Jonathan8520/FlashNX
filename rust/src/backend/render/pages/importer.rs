@@ -901,7 +901,9 @@ impl SwitchRenderBackend {
         self.kit_panel(x0, top, w, h, false);
         self.kit_rrect(x0 + 36.0, top + 36.0, DISC, DISC, DISC * 0.5, 0xFF_4A_22_34);
         self.kit_icon(x0 + 36.0 + 14.0, top + 36.0 + DISC * 0.5, 28.0, Icon::Alert, col::DANGER);
-        let mut ly = top + 36.0 + lh * 0.5 + 4.0;
+        // A short message sits level with the mark; a long one starts at its top.
+        let block = lines.len() as f32 * lh;
+        let mut ly = top + 36.0 + (DISC - block).max(0.0) * 0.5 + lh * 0.5;
         for line in &lines {
             self.kit_text_mid(text_x, ly, size::BODY, line, col::TEXT);
             ly += lh;

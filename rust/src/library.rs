@@ -6639,6 +6639,8 @@ fn handle_distant_idle_input(
     // stops, like every list.
     let n = importer_view(s).len();
     let last = n + IMPORTER_PINNED_ROWS - 1;
+    // A row the list no longer has (it shrank under the cursor) counts as the last.
+    selection = selection.min(last);
     let card = IMPORT_CARD.load(std::sync::atomic::Ordering::Relaxed).min(IMPORTER_PINNED_ROWS - 1);
     match button {
         "Up" | "StickLUp" => {

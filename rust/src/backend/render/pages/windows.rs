@@ -235,7 +235,7 @@ impl SwitchRenderBackend {
         let bx = x + PAD;
         let bw = w - 2.0 * PAD;
         let by = y + PAD + DISC + 44.0;
-        self.kit_rrect(bx, by, bw, BAR_H, BAR_H * 0.5, 0xFF_0E_17_2A);
+        self.kit_rrect(bx, by, bw, BAR_H, BAR_H * 0.5, col::LINE);
         match frac {
             Some(f) => {
                 let f = f.clamp(0.0, 1.0);

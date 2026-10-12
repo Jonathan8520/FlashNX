@@ -76,15 +76,18 @@ impl SwitchRenderBackend {
         // No tiles to tap but on a page of results: the last page's table must
         // not stay live under a finger (a stale hit would select a game that is
         // not there, or try the search again).
-        if g.interactive && g.state != FpState::Results {
-            if let Ok(mut c) = gallery_cache().lock() {
-                *c = (std::vec::Vec::new(), 0);
-            }
-        }
         let (_, _, tile_w, tile_h) = fp_tile_rect(0, 0.0, vw);
         let pitch = tile_h + crate::library::FP_GRID_GAP;
         let band_top = TOP - 12.0;
         let band_bot = TOP + ROWS as f32 * pitch - crate::library::FP_GRID_GAP + 8.0;
+        if g.interactive && g.state != FpState::Results {
+            if let Ok(mut c) = gallery_cache().lock() {
+                *c = (std::vec::Vec::new(), 0);
+            }
+            if let Ok(mut v) = gallery_view().lock() {
+                *v = GalleryView { pitch, band_top, band_bot, rows_visible: ROWS as u32, ..GalleryView::default() };
+            }
+        }
 
         match g.state {
             FpState::Loading => {
@@ -92,7 +95,7 @@ impl SwitchRenderBackend {
                 for i in 0..COLS * ROWS {
                     let (x, y, w, h) = fp_tile_rect(i, 0.0, vw);
                     self.kit_rrect(x, y, w, h, radius::TILE, col::TILE);
-                    self.kit_icon(x + (w - 28.0) * 0.5, y + h * 0.5, 28.0, Icon::Hourglass, 0xFF_3A_4A_6E);
+                    self.kit_icon(x + (w - 28.0) * 0.5, y + h * 0.5, 28.0, Icon::Hourglass, col::TEXT3);
                 }
                 self.kit_footer_band();
                 self.imp_footer_hints(&[(&[Btn::B][..], u.cancel)]);
@@ -220,7 +223,7 @@ impl SwitchRenderBackend {
                 }
                 None => {
                     self.kit_rrect(x, y, w, h, radius::TILE, col::TILE);
-                    self.kit_icon(x + (w - 28.0) * 0.5, y + h * 0.5, 28.0, Icon::Hourglass, 0xFF_3A_4A_6E);
+                    self.kit_icon(x + (w - 28.0) * 0.5, y + h * 0.5, 28.0, Icon::Hourglass, col::TEXT3);
                 }
             }
             if g.installed.get(i).copied().unwrap_or(false) {
