@@ -148,6 +148,9 @@ pub(crate) fn after_input(
         // in a game's options, a move).
         play(if changed {
             Sfx::Toggle
+        } else if matches!(button, "B" | "Minus") {
+            // B on the home clearing a search or going back to every game.
+            Sfx::Back
         } else if is_nav(button) || matches!(button, "L" | "R") {
             Sfx::Move
         } else {
