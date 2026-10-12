@@ -422,15 +422,47 @@ impl SwitchRenderBackend {
             (Some(before), Some(after)) => {
                 let (c0, c1) = (w * 0.34, w * 0.33);
                 self.kit_diff_what(x + 12.0, cy, c0 - 20.0, what);
-                let b = self.kit_fit(before, px, c1 - 14.0);
-                self.kit_text_mid(x + c0, cy, px, &b, col::TEXT3);
-                let a = self.kit_fit(after, px, w - c0 - c1 - 12.0);
-                self.kit_text_mid(x + c0 + c1, cy, px, &a, col::TEXT);
+                // Both values at one size: the line's, else the next smaller
+                // ones, else on two lines at the smallest; cut only after that.
+                // Cut at once, "predeterminado" or "Igual que en Normal" lost
+                // their end in a column a third of the page wide.
+                let (bw, aw) = (c1 - 14.0, w - c0 - c1 - 12.0);
+                let mut fit = None;
+                for p in [px, size::LABEL, size::CAPTION] {
+                    if self.kit_measure(before, p) <= bw && self.kit_measure(after, p) <= aw {
+                        fit = Some(p);
+                        break;
+                    }
+                }
+                match fit {
+                    Some(p) => {
+                        self.kit_text_mid(x + c0, cy, p, before, col::TEXT3);
+                        self.kit_text_mid(x + c0 + c1, cy, p, after, col::TEXT);
+                    }
+                    None => {
+                        self.kit_diff_wrapped(x + c0, cy, bw, before, col::TEXT3);
+                        self.kit_diff_wrapped(x + c0 + c1, cy, aw, after, col::TEXT);
+                    }
+                }
             }
             _ => {
                 let t = self.kit_fit(what, px, w - 24.0);
                 self.kit_text_mid(x + 12.0, cy, px, &t, col::TEXT3);
             }
+        }
+    }
+
+    /// A value of a diff line that fits its column at no size: on up to two
+    /// lines at the caption size, centred on `cy` (the table's lines, 44 px,
+    /// hold two), the second cut if it must be.
+    fn kit_diff_wrapped(&mut self, x: f32, cy: f32, max_w: f32, text: &str, ink: u32) {
+        let px = size::CAPTION;
+        let lines = self.kit_wrap(text, px, max_w, 2);
+        let lh = (px * 1.25).round();
+        let mut ly = cy - lh * 0.5 * lines.len().saturating_sub(1) as f32;
+        for l in &lines {
+            self.kit_text_mid(x, ly, px, l, ink);
+            ly += lh;
         }
     }
 
