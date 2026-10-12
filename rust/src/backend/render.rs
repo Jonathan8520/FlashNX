@@ -9784,9 +9784,12 @@ impl SwitchRenderBackend {
         let on_power = MENU_ITEMS.get(selected) == Some(&"OVERCLOCK");
         let on_resume = MENU_ITEMS.get(selected) == Some(&"REPRENDRE");
         // A value row says A arms it; armed, what Left / Right, A and B do
-        // now (input rule 2).
+        // now (input rule 2). On a game with its own overclock, X takes B's
+        // place: "B Reprendre le jeu" beside it ran the bar past the panel in
+        // eight languages out of nine, and the fitting dropped X, the one
+        // hint this row alone has. B still resumes, as every other row says.
         let hints_armed = [(&[Btn::DpadLR][..], u.change), (&[Btn::A][..], u.validate), (&[Btn::B][..], u.cancel)];
-        let hints_power_own = [(&[Btn::A][..], u.edit), (&[Btn::X][..], u.reset_default), (&[Btn::B][..], u.resume_game)];
+        let hints_power_own = [(&[Btn::A][..], u.edit), (&[Btn::X][..], u.reset_default)];
         let hints_power = [(&[Btn::A][..], u.edit), (&[Btn::B][..], u.resume_game)];
         let hints_act = [(&[Btn::A][..], a_verb), (&[Btn::B][..], u.resume_game)];
         // On Resume, A and B do the same thing: one hint, both buttons.
