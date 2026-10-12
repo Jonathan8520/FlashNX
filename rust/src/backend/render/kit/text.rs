@@ -346,6 +346,15 @@ pub(crate) fn ascent_px(px: f32) -> f32 {
     with_faces(|f| f.ascent(px)).unwrap_or(px * 0.8)
 }
 
+/// The words `kit_wrap` lays out: `text` split on breakable spaces only. A
+/// no-break space (French typography, "Actif\u{a0}: ...") keeps its two
+/// sides on one line, which is its job.
+fn wrap_words(text: &str) -> std::vec::Vec<&str> {
+    text.split(|c: char| c.is_whitespace() && c != '\u{00A0}' && c != '\u{202F}')
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
 // ─── Atlas, per renderer ────────────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
@@ -563,12 +572,7 @@ impl SwitchRenderBackend {
         let max_lines = max_lines.max(1);
         let mut lines: std::vec::Vec<std::string::String> = std::vec::Vec::new();
         let mut cur = std::string::String::new();
-        // Split on breakable spaces only: a no-break space (French typography,
-        // "Actif\u{a0}: ...") keeps its two sides on one line, which is its job.
-        let words: std::vec::Vec<&str> = text
-            .split(|c: char| c.is_whitespace() && c != '\u{00A0}' && c != '\u{202F}')
-            .filter(|w| !w.is_empty())
-            .collect();
+        let words = wrap_words(text);
         let mut i = 0;
         while i < words.len() {
             let word = words[i];
@@ -578,12 +582,23 @@ impl SwitchRenderBackend {
                 i += 1;
                 continue;
             }
-            if !cur.is_empty() {
+            // A full line is set down only when another may follow it. Set
+            // down first, the one line of a one-line wrap came back as two:
+            // the words that fit, then everything left on a line of its own.
+            if !cur.is_empty() && lines.len() + 1 < max_lines {
                 lines.push(core::mem::take(&mut cur));
             }
             if lines.len() + 1 >= max_lines {
-                // Last line: everything left, ellipsised if it does not fit.
-                lines.push(self.kit_fit(&words[i..].join(" "), px, max_w));
+                // Last line: what it holds and everything left, ellipsised if
+                // it does not fit.
+                let mut rest = core::mem::take(&mut cur);
+                for w in &words[i..] {
+                    if !rest.is_empty() {
+                        rest.push(' ');
+                    }
+                    rest.push_str(w);
+                }
+                lines.push(self.kit_fit(&rest, px, max_w));
                 return lines;
             }
             if self.kit_measure(word, px) > max_w {
