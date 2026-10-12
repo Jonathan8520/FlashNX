@@ -659,8 +659,6 @@ const FACTS_MUTED: u32 = 0x7A8CA6;
 // seen from the edge of the page.
 const SCROLLBAR_W: f32 = 4.0;
 const SCROLLBAR_MIN_THUMB: f32 = 24.0;
-const SCROLLBAR_TRACK: u32 = 0x40_99_AA_BB;
-const SCROLLBAR_THUMB: u32 = 0xFF_FF_D7_40;
 
 
 /// Count of `GpuDraw`s currently alive (created minus dropped). Used to
@@ -9648,37 +9646,27 @@ impl SwitchRenderBackend {
     /// Used for the editor's player tabs, layer sub-tabs and modifier strip (#57)
     /// so every mode is VISIBLE rather than hidden behind a button you must guess.
     fn draw_chip_strip(&mut self, labels: &[&str], active: usize, y: f32, scale: f32, h: f32) {
-        const PAD_X: f32 = 22.0;
-        const GAP: f32 = 18.0;
-        let widths: std::vec::Vec<f32> = labels
-            .iter()
-            .map(|l| self.measure_text(l, scale) + 2.0 * PAD_X)
-            .collect();
-        let total: f32 =
-            widths.iter().sum::<f32>() + GAP * labels.len().saturating_sub(1) as f32;
-        let mut x = (self.dimensions.width as f32 - total) * 0.5;
+        // A segmented control: one track, the active segment filled gold. The
+        // modes are VISIBLE rather than hidden behind a button you must guess
+        // (issue #55/#57).
+        use theme::col;
+        let px = legacy_px(scale).min(18.0);
+        const PAD_X: f32 = 18.0;
+        const INSET: f32 = 3.0;
+        let widths: std::vec::Vec<f32> = labels.iter().map(|l| self.kit_measure(l, px) + 2.0 * PAD_X).collect();
+        let total: f32 = widths.iter().sum::<f32>() + 2.0 * INSET;
+        let mut x = ((self.dimensions.width as f32 - total) * 0.5).round();
+        self.kit_rrect(x, y, total, h, h * 0.5, 0xFF_0E_17_2A);
+        x += INSET;
         for (i, lbl) in labels.iter().enumerate() {
             let w = widths[i];
-            let cap = Matrix {
-                a: w, b: 0.0, c: 0.0, d: h,
-                tx: swf::Twips::from_pixels(x as f64),
-                ty: swf::Twips::from_pixels(y as f64),
-            };
-            let (bg, fg) = if i == active {
-                (0xFFD740u32, 0x1A1A1Au32)
-            } else {
-                (0x2A3340u32, MODAL_ROW_COL)
-            };
-            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(bg, 255), cap);
-            let lw = self.measure_text(lbl, scale);
-            self.draw_text(
-                x + (w - lw) * 0.5,
-                y + (h - 7.0 * scale) * 0.5,
-                scale,
-                lbl,
-                swf::Color::from_rgb(fg, 255),
-            );
-            x += w + GAP;
+            let (fg, fill) = if i == active { (0xFF_1A_14_05, Some(col::GOLD)) } else { (col::TEXT2, None) };
+            if let Some(f) = fill {
+                self.kit_rrect(x, y + INSET, w, h - 2.0 * INSET, (h - 2.0 * INSET) * 0.5, f);
+            }
+            let lw = self.kit_measure(lbl, px);
+            self.kit_text_mid(x + (w - lw) * 0.5, y + h * 0.5, px, lbl, fg);
+            x += w;
         }
     }
 
@@ -10481,31 +10469,23 @@ impl SwitchRenderBackend {
     pub fn draw_reveal_chrome(&mut self, x: f32, y: f32, w: f32, h: f32) {
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
-        let rect = |s: &mut Self, rx: f32, ry: f32, rw: f32, rh: f32, col: swf::Color| {
-            if rw <= 0.0 || rh <= 0.0 {
-                return;
-            }
-            let m = Matrix {
-                a: rw, b: 0.0, c: 0.0, d: rh,
-                tx: swf::Twips::from_pixels(rx as f64),
-                ty: swf::Twips::from_pixels(ry as f64),
-            };
-            <Self as CommandHandler>::draw_rect(s, col, m);
-        };
         // Dim the four panes outside the window (darkens the list behind so the
-        // bright window pops). Shrinks to nothing as the window fills the screen.
-        let dim = swf::Color::from_rgba(0x88_00_00_00);
-        rect(self, 0.0, 0.0, vw, y, dim); // top
-        rect(self, 0.0, y + h, vw, vh - (y + h), dim); // bottom
-        rect(self, 0.0, y, x, h, dim); // left
-        rect(self, x + w, y, vw - (x + w), h, dim); // right
-        // Bright border around the window.
-        let col = swf::Color::from_rgb(0xFFD740, 255);
-        let b = 4.0;
-        rect(self, x - b, y - b, w + 2.0 * b, b, col); // top
-        rect(self, x - b, y + h, w + 2.0 * b, b, col); // bottom
-        rect(self, x - b, y, b, h, col); // left
-        rect(self, x + w, y, b, h, col); // right
+        // opening window pops). Shrinks to nothing as the window fills the screen.
+        let dim = 0x88_05_0A_16;
+        let panes = [
+            (0.0, 0.0, vw, y),
+            (0.0, y + h, vw, vh - (y + h)),
+            (0.0, y, x, h),
+            (x + w, y, vw - (x + w), h),
+        ];
+        for (rx, ry, rw, rh) in panes {
+            if rw > 0.0 && rh > 0.0 {
+                self.draw_overlay_rect(rx, ry, rw, rh, dim);
+            }
+        }
+        // A thin gold edge on the window, outside it, so it reads against the
+        // navy page and the navy content alike.
+        self.kit_ring(x, y, w, h, 2.0, 0.0, 3.0, theme::col::GOLD);
     }
 
     /// Draw the game-reveal content for the rect (x,y,w,h): the game's cover
@@ -11275,25 +11255,9 @@ impl SwitchRenderBackend {
     /// dimmed screenshot of the library, where painting a "background" colour into
     /// the corners would show the wrong thing.
     fn draw_round_rect(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, rgba: u32) {
-        let r = r.min(w * 0.5).min(h * 0.5).max(0.0);
-        if r <= 0.5 {
-            self.draw_overlay_rect(x, y, w, h, rgba);
-            return;
-        }
-        // Middle block, full width.
-        self.draw_overlay_rect(x, y + r, w, h - 2.0 * r, rgba);
-        // Caps: one sliver per row, inset by the circle's horizontal offset.
-        let steps = r.ceil() as i32;
-        for i in 0..steps {
-            let dy = i as f32;
-            let inset = r - (r * r - (r - dy) * (r - dy)).max(0.0).sqrt();
-            let sw = w - 2.0 * inset;
-            if sw <= 0.0 {
-                continue;
-            }
-            self.draw_overlay_rect(x + inset, y + dy, sw, 1.0, rgba);
-            self.draw_overlay_rect(x + inset, y + h - dy - 1.0, sw, 1.0, rgba);
-        }
+        // The kit's distance-field shape: anti-aliased corners in one draw call,
+        // where this used to stack one sliver per pixel row of each corner.
+        self.kit_rrect(x, y, w, h, r, rgba);
     }
 
     /// Round the corners of the rect just drawn at (x,y,w,h), by painting the
@@ -11355,14 +11319,10 @@ impl SwitchRenderBackend {
     ///
     /// `radius > 0.0` cuts the corners, which paints the PAGE colour and is
     /// therefore only valid over a `library_clear` background, never on a modal.
-    fn draw_selection_bar(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32) {
-        // Amber at 20%: light enough that the row's own text stays the brightest
-        // thing in it, which is why the marker is a wash and not a solid fill.
-        const SEL_BAR_TINT: u32 = 0x33_FF_D7_40;
-        self.draw_overlay_rect(x, y, w, h, SEL_BAR_TINT);
-        if radius > 0.0 {
-            self.round_corners(x, y, w, h, radius);
-        }
+    fn draw_selection_bar(&mut self, x: f32, y: f32, w: f32, h: f32, _radius: f32) {
+        // The kit's focus pill (raised, gold edge), the same mark as every
+        // window's list, instead of an amber wash with page-colour notches.
+        self.kit_focus_pill(x, y, w, h);
     }
 
     /// Draw a game's cover fitted INSIDE the box (x,y,w,h), centred, aspect kept,
@@ -11798,25 +11758,9 @@ impl SwitchRenderBackend {
     /// a cursor move differs, and what gets rounded afterwards differs. That is
     /// exactly how a copy keeps the old look after the cursor is restyled and
     /// nobody notices for a whole release.
-    fn draw_pulse_frame(&mut self, x: f32, y: f32, w: f32, h: f32, pulse: f32) {
-        let p = (pulse * 0.5) + 0.5;
-        let g = (0xC0 as f32 + (0xFF - 0xC0) as f32 * p) as u32;
-        let col = swf::Color::from_rgb((0xFF << 16) | (g << 8) | 0x30, 255);
-        let b = Self::SEL_FRAME_B;
-        let bars = [
-            (x - b, y - b, w + 2.0 * b, b), // top
-            (x - b, y + h, w + 2.0 * b, b), // bottom
-            (x - b, y, b, h),               // left
-            (x + w, y, b, h),               // right
-        ];
-        for (bx, by, bw, bh) in bars {
-            let m = Matrix {
-                a: bw, b: 0.0, c: 0.0, d: bh,
-                tx: swf::Twips::from_pixels(bx as f64),
-                ty: swf::Twips::from_pixels(by as f64),
-            };
-            <Self as CommandHandler>::draw_rect(self, col, m);
-        }
+    fn draw_pulse_frame(&mut self, x: f32, y: f32, w: f32, h: f32, _pulse: f32) {
+        // The kit's gold ring, standing off the tile by a gap, as in the grid.
+        self.kit_ring(x, y, w, h, theme::radius::TILE, theme::ring::GAP, theme::ring::WIDTH, theme::col::GOLD);
     }
 
     /// Centred "NO RESULTS" for a home layout whose list came back empty.
@@ -11904,8 +11848,10 @@ impl SwitchRenderBackend {
         } else {
             0.0
         };
-        self.draw_overlay_rect(x, top, SCROLLBAR_W, h, SCROLLBAR_TRACK);
-        self.draw_overlay_rect(x, top + (h - thumb_h) * t, SCROLLBAR_W, thumb_h, SCROLLBAR_THUMB);
+        let w = 4.0;
+        let bx = x + (SCROLLBAR_W - w) * 0.5;
+        self.kit_rrect(bx, top, w, h, w * 0.5, theme::col::LINE);
+        self.kit_rrect(bx, top + (h - thumb_h) * t, w, thumb_h, w * 0.5, theme::col::GOLD);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -14019,47 +13965,26 @@ impl SwitchRenderBackend {
         msg: &str,
         footer: &str,
     ) {
+        use theme::{col, size};
         self.library_clear();
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
-
-        let scale_t = 5.0;
-        let tw = self.measure_text(title, scale_t);
-        self.draw_text(
-            (vw - tw) * 0.5 + 4.0,
-            vh * 0.22 + 4.0,
-            scale_t,
-            title,
-            swf::Color::from_rgb(0x000000, 255),
-        );
-        self.draw_text(
-            (vw - tw) * 0.5,
-            vh * 0.22,
-            scale_t,
-            title,
-            swf::Color::from_rgb(title_rgb, 255),
-        );
-
-        // Word-wrapped, centred. `wrap_words` measures the line and hard-chops
-        // any single word too wide for it.
-        let scale_m = 2.0;
-        // The 60-character line this notice has always used, expressed as the
-        // width it actually occupies at `scale_m`.
-        const WRAP_W: f32 = 60.0 * 6.0 * 2.0;
-        let lines = wrap_words(msg, WRAP_W, scale_m);
-        let mut y = vh * 0.42;
+        // A card in the middle of the page: the title in the colour the caller
+        // gave it (red for an error, gold for a notice), the message under it.
+        let w = 720.0f32.min(vw - 80.0);
+        let lines = self.kit_wrap(msg, size::BODY, w - 80.0, 8);
+        let lh = (size::BODY * 1.45).round();
+        let h = 120.0 + lh * lines.len() as f32;
+        let x = ((vw - w) * 0.5).round();
+        let y = ((vh - 48.0 - h) * 0.5).round().max(90.0);
+        self.kit_panel(x, y, w, h, false);
+        let t = self.kit_fit(title, size::TITLE, w - 80.0);
+        self.kit_text_mid(x + 40.0, y + 52.0, size::TITLE, &t, 0xFF00_0000 | (title_rgb & 0x00FF_FFFF));
+        let mut ly = y + 100.0;
         for line in &lines {
-            let w = self.measure_text(line, scale_m);
-            self.draw_text(
-                (vw - w) * 0.5,
-                y,
-                scale_m,
-                line,
-                swf::Color::from_rgb(0xCCCCCC, 255),
-            );
-            y += 30.0;
+            self.kit_text_mid(x + 40.0, ly, size::BODY, line, col::TEXT2);
+            ly += lh;
         }
-
         self.draw_page_footer(footer);
         unsafe {
             glUseProgram(0);
@@ -15073,6 +14998,7 @@ impl SwitchRenderBackend {
     /// top of the current screen for a couple of seconds (the library loop counts
     /// it down), so a share/apply/revert confirms without a full "thanks" modal.
     pub fn draw_toast(&mut self, msg: &str, kind: u8) {
+        use theme::{col, size};
         unsafe {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -15080,44 +15006,26 @@ impl SwitchRenderBackend {
         }
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
-
-        const SCALE: f32 = 2.5;
-        const PAD: f32 = 28.0;
-        const H: f32 = 64.0;
-        let text_w = self.measure_text(msg, SCALE).max(1.0);
-        let max_w = vw - 80.0;
-        // Shrink the text if the banner would be wider than the screen allows.
-        let (scale, w) = if text_w + PAD * 2.0 > max_w {
-            (SCALE * (max_w - PAD * 2.0) / text_w, max_w)
-        } else {
-            (SCALE, text_w + PAD * 2.0)
+        // A pill above the footer band, never over the hints. The dot says what
+        // kind of news it is; the words say what happened.
+        let dot = match kind {
+            1 => col::DANGER,
+            2 => col::GOLD,
+            _ => col::OK,
         };
-        let x = (vw - w) * 0.5;
-        let y = vh - H - 40.0;
-
-        // (background ARGB, border RGB) per kind.
-        let (bg, border) = match kind {
-            1 => (0xF0_3A_12_12u32, 0xFF5040u32), // error  — red
-            2 => (0xF0_10_28_3Au32, 0x2196F3u32), // info   — blue
-            _ => (0xF0_12_30_1Eu32, 0x4CAF50u32), // success — green
-        };
-        let panel = Matrix {
-            a: w, b: 0.0, c: 0.0, d: H,
-            tx: swf::Twips::from_pixels(x as f64),
-            ty: swf::Twips::from_pixels(y as f64),
-        };
-        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(bg), panel);
-        <Self as CommandHandler>::draw_line_rect(self, swf::Color::from_rgb(border, 255), panel);
-
-        let tw = self.measure_text(msg, scale);
-        self.draw_text(
-            x + (w - tw) * 0.5,
-            y + (H - 7.0 * scale) * 0.5,
-            scale,
-            msg,
-            swf::Color::from_rgb(0xFFFFFF, 255),
-        );
-
+        const H: f32 = 52.0;
+        const PAD: f32 = 24.0;
+        const DOT: f32 = 10.0;
+        let max_text = vw - 80.0 - 2.0 * PAD - DOT - 14.0;
+        let text = self.kit_fit(msg, size::BODY, max_text);
+        let tw = self.kit_measure(&text, size::BODY);
+        let w = tw + 2.0 * PAD + DOT + 14.0;
+        let x = ((vw - w) * 0.5).round();
+        let y = vh - 48.0 - 20.0 - H;
+        self.kit_shadow(x, y + 6.0, w, H, H * 0.5, 18.0, col::SHADOW);
+        self.kit_shape(x, y, w, H, H * 0.5, col::PANEL, 1.0, col::PANEL_LINE, 0.0);
+        self.kit_rrect(x + PAD, y + (H - DOT) * 0.5, DOT, DOT, DOT * 0.5, dot);
+        self.kit_text_mid(x + PAD + DOT + 14.0, y + H * 0.5, size::BODY, &text, col::TEXT);
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
@@ -15409,7 +15317,7 @@ impl SwitchRenderBackend {
     pub fn draw_library_dim_backdrop(&mut self) {
         unsafe {
             glDisable(GL_STENCIL_TEST);
-            glClearColor(0.04, 0.06, 0.10, 1.0);
+            glClearColor(0.047, 0.075, 0.137, 1.0);
             glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
