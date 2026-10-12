@@ -53,6 +53,9 @@ pub struct Ui {
     pub cancel: &'static str,
     /// The controls editor: player tabs (the same short form its footer uses),
     /// the base layer's name, and the key picker's title ("{}" = the button).
+    /// Unread since the editor's player switch is written out
+    /// (`player_1`); goes after the merge.
+    #[allow(dead_code)]
     pub p1: &'static str,
     pub p2: &'static str,
     pub layer_normal: &'static str,
@@ -204,6 +207,31 @@ pub struct Ui {
     pub flash_capslock: &'static str,
     /// A numpad key named on a controls row ({} = what the key prints: 1, +, Enter).
     pub key_numpad: &'static str,
+    /// The controls editor's player switch, written out.
+    pub player_1: &'static str,
+    pub player_2: &'static str,
+    /// Beside the controls editor's title when it edits the defaults of every game.
+    pub keys_all_games: &'static str,
+    /// In a combo layer: a button that sends its Normal key (beside that key, and as the picker's key that clears the layer's own).
+    pub key_same_as_normal: &'static str,
+    /// Under the controller drawing, after the Minus glyph: why Minus has no row.
+    pub keys_minus_note: &'static str,
+    /// Across the four direction rows of a stick that moves the cursor.
+    pub keys_mouse_cursor: &'static str,
+    /// Toast when the first direction of the left stick gets a key.
+    pub toast_stick_dpad_l: &'static str,
+    /// Toast when the first direction of the right stick gets a key.
+    pub toast_stick_dpad_r: &'static str,
+    /// Controls editor help on a stick direction row (player 1, Normal layer).
+    pub help_pad_stick: &'static str,
+    /// Controls editor help on the SL and SR rows.
+    pub help_pad_slsr: &'static str,
+    /// Controls editor help in a combo layer (both {} = the layer's button: ZL, ZR, L or R).
+    pub help_pad_layer: &'static str,
+    /// What the Switch keyboard pseudo-key does (editor help line, key picker status line).
+    pub help_key_keyboard: &'static str,
+    /// Toast when A or a tap lands on a modifier row (both {} = that button: ZL, ZR, L or R).
+    pub toast_modifier_locked: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -345,6 +373,19 @@ const EN: Ui = Ui {
     key_none: "None",
     flash_capslock: "Caps Lock",
     key_numpad: "Num {}",
+    player_1: "Player 1",
+    player_2: "Player 2",
+    keys_all_games: "For every game",
+    key_same_as_normal: "Same as Normal",
+    keys_minus_note: "opens the pause menu",
+    keys_mouse_cursor: "Mouse cursor",
+    toast_stick_dpad_l: "The left stick now works as a d-pad: it no longer moves the cursor.",
+    toast_stick_dpad_r: "The right stick now works as a d-pad: it no longer moves the cursor.",
+    help_pad_stick: "Giving a direction a key turns this stick into a d-pad; leave all four empty and it moves the cursor.",
+    help_pad_slsr: "SL and SR only exist on a Joy-Con held on its own, sideways.",
+    help_pad_layer: "{} layer: these keys replace the normal ones while you hold {}.",
+    help_key_keyboard: "Opens the Switch keyboard to type in the game.",
+    toast_modifier_locked: "{} holds the {} layer, so it sends no key. Empty that layer to free it.",
 };
 
 const FR: Ui = Ui {
@@ -486,6 +527,19 @@ const FR: Ui = Ui {
     key_none: "Aucune",
     flash_capslock: "Verr. Maj",
     key_numpad: "Num {}",
+    player_1: "Joueur 1",
+    player_2: "Joueur 2",
+    keys_all_games: "Pour tous les jeux",
+    key_same_as_normal: "Comme en Normal",
+    keys_minus_note: "ouvre la pause",
+    keys_mouse_cursor: "Curseur de la souris",
+    toast_stick_dpad_l: "Le stick gauche sert maintenant de croix : il ne déplace plus le curseur.",
+    toast_stick_dpad_r: "Le stick droit sert maintenant de croix : il ne déplace plus le curseur.",
+    help_pad_stick: "Donner une touche à une direction fait de ce stick une croix ; laisse ses quatre directions vides pour qu'il déplace le curseur.",
+    help_pad_slsr: "SL et SR n'existent que sur un Joy-Con tenu seul, à l'horizontale.",
+    help_pad_layer: "Couche {} : ces touches remplacent les normales tant que tu maintiens {}.",
+    help_key_keyboard: "Ouvre le clavier de la Switch pour écrire dans le jeu.",
+    toast_modifier_locked: "{} tient la couche {} : il n'envoie plus de touche. Vide cette couche pour le libérer.",
 };
 
 const ES: Ui = Ui {
@@ -627,6 +681,19 @@ const ES: Ui = Ui {
     key_none: "Ninguna",
     flash_capslock: "Bloq Mayús",
     key_numpad: "Num {}",
+    player_1: "Jugador 1",
+    player_2: "Jugador 2",
+    keys_all_games: "Para todos los juegos",
+    key_same_as_normal: "Igual que en Normal",
+    keys_minus_note: "abre la pausa",
+    keys_mouse_cursor: "Cursor del ratón",
+    toast_stick_dpad_l: "El stick izquierdo ahora funciona como cruceta: ya no mueve el cursor.",
+    toast_stick_dpad_r: "El stick derecho ahora funciona como cruceta: ya no mueve el cursor.",
+    help_pad_stick: "Dar una tecla a una dirección convierte este stick en cruceta; deja las cuatro vacías para que mueva el cursor.",
+    help_pad_slsr: "SL y SR solo existen en un Joy-Con usado solo, en horizontal.",
+    help_pad_layer: "Capa {}: estas teclas sustituyen a las normales mientras mantienes {}.",
+    help_key_keyboard: "Abre el teclado de la Switch para escribir en el juego.",
+    toast_modifier_locked: "{} mantiene la capa {}: ya no envía ninguna tecla. Vacía esa capa para liberarlo.",
 };
 
 const RU: Ui = Ui {
@@ -768,6 +835,19 @@ const RU: Ui = Ui {
     key_none: "Нет",
     flash_capslock: "Caps Lock",
     key_numpad: "Num {}",
+    player_1: "Игрок 1",
+    player_2: "Игрок 2",
+    keys_all_games: "Для всех игр",
+    key_same_as_normal: "Как в обычном",
+    keys_minus_note: "открывает паузу",
+    keys_mouse_cursor: "Курсор мыши",
+    toast_stick_dpad_l: "Левый стик теперь работает как крестовина и больше не двигает курсор.",
+    toast_stick_dpad_r: "Правый стик теперь работает как крестовина и больше не двигает курсор.",
+    help_pad_stick: "Если дать направлению клавишу, стик станет крестовиной; оставь все четыре пустыми, чтобы он двигал курсор.",
+    help_pad_slsr: "SL и SR есть только на отдельном Joy-Con, который держат горизонтально.",
+    help_pad_layer: "Слой {}: эти клавиши заменяют обычные, пока ты держишь {}.",
+    help_key_keyboard: "Открывает клавиатуру Switch, чтобы вводить текст в игре.",
+    toast_modifier_locked: "{} удерживает слой {} и не отправляет клавишу. Очисти этот слой, чтобы освободить кнопку.",
 };
 
 const DE: Ui = Ui {
@@ -909,6 +989,19 @@ const DE: Ui = Ui {
     key_none: "Keine",
     flash_capslock: "Feststell",
     key_numpad: "Num {}",
+    player_1: "Spieler 1",
+    player_2: "Spieler 2",
+    keys_all_games: "Für alle Spiele",
+    key_same_as_normal: "Wie in Normal",
+    keys_minus_note: "öffnet die Pause",
+    keys_mouse_cursor: "Mauszeiger",
+    toast_stick_dpad_l: "Der linke Stick dient jetzt als Steuerkreuz: Er bewegt den Mauszeiger nicht mehr.",
+    toast_stick_dpad_r: "Der rechte Stick dient jetzt als Steuerkreuz: Er bewegt den Mauszeiger nicht mehr.",
+    help_pad_stick: "Bekommt eine Richtung eine Taste, wird dieser Stick zum Steuerkreuz; lass alle vier leer, damit er den Mauszeiger bewegt.",
+    help_pad_slsr: "SL und SR gibt es nur an einem einzeln und quer gehaltenen Joy-Con.",
+    help_pad_layer: "Ebene {}: Diese Tasten ersetzen die normalen, solange du {} hältst.",
+    help_key_keyboard: "Öffnet die Switch-Tastatur, um im Spiel zu schreiben.",
+    toast_modifier_locked: "{} hält die Ebene {} und sendet keine Taste mehr. Leere diese Ebene, um ihn freizugeben.",
 };
 
 const IT: Ui = Ui {
@@ -1050,6 +1143,19 @@ const IT: Ui = Ui {
     key_none: "Nessuno",
     flash_capslock: "Bloc Maiusc",
     key_numpad: "Num {}",
+    player_1: "Giocatore 1",
+    player_2: "Giocatore 2",
+    keys_all_games: "Per tutti i giochi",
+    key_same_as_normal: "Come in Normale",
+    keys_minus_note: "apre la pausa",
+    keys_mouse_cursor: "Cursore del mouse",
+    toast_stick_dpad_l: "La levetta sinistra ora fa da croce direzionale: non muove più il cursore.",
+    toast_stick_dpad_r: "La levetta destra ora fa da croce direzionale: non muove più il cursore.",
+    help_pad_stick: "Dare un tasto a una direzione trasforma questa levetta in croce direzionale; lascia vuote tutte e quattro perché muova il cursore.",
+    help_pad_slsr: "SL e SR esistono solo su un Joy-Con tenuto da solo, in orizzontale.",
+    help_pad_layer: "Livello {}: questi tasti sostituiscono quelli normali finché tieni premuto {}.",
+    help_key_keyboard: "Apre la tastiera della Switch per scrivere nel gioco.",
+    toast_modifier_locked: "{} tiene il livello {}: non invia più tasti. Svuota quel livello per liberarlo.",
 };
 
 const PT: Ui = Ui {
@@ -1191,6 +1297,19 @@ const PT: Ui = Ui {
     key_none: "Nenhuma",
     flash_capslock: "Caps Lock",
     key_numpad: "Num {}",
+    player_1: "Jogador 1",
+    player_2: "Jogador 2",
+    keys_all_games: "Para todos os jogos",
+    key_same_as_normal: "Igual ao Normal",
+    keys_minus_note: "abre a pausa",
+    keys_mouse_cursor: "Cursor do mouse",
+    toast_stick_dpad_l: "O analógico esquerdo agora funciona como direcional: não move mais o cursor.",
+    toast_stick_dpad_r: "O analógico direito agora funciona como direcional: não move mais o cursor.",
+    help_pad_stick: "Dar uma tecla a uma direção transforma este analógico em direcional; deixe as quatro vazias para que ele mova o cursor.",
+    help_pad_slsr: "SL e SR só existem em um Joy-Con usado sozinho, na horizontal.",
+    help_pad_layer: "Camada {}: estas teclas substituem as normais enquanto você segura {}.",
+    help_key_keyboard: "Abre o teclado do Switch para digitar no jogo.",
+    toast_modifier_locked: "{} segura a camada {}: não envia mais nenhuma tecla. Esvazie essa camada para liberá-lo.",
 };
 
 const ZH: Ui = Ui {
@@ -1332,6 +1451,19 @@ const ZH: Ui = Ui {
     key_none: "无",
     flash_capslock: "大写锁定",
     key_numpad: "小键盘{}",
+    player_1: "玩家1",
+    player_2: "玩家2",
+    keys_all_games: "适用于所有游戏",
+    key_same_as_normal: "与普通层相同",
+    keys_minus_note: "打开暂停菜单",
+    keys_mouse_cursor: "鼠标光标",
+    toast_stick_dpad_l: "左摇杆现在用作十字键，不再移动光标。",
+    toast_stick_dpad_r: "右摇杆现在用作十字键，不再移动光标。",
+    help_pad_stick: "给任一方向设置按键后，此摇杆会变成十字键；四个方向都留空时，它用来移动光标。",
+    help_pad_slsr: "SL 和 SR 只在单独横握的 Joy-Con 上才有。",
+    help_pad_layer: "{} 层：按住 {} 时，这些按键会取代普通按键。",
+    help_key_keyboard: "打开 Switch 键盘，在游戏中输入文字。",
+    toast_modifier_locked: "{} 用于按住 {} 层，不再发送按键。清空该层即可恢复。",
 };
 
 const TR: Ui = Ui {
@@ -1473,6 +1605,19 @@ const TR: Ui = Ui {
     key_none: "Yok",
     flash_capslock: "Caps Lock",
     key_numpad: "Num {}",
+    player_1: "Oyuncu 1",
+    player_2: "Oyuncu 2",
+    keys_all_games: "Tüm oyunlar için",
+    key_same_as_normal: "Normal ile aynı",
+    keys_minus_note: "duraklatmayı açar",
+    keys_mouse_cursor: "Fare imleci",
+    toast_stick_dpad_l: "Sol çubuk artık yön tuşu gibi çalışıyor: imleci artık hareket ettirmiyor.",
+    toast_stick_dpad_r: "Sağ çubuk artık yön tuşu gibi çalışıyor: imleci artık hareket ettirmiyor.",
+    help_pad_stick: "Bir yöne tuş vermek bu çubuğu yön tuşuna çevirir; imleci hareket ettirmesi için dördünü de boş bırak.",
+    help_pad_slsr: "SL ve SR yalnızca tek başına yatay tutulan bir Joy-Con'da bulunur.",
+    help_pad_layer: "{} katmanı: {} basılı tutulduğu sürece bu tuşlar normal olanların yerine geçer.",
+    help_key_keyboard: "Oyunda yazı yazmak için Switch klavyesini açar.",
+    toast_modifier_locked: "{}, {} katmanını tutuyor; artık tuş göndermiyor. Serbest bırakmak için o katmanı boşalt.",
 };
 
 pub fn ui() -> &'static Ui {

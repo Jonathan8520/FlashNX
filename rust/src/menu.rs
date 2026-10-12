@@ -21,7 +21,7 @@
 
 use std::sync::Mutex;
 
-use crate::backend::render::{SwitchRenderBackend, PAUSE_ROW_TOUCHES};
+use crate::backend::render::{PadValue, SwitchRenderBackend, PAUSE_ROW_TOUCHES};
 use crate::keymap;
 
 // C++-owned cursor speed (live + per-game while in a game), reused from the
@@ -92,6 +92,14 @@ struct State {
     /// `open_submenu`): the editor's B returns to the sub-menu instead of closing.
     /// The library opens the editor directly (`open`) with this false.
     submenu: bool,
+    /// Opened from the launcher: the game whose options it came from, or None
+    /// for the defaults of every game (RÉGLAGES). The editor's header names it.
+    /// In game the running game's name is read as it is drawn.
+    subject: Option<std::string::String>,
+    /// That game's cursor speed, x10, for the editor's footer. Read once on the
+    /// way in: in the launcher the live speed is the global one, and the game's
+    /// own is a file on the card, which is no read for every frame.
+    subject_speed_x10: u32,
     /// Whether the sub-menu shows a revert row (game has a custom keymap).
     can_revert: bool,
     /// Whether a hand-made backup exists (revert restores it) vs none (resets to
@@ -120,6 +128,8 @@ static TOUCHES: Mutex<State> = Mutex::new(State {
     screen: Screen::Inactive,
     dirty: false,
     submenu: false,
+    subject: None,
+    subject_speed_x10: 10,
     can_revert: false,
     has_backup: false,
     matches: std::vec::Vec::new(),
@@ -273,9 +283,10 @@ pub fn screen_is_sheet() -> bool {
         .unwrap_or(false)
 }
 
-/// Open the keymap EDITOR directly (library OPTIONS > TOUCHES > Éditer). The
-/// in-game pause entry uses `open_submenu` instead.
-pub fn open() {
+/// Open the keymap EDITOR directly from the launcher: from a game's options
+/// (`game` = its name; the keymap was pointed at it) or for the defaults of
+/// every game (`None`). The in-game pause entry uses `open_submenu` instead.
+pub fn open(game: Option<&str>) {
     keymap::set_edit_player(1); // always start on Player 1 (issue #40)...
     keymap::reset_edit_subtabs(); // ...both players on the NORMAL sub-tab, without
     // clearing the persisted modifiers (combos stay enabled in-game) (issue #57).
@@ -284,8 +295,16 @@ pub fn open() {
     // before the lock, not inside it, to keep this off the TOUCHES -> keymap
     // nesting entirely.
     let start = unstick_cursor(0);
+    // The game's own cursor speed, else the global one it follows.
+    let speed = keymap::active_game_basename()
+        .map(|b| keymap::cursor_speed_for(&b))
+        .filter(|i| *i >= 0)
+        .and_then(|i| crate::loc::CURSOR_SPEED_X10.get(i as usize).copied())
+        .unwrap_or_else(|| unsafe { ruffle_cursor_speed_mult_x10() }.max(5) as u32);
     if let Ok(mut s) = TOUCHES.lock() {
         s.submenu = false;
+        s.subject = game.map(str::to_string);
+        s.subject_speed_x10 = speed;
         s.screen = Screen::List { selection: start };
     }
 }
@@ -465,6 +484,14 @@ fn input_inner(button: &str) -> bool {
             true
         }
         Screen::List { selection } => {
+            // In game, B goes back to the Touches et curseur page and Y on to
+            // its shared profiles. Both read the card (and Y the catalogue),
+            // so they run without the lock, like that page's own rows.
+            if s.submenu && matches!(button, "B" | "Minus" | "Y") {
+                drop(s);
+                leave_editor_in_game(button == "Y");
+                return true;
+            }
             handle_list_input(&mut s, button, selection);
             true
         }
@@ -1088,13 +1115,10 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize) {
                 return;
             };
             // Reachable even though the cursor skips locked rows: a tap, or a
-            // layer switched while the cursor sat here, can put it on one.
+            // layer switched while the cursor sat here, can put it on one. Say
+            // what the button does now and how to get it back, not just a word.
             if keymap::slot_is_modifier(slot.name) {
-                set_toast(
-                    s,
-                    std::format!("{} : {}", slot.name, crate::loc::s().keys_modifier),
-                    TOAST_INFO,
-                );
+                set_toast(s, crate::loc_ui::ui().toast_modifier_locked.replace("{}", slot.name), TOAST_INFO);
                 s.screen = Screen::List { selection };
                 return;
             }
@@ -1106,17 +1130,143 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize) {
             return;
         }
         "B" | "Minus" => {
-            // In-game: back to the sub-menu (Éditer row). Library: close.
-            s.screen = if s.submenu {
-                Screen::Menu { selection: MENU_EDIT }
-            } else {
-                Screen::Inactive
-            };
+            // The launcher's editor closes; the launcher puts its page back
+            // (`library::input`). In game B never reaches here: it is
+            // `leave_editor_in_game`.
+            s.screen = Screen::Inactive;
             return;
         }
         _ => {}
     }
     s.screen = Screen::List { selection };
+}
+
+/// Leave the in-game editor for the Touches et curseur page (B), or for its
+/// shared profiles (Y, the mockup's shortcut; B there comes back to the page).
+/// The page's "Revenir…" row depends on the keys just edited, so it is worked
+/// out again here, as on the launcher side: it used to stay as it was when the
+/// page opened, missing after a first edit and stale once a key was set back.
+fn leave_editor_in_game(profiles: bool) {
+    let (can_revert, has_backup) = keymap::active_game_basename()
+        .map(|b| (keymap::has_revert(&b), keymap::has_backup(&b)))
+        .unwrap_or((false, false));
+    if let Ok(mut s) = TOUCHES.lock() {
+        s.can_revert = can_revert;
+        s.has_backup = has_backup;
+        s.screen = Screen::Menu { selection: if profiles { MENU_APPLY } else { MENU_EDIT } };
+    }
+    if profiles {
+        defer_net(PendingNet::OpenProfiles);
+    }
+}
+
+/// Where the editor sits and what it edits, as its header and footer say.
+struct Place {
+    /// The page it was opened from, under the page that holds that page.
+    crumbs: [&'static str; 2],
+    subject: std::string::String,
+    /// The cursor speed in force, x10. None for the defaults of every game,
+    /// whose cursor speed is a row of their own window.
+    speed_x10: Option<u32>,
+    /// Whether Y opens the shared profiles: they are a game's.
+    profiles: bool,
+}
+
+/// The editor's three doors: the pause (Pause › Touches et curseur), a game's
+/// options in the launcher (Options › Touches et curseur), RÉGLAGES for the
+/// defaults of every game. B goes back through the same door.
+fn editor_place() -> Option<Place> {
+    let (submenu, subject, speed) = TOUCHES
+        .lock()
+        .ok()
+        .map(|s| (s.submenu, s.subject.clone(), s.subject_speed_x10))?;
+    let lc = crate::loc::s();
+    let u = crate::loc_ui::ui();
+    Some(if submenu {
+        Place {
+            crumbs: [lc.pause_title, lc.menu_keys],
+            subject: crate::library::active_display_name().unwrap_or_default(),
+            speed_x10: Some(unsafe { ruffle_cursor_speed_mult_x10() }.max(5) as u32),
+            profiles: true,
+        }
+    } else if let Some(subject) = subject {
+        Place { crumbs: [u.hint_options, lc.menu_keys], subject, speed_x10: Some(speed), profiles: true }
+    } else {
+        Place {
+            crumbs: [u.tab_settings, u.row_game_prefs],
+            subject: u.keys_all_games.to_string(),
+            speed_x10: None,
+            profiles: false,
+        }
+    })
+}
+
+/// What each pad row shows, in `PAD_SLOTS` order: what the button really
+/// sends in the open layer.
+fn pad_values() -> std::vec::Vec<PadValue> {
+    let normal = keymap::edit_subtab_index() == 0;
+    keymap::PAD_SLOTS
+        .iter()
+        .map(|slot| {
+            if keymap::slot_is_modifier(slot.name) {
+                return PadValue::Modifier;
+            }
+            match keymap::current_binding(slot.name) {
+                Some(k) => PadValue::Key(k),
+                None if normal => PadValue::None,
+                // The layer does not map it, so while its modifier is held it
+                // sends its Normal key (`lookup_combo` falls through). It used
+                // to say "(aucune)" there, and ZL+A looked dead while it sent
+                // Espace.
+                None => PadValue::Inherited(keymap::base_binding(slot.name)),
+            }
+        })
+        .collect()
+}
+
+/// The layer tabs that carry a dot: the combo layers holding a key, so a
+/// layer in use shows from any tab.
+fn live_layers(player: u8) -> [bool; 5] {
+    let mut live = [false; 5];
+    for (i, m) in keymap::SUBTAB_MODS.iter().enumerate().skip(1) {
+        live[i] = if player == 2 { keymap::combo_active_p2(m) } else { keymap::combo_active(m) };
+    }
+    live
+}
+
+/// Whether `stick`'s four direction rows read as one "mouse cursor": player
+/// 1's stick sends nothing in any of them, which is when it moves the cursor
+/// (`keymap::stick_drives_cursor`), in a combo layer too as long as the layer
+/// maps none of them. Player 2 has no cursor.
+fn stick_reads_as_cursor(values: &[PadValue], player: u8, stick: char) -> bool {
+    player == 1
+        && keymap::PAD_SLOTS
+            .iter()
+            .zip(values)
+            .filter(|(slot, _)| keymap::stick_of_direction(slot.name) == Some(stick))
+            .all(|(_, v)| matches!(v, PadValue::None | PadValue::Inherited(None)))
+}
+
+/// The line under the pad about the focused row: what is particular to it,
+/// else what the open layer means, else what the screen is for.
+fn pad_help(selection: usize, values: &[PadValue], player: u8, layer: usize) -> std::string::String {
+    let u = crate::loc_ui::ui();
+    let Some(slot) = keymap::PAD_SLOTS.get(selection) else {
+        return std::string::String::new();
+    };
+    if matches!(slot.name, "SL" | "SR") {
+        return u.help_pad_slsr.to_string();
+    }
+    if player == 1 && layer == 0 && keymap::stick_of_direction(slot.name).is_some() {
+        return u.help_pad_stick.to_string();
+    }
+    if matches!(values.get(selection), Some(PadValue::Key(k)) | Some(PadValue::Inherited(Some(k))) if k == "Keyboard") {
+        return u.help_key_keyboard.to_string();
+    }
+    if layer > 0 {
+        return u.help_pad_layer.replace("{}", keymap::SUBTAB_MODS[layer.min(keymap::SUBTAB_MODS.len() - 1)]);
+    }
+    u.help_touches_edit.to_string()
 }
 
 /// Index of a Flash-key NAME in `keymap::KEYBOARD`, or None if it isn't on the
@@ -1213,8 +1363,20 @@ fn handle_keyboard_input(
             let Some(edit_btn) = keymap::PAD_SLOTS.get(button_idx).map(|s| s.name) else {
                 return;
             };
+            // Giving a key to the first direction of a stick that moved the
+            // cursor turns the whole stick into a d-pad (`main.cpp`): the
+            // cursor stops following it and its other three directions send
+            // nothing. That is said once, when it happens.
+            let stick = keymap::stick_of_direction(edit_btn)
+                .filter(|_| keymap::edit_player() == 1 && keymap::edit_subtab_index() == 0);
+            let was_cursor = stick.is_some_and(keymap::stick_drives_cursor);
             if keymap::set_binding(edit_btn, target) {
                 s.dirty = true;
+                if let Some(st) = stick.filter(|st| was_cursor && !keymap::stick_drives_cursor(*st)) {
+                    let u = crate::loc_ui::ui();
+                    let msg = if st == 'R' { u.toast_stick_dpad_r } else { u.toast_stick_dpad_l };
+                    set_toast(s, msg.to_string(), TOAST_INFO);
+                }
             } else {
                 // `set_binding` has already put the in-memory keymap back, so the
                 // list below is truthful again — but nothing on screen would have
@@ -1510,19 +1672,25 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
             });
         }
         Screen::List { selection } => {
-            // Parallel to PAD_SLOTS, which is both the order the pad lays out
-            // and the order `selection` counts in. `true` = this button is a
-            // modifier in the open layer and sends no key of its own.
-            let bindings: std::vec::Vec<(Option<std::string::String>, bool)> = keymap::PAD_SLOTS
-                .iter()
-                .map(|slot| (keymap::current_binding(slot.name), keymap::slot_is_modifier(slot.name)))
-                .collect();
-            backend.draw_touches_pad(
+            let Some(place) = editor_place() else { return };
+            let values = pad_values();
+            let player = keymap::edit_player();
+            let layer = keymap::edit_subtab_index();
+            let speed = place.speed_x10.map(crate::loc::mult_label);
+            let help = pad_help(selection, &values, player, layer);
+            backend.draw_touches_pad(&crate::backend::render::PadView {
+                crumbs: &place.crumbs,
+                subject: &place.subject,
                 selection,
-                &bindings,
-                keymap::edit_player(),
-                keymap::edit_subtab_index(),
-            );
+                values: &values,
+                player,
+                layer,
+                live_layers: live_layers(player),
+                stick_cursor: [stick_reads_as_cursor(&values, player, 'L'), stick_reads_as_cursor(&values, player, 'R')],
+                cursor_speed: speed.as_deref(),
+                profiles: place.profiles,
+                help: &help,
+            });
         }
         Screen::Keyboard { button_idx, key_idx } => {
             // Title shows the chord in a combo sub-tab ("ZL+A"), else the button.

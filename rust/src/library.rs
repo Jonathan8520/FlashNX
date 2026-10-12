@@ -3653,6 +3653,25 @@ fn input_inner(button: &str) -> bool {
             return true;
         }
     }
+    // A game's controls editor: Y opens the shared profiles, the mockup's
+    // shortcut. They are a page of the game's Touches et curseur (its "Apply a
+    // profile" row) and come off the network, so the editor closes onto that
+    // page and the page's own flow runs from there: B on the profiles comes
+    // back to the page, where the path says it goes.
+    if button == "Y" && menu::screen_kind() == 2 {
+        let game = LIBRARY.lock().ok().and_then(|s| match s.screen {
+            Screen::TouchesEditor { game_idx } => Some(game_idx),
+            _ => None,
+        });
+        if let Some(game_idx) = game {
+            menu::close();
+            if let Ok(mut s) = LIBRARY.lock() {
+                goto_touches_menu(&mut s, game_idx, 1);
+            }
+            defer_net(PendingNet::OpenProfiles { game_idx }, game_idx);
+            return true;
+        }
+    }
     // Sub-screen: TOUCHES editor owns input while active.
     if menu::is_active() {
         let consumed = menu::input(button);
@@ -4360,9 +4379,9 @@ fn handle_settings_prefs_input(s: &mut State, button: &str, mut selection: usize
         }
         "A" if selection == 0 => {
             // Global default keymap: it is a per-game default like the rows
-            // below it.
+            // below it. No game: the editor says "for every game".
             keymap::init_for_global_default();
-            menu::open();
+            menu::open(None);
             s.screen = Screen::SettingsKeymapEditor;
             return;
         }
@@ -5803,11 +5822,13 @@ fn handle_touches_menu_input(s: &mut State, button: &str, game_idx: usize, mut s
             // `input()`.
             if selection == 0 {
                 // Init the keymap for THIS game so current_binding / set_binding
-                // land in the right sidecar, then open the editor.
+                // land in the right sidecar, then open the editor, which names
+                // the game in its header.
+                let name = s.entries.get(game_idx).map(|e| e.display_name.clone()).unwrap_or_default();
                 if let Some(entry) = s.entries.get(game_idx) {
                     keymap::init_for_swf(&entry.basename);
                 }
-                menu::open();
+                menu::open(Some(&name));
                 s.screen = Screen::TouchesEditor { game_idx };
                 return;
             }

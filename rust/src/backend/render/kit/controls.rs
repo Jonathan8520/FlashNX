@@ -132,6 +132,29 @@ impl SwitchRenderBackend {
         }
     }
 
+    /// A key of the keyboard drawn as one: a raised cap with a darker lip and
+    /// its legend, from `x`, centred on `cy`, `h` tall, at most `max_w` wide (a
+    /// one-letter key is square). `dim` for a key that is only inherited.
+    /// Returns its width.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn kit_keycap(&mut self, x: f32, cy: f32, max_w: f32, h: f32, label: &str, px: f32, dim: bool) -> f32 {
+        const PAD_X: f32 = 9.0;
+        let t = self.kit_fit(label, px, (max_w - 2.0 * PAD_X).max(0.0));
+        let tw = self.kit_measure(&t, px);
+        let w = (tw + 2.0 * PAD_X).max(h).min(max_w.max(h));
+        let y = (cy - h * 0.5).round();
+        let x = x.round();
+        let (face, lip, ink) = if dim {
+            (col::TILE, 0xFF_15_1E_33, col::TEXT3)
+        } else {
+            (col::CHIP, 0xFF_1A_1F_27, col::TEXT)
+        };
+        self.kit_rrect(x, y, w, h, 6.0, lip);
+        self.kit_rrect(x, y, w, h - 2.0, 6.0, face);
+        self.kit_text_mid((x + (w - tw) * 0.5).round(), y + (h - 2.0) * 0.5, px, &t, ink);
+        w
+    }
+
     /// Width of a chip (see `kit_chip`).
     pub(crate) fn kit_chip_width(&mut self, icon: Option<Icon>, label: &str, count: Option<&str>) -> f32 {
         let px = size::LABEL;

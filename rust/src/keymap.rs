@@ -779,6 +779,16 @@ pub fn current_binding(button: &str) -> Option<std::string::String> {
         .cloned()
 }
 
+/// What `button` sends in the Normal layer for the player being edited, if
+/// anything: what a combo layer falls back to for a button it does not map
+/// (`lookup_combo` returns None, and `main.cpp` sends the base key).
+pub fn base_binding(button: &str) -> Option<std::string::String> {
+    let g = ACTIVE_KEYMAP.lock().ok()?;
+    let km = g.as_ref()?;
+    let map = if edit_player() == 2 { &km.bindings_p2 } else { &km.bindings };
+    map.get(button).filter(|v| !v.is_empty()).cloned()
+}
+
 /// The keys the other buttons send in the map the editor is on (player and
 /// layer), each with the pad labels (`PadSlot::glyph`) of the buttons sending
 /// it. `editing` is left out: the picker marks a key ANOTHER button already
@@ -813,6 +823,31 @@ pub fn current_map_used_keys(editing: &str) -> BTreeMap<std::string::String, std
         }
     }
     used
+}
+
+/// Whether player 1's `stick` ('L' or 'R') moves the mouse cursor: none of its
+/// four directions sends anything in the Normal layer. The rule is
+/// `main.cpp`'s (`g_left_stick_dpad` / `g_right_stick_dpad`): bind one
+/// direction and the whole stick becomes a d-pad, the cursor no longer
+/// following it. Player 2's sticks never move the cursor.
+pub fn stick_drives_cursor(stick: char) -> bool {
+    let Ok(g) = ACTIVE_KEYMAP.lock() else { return false };
+    let Some(km) = g.as_ref() else { return false };
+    ["Up", "Down", "Left", "Right"].iter().all(|d| {
+        km.bindings
+            .get(&std::format!("Stick{}{}", stick, d))
+            .map_or(true, |v| v.is_empty())
+    })
+}
+
+/// The stick ('L' or 'R') a pad slot is a DIRECTION of, if it is one. The
+/// press (`StickLPress`) is a button of its own and changes nothing about the
+/// cursor.
+pub fn stick_of_direction(button: &str) -> Option<char> {
+    let rest = button.strip_prefix("Stick")?;
+    let mut chars = rest.chars();
+    let stick = chars.next().filter(|c| *c == 'L' || *c == 'R')?;
+    matches!(chars.as_str(), "Up" | "Down" | "Left" | "Right").then_some(stick)
 }
 
 /// Set `button` → `flash_key` (e.g. "A" → "Space"). `None` clears the

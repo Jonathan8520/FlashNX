@@ -160,8 +160,6 @@ const MODAL_W: f32 = 520.0;
 const MODAL_W_WIDE: f32 = 720.0;
 /// The page behind a destructive confirm is darker than behind other windows.
 const MODAL_DIM_DANGER: u32 = 0xD0_05_0A_16;
-const MODAL_ROW_COL: u32 = 0xA8B6D6;
-const MODAL_ROW_SEL_COL: u32 = 0xFFD740;
 /// Vertical metrics. A window is PAD_TOP (title[+subtitle]) + rows*ROW_H +
 /// PAD_BOTTOM (hints). Fixed-height confirms override the total.
 const MODAL_ROW_H: f32 = 52.0;
@@ -247,6 +245,73 @@ fn pad_caption_px(px: f32) -> f32 {
 }
 
 const PAD_CAPTION_GAP: f32 = 3.0;
+
+// ── The controls editor's window ───────────────────────────────────────────
+
+/// One row of the controls editor: what the button sends in the open layer.
+#[derive(Clone, PartialEq)]
+pub(crate) enum PadValue {
+    /// A key, a click or the console keyboard (a `keymap` key name).
+    Key(std::string::String),
+    /// Nothing.
+    None,
+    /// In a combo layer, a button the layer does not map: it sends its Normal
+    /// key while the modifier is held (`None` inside when that is nothing too).
+    Inherited(Option<std::string::String>),
+    /// A modifier: it holds its layer and sends no key of its own.
+    Modifier,
+}
+
+/// The controls editor as data, gathered by `menu.rs`.
+pub(crate) struct PadView<'a> {
+    /// Where the editor was opened from ("Pause", "Touches et curseur").
+    pub crumbs: &'a [&'a str],
+    /// Beside the title: the game's name, or "for every game".
+    pub subject: &'a str,
+    /// Indexes `keymap::PAD_SLOTS`.
+    pub selection: usize,
+    /// One per `keymap::PAD_SLOTS`.
+    pub values: &'a [PadValue],
+    pub player: u8,
+    /// Indexes `keymap::SUBTAB_MODS`: 0 is Normal.
+    pub layer: usize,
+    /// The combo layers that hold a key: their tab carries a dot.
+    pub live_layers: [bool; 5],
+    /// The sticks (left, right) whose four direction rows read as one value,
+    /// the mouse cursor they move.
+    pub stick_cursor: [bool; 2],
+    /// The cursor speed in force ("×1,5"), or None where it does not apply.
+    pub cursor_speed: Option<&'a str>,
+    /// Whether Y opens the shared profiles from here.
+    pub profiles: bool,
+    /// The line about the focused row.
+    pub help: &'a str,
+}
+
+/// What the editor's touch table holds after its twenty-five rows: the two
+/// player segments, the five layer segments, then the controls on the picture
+/// (one per row, in `PAD_SLOTS` order).
+pub(crate) const PAD_CELL_PLAYER: usize = crate::keymap::PAD_SLOTS.len();
+pub(crate) const PAD_CELL_LAYER: usize = PAD_CELL_PLAYER + 2;
+pub(crate) const PAD_CELL_ICON: usize = PAD_CELL_LAYER + 5;
+
+/// The window: as wide as the screen less this margin, its content this far
+/// in, its header and footer bands, its title (Touches.dc.html).
+const TOUCHES_MARGIN: f32 = 16.0;
+const TOUCHES_PAD_X: f32 = 28.0;
+const TOUCHES_HEAD_H: f32 = 104.0;
+const TOUCHES_FOOT_H: f32 = 60.0;
+const TOUCHES_TITLE_PX: f32 = 24.0;
+/// "None", the Minus caption: quieter than any value.
+const TOUCHES_QUIET: u32 = 0xFF_5A_6A_8F;
+
+/// The header's segmented switches.
+const SEG_H: f32 = 36.0;
+const SEG_INSET: f32 = 3.0;
+const SEG_PAD: f32 = 12.0;
+const SEG_PX: f32 = 14.0;
+/// Room for the dot after a live layer's name.
+const SEG_DOT_ROOM: f32 = 10.0;
 
 /// Geometry of a drawn modal frame, returned by `draw_modal_frame` so the caller
 /// can lay its body (rows or free text) inside the shared chrome.
@@ -9496,154 +9561,169 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
-    /// TOUCHES pad view — the keymap editor.
+    /// TOUCHES pad view: the keymap editor (Touches.dc.html).
     ///
     /// Draws the controller from `keymap::PAD_SLOTS` (positioned controls in
-    /// abstract units) with one value chip per control, in two columns flanking
-    /// the picture, and lights the selected control in BOTH places at once: the
-    /// chip you are reading and the button you would press.
+    /// abstract units) with one row per control, in two columns flanking the
+    /// picture, and lights the selected control in BOTH places at once: the row
+    /// you are reading and the button you would press.
     ///
     /// That pairing is the point of the screen. The list this replaced could
     /// tell you a binding but never where the button was, and it showed eight of
-    /// twenty-five at a time — so reading one keymap took four screens, times
+    /// twenty-five at a time, so reading one keymap took four screens, times
     /// five combo layers, times two players. Nothing here scrolls.
     ///
-    /// `bindings` is parallel to `PAD_SLOTS`: `(binding, is_modifier)`. A slot
-    /// flagged `is_modifier` sends no key of its own  either it is the open
-    /// layer's own modifier, or it is a modifier everywhere because its layer has
-    /// a binding (see `keymap::slot_is_modifier`). Those rows are drawn dimmed
-    /// with the word MODIFIER where the key would be, and their button goes teal
-    /// on the picture, so a combo layer looks like what it is instead of being a
-    /// word in a tab strip.
-    pub fn draw_touches_pad(
-        &mut self,
-        selection: usize,
-        bindings: &[(Option<std::string::String>, bool)],
-        player: u8,
-        subtab: usize,
-    ) {
-        use crate::keymap::{Nub, PadIcon};
+    /// Around it, the window of the mockup: the path it was opened from and the
+    /// game it edits, the player and layer switches beside the buttons that work
+    /// them, one line about the row under the cursor, the cursor speed and the
+    /// hints. Every value says what the button really does: a key on a keycap, a
+    /// click beside the mouse, "None" quietly, in a combo layer the Normal key it
+    /// falls back to, a modifier as the layer it holds (its button teal on the
+    /// picture), and a stick that moves the cursor as one value across its four
+    /// direction rows.
+    pub(crate) fn draw_touches_pad(&mut self, v: &PadView) {
+        use crate::keymap::{Nub, PadIcon, PAD_SLOTS};
+        use theme::{col, size};
         // Amber is the cursor everywhere in this app. Teal marks a button that
-        // is a MODIFIER rather than a key  the same teal the keyboard picker
-        // uses for "in play", and the same meaning: this one is spoken for.
+        // is a MODIFIER rather than a key, the teal the key picker uses for a
+        // key already in use, and with the same meaning: this one is spoken for.
         const SHELL_COL: u32 = 0xFF_1E_2C_4A;
         const ICON_COL: u32 = 0xFF_34_46_6B;
         const ICON_NUB_COL: u32 = 0xFF_5A_6A_8F;
-        const ICON_SEL_COL: u32 = theme::col::GOLD;
+        const ICON_SEL_COL: u32 = col::GOLD;
         const ICON_SEL_NUB: u32 = 0xFF_1A_14_05;
         const ICON_MOD_COL: u32 = 0xFF_2E_6E_63;
         const ICON_MOD_NUB: u32 = 0xFF_58_C0_AE;
         const ICON_LOCK_COL: u32 = 0xFF_22_32_4F;
-        const CHIP_COL: u32 = 0xFF_22_32_4F;
-        const CHIP_LOCK_COL: u32 = 0xFF_1A_27_42;
-        const SEP_COL: u32 = 0xFF_34_46_6B;
-        const LOCK_TXT_COL: u32 = 0x8090B5;
+        /// The band of the line about the focused row, over the footer.
+        const HELP_H: f32 = 36.0;
+        /// Between a column of rows and the picture.
+        const COL_GAP: f32 = 28.0;
+        /// The picture's width in pad units: the shell and its rail buttons
+        /// (13.9 to 32.1), with a little air, centred on the shell's middle.
+        const PIC_UNITS: f32 = 18.4;
+        const PIC_MID: f32 = 23.0;
 
         let lc = crate::loc::s();
-        const PANEL_W: f32 = 1180.0;
-        const SIDE_MARGIN: f32 = 26.0;
-        // Title + the two chip strips above, the legend below. Both bands are
-        // fixed pixels, so the pad takes whatever is left — which is exactly
-        // what the scale below is measured from.
-        const HEAD_H: f32 = 96.0;
-        const FOOT_H: f32 = 56.0;
-
+        let u = crate::loc_ui::ui();
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
-        // The same clamp `draw_modal_frame` applies, run BEFORE the call: the
-        // panel's height depends on the scale, and the scale depends on the
-        // width it will actually get. A turned picture gives a 720-wide viewport,
-        // and a pad laid out for 1180 would run off both edges of it.
-        let w = PANEL_W.min(vw - 40.0);
-        let inner_w = w - 2.0 * SIDE_MARGIN;
-        let avail_h = (vh - 40.0 - HEAD_H - FOOT_H).max(80.0);
-        // ONE scale taken from BOTH axes. The keyboard could scale on width
-        // alone because it is a block of rows; this is a picture of an object,
-        // and letting the axes disagree would stretch the controller.
-        let u = (inner_w / crate::keymap::PAD_UNITS_W).min(avail_h / crate::keymap::PAD_UNITS_H);
-        let pad_w = crate::keymap::PAD_UNITS_W * u;
-        let pad_h = crate::keymap::PAD_UNITS_H * u;
+        let inner_w = vw - 2.0 * TOUCHES_MARGIN - 2.0 * TOUCHES_PAD_X;
 
-        let frame = self.draw_modal_frame(
-            PANEL_W,
-            0,
-            Some(HEAD_H + pad_h + FOOT_H),
-            false,
-            lc.keys_title,
-            None,
-            Some(lc.keys_footer),
-        );
-        // Both modes visible on the title row, each with the button that
-        // switches it: nothing about the mode you are editing should need a
-        // guess-press to discover (issue #55/#57).
-        {
-            let ul = crate::loc_ui::ui();
-            let players = [ul.p1, ul.p2];
-            let layers = [ul.layer_normal, "ZL", "ZR", "L", "R"];
-            let spx = theme::size::LABEL;
-            let gpx = 22.0;
-            let lw = self.kit_segmented_width(&layers, spx);
-            let pw = self.kit_segmented_width(&players, spx);
-            let bl = self.kit_button_width(Btn::L, gpx);
-            let br = self.kit_button_width(Btn::R, gpx);
-            let bx = self.kit_button_width(Btn::X, gpx);
-            let cy = frame.y + 44.0;
-            let right = frame.x + frame.w - 28.0;
-            let mut x = right - (bl + 8.0 + lw + 8.0 + br);
-            x += self.kit_button(x, cy, gpx, Btn::L, theme::col::PILL_INK) + 8.0;
-            x += self.kit_segmented(x, cy, &layers, subtab.min(4), spx) + 8.0;
-            self.kit_button(x, cy, gpx, Btn::R, theme::col::PILL_INK);
-            let mut x = right - (bl + 8.0 + lw + 8.0 + br) - 28.0 - (bx + 8.0 + pw);
-            x += self.kit_button(x, cy, gpx, Btn::X, theme::col::PILL_INK) + 8.0;
-            self.kit_segmented(x, cy, &players, if player == 2 { 1 } else { 0 }, spx);
+        // The header's two switches, measured first: on a narrow (turned)
+        // screen they take a row of their own under the title.
+        let players = [u.player_1, u.player_2];
+        let layers = [u.layer_normal, "ZL", "ZR", "L", "R"];
+        let gpx = 22.0;
+        let bx = self.kit_button_width(Btn::X, gpx);
+        let bl = self.kit_button_width(Btn::L, gpx);
+        let br = self.kit_button_width(Btn::R, gpx);
+        let pw = self.pad_segments_width(&players, &[false; 2]);
+        let lw = self.pad_segments_width(&layers, &v.live_layers);
+        // [X] players | [L] layers [R], 8 px apart and a hairline between.
+        let switches_w = bx + pw + bl + lw + br + 49.0;
+        let title_w = self.kit_measure(lc.keys_title, TOUCHES_TITLE_PX);
+        let wide = title_w + 14.0 + 120.0 + 24.0 + switches_w <= inner_w;
+        let head_h = if wide { TOUCHES_HEAD_H } else { TOUCHES_HEAD_H + 44.0 };
+
+        // ONE scale from BOTH axes: this is a picture of an object, and letting
+        // the axes disagree would stretch the controller. In landscape the height
+        // decides and the window fills the screen; a turned picture gives a
+        // narrow viewport, the width decides, and the window shrinks to the pad.
+        let avail_h = (vh - 2.0 * TOUCHES_MARGIN - head_h - HELP_H - TOUCHES_FOOT_H).max(80.0);
+        let unit = (inner_w / crate::keymap::PAD_UNITS_W).min(avail_h / crate::keymap::PAD_UNITS_H);
+        let pad_h = crate::keymap::PAD_UNITS_H * unit;
+        let (x, y, w, h) = self.touches_window(head_h + pad_h + HELP_H + TOUCHES_FOOT_H);
+        let left = x + TOUCHES_PAD_X;
+        let right = x + w - TOUCHES_PAD_X;
+
+        // ── The header ───────────────────────────────────────────────────
+        self.touches_crumbs(left, y + 30.0, inner_w, v.crumbs);
+        let ty = y + 66.0;
+        let tw = self.kit_text_mid(left, ty, TOUCHES_TITLE_PX, lc.keys_title, col::TEXT);
+        let sw_cy = if wide { ty } else { y + 110.0 };
+        let sw_x = right - switches_w;
+        let subject_x = left + tw + 14.0;
+        let subject_max = if wide { sw_x - 24.0 - subject_x } else { right - subject_x };
+        if subject_max > 40.0 && !v.subject.is_empty() {
+            // Cut in the middle: what tells two episodes of a series apart is
+            // at the end of the name.
+            let s = self.kit_fit_mid(v.subject, size::LABEL, subject_max);
+            self.kit_text_mid(subject_x, ty, size::LABEL, &s, col::TEXT3);
         }
+        // Both switches on show, each beside the button that works it: nothing
+        // about the map being edited should need a guess-press to discover
+        // (issue #55/#57).
+        let mut cx = sw_x;
+        cx += self.kit_button(cx, sw_cy, gpx, Btn::X, col::PILL_INK) + 8.0;
+        let player_cells = self.pad_segments(cx, sw_cy, &players, if v.player == 2 { 1 } else { 0 }, &[false; 2]);
+        cx += pw + 8.0;
+        self.draw_overlay_rect(cx, sw_cy - 12.0, 1.0, 24.0, col::PANEL_LINE);
+        cx += 9.0;
+        cx += self.kit_button(cx, sw_cy, gpx, Btn::L, col::PILL_INK) + 8.0;
+        let layer_cells = self.pad_segments(cx, sw_cy, &layers, v.layer.min(4), &v.live_layers);
+        cx += lw + 8.0;
+        self.kit_button(cx, sw_cy, gpx, Btn::R, col::PILL_INK);
+        self.draw_overlay_rect(left, y + head_h - 6.0, inner_w, 1.0, col::LINE);
 
-        let ox = frame.x + (frame.w - pad_w) * 0.5;
-        let oy = frame.y + HEAD_H;
-        // Units -> pixels. Every rect below goes through these two, so the table
-        // in keymap.rs is the only place the layout is written down.
-        let px = |ux: f32| ox + ux * u;
-        let py = |uy: f32| oy + uy * u;
+        // Units -> pixels. The picture is centred in the window at the one
+        // scale; the two columns of rows run from the window's padding to the
+        // picture, so they line up with the header and the footer whatever room
+        // the height leaves. Their heights stay in units: a row and the button
+        // it names are what the eye pairs.
+        let ox = x + w * 0.5 - PIC_MID * unit;
+        let oy = y + head_h;
+        let px = |ux: f32| ox + ux * unit;
+        let py = |uy: f32| oy + uy * unit;
+        let col_w = ((inner_w - PIC_UNITS * unit) * 0.5 - COL_GAP).max(40.0);
+        let row_rect = |i: usize| -> (f32, f32, f32, f32) {
+            let Some(s) = PAD_SLOTS.get(i) else { return (0.0, 0.0, 0.0, 0.0) };
+            let rx = if s.chip.0 < PIC_MID { left } else { right - col_w };
+            (rx, py(s.chip.1), col_w, s.chip.3 * unit)
+        };
 
         // ── The shell ────────────────────────────────────────────────────
         // Grips first, body over them, one colour: it is a silhouette, and a
         // seam between the three would read as three objects.
         for &(sx, sy, sw, sh, r) in crate::keymap::PAD_SHELL {
-            self.draw_round_rect(px(sx), py(sy), sw * u, sh * u, r * u, SHELL_COL);
+            self.draw_round_rect(px(sx), py(sy), sw * unit, sh * unit, r * unit, SHELL_COL);
         }
 
         // ── Minus, locked ────────────────────────────────────────────────
         {
             let (mx, my, mw, mh) = crate::keymap::PAD_MINUS;
-            let (x, y, d) = (px(mx), py(my), mw * u);
-            self.draw_round_rect(x, y, d, mh * u, d * 0.5, ICON_LOCK_COL);
+            let (mxp, myp, d) = (px(mx), py(my), mw * unit);
+            self.draw_round_rect(mxp, myp, d, mh * unit, d * 0.5, ICON_LOCK_COL);
             let lp = (d * 0.8).clamp(8.0, 16.0).round();
-            let lw = self.kit_measure("\u{2212}", lp);
-            if lw <= d - 2.0 {
-                self.kit_text_mid((x + (d - lw) * 0.5).round(), y + mh * u * 0.5, lp, "\u{2212}", 0xFF00_0000 | ICON_NUB_COL);
+            let mlw = self.kit_measure("\u{2212}", lp);
+            if mlw <= d - 2.0 {
+                self.kit_text_mid((mxp + (d - mlw) * 0.5).round(), myp + mh * unit * 0.5, lp, "\u{2212}", ICON_NUB_COL);
             }
         }
 
         // ── The controls on the picture ──────────────────────────────────
         // The five slots of one stick share a rect on purpose, so a stick must
-        // be drawn ONCE — with the nub of whichever of the five is selected.
+        // be drawn ONCE, with the nub of whichever of the five is selected.
         // Drawn per-slot they would overdraw each other, and the last one in the
         // table would always win. Same reason the selected control is drawn in a
         // second pass: the d-pad arms meet, and the one under the cursor has to
         // be the one on top.
-        let sel_slot = crate::keymap::PAD_SLOTS.get(selection);
+        let is_mod = |i: usize| matches!(v.values.get(i), Some(PadValue::Modifier));
+        let sel_slot = PAD_SLOTS.get(v.selection);
+        // Each control's rect, for touch: a tap on the picture picks its row.
+        // A stick answers once, on its first slot.
+        let mut icon_cells: std::vec::Vec<(f32, f32, f32, f32)> = std::vec![(0.0, 0.0, 0.0, 0.0); PAD_SLOTS.len()];
         for pass in 0..2 {
-            for (i, slot) in crate::keymap::PAD_SLOTS.iter().enumerate() {
-                let is_mod = bindings.get(i).map(|b| b.1).unwrap_or(false);
-                let is_sel = i == selection;
+            for (i, slot) in PAD_SLOTS.iter().enumerate() {
+                let is_sel = i == v.selection;
                 if is_sel != (pass == 1) {
                     continue;
                 }
                 let (ix, iy, iw, ih) = slot.icon;
-                let (x, y, w, h) = (px(ix), py(iy), iw * u, ih * u);
+                let (sx, sy, sw, sh) = (px(ix), py(iy), iw * unit, ih * unit);
                 let (body, nub) = if is_sel {
                     (ICON_SEL_COL, ICON_SEL_NUB)
-                } else if is_mod {
+                } else if is_mod(i) {
                     (ICON_MOD_COL, ICON_MOD_NUB)
                 } else {
                     (ICON_COL, ICON_NUB_COL)
@@ -9653,12 +9733,13 @@ impl SwitchRenderBackend {
                         // Only the first slot of the group draws the ring, and
                         // only when the cursor is elsewhere: a selected slot owns
                         // its stick and draws it in pass 1 with its own nub.
-                        let group_head = crate::keymap::PAD_SLOTS
+                        let group_head = PAD_SLOTS
                             .iter()
-                            .position(|o| {
-                                matches!(o.shape, PadIcon::Stick(_)) && o.icon == slot.icon
-                            })
+                            .position(|o| matches!(o.shape, PadIcon::Stick(_)) && o.icon == slot.icon)
                             .unwrap_or(i);
+                        if i == group_head {
+                            icon_cells[i] = (sx, sy, sw, sh);
+                        }
                         let owner = sel_slot
                             .filter(|s| matches!(s.shape, PadIcon::Stick(_)) && s.icon == slot.icon)
                             .is_some();
@@ -9666,9 +9747,9 @@ impl SwitchRenderBackend {
                             continue;
                         }
                         let n = if is_sel { n } else { Nub::Press };
-                        self.draw_round_rect(x, y, w, h, w * 0.5, body);
-                        let nd = w * 0.52;
-                        let off = w * 0.20;
+                        self.draw_round_rect(sx, sy, sw, sh, sw * 0.5, body);
+                        let nd = sw * 0.52;
+                        let off = sw * 0.20;
                         let (dx, dy) = match n {
                             Nub::Up => (0.0, -off),
                             Nub::Down => (0.0, off),
@@ -9677,8 +9758,8 @@ impl SwitchRenderBackend {
                             Nub::Press => (0.0, 0.0),
                         };
                         self.draw_round_rect(
-                            x + w * 0.5 + dx - nd * 0.5,
-                            y + h * 0.5 + dy - nd * 0.5,
+                            sx + sw * 0.5 + dx - nd * 0.5,
+                            sy + sh * 0.5 + dy - nd * 0.5,
                             nd,
                             nd,
                             nd * 0.5,
@@ -9686,15 +9767,17 @@ impl SwitchRenderBackend {
                         );
                     }
                     PadIcon::Disc => {
-                        self.draw_round_rect(x, y, w, h, w.min(h) * 0.5, body);
+                        icon_cells[i] = (sx, sy, sw, sh);
+                        self.draw_round_rect(sx, sy, sw, sh, sw.min(sh) * 0.5, body);
                     }
                     PadIcon::Slab => {
-                        self.draw_round_rect(x, y, w, h, w.min(h) * 0.34, body);
+                        icon_cells[i] = (sx, sy, sw, sh);
+                        self.draw_round_rect(sx, sy, sw, sh, sw.min(sh) * 0.34, body);
                     }
                 }
                 // The glyph, when the shape is big enough to carry one. The rail
                 // buttons are 0.7 units wide and never are; they are named by
-                // their chip and found by lighting up.
+                // their row and found by lighting up.
                 if !matches!(slot.shape, PadIcon::Stick(_)) {
                     // Selected wins. The cursor should never be on a modifier
                     // row -- menu.rs steps over them and refuses them to a
@@ -9702,112 +9785,149 @@ impl SwitchRenderBackend {
                     // and a label that turned invisible for one frame would be
                     // a worse answer than one that stays readable.
                     let txt = if is_sel {
-                        0x1A1A1A
-                    } else if is_mod {
-                        0xEAF7F3
+                        0xFF_1A_1A_1A
+                    } else if is_mod(i) {
+                        0xFF_EA_F7_F3
                     } else {
-                        0xE8EEF6
+                        0xFF_E8_EE_F6
                     };
                     // The label shrinks to fit its button, and a button too small
                     // for one even at 9 px (the SL/SR rails) goes without.
-                    let mut lp = (h * 0.55).clamp(9.0, 17.0).round();
-                    let mut lw = self.kit_measure(slot.glyph, lp);
-                    if lw > w - 4.0 {
-                        lp = (lp * (w - 4.0) / lw).floor();
-                        lw = self.kit_measure(slot.glyph, lp);
+                    let mut lp = (sh * 0.55).clamp(9.0, 17.0).round();
+                    let mut glw = self.kit_measure(slot.glyph, lp);
+                    if glw > sw - 4.0 {
+                        lp = (lp * (sw - 4.0) / glw).floor();
+                        glw = self.kit_measure(slot.glyph, lp);
                     }
                     if lp >= 9.0 {
-                        self.kit_text_mid((x + (w - lw) * 0.5).round(), y + h * 0.5, lp, slot.glyph, 0xFF00_0000 | txt);
+                        self.kit_text_mid((sx + (sw - glw) * 0.5).round(), sy + sh * 0.5, lp, slot.glyph, txt);
                     }
                 }
             }
         }
 
-        // ── The value chips ──────────────────────────────────────────────
-        // Backgrounds first, then the eased wash, then every label: the wash has
-        // to sit ON the chip it marks and UNDER the text it marks it for, and a
-        // chip drawn after it would paint over it.
-        let chip_h = crate::keymap::PAD_SLOTS
-            .first()
-            .map(|s| s.chip.3 * u)
-            .unwrap_or(0.0);
-        let chip_r = (chip_h * 0.25).min(5.0);
-        let badge_w = 3.4 * u;
-        let txt_px = (chip_h * 0.52).clamp(11.0, 18.0);
-        let mut cells: std::vec::Vec<(f32, f32, f32, f32)> =
-            std::vec::Vec::with_capacity(crate::keymap::PAD_SLOTS.len());
-        for (i, slot) in crate::keymap::PAD_SLOTS.iter().enumerate() {
-            let locked = bindings.get(i).map(|b| b.1).unwrap_or(false);
-            let (cx, cy, cw, ch) = slot.chip;
-            let (x, y, w, h) = (px(cx), py(cy), cw * u, ch * u);
-            cells.push((x, y, w, h));
-            self.draw_round_rect(x, y, w, h, chip_r, if locked { CHIP_LOCK_COL } else { CHIP_COL });
-            // A hairline instead of a second filled box behind the badge: the
-            // separator says "name | value" for the price of one rect, and this
-            // panel draws twenty-five of everything.
-            self.draw_overlay_rect(x + badge_w, y + h * 0.22, 2.0, h * 0.56, SEP_COL);
+        // Why Minus has no row: it opens the pause, from wherever this editor
+        // was opened. Under the picture, where the eye goes looking for it.
+        {
+            let npx = (unit * 0.6).clamp(10.0, size::CAPTION);
+            let gw = self.kit_button_width(Btn::Minus, npx + 3.0);
+            let nw = gw + 6.0 + self.kit_measure(u.keys_minus_note, npx);
+            let nx = (px(PIC_MID) - nw * 0.5).round();
+            let ncy = py(20.6);
+            self.kit_button(nx, ncy, npx + 3.0, Btn::Minus, TOUCHES_QUIET);
+            self.kit_text_mid(nx + gw + 6.0, ncy, npx, u.keys_minus_note, TOUCHES_QUIET);
         }
 
+        // ── The rows ─────────────────────────────────────────────────────
+        let row_h = PAD_SLOTS.first().map(|s| s.chip.3 * unit).unwrap_or(0.0);
+        let txt = (row_h * 0.5).clamp(10.0, size::LABEL);
+        // One badge column for every row, as wide as the widest badge, so the
+        // values start in one place down both columns.
+        let mut badge_w: f32 = 2.4 * unit;
+        for slot in PAD_SLOTS {
+            badge_w = badge_w.max(self.pad_badge_width(slot.glyph, txt));
+        }
+        let value_x = |rx: f32| rx + 10.0 + badge_w + 12.0;
+
+        // A stick that moves the cursor is ONE thing, not four rows saying
+        // "None": its direction rows share one value that says what it does.
+        // Bind any of them and the stick becomes a d-pad (the help line says
+        // so); the rows then read one by one again.
+        let mut groups: std::vec::Vec<(f32, f32, f32, f32)> = std::vec::Vec::new();
+        let mut in_group = [false; 32];
+        for (si, stick) in ['L', 'R'].iter().enumerate() {
+            if !v.stick_cursor[si] {
+                continue;
+            }
+            let rows: std::vec::Vec<usize> = (0..PAD_SLOTS.len())
+                .filter(|&i| crate::keymap::stick_of_direction(PAD_SLOTS[i].name) == Some(*stick))
+                .collect();
+            let (Some(&first), Some(&last)) = (rows.first(), rows.last()) else { continue };
+            let (rx, ry0, rw, _) = row_rect(first);
+            let (_, ry1, _, rh1) = row_rect(last);
+            let gx = value_x(rx) - 6.0;
+            groups.push((gx, ry0 + 3.0, rx + rw - 6.0 - gx, ry1 + rh1 - 3.0 - (ry0 + 3.0)));
+            for i in rows {
+                if let Some(f) = in_group.get_mut(i) {
+                    *f = true;
+                }
+            }
+        }
+        for &(gx, gy, gw, gh) in &groups {
+            self.kit_rrect(gx, gy, gw, gh, 8.0, col::TILE);
+        }
+
+        // The focus, eased on BOTH axes with one key: the cursor crosses
+        // columns here, and a jump from the left hand to the right is the move
+        // that most needs following by eye. The mockup's focused row: a darker
+        // fill than a keycap, so the key on it stays a key, inside a gold edge.
         let now = unsafe { ruffle_tick_now() };
-        if let Some(slot) = sel_slot {
-            let (cx, cy, cw, ch) = slot.chip;
-            // Eased on BOTH axes with one key, like the language grid: the
-            // cursor crosses columns here, and a jump from the left column to
-            // the right is the move that most needs to be followed by eye.
-            let bx = eased_list_x(px(cx), GLIDE_KEY_KEYS, now);
-            let by = eased_list_y(py(cy), GLIDE_KEY_KEYS, now);
-            // Drawn, not masked: `draw_selection_bar` cuts its corners with the
-            // PAGE colour, which over a chip on a modal would leave four notches
-            // of the wrong navy in the chip itself.
-            self.kit_focus_pill(bx, by, cw * u, ch * u);
+        if v.selection < PAD_SLOTS.len() {
+            let (rx, ry, rw, rh) = row_rect(v.selection);
+            let fx = eased_list_x(rx, GLIDE_KEY_KEYS, now);
+            let fy = eased_list_y(ry, GLIDE_KEY_KEYS, now);
+            self.kit_shape(fx, fy, rw, rh, 9.0, col::LINE, 2.0, col::GOLD, 0.0);
         }
 
-        for (i, slot) in crate::keymap::PAD_SLOTS.iter().enumerate() {
-            let (cx, cy, cw, ch) = slot.chip;
-            let (x, y, w, h) = (px(cx), py(cy), cw * u, ch * u);
-            let locked = bindings.get(i).map(|b| b.1).unwrap_or(false);
-            let is_sel = i == selection;
-            let col = swf::Color::from_rgb(
-                if locked {
-                    LOCK_TXT_COL
-                } else if is_sel {
-                    MODAL_ROW_SEL_COL
-                } else {
-                    MODAL_ROW_COL
-                },
-                255,
-            );
-            // Badge: what you press, as the console draws it -- its own glyph
-            // for a button, the stick or d-pad glyph with the direction beside
-            // it -- centred in its half so the column lines up.
-            let badge_ink = if locked {
-                0xFF00_0000 | LOCK_TXT_COL
-            } else if is_sel {
-                theme::col::GOLD
+        let mut cells: std::vec::Vec<(f32, f32, f32, f32)> = std::vec::Vec::with_capacity(PAD_CELL_ICON + PAD_SLOTS.len());
+        for (i, slot) in PAD_SLOTS.iter().enumerate() {
+            let (rx, ry, rw, rh) = row_rect(i);
+            cells.push((rx, ry, rw, rh));
+            let rcy = ry + rh * 0.5;
+            let focused = i == v.selection;
+            let value = v.values.get(i).cloned().unwrap_or(PadValue::None);
+            let badge_ink = if value == PadValue::Modifier {
+                col::TEXT3
+            } else if focused {
+                col::GOLD
             } else {
-                theme::col::TEXT
+                col::TEXT
             };
-            self.kit_pad_badge(x + 10.0, y + h * 0.5, badge_w - 10.0, slot.glyph, txt_px, badge_ink);
-            // Value: what it does. Shrinks rather than truncating, the way every
-            // other box in this app does — a binding cut to "RIGHT CLI" is worse
-            // than a small one.
-            // Not the stored binding: it is still in the keymap, and it will
-            // work again the day the layer is emptied, but showing it here would
-            // promise a key press that `main.cpp` mutes.
-            let value = if locked {
-                std::borrow::Cow::Borrowed(lc.keys_modifier)
-            } else {
-                bindings
-                    .get(i)
-                    .and_then(|b| b.0.as_deref())
-                    .map(crate::keymap::flash_key_display)
-                    .unwrap_or(std::borrow::Cow::Borrowed(lc.none))
-            };
-            let avail = w - badge_w - 18.0;
-            let v = self.kit_fit(&value, txt_px, avail);
-            let rgba = ((col.a as u32) << 24) | ((col.r as u32) << 16) | ((col.g as u32) << 8) | col.b as u32;
-            self.kit_text_mid(x + badge_w + 12.0, y + h * 0.5, txt_px, &v, rgba);
+            self.kit_pad_badge(rx + 10.0, rcy, badge_w, slot.glyph, txt, badge_ink);
+            if in_group.get(i).copied().unwrap_or(false) {
+                continue;
+            }
+            let vx = value_x(rx);
+            let vmax = (rx + rw - 10.0 - vx).max(0.0);
+            self.pad_value(vx, rcy, vmax, rh, &value, slot.name, txt);
         }
+        for &(gx, gy, gw, gh) in &groups {
+            let gcy = gy + gh * 0.5;
+            let isz = (txt + 1.0).round();
+            self.kit_icon(gx + 6.0, gcy, isz, Icon::Pointer, col::TEXT2);
+            let t = self.kit_fit(u.keys_mouse_cursor, txt, (gw - 12.0 - isz - 8.0).max(0.0));
+            self.kit_text_mid(gx + 6.0 + isz + 8.0, gcy, txt, &t, col::TEXT2);
+        }
+
+        // ── The line about the focused row, and the footer ───────────────
+        let help_cy = y + h - TOUCHES_FOOT_H - HELP_H * 0.5;
+        if !v.help.is_empty() {
+            self.kit_icon(left, help_cy, 16.0, Icon::Info, col::TEXT3);
+            let t = self.kit_fit(v.help, size::LABEL, inner_w - 26.0);
+            self.kit_text_mid(left + 26.0, help_cy, size::LABEL, &t, col::TEXT2);
+        }
+        let hints_profiles: [kit::text::HintItem; 3] =
+            [(&[Btn::A], u.edit), (&[Btn::Y], lc.profile_title), (&[Btn::B], u.back)];
+        let hints_plain: [kit::text::HintItem; 2] = [(&[Btn::A], u.edit), (&[Btn::B], u.back)];
+        let hints_x = self.touches_footer(x, y, w, h, if v.profiles { &hints_profiles } else { &hints_plain });
+        if let Some(speed) = v.cursor_speed {
+            // The speed the cursor rows of the page behind set, read here
+            // without going back (the mockup's footer). Left out rather than
+            // run into the hints on a narrow screen.
+            let s = std::format!("{} {}", lc.set_cursor_speed, speed);
+            let fpx = size::CAPTION + 1.0;
+            if left + 24.0 + self.kit_measure(&s, fpx) + 24.0 <= hints_x {
+                let foot_cy = y + h - TOUCHES_FOOT_H * 0.5;
+                self.kit_icon(left, foot_cy, 16.0, Icon::Pointer, col::TEXT3);
+                self.kit_text_mid(left + 24.0, foot_cy, fpx, &s, col::TEXT3);
+            }
+        }
+
+        // Touch: the rows, then the switches, then the picture (see the
+        // `PAD_CELL_*` indices).
+        cells.extend(player_cells);
+        cells.extend(layer_cells);
+        cells.extend(icon_cells);
         ui_cells_publish(ui_screen_kind(), cells);
 
         unsafe {
@@ -9815,6 +9935,158 @@ impl SwitchRenderBackend {
             glBindVertexArray(0);
         }
         self.gl_state.invalidate();
+    }
+
+    /// One row's value in the controls editor, from `x`, at most `max_w` wide.
+    #[allow(clippy::too_many_arguments)]
+    fn pad_value(&mut self, x: f32, cy: f32, max_w: f32, row_h: f32, value: &PadValue, button: &str, px: f32) {
+        use theme::col;
+        let u = crate::loc_ui::ui();
+        match value {
+            PadValue::Key(k) => {
+                self.pad_key(x, cy, max_w, row_h, k, px, false);
+            }
+            PadValue::None | PadValue::Inherited(None) => {
+                let t = self.kit_fit(u.key_none, px, max_w);
+                self.kit_text_mid(x, cy, px, &t, TOUCHES_QUIET);
+            }
+            PadValue::Inherited(Some(k)) => {
+                // The key the layer falls back to, quieter, and why it is there.
+                let cpx = pad_caption_px(px);
+                let caption = u.key_same_as_normal;
+                let cw = self.kit_measure(caption, cpx) + 10.0;
+                let kw = self.pad_key(x, cy, (max_w - cw).max(max_w * 0.5), row_h, k, px, true);
+                let room = (x + max_w - (x + kw + 10.0)).max(0.0);
+                let c = self.kit_fit(caption, cpx, room);
+                self.kit_text_mid(x + kw + 10.0, cy, cpx, &c, col::TEXT3);
+            }
+            PadValue::Modifier => {
+                // Not the stored binding: it is still in the keymap, and it will
+                // work again the day the layer is emptied, but showing it here
+                // would promise a key press that `main.cpp` mutes.
+                let isz = (px + 1.0).round();
+                self.kit_icon(x, cy, isz, Icon::Layers, col::TEXT3);
+                let label = crate::loc::s().keys_modifier.replace("{}", button);
+                let t = self.kit_fit(&label, px, (max_w - isz - 7.0).max(0.0));
+                self.kit_text_mid(x + isz + 7.0, cy, px, &t, col::TEXT3);
+            }
+        }
+    }
+
+    /// A key as the controls editor shows it, from `x`: a keycap for a key of
+    /// the keyboard, the mouse beside a click, the keyboard icon beside the
+    /// console keyboard (neither of those is a key to press). `dim` for the key
+    /// a combo layer only inherits. Returns the width taken.
+    #[allow(clippy::too_many_arguments)]
+    fn pad_key(&mut self, x: f32, cy: f32, max_w: f32, row_h: f32, name: &str, px: f32, dim: bool) -> f32 {
+        use theme::col;
+        let label = crate::keymap::flash_key_display(name);
+        let icon = match name {
+            "Left click" | "Right click" | "Clic gauche" | "Clic droit" => Some(Icon::Mouse),
+            "Keyboard" => Some(Icon::Keyboard),
+            _ => None,
+        };
+        match icon {
+            Some(ic) => {
+                let isz = (px + 1.0).round();
+                self.kit_icon(x, cy, isz, ic, if dim { col::TEXT3 } else { col::TEXT2 });
+                let t = self.kit_fit(&label, px, (max_w - isz - 7.0).max(0.0));
+                isz + 7.0 + self.kit_text_mid(x + isz + 7.0, cy, px, &t, if dim { col::TEXT3 } else { col::TEXT })
+            }
+            None => self.kit_keycap(x, cy, max_w, (row_h - 6.0).clamp(14.0, 24.0), &label, px, dim),
+        }
+    }
+
+    /// The window the controls editor and its key picker share: the page dimmed
+    /// behind, one raised panel `h` tall (at most the screen) across the whole
+    /// width. Both screens use it, so going from a row to its keys and back
+    /// changes what is in the window, not the window: they used to be a 1180 px
+    /// and a 1120 px panel, each popping in over the other. Returns the panel.
+    fn touches_window(&mut self, h: f32) -> (f32, f32, f32, f32) {
+        unsafe {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_STENCIL_TEST);
+        }
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        self.fill_screen_dim(theme::col::SCRIM);
+        let w = vw - 2.0 * TOUCHES_MARGIN;
+        let h = h.min(vh - 2.0 * TOUCHES_MARGIN);
+        let (x, y) = (TOUCHES_MARGIN, ((vh - h) * 0.5).round());
+        self.kit_panel(x, y, w, h, false);
+        (x, y, w, h)
+    }
+
+    /// The path over the controls editor's title ("Pause › Touches et
+    /// curseur"), the last step brighter, as on the sheets it was opened from.
+    fn touches_crumbs(&mut self, x: f32, cy: f32, max_w: f32, crumbs: &[&str]) {
+        use theme::col;
+        let px = theme::size::CAPTION + 1.0;
+        let end = x + max_w;
+        let mut cx = x;
+        for (i, c) in crumbs.iter().enumerate() {
+            if i > 0 {
+                cx += self.kit_text_mid(cx, cy, px, "  \u{203A}  ", col::TEXT3);
+            }
+            let ink = if i + 1 == crumbs.len() { col::TEXT2 } else { col::TEXT3 };
+            let t = self.kit_fit(c, px, (end - cx).max(0.0));
+            cx += self.kit_text_mid(cx, cy, px, &t, ink);
+        }
+    }
+
+    /// The bottom band of that window: its hairline and the hints at the right.
+    /// What sits at the left (the cursor speed, the picker's legend) is the
+    /// caller's; returns where the hints start, so it can stay clear of them.
+    fn touches_footer(&mut self, x: f32, y: f32, w: f32, h: f32, hints: &[kit::text::HintItem]) -> f32 {
+        self.draw_overlay_rect(x + TOUCHES_PAD_X, y + h - TOUCHES_FOOT_H, w - 2.0 * TOUCHES_PAD_X, 1.0, theme::col::LINE);
+        let right = x + w - TOUCHES_PAD_X;
+        self.kit_hints_right(right, y + h - TOUCHES_FOOT_H * 0.5, hints);
+        right - self.kit_hints_width(hints)
+    }
+
+    /// Width of `pad_segments` with these labels.
+    fn pad_segments_width(&mut self, labels: &[&str], live: &[bool]) -> f32 {
+        let mut w = 2.0 * SEG_INSET;
+        for (i, l) in labels.iter().enumerate() {
+            w += self.kit_measure(l, SEG_PX) + 2.0 * SEG_PAD;
+            if live.get(i).copied().unwrap_or(false) {
+                w += SEG_DOT_ROOM;
+            }
+        }
+        w
+    }
+
+    /// A segmented switch as the controls editor's header draws it
+    /// (Touches.dc.html): a dark track, the current option gold, and a dot after
+    /// an option marked `live` (a combo layer that holds a key, so a layer in
+    /// use shows from the Normal tab). Returns each option's rect, for touch.
+    fn pad_segments(&mut self, x: f32, cy: f32, labels: &[&str], active: usize, live: &[bool]) -> std::vec::Vec<(f32, f32, f32, f32)> {
+        use theme::col;
+        const DOT: f32 = 6.0;
+        const ON_INK: u32 = 0xFF_1A_14_05;
+        let total = self.pad_segments_width(labels, live);
+        let y = (cy - SEG_H * 0.5).round();
+        self.kit_rrect(x, y, total, SEG_H, 10.0, col::BG);
+        let mut sx = x + SEG_INSET;
+        let mut rects = std::vec::Vec::with_capacity(labels.len());
+        for (i, l) in labels.iter().enumerate() {
+            let lw = self.kit_measure(l, SEG_PX);
+            let dot = live.get(i).copied().unwrap_or(false);
+            let sw = lw + 2.0 * SEG_PAD + if dot { SEG_DOT_ROOM } else { 0.0 };
+            let on = i == active;
+            if on {
+                self.kit_rrect(sx, y + SEG_INSET, sw, SEG_H - 2.0 * SEG_INSET, 8.0, col::GOLD);
+            }
+            self.kit_text_mid((sx + SEG_PAD).round(), cy, SEG_PX, l, if on { ON_INK } else { col::TEXT2 });
+            if dot {
+                let dx = (sx + SEG_PAD + lw + 4.0).round();
+                self.kit_rrect(dx, (cy - 8.0).round(), DOT, DOT, DOT * 0.5, if on { ON_INK } else { col::GOLD });
+            }
+            rects.push((sx, y, sw, SEG_H));
+            sx += sw;
+        }
+        rects
     }
 
     /// The width `kit_pad_badge` draws `label` in at `px`.
