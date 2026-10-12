@@ -3,10 +3,10 @@
 //! Reached from the pause menu's TOUCHES entry (`ruffle_touches_open` ->
 //! `open_submenu`). Mirrors the library OPTIONS > TOUCHES sub-menu (#20 Option 1):
 //!
-//!   - **Menu** — the Touches et curseur page (`TouchesRow`): edit keys, apply
+//!   - **Menu**: the Touches et curseur page (`TouchesRow`): edit keys, apply
 //!     a profile, share my controls, revert, then the cursor's speed, its
 //!     visibility and the gyroscope. Apply / share / revert do HTTPS
-//!     synchronously (the game is paused, so a brief freeze is fine — no async
+//!     synchronously (the game is paused, so a brief freeze is fine; no async
 //!     infra here). The speed and the gyroscope are value rows, armed by A
 //!     and stepped live (`pause_values`).
 //!   - **List / Keyboard** — the per-button keymap editor (also used directly by

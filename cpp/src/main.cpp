@@ -2006,7 +2006,7 @@ static void worker_entry(void* arg) {
             // ─── Pause main menu ────────────────────────────────────────
             // Up / Down repeat when held, like every list. `-` or B dismisses
             // (= Resume). Right stick navigates too (it's the mouse cursor only
-            // when the menu is closed — this branch `continue`s before the
+            // when the menu is closed: this branch `continue`s before the
             // cursor code).
             //
             // A fresh Up on Resume wraps to Quit, the quickest way out, as
