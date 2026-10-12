@@ -58,7 +58,8 @@ pub(crate) enum Screen {
     /// Applet mode: the user pressed A on a game but we have only the small
     /// applet heap, so launching would OOM. Shows a "use title takeover"
     /// notice (P1c) instead of the embedded red SWF. Carries the list row to
-    /// return to on dismiss.
+    /// return to on dismiss (pressed on an importer page, the page to go back
+    /// to is held in `LAUNCH_BACKDROP` instead).
     AppletNotice { selection: usize, scroll_offset: usize },
     /// User pressed - or chose to quit; main loop exits the `.nro`.
     Quit,
@@ -1635,9 +1636,12 @@ pub(crate) struct State {
     /// The Flashpoint results page shows a search that failed (`cover_msg` says
     /// why) rather than one that found nothing.
     fp_error: bool,
-    /// The details window's download size is still to be read: the HEAD runs
-    /// on the frame after the window is on screen, never before it opens.
+    /// The details window's download size is still to come: `fp_size_slot` is
+    /// the thumbnail slot asking for it (-1 when none is running yet), for the
+    /// result `fp_size_for`.
     fp_size_pending: bool,
+    fp_size_slot: i32,
+    fp_size_for: usize,
     /// The details window's blurb has arrived (in `fp_desc`); until then the
     /// thumbnail slot fetching it, -1 when none is running yet.
     fp_desc_ready: bool,
@@ -1736,6 +1740,8 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     fp_query: std::string::String::new(),
     fp_error: false,
     fp_size_pending: false,
+    fp_size_slot: -1,
+    fp_size_for: usize::MAX,
     fp_desc_ready: false,
     fp_desc_slot: -1,
     import_return_row: 0,
@@ -2945,6 +2951,15 @@ pub fn open() {
     let want_path = last_played_path();
     let applet = unsafe { ruffle_is_applet_mode() } != 0;
     log(&std::format!("library: open applet_mode={}\n", applet));
+    // The game just played was started from an importer page. The cell table on
+    // record is then that page's (its cards and sources, an archive's games or
+    // the Flashpoint tiles), not the Play grid's: the cursor's row cannot be
+    // read from it, nor the tile to shrink into, and input must not act on it
+    // before the grid has drawn its own.
+    let from_importer = LAUNCHED_FROM_IMPORTER.swap(false, std::sync::atomic::Ordering::Relaxed);
+    if from_importer {
+        crate::backend::render::gallery_layout_clear();
+    }
     // Identity of the just-played game, for the quit "close" reveal below.
     let mut collapse_info: Option<(std::string::String, std::string::String, u32)> = None;
     if let Ok(mut s) = LIBRARY.lock() {
@@ -3005,7 +3020,17 @@ pub fn open() {
             // quit->library round-trip: same entries). `gallery_scroll_for`
             // falls back to 0 when no layout exists yet (first boot). Using the
             // old flat `clamp_scroll` here put a last-row game off-screen.
-            let scroll_offset = gallery_scroll_for(selection, jouer_scroll());
+            //
+            // After a game started from the importer there is no grid layout to
+            // read (see `from_importer`): the gallery keeps the scroll it was
+            // left at, and its first frame scrolls the game into view once it
+            // has published its own (`JOUER_RESCROLL`).
+            let scroll_offset = if from_importer {
+                JOUER_RESCROLL.store(true, std::sync::atomic::Ordering::Relaxed);
+                jouer_scroll()
+            } else {
+                gallery_scroll_for(selection, jouer_scroll())
+            };
             Screen::List { selection, scroll_offset }
         };
         // Returning from a game (last-played still present) -> grab its identity
@@ -3029,7 +3054,6 @@ pub fn open() {
     // Not after a game started from the importer: no tile was pressed, and the
     // cached box belongs to whatever the grid last showed (nothing at all on a
     // fresh boot, which shrank the cover into the corner).
-    let from_importer = LAUNCHED_FROM_IMPORTER.swap(false, std::sync::atomic::Ordering::Relaxed);
     if let (Some((bn, dn, color)), false) = (collapse_info, from_importer) {
         let rect = crate::backend::render::gallery_sel_rect_read();
         crate::backend::render::game_reveal_begin(true, rect, &bn, &dn, color);
@@ -3509,9 +3533,12 @@ pub fn reset() {
         s.import_retry = None;
         s.import_fp_suggest.clear();
         s.import_error_back = Screen::Inactive;
-        // The thumbnail pool was just emptied: no blurb is coming any more.
+        // The thumbnail pool was just emptied: no blurb or size is coming any
+        // more.
         s.fp_desc_slot = -1;
         s.fp_desc_ready = false;
+        s.fp_size_slot = -1;
+        s.fp_size_pending = false;
         // url_history + history_idx are deliberately NOT cleared — they
         // persist across back-to-library cycles AND across .nro reboots
         // (loaded fresh from SD by load_history_from_sd at every library
@@ -4531,9 +4558,11 @@ fn input_inner(button: &str) -> bool {
             true
         }
         Screen::AppletNotice { selection, scroll_offset } => {
-            // Any dismiss button returns to the same list row.
+            // Any dismiss button returns where the game was pressed: the same
+            // list row, or the importer page it was on (`launch_from_importer`).
             if matches!(button, "A" | "B" | "Minus") {
-                s.screen = Screen::List { selection, scroll_offset };
+                let page = LAUNCH_BACKDROP.lock().ok().and_then(|mut g| g.take());
+                s.screen = page.unwrap_or(Screen::List { selection, scroll_offset });
             }
             true
         }
@@ -4590,7 +4619,8 @@ fn input_inner(button: &str) -> bool {
             true
         }
         Screen::DistantUrlOptions { url_idx, selection } => {
-            // A on entry 0 (edit) is hoisted; here we handle move / delete / back.
+            // A on row 1 (edit the address) is hoisted; here: move, the
+            // favourite switch, delete, back.
             handle_distant_url_options_input(&mut s, button, url_idx, selection);
             true
         }
@@ -4606,6 +4636,10 @@ fn input_inner(button: &str) -> bool {
             // ever gave.)
             if matches!(button, "B" | "Minus") {
                 net::cancel_archive_fetch();
+                // Nothing failed: no address to fix and nothing to send again
+                // from a later error page that is about something else.
+                s.failed_url.clear();
+                s.import_retry = None;
                 crate::backend::render::distant_reveal_begin_collapse();
             }
             true
@@ -6520,6 +6554,13 @@ fn jouer_scroll() -> usize {
     JOUER_SCROLL.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// The gallery's next frame must scroll its selection into view from the table
+/// it is about to publish. Set by `open` after a game started from an importer
+/// page: the table on record then was that page's, and reading the row from it
+/// put a game of row 2 on "row 12" and scrolled the grid past its end (blank,
+/// the cursor off screen, until a direction was pressed).
+static JOUER_RESCROLL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// A `DistantIdle` screen parked on `row` (clamped to the rows there are),
 /// keeping the current scroll unless the row would be off screen. Every caller
 /// handing the cursor back to a specific row goes through this, so none of them
@@ -7017,9 +7058,14 @@ fn run_add_url_flow(initial: Option<&str>) {
         }
         return;
     }
-    // The window opens out of the add card.
+    // The window opens out of the add card. The importer is put back under it
+    // first: retyped from the "not an address" question, that question was
+    // still the screen, and an address that leads nowhere new (a direct link to
+    // a game already on the card only says so in a toast) left it up behind
+    // the toast. A cancelled keyboard returned above and keeps it.
     if let Ok(mut s) = LIBRARY.lock() {
         s.import_return_row = 1;
+        s.screen = distant_idle_at(&s, 1);
     }
     run_fetch_for_url(&url, 1, IMPORT_SCROLL.load(std::sync::atomic::Ordering::Relaxed));
 }
@@ -7217,6 +7263,9 @@ fn run_direct_download(url: &str) {
                 crate::loc::s().toast_already_imported.replace("{}", &shown),
                 TOAST_INFO,
             );
+            // The address is good, and nothing was sent to fail.
+            s.failed_url.clear();
+            s.import_retry = None;
             drop(s);
             push_history(url);
             return;
@@ -7268,7 +7317,9 @@ fn start_fp_search(query: &str, origin: Option<usize>) {
     log(&std::format!("library: flashpoint game search \"{}\" (async)\n", query));
     // Drop any thumbnail still coming for the previous results, and the
     // details blurb with them: a slot freed here can be handed to a logo next.
+    // Their logos go too, textures and all: those results are gone.
     crate::backend::render::thumb_cancel_all();
+    crate::backend::render::thumb_cache_clear();
     // A fresh result set: snap the glide and the tiles' clocks to rest.
     crate::backend::render::gallery_anim_reset();
     crate::backend::render::tile_open_reset();
@@ -7278,6 +7329,7 @@ fn start_fp_search(query: &str, origin: Option<usize>) {
         s.fp_query = query.to_string();
         s.fp_sort = (0, false);
         s.fp_desc_slot = -1;
+        s.fp_size_slot = -1;
         match started {
             Ok(()) => {
                 s.cover_msg = std::string::String::new();
@@ -7414,6 +7466,9 @@ fn handle_distant_files_input(
                 launch_from_importer(s, abs, rect, Screen::DistantFiles { selection, scroll_offset: scroll });
                 return;
             }
+            // A game of an archive that opened: if it fails, the archive's
+            // address is not what needs fixing (no Y on the error page).
+            s.failed_url.clear();
             s.import_retry = Some(RetryAction::ArchiveFile { selection, scroll });
             match net::start_download(&file.download_url, &out_path) {
                 Ok(()) => {
@@ -8904,11 +8959,12 @@ fn handle_cover_picker_input(s: &mut State, button: &str, game_idx: usize, mut s
 /// card; B folds the page back into the Flashpoint card. Called under the
 /// LIBRARY lock; `net::start_download` is non-blocking so that's fine.
 fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mut scroll: usize) {
-    // Search still on its way: only B (or Minus) answers, cancelling it.
+    // Search still on its way: only B (or Minus) answers, cancelling it. The
+    // page stays "loading" while it folds back (the fold clears it once done):
+    // cleared here, the folding page read as a search that found nothing.
     if s.fp_loading {
         if matches!(button, "B" | "Minus") {
             net::cancel_archive_fetch();
-            s.fp_loading = false;
             crate::backend::render::distant_reveal_begin_collapse();
         }
         return;
@@ -8952,6 +9008,10 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
                 launch_from_importer(s, abs, rect, Screen::FpGallery { selection, scroll });
                 return;
             }
+            // No address of the player's in a Flashpoint download: one left
+            // from an archive tried before must not be offered for fixing (Y)
+            // on this game's error page, whichever way it fails.
+            s.failed_url.clear();
             let swf_path = std::format!("{}/{}", primary_root(), swf_name);
             // Zipped games come from the GameZIP server: download a temp `.zip`,
             // then extract. Non-zipped (legacy "loose") games aren't on that
@@ -9060,20 +9120,16 @@ fn open_fp_details(s: &mut State, selection: usize, scroll: usize) {
     s.fp_desc.clear();
     s.fp_desc_ready = false;
     s.fp_size_pending = true;
-    FP_SIZE_ARMED.store(false, std::sync::atomic::Ordering::Relaxed);
     s.screen = Screen::FpDetails { selection, scroll, size: 0 };
 }
 
-/// The details window's download size waits one frame, so the window with its
-/// spinner is on screen before the HEAD (which blocks) runs.
-static FP_SIZE_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Fill in the details window: the blurb through the thumbnail pool (async,
-/// like the logos), the size by a HEAD run on the frame after the window has
-/// settled (`settled`: its opening pop is over; a HEAD in the middle of it would
-/// stall the animation). Called once a frame while the window is up, and from
-/// the results page, which collects a blurb still on its way after it closed.
-fn drive_fp_details(settled: bool) {
+/// Fill in the details window: its blurb and its download size, both through
+/// the thumbnail pool (async, like the logos), so the window keeps answering
+/// while they come. The size was a blocking HEAD, which froze the window, its
+/// spinner and its buttons for as long as the server took. Called once a frame
+/// while the window is up, and from the results page, which collects a request
+/// still on its way after the window closed.
+fn drive_fp_details() {
     // The blurb: collect the transfer in flight, or start the one needed.
     let (slot, for_sel, want) = match LIBRARY.lock() {
         Ok(s) => {
@@ -9114,36 +9170,57 @@ fn drive_fp_details(settled: bool) {
         }
     }
 
-    // The size: armed on the first frame, read on the second.
-    let job = match LIBRARY.lock() {
-        Ok(s) => match s.screen {
-            Screen::FpDetails { selection, .. } if s.fp_size_pending => s
-                .cover_candidates
-                .get(selection)
-                .map(|c| (selection, c.id.clone(), c.zipped, c.launch_command.clone())),
-            _ => None,
-        },
-        Err(_) => None,
+    // The size, the same way, by a HEAD.
+    let (slot, for_sel, want) = match LIBRARY.lock() {
+        Ok(s) => {
+            let want = match s.screen {
+                Screen::FpDetails { selection, .. } if s.fp_size_pending => Some(selection),
+                _ => None,
+            };
+            (s.fp_size_slot, s.fp_size_for, want)
+        }
+        Err(_) => return,
     };
-    let Some((sel, id, zipped, launch_command)) = job else { return };
-    if !settled || !FP_SIZE_ARMED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        return;
-    }
-    // Probe the URL the download will ACTUALLY use, mirroring the choice the
-    // `A` branch of `handle_fp_gallery_input` makes: the GameZIP server for a
-    // zipped game, the htdocs mirror for a legacy "loose" one. Probing
-    // `/get?id=` for a legacy entry always 404s.
-    let url = if zipped {
-        Some(crate::sources::gamezip::get_url(&id))
-    } else {
-        crate::sources::gamezip::htdocs_url_from_command(&launch_command)
-    };
-    let size = url.as_deref().and_then(net::head_content_length).unwrap_or(0);
-    if let Ok(mut s) = LIBRARY.lock() {
-        s.fp_size_pending = false;
-        if let Screen::FpDetails { selection, scroll, .. } = s.screen {
-            if selection == sel {
-                s.screen = Screen::FpDetails { selection, scroll, size };
+    if slot >= 0 {
+        net::thumb_pump();
+        if net::thumb_slot_status(slot) != 0 {
+            let size = net::thumb_slot_take_length(slot);
+            if let Ok(mut s) = LIBRARY.lock() {
+                s.fp_size_slot = -1;
+                // An answer for another result is dropped, as a blurb is.
+                if want == Some(for_sel) {
+                    s.fp_size_pending = false;
+                    if let Screen::FpDetails { selection, scroll, .. } = s.screen {
+                        s.screen = Screen::FpDetails { selection, scroll, size: size.unwrap_or(0) };
+                    }
+                }
+            }
+        }
+    } else if let Some(sel) = want {
+        // Probe the URL the download will ACTUALLY use, mirroring the choice the
+        // `A` branch of `handle_fp_gallery_input` makes: the GameZIP server for a
+        // zipped game, the htdocs mirror for a legacy "loose" one. Probing
+        // `/get?id=` for a legacy entry always 404s.
+        let url = LIBRARY.lock().ok().and_then(|s| {
+            s.cover_candidates.get(sel).and_then(|c| {
+                if c.zipped {
+                    Some(crate::sources::gamezip::get_url(&c.id))
+                } else {
+                    crate::sources::gamezip::htdocs_url_from_command(&c.launch_command)
+                }
+            })
+        });
+        let started = url.as_deref().map(net::thumb_start_head);
+        if let Ok(mut s) = LIBRARY.lock() {
+            match started {
+                Some(slot) if slot >= 0 => {
+                    s.fp_size_slot = slot;
+                    s.fp_size_for = sel;
+                }
+                // The pool is busy with logos: asked again next frame.
+                Some(-5) => {}
+                // Nowhere to ask, or no way to: the window does without the size.
+                _ => s.fp_size_pending = false,
             }
         }
     }
@@ -9156,12 +9233,20 @@ fn drive_fp_details(settled: bool) {
 /// any game played.
 fn launch_from_importer(s: &mut State, abs: usize, rect: (f32, f32, f32, f32), backdrop: Screen) {
     let Some(entry) = s.entries.get(abs).cloned() else { return };
-    let (selection, scroll_offset) = match list_screen_for_abs(s, abs) {
-        Screen::List { selection, scroll_offset } => (selection, scroll_offset),
-        _ => (0, 0),
-    };
-    // Applet mode has too little RAM to launch a SWF: the same notice as Jouer.
+    // The game's Jouer row, with the scroll Jouer was left at. Not through
+    // `list_screen_for_abs`: the cell table it reads rows from is this importer
+    // page's, not the grid's (`open` places the cursor once the grid is back).
+    let selection = local_filtered_indices(&s.entries, &s.local_filter, &s.folder_filter)
+        .iter()
+        .position(|&i| i == abs)
+        .unwrap_or(0);
+    let scroll_offset = jouer_scroll();
+    // Applet mode has too little RAM to launch a SWF: the same notice as Jouer,
+    // which then goes back to this page rather than over to Jouer.
     if s.applet_mode {
+        if let Ok(mut g) = LAUNCH_BACKDROP.lock() {
+            *g = Some(backdrop);
+        }
         s.screen = Screen::AppletNotice { selection, scroll_offset };
         return;
     }
@@ -9186,6 +9271,8 @@ static LAUNCHED_FROM_IMPORTER: std::sync::atomic::AtomicBool = std::sync::atomic
 
 /// The importer page a game was launched from, drawn behind its launch instead
 /// of the Play grid (`launch_from_importer`). Cleared when the launch is done.
+/// In applet mode, where no game launches, it is the page the notice saying so
+/// goes back to, taken when the notice is dismissed.
 static LAUNCH_BACKDROP: Mutex<Option<Screen>> = Mutex::new(None);
 
 /// The download in flight: when it started, and its speed (bytes per second,
@@ -10025,9 +10112,26 @@ fn draw_files_page(
     // A press asks before playing it instead of downloading it again.
     let snap = LIBRARY.lock().ok().map(|s| {
         let source = importer_label(&s.pending_fetch_url);
+        // The names on the card, sorted once a frame. Asking every file of a
+        // 3 600-game archive to walk the whole library, twice (its tick, then
+        // the count), was millions of string compares a frame, also paid with
+        // the page behind a window or a launch.
+        let mut names: std::vec::Vec<&str> = s
+            .entries
+            .iter()
+            .map(|e| e.basename.as_str())
+            .chain(s.downloaded_basenames.iter().map(|n| n.as_str()))
+            .collect();
+        names.sort_unstable();
+        names.dedup();
         let has = |name: &str| {
-            let safe = safe_file_name(name);
-            s.entries.iter().any(|e| e.basename == safe) || s.downloaded_basenames.iter().any(|n| *n == safe)
+            // `safe_file_name` only changes a name with a folder in it, so the
+            // rest are looked up as they are, without a copy.
+            if name.contains(['/', '\\']) {
+                names.binary_search(&safe_file_name(name).as_str()).is_ok()
+            } else {
+                names.binary_search(&name).is_ok()
+            }
         };
         let idx = filtered_indices(&s.remote_files, &s.distant_filter);
         let files: std::vec::Vec<RemoteFile> = idx.iter().map(|&i| s.remote_files[i].clone()).collect();
@@ -10185,20 +10289,20 @@ fn poll_archive_fetch() {
                 }
             }
         }
-        net::ArchivePoll::Error(e) => {
+        net::ArchivePoll::Error(f) => {
             let Ok(mut s) = LIBRARY.lock() else { return };
             let label = importer_label(&s.pending_fetch_url);
             // archive.org answering "nothing here" is a wrong address, which
-            // asking again will not fix. When what was typed is one bare word,
-            // it may have been a game's name: offer Flashpoint for it.
-            let missing = e == crate::loc_ui::ui().imp_err_item_missing;
-            if missing {
+            // asking again will not fix (`f.retry` is false for it, as for a 404
+            // or an answer too big). When what was typed is one bare word, it
+            // may have been a game's name: offer Flashpoint for it.
+            if f.msg == crate::loc_ui::ui().imp_err_item_missing {
                 let typed = s.failed_url.trim().to_string();
                 if !typed.is_empty() && !typed.contains('/') && !typed.contains('.') {
                     s.import_fp_suggest = typed;
                 }
             }
-            import_error(&mut s, ErrKind::Open, &e, !missing, &label);
+            import_error(&mut s, ErrKind::Open, &f.msg, f.retry, &label);
         }
     }
 }
@@ -10376,14 +10480,14 @@ fn drive_download(backend: &mut SwitchRenderBackend, tick: bool) {
             match net::tick_download() {
                 Ok(false) => {}
                 Ok(true) => on_download_finished(backend),
-                Err(msg) => {
+                Err(f) => {
                     if let Ok(mut s) = LIBRARY.lock() {
                         let name = s
                             .download_title
                             .clone()
                             .filter(|t| !t.trim().is_empty())
                             .unwrap_or_else(|| pretty_name(&s.download_file_name));
-                        import_error(&mut s, ErrKind::Download, &msg, true, &name);
+                        import_error(&mut s, ErrKind::Download, &f.msg, f.retry, &name);
                     }
                 }
             }
@@ -10660,7 +10764,13 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     s2.screen = distant_idle_at(&s2, row);
                 }
                 Some(PendingClose::StopDownload) => {
-                    stop_download(&mut s2);
+                    // Not once the game's other files have started: they
+                    // finish the import (see the B rule on DistantDownloading).
+                    if s2.dl_companion_active {
+                        s2.screen = Screen::DistantDownloading;
+                    } else {
+                        stop_download(&mut s2);
+                    }
                 }
                 None => {}
             }
@@ -10753,10 +10863,27 @@ pub fn render(backend: &mut SwitchRenderBackend) {
         }
         Screen::List { selection, scroll_offset } => {
             let (selection, scroll_offset) = settle_vanished_shelf(selection, scroll_offset);
+            let mut scroll_offset = scroll_offset;
+            draw_gallery(backend, selection, scroll_offset, anim_origin);
+            // Back from a game started on an importer page: the grid has just
+            // published its own table, so the game's row can be read now. Drawn
+            // again at once if that scrolls, so no frame shows the old scroll.
+            if JOUER_RESCROLL.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                let placed = gallery_scroll_for(selection, scroll_offset);
+                if placed != scroll_offset {
+                    if let Ok(mut s) = LIBRARY.lock() {
+                        if s.screen == (Screen::List { selection, scroll_offset }) {
+                            s.screen = Screen::List { selection, scroll_offset: placed };
+                        }
+                    }
+                    scroll_offset = placed;
+                    crate::backend::render::gallery_anim_reset();
+                    draw_gallery(backend, selection, scroll_offset, anim_origin);
+                }
+            }
             // Remember where the gallery is, so every path that comes BACK to it
             // restores this scroll instead of deriving one from the row.
             JOUER_SCROLL.store(scroll_offset, std::sync::atomic::Ordering::Relaxed);
-            draw_gallery(backend, selection, scroll_offset, anim_origin);
             // Quit collapse reveal: the cover shrinks from full screen back to its
             // tile over the gallery (active only right after returning from a
             // game; a no-op otherwise — the anim deactivates itself when idle).
@@ -10886,15 +11013,19 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             options_panel::draw_options_loading(backend, now, anim_origin, &label);
         }
         Screen::FpGallery { selection, scroll } => {
+            let reveal = crate::backend::render::distant_reveal_step(now);
             // The search in flight lands here, and a details blurb still on its
-            // way after its window closed is collected.
-            if LIBRARY.lock().map(|s| s.fp_loading).unwrap_or(false) {
+            // way after its window closed is collected. Not while the page folds
+            // back: B cancelled the search, whose handle now answers with an
+            // error, and the fold shows the waiting page it started from.
+            let folding = reveal.map_or(false, |(_, collapsing, _)| collapsing);
+            if !folding && LIBRARY.lock().map(|s| s.fp_loading).unwrap_or(false) {
                 poll_fp_search();
             }
-            drive_fp_details(false);
+            drive_fp_details();
             // The page opens out of the Flashpoint card and folds back into it,
             // as an archive opens out of its row.
-            if let Some((frac, collapsing, done)) = crate::backend::render::distant_reveal_step(now) {
+            if let Some((frac, collapsing, done)) = reveal {
                 let (vw, vh) = backend.screen_size();
                 let row = LIBRARY.lock().map(|s| s.import_return_row).unwrap_or(0);
                 draw_home_backdrop(backend, row, IMPORT_SCROLL.load(std::sync::atomic::Ordering::Relaxed));
@@ -10906,14 +11037,17 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 backend.draw_reveal_chrome(wx, wy, ww, wh);
                 if done && collapsing {
                     // Back on the importer, on the row the search was asked
-                    // from. The query stays, for the keyboard's next prefill.
+                    // from. The query stays, for the keyboard's next prefill;
+                    // the results go, and their logos' textures with them.
                     crate::backend::render::thumb_cancel_all();
+                    crate::backend::render::thumb_cache_clear();
                     if let Ok(mut s) = LIBRARY.lock() {
                         s.cover_candidates.clear();
                         s.cover_msg.clear();
                         s.fp_error = false;
                         s.fp_loading = false;
                         s.fp_desc_slot = -1;
+                        s.fp_size_slot = -1;
                         let row = s.import_return_row;
                         s.screen = distant_idle_at(&s, row);
                     }
@@ -10923,7 +11057,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             }
         }
         Screen::FpDetails { selection, scroll, size } => {
-            drive_fp_details(!modal_active && !closing);
+            drive_fp_details();
             // The results stay behind the window.
             backend.clear_ui_transform();
             draw_fp_page(backend, selection, scroll, false);
@@ -11141,18 +11275,26 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             // question scales out: a stop or a carry-on is on its way then.
             drive_download(backend, !closing);
             // The download may have ended this very frame, taking the question
-            // with it.
+            // with it: a finished game or an error page replaces it. Ending
+            // into the game's other files takes it too. Those finish the import
+            // and B waits for them, and a stop now would leave the game's
+            // .swf on the card without its library entry, sidecars or cover.
+            if let Ok(mut s) = LIBRARY.lock() {
+                if s.dl_companion_active && matches!(s.screen, Screen::DistantCancelConfirm { .. }) {
+                    s.screen = Screen::DistantDownloading;
+                }
+            }
             if matches!(LIBRARY.lock().map(|s| s.screen), Ok(Screen::DistantCancelConfirm { .. })) {
                 backend.set_ui_modal_scale(if modal_active { modal_scale } else { 1.0 });
                 let u = crate::loc_ui::ui();
                 let (done, total) = net::download_progress();
                 let amount = if total > 0 {
                     crate::backend::render::imp_n_of(
-                        &crate::backend::render::imp_size(done.max(1)),
+                        &crate::backend::render::imp_amount(done),
                         &crate::backend::render::imp_size(total),
                     )
                 } else {
-                    crate::backend::render::imp_size(done.max(1))
+                    crate::backend::render::imp_amount(done)
                 };
                 let body = u.imp_stop_body.replacen("{}", &amount, 1);
                 backend.draw_confirm(
@@ -11284,7 +11426,7 @@ fn extract_gamezip_main(
                 "{} %  \u{00B7}  {}",
                 pct,
                 crate::backend::render::imp_n_of(
-                    &crate::backend::render::imp_size(done.max(1)),
+                    &crate::backend::render::imp_amount(done),
                     &crate::backend::render::imp_size(total)
                 )
             )

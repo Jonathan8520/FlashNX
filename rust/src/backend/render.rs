@@ -1618,7 +1618,8 @@ pub(crate) use pages::windows::{Choice, SortOption, WinRow};
 pub(crate) use kit::list::Row;
 pub(crate) use kit::sheet::{cascade_step, Sheet, Side, OPTIONS_CHILD_W, OPTIONS_W};
 pub(crate) use pages::importer::{
-    imp_count, imp_date, imp_n_of, imp_quote, imp_release, imp_size, imp_transfer_line, imp_year, import_sel_rect,
+    imp_amount, imp_count, imp_date, imp_n_of, imp_quote, imp_release, imp_size, imp_transfer_line, imp_year,
+    import_sel_rect,
     FilesPage, ImportProgress, ImportStep, ImporterHome, SourceRow, StepState,
 };
 pub(crate) use pages::flashpoint::{FpDetailsView, FpGrid, FpState};
@@ -5353,6 +5354,17 @@ pub fn gallery_layout_read() -> (std::vec::Vec<GalleryCell>, u32) {
     gallery_cache().lock().map(|g| (g.0.clone(), g.1)).unwrap_or_default()
 }
 
+/// Forget the published cell table, for a page about to be shown whose table
+/// is not the one on record (the Play grid after a game started from an
+/// importer page, whose own table was the last one published). Until the page
+/// has drawn and published its own, navigation and touch find nothing rather
+/// than another page's cells.
+pub fn gallery_layout_clear() {
+    if let Ok(mut g) = gallery_cache().lock() {
+        *g = (std::vec::Vec::new(), 0);
+    }
+}
+
 /// Selected tile's current screen rect (x,y,w,h) from the last gallery render.
 /// The game launch/quit reveal grows the cover from / shrinks it to this box.
 fn gallery_sel_rect() -> &'static std::sync::Mutex<(f32, f32, f32, f32)> {
@@ -6583,6 +6595,35 @@ fn thumb_lookup(url: &str) -> Option<ThumbTex> {
         .lock()
         .ok()
         .and_then(|c| c.iter().find(|(u, _)| u == url).map(|(_, t)| *t))
+}
+
+/// Logos the cache holds at most: two searches' worth (60 results each). Past
+/// it the oldest go, so screens that never call `thumb_cache_clear` (the cover
+/// picker) cannot grow it without end either.
+const THUMB_CACHE_MAX: usize = 120;
+
+/// Give a cached logo's textures (the logo and its blurred backdrop) back to
+/// the driver. On the GL thread, which input and render both run on.
+fn thumb_free(t: ThumbTex) {
+    if let ThumbTex::Image { tex, amb, .. } = t {
+        for name in [tex, amb] {
+            if name != 0 {
+                unsafe { glDeleteTextures(1, &name) };
+            }
+        }
+    }
+}
+
+/// Forget every cached logo and free its textures. Called when a result set is
+/// let go of (a new Flashpoint search, the results page folding back). The
+/// cache used to keep every logo for the rest of the session, and with two
+/// textures a logo each a search left up to 120 more GL objects behind, on a
+/// driver that gives out past about 4000.
+pub fn thumb_cache_clear() {
+    let gone = thumb_cache().lock().map(|mut c| std::mem::take(&mut *c)).unwrap_or_default();
+    for (_, t) in gone {
+        thumb_free(t);
+    }
 }
 
 /// URL of the thumbnail currently being fetched ASYNC (at most one at a time),
@@ -11939,8 +11980,16 @@ impl SwitchRenderBackend {
                 },
                 None => ThumbTex::Failed,
             };
-            if let Ok(mut c) = thumb_cache().lock() {
-                c.push((url.clone(), state));
+            let evicted: std::vec::Vec<(std::string::String, ThumbTex)> = match thumb_cache().lock() {
+                Ok(mut c) => {
+                    c.push((url.clone(), state));
+                    let over = c.len().saturating_sub(THUMB_CACHE_MAX);
+                    c.drain(..over).collect()
+                }
+                Err(_) => std::vec::Vec::new(),
+            };
+            for (_, t) in evicted {
+                thumb_free(t);
             }
         }
         if let Ok(mut inflight) = thumb_inflight().lock() {

@@ -41,8 +41,10 @@ extern "C" {
     fn https_thumb_slot_status(slot: c_int) -> c_int;
     fn https_thumb_slot_take(slot: c_int, out: *mut c_char, cap: c_int) -> c_int;
     fn https_thumb_cancel();
-    // Synchronous HEAD → Content-Length (or -1). Flashpoint details popup.
-    fn https_head_content_length(url: *const c_char) -> i64;
+    // A HEAD in the same pool, and its answer (Content-Length or -1), taken once
+    // its slot is done. Flashpoint details window.
+    fn https_thumb_start_head(url: *const c_char) -> c_int;
+    fn https_thumb_slot_take_length(slot: c_int) -> i64;
     // header/guide are localized prompt strings supplied by Rust (loc.rs).
     //
     // BUFFER SIZING: the C side limits the keyboard to `(cap - 1) / 4`
@@ -115,39 +117,67 @@ pub(crate) enum Sink {
     Sd,
 }
 
+/// A transfer that failed, as the importer's error page needs it: the sentence
+/// for the player, and whether sending the same request again can work. The
+/// page offers "try again" only then: on a 404 or an answer too big to keep, it
+/// sent a request that failed the same way again.
+pub struct Failure {
+    pub msg: std::string::String,
+    pub retry: bool,
+}
+
+impl Failure {
+    /// A failure that the same request will meet again.
+    fn lasting(msg: &str) -> Self {
+        Failure { msg: std::string::String::from(msg), retry: false }
+    }
+}
+
 /// The most SPECIFIC message we can give for the last transfer failure. One
 /// catch-all sentence ("check the clock, the WiFi and the URL") is worse than
 /// nothing: it blames the console clock for a search that merely returned too
 /// much data, and it trains the user to ignore the error. The curl code says
 /// which failure it actually was, so say that.
 pub(crate) fn https_error_message(sink: Sink) -> std::string::String {
+    https_failure(sink).msg
+}
+
+/// `https_error_message`, with whether trying again can help, decided in the
+/// same arm as the sentence so the two cannot drift apart. No network, a
+/// refused connection, a timeout, a server busy and a transfer cut short can
+/// all pass on a second try. An answer too big for its buffer, a full card, a
+/// certificate the console's clock rejects (a clock does not put itself right)
+/// and a page that does not exist or is refused fail the same way again.
+pub(crate) fn https_failure(sink: Sink) -> Failure {
     let curl = unsafe { https_last_curl_code() };
     let http = unsafe { https_last_http_code() } as i64;
     let lc = crate::loc::s();
     let owned = |s: &'static str| std::string::String::from(s);
-    match curl {
+    let (msg, retry) = match curl {
         // CURLE_WRITE_ERROR — our write callback returned short.
         23 => match sink {
-            Sink::Memory => owned(lc.err_response_big),
-            Sink::Sd => owned(lc.err_sd_write),
+            Sink::Memory => (owned(lc.err_response_big), false),
+            Sink::Sd => (owned(lc.err_sd_write), false),
         },
         // COULDN'T_RESOLVE_PROXY / _HOST: the address never resolved. A console
         // with its WiFi off and one whose DNS is broken fail identically here,
         // so the message names both rather than blaming the WiFi alone — which
         // sent a connected player checking the one thing that worked (#103).
-        5 | 6 => crate::loc::fill_one(lc.err_offline, curl),
+        5 | 6 => (crate::loc::fill_one(lc.err_offline, curl), true),
         // COULDN'T_CONNECT: the name DID resolve and the connection was refused.
         // Nothing to check on the console; something between it and the server
         // is saying no, which is a different sentence and a different fix.
-        7 => crate::loc::fill_one(lc.err_unreachable, curl),
+        7 => (crate::loc::fill_one(lc.err_unreachable, curl), true),
         // OPERATION_TIMEDOUT.
-        28 => owned(lc.err_timeout),
+        28 => (owned(lc.err_timeout), true),
         // TLS handshake / certificate problems. On Switch the usual cause is a
         // wrong console clock (the cert reads as not-yet-valid), so THIS is the
         // one place the clock advice belongs.
-        35 | 51 | 53 | 54 | 58 | 59 | 60 | 66 | 77 | 83 => owned(lc.err_tls),
+        35 | 51 | 53 | 54 | 58 | 59 | 60 | 66 | 77 | 83 => (owned(lc.err_tls), false),
         // Transfer itself was fine — the server said no (404 / 403 / 429 / 5xx).
-        _ if http >= 400 => crate::loc::err_http_status(http),
+        // Busy (429, 5xx) or too slow to hear us out (408) can pass later; any
+        // other refusal is the same next time.
+        _ if http >= 400 => (crate::loc::err_http_status(http), matches!(http, 408 | 429) || http >= 500),
         // Everything else: the transfer broke on its way, mid-connection.
         // This arm is reached only AFTER 5, 6 and 7 -- the three codes that mean
         // "no network" -- have been taken above, so the WiFi is the one thing
@@ -156,8 +186,9 @@ pub(crate) fn https_error_message(sink: Sink) -> std::string::String {
         // IMPORTER search user never typed: they typed a game name. The curl
         // detail stays in the parentheses, because that is what makes a report
         // diagnosable.
-        _ => crate::loc::err_https(&last_https_error()),
-    }
+        _ => (crate::loc::err_https(&last_https_error()), true),
+    };
+    Failure { msg, retry }
 }
 
 /// Generic synchronous HTTPS GET into a freshly-allocated buffer; returns the
@@ -281,20 +312,18 @@ pub fn extract_item_id(url_or_id: &str) -> Option<std::string::String> {
 /// returns `{server, dir, files:[...]}`; we build each download URL as
 /// `https://archive.org/download/<item_id>/<filename URL-encoded>` (archive.org
 /// redirects to the CDN, keeping us URL-stable across mirror moves).
-fn parse_archive_metadata(
-    buf: &[u8],
-    item_id: &str,
-) -> Result<std::vec::Vec<RemoteFile>, std::string::String> {
+fn parse_archive_metadata(buf: &[u8], item_id: &str) -> Result<std::vec::Vec<RemoteFile>, Failure> {
+    // A garbled answer, which the next one may well not be.
     let json: serde_json::Value = serde_json::from_slice(buf).map_err(|e| {
         log(&std::format!("net: JSON parse failed: {}\n", e));
-        crate::loc::err_json(&e.to_string())
+        Failure { msg: crate::loc::err_json(&e.to_string()), retry: true }
     })?;
     // archive.org answers an identifier it does not know with `{}` and HTTP
     // 200, so a typo in an address arrives here, not as a 404: say that, rather
-    // than that some JSON lacks a field.
+    // than that some JSON lacks a field. Asking again gets the same `{}`.
     let files_json = json.get("files").and_then(|v| v.as_array()).ok_or_else(|| {
         log(&std::format!("net: archive.org/{} has no \"files\" (unknown item)\n", item_id));
-        std::string::String::from(crate::loc_ui::ui().imp_err_item_missing)
+        Failure::lasting(crate::loc_ui::ui().imp_err_item_missing)
     })?;
     let mut out: std::vec::Vec<RemoteFile> = std::vec::Vec::new();
     // Remember the item's WHOLE contents before filtering: a multi-file game's
@@ -336,7 +365,7 @@ fn parse_archive_metadata(
 pub enum ArchivePoll {
     Pending,
     Done(std::vec::Vec<RemoteFile>),
-    Error(std::string::String),
+    Error(Failure),
 }
 
 /// item-id of the in-flight async fetch, kept so completion can build the
@@ -388,14 +417,14 @@ pub fn tick_archive_fetch() -> ArchivePoll {
     }
     if rc < 0 {
         log(&std::format!("net: archive fetch failed: {}\n", last_https_error()));
-        return ArchivePoll::Error(https_error_message(Sink::Memory));
+        return ArchivePoll::Error(https_failure(Sink::Memory));
     }
     // rc == 1: response ready — copy out of C++ and parse.
     const CAP: usize = 8 * 1024 * 1024;
     let mut buf = std::vec![0u8; CAP];
     let n = unsafe { https_get_buffer(buf.as_mut_ptr() as *mut c_char, CAP as c_int) };
     if n < 0 {
-        return ArchivePoll::Error(std::string::String::from(crate::loc::s().err_too_large));
+        return ArchivePoll::Error(Failure::lasting(crate::loc::s().err_too_large));
     }
     buf.truncate(n as usize);
     let item_id = FETCH_ITEM_ID.lock().map(|g| g.clone()).unwrap_or_default();
@@ -495,12 +524,20 @@ pub(crate) fn thumb_cancel() {
     unsafe { https_thumb_cancel() };
 }
 
-/// Content-Length of `url` via a HEAD request (follows redirects). `None` if the
-/// server doesn't report it / the request fails. Blocking (~a few hundred ms) —
-/// call hoisted out of the LIBRARY lock. Used by the Flashpoint details popup.
-pub(crate) fn head_content_length(url: &str) -> Option<u64> {
+/// Start a HEAD of `url` (follows redirects) in a free thumbnail slot: the size
+/// of what is there without fetching it. Same return as `thumb_start`; poll the
+/// slot with `thumb_slot_status`, then read it with `thumb_slot_take_length`.
+/// The Flashpoint details window's download size, which used to be a blocking
+/// HEAD that froze the window while it ran.
+pub(crate) fn thumb_start_head(url: &str) -> i32 {
     let url_c = cstr(url);
-    let n = unsafe { https_head_content_length(url_c.as_ptr() as *const c_char) };
+    unsafe { https_thumb_start_head(url_c.as_ptr() as *const c_char) }
+}
+
+/// Take a finished HEAD's answer and free its slot: the size, or `None` when the
+/// server did not give one or the request failed.
+pub(crate) fn thumb_slot_take_length(slot: i32) -> Option<u64> {
+    let n = unsafe { https_thumb_slot_take_length(slot) };
     if n > 0 {
         Some(n as u64)
     } else {
@@ -546,8 +583,8 @@ pub fn start_download(url: &str, out_path: &str) -> Result<(), std::string::Stri
 /// Returns:
 ///   - `Ok(false)` → still in progress
 ///   - `Ok(true)`  → finished successfully
-///   - `Err(msg)`  → failed; the partial output file has been removed
-pub fn tick_download() -> Result<bool, std::string::String> {
+///   - `Err(f)`    → failed; the partial output file has been removed
+pub fn tick_download() -> Result<bool, Failure> {
     let rc = unsafe { https_download_tick() };
     if rc == 0 {
         return Ok(false);
@@ -559,9 +596,9 @@ pub fn tick_download() -> Result<bool, std::string::String> {
     // cause (SD full, server 404, clock/TLS...) rather than printing "code -2".
     if rc == -2 {
         log(&std::format!("net: download failed: {}\n", last_https_error()));
-        return Err(https_error_message(Sink::Sd));
+        return Err(https_failure(Sink::Sd));
     }
-    Err(crate::loc::err_dl_failed(rc))
+    Err(Failure { msg: crate::loc::err_dl_failed(rc), retry: true })
 }
 
 /// Current bytes downloaded / total bytes (0 until the Content-Length

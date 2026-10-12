@@ -593,6 +593,7 @@ struct ThumbSlot {
     CURL*       handle = nullptr;
     std::string buf;
     long        http_code = 0;
+    long long   length = -1;    // Content-Length of the answer, -1 when not given
     bool        active = false; // a transfer is in flight on this slot
     bool        done   = false; // finished; bytes ready to take
     bool        ok     = false; // finished successfully (CURLE_OK + 2xx/3xx)
@@ -607,15 +608,15 @@ void thumb_slot_free(int i) {
     }
     g_thumb[i].buf.clear();
     g_thumb[i].http_code = 0;
+    g_thumb[i].length = -1;
     g_thumb[i].active = false;
     g_thumb[i].done = false;
     g_thumb[i].ok = false;
 }
-} // namespace
 
-// Start a thumbnail GET in a free slot. Returns the slot index (>=0), -5 if the
-// pool is full (all slots busy/unread), -1 on init error.
-extern "C" int https_thumb_start(const char* url) {
+// Start a transfer in a free slot: a GET, or with `head` a HEAD, whose answer
+// is only its Content-Length (https_thumb_slot_take_length).
+int thumb_start(const char* url, bool head) {
     if (net_init() != 0) return -1;
     if (!g_thumb_multi) {
         g_thumb_multi = curl_multi_init();
@@ -638,13 +639,31 @@ extern "C" int https_thumb_start(const char* url) {
     curl_easy_setopt(c, CURLOPT_WRITEDATA, &g_thumb[slot].buf);
     curl_easy_setopt(c, CURLOPT_TIMEOUT, 20L);
     curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 8L);
+    if (head) curl_easy_setopt(c, CURLOPT_NOBODY, 1L);
     curl_multi_add_handle(g_thumb_multi, c);
     g_thumb[slot].handle = c;
     g_thumb[slot].active = true;
     g_thumb[slot].done = false;
     g_thumb[slot].ok = false;
     g_thumb[slot].http_code = 0;
+    g_thumb[slot].length = -1;
     return slot;
+}
+} // namespace
+
+// Start a thumbnail GET in a free slot. Returns the slot index (>=0), -5 if the
+// pool is full (all slots busy/unread), -1 on init error.
+extern "C" int https_thumb_start(const char* url) {
+    return thumb_start(url, false);
+}
+
+// The same as a HEAD, in the same pool: the size of what is at `url` without
+// fetching it, read with https_thumb_slot_take_length once the slot is done.
+// The Flashpoint details window's download size. It was a blocking HEAD, which
+// froze the window, its spinner and its buttons for as long as the server took
+// to answer (up to its 15 s timeout on a bad connection).
+extern "C" int https_thumb_start_head(const char* url) {
+    return thumb_start(url, true);
 }
 
 // Pump ALL in-flight thumbnail transfers once; mark completed slots `done`
@@ -664,6 +683,11 @@ extern "C" int https_thumb_tick(void) {
             curl_easy_getinfo(g_thumb[i].handle, CURLINFO_RESPONSE_CODE, &g_thumb[i].http_code);
             g_thumb[i].ok = (msg->data.result == CURLE_OK)
                 && (g_thumb[i].http_code >= 200) && (g_thumb[i].http_code < 400);
+            if (g_thumb[i].ok) {
+                curl_off_t cl = -1;
+                curl_easy_getinfo(g_thumb[i].handle, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &cl);
+                g_thumb[i].length = (long long)cl;
+            }
             curl_multi_remove_handle(g_thumb_multi, g_thumb[i].handle);
             curl_easy_cleanup(g_thumb[i].handle);
             g_thumb[i].handle = nullptr;
@@ -705,41 +729,21 @@ extern "C" int https_thumb_slot_take(int slot, char* out, int cap) {
     return rc;
 }
 
+// A done HEAD's answer: the Content-Length it found (-1 when the server gave
+// none, or on an error), and the slot FREED, as https_thumb_slot_take does.
+extern "C" long long https_thumb_slot_take_length(int slot) {
+    if (slot < 0 || slot >= THUMB_SLOTS || !g_thumb[slot].done) return -1;
+    const long long len = g_thumb[slot].ok ? g_thumb[slot].length : -1;
+    thumb_slot_free(slot);
+    return len;
+}
+
 extern "C" void https_thumb_cancel(void) {
     for (int i = 0; i < THUMB_SLOTS; i++) thumb_slot_free(i);
     if (g_thumb_multi) {
         curl_multi_cleanup(g_thumb_multi);
         g_thumb_multi = nullptr;
     }
-}
-
-// Synchronous HEAD: return the Content-Length of `url` (following redirects),
-// or -1 if unavailable. Used by the Flashpoint details popup to show a game's
-// download size without fetching the whole GameZIP. Blocks ~a few hundred ms.
-extern "C" long long https_head_content_length(const char* url) {
-    if (net_init() != 0) return -1;
-    CURL* c = curl_easy_init();
-    if (!c) return -1;
-    curl_easy_setopt(c, CURLOPT_URL, url);
-    curl_easy_setopt(c, CURLOPT_NOBODY, 1L); // HEAD request
-    curl_easy_setopt(c, CURLOPT_USERAGENT, "FlashNX/1.9.0 (Nintendo Switch homebrew)");
-    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
-    curl_easy_setopt(c, CURLOPT_CAINFO, CACERT_PATH);
-    curl_easy_setopt(c, CURLOPT_TIMEOUT, 15L);
-    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 8L);
-    CURLcode res = curl_easy_perform(c);
-    long long len = -1;
-    if (res == CURLE_OK) {
-        curl_off_t cl = -1;
-        curl_easy_getinfo(c, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &cl);
-        if (cl > 0) len = (long long)cl;
-    } else {
-        std::printf("https_head %s: curl=%d (%s)\n", url, (int)res, curl_easy_strerror(res));
-        std::fflush(stdout);
-    }
-    curl_easy_cleanup(c);
-    return len;
 }
 
 // swkbd counts its length limit in CHARACTERS; our buffers are sized in BYTES.
