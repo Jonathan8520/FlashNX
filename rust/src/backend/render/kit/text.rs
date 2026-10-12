@@ -191,6 +191,10 @@ impl Faces {
     }
 
     fn resolve(&mut self, ch: char) -> Option<(FaceId, ttf_parser::GlyphId)> {
+        // The no-break spaces French puts before ':', '?', '!' and inside « »
+        // are drawn as a space: a font without them must not leave a hole or a
+        // box where the space goes. (They only matter to `kit_wrap`.)
+        let ch = if ch == '\u{00A0}' || ch == '\u{202F}' { ' ' } else { ch };
         if let Some(hit) = self.chars.get(&ch) {
             return hit.map(|(f, g)| (f, ttf_parser::GlyphId(g)));
         }
@@ -529,7 +533,12 @@ impl SwitchRenderBackend {
     pub fn kit_wrap(&mut self, text: &str, px: f32, max_w: f32, max_lines: usize) -> std::vec::Vec<std::string::String> {
         let mut lines: std::vec::Vec<std::string::String> = std::vec::Vec::new();
         let mut cur = std::string::String::new();
-        let mut words = text.split_whitespace().peekable();
+        // Split on breakable spaces only: a no-break space (French typography,
+        // "Actif\u{a0}: ...") keeps its two sides on one line, which is its job.
+        let mut words = text
+            .split(|c: char| c.is_whitespace() && c != '\u{00A0}' && c != '\u{202F}')
+            .filter(|w| !w.is_empty())
+            .peekable();
         while let Some(word) = words.next() {
             let candidate = if cur.is_empty() { word.to_string() } else { std::format!("{} {}", cur, word) };
             if self.kit_measure(&candidate, px) <= max_w {
