@@ -1625,7 +1625,12 @@ pub(crate) fn with_touches_view<R>(
     sheet.kicker = Some(Icon::ChevronLeft);
     sheet.crumbs = crumbs;
     sheet.sections = &sections;
-    sheet.row_h = 48.0;
+    // 44 px: the two groups and all seven rows (the revert one included) fit
+    // the pause's page without scrolling, 394 px of its 402. At 48 it
+    // scrolled as soon as the revert row was there, and the scrollbar took
+    // 10 px from every row, enough to fold the gyroscope's choice in Spanish,
+    // Italian and Portuguese.
+    sheet.row_h = 44.0;
     sheet.glide_key = GLIDE_KEY_TOUCHES_MENU;
     sheet.help = help;
     sheet.hints = if stepper { &hints_step } else { &hints_act };
