@@ -5510,13 +5510,9 @@ fn run_new_game_folder_flow(game_idx: usize) {
     let Some(name) = net::prompt_with(lc.games_dir_new, lc.kbd_newdir_guide, "") else {
         return;
     };
-    // Separators would silently build a tree, or walk out of the games folder
-    // entirely. Same guard as the games-folder browser's own new-folder flow.
-    let safe: std::string::String = name
-        .chars()
-        .filter(|c| !matches!(*c, '/' | ':' | '\\'))
-        .collect();
-    let safe = safe.trim().to_string();
+    // The same cleaning as the games-folder browser's own new-folder flow, and
+    // the same keyboard guide listing what it removes.
+    let safe = clean_folder_name(&name);
     if safe.is_empty() {
         return;
     }
@@ -5559,6 +5555,18 @@ fn run_new_game_folder_flow(game_idx: usize) {
     }
 }
 
+/// A folder name as typed, cleaned for the card: without the separators, which
+/// would build a tree or walk out of the folder, nor the characters the card's
+/// file system refuses (`* ? " < > |`), which made the folder fail to be
+/// created with nothing said. `kbd_newdir_guide` lists them.
+fn clean_folder_name(typed: &str) -> std::string::String {
+    let kept: std::string::String = typed
+        .chars()
+        .filter(|c| !matches!(*c, '/' | ':' | '\\' | '*' | '?' | '"' | '<' | '>' | '|') && !c.is_control())
+        .collect();
+    kept.trim().to_string()
+}
+
 /// Create a subfolder in the folder the browser is showing (#79).
 ///
 /// Saves a trip to a file manager for the common case: someone laying their
@@ -5587,13 +5595,18 @@ fn run_new_folder_flow() {
 ");
         return;
     };
-    // Separators would silently create a tree, or escape the folder entirely.
-    let safe: std::string::String = name
-        .chars()
-        .filter(|c| !matches!(*c, '/' | ':' | '\\'))
-        .collect();
-    let safe = safe.trim();
+    let safe = clean_folder_name(&name);
+    let safe = safe.as_str();
     if safe.is_empty() {
+        return;
+    }
+    // A name the listing hides (`covers`, `*.files`, dots) would be created and
+    // never shown, the cursor left on the first row as if nothing happened:
+    // refused with the reason, as the options' new shelf does.
+    if is_our_bookkeeping(safe) || safe.starts_with('.') {
+        if let Ok(mut s) = LIBRARY.lock() {
+            set_toast(&mut s, crate::loc_ui::ui().folder_name_reserved.to_string(), TOAST_INFO);
+        }
         return;
     }
     let path = if here.ends_with('/') {
@@ -5602,8 +5615,12 @@ fn run_new_folder_flow() {
         std::format!("{}/{}", here, safe)
     };
     if let Err(e) = std::fs::create_dir_all(&path) {
-        crate::net::log(&std::format!("games dir: could not create {}: {}
-", path, e));
+        crate::net::log(&std::format!("games dir: could not create {}: {}\n", path, e));
+        // Said, not only logged: the keyboard closing on an unchanged list
+        // reads as the button doing nothing.
+        if let Ok(mut s) = LIBRARY.lock() {
+            set_toast(&mut s, crate::loc::s().err_sd_write.to_string(), TOAST_ERR);
+        }
         return;
     }
     // Show it straight away, with the cursor on it: the point of creating a
