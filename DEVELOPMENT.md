@@ -32,7 +32,7 @@ flash-for-switch/
 │   │   ├── main.cpp              # libnx init + worker thread + applet loop + joycon/touch input
 │   │   ├── gl_context.cpp        # EGL/GL via switch-mesa, EGL_STENCIL_SIZE=8
 │   │   ├── input.cpp             # (empty — placeholder, input lives in main.cpp)
-│   │   ├── audio.cpp             # libnx audren wrapper + worker thread
+│   │   ├── audio.cpp             # libnx audren wrapper + worker thread + synthesised interface sounds (voices 1-3)
 │   │   ├── exception.cpp         # native __libnx_exception_handler (symbolizable crash log)
 │   │   ├── swf_picker.cpp        # SD scan via opendir/readdir (works around the Horizon read_dir bug)
 │   │   ├── nsp.cpp               # HOME-menu tiles: builds the three NCAs and installs them via ncm/ns
@@ -55,13 +55,19 @@ flash-for-switch/
 │       ├── sources/             # Multi-source: classify (archive.org / direct .swf) + Flashpoint search/cover logos + GameZIP game download (gamezip.rs)
 │       ├── covers.rs            # Local cover art: sidecar/cache/default resolution + PNG/JPEG decode + Flashpoint fetch (manual + auto-on-download)
 │       ├── keymap.rs             # JSON keymap (sidecar + default + fallback) + mutation API
-│       ├── menu.rs               # TOUCHES sub-screen state machine (list + dropdown)
-│       ├── loc.rs                # UI localization (EN/FR/ES/RU) + settings.json persistence
+│       ├── menu.rs               # TOUCHES sub-screen state machine (pages of the pause sheet + the controls editor)
+│       ├── loc.rs                # UI localization (9 languages) + settings.json persistence
+│       ├── loc_ui.rs             # strings of the screens rebuilt on the interface kit (9 languages)
+│       ├── sfx.rs                # which interface sound a press deserves, read from the screen before and after it
 │       ├── ffi/gl.rs             # OpenGL FFI subset (hand-written, no bindgen) + glReadPixels/PACK_ALIGNMENT
 │       └── backend/
 │           ├── render.rs         # SwitchRenderBackend : atlas + UV wrap + GlStateCache + mega-arena +
 │           │                     #   stencil masking INCR/DECR + Glow/DropShadow/Blur/ColorMatrix/Bevel filters +
 │           │                     #   FilterTexturePool TTL + render_offscreen/resolve_sync_handle (BitmapData.draw) + UI overlays
+│           ├── render/kit/       # interface bricks: console fonts + button glyphs (text.rs), SDF shapes (shapes.rs),
+│           │                     #   cover rule (cover.rs), windows/rows/side sheet (window.rs), scrolling list (list.rs),
+│           │                     #   Lucide icon font subset (icons.rs + icons.ttf, built by scripts/make_icon_font.py), theme.rs
+│           ├── render/pages/     # whole screens drawn from the kit: settings, importer, flashpoint, game options, windows
 │           ├── audio.rs          # SwitchAudioBackend (port CpalAudioBackend → libnx audren)
 │           ├── storage.rs        # SwitchStorageBackend (port DiskStorageBackend → sdmc:/flashnx/ flat)
 │           ├── tracing.rs        # Routes Ruffle's tracing events to nxlink stdout
@@ -78,6 +84,8 @@ flash-for-switch/
 ├── assets/{icon.jpg, banner.png, cacert.pem, screenshots/, *.nacp}
 └── scripts/{build.sh, build.ps1, setup-env.ps1, setup-env.sh}
 ```
+
+**Interface.** Every launcher and pause screen draws through the kit in `backend/render/kit/`: text in the console's shared fonts (`pl`: Standard, NintendoExt for the button glyphs, Chinese Simplified on demand), rasterised at the size it is shown into a per-renderer atlas; rounded panels, rings and shadows from one SDF shader; icons from a Lucide subset compiled into the binary. Colours, sizes and radii live in `kit/theme.rs`. A new screen goes in `render/pages/` and is built from `kit_scroll_rows` / `Row`, `draw_modal_frame`, `draw_confirm`, `kit_side_sheet` and `kit_hints*` rather than drawing its own rows; new strings go in `loc_ui.rs`, in all nine languages. The hand-drawn 5x7 font remains only as the fallback when the console fonts cannot be loaded.
 
 The UI/Video backends use the `Null*` implementations provided by default by `ruffle_core` (no dedicated file). **Audio** = `SwitchAudioBackend`. **Storage** = `SwitchStorageBackend`. **Navigator** = `SidecarNavigator`: for multi-file games it resolves relative loads (`loadMovie` / `GetURL` into `_levelN`) against the movie URL and reads the sibling SWF from `<game>.files/` on the SD card; the spawned loader futures are pumped once per frame by a `NullExecutor` kept in `State` (after the player lock is released, since they re-lock the player). Genuine network fetches stay rejected.
 
