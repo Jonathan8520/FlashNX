@@ -2651,7 +2651,7 @@ fn move_game_to_folder(path: &str, basename: &str, folder: &str) -> MoveOutcome 
     let outcome = move_game_inner(path, basename, folder);
     if let MoveOutcome::Moved(ref np) | MoveOutcome::Stranded(ref np) = outcome {
         if np != path {
-            tiles_follow(path, np, false);
+            tiles_follow(&[(path.to_string(), np.clone(), false)]);
         }
     }
     outcome
@@ -5275,7 +5275,11 @@ struct MoveJob {
     files: std::vec::Vec<std::string::String>,
     dirs: std::vec::Vec<std::string::String>,
     idx: usize,
-    moved: usize,
+    /// The games (top-level `.swf` names) and the folders that did move. Only
+    /// their HOME icons follow the library: a game left behind still launches
+    /// from where it is.
+    moved_games: std::vec::Vec<std::string::String>,
+    moved_dirs: std::vec::Vec<std::string::String>,
     /// Entries that stayed in `src`: a file or folder of the same name was
     /// already at the destination, or the rename failed. Told to the player
     /// at the end, not only to the log: part of the library is still behind.
@@ -5397,7 +5401,8 @@ fn start_move(dest: &str) -> bool {
             files,
             dirs,
             idx: 0,
-            moved: 0,
+            moved_games: std::vec::Vec::new(),
+            moved_dirs: std::vec::Vec::new(),
             skipped: 0,
         });
         true
@@ -5444,7 +5449,7 @@ fn step_move(job: &mut MoveJob) -> bool {
             return true;
         }
         if name.to_ascii_lowercase().ends_with(".swf") {
-            job.moved += 1;
+            job.moved_games.push(name);
         }
         return true;
     }
@@ -5466,6 +5471,8 @@ fn step_move(job: &mut MoveJob) -> bool {
         log(&std::format!("games dir: could not move {}/
 ", name));
         job.skipped += 1;
+    } else {
+        job.moved_dirs.push(name);
     }
     true
 }
@@ -5498,17 +5505,26 @@ fn drive_pending_move() {
         if alive {
             return; // more to do; the bar moves on the next frame
         }
-        let done = g.take().expect("checked above");
-        (done.src, done.dest, done.moved, done.skipped)
+        g.take().expect("checked above")
     };
-    let (src, dest, moved, skipped) = finished;
+    let MoveJob { src, dest, moved_games, moved_dirs, skipped, .. } = finished;
 
     set_primary_root(&dest);
-    tiles_follow(&src, &dest, true);
+    // The HOME icons of what moved, and of nothing else. Every icon under the
+    // old folder used to be pointed at the new one, so a game left behind (its
+    // name taken at the destination, a rename refused) got an icon launching a
+    // file that is not there, or the other game that kept it out.
+    let follow: std::vec::Vec<(std::string::String, std::string::String, bool)> = moved_games
+        .iter()
+        .map(|n| (n, false))
+        .chain(moved_dirs.iter().map(|n| (n, true)))
+        .map(|(n, prefix)| (std::format!("{}/{}", src, n), std::format!("{}/{}", dest, n), prefix))
+        .collect();
+    tiles_follow(&follow);
     log(&std::format!(
         "games dir: now {} ({} moved, {} left in {})
 ",
-        dest, moved, skipped, src,
+        dest, moved_games.len(), skipped, src,
     ));
     // Rebuild the list: `add_path` PUSHES, and the boot scan relies on starting
     // from an empty one, so rescanning in place left every game listed twice —
@@ -9080,23 +9096,26 @@ fn tile_for(swf_path: &str) -> Option<u64> {
         .or_else(|| tile_id_for(swf_path))
 }
 
-/// A game moved from `from` to `to` (or, with `prefix`, every game under the
-/// folder `from` moved under `to`): the HOME icons launching it are pointed at
-/// its new place. The installed tile keeps its program ID; only the path in
-/// its config changes.
-fn tiles_follow(from: &str, to: &str, prefix: bool) {
+/// Games that moved, each `(from, to, prefix)`: the game at `from` is now at
+/// `to` or, with `prefix`, every game under the folder `from` is now under
+/// `to`. The HOME icons launching them are pointed at their new places. The
+/// installed tile keeps its program ID; only the path in its config changes.
+///
+/// One pass over the icons for the whole list, and one commit: a library move
+/// hands over every game it took, and the configs are listed and read again
+/// after any write.
+fn tiles_follow(moves: &[(std::string::String, std::string::String, bool)]) {
     let mut wrote = false;
     for (id, p) in tile_index() {
-        let new_path = if prefix {
-            match p.strip_prefix(from) {
-                Some(rest) if rest.starts_with('/') => std::format!("{}{}", to, rest),
-                _ => continue,
+        let new_path = moves.iter().find_map(|(from, to, prefix)| {
+            if *prefix {
+                let rest = p.strip_prefix(from.as_str()).filter(|rest| rest.starts_with('/'))?;
+                Some(std::format!("{}{}", to, rest))
+            } else {
+                (p == *from).then(|| to.clone())
             }
-        } else if p == from {
-            to.to_string()
-        } else {
-            continue;
-        };
+        });
+        let Some(new_path) = new_path else { continue };
         let cfg = tile_cfg_path(id);
         if let Ok(c) = std::ffi::CString::new(cfg.as_str()) {
             let b = new_path.as_bytes();
