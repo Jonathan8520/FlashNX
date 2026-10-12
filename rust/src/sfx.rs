@@ -105,18 +105,28 @@ pub(crate) fn after_input(
         // A press that moved nothing: a value changed in place (A on a value
         // row, Left / Right on a stepper), or a step against the end of a list
         // that does not wrap, which deserves silence.
+        // (RÉGLAGES clicks its own values as they move: only it knows whether
+        // Left or Right changed anything.)
         let stepper = match before {
-            // Every row but the controls one is a value.
-            Screen::SettingsPrefsModal { selection } => selection > 0,
             // Cursor speed, cursor, gyroscope.
             Screen::TouchesMenu { selection, .. } => (3..=5).contains(&selection),
-            Screen::SettingsModal { selection } => selection == crate::library::set_row::SOUNDS,
             _ => false,
         };
         if matches!(button, "A" | "X" | "Y") || (is_nav(button) && stepper) {
             play(Sfx::Toggle);
         }
         return;
+    }
+    // Into or out of the RÉGLAGES pane: a level, not a step of the cursor.
+    if let (Screen::Settings { in_pane: a, .. }, Screen::Settings { in_pane: b, .. }) = (before, after) {
+        if a != b {
+            play(match button {
+                "B" | "Minus" => Sfx::Back,
+                "A" => Sfx::Decide,
+                _ => Sfx::Move,
+            });
+            return;
+        }
     }
     if core::mem::discriminant(&before) == core::mem::discriminant(&after) {
         // Same screen, something in it changed: the cursor (or the list under

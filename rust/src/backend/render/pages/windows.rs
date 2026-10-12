@@ -1,36 +1,13 @@
-//! The launcher's windows: a list of settings, a list of places or things that
-//! scrolls, and a question with its answers.
+//! The launcher's windows: a question with its answers, the page of work under
+//! way, and the sort picker.
 //!
 //! The old `draw_library_options` titled every one of them "Options" and put
 //! the real name in the subtitle, so the game defaults opened as "Options /
-//! Réglages par défaut". A window now says what it is.
+//! Réglages par défaut". A window now says what it is. (The settings that used
+//! to sit in list windows here are edited in the RÉGLAGES pane now.)
 
 use super::super::kit::icons::Icon;
 use super::super::*;
-
-impl SwitchRenderBackend {
-    /// A centred list window. Bit `i` of `steppers` marks row `i` as one whose
-    /// value also steps with Left and Right.
-    #[allow(clippy::too_many_arguments)]
-    pub fn draw_list_window(
-        &mut self,
-        title: &str,
-        subtitle: Option<&str>,
-        selection: usize,
-        rows: &[&str],
-        steppers: u32,
-        hints: &[HintItem],
-    ) {
-        let frame = self.draw_modal_frame(MODAL_W, rows.len(), None, false, title, subtitle, None);
-        self.draw_modal_rows_stepping(&frame, selection, rows, steppers);
-        self.modal_hints(&frame, hints, false);
-        unsafe {
-            glUseProgram(0);
-            glBindVertexArray(0);
-        }
-        self.gl_state.invalidate();
-    }
-}
 
 /// One answer of a `draw_confirm` question.
 pub(crate) struct Choice<'a> {
@@ -142,59 +119,8 @@ impl SwitchRenderBackend {
     }
 }
 
-/// One row of `draw_rows_window`: the kit's list row.
+/// One row of a window's list: the kit's list row.
 pub(crate) use super::super::kit::list::Row as WinRow;
-
-impl SwitchRenderBackend {
-    /// A window holding a list that may scroll, its first `pinned` rows held
-    /// above the rest with a hairline under them (actions on the whole list,
-    /// like "use this folder"). `visible` rows fit, pinned ones included.
-    /// `key` is the list's glide key: change it when the rows change meaning.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn draw_rows_window(
-        &mut self,
-        title: &str,
-        subtitle: Option<&str>,
-        rows: &[WinRow],
-        selection: usize,
-        scroll: usize,
-        pinned: usize,
-        visible: usize,
-        key: u32,
-        hints: &[HintItem],
-    ) {
-        use super::super::kit::list::ScrollRows;
-        let shown = visible.min(rows.len()).max(1);
-        let frame = self.draw_modal_frame(MODAL_W_WIDE, shown, None, false, title, subtitle, None);
-        let scrolls = rows.len() > visible;
-        let spec = ScrollRows {
-            x: frame.x + 16.0,
-            w: frame.w - 32.0 - if scrolls { 16.0 } else { 0.0 },
-            top: frame.rows_top() + MODAL_ROW_CY - MODAL_ROW_H * 0.5,
-            row_h: MODAL_ROW_H,
-            pill_h: MODAL_PILL_H,
-            pinned,
-            visible,
-            key,
-            scrollbar_x: if scrolls { Some(frame.x + frame.w - 26.0) } else { None },
-        };
-        let (x, w) = (spec.x, spec.w);
-        self.kit_scroll_rows(&spec, rows.len(), selection, scroll, |s, i, cy, focused| {
-            let r = &rows[i];
-            s.kit_row_item(x, cy, w, r, focused);
-        });
-        if pinned > 0 && rows.len() > pinned {
-            let ly = (spec.top + pinned as f32 * MODAL_ROW_H).round();
-            self.draw_overlay_rect(x + 12.0, ly, w - 24.0, 1.0, kit::theme::col::LINE);
-        }
-        self.modal_hints(&frame, hints, false);
-        unsafe {
-            glUseProgram(0);
-            glBindVertexArray(0);
-        }
-        self.gl_state.invalidate();
-    }
-}
 
 impl SwitchRenderBackend {
     /// A page with one card in its middle, for work in progress: an icon, what
