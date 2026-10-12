@@ -1255,9 +1255,10 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize) {
             return;
         }
         "B" | "Minus" => {
-            // The launcher's editor closes; the launcher puts its page back
-            // (`library::input`). In game B never reaches here: it is
-            // `leave_editor_in_game`.
+            // Neither side sends them here today: the launcher closes both its
+            // editors itself, through their scale-out (`library::input_inner`),
+            // and in game they are `leave_editor_in_game`. Closing is kept as
+            // the safe answer; the launcher then puts its page back.
             s.screen = Screen::Inactive;
             return;
         }

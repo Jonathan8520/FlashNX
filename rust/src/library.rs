@@ -4211,13 +4211,13 @@ fn input_inner(button: &str) -> bool {
     if settings_tab::sending() {
         return true;
     }
-    // Settings keymap editor: closing it (B at the editor's top level — the List
-    // screen, kind 2 — not inside a dropdown) scales the editor OUT before
-    // landing on the REGLAGES tab. Intercept B HERE, before forwarding to menu,
-    // so the menu stays active (drawable) during the scale-out; render closes it
-    // + swaps to the tab when the pop finishes. The tab itself never pops (it's a
-    // tab, not a modal). Only the Settings editor — TouchesEditor keeps its
-    // instant swap to the (modal) sub-menu, which pops in.
+    // Both keymap editors close by scaling OUT: B or Minus at the editor's top
+    // level (the List screen, kind 2, not inside its key picker). Caught HERE,
+    // before `menu::input`, so the menu stays active (drawable) during the
+    // scale-out; render closes it and lands on the page that opened it when the
+    // pop finishes. The Settings editor lands on the RÉGLAGES tab, which never
+    // pops (it is a tab, not a modal); a game's editor on its Touches et curseur
+    // page (below).
     if matches!(button, "B" | "Minus") && menu::screen_kind() == 2 {
         let is_settings_editor = LIBRARY
             .lock()
@@ -4272,33 +4272,19 @@ fn input_inner(button: &str) -> bool {
             return true;
         }
     }
-    // Sub-screen: TOUCHES editor owns input while active.
+    // Sub-screen: the keymap editor owns input while active.
     if menu::is_active() {
         let consumed = menu::input(button);
-        // If menu just closed itself, fall back to the OPTIONS modal.
+        // Only a safety net: B or Minus on the pad is the one way `menu` closes
+        // itself in the launcher, and both editors catch it above. Were it to
+        // close some other way, the editor's screen would stay up without its
+        // window and take no press: it lands where B would have landed.
         if !menu::is_active() {
-            let mut dest: Option<Screen> = None;
             if let Ok(mut s) = LIBRARY.lock() {
                 match s.screen {
-                    Screen::TouchesEditor { game_idx } => {
-                        // Back to the TOUCHES sub-menu's EDIT row (#20 regroup).
-                        goto_touches_menu(&mut s, game_idx, 0);
-                        dest = Some(s.screen);
-                    }
-                    Screen::SettingsKeymapEditor => {
-                        s.screen = settings_at(SetSection::Defaults, "TOUCHES");
-                        dest = Some(s.screen);
-                    }
+                    Screen::TouchesEditor { game_idx } => goto_touches_menu(&mut s, game_idx, 0),
+                    Screen::SettingsKeymapEditor => s.screen = settings_at(SetSection::Defaults, "TOUCHES"),
                     _ => {}
-                }
-            }
-            if let Some(d) = dest {
-                // Scale the destination back in ONLY if it's a real modal (the
-                // OPTIONS / TOUCHES sub-menu). The REGLAGES destination is a TAB,
-                // not a popup, so it must NOT pop — its sub-modals animate, it
-                // doesn't. modal_kind == 0 means "not a modal".
-                if modal_kind(d) != 0 {
-                    crate::backend::render::modal_open_begin();
                 }
             }
         }
