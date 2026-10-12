@@ -5533,7 +5533,8 @@ fn run_new_game_folder_flow(game_idx: usize) {
             .get(game_idx)
             .is_some_and(|e| on_shelf(e, &safe));
         if already {
-            set_toast(&mut s, crate::loc::s().toast_folder_same.to_string(), TOAST_ERR);
+            // News, not a failure: nothing went wrong, there was nothing to do.
+            set_toast(&mut s, crate::loc::s().toast_folder_same.to_string(), TOAST_INFO);
         } else {
             apply_game_folder(&mut s, game_idx, &safe);
         }
@@ -8292,9 +8293,10 @@ pub(crate) fn apply_game_folder(s: &mut State, game_idx: usize, target: &str) {
             };
             if had_labels == 0 {
                 // Already on no shelf: say so rather than report work that did
-                // not happen.
+                // not happen, in words about this row ("Déjà dans ce dossier"
+                // named a folder the game is not in) and as news, not an error.
                 let row = row_of(s, target);
-                set_toast(s, crate::loc::s().toast_folder_same.to_string(), TOAST_ERR);
+                set_toast(s, crate::loc_ui::ui().toast_folder_none.to_string(), TOAST_INFO);
                 s.screen = Screen::GameFolderPicker { game_idx, selection: row };
                 return;
             }
@@ -8385,10 +8387,11 @@ pub(crate) fn apply_game_folder(s: &mut State, game_idx: usize, target: &str) {
     //
     // A game that sits in a REAL directory of this name is on this shelf because
     // of where it is, and no label can take it off. Say that instead of quietly
-    // doing nothing, or of adding a label that changes nothing.
+    // doing nothing, or of adding a label that changes nothing: the same way
+    // out as the help on this row ("No folder"), as news rather than an error.
     if folder == target {
         let row = row_of(s, target);
-        set_toast(s, crate::loc::s().toast_folder_physical.to_string(), TOAST_ERR);
+        set_toast(s, crate::loc::s().toast_folder_physical.to_string(), TOAST_INFO);
         s.screen = Screen::GameFolderPicker { game_idx, selection: row };
         return;
     }
