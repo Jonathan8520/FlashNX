@@ -9640,8 +9640,10 @@ impl SwitchRenderBackend {
         let br = self.kit_button_width(Btn::R, gpx);
         let pw = self.pad_segments_width(&players, &[false; 2]);
         let lw = self.pad_segments_width(&layers, &v.live_layers);
-        // [X] players | [L] layers [R], 8 px apart and a hairline between.
-        let switches_w = bx + pw + bl + lw + br + 49.0;
+        // [X] players | [L] layers [R], 8 px apart and a hairline between: the
+        // gaps the drawing below steps by, 8 + 8 + 9 (the line and the 8 px
+        // after it) + 8 + 8, so the R glyph ends on the window's padding.
+        let switches_w = bx + pw + bl + lw + br + 41.0;
         let title_w = self.kit_measure(lc.keys_title, TOUCHES_TITLE_PX);
         let wide = title_w + 14.0 + 120.0 + 24.0 + switches_w <= inner_w;
         let head_h = if wide { TOUCHES_HEAD_H } else { TOUCHES_HEAD_H + 44.0 };
