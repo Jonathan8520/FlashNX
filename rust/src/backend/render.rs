@@ -11011,7 +11011,10 @@ impl SwitchRenderBackend {
     /// The selected game's cover in a detail panel (LISTE, BANDE): fitted into
     /// the box minus the caption under it, never blown up past twice its size
     /// (small and sharp reads better than large and soft), the art and its
-    /// caption centred as one block. Returns the art's rectangle.
+    /// caption centred as one block. Returns the art's rectangle, and whether
+    /// a cover was decoded for it this frame: the caller then decodes nothing
+    /// else before the next one, or the end of a dwell paid for two decodes
+    /// in one frame and dropped it.
     ///
     /// The tile thumbnail first, the full-resolution cover once the cursor has
     /// stayed on the game a moment, faded in over it. Decoding the full cover
@@ -11028,7 +11031,7 @@ impl SwitchRenderBackend {
         basename: &str,
         name: &str,
         chip: u32,
-    ) -> (f32, f32, f32, f32) {
+    ) -> ((f32, f32, f32, f32), bool) {
         /// How long the cursor has to stay before the full cover is decoded,
         /// and how long it takes to fade in over the thumbnail.
         const DWELL_MS: u64 = 150;
@@ -11047,9 +11050,11 @@ impl SwitchRenderBackend {
             },
             Err(_) => (now, 0),
         };
+        let mut decoded = false;
         let mut full = reveal_cover_lookup(basename);
         if full.is_none() && ms_since(since) >= DWELL_MS {
             full = Some(self.cover_full_for(basename));
+            decoded = true;
             full_at = now;
             if let Ok(mut g) = PANEL_COVER.lock() {
                 if let Some(p) = g.as_mut() {
@@ -11060,7 +11065,10 @@ impl SwitchRenderBackend {
         // The thumbnail, decoded now if the grid never got to it.
         let thumb = match (cover_lookup(basename), full) {
             (Some(t), _) => t,
-            (None, None) => self.cover_for(basename),
+            (None, None) => {
+                decoded = true;
+                self.cover_for(basename)
+            }
             (None, Some(_)) => CoverTex::Default,
         };
         // A full cover that was already decoded when the panel came to the game
@@ -11094,6 +11102,7 @@ impl SwitchRenderBackend {
         }
         // The box has the cover's own shape, so it fills; through `kit_cover`
         // a transparent logo sits on the same ground as in the grid.
+        let thumb_under = full_alpha < 1.0 && matches!(thumb, CoverTex::Image { .. });
         if full_alpha < 1.0 {
             match thumb {
                 CoverTex::Image { tex, w: tw, h: th, amb } => self.kit_cover(dx, dy, dw, dh, tex, tw, th, amb, 1.0),
@@ -11102,11 +11111,18 @@ impl SwitchRenderBackend {
             }
         }
         if let Some(CoverTex::Image { tex, w: tw, h: th, amb }) = full {
-            if full_alpha > 0.0 {
+            if full_alpha > 0.0 && thumb_under {
+                // Over the thumbnail, the picture alone. Its ground, faded in
+                // on top of a thumbnail already opaque, darkened the art for
+                // the length of the fade: half the full cover, a quarter of
+                // the half-dark backdrop and a quarter of the thumbnail at the
+                // midpoint.
+                self.kit_image(dx, dy, dw, dh, tex, kit::cover::crop_uv(tw, th, dw, dh), full_alpha, theme::radius::TILE);
+            } else if full_alpha > 0.0 {
                 self.kit_cover(dx, dy, dw, dh, tex, tw, th, amb, full_alpha);
             }
         }
-        (dx, dy, dw, dh)
+        ((dx, dy, dw, dh), decoded)
     }
 
     /// The layers badge of a multi-file game, in the top-right corner of a
@@ -11708,9 +11724,10 @@ impl SwitchRenderBackend {
         // upscaling at 2× native.
         let box_h = 460.0;
         let mut panel = (box_x, box_y, box_w, box_h);
-        // Asked before the panel, which may decode the selected game's own
-        // thumbnail this frame: the rows then wait for the next one.
-        let selected_ready = entries.get(selection).map_or(true, |e| cover_lookup(&e.basename).is_some());
+        // Whether the panel decoded a cover this frame (the selected game's
+        // thumbnail, or its full cover at the end of a dwell): the rows then
+        // wait for the next one.
+        let mut panel_decoded = false;
         if let Some(e) = entries.get(selection) {
             use theme::{col, size};
             // Wrapped once, measured once: the caption's height is what the art
@@ -11718,7 +11735,8 @@ impl SwitchRenderBackend {
             let lines = self.kit_wrap(&e.display_name, size::TITLE, box_w, 2);
             let fact_lines = self.kit_game_facts_lines(e, box_w);
             let caption_h = 22.0 + lines.len() as f32 * 32.0 + 30.0 + fact_lines.saturating_sub(1) as f32 * 24.0;
-            panel = self.kit_cover_panel(box_x, box_y, box_w, box_h, caption_h, &e.basename, &e.display_name, e.color_chip);
+            (panel, panel_decoded) =
+                self.kit_cover_panel(box_x, box_y, box_w, box_h, caption_h, &e.basename, &e.display_name, e.color_chip);
             if crate::favorites::is_favorite(&e.basename) {
                 self.kit_favorite_chip(panel.0 + 8.0, panel.1 + 8.0);
             }
@@ -11736,9 +11754,9 @@ impl SwitchRenderBackend {
         }
 
         // Small covers in the rows, from the tile thumbnails: one decode a frame
-        // like every view, the rows nearest the cursor first, and none while the
-        // panel is still waiting for the selected game's own thumbnail.
-        if selected_ready {
+        // like every view, the rows nearest the cursor first, and none on a
+        // frame the panel already decoded for.
+        if !panel_decoded {
             let first = (scroll_px / ROW_H).floor().max(0.0) as usize;
             let last = (first + rows_visible + 1).min(entries.len());
             let missing = (first..last)
@@ -12002,9 +12020,12 @@ impl SwitchRenderBackend {
 
         // ── Hero cover, fitted inside its fixed box ──
         let mut hero = (HERO_X, HERO_Y, HERO_W, HERO_H);
+        // Whether the hero decoded a cover this frame: the row then waits.
+        let mut hero_decoded = false;
         if let Some(e) = entries.get(selection) {
             use theme::{col, size};
-            hero = self.kit_cover_panel(HERO_X, HERO_Y, HERO_W, HERO_H, 0.0, &e.basename, &e.display_name, e.color_chip);
+            (hero, hero_decoded) =
+                self.kit_cover_panel(HERO_X, HERO_Y, HERO_W, HERO_H, 0.0, &e.basename, &e.display_name, e.color_chip);
             if crate::favorites::is_favorite(&e.basename) {
                 self.kit_favorite_chip(hero.0 + 10.0, hero.1 + 10.0);
             }
@@ -12066,7 +12087,8 @@ impl SwitchRenderBackend {
             };
         }
 
-        let mut decode_budget = COVER_DECODES_PER_FRAME;
+        // The row's decode, unless the hero has had this frame's.
+        let mut decode_budget = if hero_decoded { 0 } else { COVER_DECODES_PER_FRAME };
         for (i, e) in entries.iter().enumerate() {
             let x = off + i as f32 * pitch;
             if x > vw || x + ROW_W < 0.0 {
