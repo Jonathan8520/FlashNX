@@ -1362,7 +1362,6 @@ pub(crate) use kit::icons::Icon;
 pub(crate) use kit::text::HintItem;
 pub(crate) use kit::theme::col as ui_col;
 pub(crate) use kit::text::Btn;
-pub(crate) use pages::settings::{SettingsExtra, SettingsRow};
 pub(crate) use pages::windows::{Choice, WinRow};
 pub(crate) use kit::list::Row;
 pub(crate) use kit::sheet::{cascade_step, Sheet, Side, OPTIONS_CHILD_W, OPTIONS_W};
@@ -11111,32 +11110,6 @@ impl SwitchRenderBackend {
         self.kit_hints_centered(x + w * 0.5, y + h - 28.0, hints);
     }
 
-    /// `draw_modal_rows`, where bit `i` of `steppers` marks row `i` as one whose
-    /// value also steps with Left and Right (see `kit_row`).
-    fn draw_modal_rows_stepping(&mut self, frame: &ModalFrame, selection: usize, rows: &[&str], steppers: u32) {
-        // Which screen these rows belong to, for the touch table and for the
-        // glide key (one key per screen, so the focus never flies in from a
-        // panel that is no longer open).
-        let touch_kind = ui_screen_kind();
-        let top = frame.rows_top();
-        let (px, pw) = (frame.x + 16.0, frame.w - 32.0);
-        if selection < rows.len() {
-            let now = unsafe { ruffle_tick_now() };
-            let hy = eased_list_y(top + selection as f32 * MODAL_ROW_H, touch_kind, now);
-            self.kit_focus_pill(px, hy + MODAL_ROW_CY - MODAL_PILL_H * 0.5, pw, MODAL_PILL_H);
-        }
-        let mut cells: std::vec::Vec<(f32, f32, f32, f32)> = std::vec::Vec::with_capacity(rows.len());
-        for (i, row) in rows.iter().enumerate() {
-            let y = top + i as f32 * MODAL_ROW_H;
-            let (label, value) = kit::window::split_label_value(row);
-            let stepper = i < 32 && steppers & (1 << i) != 0;
-            self.kit_row(px, y + MODAL_ROW_CY, pw, label, value, i == selection, theme::size::ROW, stepper);
-            // The whole width of the panel: a row is a target for a thumb.
-            cells.push((frame.x + 8.0, y + MODAL_ROW_CY - MODAL_ROW_H * 0.5, (frame.w - 16.0).max(0.0), MODAL_ROW_H));
-        }
-        ui_cells_publish(touch_kind, cells);
-    }
-
     /// Top navbar: the tab strip switched with the L/R shoulder buttons.
     /// `active` indexes JOUER(0) / IMPORTER(1) / REGLAGES(2). Drawn last, over
     /// the top of every tab-home screen, by `library::render`.
@@ -12864,18 +12837,6 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
-    /// Bug-report result notice. Green title on success, red on failure; the
-    /// body is the (already-localized) message. Reuses the shared centered
-    /// notice layout.
-    pub fn draw_library_bug_result(&mut self, msg: &str, ok: bool) {
-        let lc = crate::loc::s();
-        if ok {
-            self.draw_centered_notice(lc.bug_ok_title, 0x66DD66, msg);
-        } else {
-            self.draw_centered_notice(lc.bug_fail_title, 0xFF5040, msg);
-        }
-    }
-
     /// Transient toast banner near the bottom of the screen (#20). `kind`: 0 =
     /// success (green), 1 = error (red), 2 = info (blue). Non-blocking — drawn on
     /// top of the current screen for a couple of seconds (the library loop counts
@@ -12939,113 +12900,6 @@ impl SwitchRenderBackend {
             glBindVertexArray(0);
         }
         self.gl_state.invalidate();
-    }
-
-    /// Language picker (Settings → LANGUAGE). `languages` are native display
-    /// names in `loc::PICKER_LANGS` order. The currently-active language is
-    /// tinted teal even when the cursor is elsewhere.
-    /// Solid opaque rect at screen px, for the pixel flags. `rgb` is 0xRRGGBB.
-    fn flag_fill(&mut self, x: f32, y: f32, w: f32, h: f32, rgb: u32) {
-        self.draw_overlay_rect(x, y, w, h, 0xFF00_0000 | (rgb & 0x00FF_FFFF));
-    }
-
-    /// Filled circle centred on (cx, cy), radius r, approximated by stacked 1px
-    /// horizontal spans. Used for the round parts of flags (crescent, disc, star).
-    fn flag_disc(&mut self, cx: f32, cy: f32, r: f32, rgb: u32) {
-        let ri = r.max(1.0) as i32;
-        for dy in -ri..=ri {
-            let hw = (r * r - (dy * dy) as f32).max(0.0).sqrt();
-            if hw > 0.0 {
-                self.flag_fill(cx - hw, cy + dy as f32, hw * 2.0, 1.0, rgb);
-            }
-        }
-    }
-
-    /// 2px frame around (x,y,w,h), used to outline a flag tile.
-    fn flag_stroke(&mut self, x: f32, y: f32, w: f32, h: f32, rgb: u32) {
-        const T: f32 = 2.0;
-        self.flag_fill(x, y, w, T, rgb);
-        self.flag_fill(x, y + h - T, w, T, rgb);
-        self.flag_fill(x, y, T, h, rgb);
-        self.flag_fill(x + w - T, y, T, h, rgb);
-    }
-
-    /// A small pixel flag for `lang` filling the w×h box at (x,y). Solid rects
-    /// (+ `flag_disc` for the round flags). Deliberately simplified: the native
-    /// name is drawn under it, so the flag only has to be recognisable, not exact.
-    fn draw_flag(&mut self, lang: crate::loc::Lang, x: f32, y: f32, w: f32, h: f32) {
-        use crate::loc::Lang;
-        let third_v = w / 3.0;
-        let third_h = h / 3.0;
-        match lang {
-            Lang::Fr => {
-                self.flag_fill(x, y, third_v, h, 0x0055A4);
-                self.flag_fill(x + third_v, y, third_v, h, 0xFFFFFF);
-                self.flag_fill(x + 2.0 * third_v, y, w - 2.0 * third_v, h, 0xEF4135);
-            }
-            Lang::It => {
-                self.flag_fill(x, y, third_v, h, 0x009246);
-                self.flag_fill(x + third_v, y, third_v, h, 0xFFFFFF);
-                self.flag_fill(x + 2.0 * third_v, y, w - 2.0 * third_v, h, 0xCE2B37);
-            }
-            Lang::De => {
-                self.flag_fill(x, y, w, third_h, 0x000000);
-                self.flag_fill(x, y + third_h, w, third_h, 0xDD0000);
-                self.flag_fill(x, y + 2.0 * third_h, w, h - 2.0 * third_h, 0xFFCE00);
-            }
-            Lang::Ru => {
-                self.flag_fill(x, y, w, third_h, 0xFFFFFF);
-                self.flag_fill(x, y + third_h, w, third_h, 0x0039A6);
-                self.flag_fill(x, y + 2.0 * third_h, w, h - 2.0 * third_h, 0xD52B1E);
-            }
-            Lang::Es => {
-                self.flag_fill(x, y, w, h, 0xAA151B);
-                self.flag_fill(x, y + h * 0.25, w, h * 0.5, 0xF1BF00);
-            }
-            Lang::En => {
-                // Simplified Union Jack: blue field with a white-bordered red cross
-                // (the diagonals are dropped — unreadable at this size).
-                self.flag_fill(x, y, w, h, 0x012169);
-                self.flag_fill(x, y + h * 0.35, w, h * 0.30, 0xFFFFFF);
-                self.flag_fill(x + w * 0.35, y, w * 0.30, h, 0xFFFFFF);
-                self.flag_fill(x, y + h * 0.42, w, h * 0.16, 0xC8102E);
-                self.flag_fill(x + w * 0.42, y, w * 0.16, h, 0xC8102E);
-            }
-            Lang::Zh => {
-                self.flag_fill(x, y, w, h, 0xDE2910);
-                // One big yellow star (disc) + four small dots, upper-left quadrant.
-                self.flag_disc(x + w * 0.24, y + h * 0.34, h * 0.15, 0xFFDE00);
-                let d = (h * 0.05).max(2.0);
-                for (fx, fy) in [(0.42, 0.16), (0.50, 0.30), (0.50, 0.50), (0.42, 0.64)] {
-                    self.flag_fill(x + w * fx, y + h * fy, d, d, 0xFFDE00);
-                }
-            }
-            Lang::Tr => {
-                self.flag_fill(x, y, w, h, 0xE30A17);
-                // Crescent = white disc minus a red disc offset to the right.
-                self.flag_disc(x + w * 0.40, y + h * 0.50, h * 0.27, 0xFFFFFF);
-                self.flag_disc(x + w * 0.47, y + h * 0.50, h * 0.21, 0xE30A17);
-                // Star (approximated by a small disc).
-                self.flag_disc(x + w * 0.60, y + h * 0.50, h * 0.09, 0xFFFFFF);
-            }
-            Lang::Pt => {
-                // Brazil: green field, yellow diamond, blue disc.
-                self.flag_fill(x, y, w, h, 0x009C3B);
-                let cx = x + w * 0.5;
-                let cy = y + h * 0.5;
-                let hh = h * 0.42;
-                let hw = w * 0.42;
-                let steps = hh as i32;
-                for dy in -steps..=steps {
-                    let frac = 1.0 - (dy.abs() as f32) / hh;
-                    let rw = hw * frac;
-                    if rw > 0.0 {
-                        self.flag_fill(cx - rw, cy + dy as f32, rw * 2.0, 1.0, 0xFFDF00);
-                    }
-                }
-                self.flag_disc(cx, cy, h * 0.16, 0x002776);
-            }
-        }
     }
 
     /// Shared loading overlay: a full-screen dim + the standard loading panel

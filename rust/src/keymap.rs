@@ -1706,25 +1706,6 @@ pub fn set_pixel_filter(mode: u8) {
 pub const POWER_MODE_COUNT: u8 = 3;
 pub const POWER_AUTO: u8 = 2;
 
-/// The setting one press of the OVERCLOCK row moves to: OFF -> AUTO -> ON ->
-/// OFF. From AUTO, the default, the first press goes to the faster one.
-pub fn next_power_setting(cur: u8) -> u8 {
-    match cur {
-        0 => POWER_AUTO,
-        POWER_AUTO => 1,
-        _ => 0,
-    }
-}
-
-/// `next_power_setting` backwards, for Left on the row.
-pub fn prev_power_setting(cur: u8) -> u8 {
-    match cur {
-        0 => 1,
-        POWER_AUTO => 0,
-        _ => POWER_AUTO,
-    }
-}
-
 /// Per-game power setting (by basename), falling back to the global default.
 ///
 /// PER GAME rather than one global switch, for the same reason as the scaling

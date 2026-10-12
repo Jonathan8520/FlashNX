@@ -131,6 +131,7 @@ impl SwitchRenderBackend {
         const ICON: f32 = 20.0;
         const MARK: f32 = 16.0;
         const CHEVRON: f32 = 18.0;
+        const KEYBOARD: f32 = 18.0;
         let mut lx = x + PAD;
         if let Some(ic) = row.icon {
             let ink = if row.danger {
@@ -163,6 +164,10 @@ impl SwitchRenderBackend {
             let ink = if focused { col::GOLD } else { col::CHEVRON };
             self.kit_icon(right - CHEVRON + 2.0, cy, CHEVRON, super::icons::Icon::ChevronRight, ink);
             right -= CHEVRON + 8.0;
+        } else if row.keyboard {
+            let ink = if focused { col::GOLD } else { 0xFF_5A_6A_8F };
+            self.kit_icon(right - KEYBOARD, cy, KEYBOARD, super::icons::Icon::Keyboard, ink);
+            right -= KEYBOARD + 10.0;
         }
         let mut avail = right - lx;
         if row.ctrl != super::controls::Ctrl::None {
@@ -214,7 +219,9 @@ impl SwitchRenderBackend {
 ///
 /// The chevron is the promise that A goes somewhere: a row without one acts
 /// where it is (it toggles, it restarts, it quits). Jonathan read "Redémarrer"
-/// and "Écran" as the same kind of row until the second one had it.
+/// and "Écran" as the same kind of row until the second one had it. A keyboard
+/// in the same place says the other way of leaving the page: A brings up the
+/// Switch keyboard (a nickname, a name, an idea to send).
 #[derive(Clone, Copy)]
 pub(crate) struct Row<'a> {
     pub icon: Option<super::icons::Icon>,
@@ -229,6 +236,7 @@ pub(crate) struct Row<'a> {
     pub dim: bool,
     pub danger: bool,
     pub opens: bool,
+    pub keyboard: bool,
 }
 
 impl<'a> Row<'a> {
@@ -243,6 +251,7 @@ impl<'a> Row<'a> {
             dim: false,
             danger: false,
             opens: false,
+            keyboard: false,
         }
     }
 
@@ -308,6 +317,13 @@ impl<'a> Row<'a> {
 
     pub(crate) fn opens_if(mut self, on: bool) -> Row<'a> {
         self.opens = on;
+        self
+    }
+
+    /// A opens the Switch keyboard: the row gets a keyboard where a chevron
+    /// would go.
+    pub(crate) fn keyboard(mut self) -> Row<'a> {
+        self.keyboard = true;
         self
     }
 

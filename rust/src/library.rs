@@ -123,13 +123,15 @@ pub(crate) enum Screen {
     /// Per-URL options modal (Plus on a history URL): rename(edit) / delete /
     /// back. `url_idx` indexes `url_history`; `selection` indexes the options.
     DistantUrlOptions { url_idx: usize, selection: usize },
-    // ── Settings modal (Plus from the library) ─────────────────────────
-    /// Global settings. `selection` indexes the 3 entries: 0 = default
-    /// controls, 1 = language, 2 = back.
-    SettingsModal { selection: usize },
-    /// RÉGLAGES → DOSSIER JEUX (#79): browse the card one level at a time and
-    /// choose where new downloads land. `path` is the folder being shown,
-    /// `selection` indexes `dir_browse` with 0 = "choose this folder".
+    // ── RÉGLAGES (`settings_tab`) ───────────────────────────────────────
+    /// The tab: its sections down the left, the open one's settings in the
+    /// pane. `in_pane` says which side has the cursor; `row` is the cursor's
+    /// place in the pane (a row, a language, the layout cards).
+    Settings { section: SetSection, in_pane: bool, row: usize },
+    /// RÉGLAGES > Bibliothèque > Dossier des jeux (#79), inside the pane:
+    /// browse the card one level at a time and choose where the library goes.
+    /// The folder shown and its subfolders are `dir_path` / `dir_browse`;
+    /// `selection` 0 = "use this folder".
     GamesDirPicker { selection: usize, scroll: usize },
     /// OPTIONS > DOSSIER (issue #68): put this one game on a shelf. Rows are
     /// the root, then every folder that already holds a game, then "new folder".
@@ -142,37 +144,26 @@ pub(crate) enum Screen {
     GameFolderDelete { game_idx: usize, folder_idx: usize, selection: usize },
     /// Confirm moving the library into the folder held in `dir_path`. Asked
     /// because a move is not undone by pressing B: it renames real files.
+    /// `selection`: 0 = cancel (left, where it opens), 1 = move.
     GamesDirConfirm { selection: usize },
     /// The move itself, with a real count behind it. A library of a hundred
     /// games is a hundred renames plus their sidecars, and a frozen screen with
     /// no explanation is how a user learns to fear a feature.
     GamesDirMoving,
-    /// Editing the GLOBAL DEFAULT keymap via the reused `menu::*` editor.
+    /// Editing the GLOBAL DEFAULT keymap (RÉGLAGES > Jeu par défaut > Touches)
+    /// in the reused `menu::*` editor, over the tab.
     SettingsKeymapEditor,
-    /// Language picker. `selection` indexes `loc::PICKER_LANGS`.
-    SettingsLanguagePicker { selection: usize },
-    /// RÉGLAGES → AFFICHAGE HOME: pick the layout from the list instead of
-    /// cycling. Four layouts behind a forward-only cycle meant three presses to
-    /// go back one, in the one app screen that gives sort and language a picker.
-    SettingsHomeViewPicker { selection: usize },
-    /// Game DEFAULTS sub-modal: 0 = display mode, 1 = screen filter, 2 = cursor
-    /// speed. Each row cycles in place. These are the values a game that was
-    /// never set from its own pause menu will use.
-    SettingsPrefsModal { selection: usize },
-    // ── Bug report (RÉGLAGES → SIGNALER UN BUG) ─────────────────────────
-    /// Pick which game is broken. `selection` indexes `State::entries`,
-    /// `scroll_offset` is the topmost visible row. A → describe + send,
-    /// B → back to the RÉGLAGES tab.
+    /// RÉGLAGES > Aide et retours > Signaler un bug, inside the pane: which
+    /// game is broken. `selection` is a row of `bug_picker_order`,
+    /// `scroll_offset` the topmost visible row. A describes + sends, B goes
+    /// back to the row that opened it.
     BugPicker { selection: usize, scroll_offset: usize },
-    /// Result of a bug OR suggestion submission. `State::bug_ok` picks the
-    /// success/failure styling, `State::bug_msg` is the (already-localized)
-    /// message. A/B dismiss back to the RÉGLAGES tab.
-    ///
-    /// `from_row` is the RÉGLAGES row the flow started on (3 = SIGNALER UN BUG,
-    /// 4 = FAIRE UNE PROPOSITION). ONE screen serves both, so the row has to be
-    /// carried rather than assumed: dismissing a sent suggestion used to land the
-    /// cursor on SIGNALER UN BUG, one row above the button just pressed (#113).
-    BugResult { from_row: usize },
+    /// A bug report or an idea the relay did not take, asked over the page:
+    /// Fermer (0) or Réessayer (1), which sends the kept report again. `row` is
+    /// the Aide et retours row the flow started on, carried rather than
+    /// assumed: one screen serves both flows, and dismissing a suggestion once
+    /// landed the cursor on the row above the button just pressed (#113).
+    SendFailed { row: usize, selection: usize },
     /// TOUCHES sub-menu (#20 regroup): everything controls-related for a game in
     /// one place. `selection` indexes [edit, apply, share, (revert)] — the revert
     /// row is present only when `State::touches_can_revert`. Reached from OPTIONS
@@ -210,24 +201,11 @@ pub(crate) enum Screen {
 // redundant clutter. APPLIQUER / PARTAGER moved OUT of here into the TOUCHES
 // sub-menu (#20 regroup) so they don't read as game-save actions next to
 // RENOMMER / JAQUETTE / SUPPRIMER.
-/// The RÉGLAGES rows, in the order they are drawn. Every screen that returns
-/// to the tab lands on the row that opened it, through these names: the rows
-/// were numbers once, and moving one meant finding every literal 3 and 6.
-pub(crate) mod set_row {
-    pub(crate) const HOME_VIEW: usize = 0;
-    pub(crate) const GAMES_DIR: usize = 1;
-    pub(crate) const GAME_PREFS: usize = 2;
-    pub(crate) const LANGUAGE: usize = 3;
-    pub(crate) const SOUNDS: usize = 4;
-    pub(crate) const PSEUDO: usize = 5;
-    pub(crate) const BUG: usize = 6;
-    pub(crate) const SUGGEST: usize = 7;
-    pub(crate) const QUIT: usize = 8;
-    pub(crate) const COUNT: usize = 9;
-}
-
 mod options_panel;
 pub(crate) use options_panel::{opt_row, OPTIONS_ENTRIES};
+mod settings_tab;
+pub(crate) use settings_tab::SetSection;
+use settings_tab::settings_at;
 
 /// Top-level navbar tabs (v1.2.0), switched with the L/R shoulder buttons.
 /// Each maps to a "home" screen. The navbar is drawn on every tab-home screen;
@@ -270,7 +248,7 @@ pub(crate) fn screen_tab(screen: Screen) -> Option<Tab> {
     match screen {
         Screen::List { .. } | Screen::Empty => Some(Tab::Jouer),
         Screen::DistantIdle { .. } => Some(Tab::Importer),
-        Screen::SettingsModal { .. } => Some(Tab::Reglages),
+        Screen::Settings { .. } => Some(Tab::Reglages),
         _ => None,
     }
 }
@@ -296,7 +274,8 @@ pub(crate) fn goto_tab(target: Tab, dir: f32) {
                 }
             }
             Tab::Importer => distant_idle_at(0),
-            Tab::Reglages => Screen::SettingsModal { selection: 0 },
+            // Back on the section the player left, not on the first one.
+            Tab::Reglages => settings_tab::settings_home(),
         };
     }
     // Slide the incoming tab's content in from the side asked for; the navbar
@@ -1362,10 +1341,6 @@ pub(crate) struct State {
     /// URL of the async archive.org fetch in flight (`Screen::DistantLoading`),
     /// pushed to history once the fetch succeeds.
     pending_fetch_url: std::string::String,
-    /// Bug-report result message (`Screen::BugResult`) + whether it succeeded
-    /// (drives the green/red notice styling).
-    bug_msg: std::string::String,
-    bug_ok: bool,
 }
 
 static LIBRARY: Mutex<State> = Mutex::new(State {
@@ -1431,8 +1406,6 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     dl_companion_seen: std::vec::Vec::new(),
     dl_companion_done: 0,
     pending_fetch_url: std::string::String::new(),
-    bug_msg: std::string::String::new(),
-    bug_ok: false,
 });
 
 /// Where the URL history persists across boots. Format: JSON array of
@@ -1620,10 +1593,15 @@ pub const FP_GALLERY_ROWS: usize = 3;
 /// with `ROW_SPACING=50`.
 pub const DISTANT_VISIBLE_ROWS: usize = 10;
 
-/// Rows visible at once in the bug-report game picker (RÉGLAGES → SIGNALER UN
-/// BUG). A simple scrollable name list — shares the layout in
-/// `draw_library_bug_picker`.
-pub const BUG_PICKER_VISIBLE_ROWS: usize = 10;
+/// Rows visible at once in the bug report's game list (RÉGLAGES > Aide et
+/// retours > Signaler un bug), which opens inside the pane: eight rows with a
+/// cover each fit under its head (`settings_game_list`).
+pub const BUG_PICKER_VISIBLE_ROWS: usize = 8;
+
+/// Subfolders visible at once in the games folder browser, under its two
+/// pinned rows (`settings_dir_list`). The input side scrolls by it and lands
+/// on a folder just left with it, so all three read this one number.
+pub const GAMES_DIR_VISIBLE: usize = 7;
 
 // ── Setup / FFI helpers ───────────────────────────────────────────────────
 
@@ -3250,17 +3228,10 @@ fn set_screen_selection(s: &mut State, idx: usize) -> bool {
             selection,
             Screen::GameFolderDelete { game_idx, folder_idx, selection: idx }
         ),
-        Screen::SettingsModal { selection } => {
-            put!(selection, Screen::SettingsModal { selection: idx })
-        }
-        Screen::SettingsPrefsModal { selection } => {
-            put!(selection, Screen::SettingsPrefsModal { selection: idx })
-        }
-        Screen::SettingsLanguagePicker { selection } => {
-            put!(selection, Screen::SettingsLanguagePicker { selection: idx })
-        }
-        Screen::SettingsHomeViewPicker { selection } => {
-            put!(selection, Screen::SettingsHomeViewPicker { selection: idx })
+        // The column and the pane share one table (see `settings_tab`).
+        Screen::Settings { section, in_pane, row } => settings_tab::touch_select(s, section, in_pane, row, idx),
+        Screen::SendFailed { row, selection } => {
+            put!(selection, Screen::SendFailed { row, selection: idx })
         }
         Screen::GamesDirPicker { selection, scroll } => {
             put!(selection, Screen::GamesDirPicker { selection: idx, scroll })
@@ -3646,9 +3617,8 @@ fn input_inner(button: &str) -> bool {
             .unwrap_or(false);
         if is_settings_editor {
             if let Ok(mut p) = PENDING_AFTER_CLOSE.lock() {
-                // Back to REGLAGES PAR DEFAUT, which is where the global
-                // keymap row now lives.
-                *p = Some(PendingClose::CloseMenuGoto(Screen::SettingsPrefsModal { selection: 0 }));
+                // Back to Jeu par défaut, on the Touches row that opened it.
+                *p = Some(PendingClose::CloseMenuGoto(settings_at(SetSection::Defaults, "TOUCHES")));
             }
             crate::backend::render::modal_close_begin();
             return true;
@@ -3687,7 +3657,7 @@ fn input_inner(button: &str) -> bool {
                         dest = Some(s.screen);
                     }
                     Screen::SettingsKeymapEditor => {
-                        s.screen = Screen::SettingsPrefsModal { selection: 0 };
+                        s.screen = settings_at(SetSection::Defaults, "TOUCHES");
                         dest = Some(s.screen);
                     }
                     _ => {}
@@ -3934,8 +3904,6 @@ fn input_inner(button: &str) -> bool {
                 return true;
             }
         }
-        // A on the RÉGLAGES suggestion row = swkbd + POST.
-        // Hoisted for the same reason.
         // X in the folder picker = create a subfolder here. Hoisted because the
         // swkbd blocks, and blocking under the library lock freezes the app.
         if let Screen::GamesDirPicker { .. } = screen_snap {
@@ -3944,14 +3912,22 @@ fn input_inner(button: &str) -> bool {
                 return true;
             }
         }
-        if let Screen::SettingsModal { selection } = screen_snap {
-            if button == "A" && selection == set_row::SUGGEST {
-                run_suggestion_flow();
+        // RÉGLAGES rows that open the keyboard: the nickname (#20) and the idea
+        // (keyboard, then a POST). Hoisted for the same reason.
+        if let Screen::Settings { section, in_pane: true, row } = screen_snap {
+            if button == "A" && section == SetSection::Profile && row == settings_tab::row_of(section, "PSEUDO") {
+                settings_tab::run_pseudo_flow();
                 return true;
             }
-            // PSEUDO (#20): swkbd to set the community-profile nickname. Hoisted.
-            if button == "A" && selection == set_row::PSEUDO {
-                run_pseudo_flow();
+            if button == "A" && section == SetSection::Help && row == settings_tab::row_of(section, "IDEE") {
+                settings_tab::run_suggestion_flow();
+                return true;
+            }
+        }
+        // Réessayer after a report the relay did not take: the POST again.
+        if let Screen::SendFailed { row, selection: 1 } = screen_snap {
+            if button == "A" {
+                settings_tab::run_retry_flow(row);
                 return true;
             }
         }
@@ -4154,8 +4130,8 @@ fn input_inner(button: &str) -> bool {
             }
             true
         }
-        Screen::SettingsModal { selection } => {
-            handle_settings_input(&mut s, button, selection);
+        Screen::Settings { section, in_pane, row } => {
+            settings_tab::handle_settings_input(&mut s, button, section, in_pane, row);
             true
         }
         Screen::GamesDirPicker { selection, scroll } => {
@@ -4170,31 +4146,13 @@ fn input_inner(button: &str) -> bool {
         Screen::GamesDirMoving => true,
         // Owned by the reused menu::* editor (handled at the top of input()).
         Screen::SettingsKeymapEditor => false,
-        Screen::SettingsLanguagePicker { selection } => {
-            handle_settings_language_input(&mut s, button, selection);
-            true
-        }
-        Screen::SettingsHomeViewPicker { selection } => {
-            handle_settings_home_view_input(&mut s, button, selection);
-            true
-        }
-        Screen::SettingsPrefsModal { selection } => {
-            handle_settings_prefs_input(&mut s, button, selection);
-            true
-        }
         Screen::BugPicker { selection, scroll_offset } => {
             handle_bug_picker_input(&mut s, button, selection, scroll_offset);
             true
         }
-        Screen::BugResult { from_row } => {
-            if matches!(button, "A" | "B" | "Minus") {
-                s.bug_msg.clear();
-                // Back to the RÉGLAGES tab, on the row that OPENED this. Row 3 was
-                // hardcoded here, and since the suggestion flow ends on the same
-                // screen, sending one put the cursor back one row above the button
-                // that had just been pressed (#113).
-                s.screen = Screen::SettingsModal { selection: from_row };
-            }
+        Screen::SendFailed { row, .. } => {
+            // A on Réessayer is hoisted (a network call); the rest is here.
+            settings_tab::handle_send_failed_input(&mut s, button, row);
             true
         }
         Screen::TouchesMenu { game_idx, selection } => {
@@ -4283,259 +4241,6 @@ fn input_inner(button: &str) -> bool {
     consumed
 }
 
-/// Settings tab entries, named in `set_row` in the order they are drawn. (No
-/// BACK: leave via L/R.) Nickname and suggestion are hoisted in `input()`
-/// because they open the system keyboard; every screen that returns here
-/// lands on the row that opened it through the same names.
-fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
-    const LAST: usize = set_row::COUNT - 1;
-    // The sounds row is the one value on the page: A, Left and Right flip it.
-    if selection == set_row::SOUNDS && matches!(button, "A" | "Left" | "Right" | "StickLLeft" | "StickLRight") {
-        // Turning them on is heard at once: the press's own click
-        // (`sfx::after_input`) plays after the switch.
-        crate::loc::set_ui_sounds(!crate::loc::ui_sounds());
-        crate::loc::save_current();
-        s.screen = Screen::SettingsModal { selection };
-        return;
-    }
-    match button {
-        "Up" | "StickLUp" => {
-            selection = if selection == 0 { LAST } else { selection - 1 };
-        }
-        "Down" | "StickLDown" => {
-            selection = if selection >= LAST { 0 } else { selection + 1 };
-        }
-        "A" => {
-            match selection {
-                set_row::HOME_VIEW => {
-                    let cur = crate::loc::home_view() as usize;
-                    s.screen = Screen::SettingsHomeViewPicker { selection: cur };
-                }
-                set_row::GAMES_DIR => {
-                    // GAMES FOLDER (#79): browse the card and pick where new
-                    // downloads land. Starts at the folder in use, so the row
-                    // opens on what it describes.
-                    let start = primary_root();
-                    s.dir_browse = list_dirs(&start);
-                    s.dir_path = start;
-                    s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 };
-                }
-                set_row::GAME_PREFS => {
-                    s.screen = Screen::SettingsPrefsModal { selection: 0 };
-                }
-                set_row::LANGUAGE => {
-                    let cur = crate::loc::current().index();
-                    s.screen = Screen::SettingsLanguagePicker { selection: cur };
-                }
-                set_row::BUG => {
-                    // Pick the broken game, then describe + send. No game on SD
-                    // = nothing to report; say so.
-                    if s.entries.is_empty() {
-                        s.bug_ok = false;
-                        s.bug_msg = crate::loc::s().bug_no_games.to_string();
-                        s.screen = Screen::BugResult { from_row: set_row::BUG };
-                    } else {
-                        s.screen = Screen::BugPicker { selection: 0, scroll_offset: 0 };
-                    }
-                }
-                // PSEUDO and SUGGEST are hoisted in input(): they open the
-                // keyboard, which must not run under the lock.
-                set_row::QUIT => {
-                    s.screen = Screen::Quit;
-                }
-                _ => {}
-            }
-            return;
-        }
-        // No B "back to JOUER": the navbar (L/R) is the only inter-tab nav.
-        _ => {}
-    }
-    s.screen = Screen::SettingsModal { selection };
-}
-
-/// Game DEFAULTS sub-modal (0 = global keymap, 1 = display, 2 = rotation,
-/// 3 = zoom, 4 = pixels, 5 = filter, 6 = fps counter, 7 = overclock,
-/// 8 = cursor speed). Rows 1-8
-/// cycle in place on A, in the order the in-game ECRAN panel uses so the two
-/// screens can be read against each other; row 0 opens the keymap editor. B
-/// returns to REGLAGES on the row that opened this.
-///
-/// These are DEFAULTS, not overrides: they apply to a game that has never been
-/// set from its own pause menu. A game with its own sidecar keeps its value, and
-/// keeps it even if the default changes later.
-fn handle_settings_prefs_input(s: &mut State, button: &str, mut selection: usize) {
-    const LAST: usize = 8;
-    // A steps a value forward; Left and Right step it either way.
-    let dir: i32 = match button {
-        "A" | "Right" | "StickLRight" => 1,
-        "Left" | "StickLLeft" => -1,
-        _ => 0,
-    };
-    match button {
-        "Up" | "StickLUp" => {
-            selection = if selection == 0 { LAST } else { selection - 1 };
-        }
-        "Down" | "StickLDown" => {
-            selection = if selection >= LAST { 0 } else { selection + 1 };
-        }
-        "A" if selection == 0 => {
-            // Global default keymap: it is a per-game default like the rows
-            // below it. No game: the editor says "for every game".
-            keymap::init_for_global_default();
-            menu::open(None);
-            s.screen = Screen::SettingsKeymapEditor;
-            return;
-        }
-        _ if dir != 0 && selection > 0 => {
-            use crate::step_wrap;
-            let d = dir as core::ffi::c_int;
-            match selection {
-                1 => crate::loc::set_default_display_mode(step_wrap(
-                    crate::loc::default_display_mode(),
-                    keymap::DISPLAY_MODE_COUNT,
-                    d,
-                )),
-                2 => crate::loc::set_default_rotation(step_wrap(
-                    crate::loc::default_rotation(),
-                    keymap::ROTATION_COUNT,
-                    d,
-                )),
-                // Presets, not the free percentage the pause menu gives:
-                // there is no picture here to judge one against.
-                3 => crate::loc::step_default_zoom(dir),
-                // Texture sampling (issue #108), above the screen filter here
-                // as in ECRAN: the two names are close enough that a different
-                // order would read as a different setting.
-                4 => crate::loc::set_default_pixel_filter(step_wrap(
-                    crate::loc::default_pixel_filter(),
-                    keymap::PIXEL_FILTER_COUNT,
-                    d,
-                )),
-                5 => crate::loc::set_default_screen_filter(step_wrap(
-                    crate::loc::default_screen_filter(),
-                    keymap::SCREEN_FILTER_COUNT,
-                    d,
-                )),
-                // The DEFAULT only: no game is running to show the counter on.
-                6 => crate::loc::set_default_fps_counter(step_wrap(
-                    crate::loc::default_fps_counter(),
-                    keymap::FPS_COUNTER_COUNT,
-                    d,
-                )),
-                // The DEFAULT only. No clock is touched from here: a raise
-                // outside gameplay would be spent entirely on drawing a menu.
-                7 => {
-                    let cur = crate::loc::default_power_mode();
-                    crate::loc::set_default_power_mode(if dir < 0 {
-                        keymap::prev_power_setting(cur)
-                    } else {
-                        keymap::next_power_setting(cur)
-                    });
-                }
-                // Cursor speed keeps its own home: C++ owns the live value and
-                // its file, and knows on its own that out of a game this steps
-                // the GLOBAL default.
-                _ => {
-                    unsafe { ruffle_cursor_speed_step(d) };
-                }
-            }
-            if selection != LAST {
-                crate::loc::save_current();
-            }
-        }
-        "B" | "Minus" => {
-            // Back to the row that opened this.
-            s.screen = Screen::SettingsModal { selection: set_row::GAME_PREFS };
-            return;
-        }
-        _ => {}
-    }
-    s.screen = Screen::SettingsPrefsModal { selection };
-}
-
-/// Language picker: `selection` indexes `loc::PICKER_LANGS`. A applies +
-/// persists the choice; B/Minus cancels back to the settings modal.
-fn handle_settings_language_input(s: &mut State, button: &str, mut selection: usize) {
-    // The picker is a 3-column grid (see draw_library_language_picker): left/right
-    // step linearly (wrapping), up/down move by a row and clamp to the last row.
-    const COLS: usize = 3;
-    let n = crate::loc::PICKER_LANGS.len();
-    let last = n.saturating_sub(1);
-    match button {
-        "Left" | "StickLLeft" => {
-            selection = if selection == 0 { last } else { selection - 1 };
-        }
-        "Right" | "StickLRight" => {
-            selection = if selection >= last { 0 } else { selection + 1 };
-        }
-        "Up" | "StickLUp" => {
-            selection = if selection >= COLS {
-                selection - COLS
-            } else {
-                // Wrap to the bottom of the same column (last row that has it).
-                let col = selection % COLS;
-                let rows = n.div_ceil(COLS);
-                let mut t = (rows - 1) * COLS + col;
-                if t > last {
-                    t = t.saturating_sub(COLS);
-                }
-                t
-            };
-        }
-        "Down" | "StickLDown" => {
-            let t = selection + COLS;
-            selection = if t <= last { t } else { selection % COLS };
-        }
-        "A" => {
-            if let Some(&lang) = crate::loc::PICKER_LANGS.get(selection) {
-                crate::loc::set(lang);
-                crate::loc::save(lang);
-            }
-            s.screen = Screen::SettingsModal { selection: set_row::LANGUAGE };
-            return;
-        }
-        "B" | "Minus" => {
-            s.screen = Screen::SettingsModal { selection: set_row::LANGUAGE };
-            return;
-        }
-        _ => {}
-    }
-    s.screen = Screen::SettingsLanguagePicker { selection };
-}
-
-/// RÉGLAGES → AFFICHAGE HOME. Same shape as the language picker: move with
-/// Up/Down, A applies, B leaves it alone. Applying resets the home animation —
-/// the eased offsets belong to the layout that produced them, and a new layout
-/// reading them would slide in from coordinates that meant something else.
-fn handle_settings_home_view_input(s: &mut State, button: &str, mut selection: usize) {
-    const LAST: usize = 3;
-    match button {
-        // The four layouts sit side by side; Up and Down still work, for the
-        // hand that expects a list.
-        "Left" | "StickLLeft" | "Up" | "StickLUp" => {
-            selection = if selection == 0 { LAST } else { selection - 1 }
-        }
-        "Right" | "StickLRight" | "Down" | "StickLDown" => {
-            selection = if selection >= LAST { 0 } else { selection + 1 }
-        }
-        "A" => {
-            crate::loc::set_home_view(selection as u8);
-            crate::loc::save_current();
-            crate::backend::render::home_anim_reset();
-            s.screen = Screen::SettingsModal { selection: set_row::HOME_VIEW };
-            return;
-        }
-        "B" | "Minus" => {
-            s.screen = Screen::SettingsModal { selection: set_row::HOME_VIEW };
-            return;
-        }
-        _ => {}
-    }
-    s.screen = Screen::SettingsHomeViewPicker { selection };
-}
-
-
-
 /// A games-folder move in flight, advanced a few entries per frame.
 ///
 /// Doing the whole sweep inside `input()` was simpler and wrong: the frame that
@@ -4551,10 +4256,19 @@ struct MoveJob {
     dirs: std::vec::Vec<std::string::String>,
     idx: usize,
     moved: usize,
+    /// Entries that stayed in `src`: a file or folder of the same name was
+    /// already at the destination, or the rename failed. Told to the player
+    /// at the end, not only to the log: part of the library is still behind.
     skipped: usize,
 }
 
 static MOVE_JOB: Mutex<Option<MoveJob>> = Mutex::new(None);
+
+/// Where the running move goes from and to, for its progress page. `None`
+/// for the frame between the answer and the job being queued.
+pub(crate) fn move_paths() -> Option<(std::string::String, std::string::String)> {
+    MOVE_JOB.lock().ok().and_then(|g| g.as_ref().map(|j| (j.src.clone(), j.dest.clone())))
+}
 
 /// How far the games-folder move has got: (done, total) entries.
 ///
@@ -4706,6 +4420,7 @@ fn step_move(job: &mut MoveJob) -> bool {
         if std::fs::rename(&from, &to).is_err() {
             log(&std::format!("games dir: could not move {}
 ", name));
+            job.skipped += 1;
             return true;
         }
         if name.to_ascii_lowercase().ends_with(".swf") {
@@ -4723,12 +4438,14 @@ fn step_move(job: &mut MoveJob) -> bool {
     if dir_exists(&to) {
         log(&std::format!("games dir: {}/ already there, left in place
 ", name));
+        job.skipped += 1;
         return true;
     }
     let from = std::format!("{}/{}", job.src, name);
     if std::fs::rename(&from, &to).is_err() {
         log(&std::format!("games dir: could not move {}/
 ", name));
+        job.skipped += 1;
     }
     true
 }
@@ -4739,6 +4456,12 @@ fn drive_pending_move() {
     // A slice, not the lot: enough that a big library still moves in a second or
     // two, small enough that the frame this runs in still gets drawn.
     const PER_FRAME: usize = 8;
+    // Not while the question is still closing: a small library would be moved
+    // before its progress page ever showed, and the page would then open on a
+    // move that no longer exists.
+    if crate::backend::render::modal_close_active() {
+        return;
+    }
     let finished = {
         let mut g = match MOVE_JOB.lock() {
             Ok(g) => g,
@@ -4756,15 +4479,15 @@ fn drive_pending_move() {
             return; // more to do; the bar moves on the next frame
         }
         let done = g.take().expect("checked above");
-        (done.dest, done.moved, done.skipped)
+        (done.src, done.dest, done.moved, done.skipped)
     };
-    let (dest, moved, skipped) = finished;
+    let (src, dest, moved, skipped) = finished;
 
     set_primary_root(&dest);
     log(&std::format!(
-        "games dir: now {} ({} moved, {} already there)
+        "games dir: now {} ({} moved, {} left in {})
 ",
-        dest, moved, skipped,
+        dest, moved, skipped, src,
     ));
     // Rebuild the list: `add_path` PUSHES, and the boot scan relies on starting
     // from an empty one, so rescanning in place left every game listed twice —
@@ -4794,21 +4517,23 @@ fn drive_pending_move() {
         // user opened the sort menu and picked the mode it was already set to.
         let (mode, rev) = (current_sort_mode(), current_sort_reverse());
         sort_entries(&mut s.entries, mode, rev);
-        // Back where the user pressed the button. Nothing else leaves this
-        // screen, and it swallows input on purpose, so forgetting this left the
-        // app frozen on a finished progress bar.
-        s.screen = if s.entries.is_empty() {
-            Screen::Empty
+        // Back where the user pressed the button, whatever the library holds:
+        // nothing else leaves this screen, and it swallows input on purpose, so
+        // forgetting this left the app frozen on a finished progress bar.
+        s.screen = settings_at(SetSection::Library, "DOSSIER");
+        // And how it went, not a silent jump back. What stayed behind matters
+        // more than the count, so it is the one said when there is both.
+        let u = crate::loc_ui::ui();
+        if skipped > 0 {
+            let left = crate::loc::fill_count(u.move_left_1, u.move_left_n, skipped as i32)
+                .replacen("{}", src.trim_start_matches("sdmc:"), 1);
+            set_toast(&mut s, left, TOAST_INFO);
         } else {
-            Screen::SettingsModal { selection: set_row::GAMES_DIR }
-        };
+            let n = crate::loc_ui::games(s.entries.len());
+            set_toast(&mut s, u.lib_moved.replacen("{}", &n, 1), TOAST_OK);
+        }
     }
 }
-/// Folder picker for RÉGLAGES → DOSSIER JEUX (#79).
-///
-/// Row 0 chooses the folder currently shown; the rows below descend into its
-/// subfolders. B goes back UP a level rather than out, which is what a file
-/// browser is expected to do — leaving happens from the top level, or with `-`.
 /// Climb one level of the browse tree and land the cursor on the folder just
 /// left, rather than at the top of the parent.
 ///
@@ -4834,48 +4559,49 @@ fn browse_go_up(s: &mut State, path: &str) {
     let sel = pos.map_or(0, |i| i + 1 + up_next);
     // Scroll the parent's listing so the folder we just left is ON SCREEN.
     // Landing on it is the whole point, and a cursor parked on row 30 of a
-    // window showing rows 0-5 is a cursor nobody can see. Must match the
-    // drawing side's window (VISIBLE in `handle_games_dir_input`).
-    const VISIBLE: usize = 6;
+    // window showing rows 0-5 is a cursor nobody can see.
     let scroll = pos.map_or(0, |i| {
-        i.saturating_sub(VISIBLE - 1)
-            .min(listing.len().saturating_sub(VISIBLE))
+        i.saturating_sub(GAMES_DIR_VISIBLE - 1)
+            .min(listing.len().saturating_sub(GAMES_DIR_VISIBLE))
     });
     s.dir_browse = listing;
     s.dir_path = parent;
     s.screen = Screen::GamesDirPicker { selection: sel, scroll };
 }
 
+/// Folder browser of RÉGLAGES > Bibliothèque > Dossier des jeux (#79).
+///
+/// Row 0 chooses the folder currently shown; the rows below descend into its
+/// subfolders. B goes back UP a level rather than out, which is what a file
+/// browser is expected to do — leaving happens from the top level, or with `-`.
 fn handle_games_dir_input(s: &mut State, button: &str, mut selection: usize, mut scroll: usize) {
     let path = s.dir_path.clone();
     // Rows: 0 = choose this folder, then "up" unless we are at the card root,
     // then one row per subfolder. `up` is a row and not just a B shortcut so
     // that going up is visible rather than folklore.
     let up = if browse_parent(&path).is_some() { 1 } else { 0 };
-    let last = up + s.dir_browse.len();
-    // Must match the drawing side, or the cursor scrolls out of view.
-    const VISIBLE: usize = 6;
+    let total = 1 + up + s.dir_browse.len();
     match button {
-        "Up" | "StickLUp" => selection = if selection == 0 { last } else { selection - 1 },
-        "Down" | "StickLDown" => selection = if selection >= last { 0 } else { selection + 1 },
+        // A press on an end comes round, a held direction stops there.
+        "Up" | "StickLUp" => selection = list_step_wrap(selection, -1, total),
+        "Down" | "StickLDown" => selection = list_step_wrap(selection, 1, total),
         "A" => {
+            let root = primary_root();
             if selection == 0 {
-                // Chosen. Ask about the games already on the card before writing
-                // anything: the answer decides whether this is a redirect or a
-                // migration, and both are legitimate.
                 // Choosing a folder moves the library into it. There is no
                 // "leave them" option: the old folder stays scanned either way,
                 // so leaving them changed nothing a user could see except
                 // splitting the library across two folders, one of which the app
                 // would never write to again — an extra screen, an extra state,
                 // and the way the misplaced-saves bug stayed hidden.
-                if path == primary_root() {
-                    // Already the games folder: nothing to confirm, nothing to do.
-                    s.dir_browse.clear();
-                    s.screen = Screen::SettingsModal { selection: set_row::GAMES_DIR };
-                } else {
-                    // On "Move": the folder was just chosen on purpose.
-                    s.screen = Screen::GamesDirConfirm { selection: 1 };
+                //
+                // The library's own folder is no destination: its row says it
+                // is the one in use, and A on it does nothing.
+                if !settings_tab::same_dir(&path, &root) {
+                    // On "Cancel", like every question of the app: this one
+                    // renames every file of the library, and a double press of
+                    // A must not be how that happens.
+                    s.screen = Screen::GamesDirConfirm { selection: 0 };
                 }
                 return;
             }
@@ -4883,13 +4609,15 @@ fn handle_games_dir_input(s: &mut State, button: &str, mut selection: usize, mut
                 browse_go_up(s, &path);
                 return;
             }
-            let child_name = &s.dir_browse[selection - 1 - up];
-            // `sdmc:/` already ends in a separator; anything else needs one.
-            let child = if path.ends_with('/') {
-                std::format!("{}{}", path, child_name)
-            } else {
-                std::format!("{}/{}", path, child_name)
-            };
+            let Some(child_name) = s.dir_browse.get(selection - 1 - up) else { return };
+            let child = settings_tab::child_dir(&path, child_name);
+            // A folder inside the library cannot take it: moving it there would
+            // rename the folders into themselves. Refused here with the reason,
+            // rather than discovered by a move that half fails.
+            if settings_tab::inside_library(&child, &root) {
+                set_toast(s, crate::loc_ui::ui().dir_inside_lib.to_string(), TOAST_INFO);
+                return;
+            }
             s.dir_browse = list_dirs(&child);
             s.dir_path = child;
             s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 };
@@ -4903,13 +4631,13 @@ fn handle_games_dir_input(s: &mut State, button: &str, mut selection: usize, mut
                 browse_go_up(s, &path);
             } else {
                 s.dir_browse.clear();
-                s.screen = Screen::SettingsModal { selection: set_row::GAMES_DIR };
+                s.screen = settings_at(SetSection::Library, "DOSSIER");
             }
             return;
         }
         "Minus" => {
             s.dir_browse.clear();
-            s.screen = Screen::SettingsModal { selection: set_row::GAMES_DIR };
+            s.screen = settings_at(SetSection::Library, "DOSSIER");
             return;
         }
         _ => {}
@@ -4920,8 +4648,8 @@ fn handle_games_dir_input(s: &mut State, button: &str, mut selection: usize, mut
         scroll = 0;
     } else if selection < scroll + first_scrolling {
         scroll = selection - first_scrolling;
-    } else if selection >= scroll + first_scrolling + VISIBLE {
-        scroll = selection + 1 - first_scrolling - VISIBLE;
+    } else if selection >= scroll + first_scrolling + GAMES_DIR_VISIBLE {
+        scroll = selection + 1 - first_scrolling - GAMES_DIR_VISIBLE;
     }
     s.screen = Screen::GamesDirPicker { selection, scroll };
 }
@@ -5069,106 +4797,46 @@ fn run_bug_report_flow(row: usize) {
         docked,
         description: description.trim().to_string(),
     };
-    // Row 3 = SIGNALER UN BUG: the picker this came through has no other way in.
-    submit_and_show(&report, set_row::BUG);
+    // The bug row: the game list this came through has no other way in.
+    settings_tab::submit_report(report, "BUG");
 }
 
-/// RÉGLAGES > FAIRE UNE PROPOSITION: open swkbd for a free-text idea and POST it
-/// as a "suggestion" issue (same relay/token as the bug report, different
-/// label). No game involved. Hoisted from `input()` — swkbd + the synchronous
-/// HTTPS POST must not run under the LIBRARY lock. Empty input aborts.
-fn run_suggestion_flow() {
-    let Some(text) = net::prompt_long(crate::loc::s().kbd_suggest_header, crate::loc::s().kbd_suggest_guide)
-    else {
-        return; // cancelled
-    };
-    let text = text.trim().to_string();
-    if text.is_empty() {
-        return; // nothing to send
-    }
-    let report = crate::bugreport::Report {
-        kind: "suggestion",
-        game: std::string::String::new(),
-        file: std::string::String::new(),
-        source_url: std::string::String::new(),
-        size: 0,
-        disk_size: 0,
-        swf_version: 0,
-        compression: std::string::String::new(),
-        as3: false,
-        app_version: crate::bugreport::APP_VERSION,
-        lang: crate::loc::current().code(),
-        applet: unsafe { ruffle_is_applet_mode() } != 0,
-        // Empty on purpose: the relay's suggestion branch renders none of the
-        // game fields, and there is no game to measure. -1 is the truthful
-        // "no companion folder", and a dock state read here would describe the
-        // menu the idea was typed in, which explains nothing.
-        companions: -1,
-        companion_dirs: -1,
-        power_mode: 0,
-        power_refused: false,
-        power_auto_pct: -1,
-        docked: false,
-        description: text,
-    };
-    // The suggestion row, the only row that reaches this flow.
-    submit_and_show(&report, set_row::SUGGEST);
-}
-
-/// RÉGLAGES > PSEUDO (#20): open swkbd (prefilled with the current nickname) to
-/// set the community-profile nickname. Hoisted from `input()` — swkbd must run
-/// without the LIBRARY lock. Empty input clears it.
-/// Bug-report game picker (RÉGLAGES → SIGNALER UN BUG). A scrollable list of
-/// the local games; A (hoisted) describes + sends, B returns to RÉGLAGES.
-/// `selection`/`scroll` index `entries` directly (no filter here).
+/// The bug report's game list (RÉGLAGES > Aide et retours > Signaler un bug),
+/// inside the pane. A (hoisted) describes + sends, B goes back to the row that
+/// opened it, L and R turn a page. `selection` / `scroll` are rows of
+/// `bug_picker_order`.
 fn handle_bug_picker_input(s: &mut State, button: &str, mut selection: usize, mut scroll: usize) {
     let total = s.entries.len();
-    let last = total.saturating_sub(1);
     match button {
-        "Up" | "StickLUp" => {
-            if total == 0 {
-                return;
-            }
-            selection = if selection == 0 { last } else { selection - 1 };
-            scroll = clamp_scroll(scroll, selection, BUG_PICKER_VISIBLE_ROWS);
-        }
-        "Down" | "StickLDown" => {
-            if total == 0 {
-                return;
-            }
-            selection = if selection >= last { 0 } else { selection + 1 };
-            scroll = clamp_scroll(scroll, selection, BUG_PICKER_VISIBLE_ROWS);
-        }
-        "B" => {
-            // Back to the row that opened the picker.
-            s.screen = Screen::SettingsModal { selection: set_row::BUG };
+        // A press on an end comes round, a held direction stops there: in a
+        // library of three hundred games, holding Down has to be able to park on
+        // the last one.
+        "Up" | "StickLUp" => selection = list_step_wrap(selection, -1, total),
+        "Down" | "StickLDown" => selection = list_step_wrap(selection, 1, total),
+        // A screenful at a time, stopping at the ends.
+        "L" => selection = selection.saturating_sub(BUG_PICKER_VISIBLE_ROWS),
+        "R" => selection = (selection + BUG_PICKER_VISIBLE_ROWS).min(total.saturating_sub(1)),
+        "B" | "Minus" => {
+            s.screen = settings_at(SetSection::Help, "BUG");
             return;
         }
         // A is hoisted in input() (swkbd + HTTPS POST run without the lock).
-        _ => {}
+        _ => return,
     }
+    scroll = clamp_scroll(scroll, selection, BUG_PICKER_VISIBLE_ROWS);
     s.screen = Screen::BugPicker { selection, scroll_offset: scroll };
 }
 
-/// Display order of the bug-report picker: last played first, whatever sort the
-/// library itself is on (#99). You report the game you have just been playing,
-/// so it belongs at the top of that list even when the library is showing A-Z.
-/// Returns positions into `entries`, so nothing is reordered behind the screen —
-/// the picker's row N is `bug_picker_order(..)[N]`, and both the drawing and the
-/// A press have to read it the same way or they point at two different games.
-///
-/// Favourites are NOT pinned here, unlike `sort_entries`: a starred game is not
-/// more likely to be the one you are reporting.
-/// "Move the whole library here?" — row 0 confirms, row 1 goes back to the
-/// picker. The work itself is recorded and run outside the lock, like every
-/// other action here that touches the SD.
-fn handle_games_dir_confirm_input(s: &mut State, button: &str, mut selection: usize) {
+/// "Move the whole library here?": 0 = cancel, where it opens, 1 = move. The
+/// work itself is recorded and run outside the lock, like every other action
+/// here that touches the SD.
+fn handle_games_dir_confirm_input(s: &mut State, button: &str, selection: usize) {
     match button {
-        "Up" | "StickLUp" | "Down" | "StickLDown" | "Left" | "StickLLeft" | "Right" | "StickLRight" => {
-            selection = 1 - selection.min(1)
-        }
+        // Left is the first answer, Right the second: a held direction stays
+        // where it points instead of flipping between the two.
+        "Left" | "StickLLeft" => s.screen = Screen::GamesDirConfirm { selection: 0 },
+        "Right" | "StickLRight" => s.screen = Screen::GamesDirConfirm { selection: 1 },
         "A" => {
-            // Cancel on the left (0), move on the right (1).
             if selection == 1 {
                 s.pending_games_dir = Some(s.dir_path.clone());
                 s.dir_browse.clear();
@@ -5176,22 +4844,12 @@ fn handle_games_dir_confirm_input(s: &mut State, button: &str, mut selection: us
             } else {
                 s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 };
             }
-            return;
         }
-        "B" | "Minus" => {
-            s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 };
-            return;
-        }
+        "B" | "Minus" => s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 },
         _ => {}
     }
-    s.screen = Screen::GamesDirConfirm { selection };
 }
 
-/// Create a subfolder in the folder the picker is showing (#79).
-///
-/// Saves a trip to a file manager for the common case: someone laying their
-/// card out as `roms/flashnx` can make that folder from inside the picker that
-/// is asking them to choose it.
 /// OPTIONS > DOSSIER > NOUVEAU DOSSIER (issue #68): name a shelf and put this
 /// game on it in one gesture. Hoisted out of the handler — swkbd blocks, and the
 /// library lock must not be held across it.
@@ -5248,6 +4906,11 @@ fn run_new_game_folder_flow(game_idx: usize) {
     }
 }
 
+/// Create a subfolder in the folder the browser is showing (#79).
+///
+/// Saves a trip to a file manager for the common case: someone laying their
+/// card out as `roms/flashnx` can make that folder from inside the browser
+/// that is asking them to choose it.
 fn run_new_folder_flow() {
     let here = match LIBRARY.lock() {
         Ok(s) => s.dir_path.clone(),
@@ -5287,45 +4950,13 @@ fn run_new_folder_flow() {
         let idx = s.dir_browse.iter().position(|d| d == safe);
         let up = if browse_parent(&here).is_some() { 1 } else { 0 };
         let selection = idx.map(|i| i + 1 + up).unwrap_or(0);
-        s.screen = Screen::GamesDirPicker { selection, scroll: 0 };
-    }
-}
-
-fn run_pseudo_flow() {
-    let current = crate::profiles::author_name();
-    let Some(name) = net::prompt_pseudo(&current) else {
-        return; // cancelled
-    };
-    crate::profiles::set_author_name(&name);
-    if let Ok(mut s) = LIBRARY.lock() {
-        s.screen = Screen::SettingsModal { selection: set_row::PSEUDO };
-    }
-}
-
-/// Submit a bug/suggestion report and land on the result screen.
-///
-/// `from_row` is the RÉGLAGES row the flow started on, carried through so the
-/// dismissal puts the cursor back on the button that was pressed (#113). Passed
-/// in rather than derived from `report.kind`: the row is a fact about the menu,
-/// and a third caller POSTing a "bug" from somewhere else would silently
-/// reintroduce the same wrong-row landing.
-fn submit_and_show(report: &crate::bugreport::Report, from_row: usize) {
-    // The success line follows the FLOW, not the relay (#83): both go through the
-    // same endpoint, but "your report was sent" after a suggestion reads like the
-    // button sent the wrong thing.
-    let sent = if report.kind == "suggestion" {
-        crate::loc::s().suggest_ok_msg
-    } else {
-        crate::loc::s().bug_ok_msg
-    };
-    let (ok, msg) = match crate::bugreport::submit(report) {
-        Ok(()) => (true, sent.to_string()),
-        Err(e) => (false, e),
-    };
-    if let Ok(mut s) = LIBRARY.lock() {
-        s.bug_ok = ok;
-        s.bug_msg = msg;
-        s.screen = Screen::BugResult { from_row };
+        // Scrolled so the new folder is on screen: a cursor on a row of the
+        // listing that the window does not show is a cursor nobody can see.
+        let len = s.dir_browse.len();
+        let scroll = idx.map_or(0, |i| {
+            i.saturating_sub(GAMES_DIR_VISIBLE - 1).min(len.saturating_sub(GAMES_DIR_VISIBLE))
+        });
+        s.screen = Screen::GamesDirPicker { selection, scroll };
     }
 }
 
@@ -8849,9 +8480,11 @@ fn distant_row_rect(sel: usize, scroll: usize, vw: f32) -> (f32, f32, f32, f32) 
 /// table from being hit.
 fn touch_kind(screen: Screen) -> u32 {
     match screen {
-        // Full pages, ids of their own well clear of the modal ones.
-        Screen::SettingsModal { .. } => 100,
+        // Full pages, ids of their own well clear of the modal ones: the
+        // RÉGLAGES tab and the two pages that open in its pane.
+        Screen::Settings { .. } => 100,
         Screen::BugPicker { .. } => 101,
+        Screen::GamesDirPicker { .. } => 102,
         // The keymap editor carries its sub-screen in the 70/80 bands: the pad
         // and its key picker share one window (one modal kind) but publish
         // different tables.
@@ -8872,9 +8505,6 @@ fn modal_kind(screen: Screen) -> u8 {
         Screen::OptionsModal { .. } => 1,
         Screen::DeleteConfirm { .. } => 2,
         Screen::CoverPicker { .. } => 3,
-        Screen::SettingsLanguagePicker { .. } => 4,
-        Screen::SettingsPrefsModal { .. } => 10,
-        Screen::SettingsHomeViewPicker { .. } => 18,
         Screen::DistantUrlOptions { .. } => 5,
         Screen::DistantHistoryConfirm { .. } => 6,
         // The keymap editor delegates to `menu::*`; its window pops in once, and
@@ -8894,12 +8524,11 @@ fn modal_kind(screen: Screen) -> u8 {
         Screen::RevertPreview { .. } => 15,
         Screen::ProfileShareConfirm { .. } => 16,
         Screen::ProfileDeleteConfirm { .. } => 17,
-        // Games-folder screens (#79). Kind 0 means "not a modal", which is how
-        // these opened and closed with no scale pop while every other panel in
-        // the app animates — distinct ids so moving between the picker and its
-        // confirmation re-fires the pop, as the keymap sub-screens do.
-        Screen::GamesDirPicker { .. } => 19,
+        // The question about moving the library (#79). Its browser is no
+        // window: it opens inside the RÉGLAGES pane, a page and not a pop.
         Screen::GamesDirConfirm { .. } => 20,
+        // A report the relay did not take, asked over the page.
+        Screen::SendFailed { .. } => 23,
         Screen::GameFolderPicker { .. } => 21,
         Screen::GameFolderDelete { .. } => 22,
         _ => 0,
@@ -9208,8 +8837,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
     // An error arriving, from a press or from a download finishing: one note.
     {
         static LAST_ERROR: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-        let is_error = matches!(screen, Screen::DistantError)
-            || (matches!(screen, Screen::BugResult { .. }) && !s.bug_ok);
+        let is_error = matches!(screen, Screen::DistantError | Screen::SendFailed { .. });
         if is_error && !LAST_ERROR.swap(true, core::sync::atomic::Ordering::Relaxed) {
             crate::sfx::play(crate::sfx::Sfx::Error);
         } else if !is_error {
@@ -9358,13 +8986,12 @@ pub fn render(backend: &mut SwitchRenderBackend) {
     // the user has already dismissed.
     // The same goes for a tab slide: the rows are mid-translation, the table is
     // not.
-    crate::backend::render::set_ui_screen_kind(
-        if closing || modal_active || crate::backend::render::tab_slide_active() {
-            0
-        } else {
-            touch_kind(screen)
-        },
-    );
+    let ui_kind = if closing || modal_active || crate::backend::render::tab_slide_active() {
+        0
+    } else {
+        touch_kind(screen)
+    };
+    crate::backend::render::set_ui_screen_kind(ui_kind);
     // Modals + the TOUCHES editor SCALE (open/close pop); tab-home content SLIDES
     // on an L/R switch. `modal_active` = an in-flight scale pop; a settled modal
     // stays full; a tab-home slides while a tab slide runs; else identity.
@@ -9436,276 +9063,60 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             backend.draw_library_dim_backdrop();
             menu::draw(backend, now);
         }
-        Screen::SettingsModal { selection } => {
-            // A full navbar TAB, not a popup: no dim backdrop, no Back row;
-            // L/R leave it.
-            use crate::backend::render::{Icon, SettingsExtra, SettingsRow};
-            let lc = crate::loc::s();
-            let u = crate::loc_ui::ui();
-            let author = crate::profiles::author_name();
-            let games_dir = primary_root();
-            let games_dir = games_dir.trim_start_matches("sdmc:");
-            let view = crate::loc::home_view();
-            let row = |icon, label, value, help, section, verb, opens, extra| SettingsRow {
-                icon,
-                label,
-                value,
-                help,
-                section,
-                verb,
-                opens,
-                extra,
-            };
-            let rows = [
-                row(Icon::Grid, u.row_home_view, crate::loc_ui::view_label(view), u.help_home_view,
-                    u.sec_library, u.open, true, SettingsExtra::HomeViews(view)),
-                row(Icon::Folder, u.row_games_dir, games_dir, u.help_games_dir,
-                    u.sec_library, u.open, true, SettingsExtra::Folder(games_dir, game_count)),
-                row(Icon::Sliders, u.row_game_prefs, "", u.help_game_prefs,
-                    u.sec_library, u.open, true, SettingsExtra::None),
-                row(Icon::Globe, u.row_language, crate::loc::current().native_name(), u.help_language,
-                    u.sec_general, u.open, true, SettingsExtra::None),
-                row(if crate::loc::ui_sounds() { Icon::Volume } else { Icon::VolumeOff }, u.row_sounds,
-                    if crate::loc::ui_sounds() { u.sounds_on } else { u.sounds_off }, u.help_sounds,
-                    u.sec_general, u.change, false, SettingsExtra::None),
-                row(Icon::User, u.row_pseudo, if author.is_empty() { lc.none } else { author.as_str() },
-                    u.help_pseudo, u.sec_general, u.edit, false, SettingsExtra::None),
-                row(Icon::Bug, u.row_bug, "", u.help_bug, u.sec_help, u.open, true, SettingsExtra::None),
-                row(Icon::Lightbulb, u.row_suggest, "", u.help_suggest, u.sec_help, u.write, false,
-                    SettingsExtra::None),
-                row(Icon::Power, u.row_quit, "", u.help_quit_app, "", u.quit, false, SettingsExtra::None),
-            ];
-            backend.draw_library_settings(selection, &rows);
+        Screen::Settings { .. } | Screen::GamesDirPicker { .. } | Screen::BugPicker { .. } => {
+            // A navbar TAB, not a popup: the page, its column and its pane, or
+            // a page opened inside the pane.
+            let logo = LIBRARY.lock().ok().map(|s| (s.banner_tex, s.banner_w, s.banner_h)).unwrap_or_default();
+            settings_tab::draw_settings(backend, screen, (&dir_path, &dir_browse), logo, game_count, false);
         }
-        Screen::SettingsPrefsModal { selection } => {
-            // Game DEFAULTS. Each row carries its live value, same shape as the
-            // in-game rows these mirror.
-            let lc = crate::loc::s();
-            let display_label = std::format!(
-                "{}: {}",
-                lc.set_display_mode,
-                crate::loc::display_mode_label(crate::loc::default_display_mode()),
-            );
-            let rotation_label = std::format!(
-                "{}: {}",
-                lc.set_rotation,
-                crate::loc::rotation_label(crate::loc::default_rotation()),
-            );
-            let zoom_label =
-                std::format!("{}: {} %", lc.set_zoom, crate::loc::default_zoom());
-            let pixels_label = std::format!(
-                "{}: {}",
-                lc.set_pixel_filter,
-                crate::loc::pixel_filter_label(crate::loc::default_pixel_filter()),
-            );
-            let filter_label = std::format!(
-                "{}: {}",
-                lc.set_screen_filter,
-                crate::loc::screen_filter_label(crate::loc::default_screen_filter()),
-            );
-            let fps_label = std::format!(
-                "{}: {}",
-                lc.set_fps,
-                crate::loc::fps_counter_label(crate::loc::default_fps_counter()),
-            );
-            let power_label = std::format!(
-                "{}: {}",
-                lc.set_overclock,
-                crate::loc::overclock_label(crate::loc::default_power_mode()),
-            );
-            let m = unsafe { ruffle_cursor_speed_mult_x10() };
-            let cursor_label = std::format!("{}: x{}.{}", lc.set_cursor_speed, m / 10, m % 10);
-            // FPS after FILTRE, so this list stays in ECRAN's order down its
-            // whole shared stretch. The two panels drifting apart is how a
-            // player ends up looking for a row where the other panel puts it.
-            let labels = [
-                lc.set_keys,
-                display_label.as_str(),
-                rotation_label.as_str(),
-                zoom_label.as_str(),
-                pixels_label.as_str(),
-                filter_label.as_str(),
-                fps_label.as_str(),
-                power_label.as_str(),
-                cursor_label.as_str(),
-            ];
-            let u = crate::loc_ui::ui();
-            backend.draw_library_dim_backdrop();
-            // Every row but the controls one steps with Left and Right.
-            backend.draw_list_window(
-                u.row_game_prefs,
-                Some(u.prefs_sub),
-                selection,
-                &labels,
-                0b1_1111_1110,
-                &[(&[crate::backend::render::Btn::A], u.change), (&[crate::backend::render::Btn::B], u.back)],
-            );
-        }
-        Screen::SettingsHomeViewPicker { selection } => {
-            backend.draw_library_dim_backdrop();
-            backend.draw_home_view_picker(selection);
-        }
-        Screen::GamesDirPicker { selection, scroll } => {
-            use crate::backend::render::{ui_col, Btn, Icon, WinRow};
-            let lc = crate::loc::s();
-            let u = crate::loc_ui::ui();
-            let shown = if dir_path == "sdmc:/" {
-                "/"
-            } else {
-                dir_path.trim_start_matches("sdmc:")
-            };
-            let up = browse_parent(&dir_path).is_some();
-            // Six folders a page: with the two action rows above them that is
-            // a window, not a wall. Scrolling handles the rest.
-            const VISIBLE: usize = 6;
-            let active = primary_root();
-            let mut rows: std::vec::Vec<WinRow> = std::vec::Vec::with_capacity(dir_browse.len() + 2);
-            rows.push(WinRow::new(Icon::Check, u.dir_choose));
-            if up {
-                rows.push(WinRow::new(Icon::ParentFolder, u.dir_up));
+        Screen::GamesDirConfirm { .. } | Screen::SettingsKeymapEditor | Screen::SendFailed { .. } => {
+            // A window over the tab: the page stays behind it, still, dimmed by
+            // the window's scrim, so B is seen to land where it was. Drawn
+            // outside the window's pop and with no touch table of its own.
+            let logo = LIBRARY.lock().ok().map(|s| (s.banner_tex, s.banner_w, s.banner_h)).unwrap_or_default();
+            backend.clear_ui_transform();
+            crate::backend::render::set_ui_screen_kind(0);
+            settings_tab::draw_settings(backend, screen, (&dir_path, &dir_browse), logo, game_count, true);
+            crate::backend::render::navbar_clear();
+            crate::backend::render::set_ui_screen_kind(ui_kind);
+            backend.set_ui_modal_scale(if modal_active { modal_scale } else { 1.0 });
+            match screen {
+                Screen::GamesDirConfirm { selection } => {
+                    // Moving a whole library is not undone by pressing B
+                    // afterwards, so it is asked once -- and it says HOW MANY
+                    // games and WHERE, because "move the library?" tells you
+                    // nothing about what you agree to.
+                    settings_tab::draw_move_question(backend, selection, &dir_path, game_count);
+                }
+                Screen::SendFailed { selection, .. } => settings_tab::draw_send_failed(backend, selection),
+                // The editor edits the global default: the keymap module was
+                // pointed there on entry.
+                _ => menu::draw(backend, now),
             }
-            for name in dir_browse.iter() {
-                // Mark the folder the library actually uses: without it the
-                // listing is a wall of names and nothing says which one you are
-                // already in.
-                let full = if dir_path.ends_with('/') {
-                    std::format!("{}{}", dir_path, name)
-                } else {
-                    std::format!("{}/{}", dir_path, name)
-                };
-                let current = full == active;
-                let row = WinRow::new(Icon::Folder, name).opens();
-                rows.push(if current {
-                    row.value(lc.games_dir_current).mark(Icon::CircleCheck, ui_col::OK)
-                } else {
-                    row
-                });
-            }
-            let pinned = 1 + up as usize;
-            // The glide is keyed on the PATH: walking into a folder replaces
-            // every row at once, and a glide across that would show the new
-            // listing streaking past under a cursor travelling to a row it was
-            // never on. A new key snaps instead.
-            let mut key: u32 = 2166136261;
-            for b in dir_path.as_bytes() {
-                key ^= *b as u32;
-                key = key.wrapping_mul(16777619);
-            }
-            let key = 0x8000_0000 | (key & 0x00FF_FFFF);
-            let a_verb = if selection == 0 {
-                u.choose
-            } else if up && selection == 1 {
-                u.go_up
-            } else {
-                u.open
-            };
-            backend.draw_library_dim_backdrop();
-            backend.draw_rows_window(
-                u.row_games_dir,
-                Some(shown),
-                &rows,
-                selection.min(rows.len().saturating_sub(1)),
-                scroll,
-                // "Use this folder" and "Parent folder" act on the folder you
-                // are IN, so they stay put while the listing under them scrolls.
-                pinned,
-                pinned + VISIBLE,
-                key,
-                &[
-                    (&[Btn::A], a_verb),
-                    (&[Btn::X], lc.games_dir_new),
-                    (&[Btn::B], if up { u.go_up } else { u.back }),
-                ],
-            );
         }
         Screen::GamesDirMoving => {
-            // Drawn for the frame between "yes" and the work starting, and by any
-            // frame the move gives back. Shows a real count, not a spinner that
-            // says only "something is happening".
-            let lc = crate::loc::s();
+            // Drawn for every frame of the move: where from, where to, and a
+            // real count, not a spinner that says only "something is
+            // happening".
             let (done, total) = move_progress();
-            backend.draw_library_move_progress(lc.games_dir_moving, done, total);
-        }
-        Screen::GamesDirConfirm { selection } => {
-            // Moving a whole library is not undone by pressing B afterwards, so
-            // it is asked once -- and it says HOW MANY games and WHERE, because
-            // "move the library?" tells you nothing about what you agree to.
-            use crate::backend::render::{Choice, Icon};
-            let lc = crate::loc::s();
-            let count = crate::loc::fill_count(lc.games_dir_confirm_1, lc.games_dir_confirm_n, game_count as i32);
-            backend.draw_library_dim_backdrop();
-            backend.draw_confirm(
-                Icon::FolderOpen,
-                lc.games_dir_confirm,
-                &count,
-                Some(dir_path.trim_start_matches("sdmc:")),
-                &[
-                    Choice { label: lc.games_dir_confirm_no, destructive: false },
-                    Choice { label: lc.games_dir_confirm_yes, destructive: false },
-                ],
-                selection,
-                false,
-            );
-        }
-        Screen::SettingsKeymapEditor => {
-            // Same as TouchesEditor — the editor edits the global default
-            // (keymap module was pointed there on entry).
-            backend.draw_library_dim_backdrop();
-            menu::draw(backend, now);
-        }
-        Screen::SettingsLanguagePicker { selection } => {
-            // First open is slow: drawing the native-name list pulls in the shared
-            // CJK font once. Show a full-size spinner (an overlay, NOT inside the
-            // modal — so the modal's open animation doesn't shrink it) one frame;
-            // the next frame draws the list (loading the font), then it's cached.
-            use std::sync::atomic::Ordering;
-            // The console fonts parse the Chinese face on first use, which costs
-            // nothing worth a spinner; only the old atlas needed one.
-            let loading = LANG_FONT_WARM.load(Ordering::Relaxed) == 0
-                && !crate::backend::render::kit_fonts_available();
-            LANG_FONT_WARM.store(if loading { 1 } else { 2 }, Ordering::Relaxed);
-            backend.draw_library_dim_backdrop();
-            if loading {
-                backend.draw_loading_overlay(crate::loc::s().lang_title, now);
-            } else {
-                let names: std::vec::Vec<&str> =
-                    crate::loc::PICKER_LANGS.iter().map(|l| l.picker_name()).collect();
-                backend.draw_library_language_picker(selection, &names);
+            match move_paths() {
+                Some((src, dest)) => backend.draw_library_move_page(
+                    src.trim_start_matches("sdmc:"),
+                    dest.trim_start_matches("sdmc:"),
+                    done,
+                    total,
+                ),
+                None => {
+                    // No move behind this page (it ended with nobody to send the
+                    // screen back): the screen swallows every button, so it
+                    // must not stay up on its own.
+                    let root = primary_root();
+                    backend.draw_library_move_page(root.trim_start_matches("sdmc:"), "", total, total);
+                    if let Ok(mut s) = LIBRARY.lock() {
+                        s.screen = settings_at(SetSection::Library, "DOSSIER");
+                    }
+                }
             }
-        }
-        Screen::BugPicker { selection, scroll_offset } => {
-            // Last played first (#99), through the same order `run_bug_report_flow`
-            // resolves the pressed row with; each with its time played.
-            let games = LIBRARY
-                .lock()
-                .ok()
-                .map(|s| {
-                    bug_picker_order(&s.entries)
-                        .into_iter()
-                        .filter_map(|i| s.entries.get(i))
-                        .map(|e| {
-                            let secs = crate::playtime::get(&e.basename);
-                            let played = if secs >= 60 {
-                                crate::loc_ui::playtime(secs)
-                            } else {
-                                std::string::String::new()
-                            };
-                            (e.display_name.clone(), played)
-                        })
-                        .collect::<std::vec::Vec<_>>()
-                })
-                .unwrap_or_default();
-            let refs: std::vec::Vec<(&str, std::string::String)> =
-                games.iter().map(|(n, p)| (n.as_str(), p.clone())).collect();
-            backend.draw_library_bug_picker(selection, scroll_offset, &refs, BUG_PICKER_VISIBLE_ROWS);
-        }
-        Screen::BugResult { .. } => {
-            let (msg, ok) = LIBRARY
-                .lock()
-                .ok()
-                .map(|s| (s.bug_msg.clone(), s.bug_ok))
-                .unwrap_or_default();
-            backend.draw_library_bug_result(&msg, ok);
         }
         Screen::TouchesMenu { .. }
         | Screen::ProfileList { .. }
