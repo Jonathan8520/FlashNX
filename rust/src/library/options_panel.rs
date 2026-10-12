@@ -73,6 +73,13 @@ fn own_bit(key: &str) -> u8 {
 /// game's `.prefs` on the card and the HOME icon an IPC round trip through ns:
 /// asked every frame, that was eight SD reads and a title listing sixty times
 /// a second while the panel was open.
+///
+/// Forgotten after every write from the panel, and wherever they can change
+/// behind it: when + opens the panel, back from a game (the pause writes the
+/// game's own values), and when Réglages writes a default the game may
+/// follow. Kept across those, the panel showed the settings from before and
+/// "par défaut" on a setting the pause had just given the game, with an X
+/// that did nothing.
 static GAME_PREFS: Mutex<Option<(std::string::String, GamePrefs)>> = Mutex::new(None);
 
 pub(crate) fn game_prefs(basename: &str, path: &str) -> GamePrefs {
@@ -145,19 +152,17 @@ pub(crate) fn options_value(s: &State, game_idx: usize, key: &str) -> u16 {
 }
 
 /// One step `dir` along setting `key` from `cur`, stopping at the ends: the
-/// next option, or ten percent of zoom.
+/// next option, or the next zoom preset (`loc::zoom_preset_step`), as
+/// Réglages › Jeu par défaut steps the zoom every game starts at. Ten percent
+/// at a time up to 500 % is the pause's, with the picture on screen.
 pub(crate) fn options_next(key: &str, cur: u16, dir: i32) -> u16 {
-    use crate::backend::render::{ZOOM_MAX, ZOOM_MIN};
     let n = match key {
         "AFFICHAGE" => keymap::DISPLAY_MODE_COUNT,
         "ROTATION" => keymap::ROTATION_COUNT,
         "PIXELS" => keymap::PIXEL_FILTER_COUNT,
         "FILTRE" => keymap::SCREEN_FILTER_COUNT,
         "OVERCLOCK" => POWER_ORDER.len() as u8,
-        "ZOOM" => {
-            let z = if dir < 0 { cur.saturating_sub(10) } else { cur.saturating_add(10) };
-            return z.clamp(ZOOM_MIN, ZOOM_MAX);
-        }
+        "ZOOM" => return crate::loc::zoom_preset_step(cur, dir),
         _ => return cur,
     };
     armed_step(cur, n as u16, dir)
@@ -253,7 +258,11 @@ pub(crate) fn with_options_sheet<R>(
     let oc_opts = [lc.overclock_off, lc.pixels_auto, lc.overclock_on];
     let oc_at = POWER_ORDER.iter().position(|m| *m == p.power).unwrap_or(0);
     let zoom = std::format!("{} %", p.zoom);
-    let zoom_ends = (p.zoom <= crate::backend::render::ZOOM_MIN, p.zoom >= crate::backend::render::ZOOM_MAX);
+    let zoom_ends = crate::loc::zoom_preset_ends(p.zoom);
+    // Where the zoom is fine-tuned and the picture framed: the pause's own
+    // row and page names, as Réglages names them for the default.
+    let zoom_path = settings_tab::menu_path(&[lc.pause_title, lc.menu_screen, lc.set_zoom]);
+    let zoom_help = u.help_opt_zoom.replacen("{}", &zoom_path, 1);
     // A setting with no value of its own says so ("par défaut"): keeping a
     // value gives the game its own, and X takes it back. Not on the row
     // being changed, where the arrows need the room.
@@ -298,7 +307,7 @@ pub(crate) fn with_options_sheet<R>(
         "RACCOURCI" => u.help_opt_home,
         "AFFICHAGE" => u.help_display,
         "ROTATION" => u.help_rotation,
-        "ZOOM" => u.help_opt_zoom,
+        "ZOOM" => zoom_help.as_str(),
         "PIXELS" => u.help_pixels,
         "FILTRE" => u.help_filter,
         "OVERCLOCK" => match p.power {

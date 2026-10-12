@@ -338,8 +338,8 @@ pub struct Strings {
     /// TOUCHES row + share/diff label for the per-game "show cursor" toggle.
     pub show_cursor: &'static str,
     /// Touches et curseur row (#119): moving the controller moves the cursor.
-    /// Its choices: the off word (`gyro_mode_label`), `gyro_marble`,
-    /// `gyro_pointer`.
+    /// Its choices (`gyro_mode_label`): `gyro_off` of loc_ui.rs (its own short
+    /// word, not the overclock's), `gyro_marble`, `gyro_pointer`.
     pub set_gyro: &'static str,
     /// Gyroscope like a marble on the screen: the cursor goes toward the edge
     /// that goes down, as far as the console is tilted.
@@ -1232,7 +1232,7 @@ const RU: Strings = Strings {
     set_cursor_speed: "Скорость курсора",
     set_display_mode: "Экран",
     display_fit: "Вписать",
-    display_fill: "Заполнить",
+    display_fill: "Обрезать",
     display_stretch: "Растянуть",
     set_zoom: "Масштаб",
     set_screen_filter: "Фильтр",
@@ -1254,7 +1254,7 @@ const RU: Strings = Strings {
     filter_crt: "CRT",
     set_pixel_filter: "Пиксели",
     pixels_auto: "Авто",
-    pixels_smooth: "Сглаженные",
+    pixels_smooth: "Мягкие",
     pixels_sharp: "Чёткие",
     set_overclock: "Разгон",
     overclock_off: "Выкл",
@@ -1691,7 +1691,7 @@ const IT: Strings = Strings {
     profile_share_confirm: "Condividere i tuoi comandi per questo gioco?",
     share_confirm_update: "Aggiorna il tuo profilo condiviso:",
     touches_edit: "Modifica comandi",
-    touches_revert_default: "Ripristina comandi predefiniti",
+    touches_revert_default: "Ripristina predefiniti",
     profile_preview_none: "Questo profilo non cambia nessun tasto.",
     profile_share_dup: "Già nel catalogo. Cambia un tasto per condividere la tua versione.",
     toast_already_imported: "{} è già nella tua libreria.",
@@ -2508,16 +2508,40 @@ pub fn rotation_label(v: u8) -> &'static str {
     }
 }
 
-/// Zoom a game starts at when it has never been framed itself (issue #101).
+/// The zooms the launcher's rows step through: the one a game starts at when
+/// it has never been framed itself (issue #101), in REGLAGES, and a game's own
+/// in its options.
 ///
 /// PRESETS, not the free percentage the pause menu gives. There is no picture
-/// on screen in REGLAGES to judge one against, and a value picked blind is not
-/// a value anybody chose -- so this offers the handful worth defaulting to, and
-/// leaves the pixel-by-pixel work to the game it applies to.
+/// on screen in the launcher to judge one against, and a value picked blind is
+/// not a value anybody chose -- so this offers the handful worth starting at,
+/// and leaves the pixel-by-pixel work to the game it applies to. The two rows
+/// used to step two ways (these presets, and ten percent at a time up to 500 %
+/// in a game's options) for the same setting.
 ///
 /// The framing offset has NO global default and never will: it is measured in
 /// screen pixels against one particular picture, and means nothing away from it.
 pub const DEFAULT_ZOOM_STEPS: &[u16] = &[100, 110, 125, 150, 175, 200, 250, 300];
+
+/// One step `dir` (< 0 down) along `DEFAULT_ZOOM_STEPS` from `cur`, stopping
+/// at the ends. A zoom that is no preset (framed in the pause, or hand-edited
+/// into settings.json) steps to the nearest preset that way.
+pub fn zoom_preset_step(cur: u16, dir: i32) -> u16 {
+    let next = if dir < 0 {
+        DEFAULT_ZOOM_STEPS.iter().rev().find(|v| **v < cur)
+    } else {
+        DEFAULT_ZOOM_STEPS.iter().find(|v| **v > cur)
+    };
+    next.copied().unwrap_or(cur)
+}
+
+/// Whether zoom `v` is at the low / high end of the presets: the armed
+/// arrow on that side is dimmed.
+pub fn zoom_preset_ends(v: u16) -> (bool, bool) {
+    let low = DEFAULT_ZOOM_STEPS.first().map_or(true, |f| v <= *f);
+    let high = DEFAULT_ZOOM_STEPS.last().map_or(true, |m| v >= *m);
+    (low, high)
+}
 
 pub fn default_zoom() -> u16 {
     DEFAULT_ZOOM.load(Ordering::Relaxed)

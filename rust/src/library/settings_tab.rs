@@ -285,6 +285,7 @@ fn row_a(s: &mut State, section: SetSection, key: &str) {
             let on = crate::loc::default_fps_counter() == 1;
             crate::loc::set_default_fps_counter((!on) as u8);
             crate::loc::save_current();
+            default_written();
             crate::sfx::value_changed();
         }
         (SetSection::Defaults, k) => arm_here(s, default_value(k)),
@@ -365,9 +366,9 @@ fn default_value(key: &str) -> u16 {
 
 /// The value armed row `row` of `section` moves to on one step `dir` from
 /// `cur`, stopping at the ends. The default zoom steps through its presets
-/// (`loc::DEFAULT_ZOOM_STEPS`), not the free percentage of the pause: there is
-/// no picture here to judge one against. A value that is no preset
-/// (hand-edited into settings.json) steps to the nearest preset that way.
+/// (`loc::zoom_preset_step`), as a game's own does in its options, not the
+/// free percentage of the pause: there is no picture here to judge one
+/// against.
 pub(crate) fn armed_next(section: SetSection, row: usize, cur: u16, dir: i32) -> u16 {
     let n = match (section, key_of(section, row)) {
         (SetSection::Library, "VUE") => crate::loc::HOME_VIEW_COUNT,
@@ -377,15 +378,7 @@ pub(crate) fn armed_next(section: SetSection, row: usize, cur: u16, dir: i32) ->
         (SetSection::Defaults, "FILTRE") => keymap::SCREEN_FILTER_COUNT,
         (SetSection::Defaults, "OVERCLOCK") => POWER_ORDER.len() as u8,
         (SetSection::Defaults, "VITESSE") => crate::loc::CURSOR_SPEED_X10.len() as u8,
-        (SetSection::Defaults, "ZOOM") => {
-            let steps = crate::loc::DEFAULT_ZOOM_STEPS;
-            let next = if dir < 0 {
-                steps.iter().rev().find(|v| **v < cur).copied()
-            } else {
-                steps.iter().find(|v| **v > cur).copied()
-            };
-            return next.unwrap_or(cur);
-        }
+        (SetSection::Defaults, "ZOOM") => return crate::loc::zoom_preset_step(cur, dir),
         _ => return cur,
     };
     armed_step(cur, n as u16, dir)
@@ -417,6 +410,13 @@ pub(crate) fn write_armed(section: SetSection, row: usize, v: u16) {
         _ => return,
     }
     l::save_current();
+    default_written();
+}
+
+/// A game default was written: the games that follow it show it in their
+/// options, whose copy of the last game's settings is read again.
+fn default_written() {
+    options_panel::game_prefs_forget();
 }
 
 /// A tap on the page, on cell `idx` of its touch table: the column's entries
@@ -493,6 +493,7 @@ pub(crate) fn touch_part(s: &mut State, section: SetSection, idx: usize, part: u
         }
         (SetSection::Defaults, "FPS") => {
             l::set_default_fps_counter((l::default_fps_counter() != 1) as u8);
+            default_written();
             true
         }
         (SetSection::Defaults, "AFFICHAGE" | "ROTATION" | "PIXELS" | "FILTRE" | "OVERCLOCK") => {
@@ -759,6 +760,11 @@ pub(crate) fn subpage_tap(s: &mut State, k: usize) {
             None => return,
         },
     };
+    // Out of the page, to the row that opened it or on to the column: the way
+    // back, with B's sound. A tap has no press for the screens to read it
+    // from, and the cursor moving out of the page sounded like a step down a
+    // list.
+    crate::sfx::choose(crate::sfx::Sfx::Back);
     s.dir_browse.clear();
     s.screen = target;
 }
@@ -982,8 +988,14 @@ fn column_hints(section: SetSection) -> std::vec::Vec<HintItem<'static>> {
 /// A way through the menus, step by step, joined the way crumbs join them. The
 /// steps are the labels the menus themselves show, so a help that names a
 /// place names it in the words the player will find there, in every language.
-fn menu_path(steps: &[&str]) -> std::string::String {
-    steps.join("  \u{203A}  ")
+///
+/// The spaces are no-break ones: `kit_wrap` breaks a help only on the others,
+/// so the path goes to the next line whole, its double spacing kept. Joined
+/// with plain spaces, a help ended one line on "Pausa" and began the next on
+/// "› Imagen › Zoom.", and every path lost its spacing to the wrap, which puts
+/// one space between words.
+pub(crate) fn menu_path(steps: &[&str]) -> std::string::String {
+    steps.join("\u{a0}\u{a0}\u{203A}\u{a0}\u{a0}")
 }
 
 /// Bibliothèque: the home layouts as cards, the games folder, the interface
@@ -1077,8 +1089,7 @@ fn defaults_pane(
     let power_opts = POWER_ORDER.map(l::overclock_label);
     let zoom_v = value("ZOOM");
     let zoom = std::format!("{} %", zoom_v);
-    let steps = l::DEFAULT_ZOOM_STEPS;
-    let zoom_ends = (steps.first().is_some_and(|f| zoom_v <= *f), steps.last().is_some_and(|m| zoom_v >= *m));
+    let zoom_ends = l::zoom_preset_ends(zoom_v);
     let n_speeds = l::CURSOR_SPEED_X10.len();
     let speed_idx = (value("VITESSE") as usize).min(n_speeds.saturating_sub(1));
     let speed = l::speed_label(speed_idx as i32);

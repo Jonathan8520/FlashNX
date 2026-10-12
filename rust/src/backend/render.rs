@@ -11841,7 +11841,9 @@ impl SwitchRenderBackend {
     }
 
     /// The notice over a game that could not be read: what happened, where it
-    /// was looked for, and that the menu (where Quit is) is on Minus.
+    /// was looked for, and that the pause (where Quit is) is on Minus, named
+    /// as its own pages name it on their way back: "Menu" named a menu the
+    /// game has nowhere else.
     pub fn draw_load_failed(&mut self, asked: &str) {
         use theme::{col, size};
         let u = crate::loc_ui::ui();
@@ -11874,7 +11876,7 @@ impl SwitchRenderBackend {
         let shown = asked.trim_start_matches("sdmc:");
         let p = self.kit_fit_mid(if shown.is_empty() { "?" } else { shown }, size::LABEL, w - 2.0 * pad - 32.0);
         self.kit_text_mid(x + pad + 16.0, by + 20.0, size::LABEL, &p, col::TEXT3);
-        self.kit_hints_right(x + w - pad, y + h - 30.0, &[(&[Btn::Minus], u.load_failed_hint)]);
+        self.kit_hints_right(x + w - pad, y + h - 30.0, &[(&[Btn::Minus], crate::loc::s().pause_title)]);
     }
 
     /// A wait over panels that stay on screen: a small card with the spinner and

@@ -275,7 +275,7 @@ fn keep_armed(s: &mut State, a: Armed) {
 }
 
 /// The value armed row `a` moves to on one step `dir`: the next option, the
-/// next preset, ten percent of zoom, stopping at the ends.
+/// next preset (a cursor speed, a zoom), stopping at the ends.
 fn armed_next(s: &State, a: Armed, dir: i32) -> u16 {
     match a.screen {
         Screen::OptionsModal { selection, .. } => {
@@ -2646,6 +2646,17 @@ enum MoveOutcome {
     Stranded(std::string::String),
 }
 
+/// `move_game_inner`, and the game's HOME icon follows it (its config names the game by path).
+fn move_game_to_folder(path: &str, basename: &str, folder: &str) -> MoveOutcome {
+    let outcome = move_game_inner(path, basename, folder);
+    if let MoveOutcome::Moved(ref np) | MoveOutcome::Stranded(ref np) = outcome {
+        if np != path {
+            tiles_follow(&[(path.to_string(), np.clone(), false)]);
+        }
+    }
+    outcome
+}
+
 /// Move ONE game onto a shelf: its `.swf` and, if it has one, its `.files/`
 /// companion tree (issue #68). `folder` empty = back to the root.
 ///
@@ -2674,18 +2685,6 @@ enum MoveOutcome {
 /// it sweeps. A rollback that fails silently is how an entry comes to name a
 /// path with no file on it, and how SUPPRIMER then deletes a game's save while
 /// leaving the game.
-/// `move_game_inner`, and the game's HOME icon follows it: the icon's config
-/// names the game by its full path, which the move just changed.
-fn move_game_to_folder(path: &str, basename: &str, folder: &str) -> MoveOutcome {
-    let outcome = move_game_inner(path, basename, folder);
-    if let MoveOutcome::Moved(ref np) | MoveOutcome::Stranded(ref np) = outcome {
-        if np != path {
-            tiles_follow(path, np, false);
-        }
-    }
-    outcome
-}
-
 fn move_game_inner(path: &str, basename: &str, folder: &str) -> MoveOutcome {
     let root = primary_root();
     let dest_dir = if folder.is_empty() {
@@ -3072,6 +3071,10 @@ pub fn open() {
     }
     // Returning from a game? Bank that session's playtime before we re-sort.
     bank_playtime();
+    // The pause writes the game's settings straight to its `.prefs`: the
+    // options' copy from before the game no longer says what it runs with,
+    // nor which of its settings are its own.
+    options_panel::game_prefs_forget();
     // If we're re-opening after quitting a game, land the cursor back on
     // that game's row instead of the top of the list.
     let want = last_played_basename();
@@ -3111,15 +3114,32 @@ pub fn open() {
                 s.folder_filter = None;
             }
         }
-        set_active_folder(s.folder_filter.as_deref());
-        s.anim_origin_ticks = unsafe { ruffle_tick_now() };
-        // Apply the active sort BEFORE the cursor position is computed below.
-        sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
         // ABSOLUTE index of the game just played. By PATH first: folders (#68)
         // let two games share a file name, and the one just quit is a particular
         // FILE, not whichever namesake the sort put first. The name is the
         // fallback, for when the path is gone -- moved or renamed while it ran.
-        //
+        let find_played = |entries: &[Entry]| {
+            want_path
+                .as_deref()
+                .and_then(|p| entries.iter().position(|e| e.path == p))
+                .or_else(|| want.as_deref().and_then(|b| entries.iter().position(|e| e.basename == b)))
+        };
+        // A game started from the importer (an archive's game, a Flashpoint
+        // download) need not be on the shelf the home was left on: back to
+        // TOUS, where it is, so the cursor lands on it. Left on the shelf, the
+        // cursor fell back to the shelf's first game.
+        if s.folder_filter.is_some() {
+            if let Some(i) = find_played(&s.entries) {
+                if !local_filtered_indices(&s.entries, &None, &s.folder_filter).contains(&i) {
+                    s.folder_filter = None;
+                }
+            }
+        }
+        set_active_folder(s.folder_filter.as_deref());
+        s.anim_origin_ticks = unsafe { ruffle_tick_now() };
+        // Apply the active sort BEFORE the cursor position is computed below
+        // (each shelf has its own, so after the shelf is settled).
+        sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
         // Computed here rather than inside the branch below, because the closing
         // fade has to grow from the same tile the cursor lands on.
         // Kept UNDEFAULTED as well as defaulted, because the two readers below
@@ -3129,13 +3149,7 @@ pub fn open() {
         // conflating them made a cold boot -- where nothing has been played at
         // all -- shrink game number one from full screen into the top-left
         // corner, over a tile rect that had never been published.
-        let found = want_path
-            .as_deref()
-            .and_then(|p| s.entries.iter().position(|e| e.path == p))
-            .or_else(|| {
-                want.as_deref()
-                    .and_then(|b| s.entries.iter().position(|e| e.basename == b))
-            });
+        let found = find_played(&s.entries);
         let abs = found.unwrap_or(0);
         s.screen = if s.entries.is_empty() {
             Screen::Empty
@@ -3796,12 +3810,21 @@ fn tap_ui_row(x: f32, y: f32) {
             }
         }
         // A tap is not a press: no `after_input` follows, so the sound is
-        // played here. A layout card applies as it is tapped (the click of a
-        // value); any other first tap moves the cursor (the move).
-        if crate::sfx::take_changed() {
+        // played here. A sound the tap's handler chose wins, as after a press
+        // (a tap out of a page in the Réglages pane goes back, like B). A
+        // layout card applies as it is tapped (the click of a value); any
+        // other first tap moves the cursor (the move), or takes it into or
+        // out of the Réglages pane (a level, as A and B sound it).
+        let chosen = if activate { None } else { crate::sfx::take_chosen() };
+        if let Some(c) = chosen {
+            crate::sfx::take_changed();
+            if let Some(snd) = c {
+                play(snd);
+            }
+        } else if crate::sfx::take_changed() {
             play(Sfx::Toggle);
         } else if !activate && s.screen != before {
-            play(Sfx::Move);
+            play(crate::sfx::pane_level(before, s.screen).unwrap_or(Sfx::Move));
         }
     }
     if activate {
@@ -3926,11 +3949,13 @@ fn touch_part(s: &mut State, row: usize, part: usize) -> bool {
         }
         _ => {}
     }
-    // Heard now, and taken, so the flag does not sound on the next press.
+    // Heard now, and taken, so the flag does not sound on the next press. A
+    // tap on an option already set, from the Réglages column, still takes the
+    // cursor into the pane: a level, as A sounds it.
     if crate::sfx::take_changed() {
         play(Sfx::Toggle);
     } else if s.screen != before && !activate {
-        play(Sfx::Move);
+        play(crate::sfx::pane_level(before, s.screen).unwrap_or(Sfx::Move));
     }
     activate
 }
@@ -4222,6 +4247,10 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
                             confirm_armed(&mut s);
                         }
                         goto_tab(target, if idx > cur { 1.0 } else { -1.0 });
+                        // A tap is not a press: no `after_input` follows to
+                        // hear the tab change, so the sound L / R make for it
+                        // is played here.
+                        crate::sfx::play(crate::sfx::Sfx::Tab);
                     }
                 }
             }
@@ -4414,11 +4443,14 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
                 t.start_x >= rx && t.start_x <= rx + rw && t.start_y >= ry && t.start_y <= ry + rh
             }
         {
-            let mut launch = false;
-            if let Ok(s) = LIBRARY.lock() {
-                launch = !s.applet_mode && !s.entries.is_empty();
-            }
+            // The hero is the selected game: a tap on it is A, as a second tap
+            // on a tile is. A starts the game, or in applet mode shows the
+            // notice saying why no game can start there; the applet was ruled
+            // out here first, and the tap did nothing at all.
+            let launch = LIBRARY.lock().map(|s| !s.entries.is_empty()).unwrap_or(false);
             if launch {
+                // TOUCH first, as below: `input` locks LIBRARY again.
+                drop(t);
                 input("A");
             }
             return;
@@ -4427,6 +4459,7 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
             // tile activates it (reuse the A-press path — launch on JOUER,
             // download on the Flashpoint grid).
             let mut launch = false;
+            let mut moved = false;
             if let Ok(mut s) = LIBRARY.lock() {
                 match s.screen {
                     Screen::List { selection, scroll_offset } => {
@@ -4434,6 +4467,7 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
                             launch = true;
                         } else {
                             s.screen = Screen::List { selection: hit, scroll_offset };
+                            moved = true;
                         }
                     }
                     Screen::FpGallery { selection, scroll } => {
@@ -4441,6 +4475,7 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
                             launch = true;
                         } else {
                             s.screen = Screen::FpGallery { selection: hit, scroll };
+                            moved = true;
                         }
                     }
                     Screen::DistantFiles { selection, scroll_offset } => {
@@ -4448,6 +4483,7 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
                             launch = true;
                         } else {
                             s.screen = Screen::DistantFiles { selection: hit, scroll_offset };
+                            moved = true;
                         }
                     }
                     Screen::DistantIdle { selection, scroll_offset } => {
@@ -4460,10 +4496,17 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
                             launch = true;
                         } else {
                             s.screen = Screen::DistantIdle { selection: hit, scroll_offset };
+                            moved = true;
                         }
                     }
                     _ => {}
                 }
+            }
+            // The cursor moved: the sound a direction makes for the same move,
+            // played here as no `after_input` follows a tap. What A does on a
+            // second tap sounds through `input`.
+            if moved {
+                crate::sfx::play(crate::sfx::Sfx::Move);
             }
             if launch {
                 // input("A") re-locks LIBRARY: drop TOUCH first to keep the
@@ -5276,7 +5319,11 @@ struct MoveJob {
     files: std::vec::Vec<std::string::String>,
     dirs: std::vec::Vec<std::string::String>,
     idx: usize,
-    moved: usize,
+    /// The games (top-level `.swf` names) and the folders that did move. Only
+    /// their HOME icons follow the library: a game left behind still launches
+    /// from where it is.
+    moved_games: std::vec::Vec<std::string::String>,
+    moved_dirs: std::vec::Vec<std::string::String>,
     /// Entries that stayed in `src`: a file or folder of the same name was
     /// already at the destination, or the rename failed. Told to the player
     /// at the end, not only to the log: part of the library is still behind.
@@ -5398,7 +5445,8 @@ fn start_move(dest: &str) -> bool {
             files,
             dirs,
             idx: 0,
-            moved: 0,
+            moved_games: std::vec::Vec::new(),
+            moved_dirs: std::vec::Vec::new(),
             skipped: 0,
         });
         true
@@ -5445,7 +5493,7 @@ fn step_move(job: &mut MoveJob) -> bool {
             return true;
         }
         if name.to_ascii_lowercase().ends_with(".swf") {
-            job.moved += 1;
+            job.moved_games.push(name);
         }
         return true;
     }
@@ -5467,6 +5515,8 @@ fn step_move(job: &mut MoveJob) -> bool {
         log(&std::format!("games dir: could not move {}/
 ", name));
         job.skipped += 1;
+    } else {
+        job.moved_dirs.push(name);
     }
     true
 }
@@ -5499,17 +5549,26 @@ fn drive_pending_move() {
         if alive {
             return; // more to do; the bar moves on the next frame
         }
-        let done = g.take().expect("checked above");
-        (done.src, done.dest, done.moved, done.skipped)
+        g.take().expect("checked above")
     };
-    let (src, dest, moved, skipped) = finished;
+    let MoveJob { src, dest, moved_games, moved_dirs, skipped, .. } = finished;
 
     set_primary_root(&dest);
-    tiles_follow(&src, &dest, true);
+    // The HOME icons of what moved, and of nothing else. Every icon under the
+    // old folder used to be pointed at the new one, so a game left behind (its
+    // name taken at the destination, a rename refused) got an icon launching a
+    // file that is not there, or the other game that kept it out.
+    let follow: std::vec::Vec<(std::string::String, std::string::String, bool)> = moved_games
+        .iter()
+        .map(|n| (n, false))
+        .chain(moved_dirs.iter().map(|n| (n, true)))
+        .map(|(n, prefix)| (std::format!("{}/{}", src, n), std::format!("{}/{}", dest, n), prefix))
+        .collect();
+    tiles_follow(&follow);
     log(&std::format!(
         "games dir: now {} ({} moved, {} left in {})
 ",
-        dest, moved, skipped, src,
+        dest, moved_games.len(), skipped, src,
     ));
     // Rebuild the list: `add_path` PUSHES, and the boot scan relies on starting
     // from an empty one, so rescanning in place left every game listed twice —
@@ -6769,6 +6828,10 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
         // the REGLAGES navbar tab (reached with L/R).
         "Plus" => {
             if let Some(&abs) = filtered.get(selection) {
+                // Read from the card again, not from the last time the panel
+                // was open: the pause, Réglages or the HOME menu itself may
+                // have changed this game's settings or its icon since.
+                options_panel::game_prefs_forget();
                 s.screen = Screen::OptionsModal { game_idx: abs, selection: 0 };
             }
             return;
@@ -7466,8 +7529,10 @@ fn with_source_sheet<R>(
         _ => lc.histdel_msg,
     };
     let a_verb = match selection {
-        0 if fav => lc.opt_unfavorite,
-        0 => u.imp_fav_add,
+        // The favourite is a switch, as in a game's options, and A says so in
+        // the same word: it read "Ajouter aux favoris" / "Retirer des favoris"
+        // here and "Changer" there for the same switch.
+        0 => u.change,
         1 => u.edit,
         _ => lc.opt_delete,
     };
@@ -9081,23 +9146,26 @@ fn tile_for(swf_path: &str) -> Option<u64> {
         .or_else(|| tile_id_for(swf_path))
 }
 
-/// A game moved from `from` to `to` (or, with `prefix`, every game under the
-/// folder `from` moved under `to`): the HOME icons launching it are pointed at
-/// its new place. The installed tile keeps its program ID; only the path in
-/// its config changes.
-fn tiles_follow(from: &str, to: &str, prefix: bool) {
+/// Games that moved, each `(from, to, prefix)`: the game at `from` is now at
+/// `to` or, with `prefix`, every game under the folder `from` is now under
+/// `to`. The HOME icons launching them are pointed at their new places. The
+/// installed tile keeps its program ID; only the path in its config changes.
+///
+/// One pass over the icons for the whole list, and one commit: a library move
+/// hands over every game it took, and the configs are listed and read again
+/// after any write.
+fn tiles_follow(moves: &[(std::string::String, std::string::String, bool)]) {
     let mut wrote = false;
     for (id, p) in tile_index() {
-        let new_path = if prefix {
-            match p.strip_prefix(from) {
-                Some(rest) if rest.starts_with('/') => std::format!("{}{}", to, rest),
-                _ => continue,
+        let new_path = moves.iter().find_map(|(from, to, prefix)| {
+            if *prefix {
+                let rest = p.strip_prefix(from.as_str()).filter(|rest| rest.starts_with('/'))?;
+                Some(std::format!("{}{}", to, rest))
+            } else {
+                (p == *from).then(|| to.clone())
             }
-        } else if p == from {
-            to.to_string()
-        } else {
-            continue;
-        };
+        });
+        let Some(new_path) = new_path else { continue };
         let cfg = tile_cfg_path(id);
         if let Ok(c) = std::ffi::CString::new(cfg.as_str()) {
             let b = new_path.as_bytes();
@@ -10615,9 +10683,6 @@ fn modal_kind(screen: Screen) -> u8 {
         return 1;
     }
     match screen {
-        Screen::OptionsModal { .. } => 1,
-        Screen::DeleteConfirm { .. } => 2,
-        Screen::CoverPicker { .. } => 3,
         // A source's options and the question deleting it asks are one panel
         // stack, like a game's options: the question comes up over the panel
         // without the panel popping again, and Cancel drops back onto it.
@@ -10638,21 +10703,11 @@ fn modal_kind(screen: Screen) -> u8 {
         Screen::SortModal { .. } => 9,
         Screen::RemoteSortModal { .. } => 7,
         Screen::FpDetails { .. } => 11,
-        // #20 profile modals: distinct ids so each gets the scale-in "pop" when it
-        // appears (they were kind 0 = no animation, unlike every other modal).
-        Screen::TouchesMenu { .. } => 12,
-        Screen::ProfileList { .. } => 13,
-        Screen::ProfilePreview { .. } => 14,
-        Screen::RevertPreview { .. } => 15,
-        Screen::ProfileShareConfirm { .. } => 16,
-        Screen::ProfileDeleteConfirm { .. } => 17,
         // The question about moving the library (#79). Its browser is no
         // window: it opens inside the RÉGLAGES pane, a page and not a pop.
         Screen::GamesDirConfirm { .. } => 20,
         // A report the relay did not take, asked over the page.
         Screen::SendFailed { .. } => 23,
-        Screen::GameFolderPicker { .. } => 21,
-        Screen::GameFolderDelete { .. } => 22,
         _ => 0,
     }
 }
@@ -10864,12 +10919,6 @@ fn maybe_arm_startup_migrations() {
         *p = Some((PendingNet::RunStartupMigrations, false));
     }
 }
-
-/// Modal kinds whose close the generic interception defers for a scale-out
-/// (plain modal -> non-modal). The destructive confirms (DeleteConfirm=2,
-/// DistantHistoryConfirm=6) are handled EXPLICITLY in their own handlers instead
-/// (they defer the mutation too — see `PendingClose`), so they're not listed here.
-
 
 /// The window a reveal opens through, `frac` of the way from `rect` (0) to
 /// the whole screen (1).
