@@ -929,6 +929,20 @@ static void cursor_speed_load() {
     }
     cursor_speed_apply();
 }
+// The cursor speed a game runs at: its own preset (<basename>.cursor) when it
+// has one, else the GLOBAL default (RÉGLAGES). Read at launch, and again after
+// the Touches pages commit something: a profile applied in game writes the
+// game's speed, and the pointer used to keep the old one until a relaunch,
+// the Touches row showing it and a step there overwriting the profile's.
+static void cursor_speed_for_game() {
+    const int cs = ruffle_keymap_cursor_speed();
+    if (cs >= 0) {
+        g_cursor_speed_idx = cs;
+        cursor_speed_apply();
+    } else {
+        cursor_speed_load(); // global default
+    }
+}
 // Step to the next preset (dir >= 0) or the previous one, apply, persist.
 // Returns the new index.
 extern "C" int ruffle_cursor_speed_step(int dir) {
@@ -1335,15 +1349,7 @@ static void worker_entry(void* arg) {
     // Cursor speed: honour this game's per-game preset (<basename>.cursor) if
     // set, else fall back to the GLOBAL default (RÉGLAGES). No bleed from the
     // previously launched game.
-    {
-        int cs = ruffle_keymap_cursor_speed();
-        if (cs >= 0) {
-            g_cursor_speed_idx = cs;
-            cursor_speed_apply();
-        } else {
-            cursor_speed_load(); // global default
-        }
-    }
+    cursor_speed_for_game();
     g_in_game = true;
     prof_game_active(1);
 
@@ -1540,6 +1546,7 @@ static void worker_entry(void* arg) {
                     ruffle_touches_close();
                     if (ruffle_touches_consume_dirty()) {
                         populate_bindings_from_keymap();
+                        cursor_speed_for_game();
                     }
                     ruffle_ui_sound(UI_SFX_CLOSE);
                     ruffle_menu_close_begin();
@@ -1561,9 +1568,11 @@ static void worker_entry(void* arg) {
                     menu_touch ? (float)touch_state.touches[0].y * UI_TOUCH_SCALE_Y : 0.0f,
                     menu_touch ? 1 : 0);
                 // If a binding was committed, refresh our runtime BINDINGS
-                // so the change applies immediately (no need to REDEMARRER).
+                // so the change applies immediately (no need to REDEMARRER),
+                // and the cursor speed, which a profile can carry.
                 if (ruffle_touches_consume_dirty()) {
                     populate_bindings_from_keymap();
+                    cursor_speed_for_game();
                 }
                 ruffle_redraw_paused();
                 // The input above may have CLOSED the sub-menu (B). If so, drawing

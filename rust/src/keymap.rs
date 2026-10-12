@@ -1330,23 +1330,49 @@ pub fn binding_diff_rows(cur: &Keymap, tgt: &Keymap) -> std::vec::Vec<std::strin
     rows
 }
 
-/// A preview row for a cursor-speed change (issue #57 sharing), or None when
-/// `cur == tgt`. Cursor speed lives outside the keymap, so it isn't in
-/// `binding_diff_rows` — the share/apply preview appends this so the user SEES the
-/// pointer speed is part of the profile. `-1` shows as the "(none)" label.
-pub fn cursor_diff_row(cur: i32, tgt: i32) -> Option<std::string::String> {
-    if cur == tgt {
+/// The cursor speed row of an apply preview (issue #57 sharing): the speed the
+/// game at `basename` runs at, then the one the profile sets, or None when
+/// applying it changes nothing. Cursor speed lives outside the keymap, so it
+/// isn't in `binding_diff_rows` — the preview appends this so the user SEES the
+/// pointer speed is part of the profile.
+pub fn cursor_apply_row(basename: &str, profile_speed: i32) -> Option<std::string::String> {
+    // A profile with no speed of its own (every one shared before #57) leaves
+    // the game's as it is: no row. It printed "x1,0" for "no value" on both
+    // sides, so a game at x2,0 previewed "x2,0 -> x1,0" and kept x2,0.
+    if profile_speed < 0 {
         return None;
     }
-    // The speed as the menu shows it ("x1,5"), not the preset's index: "#3"
-    // meant nothing to anyone but this file. No value is the default speed.
-    let disp = |v: i32| -> std::string::String { crate::loc::speed_label(if v < 0 { 1 } else { v }) };
-    Some(std::format!(
-        "{}\t{}\t{}",
-        crate::loc::s().set_cursor_speed,
-        disp(cur),
-        disp(tgt),
-    ))
+    // The speed the game runs at now: its own preset, else the one every game
+    // without one follows (C++ holds it: the live one in game, the global
+    // default in the launcher).
+    let own = cursor_speed_for(basename);
+    let now = if own >= 0 {
+        crate::loc::speed_label(own)
+    } else {
+        crate::loc::mult_label(unsafe { crate::library::ruffle_cursor_speed_mult_x10() }.max(5) as u32)
+    };
+    cursor_row(now, crate::loc::speed_label(profile_speed))
+}
+
+/// The cursor speed row of a share preview: what the shared profile carried
+/// (`before`) and what it will carry (`after`), presets or -1 for none, which
+/// reads "default". None when the two read the same.
+pub fn cursor_share_row(before: i32, after: i32) -> Option<std::string::String> {
+    let disp = |v: i32| -> std::string::String {
+        if v < 0 {
+            crate::loc_ui::ui().tag_default.to_string()
+        } else {
+            crate::loc::speed_label(v)
+        }
+    };
+    cursor_row(disp(before), disp(after))
+}
+
+/// "Vitesse du curseur <tab> before <tab> after", as the menu shows the speeds
+/// ("x1,5", not the preset's index), or None when they read the same: a line
+/// "x1,0 -> x1,0" opened a preview of nothing to change.
+fn cursor_row(before: std::string::String, after: std::string::String) -> Option<std::string::String> {
+    (before != after).then(|| std::format!("{}\t{}\t{}", crate::loc::s().set_cursor_speed, before, after))
 }
 
 /// The active game's basename, or None when no game is active / the global

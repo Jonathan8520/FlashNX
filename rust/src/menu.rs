@@ -873,7 +873,7 @@ fn run_open_preview(profile_idx: usize) {
     let Some(profile) = profile else { return };
     let current = keymap::effective_for(&basename);
     let mut rows = keymap::binding_diff_rows(&current, &profile.to_keymap());
-    if let Some(r) = keymap::cursor_diff_row(keymap::cursor_speed_for(&basename), profile.cursor_speed) {
+    if let Some(r) = keymap::cursor_apply_row(&basename, profile.cursor_speed) {
         rows.push(r);
     }
     if rows.is_empty() {
@@ -946,7 +946,7 @@ fn run_open_share_confirm() {
     };
     let mut rows = keymap::binding_diff_rows(&before, &current);
     // Cursor speed lives outside the keymap — append its change so it's visible.
-    if let Some(r) = keymap::cursor_diff_row(before_cursor, keymap::cursor_speed_for(&basename)) {
+    if let Some(r) = keymap::cursor_share_row(before_cursor, keymap::cursor_speed_for(&basename)) {
         rows.push(r);
     }
     let rows = cap_rows(rows);
