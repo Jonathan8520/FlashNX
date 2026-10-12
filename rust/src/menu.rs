@@ -1491,7 +1491,7 @@ fn with_profiles_sheet<R>(
         .lock()
         .map(|s| (s.active_id.clone(), s.copy_mode, s.matches.iter().map(ProfileItem::of).collect::<std::vec::Vec<_>>()))
         .unwrap_or_default();
-    let crumbs = [crate::loc::s().menu_keys];
+    let crumbs = [crate::loc::s().pause_title, crate::loc::s().menu_keys];
     with_profiles_view(backend, &items, &active, copy_mode, selection, &crumbs, f)
 }
 
@@ -1646,7 +1646,7 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
                     )
                 })
                 .unwrap_or_default();
-            let crumbs = [lc.profile_title];
+            let crumbs = [lc.pause_title, lc.menu_keys, lc.profile_title];
             let hints = [(&[Btn::A][..], u.apply), (&[Btn::B][..], u.back)];
             draw_diff_page(backend, &crumbs, &name, Some(u.preview_sub), &rows, &hints);
         }
@@ -1656,7 +1656,7 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
                 .map(|s| (s.share_is_update, s.preview_rows.clone()))
                 .unwrap_or((false, std::vec::Vec::new()));
             let question = if is_update { lc.share_confirm_update } else { lc.profile_share_confirm };
-            let crumbs = [lc.menu_keys];
+            let crumbs = [lc.pause_title, lc.menu_keys];
             let hints = [(&[Btn::A][..], u.share), (&[Btn::B][..], u.cancel)];
             draw_diff_page(backend, &crumbs, lc.opt_share, Some(question), &rows, &hints);
         }
@@ -1666,7 +1666,7 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
                 .map(|s| (s.preview_rows.clone(), s.has_backup))
                 .unwrap_or_default();
             let title = if has_backup { lc.profile_revert } else { lc.touches_revert_default };
-            let crumbs = [lc.menu_keys];
+            let crumbs = [lc.pause_title, lc.menu_keys];
             let hints = [(&[Btn::A][..], u.restore), (&[Btn::B][..], u.back)];
             draw_diff_page(backend, &crumbs, title, None, &rows, &hints);
         }

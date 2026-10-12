@@ -320,9 +320,27 @@ pub(crate) fn draw_options_family(
         }
         other => Some(other),
     };
-    if let Ok(mut g) = LAST_CHILD.lock() {
-        *g = page;
-    }
+    let t = crate::backend::render::cascade_step(page.is_some());
+    // After B the page is gone from the screen state but folds back for a few
+    // frames: drawn from memory, without a cursor (it takes no taps on its way
+    // out). Forgotten once folded.
+    let shown = match page {
+        Some(p) => {
+            if let Ok(mut g) = LAST_CHILD.lock() {
+                *g = Some(p);
+            }
+            Some((p, true))
+        }
+        None => {
+            let last = LAST_CHILD.lock().ok().and_then(|mut g| {
+                if t <= 0.0 {
+                    *g = None;
+                }
+                *g
+            });
+            last.map(|p| (p, false))
+        }
+    };
     let opt_sel = match screen {
         Screen::OptionsModal { selection, .. } => selection,
         other => branch_of(other),
@@ -330,8 +348,7 @@ pub(crate) fn draw_options_family(
     if let Some(p) = slide {
         backend.set_ui_sheet_slide_right(p);
     }
-    let t = crate::backend::render::cascade_step(page.is_some());
-    draw_family_panels(backend, &entry, opt_sel, page, t);
+    draw_family_panels(backend, &entry, opt_sel, shown, t);
     backend.clear_ui_transform();
 
     // A question or the cover picker on top, popping in by itself.
@@ -369,16 +386,23 @@ pub(crate) fn draw_options_loading(backend: &mut SwitchRenderBackend, now: u64, 
     }
 }
 
-fn draw_family_panels(backend: &mut SwitchRenderBackend, entry: &Entry, opt_sel: usize, page: Option<Screen>, t: f32) {
+/// `page` is the page beside the options and whether it is live (false while
+/// it folds back after B: no cursor, no taps).
+fn draw_family_panels(backend: &mut SwitchRenderBackend, entry: &Entry, opt_sel: usize, page: Option<(Screen, bool)>, t: f32) {
     let lc = crate::loc::s();
     let u = crate::loc_ui::ui();
+    let live = page.map_or(true, |(_, l)| l);
+    let page = page.map(|(p, _)| p);
     let branch = page.map(branch_of).unwrap_or(0);
+    // A page folding back is drawn without its cursor.
+    let sel = |s: usize| if live { s } else { usize::MAX };
     let cascade = |b: &mut SwitchRenderBackend, parent: &Sheet, child: Option<&Sheet>| {
         b.kit_cascade_on(Side::Right, OPTIONS_W, OPTIONS_CHILD_W, parent, branch, child, t);
     };
     with_options_sheet(backend, entry, opt_sel, |b, parent| {
+        // The way back, spelled out over each page.
         let back_options = [u.hint_options];
-        let back_keys = [lc.menu_keys];
+        let back_keys = [u.hint_options, lc.menu_keys];
         match page {
             Some(Screen::TouchesMenu { selection, .. }) => {
                 let v = LIBRARY
@@ -392,7 +416,7 @@ fn draw_family_panels(backend: &mut SwitchRenderBackend, entry: &Entry, opt_sel:
                         has_backup: s.touches_has_backup,
                     });
                 if let Some(v) = v {
-                    menu::with_touches_view(b, &v, selection, &back_options, |b, c| cascade(b, parent, Some(c)));
+                    menu::with_touches_view(b, &v, sel(selection), &back_options, |b, c| cascade(b, parent, Some(c)));
                 }
             }
             Some(Screen::ProfileList { selection, .. }) => {
@@ -404,7 +428,7 @@ fn draw_family_panels(backend: &mut SwitchRenderBackend, entry: &Entry, opt_sel:
                     )
                 });
                 if let Some((items, active, copy_mode)) = snap {
-                    menu::with_profiles_view(b, &items, &active, copy_mode, selection, &back_keys, |b, c| {
+                    menu::with_profiles_view(b, &items, &active, copy_mode, sel(selection), &back_keys, |b, c| {
                         cascade(b, parent, Some(c))
                     });
                 }
@@ -420,7 +444,7 @@ fn draw_family_panels(backend: &mut SwitchRenderBackend, entry: &Entry, opt_sel:
                         )
                     })
                     .unwrap_or_default();
-                let crumbs = [lc.profile_title];
+                let crumbs = [u.hint_options, lc.menu_keys, lc.profile_title];
                 let hints = [(&[Btn::A][..], u.apply), (&[Btn::B][..], u.back)];
                 menu::with_diff_view(b, &crumbs, &name, Some(u.preview_sub), &rows, &hints, |b, c| {
                     cascade(b, parent, Some(c))
@@ -449,7 +473,7 @@ fn draw_family_panels(backend: &mut SwitchRenderBackend, entry: &Entry, opt_sel:
                 });
             }
             Some(Screen::GameFolderPicker { selection, .. }) => {
-                with_folders_view(b, entry, selection, &back_options, |b, c| cascade(b, parent, Some(c)));
+                with_folders_view(b, entry, sel(selection), &back_options, |b, c| cascade(b, parent, Some(c)));
             }
             _ => cascade(b, parent, None),
         }

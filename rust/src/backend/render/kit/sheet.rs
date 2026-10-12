@@ -108,9 +108,11 @@ pub(crate) enum Side {
 const SECTION_H: f32 = 36.0;
 /// Rows are this far apart beyond their own height.
 const ROW_GAP: f32 = 2.0;
-/// The help box always gets room for three lines, so the rows' area does not
+/// The help box always gets room for four lines, so the rows' area does not
 /// change size (and the list does not jump) when the help under it grows.
-const HELP_LINES: usize = 3;
+/// Four, not three: a French help naming three options runs to a fourth line
+/// in a 440 px panel, and its end was the part that got cut.
+const HELP_LINES: usize = 4;
 const HINTS_BAND: f32 = 60.0;
 
 /// The cascade's progress, 0 (one panel) to 1 (rail plus sub-panel), eased on

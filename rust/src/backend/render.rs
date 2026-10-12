@@ -9215,11 +9215,13 @@ impl SwitchRenderBackend {
         let t = kit::sheet::cascade_step(false);
         let child = if t > 0.0 { pause_child() } else { PauseChild::None };
         self.with_pause_sheet(selected, |s, parent| match child {
-            PauseChild::Screen(sel) => {
-                s.with_screen_sheet(sel, |s, c| s.kit_cascade(parent, PAUSE_ROW_SCREEN, Some(c), t));
+            // The page folding back has no cursor: it is on its way out, and a
+            // cursor would publish its rows for touch over the main panel's.
+            PauseChild::Screen(_) => {
+                s.with_screen_sheet(usize::MAX, |s, c| s.kit_cascade(parent, PAUSE_ROW_SCREEN, Some(c), t));
             }
-            PauseChild::Touches(sel) => {
-                crate::menu::with_touches_sheet(s, sel, |s, c| s.kit_cascade(parent, PAUSE_ROW_TOUCHES, Some(c), t));
+            PauseChild::Touches(_) => {
+                crate::menu::with_touches_sheet(s, usize::MAX, |s, c| s.kit_cascade(parent, PAUSE_ROW_TOUCHES, Some(c), t));
             }
             PauseChild::None => s.kit_cascade(parent, 0, None, 0.0),
         });
