@@ -12407,8 +12407,10 @@ impl SwitchRenderBackend {
 
         // The mockup's grid: 48 px margins, five columns 20 px apart, tiles at
         // 16:10 (Jaquettes.dc.html), the first row 14 px under the shelf strip.
-        // `scroll_offset` is the first visible ROW.
-        const COLS: usize = 5;
+        // `scroll_offset` is the first visible ROW. The column count is the
+        // library's, which works out the scroll for a shelf or a view change
+        // before any frame of the grid exists.
+        const COLS: usize = crate::library::GALLERY_COLS;
         const LEFT: f32 = 48.0;
         const GAP: f32 = 20.0;
         const TOP: f32 = 130.0;
