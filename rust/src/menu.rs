@@ -1536,7 +1536,7 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
             } else {
                 std::format!("{}+{}", modif, btn)
             };
-            let used = keymap::current_map_used_keys();
+            let used = keymap::current_map_used_keys(btn);
             backend.draw_touches_keyboard(&label, key_idx, &used);
         }
         Screen::Profiles { selection } => {

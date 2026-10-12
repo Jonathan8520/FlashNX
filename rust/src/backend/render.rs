@@ -9869,7 +9869,7 @@ impl SwitchRenderBackend {
         &mut self,
         button_name: &str,
         sel_key_idx: usize,
-        used: &std::collections::BTreeSet<std::string::String>,
+        used: &std::collections::BTreeMap<std::string::String, std::vec::Vec<&'static str>>,
     ) {
         let keys = crate::keymap::KEYBOARD;
         const KEY_H: f32 = 48.0;
@@ -9919,12 +9919,12 @@ impl SwitchRenderBackend {
             std::vec::Vec::with_capacity(keys.len());
         for (i, &(name, row, kx, kw)) in keys.iter().enumerate() {
             let x = origin_x + kx * unit_w;
-            let key_w = kw * unit_w - KEY_GAP;
+            let key_w = kw * unit_w - key_gap;
             let y = top_y + row as f32 * (key_h + key_gap);
             cells.push((x, y, key_w, key_h));
             let (cap_col, txt_col) = if i == sel_key_idx {
                 (theme::col::GOLD, 0xFF_1A_14_05) // the cursor
-            } else if used.contains(name) {
+            } else if used.contains_key(name) {
                 (0xFF_2E_6E_63, 0xFF_EA_F7_F3) // teal = already bound elsewhere
             } else {
                 (0xFF_22_32_4F, theme::col::TEXT2)
@@ -9935,9 +9935,14 @@ impl SwitchRenderBackend {
             self.kit_rrect(x, y + 2.0, key_w, key_h, r, 0xFF_0E_17_2A);
             self.kit_rrect(x, y, key_w, key_h - 2.0, r, cap_col);
 
-            // Centre the (only-if-needed shortened) label in the cap.
+            // Centre the legend in the cap, smaller before shorter: a word key
+            // like "Retour arr." drops to the caption size, the way real
+            // keyboards print their word keys smaller than their letters, and
+            // only a legend too long even then is cut.
             let label = crate::keymap::keyboard_label(name);
-            let kpx = (key_h * 0.36).clamp(10.0, 17.0);
+            let big = (key_h * 0.36).clamp(10.0, 17.0);
+            let small = (big * 0.76).round().max(10.0);
+            let kpx = if self.kit_measure(&label, big) <= key_w - 12.0 { big } else { small };
             let l = self.kit_fit(&label, kpx, key_w - 8.0);
             let lw = self.kit_measure(&l, kpx);
             self.kit_text_mid((x + (key_w - lw) * 0.5).round(), y + (key_h - 2.0) * 0.5, kpx, &l, txt_col);

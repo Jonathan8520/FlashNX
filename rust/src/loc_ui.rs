@@ -198,6 +198,12 @@ pub struct Ui {
     pub profile_del_body: &'static str,
     /// Caption beside a stick glyph on the row of the stick pushed in (L3 / R3).
     pub stick_press: &'static str,
+    /// A button that sends nothing, in the controls editor, its key picker and the before / after tables.
+    pub key_none: &'static str,
+    /// The Caps Lock key, as the keyboards of the language print it.
+    pub flash_capslock: &'static str,
+    /// A numpad key named on a controls row ({} = what the key prints: 1, +, Enter).
+    pub key_numpad: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -336,6 +342,9 @@ const EN: Ui = Ui {
     delete_game_body: "The game, its saves, its controls and its cover will be erased from the card. This cannot be undone.",
     profile_del_body: "It disappears from the catalog for everyone. Your controls on this console stay as they are.",
     stick_press: "press",
+    key_none: "None",
+    flash_capslock: "Caps Lock",
+    key_numpad: "Num {}",
 };
 
 const FR: Ui = Ui {
@@ -474,6 +483,9 @@ const FR: Ui = Ui {
     delete_game_body: "Le jeu, ses sauvegardes, ses touches et sa jaquette seront effacés de la carte. Action irréversible.",
     profile_del_body: "Il disparaît du catalogue pour tout le monde. Tes touches sur cette console ne changent pas.",
     stick_press: "appui",
+    key_none: "Aucune",
+    flash_capslock: "Verr. Maj",
+    key_numpad: "Num {}",
 };
 
 const ES: Ui = Ui {
@@ -612,6 +624,9 @@ const ES: Ui = Ui {
     delete_game_body: "El juego, sus partidas, sus controles y su portada se borrarán de la tarjeta. No se puede deshacer.",
     profile_del_body: "Desaparece del catálogo para todos. Tus controles en esta consola no cambian.",
     stick_press: "pulsar",
+    key_none: "Ninguna",
+    flash_capslock: "Bloq Mayús",
+    key_numpad: "Num {}",
 };
 
 const RU: Ui = Ui {
@@ -750,6 +765,9 @@ const RU: Ui = Ui {
     delete_game_body: "Игра, сохранения, управление и обложка будут удалены с карты. Это нельзя отменить.",
     profile_del_body: "Он исчезнет из каталога для всех. Твоё управление на этой консоли не изменится.",
     stick_press: "нажатие",
+    key_none: "Нет",
+    flash_capslock: "Caps Lock",
+    key_numpad: "Num {}",
 };
 
 const DE: Ui = Ui {
@@ -888,6 +906,9 @@ const DE: Ui = Ui {
     delete_game_body: "Das Spiel, seine Spielstände, seine Steuerung und sein Cover werden von der Karte gelöscht. Das lässt sich nicht rückgängig machen.",
     profile_del_body: "Es verschwindet für alle aus dem Katalog. Deine Steuerung auf dieser Konsole bleibt, wie sie ist.",
     stick_press: "drücken",
+    key_none: "Keine",
+    flash_capslock: "Feststell",
+    key_numpad: "Num {}",
 };
 
 const IT: Ui = Ui {
@@ -1026,6 +1047,9 @@ const IT: Ui = Ui {
     delete_game_body: "Il gioco, i salvataggi, i controlli e la copertina verranno cancellati dalla scheda. Non si può annullare.",
     profile_del_body: "Sparisce dal catalogo per tutti. I tuoi controlli su questa console restano come sono.",
     stick_press: "premi",
+    key_none: "Nessuno",
+    flash_capslock: "Bloc Maiusc",
+    key_numpad: "Num {}",
 };
 
 const PT: Ui = Ui {
@@ -1164,6 +1188,9 @@ const PT: Ui = Ui {
     delete_game_body: "O jogo, os saves, os controles e a capa serão apagados do cartão. Não dá para desfazer.",
     profile_del_body: "Ele some do catálogo para todos. Seus controles neste console continuam iguais.",
     stick_press: "apertar",
+    key_none: "Nenhuma",
+    flash_capslock: "Caps Lock",
+    key_numpad: "Num {}",
 };
 
 const ZH: Ui = Ui {
@@ -1302,6 +1329,9 @@ const ZH: Ui = Ui {
     delete_game_body: "游戏及其存档、按键和封面将从存储卡删除，且无法撤销。",
     profile_del_body: "它将从目录中对所有人消失。你在这台主机上的按键不会改变。",
     stick_press: "按下",
+    key_none: "无",
+    flash_capslock: "大写锁定",
+    key_numpad: "小键盘{}",
 };
 
 const TR: Ui = Ui {
@@ -1440,6 +1470,9 @@ const TR: Ui = Ui {
     delete_game_body: "Oyun, kayıtları, kontrolleri ve kapağı karttan silinecek. Bu geri alınamaz.",
     profile_del_body: "Herkes için katalogdan kalkar. Bu konsoldaki kontrollerin olduğu gibi kalır.",
     stick_press: "basma",
+    key_none: "Yok",
+    flash_capslock: "Caps Lock",
+    key_numpad: "Num {}",
 };
 
 pub fn ui() -> &'static Ui {

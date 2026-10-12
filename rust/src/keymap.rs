@@ -177,24 +177,27 @@ pub const KEYBOARD: &[(&str, u8, f32, f32)] = &[
     ("G", 3, 5.75, 1.0), ("H", 3, 6.75, 1.0), ("J", 3, 7.75, 1.0), ("K", 3, 8.75, 1.0),
     ("L", 3, 9.75, 1.0), (";", 3, 10.75, 1.0), ("'", 3, 11.75, 1.0), ("Enter", 3, 12.75, 2.25),
     ("Num1", 3, 16.0, 1.0), ("Num2", 3, 17.0, 1.0), ("Num3", 3, 18.0, 1.0), ("Num-", 3, 19.0, 1.0),
-    // Row 4 — shift row, then numpad 0 . Enter +.
+    // Row 4 — shift row, Up at the top of the arrow cluster, then numpad
+    // 0 . Enter +.
     ("Shift", 4, 0.0, 2.25),
     ("Z", 4, 2.25, 1.0), ("X", 4, 3.25, 1.0), ("C", 4, 4.25, 1.0), ("V", 4, 5.25, 1.0),
     ("B", 4, 6.25, 1.0), ("N", 4, 7.25, 1.0), ("M", 4, 8.25, 1.0), (",", 4, 9.25, 1.0),
     (".", 4, 10.25, 1.0), ("/", 4, 11.25, 1.0),
+    ("Up", 4, 13.0, 1.0),
     ("Num0", 4, 16.0, 1.0), ("Num.", 4, 17.0, 1.0), ("NumEnter", 4, 18.0, 1.0), ("Num+", 4, 19.0, 1.0),
-    // Row 5 — Ctrl + Alt + space bar + arrow cluster (Ctrl moved here from the
-    // home row now that CapsLock owns that slot; bottom-left is its real place).
-    ("Control", 5, 0.0, 1.5), ("Alt", 5, 1.5, 1.5), ("Space", 5, 3.0, 5.0),
-    ("Left", 5, 8.0, 1.0), ("Up", 5, 9.0, 1.0), ("Down", 5, 10.0, 1.0), ("Right", 5, 11.0, 1.0),
-    // Unbind + mouse clicks + the keyboard — a horizontal row along the bottom,
-    // under the numpad, so they sit "under the numbers" without the lop-sided
-    // stacked look. KEYBOARD takes the free space to the left of (none), which
-    // keeps the three that were already there exactly where players know them.
-    // Ends at 7.8, not 8.0: the other three are spaced 0.2 apart, and a key that
-    // touches its neighbour reads as one wide key with a line through it.
-    ("Keyboard", 6, 3.7, 4.1),
-    ("(none)", 6, 8.0, 3.4), ("Left click", 6, 11.6, 4.1), ("Right click", 6, 15.9, 4.1),
+    // Row 5 — Ctrl + Alt + space bar, then the other three arrows under Up: the
+    // inverted T of every keyboard, the shape a hand looks for. In one flat row
+    // ("← ↑ ↓ →") Up and Down sat side by side, and the four of them read as
+    // four more letters. Down is straight under Up, so the picker's
+    // nearest-centre Up / Down moves between the two.
+    ("Control", 5, 0.0, 1.5), ("Alt", 5, 1.5, 1.5), ("Space", 5, 3.0, 6.5),
+    ("Left", 5, 12.0, 1.0), ("Down", 5, 13.0, 1.0), ("Right", 5, 14.0, 1.0),
+    // Row 6 — what is not a key, in a band of its own under the board (drawn as
+    // pills with icons): nothing, the two mouse buttons, the console keyboard.
+    // Four equal slots across the whole width, so Down from anywhere on the
+    // board lands on the one under it.
+    ("(none)", 6, 0.0, 4.7), ("Left click", 6, 5.1, 4.7), ("Right click", 6, 10.2, 4.7),
+    ("Keyboard", 6, 15.3, 4.7),
 ];
 
 /// Total width of the keyboard in units (max `x + w`) — the renderer scales to it.
@@ -390,44 +393,49 @@ const _: () = {
     }
 };
 
-/// Short DISPLAY label for a keyboard key on the visual picker. Keeps the board
-/// compact (full names like "Backspace" would blow the key width) and localises
-/// the action keys via `flash_key_display`. Plain glyph keys (letters, digits,
-/// symbols) render as their own name.
-pub fn keyboard_label(name: &str) -> std::borrow::Cow<'static, str> {
+/// The legend printed on a key of the visual picker: what a real keyboard in
+/// the player's language prints there. The word keys are the names the pad's
+/// rows use (`flash_key_display`), so a key has ONE name on both screens: the
+/// board used to say "Esc", "Bksp" and "Ent" in every language while the rows
+/// said "Échap", "Retour arr." and "Entrée". The arrows are arrows, as on the
+/// keys themselves, and the numpad shows its own digits under its caption.
+/// Letters, digits, symbols and F-keys are their own name.
+pub fn keyboard_label(name: &'static str) -> std::borrow::Cow<'static, str> {
     use std::borrow::Cow;
-    let lc = crate::loc::s(); // 'static — the translated action labels
     match name {
-        "Escape" => Cow::Borrowed("Esc"),
-        "Backspace" => Cow::Borrowed("Bksp"),
-        "Control" => Cow::Borrowed("Ctrl"),
-        "CapsLock" => Cow::Borrowed("Caps"),
-        "Enter" => Cow::Borrowed("Ent"),
-        // Numpad: compact "N" labels so the keys stay legible at cell size.
-        "Num0" => Cow::Borrowed("N0"),
-        "Num1" => Cow::Borrowed("N1"),
-        "Num2" => Cow::Borrowed("N2"),
-        "Num3" => Cow::Borrowed("N3"),
-        "Num4" => Cow::Borrowed("N4"),
-        "Num5" => Cow::Borrowed("N5"),
-        "Num6" => Cow::Borrowed("N6"),
-        "Num7" => Cow::Borrowed("N7"),
-        "Num8" => Cow::Borrowed("N8"),
-        "Num9" => Cow::Borrowed("N9"),
-        "Num+" => Cow::Borrowed("N+"),
-        "Num-" => Cow::Borrowed("N-"),
-        "Num*" => Cow::Borrowed("N*"),
-        "Num/" => Cow::Borrowed("N/"),
-        "Num." => Cow::Borrowed("N."),
-        "NumEnter" => Cow::Borrowed("NEnt"),
-        // Action keys (none / mouse clicks) are localised; everything else — the
-        // letters, digits, symbols, F-keys — shows verbatim.
-        "(none)" => Cow::Borrowed(lc.none),
-        "Left click" => Cow::Borrowed(lc.flash_mouse_left),
-        "Right click" => Cow::Borrowed(lc.flash_mouse_right),
-        "Keyboard" => Cow::Borrowed(lc.flash_keyboard),
-        other => Cow::Owned(other.to_string()),
+        "Up" => Cow::Borrowed("\u{2191}"),
+        "Down" => Cow::Borrowed("\u{2193}"),
+        "Left" => Cow::Borrowed("\u{2190}"),
+        "Right" => Cow::Borrowed("\u{2192}"),
+        "NumEnter" => Cow::Borrowed(crate::loc::s().flash_enter),
+        _ => match numpad_legend(name) {
+            Some(legend) => Cow::Borrowed(legend),
+            None => flash_key_display(name),
+        },
     }
+}
+
+/// What a numpad key prints: "Num7" is "7", "Num-" a minus. `None` for every
+/// other key, NumEnter included (its legend is a word).
+fn numpad_legend(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "Num0" => "0",
+        "Num1" => "1",
+        "Num2" => "2",
+        "Num3" => "3",
+        "Num4" => "4",
+        "Num5" => "5",
+        "Num6" => "6",
+        "Num7" => "7",
+        "Num8" => "8",
+        "Num9" => "9",
+        "Num+" => "+",
+        "Num-" => "\u{2212}",
+        "Num*" => "*",
+        "Num/" => "/",
+        "Num." => ".",
+        _ => return None,
+    })
 }
 
 /// SWF basename the keymap was loaded for. Used by `save_sidecar` to know
@@ -771,35 +779,45 @@ pub fn current_binding(button: &str) -> Option<std::string::String> {
         .cloned()
 }
 
-/// The set of Flash-key NAMES already bound to SOME button in the map the editor
-/// is currently on (player + sub-tab). The keyboard picker tints these so the user
-/// sees a key is already in use elsewhere (they can still pick it).
-pub fn current_map_used_keys() -> std::collections::BTreeSet<std::string::String> {
-    let mut set = std::collections::BTreeSet::new();
-    if let Ok(g) = ACTIVE_KEYMAP.lock() {
-        if let Some(km) = g.as_ref() {
-            let combo_mod = edit_subtab_modifier();
-            let p2 = edit_player() == 2;
-            let map = if combo_mod.is_empty() {
-                if p2 { Some(&km.bindings_p2) } else { Some(&km.bindings) }
-            } else {
-                let layers = if p2 { &km.combo_layers_p2 } else { &km.combo_layers };
-                layers.get(combo_mod)
-            };
-            if let Some(map) = map {
-                for v in map.values() {
-                    if !v.is_empty() {
-                        set.insert(v.clone());
-                    }
-                }
-            }
+/// The keys the other buttons send in the map the editor is on (player and
+/// layer), each with the pad labels (`PadSlot::glyph`) of the buttons sending
+/// it. `editing` is left out: the picker marks a key ANOTHER button already
+/// sends, and says which one. It used to count the edited button too, so the
+/// key it already had was marked as taken by someone else.
+///
+/// In a combo layer this is what each button sends while the modifier is held:
+/// its key in the layer, else its Normal key. A modifier sends nothing, so it
+/// is left out wherever it is muted.
+pub fn current_map_used_keys(editing: &str) -> BTreeMap<std::string::String, std::vec::Vec<&'static str>> {
+    let mut used: BTreeMap<std::string::String, std::vec::Vec<&'static str>> = BTreeMap::new();
+    let Ok(g) = ACTIVE_KEYMAP.lock() else { return used };
+    let Some(km) = g.as_ref() else { return used };
+    let p2 = edit_player() == 2;
+    let open = edit_subtab_modifier();
+    let base = if p2 { &km.bindings_p2 } else { &km.bindings };
+    let layers = if p2 { &km.combo_layers_p2 } else { &km.combo_layers };
+    let layer = if open.is_empty() { None } else { layers.get(open) };
+    for slot in PAD_SLOTS {
+        let b = slot.name;
+        // `slot_is_modifier`, inline: it takes the keymap lock held here.
+        let muted = b == open || (SUBTAB_MODS[1..].contains(&b) && layer_has_binding(b, layers.get(b)));
+        if b == editing || muted {
+            continue;
+        }
+        let sent = layer
+            .and_then(|m| m.get(b))
+            .filter(|v| !v.is_empty())
+            .or_else(|| base.get(b).filter(|v| !v.is_empty()));
+        if let Some(v) = sent {
+            used.entry(v.clone()).or_default().push(slot.glyph);
         }
     }
-    set
+    used
 }
 
 /// Set `button` → `flash_key` (e.g. "A" → "Space"). `None` clears the
-/// binding. Triggers a write to the per-game sidecar so the change persists
+/// binding: no key at all in the Normal layer, the Normal key again in a combo
+/// layer. Triggers a write to the per-game sidecar so the change persists
 /// across reboots. Returns false on write failure (in-memory change still
 /// applied — caller can retry / surface error).
 pub fn set_binding(button: &str, flash_key: Option<&str>) -> bool {
@@ -827,11 +845,20 @@ pub fn set_binding(button: &str, flash_key: Option<&str>) -> bool {
             undo = Some((std::string::String::new(), prev, prev_source));
         } else {
             // Per-modifier combo layer (issue #57): create it on first bind.
+            // Clearing a button REMOVES its entry rather than writing "": in a
+            // layer, an absent button and an empty one both fall through to the
+            // Normal key (`lookup_combo`), which is what the editor calls "Same
+            // as Normal", and an emptied layer goes with its last entry.
             let layers = if p2 { &mut km.combo_layers_p2 } else { &mut km.combo_layers };
-            let prev = layers
-                .entry(combo_mod.to_string())
-                .or_default()
-                .insert(button.into(), val);
+            let prev = if flash_key.is_some() {
+                layers.entry(combo_mod.to_string()).or_default().insert(button.into(), val)
+            } else {
+                let prev = layers.get_mut(combo_mod).and_then(|m| m.remove(button));
+                if layers.get(combo_mod).is_some_and(|m| m.is_empty()) {
+                    layers.remove(combo_mod);
+                }
+                prev
+            };
             undo = Some((combo_mod.to_string(), prev, prev_source));
         }
         // The user just edited by hand → mark the keymap as user-authored so a
@@ -1201,8 +1228,12 @@ pub fn has_revert(basename: &str) -> bool {
 /// for every profile/revert/share preview (library + in-game) — diffing only P1
 /// here was the bug where editing a P2 key showed "no changes" yet still dropped
 /// the active tag.
+///
+/// Within each map the rows follow the editor's pad (`PAD_SLOTS`: the left
+/// hand top to bottom, then the right), the order the player has just read the
+/// keys in, rather than the A, B, X, Y of the old list.
 pub fn binding_diff_rows(cur: &Keymap, tgt: &Keymap) -> std::vec::Vec<std::string::String> {
-    let none = crate::loc::s().none;
+    let none = crate::loc_ui::ui().key_none;
     let disp = |k: &str| -> std::string::String {
         if k.is_empty() {
             none.to_string()
@@ -1214,9 +1245,10 @@ pub fn binding_diff_rows(cur: &Keymap, tgt: &Keymap) -> std::vec::Vec<std::strin
     let mut diff_map = |label: &str,
                         c_map: &BTreeMap<std::string::String, std::string::String>,
                         t_map: &BTreeMap<std::string::String, std::string::String>| {
-        for btn in EDITABLE_BUTTONS {
-            let c = c_map.get(*btn).map(std::string::String::as_str).unwrap_or("");
-            let n = t_map.get(*btn).map(std::string::String::as_str).unwrap_or("");
+        for slot in PAD_SLOTS {
+            let btn = slot.name;
+            let c = c_map.get(btn).map(std::string::String::as_str).unwrap_or("");
+            let n = t_map.get(btn).map(std::string::String::as_str).unwrap_or("");
             if c != n {
                 rows.push(std::format!("{}{}\t{}\t{}", label, btn, disp(c), disp(n)));
             }
@@ -2156,12 +2188,26 @@ pub fn combo_active_p2(modifier: &str) -> bool {
 /// language-stable (so a keymap saved in one language still resolves in another);
 /// only the label shown in the TOUCHES editor is translated. The unbind sentinel
 /// and the mouse-click pseudo-keys are action labels (translated); plain key
-/// names (Space, A-Z, digits) are universal and returned as-is.
+/// names (A-Z, digits, symbols, F-keys) are universal and returned as-is.
+///
+/// Every key the picker offers has a name here a player can read: CapsLock and
+/// the numpad used to come out raw ("CapsLock", "Num1", "NumEnter"), so every
+/// default player-2 row read "Num1".
 pub fn flash_key_display(name: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
     let lc = crate::loc::s();
+    let u = crate::loc_ui::ui();
+    // A numpad key is its legend behind the numpad's short name ("Num 1",
+    // "Num Entrée"), so it cannot be taken for the key of the top row.
+    if name == "NumEnter" {
+        return Cow::Owned(u.key_numpad.replacen("{}", lc.flash_enter, 1));
+    }
+    if let Some(legend) = numpad_legend(name) {
+        return Cow::Owned(u.key_numpad.replacen("{}", legend, 1));
+    }
     let translated: &'static str = match name {
-        "(none)" => lc.none,
+        "(none)" => u.key_none,
+        "CapsLock" => u.flash_capslock,
         "Left click" => lc.flash_mouse_left,
         "Right click" => lc.flash_mouse_right,
         "Keyboard" => lc.flash_keyboard,
