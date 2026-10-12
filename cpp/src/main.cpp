@@ -148,6 +148,9 @@ extern "C" void ruffle_power_mode_step(int dir);
 extern "C" void ruffle_rotation_step(int dir);
 // Left / Right on ZOOM: ten percent either way, kept at once.
 extern "C" void ruffle_zoom_step(int dir);
+// Close audren and join its worker. Idempotent; called on the way out, since
+// the launcher's interface sounds open a session no game will close.
+extern "C" void ruffle_audio_shutdown(void);
 // Free zoom + framing (issue #101). Unlike the three rows above, ZOOM does not
 // cycle a value on `A`: it opens a mode where the panel gives way to the picture
 // and the buttons drive the framing until A or B.
@@ -2510,6 +2513,11 @@ int main(int argc, char** argv) {
     prof_boot(&t);
     threadStart(&t);
     threadWaitForExit(&t);
+    // The launcher's interface sounds bring audren up on their own (UI mode),
+    // and only a game's audio backend ever shut it down. Left open, its worker
+    // would keep waking every audren frame inside an NRO the loader is about
+    // to unmap.
+    ruffle_audio_shutdown();
     prof_shutdown();
     threadClose(&t);
 

@@ -3277,6 +3277,19 @@ fn set_screen_selection(s: &mut State, idx: usize) -> bool {
         Screen::ProfileDeleteConfirm { game_idx, profile_idx, selection } => {
             put!(selection, Screen::ProfileDeleteConfirm { game_idx, profile_idx, selection: idx })
         }
+        Screen::RemoteSortModal { selection, kind, reverse, prev_sel, prev_scroll } => {
+            if idx >= remote_sort_count(kind) {
+                return false;
+            }
+            put!(selection, Screen::RemoteSortModal { selection: idx, kind, reverse, prev_sel, prev_scroll })
+        }
+        Screen::DistantUrlOptions { url_idx, selection } => {
+            // Favourite, edit, delete.
+            if idx >= 3 {
+                return false;
+            }
+            put!(selection, Screen::DistantUrlOptions { url_idx, selection: idx })
+        }
         Screen::SortModal { selection, prev_sel, prev_scroll, reverse } => put!(
             selection,
             Screen::SortModal { selection: idx, prev_sel, prev_scroll, reverse }
@@ -4244,12 +4257,10 @@ fn input_inner(button: &str) -> bool {
     consumed
 }
 
-/// Settings tab entries: 0 = home layout, 1 = game defaults, 2 = language,
-/// 3 = report a bug, 4 = make a suggestion, 5 = nickname, 6 = games folder,
-/// 7 = quit. (No BACK — leave via L/R.) Rows 4 and 5 are hoisted BY INDEX in
-/// `input()` because they open the system keyboard, so any reordering has to
-/// move those two with it. Rows 3 and 4 are written by index a second time, into
-/// `Screen::BugResult { from_row }` (#113) and by `handle_bug_picker_input`'s B.
+/// Settings tab entries, named in `set_row` in the order they are drawn. (No
+/// BACK: leave via L/R.) Nickname and suggestion are hoisted in `input()`
+/// because they open the system keyboard; every screen that returns here
+/// lands on the row that opened it through the same names.
 fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
     const LAST: usize = set_row::COUNT - 1;
     // The sounds row is the one value on the page: A, Left and Right flip it.
@@ -7253,7 +7264,7 @@ fn handle_game_folder_delete_input(
     mut selection: usize,
 ) {
     match button {
-        "Up" | "Down" | "StickLUp" | "StickLDown" | "Left" | "Right" => {
+        "Up" | "Down" | "StickLUp" | "StickLDown" | "Left" | "Right" | "StickLLeft" | "StickLRight" => {
             selection = 1 - selection.min(1);
         }
         "A" => {

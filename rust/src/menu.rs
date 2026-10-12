@@ -209,6 +209,17 @@ pub fn touch_select(idx: usize) -> bool {
             s.screen = Screen::Menu { selection: idx };
             false
         }
+        Screen::DeleteConfirm { profile_idx, selection } => {
+            // The two buttons: 0 = cancel, 1 = delete.
+            if idx > 1 {
+                return false;
+            }
+            if selection == idx {
+                return true;
+            }
+            s.screen = Screen::DeleteConfirm { profile_idx, selection: idx };
+            false
+        }
         Screen::Profiles { selection } => {
             // `idx` is a VISIBLE row: the picker shows a scrolling window.
             let idx = crate::backend::render::list_window_start(
@@ -412,7 +423,8 @@ pub fn input(button: &str) -> bool {
             play(Sfx::Back);
         } else if b == a {
             // Nothing moved: a value stepped in place, or a binding was set.
-            if matches!(button, "A" | "X") || (nav && matches!(b, Screen::Menu { .. })) {
+            let stepper = matches!(b, Screen::Menu { selection } if matches!(selection, MENU_CURSOR | MENU_SHOWCURSOR | MENU_GYRO));
+            if matches!(button, "A" | "X") || (nav && stepper) {
                 play(Sfx::Toggle);
             }
         } else if core::mem::discriminant(&b) == core::mem::discriminant(&a) {
