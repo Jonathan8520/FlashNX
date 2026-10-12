@@ -69,8 +69,13 @@ pub(crate) enum Btn {
     ZR,
     Plus,
     Minus,
-    /// The d-pad, for "change a value" hints.
+    /// The d-pad's plain cross: all four directions act (the zoom framing's
+    /// pixel nudges).
     Dpad,
+    /// The cross with its Left AND Right arms marked: "change a value", the
+    /// only thing Left / Right do on an armed row. The plain cross said Up and
+    /// Down changed it too.
+    DpadLR,
     /// The d-pad's cross with one arm marked: a control that IS one of its
     /// directions.
     DpadUp,
@@ -102,6 +107,9 @@ impl Btn {
     /// its up, down, left or right arm marked. U+E0EB..E0EE are not it: they
     /// are the round direction buttons of a Joy-Con, a disc with a triangle,
     /// and the editor's rows drew them beside the cross of its picture.
+    /// U+E116 is the cross with both its left and right arms marked, the
+    /// mockups' "Changer" glyph; U+E0EA, which the hints used to show, is the
+    /// left Joy-Con's four buttons in a diamond.
     fn glyph(self) -> char {
         match self {
             Btn::A => '\u{E0E0}',
@@ -116,7 +124,8 @@ impl Btn {
             Btn::SR => '\u{E0E9}',
             Btn::Plus => '\u{E0EF}',
             Btn::Minus => '\u{E0F0}',
-            Btn::Dpad => '\u{E0EA}',
+            Btn::Dpad => '\u{E110}',
+            Btn::DpadLR => '\u{E116}',
             Btn::DpadUp => '\u{E111}',
             Btn::DpadDown => '\u{E112}',
             Btn::DpadLeft => '\u{E113}',
@@ -143,7 +152,9 @@ impl Btn {
             Btn::SR => "SR",
             Btn::Plus => "+",
             Btn::Minus => "\u{2212}",
-            Btn::Dpad => "\u{2195}",
+            // The cross itself: a plus is the one cross every font has.
+            Btn::Dpad => "+",
+            Btn::DpadLR => "\u{2194}",
             Btn::DpadUp => "\u{2191}",
             Btn::DpadDown => "\u{2193}",
             Btn::DpadLeft => "\u{2190}",
@@ -156,10 +167,12 @@ impl Btn {
 
 /// The button glyphs this file draws, to say in the log which ones the
 /// console's NintendoExt lacks (`kit_button` then draws a disc with a letter).
-const LOGGED_GLYPHS: [char; 10] = [
+const LOGGED_GLYPHS: [char; 12] = [
     '\u{E0E8}', '\u{E0E9}', // SL, SR
     '\u{E101}', '\u{E102}', '\u{E104}', '\u{E105}', // the sticks, then pushed in
+    '\u{E110}', // the plain cross
     '\u{E111}', '\u{E112}', '\u{E113}', '\u{E114}', // the cross, one arm marked
+    '\u{E116}', // the cross, left and right marked
 ];
 
 fn shared_face(kind: core::ffi::c_int) -> Option<ttf_parser::Face<'static>> {

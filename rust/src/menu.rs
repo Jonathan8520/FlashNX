@@ -3,9 +3,12 @@
 //! Reached from the pause menu's TOUCHES entry (`ruffle_touches_open` ->
 //! `open_submenu`). Mirrors the library OPTIONS > TOUCHES sub-menu (#20 Option 1):
 //!
-//!   - **Menu** — edit keys / apply a profile / share my controls / cursor speed
-//!     / revert. Apply / share / revert do HTTPS synchronously (the game is
-//!     paused, so a brief freeze is fine — no async infra here).
+//!   - **Menu** — the Touches et curseur page (`TouchesRow`): edit keys, apply
+//!     a profile, share my controls, revert, then the cursor's speed, its
+//!     visibility and the gyroscope. Apply / share / revert do HTTPS
+//!     synchronously (the game is paused, so a brief freeze is fine — no async
+//!     infra here). The speed and the gyroscope are value rows, armed by A
+//!     and stepped live (`pause_values`).
 //!   - **List / Keyboard** — the per-button keymap editor (also used directly by
 //!     the library via `open`). The picker is a visual QWERTY board (issue #55).
 //!   - **Profiles / Preview / ShareConfirm / RevertPreview** — the profile flows.
@@ -25,20 +28,68 @@ use crate::backend::render::{PadValue, SwitchRenderBackend, PAUSE_ROW_TOUCHES};
 use crate::keymap;
 
 // C++-owned cursor speed (live + per-game while in a game), reused from the
-// library extern block: cycle to the next preset / read the x10 label value.
-use crate::library::{ruffle_cursor_speed_mult_x10, ruffle_cursor_speed_step};
+// library extern block: the x10 value the editor's footer shows. The Touches
+// et curseur page steps it through `pause_values`.
+use crate::library::ruffle_cursor_speed_mult_x10;
+use crate::pause_values::{self as pv, PauseValue};
 
-// In-game TOUCHES sub-menu rows (#20 Option 1): edit / apply / share / cursor
-// speed / show-cursor toggle, then a revert row (index 5) when there's a custom
-// keymap to undo. Mirrors the library sub-menu order.
-const MENU_EDIT: usize = 0;
-const MENU_APPLY: usize = 1;
-const MENU_SHARE: usize = 2;
-const MENU_CURSOR: usize = 3;
-const MENU_SHOWCURSOR: usize = 4;
-const MENU_GYRO: usize = 5;
-const MENU_REVERT: usize = 6;
-const MENU_FIXED_ROWS: usize = 6;
+// The Touches et curseur page, in game and in a game's options in the
+// launcher (one page, two doors): the keys group (edit them, take a shared
+// profile, share yours, and, closing the group when the keys differ from what
+// it restores, go back), then the cursor group (speed, shown or hidden, the
+// gyroscope). The revert row comes and goes, so the cursor rows move with it:
+// rows are asked for by what they are (`TouchesRow`), never by a number.
+pub(crate) const MENU_EDIT: usize = 0;
+pub(crate) const MENU_APPLY: usize = 1;
+pub(crate) const MENU_SHARE: usize = 2;
+/// Present only when the keys differ from what a revert restores.
+pub(crate) const MENU_REVERT: usize = 3;
+
+/// A row of the Touches et curseur page.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum TouchesRow {
+    Edit,
+    Apply,
+    Share,
+    Revert,
+    Speed,
+    ShowCursor,
+    Gyro,
+}
+
+impl TouchesRow {
+    /// The row at `idx`, with or without the revert row.
+    pub(crate) fn at(can_revert: bool, idx: usize) -> Option<TouchesRow> {
+        let c = Self::cursor_at(can_revert);
+        Some(match idx {
+            MENU_EDIT => TouchesRow::Edit,
+            MENU_APPLY => TouchesRow::Apply,
+            MENU_SHARE => TouchesRow::Share,
+            MENU_REVERT if can_revert => TouchesRow::Revert,
+            i if i == c => TouchesRow::Speed,
+            i if i == c + 1 => TouchesRow::ShowCursor,
+            i if i == c + 2 => TouchesRow::Gyro,
+            _ => return None,
+        })
+    }
+
+    /// The first row of the cursor group, under its title.
+    pub(crate) fn cursor_at(can_revert: bool) -> usize {
+        MENU_REVERT + can_revert as usize
+    }
+
+    /// How many rows the page has.
+    pub(crate) fn count(can_revert: bool) -> usize {
+        Self::cursor_at(can_revert) + 3
+    }
+}
+
+/// A fresh press toward the pause folded into its rail, on the left of every
+/// page beside it: back a level, like B (input rule 3). A held direction
+/// stays put, so a Left held on the way into a page does not bounce out.
+fn toward_rail(button: &str) -> bool {
+    matches!(button, "Left" | "StickLLeft") && crate::library::nav_may_wrap()
+}
 
 // Toast kinds (match `SwitchRenderBackend::draw_toast`): 0 green, 1 red, 2 blue.
 const TOAST_OK: u8 = 0;
@@ -176,6 +227,7 @@ pub fn touch_select(idx: usize) -> bool {
                 return true;
             }
             s.screen = Screen::Keyboard { button_idx, key_idx: idx };
+            crate::sfx::play(crate::sfx::Sfx::Move);
             false
         }
         // Every arm BOUNDS `idx` before storing it, the way the one above does.
@@ -233,6 +285,7 @@ pub fn touch_select(idx: usize) -> bool {
                 return true;
             }
             s.screen = Screen::List { selection: row };
+            crate::sfx::play(crate::sfx::Sfx::Move);
             false
         }
         // The rows of the sub-menu and the profile picker are pages of the
@@ -240,13 +293,17 @@ pub fn touch_select(idx: usize) -> bool {
         // app -- so they answer a finger for the same reason the library's do.
         Screen::Menu { selection } => {
             // Same count `handle_menu_input` bounds its cursor with.
-            if idx > MENU_FIXED_ROWS - 1 + s.can_revert as usize {
+            if idx >= TouchesRow::count(s.can_revert) {
                 return false;
             }
             if selection == idx {
                 return true;
             }
+            // A tap on another row keeps a value armed on this one, as Up
+            // and Down do (input rule 2).
+            pv::confirm();
             s.screen = Screen::Menu { selection: idx };
+            crate::sfx::play(crate::sfx::Sfx::Move);
             false
         }
         Screen::DeleteConfirm { profile_idx, selection } => {
@@ -258,6 +315,7 @@ pub fn touch_select(idx: usize) -> bool {
                 return true;
             }
             s.screen = Screen::DeleteConfirm { profile_idx, selection: idx };
+            crate::sfx::play(crate::sfx::Sfx::Move);
             false
         }
         Screen::Profiles { selection } => {
@@ -269,10 +327,50 @@ pub fn touch_select(idx: usize) -> bool {
                 return true;
             }
             s.screen = Screen::Profiles { selection: idx };
+            crate::sfx::play(crate::sfx::Sfx::Move);
             false
         }
         _ => false,
     }
+}
+
+/// A tap on a part of a row's control (input rule 6): an option of the
+/// gyroscope is set at once, the switch flips, an armed arrow steps. The
+/// cursor goes to that row, and a value armed on another row is kept first.
+pub fn touch_part(row: usize, part: usize) {
+    use crate::backend::render::{SEG_NEXT, SEG_PREV};
+    use crate::sfx::{play, Sfx};
+    let Ok(mut s) = TOUCHES.lock() else { return };
+    let Screen::Menu { selection } = s.screen else { return };
+    let Some(what) = TouchesRow::at(s.can_revert, row) else { return };
+    let moved = selection != row;
+    s.screen = Screen::Menu { selection: row };
+    drop(s);
+    let changed = match what {
+        TouchesRow::Speed | TouchesRow::Gyro if part == SEG_PREV || part == SEG_NEXT => {
+            let v = if what == TouchesRow::Speed { PauseValue::CursorSpeed } else { PauseValue::Gyro };
+            pv::armed() == Some(v) && pv::step(if part == SEG_PREV { -1 } else { 1 }) > 0
+        }
+        TouchesRow::Gyro => pv::set(PauseValue::Gyro, part.min(u8::MAX as usize) as u8) > 0,
+        TouchesRow::ShowCursor => {
+            pv::confirm();
+            keymap::toggle_show_cursor();
+            true
+        }
+        _ => false,
+    };
+    if changed {
+        play(Sfx::Toggle);
+    } else if moved {
+        play(Sfx::Move);
+    }
+}
+
+/// A tap on the rail of the pause or on the page's "‹ Pause" caption: back a
+/// level, as B. A value armed on the page is kept, as a tap elsewhere does.
+pub fn touch_back() {
+    pv::confirm();
+    input("B");
 }
 
 /// Distinct id per active screen (0 = inactive). Lets the in-game caller
@@ -377,6 +475,9 @@ pub fn open_submenu() {
 }
 
 pub fn close() {
+    // `-` closes the pause from this page: a value armed on it is kept, as the
+    // page's close button does everywhere (input rule 2).
+    pv::confirm();
     if let Ok(mut s) = TOUCHES.lock() {
         s.screen = Screen::Inactive;
     }
@@ -503,16 +604,23 @@ pub fn input(button: &str) -> bool {
         && matches!(before, Some(Screen::List { selection })
             if keymap::PAD_SLOTS.get(selection).is_some_and(|s| keymap::slot_is_modifier(s.name)));
     let consumed = input_inner(button);
-    // Read (and forget) whether a value moved, whatever happens next, so the
-    // flag never leaks into the next press.
+    // Read (and forget) whether a value moved and which sound the handler
+    // chose, whatever happens next, so neither leaks into the next press.
     let changed = crate::sfx::take_changed();
+    let chosen = crate::sfx::take_chosen();
     if let (Some(b), Ok(a)) = (before, TOUCHES.lock().map(|s| s.screen)) {
         use crate::sfx::{play, Sfx};
         let nav = matches!(
             button,
             "Up" | "Down" | "Left" | "Right" | "StickLUp" | "StickLDown" | "StickLLeft" | "StickLRight"
         );
-        if refused {
+        if let Some(c) = chosen {
+            // Arming a value row, keeping it, putting it back: the screen
+            // does not change, the handler knows what happened.
+            if let Some(s) = c {
+                play(s);
+            }
+        } else if refused {
             play(Sfx::Error);
         } else if matches!(a, Screen::Inactive) && !matches!(b, Screen::Inactive) {
             play(Sfx::Back);
@@ -523,9 +631,11 @@ pub fn input(button: &str) -> bool {
                 play(Sfx::Tab);
             }
         } else if b == a {
-            // Nothing moved on screen: a value stepped in place (the handler
-            // said so), a binding set, or a step refused at an end (silent).
-            if changed || matches!(button, "A" | "X") {
+            // Nothing moved on screen: a value stepped in place or a switch
+            // flipped (the handler said so), or A acting where it stands. A
+            // step refused at an end is silent, and so is an X with nothing
+            // to act on.
+            if changed || button == "A" {
                 play(Sfx::Toggle);
             }
         } else if core::mem::discriminant(&b) == core::mem::discriminant(&a) {
@@ -547,13 +657,13 @@ fn input_inner(button: &str) -> bool {
         Screen::Menu { selection } => {
             // Apply / share / revert do HTTPS + file I/O — run them WITHOUT the
             // lock held. Edit / cursor / nav are handled under the lock.
-            let revert_row = if s.can_revert { MENU_REVERT } else { usize::MAX };
-            if button == "A" && (selection == MENU_APPLY || selection == MENU_SHARE || selection == revert_row) {
+            let row = TouchesRow::at(s.can_revert, selection);
+            if button == "A" && matches!(row, Some(TouchesRow::Apply | TouchesRow::Share | TouchesRow::Revert)) {
                 drop(s);
-                match selection {
+                match row {
                     // APPLY fetches the catalog (network) → defer + loading panel.
-                    MENU_APPLY => defer_net(PendingNet::OpenProfiles),
-                    MENU_SHARE => {
+                    Some(TouchesRow::Apply) => defer_net(PendingNet::OpenProfiles),
+                    Some(TouchesRow::Share) => {
                         // Instant "already shared" (no network) → run inline so no
                         // loading flash; else defer (fetches my shared profile).
                         let dup = game_ctx()
@@ -612,10 +722,11 @@ fn input_inner(button: &str) -> bool {
         }
         Screen::DeleteConfirm { profile_idx, selection } => {
             // A on "Delete" deletes my shared profile (HTTPS): defer + loading
-            // panel. A on "Cancel", B or Minus go back to the list.
+            // panel. A on "Cancel", B or Minus go back to the list. Left and
+            // Right go to the answer they point at (input rule 4).
             match button {
-                "Left" | "StickLLeft" | "Right" | "StickLRight" | "Up" | "StickLUp" | "Down" | "StickLDown" => {
-                    s.screen = Screen::DeleteConfirm { profile_idx, selection: 1 - selection.min(1) };
+                "Left" | "StickLLeft" | "Right" | "StickLRight" => {
+                    s.screen = Screen::DeleteConfirm { profile_idx, selection: crate::library::answer_at(button, selection) };
                 }
                 "A" if selection == 1 => {
                     drop(s);
@@ -635,7 +746,7 @@ fn input_inner(button: &str) -> bool {
                 defer_net(PendingNet::Apply { profile_idx });
                 return true;
             }
-            if matches!(button, "B" | "Minus") {
+            if matches!(button, "B" | "Minus") || toward_rail(button) {
                 s.preview_rows.clear();
                 s.screen = Screen::Profiles { selection: profile_idx };
             }
@@ -647,7 +758,7 @@ fn input_inner(button: &str) -> bool {
                 defer_net(PendingNet::Share);
                 return true;
             }
-            if matches!(button, "B" | "Minus") {
+            if matches!(button, "B" | "Minus") || toward_rail(button) {
                 s.preview_rows.clear();
                 s.screen = Screen::Menu { selection: MENU_SHARE };
             }
@@ -659,7 +770,7 @@ fn input_inner(button: &str) -> bool {
                 run_revert();
                 return true;
             }
-            if matches!(button, "B" | "Minus") {
+            if matches!(button, "B" | "Minus") || toward_rail(button) {
                 s.preview_rows.clear();
                 s.screen = Screen::Menu { selection: MENU_REVERT };
             }
@@ -670,85 +781,91 @@ fn input_inner(button: &str) -> bool {
     }
 }
 
-/// Sub-menu nav + the under-lock actions (edit, cursor). Apply/share/revert are
-/// hoisted in `input`.
+/// The Touches et curseur page: moving, and what acts under the lock (edit,
+/// the cursor's rows). Apply / share / revert are hoisted in `input`.
+///
+/// The speed and the gyroscope are value rows (input rule 1): A arms one,
+/// Left / Right then change it live, A keeps it, B puts it back, Up / Down
+/// keep it and move on. Unarmed, Left and Right change nothing; a fresh Left
+/// points at the pause folded into its rail and goes back to it, like B
+/// (input rule 3).
 fn handle_menu_input(s: &mut State, button: &str, mut selection: usize) {
-    let last = MENU_FIXED_ROWS - 1 + s.can_revert as usize;
-    // The three value rows step with Left and Right too, either way.
-    let dir = match button {
-        "Left" | "StickLLeft" => -1,
-        "Right" | "StickLRight" => 1,
-        _ => 0,
-    };
-    if dir != 0 {
-        // Left / Right move along what the row shows: the speed one preset
-        // down or up, the switch to off or on, the gyroscope one setting along,
-        // each stopping at its end. A is what goes round.
-        match selection {
-            MENU_CURSOR => {
-                let m = unsafe { ruffle_cursor_speed_mult_x10() }.max(0) as u32;
-                let at = crate::loc::CURSOR_SPEED_X10.iter().position(|v| *v == m);
-                let n = crate::loc::CURSOR_SPEED_X10.len();
-                let blocked = match at {
-                    Some(0) => dir < 0,
-                    Some(i) => dir > 0 && i + 1 >= n,
-                    None => false,
-                };
-                if !blocked {
-                    unsafe { ruffle_cursor_speed_step(dir) };
-                    crate::sfx::value_changed();
+    use crate::sfx::{choose, value_changed, Sfx};
+    let count = TouchesRow::count(s.can_revert);
+    let row = TouchesRow::at(s.can_revert, selection);
+    if pv::armed().is_some() {
+        match button {
+            "Left" | "StickLLeft" | "Right" | "StickLRight" => {
+                let dir = if matches!(button, "Left" | "StickLLeft") { -1 } else { 1 };
+                if pv::step(dir) > 0 {
+                    value_changed();
                 }
+                return;
             }
-            MENU_SHOWCURSOR => {
-                if keymap::show_cursor() != (dir > 0) {
-                    keymap::toggle_show_cursor();
-                    crate::sfx::value_changed();
-                }
+            "A" => {
+                pv::confirm();
+                choose(Sfx::Decide);
+                return;
             }
-            MENU_GYRO => {
-                let cur = keymap::gyro_mode();
-                if (dir < 0 && cur > 0) || (dir > 0 && cur + 1 < keymap::GYRO_MODE_COUNT) {
-                    keymap::step_gyro(dir);
-                    crate::sfx::value_changed();
-                }
+            "B" => {
+                pv::cancel();
+                choose(Sfx::Back);
+                return;
             }
-            _ => {}
+            // Kept, then the move below.
+            "Up" | "StickLUp" | "Down" | "StickLDown" => {
+                pv::confirm();
+            }
+            // Nothing else while armed: the hints name only what acts. (`-`
+            // never comes here in game: C++ closes the pause, which keeps
+            // the value, `close`.)
+            _ => return,
         }
-        s.screen = Screen::Menu { selection };
-        return;
     }
     match button {
         // A fresh press wraps round, a held direction stops at the end, as on
         // every list of the launcher.
         "Up" | "StickLUp" => {
-            selection = crate::library::list_step_wrap(selection, -1, last + 1);
+            selection = crate::library::list_step_wrap(selection, -1, count);
         }
         "Down" | "StickLDown" => {
-            selection = crate::library::list_step_wrap(selection, 1, last + 1);
+            selection = crate::library::list_step_wrap(selection, 1, count);
         }
-        "A" => match selection {
-            MENU_EDIT => {
+        _ if toward_rail(button) => {
+            s.screen = Screen::Inactive; // C++ slides the pause back out of its rail
+            return;
+        }
+        "A" => match row {
+            Some(TouchesRow::Edit) => {
                 // Enter the editor, KEEPING sub-menu context (B returns here).
                 keymap::set_edit_player(1);
                 keymap::reset_edit_subtabs(); // both players start on NORMAL (#57)
                 s.screen = Screen::List { selection: unstick_cursor(0) };
                 return;
             }
-            MENU_CURSOR => {
-                // Cycle the live per-game cursor speed (C++ applies + persists).
-                unsafe { ruffle_cursor_speed_step(1) };
+            Some(TouchesRow::Speed) => {
+                pv::arm(PauseValue::CursorSpeed);
+                choose(Sfx::Decide);
             }
-            MENU_SHOWCURSOR => {
-                // Toggle the per-game pointer visibility (persists in the keymap).
+            Some(TouchesRow::Gyro) => {
+                // The gyroscope cursor (#119); the C++ loop follows the live
+                // value from the next frame.
+                pv::arm(PauseValue::Gyro);
+                choose(Sfx::Decide);
+            }
+            Some(TouchesRow::ShowCursor) => {
+                // A switch: A flips it (persists in the keymap).
                 keymap::toggle_show_cursor();
-            }
-            MENU_GYRO => {
-                // Per-game gyroscope cursor (#119), OFF -> MARBLE -> POINTER;
-                // the C++ loop picks it up on the next frame.
-                keymap::cycle_gyro();
+                value_changed();
             }
             _ => {}
         },
+        // X: the game drops its own speed and follows Réglages again.
+        "X" if row == Some(TouchesRow::Speed) => {
+            if pv::reset_default("VITESSE") {
+                value_changed();
+            }
+        }
         "B" | "Minus" => {
             s.screen = Screen::Inactive; // C++ returns to the pause main menu
             return;
@@ -775,7 +892,7 @@ fn handle_profiles_input(s: &mut State, button: &str, mut selection: usize) {
                 return;
             }
         }
-        "B" | "Minus" => {
+        _ if matches!(button, "B" | "Minus") || toward_rail(button) => {
             // From the copy list, back to the community list, on the copy row.
             if s.copy_mode {
                 s.copy_mode = false;
@@ -900,6 +1017,9 @@ fn run_apply(profile_idx: usize) {
     let ok = crate::profiles::apply(&basename, &profile);
     if ok {
         crate::profiles::record_applied(&profile.id);
+        // A profile can bring a cursor speed: the speed row's "par défaut"
+        // is read again.
+        pv::prefs_written();
         // apply_keymap clears ACTIVE_KEYMAP (it expects a relaunch to reload it).
         // In-game we DON'T relaunch, so reload now — otherwise the editor reads a
         // None keymap (AUCUNE everywhere) and the live controls go dead. #20.
@@ -1187,6 +1307,7 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize) {
         "X" => {
             keymap::set_edit_player(if keymap::edit_player() == 2 { 1 } else { 2 });
             selection = unstick_cursor(selection);
+            crate::sfx::value_changed();
         }
         // Combo sub-tab (issue #57, per-modifier): L/R move the VIEW along
         // [NORMAL, ZL, ZR, L, R]. NORMAL edits base bindings; a modifier position
@@ -1552,22 +1673,29 @@ pub(crate) fn profile_name(p: &crate::profiles::Profile) -> std::string::String 
 /// pause (this module's state) or a game's options in the launcher (the
 /// library's). One page, two doors.
 pub(crate) struct TouchesView {
-    /// The cursor speed in force, x10 (a game with none of its own follows the
-    /// global one, and shows it).
-    pub speed_x10: u32,
+    /// The cursor speed in force, as a preset index (a game with none of its
+    /// own follows the global one, and shows it): the armed one while armed.
+    pub speed_idx: usize,
+    /// Whether the game has a cursor speed of its own (else the row says it
+    /// follows Réglages, and X has nothing to take back).
+    pub speed_own: bool,
     pub shown: bool,
     pub gyro: u8,
     pub can_revert: bool,
     pub has_backup: bool,
+    /// The value row armed by A (the speed or the gyroscope), if any.
+    pub armed: Option<TouchesRow>,
 }
 
 /// The Touches et curseur page as data, handed to `f`.
 ///
 /// Two groups under their titles: the keys (edit them, take someone else's,
-/// share yours) and the cursor (speed, shown or hidden, the gyroscope). Each
-/// row shows what it does before it is pressed: a chevron where A opens a
-/// page, the speed between arrows, a switch, the gyroscope's three settings
-/// all on show.
+/// share yours, and go back to the keys before, when there is something to go
+/// back to) and the cursor (speed, shown or hidden, the gyroscope). Each row
+/// shows what it does before it is pressed: a chevron where A opens a page,
+/// the speed's value, a switch, the gyroscope's three settings all on show.
+/// The speed and the gyroscope change only once A has armed them (input
+/// rule 1), and then show it.
 pub(crate) fn with_touches_view<R>(
     backend: &mut SwitchRenderBackend,
     v: &TouchesView,
@@ -1578,44 +1706,66 @@ pub(crate) fn with_touches_view<R>(
     use crate::backend::render::{Btn, Icon, Row, Sheet};
     let lc = crate::loc::s();
     let u = crate::loc_ui::ui();
-    let speed = crate::loc::mult_label(v.speed_x10);
+    let n_speeds = crate::loc::CURSOR_SPEED_X10.len();
+    let speed_idx = v.speed_idx.min(n_speeds.saturating_sub(1));
+    let speed = crate::loc::speed_label(speed_idx as i32);
     let gyro_opts = [
         crate::loc::gyro_mode_label(keymap::GYRO_OFF),
         lc.gyro_marble,
         lc.gyro_pointer,
     ];
+    let speed_armed = v.armed == Some(TouchesRow::Speed);
     let mut rows = std::vec![
-        Row::new(Icon::Keyboard, lc.touches_edit).opens(),
+        // The gamepad, as on the Réglages row to the same editor: the
+        // keyboard is the kit's sign for "A opens the Switch keyboard".
+        Row::new(Icon::Gamepad, lc.touches_edit).opens(),
         Row::new(Icon::Users, lc.opt_apply).opens(),
         Row::new(Icon::Share, lc.opt_share).opens(),
-        // The pointer for its speed (the gauge is the frame counter's), the
-        // eye open or shut for whether it is drawn.
-        Row::new(Icon::Pointer, lc.set_cursor_speed).cycle(&speed),
-        Row::new(if v.shown { Icon::Eye } else { Icon::EyeOff }, lc.show_cursor).toggle(v.shown),
-        Row::new(Icon::Compass, lc.set_gyro).choice(&gyro_opts, v.gyro as usize),
     ];
+    // The way back closes the keys group, under its title: it was drawn last,
+    // under the cursor's title, a keys action read as a cursor setting.
     if v.can_revert {
         rows.push(Row::new(Icon::Undo, if v.has_backup { lc.profile_revert } else { lc.touches_revert_default }).opens());
     }
-    let help = match selection {
-        MENU_EDIT => u.help_touches_edit,
-        MENU_APPLY => u.help_touches_apply,
-        MENU_SHARE => u.help_touches_share,
-        MENU_CURSOR => u.help_cursor_speed,
-        MENU_SHOWCURSOR => u.help_show_cursor,
+    rows.extend([
+        // The pointer for its speed (the gauge is the frame counter's), the
+        // eye open or shut for whether it is drawn.
+        Row::new(Icon::Pointer, lc.set_cursor_speed)
+            .cycle(&speed)
+            .ends(speed_idx == 0, speed_idx + 1 >= n_speeds)
+            .armed_if(speed_armed)
+            .note_opt(if speed_armed || v.speed_own { None } else { Some(u.tag_default) }),
+        Row::new(if v.shown { Icon::Eye } else { Icon::EyeOff }, lc.show_cursor).toggle(v.shown),
+        Row::new(Icon::Compass, lc.set_gyro)
+            .choice(&gyro_opts, v.gyro as usize)
+            .armed_if(v.armed == Some(TouchesRow::Gyro)),
+    ]);
+    let row = TouchesRow::at(v.can_revert, selection);
+    let help = match row {
+        Some(TouchesRow::Edit) => u.help_touches_edit,
+        Some(TouchesRow::Apply) => u.help_touches_apply,
+        Some(TouchesRow::Share) => u.help_touches_share,
+        Some(TouchesRow::Speed) => u.help_cursor_speed,
+        Some(TouchesRow::ShowCursor) => u.help_show_cursor,
         // One help per gyroscope setting, saying what the one in force does.
-        MENU_GYRO => match v.gyro {
+        Some(TouchesRow::Gyro) => match v.gyro {
             keymap::GYRO_MARBLE => u.help_gyro_marble,
             keymap::GYRO_POINTER => u.help_gyro_pointer,
             _ => u.help_gyro_off,
         },
-        _ if v.has_backup => u.help_revert,
-        _ => u.help_revert_default,
+        Some(TouchesRow::Revert) if v.has_backup => u.help_revert,
+        Some(TouchesRow::Revert) => u.help_revert_default,
+        None => "",
     };
-    let stepper = matches!(selection, MENU_CURSOR | MENU_SHOWCURSOR | MENU_GYRO);
-    let hints_step = [(&[Btn::Dpad][..], u.change), (&[Btn::B][..], u.back)];
-    let hints_act = [(&[Btn::A][..], u.open), (&[Btn::B][..], u.back)];
-    let sections = [(MENU_EDIT, lc.keys_title), (MENU_CURSOR, u.sec_cursor)];
+    // What A does on the row, and once a value row is armed, what Left /
+    // Right, A and B do (input rule 2). X shows where there is a speed of the
+    // game's own to drop.
+    let hints_armed = [(&[Btn::DpadLR][..], u.change), (&[Btn::A][..], u.validate), (&[Btn::B][..], u.cancel)];
+    let hints_speed_own = [(&[Btn::A][..], u.edit), (&[Btn::X][..], u.reset_default), (&[Btn::B][..], u.back)];
+    let hints_value = [(&[Btn::A][..], u.edit), (&[Btn::B][..], u.back)];
+    let hints_switch = [(&[Btn::A][..], u.change), (&[Btn::B][..], u.back)];
+    let hints_open = [(&[Btn::A][..], u.open), (&[Btn::B][..], u.back)];
+    let sections = [(MENU_EDIT, lc.keys_title), (TouchesRow::cursor_at(v.can_revert), u.sec_cursor)];
     let mut sheet = Sheet::new(lc.menu_keys, &rows, selection);
     sheet.kicker = Some(Icon::ChevronLeft);
     sheet.crumbs = crumbs;
@@ -1623,7 +1773,13 @@ pub(crate) fn with_touches_view<R>(
     sheet.row_h = 48.0;
     sheet.glide_key = GLIDE_KEY_TOUCHES_MENU;
     sheet.help = help;
-    sheet.hints = if stepper { &hints_step } else { &hints_act };
+    sheet.hints = match row {
+        _ if v.armed.is_some() => &hints_armed,
+        Some(TouchesRow::Speed) if v.speed_own => &hints_speed_own,
+        Some(TouchesRow::Speed) | Some(TouchesRow::Gyro) => &hints_value,
+        Some(TouchesRow::ShowCursor) => &hints_switch,
+        _ => &hints_open,
+    };
     f(backend, &sheet)
 }
 
@@ -1635,11 +1791,17 @@ pub(crate) fn with_touches_sheet<R>(
 ) -> R {
     let (can_revert, has_backup) = TOUCHES.lock().map(|s| (s.can_revert, s.has_backup)).unwrap_or((false, false));
     let v = TouchesView {
-        speed_x10: unsafe { ruffle_cursor_speed_mult_x10() }.max(0) as u32,
+        speed_idx: pv::current(PauseValue::CursorSpeed) as usize,
+        speed_own: !pv::follows_default("VITESSE"),
         shown: keymap::show_cursor(),
-        gyro: keymap::gyro_mode(),
+        gyro: pv::current(PauseValue::Gyro),
         can_revert,
         has_backup,
+        armed: match pv::armed() {
+            Some(PauseValue::CursorSpeed) => Some(TouchesRow::Speed),
+            Some(PauseValue::Gyro) => Some(TouchesRow::Gyro),
+            _ => None,
+        },
     };
     let crumbs = [crate::loc::s().pause_title];
     with_touches_view(backend, &v, selection, &crumbs, f)

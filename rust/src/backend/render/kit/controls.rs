@@ -3,9 +3,14 @@
 //! A setting used to be a line of text, "Overclock : Auto", changed by pressing
 //! A until the wanted value came round. The mockup shows each kind of setting
 //! as what it is: a choice among a few shows all of them with the current one
-//! lit (Left/Right move it), a range or a long list shows its value between two
-//! arrows, an on/off setting is a switch. Same parts in the launcher and in the
-//! game, so a setting looks the same wherever it is changed.
+//! lit, a range or a long list shows its value, an on/off setting is a switch.
+//! Same parts in the launcher and in the game, so a setting looks the same
+//! wherever it is changed.
+//!
+//! A choice or a range changes only once A has armed its row (input rule 1):
+//! a stick pushed sideways on the way down a list must not change what it
+//! passes. The armed control is outlined in gold with an arrow on each side
+//! (`kit_ctrl_parts`), and only then do Left and Right move it.
 
 use super::super::*;
 use super::icons::Icon;
@@ -17,7 +22,8 @@ pub(crate) enum Ctrl<'a> {
     None,
     /// A value to read: a folder, a count, a version.
     Value(&'a str),
-    /// A value stepped with Left / Right (and A): drawn between two arrows.
+    /// A value stepped with Left / Right once A has armed its row: drawn
+    /// alone at rest, between two gold arrows while armed.
     Cycle(&'a str),
     /// One of a few options, all shown, the current one lit.
     Choice(&'a [&'a str], usize),
@@ -34,8 +40,25 @@ const CHOICE_INSET: f32 = 3.0;
 const CHOICE_PX: f32 = 14.0;
 const TOGGLE_W: f32 = 44.0;
 const TOGGLE_H: f32 = 26.0;
-const ARROW: f32 = 14.0;
-const CYCLE_MIN: f32 = 64.0;
+/// Room either side of a cycle's value: the box the armed outline draws.
+const CYCLE_PAD: f32 = 12.0;
+/// The arrows beside an armed control, and their gap from it.
+const ARM_ARROW: f32 = 12.0;
+const ARM_GAP: f32 = 5.0;
+/// An armed arrow at the end of its range: the gold, faded.
+const ARM_ARROW_DIM: u32 = 0x59_FF_D7_40;
+
+/// The options of the last choice `kit_ctrl` drew whole, left to right, for
+/// `kit_ctrl_parts` to hand on as tap targets and to outline. Filled while
+/// the options are laid out, so the targets are exactly where they are drawn.
+static CHOICE_SEGS: std::sync::Mutex<std::vec::Vec<(f32, f32, f32, f32)>> =
+    std::sync::Mutex::new(std::vec::Vec::new());
+
+fn choice_seg_push(r: (f32, f32, f32, f32)) {
+    if let Ok(mut g) = CHOICE_SEGS.lock() {
+        g.push(r);
+    }
+}
 
 impl SwitchRenderBackend {
     fn kit_choice_width(&mut self, opts: &[&str], pad: f32) -> f32 {
@@ -64,7 +87,7 @@ impl SwitchRenderBackend {
         match *ctrl {
             Ctrl::None => 0.0,
             Ctrl::Value(v) => self.kit_measure(v, size::LABEL + 1.0).min(max_w),
-            Ctrl::Cycle(v) => (self.kit_measure(v, size::LABEL + 1.0).max(CYCLE_MIN) + 2.0 * (ARROW + 10.0)).min(max_w),
+            Ctrl::Cycle(v) => (self.kit_measure(v, size::LABEL + 1.0) + 2.0 * CYCLE_PAD).min(max_w),
             Ctrl::Choice(opts, active) => match self.kit_choice_pad(opts, max_w) {
                 Some(pad) => self.kit_choice_width(opts, pad),
                 None => {
@@ -89,19 +112,15 @@ impl SwitchRenderBackend {
                 w
             }
             Ctrl::Cycle(v) => {
+                // The value alone, right-aligned. The arrows saying Left and
+                // Right change it come with the armed outline only
+                // (`kit_ctrl_parts`): drawn at rest, they promised a change
+                // the arrows no longer make until A arms the row.
                 let px = size::LABEL + 1.0;
-                let inner_max = (max_w - 2.0 * (ARROW + 10.0)).max(20.0);
-                let v = self.kit_fit_mid(v, px, inner_max);
+                let v = self.kit_fit_mid(v, px, (max_w - 2.0 * CYCLE_PAD).max(20.0));
                 let vw = self.kit_measure(&v, px);
-                let inner = vw.max(CYCLE_MIN).min(inner_max);
-                let total = inner + 2.0 * (ARROW + 10.0);
-                let x0 = right - total;
-                let arrow_ink = if focused { col::GOLD } else { col::CHEVRON };
-                self.kit_icon(x0, cy, ARROW, Icon::ChevronLeft, arrow_ink);
-                let vx = x0 + ARROW + 10.0 + (inner - vw) * 0.5;
-                self.kit_text_mid(vx.round(), cy, px, &v, if focused { col::TEXT } else { col::TEXT2 });
-                self.kit_icon(right - ARROW, cy, ARROW, Icon::ChevronRight, arrow_ink);
-                total
+                self.kit_text_mid((right - CYCLE_PAD - vw).round(), cy, px, &v, if focused { col::TEXT } else { col::TEXT2 });
+                vw + 2.0 * CYCLE_PAD
             }
             Ctrl::Choice(opts, active) => {
                 let Some(pad) = self.kit_choice_pad(opts, max_w) else {
@@ -130,6 +149,8 @@ impl SwitchRenderBackend {
                     };
                     self.kit_text_mid((sx + pad).round(), cy, CHOICE_PX, o, ink);
                     sx += segw;
+                    // Where this option sits, for a finger and for an outline.
+                    choice_seg_push((sx - segw, y0, segw, CHOICE_H));
                 }
                 total
             }
@@ -144,6 +165,60 @@ impl SwitchRenderBackend {
                 TOGGLE_W
             }
         }
+    }
+
+    /// What goes on and around `row`'s control once `kit_ctrl` has drawn it,
+    /// `cw` wide and ending at `right`, centred on `cy`: the gold outline and
+    /// arrows of an armed row, the focus outline of a choice's lit option.
+    /// Returns the parts a finger can tap, as (part, rect) (see `CtrlSegs`).
+    pub(crate) fn kit_ctrl_parts(
+        &mut self,
+        right: f32,
+        cy: f32,
+        cw: f32,
+        row: &super::list::Row,
+    ) -> std::vec::Vec<(usize, (f32, f32, f32, f32))> {
+        use super::list::{SEG_NEXT, SEG_PREV};
+        let segs = CHOICE_SEGS.lock().map(|mut g| core::mem::take(&mut *g)).unwrap_or_default();
+        let mut parts = std::vec::Vec::new();
+        // A finger is taller than an option: the targets reach a little above
+        // and below what is drawn, still inside the row.
+        let tall = |r: (f32, f32, f32, f32)| (r.0, r.1 - 6.0, r.2, r.3 + 12.0);
+        match row.ctrl {
+            // Only a choice drawn whole has options to tap: one that fell back
+            // to its lit value is a cycle to a finger, armed by a tap like A.
+            Ctrl::Choice(opts, active) if segs.len() == opts.len() => {
+                if row.seg_focus {
+                    if let Some(&(x, y, w, h)) = segs.get(active) {
+                        // Around the lit fill, which is inset in its track.
+                        self.kit_ring(x, y + CHOICE_INSET, w, h - 2.0 * CHOICE_INSET, 8.0, 2.0, 2.0, col::GOLD);
+                    }
+                }
+                parts.extend(segs.iter().enumerate().map(|(i, r)| (i, tall(*r))));
+            }
+            Ctrl::Toggle(_) => {
+                let r = ((right - TOGGLE_W).round(), (cy - TOGGLE_H * 0.5).round(), TOGGLE_W, TOGGLE_H);
+                parts.push((0, tall(r)));
+            }
+            _ => {}
+        }
+        if row.armed && matches!(row.ctrl, Ctrl::Choice(..) | Ctrl::Cycle(_)) {
+            let (low, high) = match row.ctrl {
+                Ctrl::Choice(opts, active) => (active == 0, active + 1 >= opts.len()),
+                _ => row.ends,
+            };
+            let x0 = (right - cw).round();
+            let y0 = (cy - CHOICE_H * 0.5).round();
+            // The control itself: a choice's track, or the box around a
+            // cycle's value. A gap, then the gold, so it reads on either.
+            self.kit_ring(x0, y0, cw, CHOICE_H, 10.0, 1.0, 2.0, col::GOLD);
+            let (lx, rx) = (x0 - ARM_GAP - ARM_ARROW, right + ARM_GAP);
+            self.kit_icon(lx, cy, ARM_ARROW, Icon::ChevronLeft, if low { ARM_ARROW_DIM } else { col::GOLD });
+            self.kit_icon(rx, cy, ARM_ARROW, Icon::ChevronRight, if high { ARM_ARROW_DIM } else { col::GOLD });
+            parts.push((SEG_PREV, (lx - 4.0, y0 - 6.0, ARM_ARROW + 8.0, CHOICE_H + 12.0)));
+            parts.push((SEG_NEXT, (rx - 4.0, y0 - 6.0, ARM_ARROW + 8.0, CHOICE_H + 12.0)));
+        }
+        parts
     }
 
     /// A key of the keyboard drawn as one: a raised cap with a darker lip and

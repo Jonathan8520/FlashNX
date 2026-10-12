@@ -307,7 +307,16 @@ impl SwitchRenderBackend {
         if !s.help.trim().is_empty() {
             self.kit_help_box(x + 16.0, help_bottom, help_w, s.help, HELP_LINES);
         }
-        self.kit_hints_right(x + w - 24.0, hints_cy, s.hints);
+        // The bar fits the panel: a hint that would run past its edge (a
+        // long translation, a row with four of them) is left out, from the
+        // end of the bar but never the last one, the way back. Drawn whole,
+        // the options' bar started 50 to 100 px left of the panel, over the
+        // dimmed library.
+        let mut hints: std::vec::Vec<HintItem> = s.hints.to_vec();
+        while hints.len() > 1 && self.kit_hints_width(&hints) > w - 48.0 {
+            hints.remove(hints.len() - 2);
+        }
+        self.kit_hints_right(x + w - 24.0, hints_cy, &hints);
 
         // A before / after table instead of rows.
         if !s.diff.is_empty() {
@@ -355,15 +364,21 @@ impl SwitchRenderBackend {
             self.kit_focus_pill(rx, hy, rw, s.row_h);
         }
         let mut cells: std::vec::Vec<(f32, f32, f32, f32)> = std::vec![(0.0, 0.0, 0.0, 0.0); s.rows.len()];
+        let mut segs: super::list::CtrlSegs = std::vec::Vec::new();
         for (i, row) in s.rows.iter().enumerate() {
             let y = area_top + ys[i] - scroll;
             if y + s.row_h < area_top - 1.0 || y > area_bot + 1.0 {
                 continue;
             }
-            if y >= area_top - 1.0 && y + s.row_h <= area_bot + 1.0 {
+            let whole = y >= area_top - 1.0 && y + s.row_h <= area_bot + 1.0;
+            if whole {
                 cells[i] = (rx, y, rw, s.row_h);
             }
-            self.kit_row_item(rx, y + s.row_h * 0.5, rw, row, i == s.selection);
+            let parts = self.kit_row_item(rx, y + s.row_h * 0.5, rw, row, i == s.selection);
+            // A row half out of the band takes no tap, its options neither.
+            if whole {
+                segs.extend(parts.into_iter().map(|(p, r)| (i, p, r)));
+            }
         }
         if clip {
             self.clear_clip();
@@ -376,6 +391,7 @@ impl SwitchRenderBackend {
         }
         if publish && s.selection < s.rows.len() {
             ui_cells_publish(ui_screen_kind(), cells);
+            ui_segs_publish(ui_screen_kind(), segs);
         }
     }
 
@@ -473,8 +489,9 @@ impl SwitchRenderBackend {
 
     /// The parent folded to its icons, `w` wide: each row's icon where the row
     /// was, the one the page came from on a pill with a chevron pointing at the
-    /// page. Nothing on it takes input; it is the path, and the page's caption
-    /// spells it out.
+    /// page. It is the path, and the page's caption spells it out; a tap on
+    /// either goes back a level (`kit_cascade_on`), as does the direction
+    /// pointing at it (input rule 3).
     pub(crate) fn kit_sheet_rail(&mut self, s: &Sheet, x: f32, w: f32, branch: usize, side: Side) {
         let top = SHEET_MARGIN;
         let h = self.dimensions.height as f32 - 2.0 * SHEET_MARGIN;
@@ -619,6 +636,21 @@ impl SwitchRenderBackend {
             self.draw_overlay_rect(ex, SHEET_MARGIN + 20.0, 1.0, vh - 2.0 * SHEET_MARGIN - 40.0, col::PANEL_LINE);
         } else {
             self.kit_sheet_rail(parent, px, pw, branch, side);
+        }
+        // Settled, the rail and the page's "‹ Parent" caption take a finger
+        // back a level, as B does: both look like the way back (input rule
+        // 6). Published after the page's own rows, which clear the table.
+        if let Some(c) = child.filter(|_| e >= 1.0) {
+            let cx = if side == Side::Left {
+                SHEET_MARGIN + RAIL_W + CASCADE_GAP
+            } else {
+                vw - SHEET_MARGIN - RAIL_W - CASCADE_GAP - child_w
+            };
+            let mut back = std::vec![(px, SHEET_MARGIN, pw, vh - 2.0 * SHEET_MARGIN)];
+            if c.thumb.is_none() && (c.kicker.is_some() || !c.crumbs.is_empty()) {
+                back.push((cx + 16.0, SHEET_MARGIN + 12.0, child_w - 32.0, 37.0));
+            }
+            ui_back_publish(ui_screen_kind(), back);
         }
     }
 

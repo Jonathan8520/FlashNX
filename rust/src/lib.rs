@@ -914,6 +914,7 @@ mod loc_ui;
 mod sfx;
 mod menu;
 mod net;
+mod pause_values;
 mod player;
 mod playtime;
 mod profiles;
@@ -1343,6 +1344,10 @@ pub extern "C" fn ruffle_init() -> c_int {
 
     // Before the renderer, because the viewport below is chosen from it.
     crate::backend::render::set_game_rotation(pending_rotation());
+    // The scaling mode the player is about to be built with, for the pause to
+    // read back; and nothing armed in it from the game before.
+    DISPLAY_LIVE.store(pending_display_mode(), std::sync::atomic::Ordering::Relaxed);
+    pause_values::forget();
     // The framing this game was left with. Re-clamped by `set_game_zoom`, which
     // is what keeps a framing saved at 400% from throwing the picture off the
     // screen if the percentage were ever read back smaller.
@@ -2924,73 +2929,40 @@ pub extern "C" fn ruffle_draw_menu_closing(selected: c_int) -> c_int {
     }
 }
 
-/// Pause-menu AFFICHAGE row: cycle the ACTIVE game's stage scaling, persist it,
-/// and apply it to the running player at once. Applying it live is the point of
-/// putting this in the pause menu rather than in the library: the frozen game
-/// frame is re-rendered behind the panel every frame, so the player sees what
-/// each mode costs on THIS game before committing to it. Cropping is what fill
-/// trades for the black bars, and how much it crops depends entirely on the
-/// game's aspect ratio. Issues #65, #69, #74.
-/// One step through `n` values, wrapping: forward for `dir >= 0`, back
-/// otherwise. A on a row steps forward; Left and Right step either way.
-pub(crate) fn step_wrap(cur: u8, n: u8, dir: c_int) -> u8 {
-    if n == 0 {
-        return 0;
-    }
-    if dir < 0 {
-        (cur % n + n - 1) % n
-    } else {
-        (cur % n + 1) % n
-    }
+/// The stage-scaling mode the running player shows (0 fit, 1 stretch, 2 fill),
+/// mirrored for the pause: the player keeps it inside Ruffle, out of reach of
+/// a panel drawn every frame, and the card's value is not it while ÉCRAN's row
+/// is armed.
+static DISPLAY_LIVE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub(crate) fn display_mode_shown() -> u8 {
+    DISPLAY_LIVE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// `dir` for A on a row whose options are all on show: go round.
-pub(crate) const STEP_CYCLE: c_int = 2;
-
-/// One step along a setting whose options are all on show (a choice, a
-/// switch). Left (`dir < 0`) and Right (`dir == 1`) move the lit option along
-/// and stop at the ends, the way it moves on screen; A (`STEP_CYCLE`) goes
-/// round, so one button still reaches every option.
-pub(crate) fn step_choice(cur: u8, n: u8, dir: c_int) -> u8 {
-    if n == 0 {
-        return 0;
-    }
-    let cur = cur.min(n - 1);
-    if dir >= STEP_CYCLE {
-        (cur + 1) % n
-    } else if dir > 0 {
-        (cur + 1).min(n - 1)
-    } else if dir < 0 {
-        cur.saturating_sub(1)
-    } else {
-        cur
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn ruffle_display_mode_step(dir: c_int) -> c_int {
-    let cur = keymap::display_mode();
-    let next = step_choice(cur, keymap::DISPLAY_MODE_COUNT, dir);
-    if next == cur {
-        return 0;
-    }
-    keymap::set_display_mode(next);
+/// Show stage-scaling mode `mode` on the running player, without keeping it
+/// (`pause_values` writes it once A keeps it). Applying it live is the point
+/// of putting the row in the pause rather than in the library: the frozen
+/// game frame is re-rendered behind the panel every frame, so the player sees
+/// what each mode costs on THIS game before committing to it. Cropping is what
+/// fill trades for the black bars, and how much it crops depends entirely on
+/// the game's aspect ratio. Issues #65, #69, #74.
+pub(crate) fn display_mode_live(mode: u8) {
+    DISPLAY_LIVE.store(mode, std::sync::atomic::Ordering::Relaxed);
     let state = unsafe {
         match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
             Some(s) => s,
-            None => return 1,
+            None => return,
         }
     };
     if let Ok(mut player) = state.player.lock() {
         // `respect_forced = false` inside, so this wins over the forced mode the
         // player was built with.
-        player.set_scale_mode(match next {
+        player.set_scale_mode(match mode {
             1 => StageScaleMode::ExactFit,
             2 => StageScaleMode::NoBorder,
             _ => StageScaleMode::ShowAll,
         });
     }
-    1
 }
 
 /// The zoom + framing the ECRAN panel was showing when ZOOM was opened, so `B`
@@ -3041,23 +3013,10 @@ pub extern "C" fn ruffle_zoom_reset() {
     backend::render::set_game_zoom(100, 0, 0, VIEWPORT_W as f32, VIEWPORT_H as f32);
 }
 
-/// Left / Right on the ZOOM row: ten percent either way, kept at once. The
-/// framing mode is for the fine work; this is for "a bit bigger".
-#[no_mangle]
-pub extern "C" fn ruffle_zoom_step(dir: c_int) -> c_int {
-    // Applied at once, written by `ruffle_zoom_save` when the hold ends: a write
-    // is a rewrite of the game's `.prefs` plus an SD commit, and a held
-    // direction steps every 80 ms.
-    let before = backend::render::game_zoom_percent();
-    ruffle_zoom_adjust(if dir < 0 { -10 } else { 10 }, 0, 0);
-    (backend::render::game_zoom_percent() != before) as c_int
-}
-
-/// Write the zoom the ECRAN row stepped to (see `ruffle_zoom_step`).
-#[no_mangle]
-pub extern "C" fn ruffle_zoom_save() {
-    let (ox, oy) = backend::render::game_pan();
-    keymap::set_zoom(backend::render::game_zoom_percent(), ox, oy);
+/// The zoom and its framing on the running picture, without keeping them: X on
+/// ÉCRAN's zoom row puts the default back this way (`pause_values`).
+pub(crate) fn zoom_live(percent: u16, ox: i32, oy: i32) {
+    backend::render::set_game_zoom(percent, ox, oy, VIEWPORT_W as f32, VIEWPORT_H as f32);
 }
 
 /// `A`: keep it, and write it to the game's `.prefs` so it is there next launch.
@@ -3065,6 +3024,8 @@ pub extern "C" fn ruffle_zoom_save() {
 pub extern "C" fn ruffle_zoom_commit() {
     let (ox, oy) = backend::render::game_pan();
     keymap::set_zoom(backend::render::game_zoom_percent(), ox, oy);
+    // The game has a zoom of its own now: its row stops saying "par défaut".
+    pause_values::prefs_written();
     if let Ok(mut s) = ZOOM_SNAPSHOT.lock() {
         *s = None;
     }
@@ -3101,7 +3062,8 @@ pub extern "C" fn ruffle_draw_zoom_overlay() {
     }
 }
 
-/// Pause-menu ROTATION row: turn the picture a quarter clockwise and persist it.
+/// Turn the running game's picture to `q` quarters, with the framing at `pan`,
+/// without keeping either (`pause_values` writes them once A keeps them).
 ///
 /// Unlike the display mode this cannot be applied to a running player alone: the
 /// stage has to be LAID OUT for the new shape, so the logical viewport is
@@ -3109,38 +3071,29 @@ pub extern "C" fn ruffle_draw_zoom_overlay() {
 /// keeps the framebuffer landscape, and the paused frame behind the panel is
 /// redrawn turned -- so the player sees the result before committing, exactly
 /// like the display and filter rows. Issue #78.
-#[no_mangle]
-pub extern "C" fn ruffle_rotation_step(dir: c_int) -> c_int {
-    let cur = keymap::rotation();
-    let next = step_choice(cur, keymap::ROTATION_COUNT, dir);
-    if next == cur {
-        return 0;
-    }
-    keymap::set_rotation(next);
-    crate::backend::render::set_game_rotation(next);
-    // Turning the picture re-frames it, so the framing offset goes back to
-    // centred while the magnification stays (issue #101).
-    //
-    // Not a shortcut: the quarter-turn swaps the LOGICAL viewport, which makes
-    // Ruffle lay the stage out afresh. Flappy Bird fitted into 1280x720 is 514
-    // wide and pillarboxed; into 720x1280 it is 720 wide and letterboxed. The
-    // picture is a different size in a different place, so a framing offset
-    // measured in screen pixels no longer points at what it was pointing at,
-    // and no transform of that offset can recover it -- turning the vector a
-    // quarter with it would only be a prettier guess.
-    //
-    // The magnification survives because it answers a question about the GAME
-    // ("this is too small to read"), which the turn does not change. The framing
-    // answers a question about the layout, which it does.
-    {
-        let z = crate::backend::render::game_zoom_percent();
-        crate::backend::render::set_game_zoom(z, 0, 0, VIEWPORT_W as f32, VIEWPORT_H as f32);
-        keymap::set_zoom(z, 0, 0);
-    }
+///
+/// The framing comes as `pan` because turning the picture re-frames it: a new
+/// turn is shown centred while the magnification stays (issue #101), and the
+/// turn it was armed on comes back with its own framing.
+///
+/// Not a shortcut: the quarter-turn swaps the LOGICAL viewport, which makes
+/// Ruffle lay the stage out afresh. Flappy Bird fitted into 1280x720 is 514
+/// wide and pillarboxed; into 720x1280 it is 720 wide and letterboxed. The
+/// picture is a different size in a different place, so a framing offset
+/// measured in screen pixels no longer points at what it was pointing at, and
+/// no transform of that offset can recover it -- turning the vector a quarter
+/// with it would only be a prettier guess. The magnification survives because
+/// it answers a question about the GAME ("this is too small to read"), which
+/// the turn does not change. The framing answers a question about the layout,
+/// which it does.
+pub(crate) fn rotation_live(q: u8, pan: (i32, i32)) {
+    crate::backend::render::set_game_rotation(q);
+    let z = crate::backend::render::game_zoom_percent();
+    crate::backend::render::set_game_zoom(z, pan.0, pan.1, VIEWPORT_W as f32, VIEWPORT_H as f32);
     let state = unsafe {
         match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
             Some(s) => s,
-            None => return 1,
+            None => return,
         }
     };
     if let Ok(mut player) = state.player.lock() {
@@ -3156,63 +3109,6 @@ pub extern "C" fn ruffle_rotation_step(dir: c_int) -> c_int {
             scale_factor: 1.0,
         });
     }
-    1
-}
-
-/// Pause-menu FILTRE row: cycle the ACTIVE game's screen filter and persist it.
-/// Unlike the scaling mode this touches no Ruffle state at all: the filter is a
-/// pass the render backend runs over the finished frame, so setting the flag is
-/// enough and the next redraw (the paused one, behind the panel) shows it.
-/// The other half of issue #65.
-#[no_mangle]
-pub extern "C" fn ruffle_screen_filter_step(dir: c_int) -> c_int {
-    let cur = keymap::screen_filter();
-    let next = step_choice(cur, keymap::SCREEN_FILTER_COUNT, dir);
-    if next == cur {
-        return 0;
-    }
-    keymap::set_screen_filter(next);
-    crate::backend::render::set_screen_filter(next);
-    1
-}
-
-/// Pause-menu ECRAN > FPS row: show or hide the counter for the game being
-/// played, and persist it (#111).
-///
-/// Touches no Ruffle state at all, like FILTRE above: the counter is something
-/// we draw after the frame, so flipping the flag is the whole change and the
-/// paused redraw behind the panel previews it on the next call.
-#[no_mangle]
-pub extern "C" fn ruffle_fps_counter_step(dir: c_int) -> c_int {
-    let cur = keymap::fps_counter();
-    let next = step_choice(cur, keymap::FPS_COUNTER_COUNT, dir);
-    if next == cur {
-        return 0;
-    }
-    keymap::set_fps_counter(next);
-    crate::backend::render::set_fps_counter(next == 1);
-    1
-}
-
-/// Pause-menu PIXELS row: cycle the ACTIVE game's texture sampling and persist
-/// it. Issue #108.
-///
-/// Touches no Ruffle state either, for the same reason as the filter above: the
-/// sampling is decided by the render backend at draw time, so storing the mode
-/// is the whole of it and the next redraw -- the paused one, behind the panel --
-/// shows the result. That preview is the point of putting the row here: whether
-/// bilinear is helping or smearing is not a question anyone can answer from a
-/// word in a menu.
-#[no_mangle]
-pub extern "C" fn ruffle_pixel_filter_step(dir: c_int) -> c_int {
-    let cur = keymap::pixel_filter();
-    let next = step_choice(cur, keymap::PIXEL_FILTER_COUNT, dir);
-    if next == cur {
-        return 0;
-    }
-    keymap::set_pixel_filter(next);
-    crate::backend::render::set_pixel_filter(next);
-    1
 }
 
 /// The running game's gyroscope cursor mode (#119): `keymap::GYRO_OFF`,
@@ -3223,43 +3119,105 @@ pub extern "C" fn ruffle_gyro_mode() -> c_int {
     keymap::GYRO_MODE.load(core::sync::atomic::Ordering::Relaxed) as c_int
 }
 
-/// Pause-menu OVERCLOCK row: cycle the ACTIVE game's power mode and persist it.
-///
-/// What gets persisted is what the hardware actually accepted, not what was
-/// asked for. A raise can be refused (clkrst unavailable, or psm reporting the
-/// battery out of its Normal voltage state), and storing the request in that
-/// case would leave the game marked HIGH forever while running at 1020, with
-/// the row saying one thing and the console doing another.
-#[no_mangle]
-pub extern "C" fn ruffle_power_mode_step(dir: c_int) -> c_int {
-    // Flip what the row SHOWS, which is the mode in force, not the stored
-    // preference: the two part ways whenever the hardware is not where the
-    // preference says (a raise dropped for the battery, the second after HOME
-    // before the periodic check takes the clock back). Stepping from the
-    // preference then asked for the mode already in force, and the press did
-    // nothing visible (2026-10-05: "un clic ne fait rien"). On AUTO the row
-    // shows AUTO whatever the clock is doing at that moment.
-    let shown = crate::clock_auto::shown_mode();
-    // The row shows Off | Auto | On, in that order (`with_pause_sheet`).
-    const ORDER: [u8; 3] = [0, keymap::POWER_AUTO, 1];
-    let at = ORDER.iter().position(|m| *m == shown).unwrap_or(0) as u8;
-    let next = ORDER[step_choice(at, 3, dir) as usize];
-    if next == shown {
-        // Left on Off, Right on On: the end of the row, nothing to ask for.
-        return 0;
+// ── The pause's value rows, for C++ (see `pause_values`) ──────────────────
+//
+// C++ routes the pause and ÉCRAN, so it asks here to arm a row, step it, keep
+// it or put it back; the panels are drawn from the same state, so what is
+// outlined is what moves. Rows are named by their panel's touch tag and their
+// index, the way C++ already knows them.
+
+/// The value row `row` of panel `kind`, if it is one: OVERCLOCK on the pause,
+/// AFFICHAGE / ROTATION / PIXELS / FILTRE on ÉCRAN (ZOOM opens a mode, FPS is a
+/// switch).
+fn pause_value_of(kind: c_int, row: usize) -> Option<pause_values::PauseValue> {
+    use pause_values::PauseValue as V;
+    match pause_row_key(kind, row)? {
+        "OVERCLOCK" => Some(V::Overclock),
+        "AFFICHAGE" => Some(V::Display),
+        "ROTATION" => Some(V::Rotation),
+        "PIXELS" => Some(V::Pixels),
+        "FILTRE" => Some(V::Filter),
+        _ => None,
     }
-    let got = crate::clock_auto::apply_setting(next);
-    keymap::set_power_mode(got);
-    // Say what was asked for AND what was granted. A refusal is silent on the
-    // clkrst side by design, and without this line the only trace of a press
-    // that did nothing is the absence of a `clocks:` line, which is not a trace.
-    log_str(&std::format!(
-        "menu: OVERCLOCK asked={} got={}{}\n",
-        next,
-        got,
-        if next != got { " (REFUSED)" } else { "" },
-    ));
-    1
+}
+
+/// The name of row `row` of panel `kind` (`render::MENU_ITEMS` /
+/// `SCREEN_ITEMS`).
+fn pause_row_key(kind: c_int, row: usize) -> Option<&'static str> {
+    match kind as u32 {
+        UI_KIND_PAUSE => backend::render::MENU_ITEMS.get(row).copied(),
+        UI_KIND_SCREEN => backend::render::SCREEN_ITEMS.get(row).copied(),
+        _ => None,
+    }
+}
+
+/// A on a value row: arm it. 1 when `row` is one (0 for any other row).
+#[no_mangle]
+pub extern "C" fn ruffle_value_arm(kind: c_int, row: c_int) -> c_int {
+    match pause_value_of(kind, row.max(0) as usize) {
+        Some(v) => {
+            pause_values::arm(v);
+            1
+        }
+        None => 0,
+    }
+}
+
+/// The pause just opened (`-` in game): a row left armed by a pause shut some
+/// other way gives back what it changed, and the game's own keys are read
+/// afresh for the "par défaut" notes. Called from C++, holding no lock: the
+/// drawing side holds the player's, and putting a scaling mode back takes it.
+#[no_mangle]
+pub extern "C" fn ruffle_pause_opened() {
+    pause_values::pause_opened();
+}
+
+/// 1 while a row of the pause's pages is armed.
+#[no_mangle]
+pub extern "C" fn ruffle_value_armed() -> c_int {
+    pause_values::armed().is_some() as c_int
+}
+
+/// Left (`dir` < 0) or Right on the armed row: 1 moved, 0 at an end, -1 the
+/// console refused it.
+#[no_mangle]
+pub extern "C" fn ruffle_value_step(dir: c_int) -> c_int {
+    pause_values::step(dir)
+}
+
+/// Keep the armed value (written now). 1 when a row was armed.
+#[no_mangle]
+pub extern "C" fn ruffle_value_confirm() -> c_int {
+    pause_values::confirm() as c_int
+}
+
+/// Put back the value from before A. 1 when a row was armed.
+#[no_mangle]
+pub extern "C" fn ruffle_value_cancel() -> c_int {
+    pause_values::cancel() as c_int
+}
+
+/// A on a switch row (ÉCRAN's FPS counter): flipped and kept. 1 when `row` is
+/// one.
+#[no_mangle]
+pub extern "C" fn ruffle_value_toggle(kind: c_int, row: c_int) -> c_int {
+    if pause_row_key(kind, row.max(0) as usize) == Some("FPS") {
+        pause_values::confirm();
+        pause_values::toggle_fps();
+        1
+    } else {
+        0
+    }
+}
+
+/// X on a row: the game drops its own value and follows Réglages again. 1 when
+/// it had one.
+#[no_mangle]
+pub extern "C" fn ruffle_value_reset(kind: c_int, row: c_int) -> c_int {
+    match pause_row_key(kind, row.max(0) as usize) {
+        Some(key) => pause_values::reset_default(key) as c_int,
+        None => 0,
+    }
 }
 
 /// Set by `ruffle_restart`, consumed by the SESSION START marker in
@@ -3543,7 +3501,14 @@ pub extern "C" fn ruffle_menu_touch(x: f32, y: f32, pressed: c_int) {
             // buttons before touch, so it lags by a frame on exactly the frame
             // that matters.
             let live = 70 + menu::screen_kind() as u32;
-            if let Some(hit) = backend::render::ui_cells_hit(live, sx, sy) {
+            // The rail and the page's caption go back, as B does; the parts
+            // of a row's control (an option, the switch, an armed arrow) act
+            // at once; the rest of a row is the usual double tap.
+            if backend::render::ui_back_hit(live, sx, sy) {
+                menu::touch_back();
+            } else if let Some((row, part)) = backend::render::ui_seg_hit(live, sx, sy) {
+                menu::touch_part(row, part);
+            } else if let Some(hit) = backend::render::ui_cells_hit(live, sx, sy) {
                 if menu::touch_select(hit) {
                     menu::input("A");
                 }
@@ -3557,11 +3522,24 @@ pub extern "C" fn ruffle_menu_touch(x: f32, y: f32, pressed: c_int) {
     }
 }
 
-/// Touchscreen on the pause's own panels (the main one and ECRAN), which had
-/// none: only TOUCHES answered a finger. `live` is the panel C++ has up
-/// (`UI_KIND_PAUSE` or `UI_KIND_SCREEN`). Returns the row a tap landed on, or
-/// -1; C++ moves its cursor there, or acts when the cursor was already on it,
-/// the double tap every list of the app uses.
+/// What `ruffle_pause_touch` answers besides a row (the C++ PAUSE_TAP_*): no
+/// tap, a tap on the way back (the rail, the page's caption), or a part of a
+/// row's control acted on here, the row in the low byte: a value set, a value
+/// the console refused, or the option already in force.
+pub(crate) const PAUSE_TAP_NONE: c_int = -1;
+pub(crate) const PAUSE_TAP_BACK: c_int = -2;
+pub(crate) const PAUSE_TAP_SET: c_int = 0x1000;
+pub(crate) const PAUSE_TAP_REFUSED: c_int = 0x2000;
+pub(crate) const PAUSE_TAP_SAME: c_int = 0x3000;
+
+/// Touchscreen on the pause's own panels (the main one and ECRAN). `live` is
+/// the panel C++ has up (`UI_KIND_PAUSE` or `UI_KIND_SCREEN`).
+///
+/// A tap on a row returns the row: C++ moves its cursor there, or acts when
+/// the cursor was already on it, the double tap every list of the app uses.
+/// A tap on an option of a choice sets it here and now, with no arming, and
+/// the switch flips (input rule 6): that is what they show. A tap anywhere
+/// but on the armed row keeps the armed value first, as Up / Down do.
 #[no_mangle]
 pub extern "C" fn ruffle_pause_touch(x: f32, y: f32, pressed: c_int, live: c_int) -> c_int {
     // Physical pixels in, logical viewport out: the panel is drawn in the
@@ -3575,11 +3553,49 @@ pub extern "C" fn ruffle_pause_touch(x: f32, y: f32, pressed: c_int, live: c_int
         3 => (ph - y, x),
         _ => (x, y),
     };
-    match backend::render::row_touch_feed(x, y, pressed != 0) {
-        backend::render::RowTouch::Tap(sx, sy) => backend::render::ui_cells_hit(live.max(0) as u32, sx, sy)
-            .map(|i| i as c_int)
-            .unwrap_or(-1),
-        _ => -1,
+    let backend::render::RowTouch::Tap(sx, sy) = backend::render::row_touch_feed(x, y, pressed != 0) else {
+        return PAUSE_TAP_NONE;
+    };
+    let kind = live.max(0) as u32;
+    if backend::render::ui_back_hit(kind, sx, sy) {
+        pause_values::confirm();
+        return PAUSE_TAP_BACK;
+    }
+    if let Some((row, part)) = backend::render::ui_seg_hit(kind, sx, sy) {
+        use backend::render::{SEG_NEXT, SEG_PREV};
+        let done = match pause_value_of(live, row) {
+            Some(v) if part == SEG_PREV || part == SEG_NEXT => {
+                if pause_values::armed() == Some(v) {
+                    pause_values::step(if part == SEG_PREV { -1 } else { 1 })
+                } else {
+                    0
+                }
+            }
+            Some(v) => pause_values::set(v, part.min(u8::MAX as usize) as u8),
+            None if pause_row_key(live, row) == Some("FPS") => {
+                pause_values::confirm();
+                pause_values::toggle_fps();
+                1
+            }
+            None => 0,
+        };
+        let row = row.min(0xFF) as c_int;
+        return match done {
+            1 => PAUSE_TAP_SET | row,
+            -1 => PAUSE_TAP_REFUSED | row,
+            _ => PAUSE_TAP_SAME | row,
+        };
+    }
+    match backend::render::ui_cells_hit(kind, sx, sy) {
+        Some(row) => {
+            // On the armed row itself the tap is A, which C++ turns into
+            // keeping the value; anywhere else the value is kept here.
+            if pause_values::armed().is_some() && pause_value_of(live, row) != pause_values::armed() {
+                pause_values::confirm();
+            }
+            row as c_int
+        }
+        None => PAUSE_TAP_NONE,
     }
 }
 

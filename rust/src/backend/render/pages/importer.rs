@@ -414,11 +414,15 @@ impl SwitchRenderBackend {
         if n > 1 {
             hints.push((&[Btn::Y][..], u.hint_sort));
         }
+        // Over a search that found nothing, Minus says what it is for there,
+        // in the words Jouer uses; B shows every source again, the same words
+        // on every list.
         if home.total > 0 {
-            hints.push((&[Btn::Minus][..], u.hint_search));
+            let verb = if searching && n == 0 { u.home_edit_search } else { u.hint_search };
+            hints.push((&[Btn::Minus][..], verb));
         }
         if searching {
-            hints.push((&[Btn::B][..], u.imp_show_all));
+            hints.push((&[Btn::B][..], u.home_show_all));
         }
         self.imp_footer_hints(&hints);
         unsafe {
@@ -726,11 +730,14 @@ impl SwitchRenderBackend {
         if total > 1 {
             hints.push((&[Btn::Y][..], u.hint_sort));
         }
-        hints.push((&[Btn::Minus][..], u.hint_search));
+        // B shows every game again after a search before it goes back, as on
+        // every list, and says so; over a search that found nothing, Minus
+        // says what it is for there, in the words Jouer uses.
+        hints.push((&[Btn::Minus][..], if searching && total == 0 { u.home_edit_search } else { u.hint_search }));
         if total > VISIBLE {
             hints.push((&page[..], u.page));
         }
-        hints.push((&[Btn::B][..], u.back));
+        hints.push((&[Btn::B][..], if searching { u.home_show_all } else { u.back }));
         self.imp_footer_hints(&hints);
         unsafe {
             glUseProgram(0);

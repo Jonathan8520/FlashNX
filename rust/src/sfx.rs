@@ -63,6 +63,46 @@ pub(crate) fn take_changed() -> bool {
     CHANGED.swap(false, core::sync::atomic::Ordering::Relaxed)
 }
 
+/// A sound the handler of a press chose itself, played instead of the one
+/// read from the screens. Arming a row and keeping its value (Decide), or
+/// putting it back (Back), leave the screen exactly as it was, and so does a
+/// refusal (Error): the difference cannot say what happened, the handler can.
+static CHOSEN: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(CHOSEN_NONE);
+const CHOSEN_NONE: u8 = 0xFF;
+const CHOSEN_SILENCE: u8 = 0xFE;
+
+/// This press makes `s`, whatever the screens say.
+pub(crate) fn choose(s: Sfx) {
+    CHOSEN.store(s as u8, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// This press makes no sound: it did nothing (A on the language already in
+/// use, on a page with only things to read).
+pub(crate) fn hush() {
+    CHOSEN.store(CHOSEN_SILENCE, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// The sound the press just handled chose, if it chose one (and forget it):
+/// `Some(None)` is a chosen silence.
+pub(crate) fn take_chosen() -> Option<Option<Sfx>> {
+    const ALL: [Sfx; 9] = [
+        Sfx::Move,
+        Sfx::Decide,
+        Sfx::Back,
+        Sfx::Tab,
+        Sfx::Toggle,
+        Sfx::Error,
+        Sfx::Open,
+        Sfx::Close,
+        Sfx::Launch,
+    ];
+    match CHOSEN.swap(CHOSEN_NONE, core::sync::atomic::Ordering::Relaxed) {
+        CHOSEN_NONE => None,
+        CHOSEN_SILENCE => Some(None),
+        v => Some(ALL.iter().copied().find(|s| *s as u8 == v)),
+    }
+}
+
 /// RÉGLAGES > interface sounds: tell the backend.
 pub(crate) fn set_enabled(on: bool) {
     unsafe { ruffle_ui_sounds_set_enabled(on as c_int) };
@@ -90,6 +130,15 @@ pub(crate) fn after_input(
 ) {
     use crate::library::Screen;
     let changed = take_changed();
+    // A sound the handler chose wins (see `choose`). Asked before the editor
+    // below: closing the defaults' controls editor is decided out here, the
+    // editor still on screen while it scales out.
+    if let Some(chosen) = take_chosen() {
+        if let Some(s) = chosen {
+            play(s);
+        }
+        return;
+    }
     // The controls editor plays its own sounds (`menu::input`).
     let in_editor = |s: Screen| matches!(s, Screen::TouchesEditor { .. } | Screen::SettingsKeymapEditor);
     if in_editor(before) && in_editor(after) {
@@ -104,8 +153,10 @@ pub(crate) fn after_input(
         return;
     }
     // An error screen sounds its own note when it appears, wherever it came
-    // from (`library::render`): many arrive later, from a download.
-    if matches!(after, Screen::DistantError) {
+    // from (`library::render`): many arrive later, from a download. The
+    // report the relay refused is one too: with the window's sweep on top,
+    // a failed send played two sounds at once.
+    if matches!(after, Screen::DistantError | Screen::SendFailed { .. }) {
         return;
     }
     // ZL / ZR walk the folders: sideways, like a tab.
@@ -123,10 +174,11 @@ pub(crate) fn after_input(
     }
     if before == after {
         // A press that moved nothing: a value changed in place (the handler
-        // said so), A on a value row, or a step against the end of a list or a
-        // choice, which deserves silence. (RÉGLAGES clicks its own values as
-        // they move: only it knows whether Left or Right changed anything.)
-        if changed || matches!(button, "A" | "X" | "Y") {
+        // said so), or A acting where it stands. Anything else deserves
+        // silence: a step against the end of a list or a choice, an X or a Y
+        // with nothing to act on (they used to click like a toggle). A that
+        // does nothing says so through `hush`, a refusal through `choose`.
+        if changed || button == "A" {
             play(Sfx::Toggle);
         }
         return;

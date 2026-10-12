@@ -124,8 +124,17 @@ impl SwitchRenderBackend {
     }
 
     /// Draw `row` centred on `cy` between `x` and `x + w` (see `Row`). The
-    /// focus pill is the caller's, so it can glide between rows.
-    pub(crate) fn kit_row_item(&mut self, x: f32, cy: f32, w: f32, row: &Row, focused: bool) {
+    /// focus pill is the caller's, so it can glide between rows. Returns the
+    /// parts of its control a finger can tap, as (part, rect) (`CtrlSegs`
+    /// without the row, which only the caller knows).
+    pub(crate) fn kit_row_item(
+        &mut self,
+        x: f32,
+        cy: f32,
+        w: f32,
+        row: &Row,
+        focused: bool,
+    ) -> std::vec::Vec<(usize, (f32, f32, f32, f32))> {
         use super::theme::size;
         const PAD: f32 = 18.0;
         const ICON: f32 = 20.0;
@@ -169,6 +178,7 @@ impl SwitchRenderBackend {
             self.kit_icon(right - KEYBOARD, cy, KEYBOARD, super::icons::Icon::Keyboard, ink);
             right -= KEYBOARD + 10.0;
         }
+        let mut parts = std::vec::Vec::new();
         let mut avail = right - lx;
         if row.ctrl != super::controls::Ctrl::None {
             // The control takes what the label leaves it: the label is short
@@ -181,6 +191,7 @@ impl SwitchRenderBackend {
             let note_w = row.note.map_or(0.0, |n| self.kit_measure(n, size::CAPTION) + 12.0);
             let max_w = (avail - label_w - note_w - 20.0).max(60.0);
             let cw = self.kit_ctrl(right, cy, &row.ctrl, focused && !row.dim, max_w);
+            parts = self.kit_ctrl_parts(right, cy, cw, row);
             avail -= cw + 20.0;
             if let Some(n) = row.note {
                 // Dropped rather than squeezed when the label needs the room.
@@ -208,6 +219,7 @@ impl SwitchRenderBackend {
         if let Some((ic, mink)) = row.mark {
             self.kit_icon(lx + lw + 10.0, cy, MARK, ic, mink);
         }
+        parts
     }
 }
 
@@ -237,6 +249,17 @@ pub(crate) struct Row<'a> {
     pub danger: bool,
     pub opens: bool,
     pub keyboard: bool,
+    /// Armed by A (input rule 1): Left / Right change the value until A keeps
+    /// it or B puts it back. The control gets a gold outline and a gold arrow
+    /// on each side, so the row says the arrows act on it before they do.
+    pub armed: bool,
+    /// The value sits at the low / high end of its range: the armed arrow on
+    /// that side is dimmed. A choice knows it from its lit option; a cycle (a
+    /// number) is told.
+    pub ends: (bool, bool),
+    /// The lit option of a choice carries the gold focus outline: the sort
+    /// windows, where Left / Right move the focus between a row's orders.
+    pub seg_focus: bool,
 }
 
 impl<'a> Row<'a> {
@@ -252,6 +275,9 @@ impl<'a> Row<'a> {
             danger: false,
             opens: false,
             keyboard: false,
+            armed: false,
+            ends: (false, false),
+            seg_focus: false,
         }
     }
 
@@ -277,7 +303,8 @@ impl<'a> Row<'a> {
         self
     }
 
-    /// A value Left / Right step, between arrows.
+    /// A value Left / Right step once A has armed the row (shown alone at
+    /// rest, between gold arrows while armed).
     pub(crate) fn cycle(mut self, value: &'a str) -> Row<'a> {
         self.ctrl = super::controls::Ctrl::Cycle(value);
         self
@@ -337,11 +364,33 @@ impl<'a> Row<'a> {
         self
     }
 
-    /// Whether Left / Right change this row in place.
-    pub(crate) fn steps(&self) -> bool {
-        matches!(
-            self.ctrl,
-            super::controls::Ctrl::Cycle(_) | super::controls::Ctrl::Choice(..) | super::controls::Ctrl::Toggle(_)
-        )
+    /// Armed (see `armed`) when `on`.
+    pub(crate) fn armed_if(mut self, on: bool) -> Row<'a> {
+        self.armed = on;
+        self
+    }
+
+    /// A cycle's value at the low and / or high end of its range.
+    pub(crate) fn ends(mut self, low: bool, high: bool) -> Row<'a> {
+        self.ends = (low, high);
+        self
+    }
+
+    /// The choice's lit option carries the focus outline when `on`.
+    pub(crate) fn seg_focus_if(mut self, on: bool) -> Row<'a> {
+        self.seg_focus = on;
+        self
     }
 }
+
+/// What a tap on a row's control means, beside the plain options of a choice
+/// (their index): the armed arrows step the value.
+pub(crate) const SEG_PREV: usize = usize::MAX - 1;
+pub(crate) const SEG_NEXT: usize = usize::MAX;
+
+/// The tappable parts of the controls a list drew: (row, part, rect), a part
+/// being an option of a choice (its index), the knob of a switch (0), or an
+/// armed arrow (`SEG_PREV` / `SEG_NEXT`). Published beside the rows' own
+/// table (`ui_segs_publish`), so a tap on an option sets it directly instead
+/// of being taken as a tap on the row.
+pub(crate) type CtrlSegs = std::vec::Vec<(usize, usize, (f32, f32, f32, f32))>;

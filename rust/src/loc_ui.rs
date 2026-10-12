@@ -550,6 +550,8 @@ pub struct Ui {
     pub load_failed_hint: &'static str,
     /// Toast for X (new folder) in the games folder browser while it shows the library or a folder inside it.
     pub dir_new_in_lib: &'static str,
+    /// Pause › Écran: help of the zoom row, which A opens into the framing mode (Left / Right no longer step it there).
+    pub help_zoom_frame: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -871,6 +873,7 @@ const EN: Ui = Ui {
     load_failed_body: "The file is no longer at this place on the card, or it is too big for the memory left. It was looked for here:",
     load_failed_hint: "Menu",
     dir_new_in_lib: "You are in your library: create the new folder outside it.",
+    help_zoom_frame: "Enlarges the picture: A opens the framing, where ZL and ZR zoom and the stick moves the picture.",
 };
 
 const FR: Ui = Ui {
@@ -1192,6 +1195,7 @@ const FR: Ui = Ui {
     load_failed_body: "Le fichier n'est plus à cet endroit de la carte, ou il est trop gros pour la mémoire disponible. Il a été cherché ici :",
     load_failed_hint: "Menu",
     dir_new_in_lib: "Tu es dans ta bibliothèque : crée le nouveau dossier en dehors.",
+    help_zoom_frame: "Agrandit l'image : A ouvre le cadrage, où ZL et ZR zooment et le stick déplace l'image.",
 };
 
 const ES: Ui = Ui {
@@ -1513,6 +1517,7 @@ const ES: Ui = Ui {
     load_failed_body: "El archivo ya no está en este lugar de la tarjeta, o es demasiado grande para la memoria disponible. Se buscó aquí:",
     load_failed_hint: "Menú",
     dir_new_in_lib: "Estás dentro de tu biblioteca: crea la carpeta nueva fuera de ella.",
+    help_zoom_frame: "Amplía la imagen: A abre el encuadre, donde ZL y ZR hacen zoom y el stick mueve la imagen.",
 };
 
 const RU: Ui = Ui {
@@ -1834,6 +1839,7 @@ const RU: Ui = Ui {
     load_failed_body: "Файла больше нет в этом месте карты, или он слишком велик для доступной памяти. Он искался здесь:",
     load_failed_hint: "Меню",
     dir_new_in_lib: "Ты внутри своей библиотеки: создай новую папку за её пределами.",
+    help_zoom_frame: "Увеличивает картинку: A открывает кадрирование, где ZL и ZR меняют масштаб, а стик двигает картинку.",
 };
 
 const DE: Ui = Ui {
@@ -2155,6 +2161,7 @@ const DE: Ui = Ui {
     load_failed_body: "Die Datei liegt nicht mehr an dieser Stelle der Karte, oder sie ist zu groß für den freien Speicher. Gesucht wurde hier:",
     load_failed_hint: "Menü",
     dir_new_in_lib: "Du bist in deiner Bibliothek: Lege den neuen Ordner außerhalb an.",
+    help_zoom_frame: "Vergrößert das Bild: A öffnet den Ausschnitt, wo ZL und ZR zoomen und der Stick das Bild verschiebt.",
 };
 
 const IT: Ui = Ui {
@@ -2476,6 +2483,7 @@ const IT: Ui = Ui {
     load_failed_body: "Il file non è più in questo punto della scheda, oppure è troppo grande per la memoria disponibile. È stato cercato qui:",
     load_failed_hint: "Menu",
     dir_new_in_lib: "Sei dentro la tua libreria: crea la nuova cartella fuori da lì.",
+    help_zoom_frame: "Ingrandisce l'immagine: A apre l'inquadratura, dove ZL e ZR fanno lo zoom e lo stick sposta l'immagine.",
 };
 
 const PT: Ui = Ui {
@@ -2797,6 +2805,7 @@ const PT: Ui = Ui {
     load_failed_body: "O arquivo não está mais neste lugar do cartão, ou é grande demais para a memória disponível. Ele foi procurado aqui:",
     load_failed_hint: "Menu",
     dir_new_in_lib: "Você está dentro da sua biblioteca: crie a nova pasta fora dela.",
+    help_zoom_frame: "Amplia a imagem: A abre o enquadramento, onde ZL e ZR fazem zoom e o analógico move a imagem.",
 };
 
 const ZH: Ui = Ui {
@@ -3118,6 +3127,7 @@ const ZH: Ui = Ui {
     load_failed_body: "文件已不在存储卡上的这个位置，或者对于可用内存来说太大。查找的位置：",
     load_failed_hint: "菜单",
     dir_new_in_lib: "你在游戏库内：请在游戏库外新建文件夹。",
+    help_zoom_frame: "放大画面：按 A 进入取景，ZL 和 ZR 缩放，摇杆移动画面。",
 };
 
 const TR: Ui = Ui {
@@ -3439,6 +3449,7 @@ const TR: Ui = Ui {
     load_failed_body: "Dosya artık kartta bu konumda değil ya da kalan bellek için çok büyük. Şurada arandı:",
     load_failed_hint: "Menü",
     dir_new_in_lib: "Kütüphanenin içindesin: yeni klasörü kütüphanenin dışında oluştur.",
+    help_zoom_frame: "Görüntüyü büyütür: A kadrajı açar; orada ZL ve ZR yakınlaştırır, çubuk görüntüyü kaydırır.",
 };
 
 pub fn ui() -> &'static Ui {

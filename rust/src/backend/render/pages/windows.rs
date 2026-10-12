@@ -208,12 +208,14 @@ pub(crate) struct SortOption<'a> {
 }
 
 impl SwitchRenderBackend {
-    /// The sort picker. Each row is a way to sort, with both its orders as
-    /// words on its right and the one it would apply lit: Left / Right (or X)
-    /// turn the focused row round, A applies it, B leaves the list as it was.
-    /// The sort in force is ticked. Bit `i` of `reversed` set = row `i` shows
-    /// its second order. `subtitle` says what the order applies to, `help`
-    /// what the rows cannot.
+    /// The sort picker (input rule 5). Each row is a way to sort, with both
+    /// its orders as words on its right and the one it would apply lit; on the
+    /// focused row that one carries the gold focus outline, which Left / Right
+    /// move between the two orders (X flips it). A applies the focused way and
+    /// order, B leaves the list as it was. The sort in force is ticked. Bit
+    /// `i` of `reversed` set = row `i` shows its second order. `subtitle` says
+    /// what the order applies to, `help` what the rows cannot. A tap on an
+    /// order puts the focus there, a second one applies it.
     ///
     /// It used to be noun rows ("Ajouté", "Plus joués") under one "Croissant /
     /// Décroissant" switch for all of them, which said the opposite of the list
@@ -252,22 +254,24 @@ impl SwitchRenderBackend {
             scrollbar_x: None,
         };
         let (x, w) = (spec.x, spec.w);
+        let mut segs: kit::list::CtrlSegs = std::vec::Vec::new();
         self.kit_scroll_rows(&spec, options.len(), selection, 0, |s, i, cy, focused| {
             let o = &options[i];
             let lit = if i < 8 { ((reversed >> i) & 1) as usize } else { 0 };
             let row = WinRow::new(o.icon, o.label)
                 .choice(&o.orders, lit)
-                .mark_if(active == Some(i), Icon::Check, col::OK);
-            s.kit_row_item(x, cy, w, &row, focused);
+                .mark_if(active == Some(i), Icon::Check, col::OK)
+                .seg_focus_if(focused);
+            let parts = s.kit_row_item(x, cy, w, &row, focused);
+            segs.extend(parts.into_iter().map(|(p, r)| (i, p, r)));
         });
+        // After the rows' own table, which `kit_scroll_rows` published.
+        ui_segs_publish(ui_screen_kind(), segs);
         if let Some(text) = help {
             self.kit_help_box(frame.x + 16.0, frame.y + frame.h - MODAL_PAD_BOTTOM - 10.0, frame.w - 32.0, text, 3);
         }
-        self.modal_hints(
-            &frame,
-            &[(&[Btn::A], u.apply), (&[Btn::Dpad, Btn::X], u.sort_flip), (&[Btn::B], u.cancel)],
-            false,
-        );
+        // Left / Right move the focus: navigation, which needs no hint.
+        self.modal_hints(&frame, &[(&[Btn::A], u.apply), (&[Btn::X], u.sort_flip), (&[Btn::B], u.cancel)], false);
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);

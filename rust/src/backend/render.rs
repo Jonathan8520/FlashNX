@@ -1639,7 +1639,7 @@ pub(crate) use kit::text::HintItem;
 pub(crate) use kit::theme::col as ui_col;
 pub(crate) use kit::text::Btn;
 pub(crate) use pages::windows::{Choice, SortOption, WinRow};
-pub(crate) use kit::list::Row;
+pub(crate) use kit::list::{CtrlSegs, Row, SEG_NEXT, SEG_PREV};
 pub(crate) use kit::sheet::{cascade_step, Sheet, Side, OPTIONS_CHILD_W, OPTIONS_W};
 pub(crate) use pages::importer::{
     imp_amount, imp_count, imp_date, imp_n_of, imp_quote, imp_release, imp_size, imp_transfer_line, imp_year,
@@ -3849,6 +3849,14 @@ pub fn overclock_refused() -> bool {
     POWER_REFUSED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Mark a raise as turned down after the fact: a refused ON from AUTO goes
+/// back into AUTO, whose start at the stock clock clears the mark, and the
+/// help must still say why the raise did not happen.
+pub fn note_overclock_refused() {
+    POWER_REFUSED.store(true, std::sync::atomic::Ordering::Relaxed);
+    POWER_REFUSED_EVER.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// True when ANY raise was turned down since the current game was launched.
 ///
 /// Separate from `overclock_refused`, which describes the LAST request and is
@@ -3925,25 +3933,32 @@ pub fn fps_counter_on() -> bool {
     FPS_COUNTER.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Turn the counter on or off, throwing away the MEASURED rate but keeping the
-/// movie's nominal one.
+/// Turn the counter on or off for a NEW game, throwing away the MEASURED rate
+/// but keeping the movie's nominal one.
 ///
-/// Called on EVERY game launch (like the screen filter and the power mode) and
-/// from the ECRAN row. Clearing the measured rate is the point in both cases:
-/// without it the first half second of a new game shows the PREVIOUS game's
-/// speed, printed under the new game's nominal rate.
+/// Called on EVERY game launch (like the screen filter and the power mode).
+/// Clearing the measured rate is the point: without it the first half second
+/// of a new game shows the PREVIOUS game's speed, printed under the new game's
+/// nominal rate.
 ///
 /// The nominal rate is deliberately NOT cleared here, and clearing it was a real
 /// bug: only `fps_sample` writes it, `fps_sample` runs only from the live tick,
-/// and the pause loop does not tick. So turning the row on from ECRAN zeroed the
-/// nominal and `fps_readout` then refused to draw anything, which made the row
-/// look dead exactly where it is supposed to preview itself on the frozen frame.
-/// A new game invalidates the nominal, so `ruffle_init` is where it is cleared.
+/// and the pause loop does not tick. A new game invalidates the nominal, so
+/// `ruffle_init` is where it is cleared.
 pub fn set_fps_counter(on: bool) {
     FPS_COUNTER.store(on, std::sync::atomic::Ordering::Relaxed);
     FPS_REAL_X10.store(0, std::sync::atomic::Ordering::Relaxed);
     FPS_HAVE_READING.store(false, std::sync::atomic::Ordering::Relaxed);
     fps_window_reset();
+}
+
+/// Show or hide the counter of the game being played, and nothing else: the
+/// ECRAN row. The reading is taken whether the counter is shown or not, and
+/// the pause loop never takes a new one, so throwing it away here (as a launch
+/// does) left the row's corner preview at "--" and took the speed chip off
+/// the pause until the game had run another half second.
+pub fn set_fps_counter_shown(on: bool) {
+    FPS_COUNTER.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Forget the movie's nominal rate. Called from `ruffle_init`, the one moment
@@ -5895,6 +5910,65 @@ pub fn ui_cells_publish(kind: u32, rects: std::vec::Vec<(f32, f32, f32, f32)>) {
     if let Ok(mut g) = UI_CELLS.lock() {
         *g = (kind, rects);
     }
+    // A new table of rows starts without control parts or ways back: a panel
+    // with no choice on it must not answer a tap with the options of the
+    // panel drawn before it. Whoever has some publishes them after this.
+    if let Ok(mut g) = UI_SEGS.lock() {
+        *g = (kind, std::vec::Vec::new());
+    }
+    if let Ok(mut g) = UI_BACK.lock() {
+        *g = (kind, std::vec::Vec::new());
+    }
+}
+
+/// The tappable parts of the controls in the rows just published
+/// (`kit::list::CtrlSegs`): the options of a choice, the knob of a switch, the
+/// arrows of an armed row. Asked BEFORE the rows, which contain them: a tap
+/// on an option sets that option (input rule 6), where a tap on the rest of
+/// the row only moves the cursor.
+static UI_SEGS: std::sync::Mutex<(u32, kit::list::CtrlSegs)> = std::sync::Mutex::new((0, std::vec::Vec::new()));
+
+pub fn ui_segs_publish(kind: u32, segs: kit::list::CtrlSegs) {
+    if let Ok(mut g) = UI_SEGS.lock() {
+        *g = (kind, segs);
+    }
+}
+
+/// The (row, part) of the control part under `(x, y)`, for the screen `live`
+/// only (see `ui_cells_hit`).
+pub fn ui_seg_hit(live: u32, x: f32, y: f32) -> Option<(usize, usize)> {
+    if live == 0 {
+        return None;
+    }
+    let g = UI_SEGS.lock().ok()?;
+    if g.0 != live {
+        return None;
+    }
+    g.1.iter()
+        .find(|(_, _, (rx, ry, rw, rh))| *rw > 0.0 && *rh > 0.0 && x >= *rx && x <= rx + rw && y >= *ry && y <= ry + rh)
+        .map(|(row, part, _)| (*row, *part))
+}
+
+/// Where a tap goes back a level, as B does: the rail a cascade folded its
+/// parent into, and the "‹ Pause" caption of the page beside it. Both look
+/// like the way back, and a finger alone had no other one.
+static UI_BACK: std::sync::Mutex<(u32, std::vec::Vec<(f32, f32, f32, f32)>)> =
+    std::sync::Mutex::new((0, std::vec::Vec::new()));
+
+pub fn ui_back_publish(kind: u32, rects: std::vec::Vec<(f32, f32, f32, f32)>) {
+    if let Ok(mut g) = UI_BACK.lock() {
+        *g = (kind, rects);
+    }
+}
+
+/// Whether `(x, y)` falls on a way back of the screen `live`.
+pub fn ui_back_hit(live: u32, x: f32, y: f32) -> bool {
+    if live == 0 {
+        return false;
+    }
+    let Ok(g) = UI_BACK.lock() else { return false };
+    g.0 == live
+        && g.1.iter().any(|(rx, ry, rw, rh)| *rw > 0.0 && *rh > 0.0 && x >= *rx && x <= rx + rw && y >= *ry && y <= ry + rh)
 }
 
 /// Where the three navbar tabs are, and whether the strip is even on screen.
@@ -9644,6 +9718,7 @@ impl SwitchRenderBackend {
     /// pausing a slow game wants to know: how fast it was running, and whether
     /// the processor is raised.
     pub(crate) fn with_pause_sheet<R>(&mut self, selected: usize, f: impl FnOnce(&mut Self, &kit::sheet::Sheet) -> R) -> R {
+        use crate::pause_values::{self as pv, PauseValue};
         use kit::list::Row;
         use theme::col;
         let lc = crate::loc::s();
@@ -9653,22 +9728,26 @@ impl SwitchRenderBackend {
         // preference: a raise can be refused (clkrst unavailable, battery out
         // of its Normal voltage state) and a row claiming HIGH while the
         // console sits at 1020 is a support ticket. AUTO reads AUTO: whether it
-        // holds the raise at this instant is the processor chip.
+        // holds the raise at this instant is the processor chip. While the row
+        // is armed, what it shows is what Left / Right have put in force.
         //
         // It stays at the top level rather than joining ECRAN: every ECRAN row
         // previews on the frozen frame, and this one cannot.
         let power_shown = crate::clock_auto::shown_mode();
         let oc_opts = [lc.overclock_off, lc.pixels_auto, lc.overclock_on];
-        let oc_active = match power_shown {
-            0 => 0,
-            crate::keymap::POWER_AUTO => 1,
-            _ => 2,
-        };
+        let oc_armed = pv::armed() == Some(PauseValue::Overclock);
+        let oc_own = !pv::follows_default("OVERCLOCK");
+        // A game following the default says so, as its options do in the
+        // launcher; not while the row is being changed.
+        let oc_note = if !oc_armed && !oc_own { Some(u.tag_default) } else { None };
         let rows = [
             Row::new(Icon::Play, lc.menu_resume),
             Row::new(Icon::Gamepad, lc.menu_keys).opens(),
             Row::new(Icon::Monitor, lc.menu_screen).opens(),
-            Row::new(Icon::Cpu, lc.set_overclock).choice(&oc_opts, oc_active),
+            Row::new(Icon::Cpu, lc.set_overclock)
+                .choice(&oc_opts, pv::current(PauseValue::Overclock) as usize)
+                .armed_if(oc_armed)
+                .note_opt(oc_note),
             Row::new(Icon::Restart, lc.menu_restart),
             Row::new(Icon::LogOut, lc.menu_quit),
         ];
@@ -9698,14 +9777,17 @@ impl SwitchRenderBackend {
         let a_verb = match MENU_ITEMS.get(selected) {
             Some(&"REPRENDRE") => u.resume,
             Some(&"TOUCHES") | Some(&"ECRAN") => u.open,
-            Some(&"OVERCLOCK") => u.change,
             Some(&"REDEMARRER") => u.restart,
             Some(&"QUITTER") => u.quit,
             _ => u.choose,
         };
-        let on_choice = MENU_ITEMS.get(selected) == Some(&"OVERCLOCK");
+        let on_power = MENU_ITEMS.get(selected) == Some(&"OVERCLOCK");
         let on_resume = MENU_ITEMS.get(selected) == Some(&"REPRENDRE");
-        let hints_choice = [(&[Btn::Dpad][..], u.change), (&[Btn::B][..], u.resume_game)];
+        // A value row says A arms it; armed, what Left / Right, A and B do
+        // now (input rule 2).
+        let hints_armed = [(&[Btn::DpadLR][..], u.change), (&[Btn::A][..], u.validate), (&[Btn::B][..], u.cancel)];
+        let hints_power_own = [(&[Btn::A][..], u.edit), (&[Btn::X][..], u.reset_default), (&[Btn::B][..], u.resume_game)];
+        let hints_power = [(&[Btn::A][..], u.edit), (&[Btn::B][..], u.resume_game)];
         let hints_act = [(&[Btn::A][..], a_verb), (&[Btn::B][..], u.resume_game)];
         // On Resume, A and B do the same thing: one hint, both buttons.
         let hints_resume = [(&[Btn::A, Btn::B][..], u.resume_game)];
@@ -9740,8 +9822,12 @@ impl SwitchRenderBackend {
         sheet.chips = &chips;
         sheet.glide_key = GLIDE_KEY_PAUSE;
         sheet.help = help;
-        sheet.hints = if on_choice {
-            &hints_choice
+        sheet.hints = if on_power && oc_armed {
+            &hints_armed
+        } else if on_power && oc_own {
+            &hints_power_own
+        } else if on_power {
+            &hints_power
         } else if on_resume {
             &hints_resume
         } else {
@@ -9781,49 +9867,91 @@ impl SwitchRenderBackend {
 
     /// The ECRAN panel as data, handed to `f`. Rows follow `SCREEN_ITEMS`.
     ///
-    /// Every setting shows all its options, the one in force lit (Left and
-    /// Right move it, A goes round); the zoom, a free percentage, shows its
-    /// value between arrows; the counter is a switch. All of it previews on the
-    /// frozen frame to the right, which C++ re-renders after each press.
+    /// Every setting shows all its options, the one in force lit: A arms it,
+    /// Left and Right move it while armed, live (input rule 1). The zoom, a
+    /// free percentage, shows its value and opens the framing mode; the
+    /// counter is a switch. All of it previews on the frozen frame to the
+    /// right, which C++ re-renders every frame. A row the game follows
+    /// Réglages for says "par défaut", as in its options in the launcher, and
+    /// X takes a row back to it.
     pub(crate) fn with_screen_sheet<R>(&mut self, selected: usize, f: impl FnOnce(&mut Self, &kit::sheet::Sheet) -> R) -> R {
+        use crate::pause_values::{self as pv, PauseValue as V};
         use kit::list::Row;
         let lc = crate::loc::s();
         let u = crate::loc_ui::ui();
-        // Every row is read back from what is in force: the game's `.prefs` for
-        // the ones stored per game, the renderer for the zoom and the counter.
+        // Every row is read back from what is in force: the armed value while
+        // a row is armed, what the game runs with otherwise.
+        let armed = pv::armed();
         let display_opts = [lc.display_fit, lc.display_stretch, lc.display_fill];
         let rot_opts = ["0°", lc.rot_90, lc.rot_180, lc.rot_270];
         let pix_opts = [lc.pixels_auto, lc.pixels_smooth, lc.pixels_sharp];
         let filter_opts = [lc.filter_none, lc.filter_scanlines, lc.filter_crt];
         let zoom = std::format!("{} %", game_zoom_percent());
+        let note = |key: &str, v: Option<V>| {
+            if (v.is_some() && armed == v) || !pv::follows_default(key) {
+                None
+            } else {
+                Some(u.tag_default)
+            }
+        };
         let rows = [
-            Row::new(Icon::Monitor, lc.set_display_mode).choice(&display_opts, crate::keymap::display_mode() as usize),
-            Row::new(Icon::Rotate, lc.set_rotation).choice(&rot_opts, crate::keymap::rotation() as usize),
-            Row::new(Icon::ZoomIn, lc.set_zoom).cycle(&zoom),
-            Row::new(Icon::Pixels, lc.set_pixel_filter).choice(&pix_opts, crate::keymap::pixel_filter() as usize),
-            Row::new(Icon::Tv, lc.set_screen_filter).choice(&filter_opts, crate::keymap::screen_filter() as usize),
-            Row::new(Icon::Gauge, lc.set_fps).toggle(fps_counter_on()),
+            Row::new(Icon::Monitor, lc.set_display_mode)
+                .choice(&display_opts, pv::current(V::Display) as usize)
+                .armed_if(armed == Some(V::Display))
+                .note_opt(note("AFFICHAGE", Some(V::Display))),
+            Row::new(Icon::Rotate, lc.set_rotation)
+                .choice(&rot_opts, pv::current(V::Rotation) as usize)
+                .armed_if(armed == Some(V::Rotation))
+                .note_opt(note("ROTATION", Some(V::Rotation))),
+            Row::new(Icon::ZoomIn, lc.set_zoom).value(&zoom).opens().note_opt(note("ZOOM", None)),
+            Row::new(Icon::Pixels, lc.set_pixel_filter)
+                .choice(&pix_opts, pv::current(V::Pixels) as usize)
+                .armed_if(armed == Some(V::Pixels))
+                .note_opt(note("PIXELS", Some(V::Pixels))),
+            Row::new(Icon::Tv, lc.set_screen_filter)
+                .choice(&filter_opts, pv::current(V::Filter) as usize)
+                .armed_if(armed == Some(V::Filter))
+                .note_opt(note("FILTRE", Some(V::Filter))),
+            Row::new(Icon::Gauge, lc.set_fps).toggle(fps_counter_on()).note_opt(note("FPS", None)),
         ];
         debug_assert_eq!(rows.len(), SCREEN_ITEMS.len());
-        let help = match SCREEN_ITEMS.get(selected) {
-            Some(&"AFFICHAGE") => u.help_display,
-            Some(&"ROTATION") => u.help_rotation,
-            Some(&"ZOOM") => u.help_zoom,
-            Some(&"PIXELS") => u.help_pixels,
-            Some(&"FILTRE") => u.help_filter,
-            Some(&"FPS") => u.help_fps,
+        let key = SCREEN_ITEMS.get(selected).copied().unwrap_or("");
+        let help = match key {
+            "AFFICHAGE" => u.help_display,
+            "ROTATION" => u.help_rotation,
+            // A opens the framing on this row: Left and Right, which used to
+            // step it by ten percent, are an armed row's only.
+            "ZOOM" => u.help_zoom_frame,
+            "PIXELS" => u.help_pixels,
+            "FILTRE" => u.help_filter,
+            "FPS" => u.help_fps,
             _ => "",
         };
-        // The zoom row also opens the framing mode on A.
-        let hints_zoom = [(&[Btn::Dpad][..], u.change), (&[Btn::A][..], u.zoom_frame), (&[Btn::B][..], u.back)];
-        let hints = [(&[Btn::Dpad][..], u.change), (&[Btn::B][..], u.back)];
+        // A arms a value row, opens the framing on ZOOM, flips the counter;
+        // armed, what Left / Right, A and B do now. X shows where the game
+        // has a value of its own to drop.
+        let a_verb = match key {
+            "ZOOM" => u.zoom_frame,
+            "FPS" => u.change,
+            _ => u.edit,
+        };
+        let own = !key.is_empty() && !pv::follows_default(key);
+        let hints_armed = [(&[Btn::DpadLR][..], u.change), (&[Btn::A][..], u.validate), (&[Btn::B][..], u.cancel)];
+        let hints_own = [(&[Btn::A][..], a_verb), (&[Btn::X][..], u.reset_default), (&[Btn::B][..], u.back)];
+        let hints = [(&[Btn::A][..], a_verb), (&[Btn::B][..], u.back)];
         let crumbs = [lc.pause_title];
         let mut sheet = kit::sheet::Sheet::new(lc.menu_screen, &rows, selected);
         sheet.kicker = Some(Icon::ChevronLeft);
         sheet.crumbs = &crumbs;
         sheet.glide_key = GLIDE_KEY_SCREEN;
         sheet.help = help;
-        sheet.hints = if SCREEN_ITEMS.get(selected) == Some(&"ZOOM") { &hints_zoom } else { &hints };
+        sheet.hints = if armed.is_some() {
+            &hints_armed
+        } else if own {
+            &hints_own
+        } else {
+            &hints
+        };
         f(self, &sheet)
     }
 
@@ -11579,9 +11707,10 @@ impl SwitchRenderBackend {
     /// The bottom band of the home screens: a hairline, the author credit on
     /// the left (`kit_footer_band`) and what the buttons do on the right.
     ///
-    /// B says what it does only where it does something: clear the search, or
-    /// go back to TOUS from a shelf. Over a search that matched nothing, A, +
-    /// and Y have nothing to act on, and only the two ways out are left.
+    /// B says what it does only where it does something: show every game again
+    /// after a search (the same words on every list, results or none), or go
+    /// back to TOUS from a shelf. Over a search that matched nothing, A, + and
+    /// Y have nothing to act on, and only the two ways out are left.
     fn kit_home_footer(&mut self, empty: bool) {
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
@@ -11598,7 +11727,7 @@ impl SwitchRenderBackend {
             return;
         }
         let back = if searching {
-            Some(u.home_clear)
+            Some(u.home_show_all)
         } else if shelf_open {
             Some(u.home_all)
         } else {
