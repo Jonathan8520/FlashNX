@@ -160,6 +160,43 @@ pub(crate) fn https_error_message(sink: Sink) -> std::string::String {
     }
 }
 
+/// A transfer that failed, as the importer's error page needs it: the sentence
+/// for the player, and whether sending the same request again can work. The
+/// page offers "try again" only then: on a 404 or an answer too big to keep, it
+/// sent a request that failed the same way again.
+pub struct Failure {
+    pub msg: std::string::String,
+    pub retry: bool,
+}
+
+impl Failure {
+    /// A failure that the same request will meet again.
+    fn lasting(msg: &str) -> Self {
+        Failure { msg: std::string::String::from(msg), retry: false }
+    }
+}
+
+/// `https_error_message` with whether trying again can help, read from the same
+/// codes. No network, a refused connection, a timeout, a server busy and a
+/// transfer cut short can all pass on a second try. A page that does not exist
+/// or is refused, an answer too big for its buffer, a full card and a
+/// certificate the console's clock rejects (a clock does not put itself right)
+/// fail the same way again.
+pub(crate) fn https_failure(sink: Sink) -> Failure {
+    let curl = unsafe { https_last_curl_code() };
+    let http = unsafe { https_last_http_code() } as i64;
+    let retry = match curl {
+        23 => false,
+        5 | 6 | 7 | 28 => true,
+        35 | 51 | 53 | 54 | 58 | 59 | 60 | 66 | 77 | 83 => false,
+        // The server answered: busy (429, 5xx) or too slow to hear us out (408)
+        // can pass later; any other refusal is the same next time.
+        _ if http >= 400 => matches!(http, 408 | 429) || http >= 500,
+        _ => true,
+    };
+    Failure { msg: https_error_message(sink), retry }
+}
+
 /// Generic synchronous HTTPS GET into a freshly-allocated buffer; returns the
 /// raw response bytes (truncated to the real length). `cap` bounds the
 /// response (the C++ side returns -3 on overflow). Reuses the exact same
@@ -281,20 +318,18 @@ pub fn extract_item_id(url_or_id: &str) -> Option<std::string::String> {
 /// returns `{server, dir, files:[...]}`; we build each download URL as
 /// `https://archive.org/download/<item_id>/<filename URL-encoded>` (archive.org
 /// redirects to the CDN, keeping us URL-stable across mirror moves).
-fn parse_archive_metadata(
-    buf: &[u8],
-    item_id: &str,
-) -> Result<std::vec::Vec<RemoteFile>, std::string::String> {
+fn parse_archive_metadata(buf: &[u8], item_id: &str) -> Result<std::vec::Vec<RemoteFile>, Failure> {
+    // A garbled answer, which the next one may well not be.
     let json: serde_json::Value = serde_json::from_slice(buf).map_err(|e| {
         log(&std::format!("net: JSON parse failed: {}\n", e));
-        crate::loc::err_json(&e.to_string())
+        Failure { msg: crate::loc::err_json(&e.to_string()), retry: true }
     })?;
     // archive.org answers an identifier it does not know with `{}` and HTTP
     // 200, so a typo in an address arrives here, not as a 404: say that, rather
-    // than that some JSON lacks a field.
+    // than that some JSON lacks a field. Asking again gets the same `{}`.
     let files_json = json.get("files").and_then(|v| v.as_array()).ok_or_else(|| {
         log(&std::format!("net: archive.org/{} has no \"files\" (unknown item)\n", item_id));
-        std::string::String::from(crate::loc_ui::ui().imp_err_item_missing)
+        Failure::lasting(crate::loc_ui::ui().imp_err_item_missing)
     })?;
     let mut out: std::vec::Vec<RemoteFile> = std::vec::Vec::new();
     // Remember the item's WHOLE contents before filtering: a multi-file game's
@@ -336,7 +371,7 @@ fn parse_archive_metadata(
 pub enum ArchivePoll {
     Pending,
     Done(std::vec::Vec<RemoteFile>),
-    Error(std::string::String),
+    Error(Failure),
 }
 
 /// item-id of the in-flight async fetch, kept so completion can build the
@@ -388,14 +423,14 @@ pub fn tick_archive_fetch() -> ArchivePoll {
     }
     if rc < 0 {
         log(&std::format!("net: archive fetch failed: {}\n", last_https_error()));
-        return ArchivePoll::Error(https_error_message(Sink::Memory));
+        return ArchivePoll::Error(https_failure(Sink::Memory));
     }
     // rc == 1: response ready — copy out of C++ and parse.
     const CAP: usize = 8 * 1024 * 1024;
     let mut buf = std::vec![0u8; CAP];
     let n = unsafe { https_get_buffer(buf.as_mut_ptr() as *mut c_char, CAP as c_int) };
     if n < 0 {
-        return ArchivePoll::Error(std::string::String::from(crate::loc::s().err_too_large));
+        return ArchivePoll::Error(Failure::lasting(crate::loc::s().err_too_large));
     }
     buf.truncate(n as usize);
     let item_id = FETCH_ITEM_ID.lock().map(|g| g.clone()).unwrap_or_default();
@@ -546,8 +581,8 @@ pub fn start_download(url: &str, out_path: &str) -> Result<(), std::string::Stri
 /// Returns:
 ///   - `Ok(false)` → still in progress
 ///   - `Ok(true)`  → finished successfully
-///   - `Err(msg)`  → failed; the partial output file has been removed
-pub fn tick_download() -> Result<bool, std::string::String> {
+///   - `Err(f)`    → failed; the partial output file has been removed
+pub fn tick_download() -> Result<bool, Failure> {
     let rc = unsafe { https_download_tick() };
     if rc == 0 {
         return Ok(false);
@@ -559,9 +594,9 @@ pub fn tick_download() -> Result<bool, std::string::String> {
     // cause (SD full, server 404, clock/TLS...) rather than printing "code -2".
     if rc == -2 {
         log(&std::format!("net: download failed: {}\n", last_https_error()));
-        return Err(https_error_message(Sink::Sd));
+        return Err(https_failure(Sink::Sd));
     }
-    Err(crate::loc::err_dl_failed(rc))
+    Err(Failure { msg: crate::loc::err_dl_failed(rc), retry: true })
 }
 
 /// Current bytes downloaded / total bytes (0 until the Content-Length

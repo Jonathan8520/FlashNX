@@ -10084,20 +10084,20 @@ fn poll_archive_fetch() {
                 }
             }
         }
-        net::ArchivePoll::Error(e) => {
+        net::ArchivePoll::Error(f) => {
             let Ok(mut s) = LIBRARY.lock() else { return };
             let label = importer_label(&s.pending_fetch_url);
             // archive.org answering "nothing here" is a wrong address, which
-            // asking again will not fix. When what was typed is one bare word,
-            // it may have been a game's name: offer Flashpoint for it.
-            let missing = e == crate::loc_ui::ui().imp_err_item_missing;
-            if missing {
+            // asking again will not fix (`f.retry` is false for it, as for a 404
+            // or an answer too big). When what was typed is one bare word, it
+            // may have been a game's name: offer Flashpoint for it.
+            if f.msg == crate::loc_ui::ui().imp_err_item_missing {
                 let typed = s.failed_url.trim().to_string();
                 if !typed.is_empty() && !typed.contains('/') && !typed.contains('.') {
                     s.import_fp_suggest = typed;
                 }
             }
-            import_error(&mut s, ErrKind::Open, &e, !missing, &label);
+            import_error(&mut s, ErrKind::Open, &f.msg, f.retry, &label);
         }
     }
 }
@@ -10275,14 +10275,14 @@ fn drive_download(backend: &mut SwitchRenderBackend, tick: bool) {
             match net::tick_download() {
                 Ok(false) => {}
                 Ok(true) => on_download_finished(backend),
-                Err(msg) => {
+                Err(f) => {
                     if let Ok(mut s) = LIBRARY.lock() {
                         let name = s
                             .download_title
                             .clone()
                             .filter(|t| !t.trim().is_empty())
                             .unwrap_or_else(|| pretty_name(&s.download_file_name));
-                        import_error(&mut s, ErrKind::Download, &msg, true, &name);
+                        import_error(&mut s, ErrKind::Download, &f.msg, f.retry, &name);
                     }
                 }
             }
