@@ -4248,8 +4248,11 @@ fn input_inner(button: &str) -> bool {
         }
         Screen::DistantCancelConfirm { selection } => {
             match button {
-                "Left" | "StickLLeft" | "Right" | "StickLRight" | "Up" | "StickLUp" | "Down" | "StickLDown" => {
-                    s.screen = Screen::DistantCancelConfirm { selection: 1 - selection.min(1) };
+                // The answers side by side: Left / Up on the first, Right / Down
+                // on the second, so a held direction rests on one.
+                "Left" | "StickLLeft" | "Up" | "StickLUp" => s.screen = Screen::DistantCancelConfirm { selection: 0 },
+                "Right" | "StickLRight" | "Down" | "StickLDown" => {
+                    s.screen = Screen::DistantCancelConfirm { selection: 1 }
                 }
                 // Stop: the question scales out with the page still behind it,
                 // the download keeps going until it has, then render stops it.
@@ -4274,12 +4277,11 @@ fn input_inner(button: &str) -> bool {
             }
             true
         }
-        Screen::ImportNotAddress { selection } => {
+        Screen::ImportNotAddress { .. } => {
             // A is hoisted (the keyboard, or the search).
             match button {
-                "Left" | "StickLLeft" | "Right" | "StickLRight" | "Up" | "StickLUp" | "Down" | "StickLDown" => {
-                    s.screen = Screen::ImportNotAddress { selection: 1 - selection.min(1) };
-                }
+                "Left" | "StickLLeft" | "Up" | "StickLUp" => s.screen = Screen::ImportNotAddress { selection: 0 },
+                "Right" | "StickLRight" | "Down" | "StickLDown" => s.screen = Screen::ImportNotAddress { selection: 1 },
                 "B" | "Minus" => s.screen = distant_idle_at(&s, 1),
                 _ => {}
             }
@@ -4290,8 +4292,9 @@ fn input_inner(button: &str) -> bool {
             // render's close-done; Cancel drops back onto the source's options,
             // on the row that asked, as a game's delete does.
             match button {
-                "Left" | "StickLLeft" | "Right" | "StickLRight" | "Up" | "StickLUp" | "Down" | "StickLDown" => {
-                    s.screen = Screen::DistantHistoryConfirm { selection: 1 - selection.min(1) };
+                "Left" | "StickLLeft" | "Up" | "StickLUp" => s.screen = Screen::DistantHistoryConfirm { selection: 0 },
+                "Right" | "StickLRight" | "Down" | "StickLDown" => {
+                    s.screen = Screen::DistantHistoryConfirm { selection: 1 }
                 }
                 "A" if selection == 1 => {
                     let idx = s.history_idx.unwrap_or(0);

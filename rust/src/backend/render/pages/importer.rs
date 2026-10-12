@@ -493,7 +493,10 @@ impl SwitchRenderBackend {
         let lx = tx + TILE + GAP;
         let avail = (right - 6.0 - lx).max(40.0);
         let name = self.kit_fit_mid(row.name, size::BODY, avail);
-        self.kit_text_mid(lx, cy - 9.0, size::BODY, &name, col::TEXT);
+        // A bare archive.org identifier has no site to show under it: the name
+        // then sits in the middle of its row.
+        let name_cy = if row.host.is_empty() { cy } else { cy - 9.0 };
+        self.kit_text_mid(lx, name_cy, size::BODY, &name, col::TEXT);
         if !row.host.is_empty() {
             let host = self.kit_fit(row.host, size::CAPTION, avail);
             self.kit_text_mid(lx, cy + 11.0, size::CAPTION, &host, col::TEXT3);
