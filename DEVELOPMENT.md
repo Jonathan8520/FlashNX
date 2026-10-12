@@ -55,7 +55,7 @@ flash-for-switch/
 │       ├── sources/             # Multi-source: classify (archive.org / direct .swf) + Flashpoint search/cover logos + GameZIP game download (gamezip.rs)
 │       ├── covers.rs            # Local cover art: sidecar/cache/default resolution + PNG/JPEG decode + Flashpoint fetch (manual + auto-on-download)
 │       ├── keymap.rs             # JSON keymap (sidecar + default + fallback) + mutation API
-│       ├── menu.rs               # TOUCHES sub-screen state machine (pages of the pause sheet + the controls editor)
+│       ├── menu.rs               # TOUCHES sub-screen state machine (pages beside the pause + the controls editor)
 │       ├── loc.rs                # UI localization (9 languages) + settings.json persistence
 │       ├── loc_ui.rs             # strings of the screens rebuilt on the interface kit (9 languages)
 │       ├── sfx.rs                # which interface sound a press deserves, read from the screen before and after it
@@ -65,7 +65,8 @@ flash-for-switch/
 │           │                     #   stencil masking INCR/DECR + Glow/DropShadow/Blur/ColorMatrix/Bevel filters +
 │           │                     #   FilterTexturePool TTL + render_offscreen/resolve_sync_handle (BitmapData.draw) + UI overlays
 │           ├── render/kit/       # interface bricks: console fonts + button glyphs (text.rs), SDF shapes (shapes.rs),
-│           │                     #   cover rule (cover.rs), windows/rows/side sheet (window.rs), scrolling list (list.rs),
+│           │                     #   cover rule (cover.rs), windows (window.rs), scrolling list + Row (list.rs),
+│           │                     #   row controls, chips, help box (controls.rs), side panels + cascade (sheet.rs),
 │           │                     #   Lucide icon font subset (icons.rs + icons.ttf, built by scripts/make_icon_font.py), theme.rs
 │           ├── render/pages/     # whole screens drawn from the kit: settings, importer, flashpoint, game options, windows
 │           ├── audio.rs          # SwitchAudioBackend (port CpalAudioBackend → libnx audren)
@@ -85,7 +86,11 @@ flash-for-switch/
 └── scripts/{build.sh, build.ps1, setup-env.ps1, setup-env.sh}
 ```
 
-**Interface.** Every launcher and pause screen draws through the kit in `backend/render/kit/`: text in the console's shared fonts (`pl`: Standard, NintendoExt for the button glyphs, Chinese Simplified on demand), rasterised at the size it is shown into a per-renderer atlas; rounded panels, rings and shadows from one SDF shader; icons from a Lucide subset compiled into the binary. Colours, sizes and radii live in `kit/theme.rs`. A new screen goes in `render/pages/` and is built from `kit_scroll_rows` / `Row`, `draw_modal_frame`, `draw_confirm`, `kit_side_sheet` and `kit_hints*` rather than drawing its own rows; new strings go in `loc_ui.rs`, in all nine languages. The hand-drawn 5x7 font remains only as the fallback when the console fonts cannot be loaded.
+**Interface.** Every launcher and pause screen draws through the kit in `backend/render/kit/`: text in the console's shared fonts (`pl`: Standard, NintendoExt for the button glyphs, Chinese Simplified on demand), rasterised at the size it is shown into a per-renderer atlas; rounded panels, rings and shadows from one SDF shader; icons from a Lucide subset compiled into the binary. Colours, sizes and radii live in `kit/theme.rs`. A new screen goes in `render/pages/` and is built from `kit_scroll_rows` / `Row`, `draw_modal_frame`, `draw_confirm`, `Sheet` and `kit_hints*` rather than drawing its own rows; new strings go in `loc_ui.rs`, in all nine languages. The hand-drawn 5x7 font remains only as the fallback when the console fonts cannot be loaded.
+
+A row is a `Row` (`kit/list.rs`): an icon, a label, a control on the right (`Ctrl` in `kit/controls.rs`: a value to read, a value between arrows, a choice with every option on show, a switch), and a chevron when A opens another page. The chevron is the promise that A goes somewhere; a row without one acts where it is. Left and Right move a choice along and stop at its ends, A goes round (`step_choice`); lists wrap on a fresh press and stop under a held direction (`list_step_wrap`).
+
+A side panel is a `Sheet` (`kit/sheet.rs`), described as data and drawn by `kit_sheet_at`: a caption with the path, the title, status chips, the rows in sections, a help box for the focused row, the hints. The in-game pause is one at the left edge (`with_pause_sheet` in `render.rs`); a game's options in the launcher are one at the right edge (`library/options_panel.rs`). A row with a chevron opens its page beside the panel rather than over it: the panel folds to a column of icons with the branch marked, the page is uncovered next to it, and B folds it back (`kit_cascade_on`). The pages shared by both doors (Touches et curseur, the shared profiles, the before / after tables) are built once in `menu.rs` (`with_touches_view`, `with_profiles_view`, `with_diff_view`).
 
 The UI/Video backends use the `Null*` implementations provided by default by `ruffle_core` (no dedicated file). **Audio** = `SwitchAudioBackend`. **Storage** = `SwitchStorageBackend`. **Navigator** = `SidecarNavigator`: for multi-file games it resolves relative loads (`loadMovie` / `GetURL` into `_levelN`) against the movie URL and reads the sibling SWF from `<game>.files/` on the SD card; the spawned loader futures are pumped once per frame by a `NullExecutor` kept in `State` (after the player lock is released, since they re-lock the player). Genuine network fetches stay rejected.
 
