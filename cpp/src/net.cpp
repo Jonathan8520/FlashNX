@@ -797,8 +797,11 @@ extern "C" int swkbd_prompt_rename(const char* header, const char* guide, const 
     return 0;
 }
 
-// `initial` may be NULL or empty — falls back to a sensible default so
-// the user lands on a usable prefix even on the very first import.
+// `initial` may be NULL or empty: the field then opens EMPTY. It used to fall
+// back to "https://archive.org/download/", which hid the guide text (swkbd
+// shows it only in an empty field), pointed at archive.org alone, and glued
+// that prefix to a game's name typed after it, so the importer could no longer
+// tell a name from an address.
 extern "C" int swkbd_prompt_url(const char* header, const char* guide, const char* initial, char* out, int cap) {
     if (cap < 2) return -1;
     SwkbdConfig kbd;
@@ -816,8 +819,7 @@ extern "C" int swkbd_prompt_url(const char* header, const char* guide, const cha
     swkbdConfigSetType(&kbd, SwkbdType_QWERTY);
     if (guide && *guide) swkbdConfigSetGuideText(&kbd, guide);
     if (header && *header) swkbdConfigSetHeaderText(&kbd, header);
-    const char* prefill = (initial && *initial) ? initial : "https://archive.org/download/";
-    swkbdConfigSetInitialText(&kbd, prefill);
+    if (initial && *initial) swkbdConfigSetInitialText(&kbd, initial);
     swkbdConfigSetStringLenMax(&kbd, swkbd_char_limit(cap));
     rc = swkbdShow(&kbd, out, (size_t)cap);
     swkbdClose(&kbd);

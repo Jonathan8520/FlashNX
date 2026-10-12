@@ -7180,7 +7180,10 @@ fn run_add_url_flow(initial: Option<&str>) {
     }
     if url.contains(char::is_whitespace) {
         if let Ok(mut s) = LIBRARY.lock() {
-            s.import_typed = url;
+            // A name typed after an archive.org address is still a name: the
+            // question quotes it, and Flashpoint is searched for it, without
+            // the address in front.
+            s.import_typed = strip_archive_prefix(&url).trim().to_string();
             s.screen = Screen::ImportNotAddress { selection: 1 };
         }
         return;
@@ -7195,6 +7198,25 @@ fn run_add_url_flow(initial: Option<&str>) {
         s.screen = distant_idle_at(&s, 1);
     }
     run_fetch_for_url(&url, 1, IMPORT_SCROLL.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+/// `text` without a leading archive.org download or details address
+/// (`https://archive.org/download/`, `archive.org/details/`...), compared
+/// without regard to case.
+fn strip_archive_prefix(text: &str) -> &str {
+    let lower = text.to_ascii_lowercase();
+    for scheme in ["https://", "http://", ""] {
+        for host in ["www.archive.org/", "archive.org/"] {
+            for kind in ["download/", "details/"] {
+                let prefix = std::format!("{}{}{}", scheme, host, kind);
+                // ASCII on both sides of the cut, since the prefix matched it.
+                if lower.starts_with(&prefix) {
+                    return text.get(prefix.len()..).unwrap_or(text);
+                }
+            }
+        }
+    }
+    text
 }
 
 /// IMPORTER home search (Minus): the keyboard pre-filled with the active search,
@@ -10437,7 +10459,10 @@ fn poll_archive_fetch() {
             // or an answer too big). When what was typed is one bare word, it
             // may have been a game's name: offer Flashpoint for it.
             if f.msg == crate::loc_ui::ui().imp_err_item_missing {
-                let typed = s.failed_url.trim().to_string();
+                // The identifier asked for, which is the word itself when it
+                // came after an archive.org address: a game's name typed there
+                // is still one bare word.
+                let typed = net::extract_item_id(&s.failed_url).unwrap_or_default();
                 if !typed.is_empty() && !typed.contains('/') && !typed.contains('.') {
                     s.import_fp_suggest = typed;
                 }
