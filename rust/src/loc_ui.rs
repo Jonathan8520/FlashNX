@@ -232,6 +232,24 @@ pub struct Ui {
     pub help_key_keyboard: &'static str,
     /// Toast when A or a tap lands on a modifier row (both {} = that button: ZL, ZR, L or R).
     pub toast_modifier_locked: &'static str,
+    /// The key picker's header, in a combo layer ({} = its button: ZL, ZR, L or R).
+    pub key_layer: &'static str,
+    /// The key picker's header, before the key the button sends now.
+    pub key_current: &'static str,
+    /// The key picker's legend for a teal key: another button already sends it.
+    pub key_used: &'static str,
+    /// The key picker's line on a teal key ({} = the glyphs of the buttons that send it).
+    pub key_used_by: &'static str,
+    /// The key picker's line on None (Normal layer).
+    pub help_key_none: &'static str,
+    /// The key picker's line on Same as Normal (a combo layer).
+    pub help_key_inherit: &'static str,
+    /// The key picker's line on the two mouse clicks.
+    pub help_key_click: &'static str,
+    /// The caption over the key picker's numpad.
+    pub keys_numpad: &'static str,
+    /// The caption over the key picker's band of what is not a key (None, the clicks, the Switch keyboard).
+    pub keys_other: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -386,6 +404,15 @@ const EN: Ui = Ui {
     help_pad_layer: "{} layer: these keys replace the normal ones while you hold {}.",
     help_key_keyboard: "Opens the Switch keyboard to type in the game.",
     toast_modifier_locked: "{} holds the {} layer, so it sends no key. Empty that layer to free it.",
+    key_layer: "{} layer",
+    key_current: "Current key",
+    key_used: "Already in use",
+    key_used_by: "Already on {}",
+    help_key_none: "This button will send nothing.",
+    help_key_inherit: "In this layer, this button will send the same key as in Normal.",
+    help_key_click: "Clicks where the mouse cursor is.",
+    keys_numpad: "Numpad",
+    keys_other: "Other",
 };
 
 const FR: Ui = Ui {
@@ -540,6 +567,15 @@ const FR: Ui = Ui {
     help_pad_layer: "Couche {} : ces touches remplacent les normales tant que tu maintiens {}.",
     help_key_keyboard: "Ouvre le clavier de la Switch pour écrire dans le jeu.",
     toast_modifier_locked: "{} tient la couche {} : il n'envoie plus de touche. Vide cette couche pour le libérer.",
+    key_layer: "Couche {}",
+    key_current: "Touche actuelle",
+    key_used: "Déjà utilisée",
+    key_used_by: "Déjà sur {}",
+    help_key_none: "Ce bouton n'enverra plus rien.",
+    help_key_inherit: "Dans cette couche, ce bouton enverra la même touche qu'en Normal.",
+    help_key_click: "Clique là où se trouve le curseur de la souris.",
+    keys_numpad: "Pavé numérique",
+    keys_other: "Autres",
 };
 
 const ES: Ui = Ui {
@@ -694,6 +730,15 @@ const ES: Ui = Ui {
     help_pad_layer: "Capa {}: estas teclas sustituyen a las normales mientras mantienes {}.",
     help_key_keyboard: "Abre el teclado de la Switch para escribir en el juego.",
     toast_modifier_locked: "{} mantiene la capa {}: ya no envía ninguna tecla. Vacía esa capa para liberarlo.",
+    key_layer: "Capa {}",
+    key_current: "Tecla actual",
+    key_used: "Ya en uso",
+    key_used_by: "Ya en {}",
+    help_key_none: "Este botón no enviará nada.",
+    help_key_inherit: "En esta capa, este botón enviará la misma tecla que en Normal.",
+    help_key_click: "Hace clic donde está el cursor del ratón.",
+    keys_numpad: "Teclado numérico",
+    keys_other: "Otros",
 };
 
 const RU: Ui = Ui {
@@ -848,6 +893,15 @@ const RU: Ui = Ui {
     help_pad_layer: "Слой {}: эти клавиши заменяют обычные, пока ты держишь {}.",
     help_key_keyboard: "Открывает клавиатуру Switch, чтобы вводить текст в игре.",
     toast_modifier_locked: "{} удерживает слой {} и не отправляет клавишу. Очисти этот слой, чтобы освободить кнопку.",
+    key_layer: "Слой {}",
+    key_current: "Текущая клавиша",
+    key_used: "Уже занята",
+    key_used_by: "Уже на {}",
+    help_key_none: "Эта кнопка ничего не будет отправлять.",
+    help_key_inherit: "В этом слое кнопка будет отправлять ту же клавишу, что и в обычном.",
+    help_key_click: "Щелчок там, где находится курсор мыши.",
+    keys_numpad: "Цифровой блок",
+    keys_other: "Другое",
 };
 
 const DE: Ui = Ui {
@@ -1002,6 +1056,15 @@ const DE: Ui = Ui {
     help_pad_layer: "Ebene {}: Diese Tasten ersetzen die normalen, solange du {} hältst.",
     help_key_keyboard: "Öffnet die Switch-Tastatur, um im Spiel zu schreiben.",
     toast_modifier_locked: "{} hält die Ebene {} und sendet keine Taste mehr. Leere diese Ebene, um ihn freizugeben.",
+    key_layer: "Ebene {}",
+    key_current: "Aktuelle Taste",
+    key_used: "Schon belegt",
+    key_used_by: "Schon auf {}",
+    help_key_none: "Dieser Knopf sendet dann nichts.",
+    help_key_inherit: "In dieser Ebene sendet dieser Knopf dieselbe Taste wie in Normal.",
+    help_key_click: "Klickt dort, wo der Mauszeiger steht.",
+    keys_numpad: "Ziffernblock",
+    keys_other: "Weitere",
 };
 
 const IT: Ui = Ui {
@@ -1156,6 +1219,15 @@ const IT: Ui = Ui {
     help_pad_layer: "Livello {}: questi tasti sostituiscono quelli normali finché tieni premuto {}.",
     help_key_keyboard: "Apre la tastiera della Switch per scrivere nel gioco.",
     toast_modifier_locked: "{} tiene il livello {}: non invia più tasti. Svuota quel livello per liberarlo.",
+    key_layer: "Livello {}",
+    key_current: "Tasto attuale",
+    key_used: "Già in uso",
+    key_used_by: "Già su {}",
+    help_key_none: "Questo pulsante non invierà nulla.",
+    help_key_inherit: "In questo livello, questo pulsante invierà lo stesso tasto che in Normale.",
+    help_key_click: "Fa clic dove si trova il cursore del mouse.",
+    keys_numpad: "Tastierino numerico",
+    keys_other: "Altro",
 };
 
 const PT: Ui = Ui {
@@ -1310,6 +1382,15 @@ const PT: Ui = Ui {
     help_pad_layer: "Camada {}: estas teclas substituem as normais enquanto você segura {}.",
     help_key_keyboard: "Abre o teclado do Switch para digitar no jogo.",
     toast_modifier_locked: "{} segura a camada {}: não envia mais nenhuma tecla. Esvazie essa camada para liberá-lo.",
+    key_layer: "Camada {}",
+    key_current: "Tecla atual",
+    key_used: "Já em uso",
+    key_used_by: "Já em {}",
+    help_key_none: "Este botão não vai enviar nada.",
+    help_key_inherit: "Nesta camada, este botão vai enviar a mesma tecla do Normal.",
+    help_key_click: "Clica onde está o cursor do mouse.",
+    keys_numpad: "Teclado numérico",
+    keys_other: "Outros",
 };
 
 const ZH: Ui = Ui {
@@ -1464,6 +1545,15 @@ const ZH: Ui = Ui {
     help_pad_layer: "{} 层：按住 {} 时，这些按键会取代普通按键。",
     help_key_keyboard: "打开 Switch 键盘，在游戏中输入文字。",
     toast_modifier_locked: "{} 用于按住 {} 层，不再发送按键。清空该层即可恢复。",
+    key_layer: "{} 层",
+    key_current: "当前按键",
+    key_used: "已被使用",
+    key_used_by: "已用于 {}",
+    help_key_none: "此按钮将不发送任何按键。",
+    help_key_inherit: "在此层中，此按钮将发送与普通层相同的按键。",
+    help_key_click: "在鼠标光标所在处点击。",
+    keys_numpad: "数字小键盘",
+    keys_other: "其他",
 };
 
 const TR: Ui = Ui {
@@ -1618,6 +1708,15 @@ const TR: Ui = Ui {
     help_pad_layer: "{} katmanı: {} basılı tutulduğu sürece bu tuşlar normal olanların yerine geçer.",
     help_key_keyboard: "Oyunda yazı yazmak için Switch klavyesini açar.",
     toast_modifier_locked: "{}, {} katmanını tutuyor; artık tuş göndermiyor. Serbest bırakmak için o katmanı boşalt.",
+    key_layer: "{} katmanı",
+    key_current: "Şu anki tuş",
+    key_used: "Zaten kullanılıyor",
+    key_used_by: "Zaten {} üzerinde",
+    help_key_none: "Bu düğme hiçbir şey göndermeyecek.",
+    help_key_inherit: "Bu katmanda bu düğme Normal'deki tuşun aynısını gönderecek.",
+    help_key_click: "Fare imlecinin olduğu yere tıklar.",
+    keys_numpad: "Sayı tuşları",
+    keys_other: "Diğer",
 };
 
 pub fn ui() -> &'static Ui {

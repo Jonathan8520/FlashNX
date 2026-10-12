@@ -181,6 +181,9 @@ const GLIDE_KEY_PAUSE: u32 = 52;
 const GLIDE_KEY_SCREEN: u32 = 53;
 const GLIDE_KEY_LANG: u32 = 50;
 const GLIDE_KEY_KEYS: u32 = 56;
+/// The key picker's cursor: its own slot, so it snaps to the key it opens on
+/// instead of flying in from the pad row.
+const GLIDE_KEY_KEYBOARD: u32 = 61;
 const GLIDE_KEY_COVER: u32 = 55;
 // 52 and 54 used to be the folder picker's; it derives its own keys from the
 // path it is showing, so a step into another folder snaps instead of sliding.
@@ -286,6 +289,23 @@ pub(crate) struct PadView<'a> {
     pub profiles: bool,
     /// The line about the focused row.
     pub help: &'a str,
+}
+
+/// The key picker as data, gathered by `menu.rs`.
+pub(crate) struct KeysView<'a> {
+    /// The editor's path, then the editor.
+    pub crumbs: &'a [&'a str],
+    /// The edited button's pad label (`keymap::PadSlot::glyph`).
+    pub glyph: &'a str,
+    /// The open combo layer's button ("ZL"), None in the Normal layer.
+    pub layer: Option<&'a str>,
+    pub player: u8,
+    /// What the button sends now in that layer.
+    pub current: &'a PadValue,
+    /// Indexes `keymap::KEYBOARD`.
+    pub cursor: usize,
+    /// The keys the other buttons send, with their pad labels.
+    pub used: &'a std::collections::BTreeMap<std::string::String, std::vec::Vec<&'static str>>,
 }
 
 /// What the editor's touch table holds after its twenty-five rows: the two
@@ -10131,93 +10151,227 @@ impl SwitchRenderBackend {
         }
     }
 
-    /// TOUCHES keyboard picker (issue #55) — shown when the user presses A on a
-    /// control of the pad. Draws a real PC keyboard from `keymap::KEYBOARD` (positioned keys,
-    /// numpad on the RIGHT) with the key at `sel_key_idx` highlighted amber. Keys
-    /// already bound to another button in the current map (`used`) get a teal cap
-    /// so the user sees a key is already in use (they can still pick it). The user
-    /// navigates geometrically (menu.rs). QWERTY is fixed for every language.
-    pub fn draw_touches_keyboard(
-        &mut self,
-        button_name: &str,
-        sel_key_idx: usize,
-        used: &std::collections::BTreeMap<std::string::String, std::vec::Vec<&'static str>>,
-    ) {
-        let keys = crate::keymap::KEYBOARD;
-        const KEY_H: f32 = 48.0;
+    /// TOUCHES key picker (issue #55), shown when A is pressed on a row of the
+    /// pad, in the editor's own window. Draws a real PC keyboard from
+    /// `keymap::KEYBOARD` (positioned keys, numpad on the RIGHT under its
+    /// caption, the arrows in an inverted T), and under it, in a band of their
+    /// own, what is not a key: nothing, the two clicks, the console keyboard.
+    /// The user navigates geometrically (menu.rs). QWERTY is fixed for every
+    /// language.
+    ///
+    /// It says what is being edited and what it is now: "Key for" and the
+    /// button's own glyph (behind its layer's glyph in a combo layer), the
+    /// player and layer when they are not the obvious ones, the current key on
+    /// a keycap and outlined on the board. A key another button already sends
+    /// is teal, the legend at the bottom says so, and the line over it names
+    /// that button when the cursor is on it. The cursor glides like the pad's.
+    pub(crate) fn draw_touches_keyboard(&mut self, v: &KeysView) {
+        use theme::{col, size};
         const KEY_GAP: f32 = 6.0;
-        const SIDE_MARGIN: f32 = 30.0;
-        // Wider than the 720 modal so the main block + right-hand numpad both fit.
-        const PANEL_W: f32 = 1120.0;
+        /// The band of the line about the focused key, over the footer.
+        const HELP_H: f32 = 36.0;
+        /// Under the board: the gap, the band's caption, the gap to its pills.
+        const BAND_GAP: f32 = 14.0;
+        const BAND_CAPTION: f32 = 22.0;
+        const FACE: u32 = 0xFF_22_32_4F;
+        const FACE_USED: u32 = 0xFF_2E_6E_63;
+        const INK_USED: u32 = 0xFF_EA_F7_F3;
+        const LIP: u32 = 0xFF_0E_17_2A;
+        const ON_INK: u32 = 0xFF_1A_14_05;
 
-        // The frame clamps its width to the screen, so a turned picture gives a
-        // narrower panel; the key HEIGHT has to follow or the keys come out thin
-        // and tall, and the panel taller than it needs to be.
+        let u = crate::loc_ui::ui();
+        let keys = crate::keymap::KEYBOARD;
         let vw = self.dimensions.width as f32;
-        let shrink = ((vw - 40.0) / PANEL_W).clamp(0.45, 1.0);
-        let key_h = KEY_H * shrink;
-        let key_gap = KEY_GAP * shrink;
-        // Header and footer bands shrink WITH the keys. Scaling the key block
-        // alone left the rows running past the bottom of the panel and over the
-        // "A:OK  B:ANNULER" line, because the header still reserved its landscape
-        // 108 px while the block below it had got shorter.
-        let head_h = 108.0 * shrink.max(0.7);
-        let foot_h = 54.0 * shrink.max(0.7);
-        let n_rows = crate::keymap::KEYBOARD_ROWS_N as f32;
-        let panel_h = head_h + n_rows * (key_h + key_gap) + foot_h;
-        // "Touche pour ZL": the old title was "ZL ->", an arrow pointing at
-        // nothing that said what the screen was for.
-        let title = crate::loc_ui::ui().key_for.replacen("{}", button_name, 1);
-        let frame = self.draw_modal_frame(
-            PANEL_W,
-            0,
-            Some(panel_h),
-            false,
-            &title,
-            None,
-            Some(crate::loc::s().keys_dropdown_footer),
-        );
-
-        let inner_w = frame.w - 2.0 * SIDE_MARGIN;
+        let vh = self.dimensions.height as f32;
+        let inner_w = vw - 2.0 * TOUCHES_MARGIN - 2.0 * TOUCHES_PAD_X;
         let unit_w = inner_w / crate::keymap::KEYBOARD_UNITS_W;
-        let origin_x = frame.x + SIDE_MARGIN;
-        let top_y = frame.y + head_h;
+        // The keys take the room the window has, but never come out taller
+        // than wide: a turned picture gives a narrow window, and its keys
+        // shrink with it.
+        let board_rows = (crate::keymap::KEYBOARD_ROWS_N - 1) as f32;
+        let full = vw >= vh;
+        let fixed = TOUCHES_HEAD_H + BAND_GAP + BAND_CAPTION + HELP_H + TOUCHES_FOOT_H;
+        let room = vh - 2.0 * TOUCHES_MARGIN - fixed;
+        let gap = (KEY_GAP * unit_w / 60.0).clamp(3.0, KEY_GAP);
+        let key_h = ((room / (board_rows + 1.0)) - gap).min(unit_w * 0.88).max(18.0);
+        let pill_h = (key_h - 6.0).max(16.0);
+        let block_h = board_rows * (key_h + gap) + BAND_GAP + BAND_CAPTION + pill_h;
+        // In landscape the window is the editor's, to the pixel; turned, it is
+        // as tall as its keys need.
+        let content_h = TOUCHES_HEAD_H + block_h + 16.0 + HELP_H + TOUCHES_FOOT_H;
+        let (x, y, w, h) = self.touches_window(if full { vh } else { content_h });
+        let left = x + TOUCHES_PAD_X;
+        let right = x + w - TOUCHES_PAD_X;
 
-        // The caps are hit-testable now. The rects were already being computed
-        // here and thrown away at the end of each iteration; they are exactly
-        // the numbers a tap needs, and the layout is responsive (`shrink`), so
-        // they could never have been constants somewhere else.
-        let mut cells: std::vec::Vec<(f32, f32, f32, f32)> =
-            std::vec::Vec::with_capacity(keys.len());
-        for (i, &(name, row, kx, kw)) in keys.iter().enumerate() {
-            let x = origin_x + kx * unit_w;
-            let key_w = kw * unit_w - key_gap;
-            let y = top_y + row as f32 * (key_h + key_gap);
-            cells.push((x, y, key_w, key_h));
-            let (cap_col, txt_col) = if i == sel_key_idx {
-                (theme::col::GOLD, 0xFF_1A_14_05) // the cursor
-            } else if used.contains_key(name) {
-                (0xFF_2E_6E_63, 0xFF_EA_F7_F3) // teal = already bound elsewhere
+        // ── The header ───────────────────────────────────────────────────
+        self.touches_crumbs(left, y + 30.0, inner_w, v.crumbs);
+        let ty = y + 66.0;
+        // "Key for" and the button's glyph where the sentence puts it (the
+        // button comes first in Turkish and Chinese), its layer's glyph and a
+        // plus before it: the title used to be "Touche pour StickLUp".
+        let (before, after) = u.key_for.split_once("{}").unwrap_or((u.key_for, ""));
+        let bpx = 20.0;
+        let mut tx = left;
+        tx += self.kit_text_mid(tx, ty, TOUCHES_TITLE_PX, before.trim_end(), col::TEXT);
+        if !before.trim_end().is_empty() {
+            tx += 10.0;
+        }
+        if let Some(m) = v.layer {
+            let mw = self.pad_badge_width(m, bpx);
+            self.kit_pad_badge(tx, ty, mw, m, bpx, col::TEXT2);
+            tx += mw + 6.0;
+            tx += self.kit_text_mid(tx, ty, TOUCHES_TITLE_PX, "+", col::TEXT3) + 6.0;
+        }
+        let gw = self.pad_badge_width(v.glyph, bpx);
+        self.kit_pad_badge(tx, ty, gw, v.glyph, bpx, col::GOLD);
+        tx += gw;
+        if !after.trim_start().is_empty() {
+            tx += 10.0;
+            tx += self.kit_text_mid(tx, ty, TOUCHES_TITLE_PX, after.trim_start(), col::TEXT);
+        }
+        // On the right, where the editor has its switches: the player and the
+        // layer when they are not the obvious ones, and the key it sends now.
+        let mut ctx: std::vec::Vec<std::string::String> = std::vec::Vec::new();
+        if v.player == 2 {
+            ctx.push(u.player_2.to_string());
+        }
+        if let Some(m) = v.layer {
+            ctx.push(u.key_layer.replacen("{}", m, 1));
+        }
+        ctx.push(u.key_current.to_string());
+        let cpx = size::LABEL;
+        let cur_w = self.keys_current_width(v.current, cpx);
+        for drop_parts in [false, true] {
+            let words = if drop_parts { u.key_current.to_string() } else { ctx.join("  \u{00B7}  ") };
+            let ww = self.kit_measure(&words, cpx);
+            let cw = ww + 10.0 + cur_w;
+            if right - cw >= tx + 24.0 {
+                let cx0 = right - cw;
+                self.kit_text_mid(cx0, ty, cpx, &words, col::TEXT3);
+                self.keys_current(cx0 + ww + 10.0, ty, v.current, cpx);
+                break;
+            }
+        }
+        self.draw_overlay_rect(left, y + TOUCHES_HEAD_H - 6.0, inner_w, 1.0, col::LINE);
+
+        // ── The board ────────────────────────────────────────────────────
+        let area_top = y + TOUCHES_HEAD_H;
+        let area_bot = y + h - TOUCHES_FOOT_H - HELP_H;
+        let top_y = (area_top + ((area_bot - area_top) - block_h) * 0.5).max(area_top).round();
+        let band_y = top_y + board_rows * (key_h + gap) + BAND_GAP;
+        let pills_y = band_y + BAND_CAPTION;
+        let rect_of = |i: usize| -> (f32, f32, f32, f32) {
+            let Some(&(_, row, kx, kw)) = keys.get(i) else { return (0.0, 0.0, 0.0, 0.0) };
+            let kx0 = left + kx * unit_w;
+            let kw0 = kw * unit_w - gap;
+            if row as usize >= crate::keymap::KEYBOARD_ROWS_N - 1 {
+                (kx0, pills_y, kw0, pill_h)
             } else {
-                (0xFF_22_32_4F, theme::col::TEXT2)
-            };
+                (kx0, top_y + row as f32 * (key_h + gap), kw0, key_h)
+            }
+        };
+        let radius_of = |i: usize, kh: f32| -> f32 {
+            match keys.get(i) {
+                Some(k) if k.1 as usize >= crate::keymap::KEYBOARD_ROWS_N - 1 => kh * 0.5,
+                _ => (key_h * 0.18).min(8.0),
+            }
+        };
+        // The numpad's name over it, on the row the function keys leave empty
+        // there: "N1".."NEnt" said it in two letters, the caption says it once.
+        {
+            let npx = size::CAPTION;
+            let t = self.kit_fit(u.keys_numpad, npx, 4.0 * unit_w - gap);
+            let tw = self.kit_measure(&t, npx);
+            let ncx = left + 18.0 * unit_w - gap * 0.5;
+            self.kit_text_mid((ncx - tw * 0.5).round(), top_y + key_h * 0.5, npx, &t, col::TEXT3);
+        }
+        self.kit_section(left, band_y + 8.0, u.keys_other);
+
+        let current = match v.current {
+            PadValue::Key(k) => k.as_str(),
+            _ => "(none)",
+        };
+        let in_layer = v.layer.is_some();
+        let mut cells: std::vec::Vec<(f32, f32, f32, f32)> = std::vec::Vec::with_capacity(keys.len());
+        for (i, &(name, _, _, _)) in keys.iter().enumerate() {
+            let (kx, ky, kw, kh) = rect_of(i);
+            cells.push((kx, ky, kw, kh));
+            let used = v.used.contains_key(name);
+            let (face, ink) = if used { (FACE_USED, INK_USED) } else { (FACE, col::TEXT2) };
+            let r = radius_of(i, kh);
             // A cap with a lip: the face, and a darker band under it, so the
             // keys read as keys.
-            let r = (key_h * 0.18).min(8.0);
-            self.kit_rrect(x, y + 2.0, key_w, key_h, r, 0xFF_0E_17_2A);
-            self.kit_rrect(x, y, key_w, key_h - 2.0, r, cap_col);
+            self.kit_rrect(kx, ky + 2.0, kw, kh, r, LIP);
+            self.kit_rrect(kx, ky, kw, kh - 2.0, r, face);
+            self.keys_legend(kx, ky, kw, kh, name, in_layer, ink);
+            // The key it sends now, ringed just outside its cap, lip included:
+            // once the cursor has left it, it is still on the board.
+            if name == current {
+                self.kit_shape(kx - 3.0, ky - 3.0, kw + 6.0, kh + 7.0, r + 3.0, 0, 2.0, col::GOLD, 0.0);
+            }
+        }
 
-            // Centre the legend in the cap, smaller before shorter: a word key
-            // like "Retour arr." drops to the caption size, the way real
-            // keyboards print their word keys smaller than their letters, and
-            // only a legend too long even then is cut.
-            let label = crate::keymap::keyboard_label(name);
-            let big = (key_h * 0.36).clamp(10.0, 17.0);
-            let small = (big * 0.76).round().max(10.0);
-            let kpx = if self.kit_measure(&label, big) <= key_w - 12.0 { big } else { small };
-            let l = self.kit_fit(&label, kpx, key_w - 8.0);
-            let lw = self.kit_measure(&l, kpx);
-            self.kit_text_mid((x + (key_w - lw) * 0.5).round(), y + (key_h - 2.0) * 0.5, kpx, &l, txt_col);
+        // The cursor: a gold cap over the board, gliding from key to key on
+        // its centre like the pad's focus, with the key's legend dark on it.
+        if v.cursor < keys.len() {
+            let (kx, ky, kw, kh) = rect_of(v.cursor);
+            let now = unsafe { ruffle_tick_now() };
+            let ecx = eased_list_x(kx + kw * 0.5, GLIDE_KEY_KEYBOARD, now);
+            let ecy = eased_list_y(ky + kh * 0.5, GLIDE_KEY_KEYBOARD, now);
+            let r = radius_of(v.cursor, kh);
+            self.kit_rrect(ecx - kw * 0.5, ecy - kh * 0.5, kw, kh - 2.0, r, col::GOLD);
+            if let Some(&(name, _, _, _)) = keys.get(v.cursor) {
+                self.keys_legend(ecx - kw * 0.5, ecy - kh * 0.5, kw, kh, name, in_layer, ON_INK);
+            }
+        }
+
+        // ── The line about the focused key, and the footer ───────────────
+        let help_cy = y + h - TOUCHES_FOOT_H - HELP_H * 0.5;
+        let focused = keys.get(v.cursor).map(|k| k.0).unwrap_or("");
+        match v.used.get(focused) {
+            // Who already sends it, as their glyphs: two buttons on one key is
+            // allowed, but it should be a choice.
+            Some(owners) if !owners.is_empty() => {
+                let (pre, post) = u.key_used_by.split_once("{}").unwrap_or((u.key_used_by, ""));
+                let mut hx = left;
+                self.kit_rrect(hx, help_cy - 6.0, 12.0, 12.0, 3.0, FACE_USED);
+                hx += 12.0 + 12.0;
+                hx += self.kit_text_mid(hx, help_cy, size::LABEL, pre.trim_end(), col::TEXT2) + 8.0;
+                for g in owners.iter().take(6) {
+                    let bw = self.pad_badge_width(g, size::LABEL);
+                    self.kit_pad_badge(hx, help_cy, bw, g, size::LABEL, col::TEXT);
+                    hx += bw + 8.0;
+                }
+                if !post.trim().is_empty() {
+                    self.kit_text_mid(hx, help_cy, size::LABEL, post.trim(), col::TEXT2);
+                }
+            }
+            _ => {
+                let help = match focused {
+                    "(none)" if in_layer => u.help_key_inherit,
+                    "(none)" => u.help_key_none,
+                    "Keyboard" => u.help_key_keyboard,
+                    "Left click" | "Right click" => u.help_key_click,
+                    _ => "",
+                };
+                if !help.is_empty() {
+                    self.kit_icon(left, help_cy, 16.0, Icon::Info, col::TEXT3);
+                    let t = self.kit_fit(help, size::LABEL, inner_w - 26.0);
+                    self.kit_text_mid(left + 26.0, help_cy, size::LABEL, &t, col::TEXT2);
+                }
+            }
+        }
+        // X empties the button without walking to "None": in a combo layer
+        // that gives it back its Normal key, and the hint says which.
+        let x_verb = if in_layer { u.key_same_as_normal } else { u.key_none };
+        let hints: [kit::text::HintItem; 3] = [(&[Btn::A], u.choose), (&[Btn::X], x_verb), (&[Btn::B], u.cancel)];
+        let hints_x = self.touches_footer(x, y, w, h, &hints);
+        // What teal means, once, where the eye ends up.
+        let fpx = size::CAPTION + 1.0;
+        if left + 20.0 + self.kit_measure(u.key_used, fpx) + 24.0 <= hints_x {
+            let foot_cy = y + h - TOUCHES_FOOT_H * 0.5;
+            self.kit_rrect(left, foot_cy - 6.0, 12.0, 12.0, 3.0, FACE_USED);
+            self.kit_text_mid(left + 20.0, foot_cy, fpx, u.key_used, col::TEXT3);
         }
         ui_cells_publish(ui_screen_kind(), cells);
 
@@ -10226,6 +10380,72 @@ impl SwitchRenderBackend {
             glBindVertexArray(0);
         }
         self.gl_state.invalidate();
+    }
+
+    /// The legend of key `name` in its cap at (`x`, `y`, `w`, `h`): its
+    /// keyboard legend (`keymap::keyboard_label`), smaller before shorter, the
+    /// way real keyboards print their word keys smaller than their letters; a
+    /// key of the band gets its icon too.
+    #[allow(clippy::too_many_arguments)]
+    fn keys_legend(&mut self, x: f32, y: f32, w: f32, h: f32, name: &'static str, in_layer: bool, ink: u32) {
+        let u = crate::loc_ui::ui();
+        let (label, icon): (std::borrow::Cow<'static, str>, Option<Icon>) = match name {
+            // In a combo layer an empty button sends its Normal key, so the
+            // key that empties it says that instead of "None".
+            "(none)" if in_layer => (std::borrow::Cow::Borrowed(u.key_same_as_normal), Some(Icon::Undo)),
+            "(none)" => (std::borrow::Cow::Borrowed(u.key_none), Some(Icon::Close)),
+            "Left click" | "Right click" => (crate::keymap::keyboard_label(name), Some(Icon::Mouse)),
+            "Keyboard" => (crate::keymap::keyboard_label(name), Some(Icon::Keyboard)),
+            _ => (crate::keymap::keyboard_label(name), None),
+        };
+        let big = (h * 0.36).clamp(10.0, 17.0);
+        let small = (big * 0.76).round().max(10.0);
+        let isz = if icon.is_some() { (big + 1.0).round() } else { 0.0 };
+        let room = w - 12.0 - if icon.is_some() { isz + 8.0 } else { 0.0 };
+        let px = if self.kit_measure(&label, big) <= room { big } else { small };
+        let l = self.kit_fit(&label, px, room.max(0.0));
+        let lw = self.kit_measure(&l, px);
+        let total = lw + if icon.is_some() { isz + 8.0 } else { 0.0 };
+        let mut cx = (x + (w - total) * 0.5).round();
+        let cy = y + (h - 2.0) * 0.5;
+        if let Some(ic) = icon {
+            self.kit_icon(cx, cy, isz, ic, ink);
+            cx += isz + 8.0;
+        }
+        self.kit_text_mid(cx, cy, px, &l, ink);
+    }
+
+    /// Width `keys_current` takes for `value` at `px`.
+    fn keys_current_width(&mut self, value: &PadValue, px: f32) -> f32 {
+        match value {
+            PadValue::Key(k) | PadValue::Inherited(Some(k)) => {
+                let label = crate::keymap::flash_key_display(k);
+                let icon = matches!(k.as_str(), "Left click" | "Right click" | "Clic gauche" | "Clic droit" | "Keyboard");
+                let lw = self.kit_measure(&label, px);
+                if icon {
+                    (px + 1.0).round() + 7.0 + lw
+                } else {
+                    (lw + 18.0).max(24.0)
+                }
+            }
+            _ => self.kit_measure(crate::loc_ui::ui().key_none, px),
+        }
+    }
+
+    /// The key a button sends now, as its row shows it (a keycap, a click...),
+    /// for the picker's header.
+    fn keys_current(&mut self, x: f32, cy: f32, value: &PadValue, px: f32) {
+        match value {
+            PadValue::Key(k) => {
+                self.pad_key(x, cy, 400.0, 30.0, k, px, false);
+            }
+            PadValue::Inherited(Some(k)) => {
+                self.pad_key(x, cy, 400.0, 30.0, k, px, true);
+            }
+            _ => {
+                self.kit_text_mid(x, cy, px, crate::loc_ui::ui().key_none, TOUCHES_QUIET);
+            }
+        }
     }
 
     // ── Library UI (Phase 3.4) ──────────────────────────────────────────

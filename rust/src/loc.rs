@@ -157,6 +157,8 @@ pub struct Strings {
     /// Unread since the editor's hints are glyphs; goes after the merge.
     #[allow(dead_code)]
     pub keys_footer: &'static str,
+    /// Unread since the key picker's hints are glyphs; goes after the merge.
+    #[allow(dead_code)]
     pub keys_dropdown_footer: &'static str,
     /// Value a pad row shows when its button is a MODIFIER and so cannot send
     /// a key of its own -- see `keymap::slot_is_modifier`.

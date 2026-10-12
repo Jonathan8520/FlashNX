@@ -1357,9 +1357,12 @@ fn handle_keyboard_input(
             let target = if cur_row + 1 >= n_rows { 0 } else { cur_row + 1 };
             key_idx = kbd_nearest_on_row(target, cur_cx).unwrap_or(key_idx);
         }
-        "A" => {
-            // "(none)" unbinds; every other key is a real flash-key name.
-            let target = if name == "(none)" { None } else { Some(name) };
+        "A" | "X" => {
+            // "(none)" empties the button, and so does X from anywhere on the
+            // board, without walking down to it; every other key is a real
+            // flash-key name. Emptied in a combo layer, a button sends its
+            // Normal key again (`keymap::set_binding`).
+            let target = if button == "X" || name == "(none)" { None } else { Some(name) };
             let Some(edit_btn) = keymap::PAD_SLOTS.get(button_idx).map(|s| s.name) else {
                 return;
             };
@@ -1693,19 +1696,26 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
             });
         }
         Screen::Keyboard { button_idx, key_idx } => {
-            // Title shows the chord in a combo sub-tab ("ZL+A"), else the button.
-            let btn = keymap::PAD_SLOTS
-                .get(button_idx)
-                .map(|s| s.name)
-                .unwrap_or("");
+            let Some(place) = editor_place() else { return };
+            let Some(slot) = keymap::PAD_SLOTS.get(button_idx) else { return };
+            // The chord in a combo layer: the layer's glyph, then the button.
             let modif = keymap::edit_subtab_modifier();
-            let label = if modif.is_empty() {
-                btn.to_string()
-            } else {
-                std::format!("{}+{}", modif, btn)
+            let current = match keymap::current_binding(slot.name) {
+                Some(k) => PadValue::Key(k),
+                None if modif.is_empty() => PadValue::None,
+                None => PadValue::Inherited(keymap::base_binding(slot.name)),
             };
-            let used = keymap::current_map_used_keys(btn);
-            backend.draw_touches_keyboard(&label, key_idx, &used);
+            let used = keymap::current_map_used_keys(slot.name);
+            let crumbs = [place.crumbs[0], place.crumbs[1], lc.keys_title];
+            backend.draw_touches_keyboard(&crate::backend::render::KeysView {
+                crumbs: &crumbs,
+                glyph: slot.glyph,
+                layer: (!modif.is_empty()).then_some(modif),
+                player: keymap::edit_player(),
+                current: &current,
+                cursor: key_idx,
+                used: &used,
+            });
         }
         Screen::Profiles { selection } => {
             let t = crate::backend::render::cascade_step(true);
