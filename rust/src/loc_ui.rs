@@ -587,6 +587,13 @@ pub struct Ui {
     pub gyro_off: &'static str,
     /// Pause › Écran: help of the zoom row, which A opens into the framing mode (Left / Right no longer step it there).
     pub help_zoom_frame: &'static str,
+    /// Games folder browser, at the card's root: the first row, dimmed, instead of "Use this folder".
+    pub dir_root_refused: &'static str,
+    /// RÉGLAGES > Aide et retours: the card over the page while a bug report or an idea is being sent.
+    pub loading_report: &'static str,
+    /// A game's options: the card over the panels while the covers are searched for, then while the chosen one downloads.
+    pub loading_covers: &'static str,
+    pub loading_cover_dl: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -921,6 +928,10 @@ const EN: Ui = Ui {
     zoom_offset: "offset {}, {} px",
     gyro_off: "Off",
     help_zoom_frame: "Enlarges the picture: A opens the framing, where ZL and ZR zoom and the stick moves the picture.",
+    dir_root_refused: "The card's root cannot hold your library",
+    loading_report: "Sending your message…",
+    loading_covers: "Looking for covers…",
+    loading_cover_dl: "Downloading the cover…",
 };
 
 const FR: Ui = Ui {
@@ -1255,6 +1266,10 @@ const FR: Ui = Ui {
     zoom_offset: "décalé de {}, {} px",
     gyro_off: "Inactif",
     help_zoom_frame: "Agrandit l'image : A ouvre le cadrage, où ZL et ZR zooment et le stick déplace l'image.",
+    dir_root_refused: "La racine de la carte ne peut pas accueillir ta bibliothèque",
+    loading_report: "Envoi de ton message…",
+    loading_covers: "Recherche de jaquettes…",
+    loading_cover_dl: "Téléchargement de la jaquette…",
 };
 
 const ES: Ui = Ui {
@@ -1589,6 +1604,10 @@ const ES: Ui = Ui {
     zoom_offset: "desplazado {}, {} px",
     gyro_off: "No",
     help_zoom_frame: "Amplía la imagen: A abre el encuadre, donde ZL y ZR hacen zoom y el stick mueve la imagen.",
+    dir_root_refused: "La raíz de la tarjeta no puede alojar tu biblioteca",
+    loading_report: "Enviando tu mensaje…",
+    loading_covers: "Buscando carátulas…",
+    loading_cover_dl: "Descargando la carátula…",
 };
 
 const RU: Ui = Ui {
@@ -1923,6 +1942,10 @@ const RU: Ui = Ui {
     zoom_offset: "сдвиг {}, {} пикс.",
     gyro_off: "Выкл",
     help_zoom_frame: "Увеличивает картинку: A открывает кадрирование, где ZL и ZR меняют масштаб, а стик двигает картинку.",
+    dir_root_refused: "Библиотеку нельзя поместить в корень карты",
+    loading_report: "Отправка сообщения…",
+    loading_covers: "Поиск обложек…",
+    loading_cover_dl: "Загрузка обложки…",
 };
 
 const DE: Ui = Ui {
@@ -2257,6 +2280,10 @@ const DE: Ui = Ui {
     zoom_offset: "verschoben um {}, {} px",
     gyro_off: "Aus",
     help_zoom_frame: "Vergrößert das Bild: A öffnet den Ausschnitt, wo ZL und ZR zoomen und der Stick das Bild verschiebt.",
+    dir_root_refused: "Deine Bibliothek kann nicht im Stammverzeichnis liegen",
+    loading_report: "Deine Nachricht wird gesendet…",
+    loading_covers: "Suche nach Covern…",
+    loading_cover_dl: "Cover wird geladen…",
 };
 
 const IT: Ui = Ui {
@@ -2591,6 +2618,10 @@ const IT: Ui = Ui {
     zoom_offset: "spostato di {}, {} px",
     gyro_off: "No",
     help_zoom_frame: "Ingrandisce l'immagine: A apre l'inquadratura, dove ZL e ZR fanno lo zoom e lo stick sposta l'immagine.",
+    dir_root_refused: "La radice della scheda non può ospitare la tua libreria",
+    loading_report: "Invio del tuo messaggio…",
+    loading_covers: "Ricerca delle copertine…",
+    loading_cover_dl: "Download della copertina…",
 };
 
 const PT: Ui = Ui {
@@ -2925,6 +2956,10 @@ const PT: Ui = Ui {
     zoom_offset: "deslocado {}, {} px",
     gyro_off: "Não",
     help_zoom_frame: "Amplia a imagem: A abre o enquadramento, onde ZL e ZR fazem zoom e o analógico move a imagem.",
+    dir_root_refused: "A raiz do cartão não pode receber a sua biblioteca",
+    loading_report: "Enviando sua mensagem…",
+    loading_covers: "Procurando capas…",
+    loading_cover_dl: "Baixando a capa…",
 };
 
 const ZH: Ui = Ui {
@@ -3259,6 +3294,10 @@ const ZH: Ui = Ui {
     zoom_offset: "偏移 {}, {} 像素",
     gyro_off: "关闭",
     help_zoom_frame: "放大画面：按 A 进入取景，ZL 和 ZR 缩放，摇杆移动画面。",
+    dir_root_refused: "存储卡根目录不能存放你的游戏库",
+    loading_report: "正在发送你的消息…",
+    loading_covers: "正在查找封面…",
+    loading_cover_dl: "正在下载封面…",
 };
 
 const TR: Ui = Ui {
@@ -3593,6 +3632,10 @@ const TR: Ui = Ui {
     zoom_offset: "{}, {} px kaydırıldı",
     gyro_off: "Kapalı",
     help_zoom_frame: "Görüntüyü büyütür: A kadrajı açar; orada ZL ve ZR yakınlaştırır, çubuk görüntüyü kaydırır.",
+    dir_root_refused: "Kartın kök dizini kütüphaneni barındıramaz",
+    loading_report: "Mesajın gönderiliyor…",
+    loading_covers: "Kapaklar aranıyor…",
+    loading_cover_dl: "Kapak indiriliyor…",
 };
 
 pub fn ui() -> &'static Ui {

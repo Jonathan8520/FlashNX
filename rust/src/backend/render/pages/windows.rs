@@ -25,7 +25,8 @@ impl SwitchRenderBackend {
     /// The old confirms were a paragraph and a footer line, "A: SUPPRIMER
     /// B: ANNULER": nothing was selected, so the button you pressed to get
     /// there was the one that deleted. A selection that starts on the safe
-    /// answer is what the callers use now.
+    /// answer is what the callers use now. With a single answer it is a
+    /// notice, which A and B both close.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw_confirm(
         &mut self,
@@ -110,7 +111,12 @@ impl SwitchRenderBackend {
         let u = crate::loc_ui::ui();
         let hy = y + h - 28.0;
         self.draw_overlay_rect(x + 20.0, hy - 28.0, w - 40.0, 1.0, if danger { col::DANGER_LINE } else { col::LINE });
-        self.kit_hints_centered(x + w * 0.5, hy, &[(&[Btn::A], u.validate), (&[Btn::B], u.cancel)]);
+        match choices {
+            // A notice: its one answer is what A and B both do, and "Valider /
+            // Annuler" would offer a choice that is not there.
+            [only] => self.kit_hints_centered(x + w * 0.5, hy, &[(&[Btn::A, Btn::B][..], only.label)]),
+            _ => self.kit_hints_centered(x + w * 0.5, hy, &[(&[Btn::A], u.validate), (&[Btn::B], u.cancel)]),
+        }
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);

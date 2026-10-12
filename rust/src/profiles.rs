@@ -270,17 +270,21 @@ fn read_small_file(path: &str) -> Option<std::string::String> {
     std::string::String::from_utf8(data).ok()
 }
 
+/// The longest nickname kept, in characters. The keyboard that asks for it is
+/// sized to stop there (`net::prompt_pseudo`), so nothing typed is cut later.
+pub const AUTHOR_MAX_CHARS: usize = 24;
+
 /// The player's chosen nickname, shown next to their shared profiles so several
 /// profiles for the same game are distinguishable. Empty if unset. It's an
 /// anonymous LABEL only, not an identity — the install id stays the dedup key, so
 /// two people picking the same nickname still never collide. Stored in
-/// `sdmc:/flashnx/author`, capped to 24 chars.
+/// `sdmc:/flashnx/author`, capped to `AUTHOR_MAX_CHARS`.
 pub fn author_name() -> std::string::String {
     {
         if let Some(txt) = read_small_file(&crate::library::config_read_path("author")) {
             let t = txt.trim();
             if !t.is_empty() {
-                return t.chars().take(24).collect();
+                return t.chars().take(AUTHOR_MAX_CHARS).collect();
             }
         }
     }
@@ -289,7 +293,7 @@ pub fn author_name() -> std::string::String {
 
 /// Persist the player's nickname (RÉGLAGES > PSEUDO). Empty clears it.
 pub fn set_author_name(name: &str) {
-    let clean: std::string::String = name.trim().chars().take(24).collect();
+    let clean: std::string::String = name.trim().chars().take(AUTHOR_MAX_CHARS).collect();
     // Beside the LIBRARY, like everything else the app owns. These three files
     // were the last ones still writing to a hardcoded root while reading through
     // `config_read_path`: after a library move (#79) the nickname was written

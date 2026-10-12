@@ -47,6 +47,10 @@ const GAME_ROW_H: f32 = 56.0;
 /// The explanations under a block: one size, one colour, everywhere.
 const NOTE_PX: f32 = size::CAPTION + 1.0;
 const NOTE_LH: f32 = 20.0;
+/// The crumb over a page opened in the pane: its line, and where its words
+/// start past the chevron.
+const CRUMB_CY: f32 = 96.0;
+const CRUMB_TEXT_DX: f32 = 22.0;
 
 /// Glide keys of the page's cursors. One slot each is shared by every list in
 /// the app (`eased_list_y`, `eased_list_x`), so these only have to differ from
@@ -198,9 +202,9 @@ impl SwitchRenderBackend {
     /// where the list starts.
     pub(crate) fn settings_subpage_title(&mut self, crumb: &str, title: &str, subtitle: &str) -> f32 {
         let px = NOTE_PX;
-        self.kit_icon(PANE_X, 96.0, 14.0, Icon::ChevronLeft, col::TEXT3);
-        let c = self.kit_fit(crumb, px, PANE_W - 22.0);
-        self.kit_text_mid(PANE_X + 22.0, 96.0, px, &c, col::TEXT2);
+        self.kit_icon(PANE_X, CRUMB_CY, 14.0, Icon::ChevronLeft, col::TEXT3);
+        let c = self.kit_fit(crumb, px, PANE_W - CRUMB_TEXT_DX);
+        self.kit_text_mid(PANE_X + CRUMB_TEXT_DX, CRUMB_CY, px, &c, col::TEXT2);
         let tpx = size::TITLE - 2.0;
         let t = self.kit_fit(title, tpx, PANE_W);
         self.kit_text_mid(PANE_X, 124.0, tpx, &t, col::TEXT);
@@ -622,6 +626,27 @@ impl SwitchRenderBackend {
     ) {
         ui_cells_publish(ui_screen_kind(), cells);
         ui_segs_publish(ui_screen_kind(), segs);
+    }
+
+    /// A wait over the page, the column still on show: the small loading card
+    /// over the pane, saying what is being done.
+    pub(crate) fn settings_loading_card(&mut self, label: &str, now: u64) {
+        let vw = self.dimensions.width as f32;
+        self.draw_loading_card(label, now, DIVIDER_X, vw);
+    }
+
+    /// Where a finger takes the crumb `crumb` of `settings_subpage_title`: the
+    /// chevron and the words, with room around them for a thumb.
+    pub(crate) fn settings_crumb_cell(&mut self, crumb: &str) -> (f32, f32, f32, f32) {
+        let c = self.kit_fit(crumb, NOTE_PX, PANE_W - CRUMB_TEXT_DX);
+        let w = CRUMB_TEXT_DX + self.kit_measure(&c, NOTE_PX);
+        (PANE_X - 12.0, CRUMB_CY - 18.0, w + 24.0, 36.0)
+    }
+
+    /// Put `cells` after the `base` rows a page in the pane published for its
+    /// list (`ui_cells_set_tail`).
+    pub(crate) fn settings_publish_tail(&mut self, base: usize, cells: std::vec::Vec<(f32, f32, f32, f32)>) {
+        ui_cells_set_tail(ui_screen_kind(), base, cells);
     }
 
     /// Moving the library (#79): where from and where to, and a count of what

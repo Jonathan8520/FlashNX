@@ -495,8 +495,28 @@ impl SwitchRenderBackend {
                 let what_max = if Self::diff_what_is_button(what) { c0 - 20.0 } else { c0 + c1 * 0.5 - 20.0 };
                 let what_end = self.kit_diff_what(x + 12.0, cy, what_max, what);
                 let bx = (x + c0).max(what_end + 12.0);
-                self.kit_diff_value(bx, cy, x + c0 + c1 - 14.0 - bx, before, col::TEXT3);
-                self.kit_diff_value(x + c0 + c1, cy, w - c0 - c1 - 12.0, after, col::TEXT);
+                // Both values at one size: the line's, else the next smaller
+                // ones, else on two lines at the smallest; cut only after that.
+                // Cut at once, "predeterminado" or "Igual que en Normal" lost
+                // their end in a column a third of the page wide.
+                let (bw, aw) = ((x + c0 + c1 - 14.0 - bx).max(0.0), w - c0 - c1 - 12.0);
+                let mut fit = None;
+                for p in [px, size::LABEL, size::CAPTION] {
+                    if self.kit_measure(before, p) <= bw && self.kit_measure(after, p) <= aw {
+                        fit = Some(p);
+                        break;
+                    }
+                }
+                match fit {
+                    Some(p) => {
+                        self.kit_text_mid(bx, cy, p, before, col::TEXT3);
+                        self.kit_text_mid(x + c0 + c1, cy, p, after, col::TEXT);
+                    }
+                    None => {
+                        self.kit_diff_wrapped(bx, cy, bw, before, col::TEXT3);
+                        self.kit_diff_wrapped(x + c0 + c1, cy, aw, after, col::TEXT);
+                    }
+                }
             }
             _ => {
                 let t = self.kit_fit(what, px, w - 24.0);
@@ -505,22 +525,16 @@ impl SwitchRenderBackend {
         }
     }
 
-    /// A value of a diff line from `x`, in `room`: at 16 px, else 13, else on
-    /// two lines at 13 (the lines are 44 px tall), the second cut if it must.
-    fn kit_diff_value(&mut self, x: f32, cy: f32, room: f32, text: &str, ink: u32) {
-        let room = room.max(0.0);
-        for p in [size::LABEL + 1.0, size::CAPTION] {
-            if self.kit_measure(text, p) <= room {
-                self.kit_text_mid(x, cy, p, text, ink);
-                return;
-            }
-        }
-        let p = size::CAPTION;
-        let lines = self.kit_wrap(text, p, room, 2);
-        let lh = (p * 1.25).round();
-        let mut ly = cy - lh * (lines.len().max(1) - 1) as f32 * 0.5;
+    /// A value of a diff line that fits its column at no size: on up to two
+    /// lines at the caption size, centred on `cy` (the table's lines, 44 px,
+    /// hold two), the second cut if it must be.
+    fn kit_diff_wrapped(&mut self, x: f32, cy: f32, max_w: f32, text: &str, ink: u32) {
+        let px = size::CAPTION;
+        let lines = self.kit_wrap(text, px, max_w, 2);
+        let lh = (px * 1.25).round();
+        let mut ly = cy - lh * 0.5 * lines.len().saturating_sub(1) as f32;
         for l in &lines {
-            self.kit_text_mid(x, ly, p, l, ink);
+            self.kit_text_mid(x, ly, px, l, ink);
             ly += lh;
         }
     }

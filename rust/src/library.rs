@@ -58,10 +58,10 @@ pub(crate) enum Screen {
     /// reveal finishes. Carries the gallery row so the frozen gallery draws behind.
     Launching { selection: usize, scroll_offset: usize },
     /// Applet mode: the user pressed A on a game but we have only the small
-    /// applet heap, so launching would OOM. Shows a "use title takeover"
-    /// notice (P1c) instead of the embedded red SWF. Carries the list row to
-    /// return to on dismiss (pressed on an importer page, the page to go back
-    /// to is held in `LAUNCH_BACKDROP` instead).
+    /// applet heap, so launching would OOM. A window over the page says how to
+    /// get the full memory (P1c) instead of the embedded red SWF. Carries the
+    /// list row to return to on dismiss (pressed on an importer page, the page
+    /// to go back to is held in `LAUNCH_BACKDROP` instead).
     AppletNotice { selection: usize, scroll_offset: usize },
     /// User pressed - or chose to quit; main loop exits the `.nro`.
     Quit,
@@ -77,11 +77,13 @@ pub(crate) enum Screen {
     /// Cover picker (OPTIONS > JAQUETTE, v1.2.0). Lists Flashpoint search
     /// candidates from `State::cover_candidates`; `selection` indexes that vec.
     /// `State::cover_msg` (non-empty) shows a notice instead of a list (covers
-    /// off / no results / fetch error). A = fetch+cache the chosen logo.
+    /// off / no results / a failed search). A = fetch+cache the chosen logo,
+    /// behind a loading card; a failed download says why in a toast.
     CoverPicker { game_idx: usize, selection: usize },
     /// Flashpoint game gallery (IMPORTER > X): a cover grid of search hits;
-    /// A downloads the selected game's GameZIP. Reuses `cover_candidates` for
-    /// storage and `draw_library_cover_picker` for rendering.
+    /// A downloads the selected game's GameZIP, or plays it when a game of
+    /// that name is already on the card. Reuses `cover_candidates` for
+    /// storage; drawn by `draw_library_fp_gallery`.
     FpGallery { selection: usize, scroll: usize },
     /// Details popup for the Flashpoint game at `selection` (`+` on the gallery):
     /// full title + developer/publisher/date + download size. `size` is the
@@ -94,12 +96,11 @@ pub(crate) enum Screen {
     /// order: each row keeps the direction it was turned to.
     SortModal { selection: usize, prev_sel: usize, prev_scroll: usize, dirs: u8 },
     /// Sort picker for the IMPORTER lists (Y). `kind` picks the target list +
-    /// option set (`SORT_TARGET_*`): archive.org files (name/size), the
-    /// Flashpoint gallery (name, developer, release), or the IMPORTER home's
-    /// saved URLs (added/name/source/files). Bit `i` of `dirs` set = row `i`
-    /// shows (and A would apply) its reversed order: each row keeps the order
-    /// it was turned to, as on the Play tab's picker. `prev_*` restore the
-    /// cursor on cancel.
+    /// option set (`SORT_TARGET_*`, see `remote_sort_options`): an archive's
+    /// files, the Flashpoint results (name, developer, release date), or the
+    /// IMPORTER home's saved sources. Bit `i` of `dirs` set = row `i` shows (and
+    /// A would apply) its reversed order: each row keeps the order it was turned
+    /// to, as on the Play tab's picker. `prev_*` restore the cursor on cancel.
     RemoteSortModal { selection: usize, kind: u8, dirs: u8, prev_sel: usize, prev_scroll: usize },
     // ── Phase 3.7: DISTANT mode (archive.org import) ───────────────────
     /// IMPORTER home: the two action cards, then the saved sources. Rows 0 and 1
@@ -123,7 +124,8 @@ pub(crate) enum Screen {
     /// every frame via `net::download_progress`.
     DistantDownloading,
     /// Error from URL parse / metadata fetch / download. Message in
-    /// `State::distant_error`. B or A dismisses back to DistantIdle.
+    /// `State::distant_error`. A tries again when that can work
+    /// (`import_retry`), B goes back to the list the failure came from.
     DistantError,
     /// Confirm removing a history URL (from DistantUrlOptions > delete).
     /// A = delete + persist, B/Minus = cancel.
@@ -209,10 +211,12 @@ pub(crate) enum Screen {
     /// hoisted) → toast + picker; B cancels back to the picker.
     /// `selection`: 0 = cancel (where it opens), 1 = delete.
     ProfileDeleteConfirm { game_idx: usize, profile_idx: usize, selection: usize },
-    /// Transient "loading" panel shown for ONE frame before a deferred profile
-    /// network flow runs (#20), so a blocking GitHub call doesn't freeze on stale
-    /// content. `render` runs the stashed `PendingNet` the next frame, which sets
-    /// the real result screen. Carries no state — the action is in `PENDING_NET`.
+    /// The loading card shown for ONE frame before a deferred network flow runs:
+    /// a profile's (#20), or a cover's search or download. The blocking call
+    /// then freezes on the card rather than on stale content. `render` runs the
+    /// stashed `PendingNet` the next frame, which sets the real result screen.
+    /// Carries no state: the action is in `PENDING_NET`, the screen drawn under
+    /// the card in `NET_LOADING_FROM`.
     ProfileLoading,
 }
 
@@ -3361,7 +3365,7 @@ fn remember_url_total(url: &str, total: u32) {
 }
 
 /// True if the saved URL is favorited (pinned to the top of the IMPORTER list
-/// and flagged with a gold diamond, like a favorited game).
+/// and marked with a solid star chip, like a favorited game).
 pub(crate) fn url_is_favorite(s: &State, url: &str) -> bool {
     s.url_meta
         .iter()
@@ -3573,7 +3577,12 @@ fn push_history(url: &str) {
             s.history_idx = Some(pos);
             return;
         }
-        // New entry: stamp when it was saved (shown in its options modal).
+        // New entry: stamp when it was saved (shown in its options modal). A
+        // row this address already has is from an earlier life of it (deleted
+        // while the table could not be saved), not this source's: it would
+        // bring back the old star and date, and `find` would keep reading it
+        // before the new one.
+        s.url_meta.retain(|(u, _, _, _, _)| u != &url);
         s.url_meta.push((url.clone(), 0, now_epoch(), false, 0));
         s.url_history.push(url);
         // Hard ceiling only as a runaway guard (a corrupt writer, not a user):
@@ -4004,6 +4013,12 @@ fn set_screen_selection(s: &mut State, idx: usize) -> bool {
             put!(selection, Screen::SendFailed { row, selection: idx })
         }
         Screen::GamesDirPicker { selection, scroll } => {
+            // Past the rows: the crumb and the column (`subpage_tap`).
+            let rows = 1 + browse_parent(&s.dir_path).is_some() as usize + s.dir_browse.len();
+            if idx >= rows {
+                settings_tab::subpage_tap(s, idx - rows);
+                return false;
+            }
             put!(selection, Screen::GamesDirPicker { selection: idx, scroll })
         }
         Screen::GamesDirConfirm { selection } => {
@@ -4021,6 +4036,8 @@ fn set_screen_selection(s: &mut State, idx: usize) -> bool {
         Screen::ImportNotAddress { selection } => {
             put!(selection, Screen::ImportNotAddress { selection: idx })
         }
+        // One answer, always the focused one: the first tap gives it.
+        Screen::AppletNotice { .. } => idx == 0,
         Screen::ProfileDeleteConfirm { game_idx, profile_idx, selection } => {
             put!(selection, Screen::ProfileDeleteConfirm { game_idx, profile_idx, selection: idx })
         }
@@ -4044,6 +4061,11 @@ fn set_screen_selection(s: &mut State, idx: usize) -> bool {
             put!(selection, Screen::SortModal { selection: idx, prev_sel, prev_scroll, dirs })
         }
         Screen::BugPicker { selection, scroll_offset } => {
+            let rows = s.entries.len();
+            if idx >= rows {
+                settings_tab::subpage_tap(s, idx - rows);
+                return false;
+            }
             put!(selection, Screen::BugPicker { selection: idx, scroll_offset })
         }
         Screen::TouchesMenu { game_idx, selection } => {
@@ -4479,13 +4501,18 @@ fn input_inner(button: &str) -> bool {
     {
         return true;
     }
-    // Settings keymap editor: closing it (B at the editor's top level — the List
-    // screen, kind 2 — not inside a dropdown) scales the editor OUT before
-    // landing on the REGLAGES tab. Intercept B HERE, before forwarding to menu,
-    // so the menu stays active (drawable) during the scale-out; render closes it
-    // + swaps to the tab when the pop finishes. The tab itself never pops (it's a
-    // tab, not a modal). Only the Settings editor — TouchesEditor keeps its
-    // instant swap to the (modal) sub-menu, which pops in.
+    // A report on its way (one frame with its card, then the POST): the page
+    // under the card takes no press until the relay has answered.
+    if settings_tab::sending() {
+        return true;
+    }
+    // Both keymap editors close by scaling OUT: B or Minus at the editor's top
+    // level (the List screen, kind 2, not inside its key picker). Caught HERE,
+    // before `menu::input`, so the menu stays active (drawable) during the
+    // scale-out; render closes it and lands on the page that opened it when the
+    // pop finishes. The Settings editor lands on the RÉGLAGES tab, which never
+    // pops (it is a tab, not a modal); a game's editor on its Touches et curseur
+    // page (below).
     if matches!(button, "B" | "Minus") && menu::screen_kind() == 2 {
         let is_settings_editor = LIBRARY
             .lock()
@@ -4523,33 +4550,40 @@ fn input_inner(button: &str) -> bool {
             return true;
         }
     }
-    // Sub-screen: TOUCHES editor owns input while active.
+    // A game's controls editor closes like the Réglages one: it scales out over
+    // its Touches et curseur page, then lands there. Left to `menu`, it
+    // vanished in one frame, the page's own pop being invisible (the options
+    // family draws without the window transform).
+    if matches!(button, "B" | "Minus") && menu::screen_kind() == 2 {
+        let game = LIBRARY.lock().ok().and_then(|s| match s.screen {
+            Screen::TouchesEditor { game_idx } => Some(game_idx),
+            _ => None,
+        });
+        if let Some(game_idx) = game {
+            if let Ok(mut p) = PENDING_AFTER_CLOSE.lock() {
+                *p = Some(PendingClose::CloseEditorToTouches { game_idx });
+            }
+            crate::backend::render::modal_close_begin();
+            // The way back, which `menu::input` played when it closed itself:
+            // the screen is still the editor after this press, and
+            // `sfx::after_input` leaves the editor's sounds to it.
+            crate::sfx::play(crate::sfx::Sfx::Back);
+            return true;
+        }
+    }
+    // Sub-screen: the keymap editor owns input while active.
     if menu::is_active() {
         let consumed = menu::input(button);
-        // If menu just closed itself, fall back to the OPTIONS modal.
+        // Only a safety net: B or Minus on the pad is the one way `menu` closes
+        // itself in the launcher, and both editors catch it above. Were it to
+        // close some other way, the editor's screen would stay up without its
+        // window and take no press: it lands where B would have landed.
         if !menu::is_active() {
-            let mut dest: Option<Screen> = None;
             if let Ok(mut s) = LIBRARY.lock() {
                 match s.screen {
-                    Screen::TouchesEditor { game_idx } => {
-                        // Back to the TOUCHES sub-menu's EDIT row (#20 regroup).
-                        goto_touches_menu(&mut s, game_idx, menu::MENU_EDIT);
-                        dest = Some(s.screen);
-                    }
-                    Screen::SettingsKeymapEditor => {
-                        s.screen = settings_at(SetSection::Defaults, "TOUCHES");
-                        dest = Some(s.screen);
-                    }
+                    Screen::TouchesEditor { game_idx } => goto_touches_menu(&mut s, game_idx, menu::MENU_EDIT),
+                    Screen::SettingsKeymapEditor => s.screen = settings_at(SetSection::Defaults, "TOUCHES"),
                     _ => {}
-                }
-            }
-            if let Some(d) = dest {
-                // Scale the destination back in ONLY if it's a real modal (the
-                // OPTIONS / TOUCHES sub-menu). The REGLAGES destination is a TAB,
-                // not a popup, so it must NOT pop — its sub-modals animate, it
-                // doesn't. modal_kind == 0 means "not a modal".
-                if modal_kind(d) != 0 {
-                    crate::backend::render::modal_open_begin();
                 }
             }
         }
@@ -4713,7 +4747,8 @@ fn input_inner(button: &str) -> bool {
                 return true;
             }
             // JAQUETTE = Flashpoint cover search by name. Hoisted: it's a
-            // synchronous HTTPS call that must not run under the LIBRARY lock.
+            // synchronous HTTPS call that must not run under the LIBRARY lock,
+            // and it runs behind a loading card (`defer_net`).
             if button == "A" && OPTIONS_ENTRIES.get(selection).copied() == Some("JAQUETTE") {
                 run_cover_search_flow(game_idx);
                 return true;
@@ -4770,7 +4805,15 @@ fn input_inner(button: &str) -> bool {
         // Minus = refine: re-type the title and re-search (swkbd + HTTPS).
         if let Screen::CoverPicker { game_idx, selection } = screen_snap {
             if button == "A" {
-                run_cover_fetch_flow(game_idx, selection);
+                // Behind a loading card, and only for a cover that is there:
+                // the window that found nothing has nothing to download, and
+                // its A (which its hints do not offer) makes no sound.
+                let there = LIBRARY.lock().map(|s| selection < s.cover_candidates.len()).unwrap_or(false);
+                if there {
+                    defer_net(PendingNet::CoverFetch { game_idx, selection }, game_idx);
+                } else {
+                    crate::sfx::hush();
+                }
                 return true;
             }
             if button == "Minus" {
@@ -4829,8 +4872,9 @@ fn input_inner(button: &str) -> bool {
             run_local_search_flow();
             return true;
         }
-        // A on the bug-report picker = describe + send. Hoisted: swkbd + the
-        // synchronous HTTPS POST must not run under the LIBRARY lock.
+        // A on the bug-report picker = describe + send. Hoisted: the keyboard
+        // must not run under the LIBRARY lock. The POST itself runs from
+        // `render`, behind its card (`settings_tab::drive_pending_send`).
         if let Screen::BugPicker { selection, .. } = screen_snap {
             if button == "A" {
                 run_bug_report_flow(selection);
@@ -5498,6 +5542,7 @@ fn drive_pending_move() {
         // Back where the user pressed the button, whatever the library holds:
         // nothing else leaves this screen, and it swallows input on purpose, so
         // forgetting this left the app frozen on a finished progress bar.
+        s.dir_browse.clear();
         s.screen = settings_at(SetSection::Library, "DOSSIER");
         // And how it went, not a silent jump back. What stayed behind matters
         // more than the count, so it is the one said when there is both.
@@ -5552,7 +5597,9 @@ fn browse_go_up(s: &mut State, path: &str) {
 ///
 /// Row 0 chooses the folder currently shown; the rows below descend into its
 /// subfolders. B goes back UP a level rather than out, which is what a file
-/// browser is expected to do — leaving happens from the top level, or with `-`.
+/// browser is expected to do, except on the folder the browser opened on and
+/// the folders above it, where it leaves (`settings_tab::b_climbs`); `-`
+/// leaves from anywhere.
 fn handle_games_dir_input(s: &mut State, button: &str, mut selection: usize, mut scroll: usize) {
     let path = s.dir_path.clone();
     // Rows: 0 = choose this folder, then "up" unless we are at the card root,
@@ -5567,6 +5614,15 @@ fn handle_games_dir_input(s: &mut State, button: &str, mut selection: usize, mut
         "A" => {
             let root = primary_root();
             if selection == 0 {
+                // The card's root cannot take the library: its row says so,
+                // dimmed, and A on it is refused, with the note a refusal
+                // makes. A move there wrote "sdmc://game.swf" paths and
+                // recorded "sdmc:" as the library, which then held every
+                // folder of the card, so it could never be moved out again.
+                if settings_tab::is_card_root(&path) {
+                    crate::sfx::choose(crate::sfx::Sfx::Error);
+                    return;
+                }
                 // Choosing a folder moves the library into it. There is no
                 // "leave them" option: the old folder stays scanned either way,
                 // so leaving them changed nothing a user could see except
@@ -5607,10 +5663,11 @@ fn handle_games_dir_input(s: &mut State, button: &str, mut selection: usize, mut
             return;
         }
         "B" => {
-            // Same as the "up" row — including landing on the folder just left,
+            // Same as the "up" row, including landing on the folder just left,
             // which is the way most people go back up and the reason the fix on
-            // the row alone was invisible.
-            if browse_parent(&path).is_some() {
+            // the row alone was invisible. On the folder the browser opened on,
+            // or one above it, B leaves (`settings_tab::b_climbs`).
+            if settings_tab::b_climbs(&path) && browse_parent(&path).is_some() {
                 browse_go_up(s, &path);
             } else {
                 s.dir_browse.clear();
@@ -5662,8 +5719,9 @@ fn bug_picker_order(entries: &[Entry]) -> std::vec::Vec<usize> {
 }
 
 /// BugPicker > A: snapshot the chosen game's metadata, open swkbd for a
-/// description, then POST the report to the relay. Hoisted from `input()` — the
-/// keyboard + synchronous HTTPS POST must NOT run under the LIBRARY lock.
+/// description, then send the report to the relay behind a card
+/// (`settings_tab::submit_report`). Hoisted from `input()`: the keyboard must
+/// NOT run under the LIBRARY lock.
 ///
 /// `row` is a row of the picker, not a position in `entries`: the two differ
 /// since the picker has its own order.
@@ -5821,8 +5879,10 @@ fn handle_games_dir_confirm_input(s: &mut State, button: &str, selection: usize)
         }
         "A" => {
             if selection == 1 {
+                // The listing stays until the move has ended: the question
+                // scales out over the browser, which emptied here showed only
+                // its two pinned rows for the length of the close.
                 s.pending_games_dir = Some(s.dir_path.clone());
-                s.dir_browse.clear();
                 s.screen = Screen::GamesDirMoving;
             } else {
                 s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 };
@@ -5866,13 +5926,9 @@ fn run_new_game_folder_flow(game_idx: usize) {
     let Some(name) = net::prompt_with(lc.games_dir_new, lc.kbd_newdir_guide, "") else {
         return;
     };
-    // Separators would silently build a tree, or walk out of the games folder
-    // entirely. Same guard as the games-folder browser's own new-folder flow.
-    let safe: std::string::String = name
-        .chars()
-        .filter(|c| !matches!(*c, '/' | ':' | '\\'))
-        .collect();
-    let safe = safe.trim().to_string();
+    // The same cleaning as the games-folder browser's own new-folder flow, and
+    // the same keyboard guide listing what it removes.
+    let safe = clean_folder_name(&name);
     if safe.is_empty() {
         return;
     }
@@ -5921,6 +5977,18 @@ fn run_new_game_folder_flow(game_idx: usize) {
     }
 }
 
+/// A folder name as typed, cleaned for the card: without the separators, which
+/// would build a tree or walk out of the folder, nor the characters the card's
+/// file system refuses (`* ? " < > |`), which made the folder fail to be
+/// created with nothing said. `kbd_newdir_guide` lists them.
+fn clean_folder_name(typed: &str) -> std::string::String {
+    let kept: std::string::String = typed
+        .chars()
+        .filter(|c| !matches!(*c, '/' | ':' | '\\' | '*' | '?' | '"' | '<' | '>' | '|') && !c.is_control())
+        .collect();
+    kept.trim().to_string()
+}
+
 /// Create a subfolder in the folder the browser is showing (#79).
 ///
 /// Saves a trip to a file manager for the common case: someone laying their
@@ -5949,13 +6017,18 @@ fn run_new_folder_flow() {
 ");
         return;
     };
-    // Separators would silently create a tree, or escape the folder entirely.
-    let safe: std::string::String = name
-        .chars()
-        .filter(|c| !matches!(*c, '/' | ':' | '\\'))
-        .collect();
-    let safe = safe.trim();
+    let safe = clean_folder_name(&name);
+    let safe = safe.as_str();
     if safe.is_empty() {
+        return;
+    }
+    // A name the listing hides (`covers`, `*.files`, dots) would be created and
+    // never shown, the cursor left on the first row as if nothing happened:
+    // refused with the reason, as the options' new shelf does.
+    if is_our_bookkeeping(safe) || safe.starts_with('.') {
+        if let Ok(mut s) = LIBRARY.lock() {
+            set_toast(&mut s, crate::loc_ui::ui().folder_name_reserved.to_string(), TOAST_INFO);
+        }
         return;
     }
     let path = if here.ends_with('/') {
@@ -5964,8 +6037,12 @@ fn run_new_folder_flow() {
         std::format!("{}/{}", here, safe)
     };
     if let Err(e) = std::fs::create_dir_all(&path) {
-        crate::net::log(&std::format!("games dir: could not create {}: {}
-", path, e));
+        crate::net::log(&std::format!("games dir: could not create {}: {}\n", path, e));
+        // Said, not only logged: the keyboard closing on an unchanged list
+        // reads as the button doing nothing.
+        if let Ok(mut s) = LIBRARY.lock() {
+            set_toast(&mut s, crate::loc::s().err_sd_write.to_string(), TOAST_ERR);
+        }
         return;
     }
     // Show it straight away, with the cursor on it: the point of creating a
@@ -6031,7 +6108,7 @@ fn run_open_share_confirm_flow(game_idx: usize) {
     };
     let mut rows = keymap::binding_diff_rows(&before, &current);
     // Cursor speed lives outside the keymap — append its change so it's visible.
-    if let Some(r) = keymap::cursor_diff_row(before_cursor, keymap::cursor_speed_for(&basename)) {
+    if let Some(r) = keymap::cursor_share_row(before_cursor, keymap::cursor_speed_for(&basename)) {
         rows.push(r);
     }
     let rows = menu::cap_rows(rows);
@@ -6280,7 +6357,7 @@ fn run_open_preview_flow(game_idx: usize, profile_idx: usize) {
     };
     let current = keymap::effective_for(&basename);
     let mut rows = keymap::binding_diff_rows(&current, &profile.to_keymap());
-    if let Some(r) = keymap::cursor_diff_row(keymap::cursor_speed_for(&basename), profile.cursor_speed) {
+    if let Some(r) = keymap::cursor_apply_row(&basename, profile.cursor_speed) {
         rows.push(r);
     }
     // Nothing differs → don't open a preview that offers "APPLY" for a no-op.
@@ -6344,10 +6421,11 @@ fn run_profile_apply_flow(game_idx: usize, profile_idx: usize) {
     }
 }
 
-// Toast kinds (#20): colour of the transient banner. See `set_toast`.
+// Toast kinds (#20): the colour of the dot on the transient banner
+// (`SwitchRenderBackend::draw_toast`). See `set_toast`.
 const TOAST_OK: u8 = 0; // green
 const TOAST_ERR: u8 = 1; // red
-const TOAST_INFO: u8 = 2; // blue
+const TOAST_INFO: u8 = 2; // gold
 /// How long a toast stays up (~2.5 s at 60 fps).
 const TOAST_FRAMES: u32 = 150;
 
@@ -6774,9 +6852,10 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
 //
 // The saved-URL list used to be raw URLs in insertion order, add-row last —
 // fine for three entries, unreadable at thirty. Rows now show a NAME (the item
-// id / file the URL points at) with the host dimmed beside it, the "+ add" row
-// is pinned FIRST so it's reachable without scrolling, and the list filters
-// (Minus) + sorts (Y) like every other list in the app. `url_history` itself
+// id / file the URL points at) with the host dimmed beside it, the two action
+// cards (search Flashpoint, add an address) are pinned above the list so they
+// are reachable without scrolling, and the list filters (Minus) + sorts (Y)
+// like every other list in the app. `url_history` itself
 // stays in insertion order: it IS the "ADDED" sort, and reordering it on disk
 // would throw that away.
 
@@ -6857,28 +6936,44 @@ pub(crate) fn importer_view(s: &State) -> std::vec::Vec<usize> {
             }
         })
         .collect();
-    match import_sort_index() {
+    let sort = import_sort_index();
+    let rev = import_sort_reverse();
+    match sort {
         1 => idx.sort_by_key(|&i| importer_label(&s.url_history[i]).to_lowercase()),
         // SOURCE: grouped by host, by name inside a group.
         2 => idx.sort_by_key(|&i| {
             let u = &s.url_history[i];
             (importer_host(u).to_lowercase(), importer_label(u).to_lowercase())
         }),
-        // FILES: biggest source first. A URL never opened has no count, and
-        // sorts last rather than pretending to be empty.
-        3 => idx.sort_by_key(|&i| {
-            let u = &s.url_history[i];
-            let total = importer_progress(s, u).1;
-            (
-                std::cmp::Reverse(total.unwrap_or(0)),
-                total.is_none(),
-                importer_label(u).to_lowercase(),
-            )
-        }),
+        // FILES: biggest source first, or fewest first when turned round. A
+        // URL never opened has no count, and sorts last in BOTH orders rather
+        // than pretending to be empty: turning the finished list round put
+        // every one of them on top, a column of blanks hiding the rest (the
+        // rule `sort_fp_candidates` keeps for the same reason). So the order is
+        // applied here, and the list is not turned round below.
+        3 => {
+            let mut keyed: std::vec::Vec<(usize, Option<u32>, std::string::String)> = idx
+                .iter()
+                .map(|&i| {
+                    let u = &s.url_history[i];
+                    (i, importer_progress(s, u).1, importer_label(u).to_lowercase())
+                })
+                .collect();
+            keyed.sort_by(|a, b| {
+                a.1.is_none()
+                    .cmp(&b.1.is_none())
+                    .then_with(|| {
+                        let (x, y) = (a.1.unwrap_or(0), b.1.unwrap_or(0));
+                        if rev { x.cmp(&y) } else { y.cmp(&x) }
+                    })
+                    .then_with(|| a.2.cmp(&b.2))
+            });
+            idx = keyed.into_iter().map(|k| k.0).collect();
+        }
         // ADDED: history is oldest-first, so newest-first = reversed.
         _ => idx.reverse(),
     }
-    if import_sort_reverse() {
+    if rev && sort != 3 {
         idx.reverse();
     }
     // Favorites pinned on top whatever the sort, exactly like the JOUER gallery
@@ -7361,7 +7456,7 @@ fn with_source_sheet<R>(
     let chips: std::vec::Vec<(Icon, &str, u32)> = chip_list.iter().map(|(i, t, c)| (*i, t.as_str(), *c)).collect();
     let rows = [
         Row::new(Icon::Star, lc.opt_favorite).filled_if(fav, ui_col::GOLD).toggle(fav),
-        Row::new(Icon::Pencil, u.imp_edit_address),
+        Row::new(Icon::Pencil, u.imp_edit_address).keyboard(),
         Row::new(Icon::Trash, u.imp_delete_source).danger(),
     ];
     let help_edit = u.imp_help_src_edit.replacen("{}", &url, 1);
@@ -7409,7 +7504,8 @@ fn draw_source_options(
     crate::backend::render::set_ui_screen_kind(0);
     draw_importer_home(backend, row, scroll, false);
     let logo = LIBRARY.lock().ok().map(|s| (s.banner_tex, s.banner_w, s.banner_h)).unwrap_or_default();
-    backend.draw_navbar(Tab::Importer.index(), logo);
+    // L and R do not switch tabs under the panel: no L / R chips.
+    backend.draw_navbar_with(Tab::Importer.index(), logo, false);
     crate::backend::render::navbar_clear();
     backend.kit_scrim(0x9E_06_0A_14);
     crate::backend::render::set_ui_screen_kind(kind);
@@ -7463,7 +7559,11 @@ fn delete_current_history(s: &mut State) {
     if idx >= s.url_history.len() {
         return;
     }
-    s.url_history.remove(idx);
+    let removed = s.url_history.remove(idx);
+    // Its side data goes with it, in memory too: left there, it came back with
+    // the address (the old star, the old date) when the same one was added
+    // again.
+    s.url_meta.retain(|(u, _, _, _, _)| u != &removed);
     s.history_idx = if s.url_history.is_empty() {
         None
     } else {
@@ -7475,7 +7575,65 @@ fn delete_current_history(s: &mut State) {
     if s.history_loaded {
         let snapshot = s.url_history.clone();
         save_history_to_sd(&snapshot);
+        save_history_meta(s);
     }
+}
+
+/// Saved source `idx` now goes by `new_url` (its address edited, or fixed
+/// from an error page), and the index it has afterwards.
+///
+/// Its favourite and its added date go with it: the side data is keyed by the
+/// address, and renaming only the history lost the star and the date, and
+/// moved the source out of the pinned group. Its counts described the old
+/// address's item and start again. An address that is already saved is not
+/// listed twice: the source is merged into that entry, which keeps the earlier
+/// date and a star from either.
+fn rename_source(s: &mut State, idx: usize, new_url: &str) -> usize {
+    let Some(old) = s.url_history.get(idx).cloned() else { return idx };
+    if old == new_url {
+        return idx;
+    }
+    let old_meta = s.url_meta.iter().position(|(u, _, _, _, _)| *u == old).map(|i| s.url_meta.remove(i));
+    let (at, merged) = match s.url_history.iter().position(|u| u == new_url) {
+        Some(existing) => {
+            s.url_history.remove(idx);
+            if let Some((_, _, added, fav, _)) = old_meta {
+                match s.url_meta.iter_mut().find(|(u, _, _, _, _)| u == new_url) {
+                    Some(slot) => {
+                        slot.3 |= fav;
+                        if added != 0 && (slot.2 == 0 || added < slot.2) {
+                            slot.2 = added;
+                        }
+                    }
+                    None => s.url_meta.push((new_url.to_string(), 0, added, fav, 0)),
+                }
+            }
+            (if existing > idx { existing - 1 } else { existing }, true)
+        }
+        None => {
+            s.url_history[idx] = new_url.to_string();
+            s.url_meta.retain(|(u, _, _, _, _)| u != new_url);
+            if let Some((_, _, added, fav, _)) = old_meta {
+                s.url_meta.push((new_url.to_string(), 0, added, fav, 0));
+            }
+            (idx, false)
+        }
+    };
+    if let Some(h) = s.history_idx {
+        s.history_idx = Some(if h == idx {
+            at
+        } else if merged && h > idx {
+            h - 1
+        } else {
+            h
+        });
+    }
+    if s.history_loaded {
+        let snapshot = s.url_history.clone();
+        save_history_to_sd(&snapshot);
+        save_history_meta(s);
+    }
+    at
 }
 
 /// The add card: the keyboard for a new address (`initial` pre-fills it when
@@ -7494,7 +7652,10 @@ fn run_add_url_flow(initial: Option<&str>) {
     }
     if url.contains(char::is_whitespace) {
         if let Ok(mut s) = LIBRARY.lock() {
-            s.import_typed = url;
+            // A name typed after an archive.org address is still a name: the
+            // question quotes it, and Flashpoint is searched for it, without
+            // the address in front.
+            s.import_typed = strip_archive_prefix(&url).trim().to_string();
             s.screen = Screen::ImportNotAddress { selection: 1 };
         }
         return;
@@ -7509,6 +7670,25 @@ fn run_add_url_flow(initial: Option<&str>) {
         s.screen = distant_idle_at(&s, 1);
     }
     run_fetch_for_url(&url, 1, IMPORT_SCROLL.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+/// `text` without a leading archive.org download or details address
+/// (`https://archive.org/download/`, `archive.org/details/`...), compared
+/// without regard to case.
+fn strip_archive_prefix(text: &str) -> &str {
+    let lower = text.to_ascii_lowercase();
+    for scheme in ["https://", "http://", ""] {
+        for host in ["www.archive.org/", "archive.org/"] {
+            for kind in ["download/", "details/"] {
+                let prefix = std::format!("{}{}{}", scheme, host, kind);
+                // ASCII on both sides of the cut, since the prefix matched it.
+                if lower.starts_with(&prefix) {
+                    return text.get(prefix.len()..).unwrap_or(text);
+                }
+            }
+        }
+    }
+    text
 }
 
 /// IMPORTER home search (Minus): the keyboard pre-filled with the active search,
@@ -7558,12 +7738,8 @@ fn run_fix_url_flow(failed: &str) {
         clear_import_error(&mut s);
         clear_download_state(&mut s);
         if let Some(pos) = s.url_history.iter().position(|u| u == failed) {
-            s.url_history[pos] = fixed.clone();
-            if s.history_loaded {
-                let snapshot = s.url_history.clone();
-                save_history_to_sd(&snapshot);
-            }
-            importer_row_for_abs(&s, pos)
+            let at = rename_source(&mut s, pos, &fixed);
+            importer_row_for_abs(&s, at)
         } else {
             s.import_return_row
         }
@@ -7572,9 +7748,6 @@ fn run_fix_url_flow(failed: &str) {
     run_fetch_for_url(&fixed, row, scroll);
 }
 
-/// DistantUrlOptions > edit: swkbd prefilled with the existing URL. Commit
-/// replaces it (empty input deletes it), persists, returns to the list. Called
-/// from `input()` only.
 /// Leave a modal for `target`, scaling the panel OUT first when there is a panel
 /// to scale.
 ///
@@ -7605,6 +7778,10 @@ fn close_modal_to(s: &mut State, target: Screen) {
     s.screen = target;
 }
 
+/// DistantUrlOptions > edit: swkbd prefilled with the existing URL. Commit
+/// replaces it (`rename_source`: its star and its date go with it), persists,
+/// returns to the list; an emptied field is a cancel. Called from `input()`
+/// only.
 fn run_edit_url_flow(url_idx: usize) {
     let prefill = LIBRARY
         .lock()
@@ -7622,21 +7799,20 @@ fn run_edit_url_flow(url_idx: usize) {
         return;
     }
     if let Ok(mut s) = LIBRARY.lock() {
-        if url_idx < s.url_history.len() {
-            s.url_history[url_idx] = new_url;
+        let at = rename_source(&mut s, url_idx, &new_url);
+        // The panel shrinks away on the source as it now is: merged into an
+        // entry saved earlier, its old index is somebody else's.
+        if let Screen::DistantUrlOptions { selection, .. } = s.screen {
+            s.screen = Screen::DistantUrlOptions { url_idx: at, selection };
         }
-        if s.history_loaded {
-            let snapshot = s.url_history.clone();
-            save_history_to_sd(&snapshot);
-        }
-        let row = importer_row_for_abs(&s, url_idx);
+        let row = importer_row_for_abs(&s, at);
         let target = distant_idle_at(&s, row);
         close_modal_to(&mut s, target);
     }
 }
 
-/// Fetch the given URL and transition state. Used both by the post-swkbd
-/// path (`run_url_fetch_flow`) and by the ZR re-fetch-without-swkbd path.
+/// Fetch the given URL and transition state. Used by the keyboard flows (add,
+/// fix), by A on a saved source and by the error page's retry.
 /// v1.2.0: routes by source shape so the IMPORTER is "globalisable" — an
 /// archive.org URL/item-id goes through the metadata file list, a direct
 /// `.swf` URL downloads straight to SD.
@@ -7658,9 +7834,6 @@ fn run_fetch_for_url(url: &str, source_sel: usize, source_scroll: usize) {
     }
 }
 
-/// Direct `.swf` URL import: download straight to SD, no metadata list. The
-/// filename is derived from the URL's last path segment (query/fragment
-/// stripped); a re-download just overwrites + refreshes the entry.
 /// On-SD `.swf` filename FlashNX gives a directly-imported URL: last path
 /// segment, query/fragment stripped, path separators sanitized, `.swf`
 /// enforced. Kept standalone so the bug-report flow can recover a game's
@@ -7680,6 +7853,9 @@ fn safe_name_from_url(url: &str) -> std::string::String {
     }
 }
 
+/// Direct `.swf` URL import: download straight to SD, no metadata list. The
+/// filename is derived from the URL's last path segment (query/fragment
+/// stripped); a game of that name already on the card is not downloaded again.
 fn run_direct_download(url: &str) {
     // Wayback URLs need the `id_` modifier to serve the raw file instead of the
     // HTML page wrapper (e.g. .../web/<ts>id_/...mting.swf). No-op otherwise.
@@ -8847,13 +9023,22 @@ const TILE_ERROR_PATH: &str = "sdmc:/switch/FlashNX/tile_error.txt";
 /// arguments on spaces. Sixteen hex digits never contain one; `Papa Louie 2`
 /// does. See forwarder/source/main.c.
 fn tile_cfg_path(program_id: u64) -> std::string::String {
-    std::format!("sdmc:/switch/FlashNX/tiles/{:016X}.cfg", program_id)
+    std::format!("{}/{:016X}.cfg", TILES_DIR, program_id)
 }
+
+/// The folder of the tiles' configs, one `<program ID>.cfg` per tile.
+const TILES_DIR: &str = "sdmc:/switch/FlashNX/tiles";
 
 /// The tiles' configs: (program ID, the game's path), read from
 /// `sdmc:/switch/FlashNX/tiles/` once and kept until a config is written.
 static TILE_INDEX: Mutex<Option<std::vec::Vec<(u64, std::string::String)>>> = Mutex::new(None);
 
+/// Listed by C++ and read with `read_sd_text`, never with `std::fs`: Rust's
+/// `read_dir` corrupts entry names on Horizon (see `list_dirs`), and a
+/// `<ID>.cfg` that loses two bytes no longer parses, so the index came back
+/// empty and every game fell back to the hash of its CURRENT path, which a
+/// moved game's tile does not carry. `read_to_string` also sizes its buffer
+/// from fstat, which is bogus in applet mode.
 fn tile_index() -> std::vec::Vec<(u64, std::string::String)> {
     if let Ok(g) = TILE_INDEX.lock() {
         if let Some(v) = g.as_ref() {
@@ -8861,14 +9046,11 @@ fn tile_index() -> std::vec::Vec<(u64, std::string::String)> {
         }
     }
     let mut v = std::vec::Vec::new();
-    if let Ok(dir) = std::fs::read_dir("sdmc:/switch/FlashNX/tiles") {
-        for e in dir.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let Some(hex) = name.strip_suffix(".cfg") else { continue };
-            let Ok(id) = u64::from_str_radix(hex, 16) else { continue };
-            if let Ok(text) = std::fs::read_to_string(e.path()) {
-                v.push((id, text.trim().to_string()));
-            }
+    for name in list_files_top(TILES_DIR) {
+        let Some(hex) = name.strip_suffix(".cfg") else { continue };
+        let Ok(id) = u64::from_str_radix(hex, 16) else { continue };
+        if let Ok(text) = read_sd_text(&std::format!("{}/{}", TILES_DIR, name), 4096) {
+            v.push((id, text.trim().to_string()));
         }
     }
     if let Ok(mut g) = TILE_INDEX.lock() {
@@ -9277,18 +9459,24 @@ fn looks_like_download_hash(tok: &str) -> bool {
 }
 
 /// OPTIONS > JAQUETTE: search Flashpoint by the game's name and open the cover
-/// picker. Gated on the online-covers toggle (OFF → notice). Called from
-/// `input()` only — runs a synchronous HTTPS search WITHOUT the LIBRARY lock.
+/// picker, behind a loading card (the search runs on the next frame, in
+/// `drive_pending_net`). Called from `input()` only.
 fn run_cover_search_flow(game_idx: usize) {
     let name = match LIBRARY.lock() {
-        Ok(g) => match g.entries.get(game_idx) {
-            Some(e) => e.display_name.clone(),
+        Ok(mut g) => match g.entries.get(game_idx) {
+            Some(e) => {
+                let name = e.display_name.clone();
+                // A new search starts on the logos, whatever the last picker
+                // was left showing.
+                g.cover_use_shot = false;
+                name
+            }
             None => return,
         },
         Err(_) => return,
     };
     let query = cover_query_from_name(&name);
-    run_cover_search_with(game_idx, query);
+    defer_net(PendingNet::CoverSearch { game_idx, query }, game_idx);
 }
 
 /// CoverPicker > Minus: re-open the keyboard pre-filled with the last query so
@@ -9317,12 +9505,13 @@ fn run_cover_research_flow(game_idx: usize) {
     if query.is_empty() {
         return; // empty submit = no-op, don't wipe the current list
     }
-    run_cover_search_with(game_idx, query);
+    defer_net(PendingNet::CoverSearch { game_idx, query }, game_idx);
 }
 
 /// Shared Flashpoint cover search: runs the synchronous HTTPS search for
 /// `query`, remembers it (for Minus/refine pre-fill), and opens or refreshes
-/// the CoverPicker. Called from `input()` only — no LIBRARY lock during HTTPS.
+/// the CoverPicker. Run by `drive_pending_net` behind its loading card, with
+/// no LIBRARY lock during HTTPS.
 fn run_cover_search_with(game_idx: usize, query: std::string::String) {
     let (cands, msg) = match crate::sources::flashpoint::search(&query) {
         Ok(list) if list.is_empty() => {
@@ -9359,9 +9548,11 @@ fn cover_url_for_source(cover_url: &str, use_shot: bool) -> std::string::String 
 }
 
 /// CoverPicker > A: download the chosen candidate's logo and cache it as the
-/// game's cover. Called from `input()` only — synchronous HTTPS download
-/// WITHOUT the LIBRARY lock. On success, invalidates the backend cover-texture
-/// cache so the grid shows the new art, and returns to the OPTIONS modal.
+/// game's cover. Run by `drive_pending_net` behind its loading card: a
+/// synchronous HTTPS download WITHOUT the LIBRARY lock. On success,
+/// invalidates the backend cover-texture cache so the grid shows the new art,
+/// and returns to the OPTIONS modal; on failure the picker comes back with
+/// the reason in a toast.
 fn run_cover_fetch_flow(game_idx: usize, selection: usize) {
     let picked = match LIBRARY.lock() {
         Ok(g) => {
@@ -9388,14 +9579,21 @@ fn run_cover_fetch_flow(game_idx: usize, selection: usize) {
                 s.cover_candidates.clear();
                 s.cover_msg.clear();
                 s.cover_query.clear();
+                // The next search starts on the logos: left on, a screenshot
+                // picked once opened every later search on screenshots.
+                s.cover_use_shot = false;
                 // Back to OPTIONS on the JAQUETTE row.
                 s.screen = Screen::OptionsModal { game_idx, selection: opt_row("JAQUETTE") };
             }
         }
         Err(e) => {
             log(&std::format!("covers: fetch FAILED: {}\n", e));
+            // Said out loud, over the picker it came from: the reason used to go
+            // into `cover_msg`, which the grid never draws, and A seemed to do
+            // nothing at all.
             if let Ok(mut s) = LIBRARY.lock() {
-                s.cover_msg = e;
+                set_toast(&mut s, e, TOAST_ERR);
+                s.screen = Screen::CoverPicker { game_idx, selection };
             }
         }
     }
@@ -10033,9 +10231,9 @@ fn handle_remote_sort_modal_input(
 /// entry. Empty input removes the sidecar (revert to basename). Called
 /// from `input()` only — must NOT hold the LIBRARY lock during swkbd.
 fn run_rename_flow(game_idx: usize) {
-    let (basename, current_display) = match LIBRARY.lock() {
+    let (basename, path, current_display) = match LIBRARY.lock() {
         Ok(g) => match g.entries.get(game_idx) {
-            Some(e) => (e.basename.clone(), e.display_name.clone()),
+            Some(e) => (e.basename.clone(), e.path.clone(), e.display_name.clone()),
             None => return,
         },
         Err(_) => return,
@@ -10066,6 +10264,15 @@ fn run_rename_flow(game_idx: usize) {
             if entry.display_name != current_display {
                 crate::sfx::value_changed();
             }
+        }
+        // In its place under the new name now: by name, the game kept its old
+        // place until something else sorted the list, and then jumped. The
+        // panel follows it by PATH, as a favourite does (folders let two games
+        // share a file name).
+        sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
+        let new_idx = s.entries.iter().position(|e| e.path == path).unwrap_or(game_idx);
+        if let Screen::OptionsModal { selection, .. } = s.screen {
+            s.screen = Screen::OptionsModal { game_idx: new_idx, selection };
         }
     }
 }
@@ -10368,10 +10575,6 @@ fn distant_row_rect(sel: usize, scroll: usize, vw: f32) -> (f32, f32, f32, f32) 
     (x, y + 3.0, w, h - 6.0)
 }
 
-/// Stable id per panel/modal screen (0 = not a modal). Used by `render` to fire
-/// the scale-in "pop" exactly once when a modal is first shown. Full-screen
-/// notices (AppletNotice / DistantError / Downloading) are NOT modals here — no
-/// panel to scale. The TOUCHES editors ARE modals (scale in like the rest).
 /// Id of the list on screen, for the touch tables. Never zero for a screen that
 /// has tappable rows.
 ///
@@ -10396,11 +10599,19 @@ fn touch_kind(screen: Screen) -> u32 {
     }
 }
 
+/// Stable id per panel/modal screen (0 = not a modal). Used by `render` to fire
+/// the scale-in "pop" exactly once when a modal is first shown. Full pages
+/// (DistantError, the download) are NOT modals here: no panel to scale. The
+/// TOUCHES editors ARE modals (scale in like the rest).
 fn modal_kind(screen: Screen) -> u8 {
     // A game's options and everything opened from them are ONE panel stack
     // (`options_panel`): the panel slides in from the right once, its pages
-    // come out beside it, and none of them pops on its own.
-    if options_panel::is_options_family(screen) {
+    // come out beside it, and none of them pops on its own. The frame of a
+    // profile flow's loading card is part of it (`defer_net` is only called
+    // from there): counted as no window at all, it made the result screen
+    // "open" again, and both panels slid back in from the right edge after
+    // every apply, share or delete.
+    if options_panel::is_options_family(screen) || matches!(screen, Screen::ProfileLoading) {
         return 1;
     }
     match screen {
@@ -10411,8 +10622,13 @@ fn modal_kind(screen: Screen) -> u8 {
         // stack, like a game's options: the question comes up over the panel
         // without the panel popping again, and Cancel drops back onto it.
         Screen::DistantUrlOptions { .. } | Screen::DistantHistoryConfirm { .. } => 5,
-        Screen::DistantCancelConfirm { .. } => 23,
         Screen::ImportNotAddress { .. } => 24,
+        // Its own id: it shared 23 with SendFailed, and a table one of them
+        // left behind answered the other's first frame.
+        Screen::DistantCancelConfirm { .. } => 25,
+        // The applet-mode notice, a window over the page the game was pressed
+        // on: it pops in and scales out like the others.
+        Screen::AppletNotice { .. } => 26,
         // The keymap editor delegates to `menu::*`; its window pops in once, and
         // its key picker opens inside that window (`menu::window_kind` counts
         // the two as one), exactly like the in-game `ruffle_touches_draw` path.
@@ -10455,6 +10671,10 @@ enum PendingClose {
     /// Settings keymap editor, whose panel is `menu`-drawn: it must stay active
     /// (drawable) while it scales OUT, then close as the pop lands on the tab.
     CloseMenuGoto(Screen),
+    /// A game's controls editor scaled out: close the `menu` module and land on
+    /// the game's Touches et curseur page, read again (a key changed in the
+    /// editor can bring its revert row).
+    CloseEditorToTouches { game_idx: usize },
     DeleteGame { game_idx: usize },
     /// Delete the saved source `history_idx`; the cursor stays on `row`, the
     /// view row it was on, so the source below slides under it.
@@ -10465,13 +10685,14 @@ enum PendingClose {
 
 static PENDING_AFTER_CLOSE: Mutex<Option<PendingClose>> = Mutex::new(None);
 
-/// A profile network/IO flow deferred by one frame (#20) so a "loading" panel
-/// shows BEFORE the blocking GitHub call freezes the UI thread. `input` stashes
-/// the action (via `defer_net`) + flips to `Screen::ProfileLoading`; `render`
-/// draws the panel that frame, then runs the flow the next, which sets the real
-/// result screen. Lower-tech than the archive.org async fetch, but enough: the
-/// catalog index/counts cache after the first open, so only the first click is
-/// slow. `bool` = armed (false the frame it's set, true the frame it runs).
+/// A network/IO flow (a profile's, a cover's) deferred by one frame (#20) so a
+/// "loading" panel shows BEFORE the blocking call freezes the UI thread.
+/// `input` stashes the action (via `defer_net`) + flips to
+/// `Screen::ProfileLoading`; `render` draws the panel that frame, then runs the
+/// flow the next, which sets the real result screen. Lower-tech than the
+/// archive.org async fetch, but enough for the profiles: the catalog
+/// index/counts cache after the first open, so only the first click is slow.
+/// `bool` = armed (false the frame it's set, true the frame it runs).
 enum PendingNet {
     OpenProfiles { game_idx: usize },
     OpenShareConfirm { game_idx: usize },
@@ -10481,9 +10702,16 @@ enum PendingNet {
     /// One-time first-boot housekeeping (dedup + size backfill), run behind the
     /// "Optimisation" loading panel instead of freezing on a black screen.
     RunStartupMigrations,
+    /// OPTIONS > JAQUETTE, or Minus in the cover picker: the Flashpoint search
+    /// for `query` (HTTPS), then the picker.
+    CoverSearch { game_idx: usize, query: std::string::String },
+    /// A in the cover picker: download the cover on `selection` (HTTPS).
+    CoverFetch { game_idx: usize, selection: usize },
 }
 static PENDING_NET: Mutex<Option<(PendingNet, bool)>> = Mutex::new(None);
 static NET_LOADING_LABEL: Mutex<String> = Mutex::new(String::new());
+/// The screen the deferred flow started from, drawn under its loading card.
+static NET_LOADING_FROM: Mutex<Option<Screen>> = Mutex::new(None);
 /// True while the first-boot "Optimisation" modal should overlay the gallery:
 /// set when the housekeeping is queued, cleared once it finishes. The screen
 /// itself stays on JOUER, so the modal composites over the (dimmed) gallery.
@@ -10506,8 +10734,8 @@ pub fn note_renderer_reset() {
     LANG_FONT_WARM.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Stash `action` to run next frame + show the loading panel now (titled with the
-/// game name). Call from `input` instead of running the flow inline.
+/// Stash `action` to run next frame + show the loading panel now (saying what
+/// the wait is for). Call from `input` instead of running the flow inline.
 fn defer_net(action: PendingNet, game_idx: usize) {
     // What the wait is for, under its spinner (the panels behind already say
     // which game).
@@ -10519,6 +10747,8 @@ fn defer_net(action: PendingNet, game_idx: usize) {
         PendingNet::ApplyProfile { .. } => u.loading_apply,
         PendingNet::DeleteProfile { .. } => u.loading_delete,
         PendingNet::RunStartupMigrations => crate::loc::s().optimizing,
+        PendingNet::CoverSearch { .. } => u.loading_covers,
+        PendingNet::CoverFetch { .. } => u.loading_cover_dl,
     }
     .to_string();
     let _ = game_idx;
@@ -10529,6 +10759,17 @@ fn defer_net(action: PendingNet, game_idx: usize) {
         *p = Some((action, false));
     }
     if let Ok(mut s) = LIBRARY.lock() {
+        // What stays under the card: the screen the flow started from, a
+        // question already answered giving way to the list it was asked over.
+        let from = match s.screen {
+            Screen::ProfileDeleteConfirm { game_idx, profile_idx, .. } => {
+                Screen::ProfileList { game_idx, selection: profile_idx }
+            }
+            other => other,
+        };
+        if let Ok(mut f) = NET_LOADING_FROM.lock() {
+            *f = Some(from);
+        }
         s.screen = Screen::ProfileLoading;
     }
 }
@@ -10581,6 +10822,8 @@ fn drive_pending_net() {
         PendingNet::DeleteProfile { game_idx, profile_idx } => {
             run_delete_profile_flow(game_idx, profile_idx)
         }
+        PendingNet::CoverSearch { game_idx, query } => run_cover_search_with(game_idx, query),
+        PendingNet::CoverFetch { game_idx, selection } => run_cover_fetch_flow(game_idx, selection),
     }
 }
 
@@ -10640,7 +10883,9 @@ fn reveal_window(rect: (f32, f32, f32, f32), vw: f32, vh: f32, frac: f32) -> (f3
 fn draw_home_backdrop(backend: &mut SwitchRenderBackend, selection: usize, scroll: usize) {
     draw_importer_home(backend, selection, scroll, false);
     let logo = LIBRARY.lock().ok().map(|s| (s.banner_tex, s.banner_w, s.banner_h)).unwrap_or_default();
-    backend.draw_navbar(Tab::Importer.index(), logo);
+    // Always under something (a window, a page opening out of a row, a
+    // launch): L and R do not switch tabs from there, so no L / R chips.
+    backend.draw_navbar_with(Tab::Importer.index(), logo, false);
     crate::backend::render::navbar_clear();
 }
 
@@ -10857,7 +11102,10 @@ fn poll_archive_fetch() {
             // or an answer too big). When what was typed is one bare word, it
             // may have been a game's name: offer Flashpoint for it.
             if f.msg == crate::loc_ui::ui().imp_err_item_missing {
-                let typed = s.failed_url.trim().to_string();
+                // The identifier asked for, which is the word itself when it
+                // came after an archive.org address: a game's name typed there
+                // is still one bare word.
+                let typed = net::extract_item_id(&s.failed_url).unwrap_or_default();
                 if !typed.is_empty() && !typed.contains('/') && !typed.contains('.') {
                     s.import_fp_suggest = typed;
                 }
@@ -11199,6 +11447,8 @@ pub fn render(backend: &mut SwitchRenderBackend) {
     // Run any deferred profile network flow now that its loading panel has shown
     // a frame (#20). May transition the screen, so do it before reading it.
     drive_pending_net();
+    // Same for a bug report or an idea, behind its card on the RÉGLAGES page.
+    settings_tab::drive_pending_send();
     drive_pending_move();
     let s = match LIBRARY.lock() {
         Ok(g) => g,
@@ -11260,6 +11510,10 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     // and land on the tab (which does not pop, being a tab).
                     menu::close();
                     s2.screen = t;
+                }
+                Some(PendingClose::CloseEditorToTouches { game_idx }) => {
+                    menu::close();
+                    goto_touches_menu(&mut s2, game_idx, 0);
                 }
                 Some(PendingClose::DeleteGame { game_idx }) => {
                     delete_game(&mut s2, game_idx);
@@ -11392,7 +11646,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
     // when it comes from somewhere else: back from the controls editor (drawn
     // over the same panels) the panel is already in place, and sliding it in
     // again would replay its opening for nothing.
-    let class: u8 = if options_panel::is_options_family(screen) {
+    let class: u8 = if options_panel::is_options_family(screen) || matches!(screen, Screen::ProfileLoading) {
         1
     } else if matches!(screen, Screen::TouchesEditor { .. }) {
         2
@@ -11415,8 +11669,46 @@ pub fn render(backend: &mut SwitchRenderBackend) {
     // current screen has no animation.
     match screen {
         Screen::Inactive | Screen::Picked | Screen::Quit => {}
-        Screen::AppletNotice { .. } => {
-            backend.draw_library_applet_notice(crate::loc::s().applet_notice);
+        Screen::AppletNotice { selection, scroll_offset } => {
+            use crate::backend::render::{Choice, Icon};
+            // A window over the page the game was pressed on, like every other
+            // window: the grid, or the importer page of a game started from
+            // there, still and taking no taps. While the window scales out,
+            // the press has already taken that page off `LAUNCH_BACKDROP` and
+            // the close's target names it instead.
+            let behind = match PENDING_AFTER_CLOSE.lock().ok().as_deref() {
+                Some(Some(PendingClose::Goto(page))) => Some(*page),
+                _ => LAUNCH_BACKDROP.lock().ok().and_then(|g| *g),
+            };
+            backend.clear_ui_transform();
+            crate::backend::render::set_ui_screen_kind(0);
+            match behind {
+                Some(page @ (Screen::DistantIdle { .. } | Screen::DistantFiles { .. } | Screen::FpGallery { .. })) => {
+                    draw_importer_backdrop(backend, page)
+                }
+                other => {
+                    let (sel, scroll) = match other {
+                        Some(Screen::List { selection, scroll_offset }) => (selection, scroll_offset),
+                        _ => (selection, scroll_offset),
+                    };
+                    let logo = LIBRARY.lock().map(|s| (s.banner_tex, s.banner_w, s.banner_h)).unwrap_or((0, 0, 0));
+                    draw_gallery(backend, sel, scroll, anim_origin);
+                    backend.draw_navbar_with(Tab::Jouer.index(), logo, false);
+                    crate::backend::render::navbar_clear();
+                }
+            }
+            crate::backend::render::set_ui_screen_kind(ui_kind);
+            backend.set_ui_modal_scale(if modal_active { modal_scale } else { 1.0 });
+            let (lc, u) = (crate::loc::s(), crate::loc_ui::ui());
+            backend.draw_confirm(
+                Icon::Info,
+                lc.applet_title,
+                lc.applet_notice,
+                None,
+                &[Choice { label: u.close, destructive: false }],
+                0,
+                false,
+            );
         }
         Screen::Empty => {
             backend.draw_library_empty();
@@ -11551,6 +11843,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     let root = primary_root();
                     backend.draw_library_move_page(root.trim_start_matches("sdmc:"), "", total, total);
                     if let Ok(mut s) = LIBRARY.lock() {
+                        s.dir_browse.clear();
                         s.screen = settings_at(SetSection::Library, "DOSSIER");
                     }
                 }
@@ -11568,9 +11861,10 @@ pub fn render(backend: &mut SwitchRenderBackend) {
         }
         Screen::ProfileLoading => {
             // The panels as they were, the spinner over them, for the frame
-            // before the deferred GitHub call runs (#20).
+            // before the deferred network call runs (#20).
             let label = NET_LOADING_LABEL.lock().ok().map(|l| l.clone()).unwrap_or_default();
-            options_panel::draw_options_loading(backend, now, anim_origin, &label);
+            let from = NET_LOADING_FROM.lock().ok().and_then(|g| *g);
+            options_panel::draw_options_loading(backend, now, anim_origin, &label, from);
         }
         Screen::FpGallery { selection, scroll } => {
             let reveal = crate::backend::render::distant_reveal_step(now);
@@ -11666,7 +11960,8 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             backend.clear_ui_transform();
             crate::backend::render::set_ui_screen_kind(0);
             draw_gallery(backend, behind_sel, behind_scroll, anim_origin);
-            backend.draw_navbar(Tab::Jouer.index(), logo);
+            // L and R do not switch tabs under the window: no L / R chips.
+            backend.draw_navbar_with(Tab::Jouer.index(), logo, false);
             crate::backend::render::navbar_clear();
             crate::backend::render::set_ui_screen_kind(family_kind);
             backend.set_ui_modal_scale(if modal_active { modal_scale } else { 1.0 });
@@ -11752,12 +12047,19 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             }
             draw_importer_home(backend, selection, scroll_offset, true);
         }
+        // A source's panel slides on every pop of its own. It borrowed the game
+        // options' `family_slide`, whose "slide in" flag only a game's panels
+        // reset, so after a game's controls editor it came in at full
+        // position in one frame. Its question pops nothing (same kind), so
+        // this never replays the slide under it.
         Screen::DistantUrlOptions { url_idx, selection } => {
-            draw_source_options(backend, url_idx, selection, family_slide, None, family_kind);
+            let slide = if closing || modal_active { Some(modal_scale) } else { None };
+            draw_source_options(backend, url_idx, selection, slide, None, family_kind);
         }
         Screen::DistantHistoryConfirm { selection } => {
             let url_idx = LIBRARY.lock().map(|s| s.history_idx.unwrap_or(0)).unwrap_or(0);
-            draw_source_options(backend, url_idx, 2, family_slide, Some(selection), family_kind);
+            let slide = if closing || modal_active { Some(modal_scale) } else { None };
+            draw_source_options(backend, url_idx, 2, slide, Some(selection), family_kind);
         }
         Screen::ImportNotAddress { selection } => {
             use crate::backend::render::{Choice, Icon};
@@ -11928,10 +12230,20 @@ pub fn render(backend: &mut SwitchRenderBackend) {
     });
     if let Some((msg, kind)) = toast {
         // Over the library, left of a game's options and its page, rather than
-        // on top of them.
-        match options_panel::panels_left_edge(screen, backend.screen_size().0) {
-            Some(right) => backend.draw_toast_left_of(&msg, kind, right),
-            None => backend.draw_toast(&msg, kind),
+        // on top of them; over the cover picker, on its own footer, the window
+        // covering the library. A loading card keeps the toast where the
+        // screen under it has it: that frame stays up for the whole call.
+        let place = match screen {
+            Screen::ProfileLoading => NET_LOADING_FROM.lock().ok().and_then(|g| *g).unwrap_or(screen),
+            other => other,
+        };
+        if matches!(place, Screen::CoverPicker { .. }) {
+            backend.draw_toast_in_cover_picker(&msg, kind);
+        } else {
+            match options_panel::panels_left_edge(place, backend.screen_size().0) {
+                Some(right) => backend.draw_toast_left_of(&msg, kind, right),
+                None => backend.draw_toast(&msg, kind),
+            }
         }
     }
 

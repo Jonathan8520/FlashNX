@@ -36,6 +36,7 @@ impl SwitchRenderBackend {
         if n == 0 {
             // Covers off, nothing found, or an error: say which, in the window.
             let frame = self.draw_modal_frame(720.0, 0, Some(280.0), false, lc.cover_title, Some(game_name), None);
+            note_cover_foot(&frame);
             let m = if msg.is_empty() { lc.cover_none } else { msg };
             let lines = self.kit_wrap(m, size::BODY, frame.w - 120.0, 3);
             let mut ly = frame.y + 150.0;
@@ -45,6 +46,10 @@ impl SwitchRenderBackend {
                 ly += 26.0;
             }
             self.modal_hints(&frame, &[(&[Btn::Minus], u.hint_search), (&[Btn::B], u.back)], false);
+            // Nothing to tap here. Published all the same: the last table under
+            // this tag is the options panel's, and two taps on the dimmed
+            // panel around the window moved the picker's hidden cursor.
+            ui_cells_publish(ui_screen_kind(), std::vec::Vec::new());
             unsafe {
                 glUseProgram(0);
                 glBindVertexArray(0);
@@ -57,6 +62,7 @@ impl SwitchRenderBackend {
         let rows = n.div_ceil(cols);
         let h = MODAL_PAD_TOP - 14.0 + rows as f32 * (THUMB_H + GAP) + 44.0 + 60.0;
         let frame = self.draw_modal_frame(w, 0, Some(h), false, lc.cover_title, Some(game_name), None);
+        note_cover_foot(&frame);
         let grid_top = frame.y + MODAL_PAD_TOP - 14.0;
         let grid_left = frame.x + MARGIN;
         self.pump_thumbnail_load();
@@ -108,5 +114,14 @@ impl SwitchRenderBackend {
             glBindVertexArray(0);
         }
         self.gl_state.invalidate();
+    }
+}
+
+/// Remember where the picker's footer band is, for its toast
+/// (`draw_toast_in_cover_picker`): the window's height follows the number of
+/// covers found.
+fn note_cover_foot(frame: &ModalFrame) {
+    if let Ok(mut g) = COVER_FOOT.lock() {
+        *g = Some((frame.x, frame.w, frame.y + frame.h - MODAL_FOOT_H));
     }
 }

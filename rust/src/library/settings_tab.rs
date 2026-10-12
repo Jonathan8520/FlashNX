@@ -23,7 +23,8 @@ use super::*;
 use crate::backend::render::{ui_col, Btn, Choice, HintItem, Icon, Row};
 
 /// The column on the left, top to bottom. Quitter is not a section: it sits at
-/// the foot of the column, has no pane, and acts on A.
+/// the foot of the column and acts on A; its pane only explains it, and the
+/// cursor never goes in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SetSection {
     Library,
@@ -66,8 +67,8 @@ impl SetSection {
     }
 
     /// How many places the cursor can take in the pane. None in About, which
-    /// only has things to read, nor in Quitter, which has no pane: the cursor
-    /// does not go in there.
+    /// only has things to read, nor in Quitter, whose pane only explains what
+    /// it does: the cursor does not go in there.
     fn pane_len(self) -> usize {
         match self {
             SetSection::Language => crate::loc::PICKER_LANGS.len(),
@@ -80,8 +81,10 @@ impl SetSection {
 // never by number: every screen that comes back to the tab lands on the row
 // that opened it through these names.
 const LIBRARY_ROWS: &[&str] = &["VUE", "DOSSIER", "SONS"];
+// The game defaults in the groups and the order of a game's options (the
+// controls, the picture as the pause's ÉCRAN lists it, the performance).
 const DEFAULTS_ROWS: &[&str] =
-    &["AFFICHAGE", "ROTATION", "ZOOM", "PIXELS", "FILTRE", "OVERCLOCK", "FPS", "TOUCHES", "VITESSE"];
+    &["TOUCHES", "VITESSE", "AFFICHAGE", "ROTATION", "ZOOM", "PIXELS", "FILTRE", "FPS", "OVERCLOCK"];
 const PROFILE_ROWS: &[&str] = &["PSEUDO"];
 const HELP_ROWS: &[&str] = &["BUG", "IDEE"];
 
@@ -258,6 +261,11 @@ fn row_a(s: &mut State, section: SetSection, key: &str) {
                 s.dir_browse = list_dirs(&root);
                 s.dir_path = root;
                 s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 };
+            }
+            // The folder it opened on: B leaves from there or above it, and
+            // climbs anywhere else (`b_climbs`).
+            if let Ok(mut g) = BROWSE_START.lock() {
+                *g = s.dir_path.clone();
             }
         }
         (SetSection::Library, "SONS") => {
@@ -550,9 +558,9 @@ pub(crate) fn run_pseudo_flow() {
 
 /// Aide et retours > Proposer une idée: the keyboard for a free text, posted
 /// as a "suggestion" issue (same relay and token as a bug report, another
-/// label). No game involved. Hoisted from `input()`: the keyboard and the
-/// synchronous POST must not run under the library lock. Empty input sends
-/// nothing.
+/// label). No game involved. Hoisted from `input()`: the keyboard must not run
+/// under the library lock; the text is then sent behind a card
+/// (`submit_report`). Empty input sends nothing.
 pub(crate) fn run_suggestion_flow() {
     let lc = crate::loc::s();
     let Some(text) = net::prompt_long(lc.kbd_suggest_header, lc.kbd_suggest_guide) else {
@@ -595,15 +603,57 @@ pub(crate) fn run_suggestion_flow() {
 /// here: only the question reads it, and only a failed send opens that.
 static FAILED_SEND: Mutex<Option<(crate::bugreport::Report, std::string::String)>> = Mutex::new(None);
 
-/// Send `report`, which started on the Aide et retours row `key`. Sent: a
-/// toast says so and the cursor is back on the row, the tab never left. Not
-/// sent: a question over the page gives the reason and offers to try again,
-/// the report kept for it.
+/// A report on its way, with the row it started on and whether the page has
+/// shown the card saying so (`drive_pending_send`).
+static PENDING_SEND: Mutex<Option<(crate::bugreport::Report, &'static str, bool)>> = Mutex::new(None);
+
+/// Send `report`, which started on the Aide et retours row `key`, on the next
+/// frames: the Aide et retours page is drawn once with a card saying it is
+/// being sent, then the POST runs. Run at once from the keyboard's flow, it
+/// froze the last frame from before the keyboard for as long as the relay took
+/// (up to 30 s on a dead connection), with nothing saying anything was going on.
 ///
 /// The row is carried rather than derived from `report.kind`: it is a fact
 /// about the menu, and dismissing a sent suggestion once landed the cursor on
 /// the bug row above the button just pressed (#113).
 pub(crate) fn submit_report(report: crate::bugreport::Report, key: &'static str) {
+    if let Ok(mut g) = PENDING_SEND.lock() {
+        *g = Some((report, key, false));
+    }
+    if let Ok(mut s) = LIBRARY.lock() {
+        let row = row_of(SetSection::Help, key);
+        s.screen = Screen::Settings { section: SetSection::Help, in_pane: true, row };
+    }
+}
+
+/// Whether a report is on its way: the page shows the card, and no press
+/// reaches it until the relay has answered.
+pub(crate) fn sending() -> bool {
+    PENDING_SEND.lock().map(|g| g.is_some()).unwrap_or(false)
+}
+
+/// The report `submit_report` queued: the first call lets the frame with the
+/// card be drawn, the next one sends it. Called at the top of `render`, like
+/// the profile flows' `drive_pending_net`.
+pub(crate) fn drive_pending_send() {
+    let job = {
+        let Ok(mut g) = PENDING_SEND.lock() else { return };
+        match g.take() {
+            None => return,
+            Some((report, key, false)) => {
+                *g = Some((report, key, true));
+                return;
+            }
+            Some((report, key, true)) => (report, key),
+        }
+    };
+    send_report(job.0, job.1);
+}
+
+/// Send `report` now. Sent: a toast says so and the cursor is back on the row,
+/// the tab never left. Not sent: a question over the page gives the reason and
+/// offers to try again, the report kept for it.
+fn send_report(report: crate::bugreport::Report, key: &'static str) {
     // The success line follows the FLOW, not the relay (#83): both go through
     // the same endpoint, but "your report was sent" after an idea reads like
     // the button sent the wrong thing.
@@ -628,22 +678,18 @@ pub(crate) fn submit_report(report: crate::bugreport::Report, key: &'static str)
                 *g = Some((report, e));
             }
             if let Ok(mut s) = LIBRARY.lock() {
-                // A retry that failed again stays on the same question, so the
-                // note that marks an error arriving is chosen by hand, in place
-                // of the click A on an unchanged screen would make.
-                if matches!(s.screen, Screen::SendFailed { .. }) {
-                    crate::sfx::choose(crate::sfx::Sfx::Error);
-                }
                 // On Réessayer: the question is there to be answered with one
-                // press, and nothing is lost either way.
+                // press, and nothing is lost either way. A retry that fails
+                // again comes back to it from the page with the card, so the
+                // note `render` plays for an error arriving marks it too.
                 s.screen = Screen::SendFailed { row, selection: 1 };
             }
         }
     }
 }
 
-/// A on Réessayer: the kept report, sent again. Hoisted from `input()`, being
-/// a network call.
+/// A on Réessayer: the kept report, sent again behind the card
+/// (`submit_report`). Hoisted from `input()` with the other report flows.
 pub(crate) fn run_retry_flow(row: usize) {
     let kept = FAILED_SEND.lock().ok().and_then(|mut g| g.take());
     match kept {
@@ -676,6 +722,47 @@ pub(crate) fn handle_send_failed_input(s: &mut State, button: &str, row: usize) 
 
 // ── Folders ───────────────────────────────────────────────────────────────
 
+/// The folder the games-folder browser opened on (beside the library). B
+/// leaves from there and from the folders above it, which lead back to it;
+/// anywhere else it climbs.
+static BROWSE_START: Mutex<std::string::String> = Mutex::new(std::string::String::new());
+
+/// Whether B in the browser showing `path` climbs a level (true) or leaves it.
+///
+/// The browser opens beside the library, and B there used to climb on to the
+/// card's root before a second B left (a third for a library in
+/// `/roms/flashnx`), while the footer said "Remonter" and the crumb
+/// "Bibliothèque". So B leaves on the folder it opened on and on the ones
+/// above it, the way the player came. Everywhere else it climbs: below that
+/// folder, and in another branch of the card reached through the root, where
+/// leaving at once lost the whole walk down. Never at the card's root, which
+/// has nothing above it.
+pub(crate) fn b_climbs(path: &str) -> bool {
+    let start = BROWSE_START.lock().map(|g| g.clone()).unwrap_or_default();
+    browse_parent(path).is_some() && !same_dir(path, &start) && !inside_dir(&start, path)
+}
+
+/// A tap on a page opened in the pane, `k` places past its list
+/// (`draw_settings` publishes them after the rows): the crumb over the page
+/// (`k` 0) goes back to the row that opened it; an entry of the column opens
+/// that section, as on the tab itself.
+pub(crate) fn subpage_tap(s: &mut State, k: usize) {
+    let back = match s.screen {
+        Screen::GamesDirPicker { .. } => settings_at(SetSection::Library, "DOSSIER"),
+        Screen::BugPicker { .. } => settings_at(SetSection::Help, "BUG"),
+        _ => return,
+    };
+    let target = match k.checked_sub(1) {
+        None => back,
+        Some(i) => match SetSection::ALL.get(i) {
+            Some(&section) => Screen::Settings { section, in_pane: false, row: 0 },
+            None => return,
+        },
+    };
+    s.dir_browse.clear();
+    s.screen = target;
+}
+
 /// `name` inside the folder `path` (`sdmc:/` already ends in a separator).
 pub(crate) fn child_dir(path: &str, name: &str) -> std::string::String {
     if path.ends_with('/') {
@@ -683,6 +770,12 @@ pub(crate) fn child_dir(path: &str, name: &str) -> std::string::String {
     } else {
         std::format!("{}/{}", path, name)
     }
+}
+
+/// Whether `path` is the card's root, which cannot take the library: the
+/// paths of the move and the library's own root are built for a folder.
+pub(crate) fn is_card_root(path: &str) -> bool {
+    path.trim_end_matches('/') == "sdmc:"
 }
 
 /// Whether two folder paths name the same folder, a trailing slash or not.
@@ -695,8 +788,15 @@ pub(crate) fn same_dir(a: &str, b: &str) -> bool {
 /// into themselves, which fails, and the games of a shelf chosen that way lose
 /// their folder.
 pub(crate) fn inside_library(path: &str, root: &str) -> bool {
-    let root = root.trim_end_matches('/');
-    path.len() > root.len() && path.starts_with(root) && path.as_bytes()[root.len()] == b'/'
+    inside_dir(path, root)
+}
+
+/// Whether `path` is a folder somewhere under `dir` (not `dir` itself), a
+/// trailing slash or not: the card's root is written `sdmc:/`, and read with
+/// its slash it passed for a folder inside itself.
+fn inside_dir(path: &str, dir: &str) -> bool {
+    let (path, dir) = (path.trim_end_matches('/'), dir.trim_end_matches('/'));
+    !dir.is_empty() && path.len() > dir.len() && path.starts_with(dir) && path.as_bytes()[dir.len()] == b'/'
 }
 
 /// Whether `path` is the library at `root` or a folder inside it: nowhere a
@@ -792,6 +892,8 @@ pub(crate) fn draw_settings(
     // The parts of the pane's controls a finger can tap, by cell of `cells`.
     let mut segs: crate::backend::render::CtrlSegs = std::vec::Vec::new();
     let mut font_cold = false;
+    // The rows a page opened in the pane published for its list.
+    let mut list_rows = 0;
     match body {
         Body::Section { in_pane, row } => {
             let focus = if in_pane { Some(row) } else { None };
@@ -812,8 +914,10 @@ pub(crate) fn draw_settings(
                 SetSection::Quit => quit_pane(backend),
             }
         }
-        Body::Folders { selection, scroll } => folders_page(backend, folder, selection, scroll, &mut hints),
-        Body::Games { selection, scroll } => games_page(backend, selection, scroll, &mut hints),
+        Body::Folders { selection, scroll } => {
+            list_rows = folders_page(backend, folder, selection, scroll, &mut hints);
+        }
+        Body::Games { selection, scroll } => list_rows = games_page(backend, selection, scroll, &mut hints),
     }
     backend.settings_pane_end(saved);
     if column {
@@ -828,13 +932,28 @@ pub(crate) fn draw_settings(
     }
     backend.settings_footer(if under { &[] } else { &hints });
     // The pages opened in the pane publish their lists themselves; under a
-    // window nothing here may be tapped.
-    if !under && matches!(body, Body::Section { .. }) {
-        backend.settings_publish(cells, segs);
+    // window nothing here may be tapped. After a page's rows come the crumb
+    // over it, which goes back like B, and the column beside it, which opens
+    // a section as on the tab (`subpage_tap`): neither could be tapped there,
+    // and the crumb drawn as a way back said it could.
+    let sending = sending();
+    if !under && !sending {
+        match body {
+            Body::Section { .. } => backend.settings_publish(cells, segs),
+            Body::Folders { .. } | Body::Games { .. } => {
+                let crumb = if matches!(body, Body::Folders { .. }) { u.sec_library } else { u.sec_help };
+                let mut tail = std::vec![backend.settings_crumb_cell(crumb)];
+                tail.extend(cells);
+                backend.settings_publish_tail(list_rows, tail);
+            }
+        }
     }
     backend.settings_still(false);
     if font_cold {
         backend.draw_loading_overlay(crate::loc::s().lang_title, unsafe { ruffle_tick_now() });
+    }
+    if sending {
+        backend.settings_loading_card(u.loading_report, unsafe { ruffle_tick_now() });
     }
 }
 
@@ -963,7 +1082,13 @@ fn defaults_pane(
     let n_speeds = l::CURSOR_SPEED_X10.len();
     let speed_idx = (value("VITESSE") as usize).min(n_speeds.saturating_sub(1));
     let speed = l::speed_label(speed_idx as i32);
+    // In the order of `DEFAULTS_ROWS`, which the cursor and the help read.
     let rows = [
+        Row::new(Icon::Gamepad, lc.keys_title).opens(),
+        Row::new(Icon::Pointer, lc.set_cursor_speed)
+            .cycle(&speed)
+            .ends(speed_idx == 0, speed_idx + 1 >= n_speeds)
+            .armed_if(is_armed("VITESSE")),
         Row::new(Icon::Monitor, lc.set_display_mode)
             .choice(&display, value("AFFICHAGE") as usize)
             .armed_if(is_armed("AFFICHAGE")),
@@ -971,18 +1096,13 @@ fn defaults_pane(
         Row::new(Icon::ZoomIn, lc.set_zoom).cycle(&zoom).ends(zoom_ends.0, zoom_ends.1).armed_if(is_armed("ZOOM")),
         Row::new(Icon::Pixels, lc.set_pixel_filter).choice(&pixels, value("PIXELS") as usize).armed_if(is_armed("PIXELS")),
         Row::new(Icon::Tv, lc.set_screen_filter).choice(&filters, value("FILTRE") as usize).armed_if(is_armed("FILTRE")),
-        Row::new(Icon::Cpu, lc.set_overclock).choice(&power_opts, power_at).armed_if(is_armed("OVERCLOCK")),
         Row::new(Icon::Gauge, lc.set_fps).toggle(l::default_fps_counter() == 1),
-        Row::new(Icon::Gamepad, lc.keys_title).opens(),
-        Row::new(Icon::Pointer, lc.set_cursor_speed)
-            .cycle(&speed)
-            .ends(speed_idx == 0, speed_idx + 1 >= n_speeds)
-            .armed_if(is_armed("VITESSE")),
+        Row::new(Icon::Cpu, lc.set_overclock).choice(&power_opts, power_at).armed_if(is_armed("OVERCLOCK")),
     ];
     let sections = [
+        (row_of(def, "TOUCHES"), u.sec_controls),
         (row_of(def, "AFFICHAGE"), u.sec_image),
         (row_of(def, "OVERCLOCK"), u.sec_perf),
-        (row_of(def, "TOUCHES"), u.sec_controls),
     ];
     let built: std::string::String;
     let help: &str = match key {
@@ -1163,7 +1283,7 @@ fn folders_page(
     selection: usize,
     scroll: usize,
     hints: &mut std::vec::Vec<HintItem<'static>>,
-) {
+) -> usize {
     let lc = crate::loc::s();
     let u = crate::loc_ui::ui();
     let (path, listing) = folder;
@@ -1175,6 +1295,10 @@ fn folders_page(
     // one in use instead of closing the browser without a word.
     rows.push(if same_dir(path, &root) {
         Row::new(Icon::CircleCheck, u.dir_current).dim(true)
+    } else if is_card_root(path) {
+        // The root is no destination: said on the row A would act on, with
+        // the mark of a note rather than of the action it does not offer.
+        Row::new(Icon::Info, u.dir_root_refused).dim(true)
     } else {
         Row::new(Icon::Check, u.dir_choose)
     });
@@ -1225,7 +1349,8 @@ fn folders_page(
     if !within_library(path, &root) {
         hints.push((&[Btn::X][..], lc.games_dir_new));
     }
-    hints.push((&[Btn::B][..], if up { u.go_up } else { u.back }));
+    hints.push((&[Btn::B][..], if b_climbs(path) { u.go_up } else { u.back }));
+    rows.len()
 }
 
 /// Aide et retours > Signaler un bug: which game? Last played first, each with
@@ -1236,7 +1361,7 @@ fn games_page(
     selection: usize,
     scroll: usize,
     hints: &mut std::vec::Vec<HintItem<'static>>,
-) {
+) -> usize {
     let u = crate::loc_ui::ui();
     let top = b.settings_subpage_title(u.sec_help, u.row_bug, u.bug_pick_sub);
     let games = LIBRARY
@@ -1262,6 +1387,7 @@ fn games_page(
         (&[Btn::L, Btn::R][..], u.page),
         (&[Btn::B][..], u.back),
     ];
+    refs.len()
 }
 
 /// "Move the whole library here?", over the browser: how many games, and

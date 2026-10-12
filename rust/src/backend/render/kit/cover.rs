@@ -11,6 +11,8 @@
 //!   filled as the rule allows (`rest_t`) and relaxes to the whole image as it
 //!   lifts (`kit_cover_reveal`), so the same cover never loses more than the
 //!   limit at rest, whichever view it is in.
+//! - A picture made off screen, the game's icon on the HOME menu, applies the
+//!   rule on the CPU (`cover_square_rgb`), so the icon looks like the tile.
 //!
 //! Corners are cut by the image shader (`kit_image`), not painted over in the
 //! page colour, so a cover looks right over a shadow or a panel too.
@@ -182,6 +184,113 @@ fn backdrop_uv(img_w: u32, img_h: u32, box_w: f32, box_h: f32) -> [f32; 4] {
     let [u0, v0, du, dv] = crop_uv(img_w, img_h, box_w, box_h);
     let (zu, zv) = (du / AMBIENT_ZOOM, dv / AMBIENT_ZOOM);
     [u0 + (du - zu) * 0.5, v0 + (dv - zv) * 0.5, zu, zv]
+}
+
+/// The cover in a `side` x `side` square as opaque RGB8, by the rule above, for
+/// a picture made away from the screen: the game's icon on the HOME menu.
+///
+/// The same picture the tiles draw, so the icon looks like the game's tile: a
+/// cover that a square would cut by more than `FILL_LIMIT` (box art, banners,
+/// most 4:3 screenshots) shows whole over its blurred, darkened backdrop
+/// instead of losing its title, and a transparent logo sits on that backdrop,
+/// which is the tile colour where the logo does not cover it. The icon used to
+/// be centre-cropped whatever its shape, and composited on WHITE.
+pub(crate) fn cover_square_rgb(rgba: &[u8], w: u32, h: u32, side: u32) -> Option<std::vec::Vec<u8>> {
+    use super::theme::col;
+    let (wu, hu, n) = (w as usize, h as usize, side as usize);
+    if wu == 0 || hu == 0 || n == 0 || rgba.len() < wu * hu * 4 {
+        return None;
+    }
+    let s = side as f32;
+    let mut out = std::vec![0f32; n * n * 3];
+    // The ground, as `kit_cover_ground` lays it: the backdrop cropped to fill
+    // the square and enlarged, stretched with linear filtering (which is the
+    // blur), or the tile colour when there is no backdrop.
+    match ambient_pixels(rgba, w, h) {
+        Some((amb, aw, ah)) => {
+            let [u0, v0, du, dv] = backdrop_uv(w, h, s, s);
+            for y in 0..n {
+                let v = v0 + dv * (y as f32 + 0.5) / s;
+                for x in 0..n {
+                    let u = u0 + du * (x as f32 + 0.5) / s;
+                    let o = (y * n + x) * 3;
+                    out[o..o + 3].copy_from_slice(&sample_linear(&amb, aw as usize, ah as usize, u, v));
+                }
+            }
+        }
+        None => {
+            let tile = [((col::TILE >> 16) & 0xFF) as f32, ((col::TILE >> 8) & 0xFF) as f32, (col::TILE & 0xFF) as f32];
+            for px in out.chunks_mut(3) {
+                px.copy_from_slice(&tile);
+            }
+        }
+    }
+    // The image: the whole square cropped to fill when that costs at most the
+    // limit, otherwise whole and centred, its full width or height.
+    let ((bx, by, bw, bh), [u0, v0, du, dv]) = if fills(w, h, s, s) {
+        ((0, 0, n, n), crop_uv(w, h, s, s))
+    } else {
+        let a = w as f32 / h as f32;
+        let (fw, fh) = if a > 1.0 { (n, ((s / a).round() as usize).clamp(1, n)) } else { (((s * a).round() as usize).clamp(1, n), n) };
+        (((n - fw) / 2, (n - fh) / 2, fw, fh), [0.0, 0.0, 1.0, 1.0])
+    };
+    let (sx0, sy0) = (u0 * w as f32, v0 * h as f32);
+    let (sw, sh) = (du * w as f32, dv * h as f32);
+    // One box-filter pass: every source pixel that lands in a destination cell
+    // is averaged, colour premultiplied by its alpha with the coverage beside
+    // it, so a cover reduced a lot does not shimmer on its diagonals and its
+    // transparent parts let the ground through.
+    for dy in 0..bh {
+        let ya = ((sy0 + sh * dy as f32 / bh as f32) as usize).min(hu - 1);
+        let yb = ((sy0 + sh * (dy + 1) as f32 / bh as f32) as usize).clamp(ya + 1, hu);
+        for dx in 0..bw {
+            let xa = ((sx0 + sw * dx as f32 / bw as f32) as usize).min(wu - 1);
+            let xb = ((sx0 + sw * (dx + 1) as f32 / bw as f32) as usize).clamp(xa + 1, wu);
+            let (mut r, mut g, mut b, mut cov, mut cnt) = (0f32, 0f32, 0f32, 0f32, 0f32);
+            for sy in ya..yb {
+                for sx in xa..xb {
+                    let i = (sy * wu + sx) * 4;
+                    let Some(p) = rgba.get(i..i + 4) else { continue };
+                    let a = p[3] as f32 / 255.0;
+                    r += p[0] as f32 * a;
+                    g += p[1] as f32 * a;
+                    b += p[2] as f32 * a;
+                    cov += a;
+                    cnt += 1.0;
+                }
+            }
+            if cnt == 0.0 {
+                continue;
+            }
+            let o = ((by + dy) * n + bx + dx) * 3;
+            let keep = 1.0 - (cov / cnt).clamp(0.0, 1.0);
+            for (c, v) in [r, g, b].into_iter().enumerate() {
+                out[o + c] = v / cnt + out[o + c] * keep;
+            }
+        }
+    }
+    Some(out.into_iter().map(|v| v.round().clamp(0.0, 255.0) as u8).collect())
+}
+
+/// The colour of an opaque RGBA8 texture at `(u, v)`, as `GL_LINEAR` with
+/// clamped edges reads it.
+fn sample_linear(px: &[u8], w: usize, h: usize, u: f32, v: f32) -> [f32; 3] {
+    if w == 0 || h == 0 || px.len() < w * h * 4 {
+        return [0.0; 3];
+    }
+    let fx = (u * w as f32 - 0.5).clamp(0.0, (w - 1) as f32);
+    let fy = (v * h as f32 - 0.5).clamp(0.0, (h - 1) as f32);
+    let (x0, y0) = (fx as usize, fy as usize);
+    let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
+    let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+    let at = |x: usize, y: usize, c: usize| px[(y * w + x) * 4 + c] as f32;
+    let mut out = [0f32; 3];
+    for (c, o) in out.iter_mut().enumerate() {
+        let top = at(x0, y0, c) + (at(x1, y0, c) - at(x0, y0, c)) * tx;
+        let bottom = at(x0, y1, c) + (at(x1, y1, c) - at(x0, y1, c)) * tx;
+        *o = top + (bottom - top) * ty;
+    }
+    out
 }
 
 /// The texture sub-rectangle `[u0, v0, du, dv]` that crops an `img_w` x

@@ -77,9 +77,10 @@ use ruffle_render::transform::Transform;
 use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-/// Pause-menu labels rendered by `draw_menu_overlay`. C++ maps the selected
-/// index from this slice to an action (Resume / Touches / Restart / Quit).
-/// Keep the order in sync with the `MENU_*` constants in `cpp/src/main.cpp`.
+/// The pause menu's rows, as match keys: `draw_menu_overlay` draws each one's
+/// label from loc. C++ maps the selected index to an action (Resume, Touches,
+/// Écran, Overclock, Restart, Quit). Keep the order in sync with the `MENU_*`
+/// constants in `cpp/src/main.cpp`.
 // VITESSE moved into the in-game TOUCHES sub-menu (#20 Option 1), so it's no
 // longer a top-level pause entry.
 pub const MENU_ITEMS: &[&str] = &[
@@ -190,6 +191,11 @@ const MODAL_ROW_X: f32 = 36.0;
 /// 5x7 capitals), and the height of the focus pill drawn on it.
 const MODAL_ROW_CY: f32 = 10.0;
 const MODAL_PILL_H: f32 = 46.0;
+/// The band along the bottom of a window that holds its hints (`modal_hints`).
+const MODAL_FOOT_H: f32 = 56.0;
+/// The footer band of the cover picker's window as last drawn (x, width, top),
+/// where its toast goes (`draw_toast_in_cover_picker`).
+static COVER_FOOT: std::sync::Mutex<Option<(f32, f32, f32)>> = std::sync::Mutex::new(None);
 
 /// Glide slots for the lists that draw their own rows instead of going through
 /// `draw_modal_rows`.
@@ -1736,6 +1742,7 @@ pub(crate) use pages::importer::{
 };
 pub(crate) use pages::flashpoint::{FpDetailsView, FpGrid, FpState};
 pub(crate) use kit::sheet::SHEET_MARGIN;
+pub(crate) use kit::cover::cover_square_rgb;
 
 /// Whether the console's fonts loaded, i.e. the interface draws with the kit
 /// rather than the old 5x7 font.
@@ -6063,6 +6070,20 @@ pub fn ui_back_hit(live: u32, x: f32, y: f32) -> bool {
         && g.1.iter().any(|(rx, ry, rw, rh)| *rw > 0.0 && *rh > 0.0 && x >= *rx && x <= rx + rw && y >= *ry && y <= ry + rh)
 }
 
+/// Put `rects` after the first `base` cells of `kind`'s table: a page whose
+/// list published its rows makes more of the screen tappable (a crumb, a
+/// column beside the list) without the list knowing. Cut back to `base`
+/// first, so a frame that adds them again does not pile them up; nothing is
+/// added to another screen's table, nor to one shorter than the list.
+pub fn ui_cells_set_tail(kind: u32, base: usize, rects: std::vec::Vec<(f32, f32, f32, f32)>) {
+    if let Ok(mut g) = UI_CELLS.lock() {
+        if g.0 == kind && g.1.len() >= base {
+            g.1.truncate(base);
+            g.1.extend(rects);
+        }
+    }
+}
+
 /// Where the three navbar tabs are, and whether the strip is even on screen.
 ///
 /// Its OWN table, not `UI_CELLS`: the navbar is drawn OVER a screen that has
@@ -6570,7 +6591,7 @@ pub fn distant_reveal_source_scroll() -> usize {
 
 /// Retarget the reveal's grow-from / shrink-to row. Used once a newly-imported
 /// URL lands in the history, so the collapse (and the DistantIdle cursor) end on
-/// its real row instead of the "+ add" row it grew from.
+/// its real row instead of the add card it grew from.
 pub fn distant_reveal_set_source(idx: usize, scroll: usize) {
     if let Ok(mut a) = distant_reveal().lock() {
         a.source_sel = idx;
@@ -11972,8 +11993,8 @@ impl SwitchRenderBackend {
     fn modal_hints(&mut self, frame: &ModalFrame, hints: &[kit::text::HintItem], danger: bool) {
         use theme::col;
         let (x, y, w, h) = (frame.x, frame.y, frame.w, frame.h);
-        self.draw_overlay_rect(x + 20.0, y + h - 56.0, w - 40.0, 1.0, if danger { col::DANGER_LINE } else { col::LINE });
-        self.kit_hints_centered(x + w * 0.5, y + h - 28.0, hints);
+        self.draw_overlay_rect(x + 20.0, y + h - MODAL_FOOT_H, w - 40.0, 1.0, if danger { col::DANGER_LINE } else { col::LINE });
+        self.kit_hints_centered(x + w * 0.5, y + h - MODAL_FOOT_H * 0.5, hints);
     }
 
     /// Top navbar: the tab strip switched with the L/R shoulder buttons.
@@ -13024,21 +13045,6 @@ impl SwitchRenderBackend {
         }
     }
 
-    /// The centred key-hint line every full-page screen ends with, at the one
-    /// baseline they all use.
-    ///
-    /// It was copied out at each site — measure, halve, draw at `vh - 42` in
-    /// `0x99AABB` — which is how two of them ended up at a different height than
-    /// the rest.
-    /// The bottom band of a full-page screen, from one of the old footer
-    /// strings: hairline, credit on the left, the parsed hints on the right.
-    fn draw_page_footer(&mut self, text: &str) {
-        let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
-        self.kit_footer_band();
-        self.kit_footer_hints(text, vw - 40.0, vh - 24.0, false);
-    }
-
     /// The page a search that matched nothing leaves, the same in every view:
     /// what was searched, and the two ways out.
     ///
@@ -13918,88 +13924,8 @@ impl SwitchRenderBackend {
         }
     }
 
-    /// Progress of the games-folder move (#79): the progress page with a plain
-    /// count of entries, and no cancel, because a half-cancelled rename sweep is
-    /// worse than a finished one.
-    pub fn draw_library_move_progress(&mut self, title: &str, done: usize, total: usize) {
-        // Empty at 0 of 0 rather than full: a move that has not started should
-        // not look finished.
-        let frac = if total == 0 { 0.0 } else { (done as f32 / total as f32).clamp(0.0, 1.0) };
-        let dest = crate::library::primary_root();
-        self.draw_progress_page(
-            Icon::FolderOpen,
-            title,
-            dest.trim_start_matches("sdmc:"),
-            Some(frac),
-            &std::format!("{} / {}", done, total),
-            &[],
-        );
-    }
-
-    /// Applet-mode notice (P1c): same centered layout as the error toast, but
-    /// an amber "info" title instead of red — games can't launch in applet
-    /// mode, this is guidance rather than a failure.
-    pub fn draw_library_applet_notice(&mut self, msg: &str) {
-        self.draw_centered_notice(crate::loc::s().applet_title, 0xFFB740, msg);
-    }
-
-    /// Shared full-screen centered notice: big title (in `title_rgb`), a
-    /// word-wrapped body, and the generic dismiss footer.
-    fn draw_centered_notice(&mut self, title: &str, title_rgb: u32, msg: &str) {
-        self.draw_centered_notice_footer(title, title_rgb, msg, crate::loc::s().err_footer);
-    }
-
-    /// `draw_centered_notice` with an explicit footer, for notices whose
-    /// dismiss options depend on what failed.
-    fn draw_centered_notice_footer(
-        &mut self,
-        title: &str,
-        title_rgb: u32,
-        msg: &str,
-        footer: &str,
-    ) {
-        use theme::{col, size};
-        self.library_clear();
-        let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
-        // A card in the middle of the page: an icon that says what kind of
-        // news this is before a word is read, the title in the colour the
-        // caller gave it (red for an error, amber for a notice, green for a
-        // success), the message under it.
-        let rgb = title_rgb & 0x00FF_FFFF;
-        let (icon, ink) = match rgb {
-            0x66DD66 => (Icon::CircleCheck, col::OK),
-            0xFF5040 => (Icon::Alert, col::DANGER),
-            _ => (Icon::Info, 0xFF00_0000 | rgb),
-        };
-        const DISC: f32 = 56.0;
-        let w = 720.0f32.min(vw - 80.0);
-        let text_x = 40.0 + DISC + 20.0;
-        let lines = self.kit_wrap(msg, size::BODY, w - text_x - 40.0, 8);
-        let lh = (size::BODY * 1.45).round();
-        let h = (110.0 + lh * lines.len() as f32).max(40.0 + DISC + 40.0);
-        let x = ((vw - w) * 0.5).round();
-        let y = ((vh - 48.0 - h) * 0.5).round().max(90.0);
-        self.kit_panel(x, y, w, h, false);
-        self.kit_rrect(x + 40.0, y + 36.0, DISC, DISC, DISC * 0.5, col::CHIP);
-        self.kit_icon(x + 40.0 + 14.0, y + 36.0 + DISC * 0.5, 28.0, icon, ink);
-        let t = self.kit_fit(title, size::TITLE, w - text_x - 40.0);
-        self.kit_text_mid(x + text_x, y + 52.0, size::TITLE, &t, ink);
-        let mut ly = y + 96.0;
-        for line in &lines {
-            self.kit_text_mid(x + text_x, ly, size::BODY, line, col::TEXT2);
-            ly += lh;
-        }
-        self.draw_page_footer(footer);
-        unsafe {
-            glUseProgram(0);
-            glBindVertexArray(0);
-        }
-        self.gl_state.invalidate();
-    }
-
     /// Transient toast banner near the bottom of the screen (#20). `kind`: 0 =
-    /// success (green), 1 = error (red), 2 = info (blue). Non-blocking — drawn on
+    /// success (green), 1 = error (red), 2 = info (gold). Non-blocking: drawn on
     /// top of the current screen for a couple of seconds (the library loop counts
     /// it down), so a share/apply/revert confirms without a full "thanks" modal.
     pub fn draw_toast(&mut self, msg: &str, kind: u8) {
@@ -14037,6 +13963,32 @@ impl SwitchRenderBackend {
             return;
         }
         self.draw_toast_in(msg, kind, at.0, at.1, ToastAt::Middle(at.2));
+    }
+
+    /// The toast over the cover picker's window, on its footer band for the
+    /// length of the toast. Placed like the other
+    /// screens of a game's options, left of the panel, it sat on the chosen
+    /// cover's title line and off the middle of the window.
+    pub fn draw_toast_in_cover_picker(&mut self, msg: &str, kind: u8) {
+        let band = COVER_FOOT.lock().ok().and_then(|g| *g);
+        self.draw_toast_on_band(msg, kind, band, MODAL_FOOT_H);
+    }
+
+    /// A toast centred on a window's footer band (`band`: x, width, top, and
+    /// `band_h` tall); the plain footer toast when that window was not drawn.
+    fn draw_toast_on_band(&mut self, msg: &str, kind: u8, band: Option<(f32, f32, f32)>, band_h: f32) {
+        match band {
+            Some((x, w, top)) => {
+                // The band's hints go under it whole, the window's own colour
+                // over them: a pill in their middle left the ends of the hint
+                // line sticking out on both sides of it. Clear of the hairline
+                // above and of the window's rounded corners below.
+                let inset = theme::radius::PANEL;
+                self.draw_overlay_rect(x + inset, top + 1.0, w - 2.0 * inset, band_h - 3.0, theme::col::PANEL);
+                self.draw_toast_in(msg, kind, x, x + w, ToastAt::Middle(top + band_h * 0.5));
+            }
+            None => self.draw_toast(msg, kind),
+        }
     }
 
     /// The launcher's toast while a game's options are up: over the library,
@@ -14106,8 +14058,9 @@ impl SwitchRenderBackend {
     /// Shared loading overlay: a full-screen dim + the standard loading panel
     /// (title + spinner). Drawn OUTSIDE any modal pop-in scale
     /// (`clear_ui_transform`) so it stays full size instead of shrinking with a
-    /// modal's open animation. Used by the profile network flows AND the language
-    /// picker's first open, so they all look identical. `now` drives the rotation.
+    /// modal's open animation. Used by the language picker's first open, and by
+    /// a launcher flow with no screen to keep under its card (the others use
+    /// `draw_loading_card`). `now` drives the rotation.
     pub fn draw_loading_overlay(&mut self, title: &str, now: u64) {
         self.clear_ui_transform();
         let vw = self.dimensions.width as f32;
@@ -14122,17 +14075,6 @@ impl SwitchRenderBackend {
         // The same small card as every other wait, saying what is being done.
         let vw = self.dimensions.width as f32;
         self.draw_loading_card(title, now, 0.0, vw);
-    }
-
-    pub fn draw_library_dim_backdrop(&mut self) {
-        unsafe {
-            glDisable(GL_STENCIL_TEST);
-            glClearColor(0.047, 0.075, 0.137, 1.0);
-            glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        }
-        self.gl_state.invalidate();
     }
 
     // ── Mask state machine ──

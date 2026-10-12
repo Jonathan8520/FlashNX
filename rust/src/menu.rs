@@ -100,7 +100,7 @@ fn toward_rail(button: &str) -> bool {
     back
 }
 
-// Toast kinds (match `SwitchRenderBackend::draw_toast`): 0 green, 1 red, 2 blue.
+// Toast kinds (match `SwitchRenderBackend::draw_toast`): 0 green, 1 red, 2 gold.
 const TOAST_OK: u8 = 0;
 const TOAST_ERR: u8 = 1;
 const TOAST_INFO: u8 = 2;
@@ -112,7 +112,7 @@ const TOAST_MS: u64 = 2500;
 const GLIDE_KEY_TOUCHES_MENU: u32 = 59;
 const GLIDE_KEY_TOUCHES_PROFILES: u32 = 60;
 
-/// Cap a diff list so the auto-sized modal still fits the screen.
+/// Cap a diff list so its page still fits the screen.
 const MAX_PREVIEW_ROWS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -181,7 +181,8 @@ struct State {
     preview_rows: std::vec::Vec<std::string::String>,
     /// Whether sharing will UPDATE an existing shared profile vs create the first.
     share_is_update: bool,
-    /// Transient toast over the current screen (msg + kind + frames remaining).
+    /// Transient toast over the current screen (msg + kind, up until
+    /// `toast_until`).
     toast_msg: std::string::String,
     toast_kind: u8,
     /// Tick until which the toast stays up (0 = none).
@@ -457,6 +458,7 @@ pub fn open(game: Option<&str>) {
     // before the lock, not inside it, to keep this off the TOUCHES -> keymap
     // nesting entirely.
     let start = unstick_cursor(0);
+    forget_pending_net();
     // The game's own cursor speed, else the global one it follows.
     let speed = keymap::active_game_basename()
         .map(|b| keymap::cursor_speed_for(&b))
@@ -474,6 +476,7 @@ pub fn open(game: Option<&str>) {
 /// Open the IN-GAME TOUCHES sub-menu (#20 Option 1). Editing from here returns to
 /// this menu; apply/share/revert run from here too.
 pub fn open_submenu() {
+    forget_pending_net();
     let (can_revert, has_backup) = keymap::active_game_basename()
         .map(|b| (keymap::has_revert(&b), keymap::has_backup(&b)))
         .unwrap_or((false, false));
@@ -489,8 +492,19 @@ pub fn close() {
     // `-` closes the pause from this page: a value armed on it is kept, as the
     // page's close button does everywhere (input rule 2).
     pv::confirm();
+    forget_pending_net();
     if let Ok(mut s) = TOUCHES.lock() {
         s.screen = Screen::Inactive;
+    }
+}
+
+/// Drop a deferred flow that has not run yet. It is armed on one frame and run
+/// on the next, and a Minus in between closes the pages without running it: it
+/// then ran the next time the Touches page was drawn, applying or deleting a
+/// profile with no preview on screen.
+fn forget_pending_net() {
+    if let Ok(mut p) = PENDING_NET.lock() {
+        *p = None;
     }
 }
 
@@ -550,6 +564,8 @@ enum PendingNet {
     Delete { profile_idx: usize },
 }
 static PENDING_NET: std::sync::Mutex<Option<(PendingNet, bool)>> = std::sync::Mutex::new(None);
+/// The screen the deferred flow started from, drawn under its loading card.
+static LOADING_FROM: std::sync::Mutex<Option<Screen>> = std::sync::Mutex::new(None);
 
 /// What the pending flow is doing, for its loading card.
 fn pending_label() -> &'static str {
@@ -576,6 +592,9 @@ fn defer_net(action: PendingNet) {
         *p = Some((action, false));
     }
     if let Ok(mut s) = TOUCHES.lock() {
+        if let Ok(mut f) = LOADING_FROM.lock() {
+            *f = Some(s.screen);
+        }
         s.screen = Screen::Loading;
     }
 }
@@ -1005,7 +1024,7 @@ fn run_open_preview(profile_idx: usize) {
     let Some(profile) = profile else { return };
     let current = keymap::effective_for(&basename);
     let mut rows = keymap::binding_diff_rows(&current, &profile.to_keymap());
-    if let Some(r) = keymap::cursor_diff_row(keymap::cursor_speed_for(&basename), profile.cursor_speed) {
+    if let Some(r) = keymap::cursor_apply_row(&basename, profile.cursor_speed) {
         rows.push(r);
     }
     if rows.is_empty() {
@@ -1085,7 +1104,7 @@ fn run_open_share_confirm() {
     };
     let mut rows = keymap::binding_diff_rows(&before, &current);
     // Cursor speed lives outside the keymap — append its change so it's visible.
-    if let Some(r) = keymap::cursor_diff_row(before_cursor, keymap::cursor_speed_for(&basename)) {
+    if let Some(r) = keymap::cursor_share_row(before_cursor, keymap::cursor_speed_for(&basename)) {
         rows.push(r);
     }
     let rows = cap_rows(rows);
@@ -1376,9 +1395,10 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize) {
             return;
         }
         "B" | "Minus" => {
-            // The launcher's editor closes; the launcher puts its page back
-            // (`library::input`). In game B never reaches here: it is
-            // `leave_editor_in_game`.
+            // Neither side sends them here today: the launcher closes both its
+            // editors itself, through their scale-out (`library::input_inner`),
+            // and in game they are `leave_editor_in_game`. Closing is kept as
+            // the safe answer; the launcher then puts its page back.
             s.screen = Screen::Inactive;
             return;
         }
@@ -2029,17 +2049,30 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
     let lc = crate::loc::s();
     let u = crate::loc_ui::ui();
     use crate::backend::render::Btn;
+    // While a deferred GitHub call runs, the page that started it stays on
+    // screen under a card saying what it is doing, its cursor where it was; a
+    // question already answered gives way to the list it was asked over. The
+    // Touches page on "Appliquer un profil" was drawn whatever started the
+    // flow, so the pill glided away and back, and a share or a delete swapped
+    // its page for that one under the card.
+    let loading = matches!(screen, Screen::Loading);
+    let screen = if loading {
+        match LOADING_FROM.lock().ok().and_then(|g| *g) {
+            Some(Screen::DeleteConfirm { profile_idx, .. }) => Screen::Profiles { selection: profile_idx },
+            Some(from) if !matches!(from, Screen::Loading | Screen::Inactive) => from,
+            _ => Screen::Loading,
+        }
+    } else {
+        screen
+    };
     match screen {
         Screen::Inactive => {}
         Screen::Loading => {
-            // The pause and its Touches page stay on screen while a deferred
-            // GitHub call runs; a card over them says what it is doing.
+            // No page to keep (none recorded): the pause and its Touches page.
             let t = crate::backend::render::cascade_step(true);
             backend.with_pause_sheet(PAUSE_ROW_TOUCHES, |b, parent| {
                 with_touches_sheet(b, MENU_APPLY, |b, c| b.kit_cascade(parent, PAUSE_ROW_TOUCHES, Some(c), t));
             });
-            let vw = backend.screen_size().0;
-            backend.draw_loading_card(pending_label(), now, 0.0, vw);
         }
         Screen::Menu { selection } => {
             crate::backend::render::pause_child_set(crate::backend::render::PauseChild::Touches(selection));
@@ -2167,6 +2200,10 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
             let hints = [(&[Btn::A][..], u.restore), (&[Btn::B][..], u.back)];
             draw_diff_page(backend, &crumbs, title, None, &rows, &hints);
         }
+    }
+    if loading {
+        let vw = backend.screen_size().0;
+        backend.draw_loading_card(pending_label(), now, 0.0, vw);
     }
     if let Some((msg, kind)) = toast {
         // Beside the panels in game; on the editor's help line, where it is.

@@ -3,13 +3,14 @@
 //! in view, the thin scrollbar when the rows do not fit, and the box under them
 //! that explains the row with the cursor.
 //!
-//! These are the rows of a side panel (`sheet.rs`), freed from the panel. The
-//! Réglages pane is a rectangle in a page, beside the column of sections, and
-//! its rows had to look and move exactly like the pause's and the game
+//! Modelled on the rows of a side panel (`sheet.rs`), which still draws its own
+//! copy: the two are kept alike by hand, and a change to one belongs in the
+//! other. The Réglages pane is a rectangle in a page, beside the column of
+//! sections, and its rows had to look and move like the pause's and the game
 //! options': same row, same pill, same help box, same scroll. Everything here
 //! takes the rectangle it draws in and returns the rows' touch cells instead of
 //! publishing them, so a page that has other things to tap (the sections) can
-//! publish one table for all of it, and a panel can hand its rows here too.
+//! publish one table for all of it.
 
 use super::super::*;
 use super::list::Row;
