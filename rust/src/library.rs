@@ -2537,7 +2537,19 @@ enum MoveOutcome {
 /// it sweeps. A rollback that fails silently is how an entry comes to name a
 /// path with no file on it, and how SUPPRIMER then deletes a game's save while
 /// leaving the game.
+/// `move_game_inner`, and the game's HOME icon follows it: the icon's config
+/// names the game by its full path, which the move just changed.
 fn move_game_to_folder(path: &str, basename: &str, folder: &str) -> MoveOutcome {
+    let outcome = move_game_inner(path, basename, folder);
+    if let MoveOutcome::Moved(ref np) | MoveOutcome::Stranded(ref np) = outcome {
+        if np != path {
+            tiles_follow(path, np, false);
+        }
+    }
+    outcome
+}
+
+fn move_game_inner(path: &str, basename: &str, folder: &str) -> MoveOutcome {
     let root = primary_root();
     let dest_dir = if folder.is_empty() {
         root.clone()
@@ -5033,6 +5045,7 @@ fn drive_pending_move() {
     let (src, dest, moved, skipped) = finished;
 
     set_primary_root(&dest);
+    tiles_follow(&src, &dest, true);
     log(&std::format!(
         "games dir: now {} ({} moved, {} left in {})
 ",
@@ -8316,12 +8329,92 @@ fn tile_cfg_path(program_id: u64) -> std::string::String {
     std::format!("sdmc:/switch/FlashNX/tiles/{:016X}.cfg", program_id)
 }
 
+/// The tiles' configs: (program ID, the game's path), read from
+/// `sdmc:/switch/FlashNX/tiles/` once and kept until a config is written.
+static TILE_INDEX: Mutex<Option<std::vec::Vec<(u64, std::string::String)>>> = Mutex::new(None);
+
+fn tile_index() -> std::vec::Vec<(u64, std::string::String)> {
+    if let Ok(g) = TILE_INDEX.lock() {
+        if let Some(v) = g.as_ref() {
+            return v.clone();
+        }
+    }
+    let mut v = std::vec::Vec::new();
+    if let Ok(dir) = std::fs::read_dir("sdmc:/switch/FlashNX/tiles") {
+        for e in dir.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let Some(hex) = name.strip_suffix(".cfg") else { continue };
+            let Ok(id) = u64::from_str_radix(hex, 16) else { continue };
+            if let Ok(text) = std::fs::read_to_string(e.path()) {
+                v.push((id, text.trim().to_string()));
+            }
+        }
+    }
+    if let Ok(mut g) = TILE_INDEX.lock() {
+        *g = Some(v.clone());
+    }
+    v
+}
+
+fn tile_index_forget() {
+    if let Ok(mut g) = TILE_INDEX.lock() {
+        *g = None;
+    }
+}
+
+/// The program ID of the tile that launches the game at `swf_path`.
+///
+/// Found by what the configs SAY, not by hashing the path: the hash is the
+/// path's at install time, and a game moved since (into a folder, or with the
+/// whole library) would no longer find its own tile. The row then read "no
+/// icon", A installed a second one, and deleting the game left the first on
+/// the HOME menu for good. The hash is only the fallback, for a tile whose
+/// config is missing.
+fn tile_for(swf_path: &str) -> Option<u64> {
+    tile_index()
+        .into_iter()
+        .find(|(_, p)| p == swf_path)
+        .map(|(id, _)| id)
+        .or_else(|| tile_id_for(swf_path))
+}
+
+/// A game moved from `from` to `to` (or, with `prefix`, every game under the
+/// folder `from` moved under `to`): the HOME icons launching it are pointed at
+/// its new place. The installed tile keeps its program ID; only the path in
+/// its config changes.
+fn tiles_follow(from: &str, to: &str, prefix: bool) {
+    let mut wrote = false;
+    for (id, p) in tile_index() {
+        let new_path = if prefix {
+            match p.strip_prefix(from) {
+                Some(rest) if rest.starts_with('/') => std::format!("{}{}", to, rest),
+                _ => continue,
+            }
+        } else if p == from {
+            to.to_string()
+        } else {
+            continue;
+        };
+        let cfg = tile_cfg_path(id);
+        if let Ok(c) = std::ffi::CString::new(cfg.as_str()) {
+            let b = new_path.as_bytes();
+            let ok = unsafe { swf_picker_write_file(c.as_ptr(), b.as_ptr(), b.len() as u32) } == 1;
+            log(&std::format!("tile: {:016X} now launches {}{}\n", id, new_path, if ok { "" } else { " (NOT written)" }));
+            wrote |= ok;
+        }
+    }
+    if wrote {
+        crate::sd::commit();
+        tile_index_forget();
+    }
+}
+
 /// True when this game already has a tile on the HOME menu.
 ///
 /// Asked of the console rather than of the card: somebody can uninstall a tile
 /// from the HOME menu itself, and the row has to say what is actually there.
 fn shortcut_here(swf_path: &str) -> bool {
-    match tile_id_for(swf_path) {
+    match tile_for(swf_path) {
         Some(id) => (unsafe { nsp_tile_exists(id) }) == 1,
         None => false,
     }
@@ -8329,7 +8422,7 @@ fn shortcut_here(swf_path: &str) -> bool {
 
 /// Uninstall a game's tile and drop its config file. True when one went away.
 fn tile_remove(swf_path: &str) -> bool {
-    let Some(id) = tile_id_for(swf_path) else { return false };
+    let Some(id) = tile_for(swf_path) else { return false };
     if unsafe { nsp_tile_exists(id) } != 1 {
         return false;
     }
@@ -8338,6 +8431,7 @@ fn tile_remove(swf_path: &str) -> bool {
         // The config outlives the tile otherwise, and the next game whose path
         // hashes here would inherit it.
         let _ = std::fs::remove_file(tile_cfg_path(id));
+        tile_index_forget();
     }
     removed
 }
@@ -8444,7 +8538,7 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                     // again, which reads as piling up duplicates when there has
                     // only ever been one.
                     options_panel::game_prefs_forget();
-                    if unsafe { nsp_tile_exists(program_id) } == 1 {
+                    if shortcut_here(&path) {
                         let removed = tile_remove(&path);
                         crate::sd::commit();
                         set_toast(
@@ -8507,6 +8601,7 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                         .to_string();
                     if rc == 1 {
                         crate::sd::commit();
+                        tile_index_forget();
                         set_toast(s, lc.shortcut_ok.to_string(), TOAST_OK);
                     } else {
                         // The config would otherwise sit there naming a tile
