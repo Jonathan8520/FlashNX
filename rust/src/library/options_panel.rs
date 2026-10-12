@@ -20,11 +20,15 @@ use crate::backend::render::{ui_col, Btn, Icon, Row, Sheet, Side, OPTIONS_CHILD_
 
 /// The rows of the game options, in order. Matched by name, never by index:
 /// `opt_row` finds where a row sits, so adding one moves nothing else.
+///
+/// The picture rows in the order of the pause's ÉCRAN, the frame counter last
+/// among them: a player who found it there looks for it under Image here, and
+/// in Réglages › Jeu par défaut, which lists the same groups in this order.
 pub(crate) const OPTIONS_ENTRIES: &[&str] = &[
     "FAVORI", "JAQUETTE", "DOSSIER", "RENOMMER", "RACCOURCI",
     "TOUCHES",
-    "AFFICHAGE", "ROTATION", "ZOOM", "PIXELS", "FILTRE",
-    "OVERCLOCK", "FPS",
+    "AFFICHAGE", "ROTATION", "ZOOM", "PIXELS", "FILTRE", "FPS",
+    "OVERCLOCK",
     "SUPPRIMER",
 ];
 

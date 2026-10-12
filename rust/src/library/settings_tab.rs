@@ -78,8 +78,10 @@ impl SetSection {
 // never by number: every screen that comes back to the tab lands on the row
 // that opened it through these names.
 const LIBRARY_ROWS: &[&str] = &["VUE", "DOSSIER", "SONS"];
+// The game defaults in the groups and the order of a game's options (the
+// controls, the picture as the pause's ÉCRAN lists it, the performance).
 const DEFAULTS_ROWS: &[&str] =
-    &["AFFICHAGE", "ROTATION", "ZOOM", "PIXELS", "FILTRE", "OVERCLOCK", "FPS", "TOUCHES", "VITESSE"];
+    &["TOUCHES", "VITESSE", "AFFICHAGE", "ROTATION", "ZOOM", "PIXELS", "FILTRE", "FPS", "OVERCLOCK"];
 const PROFILE_ROWS: &[&str] = &["PSEUDO"];
 const HELP_ROWS: &[&str] = &["BUG", "IDEE"];
 
@@ -890,21 +892,22 @@ fn defaults_pane(
     let power_at = POWER_ORDER.iter().position(|m| *m == power).unwrap_or(0);
     let zoom = std::format!("{} %", l::default_zoom());
     let speed = l::mult_label(unsafe { ruffle_cursor_speed_mult_x10() }.max(5) as u32);
+    // In the order of `DEFAULTS_ROWS`, which the cursor and the help read.
     let rows = [
+        Row::new(Icon::Gamepad, lc.keys_title).opens(),
+        Row::new(Icon::Pointer, lc.set_cursor_speed).cycle(&speed),
         Row::new(Icon::Monitor, lc.set_display_mode).choice(&display, l::default_display_mode() as usize),
         Row::new(Icon::Rotate, lc.set_rotation).choice(&rotation, l::default_rotation() as usize),
         Row::new(Icon::ZoomIn, lc.set_zoom).cycle(&zoom),
         Row::new(Icon::Pixels, lc.set_pixel_filter).choice(&pixels, l::default_pixel_filter() as usize),
         Row::new(Icon::Tv, lc.set_screen_filter).choice(&filters, l::default_screen_filter() as usize),
-        Row::new(Icon::Cpu, lc.set_overclock).choice(&power_opts, power_at),
         Row::new(Icon::Gauge, lc.set_fps).toggle(l::default_fps_counter() == 1),
-        Row::new(Icon::Gamepad, lc.keys_title).opens(),
-        Row::new(Icon::Pointer, lc.set_cursor_speed).cycle(&speed),
+        Row::new(Icon::Cpu, lc.set_overclock).choice(&power_opts, power_at),
     ];
     let sections = [
+        (row_of(def, "TOUCHES"), u.sec_controls),
         (row_of(def, "AFFICHAGE"), u.sec_image),
         (row_of(def, "OVERCLOCK"), u.sec_perf),
-        (row_of(def, "TOUCHES"), u.sec_controls),
     ];
     let key = focus.map(|r| key_of(def, r));
     let built: std::string::String;
