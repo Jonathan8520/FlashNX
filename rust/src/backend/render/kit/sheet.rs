@@ -303,7 +303,10 @@ impl SwitchRenderBackend {
         let mut most = 0;
         for text in s.helps.iter().chain(core::iter::once(&s.help)) {
             let key = help_key(text, box_w);
-            let known = HELP_FIT.lock().ok().and_then(|g| g.iter().find(|(k, _)| *k == key).map(|(_, n)| *n as usize));
+            let known = HELP_FIT
+                .lock()
+                .ok()
+                .and_then(|g| g.iter().find(|(k, _)| *k == key).map(|(_, n)| *n as usize));
             let n = match known {
                 Some(n) => n,
                 None => {
@@ -763,7 +766,16 @@ impl SwitchRenderBackend {
     /// which its rows were laid out at; `head` false leaves the head's place
     /// empty while the head travels on its own (`kit_cascade_on`).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn kit_sheet_rail(&mut self, s: &Sheet, x: f32, w: f32, branch: usize, side: Side, full_w: f32, head: bool) {
+    pub(crate) fn kit_sheet_rail(
+        &mut self,
+        s: &Sheet,
+        x: f32,
+        w: f32,
+        branch: usize,
+        side: Side,
+        full_w: f32,
+        head: bool,
+    ) {
         // The parent's own height: in portrait it hugs its rows, and the rail
         // keeps the panel it folds from.
         let (top, h) = self.sheet_frame(s, full_w);

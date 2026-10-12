@@ -595,8 +595,9 @@ impl SwitchRenderBackend {
                 let mut chunk = std::string::String::new();
                 let mut j = 0;
                 while j < chars.len() {
+                    let started = !chunk.is_empty();
                     chunk.push(chars[j]);
-                    if chunk.chars().count() > 1 && self.kit_measure(&chunk, px) > max_w {
+                    if started && self.kit_measure(&chunk, px) > max_w {
                         chunk.pop();
                         lines.push(core::mem::take(&mut chunk));
                         if lines.len() + 1 >= max_lines {
