@@ -2723,7 +2723,11 @@ pub fn open() {
     crate::backend::render::gallery_anim_reset();
     // Play the quit "close" reveal: the cover shrinks from full screen back to
     // the launched tile (rect = the tile's pre-launch screen box, still cached).
-    if let Some((bn, dn, color)) = collapse_info {
+    // Not after a game started from the importer: no tile was pressed, and the
+    // cached box belongs to whatever the grid last showed (nothing at all on a
+    // fresh boot, which shrank the cover into the corner).
+    let from_importer = LAUNCHED_FROM_IMPORTER.swap(false, std::sync::atomic::Ordering::Relaxed);
+    if let (Some((bn, dn, color)), false) = (collapse_info, from_importer) {
         let rect = crate::backend::render::gallery_sel_rect_read();
         crate::backend::render::game_reveal_begin(true, rect, &bn, &dn, color);
     }
@@ -9027,8 +9031,13 @@ fn launch_from_importer(s: &mut State, abs: usize, rect: (f32, f32, f32, f32), b
     if let Ok(mut g) = LAUNCH_BACKDROP.lock() {
         *g = Some(backdrop);
     }
+    LAUNCHED_FROM_IMPORTER.store(true, std::sync::atomic::Ordering::Relaxed);
     s.screen = Screen::Launching { selection, scroll_offset };
 }
+
+/// The game running was started from the importer: back in the library, its
+/// cover has no tile to shrink into (see `open`).
+static LAUNCHED_FROM_IMPORTER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The importer page a game was launched from, drawn behind its launch instead
 /// of the Play grid (`launch_from_importer`). Cleared when the launch is done.
