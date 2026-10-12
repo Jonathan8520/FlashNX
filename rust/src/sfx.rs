@@ -105,7 +105,15 @@ pub(crate) fn after_input(
         // A press that moved nothing: a value changed in place (A on a value
         // row, Left / Right on a stepper), or a step against the end of a list
         // that does not wrap, which deserves silence.
-        if matches!(button, "A" | "X" | "Y") || (is_nav(button) && matches!(before, Screen::SettingsPrefsModal { .. })) {
+        let stepper = match before {
+            // Every row but the controls one is a value.
+            Screen::SettingsPrefsModal { selection } => selection > 0,
+            // Cursor speed, cursor, gyroscope.
+            Screen::TouchesMenu { selection, .. } => (3..=5).contains(&selection),
+            Screen::SettingsModal { selection } => selection == crate::library::set_row::SOUNDS,
+            _ => false,
+        };
+        if matches!(button, "A" | "X" | "Y") || (is_nav(button) && stepper) {
             play(Sfx::Toggle);
         }
         return;

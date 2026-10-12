@@ -4254,11 +4254,10 @@ fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
     const LAST: usize = set_row::COUNT - 1;
     // The sounds row is the one value on the page: A, Left and Right flip it.
     if selection == set_row::SOUNDS && matches!(button, "A" | "Left" | "Right" | "StickLLeft" | "StickLRight") {
+        // Turning them on is heard at once: the press's own click
+        // (`sfx::after_input`) plays after the switch.
         crate::loc::set_ui_sounds(!crate::loc::ui_sounds());
         crate::loc::save_current();
-        if crate::loc::ui_sounds() {
-            crate::sfx::play(crate::sfx::Sfx::Toggle);
-        }
         s.screen = Screen::SettingsModal { selection };
         return;
     }
