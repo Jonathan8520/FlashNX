@@ -1759,7 +1759,15 @@ pub(crate) fn with_profiles_view<R>(
     sheet.crumbs = &path;
     sheet.row_h = 48.0;
     sheet.glide_key = GLIDE_KEY_TOUCHES_PROFILES;
-    sheet.help = if copy_row { u.help_copy_profile } else { u.help_touches_apply };
+    // The copy list's rows are your own other games: the shared list's help
+    // ("shared by other players for this game") was false on every one.
+    sheet.help = if copy_mode {
+        u.help_copy_game
+    } else if copy_row {
+        u.help_copy_profile
+    } else {
+        u.help_touches_apply
+    };
     sheet.hints = if mine { &hints_mine } else { &hints };
     f(backend, &sheet)
 }

@@ -573,6 +573,8 @@ pub struct Ui {
     pub profile_share_failed: &'static str,
     /// Toast when the catalog refused to delete your shared profile without saying why.
     pub profile_delete_failed: &'static str,
+    /// Help under a game of the copy list (Copier d'un autre jeu): the controls are that game's own, and A shows what changes before applying, as on the shared list (`help_touches_apply`).
+    pub help_copy_game: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -903,6 +905,7 @@ const EN: Ui = Ui {
     profile_revert_failed: "Controls not restored: the card refused the write.",
     profile_share_failed: "The catalog refused your controls. Try again later.",
     profile_delete_failed: "The catalog did not delete your profile. Try again later.",
+    help_copy_game: "That other game's own controls. You see what changes before applying.",
 };
 
 const FR: Ui = Ui {
@@ -1233,6 +1236,7 @@ const FR: Ui = Ui {
     profile_revert_failed: "Touches non rétablies\u{a0}: la carte refuse l'écriture.",
     profile_share_failed: "Le catalogue a refusé tes touches. Réessaie plus tard.",
     profile_delete_failed: "Le catalogue n'a pas supprimé ton profil. Réessaie plus tard.",
+    help_copy_game: "Les touches propres à cet autre jeu. Tu vois ce qui change avant d'appliquer.",
 };
 
 const ES: Ui = Ui {
@@ -1563,6 +1567,7 @@ const ES: Ui = Ui {
     profile_revert_failed: "Controles no restaurados: la tarjeta rechazó la escritura.",
     profile_share_failed: "El catálogo rechazó tus controles. Inténtalo más tarde.",
     profile_delete_failed: "El catálogo no borró tu perfil. Inténtalo más tarde.",
+    help_copy_game: "Los controles propios de ese otro juego. Ves lo que cambia antes de aplicar.",
 };
 
 const RU: Ui = Ui {
@@ -1893,6 +1898,7 @@ const RU: Ui = Ui {
     profile_revert_failed: "Клавиши не возвращены: карта не приняла запись.",
     profile_share_failed: "Каталог не принял твои клавиши. Попробуй позже.",
     profile_delete_failed: "Каталог не удалил твой профиль. Попробуй позже.",
+    help_copy_game: "Собственная раскладка той игры. Перед применением видно, что изменится.",
 };
 
 const DE: Ui = Ui {
@@ -2223,6 +2229,7 @@ const DE: Ui = Ui {
     profile_revert_failed: "Steuerung nicht wiederhergestellt: Karte nicht beschreibbar.",
     profile_share_failed: "Der Katalog lehnt deine Steuerung ab. Versuche es später.",
     profile_delete_failed: "Dein Profil wurde nicht gelöscht. Versuche es später.",
+    help_copy_game: "Die eigene Tastenbelegung dieses anderen Spiels. Du siehst vorher, was sich ändert.",
 };
 
 const IT: Ui = Ui {
@@ -2553,6 +2560,7 @@ const IT: Ui = Ui {
     profile_revert_failed: "Comandi non ripristinati: la scheda rifiuta la scrittura.",
     profile_share_failed: "Il catalogo ha rifiutato i tuoi comandi. Riprova più tardi.",
     profile_delete_failed: "Il catalogo non ha eliminato il tuo profilo. Riprova più tardi.",
+    help_copy_game: "I comandi propri di quell'altro gioco. Vedi cosa cambia prima di applicare.",
 };
 
 const PT: Ui = Ui {
@@ -2883,6 +2891,7 @@ const PT: Ui = Ui {
     profile_revert_failed: "Controles não restaurados: o cartão recusou a gravação.",
     profile_share_failed: "O catálogo recusou seus controles. Tente mais tarde.",
     profile_delete_failed: "O catálogo não removeu seu perfil. Tente mais tarde.",
+    help_copy_game: "Os controles próprios desse outro jogo. Você vê o que muda antes de aplicar.",
 };
 
 const ZH: Ui = Ui {
@@ -3213,6 +3222,7 @@ const ZH: Ui = Ui {
     profile_revert_failed: "无法恢复按键：存储卡拒绝写入。",
     profile_share_failed: "目录拒绝了你的按键。请稍后重试。",
     profile_delete_failed: "目录未删除你的配置。请稍后重试。",
+    help_copy_game: "那款游戏自己的按键配置。应用前可以看到会改变什么。",
 };
 
 const TR: Ui = Ui {
@@ -3543,6 +3553,7 @@ const TR: Ui = Ui {
     profile_revert_failed: "Kontroller geri yüklenemedi: kart yazmayı reddetti.",
     profile_share_failed: "Katalog kontrollerini reddetti. Daha sonra tekrar dene.",
     profile_delete_failed: "Katalog profilini silmedi. Daha sonra tekrar dene.",
+    help_copy_game: "O oyunun kendi kontrolleri. Uygulamadan önce neyin değiştiğini görürsün.",
 };
 
 pub fn ui() -> &'static Ui {
