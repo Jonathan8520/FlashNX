@@ -140,7 +140,7 @@ pub(crate) fn with_options_sheet<R>(
     let fav = crate::favorites::is_favorite(&entry.basename);
     let shelves = shelves_value(entry);
     let display_opts = [lc.display_fit, lc.display_stretch, lc.display_fill];
-    let rot_opts = [lc.rot_none, lc.rot_90, lc.rot_180, lc.rot_270];
+    let rot_opts = ["0°", lc.rot_90, lc.rot_180, lc.rot_270];
     let pix_opts = [lc.pixels_auto, lc.pixels_smooth, lc.pixels_sharp];
     let filter_opts = [lc.filter_none, lc.filter_scanlines, lc.filter_crt];
     let oc_opts = [lc.overclock_off, lc.pixels_auto, lc.overclock_on];
@@ -344,10 +344,15 @@ pub(crate) fn draw_options_family(
 pub(crate) fn draw_options_loading(backend: &mut SwitchRenderBackend, now: u64, anim_origin: u64, label: &str) {
     let last = LAST_CHILD.lock().ok().and_then(|g| *g);
     match last {
-        Some(page) => draw_options_family(backend, page, now, anim_origin, None, 0),
-        None => backend.draw_library_dim_backdrop(),
+        Some(page) => {
+            draw_options_family(backend, page, now, anim_origin, None, 0);
+            // Over the library side, left of the panels.
+            let vw = backend.screen_size().0;
+            let left_of_panels = vw - 16.0 - 76.0 - 10.0 - OPTIONS_CHILD_W;
+            backend.draw_loading_card(label, now, 0.0, left_of_panels);
+        }
+        None => backend.draw_loading_overlay(label, now),
     }
-    backend.draw_loading_overlay(label, now);
 }
 
 fn draw_family_panels(backend: &mut SwitchRenderBackend, entry: &Entry, opt_sel: usize, page: Option<Screen>, t: f32) {

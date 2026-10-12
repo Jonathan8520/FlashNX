@@ -84,9 +84,13 @@ impl<'a> Sheet<'a> {
 /// together still leave about 40% of the picture in view.
 pub(crate) const SHEET_MARGIN: f32 = 16.0;
 pub(crate) const SHEET_W: f32 = 440.0;
-pub(crate) const RAIL_W: f32 = 288.0;
-pub(crate) const CHILD_W: f32 = 432.0;
-pub(crate) const CASCADE_GAP: f32 = 12.0;
+/// The parent folds to its icons alone: wide enough for a 20 px icon on its
+/// pill, so the path stays readable (the page's caption spells it out) while
+/// the game keeps nearly 60% of the screen for the ÉCRAN preview. With the
+/// labels kept (288 px) the preview was down to 41%, a 4:3 game to 372 px.
+pub(crate) const RAIL_W: f32 = 76.0;
+pub(crate) const CHILD_W: f32 = 440.0;
+pub(crate) const CASCADE_GAP: f32 = 10.0;
 /// The launcher's options panel hugs the RIGHT edge, the library showing on the
 /// left (Options.dc.html: 520 wide); its pages open to its left.
 pub(crate) const OPTIONS_W: f32 = 520.0;
@@ -261,6 +265,12 @@ impl SwitchRenderBackend {
     /// The whole panel, at `x`, `w` wide, full height. Publishes its rows for
     /// touch when it has a cursor.
     pub(crate) fn kit_sheet_at(&mut self, s: &Sheet, x: f32, w: f32) {
+        self.sheet_draw(s, x, w, true);
+    }
+
+    /// `kit_sheet_at`; `publish` false for a panel that is only being shown on
+    /// its way somewhere (it must not take the taps of the page in front).
+    fn sheet_draw(&mut self, s: &Sheet, x: f32, w: f32, publish: bool) {
         let top = SHEET_MARGIN;
         let h = self.dimensions.height as f32 - 2.0 * SHEET_MARGIN;
         self.kit_panel(x, top, w, h, false);
@@ -346,9 +356,32 @@ impl SwitchRenderBackend {
             self.kit_rrect(x + w - 14.0, area_top + 4.0, 4.0, track_h, 2.0, col::LINE);
             self.kit_rrect(x + w - 14.0, ty, 4.0, thumb_h, 2.0, 0xFF_4A_5C_85);
         }
-        if s.selection < s.rows.len() {
+        if publish && s.selection < s.rows.len() {
             ui_cells_publish(ui_screen_kind(), cells);
         }
+    }
+
+    /// The scroll the rows of `s` rest at with row `row` centred, and the top
+    /// and bottom of their area, for a panel at full height: the rail draws its
+    /// icons where the full panel had its rows.
+    fn sheet_rows_frame(&mut self, s: &Sheet, row: usize) -> (f32, f32, f32) {
+        let top = SHEET_MARGIN;
+        let h = self.dimensions.height as f32 - 2.0 * SHEET_MARGIN;
+        let area_top = top + self.sheet_header_h(s) + 10.0;
+        let help_room = if s.reserve_help {
+            28.0 + (size::LABEL * 1.45).round() * HELP_LINES as f32 + 10.0
+        } else {
+            0.0
+        };
+        let area_bot = top + h - HINTS_BAND - help_room;
+        let area_h = (area_bot - area_top).max(s.row_h);
+        let (ys, content_h) = Self::sheet_layout(s);
+        let max_off = (content_h - area_h).max(0.0);
+        let scroll = match ys.get(row) {
+            Some(y) if max_off > 0.0 => (y + s.row_h * 0.5 - area_h * 0.5).clamp(0.0, max_off),
+            _ => 0.0,
+        };
+        (scroll, area_top, area_bot)
     }
 
     /// Column titles over a diff table ("Touche", "Avant", "Après").
@@ -420,57 +453,104 @@ impl SwitchRenderBackend {
         }
     }
 
-    /// The parent folded to a rail `w` wide: its caption, title and rows (icon
-    /// and label only), the row the sub-panel came from marked. Nothing on it
-    /// takes input; it is the path.
-    pub(crate) fn kit_sheet_rail(&mut self, s: &Sheet, x: f32, w: f32, branch: usize) {
+    /// The parent folded to its icons, `w` wide: each row's icon where the row
+    /// was, the one the page came from on a pill with a chevron pointing at the
+    /// page. Nothing on it takes input; it is the path, and the page's caption
+    /// spells it out.
+    pub(crate) fn kit_sheet_rail(&mut self, s: &Sheet, x: f32, w: f32, branch: usize, side: Side) {
         let top = SHEET_MARGIN;
         let h = self.dimensions.height as f32 - 2.0 * SHEET_MARGIN;
         self.kit_panel(x, top, w, h, false);
-        self.set_clip(x, top, w, h);
-        let line_y = self.sheet_header(s, x, w, false);
-        let area_top = line_y + 10.0;
-        let (ys, _) = Self::sheet_layout(s);
-        let (rx, rw) = (x + 16.0, w - 32.0);
-        for (at, text) in s.sections {
-            if let Some(ry) = ys.get(*at) {
-                self.kit_section(rx + 12.0, area_top + ry - 14.0, text);
+        let cx = x + w * 0.5;
+        // The head: the panel's own icon (the pause's), or its cover.
+        if let Some((tex, tw, th)) = s.thumb {
+            let (tw_, th_) = ((w - 20.0).max(8.0), ((w - 20.0) * 0.625).max(5.0));
+            if tex != 0 && tw > 0 && th > 0 {
+                self.kit_image(cx - tw_ * 0.5, top + 22.0, tw_, th_, tex, super::cover::crop_uv(tw, th, tw_, th_), 1.0, 6.0);
+            } else {
+                self.kit_rrect(cx - tw_ * 0.5, top + 22.0, tw_, th_, 6.0, col::TILE);
             }
+        } else if let Some(ic) = s.kicker {
+            self.kit_icon(cx - 10.0, top + 22.0 + 8.5, 20.0, ic, col::TEXT3);
         }
+        let line_y = (top + self.sheet_header_h(s)).round();
+        self.draw_overlay_rect(x + 12.0, line_y, w - 24.0, 1.0, col::LINE);
+        let (scroll, area_top, area_bot) = self.sheet_rows_frame(s, branch);
+        let (ys, _) = Self::sheet_layout(s);
+        self.set_clip(x, area_top, w, area_bot - area_top);
         for (i, row) in s.rows.iter().enumerate() {
-            let y = area_top + ys[i];
+            let y = area_top + ys[i] - scroll;
+            if y + s.row_h < area_top || y > area_bot {
+                continue;
+            }
             let cy = y + s.row_h * 0.5;
             let on = i == branch;
             if on {
-                self.kit_rrect(rx, y, rw, s.row_h, radius::ROW, col::CHIP);
+                self.kit_rrect(x + 10.0, y, w - 20.0, s.row_h, radius::ROW, col::CHIP);
+                // The chevron points at the page, on the side it opened on.
+                let (chev, chx) = if side == Side::Left {
+                    (Icon::ChevronRight, x + w - 10.0 - 13.0)
+                } else {
+                    (Icon::ChevronLeft, x + 10.0 + 1.0)
+                };
+                self.kit_icon(chx, cy, 12.0, chev, col::GOLD);
             }
-            let mut lx = rx + 18.0;
+            let ink = if on {
+                col::GOLD
+            } else if row.danger {
+                col::DANGER
+            } else {
+                col::TEXT3
+            };
             if let Some(ic) = row.icon {
-                self.kit_icon(lx, cy, 20.0, ic, if on { col::GOLD } else { col::TEXT3 });
-                lx += 20.0 + 14.0;
+                self.kit_icon(cx - 10.0, cy, 20.0, ic, ink);
             }
-            let mut right = rx + rw - 18.0;
-            if on {
-                self.kit_icon(right - 16.0, cy, 16.0, Icon::ChevronRight, col::GOLD);
-                right -= 16.0 + 8.0;
-            }
-            let l = self.kit_fit_mid(row.label, size::ROW, (right - lx).max(0.0));
-            self.kit_text_mid(lx, cy, size::ROW, &l, if on { col::TEXT } else { col::TEXT3 });
         }
         self.clear_clip();
     }
 
     /// The pause and its sub-panels, `t` of the way from the parent alone (0) to
-    /// the rail plus `child` (1). The parent is drawn last, so the child comes
-    /// out from under it.
+    /// the rail plus `child` (1).
     pub(crate) fn kit_cascade(&mut self, parent: &Sheet, branch: usize, child: Option<&Sheet>, t: f32) {
         // Behind the panels the game is only lightly dimmed: it is the preview.
-        self.fill_screen_dim(0x70_05_0A_16);
+        // With a page open, only the panels' side is: the rest of the picture,
+        // where ÉCRAN shows what it does, stays at full brightness, with a soft
+        // edge between the two.
+        let e = if child.is_some() { t.clamp(0.0, 1.0) } else { 0.0 };
+        const DIM: u32 = 0x70_05_0A_16;
+        let a = (DIM >> 24) as f32;
+        if e < 1.0 {
+            self.fill_screen_dim(((a * (1.0 - e)) as u32) << 24 | (DIM & 0x00FF_FFFF));
+        }
+        if e > 0.0 {
+            let right = SHEET_MARGIN + RAIL_W + CASCADE_GAP + CHILD_W + 24.0;
+            self.dim_band(right, ((a * e) as u32) << 24 | (DIM & 0x00FF_FFFF));
+        }
         self.kit_cascade_on(Side::Left, SHEET_W, CHILD_W, parent, branch, child, t);
+    }
+
+    /// Darken the screen from its left edge to `right`, fading out over the
+    /// last 80 px, still whatever the panels are doing.
+    fn dim_band(&mut self, right: f32, rgba: u32) {
+        let saved = (self.ui_scale, self.ui_pivot_x, self.ui_pivot_y, self.ui_translate_x, self.ui_translate_y);
+        self.clear_ui_transform();
+        let vh = self.dimensions.height as f32;
+        self.kit_shadow(-200.0, -200.0, right + 160.0, vh + 400.0, 0.0, 80.0, rgba);
+        self.ui_scale = saved.0;
+        self.ui_pivot_x = saved.1;
+        self.ui_pivot_y = saved.2;
+        self.ui_translate_x = saved.3;
+        self.ui_translate_y = saved.4;
     }
 
     /// The same cascade from either edge, with no dim of its own: `full_w` is
     /// the parent's width alone, `child_w` the page's.
+    ///
+    /// On the way in, the parent's edge moves in towards the rail, cutting the
+    /// panel down (its controls, hints and help go first, its icons last), and
+    /// the page is uncovered from the rail outwards, at its final place: text
+    /// that slides is text nobody can read until it stops. Halfway, the cut
+    /// panel gives way to the rail. B plays it backwards.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn kit_cascade_on(
         &mut self,
@@ -483,6 +563,7 @@ impl SwitchRenderBackend {
         t: f32,
     ) {
         let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
         // Left edge of a panel `w` wide hung from `side`.
         let at = |w: f32| if side == Side::Left { SHEET_MARGIN } else { vw - SHEET_MARGIN - w };
         if t <= 0.0 || child.is_none() {
@@ -490,18 +571,41 @@ impl SwitchRenderBackend {
             return;
         }
         let e = t.clamp(0.0, 1.0);
-        let pw = full_w + (RAIL_W - full_w) * e;
+        let pw = (full_w + (RAIL_W - full_w) * e).round();
         if let Some(c) = child {
-            // From tucked under the full parent to beside the rail.
-            let (x0, x1) = if side == Side::Left {
-                (SHEET_MARGIN + full_w - child_w, SHEET_MARGIN + RAIL_W + CASCADE_GAP)
+            let cx = if side == Side::Left {
+                SHEET_MARGIN + RAIL_W + CASCADE_GAP
             } else {
-                (vw - SHEET_MARGIN - full_w, vw - SHEET_MARGIN - RAIL_W - CASCADE_GAP - child_w)
+                vw - SHEET_MARGIN - RAIL_W - CASCADE_GAP - child_w
             };
-            let cx = x0 + (x1 - x0) * e;
-            self.kit_sheet_at(c, cx.round(), child_w);
+            // Uncovered from the rail's side, its shadow included.
+            let shown = ((child_w + 40.0) * e).round();
+            let clip = if side == Side::Left {
+                (cx - 12.0, 0.0, shown, vh)
+            } else {
+                (cx + child_w + 28.0 - shown, 0.0, shown, vh)
+            };
+            if e < 1.0 {
+                self.set_clip_outer(Some(clip));
+            }
+            self.kit_sheet_at(c, cx, child_w);
+            if e < 1.0 {
+                self.set_clip_outer(None);
+            }
         }
-        self.kit_sheet_rail(parent, at(pw).round(), pw.round(), branch);
+        let px = at(pw);
+        if e < 0.5 {
+            // The full panel, cut down by its moving edge (and its shadow with
+            // it), drawn where it stood.
+            self.set_clip_outer(Some((px - 30.0, 0.0, pw + 60.0, vh)));
+            self.sheet_draw(parent, at(full_w), full_w, false);
+            self.set_clip_outer(None);
+            // The moving edge itself, so the cut reads as the panel's border.
+            let ex = if side == Side::Left { px + pw - 1.0 } else { px };
+            self.draw_overlay_rect(ex, SHEET_MARGIN + 20.0, 1.0, vh - 2.0 * SHEET_MARGIN - 40.0, col::PANEL_LINE);
+        } else {
+            self.kit_sheet_rail(parent, px, pw, branch, side);
+        }
     }
 
     /// The page behind a panel, darkened (the scrim of a window).

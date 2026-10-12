@@ -148,6 +148,7 @@ extern "C" void ruffle_power_mode_step(int dir);
 extern "C" void ruffle_rotation_step(int dir);
 // Left / Right on ZOOM: ten percent either way, kept at once.
 extern "C" void ruffle_zoom_step(int dir);
+extern "C" void ruffle_zoom_save(void);
 // Close audren and join its worker. Idempotent; called on the way out, since
 // the launcher's interface sounds open a session no game will close.
 extern "C" void ruffle_audio_shutdown(void);
@@ -433,8 +434,8 @@ struct PauseRepeat {
 static const u64 PAUSE_DIRS[4] = {
     HidNpadButton_Up | HidNpadButton_StickLUp | HidNpadButton_StickRUp,
     HidNpadButton_Down | HidNpadButton_StickLDown | HidNpadButton_StickRDown,
-    HidNpadButton_Left | HidNpadButton_StickLLeft,
-    HidNpadButton_Right | HidNpadButton_StickLRight,
+    HidNpadButton_Left | HidNpadButton_StickLLeft | HidNpadButton_StickRLeft,
+    HidNpadButton_Right | HidNpadButton_StickLRight | HidNpadButton_StickRRight,
 };
 static void pause_repeat_reset(PauseRepeat& r) {
     for (int i = 0; i < 4; ++i) {
@@ -1394,6 +1395,8 @@ static void worker_entry(void* arg) {
     // ZOOM framing mode (issue #101): a state INSIDE the ECRAN branch, because
     // backing out of it must land on the ECRAN rows, not on the game.
     bool zoom_mode = false;
+    // A zoom stepped with Left / Right that has not been written yet.
+    bool zoom_unsaved = false;
     // Frames the zoom keys have been held, so a long press accelerates. One
     // percent a frame is the right grain to land on a value and much too slow to
     // cross the whole range, which is what this fixes.
@@ -1527,6 +1530,18 @@ static void worker_entry(void* arg) {
             // input + rendering for the keymap editor. We just forward
             // joycon down-edges and ask it to draw.
             if (ruffle_touches_active()) {
+                // `-` opened the pause, so `-` resumes the game from any of its
+                // pages; B is the one that goes back a level.
+                if (kDown & HidNpadButton_Minus) {
+                    ruffle_touches_close();
+                    if (ruffle_touches_consume_dirty()) {
+                        populate_bindings_from_keymap();
+                    }
+                    ruffle_ui_sound(UI_SFX_CLOSE);
+                    ruffle_menu_close_begin();
+                    menu_closing = true;
+                    continue;
+                }
                 menu_repeat_step(touches_repeat, kDown, kUp, kHeld,
                                  ruffle_tick_now(), tick_freq_global,
                                  ruffle_touches_input);
@@ -1554,6 +1569,9 @@ static void worker_entry(void* arg) {
                 if (ruffle_touches_active()) {
                     ruffle_touches_draw();
                 } else {
+                    // Back on the main panel: a direction still held from the
+                    // page must not start repeating there.
+                    pause_repeat_reset(pause_rep);
                     ruffle_draw_menu(menu_selection);
                 }
                 gl_context_swap();
@@ -1769,6 +1787,7 @@ static void worker_entry(void* arg) {
                             break;
                         case SCREEN_ZOOM:
                             ruffle_zoom_step(dir);
+                            zoom_unsaved = true;
                             ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
                             break;
                         case SCREEN_PIXELS:   ruffle_pixel_filter_step(dir);  break;
@@ -1777,8 +1796,27 @@ static void worker_entry(void* arg) {
                         }
                     }
                 }
-                if (kDown & (HidNpadButton_Minus | HidNpadButton_B)) {
+                // The zoom stepped under a hold is written once the hold ends,
+                // or as soon as the cursor or the panel leaves it.
+                if (zoom_unsaved
+                    && (screen_selection != SCREEN_ZOOM
+                        || !(kHeld & (PAUSE_DIRS[2] | PAUSE_DIRS[3]))
+                        || (kDown & (HidNpadButton_Minus | HidNpadButton_B)))) {
+                    ruffle_zoom_save();
+                    zoom_unsaved = false;
+                }
+                if (kDown & HidNpadButton_Minus) {
+                    // `-` resumes the game from here too; B goes back to the
+                    // main panel.
                     screen_menu = false;
+                    ruffle_ui_sound(UI_SFX_CLOSE);
+                    ruffle_menu_close_begin();
+                    menu_closing = true;
+                    continue;
+                }
+                if (kDown & HidNpadButton_B) {
+                    screen_menu = false;
+                    pause_repeat_reset(pause_rep);
                     ruffle_ui_sound(UI_SFX_BACK);
                     ruffle_redraw_paused();
                     ruffle_draw_menu(menu_selection);
@@ -1868,11 +1906,11 @@ static void worker_entry(void* arg) {
                 }
             }
             if (menu_selection == MENU_POWER) {
-                if (kDown & (HidNpadButton_Left | HidNpadButton_StickLLeft)) {
+                if (kDown & PAUSE_DIRS[2]) {
                     ruffle_power_mode_step(-1);
                     ruffle_ui_sound(UI_SFX_TOGGLE);
                 }
-                if (kDown & (HidNpadButton_Right | HidNpadButton_StickLRight)) {
+                if (kDown & PAUSE_DIRS[3]) {
                     ruffle_power_mode_step(1);
                     ruffle_ui_sound(UI_SFX_TOGGLE);
                 }
@@ -1925,7 +1963,8 @@ static void worker_entry(void* arg) {
                 case MENU_TOUCHES:
                     // Hand control to the Rust TOUCHES sub-screen.
                     // menu_open stays true so we re-enter the branch above
-                    // next frame; Rust closes itself on B/Minus.
+                    // next frame; Rust closes itself on B.
+                    menu_repeat_reset(touches_repeat);
                     ruffle_touches_open();
                     continue;
                 case MENU_SCREEN:
@@ -1934,6 +1973,7 @@ static void worker_entry(void* arg) {
                     screen_menu = true;
                     screen_selection = SCREEN_DISPLAY;
                     zoom_mode = false;
+                    pause_repeat_reset(pause_rep);
                     continue;
                 case MENU_POWER:
                     // Goes round in place, like the ECRAN rows: the panel stays

@@ -44,7 +44,10 @@ const MENU_FIXED_ROWS: usize = 6;
 const TOAST_OK: u8 = 0;
 const TOAST_ERR: u8 = 1;
 const TOAST_INFO: u8 = 2;
-const TOAST_FRAMES: u32 = 150; // ~2.5 s at 60 fps
+/// How long a toast stays up, in milliseconds. Timed, not counted in frames:
+/// a paused game redraws at its own pace, and 150 frames of a game running at
+/// 6 fps kept a toast up for 25 seconds.
+const TOAST_MS: u64 = 2500;
 
 const GLIDE_KEY_TOUCHES_MENU: u32 = 59;
 const GLIDE_KEY_TOUCHES_PROFILES: u32 = 60;
@@ -113,7 +116,8 @@ struct State {
     /// Transient toast over the current screen (msg + kind + frames remaining).
     toast_msg: std::string::String,
     toast_kind: u8,
-    toast_frames: u32,
+    /// Tick until which the toast stays up (0 = none).
+    toast_until: u64,
 }
 
 static TOUCHES: Mutex<State> = Mutex::new(State {
@@ -130,7 +134,7 @@ static TOUCHES: Mutex<State> = Mutex::new(State {
     share_is_update: false,
     toast_msg: std::string::String::new(),
     toast_kind: 0,
-    toast_frames: 0,
+    toast_until: 0,
 });
 
 pub fn is_active() -> bool {
@@ -326,7 +330,9 @@ pub fn consume_dirty() -> bool {
 fn set_toast(s: &mut State, msg: std::string::String, kind: u8) {
     s.toast_msg = msg;
     s.toast_kind = kind;
-    s.toast_frames = TOAST_FRAMES;
+    let now = unsafe { crate::ruffle_tick_now() };
+    let freq = unsafe { crate::ruffle_tick_freq() }.max(1);
+    s.toast_until = now + TOAST_MS * freq / 1000;
 }
 
 /// (basename, title, on-SD .swf path) of the running game, for the in-game
@@ -359,6 +365,24 @@ enum PendingNet {
     Delete { profile_idx: usize },
 }
 static PENDING_NET: std::sync::Mutex<Option<(PendingNet, bool)>> = std::sync::Mutex::new(None);
+
+/// What the pending flow is doing, for its loading card.
+fn pending_label() -> &'static str {
+    let u = crate::loc_ui::ui();
+    match PENDING_NET.lock().ok().as_deref().and_then(|p| p.as_ref().map(|(a, _)| match a {
+        PendingNet::OpenProfiles => 0,
+        PendingNet::OpenShareConfirm => 1,
+        PendingNet::Share => 2,
+        PendingNet::Apply { .. } => 3,
+        PendingNet::Delete { .. } => 4,
+    })) {
+        Some(1) => u.loading_share_check,
+        Some(2) => u.loading_share,
+        Some(3) => u.loading_apply,
+        Some(4) => u.loading_delete,
+        _ => u.loading_profiles,
+    }
+}
 
 /// Stash `action` (run next frame) and flip to the loading screen now. Caller
 /// holds no lock (it dropped `s` first).
@@ -1292,8 +1316,10 @@ pub(crate) fn with_touches_view<R>(
         Row::new(Icon::Keyboard, lc.touches_edit).opens(),
         Row::new(Icon::Users, lc.opt_apply).opens(),
         Row::new(Icon::Share, lc.opt_share).opens(),
-        Row::new(Icon::Gauge, lc.set_cursor_speed).cycle(&speed),
-        Row::new(Icon::Pointer, lc.show_cursor).toggle(v.shown),
+        // The pointer for its speed (the gauge is the frame counter's), the
+        // eye open or shut for whether it is drawn.
+        Row::new(Icon::Pointer, lc.set_cursor_speed).cycle(&speed),
+        Row::new(if v.shown { Icon::Eye } else { Icon::EyeOff }, lc.show_cursor).toggle(v.shown),
         Row::new(Icon::Compass, lc.set_gyro).choice(&gyro_opts, v.gyro as usize),
     ];
     if v.can_revert {
@@ -1305,8 +1331,14 @@ pub(crate) fn with_touches_view<R>(
         MENU_SHARE => u.help_touches_share,
         MENU_CURSOR => u.help_cursor_speed,
         MENU_SHOWCURSOR => u.help_show_cursor,
-        MENU_GYRO => u.help_gyro,
-        _ => u.help_revert,
+        // One help per gyroscope setting, saying what the one in force does.
+        MENU_GYRO => match v.gyro {
+            keymap::GYRO_MARBLE => u.help_gyro_marble,
+            keymap::GYRO_POINTER => u.help_gyro_pointer,
+            _ => u.help_gyro_off,
+        },
+        _ if v.has_backup => u.help_revert,
+        _ => u.help_revert_default,
     };
     let stepper = matches!(selection, MENU_CURSOR | MENU_SHOWCURSOR | MENU_GYRO);
     let hints_step = [(&[Btn::Dpad][..], u.change), (&[Btn::B][..], u.back)];
@@ -1477,15 +1509,10 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
     // Run any deferred profile network flow now that its loading panel showed a
     // frame. May transition the screen, so do it before snapshotting it.
     drive_pending_net();
-    // Snapshot the screen + decrement the toast under one lock.
+    // Snapshot the screen and the toast under one lock.
     let (screen, toast) = match TOUCHES.lock() {
-        Ok(mut g) => {
-            let t = if g.toast_frames > 0 {
-                g.toast_frames -= 1;
-                Some((g.toast_msg.clone(), g.toast_kind))
-            } else {
-                None
-            };
+        Ok(g) => {
+            let t = if now < g.toast_until { Some((g.toast_msg.clone(), g.toast_kind)) } else { None };
             (g.screen, t)
         }
         Err(_) => return,
@@ -1493,14 +1520,17 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
     let lc = crate::loc::s();
     let u = crate::loc_ui::ui();
     use crate::backend::render::Btn;
-    // Active game name, the sheet's title, as on every page of the pause.
-    let game = crate::library::active_display_name().unwrap_or_default();
     match screen {
         Screen::Inactive => {}
         Screen::Loading => {
-            // Loading panel over the frozen game while a deferred GitHub call runs.
-            // Same overlay helper as on-cover, so it looks identical.
-            backend.draw_loading_overlay(&game, now);
+            // The pause and its Touches page stay on screen while a deferred
+            // GitHub call runs; a card over them says what it is doing.
+            let t = crate::backend::render::cascade_step(true);
+            backend.with_pause_sheet(PAUSE_ROW_TOUCHES, |b, parent| {
+                with_touches_sheet(b, MENU_APPLY, |b, c| b.kit_cascade(parent, PAUSE_ROW_TOUCHES, Some(c), t));
+            });
+            let vw = backend.screen_size().0;
+            backend.draw_loading_card(pending_label(), now, 0.0, vw);
         }
         Screen::Menu { selection } => {
             crate::backend::render::pause_child_set(crate::backend::render::PauseChild::Touches(selection));
@@ -1607,6 +1637,11 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
         }
     }
     if let Some((msg, kind)) = toast {
-        backend.draw_toast(&msg, kind);
+        // Beside the panels in game; under the editor's window, where it is.
+        if screen_is_sheet() {
+            backend.draw_toast_in_game(&msg, kind);
+        } else {
+            backend.draw_toast(&msg, kind);
+        }
     }
 }

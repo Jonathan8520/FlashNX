@@ -2563,8 +2563,9 @@ fn render_frame_with_dt(dt: FloatDuration) {
     let t1 = unsafe { ruffle_tick_now() };
     // FPS counter (#111). Sampled here because this is the one place that holds
     // both halves of the answer: the tick that just ran, and the movie's own
-    // declared rate. Gated on the toggle, so a player who never turns it on pays
-    // one relaxed atomic load a frame and nothing else.
+    // declared rate. Sampled whether the counter is shown or not (a few relaxed
+    // atomics a frame): the pause's speed chip reads it too, and the game a
+    // player pauses to ask "why is this slow" is rarely one with the counter on.
     //
     // `flashnx_gc_probe().0` is how many SWF frames `Player::tick` actually
     // advanced -- the counter already published for the SLOW line. NOT the
@@ -2576,7 +2577,7 @@ fn render_frame_with_dt(dt: FloatDuration) {
     // prints, re-read every frame rather than cached at load: AS3 can move it
     // with `Stage.frameRate`, and a counter measuring against a rate the movie
     // has stopped asking for would be quietly wrong.
-    if backend::render::fps_counter_on() {
+    {
         let (swf_frames, _, _, _) = ruffle_core::flashnx_gc_probe();
         let nominal_x10 = (player.frame_rate() * 10.0) as u32;
         backend::render::fps_sample(
@@ -2998,7 +2999,15 @@ pub extern "C" fn ruffle_zoom_reset() {
 /// framing mode is for the fine work; this is for "a bit bigger".
 #[no_mangle]
 pub extern "C" fn ruffle_zoom_step(dir: c_int) {
+    // Applied at once, written by `ruffle_zoom_save` when the hold ends: a write
+    // is a rewrite of the game's `.prefs` plus an SD commit, and a held
+    // direction steps every 80 ms.
     ruffle_zoom_adjust(if dir < 0 { -10 } else { 10 }, 0, 0);
+}
+
+/// Write the zoom the ECRAN row stepped to (see `ruffle_zoom_step`).
+#[no_mangle]
+pub extern "C" fn ruffle_zoom_save() {
     let (ox, oy) = backend::render::game_pan();
     keymap::set_zoom(backend::render::game_zoom_percent(), ox, oy);
 }

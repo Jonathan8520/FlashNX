@@ -940,7 +940,7 @@ const ES: Strings = Strings {
     optimizing: "Optimizando",
     menu_resume: "Reanudar",
     menu_keys: "Controles y cursor",
-    menu_screen: "Pantalla",
+    menu_screen: "Imagen",
     menu_restart: "Reiniciar juego",
     menu_quit: "Salir del juego",
     pause_title: "Pausa",
@@ -1140,7 +1140,7 @@ const RU: Strings = Strings {
     optimizing: "Оптимизация",
     menu_resume: "Продолжить",
     menu_keys: "Клавиши и курсор",
-    menu_screen: "Экран",
+    menu_screen: "Изображение",
     menu_restart: "Начать заново",
     menu_quit: "Выйти из игры",
     pause_title: "Пауза",
@@ -1540,7 +1540,7 @@ const IT: Strings = Strings {
     optimizing: "Ottimizzazione",
     menu_resume: "Riprendi",
     menu_keys: "Comandi e cursore",
-    menu_screen: "Schermo",
+    menu_screen: "Immagine",
     menu_restart: "Riavvia il gioco",
     menu_quit: "Esci dal gioco",
     pause_title: "Pausa",
@@ -1740,7 +1740,7 @@ const PT: Strings = Strings {
     optimizing: "Otimizando",
     menu_resume: "Continuar",
     menu_keys: "Controles e cursor",
-    menu_screen: "Tela",
+    menu_screen: "Imagem",
     menu_restart: "Reiniciar jogo",
     menu_quit: "Sair do jogo",
     pause_title: "Pausa",
@@ -2141,7 +2141,7 @@ const TR: Strings = Strings {
     optimizing: "Optimize ediliyor",
     menu_resume: "Devam et",
     menu_keys: "Kontroller ve imleç",
-    menu_screen: "Ekran",
+    menu_screen: "Görüntü",
     menu_restart: "Oyunu yeniden başlat",
     menu_quit: "Oyundan çık",
     pause_title: "Duraklatıldı",
@@ -2604,13 +2604,17 @@ pub fn pixel_filter_label(v: u8) -> &'static str {
 /// value; this side only shows it).
 pub const CURSOR_SPEED_X10: &[u32] = &[5, 10, 15, 20, 25, 30, 40, 50];
 
-/// A multiplier as the menus show it: "×1,5" in French, "×1.5" in English.
-pub fn mult_label(x10: u32) -> std::string::String {
-    let mark = match current() {
+/// The decimal mark of the menu language: "1,5" in French, "1.5" in English.
+pub fn decimal_mark() -> char {
+    match current() {
         Lang::En | Lang::Zh => '.',
         _ => ',',
-    };
-    std::format!("\u{00D7}{}{}{}", x10 / 10, mark, x10 % 10)
+    }
+}
+
+/// A multiplier as the menus show it: "×1,5" in French, "×1.5" in English.
+pub fn mult_label(x10: u32) -> std::string::String {
+    std::format!("\u{00D7}{}{}{}", x10 / 10, decimal_mark(), x10 % 10)
 }
 
 /// A cursor-speed preset (by index) as the menus show it.

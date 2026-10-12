@@ -8905,11 +8905,19 @@ pub fn note_renderer_reset() {
 /// Stash `action` to run next frame + show the loading panel now (titled with the
 /// game name). Call from `input` instead of running the flow inline.
 fn defer_net(action: PendingNet, game_idx: usize) {
-    let label = LIBRARY
-        .lock()
-        .ok()
-        .and_then(|s| s.entries.get(game_idx).map(|e| e.display_name.clone()))
-        .unwrap_or_default();
+    // What the wait is for, under its spinner (the panels behind already say
+    // which game).
+    let u = crate::loc_ui::ui();
+    let label = match &action {
+        PendingNet::OpenProfiles { .. } => u.loading_profiles,
+        PendingNet::OpenShareConfirm { .. } => u.loading_share_check,
+        PendingNet::ShareProfile { .. } => u.loading_share,
+        PendingNet::ApplyProfile { .. } => u.loading_apply,
+        PendingNet::DeleteProfile { .. } => u.loading_delete,
+        PendingNet::RunStartupMigrations => crate::loc::s().optimizing,
+    }
+    .to_string();
+    let _ = game_idx;
     if let Ok(mut l) = NET_LOADING_LABEL.lock() {
         *l = label;
     }

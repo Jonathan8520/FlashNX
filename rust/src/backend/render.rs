@@ -2875,6 +2875,10 @@ pub struct SwitchRenderBackend {
     /// around the library content draw, so the navbar and Ruffle are untouched).
     ui_translate_x: f32,
     ui_translate_y: f32,
+    /// A clip every `set_clip` is intersected with, and `clear_clip` returns to
+    /// (`set_clip_outer`), in screen-space logical pixels. Lets a panel being
+    /// revealed clip a list that clips itself.
+    clip_outer: Option<(f32, f32, f32, f32)>,
     /// Uniform scale about (`ui_pivot_x`, `ui_pivot_y`) for the modal open/close
     /// pop. 1.0 = identity (always so in-game / offscreen).
     ui_scale: f32,
@@ -3642,12 +3646,13 @@ static FPS_HAVE_READING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// One rate as text: whole where the movie declared a whole number (nearly all
-/// of them do), one decimal where it did not -- a SWF header can hold 12.5.
+/// of them do), one decimal where it did not -- a SWF header can hold 12.5 --
+/// with the menu language's decimal mark.
 fn fps_rate_str(x10: u32) -> std::string::String {
     if x10 % 10 == 0 {
         std::format!("{}", x10 / 10)
     } else {
-        std::format!("{}.{}", x10 / 10, x10 % 10)
+        std::format!("{}{}{}", x10 / 10, crate::loc::decimal_mark(), x10 % 10)
     }
 }
 
@@ -6700,6 +6705,7 @@ impl SwitchRenderBackend {
             offscreen_target_tex: None,
             ui_translate_x: 0.0,
             ui_translate_y: 0.0,
+            clip_outer: None,
             ui_scale: 1.0,
             ui_pivot_x: 0.0,
             ui_pivot_y: 0.0,
@@ -9224,7 +9230,7 @@ impl SwitchRenderBackend {
         // Every row is read back from what is in force: the game's `.prefs` for
         // the ones stored per game, the renderer for the zoom and the counter.
         let display_opts = [lc.display_fit, lc.display_stretch, lc.display_fill];
-        let rot_opts = [lc.rot_none, lc.rot_90, lc.rot_180, lc.rot_270];
+        let rot_opts = ["0°", lc.rot_90, lc.rot_180, lc.rot_270];
         let pix_opts = [lc.pixels_auto, lc.pixels_smooth, lc.pixels_sharp];
         let filter_opts = [lc.filter_none, lc.filter_scanlines, lc.filter_crt];
         let zoom = std::format!("{} %", game_zoom_percent());
@@ -9354,9 +9360,8 @@ impl SwitchRenderBackend {
     /// corner of the thing being measured. `draw_text_outlined` buys the
     /// legibility instead, over a white sky and over a black cave alike.
     ///
-    /// Every character is in the 5x7 bitmap font -- digits, '/', '.', 'X' and
-    /// the letters of FPS and OC -- so this pulls no shared-font glyph and stays
-    /// safe in applet mode, where loading that font is fatal.
+    /// Drawn with the kit (the console font), like the rest of the in-game
+    /// interface.
     pub fn draw_fps_overlay(&mut self) {
         use theme::col;
         let (measured, nominal) = fps_readout();
@@ -9394,10 +9399,11 @@ impl SwitchRenderBackend {
             };
             (
                 std::format!(
-                    "{} / {} FPS  \u{00B7}  {}.{:02}\u{00D7}",
+                    "{} / {} FPS  \u{00B7}  {}{}{:02}\u{00D7}",
                     fps_rate_str(real_x10),
                     fps_rate_str(nominal_x10),
                     pct / 100,
+                    crate::loc::decimal_mark(),
                     pct % 100,
                 ),
                 dot,
@@ -9418,15 +9424,15 @@ impl SwitchRenderBackend {
         self.kit_rrect(x, y, w, H, H * 0.5, 0xB8_0A_10_1C);
         self.kit_rrect(x + 12.0, y + H * 0.5 - 4.0, 8.0, 8.0, 4.0, dot);
         self.kit_text_mid(x + 12.0 + 8.0 + 8.0, y + H * 0.5, PX, &text, col::TEXT);
-        // "OC" while the overclock is IN FORCE (the mode the hardware holds, not
-        // the stored preference): a raise dropped for the battery then shows as
-        // its absence next to the number it explains.
+        // The processor icon, gold, while the overclock is IN FORCE (the mode the
+        // hardware holds, not the stored preference): a raise dropped for the
+        // battery then shows as its absence next to the number it explains. The
+        // same icon as the pause's processor chip, where it is spelled out.
         if current_power_mode() == 1 {
-            let ow = self.kit_measure("OC", PX);
-            let cw = ow + 20.0;
+            let cw = H;
             let cx = x - 8.0 - cw;
             self.kit_rrect(cx, y, cw, H, H * 0.5, 0xB8_0A_10_1C);
-            self.kit_text_mid(cx + 10.0, y + H * 0.5, PX, "OC", 0xFF_40_C4_FF);
+            self.kit_icon(cx + (H - 16.0) * 0.5, y + H * 0.5, 16.0, Icon::Cpu, col::GOLD);
         }
         unsafe {
             glUseProgram(0);
@@ -10235,11 +10241,46 @@ impl SwitchRenderBackend {
     /// A quarter-turn of an axis-aligned rect is still axis-aligned, so mapping
     /// the two corners is exact rather than a conservative bounding box.
     pub fn set_clip(&mut self, x: f32, y: f32, w: f32, h: f32) {
+        // Through the UI transform first, like every draw (`world_matrix`): a
+        // list sliding in with its panel, or popping with its window, was clipped
+        // where it would END, so its rows stayed invisible until it got there.
+        let s = self.ui_scale;
+        let (px, py) = (self.ui_pivot_x * (1.0 - s) + self.ui_translate_x, self.ui_pivot_y * (1.0 - s) + self.ui_translate_y);
+        let (mut x0, mut y0, mut x1, mut y1) = (x * s + px, y * s + py, (x + w) * s + px, (y + h) * s + py);
+        if let Some((ox, oy, ow, oh)) = self.clip_outer {
+            x0 = x0.max(ox);
+            y0 = y0.max(oy);
+            x1 = x1.min(ox + ow).max(x0);
+            y1 = y1.min(oy + oh).max(y0);
+        }
+        self.scissor_screen(x0, y0, x1, y1);
+    }
+
+    /// Set (or drop, with None) the clip every later `set_clip` stays inside,
+    /// in the same coordinates `set_clip` takes, and apply it now.
+    pub(crate) fn set_clip_outer(&mut self, r: Option<(f32, f32, f32, f32)>) {
+        self.clip_outer = None;
+        match r {
+            Some((x, y, w, h)) => {
+                let s = self.ui_scale;
+                let (px, py) =
+                    (self.ui_pivot_x * (1.0 - s) + self.ui_translate_x, self.ui_pivot_y * (1.0 - s) + self.ui_translate_y);
+                let o = (x * s + px, y * s + py, w * s, h * s);
+                self.clip_outer = Some(o);
+                self.scissor_screen(o.0, o.1, o.0 + o.2, o.1 + o.3);
+            }
+            None => unsafe {
+                glDisable(GL_SCISSOR_TEST);
+            },
+        }
+    }
+
+    /// Scissor to a screen-space logical rect (after the UI transform).
+    fn scissor_screen(&mut self, x0: f32, y0: f32, x1: f32, y1: f32) {
         let (pw, ph) = self.physical_dims();
         let (pw, ph) = (pw as f32, ph as f32);
         // Logical rect corners -> physical, top-left origin. Same mapping as the
         // translation half of `world_matrix`.
-        let (x0, y0, x1, y1) = (x, y, x + w, y + h);
         let (px0, py0, px1, py1) = match game_rotation() {
             1 => (pw - y1, x0, pw - y0, x1),
             2 => (pw - x1, ph - y1, pw - x0, ph - y0),
@@ -10262,10 +10303,13 @@ impl SwitchRenderBackend {
         }
     }
 
-    /// Disable the scissor clip set by `set_clip`.
+    /// Drop the clip set by `set_clip`, back to the outer one if any.
     pub fn clear_clip(&mut self) {
-        unsafe {
-            glDisable(GL_SCISSOR_TEST);
+        match self.clip_outer {
+            Some((x, y, w, h)) => self.scissor_screen(x, y, x + w, y + h),
+            None => unsafe {
+                glDisable(GL_SCISSOR_TEST);
+            },
         }
     }
 
@@ -10392,6 +10436,26 @@ impl SwitchRenderBackend {
         let tw = self.kit_measure(&t, size::BODY + 1.0);
         self.kit_text_mid(((vw - tw) * 0.5).round(), vh * 0.5 - 70.0, size::BODY + 1.0, &t, col::TEXT);
         self.draw_spinner(vw * 0.5, vh * 0.5 + 8.0, 26.0, now);
+    }
+
+    /// A wait over panels that stay on screen: a small card with the spinner and
+    /// what is being done, centred between `left` and `right`, over a light dim.
+    /// A full-screen veil over the panels hid the path the player was on.
+    pub fn draw_loading_card(&mut self, label: &str, now: u64, left: f32, right: f32) {
+        use theme::{col, size};
+        self.clear_ui_transform();
+        self.fill_screen_dim(0x60_05_0A_16);
+        let vh = self.dimensions.height as f32;
+        let area = (right - left).max(200.0);
+        let t = self.kit_fit(label, size::BODY, area - 96.0);
+        let tw = self.kit_measure(&t, size::BODY);
+        let w = (tw + 48.0).max(260.0).min(area - 32.0);
+        let h = 128.0;
+        let x = (left + (area - w) * 0.5).round();
+        let y = ((vh - h) * 0.5).round();
+        self.kit_panel(x, y, w, h, false);
+        self.draw_spinner(x + w * 0.5, y + 46.0, 22.0, now);
+        self.kit_text_mid((x + (w - tw) * 0.5).round(), y + 94.0, size::BODY, &t, col::TEXT2);
     }
 
     /// The footer band of a wait that can be cancelled: B, and what it does.
@@ -12267,6 +12331,20 @@ impl SwitchRenderBackend {
     /// top of the current screen for a couple of seconds (the library loop counts
     /// it down), so a share/apply/revert confirms without a full "thanks" modal.
     pub fn draw_toast(&mut self, msg: &str, kind: u8) {
+        let vh = self.dimensions.height as f32;
+        self.draw_toast_in(msg, kind, 0.0, vh - 48.0 - 20.0 - 52.0);
+    }
+
+    /// The same pill over the part of the screen the pause's panels leave free,
+    /// at its top: in game there is no footer to sit above, and the panels' help
+    /// and hints are exactly where the launcher's toast goes.
+    pub fn draw_toast_in_game(&mut self, msg: &str, kind: u8) {
+        let left = kit::sheet::SHEET_MARGIN + kit::sheet::RAIL_W + kit::sheet::CASCADE_GAP + kit::sheet::CHILD_W;
+        self.draw_toast_in(msg, kind, left, 24.0);
+    }
+
+    /// A toast centred between `left` and the right edge, its top at `y`.
+    fn draw_toast_in(&mut self, msg: &str, kind: u8, left: f32, y: f32) {
         use theme::{col, size};
         unsafe {
             glEnable(GL_BLEND);
@@ -12274,7 +12352,8 @@ impl SwitchRenderBackend {
             glDisable(GL_STENCIL_TEST);
         }
         let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
+        // Too narrow a strip (a turned picture): the whole width.
+        let left = if vw - left < 360.0 { 0.0 } else { left };
         // A pill above the footer band, never over the hints. The dot says what
         // kind of news it is; the words say what happened.
         let dot = match kind {
@@ -12285,12 +12364,12 @@ impl SwitchRenderBackend {
         const H: f32 = 52.0;
         const PAD: f32 = 24.0;
         const DOT: f32 = 10.0;
-        let max_text = vw - 80.0 - 2.0 * PAD - DOT - 14.0;
+        let area = vw - left;
+        let max_text = area - 80.0 - 2.0 * PAD - DOT - 14.0;
         let text = self.kit_fit(msg, size::BODY, max_text);
         let tw = self.kit_measure(&text, size::BODY);
         let w = tw + 2.0 * PAD + DOT + 14.0;
-        let x = ((vw - w) * 0.5).round();
-        let y = vh - 48.0 - 20.0 - H;
+        let x = (left + (area - w) * 0.5).round();
         self.kit_shadow(x, y + 6.0, w, H, H * 0.5, 18.0, col::SHADOW);
         self.kit_shape(x, y, w, H, H * 0.5, col::PANEL, 1.0, col::PANEL_LINE, 0.0);
         self.kit_rrect(x + PAD, y + (H - DOT) * 0.5, DOT, DOT, DOT * 0.5, dot);

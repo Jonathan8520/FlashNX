@@ -26,7 +26,10 @@ pub(crate) enum Ctrl<'a> {
 }
 
 const CHOICE_H: f32 = 32.0;
+/// Padding either side of an option, and the tighter one tried before a choice
+/// gives up and shows one value between arrows.
 const CHOICE_PAD: f32 = 12.0;
+const CHOICE_PAD_TIGHT: f32 = 7.0;
 const CHOICE_INSET: f32 = 3.0;
 const CHOICE_PX: f32 = 14.0;
 const TOGGLE_W: f32 = 44.0;
@@ -35,12 +38,24 @@ const ARROW: f32 = 14.0;
 const CYCLE_MIN: f32 = 64.0;
 
 impl SwitchRenderBackend {
-    fn kit_choice_width(&mut self, opts: &[&str]) -> f32 {
+    fn kit_choice_width(&mut self, opts: &[&str], pad: f32) -> f32 {
         let mut w = 2.0 * CHOICE_INSET;
         for o in opts {
-            w += self.kit_measure(o, CHOICE_PX) + 2.0 * CHOICE_PAD;
+            w += self.kit_measure(o, CHOICE_PX) + 2.0 * pad;
         }
         w
+    }
+
+    /// The padding a choice is drawn with in `max_w`, or None when even the
+    /// tight one does not fit.
+    fn kit_choice_pad(&mut self, opts: &[&str], max_w: f32) -> Option<f32> {
+        if self.kit_choice_width(opts, CHOICE_PAD) <= max_w {
+            Some(CHOICE_PAD)
+        } else if self.kit_choice_width(opts, CHOICE_PAD_TIGHT) <= max_w {
+            Some(CHOICE_PAD_TIGHT)
+        } else {
+            None
+        }
     }
 
     /// Width `ctrl` will take (at most `max_w`: a choice that would not fit is
@@ -50,15 +65,13 @@ impl SwitchRenderBackend {
             Ctrl::None => 0.0,
             Ctrl::Value(v) => self.kit_measure(v, size::LABEL + 1.0).min(max_w),
             Ctrl::Cycle(v) => (self.kit_measure(v, size::LABEL + 1.0).max(CYCLE_MIN) + 2.0 * (ARROW + 10.0)).min(max_w),
-            Ctrl::Choice(opts, active) => {
-                let w = self.kit_choice_width(opts);
-                if w <= max_w {
-                    w
-                } else {
+            Ctrl::Choice(opts, active) => match self.kit_choice_pad(opts, max_w) {
+                Some(pad) => self.kit_choice_width(opts, pad),
+                None => {
                     let v = opts.get(active).copied().unwrap_or("");
                     self.kit_ctrl_width(&Ctrl::Cycle(v), max_w)
                 }
-            }
+            },
             Ctrl::Toggle(_) => TOGGLE_W,
         }
     }
@@ -91,30 +104,31 @@ impl SwitchRenderBackend {
                 total
             }
             Ctrl::Choice(opts, active) => {
-                let total = self.kit_choice_width(opts);
-                if total > max_w {
+                let Some(pad) = self.kit_choice_pad(opts, max_w) else {
                     let v = opts.get(active).copied().unwrap_or("");
                     return self.kit_ctrl(right, cy, &Ctrl::Cycle(v), focused, max_w);
-                }
+                };
+                let total = self.kit_choice_width(opts, pad);
                 let x0 = (right - total).round();
                 let y0 = (cy - CHOICE_H * 0.5).round();
                 self.kit_rrect(x0, y0, total, CHOICE_H, 10.0, 0xFF_10_19_2E);
                 let mut sx = x0 + CHOICE_INSET;
                 for (i, o) in opts.iter().enumerate() {
                     let ow = self.kit_measure(o, CHOICE_PX);
-                    let segw = ow + 2.0 * CHOICE_PAD;
+                    let segw = ow + 2.0 * pad;
                     let ink = if i == active {
-                        // The current option: gold when the row is focused,
-                        // a quieter lit chip when it is not.
-                        let fill = if focused { col::GOLD } else { col::PILL };
-                        self.kit_rrect(sx, y0 + CHOICE_INSET, segw, CHOICE_H - 2.0 * CHOICE_INSET, 8.0, fill);
-                        if focused { 0xFF_1A_14_05 } else { col::TEXT }
+                        // The option in force is lit gold on every row, focused
+                        // or not, as on the mockups: the panel reads as a list of
+                        // current settings at a glance. The focus is the row's
+                        // pill, not this.
+                        self.kit_rrect(sx, y0 + CHOICE_INSET, segw, CHOICE_H - 2.0 * CHOICE_INSET, 8.0, col::GOLD);
+                        0xFF_1A_14_05
                     } else if focused {
                         col::TEXT2
                     } else {
                         col::TEXT3
                     };
-                    self.kit_text_mid((sx + CHOICE_PAD).round(), cy, CHOICE_PX, o, ink);
+                    self.kit_text_mid((sx + pad).round(), cy, CHOICE_PX, o, ink);
                     sx += segw;
                 }
                 total

@@ -144,9 +144,13 @@ impl SwitchRenderBackend {
             };
             match row.filled {
                 // The solid star from the console font, centred in the icon's box.
+                // A little larger than the icons: a font glyph fills less of its
+                // em than a Lucide icon does, and at the same size it looked a
+                // size smaller than the outlines on the rows around it.
                 Some(fill) if ic == super::icons::Icon::Star => {
-                    let sw = self.kit_measure("\u{2605}", ICON);
-                    self.kit_text_mid((lx + (ICON - sw) * 0.5).round(), cy, ICON, "\u{2605}", fill);
+                    const STAR: f32 = 25.0;
+                    let sw = self.kit_measure("\u{2605}", STAR);
+                    self.kit_text_mid((lx + (ICON - sw) * 0.5).round(), cy, STAR, "\u{2605}", fill);
                 }
                 _ => {
                     self.kit_icon(lx, cy, ICON, ic, ink);
@@ -162,10 +166,14 @@ impl SwitchRenderBackend {
         }
         let mut avail = right - lx;
         if row.ctrl != super::controls::Ctrl::None {
-            // The control takes what it needs, up to 60% of the row; the label
-            // keeps the rest. A choice too wide for its share shows its current
-            // option between arrows instead (`kit_ctrl`).
-            let max_w = (avail * 0.6).max(60.0);
+            // The control takes what the label leaves it: the label is short
+            // ("Affichage", "Rotation") and a choice is only useful with every
+            // option on show. A share of the row (60% once) cut "Intégral |
+            // Étirer | Remplir" back to one value between arrows in a 440 px
+            // panel, the very cycling the choice replaced. Only a choice that
+            // still does not fit falls back (`kit_ctrl`).
+            let label_w = self.kit_measure(row.label, size::ROW).min(avail * 0.5);
+            let max_w = (avail - label_w - 20.0).max(60.0);
             let cw = self.kit_ctrl(right, cy, &row.ctrl, focused && !row.dim, max_w);
             avail -= cw + 20.0;
         }
