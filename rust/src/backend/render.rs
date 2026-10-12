@@ -114,55 +114,37 @@ pub const SCREEN_ITEMS: &[&str] =
     &["AFFICHAGE", "ROTATION", "ZOOM", "PIXELS", "FILTRE", "FPS"];
 
 // ── Unified modal style ────────────────────────────────────────────────────
-// One look for every centered popup. Before this, each modal hard-coded its own
-// width / height / font scales / dim alpha / colors, so they all drifted apart
-// (#20). Now they share these constants and the `draw_modal_frame` helper, and
-// only their *body* (rows, warnings, game name) differs. Panels size their
-// HEIGHT to the row count; the WIDTH picks one of two tiers below.
-//
-// Two width tiers, on purpose — a single width made short pickers look bloated
-// (a 4-item OPTIONS panel as wide as the screen). Long content (game names,
-// profile titles) shrinks to fit the standard width instead of forcing every
-// panel wide.
+// One look for every centered window: `draw_modal_frame` draws the panel, title
+// and hints from the kit (`render/kit/window.rs`), and only each window's body
+// differs. Panels size their HEIGHT to the row count; the WIDTH picks one of two
+// tiers below, because a single width made short pickers look bloated.
 //
 /// Standard picker width — pause, OPTIONS, sort, language, key dropdown, lists.
-/// Matches the in-game pause panel, the reference Jonathan liked.
 const MODAL_W: f32 = 520.0;
 /// Wide panel — only where the body genuinely needs the room: the two-column
 /// TOUCHES editor and the danger confirms (long warning / URL lines).
 const MODAL_W_WIDE: f32 = 720.0;
-/// Dim backdrop alpha (ARGB). The danger variant is darker to sell "stop".
-const MODAL_DIM: u32 = 0xB0_00_00_00;
-const MODAL_DIM_DANGER: u32 = 0xCC_00_00_00;
-/// Panel fill + border — calm navy vs danger red.
-const MODAL_BG: u32 = 0xF0_14_20_38;
-const MODAL_BG_DANGER: u32 = 0xF0_40_10_18;
-const MODAL_BORDER: u32 = 0xFFFFFF;
-const MODAL_BORDER_DANGER: u32 = 0xFF6060;
-/// Text scales — shared so font sizes never drift between modals again.
-const MODAL_TITLE_SCALE: f32 = 3.0;
+/// The page behind a destructive confirm is darker than behind other windows.
+const MODAL_DIM_DANGER: u32 = 0xD0_05_0A_16;
+/// Body text in a window, in the old `draw_text` scale the bodies still use.
 const MODAL_SUB_SCALE: f32 = 2.0;
 const MODAL_ROW_SCALE: f32 = 2.5;
-const MODAL_FOOTER_SCALE: f32 = 2.0;
-/// Text colors.
-const MODAL_TITLE_COL: u32 = 0xFFFFFF;
-const MODAL_TITLE_COL_DANGER: u32 = 0xFFD740; // amber title on the red panels
-const MODAL_SUB_COL: u32 = 0xAABFD8;
-const MODAL_ROW_COL: u32 = 0xCCCCCC;
-const MODAL_ROW_SEL_COL: u32 = 0xFFD740; // amber cursor row
-const MODAL_FOOTER_COL: u32 = 0x99AABB;
-/// Vertical metrics. A modal is PAD_TOP (title[+subtitle]) + rows*ROW_H +
-/// PAD_BOTTOM (footer). Fixed-height confirm modals override the total.
+const MODAL_ROW_COL: u32 = 0xA8B6D6;
+const MODAL_ROW_SEL_COL: u32 = 0xFFD740;
+/// Vertical metrics. A window is PAD_TOP (title[+subtitle]) + rows*ROW_H +
+/// PAD_BOTTOM (hints). Fixed-height confirms override the total.
 const MODAL_ROW_H: f32 = 52.0;
-/// Space above the first row WITH a subtitle (title + subtitle band) vs WITHOUT
-/// (title only) — the tight one drops the empty subtitle gap so a no-subtitle
-/// modal (e.g. the language picker) doesn't waste ~50 px under its title.
+/// Space above the first row WITH a subtitle vs WITHOUT: the tight one drops
+/// the empty subtitle band so a window without one doesn't waste ~50 px.
 const MODAL_PAD_TOP: f32 = 140.0;
 const MODAL_PAD_TOP_TIGHT: f32 = 90.0;
 const MODAL_PAD_BOTTOM: f32 = 60.0;
-/// Row layout: text left padding from the panel edge, and how far left the
-/// ">" cursor sits from that text.
-const MODAL_ROW_X: f32 = 80.0;
+/// Left edge of a window's title and of the text in its rows.
+const MODAL_ROW_X: f32 = 36.0;
+/// Centre of a row below the y its callers hand around (the top of the old
+/// 5x7 capitals), and the height of the focus pill drawn on it.
+const MODAL_ROW_CY: f32 = 10.0;
+const MODAL_PILL_H: f32 = 46.0;
 const MODAL_CURSOR_DX: f32 = 30.0;
 
 /// Glide slots for the lists that draw their own rows instead of going through
@@ -197,7 +179,7 @@ impl ModalFrame {
     }
     /// Horizontal space available for a row's text before the right edge.
     fn rows_avail(&self) -> f32 {
-        self.w - MODAL_ROW_X * 1.5
+        self.w - MODAL_ROW_X * 2.0
     }
 }
 
@@ -10655,11 +10637,12 @@ impl SwitchRenderBackend {
         self.ui_translate_y = saved.4;
     }
 
-    /// Draw the shared chrome of a centered modal: dim backdrop, panel rect,
-    /// border, centered title, optional centered subtitle, optional centered
-    /// footer. Returns the panel geometry so the caller lays out its body via
-    /// [`ModalFrame`]. The height is auto-sized to `rows` unless `fixed_h` is
-    /// given; `danger=true` switches to the red destructive-action theme.
+    /// Draw the shared chrome of a centered window: the page darkened behind
+    /// it, the raised panel, the title on the left with an optional subtitle
+    /// under it, and the button hints along the bottom. Returns the panel
+    /// geometry so the caller lays out its body via [`ModalFrame`]. The height
+    /// is auto-sized to `rows` unless `fixed_h` is given; `danger=true` is the
+    /// red panel of a destructive confirm.
     fn draw_modal_frame(
         &mut self,
         width: f32,
@@ -10670,6 +10653,7 @@ impl SwitchRenderBackend {
         subtitle: Option<&str>,
         footer: Option<&str>,
     ) -> ModalFrame {
+        use theme::{col, size};
         unsafe {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -10678,174 +10662,61 @@ impl SwitchRenderBackend {
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
 
-        // Translate-immune backdrop so the panel can scale/drop in (modal-open
-        // pop) without the dim sliding off an edge.
-        self.fill_screen_dim(if danger { MODAL_DIM_DANGER } else { MODAL_DIM });
+        // Translate-immune backdrop so the panel can scale in without the dim
+        // sliding off an edge.
+        self.fill_screen_dim(if danger { MODAL_DIM_DANGER } else { col::SCRIM });
 
-        // Never wider than the screen it sits on. Panel widths are written for a
-        // 1280-wide viewport, and the logical viewport is 720 wide while the
-        // picture is turned a quarter: the keyboard asks for 1120 and ran off
-        // both edges. Clamping HERE fixes every panel at once, including the ones
-        // written after this, and is a no-op at 1280.
+        // Never wider than the screen it sits on: the logical viewport is 720
+        // wide while the picture is turned a quarter.
         let w = width.min(vw - 2.0 * 20.0);
-        // No subtitle → tighten the title-to-rows gap (drop the empty subtitle
-        // band) so we don't waste vertical space (e.g. the language picker).
         let pad_top = if subtitle.is_some() { MODAL_PAD_TOP } else { MODAL_PAD_TOP_TIGHT };
-        let h = fixed_h
-            .unwrap_or(pad_top + rows.max(1) as f32 * MODAL_ROW_H + MODAL_PAD_BOTTOM);
-        let x = (vw - w) * 0.5;
-        let y = (vh - h) * 0.5;
-        let panel = Matrix {
-            a: w, b: 0.0, c: 0.0, d: h,
-            tx: swf::Twips::from_pixels(x as f64),
-            ty: swf::Twips::from_pixels(y as f64),
-        };
-        let (bg, border) = if danger {
-            (MODAL_BG_DANGER, MODAL_BORDER_DANGER)
-        } else {
-            (MODAL_BG, MODAL_BORDER)
-        };
-        // Rounded, and DRAWN rounded rather than masked: a modal sits over the
-        // dimmed library, so cutting its corners with a flat colour would show the
-        // wrong thing there. The border is inset by a pixel and drawn the same way,
-        // which keeps it on the curve.
-        const MODAL_R: f32 = 12.0;
-        self.draw_round_rect(x - 1.0, y - 1.0, w + 2.0, h + 2.0, MODAL_R + 1.0, 0xFF_00_00_00 | border);
-        self.draw_round_rect(x, y, w, h, MODAL_R, bg);
-        let _ = panel;
+        let h = fixed_h.unwrap_or(pad_top + rows.max(1) as f32 * MODAL_ROW_H + MODAL_PAD_BOTTOM);
+        let x = ((vw - w) * 0.5).round();
+        let y = ((vh - h) * 0.5).round();
+        self.kit_panel(x, y, w, h, danger);
 
-        // Title — shrinks to fit so a long title (e.g. a confirm question, or a
-        // long-language string) never overflows the panel edges.
-        let title_col = if danger { MODAL_TITLE_COL_DANGER } else { MODAL_TITLE_COL };
-        let avail = w - MODAL_ROW_X;
-        let tw_full = self.measure_text(title, MODAL_TITLE_SCALE);
-        let tscale = if tw_full > avail {
-            MODAL_TITLE_SCALE * avail / tw_full
-        } else {
-            MODAL_TITLE_SCALE
-        };
-        let tw = self.measure_text(title, tscale);
-        self.draw_text(
-            x + (w - tw) * 0.5,
-            y + 25.0,
-            tscale,
-            title,
-            swf::Color::from_rgb(title_col, 255),
-        );
-
-        // Optional subtitle (e.g. the game name). Shrinks to fit rather than
-        // truncating with "…" — so the standard 520 width shows the whole name,
-        // just smaller, instead of cutting it off (Jonathan's no-truncation ask).
+        // Title and subtitle on the left edge of the rows, not centred: the
+        // eye then reads down one column, title to first row.
+        let tx = x + MODAL_ROW_X;
+        let avail = w - 2.0 * MODAL_ROW_X;
+        let t = self.kit_fit(title, size::WINDOW_TITLE, avail);
+        self.kit_text_mid(tx, y + 44.0, size::WINDOW_TITLE, &t, if danger { col::DANGER } else { col::TEXT });
         if let Some(sub) = subtitle {
-            let avail = w - MODAL_ROW_X;
-            let sw_full = self.measure_text(sub, MODAL_SUB_SCALE);
-            let scale = if sw_full > avail {
-                MODAL_SUB_SCALE * avail / sw_full
-            } else {
-                MODAL_SUB_SCALE
-            };
-            let sw = self.measure_text(sub, scale);
-            self.draw_text(
-                x + (w - sw) * 0.5,
-                y + 75.0,
-                scale,
-                sub,
-                swf::Color::from_rgb(MODAL_SUB_COL, 255),
-            );
+            // Cut in the middle: it is usually a game's name.
+            let s = self.kit_fit_mid(sub, size::LABEL, avail);
+            self.kit_text_mid(tx, y + 78.0, size::LABEL, &s, col::TEXT3);
         }
 
-        // Optional footer — shrinks to fit too (an extra hint like "X: delete"
-        // can push it past the panel width, especially in longer languages).
         if let Some(f) = footer {
-            let fw_full = self.measure_text(f, MODAL_FOOTER_SCALE);
-            let fscale = if fw_full > avail {
-                MODAL_FOOTER_SCALE * avail / fw_full
-            } else {
-                MODAL_FOOTER_SCALE
-            };
-            let fw = self.measure_text(f, fscale);
-            self.draw_text(
-                x + (w - fw) * 0.5,
-                y + h - 38.0,
-                fscale,
-                f,
-                swf::Color::from_rgb(MODAL_FOOTER_COL, 255),
-            );
+            self.draw_overlay_rect(x + 20.0, y + h - 56.0, w - 40.0, 1.0, if danger { col::DANGER_LINE } else { col::LINE });
+            self.kit_footer_hints(f, x + w * 0.5, y + h - 28.0, true);
         }
 
-        // `h` stays local — consumed by the panel rect + footer position above;
-        // callers lay their body out from y + fixed offsets, so it isn't returned.
         ModalFrame { x, y, w, pad_top }
     }
 
-    /// Draw a vertical list of selectable rows inside a modal `frame`, with the
-    /// shared ">" cursor + amber selection. A too-wide row is shrunk to fit.
-    /// `selection == usize::MAX` draws no cursor (read-only lists).
-    /// `key` distinguishes one list from another for the glide below: two lists
-    /// sharing it would have the cursor slide across the gap between them
-    /// instead of appearing where it belongs. Callers pass their modal kind.
+    /// Draw a window's list: one `kit_row` per entry, a "label : value" entry
+    /// split into its two columns, and the focus pill gliding to the selected
+    /// one. `selection == usize::MAX` draws no focus (read-only lists).
     fn draw_modal_rows(&mut self, frame: &ModalFrame, selection: usize, rows: &[&str]) {
-        // Which screen these rows belong to, for the touch table. Read from the
-        // one place that knows -- `library::render` stamps it every frame --
-        // rather than threaded through five call sites that would each have to
-        // be told something they have no other use for.
+        // Which screen these rows belong to, for the touch table and for the
+        // glide key (one key per screen, so the focus never flies in from a
+        // panel that is no longer open).
         let touch_kind = ui_screen_kind();
-        let left = frame.rows_left();
-        let avail = frame.rows_avail();
         let top = frame.rows_top();
-        // The cursor GLIDES between rows, and a bar travels with it.
-        //
-        // The `>` used to jump from row to row with nothing in between, in every
-        // modal in the app, while REGLAGES right next door had had a gliding
-        // highlight since v1.2.0. Same helper, same easing: the movement is now
-        // the app's, not each screen's.
-        //
-        // `usize::MAX` is the "no selection" convention some callers use for a
-        // read-only list; it must not be turned into a bar somewhere off-screen.
+        let (px, pw) = (frame.x + 16.0, frame.w - 32.0);
         if selection < rows.len() {
             let now = unsafe { ruffle_tick_now() };
-            // The glide key is the SCREEN, not a number the caller picked.
-            // `draw_library_options` alone is used by three different modals,
-            // and they all passed the same constant, so the cursor flew in from
-            // whichever one you had open last -- a row of a panel that is no
-            // longer on screen. One key per screen is the honest mapping, and it
-            // is already computed: it is the id the touch table is tagged with.
-            //
-            // It also snaps rather than glides on the frame a modal opens: the
-            // stamp is 0 while the panel scales in, and a key change snaps. A
-            // cursor that is simply THERE when the panel arrives is right.
             let hy = eased_list_y(top + selection as f32 * MODAL_ROW_H, touch_kind, now);
-            let bar_x = left - MODAL_CURSOR_DX - 10.0;
-            let bar_w = (frame.x + frame.w - 28.0 - bar_x).max(0.0);
-            self.draw_selection_bar(bar_x, hy - 9.0, bar_w, MODAL_ROW_H - 12.0, 6.0);
-            self.draw_text(
-                left - MODAL_CURSOR_DX,
-                hy,
-                MODAL_ROW_SCALE,
-                ">",
-                swf::Color::from_rgb(MODAL_ROW_SEL_COL, 255),
-            );
+            self.kit_focus_pill(px, hy + MODAL_ROW_CY - MODAL_PILL_H * 0.5, pw, MODAL_PILL_H);
         }
-        let mut cells: std::vec::Vec<(f32, f32, f32, f32)> =
-            std::vec::Vec::with_capacity(rows.len());
+        let mut cells: std::vec::Vec<(f32, f32, f32, f32)> = std::vec::Vec::with_capacity(rows.len());
         for (i, row) in rows.iter().enumerate() {
             let y = top + i as f32 * MODAL_ROW_H;
-            let is_sel = i == selection;
-            let color = swf::Color::from_rgb(
-                if is_sel { MODAL_ROW_SEL_COL } else { MODAL_ROW_COL },
-                255,
-            );
-            let w = self.measure_text(row, MODAL_ROW_SCALE);
-            let sc = if w > avail { MODAL_ROW_SCALE * avail / w } else { MODAL_ROW_SCALE };
-            self.draw_text(left, y, sc, row, color);
-            // The whole width of the panel, not the width of the text: a row is
-            // a target, and aiming at four letters with a thumb is not a target.
-            cells.push((
-                frame.x + 8.0,
-                y - 10.0,
-                (frame.w - 16.0).max(0.0),
-                MODAL_ROW_H,
-            ));
+            let (label, value) = kit::window::split_label_value(row);
+            self.kit_row(px, y + MODAL_ROW_CY, pw, label, value, i == selection, theme::size::ROW);
+            // The whole width of the panel: a row is a target for a thumb.
+            cells.push((frame.x + 8.0, y + MODAL_ROW_CY - MODAL_ROW_H * 0.5, (frame.w - 16.0).max(0.0), MODAL_ROW_H));
         }
         ui_cells_publish(touch_kind, cells);
     }
@@ -10907,26 +10778,37 @@ impl SwitchRenderBackend {
     /// The bottom band of the home screens: a hairline, the author credit on
     /// the left and what the buttons do on the right.
     ///
-    /// The credit is baked in on purpose (see `draw_version_badge`), so it moves
-    /// here rather than going away. The version itself is in REGLAGES.
+    /// The credit and the version are in the band on the left
+    /// (`kit_footer_band`).
     fn kit_home_footer(&mut self) {
-        use theme::{col, size};
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
-        self.draw_overlay_rect(0.0, vh - 48.0, vw, 1.0, col::LINE);
+        self.kit_footer_band();
         let cy = vh - 24.0;
-        self.kit_text_mid(40.0, cy, size::CAPTION + 1.0, "Jonathan8520", col::TEXT3);
         let u = crate::loc_ui::ui();
         self.kit_hints_right(
             vw - 40.0,
             cy,
             &[
-                (Btn::A, u.hint_play),
-                (Btn::Plus, u.hint_options),
-                (Btn::Y, u.hint_sort),
-                (Btn::Minus, u.hint_search),
+                (&[Btn::A], u.hint_play),
+                (&[Btn::Plus], u.hint_options),
+                (&[Btn::Y], u.hint_sort),
+                (&[Btn::Minus], u.hint_search),
             ],
         );
+    }
+
+    /// The hairline and the left-hand credit every full-page screen ends with.
+    /// The author credit is baked into the interface so a rebuilt or rebranded
+    /// copy carries it too: removing it is an MIT-attribution violation. The
+    /// version rides along with it.
+    fn kit_footer_band(&mut self) {
+        use theme::{col, size};
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        self.draw_overlay_rect(0.0, vh - 48.0, vw, 1.0, col::LINE);
+        let credit = std::format!("Jonathan8520  \u{00B7}  v{}", crate::bugreport::APP_VERSION);
+        self.kit_text_mid(40.0, vh - 24.0, size::CAPTION + 1.0, &credit, col::TEXT3);
     }
 
     /// The selected game's facts on one line, the kit way: values in the second
@@ -10952,29 +10834,6 @@ impl SwitchRenderBackend {
             pen += self.kit_text_mid(pen, cy, size::LABEL, p, col::TEXT2);
         }
         pen - x
-    }
-
-    /// Small version label in the bottom-right corner of the launcher UI (drawn
-    /// on the tab-home screens, after the navbar). The version string's single
-    /// source of truth is `crate::bugreport::APP_VERSION`.
-    pub fn draw_version_badge(&mut self) {
-        let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
-        let scale = 1.5;
-        let color = swf::Color::from_rgb(0x66788A, 255);
-        // Author credit, bottom-LEFT. Baked into the UI so a rebuilt/rebranded
-        // copy carries it too (removing it is an active MIT-attribution
-        // violation). ASCII only — the 5x7 font folds it.
-        self.draw_text(14.0, vh - 22.0, scale, "Jonathan8520", color);
-        // Version, bottom-RIGHT.
-        let label = std::format!("V{}", crate::bugreport::APP_VERSION);
-        let w = self.measure_text(&label, scale);
-        self.draw_text(vw - w - 14.0, vh - 22.0, scale, &label, color);
-        unsafe {
-            glUseProgram(0);
-            glBindVertexArray(0);
-        }
-        self.gl_state.invalidate();
     }
 
     /// Multi-file launch indicator (v1.3.0): a centered label near the bottom of
@@ -11903,11 +11762,13 @@ impl SwitchRenderBackend {
     /// It was copied out at each site — measure, halve, draw at `vh - 42` in
     /// `0x99AABB` — which is how two of them ended up at a different height than
     /// the rest.
+    /// The bottom band of a full-page screen, from one of the old footer
+    /// strings: hairline, credit on the left, the parsed hints on the right.
     fn draw_page_footer(&mut self, text: &str) {
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
-        let w = self.measure_text(text, 2.0);
-        self.draw_text((vw - w) * 0.5, vh - 42.0, 2.0, text, swf::Color::from_rgb(0x99AABB, 255));
+        self.kit_footer_band();
+        self.kit_footer_hints(text, vw - 40.0, vh - 24.0, false);
     }
 
     /// Border width of the selection frame. It is drawn OUTSIDE the tile it

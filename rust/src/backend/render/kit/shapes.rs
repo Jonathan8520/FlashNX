@@ -139,7 +139,7 @@ impl SwitchRenderBackend {
     /// One shape draw. `(x, y, w, h)` is the shape itself; `pad` grows the quad
     /// around it so a soft edge has room to fade out.
     #[allow(clippy::too_many_arguments)]
-    fn kit_shape(
+    pub(crate) fn kit_shape(
         &mut self,
         x: f32,
         y: f32,

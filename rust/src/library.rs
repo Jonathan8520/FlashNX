@@ -10281,13 +10281,9 @@ pub fn render(backend: &mut SwitchRenderBackend) {
     // no navbar. Reset the transform first so the navbar itself never moves.
     backend.clear_ui_transform();
     if let Some(tab) = screen_tab(screen) {
+        // The author credit and the version are in every page's footer band
+        // (`kit_footer_band`), so the corner badge is gone.
         backend.draw_navbar(tab.index());
-        // Version label and author credit, bottom corners of the home screens.
-        // JOUER is on the interface kit, whose footer carries the credit itself
-        // and leaves the right-hand side to the button hints.
-        if tab.index() != 0 {
-            backend.draw_version_badge();
-        }
     } else {
         // No strip on a sub-screen, so nothing on it may be tapped. Without
         // this the cells published by the last home screen stayed live, and a

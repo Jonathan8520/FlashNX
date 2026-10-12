@@ -31,6 +31,18 @@ pub(crate) mod col {
     pub const GLYPH: u32 = 0xFF_EE_F2_FF;
     /// The one accent: focus, the active tab, the favourite star.
     pub const GOLD: u32 = 0xFF_FF_D7_40;
+    /// Border of a raised panel.
+    pub const PANEL_LINE: u32 = 0xFF_2E_40_66;
+    /// What sits behind an open window: the page, darkened.
+    pub const SCRIM: u32 = 0xB8_05_0A_16;
+    /// A destructive confirm: its panel, its border and its title.
+    pub const DANGER_PANEL: u32 = 0xFF_33_18_28;
+    pub const DANGER_LINE: u32 = 0xFF_6E_2C_40;
+    pub const DANGER: u32 = 0xFF_FF_7A_7A;
+    /// Something that worked (a download done, a game already on the card).
+    pub const OK: u32 = 0xFF_4E_D1_8B;
+    /// A soft drop shadow under a raised panel.
+    pub const SHADOW: u32 = 0x90_00_00_00;
 }
 
 /// Type sizes in pixels per em. The console font has a single weight, so
@@ -47,6 +59,9 @@ pub(crate) mod size {
     pub const GLYPH: f32 = 24.0;
     /// L / R / ZL / ZR inside their pills.
     pub const PILL: f32 = 12.0;
+    /// A window's title, and the rows of a window's list.
+    pub const WINDOW_TITLE: f32 = 22.0;
+    pub const ROW: f32 = 18.0;
 }
 
 pub(crate) mod space {
@@ -54,9 +69,13 @@ pub(crate) mod space {
     pub const GLYPH_GAP: f32 = 9.0;
     /// Between two hints in a bar.
     pub const HINT_GAP: f32 = 26.0;
+    /// Between two glyphs of one hint (L R, ZL ZR).
+    pub const GLYPH_PAIR_GAP: f32 = 3.0;
 }
 
 pub(crate) mod radius {
+    pub const PANEL: f32 = 20.0;
+    pub const ROW: f32 = 12.0;
     pub const TILE: f32 = 12.0;
     pub const PILL: f32 = 7.0;
     pub const BAR: f32 = 2.0;

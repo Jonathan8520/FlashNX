@@ -16,3 +16,4 @@
 pub(crate) mod shapes;
 pub(crate) mod text;
 pub(crate) mod theme;
+pub(crate) mod window;

@@ -49,6 +49,9 @@ enum FaceId {
     Chinese,
 }
 
+/// One hint in a bar: the button(s) and what pressing them does.
+pub(crate) type HintItem<'a> = (&'a [Btn], &'a str);
+
 /// A controller button, drawn with the console's own glyph for it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Btn {
@@ -612,15 +615,31 @@ impl SwitchRenderBackend {
         }
     }
 
-    /// Width of a hint bar, so a caller can centre or right-align it.
-    pub fn kit_hints_width(&mut self, items: &[(Btn, &str)]) -> f32 {
+    /// Width of one hint: its glyphs, then its label.
+    fn kit_hint_width(&mut self, btns: &[Btn], label: &str) -> f32 {
         use super::theme::{size, space};
+        let mut w = 0.0;
+        for (i, b) in btns.iter().enumerate() {
+            if i > 0 {
+                w += space::GLYPH_PAIR_GAP;
+            }
+            w += self.kit_button_width(*b, size::GLYPH);
+        }
+        if !btns.is_empty() && !label.is_empty() {
+            w += space::GLYPH_GAP;
+        }
+        w + self.kit_measure(label, size::HINT)
+    }
+
+    /// Width of a hint bar, so a caller can centre or right-align it.
+    pub fn kit_hints_width(&mut self, items: &[HintItem]) -> f32 {
+        use super::theme::space;
         let mut total = 0.0;
-        for (i, (b, label)) in items.iter().enumerate() {
+        for (i, (btns, label)) in items.iter().enumerate() {
             if i > 0 {
                 total += space::HINT_GAP;
             }
-            total += self.kit_button_width(*b, size::GLYPH) + space::GLYPH_GAP + self.kit_measure(label, size::HINT);
+            total += self.kit_hint_width(btns, label);
         }
         total
     }
@@ -631,18 +650,31 @@ impl SwitchRenderBackend {
     /// ("A:LANCER   +:OPTIONS..."), nine languages each. A hint is now a button
     /// and a word, so a screen lists what its buttons do and the layout is
     /// shared.
-    pub fn kit_hints(&mut self, x: f32, cy: f32, items: &[(Btn, &str)]) {
+    pub fn kit_hints(&mut self, x: f32, cy: f32, items: &[HintItem]) {
         use super::theme::{col, size, space};
         let mut x = x;
-        for (b, label) in items.iter() {
-            let gw = self.kit_button(x, cy, size::GLYPH, *b, col::GLYPH);
-            let lw = self.kit_text_mid(x + gw + space::GLYPH_GAP, cy, size::HINT, label, col::TEXT);
-            x += gw + space::GLYPH_GAP + lw + space::HINT_GAP;
+        for (btns, label) in items.iter() {
+            for (i, b) in btns.iter().enumerate() {
+                if i > 0 {
+                    x += space::GLYPH_PAIR_GAP;
+                }
+                x += self.kit_button(x, cy, size::GLYPH, *b, col::GLYPH);
+            }
+            if !btns.is_empty() && !label.is_empty() {
+                x += space::GLYPH_GAP;
+            }
+            x += self.kit_text_mid(x, cy, size::HINT, label, col::TEXT) + space::HINT_GAP;
         }
     }
 
+    /// `kit_hints`, centred on `cx`.
+    pub fn kit_hints_centered(&mut self, cx: f32, cy: f32, items: &[HintItem]) {
+        let w = self.kit_hints_width(items);
+        self.kit_hints((cx - w * 0.5).round(), cy, items);
+    }
+
     /// `kit_hints`, ending at `right`.
-    pub fn kit_hints_right(&mut self, right: f32, cy: f32, items: &[(Btn, &str)]) {
+    pub fn kit_hints_right(&mut self, right: f32, cy: f32, items: &[HintItem]) {
         let w = self.kit_hints_width(items);
         self.kit_hints(right - w, cy, items);
     }
