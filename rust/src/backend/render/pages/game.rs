@@ -1,86 +1,15 @@
-//! A game's options, and a saved source's: what it is on the left, what can be
-//! done with it on the right.
+//! A saved source's options and a game's cover picker.
 //!
-//! The old window was the generic "Options" list with the game's name as its
-//! subtitle and nothing else: no cover, no size, no hint of which folder it was
-//! in, and "Supprimer" in the same grey as "Renommer". Now the window shows the
-//! game it is about, each action has its icon, the folder row says where the
-//! game is, and the destructive row is red.
+//! A game's own options are the side panel of `library::options_panel`.
 
 use super::super::kit::icons::Icon;
 use super::super::kit::list::{Row, ScrollRows};
 use super::super::kit::theme::{col, size};
 use super::super::*;
 
-const W: f32 = 860.0;
-const ART: f32 = 220.0;
 const PAD: f32 = 36.0;
-const TOP: f32 = 92.0;
 
 impl SwitchRenderBackend {
-    /// `rows` are the actions, in the order the input handler reads them.
-    pub fn draw_game_options(&mut self, entry: &crate::library::Entry, selection: usize, rows: &[Row]) {
-        let rows_h = rows.len() as f32 * MODAL_ROW_H;
-        let facts_h = ART + 24.0 + 3.0 * 26.0;
-        let h = TOP + rows_h.max(facts_h) + 76.0;
-        let frame = self.draw_modal_frame(W, 0, Some(h), false, &entry.display_name, None, None);
-        let (x, y) = (frame.x, frame.y);
-
-        // The cover, the way the library shows it.
-        let (ax, ay) = (x + PAD, y + TOP);
-        match self.cover_for(&entry.basename) {
-            CoverTex::Image { tex, w, h, amb } => self.kit_cover(ax, ay, ART, ART, tex, w, h, amb, 1.0),
-            CoverTex::Default => self.kit_default_tile(ax, ay, ART, ART, entry.color_chip, &entry.basename),
-        }
-        // What it is: size, engine, time played.
-        let mut fy = ay + ART + 30.0;
-        let mut fact = |s: &mut Self, icon: Icon, text: &str| {
-            s.kit_icon(ax, fy, 16.0, icon, col::TEXT3);
-            let t = s.kit_fit(text, size::LABEL, ART - 26.0);
-            s.kit_text_mid(ax + 26.0, fy, size::LABEL, &t, col::TEXT2);
-            fy += 26.0;
-        };
-        let sz = format_size_pretty(entry.size_bytes);
-        if !sz.is_empty() {
-            fact(self, Icon::HardDrive, &sz);
-        }
-        let engine = std::format!(
-            "SWF {}  \u{00B7}  {}",
-            entry.swf_version,
-            if entry.is_as3 { "AS3" } else { "AVM1" }
-        );
-        fact(self, Icon::Code, &engine);
-        let secs = crate::playtime::get(&entry.basename);
-        if secs >= 60 {
-            fact(self, Icon::Clock, &crate::loc_ui::playtime(secs));
-        }
-
-        // What can be done with it.
-        let rx = ax + ART + 28.0;
-        let spec = ScrollRows {
-            x: rx,
-            w: x + frame.w - 16.0 - rx,
-            top: y + TOP - 4.0,
-            row_h: MODAL_ROW_H,
-            pill_h: MODAL_PILL_H,
-            pinned: 0,
-            visible: rows.len(),
-            key: 0x6300_0000,
-            scrollbar_x: None,
-        };
-        let w = spec.w;
-        self.kit_scroll_rows(&spec, rows.len(), selection, 0, |s, i, cy, focused| {
-            s.kit_row_item(rx, cy, w, &rows[i], focused);
-        });
-        let u = crate::loc_ui::ui();
-        self.modal_hints(&frame, &[(&[Btn::A], u.choose), (&[Btn::B], u.back)], false);
-        unsafe {
-            glUseProgram(0);
-            glBindVertexArray(0);
-        }
-        self.gl_state.invalidate();
-    }
-
     /// A saved source's options: what kind it is, how much of it is on the
     /// card, when it was saved, its full address, then the actions.
     pub fn draw_url_options(

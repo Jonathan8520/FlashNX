@@ -1484,6 +1484,32 @@ pub fn set_zoom(percent: u16, pan_x: i32, pan_y: i32) {
     }
 }
 
+/// Set a game's zoom from its options in the launcher, where there is no
+/// picture to frame against: the percentage changes, and the framing goes back
+/// to the centre, because an offset chosen at one magnification is wrong at
+/// another (the pause re-clamps it anyway). The free framing stays the pause's.
+pub fn set_zoom_for(basename: &str, percent: u16) {
+    write_pref_many(basename, &[("zoom", percent as i32), ("panx", 0), ("pany", 0)]);
+}
+
+/// The settings below, for a game that is NOT running: its options in the
+/// launcher write them for the next launch. Same keys as the pause writes.
+pub fn set_screen_filter_for(basename: &str, mode: u8) {
+    write_pref(basename, "filter", mode);
+}
+
+pub fn set_pixel_filter_for(basename: &str, mode: u8) {
+    write_pref(basename, "pixels", mode);
+}
+
+pub fn set_power_mode_for(basename: &str, mode: u8) {
+    write_pref(basename, "power", mode);
+}
+
+pub fn set_fps_counter_for(basename: &str, mode: u8) {
+    write_pref(basename, "fps", mode);
+}
+
 /// Number of screen filters: 0 = none, 1 = scanlines, 2 = CRT.
 pub const SCREEN_FILTER_COUNT: u8 = 3;
 

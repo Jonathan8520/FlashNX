@@ -207,15 +207,6 @@ impl ModalFrame {
     }
 }
 
-/// First row shown by `draw_library_list_modal_window`: the window of
-/// `max_rows` stays centred on `selection`, clamped to the list's ends.
-pub fn list_window_start(selection: usize, len: usize, max_rows: usize) -> usize {
-    if len <= max_rows {
-        return 0;
-    }
-    selection.saturating_sub(max_rows / 2).min(len - max_rows)
-}
-
 /// 5×7 pixel glyphs for the pause menu. ASCII art keeps the data
 /// hand-editable: each row is exactly 5 chars wide, ' ' = off, anything
 /// else = on. `draw_text` upper-cases input before lookup, so we only
@@ -1212,7 +1203,7 @@ pub(crate) use kit::text::Btn;
 pub(crate) use pages::settings::{SettingsExtra, SettingsRow};
 pub(crate) use pages::windows::{Choice, WinRow};
 pub(crate) use kit::list::Row;
-pub(crate) use kit::sheet::{cascade_step, Sheet};
+pub(crate) use kit::sheet::{cascade_step, Sheet, Side, OPTIONS_CHILD_W, OPTIONS_W};
 
 /// Whether the console's fonts loaded, i.e. the interface draws with the kit
 /// rather than the old 5x7 font.
@@ -10175,6 +10166,21 @@ impl SwitchRenderBackend {
         self.ui_translate_y = 0.0;
     }
 
+    /// The launcher's side panel coming in from the RIGHT edge (a game's
+    /// options), on the same timeline as `set_ui_sheet_slide`.
+    pub fn set_ui_sheet_slide_right(&mut self, scale: f32) {
+        let p = if modal_anim_closing() {
+            scale
+        } else {
+            ((scale - MODAL_OPEN_FROM) / (1.0 - MODAL_OPEN_FROM)).clamp(0.0, 1.0)
+        };
+        self.ui_scale = 1.0;
+        self.ui_pivot_x = 0.0;
+        self.ui_pivot_y = 0.0;
+        self.ui_translate_x = (1.0 - p) * 560.0;
+        self.ui_translate_y = 0.0;
+    }
+
     pub fn set_ui_modal_scale(&mut self, scale: f32) {
         self.ui_scale = scale;
         self.ui_pivot_x = self.dimensions.width as f32 * 0.5;
@@ -10489,13 +10495,6 @@ impl SwitchRenderBackend {
         let (x, y, w, h) = (frame.x, frame.y, frame.w, frame.h);
         self.draw_overlay_rect(x + 20.0, y + h - 56.0, w - 40.0, 1.0, if danger { col::DANGER_LINE } else { col::LINE });
         self.kit_hints_centered(x + w * 0.5, y + h - 28.0, hints);
-    }
-
-    /// Draw a window's list: one `kit_row` per entry, a "label : value" entry
-    /// split into its two columns, and the focus pill gliding to the selected
-    /// one. `selection == usize::MAX` draws no focus (read-only lists).
-    fn draw_modal_rows(&mut self, frame: &ModalFrame, selection: usize, rows: &[&str]) {
-        self.draw_modal_rows_stepping(frame, selection, rows, 0);
     }
 
     /// `draw_modal_rows`, where bit `i` of `steppers` marks row `i` as one whose
@@ -10832,6 +10831,15 @@ impl SwitchRenderBackend {
     /// Resolve + cache a game's cover texture by basename. Decodes/uploads on
     /// first use; returns `Default` when there's no cover image (caller draws
     /// the generated tile).
+    /// A game's cover as `(texture, width, height)` for a panel's header, or
+    /// None when it has none (yet).
+    pub(crate) fn cover_thumb(&mut self, basename: &str) -> Option<(GLuint, u32, u32)> {
+        match self.cover_for(basename) {
+            CoverTex::Image { tex, w, h, .. } => Some((tex, w, h)),
+            CoverTex::Default => None,
+        }
+    }
+
     fn cover_for(&mut self, basename: &str) -> CoverTex {
         if let Some(t) = cover_lookup(basename) {
             return t;
@@ -12145,63 +12153,6 @@ impl SwitchRenderBackend {
             &std::format!("{} / {}", done, total),
             &[],
         );
-    }
-
-    /// Generic centered list modal (title + subtitle + rows + footer), same
-    /// look as `draw_library_options` but with the strings passed in. Used by
-    /// the community-profile picker (#20). `subtitle` may be empty. `wide` picks
-    /// the 720 tier for content-heavy lists (profile names, before/after diffs)
-    /// that look cramped at the standard 520; short lists pass `false`.
-    pub fn draw_library_list_modal(
-        &mut self,
-        title: &str,
-        subtitle: &str,
-        selection: usize,
-        options: &[&str],
-        footer: &str,
-        wide: bool,
-    ) {
-        let sub = if subtitle.is_empty() { None } else { Some(subtitle) };
-        let frame = self.draw_modal_frame(
-            if wide { MODAL_W_WIDE } else { MODAL_W },
-            options.len(),
-            None,
-            false,
-            title,
-            sub,
-            Some(footer),
-        );
-        self.draw_modal_rows(&frame, selection, options);
-
-        unsafe {
-            glUseProgram(0);
-            glBindVertexArray(0);
-        }
-        self.gl_state.invalidate();
-    }
-
-    /// `draw_library_list_modal` for a list that may be longer than the screen:
-    /// at most `max_rows` rows show, a window kept centred on the selection, and
-    /// the title then says where the cursor is ("4/24"). The touch table holds
-    /// the VISIBLE rows; `list_window_start` turns one back into a list index.
-    pub fn draw_library_list_modal_window(
-        &mut self,
-        title: &str,
-        subtitle: &str,
-        selection: usize,
-        options: &[&str],
-        footer: &str,
-        wide: bool,
-        max_rows: usize,
-    ) {
-        if options.len() <= max_rows {
-            self.draw_library_list_modal(title, subtitle, selection, options, footer, wide);
-            return;
-        }
-        let start = list_window_start(selection, options.len(), max_rows);
-        let shown = &options[start..start + max_rows];
-        let titled = std::format!("{}  {}/{}", title, selection.min(options.len() - 1) + 1, options.len());
-        self.draw_library_list_modal(&titled, subtitle, selection - start, shown, footer, wide);
     }
 
     // ── Phase 3.7: DISTANT mode screens ────────────────────────────────

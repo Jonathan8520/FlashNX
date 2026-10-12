@@ -87,6 +87,19 @@ pub(crate) const SHEET_W: f32 = 440.0;
 pub(crate) const RAIL_W: f32 = 288.0;
 pub(crate) const CHILD_W: f32 = 432.0;
 pub(crate) const CASCADE_GAP: f32 = 12.0;
+/// The launcher's options panel hugs the RIGHT edge, the library showing on the
+/// left (Options.dc.html: 520 wide); its pages open to its left.
+pub(crate) const OPTIONS_W: f32 = 520.0;
+pub(crate) const OPTIONS_CHILD_W: f32 = 480.0;
+
+/// Which edge a cascade hangs from.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Side {
+    /// The pause: panels from the left, over the game.
+    Left,
+    /// A game's options in the launcher: panels from the right, over the library.
+    Right,
+}
 /// The gap a section title takes over its rows.
 const SECTION_H: f32 = 36.0;
 /// Rows are this far apart beyond their own height.
@@ -453,20 +466,46 @@ impl SwitchRenderBackend {
     pub(crate) fn kit_cascade(&mut self, parent: &Sheet, branch: usize, child: Option<&Sheet>, t: f32) {
         // Behind the panels the game is only lightly dimmed: it is the preview.
         self.fill_screen_dim(0x70_05_0A_16);
-        let x = SHEET_MARGIN;
+        self.kit_cascade_on(Side::Left, SHEET_W, CHILD_W, parent, branch, child, t);
+    }
+
+    /// The same cascade from either edge, with no dim of its own: `full_w` is
+    /// the parent's width alone, `child_w` the page's.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn kit_cascade_on(
+        &mut self,
+        side: Side,
+        full_w: f32,
+        child_w: f32,
+        parent: &Sheet,
+        branch: usize,
+        child: Option<&Sheet>,
+        t: f32,
+    ) {
+        let vw = self.dimensions.width as f32;
+        // Left edge of a panel `w` wide hung from `side`.
+        let at = |w: f32| if side == Side::Left { SHEET_MARGIN } else { vw - SHEET_MARGIN - w };
         if t <= 0.0 || child.is_none() {
-            self.kit_sheet_at(parent, x, SHEET_W);
+            self.kit_sheet_at(parent, at(full_w), full_w);
             return;
         }
         let e = t.clamp(0.0, 1.0);
-        let pw = SHEET_W + (RAIL_W - SHEET_W) * e;
+        let pw = full_w + (RAIL_W - full_w) * e;
         if let Some(c) = child {
             // From tucked under the full parent to beside the rail.
-            let x0 = x + SHEET_W - CHILD_W;
-            let x1 = x + RAIL_W + CASCADE_GAP;
+            let (x0, x1) = if side == Side::Left {
+                (SHEET_MARGIN + full_w - child_w, SHEET_MARGIN + RAIL_W + CASCADE_GAP)
+            } else {
+                (vw - SHEET_MARGIN - full_w, vw - SHEET_MARGIN - RAIL_W - CASCADE_GAP - child_w)
+            };
             let cx = x0 + (x1 - x0) * e;
-            self.kit_sheet_at(c, cx.round(), CHILD_W);
+            self.kit_sheet_at(c, cx.round(), child_w);
         }
-        self.kit_sheet_rail(parent, x, pw.round(), branch);
+        self.kit_sheet_rail(parent, at(pw).round(), pw.round(), branch);
+    }
+
+    /// The page behind a panel, darkened (the scrim of a window).
+    pub(crate) fn kit_scrim(&mut self, rgba: u32) {
+        self.fill_screen_dim(rgba);
     }
 }

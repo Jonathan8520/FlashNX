@@ -1243,13 +1243,26 @@ fn kbd_center_of(k: &(&str, u8, f32, f32)) -> f32 {
 }
 
 /// A profile's name as the lists show it: its title, then who shared it.
-fn profile_name(p: &crate::profiles::Profile) -> std::string::String {
+pub(crate) fn profile_name(p: &crate::profiles::Profile) -> std::string::String {
     let mut r = p.title().to_string();
     if !p.author.is_empty() {
         r.push_str("  \u{00B7}  ");
         r.push_str(&p.author);
     }
     r
+}
+
+/// What the Touches et curseur page shows, wherever it is opened from: the
+/// pause (this module's state) or a game's options in the launcher (the
+/// library's). One page, two doors.
+pub(crate) struct TouchesView {
+    /// The cursor speed in force, x10 (a game with none of its own follows the
+    /// global one, and shows it).
+    pub speed_x10: u32,
+    pub shown: bool,
+    pub gyro: u8,
+    pub can_revert: bool,
+    pub has_backup: bool,
 }
 
 /// The Touches et curseur page as data, handed to `f`.
@@ -1259,17 +1272,17 @@ fn profile_name(p: &crate::profiles::Profile) -> std::string::String {
 /// row shows what it does before it is pressed: a chevron where A opens a
 /// page, the speed between arrows, a switch, the gyroscope's three settings
 /// all on show.
-pub(crate) fn with_touches_sheet<R>(
+pub(crate) fn with_touches_view<R>(
     backend: &mut SwitchRenderBackend,
+    v: &TouchesView,
     selection: usize,
+    crumbs: &[&str],
     f: impl FnOnce(&mut SwitchRenderBackend, &crate::backend::render::Sheet) -> R,
 ) -> R {
     use crate::backend::render::{Btn, Icon, Row, Sheet};
     let lc = crate::loc::s();
     let u = crate::loc_ui::ui();
-    let (can_revert, has_backup) = TOUCHES.lock().map(|s| (s.can_revert, s.has_backup)).unwrap_or((false, false));
-    let m = unsafe { ruffle_cursor_speed_mult_x10() };
-    let speed = crate::loc::mult_label(m.max(0) as u32);
+    let speed = crate::loc::mult_label(v.speed_x10);
     let gyro_opts = [
         crate::loc::gyro_mode_label(keymap::GYRO_OFF),
         lc.gyro_marble,
@@ -1278,13 +1291,13 @@ pub(crate) fn with_touches_sheet<R>(
     let mut rows = std::vec![
         Row::new(Icon::Keyboard, lc.touches_edit).opens(),
         Row::new(Icon::Users, lc.opt_apply).opens(),
-        Row::new(Icon::Share, lc.opt_share),
+        Row::new(Icon::Share, lc.opt_share).opens(),
         Row::new(Icon::Gauge, lc.set_cursor_speed).cycle(&speed),
-        Row::new(Icon::Pointer, lc.show_cursor).toggle(keymap::show_cursor()),
-        Row::new(Icon::Compass, lc.set_gyro).choice(&gyro_opts, keymap::gyro_mode() as usize),
+        Row::new(Icon::Pointer, lc.show_cursor).toggle(v.shown),
+        Row::new(Icon::Compass, lc.set_gyro).choice(&gyro_opts, v.gyro as usize),
     ];
-    if can_revert {
-        rows.push(Row::new(Icon::Undo, if has_backup { lc.profile_revert } else { lc.touches_revert_default }));
+    if v.can_revert {
+        rows.push(Row::new(Icon::Undo, if v.has_backup { lc.profile_revert } else { lc.touches_revert_default }).opens());
     }
     let help = match selection {
         MENU_EDIT => u.help_touches_edit,
@@ -1295,20 +1308,13 @@ pub(crate) fn with_touches_sheet<R>(
         MENU_GYRO => u.help_gyro,
         _ => u.help_revert,
     };
-    let a_verb = match selection {
-        MENU_EDIT => u.edit,
-        MENU_APPLY => u.open,
-        MENU_SHARE => u.share,
-        _ => u.restore,
-    };
     let stepper = matches!(selection, MENU_CURSOR | MENU_SHOWCURSOR | MENU_GYRO);
     let hints_step = [(&[Btn::Dpad][..], u.change), (&[Btn::B][..], u.back)];
-    let hints_act = [(&[Btn::A][..], a_verb), (&[Btn::B][..], u.back)];
+    let hints_act = [(&[Btn::A][..], u.open), (&[Btn::B][..], u.back)];
     let sections = [(MENU_EDIT, lc.keys_title), (MENU_CURSOR, u.sec_cursor)];
-    let crumbs = [lc.pause_title];
     let mut sheet = Sheet::new(lc.menu_keys, &rows, selection);
     sheet.kicker = Some(Icon::ChevronLeft);
-    sheet.crumbs = &crumbs;
+    sheet.crumbs = crumbs;
     sheet.sections = &sections;
     sheet.row_h = 48.0;
     sheet.glide_key = GLIDE_KEY_TOUCHES_MENU;
@@ -1317,76 +1323,128 @@ pub(crate) fn with_touches_sheet<R>(
     f(backend, &sheet)
 }
 
-/// The shared-profiles page as data, handed to `f`: one row per profile, its
-/// author on the right, a check on the one in use; the list scrolls.
-fn with_profiles_sheet<R>(
+/// The in-game Touches et curseur page (beside the pause).
+pub(crate) fn with_touches_sheet<R>(
     backend: &mut SwitchRenderBackend,
     selection: usize,
+    f: impl FnOnce(&mut SwitchRenderBackend, &crate::backend::render::Sheet) -> R,
+) -> R {
+    let (can_revert, has_backup) = TOUCHES.lock().map(|s| (s.can_revert, s.has_backup)).unwrap_or((false, false));
+    let v = TouchesView {
+        speed_x10: unsafe { ruffle_cursor_speed_mult_x10() }.max(0) as u32,
+        shown: keymap::show_cursor(),
+        gyro: keymap::gyro_mode(),
+        can_revert,
+        has_backup,
+    };
+    let crumbs = [crate::loc::s().pause_title];
+    with_touches_view(backend, &v, selection, &crumbs, f)
+}
+
+/// One shared profile as the list shows it.
+pub(crate) struct ProfileItem {
+    pub title: std::string::String,
+    pub author: std::string::String,
+    pub id: std::string::String,
+}
+
+impl ProfileItem {
+    pub(crate) fn of(m: &crate::profiles::Match) -> ProfileItem {
+        ProfileItem { title: m.profile.title().to_string(), author: m.profile.author.clone(), id: m.profile.id.clone() }
+    }
+}
+
+/// The shared-profiles page as data, handed to `f`: one row per profile, the
+/// player who shared it on the right ("Toi" for your own), a check on the one
+/// in use; the list scrolls.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn with_profiles_view<R>(
+    backend: &mut SwitchRenderBackend,
+    items: &[ProfileItem],
+    active: &str,
+    copy_mode: bool,
+    selection: usize,
+    crumbs: &[&str],
     f: impl FnOnce(&mut SwitchRenderBackend, &crate::backend::render::Sheet) -> R,
 ) -> R {
     use crate::backend::render::{ui_col, Btn, Icon, Row, Sheet};
     let lc = crate::loc::s();
     let u = crate::loc_ui::ui();
-    let (active, copy_mode, items): (std::string::String, bool, std::vec::Vec<(std::string::String, std::string::String, std::string::String)>) =
-        TOUCHES
-            .lock()
-            .map(|s| {
-                (
-                    s.active_id.clone(),
-                    s.copy_mode,
-                    s.matches
-                        .iter()
-                        .map(|m| (m.profile.title().to_string(), m.profile.author.clone(), m.profile.id.clone()))
-                        .collect(),
-                )
-            })
-            .unwrap_or_default();
     let mut rows: std::vec::Vec<Row> = items
         .iter()
-        .map(|(title, author, id)| {
-            let icon = if crate::profiles::is_copy_row(id) { Icon::Copy } else { Icon::User };
-            Row::new(icon, title)
-                .value(author)
-                .mark_if(!active.is_empty() && *id == active, Icon::Check, ui_col::OK)
-                .opens_if(crate::profiles::is_copy_row(id))
+        .map(|it| {
+            let copy = crate::profiles::is_copy_row(&it.id);
+            let mine = crate::profiles::is_mine(&it.id);
+            let icon = if copy {
+                Icon::Copy
+            } else if mine {
+                Icon::User
+            } else {
+                Icon::Users
+            };
+            let who: &str = if copy {
+                ""
+            } else if mine {
+                u.profile_you
+            } else {
+                &it.author
+            };
+            Row::new(icon, &it.title)
+                .value(who)
+                .mark_if(!active.is_empty() && it.id == active, Icon::Check, ui_col::OK)
+                .opens_if(copy)
         })
         .collect();
     let empty_msg = if crate::profiles::catalog_unavailable() { lc.profile_catalog_offline } else { lc.profile_none };
     if rows.is_empty() {
-        // Twin of the on-cover picker in library.rs: an unreachable catalog
-        // must not be reported as an empty one.
+        // An unreachable catalog must not be reported as an empty one.
         rows.push(Row::new(Icon::Info, empty_msg).dim(true));
     }
-    let mine = items.get(selection).is_some_and(|(_, _, id)| crate::profiles::is_mine(id));
+    let mine = items.get(selection).is_some_and(|it| crate::profiles::is_mine(&it.id));
+    let copy_row = items.get(selection).is_some_and(|it| crate::profiles::is_copy_row(&it.id));
     let title = if copy_mode { lc.profile_copy_row } else { lc.profile_title };
-    let hints_mine = [(&[Btn::A][..], u.preview), (&[Btn::X][..], lc.opt_delete), (&[Btn::B][..], u.back)];
-    let hints = [(&[Btn::A][..], u.preview), (&[Btn::B][..], u.back)];
-    let crumbs = [lc.menu_keys];
+    let a_verb = if copy_row { u.open } else { u.preview };
+    let hints_mine = [(&[Btn::A][..], a_verb), (&[Btn::X][..], lc.opt_delete), (&[Btn::B][..], u.back)];
+    let hints = [(&[Btn::A][..], a_verb), (&[Btn::B][..], u.back)];
     let mut sheet = Sheet::new(title, &rows, if items.is_empty() { usize::MAX } else { selection });
     sheet.kicker = Some(Icon::ChevronLeft);
-    sheet.crumbs = &crumbs;
+    sheet.crumbs = crumbs;
     sheet.row_h = 48.0;
     sheet.glide_key = GLIDE_KEY_TOUCHES_PROFILES;
-    sheet.help = u.help_touches_apply;
+    sheet.help = if copy_row { u.help_copy_profile } else { u.help_touches_apply };
     sheet.hints = if mine { &hints_mine } else { &hints };
     f(backend, &sheet)
 }
 
-/// A before / after page beside the pause rail: the changes as a table, under
+/// The in-game shared-profiles page.
+fn with_profiles_sheet<R>(
+    backend: &mut SwitchRenderBackend,
+    selection: usize,
+    f: impl FnOnce(&mut SwitchRenderBackend, &crate::backend::render::Sheet) -> R,
+) -> R {
+    let (active, copy_mode, items) = TOUCHES
+        .lock()
+        .map(|s| (s.active_id.clone(), s.copy_mode, s.matches.iter().map(ProfileItem::of).collect::<std::vec::Vec<_>>()))
+        .unwrap_or_default();
+    let crumbs = [crate::loc::s().menu_keys];
+    with_profiles_view(backend, &items, &active, copy_mode, selection, &crumbs, f)
+}
+
+/// A before / after page as data, handed to `f`: the changes as a table, under
 /// what they are about.
-fn draw_diff_page(
+pub(crate) fn with_diff_view<R>(
     backend: &mut SwitchRenderBackend,
     crumbs: &[&str],
     title: &str,
     subtitle: Option<&str>,
     rows: &[std::string::String],
     hints: &[crate::backend::render::HintItem],
-) {
+    f: impl FnOnce(&mut SwitchRenderBackend, &crate::backend::render::Sheet) -> R,
+) -> R {
     use crate::backend::render::{Icon, Sheet};
     let lc = crate::loc::s();
     let u = crate::loc_ui::ui();
     let none = [lc.profile_preview_none.to_string()];
-    let t = crate::backend::render::cascade_step(true);
     let mut sheet = Sheet::new(title, &[], usize::MAX);
     sheet.kicker = Some(Icon::ChevronLeft);
     sheet.crumbs = crumbs;
@@ -1396,7 +1454,22 @@ fn draw_diff_page(
     sheet.hints = hints;
     sheet.diff = if rows.is_empty() { &none } else { rows };
     sheet.diff_heads = ["", u.col_before, u.col_after];
-    backend.with_pause_sheet(PAUSE_ROW_TOUCHES, |b, parent| b.kit_cascade(parent, PAUSE_ROW_TOUCHES, Some(&sheet), t));
+    f(backend, &sheet)
+}
+
+/// A before / after page beside the pause rail.
+fn draw_diff_page(
+    backend: &mut SwitchRenderBackend,
+    crumbs: &[&str],
+    title: &str,
+    subtitle: Option<&str>,
+    rows: &[std::string::String],
+    hints: &[crate::backend::render::HintItem],
+) {
+    let t = crate::backend::render::cascade_step(true);
+    with_diff_view(backend, crumbs, title, subtitle, rows, hints, |b, c| {
+        b.with_pause_sheet(PAUSE_ROW_TOUCHES, |b, parent| b.kit_cascade(parent, PAUSE_ROW_TOUCHES, Some(c), t));
+    });
 }
 
 /// Draw the current TOUCHES screen + any active toast. No-op when inactive.

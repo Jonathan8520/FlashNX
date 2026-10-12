@@ -226,9 +226,8 @@ pub(crate) mod set_row {
     pub(crate) const COUNT: usize = 9;
 }
 
-pub(crate) const OPTIONS_ENTRIES: &[&str] = &[
-    "FAVORI", "TOUCHES", "RENOMMER", "JAQUETTE", "DOSSIER", "RACCOURCI", "SUPPRIMER",
-];
+mod options_panel;
+pub(crate) use options_panel::{opt_row, OPTIONS_ENTRIES};
 
 /// Top-level navbar tabs (v1.2.0), switched with the L/R shoulder buttons.
 /// Each maps to a "home" screen. The navbar is drawn on every tab-home screen;
@@ -3300,6 +3299,13 @@ fn set_screen_selection(s: &mut State, idx: usize) -> bool {
         Screen::TouchesMenu { game_idx, selection } => {
             put!(selection, Screen::TouchesMenu { game_idx, selection: idx })
         }
+        Screen::ProfileList { game_idx, selection } => {
+            // The page publishes every row by its index in the list.
+            if idx >= s.profile_matches.len() {
+                return false;
+            }
+            put!(selection, Screen::ProfileList { game_idx, selection: idx })
+        }
         Screen::CoverPicker { game_idx, selection } => {
             put!(selection, Screen::CoverPicker { game_idx, selection: idx })
         }
@@ -5504,14 +5510,10 @@ fn run_open_copies_flow(game_idx: usize, row: usize) {
 fn handle_profile_list_input(s: &mut State, button: &str, game_idx: usize, mut selection: usize) {
     let n = s.profile_matches.len();
     // At least one row (the "no profile" notice) so nav has somewhere to sit.
-    let last = n.max(1) - 1;
+    let total = n.max(1);
     match button {
-        "Up" | "StickLUp" => {
-            selection = if selection == 0 { last } else { selection - 1 };
-        }
-        "Down" | "StickLDown" => {
-            selection = if selection >= last { 0 } else { selection + 1 };
-        }
+        "Up" | "StickLUp" => selection = list_step_wrap(selection, -1, total),
+        "Down" | "StickLDown" => selection = list_step_wrap(selection, 1, total),
         // "A" (open preview) is hoisted to `run_open_preview_flow` — it reads the
         // current keymap file to build the diff, which we keep out of this lock.
         "X" => {
@@ -5733,10 +5735,20 @@ fn goto_touches_menu(s: &mut State, game_idx: usize, selection: usize) {
 /// when `touches_can_revert`.
 const TOUCHES_MENU_FIXED_ROWS: usize = 6;
 
-/// Cursor-speed presets as x10 multipliers. MUST stay in sync with
-/// `CURSOR_SPEED_MULTS` in cpp/src/main.cpp (the C++ side owns the live value;
-/// we only display + persist the index here). Default index = 1 (x1.0).
-const CURSOR_X10: &[u32] = &[5, 10, 15, 20, 25, 30, 40, 50];
+/// Cursor-speed presets as x10 multipliers (`loc::CURSOR_SPEED_X10`).
+const CURSOR_X10: &[u32] = crate::loc::CURSOR_SPEED_X10;
+
+/// The preset a game's Touches page steps from: its own, or, when it has none,
+/// the global one it follows (the C++ side's live value, which in the launcher
+/// IS the global one). Stepping from x1.0 instead made Right go SLOWER for a
+/// game following a global x2.0.
+fn touches_speed_idx(own: i32) -> i32 {
+    if own >= 0 {
+        return own.min(CURSOR_X10.len() as i32 - 1);
+    }
+    let m = unsafe { ruffle_cursor_speed_mult_x10() }.max(0) as u32;
+    CURSOR_X10.iter().position(|v| *v == m).unwrap_or(1) as i32
+}
 
 /// Input for the TOUCHES sub-menu (#20). Edit (0) + cursor speed (3) + show-cursor
 /// toggle (4) are handled here; apply (1) / share (2) / revert (5) are hoisted in
@@ -5752,32 +5764,39 @@ fn handle_touches_menu_input(s: &mut State, button: &str, game_idx: usize, mut s
         _ => 0,
     };
     if dir != 0 && (3..=5).contains(&selection) {
+        // Along what the row shows, stopping at the ends: the speed one preset
+        // down or up, the switch off or on, the gyroscope one setting along.
         if let Some(basename) = s.entries.get(game_idx).map(|e| e.basename.clone()) {
             match selection {
                 3 => {
                     let n = CURSOR_X10.len() as i32;
-                    let cur = if s.touches_cursor_idx < 0 { 1 } else { s.touches_cursor_idx };
-                    let next = (cur + dir).rem_euclid(n);
-                    keymap::set_cursor_speed_for(&basename, next);
-                    s.touches_cursor_idx = next;
+                    let cur = touches_speed_idx(s.touches_cursor_idx);
+                    let next = (cur + dir).clamp(0, n - 1);
+                    if next != cur {
+                        keymap::set_cursor_speed_for(&basename, next);
+                        s.touches_cursor_idx = next;
+                    }
                 }
                 4 => {
-                    keymap::toggle_show_cursor_for(&basename);
-                    s.touches_show_cursor = !s.touches_show_cursor;
+                    if s.touches_show_cursor != (dir > 0) {
+                        keymap::toggle_show_cursor_for(&basename);
+                        s.touches_show_cursor = !s.touches_show_cursor;
+                    }
                 }
-                _ => s.touches_gyro = keymap::step_gyro_for(&basename, dir),
+                _ => {
+                    let cur = s.touches_gyro;
+                    if (dir < 0 && cur > 0) || (dir > 0 && cur + 1 < keymap::GYRO_MODE_COUNT) {
+                        s.touches_gyro = keymap::step_gyro_for(&basename, dir);
+                    }
+                }
             }
         }
         s.screen = Screen::TouchesMenu { game_idx, selection };
         return;
     }
     match button {
-        "Up" | "StickLUp" => {
-            selection = if selection == 0 { last } else { selection - 1 };
-        }
-        "Down" | "StickLDown" => {
-            selection = if selection >= last { 0 } else { selection + 1 };
-        }
+        "Up" | "StickLUp" => selection = list_step_wrap(selection, -1, last + 1),
+        "Down" | "StickLDown" => selection = list_step_wrap(selection, 1, last + 1),
         "A" => {
             // EDIT (0) + CURSOR SPEED (3) + SHOW-CURSOR (4) are local (file I/O
             // only). Apply (1) / share (2) / revert (5) need network → hoisted in
@@ -5794,9 +5813,9 @@ fn handle_touches_menu_input(s: &mut State, button: &str, game_idx: usize, mut s
             }
             if selection == 3 {
                 // Cycle the per-game cursor speed in place (persist to the game's
-                // `<basename>.cursor`; applied next launch). -1/unset → start at
-                // the x1.0 default (index 1).
-                let cur = if s.touches_cursor_idx < 0 { 1 } else { s.touches_cursor_idx };
+                // `<basename>.cursor`; applied next launch). Unset starts from the
+                // global speed the game was following.
+                let cur = touches_speed_idx(s.touches_cursor_idx);
                 let next = ((cur as usize + 1) % CURSOR_X10.len()) as i32;
                 if let Some(basename) = s.entries.get(game_idx).map(|e| e.basename.clone()) {
                     keymap::set_cursor_speed_for(&basename, next);
@@ -5825,7 +5844,7 @@ fn handle_touches_menu_input(s: &mut State, button: &str, game_idx: usize, mut s
             }
         }
         "B" | "Minus" => {
-            s.screen = Screen::OptionsModal { game_idx, selection: 1 }; // TOUCHES row
+            s.screen = Screen::OptionsModal { game_idx, selection: opt_row("TOUCHES") };
             return;
         }
         _ => {}
@@ -7210,12 +7229,8 @@ fn handle_game_folder_input(s: &mut State, button: &str, game_idx: usize, mut se
     // index -- and `panic = "abort"` makes that a console fatal.
     selection = selection.min(last);
     match button {
-        "Up" | "StickLUp" => {
-            selection = if selection == 0 { last } else { selection - 1 };
-        }
-        "Down" | "StickLDown" => {
-            selection = if selection >= last { 0 } else { selection + 1 };
-        }
+        "Up" | "StickLUp" => selection = list_step_wrap(selection, -1, last + 1),
+        "Down" | "StickLDown" => selection = list_step_wrap(selection, 1, last + 1),
         "A" => {
             // The last row opens swkbd and is hoisted out of here, like RENOMMER:
             // the keyboard must never run under the library lock.
@@ -7248,7 +7263,7 @@ fn handle_game_folder_input(s: &mut State, button: &str, game_idx: usize, mut se
             return;
         }
         "B" | "Minus" => {
-            s.screen = Screen::OptionsModal { game_idx, selection: 4 };
+            s.screen = Screen::OptionsModal { game_idx, selection: opt_row("DOSSIER") };
             return;
         }
         _ => {}
@@ -7670,16 +7685,56 @@ fn tile_remove(swf_path: &str) -> bool {
     removed
 }
 
+/// Favourite on or off from the options (`want`, or the other way when None),
+/// keeping the panel on the SAME game: favourites jump to the top of the
+/// gallery, so the game's index changes.
+fn options_set_favorite(s: &mut State, game_idx: usize, selection: usize, want: Option<bool>) {
+    // By PATH, not by basename. Folders (issue #68) let two games share a file
+    // name, and re-pointing by name could land the panel on the other one --
+    // after which every row of it, RENOMMER and SUPPRIMER included, would act on
+    // a game the player never opened.
+    let ident = s.entries.get(game_idx).map(|e| (e.basename.clone(), e.path.clone()));
+    if let Some((basename, path)) = ident {
+        let fav = crate::favorites::is_favorite(&basename);
+        if want.is_some_and(|w| w == fav) {
+            return;
+        }
+        crate::favorites::toggle(&basename);
+        sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
+        let new_idx = s.entries.iter().position(|e| e.path == path).unwrap_or(game_idx);
+        s.screen = Screen::OptionsModal { game_idx: new_idx, selection };
+    }
+}
+
 fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut selection: usize) {
-    let last = OPTIONS_ENTRIES.len().saturating_sub(1);
+    let total = OPTIONS_ENTRIES.len();
+    let key = OPTIONS_ENTRIES.get(selection).copied().unwrap_or("");
+    // Left / Right change a setting where it is shown; on an action row they
+    // do nothing (an action is never one sideways press away).
+    let dir: i32 = match button {
+        "Left" | "StickLLeft" => -1,
+        "Right" | "StickLRight" => 1,
+        _ => 0,
+    };
+    if dir != 0 {
+        if key == "FAVORI" {
+            options_set_favorite(s, game_idx, selection, Some(dir > 0));
+            return;
+        }
+        options_panel::options_step(s, game_idx, key, dir);
+        s.screen = Screen::OptionsModal { game_idx, selection };
+        return;
+    }
     match button {
-        "Up" | "StickLUp" => {
-            selection = if selection == 0 { last } else { selection - 1 };
-        }
-        "Down" | "StickLDown" => {
-            selection = if selection >= last { 0 } else { selection + 1 };
-        }
+        // A fresh press wraps round (Up on the first row reaches Supprimer), a
+        // held direction stops at the end.
+        "Up" | "StickLUp" => selection = list_step_wrap(selection, -1, total),
+        "Down" | "StickLDown" => selection = list_step_wrap(selection, 1, total),
         "A" => {
+            if options_panel::options_step(s, game_idx, key, crate::STEP_CYCLE as i32) {
+                s.screen = Screen::OptionsModal { game_idx, selection };
+                return;
+            }
             // `.get`, not `[..]`: `selection` can arrive from the touch layer,
             // and with `panic = "abort"` a row that is out of range is a console
             // fatal rather than a wrong menu entry.
@@ -7688,26 +7743,7 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
             };
             match entry {
                 "FAVORI" => {
-                    // Toggle, then re-pin: favorites jump to the top of the
-                    // gallery, so this game's index changes. Re-point the modal
-                    // at the SAME game.
-                    //
-                    // By PATH, not by basename. Folders (issue #68) let two
-                    // games share a file name, and re-pointing by name could
-                    // land the modal on the other one — after which every row of
-                    // it, RENOMMER and SUPPRIMER included, would act on a game
-                    // the player never opened.
-                    let ident = s.entries.get(game_idx).map(|e| (e.basename.clone(), e.path.clone()));
-                    if let Some((basename, path)) = ident {
-                        crate::favorites::toggle(&basename);
-                        sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
-                        let new_idx = s
-                            .entries
-                            .iter()
-                            .position(|e| e.path == path)
-                            .unwrap_or(game_idx);
-                        s.screen = Screen::OptionsModal { game_idx: new_idx, selection };
-                    }
+                    options_set_favorite(s, game_idx, selection, None);
                     return;
                 }
                 "TOUCHES" => {
@@ -7744,6 +7780,7 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                     // A toggle, not an add: pressed twice it used to say "added"
                     // again, which reads as piling up duplicates when there has
                     // only ever been one.
+                    options_panel::game_prefs_forget();
                     if unsafe { nsp_tile_exists(program_id) } == 1 {
                         let removed = tile_remove(&path);
                         crate::sd::commit();
@@ -7859,7 +7896,8 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                 _ => {}
             }
         }
-        "B" | "Minus" => {
+        // + opened the panel, so + closes it too, like B.
+        "B" | "Minus" | "Plus" => {
             s.screen = list_screen_for_abs(s, game_idx);
             return;
         }
@@ -8016,7 +8054,7 @@ fn run_cover_fetch_flow(game_idx: usize, selection: usize) {
                 s.cover_query.clear();
                 // Back to OPTIONS on the JAQUETTE row (index 3 after #20 regroup
                 // removed APPLIQUER/PARTAGER from the list).
-                s.screen = Screen::OptionsModal { game_idx, selection: 3 };
+                s.screen = Screen::OptionsModal { game_idx, selection: opt_row("JAQUETTE") };
             }
         }
         Err(e) => {
@@ -8064,7 +8102,7 @@ fn handle_cover_picker_input(s: &mut State, button: &str, game_idx: usize, mut s
             s.cover_query.clear();
             s.cover_use_shot = false;
             // JAQUETTE row (index 3 after #20 regroup).
-            s.screen = Screen::OptionsModal { game_idx, selection: 3 };
+            s.screen = Screen::OptionsModal { game_idx, selection: opt_row("JAQUETTE") };
             return;
         }
         _ => {}
@@ -8469,7 +8507,7 @@ fn handle_delete_confirm_input(s: &mut State, button: &str, game_idx: usize, sel
         }
         "A" | "B" | "Minus" => {
             // Cancel back to OPTIONS, on the row that opened this (the last).
-            s.screen = Screen::OptionsModal { game_idx, selection: OPTIONS_ENTRIES.len() - 1 };
+            s.screen = Screen::OptionsModal { game_idx, selection: opt_row("SUPPRIMER") };
         }
         _ => {}
     }
@@ -8759,6 +8797,12 @@ fn touch_kind(screen: Screen) -> u32 {
 }
 
 fn modal_kind(screen: Screen) -> u8 {
+    // A game's options and everything opened from them are ONE panel stack
+    // (`options_panel`): the panel slides in from the right once, its pages
+    // come out beside it, and none of them pops on its own.
+    if options_panel::is_options_family(screen) {
+        return 1;
+    }
     match screen {
         Screen::OptionsModal { .. } => 1,
         Screen::DeleteConfirm { .. } => 2,
@@ -9262,6 +9306,11 @@ pub fn render(backend: &mut SwitchRenderBackend) {
         backend.clear_ui_transform();
     }
 
+    // The options family slides its panel in from the right on the window
+    // timeline, and publishes its rows under the screen's own touch tag.
+    let family_slide = if modal_active || closing { Some(modal_scale) } else { None };
+    let family_kind = if closing || modal_active { 0 } else { touch_kind(screen) };
+
     // Phase = current tick - origin. Drives sin() animations. ms-resolution
     // is enough; we compute it lazily below to avoid an FFI call when the
     // current screen has no animation.
@@ -9305,193 +9354,8 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 }
             }
         }
-        Screen::OptionsModal { game_idx, selection } => {
-            let entry_snapshot = LIBRARY
-                .lock()
-                .ok()
-                .and_then(|s| s.entries.get(game_idx).cloned());
-            if let Some(entry) = entry_snapshot {
-                // OPTIONS_ENTRIES stays the stable logical key list (matched
-                // in input handling); display uses localized labels in the
-                // SAME order. Must match OPTIONS_ENTRIES exactly (FAVORI /
-                // TOUCHES / RENOMMER / JAQUETTE / SUPPRIMER) — apply+share moved
-                // into the TOUCHES sub-menu (#20 regroup), so they're NOT here.
-                let lc = crate::loc::s();
-                let fav_label = if crate::favorites::is_favorite(&entry.basename) {
-                    lc.opt_unfavorite
-                } else {
-                    lc.opt_favorite
-                };
-                // Two states, like FAVORI just above: the row wrote the same
-                // file again on every press and still said "added", which reads
-                // as piling up duplicates. It toggles now, and the label says
-                // which way it will go.
-                let sc_label = if shortcut_here(&entry.path) {
-                    lc.opt_shortcut_del
-                } else {
-                    lc.opt_shortcut
-                };
-                // The folder row says where the game is now: every shelf it is on,
-                // or "No folder".
-                let shelves = shelves_of(&entry);
-                let shelves = if shelves.is_empty() {
-                    std::string::String::from(lc.folder_root)
-                } else {
-                    shelves.join(", ")
-                };
-                // Same order as OPTIONS_ENTRIES, with SUPPRIMER kept last: the
-                // destructive row should not move because a new one arrived.
-                use crate::backend::render::{Icon, WinRow};
-                let rows = [
-                    // Solid gold when the game IS a favourite: the row says what
-                    // it is now, the label what pressing it will do.
-                    WinRow::new(Icon::Star, fav_label)
-                        .filled_if(crate::favorites::is_favorite(&entry.basename), crate::backend::render::ui_col::GOLD),
-                    WinRow::new(Icon::Gamepad, lc.opt_keys).opens(),
-                    WinRow::new(Icon::Pencil, lc.opt_rename),
-                    WinRow::new(Icon::Image, lc.opt_cover).opens(),
-                    WinRow::new(Icon::Folder, lc.opt_folder).value(&shelves).opens(),
-                    WinRow::new(Icon::Home, sc_label),
-                    WinRow::new(Icon::Trash, lc.opt_delete).danger(),
-                ];
-                backend.draw_game_options(&entry, selection, &rows);
-            }
-        }
-        Screen::GameFolderPicker { game_idx, selection } => {
-            let snap = LIBRARY.lock().ok().map(|s| {
-                (
-                    s.entries.get(game_idx).map(|e| {
-                        // EVERY shelf this game is on, so each row can be marked
-                        // on its own: a game can be on several now, and one
-                        // "you are here" would have to pick a winner among them.
-                        //
-                        // `physical` is the shelf it is on because of WHERE ITS
-                        // FILE IS. That row cannot be toggled off with a label,
-                        // so the picker has to be able to tell the two apart.
-                        // A game found under a legacy root has no folder either,
-                        // but it is not in the games folder, so the root row must
-                        // not be marked: that would promise a move the row would
-                        // then really perform.
-                        // The shelf it is on because of WHERE ITS FILE IS. No
-                        // label can take it off that one, so the row has to be
-                        // marked differently from a label -- otherwise the
-                        // picker offers an action that then refuses.
-                        //
-                        // Asked of `e.folder` alone, with no test on which root
-                        // the game was found under. `folder_of` recognises a
-                        // directory under ANY search root, and `apply_game_folder`
-                        // refuses on `folder == target` with no such test either:
-                        // a game filed under a legacy root was being marked as a
-                        // label the picker promised to remove, and A then said no.
-                        let physical = if e.folder.is_empty() {
-                            None
-                        } else {
-                            Some(e.folder.clone())
-                        };
-                        let on: std::vec::Vec<std::string::String> = shelves_of(e);
-                        let bare = on_no_shelf(e);
-                        (e.display_name.clone(), on, physical, bare)
-                    }),
-                    folder_counts(&s.entries),
-                )
-            });
-            if let Some((Some((name, on, physical, bare)), folders)) = snap {
-                use crate::backend::render::{ui_col, Btn, Icon, WinRow};
-                let lc = crate::loc::s();
-                let u = crate::loc_ui::ui();
-                // No shelf first, then the shelves that exist, then the
-                // keyboard. Each shelf says how many games it holds, and EVERY
-                // shelf this game is on is marked, because it can be on several:
-                // a tick for a label (A takes it off), a card for the directory
-                // the file sits in (only "No folder" can take it out, by moving
-                // the file). Two marks because they are two situations; one
-                // mark would promise an action that then refuses.
-                let counts: std::vec::Vec<std::string::String> =
-                    folders.iter().map(|(_, c)| c.to_string()).collect();
-                let mut rows: std::vec::Vec<WinRow> = std::vec::Vec::with_capacity(folders.len() + 2);
-                rows.push(WinRow::new(Icon::Home, lc.folder_root).mark_if(bare, Icon::Check, ui_col::OK));
-                for (i, (n, _)) in folders.iter().enumerate() {
-                    let row = WinRow::new(Icon::Folder, n).value(&counts[i]);
-                    rows.push(if physical.as_deref() == Some(n.as_str()) {
-                        row.mark(Icon::HardDrive, ui_col::TEXT2)
-                    } else if on.iter().any(|x| x == n) {
-                        row.mark(Icon::Check, ui_col::OK)
-                    } else {
-                        row
-                    });
-                }
-                rows.push(WinRow::new(Icon::FolderPlus, lc.games_dir_new));
-                // A long shelf list would grow the window past the screen, so
-                // the rows scroll, following the cursor.
-                const WINDOW: usize = 8;
-                let start = selection
-                    .saturating_sub(WINDOW - 1)
-                    .min(rows.len().saturating_sub(WINDOW));
-                // What A does depends on the row, so the hint says it.
-                let last = rows.len() - 1;
-                let a_verb = if selection == 0 {
-                    u.choose
-                } else if selection == last {
-                    u.create
-                } else {
-                    match folders.get(selection - 1) {
-                        Some((n, _)) if on.iter().any(|x| x == n) => u.remove,
-                        _ => u.add,
-                    }
-                };
-                let on_shelf_row = selection >= 1 && selection < last;
-                let hints_shelf = [(&[Btn::A][..], a_verb), (&[Btn::X][..], u.empty_verb), (&[Btn::B][..], u.back)];
-                let hints_other = [(&[Btn::A][..], a_verb), (&[Btn::B][..], u.back)];
-                backend.draw_library_dim_backdrop();
-                backend.draw_rows_window(
-                    lc.opt_folder,
-                    Some(&name),
-                    &rows,
-                    selection,
-                    start,
-                    0,
-                    WINDOW,
-                    0x6100_0000,
-                    if on_shelf_row { &hints_shelf } else { &hints_other },
-                );
-            }
-        }
-        Screen::GameFolderDelete { folder_idx, selection, .. } => {
-            let folders = LIBRARY
-                .lock()
-                .ok()
-                .map(|s| folder_counts(&s.entries))
-                .unwrap_or_default();
-            if let Some((name, count)) = folders.get(folder_idx) {
-                // Says WHICH shelf and HOW MANY games leave it, because "empty
-                // the shelf?" tells you nothing about what you agreed to. Not
-                // "come back to No folder": only the games physically in the
-                // directory move, and one also filed on RETRO stays on RETRO.
-                use crate::backend::render::{Choice, Icon};
-                let lc = crate::loc::s();
-                let u = crate::loc_ui::ui();
-                let title = u.folder_empty_title.replacen("{}", name, 1);
-                let body = std::format!(
-                    "{}. {}",
-                    crate::loc::fill_count(lc.folder_leave_1, lc.folder_leave_n, *count as i32),
-                    u.folder_empty_body,
-                );
-                backend.draw_library_dim_backdrop();
-                // Red: nothing is deleted, but one press undoes as many
-                // deliberate filings as the shelf holds.
-                backend.draw_confirm(
-                    Icon::Folder,
-                    &title,
-                    &body,
-                    None,
-                    &[
-                        Choice { label: lc.games_dir_confirm_no, destructive: false },
-                        Choice { label: u.empty_verb, destructive: true },
-                    ],
-                    selection,
-                    true,
-                );
-            }
+        Screen::OptionsModal { .. } | Screen::GameFolderPicker { .. } | Screen::GameFolderDelete { .. } => {
+            options_panel::draw_options_family(backend, screen, now, anim_origin, family_slide, family_kind);
         }
         Screen::TouchesEditor { .. } => {
             // Backdrop = Library list frozen behind. Cheapest path: redraw
@@ -9770,292 +9634,21 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 .unwrap_or_default();
             backend.draw_library_bug_result(&msg, ok);
         }
-        Screen::TouchesMenu { game_idx, selection } => {
-            let lc = crate::loc::s();
-            let snap = LIBRARY.lock().ok().map(|s| {
-                let game = s
-                    .entries
-                    .get(game_idx)
-                    .map(|e| e.display_name.clone())
-                    .unwrap_or_default();
-                // Cursor row label, e.g. "Vitesse du curseur: x1.5" (unset → x1.0).
-                let idx = if s.touches_cursor_idx < 0 {
-                    1
-                } else {
-                    (s.touches_cursor_idx as usize).min(CURSOR_X10.len() - 1)
-                };
-                let x10 = CURSOR_X10[idx];
-                let cursor = std::format!("{}: x{}.{}", lc.set_cursor_speed, x10 / 10, x10 % 10);
-                // Show-cursor row label, e.g. "Afficher le curseur: AFFICHÉ".
-                let show_cur = std::format!(
-                    "{}: {}",
-                    lc.show_cursor,
-                    if s.touches_show_cursor { lc.cursor_shown } else { lc.cursor_hidden },
-                );
-                let gyro = std::format!(
-                    "{}: {}",
-                    lc.set_gyro,
-                    crate::loc::gyro_mode_label(s.touches_gyro),
-                );
-                (game, cursor, show_cur, gyro, s.touches_can_revert, s.touches_has_backup)
-            });
-            if let Some((game, cursor, show_cur, gyro, can_revert, has_backup)) = snap {
-                // Order MUST match the row indices in handle_touches_menu_input /
-                // the input() dispatch: edit, apply, share, cursor, show-cursor,
-                // gyroscope, (revert).
-                let mut rows: std::vec::Vec<&str> =
-                    std::vec![lc.touches_edit, lc.opt_apply, lc.opt_share, &cursor, &show_cur, &gyro];
-                if can_revert {
-                    // Distinct label: restore my keys (a backup exists) vs reset
-                    // to the default controls (none to restore).
-                    rows.push(if has_backup {
-                        lc.profile_revert
-                    } else {
-                        lc.touches_revert_default
-                    });
-                }
-                let u = crate::loc_ui::ui();
-                // Cursor speed, cursor and gyroscope step with Left and Right.
-                backend.draw_list_window(
-                    lc.opt_keys,
-                    Some(&game),
-                    selection,
-                    &rows,
-                    0b11_1000,
-                    &[
-                        (&[crate::backend::render::Btn::A], u.choose),
-                        (&[crate::backend::render::Btn::B], u.back),
-                    ],
-                );
-            }
-        }
-        Screen::ProfileList { game_idx, selection } => {
-            let lc = crate::loc::s();
-            let snap = LIBRARY.lock().ok().map(|s| {
-                let game = s
-                    .entries
-                    .get(game_idx)
-                    .map(|e| e.display_name.clone())
-                    .unwrap_or_default();
-                let active = &s.active_profile_id;
-                let rows: std::vec::Vec<std::string::String> = s
-                    .profile_matches
-                    .iter()
-                    .map(|m| {
-                        // Title, then the author's nickname (so several profiles
-                        // for one game are distinguishable), then an "active" tag
-                        // on the one currently applied.
-                        let mut row = m.profile.title().to_string();
-                        if !m.profile.author.is_empty() {
-                            row.push_str(" - ");
-                            row.push_str(&m.profile.author);
-                        }
-                        if !active.is_empty() && m.profile.id == *active {
-                            row.push(' ');
-                            row.push_str(lc.profile_active);
-                        }
-                        row
-                    })
-                    .collect();
-                // Whether the highlighted row is one this install shared (drives
-                // the "X: delete mine" footer hint).
-                let sel_is_mine = s
-                    .profile_matches
-                    .get(selection)
-                    .is_some_and(|m| crate::profiles::is_mine(&m.profile.id));
-                (game, rows, sel_is_mine, s.profile_copy_mode)
-            });
-            if let Some((game, mut rows, sel_is_mine, copy_mode)) = snap {
-                if rows.is_empty() {
-                    // "Nobody has shared one yet" and "we could not ask" are
-                    // different facts, and only one of them is worth acting on.
-                    rows.push(if crate::profiles::catalog_unavailable() {
-                        lc.profile_catalog_offline.to_string()
-                    } else {
-                        lc.profile_none.to_string()
-                    });
-                }
-                let refs: std::vec::Vec<&str> = rows.iter().map(|r| r.as_str()).collect();
-                // Append the delete hint only when sitting on your own profile.
-                let footer = if sel_is_mine {
-                    std::format!("{}   {}", lc.profile_footer, lc.profile_del_hint)
-                } else {
-                    lc.profile_footer.to_string()
-                };
-                backend.draw_library_list_modal_window(
-                    if copy_mode { lc.profile_copy_row } else { lc.profile_title },
-                    &game,
-                    selection,
-                    &refs,
-                    &footer,
-                    true,
-                    crate::profiles::PICKER_VISIBLE_ROWS,
-                );
-            }
-        }
-        Screen::ProfileDeleteConfirm { profile_idx, selection, .. } => {
-            let lc = crate::loc::s();
-            let u = crate::loc_ui::ui();
-            let name = LIBRARY
-                .lock()
-                .ok()
-                .and_then(|s| {
-                    s.profile_matches.get(profile_idx).map(|m| {
-                        let mut r = m.profile.title().to_string();
-                        if !m.profile.author.is_empty() {
-                            r.push_str(" - ");
-                            r.push_str(&m.profile.author);
-                        }
-                        r
-                    })
-                })
-                .unwrap_or_default();
-            use crate::backend::render::{Choice, Icon};
-            backend.draw_library_dim_backdrop();
-            backend.draw_confirm(
-                Icon::Trash,
-                lc.profile_del_confirm,
-                "",
-                Some(&name),
-                &[
-                    Choice { label: u.cancel, destructive: false },
-                    Choice { label: lc.opt_delete, destructive: true },
-                ],
-                selection,
-                true,
-            );
+        Screen::TouchesMenu { .. }
+        | Screen::ProfileList { .. }
+        | Screen::ProfileDeleteConfirm { .. }
+        | Screen::ProfilePreview { .. }
+        | Screen::RevertPreview { .. }
+        | Screen::ProfileShareConfirm { .. }
+        | Screen::DeleteConfirm { .. }
+        | Screen::CoverPicker { .. } => {
+            options_panel::draw_options_family(backend, screen, now, anim_origin, family_slide, family_kind);
         }
         Screen::ProfileLoading => {
-            // Dim + loading panel (game name + spinner) shown for the frame before
-            // the deferred GitHub call runs (#20). Same overlay helper as LANGUES.
+            // The panels as they were, the spinner over them, for the frame
+            // before the deferred GitHub call runs (#20).
             let label = NET_LOADING_LABEL.lock().ok().map(|l| l.clone()).unwrap_or_default();
-            backend.draw_loading_overlay(&label, now);
-        }
-        Screen::ProfilePreview { .. } => {
-            let lc = crate::loc::s();
-            let rows = LIBRARY
-                .lock()
-                .ok()
-                .map(|s| s.preview_rows.clone())
-                .unwrap_or_default();
-            let mut rows = rows;
-            if rows.is_empty() {
-                rows.push(lc.profile_preview_none.to_string());
-            }
-            let refs: std::vec::Vec<&str> = rows.iter().map(|r| r.as_str()).collect();
-            // usize::MAX = no highlighted row (it's a read-only diff, A/B only).
-            backend.draw_library_list_modal(
-                lc.profile_preview_title,
-                "",
-                usize::MAX,
-                &refs,
-                lc.profile_preview_footer,
-                true,
-            );
-        }
-        Screen::RevertPreview { .. } => {
-            let lc = crate::loc::s();
-            let mut rows = LIBRARY
-                .lock()
-                .ok()
-                .map(|s| s.preview_rows.clone())
-                .unwrap_or_default();
-            if rows.is_empty() {
-                rows.push(lc.profile_preview_none.to_string());
-            }
-            let refs: std::vec::Vec<&str> = rows.iter().map(|r| r.as_str()).collect();
-            backend.draw_library_list_modal(
-                lc.revert_preview_title,
-                "",
-                usize::MAX,
-                &refs,
-                lc.revert_preview_footer,
-                true,
-            );
-        }
-        Screen::ProfileShareConfirm { .. } => {
-            let lc = crate::loc::s();
-            let (is_update, mut rows) = LIBRARY
-                .lock()
-                .ok()
-                .map(|s| (s.share_is_update, s.preview_rows.clone()))
-                .unwrap_or((false, std::vec::Vec::new()));
-            // Make it explicit this UPDATES the player's one shared profile (vs
-            // creates the first), and show the before/after diff under it.
-            let subtitle = if is_update {
-                lc.share_confirm_update
-            } else {
-                lc.profile_share_confirm
-            };
-            if rows.is_empty() {
-                rows.push(lc.profile_preview_none.to_string());
-            }
-            let refs: std::vec::Vec<&str> = rows.iter().map(|r| r.as_str()).collect();
-            // usize::MAX = no highlighted row (it's a confirm, A:share / B:cancel).
-            backend.draw_library_list_modal(lc.opt_share, subtitle, usize::MAX, &refs, lc.lang_footer, true);
-        }
-        Screen::DeleteConfirm { game_idx, selection } => {
-            let snap = LIBRARY
-                .lock()
-                .ok()
-                .and_then(|s| s.entries.get(game_idx).map(|e| (e.display_name.clone(), e.basename.clone())));
-            if let Some((display_name, basename)) = snap {
-                use crate::backend::render::{Choice, Icon};
-                let lc = crate::loc::s();
-                let u = crate::loc_ui::ui();
-                let body = std::format!("{} {} {}", lc.del_l1, lc.del_l2, lc.del_l3);
-                let detail = if display_name == basename || pretty_name(&basename) == display_name {
-                    display_name.clone()
-                } else {
-                    std::format!("{}  \u{00B7}  {}", display_name, basename)
-                };
-                backend.draw_confirm(
-                    Icon::Trash,
-                    u.delete_game_title,
-                    &body,
-                    Some(&detail),
-                    &[
-                        Choice { label: u.cancel, destructive: false },
-                        Choice { label: lc.opt_delete, destructive: true },
-                    ],
-                    selection,
-                    true,
-                );
-            }
-        }
-        Screen::CoverPicker { game_idx, selection } => {
-            // Snapshot candidate labels + notice + game name, drop the lock
-            // before the GL draw.
-            let snap = LIBRARY.lock().ok().map(|s| {
-                let titles: std::vec::Vec<std::string::String> = s
-                    .cover_candidates
-                    .iter()
-                    .map(|c| {
-                        if c.developer.is_empty() {
-                            c.title.clone()
-                        } else {
-                            std::format!("{} - {}", c.title, c.developer)
-                        }
-                    })
-                    .collect();
-                let urls: std::vec::Vec<std::string::String> =
-                    s.cover_candidates
-                        .iter()
-                        .map(|c| cover_url_for_source(&c.cover_url, s.cover_use_shot))
-                        .collect();
-                let name = s
-                    .entries
-                    .get(game_idx)
-                    .map(|e| e.display_name.clone())
-                    .unwrap_or_default();
-                (titles, urls, s.cover_msg.clone(), name, s.cover_use_shot)
-            });
-            if let Some((titles, urls, msg, name, use_shot)) = snap {
-                let title_refs: std::vec::Vec<&str> = titles.iter().map(|x| x.as_str()).collect();
-                let url_refs: std::vec::Vec<&str> = urls.iter().map(|x| x.as_str()).collect();
-                backend.draw_library_dim_backdrop();
-                backend.draw_library_cover_picker(&name, selection, &title_refs, &url_refs, &msg, use_shot);
-            }
+            options_panel::draw_options_loading(backend, now, anim_origin, &label);
         }
         Screen::FpGallery { selection, scroll } => {
             // Async search in flight: spinner + poll until the result list lands,
