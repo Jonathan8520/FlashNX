@@ -11284,6 +11284,43 @@ impl SwitchRenderBackend {
         self.draw_spinner(vw * 0.5, vh * 0.5 + 8.0, 26.0, now);
     }
 
+    /// The notice over a game that could not be read: what happened, where it
+    /// was looked for, and that the menu (where Quit is) is on Minus.
+    pub fn draw_load_failed(&mut self, asked: &str) {
+        use theme::{col, size};
+        let u = crate::loc_ui::ui();
+        let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
+        self.clear_ui_transform();
+        self.fill_screen_dim(0xD0_06_0A_14);
+        let w = 720.0f32.min(vw - 48.0);
+        let pad = 32.0;
+        let lines = self.kit_wrap(u.load_failed_body, size::BODY, w - 2.0 * pad, 3);
+        let lh = (size::BODY * 1.45).round();
+        let h = pad + 56.0 + 16.0 + 30.0 + lh * lines.len() as f32 + 12.0 + 40.0 + 56.0;
+        let x = ((vw - w) * 0.5).round();
+        let y = ((vh - h) * 0.5).round();
+        self.kit_panel(x, y, w, h, true);
+        let disc = 56.0;
+        self.kit_rrect(x + pad, y + pad, disc, disc, disc * 0.5, col::DANGER_LINE);
+        self.kit_icon(x + pad + (disc - 28.0) * 0.5, y + pad + disc * 0.5, 28.0, Icon::Alert, col::DANGER);
+        let tx = x + pad + disc + 18.0;
+        let t = self.kit_fit(u.load_failed_title, size::TITLE, x + w - pad - tx);
+        self.kit_text_mid(tx, y + pad + disc * 0.5, size::TITLE, &t, col::TEXT);
+        let mut ly = y + pad + disc + 16.0 + lh * 0.5;
+        for line in &lines {
+            self.kit_text_mid(x + pad, ly, size::BODY, line, col::TEXT2);
+            ly += lh;
+        }
+        // The path, in a box, cut in the middle where it is too long: its end
+        // (the file name) is the part that says which game.
+        let by = ly - lh * 0.5 + 12.0;
+        self.kit_rrect(x + pad, by, w - 2.0 * pad, 40.0, 10.0, 0xFF_14_1F_36);
+        let shown = asked.trim_start_matches("sdmc:");
+        let p = self.kit_fit_mid(if shown.is_empty() { "?" } else { shown }, size::LABEL, w - 2.0 * pad - 32.0);
+        self.kit_text_mid(x + pad + 16.0, by + 20.0, size::LABEL, &p, col::TEXT3);
+        self.kit_hints_right(x + w - pad, y + h - 30.0, &[(&[Btn::Minus], u.load_failed_hint)]);
+    }
+
     /// A wait over panels that stay on screen: a small card with the spinner and
     /// what is being done, centred between `left` and `right`, over a light dim.
     /// A full-screen veil over the panels hid the path the player was on.

@@ -1123,6 +1123,15 @@ pub extern "C" fn ruffle_set_swf_path(path: *const c_char) -> c_int {
 /// Embedded fallback: a 43-byte SWF that just sets a red stage background.
 /// Pulled from the upstream ruffle tree as a known-good reproducible target
 /// when no `.swf` is found on the SD card.
+/// The game asked for that could not be read, when the fallback SWF is what is
+/// running instead: a notice is drawn over it (`draw_load_failed`) rather than
+/// leaving a plain red screen that says nothing.
+static LOAD_FAILED: Mutex<Option<std::string::String>> = Mutex::new(None);
+
+fn load_failed() -> Option<std::string::String> {
+    LOAD_FAILED.lock().ok().and_then(|g| g.clone())
+}
+
 const EMBEDDED_FALLBACK_SWF: &[u8] =
     include_bytes!("../../third_party/ruffle/swf/tests/swfs/SimpleRedBackground.swf");
 
@@ -1461,9 +1470,21 @@ pub extern "C" fn ruffle_init() -> c_int {
     // subsequent ruffle_init invocations (e.g. menu REDEMARRER) skip the
     // expensive `std::fs::read` — see CACHED_SWF docs for the OOM reason.
     let (movie_bytes, source_label) = match ensure_swf_loaded() {
-        Some(t) => t,
+        Some(t) => {
+            if let Ok(mut g) = LOAD_FAILED.lock() {
+                *g = None;
+            }
+            t
+        }
         None => {
             log(b"ruffle_init: no SWF available, using embedded fallback\n\0");
+            // Say it on screen, over the fallback's red: the path that was asked
+            // for (a HOME icon naming a moved game, a file removed over FTP, a
+            // game too big for the memory left).
+            if let Ok(mut g) = LOAD_FAILED.lock() {
+                let asked = OVERRIDE_SWF_PATH.lock().ok().and_then(|p| p.clone()).unwrap_or_default();
+                *g = Some(asked);
+            }
             (
                 EMBEDDED_FALLBACK_SWF.to_vec(),
                 std::string::String::from("http://flashforswitch.local/SimpleRedBackground.swf"),
@@ -2661,6 +2682,9 @@ fn render_frame_with_dt(dt: FloatDuration) {
         if let Some((total_us, tick_us, render_us)) = slow_frame {
             backend.log_slow_frame(total_us, tick_us, render_us);
         }
+        if let Some(asked) = load_failed() {
+            backend.draw_load_failed(&asked);
+        }
         if show_cursor {
             backend.draw_cursor_overlay(cx, cy, clicked);
         }
@@ -2720,6 +2744,9 @@ pub extern "C" fn ruffle_redraw_paused() {
     if let Some(backend) =
         <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(renderer)
     {
+        if let Some(asked) = load_failed() {
+            backend.draw_load_failed(&asked);
+        }
         if show_cursor {
             backend.draw_cursor_overlay(cx, cy, clicked);
         }

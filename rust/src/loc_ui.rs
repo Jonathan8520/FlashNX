@@ -543,6 +543,11 @@ pub struct Ui {
     pub facts_compressed: &'static str,
     /// A game made of several files (its companion folder), on its facts line and its launch.
     pub facts_multifile: &'static str,
+    /// Notice over a game that could not be read (moved, deleted, too big).
+    pub load_failed_title: &'static str,
+    pub load_failed_body: &'static str,
+    /// Hint under that notice: Minus opens the pause, where Quit is.
+    pub load_failed_hint: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -860,6 +865,9 @@ const EN: Ui = Ui {
     decimal_mark: ".",
     facts_compressed: "SWF {}, compressed",
     facts_multifile: "Several files",
+    load_failed_title: "This game can't be opened",
+    load_failed_body: "The file is no longer at this place on the card, or it is too big for the memory left. It was looked for here:",
+    load_failed_hint: "Menu",
 };
 
 const FR: Ui = Ui {
@@ -1177,6 +1185,9 @@ const FR: Ui = Ui {
     decimal_mark: ",",
     facts_compressed: "SWF {}, compressé",
     facts_multifile: "Plusieurs fichiers",
+    load_failed_title: "Impossible d'ouvrir ce jeu",
+    load_failed_body: "Le fichier n'est plus à cet endroit de la carte, ou il est trop gros pour la mémoire disponible. Il a été cherché ici :",
+    load_failed_hint: "Menu",
 };
 
 const ES: Ui = Ui {
@@ -1494,6 +1505,9 @@ const ES: Ui = Ui {
     decimal_mark: ",",
     facts_compressed: "SWF {}, comprimido",
     facts_multifile: "Varios archivos",
+    load_failed_title: "No se puede abrir este juego",
+    load_failed_body: "El archivo ya no está en este lugar de la tarjeta, o es demasiado grande para la memoria disponible. Se buscó aquí:",
+    load_failed_hint: "Menú",
 };
 
 const RU: Ui = Ui {
@@ -1811,6 +1825,9 @@ const RU: Ui = Ui {
     decimal_mark: ",",
     facts_compressed: "SWF {}, сжатый",
     facts_multifile: "Несколько файлов",
+    load_failed_title: "Не удаётся открыть эту игру",
+    load_failed_body: "Файла больше нет в этом месте карты, или он слишком велик для доступной памяти. Он искался здесь:",
+    load_failed_hint: "Меню",
 };
 
 const DE: Ui = Ui {
@@ -2128,6 +2145,9 @@ const DE: Ui = Ui {
     decimal_mark: ",",
     facts_compressed: "SWF {}, komprimiert",
     facts_multifile: "Mehrere Dateien",
+    load_failed_title: "Dieses Spiel lässt sich nicht öffnen",
+    load_failed_body: "Die Datei liegt nicht mehr an dieser Stelle der Karte, oder sie ist zu groß für den freien Speicher. Gesucht wurde hier:",
+    load_failed_hint: "Menü",
 };
 
 const IT: Ui = Ui {
@@ -2445,6 +2465,9 @@ const IT: Ui = Ui {
     decimal_mark: ",",
     facts_compressed: "SWF {}, compresso",
     facts_multifile: "Più file",
+    load_failed_title: "Impossibile aprire questo gioco",
+    load_failed_body: "Il file non è più in questo punto della scheda, oppure è troppo grande per la memoria disponibile. È stato cercato qui:",
+    load_failed_hint: "Menu",
 };
 
 const PT: Ui = Ui {
@@ -2762,6 +2785,9 @@ const PT: Ui = Ui {
     decimal_mark: ",",
     facts_compressed: "SWF {}, compactado",
     facts_multifile: "Vários arquivos",
+    load_failed_title: "Não é possível abrir este jogo",
+    load_failed_body: "O arquivo não está mais neste lugar do cartão, ou é grande demais para a memória disponível. Ele foi procurado aqui:",
+    load_failed_hint: "Menu",
 };
 
 const ZH: Ui = Ui {
@@ -3079,6 +3105,9 @@ const ZH: Ui = Ui {
     decimal_mark: ".",
     facts_compressed: "SWF {}，已压缩",
     facts_multifile: "多个文件",
+    load_failed_title: "无法打开此游戏",
+    load_failed_body: "文件已不在存储卡上的这个位置，或者对于可用内存来说太大。查找的位置：",
+    load_failed_hint: "菜单",
 };
 
 const TR: Ui = Ui {
@@ -3396,6 +3425,9 @@ const TR: Ui = Ui {
     decimal_mark: ",",
     facts_compressed: "SWF {}, sıkıştırılmış",
     facts_multifile: "Birden çok dosya",
+    load_failed_title: "Bu oyun açılamıyor",
+    load_failed_body: "Dosya artık kartta bu konumda değil ya da kalan bellek için çok büyük. Şurada arandı:",
+    load_failed_hint: "Menü",
 };
 
 pub fn ui() -> &'static Ui {
