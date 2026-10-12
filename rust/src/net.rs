@@ -714,7 +714,10 @@ pub fn prompt_with(header: &str, guide: &str, initial: &str) -> Option<std::stri
 }
 
 pub fn prompt_pseudo(initial: &str) -> Option<std::string::String> {
-    let mut buf = std::vec![0u8; 512];
+    // Sized for the nickname's limit: the keyboard takes (cap - 1) / 4
+    // characters, so it stops at the 24 that are kept. A 512-byte buffer let it
+    // take 127, and the Profil row then showed the name cut without a word.
+    let mut buf = std::vec![0u8; crate::profiles::AUTHOR_MAX_CHARS * 4 + 1];
     let mut initial_owned = initial.as_bytes().to_vec();
     initial_owned.push(0);
     let header_c = cstr(crate::loc::s().set_pseudo);
