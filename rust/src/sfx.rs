@@ -108,6 +108,23 @@ pub(crate) fn set_enabled(on: bool) {
     unsafe { ruffle_ui_sounds_set_enabled(on as c_int) };
 }
 
+/// The sound of going from `before` to `after` if that goes into or out of the
+/// RÉGLAGES pane: a level, not a step of the cursor, whatever made it. Asked
+/// after a press and after a tap, which no `after_input` follows. Out is B,
+/// `-`, a fresh Left (back to the column exactly as B goes, input rule 3) or a
+/// tap on the column; in is A, Right or a tap in the pane. While the sound
+/// followed the button, or the finger, a fresh Left and those taps sounded
+/// like a step of the cursor.
+pub(crate) fn pane_level(before: crate::library::Screen, after: crate::library::Screen) -> Option<Sfx> {
+    use crate::library::Screen;
+    match (before, after) {
+        (Screen::Settings { in_pane: a, .. }, Screen::Settings { in_pane: b, .. }) if a != b => {
+            Some(if b { Sfx::Decide } else { Sfx::Back })
+        }
+        _ => None,
+    }
+}
+
 fn is_nav(button: &str) -> bool {
     matches!(
         button,
@@ -184,15 +201,10 @@ pub(crate) fn after_input(
         }
         return;
     }
-    // Into or out of the RÉGLAGES pane: a level, not a step of the cursor,
-    // whatever made it. Out is B, `-` or a fresh Left, which goes back to the
-    // column exactly as B does (input rule 3) and sounded like a move of the
-    // cursor while the sound followed the button; in is A or Right.
-    if let (Screen::Settings { in_pane: a, .. }, Screen::Settings { in_pane: b, .. }) = (before, after) {
-        if a != b {
-            play(if b { Sfx::Decide } else { Sfx::Back });
-            return;
-        }
+    // Into or out of the RÉGLAGES pane: a level, not a step of the cursor.
+    if let Some(s) = pane_level(before, after) {
+        play(s);
+        return;
     }
     if core::mem::discriminant(&before) == core::mem::discriminant(&after) {
         // Same screen, something in it changed: a value (the handler said so),

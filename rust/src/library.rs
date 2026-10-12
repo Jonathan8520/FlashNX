@@ -3811,9 +3811,10 @@ fn tap_ui_row(x: f32, y: f32) {
         }
         // A tap is not a press: no `after_input` follows, so the sound is
         // played here. A sound the tap's handler chose wins, as after a press
-        // (the crumb over a page in the Réglages pane goes back, like B). A
+        // (a tap out of a page in the Réglages pane goes back, like B). A
         // layout card applies as it is tapped (the click of a value); any
-        // other first tap moves the cursor (the move).
+        // other first tap moves the cursor (the move), or takes it into or
+        // out of the Réglages pane (a level, as A and B sound it).
         let chosen = if activate { None } else { crate::sfx::take_chosen() };
         if let Some(c) = chosen {
             crate::sfx::take_changed();
@@ -3823,7 +3824,7 @@ fn tap_ui_row(x: f32, y: f32) {
         } else if crate::sfx::take_changed() {
             play(Sfx::Toggle);
         } else if !activate && s.screen != before {
-            play(Sfx::Move);
+            play(crate::sfx::pane_level(before, s.screen).unwrap_or(Sfx::Move));
         }
     }
     if activate {
@@ -3948,11 +3949,13 @@ fn touch_part(s: &mut State, row: usize, part: usize) -> bool {
         }
         _ => {}
     }
-    // Heard now, and taken, so the flag does not sound on the next press.
+    // Heard now, and taken, so the flag does not sound on the next press. A
+    // tap on an option already set, from the Réglages column, still takes the
+    // cursor into the pane: a level, as A sounds it.
     if crate::sfx::take_changed() {
         play(Sfx::Toggle);
     } else if s.screen != before && !activate {
-        play(Sfx::Move);
+        play(crate::sfx::pane_level(before, s.screen).unwrap_or(Sfx::Move));
     }
     activate
 }

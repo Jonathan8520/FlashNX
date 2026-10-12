@@ -754,18 +754,17 @@ pub(crate) fn subpage_tap(s: &mut State, k: usize) {
         _ => return,
     };
     let target = match k.checked_sub(1) {
-        // The way back, with B's sound: a tap has no press for the screens
-        // to read it from, and the cursor moving out of the page sounded
-        // like a step down a list.
-        None => {
-            crate::sfx::choose(crate::sfx::Sfx::Back);
-            back
-        }
+        None => back,
         Some(i) => match SetSection::ALL.get(i) {
             Some(&section) => Screen::Settings { section, in_pane: false, row: 0 },
             None => return,
         },
     };
+    // Out of the page, to the row that opened it or on to the column: the way
+    // back, with B's sound. A tap has no press for the screens to read it
+    // from, and the cursor moving out of the page sounded like a step down a
+    // list.
+    crate::sfx::choose(crate::sfx::Sfx::Back);
     s.dir_browse.clear();
     s.screen = target;
 }
