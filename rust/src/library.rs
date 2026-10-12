@@ -3732,7 +3732,11 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
             return;
         }
         let Ok(mut t) = TOUCH.lock() else { return };
-        if pressed && !t.down && t.nav_press.is_none() {
+        // Not while a chip is held: a finger sliding up from the shelf strip
+        // armed a tab on top of the chip, and lifting it on the tab already
+        // open left the chip armed for the next finger-up sample to tap. It
+        // falls through to the strip instead, which calls it off.
+        if pressed && !t.down && t.nav_press.is_none() && t.strip_press.is_none() {
             if let Some(tab) = r::navbar_hit(x, y) {
                 t.nav_press = Some(tab);
                 return;
