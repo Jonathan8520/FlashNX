@@ -2843,7 +2843,7 @@ pub fn open() {
     // the "Optimisation" loading panel instead (see `maybe_arm_startup_migrations`
     // / `PendingNet::RunStartupMigrations`), which shows a frame first, then runs.
     // Any finger business from before a game launched is over.
-    navbar_press_cancel();
+    touch_press_cancel();
     crate::backend::render::row_touch_cancel();
     log_scan_breakdown(LIBRARY.lock().map(|g| g.entries.len()).unwrap_or(0));
     // Reload URL history from SD on each open so changes from a previous
@@ -3432,6 +3432,13 @@ struct TouchState {
     nav_press: Option<usize>,
     /// The same for the shelf strip under the tabs, on the Play home.
     strip_press: Option<crate::backend::render::StripHit>,
+    /// Set when a press on the navbar or the shelf strip was called off while
+    /// the finger stayed down: it slid off its target, or the home went away
+    /// under it. The rest of that touch belongs to nobody. Without this the
+    /// same finger fell through to whatever lay under it next, started a
+    /// gallery gesture at the edge of the grid, and tapped (or launched) the
+    /// tile there when it lifted. The lift clears it.
+    dead: bool,
     /// Eased scroll (px) captured when the drag began.
     start_scroll_px: f32,
 }
@@ -3444,6 +3451,7 @@ static TOUCH: Mutex<TouchState> = Mutex::new(TouchState {
     start_scroll_px: 0.0,
     nav_press: None,
     strip_press: None,
+    dead: false,
 });
 
 /// Forward the per-frame touchscreen state to the JOUER gallery: drag to scroll,
@@ -3630,17 +3638,20 @@ fn set_screen_selection(s: &mut State, idx: usize) -> bool {
     }
 }
 
-/// Forget a press that landed on the navbar.
+/// Forget a press that landed on the navbar or the shelf strip.
 ///
-/// A press arms `nav_press` and a RELEASE spends it, and anything can happen in
-/// between: a button opens a modal, a game launches and quits. The release then
-/// arrives on a screen nobody pressed anything on. `screen_tab` already refuses
-/// while a modal is up, but a game round-trip lands back on JOUER with the strip
-/// drawn again -- and C++ sends a no-finger sample every frame, so the first one
-/// back would spend the stale press and switch tabs on its own.
-fn navbar_press_cancel() {
+/// A press arms `nav_press` or `strip_press` and a RELEASE spends it, and
+/// anything can happen in between: a button opens a modal, a game launches and
+/// quits, the keyboard takes the screen. The release then arrives on a screen
+/// nobody pressed anything on. `screen_tab` already refuses while a modal is
+/// up, but a game round-trip lands back on JOUER with both strips drawn again
+/// -- and C++ sends a no-finger sample every frame, so the first one back would
+/// spend the stale press and switch tabs, or shelves, on its own.
+fn touch_press_cancel() {
     if let Ok(mut t) = TOUCH.lock() {
         t.nav_press = None;
+        t.strip_press = None;
+        t.dead = false;
     }
 }
 
@@ -3676,6 +3687,19 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
     use crate::backend::render as r;
     // Movement (px) before a press is treated as a drag instead of a tap.
     const DRAG_THRESH: f32 = 16.0;
+
+    // A touch whose press was called off goes nowhere until it lifts (see
+    // `TouchState::dead`). Asked before the suspend window below, so the lift
+    // that ends it counts even during an animation: missed, it would void the
+    // next touch whole.
+    if let Ok(mut t) = TOUCH.lock() {
+        if t.dead {
+            if !pressed {
+                t.dead = false;
+            }
+            return;
+        }
+    }
 
     // Touch works on the JOUER gallery, the Flashpoint results grid AND the
     // archive.org file list (IMPORTER): all three feed the same render
@@ -3719,9 +3743,12 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
                 // press you can slide away from to cancel is how every button
                 // on every touchscreen behaves. Disarmed here rather than
                 // second-guessed on release, which carries no position at all
-                // (C++ reports a lifted finger as (0, 0)).
+                // (C++ reports a lifted finger as (0, 0)). The rest of the
+                // touch dies with it, or the same finger would carry on into
+                // the shelf strip or the gallery below.
                 if r::navbar_hit(x, y).is_none() {
                     t.nav_press = None;
+                    t.dead = true;
                 }
                 return;
             }
@@ -3760,15 +3787,30 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
             }
         } else if let Some(hit) = t.strip_press {
             if pressed {
-                // Slid off the target: the press is cancelled.
+                // Slid off the target: the press is cancelled, and the rest of
+                // the touch with it. Let through, the finger reached the grid
+                // and lifting it there picked the tile under it, or launched
+                // the selected one.
                 if r::strip_hit(x, y) != Some(hit) {
                     t.strip_press = None;
+                    t.dead = true;
                 }
                 return;
             }
             t.strip_press = None;
             drop(t);
             strip_tap(hit);
+            return;
+        }
+    } else if let Ok(mut t) = TOUCH.lock() {
+        // The home went away under a held chip: Y opened the sort window, +
+        // the options (a game launched by A is caught by `open` on the way
+        // back, the keyboard by the search itself). The press is void. Left
+        // armed, it was spent by the first finger-up sample back on the home
+        // (C++ sends one every frame), which tapped the chip on its own; and
+        // the finger still down must not start a gesture on the window either.
+        if t.strip_press.take().is_some() && pressed {
+            t.dead = true;
             return;
         }
     }
@@ -9054,7 +9096,12 @@ fn run_local_search_flow() {
         .ok()
         .and_then(|s| s.local_filter.clone())
         .unwrap_or_default();
-    let Some(typed) = net::prompt_search(&current) else {
+    let typed = net::prompt_search(&current);
+    // The keyboard had the screen and the finger, and the home under it never
+    // changed: a chip held while - was pressed would otherwise be tapped by the
+    // first finger-up sample once the keyboard is gone.
+    touch_press_cancel();
+    let Some(typed) = typed else {
         return; // cancelled
     };
     let trimmed = typed.trim().to_string();
