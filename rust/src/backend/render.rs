@@ -12545,21 +12545,6 @@ impl SwitchRenderBackend {
         }
     }
 
-    /// The centred key-hint line every full-page screen ends with, at the one
-    /// baseline they all use.
-    ///
-    /// It was copied out at each site — measure, halve, draw at `vh - 42` in
-    /// `0x99AABB` — which is how two of them ended up at a different height than
-    /// the rest.
-    /// The bottom band of a full-page screen, from one of the old footer
-    /// strings: hairline, credit on the left, the parsed hints on the right.
-    fn draw_page_footer(&mut self, text: &str) {
-        let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
-        self.kit_footer_band();
-        self.kit_footer_hints(text, vw - 40.0, vh - 24.0, false);
-    }
-
     /// The page a search that matched nothing leaves, the same in every view:
     /// what was searched, and the two ways out.
     ///
@@ -13455,68 +13440,6 @@ impl SwitchRenderBackend {
             &std::format!("{} / {}", done, total),
             &[],
         );
-    }
-
-    /// Applet-mode notice (P1c): same centered layout as the error toast, but
-    /// an amber "info" title instead of red — games can't launch in applet
-    /// mode, this is guidance rather than a failure.
-    pub fn draw_library_applet_notice(&mut self, msg: &str) {
-        self.draw_centered_notice(crate::loc::s().applet_title, 0xFFB740, msg);
-    }
-
-    /// Shared full-screen centered notice: big title (in `title_rgb`), a
-    /// word-wrapped body, and the generic dismiss footer.
-    fn draw_centered_notice(&mut self, title: &str, title_rgb: u32, msg: &str) {
-        self.draw_centered_notice_footer(title, title_rgb, msg, crate::loc::s().err_footer);
-    }
-
-    /// `draw_centered_notice` with an explicit footer, for notices whose
-    /// dismiss options depend on what failed.
-    fn draw_centered_notice_footer(
-        &mut self,
-        title: &str,
-        title_rgb: u32,
-        msg: &str,
-        footer: &str,
-    ) {
-        use theme::{col, size};
-        self.library_clear();
-        let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
-        // A card in the middle of the page: an icon that says what kind of
-        // news this is before a word is read, the title in the colour the
-        // caller gave it (red for an error, amber for a notice, green for a
-        // success), the message under it.
-        let rgb = title_rgb & 0x00FF_FFFF;
-        let (icon, ink) = match rgb {
-            0x66DD66 => (Icon::CircleCheck, col::OK),
-            0xFF5040 => (Icon::Alert, col::DANGER),
-            _ => (Icon::Info, 0xFF00_0000 | rgb),
-        };
-        const DISC: f32 = 56.0;
-        let w = 720.0f32.min(vw - 80.0);
-        let text_x = 40.0 + DISC + 20.0;
-        let lines = self.kit_wrap(msg, size::BODY, w - text_x - 40.0, 8);
-        let lh = (size::BODY * 1.45).round();
-        let h = (110.0 + lh * lines.len() as f32).max(40.0 + DISC + 40.0);
-        let x = ((vw - w) * 0.5).round();
-        let y = ((vh - 48.0 - h) * 0.5).round().max(90.0);
-        self.kit_panel(x, y, w, h, false);
-        self.kit_rrect(x + 40.0, y + 36.0, DISC, DISC, DISC * 0.5, col::CHIP);
-        self.kit_icon(x + 40.0 + 14.0, y + 36.0 + DISC * 0.5, 28.0, icon, ink);
-        let t = self.kit_fit(title, size::TITLE, w - text_x - 40.0);
-        self.kit_text_mid(x + text_x, y + 52.0, size::TITLE, &t, ink);
-        let mut ly = y + 96.0;
-        for line in &lines {
-            self.kit_text_mid(x + text_x, ly, size::BODY, line, col::TEXT2);
-            ly += lh;
-        }
-        self.draw_page_footer(footer);
-        unsafe {
-            glUseProgram(0);
-            glBindVertexArray(0);
-        }
-        self.gl_state.invalidate();
     }
 
     /// Transient toast banner near the bottom of the screen (#20). `kind`: 0 =

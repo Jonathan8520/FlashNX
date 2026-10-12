@@ -56,10 +56,10 @@ pub(crate) enum Screen {
     /// reveal finishes. Carries the gallery row so the frozen gallery draws behind.
     Launching { selection: usize, scroll_offset: usize },
     /// Applet mode: the user pressed A on a game but we have only the small
-    /// applet heap, so launching would OOM. Shows a "use title takeover"
-    /// notice (P1c) instead of the embedded red SWF. Carries the list row to
-    /// return to on dismiss (pressed on an importer page, the page to go back
-    /// to is held in `LAUNCH_BACKDROP` instead).
+    /// applet heap, so launching would OOM. A window over the page says how to
+    /// get the full memory (P1c) instead of the embedded red SWF. Carries the
+    /// list row to return to on dismiss (pressed on an importer page, the page
+    /// to go back to is held in `LAUNCH_BACKDROP` instead).
     AppletNotice { selection: usize, scroll_offset: usize },
     /// User pressed - or chose to quit; main loop exits the `.nro`.
     Quit,
@@ -3731,6 +3731,8 @@ fn set_screen_selection(s: &mut State, idx: usize) -> bool {
         Screen::ImportNotAddress { selection } => {
             put!(selection, Screen::ImportNotAddress { selection: idx })
         }
+        // One answer, always the focused one: the first tap gives it.
+        Screen::AppletNotice { .. } => idx == 0,
         Screen::ProfileDeleteConfirm { game_idx, profile_idx, selection } => {
             put!(selection, Screen::ProfileDeleteConfirm { game_idx, profile_idx, selection: idx })
         }
@@ -9877,10 +9879,6 @@ fn distant_row_rect(sel: usize, scroll: usize, vw: f32) -> (f32, f32, f32, f32) 
     (x, y + 3.0, w, h - 6.0)
 }
 
-/// Stable id per panel/modal screen (0 = not a modal). Used by `render` to fire
-/// the scale-in "pop" exactly once when a modal is first shown. Full-screen
-/// notices (AppletNotice / DistantError / Downloading) are NOT modals here — no
-/// panel to scale. The TOUCHES editors ARE modals (scale in like the rest).
 /// Id of the list on screen, for the touch tables. Never zero for a screen that
 /// has tappable rows.
 ///
@@ -9905,6 +9903,10 @@ fn touch_kind(screen: Screen) -> u32 {
     }
 }
 
+/// Stable id per panel/modal screen (0 = not a modal). Used by `render` to fire
+/// the scale-in "pop" exactly once when a modal is first shown. Full pages
+/// (DistantError, the download) are NOT modals here: no panel to scale. The
+/// TOUCHES editors ARE modals (scale in like the rest).
 fn modal_kind(screen: Screen) -> u8 {
     // A game's options and everything opened from them are ONE panel stack
     // (`options_panel`): the panel slides in from the right once, its pages
@@ -9920,8 +9922,13 @@ fn modal_kind(screen: Screen) -> u8 {
         // stack, like a game's options: the question comes up over the panel
         // without the panel popping again, and Cancel drops back onto it.
         Screen::DistantUrlOptions { .. } | Screen::DistantHistoryConfirm { .. } => 5,
-        Screen::DistantCancelConfirm { .. } => 23,
         Screen::ImportNotAddress { .. } => 24,
+        // Its own id: it shared 23 with SendFailed, and a table one of them
+        // left behind answered the other's first frame.
+        Screen::DistantCancelConfirm { .. } => 25,
+        // The applet-mode notice, a window over the page the game was pressed
+        // on: it pops in and scales out like the others.
+        Screen::AppletNotice { .. } => 26,
         // The keymap editor delegates to `menu::*`; its window pops in once, and
         // its key picker opens inside that window (`menu::window_kind` counts
         // the two as one), exactly like the in-game `ruffle_touches_draw` path.
@@ -10926,8 +10933,46 @@ pub fn render(backend: &mut SwitchRenderBackend) {
     // current screen has no animation.
     match screen {
         Screen::Inactive | Screen::Picked | Screen::Quit => {}
-        Screen::AppletNotice { .. } => {
-            backend.draw_library_applet_notice(crate::loc::s().applet_notice);
+        Screen::AppletNotice { selection, scroll_offset } => {
+            use crate::backend::render::{Choice, Icon};
+            // A window over the page the game was pressed on, like every other
+            // window: the grid, or the importer page of a game started from
+            // there, still and taking no taps. While the window scales out,
+            // the press has already taken that page off `LAUNCH_BACKDROP` and
+            // the close's target names it instead.
+            let behind = match PENDING_AFTER_CLOSE.lock().ok().as_deref() {
+                Some(Some(PendingClose::Goto(page))) => Some(*page),
+                _ => LAUNCH_BACKDROP.lock().ok().and_then(|g| *g),
+            };
+            backend.clear_ui_transform();
+            crate::backend::render::set_ui_screen_kind(0);
+            match behind {
+                Some(page @ (Screen::DistantIdle { .. } | Screen::DistantFiles { .. } | Screen::FpGallery { .. })) => {
+                    draw_importer_backdrop(backend, page)
+                }
+                other => {
+                    let (sel, scroll) = match other {
+                        Some(Screen::List { selection, scroll_offset }) => (selection, scroll_offset),
+                        _ => (selection, scroll_offset),
+                    };
+                    let logo = LIBRARY.lock().map(|s| (s.banner_tex, s.banner_w, s.banner_h)).unwrap_or((0, 0, 0));
+                    draw_gallery(backend, sel, scroll, anim_origin);
+                    backend.draw_navbar_with(Tab::Jouer.index(), logo, false);
+                    crate::backend::render::navbar_clear();
+                }
+            }
+            crate::backend::render::set_ui_screen_kind(ui_kind);
+            backend.set_ui_modal_scale(if modal_active { modal_scale } else { 1.0 });
+            let (lc, u) = (crate::loc::s(), crate::loc_ui::ui());
+            backend.draw_confirm(
+                Icon::Info,
+                lc.applet_title,
+                lc.applet_notice,
+                None,
+                &[Choice { label: u.close, destructive: false }],
+                0,
+                false,
+            );
         }
         Screen::Empty => {
             backend.draw_library_empty();
