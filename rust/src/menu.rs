@@ -446,6 +446,8 @@ enum PendingNet {
     Delete { profile_idx: usize },
 }
 static PENDING_NET: std::sync::Mutex<Option<(PendingNet, bool)>> = std::sync::Mutex::new(None);
+/// The screen the deferred flow started from, drawn under its loading card.
+static LOADING_FROM: std::sync::Mutex<Option<Screen>> = std::sync::Mutex::new(None);
 
 /// What the pending flow is doing, for its loading card.
 fn pending_label() -> &'static str {
@@ -472,6 +474,9 @@ fn defer_net(action: PendingNet) {
         *p = Some((action, false));
     }
     if let Ok(mut s) = TOUCHES.lock() {
+        if let Ok(mut f) = LOADING_FROM.lock() {
+            *f = Some(s.screen);
+        }
         s.screen = Screen::Loading;
     }
 }
@@ -1836,17 +1841,30 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
     let lc = crate::loc::s();
     let u = crate::loc_ui::ui();
     use crate::backend::render::Btn;
+    // While a deferred GitHub call runs, the page that started it stays on
+    // screen under a card saying what it is doing, its cursor where it was; a
+    // question already answered gives way to the list it was asked over. The
+    // Touches page on "Appliquer un profil" was drawn whatever started the
+    // flow, so the pill glided away and back, and a share or a delete swapped
+    // its page for that one under the card.
+    let loading = matches!(screen, Screen::Loading);
+    let screen = if loading {
+        match LOADING_FROM.lock().ok().and_then(|g| *g) {
+            Some(Screen::DeleteConfirm { profile_idx, .. }) => Screen::Profiles { selection: profile_idx },
+            Some(from) if !matches!(from, Screen::Loading | Screen::Inactive) => from,
+            _ => Screen::Loading,
+        }
+    } else {
+        screen
+    };
     match screen {
         Screen::Inactive => {}
         Screen::Loading => {
-            // The pause and its Touches page stay on screen while a deferred
-            // GitHub call runs; a card over them says what it is doing.
+            // No page to keep (none recorded): the pause and its Touches page.
             let t = crate::backend::render::cascade_step(true);
             backend.with_pause_sheet(PAUSE_ROW_TOUCHES, |b, parent| {
                 with_touches_sheet(b, MENU_APPLY, |b, c| b.kit_cascade(parent, PAUSE_ROW_TOUCHES, Some(c), t));
             });
-            let vw = backend.screen_size().0;
-            backend.draw_loading_card(pending_label(), now, 0.0, vw);
         }
         Screen::Menu { selection } => {
             crate::backend::render::pause_child_set(crate::backend::render::PauseChild::Touches(selection));
@@ -1969,6 +1987,10 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
             let hints = [(&[Btn::A][..], u.restore), (&[Btn::B][..], u.back)];
             draw_diff_page(backend, &crumbs, title, None, &rows, &hints);
         }
+    }
+    if loading {
+        let vw = backend.screen_size().0;
+        backend.draw_loading_card(pending_label(), now, 0.0, vw);
     }
     if let Some((msg, kind)) = toast {
         // Beside the panels in game; under the editor's window, where it is.
