@@ -4298,6 +4298,27 @@ pub extern "C" fn ruffle_keyboard_type_text(text: *const c_char) -> c_int {
     sent
 }
 
+/// The header of the keyboard a game's text field opens, in the menu language,
+/// copied into `out` (UTF-8, NUL-terminated, cut on a character boundary to fit
+/// `cap`). Every other keyboard header comes from the string tables; this one
+/// was "Text input" in every language. Returns 1, or 0 when `out` is unusable.
+#[no_mangle]
+pub extern "C" fn ruffle_keyboard_header(out: *mut c_char, cap: c_int) -> c_int {
+    if out.is_null() || cap < 1 {
+        return 0;
+    }
+    let text = loc_ui::ui().kbd_game_text_header;
+    let mut n = text.len().min(cap as usize - 1);
+    while n > 0 && !text.is_char_boundary(n) {
+        n -= 1;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(text.as_ptr(), out as *mut u8, n);
+        *out.add(n) = 0;
+    }
+    1
+}
+
 /// Switch key code for a printable character, when one exists. Only the keys the
 /// mapper already knows about: letters (typed unshifted), digits, space.
 fn char_key_code(c: char) -> Option<c_int> {

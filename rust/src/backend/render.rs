@@ -9792,7 +9792,7 @@ impl SwitchRenderBackend {
         // Every row is read back from what is in force: the game's `.prefs` for
         // the ones stored per game, the renderer for the zoom and the counter.
         let display_opts = [lc.display_fit, lc.display_stretch, lc.display_fill];
-        let rot_opts = ["0°", lc.rot_90, lc.rot_180, lc.rot_270];
+        let rot_opts = [lc.rot_none, lc.rot_90, lc.rot_180, lc.rot_270];
         let pix_opts = [lc.pixels_auto, lc.pixels_smooth, lc.pixels_sharp];
         let filter_opts = [lc.filter_none, lc.filter_scanlines, lc.filter_crt];
         let zoom = std::format!("{} %", game_zoom_percent());

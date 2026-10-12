@@ -412,11 +412,16 @@ fn game_ctx() -> Option<(std::string::String, std::string::String, std::string::
     Some((basename, title, path))
 }
 
-fn cap_rows(mut rows: std::vec::Vec<std::string::String>) -> std::vec::Vec<std::string::String> {
+/// A before / after table cut to `MAX_PREVIEW_ROWS`, its last line saying how
+/// many were left out ("Et 3 autres changements", "Et 1 autre changement").
+/// The pause and a game's options share it, so the same table ends the same
+/// way in game and on a cover.
+pub(crate) fn cap_rows(mut rows: std::vec::Vec<std::string::String>) -> std::vec::Vec<std::string::String> {
     if rows.len() > MAX_PREVIEW_ROWS {
         let extra = rows.len() - MAX_PREVIEW_ROWS;
         rows.truncate(MAX_PREVIEW_ROWS);
-        rows.push(crate::loc_ui::ui().more_changes.replace("{}", &extra.to_string()));
+        let u = crate::loc_ui::ui();
+        rows.push(crate::loc::fill_count(u.more_changes_1, u.more_changes, extra as i32));
     }
     rows
 }
@@ -906,7 +911,8 @@ fn run_apply(profile_idx: usize) {
         keymap::init_for_swf(&basename);
     }
     let lc = crate::loc::s();
-    let msg = if ok { lc.profile_applied_ok } else { lc.bug_fail_title };
+    // Saying what failed and why: "Échec" alone was the old bug window's title.
+    let msg = if ok { lc.profile_applied_ok } else { crate::loc_ui::ui().profile_apply_failed };
     let can_revert = keymap::has_revert(&basename);
     let has_backup = keymap::has_backup(&basename);
     if let Ok(mut s) = TOUCHES.lock() {
@@ -1037,7 +1043,7 @@ fn run_revert() {
         keymap::init_for_swf(&basename);
     }
     let lc = crate::loc::s();
-    let msg = if ok { lc.profile_reverted_ok } else { lc.bug_fail_title };
+    let msg = if ok { lc.profile_reverted_ok } else { crate::loc_ui::ui().profile_revert_failed };
     let can_revert = keymap::has_revert(&basename);
     let has_backup = keymap::has_backup(&basename);
     if let Ok(mut s) = TOUCHES.lock() {
@@ -1586,7 +1592,8 @@ pub(crate) fn with_touches_view<R>(
     ];
     let mut rows = std::vec![
         Row::new(Icon::Keyboard, lc.touches_edit).opens(),
-        Row::new(Icon::Users, lc.opt_apply).opens(),
+        // Named like the page it opens and like the editor's Y hint to it.
+        Row::new(Icon::Users, u.shared_profiles).opens(),
         Row::new(Icon::Share, lc.opt_share).opens(),
         // The pointer for its speed (the gauge is the frame counter's), the
         // eye open or shut for whether it is drawn.
@@ -1670,7 +1677,9 @@ impl ProfileItem {
 
 /// The shared-profiles page as data, handed to `f`: one row per profile, the
 /// player who shared it on the right ("Toi" for your own), a check on the one
-/// in use; the list scrolls.
+/// in use; the list scrolls. `crumbs` is the path to the Touches et curseur
+/// page; the copy list, which B leaves for the profiles, adds the profiles'
+/// name to it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn with_profiles_view<R>(
     backend: &mut SwitchRenderBackend,
@@ -1722,10 +1731,12 @@ pub(crate) fn with_profiles_view<R>(
             } else {
                 ""
             };
+            // Every row opens a page (a profile's before / after, or the copy
+            // list), so every row shows the chevron that promises it.
             Row::new(icon, label)
                 .value(value)
                 .mark_if(!active.is_empty() && it.id == active, Icon::Check, ui_col::OK)
-                .opens_if(copy)
+                .opens()
         })
         .collect();
     let empty_msg = if crate::profiles::catalog_unavailable() { lc.profile_catalog_offline } else { lc.profile_none };
@@ -1735,16 +1746,28 @@ pub(crate) fn with_profiles_view<R>(
     }
     let mine = items.get(selection).is_some_and(|it| crate::profiles::is_mine(&it.id));
     let copy_row = items.get(selection).is_some_and(|it| crate::profiles::is_copy_row(&it.id));
-    let title = if copy_mode { lc.profile_copy_row } else { lc.profile_title };
+    let title = if copy_mode { lc.profile_copy_row } else { u.shared_profiles };
+    let mut path: std::vec::Vec<&str> = crumbs.to_vec();
+    if copy_mode {
+        path.push(u.shared_profiles);
+    }
     let a_verb = if copy_row { u.open } else { u.preview };
     let hints_mine = [(&[Btn::A][..], a_verb), (&[Btn::X][..], lc.opt_delete), (&[Btn::B][..], u.back)];
     let hints = [(&[Btn::A][..], a_verb), (&[Btn::B][..], u.back)];
     let mut sheet = Sheet::new(title, &rows, if items.is_empty() { usize::MAX } else { selection });
     sheet.kicker = Some(Icon::ChevronLeft);
-    sheet.crumbs = crumbs;
+    sheet.crumbs = &path;
     sheet.row_h = 48.0;
     sheet.glide_key = GLIDE_KEY_TOUCHES_PROFILES;
-    sheet.help = if copy_row { u.help_copy_profile } else { u.help_touches_apply };
+    // The copy list's rows are your own other games: the shared list's help
+    // ("shared by other players for this game") was false on every one.
+    sheet.help = if copy_mode {
+        u.help_copy_game
+    } else if copy_row {
+        u.help_copy_profile
+    } else {
+        u.help_touches_apply
+    };
     sheet.hints = if mine { &hints_mine } else { &hints };
     f(backend, &sheet)
 }
@@ -1930,7 +1953,7 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
                     )
                 })
                 .unwrap_or_default();
-            let crumbs = [lc.pause_title, lc.menu_keys, lc.profile_title];
+            let crumbs = [lc.pause_title, lc.menu_keys, u.shared_profiles];
             let hints = [(&[Btn::A][..], u.apply), (&[Btn::B][..], u.back)];
             draw_diff_page(backend, &crumbs, &name, Some(u.preview_sub), &rows, &hints);
         }

@@ -189,9 +189,28 @@ impl SwitchRenderBackend {
             cx += 14.0 + 8.0;
         }
         let end = x + max_w;
-        for (i, c) in s.crumbs.iter().enumerate() {
-            if i > 0 {
-                cx += self.kit_text_mid(cx, cy, px, "  \u{203A}  ", col::TEXT3);
+        let sep = "  \u{203A}  ";
+        // A path too long for its line loses its first steps, never its last:
+        // the last is where B goes back to, and on a page that deep the first
+        // are the panel folded into the rail beside it (the pause, a game's
+        // options). Cut at its end, the path of a profile's page read "Pausa ›
+        // Controles y cursor › Perfiles comp…" in Spanish. Only a last step
+        // too long on its own is still cut.
+        let sep_w = self.kit_measure(sep, px);
+        let mut first = 0;
+        while first + 1 < s.crumbs.len() {
+            let mut need = sep_w * (s.crumbs.len() - first - 1) as f32;
+            for c in s.crumbs.iter().skip(first) {
+                need += self.kit_measure(c, px);
+            }
+            if need <= end - cx {
+                break;
+            }
+            first += 1;
+        }
+        for (i, c) in s.crumbs.iter().enumerate().skip(first) {
+            if i > first {
+                cx += self.kit_text_mid(cx, cy, px, sep, col::TEXT3);
             }
             let ink = if i + 1 == s.crumbs.len() { col::TEXT2 } else { col::TEXT3 };
             let t = self.kit_fit(c, px, (end - cx).max(0.0));

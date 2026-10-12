@@ -924,7 +924,7 @@ pub fn share(
         Ok(parsed.id)
     } else {
         Err(if parsed.error.is_empty() {
-            crate::loc::s().bug_fail_title.to_string()
+            crate::loc_ui::ui().profile_share_failed.to_string()
         } else {
             parsed.error
         })
@@ -977,7 +977,7 @@ pub fn delete(id: &str) -> Result<(), std::string::String> {
         Ok(())
     } else {
         Err(if parsed.error.is_empty() {
-            crate::loc::s().bug_fail_title.to_string()
+            crate::loc_ui::ui().profile_delete_failed.to_string()
         } else {
             parsed.error
         })

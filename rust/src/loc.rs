@@ -2,16 +2,25 @@
 //!
 //! Every string is written the way its language writes it, accents and lower
 //! case included: the interface kit draws them in the console's own fonts
-//! (`backend/render/kit/text.rs`). The strings of the screens rebuilt on the
-//! kit live in `loc_ui.rs`.
+//! (`backend/render/kit/text.rs`). This is the older of the two string tables;
+//! `loc_ui.rs` holds the newer one, where strings are added now. Screens read
+//! from both.
 //!
 //! Lookup is a plain `&'static Strings` per language, chosen by a global
 //! atomic set at boot from `settings.json` (or auto-detected from the Switch
-//! system language) and changeable at runtime via the Settings modal.
+//! system language) and changed at runtime from Réglages › Langue.
 //!
-//! Flash KEY names ("Space", "Shift", "A".."Z") are technical identifiers
-//! stored in keymap JSON and are intentionally NOT translated -- only the
-//! "(none)" placeholder is localized (`none`).
+//! Flash key names ("Space", "Shift", "A".."Z") are the identifiers stored in
+//! the keymap JSON and are never translated there; the screens show the named
+//! keys through the `flash_*` fields, and letters and digits as they are.
+//!
+//! French typography: a no-break space, written `\u{a0}`, goes before ':',
+//! ';', '?', '!' and '%' and inside « », so a wrapped line never starts with
+//! the punctuation (the kit draws it as a space and never breaks a line
+//! there). Where another language writes a space between a number and '%'
+//! ("10 %"), it is a no-break one too; Chinese writes "10%" and Turkish "%10",
+//! with no space. The `kbd_*` strings keep plain spaces: the console's
+//! keyboard draws them, not the kit.
 
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::fs::File;
@@ -189,19 +198,17 @@ pub struct Strings {
     pub empty_title: &'static str,
     pub empty_l1: &'static str,
     pub empty_l3: &'static str,
-    // Library list
-    // Applet-mode notice (P1c) — shown when a game can't launch (small heap)
+    // Applet-mode notice (P1c), shown when a game cannot launch (small heap).
     pub applet_title: &'static str,
     pub applet_notice: &'static str,
-    // OPTIONS modal (per-game)
+    // A game's options panel.
     pub opt_keys: &'static str,
     pub opt_rename: &'static str,
     pub opt_edit: &'static str,
     /// OPTIONS > move this game onto a shelf (issue #68).
     pub opt_folder: &'static str,
     pub opt_delete: &'static str,
-    // Delete confirm
-    // DISTANT idle / history
+    // Importer home and its saved sources.
     /// Pinned IMPORTER row that opens the Flashpoint search. Above "+ add a
     /// URL" because it is the path that needs no URL at all.
     pub dist_search_games: &'static str,
@@ -214,7 +221,7 @@ pub struct Strings {
     pub dist_add: &'static str,
     /// IMPORTER sub-line: saved-URL count ({} = number).
     pub dist_count: &'static str,
-    // DISTANT files list
+    // Importer: an archive's games.
     pub files_title: &'static str,
     /// First row of the shelf picker: take this game off every shelf. Describes
     /// a STATE, not a destination -- it used to say ACCUEIL, which promised a
@@ -229,18 +236,20 @@ pub struct Strings {
     /// data files that are not available, so the player learns it now instead of
     /// meeting a game that loads forever.
     pub toast_assets_missing: &'static str,
-    // Error toast
+    // The old error window's title and footers.
     pub err_title: &'static str,
     pub err_footer: &'static str,
     /// Error footer when the failing URL can be re-typed on the spot (Y).
     pub err_footer_fix: &'static str,
-    // Settings modal (Plus from library)
+    // Settings (Réglages, a game's options, the pause's Écran page), the games
+    // folder browser and the HOME Menu icon.
     pub set_keys: &'static str,
     pub set_cursor_speed: &'static str,
-    /// Stage scaling row in a game's OPTIONS, shown as "<label>: <mode>". Issues
-    /// #65, #69 and #74: three players in three languages asking to lose the
-    /// black bars, #74 putting it best ("the menu is fullscreen but the game is
-    /// not").
+    /// Stage scaling row (a choice of `display_fit`, `display_stretch`,
+    /// `display_fill`) in a game's options, the pause's Écran page and the game
+    /// defaults. Issues #65, #69 and #74: three players in three languages
+    /// asking to lose the black bars, #74 putting it best ("the menu is
+    /// fullscreen but the game is not").
     pub set_display_mode: &'static str,
     /// Keeps the aspect ratio, black bars where the game does not reach.
     pub display_fit: &'static str,
@@ -267,18 +276,21 @@ pub struct Strings {
     pub games_dir_confirm_no: &'static str,
     /// Shown while the move runs, and when it is done.
     pub games_dir_moving: &'static str,
-    /// Titre de la barre d'extraction d'un GameZIP (#117). Un gros jeu
-    /// met aussi longtemps a s'extraire qu'a se telecharger, et l'ecran
-    /// restait fige sur la barre de telechargement pleine.
+    /// Title of a GameZIP's extraction bar (#117): a big game takes as long to
+    /// unpack as to download, and the screen used to sit on a full download
+    /// bar. Kept only by `importer_retired_strings` since the import page names
+    /// its steps (`loc_ui::Ui::imp_step_extract`); goes after the merge.
     pub extracting: &'static str,
     pub shortcut_ok: &'static str,
     pub shortcut_err: &'static str,
     pub shortcut_removed: &'static str,
-    /// Free-zoom row in the pause menu, shown as "<label>: <percent> %", and
-    /// again as the heading of the framing mode it opens. Issue #101.
+    /// Zoom row (a percentage: the pause's Écran page, a game's options, the
+    /// game defaults), and the heading of the framing mode the pause's row
+    /// opens. Issue #101.
     pub set_zoom: &'static str,
-    /// Screen-filter row in the pause menu, shown as "<label>: <filter>".
-    /// The other half of issue #65, which asked for "stretch and filters".
+    /// Screen-filter row (a choice of the three `filter_*`), in the same three
+    /// places as the scaling row. The other half of issue #65, which asked for
+    /// "stretch and filters".
     pub set_screen_filter: &'static str,
     /// No filter (default).
     pub filter_none: &'static str,
@@ -286,12 +298,13 @@ pub struct Strings {
     pub filter_scanlines: &'static str,
     /// Scanlines + RGB stripe mask + vignette.
     pub filter_crt: &'static str,
-    /// Texture-sampling row in the pause menu, shown as "<label>: <value>"
-    /// (issue #108). Named after what it acts on, not after what it does: a
-    /// "FILTERING" row directly under the screen filter's "FILTER" is two rows
-    /// one word apart on the same panel, and "FILTRAGE" under "FILTRE" is
-    /// worse. What it acts on is the pixels of the game's own bitmaps, which
-    /// the free zoom magnifies -- which is how a player noticed at all.
+    /// Texture-sampling row (a choice of the three `pixels_*`, issue #108), in
+    /// the same three places. Named after what it acts on, not after what it
+    /// does: a "Filtering" row directly under the screen filter's "Filter" is
+    /// two rows one word apart on the same panel, and "Filtrage" under
+    /// "Filtre" is worse. What it acts on is the pixels of the game's own
+    /// bitmaps, which the free zoom magnifies, which is how a player noticed
+    /// at all.
     pub set_pixel_filter: &'static str,
     /// Follow the SWF's own smoothing flag. What Flash Player did, so the
     /// default.
@@ -315,14 +328,18 @@ pub struct Strings {
     pub set_fps: &'static str,
     /// Pause row + defaults row: turn the picture a quarter at a time (#78).
     pub set_rotation: &'static str,
+    /// The rotation's first option, the picture as the game draws it: "0°",
+    /// an angle like the three others, the same on every screen that shows
+    /// the choice.
     pub rot_none: &'static str,
     pub rot_90: &'static str,
     pub rot_180: &'static str,
     pub rot_270: &'static str,
     /// TOUCHES row + share/diff label for the per-game "show cursor" toggle.
     pub show_cursor: &'static str,
-    /// TOUCHES row (#119): moving the controller moves the cursor. Values:
-    /// `overclock_off` (the same OFF word), `gyro_marble`, `gyro_pointer`.
+    /// Touches et curseur row (#119): moving the controller moves the cursor.
+    /// Its choices: the off word (`gyro_mode_label`), `gyro_marble`,
+    /// `gyro_pointer`.
     pub set_gyro: &'static str,
     /// Gyroscope like a marble on the screen: the cursor goes toward the edge
     /// that goes down, as far as the console is tilted.
@@ -336,26 +353,30 @@ pub struct Strings {
     pub set_pseudo: &'static str,
     /// Keyboard guide line when typing the nickname.
     pub kbd_pseudo_guide: &'static str,
-    // Navbar tabs (v1.2.0) — switched with L/R.
-    // v1.2.0 covers + online toggle.
+    // On / off words, then a game's options rows (v1.2.0 covers).
     pub lbl_on: &'static str,
     pub lbl_off: &'static str,
     pub opt_cover: &'static str,
-    /// OPTIONS row label: add the game to favorites (when not yet favorited).
+    /// The favourite switch's label, the same whether it is on or off: in a
+    /// game's options and in a saved source's options.
     pub opt_favorite: &'static str,
-    /// OPTIONS row label: remove the game from favorites (when already favorited).
+    /// A's hint on a saved source's favourite row while it is a favourite.
     pub opt_unfavorite: &'static str,
-    /// OPTIONS row label: share this game's controls as a community profile (#20).
+    /// Touches et curseur row: share this game's controls as a community
+    /// profile (#20). Also the title of the before / after page it opens.
     pub opt_share: &'static str,
     /// Success toast shown after the controls were shared (#20).
     pub profile_shared_ok: &'static str,
     // Apply-a-profile UI (#20).
-    /// OPTIONS row: apply a community control profile to this game.
+    /// Unread since the shared-profiles row, page and crumbs all say
+    /// `loc_ui::Ui::shared_profiles`; goes after the merge.
+    #[allow(dead_code)]
     pub opt_apply: &'static str,
-    /// Header of the profile picker modal.
+    /// Unread for the same reason as `opt_apply`; goes after the merge.
+    #[allow(dead_code)]
     pub profile_title: &'static str,
-    /// Last row of the APPLY picker, and the title of the list it opens: the
-    /// player's own games with controls of their own, to copy from.
+    /// Last row of the shared-profiles list, and the title of the list it
+    /// opens: the player's own games with controls of their own, to copy from.
     pub profile_copy_row: &'static str,
     /// Toast when no other game has controls of its own to copy.
     pub profile_copy_none: &'static str,
@@ -373,7 +394,7 @@ pub struct Strings {
     /// Confirmation question shown before sharing a game's controls (first time).
     pub profile_share_confirm: &'static str,
     /// Subtitle on the share confirm when it UPDATES the player's existing shared
-    /// profile (one slot per person) — shown above the before/after diff.
+    /// profile (one slot per person), shown above the before / after table.
     pub share_confirm_update: &'static str,
     // TOUCHES sub-menu (#20 regroup): everything control-related lives under one
     // entry so apply/share/revert don't read as game-save actions in OPTIONS.
@@ -390,18 +411,20 @@ pub struct Strings {
     /// Toast when sharing would duplicate an already-existing identical profile.
     pub profile_share_dup: &'static str,
     /// Toast when the URL the user just typed names a game already on the card.
-    /// `{}` is the file name.
+    /// `{}` is that game's name as the library shows it.
     pub toast_already_imported: &'static str,
-    /// Toast when a game is moved onto the shelf it is already on (issue #68).
+    /// Toast when a new folder gets the name of one the game is already in
+    /// (issue #68). The "No folder" row has its own, `loc_ui::Ui::toast_folder_none`.
     pub toast_folder_same: &'static str,
     /// Toast after a game is put ON a shelf. One {}: the shelf name.
     pub toast_folder_on: &'static str,
     /// Toast after a game is taken OFF a shelf. One {}: the shelf name.
     pub toast_folder_off_of: &'static str,
-    /// Toast after a game is taken off every shelf at once (the ACCUEIL row).
+    /// Toast after a game is taken off every shelf at once (the "No folder" row).
     pub toast_folder_off: &'static str,
     /// Toast when A is pressed on a shelf the game is on because its FILE sits
-    /// in a directory of that name: no label can take it off, only moving it.
+    /// in a directory of that name: no label can take it off, so it points to
+    /// the "No folder" row, as the help on that row does.
     pub toast_folder_physical: &'static str,
     /// Toast when a game cannot come back to the root because another game
     /// already holds that file name there. One {}: the file name. NOT an SD
@@ -422,6 +445,8 @@ pub struct Strings {
     pub profile_del_ok: &'static str,
     /// Toast when there's nothing to delete (no profile shared from this console).
     pub profile_del_not_mine: &'static str,
+    /// The cover picker's title, and the header of the keyboard it opens to
+    /// search again (Minus).
     pub cover_title: &'static str,
     /// Cover-picker hint for the Y toggle, worded as the ACTION it performs
     /// (what pressing it gives you), not the state you are in. Screenshots
@@ -430,7 +455,8 @@ pub struct Strings {
     pub cover_show_logos: &'static str,
     pub cover_show_shots: &'static str,
     pub cover_none: &'static str,
-    // Flashpoint game gallery (IMPORTER > X — browse + download a game).
+    // Flashpoint game gallery (Importer › Chercher sur Flashpoint: browse and
+    // download a game).
     pub fp_title: &'static str,
     // Flashpoint details popup (`+` on a gallery tile).
     pub fp_details_dev: &'static str,
@@ -475,11 +501,11 @@ pub struct Strings {
     /// DNS / connect failure: no usable network at all.
     /// curl 5/6: the address never resolved. Names WiFi and DNS both, because
     /// a console with its WiFi off fails exactly the same way as one whose DNS
-    /// is broken — blaming only the WiFi sends a connected player to check the
+    /// is broken: blaming only the WiFi sends a connected player to check the
     /// one thing that works (#103).
     pub err_offline: &'static str,
     /// curl 7: the name resolved and the connection was refused. A different
-    /// instruction entirely — the network is up, something between the console
+    /// instruction entirely: the network is up, something between the console
     /// and the server is saying no.
     pub err_unreachable: &'static str,
     /// The request timed out.
@@ -494,12 +520,15 @@ pub struct Strings {
     /// The server answered an error status. {} = the HTTP code.
     pub err_http_status: &'static str,
     /// 429 / 5xx: the host is up but temporarily unable, which is a different
-    /// instruction to the player than a refusal or a dead link — wait, do not
+    /// instruction to the player than a refusal or a dead link: wait, do not
     /// go looking for a mistake in the URL. archive.org does this under load.
     pub err_server_busy: &'static str,
     /// HTTP 404 specifically: the URL or item id is wrong / gone.
     pub err_not_found: &'static str,
     pub err_json: &'static str,          // {} = parser detail
+    /// Unread since both Flashpoint searches say
+    /// `loc_ui::Ui::imp_err_fp_unreadable`; goes after the merge.
+    #[allow(dead_code)]
     pub err_json_no_files: &'static str,
     pub err_dl_start: &'static str,      // {} = code
     pub err_dl_failed: &'static str,     // {} = code
@@ -507,12 +536,13 @@ pub struct Strings {
     pub err_url_invalid: &'static str,
     pub err_no_swf: &'static str,
     /// Shown when a download completed (HTTP 200) but the bytes are not the file
-    /// we asked for — an HTML listing/error page, a redirect target, a truncated
-    /// body. Without this the file was saved under the game's name, announced as a
-    /// success, and only dropped much later at the library scan, silently.
+    /// we asked for: an HTML listing or error page, a redirect target, a
+    /// truncated body. Without this the file was saved under the game's name,
+    /// announced as a success, and only dropped much later at the library scan,
+    /// silently.
     pub err_dl_not_a_game: &'static str,
     /// Shown when a Flashpoint game launches via an HTML page + FlashVars
-    /// (launchCommand isn't a `.swf`) so it can't run as a bare SWF — refused
+    /// (launchCommand isn't a `.swf`) so it can't run as a bare SWF: refused
     /// before the (often huge) GameZIP download instead of failing after it.
     pub err_fp_html_game: &'static str,
     // swkbd prompts (passed to the C++ software keyboard)
@@ -520,16 +550,21 @@ pub struct Strings {
     pub kbd_url_guide: &'static str,
     pub kbd_rename_header: &'static str,
     pub kbd_rename_guide: &'static str,
+    /// The Jouer search's keyboard (Minus): it narrows the library by name.
     pub kbd_search_header: &'static str,
     pub kbd_search_guide: &'static str,
-    // Bug report (RÉGLAGES → SIGNALER UN BUG)
+    // Bug report (Réglages › Signaler un bug).
     pub bug_no_games: &'static str,
     pub bug_ok_title: &'static str,
     pub bug_ok_msg: &'static str,
+    /// Unread since every profile failure has its own toast
+    /// (`loc_ui::Ui::profile_apply_failed` and its three twins); goes after the
+    /// merge.
+    #[allow(dead_code)]
     pub bug_fail_title: &'static str,
     pub kbd_bug_header: &'static str,
     pub kbd_bug_guide: &'static str,
-    // Suggestion / feature request (RÉGLAGES → FAIRE UNE PROPOSITION). Reuses the
+    // Suggestion / feature request (Réglages › Proposer une idée). Reuses the
     // same relay + token as the bug report; only the issue label differs.
     pub kbd_suggest_header: &'static str,
     pub kbd_suggest_guide: &'static str,
@@ -604,7 +639,7 @@ const EN: Strings = Strings {
     set_zoom: "Zoom",
     set_screen_filter: "Filter",
     games_dir_new: "New folder",
-    games_dir_current: "in use",
+    games_dir_current: "In use",
     games_dir_confirm: "Move the whole library here?",
     games_dir_confirm_n: "{} games will be moved to:",
     games_dir_confirm_1: "{} game will be moved to:",
@@ -613,9 +648,9 @@ const EN: Strings = Strings {
     kbd_newdir_guide: "Name of the folder to create (no / or :)",
     games_dir_moving: "Moving…",
     extracting: "Extracting…",
-    shortcut_ok: "Tile installed on the HOME menu",
-    shortcut_err: "Could not install the tile",
-    shortcut_removed: "Tile removed",
+    shortcut_ok: "Icon installed on the HOME Menu",
+    shortcut_err: "Couldn't install the icon",
+    shortcut_removed: "Icon removed from the HOME Menu",
     filter_none: "None",
     filter_scanlines: "Scanlines",
     filter_crt: "CRT",
@@ -629,7 +664,7 @@ const EN: Strings = Strings {
     overclock_refused: "Overclock unavailable: battery too low.",
     set_fps: "FPS counter",
     set_rotation: "Rotation",
-    rot_none: "None",
+    rot_none: "0°",
     rot_90: "90°",
     rot_180: "180°",
     rot_270: "270°",
@@ -666,7 +701,7 @@ const EN: Strings = Strings {
     toast_folder_on: "Added to {}.",
     toast_folder_off_of: "Removed from {}.",
     toast_folder_off: "Off every folder",
-    toast_folder_physical: "In this folder on the card. Move it to take it off.",
+    toast_folder_physical: "Its file is in this folder: choose “No folder” to take it out.",
     toast_name_taken: "{} already exists at the root.",
     folder_emptied: "Folder emptied",
     folder_leave_n: "{} games leave this folder",
@@ -713,12 +748,12 @@ const EN: Strings = Strings {
     err_response_big: "Response too large for this build. Try a narrower search.",
     err_sd_write: "Could not write to the SD card. It may be full or write-protected.",
     err_http_status: "The server refused the request (HTTP {}). Try again later.",
-    err_server_busy: "The server is overloaded (HTTP {}). Your link is fine — try again in a few minutes.",
+    err_server_busy: "The server is overloaded (HTTP {}). Your link is fine, try again in a few minutes.",
     err_not_found: "Not found (404). The address is wrong, or the page was removed.",
     err_json: "Unreadable answer from the server. Try again in a moment.",
     err_json_no_files: "JSON has no \"files\" field",
     err_dl_start: "Could not start the download (code {}).",
-    err_dl_failed: "Download failed (code {})",
+    err_dl_failed: "The transfer stopped (code {}). Try again in a moment.",
     err_dl_cancelled: "Download cancelled.",
     err_url_invalid: "Address not recognized. Type an archive.org page (archive.org/details/...) or a direct link to a .swf file.",
     err_no_swf: "This archive holds no Flash game (.swf).",
@@ -726,17 +761,17 @@ const EN: Strings = Strings {
     err_fp_html_game: "This game starts from a web page: not supported yet.",
     kbd_url_header: "Add an address",
     kbd_url_guide: "An archive.org page (archive.org/details/...) or a direct link to a .swf file",
-    kbd_rename_header: "FlashNX - Rename game",
+    kbd_rename_header: "Rename game",
     kbd_rename_guide: "Display name (leave empty to revert to the file name)",
-    kbd_search_header: "FlashNX - Search",
-    kbd_search_guide: "Filter by file name (empty = show everything)",
+    kbd_search_header: "Search your library",
+    kbd_search_guide: "Game name (empty = show everything)",
     bug_no_games: "No game to report yet. Import or drop a .swf first.",
     bug_ok_title: "Thanks!",
     bug_ok_msg: "Your report was sent. Thanks for helping improve FlashNX.",
     bug_fail_title: "Failed",
-    kbd_bug_header: "FlashNX - Report a bug",
-    kbd_bug_guide: "Opens a public GitHub issue. Describe the problem. Optional: your @handle. A short technical log is attached.",
-    kbd_suggest_header: "FlashNX - Suggest an idea",
+    kbd_bug_header: "Report a bug",
+    kbd_bug_guide: "Describe the problem. Your message is posted as it is on FlashNX's public GitHub, with a short technical log. Optional: your GitHub @handle.",
+    kbd_suggest_header: "Suggest an idea",
     kbd_suggest_guide: "Your idea for FlashNX. It is posted as it is on FlashNX's public GitHub.",
     suggest_ok_msg: "Your idea was sent. Thanks for helping improve FlashNX.",
 };
@@ -752,7 +787,7 @@ const FR: Strings = Strings {
     keys_title: "Touches",
     keys_footer: "A:Éditer  L/R:Mode  X:J1/J2  B:Retour",
     keys_dropdown_footer: "A:OK   B:Annuler   haut/bas:Nav",
-    keys_modifier: "Maintien : couche {}",
+    keys_modifier: "Maintien\u{a0}: couche {}",
     none: "(aucune)",
     flash_mouse_left: "Clic gauche",
     flash_mouse_right: "Clic droit",
@@ -788,7 +823,7 @@ const FR: Strings = Strings {
     folder_root: "Aucun dossier",
     dl_title: "Téléchargement",
     toast_dl_ok: "{} téléchargé",
-    toast_assets_missing: "Données de jeu manquantes : {}. Ce jeu risque de ne pas démarrer.",
+    toast_assets_missing: "Données de jeu manquantes\u{a0}: {}. Ce jeu risque de ne pas démarrer.",
     err_title: "Erreur",
     err_footer: "A/B:OK",
     err_footer_fix: "A/B:OK   Y:Corriger l'URL",
@@ -803,18 +838,18 @@ const FR: Strings = Strings {
     set_zoom: "Zoom",
     set_screen_filter: "Filtre",
     games_dir_new: "Nouveau dossier",
-    games_dir_current: "actuel",
-    games_dir_confirm: "Déplacer toute la bibliothèque ici ?",
-    games_dir_confirm_n: "{} jeux seront déplacés vers :",
-    games_dir_confirm_1: "{} jeu sera déplacé vers :",
+    games_dir_current: "Utilisé",
+    games_dir_confirm: "Déplacer toute la bibliothèque ici\u{a0}?",
+    games_dir_confirm_n: "{} jeux seront déplacés vers\u{a0}:",
+    games_dir_confirm_1: "{} jeu sera déplacé vers\u{a0}:",
     games_dir_confirm_yes: "Déplacer",
     games_dir_confirm_no: "Annuler",
     kbd_newdir_guide: "Nom du dossier à créer (sans / ni :)",
     games_dir_moving: "Déplacement\u{2026}",
     extracting: "Extraction…",
-    shortcut_ok: "Tuile installée sur le menu HOME",
-    shortcut_err: "Impossible d'installer la tuile",
-    shortcut_removed: "Tuile retirée",
+    shortcut_ok: "Icône installée sur le menu HOME",
+    shortcut_err: "Impossible d'installer l'icône",
+    shortcut_removed: "Icône retirée du menu HOME",
     filter_none: "Aucun",
     filter_scanlines: "Lignes",
     filter_crt: "CRT",
@@ -825,10 +860,10 @@ const FR: Strings = Strings {
     set_overclock: "Overclock",
     overclock_off: "Inactif",
     overclock_on: "Actif",
-    overclock_refused: "Overclock indisponible : batterie trop faible.",
+    overclock_refused: "Overclock indisponible\u{a0}: batterie trop faible.",
     set_fps: "Compteur FPS",
     set_rotation: "Rotation",
-    rot_none: "Aucune",
+    rot_none: "0°",
     rot_90: "90°",
     rot_180: "180°",
     rot_270: "270°",
@@ -849,13 +884,13 @@ const FR: Strings = Strings {
     profile_title: "Profils de touches",
     profile_copy_row: "Copier d'un autre jeu",
     profile_copy_none: "Aucun autre jeu n'a encore ses propres touches",
-    profile_none: "Aucun profil pour ce jeu. Partage le tien pour aider !",
+    profile_none: "Aucun profil pour ce jeu. Partage le tien pour aider\u{a0}!",
     profile_catalog_offline: "Catalogue indisponible. Vérifie ta connexion.",
     profile_revert: "Revenir à mes touches",
     profile_applied_ok: "Profil appliqué. Tes touches précédentes sont sauvegardées.",
     profile_reverted_ok: "Tes touches ont été restaurées.",
-    profile_share_confirm: "Partager tes touches pour ce jeu ?",
-    share_confirm_update: "Met à jour ton profil partagé :",
+    profile_share_confirm: "Partager tes touches pour ce jeu\u{a0}?",
+    share_confirm_update: "Met à jour ton profil partagé\u{a0}:",
     touches_edit: "Modifier les touches",
     touches_revert_default: "Revenir aux touches par défaut",
     profile_preview_none: "Ce profil ne change aucune touche.",
@@ -865,14 +900,14 @@ const FR: Strings = Strings {
     toast_folder_on: "Ajouté à {}.",
     toast_folder_off_of: "Retiré de {}.",
     toast_folder_off: "Retiré de tous les dossiers",
-    toast_folder_physical: "Dans ce dossier sur la carte. Déplace-le pour l'en sortir.",
+    toast_folder_physical: "Son fichier est ici\u{a0}: choisis «\u{a0}Aucun dossier\u{a0}» pour l'en sortir.",
     toast_name_taken: "{} existe déjà à la racine.",
     folder_emptied: "Dossier vidé",
     folder_leave_n: "{} jeux quittent ce dossier",
     folder_leave_1: "{} jeu quitte ce dossier",
-    profile_del_confirm: "Supprimer ton profil partagé ?",
+    profile_del_confirm: "Supprimer ton profil partagé\u{a0}?",
     profile_del_ok: "Ton profil partagé a été supprimé.",
-    profile_del_not_mine: "Rien à supprimer : pas partagé depuis cette console.",
+    profile_del_not_mine: "Rien à supprimer\u{a0}: pas partagé depuis cette console.",
     cover_title: "Choisir une jaquette",
     cover_show_logos: "Y: Logos",
     cover_show_shots: "Y: Captures",
@@ -896,11 +931,11 @@ const FR: Strings = Strings {
     sort_dir_asc: "Croissant",
     sort_dir_desc: "Décroissant",
     lang_title: "Langue",
-    histdel_title: "Supprimer cette source ?",
+    histdel_title: "Supprimer cette source\u{a0}?",
     url_info_type: "Type",
     url_type_swf: "Fichier .swf",
     url_type_list: "Liste de jeux",
-    url_info_files: "Sur ta carte : {} sur {}",
+    url_info_files: "Sur ta carte\u{a0}: {} sur {}",
     url_info_added: "Ajoutée le",
     histdel_msg: "Elle disparaît de tes sources. Les jeux déjà téléchargés restent sur la carte.",
     err_too_large: "Cette archive est trop grande pour être lue ici.",
@@ -908,7 +943,7 @@ const FR: Strings = Strings {
     err_offline: "Adresse introuvable (curl {}). Vérifie le Wi-Fi de la console, puis son DNS.",
     err_unreachable: "Le serveur a refusé la connexion (curl {}). La console est en ligne, quelque chose entre elle et le serveur bloque.",
     err_timeout: "Le serveur n'a pas répondu à temps. Réessaie.",
-    err_tls: "Connexion sécurisée refusée. Vérifie la date et l'heure de la console : une horloge fausse casse le HTTPS.",
+    err_tls: "Connexion sécurisée refusée. Vérifie la date et l'heure de la console\u{a0}: une horloge fausse casse le HTTPS.",
     err_response_big: "Réponse trop volumineuse. Essaie une recherche plus précise.",
     err_sd_write: "Écriture impossible sur la carte SD. Elle est peut-être pleine.",
     err_http_status: "Le serveur a refusé la requête (HTTP {}). Réessaie plus tard.",
@@ -917,25 +952,25 @@ const FR: Strings = Strings {
     err_json: "Réponse du serveur illisible. Réessaie dans un instant.",
     err_json_no_files: "JSON sans champ \"files\"",
     err_dl_start: "Impossible de lancer le téléchargement (code {}).",
-    err_dl_failed: "Téléchargement échoué (code {})",
+    err_dl_failed: "Transfert interrompu (code {}). Réessaie dans un instant.",
     err_dl_cancelled: "Téléchargement annulé.",
     err_url_invalid: "Adresse non reconnue. Tape une page archive.org (archive.org/details/...) ou un lien direct vers un fichier .swf.",
     err_no_swf: "Cette archive ne contient aucun jeu Flash (.swf).",
     err_dl_not_a_game: "Le téléchargement n'a pas renvoyé un fichier de jeu. Vérifie l'adresse.",
-    err_fp_html_game: "Ce jeu se lance depuis une page web : pas encore pris en charge.",
+    err_fp_html_game: "Ce jeu se lance depuis une page web\u{a0}: pas encore pris en charge.",
     kbd_url_header: "Ajouter une adresse",
     kbd_url_guide: "Page archive.org (archive.org/details/...) ou lien direct vers un fichier .swf",
-    kbd_rename_header: "FlashNX - Renommer le jeu",
+    kbd_rename_header: "Renommer le jeu",
     kbd_rename_guide: "Nom d'affichage (laisser vide pour revenir au nom de fichier)",
-    kbd_search_header: "FlashNX - Rechercher",
-    kbd_search_guide: "Filtre nom de fichier (vide = tout afficher)",
+    kbd_search_header: "Rechercher dans ta bibliothèque",
+    kbd_search_guide: "Nom du jeu (vide = tout afficher)",
     bug_no_games: "Aucun jeu à signaler. Importe ou dépose un .swf d'abord.",
-    bug_ok_title: "Merci !",
+    bug_ok_title: "Merci\u{a0}!",
     bug_ok_msg: "Ton rapport a été envoyé. Merci de m'aider à améliorer FlashNX.",
     bug_fail_title: "Échec",
-    kbd_bug_header: "FlashNX - Signaler un bug",
-    kbd_bug_guide: "Ouvre une issue GitHub publique. Décris le problème. Option : ton @pseudo. Un court journal technique est joint.",
-    kbd_suggest_header: "FlashNX - Proposer une idée",
+    kbd_bug_header: "Signaler un bug",
+    kbd_bug_guide: "Décris le problème. Ton message est publié tel quel sur le GitHub public de FlashNX, avec un court journal technique. Facultatif : ton @pseudo GitHub.",
+    kbd_suggest_header: "Proposer une idée",
     kbd_suggest_guide: "Ton idée pour FlashNX. Elle est publiée telle quelle sur le GitHub public de FlashNX.",
     suggest_ok_msg: "Ton idée a été envoyée. Merci de m'aider à améliorer FlashNX.",
 };
@@ -1002,7 +1037,7 @@ const ES: Strings = Strings {
     set_zoom: "Zoom",
     set_screen_filter: "Filtro",
     games_dir_new: "Nueva carpeta",
-    games_dir_current: "en uso",
+    games_dir_current: "En uso",
     games_dir_confirm: "¿Mover toda la biblioteca aquí?",
     games_dir_confirm_n: "{} juegos se moverán a:",
     games_dir_confirm_1: "{} juego se moverá a:",
@@ -1013,7 +1048,7 @@ const ES: Strings = Strings {
     extracting: "Extrayendo…",
     shortcut_ok: "Icono instalado en el menú HOME",
     shortcut_err: "No se pudo instalar el icono",
-    shortcut_removed: "Icono eliminado",
+    shortcut_removed: "Icono quitado del menú HOME",
     filter_none: "Ninguno",
     filter_scanlines: "Líneas",
     filter_crt: "CRT",
@@ -1027,7 +1062,7 @@ const ES: Strings = Strings {
     overclock_refused: "Overclock no disponible: batería muy baja.",
     set_fps: "Contador FPS",
     set_rotation: "Rotación",
-    rot_none: "Ninguna",
+    rot_none: "0°",
     rot_90: "90°",
     rot_180: "180°",
     rot_270: "270°",
@@ -1039,7 +1074,7 @@ const ES: Strings = Strings {
     cursor_hidden: "Oculto",
     lbl_on: "On",
     lbl_off: "Off",
-    opt_cover: "Carátula",
+    opt_cover: "Portada",
     opt_favorite: "Favorito",
     opt_unfavorite: "Quitar favorito",
     opt_share: "Compartir controles",
@@ -1064,7 +1099,7 @@ const ES: Strings = Strings {
     toast_folder_on: "Añadido a {}.",
     toast_folder_off_of: "Quitado de {}.",
     toast_folder_off: "Fuera de todas las carpetas",
-    toast_folder_physical: "En esta carpeta en la tarjeta. Muévelo para sacarlo.",
+    toast_folder_physical: "Su archivo está aquí: elige «Sin carpeta» para sacarlo.",
     toast_name_taken: "{} ya existe en la raíz.",
     folder_emptied: "Carpeta vaciada",
     folder_leave_n: "{} juegos salen de esta carpeta",
@@ -1072,7 +1107,7 @@ const ES: Strings = Strings {
     profile_del_confirm: "¿Borrar tu perfil compartido?",
     profile_del_ok: "Tu perfil compartido fue borrado.",
     profile_del_not_mine: "Nada que borrar desde esta consola.",
-    cover_title: "Elegir carátula",
+    cover_title: "Elegir portada",
     cover_show_logos: "Y: Logos",
     cover_show_shots: "Y: Capturas",
     cover_none: "Sin resultados",
@@ -1116,7 +1151,7 @@ const ES: Strings = Strings {
     err_json: "Respuesta del servidor ilegible. Inténtalo de nuevo en un momento.",
     err_json_no_files: "JSON sin campo \"files\"",
     err_dl_start: "No se pudo iniciar la descarga (código {}).",
-    err_dl_failed: "Descarga fallida (código {})",
+    err_dl_failed: "Transferencia interrumpida (código {}). Inténtalo de nuevo en un momento.",
     err_dl_cancelled: "Descarga cancelada.",
     err_url_invalid: "Dirección no reconocida. Escribe una página de archive.org (archive.org/details/...) o un enlace directo a un archivo .swf.",
     err_no_swf: "Esta fuente no contiene ningún juego Flash (.swf).",
@@ -1124,17 +1159,17 @@ const ES: Strings = Strings {
     err_fp_html_game: "Este juego se inicia desde una página web: aún no es compatible.",
     kbd_url_header: "Añadir una dirección",
     kbd_url_guide: "Página de archive.org (archive.org/details/...) o enlace directo a un archivo .swf",
-    kbd_rename_header: "FlashNX - Renombrar juego",
+    kbd_rename_header: "Renombrar juego",
     kbd_rename_guide: "Nombre a mostrar (déjalo vacío para volver al nombre de archivo)",
-    kbd_search_header: "FlashNX - Buscar",
-    kbd_search_guide: "Filtrar por nombre de archivo (vacio = mostrar todo)",
-    bug_no_games: "No hay juego que reportar. Importa o coloca un .swf primero.",
+    kbd_search_header: "Buscar en tu biblioteca",
+    kbd_search_guide: "Nombre del juego (vacío = mostrar todo)",
+    bug_no_games: "Todavía no hay ningún juego del que informar. Importa o coloca un .swf primero.",
     bug_ok_title: "¡Gracias!",
     bug_ok_msg: "Tu informe se envió. Gracias por ayudar a mejorar FlashNX.",
     bug_fail_title: "Fallo",
-    kbd_bug_header: "FlashNX - Reportar un fallo",
-    kbd_bug_guide: "Abre un issue público en GitHub. Describe el problema. Opcional: tu @usuario. Se adjunta un registro técnico breve.",
-    kbd_suggest_header: "FlashNX - Proponer una idea",
+    kbd_bug_header: "Informar de un error",
+    kbd_bug_guide: "Describe el problema. Tu mensaje se publica tal cual en el GitHub público de FlashNX, con un breve registro técnico. Opcional: tu @usuario de GitHub.",
+    kbd_suggest_header: "Proponer una idea",
     kbd_suggest_guide: "Tu idea para FlashNX. Se publica tal cual en el GitHub público de FlashNX.",
     suggest_ok_msg: "Tu idea se envió. Gracias por ayudar a mejorar FlashNX.",
 };
@@ -1169,8 +1204,8 @@ const RU: Strings = Strings {
     flash_left: "Влево",
     flash_right: "Вправо",
     empty_title: "Нет игр",
-    empty_l1: "Поместите файлы .swf в",
-    empty_l3: "Затем перезапустите FlashNX.",
+    empty_l1: "Помести файлы .swf в",
+    empty_l3: "Затем перезапусти FlashNX.",
     applet_title: "Режим апплета",
     applet_notice: "Для запуска игры нужна вся память приложения, которой нет в режиме апплета. В homebrew menu удерживай R на игре (или используй forwarder), чтобы запустить FlashNX со всей памятью.",
     opt_keys: "Клавиши и курсор",
@@ -1180,7 +1215,7 @@ const RU: Strings = Strings {
     opt_delete: "Удалить",
     dist_search_games: "Найти игру",
     dist_sources: "Мои источники",
-    dist_empty_hint: "Найдите игру по названию или вставьте ссылку",
+    dist_empty_hint: "Найди игру по названию или вставь ссылку",
     dist_add: "+ Добавить URL",
     dist_count: "{} URL",
     files_title: "Игры архива",
@@ -1202,7 +1237,7 @@ const RU: Strings = Strings {
     set_zoom: "Масштаб",
     set_screen_filter: "Фильтр",
     games_dir_new: "Новая папка",
-    games_dir_current: "текущая",
+    games_dir_current: "Текущая",
     games_dir_confirm: "Переместить всю библиотеку сюда?",
     games_dir_confirm_n: "Игр к перемещению: {}, в папку:",
     games_dir_confirm_1: "{} игра будет перемещена в:",
@@ -1213,7 +1248,7 @@ const RU: Strings = Strings {
     extracting: "Извлечение…",
     shortcut_ok: "Значок установлен в меню HOME",
     shortcut_err: "Не удалось установить значок",
-    shortcut_removed: "Значок удален",
+    shortcut_removed: "Значок убран из меню HOME",
     filter_none: "Нет",
     filter_scanlines: "Линии",
     filter_crt: "CRT",
@@ -1227,7 +1262,7 @@ const RU: Strings = Strings {
     overclock_refused: "Разгон недоступен: батарея разряжена.",
     set_fps: "Счётчик FPS",
     set_rotation: "Поворот",
-    rot_none: "Нет",
+    rot_none: "0°",
     rot_90: "90°",
     rot_180: "180°",
     rot_270: "270°",
@@ -1243,36 +1278,36 @@ const RU: Strings = Strings {
     opt_favorite: "Избранное",
     opt_unfavorite: "Из избранного",
     opt_share: "Поделиться клавишами",
-    profile_shared_ok: "Ваши клавиши отправлены. Спасибо за помощь сообществу.",
+    profile_shared_ok: "Твои клавиши отправлены. Спасибо за помощь сообществу.",
     opt_apply: "Применить профиль",
     profile_title: "Профили клавиш",
     profile_copy_row: "Копировать из другой игры",
     profile_copy_none: "У других игр пока нет своих клавиш",
-    profile_none: "Для этой игры пока нет профиля. Поделитесь своим!",
-    profile_catalog_offline: "Каталог недоступен. Проверьте подключение.",
+    profile_none: "Для этой игры пока нет профиля. Поделись своим!",
+    profile_catalog_offline: "Каталог недоступен. Проверь подключение.",
     profile_revert: "Вернуть мои клавиши",
-    profile_applied_ok: "Профиль применен. Ваши прежние клавиши сохранены.",
-    profile_reverted_ok: "Ваши клавиши восстановлены.",
+    profile_applied_ok: "Профиль применён. Твои прежние клавиши сохранены.",
+    profile_reverted_ok: "Твои клавиши восстановлены.",
     profile_share_confirm: "Поделиться клавишами для этой игры?",
-    share_confirm_update: "Обновит ваш общий профиль:",
+    share_confirm_update: "Обновит твой общий профиль:",
     touches_edit: "Изменить клавиши",
     touches_revert_default: "Сбросить на клавиши по умолчанию",
     profile_preview_none: "Этот профиль не меняет клавиши.",
-    profile_share_dup: "Уже в каталоге. Измените клавишу, чтобы поделиться своей версией.",
+    profile_share_dup: "Уже в каталоге. Измени клавишу, чтобы поделиться своей версией.",
     toast_already_imported: "{} уже в твоей библиотеке.",
     toast_folder_same: "Уже в этой папке.",
     toast_folder_on: "Добавлено в {}.",
     toast_folder_off_of: "Убрано из {}.",
     toast_folder_off: "Убрано из всех папок",
-    toast_folder_physical: "В этой папке на карте. Переместите его.",
+    toast_folder_physical: "Файл игры в этой папке: выбери «Без папки», чтобы вынуть его.",
     toast_name_taken: "{} уже есть в корне.",
     folder_emptied: "Папка очищена",
     folder_leave_n: "Игр покинет папку: {}",
     folder_leave_1: "{} игра покидает папку",
-    profile_del_confirm: "Удалить ваш профиль?",
-    profile_del_ok: "Ваш профиль удален из каталога.",
+    profile_del_confirm: "Удалить твой общий профиль?",
+    profile_del_ok: "Твой профиль удалён из каталога.",
     profile_del_not_mine: "Нечего удалять: не опубликовано с этой консоли.",
-    cover_title: "Выберите обложку",
+    cover_title: "Выбери обложку",
     cover_show_logos: "Y: Логотипы",
     cover_show_shots: "Y: Скриншоты",
     cover_none: "Нет результатов",
@@ -1303,20 +1338,20 @@ const RU: Strings = Strings {
     url_info_added: "Добавлено",
     histdel_msg: "Он исчезнет из твоих источников. Уже скачанные игры останутся на карте.",
     err_too_large: "Этот архив слишком велик, чтобы прочитать его здесь.",
-    err_https: "Сбой передачи ({}). Попробуйте через минуту.",
-    err_offline: "Адрес не найден (curl {}). Проверьте Wi-Fi консоли, затем DNS.",
+    err_https: "Сбой передачи ({}). Попробуй через минуту.",
+    err_offline: "Адрес не найден (curl {}). Проверь Wi-Fi консоли, затем DNS.",
     err_unreachable: "Сервер отклонил соединение (curl {}). Консоль онлайн, что-то между ней и сервером блокирует.",
-    err_timeout: "Сервер не ответил вовремя. Попробуйте снова.",
-    err_tls: "Защищённое соединение отклонено. Проверьте дату и время консоли: неверные часы ломают HTTPS.",
-    err_response_big: "Ответ слишком большой. Уточните запрос.",
+    err_timeout: "Сервер не ответил вовремя. Попробуй снова.",
+    err_tls: "Защищённое соединение отклонено. Проверь дату и время консоли: неверные часы ломают HTTPS.",
+    err_response_big: "Ответ слишком большой. Уточни запрос.",
     err_sd_write: "Не удалось записать на SD-карту. Возможно, она заполнена.",
-    err_http_status: "Сервер отклонил запрос (HTTP {}). Попробуйте позже.",
-    err_server_busy: "Сервер перегружен (HTTP {}). Ссылка верна, попробуйте через несколько минут.",
+    err_http_status: "Сервер отклонил запрос (HTTP {}). Попробуй позже.",
+    err_server_busy: "Сервер перегружен (HTTP {}). Ссылка верна, попробуй через несколько минут.",
     err_not_found: "Не найдено (404). Адрес неверный, или страница удалена.",
     err_json: "Ответ сервера не читается. Попробуй ещё раз чуть позже.",
     err_json_no_files: "В JSON нет поля \"files\"",
     err_dl_start: "Не удалось начать скачивание (код {}).",
-    err_dl_failed: "Скачивание не удалось (код {})",
+    err_dl_failed: "Передача прервана (код {}). Попробуй ещё раз чуть позже.",
     err_dl_cancelled: "Скачивание отменено.",
     err_url_invalid: "Адрес не распознан. Введи страницу archive.org (archive.org/details/...) или прямую ссылку на файл .swf.",
     err_no_swf: "В этом архиве нет игр Flash (.swf).",
@@ -1324,17 +1359,17 @@ const RU: Strings = Strings {
     err_fp_html_game: "Эта игра запускается с веб-страницы: пока не поддерживается.",
     kbd_url_header: "Добавить адрес",
     kbd_url_guide: "Страница archive.org (archive.org/details/...) или прямая ссылка на файл .swf",
-    kbd_rename_header: "FlashNX - Переименовать",
+    kbd_rename_header: "Переименовать игру",
     kbd_rename_guide: "Отображаемое имя (оставь пустым, чтобы вернуть имя файла)",
-    kbd_search_header: "FlashNX - Поиск",
-    kbd_search_guide: "Фильтр по имени файла (пусто = показать все)",
+    kbd_search_header: "Поиск в твоей библиотеке",
+    kbd_search_guide: "Название игры (пусто = показать все)",
     bug_no_games: "Пока нет игр для отчёта. Сначала импортируй или добавь .swf.",
     bug_ok_title: "Спасибо!",
     bug_ok_msg: "Отчёт отправлен. Спасибо, что помогаешь улучшить FlashNX.",
     bug_fail_title: "Ошибка",
-    kbd_bug_header: "FlashNX - Сообщить об ошибке",
-    kbd_bug_guide: "Откроет публичную issue на GitHub. Опиши проблему. По желанию: твой @ник. Прилагается краткий технический лог.",
-    kbd_suggest_header: "FlashNX - Предложить идею",
+    kbd_bug_header: "Сообщить об ошибке",
+    kbd_bug_guide: "Опиши проблему. Сообщение публикуется как есть на открытом GitHub FlashNX вместе с коротким техническим журналом. По желанию: твой @ник на GitHub.",
+    kbd_suggest_header: "Предложить идею",
     kbd_suggest_guide: "Твоя идея для FlashNX. Она будет опубликована как есть на открытом GitHub FlashNX.",
     suggest_ok_msg: "Идея отправлена. Спасибо, что помогаешь улучшить FlashNX.",
 };
@@ -1402,7 +1437,7 @@ const DE: Strings = Strings {
     set_zoom: "Zoom",
     set_screen_filter: "Filter",
     games_dir_new: "Neuer Ordner",
-    games_dir_current: "aktuell",
+    games_dir_current: "Aktuell",
     games_dir_confirm: "Ganze Bibliothek hierher verschieben?",
     games_dir_confirm_n: "{} Spiele werden verschoben nach:",
     games_dir_confirm_1: "{} Spiel wird verschoben nach:",
@@ -1411,9 +1446,9 @@ const DE: Strings = Strings {
     kbd_newdir_guide: "Name des neuen Ordners (ohne / und :)",
     games_dir_moving: "Verschieben…",
     extracting: "Entpacken…",
-    shortcut_ok: "Kachel im HOME-Menü installiert",
-    shortcut_err: "Kachel konnte nicht installiert werden",
-    shortcut_removed: "Kachel entfernt",
+    shortcut_ok: "Symbol im HOME-Menü installiert",
+    shortcut_err: "Symbol konnte nicht installiert werden",
+    shortcut_removed: "Symbol aus dem HOME-Menü entfernt",
     filter_none: "Keiner",
     filter_scanlines: "Linien",
     filter_crt: "CRT",
@@ -1427,7 +1462,7 @@ const DE: Strings = Strings {
     overclock_refused: "Overclock nicht verfügbar: Akku zu schwach.",
     set_fps: "FPS-Anzeige",
     set_rotation: "Drehung",
-    rot_none: "Keine",
+    rot_none: "0°",
     rot_90: "90°",
     rot_180: "180°",
     rot_270: "270°",
@@ -1464,7 +1499,7 @@ const DE: Strings = Strings {
     toast_folder_on: "Zu {} hinzugefügt.",
     toast_folder_off_of: "Aus {} entfernt.",
     toast_folder_off: "Aus allen Ordnern entfernt",
-    toast_folder_physical: "Auf der Karte in diesem Ordner. Zum Entfernen verschieben.",
+    toast_folder_physical: "Die Datei liegt hier: Wähle „Kein Ordner“ zum Herausnehmen.",
     toast_name_taken: "{} existiert bereits im Stammverzeichnis.",
     folder_emptied: "Ordner geleert",
     folder_leave_n: "{} Spiele verlassen diesen Ordner",
@@ -1516,7 +1551,7 @@ const DE: Strings = Strings {
     err_json: "Antwort des Servers unlesbar. Versuche es gleich noch einmal.",
     err_json_no_files: "JSON ohne \"files\"-Feld",
     err_dl_start: "Download konnte nicht gestartet werden (Code {}).",
-    err_dl_failed: "Download fehlgeschlagen (Code {})",
+    err_dl_failed: "Übertragung abgebrochen (Code {}). Versuche es gleich noch einmal.",
     err_dl_cancelled: "Download abgebrochen.",
     err_url_invalid: "Adresse nicht erkannt. Gib eine archive.org-Seite (archive.org/details/...) oder einen direkten Link zu einer .swf-Datei ein.",
     err_no_swf: "Dieses Archiv enthält kein Flash-Spiel (.swf).",
@@ -1524,17 +1559,17 @@ const DE: Strings = Strings {
     err_fp_html_game: "Dieses Spiel startet von einer Webseite: noch nicht unterstützt.",
     kbd_url_header: "Adresse hinzufügen",
     kbd_url_guide: "archive.org-Seite (archive.org/details/...) oder direkter Link zu einer .swf-Datei",
-    kbd_rename_header: "FlashNX - Spiel umbenennen",
+    kbd_rename_header: "Spiel umbenennen",
     kbd_rename_guide: "Anzeigename (leer lassen, um zum Dateinamen zurückzukehren)",
-    kbd_search_header: "FlashNX - Suche",
-    kbd_search_guide: "Nach Dateiname filtern (leer = alles anzeigen)",
+    kbd_search_header: "In deiner Bibliothek suchen",
+    kbd_search_guide: "Spielname (leer = alles anzeigen)",
     bug_no_games: "Noch kein Spiel zu melden. Importiere oder lege zuerst eine .swf ab.",
     bug_ok_title: "Danke!",
     bug_ok_msg: "Dein Bericht wurde gesendet. Danke, dass du hilfst, FlashNX zu verbessern.",
     bug_fail_title: "Fehlgeschlagen",
-    kbd_bug_header: "FlashNX - Fehler melden",
-    kbd_bug_guide: "Öffnet ein öffentliches GitHub-Issue. Beschreibe das Problem. Optional: dein @Name. Ein kurzes technisches Protokoll wird angehängt.",
-    kbd_suggest_header: "FlashNX - Idee vorschlagen",
+    kbd_bug_header: "Fehler melden",
+    kbd_bug_guide: "Beschreibe das Problem. Deine Nachricht erscheint unverändert auf dem öffentlichen GitHub von FlashNX, mit einem kurzen technischen Protokoll. Optional: dein GitHub-@Name.",
+    kbd_suggest_header: "Idee vorschlagen",
     kbd_suggest_guide: "Deine Idee für FlashNX. Sie erscheint unverändert auf dem öffentlichen GitHub von FlashNX.",
     suggest_ok_msg: "Deine Idee wurde gesendet. Danke, dass du hilfst, FlashNX zu verbessern.",
 };
@@ -1592,7 +1627,7 @@ const IT: Strings = Strings {
     err_footer: "A/B:OK",
     err_footer_fix: "A/B:OK   Y:Correggi l'URL",
     set_keys: "Comandi predefiniti",
-    set_pseudo: "Soprannome",
+    set_pseudo: "Nickname",
     kbd_pseudo_guide: "Il tuo nome, accanto ai profili condivisi",
     set_cursor_speed: "Velocità cursore",
     set_display_mode: "Schermo",
@@ -1602,7 +1637,7 @@ const IT: Strings = Strings {
     set_zoom: "Zoom",
     set_screen_filter: "Filtro",
     games_dir_new: "Nuova cartella",
-    games_dir_current: "in uso",
+    games_dir_current: "In uso",
     games_dir_confirm: "Spostare qui tutta la libreria?",
     games_dir_confirm_n: "{} giochi saranno spostati in:",
     games_dir_confirm_1: "{} gioco sarà spostato in:",
@@ -1613,7 +1648,7 @@ const IT: Strings = Strings {
     extracting: "Estrazione…",
     shortcut_ok: "Icona installata nel menu HOME",
     shortcut_err: "Impossibile installare l'icona",
-    shortcut_removed: "Icona rimossa",
+    shortcut_removed: "Icona rimossa dal menu HOME",
     filter_none: "Nessuno",
     filter_scanlines: "Linee",
     filter_crt: "CRT",
@@ -1627,7 +1662,7 @@ const IT: Strings = Strings {
     overclock_refused: "Overclock non disponibile: batteria troppo bassa.",
     set_fps: "Contatore FPS",
     set_rotation: "Rotazione",
-    rot_none: "Nessuna",
+    rot_none: "0°",
     rot_90: "90°",
     rot_180: "180°",
     rot_270: "270°",
@@ -1664,7 +1699,7 @@ const IT: Strings = Strings {
     toast_folder_on: "Aggiunto a {}.",
     toast_folder_off_of: "Rimosso da {}.",
     toast_folder_off: "Rimosso da tutte le cartelle",
-    toast_folder_physical: "In questa cartella sulla scheda. Spostalo per toglierlo.",
+    toast_folder_physical: "Il file è qui: scegli «Nessuna cartella» per toglierlo.",
     toast_name_taken: "{} esiste già nella radice.",
     folder_emptied: "Cartella svuotata",
     folder_leave_n: "{} giochi lasciano questa cartella",
@@ -1716,7 +1751,7 @@ const IT: Strings = Strings {
     err_json: "Risposta del server illeggibile. Riprova tra un attimo.",
     err_json_no_files: "JSON senza campo \"files\"",
     err_dl_start: "Impossibile avviare il download (codice {}).",
-    err_dl_failed: "Download fallito (codice {})",
+    err_dl_failed: "Trasferimento interrotto (codice {}). Riprova tra un attimo.",
     err_dl_cancelled: "Download annullato.",
     err_url_invalid: "Indirizzo non riconosciuto. Scrivi una pagina archive.org (archive.org/details/...) o un link diretto a un file .swf.",
     err_no_swf: "Questo archivio non contiene giochi Flash (.swf).",
@@ -1724,17 +1759,17 @@ const IT: Strings = Strings {
     err_fp_html_game: "Questo gioco si avvia da una pagina web: non ancora supportato.",
     kbd_url_header: "Aggiungi un indirizzo",
     kbd_url_guide: "Pagina archive.org (archive.org/details/...) o link diretto a un file .swf",
-    kbd_rename_header: "FlashNX - Rinomina gioco",
+    kbd_rename_header: "Rinomina gioco",
     kbd_rename_guide: "Nome visualizzato (lascia vuoto per tornare al nome del file)",
-    kbd_search_header: "FlashNX - Cerca",
-    kbd_search_guide: "Filtra per nome file (vuoto = mostra tutto)",
+    kbd_search_header: "Cerca nella tua libreria",
+    kbd_search_guide: "Nome del gioco (vuoto = mostra tutto)",
     bug_no_games: "Nessun gioco da segnalare. Importa o inserisci prima un .swf.",
     bug_ok_title: "Grazie!",
     bug_ok_msg: "La tua segnalazione è stata inviata. Grazie per aiutare a migliorare FlashNX.",
     bug_fail_title: "Fallito",
-    kbd_bug_header: "FlashNX - Segnala un bug",
-    kbd_bug_guide: "Apre una issue pubblica su GitHub. Descrivi il problema. Facoltativo: il tuo @nome. Viene allegato un breve log tecnico.",
-    kbd_suggest_header: "FlashNX - Proponi un'idea",
+    kbd_bug_header: "Segnala un bug",
+    kbd_bug_guide: "Descrivi il problema. Il messaggio viene pubblicato così com'è sul GitHub pubblico di FlashNX, con un breve registro tecnico. Facoltativo: il tuo @nome GitHub.",
+    kbd_suggest_header: "Proponi un'idea",
     kbd_suggest_guide: "La tua idea per FlashNX. Viene pubblicata così com'è sul GitHub pubblico di FlashNX.",
     suggest_ok_msg: "La tua idea è stata inviata. Grazie per aiutare a migliorare FlashNX.",
 };
@@ -1802,7 +1837,7 @@ const PT: Strings = Strings {
     set_zoom: "Zoom",
     set_screen_filter: "Filtro",
     games_dir_new: "Nova pasta",
-    games_dir_current: "em uso",
+    games_dir_current: "Em uso",
     games_dir_confirm: "Mover toda a biblioteca para cá?",
     games_dir_confirm_n: "{} jogos serão movidos para:",
     games_dir_confirm_1: "{} jogo será movido para:",
@@ -1813,7 +1848,7 @@ const PT: Strings = Strings {
     extracting: "Extraindo…",
     shortcut_ok: "Ícone instalado no menu HOME",
     shortcut_err: "Não foi possível instalar o ícone",
-    shortcut_removed: "Ícone removido",
+    shortcut_removed: "Ícone removido do menu HOME",
     filter_none: "Nenhum",
     filter_scanlines: "Linhas",
     filter_crt: "CRT",
@@ -1827,7 +1862,7 @@ const PT: Strings = Strings {
     overclock_refused: "Overclock indisponível: bateria fraca.",
     set_fps: "Contador FPS",
     set_rotation: "Rotação",
-    rot_none: "Nenhuma",
+    rot_none: "0°",
     rot_90: "90°",
     rot_180: "180°",
     rot_270: "270°",
@@ -1864,7 +1899,7 @@ const PT: Strings = Strings {
     toast_folder_on: "Adicionado a {}.",
     toast_folder_off_of: "Removido de {}.",
     toast_folder_off: "Fora de todas as pastas",
-    toast_folder_physical: "Nesta pasta no cartão. Mova-o para tirar.",
+    toast_folder_physical: "O arquivo está aqui: escolha “Sem pasta” para tirá-lo.",
     toast_name_taken: "{} já existe na raiz.",
     folder_emptied: "Pasta esvaziada",
     folder_leave_n: "{} jogos saem desta pasta",
@@ -1916,7 +1951,7 @@ const PT: Strings = Strings {
     err_json: "Resposta do servidor ilegível. Tente de novo em instantes.",
     err_json_no_files: "JSON sem o campo \"files\"",
     err_dl_start: "Não foi possível iniciar o download (código {}).",
-    err_dl_failed: "Falha no download (código {})",
+    err_dl_failed: "Transferência interrompida (código {}). Tente de novo em instantes.",
     err_dl_cancelled: "Download cancelado.",
     err_url_invalid: "Endereço não reconhecido. Digite uma página do archive.org (archive.org/details/...) ou um link direto para um arquivo .swf.",
     err_no_swf: "Esta fonte não contém nenhum jogo Flash (.swf).",
@@ -1924,17 +1959,17 @@ const PT: Strings = Strings {
     err_fp_html_game: "Este jogo inicia a partir de uma página web: ainda não suportado.",
     kbd_url_header: "Adicionar um endereço",
     kbd_url_guide: "Página do archive.org (archive.org/details/...) ou link direto para um arquivo .swf",
-    kbd_rename_header: "FlashNX - Renomear jogo",
+    kbd_rename_header: "Renomear jogo",
     kbd_rename_guide: "Nome de exibição (deixe vazio para voltar ao nome do arquivo)",
-    kbd_search_header: "FlashNX - Buscar",
-    kbd_search_guide: "Filtrar por nome de arquivo (vazio = mostrar tudo)",
+    kbd_search_header: "Pesquisar na sua biblioteca",
+    kbd_search_guide: "Nome do jogo (vazio = mostrar tudo)",
     bug_no_games: "Nenhum jogo para relatar. Importe ou coloque um .swf primeiro.",
     bug_ok_title: "Obrigado!",
     bug_ok_msg: "Seu relato foi enviado. Obrigado por ajudar a melhorar o FlashNX.",
     bug_fail_title: "Falhou",
-    kbd_bug_header: "FlashNX - Relatar um bug",
-    kbd_bug_guide: "Abre uma issue pública no GitHub. Descreva o problema. Opcional: seu @usuário. Um breve log técnico é anexado.",
-    kbd_suggest_header: "FlashNX - Sugerir uma ideia",
+    kbd_bug_header: "Relatar um erro",
+    kbd_bug_guide: "Descreva o problema. Sua mensagem é publicada como está no GitHub público do FlashNX, com um registro técnico curto. Opcional: seu @usuário do GitHub.",
+    kbd_suggest_header: "Sugerir uma ideia",
     kbd_suggest_guide: "Sua ideia para o FlashNX. Ela é publicada como está no GitHub público do FlashNX.",
     suggest_ok_msg: "Sua ideia foi enviada. Obrigado por ajudar a melhorar o FlashNX.",
 };
@@ -2012,9 +2047,9 @@ const ZH: Strings = Strings {
     kbd_newdir_guide: "要创建的文件夹名称（不含 / 和 :）",
     games_dir_moving: "移动中…",
     extracting: "解压中…",
-    shortcut_ok: "图标已安装到主页菜单",
+    shortcut_ok: "图标已安装到 HOME 菜单",
     shortcut_err: "无法安装图标",
-    shortcut_removed: "图标已移除",
+    shortcut_removed: "图标已从 HOME 菜单移除",
     filter_none: "无",
     filter_scanlines: "扫描线",
     filter_crt: "CRT",
@@ -2028,7 +2063,7 @@ const ZH: Strings = Strings {
     overclock_refused: "超频不可用：电量过低。",
     set_fps: "帧率显示",
     set_rotation: "旋转",
-    rot_none: "无",
+    rot_none: "0°",
     rot_90: "90°",
     rot_180: "180°",
     rot_270: "270°",
@@ -2065,7 +2100,7 @@ const ZH: Strings = Strings {
     toast_folder_on: "已加入 {}。",
     toast_folder_off_of: "已移出 {}。",
     toast_folder_off: "已移出所有文件夹",
-    toast_folder_physical: "卡上位于此文件夹。需移动文件才能移出。",
+    toast_folder_physical: "游戏文件在此文件夹中：选择“无文件夹”即可移出。",
     toast_name_taken: "{} 已在根目录中。",
     folder_emptied: "文件夹已清空",
     folder_leave_n: "{} 个游戏离开此文件夹",
@@ -2117,7 +2152,7 @@ const ZH: Strings = Strings {
     err_json: "服务器的回应无法读取。请稍后重试。",
     err_json_no_files: "JSON 中没有 \"files\" 字段",
     err_dl_start: "无法开始下载（代码 {}）。",
-    err_dl_failed: "下载失败（代码 {}）",
+    err_dl_failed: "传输中断（代码 {}）。请稍后重试。",
     err_dl_cancelled: "下载已取消。",
     err_url_invalid: "无法识别这个地址。请输入 archive.org 页面（archive.org/details/...）或 .swf 文件直链。",
     err_no_swf: "此存档中没有 Flash 游戏（.swf）。",
@@ -2125,17 +2160,17 @@ const ZH: Strings = Strings {
     err_fp_html_game: "此游戏需要从网页启动：暂不支持。",
     kbd_url_header: "添加地址",
     kbd_url_guide: "archive.org 页面（archive.org/details/...）或 .swf 文件直链",
-    kbd_rename_header: "FlashNX - 重命名游戏",
+    kbd_rename_header: "重命名游戏",
     kbd_rename_guide: "显示名称（留空以恢复文件名）",
-    kbd_search_header: "FlashNX - 搜索",
-    kbd_search_guide: "按文件名筛选（留空 = 显示全部）",
+    kbd_search_header: "搜索你的游戏库",
+    kbd_search_guide: "游戏名称（留空 = 显示全部）",
     bug_no_games: "暂无可报告的游戏。请先导入或放入一个 .SWF。",
     bug_ok_title: "谢谢！",
     bug_ok_msg: "你的报告已发送。感谢你帮助改进 FlashNX。",
     bug_fail_title: "失败",
-    kbd_bug_header: "FlashNX - 报告问题",
-    kbd_bug_guide: "将打开一个公开的 GitHub issue。请描述问题。可选：你的 @用户名。将附带一份简短的技术日志。",
-    kbd_suggest_header: "FlashNX - 提出建议",
+    kbd_bug_header: "报告问题",
+    kbd_bug_guide: "请描述问题。你的留言会原样发布到 FlashNX 的公开 GitHub 上，并附带一小段技术日志。可选：你的 GitHub @用户名。",
+    kbd_suggest_header: "提出建议",
     kbd_suggest_guide: "你对 FlashNX 的想法。它会原样发布到 FlashNX 的公开 GitHub 上。",
     suggest_ok_msg: "你的想法已发送。感谢你帮助改进 FlashNX。",
 };
@@ -2170,8 +2205,8 @@ const TR: Strings = Strings {
     flash_left: "Sol",
     flash_right: "Sağ",
     empty_title: "Oyun yok",
-    empty_l1: ".swf dosyalarını şuraya koyun",
-    empty_l3: "Sonra FlashNX'ı yeniden başlatın.",
+    empty_l1: ".swf dosyalarını şuraya koy",
+    empty_l3: "Sonra FlashNX'i yeniden başlat.",
     applet_title: "Applet modu",
     applet_notice: "Bir oyun başlatmak uygulamanın tüm belleğini gerektirir; applet modunda bu bellek yoktur. Homebrew menüsünde bir oyunun (veya forwarder'ın) üzerinde R tuşunu basılı tutarak FlashNX'i tam bellekle başlat.",
     opt_keys: "Kontroller ve imleç",
@@ -2181,7 +2216,7 @@ const TR: Strings = Strings {
     opt_delete: "Sil",
     dist_search_games: "Oyun ara",
     dist_sources: "Kaynaklarım",
-    dist_empty_hint: "Oyunu adıyla arayın veya bir adres yapıştırın",
+    dist_empty_hint: "Oyunu adıyla ara veya bir adres yapıştır",
     dist_add: "+ URL ekle",
     dist_count: "{} URL",
     files_title: "Arşivdeki oyunlar",
@@ -2203,7 +2238,7 @@ const TR: Strings = Strings {
     set_zoom: "Zoom",
     set_screen_filter: "Filtre",
     games_dir_new: "Yeni klasör",
-    games_dir_current: "kullanımda",
+    games_dir_current: "Kullanımda",
     games_dir_confirm: "Tüm kütüphane buraya taşınsın mı?",
     games_dir_confirm_n: "{} oyun şuraya taşınacak:",
     games_dir_confirm_1: "{} oyun şuraya taşınacak:",
@@ -2212,9 +2247,9 @@ const TR: Strings = Strings {
     kbd_newdir_guide: "Oluşturulacak klasörün adı (/ ve : olmadan)",
     games_dir_moving: "Taşınıyor…",
     extracting: "Çıkartılıyor…",
-    shortcut_ok: "Kutucuk ana menüye eklendi",
-    shortcut_err: "Kutucuk yüklenemedi",
-    shortcut_removed: "Kutucuk kaldırıldı",
+    shortcut_ok: "Simge HOME menüsüne eklendi",
+    shortcut_err: "Simge yüklenemedi",
+    shortcut_removed: "Simge HOME menüsünden kaldırıldı",
     filter_none: "Yok",
     filter_scanlines: "Çizgiler",
     filter_crt: "CRT",
@@ -2228,7 +2263,7 @@ const TR: Strings = Strings {
     overclock_refused: "Overclock kullanılamaz: pil çok düşük.",
     set_fps: "FPS sayacı",
     set_rotation: "Döndürme",
-    rot_none: "Yok",
+    rot_none: "0°",
     rot_90: "90°",
     rot_180: "180°",
     rot_270: "270°",
@@ -2265,7 +2300,7 @@ const TR: Strings = Strings {
     toast_folder_on: "{} klasörüne eklendi",
     toast_folder_off_of: "{} klasöründen çıkarıldı",
     toast_folder_off: "Tüm klasörlerden çıkarıldı",
-    toast_folder_physical: "Kartta bu klasörde. Çıkarmak için taşıyın.",
+    toast_folder_physical: "Dosyası burada: çıkarmak için “Klasörsüz”ü seç.",
     toast_name_taken: "{} kök dizinde zaten var.",
     folder_emptied: "Klasör boşaltıldı",
     folder_leave_n: "{} oyun bu klasörden çıkacak",
@@ -2304,38 +2339,38 @@ const TR: Strings = Strings {
     url_info_added: "Eklendi:",
     histdel_msg: "Kaynaklarından kalkar. İndirilmiş oyunlar kartta kalır.",
     err_too_large: "Bu arşiv burada okunamayacak kadar büyük.",
-    err_https: "Aktarım başarısız ({}). Biraz sonra tekrar deneyin.",
-    err_offline: "Adres bulunamadı (curl {}). Konsolun Wi-Fi bağlantısını, sonra DNS'ini kontrol edin.",
+    err_https: "Aktarım başarısız ({}). Biraz sonra tekrar dene.",
+    err_offline: "Adres bulunamadı (curl {}). Konsolun Wi-Fi bağlantısını, sonra DNS'ini kontrol et.",
     err_unreachable: "Sunucu bağlantıyı reddetti (curl {}). Konsol çevrimiçi, arada bir şey engelliyor.",
-    err_timeout: "Sunucu zamanında yanıt vermedi. Tekrar deneyin.",
-    err_tls: "Güvenli bağlantı reddedildi. Konsolun tarih ve saatini kontrol edin: yanlış saat HTTPS'i bozar.",
-    err_response_big: "Yanıt çok büyük. Daha dar bir arama deneyin.",
+    err_timeout: "Sunucu zamanında yanıt vermedi. Tekrar dene.",
+    err_tls: "Güvenli bağlantı reddedildi. Konsolun tarih ve saatini kontrol et: yanlış saat HTTPS'i bozar.",
+    err_response_big: "Yanıt çok büyük. Daha dar bir arama dene.",
     err_sd_write: "SD karta yazılamadı. Dolu olabilir.",
-    err_http_status: "Sunucu isteği reddetti (HTTP {}). Daha sonra deneyin.",
-    err_server_busy: "Sunucu aşırı yüklü (HTTP {}). Bağlantı doğru, birkaç dakika sonra deneyin.",
+    err_http_status: "Sunucu isteği reddetti (HTTP {}). Daha sonra dene.",
+    err_server_busy: "Sunucu aşırı yüklü (HTTP {}). Bağlantı doğru, birkaç dakika sonra dene.",
     err_not_found: "Bulunamadı (404). Adres yanlış ya da sayfa kaldırılmış.",
     err_json: "Sunucu yanıtı okunamadı. Birazdan tekrar dene.",
     err_json_no_files: "JSON'da \"files\" alanı yok",
     err_dl_start: "İndirme başlatılamadı (kod {}).",
-    err_dl_failed: "İndirme başarısız (kod {})",
+    err_dl_failed: "Aktarım kesildi (kod {}). Birazdan tekrar dene.",
     err_dl_cancelled: "İndirme iptal edildi.",
     err_url_invalid: "Adres tanınmadı. Bir archive.org sayfası (archive.org/details/...) veya bir .swf dosyasına doğrudan bağlantı yaz.",
     err_no_swf: "Bu arşivde Flash oyunu (.swf) yok.",
-    err_dl_not_a_game: "İndirme bir oyun dosyası döndürmedi. Adresi kontrol edin.",
+    err_dl_not_a_game: "İndirme bir oyun dosyası döndürmedi. Adresi kontrol et.",
     err_fp_html_game: "Bu oyun bir web sayfasından başlıyor: henüz desteklenmiyor.",
     kbd_url_header: "Adres ekle",
     kbd_url_guide: "archive.org sayfası (archive.org/details/...) veya bir .swf dosyasına doğrudan bağlantı",
-    kbd_rename_header: "FlashNX - Oyunu yeniden adlandır",
-    kbd_rename_guide: "Görünen ad (dosya adına dönmek için boş bırakın)",
-    kbd_search_header: "FlashNX - Ara",
-    kbd_search_guide: "Dosya adına göre filtrele (boş = hepsini göster)",
+    kbd_rename_header: "Oyunu yeniden adlandır",
+    kbd_rename_guide: "Görünen ad (dosya adına dönmek için boş bırak)",
+    kbd_search_header: "Kütüphanende ara",
+    kbd_search_guide: "Oyun adı (boş = hepsini göster)",
     bug_no_games: "Bildirilecek oyun yok. Önce bir .swf içe aktar ya da kopyala.",
     bug_ok_title: "Teşekkürler!",
     bug_ok_msg: "Raporun gönderildi. FlashNX'i geliştirmeye yardım ettiğin için teşekkürler.",
     bug_fail_title: "Başarısız",
-    kbd_bug_header: "FlashNX - Hata bildir",
-    kbd_bug_guide: "Herkese açık bir GitHub konusu açar. Sorunu anlat. İsteğe bağlı: @kullanıcı adın. Kısa bir teknik günlük eklenir.",
-    kbd_suggest_header: "FlashNX - Fikir öner",
+    kbd_bug_header: "Hata bildir",
+    kbd_bug_guide: "Sorunu anlat. Mesajın, kısa bir teknik günlükle birlikte FlashNX'in herkese açık GitHub sayfasında olduğu gibi yayımlanır. İsteğe bağlı: GitHub @kullanıcı adın.",
+    kbd_suggest_header: "Fikir öner",
     kbd_suggest_guide: "FlashNX için fikrin. FlashNX'in herkese açık GitHub sayfasında olduğu gibi yayımlanır.",
     suggest_ok_msg: "Fikrin gönderildi. FlashNX'i geliştirmeye yardım ettiğin için teşekkürler.",
 };
@@ -2362,7 +2397,7 @@ pub fn set(lang: Lang) {
     CURRENT.store(lang.index() as u8, Ordering::Relaxed);
 }
 
-/// v1.2.0 — whether the per-game "JAQUETTE" action may reach Flashpoint to
+/// v1.2.0: whether the per-game "Jaquette" action may reach Flashpoint to
 /// fetch cover art. OFF by default: with it off, FlashNX makes ZERO unsolicited
 /// network requests (covers come only from local sidecars/cache). Persisted in
 /// settings.json alongside the language.
@@ -2738,7 +2773,7 @@ pub fn err_dl_start(code: i32) -> std::string::String {
 pub fn err_dl_failed(code: i32) -> std::string::String {
     fill(s().err_dl_failed, &code.to_string())
 }
-/// HTTP status the server answered with (>= 400). 404 gets its own wording —
+/// HTTP status the server answered with (>= 400). 404 gets its own wording:
 /// "not found" is a different action for the user than "the server said no".
 pub fn err_http_status(code: i64) -> std::string::String {
     if code == 404 {
@@ -2872,7 +2907,7 @@ fn write_settings(lang: Lang, covers: bool) -> bool {
 }
 
 /// Persist the chosen language. Best-effort. (The covers-online flag is always
-/// on in v1.2.0 — no toggle — but stays in the file for forward-compat.)
+/// on in v1.2.0, with no toggle, but stays in the file for forward-compat.)
 pub fn save(lang: Lang) -> bool {
     write_settings(lang, covers_online())
 }

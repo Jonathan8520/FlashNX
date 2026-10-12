@@ -100,10 +100,12 @@ pub fn search(
     net::log(&std::format!("flashpoint: {} bytes received\n", bytes.len()));
     let json: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|e| crate::loc::err_json(&e.to_string()))?;
-    // db-api returns a top-level JSON array of game objects.
+    // db-api returns a top-level JSON array of game objects. Anything else is
+    // an unreadable answer, as the game search says (gamezip::parse_search):
+    // the archive.org wording this borrowed named a field Flashpoint never had.
     let arr = json
         .as_array()
-        .ok_or_else(|| std::string::String::from(crate::loc::s().err_json_no_files))?;
+        .ok_or_else(|| std::string::String::from(crate::loc_ui::ui().imp_err_fp_unreadable))?;
     let mut out: std::vec::Vec<CatalogEntry> = std::vec::Vec::new();
     for g in arr {
         let id = g.get("id").and_then(|v| v.as_str()).unwrap_or("");

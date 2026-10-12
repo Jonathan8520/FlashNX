@@ -196,7 +196,9 @@ extern "C" int  ruffle_keyboard_submit(const char* text);
 // into the movie when no editable field is focused to receive it.
 extern "C" void ruffle_keyboard_request_manual(void);
 extern "C" int  ruffle_keyboard_type_text(const char* text);
-extern "C" int  swkbd_prompt_game_field(const char* initial, int flags, int maxlen, char* out, int cap);
+// The keyboard's title in the menu language (Rust string tables).
+extern "C" int  ruffle_keyboard_header(char* out, int cap);
+extern "C" int  swkbd_prompt_game_field(const char* header, const char* initial, int flags, int maxlen, char* out, int cap);
 
 // Switch key codes (must match SK_* constants in rust/src/lib.rs).
 enum SwitchKey {
@@ -2314,9 +2316,11 @@ static void worker_entry(void* arg) {
         if (ruffle_keyboard_take_request()) {
             char kbd_prefill[4096];
             char kbd_out[4096];
+            char kbd_header[256];
             int  kbd_flags = 0, kbd_max = 0;
+            if (!ruffle_keyboard_header(kbd_header, sizeof(kbd_header))) kbd_header[0] = '\0';
             if (ruffle_keyboard_field(kbd_prefill, sizeof(kbd_prefill), &kbd_flags, &kbd_max)) {
-                if (swkbd_prompt_game_field(kbd_prefill, kbd_flags, kbd_max,
+                if (swkbd_prompt_game_field(kbd_header, kbd_prefill, kbd_flags, kbd_max,
                                             kbd_out, sizeof(kbd_out)) == 0) {
                     ruffle_keyboard_submit(kbd_out);
                 }
@@ -2326,7 +2330,7 @@ static void worker_entry(void* arg) {
                 // the keyboard action was pressed on purpose, so open an empty
                 // one and TYPE the result into the game instead of doing nothing.
                 kbd_prefill[0] = '\0';
-                if (swkbd_prompt_game_field(kbd_prefill, 0, 0,
+                if (swkbd_prompt_game_field(kbd_header, kbd_prefill, 0, 0,
                                             kbd_out, sizeof(kbd_out)) == 0) {
                     ruffle_keyboard_type_text(kbd_out);
                 }

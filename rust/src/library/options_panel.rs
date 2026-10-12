@@ -228,7 +228,7 @@ pub(crate) fn with_options_sheet<R>(
     let fav = crate::favorites::is_favorite(&entry.basename);
     let shelves = shelves_value(entry);
     let display_opts = [lc.display_fit, lc.display_stretch, lc.display_fill];
-    let rot_opts = ["0°", lc.rot_90, lc.rot_180, lc.rot_270];
+    let rot_opts = [lc.rot_none, lc.rot_90, lc.rot_180, lc.rot_270];
     let pix_opts = [lc.pixels_auto, lc.pixels_smooth, lc.pixels_sharp];
     let filter_opts = [lc.filter_none, lc.filter_scanlines, lc.filter_crt];
     let oc_opts = [lc.overclock_off, lc.pixels_auto, lc.overclock_on];
@@ -576,7 +576,7 @@ fn draw_family_panels(backend: &mut SwitchRenderBackend, entry: &Entry, opt_sel:
                         )
                     })
                     .unwrap_or_default();
-                let crumbs = [u.hint_options, lc.menu_keys, lc.profile_title];
+                let crumbs = [u.hint_options, lc.menu_keys, u.shared_profiles];
                 let hints = [(&[Btn::A][..], u.apply), (&[Btn::B][..], u.back)];
                 menu::with_diff_view(b, &crumbs, &name, Some(u.preview_sub), &rows, &hints, |b, c| {
                     cascade(b, parent, Some(c))
@@ -769,7 +769,7 @@ fn draw_family_dialog(backend: &mut SwitchRenderBackend, screen: Screen, entry: 
                         if c.developer.is_empty() {
                             c.title.clone()
                         } else {
-                            std::format!("{} - {}", c.title, c.developer)
+                            std::format!("{}  \u{00B7}  {}", c.title, c.developer)
                         }
                     })
                     .collect();

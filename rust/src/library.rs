@@ -5533,7 +5533,8 @@ fn run_new_game_folder_flow(game_idx: usize) {
             .get(game_idx)
             .is_some_and(|e| on_shelf(e, &safe));
         if already {
-            set_toast(&mut s, crate::loc::s().toast_folder_same.to_string(), TOAST_ERR);
+            // News, not a failure: nothing went wrong, there was nothing to do.
+            set_toast(&mut s, crate::loc::s().toast_folder_same.to_string(), TOAST_INFO);
         } else {
             apply_game_folder(&mut s, game_idx, &safe);
         }
@@ -5660,7 +5661,7 @@ fn run_open_share_confirm_flow(game_idx: usize) {
     if let Some(r) = keymap::cursor_diff_row(before_cursor, keymap::cursor_speed_for(&basename)) {
         rows.push(r);
     }
-    let rows = cap_preview_rows(rows);
+    let rows = menu::cap_rows(rows);
     if let Ok(mut s) = LIBRARY.lock() {
         s.preview_rows = rows;
         s.share_is_update = is_update;
@@ -5919,7 +5920,7 @@ fn run_open_preview_flow(game_idx: usize, profile_idx: usize) {
         return;
     }
     if let Ok(mut s) = LIBRARY.lock() {
-        s.preview_rows = cap_preview_rows(rows);
+        s.preview_rows = menu::cap_rows(rows);
         s.screen = Screen::ProfilePreview { game_idx, profile_idx };
     }
 }
@@ -5936,22 +5937,11 @@ fn run_open_revert_preview_flow(game_idx: usize) {
     };
     let current = keymap::effective_for(&basename);
     let target = keymap::revert_target(&basename);
-    let rows = cap_preview_rows(keymap::binding_diff_rows(&current, &target));
+    let rows = menu::cap_rows(keymap::binding_diff_rows(&current, &target));
     if let Ok(mut s) = LIBRARY.lock() {
         s.preview_rows = rows; // may be empty — revert still clears the active tag
         s.screen = Screen::RevertPreview { game_idx };
     }
-}
-
-/// Cap a diff list so the auto-sized modal still fits the screen, noting overflow.
-fn cap_preview_rows(mut rows: std::vec::Vec<std::string::String>) -> std::vec::Vec<std::string::String> {
-    const MAX_PREVIEW_ROWS: usize = 8;
-    if rows.len() > MAX_PREVIEW_ROWS {
-        let extra = rows.len() - MAX_PREVIEW_ROWS;
-        rows.truncate(MAX_PREVIEW_ROWS);
-        rows.push(std::format!("(+{} ...)", extra));
-    }
-    rows
 }
 
 /// A on the preview (#20): actually apply the profile. Hoisted so the popularity
@@ -5973,7 +5963,8 @@ fn run_profile_apply_flow(game_idx: usize, profile_idx: usize) {
         crate::profiles::record_applied(&profile.id);
     }
     let lc = crate::loc::s();
-    let msg = if ok { lc.profile_applied_ok } else { lc.bug_fail_title };
+    // Saying what failed and why: "Échec" alone was the old bug window's title.
+    let msg = if ok { lc.profile_applied_ok } else { crate::loc_ui::ui().profile_apply_failed };
     if let Ok(mut s) = LIBRARY.lock() {
         set_toast(&mut s, msg.to_string(), if ok { TOAST_OK } else { TOAST_ERR });
         goto_touches_menu(&mut s, game_idx, 1); // back to the sub-menu (APPLY row)
@@ -6175,7 +6166,7 @@ fn run_touches_revert(game_idx: usize) {
     };
     let ok = keymap::revert_profile(&basename);
     let lc = crate::loc::s();
-    let msg = if ok { lc.profile_reverted_ok } else { lc.bug_fail_title };
+    let msg = if ok { lc.profile_reverted_ok } else { crate::loc_ui::ui().profile_revert_failed };
     if let Ok(mut s) = LIBRARY.lock() {
         set_toast(&mut s, msg.to_string(), if ok { TOAST_OK } else { TOAST_ERR });
         goto_touches_menu(&mut s, game_idx, 0); // back to the sub-menu
@@ -6943,12 +6934,15 @@ fn with_source_sheet<R>(
     // panel: a long translation must not run off its edge.
     let kind = if direct { lc.url_type_swf } else { lc.url_type_list };
     let on_card = match total {
+        // One file: on the card or not, as the source's row says it, rather
+        // than "0 of 1".
+        _ if direct => (have > 0).then(|| u.on_card.to_string()),
         Some(t) if t > 0 => Some(
             lc.url_info_files
                 .replacen("{}", &crate::backend::render::imp_count(have as u64), 1)
                 .replacen("{}", &crate::backend::render::imp_count(t as u64), 1),
         ),
-        _ if have > 0 => Some(u.imp_on_card_n.replacen("{}", &have.to_string(), 1)),
+        _ if have > 0 => Some(u.imp_on_card_n.replacen("{}", &crate::backend::render::imp_count(have as u64), 1)),
         _ => None,
     };
     let date = format_date(added);
@@ -7314,7 +7308,12 @@ fn run_direct_download(url: &str) {
             // the same file name". The URL still goes into the history: it is a
             // valid address the user asked for, and dropping it meant the saved
             // list quietly disagreed with what they typed.
-            let shown = safe_name.clone();
+            let shown = s
+                .entries
+                .iter()
+                .find(|e| e.basename == safe_name)
+                .map(|e| e.display_name.clone())
+                .unwrap_or_else(|| pretty_name(&safe_name));
             set_toast(
                 &mut s,
                 crate::loc::s().toast_already_imported.replace("{}", &shown),
@@ -8292,9 +8291,10 @@ pub(crate) fn apply_game_folder(s: &mut State, game_idx: usize, target: &str) {
             };
             if had_labels == 0 {
                 // Already on no shelf: say so rather than report work that did
-                // not happen.
+                // not happen, in words about this row ("Déjà dans ce dossier"
+                // named a folder the game is not in) and as news, not an error.
                 let row = row_of(s, target);
-                set_toast(s, crate::loc::s().toast_folder_same.to_string(), TOAST_ERR);
+                set_toast(s, crate::loc_ui::ui().toast_folder_none.to_string(), TOAST_INFO);
                 s.screen = Screen::GameFolderPicker { game_idx, selection: row };
                 return;
             }
@@ -8385,10 +8385,11 @@ pub(crate) fn apply_game_folder(s: &mut State, game_idx: usize, target: &str) {
     //
     // A game that sits in a REAL directory of this name is on this shelf because
     // of where it is, and no label can take it off. Say that instead of quietly
-    // doing nothing, or of adding a label that changes nothing.
+    // doing nothing, or of adding a label that changes nothing: the same way
+    // out as the help on this row ("No folder"), as news rather than an error.
     if folder == target {
         let row = row_of(s, target);
-        set_toast(s, crate::loc::s().toast_folder_physical.to_string(), TOAST_ERR);
+        set_toast(s, crate::loc::s().toast_folder_physical.to_string(), TOAST_INFO);
         s.screen = Screen::GameFolderPicker { game_idx, selection: row };
         return;
     }
@@ -8653,9 +8654,11 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                     if shortcut_here(&path) {
                         let removed = tile_remove(&path);
                         crate::sd::commit();
+                        // A failed removal says it could not REMOVE the icon:
+                        // the install's failure message named the wrong act.
                         set_toast(
                             s,
-                            if removed { lc.shortcut_removed } else { lc.shortcut_err }.to_string(),
+                            if removed { lc.shortcut_removed } else { crate::loc_ui::ui().shortcut_remove_err }.to_string(),
                             if removed { TOAST_OK } else { TOAST_ERR },
                         );
                         return;
@@ -8874,8 +8877,13 @@ fn run_cover_research_flow(game_idx: usize) {
             .unwrap_or_default(),
         Err(_) => return,
     };
-    let Some(typed) = net::prompt_search(&current) else {
-        return; // cancelled — keep the picker as it was
+    // Its own header and guide: this keyboard searches Flashpoint for a game's
+    // name, and the library search's guide promises that an empty entry shows
+    // everything, which here does nothing.
+    let lc = crate::loc::s();
+    let guide = crate::loc_ui::ui().kbd_cover_guide;
+    let Some(typed) = net::prompt_search_as(lc.cover_title, guide, &current) else {
+        return; // cancelled: keep the picker as it was
     };
     let query = typed.trim().to_string();
     if query.is_empty() {
@@ -11710,8 +11718,9 @@ fn finalize_gamezip_download(backend: &mut SwitchRenderBackend) {
         .map(str::trim)
         .filter(|t| !t.is_empty() && *t != stem);
     // Toast label, owned up-front: `file_name` (which `stem` borrows) is moved
-    // into `downloaded_basenames` below.
-    let shown = restored_title.unwrap_or(stem).to_string();
+    // into `downloaded_basenames` below. Without a real title, the name the
+    // library and the import page show, not the file's ("papa_louie_2").
+    let shown = restored_title.map(str::to_string).unwrap_or_else(|| pretty_name(&file_name));
     if let (Some(title), false) = (restored_title, file_name.is_empty()) {
         if write_meta_sidecar(&file_name, title) {
             log(&std::format!("library: saved real title \"{}\" for {}\n", title, file_name));
@@ -12085,11 +12094,10 @@ fn on_download_finished(backend: &mut SwitchRenderBackend) {
             }
         }
     }
-    // Toast label, owned before `file_name` is moved into the session list.
-    let shown = file_name
-        .strip_suffix(".swf")
-        .unwrap_or(&file_name)
-        .to_string();
+    // Toast label, owned before `file_name` is moved into the session list:
+    // the name the import page and the library show ("Papa Louie 2"), not
+    // the file's ("papa_louie_2").
+    let shown = pretty_name(&file_name);
     if let Ok(mut s) = LIBRARY.lock() {
         s.download_file_name.clear();
         s.download_out_path.clear();
