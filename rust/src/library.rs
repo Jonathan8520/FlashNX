@@ -8438,13 +8438,22 @@ const TILE_ERROR_PATH: &str = "sdmc:/switch/FlashNX/tile_error.txt";
 /// arguments on spaces. Sixteen hex digits never contain one; `Papa Louie 2`
 /// does. See forwarder/source/main.c.
 fn tile_cfg_path(program_id: u64) -> std::string::String {
-    std::format!("sdmc:/switch/FlashNX/tiles/{:016X}.cfg", program_id)
+    std::format!("{}/{:016X}.cfg", TILES_DIR, program_id)
 }
+
+/// The folder of the tiles' configs, one `<program ID>.cfg` per tile.
+const TILES_DIR: &str = "sdmc:/switch/FlashNX/tiles";
 
 /// The tiles' configs: (program ID, the game's path), read from
 /// `sdmc:/switch/FlashNX/tiles/` once and kept until a config is written.
 static TILE_INDEX: Mutex<Option<std::vec::Vec<(u64, std::string::String)>>> = Mutex::new(None);
 
+/// Listed by C++ and read with `read_sd_text`, never with `std::fs`: Rust's
+/// `read_dir` corrupts entry names on Horizon (see `list_dirs`), and a
+/// `<ID>.cfg` that loses two bytes no longer parses, so the index came back
+/// empty and every game fell back to the hash of its CURRENT path, which a
+/// moved game's tile does not carry. `read_to_string` also sizes its buffer
+/// from fstat, which is bogus in applet mode.
 fn tile_index() -> std::vec::Vec<(u64, std::string::String)> {
     if let Ok(g) = TILE_INDEX.lock() {
         if let Some(v) = g.as_ref() {
@@ -8452,14 +8461,11 @@ fn tile_index() -> std::vec::Vec<(u64, std::string::String)> {
         }
     }
     let mut v = std::vec::Vec::new();
-    if let Ok(dir) = std::fs::read_dir("sdmc:/switch/FlashNX/tiles") {
-        for e in dir.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let Some(hex) = name.strip_suffix(".cfg") else { continue };
-            let Ok(id) = u64::from_str_radix(hex, 16) else { continue };
-            if let Ok(text) = std::fs::read_to_string(e.path()) {
-                v.push((id, text.trim().to_string()));
-            }
+    for name in list_files_top(TILES_DIR) {
+        let Some(hex) = name.strip_suffix(".cfg") else { continue };
+        let Ok(id) = u64::from_str_radix(hex, 16) else { continue };
+        if let Ok(text) = read_sd_text(&std::format!("{}/{}", TILES_DIR, name), 4096) {
+            v.push((id, text.trim().to_string()));
         }
     }
     if let Ok(mut g) = TILE_INDEX.lock() {
