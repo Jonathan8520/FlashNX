@@ -170,6 +170,10 @@ impl SwitchRenderBackend {
             right -= KEYBOARD + 10.0;
         }
         let mut avail = right - lx;
+        // The mark after the label is part of the label's room, counted before
+        // the control is sized: taken from the label afterwards, a ticked sort
+        // row cut "Última partida" when its choice could have tightened.
+        let mark_w = if row.mark.is_some() { MARK + 10.0 } else { 0.0 };
         if row.ctrl != super::controls::Ctrl::None {
             // The control takes what the label leaves it: the label is short
             // ("Affichage", "Rotation") and a choice is only useful with every
@@ -178,22 +182,11 @@ impl SwitchRenderBackend {
             // panel, the very cycling the choice replaced. Only a choice that
             // still does not fit falls back (`kit_ctrl`).
             let label_w = self.kit_measure(row.label, size::ROW).min(avail * 0.5);
-            let note_w = row.note.map_or(0.0, |n| self.kit_measure(n, size::CAPTION) + 12.0);
-            let max_w = (avail - label_w - note_w - 20.0).max(60.0);
+            let max_w = (avail - label_w - mark_w - 20.0).max(60.0);
             let cw = self.kit_ctrl(right, cy, &row.ctrl, focused && !row.dim, max_w);
             avail -= cw + 20.0;
-            if let Some(n) = row.note {
-                // Dropped rather than squeezed when the label needs the room.
-                if avail - note_w > label_w.min(avail * 0.5) {
-                    let nw = self.kit_measure(n, size::CAPTION);
-                    self.kit_text_mid((right - cw - 12.0 - nw).round(), cy, size::CAPTION, n, col::TEXT3);
-                    avail -= note_w;
-                }
-            }
         }
-        if row.mark.is_some() {
-            avail -= MARK + 10.0;
-        }
+        avail -= mark_w;
         let ink = if row.danger {
             col::DANGER
         } else if row.dim {
@@ -203,10 +196,20 @@ impl SwitchRenderBackend {
         } else {
             col::TEXT2
         };
+        // A note ("par défaut") is a caption under the label, so it never
+        // takes the control's width: set aside beside the control, it pushed
+        // "Intégral | Étirer | Remplir" back to one value between arrows on
+        // every game that follows the default, until a press gave the game
+        // its own value and the row redrew as three segments.
+        let label_cy = if row.note.is_some() { cy - 8.0 } else { cy };
         let l = self.kit_fit_mid(row.label, size::ROW, avail);
-        let lw = self.kit_text_mid(lx, cy, size::ROW, &l, ink);
+        let lw = self.kit_text_mid(lx, label_cy, size::ROW, &l, ink);
         if let Some((ic, mink)) = row.mark {
-            self.kit_icon(lx + lw + 10.0, cy, MARK, ic, mink);
+            self.kit_icon(lx + lw + 10.0, label_cy, MARK, ic, mink);
+        }
+        if let Some(n) = row.note {
+            let n = self.kit_fit(n, size::CAPTION, (avail + mark_w).max(0.0));
+            self.kit_text_mid(lx, cy + 11.0, size::CAPTION, &n, col::TEXT3);
         }
     }
 }
@@ -231,7 +234,7 @@ pub(crate) struct Row<'a> {
     pub label: &'a str,
     pub ctrl: super::controls::Ctrl<'a>,
     pub mark: Option<(super::icons::Icon, u32)>,
-    /// A small caption just left of the control ("par défaut").
+    /// A small caption under the label ("par défaut").
     pub note: Option<&'a str>,
     pub dim: bool,
     pub danger: bool,
@@ -295,7 +298,7 @@ impl<'a> Row<'a> {
         self
     }
 
-    /// A small caption just left of the control, when there is one.
+    /// A small caption under the label, when there is one.
     pub(crate) fn note_opt(mut self, note: Option<&'a str>) -> Row<'a> {
         self.note = note;
         self
