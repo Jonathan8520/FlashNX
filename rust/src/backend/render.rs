@@ -10219,6 +10219,14 @@ impl SwitchRenderBackend {
         self.draw_spinner(vw * 0.5, vh * 0.5 + 8.0, 26.0, now);
     }
 
+    /// The footer band of a wait that can be cancelled: B, and what it does.
+    pub fn draw_cancel_hint(&mut self) {
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        self.kit_footer_band();
+        self.kit_hints_right(vw - 40.0, vh - 24.0, &[(&[Btn::B], crate::loc_ui::ui().cancel)]);
+    }
+
     /// Draw a full-screen dim rect that ignores the active UI transform, so a
     /// modal's backdrop stays full-screen + still while its panel scales in/out.
     /// Saves + restores the transform around the single draw.

@@ -3680,6 +3680,12 @@ fn input_inner(button: &str) -> bool {
         // for their own use (e.g. nothing today; DISTANT paging moved to Up/Down).
         if matches!(button, "L" | "R") {
             if let Some(tab) = screen_tab(screen_snap) {
+                // One tab per PRESS. L / R auto-repeat (the file list pages
+                // with them), and a held shoulder spun the tabs past the one
+                // wanted every 80 ms.
+                if !nav_may_wrap() {
+                    return true;
+                }
                 let target = if button == "L" { tab.prev() } else { tab.next() };
                 goto_tab(target, if button == "L" { -1.0 } else { 1.0 });
                 return true;
@@ -4024,11 +4030,14 @@ fn input_inner(button: &str) -> bool {
         }
         Screen::DistantLoading => {
             // Input is suspended during the opening reveal (handled at the top of
-            // input via `distant_reveal_active`); once open, B/Minus/Y cancels the
-            // async fetch and returns to the IMPORTER list.
-            if matches!(button, "B" | "Minus" | "Y") {
+            // input via `distant_reveal_active`); once open, B cancels the async
+            // fetch and returns to the IMPORTER list, on the row that was opened.
+            // (Y cancelled too, for no reason any hint ever gave.)
+            if matches!(button, "B" | "Minus") {
                 net::cancel_archive_fetch();
-                s.screen = distant_idle_at(0);
+                let row = crate::backend::render::distant_reveal_source_sel();
+                let rows = importer_view(&s).len() + IMPORTER_PINNED_ROWS;
+                s.screen = distant_idle_at(row.min(rows.saturating_sub(1)));
             }
             true
         }
@@ -6450,9 +6459,9 @@ fn run_import_search_flow() {
     let trimmed = typed.trim().to_string();
     if let Ok(mut s) = LIBRARY.lock() {
         s.import_filter = if trimmed.is_empty() { None } else { Some(trimmed) };
-        // Fresh (filtered) list: put the cursor on its first URL row, or on the
-        // "+ add" row when nothing matched.
-        let row = if importer_view(&s).is_empty() { 0 } else { 1 };
+        // Fresh (filtered) list: put the cursor on its first source, under the
+        // two pinned actions, or on the first action when nothing matched.
+        let row = if importer_view(&s).is_empty() { 0 } else { IMPORTER_PINNED_ROWS };
         s.screen = distant_idle_at(row);
     }
     crate::backend::render::gallery_anim_reset();
@@ -6542,13 +6551,14 @@ fn run_edit_url_flow(url_idx: usize) {
         return; // cancelled — leave history untouched
     };
     let new_url = new_url.trim().to_string();
+    // Emptied: a cancel, not a delete. Deleting has its own row and asks
+    // first; clearing a text field is how people start retyping.
+    if new_url.is_empty() {
+        return;
+    }
     if let Ok(mut s) = LIBRARY.lock() {
         if url_idx < s.url_history.len() {
-            if new_url.is_empty() {
-                s.url_history.remove(url_idx);
-            } else {
-                s.url_history[url_idx] = new_url;
-            }
+            s.url_history[url_idx] = new_url;
         }
         if s.history_loaded {
             let snapshot = s.url_history.clone();
@@ -8309,8 +8319,8 @@ fn handle_remote_sort_modal_input(
                     // so the list is already re-ordered when we land back on it.
                     set_import_sort(selection as u8, reverse);
                     crate::backend::render::gallery_anim_reset();
-                    // Cursor on the first URL row (row 0 is "+ add").
-                    let row = if importer_view(s).is_empty() { 0 } else { 1 };
+                    // Cursor on the first source, under the two pinned actions.
+                    let row = if importer_view(s).is_empty() { 0 } else { IMPORTER_PINNED_ROWS };
                     s.screen = distant_idle_at(row);
                 }
                 _ => {
@@ -9987,6 +9997,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 let q = LIBRARY.lock().ok().map(|s| s.cover_query.clone()).unwrap_or_default();
                 backend.draw_overlay_rect(0.0, 0.0, vw, vh, 0xFF_14_20_38);
                 backend.draw_loading_panel(&q, now);
+                backend.draw_cancel_hint();
                 match net::tick_get_async() {
                     net::GetPoll::Pending => {}
                     net::GetPoll::Done(bytes) => {
@@ -10234,6 +10245,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             // visible (dimmed) only OUTSIDE the window via the chrome below.
             backend.draw_overlay_rect(wx, wy, ww, wh, 0xFF_14_20_38);
             backend.draw_loading_panel(&title, now);
+            backend.draw_cancel_hint();
             backend.clear_clip();
             backend.draw_reveal_chrome(wx, wy, ww, wh);
             // Poll the async fetch.
