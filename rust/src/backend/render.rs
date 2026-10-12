@@ -195,37 +195,81 @@ type Glyph = [&'static str; 7];
 // is rendered full-width: one square cell `CJK_ADVANCE_UNITS` wide, used by
 // BOTH `draw_text` and `measure_text` so centring matches rendering. These two
 // are the only things to tweak on hardware to align CJK with the bitmap font.
-/// Which grid tile is opening its cover, which one is closing, and when the
-/// changeover started. `(selection, previous, tick)`.
-///
-/// The obvious implementation reads the animated selection FRAME and opens
-/// whatever tile it is near. That is wrong in two dimensions: on a diagonal the
-/// frame flies past the two tiles that share a row or a column with the ends,
-/// and they blink open as it goes by. The player sees the cursor "touch" games
-/// it never selected. Only two tiles are ever involved in a move, so name them.
-static GRID_COVER_ANIM: Mutex<(usize, usize, u64)> = Mutex::new((usize::MAX, usize::MAX, 0));
-
 /// How long a grid cover takes to open or close, in milliseconds. Matched to
 /// the selection frame's own travel so the art and the cursor settle together.
-const GRID_COVER_MS: u64 = 190;
+const GRID_COVER_MS: f32 = 190.0;
 
-/// `(opening, closing, t)` for this frame: which tile is revealing its art,
-/// which is folding back, and how far along. `t` runs 0..1 and is smoothstepped
-/// by the caller.
-fn grid_cover_phase(selection: usize) -> (usize, usize, f32) {
+/// How far each tile's cover is open, on its own clock.
+///
+/// It used to be one pair, `(opening, closing, start)`: the tile being selected
+/// and the one being left. Run the cursor across six covers and only the last
+/// two moved; the four in between snapped shut the moment the next one was
+/// chosen, which reads as a glitch. Now every tile eases toward open while it
+/// is selected and toward closed when it is not, from wherever it was, so a
+/// cover left half open finishes closing by itself. A tile is named by a hash
+/// of what it shows (its file name, its URL), not by its index, so a re-sort
+/// cannot hand one tile's motion to another.
+struct TileOpen {
+    /// Tick of the last frame that stepped the clocks, and the step it took.
+    tick: u64,
+    dt_ms: f32,
+    /// `(key, t)` for every tile not at rest; `t` runs 0 (closed) to 1.
+    open: std::vec::Vec<(u64, f32)>,
+}
+
+static TILE_OPEN: Mutex<TileOpen> = Mutex::new(TileOpen { tick: 0, dt_ms: 0.0, open: std::vec::Vec::new() });
+
+/// Start a frame of tile animation: how long since the last one, capped so a
+/// stall (a game run, a sleep) does not jump every tile to its end.
+fn tile_open_frame() {
     let now = unsafe { ruffle_tick_now() };
-    let freq = unsafe { ruffle_tick_freq() }.max(1);
-    let Ok(mut g) = GRID_COVER_ANIM.lock() else {
-        return (selection, usize::MAX, 1.0);
-    };
-    if g.0 != selection {
-        // First ever draw opens instantly rather than animating from nothing.
-        let prev = if g.0 == usize::MAX { usize::MAX } else { g.0 };
-        *g = (selection, prev, now);
+    let freq = unsafe { ruffle_tick_freq() }.max(1) as f32;
+    if let Ok(mut g) = TILE_OPEN.lock() {
+        let dt = if g.tick == 0 { 0.0 } else { (now.saturating_sub(g.tick) as f32 * 1000.0 / freq).min(100.0) };
+        g.tick = now;
+        g.dt_ms = dt;
     }
-    let elapsed_ms = now.saturating_sub(g.2) * 1000 / freq;
-    let t = (elapsed_ms as f32 / GRID_COVER_MS as f32).clamp(0.0, 1.0);
-    (g.0, g.1, t)
+}
+
+/// A stable key for a tile: FNV-1a of what it shows.
+fn tile_key(name: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in name.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
+
+/// Step tile `key` toward open (`selected`) or closed and return how open it
+/// is, smoothstepped for display. Call once per tile per frame, after
+/// `tile_open_frame`.
+fn tile_open(key: u64, selected: bool) -> f32 {
+    let Ok(mut g) = TILE_OPEN.lock() else {
+        return if selected { 1.0 } else { 0.0 };
+    };
+    let step = g.dt_ms / GRID_COVER_MS;
+    let pos = g.open.iter().position(|(k, _)| *k == key);
+    let cur = pos.map_or(0.0, |i| g.open[i].1);
+    let next = if selected { (cur + step).min(1.0) } else { (cur - step).max(0.0) };
+    match pos {
+        Some(i) if next <= 0.0 && !selected => {
+            g.open.swap_remove(i);
+        }
+        Some(i) => g.open[i].1 = next,
+        None if next > 0.0 || selected => g.open.push((key, next)),
+        None => {}
+    }
+    next * next * (3.0 - 2.0 * next)
+}
+
+/// Forget every tile's motion: the next frame starts with all covers at rest
+/// (a new layout, a new list).
+pub fn tile_open_reset() {
+    if let Ok(mut g) = TILE_OPEN.lock() {
+        g.open.clear();
+        g.tick = 0;
+    }
 }
 
 /// Full-width cell width (and render size) for an atlas glyph.
@@ -5067,6 +5111,8 @@ pub fn home_anim_set_sel(sel_pos: f32) {
 /// Forget the layout animation, so the next frame snaps instead of sliding in
 /// from the previous view's state.
 pub fn home_anim_reset() {
+    // A new layout: its tiles start closed.
+    tile_open_reset();
     if let Ok(mut a) = home_anim().lock() {
         a.inited = false;
     }
@@ -11806,10 +11852,11 @@ impl SwitchRenderBackend {
                 let _ = self.cover_for(&entries[idx].basename);
             }
         }
-        let (cover_open, cover_close, cover_t) = grid_cover_phase(selection);
+        tile_open_frame();
         // How far a tile grows when it opens: enough to read as lifted off the
         // grid, little enough to stay inside the gap to its neighbours.
         const LIFT: f32 = 0.05;
+        let mut selected_open = 0.0f32;
         for (idx, &(tx0, tw0, trow)) in tiles.iter().enumerate() {
             if trow < lo_row || trow > hi_row {
                 continue;
@@ -11819,18 +11866,12 @@ impl SwitchRenderBackend {
             if ty0 + ROW_IMG_H < band_top || ty0 > band_bot {
                 continue;
             }
-            // Exactly two tiles move: the one being selected opens, the one
-            // being left folds back, whatever the travelling ring passes over.
-            let b = {
-                let u = if idx == cover_open {
-                    cover_t
-                } else if idx == cover_close {
-                    1.0 - cover_t
-                } else {
-                    0.0
-                };
-                u * u * (3.0 - 2.0 * u)
-            };
+            // Every tile on its own clock: the selected one opens, any other
+            // closes from wherever it was, so none snaps shut mid-way.
+            let b = tile_open(tile_key(&entries[idx].basename), idx == selection);
+            if idx == selection {
+                selected_open = b;
+            }
             let grow = LIFT * b;
             let (tx, ty, tw, th) = (
                 tx0 - tw0 * grow * 0.5,
@@ -11896,10 +11937,7 @@ impl SwitchRenderBackend {
         if !tiles.is_empty() {
             // The ring hugs the lifted tile: the same growth, plus the brief
             // "snap" right after a move.
-            let lift = {
-                let u = cover_t;
-                0.05 * u * u * (3.0 - 2.0 * u)
-            };
+            let lift = 0.05 * selected_open;
             let grow = pop * 3.0;
             let fx = frame_x - frame_w * lift * 0.5 - grow;
             let fy = frame_y - scroll_px - ROW_IMG_H * lift * 0.5 - grow;

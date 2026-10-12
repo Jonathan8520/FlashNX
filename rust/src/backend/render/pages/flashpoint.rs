@@ -164,9 +164,9 @@ impl SwitchRenderBackend {
             };
         }
         self.set_clip(0.0, band_top, vw, band_bot - band_top);
-        // The tile being selected opens to its whole logo and the one being
-        // left closes, as on the Play grid.
-        let (cover_open, cover_close, cover_t) = grid_cover_phase(selection);
+        // Each tile opens to its whole logo while selected and closes on its
+        // own clock when left, as on the Play grid.
+        tile_open_frame();
         for i in 0..n {
             let cx = MARGIN + (i % cols) as f32 * (cell_w + GAP);
             let cy = grid_top + (i / cols) as f32 * pitch - scroll_px;
@@ -175,14 +175,7 @@ impl SwitchRenderBackend {
             }
             match self.thumb_for(urls[i]) {
                 Some(ThumbTex::Image { tex, w, h }) => {
-                    let t = if i == cover_open {
-                        cover_t
-                    } else if i == cover_close {
-                        1.0 - cover_t
-                    } else {
-                        0.0
-                    };
-                    let b = t * t * (3.0 - 2.0 * t);
+                    let b = tile_open(tile_key(urls[i]), i == selection);
                     self.kit_cover_reveal(cx, cy, cell_w, thumb_h, tex, w, h, 0, b, 1.0);
                 }
                 other => {

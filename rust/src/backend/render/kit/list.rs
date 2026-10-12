@@ -142,7 +142,16 @@ impl SwitchRenderBackend {
             } else {
                 col::TEXT2
             };
-            self.kit_icon(lx, cy, ICON, ic, ink);
+            match row.filled {
+                // The solid star from the console font, centred in the icon's box.
+                Some(fill) if ic == super::icons::Icon::Star => {
+                    let sw = self.kit_measure("\u{2605}", ICON);
+                    self.kit_text_mid((lx + (ICON - sw) * 0.5).round(), cy, ICON, "\u{2605}", fill);
+                }
+                _ => {
+                    self.kit_icon(lx, cy, ICON, ic, ink);
+                }
+            }
             lx += ICON + 14.0;
         }
         let mut right = x + w - PAD;
@@ -186,6 +195,9 @@ impl SwitchRenderBackend {
 #[derive(Clone, Copy)]
 pub(crate) struct Row<'a> {
     pub icon: Option<super::icons::Icon>,
+    /// The icon drawn FILLED, in this colour: a favourite's star is a solid
+    /// gold star, not the outline every other row has.
+    pub filled: Option<u32>,
     pub label: &'a str,
     pub value: &'a str,
     pub mark: Option<(super::icons::Icon, u32)>,
@@ -196,7 +208,16 @@ pub(crate) struct Row<'a> {
 
 impl<'a> Row<'a> {
     pub(crate) fn new(icon: super::icons::Icon, label: &'a str) -> Row<'a> {
-        Row { icon: Some(icon), label, value: "", mark: None, dim: false, danger: false, opens: false }
+        Row { icon: Some(icon), filled: None, label, value: "", mark: None, dim: false, danger: false, opens: false }
+    }
+
+    /// Draw the icon solid in `ink` when `on` (only the star has a solid form:
+    /// the console font's black star).
+    pub(crate) fn filled_if(mut self, on: bool, ink: u32) -> Row<'a> {
+        if on {
+            self.filled = Some(ink);
+        }
+        self
     }
 
     pub(crate) fn value(mut self, value: &'a str) -> Row<'a> {

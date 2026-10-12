@@ -412,6 +412,65 @@ static void menu_repeat_step(
     }
 }
 
+// Hold-to-repeat for the pause panels, which read raw down-edges: a held
+// direction fires again after 400 ms, then every 80 ms, the timing the
+// launcher's lists use (`menu_repeat_step`). Returns the direction bits to
+// treat as pressed this frame; `*repeat_out` says they are all repeat ticks,
+// so a list stops at its end under a held direction and only a fresh press
+// wraps round, as in the launcher (no carousel).
+struct PauseRepeat {
+    u64  since[4];
+    u64  last[4];
+    bool first_done[4];
+};
+static const u64 PAUSE_DIRS[4] = {
+    HidNpadButton_Up | HidNpadButton_StickLUp | HidNpadButton_StickRUp,
+    HidNpadButton_Down | HidNpadButton_StickLDown | HidNpadButton_StickRDown,
+    HidNpadButton_Left | HidNpadButton_StickLLeft,
+    HidNpadButton_Right | HidNpadButton_StickLRight,
+};
+static void pause_repeat_reset(PauseRepeat& r) {
+    for (int i = 0; i < 4; ++i) {
+        r.since[i] = 0;
+        r.last[i] = 0;
+        r.first_done[i] = false;
+    }
+}
+static u64 pause_repeat_step(PauseRepeat& r, u64 kDown, u64 kHeld, u64 now, u64 freq, bool* repeat_out) {
+    const u64 INITIAL = (400ULL * freq) / 1000ULL;
+    const u64 INTERVAL = (80ULL * freq) / 1000ULL;
+    u64 out = 0;
+    bool fresh = false;
+    for (int i = 0; i < 4; ++i) {
+        const u64 m = PAUSE_DIRS[i];
+        if (kDown & m) {
+            r.since[i] = now;
+            r.last[i] = now;
+            r.first_done[i] = false;
+            out |= kDown & m;
+            fresh = true;
+            continue;
+        }
+        if (!(kHeld & m)) {
+            r.since[i] = 0;
+            continue;
+        }
+        if (r.since[i] == 0) continue;
+        if (!r.first_done[i]) {
+            if (now - r.since[i] >= INITIAL) {
+                r.first_done[i] = true;
+                r.last[i] = now;
+                out |= kHeld & m;
+            }
+        } else if (now - r.last[i] >= INTERVAL) {
+            r.last[i] = now;
+            out |= kHeld & m;
+        }
+    }
+    *repeat_out = out != 0 && !fresh;
+    return out;
+}
+
 static void populate_bindings_from_keymap(void) {
     for (size_t i = 0; i < BINDINGS_COUNT; ++i) {
         BINDINGS[i].key = ruffle_keymap_lookup(BINDINGS[i].name);
@@ -1365,6 +1424,8 @@ static void worker_entry(void* arg) {
     // scrollable list — benefits a lot from D-pad auto-repeat).
     MenuRepeatState touches_repeat;
     menu_repeat_reset(touches_repeat);
+    PauseRepeat pause_rep;
+    pause_repeat_reset(pause_rep);
 
     // CpuBoostMode re-assert counter. A download raises FastLoad for its own
     // duration (net.cpp) and resets it on completion, but an aborted/errored
@@ -1670,20 +1731,27 @@ static void worker_entry(void* arg) {
             }
 
             if (screen_menu) {
-                if (kDown & (HidNpadButton_Up | HidNpadButton_StickLUp | HidNpadButton_StickRUp)) {
-                    screen_selection = (screen_selection + SCREEN_COUNT - 1) % SCREEN_COUNT;
-                    ruffle_ui_sound(UI_SFX_MOVE);
+                bool nav_rep = false;
+                const u64 kNav = pause_repeat_step(pause_rep, kDown, kHeld, ruffle_tick_now(), tick_freq_global, &nav_rep);
+                if (kNav & PAUSE_DIRS[0]) {
+                    if (screen_selection > 0 || !nav_rep) {
+                        screen_selection = (screen_selection + SCREEN_COUNT - 1) % SCREEN_COUNT;
+                        ruffle_ui_sound(UI_SFX_MOVE);
+                    }
                 }
-                if (kDown & (HidNpadButton_Down | HidNpadButton_StickLDown | HidNpadButton_StickRDown)) {
-                    screen_selection = (screen_selection + 1) % SCREEN_COUNT;
-                    ruffle_ui_sound(UI_SFX_MOVE);
+                if (kNav & PAUSE_DIRS[1]) {
+                    if (screen_selection + 1 < SCREEN_COUNT || !nav_rep) {
+                        screen_selection = (screen_selection + 1) % SCREEN_COUNT;
+                        ruffle_ui_sound(UI_SFX_MOVE);
+                    }
                 }
                 // Left / Right step the value under the cursor either way, so
                 // going one past what you wanted is one press back, not a lap.
                 {
+                    const u64 kStep = screen_selection == SCREEN_ZOOM ? kNav : kDown;
                     int dir = 0;
-                    if (kDown & (HidNpadButton_Left | HidNpadButton_StickLLeft)) dir = -1;
-                    if (kDown & (HidNpadButton_Right | HidNpadButton_StickLRight)) dir = 1;
+                    if (kStep & PAUSE_DIRS[2]) dir = -1;
+                    if (kStep & PAUSE_DIRS[3]) dir = 1;
                     if (dir != 0) {
                         ruffle_ui_sound(UI_SFX_TOGGLE);
                         switch (screen_selection) {
@@ -1753,19 +1821,24 @@ static void worker_entry(void* arg) {
             // Right stick navigates too (it's the mouse cursor only when the
             // menu is closed — this branch `continue`s before the cursor code).
             //
-            // No wrap here, unlike the other lists: the pause opens on Resume,
-            // and one Up from there used to land on Quit, a press of A away
-            // from losing the game in progress.
-            if (kDown & (HidNpadButton_Up | HidNpadButton_StickLUp | HidNpadButton_StickRUp)) {
-                if (menu_selection > 0) {
-                    menu_selection -= 1;
-                    ruffle_ui_sound(UI_SFX_MOVE);
+            // A fresh Up on Resume wraps to Quit, the quickest way out, as
+            // Jonathan asked; under a HELD direction the list stops at its
+            // ends instead, so holding Down settles on Quit rather than
+            // spinning round to Resume.
+            {
+                bool nav_rep = false;
+                const u64 kNav = pause_repeat_step(pause_rep, kDown, kHeld, ruffle_tick_now(), tick_freq_global, &nav_rep);
+                if (kNav & PAUSE_DIRS[0]) {
+                    if (menu_selection > 0 || !nav_rep) {
+                        menu_selection = (menu_selection + MENU_COUNT - 1) % MENU_COUNT;
+                        ruffle_ui_sound(UI_SFX_MOVE);
+                    }
                 }
-            }
-            if (kDown & (HidNpadButton_Down | HidNpadButton_StickLDown | HidNpadButton_StickRDown)) {
-                if (menu_selection + 1 < MENU_COUNT) {
-                    menu_selection += 1;
-                    ruffle_ui_sound(UI_SFX_MOVE);
+                if (kNav & PAUSE_DIRS[1]) {
+                    if (menu_selection + 1 < MENU_COUNT || !nav_rep) {
+                        menu_selection = (menu_selection + 1) % MENU_COUNT;
+                        ruffle_ui_sound(UI_SFX_MOVE);
+                    }
                 }
             }
             if (menu_selection == MENU_POWER) {
@@ -1878,6 +1951,7 @@ static void worker_entry(void* arg) {
             }
             menu_open = true;
             menu_selection = MENU_RESUME;
+            pause_repeat_reset(pause_rep);
             ruffle_ui_sound(UI_SFX_OPEN);
             // A fresh pause always opens on the main panel, never back inside
             // ECRAN where a previous pause happened to leave it.

@@ -193,12 +193,16 @@ impl SwitchRenderBackend {
         let t = t.clamp(0.0, 1.0);
         let a = tw as f32 / th as f32;
         let (fit_w, fit_h) = if a > w / h { (w, w / a) } else { (h * a, h) };
-        if t > 0.0 && (fit_w < w - 0.5 || fit_h < h - 0.5) {
-            if amb != 0 {
-                self.kit_image(x, y, w, h, amb, crop_uv(tw, th, w, h), alpha, r);
-            } else {
-                self.kit_rrect(x, y, w, h, r, ((alpha.clamp(0.0, 1.0) * 255.0) as u32) << 24 | 0x0A_10_1C);
-            }
+        // The backdrop is ALWAYS under the cover, at rest too. It used to be
+        // drawn only while the tile was opening, so the frame the tile came to
+        // rest it vanished: invisible under an opaque cover, but under a PNG
+        // with transparent parts the blur turned into the page colour in one
+        // frame, which is the jolt at the end of the animation. Drawn every
+        // frame, the transparent parts always sit on the same ground.
+        if amb != 0 {
+            self.kit_image(x, y, w, h, amb, crop_uv(tw, th, w, h), alpha, r);
+        } else {
+            self.kit_rrect(x, y, w, h, r, ((alpha.clamp(0.0, 1.0) * 255.0) as u32) << 24 | 0x0A_10_1C);
         }
         // The drawn box shrinks from the tile to the fitted image while the crop
         // in it relaxes, so at t = 1 nothing is cut.

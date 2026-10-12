@@ -9343,7 +9343,10 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 // destructive row should not move because a new one arrived.
                 use crate::backend::render::{Icon, WinRow};
                 let rows = [
-                    WinRow::new(Icon::Star, fav_label),
+                    // Solid gold when the game IS a favourite: the row says what
+                    // it is now, the label what pressing it will do.
+                    WinRow::new(Icon::Star, fav_label)
+                        .filled_if(crate::favorites::is_favorite(&entry.basename), crate::backend::render::ui_col::GOLD),
                     WinRow::new(Icon::Gamepad, lc.opt_keys).opens(),
                     WinRow::new(Icon::Pencil, lc.opt_rename),
                     WinRow::new(Icon::Image, lc.opt_cover).opens(),
@@ -10256,7 +10259,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 }
                 let fav_label = if fav { lc.opt_unfavorite } else { lc.opt_favorite };
                 let rows = [
-                    WinRow::new(Icon::Star, fav_label),
+                    WinRow::new(Icon::Star, fav_label).filled_if(fav, crate::backend::render::ui_col::GOLD),
                     WinRow::new(Icon::Pencil, lc.opt_edit),
                     WinRow::new(Icon::Trash, lc.opt_delete).danger(),
                 ];
