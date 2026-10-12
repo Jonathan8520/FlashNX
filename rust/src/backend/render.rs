@@ -1365,6 +1365,12 @@ pub(crate) use kit::text::Btn;
 pub(crate) use pages::windows::{Choice, WinRow};
 pub(crate) use kit::list::Row;
 pub(crate) use kit::sheet::{cascade_step, Sheet, Side, OPTIONS_CHILD_W, OPTIONS_W};
+pub(crate) use pages::importer::{
+    imp_count, imp_date, imp_n_of, imp_quote, imp_release, imp_size, imp_transfer_line, imp_year, import_sel_rect,
+    FilesPage, ImportProgress, ImportStep, ImporterHome, SourceRow, StepState,
+};
+pub(crate) use pages::flashpoint::{FpDetailsView, FpGrid, FpState};
+pub(crate) use kit::sheet::SHEET_MARGIN;
 
 /// Whether the console's fonts loaded, i.e. the interface draws with the kit
 /// rather than the old 5x7 font.
@@ -6243,9 +6249,14 @@ pub fn game_reveal_step(now: u64) -> Option<(f32, f32, bool, bool)> {
 
 /// Cover-picker thumbnail state, keyed by the candidate's logo URL. Loaded
 /// progressively (one per frame) so opening the picker never freezes.
+///
+/// `amb` is the logo's blurred backdrop, as covers have: Flashpoint logos are
+/// mostly transparent PNGs, and since a tile draws its backdrop at rest, a
+/// thumbnail without one sat on a near-black box instead of on its own colours
+/// ("entière sur son fond flou", Jaquettes.dc.html).
 #[derive(Clone, Copy)]
 enum ThumbTex {
-    Image { tex: GLuint, w: u32, h: u32 },
+    Image { tex: GLuint, w: u32, h: u32, amb: GLuint },
     Failed,
 }
 
@@ -10974,9 +10985,8 @@ impl SwitchRenderBackend {
         }
     }
 
-    /// Loading panel content for the IMPORTER async fetch: the URL/item title
-    /// above a centred spinner. The caller fills the window with an opaque panel
-    /// first (so the URL list behind is replaced, not seen through).
+    /// A title above a centred spinner, for the loading overlay. The caller
+    /// fills the screen first (so what is behind is dimmed, not seen through).
     pub fn draw_loading_panel(&mut self, title: &str, now: u64) {
         use theme::{col, size};
         let vw = self.dimensions.width as f32;
@@ -11005,14 +11015,6 @@ impl SwitchRenderBackend {
         self.kit_panel(x, y, w, h, false);
         self.draw_spinner(x + w * 0.5, y + 46.0, 22.0, now);
         self.kit_text_mid((x + (w - tw) * 0.5).round(), y + 94.0, size::BODY, &t, col::TEXT2);
-    }
-
-    /// The footer band of a wait that can be cancelled: B, and what it does.
-    pub fn draw_cancel_hint(&mut self) {
-        let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
-        self.kit_footer_band();
-        self.kit_hints_right(vw - 40.0, vh - 24.0, &[(&[Btn::B], crate::loc_ui::ui().cancel)]);
     }
 
     /// Draw a full-screen dim rect that ignores the active UI transform, so a
@@ -11530,7 +11532,8 @@ impl SwitchRenderBackend {
                     Some((rgba, w, h)) => {
                         let tex = self.upload_rgba_texture(&rgba, w, h);
                         if tex != 0 {
-                            ThumbTex::Image { tex, w, h }
+                            let amb = self.kit_ambient_texture(&rgba, w, h);
+                            ThumbTex::Image { tex, w, h, amb }
                         } else {
                             ThumbTex::Failed
                         }
@@ -12740,39 +12743,6 @@ impl SwitchRenderBackend {
             &std::format!("{} / {}", done, total),
             &[],
         );
-    }
-
-    // ── Phase 3.7: DISTANT mode screens ────────────────────────────────
-
-    /// A download in flight: the progress page, with B to cancel.
-    /// `bytes_total = 0` means no Content-Length yet: the bar sweeps instead.
-    pub fn draw_library_distant_downloading(&mut self, file_name: &str, bytes_done: u64, bytes_total: u64) {
-        let lc = crate::loc::s();
-        let u = crate::loc_ui::ui();
-        let (frac, detail) = if bytes_total > 0 {
-            let f = (bytes_done as f32 / bytes_total as f32).clamp(0.0, 1.0);
-            (
-                Some(f),
-                std::format!(
-                    "{} %   \u{00B7}   {} / {}",
-                    (f * 100.0) as u32,
-                    format_size_pretty(bytes_done),
-                    format_size_pretty(bytes_total),
-                ),
-            )
-        } else {
-            (None, std::format!("{}\u{2026}", format_size_pretty(bytes_done)))
-        };
-        self.draw_progress_page(Icon::Download, lc.dl_title, file_name, frac, &detail, &[(&[Btn::B], u.cancel)]);
-    }
-
-    /// Error toast for DISTANT mode (URL parse / metadata fetch / DL fail).
-    /// `can_fix` = the failure carries the URL that caused it, so the footer
-    /// advertises Y (re-type it here) on top of the usual A/B dismiss.
-    pub fn draw_library_distant_error(&mut self, msg: &str, can_fix: bool) {
-        let lc = crate::loc::s();
-        let footer = if can_fix { lc.err_footer_fix } else { lc.err_footer };
-        self.draw_centered_notice_footer(lc.err_title, 0xFF5040, msg, footer);
     }
 
     /// Applet-mode notice (P1c): same centered layout as the error toast, but

@@ -1,72 +1,11 @@
-//! A saved source's options and a game's cover picker.
+//! A game's cover picker.
 //!
-//! A game's own options are the side panel of `library::options_panel`.
+//! A game's own options are the side panel of `library::options_panel`; a saved
+//! source's are the importer's side panel (`library`, `with_source_sheet`).
 
 use super::super::kit::icons::Icon;
-use super::super::kit::list::{Row, ScrollRows};
 use super::super::kit::theme::{col, size};
 use super::super::*;
-
-const PAD: f32 = 36.0;
-
-impl SwitchRenderBackend {
-    /// A saved source's options: what kind it is, how much of it is on the
-    /// card, when it was saved, its full address, then the actions.
-    pub fn draw_url_options(
-        &mut self,
-        title: &str,
-        facts: &[(Icon, std::string::String)],
-        url: &str,
-        selection: usize,
-        rows: &[Row],
-    ) {
-        const URL_LINES: usize = 2;
-        let facts_h = facts.len() as f32 * 28.0;
-        let url_h = URL_LINES as f32 * 22.0 + 24.0;
-        let h = MODAL_PAD_TOP_TIGHT + facts_h + url_h + 12.0 + rows.len() as f32 * MODAL_ROW_H + 70.0;
-        let frame = self.draw_modal_frame(MODAL_W_WIDE, 0, Some(h), false, title, None, None);
-        let (x, y, fw) = (frame.x, frame.y, frame.w);
-        let mut fy = y + MODAL_PAD_TOP_TIGHT + 4.0;
-        for (icon, text) in facts {
-            self.kit_icon(x + PAD, fy, 16.0, *icon, col::TEXT3);
-            let t = self.kit_fit(text, size::LABEL + 1.0, fw - 2.0 * PAD - 26.0);
-            self.kit_text_mid(x + PAD + 26.0, fy, size::LABEL + 1.0, &t, col::TEXT2);
-            fy += 28.0;
-        }
-        // The full address: the row only ever showed a short label.
-        let lines = self.kit_wrap(url, size::LABEL, fw - 2.0 * PAD - 32.0, URL_LINES);
-        let box_h = lines.len() as f32 * 22.0 + 20.0;
-        self.kit_rrect(x + PAD, fy - 4.0, fw - 2.0 * PAD, box_h, 10.0, 0xFF_14_1F_36);
-        let mut ly = fy + 10.0 + 4.0;
-        for line in &lines {
-            self.kit_text_mid(x + PAD + 16.0, ly, size::LABEL, line, col::TEXT3);
-            ly += 22.0;
-        }
-        let top = fy - 4.0 + box_h + 14.0;
-        let spec = ScrollRows {
-            x: x + 16.0,
-            w: fw - 32.0,
-            top,
-            row_h: MODAL_ROW_H,
-            pill_h: MODAL_PILL_H,
-            pinned: 0,
-            visible: rows.len(),
-            key: 0x6400_0000,
-            scrollbar_x: None,
-        };
-        let (rx, w) = (spec.x, spec.w);
-        self.kit_scroll_rows(&spec, rows.len(), selection, 0, |s, i, cy, focused| {
-            s.kit_row_item(rx, cy, w, &rows[i], focused);
-        });
-        let u = crate::loc_ui::ui();
-        self.modal_hints(&frame, &[(&[Btn::A], u.choose), (&[Btn::B], u.back)], false);
-        unsafe {
-            glUseProgram(0);
-            glBindVertexArray(0);
-        }
-        self.gl_state.invalidate();
-    }
-}
 
 impl SwitchRenderBackend {
     /// OPTIONS > cover: the candidates found online as a grid, the gold ring
@@ -136,9 +75,9 @@ impl SwitchRenderBackend {
             let cy = grid_top + (i / cols) as f32 * (THUMB_H + GAP);
             cells.push((cx, cy, cell_w, THUMB_H));
             match self.thumb_for(urls[i]) {
-                Some(ThumbTex::Image { tex, w, h }) => self.kit_cover(cx, cy, cell_w, THUMB_H, tex, w, h, 0, 1.0),
+                Some(ThumbTex::Image { tex, w, h, amb }) => self.kit_cover(cx, cy, cell_w, THUMB_H, tex, w, h, amb, 1.0),
                 other => {
-                    self.kit_rrect(cx, cy, cell_w, THUMB_H, radius::TILE, 0xFF_14_1F_36);
+                    self.kit_rrect(cx, cy, cell_w, THUMB_H, radius::TILE, col::TILE);
                     let icon = if matches!(other, Some(ThumbTex::Failed)) { Icon::Image } else { Icon::Hourglass };
                     self.kit_icon(cx + (cell_w - 28.0) * 0.5, cy + THUMB_H * 0.5, 28.0, icon, col::TEXT3);
                 }
