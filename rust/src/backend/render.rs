@@ -5024,6 +5024,45 @@ fn reveal_cover_cache() -> &'static std::sync::Mutex<std::vec::Vec<(std::string:
 /// worst case at 1126x619.
 const REVEAL_CACHE_MAX: usize = 8;
 
+/// The detail panel's cover (LISTE, BANDE): the game it shows, since when, and
+/// when its full-resolution cover arrived (0 = it was already there).
+struct PanelCover {
+    basename: std::string::String,
+    since: u64,
+    full_at: u64,
+}
+
+static PANEL_COVER: Mutex<Option<PanelCover>> = Mutex::new(None);
+
+/// A full-resolution cover if it is already decoded, never decoding.
+fn reveal_cover_lookup(basename: &str) -> Option<CoverTex> {
+    reveal_cover_cache().lock().ok()?.iter().find(|(b, _)| b == basename).map(|(_, t)| *t)
+}
+
+/// Gap between two facts of a game.
+const FACTS_GAP: f32 = 22.0;
+
+/// Break facts of these widths into lines of `max_w`: `(first, end, width)`
+/// per line. A fact wider than a line gets a line of its own.
+fn facts_lines(widths: &[f32], max_w: f32) -> std::vec::Vec<(usize, usize, f32)> {
+    let mut lines = std::vec::Vec::new();
+    let (mut start, mut w) = (0usize, 0.0f32);
+    for (i, fw) in widths.iter().enumerate() {
+        let add = if i == start { *fw } else { FACTS_GAP + fw };
+        if i > start && w + add > max_w {
+            lines.push((start, i, w));
+            start = i;
+            w = *fw;
+        } else {
+            w += add;
+        }
+    }
+    if start < widths.len() {
+        lines.push((start, widths.len(), w));
+    }
+    lines
+}
+
 /// Append one axis-aligned quad (two triangles) in PIXEL space with a flat
 /// colour to a text batch. Layout matches the solid quad VAO: vec2 pos + vec4
 /// rgba, stride 24.
@@ -10929,61 +10968,77 @@ impl SwitchRenderBackend {
         self.kit_text_mid(40.0, vh - 24.0, size::CAPTION + 1.0, &credit, col::TEXT3);
     }
 
-    /// The selected game's facts on one line, the kit way: values in the second
-    /// text colour, separated by a dim middle dot. Returns the width drawn.
-    fn kit_game_facts(&mut self, x: f32, cy: f32, entry: &crate::library::Entry) -> f32 {
-        self.kit_game_facts_px(x, cy, entry, theme::size::LABEL)
-    }
-
-    /// Width `kit_game_facts_px` will take, for centring it.
-    fn kit_game_facts_width(&mut self, entry: &crate::library::Entry, px: f32) -> f32 {
-        let parts = Self::kit_facts_parts(entry);
-        let sep = self.kit_measure("  \u{00B7}  ", px);
-        let mut w = 0.0;
-        for (i, p) in parts.iter().enumerate() {
-            if i > 0 {
-                w += sep;
+    /// The selected game's facts (Main.dc.html): what it takes on the card,
+    /// whether it is made of several files, what the file is, its engine and
+    /// the time played, each an icon and its value, 22 px apart, without the
+    /// dots that used to separate bare words. From `x` (or centred on `x`), on
+    /// as many lines of `max_w` as they need, the first centred on `cy`, 24 px
+    /// apart. Returns the lines used.
+    fn kit_game_facts(&mut self, x: f32, cy: f32, entry: &crate::library::Entry, max_w: f32, centered: bool) -> usize {
+        use theme::{col, size};
+        let facts = Self::game_facts(entry);
+        let widths: std::vec::Vec<f32> = facts.iter().map(|(_, t)| 16.0 + 7.0 + self.kit_measure(t, size::LABEL)).collect();
+        let lines = facts_lines(&widths, max_w);
+        let mut ly = cy;
+        for &(a, b, lw) in &lines {
+            let mut pen = if centered { (x - lw * 0.5).round() } else { x };
+            for i in a..b {
+                let (icon, text) = &facts[i];
+                self.kit_icon(pen, ly, 16.0, *icon, col::TEXT3);
+                self.kit_text_mid(pen + 16.0 + 7.0, ly, size::LABEL, text, col::TEXT2);
+                pen += widths[i] + FACTS_GAP;
             }
-            w += self.kit_measure(p, px);
+            ly += 24.0;
         }
-        w
+        lines.len()
     }
 
-    /// `kit_game_facts` at a chosen size.
-    fn kit_game_facts_px(&mut self, x: f32, cy: f32, entry: &crate::library::Entry, px: f32) -> f32 {
-        use theme::col;
-        let parts = Self::kit_facts_parts(entry);
-        let mut pen = x;
-        for (i, p) in parts.iter().enumerate() {
-            if i > 0 {
-                pen += self.kit_text_mid(pen, cy, px, "  \u{00B7}  ", col::TEXT3);
-            }
-            pen += self.kit_text_mid(pen, cy, px, p, col::TEXT2);
-        }
-        pen - x
+    /// How many lines `kit_game_facts` takes in `max_w`.
+    fn kit_game_facts_lines(&mut self, entry: &crate::library::Entry, max_w: f32) -> usize {
+        let facts = Self::game_facts(entry);
+        let widths: std::vec::Vec<f32> =
+            facts.iter().map(|(_, t)| 16.0 + 7.0 + self.kit_measure(t, theme::size::LABEL)).collect();
+        facts_lines(&widths, max_w).len()
     }
 
-    /// The facts themselves: size, what the file is, the engine, time played.
-    fn kit_facts_parts(entry: &crate::library::Entry) -> std::vec::Vec<std::string::String> {
-        let mut parts: std::vec::Vec<std::string::String> = std::vec::Vec::with_capacity(4);
-        let sz = format_size_pretty(entry.size_bytes);
+    /// The facts themselves, with their icons.
+    fn game_facts(entry: &crate::library::Entry) -> std::vec::Vec<(Icon, std::string::String)> {
+        let u = crate::loc_ui::ui();
+        let mut out: std::vec::Vec<(Icon, std::string::String)> = std::vec::Vec::with_capacity(5);
+        let sz = format_size_pretty(entry.card_bytes);
         if !sz.is_empty() {
-            parts.push(sz);
+            out.push((Icon::HardDrive, sz));
         }
-        parts.push(std::format!("SWF {} {}", entry.swf_version, entry.compression_label));
-        parts.push(std::string::String::from(if entry.is_as3 { "AS3" } else { "AVM1" }));
+        if entry.multi {
+            out.push((Icon::Layers, u.facts_multifile.to_string()));
+        }
+        // The file's version, and whether it is compressed in words: the raw
+        // signatures it printed (CWS, ZWS) meant nothing to anyone.
+        let swf = if entry.compression_label == "FWS" {
+            std::format!("SWF {}", entry.swf_version)
+        } else {
+            u.facts_compressed.replacen("{}", &entry.swf_version.to_string(), 1)
+        };
+        out.push((Icon::File, swf));
+        // The engine by the machine's name, both ways: it read "AS3", a
+        // language, where the other games read "AVM1", a machine.
+        out.push((Icon::Code, std::string::String::from(if entry.is_as3 { "AVM2" } else { "AVM1" })));
         let secs = crate::playtime::get(&entry.basename);
         if secs >= 60 {
-            parts.push(crate::loc_ui::playtime(secs));
+            out.push((Icon::Clock, crate::loc_ui::playtime(secs)));
         }
-        parts
+        out
     }
 
-    /// The selected game's cover in a detail panel: fitted into the box minus
-    /// the caption under it, never blown up past twice its size (small and
-    /// sharp reads better than large and soft), the art and its caption
-    /// centred as one block. Rounded by the kit's shader, so no page-coloured
-    /// corners are painted on. Returns the art's rectangle.
+    /// The selected game's cover in a detail panel (LISTE, BANDE): fitted into
+    /// the box minus the caption under it, never blown up past twice its size
+    /// (small and sharp reads better than large and soft), the art and its
+    /// caption centred as one block. Returns the art's rectangle.
+    ///
+    /// The tile thumbnail first, the full-resolution cover once the cursor has
+    /// stayed on the game a moment, faded in over it. Decoding the full cover
+    /// on every step (13 to 24 ms of PNG) dropped a frame per game for as long
+    /// as a direction was held, exactly while the list was meant to glide.
     #[allow(clippy::too_many_arguments)]
     fn kit_cover_panel(
         &mut self,
@@ -10996,52 +11051,116 @@ impl SwitchRenderBackend {
         name: &str,
         chip: u32,
     ) -> (f32, f32, f32, f32) {
-        // Full resolution: these panels are large enough that a tile thumbnail
-        // would show as mush.
-        let cover = self.cover_full_for(basename);
-        let (iw, ih) = match cover {
-            CoverTex::Image { w: iw, h: ih, .. } if iw > 0 && ih > 0 => (iw as f32, ih as f32),
-            _ => (4.0, 3.0),
+        /// How long the cursor has to stay before the full cover is decoded,
+        /// and how long it takes to fade in over the thumbnail.
+        const DWELL_MS: u64 = 150;
+        const FADE_MS: u64 = 120;
+        let now = unsafe { ruffle_tick_now() };
+        let freq = unsafe { ruffle_tick_freq() }.max(1);
+        let ms_since = |t: u64| now.saturating_sub(t) * 1000 / freq;
+        // Which game the panel shows, since when, and when its full cover came.
+        let (since, mut full_at) = match PANEL_COVER.lock() {
+            Ok(mut g) => match g.as_ref() {
+                Some(p) if p.basename == basename => (p.since, p.full_at),
+                _ => {
+                    *g = Some(PanelCover { basename: basename.to_string(), since: now, full_at: 0 });
+                    (now, 0)
+                }
+            },
+            Err(_) => (now, 0),
+        };
+        let mut full = reveal_cover_lookup(basename);
+        if full.is_none() && ms_since(since) >= DWELL_MS {
+            full = Some(self.cover_full_for(basename));
+            full_at = now;
+            if let Ok(mut g) = PANEL_COVER.lock() {
+                if let Some(p) = g.as_mut() {
+                    p.full_at = now;
+                }
+            }
+        }
+        // The thumbnail, decoded now if the grid never got to it.
+        let thumb = match (cover_lookup(basename), full) {
+            (Some(t), _) => t,
+            (None, None) => self.cover_for(basename),
+            (None, Some(_)) => CoverTex::Default,
+        };
+        // A full cover that was already decoded when the panel came to the game
+        // shows at once; one decoded now fades in over the thumbnail.
+        let full_alpha = match full {
+            Some(CoverTex::Image { .. }) if full_at == 0 => 1.0,
+            Some(CoverTex::Image { .. }) => (ms_since(full_at) as f32 / FADE_MS as f32).min(1.0),
+            _ => 0.0,
+        };
+        // The box's shape: the full cover's when known, else the thumbnail's.
+        // A thumbnail at the thumbnail box's size may have been shrunk, so it
+        // does not say how far the cover may be enlarged; one smaller than
+        // that box is the cover itself.
+        let (iw, ih, real) = match (full, thumb) {
+            (Some(CoverTex::Image { w, h, .. }), _) => (w as f32, h as f32, true),
+            (_, CoverTex::Image { w, h, .. }) => (w as f32, h as f32, w < 256 && h < 160),
+            _ => (4.0, 3.0, false),
         };
         let art_h = (h - caption_h).max(1.0);
         let img_aspect = iw / ih;
         let (mut dw, mut dh) = if img_aspect > w / art_h { (w, w / img_aspect) } else { (art_h * img_aspect, art_h) };
-        if matches!(cover, CoverTex::Image { .. }) && dw > iw * 2.0 {
+        if real && dw > iw * 2.0 {
             dw = iw * 2.0;
             dh = ih * 2.0;
         }
         let dx = (x + (w - dw) * 0.5).round();
         let dy = (y + ((h - dh - caption_h) * 0.5).max(0.0)).round();
-        match cover {
-            CoverTex::Image { tex, w: tw, h: th, amb } => {
-                self.kit_shadow(dx, dy + 8.0, dw, dh, theme::radius::TILE, 18.0, 0x70_00_00_00);
-                // The box has the cover's own shape, so it fills; through `kit_cover`
-                // a transparent logo sits on the same ground as in the grid.
-                self.kit_cover(dx, dy, dw, dh, tex, tw, th, amb, 1.0);
+        let has_art = matches!(thumb, CoverTex::Image { .. }) || matches!(full, Some(CoverTex::Image { .. }));
+        if has_art {
+            self.kit_shadow(dx, dy + 8.0, dw, dh, theme::radius::TILE, 18.0, 0x70_00_00_00);
+        }
+        // The box has the cover's own shape, so it fills; through `kit_cover`
+        // a transparent logo sits on the same ground as in the grid.
+        if full_alpha < 1.0 {
+            match thumb {
+                CoverTex::Image { tex, w: tw, h: th, amb } => self.kit_cover(dx, dy, dw, dh, tex, tw, th, amb, 1.0),
+                CoverTex::Default if !has_art => self.kit_default_tile(dx, dy, dw, dh, chip, name),
+                CoverTex::Default => {}
             }
-            CoverTex::Default => self.kit_default_tile(dx, dy, dw, dh, chip, name),
+        }
+        if let Some(CoverTex::Image { tex, w: tw, h: th, amb }) = full {
+            if full_alpha > 0.0 {
+                self.kit_cover(dx, dy, dw, dh, tex, tw, th, amb, full_alpha);
+            }
         }
         (dx, dy, dw, dh)
     }
 
-    /// Multi-file launch indicator (v1.3.0): a centered label near the bottom of
-    /// the launch/loading reveal, e.g. "MULTI-FILE (6)", telling the user this
-    /// game pulls in companion SWFs from its `.files/` folder. The caller gates
-    /// when it shows (launch reveal only, once the cover fills the screen).
-    pub fn draw_multifile_badge(&mut self, label: &str, count: i32) {
+    /// The layers badge of a multi-file game, in the top-right corner of a
+    /// cover whose right edge is `right` (Main.dc.html): the favourite chip's
+    /// twin on the other corner.
+    fn kit_multi_badge(&mut self, right: f32, y: f32) {
+        const CHIP: f32 = 26.0;
+        self.kit_rrect(right - CHIP, y, CHIP, CHIP, 8.0, 0xB8_0A_10_1C);
+        self.kit_icon(right - CHIP + 5.5, y + CHIP * 0.5, 15.0, Icon::Layers, theme::col::TEXT);
+    }
+
+    /// The launch's "several files" notice: a pill near the bottom of the
+    /// full-screen cover, with the same words and icon as the game's facts
+    /// line, `alpha` of the way faded in. The old one read "Multi-fichiers · 6",
+    /// which said neither six of what nor that the main file was a seventh.
+    pub fn draw_multifile_badge(&mut self, alpha: f32) {
         use theme::{col, size};
+        let a = alpha.clamp(0.0, 1.0);
+        if a <= 0.0 {
+            return;
+        }
+        let fade = |c: u32| (((c >> 24) as f32 * a) as u32) << 24 | (c & 0x00FF_FFFF);
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
-        // A pill over the bottom of the cover: an icon of stacked layers and the
-        // count, on a dark ground so it reads over any art.
-        let text = std::format!("{}  \u{00B7}  {}", label, count);
-        let tw = self.kit_measure(&text, size::LABEL + 1.0);
+        let text = crate::loc_ui::ui().facts_multifile;
+        let tw = self.kit_measure(text, size::LABEL + 1.0);
         let w = 18.0 + 20.0 + 10.0 + tw + 20.0;
         let x = ((vw - w) * 0.5).round();
         let cy = vh - 56.0;
-        self.kit_rrect(x, cy - 20.0, w, 40.0, 20.0, 0xC8_0A_10_1C);
-        self.kit_icon(x + 18.0, cy, 20.0, Icon::Layers, col::GOLD);
-        self.kit_text_mid(x + 18.0 + 20.0 + 10.0, cy, size::LABEL + 1.0, &text, col::TEXT);
+        self.kit_rrect(x, cy - 20.0, w, 40.0, 20.0, fade(0xC8_0A_10_1C));
+        self.kit_icon(x + 18.0, cy, 20.0, Icon::Layers, fade(col::GOLD));
+        self.kit_text_mid(x + 18.0 + 20.0 + 10.0, cy, size::LABEL + 1.0, text, fade(col::TEXT));
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
@@ -11614,19 +11733,38 @@ impl SwitchRenderBackend {
             // Wrapped once, measured once: the caption's height is what the art
             // is fitted against, so the two cannot disagree.
             let lines = self.kit_wrap(&e.display_name, size::TITLE, box_w, 2);
-            let caption_h = 22.0 + lines.len() as f32 * 32.0 + 30.0;
+            let fact_lines = self.kit_game_facts_lines(e, box_w);
+            let caption_h = 22.0 + lines.len() as f32 * 32.0 + 30.0 + fact_lines.saturating_sub(1) as f32 * 24.0;
             panel = self.kit_cover_panel(box_x, box_y, box_w, box_h, caption_h, &e.basename, &e.display_name, e.color_chip);
             if crate::favorites::is_favorite(&e.basename) {
                 self.kit_favorite_chip(panel.0 + 8.0, panel.1 + 8.0);
             }
+            if e.multi {
+                self.kit_multi_badge(panel.0 + panel.2 - 8.0, panel.1 + 8.0);
+            }
+            // The selected name in gold at the title size, as in every view.
             let mut ty = panel.1 + panel.3 + 30.0;
             for line in &lines {
                 let lw = self.kit_measure(line, size::TITLE);
-                self.kit_text_mid((box_x + ((box_w - lw) * 0.5).max(0.0)).round(), ty, size::TITLE, line, col::TEXT);
+                self.kit_text_mid((box_x + ((box_w - lw) * 0.5).max(0.0)).round(), ty, size::TITLE, line, col::GOLD);
                 ty += 32.0;
             }
-            let fw = self.kit_game_facts_width(e, size::LABEL);
-            self.kit_game_facts_px((box_x + ((box_w - fw) * 0.5).max(0.0)).round(), ty + 2.0, e, size::LABEL);
+            self.kit_game_facts(box_x + box_w * 0.5, ty + 2.0, e, box_w, true);
+        }
+
+        // Small covers in the rows, from the tile thumbnails: one decode a frame
+        // like every view, the rows nearest the cursor first, and none while the
+        // panel is still waiting for the selected game's own thumbnail.
+        let selected_ready = entries.get(selection).map_or(true, |e| cover_lookup(&e.basename).is_some());
+        if selected_ready {
+            let first = (scroll_px / ROW_H).floor().max(0.0) as usize;
+            let last = (first + rows_visible + 1).min(entries.len());
+            let missing = (first..last)
+                .filter(|&i| cover_lookup(&entries[i].basename).is_none())
+                .min_by_key(|&i| (i as isize - selection as isize).abs());
+            if let Some(i) = missing {
+                let _ = self.cover_for(&entries[i].basename);
+            }
         }
 
         // ── Title list, clipped to its band ──
@@ -11650,23 +11788,41 @@ impl SwitchRenderBackend {
                 continue;
             }
 
-            // Colour dot: the same per-game hue the grid falls back to, kept here
-            // so a game stays recognisable between the two layouts.
+            // A small cover where a coloured dot used to be: the dot was a hash
+            // of the file name, and a coloured dot before a name reads as a
+            // status light. A game with no cover (yet) gets its tile's colour.
             let cy = y + (ROW_H - 4.0) * 0.5;
-            self.kit_rrect(list_x + 14.0, cy - 5.0, 10.0, 10.0, 5.0, 0xFF00_0000 | e.color_chip);
+            let (mx, mw, mh) = (list_x + 10.0, 48.0, 30.0);
+            let my = (cy - mh * 0.5).round();
+            match cover_lookup(&e.basename) {
+                Some(CoverTex::Image { tex, w, h, .. }) => {
+                    self.kit_rrect(mx, my, mw, mh, 6.0, theme::col::TILE);
+                    self.kit_image(mx, my, mw, mh, tex, kit::cover::crop_uv(w, h, mw, mh), 1.0, 6.0);
+                }
+                _ => {
+                    let fill = kit::cover::mix_rgb(e.color_chip & 0x00FF_FFFF, theme::col::BG & 0x00FF_FFFF, 0.55);
+                    self.kit_rrect(mx, my, mw, mh, 6.0, 0xFF00_0000 | fill);
+                }
+            }
             let focused = idx == selection;
             let ink = if focused { theme::col::TEXT } else { theme::col::TEXT2 };
             // Favourites also sort to the top, so the star confirms WHY a row is
-            // up there rather than announcing something new.
+            // up there rather than announcing something new. The solid star, as
+            // on every cover: the outline is the options' "not a favourite".
             let fav = crate::favorites::is_favorite(&e.basename);
-            let mut text_x = list_x + 36.0;
+            let mut text_x = mx + mw + 12.0;
             if fav {
-                self.kit_icon(text_x, cy, 16.0, Icon::Star, theme::col::GOLD);
-                text_x += 24.0;
+                self.kit_star(text_x, cy, 16.0, theme::col::GOLD);
+                text_x += 22.0;
             }
-            // Truncated to the column, never to the panel beside it.
-            let label = self.kit_fit_mid(&e.display_name, theme::size::ROW - 1.0, list_x + list_w - text_x - 14.0);
-            self.kit_text_mid(text_x, cy, theme::size::ROW - 1.0, &label, ink);
+            // Truncated to the column, never to the panel beside it, leaving
+            // room for the layers mark of a multi-file game after the name.
+            let mark = if e.multi { 8.0 + 16.0 } else { 0.0 };
+            let label = self.kit_fit_mid(&e.display_name, theme::size::ROW - 1.0, list_x + list_w - text_x - 14.0 - mark);
+            let lw = self.kit_text_mid(text_x, cy, theme::size::ROW - 1.0, &label, ink);
+            if e.multi {
+                self.kit_icon(text_x + lw + 8.0, cy, 16.0, Icon::Layers, theme::col::TEXT3);
+            }
         }
         self.clear_clip();
 
@@ -11866,14 +12022,19 @@ impl SwitchRenderBackend {
             if crate::favorites::is_favorite(&e.basename) {
                 self.kit_favorite_chip(hero.0 + 10.0, hero.1 + 10.0);
             }
-            // Three lines: the column is wide and the row does not start until
-            // y468, so a long title has room for a third.
-            let mut ty = HERO_Y + 22.0;
-            for line in self.kit_wrap(&e.display_name, size::TITLE + 4.0, vw - COL_X - 48.0, 3) {
-                self.kit_text_mid(COL_X, ty, size::TITLE + 4.0, &line, col::TEXT);
-                ty += 38.0;
+            if e.multi {
+                self.kit_multi_badge(hero.0 + hero.2 - 10.0, hero.1 + 10.0);
             }
-            self.kit_game_facts(COL_X, ty + 6.0, e);
+            // Three lines: the column is wide and the row does not start until
+            // y468, so a long title has room for a third. In gold at the title
+            // size, as the selected name is in every view.
+            let col_w = vw - COL_X - 48.0;
+            let mut ty = HERO_Y + 22.0;
+            for line in self.kit_wrap(&e.display_name, size::TITLE, col_w, 3) {
+                self.kit_text_mid(COL_X, ty, size::TITLE, &line, col::GOLD);
+                ty += 32.0;
+            }
+            self.kit_game_facts(COL_X, ty + 6.0, e, col_w, false);
         }
         if let Ok(mut r) = gallery_sel_rect().lock() {
             *r = hero;
@@ -11950,6 +12111,9 @@ impl SwitchRenderBackend {
             }
             if crate::favorites::is_favorite(&e.basename) {
                 self.kit_favorite_chip(x + 8.0, ry + 8.0);
+            }
+            if e.multi {
+                self.kit_multi_badge(x + rw - 8.0, ry + 8.0);
             }
             // Veil measured against the EASED selection, so it lifts and settles
             // with the slide instead of switching at the moment the index changes.
@@ -12145,6 +12309,9 @@ impl SwitchRenderBackend {
             if crate::favorites::is_favorite(&e.basename) {
                 self.kit_favorite_chip(x + 8.0 * sc, y + 8.0 * sc);
             }
+            if e.multi {
+                self.kit_multi_badge(x + w - 8.0 * sc, y + 8.0 * sc);
+            }
         }
 
         // ── Light under the shelf ──
@@ -12176,7 +12343,7 @@ impl SwitchRenderBackend {
             // Named from the INTEGER selection, not from `sel_pos.round()`: A
             // launches `selection`, so naming anything else would let the facts
             // describe a different game than the one that starts.
-            let lines = self.kit_wrap(&e.display_name, theme::size::TITLE + 6.0, cap_w, 2);
+            let lines = self.kit_wrap(&e.display_name, theme::size::TITLE, cap_w, 2);
             // 414, not 388: the lit segment above is `3.0 + 7.0 * b` tall from
             // y=380, so at full selection it reaches y=390 and the title's first
             // pixel row landed INSIDE it -- the name looked stuck to the light
@@ -12185,12 +12352,13 @@ impl SwitchRenderBackend {
             // this only show on the selected tile. The extra room past mere
             // clearance is free: the page had ~170 px of nothing between the rail
             // and the footer.
+            // In gold at the title size, as the selected name is in every view.
             let mut ty = 430.0;
             for line in &lines {
-                self.kit_text_mid(cap_x, ty, theme::size::TITLE + 6.0, line, theme::col::TEXT);
-                ty += 40.0;
+                self.kit_text_mid(cap_x, ty, theme::size::TITLE, line, theme::col::GOLD);
+                ty += 32.0;
             }
-            self.kit_game_facts_px(cap_x, ty + 2.0, e, theme::size::LABEL + 1.0);
+            self.kit_game_facts(cap_x, ty + 2.0, e, cap_w, false);
         }
 
         // Position rail — the row shows about five games out of many, so where you
@@ -12484,6 +12652,9 @@ impl SwitchRenderBackend {
             if crate::favorites::is_favorite(&e.basename) {
                 self.kit_favorite_chip(tx + 8.0, ty + 8.0);
             }
+            if e.multi {
+                self.kit_multi_badge(tx + tw - 8.0, ty + 8.0);
+            }
         }
 
         // The ring, drawn last and still inside the scissor so it clips with its
@@ -12530,7 +12701,7 @@ impl SwitchRenderBackend {
             use theme::{col, size};
             let name = self.kit_fit_mid(&entry.display_name, size::TITLE, vw - 2.0 * LEFT);
             self.kit_text_mid(LEFT, 616.0, size::TITLE, &name, col::GOLD);
-            self.kit_game_facts(LEFT, 648.0, entry);
+            self.kit_game_facts(LEFT, 648.0, entry, vw - 2.0 * LEFT, false);
         }
 
         self.kit_home_footer(false);
@@ -12985,27 +13156,39 @@ impl SwitchRenderBackend {
 }
 
 
-/// Format a byte count as a short pretty string ("3 KB", "15 MB"). Picks
-/// the largest unit that keeps the integer part ≤ 999. KiB-style (1024)
-/// instead of decimal because that's what hbmenu / fsadm show for files.
+/// A byte count as the player's language writes it: "18 Mo" and "1,2 Go" in
+/// French, "18 MB" in English, "18 МБ" in Russian. One decimal under 10, so a
+/// small download moves ("3,4 Mo", "3,5 Mo") instead of sitting on "3 Mo" and
+/// then jumping. Powers of 1024, as hbmenu and the console show files.
+/// Truncated, never rounded up: a size should not promise more than is there.
+/// Integers only, which keeps libm out of it like `approx_sin`.
 fn format_size_pretty(bytes: u64) -> std::string::String {
     // Unknown size (e.g. Flashpoint search hits — db-api doesn't expose the
     // GameZIP size) → show nothing rather than a misleading "0 B".
     if bytes == 0 {
         return std::string::String::new();
     }
+    let u = crate::loc_ui::ui();
     const KB: u64 = 1024;
     const MB: u64 = 1024 * 1024;
     const GB: u64 = 1024 * 1024 * 1024;
-    if bytes >= GB {
-        std::format!("{}.{} GB", bytes / GB, (bytes % GB) / (GB / 10))
+    let (div, unit) = if bytes >= GB {
+        (GB, u.size_gb)
     } else if bytes >= MB {
-        std::format!("{} MB", bytes / MB)
+        (MB, u.size_mb)
     } else if bytes >= KB {
-        std::format!("{} KB", bytes / KB)
+        (KB, u.size_kb)
     } else {
-        std::format!("{} B", bytes)
-    }
+        return u.size_b.replacen("{}", &bytes.to_string(), 1);
+    };
+    let whole = bytes / div;
+    let num = if whole < 10 {
+        let tenth = (bytes % div) * 10 / div;
+        std::format!("{}{}{}", whole, u.decimal_mark, tenth)
+    } else {
+        whole.to_string()
+    };
+    unit.replacen("{}", &num, 1)
 }
 
 /// Cheap sin approximation for UI animations. Bhaskara-I-style polynomial

@@ -335,10 +335,15 @@ static LAST_PLAYED: Mutex<Option<(std::string::String, std::string::String, std:
 /// survives the game->library teardown.
 static LAUNCH_TICK: Mutex<Option<u64>> = Mutex::new(None);
 
-/// Companion-SWF count of the launching game's `<game>.files/` folder
-/// (multi-file indicator, v1.3.0). Set at launch (A-press), shown on the launch
-/// reveal, reset to 0 on return to the library so the quit reveal stays clean.
-static LAUNCH_COMPANIONS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+/// Whether the launching game has a companion folder (`Entry::multi`), for
+/// the launch reveal's "several files" badge. Set at launch (A-press), cleared
+/// on return to the library so the quit reveal stays clean.
+///
+/// It was a count of the flat `.swf` files in the folder, read off the card at
+/// the press. A Flashpoint GameZIP keeps its files in host directories, so that
+/// count was 0 and the badge never showed for most multi-file games; the tile
+/// and the launch now answer from the same flag.
+static LAUNCH_MULTI: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Active library sort, persisted to `sdmc:/flashnx/sort.txt`
 /// (0 = A-Z, 1 = recent, 2 = recently played, 3 = most played, 4 = size).
@@ -734,7 +739,7 @@ pub(crate) fn sort_entries(entries: &mut std::vec::Vec<Entry>, mode: SortMode, r
                 .then_with(|| alpha(a, b))
         }),
         SortMode::Size => {
-            entries.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes).then_with(|| alpha(a, b)))
+            entries.sort_by(|a, b| b.card_bytes.cmp(&a.card_bytes).then_with(|| alpha(a, b)))
         }
     }
     if reverse {
@@ -1369,7 +1374,22 @@ pub(crate) struct Entry {
     /// `refresh_tags` puts it back in step after any change.
     pub tags: std::vec::Vec<std::string::String>,
     pub display_name: std::string::String,
+    /// The SWF header's declared length (the UNCOMPRESSED size of a CWS or ZWS
+    /// file), or the `.filesize` footprint of a multi-file game. The bug report
+    /// sends this beside the header's own number; what the player is shown is
+    /// `card_bytes`.
     pub size_bytes: u64,
+    /// What the game takes on the card: the `.swf` as stored, or for a
+    /// multi-file game the footprint of the file and its companion folder. The
+    /// facts line and the size sort read this. They used to read `size_bytes`,
+    /// so a 6 MB compressed file showed about 18 MB beside an icon promising
+    /// its size on the card.
+    pub card_bytes: u64,
+    /// The game has a `<stem>.files/` companion folder: its tile carries the
+    /// layers badge and its facts say it is made of several files. Those are
+    /// the big games that take longest to start, and the launch was the only
+    /// place that said so, too late to help.
+    pub multi: bool,
     pub swf_version: u8,
     /// 0 = uncompressed FWS, 1 = zlib CWS, 2 = lzma ZWS.
     pub compression_label: &'static str,
@@ -2013,7 +2033,10 @@ fn backfill_game_sizes() {
         if let Some(sz) = read_filesize_cache(swf_path) {
             if let Ok(mut g) = LIBRARY.lock() {
                 if let Some(e) = g.entries.iter_mut().find(|e| e.path == *swf_path) {
-                    e.size_bytes = sz; // reflect it now, without waiting for a re-scan
+                    // Reflect it now, without waiting for a re-scan.
+                    e.size_bytes = sz;
+                    e.card_bytes = sz;
+                    e.multi = true;
                 }
             }
             done += 1;
@@ -2245,6 +2268,11 @@ struct IndexEntry {
     /// "FWS" / "CWS" / "ZWS" — mapped back to the `&'static str` the UI holds.
     comp: std::string::String,
     as3: bool,
+    /// The `.swf`'s own size on the card, as stored. Read out of the same file,
+    /// so the mtime check covers it as well. 0 in an index written before it
+    /// existed: the game is asked once, and the index rewritten with it.
+    #[serde(default)]
+    disk: u64,
 }
 
 static SCAN_INDEX: Mutex<std::vec::Vec<IndexEntry>> = Mutex::new(std::vec::Vec::new());
@@ -2287,7 +2315,8 @@ pub fn scan_begin() {
 }
 
 /// Record one game's header for the write-back at `scan_end`.
-fn scan_note_header(path: &str, mtime: u64, size: u64, ver: u8, comp: &str, as3: bool) {
+#[allow(clippy::too_many_arguments)]
+fn scan_note_header(path: &str, mtime: u64, size: u64, ver: u8, comp: &str, as3: bool, disk: u64) {
     if let Ok(mut rows) = SCAN_HEADERS.lock() {
         rows.push(IndexEntry {
             path: path.to_string(),
@@ -2296,6 +2325,7 @@ fn scan_note_header(path: &str, mtime: u64, size: u64, ver: u8, comp: &str, as3:
             ver,
             comp: comp.to_string(),
             as3,
+            disk,
         });
     }
 }
@@ -2327,8 +2357,9 @@ pub fn scan_end() {
     }
 }
 
-/// Cached SWF header for `path`, if the index has it at exactly this mtime.
-fn index_lookup(path: &str, mtime: u64) -> Option<(u64, u8, &'static str, bool)> {
+/// Cached SWF header for `path`, and the file's size on the card (0 when the
+/// row predates it), if the index has it at exactly this mtime.
+fn index_lookup(path: &str, mtime: u64) -> Option<(u64, u8, &'static str, bool, u64)> {
     // A game whose mtime is unknown (0) can't be validated — don't trust it.
     if mtime == 0 {
         return None;
@@ -2336,7 +2367,7 @@ fn index_lookup(path: &str, mtime: u64) -> Option<(u64, u8, &'static str, bool)>
     let idx = SCAN_INDEX.lock().ok()?;
     let e = idx.iter().find(|e| e.path == path && e.mtime == mtime)?;
     let comp = static_compression_label(&e.comp)?;
-    Some((e.size, e.ver, comp, e.as3))
+    Some((e.size, e.ver, comp, e.as3, e.disk))
 }
 
 /// Per-part cost of the SD scan, in system ticks. The scan runs before the
@@ -2615,13 +2646,13 @@ pub fn add_path(path: &str, mtime: u64) -> bool {
     // The SWF header is the one part of a scan that can be cached safely: it is
     // read out of the `.swf`, so an unchanged mtime guarantees it is current.
     // The sidecars below are read every scan (they change on their own).
-    let (header_size, swf_version, compression_label, is_as3) =
+    let (header_size, swf_version, compression_label, is_as3, mut disk) =
         match index_lookup(path, mtime) {
             Some(hit) => hit,
             None => {
                 SCAN_INDEX_DIRTY.store(true, core::sync::atomic::Ordering::Relaxed);
                 match scan_timed(0, || read_swf_header(path)) {
-                    Some(h) => (h.size_bytes, h.version, h.compression_label, h.is_as3),
+                    Some(h) => (h.size_bytes, h.version, h.compression_label, h.is_as3, 0),
                     None => {
                         log(&std::format!(
                             "library: failed to parse SWF header for {}, skipping\n",
@@ -2632,10 +2663,23 @@ pub fn add_path(path: &str, mtime: u64) -> bool {
                 }
             }
         };
-    scan_note_header(path, mtime, header_size, swf_version, compression_label, is_as3);
+    // The file's own size on the card (a stat), read once and then kept in the
+    // index with its header; a row written before the index had it is asked
+    // once, and the index rewritten.
+    if disk == 0 {
+        disk = scan_timed(0, || file_size(path));
+        SCAN_INDEX_DIRTY.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
+    scan_note_header(path, mtime, header_size, swf_version, compression_label, is_as3, disk);
     // Prefer the cached real footprint (multi-file games); fall back to the SWF
-    // header's declared size for single-file / pre-feature games.
-    let size_bytes = scan_timed(1, || read_filesize_cache(path)).unwrap_or(header_size);
+    // header's declared size for single-file / pre-feature games. What the
+    // player is shown falls back to the file's size on the card instead.
+    let footprint = scan_timed(1, || read_filesize_cache(path));
+    let size_bytes = footprint.unwrap_or(header_size);
+    let card_bytes = footprint.unwrap_or(if disk > 0 { disk } else { header_size });
+    // A companion folder is a directory the scan listed, so this is a memory
+    // lookup; a game downloaded since has its `.filesize`, written with it.
+    let multi = footprint.is_some() || file_exists(&crate::sidecar_dir_for(Some(path)).to_string_lossy());
     let color_chip = color_from_basename(&basename);
     // Honour a per-game display-name override from the .meta.json sidecar
     // (Phase 3.4.bis RENOMMER). Sidecar absent / unparseable / empty
@@ -2658,6 +2702,8 @@ pub fn add_path(path: &str, mtime: u64) -> bool {
         folder,
         tags,
         size_bytes,
+        card_bytes,
+        multi,
         swf_version,
         compression_label,
         is_as3,
@@ -2906,7 +2952,7 @@ pub fn open() {
     // so the first JOUER frame doesn't slide in from a stale position.
     // The multi-file badge is a launch-only cue; clear it so the quit reveal
     // (cover shrinking back to the tile) doesn't carry it.
-    LAUNCH_COMPANIONS.store(0, std::sync::atomic::Ordering::Relaxed);
+    LAUNCH_MULTI.store(false, std::sync::atomic::Ordering::Relaxed);
     crate::backend::render::gallery_anim_reset();
     crate::backend::render::home_strip_snap();
     crate::backend::render::home_header_pin(false);
@@ -6291,16 +6337,8 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
                 if let Ok(mut g) = LAUNCH_TICK.lock() {
                     *g = Some(unsafe { ruffle_tick_now() });
                 }
-                // Multi-file indicator: count companion SWFs in <game>.files/ so
-                // the launch reveal can flag a multi-file game.
-                {
-                    let mut p = entry.path.as_bytes().to_vec();
-                    p.push(0);
-                    let n = unsafe {
-                        swf_picker_count_companions(p.as_ptr() as *const core::ffi::c_char)
-                    };
-                    LAUNCH_COMPANIONS.store(n.max(0), std::sync::atomic::Ordering::Relaxed);
-                }
+                // The launch reveal flags a multi-file game, as its tile does.
+                LAUNCH_MULTI.store(entry.multi, std::sync::atomic::Ordering::Relaxed);
                 log(&std::format!(
                     "library: JOUER -> {} ({})\n",
                     entry.display_name, entry.path,
@@ -9421,9 +9459,10 @@ fn draw_game_reveal_window(backend: &mut SwitchRenderBackend, frac: f32, fade: f
     // Multi-file indicator (v1.3.0): once the cover fills the screen (the SWF is
     // loading behind it), flag that this game pulls in companion SWFs from its
     // `.files/` folder. Count is reset to 0 on the quit reveal, so launch-only.
-    let companions = LAUNCH_COMPANIONS.load(std::sync::atomic::Ordering::Relaxed);
-    if companions > 0 && frac >= 0.85 {
-        backend.draw_multifile_badge(crate::loc::s().multifile, companions);
+    let multi = LAUNCH_MULTI.load(std::sync::atomic::Ordering::Relaxed);
+    if multi && frac >= 0.85 {
+        // Fading in over the last stretch of the opening, not popping.
+        backend.draw_multifile_badge((frac - 0.85) / 0.15);
     }
 }
 
