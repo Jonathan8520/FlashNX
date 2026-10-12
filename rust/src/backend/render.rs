@@ -374,6 +374,11 @@ fn tile_open(key: u64, selected: bool) -> f32 {
         }
     };
     let c = &mut g.clocks[i];
+    // Two tiles showing the same thing (a result listed twice) share a clock:
+    // the selected one has the frame, rather than the two pulling it both ways.
+    if c.seen == frame && !selected {
+        return c.open.value().clamp(0.0, 1.0);
+    }
     c.open.retarget(target);
     if c.stepped != frame {
         c.open.step(dt);
