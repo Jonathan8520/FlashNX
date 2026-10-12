@@ -865,9 +865,11 @@ extern "C" int swkbd_prompt_search(const char* header, const char* guide, const 
 // own properties (queried via ruffle_keyboard_field): `flags` bit0 = password,
 // bit1 = multiline, bit2 = numeric (digits-only restrict); `maxlen` = the
 // field's max char count (0 = unlimited). Pre-fills with `initial` (the field's
-// current text) so the user edits in place. Writes the entered string into
-// `out` and returns 0 on accept, -1 on cancel or applet error (field unchanged).
-extern "C" int swkbd_prompt_game_field(const char* initial, int flags, int maxlen, char* out, int cap) {
+// current text) so the user edits in place. `header` is the localized title
+// (ruffle_keyboard_header), like every other keyboard's. Writes the entered
+// string into `out` and returns 0 on accept, -1 on cancel or applet error
+// (field unchanged).
+extern "C" int swkbd_prompt_game_field(const char* header, const char* initial, int flags, int maxlen, char* out, int cap) {
     if (cap < 2) return -1;
     SwkbdConfig kbd;
     Result rc = swkbdCreate(&kbd, 0);
@@ -891,7 +893,7 @@ extern "C" int swkbd_prompt_game_field(const char* initial, int flags, int maxle
         // submitting, so the user can enter multi-line text.
         swkbdConfigSetReturnButtonFlag(&kbd, 1);
     }
-    swkbdConfigSetHeaderText(&kbd, "Text input");
+    if (header && *header) swkbdConfigSetHeaderText(&kbd, header);
     if (initial && *initial) {
         swkbdConfigSetInitialText(&kbd, initial);
     }

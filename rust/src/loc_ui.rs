@@ -558,6 +558,8 @@ pub struct Ui {
     pub more_changes_1: &'static str,
     /// Guide line of the keyboard the cover picker opens (Minus) to search Flashpoint again; its header is `loc::Strings::cover_title`.
     pub kbd_cover_guide: &'static str,
+    /// Header of the Switch keyboard a game's own text field opens (a name entry, a password), and the keyboard a key bound to it opens.
+    pub kbd_game_text_header: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -883,6 +885,7 @@ const EN: Ui = Ui {
     toast_folder_none: "This game isn't in any folder.",
     more_changes_1: "And {} more change",
     kbd_cover_guide: "Name of the game whose cover you want",
+    kbd_game_text_header: "Text for the game",
 };
 
 const FR: Ui = Ui {
@@ -1208,6 +1211,7 @@ const FR: Ui = Ui {
     toast_folder_none: "Ce jeu n'est dans aucun dossier.",
     more_changes_1: "Et {} autre changement",
     kbd_cover_guide: "Nom du jeu dont tu cherches la jaquette",
+    kbd_game_text_header: "Saisie pour le jeu",
 };
 
 const ES: Ui = Ui {
@@ -1533,6 +1537,7 @@ const ES: Ui = Ui {
     toast_folder_none: "Este juego no está en ninguna carpeta.",
     more_changes_1: "Y {} cambio más",
     kbd_cover_guide: "Nombre del juego cuya portada buscas",
+    kbd_game_text_header: "Texto para el juego",
 };
 
 const RU: Ui = Ui {
@@ -1858,6 +1863,7 @@ const RU: Ui = Ui {
     toast_folder_none: "Эта игра не входит ни в одну папку.",
     more_changes_1: "И ещё одно изменение",
     kbd_cover_guide: "Название игры, для которой ищешь обложку",
+    kbd_game_text_header: "Текст для игры",
 };
 
 const DE: Ui = Ui {
@@ -2183,6 +2189,7 @@ const DE: Ui = Ui {
     toast_folder_none: "Dieses Spiel ist in keinem Ordner.",
     more_changes_1: "Und {} weitere Änderung",
     kbd_cover_guide: "Name des Spiels, dessen Cover du suchst",
+    kbd_game_text_header: "Text für das Spiel",
 };
 
 const IT: Ui = Ui {
@@ -2508,6 +2515,7 @@ const IT: Ui = Ui {
     toast_folder_none: "Questo gioco non è in nessuna cartella.",
     more_changes_1: "E un'altra modifica",
     kbd_cover_guide: "Nome del gioco di cui cerchi la copertina",
+    kbd_game_text_header: "Testo per il gioco",
 };
 
 const PT: Ui = Ui {
@@ -2833,6 +2841,7 @@ const PT: Ui = Ui {
     toast_folder_none: "Este jogo não está em nenhuma pasta.",
     more_changes_1: "E mais {} mudança",
     kbd_cover_guide: "Nome do jogo cuja capa você procura",
+    kbd_game_text_header: "Texto para o jogo",
 };
 
 const ZH: Ui = Ui {
@@ -3158,6 +3167,7 @@ const ZH: Ui = Ui {
     toast_folder_none: "此游戏不在任何文件夹中。",
     more_changes_1: "还有 {} 处更改",
     kbd_cover_guide: "要查找封面的游戏名称",
+    kbd_game_text_header: "输入游戏文字",
 };
 
 const TR: Ui = Ui {
@@ -3483,6 +3493,7 @@ const TR: Ui = Ui {
     toast_folder_none: "Bu oyun hiçbir klasörde değil.",
     more_changes_1: "Ve {} değişiklik daha",
     kbd_cover_guide: "Kapağını aradığın oyunun adı",
+    kbd_game_text_header: "Oyun için metin",
 };
 
 pub fn ui() -> &'static Ui {
