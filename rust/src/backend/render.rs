@@ -377,37 +377,115 @@ impl ModalFrame {
 /// characters.
 type Glyph = [&'static str; 7];
 
-// CJK / atlas-glyph layout knobs, in the same "units" the 5x7 bitmap font uses
-// (1 unit = `scale` px; a bitmap glyph is 7 units tall, 6 units advance). CJK
-// is rendered full-width: one square cell `CJK_ADVANCE_UNITS` wide, used by
-// BOTH `draw_text` and `measure_text` so centring matches rendering. These two
-// are the only things to tweak on hardware to align CJK with the bitmap font.
-/// How long a grid cover takes to open or close, in milliseconds. Matched to
-/// the selection frame's own travel so the art and the cursor settle together.
+/// How long a cover takes to open or close, and the ring to travel to its new
+/// tile, in milliseconds. One clock for both, so the art and the ring settle on
+/// the same frame instead of the movement seeming to end twice.
 const GRID_COVER_MS: f32 = 190.0;
+
+/// A value travelling to a target in exactly `GRID_COVER_MS`, keeping its speed
+/// when the target changes on the way.
+///
+/// A cubic Hermite from where the value is, at the speed it has, to the target
+/// at rest. From rest it IS a smoothstep, the curve the covers always used. The
+/// difference is a change of mind half way, which a fast hand makes all the
+/// time (left, right, left): reversing a linear clock under a smoothstep
+/// flipped the speed in one frame, and restarting a smoothstep stopped the
+/// value dead before setting off again, which under a held direction pulsed
+/// the ring twelve times a second. Here the speed carries over and the motion
+/// bends instead.
+#[derive(Clone, Copy)]
+struct Glide {
+    /// Where the current leg started, the speed it had there (in units per
+    /// leg), where it ends, and how far along it is (0 to 1).
+    from: f32,
+    speed: f32,
+    to: f32,
+    u: f32,
+}
+
+impl Glide {
+    /// Resting at `v`.
+    const fn at(v: f32) -> Glide {
+        Glide { from: v, speed: 0.0, to: v, u: 1.0 }
+    }
+
+    fn value(&self) -> f32 {
+        let u = self.u;
+        let (u2, u3) = (u * u, u * u * u);
+        (2.0 * u3 - 3.0 * u2 + 1.0) * self.from + (u3 - 2.0 * u2 + u) * self.speed + (3.0 * u2 - 2.0 * u3) * self.to
+    }
+
+    /// The speed now, in units per leg.
+    fn velocity(&self) -> f32 {
+        let u = self.u;
+        let u2 = u * u;
+        (6.0 * u2 - 6.0 * u) * self.from + (3.0 * u2 - 4.0 * u + 1.0) * self.speed + (6.0 * u - 6.0 * u2) * self.to
+    }
+
+    /// Head for `to` from wherever the value is, at the speed it has. Every leg
+    /// lasts the same time, so a speed in units per leg carries over as it is.
+    fn retarget(&mut self, to: f32) {
+        if to == self.to {
+            return;
+        }
+        let (from, speed) = if self.settled() { (self.to, 0.0) } else { (self.value(), self.velocity()) };
+        *self = Glide { from, speed, to, u: 0.0 };
+    }
+
+    fn step(&mut self, dt_ms: f32) {
+        self.u = (self.u + dt_ms / GRID_COVER_MS).min(1.0);
+    }
+
+    fn settled(&self) -> bool {
+        self.u >= 1.0
+    }
+}
+
+/// One tile's cover: how open it is, and the gallery frame that last drew it.
+struct TileClock {
+    key: u64,
+    open: Glide,
+    /// The frame that last drew the tile, and the one that last stepped its
+    /// clock (a tile coming back into view is stepped once, not twice).
+    seen: u32,
+    stepped: u32,
+}
 
 /// How far each tile's cover is open, on its own clock.
 ///
 /// It used to be one pair, `(opening, closing, start)`: the tile being selected
 /// and the one being left. Run the cursor across six covers and only the last
 /// two moved; the four in between snapped shut the moment the next one was
-/// chosen, which reads as a glitch. Now every tile eases toward open while it
-/// is selected and toward closed when it is not, from wherever it was, so a
-/// cover left half open finishes closing by itself. A tile is named by a hash
-/// of what it shows (its file name, its URL), not by its index, so a re-sort
-/// cannot hand one tile's motion to another.
+/// chosen, which reads as a glitch. Now every tile heads for open while it is
+/// selected and for closed when it is not, from wherever it was, so a cover
+/// left half open finishes closing by itself.
+///
+/// Even out of sight: a tile still closing when its row scrolled away used to
+/// keep its half-open state until it came back, and reappeared half open. A
+/// clock the last frame did not draw now keeps closing on its own and is
+/// forgotten once shut. A tile is named by a hash of WHERE it comes from (the
+/// game's path, a result's URL), never its index or its file name: a re-sort
+/// cannot hand one tile's motion to another, and two games of the same name in
+/// two folders no longer pull one clock in two directions.
 struct TileOpen {
     /// Tick of the last frame that stepped the clocks, and the step it took.
     tick: u64,
     dt_ms: f32,
-    /// `(key, t)` for every tile not at rest; `t` runs 0 (closed) to 1.
-    open: std::vec::Vec<(u64, f32)>,
+    /// Gallery frames drawn so far (wraps).
+    frame: u32,
+    /// Every tile not at rest.
+    clocks: std::vec::Vec<TileClock>,
 }
 
-static TILE_OPEN: Mutex<TileOpen> = Mutex::new(TileOpen { tick: 0, dt_ms: 0.0, open: std::vec::Vec::new() });
+static TILE_OPEN: Mutex<TileOpen> = Mutex::new(TileOpen { tick: 0, dt_ms: 0.0, frame: 0, clocks: std::vec::Vec::new() });
 
 /// Start a frame of tile animation: how long since the last one, capped so a
-/// stall (a game run, a sleep) does not jump every tile to its end.
+/// stall (a game run, a sleep) does not jump every tile to its end, and the
+/// tiles the previous frame did not draw, which close unseen.
+///
+/// Frames are counted in GALLERY frames, not in time: while another tab or a
+/// game is on screen no frame passes, and the tiles come back exactly as they
+/// were left rather than all judged out of sight.
 fn tile_open_frame() {
     let now = unsafe { ruffle_tick_now() };
     let freq = unsafe { ruffle_tick_freq() }.max(1) as f32;
@@ -415,10 +493,22 @@ fn tile_open_frame() {
         let dt = if g.tick == 0 { 0.0 } else { (now.saturating_sub(g.tick) as f32 * 1000.0 / freq).min(100.0) };
         g.tick = now;
         g.dt_ms = dt;
+        let prev = g.frame;
+        g.frame = g.frame.wrapping_add(1);
+        let frame = g.frame;
+        g.clocks.retain_mut(|c| {
+            if c.seen == prev {
+                return true;
+            }
+            c.open.retarget(0.0);
+            c.open.step(dt);
+            c.stepped = frame;
+            !(c.open.settled() && c.open.to == 0.0)
+        });
     }
 }
 
-/// A stable key for a tile: FNV-1a of what it shows.
+/// A stable key for a tile: FNV-1a of where it comes from (a path, a URL).
 fn tile_key(name: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in name.as_bytes() {
@@ -429,36 +519,55 @@ fn tile_key(name: &str) -> u64 {
 }
 
 /// Step tile `key` toward open (`selected`) or closed and return how open it
-/// is, smoothstepped for display. Call once per tile per frame, after
-/// `tile_open_frame`.
+/// is, eased, 0 to 1. Call once per tile per frame, after `tile_open_frame`.
 fn tile_open(key: u64, selected: bool) -> f32 {
     let Ok(mut g) = TILE_OPEN.lock() else {
         return if selected { 1.0 } else { 0.0 };
     };
-    let step = g.dt_ms / GRID_COVER_MS;
-    let pos = g.open.iter().position(|(k, _)| *k == key);
-    let cur = pos.map_or(0.0, |i| g.open[i].1);
-    let next = if selected { (cur + step).min(1.0) } else { (cur - step).max(0.0) };
-    match pos {
-        Some(i) if next <= 0.0 && !selected => {
-            g.open.swap_remove(i);
+    let (dt, frame) = (g.dt_ms, g.frame);
+    let target = if selected { 1.0 } else { 0.0 };
+    let i = match g.clocks.iter().position(|c| c.key == key) {
+        Some(i) => i,
+        // A closed tile that stays closed needs no clock.
+        None if !selected => return 0.0,
+        None => {
+            g.clocks.push(TileClock { key, open: Glide::at(0.0), seen: frame, stepped: frame.wrapping_sub(1) });
+            g.clocks.len() - 1
         }
-        Some(i) => g.open[i].1 = next,
-        None if next > 0.0 || selected => g.open.push((key, next)),
-        None => {}
+    };
+    let c = &mut g.clocks[i];
+    // Two tiles showing the same thing (a result listed twice) share a clock:
+    // the selected one has the frame, rather than the two pulling it both ways.
+    if c.seen == frame && !selected {
+        return c.open.value().clamp(0.0, 1.0);
     }
-    next * next * (3.0 - 2.0 * next)
+    c.open.retarget(target);
+    if c.stepped != frame {
+        c.open.step(dt);
+        c.stepped = frame;
+    }
+    c.seen = frame;
+    let v = c.open.value().clamp(0.0, 1.0);
+    if !selected && c.open.settled() {
+        g.clocks.swap_remove(i);
+    }
+    v
 }
 
 /// Forget every tile's motion: the next frame starts with all covers at rest
 /// (a new layout, a new list).
 pub fn tile_open_reset() {
     if let Ok(mut g) = TILE_OPEN.lock() {
-        g.open.clear();
+        g.clocks.clear();
         g.tick = 0;
     }
 }
 
+// CJK / atlas-glyph layout knobs, in the same "units" the 5x7 bitmap font uses
+// (1 unit = `scale` px; a bitmap glyph is 7 units tall, 6 units advance). CJK
+// is rendered full-width: one square cell `CJK_ADVANCE_UNITS` wide, used by
+// BOTH `draw_text` and `measure_text` so centring matches rendering. These two
+// are the only things to tweak on hardware to align CJK with the bitmap font.
 /// Full-width cell width (and render size) for an atlas glyph.
 const CJK_ADVANCE_UNITS: f32 = 8.0;
 /// Baseline offset from the line top; raise/lower to sit CJK on the Latin line.
@@ -732,45 +841,184 @@ pub fn rotation_swaps_axes() -> bool {
     matches!(game_rotation(), 1 | 3)
 }
 
-/// Folder the home is currently showing (issue #68); `None` = all of them.
+/// One chip of the shelf strip under the Play tab's tabs.
+pub struct HomeChip {
+    pub kind: HomeChipKind,
+    pub label: std::string::String,
+    /// The number beside the label. Only TOUS carries one, as on the mockup:
+    /// the tab row already says how many games the open shelf holds.
+    pub count: Option<usize>,
+}
+
+/// What a chip stands for, which picks its icon.
+#[derive(Clone, Copy, PartialEq)]
+pub enum HomeChipKind {
+    All,
+    Favorites,
+    /// A shelf that is a real directory on the card.
+    Folder,
+    /// A shelf that exists only as a label.
+    Label,
+}
+
+/// A chip as drawn: its label cut to fit, its count written out, its width.
+/// Kept with the strip and rebuilt only when the chips change, because the
+/// gallery draws sixty frames a second and each of these is an allocation.
+struct ChipLayout {
+    label: std::string::String,
+    count: Option<std::string::String>,
+    w: f32,
+}
+
+/// What the band under the tabs shows (Main.dc.html), as `library` sees it:
+/// the shelf chips, which one is open, the search running inside it and the
+/// sort in force. Published by `library::draw_gallery` under the same lock that
+/// reads the entries, so the strip can never describe another list than the
+/// one drawn under it.
 ///
-/// A static rather than a tenth argument through all four view renderers. It is
-/// read in exactly ONE place -- `draw_home_header`, to name the open shelf in
-/// the slot the active filter already uses -- and threading it would have meant
-/// four signatures and a dispatch tuple changed to move one line of text. The
-/// four views themselves never learn folders exist: they are handed the games
-/// that survived the filter, as they always were.
-static HOME_FOLDER: std::sync::Mutex<Option<std::string::String>> =
-    std::sync::Mutex::new(None);
+/// It replaces three statics that each told the header one fact (the open
+/// folder, whether any existed, the library's size), and a header that could
+/// therefore only print a sentence about them.
+struct HomeStrip {
+    /// Fingerprint of `chips`, so an unchanged strip is not rebuilt, and the
+    /// one `layout` was measured for.
+    fp: Option<u64>,
+    chips: std::vec::Vec<HomeChip>,
+    layout_fp: Option<u64>,
+    layout: std::vec::Vec<ChipLayout>,
+    /// The open shelf, an index into `chips`.
+    active: usize,
+    /// The search running inside the open shelf, how many games match, and
+    /// its chip as last measured (with the term and count it was measured for).
+    search: Option<std::string::String>,
+    matches: usize,
+    search_layout: Option<(std::string::String, usize, ChipLayout)>,
+    /// The sort in force (`library::sort_mode_index`) and its direction.
+    sort_mode: usize,
+    sort_reverse: bool,
+    /// Whether favourites lead the list on screen. The sort indicator says it
+    /// with a star: the order changes, they stay first.
+    favorites_first: bool,
+}
 
-/// Whether the library has any folder at all, so the header can ADVERTISE the
-/// shoulder buttons. Nothing on the home says folders exist otherwise, and an
-/// unadvertised button is a feature nobody finds.
-static HOME_HAS_FOLDERS: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+static HOME_STRIP: Mutex<HomeStrip> = Mutex::new(HomeStrip {
+    fp: None,
+    chips: std::vec::Vec::new(),
+    layout_fp: None,
+    layout: std::vec::Vec::new(),
+    active: 0,
+    search: None,
+    matches: 0,
+    search_layout: None,
+    sort_mode: 0,
+    sort_reverse: false,
+    favorites_first: false,
+});
 
-pub fn set_home_folder(folder: Option<&str>) {
-    if let Ok(mut g) = HOME_FOLDER.lock() {
-        // Compared before writing: this is called once per gallery frame, and
-        // the shelf changes about once a minute. Two allocations a frame for a
-        // string that is almost always the same one is not free at 60 Hz.
-        if g.as_deref() != folder {
-            *g = folder.map(|s| s.to_string());
-        }
+/// What one frame of the home tells the strip, besides the chips themselves.
+pub struct HomeStripState<'a> {
+    pub active: usize,
+    pub search: Option<&'a str>,
+    pub matches: usize,
+    pub sort_mode: usize,
+    pub sort_reverse: bool,
+    pub favorites_first: bool,
+}
+
+/// Publish the strip. `chips` only runs when `fp`, the fingerprint of what the
+/// chips show, has changed since the last call.
+pub fn home_strip_publish(fp: u64, chips: impl FnOnce() -> std::vec::Vec<HomeChip>, st: &HomeStripState) {
+    let Ok(mut g) = HOME_STRIP.lock() else { return };
+    if g.fp != Some(fp) {
+        g.chips = chips();
+        g.fp = Some(fp);
+    }
+    g.active = st.active.min(g.chips.len().saturating_sub(1));
+    let search = st.search.map(str::trim).filter(|t| !t.is_empty());
+    // Compared first: a term that is the same as last frame's costs nothing.
+    if g.search.as_deref() != search {
+        g.search = search.map(|t| t.to_string());
+    }
+    g.matches = st.matches;
+    g.sort_mode = st.sort_mode;
+    g.sort_reverse = st.sort_reverse;
+    g.favorites_first = st.favorites_first;
+}
+
+/// Whether a search narrows the home, and whether a shelf other than TOUS is
+/// open: what B does there, and what the footer says it does.
+pub fn home_strip_state() -> (bool, bool) {
+    HOME_STRIP.lock().map(|g| (g.search.is_some(), g.active != 0)).unwrap_or((false, false))
+}
+
+/// What a tap on the strip lands on.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum StripHit {
+    /// The search chip: edit the search.
+    Search,
+    /// A shelf chip, by its index in the chips.
+    Shelf(usize),
+    /// The sort indicator: open the sort window.
+    Sort,
+    /// The view indicator: the next view.
+    View,
+}
+
+/// Where the strip's targets were drawn, in screen pixels. Its own table, like
+/// the navbar's: the strip sits over the gallery, whose tiles have theirs.
+static STRIP_CELLS: Mutex<std::vec::Vec<((f32, f32, f32, f32), StripHit)>> = Mutex::new(std::vec::Vec::new());
+
+/// The strip target under `(x, y)`, if any.
+pub fn strip_hit(x: f32, y: f32) -> Option<StripHit> {
+    let g = STRIP_CELLS.lock().ok()?;
+    g.iter()
+        .find(|((rx, ry, rw, rh), _)| *rw > 0.0 && x >= *rx && x <= rx + rw && y >= *ry && y <= ry + rh)
+        .map(|(_, hit)| *hit)
+}
+
+fn publish_strip_cells(cells: std::vec::Vec<((f32, f32, f32, f32), StripHit)>) {
+    if let Ok(mut g) = STRIP_CELLS.lock() {
+        *g = cells;
     }
 }
 
-pub fn set_home_has_folders(any: bool) {
-    HOME_HAS_FOLDERS.store(any, core::sync::atomic::Ordering::Relaxed);
+/// The strip's moving parts: how far the chips are scrolled when they do not
+/// all fit, and the fill under the open shelf, which glides from chip to chip.
+/// In the chips' own coordinates, so the fill stays on its chip while they
+/// scroll. On the covers' clock, like the ring.
+struct StripAnim {
+    inited: bool,
+    tick: u64,
+    off: Glide,
+    fill_x: Glide,
+    fill_w: Glide,
 }
 
-/// Size of the WHOLE library, for the one line that needs to compare a shelf to
-/// it. Everything else on screen counts what is in front of the player.
-static HOME_LIBRARY_TOTAL: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
+static STRIP_ANIM: Mutex<StripAnim> = Mutex::new(StripAnim {
+    inited: false,
+    tick: 0,
+    off: Glide::at(0.0),
+    fill_x: Glide::at(0.0),
+    fill_w: Glide::at(0.0),
+});
 
-pub fn set_home_library_total(n: usize) {
-    HOME_LIBRARY_TOTAL.store(n, core::sync::atomic::Ordering::Relaxed);
+/// Put the strip straight where it belongs on the next frame: a fresh open, or
+/// coming back from another tab. A shelf change does NOT snap it: the fill
+/// travelling to the new chip is what shows where ZL / ZR went.
+pub fn home_strip_snap() {
+    if let Ok(mut a) = STRIP_ANIM.lock() {
+        a.inited = false;
+    }
+}
+
+/// Set while the home slides in from the side on a shelf change: the band
+/// under the tabs then stays still and only the content moves, as the navbar
+/// stays still on a tab change. A tab change clears it, since the whole page
+/// moves then.
+static HOME_HEADER_PINNED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn home_header_pin(on: bool) {
+    HOME_HEADER_PINNED.store(on, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Free zoom on the game's picture, in percent of the fitted size (issue #101),
@@ -839,11 +1087,15 @@ pub fn pan_limits(percent: u16, screen_w: f32, screen_h: f32) -> (i32, i32) {
 // They drifted exactly where an inline copy always drifts: the Flashpoint
 // gallery's track came out white where every other one is slate, and three of
 // the seven clamp their thumb 4 px shorter than the rest. Differences nobody
-// decided, only inherited from whichever site happened to be open that day. The
-// thumb is the selection amber on purpose: on every screen it is the cursor,
-// seen from the edge of the page.
+// decided, only inherited from whichever site happened to be open that day.
+//
+// The thumb is slate on the line colour, as the Options mockup draws it and as
+// the side panels already did. It was the selection gold, so beside the grid's
+// gold ring two things on the page looked selected; gold is the one accent,
+// kept for focus.
 const SCROLLBAR_W: f32 = 4.0;
 const SCROLLBAR_MIN_THUMB: f32 = 24.0;
+const SCROLLBAR_THUMB: u32 = 0xFF_4A_5C_85;
 
 
 /// Count of `GpuDraw`s currently alive (created minus dropped). Used to
@@ -1362,7 +1614,7 @@ pub(crate) use kit::icons::Icon;
 pub(crate) use kit::text::HintItem;
 pub(crate) use kit::theme::col as ui_col;
 pub(crate) use kit::text::Btn;
-pub(crate) use pages::windows::{Choice, WinRow};
+pub(crate) use pages::windows::{Choice, SortOption, WinRow};
 pub(crate) use kit::list::Row;
 pub(crate) use kit::sheet::{cascade_step, Sheet, Side, OPTIONS_CHILD_W, OPTIONS_W};
 pub(crate) use pages::importer::{
@@ -4953,6 +5205,45 @@ fn reveal_cover_cache() -> &'static std::sync::Mutex<std::vec::Vec<(std::string:
 /// worst case at 1126x619.
 const REVEAL_CACHE_MAX: usize = 8;
 
+/// The detail panel's cover (LISTE, BANDE): the game it shows, since when, and
+/// when its full-resolution cover arrived (0 = it was already there).
+struct PanelCover {
+    basename: std::string::String,
+    since: u64,
+    full_at: u64,
+}
+
+static PANEL_COVER: Mutex<Option<PanelCover>> = Mutex::new(None);
+
+/// A full-resolution cover if it is already decoded, never decoding.
+fn reveal_cover_lookup(basename: &str) -> Option<CoverTex> {
+    reveal_cover_cache().lock().ok()?.iter().find(|(b, _)| b == basename).map(|(_, t)| *t)
+}
+
+/// Gap between two facts of a game.
+const FACTS_GAP: f32 = 22.0;
+
+/// Break facts of these widths into lines of `max_w`: `(first, end, width)`
+/// per line. A fact wider than a line gets a line of its own.
+fn facts_lines(widths: &[f32], max_w: f32) -> std::vec::Vec<(usize, usize, f32)> {
+    let mut lines = std::vec::Vec::new();
+    let (mut start, mut w) = (0usize, 0.0f32);
+    for (i, fw) in widths.iter().enumerate() {
+        let add = if i == start { *fw } else { FACTS_GAP + fw };
+        if i > start && w + add > max_w {
+            lines.push((start, i, w));
+            start = i;
+            w = *fw;
+        } else {
+            w += add;
+        }
+    }
+    if start < widths.len() {
+        lines.push((start, widths.len(), w));
+    }
+    lines
+}
+
 /// Append one axis-aligned quad (two triangles) in PIXEL space with a flat
 /// colour to a text batch. Layout matches the solid quad VAO: vec2 pos + vec4
 /// rgba, stride 24.
@@ -5190,6 +5481,15 @@ struct GalleryAnim {
     scroll_px: f32,
     /// Decays 1->0 after a selection change; drives a small frame "pop".
     pop: f32,
+    /// The Play grid's ring, in the same content space as `sel_*`, on the
+    /// covers' own clock (`Glide`) so ring and cover settle on the same frame.
+    /// The importer's lists keep the fields above.
+    ring_x: Glide,
+    ring_y: Glide,
+    ring_w: Glide,
+    /// How far through its pop the ring is (1 = at rest): a few pixels of
+    /// swell that peak half way and end as the ring arrives.
+    ring_pop: f32,
 }
 
 fn gallery_anim() -> &'static std::sync::Mutex<GalleryAnim> {
@@ -5202,6 +5502,10 @@ fn gallery_anim() -> &'static std::sync::Mutex<GalleryAnim> {
         sel_w: 0.0,
         scroll_px: 0.0,
         pop: 0.0,
+        ring_x: Glide::at(0.0),
+        ring_y: Glide::at(0.0),
+        ring_w: Glide::at(0.0),
+        ring_pop: 1.0,
     });
     &A
 }
@@ -5210,15 +5514,20 @@ fn gallery_anim() -> &'static std::sync::Mutex<GalleryAnim> {
 /// Called from `library` whenever the gallery is (re)entered with a possibly
 /// far-away selection — fresh open, navbar switch into JOUER, new search — so
 /// the cursor doesn't slide across the whole screen from a stale position.
+///
+/// The other three home views ease from `HomeAnim`, and they are reset here
+/// too: a new shelf, a search, a sort or a delete hands every view a new list,
+/// and LISTE, BANDE and ETAGERE used to streak in from the old one (BANDE's row
+/// flew past forty games to reach the first) while only the grid snapped.
 pub fn gallery_anim_reset() {
     if let Ok(mut a) = gallery_anim().lock() {
         a.inited = false;
     }
+    if let Ok(mut a) = home_anim().lock() {
+        a.inited = false;
+    }
 }
 
-/// Frame-rate aware approach of `cur` toward `target`. `rate` ~ 1/time-constant
-/// (s^-1); `dt` is the frame delta in seconds. Linear in dt (no `exp()`: we
-/// stay off libm like `approx_sin`), which is plenty smooth at ~60 fps.
 /// Eased state for the LIST / STRIP / SHELF layouts.
 ///
 /// A struct rather than repeated `eased_list_y` calls: that helper holds ONE
@@ -5317,6 +5626,9 @@ pub fn home_anim_reset() {
     }
 }
 
+/// Frame-rate aware approach of `cur` toward `target`. `rate` ~ 1/time-constant
+/// (s^-1); `dt` is the frame delta in seconds. Linear in dt (no `exp()`: we
+/// stay off libm like `approx_sin`), which is plenty smooth at ~60 fps.
 fn ease_to(cur: f32, target: f32, dt: f32, rate: f32) -> f32 {
     let t = (rate * dt).clamp(0.0, 1.0);
     cur + (target - cur) * t
@@ -10541,6 +10853,31 @@ impl SwitchRenderBackend {
         tex
     }
 
+    /// `upload_rgba_texture` for a cover, with a mipmap chain.
+    ///
+    /// Covers are drawn SHRUNK most of the time: a 655x155 banner kept at full
+    /// width in its thumbnail is drawn 227 px wide in an opened tile, and a
+    /// full-resolution cover fills a 560 px panel. One bilinear tap at a 3:1
+    /// reduction skips most of the pixels, so logos with text sparkled, worst in
+    /// the last frames of a tile's opening where the size changes by fractions
+    /// of a pixel. Trilinear filtering over the chain averages them instead, for
+    /// a third more memory per cover. The pixels must have been through
+    /// `covers::bleed_transparent`, or the chain averages the black of a logo's
+    /// transparent margin into its edges.
+    fn upload_cover_texture(&mut self, rgba: &[u8], width: u32, height: u32) -> GLuint {
+        let tex = self.upload_rgba_texture(rgba, width, height);
+        if tex != 0 {
+            unsafe {
+                glBindTexture(GL_TEXTURE_2D, tex);
+                glGenerateMipmap(GL_TEXTURE_2D);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR as GLint);
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+            self.gl_state.invalidate();
+        }
+        tex
+    }
+
     /// Draw a screen-aligned axis-aligned textured rectangle. Uses the
     /// existing `bitmap_prog` + unit-quad VAO; no per-call buffer upload.
     /// Identity color transform (mult=1, add=0).
@@ -10567,73 +10904,6 @@ impl SwitchRenderBackend {
         let mult = [1.0, 1.0, 1.0, 1.0];
         let add = [0.0, 0.0, 0.0, 0.0];
         let uv_remap = [0.0, 0.0, 1.0, 1.0];
-        self.use_bitmap(&world, &mult, &add, tex, &uv_remap, 0, false);
-        self.gl_state.bind_vao(self.bitmap_vao);
-        unsafe {
-            glDrawArrays(GL_TRIANGLES, 0, 6);
-        }
-    }
-
-    /// Draw `tex` filling the rect (x,y,w,h) with CROP-TO-FILL — no black bars.
-    /// Scales the image to cover the whole rect and center-crops the overflow
-    /// via a UV remap (the shader does `v_uv = remap.xy + uv * remap.zw`).
-    /// `img_w`/`img_h` are the texture's pixel dims, used for the aspect ratio.
-    /// This is what makes the cover grid look clean despite mixed cover sizes.
-    pub fn draw_textured_rect_cover(
-        &mut self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        tex: GLuint,
-        img_w: u32,
-        img_h: u32,
-        // 0 = invisible, 1 = fully drawn. Used to fade a cover in over the
-        // generated tile: swapping between two frames reads as a flicker.
-        alpha: f32,
-    ) {
-        if tex == 0 || w <= 0.0 || h <= 0.0 || img_w == 0 || img_h == 0 {
-            return;
-        }
-        let tile_aspect = w / h;
-        let img_aspect = img_w as f32 / img_h as f32;
-        // remap = [offset_x, offset_y, scale_x, scale_y] over UV [0,1]. Crop the
-        // long axis so the short axis fills the tile (center-cropped).
-        let uv_remap = if img_aspect > tile_aspect {
-            let fx = tile_aspect / img_aspect; // visible width fraction
-            [(1.0 - fx) * 0.5, 0.0, fx, 1.0]
-        } else {
-            let fy = img_aspect / tile_aspect; // visible height fraction
-            [0.0, (1.0 - fy) * 0.5, 1.0, fy]
-        };
-        let mat = Matrix {
-            a: w,
-            b: 0.0,
-            c: 0.0,
-            d: h,
-            tx: swf::Twips::from_pixels(x as f64),
-            ty: swf::Twips::from_pixels(y as f64),
-        };
-        let world = self.world_matrix(&mat);
-        let a = alpha.clamp(0.0, 1.0);
-        // STRAIGHT alpha, and the fade applied to the alpha channel alone.
-        //
-        // This used to premultiply (`mult = [a,a,a,a]` with `GL_ONE`), which is
-        // right only for a texture that is already premultiplied. A cover comes
-        // from a decoded PNG and is not: with `GL_ONE` its transparent pixels
-        // were added at full strength, so wherever a cover had an alpha channel
-        // its see-through corners came out as solid white blocks. Nearly every
-        // cover is opaque, which is why it took a logo with cut corners to show
-        // it (Super Smash Flash 2, reported 2026-08-21).
-        let mult = [1.0, 1.0, 1.0, a];
-        let add = [0.0, 0.0, 0.0, 0.0];
-        if a <= 0.0 {
-            return;
-        }
-        unsafe {
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        }
         self.use_bitmap(&world, &mult, &add, tex, &uv_remap, 0, false);
         self.gl_state.bind_vao(self.bitmap_vao);
         unsafe {
@@ -10672,7 +10942,7 @@ impl SwitchRenderBackend {
         let mut cy = 200.0;
         self.kit_icon(((vw - 64.0) * 0.5).round(), cy, 64.0, Icon::Gamepad, col::TEXT3);
         cy += 72.0;
-        center(self, lc.empty_title, size::TITLE + 6.0, cy, col::TEXT);
+        center(self, lc.empty_title, size::TITLE, cy, col::TEXT);
         cy += 48.0;
         center(self, lc.empty_l1, size::BODY, cy, col::TEXT2);
         cy += 40.0;
@@ -10898,46 +11168,56 @@ impl SwitchRenderBackend {
         self.kit_ring(x, y, w, h, 2.0, 0.0, 3.0, theme::col::GOLD);
     }
 
-    /// Draw the game-reveal content for the rect (x,y,w,h): the game's cover
-    /// LETTERBOXED (fit, keeps aspect — no crop, no stretch; black bars fill the
-    /// rest) if it has one, else its colour chip + initials. Used full-screen as
-    /// the launch/quit reveal window's content.
-    pub fn draw_game_reveal_tile(
+    /// The launch and quit reveal, `e` of the way from the selected tile (0)
+    /// to the whole screen (1), in the window `(x, y, w, h)` between the two.
+    ///
+    /// The cover is carried, not cut out: drawn INTO the window, whole over its
+    /// backdrop, with corners that straighten as it grows. At 0 that is exactly
+    /// the opened tile (or the LISTE / BANDE panel's picture), at 1 the cover on
+    /// the full screen. It used to be the full-screen cover seen through a
+    /// window clipped out of it, so the first frame showed whatever part of the
+    /// picture happened to lie under the tile (a corner of the blur, a band of
+    /// the art), with 2 px corners where the tile had 12 and a page dimmed in
+    /// one frame. The dim now follows the opening, and the grid's ring, which
+    /// the tile was wearing, fades out over the first third.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_game_reveal(
         &mut self,
         x: f32,
         y: f32,
         w: f32,
         h: f32,
+        e: f32,
         basename: &str,
         display_name: &str,
         color_chip: u32,
     ) {
-        // FULL resolution here, not the gallery's tile thumbnail: this fills the
-        // screen, where a 256-wide thumbnail upscales to visible mush.
+        use theme::{col, radius, ring};
+        let e = e.clamp(0.0, 1.0);
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        // The page around the window darkens as the window opens.
+        let dim = ((0x88 as f32 * e) as u32) << 24 | 0x05_0A_16;
+        if e > 0.0 {
+            for (rx, ry, rw, rh) in [(0.0, 0.0, vw, y), (0.0, y + h, vw, vh - (y + h)), (0.0, y, x, h), (x + w, y, vw - (x + w), h)] {
+                if rw > 0.0 && rh > 0.0 {
+                    self.draw_overlay_rect(rx, ry, rw, rh, dim);
+                }
+            }
+        }
+        let r = radius::TILE * (1.0 - e);
+        // FULL resolution here, not the gallery's tile thumbnail: this fills
+        // the screen, where a 256-wide thumbnail upscales to visible mush.
         match self.cover_full_for(basename) {
             CoverTex::Image { tex, w: iw, h: ih, amb } if iw > 0 && ih > 0 => {
-                // The cover whole, over its own blurred backdrop rather than
-                // black bars: the box grows from the tile to the full screen,
-                // and the art stays the art the tile showed.
-                self.draw_overlay_rect(x, y, w, h, 0xFF_00_00_00);
-                if amb != 0 {
-                    self.draw_textured_rect_cover(x, y, w, h, amb, iw, ih, 1.0);
-                }
-                let cover_aspect = iw as f32 / ih as f32;
-                let win_aspect = w / h;
-                let (dw, dh) = if cover_aspect > win_aspect {
-                    (w, w / cover_aspect)
-                } else {
-                    (h * cover_aspect, h)
-                };
-                self.draw_textured_rect(x + (w - dw) * 0.5, y + (h - dh) * 0.5, dw, dh, tex);
+                self.kit_cover_reveal_r(x, y, w, h, tex, iw, ih, amb, 1.0, 1.0, r);
             }
             _ => {
                 // No cover: the tile the library showed, its colour and the
                 // game's name, grown with the window.
                 let chip = color_chip & 0x00FF_FFFF;
-                self.draw_overlay_rect(x, y, w, h, 0xFF00_0000 | kit::cover::mix_rgb(chip, theme::col::BG & 0x00FF_FFFF, 0.55));
-                let px = (h / 9.0).clamp(18.0, 64.0).round();
+                self.kit_rrect(x, y, w, h, r, 0xFF00_0000 | kit::cover::mix_rgb(chip, col::BG & 0x00FF_FFFF, 0.55));
+                let px = (h / 9.0).clamp(17.0, 64.0).round();
                 let lines = self.kit_wrap(display_name, px, w * 0.8, 3);
                 let lh = (px * 1.25).round();
                 let mut cy = y + (h - lh * (lines.len() as f32 - 1.0)) * 0.5;
@@ -10948,6 +11228,13 @@ impl SwitchRenderBackend {
                     cy += lh;
                 }
             }
+        }
+        // Only the grid rings its selected tile (the panels and the shelf mark
+        // theirs otherwise), so only there does a ring hand over.
+        let ring_alpha = (1.0 - e / 0.3).clamp(0.0, 1.0);
+        if ring_alpha > 0.0 && crate::loc::home_view() == 0 {
+            let ink = ((ring_alpha * 255.0) as u32) << 24 | (col::GOLD & 0x00FF_FFFF);
+            self.kit_ring(x, y, w, h, r, ring::GAP, ring::WIDTH, ink);
         }
     }
 
@@ -11178,26 +11465,46 @@ impl SwitchRenderBackend {
     }
 
     /// The bottom band of the home screens: a hairline, the author credit on
-    /// the left and what the buttons do on the right.
+    /// the left (`kit_footer_band`) and what the buttons do on the right.
     ///
-    /// The credit and the version are in the band on the left
-    /// (`kit_footer_band`).
-    fn kit_home_footer(&mut self) {
+    /// B says what it does only where it does something: clear the search, or
+    /// go back to TOUS from a shelf. Over a search that matched nothing, A, +
+    /// and Y have nothing to act on, and only the two ways out are left.
+    fn kit_home_footer(&mut self, empty: bool) {
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
         self.kit_footer_band();
         let cy = vh - 24.0;
         let u = crate::loc_ui::ui();
-        self.kit_hints_right(
-            vw - 40.0,
-            cy,
-            &[
-                (&[Btn::A], u.hint_play),
-                (&[Btn::Plus], u.hint_options),
-                (&[Btn::Y], u.hint_sort),
-                (&[Btn::Minus], u.hint_search),
-            ],
-        );
+        let (searching, shelf_open) = home_strip_state();
+        if empty && searching {
+            self.kit_hints_right(
+                vw - 40.0,
+                cy,
+                &[(&[Btn::Minus], u.home_edit_search), (&[Btn::B], u.home_show_all)],
+            );
+            return;
+        }
+        let back = if searching {
+            Some(u.home_clear)
+        } else if shelf_open {
+            Some(u.home_all)
+        } else {
+            None
+        };
+        let base: [HintItem; 4] = [
+            (&[Btn::A], u.hint_play),
+            (&[Btn::Plus], u.hint_options),
+            (&[Btn::Y], u.hint_sort),
+            (&[Btn::Minus], u.hint_search),
+        ];
+        match back {
+            Some(verb) => {
+                let all: [HintItem; 5] = [base[0], base[1], base[2], base[3], (&[Btn::B], verb)];
+                self.kit_hints_right(vw - 40.0, cy, &all);
+            }
+            None => self.kit_hints_right(vw - 40.0, cy, &base),
+        }
     }
 
     /// The hairline and the left-hand credit every full-page screen ends with.
@@ -11213,61 +11520,77 @@ impl SwitchRenderBackend {
         self.kit_text_mid(40.0, vh - 24.0, size::CAPTION + 1.0, &credit, col::TEXT3);
     }
 
-    /// The selected game's facts on one line, the kit way: values in the second
-    /// text colour, separated by a dim middle dot. Returns the width drawn.
-    fn kit_game_facts(&mut self, x: f32, cy: f32, entry: &crate::library::Entry) -> f32 {
-        self.kit_game_facts_px(x, cy, entry, theme::size::LABEL)
-    }
-
-    /// Width `kit_game_facts_px` will take, for centring it.
-    fn kit_game_facts_width(&mut self, entry: &crate::library::Entry, px: f32) -> f32 {
-        let parts = Self::kit_facts_parts(entry);
-        let sep = self.kit_measure("  \u{00B7}  ", px);
-        let mut w = 0.0;
-        for (i, p) in parts.iter().enumerate() {
-            if i > 0 {
-                w += sep;
+    /// The selected game's facts (Main.dc.html): what it takes on the card,
+    /// whether it is made of several files, what the file is, its engine and
+    /// the time played, each an icon and its value, 22 px apart, without the
+    /// dots that used to separate bare words. From `x` (or centred on `x`), on
+    /// as many lines of `max_w` as they need, the first centred on `cy`, 24 px
+    /// apart. Returns the lines used.
+    fn kit_game_facts(&mut self, x: f32, cy: f32, entry: &crate::library::Entry, max_w: f32, centered: bool) -> usize {
+        use theme::{col, size};
+        let facts = Self::game_facts(entry);
+        let widths: std::vec::Vec<f32> = facts.iter().map(|(_, t)| 16.0 + 7.0 + self.kit_measure(t, size::LABEL)).collect();
+        let lines = facts_lines(&widths, max_w);
+        let mut ly = cy;
+        for &(a, b, lw) in &lines {
+            let mut pen = if centered { (x - lw * 0.5).round() } else { x };
+            for i in a..b {
+                let (icon, text) = &facts[i];
+                self.kit_icon(pen, ly, 16.0, *icon, col::TEXT3);
+                self.kit_text_mid(pen + 16.0 + 7.0, ly, size::LABEL, text, col::TEXT2);
+                pen += widths[i] + FACTS_GAP;
             }
-            w += self.kit_measure(p, px);
+            ly += 24.0;
         }
-        w
+        lines.len()
     }
 
-    /// `kit_game_facts` at a chosen size.
-    fn kit_game_facts_px(&mut self, x: f32, cy: f32, entry: &crate::library::Entry, px: f32) -> f32 {
-        use theme::col;
-        let parts = Self::kit_facts_parts(entry);
-        let mut pen = x;
-        for (i, p) in parts.iter().enumerate() {
-            if i > 0 {
-                pen += self.kit_text_mid(pen, cy, px, "  \u{00B7}  ", col::TEXT3);
-            }
-            pen += self.kit_text_mid(pen, cy, px, p, col::TEXT2);
-        }
-        pen - x
+    /// How many lines `kit_game_facts` takes in `max_w`.
+    fn kit_game_facts_lines(&mut self, entry: &crate::library::Entry, max_w: f32) -> usize {
+        let facts = Self::game_facts(entry);
+        let widths: std::vec::Vec<f32> =
+            facts.iter().map(|(_, t)| 16.0 + 7.0 + self.kit_measure(t, theme::size::LABEL)).collect();
+        facts_lines(&widths, max_w).len()
     }
 
-    /// The facts themselves: size, what the file is, the engine, time played.
-    fn kit_facts_parts(entry: &crate::library::Entry) -> std::vec::Vec<std::string::String> {
-        let mut parts: std::vec::Vec<std::string::String> = std::vec::Vec::with_capacity(4);
-        let sz = format_size_pretty(entry.size_bytes);
+    /// The facts themselves, with their icons.
+    fn game_facts(entry: &crate::library::Entry) -> std::vec::Vec<(Icon, std::string::String)> {
+        let u = crate::loc_ui::ui();
+        let mut out: std::vec::Vec<(Icon, std::string::String)> = std::vec::Vec::with_capacity(5);
+        let sz = format_size_pretty(entry.card_bytes);
         if !sz.is_empty() {
-            parts.push(sz);
+            out.push((Icon::HardDrive, sz));
         }
-        parts.push(std::format!("SWF {} {}", entry.swf_version, entry.compression_label));
-        parts.push(std::string::String::from(if entry.is_as3 { "AS3" } else { "AVM1" }));
+        if entry.multi {
+            out.push((Icon::Layers, u.facts_multifile.to_string()));
+        }
+        // The file's version, and whether it is compressed in words: the raw
+        // signatures it printed (CWS, ZWS) meant nothing to anyone.
+        let swf = if entry.compression_label == "FWS" {
+            std::format!("SWF {}", entry.swf_version)
+        } else {
+            u.facts_compressed.replacen("{}", &entry.swf_version.to_string(), 1)
+        };
+        out.push((Icon::File, swf));
+        // The engine by the machine's name, both ways: it read "AS3", a
+        // language, where the other games read "AVM1", a machine.
+        out.push((Icon::Code, std::string::String::from(if entry.is_as3 { "AVM2" } else { "AVM1" })));
         let secs = crate::playtime::get(&entry.basename);
         if secs >= 60 {
-            parts.push(crate::loc_ui::playtime(secs));
+            out.push((Icon::Clock, crate::loc_ui::playtime(secs)));
         }
-        parts
+        out
     }
 
-    /// The selected game's cover in a detail panel: fitted into the box minus
-    /// the caption under it, never blown up past twice its size (small and
-    /// sharp reads better than large and soft), the art and its caption
-    /// centred as one block. Rounded by the kit's shader, so no page-coloured
-    /// corners are painted on. Returns the art's rectangle.
+    /// The selected game's cover in a detail panel (LISTE, BANDE): fitted into
+    /// the box minus the caption under it, never blown up past twice its size
+    /// (small and sharp reads better than large and soft), the art and its
+    /// caption centred as one block. Returns the art's rectangle.
+    ///
+    /// The tile thumbnail first, the full-resolution cover once the cursor has
+    /// stayed on the game a moment, faded in over it. Decoding the full cover
+    /// on every step (13 to 24 ms of PNG) dropped a frame per game for as long
+    /// as a direction was held, exactly while the list was meant to glide.
     #[allow(clippy::too_many_arguments)]
     fn kit_cover_panel(
         &mut self,
@@ -11280,86 +11603,116 @@ impl SwitchRenderBackend {
         name: &str,
         chip: u32,
     ) -> (f32, f32, f32, f32) {
-        // Full resolution: these panels are large enough that a tile thumbnail
-        // would show as mush.
-        let cover = self.cover_full_for(basename);
-        let (iw, ih) = match cover {
-            CoverTex::Image { w: iw, h: ih, .. } if iw > 0 && ih > 0 => (iw as f32, ih as f32),
-            _ => (4.0, 3.0),
+        /// How long the cursor has to stay before the full cover is decoded,
+        /// and how long it takes to fade in over the thumbnail.
+        const DWELL_MS: u64 = 150;
+        const FADE_MS: u64 = 120;
+        let now = unsafe { ruffle_tick_now() };
+        let freq = unsafe { ruffle_tick_freq() }.max(1);
+        let ms_since = |t: u64| now.saturating_sub(t) * 1000 / freq;
+        // Which game the panel shows, since when, and when its full cover came.
+        let (since, mut full_at) = match PANEL_COVER.lock() {
+            Ok(mut g) => match g.as_ref() {
+                Some(p) if p.basename == basename => (p.since, p.full_at),
+                _ => {
+                    *g = Some(PanelCover { basename: basename.to_string(), since: now, full_at: 0 });
+                    (now, 0)
+                }
+            },
+            Err(_) => (now, 0),
+        };
+        let mut full = reveal_cover_lookup(basename);
+        if full.is_none() && ms_since(since) >= DWELL_MS {
+            full = Some(self.cover_full_for(basename));
+            full_at = now;
+            if let Ok(mut g) = PANEL_COVER.lock() {
+                if let Some(p) = g.as_mut() {
+                    p.full_at = now;
+                }
+            }
+        }
+        // The thumbnail, decoded now if the grid never got to it.
+        let thumb = match (cover_lookup(basename), full) {
+            (Some(t), _) => t,
+            (None, None) => self.cover_for(basename),
+            (None, Some(_)) => CoverTex::Default,
+        };
+        // A full cover that was already decoded when the panel came to the game
+        // shows at once; one decoded now fades in over the thumbnail.
+        let full_alpha = match full {
+            Some(CoverTex::Image { .. }) if full_at == 0 => 1.0,
+            Some(CoverTex::Image { .. }) => (ms_since(full_at) as f32 / FADE_MS as f32).min(1.0),
+            _ => 0.0,
+        };
+        // The box's shape: the full cover's when known, else the thumbnail's.
+        // A thumbnail at the thumbnail box's size may have been shrunk, so it
+        // does not say how far the cover may be enlarged; one smaller than
+        // that box is the cover itself.
+        let (iw, ih, real) = match (full, thumb) {
+            (Some(CoverTex::Image { w, h, .. }), _) => (w as f32, h as f32, true),
+            (_, CoverTex::Image { w, h, .. }) => (w as f32, h as f32, w < 256 && h < 160),
+            _ => (4.0, 3.0, false),
         };
         let art_h = (h - caption_h).max(1.0);
         let img_aspect = iw / ih;
         let (mut dw, mut dh) = if img_aspect > w / art_h { (w, w / img_aspect) } else { (art_h * img_aspect, art_h) };
-        if matches!(cover, CoverTex::Image { .. }) && dw > iw * 2.0 {
+        if real && dw > iw * 2.0 {
             dw = iw * 2.0;
             dh = ih * 2.0;
         }
         let dx = (x + (w - dw) * 0.5).round();
         let dy = (y + ((h - dh - caption_h) * 0.5).max(0.0)).round();
-        match cover {
-            CoverTex::Image { tex, w: tw, h: th, .. } => {
-                self.kit_shadow(dx, dy + 8.0, dw, dh, theme::radius::TILE, 18.0, 0x70_00_00_00);
-                self.kit_image(dx, dy, dw, dh, tex, [0.0, 0.0, 1.0, 1.0], 1.0, theme::radius::TILE);
-                let _ = (tw, th);
+        let has_art = matches!(thumb, CoverTex::Image { .. }) || matches!(full, Some(CoverTex::Image { .. }));
+        if has_art {
+            self.kit_shadow(dx, dy + 8.0, dw, dh, theme::radius::TILE, 18.0, 0x70_00_00_00);
+        }
+        // The box has the cover's own shape, so it fills; through `kit_cover`
+        // a transparent logo sits on the same ground as in the grid.
+        if full_alpha < 1.0 {
+            match thumb {
+                CoverTex::Image { tex, w: tw, h: th, amb } => self.kit_cover(dx, dy, dw, dh, tex, tw, th, amb, 1.0),
+                CoverTex::Default if !has_art => self.kit_default_tile(dx, dy, dw, dh, chip, name),
+                CoverTex::Default => {}
             }
-            CoverTex::Default => self.kit_default_tile(dx, dy, dw, dh, chip, name),
+        }
+        if let Some(CoverTex::Image { tex, w: tw, h: th, amb }) = full {
+            if full_alpha > 0.0 {
+                self.kit_cover(dx, dy, dw, dh, tex, tw, th, amb, full_alpha);
+            }
         }
         (dx, dy, dw, dh)
     }
 
-    /// Multi-file launch indicator (v1.3.0): a centered label near the bottom of
-    /// the launch/loading reveal, e.g. "MULTI-FILE (6)", telling the user this
-    /// game pulls in companion SWFs from its `.files/` folder. The caller gates
-    /// when it shows (launch reveal only, once the cover fills the screen).
-    pub fn draw_multifile_badge(&mut self, label: &str, count: i32) {
+    /// The layers badge of a multi-file game, in the top-right corner of a
+    /// cover whose right edge is `right` (Main.dc.html): the favourite chip's
+    /// twin on the other corner.
+    fn kit_multi_badge(&mut self, right: f32, y: f32) {
+        const CHIP: f32 = 26.0;
+        self.kit_rrect(right - CHIP, y, CHIP, CHIP, 8.0, 0xB8_0A_10_1C);
+        self.kit_icon(right - CHIP + 5.5, y + CHIP * 0.5, 15.0, Icon::Layers, theme::col::TEXT);
+    }
+
+    /// The launch's "several files" notice: a pill near the bottom of the
+    /// full-screen cover, with the same words and icon as the game's facts
+    /// line, `alpha` of the way faded in. The old one read "Multi-fichiers · 6",
+    /// which said neither six of what nor that the main file was a seventh.
+    pub fn draw_multifile_badge(&mut self, alpha: f32) {
         use theme::{col, size};
+        let a = alpha.clamp(0.0, 1.0);
+        if a <= 0.0 {
+            return;
+        }
+        let fade = |c: u32| (((c >> 24) as f32 * a) as u32) << 24 | (c & 0x00FF_FFFF);
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
-        // A pill over the bottom of the cover: an icon of stacked layers and the
-        // count, on a dark ground so it reads over any art.
-        let text = std::format!("{}  \u{00B7}  {}", label, count);
-        let tw = self.kit_measure(&text, size::LABEL + 1.0);
+        let text = crate::loc_ui::ui().facts_multifile;
+        let tw = self.kit_measure(text, size::LABEL + 1.0);
         let w = 18.0 + 20.0 + 10.0 + tw + 20.0;
         let x = ((vw - w) * 0.5).round();
         let cy = vh - 56.0;
-        self.kit_rrect(x, cy - 20.0, w, 40.0, 20.0, 0xC8_0A_10_1C);
-        self.kit_icon(x + 18.0, cy, 20.0, Icon::Layers, col::GOLD);
-        self.kit_text_mid(x + 18.0 + 20.0 + 10.0, cy, size::LABEL + 1.0, &text, col::TEXT);
-        unsafe {
-            glUseProgram(0);
-            glBindVertexArray(0);
-        }
-        self.gl_state.invalidate();
-    }
-
-    /// Frame the content band and name the open shelf on the frame itself.
-    ///
-    /// Being inside a folder was legible in exactly one place: a line of small
-    /// text in the top-left corner, above a grid that looked identical either
-    /// way. A player could scroll a shelf for a minute wondering where their
-    /// games had gone. A subset of the library has to LOOK like a subset.
-    ///
-    /// So the page gets a rule above and below its content, and the top one
-    /// carries a plaque with the shelf's name, the way a labelled group has been
-    /// drawn since forms had legends. It reads instantly and it says WHICH.
-    ///
-    /// Drawn AFTER the view, at fixed heights that fall in the gaps all four
-    /// layouts already leave, so not one of them had to move a pixel to make
-    /// room.
-    pub fn draw_folder_frame(&mut self, name: &str) {
-        // TWO HORIZONTAL RULES, no sides: BANDE and ETAGERE scroll SIDEWAYS and
-        // let their tiles run off both edges on purpose, so vertical borders
-        // would cut through the artwork. The rules sit in the gaps every layout
-        // leaves (y110 above the content, `vh - 50` between the facts and the
-        // footer). The folder's NAME is in the header line now, by its icon,
-        // where it no longer needs a plate to stay readable over a cover.
-        let _ = name;
-        let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
-        const TOP_Y: f32 = 110.0;
-        const M: f32 = 20.0;
-        let ink = (theme::col::GOLD & 0x00FF_FFFF) | 0x90 << 24;
-        self.kit_rrect(M, TOP_Y, vw - 2.0 * M, 2.0, 1.0, ink);
-        self.kit_rrect(M, vh - 50.0, vw - 2.0 * M, 2.0, 1.0, ink);
+        self.kit_rrect(x, cy - 20.0, w, 40.0, 20.0, fade(0xC8_0A_10_1C));
+        self.kit_icon(x + 18.0, cy, 20.0, Icon::Layers, fade(col::GOLD));
+        self.kit_text_mid(x + 18.0 + 20.0 + 10.0, cy, size::LABEL + 1.0, text, fade(col::TEXT));
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
@@ -11381,8 +11734,9 @@ impl SwitchRenderBackend {
         let resolved = match crate::covers::resolve(basename) {
             crate::covers::Cover::Image(path) => {
                 match crate::covers::decode_file(&path) {
-                    Some((rgba, w, h)) => {
-                        let tex = self.upload_rgba_texture(&rgba, w, h);
+                    Some((mut rgba, w, h)) => {
+                        crate::covers::bleed_transparent(&mut rgba, w, h);
+                        let tex = self.upload_cover_texture(&rgba, w, h);
                         if tex != 0 {
                             let amb = self.kit_ambient_texture(&rgba, w, h);
                             CoverTex::Image { tex, w, h, amb }
@@ -11417,9 +11771,6 @@ impl SwitchRenderBackend {
         resolved
     }
 
-    /// Resolve + cache a game's cover texture by basename. Decodes/uploads on
-    /// first use; returns `Default` when there's no cover image (caller draws
-    /// the generated tile).
     /// A game's cover as `(texture, width, height, blurred backdrop)` for a
     /// panel's header, or None when it has none (yet).
     pub(crate) fn cover_thumb(&mut self, basename: &str) -> Option<(GLuint, u32, u32, GLuint)> {
@@ -11429,6 +11780,9 @@ impl SwitchRenderBackend {
         }
     }
 
+    /// Resolve + cache a game's cover texture by basename. Decodes/uploads on
+    /// first use; returns `Default` when there's no cover image (caller draws
+    /// the generated tile).
     fn cover_for(&mut self, basename: &str) -> CoverTex {
         if let Some(t) = cover_lookup(basename) {
             return t;
@@ -11440,7 +11794,7 @@ impl SwitchRenderBackend {
                 // SD invalidates it without any bookkeeping.
                 let src_len = crate::library::file_size(&path);
                 if let Some((rgba, w, h)) = crate::covers::read_thumb(basename, src_len) {
-                    let tex = self.upload_rgba_texture(&rgba, w, h);
+                    let tex = self.upload_cover_texture(&rgba, w, h);
                     if tex != 0 {
                         let amb = self.kit_ambient_texture(&rgba, w, h);
                         CoverTex::Image { tex, w, h, amb }
@@ -11456,7 +11810,7 @@ impl SwitchRenderBackend {
                             // SD so the next session skips the full decode.
                             let (small, sw, sh) = crate::covers::downscale_for_tile(rgba, w, h);
                             crate::covers::write_thumb(basename, src_len, &small, sw, sh);
-                            let tex = self.upload_rgba_texture(&small, sw, sh);
+                            let tex = self.upload_cover_texture(&small, sw, sh);
                             if tex != 0 {
                                 let amb = self.kit_ambient_texture(&small, sw, sh);
                                 CoverTex::Image { tex, w: sw, h: sh, amb }
@@ -11551,76 +11905,272 @@ impl SwitchRenderBackend {
         }
     }
 
-    /// JOUER library as a COVER GRID (v1.2.0; replaces the text list). Covers
-    /// are mandatory: a game with no sidecar/cached cover gets a generated tile
-    /// (per-game color + initials). `selection` is a linear index into
-    /// `entries`; `scroll_offset` is the first visible item (multiple of
-    /// `LIST_COLS`).
-    #[allow(clippy::too_many_arguments)]
-    /// Banner + the sub-line under it (active filter, else the library size).
-    /// Shared by the three JOUER layouts so the header height is identical in all
-    /// of them and switching views never shifts what is above the content band.
-    fn draw_home_header(
-        &mut self,
-        banner_tex: GLuint,
-        banner_w: u32,
-        banner_h: u32,
-        shown: usize,
-        filter: Option<&str>,
-        total_unfiltered: usize,
-    ) {
+    /// The band under the tabs (Main.dc.html): the shelf chips between the ZL
+    /// and ZR glyphs on the left, the sort in force and the view on the right,
+    /// and how many games the open shelf holds at the right end of the tab row.
+    /// Drawn by all four views, so switching views never moves what is above
+    /// the content.
+    ///
+    /// It used to be one line of text ("94 jeux  ZL ZR Dossiers"): which
+    /// shelves existed and where ZL and ZR would land was invisible, and
+    /// nothing said how the list was ordered, although every shelf keeps its
+    /// own sort and favourites always come first. Each chip is also a target
+    /// for a thumb, and so are the two indicators (`strip_hit`).
+    fn draw_home_header(&mut self, total_unfiltered: usize) {
         use theme::{col, size};
+        // Still while the content slides in from a shelf change.
+        let saved = if HOME_HEADER_PINNED.load(Ordering::Relaxed) { Some(self.ui_transform_take()) } else { None };
         let vw = self.dimensions.width as f32;
-        // The logo is the navbar's (`draw_navbar`), drawn on every tab.
-        let _ = (banner_tex, banner_w, banner_h);
+        let count = crate::loc_ui::games(total_unfiltered);
+        let cw = self.kit_measure(&count, size::LABEL);
+        self.kit_text_mid((vw - 40.0 - cw).round(), 36.0, size::LABEL, &count, col::TEXT3);
+        if let Ok(mut strip) = HOME_STRIP.lock() {
+            self.draw_home_strip(&mut strip);
+        }
+        if let Some(t) = saved {
+            self.ui_transform_put(t);
+        }
+    }
 
-        // What the grid is showing, in this order of precedence (unchanged): a
-        // search inside an open folder, a search, an open folder, the whole
-        // library. A search also ignores the folder, so it wins the line.
-        let cy = 94.0;
-        let left = 40.0;
-        let folder_open = HOME_FOLDER.lock().ok().and_then(|g| g.clone());
-        let library_total = HOME_LIBRARY_TOTAL
-            .load(core::sync::atomic::Ordering::Relaxed)
-            .max(shown);
-        let searching = filter.map_or(false, |f| !f.trim().is_empty());
-        let mut x = left;
-        if searching {
-            // "3 / 94" then the term, dimmer: the numbers are the answer, the
-            // term is the reminder of the question.
-            let count = std::format!("{} / {}", shown, total_unfiltered);
-            x += self.kit_text_mid(x, cy, size::LABEL, &count, col::TEXT2);
-            let term = std::format!("   \u{201C}{}\u{201D}", filter.unwrap_or("").trim());
-            let term = self.kit_fit(&term, size::LABEL, vw * 0.5 - x);
-            self.kit_text_mid(x, cy, size::LABEL, &term, col::TEXT3);
-        } else if let Some(folder) = folder_open.as_deref() {
-            // An open folder: its name, then how much of the library it holds.
-            // ZL / ZR walk to the next folder, and say so.
-            x += self.kit_icon(x, cy, 18.0, Icon::FolderOpen, col::GOLD) + 10.0;
-            let name = self.kit_fit(folder, size::LABEL + 1.0, vw * 0.4);
-            x += self.kit_text_mid(x, cy, size::LABEL + 1.0, &name, col::TEXT);
-            let count = std::format!("  \u{00B7}  {} / {}", shown, library_total);
-            x += self.kit_text_mid(x, cy, size::LABEL, &count, col::TEXT2) + 24.0;
-            x += self.kit_button(x, cy, 20.0, Btn::ZL, col::PILL_INK) + 4.0;
-            self.kit_button(x, cy, 20.0, Btn::ZR, col::PILL_INK);
-        } else {
-            x += self.kit_text_mid(x, cy, size::LABEL, &crate::loc_ui::games(shown), col::TEXT2);
-            // Folders are walked with buttons on the back of the console, and
-            // nothing else on the home says they exist: show the two glyphs, but
-            // only while the library has a folder to walk.
-            if HOME_HAS_FOLDERS.load(core::sync::atomic::Ordering::Relaxed) {
-                x += 24.0;
-                x += self.kit_button(x, cy, 20.0, Btn::ZL, col::PILL_INK) + 4.0;
-                x += self.kit_button(x, cy, 20.0, Btn::ZR, col::PILL_INK) + 8.0;
-                self.kit_text_mid(x, cy, size::LABEL, crate::loc_ui::ui().folders, col::TEXT3);
+    fn draw_home_strip(&mut self, strip: &mut HomeStrip) {
+        use kit::icons::Icon;
+        use theme::{col, size};
+        const CY: f32 = 94.0;
+        const H: f32 = 34.0;
+        const LEFT: f32 = 48.0;
+        const SHOULDER: f32 = 22.0;
+        const GAP: f32 = 8.0;
+        /// The cut edge of a strip too long for its room fades over this much.
+        const FADE: f32 = 24.0;
+        /// A shelf named after a whole sentence still leaves room for the rest.
+        const LABEL_MAX: f32 = 180.0;
+        let vw = self.dimensions.width as f32;
+        let right_end = vw - LEFT;
+        let mut cells: std::vec::Vec<((f32, f32, f32, f32), StripHit)> = std::vec::Vec::new();
+        let cell_y = CY - H * 0.5;
+
+        // ── Right: the sort in force, then the view ──
+        let view = crate::loc::home_view();
+        let view_label = crate::loc_ui::view_label(view);
+        let view_icon = match view {
+            1 => Icon::List,
+            2 => Icon::Strip,
+            3 => Icon::Shelf,
+            _ => Icon::Grid,
+        };
+        let xw = self.kit_button_width(Btn::X, 20.0);
+        let view_w = xw + 6.0 + 18.0 + 8.0 + self.kit_measure(view_label, size::LABEL);
+        let sort_label = crate::library::sort_state_label(strip.sort_mode, strip.sort_reverse);
+        let star_w = if strip.favorites_first { 14.0 + 6.0 } else { 0.0 };
+        let sort_w = star_w + 18.0 + 8.0 + self.kit_measure(sort_label, size::LABEL);
+        let view_x = (right_end - view_w).round();
+        let sort_x = (view_x - 18.0 - sort_w).round();
+        let mut x = sort_x;
+        if strip.favorites_first {
+            self.kit_star(x, CY, 14.0, col::GOLD);
+            x += star_w;
+        }
+        self.kit_icon(x, CY, 18.0, crate::library::sort_icon(strip.sort_mode), col::TEXT2);
+        self.kit_text_mid(x + 18.0 + 8.0, CY, size::LABEL, sort_label, col::TEXT2);
+        cells.push(((sort_x - 6.0, cell_y, sort_w + 12.0, H), StripHit::Sort));
+        let mut x = view_x;
+        // X changes the view from here; the glyph says so, the way ZL and ZR
+        // frame the chips they walk.
+        x += self.kit_button(x, CY, 20.0, Btn::X, col::PILL_INK) + 6.0;
+        self.kit_icon(x, CY, 18.0, view_icon, col::TEXT2);
+        self.kit_text_mid(x + 18.0 + 8.0, CY, size::LABEL, view_label, col::TEXT2);
+        cells.push(((view_x - 6.0, cell_y, view_w + 12.0, H), StripHit::View));
+
+        // ── Left: the chips ──
+        if strip.layout_fp != strip.fp {
+            let mut layout = std::vec::Vec::with_capacity(strip.chips.len());
+            for chip in &strip.chips {
+                layout.push(self.strip_chip_layout(&chip.label, chip.count, LABEL_MAX));
+            }
+            strip.layout = layout;
+            strip.layout_fp = strip.fp;
+        }
+        let search_fresh = match (&strip.search, &strip.search_layout) {
+            (Some(t), Some((lt, lm, _))) => t != lt || *lm != strip.matches,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if search_fresh {
+            if let Some(t) = strip.search.clone() {
+                let l = self.strip_chip_layout(&t, Some(strip.matches), LABEL_MAX);
+                strip.search_layout = Some((t, strip.matches, l));
             }
         }
+        if strip.search.is_none() {
+            strip.search_layout = None;
+        }
+        let searching = strip.search_layout.is_some();
+        let n = strip.layout.len() + searching as usize;
+        if n == 0 {
+            publish_strip_cells(cells);
+            return;
+        }
+        // The row: the search first while one runs, then the shelves.
+        let item_w = |i: usize| -> f32 {
+            match (searching, i) {
+                (true, 0) => strip.search_layout.as_ref().map_or(0.0, |(_, _, l)| l.w),
+                (true, i) => strip.layout[i - 1].w,
+                (false, i) => strip.layout[i].w,
+            }
+        };
+        let mut xs: std::vec::Vec<f32> = std::vec::Vec::with_capacity(n);
+        let mut total = 0.0f32;
+        for i in 0..n {
+            if i > 0 {
+                total += GAP;
+            }
+            xs.push(total);
+            total += item_w(i);
+        }
+        // ZL and ZR only when there is somewhere to walk to.
+        let walkable = strip.chips.len() > 1;
+        let zl_w = if walkable { self.kit_button_width(Btn::ZL, SHOULDER) } else { 0.0 };
+        let zr_w = if walkable { self.kit_button_width(Btn::ZR, SHOULDER) } else { 0.0 };
+        let clip_l = LEFT + if walkable { zl_w + 12.0 } else { 0.0 };
+        let room = (sort_x - 16.0 - if walkable { zr_w + 12.0 } else { 0.0 } - clip_l).max(0.0);
+        let overflow = total > room;
+        let max_off = (total - room).max(0.0);
+        let act = (strip.active + searching as usize).min(n - 1);
+        let (al, aw) = (xs[act], item_w(act));
 
-        // Right: the layout's name. It is changed from REGLAGES, two screens
-        // away, and named nowhere else (#98).
-        let view = crate::loc_ui::view_label(crate::loc::home_view());
-        let vwid = self.kit_measure(view, size::LABEL);
-        self.kit_text_mid(vw - 40.0 - vwid, cy, size::LABEL, view, col::TEXT3);
+        // Scroll as little as keeps the open shelf whole and clear of the
+        // fades; travel there on the covers' clock.
+        let now = unsafe { ruffle_tick_now() };
+        let freq = unsafe { ruffle_tick_freq() }.max(1) as f32;
+        let (off, fill_x, fill_w) = match STRIP_ANIM.lock() {
+            Ok(mut guard) => {
+                let a = &mut *guard;
+                let mut want = if overflow { a.off.to.clamp(0.0, max_off) } else { 0.0 };
+                if overflow {
+                    let lo = if act == 0 { 0.0 } else { al - FADE };
+                    let hi = if act + 1 == n { total } else { al + aw + FADE };
+                    if lo < want {
+                        want = lo;
+                    }
+                    if hi > want + room {
+                        want = hi - room;
+                    }
+                    want = want.clamp(0.0, max_off);
+                }
+                if !a.inited {
+                    a.inited = true;
+                    a.off = Glide::at(want);
+                    a.fill_x = Glide::at(al);
+                    a.fill_w = Glide::at(aw);
+                } else {
+                    let dt = (now.saturating_sub(a.tick) as f32 * 1000.0 / freq).min(100.0);
+                    for (g, to) in [(&mut a.off, want), (&mut a.fill_x, al), (&mut a.fill_w, aw)] {
+                        g.retarget(to);
+                        g.step(dt);
+                    }
+                }
+                a.tick = now;
+                (a.off.value(), a.fill_x.value(), a.fill_w.value())
+            }
+            Err(_) => (0.0, al, aw),
+        };
+
+        self.set_clip(clip_l, 72.0, room, 44.0);
+        // The open shelf's fill, under whichever chips it is travelling past.
+        self.kit_rrect((clip_l + fill_x - off).round(), cell_y, fill_w, H, H * 0.5, col::CHIP);
+        for i in 0..n {
+            let x = (clip_l + xs[i] - off).round();
+            let w = item_w(i);
+            if x > clip_l + room || x + w < clip_l {
+                continue;
+            }
+            let (layout, icon, hit, lit) = match (searching, i) {
+                (true, 0) => {
+                    let Some((_, _, l)) = strip.search_layout.as_ref() else { continue };
+                    (l, Some(Icon::Search), StripHit::Search, true)
+                }
+                _ => {
+                    let k = i - searching as usize;
+                    let icon = match strip.chips[k].kind {
+                        HomeChipKind::All => Some(Icon::Grid),
+                        HomeChipKind::Favorites => None,
+                        HomeChipKind::Folder => Some(Icon::Folder),
+                        HomeChipKind::Label => Some(Icon::Tag),
+                    };
+                    (&strip.layout[k], icon, StripHit::Shelf(k), k == strip.active)
+                }
+            };
+            if hit == StripHit::Search {
+                // What narrows the shelf: filled and edged in gold, so the
+                // open shelf's chip still reads as the shelf.
+                self.kit_shape(x, cell_y, w, H, H * 0.5, col::CHIP, 1.5, col::GOLD, 0.0);
+            }
+            let icon_ink = if lit { col::GOLD } else { col::TEXT3 };
+            let mut pen = x + 14.0;
+            match icon {
+                Some(ic) => {
+                    self.kit_icon(pen, CY, 16.0, ic, icon_ink);
+                }
+                // The favourites' star is the solid one, as everywhere a
+                // favourite is marked.
+                None => {
+                    self.kit_star(pen, CY, 16.0, icon_ink);
+                }
+            }
+            pen += 16.0 + 8.0;
+            pen += self.kit_text_mid(pen, CY, size::LABEL, &layout.label, if lit { col::TEXT } else { col::TEXT2 });
+            if let Some(c) = &layout.count {
+                self.kit_text_mid(pen + 6.0, CY, size::LABEL, c, col::TEXT3);
+            }
+            let (vx0, vx1) = (x.max(clip_l), (x + w).min(clip_l + room));
+            if vx1 > vx0 {
+                cells.push(((vx0, cell_y, vx1 - vx0, H), hit));
+            }
+        }
+        // A cut edge fades into the page, so a chip running out of room reads
+        // as "more this way" rather than as a broken one.
+        if off > 0.5 {
+            self.kit_shape(clip_l - 240.0, 40.0, 240.0 + FADE * 0.5, 110.0, 0.0, col::BG, 0.0, 0, FADE * 0.5);
+        }
+        if off < max_off - 0.5 {
+            self.kit_shape(clip_l + room - FADE * 0.5, 40.0, 240.0, 110.0, 0.0, col::BG, 0.0, 0, FADE * 0.5);
+        }
+        self.clear_clip();
+        if walkable {
+            self.kit_button(LEFT, CY, SHOULDER, Btn::ZL, col::PILL_INK);
+            // Right after the last chip, or pinned at the end of the room.
+            let zr_x = clip_l + total.min(room) + 12.0;
+            self.kit_button(zr_x.round(), CY, SHOULDER, Btn::ZR, col::PILL_INK);
+        }
+        publish_strip_cells(cells);
+    }
+
+    /// One chip's label cut to `max_w`, its count written out, and its width.
+    fn strip_chip_layout(&mut self, label: &str, count: Option<usize>, max_w: f32) -> ChipLayout {
+        use theme::size;
+        let label = self.kit_fit_mid(label, size::LABEL, max_w);
+        let count = count.map(|c| c.to_string());
+        let mut w = 14.0 + 16.0 + 8.0 + self.kit_measure(&label, size::LABEL) + 14.0;
+        if let Some(c) = &count {
+            w += 6.0 + self.kit_measure(c, size::LABEL);
+        }
+        ChipLayout { label, count, w: w.round() }
+    }
+
+    /// Set the UI transform aside (and clear it), for something drawn still
+    /// while the rest of the page moves.
+    fn ui_transform_take(&mut self) -> (f32, f32, f32, f32, f32) {
+        let t = (self.ui_scale, self.ui_pivot_x, self.ui_pivot_y, self.ui_translate_x, self.ui_translate_y);
+        self.clear_ui_transform();
+        t
+    }
+
+    fn ui_transform_put(&mut self, t: (f32, f32, f32, f32, f32)) {
+        self.ui_scale = t.0;
+        self.ui_pivot_x = t.1;
+        self.ui_pivot_y = t.2;
+        self.ui_translate_x = t.3;
+        self.ui_translate_y = t.4;
     }
 
     /// Filled rounded rectangle, built from horizontal slivers.
@@ -11654,29 +12204,27 @@ impl SwitchRenderBackend {
         selection: usize,
         scroll_offset: usize,
         entries: &[crate::library::Entry],
-        banner_tex: GLuint,
-        banner_w: u32,
-        banner_h: u32,
         phase_ticks: u64,
-        filter: Option<&str>,
         total_unfiltered: usize,
     ) {
         self.library_clear();
         let vw = self.dimensions.width as f32;
-        self.draw_home_header(banner_tex, banner_w, banner_h, entries.len(), filter, total_unfiltered);
+        self.draw_home_header(total_unfiltered);
 
         const TOP: f32 = 126.0;
         // 40 px rows fit 13 titles between the header and the footer. The first
         // pass used 44 and showed 10, which left a visibly empty band below.
         const ROW_H: f32 = 40.0;
         let rows_visible = crate::library::home_rows_visible();
-        let list_x = 40.0;
-        let list_w = (vw * 0.50 - 40.0).max(120.0);
+        // The 48 px margin of the grid and of the strip above, so the four views
+        // share one left edge.
+        let list_x = 48.0;
+        let list_w = (vw * 0.50 - 48.0).max(120.0);
         let band_top = TOP - 8.0;
         let band_bot = TOP + rows_visible as f32 * ROW_H;
         if entries.is_empty() {
-            self.draw_home_empty(band_top, band_bot);
-            self.kit_home_footer();
+            self.draw_home_empty();
+            self.kit_home_footer(true);
             return;
         }
 
@@ -11725,7 +12273,7 @@ impl SwitchRenderBackend {
         // the art, so a wide cover and a tall one both sit tight under their own
         // picture instead of leaving a hole under a fixed-size frame.
         let box_x = vw * 0.53;
-        let box_w = vw - box_x - 40.0;
+        let box_w = vw - box_x - 48.0;
         let box_y = TOP + 6.0;
         // 340 gave this layout the SMALLEST cover in the app — 15.4% of the
         // screen — while ~100,000 px² sat empty below the caption, in the one
@@ -11735,24 +12283,45 @@ impl SwitchRenderBackend {
         // upscaling at 2× native.
         let box_h = 460.0;
         let mut panel = (box_x, box_y, box_w, box_h);
+        // Asked before the panel, which may decode the selected game's own
+        // thumbnail this frame: the rows then wait for the next one.
+        let selected_ready = entries.get(selection).map_or(true, |e| cover_lookup(&e.basename).is_some());
         if let Some(e) = entries.get(selection) {
             use theme::{col, size};
             // Wrapped once, measured once: the caption's height is what the art
             // is fitted against, so the two cannot disagree.
             let lines = self.kit_wrap(&e.display_name, size::TITLE, box_w, 2);
-            let caption_h = 22.0 + lines.len() as f32 * 32.0 + 30.0;
+            let fact_lines = self.kit_game_facts_lines(e, box_w);
+            let caption_h = 22.0 + lines.len() as f32 * 32.0 + 30.0 + fact_lines.saturating_sub(1) as f32 * 24.0;
             panel = self.kit_cover_panel(box_x, box_y, box_w, box_h, caption_h, &e.basename, &e.display_name, e.color_chip);
             if crate::favorites::is_favorite(&e.basename) {
                 self.kit_favorite_chip(panel.0 + 8.0, panel.1 + 8.0);
             }
+            if e.multi {
+                self.kit_multi_badge(panel.0 + panel.2 - 8.0, panel.1 + 8.0);
+            }
+            // The selected name in gold at the title size, as in every view.
             let mut ty = panel.1 + panel.3 + 30.0;
             for line in &lines {
                 let lw = self.kit_measure(line, size::TITLE);
-                self.kit_text_mid((box_x + ((box_w - lw) * 0.5).max(0.0)).round(), ty, size::TITLE, line, col::TEXT);
+                self.kit_text_mid((box_x + ((box_w - lw) * 0.5).max(0.0)).round(), ty, size::TITLE, line, col::GOLD);
                 ty += 32.0;
             }
-            let fw = self.kit_game_facts_width(e, size::LABEL);
-            self.kit_game_facts_px((box_x + ((box_w - fw) * 0.5).max(0.0)).round(), ty + 2.0, e, size::LABEL);
+            self.kit_game_facts(box_x + box_w * 0.5, ty + 2.0, e, box_w, true);
+        }
+
+        // Small covers in the rows, from the tile thumbnails: one decode a frame
+        // like every view, the rows nearest the cursor first, and none while the
+        // panel is still waiting for the selected game's own thumbnail.
+        if selected_ready {
+            let first = (scroll_px / ROW_H).floor().max(0.0) as usize;
+            let last = (first + rows_visible + 1).min(entries.len());
+            let missing = (first..last)
+                .filter(|&i| cover_lookup(&entries[i].basename).is_none())
+                .min_by_key(|&i| (i as isize - selection as isize).abs());
+            if let Some(i) = missing {
+                let _ = self.cover_for(&entries[i].basename);
+            }
         }
 
         // ── Title list, clipped to its band ──
@@ -11776,23 +12345,41 @@ impl SwitchRenderBackend {
                 continue;
             }
 
-            // Colour dot: the same per-game hue the grid falls back to, kept here
-            // so a game stays recognisable between the two layouts.
+            // A small cover where a coloured dot used to be: the dot was a hash
+            // of the file name, and a coloured dot before a name reads as a
+            // status light. A game with no cover (yet) gets its tile's colour.
             let cy = y + (ROW_H - 4.0) * 0.5;
-            self.kit_rrect(list_x + 14.0, cy - 5.0, 10.0, 10.0, 5.0, 0xFF00_0000 | e.color_chip);
+            let (mx, mw, mh) = (list_x + 10.0, 48.0, 30.0);
+            let my = (cy - mh * 0.5).round();
+            match cover_lookup(&e.basename) {
+                Some(CoverTex::Image { tex, w, h, .. }) => {
+                    self.kit_rrect(mx, my, mw, mh, 6.0, theme::col::TILE);
+                    self.kit_image(mx, my, mw, mh, tex, kit::cover::crop_uv(w, h, mw, mh), 1.0, 6.0);
+                }
+                _ => {
+                    let fill = kit::cover::mix_rgb(e.color_chip & 0x00FF_FFFF, theme::col::BG & 0x00FF_FFFF, 0.55);
+                    self.kit_rrect(mx, my, mw, mh, 6.0, 0xFF00_0000 | fill);
+                }
+            }
             let focused = idx == selection;
             let ink = if focused { theme::col::TEXT } else { theme::col::TEXT2 };
             // Favourites also sort to the top, so the star confirms WHY a row is
-            // up there rather than announcing something new.
+            // up there rather than announcing something new. The solid star, as
+            // on every cover: the outline is the options' "not a favourite".
             let fav = crate::favorites::is_favorite(&e.basename);
-            let mut text_x = list_x + 36.0;
+            let mut text_x = mx + mw + 12.0;
             if fav {
-                self.kit_icon(text_x, cy, 16.0, Icon::Star, theme::col::GOLD);
-                text_x += 24.0;
+                self.kit_star(text_x, cy, 16.0, theme::col::GOLD);
+                text_x += 22.0;
             }
-            // Truncated to the column, never to the panel beside it.
-            let label = self.kit_fit_mid(&e.display_name, theme::size::ROW - 1.0, list_x + list_w - text_x - 14.0);
-            self.kit_text_mid(text_x, cy, theme::size::ROW - 1.0, &label, ink);
+            // Truncated to the column, never to the panel beside it, leaving
+            // room for the layers mark of a multi-file game after the name.
+            let mark = if e.multi { 8.0 + 16.0 } else { 0.0 };
+            let label = self.kit_fit_mid(&e.display_name, theme::size::ROW - 1.0, list_x + list_w - text_x - 14.0 - mark);
+            let lw = self.kit_text_mid(text_x, cy, theme::size::ROW - 1.0, &label, ink);
+            if e.multi {
+                self.kit_icon(text_x + lw + 8.0, cy, 16.0, Icon::Layers, theme::col::TEXT3);
+            }
         }
         self.clear_clip();
 
@@ -11811,7 +12398,7 @@ impl SwitchRenderBackend {
             entries.len(),
         );
 
-        self.kit_home_footer();
+        self.kit_home_footer(false);
 
         // The reveal grows from the COVER PANEL, not from a text row: the panel is
         // already showing that game's art at full size, so the launch continues it.
@@ -11835,13 +12422,15 @@ impl SwitchRenderBackend {
         self.kit_footer_hints(text, vw - 40.0, vh - 24.0, false);
     }
 
-    /// Centred "NO RESULTS" for a home layout whose list came back empty.
+    /// The page a search that matched nothing leaves, the same in every view:
+    /// what was searched, and the two ways out.
     ///
     /// A search that matches nothing leaves the same `Screen::List` with zero
-    /// entries, and each of the four layouts then drew its chrome around nothing
-    /// at all: no tiles, no rows, no cover, no word. It was only ever mitigated by
-    /// the header's "0 / 77" count, which is a side effect and not a message.
-    fn draw_home_empty(&mut self, band_top: f32, band_bot: f32) {
+    /// entries, and each layout used to draw its chrome around nothing, then a
+    /// bare "No results" at four different heights, with A, + and Y still
+    /// offered in the footer for a list that had nothing to act on.
+    fn draw_home_empty(&mut self) {
+        use theme::{col, size};
         // Cleared FIRST. The four layouts return early from here without
         // publishing a layout, so the cache would still hold the cells of the
         // last non-empty frame — and `gallery_hit_test` walks exactly that list,
@@ -11850,32 +12439,28 @@ impl SwitchRenderBackend {
         if let Ok(mut g) = gallery_cache().lock() {
             *g = (std::vec::Vec::new(), 0);
         }
-        // A search icon over the words: this is a search that found nothing.
-        let msg = crate::loc::s().cover_none;
+        let u = crate::loc_ui::ui();
+        let term = HOME_STRIP.lock().ok().and_then(|g| g.search.clone());
         let vw = self.dimensions.width as f32;
-        let cy = (band_top + band_bot) * 0.5;
-        self.kit_icon(((vw - 40.0) * 0.5).round(), cy - 30.0, 40.0, Icon::Search, theme::col::TEXT3);
-        let w = self.kit_measure(msg, theme::size::BODY);
-        self.kit_text_mid(((vw - w) * 0.5).round(), cy + 18.0, theme::size::BODY, msg, theme::col::TEXT2);
+        // The middle of the band between the strip and the footer.
+        let cy = 388.0;
+        self.kit_icon(((vw - 40.0) * 0.5).round(), cy - 44.0, 40.0, Icon::Search, col::TEXT3);
+        let msg = match &term {
+            Some(t) => u.home_no_match.replacen("{}", t, 1),
+            None => crate::loc::s().cover_none.to_string(),
+        };
+        let msg = self.kit_fit_mid(&msg, size::BODY, vw - 160.0);
+        let w = self.kit_measure(&msg, size::BODY);
+        self.kit_text_mid(((vw - w) * 0.5).round(), cy + 10.0, size::BODY, &msg, col::TEXT2);
+        if term.is_some() {
+            self.kit_hints_centered(
+                vw * 0.5,
+                cy + 62.0,
+                &[(&[Btn::Minus], u.home_edit_search), (&[Btn::B], u.home_show_all)],
+            );
+        }
     }
 
-    /// JOUER layout 2, BANDE: a large cover of the selected game with its details
-    /// beside it, over one full-width row of the whole library.
-    ///
-    /// Three rules, each fixing something an earlier pass got wrong:
-    ///
-    /// The columns are FIXED. Sizing the page from the art's own aspect made the
-    /// whole layout move every time the selection changed — a banner cover swelled
-    /// across the screen, a square one left a hole. The hero is fitted inside a box
-    /// it cannot outgrow, so the details and the row never move.
-    ///
-    /// EVERY game is drawn in the row, none skipped. Hiding the ones already
-    /// passed made tiles appear and vanish a step at a time while the row glided,
-    /// which is the popping: one discrete rule fighting one continuous one.
-    ///
-    /// The selection is anchored PART WAY IN, not at the edge, so the previous
-    /// cover stays half visible. A shelf you can only see forwards on does not
-    /// read as a shelf.
     /// The vertical scrollbar a scrolling page draws in its right-hand gutter: a
     /// track from `top` to `top + h` at `x`, and a thumb whose length is the
     /// visible share of `total` and whose position comes from the live pixel
@@ -11919,28 +12504,45 @@ impl SwitchRenderBackend {
         let w = 4.0;
         let bx = x + (SCROLLBAR_W - w) * 0.5;
         self.kit_rrect(bx, top, w, h, w * 0.5, theme::col::LINE);
-        self.kit_rrect(bx, top + (h - thumb_h) * t, w, thumb_h, w * 0.5, theme::col::GOLD);
+        self.kit_rrect(bx, top + (h - thumb_h) * t, w, thumb_h, w * 0.5, SCROLLBAR_THUMB);
     }
 
+    /// JOUER layout 2, BANDE: a large cover of the selected game with its details
+    /// beside it, over one full-width row of the whole library.
+    ///
+    /// Three rules, each fixing something an earlier pass got wrong:
+    ///
+    /// The columns are FIXED. Sizing the page from the art's own aspect made the
+    /// whole layout move every time the selection changed — a banner cover swelled
+    /// across the screen, a square one left a hole. The hero is fitted inside a box
+    /// it cannot outgrow, so the details and the row never move.
+    ///
+    /// EVERY game is drawn in the row, none skipped. Hiding the ones already
+    /// passed made tiles appear and vanish a step at a time while the row glided,
+    /// which is the popping: one discrete rule fighting one continuous one.
+    ///
+    /// The selection is anchored PART WAY IN, not at the edge, so the previous
+    /// cover stays half visible. A shelf you can only see forwards on does not
+    /// read as a shelf.
+    ///
+    /// The row's tiles do not open: the hero above is the selected cover at
+    /// size, and the row follows the cover rule of a box that only shows
+    /// (`kit_cover`), as Jaquettes.dc.html draws BANDE.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_library_shelf_view(
         &mut self,
         selection: usize,
         _scroll_offset: usize,
         entries: &[crate::library::Entry],
-        banner_tex: GLuint,
-        banner_w: u32,
-        banner_h: u32,
         phase_ticks: u64,
-        filter: Option<&str>,
         total_unfiltered: usize,
     ) {
         self.library_clear();
         let vw = self.dimensions.width as f32;
-        self.draw_home_header(banner_tex, banner_w, banner_h, entries.len(), filter, total_unfiltered);
+        self.draw_home_header(total_unfiltered);
         if entries.is_empty() {
-            self.draw_home_empty(124.0, 592.0);
-            self.kit_home_footer();
+            self.draw_home_empty();
+            self.kit_home_footer(true);
             return;
         }
 
@@ -11981,14 +12583,19 @@ impl SwitchRenderBackend {
             if crate::favorites::is_favorite(&e.basename) {
                 self.kit_favorite_chip(hero.0 + 10.0, hero.1 + 10.0);
             }
-            // Three lines: the column is wide and the row does not start until
-            // y468, so a long title has room for a third.
-            let mut ty = HERO_Y + 22.0;
-            for line in self.kit_wrap(&e.display_name, size::TITLE + 4.0, vw - COL_X - 48.0, 3) {
-                self.kit_text_mid(COL_X, ty, size::TITLE + 4.0, &line, col::TEXT);
-                ty += 38.0;
+            if e.multi {
+                self.kit_multi_badge(hero.0 + hero.2 - 10.0, hero.1 + 10.0);
             }
-            self.kit_game_facts(COL_X, ty + 6.0, e);
+            // Three lines: the column is wide and the row does not start until
+            // y468, so a long title has room for a third. In gold at the title
+            // size, as the selected name is in every view.
+            let col_w = vw - COL_X - 48.0;
+            let mut ty = HERO_Y + 22.0;
+            for line in self.kit_wrap(&e.display_name, size::TITLE, col_w, 3) {
+                self.kit_text_mid(COL_X, ty, size::TITLE, &line, col::GOLD);
+                ty += 32.0;
+            }
+            self.kit_game_facts(COL_X, ty + 6.0, e, col_w, false);
         }
         if let Ok(mut r) = gallery_sel_rect().lock() {
             *r = hero;
@@ -12040,11 +12647,6 @@ impl SwitchRenderBackend {
             if x > vw || x + ROW_W < 0.0 {
                 continue;
             }
-            // From the SAME eased distance the veil below already uses, so the
-            // cover opens up and brightens as one movement across a slide
-            // instead of snapping at the frame the index changes.
-            let u = (1.0 - (i as f32 - sel_pos).abs()).max(0.0);
-            let b = u * u * (3.0 - 2.0 * u); // smoothstep, as ETAGERE's bump uses
             let (ry, rw, rh) = (ROW_Y, ROW_W, ROW_H);
             let cover = match cover_lookup(&e.basename) {
                 Some(t) => t,
@@ -12054,7 +12656,6 @@ impl SwitchRenderBackend {
                 }
                 None => CoverTex::Default,
             };
-            let _ = b;
             match cover {
                 CoverTex::Image { tex, w, h, amb } => {
                     self.kit_cover(x, ry, rw, rh, tex, w, h, amb, 1.0);
@@ -12065,6 +12666,9 @@ impl SwitchRenderBackend {
             }
             if crate::favorites::is_favorite(&e.basename) {
                 self.kit_favorite_chip(x + 8.0, ry + 8.0);
+            }
+            if e.multi {
+                self.kit_multi_badge(x + rw - 8.0, ry + 8.0);
             }
             // Veil measured against the EASED selection, so it lifts and settles
             // with the slide instead of switching at the moment the index changes.
@@ -12097,10 +12701,10 @@ impl SwitchRenderBackend {
             self.kit_rrect(track_x, 621.0, track_w, 4.0, 2.0, theme::col::LINE);
             let tw = (track_w * (vw / pitch) / total as f32).max(56.0);
             let t = (sel_pos / (total - 1) as f32).clamp(0.0, 1.0);
-            self.kit_rrect(track_x + (track_w - tw) * t, 620.0, tw, 6.0, 3.0, theme::col::GOLD);
+            self.kit_rrect(track_x + (track_w - tw) * t, 620.0, tw, 6.0, 3.0, SCROLLBAR_THUMB);
         }
 
-        self.kit_home_footer();
+        self.kit_home_footer(false);
     }
 
     /// JOUER layout 3, the shelf: ONE row of large covers, the selected one grown
@@ -12125,20 +12729,16 @@ impl SwitchRenderBackend {
         selection: usize,
         _scroll_offset: usize,
         entries: &[crate::library::Entry],
-        banner_tex: GLuint,
-        banner_w: u32,
-        banner_h: u32,
         phase_ticks: u64,
-        filter: Option<&str>,
         total_unfiltered: usize,
     ) {
         self.library_clear();
         let vw = self.dimensions.width as f32;
-        self.draw_home_header(banner_tex, banner_w, banner_h, entries.len(), filter, total_unfiltered);
+        self.draw_home_header(total_unfiltered);
 
         if entries.is_empty() {
-            self.draw_home_empty(124.0, 560.0);
-            self.kit_home_footer();
+            self.draw_home_empty();
+            self.kit_home_footer(true);
             return;
         }
 
@@ -12149,7 +12749,6 @@ impl SwitchRenderBackend {
         const ANCHOR_CX: f32 = 328.0;       // fixed screen x of the active centre
         const SHELF_Y: f32 = 344.0;         // common BOTTOM edge; growth is upward
         const RIGHT_SLOTS: usize = 2;
-        const UPSCALE_MAX: f32 = 1.25;
         const VEIL: u32 = 0x0C_10_18;
         let w1 = W0 * (1.0 + GROW);
         let h1 = H0 * (1.0 + GROW);
@@ -12248,26 +12847,13 @@ impl SwitchRenderBackend {
             let sc = 1.0 + GROW * b;
             match cover_lookup(&e.basename) {
                 Some(CoverTex::Image { tex, w: iw, h: ih, amb }) if iw > 0 && ih > 0 => {
-                    let a = iw as f32 / ih as f32;
-                    let bx = W0 / H0;
-                    // Resting zoom floor, a per-cover CONSTANT computed at BASE
-                    // scale so it can never reflow: a cover that would have to be
-                    // blown up past UPSCALE_MAX to fill the box rests part-way
-                    // zoomed out instead of showing a magnified sliver.
-                    let (u0, u1) = if a > bx {
-                        (H0 / ih as f32, (W0 / a) / ih as f32)
-                    } else {
-                        (W0 / iw as f32, (H0 * a) / iw as f32)
-                    };
-                    let t_rest = if u0 <= UPSCALE_MAX || (u0 - u1) < 1e-3 {
-                        0.0
-                    } else {
-                        ((u0 - UPSCALE_MAX) / (u0 - u1)).clamp(0.0, 1.0)
-                    };
-                    // One continuous zoom-out from the box to the whole cover,
-                    // the cover's own blurred colours behind what it leaves.
-                    let t = t_rest.max(b);
-                    self.kit_cover_reveal(x, y, w, h, tex, iw, ih, amb, t, 1.0);
+                    // At rest as filled as the 15% rule allows, the same rule
+                    // as the grid: the box keeps its aspect at every scale, so
+                    // the resting point is a per-cover constant and never
+                    // reflows. The selected cover opens the rest of the way to
+                    // the whole image, its own blurred colours behind it.
+                    let rest = kit::cover::rest_t(iw, ih, W0, H0);
+                    self.kit_cover_reveal(x, y, w, h, tex, iw, ih, amb, rest + (1.0 - rest) * b, 1.0);
                 }
                 _ => self.kit_default_tile(x, y, w, h, e.color_chip, &e.display_name),
             }
@@ -12277,6 +12863,9 @@ impl SwitchRenderBackend {
             }
             if crate::favorites::is_favorite(&e.basename) {
                 self.kit_favorite_chip(x + 8.0 * sc, y + 8.0 * sc);
+            }
+            if e.multi {
+                self.kit_multi_badge(x + w - 8.0 * sc, y + 8.0 * sc);
             }
         }
 
@@ -12309,7 +12898,7 @@ impl SwitchRenderBackend {
             // Named from the INTEGER selection, not from `sel_pos.round()`: A
             // launches `selection`, so naming anything else would let the facts
             // describe a different game than the one that starts.
-            let lines = self.kit_wrap(&e.display_name, theme::size::TITLE + 6.0, cap_w, 2);
+            let lines = self.kit_wrap(&e.display_name, theme::size::TITLE, cap_w, 2);
             // 414, not 388: the lit segment above is `3.0 + 7.0 * b` tall from
             // y=380, so at full selection it reaches y=390 and the title's first
             // pixel row landed INSIDE it -- the name looked stuck to the light
@@ -12318,12 +12907,13 @@ impl SwitchRenderBackend {
             // this only show on the selected tile. The extra room past mere
             // clearance is free: the page had ~170 px of nothing between the rail
             // and the footer.
+            // In gold at the title size, as the selected name is in every view.
             let mut ty = 430.0;
             for line in &lines {
-                self.kit_text_mid(cap_x, ty, theme::size::TITLE + 6.0, line, theme::col::TEXT);
-                ty += 40.0;
+                self.kit_text_mid(cap_x, ty, theme::size::TITLE, line, theme::col::GOLD);
+                ty += 32.0;
             }
-            self.kit_game_facts_px(cap_x, ty + 2.0, e, theme::size::LABEL + 1.0);
+            self.kit_game_facts(cap_x, ty + 2.0, e, cap_w, false);
         }
 
         // Position rail — the row shows about five games out of many, so where you
@@ -12337,64 +12927,55 @@ impl SwitchRenderBackend {
             self.kit_rrect(cap_x, 549.0, cap_w, 4.0, 2.0, theme::col::LINE);
             let tw = (cap_w * (1280.0 / PITCH) / n as f32).max(56.0);
             let tx = cap_x + (cap_w - tw) * (sel_pos / (n - 1) as f32).clamp(0.0, 1.0);
-            self.kit_rrect(tx, 548.0, tw, 6.0, 3.0, theme::col::GOLD);
+            self.kit_rrect(tx, 548.0, tw, 6.0, 3.0, SCROLLBAR_THUMB);
         }
 
-        self.kit_home_footer();
+        self.kit_home_footer(false);
     }
 
+    /// JOUER layout 0, GRILLE: the covers as a grid of 16:10 tiles, five a row
+    /// (Main.dc.html), the selected one lifted on a shadow inside a gold ring,
+    /// its name and facts under the grid.
+    ///
+    /// `selection` is an index into `entries`; `scroll_offset` is the first
+    /// visible ROW. A game with no cover gets a generated tile.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_library_gallery(
         &mut self,
         selection: usize,
         scroll_offset: usize,
         entries: &[crate::library::Entry],
-        banner_tex: GLuint,
-        banner_w: u32,
-        banner_h: u32,
         phase_ticks: u64,
-        filter: Option<&str>,
         total_unfiltered: usize,
     ) {
         self.library_clear();
         let vw = self.dimensions.width as f32;
-
-        // Banner — compact, fully below the navbar strip (y 4..38). Scaled to a
-        // small target height so it doesn't dominate the screen (was full 720x144).
-        self.draw_home_header(banner_tex, banner_w, banner_h, entries.len(), filter, total_unfiltered);
+        self.draw_home_header(total_unfiltered);
 
         if entries.is_empty() {
-            // GRILLE is the validated screen of the four; the guard is placed
-            // after the header and before any tile work, so a non-empty library
-            // reaches exactly the code it did before.
-            self.draw_home_empty(126.0, 630.0);
-            self.kit_home_footer();
+            self.draw_home_empty();
+            self.kit_home_footer(true);
             return;
         }
 
-        // ── Cover gallery (v1.2.0) ───────────────────────────────────────
-        // Fixed 5-per-row GRID. Every tile is the same size and covers are
-        // CROP-TO-FILL (object-fit: cover, via draw_textured_rect_cover), so
-        // the grid stays perfectly aligned whatever each cover's native aspect —
-        // we accept cropping the overflow (the deliberate "5 per row, tant pis"
-        // choice). `scroll_offset` is the first visible ROW.
+        // The mockup's grid: 48 px margins, five columns 20 px apart, tiles at
+        // 16:10 (Jaquettes.dc.html), the first row 14 px under the shelf strip.
+        // `scroll_offset` is the first visible ROW.
         const COLS: usize = 5;
-        const ROW_IMG_H: f32 = 132.0; // uniform tile height
-        const GAP_X: f32 = 16.0;
-        const GAP_Y: f32 = 22.0;
-        const LEFT: f32 = 40.0;
-        // 126, not 150: the shrunk banner ends at y102 and left a 46 px gap under
-        // itself, which read as the header having lost its second line rather than
-        // as clearance. 24 px is the same air the rest of the page uses. No row
-        // count changes at any of the four layouts, so no scroll maths moves.
-        const TOP: f32 = 126.0;
+        const LEFT: f32 = 48.0;
+        const GAP: f32 = 20.0;
+        const TOP: f32 = 130.0;
+        // How far a tile grows when it opens: enough to read as lifted off the
+        // grid, little enough to stay inside the gap to its neighbours.
+        const LIFT: f32 = 0.05;
         let rows_visible = crate::library::GALLERY_ROWS_VISIBLE;
-        let avail_w = vw - LEFT * 2.0;
-        let cell_w = ((avail_w - (COLS as f32 - 1.0) * GAP_X) / COLS as f32).max(10.0);
-        let pitch = ROW_IMG_H + GAP_Y;
+        let cell_w = ((vw - LEFT * 2.0 - (COLS as f32 - 1.0) * GAP) / COLS as f32).max(10.0);
+        let cell_h = (cell_w / 1.6).round();
+        let pitch = cell_h + GAP;
 
         // Regular grid: tile i sits at (col = i % COLS, row = i / COLS).
-        // `tiles` = (x, w, row); `cells` feeds input-side 2D navigation
-        // (which reads row + center-x, so a fixed grid works unchanged).
+        // `tiles` = (x, row); `cells` feeds input-side 2D navigation (which
+        // reads row + center-x, so a fixed grid works unchanged).
         //
         // Geometry ONLY — no cover resolution here. This pass runs over the whole
         // library, and resolving a cover means an SD read + PNG/JPEG decode +
@@ -12402,71 +12983,59 @@ impl SwitchRenderBackend {
         // frame cost ~1.9 s on a 71-game library, which is the black screen at
         // launch. Covers are resolved in the draw pass below, visible tiles only.
         let total = entries.len();
-        let mut tiles: std::vec::Vec<(f32, f32, u32)> = std::vec::Vec::with_capacity(total);
+        let mut tiles: std::vec::Vec<(f32, u32)> = std::vec::Vec::with_capacity(total);
         let mut cells: std::vec::Vec<GalleryCell> = std::vec::Vec::with_capacity(total);
-        for (idx, _entry) in entries.iter().enumerate() {
+        for idx in 0..total {
             let col = idx % COLS;
             let row = (idx / COLS) as u32;
-            let x = LEFT + col as f32 * (cell_w + GAP_X);
-            tiles.push((x, cell_w, row));
+            let x = LEFT + col as f32 * (cell_w + GAP);
+            tiles.push((x, row));
             cells.push(GalleryCell {
                 row,
                 cx: x + cell_w * 0.5,
                 x,
                 y: TOP + row as f32 * pitch,
                 w: cell_w,
-                h: ROW_IMG_H,
+                h: cell_h,
             });
         }
-        let rows_total = if total == 0 { 0 } else { ((total + COLS - 1) / COLS) as u32 };
+        let rows_total = ((total + COLS - 1) / COLS) as u32;
         // Publish layout for input-side 2D navigation.
         if let Ok(mut g) = gallery_cache().lock() {
             *g = (cells, rows_total);
         }
 
-        // Pass 2 — smooth-scrolled visible window (v1.2.0 polish). The input
-        // layer still tracks a discrete first row (`scroll_offset`) + tile
-        // index (`selection`); here we ease an actual pixel scroll toward that
-        // row and glide a single selection frame toward the active tile, so
-        // cursor moves and row changes slide instead of snapping. A scissor
-        // clips the band so partially-scrolled rows don't bleed onto the banner
-        // or the info line.
-        // Clip band sits a touch ABOVE the first row (TOP) so the resting row's
-        // top edge + its selection frame (which overhangs ~4px, more on a pop)
-        // aren't rogned; the 16px headroom still leaves a gap to the banner so a
-        // row scrolling UP fades out cleanly instead of overlapping it.
-        // -12 (not -16): a tile scrolling in is still revealed gradually, but the
-        // band no longer reaches up into the count / filter line above it.
+        // The input layer tracks a discrete first row (`scroll_offset`) and
+        // tile index (`selection`); here the pixel scroll eases toward that row
+        // and the ring travels to the active tile, so moves and row changes
+        // slide instead of snapping. A scissor clips the band so rows scrolling
+        // past don't bleed onto the shelf strip or the name under the grid; it
+        // starts 12 px above the first row so the ring of a lifted tile on the
+        // top row is not cut.
         let band_top = TOP - 12.0;
         let band_bot = TOP + rows_visible as f32 * pitch;
         let target_scroll = scroll_offset as f32 * pitch;
-        // Selected tile geometry in content space — the eased frame chases it.
-        let (target_sel_x, target_sel_row, target_sel_w) = tiles
-            .get(selection)
-            .map(|&(tx, tw, trow)| (tx, trow, tw))
-            .unwrap_or((LEFT, 0, 0.0));
-        let target_sel_y = TOP + target_sel_row as f32 * pitch;
+        let (target_x, target_row) = tiles.get(selection).copied().unwrap_or((LEFT, 0));
+        let target_y = TOP + target_row as f32 * pitch;
 
-        // Advance the animation toward the targets (snap on the first frame
-        // after a reset; ease otherwise). Falls back to the targets if the lock
-        // is somehow unavailable — worst case is one un-eased frame.
+        // Snap on the first frame after a reset; travel otherwise. Falls back to
+        // the targets if the lock is somehow unavailable (one still frame).
         let mut scroll_px = target_scroll;
-        let mut frame_x = target_sel_x;
-        let mut frame_y = target_sel_y;
-        let mut frame_w = target_sel_w;
-        let mut pop = 0.0f32;
+        let (mut ring_x, mut ring_y, mut ring_w) = (target_x, target_y, cell_w);
+        let mut ring_travelling = false;
+        let mut ring_pop = 0.0f32;
         let touch_scroll = gallery_touch_scroll_read();
-        if let Ok(mut a) = gallery_anim().lock() {
+        if let Ok(mut guard) = gallery_anim().lock() {
+            let a = &mut *guard;
             let now = phase_ticks;
             if !a.inited {
                 a.inited = true;
                 a.last_tick = now;
-                a.last_sel = selection;
-                a.sel_x = target_sel_x;
-                a.sel_y = target_sel_y;
-                a.sel_w = target_sel_w;
+                a.ring_x = Glide::at(target_x);
+                a.ring_y = Glide::at(target_y);
+                a.ring_w = Glide::at(cell_w);
+                a.ring_pop = 1.0;
                 a.scroll_px = target_scroll;
-                a.pop = 0.0;
             } else {
                 let freq = unsafe { ruffle_tick_freq() } as f32;
                 let dt = if freq > 0.0 {
@@ -12475,15 +13044,18 @@ impl SwitchRenderBackend {
                     1.0 / 60.0
                 };
                 a.last_tick = now;
-                if selection != a.last_sel {
-                    a.pop = 1.0; // kick the "snap" pop on every cursor move
-                    a.last_sel = selection;
+                // A press pops the ring on its way; a held direction does not,
+                // and a pop under way is never restarted (it would jump).
+                let moved = target_x != a.ring_x.to || target_y != a.ring_y.to;
+                if moved && a.ring_pop >= 1.0 && !crate::library::nav_is_repeat() {
+                    a.ring_pop = 0.0;
                 }
-                a.sel_x = ease_to(a.sel_x, target_sel_x, dt, 18.0);
-                a.sel_y = ease_to(a.sel_y, target_sel_y, dt, 18.0);
-                a.sel_w = ease_to(a.sel_w, target_sel_w, dt, 18.0);
+                a.ring_pop = (a.ring_pop + dt * 1000.0 / GRID_COVER_MS).min(1.0);
+                for (g, to) in [(&mut a.ring_x, target_x), (&mut a.ring_y, target_y), (&mut a.ring_w, cell_w)] {
+                    g.retarget(to);
+                    g.step(dt * 1000.0);
+                }
                 a.scroll_px = ease_to(a.scroll_px, target_scroll, dt, 16.0);
-                a.pop = ease_to(a.pop, 0.0, dt, 12.0);
             }
             // Touch drag overrides the eased scroll with 1:1 finger tracking
             // (cleared to None on release, so the glide then settles onto a row).
@@ -12491,19 +13063,11 @@ impl SwitchRenderBackend {
                 a.scroll_px = px;
             }
             scroll_px = a.scroll_px;
-            frame_x = a.sel_x;
-            frame_y = a.sel_y;
-            frame_w = a.sel_w;
-            pop = a.pop;
-        }
-
-        // Publish the selected tile's current screen rect for the game launch /
-        // quit reveal (the cover grows from / shrinks to it).
-        if !tiles.is_empty() {
-            let sel_y = TOP + target_sel_row as f32 * pitch - scroll_px;
-            if let Ok(mut r) = gallery_sel_rect().lock() {
-                *r = (target_sel_x, sel_y, target_sel_w, ROW_IMG_H);
-            }
+            ring_x = a.ring_x.value();
+            ring_y = a.ring_y.value();
+            ring_w = a.ring_w.value();
+            ring_travelling = !(a.ring_x.settled() && a.ring_y.settled());
+            ring_pop = 4.0 * a.ring_pop * (1.0 - a.ring_pop);
         }
 
         // Publish viewport metrics for the touch layer (drag-scroll + hit-test).
@@ -12521,11 +13085,6 @@ impl SwitchRenderBackend {
             };
         }
 
-        // Clip to the gallery band. `set_clip` owns the top-left/bottom-left
-        // conversion: every view that re-derived it had to be hunted down and
-        // re-checked whenever the band geometry moved, and it moved often.
-        self.set_clip(0.0, band_top, vw, band_bot - band_top);
-
         // Draw the rows that can intersect the band. `scroll_offset` moves at
         // most one row per input, so a ±1 window around it always covers the
         // partially-scrolled rows; the scissor does the exact clipping.
@@ -12533,75 +13092,60 @@ impl SwitchRenderBackend {
         let hi_row = (scroll_offset + rows_visible + 1) as u32;
         // Budget of NEW cover decodes for this frame — see COVER_DECODES_PER_FRAME.
         let mut decode_budget = COVER_DECODES_PER_FRAME;
-        // Work AHEAD of the eye. Only the rows on screen used to be decoded, so
-        // scrolling down met a fresh row of generated tiles every time and each
-        // cover popped in behind the movement. Two rows of margin on each side
-        // are decoded first, in the same one-per-frame budget, so an idle moment
-        // buys the row you are about to reach.
-        //
-        // Not a fixed window: the NEAREST undecoded tile in the WHOLE list, one
-        // per frame. Stopping at a couple of rows meant a fast scroll outran the
-        // decoder and covers kept landing one by one behind the movement. Working
-        // outwards instead means a second spent looking at the gallery quietly
-        // finishes the rest of the library, and by the time you scroll there is
-        // nothing left to decode. Costs nothing at startup — this only runs while
-        // the gallery is on screen, and never more than one decode per frame.
-        if decode_budget > 0 {
-            // From the TOP of what is on screen, downwards, then below the fold,
-            // then the rest. Starting from the middle of the band filled the grid
-            // outwards from its centre, which reads as tiles popping upwards and
-            // matches nothing the player can see.
-            let mut best: Option<(u8, u32, usize)> = None;
-            for (idx, &(_, _, trow)) in tiles.iter().enumerate() {
-                if cover_lookup(&entries[idx].basename).is_some() {
-                    continue;
-                }
-                let band = if trow >= lo_row && trow <= hi_row {
-                    0
-                } else if trow > hi_row {
-                    1
-                } else {
-                    2
-                };
-                let key = (band, trow, idx);
-                if best.map_or(true, |b| key < b) {
-                    best = Some(key);
-                }
+        // Work AHEAD of the eye: the NEAREST undecoded tile in the WHOLE list,
+        // one per frame. Only the rows on screen used to be decoded, so
+        // scrolling met a fresh row of generated tiles every time and each cover
+        // popped in behind the movement; a second spent looking at the gallery
+        // now quietly finishes the rest of the library. From the TOP of what is
+        // on screen, downwards, then below the fold, then the rest: starting from
+        // the middle filled the grid outwards from its centre, which reads as
+        // tiles popping upwards and matches nothing the player can see.
+        let mut best: Option<(u8, u32, usize)> = None;
+        for (idx, &(_, trow)) in tiles.iter().enumerate() {
+            if cover_lookup(&entries[idx].basename).is_some() {
+                continue;
             }
-            if let Some((_, _, idx)) = best {
-                decode_budget -= 1;
-                let _ = self.cover_for(&entries[idx].basename);
+            let band = if trow >= lo_row && trow <= hi_row {
+                0
+            } else if trow > hi_row {
+                1
+            } else {
+                2
+            };
+            let key = (band, trow, idx);
+            if best.map_or(true, |b| key < b) {
+                best = Some(key);
             }
         }
+        if let Some((_, _, idx)) = best {
+            decode_budget -= 1;
+            let _ = self.cover_for(&entries[idx].basename);
+        }
+
+        // Every visible tile on its own clock: the selected one opens, any other
+        // closes from wherever it was, so none snaps shut mid-way.
         tile_open_frame();
-        // How far a tile grows when it opens: enough to read as lifted off the
-        // grid, little enough to stay inside the gap to its neighbours.
-        const LIFT: f32 = 0.05;
+        struct Shown {
+            idx: usize,
+            x: f32,
+            y: f32,
+            open: f32,
+            cover: CoverTex,
+            ready_at: u64,
+        }
+        let mut shown: std::vec::Vec<Shown> = std::vec::Vec::with_capacity(COLS * (rows_visible + 2));
         let mut selected_open = 0.0f32;
-        for (idx, &(tx0, tw0, trow)) in tiles.iter().enumerate() {
+        for (idx, &(x, trow)) in tiles.iter().enumerate() {
             if trow < lo_row || trow > hi_row {
                 continue;
             }
-            let ty0 = TOP + trow as f32 * pitch - scroll_px;
-            // Skip tiles fully outside the band (cheap reject before draw).
-            if ty0 + ROW_IMG_H < band_top || ty0 > band_bot {
+            let y = TOP + trow as f32 * pitch - scroll_px;
+            if y + cell_h < band_top || y > band_bot {
                 continue;
             }
-            // Every tile on its own clock: the selected one opens, any other
-            // closes from wherever it was, so none snaps shut mid-way.
-            let b = tile_open(tile_key(&entries[idx].basename), idx == selection);
+            let open = tile_open(tile_key(&entries[idx].path), idx == selection);
             if idx == selection {
-                selected_open = b;
-            }
-            let grow = LIFT * b;
-            let (tx, ty, tw, th) = (
-                tx0 - tw0 * grow * 0.5,
-                ty0 - ROW_IMG_H * grow * 0.5,
-                tw0 * (1.0 + grow),
-                ROW_IMG_H * (1.0 + grow),
-            );
-            if b > 0.0 {
-                self.kit_shadow(tx, ty + 8.0, tw, th, theme::radius::TILE, 16.0, ((0x90 as f32 * b) as u32) << 24);
+                selected_open = open;
             }
             // Cached cover, else decode one if this frame still has budget, else
             // the generated tile for now (it resolves on a following frame).
@@ -12614,63 +13158,86 @@ impl SwitchRenderBackend {
                 }
                 None => (CoverTex::Default, 0),
             };
-            let fade = cover_fade(ready_at);
-            // The generated tile under a cover that is still fading in, alone
-            // when there is no cover at all.
-            let cover_img = match cover {
-                CoverTex::Image { tex, w, h, amb } => Some((tex, w, h, amb)),
-                CoverTex::Default => None,
-            };
-            if cover_img.is_none() || fade < 1.0 {
-                self.kit_default_tile(tx, ty, tw, th, entries[idx].color_chip, &entries[idx].display_name);
-            }
-            if let Some((tex, w, h, amb)) = cover_img {
-                // Filled at rest; the selected tile opens to the whole cover
-                // over its blurred backdrop.
-                self.kit_cover_reveal(tx, ty, tw, th, tex, w, h, amb, b, fade);
-            }
+            shown.push(Shown { idx, x, y, open, cover, ready_at });
+        }
+        // Resting tiles first, then the moving ones from the least open to the
+        // most, so a lifted tile and its shadow are drawn over every neighbour
+        // (the mockup's z-index) instead of under the ones after it in the row.
+        shown.sort_by(|a, b| a.open.partial_cmp(&b.open).unwrap_or(core::cmp::Ordering::Equal));
 
-
-            // NO AS3 BADGE. It used to sit here, in amber, on every AS3 tile.
-            //
-            // It was put there when AVM2 was the riskier engine and the badge
-            // was an honest warning. It is not one any more: game after game has
-            // been made to run, and whether a given SWF works now has nothing to
-            // do with which ActionScript it was written in. Marking a third of
-            // the library with a warning colour for a property that no longer
-            // predicts anything told players their game was fragile when it was
-            // not. The engine is still named in the facts line under the
-            // selection, where it belongs: a fact, not a verdict.
-
-            // Favourite marker, top-left: a gold star on a dark chip (the chip
-            // gives contrast on bright covers). The old 5x7 font had no star, so
-            // this used to be a diamond built from a rotated square. Favourites
-            // are also pinned to the top of the gallery (library::sort_entries).
-            if crate::favorites::is_favorite(&entries[idx].basename) {
-                self.kit_favorite_chip(tx + 8.0, ty + 8.0);
+        // Publish the selected tile's rect AS DRAWN, lifted, for the launch and
+        // quit reveal, which grows the cover from it and shrinks it back to it.
+        if let Some(&(x, trow)) = tiles.get(selection) {
+            let grow = LIFT * selected_open;
+            let y = TOP + trow as f32 * pitch - scroll_px;
+            if let Ok(mut r) = gallery_sel_rect().lock() {
+                *r = (x - cell_w * grow * 0.5, y - cell_h * grow * 0.5, cell_w * (1.0 + grow), cell_h * (1.0 + grow));
             }
         }
 
-        // Single eased selection frame, drawn last and still inside the scissor
-        // so it clips with its tile when partially scrolled. `pop` briefly
-        // inflates it right after a move for a little tactile "snap"; `pulse`
-        // keeps the existing breathing brightness.
-        if !tiles.is_empty() {
-            // The ring hugs the lifted tile: the same growth, plus the brief
-            // "snap" right after a move.
-            let lift = 0.05 * selected_open;
-            let grow = pop * 3.0;
-            let fx = frame_x - frame_w * lift * 0.5 - grow;
-            let fy = frame_y - scroll_px - ROW_IMG_H * lift * 0.5 - grow;
-            let fw = frame_w * (1.0 + lift) + 2.0 * grow;
-            let fh = ROW_IMG_H * (1.0 + lift) + 2.0 * grow;
-            // A gold ring that stands off the tile, concentric with its corners,
-            // instead of the breathing frame drawn over the cover's edge.
+        // Clip to the gallery band. `set_clip` owns the top-left/bottom-left
+        // conversion: every view that re-derived it had to be hunted down and
+        // re-checked whenever the band geometry moved, and it moved often.
+        self.set_clip(0.0, band_top, vw, band_bot - band_top);
+        for t in &shown {
+            let e = &entries[t.idx];
+            let grow = LIFT * t.open;
+            let (tx, ty, tw, th) = (
+                t.x - cell_w * grow * 0.5,
+                t.y - cell_h * grow * 0.5,
+                cell_w * (1.0 + grow),
+                cell_h * (1.0 + grow),
+            );
+            if t.open > 0.0 {
+                self.kit_shadow(tx, ty + 8.0, tw, th, theme::radius::TILE, 16.0, ((0x90 as f32 * t.open) as u32) << 24);
+            }
+            let fade = cover_fade(t.ready_at);
+            // The generated tile when there is no cover at all; under a cover
+            // still fading in, only its ground, or the name shows through.
+            match t.cover {
+                CoverTex::Image { tex, w, h, amb } => {
+                    if fade < 1.0 {
+                        self.kit_default_ground(tx, ty, tw, th, e.color_chip);
+                    }
+                    // At rest as filled as the 15% rule allows; the selected
+                    // tile opens the rest of the way to the whole cover.
+                    let rest = kit::cover::rest_t(w, h, cell_w, cell_h);
+                    self.kit_cover_reveal(tx, ty, tw, th, tex, w, h, amb, rest + (1.0 - rest) * t.open, fade);
+                }
+                CoverTex::Default => self.kit_default_tile(tx, ty, tw, th, e.color_chip, &e.display_name),
+            }
+            // No engine badge: whether a game runs stopped depending on which
+            // ActionScript it was written in, and an amber mark on a third of
+            // the library told players their game was fragile when it was not.
+            // The engine is named in the facts line under the selection.
+            //
+            // The favourite's solid star, top-left, on a dark chip for contrast
+            // on bright covers. Favourites are also pinned first
+            // (library::sort_entries).
+            if crate::favorites::is_favorite(&e.basename) {
+                self.kit_favorite_chip(tx + 8.0, ty + 8.0);
+            }
+            if e.multi {
+                self.kit_multi_badge(tx + tw - 8.0, ty + 8.0);
+            }
+        }
+
+        // The ring, drawn last and still inside the scissor so it clips with its
+        // tile when partially scrolled. It travels on the covers' clock and hugs
+        // the lifted tile: at the full lift while it travels (the tile it is
+        // heading for ends fully open on the same frame it arrives), then the
+        // tile's own lift, which is what it grows with after a reset. A press
+        // swells it by up to 3 px on the way.
+        {
+            let lift = LIFT * if ring_travelling { 1.0 } else { selected_open };
+            let pop = 3.0 * ring_pop;
+            let fx = ring_x - ring_w * lift * 0.5 - pop;
+            let fy = ring_y - scroll_px - cell_h * lift * 0.5 - pop;
             self.kit_ring(
                 fx,
                 fy,
-                fw,
-                fh,
+                ring_w * (1.0 + lift) + 2.0 * pop,
+                cell_h * (1.0 + lift) + 2.0 * pop,
                 theme::radius::TILE,
                 theme::ring::GAP,
                 theme::ring::WIDTH,
@@ -12680,11 +13247,12 @@ impl SwitchRenderBackend {
 
         self.clear_clip();
 
-        // Tracks the eased pixel scroll so the thumb glides with the tiles.
+        // Tracks the eased pixel scroll so the thumb glides with the tiles. In
+        // the middle of the right-hand margin.
         self.draw_scrollbar(
-            vw - 18.0,
+            vw - LEFT * 0.5 - SCROLLBAR_W * 0.5,
             TOP,
-            rows_visible as f32 * pitch,
+            rows_visible as f32 * pitch - GAP,
             scroll_px,
             pitch,
             rows_visible,
@@ -12699,11 +13267,11 @@ impl SwitchRenderBackend {
         if let Some(entry) = entries.get(selection) {
             use theme::{col, size};
             let name = self.kit_fit_mid(&entry.display_name, size::TITLE, vw - 2.0 * LEFT);
-            self.kit_text_mid(LEFT, 606.0, size::TITLE, &name, col::GOLD);
-            self.kit_game_facts(LEFT, 642.0, entry);
+            self.kit_text_mid(LEFT, 616.0, size::TITLE, &name, col::GOLD);
+            self.kit_game_facts(LEFT, 648.0, entry, vw - 2.0 * LEFT, false);
         }
 
-        self.kit_home_footer();
+        self.kit_home_footer(false);
 
         unsafe {
             glUseProgram(0);
@@ -13025,27 +13593,39 @@ impl SwitchRenderBackend {
 }
 
 
-/// Format a byte count as a short pretty string ("3 KB", "15 MB"). Picks
-/// the largest unit that keeps the integer part ≤ 999. KiB-style (1024)
-/// instead of decimal because that's what hbmenu / fsadm show for files.
+/// A byte count as the player's language writes it: "18 Mo" and "1,2 Go" in
+/// French, "18 MB" in English, "18 МБ" in Russian. One decimal under 10, so a
+/// small download moves ("3,4 Mo", "3,5 Mo") instead of sitting on "3 Mo" and
+/// then jumping. Powers of 1024, as hbmenu and the console show files.
+/// Truncated, never rounded up: a size should not promise more than is there.
+/// Integers only, which keeps libm out of it like `approx_sin`.
 fn format_size_pretty(bytes: u64) -> std::string::String {
     // Unknown size (e.g. Flashpoint search hits — db-api doesn't expose the
     // GameZIP size) → show nothing rather than a misleading "0 B".
     if bytes == 0 {
         return std::string::String::new();
     }
+    let u = crate::loc_ui::ui();
     const KB: u64 = 1024;
     const MB: u64 = 1024 * 1024;
     const GB: u64 = 1024 * 1024 * 1024;
-    if bytes >= GB {
-        std::format!("{}.{} GB", bytes / GB, (bytes % GB) / (GB / 10))
+    let (div, unit) = if bytes >= GB {
+        (GB, u.size_gb)
     } else if bytes >= MB {
-        std::format!("{} MB", bytes / MB)
+        (MB, u.size_mb)
     } else if bytes >= KB {
-        std::format!("{} KB", bytes / KB)
+        (KB, u.size_kb)
     } else {
-        std::format!("{} B", bytes)
-    }
+        return u.size_b.replacen("{}", &bytes.to_string(), 1);
+    };
+    let whole = bytes / div;
+    let num = if whole < 10 {
+        let tenth = (bytes % div) * 10 / div;
+        std::format!("{}{}{}", whole, u.decimal_mark, tenth)
+    } else {
+        whole.to_string()
+    };
+    unit.replacen("{}", &num, 1)
 }
 
 /// Cheap sin approximation for UI animations. Bhaskara-I-style polynomial

@@ -99,6 +99,7 @@ pub const GL_TEXTURE_WRAP_T: GLenum = 0x2803;
 pub const GL_TEXTURE_MIN_FILTER: GLenum = 0x2801;
 pub const GL_TEXTURE_MAG_FILTER: GLenum = 0x2800;
 pub const GL_LINEAR: GLenum = 0x2601;
+pub const GL_LINEAR_MIPMAP_LINEAR: GLenum = 0x2703;
 pub const GL_NEAREST: GLenum = 0x2600;
 pub const GL_CLAMP_TO_EDGE: GLenum = 0x812F;
 pub const GL_REPEAT: GLenum = 0x2901;
@@ -293,6 +294,10 @@ extern "C" {
         pixels: *const c_void,
     );
     pub fn glTexParameteri(target: GLenum, pname: GLenum, param: GLint);
+    /// Build the mipmap chain of the bound texture. Only the launcher's cover
+    /// textures use one: they are drawn shrunk (a wide logo at a third of its
+    /// size in a tile), and a single bilinear tap at that ratio sparkles.
+    pub fn glGenerateMipmap(target: GLenum);
     // Sampler objects. Filtering has to be a per-DRAW choice, not a per-texture
     // one: a 2048 atlas holds hundreds of bitmaps and each carries its own
     // smoothing flag, so there is nowhere on the atlas texture object to put it.
