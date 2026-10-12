@@ -227,11 +227,20 @@ fn row_input(s: &mut State, section: SetSection, key: &str, dir: i32) -> bool {
         }
         (SetSection::Library, "DOSSIER") => {
             if press {
-                // Opens on the folder in use, so the row opens on what it shows.
-                let start = primary_root();
-                s.dir_browse = list_dirs(&start);
-                s.dir_path = start;
-                s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 };
+                // Opens beside the folder in use, the cursor on it: the row
+                // opens on what it shows, among folders it could move to. Its
+                // own listing holds none (every folder in it is part of the
+                // library), and a new folder made beside it can take it. A
+                // library at the card's root has nothing beside it, and opens
+                // on itself.
+                let root = primary_root();
+                if browse_parent(&root).is_some() {
+                    browse_go_up(s, &root);
+                } else {
+                    s.dir_browse = list_dirs(&root);
+                    s.dir_path = root;
+                    s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 };
+                }
             }
             press
         }
@@ -548,7 +557,8 @@ pub(crate) fn run_suggestion_flow() {
 }
 
 /// A report the relay refused, kept with the reason, so Réessayer sends it
-/// again without the description being typed a second time.
+/// again without the description being typed a second time. Fermer leaves it
+/// here: only the question reads it, and only a failed send opens that.
 static FAILED_SEND: Mutex<Option<(crate::bugreport::Report, std::string::String)>> = Mutex::new(None);
 
 /// Send `report`, which started on the Aide et retours row `key`. Sent: a
@@ -617,9 +627,9 @@ pub(crate) fn handle_send_failed_input(s: &mut State, button: &str, row: usize) 
         "Left" | "StickLLeft" => s.screen = Screen::SendFailed { row, selection: 0 },
         "Right" | "StickLRight" => s.screen = Screen::SendFailed { row, selection: 1 },
         "A" | "B" | "Minus" => {
-            if let Ok(mut g) = FAILED_SEND.lock() {
-                *g = None;
-            }
+            // The kept report stays: the question is drawn again through its
+            // close, its reason read from there, and a reason gone empty would
+            // shrink the box as it leaves. The next send replaces or clears it.
             s.screen = Screen::Settings { section: SetSection::Help, in_pane: true, row };
         }
         _ => {}
@@ -649,6 +659,12 @@ pub(crate) fn same_dir(a: &str, b: &str) -> bool {
 pub(crate) fn inside_library(path: &str, root: &str) -> bool {
     let root = root.trim_end_matches('/');
     path.len() > root.len() && path.starts_with(root) && path.as_bytes()[root.len()] == b'/'
+}
+
+/// Whether `path` is the library at `root` or a folder inside it: nowhere a
+/// new folder could take the library either, so the browser makes none there.
+pub(crate) fn within_library(path: &str, root: &str) -> bool {
+    same_dir(path, root) || inside_library(path, root)
 }
 
 /// A path as the page shows it: from the card's root, `sdmc:` left out.
@@ -762,8 +778,10 @@ pub(crate) fn draw_settings(
     }
     // A page in the pane is not the tab's home, so the tab strip is not drawn
     // for it after this: it is drawn here, and nothing on it can be tapped.
+    // Nor do L and R switch tabs from it (the bug list pages with them), so
+    // the strip goes without its L and R chips.
     if !matches!(screen, Screen::Settings { .. }) {
-        backend.draw_navbar(Tab::Reglages.index(), logo);
+        backend.draw_navbar_with(Tab::Reglages.index(), logo, false);
     }
     backend.settings_footer(if under { &[] } else { &hints });
     // The pages opened in the pane publish their lists themselves; under a
@@ -797,6 +815,13 @@ fn column_hints(section: SetSection) -> std::vec::Vec<HintItem<'static>> {
         SetSection::About => std::vec::Vec::new(),
         _ => std::vec![(&[Btn::A][..], u.open)],
     }
+}
+
+/// A way through the menus, step by step, joined the way crumbs join them. The
+/// steps are the labels the menus themselves show, so a help that names a
+/// place names it in the words the player will find there, in every language.
+fn menu_path(steps: &[&str]) -> std::string::String {
+    steps.join("  \u{203A}  ")
 }
 
 /// Bibliothèque: the home layouts as cards, the games folder, the interface
@@ -882,13 +907,19 @@ fn defaults_pane(
         (row_of(def, "TOUCHES"), u.sec_controls),
     ];
     let key = focus.map(|r| key_of(def, r));
-    let refused: std::string::String;
+    let built: std::string::String;
     let help: &str = match key {
         // The cursor still in the column: what the section is about.
         None => u.help_game_prefs,
         Some("AFFICHAGE") => u.help_display,
         Some("ROTATION") => u.help_rotation,
-        Some("ZOOM") => u.help_zoom_default,
+        Some("ZOOM") => {
+            // Where the zoom is fine-tuned in a game: the pause's own row and
+            // page names, which are not the same words in every language.
+            let path = menu_path(&[lc.pause_title, lc.menu_screen, lc.set_zoom]);
+            built = u.help_zoom_default.replacen("{}", &path, 1);
+            &built
+        }
         Some("PIXELS") => u.help_pixels,
         Some("FILTRE") => u.help_filter,
         Some("OVERCLOCK") => {
@@ -900,8 +931,8 @@ fn defaults_pane(
             // The battery veto, when the last game asked for a raise and the
             // console said no: the setting alone would not explain the speed.
             if power != 0 && crate::backend::render::overclock_refused() {
-                refused = std::format!("{} {}", base, lc.overclock_refused);
-                &refused
+                built = std::format!("{} {}", base, lc.overclock_refused);
+                &built
             } else {
                 base
             }
@@ -965,7 +996,7 @@ fn profile_pane(
     cells.extend(c);
     let y = b.settings_note(y + 8.0, u.help_pseudo, 2);
     // The way to a game's sharing, in the words its menus use.
-    let path = std::format!("{}  \u{203A}  {}  \u{203A}  {}", u.hint_options, lc.opt_keys, lc.opt_share);
+    let path = menu_path(&[u.hint_options, lc.opt_keys, lc.opt_share]);
     b.settings_note_icon(y + 16.0, Icon::Share, &u.help_share_where.replacen("{}", &path, 1), ui_col::TEXT3);
     if focus.is_some() {
         *hints = std::vec![(&[Btn::A][..], u.type_text), (&[Btn::B][..], u.back)];
@@ -1107,7 +1138,11 @@ fn folders_page(
     if let Some(v) = a_verb {
         hints.push((&[Btn::A][..], v));
     }
-    hints.push((&[Btn::X][..], lc.games_dir_new));
+    // In the library, a new folder would be one more greyed row: X makes none
+    // there (`run_new_folder_flow` says why if it is pressed anyway).
+    if !within_library(path, &root) {
+        hints.push((&[Btn::X][..], lc.games_dir_new));
+    }
     hints.push((&[Btn::B][..], if up { u.go_up } else { u.back }));
 }
 

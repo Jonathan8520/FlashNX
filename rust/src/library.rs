@@ -4906,7 +4906,7 @@ struct MoveJob {
 static MOVE_JOB: Mutex<Option<MoveJob>> = Mutex::new(None);
 
 /// Where the running move goes from and to, for its progress page. `None`
-/// for the frame between the answer and the job being queued.
+/// when no move is running: `start_move` refused it, or it has finished.
 pub(crate) fn move_paths() -> Option<(std::string::String, std::string::String)> {
     MOVE_JOB.lock().ok().and_then(|g| g.as_ref().map(|j| (j.src.clone(), j.dest.clone())))
 }
@@ -5182,7 +5182,8 @@ fn drive_pending_move() {
 /// Walking out of a folder and being dropped on row zero means finding your
 /// place again by eye every single time — and the folder you just came out of
 /// is the one thing you are certain to be looking for. Shared by the REMONTER
-/// row and by B, which is how most people actually go back up.
+/// row and by B, which is how most people actually go back up, and by the
+/// RÉGLAGES row that opens the browser beside the library, on its folder.
 fn browse_go_up(s: &mut State, path: &str) {
     let Some(parent) = browse_parent(path) else {
         return;
@@ -5559,6 +5560,16 @@ fn run_new_folder_flow() {
         Ok(s) => s.dir_path.clone(),
         Err(_) => return,
     };
+    // In the library or one of its folders, the new folder could not take the
+    // library either, and would only be written to the card to sit greyed out
+    // under the cursor. The footer offers no X there; a press says why, before
+    // the keyboard asks for a name that leads nowhere.
+    if settings_tab::within_library(&here, &primary_root()) {
+        if let Ok(mut s) = LIBRARY.lock() {
+            set_toast(&mut s, crate::loc_ui::ui().dir_new_in_lib.to_string(), TOAST_INFO);
+        }
+        return;
+    }
     crate::net::log(&std::format!("games dir: new folder in {}
 ", here));
     let lc = crate::loc::s();
@@ -11036,9 +11047,9 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     total,
                 ),
                 None => {
-                    // No move behind this page (it ended with nobody to send the
-                    // screen back): the screen swallows every button, so it
-                    // must not stay up on its own.
+                    // No move behind this page (`start_move` refused it, or it
+                    // ended without sending the screen back): the screen
+                    // swallows every button, so it must not stay up on its own.
                     let root = primary_root();
                     backend.draw_library_move_page(root.trim_start_matches("sdmc:"), "", total, total);
                     if let Ok(mut s) = LIBRARY.lock() {

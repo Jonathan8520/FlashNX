@@ -290,7 +290,7 @@ pub struct Ui {
     pub change_view: &'static str,
     /// Value of the nickname row when there is none.
     pub not_set: &'static str,
-    /// Game defaults: help of the zoom, cursor speed and controls rows.
+    /// Game defaults: help of the zoom, cursor speed and controls rows (in the zoom's, {} = the menu path).
     pub help_zoom_default: &'static str,
     pub help_keys_default: &'static str,
     pub help_cursor_default: &'static str,
@@ -548,6 +548,8 @@ pub struct Ui {
     pub load_failed_body: &'static str,
     /// Hint under that notice: Minus opens the pause, where Quit is.
     pub load_failed_hint: &'static str,
+    /// Toast for X (new folder) in the games folder browser while it shows the library or a folder inside it.
+    pub dir_new_in_lib: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -735,7 +737,7 @@ const EN: Ui = Ui {
     type_text: "Type",
     change_view: "Change view",
     not_set: "Not set",
-    help_zoom_default: "The zoom every game starts at. Fine-tune it in the game: Pause › Screen › Zoom.",
+    help_zoom_default: "The zoom every game starts at. Fine-tune it in the game: {}.",
     help_keys_default: "The controls of every game that has none of its own. A game set up from its Options › Controls and cursor keeps its own. The gyroscope and the cursor's visibility are set game by game.",
     help_cursor_default: "How fast the right stick moves the mouse cursor, in every game that has no speed of its own.",
     lang_current: "Current language",
@@ -868,6 +870,7 @@ const EN: Ui = Ui {
     load_failed_title: "This game can't be opened",
     load_failed_body: "The file is no longer at this place on the card, or it is too big for the memory left. It was looked for here:",
     load_failed_hint: "Menu",
+    dir_new_in_lib: "You are in your library: create the new folder outside it.",
 };
 
 const FR: Ui = Ui {
@@ -1055,7 +1058,7 @@ const FR: Ui = Ui {
     type_text: "Saisir",
     change_view: "Changer de vue",
     not_set: "Aucun",
-    help_zoom_default: "Le zoom de départ de chaque jeu. Affine-le en jeu : Pause › Écran › Zoom.",
+    help_zoom_default: "Le zoom de départ de chaque jeu. Affine-le en jeu : {}.",
     help_keys_default: "Les touches de chaque jeu qui n'a pas les siennes. Un jeu réglé depuis ses Options › Touches et curseur garde les siennes. Le gyroscope et l'affichage du curseur se règlent jeu par jeu.",
     help_cursor_default: "La vitesse du curseur de souris au stick droit, dans chaque jeu qui n'a pas la sienne.",
     lang_current: "Langue actuelle",
@@ -1188,6 +1191,7 @@ const FR: Ui = Ui {
     load_failed_title: "Impossible d'ouvrir ce jeu",
     load_failed_body: "Le fichier n'est plus à cet endroit de la carte, ou il est trop gros pour la mémoire disponible. Il a été cherché ici :",
     load_failed_hint: "Menu",
+    dir_new_in_lib: "Tu es dans ta bibliothèque : crée le nouveau dossier en dehors.",
 };
 
 const ES: Ui = Ui {
@@ -1375,7 +1379,7 @@ const ES: Ui = Ui {
     type_text: "Escribir",
     change_view: "Cambiar vista",
     not_set: "Ninguno",
-    help_zoom_default: "El zoom con el que empieza cada juego. Ajústalo en el juego: Pausa › Pantalla › Zoom.",
+    help_zoom_default: "El zoom con el que empieza cada juego. Ajústalo en el juego: {}.",
     help_keys_default: "Los controles de cada juego que no tenga los suyos. Un juego ajustado desde sus Opciones › Controles y cursor conserva los suyos. El giroscopio y la visibilidad del cursor se ajustan juego a juego.",
     help_cursor_default: "La velocidad con la que el stick derecho mueve el cursor, en cada juego que no tenga la suya.",
     lang_current: "Idioma actual",
@@ -1508,6 +1512,7 @@ const ES: Ui = Ui {
     load_failed_title: "No se puede abrir este juego",
     load_failed_body: "El archivo ya no está en este lugar de la tarjeta, o es demasiado grande para la memoria disponible. Se buscó aquí:",
     load_failed_hint: "Menú",
+    dir_new_in_lib: "Estás dentro de tu biblioteca: crea la carpeta nueva fuera de ella.",
 };
 
 const RU: Ui = Ui {
@@ -1695,7 +1700,7 @@ const RU: Ui = Ui {
     type_text: "Ввести",
     change_view: "Сменить вид",
     not_set: "Не задан",
-    help_zoom_default: "Масштаб, с которым начинается каждая игра. Точнее его можно настроить в игре: Пауза › Экран › Масштаб.",
+    help_zoom_default: "Масштаб, с которым начинается каждая игра. Точнее его можно настроить в игре: {}.",
     help_keys_default: "Клавиши для игр, у которых нет своих. Игра, настроенная через Параметры › Клавиши и курсор, сохраняет свои. Гироскоп и видимость курсора настраиваются для каждой игры отдельно.",
     help_cursor_default: "Скорость курсора мыши на правом стике во всех играх, где она не задана отдельно.",
     lang_current: "Текущий язык",
@@ -1828,6 +1833,7 @@ const RU: Ui = Ui {
     load_failed_title: "Не удаётся открыть эту игру",
     load_failed_body: "Файла больше нет в этом месте карты, или он слишком велик для доступной памяти. Он искался здесь:",
     load_failed_hint: "Меню",
+    dir_new_in_lib: "Ты внутри своей библиотеки: создай новую папку за её пределами.",
 };
 
 const DE: Ui = Ui {
@@ -2015,7 +2021,7 @@ const DE: Ui = Ui {
     type_text: "Eingeben",
     change_view: "Ansicht wechseln",
     not_set: "Keiner",
-    help_zoom_default: "Der Zoom, mit dem jedes Spiel startet. Feiner stellst du ihn im Spiel ein: Pause › Bildschirm › Zoom.",
+    help_zoom_default: "Der Zoom, mit dem jedes Spiel startet. Feiner stellst du ihn im Spiel ein: {}.",
     help_keys_default: "Die Steuerung jedes Spiels, das keine eigene hat. Ein Spiel, das du unter Optionen › Steuerung und Cursor eingerichtet hast, behält seine. Gyroskop und Cursoranzeige stellst du je Spiel ein.",
     help_cursor_default: "Wie schnell der rechte Stick den Mauszeiger bewegt, in jedem Spiel ohne eigenes Tempo.",
     lang_current: "Aktuelle Sprache",
@@ -2148,6 +2154,7 @@ const DE: Ui = Ui {
     load_failed_title: "Dieses Spiel lässt sich nicht öffnen",
     load_failed_body: "Die Datei liegt nicht mehr an dieser Stelle der Karte, oder sie ist zu groß für den freien Speicher. Gesucht wurde hier:",
     load_failed_hint: "Menü",
+    dir_new_in_lib: "Du bist in deiner Bibliothek: Lege den neuen Ordner außerhalb an.",
 };
 
 const IT: Ui = Ui {
@@ -2335,7 +2342,7 @@ const IT: Ui = Ui {
     type_text: "Scrivi",
     change_view: "Cambia vista",
     not_set: "Nessuno",
-    help_zoom_default: "Lo zoom con cui parte ogni gioco. Rifiniscilo in gioco: Pausa › Schermo › Zoom.",
+    help_zoom_default: "Lo zoom con cui parte ogni gioco. Rifiniscilo in gioco: {}.",
     help_keys_default: "I comandi di ogni gioco che non ha i suoi. Un gioco impostato da Opzioni › Comandi e cursore mantiene i propri. Giroscopio e visibilità del cursore si impostano gioco per gioco.",
     help_cursor_default: "La velocità del cursore del mouse con la levetta destra, in ogni gioco che non ha la sua.",
     lang_current: "Lingua attuale",
@@ -2468,6 +2475,7 @@ const IT: Ui = Ui {
     load_failed_title: "Impossibile aprire questo gioco",
     load_failed_body: "Il file non è più in questo punto della scheda, oppure è troppo grande per la memoria disponibile. È stato cercato qui:",
     load_failed_hint: "Menu",
+    dir_new_in_lib: "Sei dentro la tua libreria: crea la nuova cartella fuori da lì.",
 };
 
 const PT: Ui = Ui {
@@ -2655,7 +2663,7 @@ const PT: Ui = Ui {
     type_text: "Digitar",
     change_view: "Mudar visualização",
     not_set: "Nenhum",
-    help_zoom_default: "O zoom com que cada jogo começa. Ajuste com precisão no jogo: Pausa › Tela › Zoom.",
+    help_zoom_default: "O zoom com que cada jogo começa. Ajuste com precisão no jogo: {}.",
     help_keys_default: "Os controles de cada jogo que não tem os seus. Um jogo ajustado em Opções › Controles e cursor mantém os dele. O giroscópio e a exibição do cursor são ajustados jogo a jogo.",
     help_cursor_default: "A velocidade com que o analógico direito move o cursor, em cada jogo que não tem a sua.",
     lang_current: "Idioma atual",
@@ -2788,6 +2796,7 @@ const PT: Ui = Ui {
     load_failed_title: "Não é possível abrir este jogo",
     load_failed_body: "O arquivo não está mais neste lugar do cartão, ou é grande demais para a memória disponível. Ele foi procurado aqui:",
     load_failed_hint: "Menu",
+    dir_new_in_lib: "Você está dentro da sua biblioteca: crie a nova pasta fora dela.",
 };
 
 const ZH: Ui = Ui {
@@ -2975,7 +2984,7 @@ const ZH: Ui = Ui {
     type_text: "输入",
     change_view: "切换视图",
     not_set: "未设置",
-    help_zoom_default: "每个游戏开始时的缩放。可在游戏中细调：暂停 › 屏幕 › 缩放。",
+    help_zoom_default: "每个游戏开始时的缩放。可在游戏中细调：{}。",
     help_keys_default: "所有没有自己按键的游戏所用的按键。在“选项 › 按键与光标”中单独设置过的游戏会保留自己的按键。陀螺仪和光标显示需逐个游戏设置。",
     help_cursor_default: "在没有单独设置速度的游戏中，右摇杆移动鼠标光标的速度。",
     lang_current: "当前语言",
@@ -3108,6 +3117,7 @@ const ZH: Ui = Ui {
     load_failed_title: "无法打开此游戏",
     load_failed_body: "文件已不在存储卡上的这个位置，或者对于可用内存来说太大。查找的位置：",
     load_failed_hint: "菜单",
+    dir_new_in_lib: "你在游戏库内：请在游戏库外新建文件夹。",
 };
 
 const TR: Ui = Ui {
@@ -3295,7 +3305,7 @@ const TR: Ui = Ui {
     type_text: "Yaz",
     change_view: "Görünümü değiştir",
     not_set: "Yok",
-    help_zoom_default: "Her oyunun başladığı zoom. Oyunda ince ayar yap: Duraklatıldı › Ekran › Zoom.",
+    help_zoom_default: "Her oyunun başladığı zoom. Oyunda ince ayar yap: {}.",
     help_keys_default: "Kendi kontrolleri olmayan her oyunun kontrolleri. Seçenekler › Kontroller ve imleç üzerinden ayarlanan bir oyun kendi kontrollerini korur. Jiroskop ve imleç görünürlüğü oyun oyun ayarlanır.",
     help_cursor_default: "Kendi hızı olmayan her oyunda sağ çubuğun fare imlecini ne kadar hızlı hareket ettirdiği.",
     lang_current: "Geçerli dil",
@@ -3428,6 +3438,7 @@ const TR: Ui = Ui {
     load_failed_title: "Bu oyun açılamıyor",
     load_failed_body: "Dosya artık kartta bu konumda değil ya da kalan bellek için çok büyük. Şurada arandı:",
     load_failed_hint: "Menü",
+    dir_new_in_lib: "Kütüphanenin içindesin: yeni klasörü kütüphanenin dışında oluştur.",
 };
 
 pub fn ui() -> &'static Ui {
