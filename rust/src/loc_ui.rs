@@ -1265,7 +1265,7 @@ const FR: Ui = Ui {
     help_copy_game: "Les touches propres à cet autre jeu. Tu vois ce qui change avant d'appliquer.",
     zoom_offset: "décalé de {}, {} px",
     gyro_off: "Inactif",
-    help_zoom_frame: "Agrandit l'image : A ouvre le cadrage, où ZL et ZR zooment et le stick déplace l'image.",
+    help_zoom_frame: "Agrandit l'image\u{a0}: A ouvre le cadrage, où ZL et ZR zooment et le stick déplace l'image.",
     dir_root_refused: "La racine de la carte ne peut pas accueillir ta bibliothèque",
     loading_report: "Envoi de ton message…",
     loading_covers: "Recherche de jaquettes…",
