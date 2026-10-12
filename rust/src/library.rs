@@ -69,7 +69,8 @@ pub(crate) enum Screen {
     /// Confirm screen for OPTIONS > SUPPRIMER. A = delete .swf + all
     /// sidecars / saves matching the basename, then back to List. B =
     /// back to OptionsModal. Destructive, hence the explicit step.
-    DeleteConfirm { game_idx: usize },
+    /// `selection`: 0 = cancel (left, where it opens), 1 = delete.
+    DeleteConfirm { game_idx: usize, selection: usize },
     /// Cover picker (OPTIONS > JAQUETTE, v1.2.0). Lists Flashpoint search
     /// candidates from `State::cover_candidates`; `selection` indexes that vec.
     /// `State::cover_msg` (non-empty) shows a notice instead of a list (covers
@@ -86,7 +87,7 @@ pub(crate) enum Screen {
     FpDetails { selection: usize, scroll: usize, size: u64 },
     /// JOUER sort picker (Y): centered modal — A-Z / recent / most-played / size.
     /// `prev_sel`/`prev_scroll` restore the gallery cursor when B (cancel) is hit.
-    SortModal { selection: usize, prev_sel: usize, prev_scroll: usize },
+    SortModal { selection: usize, prev_sel: usize, prev_scroll: usize, reverse: bool },
     /// Sort picker for the IMPORTER lists (Y). `kind` picks the target list +
     /// option set (`SORT_TARGET_*`): archive.org files (name/size), the
     /// Flashpoint gallery (name only — developers are unknown), or the IMPORTER
@@ -117,7 +118,8 @@ pub(crate) enum Screen {
     DistantError,
     /// Confirm removing a history URL (from DistantUrlOptions > delete).
     /// A = delete + persist, B/Minus = cancel.
-    DistantHistoryConfirm,
+    /// `selection`: 0 = cancel (left, where it opens), 1 = delete.
+    DistantHistoryConfirm { selection: usize },
     /// Per-URL options modal (Plus on a history URL): rename(edit) / delete /
     /// back. `url_idx` indexes `url_history`; `selection` indexes the options.
     DistantUrlOptions { url_idx: usize, selection: usize },
@@ -1672,8 +1674,6 @@ fn log(s: &str) {
     unsafe { ruffle_log_cstr(bytes.as_ptr() as *const _) };
 }
 
-/// Called from C++ once per `.swf` found during the SD scan. Parses the
-/// header inline so the library list has full metadata to display.
 extern "C" {
     // C++/libnx: flat file size, and recursive `<stem>.files/` tree size (0 if
     // absent). Horizon-safe (opendir/readdir/stat). The tree walk is called ONLY
@@ -3266,9 +3266,15 @@ fn set_screen_selection(s: &mut State, idx: usize) -> bool {
         Screen::GamesDirConfirm { selection } => {
             put!(selection, Screen::GamesDirConfirm { selection: idx })
         }
-        Screen::SortModal { selection, prev_sel, prev_scroll } => put!(
+        Screen::DeleteConfirm { game_idx, selection } => {
+            put!(selection, Screen::DeleteConfirm { game_idx, selection: idx })
+        }
+        Screen::DistantHistoryConfirm { selection } => {
+            put!(selection, Screen::DistantHistoryConfirm { selection: idx })
+        }
+        Screen::SortModal { selection, prev_sel, prev_scroll, reverse } => put!(
             selection,
-            Screen::SortModal { selection: idx, prev_sel, prev_scroll }
+            Screen::SortModal { selection: idx, prev_sel, prev_scroll, reverse }
         ),
         Screen::BugPicker { selection, scroll_offset } => {
             put!(selection, Screen::BugPicker { selection: idx, scroll_offset })
@@ -3893,7 +3899,10 @@ pub fn input(button: &str) -> bool {
             // home. `run_fp_search_flow` pre-fills swkbd from `cover_query` (the
             // current term), so the user can fix/refine it in place. Hoisted:
             // swkbd + the async GET must run WITHOUT the LIBRARY lock.
-            if button == "X" {
+            // Minus too, the search button of every other list; not while the
+            // first search is still loading, where Minus cancels it.
+            let loading = LIBRARY.lock().map(|s| s.fp_loading).unwrap_or(false);
+            if button == "X" || (button == "Minus" && !loading) {
                 run_fp_search_flow();
                 return true;
             }
@@ -3948,8 +3957,8 @@ pub fn input(button: &str) -> bool {
             true
         }
         Screen::TouchesEditor { .. } => false,
-        Screen::DeleteConfirm { game_idx } => {
-            handle_delete_confirm_input(&mut s, button, game_idx);
+        Screen::DeleteConfirm { game_idx, selection } => {
+            handle_delete_confirm_input(&mut s, button, game_idx, selection);
             true
         }
         Screen::CoverPicker { game_idx, selection } => {
@@ -3963,14 +3972,19 @@ pub fn input(button: &str) -> bool {
         }
         Screen::FpDetails { selection, scroll, .. } => {
             // `+` is hoisted only for FpGallery; here `+`/`B` close back to the
-            // gallery (the deferred modal-close machinery scales it out).
+            // gallery (the deferred modal-close machinery scales it out). A
+            // downloads, exactly as A on the tile behind: same code, so the two
+            // cannot disagree about what a press does.
             if matches!(button, "B" | "Plus") {
                 s.screen = Screen::FpGallery { selection, scroll };
+            } else if button == "A" {
+                s.screen = Screen::FpGallery { selection, scroll };
+                handle_fp_gallery_input(&mut s, "A", selection, scroll);
             }
             true
         }
-        Screen::SortModal { selection, prev_sel, prev_scroll } => {
-            handle_sort_modal_input(&mut s, button, selection, prev_sel, prev_scroll);
+        Screen::SortModal { selection, prev_sel, prev_scroll, reverse } => {
+            handle_sort_modal_input(&mut s, button, selection, prev_sel, prev_scroll, reverse);
             true
         }
         Screen::RemoteSortModal { selection, kind, reverse, prev_sel, prev_scroll } => {
@@ -4043,17 +4057,20 @@ pub fn input(button: &str) -> bool {
             }
             true
         }
-        Screen::DistantHistoryConfirm => {
-            // Both paths scale OUT first (panel stays populated); the delete (A)
-            // is deferred to render's close-done, cancel (B) just returns.
+        Screen::DistantHistoryConfirm { selection } => {
+            // Both paths scale OUT first (panel stays populated); the delete (A
+            // on "Delete") is deferred to render's close-done, cancel returns.
             match button {
-                "A" => {
+                "Left" | "StickLLeft" | "Right" | "StickLRight" | "Up" | "StickLUp" | "Down" | "StickLDown" => {
+                    s.screen = Screen::DistantHistoryConfirm { selection: 1 - selection.min(1) };
+                }
+                "A" if selection == 1 => {
                     if let Ok(mut p) = PENDING_AFTER_CLOSE.lock() {
                         *p = Some(PendingClose::DeleteHistory);
                     }
                     crate::backend::render::modal_close_begin();
                 }
-                "B" | "Minus" => {
+                "A" | "B" | "Minus" => {
                     let idx = s.history_idx.unwrap_or(0);
                     let row = importer_row_for_abs(&s, idx);
                     if let Ok(mut p) = PENDING_AFTER_CLOSE.lock() {
@@ -5893,6 +5910,7 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
                 selection: sort_mode_index(),
                 prev_sel: selection,
                 prev_scroll: scroll,
+                reverse: current_sort_reverse(),
             };
             return;
         }
@@ -6340,7 +6358,7 @@ fn handle_distant_url_options_input(
             if selection == 2 {
                 // Delete -> reuse the existing confirm screen via history_idx.
                 s.history_idx = Some(url_idx);
-                s.screen = Screen::DistantHistoryConfirm;
+                s.screen = Screen::DistantHistoryConfirm { selection: 0 };
             }
             return;
         }
@@ -7744,7 +7762,8 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                     return;
                 }
                 "SUPPRIMER" => {
-                    s.screen = Screen::DeleteConfirm { game_idx };
+                    // On "Cancel": deleting is one press away, never zero.
+                    s.screen = Screen::DeleteConfirm { game_idx, selection: 0 };
                     return;
                 }
                 _ => {}
@@ -8148,6 +8167,7 @@ fn handle_sort_modal_input(
     mut selection: usize,
     prev_sel: usize,
     prev_scroll: usize,
+    reverse: bool,
 ) {
     const N: usize = 5;
     match button {
@@ -8162,17 +8182,16 @@ fn handle_sort_modal_input(
             }
         }
         "X" => {
-            // Toggle the sort direction in place: flip + persist + re-sort now.
-            // The list reorders, so a later B can't restore a meaningful cursor —
-            // park prev at the top.
-            set_sort_reverse(!current_sort_reverse());
-            sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
-            s.screen = Screen::SortModal { selection, prev_sel: 0, prev_scroll: 0 };
+            // Flip the direction shown; nothing applies before A, the same as
+            // the importer's sort pickers. It used to re-sort the library on
+            // the spot, so B ("cancel") could no longer cancel anything.
+            s.screen = Screen::SortModal { selection, prev_sel, prev_scroll, reverse: !reverse };
             return;
         }
         "A" => {
             // Applied a new sort → the list reorders, so land on the top.
             set_sort_mode(selection as u8);
+            set_sort_reverse(reverse);
             sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
             s.screen = Screen::List { selection: 0, scroll_offset: 0 };
             return;
@@ -8184,7 +8203,7 @@ fn handle_sort_modal_input(
         }
         _ => {}
     }
-    s.screen = Screen::SortModal { selection, prev_sel, prev_scroll };
+    s.screen = Screen::SortModal { selection, prev_sel, prev_scroll, reverse };
 }
 
 /// Which list a `RemoteSortModal` sorts.
@@ -8343,9 +8362,12 @@ fn run_rename_flow(game_idx: usize) {
 /// Handles the destructive SUPPRIMER confirmation screen. A = run the
 /// delete + back to List (with selection clamped to the now-shorter list).
 /// B / Minus = cancel + back to OptionsModal.
-fn handle_delete_confirm_input(s: &mut State, button: &str, game_idx: usize) {
+fn handle_delete_confirm_input(s: &mut State, button: &str, game_idx: usize, selection: usize) {
     match button {
-        "A" => {
+        "Left" | "StickLLeft" | "Right" | "StickLRight" | "Up" | "StickLUp" | "Down" | "StickLDown" => {
+            s.screen = Screen::DeleteConfirm { game_idx, selection: 1 - selection.min(1) };
+        }
+        "A" if selection == 1 => {
             // Defer the delete until the close-out finishes: stash the action,
             // start the scale-out, and leave the screen on DeleteConfirm so its
             // panel stays populated while it shrinks. render() runs the delete
@@ -8355,9 +8377,9 @@ fn handle_delete_confirm_input(s: &mut State, button: &str, game_idx: usize) {
             }
             crate::backend::render::modal_close_begin();
         }
-        "B" | "Minus" => {
-            // Cancel back to OPTIONS (modal -> modal: instant swap, OPTIONS pops).
-            s.screen = Screen::OptionsModal { game_idx, selection: 0 };
+        "A" | "B" | "Minus" => {
+            // Cancel back to OPTIONS, on the row that opened this (the last).
+            s.screen = Screen::OptionsModal { game_idx, selection: OPTIONS_ENTRIES.len() - 1 };
         }
         _ => {}
     }
@@ -8655,7 +8677,7 @@ fn modal_kind(screen: Screen) -> u8 {
         Screen::SettingsPrefsModal { .. } => 10,
         Screen::SettingsHomeViewPicker { .. } => 18,
         Screen::DistantUrlOptions { .. } => 5,
-        Screen::DistantHistoryConfirm => 6,
+        Screen::DistantHistoryConfirm { .. } => 6,
         // The keymap editor delegates to `menu::*`; fold its sub-screen id in so a
         // List -> Keyboard (etc.) transition CHANGES the kind and re-fires the
         // scale-in "pop", exactly like the in-game `ruffle_touches_draw` path.
@@ -9208,22 +9230,27 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 } else {
                     lc.opt_shortcut
                 };
+                // The folder row says where the game is now: every shelf it is on,
+                // or "No folder".
+                let shelves = shelves_of(&entry);
+                let shelves = if shelves.is_empty() {
+                    std::string::String::from(lc.folder_root)
+                } else {
+                    shelves.join(", ")
+                };
                 // Same order as OPTIONS_ENTRIES, with SUPPRIMER kept last: the
                 // destructive row should not move because a new one arrived.
-                let labels = [
-                    fav_label,
-                    lc.opt_keys,
-                    lc.opt_rename,
-                    lc.opt_cover,
-                    lc.opt_folder,
-                    sc_label,
-                    lc.opt_delete,
+                use crate::backend::render::{Icon, WinRow};
+                let rows = [
+                    WinRow::new(Icon::Star, fav_label),
+                    WinRow::new(Icon::Gamepad, lc.opt_keys).opens(),
+                    WinRow::new(Icon::Pencil, lc.opt_rename),
+                    WinRow::new(Icon::Image, lc.opt_cover).opens(),
+                    WinRow::new(Icon::Folder, lc.opt_folder).value(&shelves).opens(),
+                    WinRow::new(Icon::Home, sc_label),
+                    WinRow::new(Icon::Trash, lc.opt_delete).danger(),
                 ];
-                backend.draw_library_options(
-                    &entry.display_name,
-                    selection,
-                    &labels,
-                );
+                backend.draw_game_options(&entry, selection, &rows);
             }
         }
         Screen::GameFolderPicker { game_idx, selection } => {
@@ -9278,30 +9305,18 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 let counts: std::vec::Vec<std::string::String> =
                     folders.iter().map(|(_, c)| c.to_string()).collect();
                 let mut rows: std::vec::Vec<WinRow> = std::vec::Vec::with_capacity(folders.len() + 2);
-                rows.push(WinRow {
-                    icon: Some(Icon::Home),
-                    label: lc.folder_root,
-                    value: "",
-                    mark: if bare { Some((Icon::Check, ui_col::OK)) } else { None },
-                    dim: false,
-                });
+                rows.push(WinRow::new(Icon::Home, lc.folder_root).mark_if(bare, Icon::Check, ui_col::OK));
                 for (i, (n, _)) in folders.iter().enumerate() {
-                    let mark = if physical.as_deref() == Some(n.as_str()) {
-                        Some((Icon::HardDrive, ui_col::TEXT2))
+                    let row = WinRow::new(Icon::Folder, n).value(&counts[i]);
+                    rows.push(if physical.as_deref() == Some(n.as_str()) {
+                        row.mark(Icon::HardDrive, ui_col::TEXT2)
                     } else if on.iter().any(|x| x == n) {
-                        Some((Icon::Check, ui_col::OK))
+                        row.mark(Icon::Check, ui_col::OK)
                     } else {
-                        None
-                    };
-                    rows.push(WinRow { icon: Some(Icon::Folder), label: n, value: &counts[i], mark, dim: false });
+                        row
+                    });
                 }
-                rows.push(WinRow {
-                    icon: Some(Icon::FolderPlus),
-                    label: lc.games_dir_new,
-                    value: "",
-                    mark: None,
-                    dim: false,
-                });
+                rows.push(WinRow::new(Icon::FolderPlus, lc.games_dir_new));
                 // A long shelf list would grow the window past the screen, so
                 // the rows scroll, following the cursor.
                 const WINDOW: usize = 8;
@@ -9501,9 +9516,9 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             const VISIBLE: usize = 6;
             let active = primary_root();
             let mut rows: std::vec::Vec<WinRow> = std::vec::Vec::with_capacity(dir_browse.len() + 2);
-            rows.push(WinRow { icon: Some(Icon::Check), label: u.dir_choose, value: "", mark: None, dim: false });
+            rows.push(WinRow::new(Icon::Check, u.dir_choose));
             if up {
-                rows.push(WinRow { icon: Some(Icon::ParentFolder), label: u.dir_up, value: "", mark: None, dim: false });
+                rows.push(WinRow::new(Icon::ParentFolder, u.dir_up));
             }
             for name in dir_browse.iter() {
                 // Mark the folder the library actually uses: without it the
@@ -9515,12 +9530,11 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     std::format!("{}/{}", dir_path, name)
                 };
                 let current = full == active;
-                rows.push(WinRow {
-                    icon: Some(Icon::Folder),
-                    label: name,
-                    value: if current { lc.games_dir_current } else { "" },
-                    mark: if current { Some((Icon::CircleCheck, ui_col::OK)) } else { None },
-                    dim: false,
+                let row = WinRow::new(Icon::Folder, name).opens();
+                rows.push(if current {
+                    row.value(lc.games_dir_current).mark(Icon::CircleCheck, ui_col::OK)
+                } else {
+                    row
                 });
             }
             let pinned = 1 + up as usize;
@@ -9856,13 +9870,33 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             // usize::MAX = no highlighted row (it's a confirm, A:share / B:cancel).
             backend.draw_library_list_modal(lc.opt_share, subtitle, usize::MAX, &refs, lc.lang_footer, true);
         }
-        Screen::DeleteConfirm { game_idx } => {
+        Screen::DeleteConfirm { game_idx, selection } => {
             let snap = LIBRARY
                 .lock()
                 .ok()
                 .and_then(|s| s.entries.get(game_idx).map(|e| (e.display_name.clone(), e.basename.clone())));
             if let Some((display_name, basename)) = snap {
-                backend.draw_library_delete_confirm(&display_name, &basename);
+                use crate::backend::render::{Choice, Icon};
+                let lc = crate::loc::s();
+                let u = crate::loc_ui::ui();
+                let body = std::format!("{} {} {}", lc.del_l1, lc.del_l2, lc.del_l3);
+                let detail = if display_name == basename || pretty_name(&basename) == display_name {
+                    display_name.clone()
+                } else {
+                    std::format!("{}  \u{00B7}  {}", display_name, basename)
+                };
+                backend.draw_confirm(
+                    Icon::Trash,
+                    u.delete_game_title,
+                    &body,
+                    Some(&detail),
+                    &[
+                        Choice { label: u.cancel, destructive: false },
+                        Choice { label: lc.opt_delete, destructive: true },
+                    ],
+                    selection,
+                    true,
+                );
             }
         }
         Screen::CoverPicker { game_idx, selection } => {
@@ -9895,19 +9929,8 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             if let Some((titles, urls, msg, name, use_shot)) = snap {
                 let title_refs: std::vec::Vec<&str> = titles.iter().map(|x| x.as_str()).collect();
                 let url_refs: std::vec::Vec<&str> = urls.iter().map(|x| x.as_str()).collect();
-                let lc = crate::loc::s();
-                // The hint names what Y GIVES you, so it reads as an action rather
-                // than as a state you have to decode.
-                let footer = std::format!(
-                    "{}   {}",
-                    lc.cover_footer,
-                    if use_shot { lc.cover_show_logos } else { lc.cover_show_shots },
-                );
                 backend.draw_library_dim_backdrop();
-                backend.draw_library_cover_picker(
-                    &name, selection, &title_refs, &url_refs, &msg,
-                    lc.cover_title, &footer,
-                );
+                backend.draw_library_cover_picker(&name, selection, &title_refs, &url_refs, &msg, use_shot);
             }
         }
         Screen::FpGallery { selection, scroll } => {
@@ -9980,16 +10003,10 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     let title_refs: std::vec::Vec<&str> =
                         titles.iter().map(|x| x.as_str()).collect();
                     let url_refs: std::vec::Vec<&str> = urls.iter().map(|x| x.as_str()).collect();
-                    // Footer's ZL+ZR hint shows the live filter state: the `{}`
-                    // placeholder in `fp_footer` becomes ON (filtered, default) or
-                    // OFF (mature catalogue revealed), so the chord's effect is
-                    // legible without an extra on-screen widget.
-                    let lc = crate::loc::s();
-                    let on_off = if filter { lc.lbl_on } else { lc.lbl_off };
-                    let footer = lc.fp_footer.replace("{}", on_off);
+                    // The ZL+ZR hint shows the live filter state, ON (filtered,
+                    // the default) or OFF, so the chord's effect is legible.
                     backend.draw_library_fp_gallery(
-                        &query, selection, scroll, &title_refs, &url_refs, &installed, &msg,
-                        lc.fp_title, &footer,
+                        &query, selection, scroll, &title_refs, &url_refs, &installed, &msg, filter,
                     );
                 }
             }
@@ -9998,6 +10015,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             let snap = LIBRARY.lock().ok().and_then(|s| {
                 let desc = s.fp_desc.clone();
                 s.cover_candidates.get(selection).map(|c| {
+                    let name = crate::sources::gamezip::swf_filename(&c.title);
                     (
                         c.title.clone(),
                         c.developer.clone(),
@@ -10005,41 +10023,46 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                         c.release_date.clone(),
                         c.cover_url.clone(),
                         desc,
+                        s.entries.iter().any(|e| e.basename == name),
                     )
                 })
             });
-            if let Some((title, dev, publisher, date, cover, desc)) = snap {
+            if let Some((title, dev, publisher, date, cover, desc, installed)) = snap {
                 backend.draw_library_dim_backdrop();
-                backend.draw_library_fp_details(
-                    &title, &dev, &publisher, &date, size, &cover, &desc,
-                );
+                backend.draw_library_fp_details(&title, &dev, &publisher, &date, size, &cover, &desc, installed);
             }
         }
-        Screen::SortModal { selection, .. } => {
+        Screen::SortModal { selection, reverse, .. } => {
+            use crate::backend::render::Icon;
             let lc = crate::loc::s();
-            let labels = [
-                lc.sort_alpha,
-                lc.sort_recent,
-                lc.sort_recent_played,
-                lc.sort_played,
-                lc.sort_size,
+            let options = [
+                (Icon::SortAlpha, lc.sort_alpha),
+                (Icon::Calendar, lc.sort_recent),
+                (Icon::History, lc.sort_recent_played),
+                (Icon::Flame, lc.sort_played),
+                (Icon::HardDrive, lc.sort_size),
             ];
-            let dir = if current_sort_reverse() { lc.sort_dir_desc } else { lc.sort_dir_asc };
-            backend.draw_library_sort_modal(selection, &labels, lc.sort_title, lc.sort_footer, dir);
+            backend.draw_sort_window(lc.sort_title, &options, selection, Some(sort_mode_index()), reverse);
         }
         Screen::RemoteSortModal { selection, kind, reverse, .. } => {
             let lc = crate::loc::s();
             // Flashpoint: NAME only. archive.org: NAME + SIZE. Saved URLs:
             // ADDED / NAME / SOURCE (same order as `importer_view` reads).
-            let labels: &[&str] = match kind {
-                SORT_TARGET_FP => &[lc.sort_alpha],
-                SORT_TARGET_IMPORT => {
-                    &[lc.sort_recent, lc.sort_alpha, lc.sort_source, lc.sort_files]
-                }
-                _ => &[lc.sort_alpha, lc.sort_size],
+            use crate::backend::render::Icon;
+            let options: &[(Icon, &str)] = match kind {
+                SORT_TARGET_FP => &[(Icon::SortAlpha, lc.sort_alpha)],
+                SORT_TARGET_IMPORT => &[
+                    (Icon::Calendar, lc.sort_recent),
+                    (Icon::SortAlpha, lc.sort_alpha),
+                    (Icon::Globe, lc.sort_source),
+                    (Icon::Layers, lc.sort_files),
+                ],
+                _ => &[(Icon::SortAlpha, lc.sort_alpha), (Icon::HardDrive, lc.sort_size)],
             };
-            let dir = if reverse { lc.sort_dir_desc } else { lc.sort_dir_asc };
-            backend.draw_library_sort_modal(selection, labels, lc.sort_title, lc.sort_footer, dir);
+            // Only the saved sources keep their order; the other two lists are
+            // sorted once and forgotten, so nothing is ticked there.
+            let active = if kind == SORT_TARGET_IMPORT { Some(import_sort_index()) } else { None };
+            backend.draw_sort_window(lc.sort_title, options, selection, active, reverse);
         }
         // ── Phase 3.7 DISTANT mode ─────────────────────────────────────
         Screen::DistantIdle { selection, scroll_offset } => {
@@ -10096,28 +10119,26 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 Some((url, have, total, direct, added, fav))
             });
             if let Some((url, have, total, direct, added, fav)) = snap {
-                let mut info: std::vec::Vec<std::string::String> = std::vec::Vec::new();
-                info.push(std::format!(
-                    "{} : {}",
-                    lc.url_info_type,
-                    if direct { lc.url_type_swf } else { lc.url_type_list },
+                use crate::backend::render::{Icon, WinRow};
+                let mut facts: std::vec::Vec<(Icon, std::string::String)> = std::vec::Vec::new();
+                facts.push((
+                    if direct { Icon::File } else { Icon::Archive },
+                    std::format!("{} : {}", lc.url_info_type, if direct { lc.url_type_swf } else { lc.url_type_list }),
                 ));
                 if let Some(total) = total {
-                    info.push(std::format!("{} : {}/{}", lc.url_info_files, have, total));
+                    facts.push((Icon::HardDrive, std::format!("{} : {}/{}", lc.url_info_files, have, total)));
                 }
                 let date = format_date(added);
                 if !date.is_empty() {
-                    info.push(std::format!("{} : {}", lc.url_info_added, date));
+                    facts.push((Icon::Calendar, std::format!("{} : {}", lc.url_info_added, date)));
                 }
                 let fav_label = if fav { lc.opt_unfavorite } else { lc.opt_favorite };
-                backend.draw_library_url_options(
-                    importer_label(&url).as_str(),
-                    selection,
-                    &[fav_label, lc.opt_edit, lc.opt_delete],
-                    &info,
-                    &url,
-                    lc.options_footer,
-                );
+                let rows = [
+                    WinRow::new(Icon::Star, fav_label),
+                    WinRow::new(Icon::Pencil, lc.opt_edit),
+                    WinRow::new(Icon::Trash, lc.opt_delete).danger(),
+                ];
+                backend.draw_url_options(importer_label(&url).as_str(), &facts, &url, selection, &rows);
             }
         }
         Screen::DistantLoading => {
@@ -10129,7 +10150,9 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 .ok()
                 .map(|s| {
                     let (labels, hosts, direct, progress, favorite, total) = importer_rows(&s);
-                    (labels, hosts, direct, progress, favorite, total, s.pending_fetch_url.clone())
+                    // The source's name, not its address: the address is what the
+                    // row hid behind a readable label in the first place.
+                    (labels, hosts, direct, progress, favorite, total, importer_label(&s.pending_fetch_url))
                 })
                 .unwrap_or_default();
             let lrefs: std::vec::Vec<&str> = labels.iter().map(|u| u.as_str()).collect();
@@ -10231,10 +10254,11 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             // the rule has to be the name and nothing else: the app already
             // treats "a file of this name exists" as "you have it", so a badge
             // that disagreed would promise a download the button then refuses.
-            let (files, marked, filter, total, under) = LIBRARY
+            let (files, marked, filter, total, under, source) = LIBRARY
                 .lock()
                 .ok()
                 .map(|s| {
+                    let source = importer_label(&s.pending_fetch_url);
                     let mut marked = s.downloaded_basenames.clone();
                     for e in &s.entries {
                         if !marked.iter().any(|n| n == &e.basename) {
@@ -10246,7 +10270,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     let filtered: std::vec::Vec<crate::net::RemoteFile> =
                         idx.iter().map(|&i| s.remote_files[i].clone()).collect();
                     // `under` = the IMPORTER rows drawn UNDER the reveal window.
-                    (filtered, marked, s.distant_filter.clone(), total, importer_rows(&s))
+                    (filtered, marked, s.distant_filter.clone(), total, importer_rows(&s), source)
                 })
                 .unwrap_or_default();
             // Expand/collapse reveal (v1.2.0): while a reveal runs, draw the
@@ -10283,7 +10307,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 backend.set_clip(wx, wy, ww, wh);
                 backend.draw_library_distant_files(
                     selection, scroll_offset, &files, DISTANT_VISIBLE_ROWS,
-                    &marked, filter.as_deref(), total, Some((wx, wy, ww, wh)),
+                    &marked, filter.as_deref(), total, &source, Some((wx, wy, ww, wh)),
                 );
                 backend.clear_clip();
                 // Make the opening/closing rectangle visible (same navy behind):
@@ -10302,7 +10326,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             } else {
                 backend.draw_library_distant_files(
                     selection, scroll_offset, &files, DISTANT_VISIBLE_ROWS,
-                    &marked, filter.as_deref(), total, None,
+                    &marked, filter.as_deref(), total, &source, None,
                 );
             }
         }
@@ -10375,13 +10399,28 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 .unwrap_or_default();
             backend.draw_library_distant_error(&msg, can_fix);
         }
-        Screen::DistantHistoryConfirm => {
+        Screen::DistantHistoryConfirm { selection } => {
             let url = LIBRARY
                 .lock()
                 .ok()
                 .and_then(|s| s.history_idx.and_then(|i| s.url_history.get(i).cloned()))
                 .unwrap_or_default();
-            backend.draw_library_history_delete_confirm(&url);
+            use crate::backend::render::{Choice, Icon};
+            let lc = crate::loc::s();
+            let u = crate::loc_ui::ui();
+            backend.draw_library_dim_backdrop();
+            backend.draw_confirm(
+                Icon::Trash,
+                lc.histdel_title,
+                lc.histdel_msg,
+                Some(&url),
+                &[
+                    Choice { label: u.cancel, destructive: false },
+                    Choice { label: lc.opt_delete, destructive: true },
+                ],
+                selection,
+                true,
+            );
         }
     }
 

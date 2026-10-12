@@ -1469,21 +1469,6 @@ pub fn zoom_pan_for(basename: &str) -> (i32, i32) {
     )
 }
 
-/// Zoom of the ACTIVE game, 100 (untouched) when nothing is playing.
-pub fn zoom() -> u16 {
-    match active_game_basename() {
-        Some(b) => zoom_for(&b),
-        None => 100,
-    }
-}
-
-pub fn zoom_pan() -> (i32, i32) {
-    match active_game_basename() {
-        Some(b) => zoom_pan_for(&b),
-        None => (0, 0),
-    }
-}
-
 pub fn set_zoom(percent: u16, pan_x: i32, pan_y: i32) {
     if let Some(b) = active_game_basename() {
         write_pref_many(
@@ -1682,8 +1667,14 @@ pub fn refresh_gyro() {
 
 /// Step the ACTIVE game's setting (pause menu > TOUCHES).
 pub fn cycle_gyro() {
+    step_gyro(1);
+}
+
+/// `cycle_gyro` either way: forward for `dir >= 0`, back otherwise.
+pub fn step_gyro(dir: i32) {
     if let Some(b) = active_game_basename() {
-        cycle_gyro_for(&b);
+        let mode = crate::step_wrap(gyro_mode_for(&b), GYRO_MODE_COUNT, dir as core::ffi::c_int);
+        write_pref(&b, "gyro", mode);
     }
     refresh_gyro();
 }

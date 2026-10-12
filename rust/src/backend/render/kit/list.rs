@@ -123,57 +123,108 @@ impl SwitchRenderBackend {
         }
     }
 
-    /// A list row's usual contents, centred on `cy` between `x` and `x + w`:
-    /// an icon, the label, a small mark after it ("in use", "on this shelf"),
-    /// and on the right a value. `dim` greys a row out (a game already on the
-    /// card, say) without hiding it.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn kit_list_row(
-        &mut self,
-        x: f32,
-        cy: f32,
-        w: f32,
-        icon: Option<super::icons::Icon>,
-        label: &str,
-        value: &str,
-        mark: Option<(super::icons::Icon, u32)>,
-        focused: bool,
-        dim: bool,
-    ) {
+    /// Draw `row` centred on `cy` between `x` and `x + w` (see `Row`). The
+    /// focus pill is the caller's, so it can glide between rows.
+    pub(crate) fn kit_row_item(&mut self, x: f32, cy: f32, w: f32, row: &Row, focused: bool) {
         use super::theme::size;
         const PAD: f32 = 18.0;
         const ICON: f32 = 20.0;
+        const MARK: f32 = 16.0;
+        const CHEVRON: f32 = 18.0;
         let mut lx = x + PAD;
-        if let Some(ic) = icon {
-            let ink = if focused { col::GOLD } else if dim { col::TEXT3 } else { col::TEXT2 };
+        if let Some(ic) = row.icon {
+            let ink = if row.danger {
+                col::DANGER
+            } else if focused {
+                col::GOLD
+            } else if row.dim {
+                col::TEXT3
+            } else {
+                col::TEXT2
+            };
             self.kit_icon(lx, cy, ICON, ic, ink);
             lx += ICON + 14.0;
         }
-        let right = x + w - PAD;
+        let mut right = x + w - PAD;
+        if row.opens {
+            self.kit_icon(right - CHEVRON + 2.0, cy, CHEVRON, super::icons::Icon::ChevronRight, col::TEXT3);
+            right -= CHEVRON + 8.0;
+        }
         let mut avail = right - lx;
-        if !value.is_empty() {
+        if !row.value.is_empty() {
             let px = size::LABEL + 1.0;
-            let v = self.kit_fit(value, px, (avail * 0.4).max(60.0));
+            let v = self.kit_fit_mid(row.value, px, (avail * 0.4).max(60.0));
             let vw = self.kit_measure(&v, px);
             let ink = if focused { col::GOLD } else { col::TEXT3 };
             self.kit_text_mid(right - vw, cy, px, &v, ink);
             avail -= vw + 20.0;
         }
-        let ink = if dim {
+        if row.mark.is_some() {
+            avail -= MARK + 10.0;
+        }
+        let ink = if row.danger {
+            col::DANGER
+        } else if row.dim {
             col::TEXT3
         } else if focused {
             col::TEXT
         } else {
             col::TEXT2
         };
-        const MARK: f32 = 16.0;
-        if mark.is_some() {
-            avail -= MARK + 10.0;
-        }
-        let l = self.kit_fit_mid(label, size::ROW, avail);
+        let l = self.kit_fit_mid(row.label, size::ROW, avail);
         let lw = self.kit_text_mid(lx, cy, size::ROW, &l, ink);
-        if let Some((ic, mink)) = mark {
+        if let Some((ic, mink)) = row.mark {
             self.kit_icon(lx + lw + 10.0, cy, MARK, ic, mink);
         }
+    }
+}
+
+/// What a list row shows: an icon, the label, a small mark after it ("in
+/// use", "on this shelf"), and on the right a value, then a chevron when the
+/// row opens another screen. `dim` greys a row out without hiding it;
+/// `danger` reddens the one that loses something.
+#[derive(Clone, Copy)]
+pub(crate) struct Row<'a> {
+    pub icon: Option<super::icons::Icon>,
+    pub label: &'a str,
+    pub value: &'a str,
+    pub mark: Option<(super::icons::Icon, u32)>,
+    pub dim: bool,
+    pub danger: bool,
+    pub opens: bool,
+}
+
+impl<'a> Row<'a> {
+    pub(crate) fn new(icon: super::icons::Icon, label: &'a str) -> Row<'a> {
+        Row { icon: Some(icon), label, value: "", mark: None, dim: false, danger: false, opens: false }
+    }
+
+    pub(crate) fn value(mut self, value: &'a str) -> Row<'a> {
+        self.value = value;
+        self
+    }
+
+    pub(crate) fn mark(mut self, icon: super::icons::Icon, ink: u32) -> Row<'a> {
+        self.mark = Some((icon, ink));
+        self
+    }
+
+    pub(crate) fn mark_if(self, on: bool, icon: super::icons::Icon, ink: u32) -> Row<'a> {
+        if on { self.mark(icon, ink) } else { self }
+    }
+
+    pub(crate) fn opens(mut self) -> Row<'a> {
+        self.opens = true;
+        self
+    }
+
+    pub(crate) fn danger(mut self) -> Row<'a> {
+        self.danger = true;
+        self
+    }
+
+    pub(crate) fn dim(mut self, dim: bool) -> Row<'a> {
+        self.dim = dim;
+        self
     }
 }

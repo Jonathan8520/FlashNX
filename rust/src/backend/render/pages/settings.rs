@@ -8,7 +8,7 @@
 //! the four layouts instead of naming them.
 
 use super::super::kit::icons::Icon;
-use super::super::kit::list::ScrollRows;
+use super::super::kit::list::{Row, ScrollRows};
 use super::super::kit::theme::{col, radius, ring, size};
 use super::super::*;
 
@@ -423,7 +423,7 @@ impl SwitchRenderBackend {
         let w = spec.w;
         self.kit_scroll_rows(&spec, games.len(), selection, scroll_offset, |s, i, cy, focused| {
             let (name, played) = &games[i];
-            s.kit_list_row(40.0, cy, w, Some(Icon::Gamepad), name, played, None, focused, false);
+            s.kit_row_item(40.0, cy, w, &Row::new(Icon::Gamepad, name).value(played), focused);
         });
         self.kit_footer_band();
         self.kit_hints_right(vw - 40.0, vh - 24.0, &[(&[Btn::A], u.choose), (&[Btn::B], u.back)]);

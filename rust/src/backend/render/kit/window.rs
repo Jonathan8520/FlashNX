@@ -226,11 +226,19 @@ impl SwitchRenderBackend {
             let hy = eased_list_y(top + selection as f32 * ROW_H, glide_key, now);
             self.kit_focus_pill(px, hy + (ROW_H - PILL_H) * 0.5, pw, PILL_H);
         }
+        let mut cells: std::vec::Vec<(f32, f32, f32, f32)> = std::vec::Vec::with_capacity(rows.len());
         for (i, row) in rows.iter().enumerate() {
             let cy = top + i as f32 * ROW_H + ROW_H * 0.5;
             let (label, value) = split_label_value(row);
             let stepper = i < 32 && steppers & (1 << i) != 0;
             self.kit_row(px, cy, pw, label, value, i == selection, size::ROW, stepper);
+            cells.push((px, top + i as f32 * ROW_H, pw, ROW_H));
+        }
+        // Rows answer a finger like every other list's, in the visible order
+        // (the caller maps a windowed list back). A list with no cursor is
+        // read-only and takes no taps.
+        if selection < rows.len() {
+            ui_cells_publish(ui_screen_kind(), cells);
         }
 
         // What the row under the cursor does, always in the same place.

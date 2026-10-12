@@ -111,6 +111,29 @@ pub struct Ui {
     pub download: &'static str,
     /// Minus on a list it narrows down (the importer's saved sources).
     pub filter_verb: &'static str,
+    /// L / R through a long list, a screenful at a time.
+    pub page: &'static str,
+    /// X in the sort pickers: the direction.
+    pub order: &'static str,
+    /// Deleting a game: the question.
+    pub delete_game_title: &'static str,
+    pub info: &'static str,
+    /// The Flashpoint content filter's hint ("{}" = on / off).
+    pub fp_filter: &'static str,
+    /// A game already in the library, in a details window.
+    pub on_card: &'static str,
+    /// Verbs of the controls sub-menu's profile flows.
+    pub preview: &'static str,
+    pub share: &'static str,
+    pub restore: &'static str,
+    /// The controls sub-menu (Pause > Controls): one line per row.
+    pub help_touches_edit: &'static str,
+    pub help_touches_apply: &'static str,
+    pub help_touches_share: &'static str,
+    pub help_cursor_speed: &'static str,
+    pub help_show_cursor: &'static str,
+    pub help_gyro: &'static str,
+    pub help_revert: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -192,6 +215,22 @@ const EN: Ui = Ui {
     folder_empty_body: "No game is deleted.",
     download: "Download",
     filter_verb: "Filter",
+    page: "Page",
+    order: "Order",
+    delete_game_title: "Delete this game?",
+    info: "Info",
+    fp_filter: "Filter: {}",
+    on_card: "Already on your card",
+    preview: "Preview",
+    share: "Share",
+    restore: "Restore",
+    help_touches_edit: "Pick the keyboard key or mouse click each button sends, for each player.",
+    help_touches_apply: "Controls other players shared for this game. You see what changes before applying.",
+    help_touches_share: "Sends your controls to the community catalogue, signed with your nickname.",
+    help_cursor_speed: "How fast the right stick moves the mouse cursor in this game.",
+    help_show_cursor: "Shows or hides the mouse arrow over the game.",
+    help_gyro: "Move the cursor by tilting the console: Pointer aims by turning it, Marble rolls with the tilt.",
+    help_revert: "Puts back the controls you had before.",
 };
 
 const FR: Ui = Ui {
@@ -273,6 +312,22 @@ const FR: Ui = Ui {
     folder_empty_body: "Aucun jeu n'est supprimé.",
     download: "Télécharger",
     filter_verb: "Filtrer",
+    page: "Page",
+    order: "Ordre",
+    delete_game_title: "Supprimer ce jeu ?",
+    info: "Infos",
+    fp_filter: "Filtre : {}",
+    on_card: "Déjà sur ta carte",
+    preview: "Aperçu",
+    share: "Partager",
+    restore: "Rétablir",
+    help_touches_edit: "Choisis la touche de clavier ou le clic de souris que chaque bouton envoie, pour chaque joueur.",
+    help_touches_apply: "Les touches partagées par d'autres joueurs pour ce jeu. Tu vois ce qui change avant d'appliquer.",
+    help_touches_share: "Envoie tes touches au catalogue communautaire, signées de ton pseudo.",
+    help_cursor_speed: "La vitesse du curseur de souris au stick droit dans ce jeu.",
+    help_show_cursor: "Affiche ou masque la flèche de la souris sur le jeu.",
+    help_gyro: "Bouge le curseur en inclinant la console : Visée vise en la tournant, Bille roule avec l'inclinaison.",
+    help_revert: "Remet les touches que tu avais avant.",
 };
 
 const ES: Ui = Ui {
@@ -354,6 +409,22 @@ const ES: Ui = Ui {
     folder_empty_body: "No se borra ningún juego.",
     download: "Descargar",
     filter_verb: "Filtrar",
+    page: "Página",
+    order: "Orden",
+    delete_game_title: "¿Borrar este juego?",
+    info: "Info",
+    fp_filter: "Filtro: {}",
+    on_card: "Ya está en tu tarjeta",
+    preview: "Vista previa",
+    share: "Compartir",
+    restore: "Restaurar",
+    help_touches_edit: "Elige la tecla o el clic de ratón que envía cada botón, para cada jugador.",
+    help_touches_apply: "Controles que otros jugadores compartieron para este juego. Ves lo que cambia antes de aplicar.",
+    help_touches_share: "Envía tus controles al catálogo de la comunidad, firmados con tu apodo.",
+    help_cursor_speed: "La velocidad con la que el stick derecho mueve el cursor en este juego.",
+    help_show_cursor: "Muestra u oculta la flecha del ratón sobre el juego.",
+    help_gyro: "Mueve el cursor inclinando la consola: Puntero apunta al girarla, Canica rueda con la inclinación.",
+    help_revert: "Vuelve a poner los controles que tenías antes.",
 };
 
 const RU: Ui = Ui {
@@ -435,6 +506,22 @@ const RU: Ui = Ui {
     folder_empty_body: "Ни одна игра не удаляется.",
     download: "Скачать",
     filter_verb: "Фильтр",
+    page: "Страница",
+    order: "Порядок",
+    delete_game_title: "Удалить эту игру?",
+    info: "Инфо",
+    fp_filter: "Фильтр: {}",
+    on_card: "Уже на твоей карте",
+    preview: "Просмотр",
+    share: "Поделиться",
+    restore: "Вернуть",
+    help_touches_edit: "Выбери клавишу или щелчок мыши для каждой кнопки и каждого игрока.",
+    help_touches_apply: "Раскладки, которыми другие игроки поделились для этой игры. Перед применением видно, что изменится.",
+    help_touches_share: "Отправляет твою раскладку в общий каталог, с подписью твоим ником.",
+    help_cursor_speed: "Скорость курсора мыши на правом стике в этой игре.",
+    help_show_cursor: "Показывает или скрывает стрелку мыши поверх игры.",
+    help_gyro: "Двигай курсор наклоном консоли: «Прицел» целится поворотом, «Шарик» катится от наклона.",
+    help_revert: "Возвращает раскладку, которая была раньше.",
 };
 
 const DE: Ui = Ui {
@@ -516,6 +603,22 @@ const DE: Ui = Ui {
     folder_empty_body: "Es wird kein Spiel gelöscht.",
     download: "Herunterladen",
     filter_verb: "Filtern",
+    page: "Seite",
+    order: "Reihenfolge",
+    delete_game_title: "Dieses Spiel löschen?",
+    info: "Infos",
+    fp_filter: "Filter: {}",
+    on_card: "Schon auf deiner Karte",
+    preview: "Vorschau",
+    share: "Teilen",
+    restore: "Wiederherstellen",
+    help_touches_edit: "Wähle für jeden Spieler, welche Taste oder welchen Mausklick jeder Knopf sendet.",
+    help_touches_apply: "Tastenbelegungen, die andere Spieler für dieses Spiel geteilt haben. Du siehst vorher, was sich ändert.",
+    help_touches_share: "Schickt deine Belegung an den Community-Katalog, mit deinem Spitznamen signiert.",
+    help_cursor_speed: "Wie schnell der rechte Stick den Mauszeiger in diesem Spiel bewegt.",
+    help_show_cursor: "Zeigt oder verbirgt den Mauspfeil über dem Spiel.",
+    help_gyro: "Bewege den Zeiger durch Neigen der Konsole: Zeiger zielt beim Drehen, Murmel rollt mit der Neigung.",
+    help_revert: "Stellt die Belegung wieder her, die du vorher hattest.",
 };
 
 const IT: Ui = Ui {
@@ -597,6 +700,22 @@ const IT: Ui = Ui {
     folder_empty_body: "Nessun gioco viene eliminato.",
     download: "Scarica",
     filter_verb: "Filtra",
+    page: "Pagina",
+    order: "Ordine",
+    delete_game_title: "Eliminare questo gioco?",
+    info: "Info",
+    fp_filter: "Filtro: {}",
+    on_card: "Già sulla tua scheda",
+    preview: "Anteprima",
+    share: "Condividi",
+    restore: "Ripristina",
+    help_touches_edit: "Scegli il tasto o il clic del mouse che ogni pulsante invia, per ogni giocatore.",
+    help_touches_apply: "Comandi condivisi da altri giocatori per questo gioco. Vedi cosa cambia prima di applicare.",
+    help_touches_share: "Invia i tuoi comandi al catalogo della community, firmati con il tuo nickname.",
+    help_cursor_speed: "La velocità del cursore del mouse con la levetta destra in questo gioco.",
+    help_show_cursor: "Mostra o nasconde la freccia del mouse sul gioco.",
+    help_gyro: "Muovi il cursore inclinando la console: Puntatore mira ruotandola, Biglia rotola con l'inclinazione.",
+    help_revert: "Rimette i comandi che avevi prima.",
 };
 
 const PT: Ui = Ui {
@@ -678,6 +797,22 @@ const PT: Ui = Ui {
     folder_empty_body: "Nenhum jogo é apagado.",
     download: "Baixar",
     filter_verb: "Filtrar",
+    page: "Página",
+    order: "Ordem",
+    delete_game_title: "Excluir este jogo?",
+    info: "Info",
+    fp_filter: "Filtro: {}",
+    on_card: "Já está no seu cartão",
+    preview: "Prévia",
+    share: "Compartilhar",
+    restore: "Restaurar",
+    help_touches_edit: "Escolha a tecla ou o clique do mouse que cada botão envia, para cada jogador.",
+    help_touches_apply: "Controles que outros jogadores compartilharam para este jogo. Você vê o que muda antes de aplicar.",
+    help_touches_share: "Envia seus controles ao catálogo da comunidade, assinados com seu apelido.",
+    help_cursor_speed: "A velocidade com que o analógico direito move o cursor neste jogo.",
+    help_show_cursor: "Mostra ou esconde a seta do mouse sobre o jogo.",
+    help_gyro: "Mova o cursor inclinando o console: Ponteiro mira ao girar, Bolinha rola com a inclinação.",
+    help_revert: "Volta os controles que você tinha antes.",
 };
 
 const ZH: Ui = Ui {
@@ -759,6 +894,22 @@ const ZH: Ui = Ui {
     folder_empty_body: "不会删除任何游戏。",
     download: "下载",
     filter_verb: "筛选",
+    page: "翻页",
+    order: "顺序",
+    delete_game_title: "删除这个游戏？",
+    info: "详情",
+    fp_filter: "过滤：{}",
+    on_card: "已在你的存储卡上",
+    preview: "预览",
+    share: "分享",
+    restore: "恢复",
+    help_touches_edit: "为每位玩家选择每个按钮对应的键盘按键或鼠标点击。",
+    help_touches_apply: "其他玩家为这个游戏分享的按键配置。应用前可以看到会改变什么。",
+    help_touches_share: "把你的按键配置发送到社区目录，并署上你的昵称。",
+    help_cursor_speed: "此游戏中右摇杆移动鼠标光标的速度。",
+    help_show_cursor: "在游戏上显示或隐藏鼠标箭头。",
+    help_gyro: "倾斜主机来移动光标：指针模式靠转动瞄准，弹珠模式随倾斜滚动。",
+    help_revert: "恢复你之前的按键配置。",
 };
 
 const TR: Ui = Ui {
@@ -840,6 +991,22 @@ const TR: Ui = Ui {
     folder_empty_body: "Hiçbir oyun silinmez.",
     download: "İndir",
     filter_verb: "Filtrele",
+    page: "Sayfa",
+    order: "Sıra",
+    delete_game_title: "Bu oyun silinsin mi?",
+    info: "Bilgi",
+    fp_filter: "Filtre: {}",
+    on_card: "Zaten kartında",
+    preview: "Önizle",
+    share: "Paylaş",
+    restore: "Geri yükle",
+    help_touches_edit: "Her oyuncu için her düğmenin gönderdiği klavye tuşunu veya fare tıklamasını seç.",
+    help_touches_apply: "Diğer oyuncuların bu oyun için paylaştığı kontroller. Uygulamadan önce neyin değiştiğini görürsün.",
+    help_touches_share: "Kontrollerini takma adınla imzalanmış olarak topluluk kataloğuna gönderir.",
+    help_cursor_speed: "Bu oyunda sağ çubuğun fare imlecini ne kadar hızlı hareket ettirdiği.",
+    help_show_cursor: "Oyunun üzerindeki fare okunu gösterir veya gizler.",
+    help_gyro: "İmleci konsolu eğerek hareket ettir: İşaretçi döndürerek nişan alır, Bilye eğimle yuvarlanır.",
+    help_revert: "Önceki kontrollerini geri getirir.",
 };
 
 pub fn ui() -> &'static Ui {

@@ -3355,10 +3355,15 @@ pub extern "C" fn ruffle_touches_draw() {
         let now = unsafe { ruffle_tick_now() };
         let kind = menu::screen_kind();
         let last = LAST_TOUCHES_KIND.swap(kind, std::sync::atomic::Ordering::Relaxed);
-        if kind != 0 && kind != last {
+        // The sub-menu and the profile flows are pages of the pause sheet: one
+        // replaces the last in place, the way moving between rows does. Only
+        // the editor and its keyboard, which are windows, pop.
+        let sheet = menu::screen_is_sheet();
+        if kind != 0 && kind != last && !sheet {
             backend::render::modal_open_begin();
         }
         let (scale, active, _done) = backend::render::modal_scale_step(now);
+        let active = active && !sheet;
         if active {
             backend.set_ui_modal_scale(scale);
         } else {

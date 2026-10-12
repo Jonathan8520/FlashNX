@@ -8,8 +8,12 @@
 //!     paused, so a brief freeze is fine — no async infra here).
 //!   - **List / Keyboard** — the per-button keymap editor (also used directly by
 //!     the library via `open`). The picker is a visual QWERTY board (issue #55).
-//!   - **Profiles / Preview / ShareConfirm / RevertPreview** — the profile flows,
-//!     drawn with the same generic `draw_library_list_modal` the library uses.
+//!   - **Profiles / Preview / ShareConfirm / RevertPreview** — the profile flows.
+//!
+//! The sub-menu and the profile flows are pages of the pause sheet (the panel
+//! down the left, `kit_side_sheet`), with "Pause › Touches et curseur" on top,
+//! so going into them reads as going deeper into one menu rather than as a
+//! window opening over it. Only the editor and its keyboard are windows.
 //!
 //! All state lives behind a single Mutex so C++ can drive the screen via a thin
 //! FFI surface: `is_active`, `open`/`open_submenu`, `input`, `draw`,
@@ -42,6 +46,12 @@ const TOAST_ERR: u8 = 1;
 const TOAST_INFO: u8 = 2;
 const TOAST_FRAMES: u32 = 150; // ~2.5 s at 60 fps
 
+/// Rows a page of the pause sheet shows at once (it does not scroll), and the
+/// glide keys of its two lists, apart from the pause's own.
+const SHEET_ROWS: usize = 8;
+const GLIDE_KEY_TOUCHES_MENU: u32 = 59;
+const GLIDE_KEY_TOUCHES_PROFILES: u32 = 60;
+
 /// Cap a diff list so the auto-sized modal still fits the screen.
 const MAX_PREVIEW_ROWS: usize = 8;
 
@@ -68,7 +78,8 @@ enum Screen {
     RevertPreview,
     /// Confirm deleting one of MY OWN shared profiles (X on a self-shared row in
     /// the picker). `profile_idx` indexes `matches`. A deletes (hoisted), B back.
-    DeleteConfirm { profile_idx: usize },
+    /// `selection`: 0 = cancel (where it opens), 1 = delete.
+    DeleteConfirm { profile_idx: usize, selection: usize },
     /// Transient loading panel shown for one frame before a deferred profile
     /// network flow runs (so the blocking GitHub call doesn't freeze on stale
     /// content). `draw` runs the stashed `PendingNet` the next frame.
@@ -184,10 +195,9 @@ pub fn touch_select(idx: usize) -> bool {
             s.screen = Screen::List { selection: idx };
             false
         }
-        // The rows of the sub-menu and the profile picker are drawn by the
-        // shared `draw_modal_rows`, which publishes its table like every other
-        // modal in the app -- so they answer a finger for the same reason the
-        // library's modals do.
+        // The rows of the sub-menu and the profile picker are pages of the
+        // pause sheet, whose rows publish their table like every list in the
+        // app -- so they answer a finger for the same reason the library's do.
         Screen::Menu { selection } => {
             // Same count `handle_menu_input` bounds its cursor with.
             if idx > MENU_FIXED_ROWS - 1 + s.can_revert as usize {
@@ -239,6 +249,25 @@ pub fn screen_kind() -> u8 {
             Screen::Loading => 9,
         })
         .unwrap_or(0)
+}
+
+/// Whether the screen up is a page of the pause sheet (the sub-menu, the
+/// profile flows) rather than a window (the editor, its keyboard). A page
+/// replaces the one before it in place; only a window pops.
+pub fn screen_is_sheet() -> bool {
+    TOUCHES
+        .lock()
+        .map(|s| {
+            matches!(
+                s.screen,
+                Screen::Menu { .. }
+                    | Screen::Profiles { .. }
+                    | Screen::Preview { .. }
+                    | Screen::ShareConfirm
+                    | Screen::RevertPreview
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// Open the keymap EDITOR directly (library OPTIONS > TOUCHES > Éditer). The
@@ -433,15 +462,22 @@ pub fn input(button: &str) -> bool {
             handle_profiles_input(&mut s, button, selection);
             true
         }
-        Screen::DeleteConfirm { profile_idx } => {
-            // A deletes my shared profile (HTTPS) — defer + loading panel; B cancels.
-            if button == "A" {
-                drop(s);
-                defer_net(PendingNet::Delete { profile_idx });
-                return true;
-            }
-            if matches!(button, "B" | "Minus") {
-                s.screen = Screen::Profiles { selection: profile_idx };
+        Screen::DeleteConfirm { profile_idx, selection } => {
+            // A on "Delete" deletes my shared profile (HTTPS): defer + loading
+            // panel. A on "Cancel", B or Minus go back to the list.
+            match button {
+                "Left" | "StickLLeft" | "Right" | "StickLRight" | "Up" | "StickLUp" | "Down" | "StickLDown" => {
+                    s.screen = Screen::DeleteConfirm { profile_idx, selection: 1 - selection.min(1) };
+                }
+                "A" if selection == 1 => {
+                    drop(s);
+                    defer_net(PendingNet::Delete { profile_idx });
+                    return true;
+                }
+                "A" | "B" | "Minus" => {
+                    s.screen = Screen::Profiles { selection: profile_idx };
+                }
+                _ => {}
             }
             true
         }
@@ -490,6 +526,24 @@ pub fn input(button: &str) -> bool {
 /// hoisted in `input`.
 fn handle_menu_input(s: &mut State, button: &str, mut selection: usize) {
     let last = MENU_FIXED_ROWS - 1 + s.can_revert as usize;
+    // The three value rows step with Left and Right too, either way.
+    let dir = match button {
+        "Left" | "StickLLeft" => -1,
+        "Right" | "StickLRight" => 1,
+        _ => 0,
+    };
+    if dir != 0 {
+        match selection {
+            MENU_CURSOR => {
+                unsafe { ruffle_cursor_speed_step(dir) };
+            }
+            MENU_SHOWCURSOR => keymap::toggle_show_cursor(),
+            MENU_GYRO => keymap::step_gyro(dir),
+            _ => {}
+        }
+        s.screen = Screen::Menu { selection };
+        return;
+    }
     match button {
         "Up" | "StickLUp" => {
             selection = if selection == 0 { last } else { selection - 1 };
@@ -542,7 +596,7 @@ fn handle_profiles_input(s: &mut State, button: &str, mut selection: usize) {
                 .get(selection)
                 .is_some_and(|m| crate::profiles::is_mine(&m.profile.id))
             {
-                s.screen = Screen::DeleteConfirm { profile_idx: selection };
+                s.screen = Screen::DeleteConfirm { profile_idx: selection, selection: 0 };
                 return;
             }
         }
@@ -1152,8 +1206,9 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
         Err(_) => return,
     };
     let lc = crate::loc::s();
-    // Active game name, shown as the subtitle under the header — same as the
-    // on-cover OPTIONS / profile picker (it was missing in-game).
+    let u = crate::loc_ui::ui();
+    use crate::backend::render::Btn;
+    // Active game name, the sheet's title, as on every page of the pause.
     let game = crate::library::active_display_name().unwrap_or_default();
     match screen {
         Screen::Inactive => {}
@@ -1191,7 +1246,25 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
             if can_revert {
                 rows.push(if has_backup { lc.profile_revert } else { lc.touches_revert_default });
             }
-            backend.draw_library_list_modal(lc.opt_keys, &game, selection, &rows, lc.touches_footer, false);
+            let help = match selection {
+                MENU_EDIT => u.help_touches_edit,
+                MENU_APPLY => u.help_touches_apply,
+                MENU_SHARE => u.help_touches_share,
+                MENU_CURSOR => u.help_cursor_speed,
+                MENU_SHOWCURSOR => u.help_show_cursor,
+                MENU_GYRO => u.help_gyro,
+                _ => u.help_revert,
+            };
+            backend.kit_side_sheet(
+                &[lc.pause_title, lc.menu_keys],
+                &game,
+                &rows,
+                selection,
+                Some(help),
+                &[(&[Btn::A], u.choose), (&[Btn::B], u.back)],
+                GLIDE_KEY_TOUCHES_MENU,
+                (1 << MENU_CURSOR) | (1 << MENU_SHOWCURSOR) | (1 << MENU_GYRO),
+            );
         }
         Screen::List { selection } => {
             // Parallel to PAD_SLOTS, which is both the order the pad lays out
@@ -1267,29 +1340,29 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
                     lc.profile_none.to_string()
                 });
             }
-            let refs: std::vec::Vec<&str> = rows.iter().map(|r| r.as_str()).collect();
-            // Append the delete hint only when sitting on your own profile.
-            let footer = if active_ids
-                .get(selection)
-                .is_some_and(|id| crate::profiles::is_mine(id))
-            {
-                std::format!("{}   {}", lc.profile_footer, lc.profile_del_hint)
-            } else {
-                lc.profile_footer.to_string()
-            };
+            let mine = active_ids.get(selection).is_some_and(|id| crate::profiles::is_mine(id));
             let copy_mode = TOUCHES.lock().map(|s| s.copy_mode).unwrap_or(false);
             let title = if copy_mode { lc.profile_copy_row } else { lc.profile_title };
-            backend.draw_library_list_modal_window(
-                title,
+            // A window of the rows around the cursor: the sheet does not scroll.
+            // Same window `touch_select` maps a tapped row back through.
+            let window = crate::profiles::PICKER_VISIBLE_ROWS;
+            let start = crate::backend::render::list_window_start(selection, rows.len(), window);
+            let end = (start + window).min(rows.len());
+            let refs: std::vec::Vec<&str> = rows[start..end].iter().map(|r| r.as_str()).collect();
+            let hints_mine = [(&[Btn::A][..], u.preview), (&[Btn::X][..], lc.opt_delete), (&[Btn::B][..], u.back)];
+            let hints = [(&[Btn::A][..], u.preview), (&[Btn::B][..], u.back)];
+            backend.kit_side_sheet(
+                &[lc.pause_title, lc.menu_keys, title],
                 &game,
-                selection,
                 &refs,
-                &footer,
-                true,
-                crate::profiles::PICKER_VISIBLE_ROWS,
+                selection.saturating_sub(start),
+                None,
+                if mine { &hints_mine } else { &hints },
+                GLIDE_KEY_TOUCHES_PROFILES,
+                0,
             );
         }
-        Screen::DeleteConfirm { profile_idx } => {
+        Screen::DeleteConfirm { profile_idx, selection } => {
             let name = TOUCHES
                 .lock()
                 .ok()
@@ -1304,37 +1377,74 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
                     })
                 })
                 .unwrap_or_default();
-            let refs = [name.as_str()];
-            // usize::MAX = no cursor (confirm: A deletes / B cancels).
-            backend.draw_library_list_modal(lc.profile_del_confirm, "", usize::MAX, &refs, lc.del_footer, true);
+            use crate::backend::render::{Choice, Icon};
+            backend.draw_confirm(
+                Icon::Trash,
+                lc.profile_del_confirm,
+                "",
+                Some(&name),
+                &[
+                    Choice { label: u.cancel, destructive: false },
+                    Choice { label: lc.opt_delete, destructive: true },
+                ],
+                selection,
+                true,
+            );
         }
         Screen::Preview { .. } => {
             let mut rows = TOUCHES.lock().map(|s| s.preview_rows.clone()).unwrap_or_default();
             if rows.is_empty() {
                 rows.push(lc.profile_preview_none.to_string());
             }
-            let refs: std::vec::Vec<&str> = rows.iter().map(|r| r.as_str()).collect();
-            backend.draw_library_list_modal(lc.profile_preview_title, "", usize::MAX, &refs, lc.profile_preview_footer, true);
+            let refs: std::vec::Vec<&str> = rows.iter().take(SHEET_ROWS).map(|r| r.as_str()).collect();
+            backend.kit_side_sheet(
+                &[lc.pause_title, lc.menu_keys, lc.profile_title],
+                &game,
+                &refs,
+                usize::MAX,
+                Some(lc.profile_preview_title),
+                &[(&[Btn::A], u.apply), (&[Btn::B], u.back)],
+                GLIDE_KEY_TOUCHES_PROFILES,
+                0,
+            );
         }
         Screen::ShareConfirm => {
             let (is_update, mut rows) = TOUCHES
                 .lock()
                 .map(|s| (s.share_is_update, s.preview_rows.clone()))
                 .unwrap_or((false, std::vec::Vec::new()));
-            let subtitle = if is_update { lc.share_confirm_update } else { lc.profile_share_confirm };
+            let question = if is_update { lc.share_confirm_update } else { lc.profile_share_confirm };
             if rows.is_empty() {
                 rows.push(lc.profile_preview_none.to_string());
             }
-            let refs: std::vec::Vec<&str> = rows.iter().map(|r| r.as_str()).collect();
-            backend.draw_library_list_modal(lc.opt_share, subtitle, usize::MAX, &refs, lc.lang_footer, true);
+            let refs: std::vec::Vec<&str> = rows.iter().take(SHEET_ROWS).map(|r| r.as_str()).collect();
+            backend.kit_side_sheet(
+                &[lc.pause_title, lc.menu_keys, lc.opt_share],
+                &game,
+                &refs,
+                usize::MAX,
+                Some(question),
+                &[(&[Btn::A], u.share), (&[Btn::B], u.cancel)],
+                GLIDE_KEY_TOUCHES_PROFILES,
+                0,
+            );
         }
         Screen::RevertPreview => {
             let mut rows = TOUCHES.lock().map(|s| s.preview_rows.clone()).unwrap_or_default();
             if rows.is_empty() {
                 rows.push(lc.profile_preview_none.to_string());
             }
-            let refs: std::vec::Vec<&str> = rows.iter().map(|r| r.as_str()).collect();
-            backend.draw_library_list_modal(lc.revert_preview_title, "", usize::MAX, &refs, lc.revert_preview_footer, true);
+            let refs: std::vec::Vec<&str> = rows.iter().take(SHEET_ROWS).map(|r| r.as_str()).collect();
+            backend.kit_side_sheet(
+                &[lc.pause_title, lc.menu_keys],
+                &game,
+                &refs,
+                usize::MAX,
+                Some(lc.revert_preview_title),
+                &[(&[Btn::A], u.restore), (&[Btn::B], u.back)],
+                GLIDE_KEY_TOUCHES_PROFILES,
+                0,
+            );
         }
     }
     if let Some((msg, kind)) = toast {

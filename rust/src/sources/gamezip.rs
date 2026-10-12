@@ -783,8 +783,6 @@ pub fn write_sidecar_abs(abs_path: &str, bytes: &[u8]) -> bool {
     ok
 }
 
-/// Write `bytes` to `<files_dir>/<rel>` (rel is a forward-slash `content/`-
-/// relative path like `host/path/file.swf`), creating parent dirs. Best-effort.
 extern "C" {
     // C++/libnx file write (cpp/src/swf_picker.cpp). Creates parent dirs +
     // writes the file. Returns 1 on success, 0 on failure. We go through C++
@@ -794,6 +792,8 @@ extern "C" {
     fn swf_picker_write_file(path: *const core::ffi::c_char, data: *const u8, len: u32) -> core::ffi::c_int;
 }
 
+/// Write `bytes` to `<files_dir>/<rel>` (rel is a forward-slash `content/`-
+/// relative path like `host/path/file.swf`), creating parent dirs. Best-effort.
 fn write_tree_file(files_dir: &str, rel: &str, bytes: &[u8]) -> bool {
     let base = files_dir.trim_end_matches('/');
     let full = std::format!("{}/{}", base, rel);
@@ -1174,80 +1174,6 @@ fn scan_names_with_ext(data: &[u8], ext: &[u8], out: &mut std::vec::Vec<std::str
             i += 1;
         }
     }
-}
-
-/// Download a multi-file game's companion SWFs into `files_dir` (the sidecar
-/// `<game>.files/` folder the SidecarNavigator reads at play time). Starts from
-/// the names `main_swf` references, fetches each from `htdocs_base`, then scans
-/// each downloaded companion for further references (breadth-first) until none
-/// remain. `main_name` (the game's own entry file, e.g. "main.swf") is skipped.
-/// Best-effort and synchronous (small files, runs in the post-download finish
-/// step like the auto-cover fetch): a failed/non-SWF fetch is logged and
-/// skipped. Returns the number of companions written. CONTENT-NEUTRAL: same
-/// Flashpoint mirror the GameZIP itself came from, only for the game the user
-/// explicitly downloaded.
-pub fn fetch_siblings(
-    main_swf: &[u8],
-    main_name: &str,
-    htdocs_base: &str,
-    files_dir: &str,
-) -> usize {
-    const MAX_FILES: usize = 32;
-    const PER_FILE_CAP: usize = 4 * 1024 * 1024;
-    let mut queue = scan_swf_siblings(main_swf);
-    if queue.is_empty() {
-        return 0;
-    }
-    if std::fs::create_dir_all(files_dir).is_err() {
-        net::log(&std::format!("siblings: can't create dir {}\n", files_dir));
-        return 0;
-    }
-    let mut seen: std::vec::Vec<std::string::String> =
-        std::vec![main_name.to_ascii_lowercase()];
-    let mut written = 0usize;
-    while let Some(name) = queue.pop() {
-        let lower = name.to_ascii_lowercase();
-        if seen.iter().any(|s| *s == lower) {
-            continue;
-        }
-        seen.push(lower);
-        if written >= MAX_FILES {
-            net::log("siblings: hit MAX_FILES cap, stopping\n");
-            break;
-        }
-        let url = std::format!("{}{}", htdocs_base, name);
-        match net::http_get(&url, PER_FILE_CAP) {
-            Ok(bytes) => {
-                let is_swf = bytes.len() > 8 && {
-                    let sig = &bytes[0..3];
-                    sig == b"FWS" || sig == b"CWS" || sig == b"ZWS"
-                };
-                if !is_swf {
-                    net::log(&std::format!("siblings: {} not a SWF, skip\n", name));
-                    continue;
-                }
-                let dest = std::format!("{}/{}", files_dir, name);
-                if std::fs::write(&dest, &bytes).is_ok() {
-                    written += 1;
-                    net::log(&std::format!(
-                        "siblings: fetched {} ({} bytes) -> {}\n",
-                        name,
-                        bytes.len(),
-                        dest
-                    ));
-                    for more in scan_swf_siblings(&bytes) {
-                        queue.push(more);
-                    }
-                } else {
-                    net::log(&std::format!("siblings: write failed {}\n", dest));
-                }
-            }
-            Err(e) => {
-                net::log(&std::format!("siblings: fetch {} failed: {}\n", url, e));
-            }
-        }
-    }
-    written
 }
 
 /// Bounded file read for the downloaded GameZIP. Mirrors

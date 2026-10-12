@@ -142,16 +142,8 @@ impl SwitchRenderBackend {
     }
 }
 
-/// One row of `draw_rows_window`.
-pub(crate) struct WinRow<'a> {
-    pub icon: Option<Icon>,
-    pub label: &'a str,
-    /// On the right: a count, a size, "in use".
-    pub value: &'a str,
-    /// A small icon after the label, in its colour.
-    pub mark: Option<(Icon, u32)>,
-    pub dim: bool,
-}
+/// One row of `draw_rows_window`: the kit's list row.
+pub(crate) use super::super::kit::list::Row as WinRow;
 
 impl SwitchRenderBackend {
     /// A window holding a list that may scroll, its first `pinned` rows held
@@ -189,13 +181,141 @@ impl SwitchRenderBackend {
         let (x, w) = (spec.x, spec.w);
         self.kit_scroll_rows(&spec, rows.len(), selection, scroll, |s, i, cy, focused| {
             let r = &rows[i];
-            s.kit_list_row(x, cy, w, r.icon, r.label, r.value, r.mark, focused, r.dim);
+            s.kit_row_item(x, cy, w, r, focused);
         });
         if pinned > 0 && rows.len() > pinned {
             let ly = (spec.top + pinned as f32 * MODAL_ROW_H).round();
             self.draw_overlay_rect(x + 12.0, ly, w - 24.0, 1.0, kit::theme::col::LINE);
         }
         self.modal_hints(&frame, hints, false);
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+}
+
+impl SwitchRenderBackend {
+    /// A page with one card in its middle, for work in progress: an icon, what
+    /// is happening, on what, a bar and the numbers under it. `frac` None is an
+    /// amount not known yet: a band sweeps the track instead of a fill claiming
+    /// a share it does not know.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_progress_page(
+        &mut self,
+        icon: Icon,
+        title: &str,
+        name: &str,
+        frac: Option<f32>,
+        detail: &str,
+        hints: &[HintItem],
+    ) {
+        use kit::theme::{col, size};
+        const PAD: f32 = 40.0;
+        const DISC: f32 = 56.0;
+        const BAR_H: f32 = 12.0;
+        self.library_clear();
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        let w = 760.0f32.min(vw - 80.0);
+        let h = 250.0;
+        let x = ((vw - w) * 0.5).round();
+        let y = ((vh - 48.0 - h) * 0.5).round();
+        self.kit_panel(x, y, w, h, false);
+        self.kit_rrect(x + PAD, y + PAD, DISC, DISC, DISC * 0.5, col::CHIP);
+        self.kit_icon(x + PAD + 14.0, y + PAD + DISC * 0.5, 28.0, icon, col::GOLD);
+        let tx = x + PAD + DISC + 20.0;
+        let tw = x + w - PAD - tx;
+        let t = self.kit_fit(title, size::TITLE, tw);
+        self.kit_text_mid(tx, y + PAD + 16.0, size::TITLE, &t, col::TEXT);
+        let n = self.kit_fit_mid(name, size::BODY, tw);
+        self.kit_text_mid(tx, y + PAD + 46.0, size::BODY, &n, col::TEXT2);
+
+        let bx = x + PAD;
+        let bw = w - 2.0 * PAD;
+        let by = y + PAD + DISC + 44.0;
+        self.kit_rrect(bx, by, bw, BAR_H, BAR_H * 0.5, 0xFF_0E_17_2A);
+        match frac {
+            Some(f) => {
+                let f = f.clamp(0.0, 1.0);
+                if f > 0.0 {
+                    self.kit_rrect(bx, by, (bw * f).max(BAR_H), BAR_H, BAR_H * 0.5, col::GOLD);
+                }
+            }
+            None => {
+                let now = unsafe { ruffle_tick_now() };
+                let freq = unsafe { ruffle_tick_freq() } as f32;
+                let t = if freq > 0.0 { (now as f32 / freq) * 0.7 } else { 0.0 };
+                let seg = bw * 0.25;
+                let p = t - t.floor();
+                let sx = bx - seg + (bw + seg) * p;
+                let x0 = sx.max(bx);
+                let x1 = (sx + seg).min(bx + bw);
+                if x1 > x0 {
+                    self.kit_rrect(x0, by, x1 - x0, BAR_H, BAR_H * 0.5, col::GOLD);
+                }
+            }
+        }
+        let d = self.kit_fit(detail, size::LABEL + 1.0, bw);
+        self.kit_text_mid(bx, by + BAR_H + 26.0, size::LABEL + 1.0, &d, col::TEXT2);
+
+        self.kit_footer_band();
+        if !hints.is_empty() {
+            self.kit_hints_right(vw - 40.0, vh - 24.0, hints);
+        }
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+}
+
+impl SwitchRenderBackend {
+    /// The sort picker: the orders as rows with an icon, the one in force
+    /// ticked, and under the title the direction as a two-part switch that X
+    /// flips. Nothing applies before A: B leaves the list as it was.
+    pub(crate) fn draw_sort_window(
+        &mut self,
+        title: &str,
+        options: &[(Icon, &str)],
+        selection: usize,
+        active: Option<usize>,
+        reverse: bool,
+    ) {
+        use super::super::kit::list::ScrollRows;
+        use kit::theme::{col, size};
+        let lc = crate::loc::s();
+        let u = crate::loc_ui::ui();
+        let frame = self.draw_modal_frame(MODAL_W, options.len(), None, false, title, Some(""), None);
+        // The direction, where the subtitle would be.
+        let sx = frame.x + MODAL_ROW_X;
+        let cy = frame.y + 82.0;
+        let gw = self.kit_button(sx, cy, size::GLYPH, Btn::X, col::GLYPH);
+        self.kit_segmented(sx + gw + 10.0, cy, &[lc.sort_dir_asc, lc.sort_dir_desc], reverse as usize, size::LABEL);
+        let spec = ScrollRows {
+            x: frame.x + 16.0,
+            w: frame.w - 32.0,
+            top: frame.rows_top() + MODAL_ROW_CY - MODAL_ROW_H * 0.5,
+            row_h: MODAL_ROW_H,
+            pill_h: MODAL_PILL_H,
+            pinned: 0,
+            visible: options.len(),
+            key: 0x6200_0000,
+            scrollbar_x: None,
+        };
+        let (x, w) = (spec.x, spec.w);
+        self.kit_scroll_rows(&spec, options.len(), selection, 0, |s, i, cy, focused| {
+            let (icon, label) = options[i];
+            let row = WinRow::new(icon, label).mark_if(active == Some(i), Icon::Check, col::OK);
+            s.kit_row_item(x, cy, w, &row, focused);
+        });
+        self.modal_hints(
+            &frame,
+            &[(&[Btn::A], u.apply), (&[Btn::X], u.order), (&[Btn::B], u.cancel)],
+            false,
+        );
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);

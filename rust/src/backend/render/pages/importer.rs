@@ -7,6 +7,7 @@
 //! says what pressing A on it does: a file downloads, an archive opens its list.
 
 use super::super::kit::icons::Icon;
+use super::super::kit::list::Row;
 use super::super::kit::theme::{col, size};
 use super::super::*;
 
@@ -128,7 +129,7 @@ impl SwitchRenderBackend {
                 } else {
                     (Icon::Link, add_label.trim_start_matches(['+', ' ']), "archive.org")
                 };
-                self.kit_list_row(x, rcy, w, Some(icon), label, source, None, focused, false);
+                self.kit_row_item(x, rcy, w, &Row::new(icon, label).value(source), focused);
                 continue;
             }
             let k = i - PINNED;
@@ -250,6 +251,149 @@ impl SwitchRenderBackend {
                 &[(&[Btn::A], a_verb), (&[Btn::Y], u.hint_sort), (&[Btn::Minus], u.filter_verb)],
             );
         }
+        unsafe {
+            glUseProgram(0);
+            glBindVertexArray(0);
+        }
+        self.gl_state.invalidate();
+    }
+}
+
+impl SwitchRenderBackend {
+    /// An archive.org item's files: its name on top, then one row per `.swf`
+    /// with its size, a tick on the ones already on the card. `source` is the
+    /// item's name ("" falls back to the generic title); `outer_clip` is the
+    /// reveal window while the list opens out of its row, intersected with
+    /// the rows' own band.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_library_distant_files(
+        &mut self,
+        selection: usize,
+        scroll_offset: usize,
+        files: &[crate::net::RemoteFile],
+        visible_rows: usize,
+        downloaded: &[std::string::String],
+        filter: Option<&str>,
+        total_unfiltered: usize,
+        source: &str,
+        outer_clip: Option<(f32, f32, f32, f32)>,
+    ) {
+        self.library_clear();
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        let lc = crate::loc::s();
+        let u = crate::loc_ui::ui();
+        let sub = crate::loc::count_line(files.len(), total_unfiltered, filter, || {
+            crate::loc::files_found(files.len())
+        });
+        let title = if source.is_empty() { lc.files_title } else { source };
+        let rows_top = self.kit_page_header(&[u.tab_import], title, Some(&sub)) + 14.0;
+        let pitch = 50.0;
+        let total = files.len();
+        let rows_total = total as u32;
+        let mut cells: std::vec::Vec<GalleryCell> = std::vec::Vec::with_capacity(total);
+        for i in 0..total {
+            cells.push(GalleryCell { row: i as u32, cx: vw * 0.5, x: 0.0, y: rows_top + i as f32 * pitch, w: vw, h: pitch });
+        }
+        if let Ok(mut g) = gallery_cache().lock() {
+            *g = (cells, rows_total);
+        }
+        let band_top = rows_top;
+        let band_bot = rows_top + visible_rows as f32 * pitch;
+        let target_scroll = scroll_offset as f32 * pitch;
+        let target_hover = rows_top + selection as f32 * pitch;
+        let touch_scroll = gallery_touch_scroll_read();
+        let mut scroll_px = target_scroll;
+        let mut hover_y = target_hover;
+        if let Ok(mut a) = gallery_anim().lock() {
+            let now = unsafe { ruffle_tick_now() };
+            if !a.inited {
+                a.inited = true;
+                a.last_tick = now;
+                a.last_sel = selection;
+                a.scroll_px = target_scroll;
+                a.sel_x = 0.0;
+                a.sel_y = target_hover;
+                a.sel_w = 0.0;
+                a.pop = 0.0;
+            } else {
+                let freq = unsafe { ruffle_tick_freq() } as f32;
+                let dt = if freq > 0.0 {
+                    (now.saturating_sub(a.last_tick) as f32 / freq).min(0.1)
+                } else {
+                    1.0 / 60.0
+                };
+                a.last_tick = now;
+                a.last_sel = selection;
+                a.scroll_px = ease_to(a.scroll_px, target_scroll, dt, 16.0);
+                a.sel_y = ease_to(a.sel_y, target_hover, dt, 18.0);
+            }
+            if let Some(px) = touch_scroll {
+                a.scroll_px = px;
+            }
+            scroll_px = a.scroll_px;
+            hover_y = a.sel_y;
+        }
+        if let Ok(mut v) = gallery_view().lock() {
+            *v = GalleryView {
+                scroll_px,
+                pitch,
+                band_top,
+                band_bot,
+                rows_total,
+                rows_visible: visible_rows as u32,
+                horizontal: false,
+                off_min: 0.0,
+                off_max: 0.0,
+            };
+        }
+        // The rows' band, intersected with the reveal window when there is one.
+        let band = (0.0f32, band_top - 2.0, vw, band_bot - band_top + 4.0);
+        let clip = match outer_clip {
+            Some((ox, oy, ow, oh)) => {
+                let x0 = band.0.max(ox);
+                let y0 = band.1.max(oy);
+                let x1 = (band.0 + band.2).min(ox + ow);
+                let y1 = (band.1 + band.3).min(oy + oh);
+                (x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
+            }
+            None => band,
+        };
+        self.set_clip(clip.0, clip.1, clip.2, clip.3);
+        let (x, w) = (40.0, vw - 80.0 - 20.0);
+        if total > 0 {
+            self.kit_focus_pill(x, hover_y - scroll_px + 3.0, w, pitch - 6.0);
+        }
+        for i in 0..total {
+            let y = rows_top + i as f32 * pitch - scroll_px;
+            if y + pitch < band_top - 8.0 || y > band_bot + 8.0 {
+                continue;
+            }
+            let f = &files[i];
+            let have = downloaded.iter().any(|n| n == &f.name);
+            let size = format_size_pretty(f.size_bytes);
+            let row = Row::new(Icon::File, &f.name).value(&size).mark_if(have, Icon::CircleCheck, col::OK);
+            self.kit_row_item(x, y + pitch * 0.5, w, &row, i == selection);
+        }
+        match outer_clip {
+            Some((ox, oy, ow, oh)) => self.set_clip(ox, oy, ow, oh),
+            None => self.clear_clip(),
+        }
+        self.draw_scrollbar(vw - 44.0, rows_top, visible_rows as f32 * pitch, scroll_px, pitch, visible_rows, total);
+
+        // A on a file already on the card does nothing (the download is
+        // refused), so the hint is not offered there.
+        self.kit_footer_band();
+        let have_sel = files.get(selection).map_or(true, |f| downloaded.iter().any(|n| n == &f.name));
+        let page = [Btn::L, Btn::R];
+        let full = [
+            (&[Btn::A][..], u.download),
+            (&[Btn::Y][..], u.hint_sort),
+            (&[Btn::Minus][..], u.filter_verb),
+            (&page[..], u.page),
+            (&[Btn::B][..], u.back),
+        ];
+        self.kit_hints_right(vw - 40.0, vh - 24.0, if have_sel { &full[1..] } else { &full[..] });
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
