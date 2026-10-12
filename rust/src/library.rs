@@ -6478,28 +6478,44 @@ pub(crate) fn importer_view(s: &State) -> std::vec::Vec<usize> {
             }
         })
         .collect();
-    match import_sort_index() {
+    let sort = import_sort_index();
+    let rev = import_sort_reverse();
+    match sort {
         1 => idx.sort_by_key(|&i| importer_label(&s.url_history[i]).to_lowercase()),
         // SOURCE: grouped by host, by name inside a group.
         2 => idx.sort_by_key(|&i| {
             let u = &s.url_history[i];
             (importer_host(u).to_lowercase(), importer_label(u).to_lowercase())
         }),
-        // FILES: biggest source first. A URL never opened has no count, and
-        // sorts last rather than pretending to be empty.
-        3 => idx.sort_by_key(|&i| {
-            let u = &s.url_history[i];
-            let total = importer_progress(s, u).1;
-            (
-                std::cmp::Reverse(total.unwrap_or(0)),
-                total.is_none(),
-                importer_label(u).to_lowercase(),
-            )
-        }),
+        // FILES: biggest source first, or fewest first when turned round. A
+        // URL never opened has no count, and sorts last in BOTH orders rather
+        // than pretending to be empty: turning the finished list round put
+        // every one of them on top, a column of blanks hiding the rest (the
+        // rule `sort_fp_candidates` keeps for the same reason). So the order is
+        // applied here, and the list is not turned round below.
+        3 => {
+            let mut keyed: std::vec::Vec<(usize, Option<u32>, std::string::String)> = idx
+                .iter()
+                .map(|&i| {
+                    let u = &s.url_history[i];
+                    (i, importer_progress(s, u).1, importer_label(u).to_lowercase())
+                })
+                .collect();
+            keyed.sort_by(|a, b| {
+                a.1.is_none()
+                    .cmp(&b.1.is_none())
+                    .then_with(|| {
+                        let (x, y) = (a.1.unwrap_or(0), b.1.unwrap_or(0));
+                        if rev { x.cmp(&y) } else { y.cmp(&x) }
+                    })
+                    .then_with(|| a.2.cmp(&b.2))
+            });
+            idx = keyed.into_iter().map(|k| k.0).collect();
+        }
         // ADDED: history is oldest-first, so newest-first = reversed.
         _ => idx.reverse(),
     }
-    if import_sort_reverse() {
+    if rev && sort != 3 {
         idx.reverse();
     }
     // Favorites pinned on top whatever the sort, exactly like the JOUER gallery
