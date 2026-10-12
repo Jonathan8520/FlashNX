@@ -41,8 +41,10 @@ extern "C" {
     fn https_thumb_slot_status(slot: c_int) -> c_int;
     fn https_thumb_slot_take(slot: c_int, out: *mut c_char, cap: c_int) -> c_int;
     fn https_thumb_cancel();
-    // Synchronous HEAD → Content-Length (or -1). Flashpoint details popup.
-    fn https_head_content_length(url: *const c_char) -> i64;
+    // A HEAD in the same pool, and its answer (Content-Length or -1), taken once
+    // its slot is done. Flashpoint details window.
+    fn https_thumb_start_head(url: *const c_char) -> c_int;
+    fn https_thumb_slot_take_length(slot: c_int) -> i64;
     // header/guide are localized prompt strings supplied by Rust (loc.rs).
     //
     // BUFFER SIZING: the C side limits the keyboard to `(cap - 1) / 4`
@@ -530,12 +532,20 @@ pub(crate) fn thumb_cancel() {
     unsafe { https_thumb_cancel() };
 }
 
-/// Content-Length of `url` via a HEAD request (follows redirects). `None` if the
-/// server doesn't report it / the request fails. Blocking (~a few hundred ms) —
-/// call hoisted out of the LIBRARY lock. Used by the Flashpoint details popup.
-pub(crate) fn head_content_length(url: &str) -> Option<u64> {
+/// Start a HEAD of `url` (follows redirects) in a free thumbnail slot: the size
+/// of what is there without fetching it. Same return as `thumb_start`; poll the
+/// slot with `thumb_slot_status`, then read it with `thumb_slot_take_length`.
+/// The Flashpoint details window's download size, which used to be a blocking
+/// HEAD that froze the window while it ran.
+pub(crate) fn thumb_start_head(url: &str) -> i32 {
     let url_c = cstr(url);
-    let n = unsafe { https_head_content_length(url_c.as_ptr() as *const c_char) };
+    unsafe { https_thumb_start_head(url_c.as_ptr() as *const c_char) }
+}
+
+/// Take a finished HEAD's answer and free its slot: the size, or `None` when the
+/// server did not give one or the request failed.
+pub(crate) fn thumb_slot_take_length(slot: i32) -> Option<u64> {
+    let n = unsafe { https_thumb_slot_take_length(slot) };
     if n > 0 {
         Some(n as u64)
     } else {

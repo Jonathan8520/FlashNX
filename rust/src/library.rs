@@ -1388,9 +1388,12 @@ pub(crate) struct State {
     /// The Flashpoint results page shows a search that failed (`cover_msg` says
     /// why) rather than one that found nothing.
     fp_error: bool,
-    /// The details window's download size is still to be read: the HEAD runs
-    /// on the frame after the window is on screen, never before it opens.
+    /// The details window's download size is still to come: `fp_size_slot` is
+    /// the thumbnail slot asking for it (-1 when none is running yet), for the
+    /// result `fp_size_for`.
     fp_size_pending: bool,
+    fp_size_slot: i32,
+    fp_size_for: usize,
     /// The details window's blurb has arrived (in `fp_desc`); until then the
     /// thumbnail slot fetching it, -1 when none is running yet.
     fp_desc_ready: bool,
@@ -1493,6 +1496,8 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     fp_query: std::string::String::new(),
     fp_error: false,
     fp_size_pending: false,
+    fp_size_slot: -1,
+    fp_size_for: usize::MAX,
     fp_desc_ready: false,
     fp_desc_slot: -1,
     import_return_row: 0,
@@ -3225,9 +3230,12 @@ pub fn reset() {
         s.import_retry = None;
         s.import_fp_suggest.clear();
         s.import_error_back = Screen::Inactive;
-        // The thumbnail pool was just emptied: no blurb is coming any more.
+        // The thumbnail pool was just emptied: no blurb or size is coming any
+        // more.
         s.fp_desc_slot = -1;
         s.fp_desc_ready = false;
+        s.fp_size_slot = -1;
+        s.fp_size_pending = false;
         // url_history + history_idx are deliberately NOT cleared — they
         // persist across back-to-library cycles AND across .nro reboots
         // (loaded fresh from SD by load_history_from_sd at every library
@@ -7291,6 +7299,7 @@ fn start_fp_search(query: &str, origin: Option<usize>) {
         s.fp_query = query.to_string();
         s.fp_sort = (0, false);
         s.fp_desc_slot = -1;
+        s.fp_size_slot = -1;
         match started {
             Ok(()) => {
                 s.cover_msg = std::string::String::new();
@@ -8959,20 +8968,16 @@ fn open_fp_details(s: &mut State, selection: usize, scroll: usize) {
     s.fp_desc.clear();
     s.fp_desc_ready = false;
     s.fp_size_pending = true;
-    FP_SIZE_ARMED.store(false, std::sync::atomic::Ordering::Relaxed);
     s.screen = Screen::FpDetails { selection, scroll, size: 0 };
 }
 
-/// The details window's download size waits one frame, so the window with its
-/// spinner is on screen before the HEAD (which blocks) runs.
-static FP_SIZE_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Fill in the details window: the blurb through the thumbnail pool (async,
-/// like the logos), the size by a HEAD run on the frame after the window has
-/// settled (`settled`: its opening pop is over; a HEAD in the middle of it would
-/// stall the animation). Called once a frame while the window is up, and from
-/// the results page, which collects a blurb still on its way after it closed.
-fn drive_fp_details(settled: bool) {
+/// Fill in the details window: its blurb and its download size, both through
+/// the thumbnail pool (async, like the logos), so the window keeps answering
+/// while they come. The size was a blocking HEAD, which froze the window, its
+/// spinner and its buttons for as long as the server took. Called once a frame
+/// while the window is up, and from the results page, which collects a request
+/// still on its way after the window closed.
+fn drive_fp_details() {
     // The blurb: collect the transfer in flight, or start the one needed.
     let (slot, for_sel, want) = match LIBRARY.lock() {
         Ok(s) => {
@@ -9013,36 +9018,57 @@ fn drive_fp_details(settled: bool) {
         }
     }
 
-    // The size: armed on the first frame, read on the second.
-    let job = match LIBRARY.lock() {
-        Ok(s) => match s.screen {
-            Screen::FpDetails { selection, .. } if s.fp_size_pending => s
-                .cover_candidates
-                .get(selection)
-                .map(|c| (selection, c.id.clone(), c.zipped, c.launch_command.clone())),
-            _ => None,
-        },
-        Err(_) => None,
+    // The size, the same way, by a HEAD.
+    let (slot, for_sel, want) = match LIBRARY.lock() {
+        Ok(s) => {
+            let want = match s.screen {
+                Screen::FpDetails { selection, .. } if s.fp_size_pending => Some(selection),
+                _ => None,
+            };
+            (s.fp_size_slot, s.fp_size_for, want)
+        }
+        Err(_) => return,
     };
-    let Some((sel, id, zipped, launch_command)) = job else { return };
-    if !settled || !FP_SIZE_ARMED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        return;
-    }
-    // Probe the URL the download will ACTUALLY use, mirroring the choice the
-    // `A` branch of `handle_fp_gallery_input` makes: the GameZIP server for a
-    // zipped game, the htdocs mirror for a legacy "loose" one. Probing
-    // `/get?id=` for a legacy entry always 404s.
-    let url = if zipped {
-        Some(crate::sources::gamezip::get_url(&id))
-    } else {
-        crate::sources::gamezip::htdocs_url_from_command(&launch_command)
-    };
-    let size = url.as_deref().and_then(net::head_content_length).unwrap_or(0);
-    if let Ok(mut s) = LIBRARY.lock() {
-        s.fp_size_pending = false;
-        if let Screen::FpDetails { selection, scroll, .. } = s.screen {
-            if selection == sel {
-                s.screen = Screen::FpDetails { selection, scroll, size };
+    if slot >= 0 {
+        net::thumb_pump();
+        if net::thumb_slot_status(slot) != 0 {
+            let size = net::thumb_slot_take_length(slot);
+            if let Ok(mut s) = LIBRARY.lock() {
+                s.fp_size_slot = -1;
+                // An answer for another result is dropped, as a blurb is.
+                if want == Some(for_sel) {
+                    s.fp_size_pending = false;
+                    if let Screen::FpDetails { selection, scroll, .. } = s.screen {
+                        s.screen = Screen::FpDetails { selection, scroll, size: size.unwrap_or(0) };
+                    }
+                }
+            }
+        }
+    } else if let Some(sel) = want {
+        // Probe the URL the download will ACTUALLY use, mirroring the choice the
+        // `A` branch of `handle_fp_gallery_input` makes: the GameZIP server for a
+        // zipped game, the htdocs mirror for a legacy "loose" one. Probing
+        // `/get?id=` for a legacy entry always 404s.
+        let url = LIBRARY.lock().ok().and_then(|s| {
+            s.cover_candidates.get(sel).and_then(|c| {
+                if c.zipped {
+                    Some(crate::sources::gamezip::get_url(&c.id))
+                } else {
+                    crate::sources::gamezip::htdocs_url_from_command(&c.launch_command)
+                }
+            })
+        });
+        let started = url.as_deref().map(net::thumb_start_head);
+        if let Ok(mut s) = LIBRARY.lock() {
+            match started {
+                Some(slot) if slot >= 0 => {
+                    s.fp_size_slot = slot;
+                    s.fp_size_for = sel;
+                }
+                // The pool is busy with logos: asked again next frame.
+                Some(-5) => {}
+                // Nowhere to ask, or no way to: the window does without the size.
+                _ => s.fp_size_pending = false,
             }
         }
     }
@@ -11026,7 +11052,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             if !folding && LIBRARY.lock().map(|s| s.fp_loading).unwrap_or(false) {
                 poll_fp_search();
             }
-            drive_fp_details(false);
+            drive_fp_details();
             // The page opens out of the Flashpoint card and folds back into it,
             // as an archive opens out of its row.
             if let Some((frac, collapsing, done)) = reveal {
@@ -11051,6 +11077,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                         s.fp_error = false;
                         s.fp_loading = false;
                         s.fp_desc_slot = -1;
+                        s.fp_size_slot = -1;
                         let row = s.import_return_row;
                         s.screen = distant_idle_at(&s, row);
                     }
@@ -11060,7 +11087,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             }
         }
         Screen::FpDetails { selection, scroll, size } => {
-            drive_fp_details(!modal_active && !closing);
+            drive_fp_details();
             // The results stay behind the window.
             backend.clear_ui_transform();
             draw_fp_page(backend, selection, scroll, false);
