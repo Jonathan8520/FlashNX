@@ -346,6 +346,15 @@ pub(crate) fn ascent_px(px: f32) -> f32 {
     with_faces(|f| f.ascent(px)).unwrap_or(px * 0.8)
 }
 
+/// The words `kit_wrap` lays out: `text` split on breakable spaces only. A
+/// no-break space (French typography, "Actif\u{a0}: ...") keeps its two
+/// sides on one line, which is its job.
+fn wrap_words(text: &str) -> std::vec::Vec<&str> {
+    text.split(|c: char| c.is_whitespace() && c != '\u{00A0}' && c != '\u{202F}')
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
 // ─── Atlas, per renderer ────────────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
@@ -551,54 +560,108 @@ impl SwitchRenderBackend {
     }
 
     /// `text` on at most `max_lines` lines of `max_w`, broken on spaces (or
-    /// anywhere, for a word wider than a line); the last line is ellipsised.
+    /// anywhere, for a word wider than a line). When the lines run out, the
+    /// last one holds everything left, ellipsised: the cut always shows.
+    ///
+    /// A word wider than a line used to stop being cut once the lines ran
+    /// out, and only the character that overflowed survived on the last line
+    /// ("doodle_jump_fla" over a lone "s"), the rest of the text dropped
+    /// without a mark. The words after it could even add a line past the
+    /// limit.
     pub fn kit_wrap(&mut self, text: &str, px: f32, max_w: f32, max_lines: usize) -> std::vec::Vec<std::string::String> {
+        let max_lines = max_lines.max(1);
         let mut lines: std::vec::Vec<std::string::String> = std::vec::Vec::new();
         let mut cur = std::string::String::new();
-        // Split on breakable spaces only: a no-break space (French typography,
-        // "Actif\u{a0}: ...") keeps its two sides on one line, which is its job.
-        let mut words = text
-            .split(|c: char| c.is_whitespace() && c != '\u{00A0}' && c != '\u{202F}')
-            .filter(|w| !w.is_empty())
-            .peekable();
-        while let Some(word) = words.next() {
+        let words = wrap_words(text);
+        let mut i = 0;
+        while i < words.len() {
+            let word = words[i];
             let candidate = if cur.is_empty() { word.to_string() } else { std::format!("{} {}", cur, word) };
             if self.kit_measure(&candidate, px) <= max_w {
                 cur = candidate;
+                i += 1;
                 continue;
             }
-            if !cur.is_empty() {
+            // A full line is set down only when another may follow it. Set
+            // down first, the one line of a one-line wrap came back as two:
+            // the words that fit, then everything left on a line of its own.
+            if !cur.is_empty() && lines.len() + 1 < max_lines {
                 lines.push(core::mem::take(&mut cur));
             }
             if lines.len() + 1 >= max_lines {
-                // Last line: everything left, ellipsised.
-                let rest: std::vec::Vec<&str> = core::iter::once(word).chain(words.by_ref()).collect();
-                lines.push(self.kit_fit(&rest.join(" "), px, max_w));
+                // Last line: what it holds and everything left, ellipsised if
+                // it does not fit.
+                let mut rest = core::mem::take(&mut cur);
+                for w in &words[i..] {
+                    if !rest.is_empty() {
+                        rest.push(' ');
+                    }
+                    rest.push_str(w);
+                }
+                lines.push(self.kit_fit(&rest, px, max_w));
                 return lines;
             }
             if self.kit_measure(word, px) > max_w {
-                // One word wider than a line: cut it where it overflows.
+                // One word wider than a line: cut it where it overflows, the
+                // rest going on to the next line. A single character wider
+                // than the line keeps a line of its own rather than leaving an
+                // empty one.
+                let chars: std::vec::Vec<char> = word.chars().collect();
                 let mut chunk = std::string::String::new();
-                for ch in word.chars() {
-                    chunk.push(ch);
-                    if self.kit_measure(&chunk, px) > max_w {
+                let mut j = 0;
+                while j < chars.len() {
+                    let started = !chunk.is_empty();
+                    chunk.push(chars[j]);
+                    if started && self.kit_measure(&chunk, px) > max_w {
                         chunk.pop();
                         lines.push(core::mem::take(&mut chunk));
-                        chunk.push(ch);
                         if lines.len() + 1 >= max_lines {
-                            break;
+                            // Last line: the rest of this word and every word
+                            // after it, ellipsised.
+                            let mut rest: std::string::String = chars[j..].iter().collect();
+                            for w in &words[i + 1..] {
+                                rest.push(' ');
+                                rest.push_str(w);
+                            }
+                            lines.push(self.kit_fit(&rest, px, max_w));
+                            return lines;
                         }
+                        // The character that overflowed starts the next line.
+                        continue;
                     }
+                    j += 1;
                 }
                 cur = chunk;
             } else {
                 cur = word.to_string();
             }
+            i += 1;
         }
+        // What is left fits its line: it was only ever grown while it did.
         if !cur.is_empty() {
-            lines.push(if lines.len() + 1 >= max_lines { self.kit_fit(&cur, px, max_w) } else { cur });
+            lines.push(cur);
         }
         lines
+    }
+
+    /// `kit_wrap`'s lines when they show `text` whole, every word on one
+    /// line and nothing cut; None when it would have to break a word or cut
+    /// the text. For a label that tries a wrap before cutting (a game's name
+    /// on a small tile goes on two lines rather than lose its middle).
+    pub fn kit_wrap_whole(
+        &mut self,
+        text: &str,
+        px: f32,
+        max_w: f32,
+        max_lines: usize,
+    ) -> Option<std::vec::Vec<std::string::String>> {
+        let lines = self.kit_wrap(text, px, max_w, max_lines);
+        // Broken in a word or ellipsised, the lines no longer spell the words
+        // with one space between each. A single character wider than a line
+        // keeps a line of its own, too wide.
+        let spelled = lines.join(" ") == wrap_words(text).join(" ");
+        let fits = lines.iter().all(|l| self.kit_measure(l, px) <= max_w);
+        (spelled && fits).then_some(lines)
     }
 
     /// `text`, with characters dropped from the MIDDLE until it fits `max_w`.
@@ -840,11 +903,19 @@ impl SwitchRenderBackend {
     /// The favourite marker: a gold star on a dark chip, for the top-left
     /// corner of a cover.
     pub fn kit_favorite_chip(&mut self, x: f32, y: f32) {
+        self.kit_favorite_chip_faded(x, y, 1.0);
+    }
+
+    /// `kit_favorite_chip`, `alpha` of the way faded in: the launch hands the
+    /// chip over from the tile to the growing cover.
+    pub fn kit_favorite_chip_faded(&mut self, x: f32, y: f32, alpha: f32) {
         use super::theme::col;
         const CHIP: f32 = 26.0;
         const STAR: f32 = 16.0;
-        self.kit_rrect(x, y, CHIP, CHIP, 8.0, 0xB8_0A_10_1C);
+        let a = alpha.clamp(0.0, 1.0);
+        let fade = |c: u32| (((c >> 24) as f32 * a).round() as u32) << 24 | (c & 0x00FF_FFFF);
+        self.kit_rrect(x, y, CHIP, CHIP, 8.0, fade(0xB8_0A_10_1C));
         let w = self.kit_measure("\u{2605}", STAR);
-        self.kit_text_mid((x + (CHIP - w) * 0.5).round(), y + CHIP * 0.5, STAR, "\u{2605}", col::GOLD);
+        self.kit_text_mid((x + (CHIP - w) * 0.5).round(), y + CHIP * 0.5, STAR, "\u{2605}", fade(col::GOLD));
     }
 }

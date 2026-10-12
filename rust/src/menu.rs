@@ -1785,23 +1785,30 @@ pub(crate) fn with_touches_view<R>(
             .choice(&gyro_opts, v.gyro as usize)
             .armed_if(v.armed == Some(TouchesRow::Gyro)),
     ]);
-    let row = TouchesRow::at(v.can_revert, selection);
-    let help = match row {
-        Some(TouchesRow::Edit) => u.help_touches_edit,
-        Some(TouchesRow::Apply) => u.help_touches_apply,
-        Some(TouchesRow::Share) => u.help_touches_share,
-        Some(TouchesRow::Speed) => u.help_cursor_speed,
-        Some(TouchesRow::ShowCursor) => u.help_show_cursor,
+    let help_of = |row: TouchesRow, gyro: u8| match row {
+        TouchesRow::Edit => u.help_touches_edit,
+        TouchesRow::Apply => u.help_touches_apply,
+        TouchesRow::Share => u.help_touches_share,
+        TouchesRow::Speed => u.help_cursor_speed,
+        TouchesRow::ShowCursor => u.help_show_cursor,
         // One help per gyroscope setting, saying what the one in force does.
-        Some(TouchesRow::Gyro) => match v.gyro {
+        TouchesRow::Gyro => match gyro {
             keymap::GYRO_MARBLE => u.help_gyro_marble,
             keymap::GYRO_POINTER => u.help_gyro_pointer,
             _ => u.help_gyro_off,
         },
-        Some(TouchesRow::Revert) if v.has_backup => u.help_revert,
-        Some(TouchesRow::Revert) => u.help_revert_default,
-        None => "",
+        TouchesRow::Revert if v.has_backup => u.help_revert,
+        TouchesRow::Revert => u.help_revert_default,
     };
+    let row = TouchesRow::at(v.can_revert, selection);
+    let help = row.map_or("", |r| help_of(r, v.gyro));
+    // Every row's, and the gyroscope's for each of its settings (the armed
+    // row goes through them), for the help box's height.
+    let mut helps: std::vec::Vec<&str> = (0..TouchesRow::count(v.can_revert))
+        .filter_map(|i| TouchesRow::at(v.can_revert, i))
+        .map(|r| help_of(r, v.gyro))
+        .collect();
+    helps.extend([keymap::GYRO_OFF, keymap::GYRO_MARBLE, keymap::GYRO_POINTER].map(|g| help_of(TouchesRow::Gyro, g)));
     // What A does on the row, and once a value row is armed, what Left /
     // Right, A and B do (input rule 2). X shows where there is a speed of the
     // game's own to drop.
@@ -1816,13 +1823,15 @@ pub(crate) fn with_touches_view<R>(
     sheet.crumbs = crumbs;
     sheet.sections = &sections;
     // 44 px: the two groups and all seven rows (the revert one included) fit
-    // the pause's page without scrolling, 394 px of its 402. At 48 it
-    // scrolled as soon as the revert row was there, and the scrollbar took
-    // 10 px from every row, enough to fold the gyroscope's choice in Spanish,
-    // Italian and Portuguese.
+    // the page without scrolling, 394 px of the 402 a help box of four lines
+    // leaves them (the longest German help, in game and in the launcher).
+    // At 48 it scrolled as soon as the revert row was there, and the
+    // scrollbar took 10 px from every row, enough to fold the gyroscope's
+    // choice in Spanish, Italian and Portuguese.
     sheet.row_h = 44.0;
     sheet.glide_key = GLIDE_KEY_TOUCHES_MENU;
     sheet.help = help;
+    sheet.helps = &helps;
     sheet.hints = match row {
         _ if v.armed.is_some() => &hints_armed,
         Some(TouchesRow::Speed) if v.speed_own => &hints_speed_own,
@@ -1973,6 +1982,16 @@ pub(crate) fn with_profiles_view<R>(
     } else {
         u.help_touches_apply
     };
+    // The helps its rows can show, for the help box's height.
+    let has_copy_row = items.iter().any(|it| crate::profiles::is_copy_row(&it.id));
+    let helps: std::vec::Vec<&str> = if copy_mode {
+        std::vec![u.help_copy_game]
+    } else if has_copy_row {
+        std::vec![u.help_touches_apply, u.help_copy_profile]
+    } else {
+        std::vec![u.help_touches_apply]
+    };
+    sheet.helps = &helps;
     sheet.hints = if mine { &hints_mine } else { &hints };
     f(backend, &sheet)
 }

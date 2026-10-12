@@ -29,6 +29,11 @@ pub(crate) struct Sheet<'a> {
     pub kicker: Option<Icon>,
     pub crumbs: &'a [&'a str],
     pub title: &'a str,
+    /// The title is a name (a game's, a source's): too long, it loses its
+    /// middle, where two episodes of a series do not differ, rather than its
+    /// end, where they do. Cut at its end, the pause's title showed the same
+    /// "Scooby-Doo: Mayan Monster Mayh…" for every episode.
+    pub title_is_name: bool,
     /// A line under the title ("Options de ce jeu").
     pub subtitle: Option<&'a str>,
     /// The game's cover beside the title: (texture, width, height, its
@@ -49,6 +54,14 @@ pub(crate) struct Sheet<'a> {
     /// Glide key of the focus pill; also seeds the scroll's.
     pub glide_key: u32,
     pub help: &'a str,
+    /// Every help this page can show, whichever row has the cursor and
+    /// whatever value a row's help depends on (the overclock's three). The
+    /// help box is as tall as the longest of them at this panel's width, at
+    /// most `HELP_LINES`, and keeps that height while the cursor moves; the
+    /// rows get the rest. Four lines kept on every page left 50 px empty
+    /// over the box in the launcher's Touches et curseur page, while its
+    /// last row was cut by the bottom of the list. Empty: `HELP_LINES`.
+    pub helps: &'a [&'a str],
     /// Keep room for the help box even on a row without help, so the rows do
     /// not move when the cursor goes from one to the other. False for a list
     /// that never has any (a read-only preview).
@@ -67,6 +80,7 @@ impl<'a> Sheet<'a> {
             kicker: None,
             crumbs: &[],
             title,
+            title_is_name: false,
             subtitle: None,
             thumb: None,
             thumb_tile: None,
@@ -77,6 +91,7 @@ impl<'a> Sheet<'a> {
             row_h: 52.0,
             glide_key: 0,
             help: "",
+            helps: &[],
             reserve_help: true,
             hints: &[],
             diff: &[],
@@ -102,6 +117,39 @@ pub(crate) const CASCADE_GAP: f32 = 10.0;
 pub(crate) const OPTIONS_W: f32 = 520.0;
 pub(crate) const OPTIONS_CHILD_W: f32 = 480.0;
 
+/// The cover beside a panel's title (Options.dc.html).
+const THUMB_W: f32 = 96.0;
+const THUMB_H: f32 = 60.0;
+
+/// Where the cover sits in the header of a panel whose left edge is `x`.
+/// This and the three below are the two ends of the parent's head on its way
+/// into the rail (`kit_cascade_on`), and the static header and rail draw from
+/// them too, so the movement starts and ends exactly on them.
+fn header_thumb(x: f32) -> (f32, f32, f32, f32) {
+    (x + 24.0, SHEET_MARGIN + 22.0, THUMB_W, THUMB_H)
+}
+
+/// Where the cover sits at the head of the rail centred on `cx`: the rail's
+/// width less its margins, at 16:10.
+fn rail_thumb(cx: f32) -> (f32, f32, f32, f32) {
+    let w = RAIL_W - 20.0;
+    (cx - w * 0.5, SHEET_MARGIN + 22.0, w, w * 0.625)
+}
+
+/// The size of a panel's own icon on its caption line.
+const KICKER_ICON: f32 = 14.0;
+
+/// The panel's own icon on its caption line (`sheet_kicker`), for a panel
+/// whose left edge is `x`: its left edge, its centre line and its size.
+fn header_kicker(x: f32) -> (f32, f32, f32) {
+    (x + 24.0, SHEET_MARGIN + 22.0 + 8.5, KICKER_ICON)
+}
+
+/// The same icon at the head of the rail centred on `cx`.
+fn rail_kicker(cx: f32) -> (f32, f32, f32) {
+    (cx - 10.0, SHEET_MARGIN + 22.0 + 8.5, 20.0)
+}
+
 /// Which edge a cascade hangs from.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Side {
@@ -114,16 +162,37 @@ pub(crate) enum Side {
 const SECTION_H: f32 = 36.0;
 /// Rows are this far apart beyond their own height.
 const ROW_GAP: f32 = 2.0;
-/// The help box always gets room for four lines, so the rows' area does not
-/// change size (and the list does not jump) when the help under it grows.
-/// Four, not three: a French help naming three options runs to a fourth line
-/// in a 440 px panel, and its end was the part that got cut.
+/// The most lines a panel's help box holds. Four, not three: a French help
+/// naming three options runs to a fourth line in a 440 px panel, and its end
+/// was the part that got cut. A page whose helps are all shorter keeps only
+/// the lines its longest takes (`Sheet::helps`).
 const HELP_LINES: usize = 4;
 const HINTS_BAND: f32 = 60.0;
 
-/// The room kept for the help box over the hints, with its gap.
-fn help_room() -> f32 {
-    28.0 + (size::LABEL * 1.45).round() * HELP_LINES as f32 + 10.0
+/// The room kept for a help box of `lines` lines over the hints, with its
+/// gap: none for none.
+fn help_room(lines: usize) -> f32 {
+    if lines == 0 {
+        0.0
+    } else {
+        super::controls::help_box_h(lines) + 10.0
+    }
+}
+
+/// How many lines each help took in a help box, by its text and the box's
+/// width (`help_key`): a page asks for the longest of its helps several times
+/// a frame (its frame, its rows, the rail it folds into), and wrapping every
+/// one of them each time cost a few thousand glyph lookups a frame.
+static HELP_FIT: std::sync::Mutex<std::vec::Vec<(u64, u8)>> = std::sync::Mutex::new(std::vec::Vec::new());
+
+/// FNV-1a of a help's text, seeded with the width it is wrapped at.
+fn help_key(text: &str, w: f32) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ w.to_bits() as u64;
+    for b in text.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
 }
 
 /// The bottom of the pause's panels as last drawn (`kit_cascade`), for what
@@ -183,7 +252,7 @@ impl SwitchRenderBackend {
     /// so its rows stay exactly where they were while it folds.
     fn sheet_header_h(&mut self, s: &Sheet) -> f32 {
         if s.thumb.is_some() {
-            return 22.0 + 60.0 + 18.0;
+            return 22.0 + THUMB_H + 18.0;
         }
         let mut h = 22.0;
         if s.kicker.is_some() || !s.crumbs.is_empty() {
@@ -199,32 +268,75 @@ impl SwitchRenderBackend {
         h + 16.0
     }
 
-    /// Top and height of the panel for `s`. In landscape every panel is the
-    /// screen's height. In portrait (a turned picture, 1280 tall) a panel that
-    /// tall put the help box 600 px under the rows it explains, and its dim
-    /// covered the lower half of the picture, where ÉCRAN shows what it does:
-    /// there a panel hugs its content, from the top, never taller than the
-    /// screen. The help box keeps its reserved lines, so a panel does not
-    /// change height as the cursor moves.
-    fn sheet_frame(&mut self, s: &Sheet) -> (f32, f32) {
+    /// Top and height of the panel for `s`, `w` wide. In landscape every panel
+    /// is the screen's height. In portrait (a turned picture, 1280 tall) a
+    /// panel that tall put the help box 600 px under the rows it explains, and
+    /// its dim covered the lower half of the picture, where ÉCRAN shows what
+    /// it does: there a panel hugs its content, from the top, never taller
+    /// than the screen. The help box keeps its lines whichever row has the
+    /// cursor (`sheet_help_lines`), so a panel does not change height as the
+    /// cursor moves.
+    fn sheet_frame(&mut self, s: &Sheet, w: f32) -> (f32, f32) {
         let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
         let full = vh - 2.0 * SHEET_MARGIN;
         if vh <= vw {
             return (SHEET_MARGIN, full);
         }
         let body = if s.diff.is_empty() { Self::sheet_layout(s).1 } else { SECTION_H + s.diff.len() as f32 * s.row_h };
-        let help = if s.reserve_help { help_room() } else { 0.0 };
+        let help = help_room(self.sheet_help_lines(s, w));
         let content = self.sheet_header_h(s) + 10.0 + body + help + HINTS_BAND;
         (SHEET_MARGIN, content.min(full).round())
     }
 
-    /// The caption line: an icon and the path, the last step brighter.
-    fn sheet_kicker(&mut self, x: f32, cy: f32, max_w: f32, s: &Sheet) {
+    /// How many lines the help box of `s` keeps in a panel `w` wide: as many
+    /// as the longest of its helps takes (the one showing among them), at
+    /// most `HELP_LINES`; `HELP_LINES` for a page that does not list its
+    /// helps, none for a page that keeps no room.
+    fn sheet_help_lines(&mut self, s: &Sheet, w: f32) -> usize {
+        if !s.reserve_help {
+            return 0;
+        }
+        if s.helps.is_empty() {
+            return HELP_LINES;
+        }
+        let box_w = w - 32.0;
+        let mut most = 0;
+        for text in s.helps.iter().chain(core::iter::once(&s.help)) {
+            let key = help_key(text, box_w);
+            let known = HELP_FIT
+                .lock()
+                .ok()
+                .and_then(|g| g.iter().find(|(k, _)| *k == key).map(|(_, n)| *n as usize));
+            let n = match known {
+                Some(n) => n,
+                None => {
+                    let n = self.kit_help_lines(text, box_w, HELP_LINES);
+                    if let Ok(mut g) = HELP_FIT.lock() {
+                        // A few pages' worth in each of the languages a player
+                        // goes through; a long session starts over now and then.
+                        if g.len() >= 256 {
+                            g.clear();
+                        }
+                        g.push((key, n as u8));
+                    }
+                    n
+                }
+            };
+            most = most.max(n);
+        }
+        most
+    }
+
+    /// The caption line: an icon and the path, the last step brighter. `head`
+    /// false leaves the icon's place empty: it is on its way to the rail.
+    fn sheet_kicker(&mut self, x: f32, cy: f32, max_w: f32, s: &Sheet, head: bool) {
         let px = size::CAPTION + 1.0;
         let mut cx = x;
         if let Some(ic) = s.kicker {
-            self.kit_icon(cx, cy, 14.0, ic, col::TEXT3);
-            cx += 14.0 + 8.0;
+            if head {
+                self.kit_icon(cx, cy, KICKER_ICON, ic, col::TEXT3);
+            }
+            cx += KICKER_ICON + 8.0;
         }
         let end = x + max_w;
         let sep = "  \u{203A}  ";
@@ -256,35 +368,46 @@ impl SwitchRenderBackend {
         }
     }
 
-    /// Draw the header of `s` in a panel at `x`, `w` wide. `chips` false keeps
-    /// their room empty (the rail). Returns the y of the hairline under it.
-    fn sheet_header(&mut self, s: &Sheet, x: f32, w: f32, chips: bool) -> f32 {
+    /// Draw the header of `s` in a panel at `x`, `w` wide. `fold` is how far
+    /// the panel has folded towards its rail (`kit_cascade_on`), 0 when it
+    /// stands: folding, the place of its head (its cover, else its own icon)
+    /// is left empty, the head being on its way to the rail. Returns the y of
+    /// the hairline under it.
+    fn sheet_header(&mut self, s: &Sheet, x: f32, w: f32, fold: f32) -> f32 {
         let top = SHEET_MARGIN;
         let mut y = top + 22.0;
         let inner = w - 48.0;
+        let head = fold <= 0.0;
         if let Some(thumb) = s.thumb {
-            const TW: f32 = 96.0;
-            const TH: f32 = 60.0;
-            self.sheet_thumb(x + 24.0, y, TW, TH, thumb, s.thumb_tile);
-            let tx = x + 24.0 + TW + 16.0;
-            let tmax = x + w - 24.0 - tx;
-            // A game's name: cut in the middle, where two episodes of a series
-            // differ at the end.
-            let t = self.kit_fit_mid(s.title, size::WINDOW_TITLE - 1.0, tmax);
-            let has_sub = s.subtitle.is_some();
-            let tcy = if has_sub { y + 20.0 } else { y + TH * 0.5 };
-            self.kit_text_mid(tx, tcy, size::WINDOW_TITLE - 1.0, &t, col::TEXT);
-            if let Some(sub) = s.subtitle {
-                let st = self.kit_fit(sub, size::CAPTION + 1.0, tmax);
-                self.kit_text_mid(tx, y + 44.0, size::CAPTION + 1.0, &st, col::TEXT3);
+            let (bx, by, bw, bh) = header_thumb(x);
+            if head {
+                self.sheet_thumb(bx, by, bw, bh, thumb, s.thumb_tile, 2);
             }
-            y += TH + 18.0;
+            // The cover on its way to the rail crosses the title beside it:
+            // the title and the line under it fade out as it goes, gone
+            // before the rail takes over.
+            let fade = (1.0 - fold * 2.5).clamp(0.0, 1.0);
+            let ink = |rgba: u32| (((rgba >> 24) as f32 * fade).round() as u32) << 24 | (rgba & 0x00FF_FFFF);
+            let tx = bx + bw + 16.0;
+            let tmax = x + w - 24.0 - tx;
+            if fade > 0.0 {
+                let t = self.sheet_title_fit(s, size::WINDOW_TITLE - 1.0, tmax);
+                let has_sub = s.subtitle.is_some();
+                let tcy = if has_sub { y + 20.0 } else { y + THUMB_H * 0.5 };
+                self.kit_text_mid(tx, tcy, size::WINDOW_TITLE - 1.0, &t, ink(col::TEXT));
+                if let Some(sub) = s.subtitle {
+                    let st = self.kit_fit(sub, size::CAPTION + 1.0, tmax);
+                    self.kit_text_mid(tx, y + 44.0, size::CAPTION + 1.0, &st, ink(col::TEXT3));
+                }
+            }
+            y += THUMB_H + 18.0;
         } else {
             if s.kicker.is_some() || !s.crumbs.is_empty() {
-                self.sheet_kicker(x + 24.0, y + 8.5, inner, s);
+                let (kx, kcy, _) = header_kicker(x);
+                self.sheet_kicker(kx, kcy, inner, s, head);
                 y += 17.0 + 6.0;
             }
-            let t = self.kit_fit(s.title, size::WINDOW_TITLE + 2.0, inner);
+            let t = self.sheet_title_fit(s, size::WINDOW_TITLE + 2.0, inner);
             self.kit_text_mid(x + 24.0, y + 14.5, size::WINDOW_TITLE + 2.0, &t, col::TEXT);
             y += 29.0;
             if let Some(sub) = s.subtitle {
@@ -294,12 +417,10 @@ impl SwitchRenderBackend {
             }
             if !s.chips.is_empty() {
                 y += 12.0;
-                if chips {
-                    let mut cx = x + 24.0;
-                    for (ic, text, ink) in s.chips {
-                        let cw = self.kit_status_chip(cx, y + 14.0, *ic, text, *ink);
-                        cx += cw + 8.0;
-                    }
+                let mut cx = x + 24.0;
+                for (ic, text, ink) in s.chips {
+                    let cw = self.kit_status_chip(cx, y + 14.0, *ic, text, *ink);
+                    cx += cw + 8.0;
                 }
                 y += 28.0;
             }
@@ -310,15 +431,65 @@ impl SwitchRenderBackend {
         line_y
     }
 
+    /// The title of `s` cut to `max_w` at `px`: in the middle for a name
+    /// (`title_is_name`), at its end otherwise.
+    fn sheet_title_fit(&mut self, s: &Sheet, px: f32, max_w: f32) -> std::string::String {
+        if s.title_is_name {
+            self.kit_fit_mid(s.title, px, max_w)
+        } else {
+            self.kit_fit(s.title, px, max_w)
+        }
+    }
+
+    /// The head of `s`, its cover or else its own icon, `e` of the way from
+    /// its place in the header of the full panel at `x` (0) to the head of the
+    /// settled rail at `rail_x` (1). On the fold's progress, so it keeps to
+    /// the panel's visible part as the edge moves in, and its two ends are
+    /// exactly where the header and the rail draw it. A game with no cover
+    /// shows its generated tile at every size in between, its name laid out
+    /// again for each (`kit_default_tile_small`): on two lines, if the header
+    /// has it on two, while the box is tall enough and they show it whole,
+    /// then on one, cut in the middle, as in the rail.
+    fn sheet_head_between(&mut self, s: &Sheet, x: f32, rail_x: f32, e: f32) {
+        let mix = |a: f32, b: f32| a + (b - a) * e;
+        let rail_cx = rail_x + RAIL_W * 0.5;
+        if let Some(thumb) = s.thumb {
+            let (ax, ay, aw, ah) = header_thumb(x);
+            let (bx, by, bw, bh) = rail_thumb(rail_cx);
+            // Never more lines on the way than in the header. A short name,
+            // whole on one line there, would otherwise go on two for a frame
+            // or two, once one line no longer held it and before the box got
+            // too low for two ("Pac Man" at e = 0.62), then back to one, cut.
+            let most = s.thumb_tile.map_or(2, |(_, name)| self.kit_default_tile_small_lines(aw, ah, name, 2).len());
+            self.sheet_thumb(mix(ax, bx), mix(ay, by), mix(aw, bw), mix(ah, bh), thumb, s.thumb_tile, most);
+        } else if let Some(ic) = s.kicker {
+            let (ax, acy, apx) = header_kicker(x);
+            let (bx, bcy, bpx) = rail_kicker(rail_cx);
+            // A whole size: the icon is rasterized at the size it is drawn.
+            self.kit_icon(mix(ax, bx), mix(acy, bcy), mix(apx, bpx).round(), ic, col::TEXT3);
+        }
+    }
+
     /// A panel's cover in a `w` x `h` box: the cover rule (filled when little
     /// is cropped, else whole over its blur), the generated tile when there is
-    /// no cover yet.
-    fn sheet_thumb(&mut self, x: f32, y: f32, w: f32, h: f32, thumb: (GLuint, u32, u32, GLuint), tile: Option<(u32, &str)>) {
+    /// no cover yet, its name on at most `most_lines` (the box is always a
+    /// small one: the header's, the rail's or one in between).
+    #[allow(clippy::too_many_arguments)]
+    fn sheet_thumb(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        thumb: (GLuint, u32, u32, GLuint),
+        tile: Option<(u32, &str)>,
+        most_lines: usize,
+    ) {
         let (tex, tw, th, amb) = thumb;
         if tex != 0 && tw > 0 && th > 0 {
             self.kit_cover(x, y, w, h, tex, tw, th, amb, 1.0);
         } else if let Some((chip, name)) = tile {
-            self.kit_default_tile(x, y, w, h, chip, name);
+            self.kit_default_tile_small(x, y, w, h, chip, name, most_lines);
         } else {
             self.kit_rrect(x, y, w, h, 8.0, col::TILE);
         }
@@ -342,23 +513,31 @@ impl SwitchRenderBackend {
     /// The whole panel, at `x`, `w` wide, full height. Publishes its rows for
     /// touch when it has a cursor.
     pub(crate) fn kit_sheet_at(&mut self, s: &Sheet, x: f32, w: f32) {
-        self.sheet_draw(s, x, w, true);
+        self.sheet_draw(s, x, w, true, 0.0);
     }
 
     /// `kit_sheet_at`; `publish` false for a panel that is only being shown on
-    /// its way somewhere (it must not take the taps of the page in front).
-    fn sheet_draw(&mut self, s: &Sheet, x: f32, w: f32, publish: bool) {
-        let (top, h) = self.sheet_frame(s);
+    /// its way somewhere (it must not take the taps of the page in front),
+    /// `fold` above 0 for one folding into its rail (`sheet_header`).
+    fn sheet_draw(&mut self, s: &Sheet, x: f32, w: f32, publish: bool, fold: f32) {
+        let (top, h) = self.sheet_frame(s, w);
         self.kit_panel(x, top, w, h, false);
-        let line_y = self.sheet_header(s, x, w, true);
+        let line_y = self.sheet_header(s, x, w, fold);
 
-        // The help box and the hints, from the bottom up.
+        // The help box and the hints, from the bottom up. The box is as tall
+        // as the page's longest help, whichever row it explains: its top edge
+        // stays put while the cursor moves, and the list ends right over it.
         let hints_cy = top + h - HINTS_BAND * 0.5;
         let help_bottom = top + h - HINTS_BAND;
         let help_w = w - 32.0;
-        let help_room = if s.reserve_help { help_room() } else { 0.0 };
+        let help_lines = self.sheet_help_lines(s, w);
+        let help_room = help_room(help_lines);
         if !s.help.trim().is_empty() {
-            self.kit_help_box(x + 16.0, help_bottom, help_w, s.help, HELP_LINES);
+            if help_lines > 0 {
+                self.kit_help_box_lines(x + 16.0, help_bottom, help_w, s.help, help_lines);
+            } else {
+                self.kit_help_box(x + 16.0, help_bottom, help_w, s.help, HELP_LINES);
+            }
         }
         // The bar fits the panel: a hint that would run past its edge (a
         // long translation, a row with four of them) is left out, from the
@@ -449,12 +628,12 @@ impl SwitchRenderBackend {
     }
 
     /// The scroll the rows of `s` rest at with row `row` centred, and the top
-    /// and bottom of their area, for a panel at full height: the rail draws its
-    /// icons where the full panel had its rows.
-    fn sheet_rows_frame(&mut self, s: &Sheet, row: usize) -> (f32, f32, f32) {
-        let (top, h) = self.sheet_frame(s);
+    /// and bottom of their area, for the full panel, `w` wide: the rail draws
+    /// its icons where the full panel had its rows.
+    fn sheet_rows_frame(&mut self, s: &Sheet, row: usize, w: f32) -> (f32, f32, f32) {
+        let (top, h) = self.sheet_frame(s, w);
         let area_top = top + self.sheet_header_h(s) + 10.0;
-        let help_room = if s.reserve_help { help_room() } else { 0.0 };
+        let help_room = help_room(self.sheet_help_lines(s, w));
         let area_bot = top + h - HINTS_BAND - help_room;
         let area_h = (area_bot - area_top).max(s.row_h);
         let (ys, content_h) = Self::sheet_layout(s);
@@ -601,23 +780,43 @@ impl SwitchRenderBackend {
     /// was, the one the page came from on a pill with a chevron pointing at the
     /// page. It is the path, and the page's caption spells it out; a tap on
     /// either goes back a level (`kit_cascade_on`), as does the direction
-    /// pointing at it (input rule 3).
-    pub(crate) fn kit_sheet_rail(&mut self, s: &Sheet, x: f32, w: f32, branch: usize, side: Side) {
+    /// pointing at it (input rule 3). `full_w` is the parent's own width,
+    /// which its rows were laid out at; `head` false leaves the head's place
+    /// empty while the head travels on its own (`kit_cascade_on`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn kit_sheet_rail(
+        &mut self,
+        s: &Sheet,
+        x: f32,
+        w: f32,
+        branch: usize,
+        side: Side,
+        full_w: f32,
+        head: bool,
+    ) {
         // The parent's own height: in portrait it hugs its rows, and the rail
         // keeps the panel it folds from.
-        let (top, h) = self.sheet_frame(s);
+        let (top, h) = self.sheet_frame(s, full_w);
         self.kit_panel(x, top, w, h, false);
-        let cx = x + w * 0.5;
+        // The icons stand where the settled rail has them, on the side it
+        // hangs from, while it is still narrowing. Centred in a rail still
+        // three or four times its width, they appeared at the hand-over about
+        // a hundred pixels from there (91 in the pause, 111 in a game's
+        // options) and slid back.
+        let cx = if side == Side::Left { x + RAIL_W * 0.5 } else { x + w - RAIL_W * 0.5 };
         // The head: the panel's own icon (the pause's), or its cover.
-        if let Some(thumb) = s.thumb {
-            let (tw_, th_) = ((w - 20.0).max(8.0), ((w - 20.0) * 0.625).max(5.0));
-            self.sheet_thumb(cx - tw_ * 0.5, top + 22.0, tw_, th_, thumb, s.thumb_tile);
-        } else if let Some(ic) = s.kicker {
-            self.kit_icon(cx - 10.0, top + 22.0 + 8.5, 20.0, ic, col::TEXT3);
+        if head {
+            if let Some(thumb) = s.thumb {
+                let (bx, by, bw, bh) = rail_thumb(cx);
+                self.sheet_thumb(bx, by, bw, bh, thumb, s.thumb_tile, 2);
+            } else if let Some(ic) = s.kicker {
+                let (ix, icy, ipx) = rail_kicker(cx);
+                self.kit_icon(ix, icy, ipx, ic, col::TEXT3);
+            }
         }
         let line_y = (top + self.sheet_header_h(s)).round();
         self.draw_overlay_rect(x + 12.0, line_y, w - 24.0, 1.0, col::LINE);
-        let (scroll, area_top, area_bot) = self.sheet_rows_frame(s, branch);
+        let (scroll, area_top, area_bot) = self.sheet_rows_frame(s, branch, full_w);
         let (ys, _) = Self::sheet_layout(s);
         self.set_clip(x, area_top, w, area_bot - area_top);
         for (i, row) in s.rows.iter().enumerate() {
@@ -673,9 +872,9 @@ impl SwitchRenderBackend {
         const DIM: u32 = col::SCRIM_GAME;
         let a = (DIM >> 24) as f32 * self.ui_sheet_reveal.clamp(0.0, 1.0);
         let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
-        let (_, parent_h) = self.sheet_frame(parent);
+        let (_, parent_h) = self.sheet_frame(parent, SHEET_W);
         let child_h = match child {
-            Some(c) => self.sheet_frame(c).1,
+            Some(c) => self.sheet_frame(c, CHILD_W).1,
             None => 0.0,
         };
         let bottom = SHEET_MARGIN + parent_h.max(child_h);
@@ -713,7 +912,10 @@ impl SwitchRenderBackend {
     /// panel down (its controls, hints and help go first, its icons last), and
     /// the page is uncovered from the rail outwards, at its final place: text
     /// that slides is text nobody can read until it stops. Halfway, the cut
-    /// panel gives way to the rail. B plays it backwards.
+    /// panel gives way to the rail. The parent's head, its cover or its own
+    /// icon, is the one thing that travels: drawn on its own over both, it
+    /// goes from its place in the header to the rail's head on the fold's
+    /// own progress (`sheet_head_between`). B plays it all backwards.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn kit_cascade_on(
         &mut self,
@@ -758,17 +960,32 @@ impl SwitchRenderBackend {
         }
         let px = at(pw);
         if e < 0.5 {
-            // The full panel, cut down by its moving edge (and its shadow with
-            // it), drawn where it stood.
-            self.set_clip_outer(Some((px - 30.0, 0.0, pw + 60.0, vh)));
-            self.sheet_draw(parent, at(full_w), full_w, false);
+            // The full panel, drawn where it stood and cut at its moving edge,
+            // its shadow kept on the side it hangs from. The cut let 30 px of
+            // the panel through past the edge: the border line ran across the
+            // rows, and the panel went on beyond it without one.
+            let clip = if side == Side::Left { (px - 40.0, 0.0, pw + 40.0, vh) } else { (px, 0.0, pw + 40.0, vh) };
+            self.set_clip_outer(Some(clip));
+            self.sheet_draw(parent, at(full_w), full_w, false, e);
+            // The narrowing panel's shadow past its edge, where the full
+            // panel's went with the part cut away, as the rail has its own.
+            let (ptop, ph) = self.sheet_frame(parent, full_w);
+            let beyond = if side == Side::Left { (px + pw, 0.0, 40.0, vh) } else { (px - 40.0, 0.0, 40.0, vh) };
+            self.set_clip_outer(Some(beyond));
+            self.kit_shadow(px, ptop + 10.0, pw, ph, radius::PANEL, 26.0, col::SHADOW);
             self.set_clip_outer(None);
             // The moving edge itself, so the cut reads as the panel's border.
             let ex = if side == Side::Left { px + pw - 1.0 } else { px };
-            let (ptop, ph) = self.sheet_frame(parent);
             self.draw_overlay_rect(ex, ptop + 20.0, 1.0, ph - 40.0, col::PANEL_LINE);
         } else {
-            self.kit_sheet_rail(parent, px, pw, branch, side);
+            self.kit_sheet_rail(parent, px, pw, branch, side, full_w, e >= 1.0);
+        }
+        // The head on its way, over the panel it leaves and the rail it joins.
+        // Each of them drew its own copy before: the header's was cut away by
+        // the moving edge, then the rail's popped up at the hand-over, as wide
+        // as the rail was then (278 px in a game's options) and shrinking.
+        if e < 1.0 {
+            self.sheet_head_between(parent, at(full_w), at(RAIL_W), e);
         }
         // Settled, the rail and the page's "‹ Parent" caption take a finger
         // back a level, as B does: both look like the way back (input rule
@@ -790,8 +1007,13 @@ impl SwitchRenderBackend {
         }
     }
 
-    /// The page behind a panel, darkened (the scrim of a window).
+    /// The page behind a panel, darkened (the scrim of a window), as far as
+    /// the panel has come in (`ui_sheet_reveal`, 1 when it stands): a game's
+    /// options and a source's darkened the library at full strength on the
+    /// panel's first frame, and on the way out kept it dark until the slide
+    /// had ended, then let go in one frame. Their callers set the slide first.
     pub(crate) fn kit_scrim(&mut self, rgba: u32) {
-        self.fill_screen_dim(rgba);
+        let a = ((rgba >> 24) as f32 * self.ui_sheet_reveal.clamp(0.0, 1.0)).round() as u32;
+        self.fill_screen_dim(a << 24 | (rgba & 0x00FF_FFFF));
     }
 }

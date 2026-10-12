@@ -7523,11 +7523,9 @@ fn with_source_sheet<R>(
         Row::new(Icon::Trash, u.imp_delete_source).danger(),
     ];
     let help_edit = u.imp_help_src_edit.replacen("{}", &url, 1);
-    let help = match selection {
-        0 => u.imp_help_src_fav,
-        1 => help_edit.as_str(),
-        _ => lc.histdel_msg,
-    };
+    // One per row, in order; all of them size the help box.
+    let helps = [u.imp_help_src_fav, help_edit.as_str(), lc.histdel_msg];
+    let help = helps[selection.min(helps.len() - 1)];
     let a_verb = match selection {
         // The favourite is a switch, as in a game's options, and A says so in
         // the same word: it read "Ajouter aux favoris" / "Retirer des favoris"
@@ -7539,6 +7537,8 @@ fn with_source_sheet<R>(
     let hints = [(&[Btn::A][..], a_verb), (&[Btn::B][..], u.back)];
     let crumbs = [u.tab_import];
     let mut sheet = Sheet::new(&name, &rows, selection);
+    // A source's name, cut in the middle as its row in the list cuts it.
+    sheet.title_is_name = true;
     sheet.kicker = Some(if direct { Icon::File } else { Icon::Archive });
     sheet.crumbs = &crumbs;
     sheet.subtitle = Some(u.imp_src_sub);
@@ -7546,6 +7546,7 @@ fn with_source_sheet<R>(
     sheet.row_h = 48.0;
     sheet.glide_key = 0x6400_0000;
     sheet.help = help;
+    sheet.helps = &helps;
     sheet.hints = &hints;
     Some(f(backend, &sheet))
 }
@@ -7572,11 +7573,13 @@ fn draw_source_options(
     // L and R do not switch tabs under the panel: no L / R chips.
     backend.draw_navbar_with(Tab::Importer.index(), logo, false);
     crate::backend::render::navbar_clear();
-    backend.kit_scrim(0x9E_06_0A_14);
-    crate::backend::render::set_ui_screen_kind(kind);
+    // The slide first: the scrim darkens the list as far as the panel has
+    // come in.
     if let Some(p) = slide {
         backend.set_ui_sheet_slide_right(p);
     }
+    backend.kit_scrim(0x9E_06_0A_14);
+    crate::backend::render::set_ui_screen_kind(kind);
     let (vw, _) = backend.screen_size();
     let x = vw - crate::backend::render::SHEET_MARGIN - OPTIONS_W;
     with_source_sheet(backend, url_idx, selection, |b, sheet| b.kit_sheet_at(sheet, x, OPTIONS_W));

@@ -5516,6 +5516,26 @@ pub fn gallery_sel_rect_read() -> (f32, f32, f32, f32) {
     gallery_sel_rect().lock().map(|r| *r).unwrap_or((0.0, 0.0, 0.0, 0.0))
 }
 
+/// The corner badges the selected tile wears in the view that published
+/// `gallery_sel_rect`: whether it is a favourite (the star, top-left),
+/// whether it is made of several files (the layers, top-right), and how far
+/// in from the tile's corners they sit. The launch and quit reveal carries
+/// them as it carries the ring.
+fn gallery_sel_badges() -> &'static std::sync::Mutex<(bool, bool, f32)> {
+    static B: std::sync::Mutex<(bool, bool, f32)> = std::sync::Mutex::new((false, false, 8.0));
+    &B
+}
+
+/// Publish the selected tile's rect as drawn, and the badges it wears there.
+fn gallery_sel_publish(rect: (f32, f32, f32, f32), badges: (bool, bool, f32)) {
+    if let Ok(mut r) = gallery_sel_rect().lock() {
+        *r = rect;
+    }
+    if let Ok(mut b) = gallery_sel_badges().lock() {
+        *b = badges;
+    }
+}
+
 /// Live JOUER gallery viewport metrics, published each frame for the touch
 /// layer: `(scroll_px, pitch, band_top, band_bot, rows_total, rows_visible)`.
 #[derive(Clone, Copy, Default)]
@@ -6654,6 +6674,9 @@ struct GameReveal {
     basename: std::string::String,
     display_name: std::string::String,
     color_chip: u32,
+    /// The corner badges of the tile it grows from or shrinks to
+    /// (`gallery_sel_badges`), None for a box that wears none.
+    badges: Option<(bool, bool, f32)>,
 }
 
 fn game_reveal() -> &'static std::sync::Mutex<GameReveal> {
@@ -6670,6 +6693,7 @@ fn game_reveal() -> &'static std::sync::Mutex<GameReveal> {
         basename: std::string::String::new(),
         display_name: std::string::String::new(),
         color_chip: 0,
+        badges: None,
     });
     &A
 }
@@ -6684,6 +6708,10 @@ pub fn game_reveal_begin(
     display_name: &str,
     color_chip: u32,
 ) {
+    // The badges of the tile the views published, when the reveal starts from
+    // it (a launch from Jouer, the quit back to it). A launch from the
+    // importer starts from a row, which wears none.
+    let badges = if rect == gallery_sel_rect_read() { gallery_sel_badges().lock().ok().map(|b| *b) } else { None };
     if let Ok(mut a) = game_reveal().lock() {
         a.active = true;
         a.collapsing = collapsing;
@@ -6696,6 +6724,7 @@ pub fn game_reveal_begin(
         a.basename = basename.to_string();
         a.display_name = display_name.to_string();
         a.color_chip = color_chip;
+        a.badges = badges;
     }
 }
 
@@ -9866,27 +9895,29 @@ impl SwitchRenderBackend {
             Row::new(Icon::LogOut, lc.menu_quit),
         ];
         debug_assert_eq!(rows.len(), MENU_ITEMS.len());
-        let help = match MENU_ITEMS.get(selected) {
-            Some(&"REPRENDRE") => u.help_resume,
-            Some(&"TOUCHES") => u.help_keys,
-            Some(&"ECRAN") => u.help_screen,
-            Some(&"OVERCLOCK") => {
-                if overclock_refused() {
-                    lc.overclock_refused
-                } else {
-                    match power_shown {
-                        0 => u.help_oc_off,
-                        crate::keymap::POWER_AUTO => u.help_oc_auto,
-                        _ => u.help_oc_on,
-                    }
-                }
-            }
-            Some(&"REDEMARRER") => u.help_restart,
+        let refused = overclock_refused();
+        let help_of = |item: &str, power: u8| match item {
+            "REPRENDRE" => u.help_resume,
+            "TOUCHES" => u.help_keys,
+            "ECRAN" => u.help_screen,
+            "OVERCLOCK" if refused => lc.overclock_refused,
+            "OVERCLOCK" => match power {
+                0 => u.help_oc_off,
+                crate::keymap::POWER_AUTO => u.help_oc_auto,
+                _ => u.help_oc_on,
+            },
+            "REDEMARRER" => u.help_restart,
             // Started from a HOME icon there is no library to go back to.
-            Some(&"QUITTER") if crate::direct_launch() => u.help_quit_direct,
-            Some(&"QUITTER") => u.help_quit,
+            "QUITTER" if crate::direct_launch() => u.help_quit_direct,
+            "QUITTER" => u.help_quit,
             _ => "",
         };
+        let help = MENU_ITEMS.get(selected).map_or("", |item| help_of(item, power_shown));
+        // Every help the page can show, for the help box's height: each row's,
+        // and the overclock's for each of its settings and for a refused raise,
+        // which the armed row runs through as Left / Right move it.
+        let mut helps: std::vec::Vec<&str> = MENU_ITEMS.iter().map(|item| help_of(item, power_shown)).collect();
+        helps.extend([lc.overclock_refused, u.help_oc_off, u.help_oc_auto, u.help_oc_on]);
         // The A hint names what A does on THIS row; B always resumes.
         let a_verb = match MENU_ITEMS.get(selected) {
             Some(&"REPRENDRE") => u.resume,
@@ -9934,11 +9965,13 @@ impl SwitchRenderBackend {
         ));
 
         let mut sheet = kit::sheet::Sheet::new(&game, &rows, selected);
+        sheet.title_is_name = true;
         sheet.kicker = Some(Icon::Pause);
         sheet.crumbs = core::slice::from_ref(&lc.pause_title);
         sheet.chips = &chips;
         sheet.glide_key = GLIDE_KEY_PAUSE;
         sheet.help = help;
+        sheet.helps = &helps;
         sheet.hints = if on_power && oc_armed {
             &hints_armed
         } else if on_power && oc_own {
@@ -10033,7 +10066,7 @@ impl SwitchRenderBackend {
         ];
         debug_assert_eq!(rows.len(), SCREEN_ITEMS.len());
         let key = SCREEN_ITEMS.get(selected).copied().unwrap_or("");
-        let help = match key {
+        let help_of = |key: &str| match key {
             "AFFICHAGE" => u.help_display,
             "ROTATION" => u.help_rotation,
             // A opens the framing on this row: Left and Right, which used to
@@ -10044,6 +10077,9 @@ impl SwitchRenderBackend {
             "FPS" => u.help_fps,
             _ => "",
         };
+        let help = help_of(key);
+        // Every row's, for the help box's height.
+        let helps: std::vec::Vec<&str> = SCREEN_ITEMS.iter().map(|k| help_of(k)).collect();
         // A arms a value row, opens the framing on ZOOM, flips the counter;
         // armed, what Left / Right, A and B do now. X shows where the game
         // has a value of its own to drop.
@@ -10062,6 +10098,7 @@ impl SwitchRenderBackend {
         sheet.crumbs = &crumbs;
         sheet.glide_key = GLIDE_KEY_SCREEN;
         sheet.help = help;
+        sheet.helps = &helps;
         sheet.hints = if armed.is_some() {
             &hints_armed
         } else if own {
@@ -11566,13 +11603,15 @@ impl SwitchRenderBackend {
     }
 
     /// The launcher's side panel coming in from the RIGHT edge (a game's
-    /// options), on the same timeline as `set_ui_sheet_slide`.
+    /// options), on the same timeline as `set_ui_sheet_slide`. The scrim
+    /// behind it follows the same slide (`kit_scrim`).
     pub fn set_ui_sheet_slide_right(&mut self, scale: f32) {
         let p = if modal_anim_closing() {
             scale
         } else {
             ((scale - MODAL_OPEN_FROM) / (1.0 - MODAL_OPEN_FROM)).clamp(0.0, 1.0)
         };
+        self.ui_sheet_reveal = p;
         self.ui_scale = 1.0;
         self.ui_pivot_x = 0.0;
         self.ui_pivot_y = 0.0;
@@ -11791,6 +11830,20 @@ impl SwitchRenderBackend {
         if ring_alpha > 0.0 && crate::loc::home_view() == 0 {
             let ink = ((ring_alpha * 255.0) as u32) << 24 | (col::GOLD & 0x00FF_FFFF);
             self.kit_ring(x, y, w, h, r, ring::GAP, ring::WIDTH, ink);
+        }
+        // The tile's corner badges hand over the same way, in every view: the
+        // window covered them, so the launch's first frame lost a favourite's
+        // star and a multi-file game's layers, and the quit's last frame put
+        // them back in one go.
+        if ring_alpha > 0.0 {
+            if let Some((fav, multi, inset)) = game_reveal().lock().ok().and_then(|a| a.badges) {
+                if fav {
+                    self.kit_favorite_chip_faded(x + inset, y + inset, ring_alpha);
+                }
+                if multi {
+                    self.kit_multi_badge(x + w - inset, y + inset, ring_alpha);
+                }
+            }
         }
     }
 
@@ -12315,11 +12368,13 @@ impl SwitchRenderBackend {
 
     /// The layers badge of a multi-file game, in the top-right corner of a
     /// cover whose right edge is `right` (Main.dc.html): the favourite chip's
-    /// twin on the other corner.
-    fn kit_multi_badge(&mut self, right: f32, y: f32) {
+    /// twin on the other corner. `alpha` fades it (the launch hands it over).
+    fn kit_multi_badge(&mut self, right: f32, y: f32, alpha: f32) {
         const CHIP: f32 = 26.0;
-        self.kit_rrect(right - CHIP, y, CHIP, CHIP, 8.0, 0xB8_0A_10_1C);
-        self.kit_icon(right - CHIP + 5.5, y + CHIP * 0.5, 15.0, Icon::Layers, theme::col::TEXT);
+        let a = alpha.clamp(0.0, 1.0);
+        let fade = |c: u32| (((c >> 24) as f32 * a).round() as u32) << 24 | (c & 0x00FF_FFFF);
+        self.kit_rrect(right - CHIP, y, CHIP, CHIP, 8.0, fade(0xB8_0A_10_1C));
+        self.kit_icon(right - CHIP + 5.5, y + CHIP * 0.5, 15.0, Icon::Layers, fade(theme::col::TEXT));
     }
 
     /// The launch's "several files" notice: a pill near the bottom of the
@@ -12921,6 +12976,7 @@ impl SwitchRenderBackend {
         // upscaling at 2× native.
         let box_h = 460.0;
         let mut panel = (box_x, box_y, box_w, box_h);
+        let mut panel_badges = (false, false, 8.0);
         // Whether the panel decoded a cover this frame (the selected game's
         // thumbnail, or its full cover at the end of a dwell): the rows then
         // wait for the next one.
@@ -12934,12 +12990,14 @@ impl SwitchRenderBackend {
             let caption_h = 22.0 + lines.len() as f32 * 32.0 + 30.0 + fact_lines.saturating_sub(1) as f32 * 24.0;
             (panel, panel_decoded) =
                 self.kit_cover_panel(box_x, box_y, box_w, box_h, caption_h, &e.basename, &e.display_name, e.color_chip);
-            if crate::favorites::is_favorite(&e.basename) {
+            let fav = crate::favorites::is_favorite(&e.basename);
+            if fav {
                 self.kit_favorite_chip(panel.0 + 8.0, panel.1 + 8.0);
             }
             if e.multi {
-                self.kit_multi_badge(panel.0 + panel.2 - 8.0, panel.1 + 8.0);
+                self.kit_multi_badge(panel.0 + panel.2 - 8.0, panel.1 + 8.0, 1.0);
             }
+            panel_badges = (fav, e.multi, 8.0);
             // The selected name in gold at the title size, as in every view.
             let mut ty = panel.1 + panel.3 + 30.0;
             for line in &lines {
@@ -13042,13 +13100,13 @@ impl SwitchRenderBackend {
 
         // The reveal grows from the COVER PANEL, not from a text row: the panel is
         // already showing that game's art at full size, so the launch continues it.
-        if let Ok(mut r) = gallery_sel_rect().lock() {
-            *r = panel;
-        }
+        gallery_sel_publish(panel, panel_badges);
     }
 
     /// The page a search that matched nothing leaves, the same in every view:
-    /// what was searched, and the two ways out.
+    /// what was searched. The two ways out are the footer's
+    /// (`kit_home_footer`), as on the importer's empty lists: they were also
+    /// drawn under the message, the same two hints twice on one screen.
     ///
     /// A search that matches nothing leaves the same `Screen::List` with zero
     /// entries, and each layout used to draw its chrome around nothing, then a
@@ -13067,23 +13125,17 @@ impl SwitchRenderBackend {
         let u = crate::loc_ui::ui();
         let term = HOME_STRIP.lock().ok().and_then(|g| g.search.clone());
         let vw = self.dimensions.width as f32;
-        // The middle of the band between the strip and the footer.
+        // The middle of the band between the strip and the footer, where the
+        // icon and the message are centred as one block.
         let cy = 388.0;
-        self.kit_icon(((vw - 40.0) * 0.5).round(), cy - 44.0, 40.0, Icon::Search, col::TEXT3);
+        self.kit_icon(((vw - 40.0) * 0.5).round(), cy - 20.0, 40.0, Icon::Search, col::TEXT3);
         let msg = match &term {
             Some(t) => u.home_no_match.replacen("{}", t, 1),
             None => crate::loc::s().cover_none.to_string(),
         };
         let msg = self.kit_fit_mid(&msg, size::BODY, vw - 160.0);
         let w = self.kit_measure(&msg, size::BODY);
-        self.kit_text_mid(((vw - w) * 0.5).round(), cy + 10.0, size::BODY, &msg, col::TEXT2);
-        if term.is_some() {
-            self.kit_hints_centered(
-                vw * 0.5,
-                cy + 62.0,
-                &[(&[Btn::Minus], u.home_edit_search), (&[Btn::B], u.home_show_all)],
-            );
-        }
+        self.kit_text_mid(((vw - w) * 0.5).round(), cy + 34.0, size::BODY, &msg, col::TEXT2);
     }
 
     /// The vertical scrollbar a scrolling page draws in its right-hand gutter: a
@@ -13202,18 +13254,21 @@ impl SwitchRenderBackend {
 
         // ── Hero cover, fitted inside its fixed box ──
         let mut hero = (HERO_X, HERO_Y, HERO_W, HERO_H);
+        let mut hero_badges = (false, false, 10.0);
         // Whether the hero decoded a cover this frame: the row then waits.
         let mut hero_decoded = false;
         if let Some(e) = entries.get(selection) {
             use theme::{col, size};
             (hero, hero_decoded) =
                 self.kit_cover_panel(HERO_X, HERO_Y, HERO_W, HERO_H, 0.0, &e.basename, &e.display_name, e.color_chip);
-            if crate::favorites::is_favorite(&e.basename) {
+            let fav = crate::favorites::is_favorite(&e.basename);
+            if fav {
                 self.kit_favorite_chip(hero.0 + 10.0, hero.1 + 10.0);
             }
             if e.multi {
-                self.kit_multi_badge(hero.0 + hero.2 - 10.0, hero.1 + 10.0);
+                self.kit_multi_badge(hero.0 + hero.2 - 10.0, hero.1 + 10.0, 1.0);
             }
+            hero_badges = (fav, e.multi, 10.0);
             // Three lines: the column is wide and the row does not start until
             // y468, so a long title has room for a third. In gold at the title
             // size, as the selected name is in every view.
@@ -13225,9 +13280,7 @@ impl SwitchRenderBackend {
             }
             self.kit_game_facts(COL_X, ty + 6.0, e, col_w, false);
         }
-        if let Ok(mut r) = gallery_sel_rect().lock() {
-            *r = hero;
-        }
+        gallery_sel_publish(hero, hero_badges);
 
         // ── Full-width row ──
         let mut cells: std::vec::Vec<GalleryCell> = std::vec::Vec::with_capacity(total);
@@ -13297,7 +13350,7 @@ impl SwitchRenderBackend {
                 self.kit_favorite_chip(x + 8.0, ry + 8.0);
             }
             if e.multi {
-                self.kit_multi_badge(x + rw - 8.0, ry + 8.0);
+                self.kit_multi_badge(x + rw - 8.0, ry + 8.0, 1.0);
             }
             // Veil measured against the EASED selection, so it lifts and settles
             // with the slide instead of switching at the moment the index changes.
@@ -13430,12 +13483,13 @@ impl SwitchRenderBackend {
         if let Ok(mut g) = gallery_cache().lock() {
             *g = (cells.clone(), 1);
         }
-        if let Ok(mut r) = gallery_sel_rect().lock() {
-            *r = cells
-                .get(selection)
-                .map(|c| (c.x, c.y, c.w, c.h))
-                .unwrap_or((cap_x, SHELF_Y - h1, w1, h1));
-        }
+        // The selected cover as drawn, with the badges it wears (set in from
+        // its corners as far as it has grown).
+        let sel_rect = cells.get(selection).map(|c| (c.x, c.y, c.w, c.h)).unwrap_or((cap_x, SHELF_Y - h1, w1, h1));
+        let sel_badges = entries.get(selection).map_or((false, false, 8.0), |e| {
+            (crate::favorites::is_favorite(&e.basename), e.multi, 8.0 * (1.0 + GROW * bump(selection)))
+        });
+        gallery_sel_publish(sel_rect, sel_badges);
         if let Ok(mut v) = gallery_view().lock() {
             *v = GalleryView {
                 scroll_px: off,
@@ -13494,7 +13548,7 @@ impl SwitchRenderBackend {
                 self.kit_favorite_chip(x + 8.0 * sc, y + 8.0 * sc);
             }
             if e.multi {
-                self.kit_multi_badge(x + w - 8.0 * sc, y + 8.0 * sc);
+                self.kit_multi_badge(x + w - 8.0 * sc, y + 8.0 * sc, 1.0);
             }
         }
 
@@ -13797,13 +13851,15 @@ impl SwitchRenderBackend {
         shown.sort_by(|a, b| a.open.partial_cmp(&b.open).unwrap_or(core::cmp::Ordering::Equal));
 
         // Publish the selected tile's rect AS DRAWN, lifted, for the launch and
-        // quit reveal, which grows the cover from it and shrinks it back to it.
-        if let Some(&(x, trow)) = tiles.get(selection) {
+        // quit reveal, which grows the cover from it and shrinks it back to it,
+        // and the badges it wears.
+        if let (Some(&(x, trow)), Some(e)) = (tiles.get(selection), entries.get(selection)) {
             let grow = LIFT * selected_open;
             let y = TOP + trow as f32 * pitch - scroll_px;
-            if let Ok(mut r) = gallery_sel_rect().lock() {
-                *r = (x - cell_w * grow * 0.5, y - cell_h * grow * 0.5, cell_w * (1.0 + grow), cell_h * (1.0 + grow));
-            }
+            gallery_sel_publish(
+                (x - cell_w * grow * 0.5, y - cell_h * grow * 0.5, cell_w * (1.0 + grow), cell_h * (1.0 + grow)),
+                (crate::favorites::is_favorite(&e.basename), e.multi, 8.0),
+            );
         }
 
         // Clip to the gallery band. `set_clip` owns the top-left/bottom-left
@@ -13849,7 +13905,7 @@ impl SwitchRenderBackend {
                 self.kit_favorite_chip(tx + 8.0, ty + 8.0);
             }
             if e.multi {
-                self.kit_multi_badge(tx + tw - 8.0, ty + 8.0);
+                self.kit_multi_badge(tx + tw - 8.0, ty + 8.0, 1.0);
             }
         }
 

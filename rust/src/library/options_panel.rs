@@ -298,7 +298,7 @@ pub(crate) fn with_options_sheet<R>(
         .zip(OPTIONS_ENTRIES.iter())
         .map(|(r, k)| r.note_opt(note(k)).armed_if(armed.is_some() && *k == key))
         .collect();
-    let help = match key {
+    let help_of = |key: &str, power: u8| match key {
         "FAVORI" => u.help_opt_fav,
         "TOUCHES" => u.help_keys,
         "JAQUETTE" => u.help_opt_cover,
@@ -310,7 +310,7 @@ pub(crate) fn with_options_sheet<R>(
         "ZOOM" => zoom_help.as_str(),
         "PIXELS" => u.help_pixels,
         "FILTRE" => u.help_filter,
-        "OVERCLOCK" => match p.power {
+        "OVERCLOCK" => match power {
             0 => u.help_oc_off,
             keymap::POWER_AUTO => u.help_oc_auto,
             _ => u.help_oc_on,
@@ -318,6 +318,11 @@ pub(crate) fn with_options_sheet<R>(
         "FPS" => u.help_fps,
         _ => u.help_opt_delete,
     };
+    let help = help_of(key, p.power);
+    // Every row's, and the overclock's for each of its settings (the armed
+    // row goes through them), for the help box's height.
+    let mut helps: std::vec::Vec<&str> = OPTIONS_ENTRIES.iter().map(|k| help_of(k, p.power)).collect();
+    helps.extend(POWER_ORDER.iter().map(|m| help_of("OVERCLOCK", *m)));
     // What A does on the row: arm a value, flip a switch, open, act.
     let a_verb = match key {
         "TOUCHES" | "JAQUETTE" | "DOSSIER" => u.open,
@@ -357,6 +362,7 @@ pub(crate) fn with_options_sheet<R>(
     ];
     let thumb = backend.cover_thumb(&entry.basename);
     let mut sheet = Sheet::new(&entry.display_name, &rows, selection);
+    sheet.title_is_name = true;
     sheet.subtitle = Some(u.opt_subtitle);
     sheet.thumb = Some(thumb.unwrap_or((0, 0, 0, 0)));
     // The name the grid's tile shows, not the file's.
@@ -365,6 +371,7 @@ pub(crate) fn with_options_sheet<R>(
     sheet.row_h = 48.0;
     sheet.glide_key = 0x6200_0000;
     sheet.help = help;
+    sheet.helps = &helps;
     sheet.hints = if armed.is_some() {
         &hints_armed
     } else if own_here {
@@ -480,6 +487,11 @@ pub(crate) fn draw_options_family(
     // without its L / R chips, as over a page opened from RÉGLAGES.
     backend.draw_navbar_with(Tab::Jouer.index(), logo, false);
     crate::backend::render::navbar_clear();
+    // The panel's slide, set before the scrim, which darkens the library as
+    // far as the panel has come in.
+    if let Some(p) = slide {
+        backend.set_ui_sheet_slide_right(p);
+    }
     backend.kit_scrim(ui_col::SCRIM);
     crate::backend::render::set_ui_screen_kind(kind);
 
@@ -520,9 +532,6 @@ pub(crate) fn draw_options_family(
         Screen::OptionsModal { selection, .. } => selection,
         other => branch_of(other),
     };
-    if let Some(p) = slide {
-        backend.set_ui_sheet_slide_right(p);
-    }
     // The panel's own armed row, or the page's (the Touches et curseur page
     // reads its own from the state).
     let opt_armed = if matches!(screen, Screen::OptionsModal { .. }) { armed } else { None };
@@ -851,6 +860,14 @@ fn with_folders_view<R>(
         }
     };
     let help = if on_physical { u.help_folder_physical } else { u.help_opt_folders };
+    // The helps its rows can show, for the help box's height: the folder the
+    // game's file sits in has its own.
+    let has_physical = folders.iter().any(|(n, _)| physical.as_deref() == Some(n.as_str()));
+    let helps: std::vec::Vec<&str> = if has_physical {
+        std::vec![u.help_opt_folders, u.help_folder_physical]
+    } else {
+        std::vec![u.help_opt_folders]
+    };
     let on_shelf_row = selection >= 1 && selection < last;
     let hints_physical = [(&[Btn::X][..], u.empty_verb), (&[Btn::B][..], u.back)];
     let hints_shelf = [(&[Btn::A][..], a_verb), (&[Btn::X][..], u.empty_verb), (&[Btn::B][..], u.back)];
@@ -861,6 +878,7 @@ fn with_folders_view<R>(
     sheet.row_h = 48.0;
     sheet.glide_key = 0x6100_0000;
     sheet.help = help;
+    sheet.helps = &helps;
     sheet.hints = if on_physical {
         &hints_physical
     } else if on_shelf_row {
