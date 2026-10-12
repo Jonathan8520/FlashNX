@@ -283,6 +283,9 @@ impl Glide {
 struct TileClock {
     key: u64,
     open: Glide,
+    /// The clock as this frame found it, before its step: the step is taken
+    /// again from here when it went the wrong way (see `tile_open`).
+    base: Glide,
     /// The frame that last drew the tile, and the one that last stepped its
     /// clock (a tile coming back into view is stepped once, not twice).
     seen: u32,
@@ -321,9 +324,12 @@ static TILE_OPEN: Mutex<TileOpen> = Mutex::new(TileOpen { tick: 0, dt_ms: 0.0, f
 /// stall (a game run, a sleep) does not jump every tile to its end, and the
 /// tiles the previous frame did not draw, which close unseen.
 ///
-/// Frames are counted in GALLERY frames, not in time: while another tab or a
-/// game is on screen no frame passes, and the tiles come back exactly as they
-/// were left rather than all judged out of sight.
+/// Frames are counted in GALLERY frames, not in time: while a game, or a tab
+/// with no grid, is on screen no frame passes, and the tiles come back exactly
+/// as they were left rather than all judged out of sight. The two grids share
+/// the counter, though: the Importer's Flashpoint results run their tiles on
+/// these clocks too, so while they are up the Play grid's tiles are out of
+/// sight, and the open one closes. Coming back to the Play tab, it opens again.
 fn tile_open_frame() {
     let now = unsafe { ruffle_tick_now() };
     let freq = unsafe { ruffle_tick_freq() }.max(1) as f32;
@@ -338,6 +344,7 @@ fn tile_open_frame() {
             if c.seen == prev {
                 return true;
             }
+            c.base = c.open;
             c.open.retarget(0.0);
             c.open.step(dt);
             c.stepped = frame;
@@ -358,35 +365,52 @@ fn tile_key(name: &str) -> u64 {
 
 /// Step tile `key` toward open (`selected`) or closed and return how open it
 /// is, eased, 0 to 1. Call once per tile per frame, after `tile_open_frame`.
+///
+/// A clock takes one step a frame, toward open when ANY tile of its key is
+/// selected. Two tiles can show the same thing (a result listed twice) and
+/// share a clock, and the callers go in index order: when the unselected copy
+/// came first it stepped the clock toward closed, the selected one could only
+/// turn it round without stepping, and the clock only ever moved toward closed,
+/// so the selected tile never opened. Now the step that went the wrong way is
+/// taken again from where the frame found the clock, whichever copy comes
+/// first. The same holds for a tile coming back into view, which
+/// `tile_open_frame` has already stepped toward closed.
 fn tile_open(key: u64, selected: bool) -> f32 {
     let Ok(mut g) = TILE_OPEN.lock() else {
         return if selected { 1.0 } else { 0.0 };
     };
     let (dt, frame) = (g.dt_ms, g.frame);
-    let target = if selected { 1.0 } else { 0.0 };
     let i = match g.clocks.iter().position(|c| c.key == key) {
         Some(i) => i,
         // A closed tile that stays closed needs no clock.
         None if !selected => return 0.0,
         None => {
-            g.clocks.push(TileClock { key, open: Glide::at(0.0), seen: frame, stepped: frame.wrapping_sub(1) });
+            g.clocks.push(TileClock {
+                key,
+                open: Glide::at(0.0),
+                base: Glide::at(0.0),
+                seen: frame,
+                stepped: frame.wrapping_sub(1),
+            });
             g.clocks.len() - 1
         }
     };
     let c = &mut g.clocks[i];
-    // Two tiles showing the same thing (a result listed twice) share a clock:
-    // the selected one has the frame, rather than the two pulling it both ways.
-    if c.seen == frame && !selected {
-        return c.open.value().clamp(0.0, 1.0);
-    }
-    c.open.retarget(target);
     if c.stepped != frame {
+        c.base = c.open;
+        c.open.retarget(if selected { 1.0 } else { 0.0 });
         c.open.step(dt);
         c.stepped = frame;
+    } else if selected && c.open.to != 1.0 {
+        c.open = c.base;
+        c.open.retarget(1.0);
+        c.open.step(dt);
     }
     c.seen = frame;
     let v = c.open.value().clamp(0.0, 1.0);
-    if !selected && c.open.settled() {
+    // Shut and staying shut: forgotten. Never while open, which a selected
+    // copy drawn earlier this frame may still need.
+    if c.open.to == 0.0 && c.open.settled() {
         g.clocks.swap_remove(i);
     }
     v
