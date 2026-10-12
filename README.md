@@ -45,13 +45,17 @@ The same tab also imports from a URL: a direct `.swf`, an archive.org item, or a
 | | |
 |---|---|
 | **L / R** | Switch tabs (Play / Import / Settings) |
+| **ZL / ZR** | Switch folders (All, Favourites, then each folder) |
 | D-pad or sticks | Move in the cover gallery |
 | **A** | Play |
-| **Y** | Sort by name, date added, last played, most played or size (**X** flips the order, **A** applies) |
+| **X** | Change the view (grid, list, strip, shelf) |
+| **Y** | Sort by name, date added, last played, most played or size (Left and Right pick the order, **A** applies) |
 | **−** | Search by name |
-| **+** | Game options: favorite, controls, rename, cover, delete |
+| **+** | Game options: favorite, cover, folders, rename, HOME menu icon, controls, picture settings, delete |
 
 Your library size is shown under the logo. Quit, bug report and suggestions live in the Settings tab.
+
+**In every menu**, a setting changes only on purpose: **A** on a choice or a number outlines it in gold, Left and Right then change it, **A** keeps it and **B** puts back what was there. Switches flip with **A**, and a tap on an option picks it. Left and Right never change a setting that is not outlined, so a stick pushed a little sideways on the way down a list changes nothing; on a page opened beside its menu, Left (or Right, toward the column of icons) goes back.
 
 **Import tab**
 
@@ -87,7 +91,7 @@ Plug in a second controller and you get **two players**, each with their own bin
 **Your library**
 
 - **Four ways to lay it out**: a grid of covers, a list with the selected cover shown whole beside it, a strip, or a shelf. Pick one in SETTINGS and it is remembered.
-- **Folders**: file games into shelves with ZL and ZR. A shelf is a label, not a directory, so filing a game leaves its file where it is and one game can be on several shelves at once. Folders you made yourself on the card show up as shelves too.
+- **Folders**: put games on shelves from a game's options, and switch between them with ZL and ZR. A shelf is a label, not a directory, so filing a game leaves its file where it is and one game can be on several shelves at once. Folders you made yourself on the card show up as shelves too.
 - **Cover art**: Drop a `<game>.png` or `.jpg` next to the `.swf`, or fetch artwork from the Flashpoint Archive in a game's options and pick from thumbnails. Games without one get a generated tile.
 - **Favorites** pinned to the top, **playtime** tracked per game, and sorting by name, date added, last played, most played or size.
 - **Rename** a game for display without touching the file, and deleting one cleans up everything it left on the card.
@@ -98,13 +102,13 @@ Plug in a second controller and you get **two players**, each with their own bin
 
 - **Community control profiles**: share your bindings for a game and download what other players have shared for it. Applying a profile is non-destructive and can be reverted, and verified or most-applied ones come first. Your combo layers and cursor settings travel with it.
 - **Copy from another game**: start a game's controls from the ones you set for another, sequels first.
-- **Cursor**: adjustable speed (x0.5 to x2.5, cycling live from the pause menu) and a per-game show or hide toggle for games played entirely on the pad.
+- **Cursor**: adjustable speed (x0.5 to x2.5, set live from the pause menu) and a per-game show or hide toggle for games played entirely on the pad.
 - **Gyroscope cursor**: per game, aim like a Wii remote (POINTER) or tilt the console like a tray with a marble on it (MARBLE).
 
 **In game**
 
 - **Automatic saves** on the SD card for games that save (SharedObject `.sol`).
-- **Pause menu** (**−**): resume, controls and cursor, screen, overclock, restart, quit. The SCREEN panel holds how the game uses the display (fit, stretch, fill), a quarter-turn rotation, a free zoom, a scanline or CRT filter, how bitmaps are sampled (AUTO follows the game's own smoothing flag, as Flash Player did, or force SMOOTH or SHARP for pixel art) and a frame counter that shows the measured rate against the rate the game asks for. Every one of these, overclock included, is kept for that game alone, and SETTINGS > GAME DEFAULTS sets what a game you have never touched will use.
+- **Pause menu** (**−**): resume, controls and cursor, screen, overclock, restart, quit. The SCREEN panel holds how the game uses the display (fit, stretch, fill), a quarter-turn rotation, a free zoom, a scanline or CRT filter, how bitmaps are sampled (AUTO follows the game's own smoothing flag, as Flash Player did, or force SMOOTH or SHARP for pixel art) and a frame counter that shows the measured rate against the rate the game asks for. Every one of these, overclock included, is kept for that game alone, and SETTINGS > GAME DEFAULTS sets what a game you have never touched will use. When the picture is turned, the pause menu and its pages turn with it and use a layout made for portrait.
 - **Multi-file games**: some games load companion `.swf` files. A Flashpoint download fetches them automatically into a `<game>.files/` folder; for a game added another way, put them there yourself.
 - **Games packaged as a web page**: a few Flashpoint entries ship an `index.html` instead of a plain `.swf`. FlashNX reads its configuration and runs the game, which covers Disney/Yamago minigames (*Agent P Strikes Back*, *Tron Uprising*) and titles such as *Dragon City*.
 
