@@ -250,7 +250,8 @@ pub(crate) fn with_options_sheet<R>(
             "TOUCHES" => Row::new(Icon::Gamepad, lc.opt_keys).opens(),
             "JAQUETTE" => Row::new(Icon::Image, lc.opt_cover).opens(),
             "DOSSIER" => Row::new(Icon::Folder, lc.opt_folder).value(&shelves).opens(),
-            "RENOMMER" => Row::new(Icon::Pencil, lc.opt_rename),
+            // A brings up the Switch keyboard, as Réglages marks its own.
+            "RENOMMER" => Row::new(Icon::Pencil, lc.opt_rename).keyboard(),
             "RACCOURCI" => Row::new(Icon::Home, u.opt_home_icon).toggle(p.home_icon),
             "AFFICHAGE" => Row::new(Icon::Monitor, lc.set_display_mode).choice(&display_opts, p.display as usize),
             "ROTATION" => Row::new(Icon::Rotate, lc.set_rotation).choice(&rot_opts, p.rotation as usize),
@@ -661,7 +662,7 @@ fn with_folders_view<R>(
             row
         });
     }
-    rows.push(Row::new(Icon::FolderPlus, lc.games_dir_new));
+    rows.push(Row::new(Icon::FolderPlus, lc.games_dir_new).keyboard());
     let last = rows.len() - 1;
     let on_physical = selection >= 1
         && selection < last

@@ -7003,7 +7003,7 @@ fn with_source_sheet<R>(
     let chips: std::vec::Vec<(Icon, &str, u32)> = chip_list.iter().map(|(i, t, c)| (*i, t.as_str(), *c)).collect();
     let rows = [
         Row::new(Icon::Star, lc.opt_favorite).filled_if(fav, ui_col::GOLD).toggle(fav),
-        Row::new(Icon::Pencil, u.imp_edit_address),
+        Row::new(Icon::Pencil, u.imp_edit_address).keyboard(),
         Row::new(Icon::Trash, u.imp_delete_source).danger(),
     ];
     let help_edit = u.imp_help_src_edit.replacen("{}", &url, 1);

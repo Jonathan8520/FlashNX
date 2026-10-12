@@ -1722,10 +1722,12 @@ pub(crate) fn with_profiles_view<R>(
             } else {
                 ""
             };
+            // Every row opens a page beside the list (a profile its preview,
+            // the copy row the other games), so every row has the chevron.
             Row::new(icon, label)
                 .value(value)
                 .mark_if(!active.is_empty() && it.id == active, Icon::Check, ui_col::OK)
-                .opens_if(copy)
+                .opens()
         })
         .collect();
     let empty_msg = if crate::profiles::catalog_unavailable() { lc.profile_catalog_offline } else { lc.profile_none };
