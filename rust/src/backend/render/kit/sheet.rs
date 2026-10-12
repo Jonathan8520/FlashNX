@@ -494,7 +494,8 @@ impl SwitchRenderBackend {
 
     /// The control a diff line is about: "P2 ZL+StickLUp" is a J2 chip, the ZL
     /// glyph, a plus and the left stick's badge. A name that is no button (a
-    /// cursor setting) is written as it is. Returns where it ends.
+    /// cursor setting) is written as it is, the cursor's speed after the
+    /// pointer its row has. Returns where it ends.
     fn kit_diff_what(&mut self, x: f32, cy: f32, max_w: f32, what: &str) -> f32 {
         let px = size::LABEL;
         let mut cx = x;
@@ -524,6 +525,17 @@ impl SwitchRenderBackend {
                 cx + bw
             }
             None => {
+                // The speed's name is one word in some languages ("Velocidad"):
+                // alone under an empty column head, among button glyphs, it
+                // did not say whose speed it was. The pointer says it, as on
+                // the speed's row and in the editor's footer. "Afficher le
+                // curseur" names the cursor already, and an icon before it
+                // would leave "Masqué" 54 px of the in-game "Avant" column,
+                // too few even at 13 px.
+                if rest == crate::loc::s().set_cursor_speed {
+                    self.kit_icon(cx, cy, 16.0, Icon::Pointer, col::TEXT2);
+                    cx += 16.0 + 8.0;
+                }
                 let t = self.kit_fit(rest, px, (x + max_w - cx).max(0.0));
                 cx + self.kit_text_mid(cx, cy, px, &t, col::TEXT2)
             }
