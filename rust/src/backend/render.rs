@@ -6405,7 +6405,7 @@ pub fn distant_reveal_source_scroll() -> usize {
 
 /// Retarget the reveal's grow-from / shrink-to row. Used once a newly-imported
 /// URL lands in the history, so the collapse (and the DistantIdle cursor) end on
-/// its real row instead of the "+ add" row it grew from.
+/// its real row instead of the add card it grew from.
 pub fn distant_reveal_set_source(idx: usize, scroll: usize) {
     if let Ok(mut a) = distant_reveal().lock() {
         a.source_sel = idx;

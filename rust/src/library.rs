@@ -78,8 +78,9 @@ pub(crate) enum Screen {
     /// off / no results / fetch error). A = fetch+cache the chosen logo.
     CoverPicker { game_idx: usize, selection: usize },
     /// Flashpoint game gallery (IMPORTER > X): a cover grid of search hits;
-    /// A downloads the selected game's GameZIP. Reuses `cover_candidates` for
-    /// storage and `draw_library_cover_picker` for rendering.
+    /// A downloads the selected game's GameZIP, or plays it when a game of
+    /// that name is already on the card. Reuses `cover_candidates` for
+    /// storage; drawn by `draw_library_fp_gallery`.
     FpGallery { selection: usize, scroll: usize },
     /// Details popup for the Flashpoint game at `selection` (`+` on the gallery):
     /// full title + developer/publisher/date + download size. `size` is the
@@ -92,10 +93,10 @@ pub(crate) enum Screen {
     /// order: each row keeps the direction it was turned to.
     SortModal { selection: usize, prev_sel: usize, prev_scroll: usize, dirs: u8 },
     /// Sort picker for the IMPORTER lists (Y). `kind` picks the target list +
-    /// option set (`SORT_TARGET_*`): archive.org files (name/size), the
-    /// Flashpoint gallery (name only — developers are unknown), or the IMPORTER
-    /// home's saved URLs (added/name/source). `reverse` mirrors the JOUER
-    /// modal's X toggle. `prev_*` restore the cursor on cancel.
+    /// option set (`SORT_TARGET_*`, see `remote_sort_options`): an archive's
+    /// files, the Flashpoint results (name, developer, release date), or the
+    /// IMPORTER home's saved sources. `reverse` mirrors the JOUER modal's X
+    /// toggle. `prev_*` restore the cursor on cancel.
     RemoteSortModal { selection: usize, kind: u8, reverse: bool, prev_sel: usize, prev_scroll: usize },
     // ── Phase 3.7: DISTANT mode (archive.org import) ───────────────────
     /// IMPORTER home: the two action cards, then the saved sources. Rows 0 and 1
@@ -119,7 +120,8 @@ pub(crate) enum Screen {
     /// every frame via `net::download_progress`.
     DistantDownloading,
     /// Error from URL parse / metadata fetch / download. Message in
-    /// `State::distant_error`. B or A dismisses back to DistantIdle.
+    /// `State::distant_error`. A tries again when that can work
+    /// (`import_retry`), B goes back to the list the failure came from.
     DistantError,
     /// Confirm removing a history URL (from DistantUrlOptions > delete).
     /// A = delete + persist, B/Minus = cancel.
@@ -3234,7 +3236,7 @@ fn remember_url_total(url: &str, total: u32) {
 }
 
 /// True if the saved URL is favorited (pinned to the top of the IMPORTER list
-/// and flagged with a gold diamond, like a favorited game).
+/// and marked with a solid star chip, like a favorited game).
 pub(crate) fn url_is_favorite(s: &State, url: &str) -> bool {
     s.url_meta
         .iter()
@@ -6395,9 +6397,10 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
 //
 // The saved-URL list used to be raw URLs in insertion order, add-row last —
 // fine for three entries, unreadable at thirty. Rows now show a NAME (the item
-// id / file the URL points at) with the host dimmed beside it, the "+ add" row
-// is pinned FIRST so it's reachable without scrolling, and the list filters
-// (Minus) + sorts (Y) like every other list in the app. `url_history` itself
+// id / file the URL points at) with the host dimmed beside it, the two action
+// cards (search Flashpoint, add an address) are pinned above the list so they
+// are reachable without scrolling, and the list filters (Minus) + sorts (Y)
+// like every other list in the app. `url_history` itself
 // stays in insertion order: it IS the "ADDED" sort, and reordering it on disk
 // would throw that away.
 
@@ -7292,9 +7295,6 @@ fn run_fix_url_flow(failed: &str) {
     run_fetch_for_url(&fixed, row, scroll);
 }
 
-/// DistantUrlOptions > edit: swkbd prefilled with the existing URL. Commit
-/// replaces it (empty input deletes it), persists, returns to the list. Called
-/// from `input()` only.
 /// Leave a modal for `target`, scaling the panel OUT first when there is a panel
 /// to scale.
 ///
@@ -7325,6 +7325,10 @@ fn close_modal_to(s: &mut State, target: Screen) {
     s.screen = target;
 }
 
+/// DistantUrlOptions > edit: swkbd prefilled with the existing URL. Commit
+/// replaces it (`rename_source`: its star and its date go with it), persists,
+/// returns to the list; an emptied field is a cancel. Called from `input()`
+/// only.
 fn run_edit_url_flow(url_idx: usize) {
     let prefill = LIBRARY
         .lock()
@@ -7354,8 +7358,8 @@ fn run_edit_url_flow(url_idx: usize) {
     }
 }
 
-/// Fetch the given URL and transition state. Used both by the post-swkbd
-/// path (`run_url_fetch_flow`) and by the ZR re-fetch-without-swkbd path.
+/// Fetch the given URL and transition state. Used by the keyboard flows (add,
+/// fix), by A on a saved source and by the error page's retry.
 /// v1.2.0: routes by source shape so the IMPORTER is "globalisable" — an
 /// archive.org URL/item-id goes through the metadata file list, a direct
 /// `.swf` URL downloads straight to SD.
@@ -7377,9 +7381,6 @@ fn run_fetch_for_url(url: &str, source_sel: usize, source_scroll: usize) {
     }
 }
 
-/// Direct `.swf` URL import: download straight to SD, no metadata list. The
-/// filename is derived from the URL's last path segment (query/fragment
-/// stripped); a re-download just overwrites + refreshes the entry.
 /// On-SD `.swf` filename FlashNX gives a directly-imported URL: last path
 /// segment, query/fragment stripped, path separators sanitized, `.swf`
 /// enforced. Kept standalone so the bug-report flow can recover a game's
@@ -7399,6 +7400,9 @@ fn safe_name_from_url(url: &str) -> std::string::String {
     }
 }
 
+/// Direct `.swf` URL import: download straight to SD, no metadata list. The
+/// filename is derived from the URL's last path segment (query/fragment
+/// stripped); a game of that name already on the card is not downloaded again.
 fn run_direct_download(url: &str) {
     // Wayback URLs need the `id_` modifier to serve the raw file instead of the
     // HTML page wrapper (e.g. .../web/<ts>id_/...mting.swf). No-op otherwise.
