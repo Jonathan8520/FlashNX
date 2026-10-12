@@ -248,8 +248,8 @@ impl SwitchRenderBackend {
     /// every size they pass through. The glyph atlas keeps every size it is
     /// asked for and has no room to spare, and the old launch walked one name
     /// through fifty sizes. They are rasterized at the tile's size and at the
-    /// final one, each scaled to the size of the moment, the first fading into
-    /// the second as the box grows.
+    /// final one, each scaled to the size of the moment, the first handing
+    /// over to the second as the box grows.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn kit_default_tile_grown(
         &mut self,
@@ -289,13 +289,16 @@ impl SwitchRenderBackend {
         let pad0 = (bw * 0.07).clamp(10.0, 16.0);
         let pad = pad0 * z;
         // Each element is drawn from two rasters, the tile's and the final
-        // one, scaled about its own corner to its size of the moment.
+        // one, scaled about its own corner to its size of the moment. Their
+        // fades overlap, one at full strength while the other comes or goes:
+        // two half-faded copies let the ground through the letters half way.
+        let (fade_tile, fade_end) = ((2.0 * (1.0 - f)).min(1.0), (2.0 * f).min(1.0));
         if bw >= 64.0 && bh >= 48.0 {
             let ink = mix_rgb(chip, col::BG & 0x00FF_FFFF, 0.25);
             let end = (PAD_ICON * z_end).round();
             let size = PAD_ICON + (end - PAD_ICON) * f;
             let (ix, iy) = ((x + pad).round(), (y + pad).round());
-            for (raster, a) in [(PAD_ICON, 1.0 - f), (end, f)] {
+            for (raster, a) in [(PAD_ICON, fade_tile), (end, fade_end)] {
                 if a > 0.0 {
                     self.kit_scaled(ix, iy, size / raster, |s| {
                         s.kit_icon(ix, iy + raster * 0.5, raster, Icon::Gamepad, alpha(a, ink));
@@ -313,7 +316,7 @@ impl SwitchRenderBackend {
         let lx = (x + pad).round();
         for line in &lines {
             let by = baseline.round();
-            for (raster, a) in [(px0, 1.0 - f), (end, f)] {
+            for (raster, a) in [(px0, fade_tile), (end, fade_end)] {
                 if a > 0.0 {
                     self.kit_scaled(lx, by, px0 * z / raster, |s| {
                         s.kit_text_baseline(lx, by, raster, line, alpha(a, ink));
