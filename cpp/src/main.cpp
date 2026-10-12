@@ -982,13 +982,19 @@ static int gyro_cursor_delta(float* dx, float* dy) {
     return mode;
 }
 
+// The GLOBAL default (RÉGLAGES > VITESSE) back in force: its file, or x1.0
+// when there is none. The file only exists once VITESSE has been changed, and
+// keeping whatever was in force without it carried a game's own speed into
+// the library, into the next game, and into the game that had just dropped
+// it (X on the row in the pause, which then still read "par défaut").
 static void cursor_speed_load() {
+    int v = 1;
     FILE* f = std::fopen(app_file_path("cursor_speed"), "rb");
     if (f) {
-        int v = 1;
-        if (std::fscanf(f, "%d", &v) == 1) g_cursor_speed_idx = v;
+        if (std::fscanf(f, "%d", &v) != 1) v = 1;
         std::fclose(f);
     }
+    g_cursor_speed_idx = v;
     cursor_speed_apply();
 }
 // The preset in force, for the rows that show and step it.
