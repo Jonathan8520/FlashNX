@@ -11398,12 +11398,19 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             }
             draw_importer_home(backend, selection, scroll_offset, true);
         }
+        // A source's panel slides on every pop of its own. It borrowed the game
+        // options' `family_slide`, whose "slide in" flag only a game's panels
+        // reset, so after a game's controls editor it came in at full
+        // position in one frame. Its question pops nothing (same kind), so
+        // this never replays the slide under it.
         Screen::DistantUrlOptions { url_idx, selection } => {
-            draw_source_options(backend, url_idx, selection, family_slide, None, family_kind);
+            let slide = if closing || modal_active { Some(modal_scale) } else { None };
+            draw_source_options(backend, url_idx, selection, slide, None, family_kind);
         }
         Screen::DistantHistoryConfirm { selection } => {
             let url_idx = LIBRARY.lock().map(|s| s.history_idx.unwrap_or(0)).unwrap_or(0);
-            draw_source_options(backend, url_idx, 2, family_slide, Some(selection), family_kind);
+            let slide = if closing || modal_active { Some(modal_scale) } else { None };
+            draw_source_options(backend, url_idx, 2, slide, Some(selection), family_kind);
         }
         Screen::ImportNotAddress { selection } => {
             use crate::backend::render::{Choice, Icon};
