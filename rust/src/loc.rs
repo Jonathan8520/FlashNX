@@ -350,12 +350,15 @@ pub struct Strings {
     /// Success toast shown after the controls were shared (#20).
     pub profile_shared_ok: &'static str,
     // Apply-a-profile UI (#20).
-    /// OPTIONS row: apply a community control profile to this game.
+    /// Unread since the shared-profiles row, page and crumbs all say
+    /// `loc_ui::Ui::shared_profiles`; goes after the merge.
+    #[allow(dead_code)]
     pub opt_apply: &'static str,
-    /// Header of the profile picker modal.
+    /// Unread for the same reason as `opt_apply`; goes after the merge.
+    #[allow(dead_code)]
     pub profile_title: &'static str,
-    /// Last row of the APPLY picker, and the title of the list it opens: the
-    /// player's own games with controls of their own, to copy from.
+    /// Last row of the shared-profiles list, and the title of the list it
+    /// opens: the player's own games with controls of their own, to copy from.
     pub profile_copy_row: &'static str,
     /// Toast when no other game has controls of its own to copy.
     pub profile_copy_none: &'static str,

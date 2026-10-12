@@ -576,7 +576,7 @@ fn draw_family_panels(backend: &mut SwitchRenderBackend, entry: &Entry, opt_sel:
                         )
                     })
                     .unwrap_or_default();
-                let crumbs = [u.hint_options, lc.menu_keys, lc.profile_title];
+                let crumbs = [u.hint_options, lc.menu_keys, u.shared_profiles];
                 let hints = [(&[Btn::A][..], u.apply), (&[Btn::B][..], u.back)];
                 menu::with_diff_view(b, &crumbs, &name, Some(u.preview_sub), &rows, &hints, |b, c| {
                     cascade(b, parent, Some(c))
