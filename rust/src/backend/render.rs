@@ -13425,24 +13425,6 @@ impl SwitchRenderBackend {
         }
     }
 
-    /// Progress of the games-folder move (#79): the progress page with a plain
-    /// count of entries, and no cancel, because a half-cancelled rename sweep is
-    /// worse than a finished one.
-    pub fn draw_library_move_progress(&mut self, title: &str, done: usize, total: usize) {
-        // Empty at 0 of 0 rather than full: a move that has not started should
-        // not look finished.
-        let frac = if total == 0 { 0.0 } else { (done as f32 / total as f32).clamp(0.0, 1.0) };
-        let dest = crate::library::primary_root();
-        self.draw_progress_page(
-            Icon::FolderOpen,
-            title,
-            dest.trim_start_matches("sdmc:"),
-            Some(frac),
-            &std::format!("{} / {}", done, total),
-            &[],
-        );
-    }
-
     /// Transient toast banner near the bottom of the screen (#20). `kind`: 0 =
     /// success (green), 1 = error (red), 2 = info (blue). Non-blocking — drawn on
     /// top of the current screen for a couple of seconds (the library loop counts
@@ -13527,17 +13509,6 @@ impl SwitchRenderBackend {
         // The same small card as every other wait, saying what is being done.
         let vw = self.dimensions.width as f32;
         self.draw_loading_card(title, now, 0.0, vw);
-    }
-
-    pub fn draw_library_dim_backdrop(&mut self) {
-        unsafe {
-            glDisable(GL_STENCIL_TEST);
-            glClearColor(0.047, 0.075, 0.137, 1.0);
-            glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        }
-        self.gl_state.invalidate();
     }
 
     // ── Mask state machine ──
