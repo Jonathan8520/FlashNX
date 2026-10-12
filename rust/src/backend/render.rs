@@ -5310,6 +5310,9 @@ struct GalleryAnim {
     ring_x: Glide,
     ring_y: Glide,
     ring_w: Glide,
+    /// How far through its pop the ring is (1 = at rest): a few pixels of
+    /// swell that peak half way and end as the ring arrives.
+    ring_pop: f32,
 }
 
 fn gallery_anim() -> &'static std::sync::Mutex<GalleryAnim> {
@@ -5325,6 +5328,7 @@ fn gallery_anim() -> &'static std::sync::Mutex<GalleryAnim> {
         ring_x: Glide::at(0.0),
         ring_y: Glide::at(0.0),
         ring_w: Glide::at(0.0),
+        ring_pop: 1.0,
     });
     &A
 }
@@ -11682,6 +11686,9 @@ impl SwitchRenderBackend {
         // upscaling at 2× native.
         let box_h = 460.0;
         let mut panel = (box_x, box_y, box_w, box_h);
+        // Asked before the panel, which may decode the selected game's own
+        // thumbnail this frame: the rows then wait for the next one.
+        let selected_ready = entries.get(selection).map_or(true, |e| cover_lookup(&e.basename).is_some());
         if let Some(e) = entries.get(selection) {
             use theme::{col, size};
             // Wrapped once, measured once: the caption's height is what the art
@@ -11709,7 +11716,6 @@ impl SwitchRenderBackend {
         // Small covers in the rows, from the tile thumbnails: one decode a frame
         // like every view, the rows nearest the cursor first, and none while the
         // panel is still waiting for the selected game's own thumbnail.
-        let selected_ready = entries.get(selection).map_or(true, |e| cover_lookup(&e.basename).is_some());
         if selected_ready {
             let first = (scroll_px / ROW_H).floor().max(0.0) as usize;
             let last = (first + rows_visible + 1).min(entries.len());
@@ -12420,6 +12426,7 @@ impl SwitchRenderBackend {
         let mut scroll_px = target_scroll;
         let (mut ring_x, mut ring_y, mut ring_w) = (target_x, target_y, cell_w);
         let mut ring_travelling = false;
+        let mut ring_pop = 0.0f32;
         let touch_scroll = gallery_touch_scroll_read();
         if let Ok(mut guard) = gallery_anim().lock() {
             let a = &mut *guard;
@@ -12430,6 +12437,7 @@ impl SwitchRenderBackend {
                 a.ring_x = Glide::at(target_x);
                 a.ring_y = Glide::at(target_y);
                 a.ring_w = Glide::at(cell_w);
+                a.ring_pop = 1.0;
                 a.scroll_px = target_scroll;
             } else {
                 let freq = unsafe { ruffle_tick_freq() } as f32;
@@ -12439,6 +12447,13 @@ impl SwitchRenderBackend {
                     1.0 / 60.0
                 };
                 a.last_tick = now;
+                // A press pops the ring on its way; a held direction does not,
+                // and a pop under way is never restarted (it would jump).
+                let moved = target_x != a.ring_x.to || target_y != a.ring_y.to;
+                if moved && a.ring_pop >= 1.0 && !crate::library::nav_is_repeat() {
+                    a.ring_pop = 0.0;
+                }
+                a.ring_pop = (a.ring_pop + dt * 1000.0 / GRID_COVER_MS).min(1.0);
                 for (g, to) in [(&mut a.ring_x, target_x), (&mut a.ring_y, target_y), (&mut a.ring_w, cell_w)] {
                     g.retarget(to);
                     g.step(dt * 1000.0);
@@ -12455,6 +12470,7 @@ impl SwitchRenderBackend {
             ring_y = a.ring_y.value();
             ring_w = a.ring_w.value();
             ring_travelling = !(a.ring_x.settled() && a.ring_y.settled());
+            ring_pop = 4.0 * a.ring_pop * (1.0 - a.ring_pop);
         }
 
         // Publish viewport metrics for the touch layer (drag-scroll + hit-test).
@@ -12613,16 +12629,18 @@ impl SwitchRenderBackend {
         // tile when partially scrolled. It travels on the covers' clock and hugs
         // the lifted tile: at the full lift while it travels (the tile it is
         // heading for ends fully open on the same frame it arrives), then the
-        // tile's own lift, which is what it grows with after a reset.
+        // tile's own lift, which is what it grows with after a reset. A press
+        // swells it by up to 3 px on the way.
         {
             let lift = LIFT * if ring_travelling { 1.0 } else { selected_open };
-            let fx = ring_x - ring_w * lift * 0.5;
-            let fy = ring_y - scroll_px - cell_h * lift * 0.5;
+            let pop = 3.0 * ring_pop;
+            let fx = ring_x - ring_w * lift * 0.5 - pop;
+            let fy = ring_y - scroll_px - cell_h * lift * 0.5 - pop;
             self.kit_ring(
                 fx,
                 fy,
-                ring_w * (1.0 + lift),
-                cell_h * (1.0 + lift),
+                ring_w * (1.0 + lift) + 2.0 * pop,
+                cell_h * (1.0 + lift) + 2.0 * pop,
                 theme::radius::TILE,
                 theme::ring::GAP,
                 theme::ring::WIDTH,

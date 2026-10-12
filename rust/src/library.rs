@@ -1783,6 +1783,14 @@ fn nav_may_wrap() -> bool {
     !NAV_REPEAT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether the last move came from a held direction's auto-repeat rather than
+/// a press. The grid's ring marks a press with a small pop and leaves a held
+/// direction alone: armed on every repeat, it pulsed for as long as the
+/// direction was held.
+pub(crate) fn nav_is_repeat() -> bool {
+    NAV_REPEAT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Move `sel` one row up (`down = false`) or down inside a `cols`-wide grid of
 /// `total` items, clamping to the last item of a partial row and wrapping at the
 /// ends.
@@ -3651,6 +3659,8 @@ fn strip_tap(hit: crate::backend::render::StripHit) {
                     let (keys, cur) = shelf_keys(&s);
                     if i != cur && i < keys.len() {
                         goto_shelf(&mut s, keys[i].clone(), if i > cur { 1.0 } else { -1.0 }, selection, None);
+                        // The sound ZL / ZR make for the same move.
+                        crate::sfx::play(crate::sfx::Sfx::Tab);
                     }
                 }
             }
