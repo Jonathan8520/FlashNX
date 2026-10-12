@@ -7025,7 +7025,8 @@ fn draw_source_options(
     crate::backend::render::set_ui_screen_kind(0);
     draw_importer_home(backend, row, scroll, false);
     let logo = LIBRARY.lock().ok().map(|s| (s.banner_tex, s.banner_w, s.banner_h)).unwrap_or_default();
-    backend.draw_navbar(Tab::Importer.index(), logo);
+    // L and R do not switch tabs under the panel: no L / R chips.
+    backend.draw_navbar_with(Tab::Importer.index(), logo, false);
     crate::backend::render::navbar_clear();
     backend.kit_scrim(0x9E_06_0A_14);
     crate::backend::render::set_ui_screen_kind(kind);
@@ -10148,7 +10149,9 @@ fn reveal_window(rect: (f32, f32, f32, f32), vw: f32, vh: f32, frac: f32) -> (f3
 fn draw_home_backdrop(backend: &mut SwitchRenderBackend, selection: usize, scroll: usize) {
     draw_importer_home(backend, selection, scroll, false);
     let logo = LIBRARY.lock().ok().map(|s| (s.banner_tex, s.banner_w, s.banner_h)).unwrap_or_default();
-    backend.draw_navbar(Tab::Importer.index(), logo);
+    // Always under something (a window, a page opening out of a row, a
+    // launch): L and R do not switch tabs from there, so no L / R chips.
+    backend.draw_navbar_with(Tab::Importer.index(), logo, false);
     crate::backend::render::navbar_clear();
 }
 
@@ -11174,7 +11177,8 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             backend.clear_ui_transform();
             crate::backend::render::set_ui_screen_kind(0);
             draw_gallery(backend, behind_sel, behind_scroll, anim_origin);
-            backend.draw_navbar(Tab::Jouer.index(), logo);
+            // L and R do not switch tabs under the window: no L / R chips.
+            backend.draw_navbar_with(Tab::Jouer.index(), logo, false);
             crate::backend::render::navbar_clear();
             crate::backend::render::set_ui_screen_kind(family_kind);
             backend.set_ui_modal_scale(if modal_active { modal_scale } else { 1.0 });

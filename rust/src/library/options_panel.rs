@@ -435,7 +435,9 @@ pub(crate) fn draw_options_family(
     if let Screen::List { selection, scroll_offset } = home {
         draw_gallery(backend, selection, scroll_offset, anim_origin);
     }
-    backend.draw_navbar(Tab::Jouer.index(), logo);
+    // L and R pick the next game here, not the next tab: the strip goes
+    // without its L / R chips, as over a page opened from RÉGLAGES.
+    backend.draw_navbar_with(Tab::Jouer.index(), logo, false);
     crate::backend::render::navbar_clear();
     backend.kit_scrim(ui_col::SCRIM);
     crate::backend::render::set_ui_screen_kind(kind);
