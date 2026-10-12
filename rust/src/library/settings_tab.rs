@@ -799,6 +799,13 @@ fn column_hints(section: SetSection) -> std::vec::Vec<HintItem<'static>> {
     }
 }
 
+/// A way through the menus, step by step, joined the way crumbs join them. The
+/// steps are the labels the menus themselves show, so a help that names a
+/// place names it in the words the player will find there, in every language.
+fn menu_path(steps: &[&str]) -> std::string::String {
+    steps.join("  \u{203A}  ")
+}
+
 /// Bibliothèque: the home layouts as cards, the games folder, the interface
 /// sounds, each with what it is for underneath.
 fn library_pane(
@@ -882,13 +889,19 @@ fn defaults_pane(
         (row_of(def, "TOUCHES"), u.sec_controls),
     ];
     let key = focus.map(|r| key_of(def, r));
-    let refused: std::string::String;
+    let built: std::string::String;
     let help: &str = match key {
         // The cursor still in the column: what the section is about.
         None => u.help_game_prefs,
         Some("AFFICHAGE") => u.help_display,
         Some("ROTATION") => u.help_rotation,
-        Some("ZOOM") => u.help_zoom_default,
+        Some("ZOOM") => {
+            // Where the zoom is fine-tuned in a game: the pause's own row and
+            // page names, which are not the same words in every language.
+            let path = menu_path(&[lc.pause_title, lc.menu_screen, lc.set_zoom]);
+            built = u.help_zoom_default.replacen("{}", &path, 1);
+            &built
+        }
         Some("PIXELS") => u.help_pixels,
         Some("FILTRE") => u.help_filter,
         Some("OVERCLOCK") => {
@@ -900,8 +913,8 @@ fn defaults_pane(
             // The battery veto, when the last game asked for a raise and the
             // console said no: the setting alone would not explain the speed.
             if power != 0 && crate::backend::render::overclock_refused() {
-                refused = std::format!("{} {}", base, lc.overclock_refused);
-                &refused
+                built = std::format!("{} {}", base, lc.overclock_refused);
+                &built
             } else {
                 base
             }
@@ -965,7 +978,7 @@ fn profile_pane(
     cells.extend(c);
     let y = b.settings_note(y + 8.0, u.help_pseudo, 2);
     // The way to a game's sharing, in the words its menus use.
-    let path = std::format!("{}  \u{203A}  {}  \u{203A}  {}", u.hint_options, lc.opt_keys, lc.opt_share);
+    let path = menu_path(&[u.hint_options, lc.opt_keys, lc.opt_share]);
     b.settings_note_icon(y + 16.0, Icon::Share, &u.help_share_where.replacen("{}", &path, 1), ui_col::TEXT3);
     if focus.is_some() {
         *hints = std::vec![(&[Btn::A][..], u.type_text), (&[Btn::B][..], u.back)];
