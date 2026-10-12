@@ -4,34 +4,44 @@ Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://
 
 ## Unreleased
 
-The whole interface is redrawn. Every screen now uses the console's own fonts, at their real size and with every accent, Cyrillic and Chinese character drawn properly; buttons are shown with the console's own glyphs; and the menus share one set of parts, so the same thing looks and behaves the same everywhere.
+The whole interface is redrawn. Every screen uses the console's own fonts, at their real size and with every accent, Cyrillic and Chinese character drawn properly; buttons are shown with the console's own glyphs; and the menus share one set of parts, so the same thing looks and behaves the same on every page. Changing a setting now takes a deliberate press, and every screen shown over a game has a layout for games turned on their side.
 
 ### Interface
 
-- **The console's fonts and button glyphs everywhere.** The hand-drawn capitals are gone: text is drawn in the system font at the size it is shown, in natural case, and the hints along the bottom read as a button and a word (the A glyph, "Play") instead of a sentence of "A:PLAY +:OPTIONS".
+- **The console's fonts and button glyphs everywhere.** The hand-drawn capitals are gone: text is drawn in the system font at the size it is shown, in natural case, and the hints along the bottom read as a button and a word (the A glyph, "Play") instead of a sentence of "A:PLAY +:OPTIONS". Sticks, stick presses, SL and SR and the d-pad have their real glyphs.
 - **Icons.** Rows, settings, notices and the importer use a small icon set (Lucide), so a row says what it does before it is read.
-- **Covers of every shape.** A cover fills its tile when little would be cropped, and otherwise opens to the whole picture over its own blurred colours when it is selected. The detail panels of the List, Strip and Shelf views show the cover rounded, with a soft shadow.
-- **Settings** is two columns: the settings in groups with their current value on the left, and on the right a card explaining the selected one. The home view is chosen from drawings of the four layouts, and the language picker ticks the one in use.
-- **The pause menu is a panel down the left side**, over the game, with where you are written on top ("Pause › Screen"), a line explaining the selected row, and a B hint that says where it goes ("Resume game", "Back"). Controls and cursor, and the profile screens, are pages of that same panel.
-- **Import**: each source shows whether it is a file or an archive, how much of it is on your card (green when complete), and the hints follow the row. Downloads, loading and the games folder move use one progress card.
-- **Questions that delete something** have two buttons and start on Cancel.
-- **Game options** show the game's cover, size, engine and time played beside the actions, and the folder the game is in.
-- **Interface sounds**: a soft click when moving, choosing, going back or switching tabs. They can be turned off in Settings.
+- **Covers of every shape.** A cover fills its tile when little would be cropped, and otherwise shows the whole picture over its own blurred colours. Transparent PNG covers sit on the tile's colour without a dark halo, every cover finishes its animation even after the cursor has moved on, and launching a game grows its cover from the tile to the screen.
+- **Play** shows your folders as chips under the tabs (ZL and ZR: All, Favourites, then each folder), the sort and the view in use on the right, and a line of facts under the selected game (size, SWF version, engine, time played) with icons. Favourites have a solid star, games made of several files a badge. B clears a search, then goes back to All.
+- **Game options** are a panel on the right edge with the game's cover. Its pages (Controls and cursor, Folders, Shared profiles, the before and after of a profile) open beside it while the panel folds into a column of icons that shows where you are; L and R switch to the previous or next game. The picture settings (display, rotation, zoom, pixels, filter, frame counter) and the overclock can be set before the game is ever started. A setting the game takes from Settings says "default", and X takes back a value the game set itself.
+- **The pause menu is a panel down the left side**, over the game. Screen and Controls open beside it, with the path written on top ("Pause › Screen"), a box explaining the selected row, and a B hint that says where it goes. Every setting previews on the frozen game behind it.
+- **Settings** is laid out like the console's System Settings: the sections on the left (Library, Game defaults, Language, Profile, Help and feedback, About, and Quit at the bottom), the selected section's settings on the right, changed in place. The home view is chosen from drawings of the four layouts.
+- **Import** opens on two actions (search Flashpoint, add an address) and your sources, each with its progress, its count and a tick once everything is on your card. A source's options open in a side panel. Errors say what happened and offer Retry only when trying again can work, and every network wait shows a card instead of freezing the screen.
+- **The controls editor** draws the controller with one row per button beside it, and lights the selected button in both places. Keys are written in full, the PC keyboard picker has its arrows as an inverted T, and a combo layer shows the key it falls back to.
+- **Games turned on their side** (rotation 90 or 270) get a portrait layout on every screen shown over them: the controls editor puts the controller on top with its rows in two columns below, the keyboard picker stacks the numpad under the main block, the zoom legend takes several lines, and the pause panels are as tall as their content.
+- **Questions** have two buttons and start on Cancel; Left picks the first, Right the second, and a held direction stays on the one it points at.
+- **Interface sounds**: a soft click when moving, choosing, going back or switching tabs, an error note when something is refused, silence when a press does nothing. They can be turned off in Settings.
 
 ### Changed
 
-- **A value changes only once A arms it**: A on a choice or a number outlines it in gold, Left and Right then change it (live in the pause, where the game shows it), A keeps it and B puts back what was there. Left and Right change nothing on a row that is not armed, so a stick pushed slightly sideways on the way down a list no longer changes what it passes; menus follow one axis of the stick at a time, and a fresh Left goes back from a page beside the pause or from the Settings pane. On/off switches flip with A, and a tap on an option sets it.
-- The pause menu no longer wraps from Resume to Quit, so one press of Up can no longer land on Quit.
-- Sorting waits for A: X flips the order shown, and B leaves the list as it was.
+- **A value changes only once A arms it.** A on a choice or a number outlines it in gold; Left and Right then change it (live in the pause, where the game shows it), A keeps it and B puts back exactly what was there. Left and Right change nothing on a row that is not armed, so a stick pushed slightly sideways on the way down a list no longer changes what it passes; menus follow one axis of the stick at a time. A fresh Left goes back from a page opened beside the pause, or from the Settings pane to its sections. On and off switches flip with A, and a tap on an option sets it directly.
+- Multiple-choice settings (overclock, gyroscope, display, pixels...) show all their options at once instead of one value to cycle through.
+- Sorting waits for A: each criterion shows its two orders in words ("Recently added", "A to Z"), Left and Right pick one, A applies it, and B leaves the list as it was.
+- In the pause menu, Up on Resume goes straight to Quit; a held direction scrolls and stops at the ends instead of going round.
 - Holding L or R switches one tab, not one every 80 ms.
-- In the Flashpoint results, − searches again, as in every other list, and A in a game's details downloads it.
+- In the Flashpoint results, − searches again, as in every other list.
 - The empty library shows the folder FlashNX really uses, and − there no longer quits the app.
+- The games folder browser opens beside the library folder, and the card's root, which cannot hold the library, is refused with the reason.
 
 ### Fixed
 
+- A game moved into a folder (or with the whole library) keeps its HOME menu icon: the icon follows it, and the icon's image follows the cover rule instead of a white frame around transparent covers.
+- A game that cannot be read (moved, deleted, too big) says so and where it was looked for, instead of a red screen.
+- A profile applied in game changes the cursor speed at once, and its preview shows the speed that really changes.
+- Editing or deleting an import source keeps its favourite and its dates right, and the add-address keyboard opens empty, with its guide.
+- A refused overclock raise from Auto keeps Auto instead of switching the game to Off for good, and turning the frame counter on or off no longer loses the speed reading.
 - After a search or a sort in Import, the cursor lands on the first source instead of the add row.
 - Clearing a saved address in the keyboard cancels the edit instead of deleting the source without asking.
-- Translations: broken capitals ("DÉplacer"), keyboard guides written in transliterated Russian, Turkish words missing ı, ş and ğ, and labels cut short for the old font.
+- Translations: broken capitals ("DÉplacer"), keyboard guides written in transliterated Russian, Turkish words missing ı, ş and ğ, labels cut short for the old font; Russian and Turkish now address the player informally everywhere, and French uses its no-break spaces.
 
 ## v1.9.0 (2026-10-09)
 
