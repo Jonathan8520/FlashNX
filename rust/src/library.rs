@@ -3114,15 +3114,32 @@ pub fn open() {
                 s.folder_filter = None;
             }
         }
-        set_active_folder(s.folder_filter.as_deref());
-        s.anim_origin_ticks = unsafe { ruffle_tick_now() };
-        // Apply the active sort BEFORE the cursor position is computed below.
-        sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
         // ABSOLUTE index of the game just played. By PATH first: folders (#68)
         // let two games share a file name, and the one just quit is a particular
         // FILE, not whichever namesake the sort put first. The name is the
         // fallback, for when the path is gone -- moved or renamed while it ran.
-        //
+        let find_played = |entries: &[Entry]| {
+            want_path
+                .as_deref()
+                .and_then(|p| entries.iter().position(|e| e.path == p))
+                .or_else(|| want.as_deref().and_then(|b| entries.iter().position(|e| e.basename == b)))
+        };
+        // A game started from the importer (an archive's game, a Flashpoint
+        // download) need not be on the shelf the home was left on: back to
+        // TOUS, where it is, so the cursor lands on it. Left on the shelf, the
+        // cursor fell back to the shelf's first game.
+        if s.folder_filter.is_some() {
+            if let Some(i) = find_played(&s.entries) {
+                if !local_filtered_indices(&s.entries, &None, &s.folder_filter).contains(&i) {
+                    s.folder_filter = None;
+                }
+            }
+        }
+        set_active_folder(s.folder_filter.as_deref());
+        s.anim_origin_ticks = unsafe { ruffle_tick_now() };
+        // Apply the active sort BEFORE the cursor position is computed below
+        // (each shelf has its own, so after the shelf is settled).
+        sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
         // Computed here rather than inside the branch below, because the closing
         // fade has to grow from the same tile the cursor lands on.
         // Kept UNDEFAULTED as well as defaulted, because the two readers below
@@ -3132,13 +3149,7 @@ pub fn open() {
         // conflating them made a cold boot -- where nothing has been played at
         // all -- shrink game number one from full screen into the top-left
         // corner, over a tile rect that had never been published.
-        let found = want_path
-            .as_deref()
-            .and_then(|p| s.entries.iter().position(|e| e.path == p))
-            .or_else(|| {
-                want.as_deref()
-                    .and_then(|b| s.entries.iter().position(|e| e.basename == b))
-            });
+        let found = find_played(&s.entries);
         let abs = found.unwrap_or(0);
         s.screen = if s.entries.is_empty() {
             Screen::Empty
