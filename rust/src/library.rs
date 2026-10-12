@@ -5171,6 +5171,7 @@ fn drive_pending_move() {
         // Back where the user pressed the button, whatever the library holds:
         // nothing else leaves this screen, and it swallows input on purpose, so
         // forgetting this left the app frozen on a finished progress bar.
+        s.dir_browse.clear();
         s.screen = settings_at(SetSection::Library, "DOSSIER");
         // And how it went, not a silent jump back. What stayed behind matters
         // more than the count, so it is the one said when there is both.
@@ -5490,8 +5491,10 @@ fn handle_games_dir_confirm_input(s: &mut State, button: &str, selection: usize)
         "Right" | "StickLRight" => s.screen = Screen::GamesDirConfirm { selection: 1 },
         "A" => {
             if selection == 1 {
+                // The listing stays until the move has ended: the question
+                // scales out over the browser, which emptied here showed only
+                // its two pinned rows for the length of the close.
                 s.pending_games_dir = Some(s.dir_path.clone());
-                s.dir_browse.clear();
                 s.screen = Screen::GamesDirMoving;
             } else {
                 s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 };
@@ -11231,6 +11234,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     let root = primary_root();
                     backend.draw_library_move_page(root.trim_start_matches("sdmc:"), "", total, total);
                     if let Ok(mut s) = LIBRARY.lock() {
+                        s.dir_browse.clear();
                         s.screen = settings_at(SetSection::Library, "DOSSIER");
                     }
                 }
