@@ -430,10 +430,18 @@ pub(crate) fn touch_select(s: &mut State, section: SetSection, in_pane: bool, ro
     if section == SetSection::Library {
         if cell < LIBRARY_CARDS {
             // Nothing to confirm, and tapping the card in use again must not
-            // move to the next one.
+            // move to the next one. The tapped card is the layout kept, armed
+            // or not: a layout row armed by A is dropped, or its cards kept
+            // lighting the armed layout over the tapped one, and the next A
+            // wrote it in place of what the finger chose.
             let v = cell as u8;
-            if crate::loc::home_view() != v {
+            let shown = armed_here(s).map_or(crate::loc::home_view(), |a| a.cur.min(u8::MAX as u16) as u8);
+            s.armed = None;
+            let stored = crate::loc::home_view();
+            if stored != v {
                 apply_home_view(v);
+            }
+            if stored != v || shown != v {
                 crate::sfx::value_changed();
             }
             s.screen = settings_at(SetSection::Library, "VUE");
