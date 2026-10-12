@@ -2775,7 +2775,7 @@ pub extern "C" fn ruffle_draw_menu(selected: c_int) {
         }
         let (scale, active, _done) = backend::render::modal_scale_step(now);
         if active {
-            backend.set_ui_modal_scale(scale);
+            backend.set_ui_sheet_slide(scale);
         } else {
             backend.clear_ui_transform();
         }
@@ -2819,7 +2819,7 @@ pub extern "C" fn ruffle_draw_screen_menu(selected: c_int) {
         }
         let (scale, active, _done) = backend::render::modal_scale_step(now);
         if active {
-            backend.set_ui_modal_scale(scale);
+            backend.set_ui_sheet_slide(scale);
         } else {
             backend.clear_ui_transform();
         }
@@ -2861,7 +2861,7 @@ pub extern "C" fn ruffle_draw_menu_closing(selected: c_int) -> c_int {
             backend.clear_ui_transform();
             return 1;
         }
-        backend.set_ui_modal_scale(scale);
+        backend.set_ui_sheet_slide(scale);
         let idx = selected.max(0) as usize;
         backend.draw_menu_overlay(idx);
         backend.clear_ui_transform();

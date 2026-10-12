@@ -140,6 +140,80 @@ impl SwitchRenderBackend {
         self.kit_shape(x, y, w, h, radius::ROW, col::CHIP, 2.0, col::GOLD, 0.0);
     }
 
+    /// The in-game sheet: a panel down the left side of the screen, over the
+    /// frozen game, which stays visible on the right (the ECRAN rows preview on
+    /// it). From the top: where you are ("Pause › Écran"), the game's name, the
+    /// rows, a box explaining the row under the cursor, and the hints, whose B
+    /// says where it goes. Every in-game page is this same panel, so moving
+    /// between them reads as moving through one menu, not a stack of popups.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn kit_side_sheet(
+        &mut self,
+        crumbs: &[&str],
+        title: &str,
+        rows: &[&str],
+        selection: usize,
+        help: Option<&str>,
+        hints: &[HintItem],
+        glide_key: u32,
+    ) {
+        use super::theme::size;
+        const ROW_H: f32 = 52.0;
+        const PILL_H: f32 = 46.0;
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        // Behind the sheet the game is only lightly dimmed: it is the preview.
+        self.fill_screen_dim(0x70_05_0A_16);
+        let (x, y) = (16.0, 16.0);
+        let w = 460.0f32.min(vw - 32.0);
+        let h = vh - 32.0;
+        self.kit_panel(x, y, w, h, false);
+
+        // Where you are.
+        let mut cx = x + 28.0;
+        for (i, c) in crumbs.iter().enumerate() {
+            if i > 0 {
+                cx += self.kit_text_mid(cx, y + 40.0, size::CAPTION + 1.0, "  \u{203A}  ", col::TEXT3);
+            }
+            let ink = if i + 1 == crumbs.len() { col::TEXT2 } else { col::TEXT3 };
+            cx += self.kit_text_mid(cx, y + 40.0, size::CAPTION + 1.0, c, ink);
+        }
+        let t = self.kit_fit_mid(title, size::WINDOW_TITLE, w - 56.0);
+        self.kit_text_mid(x + 28.0, y + 74.0, size::WINDOW_TITLE, &t, col::TEXT);
+        self.draw_overlay_rect(x + 20.0, y + 100.0, w - 40.0, 1.0, col::LINE);
+
+        // The rows, with the focus pill gliding between them.
+        let top = y + 116.0;
+        let (px, pw) = (x + 12.0, w - 24.0);
+        if selection < rows.len() {
+            let now = unsafe { ruffle_tick_now() };
+            let hy = eased_list_y(top + selection as f32 * ROW_H, glide_key, now);
+            self.kit_focus_pill(px, hy + (ROW_H - PILL_H) * 0.5, pw, PILL_H);
+        }
+        for (i, row) in rows.iter().enumerate() {
+            let cy = top + i as f32 * ROW_H + ROW_H * 0.5;
+            let (label, value) = split_label_value(row);
+            self.kit_row(px, cy, pw, label, value, i == selection, size::ROW);
+        }
+
+        // What the row under the cursor does, always in the same place.
+        let hint_cy = y + h - 30.0;
+        if let Some(help) = help.filter(|s| !s.trim().is_empty()) {
+            let lines = self.kit_wrap(help, size::LABEL, w - 72.0, 3);
+            let lh = (size::LABEL * 1.35).round();
+            let box_h = 28.0 + lh * lines.len() as f32;
+            let box_y = hint_cy - 30.0 - box_h;
+            self.kit_rrect(x + 16.0, box_y, w - 32.0, box_h, radius::ROW, col::CHIP & 0x00FF_FFFF | 0xB0 << 24);
+            let mut ly = box_y + 14.0 + lh * 0.5;
+            for line in &lines {
+                self.kit_text_mid(x + 36.0, ly, size::LABEL, line, col::TEXT2);
+                ly += lh;
+            }
+        }
+        self.draw_overlay_rect(x + 20.0, hint_cy - 26.0, w - 40.0, 1.0, col::LINE);
+        self.kit_hints_right(x + w - 24.0, hint_cy, hints);
+    }
+
     /// One list row centred on `cy`, between `x` and `x + w`: the label at the
     /// left, the value (if any) right-aligned. The focus pill is drawn by the
     /// caller, so it can glide between rows.

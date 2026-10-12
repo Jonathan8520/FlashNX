@@ -149,6 +149,8 @@ const MODAL_CURSOR_DX: f32 = 30.0;
 
 /// Glide slots for the lists that draw their own rows instead of going through
 /// `draw_modal_rows`.
+const GLIDE_KEY_PAUSE: u32 = 52;
+const GLIDE_KEY_SCREEN: u32 = 53;
 const GLIDE_KEY_LANG: u32 = 50;
 const GLIDE_KEY_BUG: u32 = 51;
 const GLIDE_KEY_KEYS: u32 = 53;
@@ -5314,6 +5316,11 @@ pub fn modal_close_active() -> bool {
 ///   - `active`: true while opening or closing (caller applies `scale`).
 ///   - `close_done`: true on the single frame a close finishes (caller then
 ///     swaps to the deferred target screen).
+/// Whether the window timeline is playing its close.
+fn modal_anim_closing() -> bool {
+    modal_anim().lock().map_or(false, |a| a.mode == ModalMode::Closing)
+}
+
 pub fn modal_scale_step(now: u64) -> (f32, bool, bool) {
     let mut a = match modal_anim().lock() {
         Ok(g) => g,
@@ -9317,55 +9324,20 @@ impl SwitchRenderBackend {
     /// selected row; the selected label is rendered in yellow, others in
     /// white. Help line at the bottom describes the buttons.
     pub fn draw_menu_overlay(&mut self, selected: usize) {
-        // Shared modal chrome: game name in the subtitle slot (mirrors the
-        // OPTIONS modal). Held in a local so `as_deref()` can feed the frame.
         let lc = crate::loc::s();
-        let game = crate::library::active_display_name();
-        // The footer carries the power note while that row is highlighted, and
-        // goes back to the button legend everywhere else. A row whose effect is
-        // invisible on the frozen frame behind the panel is the one row that has
-        // to say what it costs, and a footer says it without a modal nobody else
-        // in this family of homebrews puts up.
+        let u = crate::loc_ui::ui();
+        let game = crate::library::active_display_name().unwrap_or_default();
+        // OVERCLOCK reads back `flashnx_clock_mode()`, not the stored
+        // preference: a raise can be refused (clkrst unavailable, battery out
+        // of its Normal voltage state) and a row claiming HIGH while the
+        // console sits at 1020 is a support ticket. AUTO reads AUTO: whether it
+        // holds the raise at this instant is the "OC" next to the FPS counter.
+        //
+        // It stays at the top level rather than joining ECRAN: every ECRAN row
+        // previews on the frozen frame, and this one cannot.
         let power_shown = crate::clock_auto::shown_mode();
-        let footer = if MENU_ITEMS.get(selected) == Some(&"OVERCLOCK") {
-            if overclock_refused() {
-                lc.overclock_refused
-            } else if power_shown == crate::keymap::POWER_AUTO {
-                lc.overclock_auto_hint
-            } else {
-                lc.overclock_hint
-            }
-        } else {
-            lc.pause_footer
-        };
-        let frame = self.draw_modal_frame(
-            MODAL_W,
-            MENU_ITEMS.len(),
-            None,
-            false,
-            lc.pause_title,
-            game.as_deref(),
-            Some(footer),
-        );
-
-        // Localized labels, same order/count as the MENU_ITEMS contract C++
-        // relies on for pause-menu navigation. Cursor speed moved into the
-        // TOUCHES sub-menu (#20 Option 1) and the three screen settings into
-        // ECRAN, so neither is a top-level item anymore.
-        //
-        // OVERCLOCK stays at the top level rather than joining ECRAN, even
-        // though it is a setting and ECRAN is where settings went: every ECRAN
-        // row previews on the frozen frame, and this one cannot. Buried a level
-        // down it would be undiscoverable, and it is the largest single lever
-        // the app has (roughly 1.5x on interpreter-bound games).
-        //
-        // It reads back `flashnx_clock_mode()`, not the stored preference: a
-        // raise can be refused (clkrst unavailable, battery out of its Normal
-        // voltage state) and a row claiming HIGH while the console sits at 1020
-        // is a support ticket. AUTO reads AUTO: whether it holds the raise at
-        // this instant is the "OC" next to the FPS counter.
         let power_label = std::format!(
-            "{}: {}",
+            "{} : {}",
             lc.set_overclock,
             crate::loc::overclock_label(power_shown),
         );
@@ -9378,8 +9350,32 @@ impl SwitchRenderBackend {
             lc.menu_quit,
         ];
         debug_assert_eq!(items.len(), MENU_ITEMS.len());
-        self.draw_modal_rows(&frame, selected, &items);
-
+        let help = match MENU_ITEMS.get(selected) {
+            Some(&"REPRENDRE") => u.help_resume,
+            Some(&"TOUCHES") => u.help_keys,
+            Some(&"ECRAN") => u.help_screen,
+            Some(&"OVERCLOCK") => {
+                if overclock_refused() {
+                    lc.overclock_refused
+                } else if power_shown == crate::keymap::POWER_AUTO {
+                    lc.overclock_auto_hint
+                } else {
+                    lc.overclock_hint
+                }
+            }
+            Some(&"REDEMARRER") => u.help_restart,
+            Some(&"QUITTER") => u.help_quit,
+            _ => "",
+        };
+        self.kit_side_sheet(
+            &[lc.pause_title],
+            &game,
+            &items,
+            selected,
+            Some(help),
+            &[(&[Btn::A], u.choose), (&[Btn::B], u.resume_game)],
+            GLIDE_KEY_PAUSE,
+        );
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
@@ -9397,62 +9393,33 @@ impl SwitchRenderBackend {
     /// panel and QUITTER does not.
     pub fn draw_screen_menu(&mut self, selected: usize) {
         let lc = crate::loc::s();
-        let game = crate::library::active_display_name();
-        // PIXELS carries a hint while it is the selected row, the way OVERCLOCK
-        // does on the pause panel one level up. Every other row here proves
-        // itself on the frozen frame; this one has a position that cannot.
-        // AUTO and SMOOTH draw an identical picture on any game whose bitmaps
-        // all ask for smoothing, which is most of them, so two of the three
-        // positions would read as a dead button with nothing to say why.
-        // FPS needs one for a different reason: "15 / 30" is not
-        // self-explanatory the first time it appears, and the alternative --
-        // a second line under the counter itself, over the game -- is exactly
-        // what the framing legend's comment rules out.
-        let footer = match SCREEN_ITEMS.get(selected) {
-            Some(&"PIXELS") => lc.pixels_hint,
-            Some(&"FPS") => lc.fps_hint,
-            _ => lc.pause_footer,
-        };
-        let frame = self.draw_modal_frame(
-            MODAL_W,
-            SCREEN_ITEMS.len(),
-            None,
-            false,
-            lc.menu_screen,
-            game.as_deref(),
-            Some(footer),
-        );
+        let u = crate::loc_ui::ui();
+        let game = crate::library::active_display_name().unwrap_or_default();
+        // Every row is read back from what is in force: the game's `.prefs` for
+        // the four stored per game, the renderer for the zoom and the counter.
         let display_label = std::format!(
-            "{}: {}",
+            "{} : {}",
             lc.set_display_mode,
             crate::loc::display_mode_label(crate::keymap::display_mode()),
         );
         let rotation_label = std::format!(
-            "{}: {}",
+            "{} : {}",
             lc.set_rotation,
             crate::loc::rotation_label(crate::keymap::rotation()),
         );
-        let zoom_label = std::format!("{}: {} %", lc.set_zoom, game_zoom_percent());
-        // Read back from the game's `.prefs` rather than from the renderer's
-        // atomic, exactly like the four rows around it: the file is what the
-        // player is editing, and a row rebuilt from it says so even if a write
-        // failed.
+        let zoom_label = std::format!("{} : {} %", lc.set_zoom, game_zoom_percent());
         let pixels_label = std::format!(
-            "{}: {}",
+            "{} : {}",
             lc.set_pixel_filter,
             crate::loc::pixel_filter_label(crate::keymap::pixel_filter()),
         );
         let filter_label = std::format!(
-            "{}: {}",
+            "{} : {}",
             lc.set_screen_filter,
             crate::loc::screen_filter_label(crate::keymap::screen_filter()),
         );
-        // Reads back the atomic, not the stored preference, for the reason the
-        // OVERCLOCK row reads back the hardware: this is what is in force right
-        // now, and it costs nothing, where `keymap::fps_counter()` would open a
-        // file on the SD card on every frame the panel is up.
         let fps_label = std::format!(
-            "{}: {}",
+            "{} : {}",
             lc.set_fps,
             crate::loc::fps_counter_label(if fps_counter_on() { 1 } else { 0 }),
         );
@@ -9465,8 +9432,24 @@ impl SwitchRenderBackend {
             fps_label.as_str(),
         ];
         debug_assert_eq!(items.len(), SCREEN_ITEMS.len());
-        self.draw_modal_rows(&frame, selected, &items);
-
+        let help = match SCREEN_ITEMS.get(selected) {
+            Some(&"AFFICHAGE") => u.help_display,
+            Some(&"ROTATION") => u.help_rotation,
+            Some(&"ZOOM") => u.help_zoom,
+            Some(&"PIXELS") => lc.pixels_hint,
+            Some(&"FILTRE") => u.help_filter,
+            Some(&"FPS") => lc.fps_hint,
+            _ => "",
+        };
+        self.kit_side_sheet(
+            &[lc.pause_title, lc.menu_screen],
+            &game,
+            &items,
+            selected,
+            Some(help),
+            &[(&[Btn::A], u.change), (&[Btn::B], u.back)],
+            GLIDE_KEY_SCREEN,
+        );
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
@@ -9503,41 +9486,44 @@ impl SwitchRenderBackend {
     /// Drawn outside `game_layer`, so the text keeps its size while the picture
     /// behind it grows.
     pub fn draw_zoom_overlay(&mut self, percent: u16) {
+        use theme::{col, size};
+        let u = crate::loc_ui::ui();
         let lc = crate::loc::s();
         let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
         unsafe {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         }
-        // The WHOLE framing state, not just the percentage: the offset is half
-        // of what is being set, it is what a rotation resets, and it is what
-        // lands in the game's `.prefs` as `panx` / `pany`. Showing only the
-        // magnification meant the other half could move without anything on
-        // screen saying so.
+        // Two small plates on the picture, nothing else: what is being judged
+        // here IS the framing. The top one carries the WHOLE framing state, not
+        // just the percentage: the offset is half of what is being set, and it
+        // is what lands in the game's `.prefs` as `panx` / `pany`.
+        const PLATE: u32 = 0xC8_0A_10_1C;
         let (ox, oy) = game_pan();
-        let head = std::format!("{}  {} %    X {}    Y {}", lc.set_zoom, percent, ox, oy);
-        let hs = 2.2;
-        let hw = self.measure_text(&head, hs);
-        self.draw_text_outlined(
-            (vw - hw) * 0.5,
-            14.0,
-            hs,
-            &head,
-            swf::Color::from_rgb(0xFFD740, 255),
-        );
+        let head = std::format!("{}  {} %     X {}   Y {}", lc.set_zoom, percent, ox, oy);
+        let hw = self.kit_measure(&head, size::BODY);
+        let pw = hw + 40.0;
+        self.kit_rrect(((vw - pw) * 0.5).round(), 14.0, pw, 40.0, 20.0, PLATE);
+        self.kit_text_mid(((vw - hw) * 0.5).round(), 34.0, size::BODY, &head, col::GOLD);
 
-        // What every button does now. Fitted rather than counted, because this
-        // line is translated and some languages run long.
-        let ls = 1.6;
-        let legend = self.fit_text(lc.zoom_legend, ls, vw - 40.0);
-        let lw = self.measure_text(&legend, ls);
-        self.draw_text_outlined(
-            (vw - lw) * 0.5,
-            vh - 14.0 - 7.0 * ls,
-            ls,
-            &legend,
-            swf::Color::from_rgb(0xFFFFFF, 255),
-        );
+        // What every button does in this mode (cpp/src/main.cpp, `zoom_mode`):
+        // shoulders zoom coarsely, Y / X finely, either stick frames, the d-pad
+        // frames by single pixels, pressing the left stick resets, A keeps, B
+        // drops.
+        let hints: [kit::text::HintItem; 7] = [
+            (&[Btn::ZL, Btn::ZR], u.zoom_coarse),
+            (&[Btn::Y, Btn::X], u.zoom_fine),
+            (&[Btn::LStick, Btn::RStick], u.zoom_frame),
+            (&[Btn::Dpad], u.zoom_pixel),
+            (&[Btn::LStick], u.zoom_reset),
+            (&[Btn::A], u.validate),
+            (&[Btn::B], u.cancel),
+        ];
+        let w = self.kit_hints_width(&hints);
+        let pw = (w + 48.0).min(vw - 24.0);
+        let py = vh - 66.0;
+        self.kit_rrect(((vw - pw) * 0.5).round(), py, pw, 48.0, 24.0, PLATE);
+        self.kit_hints_centered(vw * 0.5, py + 24.0, &hints);
 
         unsafe {
             glUseProgram(0);
@@ -10383,6 +10369,22 @@ impl SwitchRenderBackend {
     /// a fresh open from a continuation (see `ruffle_draw_menu`).
     pub fn frame_count(&self) -> u32 {
         self.frame_count
+    }
+
+    /// The in-game sheet's open/close movement, driven by the same timeline as
+    /// the modal pop (`modal_scale_step`): it slides in from the left edge and
+    /// back out, instead of scaling about the centre of the screen.
+    pub fn set_ui_sheet_slide(&mut self, scale: f32) {
+        let p = if modal_anim_closing() {
+            scale
+        } else {
+            ((scale - MODAL_OPEN_FROM) / (1.0 - MODAL_OPEN_FROM)).clamp(0.0, 1.0)
+        };
+        self.ui_scale = 1.0;
+        self.ui_pivot_x = 0.0;
+        self.ui_pivot_y = 0.0;
+        self.ui_translate_x = -(1.0 - p) * 500.0;
+        self.ui_translate_y = 0.0;
     }
 
     pub fn set_ui_modal_scale(&mut self, scale: f32) {
