@@ -469,6 +469,52 @@ impl SwitchRenderBackend {
         out
     }
 
+    /// `text` on at most `max_lines` lines of `max_w`, broken on spaces (or
+    /// anywhere, for a word wider than a line); the last line is ellipsised.
+    pub fn kit_wrap(&mut self, text: &str, px: f32, max_w: f32, max_lines: usize) -> std::vec::Vec<std::string::String> {
+        let mut lines: std::vec::Vec<std::string::String> = std::vec::Vec::new();
+        let mut cur = std::string::String::new();
+        let mut words = text.split_whitespace().peekable();
+        while let Some(word) = words.next() {
+            let candidate = if cur.is_empty() { word.to_string() } else { std::format!("{} {}", cur, word) };
+            if self.kit_measure(&candidate, px) <= max_w {
+                cur = candidate;
+                continue;
+            }
+            if !cur.is_empty() {
+                lines.push(core::mem::take(&mut cur));
+            }
+            if lines.len() + 1 >= max_lines {
+                // Last line: everything left, ellipsised.
+                let rest: std::vec::Vec<&str> = core::iter::once(word).chain(words.by_ref()).collect();
+                lines.push(self.kit_fit(&rest.join(" "), px, max_w));
+                return lines;
+            }
+            if self.kit_measure(word, px) > max_w {
+                // One word wider than a line: cut it where it overflows.
+                let mut chunk = std::string::String::new();
+                for ch in word.chars() {
+                    chunk.push(ch);
+                    if self.kit_measure(&chunk, px) > max_w {
+                        chunk.pop();
+                        lines.push(core::mem::take(&mut chunk));
+                        chunk.push(ch);
+                        if lines.len() + 1 >= max_lines {
+                            break;
+                        }
+                    }
+                }
+                cur = chunk;
+            } else {
+                cur = word.to_string();
+            }
+        }
+        if !cur.is_empty() {
+            lines.push(if lines.len() + 1 >= max_lines { self.kit_fit(&cur, px, max_w) } else { cur });
+        }
+        lines
+    }
+
     /// `text`, with characters dropped from the MIDDLE until it fits `max_w`.
     /// For game names: what tells two episodes of a series apart is at the end.
     pub fn kit_fit_mid(&mut self, text: &str, px: f32, max_w: f32) -> std::string::String {

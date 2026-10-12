@@ -13,6 +13,7 @@
 // while; the warnings would only bury real ones.
 #![allow(dead_code)]
 
+pub(crate) mod cover;
 pub(crate) mod shapes;
 pub(crate) mod text;
 pub(crate) mod theme;

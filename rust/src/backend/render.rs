@@ -4708,7 +4708,9 @@ fn as_reloadable_bitmap(handle: &BitmapHandle) -> Option<&ReloadableBitmap> {
 /// `Default` = no cover image found → the grid draws a generated tile.
 #[derive(Clone, Copy)]
 enum CoverTex {
-    Image { tex: GLuint, w: u32, h: u32 },
+    /// `amb` is the blurred backdrop the kit draws behind a cover that does
+    /// not fill its box (`render/kit/cover.rs`); 0 when there is none.
+    Image { tex: GLuint, w: u32, h: u32, amb: GLuint },
     Default,
 }
 
@@ -10521,10 +10523,14 @@ impl SwitchRenderBackend {
         // FULL resolution here, not the gallery's tile thumbnail: this fills the
         // screen, where a 256-wide thumbnail upscales to visible mush.
         match self.cover_full_for(basename) {
-            CoverTex::Image { tex, w: iw, h: ih } if iw > 0 && ih > 0 => {
-                // Black backdrop (the letterbox bars).
+            CoverTex::Image { tex, w: iw, h: ih, amb } if iw > 0 && ih > 0 => {
+                // The cover whole, over its own blurred backdrop rather than
+                // black bars: the box grows from the tile to the full screen,
+                // and the art stays the art the tile showed.
                 self.draw_overlay_rect(x, y, w, h, 0xFF_00_00_00);
-                // Fit the cover inside (w,h) keeping its aspect, centred.
+                if amb != 0 {
+                    self.draw_textured_rect_cover(x, y, w, h, amb, iw, ih, 1.0);
+                }
                 let cover_aspect = iw as f32 / ih as f32;
                 let win_aspect = w / h;
                 let (dw, dh) = if cover_aspect > win_aspect {
@@ -11005,7 +11011,8 @@ impl SwitchRenderBackend {
                     Some((rgba, w, h)) => {
                         let tex = self.upload_rgba_texture(&rgba, w, h);
                         if tex != 0 {
-                            CoverTex::Image { tex, w, h }
+                            let amb = self.kit_ambient_texture(&rgba, w, h);
+                            CoverTex::Image { tex, w, h, amb }
                         } else {
                             CoverTex::Default
                         }
@@ -11027,9 +11034,11 @@ impl SwitchRenderBackend {
         };
         // Full-res covers are megabytes of VRAM each — unlike the tile
         // thumbnails, these can't just be leaked. We're on the GL thread.
-        if let Some(CoverTex::Image { tex, .. }) = evicted {
-            if tex != 0 {
-                unsafe { glDeleteTextures(1, &tex) };
+        if let Some(CoverTex::Image { tex, amb, .. }) = evicted {
+            for t in [tex, amb] {
+                if t != 0 {
+                    unsafe { glDeleteTextures(1, &t) };
+                }
             }
         }
         resolved
@@ -11051,7 +11060,8 @@ impl SwitchRenderBackend {
                 if let Some((rgba, w, h)) = crate::covers::read_thumb(basename, src_len) {
                     let tex = self.upload_rgba_texture(&rgba, w, h);
                     if tex != 0 {
-                        CoverTex::Image { tex, w, h }
+                        let amb = self.kit_ambient_texture(&rgba, w, h);
+                        CoverTex::Image { tex, w, h, amb }
                     } else {
                         CoverTex::Default
                     }
@@ -11066,7 +11076,8 @@ impl SwitchRenderBackend {
                             crate::covers::write_thumb(basename, src_len, &small, sw, sh);
                             let tex = self.upload_rgba_texture(&small, sw, sh);
                             if tex != 0 {
-                                CoverTex::Image { tex, w: sw, h: sh }
+                                let amb = self.kit_ambient_texture(&small, sw, sh);
+                                CoverTex::Image { tex, w: sw, h: sh, amb }
                             } else {
                                 CoverTex::Default
                             }
@@ -11375,7 +11386,7 @@ impl SwitchRenderBackend {
         // Full resolution, like the launch reveal: these panels are large enough
         // that a tile thumbnail would show as mush.
         let (iw, ih, tex) = match self.cover_full_for(basename) {
-            CoverTex::Image { tex, w: iw, h: ih } if iw > 0 && ih > 0 => (iw as f32, ih as f32, Some(tex)),
+            CoverTex::Image { tex, w: iw, h: ih, .. } if iw > 0 && ih > 0 => (iw as f32, ih as f32, Some(tex)),
             _ => (4.0, 3.0, None),
         };
         // The art is fitted into the box MINUS the caption, not into the whole
@@ -12034,27 +12045,18 @@ impl SwitchRenderBackend {
                 }
                 None => CoverTex::Default,
             };
+            let _ = b;
             match cover {
-                CoverTex::Image { tex, w, h } => {
-                    self.draw_cover_zoomed_out(x, ry, rw, rh, tex, w, h, b, 1.0);
+                CoverTex::Image { tex, w, h, amb } => {
+                    self.kit_cover(x, ry, rw, rh, tex, w, h, amb, 1.0);
                 }
                 CoverTex::Default => {
-                    self.draw_overlay_rect(x, ry, rw, rh, 0xFF_00_00_00 | e.color_chip);
-                    let initials: std::string::String = e.display_name.chars().take(3).collect();
-                    let isc = 3.0;
-                    let iw = self.measure_text(&initials, isc);
-                    self.draw_text(
-                        x + (rw - iw) * 0.5,
-                        ry + (rh - 7.0 * isc) * 0.5,
-                        isc,
-                        &initials,
-                        swf::Color::from_rgb(0xFFFFFF, 255),
-                    );
+                    self.kit_default_tile(x, ry, rw, rh, e.color_chip, &e.display_name);
                 }
             }
-            self.round_corners(x, ry, rw, rh, 6.0);
+            self.round_corners(x, ry, rw, rh, theme::radius::TILE);
             if crate::favorites::is_favorite(&e.basename) {
-                self.draw_favorite_mark(x + 5.0, ry + 5.0, 18.0);
+                self.kit_favorite_chip(x + 8.0, ry + 8.0);
             }
             // Veil measured against the EASED selection, so it lifts and settles
             // with the slide instead of switching at the moment the index changes.
@@ -12246,7 +12248,7 @@ impl SwitchRenderBackend {
             let (x, y, w, h) = rect_of(i, b);
             let sc = 1.0 + GROW * b;
             match cover_lookup(&e.basename) {
-                Some(CoverTex::Image { tex, w: iw, h: ih }) if iw > 0 && ih > 0 => {
+                Some(CoverTex::Image { tex, w: iw, h: ih, .. }) if iw > 0 && ih > 0 => {
                     // Neutral plaque, never the colour chip: the hero's backdrop
                     // must not change hue as the selection moves.
                     self.draw_overlay_rect(x, y, w, h, PLAQUE);
@@ -12600,7 +12602,6 @@ impl SwitchRenderBackend {
                 let _ = self.cover_for(&entries[idx].basename);
             }
         }
-        let (cover_open, cover_close, cover_t) = grid_cover_phase(selection);
         for (idx, &(tx, tw, trow)) in tiles.iter().enumerate() {
             if trow < lo_row || trow > hi_row {
                 continue;
@@ -12611,23 +12612,6 @@ impl SwitchRenderBackend {
                 continue;
             }
             let th = ROW_IMG_H;
-            // How SELECTED this tile is, from the EASED frame rather than from
-            // the index: the frame is already animated between the old cell and
-            // the new one, so reading it gives the zoom-out below a continuous
-            // 0..1 with no state of its own and no pop. One cell away = 0.
-            // Exactly two tiles move: the one being selected opens, the one
-            // being left folds back. Everything else is 0, whatever the
-            // travelling frame passes over.
-            let b = {
-                let u = if idx == cover_open {
-                    cover_t
-                } else if idx == cover_close {
-                    1.0 - cover_t
-                } else {
-                    0.0
-                };
-                u * u * (3.0 - 2.0 * u) // smoothstep, as ETAGERE's bump uses
-            };
             // Cached cover, else decode one if this frame still has budget, else
             // the generated tile for now (it resolves on a following frame).
             let (cover, ready_at) = match cover_ready(&entries[idx].basename) {
@@ -12640,54 +12624,22 @@ impl SwitchRenderBackend {
                 None => (CoverTex::Default, 0),
             };
             let fade = cover_fade(ready_at);
-
-            match cover {
-                CoverTex::Image { tex, w, h } if fade >= 1.0 => {
-                    // Crop-to-fill the uniform cell (object-fit: cover) so the
-                    // grid stays aligned regardless of the cover's native aspect.
-                    self.draw_cover_zoomed_out(tx, ty, tw, th, tex, w, h, b, 1.0);
-                }
-                CoverTex::Image { tex, w, h } => {
-                    // Mid-fade: the generated tile underneath, the cover over it.
-                    let bg = Matrix {
-                        a: tw, b: 0.0, c: 0.0, d: th,
-                        tx: swf::Twips::from_pixels(tx as f64),
-                        ty: swf::Twips::from_pixels(ty as f64),
-                    };
-                    <Self as CommandHandler>::draw_rect(
-                        self,
-                        swf::Color::from_rgb(entries[idx].color_chip, 255),
-                        bg,
-                    );
-                    self.draw_cover_zoomed_out(tx, ty, tw, th, tex, w, h, b, fade);
-                }
-                CoverTex::Default => {
-                    let bg = Matrix {
-                        a: tw, b: 0.0, c: 0.0, d: th,
-                        tx: swf::Twips::from_pixels(tx as f64),
-                        ty: swf::Twips::from_pixels(ty as f64),
-                    };
-                    <Self as CommandHandler>::draw_rect(
-                        self,
-                        swf::Color::from_rgb(entries[idx].color_chip, 255),
-                        bg,
-                    );
-                    let initials: std::string::String =
-                        entries[idx].display_name.chars().take(3).collect();
-                    let isc = 4.0;
-                    let iw = self.measure_text(&initials, isc);
-                    self.draw_text(
-                        tx + (tw - iw) * 0.5,
-                        ty + (th - 7.0 * isc) * 0.5,
-                        isc,
-                        &initials,
-                        swf::Color::from_rgb(0xFFFFFF, 255),
-                    );
-                }
+            // The generated tile under a cover that is still fading in, alone
+            // when there is no cover at all.
+            let cover_img = match cover {
+                CoverTex::Image { tex, w, h, amb } => Some((tex, w, h, amb)),
+                CoverTex::Default => None,
+            };
+            if cover_img.is_none() || fade < 1.0 {
+                self.kit_default_tile(tx, ty, tw, th, entries[idx].color_chip, &entries[idx].display_name);
+            }
+            if let Some((tex, w, h, amb)) = cover_img {
+                // Whole cover, or cropped to fill when that costs almost nothing:
+                // the same rule as every other view. Nothing is hidden, so the
+                // selected tile no longer has to zoom out to show its art.
+                self.kit_cover(tx, ty, tw, th, tex, w, h, amb, fade);
             }
 
-            // Not the selected one: its frame is drawn after, and rounding the
-            // tile here too would trap the tile's dark notches inside that frame.
             // Every tile, the selected one included: the focus ring stands off
             // the tile by a gap of page colour, so there is no frame for the
             // corner notches to be trapped inside any more.
