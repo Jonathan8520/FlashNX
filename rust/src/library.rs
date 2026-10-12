@@ -9723,9 +9723,9 @@ fn handle_remote_sort_modal_input(
 /// entry. Empty input removes the sidecar (revert to basename). Called
 /// from `input()` only — must NOT hold the LIBRARY lock during swkbd.
 fn run_rename_flow(game_idx: usize) {
-    let (basename, current_display) = match LIBRARY.lock() {
+    let (basename, path, current_display) = match LIBRARY.lock() {
         Ok(g) => match g.entries.get(game_idx) {
-            Some(e) => (e.basename.clone(), e.display_name.clone()),
+            Some(e) => (e.basename.clone(), e.path.clone(), e.display_name.clone()),
             None => return,
         },
         Err(_) => return,
@@ -9752,6 +9752,15 @@ fn run_rename_flow(game_idx: usize) {
             } else {
                 new_name_trimmed
             };
+        }
+        // In its place under the new name now: by name, the game kept its old
+        // place until something else sorted the list, and then jumped. The
+        // panel follows it by PATH, as a favourite does (folders let two games
+        // share a file name).
+        sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
+        let new_idx = s.entries.iter().position(|e| e.path == path).unwrap_or(game_idx);
+        if let Screen::OptionsModal { selection, .. } = s.screen {
+            s.screen = Screen::OptionsModal { game_idx: new_idx, selection };
         }
     }
 }
