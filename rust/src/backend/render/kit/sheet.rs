@@ -159,6 +159,12 @@ pub(crate) fn cascade_reset() {
     }
 }
 
+/// The panel `kit_sheet_rail` drew last, for `kit_cascade_on` to make it the
+/// way back for a finger: the target is the rail as drawn, whatever height it
+/// was given. Taken from a height of its own, a rail shorter than the screen
+/// (a panel that hugs its rows) left a strip under it that went back.
+static RAIL_DRAWN: std::sync::Mutex<(f32, f32, f32, f32)> = std::sync::Mutex::new((0.0, 0.0, 0.0, 0.0));
+
 impl SwitchRenderBackend {
     /// Height of the header for `s`, in the full panel. The rail uses the same,
     /// so its rows stay exactly where they were while it folds.
@@ -538,6 +544,10 @@ impl SwitchRenderBackend {
             }
         }
         self.clear_clip();
+        // Where a tap on the rail lands (`kit_cascade_on`): this panel.
+        if let Ok(mut g) = RAIL_DRAWN.lock() {
+            *g = (x, top, w, h);
+        }
     }
 
     /// The pause and its sub-panels, `t` of the way from the parent alone (0) to
@@ -646,7 +656,10 @@ impl SwitchRenderBackend {
             } else {
                 vw - SHEET_MARGIN - RAIL_W - CASCADE_GAP - child_w
             };
-            let mut back = std::vec![(px, SHEET_MARGIN, pw, vh - 2.0 * SHEET_MARGIN)];
+            // The rail just drawn above (settled, the cascade draws the rail,
+            // never the cut panel), as `kit_sheet_rail` placed it.
+            let rail = RAIL_DRAWN.lock().map(|g| *g).unwrap_or((px, SHEET_MARGIN, pw, vh - 2.0 * SHEET_MARGIN));
+            let mut back = std::vec![rail];
             if c.thumb.is_none() && (c.kicker.is_some() || !c.crumbs.is_empty()) {
                 back.push((cx + 16.0, SHEET_MARGIN + 12.0, child_w - 32.0, 37.0));
             }
