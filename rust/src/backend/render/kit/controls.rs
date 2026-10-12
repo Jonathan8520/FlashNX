@@ -28,10 +28,12 @@ pub(crate) enum Ctrl<'a> {
 const CHOICE_H: f32 = 32.0;
 /// Padding either side of an option and the options' text size, tried in turn
 /// before a choice gives up and shows one value between arrows: the usual
-/// one, a tighter one, then tighter again a size down. The last keeps
-/// "Einpassen | Strecken | Füllen" and "Otomatik | Yumuşak | Keskin" whole in
-/// the pause's 440 px ÉCRAN, and the Spanish, Italian and Portuguese
-/// gyroscope on its Touches page, which all missed by a few pixels.
+/// one, a tighter one, then tighter again a size down. The last is the final
+/// step before that fallback. Measured with the console's Latin widths, the
+/// settings' choices fit by the second; the third serves the sort windows,
+/// whose rows hold two whole orders and room for a tick, and leaves a few
+/// pixels' margin for a choice that misses on the console's own font (the
+/// Russian ÉCRAN is the closest call).
 const CHOICE_TIERS: [(f32, f32); 3] = [(12.0, 14.0), (7.0, 14.0), (4.0, 13.0)];
 const CHOICE_INSET: f32 = 3.0;
 const TOGGLE_W: f32 = 44.0;
