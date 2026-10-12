@@ -64,26 +64,21 @@ pub fn search_url(name: &str, filter: bool) -> std::string::String {
     )
 }
 
-/// Fetch ONE game's blurb by id (`originalDescription`, the text from the game's
+/// Where ONE game's blurb is (`originalDescription`, the text from the game's
 /// original site — verified present in the db-api payload 2026-07-31).
 ///
 /// Deliberately a separate per-game request rather than another `fields=` entry
 /// on the gallery search: descriptions run to kilobytes each, and folding 60 of
 /// them into the search response would bloat it for a blurb the user only sees
-/// after pressing `+`. Blocking HTTPS — call it hoisted, like the other flows.
-pub fn fetch_description(id: &str) -> std::string::String {
-    if id.is_empty() {
-        return std::string::String::new();
-    }
-    let url = std::format!(
-        "{}?id={}&fields=id,originalDescription",
-        SEARCH_BASE,
-        net::url_encode_path(id),
-    );
-    let Ok(bytes) = net::http_get(&url, 512 * 1024) else {
-        return std::string::String::new();
-    };
-    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+/// after pressing `+`. Fetched through the thumbnail pool, so the details
+/// window is up before it arrives.
+pub fn description_url(id: &str) -> std::string::String {
+    std::format!("{}?id={}&fields=id,originalDescription", SEARCH_BASE, net::url_encode_path(id))
+}
+
+/// The blurb out of `description_url`'s answer; empty when there is none.
+pub fn parse_description(bytes: &[u8]) -> std::string::String {
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(bytes) else {
         return std::string::String::new();
     };
     json.as_array()
@@ -107,11 +102,15 @@ pub fn parse_search(
     bytes: &[u8],
 ) -> Result<std::vec::Vec<flashpoint::CatalogEntry>, std::string::String> {
     const MAX: usize = 60;
-    let json: serde_json::Value =
-        serde_json::from_slice(bytes).map_err(|e| crate::loc::err_json(&e.to_string()))?;
+    let json: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| {
+        net::log(&std::format!("gamezip: search JSON parse failed: {}\n", e));
+        crate::loc::err_json(&e.to_string())
+    })?;
+    // Anything but a list is not an answer to a search: say it was unreadable,
+    // not the archive.org wording this used to borrow.
     let arr = json
         .as_array()
-        .ok_or_else(|| std::string::String::from(crate::loc::s().err_json_no_files))?;
+        .ok_or_else(|| std::string::String::from(crate::loc_ui::ui().imp_err_fp_unreadable))?;
     let mut out: std::vec::Vec<flashpoint::CatalogEntry> = std::vec::Vec::new();
     let mut seen_ids: std::vec::Vec<std::string::String> = std::vec::Vec::new();
     let mut seen_titles: std::vec::Vec<std::string::String> = std::vec::Vec::new();

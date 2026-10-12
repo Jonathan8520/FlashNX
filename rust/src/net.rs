@@ -217,7 +217,9 @@ pub(crate) fn post_json(
         )
     };
     if n == -3 {
-        return Err(std::string::String::from(crate::loc::s().err_too_large));
+        // The relay's answer outgrew the buffer: a response too big, not the
+        // archive.org one that `err_too_large` is worded for.
+        return Err(std::string::String::from(crate::loc::s().err_response_big));
     }
     if n < 0 {
         if n == -2 {
@@ -287,10 +289,13 @@ fn parse_archive_metadata(
         log(&std::format!("net: JSON parse failed: {}\n", e));
         crate::loc::err_json(&e.to_string())
     })?;
-    let files_json = json
-        .get("files")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| std::string::String::from(crate::loc::s().err_json_no_files))?;
+    // archive.org answers an identifier it does not know with `{}` and HTTP
+    // 200, so a typo in an address arrives here, not as a 404: say that, rather
+    // than that some JSON lacks a field.
+    let files_json = json.get("files").and_then(|v| v.as_array()).ok_or_else(|| {
+        log(&std::format!("net: archive.org/{} has no \"files\" (unknown item)\n", item_id));
+        std::string::String::from(crate::loc_ui::ui().imp_err_item_missing)
+    })?;
     let mut out: std::vec::Vec<RemoteFile> = std::vec::Vec::new();
     // Remember the item's WHOLE contents before filtering: a multi-file game's
     // data files are in here, and the importer looks them up by name later.
@@ -574,13 +579,12 @@ pub fn cancel_download() {
 
 // ── swkbd URL input ────────────────────────────────────────────────────
 
-/// Prompt the user for an archive.org URL via libnx's software keyboard.
-/// `initial` pre-fills the input field — pass the most recent history
-/// URL so the user can edit a neighbouring item-id with a few keystrokes
-/// instead of retyping the whole URL. Pass `None` for a default prefix.
-/// Synchronous — the keyboard applet takes over the whole screen until
-/// the user submits or cancels. Returns None if cancelled.
-pub fn prompt_url_with_initial(initial: Option<&str>) -> Option<std::string::String> {
+/// Prompt for an address via libnx's software keyboard, under `header` and
+/// `guide` (adding one and fixing one are not the same question). `initial`
+/// pre-fills the field, so a typo in a long address is a few keystrokes to
+/// fix rather than a retype. Synchronous — the keyboard applet takes over the
+/// whole screen until the user submits or cancels. Returns None if cancelled.
+pub fn prompt_url(header: &str, guide: &str, initial: Option<&str>) -> Option<std::string::String> {
     let mut buf = std::vec![0u8; 4096];
     // Build NUL-terminated initial string (or NULL ptr if None).
     let initial_owned: Option<std::vec::Vec<u8>> = initial.map(|s| {
@@ -592,8 +596,8 @@ pub fn prompt_url_with_initial(initial: Option<&str>) -> Option<std::string::Str
         .as_ref()
         .map(|v| v.as_ptr() as *const c_char)
         .unwrap_or(core::ptr::null());
-    let header_c = cstr(crate::loc::s().kbd_url_header);
-    let guide_c = cstr(crate::loc::s().kbd_url_guide);
+    let header_c = cstr(header);
+    let guide_c = cstr(guide);
     let rc = unsafe {
         swkbd_prompt_url(
             header_c.as_ptr() as *const c_char,
@@ -727,16 +731,23 @@ pub fn prompt_bug() -> Option<std::string::String> {
     prompt_long(crate::loc::s().kbd_bug_header, crate::loc::s().kbd_bug_guide)
 }
 
-/// Search prompt for filtering the DistantFiles list. `initial` pre-fills
-/// the input with the currently-active filter so the user can refine it.
-/// Returns the typed text on commit (empty string = clear filter), None
-/// on cancel.
+/// Search prompt for narrowing a list. `initial` pre-fills the input with
+/// the currently-active search so the user can refine it. Returns the typed
+/// text on commit (empty string = clear the search), None on cancel.
 pub fn prompt_search(initial: &str) -> Option<std::string::String> {
+    prompt_search_as(crate::loc::s().kbd_search_header, crate::loc::s().kbd_search_guide, initial)
+}
+
+/// `prompt_search` under a header and guide of the caller's: each importer
+/// search says what it searches (Flashpoint by name, the saved sources by name
+/// or address, an archive's files), where they all used to read "filter by file
+/// name".
+pub fn prompt_search_as(header: &str, guide: &str, initial: &str) -> Option<std::string::String> {
     let mut buf = std::vec![0u8; 1024];
     let mut initial_owned = initial.as_bytes().to_vec();
     initial_owned.push(0);
-    let header_c = cstr(crate::loc::s().kbd_search_header);
-    let guide_c = cstr(crate::loc::s().kbd_search_guide);
+    let header_c = cstr(header);
+    let guide_c = cstr(guide);
     let rc = unsafe {
         swkbd_prompt_search(
             header_c.as_ptr() as *const c_char,
