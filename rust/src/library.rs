@@ -4500,10 +4500,13 @@ fn input_inner(button: &str) -> bool {
         if let Screen::CoverPicker { game_idx, selection } = screen_snap {
             if button == "A" {
                 // Behind a loading card, and only for a cover that is there:
-                // the window that found nothing has nothing to download.
+                // the window that found nothing has nothing to download, and
+                // its A (which its hints do not offer) makes no sound.
                 let there = LIBRARY.lock().map(|s| selection < s.cover_candidates.len()).unwrap_or(false);
                 if there {
                     defer_net(PendingNet::CoverFetch { game_idx, selection }, game_idx);
+                } else {
+                    crate::sfx::press_did_nothing();
                 }
                 return true;
             }
@@ -5277,11 +5280,12 @@ fn handle_games_dir_input(s: &mut State, button: &str, mut selection: usize, mut
             let root = primary_root();
             if selection == 0 {
                 // The card's root cannot take the library: its row says so,
-                // dimmed, and A on it does nothing. A move there wrote
-                // "sdmc://game.swf" paths and recorded "sdmc:" as the library,
-                // which then held every folder of the card, so it could never
-                // be moved out again.
+                // dimmed, and A on it does nothing, without a sound. A move
+                // there wrote "sdmc://game.swf" paths and recorded "sdmc:" as
+                // the library, which then held every folder of the card, so it
+                // could never be moved out again.
                 if settings_tab::is_card_root(&path) {
+                    crate::sfx::press_did_nothing();
                     return;
                 }
                 // Choosing a folder moves the library into it. There is no
@@ -5292,12 +5296,14 @@ fn handle_games_dir_input(s: &mut State, button: &str, mut selection: usize, mut
                 // and the way the misplaced-saves bug stayed hidden.
                 //
                 // The library's own folder is no destination: its row says it
-                // is the one in use, and A on it does nothing.
+                // is the one in use, and A on it does nothing, silently.
                 if !settings_tab::same_dir(&path, &root) {
                     // On "Cancel", like every question of the app: this one
                     // renames every file of the library, and a double press of
                     // A must not be how that happens.
                     s.screen = Screen::GamesDirConfirm { selection: 0 };
+                } else {
+                    crate::sfx::press_did_nothing();
                 }
                 return;
             }

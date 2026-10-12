@@ -63,6 +63,17 @@ pub(crate) fn take_changed() -> bool {
     CHANGED.swap(false, core::sync::atomic::Ordering::Relaxed)
 }
 
+/// Set by a handler when the press being handled did nothing at all (A on a
+/// row that is only there to say why it cannot be chosen), read once by the
+/// next `after_input`. Such a press leaves the screen as it was, which reads
+/// like a value changed in place, and it clicked for nothing.
+static IDLE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Say that the press being handled did nothing: it stays silent.
+pub(crate) fn press_did_nothing() {
+    IDLE.store(true, core::sync::atomic::Ordering::Relaxed);
+}
+
 /// RÉGLAGES > interface sounds: tell the backend.
 pub(crate) fn set_enabled(on: bool) {
     unsafe { ruffle_ui_sounds_set_enabled(on as c_int) };
@@ -90,6 +101,8 @@ pub(crate) fn after_input(
 ) {
     use crate::library::Screen;
     let changed = take_changed();
+    // Read (and forgotten) here, whatever happens next, like `changed`.
+    let idle = IDLE.swap(false, core::sync::atomic::Ordering::Relaxed);
     // The controls editor plays its own sounds (`menu::input`).
     let in_editor = |s: Screen| matches!(s, Screen::TouchesEditor { .. } | Screen::SettingsKeymapEditor);
     if in_editor(before) && in_editor(after) {
@@ -126,7 +139,8 @@ pub(crate) fn after_input(
         // said so), A on a value row, or a step against the end of a list or a
         // choice, which deserves silence. (RÉGLAGES clicks its own values as
         // they move: only it knows whether Left or Right changed anything.)
-        if changed || matches!(button, "A" | "X" | "Y") {
+        // A press its handler says did nothing is silent too.
+        if !idle && (changed || matches!(button, "A" | "X" | "Y")) {
             play(Sfx::Toggle);
         }
         return;
