@@ -153,7 +153,7 @@ const GLIDE_KEY_PAUSE: u32 = 52;
 const GLIDE_KEY_SCREEN: u32 = 53;
 const GLIDE_KEY_LANG: u32 = 50;
 const GLIDE_KEY_BUG: u32 = 51;
-const GLIDE_KEY_KEYS: u32 = 53;
+const GLIDE_KEY_KEYS: u32 = 56;
 const GLIDE_KEY_COVER: u32 = 55;
 // 52 and 54 used to be the folder picker's; it derives its own keys from the
 // path it is showing, so a step into another folder snaps instead of sliding.
@@ -165,6 +165,7 @@ struct ModalFrame {
     x: f32,
     y: f32,
     w: f32,
+    h: f32,
     /// Distance from `y` to the first body row — `MODAL_PAD_TOP` with a subtitle,
     /// `MODAL_PAD_TOP_TIGHT` without (no empty subtitle gap).
     pad_top: f32,
@@ -1172,7 +1173,19 @@ use crate::ffi::gl::*;
 use crate::query_ram;
 
 mod kit;
+mod pages;
+pub(crate) use kit::icons::Icon;
+pub(crate) use kit::text::HintItem;
+pub(crate) use kit::theme::col as ui_col;
 pub(crate) use kit::text::Btn;
+pub(crate) use pages::settings::{SettingsExtra, SettingsRow};
+pub(crate) use pages::windows::{Choice, WinRow};
+
+/// Whether the console's fonts loaded, i.e. the interface draws with the kit
+/// rather than the old 5x7 font.
+pub(crate) fn kit_fonts_available() -> bool {
+    kit::text::fonts_available()
+}
 use kit::theme;
 
 extern "C" {
@@ -9373,6 +9386,8 @@ impl SwitchRenderBackend {
             Some(help),
             &[(&[Btn::A], u.choose), (&[Btn::B], u.resume_game)],
             GLIDE_KEY_PAUSE,
+            // OVERCLOCK steps with Left and Right too.
+            1 << 3,
         );
         unsafe {
             glUseProgram(0);
@@ -9447,6 +9462,8 @@ impl SwitchRenderBackend {
             Some(help),
             &[(&[Btn::A], u.change), (&[Btn::B], u.back)],
             GLIDE_KEY_SCREEN,
+            // Every ECRAN row steps with Left and Right; ZOOM by tens.
+            (1 << SCREEN_ITEMS.len()) - 1,
         );
         unsafe {
             glUseProgram(0);
@@ -10678,13 +10695,28 @@ impl SwitchRenderBackend {
             self.kit_footer_hints(f, x + w * 0.5, y + h - 28.0, true);
         }
 
-        ModalFrame { x, y, w, pad_top }
+        ModalFrame { x, y, w, h, pad_top }
+    }
+
+    /// The hint bar along the bottom of a window drawn with no footer text:
+    /// the hairline, then the hints centred under the rows.
+    fn modal_hints(&mut self, frame: &ModalFrame, hints: &[kit::text::HintItem], danger: bool) {
+        use theme::col;
+        let (x, y, w, h) = (frame.x, frame.y, frame.w, frame.h);
+        self.draw_overlay_rect(x + 20.0, y + h - 56.0, w - 40.0, 1.0, if danger { col::DANGER_LINE } else { col::LINE });
+        self.kit_hints_centered(x + w * 0.5, y + h - 28.0, hints);
     }
 
     /// Draw a window's list: one `kit_row` per entry, a "label : value" entry
     /// split into its two columns, and the focus pill gliding to the selected
     /// one. `selection == usize::MAX` draws no focus (read-only lists).
     fn draw_modal_rows(&mut self, frame: &ModalFrame, selection: usize, rows: &[&str]) {
+        self.draw_modal_rows_stepping(frame, selection, rows, 0);
+    }
+
+    /// `draw_modal_rows`, where bit `i` of `steppers` marks row `i` as one whose
+    /// value also steps with Left and Right (see `kit_row`).
+    fn draw_modal_rows_stepping(&mut self, frame: &ModalFrame, selection: usize, rows: &[&str], steppers: u32) {
         // Which screen these rows belong to, for the touch table and for the
         // glide key (one key per screen, so the focus never flies in from a
         // panel that is no longer open).
@@ -10700,7 +10732,8 @@ impl SwitchRenderBackend {
         for (i, row) in rows.iter().enumerate() {
             let y = top + i as f32 * MODAL_ROW_H;
             let (label, value) = kit::window::split_label_value(row);
-            self.kit_row(px, y + MODAL_ROW_CY, pw, label, value, i == selection, theme::size::ROW);
+            let stepper = i < 32 && steppers & (1 << i) != 0;
+            self.kit_row(px, y + MODAL_ROW_CY, pw, label, value, i == selection, theme::size::ROW, stepper);
             // The whole width of the panel: a row is a target for a thumb.
             cells.push((frame.x + 8.0, y + MODAL_ROW_CY - MODAL_ROW_H * 0.5, (frame.w - 16.0).max(0.0), MODAL_ROW_H));
         }
@@ -10714,9 +10747,20 @@ impl SwitchRenderBackend {
     /// On the interface kit: the tabs in the console font, the active one white
     /// over a gold bar, and the console's own L and R glyphs either side, which
     /// say "the shoulders switch these" without a footer line spelling it out.
-    pub fn draw_navbar(&mut self, active: usize) {
+    pub fn draw_navbar(&mut self, active: usize, logo: (GLuint, u32, u32)) {
         use theme::{col, radius, size};
         let vw = self.dimensions.width as f32;
+        // The logo, top-left in the strip's band as on the console's own
+        // screens, on every tab: it used to be the Play tab's alone, so the
+        // other two had no name at all.
+        let (logo_tex, logo_w, logo_h) = logo;
+        if logo_tex != 0 && logo_w > 0 && logo_h > 0 {
+            let draw_h = 30.0;
+            let draw_w = logo_w as f32 * draw_h / logo_h as f32;
+            self.draw_textured_rect(32.0, 21.0, draw_w, draw_h, logo_tex);
+        } else {
+            self.kit_text_mid(40.0, 36.0, size::TAB, "FlashNX", col::GOLD);
+        }
         let u = crate::loc_ui::ui();
         let tabs = [u.tab_play, u.tab_import, u.tab_settings];
 
@@ -11168,16 +11212,8 @@ impl SwitchRenderBackend {
     ) {
         use theme::{col, size};
         let vw = self.dimensions.width as f32;
-        // The logo moves into the tab strip's band, top-left, as on the console's
-        // own screens: the band under the strip is then free for the line that
-        // says what the grid is showing.
-        if banner_tex != 0 && banner_w > 0 && banner_h > 0 {
-            let draw_h = 30.0;
-            let draw_w = banner_w as f32 * draw_h / banner_h as f32;
-            self.draw_textured_rect(32.0, 21.0, draw_w, draw_h, banner_tex);
-        } else {
-            self.kit_text_mid(40.0, 36.0, size::TAB, "FlashNX", col::GOLD);
-        }
+        // The logo is the navbar's (`draw_navbar`), drawn on every tab.
+        let _ = (banner_tex, banner_w, banner_h);
 
         // What the grid is showing, in this order of precedence (unchanged): a
         // search inside an open folder, a search, an open folder, the whole
@@ -13189,385 +13225,6 @@ impl SwitchRenderBackend {
 
     // ── Phase 3.7: DISTANT mode screens ────────────────────────────────
 
-    /// IMPORTER tab — the saved-URL list. Row 0 is the "+ add" row (PINNED
-    /// first, so it stays reachable however long the history gets); rows 1.. are
-    /// `labels`/`hosts`/`installed`, already filtered + sorted by the caller.
-    /// `selection` is a ROW index. A = launch (or add a URL), + = per-URL
-    /// options, Y = sort, - = search.
-    pub fn draw_library_distant_list(
-        &mut self,
-        selection: usize,
-        // Readable name per URL (item id / file name) — the raw URL is unusable
-        // as a row label past a couple of entries.
-        labels: &[&str],
-        // Host tag drawn dimmed to the right of each label ("" = none).
-        hosts: &[&str],
-        // True = a direct `.swf` (one file, A downloads it) vs an archive.org
-        // item (A opens its file list). They behave differently on A, so the row
-        // says which it is instead of leaving the user to guess from the URL.
-        direct: &[bool],
-        // (files on SD, total files) per URL. `None` total = never opened, so
-        // the count is unknown and the row shows nothing rather than a guess.
-        progress: &[(u32, Option<u32>)],
-        // Favorited URLs: gold diamond, and pinned to the top by the caller —
-        // same treatment a favorited game gets in the JOUER gallery.
-        favorite: &[bool],
-        // The two pinned action rows, in the order they are drawn.
-        search_label: &str,
-        add_label: &str,
-        // Topmost visible row. A real value from the screen state (not derived
-        // from `selection`) so a touch drag can scroll without moving the cursor.
-        scroll_offset: usize,
-        // Active search, echoed in the sub-line with the match count.
-        filter: Option<&str>,
-        // URL count BEFORE filtering, for the "3 / 21" sub-line.
-        total_unfiltered: usize,
-        // True only when this is the ACTIVE IMPORTER home (not a reveal-window
-        // underlay): then it drives the shared scroll/hover animation and
-        // publishes row geometry for the touch layer. An underlay must do
-        // NEITHER — the file list drawn on top owns those singletons that frame.
-        interactive: bool,
-    ) {
-        self.library_clear();
-        let vw = self.dimensions.width as f32;
-
-        // Header.
-        let header = crate::loc::s().dist_title;
-        let hs = 4.0;
-        let hw = self.measure_text(header, hs);
-        self.draw_text(
-            (vw - hw) * 0.5,
-            70.0,
-            hs,
-            header,
-            swf::Color::from_rgb(0xFFD740, 255),
-        );
-
-        // Sub-line: "3 / 21 - FILTRE: mario" while searching, else the count —
-        // with a long history you need to know how much of it you're looking at.
-        let lc = crate::loc::s();
-        // With nothing saved yet, "0" is a fact nobody needed. The line says what
-        // the two rows below it are for instead -- which this page has not done
-        // since it stopped being an archive.org URL box, and the strings written
-        // for that job went unread in loc.rs ever since.
-        let empty = total_unfiltered == 0 && filter.map_or(true, |f| f.trim().is_empty());
-        let sub = if empty {
-            std::borrow::Cow::Borrowed(lc.dist_empty_hint)
-        } else {
-            std::borrow::Cow::Owned(crate::loc::count_line(
-                labels.len(),
-                total_unfiltered,
-                filter,
-                || lc.dist_count.replace("{}", &total_unfiltered.to_string()),
-            ))
-        };
-        // Shrunk to fit rather than truncated: the hint is a sentence, and a
-        // sentence cut in half is worse than a small one. It is the longest thing
-        // this header ever draws, and longest of all in German.
-        let sub_scale = {
-            let full = self.measure_text(&sub, 2.0);
-            if full > vw - 80.0 { 2.0 * (vw - 80.0) / full } else { 2.0 }
-        };
-        let sub_w = self.measure_text(&sub, sub_scale);
-        self.draw_text(
-            (vw - sub_w) * 0.5,
-            118.0,
-            sub_scale,
-            &sub,
-            swf::Color::from_rgb(0xAABFD8, 255),
-        );
-
-        let total = labels.len() + crate::library::IMPORTER_PINNED_ROWS;
-        // 10 rows: the last one ends at 660, clear of the footer at vh-42. Taken
-        // from `library`, not re-typed: the scroll clamp and the reveal box are
-        // computed there from the same three numbers, and a comment asking two
-        // files to stay in step is not a mechanism.
-        const VISIBLE: usize = crate::library::IMPORTER_VISIBLE_ROWS;
-        let row_h = crate::library::IMPORTER_ROW_H;
-        let top = crate::library::IMPORTER_ROW_TOP;
-        let left = 80.0;
-        let scale = 2.0;
-
-        // Smooth scroll + gliding hover, same machinery as the archive.org file
-        // list and the JOUER gallery (shared anim/view/cache singletons — only
-        // one of those screens renders per frame). This list used to PAGE, which
-        // is why it alone felt like it snapped: the rows now ease toward
-        // `scroll_offset` and the highlight bar slides between rows.
-        // The rule only exists when there is something under it, so on a fresh
-        // library nothing shifts and the page is simply two rows.
-        let gap = if labels.is_empty() {
-            0.0
-        } else {
-            crate::library::IMPORTER_SECTION_GAP
-        };
-        // Content-space y of row `i`. One pitch throughout, plus a constant step
-        // for the rows below the rule -- the drag-scroll and the touch cells are
-        // built on the pitch, so it must stay the same on both sides.
-        let row_y = |i: usize| {
-            top + i as f32 * row_h
-                + if i >= crate::library::IMPORTER_PINNED_ROWS { gap } else { 0.0 }
-        };
-        let band_top = top - 8.0;
-        let band_bot = top + VISIBLE as f32 * row_h + gap;
-        let target_scroll = scroll_offset as f32 * row_h;
-        let target_hover = row_y(selection);
-        let mut scroll_px = target_scroll;
-        let mut hover_y = target_hover;
-        // An underlay must not touch the animation: the file list drawn over it
-        // owns these singletons for this frame.
-        if interactive {
-            let touch_scroll = gallery_touch_scroll_read();
-            if let Ok(mut a) = gallery_anim().lock() {
-                let now = unsafe { ruffle_tick_now() };
-                if !a.inited {
-                    a.inited = true;
-                    a.last_tick = now;
-                    a.last_sel = selection;
-                    a.scroll_px = target_scroll;
-                    a.sel_x = 0.0;
-                    a.sel_y = target_hover;
-                    a.sel_w = 0.0;
-                    a.pop = 0.0;
-                } else {
-                    let freq = unsafe { ruffle_tick_freq() } as f32;
-                    let dt = if freq > 0.0 {
-                        (now.saturating_sub(a.last_tick) as f32 / freq).min(0.1)
-                    } else {
-                        1.0 / 60.0
-                    };
-                    a.last_tick = now;
-                    a.last_sel = selection;
-                    a.scroll_px = ease_to(a.scroll_px, target_scroll, dt, 16.0);
-                    a.sel_y = ease_to(a.sel_y, target_hover, dt, 18.0);
-                }
-                // A finger on the screen overrides the eased value 1:1.
-                if let Some(px) = touch_scroll {
-                    a.scroll_px = px;
-                }
-                scroll_px = a.scroll_px;
-                hover_y = a.sel_y;
-            }
-        }
-
-        // Clip the rows to their band so a mid-glide row can't bleed over the
-        // sub-line or the footer.
-        self.set_clip(0.0, band_top, vw, band_bot - band_top);
-
-        let hy = hover_y - scroll_px;
-        let bar_x = left - 40.0;
-        // Radius 6, like JOUER's list: this screen draws straight onto the page
-        // (`library_clear`), so `round_corners` paints the right colour into the
-        // notches. The square bar was the odd one out of the four list screens.
-        self.draw_selection_bar(bar_x, hy - 6.0, vw - bar_x - 56.0, row_h - 12.0, 6.0);
-        self.draw_text(left - 34.0, hy, scale, ">", swf::Color::from_rgb(0xFFD740, 255));
-
-        for i in 0..total {
-            let y = row_y(i) - scroll_px;
-            // Cheap cull: skip rows fully outside the band.
-            if y + row_h < band_top - 8.0 || y > band_bot + 8.0 {
-                continue;
-            }
-            let is_sel = i == selection;
-            let color = if is_sel {
-                swf::Color::from_rgb(0xFFD740, 255)
-            } else {
-                swf::Color::from_rgb(0xCCCCCC, 255)
-            };
-            if i < crate::library::IMPORTER_PINNED_ROWS {
-                // The two actions — teal when not selected so they stand out
-                // from the URLs below. One colour for both: they are one kind of
-                // thing (do something) against another (a source you saved).
-                let c = if is_sel {
-                    color
-                } else {
-                    swf::Color::from_rgb(0x88CC99, 255)
-                };
-                let lbl = if i == 0 { search_label } else { add_label };
-                self.draw_text(left, y, scale, lbl, c);
-                // The search row carries a source tag in the same column and the
-                // same dimmed style a URL row uses for its host, so "where does
-                // this come from" is answered the same way down the whole list.
-                // Not localised: it is the name of the project.
-                {
-                    let src = if i == 0 { "FLASHPOINT" } else { "ARCHIVE.ORG" };
-                    let tw = self.measure_text(src, 1.5);
-                    self.draw_text(
-                        vw - 60.0 - tw,
-                        y + 5.0,
-                        1.5,
-                        src,
-                        swf::Color::from_rgb(0x66788C, 255),
-                    );
-                }
-                continue;
-            }
-            let k = i - crate::library::IMPORTER_PINNED_ROWS;
-            // Right-hand metadata first (host, then count), so the label knows
-            // how much room is left before it truncates.
-            let mut right = vw - 60.0;
-            let host = hosts.get(k).copied().unwrap_or("");
-            if !host.is_empty() {
-                let hw = self.measure_text(host, 1.5);
-                self.draw_text(
-                    right - hw,
-                    y + 5.0,
-                    1.5,
-                    host,
-                    swf::Color::from_rgb(0x66788C, 255),
-                );
-                right -= hw + 20.0;
-            }
-            // "4/13" = how much of this source is already on SD. Green once it's
-            // complete, amber while partial, grey at zero. This replaces the old
-            // all-or-nothing OK badge, which only ever lit up at 100% and so said
-            // nothing at all about a 13-file archive.org item.
-            let count = match progress.get(k).copied() {
-                Some((have, Some(total))) => Some((
-                    std::format!("{}/{}", have, total),
-                    if total > 0 && have >= total {
-                        swf::Color::from_rgb(0x66DD66, 255)
-                    } else if have > 0 {
-                        swf::Color::from_rgb(0xFFB740, 255)
-                    } else {
-                        swf::Color::from_rgb(0x778899, 255)
-                    },
-                )),
-                // Total unknown (never opened) but files from it ARE on SD:
-                // still worth saying so, with the total left as "?".
-                Some((have, None)) if have > 0 => Some((
-                    std::format!("{}/?", have),
-                    swf::Color::from_rgb(0xFFB740, 255),
-                )),
-                _ => None,
-            };
-            if let Some((txt, c)) = count {
-                let cw = self.measure_text(&txt, 1.6);
-                self.draw_text(right - cw, y + 4.0, 1.6, &txt, c);
-                right -= cw + 20.0;
-            }
-            // Type tag: a direct `.swf` downloads on A, an item opens a file
-            // list. Fixed slot on the left so the labels stay aligned.
-            let is_direct = direct.get(k).copied().unwrap_or(false);
-            let (tag, tag_c) = if is_direct {
-                ("SWF", swf::Color::from_rgb(0x7FB3FF, 255))
-            } else {
-                ("LIST", swf::Color::from_rgb(0xB08CE0, 255))
-            };
-            self.draw_text(left, y + 2.0, 1.6, tag, tag_c);
-            let mut ux = left + self.measure_text("LIST", 1.6) + 12.0;
-            // Favorite marker: the same gold diamond the gallery puts on a
-            // favorited cover (the bitmap font has no star glyph).
-            if favorite.get(k).copied().unwrap_or(false) {
-                let sz = 11.0_f32;
-                let cs = 0.70710678_f32; // cos/sin 45°
-                let diamond = Matrix {
-                    a: sz * cs, b: sz * cs, c: -sz * cs, d: sz * cs,
-                    tx: swf::Twips::from_pixels((ux + sz * 0.5) as f64),
-                    ty: swf::Twips::from_pixels((y + row_h * 0.5 - 12.0 - sz * cs) as f64),
-                };
-                <Self as CommandHandler>::draw_rect(
-                    self,
-                    swf::Color::from_rgb(0xFFD740, 255),
-                    diamond,
-                );
-                ux += sz + 12.0;
-            }
-            let shown = self.fit_text_mid(labels[k], scale, right - ux);
-            self.draw_text(ux, y, scale, &shown, color);
-        }
-
-        // The rule between the two halves: what you can do, and what you have
-        // saved. Drawn inside the clip and in content space, so it travels with
-        // the rows instead of hanging in the header when the list scrolls.
-        if !labels.is_empty() {
-            let sep_y = top + crate::library::IMPORTER_PINNED_ROWS as f32 * row_h
-                + (gap - 24.0) * 0.5
-                - scroll_px;
-            if sep_y > band_top && sep_y < band_bot {
-                const RULE_COL: u32 = 0xFF_364356;
-                let head = lc.dist_sources;
-                let hw = self.measure_text(head, 1.5);
-                let cx = vw * 0.5;
-                let x0 = left - 40.0;
-                let x1 = vw - 56.0;
-                // Broken around the heading, like a legend on a frame: an
-                // unbroken rule with a word floating over it reads as two things
-                // that happen to overlap.
-                self.draw_overlay_rect(x0, sep_y, (cx - hw * 0.5 - 16.0 - x0).max(0.0), 2.0, RULE_COL);
-                let right_x = cx + hw * 0.5 + 16.0;
-                self.draw_overlay_rect(right_x, sep_y, (x1 - right_x).max(0.0), 2.0, RULE_COL);
-                self.draw_text(
-                    cx - hw * 0.5,
-                    sep_y - 5.0,
-                    1.5,
-                    head,
-                    swf::Color::from_rgb(0x8FA3BC, 255),
-                );
-            }
-        }
-
-        self.clear_clip();
-
-        // A search that matched nothing would otherwise be a blank page with a
-        // lone "+ add" row — say so.
-        if labels.is_empty() && filter.map_or(false, |f| !f.trim().is_empty()) {
-            let none = lc.cover_none;
-            let nw = self.measure_text(none, 2.0);
-            self.draw_text(
-                (vw - nw) * 0.5,
-                top + row_h * 2.0,
-                2.0,
-                none,
-                swf::Color::from_rgb(0x99AABB, 255),
-            );
-        }
-
-        // Publish row geometry + the live scroll for the touch layer (drag to
-        // scroll, tap to select / activate). Only when interactive: an underlay
-        // would clobber the windowed list's metrics. `y` is content-space
-        // (pre-scroll), matching what `gallery_hit_test` expects.
-        if interactive {
-            let mut cells: std::vec::Vec<GalleryCell> = std::vec::Vec::with_capacity(total);
-            for i in 0..total {
-                cells.push(GalleryCell {
-                    row: i as u32,
-                    cx: vw * 0.5,
-                    x: 0.0,
-                    y: row_y(i),
-                    w: vw,
-                    h: row_h,
-                });
-            }
-            if let Ok(mut g) = gallery_cache().lock() {
-                *g = (cells, total as u32);
-            }
-            if let Ok(mut v) = gallery_view().lock() {
-                *v = GalleryView {
-                    scroll_px,
-                    pitch: row_h,
-                    band_top,
-                    band_bot,
-                    rows_total: total as u32,
-                    rows_visible: VISIBLE as u32,
-                    horizontal: false,
-                    off_min: 0.0,
-                    off_max: 0.0,
-                };
-            }
-        }
-
-        // Tracking the eased pixel scroll.
-        self.draw_scrollbar(vw - 40.0, top, VISIBLE as f32 * row_h, scroll_px, row_h, VISIBLE, total);
-
-        self.draw_page_footer(crate::loc::s().dist_list_footer);
-
-        unsafe {
-            glUseProgram(0);
-            glBindVertexArray(0);
-        }
-        self.gl_state.invalidate();
-    }
-
     /// List of remote files (one row per `RemoteFile`). Mirrors the local
     /// `draw_library_list` layout but skips the per-file color chip /
     /// metadata panel — remote files only have name + size to show.
@@ -13967,131 +13624,35 @@ impl SwitchRenderBackend {
         self.library_clear();
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
-        // A card in the middle of the page: the title in the colour the caller
-        // gave it (red for an error, gold for a notice), the message under it.
+        // A card in the middle of the page: an icon that says what kind of
+        // news this is before a word is read, the title in the colour the
+        // caller gave it (red for an error, amber for a notice, green for a
+        // success), the message under it.
+        let rgb = title_rgb & 0x00FF_FFFF;
+        let (icon, ink) = match rgb {
+            0x66DD66 => (Icon::CircleCheck, col::OK),
+            0xFF5040 => (Icon::Alert, col::DANGER),
+            _ => (Icon::Info, 0xFF00_0000 | rgb),
+        };
+        const DISC: f32 = 56.0;
         let w = 720.0f32.min(vw - 80.0);
-        let lines = self.kit_wrap(msg, size::BODY, w - 80.0, 8);
+        let text_x = 40.0 + DISC + 20.0;
+        let lines = self.kit_wrap(msg, size::BODY, w - text_x - 40.0, 8);
         let lh = (size::BODY * 1.45).round();
-        let h = 120.0 + lh * lines.len() as f32;
+        let h = (110.0 + lh * lines.len() as f32).max(40.0 + DISC + 40.0);
         let x = ((vw - w) * 0.5).round();
         let y = ((vh - 48.0 - h) * 0.5).round().max(90.0);
         self.kit_panel(x, y, w, h, false);
-        let t = self.kit_fit(title, size::TITLE, w - 80.0);
-        self.kit_text_mid(x + 40.0, y + 52.0, size::TITLE, &t, 0xFF00_0000 | (title_rgb & 0x00FF_FFFF));
-        let mut ly = y + 100.0;
+        self.kit_rrect(x + 40.0, y + 36.0, DISC, DISC, DISC * 0.5, col::CHIP);
+        self.kit_icon(x + 40.0 + 14.0, y + 36.0 + DISC * 0.5, 28.0, icon, ink);
+        let t = self.kit_fit(title, size::TITLE, w - text_x - 40.0);
+        self.kit_text_mid(x + text_x, y + 52.0, size::TITLE, &t, ink);
+        let mut ly = y + 96.0;
         for line in &lines {
-            self.kit_text_mid(x + 40.0, ly, size::BODY, line, col::TEXT2);
+            self.kit_text_mid(x + text_x, ly, size::BODY, line, col::TEXT2);
             ly += lh;
         }
         self.draw_page_footer(footer);
-        unsafe {
-            glUseProgram(0);
-            glBindVertexArray(0);
-        }
-        self.gl_state.invalidate();
-    }
-
-    /// Dim backdrop used when the menu module's TOUCHES editor is on top of
-    /// the library (pre-launch keymap edit). Quick black fill — no library
-    /// content underneath, no Ruffle render — just a flat backdrop so
-    /// `menu::draw` sits on something solid.
-    /// Settings modal (Plus from the library). Caller has already cleared
-    /// the screen via `draw_library_dim_backdrop`. `entries` are localized
-    /// labels in fixed order (default controls / language / back).
-    /// REGLAGES — a full-screen navbar TAB page (v1.2.0), not a floating modal:
-    /// clears its own background, draws a top header + a centered entry list +
-    /// footer. The navbar is drawn over the top afterwards by `library::render`.
-    pub fn draw_library_settings(&mut self, selection: usize, entries: &[&str]) {
-        self.library_clear();
-        let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
-
-        // Header (below the navbar strip).
-        const TITLE_SCALE: f32 = 4.0;
-        let header = crate::loc::s().settings_title;
-        let header_w = self.measure_text(header, TITLE_SCALE);
-        self.draw_text(
-            (vw - header_w) * 0.5,
-            90.0,
-            TITLE_SCALE,
-            header,
-            swf::Color::from_rgb(0xFFD740, 255),
-        );
-        // Thin underline accent under the header.
-        let rule = Matrix {
-            a: 360.0, b: 0.0, c: 0.0, d: 2.0,
-            tx: swf::Twips::from_pixels(((vw - 360.0) * 0.5) as f64),
-            ty: swf::Twips::from_pixels(150.0),
-        };
-        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x80_99_AA_BB), rule);
-
-        // Centered entry list with a gliding selection highlight (v1.2.0).
-        const OPT_SCALE: f32 = 3.0;
-        // Center the block vertically between the header rule and the footer so it
-        // stays balanced whatever the entry count (a row was added: PSEUDO #20).
-        let region_top = 185.0;
-        let region_bottom = vh - 70.0;
-        // Rows tighten rather than overflow. At the comfortable 66 px the list
-        // outgrew its region the moment an eighth row arrived (DOSSIER JEUX,
-        // #79) and the last entry landed on top of the footer hint. Dividing the
-        // region instead keeps every row on screen, and keeps doing so for the
-        // next row someone adds.
-        let row_h = (66.0f32).min((region_bottom - region_top) / entries.len().max(1) as f32);
-        let block_h = entries.len() as f32 * row_h;
-        let top_y = (region_top + ((region_bottom - region_top) - block_h) * 0.5).max(region_top);
-
-        let target_hy = top_y + selection as f32 * row_h;
-        let now_hl = unsafe { ruffle_tick_now() };
-        let hy = eased_list_y(target_hy, 2, now_hl);
-        // Wide enough for the LONGEST row, not a fixed 460 px. Rows carry their
-        // value now — "DOSSIER JEUX : /ROMS/FLASHNX" — and a fixed bar let the
-        // text hang out of its own highlight. Sized on the widest entry rather
-        // than the selected one so the bar keeps still as the cursor moves.
-        let widest = entries
-            .iter()
-            .map(|e| self.measure_text(e, OPT_SCALE))
-            .fold(0.0f32, f32::max);
-        let bar_w = (widest + 56.0).clamp(460.0, vw - 80.0);
-        self.draw_selection_bar((vw - bar_w) * 0.5, hy - 8.0, bar_w, row_h - 16.0, 6.0);
-        // Tappable rows, the width of the bar they light up.
-        ui_cells_publish(
-            ui_screen_kind(),
-            (0..entries.len())
-                .map(|i| ((vw - bar_w) * 0.5, top_y + i as f32 * row_h - 8.0, bar_w, row_h))
-                .collect(),
-        );
-        // Cursor at the eased y, x aligned to the selected entry's centering.
-        if let Some(sel) = entries.get(selection) {
-            let sel_ow = self.measure_text(sel, OPT_SCALE);
-            let sel_x = (vw - sel_ow) * 0.5;
-            self.draw_text(sel_x - 40.0, hy, OPT_SCALE, ">", swf::Color::from_rgb(0xFFD740, 255));
-        }
-
-        for (i, opt) in entries.iter().enumerate() {
-            let y = top_y + i as f32 * row_h;
-            let is_sel = i == selection;
-            let color = if is_sel {
-                swf::Color::from_rgb(0xFFD740, 255)
-            } else {
-                swf::Color::from_rgb(0xCCCCCC, 255)
-            };
-            let ow = self.measure_text(opt, OPT_SCALE);
-            let x = (vw - ow) * 0.5;
-            self.draw_text(x, y, OPT_SCALE, opt, color);
-        }
-
-        // Footer.
-        const HELP_SCALE: f32 = 2.0;
-        let help = crate::loc::s().settings_footer;
-        let help_w = self.measure_text(help, HELP_SCALE);
-        self.draw_text(
-            (vw - help_w) * 0.5,
-            vh - 42.0,
-            HELP_SCALE,
-            help,
-            swf::Color::from_rgb(0x99AABB, 255),
-        );
-
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
@@ -14830,155 +14391,6 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
-    /// Bug-report game picker (RÉGLAGES → SIGNALER UN BUG). A full-page
-    /// scrollable list of game names — pick which `.swf` is broken. Mirrors the
-    /// DistantFiles list layout (header + rows + scrollbar + footer).
-    pub fn draw_library_bug_picker(
-        &mut self,
-        selection: usize,
-        scroll_offset: usize,
-        names: &[&str],
-        visible_rows: usize,
-        title: &str,
-        footer: &str,
-    ) {
-        self.library_clear();
-        let vw = self.dimensions.width as f32;
-
-        // Header (drop shadow + amber, like the other list screens).
-        let scale_t = 4.0;
-        let tw = self.measure_text(title, scale_t);
-        self.draw_text((vw - tw) * 0.5 + 3.0, 30.0 + 3.0, scale_t, title, swf::Color::from_rgb(0x000000, 255));
-        self.draw_text((vw - tw) * 0.5, 30.0, scale_t, title, swf::Color::from_rgb(0xFFD740, 255));
-
-        // Rows.
-        const ROW_SCALE: f32 = 2.5;
-        const ROW_SPACING: f32 = 50.0;
-        let rows_top_y = 150.0;
-        let rows_left_x = 80.0;
-        let total = names.len();
-        let now = unsafe { ruffle_tick_now() };
-        // The list SLIDES to its new page instead of jumping a whole row at a
-        // time. `scroll_off` is the eased pixel offset the rows are drawn
-        // against; a scissor over the band turns the row arriving at each edge
-        // into something that visibly slides in rather than appearing.
-        let band_top = rows_top_y - 12.0;
-        let band_bot = rows_top_y + visible_rows as f32 * ROW_SPACING - 4.0;
-        let max_off = total.saturating_sub(visible_rows) as f32 * ROW_SPACING;
-        let scroll_off = eased_scroll_px(
-            (scroll_offset as f32 * ROW_SPACING).min(max_off),
-            GLIDE_KEY_BUG,
-            now,
-        );
-        let first = (scroll_off / ROW_SPACING).floor().max(0.0) as usize;
-        let end = (first + visible_rows + 2).min(total);
-        row_view_publish(RowView {
-            key: GLIDE_KEY_BUG,
-            kind: ui_screen_kind(),
-            band_top,
-            band_bot,
-            row_h: ROW_SPACING,
-            scroll_px: scroll_off,
-            max_off,
-            total: total as u32,
-            visible: visible_rows as u32,
-            base: 0,
-        });
-        self.set_clip(0.0, band_top, vw, band_bot - band_top);
-        // Gliding bar + cursor, drawn under the rows, in the same eased space.
-        //
-        // The GLIDE is eased on top of the eased scroll, not instead of it. They
-        // are two different movements: the list travelling to a new page, and
-        // the cursor travelling to a new row. Dropping the second when the first
-        // arrived left the bar jumping from row to row inside a list that slid
-        // smoothly underneath it -- the two halves of one movement disagreeing,
-        // which is the exact complaint the glide was added for.
-        if selection < total {
-            // Eased in CONTENT space, THEN scrolled -- not the other way round.
-            // Easing the already-scrolled position eases the same movement
-            // twice: during a scroll the rows travel at the scroll speed while
-            // the bar chases them one step behind, which is the exact lag the
-            // glide exists to remove. In content space the bar rides the scroll
-            // exactly, and eases only when the SELECTION moves.
-            let hy = eased_list_y(rows_top_y + selection as f32 * ROW_SPACING, GLIDE_KEY_BUG, now)
-                - scroll_off;
-            let bar_x = rows_left_x - 40.0;
-            self.draw_selection_bar(bar_x, hy - 8.0, vw - bar_x - 40.0, ROW_SPACING - 12.0, 6.0);
-            self.draw_text(
-                rows_left_x - 30.0,
-                hy,
-                ROW_SCALE,
-                ">",
-                swf::Color::from_rgb(0xFFD740, 255),
-            );
-        }
-        // Rows are published in ABSOLUTE index space -- the ones scrolled out of
-        // view get a zero-size rect -- so a hit is directly the index the input
-        // handler and the selection already speak in.
-        let mut cells: std::vec::Vec<(f32, f32, f32, f32)> = std::vec![(0.0, 0.0, 0.0, 0.0); total];
-        for abs_idx in first..end {
-            let y = rows_top_y + abs_idx as f32 * ROW_SPACING - scroll_off;
-            // The scissor decides what is SEEN; this decides what is TOUCHABLE.
-            // A row caught halfway through an edge would otherwise take a tap
-            // aimed at the header or at the row below it.
-            if y >= rows_top_y - 1.0 && y + ROW_SPACING <= band_bot + 12.0 {
-                cells[abs_idx] = (
-                    rows_left_x - 40.0,
-                    y - 8.0,
-                    vw - (rows_left_x - 40.0) - 40.0,
-                    ROW_SPACING,
-                );
-            }
-            let is_sel = abs_idx == selection;
-            let color = if is_sel {
-                swf::Color::from_rgb(0xFFD740, 255)
-            } else {
-                swf::Color::from_rgb(0xCCCCCC, 255)
-            };
-            // Truncate the name to the row WIDTH, not to a character count: a
-            // character is 6 units of pen here and 8 for anything drawn from
-            // the shared font, so a Chinese title budgeted in characters ran a
-            // third past the row and under the scrollbar.
-            let display = self.fit_text(names[abs_idx], ROW_SCALE, vw - rows_left_x * 2.0);
-            self.draw_text(rows_left_x, y, ROW_SCALE, &display, color);
-        }
-        self.clear_clip();
-
-        ui_cells_publish(ui_screen_kind(), cells);
-
-        // Scrollbar if needed.
-        if total > visible_rows {
-            let bar_x = vw - 30.0;
-            let bar_top_y = rows_top_y;
-            let bar_h_total = visible_rows as f32 * ROW_SPACING;
-            let bar_h_thumb = (bar_h_total * visible_rows as f32 / total as f32).max(20.0);
-            // Follows the EASED offset, so the thumb travels with the rows
-            // instead of snapping a page ahead of them.
-            let progress = if max_off > 0.0 { (scroll_off / max_off).clamp(0.0, 1.0) } else { 0.0 };
-            let thumb_y = bar_top_y + (bar_h_total - bar_h_thumb) * progress;
-            let track = Matrix {
-                a: 4.0, b: 0.0, c: 0.0, d: bar_h_total,
-                tx: swf::Twips::from_pixels(bar_x as f64),
-                ty: swf::Twips::from_pixels(bar_top_y as f64),
-            };
-            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0x40_99AABB), track);
-            let thumb = Matrix {
-                a: 4.0, b: 0.0, c: 0.0, d: bar_h_thumb,
-                tx: swf::Twips::from_pixels(bar_x as f64),
-                ty: swf::Twips::from_pixels(thumb_y as f64),
-            };
-            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), thumb);
-        }
-
-        self.draw_page_footer(footer);
-
-        unsafe {
-            glUseProgram(0);
-            glBindVertexArray(0);
-        }
-        self.gl_state.invalidate();
-    }
-
     /// Bug-report result notice. Green title on success, red on failure; the
     /// body is the (already-localized) message. Reuses the shared centered
     /// notice layout.
@@ -15136,109 +14548,6 @@ impl SwitchRenderBackend {
                 self.flag_disc(cx, cy, h * 0.16, 0x002776);
             }
         }
-    }
-
-    /// Language picker: a grid of pixel flags, each with its native name under it
-    /// (issue: the list grew long). `selection` indexes `loc::PICKER_LANGS`;
-    /// `languages` is the parallel list of native names. The active language keeps
-    /// a teal tint even when the cursor is elsewhere.
-    pub fn draw_library_language_picker(&mut self, selection: usize, languages: &[&str]) {
-        let lc = crate::loc::s();
-        const COLS: usize = 3;
-        const CELL_W: f32 = 210.0;
-        const CELL_H: f32 = 104.0;
-        const FLAG_W: f32 = 96.0;
-        const FLAG_H: f32 = 64.0;
-        let n = languages.len();
-        let rows_n = n.div_ceil(COLS);
-        let grid_w = COLS as f32 * CELL_W;
-        let grid_h = rows_n as f32 * CELL_H;
-        let fixed_h = MODAL_PAD_TOP_TIGHT + grid_h + MODAL_PAD_BOTTOM;
-        let frame = self.draw_modal_frame(
-            MODAL_W_WIDE,
-            0,
-            Some(fixed_h),
-            false,
-            lc.lang_title,
-            None,
-            Some(lc.lang_footer),
-        );
-        let active = crate::loc::current().index();
-        let grid_left = frame.x + (frame.w - grid_w) * 0.5;
-        let grid_top = frame.rows_top();
-        // ONE tint, eased in both axes and drawn before the cells: this is a
-        // grid, so the cursor moves sideways as often as it moves down, and a
-        // tint that only slid vertically would have looked broken half the time.
-        if selection < n {
-            let now = unsafe { ruffle_tick_now() };
-            let tx = grid_left + (selection % COLS) as f32 * CELL_W;
-            let ty = grid_top + (selection / COLS) as f32 * CELL_H;
-            let hx = eased_list_x(tx, GLIDE_KEY_LANG, now);
-            let hy = eased_list_y(ty, GLIDE_KEY_LANG, now);
-            // Radius 0: `round_corners` paints the PAGE colour, and this sits on
-            // a modal panel — cutting here would leave four navy notches on it.
-            self.draw_selection_bar(hx + 4.0, hy, CELL_W - 8.0, CELL_H - 6.0, 0.0);
-        }
-        ui_cells_publish(
-            ui_screen_kind(),
-            (0..n)
-                .map(|i| {
-                    (
-                        grid_left + (i % COLS) as f32 * CELL_W,
-                        grid_top + (i / COLS) as f32 * CELL_H,
-                        CELL_W,
-                        CELL_H,
-                    )
-                })
-                .collect(),
-        );
-        for (i, name) in languages.iter().enumerate() {
-            let col = i % COLS;
-            let row = i / COLS;
-            let cell_x = grid_left + col as f32 * CELL_W;
-            let cell_y = grid_top + row as f32 * CELL_H;
-            let is_sel = i == selection;
-            let is_active = i == active;
-            let fx = cell_x + (CELL_W - FLAG_W) * 0.5;
-            let fy = cell_y + 6.0;
-            if let Some(&l) = crate::loc::PICKER_LANGS.get(i) {
-                self.draw_flag(l, fx, fy, FLAG_W, FLAG_H);
-            }
-            let border = if is_sel {
-                MODAL_ROW_SEL_COL
-            } else if is_active {
-                0x66DDCC
-            } else {
-                0x3A4450
-            };
-            self.flag_stroke(fx, fy, FLAG_W, FLAG_H, border);
-            // Native name under the flag, centred and shrunk to fit the cell.
-            let name_col = if is_sel {
-                MODAL_ROW_SEL_COL
-            } else if is_active {
-                0x66DDCC
-            } else {
-                MODAL_ROW_COL
-            };
-            let base = 2.0;
-            let maxw = CELL_W - 16.0;
-            let full = self.measure_text(name, base);
-            let scale = if full > maxw { base * maxw / full } else { base };
-            let nw = self.measure_text(name, scale);
-            self.draw_text(
-                cell_x + (CELL_W - nw) * 0.5,
-                fy + FLAG_H + 10.0,
-                scale,
-                name,
-                swf::Color::from_rgb(name_col, 255),
-            );
-        }
-
-        unsafe {
-            glUseProgram(0);
-            glBindVertexArray(0);
-        }
-        self.gl_state.invalidate();
     }
 
     /// Shared loading overlay: a full-screen dim + the standard loading panel

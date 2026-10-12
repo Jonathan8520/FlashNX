@@ -2878,9 +2878,22 @@ pub extern "C" fn ruffle_draw_menu_closing(selected: c_int) -> c_int {
 /// each mode costs on THIS game before committing to it. Cropping is what fill
 /// trades for the black bars, and how much it crops depends entirely on the
 /// game's aspect ratio. Issues #65, #69, #74.
+/// One step through `n` values, wrapping: forward for `dir >= 0`, back
+/// otherwise. A on a row steps forward; Left and Right step either way.
+pub(crate) fn step_wrap(cur: u8, n: u8, dir: c_int) -> u8 {
+    if n == 0 {
+        return 0;
+    }
+    if dir < 0 {
+        (cur % n + n - 1) % n
+    } else {
+        (cur % n + 1) % n
+    }
+}
+
 #[no_mangle]
-pub extern "C" fn ruffle_display_mode_cycle() {
-    let next = (keymap::display_mode() + 1) % keymap::DISPLAY_MODE_COUNT;
+pub extern "C" fn ruffle_display_mode_step(dir: c_int) {
+    let next = step_wrap(keymap::display_mode(), keymap::DISPLAY_MODE_COUNT, dir);
     keymap::set_display_mode(next);
     let state = unsafe {
         match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
@@ -2947,6 +2960,15 @@ pub extern "C" fn ruffle_zoom_reset() {
     backend::render::set_game_zoom(100, 0, 0, VIEWPORT_W as f32, VIEWPORT_H as f32);
 }
 
+/// Left / Right on the ZOOM row: ten percent either way, kept at once. The
+/// framing mode is for the fine work; this is for "a bit bigger".
+#[no_mangle]
+pub extern "C" fn ruffle_zoom_step(dir: c_int) {
+    ruffle_zoom_adjust(if dir < 0 { -10 } else { 10 }, 0, 0);
+    let (ox, oy) = backend::render::game_pan();
+    keymap::set_zoom(backend::render::game_zoom_percent(), ox, oy);
+}
+
 /// `A`: keep it, and write it to the game's `.prefs` so it is there next launch.
 #[no_mangle]
 pub extern "C" fn ruffle_zoom_commit() {
@@ -2996,8 +3018,8 @@ pub extern "C" fn ruffle_draw_zoom_overlay() {
 /// redrawn turned -- so the player sees the result before committing, exactly
 /// like the display and filter rows. Issue #78.
 #[no_mangle]
-pub extern "C" fn ruffle_rotation_cycle() {
-    let next = (keymap::rotation() + 1) % keymap::ROTATION_COUNT;
+pub extern "C" fn ruffle_rotation_step(dir: c_int) {
+    let next = step_wrap(keymap::rotation(), keymap::ROTATION_COUNT, dir);
     keymap::set_rotation(next);
     crate::backend::render::set_game_rotation(next);
     // Turning the picture re-frames it, so the framing offset goes back to
@@ -3046,8 +3068,8 @@ pub extern "C" fn ruffle_rotation_cycle() {
 /// enough and the next redraw (the paused one, behind the panel) shows it.
 /// The other half of issue #65.
 #[no_mangle]
-pub extern "C" fn ruffle_screen_filter_cycle() {
-    let next = (keymap::screen_filter() + 1) % keymap::SCREEN_FILTER_COUNT;
+pub extern "C" fn ruffle_screen_filter_step(dir: c_int) {
+    let next = step_wrap(keymap::screen_filter(), keymap::SCREEN_FILTER_COUNT, dir);
     keymap::set_screen_filter(next);
     crate::backend::render::set_screen_filter(next);
 }
@@ -3059,8 +3081,8 @@ pub extern "C" fn ruffle_screen_filter_cycle() {
 /// we draw after the frame, so flipping the flag is the whole change and the
 /// paused redraw behind the panel previews it on the next call.
 #[no_mangle]
-pub extern "C" fn ruffle_fps_counter_cycle() {
-    let next = (keymap::fps_counter() + 1) % keymap::FPS_COUNTER_COUNT;
+pub extern "C" fn ruffle_fps_counter_step(dir: c_int) {
+    let next = step_wrap(keymap::fps_counter(), keymap::FPS_COUNTER_COUNT, dir);
     keymap::set_fps_counter(next);
     crate::backend::render::set_fps_counter(next == 1);
 }
@@ -3075,8 +3097,8 @@ pub extern "C" fn ruffle_fps_counter_cycle() {
 /// bilinear is helping or smearing is not a question anyone can answer from a
 /// word in a menu.
 #[no_mangle]
-pub extern "C" fn ruffle_pixel_filter_cycle() {
-    let next = (keymap::pixel_filter() + 1) % keymap::PIXEL_FILTER_COUNT;
+pub extern "C" fn ruffle_pixel_filter_step(dir: c_int) {
+    let next = step_wrap(keymap::pixel_filter(), keymap::PIXEL_FILTER_COUNT, dir);
     keymap::set_pixel_filter(next);
     crate::backend::render::set_pixel_filter(next);
 }
@@ -3097,7 +3119,7 @@ pub extern "C" fn ruffle_gyro_mode() -> c_int {
 /// case would leave the game marked HIGH forever while running at 1020, with
 /// the row saying one thing and the console doing another.
 #[no_mangle]
-pub extern "C" fn ruffle_power_mode_cycle() {
+pub extern "C" fn ruffle_power_mode_step(dir: c_int) {
     // Flip what the row SHOWS, which is the mode in force, not the stored
     // preference: the two part ways whenever the hardware is not where the
     // preference says (a raise dropped for the battery, the second after HOME
@@ -3105,7 +3127,8 @@ pub extern "C" fn ruffle_power_mode_cycle() {
     // preference then asked for the mode already in force, and the press did
     // nothing visible (2026-10-05: "un clic ne fait rien"). On AUTO the row
     // shows AUTO whatever the clock is doing at that moment.
-    let next = keymap::next_power_setting(crate::clock_auto::shown_mode());
+    let shown = crate::clock_auto::shown_mode();
+    let next = if dir < 0 { keymap::prev_power_setting(shown) } else { keymap::next_power_setting(shown) };
     let got = crate::clock_auto::apply_setting(next);
     keymap::set_power_mode(got);
     // Say what was asked for AND what was granted. A refusal is silent on the

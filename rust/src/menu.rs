@@ -22,7 +22,7 @@ use crate::keymap;
 
 // C++-owned cursor speed (live + per-game while in a game), reused from the
 // library extern block: cycle to the next preset / read the x10 label value.
-use crate::library::{ruffle_cursor_speed_cycle, ruffle_cursor_speed_mult_x10};
+use crate::library::{ruffle_cursor_speed_mult_x10, ruffle_cursor_speed_step};
 
 // In-game TOUCHES sub-menu rows (#20 Option 1): edit / apply / share / cursor
 // speed / show-cursor toggle, then a revert row (index 5) when there's a custom
@@ -507,7 +507,7 @@ fn handle_menu_input(s: &mut State, button: &str, mut selection: usize) {
             }
             MENU_CURSOR => {
                 // Cycle the live per-game cursor speed (C++ applies + persists).
-                unsafe { ruffle_cursor_speed_cycle() };
+                unsafe { ruffle_cursor_speed_step(1) };
             }
             MENU_SHOWCURSOR => {
                 // Toggle the per-game pointer visibility (persists in the keymap).

@@ -178,6 +178,9 @@ impl SwitchRenderBackend {
     /// rows, a box explaining the row under the cursor, and the hints, whose B
     /// says where it goes. Every in-game page is this same panel, so moving
     /// between them reads as moving through one menu, not a stack of popups.
+    ///
+    /// `steppers` has bit `i` set when row `i`'s value also steps with Left and
+    /// Right; the focused one then shows an arrow either side of its value.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn kit_side_sheet(
         &mut self,
@@ -188,6 +191,7 @@ impl SwitchRenderBackend {
         help: Option<&str>,
         hints: &[HintItem],
         glide_key: u32,
+        steppers: u32,
     ) {
         use super::theme::size;
         const ROW_H: f32 = 52.0;
@@ -225,7 +229,8 @@ impl SwitchRenderBackend {
         for (i, row) in rows.iter().enumerate() {
             let cy = top + i as f32 * ROW_H + ROW_H * 0.5;
             let (label, value) = split_label_value(row);
-            self.kit_row(px, cy, pw, label, value, i == selection, size::ROW);
+            let stepper = i < 32 && steppers & (1 << i) != 0;
+            self.kit_row(px, cy, pw, label, value, i == selection, size::ROW, stepper);
         }
 
         // What the row under the cursor does, always in the same place.
@@ -249,20 +254,80 @@ impl SwitchRenderBackend {
     /// One list row centred on `cy`, between `x` and `x + w`: the label at the
     /// left, the value (if any) right-aligned. The focus pill is drawn by the
     /// caller, so it can glide between rows.
+    ///
+    /// A `stepper` row's value also changes with Left and Right. The arrows that
+    /// say so are drawn on the focused row only, but their room is kept on
+    /// every stepper row, so the values stay in one column as the focus moves.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn kit_row(&mut self, x: f32, cy: f32, w: f32, label: &str, value: Option<&str>, focused: bool, px: f32) {
+    pub(crate) fn kit_row(
+        &mut self,
+        x: f32,
+        cy: f32,
+        w: f32,
+        label: &str,
+        value: Option<&str>,
+        focused: bool,
+        px: f32,
+        stepper: bool,
+    ) {
+        use super::icons::Icon;
         const PAD: f32 = 20.0;
+        const ARROW: f32 = 16.0;
+        const ARROW_GAP: f32 = 6.0;
         let ink = if focused { col::TEXT } else { col::TEXT2 };
         let mut avail = w - 2.0 * PAD;
         if let Some(v) = value {
+            let mut right = x + w - PAD;
+            if stepper {
+                if focused {
+                    self.kit_icon(right - ARROW, cy, ARROW, Icon::ChevronRight, col::GOLD);
+                }
+                right -= ARROW + ARROW_GAP;
+                avail -= ARROW + ARROW_GAP;
+            }
             let vw_max = (avail * 0.45).max(60.0);
             let v = self.kit_fit(v, px, vw_max);
             let vw = self.kit_measure(&v, px);
             let vink = if focused { col::GOLD } else { col::TEXT3 };
-            self.kit_text_mid(x + w - PAD - vw, cy, px, &v, vink);
+            self.kit_text_mid(right - vw, cy, px, &v, vink);
             avail -= vw + 16.0;
+            if stepper {
+                if focused {
+                    self.kit_icon(right - vw - ARROW_GAP - ARROW, cy, ARROW, Icon::ChevronLeft, col::GOLD);
+                }
+                avail -= ARROW + ARROW_GAP;
+            }
         }
         let l = self.kit_fit(label, px, avail);
         self.kit_text_mid(x + PAD, cy, px, &l, ink);
+    }
+}
+
+impl SwitchRenderBackend {
+    /// The head of a full page that is not a tab: where it sits ("Réglages ›
+    /// Signaler un bug"), its title, and a line saying what to do here. Returns
+    /// the y where the page's content can start.
+    pub(crate) fn kit_page_header(&mut self, crumbs: &[&str], title: &str, subtitle: Option<&str>) -> f32 {
+        use super::theme::size;
+        let vw = self.dimensions.width as f32;
+        let x = 48.0;
+        let mut cx = x;
+        for (i, c) in crumbs.iter().enumerate() {
+            if i > 0 {
+                cx += self.kit_text_mid(cx, 34.0, size::CAPTION + 1.0, "  \u{203A}  ", col::TEXT3);
+            }
+            let ink = if i + 1 == crumbs.len() { col::TEXT2 } else { col::TEXT3 };
+            cx += self.kit_text_mid(cx, 34.0, size::CAPTION + 1.0, c, ink);
+        }
+        let t = self.kit_fit(title, size::TITLE, vw - 2.0 * x);
+        self.kit_text_mid(x, 70.0, size::TITLE, &t, col::TEXT);
+        match subtitle {
+            Some(sub) => {
+                let s = self.kit_fit(sub, size::LABEL + 1.0, vw - 2.0 * x);
+                self.kit_text_mid(x, 102.0, size::LABEL + 1.0, &s, col::TEXT3);
+                126.0
+            }
+            None => 100.0,
+        }
     }
 }

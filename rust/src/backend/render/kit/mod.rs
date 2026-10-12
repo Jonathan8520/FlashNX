@@ -3,7 +3,12 @@
 //! - `theme`: every colour, type size and radius, in one place.
 //! - `text`: the console's own fonts at the size they are drawn, and the button
 //!   glyphs that replace "A:" in the hint bars.
-//! - `shapes`: rounded rectangles, rings and shadows from one shader.
+//! - `shapes`: rounded rectangles, rings and shadows from one shader, and
+//!   images with rounded corners.
+//! - `icons`: the interface icons (a Lucide subset), drawn by `kit_icon`.
+//! - `cover`: cover art in boxes of any shape.
+//! - `window`: windows, list rows, hint bars, the in-game side sheet.
+//! - `list`: a list that scrolls, with its pill, touch table and scrollbar.
 //!
 //! These are children of `render` so they can reach the renderer's GL state the
 //! way the rest of `render.rs` does. Screens move onto them one at a time; the
@@ -14,6 +19,8 @@
 #![allow(dead_code)]
 
 pub(crate) mod cover;
+pub(crate) mod icons;
+pub(crate) mod list;
 pub(crate) mod shapes;
 pub(crate) mod text;
 pub(crate) mod theme;

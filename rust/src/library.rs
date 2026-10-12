@@ -207,6 +207,21 @@ pub(crate) enum Screen {
 // redundant clutter. APPLIQUER / PARTAGER moved OUT of here into the TOUCHES
 // sub-menu (#20 regroup) so they don't read as game-save actions next to
 // RENOMMER / JAQUETTE / SUPPRIMER.
+/// The RÉGLAGES rows, in the order they are drawn. Every screen that returns
+/// to the tab lands on the row that opened it, through these names: the rows
+/// were numbers once, and moving one meant finding every literal 3 and 6.
+pub(crate) mod set_row {
+    pub(crate) const HOME_VIEW: usize = 0;
+    pub(crate) const GAMES_DIR: usize = 1;
+    pub(crate) const GAME_PREFS: usize = 2;
+    pub(crate) const LANGUAGE: usize = 3;
+    pub(crate) const PSEUDO: usize = 4;
+    pub(crate) const BUG: usize = 5;
+    pub(crate) const SUGGEST: usize = 6;
+    pub(crate) const QUIT: usize = 7;
+    pub(crate) const COUNT: usize = 8;
+}
+
 pub(crate) const OPTIONS_ENTRIES: &[&str] = &[
     "FAVORI", "TOUCHES", "RENOMMER", "JAQUETTE", "DOSSIER", "RACCOURCI", "SUPPRIMER",
 ];
@@ -3845,7 +3860,7 @@ pub fn input(button: &str) -> bool {
                 return true;
             }
         }
-        // A on the RÉGLAGES "FAIRE UNE PROPOSITION" row (index 4) = swkbd + POST.
+        // A on the RÉGLAGES suggestion row = swkbd + POST.
         // Hoisted for the same reason.
         // X in the folder picker = create a subfolder here. Hoisted because the
         // swkbd blocks, and blocking under the library lock freezes the app.
@@ -3856,12 +3871,12 @@ pub fn input(button: &str) -> bool {
             }
         }
         if let Screen::SettingsModal { selection } = screen_snap {
-            if button == "A" && selection == 4 {
+            if button == "A" && selection == set_row::SUGGEST {
                 run_suggestion_flow();
                 return true;
             }
             // PSEUDO (#20): swkbd to set the community-profile nickname. Hoisted.
-            if button == "A" && selection == 5 {
+            if button == "A" && selection == set_row::PSEUDO {
                 run_pseudo_flow();
                 return true;
             }
@@ -4180,7 +4195,7 @@ pub fn input(button: &str) -> bool {
 /// move those two with it. Rows 3 and 4 are written by index a second time, into
 /// `Screen::BugResult { from_row }` (#113) and by `handle_bug_picker_input`'s B.
 fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
-    const LAST: usize = 7;
+    const LAST: usize = set_row::COUNT - 1;
     match button {
         "Up" | "StickLUp" => {
             selection = if selection == 0 { LAST } else { selection - 1 };
@@ -4190,40 +4205,11 @@ fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
         }
         "A" => {
             match selection {
-                0 => {
-                    // JOUER layout: cycle in place. The global keymap row that used
-                    // to sit here moved into REGLAGES PAR DEFAUT, where it belongs
-                    // (it IS a per-game default), which freed index 0 — the only
-                    // slot a new row can take without shifting the by-index hoists
-                    // on rows 3 and 5.
+                set_row::HOME_VIEW => {
                     let cur = crate::loc::home_view() as usize;
                     s.screen = Screen::SettingsHomeViewPicker { selection: cur };
-                    return;
                 }
-                1 => {
-                    // Game defaults sub-modal (keymap / display / filter / cursor).
-                    s.screen = Screen::SettingsPrefsModal { selection: 0 };
-                    return;
-                }
-                2 => {
-                    let cur = crate::loc::current().index();
-                    s.screen = Screen::SettingsLanguagePicker { selection: cur };
-                }
-                3 => {
-                    // SIGNALER UN BUG — pick the broken game, then describe + send.
-                    // No game on SD = nothing to report; show a short notice.
-                    if s.entries.is_empty() {
-                        s.bug_ok = false;
-                        s.bug_msg = crate::loc::s().bug_no_games.to_string();
-                        // Opened from this very row, so dismissing comes back to it.
-                        s.screen = Screen::BugResult { from_row: 3 };
-                    } else {
-                        s.screen = Screen::BugPicker { selection: 0, scroll_offset: 0 };
-                    }
-                }
-                // 4 = FAIRE UNE PROPOSITION and 5 = PSEUDO are hoisted in input()
-                // (they open the swkbd).
-                6 => {
+                set_row::GAMES_DIR => {
                     // GAMES FOLDER (#79): browse the card and pick where new
                     // downloads land. Starts at the folder in use, so the row
                     // opens on what it describes.
@@ -4231,10 +4217,28 @@ fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
                     s.dir_browse = list_dirs(&start);
                     s.dir_path = start;
                     s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 };
-                    return;
                 }
-                7 => {
-                    // QUIT (Minus is SEARCH now). Exits the .nro.
+                set_row::GAME_PREFS => {
+                    s.screen = Screen::SettingsPrefsModal { selection: 0 };
+                }
+                set_row::LANGUAGE => {
+                    let cur = crate::loc::current().index();
+                    s.screen = Screen::SettingsLanguagePicker { selection: cur };
+                }
+                set_row::BUG => {
+                    // Pick the broken game, then describe + send. No game on SD
+                    // = nothing to report; say so.
+                    if s.entries.is_empty() {
+                        s.bug_ok = false;
+                        s.bug_msg = crate::loc::s().bug_no_games.to_string();
+                        s.screen = Screen::BugResult { from_row: set_row::BUG };
+                    } else {
+                        s.screen = Screen::BugPicker { selection: 0, scroll_offset: 0 };
+                    }
+                }
+                // PSEUDO and SUGGEST are hoisted in input(): they open the
+                // keyboard, which must not run under the lock.
+                set_row::QUIT => {
                     s.screen = Screen::Quit;
                 }
                 _ => {}
@@ -4259,6 +4263,12 @@ fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
 /// keeps it even if the default changes later.
 fn handle_settings_prefs_input(s: &mut State, button: &str, mut selection: usize) {
     const LAST: usize = 8;
+    // A steps a value forward; Left and Right step it either way.
+    let dir: i32 = match button {
+        "A" | "Right" | "StickLRight" => 1,
+        "Left" | "StickLLeft" => -1,
+        _ => 0,
+    };
     match button {
         "Up" | "StickLUp" => {
             selection = if selection == 0 { LAST } else { selection - 1 };
@@ -4266,79 +4276,74 @@ fn handle_settings_prefs_input(s: &mut State, button: &str, mut selection: usize
         "Down" | "StickLDown" => {
             selection = if selection >= LAST { 0 } else { selection + 1 };
         }
-        "A" => {
+        "A" if selection == 0 => {
+            // Global default keymap: it is a per-game default like the rows
+            // below it.
+            keymap::init_for_global_default();
+            menu::open();
+            s.screen = Screen::SettingsKeymapEditor;
+            return;
+        }
+        _ if dir != 0 && selection > 0 => {
+            use crate::step_wrap;
+            let d = dir as core::ffi::c_int;
             match selection {
-                0 => {
-                    // Global default keymap, moved here from the REGLAGES top
-                    // level: it is a per-game default like the three below.
-                    keymap::init_for_global_default();
-                    menu::open();
-                    s.screen = Screen::SettingsKeymapEditor;
-                    return;
-                }
-                1 => {
-                    let next = (crate::loc::default_display_mode() + 1)
-                        % keymap::DISPLAY_MODE_COUNT;
-                    crate::loc::set_default_display_mode(next);
-                    crate::loc::save_current();
-                }
-                2 => {
-                    let next = (crate::loc::default_rotation() + 1) % keymap::ROTATION_COUNT;
-                    crate::loc::set_default_rotation(next);
-                    crate::loc::save_current();
-                }
-                3 => {
-                    // Presets, not the free percentage the pause menu gives:
-                    // there is no picture here to judge one against.
-                    crate::loc::cycle_default_zoom();
-                    crate::loc::save_current();
-                }
-                4 => {
-                    // Texture sampling (issue #108). Sits above the screen
-                    // filter here for the same reason it does in ECRAN, and the
-                    // two are kept in the same order on both screens because
-                    // their names are close enough that a different order would
-                    // be read as a different setting.
-                    let next = (crate::loc::default_pixel_filter() + 1)
-                        % keymap::PIXEL_FILTER_COUNT;
-                    crate::loc::set_default_pixel_filter(next);
-                    crate::loc::save_current();
-                }
-                5 => {
-                    let next = (crate::loc::default_screen_filter() + 1)
-                        % keymap::SCREEN_FILTER_COUNT;
-                    crate::loc::set_default_screen_filter(next);
-                    crate::loc::save_current();
-                }
-                6 => {
-                    // The DEFAULT only, and nothing is drawn here to preview it
-                    // on: there is no game running, so the first sight of the
-                    // counter is the next game that follows this default.
-                    let next = (crate::loc::default_fps_counter() + 1)
-                        % keymap::FPS_COUNTER_COUNT;
-                    crate::loc::set_default_fps_counter(next);
-                    crate::loc::save_current();
-                }
+                1 => crate::loc::set_default_display_mode(step_wrap(
+                    crate::loc::default_display_mode(),
+                    keymap::DISPLAY_MODE_COUNT,
+                    d,
+                )),
+                2 => crate::loc::set_default_rotation(step_wrap(
+                    crate::loc::default_rotation(),
+                    keymap::ROTATION_COUNT,
+                    d,
+                )),
+                // Presets, not the free percentage the pause menu gives:
+                // there is no picture here to judge one against.
+                3 => crate::loc::step_default_zoom(dir),
+                // Texture sampling (issue #108), above the screen filter here
+                // as in ECRAN: the two names are close enough that a different
+                // order would read as a different setting.
+                4 => crate::loc::set_default_pixel_filter(step_wrap(
+                    crate::loc::default_pixel_filter(),
+                    keymap::PIXEL_FILTER_COUNT,
+                    d,
+                )),
+                5 => crate::loc::set_default_screen_filter(step_wrap(
+                    crate::loc::default_screen_filter(),
+                    keymap::SCREEN_FILTER_COUNT,
+                    d,
+                )),
+                // The DEFAULT only: no game is running to show the counter on.
+                6 => crate::loc::set_default_fps_counter(step_wrap(
+                    crate::loc::default_fps_counter(),
+                    keymap::FPS_COUNTER_COUNT,
+                    d,
+                )),
+                // The DEFAULT only. No clock is touched from here: a raise
+                // outside gameplay would be spent entirely on drawing a menu.
                 7 => {
-                    // The DEFAULT only. No clock is touched from here: there is
-                    // no game running, and a raise outside gameplay would be
-                    // spent entirely on drawing a menu.
-                    // Same order as the pause-menu row.
-                    let next = keymap::next_power_setting(crate::loc::default_power_mode());
-                    crate::loc::set_default_power_mode(next);
-                    crate::loc::save_current();
+                    let cur = crate::loc::default_power_mode();
+                    crate::loc::set_default_power_mode(if dir < 0 {
+                        keymap::prev_power_setting(cur)
+                    } else {
+                        keymap::next_power_setting(cur)
+                    });
                 }
+                // Cursor speed keeps its own home: C++ owns the live value and
+                // its file, and knows on its own that out of a game this steps
+                // the GLOBAL default.
                 _ => {
-                    // Cursor speed keeps its own home: C++ owns the live value and
-                    // its `sdmc:/flashnx/cursor_speed` file, and knows on its own
-                    // that out of a game this cycles the GLOBAL default.
-                    unsafe { ruffle_cursor_speed_cycle() };
+                    unsafe { ruffle_cursor_speed_step(d) };
                 }
+            }
+            if selection != LAST {
+                crate::loc::save_current();
             }
         }
         "B" | "Minus" => {
-            // Back to REGLAGES PAR DEFAUT (row 1), the row that opened this.
-            s.screen = Screen::SettingsModal { selection: 1 };
+            // Back to the row that opened this.
+            s.screen = Screen::SettingsModal { selection: set_row::GAME_PREFS };
             return;
         }
         _ => {}
@@ -4384,11 +4389,11 @@ fn handle_settings_language_input(s: &mut State, button: &str, mut selection: us
                 crate::loc::set(lang);
                 crate::loc::save(lang);
             }
-            s.screen = Screen::SettingsModal { selection: 2 };
+            s.screen = Screen::SettingsModal { selection: set_row::LANGUAGE };
             return;
         }
         "B" | "Minus" => {
-            s.screen = Screen::SettingsModal { selection: 2 };
+            s.screen = Screen::SettingsModal { selection: set_row::LANGUAGE };
             return;
         }
         _ => {}
@@ -4403,17 +4408,23 @@ fn handle_settings_language_input(s: &mut State, button: &str, mut selection: us
 fn handle_settings_home_view_input(s: &mut State, button: &str, mut selection: usize) {
     const LAST: usize = 3;
     match button {
-        "Up" | "StickLUp" => selection = if selection == 0 { LAST } else { selection - 1 },
-        "Down" | "StickLDown" => selection = if selection >= LAST { 0 } else { selection + 1 },
+        // The four layouts sit side by side; Up and Down still work, for the
+        // hand that expects a list.
+        "Left" | "StickLLeft" | "Up" | "StickLUp" => {
+            selection = if selection == 0 { LAST } else { selection - 1 }
+        }
+        "Right" | "StickLRight" | "Down" | "StickLDown" => {
+            selection = if selection >= LAST { 0 } else { selection + 1 }
+        }
         "A" => {
             crate::loc::set_home_view(selection as u8);
             crate::loc::save_current();
             crate::backend::render::home_anim_reset();
-            s.screen = Screen::SettingsModal { selection: 0 };
+            s.screen = Screen::SettingsModal { selection: set_row::HOME_VIEW };
             return;
         }
         "B" | "Minus" => {
-            s.screen = Screen::SettingsModal { selection: 0 };
+            s.screen = Screen::SettingsModal { selection: set_row::HOME_VIEW };
             return;
         }
         _ => {}
@@ -4687,7 +4698,7 @@ fn drive_pending_move() {
         s.screen = if s.entries.is_empty() {
             Screen::Empty
         } else {
-            Screen::SettingsModal { selection: 6 }
+            Screen::SettingsModal { selection: set_row::GAMES_DIR }
         };
     }
 }
@@ -4759,9 +4770,10 @@ fn handle_games_dir_input(s: &mut State, button: &str, mut selection: usize, mut
                 if path == primary_root() {
                     // Already the games folder: nothing to confirm, nothing to do.
                     s.dir_browse.clear();
-                    s.screen = Screen::SettingsModal { selection: 6 };
+                    s.screen = Screen::SettingsModal { selection: set_row::GAMES_DIR };
                 } else {
-                    s.screen = Screen::GamesDirConfirm { selection: 0 };
+                    // On "Move": the folder was just chosen on purpose.
+                    s.screen = Screen::GamesDirConfirm { selection: 1 };
                 }
                 return;
             }
@@ -4789,13 +4801,13 @@ fn handle_games_dir_input(s: &mut State, button: &str, mut selection: usize, mut
                 browse_go_up(s, &path);
             } else {
                 s.dir_browse.clear();
-                s.screen = Screen::SettingsModal { selection: 6 };
+                s.screen = Screen::SettingsModal { selection: set_row::GAMES_DIR };
             }
             return;
         }
         "Minus" => {
             s.dir_browse.clear();
-            s.screen = Screen::SettingsModal { selection: 6 };
+            s.screen = Screen::SettingsModal { selection: set_row::GAMES_DIR };
             return;
         }
         _ => {}
@@ -4956,7 +4968,7 @@ fn run_bug_report_flow(row: usize) {
         description: description.trim().to_string(),
     };
     // Row 3 = SIGNALER UN BUG: the picker this came through has no other way in.
-    submit_and_show(&report, 3);
+    submit_and_show(&report, set_row::BUG);
 }
 
 /// RÉGLAGES > FAIRE UNE PROPOSITION: open swkbd for a free-text idea and POST it
@@ -4997,8 +5009,8 @@ fn run_suggestion_flow() {
         docked: false,
         description: text,
     };
-    // Row 4 = FAIRE UNE PROPOSITION, the only row that reaches this flow.
-    submit_and_show(&report, 4);
+    // The suggestion row, the only row that reaches this flow.
+    submit_and_show(&report, set_row::SUGGEST);
 }
 
 /// RÉGLAGES > PSEUDO (#20): open swkbd (prefilled with the current nickname) to
@@ -5026,8 +5038,8 @@ fn handle_bug_picker_input(s: &mut State, button: &str, mut selection: usize, mu
             scroll = clamp_scroll(scroll, selection, BUG_PICKER_VISIBLE_ROWS);
         }
         "B" => {
-            // Back to SIGNALER UN BUG (row 3), the row that opened the picker.
-            s.screen = Screen::SettingsModal { selection: 3 };
+            // Back to the row that opened the picker.
+            s.screen = Screen::SettingsModal { selection: set_row::BUG };
             return;
         }
         // A is hoisted in input() (swkbd + HTTPS POST run without the lock).
@@ -5050,9 +5062,12 @@ fn handle_bug_picker_input(s: &mut State, button: &str, mut selection: usize, mu
 /// other action here that touches the SD.
 fn handle_games_dir_confirm_input(s: &mut State, button: &str, mut selection: usize) {
     match button {
-        "Up" | "StickLUp" | "Down" | "StickLDown" => selection = 1 - selection.min(1),
+        "Up" | "StickLUp" | "Down" | "StickLDown" | "Left" | "StickLLeft" | "Right" | "StickLRight" => {
+            selection = 1 - selection.min(1)
+        }
         "A" => {
-            if selection == 0 {
+            // Cancel on the left (0), move on the right (1).
+            if selection == 1 {
                 s.pending_games_dir = Some(s.dir_path.clone());
                 s.dir_browse.clear();
                 s.screen = Screen::GamesDirMoving;
@@ -5181,7 +5196,7 @@ fn run_pseudo_flow() {
     };
     crate::profiles::set_author_name(&name);
     if let Ok(mut s) = LIBRARY.lock() {
-        s.screen = Screen::SettingsModal { selection: 5 };
+        s.screen = Screen::SettingsModal { selection: set_row::PSEUDO };
     }
 }
 
@@ -6074,15 +6089,15 @@ pub(crate) fn importer_view(s: &State) -> std::vec::Vec<usize> {
 /// drift apart.
 pub const IMPORTER_VISIBLE_ROWS: usize = 9;
 
-/// Blank space opened under the pinned actions, for the rule that separates them
-/// from the saved sources.
+/// Blank space opened under the pinned actions, for the header ("My sources")
+/// that separates them from the saved sources.
 ///
 /// A constant OFFSET applied to the rows below it, never a second row height:
 /// the drag-to-scroll and the touch cells are both built on one pitch, and a row
 /// that was taller than the pitch would put what you see and what you tap in two
 /// different places. One row of the ten went to pay for it, so the last row still
 /// ends clear of the footer.
-pub const IMPORTER_SECTION_GAP: f32 = 22.0;
+pub const IMPORTER_SECTION_GAP: f32 = 30.0;
 
 /// Action rows pinned above the saved URLs: search Flashpoint, then add a URL.
 ///
@@ -7119,7 +7134,7 @@ fn handle_game_folder_input(s: &mut State, button: &str, game_idx: usize, mut se
                 s.screen = Screen::GameFolderDelete {
                     game_idx,
                     folder_idx: selection - 1,
-                    selection: 1, // cursor on NO: this undoes deliberate work
+                    selection: 0, // cursor on Cancel: this undoes deliberate work
                 };
             }
             return;
@@ -7145,7 +7160,9 @@ fn handle_game_folder_delete_input(
             selection = 1 - selection.min(1);
         }
         "A" => {
-            if selection == 0 {
+            // Cancel on the left (0), empty on the right (1), like the
+            // console's own questions.
+            if selection == 1 {
                 // `empty_folder` re-sorts AND rewrites the paths, so it is the
                 // only thing that can tell us where this game ended up. Pinning
                 // from out here by path could not work: the path is what it
@@ -8493,7 +8510,7 @@ extern "C" {
     fn swf_picker_count_companions(swf_path: *const core::ffi::c_char) -> core::ffi::c_int;
     // Cursor-speed preset (main.cpp): cycle to the next preset (returns the new
     // index), and read the current multiplier x10 (5,10,15,20,25) for the label.
-    pub(crate) fn ruffle_cursor_speed_cycle() -> core::ffi::c_int;
+    pub(crate) fn ruffle_cursor_speed_step(dir: core::ffi::c_int) -> core::ffi::c_int;
     pub(crate) fn ruffle_cursor_speed_mult_x10() -> core::ffi::c_int;
 }
 
@@ -9248,68 +9265,75 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 )
             });
             if let Some((Some((name, on, physical, bare)), folders)) = snap {
+                use crate::backend::render::{ui_col, Btn, Icon, WinRow};
                 let lc = crate::loc::s();
-                // Root first, then the shelves that exist, then the keyboard.
-                // Each row says how many games it holds, and EVERY shelf this
-                // game is on is marked, because it can be on several. A row
-                // marked with the arrow is a row A will take it OFF.
-                let mut labels: std::vec::Vec<std::string::String> = std::vec::Vec::new();
-                labels.push(std::format!(
-                    "{}{}",
-                    lc.folder_root,
-                    // No arrow here. `<` means "a label, and A takes it off",
-                    // and this row takes nothing off: it is where a game with no
-                    // shelf at all already stands.
-                    if bare { "  ." } else { "" },
-                ));
-                for (n, count) in &folders {
-                    // Two different marks, because they are two different
-                    // situations. `<` is a label, and A takes it off. `#` is
-                    // the DIRECTORY the file sits in: A cannot take that off,
-                    // only ACCUEIL can, by moving the file. Showing them the
-                    // same would promise an action that then refuses.
-                    let m = if physical.as_deref() == Some(n.as_str()) {
-                        "  #"
+                let u = crate::loc_ui::ui();
+                // No shelf first, then the shelves that exist, then the
+                // keyboard. Each shelf says how many games it holds, and EVERY
+                // shelf this game is on is marked, because it can be on several:
+                // a tick for a label (A takes it off), a card for the directory
+                // the file sits in (only "No folder" can take it out, by moving
+                // the file). Two marks because they are two situations; one
+                // mark would promise an action that then refuses.
+                let counts: std::vec::Vec<std::string::String> =
+                    folders.iter().map(|(_, c)| c.to_string()).collect();
+                let mut rows: std::vec::Vec<WinRow> = std::vec::Vec::with_capacity(folders.len() + 2);
+                rows.push(WinRow {
+                    icon: Some(Icon::Home),
+                    label: lc.folder_root,
+                    value: "",
+                    mark: if bare { Some((Icon::Check, ui_col::OK)) } else { None },
+                    dim: false,
+                });
+                for (i, (n, _)) in folders.iter().enumerate() {
+                    let mark = if physical.as_deref() == Some(n.as_str()) {
+                        Some((Icon::HardDrive, ui_col::TEXT2))
                     } else if on.iter().any(|x| x == n) {
-                        "  <"
+                        Some((Icon::Check, ui_col::OK))
                     } else {
-                        ""
+                        None
                     };
-                    labels.push(std::format!("{} ({}){}", n, count, m));
+                    rows.push(WinRow { icon: Some(Icon::Folder), label: n, value: &counts[i], mark, dim: false });
                 }
-                labels.push(std::format!("+  {}", lc.games_dir_new));
-                // A long shelf list would grow the modal past the screen, so the
-                // rows scroll: a window that follows the cursor, exactly like
-                // every other list in the app.
+                rows.push(WinRow {
+                    icon: Some(Icon::FolderPlus),
+                    label: lc.games_dir_new,
+                    value: "",
+                    mark: None,
+                    dim: false,
+                });
+                // A long shelf list would grow the window past the screen, so
+                // the rows scroll, following the cursor.
                 const WINDOW: usize = 8;
-                // Scroll only as far as the cursor forces: pinning it to the
-                // bottom row would make every downward step redraw the whole
-                // list under a cursor that never moves.
                 let start = selection
                     .saturating_sub(WINDOW - 1)
-                    .min(labels.len().saturating_sub(WINDOW));
-                let refs: std::vec::Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-                // Drawn through the folder picker rather than the options modal
-                // so the footer can advertise BOTH X, the only way to know a shelf
-                // can be emptied, and that A is a toggle rather than a move.
-                let footer = lc.folder_picker_footer;
+                    .min(rows.len().saturating_sub(WINDOW));
+                // What A does depends on the row, so the hint says it.
+                let last = rows.len() - 1;
+                let a_verb = if selection == 0 {
+                    u.choose
+                } else if selection == last {
+                    u.create
+                } else {
+                    match folders.get(selection - 1) {
+                        Some((n, _)) if on.iter().any(|x| x == n) => u.remove,
+                        _ => u.add,
+                    }
+                };
+                let on_shelf_row = selection >= 1 && selection < last;
+                let hints_shelf = [(&[Btn::A][..], a_verb), (&[Btn::X][..], u.empty_verb), (&[Btn::B][..], u.back)];
+                let hints_other = [(&[Btn::A][..], a_verb), (&[Btn::B][..], u.back)];
                 backend.draw_library_dim_backdrop();
-                backend.draw_library_folder_picker(
-                    &name,
+                backend.draw_rows_window(
                     lc.opt_folder,
+                    Some(&name),
+                    &rows,
                     selection,
-                    &refs,
-                    footer,
-                    false,
-                    // ACCUEIL is an ACTION row, not a shelf: it gets the accent
-                    // and the rule under it, so the list below reads as the
-                    // folders and only the folders.
-                    1,
-                    // Nothing pinned: with one action row and a short list, the
-                    // panel reads better scrolling as one piece.
-                    0,
                     start,
+                    0,
                     WINDOW,
+                    0x6100_0000,
+                    if on_shelf_row { &hints_shelf } else { &hints_other },
                 );
             }
         }
@@ -9320,38 +9344,33 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 .map(|s| folder_counts(&s.entries))
                 .unwrap_or_default();
             if let Some((name, count)) = folders.get(folder_idx) {
-                // Says WHICH shelf and HOW MANY games leave it, because
-                // "empty the shelf?" tells you nothing about what you agreed to.
-                // Not drawn in the danger colour: nothing is destroyed here.
-                //
-                // "leave this shelf", not "come back to ACCUEIL". The count is
-                // the UNION, and only the games physically in a directory are
-                // moved -- one that is here by label and also on RETRO stays on
-                // RETRO. Promising ACCUEIL was promising a place half of them
-                // will not end up in.
+                // Says WHICH shelf and HOW MANY games leave it, because "empty
+                // the shelf?" tells you nothing about what you agreed to. Not
+                // "come back to No folder": only the games physically in the
+                // directory move, and one also filed on RETRO stays on RETRO.
+                use crate::backend::render::{Choice, Icon};
                 let lc = crate::loc::s();
-                let labels = [lc.games_dir_confirm_yes, lc.games_dir_confirm_no];
-                let detail = crate::loc::fill_count(lc.folder_leave_1, lc.folder_leave_n, *count as i32);
-                // Says what it DOES, not what it is about. A panel titled with a
-                // shelf name asks nothing; a panel titled "empty the shelf MARIO"
-                // is a question with an answer.
-                let title = crate::loc::fill_name(lc.folder_del_title, name);
+                let u = crate::loc_ui::ui();
+                let title = u.folder_empty_title.replacen("{}", name, 1);
+                let body = std::format!(
+                    "{}. {}",
+                    crate::loc::fill_count(lc.folder_leave_1, lc.folder_leave_n, *count as i32),
+                    u.folder_empty_body,
+                );
                 backend.draw_library_dim_backdrop();
-                backend.draw_library_folder_picker(
+                // Red: nothing is deleted, but one press undoes as many
+                // deliberate filings as the shelf holds.
+                backend.draw_confirm(
+                    Icon::Folder,
                     &title,
-                    &detail,
+                    &body,
+                    None,
+                    &[
+                        Choice { label: lc.games_dir_confirm_no, destructive: false },
+                        Choice { label: u.empty_verb, destructive: true },
+                    ],
                     selection,
-                    &labels,
-                    lc.options_footer,
-                    // Red. Nothing is destroyed -- no game is deleted -- but one
-                    // press undoes as many deliberate filings as the shelf holds,
-                    // and a panel that looks like every other one gets answered
-                    // like every other one.
                     true,
-                    0,
-                    0,
-                    0,
-                    labels.len(),
                 );
             }
         }
@@ -9362,34 +9381,42 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             menu::draw(backend, now);
         }
         Screen::SettingsModal { selection } => {
-            // REGLAGES is a full navbar TAB now (not a popup): no dim backdrop,
-            // no BACK entry — leave via L/R.
+            // A full navbar TAB, not a popup: no dim backdrop, no Back row;
+            // L/R leave it.
+            use crate::backend::render::{Icon, SettingsExtra, SettingsRow};
             let lc = crate::loc::s();
-            // Nickname row shows the current value (or the "(none)" placeholder).
+            let u = crate::loc_ui::ui();
             let author = crate::profiles::author_name();
-            let pseudo_label = std::format!(
-                "{} : {}",
-                lc.set_pseudo,
-                if author.is_empty() { lc.none } else { author.as_str() },
-            );
-            let home_label = std::format!(
-                "{}: {}",
-                lc.set_home_view,
-                crate::loc::home_view_label(crate::loc::home_view()),
-            );
-            // The games folder shows its current value, like the rows above it.
             let games_dir = primary_root();
-            let games_label = std::format!(
-                "{} : {}",
-                lc.set_games_dir,
-                games_dir.trim_start_matches("sdmc:"),
-            );
-            let entries = [
-                home_label.as_str(), lc.set_game_prefs, lc.set_language,
-                lc.set_report_bug, lc.set_suggest, pseudo_label.as_str(),
-                games_label.as_str(), lc.set_quit,
+            let games_dir = games_dir.trim_start_matches("sdmc:");
+            let view = crate::loc::home_view();
+            let row = |icon, label, value, help, section, verb, opens, extra| SettingsRow {
+                icon,
+                label,
+                value,
+                help,
+                section,
+                verb,
+                opens,
+                extra,
+            };
+            let rows = [
+                row(Icon::Grid, u.row_home_view, crate::loc_ui::view_label(view), u.help_home_view,
+                    u.sec_library, u.open, true, SettingsExtra::HomeViews(view)),
+                row(Icon::Folder, u.row_games_dir, games_dir, u.help_games_dir,
+                    u.sec_library, u.open, true, SettingsExtra::Folder(games_dir, game_count)),
+                row(Icon::Sliders, u.row_game_prefs, "", u.help_game_prefs,
+                    u.sec_library, u.open, true, SettingsExtra::None),
+                row(Icon::Globe, u.row_language, crate::loc::current().native_name(), u.help_language,
+                    u.sec_general, u.open, true, SettingsExtra::None),
+                row(Icon::User, u.row_pseudo, if author.is_empty() { lc.none } else { author.as_str() },
+                    u.help_pseudo, u.sec_general, u.edit, false, SettingsExtra::None),
+                row(Icon::Bug, u.row_bug, "", u.help_bug, u.sec_help, u.open, true, SettingsExtra::None),
+                row(Icon::Lightbulb, u.row_suggest, "", u.help_suggest, u.sec_help, u.write, false,
+                    SettingsExtra::None),
+                row(Icon::Power, u.row_quit, "", u.help_quit_app, "", u.quit, false, SettingsExtra::None),
             ];
-            backend.draw_library_settings(selection, &entries);
+            backend.draw_library_settings(selection, &rows);
         }
         Screen::SettingsPrefsModal { selection } => {
             // Game DEFAULTS. Each row carries its live value, same shape as the
@@ -9443,64 +9470,94 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 power_label.as_str(),
                 cursor_label.as_str(),
             ];
+            let u = crate::loc_ui::ui();
             backend.draw_library_dim_backdrop();
-            backend.draw_library_options(lc.prefs_title, selection, &labels);
+            // Every row but the controls one steps with Left and Right.
+            backend.draw_list_window(
+                u.row_game_prefs,
+                Some(u.prefs_sub),
+                selection,
+                &labels,
+                0b1_1111_1110,
+                &[(&[crate::backend::render::Btn::A], u.change), (&[crate::backend::render::Btn::B], u.back)],
+            );
         }
         Screen::SettingsHomeViewPicker { selection } => {
-            let lc = crate::loc::s();
-            let labels = [lc.home_grid, lc.home_list, lc.home_strip, lc.home_shelf];
             backend.draw_library_dim_backdrop();
-            backend.draw_library_options(lc.set_home_view, selection, &labels);
+            backend.draw_home_view_picker(selection);
         }
         Screen::GamesDirPicker { selection, scroll } => {
+            use crate::backend::render::{ui_col, Btn, Icon, WinRow};
             let lc = crate::loc::s();
+            let u = crate::loc_ui::ui();
             let shown = if dir_path == "sdmc:/" {
                 "/"
             } else {
                 dir_path.trim_start_matches("sdmc:")
             };
-            let up = if browse_parent(&dir_path).is_some() { 1 } else { 0 };
-            // Six folders a page, not eight: with the two action rows above them
-            // the panel reached the full height of the screen, which reads as a
-            // wall rather than a menu. Scrolling handles the rest.
+            let up = browse_parent(&dir_path).is_some();
+            // Six folders a page: with the two action rows above them that is
+            // a window, not a wall. Scrolling handles the rest.
             const VISIBLE: usize = 6;
             let active = primary_root();
-            let mut labels: std::vec::Vec<std::string::String> =
-                std::vec::Vec::with_capacity(VISIBLE + 2);
-            labels.push(std::format!("{} : {}", lc.games_dir_pick, shown));
-            if up == 1 {
-                labels.push(std::format!("{} ..", lc.games_dir_up));
+            let mut rows: std::vec::Vec<WinRow> = std::vec::Vec::with_capacity(dir_browse.len() + 2);
+            rows.push(WinRow { icon: Some(Icon::Check), label: u.dir_choose, value: "", mark: None, dim: false });
+            if up {
+                rows.push(WinRow { icon: Some(Icon::ParentFolder), label: u.dir_up, value: "", mark: None, dim: false });
             }
             for name in dir_browse.iter() {
-                // Mark the folder the library actually uses. Without it the
-                // listing is a wall of identical names and nothing says which one
-                // you are already in.
+                // Mark the folder the library actually uses: without it the
+                // listing is a wall of names and nothing says which one you are
+                // already in.
                 let full = if dir_path.ends_with('/') {
                     std::format!("{}{}", dir_path, name)
                 } else {
                     std::format!("{}/{}", dir_path, name)
                 };
-                if full == active {
-                    labels.push(std::format!("{}/  ({})", name, lc.games_dir_current));
-                } else {
-                    labels.push(std::format!("{}/", name));
-                }
+                let current = full == active;
+                rows.push(WinRow {
+                    icon: Some(Icon::Folder),
+                    label: name,
+                    value: if current { lc.games_dir_current } else { "" },
+                    mark: if current { Some((Icon::CircleCheck, ui_col::OK)) } else { None },
+                    dim: false,
+                });
             }
-            let refs: std::vec::Vec<&str> = labels.iter().map(|l| l.as_str()).collect();
+            let pinned = 1 + up as usize;
+            // The glide is keyed on the PATH: walking into a folder replaces
+            // every row at once, and a glide across that would show the new
+            // listing streaking past under a cursor travelling to a row it was
+            // never on. A new key snaps instead.
+            let mut key: u32 = 2166136261;
+            for b in dir_path.as_bytes() {
+                key ^= *b as u32;
+                key = key.wrapping_mul(16777619);
+            }
+            let key = 0x8000_0000 | (key & 0x00FF_FFFF);
+            let a_verb = if selection == 0 {
+                u.choose
+            } else if up && selection == 1 {
+                u.go_up
+            } else {
+                u.open
+            };
             backend.draw_library_dim_backdrop();
-            backend.draw_library_folder_picker(
-                lc.set_games_dir,
-                shown,
-                selection.min(refs.len().saturating_sub(1)),
-                &refs,
-                lc.games_dir_footer,
-                false,
-                1 + up,
-                // CHOISIR and REMONTER act on the folder you are IN, so they stay
-                // put while the listing under them scrolls.
-                1 + up,
+            backend.draw_rows_window(
+                u.row_games_dir,
+                Some(shown),
+                &rows,
+                selection.min(rows.len().saturating_sub(1)),
                 scroll,
-                1 + up + VISIBLE,
+                // "Use this folder" and "Parent folder" act on the folder you
+                // are IN, so they stay put while the listing under them scrolls.
+                pinned,
+                pinned + VISIBLE,
+                key,
+                &[
+                    (&[Btn::A], a_verb),
+                    (&[Btn::X], lc.games_dir_new),
+                    (&[Btn::B], if up { u.go_up } else { u.back }),
+                ],
             );
         }
         Screen::GamesDirMoving => {
@@ -9512,26 +9569,24 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             backend.draw_library_move_progress(lc.games_dir_moving, done, total);
         }
         Screen::GamesDirConfirm { selection } => {
-            // Moving a whole library is not undoable by pressing B afterwards, so
-            // it is asked once — and it says HOW MANY games and WHERE, because
-            // "move the library?" tells you nothing about what you are agreeing
-            // to.
+            // Moving a whole library is not undone by pressing B afterwards, so
+            // it is asked once -- and it says HOW MANY games and WHERE, because
+            // "move the library?" tells you nothing about what you agree to.
+            use crate::backend::render::{Choice, Icon};
             let lc = crate::loc::s();
-            let labels = [lc.games_dir_confirm_yes, lc.games_dir_confirm_no];
             let count = crate::loc::fill_count(lc.games_dir_confirm_1, lc.games_dir_confirm_n, game_count as i32);
-            let detail = std::format!("{}  {}", count, dir_path.trim_start_matches("sdmc:"));
             backend.draw_library_dim_backdrop();
-            backend.draw_library_folder_picker(
+            backend.draw_confirm(
+                Icon::FolderOpen,
                 lc.games_dir_confirm,
-                &detail,
+                &count,
+                Some(dir_path.trim_start_matches("sdmc:")),
+                &[
+                    Choice { label: lc.games_dir_confirm_no, destructive: false },
+                    Choice { label: lc.games_dir_confirm_yes, destructive: false },
+                ],
                 selection,
-                &labels,
-                lc.options_footer,
-                true,
-                0,
-                0,
-                0,
-                labels.len(),
+                false,
             );
         }
         Screen::SettingsKeymapEditor => {
@@ -9546,7 +9601,10 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             // modal — so the modal's open animation doesn't shrink it) one frame;
             // the next frame draws the list (loading the font), then it's cached.
             use std::sync::atomic::Ordering;
-            let loading = LANG_FONT_WARM.load(Ordering::Relaxed) == 0;
+            // The console fonts parse the Chinese face on first use, which costs
+            // nothing worth a spinner; only the old atlas needed one.
+            let loading = LANG_FONT_WARM.load(Ordering::Relaxed) == 0
+                && !crate::backend::render::kit_fonts_available();
             LANG_FONT_WARM.store(if loading { 1 } else { 2 }, Ordering::Relaxed);
             backend.draw_library_dim_backdrop();
             if loading {
@@ -9559,27 +9617,29 @@ pub fn render(backend: &mut SwitchRenderBackend) {
         }
         Screen::BugPicker { selection, scroll_offset } => {
             // Last played first (#99), through the same order `run_bug_report_flow`
-            // resolves the pressed row with.
-            let names = LIBRARY
+            // resolves the pressed row with; each with its time played.
+            let games = LIBRARY
                 .lock()
                 .ok()
                 .map(|s| {
                     bug_picker_order(&s.entries)
                         .into_iter()
-                        .filter_map(|i| s.entries.get(i).map(|e| e.display_name.clone()))
+                        .filter_map(|i| s.entries.get(i))
+                        .map(|e| {
+                            let secs = crate::playtime::get(&e.basename);
+                            let played = if secs >= 60 {
+                                crate::loc_ui::playtime(secs)
+                            } else {
+                                std::string::String::new()
+                            };
+                            (e.display_name.clone(), played)
+                        })
                         .collect::<std::vec::Vec<_>>()
                 })
                 .unwrap_or_default();
-            let refs: std::vec::Vec<&str> = names.iter().map(|n| n.as_str()).collect();
-            let lc = crate::loc::s();
-            backend.draw_library_bug_picker(
-                selection,
-                scroll_offset,
-                &refs,
-                BUG_PICKER_VISIBLE_ROWS,
-                lc.bug_pick_title,
-                lc.bug_pick_footer,
-            );
+            let refs: std::vec::Vec<(&str, std::string::String)> =
+                games.iter().map(|(n, p)| (n.as_str(), p.clone())).collect();
+            backend.draw_library_bug_picker(selection, scroll_offset, &refs, BUG_PICKER_VISIBLE_ROWS);
         }
         Screen::BugResult { .. } => {
             let (msg, ok) = LIBRARY
@@ -10333,7 +10393,12 @@ pub fn render(backend: &mut SwitchRenderBackend) {
     if let Some(tab) = screen_tab(screen) {
         // The author credit and the version are in every page's footer band
         // (`kit_footer_band`), so the corner badge is gone.
-        backend.draw_navbar(tab.index());
+        let logo = LIBRARY
+            .lock()
+            .ok()
+            .map(|s| (s.banner_tex, s.banner_w, s.banner_h))
+            .unwrap_or_default();
+        backend.draw_navbar(tab.index(), logo);
     } else {
         // No strip on a sub-screen, so nothing on it may be tapped. Without
         // this the cells published by the last home screen stayed live, and a

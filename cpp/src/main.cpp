@@ -125,25 +125,29 @@ extern "C" int  ruffle_restart(void);
 // Pause-menu AFFICHAGE: next stage-scaling mode for the game being played.
 // Persists per game AND applies to the live player, so the frozen frame behind
 // the pause panel shows the result immediately.
-extern "C" void ruffle_display_mode_cycle(void);
+// Every `_step(dir)` below moves one value forward (dir >= 0) or back: A steps
+// forward, Left and Right either way.
+extern "C" void ruffle_display_mode_step(int dir);
 // Pause-menu FILTRE: next screen filter for the game being played. Persists per
 // game; the next redraw picks it up, so the paused frame previews it.
-extern "C" void ruffle_screen_filter_cycle(void);
+extern "C" void ruffle_screen_filter_step(int dir);
 // Pause-menu FPS: show / hide the frame-rate counter for the game being played
 // (#111). Persists per game and, like FILTRE, needs nothing but the flag: the
 // counter is drawn after the frame, so the paused redraw previews it.
-extern "C" void ruffle_fps_counter_cycle(void);
+extern "C" void ruffle_fps_counter_step(int dir);
 // Pause-menu PIXELS: next texture sampling (auto / smooth / sharp) for the game
 // being played. A DIFFERENT setting from the row above -- this one is how the
 // game's own bitmaps are sampled, that one is the CRT pass over the finished
 // frame. Persists per game; the next redraw previews it.
-extern "C" void ruffle_pixel_filter_cycle(void);
+extern "C" void ruffle_pixel_filter_step(int dir);
 // Pause-menu OVERCLOCK: on <-> off for the game being played. Persists
 // per game, and persists what the hardware ACCEPTED rather than what was asked
 // for, so a refused raise cannot leave a game marked ON while it runs at
 // 1020 MHz.
-extern "C" void ruffle_power_mode_cycle(void);
-extern "C" void ruffle_rotation_cycle(void);
+extern "C" void ruffle_power_mode_step(int dir);
+extern "C" void ruffle_rotation_step(int dir);
+// Left / Right on ZOOM: ten percent either way, kept at once.
+extern "C" void ruffle_zoom_step(int dir);
 // Free zoom + framing (issue #101). Unlike the three rows above, ZOOM does not
 // cycle a value on `A`: it opens a mode where the panel gives way to the picture
 // and the buttons drive the framing until A or B.
@@ -854,9 +858,12 @@ static void cursor_speed_load() {
     }
     cursor_speed_apply();
 }
-// Cycle to the next preset, apply, persist. Returns the new index.
-extern "C" int ruffle_cursor_speed_cycle(void) {
-    g_cursor_speed_idx = (g_cursor_speed_idx + 1) % CURSOR_SPEED_COUNT;
+// Step to the next preset (dir >= 0) or the previous one, apply, persist.
+// Returns the new index.
+extern "C" int ruffle_cursor_speed_step(int dir) {
+    g_cursor_speed_idx = dir < 0
+        ? (g_cursor_speed_idx + CURSOR_SPEED_COUNT - 1) % CURSOR_SPEED_COUNT
+        : (g_cursor_speed_idx + 1) % CURSOR_SPEED_COUNT;
     cursor_speed_apply();
     if (g_in_game) {
         // In a game → save to THIS game's <basename>.cursor (via Rust). No bleed
@@ -1664,6 +1671,29 @@ static void worker_entry(void* arg) {
                 if (kDown & (HidNpadButton_Down | HidNpadButton_StickLDown | HidNpadButton_StickRDown)) {
                     screen_selection = (screen_selection + 1) % SCREEN_COUNT;
                 }
+                // Left / Right step the value under the cursor either way, so
+                // going one past what you wanted is one press back, not a lap.
+                {
+                    int dir = 0;
+                    if (kDown & (HidNpadButton_Left | HidNpadButton_StickLLeft)) dir = -1;
+                    if (kDown & (HidNpadButton_Right | HidNpadButton_StickLRight)) dir = 1;
+                    if (dir != 0) {
+                        switch (screen_selection) {
+                        case SCREEN_DISPLAY:  ruffle_display_mode_step(dir);  break;
+                        case SCREEN_ROTATION:
+                            ruffle_rotation_step(dir);
+                            ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
+                            break;
+                        case SCREEN_ZOOM:
+                            ruffle_zoom_step(dir);
+                            ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
+                            break;
+                        case SCREEN_PIXELS:   ruffle_pixel_filter_step(dir);  break;
+                        case SCREEN_FILTER:   ruffle_screen_filter_step(dir); break;
+                        case SCREEN_FPS:      ruffle_fps_counter_step(dir);   break;
+                        }
+                    }
+                }
                 if (kDown & (HidNpadButton_Minus | HidNpadButton_B)) {
                     screen_menu = false;
                     ruffle_redraw_paused();
@@ -1673,9 +1703,9 @@ static void worker_entry(void* arg) {
                 }
                 if (kDown & HidNpadButton_A) {
                     switch (screen_selection) {
-                    case SCREEN_DISPLAY:  ruffle_display_mode_cycle();   break;
+                    case SCREEN_DISPLAY:  ruffle_display_mode_step(1);   break;
                     case SCREEN_ROTATION:
-                        ruffle_rotation_cycle();
+                        ruffle_rotation_step(1);
                         // Turning changes the basis the pointer is mapped
                         // through AND recentres the framing, so the stage point
                         // under the crosshair moves. Same reason as the zoom
@@ -1695,9 +1725,9 @@ static void worker_entry(void* arg) {
                         pan_hold = 0;
                         zoom_fine_hold = 0;
                         break;
-                    case SCREEN_PIXELS:   ruffle_pixel_filter_cycle();   break;
-                    case SCREEN_FILTER:   ruffle_screen_filter_cycle();  break;
-                    case SCREEN_FPS:      ruffle_fps_counter_cycle();    break;
+                    case SCREEN_PIXELS:   ruffle_pixel_filter_step(1);   break;
+                    case SCREEN_FILTER:   ruffle_screen_filter_step(1);  break;
+                    case SCREEN_FPS:      ruffle_fps_counter_step(1);    break;
                     }
                 }
                 ruffle_redraw_paused();
@@ -1711,11 +1741,19 @@ static void worker_entry(void* arg) {
             // entry. Press `-` again or `B` to dismiss (= Resume).
             // Right stick navigates too (it's the mouse cursor only when the
             // menu is closed — this branch `continue`s before the cursor code).
+            //
+            // No wrap here, unlike the other lists: the pause opens on Resume,
+            // and one Up from there used to land on Quit, a press of A away
+            // from losing the game in progress.
             if (kDown & (HidNpadButton_Up | HidNpadButton_StickLUp | HidNpadButton_StickRUp)) {
-                menu_selection = (menu_selection + MENU_COUNT - 1) % MENU_COUNT;
+                if (menu_selection > 0) menu_selection -= 1;
             }
             if (kDown & (HidNpadButton_Down | HidNpadButton_StickLDown | HidNpadButton_StickRDown)) {
-                menu_selection = (menu_selection + 1) % MENU_COUNT;
+                if (menu_selection + 1 < MENU_COUNT) menu_selection += 1;
+            }
+            if (menu_selection == MENU_POWER) {
+                if (kDown & (HidNpadButton_Left | HidNpadButton_StickLLeft)) ruffle_power_mode_step(-1);
+                if (kDown & (HidNpadButton_Right | HidNpadButton_StickLRight)) ruffle_power_mode_step(1);
             }
             if (kDown & (HidNpadButton_Minus | HidNpadButton_B)) {
                 // Scale the menu out (drained at the top of this branch over the
@@ -1754,7 +1792,7 @@ static void worker_entry(void* arg) {
                     // Toggles in place, like the ECRAN rows: the panel stays
                     // open and the row redraws with the mode actually in force,
                     // which is not always the one asked for.
-                    ruffle_power_mode_cycle();
+                    ruffle_power_mode_step(1);
                     continue;
                 case MENU_RESTART: {
                     std::printf("menu: REDEMARRER → ruffle_restart()\n");

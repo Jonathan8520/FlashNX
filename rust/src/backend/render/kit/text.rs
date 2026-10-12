@@ -47,6 +47,10 @@ enum FaceId {
     Standard,
     Ext,
     Chinese,
+    /// The interface icons (`kit/icons.rs`), compiled into the binary. Never
+    /// reached through a string: its code points share the Private Use Area
+    /// with NintendoExt's buttons.
+    Icons,
 }
 
 /// One hint in a bar: the button(s) and what pressing them does.
@@ -131,6 +135,7 @@ fn shared_face(kind: core::ffi::c_int) -> Option<ttf_parser::Face<'static>> {
 struct Faces {
     std: ttf_parser::Face<'static>,
     ext: Option<ttf_parser::Face<'static>>,
+    icons: Option<ttf_parser::Face<'static>>,
     cn: Option<ttf_parser::Face<'static>>,
     cn_tried: bool,
     /// Which face and glyph a character resolved to, misses included, so the
@@ -144,6 +149,7 @@ impl Faces {
             FaceId::Standard => Some(&self.std),
             FaceId::Ext => self.ext.as_ref(),
             FaceId::Chinese => self.cn.as_ref(),
+            FaceId::Icons => self.icons.as_ref(),
         }
     }
 
@@ -229,7 +235,8 @@ fn with_faces<R>(f: impl FnOnce(&mut Faces) -> R) -> Option<R> {
                     std.units_per_em(),
                     if ext.is_some() { "yes" } else { "MISSING, glyphs drawn by hand" },
                 ));
-                *guard = Some(Faces { std, ext, cn: None, cn_tried: false, chars: HashMap::new() });
+                let icons = ttf_parser::Face::parse(super::icons::ICON_FONT, 0).ok();
+                *guard = Some(Faces { std, ext, icons, cn: None, cn_tried: false, chars: HashMap::new() });
                 FACES_STATE.store(1, Ordering::Relaxed);
             }
             None => {
@@ -675,6 +682,32 @@ impl SwitchRenderBackend {
             w += space::GLYPH_GAP;
         }
         w + self.kit_measure(label, size::HINT)
+    }
+
+    /// Draw an interface icon in the `px` x `px` box whose left edge is `x`,
+    /// centred on `cy`; returns `px`, the width it takes. The icon font's em is
+    /// the icon's box (see `kit/icons.rs`), so the bitmap goes where its
+    /// bearings say.
+    pub fn kit_icon(&mut self, x: f32, cy: f32, px: f32, icon: super::icons::Icon, rgba: u32) -> f32 {
+        let pxi = px.round().clamp(1.0, 200.0) as u16;
+        let gid = with_faces(|f| f.icons.as_ref().and_then(|face| face.glyph_index(icon.codepoint()))).flatten();
+        let Some(gid) = gid else { return px };
+        let mut uploaded = false;
+        let drawn = match self.kit_atlas() {
+            Some(t) => t.ensure(FaceId::Icons, gid, pxi, &mut uploaded),
+            None => None,
+        };
+        if uploaded {
+            self.gl_state.invalidate();
+        }
+        if let Some(g) = drawn.filter(|g| !g.blank) {
+            let top = (cy - px * 0.5).round();
+            let gx = x.round() + g.xmin;
+            let gy = top + px - (g.ymin + g.h);
+            let mut verts = quad(gx, gy, g.w, g.h, g.uv).to_vec();
+            self.flush_atlas_quads(&mut verts, g.tex, swf::Color::from_rgba(rgba));
+        }
+        px
     }
 
     /// Width of a hint bar, so a caller can centre or right-align it.

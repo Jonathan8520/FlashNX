@@ -1,18 +1,16 @@
-//! UI string localization (EN / FR / ES / RU / DE / IT / PT / ZH).
+//! UI string localization (EN / FR / ES / RU / DE / IT / PT / ZH / TR).
 //!
-//! All on-screen text routes through `draw_text` (render.rs), which only
-//! carries an uppercase pixel font. ASCII lowercase is folded to uppercase
-//! at draw time, but non-ASCII (Cyrillic) is NOT folded — so Russian strings
-//! here are written in UPPERCASE Cyrillic, matching the glyphs added to the
-//! font. Latin strings are written in uppercase too (display is uppercase
-//! regardless) so the source reads like the screen.
+//! Every string is written the way its language writes it, accents and lower
+//! case included: the interface kit draws them in the console's own fonts
+//! (`backend/render/kit/text.rs`). The strings of the screens rebuilt on the
+//! kit live in `loc_ui.rs`.
 //!
 //! Lookup is a plain `&'static Strings` per language, chosen by a global
 //! atomic set at boot from `settings.json` (or auto-detected from the Switch
 //! system language) and changeable at runtime via the Settings modal.
 //!
 //! Flash KEY names ("Space", "Shift", "A".."Z") are technical identifiers
-//! stored in keymap JSON and are intentionally NOT translated — only the
+//! stored in keymap JSON and are intentionally NOT translated -- only the
 //! "(none)" placeholder is localized (`none`).
 
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -93,17 +91,16 @@ impl Lang {
             _ => None,
         }
     }
-    /// Native display name shown in the language picker. Uppercase, no
-    /// accents for Latin (font has none); Russian in uppercase Cyrillic.
-    /// Name for the picker. A CJK name is drawn from the shared-font atlas, so
-    /// when that font cannot be afforded it would render as a blank row: fall
-    /// back to a Latin label the bitmap font can actually draw. Picking it then
-    /// resolves to English (see `set`), which is what it will look like too.
+    /// Name for the picker, in its own language. Without the console fonts a
+    /// CJK name falls back to the old glyph atlas, and when that cannot be
+    /// afforded it would render as a blank row: show a Latin label instead.
+    /// Picking it then resolves to English (see `set`), which is what it will
+    /// look like too.
     pub fn picker_name(self) -> &'static str {
-        if self.needs_cjk() && !crate::backend::glyphs::cjk_possible() {
+        if self.needs_cjk() && !cjk_drawable() {
             return match self {
-                Lang::Zh => "CHINESE (NEEDS MORE MEMORY)",
-                _ => "UNAVAILABLE",
+                Lang::Zh => "Chinese (needs more memory)",
+                _ => "Unavailable",
             };
         }
         self.native_name()
@@ -111,18 +108,24 @@ impl Lang {
 
     pub fn native_name(self) -> &'static str {
         match self {
-            Lang::En => "ENGLISH",
-            Lang::Fr => "FRAN\u{00C7}AIS",
-            Lang::Es => "ESPA\u{00D1}OL",
-            Lang::Ru => "\u{0420}\u{0423}\u{0421}\u{0421}\u{041A}\u{0418}\u{0419}", // РУССКИЙ
-            Lang::De => "DEUTSCH",
-            Lang::It => "ITALIANO",
-            Lang::Pt => "PORTUGU\u{00CA}S", // PORTUGUÊS
-            // Drawn via the shared-font atlas (CJK is not in the bitmap font).
-            Lang::Zh => "\u{4E2D}\u{6587}", // 中文
-            Lang::Tr => "T\u{00DC}RK\u{00C7}E", // TÜRKÇE
+            Lang::En => "English",
+            Lang::Fr => "Français",
+            Lang::Es => "Español",
+            Lang::Ru => "Русский",
+            Lang::De => "Deutsch",
+            Lang::It => "Italiano",
+            Lang::Pt => "Português",
+            Lang::Zh => "中文",
+            Lang::Tr => "Türkçe",
         }
     }
+}
+
+/// Whether Chinese can be drawn: always with the console fonts (the kit loads
+/// the shared Chinese font on first use), else only if the old glyph atlas
+/// fits in memory.
+fn cjk_drawable() -> bool {
+    crate::backend::render::kit_fonts_available() || crate::backend::glyphs::cjk_possible()
 }
 
 /// Order of languages in the picker (matches `Lang` index order).
@@ -679,7 +682,7 @@ const EN: Strings = Strings {
     menu_keys: "Controls and cursor",
     menu_screen: "Screen",
     menu_restart: "Restart",
-    menu_quit: "Quit",
+    menu_quit: "Quit game",
     menu_cursor: "Cursor",
     pause_title: "Pause",
     pause_footer: "A:OK   B:Cancel   up/down:Nav",
@@ -783,8 +786,8 @@ const EN: Strings = Strings {
     games_dir_ask_move: "Move the games already on the card?",
     games_dir_move: "Move them",
     games_dir_keep: "Leave them",
-    games_dir_moving: "Moving...",
-    extracting: "Extracting...",
+    games_dir_moving: "Moving…",
+    extracting: "Extracting…",
     opt_shortcut: "HOME menu",
     shortcut_ok: "Tile installed on the HOME menu",
     shortcut_err: "Could not install the tile",
@@ -804,13 +807,13 @@ const EN: Strings = Strings {
     pixels_auto: "Auto",
     pixels_smooth: "Smooth",
     pixels_sharp: "Sharp",
-    pixels_hint: "AUTO: as the game asks. SHARP: no blur.",
+    pixels_hint: "Auto: as the game asks. Sharp: no blur.",
     set_overclock: "Overclock",
     overclock_off: "Off",
     overclock_on: "On",
-    overclock_hint: "ON: more battery used, more heat.",
+    overclock_hint: "On: more battery used, more heat.",
     overclock_refused: "Overclock unavailable: battery too low.",
-    overclock_auto_hint: "AUTO: speeds up only slow games.",
+    overclock_auto_hint: "Auto: speeds up only slow games.",
     set_fps: "FPS counter",
     fps_hint: "Frames per second, then the rate the game asks for.",
     set_rotation: "Rotation",
@@ -948,10 +951,10 @@ const EN: Strings = Strings {
     bug_ok_msg: "Your report was sent. Thanks for helping improve FlashNX.",
     bug_fail_title: "Failed",
     kbd_bug_header: "FlashNX - Report a bug",
-    kbd_bug_guide: "Opens a PUBLIC GitHub issue. Describe the problem. Optional: your @handle. A short technical log is attached.",
+    kbd_bug_guide: "Opens a public GitHub issue. Describe the problem. Optional: your @handle. A short technical log is attached.",
     set_suggest: "Make a suggestion",
     kbd_suggest_header: "FlashNX - Make a suggestion",
-    kbd_suggest_guide: "Opens a PUBLIC GitHub issue. Your idea / feature request for FlashNX.",
+    kbd_suggest_guide: "Opens a public GitHub issue. Your idea / feature request for FlashNX.",
     suggest_ok_msg: "Your suggestion was sent. Thanks for helping improve FlashNX.",
 };
 
@@ -961,7 +964,7 @@ const FR: Strings = Strings {
     menu_keys: "Touches et curseur",
     menu_screen: "Écran",
     menu_restart: "Redémarrer",
-    menu_quit: "Quitter",
+    menu_quit: "Quitter le jeu",
     menu_cursor: "Curseur",
     pause_title: "Pause",
     pause_footer: "A:OK   B:Annuler   haut/bas:Nav",
@@ -974,7 +977,7 @@ const FR: Strings = Strings {
     flash_mouse_right: "Clic droit",
     flash_keyboard: "Clavier",
     flash_space: "Espace",
-    flash_enter: "EntrÉe",
+    flash_enter: "Entrée",
     flash_escape: "Échap",
     flash_shift: "Maj",
     flash_control: "Ctrl",
@@ -1002,7 +1005,7 @@ const FR: Strings = Strings {
     opt_back: "Retour",
     options_footer: "A:OK   B:Retour",
     del_title: "Supprimer ?",
-    del_l1: "LE FICHIER .swf, LES SAUVEGARDES (.sol),",
+    del_l1: "Le fichier .swf, les sauvegardes (.sol),",
     del_l2: "Les touches et l'alias seront effacés.",
     del_l3: "Action irréversible.",
     del_footer: "A: Supprimer     B: Annuler",
@@ -1056,23 +1059,23 @@ const FR: Strings = Strings {
     games_dir_new: "Nouveau dossier",
     games_dir_footer: "A:Choisir  B:Remonter  X:Nouveau",
     games_dir_current: "actuel",
-    games_dir_confirm: "DÉplacer toute la bibliothÈque ici ?",
+    games_dir_confirm: "Déplacer toute la bibliothèque ici ?",
     games_dir_confirm_n: "{} jeux seront déplacés vers :",
     games_dir_confirm_1: "{} jeu sera déplacé vers :",
-    games_dir_confirm_yes: "DÉplacer",
+    games_dir_confirm_yes: "Déplacer",
     games_dir_confirm_no: "Annuler",
     kbd_newdir_guide: "Nom du dossier à créer",
-    games_dir_ask_move: "DÉplacer les jeux dÉjÀ sur la carte ?",
-    games_dir_move: "Les deplacer",
+    games_dir_ask_move: "Déplacer les jeux déjà sur la carte ?",
+    games_dir_move: "Les déplacer",
     games_dir_keep: "Les laisser",
-    games_dir_moving: "DÉplacement...",
-    extracting: "Extraction...",
+    games_dir_moving: "Déplacement\u{2026}",
+    extracting: "Extraction…",
     opt_shortcut: "Menu HOME",
     shortcut_ok: "Tuile installée sur le menu HOME",
     shortcut_err: "Impossible d'installer la tuile",
     opt_shortcut_del: "Retirer du menu HOME",
     shortcut_removed: "Tuile retirée",
-    games_dir_moved: "DÉplacÉs",
+    games_dir_moved: "Déplacés",
     home_grid: "Grille",
     home_list: "Liste",
     home_strip: "Bande",
@@ -1086,13 +1089,13 @@ const FR: Strings = Strings {
     pixels_auto: "Auto",
     pixels_smooth: "Lissés",
     pixels_sharp: "Nets",
-    pixels_hint: "AUTO : comme le jeu le demande. NETS : aucun flou.",
+    pixels_hint: "Auto : comme le jeu le demande. Nets : aucun flou.",
     set_overclock: "Overclock",
     overclock_off: "Inactif",
     overclock_on: "Actif",
-    overclock_hint: "ACTIF : plus de batterie, plus de chaleur.",
+    overclock_hint: "Actif : plus de batterie, plus de chaleur.",
     overclock_refused: "Overclock indisponible : batterie trop faible.",
-    overclock_auto_hint: "AUTO : seulement si le jeu ralentit.",
+    overclock_auto_hint: "Auto : seulement si le jeu ralentit.",
     set_fps: "Compteur FPS",
     fps_hint: "Images par seconde, puis la cadence demandée par le jeu.",
     set_rotation: "Rotation",
@@ -1209,11 +1212,11 @@ const FR: Strings = Strings {
     err_server_busy: "Le serveur est saturé (HTTP {}). Ton lien n'est pas en cause, réessaie dans quelques minutes.",
     err_not_found: "Introuvable (404). L'URL ou l'identifiant de l'item est faux, ou il a été supprimé.",
     err_json: "JSON archive.org illisible : {}",
-    err_json_no_files: "JSON SANS CHAMP \"files\"",
+    err_json_no_files: "JSON sans champ \"files\"",
     err_dl_start: "Impossible de lancer le téléchargement (code {}).",
     err_dl_failed: "Téléchargement échoué (code {})",
     err_dl_cancelled: "Téléchargement annulé par l'utilisateur.",
-    err_url_invalid: "URL INVALIDE. ATTENDU UNE URL ARCHIVE.ORG TYPE https://archive.org/details/<id> OU SIMPLEMENT <id>.",
+    err_url_invalid: "URL invalide. Attendu : une URL archive.org du type https://archive.org/details/<id>, ou simplement <id>.",
     err_no_swf: "Aucun fichier .swf trouvé pour ce jeu.",
     err_dl_not_a_game: "Le téléchargement n'a pas renvoyé un fichier de jeu. Vérifie l'adresse.",
     err_fp_html_game: "Ce jeu se lance via une page HTML (FlashVars), pas encore supporté.",
@@ -1230,10 +1233,10 @@ const FR: Strings = Strings {
     bug_ok_msg: "Ton rapport a été envoyé. Merci de m'aider à améliorer FlashNX.",
     bug_fail_title: "Échec",
     kbd_bug_header: "FlashNX - Signaler un bug",
-    kbd_bug_guide: "Ouvre une issue GitHub PUBLIQUE. Décris le problème. Option : ton @pseudo. Un court journal technique est joint.",
+    kbd_bug_guide: "Ouvre une issue GitHub publique. Décris le problème. Option : ton @pseudo. Un court journal technique est joint.",
     set_suggest: "Faire une proposition",
     kbd_suggest_header: "FlashNX - Faire une proposition",
-    kbd_suggest_guide: "Ouvre une issue GitHub PUBLIQUE. Ton idée / proposition pour FlashNX.",
+    kbd_suggest_guide: "Ouvre une issue GitHub publique. Ton idée / proposition pour FlashNX.",
     suggest_ok_msg: "Ta proposition a été envoyée. Merci de m'aider à améliorer FlashNX.",
 };
 
@@ -1243,7 +1246,7 @@ const ES: Strings = Strings {
     menu_keys: "Controles y cursor",
     menu_screen: "Pantalla",
     menu_restart: "Reiniciar",
-    menu_quit: "Salir",
+    menu_quit: "Salir del juego",
     menu_cursor: "Cursor",
     pause_title: "Pausa",
     pause_footer: "A:OK   B:Cancelar   arriba/abajo:Nav",
@@ -1258,7 +1261,7 @@ const ES: Strings = Strings {
     flash_space: "Espacio",
     flash_enter: "Intro",
     flash_escape: "Escape",
-    flash_shift: "MayÚs",
+    flash_shift: "Mayús",
     flash_control: "Ctrl",
     flash_alt: "Alt",
     flash_tab: "Tab",
@@ -1284,7 +1287,7 @@ const ES: Strings = Strings {
     opt_back: "Volver",
     options_footer: "A:OK   B:Volver",
     del_title: "¿Borrar?",
-    del_l1: "EL ARCHIVO .swf, LAS PARTIDAS (.sol),",
+    del_l1: "El archivo .swf, las partidas (.sol),",
     del_l2: "Los controles y el alias se borrarán.",
     del_l3: "Acción irreversible.",
     del_footer: "A: Borrar     B: Cancelar",
@@ -1347,8 +1350,8 @@ const ES: Strings = Strings {
     games_dir_ask_move: "Mover los juegos ya en la tarjeta?",
     games_dir_move: "Moverlos",
     games_dir_keep: "Dejarlos",
-    games_dir_moving: "Moviendo...",
-    extracting: "Extrayendo...",
+    games_dir_moving: "Moviendo…",
+    extracting: "Extrayendo…",
     opt_shortcut: "Menú HOME",
     shortcut_ok: "Icono instalado en el menú HOME",
     shortcut_err: "No se pudo instalar el icono",
@@ -1368,13 +1371,13 @@ const ES: Strings = Strings {
     pixels_auto: "Auto",
     pixels_smooth: "Suaves",
     pixels_sharp: "Nítidos",
-    pixels_hint: "AUTO: como pide el juego. NÍTIDOS: sin desenfoque.",
+    pixels_hint: "Auto: como pide el juego. Nítidos: sin desenfoque.",
     set_overclock: "Overclock",
     overclock_off: "Inactivo",
     overclock_on: "Activo",
-    overclock_hint: "ACTIVO: más batería, más calor.",
+    overclock_hint: "Activo: más batería, más calor.",
     overclock_refused: "Overclock no disponible: batería muy baja.",
-    overclock_auto_hint: "AUTO: solo si el juego va lento.",
+    overclock_auto_hint: "Auto: solo si el juego va lento.",
     set_fps: "Contador FPS",
     fps_hint: "Fotogramas por segundo, y la tasa que pide el juego.",
     set_rotation: "Rotación",
@@ -1491,18 +1494,18 @@ const ES: Strings = Strings {
     err_server_busy: "El servidor está saturado (HTTP {}). Tu enlace está bien, inténtalo en unos minutos.",
     err_not_found: "No encontrado (404). La URL o el ID del item es incorrecto, o fue eliminado.",
     err_json: "JSON de archive.org ilegible: {}",
-    err_json_no_files: "JSON SIN CAMPO \"files\"",
+    err_json_no_files: "JSON sin campo \"files\"",
     err_dl_start: "No se pudo iniciar la descarga (código {}).",
     err_dl_failed: "Descarga fallida (código {})",
     err_dl_cancelled: "Descarga cancelada por el usuario.",
-    err_url_invalid: "URL INVÁLIDA. SE ESPERABA UNA URL DE ARCHIVE.ORG TIPO https://archive.org/details/<id> O SIMPLEMENTE <id>.",
+    err_url_invalid: "URL inválida. Se esperaba una URL de archive.org tipo https://archive.org/details/<id> o simplemente <id>.",
     err_no_swf: "No se encontró ningún archivo .swf para este juego.",
     err_dl_not_a_game: "La descarga no devolvió un archivo de juego. Comprueba la dirección.",
     err_fp_html_game: "Este juego se inicia desde una página HTML (FlashVars); aún no compatible.",
     kbd_url_header: "FlashNX - Importar remoto",
     kbd_url_guide: "URL del item de archive.org (ej: https://archive.org/download/your-game-id)",
     kbd_rename_header: "FlashNX - Renombrar juego",
-    kbd_rename_guide: "Nombre a mostrar (dejar vacio para volver al nombre de archivo)",
+    kbd_rename_guide: "Nombre a mostrar (déjalo vacío para volver al nombre de archivo)",
     kbd_search_header: "FlashNX - Buscar",
     kbd_search_guide: "Filtrar por nombre de archivo (vacio = mostrar todo)",
     bug_pick_title: "Reportar un fallo",
@@ -1512,22 +1515,21 @@ const ES: Strings = Strings {
     bug_ok_msg: "Tu informe se envió. Gracias por ayudar a mejorar FlashNX.",
     bug_fail_title: "Fallo",
     kbd_bug_header: "FlashNX - Reportar un fallo",
-    kbd_bug_guide: "Abre un issue PUBLICO en GitHub. Describe el problema. Opcional: tu @usuario. Se adjunta un registro tecnico breve.",
+    kbd_bug_guide: "Abre un issue público en GitHub. Describe el problema. Opcional: tu @usuario. Se adjunta un registro técnico breve.",
     set_suggest: "Hacer una sugerencia",
     kbd_suggest_header: "FlashNX - Hacer una sugerencia",
-    kbd_suggest_guide: "Abre un issue PUBLICO en GitHub. Tu idea / sugerencia para FlashNX.",
+    kbd_suggest_guide: "Abre un issue público en GitHub. Tu idea / sugerencia para FlashNX.",
     suggest_ok_msg: "Tu sugerencia se envió. Gracias por ayudar a mejorar FlashNX.",
 };
 
-// Russian — UPPERCASE Cyrillic (draw_text does not case-fold non-ASCII, and
-// only uppercase Cyrillic glyphs were added to the font).
+// Russian.
 const RU: Strings = Strings {
     optimizing: "Оптимизация",
     menu_resume: "Продолжить",
     menu_keys: "Клавиши и курсор",
     menu_screen: "Экран",
     menu_restart: "Заново",
-    menu_quit: "Выход",
+    menu_quit: "Выйти из игры",
     menu_cursor: "Курсор",
     pause_title: "Пауза",
     pause_footer: "A:ОК   B:Отмена   вверх/вниз:Нав",
@@ -1568,7 +1570,7 @@ const RU: Strings = Strings {
     opt_back: "Назад",
     options_footer: "A:ОК   B:Назад",
     del_title: "Удалить?",
-    del_l1: "ФАЙЛ .swf, СОХРАНЕНИЯ (.sol),",
+    del_l1: "Файл .swf, сохранения (.sol),",
     del_l2: "Клавиши и псевдоним будут удалены.",
     del_l3: "Действие необратимо.",
     del_footer: "A: Удалить     B: Отмена",
@@ -1631,8 +1633,8 @@ const RU: Strings = Strings {
     games_dir_ask_move: "Переместить игры с карты?",
     games_dir_move: "Переместить",
     games_dir_keep: "Оставить",
-    games_dir_moving: "Перемещение...",
-    extracting: "Извлечение...",
+    games_dir_moving: "Перемещение…",
+    extracting: "Извлечение…",
     opt_shortcut: "Меню HOME",
     shortcut_ok: "Значок установлен в меню HOME",
     shortcut_err: "Не удалось установить значок",
@@ -1652,13 +1654,13 @@ const RU: Strings = Strings {
     pixels_auto: "Авто",
     pixels_smooth: "Сглаженные",
     pixels_sharp: "Чёткие",
-    pixels_hint: "АВТО: как просит игра. ЧЁТКИЕ: без размытия.",
+    pixels_hint: "Авто: как просит игра. Чёткие: без размытия.",
     set_overclock: "Разгон",
     overclock_off: "Выкл",
     overclock_on: "Вкл",
-    overclock_hint: "ВКЛ: больше расход батареи и нагрев.",
+    overclock_hint: "Вкл: больше расход батареи и нагрев.",
     overclock_refused: "Разгон недоступен: батарея разряжена.",
-    overclock_auto_hint: "АВТО: только если игра тормозит.",
+    overclock_auto_hint: "Авто: только если игра тормозит.",
     set_fps: "Счётчик FPS",
     fps_hint: "Кадров в секунду и частота, которую запрашивает игра.",
     set_rotation: "Поворот",
@@ -1775,46 +1777,42 @@ const RU: Strings = Strings {
     err_server_busy: "Сервер перегружен (HTTP {}). Ссылка верна, попробуйте через несколько минут.",
     err_not_found: "Не найдено (404). Неверный URL или ID элемента, либо он удалён.",
     err_json: "Нечитаемый JSON archive.org: {}",
-    err_json_no_files: "В JSON НЕТ ПОЛЯ \"files\"",
+    err_json_no_files: "В JSON нет поля \"files\"",
     err_dl_start: "Не удалось начать загрузку (код {}).",
     err_dl_failed: "Загрузка не удалась (код {})",
     err_dl_cancelled: "Загрузка отменена пользователем.",
-    err_url_invalid: "НЕВЕРНЫЙ URL. ОЖИДАЛСЯ URL ARCHIVE.ORG ВИДА https://archive.org/details/<id> ИЛИ ПРОСТО <id>.",
+    err_url_invalid: "Неверный URL. Ожидался URL archive.org вида https://archive.org/details/<id> или просто <id>.",
     err_no_swf: "Для этой игры не найдено файлов .swf.",
     err_dl_not_a_game: "Загрузка вернула не игровой файл. Проверьте адрес.",
     err_fp_html_game: "Эта игра запускается через HTML-страницу (FlashVars), пока не поддерживается.",
-    kbd_url_header: "FlashNX - Zagruzka po seti",
-    kbd_url_guide: "URL elementa archive.org (naprimer: https://archive.org/download/your-game-id)",
-    kbd_rename_header: "FlashNX - Pereimenovat",
-    kbd_rename_guide: "Otobrazhaemoe imya (ostavte pustym chtoby vernut imya fayla)",
-    kbd_search_header: "FlashNX - Poisk",
-    kbd_search_guide: "Filtr po imeni fayla (pusto = pokazat vse)",
+    kbd_url_header: "FlashNX - Загрузка по сети",
+    kbd_url_guide: "URL элемента archive.org (например: https://archive.org/download/your-game-id)",
+    kbd_rename_header: "FlashNX - Переименовать",
+    kbd_rename_guide: "Отображаемое имя (оставь пустым, чтобы вернуть имя файла)",
+    kbd_search_header: "FlashNX - Поиск",
+    kbd_search_guide: "Фильтр по имени файла (пусто = показать все)",
     bug_pick_title: "Сообщить об ошибке",
     bug_pick_footer: "A:Выбрать   B:Назад   вверх/вниз:Нав",
     bug_no_games: "Нет игр для отчета. Сначала добавьте или загрузите .swf.",
     bug_ok_title: "Спасибо!",
     bug_ok_msg: "Отчет отправлен. Спасибо, что помогаете улучшить FlashNX.",
     bug_fail_title: "Ошибка",
-    kbd_bug_header: "FlashNX - Soobshchit ob oshibke",
-    kbd_bug_guide: "Otkroet PUBLICHNUYU issue na GitHub. Opishite problemu. @nik po zhelaniyu. Kratkiy tekhnicheskiy log prilagaetsya.",
+    kbd_bug_header: "FlashNX - Сообщить об ошибке",
+    kbd_bug_guide: "Откроет публичную issue на GitHub. Опиши проблему. По желанию: твой @ник. Прилагается краткий технический лог.",
     set_suggest: "Предложить идею",
-    kbd_suggest_header: "FlashNX - Predlozhit ideyu",
-    kbd_suggest_guide: "Otkroet PUBLICHNUYU issue na GitHub. Vasha ideya / predlozhenie.",
+    kbd_suggest_header: "FlashNX - Предложить идею",
+    kbd_suggest_guide: "Откроет публичную issue на GitHub. Твоя идея / предложение для FlashNX.",
     suggest_ok_msg: "Предложение отправлено. Спасибо, что помогаете улучшить FlashNX.",
 };
 
-// German — uppercase Latin. draw_text folds ASCII to uppercase but NOT
-// accented letters, so umlauts are written in their UPPERCASE form (Ä Ö Ü)
-// to hit the glyphs added to the font; ß is rendered as SS (uppercase German
-// convention). The kbd_* strings go to the Switch software keyboard, which
-// renders full Unicode, so those keep natural mixed case + lowercase accents.
+// German.
 const DE: Strings = Strings {
     optimizing: "Optimierung",
     menu_resume: "Fortsetzen",
     menu_keys: "Steuerung und Cursor",
     menu_screen: "Bildschirm",
     menu_restart: "Neustart",
-    menu_quit: "Beenden",
+    menu_quit: "Spiel beenden",
     menu_cursor: "Cursor",
     pause_title: "Pause",
     pause_footer: "A:OK   B:Abbrechen   hoch/runter:Nav",
@@ -1833,7 +1831,7 @@ const DE: Strings = Strings {
     flash_control: "Strg",
     flash_alt: "Alt",
     flash_tab: "Tab",
-    flash_backspace: "RÜcktaste",
+    flash_backspace: "Rücktaste",
     flash_up: "Hoch",
     flash_down: "Runter",
     flash_left: "Links",
@@ -1855,7 +1853,7 @@ const DE: Strings = Strings {
     opt_back: "Zurück",
     options_footer: "A:OK   B:Zurück",
     del_title: "Löschen?",
-    del_l1: "DIE .swf-DATEI, DIE SPEICHER (.sol),",
+    del_l1: "Die .swf-Datei, die Spielstände (.sol),",
     del_l2: "Die Steuerung und der Alias werden gelöscht.",
     del_l3: "Nicht rückgängig zu machen.",
     del_footer: "A: Löschen     B: Abbrechen",
@@ -1904,8 +1902,8 @@ const DE: Strings = Strings {
     set_screen_filter: "Filter",
     set_home_view: "Startansicht",
     set_games_dir: "Spiele-Ordner",
-    games_dir_pick: "WÄhlen",
-    games_dir_up: "ZurÜck",
+    games_dir_pick: "Wählen",
+    games_dir_up: "Zurück",
     games_dir_new: "Neuer Ordner",
     games_dir_footer: "A:Wählen  B:Zurück  X:Neu",
     games_dir_current: "aktuell",
@@ -1918,8 +1916,8 @@ const DE: Strings = Strings {
     games_dir_ask_move: "Spiele auf der Karte mitnehmen?",
     games_dir_move: "Verschieben",
     games_dir_keep: "Behalten",
-    games_dir_moving: "Verschieben...",
-    extracting: "Entpacken...",
+    games_dir_moving: "Verschieben…",
+    extracting: "Entpacken…",
     opt_shortcut: "HOME-Menü",
     shortcut_ok: "Kachel im HOME-Menü installiert",
     shortcut_err: "Kachel konnte nicht installiert werden",
@@ -1939,13 +1937,13 @@ const DE: Strings = Strings {
     pixels_auto: "Auto",
     pixels_smooth: "Weich",
     pixels_sharp: "Scharf",
-    pixels_hint: "AUTO: wie das Spiel es verlangt. SCHARF: keine Unschärfe.",
+    pixels_hint: "Auto: wie das Spiel es verlangt. Scharf: keine Unschärfe.",
     set_overclock: "Overclock",
     overclock_off: "Aus",
     overclock_on: "Ein",
-    overclock_hint: "EIN: mehr Akkuverbrauch, mehr Wärme.",
+    overclock_hint: "Ein: mehr Akkuverbrauch, mehr Wärme.",
     overclock_refused: "Overclock nicht verfügbar: Akku zu schwach.",
-    overclock_auto_hint: "AUTO: nur bei langsamen Spielen.",
+    overclock_auto_hint: "Auto: nur bei langsamen Spielen.",
     set_fps: "FPS-Anzeige",
     fps_hint: "Bilder pro Sekunde, dann die vom Spiel geforderte Rate.",
     set_rotation: "Drehung",
@@ -2062,11 +2060,11 @@ const DE: Strings = Strings {
     err_server_busy: "Der Server ist überlastet (HTTP {}). Dein Link ist in Ordnung, versuche es in ein paar Minuten erneut.",
     err_not_found: "Nicht gefunden (404). URL oder Item-ID ist falsch, oder es wurde entfernt.",
     err_json: "Unlesbares archive.org-JSON: {}",
-    err_json_no_files: "JSON OHNE \"files\"-FELD",
+    err_json_no_files: "JSON ohne \"files\"-Feld",
     err_dl_start: "Download konnte nicht gestartet werden (Code {}).",
     err_dl_failed: "Download fehlgeschlagen (Code {})",
     err_dl_cancelled: "Download vom Benutzer abgebrochen.",
-    err_url_invalid: "UNGÜLTIGE URL. ERWARTET WIRD EINE ARCHIVE.ORG-URL WIE https://archive.org/details/<id> ODER EINFACH <id>.",
+    err_url_invalid: "Ungültige URL. Erwartet wird eine archive.org-URL wie https://archive.org/details/<id> oder einfach <id>.",
     err_no_swf: "Keine .swf-Datei für dieses Spiel gefunden.",
     err_dl_not_a_game: "Der Download hat keine Spieldatei geliefert. Prüfe die Adresse.",
     err_fp_html_game: "Dieses Spiel startet über eine HTML-Seite (FlashVars), noch nicht unterstützt.",
@@ -2090,15 +2088,14 @@ const DE: Strings = Strings {
     suggest_ok_msg: "Dein Vorschlag wurde gesendet. Danke, dass du hilfst, FlashNX zu verbessern.",
 };
 
-// Italian — uppercase Latin. Accented uppercase vowels (À È É Ì Ò Ù) are
-// written directly to hit the font glyphs (draw_text does not fold accents).
+// Italian.
 const IT: Strings = Strings {
     optimizing: "Ottimizzazione",
     menu_resume: "Riprendi",
     menu_keys: "Comandi e cursore",
     menu_screen: "Schermo",
     menu_restart: "Riavvia",
-    menu_quit: "Esci",
+    menu_quit: "Esci dal gioco",
     menu_cursor: "Cursore",
     pause_title: "Pausa",
     pause_footer: "A:OK   B:Annulla   su/giù:Nav",
@@ -2119,7 +2116,7 @@ const IT: Strings = Strings {
     flash_tab: "Tab",
     flash_backspace: "Backspace",
     flash_up: "Su",
-    flash_down: "GiÙ",
+    flash_down: "Giù",
     flash_left: "Sinistra",
     flash_right: "Destra",
     empty_title: "Nessun gioco",
@@ -2139,7 +2136,7 @@ const IT: Strings = Strings {
     opt_back: "Indietro",
     options_footer: "A:OK   B:Indietro",
     del_title: "Eliminare?",
-    del_l1: "IL FILE .swf, I SALVATAGGI (.sol),",
+    del_l1: "Il file .swf, i salvataggi (.sol),",
     del_l2: "I comandi e l'alias saranno eliminati.",
     del_l3: "Azione irreversibile.",
     del_footer: "A: Elimina     B: Annulla",
@@ -2202,8 +2199,8 @@ const IT: Strings = Strings {
     games_dir_ask_move: "Spostare i giochi gia sulla scheda?",
     games_dir_move: "Spostali",
     games_dir_keep: "Lasciali",
-    games_dir_moving: "Spostamento...",
-    extracting: "Estrazione...",
+    games_dir_moving: "Spostamento…",
+    extracting: "Estrazione…",
     opt_shortcut: "Menu HOME",
     shortcut_ok: "Icona installata nel menu HOME",
     shortcut_err: "Impossibile installare l'icona",
@@ -2223,13 +2220,13 @@ const IT: Strings = Strings {
     pixels_auto: "Auto",
     pixels_smooth: "Morbidi",
     pixels_sharp: "Nitidi",
-    pixels_hint: "AUTO: come chiede il gioco. NITIDI: nessuna sfocatura.",
+    pixels_hint: "Auto: come chiede il gioco. Nitidi: nessuna sfocatura.",
     set_overclock: "Overclock",
     overclock_off: "Inattivo",
     overclock_on: "Attivo",
-    overclock_hint: "ATTIVO: più batteria, più calore.",
+    overclock_hint: "Attivo: più batteria, più calore.",
     overclock_refused: "Overclock non disponibile: batteria troppo bassa.",
-    overclock_auto_hint: "AUTO: solo se il gioco rallenta.",
+    overclock_auto_hint: "Auto: solo se il gioco rallenta.",
     set_fps: "Contatore FPS",
     fps_hint: "Fotogrammi al secondo, poi la frequenza richiesta dal gioco.",
     set_rotation: "Rotazione",
@@ -2346,11 +2343,11 @@ const IT: Strings = Strings {
     err_server_busy: "Il server è sovraccarico (HTTP {}). Il tuo link è corretto, riprova tra qualche minuto.",
     err_not_found: "Non trovato (404). URL o ID dell'elemento errato, oppure è stato rimosso.",
     err_json: "JSON di archive.org illeggibile: {}",
-    err_json_no_files: "JSON SENZA CAMPO \"files\"",
+    err_json_no_files: "JSON senza campo \"files\"",
     err_dl_start: "Impossibile avviare il download (codice {}).",
     err_dl_failed: "Download fallito (codice {})",
     err_dl_cancelled: "Download annullato dall'utente.",
-    err_url_invalid: "URL NON VALIDO. ATTESO UN URL DI ARCHIVE.ORG TIPO https://archive.org/details/<id> O SEMPLICEMENTE <id>.",
+    err_url_invalid: "URL non valido. Atteso un URL di archive.org tipo https://archive.org/details/<id> o semplicemente <id>.",
     err_no_swf: "Nessun file .swf trovato per questo gioco.",
     err_dl_not_a_game: "Il download non ha restituito un file di gioco. Controlla l'indirizzo.",
     err_fp_html_game: "Questo gioco si avvia da una pagina HTML (FlashVars), non ancora supportato.",
@@ -2367,22 +2364,21 @@ const IT: Strings = Strings {
     bug_ok_msg: "La tua segnalazione è stata inviata. Grazie per aiutare a migliorare FlashNX.",
     bug_fail_title: "Fallito",
     kbd_bug_header: "FlashNX - Segnala un bug",
-    kbd_bug_guide: "Apre una issue PUBBLICA su GitHub. Descrivi il problema. Facoltativo: il tuo @nome. Viene allegato un breve log tecnico.",
+    kbd_bug_guide: "Apre una issue pubblica su GitHub. Descrivi il problema. Facoltativo: il tuo @nome. Viene allegato un breve log tecnico.",
     set_suggest: "Proponi un'idea",
     kbd_suggest_header: "FlashNX - Proponi un'idea",
-    kbd_suggest_guide: "Apre una issue PUBBLICA su GitHub. La tua idea / proposta per FlashNX.",
+    kbd_suggest_guide: "Apre una issue pubblica su GitHub. La tua idea / proposta per FlashNX.",
     suggest_ok_msg: "La tua proposta è stata inviata. Grazie per aiutare a migliorare FlashNX.",
 };
 
-// Portuguese (Brazil) — uppercase Latin. Accented uppercase letters
-// (Á Â Ã É Ê Í Ó Ô Õ Ú Ç) are written directly to hit the font glyphs.
+// Portuguese (Brazil).
 const PT: Strings = Strings {
     optimizing: "Otimizando",
     menu_resume: "Continuar",
     menu_keys: "Controles e cursor",
     menu_screen: "Tela",
     menu_restart: "Reiniciar",
-    menu_quit: "Sair",
+    menu_quit: "Sair do jogo",
     menu_cursor: "Cursor",
     pause_title: "Pausa",
     pause_footer: "A:OK   B:Cancelar   cima/baixo:Nav",
@@ -2394,7 +2390,7 @@ const PT: Strings = Strings {
     flash_mouse_left: "Clique esquerdo",
     flash_mouse_right: "Clique direito",
     flash_keyboard: "Teclado",
-    flash_space: "EspaÇo",
+    flash_space: "Espaço",
     flash_enter: "Enter",
     flash_escape: "Esc",
     flash_shift: "Shift",
@@ -2423,7 +2419,7 @@ const PT: Strings = Strings {
     opt_back: "Voltar",
     options_footer: "A:OK   B:Voltar",
     del_title: "Excluir?",
-    del_l1: "O ARQUIVO .swf, OS SAVES (.sol),",
+    del_l1: "O arquivo .swf, os jogos salvos (.sol),",
     del_l2: "Os controles e o alias serão apagados.",
     del_l3: "Ação irreversível.",
     del_footer: "A: Excluir     B: Cancelar",
@@ -2486,8 +2482,8 @@ const PT: Strings = Strings {
     games_dir_ask_move: "Mover os jogos ja no cartao?",
     games_dir_move: "Mover",
     games_dir_keep: "Deixar",
-    games_dir_moving: "Movendo...",
-    extracting: "Extraindo...",
+    games_dir_moving: "Movendo…",
+    extracting: "Extraindo…",
     opt_shortcut: "Menu HOME",
     shortcut_ok: "Ícone instalado no menu HOME",
     shortcut_err: "Não foi possível instalar o ícone",
@@ -2507,13 +2503,13 @@ const PT: Strings = Strings {
     pixels_auto: "Auto",
     pixels_smooth: "Suaves",
     pixels_sharp: "Nítidos",
-    pixels_hint: "AUTO: como o jogo pede. NÍTIDOS: sem desfoque.",
+    pixels_hint: "Auto: como o jogo pede. Nítidos: sem desfoque.",
     set_overclock: "Overclock",
     overclock_off: "Inativo",
     overclock_on: "Ativo",
-    overclock_hint: "ATIVO: mais bateria, mais calor.",
+    overclock_hint: "Ativo: mais bateria, mais calor.",
     overclock_refused: "Overclock indisponível: bateria fraca.",
-    overclock_auto_hint: "AUTO: só se o jogo ficar lento.",
+    overclock_auto_hint: "Auto: só se o jogo ficar lento.",
     set_fps: "Contador FPS",
     fps_hint: "Quadros por segundo, e a taxa que o jogo pede.",
     set_rotation: "Rotação",
@@ -2630,11 +2626,11 @@ const PT: Strings = Strings {
     err_server_busy: "O servidor está sobrecarregado (HTTP {}). Seu link está certo, tente em alguns minutos.",
     err_not_found: "Não encontrado (404). A URL ou o ID do item está errado, ou foi removido.",
     err_json: "JSON do archive.org ilegível: {}",
-    err_json_no_files: "JSON SEM O CAMPO \"files\"",
+    err_json_no_files: "JSON sem o campo \"files\"",
     err_dl_start: "Não foi possível iniciar o download (código {}).",
     err_dl_failed: "Falha no download (código {})",
     err_dl_cancelled: "Download cancelado pelo usuário.",
-    err_url_invalid: "URL INVÁLIDA. ESPERADA UMA URL DO ARCHIVE.ORG TIPO https://archive.org/details/<id> OU SIMPLESMENTE <id>.",
+    err_url_invalid: "URL inválida. Esperada uma URL do archive.org tipo https://archive.org/details/<id> ou simplesmente <id>.",
     err_no_swf: "Nenhum arquivo .swf encontrado para este jogo.",
     err_dl_not_a_game: "O download não retornou um arquivo de jogo. Verifique o endereço.",
     err_fp_html_game: "Este jogo inicia por uma página HTML (FlashVars), ainda não suportado.",
@@ -2651,27 +2647,22 @@ const PT: Strings = Strings {
     bug_ok_msg: "Seu relato foi enviado. Obrigado por ajudar a melhorar o FlashNX.",
     bug_fail_title: "Falhou",
     kbd_bug_header: "FlashNX - Relatar um bug",
-    kbd_bug_guide: "Abre uma issue PÚBLICA no GitHub. Descreva o problema. Opcional: seu @usuário. Um breve log tecnico e anexado.",
+    kbd_bug_guide: "Abre uma issue pública no GitHub. Descreva o problema. Opcional: seu @usuário. Um breve log técnico é anexado.",
     set_suggest: "Fazer uma sugestão",
     kbd_suggest_header: "FlashNX - Fazer uma sugestão",
-    kbd_suggest_guide: "Abre uma issue PÚBLICA no GitHub. Sua ideia / sugestão para o FlashNX.",
+    kbd_suggest_guide: "Abre uma issue pública no GitHub. Sua ideia / sugestão para o FlashNX.",
     suggest_ok_msg: "Sua sugestão foi enviada. Obrigado por ajudar a melhorar o FlashNX.",
 };
 
-// Simplified Chinese (issue #41). CJK has no case, so unlike the Latin tables
-// these are written verbatim; they render through the shared-font glyph atlas
-// (backend/glyphs.rs), while the ASCII parts (button names, paths, URLs) still
-// come from the 5x7 bitmap font (folded to uppercase). Button-hint footers keep
-// ASCII ":" / spacing for parity with the other locales; prose uses Chinese
-// punctuation. The kbd_* strings go to the Switch software keyboard (full
-// Unicode), so they read as natural mixed Chinese + Latin.
+// Simplified Chinese (issue #41). Prose uses Chinese punctuation; names,
+// paths and URLs stay in Latin script.
 const ZH: Strings = Strings {
     optimizing: "优化中",
     menu_resume: "继续",
     menu_keys: "按键与光标",
     menu_screen: "屏幕",
     menu_restart: "重新开始",
-    menu_quit: "退出",
+    menu_quit: "退出游戏",
     menu_cursor: "光标",
     pause_title: "暂停",
     pause_footer: "A:确定   B:取消   上/下:导航",
@@ -2697,12 +2688,12 @@ const ZH: Strings = Strings {
     flash_right: "右",
     empty_title: "没有游戏",
     empty_l1: "将 .SWF 文件放入",
-    empty_l2: "SDMC:/FLASHNX/",
-    empty_l3: "然后重启 FLASHNX。",
+    empty_l2: "sdmc:/flashnx/",
+    empty_l3: "然后重启 FlashNX。",
     empty_footer: "Y:在线导入   -:退出",
     list_footer: "L/R:标签  A:开始  Y:排序  -:搜索  +:选项",
     applet_title: "小程序模式",
-    applet_notice: "启动游戏需要应用的全部内存，小程序模式没有。在自制软件菜单中，按住 R 选择标题（或使用转发器）以全内存启动 FLASHNX。",
+    applet_notice: "启动游戏需要应用的全部内存，小程序模式没有。在自制软件菜单中，按住 R 选择标题（或使用转发器）以全内存启动 FlashNX。",
     options_title: "选项",
     opt_keys: "按键与光标",
     opt_rename: "重命名",
@@ -2721,12 +2712,12 @@ const ZH: Strings = Strings {
     dist_sources: "我的来源",
     dist_empty_hint: "按名称搜索游戏，或粘贴网址",
     dist_add: "+ 添加网址",
-    dist_list_footer: "A:启动   +:选项   Y:排序   -:搜索   X:FLASHPOINT",
+    dist_list_footer: "A:启动   +:选项   Y:排序   -:搜索   X:Flashpoint",
     dist_count: "{} 个网址",
-    dist_subtitle: "从 ARCHIVE.ORG 下载 SWF",
+    dist_subtitle: "从 archive.org 下载 SWF",
     dist_press_a: "按 A 输入网址",
-    dist_example1: "示例: HTTPS://ARCHIVE.ORG/DETAILS/<ITEM-ID>",
-    dist_example2: "或直接输入 <ITEM-ID>",
+    dist_example1: "示例：https://archive.org/details/<item-id>",
+    dist_example2: "或直接输入 <item-id>",
     dist_history: "历史记录",
     dist_hint_zr: "ZR : 直接加载此网址",
     dist_hint_a: "A  : 输入 / 编辑网址（键盘）",
@@ -2873,7 +2864,7 @@ const ZH: Strings = Strings {
     cover_show_shots: "Y: 截图",
     cover_off_notice: "在设置中启用在线封面",
     cover_none: "无结果",
-    fp_title: "FLASHPOINT",
+    fp_title: "Flashpoint",
     fp_footer: "A:下载   X:搜索   Y:排序   +:信息   ZL+ZR:筛选 {}   B:返回",
     fp_details_title: "详情",
     fp_details_dev: "开发者",
@@ -2907,10 +2898,10 @@ const ZH: Strings = Strings {
     url_info_files: "已在 SD 卡",
     url_info_added: "添加于",
     histdel_msg: "从历史记录中移除此网址？",
-    err_too_large: "ARCHIVE.ORG 响应过大 (>4 MB)。此项目对当前版本来说太大了。",
+    err_too_large: "archive.org 响应过大 (>4 MB)。此项目对当前版本来说太大了。",
     err_https: "传输失败 ({})。请稍后重试。",
-    err_offline: "找不到地址 (CURL {})。请检查主机的 WIFI，然后检查 DNS。",
-    err_unreachable: "服务器拒绝了连接 (CURL {})。主机在线，中间有东西在阻断。",
+    err_offline: "找不到地址（curl {}）。请检查主机的 Wi-Fi，然后检查 DNS。",
+    err_unreachable: "服务器拒绝了连接（curl {}）。主机在线，中间有东西在阻断。",
     err_timeout: "服务器未及时响应。请重试。",
     err_tls: "安全连接被拒绝。请检查主机的日期和时间：时钟错误会导致 HTTPS 失败。",
     err_response_big: "响应过大。请使用更精确的搜索。",
@@ -2918,15 +2909,15 @@ const ZH: Strings = Strings {
     err_http_status: "服务器拒绝了请求 (HTTP {})。请稍后重试。",
     err_server_busy: "服务器过载 (HTTP {})。链接没有问题，请过几分钟再试。",
     err_not_found: "未找到 (404)。网址或条目 ID 有误，或已被删除。",
-    err_json: "无法读取 ARCHIVE.ORG 的 JSON: {}",
+    err_json: "无法读取 archive.org 的 JSON: {}",
     err_json_no_files: "JSON 中没有 \"files\" 字段",
     err_dl_start: "无法开始下载（代码 {}）。",
     err_dl_failed: "下载失败（代码 {}）",
     err_dl_cancelled: "下载已被用户取消。",
-    err_url_invalid: "网址无效。应为 ARCHIVE.ORG 网址，例如 https://archive.org/details/<id>，或直接输入 <id>。",
+    err_url_invalid: "网址无效。应为 archive.org 网址，例如 https://archive.org/details/<id>，或直接输入 <id>。",
     err_no_swf: "未找到此游戏的 .SWF 文件。",
     err_dl_not_a_game: "下载返回的不是游戏文件。请检查地址。",
-    err_fp_html_game: "此游戏通过 HTML 页面（FLASHVARS）启动，暂不支持。",
+    err_fp_html_game: "此游戏通过 HTML 页面（FlashVars）启动，暂不支持。",
     kbd_url_header: "FlashNX - 在线导入",
     kbd_url_guide: "archive.org 项目网址（例如 https://archive.org/download/your-game-id）",
     kbd_rename_header: "FlashNX - 重命名游戏",
@@ -2937,28 +2928,24 @@ const ZH: Strings = Strings {
     bug_pick_footer: "A:选择   B:返回   上/下:导航",
     bug_no_games: "暂无可报告的游戏。请先导入或放入一个 .SWF。",
     bug_ok_title: "谢谢！",
-    bug_ok_msg: "你的报告已发送。感谢你帮助改进 FLASHNX。",
+    bug_ok_msg: "你的报告已发送。感谢你帮助改进 FlashNX。",
     bug_fail_title: "失败",
     kbd_bug_header: "FlashNX - 报告问题",
     kbd_bug_guide: "将打开一个公开的 GitHub issue。请描述问题。可选：你的 @用户名。将附带一份简短的技术日志。",
     set_suggest: "提出建议",
     kbd_suggest_header: "FlashNX - 提出建议",
     kbd_suggest_guide: "将打开一个公开的 GitHub issue。你对 FlashNX 的想法 / 建议。",
-    suggest_ok_msg: "你的建议已发送。感谢你帮助改进 FLASHNX。",
+    suggest_ok_msg: "你的建议已发送。感谢你帮助改进 FlashNX。",
 };
 
-// Turkish. Drawn strings are UPPERCASE with only the caps our 5x7 font carries
-// (Ç Ö Ü + the added Ğ/Ş); the dotted capital I is
-// rendered as a plain ASCII "I" (standard all-caps relaxation, avoids a glyph).
-// The `kbd_*` guides go to the Switch software keyboard, which renders full
-// Turkish diacritics, so those keep proper lowercase spelling.
+// Turkish.
 const TR: Strings = Strings {
     optimizing: "Optimize ediliyor",
     menu_resume: "Devam et",
     menu_keys: "Kontroller ve imleç",
     menu_screen: "Ekran",
     menu_restart: "Yeniden başlat",
-    menu_quit: "Çıkış",
+    menu_quit: "Oyundan çık",
     menu_cursor: "İmleç",
     pause_title: "Duraklatıldı",
     pause_footer: "A:Tamam   B:İptal   yukarı/aşağı",
@@ -2967,10 +2954,10 @@ const TR: Strings = Strings {
     keys_dropdown_footer: "A:Tamam   B:İptal   yukarı/aşağı",
     keys_modifier: "Değiştirici",
     none: "(yok)",
-    flash_mouse_left: "Sol tik",
-    flash_mouse_right: "SaĞ tik",
+    flash_mouse_left: "Sol tık",
+    flash_mouse_right: "Sağ tık",
     flash_keyboard: "Klavye",
-    flash_space: "BoŞluk",
+    flash_space: "Boşluk",
     flash_enter: "Enter",
     flash_escape: "Esc",
     flash_shift: "Shift",
@@ -2978,10 +2965,10 @@ const TR: Strings = Strings {
     flash_alt: "Alt",
     flash_tab: "Tab",
     flash_backspace: "Geri sil",
-    flash_up: "Yukari",
-    flash_down: "AŞaĞi",
+    flash_up: "Yukarı",
+    flash_down: "Aşağı",
     flash_left: "Sol",
-    flash_right: "SaĞ",
+    flash_right: "Sağ",
     empty_title: "Oyun yok",
     empty_l1: ".swf dosyalarını şuraya koyun",
     empty_l2: "sdmc:/flashnx/",
@@ -2999,7 +2986,7 @@ const TR: Strings = Strings {
     opt_back: "Geri",
     options_footer: "A:Tamam   B:Geri",
     del_title: "Silinsin mi?",
-    del_l1: ".swf DOSYASI, KAYITLAR (.sol),",
+    del_l1: ".swf dosyası, kayıtlar (.sol),",
     del_l2: "Kontroller ve takma ad silinecek.",
     del_l3: "Bu geri alınamaz.",
     del_footer: "A: Sil     B: İptal",
@@ -3048,28 +3035,28 @@ const TR: Strings = Strings {
     set_screen_filter: "Filtre",
     set_home_view: "Ana ekran",
     set_games_dir: "Oyun klasörü",
-    games_dir_pick: "Sec",
-    games_dir_up: "Yukari",
-    games_dir_new: "Yeni klasor",
+    games_dir_pick: "Seç",
+    games_dir_up: "Yukarı",
+    games_dir_new: "Yeni klasör",
     games_dir_footer: "A:Seç  B:Yukarı  X:Yeni",
-    games_dir_current: "kullanimda",
-    games_dir_confirm: "Tum kutuphane buraya tasinsin mi?",
+    games_dir_current: "kullanımda",
+    games_dir_confirm: "Tüm kütüphane buraya taşınsın mı?",
     games_dir_confirm_n: "{} oyun şuraya taşınacak:",
     games_dir_confirm_1: "{} oyun şuraya taşınacak:",
-    games_dir_confirm_yes: "Tasi",
-    games_dir_confirm_no: "Iptal",
-    kbd_newdir_guide: "Olusturulacak klasorun adi",
-    games_dir_ask_move: "Karttaki oyunlar tasinsin mi?",
-    games_dir_move: "Tasi",
-    games_dir_keep: "Birak",
-    games_dir_moving: "Tasiniyor...",
-    extracting: "Cikartiliyor...",
+    games_dir_confirm_yes: "Taşı",
+    games_dir_confirm_no: "İptal",
+    kbd_newdir_guide: "Oluşturulacak klasörün adı",
+    games_dir_ask_move: "Karttaki oyunlar taşınsın mı?",
+    games_dir_move: "Taşı",
+    games_dir_keep: "Bırak",
+    games_dir_moving: "Taşınıyor…",
+    extracting: "Çıkartılıyor…",
     opt_shortcut: "Ana menü",
     shortcut_ok: "Kutucuk ana menüye eklendi",
     shortcut_err: "Kutucuk yüklenemedi",
     opt_shortcut_del: "Ana menüden kaldır",
     shortcut_removed: "Kutucuk kaldırıldı",
-    games_dir_moved: "Tasindi",
+    games_dir_moved: "Taşındı",
     home_grid: "Izgara",
     home_list: "Liste",
     home_strip: "Şerit",
@@ -3083,13 +3070,13 @@ const TR: Strings = Strings {
     pixels_auto: "Otomatik",
     pixels_smooth: "Yumuşak",
     pixels_sharp: "Keskin",
-    pixels_hint: "OTOMATİK: oyunun istediği gibi. KESKİN: bulanıklık yok.",
+    pixels_hint: "Otomatik: oyunun istediği gibi. Keskin: bulanıklık yok.",
     set_overclock: "Overclock",
     overclock_off: "Kapalı",
     overclock_on: "Açık",
-    overclock_hint: "AÇIK: daha çok pil, daha çok ısı.",
+    overclock_hint: "Açık: daha çok pil, daha çok ısı.",
     overclock_refused: "Overclock kullanılamaz: pil çok düşük.",
-    overclock_auto_hint: "OTOMATİK: yalnızca oyun yavaşlarsa.",
+    overclock_auto_hint: "Otomatik: yalnızca oyun yavaşlarsa.",
     set_fps: "FPS sayacı",
     fps_hint: "Saniyedeki kare sayısı ve oyunun istediği hız.",
     set_rotation: "Döndürme",
@@ -3206,11 +3193,11 @@ const TR: Strings = Strings {
     err_server_busy: "Sunucu aşırı yüklü (HTTP {}). Bağlantı doğru, birkaç dakika sonra deneyin.",
     err_not_found: "Bulunamadı (404). URL veya öğe kimliği yanlış ya da kaldırılmış.",
     err_json: "Okunamayan archive.org JSON: {}",
-    err_json_no_files: "JSON'DA \"files\" ALANI YOK",
+    err_json_no_files: "JSON'da \"files\" alanı yok",
     err_dl_start: "İndirme başlatılamadı (kod {}).",
     err_dl_failed: "İndirme başarısız (kod {})",
     err_dl_cancelled: "İndirme kullanıcı tarafından iptal edildi.",
-    err_url_invalid: "GEÇERSİZ URL. https://archive.org/details/<id> GİBİ BİR URL VEYA SADECE <id> BEKLENİYOR.",
+    err_url_invalid: "Geçersiz URL. https://archive.org/details/<id> gibi bir URL veya yalnızca <id> bekleniyor.",
     err_no_swf: "Bu oyun için .swf dosyası bulunamadı.",
     err_dl_not_a_game: "İndirme bir oyun dosyası döndürmedi. Adresi kontrol edin.",
     err_fp_html_game: "Bu oyun bir HTML sayfasından (FlashVars) başlar, henüz desteklenmiyor.",
@@ -3248,7 +3235,7 @@ pub fn set(lang: Lang) {
     // renders blank, not just a label. Applet mode cannot afford that font
     // (see `glyphs::cjk_possible`), so fall back to English there rather than
     // hand someone an invisible interface.
-    let lang = if lang.needs_cjk() && !crate::backend::glyphs::cjk_possible() {
+    let lang = if lang.needs_cjk() && !cjk_drawable() {
         Lang::En
     } else {
         lang
@@ -3384,11 +3371,13 @@ pub fn set_default_zoom(v: u16) {
 
 /// Step to the next preset, wrapping. A value that is not one of them (hand
 /// edited into settings.json) lands on the first.
-pub fn cycle_default_zoom() {
+pub fn step_default_zoom(dir: i32) {
     let cur = default_zoom();
+    let n = DEFAULT_ZOOM_STEPS.len();
     let idx = DEFAULT_ZOOM_STEPS.iter().position(|v| *v == cur);
     let next = match idx {
-        Some(i) => DEFAULT_ZOOM_STEPS[(i + 1) % DEFAULT_ZOOM_STEPS.len()],
+        Some(i) if dir < 0 => DEFAULT_ZOOM_STEPS[(i + n - 1) % n],
+        Some(i) => DEFAULT_ZOOM_STEPS[(i + 1) % n],
         None => DEFAULT_ZOOM_STEPS[0],
     };
     set_default_zoom(next);

@@ -1591,6 +1591,15 @@ pub fn next_power_setting(cur: u8) -> u8 {
     }
 }
 
+/// `next_power_setting` backwards, for Left on the row.
+pub fn prev_power_setting(cur: u8) -> u8 {
+    match cur {
+        0 => 1,
+        POWER_AUTO => 0,
+        _ => POWER_AUTO,
+    }
+}
+
 /// Per-game power setting (by basename), falling back to the global default.
 ///
 /// PER GAME rather than one global switch, for the same reason as the scaling
