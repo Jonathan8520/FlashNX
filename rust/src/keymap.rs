@@ -1414,6 +1414,49 @@ fn write_pref_many(basename: &str, pairs: &[(&str, i32)]) -> bool {
     true
 }
 
+/// The keys a game's `.prefs` holds: the settings it has a value of its own
+/// for, every other one following the global default. One read for all.
+pub fn pref_keys(basename: &str) -> std::vec::Vec<std::string::String> {
+    let mut keys = std::vec::Vec::new();
+    if let Some(path) = find_user_path(&std::format!("{}.prefs", basename)) {
+        if let Some(text) = read_json_file(&path) {
+            for line in text.lines() {
+                if let Some((k, v)) = line.split_once('=') {
+                    if !k.trim().is_empty() && v.trim().parse::<i32>().is_ok() {
+                        keys.push(k.trim().to_string());
+                    }
+                }
+            }
+        }
+    }
+    keys
+}
+
+/// Drop a game's own values for `keys`: those settings follow the global
+/// default again. The file is rewritten with the other keys it held.
+pub fn clear_prefs(basename: &str, keys: &[&str]) -> bool {
+    let Some(path) = find_user_path(&std::format!("{}.prefs", basename)) else {
+        return true;
+    };
+    let Some(text) = read_json_file(&path) else {
+        return true;
+    };
+    let body: std::string::String = text
+        .lines()
+        .filter(|line| match line.split_once('=') {
+            Some((k, _)) => !keys.contains(&k.trim()),
+            None => false,
+        })
+        .map(|line| std::format!("{}\n", line.trim()))
+        .collect();
+    if let Err(e) = std::fs::write(prefs_path(basename), body.as_bytes()) {
+        log(&std::format!("keymap: prefs for {} not saved: {}\n", basename, e));
+        return false;
+    }
+    crate::sd::commit();
+    true
+}
+
 /// Quarter-turns of the picture: 0 = none, 1 = 90 CW, 2 = 180, 3 = 270 (#78).
 pub const ROTATION_COUNT: u8 = 4;
 

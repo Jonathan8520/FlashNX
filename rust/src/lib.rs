@@ -2749,6 +2749,20 @@ fn pause_frame_mark(backend: &SwitchRenderBackend) -> bool {
     last == u32::MAX || f.wrapping_sub(last) > 1
 }
 
+/// Set when the game was started without the library (a HOME icon, a
+/// forwarder, a game shipped as its own app): quitting it closes FlashNX
+/// rather than going back to a library, and the pause says so.
+static DIRECT_LAUNCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[no_mangle]
+pub extern "C" fn ruffle_set_direct_launch(on: c_int) {
+    DIRECT_LAUNCH.store(on != 0, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn direct_launch() -> bool {
+    DIRECT_LAUNCH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Touch tables of the pause's two panels (`set_ui_screen_kind`), so a tap is
 /// only ever read against the panel that is up.
 pub(crate) const UI_KIND_PAUSE: u32 = 60;

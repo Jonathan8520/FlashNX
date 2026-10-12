@@ -160,7 +160,7 @@ impl SwitchRenderBackend {
         }
         let mut right = x + w - PAD;
         if row.opens {
-            let ink = if focused { col::GOLD } else { 0xFF_5A_6A_8F };
+            let ink = if focused { col::GOLD } else { col::CHEVRON };
             self.kit_icon(right - CHEVRON + 2.0, cy, CHEVRON, super::icons::Icon::ChevronRight, ink);
             right -= CHEVRON + 8.0;
         }
@@ -173,9 +173,18 @@ impl SwitchRenderBackend {
             // panel, the very cycling the choice replaced. Only a choice that
             // still does not fit falls back (`kit_ctrl`).
             let label_w = self.kit_measure(row.label, size::ROW).min(avail * 0.5);
-            let max_w = (avail - label_w - 20.0).max(60.0);
+            let note_w = row.note.map_or(0.0, |n| self.kit_measure(n, size::CAPTION) + 12.0);
+            let max_w = (avail - label_w - note_w - 20.0).max(60.0);
             let cw = self.kit_ctrl(right, cy, &row.ctrl, focused && !row.dim, max_w);
             avail -= cw + 20.0;
+            if let Some(n) = row.note {
+                // Dropped rather than squeezed when the label needs the room.
+                if avail - note_w > label_w.min(avail * 0.5) {
+                    let nw = self.kit_measure(n, size::CAPTION);
+                    self.kit_text_mid((right - cw - 12.0 - nw).round(), cy, size::CAPTION, n, col::TEXT3);
+                    avail -= note_w;
+                }
+            }
         }
         if row.mark.is_some() {
             avail -= MARK + 10.0;
@@ -215,6 +224,8 @@ pub(crate) struct Row<'a> {
     pub label: &'a str,
     pub ctrl: super::controls::Ctrl<'a>,
     pub mark: Option<(super::icons::Icon, u32)>,
+    /// A small caption just left of the control ("par défaut").
+    pub note: Option<&'a str>,
     pub dim: bool,
     pub danger: bool,
     pub opens: bool,
@@ -228,6 +239,7 @@ impl<'a> Row<'a> {
             label,
             ctrl: super::controls::Ctrl::None,
             mark: None,
+            note: None,
             dim: false,
             danger: false,
             opens: false,
@@ -271,6 +283,12 @@ impl<'a> Row<'a> {
     /// An on / off switch.
     pub(crate) fn toggle(mut self, on: bool) -> Row<'a> {
         self.ctrl = super::controls::Ctrl::Toggle(on);
+        self
+    }
+
+    /// A small caption just left of the control, when there is one.
+    pub(crate) fn note_opt(mut self, note: Option<&'a str>) -> Row<'a> {
+        self.note = note;
         self
     }
 

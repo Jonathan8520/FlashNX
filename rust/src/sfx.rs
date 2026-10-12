@@ -44,6 +44,25 @@ pub(crate) fn play(s: Sfx) {
     unsafe { ruffle_ui_sound(s as c_int) };
 }
 
+/// Set by a handler when a press changed a value in place (a choice moved, a
+/// switch flipped), read once by the next `after_input` / `menu::input`.
+///
+/// The screen alone cannot say it: a value changing leaves the screen exactly
+/// as it was, and so does a step refused at the end of a choice. Guessing from
+/// the row ("this row is a stepper") clicked on both, so a refused step clicked
+/// as loudly as a real one.
+static CHANGED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Say that the press being handled changed a value.
+pub(crate) fn value_changed() {
+    CHANGED.store(true, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the press just handled changed a value (and forget it).
+pub(crate) fn take_changed() -> bool {
+    CHANGED.swap(false, core::sync::atomic::Ordering::Relaxed)
+}
+
 /// RÉGLAGES > interface sounds: tell the backend.
 pub(crate) fn set_enabled(on: bool) {
     unsafe { ruffle_ui_sounds_set_enabled(on as c_int) };
@@ -70,6 +89,7 @@ pub(crate) fn after_input(
     opened: bool,
 ) {
     use crate::library::Screen;
+    let changed = take_changed();
     // The controls editor plays its own sounds (`menu::input`).
     let in_editor = |s: Screen| matches!(s, Screen::TouchesEditor { .. } | Screen::SettingsKeymapEditor);
     if in_editor(before) && in_editor(after) {
@@ -102,26 +122,31 @@ pub(crate) fn after_input(
         return;
     }
     if before == after {
-        // A press that moved nothing: a value changed in place (A on a value
-        // row, Left / Right on a stepper), or a step against the end of a list
-        // that does not wrap, which deserves silence.
+        // A press that moved nothing: a value changed in place (the handler
+        // said so), A on a value row, or a step against the end of a list or a
+        // choice, which deserves silence.
         let stepper = match before {
             // Every row but the controls one is a value.
             Screen::SettingsPrefsModal { selection } => selection > 0,
-            // Cursor speed, cursor, gyroscope.
-            Screen::TouchesMenu { selection, .. } => (3..=5).contains(&selection),
             Screen::SettingsModal { selection } => selection == crate::library::set_row::SOUNDS,
             _ => false,
         };
-        if matches!(button, "A" | "X" | "Y") || (is_nav(button) && stepper) {
+        if changed || matches!(button, "A" | "X" | "Y") || (is_nav(button) && stepper) {
             play(Sfx::Toggle);
         }
         return;
     }
     if core::mem::discriminant(&before) == core::mem::discriminant(&after) {
-        // Same screen, something in it changed: the cursor (or the list under
-        // it), or a value.
-        play(if is_nav(button) { Sfx::Move } else { Sfx::Toggle });
+        // Same screen, something in it changed: a value (the handler said so),
+        // the cursor or the list under it, or the game a panel is about (L / R
+        // in a game's options, a move).
+        play(if changed {
+            Sfx::Toggle
+        } else if is_nav(button) || matches!(button, "L" | "R") {
+            Sfx::Move
+        } else {
+            Sfx::Toggle
+        });
         return;
     }
     play(match button {

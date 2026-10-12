@@ -5775,18 +5775,21 @@ fn handle_touches_menu_input(s: &mut State, button: &str, game_idx: usize, mut s
                     if next != cur {
                         keymap::set_cursor_speed_for(&basename, next);
                         s.touches_cursor_idx = next;
+                        crate::sfx::value_changed();
                     }
                 }
                 4 => {
                     if s.touches_show_cursor != (dir > 0) {
                         keymap::toggle_show_cursor_for(&basename);
                         s.touches_show_cursor = !s.touches_show_cursor;
+                        crate::sfx::value_changed();
                     }
                 }
                 _ => {
                     let cur = s.touches_gyro;
                     if (dir < 0 && cur > 0) || (dir > 0 && cur + 1 < keymap::GYRO_MODE_COUNT) {
                         s.touches_gyro = keymap::step_gyro_for(&basename, dir);
+                        crate::sfx::value_changed();
                     }
                 }
             }
@@ -7700,6 +7703,7 @@ fn options_set_favorite(s: &mut State, game_idx: usize, selection: usize, want: 
             return;
         }
         crate::favorites::toggle(&basename);
+        crate::sfx::value_changed();
         sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
         let new_idx = s.entries.iter().position(|e| e.path == path).unwrap_or(game_idx);
         s.screen = Screen::OptionsModal { game_idx: new_idx, selection };
@@ -7721,7 +7725,9 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
             options_set_favorite(s, game_idx, selection, Some(dir > 0));
             return;
         }
-        options_panel::options_step(s, game_idx, key, dir);
+        if options_panel::options_step(s, game_idx, key, dir) {
+            crate::sfx::value_changed();
+        }
         s.screen = Screen::OptionsModal { game_idx, selection };
         return;
     }
@@ -7731,7 +7737,10 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
         "Up" | "StickLUp" => selection = list_step_wrap(selection, -1, total),
         "Down" | "StickLDown" => selection = list_step_wrap(selection, 1, total),
         "A" => {
-            if options_panel::options_step(s, game_idx, key, crate::STEP_CYCLE as i32) {
+            if options_panel::is_setting(key) {
+                if options_panel::options_step(s, game_idx, key, crate::STEP_CYCLE as i32) {
+                    crate::sfx::value_changed();
+                }
                 s.screen = Screen::OptionsModal { game_idx, selection };
                 return;
             }
@@ -7901,10 +7910,21 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
             s.screen = list_screen_for_abs(s, game_idx);
             return;
         }
+        // Back to the global default for this setting.
+        "X" => {
+            if options_panel::options_reset(s, game_idx, key) {
+                crate::sfx::value_changed();
+            }
+        }
         // The previous / next game of the list behind, on the same row: setting
         // up several games one after the other without closing the panel each
         // time. Stops at the ends (the list behind follows the cursor).
         "L" | "R" => {
+            // One game per press: a held shoulder would race through the list,
+            // each step reading the next game's settings from the card.
+            if !nav_may_wrap() {
+                return;
+            }
             let shown = local_filtered_indices(&s.entries, &s.local_filter, &s.folder_filter);
             if let Some(pos) = shown.iter().position(|&i| i == game_idx) {
                 let next = if button == "L" {
@@ -10203,7 +10223,12 @@ pub fn render(backend: &mut SwitchRenderBackend) {
         }
     });
     if let Some((msg, kind)) = toast {
-        backend.draw_toast(&msg, kind);
+        // Over the library, left of a game's options and its page, rather than
+        // on top of them.
+        match options_panel::panels_left_edge(screen, backend.screen_size().0) {
+            Some(right) => backend.draw_toast_left_of(&msg, kind, right),
+            None => backend.draw_toast(&msg, kind),
+        }
     }
 
     // First-boot housekeeping: a bordered "Optimisation" modal composited over

@@ -31,8 +31,13 @@ pub(crate) struct Sheet<'a> {
     pub title: &'a str,
     /// A line under the title ("Options de ce jeu").
     pub subtitle: Option<&'a str>,
-    /// The game's cover beside the title: (texture, width, height).
-    pub thumb: Option<(GLuint, u32, u32)>,
+    /// The game's cover beside the title: (texture, width, height, its
+    /// blurred backdrop or 0), drawn by the cover rule (whole over its own
+    /// blur when filling the box would crop too much).
+    pub thumb: Option<(GLuint, u32, u32, GLuint)>,
+    /// What stands in for a missing cover: the game's generated tile (its
+    /// colour and name), as on the grid.
+    pub thumb_tile: Option<(u32, &'a str)>,
     /// Status chips under the title: icon, text, icon colour.
     pub chips: &'a [(Icon, &'a str, u32)],
     pub rows: &'a [Row<'a>],
@@ -64,6 +69,7 @@ impl<'a> Sheet<'a> {
             title,
             subtitle: None,
             thumb: None,
+            thumb_tile: None,
             chips: &[],
             rows,
             sections: &[],
@@ -199,14 +205,10 @@ impl SwitchRenderBackend {
         let top = SHEET_MARGIN;
         let mut y = top + 22.0;
         let inner = w - 48.0;
-        if let Some((tex, tw, th)) = s.thumb {
+        if let Some(thumb) = s.thumb {
             const TW: f32 = 96.0;
             const TH: f32 = 60.0;
-            if tex != 0 && tw > 0 && th > 0 {
-                self.kit_image(x + 24.0, y, TW, TH, tex, super::cover::crop_uv(tw, th, TW, TH), 1.0, 8.0);
-            } else {
-                self.kit_rrect(x + 24.0, y, TW, TH, 8.0, col::TILE);
-            }
+            self.sheet_thumb(x + 24.0, y, TW, TH, thumb, s.thumb_tile);
             let tx = x + 24.0 + TW + 16.0;
             let tmax = x + w - 24.0 - tx;
             let t = self.kit_fit(s.title, size::WINDOW_TITLE - 1.0, tmax);
@@ -247,6 +249,20 @@ impl SwitchRenderBackend {
         let line_y = y.round();
         self.draw_overlay_rect(x + 24.0, line_y, w - 48.0, 1.0, col::LINE);
         line_y
+    }
+
+    /// A panel's cover in a `w` x `h` box: the cover rule (filled when little
+    /// is cropped, else whole over its blur), the generated tile when there is
+    /// no cover yet.
+    fn sheet_thumb(&mut self, x: f32, y: f32, w: f32, h: f32, thumb: (GLuint, u32, u32, GLuint), tile: Option<(u32, &str)>) {
+        let (tex, tw, th, amb) = thumb;
+        if tex != 0 && tw > 0 && th > 0 {
+            self.kit_cover(x, y, w, h, tex, tw, th, amb, 1.0);
+        } else if let Some((chip, name)) = tile {
+            self.kit_default_tile(x, y, w, h, chip, name);
+        } else {
+            self.kit_rrect(x, y, w, h, 8.0, col::TILE);
+        }
     }
 
     /// Where each row sits from the top of the rows' area, and the content's
@@ -356,7 +372,7 @@ impl SwitchRenderBackend {
             let thumb_h = (track_h * area_h / content_h).max(28.0).min(track_h);
             let ty = area_top + 4.0 + (track_h - thumb_h) * (scroll / max_off).clamp(0.0, 1.0);
             self.kit_rrect(x + w - 14.0, area_top + 4.0, 4.0, track_h, 2.0, col::LINE);
-            self.kit_rrect(x + w - 14.0, ty, 4.0, thumb_h, 2.0, 0xFF_4A_5C_85);
+            self.kit_rrect(x + w - 14.0, ty, 4.0, thumb_h, 2.0, col::THUMB);
         }
         if publish && s.selection < s.rows.len() {
             ui_cells_publish(ui_screen_kind(), cells);
@@ -465,13 +481,9 @@ impl SwitchRenderBackend {
         self.kit_panel(x, top, w, h, false);
         let cx = x + w * 0.5;
         // The head: the panel's own icon (the pause's), or its cover.
-        if let Some((tex, tw, th)) = s.thumb {
+        if let Some(thumb) = s.thumb {
             let (tw_, th_) = ((w - 20.0).max(8.0), ((w - 20.0) * 0.625).max(5.0));
-            if tex != 0 && tw > 0 && th > 0 {
-                self.kit_image(cx - tw_ * 0.5, top + 22.0, tw_, th_, tex, super::cover::crop_uv(tw, th, tw_, th_), 1.0, 6.0);
-            } else {
-                self.kit_rrect(cx - tw_ * 0.5, top + 22.0, tw_, th_, 6.0, col::TILE);
-            }
+            self.sheet_thumb(cx - tw_ * 0.5, top + 22.0, tw_, th_, thumb, s.thumb_tile);
         } else if let Some(ic) = s.kicker {
             self.kit_icon(cx - 10.0, top + 22.0 + 8.5, 20.0, ic, col::TEXT3);
         }
@@ -519,7 +531,7 @@ impl SwitchRenderBackend {
         // where ÉCRAN shows what it does, stays at full brightness, with a soft
         // edge between the two.
         let e = if child.is_some() { t.clamp(0.0, 1.0) } else { 0.0 };
-        const DIM: u32 = 0x70_05_0A_16;
+        const DIM: u32 = col::SCRIM_GAME;
         let a = (DIM >> 24) as f32;
         if e < 1.0 {
             self.fill_screen_dim(((a * (1.0 - e)) as u32) << 24 | (DIM & 0x00FF_FFFF));

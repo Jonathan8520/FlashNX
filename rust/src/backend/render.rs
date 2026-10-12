@@ -9156,6 +9156,8 @@ impl SwitchRenderBackend {
                 }
             }
             Some(&"REDEMARRER") => u.help_restart,
+            // Started from a HOME icon there is no library to go back to.
+            Some(&"QUITTER") if crate::direct_launch() => u.help_quit_direct,
             Some(&"QUITTER") => u.help_quit,
             _ => "",
         };
@@ -10922,11 +10924,11 @@ impl SwitchRenderBackend {
     /// Resolve + cache a game's cover texture by basename. Decodes/uploads on
     /// first use; returns `Default` when there's no cover image (caller draws
     /// the generated tile).
-    /// A game's cover as `(texture, width, height)` for a panel's header, or
-    /// None when it has none (yet).
-    pub(crate) fn cover_thumb(&mut self, basename: &str) -> Option<(GLuint, u32, u32)> {
+    /// A game's cover as `(texture, width, height, blurred backdrop)` for a
+    /// panel's header, or None when it has none (yet).
+    pub(crate) fn cover_thumb(&mut self, basename: &str) -> Option<(GLuint, u32, u32, GLuint)> {
         match self.cover_for(basename) {
-            CoverTex::Image { tex, w, h, .. } => Some((tex, w, h)),
+            CoverTex::Image { tex, w, h, amb } => Some((tex, w, h, amb)),
             CoverTex::Default => None,
         }
     }
@@ -12358,20 +12360,30 @@ impl SwitchRenderBackend {
     /// top of the current screen for a couple of seconds (the library loop counts
     /// it down), so a share/apply/revert confirms without a full "thanks" modal.
     pub fn draw_toast(&mut self, msg: &str, kind: u8) {
-        let vh = self.dimensions.height as f32;
-        self.draw_toast_in(msg, kind, 0.0, vh - 48.0 - 20.0 - 52.0);
+        let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
+        self.draw_toast_in(msg, kind, 0.0, vw, vh - 48.0 - 20.0 - 52.0);
     }
 
     /// The same pill over the part of the screen the pause's panels leave free,
     /// at its top: in game there is no footer to sit above, and the panels' help
-    /// and hints are exactly where the launcher's toast goes.
+    /// and hints are exactly where the launcher's toast goes. Below the frame
+    /// counter when it is shown, which owns the top-right corner.
     pub fn draw_toast_in_game(&mut self, msg: &str, kind: u8) {
         let left = kit::sheet::SHEET_MARGIN + kit::sheet::RAIL_W + kit::sheet::CASCADE_GAP + kit::sheet::CHILD_W;
-        self.draw_toast_in(msg, kind, left, 24.0);
+        let vw = self.dimensions.width as f32;
+        let y = if fps_counter_on() { 14.0 + 28.0 + 12.0 } else { 24.0 };
+        self.draw_toast_in(msg, kind, left, vw, y);
     }
 
-    /// A toast centred between `left` and the right edge, its top at `y`.
-    fn draw_toast_in(&mut self, msg: &str, kind: u8, left: f32, y: f32) {
+    /// The launcher's toast while a game's options are up: over the library,
+    /// left of the panels (`right`), where the footer toast would land on them.
+    pub fn draw_toast_left_of(&mut self, msg: &str, kind: u8, right: f32) {
+        let vh = self.dimensions.height as f32;
+        self.draw_toast_in(msg, kind, 0.0, right, vh - 48.0 - 20.0 - 52.0);
+    }
+
+    /// A toast centred between `left` and `right`, its top at `y`.
+    fn draw_toast_in(&mut self, msg: &str, kind: u8, left: f32, right: f32, y: f32) {
         use theme::{col, size};
         unsafe {
             glEnable(GL_BLEND);
@@ -12380,7 +12392,7 @@ impl SwitchRenderBackend {
         }
         let vw = self.dimensions.width as f32;
         // Too narrow a strip (a turned picture): the whole width.
-        let left = if vw - left < 360.0 { 0.0 } else { left };
+        let (left, right) = if right.min(vw) - left < 360.0 { (0.0, vw) } else { (left, right.min(vw)) };
         // A pill above the footer band, never over the hints. The dot says what
         // kind of news it is; the words say what happened.
         let dot = match kind {
@@ -12391,8 +12403,8 @@ impl SwitchRenderBackend {
         const H: f32 = 52.0;
         const PAD: f32 = 24.0;
         const DOT: f32 = 10.0;
-        let area = vw - left;
-        let max_text = area - 80.0 - 2.0 * PAD - DOT - 14.0;
+        let area = right - left;
+        let max_text = area - 40.0 - 2.0 * PAD - DOT - 14.0;
         let text = self.kit_fit(msg, size::BODY, max_text);
         let tw = self.kit_measure(&text, size::BODY);
         let w = tw + 2.0 * PAD + DOT + 14.0;

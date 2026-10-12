@@ -96,7 +96,7 @@ impl SwitchRenderBackend {
                 let inner = vw.max(CYCLE_MIN).min(inner_max);
                 let total = inner + 2.0 * (ARROW + 10.0);
                 let x0 = right - total;
-                let arrow_ink = if focused { col::GOLD } else { 0xFF_5A_6A_8F };
+                let arrow_ink = if focused { col::GOLD } else { col::CHEVRON };
                 self.kit_icon(x0, cy, ARROW, Icon::ChevronLeft, arrow_ink);
                 let vx = x0 + ARROW + 10.0 + (inner - vw) * 0.5;
                 self.kit_text_mid(vx.round(), cy, px, &v, if focused { col::TEXT } else { col::TEXT2 });

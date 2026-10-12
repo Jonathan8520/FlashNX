@@ -217,6 +217,14 @@ pub struct Ui {
     pub profile_same_name: &'static str,
     /// Game options hint: L / R go to the previous / next game of the list.
     pub other_game: &'static str,
+    /// Caption beside a game setting that follows the global default (no value of its own).
+    pub tag_default: &'static str,
+    /// Hint verb: drop the game's own value, follow the global default again.
+    pub reset_default: &'static str,
+    /// Pause, Quit row, for a game started without the library (HOME icon, forwarder): there is no library to go back to.
+    pub help_quit_direct: &'static str,
+    /// Game options section title over Touches et curseur.
+    pub sec_controls: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -240,7 +248,7 @@ const EN: Ui = Ui {
     help_keys: "The keys of this game, the profiles other players shared, the cursor's speed and visibility, the gyroscope.",
     help_screen: "Display, rotation, zoom, pixels, filter, FPS counter: every change shows on the game behind this menu.",
     help_restart: "Reloads the game from the start. Its saves are kept.",
-    help_quit: "Back to your library.",
+    help_quit: "Back to your library. Anything the game has not saved is lost.",
     help_display: "Fit shows the whole game, Stretch fills the screen by stretching it, Fill crops it.",
     help_rotation: "Turns the picture a quarter turn, for games made in portrait.",
     help_zoom: "Enlarges the picture: Left and Right in steps of 10 %, A to frame it with the stick.",
@@ -368,6 +376,10 @@ const EN: Ui = Ui {
     profile_applied_n: "Applied {} times",
     profile_same_name: "Same name",
     other_game: "Other game",
+    tag_default: "default",
+    reset_default: "Use default",
+    help_quit_direct: "Closes the game and FlashNX. Anything the game has not saved is lost.",
+    sec_controls: "Controls",
 };
 
 const FR: Ui = Ui {
@@ -391,7 +403,7 @@ const FR: Ui = Ui {
     help_keys: "Les touches de ce jeu, les profils partagés par les autres joueurs, la vitesse et l'affichage du curseur, le gyroscope.",
     help_screen: "Affichage, rotation, zoom, pixels, filtre, compteur FPS : chaque réglage se voit tout de suite sur le jeu derrière ce menu.",
     help_restart: "Relance le jeu depuis le début. Ses sauvegardes sont gardées.",
-    help_quit: "Retour à ta bibliothèque.",
+    help_quit: "Retour à ta bibliothèque. Ce que le jeu n'a pas sauvegardé est perdu.",
     help_display: "Intégral montre tout le jeu, Étirer remplit l'écran en déformant, Remplir rogne les bords.",
     help_rotation: "Tourne l'image d'un quart de tour, pour les jeux faits en portrait.",
     help_zoom: "Agrandit l'image : Gauche et Droite par pas de 10 %, A pour la cadrer au stick.",
@@ -519,6 +531,10 @@ const FR: Ui = Ui {
     profile_applied_n: "Appliqué {} fois",
     profile_same_name: "Même nom",
     other_game: "Autre jeu",
+    tag_default: "par défaut",
+    reset_default: "Par défaut",
+    help_quit_direct: "Ferme le jeu et FlashNX. Ce que le jeu n'a pas sauvegardé est perdu.",
+    sec_controls: "Commandes",
 };
 
 const ES: Ui = Ui {
@@ -542,7 +558,7 @@ const ES: Ui = Ui {
     help_keys: "Los controles de este juego, los perfiles que comparten otros jugadores, la velocidad y la visibilidad del cursor, el giroscopio.",
     help_screen: "Pantalla, rotación, zoom, píxeles, filtro, contador FPS: cada cambio se ve al instante en el juego detrás de este menú.",
     help_restart: "Reinicia el juego desde el principio. Sus partidas guardadas se conservan.",
-    help_quit: "Volver a tu biblioteca.",
+    help_quit: "Vuelve a tu biblioteca. Lo que el juego no haya guardado se pierde.",
     help_display: "Ajustar muestra todo el juego, Estirar llena la pantalla deformándolo, Rellenar lo recorta.",
     help_rotation: "Gira la imagen un cuarto de vuelta, para juegos hechos en vertical.",
     help_zoom: "Amplía la imagen: Izquierda y Derecha de 10 % en 10 %, A para encuadrarla con el stick.",
@@ -670,6 +686,10 @@ const ES: Ui = Ui {
     profile_applied_n: "Aplicado {} veces",
     profile_same_name: "Mismo nombre",
     other_game: "Otro juego",
+    tag_default: "predeterminado",
+    reset_default: "Predeterminado",
+    help_quit_direct: "Cierra el juego y FlashNX. Lo que el juego no haya guardado se pierde.",
+    sec_controls: "Controles",
 };
 
 const RU: Ui = Ui {
@@ -693,7 +713,7 @@ const RU: Ui = Ui {
     help_keys: "Клавиши этой игры, профили других игроков, скорость и видимость курсора, гироскоп.",
     help_screen: "Экран, поворот, масштаб, пиксели, фильтр, счётчик FPS: каждое изменение сразу видно в игре за этим меню.",
     help_restart: "Перезапускает игру с начала. Сохранения остаются.",
-    help_quit: "Вернуться в библиотеку.",
+    help_quit: "Назад в библиотеку. Всё, что игра не сохранила, будет потеряно.",
     help_display: "«Вписать» показывает всю игру, «Растянуть» заполняет экран с искажением, «Заполнить» обрезает края.",
     help_rotation: "Поворачивает изображение на четверть оборота, для вертикальных игр.",
     help_zoom: "Увеличивает картинку: влево и вправо шагами по 10 %, A — кадрировать стиком.",
@@ -821,6 +841,10 @@ const RU: Ui = Ui {
     profile_applied_n: "Применён раз: {}",
     profile_same_name: "То же имя",
     other_game: "Другая игра",
+    tag_default: "по умолчанию",
+    reset_default: "По умолчанию",
+    help_quit_direct: "Закрывает игру и FlashNX. Всё, что игра не сохранила, будет потеряно.",
+    sec_controls: "Управление",
 };
 
 const DE: Ui = Ui {
@@ -844,7 +868,7 @@ const DE: Ui = Ui {
     help_keys: "Die Tasten dieses Spiels, die Profile anderer Spieler, Tempo und Sichtbarkeit des Cursors, das Gyroskop.",
     help_screen: "Anzeige, Drehung, Zoom, Pixel, Filter, FPS-Anzeige: Jede Änderung siehst du sofort am Spiel hinter diesem Menü.",
     help_restart: "Startet das Spiel von vorn. Die Spielstände bleiben erhalten.",
-    help_quit: "Zurück zu deiner Bibliothek.",
+    help_quit: "Zurück zu deiner Bibliothek. Was das Spiel nicht gespeichert hat, geht verloren.",
     help_display: "Einpassen zeigt das ganze Spiel, Strecken füllt den Bildschirm verzerrt, Füllen schneidet die Ränder ab.",
     help_rotation: "Dreht das Bild um eine Vierteldrehung, für Spiele im Hochformat.",
     help_zoom: "Vergrößert das Bild: Links und Rechts in 10-%-Schritten, A zum Ausrichten mit dem Stick.",
@@ -972,6 +996,10 @@ const DE: Ui = Ui {
     profile_applied_n: "{}-mal übernommen",
     profile_same_name: "Gleicher Name",
     other_game: "Anderes Spiel",
+    tag_default: "Standard",
+    reset_default: "Standard",
+    help_quit_direct: "Schließt das Spiel und FlashNX. Was das Spiel nicht gespeichert hat, geht verloren.",
+    sec_controls: "Steuerung",
 };
 
 const IT: Ui = Ui {
@@ -995,7 +1023,7 @@ const IT: Ui = Ui {
     help_keys: "I controlli di questo gioco, i profili condivisi dagli altri giocatori, velocità e visibilità del cursore, il giroscopio.",
     help_screen: "Schermo, rotazione, zoom, pixel, filtro, contatore FPS: ogni modifica si vede subito sul gioco dietro questo menu.",
     help_restart: "Riavvia il gioco dall'inizio. I salvataggi restano.",
-    help_quit: "Torna alla tua libreria.",
+    help_quit: "Torna alla tua libreria. Ciò che il gioco non ha salvato va perso.",
     help_display: "Adatta mostra tutto il gioco, Allarga riempie lo schermo deformandolo, Riempi lo ritaglia.",
     help_rotation: "Ruota l'immagine di un quarto di giro, per i giochi in verticale.",
     help_zoom: "Ingrandisce l'immagine: Sinistra e Destra a passi del 10 %, A per inquadrarla con lo stick.",
@@ -1123,6 +1151,10 @@ const IT: Ui = Ui {
     profile_applied_n: "Applicato {} volte",
     profile_same_name: "Stesso nome",
     other_game: "Altro gioco",
+    tag_default: "predefinito",
+    reset_default: "Predefinito",
+    help_quit_direct: "Chiude il gioco e FlashNX. Ciò che il gioco non ha salvato va perso.",
+    sec_controls: "Controlli",
 };
 
 const PT: Ui = Ui {
@@ -1146,7 +1178,7 @@ const PT: Ui = Ui {
     help_keys: "Os controles deste jogo, os perfis compartilhados por outros jogadores, a velocidade e a visibilidade do cursor, o giroscópio.",
     help_screen: "Tela, rotação, zoom, pixels, filtro, contador FPS: cada mudança aparece na hora no jogo atrás deste menu.",
     help_restart: "Reinicia o jogo do começo. Os saves são mantidos.",
-    help_quit: "Voltar à sua biblioteca.",
+    help_quit: "Volta para a sua biblioteca. O que o jogo não salvou será perdido.",
     help_display: "Ajustar mostra o jogo inteiro, Esticar preenche a tela distorcendo, Preencher corta as bordas.",
     help_rotation: "Gira a imagem um quarto de volta, para jogos em retrato.",
     help_zoom: "Amplia a imagem: Esquerda e Direita de 10 % em 10 %, A para enquadrar com o analógico.",
@@ -1274,6 +1306,10 @@ const PT: Ui = Ui {
     profile_applied_n: "Aplicado {} vezes",
     profile_same_name: "Mesmo nome",
     other_game: "Outro jogo",
+    tag_default: "padrão",
+    reset_default: "Padrão",
+    help_quit_direct: "Fecha o jogo e o FlashNX. O que o jogo não salvou será perdido.",
+    sec_controls: "Controles",
 };
 
 const ZH: Ui = Ui {
@@ -1297,7 +1333,7 @@ const ZH: Ui = Ui {
     help_keys: "此游戏的按键、其他玩家分享的配置、光标速度与显示、陀螺仪。",
     help_screen: "画面、旋转、缩放、像素、滤镜、FPS 计数：每项改动都会立刻显示在菜单后面的游戏上。",
     help_restart: "从头重新载入游戏。存档会保留。",
-    help_quit: "返回游戏库。",
+    help_quit: "返回游戏库。游戏未保存的进度将丢失。",
     help_display: "适应显示整个游戏，拉伸会变形铺满屏幕，填充会裁掉边缘。",
     help_rotation: "将画面旋转四分之一圈，适合竖屏游戏。",
     help_zoom: "放大画面：左右键每次 10 %，按 A 用摇杆取景。",
@@ -1425,6 +1461,10 @@ const ZH: Ui = Ui {
     profile_applied_n: "已应用 {} 次",
     profile_same_name: "同名",
     other_game: "其他游戏",
+    tag_default: "默认",
+    reset_default: "恢复默认",
+    help_quit_direct: "关闭游戏和 FlashNX。游戏未保存的进度将丢失。",
+    sec_controls: "操作",
 };
 
 const TR: Ui = Ui {
@@ -1448,7 +1488,7 @@ const TR: Ui = Ui {
     help_keys: "Bu oyunun tuşları, diğer oyuncuların paylaştığı profiller, imlecin hızı ve görünürlüğü, jiroskop.",
     help_screen: "Ekran, döndürme, zoom, pikseller, filtre, FPS sayacı: her değişiklik menünün arkasındaki oyunda hemen görünür.",
     help_restart: "Oyunu baştan başlatır. Kayıtlar korunur.",
-    help_quit: "Kütüphanenize dönün.",
+    help_quit: "Kütüphanene döner. Oyunun kaydetmedikleri kaybolur.",
     help_display: "Sığdır tüm oyunu gösterir, Ger ekranı esneterek doldurur, Doldur kenarları keser.",
     help_rotation: "Görüntüyü çeyrek tur döndürür, dikey oyunlar için.",
     help_zoom: "Görüntüyü büyütür: Sol ve Sağ ile %10 adımlarla, A ile çubukla kadrajla.",
@@ -1576,6 +1616,10 @@ const TR: Ui = Ui {
     profile_applied_n: "{} kez uygulandı",
     profile_same_name: "Aynı ad",
     other_game: "Diğer oyun",
+    tag_default: "varsayılan",
+    reset_default: "Varsayılan",
+    help_quit_direct: "Oyunu ve FlashNX'i kapatır. Oyunun kaydetmedikleri kaybolur.",
+    sec_controls: "Kontroller",
 };
 
 pub fn ui() -> &'static Ui {

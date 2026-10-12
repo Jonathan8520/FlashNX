@@ -433,6 +433,9 @@ pub fn input(button: &str) -> bool {
     // launcher (`sfx::after_input`).
     let before = TOUCHES.lock().map(|s| s.screen).ok();
     let consumed = input_inner(button);
+    // Read (and forget) whether a value moved, whatever happens next, so the
+    // flag never leaks into the next press.
+    let changed = crate::sfx::take_changed();
     if let (Some(b), Ok(a)) = (before, TOUCHES.lock().map(|s| s.screen)) {
         use crate::sfx::{play, Sfx};
         let nav = matches!(
@@ -442,9 +445,9 @@ pub fn input(button: &str) -> bool {
         if matches!(a, Screen::Inactive) && !matches!(b, Screen::Inactive) {
             play(Sfx::Back);
         } else if b == a {
-            // Nothing moved: a value stepped in place, or a binding was set.
-            let stepper = matches!(b, Screen::Menu { selection } if matches!(selection, MENU_CURSOR | MENU_SHOWCURSOR | MENU_GYRO));
-            if matches!(button, "A" | "X") || (nav && stepper) {
+            // Nothing moved on screen: a value stepped in place (the handler
+            // said so), a binding set, or a step refused at an end (silent).
+            if changed || matches!(button, "A" | "X") {
                 play(Sfx::Toggle);
             }
         } else if core::mem::discriminant(&b) == core::mem::discriminant(&a) {
@@ -607,17 +610,20 @@ fn handle_menu_input(s: &mut State, button: &str, mut selection: usize) {
                 };
                 if !blocked {
                     unsafe { ruffle_cursor_speed_step(dir) };
+                    crate::sfx::value_changed();
                 }
             }
             MENU_SHOWCURSOR => {
                 if keymap::show_cursor() != (dir > 0) {
                     keymap::toggle_show_cursor();
+                    crate::sfx::value_changed();
                 }
             }
             MENU_GYRO => {
                 let cur = keymap::gyro_mode();
                 if (dir < 0 && cur > 0) || (dir > 0 && cur + 1 < keymap::GYRO_MODE_COUNT) {
                     keymap::step_gyro(dir);
+                    crate::sfx::value_changed();
                 }
             }
             _ => {}

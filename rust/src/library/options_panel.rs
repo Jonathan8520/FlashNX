@@ -2,8 +2,8 @@
 //!
 //! The panel the mockup draws (Options.dc.html): at the right edge, over the
 //! library dimmed behind it, the game's cover and name on top, then the rows
-//! in groups. First what concerns the game in the library (favourite, keys,
-//! cover, folders, name, HOME icon), then its picture and its performance (the
+//! in titled groups. First the game in the library (favourite, cover, folders,
+//! name, HOME icon), its controls, then its picture and its performance (the
 //! settings the pause's ÉCRAN and OVERCLOCK change, here before the game is
 //! even launched: a portrait game can be turned before its first run), and the
 //! delete row last, on its own.
@@ -21,7 +21,8 @@ use crate::backend::render::{ui_col, Btn, Icon, Row, Sheet, Side, OPTIONS_CHILD_
 /// The rows of the game options, in order. Matched by name, never by index:
 /// `opt_row` finds where a row sits, so adding one moves nothing else.
 pub(crate) const OPTIONS_ENTRIES: &[&str] = &[
-    "FAVORI", "TOUCHES", "JAQUETTE", "DOSSIER", "RENOMMER", "RACCOURCI",
+    "FAVORI", "JAQUETTE", "DOSSIER", "RENOMMER", "RACCOURCI",
+    "TOUCHES",
     "AFFICHAGE", "ROTATION", "ZOOM", "PIXELS", "FILTRE",
     "OVERCLOCK", "FPS",
     "SUPPRIMER",
@@ -44,6 +45,24 @@ pub(crate) struct GamePrefs {
     pub power: u8,
     pub fps: u8,
     pub home_icon: bool,
+    /// The settings this game has a value of its own for (the `.prefs` keys);
+    /// the others follow the global default from Réglages.
+    pub own: u8,
+}
+
+/// Bits of `GamePrefs::own`, and the `.prefs` keys behind each setting row.
+const OWN_KEYS: [(&str, &[&str]); 7] = [
+    ("AFFICHAGE", &["display"]),
+    ("ROTATION", &["rot"]),
+    ("ZOOM", &["zoom", "panx", "pany"]),
+    ("PIXELS", &["pixels"]),
+    ("FILTRE", &["filter"]),
+    ("OVERCLOCK", &["power"]),
+    ("FPS", &["fps"]),
+];
+
+fn own_bit(key: &str) -> u8 {
+    OWN_KEYS.iter().position(|(k, _)| *k == key).map_or(0, |i| 1 << i)
 }
 
 /// The last game's settings, keyed by its path. Each of them is a read of the
@@ -69,6 +88,14 @@ pub(crate) fn game_prefs(basename: &str, path: &str) -> GamePrefs {
         power: keymap::power_mode_for(basename),
         fps: keymap::fps_counter_for(basename),
         home_icon: shortcut_here(path),
+        own: {
+            let keys = keymap::pref_keys(basename);
+            OWN_KEYS
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, ks))| keys.iter().any(|k| k == ks[0]))
+                .fold(0u8, |m, (i, _)| m | 1 << i)
+        },
     };
     if let Ok(mut g) = GAME_PREFS.lock() {
         *g = Some((path.to_string(), p));
@@ -86,32 +113,93 @@ pub(crate) fn game_prefs_forget() {
 /// The overclock's three settings in the order its row shows them.
 const POWER_ORDER: [u8; 3] = [0, keymap::POWER_AUTO, 1];
 
+/// Whether row `key` is one of the game's settings (as opposed to an action).
+pub(crate) fn is_setting(key: &str) -> bool {
+    matches!(key, "AFFICHAGE" | "ROTATION" | "ZOOM" | "PIXELS" | "FILTRE" | "OVERCLOCK" | "FPS")
+}
+
 /// Left / Right (`dir` -1 / 1) or A (`STEP_CYCLE`) on a settings row: the
 /// lit option moves along and stops at the ends, A goes round. Written for the
-/// next launch. Returns false when the row is not a setting.
+/// next launch. Returns whether the value moved (a step refused at an end
+/// writes nothing and makes no sound).
 pub(crate) fn options_step(s: &mut State, game_idx: usize, key: &str, dir: i32) -> bool {
     let Some(e) = s.entries.get(game_idx) else { return false };
     let (b, path) = (e.basename.clone(), e.path.clone());
     let p = game_prefs(&b, &path);
     let d = dir as core::ffi::c_int;
-    match key {
-        "AFFICHAGE" => keymap::set_display_mode_for(&b, crate::step_choice(p.display, keymap::DISPLAY_MODE_COUNT, d)),
-        "ROTATION" => keymap::set_rotation_for(&b, crate::step_choice(p.rotation, keymap::ROTATION_COUNT, d)),
+    let moved = match key {
+        "AFFICHAGE" => {
+            let v = crate::step_choice(p.display, keymap::DISPLAY_MODE_COUNT, d);
+            v != p.display && {
+                keymap::set_display_mode_for(&b, v);
+                true
+            }
+        }
+        "ROTATION" => {
+            let v = crate::step_choice(p.rotation, keymap::ROTATION_COUNT, d);
+            v != p.rotation && {
+                keymap::set_rotation_for(&b, v);
+                true
+            }
+        }
         "ZOOM" => {
             use crate::backend::render::{ZOOM_MAX, ZOOM_MIN};
             // A steps up like Right: a percentage has no "round" to go.
             let z = if dir < 0 { p.zoom.saturating_sub(10) } else { p.zoom.saturating_add(10) };
-            keymap::set_zoom_for(&b, z.clamp(ZOOM_MIN, ZOOM_MAX));
+            let z = z.clamp(ZOOM_MIN, ZOOM_MAX);
+            z != p.zoom && {
+                keymap::set_zoom_for(&b, z);
+                true
+            }
         }
-        "PIXELS" => keymap::set_pixel_filter_for(&b, crate::step_choice(p.pixels, keymap::PIXEL_FILTER_COUNT, d)),
-        "FILTRE" => keymap::set_screen_filter_for(&b, crate::step_choice(p.filter, keymap::SCREEN_FILTER_COUNT, d)),
+        "PIXELS" => {
+            let v = crate::step_choice(p.pixels, keymap::PIXEL_FILTER_COUNT, d);
+            v != p.pixels && {
+                keymap::set_pixel_filter_for(&b, v);
+                true
+            }
+        }
+        "FILTRE" => {
+            let v = crate::step_choice(p.filter, keymap::SCREEN_FILTER_COUNT, d);
+            v != p.filter && {
+                keymap::set_screen_filter_for(&b, v);
+                true
+            }
+        }
         "OVERCLOCK" => {
             let at = POWER_ORDER.iter().position(|m| *m == p.power).unwrap_or(0) as u8;
-            keymap::set_power_mode_for(&b, POWER_ORDER[crate::step_choice(at, 3, d) as usize]);
+            let v = POWER_ORDER[crate::step_choice(at, 3, d) as usize];
+            v != p.power && {
+                keymap::set_power_mode_for(&b, v);
+                true
+            }
         }
-        "FPS" => keymap::set_fps_counter_for(&b, crate::step_choice(p.fps, keymap::FPS_COUNTER_COUNT, d)),
-        _ => return false,
+        "FPS" => {
+            let v = crate::step_choice(p.fps, keymap::FPS_COUNTER_COUNT, d);
+            v != p.fps && {
+                keymap::set_fps_counter_for(&b, v);
+                true
+            }
+        }
+        _ => false,
+    };
+    if moved {
+        game_prefs_forget();
     }
+    moved
+}
+
+/// X on a setting row: the game drops its own value and follows the global
+/// default again. Returns whether there was one to drop.
+pub(crate) fn options_reset(s: &mut State, game_idx: usize, key: &str) -> bool {
+    let Some(e) = s.entries.get(game_idx) else { return false };
+    let (b, path) = (e.basename.clone(), e.path.clone());
+    let p = game_prefs(&b, &path);
+    let Some((_, keys)) = OWN_KEYS.iter().find(|(k, _)| *k == key) else { return false };
+    if p.own & own_bit(key) == 0 {
+        return false;
+    }
+    keymap::clear_prefs(&b, keys);
     game_prefs_forget();
     true
 }
@@ -146,6 +234,9 @@ pub(crate) fn with_options_sheet<R>(
     let oc_opts = [lc.overclock_off, lc.pixels_auto, lc.overclock_on];
     let oc_at = POWER_ORDER.iter().position(|m| *m == p.power).unwrap_or(0);
     let zoom = std::format!("{} %", p.zoom);
+    // A setting with no value of its own says so ("par défaut"): one sideways
+    // press gives the game its own value, and X takes it back.
+    let note = |k: &str| if is_setting(k) && p.own & own_bit(k) == 0 { Some(u.tag_default) } else { None };
     let rows: std::vec::Vec<Row> = OPTIONS_ENTRIES
         .iter()
         .map(|k| match *k {
@@ -166,6 +257,8 @@ pub(crate) fn with_options_sheet<R>(
             "FPS" => Row::new(Icon::Gauge, lc.set_fps).toggle(p.fps == 1),
             _ => Row::new(Icon::Trash, u.opt_delete_game).danger(),
         })
+        .zip(OPTIONS_ENTRIES.iter())
+        .map(|(r, k)| r.note_opt(note(k)))
         .collect();
     let key = OPTIONS_ENTRIES.get(selection).copied().unwrap_or("");
     let help = match key {
@@ -205,8 +298,20 @@ pub(crate) fn with_options_sheet<R>(
         "FAVORI" | "AFFICHAGE" | "ROTATION" | "ZOOM" | "PIXELS" | "FILTRE" | "OVERCLOCK" | "FPS"
     );
     let hints_step = [(&[Btn::Dpad][..], u.change), (&[Btn::L, Btn::R][..], u.other_game), (&[Btn::B][..], u.back)];
+    // On a setting the game has its own value for, X goes back to the default.
+    let hints_own = [
+        (&[Btn::Dpad][..], u.change),
+        (&[Btn::X][..], u.reset_default),
+        (&[Btn::L, Btn::R][..], u.other_game),
+        (&[Btn::B][..], u.back),
+    ];
+    let own_here = is_setting(key) && p.own & own_bit(key) != 0;
     let hints_act = [(&[Btn::A][..], a_verb), (&[Btn::L, Btn::R][..], u.other_game), (&[Btn::B][..], u.back)];
+    // Every group under its title: the game in the library, its controls, its
+    // picture and its performance, then the delete row on its own.
     let sections = [
+        (opt_row("FAVORI"), u.sec_library),
+        (opt_row("TOUCHES"), u.sec_controls),
         (opt_row("AFFICHAGE"), u.sec_image),
         (opt_row("OVERCLOCK"), u.sec_perf),
         (opt_row("SUPPRIMER"), ""),
@@ -214,12 +319,19 @@ pub(crate) fn with_options_sheet<R>(
     let thumb = backend.cover_thumb(&entry.basename);
     let mut sheet = Sheet::new(&entry.display_name, &rows, selection);
     sheet.subtitle = Some(u.opt_subtitle);
-    sheet.thumb = Some(thumb.unwrap_or((0, 0, 0)));
+    sheet.thumb = Some(thumb.unwrap_or((0, 0, 0, 0)));
+    sheet.thumb_tile = Some((entry.color_chip, &entry.basename));
     sheet.sections = &sections;
     sheet.row_h = 48.0;
     sheet.glide_key = 0x6200_0000;
     sheet.help = help;
-    sheet.hints = if stepper { &hints_step } else { &hints_act };
+    sheet.hints = if own_here {
+        &hints_own
+    } else if stepper {
+        &hints_step
+    } else {
+        &hints_act
+    };
     f(backend, &sheet)
 }
 
@@ -243,6 +355,26 @@ pub(crate) fn is_options_family(screen: Screen) -> bool {
             | Screen::GameFolderPicker { .. }
             | Screen::GameFolderDelete { .. }
     )
+}
+
+/// The left edge of the options panels on screen for `screen` (the panel, or
+/// the rail and the page beside it), None when `screen` is not one of theirs.
+pub(crate) fn panels_left_edge(screen: Screen, vw: f32) -> Option<f32> {
+    if !is_options_family(screen) {
+        return None;
+    }
+    let page_open = matches!(
+        screen,
+        Screen::TouchesMenu { .. }
+            | Screen::ProfileList { .. }
+            | Screen::ProfilePreview { .. }
+            | Screen::RevertPreview { .. }
+            | Screen::ProfileShareConfirm { .. }
+            | Screen::ProfileDeleteConfirm { .. }
+            | Screen::GameFolderPicker { .. }
+            | Screen::GameFolderDelete { .. }
+    );
+    Some(if page_open { vw - 16.0 - 76.0 - 10.0 - OPTIONS_CHILD_W } else { vw - 16.0 - OPTIONS_W })
 }
 
 /// The game a family screen is about.
@@ -305,7 +437,7 @@ pub(crate) fn draw_options_family(
     }
     backend.draw_navbar(Tab::Jouer.index(), logo);
     crate::backend::render::navbar_clear();
-    backend.kit_scrim(0x9E_06_0A_14);
+    backend.kit_scrim(ui_col::SCRIM);
     crate::backend::render::set_ui_screen_kind(kind);
 
     // The page beside the options, or none. A loading panel keeps the last

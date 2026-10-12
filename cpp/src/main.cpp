@@ -180,6 +180,7 @@ extern "C" int  ruffle_touches_consume_dirty(void);
 extern "C" void ruffle_touches_draw(void);
 extern "C" void ruffle_menu_touch(float x, float y, int pressed);
 extern "C" int  ruffle_pause_touch(float x, float y, int pressed, int live);
+extern "C" void ruffle_set_direct_launch(int on);
 // Touch tables of the pause panels (lib.rs UI_KIND_PAUSE / UI_KIND_SCREEN).
 static const int UI_KIND_PAUSE  = 60;
 static const int UI_KIND_SCREEN = 61;
@@ -1305,6 +1306,9 @@ static void worker_entry(void* arg) {
                     forwarder_swf);
         std::fflush(stdout);
         ruffle_set_swf_path(forwarder_swf);
+        // Quitting will close FlashNX, not go back to a library: the pause
+        // says so.
+        ruffle_set_direct_launch(1);
     }
 
     // Drop the internal resolution for gameplay (see the GAME_VIEWPORT_* comment).

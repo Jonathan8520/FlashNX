@@ -33,14 +33,22 @@ pub(crate) mod col {
     pub const GOLD: u32 = 0xFF_FF_D7_40;
     /// Border of a raised panel.
     pub const PANEL_LINE: u32 = 0xFF_2E_40_66;
-    /// What sits behind an open window: the page, darkened.
-    pub const SCRIM: u32 = 0xB8_05_0A_16;
+    /// What sits behind an open window: the page, darkened (the mockups'
+    /// rgba(6, 10, 20, 0.62), one strength for every window).
+    pub const SCRIM: u32 = 0x9E_06_0A_14;
+    /// Behind the pause: lighter, the game is the preview (Pause.dc.html, 0.5).
+    pub const SCRIM_GAME: u32 = 0x80_06_0A_14;
     /// A destructive confirm: its panel, its border and its title.
     pub const DANGER_PANEL: u32 = 0xFF_33_18_28;
     pub const DANGER_LINE: u32 = 0xFF_6E_2C_40;
-    pub const DANGER: u32 = 0xFF_FF_7A_7A;
+    pub const DANGER: u32 = 0xFF_FF_5D_5D;
     /// Something that worked (a download done, a game already on the card).
-    pub const OK: u32 = 0xFF_4E_D1_8B;
+    pub const OK: u32 = 0xFF_3D_D6_8C;
+    /// A chevron or an arrow at rest (a row that opens a page, a value's
+    /// arrows on a row without the focus).
+    pub const CHEVRON: u32 = 0xFF_5A_6A_8F;
+    /// A scrollbar's thumb, on a `LINE` track. Not gold: gold is the focus.
+    pub const THUMB: u32 = 0xFF_4A_5C_85;
     /// A soft drop shadow under a raised panel.
     pub const SHADOW: u32 = 0x90_00_00_00;
 }
