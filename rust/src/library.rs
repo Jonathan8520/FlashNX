@@ -4240,7 +4240,8 @@ fn input_inner(button: &str) -> bool {
             true
         }
         Screen::DistantUrlOptions { url_idx, selection } => {
-            // A on entry 0 (edit) is hoisted; here we handle move / delete / back.
+            // A on row 1 (edit the address) is hoisted; here: move, the
+            // favourite switch, delete, back.
             handle_distant_url_options_input(&mut s, button, url_idx, selection);
             true
         }
