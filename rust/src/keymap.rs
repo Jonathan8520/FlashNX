@@ -153,8 +153,10 @@ pub const EDITABLE_BUTTONS: &[&str] = &[
 /// US keyCodes and CJK boards are physically QWERTY too (see the #55 discussion).
 /// Labels are localised at draw time via `keyboard_label`; stored names are stable.
 pub const KEYBOARD: &[(&str, u8, f32, f32)] = &[
-    // Row 0 — Esc + function keys, grouped in fours like a real board.
-    ("Escape", 0, 0.0, 1.0),
+    // Row 0 — Esc + function keys, grouped in fours like a real board. Esc is
+    // a quarter wider than a letter: its word ("Escape", "Échap") does not fit
+    // a one-unit cap even at the smaller legend size, and it was cut to "Esc…".
+    ("Escape", 0, 0.0, 1.25),
     ("F1", 0, 1.5, 1.0), ("F2", 0, 2.5, 1.0), ("F3", 0, 3.5, 1.0), ("F4", 0, 4.5, 1.0),
     ("F5", 0, 5.75, 1.0), ("F6", 0, 6.75, 1.0), ("F7", 0, 7.75, 1.0), ("F8", 0, 8.75, 1.0),
     ("F9", 0, 10.0, 1.0), ("F10", 0, 11.0, 1.0), ("F11", 0, 12.0, 1.0), ("F12", 0, 13.0, 1.0),
@@ -1270,18 +1272,24 @@ pub fn has_revert(basename: &str) -> bool {
 /// hand top to bottom, then the right), the order the player has just read the
 /// keys in, rather than the A, B, X, Y of the old list.
 pub fn binding_diff_rows(cur: &Keymap, tgt: &Keymap) -> std::vec::Vec<std::string::String> {
-    let none = crate::loc_ui::ui().key_none;
-    let disp = |k: &str| -> std::string::String {
-        if k.is_empty() {
-            none.to_string()
-        } else {
-            flash_key_display(k).into_owned()
-        }
-    };
+    let u = crate::loc_ui::ui();
     let mut rows = std::vec::Vec::new();
+    // `unbound` is what a button without a key does in that map, worded as the
+    // editor words it: nothing in the Normal layer, but in a combo layer its
+    // Normal key (`lookup_combo` falls through), "Same as Normal". A profile
+    // that dropped a layer previewed ZL+A going from W to "None", and once it
+    // was applied, ZL+A sent A's Normal key.
     let mut diff_map = |label: &str,
+                        unbound: &str,
                         c_map: &BTreeMap<std::string::String, std::string::String>,
                         t_map: &BTreeMap<std::string::String, std::string::String>| {
+        let disp = |k: &str| -> std::string::String {
+            if k.is_empty() {
+                unbound.to_string()
+            } else {
+                flash_key_display(k).into_owned()
+            }
+        };
         for slot in PAD_SLOTS {
             let btn = slot.name;
             let c = c_map.get(btn).map(std::string::String::as_str).unwrap_or("");
@@ -1292,8 +1300,8 @@ pub fn binding_diff_rows(cur: &Keymap, tgt: &Keymap) -> std::vec::Vec<std::strin
         }
     };
     // Base bindings, both players (#40).
-    diff_map("", &cur.bindings, &tgt.bindings);
-    diff_map("P2 ", &cur.bindings_p2, &tgt.bindings_p2);
+    diff_map("", u.key_none, &cur.bindings, &tgt.bindings);
+    diff_map("P2 ", u.key_none, &cur.bindings_p2, &tgt.bindings_p2);
     // Per-modifier combo layers, both players (#57): a combo-only change must show
     // up too, and under the RIGHT modifier ("ZL+A" vs "R+A"). An absent layer diffs
     // against an empty one, so turning a combo on/off registers.
@@ -1301,10 +1309,10 @@ pub fn binding_diff_rows(cur: &Keymap, tgt: &Keymap) -> std::vec::Vec<std::strin
     for m in &SUBTAB_MODS[1..] {
         let c1 = cur.combo_layers.get(*m).unwrap_or(&empty);
         let t1 = tgt.combo_layers.get(*m).unwrap_or(&empty);
-        diff_map(&std::format!("{}+", m), c1, t1);
+        diff_map(&std::format!("{}+", m), u.key_same_as_normal, c1, t1);
         let c2 = cur.combo_layers_p2.get(*m).unwrap_or(&empty);
         let t2 = tgt.combo_layers_p2.get(*m).unwrap_or(&empty);
-        diff_map(&std::format!("P2 {}+", m), c2, t2);
+        diff_map(&std::format!("P2 {}+", m), u.key_same_as_normal, c2, t2);
     }
     // Cursor visibility (show-cursor toggle) rides IN the keymap, so a change to it
     // must register too — otherwise hiding the pointer would read as "no changes"

@@ -208,11 +208,11 @@ const GLIDE_KEY_COVER: u32 = 55;
 
 /// Which glyph a pad slot's label (`keymap::PadSlot::glyph`) is drawn with,
 /// and the caption beside it: "LS↑" is the left stick and an arrow, "LS" alone
-/// the left stick pushed in and "press", "↑" the d-pad with its top arm lit and
-/// an arrow. One table for every place a button is named (the editor, its key
-/// picker, the before / after tables), so they cannot disagree on a glyph again:
-/// the editor and the diff table each had their own copy, and fixing one would
-/// have left the other's widths wrong.
+/// the left stick pushed in and "press", "↑" the d-pad's cross with its top arm
+/// marked and an arrow. One table for every place a button is named (the
+/// editor, its key picker, the before / after tables), so they cannot disagree
+/// on a glyph again: the editor and the diff table each had their own copy, and
+/// fixing one would have left the other's widths wrong.
 fn pad_badge_parts(label: &str) -> (Option<Btn>, &str) {
     let single = match label {
         "A" => Some(Btn::A),
@@ -9997,8 +9997,10 @@ impl SwitchRenderBackend {
         let br = self.kit_button_width(Btn::R, gpx);
         let pw = self.pad_segments_width(&players, &[false; 2]);
         let lw = self.pad_segments_width(&layers, &v.live_layers);
-        // [X] players | [L] layers [R], 8 px apart and a hairline between.
-        let switches_w = bx + pw + bl + lw + br + 49.0;
+        // [X] players | [L] layers [R], 8 px apart and a hairline between: the
+        // gaps the drawing below steps by, 8 + 8 + 9 (the line and the 8 px
+        // after it) + 8 + 8, so the R glyph ends on the window's padding.
+        let switches_w = bx + pw + bl + lw + br + 41.0;
         let title_w = self.kit_measure(lc.keys_title, TOUCHES_TITLE_PX);
         let wide = title_w + 14.0 + 120.0 + 24.0 + switches_w <= inner_w;
         let head_h = if wide { TOUCHES_HEAD_H } else { TOUCHES_HEAD_H + 44.0 };
@@ -10768,7 +10770,11 @@ impl SwitchRenderBackend {
         let small = (big * 0.76).round().max(10.0);
         let isz = if icon.is_some() { (big + 1.0).round() } else { 0.0 };
         let room = w - 12.0 - if icon.is_some() { isz + 8.0 } else { 0.0 };
-        let px = if self.kit_measure(&label, big) <= room { big } else { small };
+        // Two more steps down before anything is cut: the numpad's Enter is a
+        // one-unit cap, and "Entrée" only fits it at 11 px. A cut legend is
+        // what made the board look unfinished.
+        let steps = [big, small, small.min(11.0), 10.0];
+        let px = steps.into_iter().find(|&p| self.kit_measure(&label, p) <= room).unwrap_or(10.0);
         let l = self.kit_fit(&label, px, room.max(0.0));
         let lw = self.kit_measure(&l, px);
         let total = lw + if icon.is_some() { isz + 8.0 } else { 0.0 };

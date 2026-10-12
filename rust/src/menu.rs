@@ -221,10 +221,12 @@ pub fn touch_select(idx: usize) -> bool {
             };
             // A modifier row takes no cursor from a finger either, and returning
             // false means the tap is not counted as the first half of a
-            // double-tap that would then activate it. It says why, as A does.
+            // double-tap that would then activate it. It says why, and sounds
+            // the refusal, as A does (`input`).
             if let Some(slot) = crate::keymap::PAD_SLOTS.get(row).filter(|s| crate::keymap::slot_is_modifier(s.name)) {
                 let msg = crate::loc_ui::ui().toast_modifier_locked.replace("{}", slot.name);
                 set_toast(&mut s, msg, TOAST_INFO);
+                crate::sfx::play(crate::sfx::Sfx::Error);
                 return false;
             }
             if selection == row {
