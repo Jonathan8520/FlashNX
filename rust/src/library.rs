@@ -9925,9 +9925,26 @@ fn draw_files_page(
     // A press asks before playing it instead of downloading it again.
     let snap = LIBRARY.lock().ok().map(|s| {
         let source = importer_label(&s.pending_fetch_url);
+        // The names on the card, sorted once a frame. Asking every file of a
+        // 3 600-game archive to walk the whole library, twice (its tick, then
+        // the count), was millions of string compares a frame, also paid with
+        // the page behind a window or a launch.
+        let mut names: std::vec::Vec<&str> = s
+            .entries
+            .iter()
+            .map(|e| e.basename.as_str())
+            .chain(s.downloaded_basenames.iter().map(|n| n.as_str()))
+            .collect();
+        names.sort_unstable();
+        names.dedup();
         let has = |name: &str| {
-            let safe = safe_file_name(name);
-            s.entries.iter().any(|e| e.basename == safe) || s.downloaded_basenames.iter().any(|n| *n == safe)
+            // `safe_file_name` only changes a name with a folder in it, so the
+            // rest are looked up as they are, without a copy.
+            if name.contains(['/', '\\']) {
+                names.binary_search(&safe_file_name(name).as_str()).is_ok()
+            } else {
+                names.binary_search(&name).is_ok()
+            }
         };
         let idx = filtered_indices(&s.remote_files, &s.distant_filter);
         let files: std::vec::Vec<RemoteFile> = idx.iter().map(|&i| s.remote_files[i].clone()).collect();
