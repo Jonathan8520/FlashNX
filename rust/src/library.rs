@@ -5388,7 +5388,7 @@ fn bug_picker_order(entries: &[Entry]) -> std::vec::Vec<usize> {
 
 /// BugPicker > A: snapshot the chosen game's metadata, open swkbd for a
 /// description, then send the report to the relay behind a card
-/// (`settings_tab::submit_report`). Hoisted from `input()` — the keyboard must
+/// (`settings_tab::submit_report`). Hoisted from `input()`: the keyboard must
 /// NOT run under the LIBRARY lock.
 ///
 /// `row` is a row of the picker, not a position in `entries`: the two differ
@@ -9119,7 +9119,7 @@ fn cover_url_for_source(cover_url: &str, use_shot: bool) -> std::string::String 
 }
 
 /// CoverPicker > A: download the chosen candidate's logo and cache it as the
-/// game's cover. Run by `drive_pending_net` behind its loading card —
+/// game's cover. Run by `drive_pending_net` behind its loading card: a
 /// synchronous HTTPS download WITHOUT the LIBRARY lock. On success,
 /// invalidates the backend cover-texture cache so the grid shows the new art,
 /// and returns to the OPTIONS modal; on failure the picker comes back with

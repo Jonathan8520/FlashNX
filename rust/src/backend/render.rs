@@ -13447,7 +13447,7 @@ impl SwitchRenderBackend {
     }
 
     /// Transient toast banner near the bottom of the screen (#20). `kind`: 0 =
-    /// success (green), 1 = error (red), 2 = info (gold). Non-blocking — drawn on
+    /// success (green), 1 = error (red), 2 = info (gold). Non-blocking: drawn on
     /// top of the current screen for a couple of seconds (the library loop counts
     /// it down), so a share/apply/revert confirms without a full "thanks" modal.
     pub fn draw_toast(&mut self, msg: &str, kind: u8) {

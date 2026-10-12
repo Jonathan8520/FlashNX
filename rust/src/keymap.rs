@@ -1333,7 +1333,7 @@ pub fn binding_diff_rows(cur: &Keymap, tgt: &Keymap) -> std::vec::Vec<std::strin
 /// The cursor speed row of an apply preview (issue #57 sharing): the speed the
 /// game at `basename` runs at, then the one the profile sets, or None when
 /// applying it changes nothing. Cursor speed lives outside the keymap, so it
-/// isn't in `binding_diff_rows` — the preview appends this so the user SEES the
+/// isn't in `binding_diff_rows`: the preview appends this so the user SEES the
 /// pointer speed is part of the profile.
 pub fn cursor_apply_row(basename: &str, profile_speed: i32) -> Option<std::string::String> {
     // A profile with no speed of its own (every one shared before #57) leaves
