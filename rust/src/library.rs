@@ -6468,6 +6468,10 @@ static IMPORT_ROW: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsi
 /// The card last focused, 0 or 1: Up from the first source goes back to it.
 static IMPORT_CARD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// When the importer home was last drawn as the page, to tell a frame that
+/// follows another from one that comes back to it.
+static HOME_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Scroll the IMPORTER list was last drawn at. Every "come back to the list"
 /// path clamps from THIS rather than from 0: recomputing the scroll from the row
 /// alone dragged the view whenever the cursor sat past the first page (open `+`
@@ -11019,6 +11023,13 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             // list" path, and the tab itself, can restore them.
             IMPORT_SCROLL.store(scroll_offset, std::sync::atomic::Ordering::Relaxed);
             IMPORT_ROW.store(selection, std::sync::atomic::Ordering::Relaxed);
+            // Back from another page (an archive folding into its row, the
+            // results, an error): the glide state is that page's, so the pill
+            // and the scroll snap to the home's instead of flying in from it.
+            let gap = now.saturating_sub(HOME_TICK.swap(now, std::sync::atomic::Ordering::Relaxed));
+            if gap > unsafe { ruffle_tick_freq() } / 20 {
+                crate::backend::render::gallery_anim_reset();
+            }
             draw_importer_home(backend, selection, scroll_offset, true);
         }
         Screen::DistantUrlOptions { url_idx, selection } => {
