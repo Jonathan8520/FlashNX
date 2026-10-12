@@ -3446,7 +3446,12 @@ fn push_history(url: &str) {
             s.history_idx = Some(pos);
             return;
         }
-        // New entry: stamp when it was saved (shown in its options modal).
+        // New entry: stamp when it was saved (shown in its options modal). A
+        // row this address already has is from an earlier life of it (deleted
+        // while the table could not be saved), not this source's: it would
+        // bring back the old star and date, and `find` would keep reading it
+        // before the new one.
+        s.url_meta.retain(|(u, _, _, _, _)| u != &url);
         s.url_meta.push((url.clone(), 0, now_epoch(), false, 0));
         s.url_history.push(url);
         // Hard ceiling only as a runaway guard (a corrupt writer, not a user):
@@ -7082,7 +7087,11 @@ fn delete_current_history(s: &mut State) {
     if idx >= s.url_history.len() {
         return;
     }
-    s.url_history.remove(idx);
+    let removed = s.url_history.remove(idx);
+    // Its side data goes with it, in memory too: left there, it came back with
+    // the address (the old star, the old date) when the same one was added
+    // again.
+    s.url_meta.retain(|(u, _, _, _, _)| u != &removed);
     s.history_idx = if s.url_history.is_empty() {
         None
     } else {
@@ -7094,7 +7103,65 @@ fn delete_current_history(s: &mut State) {
     if s.history_loaded {
         let snapshot = s.url_history.clone();
         save_history_to_sd(&snapshot);
+        save_history_meta(s);
     }
+}
+
+/// Saved source `idx` now goes by `new_url` (its address edited, or fixed
+/// from an error page), and the index it has afterwards.
+///
+/// Its favourite and its added date go with it: the side data is keyed by the
+/// address, and renaming only the history lost the star and the date, and
+/// moved the source out of the pinned group. Its counts described the old
+/// address's item and start again. An address that is already saved is not
+/// listed twice: the source is merged into that entry, which keeps the earlier
+/// date and a star from either.
+fn rename_source(s: &mut State, idx: usize, new_url: &str) -> usize {
+    let Some(old) = s.url_history.get(idx).cloned() else { return idx };
+    if old == new_url {
+        return idx;
+    }
+    let old_meta = s.url_meta.iter().position(|(u, _, _, _, _)| *u == old).map(|i| s.url_meta.remove(i));
+    let (at, merged) = match s.url_history.iter().position(|u| u == new_url) {
+        Some(existing) => {
+            s.url_history.remove(idx);
+            if let Some((_, _, added, fav, _)) = old_meta {
+                match s.url_meta.iter_mut().find(|(u, _, _, _, _)| u == new_url) {
+                    Some(slot) => {
+                        slot.3 |= fav;
+                        if added != 0 && (slot.2 == 0 || added < slot.2) {
+                            slot.2 = added;
+                        }
+                    }
+                    None => s.url_meta.push((new_url.to_string(), 0, added, fav, 0)),
+                }
+            }
+            (if existing > idx { existing - 1 } else { existing }, true)
+        }
+        None => {
+            s.url_history[idx] = new_url.to_string();
+            s.url_meta.retain(|(u, _, _, _, _)| u != new_url);
+            if let Some((_, _, added, fav, _)) = old_meta {
+                s.url_meta.push((new_url.to_string(), 0, added, fav, 0));
+            }
+            (idx, false)
+        }
+    };
+    if let Some(h) = s.history_idx {
+        s.history_idx = Some(if h == idx {
+            at
+        } else if merged && h > idx {
+            h - 1
+        } else {
+            h
+        });
+    }
+    if s.history_loaded {
+        let snapshot = s.url_history.clone();
+        save_history_to_sd(&snapshot);
+        save_history_meta(s);
+    }
+    at
 }
 
 /// The add card: the keyboard for a new address (`initial` pre-fills it when
@@ -7177,12 +7244,8 @@ fn run_fix_url_flow(failed: &str) {
         clear_import_error(&mut s);
         clear_download_state(&mut s);
         if let Some(pos) = s.url_history.iter().position(|u| u == failed) {
-            s.url_history[pos] = fixed.clone();
-            if s.history_loaded {
-                let snapshot = s.url_history.clone();
-                save_history_to_sd(&snapshot);
-            }
-            importer_row_for_abs(&s, pos)
+            let at = rename_source(&mut s, pos, &fixed);
+            importer_row_for_abs(&s, at)
         } else {
             s.import_return_row
         }
@@ -7241,14 +7304,13 @@ fn run_edit_url_flow(url_idx: usize) {
         return;
     }
     if let Ok(mut s) = LIBRARY.lock() {
-        if url_idx < s.url_history.len() {
-            s.url_history[url_idx] = new_url;
+        let at = rename_source(&mut s, url_idx, &new_url);
+        // The panel shrinks away on the source as it now is: merged into an
+        // entry saved earlier, its old index is somebody else's.
+        if let Screen::DistantUrlOptions { selection, .. } = s.screen {
+            s.screen = Screen::DistantUrlOptions { url_idx: at, selection };
         }
-        if s.history_loaded {
-            let snapshot = s.url_history.clone();
-            save_history_to_sd(&snapshot);
-        }
-        let row = importer_row_for_abs(&s, url_idx);
+        let row = importer_row_for_abs(&s, at);
         let target = distant_idle_at(&s, row);
         close_modal_to(&mut s, target);
     }
