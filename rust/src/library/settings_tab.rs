@@ -557,7 +557,8 @@ pub(crate) fn run_suggestion_flow() {
 }
 
 /// A report the relay refused, kept with the reason, so Réessayer sends it
-/// again without the description being typed a second time.
+/// again without the description being typed a second time. Fermer leaves it
+/// here: only the question reads it, and only a failed send opens that.
 static FAILED_SEND: Mutex<Option<(crate::bugreport::Report, std::string::String)>> = Mutex::new(None);
 
 /// Send `report`, which started on the Aide et retours row `key`. Sent: a
@@ -626,9 +627,9 @@ pub(crate) fn handle_send_failed_input(s: &mut State, button: &str, row: usize) 
         "Left" | "StickLLeft" => s.screen = Screen::SendFailed { row, selection: 0 },
         "Right" | "StickLRight" => s.screen = Screen::SendFailed { row, selection: 1 },
         "A" | "B" | "Minus" => {
-            if let Ok(mut g) = FAILED_SEND.lock() {
-                *g = None;
-            }
+            // The kept report stays: the question is drawn again through its
+            // close, its reason read from there, and a reason gone empty would
+            // shrink the box as it leaves. The next send replaces or clears it.
             s.screen = Screen::Settings { section: SetSection::Help, in_pane: true, row };
         }
         _ => {}
