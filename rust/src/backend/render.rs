@@ -3391,6 +3391,10 @@ pub struct SwitchRenderBackend {
     ui_scale: f32,
     ui_pivot_x: f32,
     ui_pivot_y: f32,
+    /// How far a side sheet has come in on its open or close movement
+    /// (`set_ui_sheet_slide`), 0 to 1, so the dim behind it can come and go
+    /// with it. 1 whenever no such movement is playing.
+    ui_sheet_reveal: f32,
     /// Reusable FBO object (lazy; 0 = not created). Color attachment is
     /// rebound per offscreen render.
     offscreen_fbo: GLuint,
@@ -7321,6 +7325,7 @@ impl SwitchRenderBackend {
             ui_scale: 1.0,
             ui_pivot_x: 0.0,
             ui_pivot_y: 0.0,
+            ui_sheet_reveal: 1.0,
             offscreen_fbo: 0,
             offscreen_depth_stencil: 0,
             offscreen_depth_stencil_dims: (0, 0),
@@ -11324,6 +11329,7 @@ impl SwitchRenderBackend {
     /// Slide the whole library-UI content horizontally (tab transitions); no
     /// scale. `library::render` resets this via `clear_ui_transform` afterwards.
     pub fn set_ui_slide(&mut self, x: f32) {
+        self.ui_sheet_reveal = 1.0;
         self.ui_scale = 1.0;
         self.ui_pivot_x = 0.0;
         self.ui_pivot_y = 0.0;
@@ -11349,6 +11355,7 @@ impl SwitchRenderBackend {
         } else {
             ((scale - MODAL_OPEN_FROM) / (1.0 - MODAL_OPEN_FROM)).clamp(0.0, 1.0)
         };
+        self.ui_sheet_reveal = p;
         self.ui_scale = 1.0;
         self.ui_pivot_x = 0.0;
         self.ui_pivot_y = 0.0;
@@ -11372,6 +11379,7 @@ impl SwitchRenderBackend {
     }
 
     pub fn set_ui_modal_scale(&mut self, scale: f32) {
+        self.ui_sheet_reveal = 1.0;
         self.ui_scale = scale;
         self.ui_pivot_x = self.dimensions.width as f32 * 0.5;
         self.ui_pivot_y = self.dimensions.height as f32 * 0.5;
@@ -11397,6 +11405,7 @@ impl SwitchRenderBackend {
     }
 
     pub fn clear_ui_transform(&mut self) {
+        self.ui_sheet_reveal = 1.0;
         self.ui_scale = 1.0;
         self.ui_pivot_x = 0.0;
         self.ui_pivot_y = 0.0;

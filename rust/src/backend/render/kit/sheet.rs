@@ -554,9 +554,14 @@ impl SwitchRenderBackend {
         // edge between the two. In portrait the panels hug their rows at the
         // top, so the band stops under them too and the picture below stays
         // bright as well.
+        //
+        // The dim comes and goes with the panel's own slide: at full strength
+        // on the first frame after Minus, it was there before the panel, and on
+        // the way out it stayed until the slide had ended, then went in one
+        // frame (`ui_sheet_reveal`).
         let e = if child.is_some() { t.clamp(0.0, 1.0) } else { 0.0 };
         const DIM: u32 = col::SCRIM_GAME;
-        let a = (DIM >> 24) as f32;
+        let a = (DIM >> 24) as f32 * self.ui_sheet_reveal.clamp(0.0, 1.0);
         let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
         let (_, parent_h) = self.sheet_frame(parent);
         let child_h = match child {
