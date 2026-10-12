@@ -320,7 +320,8 @@ pub(crate) fn with_options_sheet<R>(
     let mut sheet = Sheet::new(&entry.display_name, &rows, selection);
     sheet.subtitle = Some(u.opt_subtitle);
     sheet.thumb = Some(thumb.unwrap_or((0, 0, 0, 0)));
-    sheet.thumb_tile = Some((entry.color_chip, &entry.basename));
+    // The name the grid's tile shows, not the file's.
+    sheet.thumb_tile = Some((entry.color_chip, &entry.display_name));
     sheet.sections = &sections;
     sheet.row_h = 48.0;
     sheet.glide_key = 0x6200_0000;

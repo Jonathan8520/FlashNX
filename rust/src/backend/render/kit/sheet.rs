@@ -243,7 +243,9 @@ impl SwitchRenderBackend {
             self.sheet_thumb(x + 24.0, y, TW, TH, thumb, s.thumb_tile);
             let tx = x + 24.0 + TW + 16.0;
             let tmax = x + w - 24.0 - tx;
-            let t = self.kit_fit(s.title, size::WINDOW_TITLE - 1.0, tmax);
+            // A game's name: cut in the middle, where two episodes of a series
+            // differ at the end.
+            let t = self.kit_fit_mid(s.title, size::WINDOW_TITLE - 1.0, tmax);
             let has_sub = s.subtitle.is_some();
             let tcy = if has_sub { y + 20.0 } else { y + TH * 0.5 };
             self.kit_text_mid(tx, tcy, size::WINDOW_TITLE - 1.0, &t, col::TEXT);
