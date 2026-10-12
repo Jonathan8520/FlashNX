@@ -113,6 +113,40 @@ pub const MENU_ITEMS: &[&str] = &[
 pub const SCREEN_ITEMS: &[&str] =
     &["AFFICHAGE", "ROTATION", "ZOOM", "PIXELS", "FILTRE", "FPS"];
 
+/// Rows of `MENU_ITEMS` that open a panel beside the pause.
+pub const PAUSE_ROW_TOUCHES: usize = 1;
+pub const PAUSE_ROW_SCREEN: usize = 2;
+
+/// What sits to the right of the pause rail, kept so B can slide it back under
+/// the pause instead of making it vanish: the frame after B, nothing draws the
+/// sub-panel any more but `draw_menu_overlay`, which redraws it from this.
+#[derive(Clone, Copy, PartialEq)]
+pub enum PauseChild {
+    None,
+    /// ECRAN, with its cursor.
+    Screen(usize),
+    /// Touches et curseur, with its cursor.
+    Touches(usize),
+}
+
+static PAUSE_CHILD: std::sync::Mutex<PauseChild> = std::sync::Mutex::new(PauseChild::None);
+
+pub fn pause_child_set(c: PauseChild) {
+    if let Ok(mut g) = PAUSE_CHILD.lock() {
+        *g = c;
+    }
+}
+
+fn pause_child() -> PauseChild {
+    PAUSE_CHILD.lock().map(|g| *g).unwrap_or(PauseChild::None)
+}
+
+/// A fresh pause: the main panel alone, no sub-panel to slide back.
+pub fn pause_reset() {
+    pause_child_set(PauseChild::None);
+    kit::sheet::cascade_reset();
+}
+
 // ── Unified modal style ────────────────────────────────────────────────────
 // One look for every centered window: `draw_modal_frame` draws the panel, title
 // and hints from the kit (`render/kit/window.rs`), and only each window's body
@@ -1177,6 +1211,8 @@ pub(crate) use kit::theme::col as ui_col;
 pub(crate) use kit::text::Btn;
 pub(crate) use pages::settings::{SettingsExtra, SettingsRow};
 pub(crate) use pages::windows::{Choice, WinRow};
+pub(crate) use kit::list::Row;
+pub(crate) use kit::sheet::{cascade_step, Sheet};
 
 /// Whether the console's fonts loaded, i.e. the interface draws with the kit
 /// rather than the old 5x7 font.
@@ -9052,15 +9088,18 @@ impl SwitchRenderBackend {
     }
 
 
-    /// Draw the pause-modal overlay on top of whatever's already in the
-    /// framebuffer. The caller is expected to have re-rendered the paused
-    /// game state (via `Player::render`) so this overlay sits over a frozen
-    /// snapshot of the game, not a blank screen.
+    /// The pause panel as data, handed to `f` (its strings live in this
+    /// frame). Rows follow `MENU_ITEMS`.
     ///
-    /// `selected` indexes `MENU_ITEMS`. The cursor `>` is drawn on the
-    /// selected row; the selected label is rendered in yellow, others in
-    /// white. Help line at the bottom describes the buttons.
-    pub fn draw_menu_overlay(&mut self, selected: usize) {
+    /// The rows say what they are before they are pressed: a chevron on the two
+    /// that open a panel (Touches et curseur, Écran), the overclock's three
+    /// settings all on show with the one in force lit, and plain rows for the
+    /// three that act at once. Under the title, two chips answer what a player
+    /// pausing a slow game wants to know: how fast it was running, and whether
+    /// the processor is raised.
+    pub(crate) fn with_pause_sheet<R>(&mut self, selected: usize, f: impl FnOnce(&mut Self, &kit::sheet::Sheet) -> R) -> R {
+        use kit::list::Row;
+        use theme::col;
         let lc = crate::loc::s();
         let u = crate::loc_ui::ui();
         let game = crate::library::active_display_name().unwrap_or_default();
@@ -9068,25 +9107,26 @@ impl SwitchRenderBackend {
         // preference: a raise can be refused (clkrst unavailable, battery out
         // of its Normal voltage state) and a row claiming HIGH while the
         // console sits at 1020 is a support ticket. AUTO reads AUTO: whether it
-        // holds the raise at this instant is the "OC" next to the FPS counter.
+        // holds the raise at this instant is the processor chip.
         //
         // It stays at the top level rather than joining ECRAN: every ECRAN row
         // previews on the frozen frame, and this one cannot.
         let power_shown = crate::clock_auto::shown_mode();
-        let power_label = std::format!(
-            "{} : {}",
-            lc.set_overclock,
-            crate::loc::overclock_label(power_shown),
-        );
-        let items = [
-            lc.menu_resume,
-            lc.menu_keys,
-            lc.menu_screen,
-            power_label.as_str(),
-            lc.menu_restart,
-            lc.menu_quit,
+        let oc_opts = [lc.overclock_off, lc.pixels_auto, lc.overclock_on];
+        let oc_active = match power_shown {
+            0 => 0,
+            crate::keymap::POWER_AUTO => 1,
+            _ => 2,
+        };
+        let rows = [
+            Row::new(Icon::Play, lc.menu_resume),
+            Row::new(Icon::Gamepad, lc.menu_keys).opens(),
+            Row::new(Icon::Monitor, lc.menu_screen).opens(),
+            Row::new(Icon::Cpu, lc.set_overclock).choice(&oc_opts, oc_active),
+            Row::new(Icon::Restart, lc.menu_restart),
+            Row::new(Icon::LogOut, lc.menu_quit),
         ];
-        debug_assert_eq!(items.len(), MENU_ITEMS.len());
+        debug_assert_eq!(rows.len(), MENU_ITEMS.len());
         let help = match MENU_ITEMS.get(selected) {
             Some(&"REPRENDRE") => u.help_resume,
             Some(&"TOUCHES") => u.help_keys,
@@ -9094,27 +9134,85 @@ impl SwitchRenderBackend {
             Some(&"OVERCLOCK") => {
                 if overclock_refused() {
                     lc.overclock_refused
-                } else if power_shown == crate::keymap::POWER_AUTO {
-                    lc.overclock_auto_hint
                 } else {
-                    lc.overclock_hint
+                    match power_shown {
+                        0 => u.help_oc_off,
+                        crate::keymap::POWER_AUTO => u.help_oc_auto,
+                        _ => u.help_oc_on,
+                    }
                 }
             }
             Some(&"REDEMARRER") => u.help_restart,
             Some(&"QUITTER") => u.help_quit,
             _ => "",
         };
-        self.kit_side_sheet(
-            &[lc.pause_title],
-            &game,
-            &items,
-            selected,
-            Some(help),
-            &[(&[Btn::A], u.choose), (&[Btn::B], u.resume_game)],
-            GLIDE_KEY_PAUSE,
-            // OVERCLOCK steps with Left and Right too.
-            1 << 3,
-        );
+        // The A hint names what A does on THIS row; B always resumes.
+        let a_verb = match MENU_ITEMS.get(selected) {
+            Some(&"REPRENDRE") => u.resume,
+            Some(&"TOUCHES") | Some(&"ECRAN") => u.open,
+            Some(&"OVERCLOCK") => u.change,
+            Some(&"REDEMARRER") => u.restart,
+            Some(&"QUITTER") => u.quit,
+            _ => u.choose,
+        };
+        let on_choice = MENU_ITEMS.get(selected) == Some(&"OVERCLOCK");
+        let hints_choice = [(&[Btn::Dpad][..], u.change), (&[Btn::B][..], u.resume_game)];
+        let hints_act = [(&[Btn::A][..], a_verb), (&[Btn::B][..], u.resume_game)];
+
+        // The chips. The reading is the one frozen with the picture: no frame
+        // runs while paused, so there is no newer speed to report.
+        let (measured, nominal) = fps_readout();
+        let fps_text;
+        let mut chips: std::vec::Vec<(Icon, &str, u32)> = std::vec::Vec::new();
+        if let Some(real_x10) = measured {
+            fps_text = u.fps_chip.replace("{}", &fps_rate_str(real_x10));
+            let ink = match nominal {
+                Some(n) if n > 0 => match (real_x10 as u64 * 100 / n as u64) as u32 {
+                    0..=65 => col::DANGER,
+                    66..=94 => col::GOLD,
+                    _ => col::OK,
+                },
+                _ => col::TEXT3,
+            };
+            chips.push((Icon::Gauge, fps_text.as_str(), ink));
+        }
+        let raised = current_power_mode() == 1;
+        chips.push((
+            Icon::Cpu,
+            if raised { u.cpu_boosted } else { u.cpu_normal },
+            if raised { col::GOLD } else { col::TEXT3 },
+        ));
+
+        let mut sheet = kit::sheet::Sheet::new(&game, &rows, selected);
+        sheet.kicker = Some(Icon::Pause);
+        sheet.crumbs = core::slice::from_ref(&lc.pause_title);
+        sheet.chips = &chips;
+        sheet.glide_key = GLIDE_KEY_PAUSE;
+        sheet.help = help;
+        sheet.hints = if on_choice { &hints_choice } else { &hints_act };
+        f(self, &sheet)
+    }
+
+    /// Draw the pause over the frozen frame the caller re-rendered first.
+    /// `selected` indexes `MENU_ITEMS`.
+    ///
+    /// When a sub-panel was open the frame before, it slides back under this
+    /// one while the rail unfolds (`kit_cascade`): B goes back the way A came.
+    pub fn draw_menu_overlay(&mut self, selected: usize) {
+        let t = kit::sheet::cascade_step(false);
+        let child = if t > 0.0 { pause_child() } else { PauseChild::None };
+        self.with_pause_sheet(selected, |s, parent| match child {
+            PauseChild::Screen(sel) => {
+                s.with_screen_sheet(sel, |s, c| s.kit_cascade(parent, PAUSE_ROW_SCREEN, Some(c), t));
+            }
+            PauseChild::Touches(sel) => {
+                crate::menu::with_touches_sheet(s, sel, |s, c| s.kit_cascade(parent, PAUSE_ROW_TOUCHES, Some(c), t));
+            }
+            PauseChild::None => s.kit_cascade(parent, 0, None, 0.0),
+        });
+        if t <= 0.0 {
+            pause_child_set(PauseChild::None);
+        }
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
@@ -9122,75 +9220,62 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
-    /// Draw the ECRAN sub-panel: the three settings that change how the game
-    /// sits on the screen, each carrying its live value.
+    /// The ECRAN panel as data, handed to `f`. Rows follow `SCREEN_ITEMS`.
     ///
-    /// Every row previews on the frozen frame behind the panel — C++ re-renders
-    /// it after each press rather than `continue`ing — so you see the crop, the
-    /// quarter turn or the scanlines on that particular game before going back
-    /// to playing. That shared behaviour is the reason these three belong on one
-    /// panel and QUITTER does not.
-    pub fn draw_screen_menu(&mut self, selected: usize) {
+    /// Every setting shows all its options, the one in force lit (Left and
+    /// Right move it, A goes round); the zoom, a free percentage, shows its
+    /// value between arrows; the counter is a switch. All of it previews on the
+    /// frozen frame to the right, which C++ re-renders after each press.
+    pub(crate) fn with_screen_sheet<R>(&mut self, selected: usize, f: impl FnOnce(&mut Self, &kit::sheet::Sheet) -> R) -> R {
+        use kit::list::Row;
         let lc = crate::loc::s();
         let u = crate::loc_ui::ui();
-        let game = crate::library::active_display_name().unwrap_or_default();
         // Every row is read back from what is in force: the game's `.prefs` for
-        // the four stored per game, the renderer for the zoom and the counter.
-        let display_label = std::format!(
-            "{} : {}",
-            lc.set_display_mode,
-            crate::loc::display_mode_label(crate::keymap::display_mode()),
-        );
-        let rotation_label = std::format!(
-            "{} : {}",
-            lc.set_rotation,
-            crate::loc::rotation_label(crate::keymap::rotation()),
-        );
-        let zoom_label = std::format!("{} : {} %", lc.set_zoom, game_zoom_percent());
-        let pixels_label = std::format!(
-            "{} : {}",
-            lc.set_pixel_filter,
-            crate::loc::pixel_filter_label(crate::keymap::pixel_filter()),
-        );
-        let filter_label = std::format!(
-            "{} : {}",
-            lc.set_screen_filter,
-            crate::loc::screen_filter_label(crate::keymap::screen_filter()),
-        );
-        let fps_label = std::format!(
-            "{} : {}",
-            lc.set_fps,
-            crate::loc::fps_counter_label(if fps_counter_on() { 1 } else { 0 }),
-        );
-        let items = [
-            display_label.as_str(),
-            rotation_label.as_str(),
-            zoom_label.as_str(),
-            pixels_label.as_str(),
-            filter_label.as_str(),
-            fps_label.as_str(),
+        // the ones stored per game, the renderer for the zoom and the counter.
+        let display_opts = [lc.display_fit, lc.display_stretch, lc.display_fill];
+        let rot_opts = [lc.rot_none, lc.rot_90, lc.rot_180, lc.rot_270];
+        let pix_opts = [lc.pixels_auto, lc.pixels_smooth, lc.pixels_sharp];
+        let filter_opts = [lc.filter_none, lc.filter_scanlines, lc.filter_crt];
+        let zoom = std::format!("{} %", game_zoom_percent());
+        let rows = [
+            Row::new(Icon::Monitor, lc.set_display_mode).choice(&display_opts, crate::keymap::display_mode() as usize),
+            Row::new(Icon::Rotate, lc.set_rotation).choice(&rot_opts, crate::keymap::rotation() as usize),
+            Row::new(Icon::ZoomIn, lc.set_zoom).cycle(&zoom),
+            Row::new(Icon::Pixels, lc.set_pixel_filter).choice(&pix_opts, crate::keymap::pixel_filter() as usize),
+            Row::new(Icon::Tv, lc.set_screen_filter).choice(&filter_opts, crate::keymap::screen_filter() as usize),
+            Row::new(Icon::Gauge, lc.set_fps).toggle(fps_counter_on()),
         ];
-        debug_assert_eq!(items.len(), SCREEN_ITEMS.len());
+        debug_assert_eq!(rows.len(), SCREEN_ITEMS.len());
         let help = match SCREEN_ITEMS.get(selected) {
             Some(&"AFFICHAGE") => u.help_display,
             Some(&"ROTATION") => u.help_rotation,
             Some(&"ZOOM") => u.help_zoom,
-            Some(&"PIXELS") => lc.pixels_hint,
+            Some(&"PIXELS") => u.help_pixels,
             Some(&"FILTRE") => u.help_filter,
-            Some(&"FPS") => lc.fps_hint,
+            Some(&"FPS") => u.help_fps,
             _ => "",
         };
-        self.kit_side_sheet(
-            &[lc.pause_title, lc.menu_screen],
-            &game,
-            &items,
-            selected,
-            Some(help),
-            &[(&[Btn::A], u.change), (&[Btn::B], u.back)],
-            GLIDE_KEY_SCREEN,
-            // Every ECRAN row steps with Left and Right; ZOOM by tens.
-            (1 << SCREEN_ITEMS.len()) - 1,
-        );
+        // The zoom row also opens the framing mode on A.
+        let hints_zoom = [(&[Btn::Dpad][..], u.change), (&[Btn::A][..], u.zoom_frame), (&[Btn::B][..], u.back)];
+        let hints = [(&[Btn::Dpad][..], u.change), (&[Btn::B][..], u.back)];
+        let crumbs = [lc.pause_title];
+        let mut sheet = kit::sheet::Sheet::new(lc.menu_screen, &rows, selected);
+        sheet.kicker = Some(Icon::ChevronLeft);
+        sheet.crumbs = &crumbs;
+        sheet.glide_key = GLIDE_KEY_SCREEN;
+        sheet.help = help;
+        sheet.hints = if SCREEN_ITEMS.get(selected) == Some(&"ZOOM") { &hints_zoom } else { &hints };
+        f(self, &sheet)
+    }
+
+    /// Draw the ECRAN panel beside the pause rail. `selected` indexes
+    /// `SCREEN_ITEMS`.
+    pub fn draw_screen_menu(&mut self, selected: usize) {
+        pause_child_set(PauseChild::Screen(selected));
+        let t = kit::sheet::cascade_step(true);
+        self.with_pause_sheet(PAUSE_ROW_SCREEN, |s, parent| {
+            s.with_screen_sheet(selected, |s, c| s.kit_cascade(parent, PAUSE_ROW_SCREEN, Some(c), t));
+        });
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
@@ -9683,6 +9768,44 @@ impl SwitchRenderBackend {
     /// A controller slot's label as glyphs, centred in `w` from `x`: "A" is the
     /// console's A, "LS↑" is the left-stick glyph and an arrow, "↑" the d-pad
     /// glyph and an arrow. Anything else (SL, SR) stays text.
+    /// The width `kit_pad_badge` draws `label` in, so a badge can sit at the
+    /// start of a column instead of centred in a cell.
+    fn pad_badge_width(&mut self, label: &str, px: f32) -> f32 {
+        let gpx = (px * 1.35).round();
+        let single = match label {
+            "A" => Some(Btn::A),
+            "B" => Some(Btn::B),
+            "X" => Some(Btn::X),
+            "Y" => Some(Btn::Y),
+            "L" => Some(Btn::L),
+            "R" => Some(Btn::R),
+            "ZL" => Some(Btn::ZL),
+            "ZR" => Some(Btn::ZR),
+            "+" => Some(Btn::Plus),
+            "-" => Some(Btn::Minus),
+            _ => None,
+        };
+        if let Some(b) = single {
+            return self.kit_button_width(b, gpx);
+        }
+        let (glyph, rest) = if let Some(r) = label.strip_prefix("LS") {
+            (Some(Btn::LStick), r)
+        } else if let Some(r) = label.strip_prefix("RS") {
+            (Some(Btn::RStick), r)
+        } else if matches!(label, "\u{2191}" | "\u{2193}" | "\u{2190}" | "\u{2192}") {
+            (Some(Btn::Dpad), label)
+        } else {
+            (None, label)
+        };
+        match glyph {
+            Some(b) => {
+                let gw = self.kit_button_width(b, gpx);
+                gw + if rest.is_empty() { 0.0 } else { 4.0 + self.kit_measure(rest, px) }
+            }
+            None => self.kit_measure(rest, px) + 8.0,
+        }
+    }
+
     fn kit_pad_badge(&mut self, x: f32, cy: f32, w: f32, label: &str, px: f32, ink: u32) {
         let gpx = (px * 1.35).round();
         let single = match label {

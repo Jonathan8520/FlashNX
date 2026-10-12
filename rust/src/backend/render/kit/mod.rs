@@ -9,6 +9,10 @@
 //! - `cover`: cover art in boxes of any shape.
 //! - `window`: windows, list rows, hint bars, the in-game side sheet.
 //! - `list`: a list that scrolls, with its pill, touch table and scrollbar.
+//! - `controls`: what sits on the right of a settings row (a choice with every
+//!   option shown, a value between arrows, a switch), chips and the help box.
+//! - `sheet`: the side panel (in-game pause, the game options), and the
+//!   cascade that opens a sub-panel beside its parent.
 //!
 //! These are children of `render` so they can reach the renderer's GL state the
 //! way the rest of `render.rs` does. Screens move onto them one at a time; the
@@ -18,10 +22,12 @@
 // while; the warnings would only bury real ones.
 #![allow(dead_code)]
 
+pub(crate) mod controls;
 pub(crate) mod cover;
 pub(crate) mod icons;
 pub(crate) mod list;
 pub(crate) mod shapes;
+pub(crate) mod sheet;
 pub(crate) mod text;
 pub(crate) mod theme;
 pub(crate) mod window;

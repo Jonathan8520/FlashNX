@@ -156,17 +156,18 @@ impl SwitchRenderBackend {
         }
         let mut right = x + w - PAD;
         if row.opens {
-            self.kit_icon(right - CHEVRON + 2.0, cy, CHEVRON, super::icons::Icon::ChevronRight, col::TEXT3);
+            let ink = if focused { col::GOLD } else { 0xFF_5A_6A_8F };
+            self.kit_icon(right - CHEVRON + 2.0, cy, CHEVRON, super::icons::Icon::ChevronRight, ink);
             right -= CHEVRON + 8.0;
         }
         let mut avail = right - lx;
-        if !row.value.is_empty() {
-            let px = size::LABEL + 1.0;
-            let v = self.kit_fit_mid(row.value, px, (avail * 0.4).max(60.0));
-            let vw = self.kit_measure(&v, px);
-            let ink = if focused { col::GOLD } else { col::TEXT3 };
-            self.kit_text_mid(right - vw, cy, px, &v, ink);
-            avail -= vw + 20.0;
+        if row.ctrl != super::controls::Ctrl::None {
+            // The control takes what it needs, up to 60% of the row; the label
+            // keeps the rest. A choice too wide for its share shows its current
+            // option between arrows instead (`kit_ctrl`).
+            let max_w = (avail * 0.6).max(60.0);
+            let cw = self.kit_ctrl(right, cy, &row.ctrl, focused && !row.dim, max_w);
+            avail -= cw + 20.0;
         }
         if row.mark.is_some() {
             avail -= MARK + 10.0;
@@ -189,9 +190,14 @@ impl SwitchRenderBackend {
 }
 
 /// What a list row shows: an icon, the label, a small mark after it ("in
-/// use", "on this shelf"), and on the right a value, then a chevron when the
-/// row opens another screen. `dim` greys a row out without hiding it;
-/// `danger` reddens the one that loses something.
+/// use", "on this shelf"), and on the right its control (a value, a choice, a
+/// switch: `Ctrl`), then a chevron when the row opens another screen. `dim`
+/// greys a row out without hiding it; `danger` reddens the one that loses
+/// something.
+///
+/// The chevron is the promise that A goes somewhere: a row without one acts
+/// where it is (it toggles, it restarts, it quits). Jonathan read "Redémarrer"
+/// and "Écran" as the same kind of row until the second one had it.
 #[derive(Clone, Copy)]
 pub(crate) struct Row<'a> {
     pub icon: Option<super::icons::Icon>,
@@ -199,7 +205,7 @@ pub(crate) struct Row<'a> {
     /// gold star, not the outline every other row has.
     pub filled: Option<u32>,
     pub label: &'a str,
-    pub value: &'a str,
+    pub ctrl: super::controls::Ctrl<'a>,
     pub mark: Option<(super::icons::Icon, u32)>,
     pub dim: bool,
     pub danger: bool,
@@ -208,7 +214,21 @@ pub(crate) struct Row<'a> {
 
 impl<'a> Row<'a> {
     pub(crate) fn new(icon: super::icons::Icon, label: &'a str) -> Row<'a> {
-        Row { icon: Some(icon), filled: None, label, value: "", mark: None, dim: false, danger: false, opens: false }
+        Row {
+            icon: Some(icon),
+            filled: None,
+            label,
+            ctrl: super::controls::Ctrl::None,
+            mark: None,
+            dim: false,
+            danger: false,
+            opens: false,
+        }
+    }
+
+    /// A row with no icon (a list of names).
+    pub(crate) fn plain(label: &'a str) -> Row<'a> {
+        Row { icon: None, ..Row::new(super::icons::Icon::File, label) }
     }
 
     /// Draw the icon solid in `ink` when `on` (only the star has a solid form:
@@ -220,8 +240,29 @@ impl<'a> Row<'a> {
         self
     }
 
+    /// A value to read on the right.
     pub(crate) fn value(mut self, value: &'a str) -> Row<'a> {
-        self.value = value;
+        if !value.is_empty() {
+            self.ctrl = super::controls::Ctrl::Value(value);
+        }
+        self
+    }
+
+    /// A value Left / Right step, between arrows.
+    pub(crate) fn cycle(mut self, value: &'a str) -> Row<'a> {
+        self.ctrl = super::controls::Ctrl::Cycle(value);
+        self
+    }
+
+    /// One of a few options, all shown, `active` lit.
+    pub(crate) fn choice(mut self, opts: &'a [&'a str], active: usize) -> Row<'a> {
+        self.ctrl = super::controls::Ctrl::Choice(opts, active);
+        self
+    }
+
+    /// An on / off switch.
+    pub(crate) fn toggle(mut self, on: bool) -> Row<'a> {
+        self.ctrl = super::controls::Ctrl::Toggle(on);
         self
     }
 
@@ -239,6 +280,11 @@ impl<'a> Row<'a> {
         self
     }
 
+    pub(crate) fn opens_if(mut self, on: bool) -> Row<'a> {
+        self.opens = on;
+        self
+    }
+
     pub(crate) fn danger(mut self) -> Row<'a> {
         self.danger = true;
         self
@@ -247,5 +293,13 @@ impl<'a> Row<'a> {
     pub(crate) fn dim(mut self, dim: bool) -> Row<'a> {
         self.dim = dim;
         self
+    }
+
+    /// Whether Left / Right change this row in place.
+    pub(crate) fn steps(&self) -> bool {
+        matches!(
+            self.ctrl,
+            super::controls::Ctrl::Cycle(_) | super::controls::Ctrl::Choice(..) | super::controls::Ctrl::Toggle(_)
+        )
     }
 }

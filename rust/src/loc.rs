@@ -303,38 +303,19 @@ pub struct Strings {
     pub pixels_smooth: &'static str,
     /// Force nearest-neighbour on every bitmap.
     pub pixels_sharp: &'static str,
-    /// One line under the row while it is selected, like `overclock_hint`.
-    /// AUTO and SMOOTH draw the same picture on every game whose bitmaps all
-    /// ask for smoothing, which is most of them, so without this two of the
-    /// three positions look like a dead button.
-    pub pixels_hint: &'static str,
     /// Pause row + defaults row: raise the CPU clock for heavy games.
     pub set_overclock: &'static str,
     /// The console's own profile, untouched.
     pub overclock_off: &'static str,
     /// CPU 1785 MHz. The GPU is never touched.
     pub overclock_on: &'static str,
-    /// One line under the row. Says the two things the evidence actually
-    /// supports: it drains the battery faster and it runs hotter. It does NOT
-    /// claim hardware damage, because nothing in the record supports that, and
-    /// dressing folklore as a warning is worse than saying nothing.
-    pub overclock_hint: &'static str,
     /// Replaces the hint when the console refused the raise. Seen for real on
     /// 2026-08-26 at 7% charge: psm reports the pack out of its Normal voltage
     /// state and the raise is refused, which without this line is a button
     /// pressed eight times with nothing happening and no reason given.
     pub overclock_refused: &'static str,
-    /// Replaces `overclock_hint` while the row reads AUTO: the raise comes and
-    /// goes on its own, so the row has to say when. Its label is `pixels_auto`,
-    /// the same word in every language we ship.
-    pub overclock_auto_hint: &'static str,
     /// ECRAN row + defaults row: show the frame rate over the running game (#111).
     pub set_fps: &'static str,
-    /// One line under that row. It has to say what the SECOND number is, because
-    /// nothing here declares 60 (Mario 63 asks for 32, Papa Louie 3 for 30, Icy
-    /// Tower for 24) and a lone "15" means half speed on one of those and full
-    /// speed on none of them.
-    pub fps_hint: &'static str,
     /// Pause row + defaults row: turn the picture a quarter at a time (#78).
     pub set_rotation: &'static str,
     pub rot_none: &'static str,
@@ -584,7 +565,7 @@ const EN: Strings = Strings {
     menu_resume: "Resume",
     menu_keys: "Controls and cursor",
     menu_screen: "Screen",
-    menu_restart: "Restart",
+    menu_restart: "Restart game",
     menu_quit: "Quit game",
     pause_title: "Pause",
     keys_title: "Controls",
@@ -665,15 +646,11 @@ const EN: Strings = Strings {
     pixels_auto: "Auto",
     pixels_smooth: "Smooth",
     pixels_sharp: "Sharp",
-    pixels_hint: "Auto: as the game asks. Sharp: no blur.",
     set_overclock: "Overclock",
     overclock_off: "Off",
     overclock_on: "On",
-    overclock_hint: "On: more battery used, more heat.",
     overclock_refused: "Overclock unavailable: battery too low.",
-    overclock_auto_hint: "Auto: speeds up only slow games.",
     set_fps: "FPS counter",
-    fps_hint: "Frames per second, then the rate the game asks for.",
     set_rotation: "Rotation",
     rot_none: "None",
     rot_90: "90°",
@@ -800,7 +777,7 @@ const FR: Strings = Strings {
     menu_resume: "Reprendre",
     menu_keys: "Touches et curseur",
     menu_screen: "Écran",
-    menu_restart: "Redémarrer",
+    menu_restart: "Redémarrer le jeu",
     menu_quit: "Quitter le jeu",
     pause_title: "Pause",
     keys_title: "Touches",
@@ -881,15 +858,11 @@ const FR: Strings = Strings {
     pixels_auto: "Auto",
     pixels_smooth: "Lissés",
     pixels_sharp: "Nets",
-    pixels_hint: "Auto : comme le jeu le demande. Nets : aucun flou.",
     set_overclock: "Overclock",
     overclock_off: "Inactif",
     overclock_on: "Actif",
-    overclock_hint: "Actif : plus de batterie, plus de chaleur.",
     overclock_refused: "Overclock indisponible : batterie trop faible.",
-    overclock_auto_hint: "Auto : seulement si le jeu ralentit.",
     set_fps: "Compteur FPS",
-    fps_hint: "Images par seconde, puis la cadence demandée par le jeu.",
     set_rotation: "Rotation",
     rot_none: "Aucune",
     rot_90: "90°",
@@ -1016,7 +989,7 @@ const ES: Strings = Strings {
     menu_resume: "Reanudar",
     menu_keys: "Controles y cursor",
     menu_screen: "Pantalla",
-    menu_restart: "Reiniciar",
+    menu_restart: "Reiniciar juego",
     menu_quit: "Salir del juego",
     pause_title: "Pausa",
     keys_title: "Controles",
@@ -1097,15 +1070,11 @@ const ES: Strings = Strings {
     pixels_auto: "Auto",
     pixels_smooth: "Suaves",
     pixels_sharp: "Nítidos",
-    pixels_hint: "Auto: como pide el juego. Nítidos: sin desenfoque.",
     set_overclock: "Overclock",
     overclock_off: "Inactivo",
     overclock_on: "Activo",
-    overclock_hint: "Activo: más batería, más calor.",
     overclock_refused: "Overclock no disponible: batería muy baja.",
-    overclock_auto_hint: "Auto: solo si el juego va lento.",
     set_fps: "Contador FPS",
-    fps_hint: "Fotogramas por segundo, y la tasa que pide el juego.",
     set_rotation: "Rotación",
     rot_none: "Ninguna",
     rot_90: "90°",
@@ -1233,7 +1202,7 @@ const RU: Strings = Strings {
     menu_resume: "Продолжить",
     menu_keys: "Клавиши и курсор",
     menu_screen: "Экран",
-    menu_restart: "Заново",
+    menu_restart: "Начать заново",
     menu_quit: "Выйти из игры",
     pause_title: "Пауза",
     keys_title: "Клавиши",
@@ -1314,15 +1283,11 @@ const RU: Strings = Strings {
     pixels_auto: "Авто",
     pixels_smooth: "Сглаженные",
     pixels_sharp: "Чёткие",
-    pixels_hint: "Авто: как просит игра. Чёткие: без размытия.",
     set_overclock: "Разгон",
     overclock_off: "Выкл",
     overclock_on: "Вкл",
-    overclock_hint: "Вкл: больше расход батареи и нагрев.",
     overclock_refused: "Разгон недоступен: батарея разряжена.",
-    overclock_auto_hint: "Авто: только если игра тормозит.",
     set_fps: "Счётчик FPS",
-    fps_hint: "Кадров в секунду и частота, которую запрашивает игра.",
     set_rotation: "Поворот",
     rot_none: "Нет",
     rot_90: "90°",
@@ -1450,7 +1415,7 @@ const DE: Strings = Strings {
     menu_resume: "Fortsetzen",
     menu_keys: "Steuerung und Cursor",
     menu_screen: "Bildschirm",
-    menu_restart: "Neustart",
+    menu_restart: "Spiel neu starten",
     menu_quit: "Spiel beenden",
     pause_title: "Pause",
     keys_title: "Steuerung",
@@ -1531,15 +1496,11 @@ const DE: Strings = Strings {
     pixels_auto: "Auto",
     pixels_smooth: "Weich",
     pixels_sharp: "Scharf",
-    pixels_hint: "Auto: wie das Spiel es verlangt. Scharf: keine Unschärfe.",
     set_overclock: "Overclock",
     overclock_off: "Aus",
     overclock_on: "Ein",
-    overclock_hint: "Ein: mehr Akkuverbrauch, mehr Wärme.",
     overclock_refused: "Overclock nicht verfügbar: Akku zu schwach.",
-    overclock_auto_hint: "Auto: nur bei langsamen Spielen.",
     set_fps: "FPS-Anzeige",
-    fps_hint: "Bilder pro Sekunde, dann die vom Spiel geforderte Rate.",
     set_rotation: "Drehung",
     rot_none: "Keine",
     rot_90: "90°",
@@ -1667,7 +1628,7 @@ const IT: Strings = Strings {
     menu_resume: "Riprendi",
     menu_keys: "Comandi e cursore",
     menu_screen: "Schermo",
-    menu_restart: "Riavvia",
+    menu_restart: "Riavvia il gioco",
     menu_quit: "Esci dal gioco",
     pause_title: "Pausa",
     keys_title: "Comandi",
@@ -1748,15 +1709,11 @@ const IT: Strings = Strings {
     pixels_auto: "Auto",
     pixels_smooth: "Morbidi",
     pixels_sharp: "Nitidi",
-    pixels_hint: "Auto: come chiede il gioco. Nitidi: nessuna sfocatura.",
     set_overclock: "Overclock",
     overclock_off: "Inattivo",
     overclock_on: "Attivo",
-    overclock_hint: "Attivo: più batteria, più calore.",
     overclock_refused: "Overclock non disponibile: batteria troppo bassa.",
-    overclock_auto_hint: "Auto: solo se il gioco rallenta.",
     set_fps: "Contatore FPS",
-    fps_hint: "Fotogrammi al secondo, poi la frequenza richiesta dal gioco.",
     set_rotation: "Rotazione",
     rot_none: "Nessuna",
     rot_90: "90°",
@@ -1884,7 +1841,7 @@ const PT: Strings = Strings {
     menu_resume: "Continuar",
     menu_keys: "Controles e cursor",
     menu_screen: "Tela",
-    menu_restart: "Reiniciar",
+    menu_restart: "Reiniciar jogo",
     menu_quit: "Sair do jogo",
     pause_title: "Pausa",
     keys_title: "Controles",
@@ -1965,15 +1922,11 @@ const PT: Strings = Strings {
     pixels_auto: "Auto",
     pixels_smooth: "Suaves",
     pixels_sharp: "Nítidos",
-    pixels_hint: "Auto: como o jogo pede. Nítidos: sem desfoque.",
     set_overclock: "Overclock",
     overclock_off: "Inativo",
     overclock_on: "Ativo",
-    overclock_hint: "Ativo: mais bateria, mais calor.",
     overclock_refused: "Overclock indisponível: bateria fraca.",
-    overclock_auto_hint: "Auto: só se o jogo ficar lento.",
     set_fps: "Contador FPS",
-    fps_hint: "Quadros por segundo, e a taxa que o jogo pede.",
     set_rotation: "Rotação",
     rot_none: "Nenhuma",
     rot_90: "90°",
@@ -2102,7 +2055,7 @@ const ZH: Strings = Strings {
     menu_resume: "继续",
     menu_keys: "按键与光标",
     menu_screen: "屏幕",
-    menu_restart: "重新开始",
+    menu_restart: "重新开始游戏",
     menu_quit: "退出游戏",
     pause_title: "暂停",
     keys_title: "按键",
@@ -2183,15 +2136,11 @@ const ZH: Strings = Strings {
     pixels_auto: "自动",
     pixels_smooth: "平滑",
     pixels_sharp: "锐利",
-    pixels_hint: "自动：按游戏的要求。锐利：不模糊。",
     set_overclock: "超频",
     overclock_off: "关闭",
     overclock_on: "开启",
-    overclock_hint: "开启：更耗电，发热更多。",
     overclock_refused: "超频不可用：电量过低。",
-    overclock_auto_hint: "自动：仅在游戏变慢时提速。",
     set_fps: "帧率显示",
-    fps_hint: "每秒帧数，以及游戏要求的帧率。",
     set_rotation: "旋转",
     rot_none: "无",
     rot_90: "90°",
@@ -2319,7 +2268,7 @@ const TR: Strings = Strings {
     menu_resume: "Devam et",
     menu_keys: "Kontroller ve imleç",
     menu_screen: "Ekran",
-    menu_restart: "Yeniden başlat",
+    menu_restart: "Oyunu yeniden başlat",
     menu_quit: "Oyundan çık",
     pause_title: "Duraklatıldı",
     keys_title: "Kontroller",
@@ -2400,15 +2349,11 @@ const TR: Strings = Strings {
     pixels_auto: "Otomatik",
     pixels_smooth: "Yumuşak",
     pixels_sharp: "Keskin",
-    pixels_hint: "Otomatik: oyunun istediği gibi. Keskin: bulanıklık yok.",
     set_overclock: "Overclock",
     overclock_off: "Kapalı",
     overclock_on: "Açık",
-    overclock_hint: "Açık: daha çok pil, daha çok ısı.",
     overclock_refused: "Overclock kullanılamaz: pil çok düşük.",
-    overclock_auto_hint: "Otomatik: yalnızca oyun yavaşlarsa.",
     set_fps: "FPS sayacı",
-    fps_hint: "Saniyedeki kare sayısı ve oyunun istediği hız.",
     set_rotation: "Döndürme",
     rot_none: "Yok",
     rot_90: "90°",
@@ -2791,6 +2736,26 @@ pub fn pixel_filter_label(v: u8) -> &'static str {
         2 => s().pixels_sharp,
         _ => s().pixels_auto,
     }
+}
+
+/// Cursor-speed presets as x10 multipliers, in index order. MUST stay in sync
+/// with `CURSOR_SPEED_MULTS` in cpp/src/main.cpp (the C++ side owns the live
+/// value; this side only shows it).
+pub const CURSOR_SPEED_X10: &[u32] = &[5, 10, 15, 20, 25, 30, 40, 50];
+
+/// A multiplier as the menus show it: "×1,5" in French, "×1.5" in English.
+pub fn mult_label(x10: u32) -> std::string::String {
+    let mark = match current() {
+        Lang::En | Lang::Zh => '.',
+        _ => ',',
+    };
+    std::format!("\u{00D7}{}{}{}", x10 / 10, mark, x10 % 10)
+}
+
+/// A cursor-speed preset (by index) as the menus show it.
+pub fn speed_label(idx: i32) -> std::string::String {
+    let i = idx.clamp(0, CURSOR_SPEED_X10.len() as i32 - 1) as usize;
+    mult_label(CURSOR_SPEED_X10[i])
 }
 
 /// The active language's string table. Short name because it's called a lot.

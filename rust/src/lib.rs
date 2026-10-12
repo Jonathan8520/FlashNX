@@ -2732,6 +2732,27 @@ pub extern "C" fn ruffle_redraw_paused() {
     }
 }
 
+/// Frame of the last pause draw, of ANY of its panels.
+///
+/// Each panel used to keep its own, so going into ECRAN left the main panel's
+/// stale and coming back played the opening slide again, as if the pause had
+/// just been opened. One counter shared by every pause draw tells a real open
+/// (nothing of the pause on screen the frame before) from a step inside it.
+static LAST_PAUSE_FRAME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
+
+/// Record a pause draw on this frame; true when the pause was not on screen
+/// the frame before (a fresh open).
+fn pause_frame_mark(backend: &SwitchRenderBackend) -> bool {
+    let f = backend.frame_count();
+    let last = LAST_PAUSE_FRAME.swap(f, std::sync::atomic::Ordering::Relaxed);
+    last == u32::MAX || f.wrapping_sub(last) > 1
+}
+
+/// Touch tables of the pause's two panels (`set_ui_screen_kind`), so a tap is
+/// only ever read against the panel that is up.
+pub(crate) const UI_KIND_PAUSE: u32 = 60;
+pub(crate) const UI_KIND_SCREEN: u32 = 61;
+
 /// Draw the pause-menu overlay on top of whatever's already in the
 /// framebuffer. `selected` indexes into `render::MENU_ITEMS`. C++ calls
 /// this right after `ruffle_redraw_paused` so the menu sits on top of a
@@ -2767,12 +2788,11 @@ pub extern "C" fn ruffle_draw_menu(selected: c_int) {
         // is frame-rate independent, and it also covers reopening after TOUCHES or
         // after a close drain, which take different C++ paths.
         let now = unsafe { ruffle_tick_now() };
-        static LAST_MENU_FRAME: std::sync::atomic::AtomicU32 =
-            std::sync::atomic::AtomicU32::new(u32::MAX);
-        let f = backend.frame_count();
-        let last = LAST_MENU_FRAME.swap(f, std::sync::atomic::Ordering::Relaxed);
-        if last == u32::MAX || f.wrapping_sub(last) > 1 {
+        if pause_frame_mark(backend) {
+            // A fresh pause: the panel slides in alone, no sub-panel to fold
+            // back from whatever a previous pause left open.
             backend::render::modal_open_begin();
+            backend::render::pause_reset();
         }
         let (scale, active, _done) = backend::render::modal_scale_step(now);
         if active {
@@ -2780,20 +2800,20 @@ pub extern "C" fn ruffle_draw_menu(selected: c_int) {
         } else {
             backend.clear_ui_transform();
         }
+        // No touch table while the panel is moving: its rows are not where the
+        // table would say.
+        backend::render::set_ui_screen_kind(if active { 0 } else { UI_KIND_PAUSE });
         backend.draw_menu_overlay(idx);
         backend.clear_ui_transform();
     }
 }
 
-/// Draw the ECRAN sub-panel (display mode / rotation / filter) over the frozen
-/// game frame. `selected` indexes `render::SCREEN_ITEMS`.
+/// Draw the ECRAN sub-panel over the frozen game frame, beside the pause rail.
+/// `selected` indexes `render::SCREEN_ITEMS`.
 ///
-/// Its own frame counter, deliberately: entering the sub-panel interrupts
-/// `ruffle_draw_menu`'s run of consecutive frames, so this one's counter is
-/// stale on the first call and the panel pops in — and leaving it makes the
-/// main menu's counter stale in turn, so that pops back. No extra open/close
-/// FFI is needed for either direction; the same "this draw does not follow the
-/// previous one" rule the pause menu already uses carries both.
+/// No pop of its own: it comes out from under the pause (`kit_cascade`), and
+/// the pause's frame counter is shared, so coming back does not replay the
+/// pause's opening either.
 #[no_mangle]
 pub extern "C" fn ruffle_draw_screen_menu(selected: c_int) {
     let state = unsafe {
@@ -2810,22 +2830,10 @@ pub extern "C" fn ruffle_draw_screen_menu(selected: c_int) {
         <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(renderer)
     {
         let idx = selected.max(0) as usize;
-        let now = unsafe { ruffle_tick_now() };
-        static LAST_SCREEN_FRAME: std::sync::atomic::AtomicU32 =
-            std::sync::atomic::AtomicU32::new(u32::MAX);
-        let f = backend.frame_count();
-        let last = LAST_SCREEN_FRAME.swap(f, std::sync::atomic::Ordering::Relaxed);
-        if last == u32::MAX || f.wrapping_sub(last) > 1 {
-            backend::render::modal_open_begin();
-        }
-        let (scale, active, _done) = backend::render::modal_scale_step(now);
-        if active {
-            backend.set_ui_sheet_slide(scale);
-        } else {
-            backend.clear_ui_transform();
-        }
-        backend.draw_screen_menu(idx);
+        pause_frame_mark(backend);
         backend.clear_ui_transform();
+        backend::render::set_ui_screen_kind(UI_KIND_SCREEN);
+        backend.draw_screen_menu(idx);
     }
 }
 
@@ -2857,6 +2865,8 @@ pub extern "C" fn ruffle_draw_menu_closing(selected: c_int) -> c_int {
         <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(renderer)
     {
         let now = unsafe { ruffle_tick_now() };
+        pause_frame_mark(backend);
+        backend::render::set_ui_screen_kind(0);
         let (scale, _active, close_done) = backend::render::modal_scale_step(now);
         if close_done {
             backend.clear_ui_transform();
@@ -2892,9 +2902,32 @@ pub(crate) fn step_wrap(cur: u8, n: u8, dir: c_int) -> u8 {
     }
 }
 
+/// `dir` for A on a row whose options are all on show: go round.
+pub(crate) const STEP_CYCLE: c_int = 2;
+
+/// One step along a setting whose options are all on show (a choice, a
+/// switch). Left (`dir < 0`) and Right (`dir == 1`) move the lit option along
+/// and stop at the ends, the way it moves on screen; A (`STEP_CYCLE`) goes
+/// round, so one button still reaches every option.
+pub(crate) fn step_choice(cur: u8, n: u8, dir: c_int) -> u8 {
+    if n == 0 {
+        return 0;
+    }
+    let cur = cur.min(n - 1);
+    if dir >= STEP_CYCLE {
+        (cur + 1) % n
+    } else if dir > 0 {
+        (cur + 1).min(n - 1)
+    } else if dir < 0 {
+        cur.saturating_sub(1)
+    } else {
+        cur
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn ruffle_display_mode_step(dir: c_int) {
-    let next = step_wrap(keymap::display_mode(), keymap::DISPLAY_MODE_COUNT, dir);
+    let next = step_choice(keymap::display_mode(), keymap::DISPLAY_MODE_COUNT, dir);
     keymap::set_display_mode(next);
     let state = unsafe {
         match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
@@ -3006,6 +3039,7 @@ pub extern "C" fn ruffle_draw_zoom_overlay() {
     let percent = backend::render::game_zoom_percent();
     let renderer = player.renderer_mut();
     if let Some(backend) = <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(renderer) {
+        pause_frame_mark(backend);
         backend.draw_zoom_overlay(percent);
     }
 }
@@ -3020,7 +3054,7 @@ pub extern "C" fn ruffle_draw_zoom_overlay() {
 /// like the display and filter rows. Issue #78.
 #[no_mangle]
 pub extern "C" fn ruffle_rotation_step(dir: c_int) {
-    let next = step_wrap(keymap::rotation(), keymap::ROTATION_COUNT, dir);
+    let next = step_choice(keymap::rotation(), keymap::ROTATION_COUNT, dir);
     keymap::set_rotation(next);
     crate::backend::render::set_game_rotation(next);
     // Turning the picture re-frames it, so the framing offset goes back to
@@ -3070,7 +3104,7 @@ pub extern "C" fn ruffle_rotation_step(dir: c_int) {
 /// The other half of issue #65.
 #[no_mangle]
 pub extern "C" fn ruffle_screen_filter_step(dir: c_int) {
-    let next = step_wrap(keymap::screen_filter(), keymap::SCREEN_FILTER_COUNT, dir);
+    let next = step_choice(keymap::screen_filter(), keymap::SCREEN_FILTER_COUNT, dir);
     keymap::set_screen_filter(next);
     crate::backend::render::set_screen_filter(next);
 }
@@ -3083,7 +3117,7 @@ pub extern "C" fn ruffle_screen_filter_step(dir: c_int) {
 /// paused redraw behind the panel previews it on the next call.
 #[no_mangle]
 pub extern "C" fn ruffle_fps_counter_step(dir: c_int) {
-    let next = step_wrap(keymap::fps_counter(), keymap::FPS_COUNTER_COUNT, dir);
+    let next = step_choice(keymap::fps_counter(), keymap::FPS_COUNTER_COUNT, dir);
     keymap::set_fps_counter(next);
     crate::backend::render::set_fps_counter(next == 1);
 }
@@ -3099,7 +3133,7 @@ pub extern "C" fn ruffle_fps_counter_step(dir: c_int) {
 /// word in a menu.
 #[no_mangle]
 pub extern "C" fn ruffle_pixel_filter_step(dir: c_int) {
-    let next = step_wrap(keymap::pixel_filter(), keymap::PIXEL_FILTER_COUNT, dir);
+    let next = step_choice(keymap::pixel_filter(), keymap::PIXEL_FILTER_COUNT, dir);
     keymap::set_pixel_filter(next);
     crate::backend::render::set_pixel_filter(next);
 }
@@ -3129,7 +3163,14 @@ pub extern "C" fn ruffle_power_mode_step(dir: c_int) {
     // nothing visible (2026-10-05: "un clic ne fait rien"). On AUTO the row
     // shows AUTO whatever the clock is doing at that moment.
     let shown = crate::clock_auto::shown_mode();
-    let next = if dir < 0 { keymap::prev_power_setting(shown) } else { keymap::next_power_setting(shown) };
+    // The row shows Off | Auto | On, in that order (`with_pause_sheet`).
+    const ORDER: [u8; 3] = [0, keymap::POWER_AUTO, 1];
+    let at = ORDER.iter().position(|m| *m == shown).unwrap_or(0) as u8;
+    let next = ORDER[step_choice(at, 3, dir) as usize];
+    if next == shown {
+        // Left on Off, Right on On: the end of the row, nothing to ask for.
+        return;
+    }
     let got = crate::clock_auto::apply_setting(next);
     keymap::set_power_mode(got);
     // Say what was asked for AND what was granted. A refusal is silent on the
@@ -3354,6 +3395,7 @@ pub extern "C" fn ruffle_touches_draw() {
         // first entry popped and every sub-screen snapped in. The dim backdrop
         // stays put (fill_screen_dim); only the panel scales.
         let now = unsafe { ruffle_tick_now() };
+        pause_frame_mark(backend);
         let kind = menu::screen_kind();
         let last = LAST_TOUCHES_KIND.swap(kind, std::sync::atomic::Ordering::Relaxed);
         // The sub-menu and the profile flows are pages of the pause sheet: one
@@ -3433,6 +3475,32 @@ pub extern "C" fn ruffle_menu_touch(x: f32, y: f32, pressed: c_int) {
         // over them has nothing to commit. Both answer taps, which is the arm
         // above.
         _ => {}
+    }
+}
+
+/// Touchscreen on the pause's own panels (the main one and ECRAN), which had
+/// none: only TOUCHES answered a finger. `live` is the panel C++ has up
+/// (`UI_KIND_PAUSE` or `UI_KIND_SCREEN`). Returns the row a tap landed on, or
+/// -1; C++ moves its cursor there, or acts when the cursor was already on it,
+/// the double tap every list of the app uses.
+#[no_mangle]
+pub extern "C" fn ruffle_pause_touch(x: f32, y: f32, pressed: c_int, live: c_int) -> c_int {
+    // Physical pixels in, logical viewport out: the panel is drawn in the
+    // logical viewport, portrait while the picture is turned. Same undoing as
+    // `ruffle_menu_touch`, and for the same reason the zoom is not undone.
+    let pw = VIEWPORT_W as f32;
+    let ph = VIEWPORT_H as f32;
+    let (x, y) = match backend::render::game_rotation() {
+        1 => (y, pw - x),
+        2 => (pw - x, ph - y),
+        3 => (ph - y, x),
+        _ => (x, y),
+    };
+    match backend::render::row_touch_feed(x, y, pressed != 0) {
+        backend::render::RowTouch::Tap(sx, sy) => backend::render::ui_cells_hit(live.max(0) as u32, sx, sy)
+            .map(|i| i as c_int)
+            .unwrap_or(-1),
+        _ => -1,
     }
 }
 

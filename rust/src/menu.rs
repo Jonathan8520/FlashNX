@@ -10,10 +10,10 @@
 //!     the library via `open`). The picker is a visual QWERTY board (issue #55).
 //!   - **Profiles / Preview / ShareConfirm / RevertPreview** — the profile flows.
 //!
-//! The sub-menu and the profile flows are pages of the pause sheet (the panel
-//! down the left, `kit_side_sheet`), with "Pause › Touches et curseur" on top,
-//! so going into them reads as going deeper into one menu rather than as a
-//! window opening over it. Only the editor and its keyboard are windows.
+//! The sub-menu and the profile flows open beside the pause, which folds to a
+//! rail (`kit_cascade`): going into them reads as going deeper into one menu
+//! rather than as a window opening over it. Only the editor and its keyboard
+//! are windows.
 //!
 //! All state lives behind a single Mutex so C++ can drive the screen via a thin
 //! FFI surface: `is_active`, `open`/`open_submenu`, `input`, `draw`,
@@ -21,7 +21,7 @@
 
 use std::sync::Mutex;
 
-use crate::backend::render::SwitchRenderBackend;
+use crate::backend::render::{SwitchRenderBackend, PAUSE_ROW_TOUCHES};
 use crate::keymap;
 
 // C++-owned cursor speed (live + per-game while in a game), reused from the
@@ -46,9 +46,6 @@ const TOAST_ERR: u8 = 1;
 const TOAST_INFO: u8 = 2;
 const TOAST_FRAMES: u32 = 150; // ~2.5 s at 60 fps
 
-/// Rows a page of the pause sheet shows at once (it does not scroll), and the
-/// glide keys of its two lists, apart from the pause's own.
-const SHEET_ROWS: usize = 8;
 const GLIDE_KEY_TOUCHES_MENU: u32 = 59;
 const GLIDE_KEY_TOUCHES_PROFILES: u32 = 60;
 
@@ -221,12 +218,7 @@ pub fn touch_select(idx: usize) -> bool {
             false
         }
         Screen::Profiles { selection } => {
-            // `idx` is a VISIBLE row: the picker shows a scrolling window.
-            let idx = crate::backend::render::list_window_start(
-                selection,
-                s.matches.len(),
-                crate::profiles::PICKER_VISIBLE_ROWS,
-            ) + idx;
+            // The sheet publishes every row by its index in the list.
             if idx >= s.matches.len() {
                 return false;
             }
@@ -350,7 +342,7 @@ fn cap_rows(mut rows: std::vec::Vec<std::string::String>) -> std::vec::Vec<std::
     if rows.len() > MAX_PREVIEW_ROWS {
         let extra = rows.len() - MAX_PREVIEW_ROWS;
         rows.truncate(MAX_PREVIEW_ROWS);
-        rows.push(std::format!("(+{} ...)", extra));
+        rows.push(crate::loc_ui::ui().more_changes.replace("{}", &extra.to_string()));
     }
     rows
 }
@@ -572,23 +564,47 @@ fn handle_menu_input(s: &mut State, button: &str, mut selection: usize) {
         _ => 0,
     };
     if dir != 0 {
+        // Left / Right move along what the row shows: the speed one preset
+        // down or up, the switch to off or on, the gyroscope one setting along,
+        // each stopping at its end. A is what goes round.
         match selection {
             MENU_CURSOR => {
-                unsafe { ruffle_cursor_speed_step(dir) };
+                let m = unsafe { ruffle_cursor_speed_mult_x10() }.max(0) as u32;
+                let at = crate::loc::CURSOR_SPEED_X10.iter().position(|v| *v == m);
+                let n = crate::loc::CURSOR_SPEED_X10.len();
+                let blocked = match at {
+                    Some(0) => dir < 0,
+                    Some(i) => dir > 0 && i + 1 >= n,
+                    None => false,
+                };
+                if !blocked {
+                    unsafe { ruffle_cursor_speed_step(dir) };
+                }
             }
-            MENU_SHOWCURSOR => keymap::toggle_show_cursor(),
-            MENU_GYRO => keymap::step_gyro(dir),
+            MENU_SHOWCURSOR => {
+                if keymap::show_cursor() != (dir > 0) {
+                    keymap::toggle_show_cursor();
+                }
+            }
+            MENU_GYRO => {
+                let cur = keymap::gyro_mode();
+                if (dir < 0 && cur > 0) || (dir > 0 && cur + 1 < keymap::GYRO_MODE_COUNT) {
+                    keymap::step_gyro(dir);
+                }
+            }
             _ => {}
         }
         s.screen = Screen::Menu { selection };
         return;
     }
     match button {
+        // A fresh press wraps round, a held direction stops at the end, as on
+        // every list of the launcher.
         "Up" | "StickLUp" => {
-            selection = if selection == 0 { last } else { selection - 1 };
+            selection = crate::library::list_step_wrap(selection, -1, last + 1);
         }
         "Down" | "StickLDown" => {
-            selection = if selection >= last { 0 } else { selection + 1 };
+            selection = crate::library::list_step_wrap(selection, 1, last + 1);
         }
         "A" => match selection {
             MENU_EDIT => {
@@ -624,10 +640,10 @@ fn handle_menu_input(s: &mut State, button: &str, mut selection: usize) {
 
 /// Picker nav (A is hoisted to open the preview).
 fn handle_profiles_input(s: &mut State, button: &str, mut selection: usize) {
-    let last = s.matches.len().max(1) - 1;
+    let total = s.matches.len().max(1);
     match button {
-        "Up" | "StickLUp" => selection = if selection == 0 { last } else { selection - 1 },
-        "Down" | "StickLDown" => selection = if selection >= last { 0 } else { selection + 1 },
+        "Up" | "StickLUp" => selection = crate::library::list_step_wrap(selection, -1, total),
+        "Down" | "StickLDown" => selection = crate::library::list_step_wrap(selection, 1, total),
         "X" => {
             // Delete MY OWN shared profile: only on a row this install shared.
             if s
@@ -1226,6 +1242,163 @@ fn kbd_center_of(k: &(&str, u8, f32, f32)) -> f32 {
     k.2 + k.3 * 0.5
 }
 
+/// A profile's name as the lists show it: its title, then who shared it.
+fn profile_name(p: &crate::profiles::Profile) -> std::string::String {
+    let mut r = p.title().to_string();
+    if !p.author.is_empty() {
+        r.push_str("  \u{00B7}  ");
+        r.push_str(&p.author);
+    }
+    r
+}
+
+/// The Touches et curseur page as data, handed to `f`.
+///
+/// Two groups under their titles: the keys (edit them, take someone else's,
+/// share yours) and the cursor (speed, shown or hidden, the gyroscope). Each
+/// row shows what it does before it is pressed: a chevron where A opens a
+/// page, the speed between arrows, a switch, the gyroscope's three settings
+/// all on show.
+pub(crate) fn with_touches_sheet<R>(
+    backend: &mut SwitchRenderBackend,
+    selection: usize,
+    f: impl FnOnce(&mut SwitchRenderBackend, &crate::backend::render::Sheet) -> R,
+) -> R {
+    use crate::backend::render::{Btn, Icon, Row, Sheet};
+    let lc = crate::loc::s();
+    let u = crate::loc_ui::ui();
+    let (can_revert, has_backup) = TOUCHES.lock().map(|s| (s.can_revert, s.has_backup)).unwrap_or((false, false));
+    let m = unsafe { ruffle_cursor_speed_mult_x10() };
+    let speed = crate::loc::mult_label(m.max(0) as u32);
+    let gyro_opts = [
+        crate::loc::gyro_mode_label(keymap::GYRO_OFF),
+        lc.gyro_marble,
+        lc.gyro_pointer,
+    ];
+    let mut rows = std::vec![
+        Row::new(Icon::Keyboard, lc.touches_edit).opens(),
+        Row::new(Icon::Users, lc.opt_apply).opens(),
+        Row::new(Icon::Share, lc.opt_share),
+        Row::new(Icon::Gauge, lc.set_cursor_speed).cycle(&speed),
+        Row::new(Icon::Pointer, lc.show_cursor).toggle(keymap::show_cursor()),
+        Row::new(Icon::Compass, lc.set_gyro).choice(&gyro_opts, keymap::gyro_mode() as usize),
+    ];
+    if can_revert {
+        rows.push(Row::new(Icon::Undo, if has_backup { lc.profile_revert } else { lc.touches_revert_default }));
+    }
+    let help = match selection {
+        MENU_EDIT => u.help_touches_edit,
+        MENU_APPLY => u.help_touches_apply,
+        MENU_SHARE => u.help_touches_share,
+        MENU_CURSOR => u.help_cursor_speed,
+        MENU_SHOWCURSOR => u.help_show_cursor,
+        MENU_GYRO => u.help_gyro,
+        _ => u.help_revert,
+    };
+    let a_verb = match selection {
+        MENU_EDIT => u.edit,
+        MENU_APPLY => u.open,
+        MENU_SHARE => u.share,
+        _ => u.restore,
+    };
+    let stepper = matches!(selection, MENU_CURSOR | MENU_SHOWCURSOR | MENU_GYRO);
+    let hints_step = [(&[Btn::Dpad][..], u.change), (&[Btn::B][..], u.back)];
+    let hints_act = [(&[Btn::A][..], a_verb), (&[Btn::B][..], u.back)];
+    let sections = [(MENU_EDIT, lc.keys_title), (MENU_CURSOR, u.sec_cursor)];
+    let crumbs = [lc.pause_title];
+    let mut sheet = Sheet::new(lc.menu_keys, &rows, selection);
+    sheet.kicker = Some(Icon::ChevronLeft);
+    sheet.crumbs = &crumbs;
+    sheet.sections = &sections;
+    sheet.row_h = 48.0;
+    sheet.glide_key = GLIDE_KEY_TOUCHES_MENU;
+    sheet.help = help;
+    sheet.hints = if stepper { &hints_step } else { &hints_act };
+    f(backend, &sheet)
+}
+
+/// The shared-profiles page as data, handed to `f`: one row per profile, its
+/// author on the right, a check on the one in use; the list scrolls.
+fn with_profiles_sheet<R>(
+    backend: &mut SwitchRenderBackend,
+    selection: usize,
+    f: impl FnOnce(&mut SwitchRenderBackend, &crate::backend::render::Sheet) -> R,
+) -> R {
+    use crate::backend::render::{ui_col, Btn, Icon, Row, Sheet};
+    let lc = crate::loc::s();
+    let u = crate::loc_ui::ui();
+    let (active, copy_mode, items): (std::string::String, bool, std::vec::Vec<(std::string::String, std::string::String, std::string::String)>) =
+        TOUCHES
+            .lock()
+            .map(|s| {
+                (
+                    s.active_id.clone(),
+                    s.copy_mode,
+                    s.matches
+                        .iter()
+                        .map(|m| (m.profile.title().to_string(), m.profile.author.clone(), m.profile.id.clone()))
+                        .collect(),
+                )
+            })
+            .unwrap_or_default();
+    let mut rows: std::vec::Vec<Row> = items
+        .iter()
+        .map(|(title, author, id)| {
+            let icon = if crate::profiles::is_copy_row(id) { Icon::Copy } else { Icon::User };
+            Row::new(icon, title)
+                .value(author)
+                .mark_if(!active.is_empty() && *id == active, Icon::Check, ui_col::OK)
+                .opens_if(crate::profiles::is_copy_row(id))
+        })
+        .collect();
+    let empty_msg = if crate::profiles::catalog_unavailable() { lc.profile_catalog_offline } else { lc.profile_none };
+    if rows.is_empty() {
+        // Twin of the on-cover picker in library.rs: an unreachable catalog
+        // must not be reported as an empty one.
+        rows.push(Row::new(Icon::Info, empty_msg).dim(true));
+    }
+    let mine = items.get(selection).is_some_and(|(_, _, id)| crate::profiles::is_mine(id));
+    let title = if copy_mode { lc.profile_copy_row } else { lc.profile_title };
+    let hints_mine = [(&[Btn::A][..], u.preview), (&[Btn::X][..], lc.opt_delete), (&[Btn::B][..], u.back)];
+    let hints = [(&[Btn::A][..], u.preview), (&[Btn::B][..], u.back)];
+    let crumbs = [lc.menu_keys];
+    let mut sheet = Sheet::new(title, &rows, if items.is_empty() { usize::MAX } else { selection });
+    sheet.kicker = Some(Icon::ChevronLeft);
+    sheet.crumbs = &crumbs;
+    sheet.row_h = 48.0;
+    sheet.glide_key = GLIDE_KEY_TOUCHES_PROFILES;
+    sheet.help = u.help_touches_apply;
+    sheet.hints = if mine { &hints_mine } else { &hints };
+    f(backend, &sheet)
+}
+
+/// A before / after page beside the pause rail: the changes as a table, under
+/// what they are about.
+fn draw_diff_page(
+    backend: &mut SwitchRenderBackend,
+    crumbs: &[&str],
+    title: &str,
+    subtitle: Option<&str>,
+    rows: &[std::string::String],
+    hints: &[crate::backend::render::HintItem],
+) {
+    use crate::backend::render::{Icon, Sheet};
+    let lc = crate::loc::s();
+    let u = crate::loc_ui::ui();
+    let none = [lc.profile_preview_none.to_string()];
+    let t = crate::backend::render::cascade_step(true);
+    let mut sheet = Sheet::new(title, &[], usize::MAX);
+    sheet.kicker = Some(Icon::ChevronLeft);
+    sheet.crumbs = crumbs;
+    sheet.subtitle = subtitle;
+    sheet.row_h = 44.0;
+    sheet.reserve_help = false;
+    sheet.hints = hints;
+    sheet.diff = if rows.is_empty() { &none } else { rows };
+    sheet.diff_heads = ["", u.col_before, u.col_after];
+    backend.with_pause_sheet(PAUSE_ROW_TOUCHES, |b, parent| b.kit_cascade(parent, PAUSE_ROW_TOUCHES, Some(&sheet), t));
+}
+
 /// Draw the current TOUCHES screen + any active toast. No-op when inactive.
 pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
     // Run any deferred profile network flow now that its loading panel showed a
@@ -1257,53 +1430,11 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
             backend.draw_loading_overlay(&game, now);
         }
         Screen::Menu { selection } => {
-            // Snapshot the dynamic bits under the lock.
-            let (can_revert, has_backup) = TOUCHES
-                .lock()
-                .map(|s| (s.can_revert, s.has_backup))
-                .unwrap_or((false, false));
-            let m = unsafe { ruffle_cursor_speed_mult_x10() };
-            let cursor = std::format!("{}: x{}.{}", lc.set_cursor_speed, m / 10, m % 10);
-            let show_cur = std::format!(
-                "{}: {}",
-                lc.show_cursor,
-                if keymap::show_cursor() { lc.cursor_shown } else { lc.cursor_hidden },
-            );
-            let gyro = std::format!(
-                "{}: {}",
-                lc.set_gyro,
-                crate::loc::gyro_mode_label(keymap::gyro_mode()),
-            );
-            let mut rows: std::vec::Vec<&str> = std::vec![
-                lc.touches_edit,
-                lc.opt_apply,
-                lc.opt_share,
-                cursor.as_str(),
-                show_cur.as_str(),
-                gyro.as_str(),
-            ];
-            if can_revert {
-                rows.push(if has_backup { lc.profile_revert } else { lc.touches_revert_default });
-            }
-            let help = match selection {
-                MENU_EDIT => u.help_touches_edit,
-                MENU_APPLY => u.help_touches_apply,
-                MENU_SHARE => u.help_touches_share,
-                MENU_CURSOR => u.help_cursor_speed,
-                MENU_SHOWCURSOR => u.help_show_cursor,
-                MENU_GYRO => u.help_gyro,
-                _ => u.help_revert,
-            };
-            backend.kit_side_sheet(
-                &[lc.pause_title, lc.menu_keys],
-                &game,
-                &rows,
-                selection,
-                Some(help),
-                &[(&[Btn::A], u.choose), (&[Btn::B], u.back)],
-                GLIDE_KEY_TOUCHES_MENU,
-                (1 << MENU_CURSOR) | (1 << MENU_SHOWCURSOR) | (1 << MENU_GYRO),
-            );
+            crate::backend::render::pause_child_set(crate::backend::render::PauseChild::Touches(selection));
+            let t = crate::backend::render::cascade_step(true);
+            backend.with_pause_sheet(PAUSE_ROW_TOUCHES, |b, parent| {
+                with_touches_sheet(b, selection, |b, c| b.kit_cascade(parent, PAUSE_ROW_TOUCHES, Some(c), t));
+            });
         }
         Screen::List { selection } => {
             // Parallel to PAD_SLOTS, which is both the order the pad lays out
@@ -1336,85 +1467,22 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
             backend.draw_touches_keyboard(&label, key_idx, &used);
         }
         Screen::Profiles { selection } => {
-            let (active, mut rows): (std::string::String, std::vec::Vec<std::string::String>) =
-                TOUCHES
-                    .lock()
-                    .map(|s| {
-                        (
-                            s.active_id.clone(),
-                            s.matches
-                                .iter()
-                                .map(|m| {
-                                    // Title + author nickname (distinguishes profiles).
-                                    let mut r = m.profile.title().to_string();
-                                    if !m.profile.author.is_empty() {
-                                        r.push_str(" - ");
-                                        r.push_str(&m.profile.author);
-                                    }
-                                    r
-                                })
-                                .collect(),
-                        )
-                    })
-                    .unwrap_or_default();
-            // Tag the active row.
-            let active_ids: std::vec::Vec<std::string::String> = TOUCHES
-                .lock()
-                .map(|s| s.matches.iter().map(|m| m.profile.id.clone()).collect())
-                .unwrap_or_default();
-            for (i, id) in active_ids.iter().enumerate() {
-                if !active.is_empty() && *id == active {
-                    if let Some(r) = rows.get_mut(i) {
-                        r.push(' ');
-                        r.push_str(lc.profile_active);
-                    }
-                }
-            }
-            if rows.is_empty() {
-                // Twin of the on-cover picker in library.rs: an unreachable
-                // catalog must not be reported as an empty one.
-                rows.push(if crate::profiles::catalog_unavailable() {
-                    lc.profile_catalog_offline.to_string()
-                } else {
-                    lc.profile_none.to_string()
-                });
-            }
-            let mine = active_ids.get(selection).is_some_and(|id| crate::profiles::is_mine(id));
-            let copy_mode = TOUCHES.lock().map(|s| s.copy_mode).unwrap_or(false);
-            let title = if copy_mode { lc.profile_copy_row } else { lc.profile_title };
-            // A window of the rows around the cursor: the sheet does not scroll.
-            // Same window `touch_select` maps a tapped row back through.
-            let window = crate::profiles::PICKER_VISIBLE_ROWS;
-            let start = crate::backend::render::list_window_start(selection, rows.len(), window);
-            let end = (start + window).min(rows.len());
-            let refs: std::vec::Vec<&str> = rows[start..end].iter().map(|r| r.as_str()).collect();
-            let hints_mine = [(&[Btn::A][..], u.preview), (&[Btn::X][..], lc.opt_delete), (&[Btn::B][..], u.back)];
-            let hints = [(&[Btn::A][..], u.preview), (&[Btn::B][..], u.back)];
-            backend.kit_side_sheet(
-                &[lc.pause_title, lc.menu_keys, title],
-                &game,
-                &refs,
-                selection.saturating_sub(start),
-                None,
-                if mine { &hints_mine } else { &hints },
-                GLIDE_KEY_TOUCHES_PROFILES,
-                0,
-            );
+            let t = crate::backend::render::cascade_step(true);
+            backend.with_pause_sheet(PAUSE_ROW_TOUCHES, |b, parent| {
+                with_profiles_sheet(b, selection, |b, c| b.kit_cascade(parent, PAUSE_ROW_TOUCHES, Some(c), t));
+            });
         }
         Screen::DeleteConfirm { profile_idx, selection } => {
+            // The list stays behind the question, so it is clear which profile
+            // it is about.
+            let t = crate::backend::render::cascade_step(true);
+            backend.with_pause_sheet(PAUSE_ROW_TOUCHES, |b, parent| {
+                with_profiles_sheet(b, profile_idx, |b, c| b.kit_cascade(parent, PAUSE_ROW_TOUCHES, Some(c), t));
+            });
             let name = TOUCHES
                 .lock()
                 .ok()
-                .and_then(|s| {
-                    s.matches.get(profile_idx).map(|m| {
-                        let mut r = m.profile.title().to_string();
-                        if !m.profile.author.is_empty() {
-                            r.push_str(" - ");
-                            r.push_str(&m.profile.author);
-                        }
-                        r
-                    })
-                })
+                .and_then(|s| s.matches.get(profile_idx).map(|m| profile_name(&m.profile)))
                 .unwrap_or_default();
             use crate::backend::render::{Choice, Icon};
             backend.draw_confirm(
@@ -1430,60 +1498,39 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
                 true,
             );
         }
-        Screen::Preview { .. } => {
-            let mut rows = TOUCHES.lock().map(|s| s.preview_rows.clone()).unwrap_or_default();
-            if rows.is_empty() {
-                rows.push(lc.profile_preview_none.to_string());
-            }
-            let refs: std::vec::Vec<&str> = rows.iter().take(SHEET_ROWS).map(|r| r.as_str()).collect();
-            backend.kit_side_sheet(
-                &[lc.pause_title, lc.menu_keys, lc.profile_title],
-                &game,
-                &refs,
-                usize::MAX,
-                Some(lc.profile_preview_title),
-                &[(&[Btn::A], u.apply), (&[Btn::B], u.back)],
-                GLIDE_KEY_TOUCHES_PROFILES,
-                0,
-            );
+        Screen::Preview { profile_idx } => {
+            let (rows, name) = TOUCHES
+                .lock()
+                .map(|s| {
+                    (
+                        s.preview_rows.clone(),
+                        s.matches.get(profile_idx).map(|m| profile_name(&m.profile)).unwrap_or_default(),
+                    )
+                })
+                .unwrap_or_default();
+            let crumbs = [lc.profile_title];
+            let hints = [(&[Btn::A][..], u.apply), (&[Btn::B][..], u.back)];
+            draw_diff_page(backend, &crumbs, &name, Some(u.preview_sub), &rows, &hints);
         }
         Screen::ShareConfirm => {
-            let (is_update, mut rows) = TOUCHES
+            let (is_update, rows) = TOUCHES
                 .lock()
                 .map(|s| (s.share_is_update, s.preview_rows.clone()))
                 .unwrap_or((false, std::vec::Vec::new()));
             let question = if is_update { lc.share_confirm_update } else { lc.profile_share_confirm };
-            if rows.is_empty() {
-                rows.push(lc.profile_preview_none.to_string());
-            }
-            let refs: std::vec::Vec<&str> = rows.iter().take(SHEET_ROWS).map(|r| r.as_str()).collect();
-            backend.kit_side_sheet(
-                &[lc.pause_title, lc.menu_keys, lc.opt_share],
-                &game,
-                &refs,
-                usize::MAX,
-                Some(question),
-                &[(&[Btn::A], u.share), (&[Btn::B], u.cancel)],
-                GLIDE_KEY_TOUCHES_PROFILES,
-                0,
-            );
+            let crumbs = [lc.menu_keys];
+            let hints = [(&[Btn::A][..], u.share), (&[Btn::B][..], u.cancel)];
+            draw_diff_page(backend, &crumbs, lc.opt_share, Some(question), &rows, &hints);
         }
         Screen::RevertPreview => {
-            let mut rows = TOUCHES.lock().map(|s| s.preview_rows.clone()).unwrap_or_default();
-            if rows.is_empty() {
-                rows.push(lc.profile_preview_none.to_string());
-            }
-            let refs: std::vec::Vec<&str> = rows.iter().take(SHEET_ROWS).map(|r| r.as_str()).collect();
-            backend.kit_side_sheet(
-                &[lc.pause_title, lc.menu_keys],
-                &game,
-                &refs,
-                usize::MAX,
-                Some(lc.revert_preview_title),
-                &[(&[Btn::A], u.restore), (&[Btn::B], u.back)],
-                GLIDE_KEY_TOUCHES_PROFILES,
-                0,
-            );
+            let (rows, has_backup) = TOUCHES
+                .lock()
+                .map(|s| (s.preview_rows.clone(), s.has_backup))
+                .unwrap_or_default();
+            let title = if has_backup { lc.profile_revert } else { lc.touches_revert_default };
+            let crumbs = [lc.menu_keys];
+            let hints = [(&[Btn::A][..], u.restore), (&[Btn::B][..], u.back)];
+            draw_diff_page(backend, &crumbs, title, None, &rows, &hints);
         }
     }
     if let Some((msg, kind)) = toast {

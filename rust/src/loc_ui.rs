@@ -142,6 +142,32 @@ pub struct Ui {
     pub sounds_on: &'static str,
     pub sounds_off: &'static str,
     pub help_sounds: &'static str,
+    /// The pause's speed chip: the frame rate frozen with the picture ({} = the number).
+    pub fps_chip: &'static str,
+    /// The pause's processor chip, at the stock clock.
+    pub cpu_normal: &'static str,
+    /// The pause's processor chip, while the clock is raised.
+    pub cpu_boosted: &'static str,
+    /// Overclock help, one per setting, naming the options as the row shows them.
+    pub help_oc_off: &'static str,
+    pub help_oc_auto: &'static str,
+    pub help_oc_on: &'static str,
+    /// Pixels row help, naming the three options.
+    pub help_pixels: &'static str,
+    /// FPS counter row help.
+    pub help_fps: &'static str,
+    /// Verbs for the A hint of the pause rows that act at once.
+    pub resume: &'static str,
+    pub restart: &'static str,
+    /// Section title over the cursor rows of Touches et curseur.
+    pub sec_cursor: &'static str,
+    /// Column titles of a before / after table (profile preview, share, revert).
+    pub col_before: &'static str,
+    pub col_after: &'static str,
+    /// Last line of a before / after table cut short ({} = lines left out).
+    pub more_changes: &'static str,
+    /// Under a profile's name in its preview.
+    pub preview_sub: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -245,6 +271,21 @@ const EN: Ui = Ui {
     sounds_on: "On",
     sounds_off: "Off",
     help_sounds: "A short click when you move, choose or go back in the menus. Games are not affected.",
+    fps_chip: "{} fps",
+    cpu_normal: "Normal CPU",
+    cpu_boosted: "CPU boosted",
+    help_oc_off: "The console runs at its normal speed and the battery lasts longest. Auto speeds up only the games that slow down.",
+    help_oc_auto: "Auto raises the processor only while the game falls behind, and lowers it again once it no longer helps. On keeps it at full speed.",
+    help_oc_on: "On keeps the processor at full speed: smoother, but the battery drains faster and the console runs warmer.",
+    help_pixels: "Auto follows the game. Smooth softens the enlarged picture, Sharp keeps every pixel crisp: the right choice for pixel art.",
+    help_fps: "Shows the frames per second in the corner, the rate the game asks for, and a dot: green at full speed, yellow or red when it slows down.",
+    resume: "Resume",
+    restart: "Restart",
+    sec_cursor: "Cursor",
+    col_before: "Before",
+    col_after: "After",
+    more_changes: "And {} more changes",
+    preview_sub: "What this profile changes",
 };
 
 const FR: Ui = Ui {
@@ -348,6 +389,21 @@ const FR: Ui = Ui {
     sounds_on: "Activés",
     sounds_off: "Désactivés",
     help_sounds: "Un petit clic quand tu te déplaces, choisis ou reviens dans les menus. Les jeux ne sont pas concernés.",
+    fps_chip: "{} images/s",
+    cpu_normal: "Processeur normal",
+    cpu_boosted: "Processeur accéléré",
+    help_oc_off: "La console garde sa vitesse normale et la batterie dure le plus longtemps. Auto accélère seulement les jeux qui ralentissent.",
+    help_oc_auto: "Auto monte le processeur seulement quand le jeu ralentit, puis redescend s'il n'en a plus besoin. Actif le garde toujours au maximum.",
+    help_oc_on: "Actif garde le processeur au maximum : plus fluide, mais la batterie se vide plus vite et la console chauffe davantage.",
+    help_pixels: "Auto suit le jeu. Lissés adoucit l'image agrandie, Nets garde chaque pixel bien net : le bon choix pour le pixel art.",
+    help_fps: "Affiche dans le coin les images par seconde, la cadence demandée par le jeu et une pastille : verte à pleine vitesse, jaune ou rouge quand il ralentit.",
+    resume: "Reprendre",
+    restart: "Redémarrer",
+    sec_cursor: "Curseur",
+    col_before: "Avant",
+    col_after: "Après",
+    more_changes: "Et {} autres changements",
+    preview_sub: "Ce que ce profil change",
 };
 
 const ES: Ui = Ui {
@@ -451,6 +507,21 @@ const ES: Ui = Ui {
     sounds_on: "Activados",
     sounds_off: "Desactivados",
     help_sounds: "Un clic breve al moverte, elegir o volver en los menús. No afecta a los juegos.",
+    fps_chip: "{} fps",
+    cpu_normal: "CPU normal",
+    cpu_boosted: "CPU acelerada",
+    help_oc_off: "La consola va a su velocidad normal y la batería dura más. Auto solo acelera los juegos que van lentos.",
+    help_oc_auto: "Auto sube el procesador solo cuando el juego se ralentiza y lo baja cuando ya no hace falta. Activo lo mantiene siempre al máximo.",
+    help_oc_on: "Activo mantiene el procesador al máximo: más fluido, pero la batería se gasta antes y la consola se calienta más.",
+    help_pixels: "Auto sigue al juego. Suaves suaviza la imagen ampliada, Nítidos mantiene cada píxel definido: lo ideal para el pixel art.",
+    help_fps: "Muestra en la esquina los fotogramas por segundo, la tasa que pide el juego y un punto: verde a toda velocidad, amarillo o rojo cuando se ralentiza.",
+    resume: "Reanudar",
+    restart: "Reiniciar",
+    sec_cursor: "Cursor",
+    col_before: "Antes",
+    col_after: "Después",
+    more_changes: "Y {} cambios más",
+    preview_sub: "Lo que cambia este perfil",
 };
 
 const RU: Ui = Ui {
@@ -554,6 +625,21 @@ const RU: Ui = Ui {
     sounds_on: "Вкл.",
     sounds_off: "Выкл.",
     help_sounds: "Короткий щелчок при перемещении, выборе и возврате в меню. На игры не влияет.",
+    fps_chip: "{} кадр/с",
+    cpu_normal: "Обычная частота",
+    cpu_boosted: "Частота повышена",
+    help_oc_off: "Консоль работает на обычной частоте, батарея держится дольше всего. «Авто» ускоряет только игры, которые тормозят.",
+    help_oc_auto: "«Авто» повышает частоту, только когда игра тормозит, и снижает её, когда это больше не нужно. «Вкл» всегда держит максимум.",
+    help_oc_on: "«Вкл» держит максимальную частоту: плавнее, но батарея садится быстрее и консоль греется сильнее.",
+    help_pixels: "«Авто» следует игре. «Сглаженные» смягчают увеличенную картинку, «Чёткие» сохраняют каждый пиксель резким: лучший выбор для пиксель-арта.",
+    help_fps: "Показывает в углу кадры в секунду, частоту, которую просит игра, и точку: зелёную на полной скорости, жёлтую или красную при замедлении.",
+    resume: "Продолжить",
+    restart: "Заново",
+    sec_cursor: "Курсор",
+    col_before: "Было",
+    col_after: "Станет",
+    more_changes: "И ещё изменений: {}",
+    preview_sub: "Что меняет этот профиль",
 };
 
 const DE: Ui = Ui {
@@ -657,6 +743,21 @@ const DE: Ui = Ui {
     sounds_on: "An",
     sounds_off: "Aus",
     help_sounds: "Ein kurzer Klick beim Bewegen, Auswählen und Zurückgehen in den Menüs. Spiele sind nicht betroffen.",
+    fps_chip: "{} Bilder/s",
+    cpu_normal: "Normaler Takt",
+    cpu_boosted: "Takt erhöht",
+    help_oc_off: "Die Konsole läuft mit normalem Takt, der Akku hält am längsten. Auto beschleunigt nur Spiele, die ruckeln.",
+    help_oc_auto: "Auto erhöht den Takt nur, wenn das Spiel ruckelt, und senkt ihn wieder, sobald es nicht mehr nötig ist. Ein hält ihn immer am Maximum.",
+    help_oc_on: "Ein hält den Takt am Maximum: flüssiger, aber der Akku leert sich schneller und die Konsole wird wärmer.",
+    help_pixels: "Auto folgt dem Spiel. Weich glättet das vergrößerte Bild, Scharf hält jedes Pixel klar: ideal für Pixelart.",
+    help_fps: "Zeigt in der Ecke die Bilder pro Sekunde, die vom Spiel verlangte Rate und einen Punkt: grün bei voller Geschwindigkeit, gelb oder rot, wenn es langsamer wird.",
+    resume: "Fortsetzen",
+    restart: "Neu starten",
+    sec_cursor: "Cursor",
+    col_before: "Vorher",
+    col_after: "Nachher",
+    more_changes: "Und {} weitere Änderungen",
+    preview_sub: "Was dieses Profil ändert",
 };
 
 const IT: Ui = Ui {
@@ -760,6 +861,21 @@ const IT: Ui = Ui {
     sounds_on: "Attivi",
     sounds_off: "Disattivati",
     help_sounds: "Un breve clic quando ti sposti, scegli o torni indietro nei menu. I giochi non cambiano.",
+    fps_chip: "{} fps",
+    cpu_normal: "CPU normale",
+    cpu_boosted: "CPU accelerata",
+    help_oc_off: "La console resta alla velocità normale e la batteria dura di più. Auto accelera solo i giochi che rallentano.",
+    help_oc_auto: "Auto alza il processore solo quando il gioco rallenta e lo riabbassa quando non serve più. Attivo lo tiene sempre al massimo.",
+    help_oc_on: "Attivo tiene il processore al massimo: più fluido, ma la batteria si scarica prima e la console scalda di più.",
+    help_pixels: "Auto segue il gioco. Morbidi ammorbidisce l'immagine ingrandita, Nitidi tiene ogni pixel definito: la scelta giusta per la pixel art.",
+    help_fps: "Mostra nell'angolo i fotogrammi al secondo, la frequenza richiesta dal gioco e un punto: verde a piena velocità, giallo o rosso quando rallenta.",
+    resume: "Riprendi",
+    restart: "Riavvia",
+    sec_cursor: "Cursore",
+    col_before: "Prima",
+    col_after: "Dopo",
+    more_changes: "E altre {} modifiche",
+    preview_sub: "Cosa cambia questo profilo",
 };
 
 const PT: Ui = Ui {
@@ -863,6 +979,21 @@ const PT: Ui = Ui {
     sounds_on: "Ativados",
     sounds_off: "Desativados",
     help_sounds: "Um clique curto ao mover, escolher ou voltar nos menus. Os jogos não são afetados.",
+    fps_chip: "{} fps",
+    cpu_normal: "CPU normal",
+    cpu_boosted: "CPU acelerada",
+    help_oc_off: "O console fica na velocidade normal e a bateria dura mais. Auto acelera só os jogos que ficam lentos.",
+    help_oc_auto: "Auto sobe o processador só quando o jogo fica lento e o baixa quando não precisa mais. Ativo o mantém sempre no máximo.",
+    help_oc_on: "Ativo mantém o processador no máximo: mais fluido, mas a bateria acaba mais rápido e o console esquenta mais.",
+    help_pixels: "Auto segue o jogo. Suaves suaviza a imagem ampliada, Nítidos mantém cada pixel definido: o ideal para pixel art.",
+    help_fps: "Mostra no canto os quadros por segundo, a taxa que o jogo pede e um ponto: verde na velocidade total, amarelo ou vermelho quando fica lento.",
+    resume: "Continuar",
+    restart: "Reiniciar",
+    sec_cursor: "Cursor",
+    col_before: "Antes",
+    col_after: "Depois",
+    more_changes: "E mais {} mudanças",
+    preview_sub: "O que este perfil muda",
 };
 
 const ZH: Ui = Ui {
@@ -966,6 +1097,21 @@ const ZH: Ui = Ui {
     sounds_on: "开",
     sounds_off: "关",
     help_sounds: "在菜单中移动、选择或返回时发出轻微的提示音。不影响游戏。",
+    fps_chip: "{} 帧/秒",
+    cpu_normal: "处理器正常",
+    cpu_boosted: "处理器已加速",
+    help_oc_off: "主机保持正常频率，续航最长。“自动”只为变慢的游戏提速。",
+    help_oc_auto: "“自动”只在游戏变慢时提高处理器频率，不再需要时恢复。“开启”始终保持最高频率。",
+    help_oc_on: "“开启”让处理器始终保持最高频率：更流畅，但耗电更快、发热更多。",
+    help_pixels: "“自动”跟随游戏设置。“平滑”柔化放大的画面，“锐利”让每个像素保持清晰，适合像素画风。",
+    help_fps: "在角落显示每秒帧数、游戏要求的帧率和一个圆点：全速时为绿色，变慢时为黄色或红色。",
+    resume: "继续",
+    restart: "重新开始",
+    sec_cursor: "光标",
+    col_before: "之前",
+    col_after: "之后",
+    more_changes: "还有 {} 处更改",
+    preview_sub: "此配置会更改的内容",
 };
 
 const TR: Ui = Ui {
@@ -1069,6 +1215,21 @@ const TR: Ui = Ui {
     sounds_on: "Açık",
     sounds_off: "Kapalı",
     help_sounds: "Menülerde gezinirken, seçerken veya geri dönerken kısa bir tık. Oyunları etkilemez.",
+    fps_chip: "{} kare/sn",
+    cpu_normal: "Normal işlemci",
+    cpu_boosted: "İşlemci hızlandı",
+    help_oc_off: "Konsol normal hızında çalışır, pil en uzun dayanır. Otomatik yalnızca yavaşlayan oyunları hızlandırır.",
+    help_oc_auto: "Otomatik, işlemciyi yalnızca oyun yavaşladığında yükseltir, gerek kalmayınca düşürür. Açık her zaman en yüksekte tutar.",
+    help_oc_on: "Açık, işlemciyi en yüksekte tutar: daha akıcı, ama pil daha çabuk biter ve konsol daha çok ısınır.",
+    help_pixels: "Otomatik oyunu izler. Yumuşak büyütülen görüntüyü yumuşatır, Keskin her pikseli net tutar: piksel sanatı için doğru seçim.",
+    help_fps: "Köşede saniyedeki kare sayısını, oyunun istediği hızı ve bir nokta gösterir: tam hızda yeşil, yavaşlayınca sarı ya da kırmızı.",
+    resume: "Devam et",
+    restart: "Yeniden başlat",
+    sec_cursor: "İmleç",
+    col_before: "Önce",
+    col_after: "Sonra",
+    more_changes: "Ve {} değişiklik daha",
+    preview_sub: "Bu profilin değiştirdikleri",
 };
 
 pub fn ui() -> &'static Ui {

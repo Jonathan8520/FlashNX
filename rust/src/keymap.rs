@@ -1188,10 +1188,16 @@ pub fn has_revert(basename: &str) -> bool {
     !binding_diff_rows(&cur, &tgt).is_empty()
 }
 
-/// Build "<button>: <current> -> <target>" diff lines for the keys that differ
-/// between two keymaps, across BOTH players (#40). P1 rows are unprefixed (the
-/// common single-player case stays clean); P2 rows carry a "P2 " tag so a
-/// two-player change is attributed to the right pad. The single source of truth
+/// Build one diff line per key that differs between two keymaps, across BOTH
+/// players (#40): `"<what>\t<before>\t<after>"`, three fields the preview
+/// draws as three columns under "Avant" and "Après" (`kit_diff_line`).
+///
+/// It used to be one sentence, "A: Espace -> Clic gauche", and the arrow was
+/// what a player could not read (Jonathan, 2026-10-12: "pourquoi tu mets
+/// ->"). `<what>` is the button as the keymap names it, so the preview can draw
+/// the same badge the editor does: P1 rows are bare ("StickLUp"), P2 rows carry
+/// a "P2 " tag and combo rows their modifier ("ZL+A"), so a two-player change
+/// is attributed to the right pad. The single source of truth
 /// for every profile/revert/share preview (library + in-game) — diffing only P1
 /// here was the bug where editing a P2 key showed "no changes" yet still dropped
 /// the active tag.
@@ -1212,7 +1218,7 @@ pub fn binding_diff_rows(cur: &Keymap, tgt: &Keymap) -> std::vec::Vec<std::strin
             let c = c_map.get(*btn).map(std::string::String::as_str).unwrap_or("");
             let n = t_map.get(*btn).map(std::string::String::as_str).unwrap_or("");
             if c != n {
-                rows.push(std::format!("{}{}: {} -> {}", label, btn, disp(c), disp(n)));
+                rows.push(std::format!("{}{}\t{}\t{}", label, btn, disp(c), disp(n)));
             }
         }
     };
@@ -1238,7 +1244,7 @@ pub fn binding_diff_rows(cur: &Keymap, tgt: &Keymap) -> std::vec::Vec<std::strin
         let lc = crate::loc::s();
         let onoff = |b: bool| if b { lc.cursor_shown } else { lc.cursor_hidden };
         rows.push(std::format!(
-            "{}: {} -> {}",
+            "{}\t{}\t{}",
             lc.show_cursor,
             onoff(cur.show_cursor),
             onoff(tgt.show_cursor),
@@ -1255,15 +1261,11 @@ pub fn cursor_diff_row(cur: i32, tgt: i32) -> Option<std::string::String> {
     if cur == tgt {
         return None;
     }
-    let disp = |v: i32| -> std::string::String {
-        if v < 0 {
-            crate::loc::s().none.to_string()
-        } else {
-            std::format!("#{}", v)
-        }
-    };
+    // The speed as the menu shows it ("x1,5"), not the preset's index: "#3"
+    // meant nothing to anyone but this file. No value is the default speed.
+    let disp = |v: i32| -> std::string::String { crate::loc::speed_label(if v < 0 { 1 } else { v }) };
     Some(std::format!(
-        "{}: {} -> {}",
+        "{}\t{}\t{}",
         crate::loc::s().set_cursor_speed,
         disp(cur),
         disp(tgt),

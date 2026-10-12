@@ -178,6 +178,13 @@ extern "C" int  ruffle_touches_input(const char* button_name);
 extern "C" int  ruffle_touches_consume_dirty(void);
 extern "C" void ruffle_touches_draw(void);
 extern "C" void ruffle_menu_touch(float x, float y, int pressed);
+extern "C" int  ruffle_pause_touch(float x, float y, int pressed, int live);
+// Touch tables of the pause panels (lib.rs UI_KIND_PAUSE / UI_KIND_SCREEN).
+static const int UI_KIND_PAUSE  = 60;
+static const int UI_KIND_SCREEN = 61;
+// `dir` for A on a row whose options are all on show: go round (lib.rs
+// STEP_CYCLE). Left / Right pass -1 / 1 and stop at the ends.
+static const int STEP_CYCLE = 2;
 
 // In-game software keyboard (raised when a Flash TextField gains focus).
 extern "C" int  ruffle_keyboard_take_request(void);
@@ -1778,13 +1785,32 @@ static void worker_entry(void* arg) {
                     gl_context_swap();
                     continue;
                 }
-                if (kDown & HidNpadButton_A) {
-                    // ZOOM opens a mode; every other row steps its value.
+                // A tap on a row moves the cursor there; a tap on the row it is
+                // already on is A.
+                bool tap_a = false;
+                {
+                    hidGetTouchScreenStates(&touch_state, 1);
+                    const bool t = touch_state.count > 0;
+                    const int hit = ruffle_pause_touch(
+                        t ? (float)touch_state.touches[0].x * UI_TOUCH_SCALE_X : 0.0f,
+                        t ? (float)touch_state.touches[0].y * UI_TOUCH_SCALE_Y : 0.0f,
+                        t ? 1 : 0, UI_KIND_SCREEN);
+                    if (hit >= 0 && hit < SCREEN_COUNT) {
+                        if (hit == screen_selection) {
+                            tap_a = true;
+                        } else {
+                            screen_selection = hit;
+                            ruffle_ui_sound(UI_SFX_MOVE);
+                        }
+                    }
+                }
+                if ((kDown & HidNpadButton_A) || tap_a) {
+                    // ZOOM opens a mode; every other row goes round its options.
                     ruffle_ui_sound(screen_selection == SCREEN_ZOOM ? UI_SFX_DECIDE : UI_SFX_TOGGLE);
                     switch (screen_selection) {
-                    case SCREEN_DISPLAY:  ruffle_display_mode_step(1);   break;
+                    case SCREEN_DISPLAY:  ruffle_display_mode_step(STEP_CYCLE);   break;
                     case SCREEN_ROTATION:
-                        ruffle_rotation_step(1);
+                        ruffle_rotation_step(STEP_CYCLE);
                         // Turning changes the basis the pointer is mapped
                         // through AND recentres the framing, so the stage point
                         // under the crosshair moves. Same reason as the zoom
@@ -1804,9 +1830,9 @@ static void worker_entry(void* arg) {
                         pan_hold = 0;
                         zoom_fine_hold = 0;
                         break;
-                    case SCREEN_PIXELS:   ruffle_pixel_filter_step(1);   break;
-                    case SCREEN_FILTER:   ruffle_screen_filter_step(1);  break;
-                    case SCREEN_FPS:      ruffle_fps_counter_step(1);    break;
+                    case SCREEN_PIXELS:   ruffle_pixel_filter_step(STEP_CYCLE);   break;
+                    case SCREEN_FILTER:   ruffle_screen_filter_step(STEP_CYCLE);  break;
+                    case SCREEN_FPS:      ruffle_fps_counter_step(STEP_CYCLE);    break;
                     }
                 }
                 ruffle_redraw_paused();
@@ -1851,6 +1877,25 @@ static void worker_entry(void* arg) {
                     ruffle_ui_sound(UI_SFX_TOGGLE);
                 }
             }
+            // A tap on a row moves the cursor there; a tap on the row it is
+            // already on is A.
+            bool tap_a = false;
+            {
+                hidGetTouchScreenStates(&touch_state, 1);
+                const bool t = touch_state.count > 0;
+                const int hit = ruffle_pause_touch(
+                    t ? (float)touch_state.touches[0].x * UI_TOUCH_SCALE_X : 0.0f,
+                    t ? (float)touch_state.touches[0].y * UI_TOUCH_SCALE_Y : 0.0f,
+                    t ? 1 : 0, UI_KIND_PAUSE);
+                if (hit >= 0 && hit < MENU_COUNT) {
+                    if (hit == menu_selection) {
+                        tap_a = true;
+                    } else {
+                        menu_selection = hit;
+                        ruffle_ui_sound(UI_SFX_MOVE);
+                    }
+                }
+            }
             if (kDown & (HidNpadButton_Minus | HidNpadButton_B)) {
                 // Scale the menu out (drained at the top of this branch over the
                 // next frames), then resume.
@@ -1864,7 +1909,7 @@ static void worker_entry(void* arg) {
                 menu_closing = true;
                 continue;
             }
-            if (kDown & HidNpadButton_A) {
+            if ((kDown & HidNpadButton_A) || tap_a) {
                 // Resume closes the sheet, OVERCLOCK steps in place, the rest
                 // open a page or act.
                 ruffle_ui_sound(menu_selection == MENU_RESUME ? UI_SFX_CLOSE
@@ -1891,10 +1936,10 @@ static void worker_entry(void* arg) {
                     zoom_mode = false;
                     continue;
                 case MENU_POWER:
-                    // Toggles in place, like the ECRAN rows: the panel stays
+                    // Goes round in place, like the ECRAN rows: the panel stays
                     // open and the row redraws with the mode actually in force,
                     // which is not always the one asked for.
-                    ruffle_power_mode_step(1);
+                    ruffle_power_mode_step(STEP_CYCLE);
                     continue;
                 case MENU_RESTART: {
                     std::printf("menu: REDEMARRER → ruffle_restart()\n");
