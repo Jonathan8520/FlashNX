@@ -4440,11 +4440,14 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
                 t.start_x >= rx && t.start_x <= rx + rw && t.start_y >= ry && t.start_y <= ry + rh
             }
         {
-            let mut launch = false;
-            if let Ok(s) = LIBRARY.lock() {
-                launch = !s.applet_mode && !s.entries.is_empty();
-            }
+            // The hero is the selected game: a tap on it is A, as a second tap
+            // on a tile is. A starts the game, or in applet mode shows the
+            // notice saying why no game can start there; the applet was ruled
+            // out here first, and the tap did nothing at all.
+            let launch = LIBRARY.lock().map(|s| !s.entries.is_empty()).unwrap_or(false);
             if launch {
+                // TOUCH first, as below: `input` locks LIBRARY again.
+                drop(t);
                 input("A");
             }
             return;
