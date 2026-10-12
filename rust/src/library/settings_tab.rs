@@ -684,7 +684,8 @@ pub(crate) fn handle_send_failed_input(s: &mut State, button: &str, row: usize) 
 // ── Folders ───────────────────────────────────────────────────────────────
 
 /// The folder the games-folder browser opened on (beside the library). B
-/// climbs back up to it and leaves from there, or from anywhere above it.
+/// leaves from there and from the folders above it, which lead back to it;
+/// anywhere else it climbs.
 static BROWSE_START: Mutex<std::string::String> = Mutex::new(std::string::String::new());
 
 /// Whether B in the browser showing `path` climbs a level (true) or leaves it.
@@ -692,10 +693,14 @@ static BROWSE_START: Mutex<std::string::String> = Mutex::new(std::string::String
 /// The browser opens beside the library, and B there used to climb on to the
 /// card's root before a second B left (a third for a library in
 /// `/roms/flashnx`), while the footer said "Remonter" and the crumb
-/// "Bibliothèque". Below the folder it opened on, B still climbs back to it.
+/// "Bibliothèque". So B leaves on the folder it opened on and on the ones
+/// above it, the way the player came. Everywhere else it climbs: below that
+/// folder, and in another branch of the card reached through the root, where
+/// leaving at once lost the whole walk down. Never at the card's root, which
+/// has nothing above it.
 pub(crate) fn b_climbs(path: &str) -> bool {
     let start = BROWSE_START.lock().map(|g| g.clone()).unwrap_or_default();
-    inside_dir(path, &start)
+    browse_parent(path).is_some() && !same_dir(path, &start) && !inside_dir(&start, path)
 }
 
 /// A tap on a page opened in the pane, `k` places past its list

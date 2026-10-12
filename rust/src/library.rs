@@ -5269,9 +5269,10 @@ fn browse_go_up(s: &mut State, path: &str) {
 /// Folder browser of RÉGLAGES > Bibliothèque > Dossier des jeux (#79).
 ///
 /// Row 0 chooses the folder currently shown; the rows below descend into its
-/// subfolders. Below the folder the browser opened on, B goes back UP a level
-/// rather than out, which is what a file browser is expected to do; from that
-/// folder or above it B leaves, and `-` leaves from anywhere.
+/// subfolders. B goes back UP a level rather than out, which is what a file
+/// browser is expected to do, except on the folder the browser opened on and
+/// the folders above it, where it leaves (`settings_tab::b_climbs`); `-`
+/// leaves from anywhere.
 fn handle_games_dir_input(s: &mut State, button: &str, mut selection: usize, mut scroll: usize) {
     let path = s.dir_path.clone();
     // Rows: 0 = choose this folder, then "up" unless we are at the card root,
@@ -5330,11 +5331,10 @@ fn handle_games_dir_input(s: &mut State, button: &str, mut selection: usize, mut
             return;
         }
         "B" => {
-            // Same as the "up" row below the folder the browser opened on --
-            // including landing on the folder just left, which is the way most
-            // people go back up and the reason the fix on the row alone was
-            // invisible. From that folder, or above it, B leaves
-            // (`settings_tab::b_climbs`).
+            // Same as the "up" row, including landing on the folder just left,
+            // which is the way most people go back up and the reason the fix on
+            // the row alone was invisible. On the folder the browser opened on,
+            // or one above it, B leaves (`settings_tab::b_climbs`).
             if settings_tab::b_climbs(&path) && browse_parent(&path).is_some() {
                 browse_go_up(s, &path);
             } else {
