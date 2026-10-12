@@ -60,6 +60,43 @@ void main() {\n\
     frag_color = pf.a > 0.0001 ? vec4(pf.rgb / pf.a, pf.a) : vec4(0.0);\n\
 }\n\0";
 
+// A textured quad clipped to the same rounded rectangle, for cover art: the
+// corners are cut by the shader instead of painted over in the page colour, so
+// a cover can sit on a shadow, a backdrop or a panel and still look right.
+const IMAGE_VERT: &[u8] = b"#version 330 core\n\
+layout(location = 0) in vec2 a_pos;\n\
+uniform mat3 u_world;\n\
+uniform vec2 u_size;\n\
+uniform vec4 u_uv;\n\
+out vec2 v_local;\n\
+out vec2 v_uv;\n\
+void main() {\n\
+    vec3 p = u_world * vec3(a_pos, 1.0);\n\
+    gl_Position = vec4(p.xy, 0.0, 1.0);\n\
+    v_local = (a_pos - 0.5) * u_size;\n\
+    v_uv = u_uv.xy + a_pos * u_uv.zw;\n\
+}\n\0";
+
+const IMAGE_FRAG: &[u8] = b"#version 330 core\n\
+in vec2 v_local;\n\
+in vec2 v_uv;\n\
+out vec4 frag_color;\n\
+uniform sampler2D u_tex;\n\
+uniform vec2 u_half;\n\
+uniform float u_radius;\n\
+uniform float u_alpha;\n\
+float sd_rrect(vec2 p, vec2 b, float r) {\n\
+    vec2 q = abs(p) - b + vec2(r);\n\
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;\n\
+}\n\
+void main() {\n\
+    vec4 c = texture(u_tex, v_uv);\n\
+    float d = sd_rrect(v_local, u_half, u_radius);\n\
+    float aa = max(fwidth(d), 0.0001);\n\
+    float cover = clamp(0.5 - d / aa, 0.0, 1.0);\n\
+    frag_color = vec4(c.rgb, c.a * u_alpha * cover);\n\
+}\n\0";
+
 pub(crate) struct ShapeProgram {
     program: GLuint,
     u_world: GLint,
@@ -70,6 +107,13 @@ pub(crate) struct ShapeProgram {
     u_border: GLint,
     u_border_col: GLint,
     u_soft: GLint,
+    img_program: GLuint,
+    img_u_world: GLint,
+    img_u_size: GLint,
+    img_u_uv: GLint,
+    img_u_half: GLint,
+    img_u_radius: GLint,
+    img_u_alpha: GLint,
     vao: GLuint,
     vbo: GLuint,
 }
@@ -77,6 +121,13 @@ pub(crate) struct ShapeProgram {
 impl ShapeProgram {
     fn build() -> Option<ShapeProgram> {
         let program = link_program(SHAPE_VERT, SHAPE_FRAG)?;
+        let img_program = link_program(IMAGE_VERT, IMAGE_FRAG)?;
+        unsafe {
+            // The sampler is always unit 0; set once, like the bitmap program.
+            glUseProgram(img_program);
+            glUniform1i(loc(img_program, b"u_tex\0"), 0);
+            glUseProgram(0);
+        }
         #[rustfmt::skip]
         const QUAD: [f32; 12] = [
             0.0, 0.0,  1.0, 0.0,  1.0, 1.0,
@@ -109,6 +160,13 @@ impl ShapeProgram {
             u_border: loc(program, b"u_border\0"),
             u_border_col: loc(program, b"u_border_col\0"),
             u_soft: loc(program, b"u_soft\0"),
+            img_u_world: loc(img_program, b"u_world\0"),
+            img_u_size: loc(img_program, b"u_size\0"),
+            img_u_uv: loc(img_program, b"u_uv\0"),
+            img_u_half: loc(img_program, b"u_half\0"),
+            img_u_radius: loc(img_program, b"u_radius\0"),
+            img_u_alpha: loc(img_program, b"u_alpha\0"),
+            img_program,
             program,
             vao,
             vbo,
@@ -122,6 +180,7 @@ impl Drop for ShapeProgram {
             glDeleteBuffers(1, &self.vbo);
             glDeleteVertexArrays(1, &self.vao);
             glDeleteProgram(self.program);
+            glDeleteProgram(self.img_program);
         }
     }
 }
@@ -136,6 +195,59 @@ fn rgba_f(c: u32) -> [f32; 4] {
 }
 
 impl SwitchRenderBackend {
+    fn kit_shapes_init(&mut self) {
+        if !self.kit_shapes_tried {
+            self.kit_shapes_tried = true;
+            self.kit_shapes = ShapeProgram::build();
+            if self.kit_shapes.is_none() {
+                log_str("kit: shape shader failed, falling back to square boxes\n");
+            }
+            self.gl_state.invalidate();
+        }
+    }
+
+    /// Draw `tex` in the box `(x, y, w, h)` with rounded corners. `uv` is the
+    /// sub-rectangle of the texture shown, `[u0, v0, du, dv]`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn kit_image(&mut self, x: f32, y: f32, w: f32, h: f32, tex: GLuint, uv: [f32; 4], alpha: f32, radius: f32) {
+        if tex == 0 || w <= 0.0 || h <= 0.0 || alpha <= 0.0 {
+            return;
+        }
+        self.kit_shapes_init();
+        let Some(sp) = self.kit_shapes.as_ref() else {
+            self.draw_textured_rect(x, y, w, h, tex);
+            return;
+        };
+        let (program, vao) = (sp.img_program, sp.vao);
+        let (u_world, u_size, u_uv, u_half, u_radius, u_alpha) =
+            (sp.img_u_world, sp.img_u_size, sp.img_u_uv, sp.img_u_half, sp.img_u_radius, sp.img_u_alpha);
+        let m = Matrix {
+            a: w, b: 0.0, c: 0.0, d: h,
+            tx: swf::Twips::from_pixels(x as f64),
+            ty: swf::Twips::from_pixels(y as f64),
+        };
+        let world = self.world_matrix(&m);
+        let r = radius.min(w * 0.5).min(h * 0.5).max(0.0);
+        unsafe {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        }
+        self.gl_state.use_program(program);
+        self.gl_state.bind_texture_unit0(tex);
+        self.gl_state.bind_sampler(0);
+        self.gl_state.bind_vao(vao);
+        self.draw_calls_this_window = self.draw_calls_this_window.saturating_add(1);
+        unsafe {
+            glUniformMatrix3fv(u_world, 1, GL_FALSE, world.as_ptr());
+            glUniform2f(u_size, w, h);
+            glUniform4f(u_uv, uv[0], uv[1], uv[2], uv[3]);
+            glUniform2f(u_half, w * 0.5, h * 0.5);
+            glUniform1f(u_radius, r);
+            glUniform1f(u_alpha, alpha.clamp(0.0, 1.0));
+            glDrawArrays(GL_TRIANGLES, 0, 6);
+        }
+    }
+
     /// One shape draw. `(x, y, w, h)` is the shape itself; `pad` grows the quad
     /// around it so a soft edge has room to fade out.
     #[allow(clippy::too_many_arguments)]
@@ -154,14 +266,7 @@ impl SwitchRenderBackend {
         if w <= 0.0 || h <= 0.0 {
             return;
         }
-        if !self.kit_shapes_tried {
-            self.kit_shapes_tried = true;
-            self.kit_shapes = ShapeProgram::build();
-            if self.kit_shapes.is_none() {
-                log_str("kit: shape shader failed, falling back to square boxes\n");
-            }
-            self.gl_state.invalidate();
-        }
+        self.kit_shapes_init();
         let Some(sp) = self.kit_shapes.as_ref() else {
             // No shader: square corners rather than nothing.
             if border <= 0.0 && soft <= 0.0 {

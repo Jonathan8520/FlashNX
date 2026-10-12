@@ -743,7 +743,7 @@ pub fn note_played_from_path(path: &str) {
     let display_name = read_meta_sidecar(&basename)
         .and_then(|m| m.display_name)
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| basename.clone());
+        .unwrap_or_else(|| pretty_name(&basename));
     note_played(path, &basename, &display_name);
 }
 
@@ -786,7 +786,7 @@ pub fn owned_games() -> std::vec::Vec<(std::string::String, std::string::String)
             let name = read_meta_sidecar(basename)
                 .and_then(|m| m.display_name)
                 .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| basename.to_string());
+                .unwrap_or_else(|| pretty_name(basename));
             out.push((basename.to_string(), name));
         }
     }
@@ -966,6 +966,56 @@ fn find_user_file(suffix: &str) -> Option<std::string::String> {
 /// Where to WRITE a user-facing sidecar / config: the player's games folder.
 fn primary_user_path(suffix: &str) -> std::string::String {
     std::format!("{}/{}", primary_root(), suffix)
+}
+
+/// The name a game is shown under when it has never been renamed: its file
+/// name, made readable.
+///
+/// The file name was shown as is, extension included ("Super Mario
+/// Cloud.swf"), and the files that come from Flashpoint carry its file-system
+/// escapes: ":" became "_ " ("Jinx_ Dark and Stormy Night") and "'" became "_"
+/// ("Garfield_s Scary Scavenger Hunt"). A download from a site often arrives as
+/// "haunt-the-house-719579f9": dashes for spaces and a hash on the end. None of
+/// it is part of the game's name, so none of it is shown. RENOMMER still wins
+/// over all of this, and the file on the card is not touched.
+pub(crate) fn pretty_name(basename: &str) -> std::string::String {
+    let stem = basename
+        .strip_suffix(".swf")
+        .or_else(|| basename.strip_suffix(".SWF"))
+        .unwrap_or(basename);
+    let mut name = stem.replace("_ ", ": ").replace("_s ", "'s ");
+    if name.ends_with("_s") {
+        name.truncate(name.len() - 2);
+        name.push_str("'s");
+    }
+    name = name.replace('_', " ");
+    if !name.contains(' ') && name.contains('-') {
+        let mut parts: std::vec::Vec<&str> = name.split('-').filter(|p| !p.is_empty()).collect();
+        if parts.len() > 1 && parts.last().map_or(false, |t| looks_like_download_hash(t)) {
+            parts.pop();
+        }
+        name = parts.join(" ");
+    }
+    let name = name.split_whitespace().collect::<std::vec::Vec<_>>().join(" ");
+    if name.is_empty() {
+        return basename.to_string();
+    }
+    // An all-lower-case name ("super gravity rush") gets its words capitalised;
+    // a name that already has capitals is left exactly as its author wrote it.
+    if !name.chars().any(|c| c.is_uppercase()) {
+        return name
+            .split(' ')
+            .map(|w| {
+                let mut cs = w.chars();
+                match cs.next() {
+                    Some(f) => f.to_uppercase().chain(cs).collect::<std::string::String>(),
+                    None => std::string::String::new(),
+                }
+            })
+            .collect::<std::vec::Vec<_>>()
+            .join(" ");
+    }
+    name
 }
 
 fn read_meta_sidecar(basename: &str) -> Option<MetaSidecar> {
@@ -2317,7 +2367,7 @@ pub fn add_path(path: &str, mtime: u64) -> bool {
     let display_name = scan_timed(2, || read_meta_sidecar(&basename))
         .and_then(|m| m.display_name)
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| basename.clone());
+        .unwrap_or_else(|| pretty_name(&basename));
     // Which import source this game came from (its `.url` sidecar). Read here,
     // alongside the other sidecars, so the IMPORTER list can count an item's
     // installed files in memory instead of hitting the SD every frame.
@@ -8265,7 +8315,7 @@ fn run_rename_flow(game_idx: usize) {
         }
         if let Some(entry) = s.entries.get_mut(game_idx) {
             entry.display_name = if new_name_trimmed.is_empty() {
-                entry.basename.clone()
+                pretty_name(&entry.basename)
             } else {
                 new_name_trimmed
             };

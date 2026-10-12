@@ -12054,7 +12054,6 @@ impl SwitchRenderBackend {
                     self.kit_default_tile(x, ry, rw, rh, e.color_chip, &e.display_name);
                 }
             }
-            self.round_corners(x, ry, rw, rh, theme::radius::TILE);
             if crate::favorites::is_favorite(&e.basename) {
                 self.kit_favorite_chip(x + 8.0, ry + 8.0);
             }
@@ -12602,16 +12601,41 @@ impl SwitchRenderBackend {
                 let _ = self.cover_for(&entries[idx].basename);
             }
         }
-        for (idx, &(tx, tw, trow)) in tiles.iter().enumerate() {
+        let (cover_open, cover_close, cover_t) = grid_cover_phase(selection);
+        // How far a tile grows when it opens: enough to read as lifted off the
+        // grid, little enough to stay inside the gap to its neighbours.
+        const LIFT: f32 = 0.05;
+        for (idx, &(tx0, tw0, trow)) in tiles.iter().enumerate() {
             if trow < lo_row || trow > hi_row {
                 continue;
             }
-            let ty = TOP + trow as f32 * pitch - scroll_px;
+            let ty0 = TOP + trow as f32 * pitch - scroll_px;
             // Skip tiles fully outside the band (cheap reject before draw).
-            if ty + ROW_IMG_H < band_top || ty > band_bot {
+            if ty0 + ROW_IMG_H < band_top || ty0 > band_bot {
                 continue;
             }
-            let th = ROW_IMG_H;
+            // Exactly two tiles move: the one being selected opens, the one
+            // being left folds back, whatever the travelling ring passes over.
+            let b = {
+                let u = if idx == cover_open {
+                    cover_t
+                } else if idx == cover_close {
+                    1.0 - cover_t
+                } else {
+                    0.0
+                };
+                u * u * (3.0 - 2.0 * u)
+            };
+            let grow = LIFT * b;
+            let (tx, ty, tw, th) = (
+                tx0 - tw0 * grow * 0.5,
+                ty0 - ROW_IMG_H * grow * 0.5,
+                tw0 * (1.0 + grow),
+                ROW_IMG_H * (1.0 + grow),
+            );
+            if b > 0.0 {
+                self.kit_shadow(tx, ty + 8.0, tw, th, theme::radius::TILE, 16.0, ((0x90 as f32 * b) as u32) << 24);
+            }
             // Cached cover, else decode one if this frame still has budget, else
             // the generated tile for now (it resolves on a following frame).
             let (cover, ready_at) = match cover_ready(&entries[idx].basename) {
@@ -12634,16 +12658,11 @@ impl SwitchRenderBackend {
                 self.kit_default_tile(tx, ty, tw, th, entries[idx].color_chip, &entries[idx].display_name);
             }
             if let Some((tex, w, h, amb)) = cover_img {
-                // Whole cover, or cropped to fill when that costs almost nothing:
-                // the same rule as every other view. Nothing is hidden, so the
-                // selected tile no longer has to zoom out to show its art.
-                self.kit_cover(tx, ty, tw, th, tex, w, h, amb, fade);
+                // Filled at rest; the selected tile opens to the whole cover
+                // over its blurred backdrop.
+                self.kit_cover_reveal(tx, ty, tw, th, tex, w, h, amb, b, fade);
             }
 
-            // Every tile, the selected one included: the focus ring stands off
-            // the tile by a gap of page colour, so there is no frame for the
-            // corner notches to be trapped inside any more.
-            self.round_corners(tx, ty, tw, th, theme::radius::TILE);
 
             // NO AS3 BADGE. It used to sit here, in amber, on every AS3 tile.
             //
@@ -12670,11 +12689,17 @@ impl SwitchRenderBackend {
         // inflates it right after a move for a little tactile "snap"; `pulse`
         // keeps the existing breathing brightness.
         if !tiles.is_empty() {
-            let grow = pop * 5.0;
-            let fx = frame_x - grow;
-            let fy = frame_y - scroll_px - grow;
-            let fw = frame_w + 2.0 * grow;
-            let fh = ROW_IMG_H + 2.0 * grow;
+            // The ring hugs the lifted tile: the same growth, plus the brief
+            // "snap" right after a move.
+            let lift = {
+                let u = cover_t;
+                0.05 * u * u * (3.0 - 2.0 * u)
+            };
+            let grow = pop * 3.0;
+            let fx = frame_x - frame_w * lift * 0.5 - grow;
+            let fy = frame_y - scroll_px - ROW_IMG_H * lift * 0.5 - grow;
+            let fw = frame_w * (1.0 + lift) + 2.0 * grow;
+            let fh = ROW_IMG_H * (1.0 + lift) + 2.0 * grow;
             // A gold ring that stands off the tile, concentric with its corners,
             // instead of the breathing frame drawn over the cover's edge.
             self.kit_ring(

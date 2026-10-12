@@ -1,12 +1,18 @@
-//! Cover art in a box of any shape, by one rule shared by every view.
+//! Cover art in a box of any shape.
 //!
-//! Covers come in every shape: square logos, 16:9 screenshots, 4:1 banners. The
-//! grid used to crop them all to fill its tiles, which cut titles in half, and
-//! then zoomed the selected one back out to show what had been cut. The rule
-//! now: if filling the box costs at most `FILL_LIMIT` of the image, fill it;
-//! otherwise show the WHOLE image, over a blurred, darkened copy of itself that
-//! fills the rest of the box. Nothing is hidden, so nothing has to move when the
-//! cursor arrives, and every tile still has the same size.
+//! Covers come in every shape: square logos, 16:9 screenshots, banners ten
+//! times wider than tall. Two ways of showing them, one per kind of box:
+//!
+//! - A TILE in a grid or a strip fills its box at rest (cropped, so the grid is
+//!   calm and every tile reads as a picture) and OPENS when selected: it grows a
+//!   little, lifts on a shadow, and relaxes to the whole image over a blurred,
+//!   darkened copy of itself (`kit_cover_reveal`).
+//! - A box that shows one cover on its own (the launch, a detail panel) shows it
+//!   whole over that backdrop unless filling costs at most `FILL_LIMIT` of the
+//!   image (`kit_cover`).
+//!
+//! Corners are cut by the image shader (`kit_image`), not painted over in the
+//! page colour, so a cover looks right over a shadow or a panel too.
 //!
 //! The blurred copy is free on this GPU: a ~20 px wide version of the image,
 //! softened once on the CPU and stretched with linear filtering, is the blur.
@@ -110,6 +116,23 @@ pub(crate) fn ambient_pixels(rgba: &[u8], w: u32, h: u32) -> Option<(std::vec::V
     Some((out, aw as u32, ah as u32))
 }
 
+/// The texture sub-rectangle `[u0, v0, du, dv]` that crops an `img_w` x
+/// `img_h` image to fill a `box_w` x `box_h` box, centred.
+pub(crate) fn crop_uv(img_w: u32, img_h: u32, box_w: f32, box_h: f32) -> [f32; 4] {
+    if img_w == 0 || img_h == 0 || box_w <= 0.0 || box_h <= 0.0 {
+        return [0.0, 0.0, 1.0, 1.0];
+    }
+    let img = img_w as f32 / img_h as f32;
+    let bx = box_w / box_h;
+    if img > bx {
+        let f = bx / img;
+        [(1.0 - f) * 0.5, 0.0, f, 1.0]
+    } else {
+        let f = img / bx;
+        [0.0, (1.0 - f) * 0.5, 1.0, f]
+    }
+}
+
 /// `a` and `b` (0xRRGGBB) mixed, `t` of the way from `a` to `b`.
 fn mix_rgb(a: u32, b: u32, t: f32) -> u32 {
     let ch = |s: u32| -> (f32, f32) {
@@ -132,7 +155,7 @@ impl SwitchRenderBackend {
         let chip = chip & 0x00FF_FFFF;
         let fill = mix_rgb(chip, col::BG & 0x00FF_FFFF, 0.55);
         let ink = mix_rgb(chip, 0xFF_FF_FF, 0.78);
-        self.draw_overlay_rect(x, y, w, h, 0xFF00_0000 | fill);
+        self.kit_rrect(x, y, w, h, super::theme::radius::TILE, 0xFF00_0000 | fill);
         let px = if w >= 180.0 { 18.0 } else { 15.0 };
         let pad = (w * 0.07).clamp(10.0, 16.0);
         let shown = name.strip_suffix(".swf").or_else(|| name.strip_suffix(".SWF")).unwrap_or(name);
@@ -153,6 +176,38 @@ impl SwitchRenderBackend {
         }
     }
 
+    /// A cover that fills its tile at rest and OPENS to show itself whole as
+    /// the tile is selected: `t` runs 0 (cropped to fill) to 1 (the whole
+    /// image, centred over its blurred backdrop).
+    ///
+    /// A grid of filled tiles is the calmer picture, and a banner ten times
+    /// wider than tall would be a thin strip if shown whole at rest. Opening
+    /// the one under the cursor gives both, and the movement is what makes the
+    /// grid feel alive.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn kit_cover_reveal(&mut self, x: f32, y: f32, w: f32, h: f32, tex: GLuint, tw: u32, th: u32, amb: GLuint, t: f32, alpha: f32) {
+        if tex == 0 || tw == 0 || th == 0 {
+            return;
+        }
+        let r = super::theme::radius::TILE;
+        let t = t.clamp(0.0, 1.0);
+        let a = tw as f32 / th as f32;
+        let (fit_w, fit_h) = if a > w / h { (w, w / a) } else { (h * a, h) };
+        if t > 0.0 && (fit_w < w - 0.5 || fit_h < h - 0.5) {
+            if amb != 0 {
+                self.kit_image(x, y, w, h, amb, crop_uv(tw, th, w, h), alpha, r);
+            } else {
+                self.kit_rrect(x, y, w, h, r, ((alpha.clamp(0.0, 1.0) * 255.0) as u32) << 24 | 0x0A_10_1C);
+            }
+        }
+        // The drawn box shrinks from the tile to the fitted image while the crop
+        // in it relaxes, so at t = 1 nothing is cut.
+        let dw = w + (fit_w - w) * t;
+        let dh = h + (fit_h - h) * t;
+        let (dx, dy) = (x + (w - dw) * 0.5, y + (h - dh) * 0.5);
+        self.kit_image(dx, dy, dw, dh, tex, crop_uv(tw, th, dw, dh), alpha, r);
+    }
+
     /// Draw a cover in the box `(x, y, w, h)` by the rule above. `alpha` fades
     /// the whole thing in over whatever is under it.
     #[allow(clippy::too_many_arguments)]
@@ -160,22 +215,11 @@ impl SwitchRenderBackend {
         if tex == 0 || tw == 0 || th == 0 {
             return;
         }
+        let r = super::theme::radius::TILE;
         if fills(tw, th, w, h) {
-            self.draw_textured_rect_cover(x, y, w, h, tex, tw, th, alpha);
+            self.kit_image(x, y, w, h, tex, crop_uv(tw, th, w, h), alpha, r);
             return;
         }
-        if amb != 0 {
-            // The backdrop's own aspect is the image's, so crop it to the box
-            // the same way the fill mode would.
-            self.draw_textured_rect_cover(x, y, w, h, amb, tw, th, alpha);
-        } else {
-            self.draw_overlay_rect(x, y, w, h, ((alpha.clamp(0.0, 1.0) * 255.0) as u32) << 24 | 0x0A_10_1C);
-        }
-        let s = (w / tw as f32).min(h / th as f32);
-        let (dw, dh) = (tw as f32 * s, th as f32 * s);
-        let (dx, dy) = ((x + (w - dw) * 0.5).round(), (y + (h - dh) * 0.5).round());
-        // `draw_textured_rect_cover` into a box of the image's own aspect is a
-        // plain fitted draw, with the alpha the fade needs.
-        self.draw_textured_rect_cover(dx, dy, dw.round(), dh.round(), tex, tw, th, alpha);
+        self.kit_cover_reveal(x, y, w, h, tex, tw, th, amb, 1.0, alpha);
     }
 }
