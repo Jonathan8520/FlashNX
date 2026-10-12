@@ -45,8 +45,13 @@ fn key_token(t: &str) -> Option<Option<Btn>> {
         "ZR" => Btn::ZR,
         "+" => Btn::Plus,
         "-" | "\u{2212}" => Btn::Minus,
-        "L3" | "LS" => Btn::LStick,
-        "R3" | "RS" => Btn::RStick,
+        // L3 is the stick pushed in, LS the stick itself: two glyphs.
+        "L3" => Btn::LStickPress,
+        "R3" => Btn::RStickPress,
+        "LS" => Btn::LStick,
+        "RS" => Btn::RStick,
+        "SL" => Btn::SL,
+        "SR" => Btn::SR,
         _ => {
             const DIRECTIONS: &[&str] = &[
                 "UP", "DOWN", "HAUT", "BAS", "ARRIBA", "ABAJO", "ВВЕРХ", "ВНИЗ", "HOCH",

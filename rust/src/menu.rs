@@ -21,7 +21,7 @@
 
 use std::sync::Mutex;
 
-use crate::backend::render::{SwitchRenderBackend, PAUSE_ROW_TOUCHES};
+use crate::backend::render::{PadValue, SwitchRenderBackend, PAUSE_ROW_TOUCHES};
 use crate::keymap;
 
 // C++-owned cursor speed (live + per-game while in a game), reused from the
@@ -95,6 +95,14 @@ struct State {
     /// `open_submenu`): the editor's B returns to the sub-menu instead of closing.
     /// The library opens the editor directly (`open`) with this false.
     submenu: bool,
+    /// Opened from the launcher: the game whose options it came from, or None
+    /// for the defaults of every game (RÉGLAGES). The editor's header names it.
+    /// In game the running game's name is read as it is drawn.
+    subject: Option<std::string::String>,
+    /// That game's cursor speed, x10, for the editor's footer. Read once on the
+    /// way in: in the launcher the live speed is the global one, and the game's
+    /// own is a file on the card, which is no read for every frame.
+    subject_speed_x10: u32,
     /// Whether the sub-menu shows a revert row (game has a custom keymap).
     can_revert: bool,
     /// Whether a hand-made backup exists (revert restores it) vs none (resets to
@@ -124,6 +132,8 @@ static TOUCHES: Mutex<State> = Mutex::new(State {
     screen: Screen::Inactive,
     dirty: false,
     submenu: false,
+    subject: None,
+    subject_speed_x10: 10,
     can_revert: false,
     has_backup: false,
     matches: std::vec::Vec::new(),
@@ -177,23 +187,50 @@ pub fn touch_select(idx: usize) -> bool {
         // on the next A -- and `panic = "abort"` makes that a console fatal,
         // not an exception.
         Screen::List { selection } => {
-            if idx >= crate::keymap::PAD_SLOTS.len() {
+            use crate::backend::render::{PAD_CELL_ICON, PAD_CELL_LAYER, PAD_CELL_PLAYER};
+            let n = crate::keymap::PAD_SLOTS.len();
+            // The header's switches: a tap switches, as X and the shoulders
+            // do, and there is nothing to take after it.
+            if (PAD_CELL_PLAYER..PAD_CELL_ICON).contains(&idx) {
+                let before = (keymap::edit_player(), keymap::edit_subtab_index());
+                if idx < PAD_CELL_LAYER {
+                    keymap::set_edit_player(if idx == PAD_CELL_PLAYER { 1 } else { 2 });
+                } else {
+                    keymap::set_edit_subtab_index(idx - PAD_CELL_LAYER);
+                }
+                if (keymap::edit_player(), keymap::edit_subtab_index()) != before {
+                    crate::sfx::play(crate::sfx::Sfx::Tab);
+                }
+                s.screen = Screen::List { selection: unstick_cursor(selection) };
                 return false;
             }
+            // A control on the picture stands for its row. A stick stands for
+            // the one of its five rows already under the cursor, else its
+            // first, so a second tap on it opens the row being read.
+            let row = if (PAD_CELL_ICON..PAD_CELL_ICON + n).contains(&idx) {
+                let r = idx - PAD_CELL_ICON;
+                let same_stick = crate::keymap::PAD_SLOTS
+                    .get(r)
+                    .zip(crate::keymap::PAD_SLOTS.get(selection))
+                    .is_some_and(|(a, b)| matches!(a.shape, keymap::PadIcon::Stick(_)) && a.icon == b.icon);
+                if same_stick { selection } else { r }
+            } else if idx < n {
+                idx
+            } else {
+                return false;
+            };
             // A modifier row takes no cursor from a finger either, and returning
-            // false means the tap is simply ignored rather than counted as the
-            // first half of a double-tap that would then activate it.
-            if crate::keymap::PAD_SLOTS
-                .get(idx)
-                .map(|s| crate::keymap::slot_is_modifier(s.name))
-                .unwrap_or(false)
-            {
+            // false means the tap is not counted as the first half of a
+            // double-tap that would then activate it. It says why, as A does.
+            if let Some(slot) = crate::keymap::PAD_SLOTS.get(row).filter(|s| crate::keymap::slot_is_modifier(s.name)) {
+                let msg = crate::loc_ui::ui().toast_modifier_locked.replace("{}", slot.name);
+                set_toast(&mut s, msg, TOAST_INFO);
                 return false;
             }
-            if selection == idx {
+            if selection == row {
                 return true;
             }
-            s.screen = Screen::List { selection: idx };
+            s.screen = Screen::List { selection: row };
             false
         }
         // The rows of the sub-menu and the profile picker are pages of the
@@ -258,6 +295,22 @@ pub fn screen_kind() -> u8 {
         .unwrap_or(0)
 }
 
+/// Whether two screens (`screen_kind`) are one window: the editor and its key
+/// picker share `render::touches_window`, so going between them changes what
+/// is in the window and must not pop it in again after every key.
+pub fn same_window(a: u8, b: u8) -> bool {
+    matches!((a, b), (2, 3) | (3, 2))
+}
+
+/// `screen_kind`, the editor and its key picker counted as one window: what
+/// decides whether a window pops in.
+pub fn window_kind() -> u8 {
+    match screen_kind() {
+        3 => 2,
+        k => k,
+    }
+}
+
 /// Whether the screen up is a page of the pause sheet (the sub-menu, the
 /// profile flows) rather than a window (the editor, its keyboard). A page
 /// replaces the one before it in place; only a window pops.
@@ -281,9 +334,10 @@ pub fn screen_is_sheet() -> bool {
         .unwrap_or(false)
 }
 
-/// Open the keymap EDITOR directly (library OPTIONS > TOUCHES > Éditer). The
-/// in-game pause entry uses `open_submenu` instead.
-pub fn open() {
+/// Open the keymap EDITOR directly from the launcher: from a game's options
+/// (`game` = its name; the keymap was pointed at it) or for the defaults of
+/// every game (`None`). The in-game pause entry uses `open_submenu` instead.
+pub fn open(game: Option<&str>) {
     keymap::set_edit_player(1); // always start on Player 1 (issue #40)...
     keymap::reset_edit_subtabs(); // ...both players on the NORMAL sub-tab, without
     // clearing the persisted modifiers (combos stay enabled in-game) (issue #57).
@@ -292,8 +346,16 @@ pub fn open() {
     // before the lock, not inside it, to keep this off the TOUCHES -> keymap
     // nesting entirely.
     let start = unstick_cursor(0);
+    // The game's own cursor speed, else the global one it follows.
+    let speed = keymap::active_game_basename()
+        .map(|b| keymap::cursor_speed_for(&b))
+        .filter(|i| *i >= 0)
+        .and_then(|i| crate::loc::CURSOR_SPEED_X10.get(i as usize).copied())
+        .unwrap_or_else(|| unsafe { ruffle_cursor_speed_mult_x10() }.max(5) as u32);
     if let Ok(mut s) = TOUCHES.lock() {
         s.submenu = false;
+        s.subject = game.map(str::to_string);
+        s.subject_speed_x10 = speed;
         s.screen = Screen::List { selection: start };
     }
 }
@@ -430,8 +492,14 @@ fn drive_pending_net() {
 /// event was consumed (input shouldn't fall through to the game / pause menu).
 pub fn input(button: &str) -> bool {
     // The sound each press deserves, read from what it changed, as in the
-    // launcher (`sfx::after_input`).
+    // launcher (`sfx::after_input`). Two changes the screen does not show by
+    // itself are read here too: the editor's layer, and a refusal (A on a
+    // modifier row, which used to click as if something had toggled).
     let before = TOUCHES.lock().map(|s| s.screen).ok();
+    let layer_before = keymap::edit_subtab_index();
+    let refused = button == "A"
+        && matches!(before, Some(Screen::List { selection })
+            if keymap::PAD_SLOTS.get(selection).is_some_and(|s| keymap::slot_is_modifier(s.name)));
     let consumed = input_inner(button);
     // Read (and forget) whether a value moved, whatever happens next, so the
     // flag never leaks into the next press.
@@ -442,8 +510,16 @@ pub fn input(button: &str) -> bool {
             button,
             "Up" | "Down" | "Left" | "Right" | "StickLUp" | "StickLDown" | "StickLLeft" | "StickLRight"
         );
-        if matches!(a, Screen::Inactive) && !matches!(b, Screen::Inactive) {
+        if refused {
+            play(Sfx::Error);
+        } else if matches!(a, Screen::Inactive) && !matches!(b, Screen::Inactive) {
             play(Sfx::Back);
+        } else if matches!(button, "L" | "R") && matches!(b, Screen::List { .. }) {
+            // A layer is a tab; one that did not change (the end, or a held
+            // shoulder) is silent.
+            if keymap::edit_subtab_index() != layer_before {
+                play(Sfx::Tab);
+            }
         } else if b == a {
             // Nothing moved on screen: a value stepped in place (the handler
             // said so), a binding set, or a step refused at an end (silent).
@@ -496,6 +572,14 @@ fn input_inner(button: &str) -> bool {
             true
         }
         Screen::List { selection } => {
+            // In game, B goes back to the Touches et curseur page and Y on to
+            // its shared profiles. Both read the card (and Y the catalogue),
+            // so they run without the lock, like that page's own rows.
+            if s.submenu && matches!(button, "B" | "Minus" | "Y") {
+                drop(s);
+                leave_editor_in_game(button == "Y");
+                return true;
+            }
             handle_list_input(&mut s, button, selection);
             true
         }
@@ -989,7 +1073,9 @@ fn pad_center(i: usize) -> (f32, f32) {
 /// what the player means by Right is "the other hand, same height" — which an
 /// index step would turn into "thirteen rows down". It also means the table in
 /// keymap.rs can be re-laid-out without a matching edit here.
-fn pad_step(cur: usize, dir: PadDir) -> usize {
+///
+/// `wrap`: whether Up and Down may come round at the end of a column.
+fn pad_step(cur: usize, dir: PadDir, wrap: bool) -> usize {
     let n = keymap::PAD_SLOTS.len();
     if n == 0 {
         return cur;
@@ -1020,16 +1106,20 @@ fn pad_step(cur: usize, dir: PadDir) -> usize {
     if let Some((i, _)) = best {
         return i;
     }
-    // Nothing that way. Up and Down wrap inside their own column, the way the
-    // list they replace wrapped; a cursor that stops dead at the top of a column
-    // reads as a stuck stick. Left and Right at the outer edge stay put — there
-    // is no third column to wrap to.
+    // Nothing that way. Up and Down come round inside their own column on a
+    // fresh press, and stop at the end under a held direction, as every list
+    // of the app does (`library::nav_may_wrap`): holding Down used to circle a
+    // column every 80 ms. Left and Right at the outer edge stay put, there is
+    // no third column to wrap to.
     let want_max = match dir {
         PadDir::Up => true,
         PadDir::Down => false,
         _ => return cur,
     };
-    let mut wrap = cur;
+    if !wrap {
+        return cur;
+    }
+    let mut far = cur;
     let mut edge = cy;
     for i in 0..n {
         if slot_locked(i) {
@@ -1038,10 +1128,10 @@ fn pad_step(cur: usize, dir: PadDir) -> usize {
         let (x, y) = pad_center(i);
         if same_col(x) && ((want_max && y > edge) || (!want_max && y < edge)) {
             edge = y;
-            wrap = i;
+            far = i;
         }
     }
-    wrap
+    far
 }
 
 /// Whether slot `i` is a modifier in the open layer, and so takes no cursor.
@@ -1067,7 +1157,7 @@ fn unstick_cursor(mut selection: usize) -> usize {
     // column always finds a free row -- but the loop is capped anyway rather
     // than trusting that to stay true.
     for _ in 0..n {
-        let next = pad_step(selection, PadDir::Down);
+        let next = pad_step(selection, PadDir::Down, true);
         if next == selection {
             break;
         }
@@ -1080,14 +1170,15 @@ fn unstick_cursor(mut selection: usize) -> usize {
 }
 
 fn handle_list_input(s: &mut State, button: &str, mut selection: usize) {
+    let wrap = crate::library::nav_may_wrap();
     match button {
-        "Up" | "StickLUp" => selection = pad_step(selection, PadDir::Up),
-        "Down" | "StickLDown" => selection = pad_step(selection, PadDir::Down),
+        "Up" | "StickLUp" => selection = pad_step(selection, PadDir::Up, wrap),
+        "Down" | "StickLDown" => selection = pad_step(selection, PadDir::Down, wrap),
         // Left and Right finally mean something on this screen: the pad has two
         // columns, and they cross to the other hand at the same height. The
         // SHOULDER L/R still change the combo layer, as they always did.
-        "Left" | "StickLLeft" => selection = pad_step(selection, PadDir::Left),
-        "Right" | "StickLRight" => selection = pad_step(selection, PadDir::Right),
+        "Left" | "StickLLeft" => selection = pad_step(selection, PadDir::Left, wrap),
+        "Right" | "StickLRight" => selection = pad_step(selection, PadDir::Right, wrap),
         // Player toggle (issue #40): X flips P1 <-> P2 (2 items, a toggle is fine).
         // P1 and P2 have their OWN combo layers, so the swap can lock or free the
         // row under the cursor.
@@ -1100,6 +1191,12 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize) {
         // edits THAT modifier's own combo layer. Pure view — a modifier becomes
         // active in-game as soon as its layer gets a binding (no separate toggle).
         "L" | "R" => {
+            // One layer per press: the shoulders repeat when held (the
+            // launcher pages long lists with them), and held here they ran
+            // from Normal to R in half a second.
+            if !wrap {
+                return;
+            }
             let cur = keymap::edit_subtab_index();
             let new = if button == "R" {
                 (cur + 1).min(keymap::SUBTAB_MODS.len() - 1)
@@ -1122,13 +1219,10 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize) {
                 return;
             };
             // Reachable even though the cursor skips locked rows: a tap, or a
-            // layer switched while the cursor sat here, can put it on one.
+            // layer switched while the cursor sat here, can put it on one. Say
+            // what the button does now and how to get it back, not just a word.
             if keymap::slot_is_modifier(slot.name) {
-                set_toast(
-                    s,
-                    std::format!("{} : {}", slot.name, crate::loc::s().keys_modifier),
-                    TOAST_INFO,
-                );
+                set_toast(s, crate::loc_ui::ui().toast_modifier_locked.replace("{}", slot.name), TOAST_INFO);
                 s.screen = Screen::List { selection };
                 return;
             }
@@ -1140,17 +1234,143 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize) {
             return;
         }
         "B" | "Minus" => {
-            // In-game: back to the sub-menu (Éditer row). Library: close.
-            s.screen = if s.submenu {
-                Screen::Menu { selection: MENU_EDIT }
-            } else {
-                Screen::Inactive
-            };
+            // The launcher's editor closes; the launcher puts its page back
+            // (`library::input`). In game B never reaches here: it is
+            // `leave_editor_in_game`.
+            s.screen = Screen::Inactive;
             return;
         }
         _ => {}
     }
     s.screen = Screen::List { selection };
+}
+
+/// Leave the in-game editor for the Touches et curseur page (B), or for its
+/// shared profiles (Y, the mockup's shortcut; B there comes back to the page).
+/// The page's "Revenir…" row depends on the keys just edited, so it is worked
+/// out again here, as on the launcher side: it used to stay as it was when the
+/// page opened, missing after a first edit and stale once a key was set back.
+fn leave_editor_in_game(profiles: bool) {
+    let (can_revert, has_backup) = keymap::active_game_basename()
+        .map(|b| (keymap::has_revert(&b), keymap::has_backup(&b)))
+        .unwrap_or((false, false));
+    if let Ok(mut s) = TOUCHES.lock() {
+        s.can_revert = can_revert;
+        s.has_backup = has_backup;
+        s.screen = Screen::Menu { selection: if profiles { MENU_APPLY } else { MENU_EDIT } };
+    }
+    if profiles {
+        defer_net(PendingNet::OpenProfiles);
+    }
+}
+
+/// Where the editor sits and what it edits, as its header and footer say.
+struct Place {
+    /// The page it was opened from, under the page that holds that page.
+    crumbs: [&'static str; 2],
+    subject: std::string::String,
+    /// The cursor speed in force, x10. None for the defaults of every game,
+    /// whose cursor speed is a row of their own window.
+    speed_x10: Option<u32>,
+    /// Whether Y opens the shared profiles: they are a game's.
+    profiles: bool,
+}
+
+/// The editor's three doors: the pause (Pause › Touches et curseur), a game's
+/// options in the launcher (Options › Touches et curseur), RÉGLAGES for the
+/// defaults of every game. B goes back through the same door.
+fn editor_place() -> Option<Place> {
+    let (submenu, subject, speed) = TOUCHES
+        .lock()
+        .ok()
+        .map(|s| (s.submenu, s.subject.clone(), s.subject_speed_x10))?;
+    let lc = crate::loc::s();
+    let u = crate::loc_ui::ui();
+    Some(if submenu {
+        Place {
+            crumbs: [lc.pause_title, lc.menu_keys],
+            subject: crate::library::active_display_name().unwrap_or_default(),
+            speed_x10: Some(unsafe { ruffle_cursor_speed_mult_x10() }.max(5) as u32),
+            profiles: true,
+        }
+    } else if let Some(subject) = subject {
+        Place { crumbs: [u.hint_options, lc.menu_keys], subject, speed_x10: Some(speed), profiles: true }
+    } else {
+        Place {
+            crumbs: [u.tab_settings, u.row_game_prefs],
+            subject: u.keys_all_games.to_string(),
+            speed_x10: None,
+            profiles: false,
+        }
+    })
+}
+
+/// What each pad row shows, in `PAD_SLOTS` order: what the button really
+/// sends in the open layer.
+fn pad_values() -> std::vec::Vec<PadValue> {
+    let normal = keymap::edit_subtab_index() == 0;
+    keymap::PAD_SLOTS
+        .iter()
+        .map(|slot| {
+            if keymap::slot_is_modifier(slot.name) {
+                return PadValue::Modifier;
+            }
+            match keymap::current_binding(slot.name) {
+                Some(k) => PadValue::Key(k),
+                None if normal => PadValue::None,
+                // The layer does not map it, so while its modifier is held it
+                // sends its Normal key (`lookup_combo` falls through). It used
+                // to say "(aucune)" there, and ZL+A looked dead while it sent
+                // Espace.
+                None => PadValue::Inherited(keymap::base_binding(slot.name)),
+            }
+        })
+        .collect()
+}
+
+/// The layer tabs that carry a dot: the combo layers holding a key, so a
+/// layer in use shows from any tab.
+fn live_layers(player: u8) -> [bool; 5] {
+    let mut live = [false; 5];
+    for (i, m) in keymap::SUBTAB_MODS.iter().enumerate().skip(1) {
+        live[i] = if player == 2 { keymap::combo_active_p2(m) } else { keymap::combo_active(m) };
+    }
+    live
+}
+
+/// Whether `stick`'s four direction rows read as one "mouse cursor": player
+/// 1's stick sends nothing in any of them, which is when it moves the cursor
+/// (`keymap::stick_drives_cursor`), in a combo layer too as long as the layer
+/// maps none of them. Player 2 has no cursor.
+fn stick_reads_as_cursor(values: &[PadValue], player: u8, stick: char) -> bool {
+    player == 1
+        && keymap::PAD_SLOTS
+            .iter()
+            .zip(values)
+            .filter(|(slot, _)| keymap::stick_of_direction(slot.name) == Some(stick))
+            .all(|(_, v)| matches!(v, PadValue::None | PadValue::Inherited(None)))
+}
+
+/// The line under the pad about the focused row: what is particular to it,
+/// else what the open layer means, else what the screen is for.
+fn pad_help(selection: usize, values: &[PadValue], player: u8, layer: usize) -> std::string::String {
+    let u = crate::loc_ui::ui();
+    let Some(slot) = keymap::PAD_SLOTS.get(selection) else {
+        return std::string::String::new();
+    };
+    if matches!(slot.name, "SL" | "SR") {
+        return u.help_pad_slsr.to_string();
+    }
+    if player == 1 && layer == 0 && keymap::stick_of_direction(slot.name).is_some() {
+        return u.help_pad_stick.to_string();
+    }
+    if matches!(values.get(selection), Some(PadValue::Key(k)) | Some(PadValue::Inherited(Some(k))) if k == "Keyboard") {
+        return u.help_key_keyboard.to_string();
+    }
+    if layer > 0 {
+        return u.help_pad_layer.replace("{}", keymap::SUBTAB_MODS[layer.min(keymap::SUBTAB_MODS.len() - 1)]);
+    }
+    u.help_touches_edit.to_string()
 }
 
 /// Index of a Flash-key NAME in `keymap::KEYBOARD`, or None if it isn't on the
@@ -1167,23 +1387,88 @@ fn kbd_none_index() -> usize {
 
 /// Horizontal centre (in layout units) of key `i`, for geometric navigation.
 fn kbd_center(i: usize) -> f32 {
-    let (_, _, x, w) = keymap::KEYBOARD[i];
-    x + w * 0.5
+    keymap::KEYBOARD.get(i).map(kbd_center_of).unwrap_or(0.0)
 }
 
-/// Nearest key to `cx` (by centre) among those on `row`. Rows always have ≥1 key,
-/// so this never returns None for a valid row.
-fn kbd_nearest_on_row(row: u8, cx: f32) -> Option<usize> {
-    keymap::KEYBOARD
-        .iter()
-        .enumerate()
-        .filter(|(_, k)| k.1 == row)
-        .min_by(|(ia, _), (ib, _)| {
-            (kbd_center(*ia) - cx)
-                .abs()
-                .total_cmp(&(kbd_center(*ib) - cx).abs())
-        })
-        .map(|(i, _)| i)
+/// The key beside key `cur` on its row, `dir` -1 for Left and 1 for Right.
+/// Past the end of the row, a fresh press comes round to its other end and a
+/// held one stops (`library::nav_may_wrap`): held, it used to circle the row.
+fn kbd_horizontal(cur: usize, dir: i32, wrap: bool) -> usize {
+    let Some(&(_, row, _, _)) = keymap::KEYBOARD.get(cur) else { return cur };
+    let cx = kbd_center(cur);
+    let on_row = || keymap::KEYBOARD.iter().enumerate().filter(move |(_, k)| k.1 == row);
+    let by_centre = |a: &(usize, &(&str, u8, f32, f32)), b: &(usize, &(&str, u8, f32, f32))| {
+        kbd_center_of(a.1).total_cmp(&kbd_center_of(b.1))
+    };
+    let next = if dir < 0 {
+        on_row().filter(|(_, k)| kbd_center_of(k) < cx - 0.01).max_by(by_centre)
+    } else {
+        on_row().filter(|(_, k)| kbd_center_of(k) > cx + 0.01).min_by(by_centre)
+    };
+    match next {
+        Some((i, _)) => i,
+        None if wrap => {
+            let far = if dir < 0 { on_row().max_by(by_centre) } else { on_row().min_by(by_centre) };
+            far.map_or(cur, |(i, _)| i)
+        }
+        None => cur,
+    }
+}
+
+/// The key above (`dir` -1) or below (1) key `cur`: on the nearest row with a
+/// key under the cursor, the key whose span is closest to the cursor's centre.
+/// A row with nothing there (the space under the numpad, above it) is passed
+/// over rather than landed on sideways. A fresh press comes round from the
+/// last row to the first, and when no row has anything under the cursor it
+/// takes the next row's nearest key; a held one stops.
+fn kbd_vertical(cur: usize, dir: i32, wrap: bool) -> usize {
+    let Some(&(_, row, _, _)) = keymap::KEYBOARD.get(cur) else { return cur };
+    let cx = kbd_center(cur);
+    let n = keymap::KEYBOARD_ROWS_N as i32;
+    // 0 inside the key's span, else how far outside it the centre falls.
+    let gap = |k: &(&str, u8, f32, f32)| -> f32 {
+        if cx < k.2 {
+            k.2 - cx
+        } else if cx > k.2 + k.3 {
+            cx - (k.2 + k.3)
+        } else {
+            0.0
+        }
+    };
+    let best_on = |r: i32| -> Option<(usize, f32)> {
+        keymap::KEYBOARD
+            .iter()
+            .enumerate()
+            .filter(|(_, k)| k.1 as i32 == r)
+            .map(|(i, k)| (i, gap(k), (kbd_center_of(k) - cx).abs()))
+            .min_by(|a, b| a.1.total_cmp(&b.1).then(a.2.total_cmp(&b.2)))
+            .map(|(i, g, _)| (i, g))
+    };
+    let mut nearest = None;
+    let mut r = row as i32;
+    for _ in 1..n {
+        r += dir;
+        if r < 0 || r >= n {
+            if !wrap {
+                break;
+            }
+            r = r.rem_euclid(n);
+        }
+        if let Some((i, g)) = best_on(r) {
+            if nearest.is_none() {
+                nearest = Some(i);
+            }
+            // Under the cursor, or within half a key of it.
+            if g <= 0.5 {
+                return i;
+            }
+        }
+    }
+    if wrap {
+        nearest.unwrap_or(cur)
+    } else {
+        cur
+    }
 }
 
 fn handle_keyboard_input(
@@ -1192,63 +1477,38 @@ fn handle_keyboard_input(
     button_idx: usize,
     mut key_idx: usize,
 ) {
-    let (name, cur_row, _, _) = keymap::KEYBOARD[key_idx];
-    let cur_cx = kbd_center(key_idx);
-    let n_rows = keymap::KEYBOARD_ROWS_N as u8;
-    // Row-scoped left/right by centre; up/down jump to the vertically adjacent row
-    // and land on the key whose centre is nearest — so the numpad column stays put.
+    let Some(&(name, _, _, _)) = keymap::KEYBOARD.get(key_idx) else { return };
+    let wrap = crate::library::nav_may_wrap();
+    // Left / Right along the row, Up / Down to the key under the cursor on the
+    // next row that has one, so the numpad column stays put.
     match button {
-        "Left" | "StickLLeft" => {
-            key_idx = keymap::KEYBOARD
-                .iter()
-                .enumerate()
-                .filter(|(_, k)| k.1 == cur_row && kbd_center_of(k) < cur_cx - 0.01)
-                .max_by(|a, b| kbd_center_of(a.1).total_cmp(&kbd_center_of(b.1)))
-                .map(|(i, _)| i)
-                // Wrap to the rightmost key on the row.
-                .or_else(|| {
-                    keymap::KEYBOARD
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, k)| k.1 == cur_row)
-                        .max_by(|a, b| kbd_center_of(a.1).total_cmp(&kbd_center_of(b.1)))
-                        .map(|(i, _)| i)
-                })
-                .unwrap_or(key_idx);
-        }
-        "Right" | "StickLRight" => {
-            key_idx = keymap::KEYBOARD
-                .iter()
-                .enumerate()
-                .filter(|(_, k)| k.1 == cur_row && kbd_center_of(k) > cur_cx + 0.01)
-                .min_by(|a, b| kbd_center_of(a.1).total_cmp(&kbd_center_of(b.1)))
-                .map(|(i, _)| i)
-                .or_else(|| {
-                    keymap::KEYBOARD
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, k)| k.1 == cur_row)
-                        .min_by(|a, b| kbd_center_of(a.1).total_cmp(&kbd_center_of(b.1)))
-                        .map(|(i, _)| i)
-                })
-                .unwrap_or(key_idx);
-        }
-        "Up" | "StickLUp" => {
-            let target = if cur_row == 0 { n_rows - 1 } else { cur_row - 1 };
-            key_idx = kbd_nearest_on_row(target, cur_cx).unwrap_or(key_idx);
-        }
-        "Down" | "StickLDown" => {
-            let target = if cur_row + 1 >= n_rows { 0 } else { cur_row + 1 };
-            key_idx = kbd_nearest_on_row(target, cur_cx).unwrap_or(key_idx);
-        }
-        "A" => {
-            // "(none)" unbinds; every other key is a real flash-key name.
-            let target = if name == "(none)" { None } else { Some(name) };
+        "Left" | "StickLLeft" => key_idx = kbd_horizontal(key_idx, -1, wrap),
+        "Right" | "StickLRight" => key_idx = kbd_horizontal(key_idx, 1, wrap),
+        "Up" | "StickLUp" => key_idx = kbd_vertical(key_idx, -1, wrap),
+        "Down" | "StickLDown" => key_idx = kbd_vertical(key_idx, 1, wrap),
+        "A" | "X" => {
+            // "(none)" empties the button, and so does X from anywhere on the
+            // board, without walking down to it; every other key is a real
+            // flash-key name. Emptied in a combo layer, a button sends its
+            // Normal key again (`keymap::set_binding`).
+            let target = if button == "X" || name == "(none)" { None } else { Some(name) };
             let Some(edit_btn) = keymap::PAD_SLOTS.get(button_idx).map(|s| s.name) else {
                 return;
             };
+            // Giving a key to the first direction of a stick that moved the
+            // cursor turns the whole stick into a d-pad (`main.cpp`): the
+            // cursor stops following it and its other three directions send
+            // nothing. That is said once, when it happens.
+            let stick = keymap::stick_of_direction(edit_btn)
+                .filter(|_| keymap::edit_player() == 1 && keymap::edit_subtab_index() == 0);
+            let was_cursor = stick.is_some_and(keymap::stick_drives_cursor);
             if keymap::set_binding(edit_btn, target) {
                 s.dirty = true;
+                if let Some(st) = stick.filter(|st| was_cursor && !keymap::stick_drives_cursor(*st)) {
+                    let u = crate::loc_ui::ui();
+                    let msg = if st == 'R' { u.toast_stick_dpad_r } else { u.toast_stick_dpad_l };
+                    set_toast(s, msg.to_string(), TOAST_INFO);
+                }
             } else {
                 // `set_binding` has already put the in-memory keymap back, so the
                 // list below is truthful again — but nothing on screen would have
@@ -1579,34 +1839,50 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
             });
         }
         Screen::List { selection } => {
-            // Parallel to PAD_SLOTS, which is both the order the pad lays out
-            // and the order `selection` counts in. `true` = this button is a
-            // modifier in the open layer and sends no key of its own.
-            let bindings: std::vec::Vec<(Option<std::string::String>, bool)> = keymap::PAD_SLOTS
-                .iter()
-                .map(|slot| (keymap::current_binding(slot.name), keymap::slot_is_modifier(slot.name)))
-                .collect();
-            backend.draw_touches_pad(
+            let Some(place) = editor_place() else { return };
+            let values = pad_values();
+            let player = keymap::edit_player();
+            let layer = keymap::edit_subtab_index();
+            let speed = place.speed_x10.map(crate::loc::mult_label);
+            let help = pad_help(selection, &values, player, layer);
+            backend.draw_touches_pad(&crate::backend::render::PadView {
+                crumbs: &place.crumbs,
+                subject: &place.subject,
                 selection,
-                &bindings,
-                keymap::edit_player(),
-                keymap::edit_subtab_index(),
-            );
+                values: &values,
+                player,
+                layer,
+                live_layers: live_layers(player),
+                stick_cursor: [
+                    stick_reads_as_cursor(&values, player, 'L'),
+                    stick_reads_as_cursor(&values, player, 'R'),
+                ],
+                cursor_speed: speed.as_deref(),
+                profiles: place.profiles,
+                help: &help,
+            });
         }
         Screen::Keyboard { button_idx, key_idx } => {
-            // Title shows the chord in a combo sub-tab ("ZL+A"), else the button.
-            let btn = keymap::PAD_SLOTS
-                .get(button_idx)
-                .map(|s| s.name)
-                .unwrap_or("");
+            let Some(place) = editor_place() else { return };
+            let Some(slot) = keymap::PAD_SLOTS.get(button_idx) else { return };
+            // The chord in a combo layer: the layer's glyph, then the button.
             let modif = keymap::edit_subtab_modifier();
-            let label = if modif.is_empty() {
-                btn.to_string()
-            } else {
-                std::format!("{}+{}", modif, btn)
+            let current = match keymap::current_binding(slot.name) {
+                Some(k) => PadValue::Key(k),
+                None if modif.is_empty() => PadValue::None,
+                None => PadValue::Inherited(keymap::base_binding(slot.name)),
             };
-            let used = keymap::current_map_used_keys();
-            backend.draw_touches_keyboard(&label, key_idx, &used);
+            let used = keymap::current_map_used_keys(slot.name);
+            let crumbs = [place.crumbs[0], place.crumbs[1], lc.keys_title];
+            backend.draw_touches_keyboard(&crate::backend::render::KeysView {
+                crumbs: &crumbs,
+                glyph: slot.glyph,
+                layer: (!modif.is_empty()).then_some(modif),
+                player: keymap::edit_player(),
+                current: &current,
+                cursor: key_idx,
+                used: &used,
+            });
         }
         Screen::Profiles { selection } => {
             let t = crate::backend::render::cascade_step(true);

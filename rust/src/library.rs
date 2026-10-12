@@ -1506,8 +1506,9 @@ pub extern "C" fn ruffle_nav_repeat(is_repeat: core::ffi::c_int) {
 /// carousel: hold Down and the selection runs off the bottom, reappears at the
 /// top and keeps going, so you cannot use the hold to reach the end of a long
 /// library -- the one thing it is for. Stopping is also what says "this is the
-/// end", which a list that never stops can never say.
-fn nav_may_wrap() -> bool {
+/// end", which a list that never stops can never say. The controls editor and
+/// its key picker (`menu.rs`) follow it too, in game as in the launcher.
+pub(crate) fn nav_may_wrap() -> bool {
     !NAV_REPEAT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -3653,6 +3654,25 @@ fn input_inner(button: &str) -> bool {
             return true;
         }
     }
+    // A game's controls editor: Y opens the shared profiles, the mockup's
+    // shortcut. They are a page of the game's Touches et curseur (its "Apply a
+    // profile" row) and come off the network, so the editor closes onto that
+    // page and the page's own flow runs from there: B on the profiles comes
+    // back to the page, where the path says it goes.
+    if button == "Y" && menu::screen_kind() == 2 {
+        let game = LIBRARY.lock().ok().and_then(|s| match s.screen {
+            Screen::TouchesEditor { game_idx } => Some(game_idx),
+            _ => None,
+        });
+        if let Some(game_idx) = game {
+            menu::close();
+            if let Ok(mut s) = LIBRARY.lock() {
+                goto_touches_menu(&mut s, game_idx, 1);
+            }
+            defer_net(PendingNet::OpenProfiles { game_idx }, game_idx);
+            return true;
+        }
+    }
     // Sub-screen: TOUCHES editor owns input while active.
     if menu::is_active() {
         let consumed = menu::input(button);
@@ -4360,9 +4380,9 @@ fn handle_settings_prefs_input(s: &mut State, button: &str, mut selection: usize
         }
         "A" if selection == 0 => {
             // Global default keymap: it is a per-game default like the rows
-            // below it.
+            // below it. No game: the editor says "for every game".
             keymap::init_for_global_default();
-            menu::open();
+            menu::open(None);
             s.screen = Screen::SettingsKeymapEditor;
             return;
         }
@@ -5806,11 +5826,13 @@ fn handle_touches_menu_input(s: &mut State, button: &str, game_idx: usize, mut s
             // `input()`.
             if selection == 0 {
                 // Init the keymap for THIS game so current_binding / set_binding
-                // land in the right sidecar, then open the editor.
+                // land in the right sidecar, then open the editor, which names
+                // the game in its header.
+                let name = s.entries.get(game_idx).map(|e| e.display_name.clone()).unwrap_or_default();
                 if let Some(entry) = s.entries.get(game_idx) {
                     keymap::init_for_swf(&entry.basename);
                 }
-                menu::open();
+                menu::open(Some(&name));
                 s.screen = Screen::TouchesEditor { game_idx };
                 return;
             }
@@ -8830,7 +8852,11 @@ fn touch_kind(screen: Screen) -> u32 {
         // Full pages, ids of their own well clear of the modal ones.
         Screen::SettingsModal { .. } => 100,
         Screen::BugPicker { .. } => 101,
-        // The keymap editor carries its sub-screen in the 70/80 bands already.
+        // The keymap editor carries its sub-screen in the 70/80 bands: the pad
+        // and its key picker share one window (one modal kind) but publish
+        // different tables.
+        Screen::TouchesEditor { .. } => 70 + menu::screen_kind() as u32,
+        Screen::SettingsKeymapEditor => 80 + menu::screen_kind() as u32,
         other => modal_kind(other) as u32,
     }
 }
@@ -8851,12 +8877,12 @@ fn modal_kind(screen: Screen) -> u8 {
         Screen::SettingsHomeViewPicker { .. } => 18,
         Screen::DistantUrlOptions { .. } => 5,
         Screen::DistantHistoryConfirm { .. } => 6,
-        // The keymap editor delegates to `menu::*`; fold its sub-screen id in so a
-        // List -> Keyboard (etc.) transition CHANGES the kind and re-fires the
-        // scale-in "pop", exactly like the in-game `ruffle_touches_draw` path.
+        // The keymap editor delegates to `menu::*`; its window pops in once, and
+        // its key picker opens inside that window (`menu::window_kind` counts
+        // the two as one), exactly like the in-game `ruffle_touches_draw` path.
         // Distinct 70-79 / 80-89 bands so they never collide with the ids above.
-        Screen::TouchesEditor { .. } => 70 + menu::screen_kind(),
-        Screen::SettingsKeymapEditor => 80 + menu::screen_kind(),
+        Screen::TouchesEditor { .. } => 70 + menu::window_kind(),
+        Screen::SettingsKeymapEditor => 80 + menu::window_kind(),
         Screen::SortModal { .. } => 9,
         Screen::RemoteSortModal { .. } => 7,
         Screen::FpDetails { .. } => 11,
