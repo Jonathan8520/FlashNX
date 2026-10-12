@@ -9641,35 +9641,6 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
-    /// Draw a centred horizontal strip of tab "chips" (labels), highlighting the
-    /// `active` one in amber. Centred on the screen (which is the modal centre).
-    /// Used for the editor's player tabs, layer sub-tabs and modifier strip (#57)
-    /// so every mode is VISIBLE rather than hidden behind a button you must guess.
-    fn draw_chip_strip(&mut self, labels: &[&str], active: usize, y: f32, scale: f32, h: f32) {
-        // A segmented control: one track, the active segment filled gold. The
-        // modes are VISIBLE rather than hidden behind a button you must guess
-        // (issue #55/#57).
-        use theme::col;
-        let px = legacy_px(scale).min(18.0);
-        const PAD_X: f32 = 18.0;
-        const INSET: f32 = 3.0;
-        let widths: std::vec::Vec<f32> = labels.iter().map(|l| self.kit_measure(l, px) + 2.0 * PAD_X).collect();
-        let total: f32 = widths.iter().sum::<f32>() + 2.0 * INSET;
-        let mut x = ((self.dimensions.width as f32 - total) * 0.5).round();
-        self.kit_rrect(x, y, total, h, h * 0.5, 0xFF_0E_17_2A);
-        x += INSET;
-        for (i, lbl) in labels.iter().enumerate() {
-            let w = widths[i];
-            let (fg, fill) = if i == active { (0xFF_1A_14_05, Some(col::GOLD)) } else { (col::TEXT2, None) };
-            if let Some(f) = fill {
-                self.kit_rrect(x, y + INSET, w, h - 2.0 * INSET, (h - 2.0 * INSET) * 0.5, f);
-            }
-            let lw = self.kit_measure(lbl, px);
-            self.kit_text_mid(x + (w - lw) * 0.5, y + h * 0.5, px, lbl, fg);
-            x += w;
-        }
-    }
-
     /// Largest scale at or below `want` that fits `text` in a `w`-wide box, or
     /// None when even scale 1 overflows — the renderer's way of saying "this
     /// shape is too small to label", which is true of the SL/SR rail buttons.
@@ -9716,19 +9687,18 @@ impl SwitchRenderBackend {
         // Amber is the cursor everywhere in this app. Teal marks a button that
         // is a MODIFIER rather than a key  the same teal the keyboard picker
         // uses for "in play", and the same meaning: this one is spoken for.
-        const SHELL_COL: u32 = 0xFF_1E2735;
-        const ICON_COL: u32 = 0xFF_3A4657;
-        const ICON_NUB_COL: u32 = 0xFF_5A6A80;
-        const ICON_SEL_COL: u32 = 0xFF_FFD740;
-        const ICON_SEL_NUB: u32 = 0xFF_1A1A1A;
-        const ICON_MOD_COL: u32 = 0xFF_2E6E63;
-        const ICON_MOD_NUB: u32 = 0xFF_58C0AE;
-        const ICON_LOCK_COL: u32 = 0xFF_2A3038;
-        const CHIP_COL: u32 = 0xFF_2A3340;
-        const CHIP_LOCK_COL: u32 = 0xFF_222A34;
-        const SEP_COL: u32 = 0xFF_4A5568;
-        const LOCK_TXT_COL: u32 = 0x6E7B8C;
-        const SEL_WASH: u32 = 0x33_FF_D7_40;
+        const SHELL_COL: u32 = 0xFF_1E_2C_4A;
+        const ICON_COL: u32 = 0xFF_34_46_6B;
+        const ICON_NUB_COL: u32 = 0xFF_5A_6A_8F;
+        const ICON_SEL_COL: u32 = theme::col::GOLD;
+        const ICON_SEL_NUB: u32 = 0xFF_1A_14_05;
+        const ICON_MOD_COL: u32 = 0xFF_2E_6E_63;
+        const ICON_MOD_NUB: u32 = 0xFF_58_C0_AE;
+        const ICON_LOCK_COL: u32 = 0xFF_22_32_4F;
+        const CHIP_COL: u32 = 0xFF_22_32_4F;
+        const CHIP_LOCK_COL: u32 = 0xFF_1A_27_42;
+        const SEP_COL: u32 = 0xFF_34_46_6B;
+        const LOCK_TXT_COL: u32 = 0x8090B5;
 
         let lc = crate::loc::s();
         const PANEL_W: f32 = 1180.0;
@@ -9736,7 +9706,7 @@ impl SwitchRenderBackend {
         // Title + the two chip strips above, the legend below. Both bands are
         // fixed pixels, so the pad takes whatever is left — which is exactly
         // what the scale below is measured from.
-        const HEAD_H: f32 = 150.0;
+        const HEAD_H: f32 = 96.0;
         const FOOT_H: f32 = 56.0;
 
         let vw = self.dimensions.width as f32;
@@ -9764,22 +9734,30 @@ impl SwitchRenderBackend {
             None,
             Some(lc.keys_footer),
         );
-        // Two visible tab rows, as the list had: nothing about the mode you are
-        // editing should need a guess-press to discover (issue #55/#57).
-        self.draw_chip_strip(
-            &["P1", "P2"],
-            if player == 2 { 1 } else { 0 },
-            frame.y + 52.0,
-            2.2,
-            38.0,
-        );
-        self.draw_chip_strip(
-            &["NORMAL", "ZL", "ZR", "L", "R"],
-            subtab.min(4),
-            frame.y + 98.0,
-            1.9,
-            34.0,
-        );
+        // Both modes visible on the title row, each with the button that
+        // switches it: nothing about the mode you are editing should need a
+        // guess-press to discover (issue #55/#57).
+        {
+            let ul = crate::loc_ui::ui();
+            let players = [ul.p1, ul.p2];
+            let layers = [ul.layer_normal, "ZL", "ZR", "L", "R"];
+            let spx = theme::size::LABEL;
+            let gpx = 22.0;
+            let lw = self.kit_segmented_width(&layers, spx);
+            let pw = self.kit_segmented_width(&players, spx);
+            let bl = self.kit_button_width(Btn::L, gpx);
+            let br = self.kit_button_width(Btn::R, gpx);
+            let bx = self.kit_button_width(Btn::X, gpx);
+            let cy = frame.y + 44.0;
+            let right = frame.x + frame.w - 28.0;
+            let mut x = right - (bl + 8.0 + lw + 8.0 + br);
+            x += self.kit_button(x, cy, gpx, Btn::L, theme::col::PILL_INK) + 8.0;
+            x += self.kit_segmented(x, cy, &layers, subtab.min(4), spx) + 8.0;
+            self.kit_button(x, cy, gpx, Btn::R, theme::col::PILL_INK);
+            let mut x = right - (bl + 8.0 + lw + 8.0 + br) - 28.0 - (bx + 8.0 + pw);
+            x += self.kit_button(x, cy, gpx, Btn::X, theme::col::PILL_INK) + 8.0;
+            self.kit_segmented(x, cy, &players, if player == 2 { 1 } else { 0 }, spx);
+        }
 
         let ox = frame.x + (frame.w - pad_w) * 0.5;
         let oy = frame.y + HEAD_H;
@@ -9920,7 +9898,7 @@ impl SwitchRenderBackend {
             .unwrap_or(0.0);
         let chip_r = (chip_h * 0.25).min(5.0);
         let badge_w = 3.4 * u;
-        let txt_scale = (chip_h / 16.0).clamp(1.0, 2.2);
+        let txt_px = (chip_h * 0.52).clamp(11.0, 18.0);
         let mut cells: std::vec::Vec<(f32, f32, f32, f32)> =
             std::vec::Vec::with_capacity(crate::keymap::PAD_SLOTS.len());
         for (i, slot) in crate::keymap::PAD_SLOTS.iter().enumerate() {
@@ -9946,7 +9924,7 @@ impl SwitchRenderBackend {
             // Drawn, not masked: `draw_selection_bar` cuts its corners with the
             // PAGE colour, which over a chip on a modal would leave four notches
             // of the wrong navy in the chip itself.
-            self.draw_round_rect(bx, by, cw * u, ch * u, chip_r, SEL_WASH);
+            self.kit_focus_pill(bx, by, cw * u, ch * u);
         }
 
         for (i, slot) in crate::keymap::PAD_SLOTS.iter().enumerate() {
@@ -9964,27 +9942,17 @@ impl SwitchRenderBackend {
                 },
                 255,
             );
-            // Badge: what you press. Centred in its half so the arrows line up
-            // down the column instead of drifting with the word beside them.
-            if let Some(s) = self.label_scale(slot.glyph, badge_w - 10.0, txt_scale) {
-                let lw = self.measure_text(slot.glyph, s);
-                self.draw_text(
-                    x + (badge_w - lw) * 0.5,
-                    y + (h - 7.0 * s) * 0.5,
-                    s,
-                    slot.glyph,
-                    swf::Color::from_rgb(
-                        if locked {
-                            LOCK_TXT_COL
-                        } else if is_sel {
-                            MODAL_ROW_SEL_COL
-                        } else {
-                            0xFFFFFF
-                        },
-                        255,
-                    ),
-                );
-            }
+            // Badge: what you press, as the console draws it -- its own glyph
+            // for a button, the stick or d-pad glyph with the direction beside
+            // it -- centred in its half so the column lines up.
+            let badge_ink = if locked {
+                0xFF00_0000 | LOCK_TXT_COL
+            } else if is_sel {
+                theme::col::GOLD
+            } else {
+                theme::col::TEXT
+            };
+            self.kit_pad_badge(x, y + h * 0.5, badge_w, slot.glyph, txt_px, badge_ink);
             // Value: what it does. Shrinks rather than truncating, the way every
             // other box in this app does — a binding cut to "RIGHT CLI" is worse
             // than a small one.
@@ -10001,18 +9969,9 @@ impl SwitchRenderBackend {
                     .unwrap_or(std::borrow::Cow::Borrowed(lc.none))
             };
             let avail = w - badge_w - 18.0;
-            // Floor of 1: below that a 5x7 bitmap font is mush, so the rule the
-            // keyboard picker already follows applies here — shrink to 1, then
-            // let it run. At scale 1 the value column takes thirty-odd
-            // characters and the longest binding name is half that.
-            let s = self.label_scale(&value, avail, txt_scale).unwrap_or(1.0);
-            self.draw_text(
-                x + badge_w + 12.0,
-                y + (h - 7.0 * s) * 0.5,
-                s,
-                &value,
-                col,
-            );
+            let v = self.kit_fit(&value, txt_px, avail);
+            let rgba = ((col.a as u32) << 24) | ((col.r as u32) << 16) | ((col.g as u32) << 8) | col.b as u32;
+            self.kit_text_mid(x + badge_w + 12.0, y + h * 0.5, txt_px, &v, rgba);
         }
         ui_cells_publish(ui_screen_kind(), cells);
 
@@ -10021,6 +9980,56 @@ impl SwitchRenderBackend {
             glBindVertexArray(0);
         }
         self.gl_state.invalidate();
+    }
+
+    /// A controller slot's label as glyphs, centred in `w` from `x`: "A" is the
+    /// console's A, "LS↑" is the left-stick glyph and an arrow, "↑" the d-pad
+    /// glyph and an arrow. Anything else (SL, SR) stays text.
+    fn kit_pad_badge(&mut self, x: f32, cy: f32, w: f32, label: &str, px: f32, ink: u32) {
+        let gpx = (px * 1.35).round();
+        let single = match label {
+            "A" => Some(Btn::A),
+            "B" => Some(Btn::B),
+            "X" => Some(Btn::X),
+            "Y" => Some(Btn::Y),
+            "L" => Some(Btn::L),
+            "R" => Some(Btn::R),
+            "ZL" => Some(Btn::ZL),
+            "ZR" => Some(Btn::ZR),
+            "+" => Some(Btn::Plus),
+            "-" => Some(Btn::Minus),
+            _ => None,
+        };
+        if let Some(b) = single {
+            let gw = self.kit_button_width(b, gpx);
+            self.kit_button((x + (w - gw) * 0.5).round(), cy, gpx, b, ink);
+            return;
+        }
+        let (glyph, rest) = if let Some(r) = label.strip_prefix("LS") {
+            (Some(Btn::LStick), r)
+        } else if let Some(r) = label.strip_prefix("RS") {
+            (Some(Btn::RStick), r)
+        } else if matches!(label, "\u{2191}" | "\u{2193}" | "\u{2190}" | "\u{2192}") {
+            (Some(Btn::Dpad), label)
+        } else {
+            (None, label)
+        };
+        match glyph {
+            Some(b) => {
+                let gw = self.kit_button_width(b, gpx);
+                let rw = if rest.is_empty() { 0.0 } else { 4.0 + self.kit_measure(rest, px) };
+                let mut cx = (x + (w - gw - rw) * 0.5).round();
+                cx += self.kit_button(cx, cy, gpx, b, ink);
+                if !rest.is_empty() {
+                    self.kit_text_mid(cx + 4.0, cy, px, rest, ink);
+                }
+            }
+            None => {
+                let t = self.kit_fit(rest, px, w - 8.0);
+                let tw = self.kit_measure(&t, px);
+                self.kit_text_mid((x + (w - tw) * 0.5).round(), cy, px, &t, ink);
+            }
+        }
     }
 
     /// TOUCHES keyboard picker (issue #55) — shown when the user presses A on a
@@ -10038,7 +10047,6 @@ impl SwitchRenderBackend {
         let keys = crate::keymap::KEYBOARD;
         const KEY_H: f32 = 48.0;
         const KEY_GAP: f32 = 6.0;
-        const KEY_SCALE: f32 = 2.0;
         const SIDE_MARGIN: f32 = 30.0;
         // Wider than the 720 modal so the main block + right-hand numpad both fit.
         const PANEL_W: f32 = 1120.0;
@@ -10050,7 +10058,6 @@ impl SwitchRenderBackend {
         let shrink = ((vw - 40.0) / PANEL_W).clamp(0.45, 1.0);
         let key_h = KEY_H * shrink;
         let key_gap = KEY_GAP * shrink;
-        let key_scale = KEY_SCALE * shrink;
         // Header and footer bands shrink WITH the keys. Scaling the key block
         // alone left the rows running past the bottom of the panel and over the
         // "A:OK  B:ANNULER" line, because the header still reserved its landscape
@@ -10059,7 +10066,9 @@ impl SwitchRenderBackend {
         let foot_h = 54.0 * shrink.max(0.7);
         let n_rows = crate::keymap::KEYBOARD_ROWS_N as f32;
         let panel_h = head_h + n_rows * (key_h + key_gap) + foot_h;
-        let title = std::format!("{} ->", button_name);
+        // "Touche pour ZL": the old title was "ZL ->", an arrow pointing at
+        // nothing that said what the screen was for.
+        let title = crate::loc_ui::ui().key_for.replacen("{}", button_name, 1);
         let frame = self.draw_modal_frame(
             PANEL_W,
             0,
@@ -10086,36 +10095,25 @@ impl SwitchRenderBackend {
             let key_w = kw * unit_w - KEY_GAP;
             let y = top_y + row as f32 * (key_h + key_gap);
             cells.push((x, y, key_w, key_h));
-            let cap = Matrix {
-                a: key_w, b: 0.0, c: 0.0, d: key_h,
-                tx: swf::Twips::from_pixels(x as f64),
-                ty: swf::Twips::from_pixels(y as f64),
-            };
             let (cap_col, txt_col) = if i == sel_key_idx {
-                (0xFFD740u32, 0x1A1A1Au32) // amber cap, near-black label (cursor)
+                (theme::col::GOLD, 0xFF_1A_14_05) // the cursor
             } else if used.contains(name) {
-                (0x2E6E63u32, 0xEAF7F3u32) // teal cap = already bound elsewhere
+                (0xFF_2E_6E_63, 0xFF_EA_F7_F3) // teal = already bound elsewhere
             } else {
-                (0x2A3340u32, MODAL_ROW_COL) // slate cap, light label
+                (0xFF_22_32_4F, theme::col::TEXT2)
             };
-            <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(cap_col, 255), cap);
+            // A cap with a lip: the face, and a darker band under it, so the
+            // keys read as keys.
+            let r = (key_h * 0.18).min(8.0);
+            self.kit_rrect(x, y + 2.0, key_w, key_h, r, 0xFF_0E_17_2A);
+            self.kit_rrect(x, y, key_w, key_h - 2.0, r, cap_col);
 
-            // Centre the (only-if-needed shrunk) label in the cap.
+            // Centre the (only-if-needed shortened) label in the cap.
             let label = crate::keymap::keyboard_label(name);
-            let lw_full = self.measure_text(&label, key_scale);
-            let scale = if lw_full > key_w - 8.0 {
-                (key_scale * (key_w - 8.0) / lw_full).max(1.0)
-            } else {
-                key_scale
-            };
-            let lw = self.measure_text(&label, scale);
-            self.draw_text(
-                x + (key_w - lw) * 0.5,
-                y + (key_h - 7.0 * scale) * 0.5,
-                scale,
-                &label,
-                swf::Color::from_rgb(txt_col, 255),
-            );
+            let kpx = (key_h * 0.36).clamp(10.0, 17.0);
+            let l = self.kit_fit(&label, kpx, key_w - 8.0);
+            let lw = self.kit_measure(&l, kpx);
+            self.kit_text_mid((x + (key_w - lw) * 0.5).round(), y + (key_h - 2.0) * 0.5, kpx, &l, txt_col);
         }
         ui_cells_publish(ui_screen_kind(), cells);
 

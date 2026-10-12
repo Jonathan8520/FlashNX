@@ -51,6 +51,12 @@ pub struct Ui {
     pub zoom_reset: &'static str,
     pub validate: &'static str,
     pub cancel: &'static str,
+    /// The controls editor: player tabs (the same short form its footer uses),
+    /// the base layer's name, and the key picker's title ("{}" = the button).
+    pub p1: &'static str,
+    pub p2: &'static str,
+    pub layer_normal: &'static str,
+    pub key_for: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -86,6 +92,10 @@ const EN: Ui = Ui {
     zoom_reset: "Press: 100 %",
     validate: "Confirm",
     cancel: "Cancel",
+    p1: "P1",
+    p2: "P2",
+    layer_normal: "Normal",
+    key_for: "Key for {}",
 };
 
 const FR: Ui = Ui {
@@ -121,6 +131,10 @@ const FR: Ui = Ui {
     zoom_reset: "Appui : 100 %",
     validate: "Valider",
     cancel: "Annuler",
+    p1: "J1",
+    p2: "J2",
+    layer_normal: "Normal",
+    key_for: "Touche pour {}",
 };
 
 const ES: Ui = Ui {
@@ -156,6 +170,10 @@ const ES: Ui = Ui {
     zoom_reset: "Pulsar: 100 %",
     validate: "Aceptar",
     cancel: "Cancelar",
+    p1: "J1",
+    p2: "J2",
+    layer_normal: "Normal",
+    key_for: "Tecla para {}",
 };
 
 const RU: Ui = Ui {
@@ -191,6 +209,10 @@ const RU: Ui = Ui {
     zoom_reset: "Нажатие: 100 %",
     validate: "Готово",
     cancel: "Отмена",
+    p1: "P1",
+    p2: "P2",
+    layer_normal: "Обычный",
+    key_for: "Клавиша для {}",
 };
 
 const DE: Ui = Ui {
@@ -226,6 +248,10 @@ const DE: Ui = Ui {
     zoom_reset: "Drücken: 100 %",
     validate: "Bestätigen",
     cancel: "Abbrechen",
+    p1: "S1",
+    p2: "S2",
+    layer_normal: "Normal",
+    key_for: "Taste für {}",
 };
 
 const IT: Ui = Ui {
@@ -261,6 +287,10 @@ const IT: Ui = Ui {
     zoom_reset: "Premi: 100 %",
     validate: "Conferma",
     cancel: "Annulla",
+    p1: "G1",
+    p2: "G2",
+    layer_normal: "Normale",
+    key_for: "Tasto per {}",
 };
 
 const PT: Ui = Ui {
@@ -296,6 +326,10 @@ const PT: Ui = Ui {
     zoom_reset: "Pressionar: 100 %",
     validate: "Confirmar",
     cancel: "Cancelar",
+    p1: "J1",
+    p2: "J2",
+    layer_normal: "Normal",
+    key_for: "Tecla para {}",
 };
 
 const ZH: Ui = Ui {
@@ -331,6 +365,10 @@ const ZH: Ui = Ui {
     zoom_reset: "按下：100%",
     validate: "确认",
     cancel: "取消",
+    p1: "玩家1",
+    p2: "玩家2",
+    layer_normal: "普通",
+    key_for: "{} 对应的按键",
 };
 
 const TR: Ui = Ui {
@@ -366,6 +404,10 @@ const TR: Ui = Ui {
     zoom_reset: "Bas: %100",
     validate: "Onayla",
     cancel: "İptal",
+    p1: "O1",
+    p2: "O2",
+    layer_normal: "Normal",
+    key_for: "{} için tuş",
 };
 
 pub fn ui() -> &'static Ui {

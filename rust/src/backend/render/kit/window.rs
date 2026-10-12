@@ -140,6 +140,38 @@ impl SwitchRenderBackend {
         self.kit_shape(x, y, w, h, radius::ROW, col::CHIP, 2.0, col::GOLD, 0.0);
     }
 
+    /// Width of a segmented control with these labels at `px`.
+    pub(crate) fn kit_segmented_width(&mut self, labels: &[&str], px: f32) -> f32 {
+        const PAD_X: f32 = 16.0;
+        const INSET: f32 = 3.0;
+        labels.iter().map(|l| self.kit_measure(l, px) + 2.0 * PAD_X).sum::<f32>() + 2.0 * INSET
+    }
+
+    /// A segmented control (one track, the active segment filled gold) with
+    /// its left edge at `x`, centred on `cy`. Returns its width.
+    pub(crate) fn kit_segmented(&mut self, x: f32, cy: f32, labels: &[&str], active: usize, px: f32) -> f32 {
+        const PAD_X: f32 = 16.0;
+        const INSET: f32 = 3.0;
+        const H: f32 = 36.0;
+        let total = self.kit_segmented_width(labels, px);
+        let y = (cy - H * 0.5).round();
+        self.kit_rrect(x, y, total, H, H * 0.5, 0xFF_0E_17_2A);
+        let mut sx = x + INSET;
+        for (i, lbl) in labels.iter().enumerate() {
+            let lw = self.kit_measure(lbl, px);
+            let w = lw + 2.0 * PAD_X;
+            let ink = if i == active {
+                self.kit_rrect(sx, y + INSET, w, H - 2.0 * INSET, (H - 2.0 * INSET) * 0.5, col::GOLD);
+                0xFF_1A_14_05
+            } else {
+                col::TEXT2
+            };
+            self.kit_text_mid(sx + PAD_X, cy, px, lbl, ink);
+            sx += w;
+        }
+        total
+    }
+
     /// The in-game sheet: a panel down the left side of the screen, over the
     /// frozen game, which stays visible on the right (the ECRAN rows preview on
     /// it). From the top: where you are ("Pause › Écran"), the game's name, the
