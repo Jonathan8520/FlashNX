@@ -275,7 +275,7 @@ fn keep_armed(s: &mut State, a: Armed) {
 }
 
 /// The value armed row `a` moves to on one step `dir`: the next option, the
-/// next preset, ten percent of zoom, stopping at the ends.
+/// next preset (a cursor speed, a zoom), stopping at the ends.
 fn armed_next(s: &State, a: Armed, dir: i32) -> u16 {
     match a.screen {
         Screen::OptionsModal { selection, .. } => {

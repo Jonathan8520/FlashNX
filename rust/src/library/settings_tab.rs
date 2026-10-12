@@ -366,9 +366,9 @@ fn default_value(key: &str) -> u16 {
 
 /// The value armed row `row` of `section` moves to on one step `dir` from
 /// `cur`, stopping at the ends. The default zoom steps through its presets
-/// (`loc::DEFAULT_ZOOM_STEPS`), not the free percentage of the pause: there is
-/// no picture here to judge one against. A value that is no preset
-/// (hand-edited into settings.json) steps to the nearest preset that way.
+/// (`loc::zoom_preset_step`), as a game's own does in its options, not the
+/// free percentage of the pause: there is no picture here to judge one
+/// against.
 pub(crate) fn armed_next(section: SetSection, row: usize, cur: u16, dir: i32) -> u16 {
     let n = match (section, key_of(section, row)) {
         (SetSection::Library, "VUE") => crate::loc::HOME_VIEW_COUNT,
@@ -378,15 +378,7 @@ pub(crate) fn armed_next(section: SetSection, row: usize, cur: u16, dir: i32) ->
         (SetSection::Defaults, "FILTRE") => keymap::SCREEN_FILTER_COUNT,
         (SetSection::Defaults, "OVERCLOCK") => POWER_ORDER.len() as u8,
         (SetSection::Defaults, "VITESSE") => crate::loc::CURSOR_SPEED_X10.len() as u8,
-        (SetSection::Defaults, "ZOOM") => {
-            let steps = crate::loc::DEFAULT_ZOOM_STEPS;
-            let next = if dir < 0 {
-                steps.iter().rev().find(|v| **v < cur).copied()
-            } else {
-                steps.iter().find(|v| **v > cur).copied()
-            };
-            return next.unwrap_or(cur);
-        }
+        (SetSection::Defaults, "ZOOM") => return crate::loc::zoom_preset_step(cur, dir),
         _ => return cur,
     };
     armed_step(cur, n as u16, dir)
@@ -997,7 +989,7 @@ fn column_hints(section: SetSection) -> std::vec::Vec<HintItem<'static>> {
 /// A way through the menus, step by step, joined the way crumbs join them. The
 /// steps are the labels the menus themselves show, so a help that names a
 /// place names it in the words the player will find there, in every language.
-fn menu_path(steps: &[&str]) -> std::string::String {
+pub(crate) fn menu_path(steps: &[&str]) -> std::string::String {
     steps.join("  \u{203A}  ")
 }
 
@@ -1092,8 +1084,7 @@ fn defaults_pane(
     let power_opts = POWER_ORDER.map(l::overclock_label);
     let zoom_v = value("ZOOM");
     let zoom = std::format!("{} %", zoom_v);
-    let steps = l::DEFAULT_ZOOM_STEPS;
-    let zoom_ends = (steps.first().is_some_and(|f| zoom_v <= *f), steps.last().is_some_and(|m| zoom_v >= *m));
+    let zoom_ends = l::zoom_preset_ends(zoom_v);
     let n_speeds = l::CURSOR_SPEED_X10.len();
     let speed_idx = (value("VITESSE") as usize).min(n_speeds.saturating_sub(1));
     let speed = l::speed_label(speed_idx as i32);
