@@ -340,8 +340,8 @@ pub(crate) fn with_options_sheet<R>(
     f(backend, &sheet)
 }
 
-/// What sits beside the options while one of their pages is open, kept for the
-/// frames where the page itself is not on screen (a loading panel).
+/// The page last drawn beside the options, kept so it can fold back after B:
+/// the screen state has already left it by then.
 static LAST_CHILD: Mutex<Option<Screen>> = Mutex::new(None);
 
 /// Whether `screen` is drawn by `draw_options_family`.
@@ -447,8 +447,8 @@ pub(crate) fn draw_options_family(
     backend.kit_scrim(ui_col::SCRIM);
     crate::backend::render::set_ui_screen_kind(kind);
 
-    // The page beside the options, or none. A loading panel keeps the last
-    // page on screen under it rather than folding the options back open.
+    // The page beside the options, or none. A question keeps the page it was
+    // asked over beside the options, under it.
     let page = match screen {
         Screen::OptionsModal { .. } | Screen::DeleteConfirm { .. } | Screen::CoverPicker { .. } => None,
         Screen::ProfileDeleteConfirm { game_idx, profile_idx, .. } => {

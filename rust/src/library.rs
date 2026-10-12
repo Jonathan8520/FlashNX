@@ -207,10 +207,12 @@ pub(crate) enum Screen {
     /// hoisted) → toast + picker; B cancels back to the picker.
     /// `selection`: 0 = cancel (where it opens), 1 = delete.
     ProfileDeleteConfirm { game_idx: usize, profile_idx: usize, selection: usize },
-    /// Transient "loading" panel shown for ONE frame before a deferred profile
-    /// network flow runs (#20), so a blocking GitHub call doesn't freeze on stale
-    /// content. `render` runs the stashed `PendingNet` the next frame, which sets
-    /// the real result screen. Carries no state — the action is in `PENDING_NET`.
+    /// The loading card shown for ONE frame before a deferred network flow runs:
+    /// a profile's (#20), or a cover's search or download. The blocking call
+    /// then freezes on the card rather than on stale content. `render` runs the
+    /// stashed `PendingNet` the next frame, which sets the real result screen.
+    /// Carries no state: the action is in `PENDING_NET`, the screen drawn under
+    /// the card in `NET_LOADING_FROM`.
     ProfileLoading,
 }
 
@@ -4561,8 +4563,9 @@ fn input_inner(button: &str) -> bool {
             run_local_search_flow();
             return true;
         }
-        // A on the bug-report picker = describe + send. Hoisted: swkbd + the
-        // synchronous HTTPS POST must not run under the LIBRARY lock.
+        // A on the bug-report picker = describe + send. Hoisted: the keyboard
+        // must not run under the LIBRARY lock. The POST itself runs from
+        // `render`, behind its card (`settings_tab::drive_pending_send`).
         if let Screen::BugPicker { selection, .. } = screen_snap {
             if button == "A" {
                 run_bug_report_flow(selection);
@@ -6051,10 +6054,11 @@ fn run_profile_apply_flow(game_idx: usize, profile_idx: usize) {
     }
 }
 
-// Toast kinds (#20): colour of the transient banner. See `set_toast`.
+// Toast kinds (#20): the colour of the dot on the transient banner
+// (`SwitchRenderBackend::draw_toast`). See `set_toast`.
 const TOAST_OK: u8 = 0; // green
 const TOAST_ERR: u8 = 1; // red
-const TOAST_INFO: u8 = 2; // blue
+const TOAST_INFO: u8 = 2; // gold
 /// How long a toast stays up (~2.5 s at 60 fps).
 const TOAST_FRAMES: u32 = 150;
 
@@ -10179,13 +10183,14 @@ enum PendingClose {
 
 static PENDING_AFTER_CLOSE: Mutex<Option<PendingClose>> = Mutex::new(None);
 
-/// A profile network/IO flow deferred by one frame (#20) so a "loading" panel
-/// shows BEFORE the blocking GitHub call freezes the UI thread. `input` stashes
-/// the action (via `defer_net`) + flips to `Screen::ProfileLoading`; `render`
-/// draws the panel that frame, then runs the flow the next, which sets the real
-/// result screen. Lower-tech than the archive.org async fetch, but enough: the
-/// catalog index/counts cache after the first open, so only the first click is
-/// slow. `bool` = armed (false the frame it's set, true the frame it runs).
+/// A network/IO flow (a profile's, a cover's) deferred by one frame (#20) so a
+/// "loading" panel shows BEFORE the blocking call freezes the UI thread.
+/// `input` stashes the action (via `defer_net`) + flips to
+/// `Screen::ProfileLoading`; `render` draws the panel that frame, then runs the
+/// flow the next, which sets the real result screen. Lower-tech than the
+/// archive.org async fetch, but enough for the profiles: the catalog
+/// index/counts cache after the first open, so only the first click is slow.
+/// `bool` = armed (false the frame it's set, true the frame it runs).
 enum PendingNet {
     OpenProfiles { game_idx: usize },
     OpenShareConfirm { game_idx: usize },
@@ -10227,8 +10232,8 @@ pub fn note_renderer_reset() {
     LANG_FONT_WARM.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Stash `action` to run next frame + show the loading panel now (titled with the
-/// game name). Call from `input` instead of running the flow inline.
+/// Stash `action` to run next frame + show the loading panel now (saying what
+/// the wait is for). Call from `input` instead of running the flow inline.
 fn defer_net(action: PendingNet, game_idx: usize) {
     // What the wait is for, under its spinner (the panels behind already say
     // which game).
