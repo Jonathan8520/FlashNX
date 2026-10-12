@@ -10717,11 +10717,12 @@ impl SwitchRenderBackend {
     pub(crate) fn draw_touches_keyboard(&mut self, v: &KeysView) {
         use theme::{col, size};
         const KEY_GAP: f32 = 6.0;
-        /// The band of the line about the focused key, over the footer.
-        const HELP_H: f32 = 36.0;
         /// Under the board: the gap, the band's caption, the gap to its pills.
         const BAND_GAP: f32 = 14.0;
         const BAND_CAPTION: f32 = 22.0;
+        /// Portrait: between the main block and the numpad dropped under it
+        /// (`keymap::keyboard_slot`), the room its caption takes.
+        const SPLIT_GAP: f32 = 36.0;
         const FACE: u32 = 0xFF_22_32_4F;
         const FACE_USED: u32 = 0xFF_2E_6E_63;
         const INK_USED: u32 = 0xFF_EA_F7_F3;
@@ -10732,23 +10733,35 @@ impl SwitchRenderBackend {
         let keys = crate::keymap::KEYBOARD;
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
+        // The board's layout and the navigation's come from one place
+        // (`keymap::keyboard_slot`); only the pixels come from the viewport.
+        let portrait = crate::keymap::keyboard_portrait();
         let inner_w = vw - 2.0 * TOUCHES_MARGIN - 2.0 * TOUCHES_PAD_X;
-        let unit_w = inner_w / crate::keymap::KEYBOARD_UNITS_W;
-        // The keys take the room the window has, but never come out taller
-        // than wide: a turned picture gives a narrow window, and its keys
-        // shrink with it.
-        let board_rows = (crate::keymap::KEYBOARD_ROWS_N - 1) as f32;
-        let full = vw >= vh;
-        let fixed = TOUCHES_HEAD_H + BAND_GAP + BAND_CAPTION + HELP_H + TOUCHES_FOOT_H;
+        let unit_w = inner_w / crate::keymap::keyboard_units_w();
+        let band_row = crate::keymap::keyboard_rows().saturating_sub(1);
+        let board_rows = band_row as f32;
+        // The numpad's first row in portrait, where the split gap goes.
+        let split_row = if portrait { crate::keymap::KEYBOARD_ROWS_N - 1 } else { usize::MAX };
+        let split = if portrait { SPLIT_GAP } else { 0.0 };
+        // The editor's header and help band, so the hairlines stay put when
+        // the window goes from a row to its keys.
+        let head_h = if portrait { TOUCHES_HEAD_H + 44.0 } else { TOUCHES_HEAD_H };
+        let help_h = touches_help_band(portrait);
+        let help_lh = (size::LABEL * 1.45).round();
+        // The keys take the room the window has: never taller than wide in
+        // landscape; in portrait up to a little taller than wide, as a phone's
+        // keyboard held upright has them, which is what makes the legends of
+        // its 38 px caps as large as the landscape ones.
+        let fixed = head_h + split + BAND_GAP + BAND_CAPTION + help_h + TOUCHES_FOOT_H;
         let room = vh - 2.0 * TOUCHES_MARGIN - fixed;
         let gap = (KEY_GAP * unit_w / 60.0).clamp(3.0, KEY_GAP);
-        let key_h = ((room / (board_rows + 1.0)) - gap).min(unit_w * 0.88).max(18.0);
+        let tall = if portrait { 1.15 } else { 0.88 };
+        let key_h = ((room / (board_rows + 1.0)) - gap).min(unit_w * tall).max(18.0);
         let pill_h = (key_h - 6.0).max(16.0);
-        let block_h = board_rows * (key_h + gap) + BAND_GAP + BAND_CAPTION + pill_h;
-        // In landscape the window is the editor's, to the pixel; turned, it is
-        // as tall as its keys need.
-        let content_h = TOUCHES_HEAD_H + block_h + 16.0 + HELP_H + TOUCHES_FOOT_H;
-        let (x, y, w, h) = self.touches_window(if full { vh } else { content_h });
+        let block_h = board_rows * (key_h + gap) + split + BAND_GAP + BAND_CAPTION + pill_h;
+        // The editor's window, to the pixel, in both orientations: going from
+        // a row to its keys changes what is in the window, not the window.
+        let (x, y, w, h) = self.touches_window(vh);
         let left = x + TOUCHES_PAD_X;
         let right = x + w - TOUCHES_PAD_X;
 
@@ -10778,8 +10791,10 @@ impl SwitchRenderBackend {
             tx += 10.0;
             tx += self.kit_text_mid(tx, ty, TOUCHES_TITLE_PX, after.trim_start(), col::TEXT);
         }
-        // On the right, where the editor has its switches: the player and the
-        // layer when they are not the obvious ones, and the key it sends now.
+        // Where the editor has its switches: the player and the layer when
+        // they are not the obvious ones, and the key it sends now. On the
+        // title's line at the right in landscape; on the row under it, from
+        // the left, in portrait, where the title's line has no room for it.
         let mut ctx: std::vec::Vec<std::string::String> = std::vec::Vec::new();
         if v.player == 2 {
             ctx.push(u.player_2.to_string());
@@ -10794,45 +10809,53 @@ impl SwitchRenderBackend {
             let words = if drop_parts { u.key_current.to_string() } else { ctx.join("  \u{00B7}  ") };
             let ww = self.kit_measure(&words, cpx);
             let cw = ww + 10.0 + cur_w;
-            if right - cw >= tx + 24.0 {
-                let cx0 = right - cw;
-                self.kit_text_mid(cx0, ty, cpx, &words, col::TEXT3);
-                self.keys_current(cx0 + ww + 10.0, ty, v.current, cpx);
+            let at = if portrait {
+                (left + cw <= right).then_some((left, y + 110.0))
+            } else {
+                (right - cw >= tx + 24.0).then_some((right - cw, ty))
+            };
+            if let Some((cx0, ccy)) = at {
+                self.kit_text_mid(cx0, ccy, cpx, &words, col::TEXT3);
+                self.keys_current(cx0 + ww + 10.0, ccy, v.current, cpx);
                 break;
             }
         }
-        self.draw_overlay_rect(left, y + TOUCHES_HEAD_H - 6.0, inner_w, 1.0, col::LINE);
+        self.draw_overlay_rect(left, y + head_h - 6.0, inner_w, 1.0, col::LINE);
 
         // ── The board ────────────────────────────────────────────────────
-        let area_top = y + TOUCHES_HEAD_H;
-        let area_bot = y + h - TOUCHES_FOOT_H - HELP_H;
+        let area_top = y + head_h;
+        let area_bot = y + h - TOUCHES_FOOT_H - help_h;
         let top_y = (area_top + ((area_bot - area_top) - block_h) * 0.5).max(area_top).round();
-        let band_y = top_y + board_rows * (key_h + gap) + BAND_GAP;
+        let row_y = |r: usize| top_y + r as f32 * (key_h + gap) + if r >= split_row { split } else { 0.0 };
+        let band_y = top_y + board_rows * (key_h + gap) + split + BAND_GAP;
         let pills_y = band_y + BAND_CAPTION;
         let rect_of = |i: usize| -> (f32, f32, f32, f32) {
-            let Some(&(_, row, kx, kw)) = keys.get(i) else { return (0.0, 0.0, 0.0, 0.0) };
+            let Some((row, kx, kw)) = crate::keymap::keyboard_slot(i) else { return (0.0, 0.0, 0.0, 0.0) };
             let kx0 = left + kx * unit_w;
             let kw0 = kw * unit_w - gap;
-            if row as usize >= crate::keymap::KEYBOARD_ROWS_N - 1 {
+            if row as usize >= band_row {
                 (kx0, pills_y, kw0, pill_h)
             } else {
-                (kx0, top_y + row as f32 * (key_h + gap), kw0, key_h)
+                (kx0, row_y(row as usize), kw0, key_h)
             }
         };
         let radius_of = |i: usize, kh: f32| -> f32 {
-            match keys.get(i) {
-                Some(k) if k.1 as usize >= crate::keymap::KEYBOARD_ROWS_N - 1 => kh * 0.5,
+            match crate::keymap::keyboard_slot(i) {
+                Some((row, _, _)) if row as usize >= band_row => kh * 0.5,
                 _ => (key_h * 0.18).min(8.0),
             }
         };
-        // The numpad's name over it, on the row the function keys leave empty
-        // there: "N1".."NEnt" said it in two letters, the caption says it once.
-        {
+        // The numpad's name over it: "N1".."NEnt" said it in two letters, the
+        // caption says it once. In landscape on the row the function keys
+        // leave empty there; in portrait in the gap over the dropped numpad.
+        let numpad = |n: &str| keys.iter().position(|k| k.0 == n).map(rect_of);
+        if let (Some((nx, ny, _, _)), Some((ex, _, ew, _))) = (numpad("Num7"), numpad("Num/")) {
             let npx = size::CAPTION;
-            let t = self.kit_fit(u.keys_numpad, npx, 4.0 * unit_w - gap);
+            let block_w = ex + ew - nx;
+            let t = self.kit_fit(u.keys_numpad, npx, block_w);
             let tw = self.kit_measure(&t, npx);
-            let ncx = left + 18.0 * unit_w - gap * 0.5;
-            self.kit_text_mid((ncx - tw * 0.5).round(), top_y + key_h * 0.5, npx, &t, col::TEXT3);
+            let ncy = if portrait { ny - (gap + SPLIT_GAP) * 0.5 } else { top_y + key_h * 0.5 };
+            self.kit_text_mid((nx + (block_w - tw) * 0.5).round(), ncy, npx, &t, col::TEXT3);
         }
         self.kit_section(left, band_y + 8.0, u.keys_other);
 
@@ -10875,7 +10898,7 @@ impl SwitchRenderBackend {
         }
 
         // ── The line about the focused key, and the footer ───────────────
-        let help_cy = y + h - TOUCHES_FOOT_H - HELP_H * 0.5;
+        let help_cy = y + h - TOUCHES_FOOT_H - help_h * 0.5;
         let focused = keys.get(v.cursor).map(|k| k.0).unwrap_or("");
         match v.used.get(focused) {
             // Who already sends it, as their glyphs: two buttons on one key is
@@ -10904,9 +10927,19 @@ impl SwitchRenderBackend {
                     _ => "",
                 };
                 if !help.is_empty() {
-                    self.kit_icon(left, help_cy, 16.0, Icon::Info, col::TEXT3);
-                    let t = self.kit_fit(help, size::LABEL, inner_w - 26.0);
-                    self.kit_text_mid(left + 26.0, help_cy, size::LABEL, &t, col::TEXT2);
+                    // One line in landscape; wrapped in its band in portrait,
+                    // as the editor's.
+                    let lines = if portrait {
+                        self.kit_wrap(help, size::LABEL, inner_w - 26.0, TOUCHES_HELP_LINES_PORTRAIT)
+                    } else {
+                        std::vec![self.kit_fit(help, size::LABEL, inner_w - 26.0)]
+                    };
+                    let mut ly = help_cy - help_lh * (lines.len().max(1) - 1) as f32 * 0.5;
+                    self.kit_icon(left, ly, 16.0, Icon::Info, col::TEXT3);
+                    for line in &lines {
+                        self.kit_text_mid(left + 26.0, ly, size::LABEL, line, col::TEXT2);
+                        ly += help_lh;
+                    }
                 }
             }
         }
@@ -10955,17 +10988,62 @@ impl SwitchRenderBackend {
         // one-unit cap, and "Entrée" only fits it at 11 px. A cut legend is
         // what made the board look unfinished.
         let steps = [big, small, small.min(11.0), 10.0];
-        let px = steps.into_iter().find(|&p| self.kit_measure(&label, p) <= room).unwrap_or(10.0);
-        let l = self.kit_fit(&label, px, room.max(0.0));
-        let lw = self.kit_measure(&l, px);
+        let one = steps.into_iter().find(|&p| self.kit_measure(&label, p) <= room);
+        // Then a legend of several words goes on two lines, where the cap is
+        // tall enough for them: a turned picture's caps are narrow and tall,
+        // and "Bloq Mayús" or "Bloc Maiusc" fits no single line of their Caps
+        // Lock even at 10 px.
+        let two = if one.is_none() { self.keys_legend_two_lines(&label, &steps, room, h) } else { None };
+        let cy = y + (h - 2.0) * 0.5;
+        let (px, lines) = match (one, two) {
+            (Some(p), _) => (p, std::vec![label.to_string()]),
+            (None, Some((p, a, b))) => (p, std::vec![a, b]),
+            (None, None) => (10.0, std::vec![self.kit_fit(&label, 10.0, room.max(0.0))]),
+        };
+        let mut lw: f32 = 0.0;
+        for l in &lines {
+            lw = lw.max(self.kit_measure(l, px));
+        }
         let total = lw + if icon.is_some() { isz + 8.0 } else { 0.0 };
         let mut cx = (x + (w - total) * 0.5).round();
-        let cy = y + (h - 2.0) * 0.5;
         if let Some(ic) = icon {
             self.kit_icon(cx, cy, isz, ic, ink);
             cx += isz + 8.0;
         }
-        self.kit_text_mid(cx, cy, px, &l, ink);
+        let lh = (px * 1.2).round();
+        let mut ly = cy - lh * (lines.len() - 1) as f32 * 0.5;
+        for l in &lines {
+            let lx = (cx + (lw - self.kit_measure(l, px)) * 0.5).round();
+            self.kit_text_mid(lx, ly, px, l, ink);
+            ly += lh;
+        }
+    }
+
+    /// `label` broken at one of its spaces into two lines that fit `room`, at
+    /// the largest of `steps` whose two lines also fit a cap `h` tall: the
+    /// break whose longer line is shortest. None for one word, or no fit.
+    fn keys_legend_two_lines(&mut self, label: &str, steps: &[f32], room: f32, h: f32) -> Option<(f32, std::string::String, std::string::String)> {
+        let breaks: std::vec::Vec<usize> = label.match_indices(' ').map(|(i, _)| i).collect();
+        for &p in steps {
+            if 2.0 * (p * 1.2).round() + 6.0 > h - 2.0 {
+                continue;
+            }
+            let mut best: Option<(f32, usize)> = None;
+            for &i in &breaks {
+                let wa = self.kit_measure(&label[..i], p);
+                let wb = self.kit_measure(&label[i + 1..], p);
+                let longest = wa.max(wb);
+                if best.map_or(true, |(b, _)| longest < b) {
+                    best = Some((longest, i));
+                }
+            }
+            if let Some((longest, i)) = best {
+                if longest <= room {
+                    return Some((p, label[..i].to_string(), label[i + 1..].to_string()));
+                }
+            }
+        }
+        None
     }
 
     /// Width `keys_current` takes for `value` at `px`.

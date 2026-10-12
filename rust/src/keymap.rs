@@ -207,6 +207,68 @@ pub const KEYBOARD_UNITS_W: f32 = 20.0;
 /// Number of keyboard rows (0-based rows 0..=6).
 pub const KEYBOARD_ROWS_N: usize = 7;
 
+/// Where the numpad starts in `KEYBOARD` (its left column), and how wide the
+/// main block before it is: Esc to Backspace, the arrows included.
+const KEYBOARD_NUMPAD_X: f32 = 16.0;
+const KEYBOARD_MAIN_W: f32 = 15.0;
+/// The numpad's keys in portrait, in main-block units: a one-unit cap is 38 px
+/// there, and the numpad's Enter does not fit "Entrée" even at 10 px in it.
+const KEYBOARD_NUMPAD_SCALE: f32 = 1.5;
+
+/// Whether the key picker is laid out for a turned picture (portrait), the
+/// one place the renderer, the touch table and the navigation all ask.
+pub fn keyboard_portrait() -> bool {
+    crate::backend::render::rotation_swaps_axes()
+}
+
+/// Rows and width in units of the board as `keyboard_slot` lays it out, the
+/// band of what is not a key being the last row.
+pub fn keyboard_rows() -> usize {
+    if keyboard_portrait() { KEYBOARD_ROWS_N + 4 } else { KEYBOARD_ROWS_N }
+}
+
+pub fn keyboard_units_w() -> f32 {
+    if keyboard_portrait() { KEYBOARD_MAIN_W } else { KEYBOARD_UNITS_W }
+}
+
+/// Key `i` of `KEYBOARD` as `(row, x, w)` in key units for the orientation in
+/// force: the table itself in landscape. On a turned picture the window is
+/// 720 wide, and the twenty units of the whole board made keys a third of a
+/// landscape key, their legends 10 px. There the numpad drops under the main
+/// block, centred, with keys half as wide again (its row 1 becomes row 6), and
+/// the band of what is not a key spreads across the 15 units left, a row
+/// lower. The main keys are then 42 px wide instead of 32. Esc takes the unit
+/// the function row has spare there (the F keys move a quarter to the right):
+/// at a unit and a quarter, "Escape" was cut even at 10 px.
+///
+/// The renderer draws each key here, publishes the touch cell it drew, and
+/// `menu.rs` navigates on these rows and spans, so a press always goes to the
+/// key that is drawn that way.
+pub fn keyboard_slot(i: usize) -> Option<(u8, f32, f32)> {
+    keyboard_slot_for(i, keyboard_portrait())
+}
+
+fn keyboard_slot_for(i: usize, portrait: bool) -> Option<(u8, f32, f32)> {
+    let &(_, row, x, w) = KEYBOARD.get(i)?;
+    if !portrait {
+        return Some((row, x, w));
+    }
+    let band = (KEYBOARD_ROWS_N - 1) as u8;
+    Some(if row == band {
+        let s = KEYBOARD_MAIN_W / KEYBOARD_UNITS_W;
+        (band + 4, x * s, w * s)
+    } else if x >= KEYBOARD_NUMPAD_X {
+        let start = (KEYBOARD_MAIN_W - 4.0 * KEYBOARD_NUMPAD_SCALE) * 0.5;
+        (row + 5, start + (x - KEYBOARD_NUMPAD_X) * KEYBOARD_NUMPAD_SCALE, w * KEYBOARD_NUMPAD_SCALE)
+    } else if row == 0 && x == 0.0 {
+        (row, x, w + 0.25)
+    } else if row == 0 {
+        (row, x + 0.25, w)
+    } else {
+        (row, x, w)
+    })
+}
+
 // ── TOUCHES pad view ────────────────────────────────────────────────────
 //
 // The keymap editor draws a CONTROLLER, not a scrolling list. The list showed

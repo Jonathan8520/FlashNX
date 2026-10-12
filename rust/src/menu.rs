@@ -1387,25 +1387,34 @@ fn kbd_none_index() -> usize {
     kbd_index_of("(none)").unwrap_or(0)
 }
 
+/// Key `i` as the picker lays it out now, `(row, x, w)` in key units: the
+/// renderer draws it there (`keymap::keyboard_slot`), so stepping on these
+/// spans goes to the key drawn beside or under the cursor in either
+/// orientation.
+fn kbd_slot(i: usize) -> Option<(u8, f32, f32)> {
+    keymap::keyboard_slot(i)
+}
+
 /// Horizontal centre (in layout units) of key `i`, for geometric navigation.
 fn kbd_center(i: usize) -> f32 {
-    keymap::KEYBOARD.get(i).map(kbd_center_of).unwrap_or(0.0)
+    kbd_slot(i).map(|(_, x, w)| x + w * 0.5).unwrap_or(0.0)
 }
 
 /// The key beside key `cur` on its row, `dir` -1 for Left and 1 for Right.
 /// Past the end of the row, a fresh press comes round to its other end and a
 /// held one stops (`library::nav_may_wrap`): held, it used to circle the row.
 fn kbd_horizontal(cur: usize, dir: i32, wrap: bool) -> usize {
-    let Some(&(_, row, _, _)) = keymap::KEYBOARD.get(cur) else { return cur };
+    let Some((row, _, _)) = kbd_slot(cur) else { return cur };
     let cx = kbd_center(cur);
-    let on_row = || keymap::KEYBOARD.iter().enumerate().filter(move |(_, k)| k.1 == row);
-    let by_centre = |a: &(usize, &(&str, u8, f32, f32)), b: &(usize, &(&str, u8, f32, f32))| {
-        kbd_center_of(a.1).total_cmp(&kbd_center_of(b.1))
+    // (index, centre) of every key on the row.
+    let on_row = || {
+        (0..keymap::KEYBOARD.len()).filter_map(move |i| kbd_slot(i).filter(|s| s.0 == row).map(|(_, x, w)| (i, x + w * 0.5)))
     };
+    let by_centre = |a: &(usize, f32), b: &(usize, f32)| a.1.total_cmp(&b.1);
     let next = if dir < 0 {
-        on_row().filter(|(_, k)| kbd_center_of(k) < cx - 0.01).max_by(by_centre)
+        on_row().filter(|(_, c)| *c < cx - 0.01).max_by(by_centre)
     } else {
-        on_row().filter(|(_, k)| kbd_center_of(k) > cx + 0.01).min_by(by_centre)
+        on_row().filter(|(_, c)| *c > cx + 0.01).min_by(by_centre)
     };
     match next {
         Some((i, _)) => i,
@@ -1424,25 +1433,26 @@ fn kbd_horizontal(cur: usize, dir: i32, wrap: bool) -> usize {
 /// last row to the first, and when no row has anything under the cursor it
 /// takes the next row's nearest key; a held one stops.
 fn kbd_vertical(cur: usize, dir: i32, wrap: bool) -> usize {
-    let Some(&(_, row, _, _)) = keymap::KEYBOARD.get(cur) else { return cur };
+    let Some((row, _, _)) = kbd_slot(cur) else { return cur };
     let cx = kbd_center(cur);
-    let n = keymap::KEYBOARD_ROWS_N as i32;
+    let n = keymap::keyboard_rows() as i32;
     // 0 inside the key's span, else how far outside it the centre falls.
-    let gap = |k: &(&str, u8, f32, f32)| -> f32 {
-        if cx < k.2 {
-            k.2 - cx
-        } else if cx > k.2 + k.3 {
-            cx - (k.2 + k.3)
+    let gap = |x: f32, w: f32| -> f32 {
+        if cx < x {
+            x - cx
+        } else if cx > x + w {
+            cx - (x + w)
         } else {
             0.0
         }
     };
     let best_on = |r: i32| -> Option<(usize, f32)> {
-        keymap::KEYBOARD
-            .iter()
-            .enumerate()
-            .filter(|(_, k)| k.1 as i32 == r)
-            .map(|(i, k)| (i, gap(k), (kbd_center_of(k) - cx).abs()))
+        (0..keymap::KEYBOARD.len())
+            .filter_map(|i| {
+                kbd_slot(i)
+                    .filter(|s| s.0 as i32 == r)
+                    .map(|(_, x, w)| (i, gap(x, w), (x + w * 0.5 - cx).abs()))
+            })
             .min_by(|a, b| a.1.total_cmp(&b.1).then(a.2.total_cmp(&b.2)))
             .map(|(i, g, _)| (i, g))
     };
@@ -1531,11 +1541,6 @@ fn handle_keyboard_input(
         _ => {}
     }
     s.screen = Screen::Keyboard { button_idx, key_idx };
-}
-
-/// Centre (units) of a `keymap::KEYBOARD` tuple `(name, row, x, w)`.
-fn kbd_center_of(k: &(&str, u8, f32, f32)) -> f32 {
-    k.2 + k.3 * 0.5
 }
 
 /// A profile's name as the lists show it: its title, then who shared it.
