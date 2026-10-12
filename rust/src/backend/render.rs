@@ -1648,6 +1648,7 @@ pub(crate) use pages::importer::{
 };
 pub(crate) use pages::flashpoint::{FpDetailsView, FpGrid, FpState};
 pub(crate) use kit::sheet::SHEET_MARGIN;
+pub(crate) use kit::cover::cover_square_rgb;
 
 /// Whether the console's fonts loaded, i.e. the interface draws with the kit
 /// rather than the old 5x7 font.
