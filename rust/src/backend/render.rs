@@ -303,6 +303,9 @@ fn bitmap_glyph(ch: char) -> Option<&'static Glyph> {
 /// `measure_text` and `wrap_point`, so a title can never wrap to a width it is
 /// not drawn at.
 fn char_advance(ch: char, scale: f32) -> f32 {
+    if let Some(w) = kit::text::advance_px(ch, legacy_px(scale)) {
+        return w;
+    }
     if bitmap_glyph(ch).is_some() {
         6.0 * scale
     } else if (ch as u32) >= 0x80 {
@@ -311,6 +314,16 @@ fn char_advance(ch: char, scale: f32) -> f32 {
         // Unknown ASCII: drawn blank, but it still advances the pen.
         6.0 * scale
     }
+}
+
+/// Console-font pixel size for an old 5x7 `scale`.
+///
+/// 8.5 px per unit puts the old sizes on the kit's own scale: 1.8 (captions)
+/// lands on 15, 2.0 (body) on 17, 3.0 (titles) on 26. Capitals then come out a
+/// little shorter than the 7-unit 5x7 ones, which is what lower case needs to
+/// not look shouted.
+fn legacy_px(scale: f32) -> f32 {
+    (scale * 8.5).round().max(9.0)
 }
 
 /// Characters from a script written without spaces, where a line may break
@@ -8845,7 +8858,27 @@ impl SwitchRenderBackend {
     /// as a full-width cell. `x`, `y` are top-left in screen pixels; each lit
     /// bitmap pixel becomes a `scale × scale` solid rect (same path as
     /// `draw_rect`). Unknown ASCII renders as blank space.
+    /// Text at the old call sites' coordinates: `y` is the top of a 7-unit-tall
+    /// capital, `scale` the 5x7 font's pixel size.
+    ///
+    /// Drawn in the console font now (`render/kit/text.rs`), at the size those
+    /// coordinates imply (see `legacy_px`), with the capitals centred in the box
+    /// the 5x7 capitals used to fill. Every screen not yet rebuilt on the kit
+    /// gets real lower case, accents and widths from this alone; the 5x7 font
+    /// stays as the fallback for a console without the shared fonts.
     pub fn draw_text(&mut self, x: f32, y: f32, scale: f32, text: &str, color: swf::Color) {
+        if !kit::text::fonts_available() {
+            self.draw_text_5x7(x, y, scale, text, color);
+            return;
+        }
+        let px = legacy_px(scale);
+        let baseline = y + 3.5 * scale + kit::text::cap_height_px(px) * 0.5;
+        let rgba = ((color.a as u32) << 24) | ((color.r as u32) << 16) | ((color.g as u32) << 8) | color.b as u32;
+        self.kit_text_baseline(x, baseline, px, text, rgba);
+    }
+
+    /// The hand-drawn 5x7 font, kept for a console without the shared fonts.
+    pub fn draw_text_5x7(&mut self, x: f32, y: f32, scale: f32, text: &str, color: swf::Color) {
         // Every lit RUN of the 5x7 font used to be its own `draw_rect` — a
         // uniform upload + glBufferData + glDrawArrays each, ~8 per character.
         // A gallery frame carries ~250 characters, so text alone was thousands of

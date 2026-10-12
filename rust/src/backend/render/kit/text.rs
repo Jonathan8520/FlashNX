@@ -15,6 +15,15 @@
 //! None of it ships in the .nro. Each glyph is rasterized once per pixel size
 //! and drawn 1:1, which is what keeps 15 px text sharp: the CJK atlas next door
 //! rasterizes everything at 44 px and lets the sampler shrink it.
+//!
+//! Two halves. The METRICS (which font has a character, how wide it is) are
+//! process-wide, because `render.rs` measures text from free functions that have
+//! no renderer at hand, and every measuring helper there has to agree with what
+//! gets drawn. The ATLAS is per renderer, because it is GL textures.
+//!
+//! No kerning, on purpose: the old helpers measure a string as the sum of its
+//! characters' widths, and drawing exactly that sum is what keeps centring,
+//! cutting and wrapping right everywhere they are used.
 
 use super::super::*;
 use crate::backend::glyphs::{new_atlas_texture, raster_gid_px, ATLAS_DIM, PAD};
@@ -41,7 +50,7 @@ enum FaceId {
 }
 
 /// A controller button, drawn with the console's own glyph for it.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Btn {
     A,
     B,
@@ -53,6 +62,10 @@ pub(crate) enum Btn {
     ZR,
     Plus,
     Minus,
+    /// The d-pad, for "change a value" hints.
+    Dpad,
+    LStick,
+    RStick,
 }
 
 impl Btn {
@@ -70,10 +83,13 @@ impl Btn {
             Btn::ZR => '\u{E0E7}',
             Btn::Plus => '\u{E0EF}',
             Btn::Minus => '\u{E0F0}',
+            Btn::Dpad => '\u{E0EA}',
+            Btn::LStick => '\u{E104}',
+            Btn::RStick => '\u{E105}',
         }
     }
 
-    /// What to print inside a drawn circle when NintendoExt is unavailable.
+    /// What to print inside a drawn disc when NintendoExt is unavailable.
     fn letter(self) -> &'static str {
         match self {
             Btn::A => "A",
@@ -86,30 +102,11 @@ impl Btn {
             Btn::ZR => "ZR",
             Btn::Plus => "+",
             Btn::Minus => "\u{2212}",
+            Btn::Dpad => "\u{2195}",
+            Btn::LStick => "L",
+            Btn::RStick => "R",
         }
     }
-}
-
-#[derive(Clone, Copy)]
-struct UiGlyph {
-    tex: GLuint,
-    /// Atlas UV sub-rect `[u0, v0, du, dv]`.
-    uv: [f32; 4],
-    w: f32,
-    h: f32,
-    /// Left bearing, and baseline to bitmap bottom with y up.
-    xmin: f32,
-    ymin: f32,
-    blank: bool,
-}
-
-/// One laid-out glyph: where it comes from and its pen offset from the start of
-/// the line.
-#[derive(Clone, Copy)]
-struct Placed {
-    face: FaceId,
-    gid: ttf_parser::GlyphId,
-    x: f32,
 }
 
 fn shared_face(kind: core::ffi::c_int) -> Option<ttf_parser::Face<'static>> {
@@ -126,55 +123,19 @@ fn shared_face(kind: core::ffi::c_int) -> Option<ttf_parser::Face<'static>> {
     ttf_parser::Face::parse(bytes, 0).ok()
 }
 
-pub(crate) struct UiText {
+// ─── Metrics, process-wide ──────────────────────────────────────────────────
+
+struct Faces {
     std: ttf_parser::Face<'static>,
     ext: Option<ttf_parser::Face<'static>>,
     cn: Option<ttf_parser::Face<'static>>,
     cn_tried: bool,
-    raster: ab_glyph_rasterizer::Rasterizer,
     /// Which face and glyph a character resolved to, misses included, so the
-    /// fallback chain runs once per character per renderer.
+    /// fallback chain runs once per character.
     chars: HashMap<char, Option<(FaceId, u16)>>,
-    /// Keyed by face, glyph and pixel size: the same letter at 15 and 26 px is
-    /// two bitmaps, each drawn at its own size.
-    glyphs: HashMap<(FaceId, u16, u16), Option<UiGlyph>>,
-    tex: GLuint,
-    texs: std::vec::Vec<GLuint>,
-    pen_x: usize,
-    pen_y: usize,
-    shelf_h: usize,
-    full: bool,
 }
 
-impl UiText {
-    /// `None` when the Standard font cannot be had, and the caller falls back
-    /// to the old font rather than drawing nothing.
-    fn new() -> Option<UiText> {
-        let std = shared_face(PL_STANDARD)?;
-        let ext = shared_face(PL_NINTENDO_EXT);
-        let tex = new_atlas_texture()?;
-        log_str(&std::format!(
-            "kit: fonts ready (standard {} upem, nintendo-ext {})\n",
-            std.units_per_em(),
-            if ext.is_some() { "yes" } else { "MISSING, glyphs drawn by hand" },
-        ));
-        Some(UiText {
-            std,
-            ext,
-            cn: None,
-            cn_tried: false,
-            raster: ab_glyph_rasterizer::Rasterizer::new(0, 0),
-            chars: HashMap::new(),
-            glyphs: HashMap::new(),
-            tex,
-            texs: std::vec![tex],
-            pen_x: PAD,
-            pen_y: PAD,
-            shelf_h: 0,
-            full: false,
-        })
-    }
-
+impl Faces {
     fn face(&self, id: FaceId) -> Option<&ttf_parser::Face<'static>> {
         match id {
             FaceId::Standard => Some(&self.std),
@@ -214,27 +175,20 @@ impl UiText {
         self.face(face).map_or(0.0, |f| px / f.units_per_em() as f32)
     }
 
-    fn advance(&self, face: FaceId, gid: ttf_parser::GlyphId, px: f32) -> f32 {
+    fn advance_gid(&self, face: FaceId, gid: ttf_parser::GlyphId, px: f32) -> f32 {
         let s = self.scale(face, px);
         self.face(face)
             .and_then(|f| f.glyph_hor_advance(gid))
             .map_or(0.0, |a| a as f32 * s)
     }
 
-    /// Pair kerning from the `kern` table, when the font has one. A font that
-    /// kerns only through GPOS gets none: that needs shaping, and interface
-    /// labels do not need it enough to bring a shaper in.
-    fn kern(&self, face: FaceId, l: ttf_parser::GlyphId, r: ttf_parser::GlyphId, px: f32) -> f32 {
-        let Some(f) = self.face(face) else { return 0.0 };
-        let Some(table) = f.tables().kern else { return 0.0 };
-        for st in table.subtables {
-            if st.horizontal && !st.variable {
-                if let Some(v) = st.glyphs_kerning(l, r) {
-                    return v as f32 * self.scale(face, px);
-                }
-            }
+    /// Width of one character. A character no font has still takes a little
+    /// room: a gap reads better than a box, and better than letters colliding.
+    fn advance(&mut self, ch: char, px: f32) -> f32 {
+        match self.resolve(ch) {
+            Some((face, gid)) => self.advance_gid(face, gid, px),
+            None => px * 0.3,
         }
-        0.0
     }
 
     fn ascent(&self, px: f32) -> f32 {
@@ -248,29 +202,110 @@ impl UiText {
             _ => px * 0.7,
         }
     }
+}
 
-    fn layout(&mut self, text: &str, px: f32) -> (std::vec::Vec<Placed>, f32) {
-        let mut out = std::vec::Vec::with_capacity(text.len());
-        let mut pen = 0.0f32;
-        let mut prev: Option<(FaceId, ttf_parser::GlyphId)> = None;
-        for ch in text.chars() {
-            let Some((face, gid)) = self.resolve(ch) else {
-                // No font has it. A gap, not a box: one stray symbol in a title
-                // should not shout.
-                pen += px * 0.3;
-                prev = None;
-                continue;
-            };
-            if let Some((pf, pg)) = prev {
-                if pf == face {
-                    pen += self.kern(face, pg, gid, px);
-                }
-            }
-            out.push(Placed { face, gid, x: pen });
-            pen += self.advance(face, gid, px);
-            prev = Some((face, gid));
+static FACES: std::sync::Mutex<Option<Faces>> = std::sync::Mutex::new(None);
+/// 0 = not tried, 1 = ready, 2 = no Standard font (old 5x7 font everywhere).
+static FACES_STATE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+fn with_faces<R>(f: impl FnOnce(&mut Faces) -> R) -> Option<R> {
+    use core::sync::atomic::Ordering;
+    if FACES_STATE.load(Ordering::Relaxed) == 2 {
+        return None;
+    }
+    let mut guard = FACES.lock().ok()?;
+    if guard.is_none() {
+        if FACES_STATE.load(Ordering::Relaxed) != 0 {
+            return None;
         }
-        (out, pen)
+        match shared_face(PL_STANDARD) {
+            Some(std) => {
+                let ext = shared_face(PL_NINTENDO_EXT);
+                log_str(&std::format!(
+                    "kit: fonts ready (standard {} upem, nintendo-ext {})\n",
+                    std.units_per_em(),
+                    if ext.is_some() { "yes" } else { "MISSING, glyphs drawn by hand" },
+                ));
+                *guard = Some(Faces { std, ext, cn: None, cn_tried: false, chars: HashMap::new() });
+                FACES_STATE.store(1, Ordering::Relaxed);
+            }
+            None => {
+                log_str("kit: no shared Standard font, keeping the 5x7 font\n");
+                FACES_STATE.store(2, Ordering::Relaxed);
+                return None;
+            }
+        }
+    }
+    guard.as_mut().map(f)
+}
+
+/// Whether the console fonts are usable. `false` keeps every screen on the old
+/// 5x7 font, which is still there for exactly that case.
+pub(crate) fn fonts_available() -> bool {
+    with_faces(|_| ()).is_some()
+}
+
+/// Width of `ch` at `px` in the console font, `None` without one.
+pub(crate) fn advance_px(ch: char, px: f32) -> Option<f32> {
+    with_faces(|f| f.advance(ch, px))
+}
+
+pub(crate) fn measure_px(text: &str, px: f32) -> Option<f32> {
+    with_faces(|f| text.chars().map(|c| f.advance(c, px)).sum())
+}
+
+pub(crate) fn cap_height_px(px: f32) -> f32 {
+    with_faces(|f| f.cap_height(px)).unwrap_or(px * 0.7)
+}
+
+pub(crate) fn ascent_px(px: f32) -> f32 {
+    with_faces(|f| f.ascent(px)).unwrap_or(px * 0.8)
+}
+
+// ─── Atlas, per renderer ────────────────────────────────────────────────────
+
+#[derive(Clone, Copy)]
+struct UiGlyph {
+    tex: GLuint,
+    /// Atlas UV sub-rect `[u0, v0, du, dv]`.
+    uv: [f32; 4],
+    w: f32,
+    h: f32,
+    /// Left bearing, and baseline to bitmap bottom with y up.
+    xmin: f32,
+    ymin: f32,
+    blank: bool,
+}
+
+pub(crate) struct UiText {
+    raster: ab_glyph_rasterizer::Rasterizer,
+    /// Keyed by face, glyph and pixel size: the same letter at 15 and 26 px is
+    /// two bitmaps, each drawn at its own size.
+    glyphs: HashMap<(FaceId, u16, u16), Option<UiGlyph>>,
+    tex: GLuint,
+    texs: std::vec::Vec<GLuint>,
+    pen_x: usize,
+    pen_y: usize,
+    shelf_h: usize,
+    full: bool,
+}
+
+impl UiText {
+    fn new() -> Option<UiText> {
+        if !fonts_available() {
+            return None;
+        }
+        let tex = new_atlas_texture()?;
+        Some(UiText {
+            raster: ab_glyph_rasterizer::Rasterizer::new(0, 0),
+            glyphs: HashMap::new(),
+            tex,
+            texs: std::vec![tex],
+            pen_x: PAD,
+            pen_y: PAD,
+            shelf_h: 0,
+            full: false,
+        })
     }
 
     fn grow(&mut self) -> bool {
@@ -290,28 +325,13 @@ impl UiText {
 
     /// The glyph's bitmap at `px`, rasterized and packed on first use. Sets
     /// `*uploaded` when it wrote a texture behind the GL state cache's back.
-    fn ensure(
-        &mut self,
-        face: FaceId,
-        gid: ttf_parser::GlyphId,
-        px: u16,
-        uploaded: &mut bool,
-    ) -> Option<UiGlyph> {
+    fn ensure(&mut self, face: FaceId, gid: ttf_parser::GlyphId, px: u16, uploaded: &mut bool) -> Option<UiGlyph> {
         let key = (face, gid.0, px);
         if let Some(hit) = self.glyphs.get(&key) {
             return *hit;
         }
-        let ink = match face {
-            FaceId::Standard => Some(raster_gid_px(&self.std, &mut self.raster, gid, px as f32)),
-            FaceId::Ext => self
-                .ext
-                .as_ref()
-                .map(|f| raster_gid_px(f, &mut self.raster, gid, px as f32)),
-            FaceId::Chinese => self
-                .cn
-                .as_ref()
-                .map(|f| raster_gid_px(f, &mut self.raster, gid, px as f32)),
-        };
+        let raster = &mut self.raster;
+        let ink = with_faces(|f| f.face(face).map(|fc| raster_gid_px(fc, raster, gid, px as f32))).flatten();
         let Some((gw, gh, xmin, ymin, cov)) = ink else {
             self.glyphs.insert(key, None);
             return None;
@@ -405,9 +425,8 @@ fn quad(x0: f32, y0: f32, w: f32, h: f32, uv: [f32; 4]) -> [f32; 24] {
 }
 
 impl SwitchRenderBackend {
-    /// The kit's text state, built on first use. `None` = no shared font, and
-    /// every kit text call falls back to the old 5x7 font.
-    fn kit_fonts(&mut self) -> Option<&mut UiText> {
+    /// The kit's atlas, built on first use. `None` = no console font.
+    fn kit_atlas(&mut self) -> Option<&mut UiText> {
         if !self.kit_text_tried {
             self.kit_text_tried = true;
             self.kit_text = UiText::new().map(std::boxed::Box::new);
@@ -417,11 +436,11 @@ impl SwitchRenderBackend {
         self.kit_text.as_deref_mut()
     }
 
-    /// Width of `text` at `px`, exactly as `kit_text` will lay it out.
+    /// Width of `text` at `px`, exactly as the kit draws it.
     pub fn kit_measure(&mut self, text: &str, px: f32) -> f32 {
-        match self.kit_fonts() {
-            Some(t) => t.layout(text, px).1,
-            None => self.measure_text(text, (px / 9.0).max(1.0)),
+        match measure_px(text, px) {
+            Some(w) => w,
+            None => self.measure_text(text, (px / 8.5).max(1.0)),
         }
     }
 
@@ -430,18 +449,21 @@ impl SwitchRenderBackend {
         if self.kit_measure(text, px) <= max_w {
             return text.to_string();
         }
-        const ELL: &str = "\u{2026}";
-        let budget = max_w - self.kit_measure(ELL, px);
+        const ELL: char = '\u{2026}';
+        let budget = max_w - advance_px(ELL, px).unwrap_or(px * 0.6);
         let mut out = std::string::String::new();
+        let mut w = 0.0;
         for ch in text.chars() {
-            out.push(ch);
-            if self.kit_measure(&out, px) > budget {
-                out.pop();
+            let cw = advance_px(ch, px).unwrap_or(px * 0.5);
+            if w + cw > budget {
                 break;
             }
+            out.push(ch);
+            w += cw;
         }
-        let trimmed = out.trim_end().to_string();
-        trimmed + ELL
+        let mut out = out.trim_end().to_string();
+        out.push(ELL);
+        out
     }
 
     /// `text`, with characters dropped from the MIDDLE until it fits `max_w`.
@@ -451,55 +473,66 @@ impl SwitchRenderBackend {
             return text.to_string();
         }
         let chars: std::vec::Vec<char> = text.chars().collect();
-        let mut keep = chars.len();
-        while keep > 1 {
-            keep -= 1;
+        let mut prefix = std::vec::Vec::with_capacity(chars.len() + 1);
+        prefix.push(0.0f32);
+        for c in &chars {
+            let w = prefix[prefix.len() - 1] + advance_px(*c, px).unwrap_or(px * 0.5);
+            prefix.push(w);
+        }
+        let total = prefix[chars.len()];
+        let ell = advance_px('\u{2026}', px).unwrap_or(px * 0.6);
+        for keep in (0..chars.len()).rev() {
             let head = (keep + 1) / 2;
             let tail = keep - head;
-            let mut s: std::string::String = chars[..head].iter().collect();
-            let s_trim = s.trim_end().len();
-            s.truncate(s_trim);
-            s.push('\u{2026}');
-            s.extend(chars[chars.len() - tail..].iter().skip_while(|c| c.is_whitespace()));
-            if self.kit_measure(&s, px) <= max_w {
-                return s;
+            if prefix[head] + ell + (total - prefix[chars.len() - tail]) <= max_w {
+                let mut out: std::string::String = chars[..head].iter().collect();
+                let t = out.trim_end().len();
+                out.truncate(t);
+                out.push('\u{2026}');
+                out.extend(chars[chars.len() - tail..].iter().skip_while(|c| c.is_whitespace()));
+                return out;
             }
         }
         std::string::String::from("\u{2026}")
     }
 
-    /// The favourite marker: a gold star on a dark chip, for the top-left
-    /// corner of a cover.
-    pub fn kit_favorite_chip(&mut self, x: f32, y: f32) {
-        use super::theme::col;
-        const CHIP: f32 = 26.0;
-        const STAR: f32 = 16.0;
-        self.kit_rrect(x, y, CHIP, CHIP, 8.0, 0xB8_0A_10_1C);
-        let w = self.kit_measure("\u{2605}", STAR);
-        self.kit_text_mid((x + (CHIP - w) * 0.5).round(), y + CHIP * 0.5, STAR, "\u{2605}", col::GOLD);
-    }
-
     /// Draw `text` with its baseline at `baseline`; returns its width.
     pub fn kit_text_baseline(&mut self, x: f32, baseline: f32, px: f32, text: &str, rgba: u32) -> f32 {
         let pxi = px.round().clamp(1.0, 200.0) as u16;
+        if self.kit_atlas().is_none() {
+            let s = (px / 8.5).max(1.0);
+            self.draw_text_5x7(x, baseline - 7.0 * s, s, text, swf::Color::from_rgba(rgba));
+            return self.measure_text(text, s);
+        }
+        // Resolve and measure first (metrics lock), then rasterize (atlas).
+        let placed: std::vec::Vec<(FaceId, ttf_parser::GlyphId, f32)> = with_faces(|f| {
+            let mut out = std::vec::Vec::with_capacity(text.len());
+            let mut pen = 0.0f32;
+            for ch in text.chars() {
+                match f.resolve(ch) {
+                    Some((face, gid)) => {
+                        out.push((face, gid, pen));
+                        pen += f.advance_gid(face, gid, px);
+                    }
+                    None => pen += px * 0.3,
+                }
+            }
+            out.push((FaceId::Standard, ttf_parser::GlyphId(0), pen));
+            out
+        })
+        .unwrap_or_default();
+        let width = placed.last().map_or(0.0, |p| p.2);
         let mut uploaded = false;
         let mut batches: std::vec::Vec<(GLuint, std::vec::Vec<f32>)> = std::vec::Vec::new();
-        let width;
         {
-            let Some(t) = self.kit_fonts() else {
-                let s = (px / 9.0).max(1.0);
-                self.draw_text(x, baseline - 7.0 * s, s, text, swf::Color::from_rgba(rgba));
-                return self.measure_text(text, s);
-            };
-            let (placed, w) = t.layout(text, px);
-            width = w;
+            let Some(t) = self.kit_atlas() else { return width };
             let by = baseline.round();
-            for p in placed {
-                let Some(g) = t.ensure(p.face, p.gid, pxi, &mut uploaded) else { continue };
+            for &(face, gid, pen) in placed.iter().take(placed.len().saturating_sub(1)) {
+                let Some(g) = t.ensure(face, gid, pxi, &mut uploaded) else { continue };
                 if g.blank {
                     continue;
                 }
-                let gx = (x + p.x).round() + g.xmin;
+                let gx = (x + pen).round() + g.xmin;
                 let gy = by - (g.ymin + g.h);
                 let q = quad(gx, gy, g.w, g.h, g.uv);
                 match batches.iter_mut().find(|(tex, _)| *tex == g.tex) {
@@ -520,33 +553,23 @@ impl SwitchRenderBackend {
 
     /// Draw `text` with the top of its line box at `top`; returns its width.
     pub fn kit_text(&mut self, x: f32, top: f32, px: f32, text: &str, rgba: u32) -> f32 {
-        let ascent = match self.kit_fonts() {
-            Some(t) => t.ascent(px),
-            None => px * 0.8,
-        };
-        self.kit_text_baseline(x, top + ascent, px, text, rgba)
+        self.kit_text_baseline(x, top + ascent_px(px), px, text, rgba)
     }
 
     /// Draw `text` centred vertically on `cy` (on its capitals); returns its
     /// width.
     pub fn kit_text_mid(&mut self, x: f32, cy: f32, px: f32, text: &str, rgba: u32) -> f32 {
-        let cap = match self.kit_fonts() {
-            Some(t) => t.cap_height(px),
-            None => px * 0.7,
-        };
-        self.kit_text_baseline(x, cy + cap * 0.5, px, text, rgba)
+        self.kit_text_baseline(x, cy + cap_height_px(px) * 0.5, px, text, rgba)
     }
 
     /// Width a button glyph takes at `px`.
     pub fn kit_button_width(&mut self, b: Btn, px: f32) -> f32 {
         let ch = b.glyph();
-        match self.kit_fonts() {
-            Some(t) => match t.resolve(ch) {
-                Some((face, gid)) if face == FaceId::Ext => t.advance(face, gid, px),
-                _ => px,
-            },
-            None => px,
-        }
+        with_faces(|f| match f.resolve(ch) {
+            Some((face, gid)) if face == FaceId::Ext => f.advance_gid(face, gid, px),
+            _ => (px * 0.92).round(),
+        })
+        .unwrap_or((px * 0.92).round())
     }
 
     /// Draw one button glyph centred on `cy`, its left edge at `x`; returns the
@@ -554,18 +577,15 @@ impl SwitchRenderBackend {
     /// text line, because a circle and a letter do not share a middle.
     pub fn kit_button(&mut self, x: f32, cy: f32, px: f32, b: Btn, rgba: u32) -> f32 {
         let pxi = px.round().clamp(1.0, 200.0) as u16;
+        let found = with_faces(|f| match f.resolve(b.glyph()) {
+            Some((face, gid)) if face == FaceId::Ext => Some((face, gid, f.advance_gid(face, gid, px))),
+            _ => None,
+        })
+        .flatten();
         let mut uploaded = false;
-        let drawn = {
-            match self.kit_fonts() {
-                Some(t) => match t.resolve(b.glyph()) {
-                    Some((face, gid)) if face == FaceId::Ext => {
-                        let adv = t.advance(face, gid, px);
-                        t.ensure(face, gid, pxi, &mut uploaded).map(|g| (g, adv))
-                    }
-                    _ => None,
-                },
-                None => None,
-            }
+        let drawn = match (found, self.kit_atlas()) {
+            (Some((face, gid, adv)), Some(t)) => t.ensure(face, gid, pxi, &mut uploaded).map(|g| (g, adv)),
+            _ => None,
         };
         if uploaded {
             self.gl_state.invalidate();
@@ -592,28 +612,49 @@ impl SwitchRenderBackend {
         }
     }
 
-    /// A row of "glyph + verb" hints ending at `right`, centred on `cy`.
+    /// Width of a hint bar, so a caller can centre or right-align it.
+    pub fn kit_hints_width(&mut self, items: &[(Btn, &str)]) -> f32 {
+        use super::theme::{size, space};
+        let mut total = 0.0;
+        for (i, (b, label)) in items.iter().enumerate() {
+            if i > 0 {
+                total += space::HINT_GAP;
+            }
+            total += self.kit_button_width(*b, size::GLYPH) + space::GLYPH_GAP + self.kit_measure(label, size::HINT);
+        }
+        total
+    }
+
+    /// A row of "glyph + verb" hints starting at `x`, centred on `cy`.
     ///
     /// The old footers were one translated sentence per screen
     /// ("A:LANCER   +:OPTIONS..."), nine languages each. A hint is now a button
     /// and a word, so a screen lists what its buttons do and the layout is
     /// shared.
-    pub fn kit_hints_right(&mut self, right: f32, cy: f32, items: &[(Btn, &str)]) {
-        use super::theme::{col, size};
-        const GLYPH_GAP: f32 = 9.0;
-        const ITEM_GAP: f32 = 26.0;
-        let mut widths = std::vec::Vec::with_capacity(items.len());
-        let mut total = 0.0;
-        for (i, (b, label)) in items.iter().enumerate() {
-            let w = self.kit_button_width(*b, size::GLYPH) + GLYPH_GAP + self.kit_measure(label, size::HINT);
-            widths.push(w);
-            total += w + if i > 0 { ITEM_GAP } else { 0.0 };
-        }
-        let mut x = right - total;
-        for (i, (b, label)) in items.iter().enumerate() {
+    pub fn kit_hints(&mut self, x: f32, cy: f32, items: &[(Btn, &str)]) {
+        use super::theme::{col, size, space};
+        let mut x = x;
+        for (b, label) in items.iter() {
             let gw = self.kit_button(x, cy, size::GLYPH, *b, col::GLYPH);
-            self.kit_text_mid(x + gw + GLYPH_GAP, cy, size::HINT, label, col::TEXT);
-            x += widths[i] + ITEM_GAP;
+            let lw = self.kit_text_mid(x + gw + space::GLYPH_GAP, cy, size::HINT, label, col::TEXT);
+            x += gw + space::GLYPH_GAP + lw + space::HINT_GAP;
         }
+    }
+
+    /// `kit_hints`, ending at `right`.
+    pub fn kit_hints_right(&mut self, right: f32, cy: f32, items: &[(Btn, &str)]) {
+        let w = self.kit_hints_width(items);
+        self.kit_hints(right - w, cy, items);
+    }
+
+    /// The favourite marker: a gold star on a dark chip, for the top-left
+    /// corner of a cover.
+    pub fn kit_favorite_chip(&mut self, x: f32, y: f32) {
+        use super::theme::col;
+        const CHIP: f32 = 26.0;
+        const STAR: f32 = 16.0;
+        self.kit_rrect(x, y, CHIP, CHIP, 8.0, 0xB8_0A_10_1C);
+        let w = self.kit_measure("\u{2605}", STAR);
+        self.kit_text_mid((x + (CHIP - w) * 0.5).round(), y + CHIP * 0.5, STAR, "\u{2605}", col::GOLD);
     }
 }

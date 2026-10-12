@@ -49,6 +49,13 @@ pub(crate) mod size {
     pub const PILL: f32 = 12.0;
 }
 
+pub(crate) mod space {
+    /// Between a button glyph and its verb.
+    pub const GLYPH_GAP: f32 = 9.0;
+    /// Between two hints in a bar.
+    pub const HINT_GAP: f32 = 26.0;
+}
+
 pub(crate) mod radius {
     pub const TILE: f32 = 12.0;
     pub const PILL: f32 = 7.0;
