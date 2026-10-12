@@ -10270,8 +10270,26 @@ pub fn render(backend: &mut SwitchRenderBackend) {
     }
 
     // The options family slides its panel in from the right on the window
-    // timeline, and publishes its rows under the screen's own touch tag.
-    let family_slide = if modal_active || closing { Some(modal_scale) } else { None };
+    // timeline, and publishes its rows under the screen's own touch tag. Only
+    // when it comes from somewhere else: back from the controls editor (drawn
+    // over the same panels) the panel is already in place, and sliding it in
+    // again would replay its opening for nothing.
+    let class: u8 = if options_panel::is_options_family(screen) {
+        1
+    } else if matches!(screen, Screen::TouchesEditor { .. }) {
+        2
+    } else {
+        0
+    };
+    static CLASS_PREV: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+    static SLIDE_IN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+    match (CLASS_PREV.swap(class, std::sync::atomic::Ordering::Relaxed), class) {
+        (0, 1) => SLIDE_IN.store(true, std::sync::atomic::Ordering::Relaxed),
+        (2, 1) => SLIDE_IN.store(false, std::sync::atomic::Ordering::Relaxed),
+        _ => {}
+    }
+    let slide_in = SLIDE_IN.load(std::sync::atomic::Ordering::Relaxed);
+    let family_slide = if closing || (modal_active && slide_in) { Some(modal_scale) } else { None };
     let family_kind = if closing || modal_active { 0 } else { touch_kind(screen) };
 
     // Phase = current tick - origin. Drives sin() animations. ms-resolution
@@ -10328,10 +10346,23 @@ pub fn render(backend: &mut SwitchRenderBackend) {
         Screen::OptionsModal { .. } | Screen::GameFolderPicker { .. } | Screen::GameFolderDelete { .. } => {
             options_panel::draw_options_family(backend, screen, now, anim_origin, family_slide, family_kind);
         }
-        Screen::TouchesEditor { .. } => {
-            // Backdrop = Library list frozen behind. Cheapest path: redraw
-            // a dim panel + delegate to menu::draw.
-            backend.draw_library_dim_backdrop();
+        Screen::TouchesEditor { game_idx } => {
+            // The game's options and their Touches page stay behind the editor,
+            // still, taking no taps, dimmed by the editor's scrim: the path
+            // stays on screen and B is seen to land where it was. It used to
+            // clear the screen to flat navy at the deepest level of the path.
+            backend.clear_ui_transform();
+            crate::backend::render::set_ui_screen_kind(0);
+            options_panel::draw_options_family(
+                backend,
+                Screen::TouchesMenu { game_idx, selection: 0 },
+                now,
+                anim_origin,
+                None,
+                0,
+            );
+            crate::backend::render::set_ui_screen_kind(ui_kind);
+            backend.set_ui_modal_scale(if modal_active { modal_scale } else { 1.0 });
             menu::draw(backend, now);
         }
         Screen::Settings { .. } | Screen::GamesDirPicker { .. } | Screen::BugPicker { .. } => {
