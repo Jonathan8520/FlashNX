@@ -71,13 +71,31 @@ pub(crate) enum Btn {
     Minus,
     /// The d-pad, for "change a value" hints.
     Dpad,
+    /// The d-pad with one arm lit: a control that IS one of its directions.
+    DpadUp,
+    DpadDown,
+    DpadLeft,
+    DpadRight,
+    /// A stick, to move: the framing hint, and the four direction rows of the
+    /// controls editor.
     LStick,
     RStick,
+    /// A stick pushed in (L3 / R3), a button of its own.
+    LStickPress,
+    RStickPress,
+    /// The rail buttons of a Joy-Con held on its own, sideways.
+    SL,
+    SR,
 }
 
 impl Btn {
-    /// Code points in NintendoExt, as Borealis and the other homebrews that use
-    /// the shared font map them.
+    /// Code points in NintendoExt, as the homebrews that use the shared font
+    /// map them (ReiNX Toolkit's `Font.hpp`, sphaira's `nvg_util.cpp`).
+    ///
+    /// The sticks were taken from Borealis, whose LSTICK is the stick CLICK:
+    /// U+E104 / U+E105 are the sticks pressed in, U+E101 / U+E102 the sticks
+    /// themselves. With the click glyph on the four direction rows, the editor
+    /// showed a press icon beside an arrow, which is what Jonathan asked about.
     fn glyph(self) -> char {
         match self {
             Btn::A => '\u{E0E0}',
@@ -88,11 +106,19 @@ impl Btn {
             Btn::R => '\u{E0E5}',
             Btn::ZL => '\u{E0E6}',
             Btn::ZR => '\u{E0E7}',
+            Btn::SL => '\u{E0E8}',
+            Btn::SR => '\u{E0E9}',
             Btn::Plus => '\u{E0EF}',
             Btn::Minus => '\u{E0F0}',
             Btn::Dpad => '\u{E0EA}',
-            Btn::LStick => '\u{E104}',
-            Btn::RStick => '\u{E105}',
+            Btn::DpadUp => '\u{E0EB}',
+            Btn::DpadDown => '\u{E0EC}',
+            Btn::DpadLeft => '\u{E0ED}',
+            Btn::DpadRight => '\u{E0EE}',
+            Btn::LStick => '\u{E101}',
+            Btn::RStick => '\u{E102}',
+            Btn::LStickPress => '\u{E104}',
+            Btn::RStickPress => '\u{E105}',
         }
     }
 
@@ -107,14 +133,25 @@ impl Btn {
             Btn::R => "R",
             Btn::ZL => "ZL",
             Btn::ZR => "ZR",
+            Btn::SL => "SL",
+            Btn::SR => "SR",
             Btn::Plus => "+",
             Btn::Minus => "\u{2212}",
             Btn::Dpad => "\u{2195}",
-            Btn::LStick => "L",
-            Btn::RStick => "R",
+            Btn::DpadUp => "\u{2191}",
+            Btn::DpadDown => "\u{2193}",
+            Btn::DpadLeft => "\u{2190}",
+            Btn::DpadRight => "\u{2192}",
+            Btn::LStick | Btn::LStickPress => "L",
+            Btn::RStick | Btn::RStickPress => "R",
         }
     }
 }
+
+/// The button glyphs this file draws, to say in the log which ones the
+/// console's NintendoExt lacks (`kit_button` then draws a disc with a letter).
+const LOGGED_GLYPHS: [char; 8] =
+    ['\u{E0E8}', '\u{E0E9}', '\u{E0EB}', '\u{E0EE}', '\u{E101}', '\u{E102}', '\u{E104}', '\u{E105}'];
 
 fn shared_face(kind: core::ffi::c_int) -> Option<ttf_parser::Face<'static>> {
     let bytes: &'static [u8] = unsafe {
@@ -230,10 +267,21 @@ fn with_faces<R>(f: impl FnOnce(&mut Faces) -> R) -> Option<R> {
         match shared_face(PL_STANDARD) {
             Some(std) => {
                 let ext = shared_face(PL_NINTENDO_EXT);
+                let lacks: std::vec::Vec<std::string::String> = ext
+                    .as_ref()
+                    .map(|e| {
+                        LOGGED_GLYPHS
+                            .iter()
+                            .filter(|c| e.glyph_index(**c).map_or(true, |g| g.0 == 0))
+                            .map(|c| std::format!("{:04X}", *c as u32))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 log_str(&std::format!(
-                    "kit: fonts ready (standard {} upem, nintendo-ext {})\n",
+                    "kit: fonts ready (standard {} upem, nintendo-ext {}{})\n",
                     std.units_per_em(),
                     if ext.is_some() { "yes" } else { "MISSING, glyphs drawn by hand" },
+                    if lacks.is_empty() { std::string::String::new() } else { std::format!(", lacks {}", lacks.join(" ")) },
                 ));
                 let icons = ttf_parser::Face::parse(super::icons::ICON_FONT, 0).ok();
                 *guard = Some(Faces { std, ext, icons, cn: None, cn_tried: false, chars: HashMap::new() });

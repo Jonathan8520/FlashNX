@@ -196,6 +196,8 @@ pub struct Ui {
     pub delete_game_body: &'static str,
     /// Body of the delete-my-shared-profile question.
     pub profile_del_body: &'static str,
+    /// Caption beside a stick glyph on the row of the stick pushed in (L3 / R3).
+    pub stick_press: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -333,6 +335,7 @@ const EN: Ui = Ui {
     help_folder_physical: "This game's file is in this folder on the card. Choose “No folder” to take it out.",
     delete_game_body: "The game, its saves, its controls and its cover will be erased from the card. This cannot be undone.",
     profile_del_body: "It disappears from the catalog for everyone. Your controls on this console stay as they are.",
+    stick_press: "press",
 };
 
 const FR: Ui = Ui {
@@ -470,6 +473,7 @@ const FR: Ui = Ui {
     help_folder_physical: "Le fichier de ce jeu est rangé dans ce dossier sur la carte. Choisis « Aucun dossier » pour l'en sortir.",
     delete_game_body: "Le jeu, ses sauvegardes, ses touches et sa jaquette seront effacés de la carte. Action irréversible.",
     profile_del_body: "Il disparaît du catalogue pour tout le monde. Tes touches sur cette console ne changent pas.",
+    stick_press: "appui",
 };
 
 const ES: Ui = Ui {
@@ -607,6 +611,7 @@ const ES: Ui = Ui {
     help_folder_physical: "El archivo de este juego está en esta carpeta de la tarjeta. Elige «Sin carpeta» para sacarlo.",
     delete_game_body: "El juego, sus partidas, sus controles y su portada se borrarán de la tarjeta. No se puede deshacer.",
     profile_del_body: "Desaparece del catálogo para todos. Tus controles en esta consola no cambian.",
+    stick_press: "pulsar",
 };
 
 const RU: Ui = Ui {
@@ -744,6 +749,7 @@ const RU: Ui = Ui {
     help_folder_physical: "Файл этой игры лежит в этой папке на карте. Выбери «Без папки», чтобы вынуть его оттуда.",
     delete_game_body: "Игра, сохранения, управление и обложка будут удалены с карты. Это нельзя отменить.",
     profile_del_body: "Он исчезнет из каталога для всех. Твоё управление на этой консоли не изменится.",
+    stick_press: "нажатие",
 };
 
 const DE: Ui = Ui {
@@ -881,6 +887,7 @@ const DE: Ui = Ui {
     help_folder_physical: "Die Datei dieses Spiels liegt auf der Karte in diesem Ordner. Wähle „Kein Ordner“, um sie herauszunehmen.",
     delete_game_body: "Das Spiel, seine Spielstände, seine Steuerung und sein Cover werden von der Karte gelöscht. Das lässt sich nicht rückgängig machen.",
     profile_del_body: "Es verschwindet für alle aus dem Katalog. Deine Steuerung auf dieser Konsole bleibt, wie sie ist.",
+    stick_press: "drücken",
 };
 
 const IT: Ui = Ui {
@@ -1018,6 +1025,7 @@ const IT: Ui = Ui {
     help_folder_physical: "Il file di questo gioco è in questa cartella sulla scheda. Scegli «Nessuna cartella» per toglierlo.",
     delete_game_body: "Il gioco, i salvataggi, i controlli e la copertina verranno cancellati dalla scheda. Non si può annullare.",
     profile_del_body: "Sparisce dal catalogo per tutti. I tuoi controlli su questa console restano come sono.",
+    stick_press: "premi",
 };
 
 const PT: Ui = Ui {
@@ -1155,6 +1163,7 @@ const PT: Ui = Ui {
     help_folder_physical: "O arquivo deste jogo está nesta pasta do cartão. Escolha “Sem pasta” para tirá-lo de lá.",
     delete_game_body: "O jogo, os saves, os controles e a capa serão apagados do cartão. Não dá para desfazer.",
     profile_del_body: "Ele some do catálogo para todos. Seus controles neste console continuam iguais.",
+    stick_press: "apertar",
 };
 
 const ZH: Ui = Ui {
@@ -1292,6 +1301,7 @@ const ZH: Ui = Ui {
     help_folder_physical: "此游戏的文件位于存储卡上的这个文件夹。选择“无文件夹”即可移出。",
     delete_game_body: "游戏及其存档、按键和封面将从存储卡删除，且无法撤销。",
     profile_del_body: "它将从目录中对所有人消失。你在这台主机上的按键不会改变。",
+    stick_press: "按下",
 };
 
 const TR: Ui = Ui {
@@ -1429,6 +1439,7 @@ const TR: Ui = Ui {
     help_folder_physical: "Bu oyunun dosyası karttaki bu klasörde. Çıkarmak için “Klasörsüz”ü seç.",
     delete_game_body: "Oyun, kayıtları, kontrolleri ve kapağı karttan silinecek. Bu geri alınamaz.",
     profile_del_body: "Herkes için katalogdan kalkar. Bu konsoldaki kontrollerin olduğu gibi kalır.",
+    stick_press: "basma",
 };
 
 pub fn ui() -> &'static Ui {

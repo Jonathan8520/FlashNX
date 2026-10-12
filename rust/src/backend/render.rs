@@ -187,6 +187,67 @@ const GLIDE_KEY_COVER: u32 = 55;
 // 52 and 54 used to be the folder picker's; it derives its own keys from the
 // path it is showing, so a step into another folder snaps instead of sliding.
 
+// ── Controller badges ──────────────────────────────────────────────────────
+
+/// Which glyph a pad slot's label (`keymap::PadSlot::glyph`) is drawn with,
+/// and the caption beside it: "LS↑" is the left stick and an arrow, "LS" alone
+/// the left stick pushed in and "press", "↑" the d-pad with its top arm lit and
+/// an arrow. One table for every place a button is named (the editor, its key
+/// picker, the before / after tables), so they cannot disagree on a glyph again:
+/// the editor and the diff table each had their own copy, and fixing one would
+/// have left the other's widths wrong.
+fn pad_badge_parts(label: &str) -> (Option<Btn>, &str) {
+    let single = match label {
+        "A" => Some(Btn::A),
+        "B" => Some(Btn::B),
+        "X" => Some(Btn::X),
+        "Y" => Some(Btn::Y),
+        "L" => Some(Btn::L),
+        "R" => Some(Btn::R),
+        "ZL" => Some(Btn::ZL),
+        "ZR" => Some(Btn::ZR),
+        "SL" => Some(Btn::SL),
+        "SR" => Some(Btn::SR),
+        "+" => Some(Btn::Plus),
+        "-" => Some(Btn::Minus),
+        _ => None,
+    };
+    if single.is_some() {
+        return (single, "");
+    }
+    let press = crate::loc_ui::ui().stick_press;
+    match label {
+        "LS" => return (Some(Btn::LStickPress), press),
+        "RS" => return (Some(Btn::RStickPress), press),
+        "\u{2191}" => return (Some(Btn::DpadUp), label),
+        "\u{2193}" => return (Some(Btn::DpadDown), label),
+        "\u{2190}" => return (Some(Btn::DpadLeft), label),
+        "\u{2192}" => return (Some(Btn::DpadRight), label),
+        _ => {}
+    }
+    if let Some(arrow) = label.strip_prefix("LS") {
+        return (Some(Btn::LStick), arrow);
+    }
+    if let Some(arrow) = label.strip_prefix("RS") {
+        return (Some(Btn::RStick), arrow);
+    }
+    (None, label)
+}
+
+/// A badge's glyph beside text at `px`: the glyph's circle fills most of its
+/// em where a letter fills about 70%, so it is drawn larger to look the same
+/// size.
+fn pad_glyph_px(px: f32) -> f32 {
+    (px * 1.35).round()
+}
+
+/// The caption beside a badge's glyph: the mockup's 13 px beside 15 px text.
+fn pad_caption_px(px: f32) -> f32 {
+    (px * 0.87).round().max(10.0)
+}
+
+const PAD_CAPTION_GAP: f32 = 3.0;
+
 /// Geometry of a drawn modal frame, returned by `draw_modal_frame` so the caller
 /// can lay its body (rows or free text) inside the shared chrome.
 #[derive(Clone, Copy)]
@@ -9310,13 +9371,13 @@ impl SwitchRenderBackend {
         // What every button does in this mode (cpp/src/main.cpp, `zoom_mode`):
         // shoulders zoom coarsely, Y / X finely, either stick frames, the d-pad
         // frames by single pixels, pressing the left stick resets, A keeps, B
-        // drops.
+        // drops. Framing MOVES a stick and resetting PRESSES one: two glyphs.
         let hints: [kit::text::HintItem; 7] = [
             (&[Btn::ZL, Btn::ZR], u.zoom_coarse),
             (&[Btn::Y, Btn::X], u.zoom_fine),
             (&[Btn::LStick, Btn::RStick], u.zoom_frame),
             (&[Btn::Dpad], u.zoom_pixel),
-            (&[Btn::LStick], u.zoom_reset),
+            (&[Btn::LStickPress], u.zoom_reset),
             (&[Btn::A], u.validate),
             (&[Btn::B], u.cancel),
         ];
@@ -9726,7 +9787,7 @@ impl SwitchRenderBackend {
             } else {
                 theme::col::TEXT
             };
-            self.kit_pad_badge(x, y + h * 0.5, badge_w, slot.glyph, txt_px, badge_ink);
+            self.kit_pad_badge(x + 10.0, y + h * 0.5, badge_w - 10.0, slot.glyph, txt_px, badge_ink);
             // Value: what it does. Shrinks rather than truncating, the way every
             // other box in this app does — a binding cut to "RIGHT CLI" is worse
             // than a small one.
@@ -9756,91 +9817,45 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
-    /// A controller slot's label as glyphs, centred in `w` from `x`: "A" is the
-    /// console's A, "LS↑" is the left-stick glyph and an arrow, "↑" the d-pad
-    /// glyph and an arrow. Anything else (SL, SR) stays text.
-    /// The width `kit_pad_badge` draws `label` in, so a badge can sit at the
-    /// start of a column instead of centred in a cell.
+    /// The width `kit_pad_badge` draws `label` in at `px`.
     fn pad_badge_width(&mut self, label: &str, px: f32) -> f32 {
-        let gpx = (px * 1.35).round();
-        let single = match label {
-            "A" => Some(Btn::A),
-            "B" => Some(Btn::B),
-            "X" => Some(Btn::X),
-            "Y" => Some(Btn::Y),
-            "L" => Some(Btn::L),
-            "R" => Some(Btn::R),
-            "ZL" => Some(Btn::ZL),
-            "ZR" => Some(Btn::ZR),
-            "+" => Some(Btn::Plus),
-            "-" => Some(Btn::Minus),
-            _ => None,
-        };
-        if let Some(b) = single {
-            return self.kit_button_width(b, gpx);
-        }
-        let (glyph, rest) = if let Some(r) = label.strip_prefix("LS") {
-            (Some(Btn::LStick), r)
-        } else if let Some(r) = label.strip_prefix("RS") {
-            (Some(Btn::RStick), r)
-        } else if matches!(label, "\u{2191}" | "\u{2193}" | "\u{2190}" | "\u{2192}") {
-            (Some(Btn::Dpad), label)
-        } else {
-            (None, label)
-        };
+        let (glyph, caption) = pad_badge_parts(label);
         match glyph {
             Some(b) => {
-                let gw = self.kit_button_width(b, gpx);
-                gw + if rest.is_empty() { 0.0 } else { 4.0 + self.kit_measure(rest, px) }
+                let gw = self.kit_button_width(b, pad_glyph_px(px));
+                if caption.is_empty() {
+                    gw
+                } else {
+                    gw + PAD_CAPTION_GAP + self.kit_measure(caption, pad_caption_px(px))
+                }
             }
-            None => self.kit_measure(rest, px) + 8.0,
+            None => self.kit_measure(label, px),
         }
     }
 
+    /// A controller slot's label as the console draws it, from `x` (left
+    /// aligned, so a column of them starts in one place), at most `w` wide:
+    /// the button's own glyph, then a small caption for what the glyph alone
+    /// does not say, the direction of a stick or of the d-pad, or "press" for a
+    /// stick pushed in. The caption is smaller and quieter than the glyph: drawn
+    /// at the value's size, the arrow of a "→" row read as "maps to".
     fn kit_pad_badge(&mut self, x: f32, cy: f32, w: f32, label: &str, px: f32, ink: u32) {
-        let gpx = (px * 1.35).round();
-        let single = match label {
-            "A" => Some(Btn::A),
-            "B" => Some(Btn::B),
-            "X" => Some(Btn::X),
-            "Y" => Some(Btn::Y),
-            "L" => Some(Btn::L),
-            "R" => Some(Btn::R),
-            "ZL" => Some(Btn::ZL),
-            "ZR" => Some(Btn::ZR),
-            "+" => Some(Btn::Plus),
-            "-" => Some(Btn::Minus),
-            _ => None,
-        };
-        if let Some(b) = single {
-            let gw = self.kit_button_width(b, gpx);
-            self.kit_button((x + (w - gw) * 0.5).round(), cy, gpx, b, ink);
+        let (glyph, caption) = pad_badge_parts(label);
+        let Some(b) = glyph else {
+            let t = self.kit_fit(label, px, w);
+            self.kit_text_mid(x.round(), cy, px, &t, ink);
             return;
-        }
-        let (glyph, rest) = if let Some(r) = label.strip_prefix("LS") {
-            (Some(Btn::LStick), r)
-        } else if let Some(r) = label.strip_prefix("RS") {
-            (Some(Btn::RStick), r)
-        } else if matches!(label, "\u{2191}" | "\u{2193}" | "\u{2190}" | "\u{2192}") {
-            (Some(Btn::Dpad), label)
-        } else {
-            (None, label)
         };
-        match glyph {
-            Some(b) => {
-                let gw = self.kit_button_width(b, gpx);
-                let rw = if rest.is_empty() { 0.0 } else { 4.0 + self.kit_measure(rest, px) };
-                let mut cx = (x + (w - gw - rw) * 0.5).round();
-                cx += self.kit_button(cx, cy, gpx, b, ink);
-                if !rest.is_empty() {
-                    self.kit_text_mid(cx + 4.0, cy, px, rest, ink);
-                }
-            }
-            None => {
-                let t = self.kit_fit(rest, px, w - 8.0);
-                let tw = self.kit_measure(&t, px);
-                self.kit_text_mid((x + (w - tw) * 0.5).round(), cy, px, &t, ink);
-            }
+        let gx = x.round();
+        let gw = self.kit_button(gx, cy, pad_glyph_px(px), b, ink);
+        if !caption.is_empty() {
+            // The glyph keeps the row's ink; the caption steps back a shade
+            // unless the row is lit or dimmed as a whole.
+            let cink = if ink == theme::col::TEXT { theme::col::TEXT2 } else { ink };
+            let cpx = pad_caption_px(px);
+            let cx = gx + gw + PAD_CAPTION_GAP;
+            let c = self.kit_fit(caption, cpx, (x + w - cx).max(0.0));
+            self.kit_text_mid(cx, cy, cpx, &c, cink);
         }
     }
 
