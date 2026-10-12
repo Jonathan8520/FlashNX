@@ -58,7 +58,8 @@ pub(crate) enum Screen {
     /// Applet mode: the user pressed A on a game but we have only the small
     /// applet heap, so launching would OOM. Shows a "use title takeover"
     /// notice (P1c) instead of the embedded red SWF. Carries the list row to
-    /// return to on dismiss.
+    /// return to on dismiss (pressed on an importer page, the page to go back
+    /// to is held in `LAUNCH_BACKDROP` instead).
     AppletNotice { selection: usize, scroll_offset: usize },
     /// User pressed - or chose to quit; main loop exits the `.nro`.
     Quit,
@@ -2644,6 +2645,15 @@ pub fn open() {
     let want_path = last_played_path();
     let applet = unsafe { ruffle_is_applet_mode() } != 0;
     log(&std::format!("library: open applet_mode={}\n", applet));
+    // The game just played was started from an importer page. The cell table on
+    // record is then that page's (its cards and sources, an archive's games or
+    // the Flashpoint tiles), not the Play grid's: the cursor's row cannot be
+    // read from it, nor the tile to shrink into, and input must not act on it
+    // before the grid has drawn its own.
+    let from_importer = LAUNCHED_FROM_IMPORTER.swap(false, std::sync::atomic::Ordering::Relaxed);
+    if from_importer {
+        crate::backend::render::gallery_layout_clear();
+    }
     // Identity of the just-played game, for the quit "close" reveal below.
     let mut collapse_info: Option<(std::string::String, std::string::String, u32)> = None;
     if let Ok(mut s) = LIBRARY.lock() {
@@ -2704,7 +2714,17 @@ pub fn open() {
             // quit->library round-trip: same entries). `gallery_scroll_for`
             // falls back to 0 when no layout exists yet (first boot). Using the
             // old flat `clamp_scroll` here put a last-row game off-screen.
-            let scroll_offset = gallery_scroll_for(selection, jouer_scroll());
+            //
+            // After a game started from the importer there is no grid layout to
+            // read (see `from_importer`): the gallery keeps the scroll it was
+            // left at, and its first frame scrolls the game into view once it
+            // has published its own (`JOUER_RESCROLL`).
+            let scroll_offset = if from_importer {
+                JOUER_RESCROLL.store(true, std::sync::atomic::Ordering::Relaxed);
+                jouer_scroll()
+            } else {
+                gallery_scroll_for(selection, jouer_scroll())
+            };
             Screen::List { selection, scroll_offset }
         };
         // Returning from a game (last-played still present) -> grab its identity
@@ -2726,7 +2746,6 @@ pub fn open() {
     // Not after a game started from the importer: no tile was pressed, and the
     // cached box belongs to whatever the grid last showed (nothing at all on a
     // fresh boot, which shrank the cover into the corner).
-    let from_importer = LAUNCHED_FROM_IMPORTER.swap(false, std::sync::atomic::Ordering::Relaxed);
     if let (Some((bn, dn, color)), false) = (collapse_info, from_importer) {
         let rect = crate::backend::render::gallery_sel_rect_read();
         crate::backend::render::game_reveal_begin(true, rect, &bn, &dn, color);
@@ -4152,9 +4171,11 @@ fn input_inner(button: &str) -> bool {
             true
         }
         Screen::AppletNotice { selection, scroll_offset } => {
-            // Any dismiss button returns to the same list row.
+            // Any dismiss button returns where the game was pressed: the same
+            // list row, or the importer page it was on (`launch_from_importer`).
             if matches!(button, "A" | "B" | "Minus") {
-                s.screen = Screen::List { selection, scroll_offset };
+                let page = LAUNCH_BACKDROP.lock().ok().and_then(|mut g| g.take());
+                s.screen = page.unwrap_or(Screen::List { selection, scroll_offset });
             }
             true
         }
@@ -6495,6 +6516,13 @@ static JOUER_SCROLL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicU
 fn jouer_scroll() -> usize {
     JOUER_SCROLL.load(std::sync::atomic::Ordering::Relaxed)
 }
+
+/// The gallery's next frame must scroll its selection into view from the table
+/// it is about to publish. Set by `open` after a game started from an importer
+/// page: the table on record then was that page's, and reading the row from it
+/// put a game of row 2 on "row 12" and scrolled the grid past its end (blank,
+/// the cursor off screen, until a direction was pressed).
+static JOUER_RESCROLL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// A `DistantIdle` screen parked on `row` (clamped to the rows there are),
 /// keeping the current scroll unless the row would be off screen. Every caller
@@ -9010,12 +9038,20 @@ fn drive_fp_details(settled: bool) {
 /// any game played.
 fn launch_from_importer(s: &mut State, abs: usize, rect: (f32, f32, f32, f32), backdrop: Screen) {
     let Some(entry) = s.entries.get(abs).cloned() else { return };
-    let (selection, scroll_offset) = match list_screen_for_abs(s, abs) {
-        Screen::List { selection, scroll_offset } => (selection, scroll_offset),
-        _ => (0, 0),
-    };
-    // Applet mode has too little RAM to launch a SWF: the same notice as Jouer.
+    // The game's Jouer row, with the scroll Jouer was left at. Not through
+    // `list_screen_for_abs`: the cell table it reads rows from is this importer
+    // page's, not the grid's (`open` places the cursor once the grid is back).
+    let selection = local_filtered_indices(&s.entries, &s.local_filter, &s.folder_filter)
+        .iter()
+        .position(|&i| i == abs)
+        .unwrap_or(0);
+    let scroll_offset = jouer_scroll();
+    // Applet mode has too little RAM to launch a SWF: the same notice as Jouer,
+    // which then goes back to this page rather than over to Jouer.
     if s.applet_mode {
+        if let Ok(mut g) = LAUNCH_BACKDROP.lock() {
+            *g = Some(backdrop);
+        }
         s.screen = Screen::AppletNotice { selection, scroll_offset };
         return;
     }
@@ -9045,6 +9081,8 @@ static LAUNCHED_FROM_IMPORTER: std::sync::atomic::AtomicBool = std::sync::atomic
 
 /// The importer page a game was launched from, drawn behind its launch instead
 /// of the Play grid (`launch_from_importer`). Cleared when the launch is done.
+/// In applet mode, where no game launches, it is the page the notice saying so
+/// goes back to, taken when the notice is dismissed.
 static LAUNCH_BACKDROP: Mutex<Option<Screen>> = Mutex::new(None);
 
 /// The download in flight: when it started, and its speed (bytes per second,
@@ -10586,10 +10624,27 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             backend.draw_library_empty();
         }
         Screen::List { selection, scroll_offset } => {
+            let mut scroll_offset = scroll_offset;
+            draw_gallery(backend, selection, scroll_offset, anim_origin);
+            // Back from a game started on an importer page: the grid has just
+            // published its own table, so the game's row can be read now. Drawn
+            // again at once if that scrolls, so no frame shows the old scroll.
+            if JOUER_RESCROLL.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                let placed = gallery_scroll_for(selection, scroll_offset);
+                if placed != scroll_offset {
+                    if let Ok(mut s) = LIBRARY.lock() {
+                        if s.screen == (Screen::List { selection, scroll_offset }) {
+                            s.screen = Screen::List { selection, scroll_offset: placed };
+                        }
+                    }
+                    scroll_offset = placed;
+                    crate::backend::render::gallery_anim_reset();
+                    draw_gallery(backend, selection, scroll_offset, anim_origin);
+                }
+            }
             // Remember where the gallery is, so every path that comes BACK to it
             // restores this scroll instead of deriving one from the row.
             JOUER_SCROLL.store(scroll_offset, std::sync::atomic::Ordering::Relaxed);
-            draw_gallery(backend, selection, scroll_offset, anim_origin);
             // Quit collapse reveal: the cover shrinks from full screen back to its
             // tile over the gallery (active only right after returning from a
             // game; a no-op otherwise — the anim deactivates itself when idle).

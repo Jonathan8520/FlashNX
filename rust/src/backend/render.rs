@@ -4896,6 +4896,17 @@ pub fn gallery_layout_read() -> (std::vec::Vec<GalleryCell>, u32) {
     gallery_cache().lock().map(|g| (g.0.clone(), g.1)).unwrap_or_default()
 }
 
+/// Forget the published cell table, for a page about to be shown whose table
+/// is not the one on record (the Play grid after a game started from an
+/// importer page, whose own table was the last one published). Until the page
+/// has drawn and published its own, navigation and touch find nothing rather
+/// than another page's cells.
+pub fn gallery_layout_clear() {
+    if let Ok(mut g) = gallery_cache().lock() {
+        *g = (std::vec::Vec::new(), 0);
+    }
+}
+
 /// Selected tile's current screen rect (x,y,w,h) from the last gallery render.
 /// The game launch/quit reveal grows the cover from / shrinks it to this box.
 fn gallery_sel_rect() -> &'static std::sync::Mutex<(f32, f32, f32, f32)> {
