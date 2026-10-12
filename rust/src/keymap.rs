@@ -153,8 +153,10 @@ pub const EDITABLE_BUTTONS: &[&str] = &[
 /// US keyCodes and CJK boards are physically QWERTY too (see the #55 discussion).
 /// Labels are localised at draw time via `keyboard_label`; stored names are stable.
 pub const KEYBOARD: &[(&str, u8, f32, f32)] = &[
-    // Row 0 — Esc + function keys, grouped in fours like a real board.
-    ("Escape", 0, 0.0, 1.0),
+    // Row 0 — Esc + function keys, grouped in fours like a real board. Esc is
+    // a quarter wider than a letter: its word ("Escape", "Échap") does not fit
+    // a one-unit cap even at the smaller legend size, and it was cut to "Esc…".
+    ("Escape", 0, 0.0, 1.25),
     ("F1", 0, 1.5, 1.0), ("F2", 0, 2.5, 1.0), ("F3", 0, 3.5, 1.0), ("F4", 0, 4.5, 1.0),
     ("F5", 0, 5.75, 1.0), ("F6", 0, 6.75, 1.0), ("F7", 0, 7.75, 1.0), ("F8", 0, 8.75, 1.0),
     ("F9", 0, 10.0, 1.0), ("F10", 0, 11.0, 1.0), ("F11", 0, 12.0, 1.0), ("F12", 0, 13.0, 1.0),

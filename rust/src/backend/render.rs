@@ -10411,7 +10411,11 @@ impl SwitchRenderBackend {
         let small = (big * 0.76).round().max(10.0);
         let isz = if icon.is_some() { (big + 1.0).round() } else { 0.0 };
         let room = w - 12.0 - if icon.is_some() { isz + 8.0 } else { 0.0 };
-        let px = if self.kit_measure(&label, big) <= room { big } else { small };
+        // Two more steps down before anything is cut: the numpad's Enter is a
+        // one-unit cap, and "Entrée" only fits it at 11 px. A cut legend is
+        // what made the board look unfinished.
+        let steps = [big, small, small.min(11.0), 10.0];
+        let px = steps.into_iter().find(|&p| self.kit_measure(&label, p) <= room).unwrap_or(10.0);
         let l = self.kit_fit(&label, px, room.max(0.0));
         let lw = self.kit_measure(&l, px);
         let total = lw + if icon.is_some() { isz + 8.0 } else { 0.0 };
