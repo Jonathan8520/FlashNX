@@ -10332,73 +10332,6 @@ impl SwitchRenderBackend {
         }
     }
 
-    /// Draw `tex` filling the rect (x,y,w,h) with CROP-TO-FILL — no black bars.
-    /// Scales the image to cover the whole rect and center-crops the overflow
-    /// via a UV remap (the shader does `v_uv = remap.xy + uv * remap.zw`).
-    /// `img_w`/`img_h` are the texture's pixel dims, used for the aspect ratio.
-    /// This is what makes the cover grid look clean despite mixed cover sizes.
-    pub fn draw_textured_rect_cover(
-        &mut self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        tex: GLuint,
-        img_w: u32,
-        img_h: u32,
-        // 0 = invisible, 1 = fully drawn. Used to fade a cover in over the
-        // generated tile: swapping between two frames reads as a flicker.
-        alpha: f32,
-    ) {
-        if tex == 0 || w <= 0.0 || h <= 0.0 || img_w == 0 || img_h == 0 {
-            return;
-        }
-        let tile_aspect = w / h;
-        let img_aspect = img_w as f32 / img_h as f32;
-        // remap = [offset_x, offset_y, scale_x, scale_y] over UV [0,1]. Crop the
-        // long axis so the short axis fills the tile (center-cropped).
-        let uv_remap = if img_aspect > tile_aspect {
-            let fx = tile_aspect / img_aspect; // visible width fraction
-            [(1.0 - fx) * 0.5, 0.0, fx, 1.0]
-        } else {
-            let fy = img_aspect / tile_aspect; // visible height fraction
-            [0.0, (1.0 - fy) * 0.5, 1.0, fy]
-        };
-        let mat = Matrix {
-            a: w,
-            b: 0.0,
-            c: 0.0,
-            d: h,
-            tx: swf::Twips::from_pixels(x as f64),
-            ty: swf::Twips::from_pixels(y as f64),
-        };
-        let world = self.world_matrix(&mat);
-        let a = alpha.clamp(0.0, 1.0);
-        // STRAIGHT alpha, and the fade applied to the alpha channel alone.
-        //
-        // This used to premultiply (`mult = [a,a,a,a]` with `GL_ONE`), which is
-        // right only for a texture that is already premultiplied. A cover comes
-        // from a decoded PNG and is not: with `GL_ONE` its transparent pixels
-        // were added at full strength, so wherever a cover had an alpha channel
-        // its see-through corners came out as solid white blocks. Nearly every
-        // cover is opaque, which is why it took a logo with cut corners to show
-        // it (Super Smash Flash 2, reported 2026-08-21).
-        let mult = [1.0, 1.0, 1.0, a];
-        let add = [0.0, 0.0, 0.0, 0.0];
-        if a <= 0.0 {
-            return;
-        }
-        unsafe {
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        }
-        self.use_bitmap(&world, &mult, &add, tex, &uv_remap, 0, false);
-        self.gl_state.bind_vao(self.bitmap_vao);
-        unsafe {
-            glDrawArrays(GL_TRIANGLES, 0, 6);
-        }
-    }
-
     /// Full-screen black clear used at the top of each library render. We
     /// own the framebuffer here (no Ruffle behind us pre-init).
     pub fn library_clear(&mut self) {
@@ -10618,46 +10551,56 @@ impl SwitchRenderBackend {
         self.kit_ring(x, y, w, h, 2.0, 0.0, 3.0, theme::col::GOLD);
     }
 
-    /// Draw the game-reveal content for the rect (x,y,w,h): the game's cover
-    /// LETTERBOXED (fit, keeps aspect — no crop, no stretch; black bars fill the
-    /// rest) if it has one, else its colour chip + initials. Used full-screen as
-    /// the launch/quit reveal window's content.
-    pub fn draw_game_reveal_tile(
+    /// The launch and quit reveal, `e` of the way from the selected tile (0)
+    /// to the whole screen (1), in the window `(x, y, w, h)` between the two.
+    ///
+    /// The cover is carried, not cut out: drawn INTO the window, whole over its
+    /// backdrop, with corners that straighten as it grows. At 0 that is exactly
+    /// the opened tile (or the LISTE / BANDE panel's picture), at 1 the cover on
+    /// the full screen. It used to be the full-screen cover seen through a
+    /// window clipped out of it, so the first frame showed whatever part of the
+    /// picture happened to lie under the tile (a corner of the blur, a band of
+    /// the art), with 2 px corners where the tile had 12 and a page dimmed in
+    /// one frame. The dim now follows the opening, and the grid's ring, which
+    /// the tile was wearing, fades out over the first third.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_game_reveal(
         &mut self,
         x: f32,
         y: f32,
         w: f32,
         h: f32,
+        e: f32,
         basename: &str,
         display_name: &str,
         color_chip: u32,
     ) {
-        // FULL resolution here, not the gallery's tile thumbnail: this fills the
-        // screen, where a 256-wide thumbnail upscales to visible mush.
+        use theme::{col, radius, ring};
+        let e = e.clamp(0.0, 1.0);
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        // The page around the window darkens as the window opens.
+        let dim = ((0x88 as f32 * e) as u32) << 24 | 0x05_0A_16;
+        if e > 0.0 {
+            for (rx, ry, rw, rh) in [(0.0, 0.0, vw, y), (0.0, y + h, vw, vh - (y + h)), (0.0, y, x, h), (x + w, y, vw - (x + w), h)] {
+                if rw > 0.0 && rh > 0.0 {
+                    self.draw_overlay_rect(rx, ry, rw, rh, dim);
+                }
+            }
+        }
+        let r = radius::TILE * (1.0 - e);
+        // FULL resolution here, not the gallery's tile thumbnail: this fills
+        // the screen, where a 256-wide thumbnail upscales to visible mush.
         match self.cover_full_for(basename) {
             CoverTex::Image { tex, w: iw, h: ih, amb } if iw > 0 && ih > 0 => {
-                // The cover whole, over its own blurred backdrop rather than
-                // black bars: the box grows from the tile to the full screen,
-                // and the art stays the art the tile showed.
-                self.draw_overlay_rect(x, y, w, h, 0xFF_00_00_00);
-                if amb != 0 {
-                    self.draw_textured_rect_cover(x, y, w, h, amb, iw, ih, 1.0);
-                }
-                let cover_aspect = iw as f32 / ih as f32;
-                let win_aspect = w / h;
-                let (dw, dh) = if cover_aspect > win_aspect {
-                    (w, w / cover_aspect)
-                } else {
-                    (h * cover_aspect, h)
-                };
-                self.draw_textured_rect(x + (w - dw) * 0.5, y + (h - dh) * 0.5, dw, dh, tex);
+                self.kit_cover_reveal_r(x, y, w, h, tex, iw, ih, amb, 1.0, 1.0, r);
             }
             _ => {
                 // No cover: the tile the library showed, its colour and the
                 // game's name, grown with the window.
                 let chip = color_chip & 0x00FF_FFFF;
-                self.draw_overlay_rect(x, y, w, h, 0xFF00_0000 | kit::cover::mix_rgb(chip, theme::col::BG & 0x00FF_FFFF, 0.55));
-                let px = (h / 9.0).clamp(18.0, 64.0).round();
+                self.kit_rrect(x, y, w, h, r, 0xFF00_0000 | kit::cover::mix_rgb(chip, col::BG & 0x00FF_FFFF, 0.55));
+                let px = (h / 9.0).clamp(17.0, 64.0).round();
                 let lines = self.kit_wrap(display_name, px, w * 0.8, 3);
                 let lh = (px * 1.25).round();
                 let mut cy = y + (h - lh * (lines.len() as f32 - 1.0)) * 0.5;
@@ -10668,6 +10611,13 @@ impl SwitchRenderBackend {
                     cy += lh;
                 }
             }
+        }
+        // Only the grid rings its selected tile (the panels and the shelf mark
+        // theirs otherwise), so only there does a ring hand over.
+        let ring_alpha = (1.0 - e / 0.3).clamp(0.0, 1.0);
+        if ring_alpha > 0.0 && crate::loc::home_view() == 0 {
+            let ink = ((ring_alpha * 255.0) as u32) << 24 | (col::GOLD & 0x00FF_FFFF);
+            self.kit_ring(x, y, w, h, r, ring::GAP, ring::WIDTH, ink);
         }
     }
 

@@ -9432,9 +9432,9 @@ fn draw_gallery(
     }
 }
 
-/// Draw the launch/quit reveal window for openness `frac` (0 = tile, 1 = full):
-/// the game's cover clipped to a window that opens/closes between the two, plus
-/// the bright border + dim chrome so the rectangle reads over the gallery behind.
+/// Draw the launch/quit reveal for openness `frac` (0 = tile, 1 = full): the
+/// game's cover carried in a window that grows from the tile to the screen, or
+/// shrinks back to it, over the gallery behind.
 fn draw_game_reveal_window(backend: &mut SwitchRenderBackend, frac: f32, fade: f32) {
     let (vw, vh) = backend.screen_size();
     let ((rx, ry, rw, rh), basename, name, color) = crate::backend::render::game_reveal_info();
@@ -9442,16 +9442,13 @@ fn draw_game_reveal_window(backend: &mut SwitchRenderBackend, frac: f32, fade: f
     let wy = ry * (1.0 - frac);
     let ww = rw + (vw - rw) * frac;
     let wh = rh + (vh - rh) * frac;
-    backend.set_clip(wx, wy, ww, wh);
-    backend.draw_game_reveal_tile(0.0, 0.0, vw, vh, &basename, &name, color);
+    backend.draw_game_reveal(wx, wy, ww, wh, frac, &basename, &name, color);
     // Launch fade-to-black: a black veil over the (full-screen) cover so the game
     // pops calmly out of the dark instead of replacing the cover in one frame.
     if fade > 0.0 {
         let alpha = (fade.clamp(0.0, 1.0) * 255.0) as u32;
         backend.draw_overlay_rect(0.0, 0.0, vw, vh, alpha << 24);
     }
-    backend.clear_clip();
-    backend.draw_reveal_chrome(wx, wy, ww, wh);
     // Multi-file indicator (v1.3.0): once the cover fills the screen (the SWF is
     // loading behind it), flag that this game pulls in companion SWFs from its
     // `.files/` folder. Count is reset to 0 on the quit reveal, so launch-only.
