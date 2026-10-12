@@ -596,8 +596,24 @@ fn show_question(backend: &mut SwitchRenderBackend, q: Question) {
     }
 }
 
+/// Forget the question on screen and any still shrinking: the next frame
+/// draws none. For a loading frame, which stays on the display for the whole
+/// blocking call after it: a shrink cannot play over that call, and Supprimer
+/// on a shared profile armed one there, so the question it had just answered
+/// stayed at full size under the card until the call returned.
+fn forget_question() {
+    if let Ok(mut g) = LAST_DIALOG.lock() {
+        *g = (0, 0);
+    }
+    if let Ok(mut g) = QUESTION_GHOST.lock() {
+        *g = None;
+    }
+}
+
 /// The loading frame of a deferred flow (a profile, a cover): `from`, the
 /// screen it started from, as it was, and the spinner over it. Taking no taps.
+/// No question on it: one that started the flow is answered (`defer_net`
+/// keeps the list it was asked over).
 ///
 /// It drew the last page beside the options instead, which a cover search has
 /// none of: the panels then went under a veil over the whole screen.
@@ -608,6 +624,7 @@ pub(crate) fn draw_options_loading(
     label: &str,
     from: Option<Screen>,
 ) {
+    forget_question();
     match from.filter(|f| is_options_family(*f)) {
         Some(screen) => {
             draw_options_family(backend, screen, now, anim_origin, None, 0);
