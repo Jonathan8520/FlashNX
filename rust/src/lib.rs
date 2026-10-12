@@ -2747,7 +2747,9 @@ pub extern "C" fn ruffle_redraw_paused() {
         if let Some(asked) = load_failed() {
             backend.draw_load_failed(&asked);
         }
-        if show_cursor {
+        // Nor the pointer, for the same reason: a white cross on the picture
+        // whose framing is being judged.
+        if show_cursor && !framing {
             backend.draw_cursor_overlay(cx, cy, clicked);
         }
         // The reading freezes with the picture, which is right: no frame is

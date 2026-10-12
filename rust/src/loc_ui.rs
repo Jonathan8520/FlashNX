@@ -550,6 +550,10 @@ pub struct Ui {
     pub load_failed_hint: &'static str,
     /// Toast for X (new folder) in the games folder browser while it shows the library or a folder inside it.
     pub dir_new_in_lib: &'static str,
+    /// Zoom framing header, after the percentage, only while the picture is
+    /// panned: how far it is moved, horizontally then vertically, in screen
+    /// pixels. The two {} are the numbers, a negative one with a real minus.
+    pub zoom_offset: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -871,6 +875,7 @@ const EN: Ui = Ui {
     load_failed_body: "The file is no longer at this place on the card, or it is too big for the memory left. It was looked for here:",
     load_failed_hint: "Menu",
     dir_new_in_lib: "You are in your library: create the new folder outside it.",
+    zoom_offset: "offset {}, {} px",
 };
 
 const FR: Ui = Ui {
@@ -1192,6 +1197,7 @@ const FR: Ui = Ui {
     load_failed_body: "Le fichier n'est plus à cet endroit de la carte, ou il est trop gros pour la mémoire disponible. Il a été cherché ici :",
     load_failed_hint: "Menu",
     dir_new_in_lib: "Tu es dans ta bibliothèque : crée le nouveau dossier en dehors.",
+    zoom_offset: "décalé de {}, {} px",
 };
 
 const ES: Ui = Ui {
@@ -1513,6 +1519,7 @@ const ES: Ui = Ui {
     load_failed_body: "El archivo ya no está en este lugar de la tarjeta, o es demasiado grande para la memoria disponible. Se buscó aquí:",
     load_failed_hint: "Menú",
     dir_new_in_lib: "Estás dentro de tu biblioteca: crea la carpeta nueva fuera de ella.",
+    zoom_offset: "desplazado {}, {} px",
 };
 
 const RU: Ui = Ui {
@@ -1834,6 +1841,7 @@ const RU: Ui = Ui {
     load_failed_body: "Файла больше нет в этом месте карты, или он слишком велик для доступной памяти. Он искался здесь:",
     load_failed_hint: "Меню",
     dir_new_in_lib: "Ты внутри своей библиотеки: создай новую папку за её пределами.",
+    zoom_offset: "сдвиг {}, {} пикс.",
 };
 
 const DE: Ui = Ui {
@@ -2155,6 +2163,7 @@ const DE: Ui = Ui {
     load_failed_body: "Die Datei liegt nicht mehr an dieser Stelle der Karte, oder sie ist zu groß für den freien Speicher. Gesucht wurde hier:",
     load_failed_hint: "Menü",
     dir_new_in_lib: "Du bist in deiner Bibliothek: Lege den neuen Ordner außerhalb an.",
+    zoom_offset: "verschoben um {}, {} px",
 };
 
 const IT: Ui = Ui {
@@ -2476,6 +2485,7 @@ const IT: Ui = Ui {
     load_failed_body: "Il file non è più in questo punto della scheda, oppure è troppo grande per la memoria disponibile. È stato cercato qui:",
     load_failed_hint: "Menu",
     dir_new_in_lib: "Sei dentro la tua libreria: crea la nuova cartella fuori da lì.",
+    zoom_offset: "spostato di {}, {} px",
 };
 
 const PT: Ui = Ui {
@@ -2797,6 +2807,7 @@ const PT: Ui = Ui {
     load_failed_body: "O arquivo não está mais neste lugar do cartão, ou é grande demais para a memória disponível. Ele foi procurado aqui:",
     load_failed_hint: "Menu",
     dir_new_in_lib: "Você está dentro da sua biblioteca: crie a nova pasta fora dela.",
+    zoom_offset: "deslocado {}, {} px",
 };
 
 const ZH: Ui = Ui {
@@ -3118,6 +3129,7 @@ const ZH: Ui = Ui {
     load_failed_body: "文件已不在存储卡上的这个位置，或者对于可用内存来说太大。查找的位置：",
     load_failed_hint: "菜单",
     dir_new_in_lib: "你在游戏库内：请在游戏库外新建文件夹。",
+    zoom_offset: "偏移 {}, {} 像素",
 };
 
 const TR: Ui = Ui {
@@ -3439,6 +3451,7 @@ const TR: Ui = Ui {
     load_failed_body: "Dosya artık kartta bu konumda değil ya da kalan bellek için çok büyük. Şurada arandı:",
     load_failed_hint: "Menü",
     dir_new_in_lib: "Kütüphanenin içindesin: yeni klasörü kütüphanenin dışında oluştur.",
+    zoom_offset: "{}, {} px kaydırıldı",
 };
 
 pub fn ui() -> &'static Ui {

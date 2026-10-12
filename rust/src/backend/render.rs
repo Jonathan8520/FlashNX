@@ -9908,10 +9908,10 @@ impl SwitchRenderBackend {
     /// Zoom-adjust mode (issue #101): the framing legend, over an untouched
     /// picture.
     ///
-    /// NOTHING is laid over the picture but the two lines of text themselves.
+    /// NOTHING is laid over the picture but small plates carrying the text.
     /// What the player is judging here IS the framing, to the pixel, so every
-    /// band, plate or tint is a piece of the answer taken away -- and a tint
-    /// would fight whatever they set in FILTRE one row down. The signal that the
+    /// band or tint is a piece of the answer taken away -- and a tint would
+    /// fight whatever they set in FILTRE one row down. The signal that the
     /// buttons have stopped driving the game is that the panel is gone and the
     /// legend has taken its place.
     ///
@@ -9926,13 +9926,29 @@ impl SwitchRenderBackend {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         }
-        // Two small plates on the picture, nothing else: what is being judged
-        // here IS the framing. The top one carries the WHOLE framing state, not
-        // just the percentage: the offset is half of what is being set, and it
-        // is what lands in the game's `.prefs` as `panx` / `pany`.
         const PLATE: u32 = 0xC8_0A_10_1C;
+        /// A legend plate's height, and the step from one to the next.
+        const ROW_H: f32 = 48.0;
+        const ROW_STEP: f32 = ROW_H + 8.0;
+        // The top plate says the zoom and, once the picture has been moved,
+        // by how much: the offset is half of what is being set, and it is what
+        // lands in the game's `.prefs` as `panx` / `pany`. Not "X 12 Y -4":
+        // X and Y are the fine zoom here, on the legend just below.
         let (ox, oy) = game_pan();
-        let head = std::format!("{}  {} %     X {}   Y {}", lc.set_zoom, percent, ox, oy);
+        let signed = |v: i32| -> std::string::String {
+            if v < 0 {
+                std::format!("\u{2212}{}", v.unsigned_abs())
+            } else {
+                v.to_string()
+            }
+        };
+        let mut head = std::format!("{}  {} %", lc.set_zoom, percent);
+        if (ox, oy) != (0, 0) {
+            let offset = u.zoom_offset.replacen("{}", &signed(ox), 1).replacen("{}", &signed(oy), 1);
+            head.push_str("  \u{00B7}  ");
+            head.push_str(&offset);
+        }
+        let head = self.kit_fit(&head, size::BODY, vw - 24.0 - 40.0);
         let hw = self.kit_measure(&head, size::BODY);
         let pw = hw + 40.0;
         self.kit_rrect(((vw - pw) * 0.5).round(), 14.0, pw, 40.0, 20.0, PLATE);
@@ -9951,17 +9967,63 @@ impl SwitchRenderBackend {
             (&[Btn::A], u.validate),
             (&[Btn::B], u.cancel),
         ];
-        let w = self.kit_hints_width(&hints);
-        let pw = (w + 48.0).min(vw - 24.0);
-        let py = vh - 66.0;
-        self.kit_rrect(((vw - pw) * 0.5).round(), py, pw, 48.0, 24.0, PLATE);
-        self.kit_hints_centered(vw * 0.5, py + 24.0, &hints);
+        // One plate along the bottom when the legend fits the screen, as in
+        // landscape. On a turned picture (720 wide) it runs to 940-1240 px:
+        // the zoom keys go under the header they change, the framing keys
+        // stay at the bottom, and A and B take a plate of their own under them
+        // when the two do not fit one. Split by what the keys do, not where
+        // a row happens to fill up: that left "B Annuler" alone, away from
+        // "A Valider". Each part takes as many plates as it needs, so no hint
+        // is drawn wider than its plate.
+        let max_w = vw - 24.0 - 48.0;
+        let (top, bottom) = if self.kit_hints_width(&hints) <= max_w {
+            (std::vec::Vec::new(), std::vec![&hints[..]])
+        } else {
+            let mut bottom = std::vec::Vec::new();
+            if self.kit_hints_width(&hints[2..]) <= max_w {
+                bottom.push(&hints[2..]);
+            } else {
+                bottom.extend(self.hint_rows(&hints[2..5], max_w));
+                bottom.extend(self.hint_rows(&hints[5..], max_w));
+            }
+            (self.hint_rows(&hints[..2], max_w), bottom)
+        };
+        let plate = |s: &mut Self, items: &[kit::text::HintItem], py: f32| {
+            let pw = (s.kit_hints_width(items) + 48.0).min(vw - 24.0);
+            s.kit_rrect(((vw - pw) * 0.5).round(), py, pw, ROW_H, ROW_H * 0.5, PLATE);
+            s.kit_hints_centered(vw * 0.5, py + ROW_H * 0.5, items);
+        };
+        for (i, items) in top.iter().enumerate() {
+            plate(self, items, 14.0 + 40.0 + 10.0 + i as f32 * ROW_STEP);
+        }
+        let n = bottom.len();
+        for (i, items) in bottom.iter().enumerate() {
+            plate(self, items, vh - 66.0 - (n - 1 - i) as f32 * ROW_STEP);
+        }
 
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
         }
         self.gl_state.invalidate();
+    }
+
+    /// `items` cut into rows no wider than `max_w`, in order: each row takes
+    /// hints while they fit (a hint wider than a row alone gets a row).
+    fn hint_rows<'h, 'a>(&mut self, items: &'h [kit::text::HintItem<'a>], max_w: f32) -> std::vec::Vec<&'h [kit::text::HintItem<'a>]> {
+        let mut rows = std::vec::Vec::new();
+        let mut start = 0;
+        for end in 1..=items.len() {
+            let w = self.kit_hints_width(&items[start..end]);
+            if w > max_w && end - start > 1 {
+                rows.push(&items[start..end - 1]);
+                start = end - 1;
+            }
+        }
+        if start < items.len() {
+            rows.push(&items[start..]);
+        }
+        rows
     }
 
     /// FPS counter (issue #111): what the movie is actually running at, against
