@@ -1,15 +1,16 @@
 //! Cover art in a box of any shape.
 //!
 //! Covers come in every shape: square logos, 16:9 screenshots, banners ten
-//! times wider than tall. Two ways of showing them, one per kind of box:
+//! times wider than tall. One rule for every box (Jaquettes.dc.html): a cover
+//! fills its box when that crops at most `FILL_LIMIT` of it, and otherwise
+//! shows whole over a blurred, darkened copy of itself.
 //!
-//! - A TILE in a grid or a strip fills its box at rest (cropped, so the grid is
-//!   calm and every tile reads as a picture) and OPENS when selected: it grows a
-//!   little, lifts on a shadow, and relaxes to the whole image over a blurred,
-//!   darkened copy of itself (`kit_cover_reveal`).
-//! - A box that shows one cover on its own (the launch, a detail panel) shows it
-//!   whole over that backdrop unless filling costs at most `FILL_LIMIT` of the
-//!   image (`kit_cover`).
+//! - A box that only shows (a strip tile, a picker cell) applies the rule as it
+//!   stands (`kit_cover`).
+//! - A TILE that OPENS when selected (the grid, the shelf) rests as close to
+//!   filled as the rule allows (`rest_t`) and relaxes to the whole image as it
+//!   lifts (`kit_cover_reveal`), so the same cover never loses more than the
+//!   limit at rest, whichever view it is in.
 //!
 //! Corners are cut by the image shader (`kit_image`), not painted over in the
 //! page colour, so a cover looks right over a shadow or a panel too.
@@ -24,6 +25,38 @@ use super::super::*;
 /// The most of an image the fill mode may crop away. 15% loses a sliver at the
 /// edges of a near-fit image and nothing that matters; past it, titles go.
 pub(crate) const FILL_LIMIT: f32 = 0.15;
+
+/// How far open (`t` of `kit_cover_reveal`) a tile has to rest so its crop
+/// costs at most `FILL_LIMIT` of an `img_w` x `img_h` image: 0 for a cover that
+/// fills within the limit, up to 1 for one that has to show whole.
+///
+/// The opened box shrinks from the tile toward the fitted image while the crop
+/// inside it relaxes, so the loss at `t` has a closed form, solved here for the
+/// `t` where it equals the limit. In a 16:10 tile a 655x155 banner rests at
+/// 0.89, a square logo at 0.71, a 4:3 picture at 0.12, and a 16:9 one fills.
+pub(crate) fn rest_t(img_w: u32, img_h: u32, box_w: f32, box_h: f32) -> f32 {
+    if img_w == 0 || img_h == 0 || box_w <= 0.0 || box_h <= 0.0 {
+        return 0.0;
+    }
+    let a = img_w as f32 / img_h as f32;
+    let keep = 1.0 - FILL_LIMIT;
+    let t = if a > box_w / box_h {
+        // Wider than the box: the box gets shorter as it opens.
+        let span = box_h - box_w / a;
+        if span <= 0.0 {
+            return 0.0;
+        }
+        (box_h - box_w / (a * keep)) / span
+    } else {
+        // Taller: the box gets narrower.
+        let span = box_w - box_h * a;
+        if span <= 0.0 {
+            return 0.0;
+        }
+        (box_w - a * box_h / keep) / span
+    };
+    t.clamp(0.0, 1.0)
+}
 
 /// Whether an `img_w` x `img_h` image fills a `box_w` x `box_h` box (cropped)
 /// rather than sitting whole on its backdrop.
@@ -41,24 +74,41 @@ pub(crate) fn fills(img_w: u32, img_h: u32, box_w: f32, box_h: f32) -> bool {
 const AMBIENT_W: usize = 20;
 /// How dark the backdrop is next to the image itself (0..1 of its colour).
 const AMBIENT_LIGHT: f32 = 0.5;
+/// How much the backdrop's colours are pushed apart from their grey, so a
+/// darkened copy still reads as the cover's own colours and not as mud.
+const AMBIENT_SATURATE: f32 = 1.3;
+/// The backdrop is the image enlarged by this much behind the box (the mockup's
+/// `left: -15%; width: 130%`), so its edges, the blurriest part, stay outside.
+const AMBIENT_ZOOM: f32 = 1.3;
 
-/// Average `rgba` (w x h) down to a small softened copy, as RGBA8.
+/// Average `rgba` (w x h) down to a small softened backdrop, as opaque RGBA8.
+///
+/// What the mockup's CSS does to the image (blur, `brightness(0.5)`,
+/// `saturate(1.3)`) and then what the browser does with the result: lay it over
+/// the tile colour. A blur keeps the image's alpha, so the transparent parts of
+/// a logo come out as the tile itself. The first version composited the image
+/// over BLACK instead (each sample weighted by its alpha, divided by the sample
+/// count, written opaque), and every transparent PNG sat on a muddy dark box.
+/// Here the colours are blurred premultiplied together with their coverage,
+/// and the tile shows through exactly where the image does not cover it.
 pub(crate) fn ambient_pixels(rgba: &[u8], w: u32, h: u32) -> Option<(std::vec::Vec<u8>, u32, u32)> {
+    use super::theme::col;
     let (w, h) = (w as usize, h as usize);
     if w == 0 || h == 0 || rgba.len() < w * h * 4 {
         return None;
     }
     let aw = AMBIENT_W.min(w).max(1);
     let ah = ((AMBIENT_W as f32 * h as f32 / w as f32).round() as usize).clamp(2, 40).min(h);
-    // Box-average each cell of the source into one pixel.
-    let mut acc = std::vec![0f32; aw * ah * 3];
+    // Box-average each cell of the source into one pixel: the colour
+    // premultiplied by its alpha, and the coverage (mean alpha).
+    let mut acc = std::vec![0f32; aw * ah * 4];
     for ay in 0..ah {
         let y0 = ay * h / ah;
         let y1 = ((ay + 1) * h / ah).max(y0 + 1);
         for ax in 0..aw {
             let x0 = ax * w / aw;
             let x1 = ((ax + 1) * w / aw).max(x0 + 1);
-            let (mut r, mut g, mut b, mut n) = (0f32, 0f32, 0f32, 0f32);
+            let (mut r, mut g, mut b, mut cov, mut n) = (0f32, 0f32, 0f32, 0f32, 0f32);
             // Sampling every 2nd pixel is plenty for an average this coarse.
             let mut y = y0;
             while y < y1 {
@@ -69,51 +119,69 @@ pub(crate) fn ambient_pixels(rgba: &[u8], w: u32, h: u32) -> Option<(std::vec::V
                     r += rgba[i] as f32 * a;
                     g += rgba[i + 1] as f32 * a;
                     b += rgba[i + 2] as f32 * a;
+                    cov += a;
                     n += 1.0;
                     x += 2;
                 }
                 y += 2;
             }
-            let o = (ay * aw + ax) * 3;
+            let o = (ay * aw + ax) * 4;
             let n = n.max(1.0);
             acc[o] = r / n;
             acc[o + 1] = g / n;
             acc[o + 2] = b / n;
+            acc[o + 3] = cov / n;
         }
     }
-    // Two passes of a 3x3 box blur, edges clamped: soft, with no blocks.
+    // Two passes of a 3x3 box blur over all four channels, edges clamped:
+    // soft, with no blocks, and the coverage softened with the colour.
     for _ in 0..2 {
         let src = acc.clone();
         for y in 0..ah {
             for x in 0..aw {
-                let mut s = [0f32; 3];
+                let mut s = [0f32; 4];
                 let mut n = 0f32;
                 for dy in [-1i32, 0, 1] {
                     for dx in [-1i32, 0, 1] {
                         let sx = (x as i32 + dx).clamp(0, aw as i32 - 1) as usize;
                         let sy = (y as i32 + dy).clamp(0, ah as i32 - 1) as usize;
-                        let i = (sy * aw + sx) * 3;
-                        s[0] += src[i];
-                        s[1] += src[i + 1];
-                        s[2] += src[i + 2];
+                        let i = (sy * aw + sx) * 4;
+                        for c in 0..4 {
+                            s[c] += src[i + c];
+                        }
                         n += 1.0;
                     }
                 }
-                let o = (y * aw + x) * 3;
-                acc[o] = s[0] / n;
-                acc[o + 1] = s[1] / n;
-                acc[o + 2] = s[2] / n;
+                let o = (y * aw + x) * 4;
+                for c in 0..4 {
+                    acc[o + c] = s[c] / n;
+                }
             }
         }
     }
+    let tile = [((col::TILE >> 16) & 0xFF) as f32, ((col::TILE >> 8) & 0xFF) as f32, (col::TILE & 0xFF) as f32];
     let mut out = std::vec::Vec::with_capacity(aw * ah * 4);
-    for px in acc.chunks(3) {
-        for c in px {
-            out.push((c * AMBIENT_LIGHT).clamp(0.0, 255.0) as u8);
+    for px in acc.chunks(4) {
+        // Darken, then saturate. Both are linear in the colour, so applying
+        // them to the premultiplied value is the same as applying them first.
+        let p = [px[0] * AMBIENT_LIGHT, px[1] * AMBIENT_LIGHT, px[2] * AMBIENT_LIGHT];
+        let lum = 0.213 * p[0] + 0.715 * p[1] + 0.072 * p[2];
+        let uncovered = 1.0 - px[3].clamp(0.0, 1.0);
+        for c in 0..3 {
+            let v = (lum + (p[c] - lum) * AMBIENT_SATURATE).max(0.0) + tile[c] * uncovered;
+            out.push(v.clamp(0.0, 255.0) as u8);
         }
         out.push(255);
     }
     Some((out, aw as u32, ah as u32))
+}
+
+/// The part of the backdrop shown in a `box_w` x `box_h` box: cropped to fill
+/// it like the image would be, then enlarged by `AMBIENT_ZOOM` about its centre.
+fn backdrop_uv(img_w: u32, img_h: u32, box_w: f32, box_h: f32) -> [f32; 4] {
+    let [u0, v0, du, dv] = crop_uv(img_w, img_h, box_w, box_h);
+    let (zu, zv) = (du / AMBIENT_ZOOM, dv / AMBIENT_ZOOM);
+    [u0 + (du - zu) * 0.5, v0 + (dv - zv) * 0.5, zu, zv]
 }
 
 /// The texture sub-rectangle `[u0, v0, du, dv]` that crops an `img_w` x
@@ -148,23 +216,38 @@ pub(crate) fn mix_rgb(a: u32, b: u32, t: f32) -> u32 {
 
 impl SwitchRenderBackend {
     /// The tile of a game with no cover: its colour, deepened towards the page,
-    /// with its NAME on it rather than three initials. "BAD" told you nothing
-    /// about which of two Bad Ice Creams it was.
+    /// a gamepad in the corner and its NAME at the bottom, as the mockup draws
+    /// it, rather than three initials. "BAD" told you nothing about which of two
+    /// Bad Ice Creams it was.
     pub(crate) fn kit_default_tile(&mut self, x: f32, y: f32, w: f32, h: f32, chip: u32, name: &str) {
-        use super::theme::col;
-        let chip = chip & 0x00FF_FFFF;
-        let fill = mix_rgb(chip, col::BG & 0x00FF_FFFF, 0.55);
-        let ink = mix_rgb(chip, 0xFF_FF_FF, 0.78);
-        self.kit_rrect(x, y, w, h, super::theme::radius::TILE, 0xFF00_0000 | fill);
-        let px = if w >= 180.0 { 18.0 } else { 15.0 };
+        self.kit_default_ground(x, y, w, h, chip);
+        let ink = mix_rgb(chip & 0x00FF_FFFF, 0xFF_FF_FF, 0.78);
+        let px = if w >= 180.0 { 20.0 } else { 17.0 };
         let pad = (w * 0.07).clamp(10.0, 16.0);
         let shown = name.strip_suffix(".swf").or_else(|| name.strip_suffix(".SWF")).unwrap_or(name);
-        let lines = self.kit_wrap(shown, px, w - 2.0 * pad, 3);
-        let lh = (px * 1.25).round();
+        // Room for the gamepad above the name, so the two never touch.
+        let max_lines = if h >= 120.0 { 3 } else { 2 };
+        let lines = self.kit_wrap(shown, px, w - 2.0 * pad, max_lines);
+        let lh = (px * 1.15).round();
         let mut baseline = y + h - pad - lh * (lines.len().saturating_sub(1)) as f32;
         for line in &lines {
             self.kit_text_baseline(x + pad, baseline, px, line, 0xFF00_0000 | ink);
             baseline += lh;
+        }
+    }
+
+    /// The generated tile without its name: what sits under a cover that is
+    /// still fading in. With the name, the title showed through the art for the
+    /// length of the fade.
+    pub(crate) fn kit_default_ground(&mut self, x: f32, y: f32, w: f32, h: f32, chip: u32) {
+        use super::theme::col;
+        let chip = chip & 0x00FF_FFFF;
+        let fill = mix_rgb(chip, col::BG & 0x00FF_FFFF, 0.55);
+        self.kit_rrect(x, y, w, h, super::theme::radius::TILE, 0xFF00_0000 | fill);
+        if w >= 64.0 && h >= 48.0 {
+            let icon_ink = mix_rgb(chip, col::BG & 0x00FF_FFFF, 0.25);
+            let pad = (w * 0.07).clamp(10.0, 16.0);
+            self.kit_icon(x + pad, y + pad + 11.0, 22.0, super::icons::Icon::Gamepad, 0xFF00_0000 | icon_ink);
         }
     }
 
@@ -176,34 +259,47 @@ impl SwitchRenderBackend {
         }
     }
 
-    /// A cover that fills its tile at rest and OPENS to show itself whole as
-    /// the tile is selected: `t` runs 0 (cropped to fill) to 1 (the whole
-    /// image, centred over its blurred backdrop).
-    ///
-    /// A grid of filled tiles is the calmer picture, and a banner ten times
-    /// wider than tall would be a thin strip if shown whole at rest. Opening
-    /// the one under the cursor gives both, and the movement is what makes the
-    /// grid feel alive.
+    /// A cover that opens to show itself whole as its tile is selected: `t`
+    /// runs 0 (cropped to fill the tile) to 1 (the whole image, centred over
+    /// its blurred backdrop). A tile rests at `rest_t`, not at 0, so a banner
+    /// ten times wider than tall is never cut past the limit; opening the one
+    /// under the cursor shows the rest, and the movement is what makes the grid
+    /// feel alive.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn kit_cover_reveal(&mut self, x: f32, y: f32, w: f32, h: f32, tex: GLuint, tw: u32, th: u32, amb: GLuint, t: f32, alpha: f32) {
+        self.kit_cover_reveal_r(x, y, w, h, tex, tw, th, amb, t, alpha, super::theme::radius::TILE);
+    }
+
+    /// `kit_cover_reveal` with its corner radius: the launch grows a tile into
+    /// the whole screen, and its corners straighten as it goes.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn kit_cover_reveal_r(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        tex: GLuint,
+        tw: u32,
+        th: u32,
+        amb: GLuint,
+        t: f32,
+        alpha: f32,
+        r: f32,
+    ) {
         if tex == 0 || tw == 0 || th == 0 {
             return;
         }
-        let r = super::theme::radius::TILE;
         let t = t.clamp(0.0, 1.0);
         let a = tw as f32 / th as f32;
         let (fit_w, fit_h) = if a > w / h { (w, w / a) } else { (h * a, h) };
-        // The backdrop is ALWAYS under the cover, at rest too. It used to be
+        // The ground is ALWAYS under the cover, at rest too. It used to be
         // drawn only while the tile was opening, so the frame the tile came to
         // rest it vanished: invisible under an opaque cover, but under a PNG
         // with transparent parts the blur turned into the page colour in one
         // frame, which is the jolt at the end of the animation. Drawn every
         // frame, the transparent parts always sit on the same ground.
-        if amb != 0 {
-            self.kit_image(x, y, w, h, amb, crop_uv(tw, th, w, h), alpha, r);
-        } else {
-            self.kit_rrect(x, y, w, h, r, ((alpha.clamp(0.0, 1.0) * 255.0) as u32) << 24 | 0x0A_10_1C);
-        }
+        self.kit_cover_ground(x, y, w, h, tw, th, amb, alpha, r);
         // The drawn box shrinks from the tile to the fitted image while the crop
         // in it relaxes, so at t = 1 nothing is cut.
         let dw = w + (fit_w - w) * t;
@@ -212,8 +308,23 @@ impl SwitchRenderBackend {
         self.kit_image(dx, dy, dw, dh, tex, crop_uv(tw, th, dw, dh), alpha, r);
     }
 
-    /// Draw a cover in the box `(x, y, w, h)` by the rule above. `alpha` fades
-    /// the whole thing in over whatever is under it.
+    /// What a cover's transparent parts sit on: its blurred backdrop, which is
+    /// the tile colour wherever the image itself is transparent, or the tile
+    /// colour alone for an image that has no backdrop (a Flashpoint thumbnail).
+    /// The same ground in every view, so a logo never changes background
+    /// between the grid, the strip and the detail panels.
+    #[allow(clippy::too_many_arguments)]
+    fn kit_cover_ground(&mut self, x: f32, y: f32, w: f32, h: f32, tw: u32, th: u32, amb: GLuint, alpha: f32, r: f32) {
+        use super::theme::col;
+        if amb != 0 {
+            self.kit_image(x, y, w, h, amb, backdrop_uv(tw, th, w, h), alpha, r);
+        } else {
+            self.kit_rrect(x, y, w, h, r, ((alpha.clamp(0.0, 1.0) * 255.0) as u32) << 24 | (col::TILE & 0x00FF_FFFF));
+        }
+    }
+
+    /// Draw a cover in the box `(x, y, w, h)` by the rule above, for a box that
+    /// does not open. `alpha` fades the whole thing in over whatever is under it.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn kit_cover(&mut self, x: f32, y: f32, w: f32, h: f32, tex: GLuint, tw: u32, th: u32, amb: GLuint, alpha: f32) {
         if tex == 0 || tw == 0 || th == 0 {
@@ -221,6 +332,7 @@ impl SwitchRenderBackend {
         }
         let r = super::theme::radius::TILE;
         if fills(tw, th, w, h) {
+            self.kit_cover_ground(x, y, w, h, tw, th, amb, alpha, r);
             self.kit_image(x, y, w, h, tex, crop_uv(tw, th, w, h), alpha, r);
             return;
         }

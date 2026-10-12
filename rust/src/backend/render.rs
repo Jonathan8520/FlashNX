@@ -9975,6 +9975,31 @@ impl SwitchRenderBackend {
         tex
     }
 
+    /// `upload_rgba_texture` for a cover, with a mipmap chain.
+    ///
+    /// Covers are drawn SHRUNK most of the time: a 655x155 banner kept at full
+    /// width in its thumbnail is drawn 227 px wide in an opened tile, and a
+    /// full-resolution cover fills a 560 px panel. One bilinear tap at a 3:1
+    /// reduction skips most of the pixels, so logos with text sparkled, worst in
+    /// the last frames of a tile's opening where the size changes by fractions
+    /// of a pixel. Trilinear filtering over the chain averages them instead, for
+    /// a third more memory per cover. The pixels must have been through
+    /// `covers::bleed_transparent`, or the chain averages the black of a logo's
+    /// transparent margin into its edges.
+    fn upload_cover_texture(&mut self, rgba: &[u8], width: u32, height: u32) -> GLuint {
+        let tex = self.upload_rgba_texture(rgba, width, height);
+        if tex != 0 {
+            unsafe {
+                glBindTexture(GL_TEXTURE_2D, tex);
+                glGenerateMipmap(GL_TEXTURE_2D);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR as GLint);
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+            self.gl_state.invalidate();
+        }
+        tex
+    }
+
     /// Draw a screen-aligned axis-aligned textured rectangle. Uses the
     /// existing `bitmap_prog` + unit-quad VAO; no per-call buffer upload.
     /// Identity color transform (mult=1, add=0).
@@ -10708,10 +10733,11 @@ impl SwitchRenderBackend {
         let dx = (x + (w - dw) * 0.5).round();
         let dy = (y + ((h - dh - caption_h) * 0.5).max(0.0)).round();
         match cover {
-            CoverTex::Image { tex, w: tw, h: th, .. } => {
+            CoverTex::Image { tex, w: tw, h: th, amb } => {
                 self.kit_shadow(dx, dy + 8.0, dw, dh, theme::radius::TILE, 18.0, 0x70_00_00_00);
-                self.kit_image(dx, dy, dw, dh, tex, [0.0, 0.0, 1.0, 1.0], 1.0, theme::radius::TILE);
-                let _ = (tw, th);
+                // The box has the cover's own shape, so it fills; through `kit_cover`
+                // a transparent logo sits on the same ground as in the grid.
+                self.kit_cover(dx, dy, dw, dh, tex, tw, th, amb, 1.0);
             }
             CoverTex::Default => self.kit_default_tile(dx, dy, dw, dh, chip, name),
         }
@@ -10792,8 +10818,9 @@ impl SwitchRenderBackend {
         let resolved = match crate::covers::resolve(basename) {
             crate::covers::Cover::Image(path) => {
                 match crate::covers::decode_file(&path) {
-                    Some((rgba, w, h)) => {
-                        let tex = self.upload_rgba_texture(&rgba, w, h);
+                    Some((mut rgba, w, h)) => {
+                        crate::covers::bleed_transparent(&mut rgba, w, h);
+                        let tex = self.upload_cover_texture(&rgba, w, h);
                         if tex != 0 {
                             let amb = self.kit_ambient_texture(&rgba, w, h);
                             CoverTex::Image { tex, w, h, amb }
@@ -10828,9 +10855,6 @@ impl SwitchRenderBackend {
         resolved
     }
 
-    /// Resolve + cache a game's cover texture by basename. Decodes/uploads on
-    /// first use; returns `Default` when there's no cover image (caller draws
-    /// the generated tile).
     /// A game's cover as `(texture, width, height)` for a panel's header, or
     /// None when it has none (yet).
     pub(crate) fn cover_thumb(&mut self, basename: &str) -> Option<(GLuint, u32, u32)> {
@@ -10840,6 +10864,9 @@ impl SwitchRenderBackend {
         }
     }
 
+    /// Resolve + cache a game's cover texture by basename. Decodes/uploads on
+    /// first use; returns `Default` when there's no cover image (caller draws
+    /// the generated tile).
     fn cover_for(&mut self, basename: &str) -> CoverTex {
         if let Some(t) = cover_lookup(basename) {
             return t;
@@ -10851,7 +10878,7 @@ impl SwitchRenderBackend {
                 // SD invalidates it without any bookkeeping.
                 let src_len = crate::library::file_size(&path);
                 if let Some((rgba, w, h)) = crate::covers::read_thumb(basename, src_len) {
-                    let tex = self.upload_rgba_texture(&rgba, w, h);
+                    let tex = self.upload_cover_texture(&rgba, w, h);
                     if tex != 0 {
                         let amb = self.kit_ambient_texture(&rgba, w, h);
                         CoverTex::Image { tex, w, h, amb }
@@ -10867,7 +10894,7 @@ impl SwitchRenderBackend {
                             // SD so the next session skips the full decode.
                             let (small, sw, sh) = crate::covers::downscale_for_tile(rgba, w, h);
                             crate::covers::write_thumb(basename, src_len, &small, sw, sh);
-                            let tex = self.upload_rgba_texture(&small, sw, sh);
+                            let tex = self.upload_cover_texture(&small, sw, sh);
                             if tex != 0 {
                                 let amb = self.kit_ambient_texture(&small, sw, sh);
                                 CoverTex::Image { tex, w: sw, h: sh, amb }
@@ -11559,7 +11586,6 @@ impl SwitchRenderBackend {
         const ANCHOR_CX: f32 = 328.0;       // fixed screen x of the active centre
         const SHELF_Y: f32 = 344.0;         // common BOTTOM edge; growth is upward
         const RIGHT_SLOTS: usize = 2;
-        const UPSCALE_MAX: f32 = 1.25;
         const VEIL: u32 = 0x0C_10_18;
         let w1 = W0 * (1.0 + GROW);
         let h1 = H0 * (1.0 + GROW);
@@ -11658,26 +11684,13 @@ impl SwitchRenderBackend {
             let sc = 1.0 + GROW * b;
             match cover_lookup(&e.basename) {
                 Some(CoverTex::Image { tex, w: iw, h: ih, amb }) if iw > 0 && ih > 0 => {
-                    let a = iw as f32 / ih as f32;
-                    let bx = W0 / H0;
-                    // Resting zoom floor, a per-cover CONSTANT computed at BASE
-                    // scale so it can never reflow: a cover that would have to be
-                    // blown up past UPSCALE_MAX to fill the box rests part-way
-                    // zoomed out instead of showing a magnified sliver.
-                    let (u0, u1) = if a > bx {
-                        (H0 / ih as f32, (W0 / a) / ih as f32)
-                    } else {
-                        (W0 / iw as f32, (H0 * a) / iw as f32)
-                    };
-                    let t_rest = if u0 <= UPSCALE_MAX || (u0 - u1) < 1e-3 {
-                        0.0
-                    } else {
-                        ((u0 - UPSCALE_MAX) / (u0 - u1)).clamp(0.0, 1.0)
-                    };
-                    // One continuous zoom-out from the box to the whole cover,
-                    // the cover's own blurred colours behind what it leaves.
-                    let t = t_rest.max(b);
-                    self.kit_cover_reveal(x, y, w, h, tex, iw, ih, amb, t, 1.0);
+                    // At rest as filled as the 15% rule allows, the same rule
+                    // as the grid: the box keeps its aspect at every scale, so
+                    // the resting point is a per-cover constant and never
+                    // reflows. The selected cover opens the rest of the way to
+                    // the whole image, its own blurred colours behind it.
+                    let rest = kit::cover::rest_t(iw, ih, W0, H0);
+                    self.kit_cover_reveal(x, y, w, h, tex, iw, ih, amb, rest + (1.0 - rest) * b, 1.0);
                 }
                 _ => self.kit_default_tile(x, y, w, h, e.color_chip, &e.display_name),
             }
@@ -12025,19 +12038,22 @@ impl SwitchRenderBackend {
                 None => (CoverTex::Default, 0),
             };
             let fade = cover_fade(ready_at);
-            // The generated tile under a cover that is still fading in, alone
-            // when there is no cover at all.
+            // The generated tile when there is no cover at all; under a cover
+            // still fading in, only its ground, or the name shows through.
             let cover_img = match cover {
                 CoverTex::Image { tex, w, h, amb } => Some((tex, w, h, amb)),
                 CoverTex::Default => None,
             };
-            if cover_img.is_none() || fade < 1.0 {
-                self.kit_default_tile(tx, ty, tw, th, entries[idx].color_chip, &entries[idx].display_name);
+            match cover_img {
+                None => self.kit_default_tile(tx, ty, tw, th, entries[idx].color_chip, &entries[idx].display_name),
+                Some(_) if fade < 1.0 => self.kit_default_ground(tx, ty, tw, th, entries[idx].color_chip),
+                Some(_) => {}
             }
             if let Some((tex, w, h, amb)) = cover_img {
-                // Filled at rest; the selected tile opens to the whole cover
-                // over its blurred backdrop.
-                self.kit_cover_reveal(tx, ty, tw, th, tex, w, h, amb, b, fade);
+                // At rest as filled as the 15% rule allows; the selected tile
+                // opens the rest of the way to the whole cover.
+                let rest = kit::cover::rest_t(w, h, tw0, ROW_IMG_H);
+                self.kit_cover_reveal(tx, ty, tw, th, tex, w, h, amb, rest + (1.0 - rest) * b, fade);
             }
 
 

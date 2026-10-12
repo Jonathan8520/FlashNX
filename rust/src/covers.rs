@@ -171,7 +171,7 @@ pub fn read_cover_bytes(path: &str) -> Option<std::vec::Vec<u8>> {
 
 // ── Gallery thumbnail cache ────────────────────────────────────────────────
 //
-// A gallery tile is 227x132, but covers ship at up to 1126x619 — so drawing the
+// A gallery tile is 221x138, but covers ship at up to 1126x619 — so drawing the
 // grid re-decoded ~700 000 pixels per game, every session, to fill 30 000.
 // Measured on hardware: 13 to 24 ms per cover of PNG decode alone, which is one
 // dropped frame per tile the first time a row scrolls into view.
@@ -186,13 +186,19 @@ pub fn read_cover_bytes(path: &str) -> Option<std::vec::Vec<u8>> {
 // The full-resolution image is still what the launch/quit reveal draws — that
 // one fills the screen, where a tile-sized thumbnail would be visibly soft.
 
-/// Thumbnail box. Slightly above the 227x132 tile so the selected tile's "pop"
-/// (which inflates it a few px) still samples at or below 1:1.
+/// Thumbnail box. A little above the 221x138 grid tile so the selected tile's
+/// lift (which grows it by 5%) still samples at or below 1:1.
 const THUMB_MAX_W: u32 = 256;
 const THUMB_MAX_H: u32 = 160;
 
 /// `magic(6) | src_len u32 LE | w u16 LE | h u16 LE`, then zlib RGBA8.
-const THUMB_MAGIC: &[u8; 6] = b"FNXTH1";
+///
+/// Version 2: the pixels are averaged by their alpha and the transparent ones
+/// carry their neighbours' colour (`bleed_transparent`). Version 1 averaged
+/// straight colour, so the black under a logo's transparent margin was baked
+/// into its edge; the new magic makes every old thumbnail miss once and be
+/// rewritten from the cover.
+const THUMB_MAGIC: &[u8; 6] = b"FNXTH2";
 const THUMB_HEADER: usize = 14;
 
 fn thumb_path(basename: &str) -> std::string::String {
@@ -201,10 +207,12 @@ fn thumb_path(basename: &str) -> std::string::String {
 
 /// Scale `rgba` down so it just covers the tile box, preserving aspect. Box
 /// average (not nearest) — covers are photos and logos, and point-sampling a
-/// 4x reduction shimmers. Returns the input untouched when it's already small
-/// enough; we never upscale into the cache.
+/// 4x reduction shimmers — weighted by alpha, so a transparent pixel's colour
+/// (black, mostly) never bleeds into the visible ones beside it. An image
+/// already small enough keeps its size; we never upscale into the cache.
+/// Either way the result has gone through `bleed_transparent`.
 pub fn downscale_for_tile(
-    rgba: std::vec::Vec<u8>,
+    mut rgba: std::vec::Vec<u8>,
     w: u32,
     h: u32,
 ) -> (std::vec::Vec<u8>, u32, u32) {
@@ -215,6 +223,7 @@ pub fn downscale_for_tile(
     // the overflow is cropped at draw time.
     let scale = (THUMB_MAX_W as f32 / w as f32).max(THUMB_MAX_H as f32 / h as f32);
     if scale >= 1.0 {
+        bleed_transparent(&mut rgba, w, h);
         return (rgba, w, h);
     }
     let dw = ((w as f32 * scale).round() as u32).max(1);
@@ -226,27 +235,109 @@ pub fn downscale_for_tile(
         for dx in 0..dw {
             let x0 = (dx as u64 * w as u64 / dw as u64) as u32;
             let x1 = (((dx + 1) as u64 * w as u64 / dw as u64) as u32).max(x0 + 1).min(w);
-            let (mut r, mut g, mut b, mut a, mut n) = (0u32, 0u32, 0u32, 0u32, 0u32);
+            let (mut r, mut g, mut b, mut a, mut n) = (0u64, 0u64, 0u64, 0u64, 0u64);
             for sy in y0..y1 {
                 let row = (sy as usize) * (w as usize) * 4;
                 for sx in x0..x1 {
                     let i = row + (sx as usize) * 4;
-                    r += rgba[i] as u32;
-                    g += rgba[i + 1] as u32;
-                    b += rgba[i + 2] as u32;
-                    a += rgba[i + 3] as u32;
+                    let pa = rgba[i + 3] as u64;
+                    r += rgba[i] as u64 * pa;
+                    g += rgba[i + 1] as u64 * pa;
+                    b += rgba[i + 2] as u64 * pa;
+                    a += pa;
                     n += 1;
                 }
             }
-            let n = n.max(1);
             let o = ((dy as usize) * (dw as usize) + dx as usize) * 4;
-            out[o] = (r / n) as u8;
-            out[o + 1] = (g / n) as u8;
-            out[o + 2] = (b / n) as u8;
-            out[o + 3] = (a / n) as u8;
+            if a > 0 {
+                out[o] = (r / a) as u8;
+                out[o + 1] = (g / a) as u8;
+                out[o + 2] = (b / a) as u8;
+            }
+            out[o + 3] = (a / n.max(1)) as u8;
         }
     }
+    bleed_transparent(&mut out, dw, dh);
     (out, dw, dh)
+}
+
+/// Give every fully transparent pixel the colour of the visible ones nearest it.
+///
+/// A decoded logo's transparent pixels carry whatever colour the exporter left
+/// there, usually black. Covers are drawn with linear filtering and shrunk
+/// through mipmaps, and both mix a transparent pixel's colour into the visible
+/// ones next to it: every transparent logo had a dark outline, sharpest exactly
+/// as a tile settled. Only pixels with alpha 0 change, so nothing visible moves;
+/// they just stop dragging black into the edges.
+///
+/// Push-pull: a pyramid of alpha-weighted averages, then each transparent pixel
+/// takes the colour of the smallest block around it that has any coverage.
+/// Linear in the image size, whatever the size of its transparent areas, and a
+/// quick pass over the alpha when there is none at all (most covers).
+pub fn bleed_transparent(rgba: &mut [u8], w: u32, h: u32) {
+    let (w, h) = (w as usize, h as usize);
+    if w == 0 || h == 0 || rgba.len() < w * h * 4 {
+        return;
+    }
+    if !rgba[..w * h * 4].chunks_exact(4).any(|p| p[3] == 0) {
+        return;
+    }
+    // Level 1: 2x2 blocks of the image, as premultiplied colour and alpha.
+    let (mut lw, mut lh) = ((w + 1) / 2, (h + 1) / 2);
+    let mut first = std::vec![[0f32; 4]; lw * lh];
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            let a = rgba[i + 3] as f32;
+            if a == 0.0 {
+                continue;
+            }
+            let c = &mut first[(y / 2) * lw + x / 2];
+            c[0] += rgba[i] as f32 * a;
+            c[1] += rgba[i + 1] as f32 * a;
+            c[2] += rgba[i + 2] as f32 * a;
+            c[3] += a;
+        }
+    }
+    let mut levels: std::vec::Vec<(usize, std::vec::Vec<[f32; 4]>)> = std::vec![(lw, first)];
+    while lw > 1 || lh > 1 {
+        let (pw, ph) = (lw, lh);
+        lw = (pw + 1) / 2;
+        lh = (ph + 1) / 2;
+        let mut next = std::vec![[0f32; 4]; lw * lh];
+        if let Some((_, prev)) = levels.last() {
+            for y in 0..ph {
+                for x in 0..pw {
+                    let s = prev[y * pw + x];
+                    let d = &mut next[(y / 2) * lw + x / 2];
+                    for c in 0..4 {
+                        d[c] += s[c];
+                    }
+                }
+            }
+        }
+        levels.push((lw, next));
+    }
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            if rgba[i + 3] != 0 {
+                continue;
+            }
+            let (mut px, mut py) = (x / 2, y / 2);
+            for (stride, level) in &levels {
+                let s = level[py * stride + px];
+                if s[3] > 0.0 {
+                    rgba[i] = (s[0] / s[3]).clamp(0.0, 255.0) as u8;
+                    rgba[i + 1] = (s[1] / s[3]).clamp(0.0, 255.0) as u8;
+                    rgba[i + 2] = (s[2] / s[3]).clamp(0.0, 255.0) as u8;
+                    break;
+                }
+                px /= 2;
+                py /= 2;
+            }
+        }
+    }
 }
 
 /// Read a game's cached thumbnail, but only if it was built from a source cover
