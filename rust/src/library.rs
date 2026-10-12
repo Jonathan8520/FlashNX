@@ -2666,9 +2666,13 @@ pub fn add_path(path: &str, mtime: u64) -> bool {
     // The file's own size on the card (a stat), read once and then kept in the
     // index with its header; a row written before the index had it is asked
     // once, and the index rewritten.
+    // Only a size actually read is worth a rewrite: a file the stat cannot
+    // answer for would otherwise rewrite the index on every scan.
     if disk == 0 {
         disk = scan_timed(0, || file_size(path));
-        SCAN_INDEX_DIRTY.store(true, core::sync::atomic::Ordering::Relaxed);
+        if disk > 0 {
+            SCAN_INDEX_DIRTY.store(true, core::sync::atomic::Ordering::Relaxed);
+        }
     }
     scan_note_header(path, mtime, header_size, swf_version, compression_label, is_as3, disk);
     // Prefer the cached real footprint (multi-file games); fall back to the SWF

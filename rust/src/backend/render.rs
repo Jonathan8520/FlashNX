@@ -11621,8 +11621,10 @@ impl SwitchRenderBackend {
         // pass used 44 and showed 10, which left a visibly empty band below.
         const ROW_H: f32 = 40.0;
         let rows_visible = crate::library::home_rows_visible();
-        let list_x = 40.0;
-        let list_w = (vw * 0.50 - 40.0).max(120.0);
+        // The 48 px margin of the grid and of the strip above, so the four views
+        // share one left edge.
+        let list_x = 48.0;
+        let list_w = (vw * 0.50 - 48.0).max(120.0);
         let band_top = TOP - 8.0;
         let band_bot = TOP + rows_visible as f32 * ROW_H;
         if entries.is_empty() {
@@ -11676,7 +11678,7 @@ impl SwitchRenderBackend {
         // the art, so a wide cover and a tall one both sit tight under their own
         // picture instead of leaving a hole under a fixed-size frame.
         let box_x = vw * 0.53;
-        let box_w = vw - box_x - 40.0;
+        let box_w = vw - box_x - 48.0;
         let box_y = TOP + 6.0;
         // 340 gave this layout the SMALLEST cover in the app — 15.4% of the
         // screen — while ~100,000 px² sat empty below the caption, in the one
