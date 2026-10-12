@@ -556,6 +556,8 @@ pub struct Ui {
     pub toast_folder_none: &'static str,
     /// `more_changes` for exactly one line left out, through `loc::fill_count` ("{}", where present, = 1).
     pub more_changes_1: &'static str,
+    /// Guide line of the keyboard the cover picker opens (Minus) to search Flashpoint again; its header is `loc::Strings::cover_title`.
+    pub kbd_cover_guide: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -880,6 +882,7 @@ const EN: Ui = Ui {
     shortcut_remove_err: "Couldn't remove the icon",
     toast_folder_none: "This game isn't in any folder.",
     more_changes_1: "And {} more change",
+    kbd_cover_guide: "Name of the game whose cover you want",
 };
 
 const FR: Ui = Ui {
@@ -1204,6 +1207,7 @@ const FR: Ui = Ui {
     shortcut_remove_err: "Impossible de retirer l'icône",
     toast_folder_none: "Ce jeu n'est dans aucun dossier.",
     more_changes_1: "Et {} autre changement",
+    kbd_cover_guide: "Nom du jeu dont tu cherches la jaquette",
 };
 
 const ES: Ui = Ui {
@@ -1528,6 +1532,7 @@ const ES: Ui = Ui {
     shortcut_remove_err: "No se pudo quitar el icono",
     toast_folder_none: "Este juego no está en ninguna carpeta.",
     more_changes_1: "Y {} cambio más",
+    kbd_cover_guide: "Nombre del juego cuya portada buscas",
 };
 
 const RU: Ui = Ui {
@@ -1852,6 +1857,7 @@ const RU: Ui = Ui {
     shortcut_remove_err: "Не удалось убрать значок",
     toast_folder_none: "Эта игра не входит ни в одну папку.",
     more_changes_1: "И ещё одно изменение",
+    kbd_cover_guide: "Название игры, для которой ищешь обложку",
 };
 
 const DE: Ui = Ui {
@@ -2176,6 +2182,7 @@ const DE: Ui = Ui {
     shortcut_remove_err: "Symbol konnte nicht entfernt werden",
     toast_folder_none: "Dieses Spiel ist in keinem Ordner.",
     more_changes_1: "Und {} weitere Änderung",
+    kbd_cover_guide: "Name des Spiels, dessen Cover du suchst",
 };
 
 const IT: Ui = Ui {
@@ -2500,6 +2507,7 @@ const IT: Ui = Ui {
     shortcut_remove_err: "Impossibile rimuovere l'icona",
     toast_folder_none: "Questo gioco non è in nessuna cartella.",
     more_changes_1: "E un'altra modifica",
+    kbd_cover_guide: "Nome del gioco di cui cerchi la copertina",
 };
 
 const PT: Ui = Ui {
@@ -2824,6 +2832,7 @@ const PT: Ui = Ui {
     shortcut_remove_err: "Não foi possível remover o ícone",
     toast_folder_none: "Este jogo não está em nenhuma pasta.",
     more_changes_1: "E mais {} mudança",
+    kbd_cover_guide: "Nome do jogo cuja capa você procura",
 };
 
 const ZH: Ui = Ui {
@@ -3148,6 +3157,7 @@ const ZH: Ui = Ui {
     shortcut_remove_err: "无法移除图标",
     toast_folder_none: "此游戏不在任何文件夹中。",
     more_changes_1: "还有 {} 处更改",
+    kbd_cover_guide: "要查找封面的游戏名称",
 };
 
 const TR: Ui = Ui {
@@ -3472,6 +3482,7 @@ const TR: Ui = Ui {
     shortcut_remove_err: "Simge kaldırılamadı",
     toast_folder_none: "Bu oyun hiçbir klasörde değil.",
     more_changes_1: "Ve {} değişiklik daha",
+    kbd_cover_guide: "Kapağını aradığın oyunun adı",
 };
 
 pub fn ui() -> &'static Ui {

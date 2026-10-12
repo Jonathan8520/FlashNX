@@ -8868,8 +8868,13 @@ fn run_cover_research_flow(game_idx: usize) {
             .unwrap_or_default(),
         Err(_) => return,
     };
-    let Some(typed) = net::prompt_search(&current) else {
-        return; // cancelled — keep the picker as it was
+    // Its own header and guide: this keyboard searches Flashpoint for a game's
+    // name, and the library search's guide promises that an empty entry shows
+    // everything, which here does nothing.
+    let lc = crate::loc::s();
+    let guide = crate::loc_ui::ui().kbd_cover_guide;
+    let Some(typed) = net::prompt_search_as(lc.cover_title, guide, &current) else {
+        return; // cancelled: keep the picker as it was
     };
     let query = typed.trim().to_string();
     if query.is_empty() {
