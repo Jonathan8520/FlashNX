@@ -348,6 +348,7 @@ pub fn open(game: Option<&str>) {
     // before the lock, not inside it, to keep this off the TOUCHES -> keymap
     // nesting entirely.
     let start = unstick_cursor(0);
+    forget_pending_net();
     // The game's own cursor speed, else the global one it follows.
     let speed = keymap::active_game_basename()
         .map(|b| keymap::cursor_speed_for(&b))
@@ -365,6 +366,7 @@ pub fn open(game: Option<&str>) {
 /// Open the IN-GAME TOUCHES sub-menu (#20 Option 1). Editing from here returns to
 /// this menu; apply/share/revert run from here too.
 pub fn open_submenu() {
+    forget_pending_net();
     let (can_revert, has_backup) = keymap::active_game_basename()
         .map(|b| (keymap::has_revert(&b), keymap::has_backup(&b)))
         .unwrap_or((false, false));
@@ -377,8 +379,19 @@ pub fn open_submenu() {
 }
 
 pub fn close() {
+    forget_pending_net();
     if let Ok(mut s) = TOUCHES.lock() {
         s.screen = Screen::Inactive;
+    }
+}
+
+/// Drop a deferred flow that has not run yet. It is armed on one frame and run
+/// on the next, and a Minus in between closes the pages without running it: it
+/// then ran the next time the Touches page was drawn, applying or deleting a
+/// profile with no preview on screen.
+fn forget_pending_net() {
+    if let Ok(mut p) = PENDING_NET.lock() {
+        *p = None;
     }
 }
 
