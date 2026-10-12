@@ -989,8 +989,14 @@ fn column_hints(section: SetSection) -> std::vec::Vec<HintItem<'static>> {
 /// A way through the menus, step by step, joined the way crumbs join them. The
 /// steps are the labels the menus themselves show, so a help that names a
 /// place names it in the words the player will find there, in every language.
+///
+/// The spaces are no-break ones: `kit_wrap` breaks a help only on the others,
+/// so the path goes to the next line whole, its double spacing kept. Joined
+/// with plain spaces, a help ended one line on "Pausa" and began the next on
+/// "› Imagen › Zoom.", and every path lost its spacing to the wrap, which puts
+/// one space between words.
 pub(crate) fn menu_path(steps: &[&str]) -> std::string::String {
-    steps.join("  \u{203A}  ")
+    steps.join("\u{a0}\u{a0}\u{203A}\u{a0}\u{a0}")
 }
 
 /// Bibliothèque: the home layouts as cards, the games folder, the interface
