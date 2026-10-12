@@ -1,14 +1,13 @@
-//! Interface strings for the screens rebuilt on the interface kit.
+//! Interface strings: the newer of the two string tables, where strings are
+//! added now (`loc.rs` holds the older one, and screens read from both). The
+//! interface kit draws every screen in the console's own fonts, so these are
+//! written the way each language writes them, accents and lower case included.
 //!
-//! `loc.rs` is written in capitals because the old 5x7 font had nothing else:
-//! "RÉGLAGES", "PLUS JOUÉS", and in Turkish "SERİT" for "ŞERİT" because there was
-//! no Ş to draw. The kit draws the console's own fonts, so these are written the
-//! way each language writes them, accents and lower case included.
-//!
-//! Kept apart from `loc::Strings` while screens move over one at a time: a
-//! screen on the kit reads here, a screen not yet moved reads `loc`. Same nine
-//! languages, same order, same rule as `loc.rs`: a field added here is added
-//! to every table, or nothing compiles.
+//! Same nine languages, same order, same rule as `loc.rs`: a field added here
+//! is added to every table, or nothing compiles. Same typography too: French
+//! puts a no-break space (`\u{a0}`) before ':', ';', '?', '!' and '%' and
+//! inside « », the other languages between a number and '%', except in the
+//! `kbd_*` strings the console's keyboard draws.
 
 use crate::loc::{current, Lang};
 
@@ -167,7 +166,8 @@ pub struct Ui {
     /// Column titles of a before / after table (profile preview, share, revert).
     pub col_before: &'static str,
     pub col_after: &'static str,
-    /// Last line of a before / after table cut short ({} = lines left out).
+    /// Last line of a before / after table cut short ({} = lines left out, two
+    /// or more; one is `more_changes_1`).
     pub more_changes: &'static str,
     /// Under a profile's name in its preview.
     pub preview_sub: &'static str,
@@ -226,7 +226,9 @@ pub struct Ui {
     pub reset_default: &'static str,
     /// Pause, Quit row, for a game started without the library (HOME icon, forwarder): there is no library to go back to.
     pub help_quit_direct: &'static str,
-    /// Game options section title over Touches et curseur.
+    /// Section title over the controls rows: over Touches et curseur in a
+    /// game's options, over Touches and the cursor speed in Réglages › Jeu par
+    /// défaut.
     pub sec_controls: &'static str,
     /// Caption beside a stick glyph on the row of the stick pushed in (L3 / R3).
     pub stick_press: &'static str,
@@ -279,7 +281,9 @@ pub struct Ui {
     pub keys_numpad: &'static str,
     /// The caption over the key picker's band of what is not a key (None, the clicks, the Switch keyboard).
     pub keys_other: &'static str,
-    /// The controls editor's Y hint: the profiles other players shared for this game.
+    /// The profiles other players shared for this game: the Touches et curseur
+    /// row, the page it opens (its title, and its preview's crumbs), and the
+    /// controls editor's Y hint to the same page.
     pub shared_profiles: &'static str,
     /// RÉGLAGES: the sections of the column that have no row label of their own.
     pub sec_profile: &'static str,
@@ -411,7 +415,8 @@ pub struct Ui {
     pub imp_retry: &'static str,
     /// archive.org answered, with nothing at that address (a typo in an identifier).
     pub imp_err_item_missing: &'static str,
-    /// The Flashpoint search answered something that is not a list of games.
+    /// A Flashpoint search (for a game, or for a cover) answered something that
+    /// is not a list of games.
     pub imp_err_fp_unreadable: &'static str,
     /// A Flashpoint game that arrived without a .swf to start.
     pub imp_err_fp_no_swf: &'static str,

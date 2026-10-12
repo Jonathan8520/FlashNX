@@ -2,16 +2,23 @@
 //!
 //! Every string is written the way its language writes it, accents and lower
 //! case included: the interface kit draws them in the console's own fonts
-//! (`backend/render/kit/text.rs`). The strings of the screens rebuilt on the
-//! kit live in `loc_ui.rs`.
+//! (`backend/render/kit/text.rs`). This is the older of the two string tables;
+//! `loc_ui.rs` holds the newer one, where strings are added now. Screens read
+//! from both.
 //!
 //! Lookup is a plain `&'static Strings` per language, chosen by a global
 //! atomic set at boot from `settings.json` (or auto-detected from the Switch
-//! system language) and changeable at runtime via the Settings modal.
+//! system language) and changed at runtime from Réglages › Langue.
 //!
-//! Flash KEY names ("Space", "Shift", "A".."Z") are technical identifiers
-//! stored in keymap JSON and are intentionally NOT translated -- only the
-//! "(none)" placeholder is localized (`none`).
+//! Flash key names ("Space", "Shift", "A".."Z") are the identifiers stored in
+//! the keymap JSON and are never translated there; the screens show the named
+//! keys through the `flash_*` fields, and letters and digits as they are.
+//!
+//! French typography: a no-break space, written `\u{a0}`, goes before ':',
+//! ';', '?', '!' and '%' and inside « », so a wrapped line never starts with
+//! the punctuation (the kit draws it as a space and never breaks a line
+//! there). The other languages put one between a number and '%'. The `kbd_*`
+//! strings keep plain spaces: the console's keyboard draws them, not the kit.
 
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::fs::File;
@@ -189,19 +196,17 @@ pub struct Strings {
     pub empty_title: &'static str,
     pub empty_l1: &'static str,
     pub empty_l3: &'static str,
-    // Library list
-    // Applet-mode notice (P1c) — shown when a game can't launch (small heap)
+    // Applet-mode notice (P1c), shown when a game cannot launch (small heap).
     pub applet_title: &'static str,
     pub applet_notice: &'static str,
-    // OPTIONS modal (per-game)
+    // A game's options panel.
     pub opt_keys: &'static str,
     pub opt_rename: &'static str,
     pub opt_edit: &'static str,
     /// OPTIONS > move this game onto a shelf (issue #68).
     pub opt_folder: &'static str,
     pub opt_delete: &'static str,
-    // Delete confirm
-    // DISTANT idle / history
+    // Importer home and its saved sources.
     /// Pinned IMPORTER row that opens the Flashpoint search. Above "+ add a
     /// URL" because it is the path that needs no URL at all.
     pub dist_search_games: &'static str,
@@ -214,7 +219,7 @@ pub struct Strings {
     pub dist_add: &'static str,
     /// IMPORTER sub-line: saved-URL count ({} = number).
     pub dist_count: &'static str,
-    // DISTANT files list
+    // Importer: an archive's games.
     pub files_title: &'static str,
     /// First row of the shelf picker: take this game off every shelf. Describes
     /// a STATE, not a destination -- it used to say ACCUEIL, which promised a
@@ -229,18 +234,20 @@ pub struct Strings {
     /// data files that are not available, so the player learns it now instead of
     /// meeting a game that loads forever.
     pub toast_assets_missing: &'static str,
-    // Error toast
+    // The old error window's title and footers.
     pub err_title: &'static str,
     pub err_footer: &'static str,
     /// Error footer when the failing URL can be re-typed on the spot (Y).
     pub err_footer_fix: &'static str,
-    // Settings modal (Plus from library)
+    // Settings (Réglages, a game's options, the pause's Écran page), the games
+    // folder browser and the HOME Menu icon.
     pub set_keys: &'static str,
     pub set_cursor_speed: &'static str,
-    /// Stage scaling row in a game's OPTIONS, shown as "<label>: <mode>". Issues
-    /// #65, #69 and #74: three players in three languages asking to lose the
-    /// black bars, #74 putting it best ("the menu is fullscreen but the game is
-    /// not").
+    /// Stage scaling row (a choice of `display_fit`, `display_stretch`,
+    /// `display_fill`) in a game's options, the pause's Écran page and the game
+    /// defaults. Issues #65, #69 and #74: three players in three languages
+    /// asking to lose the black bars, #74 putting it best ("the menu is
+    /// fullscreen but the game is not").
     pub set_display_mode: &'static str,
     /// Keeps the aspect ratio, black bars where the game does not reach.
     pub display_fit: &'static str,
@@ -267,18 +274,21 @@ pub struct Strings {
     pub games_dir_confirm_no: &'static str,
     /// Shown while the move runs, and when it is done.
     pub games_dir_moving: &'static str,
-    /// Titre de la barre d'extraction d'un GameZIP (#117). Un gros jeu
-    /// met aussi longtemps a s'extraire qu'a se telecharger, et l'ecran
-    /// restait fige sur la barre de telechargement pleine.
+    /// Title of a GameZIP's extraction bar (#117): a big game takes as long to
+    /// unpack as to download, and the screen used to sit on a full download
+    /// bar. Kept only by `importer_retired_strings` since the import page names
+    /// its steps (`loc_ui::Ui::imp_step_extract`); goes after the merge.
     pub extracting: &'static str,
     pub shortcut_ok: &'static str,
     pub shortcut_err: &'static str,
     pub shortcut_removed: &'static str,
-    /// Free-zoom row in the pause menu, shown as "<label>: <percent> %", and
-    /// again as the heading of the framing mode it opens. Issue #101.
+    /// Zoom row (a percentage: the pause's Écran page, a game's options, the
+    /// game defaults), and the heading of the framing mode the pause's row
+    /// opens. Issue #101.
     pub set_zoom: &'static str,
-    /// Screen-filter row in the pause menu, shown as "<label>: <filter>".
-    /// The other half of issue #65, which asked for "stretch and filters".
+    /// Screen-filter row (a choice of the three `filter_*`), in the same three
+    /// places as the scaling row. The other half of issue #65, which asked for
+    /// "stretch and filters".
     pub set_screen_filter: &'static str,
     /// No filter (default).
     pub filter_none: &'static str,
@@ -286,12 +296,13 @@ pub struct Strings {
     pub filter_scanlines: &'static str,
     /// Scanlines + RGB stripe mask + vignette.
     pub filter_crt: &'static str,
-    /// Texture-sampling row in the pause menu, shown as "<label>: <value>"
-    /// (issue #108). Named after what it acts on, not after what it does: a
-    /// "FILTERING" row directly under the screen filter's "FILTER" is two rows
-    /// one word apart on the same panel, and "FILTRAGE" under "FILTRE" is
-    /// worse. What it acts on is the pixels of the game's own bitmaps, which
-    /// the free zoom magnifies -- which is how a player noticed at all.
+    /// Texture-sampling row (a choice of the three `pixels_*`, issue #108), in
+    /// the same three places. Named after what it acts on, not after what it
+    /// does: a "Filtering" row directly under the screen filter's "Filter" is
+    /// two rows one word apart on the same panel, and "Filtrage" under
+    /// "Filtre" is worse. What it acts on is the pixels of the game's own
+    /// bitmaps, which the free zoom magnifies, which is how a player noticed
+    /// at all.
     pub set_pixel_filter: &'static str,
     /// Follow the SWF's own smoothing flag. What Flash Player did, so the
     /// default.
@@ -315,14 +326,18 @@ pub struct Strings {
     pub set_fps: &'static str,
     /// Pause row + defaults row: turn the picture a quarter at a time (#78).
     pub set_rotation: &'static str,
+    /// The rotation's first option, the picture as the game draws it: "0°",
+    /// an angle like the three others, the same on every screen that shows
+    /// the choice.
     pub rot_none: &'static str,
     pub rot_90: &'static str,
     pub rot_180: &'static str,
     pub rot_270: &'static str,
     /// TOUCHES row + share/diff label for the per-game "show cursor" toggle.
     pub show_cursor: &'static str,
-    /// TOUCHES row (#119): moving the controller moves the cursor. Values:
-    /// `overclock_off` (the same OFF word), `gyro_marble`, `gyro_pointer`.
+    /// Touches et curseur row (#119): moving the controller moves the cursor.
+    /// Its choices: the off word (`gyro_mode_label`), `gyro_marble`,
+    /// `gyro_pointer`.
     pub set_gyro: &'static str,
     /// Gyroscope like a marble on the screen: the cursor goes toward the edge
     /// that goes down, as far as the console is tilted.
@@ -336,16 +351,17 @@ pub struct Strings {
     pub set_pseudo: &'static str,
     /// Keyboard guide line when typing the nickname.
     pub kbd_pseudo_guide: &'static str,
-    // Navbar tabs (v1.2.0) — switched with L/R.
-    // v1.2.0 covers + online toggle.
+    // On / off words, then a game's options rows (v1.2.0 covers).
     pub lbl_on: &'static str,
     pub lbl_off: &'static str,
     pub opt_cover: &'static str,
-    /// OPTIONS row label: add the game to favorites (when not yet favorited).
+    /// The favourite switch's label, the same whether it is on or off: in a
+    /// game's options and in a saved source's options.
     pub opt_favorite: &'static str,
-    /// OPTIONS row label: remove the game from favorites (when already favorited).
+    /// A's hint on a saved source's favourite row while it is a favourite.
     pub opt_unfavorite: &'static str,
-    /// OPTIONS row label: share this game's controls as a community profile (#20).
+    /// Touches et curseur row: share this game's controls as a community
+    /// profile (#20). Also the title of the before / after page it opens.
     pub opt_share: &'static str,
     /// Success toast shown after the controls were shared (#20).
     pub profile_shared_ok: &'static str,
@@ -376,7 +392,7 @@ pub struct Strings {
     /// Confirmation question shown before sharing a game's controls (first time).
     pub profile_share_confirm: &'static str,
     /// Subtitle on the share confirm when it UPDATES the player's existing shared
-    /// profile (one slot per person) — shown above the before/after diff.
+    /// profile (one slot per person), shown above the before / after table.
     pub share_confirm_update: &'static str,
     // TOUCHES sub-menu (#20 regroup): everything control-related lives under one
     // entry so apply/share/revert don't read as game-save actions in OPTIONS.
@@ -393,18 +409,20 @@ pub struct Strings {
     /// Toast when sharing would duplicate an already-existing identical profile.
     pub profile_share_dup: &'static str,
     /// Toast when the URL the user just typed names a game already on the card.
-    /// `{}` is the file name.
+    /// `{}` is that game's name as the library shows it.
     pub toast_already_imported: &'static str,
-    /// Toast when a game is moved onto the shelf it is already on (issue #68).
+    /// Toast when a new folder gets the name of one the game is already in
+    /// (issue #68). The "No folder" row has its own, `loc_ui::Ui::toast_folder_none`.
     pub toast_folder_same: &'static str,
     /// Toast after a game is put ON a shelf. One {}: the shelf name.
     pub toast_folder_on: &'static str,
     /// Toast after a game is taken OFF a shelf. One {}: the shelf name.
     pub toast_folder_off_of: &'static str,
-    /// Toast after a game is taken off every shelf at once (the ACCUEIL row).
+    /// Toast after a game is taken off every shelf at once (the "No folder" row).
     pub toast_folder_off: &'static str,
     /// Toast when A is pressed on a shelf the game is on because its FILE sits
-    /// in a directory of that name: no label can take it off, only moving it.
+    /// in a directory of that name: no label can take it off, so it points to
+    /// the "No folder" row, as the help on that row does.
     pub toast_folder_physical: &'static str,
     /// Toast when a game cannot come back to the root because another game
     /// already holds that file name there. One {}: the file name. NOT an SD
@@ -425,6 +443,8 @@ pub struct Strings {
     pub profile_del_ok: &'static str,
     /// Toast when there's nothing to delete (no profile shared from this console).
     pub profile_del_not_mine: &'static str,
+    /// The cover picker's title, and the header of the keyboard it opens to
+    /// search again (Minus).
     pub cover_title: &'static str,
     /// Cover-picker hint for the Y toggle, worded as the ACTION it performs
     /// (what pressing it gives you), not the state you are in. Screenshots
@@ -433,7 +453,8 @@ pub struct Strings {
     pub cover_show_logos: &'static str,
     pub cover_show_shots: &'static str,
     pub cover_none: &'static str,
-    // Flashpoint game gallery (IMPORTER > X — browse + download a game).
+    // Flashpoint game gallery (Importer › Chercher sur Flashpoint: browse and
+    // download a game).
     pub fp_title: &'static str,
     // Flashpoint details popup (`+` on a gallery tile).
     pub fp_details_dev: &'static str,
@@ -478,11 +499,11 @@ pub struct Strings {
     /// DNS / connect failure: no usable network at all.
     /// curl 5/6: the address never resolved. Names WiFi and DNS both, because
     /// a console with its WiFi off fails exactly the same way as one whose DNS
-    /// is broken — blaming only the WiFi sends a connected player to check the
+    /// is broken: blaming only the WiFi sends a connected player to check the
     /// one thing that works (#103).
     pub err_offline: &'static str,
     /// curl 7: the name resolved and the connection was refused. A different
-    /// instruction entirely — the network is up, something between the console
+    /// instruction entirely: the network is up, something between the console
     /// and the server is saying no.
     pub err_unreachable: &'static str,
     /// The request timed out.
@@ -497,7 +518,7 @@ pub struct Strings {
     /// The server answered an error status. {} = the HTTP code.
     pub err_http_status: &'static str,
     /// 429 / 5xx: the host is up but temporarily unable, which is a different
-    /// instruction to the player than a refusal or a dead link — wait, do not
+    /// instruction to the player than a refusal or a dead link: wait, do not
     /// go looking for a mistake in the URL. archive.org does this under load.
     pub err_server_busy: &'static str,
     /// HTTP 404 specifically: the URL or item id is wrong / gone.
@@ -513,12 +534,13 @@ pub struct Strings {
     pub err_url_invalid: &'static str,
     pub err_no_swf: &'static str,
     /// Shown when a download completed (HTTP 200) but the bytes are not the file
-    /// we asked for — an HTML listing/error page, a redirect target, a truncated
-    /// body. Without this the file was saved under the game's name, announced as a
-    /// success, and only dropped much later at the library scan, silently.
+    /// we asked for: an HTML listing or error page, a redirect target, a
+    /// truncated body. Without this the file was saved under the game's name,
+    /// announced as a success, and only dropped much later at the library scan,
+    /// silently.
     pub err_dl_not_a_game: &'static str,
     /// Shown when a Flashpoint game launches via an HTML page + FlashVars
-    /// (launchCommand isn't a `.swf`) so it can't run as a bare SWF — refused
+    /// (launchCommand isn't a `.swf`) so it can't run as a bare SWF: refused
     /// before the (often huge) GameZIP download instead of failing after it.
     pub err_fp_html_game: &'static str,
     // swkbd prompts (passed to the C++ software keyboard)
@@ -526,9 +548,10 @@ pub struct Strings {
     pub kbd_url_guide: &'static str,
     pub kbd_rename_header: &'static str,
     pub kbd_rename_guide: &'static str,
+    /// The Jouer search's keyboard (Minus): it narrows the library by name.
     pub kbd_search_header: &'static str,
     pub kbd_search_guide: &'static str,
-    // Bug report (RÉGLAGES → SIGNALER UN BUG)
+    // Bug report (Réglages › Signaler un bug).
     pub bug_no_games: &'static str,
     pub bug_ok_title: &'static str,
     pub bug_ok_msg: &'static str,
@@ -539,7 +562,7 @@ pub struct Strings {
     pub bug_fail_title: &'static str,
     pub kbd_bug_header: &'static str,
     pub kbd_bug_guide: &'static str,
-    // Suggestion / feature request (RÉGLAGES → FAIRE UNE PROPOSITION). Reuses the
+    // Suggestion / feature request (Réglages › Proposer une idée). Reuses the
     // same relay + token as the bug report; only the issue label differs.
     pub kbd_suggest_header: &'static str,
     pub kbd_suggest_guide: &'static str,
@@ -2372,7 +2395,7 @@ pub fn set(lang: Lang) {
     CURRENT.store(lang.index() as u8, Ordering::Relaxed);
 }
 
-/// v1.2.0 — whether the per-game "JAQUETTE" action may reach Flashpoint to
+/// v1.2.0: whether the per-game "Jaquette" action may reach Flashpoint to
 /// fetch cover art. OFF by default: with it off, FlashNX makes ZERO unsolicited
 /// network requests (covers come only from local sidecars/cache). Persisted in
 /// settings.json alongside the language.
@@ -2748,7 +2771,7 @@ pub fn err_dl_start(code: i32) -> std::string::String {
 pub fn err_dl_failed(code: i32) -> std::string::String {
     fill(s().err_dl_failed, &code.to_string())
 }
-/// HTTP status the server answered with (>= 400). 404 gets its own wording —
+/// HTTP status the server answered with (>= 400). 404 gets its own wording:
 /// "not found" is a different action for the user than "the server said no".
 pub fn err_http_status(code: i64) -> std::string::String {
     if code == 404 {
@@ -2882,7 +2905,7 @@ fn write_settings(lang: Lang, covers: bool) -> bool {
 }
 
 /// Persist the chosen language. Best-effort. (The covers-online flag is always
-/// on in v1.2.0 — no toggle — but stays in the file for forward-compat.)
+/// on in v1.2.0, with no toggle, but stays in the file for forward-compat.)
 pub fn save(lang: Lang) -> bool {
     write_settings(lang, covers_online())
 }
