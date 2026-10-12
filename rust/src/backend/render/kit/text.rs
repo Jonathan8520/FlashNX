@@ -867,11 +867,19 @@ impl SwitchRenderBackend {
     /// The favourite marker: a gold star on a dark chip, for the top-left
     /// corner of a cover.
     pub fn kit_favorite_chip(&mut self, x: f32, y: f32) {
+        self.kit_favorite_chip_faded(x, y, 1.0);
+    }
+
+    /// `kit_favorite_chip`, `alpha` of the way faded in: the launch hands the
+    /// chip over from the tile to the growing cover.
+    pub fn kit_favorite_chip_faded(&mut self, x: f32, y: f32, alpha: f32) {
         use super::theme::col;
         const CHIP: f32 = 26.0;
         const STAR: f32 = 16.0;
-        self.kit_rrect(x, y, CHIP, CHIP, 8.0, 0xB8_0A_10_1C);
+        let a = alpha.clamp(0.0, 1.0);
+        let fade = |c: u32| (((c >> 24) as f32 * a).round() as u32) << 24 | (c & 0x00FF_FFFF);
+        self.kit_rrect(x, y, CHIP, CHIP, 8.0, fade(0xB8_0A_10_1C));
         let w = self.kit_measure("\u{2605}", STAR);
-        self.kit_text_mid((x + (CHIP - w) * 0.5).round(), y + CHIP * 0.5, STAR, "\u{2605}", col::GOLD);
+        self.kit_text_mid((x + (CHIP - w) * 0.5).round(), y + CHIP * 0.5, STAR, "\u{2605}", fade(col::GOLD));
     }
 }
