@@ -2744,10 +2744,14 @@ pub extern "C" fn ruffle_redraw_paused() {
     if let Some(backend) =
         <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(renderer)
     {
-        if let Some(asked) = load_failed() {
-            backend.draw_load_failed(&asked);
-        }
-        if show_cursor {
+        // No "could not be read" card here: this redraw is what is behind the
+        // pause, and the card asks for exactly that (Minus). Under the panel
+        // the two were half-visible dialogs, the card's alert and the start of
+        // every line covered; the Quitter row's help says how to leave.
+        //
+        // Nor the pointer while framing, for the same reason as the counter: a
+        // white cross on the picture whose framing is being judged.
+        if show_cursor && !framing {
             backend.draw_cursor_overlay(cx, cy, clicked);
         }
         // The reading freezes with the picture, which is right: no frame is

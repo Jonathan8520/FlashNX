@@ -576,6 +576,15 @@ pub struct Ui {
     pub profile_delete_failed: &'static str,
     /// Help under a game of the copy list (Copier d'un autre jeu): the controls are that game's own, and A shows what changes before applying, as on the shared list (`help_touches_apply`).
     pub help_copy_game: &'static str,
+    /// Zoom framing header, after the percentage, only while the picture is
+    /// panned: how far it is moved, horizontally then vertically, in screen
+    /// pixels. The two {} are the numbers, a negative one with a real minus.
+    pub zoom_offset: &'static str,
+    /// TOUCHES > Gyroscope, the setting that leaves the cursor to the sticks
+    /// (#119): its first option, beside gyro_marble and gyro_pointer. Its own word,
+    /// short, rather than the overclock's: "Inactivo | Canica | Puntero" did not
+    /// fit the pause's 440 px page in Spanish, Italian or Portuguese.
+    pub gyro_off: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -907,6 +916,8 @@ const EN: Ui = Ui {
     profile_share_failed: "The catalog refused your controls. Try again later.",
     profile_delete_failed: "The catalog did not delete your profile. Try again later.",
     help_copy_game: "That other game's own controls. You see what changes before applying.",
+    zoom_offset: "offset {}, {} px",
+    gyro_off: "Off",
 };
 
 const FR: Ui = Ui {
@@ -1238,6 +1249,8 @@ const FR: Ui = Ui {
     profile_share_failed: "Le catalogue a refusé tes touches. Réessaie plus tard.",
     profile_delete_failed: "Le catalogue n'a pas supprimé ton profil. Réessaie plus tard.",
     help_copy_game: "Les touches propres à cet autre jeu. Tu vois ce qui change avant d'appliquer.",
+    zoom_offset: "décalé de {}, {} px",
+    gyro_off: "Inactif",
 };
 
 const ES: Ui = Ui {
@@ -1569,6 +1582,8 @@ const ES: Ui = Ui {
     profile_share_failed: "El catálogo rechazó tus controles. Inténtalo más tarde.",
     profile_delete_failed: "El catálogo no borró tu perfil. Inténtalo más tarde.",
     help_copy_game: "Los controles propios de ese otro juego. Ves lo que cambia antes de aplicar.",
+    zoom_offset: "desplazado {}, {} px",
+    gyro_off: "No",
 };
 
 const RU: Ui = Ui {
@@ -1900,6 +1915,8 @@ const RU: Ui = Ui {
     profile_share_failed: "Каталог не принял твои клавиши. Попробуй позже.",
     profile_delete_failed: "Каталог не удалил твой профиль. Попробуй позже.",
     help_copy_game: "Собственная раскладка той игры. Перед применением видно, что изменится.",
+    zoom_offset: "сдвиг {}, {} пикс.",
+    gyro_off: "Выкл",
 };
 
 const DE: Ui = Ui {
@@ -1924,7 +1941,7 @@ const DE: Ui = Ui {
     help_screen: "Anzeige, Drehung, Zoom, Pixel, Filter, FPS-Anzeige: Jede Änderung siehst du sofort am Spiel hinter diesem Menü.",
     help_restart: "Startet das Spiel von vorn. Die Spielstände bleiben erhalten.",
     help_quit: "Zurück zu deiner Bibliothek. Was das Spiel nicht gespeichert hat, geht verloren.",
-    help_display: "Einpassen zeigt das ganze Spiel, Strecken füllt den Bildschirm verzerrt, Füllen schneidet die Ränder ab.",
+    help_display: "Einpassen zeigt das ganze Spiel, Dehnen füllt den Bildschirm verzerrt, Füllen schneidet die Ränder ab.",
     help_rotation: "Dreht das Bild in Vierteldrehungen, für Spiele im Hochformat.",
     help_zoom: "Vergrößert das Bild: Links und Rechts in 10-%-Schritten, A zum Ausrichten mit dem Stick.",
     help_filter: "Linien oder Röhren-Look (CRT) über dem Bild.",
@@ -2231,6 +2248,8 @@ const DE: Ui = Ui {
     profile_share_failed: "Der Katalog lehnt deine Steuerung ab. Versuche es später.",
     profile_delete_failed: "Dein Profil wurde nicht gelöscht. Versuche es später.",
     help_copy_game: "Die eigene Tastenbelegung dieses anderen Spiels. Du siehst vorher, was sich ändert.",
+    zoom_offset: "verschoben um {}, {} px",
+    gyro_off: "Aus",
 };
 
 const IT: Ui = Ui {
@@ -2562,6 +2581,8 @@ const IT: Ui = Ui {
     profile_share_failed: "Il catalogo ha rifiutato i tuoi comandi. Riprova più tardi.",
     profile_delete_failed: "Il catalogo non ha eliminato il tuo profilo. Riprova più tardi.",
     help_copy_game: "I comandi propri di quell'altro gioco. Vedi cosa cambia prima di applicare.",
+    zoom_offset: "spostato di {}, {} px",
+    gyro_off: "No",
 };
 
 const PT: Ui = Ui {
@@ -2893,6 +2914,8 @@ const PT: Ui = Ui {
     profile_share_failed: "O catálogo recusou seus controles. Tente mais tarde.",
     profile_delete_failed: "O catálogo não removeu seu perfil. Tente mais tarde.",
     help_copy_game: "Os controles próprios desse outro jogo. Você vê o que muda antes de aplicar.",
+    zoom_offset: "deslocado {}, {} px",
+    gyro_off: "Não",
 };
 
 const ZH: Ui = Ui {
@@ -3224,6 +3247,8 @@ const ZH: Ui = Ui {
     profile_share_failed: "目录拒绝了你的按键。请稍后重试。",
     profile_delete_failed: "目录未删除你的配置。请稍后重试。",
     help_copy_game: "那款游戏自己的按键配置。应用前可以看到会改变什么。",
+    zoom_offset: "偏移 {}, {} 像素",
+    gyro_off: "关闭",
 };
 
 const TR: Ui = Ui {
@@ -3555,6 +3580,8 @@ const TR: Ui = Ui {
     profile_share_failed: "Katalog kontrollerini reddetti. Daha sonra tekrar dene.",
     profile_delete_failed: "Katalog profilini silmedi. Daha sonra tekrar dene.",
     help_copy_game: "O oyunun kendi kontrolleri. Uygulamadan önce neyin değiştiğini görürsün.",
+    zoom_offset: "{}, {} px kaydırıldı",
+    gyro_off: "Kapalı",
 };
 
 pub fn ui() -> &'static Ui {

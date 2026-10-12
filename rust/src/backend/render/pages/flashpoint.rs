@@ -235,9 +235,15 @@ impl SwitchRenderBackend {
             }
         }
         // The ring hugs the lifted tile: the same growth, plus the brief snap
-        // right after a move.
+        // right after a move. Under a clip of its own, as tall as the band
+        // plus what the lift, the snap and the ring itself add round a tile:
+        // under the tiles' clip the bottom of the ring was cut on the third
+        // row, and gone during the snap.
+        self.clear_clip();
         let lift = LIFT * selected_open;
         let grow = pop * 3.0;
+        let margin = (LIFT * tile_h * 0.5 + 3.0 + ring::GAP + ring::WIDTH + 1.0).ceil();
+        self.set_clip(0.0, band_top - margin, vw, band_bot - band_top + 2.0 * margin);
         let rx = fx - tile_w * lift * 0.5 - grow;
         let ry = fy - scroll_px - tile_h * lift * 0.5 - grow;
         self.kit_ring(rx, ry, tile_w * (1.0 + lift) + 2.0 * grow, tile_h * (1.0 + lift) + 2.0 * grow, radius::TILE, ring::GAP, ring::WIDTH, col::GOLD);
@@ -402,7 +408,24 @@ impl SwitchRenderBackend {
             Some(text) => self.kit_wrap(text, size::LABEL + 1.0, W - 2.0 * PAD, max_lines),
             None => std::vec::Vec::new(),
         };
+        // While the blurb is on its way the window takes the height of the
+        // longest it could show, the spinner in that room, and keeps it for as
+        // long as it stays open once the text has come: it reserved 64 px, and
+        // the window recentred when the blurb landed, moving the logo, the
+        // title and the facts by up to 100 px a moment after it had settled
+        // (or shrinking, for a game with no blurb).
+        static OPENED_PENDING: std::sync::Mutex<std::string::String> = std::sync::Mutex::new(std::string::String::new());
+        let id = std::format!("{}\u{1F}{}", d.title, d.cover_url);
+        let reserve = match OPENED_PENDING.lock() {
+            Ok(mut g) if d.description.is_none() => {
+                *g = id;
+                true
+            }
+            Ok(g) => *g == id,
+            Err(_) => false,
+        };
         let desc_h = match d.description {
+            _ if reserve => 24.0 + max_lines as f32 * 23.0,
             None => 24.0 + 40.0,
             Some(_) if desc_lines.is_empty() => 0.0,
             Some(_) => 24.0 + desc_lines.len() as f32 * 23.0,

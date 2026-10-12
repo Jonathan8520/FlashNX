@@ -214,6 +214,10 @@ pub(crate) fn mix_rgb(a: u32, b: u32, t: f32) -> u32 {
     out
 }
 
+/// Under this height a game's generated tile is a small box (a panel's
+/// header, the rail's head): one line of name, no gamepad.
+const DEFAULT_TILE_SMALL_H: f32 = 80.0;
+
 impl SwitchRenderBackend {
     /// The tile of a game with no cover: its colour, deepened towards the page,
     /// a gamepad in the corner and its NAME at the bottom, as the mockup draws
@@ -225,6 +229,17 @@ impl SwitchRenderBackend {
         let px = if w >= 180.0 { 20.0 } else { 17.0 };
         let pad = (w * 0.07).clamp(10.0, 16.0);
         let shown = name.strip_suffix(".swf").or_else(|| name.strip_suffix(".SWF")).unwrap_or(name);
+        // A small box (a panel's 96 x 60 header, the rail's 56 x 35 head):
+        // one line at 13 px, cut in the middle, centred, and no gamepad. The
+        // grid's two lines at 17 px ran into the gamepad over them in the
+        // header, and in the rail's head the first line sat above the tile.
+        if h < DEFAULT_TILE_SMALL_H {
+            const SMALL_PX: f32 = 13.0;
+            let t = self.kit_fit_mid(shown, SMALL_PX, (w - 12.0).max(0.0));
+            let tw = self.kit_measure(&t, SMALL_PX);
+            self.kit_text_mid((x + (w - tw) * 0.5).round(), y + h * 0.5, SMALL_PX, &t, 0xFF00_0000 | ink);
+            return;
+        }
         // Room for the gamepad above the name, so the two never touch.
         let max_lines = if h >= 120.0 { 3 } else { 2 };
         let lines = self.kit_wrap(shown, px, w - 2.0 * pad, max_lines);
@@ -293,7 +308,7 @@ impl SwitchRenderBackend {
         // fades overlap, one at full strength while the other comes or goes:
         // two half-faded copies let the ground through the letters half way.
         let (fade_tile, fade_end) = ((2.0 * (1.0 - f)).min(1.0), (2.0 * f).min(1.0));
-        if bw >= 64.0 && bh >= 48.0 {
+        if bw >= 64.0 && bh >= DEFAULT_TILE_SMALL_H {
             let ink = mix_rgb(chip, col::BG & 0x00FF_FFFF, 0.25);
             let end = (PAD_ICON * z_end).round();
             let size = PAD_ICON + (end - PAD_ICON) * f;
@@ -351,7 +366,7 @@ impl SwitchRenderBackend {
         let chip = chip & 0x00FF_FFFF;
         let fill = mix_rgb(chip, col::BG & 0x00FF_FFFF, 0.55);
         self.kit_rrect(x, y, w, h, super::theme::radius::TILE, 0xFF00_0000 | fill);
-        if w >= 64.0 && h >= 48.0 {
+        if w >= 64.0 && h >= DEFAULT_TILE_SMALL_H {
             let icon_ink = mix_rgb(chip, col::BG & 0x00FF_FFFF, 0.25);
             let pad = (w * 0.07).clamp(10.0, 16.0);
             self.kit_icon(x + pad, y + pad + 11.0, 22.0, super::icons::Icon::Gamepad, 0xFF00_0000 | icon_ink);

@@ -121,6 +121,19 @@ const ROW_GAP: f32 = 2.0;
 const HELP_LINES: usize = 4;
 const HINTS_BAND: f32 = 60.0;
 
+/// The room kept for the help box over the hints, with its gap.
+fn help_room() -> f32 {
+    28.0 + (size::LABEL * 1.45).round() * HELP_LINES as f32 + 10.0
+}
+
+/// The bottom of the pause's panels as last drawn (`kit_cascade`), for what
+/// goes under them in portrait (the loading card).
+static CASCADE_BOTTOM: std::sync::Mutex<f32> = std::sync::Mutex::new(0.0);
+
+pub(crate) fn cascade_bottom() -> f32 {
+    CASCADE_BOTTOM.lock().map(|g| *g).unwrap_or(0.0)
+}
+
 /// The cascade's progress, 0 (one panel) to 1 (rail plus sub-panel), eased on
 /// its own clock.
 struct Cascade {
@@ -180,6 +193,25 @@ impl SwitchRenderBackend {
         h + 16.0
     }
 
+    /// Top and height of the panel for `s`. In landscape every panel is the
+    /// screen's height. In portrait (a turned picture, 1280 tall) a panel that
+    /// tall put the help box 600 px under the rows it explains, and its dim
+    /// covered the lower half of the picture, where ÉCRAN shows what it does:
+    /// there a panel hugs its content, from the top, never taller than the
+    /// screen. The help box keeps its reserved lines, so a panel does not
+    /// change height as the cursor moves.
+    fn sheet_frame(&mut self, s: &Sheet) -> (f32, f32) {
+        let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
+        let full = vh - 2.0 * SHEET_MARGIN;
+        if vh <= vw {
+            return (SHEET_MARGIN, full);
+        }
+        let body = if s.diff.is_empty() { Self::sheet_layout(s).1 } else { SECTION_H + s.diff.len() as f32 * s.row_h };
+        let help = if s.reserve_help { help_room() } else { 0.0 };
+        let content = self.sheet_header_h(s) + 10.0 + body + help + HINTS_BAND;
+        (SHEET_MARGIN, content.min(full).round())
+    }
+
     /// The caption line: an icon and the path, the last step brighter.
     fn sheet_kicker(&mut self, x: f32, cy: f32, max_w: f32, s: &Sheet) {
         let px = size::CAPTION + 1.0;
@@ -230,7 +262,9 @@ impl SwitchRenderBackend {
             self.sheet_thumb(x + 24.0, y, TW, TH, thumb, s.thumb_tile);
             let tx = x + 24.0 + TW + 16.0;
             let tmax = x + w - 24.0 - tx;
-            let t = self.kit_fit(s.title, size::WINDOW_TITLE - 1.0, tmax);
+            // A game's name: cut in the middle, where two episodes of a series
+            // differ at the end.
+            let t = self.kit_fit_mid(s.title, size::WINDOW_TITLE - 1.0, tmax);
             let has_sub = s.subtitle.is_some();
             let tcy = if has_sub { y + 20.0 } else { y + TH * 0.5 };
             self.kit_text_mid(tx, tcy, size::WINDOW_TITLE - 1.0, &t, col::TEXT);
@@ -308,8 +342,7 @@ impl SwitchRenderBackend {
     /// `kit_sheet_at`; `publish` false for a panel that is only being shown on
     /// its way somewhere (it must not take the taps of the page in front).
     fn sheet_draw(&mut self, s: &Sheet, x: f32, w: f32, publish: bool) {
-        let top = SHEET_MARGIN;
-        let h = self.dimensions.height as f32 - 2.0 * SHEET_MARGIN;
+        let (top, h) = self.sheet_frame(s);
         self.kit_panel(x, top, w, h, false);
         let line_y = self.sheet_header(s, x, w, true);
 
@@ -317,12 +350,7 @@ impl SwitchRenderBackend {
         let hints_cy = top + h - HINTS_BAND * 0.5;
         let help_bottom = top + h - HINTS_BAND;
         let help_w = w - 32.0;
-        let help_room = if s.reserve_help {
-            let lh = (size::LABEL * 1.45).round();
-            28.0 + lh * HELP_LINES as f32 + 10.0
-        } else {
-            0.0
-        };
+        let help_room = if s.reserve_help { help_room() } else { 0.0 };
         if !s.help.trim().is_empty() {
             self.kit_help_box(x + 16.0, help_bottom, help_w, s.help, HELP_LINES);
         }
@@ -334,7 +362,7 @@ impl SwitchRenderBackend {
             let (rx, rw) = (x + 16.0, w - 32.0);
             self.kit_diff_heads(rx, area_top + SECTION_H - 14.0, rw, s.diff_heads);
             let mut y = area_top + SECTION_H;
-            let bottom = help_bottom - if s.reserve_help { 28.0 + (size::LABEL * 1.45).round() * HELP_LINES as f32 + 10.0 } else { 0.0 };
+            let bottom = help_bottom - help_room;
             for line in s.diff {
                 if y + s.row_h > bottom + 1.0 {
                     break;
@@ -402,14 +430,9 @@ impl SwitchRenderBackend {
     /// and bottom of their area, for a panel at full height: the rail draws its
     /// icons where the full panel had its rows.
     fn sheet_rows_frame(&mut self, s: &Sheet, row: usize) -> (f32, f32, f32) {
-        let top = SHEET_MARGIN;
-        let h = self.dimensions.height as f32 - 2.0 * SHEET_MARGIN;
+        let (top, h) = self.sheet_frame(s);
         let area_top = top + self.sheet_header_h(s) + 10.0;
-        let help_room = if s.reserve_help {
-            28.0 + (size::LABEL * 1.45).round() * HELP_LINES as f32 + 10.0
-        } else {
-            0.0
-        };
+        let help_room = if s.reserve_help { help_room() } else { 0.0 };
         let area_bot = top + h - HINTS_BAND - help_room;
         let area_h = (area_bot - area_top).max(s.row_h);
         let (ys, content_h) = Self::sheet_layout(s);
@@ -433,6 +456,13 @@ impl SwitchRenderBackend {
     /// button drawn as the editor draws it, what it sends now, dim, and what it
     /// will send, bright. A line without tabs (a count of lines left out) is
     /// written across.
+    ///
+    /// A name that is no button (a cursor setting) may run into the first half
+    /// of "Avant", pushing that value right: "Afficher le curseur" was cut to
+    /// "Afficher le cu…" in a column sized for a glyph. A value that does not
+    /// fit its column steps down a size, then goes on two lines, before
+    /// anything is cut: "Comme en Normal", what a combo layer's empty button
+    /// sends, ran out of both columns.
     pub(crate) fn kit_diff_line(&mut self, x: f32, cy: f32, w: f32, line: &str) {
         let px = size::LABEL + 1.0;
         let mut it = line.split('\t');
@@ -440,11 +470,11 @@ impl SwitchRenderBackend {
         match (it.next(), it.next()) {
             (Some(before), Some(after)) => {
                 let (c0, c1) = (w * 0.34, w * 0.33);
-                self.kit_diff_what(x + 12.0, cy, c0 - 20.0, what);
-                let b = self.kit_fit(before, px, c1 - 14.0);
-                self.kit_text_mid(x + c0, cy, px, &b, col::TEXT3);
-                let a = self.kit_fit(after, px, w - c0 - c1 - 12.0);
-                self.kit_text_mid(x + c0 + c1, cy, px, &a, col::TEXT);
+                let what_max = if Self::diff_what_is_button(what) { c0 - 20.0 } else { c0 + c1 * 0.5 - 20.0 };
+                let what_end = self.kit_diff_what(x + 12.0, cy, what_max, what);
+                let bx = (x + c0).max(what_end + 12.0);
+                self.kit_diff_value(bx, cy, x + c0 + c1 - 14.0 - bx, before, col::TEXT3);
+                self.kit_diff_value(x + c0 + c1, cy, w - c0 - c1 - 12.0, after, col::TEXT);
             }
             _ => {
                 let t = self.kit_fit(what, px, w - 24.0);
@@ -453,10 +483,39 @@ impl SwitchRenderBackend {
         }
     }
 
+    /// A value of a diff line from `x`, in `room`: at 16 px, else 13, else on
+    /// two lines at 13 (the lines are 44 px tall), the second cut if it must.
+    fn kit_diff_value(&mut self, x: f32, cy: f32, room: f32, text: &str, ink: u32) {
+        let room = room.max(0.0);
+        for p in [size::LABEL + 1.0, size::CAPTION] {
+            if self.kit_measure(text, p) <= room {
+                self.kit_text_mid(x, cy, p, text, ink);
+                return;
+            }
+        }
+        let p = size::CAPTION;
+        let lines = self.kit_wrap(text, p, room, 2);
+        let lh = (p * 1.25).round();
+        let mut ly = cy - lh * (lines.len().max(1) - 1) as f32 * 0.5;
+        for l in &lines {
+            self.kit_text_mid(x, ly, p, l, ink);
+            ly += lh;
+        }
+    }
+
+    /// Whether a diff line's first column names a button (drawn as glyphs),
+    /// rather than a setting written as words.
+    fn diff_what_is_button(what: &str) -> bool {
+        let rest = what.strip_prefix("P2 ").unwrap_or(what);
+        let rest = rest.split_once('+').map_or(rest, |(_, b)| b);
+        crate::keymap::PAD_SLOTS.iter().any(|s| s.name == rest)
+    }
+
     /// The control a diff line is about: "P2 ZL+StickLUp" is a J2 chip, the ZL
     /// glyph, a plus and the left stick's badge. A name that is no button (a
-    /// cursor setting) is written as it is.
-    fn kit_diff_what(&mut self, x: f32, cy: f32, max_w: f32, what: &str) {
+    /// cursor setting) is written as it is, the cursor's speed after the
+    /// pointer its row has. Returns where it ends.
+    fn kit_diff_what(&mut self, x: f32, cy: f32, max_w: f32, what: &str) -> f32 {
         let px = size::LABEL;
         let mut cx = x;
         let mut rest = what;
@@ -482,10 +541,22 @@ impl SwitchRenderBackend {
             Some(g) => {
                 let bw = self.pad_badge_width(g, px);
                 self.kit_pad_badge(cx, cy, bw, g, px, col::TEXT);
+                cx + bw
             }
             None => {
+                // The speed's name is one word in some languages ("Velocidad"):
+                // alone under an empty column head, among button glyphs, it
+                // did not say whose speed it was. The pointer says it, as on
+                // the speed's row and in the editor's footer. "Afficher le
+                // curseur" names the cursor already, and an icon before it
+                // would leave "Masqué" 54 px of the in-game "Avant" column,
+                // too few even at 13 px.
+                if rest == crate::loc::s().set_cursor_speed {
+                    self.kit_icon(cx, cy, 16.0, Icon::Pointer, col::TEXT2);
+                    cx += 16.0 + 8.0;
+                }
                 let t = self.kit_fit(rest, px, (x + max_w - cx).max(0.0));
-                self.kit_text_mid(cx, cy, px, &t, col::TEXT2);
+                cx + self.kit_text_mid(cx, cy, px, &t, col::TEXT2)
             }
         }
     }
@@ -495,8 +566,9 @@ impl SwitchRenderBackend {
     /// page. Nothing on it takes input; it is the path, and the page's caption
     /// spells it out.
     pub(crate) fn kit_sheet_rail(&mut self, s: &Sheet, x: f32, w: f32, branch: usize, side: Side) {
-        let top = SHEET_MARGIN;
-        let h = self.dimensions.height as f32 - 2.0 * SHEET_MARGIN;
+        // The parent's own height: in portrait it hugs its rows, and the rail
+        // keeps the panel it folds from.
+        let (top, h) = self.sheet_frame(s);
         self.kit_panel(x, top, w, h, false);
         let cx = x + w * 0.5;
         // The head: the panel's own icon (the pause's), or its cover.
@@ -548,27 +620,44 @@ impl SwitchRenderBackend {
         // Behind the panels the game is only lightly dimmed: it is the preview.
         // With a page open, only the panels' side is: the rest of the picture,
         // where ÉCRAN shows what it does, stays at full brightness, with a soft
-        // edge between the two.
+        // edge between the two. In portrait the panels hug their rows at the
+        // top, so the band stops under them too and the picture below stays
+        // bright as well.
+        //
+        // The dim comes and goes with the panel's own slide: at full strength
+        // on the first frame after Minus, it was there before the panel, and on
+        // the way out it stayed until the slide had ended, then went in one
+        // frame (`ui_sheet_reveal`).
         let e = if child.is_some() { t.clamp(0.0, 1.0) } else { 0.0 };
         const DIM: u32 = col::SCRIM_GAME;
-        let a = (DIM >> 24) as f32;
+        let a = (DIM >> 24) as f32 * self.ui_sheet_reveal.clamp(0.0, 1.0);
+        let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
+        let (_, parent_h) = self.sheet_frame(parent);
+        let child_h = match child {
+            Some(c) => self.sheet_frame(c).1,
+            None => 0.0,
+        };
+        let bottom = SHEET_MARGIN + parent_h.max(child_h);
+        if let Ok(mut g) = CASCADE_BOTTOM.lock() {
+            *g = bottom;
+        }
         if e < 1.0 {
             self.fill_screen_dim(((a * (1.0 - e)) as u32) << 24 | (DIM & 0x00FF_FFFF));
         }
         if e > 0.0 {
             let right = SHEET_MARGIN + RAIL_W + CASCADE_GAP + CHILD_W + 24.0;
-            self.dim_band(right, ((a * e) as u32) << 24 | (DIM & 0x00FF_FFFF));
+            let band_bottom = if vh > vw { bottom + 24.0 } else { vh + 200.0 };
+            self.dim_band(right, band_bottom, ((a * e) as u32) << 24 | (DIM & 0x00FF_FFFF));
         }
         self.kit_cascade_on(Side::Left, SHEET_W, CHILD_W, parent, branch, child, t);
     }
 
-    /// Darken the screen from its left edge to `right`, fading out over the
-    /// last 80 px, still whatever the panels are doing.
-    fn dim_band(&mut self, right: f32, rgba: u32) {
+    /// Darken the screen from its top-left corner to `right` and `bottom`,
+    /// fading out over the last 80 px, still whatever the panels are doing.
+    fn dim_band(&mut self, right: f32, bottom: f32, rgba: u32) {
         let saved = (self.ui_scale, self.ui_pivot_x, self.ui_pivot_y, self.ui_translate_x, self.ui_translate_y);
         self.clear_ui_transform();
-        let vh = self.dimensions.height as f32;
-        self.kit_shadow(-200.0, -200.0, right + 160.0, vh + 400.0, 0.0, 80.0, rgba);
+        self.kit_shadow(-200.0, -200.0, right + 160.0, bottom + 160.0, 0.0, 80.0, rgba);
         self.ui_scale = saved.0;
         self.ui_pivot_x = saved.1;
         self.ui_pivot_y = saved.2;
@@ -635,7 +724,8 @@ impl SwitchRenderBackend {
             self.set_clip_outer(None);
             // The moving edge itself, so the cut reads as the panel's border.
             let ex = if side == Side::Left { px + pw - 1.0 } else { px };
-            self.draw_overlay_rect(ex, SHEET_MARGIN + 20.0, 1.0, vh - 2.0 * SHEET_MARGIN - 40.0, col::PANEL_LINE);
+            let (ptop, ph) = self.sheet_frame(parent);
+            self.draw_overlay_rect(ex, ptop + 20.0, 1.0, ph - 40.0, col::PANEL_LINE);
         } else {
             self.kit_sheet_rail(parent, px, pw, branch, side);
         }

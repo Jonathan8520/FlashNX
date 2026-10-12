@@ -316,12 +316,18 @@ pub(crate) struct KeysView<'a> {
     /// The open combo layer's button ("ZL"), None in the Normal layer.
     pub layer: Option<&'a str>,
     pub player: u8,
+    /// The editor's `live_layers`: its header's height depends on them, and
+    /// the picker's header is the editor's.
+    pub live_layers: [bool; 5],
     /// What the button sends now in that layer.
     pub current: &'a PadValue,
     /// Indexes `keymap::KEYBOARD`.
     pub cursor: usize,
     /// The keys the other buttons send, with their pad labels.
     pub used: &'a std::collections::BTreeMap<std::string::String, std::vec::Vec<&'static str>>,
+    /// A toast stands in for the line about the focused key (it is drawn on
+    /// it): the line is left out so its ends do not peek out round the pill.
+    pub quiet: bool,
 }
 
 /// What the editor's touch table holds after its twenty-five rows: the two
@@ -338,8 +344,90 @@ const TOUCHES_PAD_X: f32 = 28.0;
 const TOUCHES_HEAD_H: f32 = 104.0;
 const TOUCHES_FOOT_H: f32 = 60.0;
 const TOUCHES_TITLE_PX: f32 = 24.0;
+/// The X, L and R glyphs beside the editor's player and layer switches.
+const TOUCHES_SWITCH_GLYPH: f32 = 22.0;
 /// "None", the Minus caption: quieter than any value.
 const TOUCHES_QUIET: u32 = 0xFF_5A_6A_8F;
+
+/// The controls editor's two switches: the players, then the layers.
+fn pad_switch_labels() -> ([&'static str; 2], [&'static str; 5]) {
+    let u = crate::loc_ui::ui();
+    ([u.player_1, u.player_2], [u.layer_normal, "ZL", "ZR", "L", "R"])
+}
+
+/// The controls editor's header as `touches_head` measures it.
+struct TouchesHead {
+    /// The band's height, down to its hairline.
+    h: f32,
+    /// The switches on the title's line, at the right.
+    wide: bool,
+    /// The layers on a row of their own, under the players.
+    split: bool,
+    /// [X] players | [L] layers [R] whole, then each segmented switch.
+    switches_w: f32,
+    players_w: f32,
+    layers_w: f32,
+}
+
+/// The band of the line about the focused row or key, over the footer: one
+/// line in landscape; in portrait, where a line is half as long, up to three
+/// lines of 22 px (what a stick that moves the cursor does runs to two in
+/// French, three with the wider Cyrillic of the stand-in font).
+const TOUCHES_HELP_LINES_PORTRAIT: usize = 3;
+
+fn touches_help_band(portrait: bool) -> f32 {
+    if portrait {
+        (theme::size::LABEL * 1.45).round() * TOUCHES_HELP_LINES_PORTRAIT as f32 + 14.0
+    } else {
+        36.0
+    }
+}
+
+/// Where the controls editor's toast goes: centred between the first two x,
+/// its middle at the y, the window's help line. Written by the editor and its
+/// key picker as they draw (`touches_toast_anchor`), read by
+/// `draw_toast_in_touches`.
+static TOUCHES_TOAST_AT: std::sync::Mutex<(f32, f32, f32)> = std::sync::Mutex::new((0.0, 0.0, 0.0));
+
+fn touches_toast_anchor(left: f32, right: f32, cy: f32) {
+    if let Ok(mut g) = TOUCHES_TOAST_AT.lock() {
+        *g = (left, right, cy);
+    }
+}
+
+/// Where a toast is placed: by its top, its bottom or its middle.
+#[derive(Clone, Copy)]
+enum ToastAt {
+    Top(f32),
+    Bottom(f32),
+    Middle(f32),
+}
+
+/// Which column of the controls editor slot `i` of `keymap::PAD_SLOTS` sits
+/// in (0 for the left hand, 1 for the right) and its place down that column,
+/// read from its chip. The portrait layout stacks the rows under the picture
+/// in this order, the landscape one draws them at their chips, so the two
+/// show the same columns in the same order and `menu::pad_step`, which walks
+/// the chips, moves the cursor the way either one is drawn.
+fn pad_slot_column(i: usize) -> (usize, usize) {
+    let slots = crate::keymap::PAD_SLOTS;
+    let Some(s) = slots.get(i) else { return (0, 0) };
+    let col = |x: f32| usize::from(x >= TOUCHES_PIC_MID);
+    let c = col(s.chip.0);
+    let rank = slots.iter().filter(|o| col(o.chip.0) == c && o.chip.1 < s.chip.1).count();
+    (c, rank)
+}
+
+/// The most rows either column of the controls editor holds.
+fn pad_column_len() -> usize {
+    let slots = crate::keymap::PAD_SLOTS;
+    let left = slots.iter().filter(|s| s.chip.0 < TOUCHES_PIC_MID).count();
+    left.max(slots.len() - left)
+}
+
+/// The middle of the editor's controller picture, in pad units: the shell's.
+/// Chips left of it belong to the left hand.
+const TOUCHES_PIC_MID: f32 = 23.0;
 
 /// The header's segmented switches.
 const SEG_H: f32 = 36.0;
@@ -3328,6 +3416,10 @@ pub struct SwitchRenderBackend {
     ui_scale: f32,
     ui_pivot_x: f32,
     ui_pivot_y: f32,
+    /// How far a side sheet has come in on its open or close movement
+    /// (`set_ui_sheet_slide`), 0 to 1, so the dim behind it can come and go
+    /// with it. 1 whenever no such movement is playing.
+    ui_sheet_reveal: f32,
     /// Reusable FBO object (lazy; 0 = not created). Color attachment is
     /// rebound per offscreen render.
     offscreen_fbo: GLuint,
@@ -7258,6 +7350,7 @@ impl SwitchRenderBackend {
             ui_scale: 1.0,
             ui_pivot_x: 0.0,
             ui_pivot_y: 0.0,
+            ui_sheet_reveal: 1.0,
             offscreen_fbo: 0,
             offscreen_depth_stencil: 0,
             offscreen_depth_stencil_dims: (0, 0),
@@ -9845,10 +9938,10 @@ impl SwitchRenderBackend {
     /// Zoom-adjust mode (issue #101): the framing legend, over an untouched
     /// picture.
     ///
-    /// NOTHING is laid over the picture but the two lines of text themselves.
+    /// NOTHING is laid over the picture but small plates carrying the text.
     /// What the player is judging here IS the framing, to the pixel, so every
-    /// band, plate or tint is a piece of the answer taken away -- and a tint
-    /// would fight whatever they set in FILTRE one row down. The signal that the
+    /// band or tint is a piece of the answer taken away -- and a tint would
+    /// fight whatever they set in FILTRE one row down. The signal that the
     /// buttons have stopped driving the game is that the panel is gone and the
     /// legend has taken its place.
     ///
@@ -9863,13 +9956,29 @@ impl SwitchRenderBackend {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         }
-        // Two small plates on the picture, nothing else: what is being judged
-        // here IS the framing. The top one carries the WHOLE framing state, not
-        // just the percentage: the offset is half of what is being set, and it
-        // is what lands in the game's `.prefs` as `panx` / `pany`.
         const PLATE: u32 = 0xC8_0A_10_1C;
+        /// A legend plate's height, and the step from one to the next.
+        const ROW_H: f32 = 48.0;
+        const ROW_STEP: f32 = ROW_H + 8.0;
+        // The top plate says the zoom and, once the picture has been moved,
+        // by how much: the offset is half of what is being set, and it is what
+        // lands in the game's `.prefs` as `panx` / `pany`. Not "X 12 Y -4":
+        // X and Y are the fine zoom here, on the legend just below.
         let (ox, oy) = game_pan();
-        let head = std::format!("{}  {} %     X {}   Y {}", lc.set_zoom, percent, ox, oy);
+        let signed = |v: i32| -> std::string::String {
+            if v < 0 {
+                std::format!("\u{2212}{}", v.unsigned_abs())
+            } else {
+                v.to_string()
+            }
+        };
+        let mut head = std::format!("{}  {} %", lc.set_zoom, percent);
+        if (ox, oy) != (0, 0) {
+            let offset = u.zoom_offset.replacen("{}", &signed(ox), 1).replacen("{}", &signed(oy), 1);
+            head.push_str("  \u{00B7}  ");
+            head.push_str(&offset);
+        }
+        let head = self.kit_fit(&head, size::BODY, vw - 24.0 - 40.0);
         let hw = self.kit_measure(&head, size::BODY);
         let pw = hw + 40.0;
         self.kit_rrect(((vw - pw) * 0.5).round(), 14.0, pw, 40.0, 20.0, PLATE);
@@ -9888,17 +9997,63 @@ impl SwitchRenderBackend {
             (&[Btn::A], u.validate),
             (&[Btn::B], u.cancel),
         ];
-        let w = self.kit_hints_width(&hints);
-        let pw = (w + 48.0).min(vw - 24.0);
-        let py = vh - 66.0;
-        self.kit_rrect(((vw - pw) * 0.5).round(), py, pw, 48.0, 24.0, PLATE);
-        self.kit_hints_centered(vw * 0.5, py + 24.0, &hints);
+        // One plate along the bottom when the legend fits the screen, as in
+        // landscape. On a turned picture (720 wide) it runs to 940-1240 px:
+        // the zoom keys go under the header they change, the framing keys
+        // stay at the bottom, and A and B take a plate of their own under them
+        // when the two do not fit one. Split by what the keys do, not where
+        // a row happens to fill up: that left "B Annuler" alone, away from
+        // "A Valider". Each part takes as many plates as it needs, so no hint
+        // is drawn wider than its plate.
+        let max_w = vw - 24.0 - 48.0;
+        let (top, bottom) = if self.kit_hints_width(&hints) <= max_w {
+            (std::vec::Vec::new(), std::vec![&hints[..]])
+        } else {
+            let mut bottom = std::vec::Vec::new();
+            if self.kit_hints_width(&hints[2..]) <= max_w {
+                bottom.push(&hints[2..]);
+            } else {
+                bottom.extend(self.hint_rows(&hints[2..5], max_w));
+                bottom.extend(self.hint_rows(&hints[5..], max_w));
+            }
+            (self.hint_rows(&hints[..2], max_w), bottom)
+        };
+        let plate = |s: &mut Self, items: &[kit::text::HintItem], py: f32| {
+            let pw = (s.kit_hints_width(items) + 48.0).min(vw - 24.0);
+            s.kit_rrect(((vw - pw) * 0.5).round(), py, pw, ROW_H, ROW_H * 0.5, PLATE);
+            s.kit_hints_centered(vw * 0.5, py + ROW_H * 0.5, items);
+        };
+        for (i, items) in top.iter().enumerate() {
+            plate(self, items, 14.0 + 40.0 + 10.0 + i as f32 * ROW_STEP);
+        }
+        let n = bottom.len();
+        for (i, items) in bottom.iter().enumerate() {
+            plate(self, items, vh - 66.0 - (n - 1 - i) as f32 * ROW_STEP);
+        }
 
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
         }
         self.gl_state.invalidate();
+    }
+
+    /// `items` cut into rows no wider than `max_w`, in order: each row takes
+    /// hints while they fit (a hint wider than a row alone gets a row).
+    fn hint_rows<'h, 'a>(&mut self, items: &'h [kit::text::HintItem<'a>], max_w: f32) -> std::vec::Vec<&'h [kit::text::HintItem<'a>]> {
+        let mut rows = std::vec::Vec::new();
+        let mut start = 0;
+        for end in 1..=items.len() {
+            let w = self.kit_hints_width(&items[start..end]);
+            if w > max_w && end - start > 1 {
+                rows.push(&items[start..end - 1]);
+                start = end - 1;
+            }
+        }
+        if start < items.len() {
+            rows.push(&items[start..]);
+        }
+        rows
     }
 
     /// FPS counter (issue #111): what the movie is actually running at, against
@@ -10007,8 +10162,9 @@ impl SwitchRenderBackend {
     ///
     /// Draws the controller from `keymap::PAD_SLOTS` (positioned controls in
     /// abstract units) with one row per control, in two columns flanking the
-    /// picture, and lights the selected control in BOTH places at once: the row
-    /// you are reading and the button you would press.
+    /// picture (under it, on a turned picture), and lights the selected control
+    /// in BOTH places at once: the row you are reading and the button you would
+    /// press.
     ///
     /// That pairing is the point of the screen. The list this replaced could
     /// tell you a binding but never where the button was, and it showed eight of
@@ -10037,47 +10193,67 @@ impl SwitchRenderBackend {
         const ICON_MOD_COL: u32 = 0xFF_2E_6E_63;
         const ICON_MOD_NUB: u32 = 0xFF_58_C0_AE;
         const ICON_LOCK_COL: u32 = 0xFF_22_32_4F;
-        /// The band of the line about the focused row, over the footer.
-        const HELP_H: f32 = 36.0;
         /// Between a column of rows and the picture.
         const COL_GAP: f32 = 28.0;
         /// The picture's width in pad units: the shell and its rail buttons
         /// (13.9 to 32.1), with a little air, centred on the shell's middle.
         const PIC_UNITS: f32 = 18.4;
-        const PIC_MID: f32 = 23.0;
+        const PIC_MID: f32 = TOUCHES_PIC_MID;
+        // Portrait (a turned picture). The picture is cropped to what it
+        // draws: from just over the shoulder buttons (5.2) to under the Minus
+        // note (20.6), so it can span the window instead of sitting between
+        // two columns of rows a third of the width each.
+        const P_PIC_TOP: f32 = 4.8;
+        const P_PIC_SPAN: f32 = 21.3 - P_PIC_TOP;
+        /// A row's pitch under the picture: a comfortable 38 px, never under
+        /// 30, and the gap between a row and the next.
+        const P_PITCH: f32 = 38.0;
+        const P_PITCH_MIN: f32 = 30.0;
+        const P_PITCH_MAX: f32 = 44.0;
+        const P_ROW_GAP: f32 = 6.0;
+        /// Between the header's hairline and the picture, the picture and the
+        /// rows; between the two columns.
+        const P_GAP: f32 = 12.0;
+        const P_COL_GAP: f32 = 16.0;
 
         let lc = crate::loc::s();
         let u = crate::loc_ui::ui();
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
         let inner_w = vw - 2.0 * TOUCHES_MARGIN - 2.0 * TOUCHES_PAD_X;
+        let portrait = vh > vw;
 
         // The header's two switches, measured first: on a narrow (turned)
         // screen they take a row of their own under the title.
-        let players = [u.player_1, u.player_2];
-        let layers = [u.layer_normal, "ZL", "ZR", "L", "R"];
-        let gpx = 22.0;
-        let bx = self.kit_button_width(Btn::X, gpx);
-        let bl = self.kit_button_width(Btn::L, gpx);
-        let br = self.kit_button_width(Btn::R, gpx);
-        let pw = self.pad_segments_width(&players, &[false; 2]);
-        let lw = self.pad_segments_width(&layers, &v.live_layers);
-        // [X] players | [L] layers [R], 8 px apart and a hairline between: the
-        // gaps the drawing below steps by, 8 + 8 + 9 (the line and the 8 px
-        // after it) + 8 + 8, so the R glyph ends on the window's padding.
-        let switches_w = bx + pw + bl + lw + br + 41.0;
-        let title_w = self.kit_measure(lc.keys_title, TOUCHES_TITLE_PX);
-        let wide = title_w + 14.0 + 120.0 + 24.0 + switches_w <= inner_w;
-        let head_h = if wide { TOUCHES_HEAD_H } else { TOUCHES_HEAD_H + 44.0 };
+        let (players, layers) = pad_switch_labels();
+        let gpx = TOUCHES_SWITCH_GLYPH;
+        let head = self.touches_head(&v.live_layers);
+        let (wide, split, head_h) = (head.wide, head.split, head.h);
+        let (pw, lw, switches_w) = (head.players_w, head.layers_w, head.switches_w);
+        let help_lh = (size::LABEL * 1.45).round();
+        let help_h = touches_help_band(portrait);
 
         // ONE scale from BOTH axes: this is a picture of an object, and letting
-        // the axes disagree would stretch the controller. In landscape the height
-        // decides and the window fills the screen; a turned picture gives a
-        // narrow viewport, the width decides, and the window shrinks to the pad.
-        let avail_h = (vh - 2.0 * TOUCHES_MARGIN - head_h - HELP_H - TOUCHES_FOOT_H).max(80.0);
-        let unit = (inner_w / crate::keymap::PAD_UNITS_W).min(avail_h / crate::keymap::PAD_UNITS_H);
-        let pad_h = crate::keymap::PAD_UNITS_H * unit;
-        let (x, y, w, h) = self.touches_window(head_h + pad_h + HELP_H + TOUCHES_FOOT_H);
+        // the axes disagree would stretch the controller. In landscape the
+        // height decides and the window fills the screen. In portrait the rows
+        // go under the picture in two columns: they take a comfortable pitch
+        // first, and the picture gets the height that leaves, up to the width.
+        let n_rows = pad_column_len() as f32;
+        let (unit, pitch, content_h) = if portrait {
+            let avail = (vh - 2.0 * TOUCHES_MARGIN - head_h - help_h - TOUCHES_FOOT_H - 2.0 * P_GAP).max(120.0);
+            let unit_w = inner_w / PIC_UNITS;
+            let mut unit = ((avail - n_rows * P_PITCH) / P_PIC_SPAN).min(unit_w);
+            if unit < 16.0 {
+                unit = 16.0f32.min(unit_w);
+            }
+            let pitch = ((avail - P_PIC_SPAN * unit) / n_rows).clamp(P_PITCH_MIN, P_PITCH_MAX);
+            (unit, pitch, head_h + P_GAP + P_PIC_SPAN * unit + P_GAP + n_rows * pitch + help_h + TOUCHES_FOOT_H)
+        } else {
+            let avail_h = (vh - 2.0 * TOUCHES_MARGIN - head_h - help_h - TOUCHES_FOOT_H).max(80.0);
+            let unit = (inner_w / crate::keymap::PAD_UNITS_W).min(avail_h / crate::keymap::PAD_UNITS_H);
+            (unit, 0.0, head_h + crate::keymap::PAD_UNITS_H * unit + help_h + TOUCHES_FOOT_H)
+        };
+        let (x, y, w, h) = self.touches_window(content_h);
         let left = x + TOUCHES_PAD_X;
         let right = x + w - TOUCHES_PAD_X;
 
@@ -10085,8 +10261,10 @@ impl SwitchRenderBackend {
         self.touches_crumbs(left, y + 30.0, inner_w, v.crumbs);
         let ty = y + 66.0;
         let tw = self.kit_text_mid(left, ty, TOUCHES_TITLE_PX, lc.keys_title, col::TEXT);
+        // On the title's line at the right; on a row of their own under the
+        // title, from the left like the title over them.
         let sw_cy = if wide { ty } else { y + 110.0 };
-        let sw_x = right - switches_w;
+        let sw_x = if wide { right - switches_w } else { left };
         let subject_x = left + tw + 14.0;
         let subject_max = if wide { sw_x - 24.0 - subject_x } else { right - subject_x };
         if subject_max > 40.0 && !v.subject.is_empty() {
@@ -10102,28 +10280,47 @@ impl SwitchRenderBackend {
         cx += self.kit_button(cx, sw_cy, gpx, Btn::X, col::PILL_INK) + 8.0;
         let player_cells = self.pad_segments(cx, sw_cy, &players, if v.player == 2 { 1 } else { 0 }, &[false; 2]);
         cx += pw + 8.0;
-        self.draw_overlay_rect(cx, sw_cy - 12.0, 1.0, 24.0, col::PANEL_LINE);
-        cx += 9.0;
-        cx += self.kit_button(cx, sw_cy, gpx, Btn::L, col::PILL_INK) + 8.0;
-        let layer_cells = self.pad_segments(cx, sw_cy, &layers, v.layer.min(4), &v.live_layers);
+        let lay_cy = if split {
+            cx = left;
+            sw_cy + 44.0
+        } else {
+            self.draw_overlay_rect(cx, sw_cy - 12.0, 1.0, 24.0, col::PANEL_LINE);
+            cx += 9.0;
+            sw_cy
+        };
+        cx += self.kit_button(cx, lay_cy, gpx, Btn::L, col::PILL_INK) + 8.0;
+        let layer_cells = self.pad_segments(cx, lay_cy, &layers, v.layer.min(4), &v.live_layers);
         cx += lw + 8.0;
-        self.kit_button(cx, sw_cy, gpx, Btn::R, col::PILL_INK);
+        self.kit_button(cx, lay_cy, gpx, Btn::R, col::PILL_INK);
         self.draw_overlay_rect(left, y + head_h - 6.0, inner_w, 1.0, col::LINE);
 
         // Units -> pixels. The picture is centred in the window at the one
-        // scale; the two columns of rows run from the window's padding to the
-        // picture, so they line up with the header and the footer whatever room
-        // the height leaves. Their heights stay in units: a row and the button
-        // it names are what the eye pairs.
+        // scale. In landscape the two columns of rows run from the window's
+        // padding to the picture, so they line up with the header and the
+        // footer whatever room the height leaves, and their heights stay in
+        // units: a row and the button it names are what the eye pairs. In
+        // portrait they are stacked under the picture, the left hand's on the
+        // left, in the order the landscape columns read, one height for all.
         let ox = x + w * 0.5 - PIC_MID * unit;
-        let oy = y + head_h;
+        let oy = if portrait { y + head_h + P_GAP - P_PIC_TOP * unit } else { y + head_h };
         let px = |ux: f32| ox + ux * unit;
         let py = |uy: f32| oy + uy * unit;
-        let col_w = ((inner_w - PIC_UNITS * unit) * 0.5 - COL_GAP).max(40.0);
+        let rows_top = y + head_h + P_GAP + P_PIC_SPAN * unit + P_GAP;
+        let col_w = if portrait {
+            (inner_w - P_COL_GAP) * 0.5
+        } else {
+            ((inner_w - PIC_UNITS * unit) * 0.5 - COL_GAP).max(40.0)
+        };
         let row_rect = |i: usize| -> (f32, f32, f32, f32) {
             let Some(s) = PAD_SLOTS.get(i) else { return (0.0, 0.0, 0.0, 0.0) };
-            let rx = if s.chip.0 < PIC_MID { left } else { right - col_w };
-            (rx, py(s.chip.1), col_w, s.chip.3 * unit)
+            if portrait {
+                let (c, k) = pad_slot_column(i);
+                let rx = left + c as f32 * (col_w + P_COL_GAP);
+                (rx, rows_top + k as f32 * pitch, col_w, pitch - P_ROW_GAP)
+            } else {
+                let rx = if s.chip.0 < PIC_MID { left } else { right - col_w };
+                (rx, py(s.chip.1), col_w, s.chip.3 * unit)
+            }
         };
 
         // ── The shell ────────────────────────────────────────────────────
@@ -10263,11 +10460,14 @@ impl SwitchRenderBackend {
         }
 
         // ── The rows ─────────────────────────────────────────────────────
-        let row_h = PAD_SLOTS.first().map(|s| s.chip.3 * unit).unwrap_or(0.0);
+        let row_h = row_rect(0).3;
         let txt = (row_h * 0.5).clamp(10.0, size::LABEL);
         // One badge column for every row, as wide as the widest badge, so the
-        // values start in one place down both columns.
-        let mut badge_w: f32 = 2.4 * unit;
+        // values start in one place down both columns. The floor follows the
+        // picture in landscape, where the rows are in its units; in portrait
+        // the picture is larger and the columns narrower, and a floor taken
+        // from it would only take room from the values.
+        let mut badge_w: f32 = if portrait { 2.4 * txt } else { 2.4 * unit };
         for slot in PAD_SLOTS {
             badge_w = badge_w.max(self.pad_badge_width(slot.glyph, txt));
         }
@@ -10345,11 +10545,22 @@ impl SwitchRenderBackend {
         }
 
         // ── The line about the focused row, and the footer ───────────────
-        let help_cy = y + h - TOUCHES_FOOT_H - HELP_H * 0.5;
+        // One line in landscape; in portrait, where a line is half as long,
+        // it wraps in its band (centred there, the icon on its first line).
+        let help_cy = y + h - TOUCHES_FOOT_H - help_h * 0.5;
+        touches_toast_anchor(x, x + w, help_cy);
         if !v.help.is_empty() {
-            self.kit_icon(left, help_cy, 16.0, Icon::Info, col::TEXT3);
-            let t = self.kit_fit(v.help, size::LABEL, inner_w - 26.0);
-            self.kit_text_mid(left + 26.0, help_cy, size::LABEL, &t, col::TEXT2);
+            let lines = if portrait {
+                self.kit_wrap(v.help, size::LABEL, inner_w - 26.0, TOUCHES_HELP_LINES_PORTRAIT)
+            } else {
+                std::vec![self.kit_fit(v.help, size::LABEL, inner_w - 26.0)]
+            };
+            let mut ly = help_cy - help_lh * (lines.len().max(1) - 1) as f32 * 0.5;
+            self.kit_icon(left, ly, 16.0, Icon::Info, col::TEXT3);
+            for line in &lines {
+                self.kit_text_mid(left + 26.0, ly, size::LABEL, line, col::TEXT2);
+                ly += help_lh;
+            }
         }
         let hints_profiles: [kit::text::HintItem; 3] =
             [(&[Btn::A], u.edit), (&[Btn::Y], u.shared_profiles), (&[Btn::B], u.back)];
@@ -10461,6 +10672,45 @@ impl SwitchRenderBackend {
         let (x, y) = (TOUCHES_MARGIN, ((vh - h) * 0.5).round());
         self.kit_panel(x, y, w, h, false);
         (x, y, w, h)
+    }
+
+    /// The controls editor's header, measured: its two switches, where they
+    /// go and how tall that makes the band. The key picker draws the same
+    /// band from the same measure, so its hairline is where the editor's was
+    /// when A opens a row's keys. The picker used to assume one row of
+    /// switches under the title, and its hairline jumped 44 px whenever the
+    /// editor needed two (every combo layer live, in Russian).
+    fn touches_head(&mut self, live_layers: &[bool; 5]) -> TouchesHead {
+        let (players, layers) = pad_switch_labels();
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        let inner_w = vw - 2.0 * TOUCHES_MARGIN - 2.0 * TOUCHES_PAD_X;
+        let portrait = vh > vw;
+        let gpx = TOUCHES_SWITCH_GLYPH;
+        let bx = self.kit_button_width(Btn::X, gpx);
+        let bl = self.kit_button_width(Btn::L, gpx);
+        let br = self.kit_button_width(Btn::R, gpx);
+        let players_w = self.pad_segments_width(&players, &[false; 2]);
+        let layers_w = self.pad_segments_width(&layers, live_layers);
+        // [X] players | [L] layers [R], 8 px apart and a hairline between: the
+        // gaps the editor steps by as it draws them, 8 + 8 + 9 (the line and
+        // the 8 px after it) + 8 + 8, so the R glyph ends on the window's
+        // padding.
+        let switches_w = bx + players_w + bl + layers_w + br + 41.0;
+        let title_w = self.kit_measure(crate::loc::s().keys_title, TOUCHES_TITLE_PX);
+        // On the title's line at the right when they fit beside it; on a
+        // narrow (turned) screen, on a row of their own under the title.
+        let wide = !portrait && title_w + 14.0 + 120.0 + 24.0 + switches_w <= inner_w;
+        // Even a row of their own can be too narrow for both switches (every
+        // combo layer live, in Russian): the layers then go on a row of their
+        // own under the players.
+        let split = !wide && switches_w > inner_w;
+        let h = match (wide, split) {
+            (true, _) => TOUCHES_HEAD_H,
+            (false, false) => TOUCHES_HEAD_H + 44.0,
+            (false, true) => TOUCHES_HEAD_H + 88.0,
+        };
+        TouchesHead { h, wide, split, switches_w, players_w, layers_w }
     }
 
     /// The path over the controls editor's title ("Pause › Touches et
@@ -10579,7 +10829,11 @@ impl SwitchRenderBackend {
             let cink = if ink == theme::col::TEXT { theme::col::TEXT2 } else { ink };
             let cpx = pad_caption_px(px);
             let cx = gx + gw + PAD_CAPTION_GAP;
-            let c = self.kit_fit(caption, cpx, (x + w - cx).max(0.0));
+            // The room is what `w` leaves after the glyph, not what is left of
+            // `x + w` once the glyph went to a whole pixel: on the right-hand
+            // column `x` has a fraction, and the half pixel the rounding took
+            // cut the widest caption ("appui") that `w` was measured on.
+            let c = self.kit_fit(caption, cpx, (w - gw - PAD_CAPTION_GAP).max(0.0));
             self.kit_text_mid(cx, cy, cpx, &c, cink);
         }
     }
@@ -10587,10 +10841,11 @@ impl SwitchRenderBackend {
     /// TOUCHES key picker (issue #55), shown when A is pressed on a row of the
     /// pad, in the editor's own window. Draws a real PC keyboard from
     /// `keymap::KEYBOARD` (positioned keys, numpad on the RIGHT under its
-    /// caption, the arrows in an inverted T), and under it, in a band of their
-    /// own, what is not a key: nothing, the two clicks, the console keyboard.
-    /// The user navigates geometrically (menu.rs). QWERTY is fixed for every
-    /// language.
+    /// caption, the arrows in an inverted T; on a turned picture the numpad
+    /// drops under the main block, `keymap::keyboard_slot`), and under it, in a
+    /// band of their own, what is not a key: nothing, the two clicks, the
+    /// console keyboard. The user navigates geometrically (menu.rs), on the
+    /// same slots. QWERTY is fixed for every language.
     ///
     /// It says what is being edited and what it is now: "Key for" and the
     /// button's own glyph (behind its layer's glyph in a combo layer), the
@@ -10601,11 +10856,12 @@ impl SwitchRenderBackend {
     pub(crate) fn draw_touches_keyboard(&mut self, v: &KeysView) {
         use theme::{col, size};
         const KEY_GAP: f32 = 6.0;
-        /// The band of the line about the focused key, over the footer.
-        const HELP_H: f32 = 36.0;
         /// Under the board: the gap, the band's caption, the gap to its pills.
         const BAND_GAP: f32 = 14.0;
         const BAND_CAPTION: f32 = 22.0;
+        /// Portrait: between the main block and the numpad dropped under it
+        /// (`keymap::keyboard_slot`), the room its caption takes.
+        const SPLIT_GAP: f32 = 36.0;
         const FACE: u32 = 0xFF_22_32_4F;
         const FACE_USED: u32 = 0xFF_2E_6E_63;
         const INK_USED: u32 = 0xFF_EA_F7_F3;
@@ -10616,23 +10872,36 @@ impl SwitchRenderBackend {
         let keys = crate::keymap::KEYBOARD;
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
+        // The board's layout and the navigation's come from one place
+        // (`keymap::keyboard_slot`); only the pixels come from the viewport.
+        let portrait = crate::keymap::keyboard_portrait();
         let inner_w = vw - 2.0 * TOUCHES_MARGIN - 2.0 * TOUCHES_PAD_X;
-        let unit_w = inner_w / crate::keymap::KEYBOARD_UNITS_W;
-        // The keys take the room the window has, but never come out taller
-        // than wide: a turned picture gives a narrow window, and its keys
-        // shrink with it.
-        let board_rows = (crate::keymap::KEYBOARD_ROWS_N - 1) as f32;
-        let full = vw >= vh;
-        let fixed = TOUCHES_HEAD_H + BAND_GAP + BAND_CAPTION + HELP_H + TOUCHES_FOOT_H;
+        let unit_w = inner_w / crate::keymap::keyboard_units_w();
+        let band_row = crate::keymap::keyboard_rows().saturating_sub(1);
+        let board_rows = band_row as f32;
+        // The numpad's first row in portrait, where the split gap goes.
+        let split_row = if portrait { crate::keymap::KEYBOARD_ROWS_N - 1 } else { usize::MAX };
+        let split = if portrait { SPLIT_GAP } else { 0.0 };
+        // The editor's header and help band, so the hairlines stay put when
+        // the window goes from a row to its keys (`touches_head`).
+        let head = self.touches_head(&v.live_layers);
+        let head_h = head.h;
+        let help_h = touches_help_band(portrait);
+        let help_lh = (size::LABEL * 1.45).round();
+        // The keys take the room the window has: never taller than wide in
+        // landscape; in portrait up to a little taller than wide, as a phone's
+        // keyboard held upright has them, which is what makes the legends of
+        // its 38 px caps as large as the landscape ones.
+        let fixed = head_h + split + BAND_GAP + BAND_CAPTION + help_h + TOUCHES_FOOT_H;
         let room = vh - 2.0 * TOUCHES_MARGIN - fixed;
         let gap = (KEY_GAP * unit_w / 60.0).clamp(3.0, KEY_GAP);
-        let key_h = ((room / (board_rows + 1.0)) - gap).min(unit_w * 0.88).max(18.0);
+        let tall = if portrait { 1.15 } else { 0.88 };
+        let key_h = ((room / (board_rows + 1.0)) - gap).min(unit_w * tall).max(18.0);
         let pill_h = (key_h - 6.0).max(16.0);
-        let block_h = board_rows * (key_h + gap) + BAND_GAP + BAND_CAPTION + pill_h;
-        // In landscape the window is the editor's, to the pixel; turned, it is
-        // as tall as its keys need.
-        let content_h = TOUCHES_HEAD_H + block_h + 16.0 + HELP_H + TOUCHES_FOOT_H;
-        let (x, y, w, h) = self.touches_window(if full { vh } else { content_h });
+        let block_h = board_rows * (key_h + gap) + split + BAND_GAP + BAND_CAPTION + pill_h;
+        // The editor's window, to the pixel, in both orientations: going from
+        // a row to its keys changes what is in the window, not the window.
+        let (x, y, w, h) = self.touches_window(vh);
         let left = x + TOUCHES_PAD_X;
         let right = x + w - TOUCHES_PAD_X;
 
@@ -10662,8 +10931,11 @@ impl SwitchRenderBackend {
             tx += 10.0;
             tx += self.kit_text_mid(tx, ty, TOUCHES_TITLE_PX, after.trim_start(), col::TEXT);
         }
-        // On the right, where the editor has its switches: the player and the
-        // layer when they are not the obvious ones, and the key it sends now.
+        // Where the editor has its switches: the player and the layer when
+        // they are not the obvious ones, and the key it sends now. On the
+        // title's line at the right in landscape; on the row under it, from
+        // the left, when the editor has its switches on that row too
+        // (portrait), where the title's line has no room for it.
         let mut ctx: std::vec::Vec<std::string::String> = std::vec::Vec::new();
         if v.player == 2 {
             ctx.push(u.player_2.to_string());
@@ -10678,45 +10950,53 @@ impl SwitchRenderBackend {
             let words = if drop_parts { u.key_current.to_string() } else { ctx.join("  \u{00B7}  ") };
             let ww = self.kit_measure(&words, cpx);
             let cw = ww + 10.0 + cur_w;
-            if right - cw >= tx + 24.0 {
-                let cx0 = right - cw;
-                self.kit_text_mid(cx0, ty, cpx, &words, col::TEXT3);
-                self.keys_current(cx0 + ww + 10.0, ty, v.current, cpx);
+            let at = if !head.wide {
+                (left + cw <= right).then_some((left, y + 110.0))
+            } else {
+                (right - cw >= tx + 24.0).then_some((right - cw, ty))
+            };
+            if let Some((cx0, ccy)) = at {
+                self.kit_text_mid(cx0, ccy, cpx, &words, col::TEXT3);
+                self.keys_current(cx0 + ww + 10.0, ccy, v.current, cpx);
                 break;
             }
         }
-        self.draw_overlay_rect(left, y + TOUCHES_HEAD_H - 6.0, inner_w, 1.0, col::LINE);
+        self.draw_overlay_rect(left, y + head_h - 6.0, inner_w, 1.0, col::LINE);
 
         // ── The board ────────────────────────────────────────────────────
-        let area_top = y + TOUCHES_HEAD_H;
-        let area_bot = y + h - TOUCHES_FOOT_H - HELP_H;
+        let area_top = y + head_h;
+        let area_bot = y + h - TOUCHES_FOOT_H - help_h;
         let top_y = (area_top + ((area_bot - area_top) - block_h) * 0.5).max(area_top).round();
-        let band_y = top_y + board_rows * (key_h + gap) + BAND_GAP;
+        let row_y = |r: usize| top_y + r as f32 * (key_h + gap) + if r >= split_row { split } else { 0.0 };
+        let band_y = top_y + board_rows * (key_h + gap) + split + BAND_GAP;
         let pills_y = band_y + BAND_CAPTION;
         let rect_of = |i: usize| -> (f32, f32, f32, f32) {
-            let Some(&(_, row, kx, kw)) = keys.get(i) else { return (0.0, 0.0, 0.0, 0.0) };
+            let Some((row, kx, kw)) = crate::keymap::keyboard_slot(i) else { return (0.0, 0.0, 0.0, 0.0) };
             let kx0 = left + kx * unit_w;
             let kw0 = kw * unit_w - gap;
-            if row as usize >= crate::keymap::KEYBOARD_ROWS_N - 1 {
+            if row as usize >= band_row {
                 (kx0, pills_y, kw0, pill_h)
             } else {
-                (kx0, top_y + row as f32 * (key_h + gap), kw0, key_h)
+                (kx0, row_y(row as usize), kw0, key_h)
             }
         };
         let radius_of = |i: usize, kh: f32| -> f32 {
-            match keys.get(i) {
-                Some(k) if k.1 as usize >= crate::keymap::KEYBOARD_ROWS_N - 1 => kh * 0.5,
+            match crate::keymap::keyboard_slot(i) {
+                Some((row, _, _)) if row as usize >= band_row => kh * 0.5,
                 _ => (key_h * 0.18).min(8.0),
             }
         };
-        // The numpad's name over it, on the row the function keys leave empty
-        // there: "N1".."NEnt" said it in two letters, the caption says it once.
-        {
+        // The numpad's name over it: "N1".."NEnt" said it in two letters, the
+        // caption says it once. In landscape on the row the function keys
+        // leave empty there; in portrait in the gap over the dropped numpad.
+        let numpad = |n: &str| keys.iter().position(|k| k.0 == n).map(rect_of);
+        if let (Some((nx, ny, _, _)), Some((ex, _, ew, _))) = (numpad("Num7"), numpad("Num/")) {
             let npx = size::CAPTION;
-            let t = self.kit_fit(u.keys_numpad, npx, 4.0 * unit_w - gap);
+            let block_w = ex + ew - nx;
+            let t = self.kit_fit(u.keys_numpad, npx, block_w);
             let tw = self.kit_measure(&t, npx);
-            let ncx = left + 18.0 * unit_w - gap * 0.5;
-            self.kit_text_mid((ncx - tw * 0.5).round(), top_y + key_h * 0.5, npx, &t, col::TEXT3);
+            let ncy = if portrait { ny - (gap + SPLIT_GAP) * 0.5 } else { top_y + key_h * 0.5 };
+            self.kit_text_mid((nx + (block_w - tw) * 0.5).round(), ncy, npx, &t, col::TEXT3);
         }
         self.kit_section(left, band_y + 8.0, u.keys_other);
 
@@ -10759,9 +11039,12 @@ impl SwitchRenderBackend {
         }
 
         // ── The line about the focused key, and the footer ───────────────
-        let help_cy = y + h - TOUCHES_FOOT_H - HELP_H * 0.5;
+        let help_cy = y + h - TOUCHES_FOOT_H - help_h * 0.5;
+        touches_toast_anchor(x, x + w, help_cy);
         let focused = keys.get(v.cursor).map(|k| k.0).unwrap_or("");
         match v.used.get(focused) {
+            // A toast stands in for the line while it shows.
+            _ if v.quiet => {}
             // Who already sends it, as their glyphs: two buttons on one key is
             // allowed, but it should be a choice.
             Some(owners) if !owners.is_empty() => {
@@ -10788,9 +11071,19 @@ impl SwitchRenderBackend {
                     _ => "",
                 };
                 if !help.is_empty() {
-                    self.kit_icon(left, help_cy, 16.0, Icon::Info, col::TEXT3);
-                    let t = self.kit_fit(help, size::LABEL, inner_w - 26.0);
-                    self.kit_text_mid(left + 26.0, help_cy, size::LABEL, &t, col::TEXT2);
+                    // One line in landscape; wrapped in its band in portrait,
+                    // as the editor's.
+                    let lines = if portrait {
+                        self.kit_wrap(help, size::LABEL, inner_w - 26.0, TOUCHES_HELP_LINES_PORTRAIT)
+                    } else {
+                        std::vec![self.kit_fit(help, size::LABEL, inner_w - 26.0)]
+                    };
+                    let mut ly = help_cy - help_lh * (lines.len().max(1) - 1) as f32 * 0.5;
+                    self.kit_icon(left, ly, 16.0, Icon::Info, col::TEXT3);
+                    for line in &lines {
+                        self.kit_text_mid(left + 26.0, ly, size::LABEL, line, col::TEXT2);
+                        ly += help_lh;
+                    }
                 }
             }
         }
@@ -10839,17 +11132,62 @@ impl SwitchRenderBackend {
         // one-unit cap, and "Entrée" only fits it at 11 px. A cut legend is
         // what made the board look unfinished.
         let steps = [big, small, small.min(11.0), 10.0];
-        let px = steps.into_iter().find(|&p| self.kit_measure(&label, p) <= room).unwrap_or(10.0);
-        let l = self.kit_fit(&label, px, room.max(0.0));
-        let lw = self.kit_measure(&l, px);
+        let one = steps.into_iter().find(|&p| self.kit_measure(&label, p) <= room);
+        // Then a legend of several words goes on two lines, where the cap is
+        // tall enough for them: a turned picture's caps are narrow and tall,
+        // and "Bloq Mayús" or "Bloc Maiusc" fits no single line of their Caps
+        // Lock even at 10 px.
+        let two = if one.is_none() { self.keys_legend_two_lines(&label, &steps, room, h) } else { None };
+        let cy = y + (h - 2.0) * 0.5;
+        let (px, lines) = match (one, two) {
+            (Some(p), _) => (p, std::vec![label.to_string()]),
+            (None, Some((p, a, b))) => (p, std::vec![a, b]),
+            (None, None) => (10.0, std::vec![self.kit_fit(&label, 10.0, room.max(0.0))]),
+        };
+        let mut lw: f32 = 0.0;
+        for l in &lines {
+            lw = lw.max(self.kit_measure(l, px));
+        }
         let total = lw + if icon.is_some() { isz + 8.0 } else { 0.0 };
         let mut cx = (x + (w - total) * 0.5).round();
-        let cy = y + (h - 2.0) * 0.5;
         if let Some(ic) = icon {
             self.kit_icon(cx, cy, isz, ic, ink);
             cx += isz + 8.0;
         }
-        self.kit_text_mid(cx, cy, px, &l, ink);
+        let lh = (px * 1.2).round();
+        let mut ly = cy - lh * (lines.len() - 1) as f32 * 0.5;
+        for l in &lines {
+            let lx = (cx + (lw - self.kit_measure(l, px)) * 0.5).round();
+            self.kit_text_mid(lx, ly, px, l, ink);
+            ly += lh;
+        }
+    }
+
+    /// `label` broken at one of its spaces into two lines that fit `room`, at
+    /// the largest of `steps` whose two lines also fit a cap `h` tall: the
+    /// break whose longer line is shortest. None for one word, or no fit.
+    fn keys_legend_two_lines(&mut self, label: &str, steps: &[f32], room: f32, h: f32) -> Option<(f32, std::string::String, std::string::String)> {
+        let breaks: std::vec::Vec<usize> = label.match_indices(' ').map(|(i, _)| i).collect();
+        for &p in steps {
+            if 2.0 * (p * 1.2).round() + 6.0 > h - 2.0 {
+                continue;
+            }
+            let mut best: Option<(f32, usize)> = None;
+            for &i in &breaks {
+                let wa = self.kit_measure(&label[..i], p);
+                let wb = self.kit_measure(&label[i + 1..], p);
+                let longest = wa.max(wb);
+                if best.map_or(true, |(b, _)| longest < b) {
+                    best = Some((longest, i));
+                }
+            }
+            if let Some((longest, i)) = best {
+                if longest <= room {
+                    return Some((p, label[..i].to_string(), label[i + 1..].to_string()));
+                }
+            }
+        }
+        None
     }
 
     /// Width `keys_current` takes for `value` at `px`.
@@ -11041,6 +11379,7 @@ impl SwitchRenderBackend {
     /// Slide the whole library-UI content horizontally (tab transitions); no
     /// scale. `library::render` resets this via `clear_ui_transform` afterwards.
     pub fn set_ui_slide(&mut self, x: f32) {
+        self.ui_sheet_reveal = 1.0;
         self.ui_scale = 1.0;
         self.ui_pivot_x = 0.0;
         self.ui_pivot_y = 0.0;
@@ -11066,6 +11405,7 @@ impl SwitchRenderBackend {
         } else {
             ((scale - MODAL_OPEN_FROM) / (1.0 - MODAL_OPEN_FROM)).clamp(0.0, 1.0)
         };
+        self.ui_sheet_reveal = p;
         self.ui_scale = 1.0;
         self.ui_pivot_x = 0.0;
         self.ui_pivot_y = 0.0;
@@ -11089,6 +11429,7 @@ impl SwitchRenderBackend {
     }
 
     pub fn set_ui_modal_scale(&mut self, scale: f32) {
+        self.ui_sheet_reveal = 1.0;
         self.ui_scale = scale;
         self.ui_pivot_x = self.dimensions.width as f32 * 0.5;
         self.ui_pivot_y = self.dimensions.height as f32 * 0.5;
@@ -11114,6 +11455,7 @@ impl SwitchRenderBackend {
     }
 
     pub fn clear_ui_transform(&mut self) {
+        self.ui_sheet_reveal = 1.0;
         self.ui_scale = 1.0;
         self.ui_pivot_x = 0.0;
         self.ui_pivot_y = 0.0;
@@ -11390,14 +11732,19 @@ impl SwitchRenderBackend {
         use theme::{col, size};
         self.clear_ui_transform();
         self.fill_screen_dim(0x60_05_0A_16);
-        let vh = self.dimensions.height as f32;
+        let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
         let area = (right - left).max(200.0);
         let t = self.kit_fit(label, size::BODY, area - 96.0);
         let tw = self.kit_measure(&t, size::BODY);
         let w = (tw + 48.0).max(260.0).min(area - 32.0);
         let h = 128.0;
         let x = (left + (area - w) * 0.5).round();
-        let y = ((vh - h) * 0.5).round();
+        // In portrait the pause's panels hug their rows at the top
+        // (`kit::sheet`): the card goes in the picture under them, rather than
+        // over the help of the page the player is on.
+        let below = kit::sheet::cascade_bottom();
+        let top = if vh > vw && below > 0.0 && below + h + 32.0 <= vh { below } else { 0.0 };
+        let y = (top + (vh - top - h) * 0.5).round();
         self.kit_panel(x, y, w, h, false);
         self.draw_spinner(x + w * 0.5, y + 46.0, 22.0, now);
         self.kit_text_mid((x + (w - tw) * 0.5).round(), y + 94.0, size::BODY, &t, col::TEXT2);
@@ -13525,29 +13872,53 @@ impl SwitchRenderBackend {
     /// it down), so a share/apply/revert confirms without a full "thanks" modal.
     pub fn draw_toast(&mut self, msg: &str, kind: u8) {
         let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
-        self.draw_toast_in(msg, kind, 0.0, vw, vh - 48.0 - 20.0 - 52.0);
+        self.draw_toast_in(msg, kind, 0.0, vw, ToastAt::Bottom(vh - 48.0 - 20.0));
     }
 
-    /// The same pill over the part of the screen the pause's panels leave free,
-    /// at its top: in game there is no footer to sit above, and the panels' help
-    /// and hints are exactly where the launcher's toast goes. Below the frame
-    /// counter when it is shown, which owns the top-right corner.
+    /// The same pill over the part of the screen the pause's panels leave free.
+    /// In landscape that is the right of the picture, at its top: in game there
+    /// is no footer to sit above, and the panels' help and hints are exactly
+    /// where the launcher's toast goes. Below the frame counter when it is
+    /// shown, which owns the top-right corner. In portrait the strip right of
+    /// the panels is too narrow, and the panels hug their rows at the top
+    /// (`kit::sheet`): the toast goes at the bottom, across the picture.
     pub fn draw_toast_in_game(&mut self, msg: &str, kind: u8) {
+        let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
+        if vh > vw {
+            self.draw_toast_in(msg, kind, 0.0, vw, ToastAt::Bottom(vh - 24.0));
+            return;
+        }
         let left = kit::sheet::SHEET_MARGIN + kit::sheet::RAIL_W + kit::sheet::CASCADE_GAP + kit::sheet::CHILD_W;
-        let vw = self.dimensions.width as f32;
         let y = if fps_counter_on() { 14.0 + 28.0 + 12.0 } else { 24.0 };
-        self.draw_toast_in(msg, kind, left, vw, y);
+        self.draw_toast_in(msg, kind, left, vw, ToastAt::Top(y));
+    }
+
+    /// The controls editor's toast, or its key picker's: on the window's help
+    /// line, which it stands in for while it shows. Under the window (the old
+    /// place, at the bottom of the screen) it covered the help line and the
+    /// footer's hairline in landscape and the rows in portrait, where the
+    /// window is taller than the screen's lower third.
+    pub fn draw_toast_in_touches(&mut self, msg: &str, kind: u8) {
+        let at = TOUCHES_TOAST_AT.lock().map(|g| *g).unwrap_or((0.0, 0.0, 0.0));
+        if at.1 <= at.0 {
+            self.draw_toast(msg, kind);
+            return;
+        }
+        self.draw_toast_in(msg, kind, at.0, at.1, ToastAt::Middle(at.2));
     }
 
     /// The launcher's toast while a game's options are up: over the library,
     /// left of the panels (`right`), where the footer toast would land on them.
     pub fn draw_toast_left_of(&mut self, msg: &str, kind: u8, right: f32) {
         let vh = self.dimensions.height as f32;
-        self.draw_toast_in(msg, kind, 0.0, right, vh - 48.0 - 20.0 - 52.0);
+        self.draw_toast_in(msg, kind, 0.0, right, ToastAt::Bottom(vh - 48.0 - 20.0));
     }
 
-    /// A toast centred between `left` and `right`, its top at `y`.
-    fn draw_toast_in(&mut self, msg: &str, kind: u8, left: f32, right: f32, y: f32) {
+    /// A toast centred between `left` and `right`, placed by `at`. A message
+    /// too long for one line wraps to a second, in a taller pill, instead of
+    /// losing its end: beside an open page the strip is 586 px, and what an
+    /// ellipsis took was the instruction ("...pour partager ta version").
+    fn draw_toast_in(&mut self, msg: &str, kind: u8, left: f32, right: f32, at: ToastAt) {
         use theme::{col, size};
         unsafe {
             glEnable(GL_BLEND);
@@ -13569,14 +13940,30 @@ impl SwitchRenderBackend {
         const DOT: f32 = 10.0;
         let area = right - left;
         let max_text = area - 40.0 - 2.0 * PAD - DOT - 14.0;
-        let text = self.kit_fit(msg, size::BODY, max_text);
-        let tw = self.kit_measure(&text, size::BODY);
+        let lines = self.kit_wrap(msg, size::BODY, max_text, 2);
+        let lh = (size::BODY * 1.45).round();
+        let h = H + lh * (lines.len().max(1) - 1) as f32;
+        let mut tw: f32 = 0.0;
+        for l in &lines {
+            tw = tw.max(self.kit_measure(l, size::BODY));
+        }
         let w = tw + 2.0 * PAD + DOT + 14.0;
         let x = (left + (area - w) * 0.5).round();
-        self.kit_shadow(x, y + 6.0, w, H, H * 0.5, 18.0, col::SHADOW);
-        self.kit_shape(x, y, w, H, H * 0.5, col::PANEL, 1.0, col::PANEL_LINE, 0.0);
-        self.kit_rrect(x + PAD, y + (H - DOT) * 0.5, DOT, DOT, DOT * 0.5, dot);
-        self.kit_text_mid(x + PAD + DOT + 14.0, y + H * 0.5, size::BODY, &text, col::TEXT);
+        let y = match at {
+            ToastAt::Top(y) => y,
+            ToastAt::Bottom(y) => y - h,
+            ToastAt::Middle(y) => y - h * 0.5,
+        }
+        .round();
+        self.kit_shadow(x, y + 6.0, w, h, H * 0.5, 18.0, col::SHADOW);
+        self.kit_shape(x, y, w, h, H * 0.5, col::PANEL, 1.0, col::PANEL_LINE, 0.0);
+        let cy = y + h * 0.5;
+        self.kit_rrect(x + PAD, cy - DOT * 0.5, DOT, DOT, DOT * 0.5, dot);
+        let mut ly = cy - lh * (lines.len().max(1) - 1) as f32 * 0.5;
+        for l in &lines {
+            self.kit_text_mid(x + PAD + DOT + 14.0, ly, size::BODY, l, col::TEXT);
+            ly += lh;
+        }
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
