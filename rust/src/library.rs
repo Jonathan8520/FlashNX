@@ -11290,11 +11290,11 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 let (done, total) = net::download_progress();
                 let amount = if total > 0 {
                     crate::backend::render::imp_n_of(
-                        &crate::backend::render::imp_size(done.max(1)),
+                        &crate::backend::render::imp_amount(done),
                         &crate::backend::render::imp_size(total),
                     )
                 } else {
-                    crate::backend::render::imp_size(done.max(1))
+                    crate::backend::render::imp_amount(done)
                 };
                 let body = u.imp_stop_body.replacen("{}", &amount, 1);
                 backend.draw_confirm(
@@ -11421,7 +11421,7 @@ fn extract_gamezip_main(
                 "{} %  \u{00B7}  {}",
                 pct,
                 crate::backend::render::imp_n_of(
-                    &crate::backend::render::imp_size(done.max(1)),
+                    &crate::backend::render::imp_amount(done),
                     &crate::backend::render::imp_size(total)
                 )
             )

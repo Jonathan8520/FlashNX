@@ -1205,7 +1205,8 @@ pub(crate) use pages::windows::{Choice, WinRow};
 pub(crate) use kit::list::Row;
 pub(crate) use kit::sheet::{cascade_step, Sheet, Side, OPTIONS_CHILD_W, OPTIONS_W};
 pub(crate) use pages::importer::{
-    imp_count, imp_date, imp_n_of, imp_quote, imp_release, imp_size, imp_transfer_line, imp_year, import_sel_rect,
+    imp_amount, imp_count, imp_date, imp_n_of, imp_quote, imp_release, imp_size, imp_transfer_line, imp_year,
+    import_sel_rect,
     FilesPage, ImportProgress, ImportStep, ImporterHome, SourceRow, StepState,
 };
 pub(crate) use pages::flashpoint::{FpDetailsView, FpGrid, FpState};

@@ -80,6 +80,17 @@ pub(crate) fn imp_size(bytes: u64) -> std::string::String {
     fill(tpl, &num)
 }
 
+/// What a transfer has got so far: `imp_size`, except that nothing yet reads
+/// "0 o". `imp_size` keeps "" for 0 because a size not known arrives as 0, and
+/// rounding the start of a download up to one byte showed "1 o sur 340 Mo".
+pub(crate) fn imp_amount(bytes: u64) -> std::string::String {
+    if bytes == 0 {
+        fill(crate::loc_ui::ui().imp_size_b, "0")
+    } else {
+        imp_size(bytes)
+    }
+}
+
 /// A day as the language writes it: "12 oct. 2026", "Oct 12, 2026",
 /// "2026年10月12日". `m` is 1..=12.
 pub(crate) fn imp_date(y: i64, m: u32, d: u32) -> std::string::String {
@@ -131,9 +142,9 @@ pub(crate) fn imp_transfer_line(done: u64, total: u64, rate: Option<f32>) -> std
     if total > 0 {
         let pct = ((done as f64 / total as f64) * 100.0).clamp(0.0, 100.0) as u32;
         parts.push(std::format!("{} %", pct));
-        parts.push(imp_n_of(&imp_size(done.max(1)), &imp_size(total)));
+        parts.push(imp_n_of(&imp_amount(done), &imp_size(total)));
     } else {
-        parts.push(imp_size(done.max(1)));
+        parts.push(imp_amount(done));
     }
     if let Some(r) = rate.filter(|r| *r > 1.0) {
         parts.push(fill(u.imp_per_sec, &imp_size(r as u64)));
