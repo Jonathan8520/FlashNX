@@ -3810,9 +3810,17 @@ fn tap_ui_row(x: f32, y: f32) {
             }
         }
         // A tap is not a press: no `after_input` follows, so the sound is
-        // played here. A layout card applies as it is tapped (the click of a
-        // value); any other first tap moves the cursor (the move).
-        if crate::sfx::take_changed() {
+        // played here. A sound the tap's handler chose wins, as after a press
+        // (the crumb over a page in the Réglages pane goes back, like B). A
+        // layout card applies as it is tapped (the click of a value); any
+        // other first tap moves the cursor (the move).
+        let chosen = if activate { None } else { crate::sfx::take_chosen() };
+        if let Some(c) = chosen {
+            crate::sfx::take_changed();
+            if let Some(snd) = c {
+                play(snd);
+            }
+        } else if crate::sfx::take_changed() {
             play(Sfx::Toggle);
         } else if !activate && s.screen != before {
             play(Sfx::Move);
@@ -4236,6 +4244,10 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
                             confirm_armed(&mut s);
                         }
                         goto_tab(target, if idx > cur { 1.0 } else { -1.0 });
+                        // A tap is not a press: no `after_input` follows to
+                        // hear the tab change, so the sound L / R make for it
+                        // is played here.
+                        crate::sfx::play(crate::sfx::Sfx::Tab);
                     }
                 }
             }
@@ -4441,6 +4453,7 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
             // tile activates it (reuse the A-press path — launch on JOUER,
             // download on the Flashpoint grid).
             let mut launch = false;
+            let mut moved = false;
             if let Ok(mut s) = LIBRARY.lock() {
                 match s.screen {
                     Screen::List { selection, scroll_offset } => {
@@ -4448,6 +4461,7 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
                             launch = true;
                         } else {
                             s.screen = Screen::List { selection: hit, scroll_offset };
+                            moved = true;
                         }
                     }
                     Screen::FpGallery { selection, scroll } => {
@@ -4455,6 +4469,7 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
                             launch = true;
                         } else {
                             s.screen = Screen::FpGallery { selection: hit, scroll };
+                            moved = true;
                         }
                     }
                     Screen::DistantFiles { selection, scroll_offset } => {
@@ -4462,6 +4477,7 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
                             launch = true;
                         } else {
                             s.screen = Screen::DistantFiles { selection: hit, scroll_offset };
+                            moved = true;
                         }
                     }
                     Screen::DistantIdle { selection, scroll_offset } => {
@@ -4474,10 +4490,17 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
                             launch = true;
                         } else {
                             s.screen = Screen::DistantIdle { selection: hit, scroll_offset };
+                            moved = true;
                         }
                     }
                     _ => {}
                 }
+            }
+            // The cursor moved: the sound a direction makes for the same move,
+            // played here as no `after_input` follows a tap. What A does on a
+            // second tap sounds through `input`.
+            if moved {
+                crate::sfx::play(crate::sfx::Sfx::Move);
             }
             if launch {
                 // input("A") re-locks LIBRARY: drop TOUCH first to keep the

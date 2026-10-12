@@ -762,7 +762,13 @@ pub(crate) fn subpage_tap(s: &mut State, k: usize) {
         _ => return,
     };
     let target = match k.checked_sub(1) {
-        None => back,
+        // The way back, with B's sound: a tap has no press for the screens
+        // to read it from, and the cursor moving out of the page sounded
+        // like a step down a list.
+        None => {
+            crate::sfx::choose(crate::sfx::Sfx::Back);
+            back
+        }
         Some(i) => match SetSection::ALL.get(i) {
             Some(&section) => Screen::Settings { section, in_pane: false, row: 0 },
             None => return,
