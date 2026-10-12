@@ -215,37 +215,115 @@ impl ModalFrame {
 /// characters.
 type Glyph = [&'static str; 7];
 
-// CJK / atlas-glyph layout knobs, in the same "units" the 5x7 bitmap font uses
-// (1 unit = `scale` px; a bitmap glyph is 7 units tall, 6 units advance). CJK
-// is rendered full-width: one square cell `CJK_ADVANCE_UNITS` wide, used by
-// BOTH `draw_text` and `measure_text` so centring matches rendering. These two
-// are the only things to tweak on hardware to align CJK with the bitmap font.
-/// How long a grid cover takes to open or close, in milliseconds. Matched to
-/// the selection frame's own travel so the art and the cursor settle together.
+/// How long a cover takes to open or close, and the ring to travel to its new
+/// tile, in milliseconds. One clock for both, so the art and the ring settle on
+/// the same frame instead of the movement seeming to end twice.
 const GRID_COVER_MS: f32 = 190.0;
+
+/// A value travelling to a target in exactly `GRID_COVER_MS`, keeping its speed
+/// when the target changes on the way.
+///
+/// A cubic Hermite from where the value is, at the speed it has, to the target
+/// at rest. From rest it IS a smoothstep, the curve the covers always used. The
+/// difference is a change of mind half way, which a fast hand makes all the
+/// time (left, right, left): reversing a linear clock under a smoothstep
+/// flipped the speed in one frame, and restarting a smoothstep stopped the
+/// value dead before setting off again, which under a held direction pulsed
+/// the ring twelve times a second. Here the speed carries over and the motion
+/// bends instead.
+#[derive(Clone, Copy)]
+struct Glide {
+    /// Where the current leg started, the speed it had there (in units per
+    /// leg), where it ends, and how far along it is (0 to 1).
+    from: f32,
+    speed: f32,
+    to: f32,
+    u: f32,
+}
+
+impl Glide {
+    /// Resting at `v`.
+    const fn at(v: f32) -> Glide {
+        Glide { from: v, speed: 0.0, to: v, u: 1.0 }
+    }
+
+    fn value(&self) -> f32 {
+        let u = self.u;
+        let (u2, u3) = (u * u, u * u * u);
+        (2.0 * u3 - 3.0 * u2 + 1.0) * self.from + (u3 - 2.0 * u2 + u) * self.speed + (3.0 * u2 - 2.0 * u3) * self.to
+    }
+
+    /// The speed now, in units per leg.
+    fn velocity(&self) -> f32 {
+        let u = self.u;
+        let u2 = u * u;
+        (6.0 * u2 - 6.0 * u) * self.from + (3.0 * u2 - 4.0 * u + 1.0) * self.speed + (6.0 * u - 6.0 * u2) * self.to
+    }
+
+    /// Head for `to` from wherever the value is, at the speed it has. Every leg
+    /// lasts the same time, so a speed in units per leg carries over as it is.
+    fn retarget(&mut self, to: f32) {
+        if to == self.to {
+            return;
+        }
+        let (from, speed) = if self.settled() { (self.to, 0.0) } else { (self.value(), self.velocity()) };
+        *self = Glide { from, speed, to, u: 0.0 };
+    }
+
+    fn step(&mut self, dt_ms: f32) {
+        self.u = (self.u + dt_ms / GRID_COVER_MS).min(1.0);
+    }
+
+    fn settled(&self) -> bool {
+        self.u >= 1.0
+    }
+}
+
+/// One tile's cover: how open it is, and the gallery frame that last drew it.
+struct TileClock {
+    key: u64,
+    open: Glide,
+    /// The frame that last drew the tile, and the one that last stepped its
+    /// clock (a tile coming back into view is stepped once, not twice).
+    seen: u32,
+    stepped: u32,
+}
 
 /// How far each tile's cover is open, on its own clock.
 ///
 /// It used to be one pair, `(opening, closing, start)`: the tile being selected
 /// and the one being left. Run the cursor across six covers and only the last
 /// two moved; the four in between snapped shut the moment the next one was
-/// chosen, which reads as a glitch. Now every tile eases toward open while it
-/// is selected and toward closed when it is not, from wherever it was, so a
-/// cover left half open finishes closing by itself. A tile is named by a hash
-/// of what it shows (its file name, its URL), not by its index, so a re-sort
-/// cannot hand one tile's motion to another.
+/// chosen, which reads as a glitch. Now every tile heads for open while it is
+/// selected and for closed when it is not, from wherever it was, so a cover
+/// left half open finishes closing by itself.
+///
+/// Even out of sight: a tile still closing when its row scrolled away used to
+/// keep its half-open state until it came back, and reappeared half open. A
+/// clock the last frame did not draw now keeps closing on its own and is
+/// forgotten once shut. A tile is named by a hash of WHERE it comes from (the
+/// game's path, a result's URL), never its index or its file name: a re-sort
+/// cannot hand one tile's motion to another, and two games of the same name in
+/// two folders no longer pull one clock in two directions.
 struct TileOpen {
     /// Tick of the last frame that stepped the clocks, and the step it took.
     tick: u64,
     dt_ms: f32,
-    /// `(key, t)` for every tile not at rest; `t` runs 0 (closed) to 1.
-    open: std::vec::Vec<(u64, f32)>,
+    /// Gallery frames drawn so far (wraps).
+    frame: u32,
+    /// Every tile not at rest.
+    clocks: std::vec::Vec<TileClock>,
 }
 
-static TILE_OPEN: Mutex<TileOpen> = Mutex::new(TileOpen { tick: 0, dt_ms: 0.0, open: std::vec::Vec::new() });
+static TILE_OPEN: Mutex<TileOpen> = Mutex::new(TileOpen { tick: 0, dt_ms: 0.0, frame: 0, clocks: std::vec::Vec::new() });
 
 /// Start a frame of tile animation: how long since the last one, capped so a
-/// stall (a game run, a sleep) does not jump every tile to its end.
+/// stall (a game run, a sleep) does not jump every tile to its end, and the
+/// tiles the previous frame did not draw, which close unseen.
+///
+/// Frames are counted in GALLERY frames, not in time: while another tab or a
+/// game is on screen no frame passes, and the tiles come back exactly as they
+/// were left rather than all judged out of sight.
 fn tile_open_frame() {
     let now = unsafe { ruffle_tick_now() };
     let freq = unsafe { ruffle_tick_freq() }.max(1) as f32;
@@ -253,10 +331,22 @@ fn tile_open_frame() {
         let dt = if g.tick == 0 { 0.0 } else { (now.saturating_sub(g.tick) as f32 * 1000.0 / freq).min(100.0) };
         g.tick = now;
         g.dt_ms = dt;
+        let prev = g.frame;
+        g.frame = g.frame.wrapping_add(1);
+        let frame = g.frame;
+        g.clocks.retain_mut(|c| {
+            if c.seen == prev {
+                return true;
+            }
+            c.open.retarget(0.0);
+            c.open.step(dt);
+            c.stepped = frame;
+            !(c.open.settled() && c.open.to == 0.0)
+        });
     }
 }
 
-/// A stable key for a tile: FNV-1a of what it shows.
+/// A stable key for a tile: FNV-1a of where it comes from (a path, a URL).
 fn tile_key(name: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in name.as_bytes() {
@@ -267,36 +357,50 @@ fn tile_key(name: &str) -> u64 {
 }
 
 /// Step tile `key` toward open (`selected`) or closed and return how open it
-/// is, smoothstepped for display. Call once per tile per frame, after
-/// `tile_open_frame`.
+/// is, eased, 0 to 1. Call once per tile per frame, after `tile_open_frame`.
 fn tile_open(key: u64, selected: bool) -> f32 {
     let Ok(mut g) = TILE_OPEN.lock() else {
         return if selected { 1.0 } else { 0.0 };
     };
-    let step = g.dt_ms / GRID_COVER_MS;
-    let pos = g.open.iter().position(|(k, _)| *k == key);
-    let cur = pos.map_or(0.0, |i| g.open[i].1);
-    let next = if selected { (cur + step).min(1.0) } else { (cur - step).max(0.0) };
-    match pos {
-        Some(i) if next <= 0.0 && !selected => {
-            g.open.swap_remove(i);
+    let (dt, frame) = (g.dt_ms, g.frame);
+    let target = if selected { 1.0 } else { 0.0 };
+    let i = match g.clocks.iter().position(|c| c.key == key) {
+        Some(i) => i,
+        // A closed tile that stays closed needs no clock.
+        None if !selected => return 0.0,
+        None => {
+            g.clocks.push(TileClock { key, open: Glide::at(0.0), seen: frame, stepped: frame.wrapping_sub(1) });
+            g.clocks.len() - 1
         }
-        Some(i) => g.open[i].1 = next,
-        None if next > 0.0 || selected => g.open.push((key, next)),
-        None => {}
+    };
+    let c = &mut g.clocks[i];
+    c.open.retarget(target);
+    if c.stepped != frame {
+        c.open.step(dt);
+        c.stepped = frame;
     }
-    next * next * (3.0 - 2.0 * next)
+    c.seen = frame;
+    let v = c.open.value().clamp(0.0, 1.0);
+    if !selected && c.open.settled() {
+        g.clocks.swap_remove(i);
+    }
+    v
 }
 
 /// Forget every tile's motion: the next frame starts with all covers at rest
 /// (a new layout, a new list).
 pub fn tile_open_reset() {
     if let Ok(mut g) = TILE_OPEN.lock() {
-        g.open.clear();
+        g.clocks.clear();
         g.tick = 0;
     }
 }
 
+// CJK / atlas-glyph layout knobs, in the same "units" the 5x7 bitmap font uses
+// (1 unit = `scale` px; a bitmap glyph is 7 units tall, 6 units advance). CJK
+// is rendered full-width: one square cell `CJK_ADVANCE_UNITS` wide, used by
+// BOTH `draw_text` and `measure_text` so centring matches rendering. These two
+// are the only things to tweak on hardware to align CJK with the bitmap font.
 /// Full-width cell width (and render size) for an atlas glyph.
 const CJK_ADVANCE_UNITS: f32 = 8.0;
 /// Baseline offset from the line top; raise/lower to sit CJK on the Latin line.
@@ -5018,6 +5122,12 @@ struct GalleryAnim {
     scroll_px: f32,
     /// Decays 1->0 after a selection change; drives a small frame "pop".
     pop: f32,
+    /// The Play grid's ring, in the same content space as `sel_*`, on the
+    /// covers' own clock (`Glide`) so ring and cover settle on the same frame.
+    /// The importer's lists keep the fields above.
+    ring_x: Glide,
+    ring_y: Glide,
+    ring_w: Glide,
 }
 
 fn gallery_anim() -> &'static std::sync::Mutex<GalleryAnim> {
@@ -5030,6 +5140,9 @@ fn gallery_anim() -> &'static std::sync::Mutex<GalleryAnim> {
         sel_w: 0.0,
         scroll_px: 0.0,
         pop: 0.0,
+        ring_x: Glide::at(0.0),
+        ring_y: Glide::at(0.0),
+        ring_w: Glide::at(0.0),
     });
     &A
 }
@@ -5038,15 +5151,20 @@ fn gallery_anim() -> &'static std::sync::Mutex<GalleryAnim> {
 /// Called from `library` whenever the gallery is (re)entered with a possibly
 /// far-away selection — fresh open, navbar switch into JOUER, new search — so
 /// the cursor doesn't slide across the whole screen from a stale position.
+///
+/// The other three home views ease from `HomeAnim`, and they are reset here
+/// too: a new shelf, a search, a sort or a delete hands every view a new list,
+/// and LISTE, BANDE and ETAGERE used to streak in from the old one (BANDE's row
+/// flew past forty games to reach the first) while only the grid snapped.
 pub fn gallery_anim_reset() {
     if let Ok(mut a) = gallery_anim().lock() {
         a.inited = false;
     }
+    if let Ok(mut a) = home_anim().lock() {
+        a.inited = false;
+    }
 }
 
-/// Frame-rate aware approach of `cur` toward `target`. `rate` ~ 1/time-constant
-/// (s^-1); `dt` is the frame delta in seconds. Linear in dt (no `exp()`: we
-/// stay off libm like `approx_sin`), which is plenty smooth at ~60 fps.
 /// Eased state for the LIST / STRIP / SHELF layouts.
 ///
 /// A struct rather than repeated `eased_list_y` calls: that helper holds ONE
@@ -5145,6 +5263,9 @@ pub fn home_anim_reset() {
     }
 }
 
+/// Frame-rate aware approach of `cur` toward `target`. `rate` ~ 1/time-constant
+/// (s^-1); `dt` is the frame delta in seconds. Linear in dt (no `exp()`: we
+/// stay off libm like `approx_sin`), which is plenty smooth at ~60 fps.
 fn ease_to(cur: f32, target: f32, dt: f32, rate: f32) -> f32 {
     let t = (rate * dt).clamp(0.0, 1.0);
     cur + (target - cur) * t
@@ -11766,6 +11887,13 @@ impl SwitchRenderBackend {
         self.kit_home_footer();
     }
 
+    /// JOUER layout 0, GRILLE: the covers as a grid of 16:10 tiles, five a row
+    /// (Main.dc.html), the selected one lifted on a shadow inside a gold ring,
+    /// its name and facts under the grid.
+    ///
+    /// `selection` is an index into `entries`; `scroll_offset` is the first
+    /// visible ROW. A game with no cover gets a generated tile.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_library_gallery(
         &mut self,
         selection: usize,
@@ -11780,44 +11908,32 @@ impl SwitchRenderBackend {
     ) {
         self.library_clear();
         let vw = self.dimensions.width as f32;
-
-        // Banner — compact, fully below the navbar strip (y 4..38). Scaled to a
-        // small target height so it doesn't dominate the screen (was full 720x144).
         self.draw_home_header(banner_tex, banner_w, banner_h, entries.len(), filter, total_unfiltered);
 
         if entries.is_empty() {
-            // GRILLE is the validated screen of the four; the guard is placed
-            // after the header and before any tile work, so a non-empty library
-            // reaches exactly the code it did before.
             self.draw_home_empty(126.0, 630.0);
             self.kit_home_footer();
             return;
         }
 
-        // ── Cover gallery (v1.2.0) ───────────────────────────────────────
-        // Fixed 5-per-row GRID. Every tile is the same size and covers are
-        // CROP-TO-FILL (object-fit: cover, via draw_textured_rect_cover), so
-        // the grid stays perfectly aligned whatever each cover's native aspect —
-        // we accept cropping the overflow (the deliberate "5 per row, tant pis"
-        // choice). `scroll_offset` is the first visible ROW.
+        // The mockup's grid: 48 px margins, five columns 20 px apart, tiles at
+        // 16:10 (Jaquettes.dc.html), the first row 14 px under the shelf strip.
+        // `scroll_offset` is the first visible ROW.
         const COLS: usize = 5;
-        const ROW_IMG_H: f32 = 132.0; // uniform tile height
-        const GAP_X: f32 = 16.0;
-        const GAP_Y: f32 = 22.0;
-        const LEFT: f32 = 40.0;
-        // 126, not 150: the shrunk banner ends at y102 and left a 46 px gap under
-        // itself, which read as the header having lost its second line rather than
-        // as clearance. 24 px is the same air the rest of the page uses. No row
-        // count changes at any of the four layouts, so no scroll maths moves.
-        const TOP: f32 = 126.0;
+        const LEFT: f32 = 48.0;
+        const GAP: f32 = 20.0;
+        const TOP: f32 = 130.0;
+        // How far a tile grows when it opens: enough to read as lifted off the
+        // grid, little enough to stay inside the gap to its neighbours.
+        const LIFT: f32 = 0.05;
         let rows_visible = crate::library::GALLERY_ROWS_VISIBLE;
-        let avail_w = vw - LEFT * 2.0;
-        let cell_w = ((avail_w - (COLS as f32 - 1.0) * GAP_X) / COLS as f32).max(10.0);
-        let pitch = ROW_IMG_H + GAP_Y;
+        let cell_w = ((vw - LEFT * 2.0 - (COLS as f32 - 1.0) * GAP) / COLS as f32).max(10.0);
+        let cell_h = (cell_w / 1.6).round();
+        let pitch = cell_h + GAP;
 
         // Regular grid: tile i sits at (col = i % COLS, row = i / COLS).
-        // `tiles` = (x, w, row); `cells` feeds input-side 2D navigation
-        // (which reads row + center-x, so a fixed grid works unchanged).
+        // `tiles` = (x, row); `cells` feeds input-side 2D navigation (which
+        // reads row + center-x, so a fixed grid works unchanged).
         //
         // Geometry ONLY — no cover resolution here. This pass runs over the whole
         // library, and resolving a cover means an SD read + PNG/JPEG decode +
@@ -11825,71 +11941,57 @@ impl SwitchRenderBackend {
         // frame cost ~1.9 s on a 71-game library, which is the black screen at
         // launch. Covers are resolved in the draw pass below, visible tiles only.
         let total = entries.len();
-        let mut tiles: std::vec::Vec<(f32, f32, u32)> = std::vec::Vec::with_capacity(total);
+        let mut tiles: std::vec::Vec<(f32, u32)> = std::vec::Vec::with_capacity(total);
         let mut cells: std::vec::Vec<GalleryCell> = std::vec::Vec::with_capacity(total);
-        for (idx, _entry) in entries.iter().enumerate() {
+        for idx in 0..total {
             let col = idx % COLS;
             let row = (idx / COLS) as u32;
-            let x = LEFT + col as f32 * (cell_w + GAP_X);
-            tiles.push((x, cell_w, row));
+            let x = LEFT + col as f32 * (cell_w + GAP);
+            tiles.push((x, row));
             cells.push(GalleryCell {
                 row,
                 cx: x + cell_w * 0.5,
                 x,
                 y: TOP + row as f32 * pitch,
                 w: cell_w,
-                h: ROW_IMG_H,
+                h: cell_h,
             });
         }
-        let rows_total = if total == 0 { 0 } else { ((total + COLS - 1) / COLS) as u32 };
+        let rows_total = ((total + COLS - 1) / COLS) as u32;
         // Publish layout for input-side 2D navigation.
         if let Ok(mut g) = gallery_cache().lock() {
             *g = (cells, rows_total);
         }
 
-        // Pass 2 — smooth-scrolled visible window (v1.2.0 polish). The input
-        // layer still tracks a discrete first row (`scroll_offset`) + tile
-        // index (`selection`); here we ease an actual pixel scroll toward that
-        // row and glide a single selection frame toward the active tile, so
-        // cursor moves and row changes slide instead of snapping. A scissor
-        // clips the band so partially-scrolled rows don't bleed onto the banner
-        // or the info line.
-        // Clip band sits a touch ABOVE the first row (TOP) so the resting row's
-        // top edge + its selection frame (which overhangs ~4px, more on a pop)
-        // aren't rogned; the 16px headroom still leaves a gap to the banner so a
-        // row scrolling UP fades out cleanly instead of overlapping it.
-        // -12 (not -16): a tile scrolling in is still revealed gradually, but the
-        // band no longer reaches up into the count / filter line above it.
+        // The input layer tracks a discrete first row (`scroll_offset`) and
+        // tile index (`selection`); here the pixel scroll eases toward that row
+        // and the ring travels to the active tile, so moves and row changes
+        // slide instead of snapping. A scissor clips the band so rows scrolling
+        // past don't bleed onto the shelf strip or the name under the grid; it
+        // starts 12 px above the first row so the ring of a lifted tile on the
+        // top row is not cut.
         let band_top = TOP - 12.0;
         let band_bot = TOP + rows_visible as f32 * pitch;
         let target_scroll = scroll_offset as f32 * pitch;
-        // Selected tile geometry in content space — the eased frame chases it.
-        let (target_sel_x, target_sel_row, target_sel_w) = tiles
-            .get(selection)
-            .map(|&(tx, tw, trow)| (tx, trow, tw))
-            .unwrap_or((LEFT, 0, 0.0));
-        let target_sel_y = TOP + target_sel_row as f32 * pitch;
+        let (target_x, target_row) = tiles.get(selection).copied().unwrap_or((LEFT, 0));
+        let target_y = TOP + target_row as f32 * pitch;
 
-        // Advance the animation toward the targets (snap on the first frame
-        // after a reset; ease otherwise). Falls back to the targets if the lock
-        // is somehow unavailable — worst case is one un-eased frame.
+        // Snap on the first frame after a reset; travel otherwise. Falls back to
+        // the targets if the lock is somehow unavailable (one still frame).
         let mut scroll_px = target_scroll;
-        let mut frame_x = target_sel_x;
-        let mut frame_y = target_sel_y;
-        let mut frame_w = target_sel_w;
-        let mut pop = 0.0f32;
+        let (mut ring_x, mut ring_y, mut ring_w) = (target_x, target_y, cell_w);
+        let mut ring_travelling = false;
         let touch_scroll = gallery_touch_scroll_read();
-        if let Ok(mut a) = gallery_anim().lock() {
+        if let Ok(mut guard) = gallery_anim().lock() {
+            let a = &mut *guard;
             let now = phase_ticks;
             if !a.inited {
                 a.inited = true;
                 a.last_tick = now;
-                a.last_sel = selection;
-                a.sel_x = target_sel_x;
-                a.sel_y = target_sel_y;
-                a.sel_w = target_sel_w;
+                a.ring_x = Glide::at(target_x);
+                a.ring_y = Glide::at(target_y);
+                a.ring_w = Glide::at(cell_w);
                 a.scroll_px = target_scroll;
-                a.pop = 0.0;
             } else {
                 let freq = unsafe { ruffle_tick_freq() } as f32;
                 let dt = if freq > 0.0 {
@@ -11898,15 +12000,11 @@ impl SwitchRenderBackend {
                     1.0 / 60.0
                 };
                 a.last_tick = now;
-                if selection != a.last_sel {
-                    a.pop = 1.0; // kick the "snap" pop on every cursor move
-                    a.last_sel = selection;
+                for (g, to) in [(&mut a.ring_x, target_x), (&mut a.ring_y, target_y), (&mut a.ring_w, cell_w)] {
+                    g.retarget(to);
+                    g.step(dt * 1000.0);
                 }
-                a.sel_x = ease_to(a.sel_x, target_sel_x, dt, 18.0);
-                a.sel_y = ease_to(a.sel_y, target_sel_y, dt, 18.0);
-                a.sel_w = ease_to(a.sel_w, target_sel_w, dt, 18.0);
                 a.scroll_px = ease_to(a.scroll_px, target_scroll, dt, 16.0);
-                a.pop = ease_to(a.pop, 0.0, dt, 12.0);
             }
             // Touch drag overrides the eased scroll with 1:1 finger tracking
             // (cleared to None on release, so the glide then settles onto a row).
@@ -11914,19 +12012,10 @@ impl SwitchRenderBackend {
                 a.scroll_px = px;
             }
             scroll_px = a.scroll_px;
-            frame_x = a.sel_x;
-            frame_y = a.sel_y;
-            frame_w = a.sel_w;
-            pop = a.pop;
-        }
-
-        // Publish the selected tile's current screen rect for the game launch /
-        // quit reveal (the cover grows from / shrinks to it).
-        if !tiles.is_empty() {
-            let sel_y = TOP + target_sel_row as f32 * pitch - scroll_px;
-            if let Ok(mut r) = gallery_sel_rect().lock() {
-                *r = (target_sel_x, sel_y, target_sel_w, ROW_IMG_H);
-            }
+            ring_x = a.ring_x.value();
+            ring_y = a.ring_y.value();
+            ring_w = a.ring_w.value();
+            ring_travelling = !(a.ring_x.settled() && a.ring_y.settled());
         }
 
         // Publish viewport metrics for the touch layer (drag-scroll + hit-test).
@@ -11944,11 +12033,6 @@ impl SwitchRenderBackend {
             };
         }
 
-        // Clip to the gallery band. `set_clip` owns the top-left/bottom-left
-        // conversion: every view that re-derived it had to be hunted down and
-        // re-checked whenever the band geometry moved, and it moved often.
-        self.set_clip(0.0, band_top, vw, band_bot - band_top);
-
         // Draw the rows that can intersect the band. `scroll_offset` moves at
         // most one row per input, so a ±1 window around it always covers the
         // partially-scrolled rows; the scissor does the exact clipping.
@@ -11956,75 +12040,60 @@ impl SwitchRenderBackend {
         let hi_row = (scroll_offset + rows_visible + 1) as u32;
         // Budget of NEW cover decodes for this frame — see COVER_DECODES_PER_FRAME.
         let mut decode_budget = COVER_DECODES_PER_FRAME;
-        // Work AHEAD of the eye. Only the rows on screen used to be decoded, so
-        // scrolling down met a fresh row of generated tiles every time and each
-        // cover popped in behind the movement. Two rows of margin on each side
-        // are decoded first, in the same one-per-frame budget, so an idle moment
-        // buys the row you are about to reach.
-        //
-        // Not a fixed window: the NEAREST undecoded tile in the WHOLE list, one
-        // per frame. Stopping at a couple of rows meant a fast scroll outran the
-        // decoder and covers kept landing one by one behind the movement. Working
-        // outwards instead means a second spent looking at the gallery quietly
-        // finishes the rest of the library, and by the time you scroll there is
-        // nothing left to decode. Costs nothing at startup — this only runs while
-        // the gallery is on screen, and never more than one decode per frame.
-        if decode_budget > 0 {
-            // From the TOP of what is on screen, downwards, then below the fold,
-            // then the rest. Starting from the middle of the band filled the grid
-            // outwards from its centre, which reads as tiles popping upwards and
-            // matches nothing the player can see.
-            let mut best: Option<(u8, u32, usize)> = None;
-            for (idx, &(_, _, trow)) in tiles.iter().enumerate() {
-                if cover_lookup(&entries[idx].basename).is_some() {
-                    continue;
-                }
-                let band = if trow >= lo_row && trow <= hi_row {
-                    0
-                } else if trow > hi_row {
-                    1
-                } else {
-                    2
-                };
-                let key = (band, trow, idx);
-                if best.map_or(true, |b| key < b) {
-                    best = Some(key);
-                }
+        // Work AHEAD of the eye: the NEAREST undecoded tile in the WHOLE list,
+        // one per frame. Only the rows on screen used to be decoded, so
+        // scrolling met a fresh row of generated tiles every time and each cover
+        // popped in behind the movement; a second spent looking at the gallery
+        // now quietly finishes the rest of the library. From the TOP of what is
+        // on screen, downwards, then below the fold, then the rest: starting from
+        // the middle filled the grid outwards from its centre, which reads as
+        // tiles popping upwards and matches nothing the player can see.
+        let mut best: Option<(u8, u32, usize)> = None;
+        for (idx, &(_, trow)) in tiles.iter().enumerate() {
+            if cover_lookup(&entries[idx].basename).is_some() {
+                continue;
             }
-            if let Some((_, _, idx)) = best {
-                decode_budget -= 1;
-                let _ = self.cover_for(&entries[idx].basename);
+            let band = if trow >= lo_row && trow <= hi_row {
+                0
+            } else if trow > hi_row {
+                1
+            } else {
+                2
+            };
+            let key = (band, trow, idx);
+            if best.map_or(true, |b| key < b) {
+                best = Some(key);
             }
         }
+        if let Some((_, _, idx)) = best {
+            decode_budget -= 1;
+            let _ = self.cover_for(&entries[idx].basename);
+        }
+
+        // Every visible tile on its own clock: the selected one opens, any other
+        // closes from wherever it was, so none snaps shut mid-way.
         tile_open_frame();
-        // How far a tile grows when it opens: enough to read as lifted off the
-        // grid, little enough to stay inside the gap to its neighbours.
-        const LIFT: f32 = 0.05;
+        struct Shown {
+            idx: usize,
+            x: f32,
+            y: f32,
+            open: f32,
+            cover: CoverTex,
+            ready_at: u64,
+        }
+        let mut shown: std::vec::Vec<Shown> = std::vec::Vec::with_capacity(COLS * (rows_visible + 2));
         let mut selected_open = 0.0f32;
-        for (idx, &(tx0, tw0, trow)) in tiles.iter().enumerate() {
+        for (idx, &(x, trow)) in tiles.iter().enumerate() {
             if trow < lo_row || trow > hi_row {
                 continue;
             }
-            let ty0 = TOP + trow as f32 * pitch - scroll_px;
-            // Skip tiles fully outside the band (cheap reject before draw).
-            if ty0 + ROW_IMG_H < band_top || ty0 > band_bot {
+            let y = TOP + trow as f32 * pitch - scroll_px;
+            if y + cell_h < band_top || y > band_bot {
                 continue;
             }
-            // Every tile on its own clock: the selected one opens, any other
-            // closes from wherever it was, so none snaps shut mid-way.
-            let b = tile_open(tile_key(&entries[idx].basename), idx == selection);
+            let open = tile_open(tile_key(&entries[idx].path), idx == selection);
             if idx == selection {
-                selected_open = b;
-            }
-            let grow = LIFT * b;
-            let (tx, ty, tw, th) = (
-                tx0 - tw0 * grow * 0.5,
-                ty0 - ROW_IMG_H * grow * 0.5,
-                tw0 * (1.0 + grow),
-                ROW_IMG_H * (1.0 + grow),
-            );
-            if b > 0.0 {
-                self.kit_shadow(tx, ty + 8.0, tw, th, theme::radius::TILE, 16.0, ((0x90 as f32 * b) as u32) << 24);
+                selected_open = open;
             }
             // Cached cover, else decode one if this frame still has budget, else
             // the generated tile for now (it resolves on a following frame).
@@ -12037,66 +12106,81 @@ impl SwitchRenderBackend {
                 }
                 None => (CoverTex::Default, 0),
             };
-            let fade = cover_fade(ready_at);
+            shown.push(Shown { idx, x, y, open, cover, ready_at });
+        }
+        // Resting tiles first, then the moving ones from the least open to the
+        // most, so a lifted tile and its shadow are drawn over every neighbour
+        // (the mockup's z-index) instead of under the ones after it in the row.
+        shown.sort_by(|a, b| a.open.partial_cmp(&b.open).unwrap_or(core::cmp::Ordering::Equal));
+
+        // Publish the selected tile's rect AS DRAWN, lifted, for the launch and
+        // quit reveal, which grows the cover from it and shrinks it back to it.
+        if let Some(&(x, trow)) = tiles.get(selection) {
+            let grow = LIFT * selected_open;
+            let y = TOP + trow as f32 * pitch - scroll_px;
+            if let Ok(mut r) = gallery_sel_rect().lock() {
+                *r = (x - cell_w * grow * 0.5, y - cell_h * grow * 0.5, cell_w * (1.0 + grow), cell_h * (1.0 + grow));
+            }
+        }
+
+        // Clip to the gallery band. `set_clip` owns the top-left/bottom-left
+        // conversion: every view that re-derived it had to be hunted down and
+        // re-checked whenever the band geometry moved, and it moved often.
+        self.set_clip(0.0, band_top, vw, band_bot - band_top);
+        for t in &shown {
+            let e = &entries[t.idx];
+            let grow = LIFT * t.open;
+            let (tx, ty, tw, th) = (
+                t.x - cell_w * grow * 0.5,
+                t.y - cell_h * grow * 0.5,
+                cell_w * (1.0 + grow),
+                cell_h * (1.0 + grow),
+            );
+            if t.open > 0.0 {
+                self.kit_shadow(tx, ty + 8.0, tw, th, theme::radius::TILE, 16.0, ((0x90 as f32 * t.open) as u32) << 24);
+            }
+            let fade = cover_fade(t.ready_at);
             // The generated tile when there is no cover at all; under a cover
             // still fading in, only its ground, or the name shows through.
-            let cover_img = match cover {
-                CoverTex::Image { tex, w, h, amb } => Some((tex, w, h, amb)),
-                CoverTex::Default => None,
-            };
-            match cover_img {
-                None => self.kit_default_tile(tx, ty, tw, th, entries[idx].color_chip, &entries[idx].display_name),
-                Some(_) if fade < 1.0 => self.kit_default_ground(tx, ty, tw, th, entries[idx].color_chip),
-                Some(_) => {}
+            match t.cover {
+                CoverTex::Image { tex, w, h, amb } => {
+                    if fade < 1.0 {
+                        self.kit_default_ground(tx, ty, tw, th, e.color_chip);
+                    }
+                    // At rest as filled as the 15% rule allows; the selected
+                    // tile opens the rest of the way to the whole cover.
+                    let rest = kit::cover::rest_t(w, h, cell_w, cell_h);
+                    self.kit_cover_reveal(tx, ty, tw, th, tex, w, h, amb, rest + (1.0 - rest) * t.open, fade);
+                }
+                CoverTex::Default => self.kit_default_tile(tx, ty, tw, th, e.color_chip, &e.display_name),
             }
-            if let Some((tex, w, h, amb)) = cover_img {
-                // At rest as filled as the 15% rule allows; the selected tile
-                // opens the rest of the way to the whole cover.
-                let rest = kit::cover::rest_t(w, h, tw0, ROW_IMG_H);
-                self.kit_cover_reveal(tx, ty, tw, th, tex, w, h, amb, rest + (1.0 - rest) * b, fade);
-            }
-
-
-            // NO AS3 BADGE. It used to sit here, in amber, on every AS3 tile.
+            // No engine badge: whether a game runs stopped depending on which
+            // ActionScript it was written in, and an amber mark on a third of
+            // the library told players their game was fragile when it was not.
+            // The engine is named in the facts line under the selection.
             //
-            // It was put there when AVM2 was the riskier engine and the badge
-            // was an honest warning. It is not one any more: game after game has
-            // been made to run, and whether a given SWF works now has nothing to
-            // do with which ActionScript it was written in. Marking a third of
-            // the library with a warning colour for a property that no longer
-            // predicts anything told players their game was fragile when it was
-            // not. The engine is still named in the facts line under the
-            // selection, where it belongs: a fact, not a verdict.
-
-            // Favourite marker, top-left: a gold star on a dark chip (the chip
-            // gives contrast on bright covers). The old 5x7 font had no star, so
-            // this used to be a diamond built from a rotated square. Favourites
-            // are also pinned to the top of the gallery (library::sort_entries).
-            if crate::favorites::is_favorite(&entries[idx].basename) {
+            // The favourite's solid star, top-left, on a dark chip for contrast
+            // on bright covers. Favourites are also pinned first
+            // (library::sort_entries).
+            if crate::favorites::is_favorite(&e.basename) {
                 self.kit_favorite_chip(tx + 8.0, ty + 8.0);
             }
         }
 
-        // Single eased selection frame, drawn last and still inside the scissor
-        // so it clips with its tile when partially scrolled. `pop` briefly
-        // inflates it right after a move for a little tactile "snap"; `pulse`
-        // keeps the existing breathing brightness.
-        if !tiles.is_empty() {
-            // The ring hugs the lifted tile: the same growth, plus the brief
-            // "snap" right after a move.
-            let lift = 0.05 * selected_open;
-            let grow = pop * 3.0;
-            let fx = frame_x - frame_w * lift * 0.5 - grow;
-            let fy = frame_y - scroll_px - ROW_IMG_H * lift * 0.5 - grow;
-            let fw = frame_w * (1.0 + lift) + 2.0 * grow;
-            let fh = ROW_IMG_H * (1.0 + lift) + 2.0 * grow;
-            // A gold ring that stands off the tile, concentric with its corners,
-            // instead of the breathing frame drawn over the cover's edge.
+        // The ring, drawn last and still inside the scissor so it clips with its
+        // tile when partially scrolled. It travels on the covers' clock and hugs
+        // the lifted tile: at the full lift while it travels (the tile it is
+        // heading for ends fully open on the same frame it arrives), then the
+        // tile's own lift, which is what it grows with after a reset.
+        {
+            let lift = LIFT * if ring_travelling { 1.0 } else { selected_open };
+            let fx = ring_x - ring_w * lift * 0.5;
+            let fy = ring_y - scroll_px - cell_h * lift * 0.5;
             self.kit_ring(
                 fx,
                 fy,
-                fw,
-                fh,
+                ring_w * (1.0 + lift),
+                cell_h * (1.0 + lift),
                 theme::radius::TILE,
                 theme::ring::GAP,
                 theme::ring::WIDTH,
@@ -12106,11 +12190,12 @@ impl SwitchRenderBackend {
 
         self.clear_clip();
 
-        // Tracks the eased pixel scroll so the thumb glides with the tiles.
+        // Tracks the eased pixel scroll so the thumb glides with the tiles. In
+        // the middle of the right-hand margin.
         self.draw_scrollbar(
-            vw - 18.0,
+            vw - LEFT * 0.5 - SCROLLBAR_W * 0.5,
             TOP,
-            rows_visible as f32 * pitch,
+            rows_visible as f32 * pitch - GAP,
             scroll_px,
             pitch,
             rows_visible,
@@ -12125,8 +12210,8 @@ impl SwitchRenderBackend {
         if let Some(entry) = entries.get(selection) {
             use theme::{col, size};
             let name = self.kit_fit_mid(&entry.display_name, size::TITLE, vw - 2.0 * LEFT);
-            self.kit_text_mid(LEFT, 606.0, size::TITLE, &name, col::GOLD);
-            self.kit_game_facts(LEFT, 642.0, entry);
+            self.kit_text_mid(LEFT, 616.0, size::TITLE, &name, col::GOLD);
+            self.kit_game_facts(LEFT, 648.0, entry);
         }
 
         self.kit_home_footer();
