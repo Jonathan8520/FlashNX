@@ -13,6 +13,8 @@
 //!   option shown, a value between arrows, a switch), chips and the help box.
 //! - `sheet`: the side panel (in-game pause, the game options), and the
 //!   cascade that opens a sub-panel beside its parent.
+//! - `pane`: a panel's rows inside any rectangle (the Réglages pane): sections,
+//!   gliding pill, scroll, help box.
 //!
 //! These are children of `render` so they can reach the renderer's GL state the
 //! way the rest of `render.rs` does. Screens move onto them one at a time; the
@@ -26,6 +28,7 @@ pub(crate) mod controls;
 pub(crate) mod cover;
 pub(crate) mod icons;
 pub(crate) mod list;
+pub(crate) mod pane;
 pub(crate) mod shapes;
 pub(crate) mod sheet;
 pub(crate) mod text;
