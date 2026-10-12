@@ -3435,39 +3435,6 @@ pub(crate) fn format_date(epoch: u64) -> std::string::String {
     crate::backend::render::imp_date(y, m as u32, d as u32)
 }
 
-/// Strings the importer no longer shows, kept in the tables until they leave
-/// all nine at once after the merge (one branch rewriting `loc.rs`, not four).
-/// Read here only so the build stays free of warnings meanwhile; this function
-/// goes with them.
-#[allow(dead_code)]
-fn importer_retired_strings() {
-    let lc = crate::loc::s();
-    let _ = (
-        lc.opt_edit,
-        lc.dist_search_games,
-        lc.dist_empty_hint,
-        lc.dist_add,
-        lc.dist_count,
-        lc.dl_title,
-        lc.err_title,
-        lc.err_footer_fix,
-        lc.extracting,
-        lc.lbl_on,
-        lc.lbl_off,
-    );
-    let _ = (
-        lc.fp_details_publisher,
-        lc.fp_details_date,
-        lc.fp_details_size,
-        lc.fav_added,
-        lc.fav_removed,
-        lc.url_info_type,
-        crate::loc_ui::ui().filter_verb,
-    );
-    let _ = crate::loc::files_found(0);
-    let _ = crate::loc::count_line(0, 0, None, std::string::String::new);
-}
-
 fn load_history_from_sd() {
     load_history_meta_from_sd();
     // 256 KB cap: the history is a few KB at most; the cap is a safety net.
@@ -13262,11 +13229,3 @@ fn hsv_to_rgb_u32(h: f32, s: f32, v: f32) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
-/// Strings this branch stopped reading. The tables in `loc.rs` and `loc_ui.rs`
-/// are only edited by the merge, which deletes them; until then this keeps
-/// them read, so the build stays free of warnings. Delete it with them.
-#[allow(dead_code)]
-fn retired_strings() -> [&'static str; 6] {
-    let (lc, u) = (crate::loc::s(), crate::loc_ui::ui());
-    [lc.sort_recent, lc.sort_played, lc.sort_recent_played, lc.sort_dir_asc, lc.sort_dir_desc, u.order]
-}

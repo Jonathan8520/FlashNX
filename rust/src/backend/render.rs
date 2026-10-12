@@ -167,13 +167,10 @@ pub fn pause_reset() {
 // ── Unified modal style ────────────────────────────────────────────────────
 // One look for every centered window: `draw_modal_frame` draws the panel, title
 // and hints from the kit (`render/kit/window.rs`), and only each window's body
-// differs. Panels size their HEIGHT to the row count; the WIDTH picks one of two
-// tiers below, because a single width made short pickers look bloated.
+// differs. Panels size their HEIGHT to the row count.
 //
-/// Standard picker width — pause, OPTIONS, sort, language, key dropdown, lists.
-const MODAL_W: f32 = 520.0;
-/// Wide panel — only where the body genuinely needs the room: the two-column
-/// TOUCHES editor and the danger confirms (long warning / URL lines).
+/// The width of the windows that keep this look (the sort windows), narrowed
+/// on a screen too small for it.
 const MODAL_W_WIDE: f32 = 720.0;
 /// The page behind a destructive confirm is darker than behind other windows.
 const MODAL_DIM_DANGER: u32 = 0xD0_05_0A_16;
@@ -1732,7 +1729,7 @@ pub(crate) use kit::icons::Icon;
 pub(crate) use kit::text::HintItem;
 pub(crate) use kit::theme::col as ui_col;
 pub(crate) use kit::text::Btn;
-pub(crate) use pages::windows::{Choice, SortOption, WinRow};
+pub(crate) use pages::windows::{Choice, SortOption};
 pub(crate) use kit::list::{CtrlSegs, Row, SEG_NEXT, SEG_PREV};
 pub(crate) use kit::sheet::{cascade_step, Sheet, Side, OPTIONS_CHILD_W, OPTIONS_W};
 pub(crate) use pages::importer::{
