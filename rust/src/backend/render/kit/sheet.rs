@@ -381,7 +381,7 @@ impl SwitchRenderBackend {
         if let Some(thumb) = s.thumb {
             let (bx, by, bw, bh) = header_thumb(x);
             if head {
-                self.sheet_thumb(bx, by, bw, bh, thumb, s.thumb_tile);
+                self.sheet_thumb(bx, by, bw, bh, thumb, s.thumb_tile, 2);
             }
             // The cover on its way to the rail crosses the title beside it:
             // the title and the line under it fade out as it goes, gone
@@ -446,15 +446,22 @@ impl SwitchRenderBackend {
     /// settled rail at `rail_x` (1). On the fold's progress, so it keeps to
     /// the panel's visible part as the edge moves in, and its two ends are
     /// exactly where the header and the rail draw it. A game with no cover
-    /// shows its generated tile at every size in between: under 80 px high
-    /// that is one line of its name, cut in the middle (`kit_default_tile`).
+    /// shows its generated tile at every size in between, its name laid out
+    /// again for each (`kit_default_tile_small`): on two lines, if the header
+    /// has it on two, while the box is tall enough and they show it whole,
+    /// then on one, cut in the middle, as in the rail.
     fn sheet_head_between(&mut self, s: &Sheet, x: f32, rail_x: f32, e: f32) {
         let mix = |a: f32, b: f32| a + (b - a) * e;
         let rail_cx = rail_x + RAIL_W * 0.5;
         if let Some(thumb) = s.thumb {
             let (ax, ay, aw, ah) = header_thumb(x);
             let (bx, by, bw, bh) = rail_thumb(rail_cx);
-            self.sheet_thumb(mix(ax, bx), mix(ay, by), mix(aw, bw), mix(ah, bh), thumb, s.thumb_tile);
+            // Never more lines on the way than in the header. A short name,
+            // whole on one line there, would otherwise go on two for a frame
+            // or two, once one line no longer held it and before the box got
+            // too low for two ("Pac Man" at e = 0.62), then back to one, cut.
+            let most = s.thumb_tile.map_or(2, |(_, name)| self.kit_default_tile_small_lines(aw, ah, name, 2).len());
+            self.sheet_thumb(mix(ax, bx), mix(ay, by), mix(aw, bw), mix(ah, bh), thumb, s.thumb_tile, most);
         } else if let Some(ic) = s.kicker {
             let (ax, acy, apx) = header_kicker(x);
             let (bx, bcy, bpx) = rail_kicker(rail_cx);
@@ -465,13 +472,24 @@ impl SwitchRenderBackend {
 
     /// A panel's cover in a `w` x `h` box: the cover rule (filled when little
     /// is cropped, else whole over its blur), the generated tile when there is
-    /// no cover yet.
-    fn sheet_thumb(&mut self, x: f32, y: f32, w: f32, h: f32, thumb: (GLuint, u32, u32, GLuint), tile: Option<(u32, &str)>) {
+    /// no cover yet, its name on at most `most_lines` (the box is always a
+    /// small one: the header's, the rail's or one in between).
+    #[allow(clippy::too_many_arguments)]
+    fn sheet_thumb(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        thumb: (GLuint, u32, u32, GLuint),
+        tile: Option<(u32, &str)>,
+        most_lines: usize,
+    ) {
         let (tex, tw, th, amb) = thumb;
         if tex != 0 && tw > 0 && th > 0 {
             self.kit_cover(x, y, w, h, tex, tw, th, amb, 1.0);
         } else if let Some((chip, name)) = tile {
-            self.kit_default_tile(x, y, w, h, chip, name);
+            self.kit_default_tile_small(x, y, w, h, chip, name, most_lines);
         } else {
             self.kit_rrect(x, y, w, h, 8.0, col::TILE);
         }
@@ -790,7 +808,7 @@ impl SwitchRenderBackend {
         if head {
             if let Some(thumb) = s.thumb {
                 let (bx, by, bw, bh) = rail_thumb(cx);
-                self.sheet_thumb(bx, by, bw, bh, thumb, s.thumb_tile);
+                self.sheet_thumb(bx, by, bw, bh, thumb, s.thumb_tile, 2);
             } else if let Some(ic) = s.kicker {
                 let (ix, icy, ipx) = rail_kicker(cx);
                 self.kit_icon(ix, icy, ipx, ic, col::TEXT3);

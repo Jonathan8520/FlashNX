@@ -324,8 +324,20 @@ pub(crate) fn mix_rgb(a: u32, b: u32, t: f32) -> u32 {
 }
 
 /// Under this height a game's generated tile is a small box (a panel's
-/// header, the rail's head): one line of name, no gamepad.
+/// header, the rail's head): its name at 13 px, no gamepad.
 const DEFAULT_TILE_SMALL_H: f32 = 80.0;
+/// The size of a small tile's name: the smallest a label goes.
+const DEFAULT_TILE_SMALL_PX: f32 = 13.0;
+/// A small tile this tall has room for its name on two lines: two 13 px lines
+/// 16 px apart keep 9 px over their capitals and 7 px under their descenders,
+/// a little more than the 6 px beside them. The rail's head (35 px) would
+/// keep 4 and 2: it stays on one line.
+const DEFAULT_TILE_TWO_LINES_H: f32 = 44.0;
+
+/// The name a game's generated tile shows: its file name without ".swf".
+fn tile_name(name: &str) -> &str {
+    name.strip_suffix(".swf").or_else(|| name.strip_suffix(".SWF")).unwrap_or(name)
+}
 
 impl SwitchRenderBackend {
     /// The tile of a game with no cover: its colour, deepened towards the page,
@@ -333,22 +345,15 @@ impl SwitchRenderBackend {
     /// it, rather than three initials. "BAD" told you nothing about which of two
     /// Bad Ice Creams it was.
     pub(crate) fn kit_default_tile(&mut self, x: f32, y: f32, w: f32, h: f32, chip: u32, name: &str) {
+        if h < DEFAULT_TILE_SMALL_H {
+            self.kit_default_tile_small(x, y, w, h, chip, name, 2);
+            return;
+        }
         self.kit_default_ground(x, y, w, h, chip);
         let ink = mix_rgb(chip & 0x00FF_FFFF, 0xFF_FF_FF, 0.78);
         let px = if w >= 180.0 { 20.0 } else { 17.0 };
         let pad = (w * 0.07).clamp(10.0, 16.0);
-        let shown = name.strip_suffix(".swf").or_else(|| name.strip_suffix(".SWF")).unwrap_or(name);
-        // A small box (a panel's 96 x 60 header, the rail's 56 x 35 head):
-        // one line at 13 px, cut in the middle, centred, and no gamepad. The
-        // grid's two lines at 17 px ran into the gamepad over them in the
-        // header, and in the rail's head the first line sat above the tile.
-        if h < DEFAULT_TILE_SMALL_H {
-            const SMALL_PX: f32 = 13.0;
-            let t = self.kit_fit_mid(shown, SMALL_PX, (w - 12.0).max(0.0));
-            let tw = self.kit_measure(&t, SMALL_PX);
-            self.kit_text_mid((x + (w - tw) * 0.5).round(), y + h * 0.5, SMALL_PX, &t, 0xFF00_0000 | ink);
-            return;
-        }
+        let shown = tile_name(name);
         // Room for the gamepad above the name, so the two never touch.
         let max_lines = if h >= 120.0 { 3 } else { 2 };
         let lines = self.kit_wrap(shown, px, w - 2.0 * pad, max_lines);
@@ -358,6 +363,59 @@ impl SwitchRenderBackend {
             self.kit_text_baseline(x + pad, baseline, px, line, 0xFF00_0000 | ink);
             baseline += lh;
         }
+    }
+
+    /// `kit_default_tile` in a small box (a panel's 96 x 60 header, the
+    /// rail's 56 x 35 head, the head on its way between them): its colour and
+    /// its name, centred, and no gamepad. The grid's two lines at 17 px ran
+    /// into the gamepad over them in the header, and in the rail's head the
+    /// first line sat above the tile. The name takes at most `most_lines`
+    /// (`kit_default_tile_small_lines`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn kit_default_tile_small(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        chip: u32,
+        name: &str,
+        most_lines: usize,
+    ) {
+        self.kit_default_ground(x, y, w, h, chip);
+        let ink = 0xFF00_0000 | mix_rgb(chip & 0x00FF_FFFF, 0xFF_FF_FF, 0.78);
+        let px = DEFAULT_TILE_SMALL_PX;
+        let lines = self.kit_default_tile_small_lines(w, h, name, most_lines);
+        let lh = (px * 1.25).round();
+        let mut cy = y + h * 0.5 - lh * 0.5 * lines.len().saturating_sub(1) as f32;
+        for line in &lines {
+            let tw = self.kit_measure(line, px);
+            self.kit_text_mid((x + (w - tw) * 0.5).round(), cy, px, line, ink);
+            cy += lh;
+        }
+    }
+
+    /// The lines of a game's name on a small tile `w` x `h`: two when
+    /// `most_lines` allows them, the box is tall enough
+    /// (`DEFAULT_TILE_TWO_LINES_H`) and they show the name whole, else one,
+    /// cut in the middle. A label wraps before it is cut: on one line, "Doodle
+    /// Jump" (93 px against the 84 of the options' header) read "Dood…ump",
+    /// where "Doodle" over "Jump" fits.
+    pub(crate) fn kit_default_tile_small_lines(
+        &mut self,
+        w: f32,
+        h: f32,
+        name: &str,
+        most_lines: usize,
+    ) -> std::vec::Vec<std::string::String> {
+        let shown = tile_name(name);
+        let room = (w - 12.0).max(0.0);
+        if most_lines >= 2 && h >= DEFAULT_TILE_TWO_LINES_H {
+            if let Some(lines) = self.kit_wrap_whole(shown, DEFAULT_TILE_SMALL_PX, room, 2) {
+                return lines;
+            }
+        }
+        std::vec![self.kit_fit_mid(shown, DEFAULT_TILE_SMALL_PX, room)]
     }
 
     /// `kit_default_tile` grown from a tile of size `base` into the box
@@ -431,7 +489,7 @@ impl SwitchRenderBackend {
             }
         }
         let ink = mix_rgb(chip, 0xFF_FF_FF, 0.78);
-        let shown = name.strip_suffix(".swf").or_else(|| name.strip_suffix(".SWF")).unwrap_or(name);
+        let shown = tile_name(name);
         let max_lines = if bh >= 120.0 { 3 } else { 2 };
         let lines = self.kit_wrap(shown, px0, bw - 2.0 * pad0, max_lines);
         let end = (px0 * z_end).round();

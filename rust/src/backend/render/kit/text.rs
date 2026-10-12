@@ -644,6 +644,26 @@ impl SwitchRenderBackend {
         lines
     }
 
+    /// `kit_wrap`'s lines when they show `text` whole, every word on one
+    /// line and nothing cut; None when it would have to break a word or cut
+    /// the text. For a label that tries a wrap before cutting (a game's name
+    /// on a small tile goes on two lines rather than lose its middle).
+    pub fn kit_wrap_whole(
+        &mut self,
+        text: &str,
+        px: f32,
+        max_w: f32,
+        max_lines: usize,
+    ) -> Option<std::vec::Vec<std::string::String>> {
+        let lines = self.kit_wrap(text, px, max_w, max_lines);
+        // Broken in a word or ellipsised, the lines no longer spell the words
+        // with one space between each. A single character wider than a line
+        // keeps a line of its own, too wide.
+        let spelled = lines.join(" ") == wrap_words(text).join(" ");
+        let fits = lines.iter().all(|l| self.kit_measure(l, px) <= max_w);
+        (spelled && fits).then_some(lines)
+    }
+
     /// `text`, with characters dropped from the MIDDLE until it fits `max_w`.
     /// For game names: what tells two episodes of a series apart is at the end.
     pub fn kit_fit_mid(&mut self, text: &str, px: f32, max_w: f32) -> std::string::String {
