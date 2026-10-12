@@ -338,8 +338,8 @@ pub struct Strings {
     /// TOUCHES row + share/diff label for the per-game "show cursor" toggle.
     pub show_cursor: &'static str,
     /// Touches et curseur row (#119): moving the controller moves the cursor.
-    /// Its choices: the off word (`gyro_mode_label`), `gyro_marble`,
-    /// `gyro_pointer`.
+    /// Its choices (`gyro_mode_label`): `gyro_off` of loc_ui.rs (its own short
+    /// word, not the overclock's), `gyro_marble`, `gyro_pointer`.
     pub set_gyro: &'static str,
     /// Gyroscope like a marble on the screen: the cursor goes toward the edge
     /// that goes down, as far as the console is tilted.
@@ -1232,7 +1232,7 @@ const RU: Strings = Strings {
     set_cursor_speed: "Скорость курсора",
     set_display_mode: "Экран",
     display_fit: "Вписать",
-    display_fill: "Заполнить",
+    display_fill: "Обрезать",
     display_stretch: "Растянуть",
     set_zoom: "Масштаб",
     set_screen_filter: "Фильтр",
@@ -1254,7 +1254,7 @@ const RU: Strings = Strings {
     filter_crt: "CRT",
     set_pixel_filter: "Пиксели",
     pixels_auto: "Авто",
-    pixels_smooth: "Сглаженные",
+    pixels_smooth: "Мягкие",
     pixels_sharp: "Чёткие",
     set_overclock: "Разгон",
     overclock_off: "Выкл",
@@ -1691,7 +1691,7 @@ const IT: Strings = Strings {
     profile_share_confirm: "Condividere i tuoi comandi per questo gioco?",
     share_confirm_update: "Aggiorna il tuo profilo condiviso:",
     touches_edit: "Modifica comandi",
-    touches_revert_default: "Ripristina comandi predefiniti",
+    touches_revert_default: "Ripristina predefiniti",
     profile_preview_none: "Questo profilo non cambia nessun tasto.",
     profile_share_dup: "Già nel catalogo. Cambia un tasto per condividere la tua versione.",
     toast_already_imported: "{} è già nella tua libreria.",
