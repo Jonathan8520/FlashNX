@@ -7279,7 +7279,9 @@ fn start_fp_search(query: &str, origin: Option<usize>) {
     log(&std::format!("library: flashpoint game search \"{}\" (async)\n", query));
     // Drop any thumbnail still coming for the previous results, and the
     // details blurb with them: a slot freed here can be handed to a logo next.
+    // Their logos go too, textures and all: those results are gone.
     crate::backend::render::thumb_cancel_all();
+    crate::backend::render::thumb_cache_clear();
     // A fresh result set: snap the glide and the tiles' clocks to rest.
     crate::backend::render::gallery_anim_reset();
     crate::backend::render::tile_open_reset();
@@ -11039,8 +11041,10 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 backend.draw_reveal_chrome(wx, wy, ww, wh);
                 if done && collapsing {
                     // Back on the importer, on the row the search was asked
-                    // from. The query stays, for the keyboard's next prefill.
+                    // from. The query stays, for the keyboard's next prefill;
+                    // the results go, and their logos' textures with them.
                     crate::backend::render::thumb_cancel_all();
+                    crate::backend::render::thumb_cache_clear();
                     if let Ok(mut s) = LIBRARY.lock() {
                         s.cover_candidates.clear();
                         s.cover_msg.clear();

@@ -6118,6 +6118,35 @@ fn thumb_lookup(url: &str) -> Option<ThumbTex> {
         .and_then(|c| c.iter().find(|(u, _)| u == url).map(|(_, t)| *t))
 }
 
+/// Logos the cache holds at most: two searches' worth (60 results each). Past
+/// it the oldest go, so screens that never call `thumb_cache_clear` (the cover
+/// picker) cannot grow it without end either.
+const THUMB_CACHE_MAX: usize = 120;
+
+/// Give a cached logo's textures (the logo and its blurred backdrop) back to
+/// the driver. On the GL thread, which input and render both run on.
+fn thumb_free(t: ThumbTex) {
+    if let ThumbTex::Image { tex, amb, .. } = t {
+        for name in [tex, amb] {
+            if name != 0 {
+                unsafe { glDeleteTextures(1, &name) };
+            }
+        }
+    }
+}
+
+/// Forget every cached logo and free its textures. Called when a result set is
+/// let go of (a new Flashpoint search, the results page folding back). The
+/// cache used to keep every logo for the rest of the session, and with two
+/// textures a logo each a search left up to 120 more GL objects behind, on a
+/// driver that gives out past about 4000.
+pub fn thumb_cache_clear() {
+    let gone = thumb_cache().lock().map(|mut c| std::mem::take(&mut *c)).unwrap_or_default();
+    for (_, t) in gone {
+        thumb_free(t);
+    }
+}
+
 /// URL of the thumbnail currently being fetched ASYNC (at most one at a time),
 /// or None when idle. The gallery render starts the next uncached logo when
 /// idle and `pump_thumbnail_load` finishes it — so the render thread NEVER
@@ -10966,8 +10995,16 @@ impl SwitchRenderBackend {
                 },
                 None => ThumbTex::Failed,
             };
-            if let Ok(mut c) = thumb_cache().lock() {
-                c.push((url.clone(), state));
+            let evicted: std::vec::Vec<(std::string::String, ThumbTex)> = match thumb_cache().lock() {
+                Ok(mut c) => {
+                    c.push((url.clone(), state));
+                    let over = c.len().saturating_sub(THUMB_CACHE_MAX);
+                    c.drain(..over).collect()
+                }
+                Err(_) => std::vec::Vec::new(),
+            };
+            for (_, t) in evicted {
+                thumb_free(t);
             }
         }
         if let Ok(mut inflight) = thumb_inflight().lock() {
