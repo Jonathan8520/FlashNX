@@ -47,3 +47,6 @@ Cargo.lock
 /forwarder/forwarder.nsp
 /forwarder/flashnx_forwarder.nsp
 /cpp/src/flashnx_forwarder.s
+
+# Python bytecode (scripts/*.py)
+__pycache__/
