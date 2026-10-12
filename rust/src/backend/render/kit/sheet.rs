@@ -117,6 +117,39 @@ pub(crate) const CASCADE_GAP: f32 = 10.0;
 pub(crate) const OPTIONS_W: f32 = 520.0;
 pub(crate) const OPTIONS_CHILD_W: f32 = 480.0;
 
+/// The cover beside a panel's title (Options.dc.html).
+const THUMB_W: f32 = 96.0;
+const THUMB_H: f32 = 60.0;
+
+/// Where the cover sits in the header of a panel whose left edge is `x`.
+/// This and the three below are the two ends of the parent's head on its way
+/// into the rail (`kit_cascade_on`), and the static header and rail draw from
+/// them too, so the movement starts and ends exactly on them.
+fn header_thumb(x: f32) -> (f32, f32, f32, f32) {
+    (x + 24.0, SHEET_MARGIN + 22.0, THUMB_W, THUMB_H)
+}
+
+/// Where the cover sits at the head of the rail centred on `cx`: the rail's
+/// width less its margins, at 16:10.
+fn rail_thumb(cx: f32) -> (f32, f32, f32, f32) {
+    let w = RAIL_W - 20.0;
+    (cx - w * 0.5, SHEET_MARGIN + 22.0, w, w * 0.625)
+}
+
+/// The size of a panel's own icon on its caption line.
+const KICKER_ICON: f32 = 14.0;
+
+/// The panel's own icon on its caption line (`sheet_kicker`), for a panel
+/// whose left edge is `x`: its left edge, its centre line and its size.
+fn header_kicker(x: f32) -> (f32, f32, f32) {
+    (x + 24.0, SHEET_MARGIN + 22.0 + 8.5, KICKER_ICON)
+}
+
+/// The same icon at the head of the rail centred on `cx`.
+fn rail_kicker(cx: f32) -> (f32, f32, f32) {
+    (cx - 10.0, SHEET_MARGIN + 22.0 + 8.5, 20.0)
+}
+
 /// Which edge a cascade hangs from.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Side {
@@ -219,7 +252,7 @@ impl SwitchRenderBackend {
     /// so its rows stay exactly where they were while it folds.
     fn sheet_header_h(&mut self, s: &Sheet) -> f32 {
         if s.thumb.is_some() {
-            return 22.0 + 60.0 + 18.0;
+            return 22.0 + THUMB_H + 18.0;
         }
         let mut h = 22.0;
         if s.kicker.is_some() || !s.crumbs.is_empty() {
@@ -291,13 +324,16 @@ impl SwitchRenderBackend {
         most
     }
 
-    /// The caption line: an icon and the path, the last step brighter.
-    fn sheet_kicker(&mut self, x: f32, cy: f32, max_w: f32, s: &Sheet) {
+    /// The caption line: an icon and the path, the last step brighter. `head`
+    /// false leaves the icon's place empty: it is on its way to the rail.
+    fn sheet_kicker(&mut self, x: f32, cy: f32, max_w: f32, s: &Sheet, head: bool) {
         let px = size::CAPTION + 1.0;
         let mut cx = x;
         if let Some(ic) = s.kicker {
-            self.kit_icon(cx, cy, 14.0, ic, col::TEXT3);
-            cx += 14.0 + 8.0;
+            if head {
+                self.kit_icon(cx, cy, KICKER_ICON, ic, col::TEXT3);
+            }
+            cx += KICKER_ICON + 8.0;
         }
         let end = x + max_w;
         let sep = "  \u{203A}  ";
@@ -329,30 +365,43 @@ impl SwitchRenderBackend {
         }
     }
 
-    /// Draw the header of `s` in a panel at `x`, `w` wide. `chips` false keeps
-    /// their room empty (the rail). Returns the y of the hairline under it.
-    fn sheet_header(&mut self, s: &Sheet, x: f32, w: f32, chips: bool) -> f32 {
+    /// Draw the header of `s` in a panel at `x`, `w` wide. `fold` is how far
+    /// the panel has folded towards its rail (`kit_cascade_on`), 0 when it
+    /// stands: folding, the place of its head (its cover, else its own icon)
+    /// is left empty, the head being on its way to the rail. Returns the y of
+    /// the hairline under it.
+    fn sheet_header(&mut self, s: &Sheet, x: f32, w: f32, fold: f32) -> f32 {
         let top = SHEET_MARGIN;
         let mut y = top + 22.0;
         let inner = w - 48.0;
+        let head = fold <= 0.0;
         if let Some(thumb) = s.thumb {
-            const TW: f32 = 96.0;
-            const TH: f32 = 60.0;
-            self.sheet_thumb(x + 24.0, y, TW, TH, thumb, s.thumb_tile);
-            let tx = x + 24.0 + TW + 16.0;
-            let tmax = x + w - 24.0 - tx;
-            let t = self.sheet_title_fit(s, size::WINDOW_TITLE - 1.0, tmax);
-            let has_sub = s.subtitle.is_some();
-            let tcy = if has_sub { y + 20.0 } else { y + TH * 0.5 };
-            self.kit_text_mid(tx, tcy, size::WINDOW_TITLE - 1.0, &t, col::TEXT);
-            if let Some(sub) = s.subtitle {
-                let st = self.kit_fit(sub, size::CAPTION + 1.0, tmax);
-                self.kit_text_mid(tx, y + 44.0, size::CAPTION + 1.0, &st, col::TEXT3);
+            let (bx, by, bw, bh) = header_thumb(x);
+            if head {
+                self.sheet_thumb(bx, by, bw, bh, thumb, s.thumb_tile);
             }
-            y += TH + 18.0;
+            // The cover on its way to the rail crosses the title beside it:
+            // the title and the line under it fade out as it goes, gone
+            // before the rail takes over.
+            let fade = (1.0 - fold * 2.5).clamp(0.0, 1.0);
+            let ink = |rgba: u32| (((rgba >> 24) as f32 * fade).round() as u32) << 24 | (rgba & 0x00FF_FFFF);
+            let tx = bx + bw + 16.0;
+            let tmax = x + w - 24.0 - tx;
+            if fade > 0.0 {
+                let t = self.sheet_title_fit(s, size::WINDOW_TITLE - 1.0, tmax);
+                let has_sub = s.subtitle.is_some();
+                let tcy = if has_sub { y + 20.0 } else { y + THUMB_H * 0.5 };
+                self.kit_text_mid(tx, tcy, size::WINDOW_TITLE - 1.0, &t, ink(col::TEXT));
+                if let Some(sub) = s.subtitle {
+                    let st = self.kit_fit(sub, size::CAPTION + 1.0, tmax);
+                    self.kit_text_mid(tx, y + 44.0, size::CAPTION + 1.0, &st, ink(col::TEXT3));
+                }
+            }
+            y += THUMB_H + 18.0;
         } else {
             if s.kicker.is_some() || !s.crumbs.is_empty() {
-                self.sheet_kicker(x + 24.0, y + 8.5, inner, s);
+                let (kx, kcy, _) = header_kicker(x);
+                self.sheet_kicker(kx, kcy, inner, s, head);
                 y += 17.0 + 6.0;
             }
             let t = self.sheet_title_fit(s, size::WINDOW_TITLE + 2.0, inner);
@@ -365,12 +414,10 @@ impl SwitchRenderBackend {
             }
             if !s.chips.is_empty() {
                 y += 12.0;
-                if chips {
-                    let mut cx = x + 24.0;
-                    for (ic, text, ink) in s.chips {
-                        let cw = self.kit_status_chip(cx, y + 14.0, *ic, text, *ink);
-                        cx += cw + 8.0;
-                    }
+                let mut cx = x + 24.0;
+                for (ic, text, ink) in s.chips {
+                    let cw = self.kit_status_chip(cx, y + 14.0, *ic, text, *ink);
+                    cx += cw + 8.0;
                 }
                 y += 28.0;
             }
@@ -388,6 +435,28 @@ impl SwitchRenderBackend {
             self.kit_fit_mid(s.title, px, max_w)
         } else {
             self.kit_fit(s.title, px, max_w)
+        }
+    }
+
+    /// The head of `s`, its cover or else its own icon, `e` of the way from
+    /// its place in the header of the full panel at `x` (0) to the head of the
+    /// settled rail at `rail_x` (1). On the fold's progress, so it keeps to
+    /// the panel's visible part as the edge moves in, and its two ends are
+    /// exactly where the header and the rail draw it. A game with no cover
+    /// shows its generated tile at every size in between: under 80 px high
+    /// that is one line of its name, cut in the middle (`kit_default_tile`).
+    fn sheet_head_between(&mut self, s: &Sheet, x: f32, rail_x: f32, e: f32) {
+        let mix = |a: f32, b: f32| a + (b - a) * e;
+        let rail_cx = rail_x + RAIL_W * 0.5;
+        if let Some(thumb) = s.thumb {
+            let (ax, ay, aw, ah) = header_thumb(x);
+            let (bx, by, bw, bh) = rail_thumb(rail_cx);
+            self.sheet_thumb(mix(ax, bx), mix(ay, by), mix(aw, bw), mix(ah, bh), thumb, s.thumb_tile);
+        } else if let Some(ic) = s.kicker {
+            let (ax, acy, apx) = header_kicker(x);
+            let (bx, bcy, bpx) = rail_kicker(rail_cx);
+            // A whole size: the icon is rasterized at the size it is drawn.
+            self.kit_icon(mix(ax, bx), mix(acy, bcy), mix(apx, bpx).round(), ic, col::TEXT3);
         }
     }
 
@@ -423,15 +492,16 @@ impl SwitchRenderBackend {
     /// The whole panel, at `x`, `w` wide, full height. Publishes its rows for
     /// touch when it has a cursor.
     pub(crate) fn kit_sheet_at(&mut self, s: &Sheet, x: f32, w: f32) {
-        self.sheet_draw(s, x, w, true);
+        self.sheet_draw(s, x, w, true, 0.0);
     }
 
     /// `kit_sheet_at`; `publish` false for a panel that is only being shown on
-    /// its way somewhere (it must not take the taps of the page in front).
-    fn sheet_draw(&mut self, s: &Sheet, x: f32, w: f32, publish: bool) {
+    /// its way somewhere (it must not take the taps of the page in front),
+    /// `fold` above 0 for one folding into its rail (`sheet_header`).
+    fn sheet_draw(&mut self, s: &Sheet, x: f32, w: f32, publish: bool, fold: f32) {
         let (top, h) = self.sheet_frame(s, w);
         self.kit_panel(x, top, w, h, false);
-        let line_y = self.sheet_header(s, x, w, true);
+        let line_y = self.sheet_header(s, x, w, fold);
 
         // The help box and the hints, from the bottom up. The box is as tall
         // as the page's longest help, whichever row it explains: its top edge
@@ -690,20 +760,29 @@ impl SwitchRenderBackend {
     /// page. It is the path, and the page's caption spells it out; a tap on
     /// either goes back a level (`kit_cascade_on`), as does the direction
     /// pointing at it (input rule 3). `full_w` is the parent's own width,
-    /// which its rows were laid out at.
+    /// which its rows were laid out at; `head` false leaves the head's place
+    /// empty while the head travels on its own (`kit_cascade_on`).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn kit_sheet_rail(&mut self, s: &Sheet, x: f32, w: f32, branch: usize, side: Side, full_w: f32) {
+    pub(crate) fn kit_sheet_rail(&mut self, s: &Sheet, x: f32, w: f32, branch: usize, side: Side, full_w: f32, head: bool) {
         // The parent's own height: in portrait it hugs its rows, and the rail
         // keeps the panel it folds from.
         let (top, h) = self.sheet_frame(s, full_w);
         self.kit_panel(x, top, w, h, false);
-        let cx = x + w * 0.5;
+        // The icons stand where the settled rail has them, on the side it
+        // hangs from, while it is still narrowing. Centred in a rail still
+        // three or four times its width, they appeared at the hand-over about
+        // a hundred pixels from there (91 in the pause, 111 in a game's
+        // options) and slid back.
+        let cx = if side == Side::Left { x + RAIL_W * 0.5 } else { x + w - RAIL_W * 0.5 };
         // The head: the panel's own icon (the pause's), or its cover.
-        if let Some(thumb) = s.thumb {
-            let (tw_, th_) = ((w - 20.0).max(8.0), ((w - 20.0) * 0.625).max(5.0));
-            self.sheet_thumb(cx - tw_ * 0.5, top + 22.0, tw_, th_, thumb, s.thumb_tile);
-        } else if let Some(ic) = s.kicker {
-            self.kit_icon(cx - 10.0, top + 22.0 + 8.5, 20.0, ic, col::TEXT3);
+        if head {
+            if let Some(thumb) = s.thumb {
+                let (bx, by, bw, bh) = rail_thumb(cx);
+                self.sheet_thumb(bx, by, bw, bh, thumb, s.thumb_tile);
+            } else if let Some(ic) = s.kicker {
+                let (ix, icy, ipx) = rail_kicker(cx);
+                self.kit_icon(ix, icy, ipx, ic, col::TEXT3);
+            }
         }
         let line_y = (top + self.sheet_header_h(s)).round();
         self.draw_overlay_rect(x + 12.0, line_y, w - 24.0, 1.0, col::LINE);
@@ -803,7 +882,10 @@ impl SwitchRenderBackend {
     /// panel down (its controls, hints and help go first, its icons last), and
     /// the page is uncovered from the rail outwards, at its final place: text
     /// that slides is text nobody can read until it stops. Halfway, the cut
-    /// panel gives way to the rail. B plays it backwards.
+    /// panel gives way to the rail. The parent's head, its cover or its own
+    /// icon, is the one thing that travels: drawn on its own over both, it
+    /// goes from its place in the header to the rail's head on the fold's
+    /// own progress (`sheet_head_between`). B plays it all backwards.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn kit_cascade_on(
         &mut self,
@@ -848,17 +930,32 @@ impl SwitchRenderBackend {
         }
         let px = at(pw);
         if e < 0.5 {
-            // The full panel, cut down by its moving edge (and its shadow with
-            // it), drawn where it stood.
-            self.set_clip_outer(Some((px - 30.0, 0.0, pw + 60.0, vh)));
-            self.sheet_draw(parent, at(full_w), full_w, false);
+            // The full panel, drawn where it stood and cut at its moving edge,
+            // its shadow kept on the side it hangs from. The cut let 30 px of
+            // the panel through past the edge: the border line ran across the
+            // rows, and the panel went on beyond it without one.
+            let clip = if side == Side::Left { (px - 40.0, 0.0, pw + 40.0, vh) } else { (px, 0.0, pw + 40.0, vh) };
+            self.set_clip_outer(Some(clip));
+            self.sheet_draw(parent, at(full_w), full_w, false, e);
+            // The narrowing panel's shadow past its edge, where the full
+            // panel's went with the part cut away, as the rail has its own.
+            let (ptop, ph) = self.sheet_frame(parent, full_w);
+            let beyond = if side == Side::Left { (px + pw, 0.0, 40.0, vh) } else { (px - 40.0, 0.0, 40.0, vh) };
+            self.set_clip_outer(Some(beyond));
+            self.kit_shadow(px, ptop + 10.0, pw, ph, radius::PANEL, 26.0, col::SHADOW);
             self.set_clip_outer(None);
             // The moving edge itself, so the cut reads as the panel's border.
             let ex = if side == Side::Left { px + pw - 1.0 } else { px };
-            let (ptop, ph) = self.sheet_frame(parent, full_w);
             self.draw_overlay_rect(ex, ptop + 20.0, 1.0, ph - 40.0, col::PANEL_LINE);
         } else {
-            self.kit_sheet_rail(parent, px, pw, branch, side, full_w);
+            self.kit_sheet_rail(parent, px, pw, branch, side, full_w, e >= 1.0);
+        }
+        // The head on its way, over the panel it leaves and the rail it joins.
+        // Each of them drew its own copy before: the header's was cut away by
+        // the moving edge, then the rail's popped up at the hand-over, as wide
+        // as the rail was then (278 px in a game's options) and shrinking.
+        if e < 1.0 {
+            self.sheet_head_between(parent, at(full_w), at(RAIL_W), e);
         }
         // Settled, the rail and the page's "‹ Parent" caption take a finger
         // back a level, as B does: both look like the way back (input rule
