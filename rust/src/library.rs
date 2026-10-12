@@ -4248,6 +4248,10 @@ fn input_inner(button: &str) -> bool {
             // ever gave.)
             if matches!(button, "B" | "Minus") {
                 net::cancel_archive_fetch();
+                // Nothing failed: no address to fix and nothing to send again
+                // from a later error page that is about something else.
+                s.failed_url.clear();
+                s.import_retry = None;
                 crate::backend::render::distant_reveal_begin_collapse();
             }
             true
@@ -7221,6 +7225,9 @@ fn run_direct_download(url: &str) {
                 crate::loc::s().toast_already_imported.replace("{}", &shown),
                 TOAST_INFO,
             );
+            // The address is good, and nothing was sent to fail.
+            s.failed_url.clear();
+            s.import_retry = None;
             drop(s);
             push_history(url);
             return;
@@ -7418,6 +7425,9 @@ fn handle_distant_files_input(
                 launch_from_importer(s, abs, rect, Screen::DistantFiles { selection, scroll_offset: scroll });
                 return;
             }
+            // A game of an archive that opened: if it fails, the archive's
+            // address is not what needs fixing (no Y on the error page).
+            s.failed_url.clear();
             s.import_retry = Some(RetryAction::ArchiveFile { selection, scroll });
             match net::start_download(&file.download_url, &out_path) {
                 Ok(()) => {
@@ -8834,6 +8844,10 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
                 launch_from_importer(s, abs, rect, Screen::FpGallery { selection, scroll });
                 return;
             }
+            // No address of the player's in a Flashpoint download: one left
+            // from an archive tried before must not be offered for fixing (Y)
+            // on this game's error page, whichever way it fails.
+            s.failed_url.clear();
             let swf_path = std::format!("{}/{}", primary_root(), swf_name);
             // Zipped games come from the GameZIP server: download a temp `.zip`,
             // then extract. Non-zipped (legacy "loose") games aren't on that
