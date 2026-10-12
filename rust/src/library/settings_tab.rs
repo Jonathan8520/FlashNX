@@ -227,11 +227,20 @@ fn row_input(s: &mut State, section: SetSection, key: &str, dir: i32) -> bool {
         }
         (SetSection::Library, "DOSSIER") => {
             if press {
-                // Opens on the folder in use, so the row opens on what it shows.
-                let start = primary_root();
-                s.dir_browse = list_dirs(&start);
-                s.dir_path = start;
-                s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 };
+                // Opens beside the folder in use, the cursor on it: the row
+                // opens on what it shows, among folders it could move to. Its
+                // own listing holds none (every folder in it is part of the
+                // library), and a new folder made beside it can take it. A
+                // library at the card's root has nothing beside it, and opens
+                // on itself.
+                let root = primary_root();
+                if browse_parent(&root).is_some() {
+                    browse_go_up(s, &root);
+                } else {
+                    s.dir_browse = list_dirs(&root);
+                    s.dir_path = root;
+                    s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 };
+                }
             }
             press
         }
@@ -649,6 +658,12 @@ pub(crate) fn same_dir(a: &str, b: &str) -> bool {
 pub(crate) fn inside_library(path: &str, root: &str) -> bool {
     let root = root.trim_end_matches('/');
     path.len() > root.len() && path.starts_with(root) && path.as_bytes()[root.len()] == b'/'
+}
+
+/// Whether `path` is the library at `root` or a folder inside it: nowhere a
+/// new folder could take the library either, so the browser makes none there.
+pub(crate) fn within_library(path: &str, root: &str) -> bool {
+    same_dir(path, root) || inside_library(path, root)
 }
 
 /// A path as the page shows it: from the card's root, `sdmc:` left out.
@@ -1122,7 +1137,11 @@ fn folders_page(
     if let Some(v) = a_verb {
         hints.push((&[Btn::A][..], v));
     }
-    hints.push((&[Btn::X][..], lc.games_dir_new));
+    // In the library, a new folder would be one more greyed row: X makes none
+    // there (`run_new_folder_flow` says why if it is pressed anyway).
+    if !within_library(path, &root) {
+        hints.push((&[Btn::X][..], lc.games_dir_new));
+    }
     hints.push((&[Btn::B][..], if up { u.go_up } else { u.back }));
 }
 

@@ -4520,7 +4520,8 @@ fn drive_pending_move() {
 /// Walking out of a folder and being dropped on row zero means finding your
 /// place again by eye every single time — and the folder you just came out of
 /// is the one thing you are certain to be looking for. Shared by the REMONTER
-/// row and by B, which is how most people actually go back up.
+/// row and by B, which is how most people actually go back up, and by the
+/// RÉGLAGES row that opens the browser beside the library, on its folder.
 fn browse_go_up(s: &mut State, path: &str) {
     let Some(parent) = browse_parent(path) else {
         return;
@@ -4896,6 +4897,16 @@ fn run_new_folder_flow() {
         Ok(s) => s.dir_path.clone(),
         Err(_) => return,
     };
+    // In the library or one of its folders, the new folder could not take the
+    // library either, and would only be written to the card to sit greyed out
+    // under the cursor. The footer offers no X there; a press says why, before
+    // the keyboard asks for a name that leads nowhere.
+    if settings_tab::within_library(&here, &primary_root()) {
+        if let Ok(mut s) = LIBRARY.lock() {
+            set_toast(&mut s, crate::loc_ui::ui().dir_new_in_lib.to_string(), TOAST_INFO);
+        }
+        return;
+    }
     crate::net::log(&std::format!("games dir: new folder in {}
 ", here));
     let lc = crate::loc::s();

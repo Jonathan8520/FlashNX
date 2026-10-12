@@ -265,6 +265,8 @@ pub struct Ui {
     pub dir_current: &'static str,
     /// Folder browser: A on a folder inside the library.
     pub dir_inside_lib: &'static str,
+    /// Toast for X (new folder) in the games folder browser while it shows the library or a folder inside it.
+    pub dir_new_in_lib: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -446,6 +448,7 @@ const EN: Ui = Ui {
     in_library: "In your library",
     dir_current: "Current folder",
     dir_inside_lib: "This folder is inside your library: choose another one.",
+    dir_new_in_lib: "You are in your library: create the new folder outside it.",
 };
 
 const FR: Ui = Ui {
@@ -627,6 +630,7 @@ const FR: Ui = Ui {
     in_library: "Dans ta bibliothèque",
     dir_current: "Dossier actuel",
     dir_inside_lib: "Ce dossier est dans ta bibliothèque : choisis-en un autre.",
+    dir_new_in_lib: "Tu es dans ta bibliothèque : crée le nouveau dossier en dehors.",
 };
 
 const ES: Ui = Ui {
@@ -808,6 +812,7 @@ const ES: Ui = Ui {
     in_library: "En tu biblioteca",
     dir_current: "Carpeta actual",
     dir_inside_lib: "Esta carpeta está dentro de tu biblioteca: elige otra.",
+    dir_new_in_lib: "Estás dentro de tu biblioteca: crea la carpeta nueva fuera de ella.",
 };
 
 const RU: Ui = Ui {
@@ -989,6 +994,7 @@ const RU: Ui = Ui {
     in_library: "В твоей библиотеке",
     dir_current: "Текущая папка",
     dir_inside_lib: "Эта папка внутри твоей библиотеки: выбери другую.",
+    dir_new_in_lib: "Ты внутри своей библиотеки: создай новую папку за её пределами.",
 };
 
 const DE: Ui = Ui {
@@ -1170,6 +1176,7 @@ const DE: Ui = Ui {
     in_library: "In deiner Bibliothek",
     dir_current: "Aktueller Ordner",
     dir_inside_lib: "Dieser Ordner liegt in deiner Bibliothek: Wähle einen anderen.",
+    dir_new_in_lib: "Du bist in deiner Bibliothek: Lege den neuen Ordner außerhalb an.",
 };
 
 const IT: Ui = Ui {
@@ -1351,6 +1358,7 @@ const IT: Ui = Ui {
     in_library: "Nella tua libreria",
     dir_current: "Cartella attuale",
     dir_inside_lib: "Questa cartella è dentro la tua libreria: scegline un'altra.",
+    dir_new_in_lib: "Sei dentro la tua libreria: crea la nuova cartella fuori da lì.",
 };
 
 const PT: Ui = Ui {
@@ -1532,6 +1540,7 @@ const PT: Ui = Ui {
     in_library: "Na sua biblioteca",
     dir_current: "Pasta atual",
     dir_inside_lib: "Esta pasta está dentro da sua biblioteca: escolha outra.",
+    dir_new_in_lib: "Você está dentro da sua biblioteca: crie a nova pasta fora dela.",
 };
 
 const ZH: Ui = Ui {
@@ -1713,6 +1722,7 @@ const ZH: Ui = Ui {
     in_library: "在你的游戏库中",
     dir_current: "当前文件夹",
     dir_inside_lib: "这个文件夹在你的游戏库内：请选择其他文件夹。",
+    dir_new_in_lib: "你在游戏库内：请在游戏库外新建文件夹。",
 };
 
 const TR: Ui = Ui {
@@ -1894,6 +1904,7 @@ const TR: Ui = Ui {
     in_library: "Kütüphanende",
     dir_current: "Geçerli klasör",
     dir_inside_lib: "Bu klasör kütüphanenin içinde: başka bir klasör seç.",
+    dir_new_in_lib: "Kütüphanenin içindesin: yeni klasörü kütüphanenin dışında oluştur.",
 };
 
 pub fn ui() -> &'static Ui {
