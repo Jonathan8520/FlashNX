@@ -45,6 +45,10 @@ impl SwitchRenderBackend {
                 ly += 26.0;
             }
             self.modal_hints(&frame, &[(&[Btn::Minus], u.hint_search), (&[Btn::B], u.back)], false);
+            // Nothing to tap here. Published all the same: the last table under
+            // this tag is the options panel's, and two taps on the dimmed
+            // panel around the window moved the picker's hidden cursor.
+            ui_cells_publish(ui_screen_kind(), std::vec::Vec::new());
             unsafe {
                 glUseProgram(0);
                 glBindVertexArray(0);
