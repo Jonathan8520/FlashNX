@@ -1645,6 +1645,13 @@ pub fn gyro_mode_for(basename: &str) -> u8 {
 
 /// Step a game's setting OFF -> MARBLE -> POINTER (library OPTIONS > TOUCHES);
 /// returns the new value.
+/// `cycle_gyro_for` either way: forward for `dir >= 0`, back otherwise.
+pub fn step_gyro_for(basename: &str, dir: i32) -> u8 {
+    let mode = crate::step_wrap(gyro_mode_for(basename), GYRO_MODE_COUNT, dir as core::ffi::c_int);
+    write_pref(basename, "gyro", mode);
+    mode
+}
+
 pub fn cycle_gyro_for(basename: &str) -> u8 {
     let mode = (gyro_mode_for(basename) + 1) % GYRO_MODE_COUNT;
     write_pref(basename, "gyro", mode);

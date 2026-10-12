@@ -197,7 +197,8 @@ pub(crate) enum Screen {
     /// Confirm deleting one of YOUR OWN shared profiles from the catalog (#20,
     /// X on a self-shared row in the picker). A confirms (DELETEs via the relay,
     /// hoisted) → toast + picker; B cancels back to the picker.
-    ProfileDeleteConfirm { game_idx: usize, profile_idx: usize },
+    /// `selection`: 0 = cancel (where it opens), 1 = delete.
+    ProfileDeleteConfirm { game_idx: usize, profile_idx: usize, selection: usize },
     /// Transient "loading" panel shown for ONE frame before a deferred profile
     /// network flow runs (#20), so a blocking GitHub call doesn't freeze on stale
     /// content. `render` runs the stashed `PendingNet` the next frame, which sets
@@ -3273,6 +3274,9 @@ fn set_screen_selection(s: &mut State, idx: usize) -> bool {
         Screen::DistantHistoryConfirm { selection } => {
             put!(selection, Screen::DistantHistoryConfirm { selection: idx })
         }
+        Screen::ProfileDeleteConfirm { game_idx, profile_idx, selection } => {
+            put!(selection, Screen::ProfileDeleteConfirm { game_idx, profile_idx, selection: idx })
+        }
         Screen::SortModal { selection, prev_sel, prev_scroll, reverse } => put!(
             selection,
             Screen::SortModal { selection: idx, prev_sel, prev_scroll, reverse }
@@ -3865,8 +3869,10 @@ fn input_inner(button: &str) -> bool {
         }
         // A on the delete confirm = remove my shared profile (#20). Hoisted: the
         // DELETE is an HTTPS POST that must not run under the LIBRARY lock.
-        if let Screen::ProfileDeleteConfirm { game_idx, profile_idx } = screen_snap {
-            if button == "A" {
+        if let Screen::ProfileDeleteConfirm { game_idx, profile_idx, selection } = screen_snap {
+            // A on "Delete" deletes (a network call, hoisted); A on "Cancel"
+            // falls through to the handler, which goes back.
+            if button == "A" && selection == 1 {
                 defer_net(PendingNet::DeleteProfile { game_idx, profile_idx }, game_idx);
                 return true;
             }
@@ -4160,10 +4166,16 @@ fn input_inner(button: &str) -> bool {
             handle_profile_list_input(&mut s, button, game_idx, selection);
             true
         }
-        Screen::ProfileDeleteConfirm { game_idx, profile_idx } => {
-            // A (delete) is hoisted in input(); B cancels back to the picker.
-            if matches!(button, "B" | "Minus") {
-                s.screen = Screen::ProfileList { game_idx, selection: profile_idx };
+        Screen::ProfileDeleteConfirm { game_idx, profile_idx, selection } => {
+            // A on "Delete" is hoisted in input(); everything else here.
+            match button {
+                "Left" | "StickLLeft" | "Right" | "StickLRight" | "Up" | "StickLUp" | "Down" | "StickLDown" => {
+                    s.screen = Screen::ProfileDeleteConfirm { game_idx, profile_idx, selection: 1 - selection.min(1) };
+                }
+                "A" | "B" | "Minus" => {
+                    s.screen = Screen::ProfileList { game_idx, selection: profile_idx };
+                }
+                _ => {}
             }
             true
         }
@@ -5499,7 +5511,7 @@ fn handle_profile_list_input(s: &mut State, button: &str, game_idx: usize, mut s
                 .get(selection)
                 .is_some_and(|m| crate::profiles::is_mine(&m.profile.id))
             {
-                s.screen = Screen::ProfileDeleteConfirm { game_idx, profile_idx: selection };
+                s.screen = Screen::ProfileDeleteConfirm { game_idx, profile_idx: selection, selection: 0 };
                 return;
             }
         }
@@ -5722,6 +5734,33 @@ const CURSOR_X10: &[u32] = &[5, 10, 15, 20, 25, 30, 40, 50];
 fn handle_touches_menu_input(s: &mut State, button: &str, game_idx: usize, mut selection: usize) {
     let row_count = TOUCHES_MENU_FIXED_ROWS + s.touches_can_revert as usize;
     let last = row_count - 1;
+    // The three value rows step with Left and Right too, either way, as the
+    // same rows do in the pause menu.
+    let dir: i32 = match button {
+        "Left" | "StickLLeft" => -1,
+        "Right" | "StickLRight" => 1,
+        _ => 0,
+    };
+    if dir != 0 && (3..=5).contains(&selection) {
+        if let Some(basename) = s.entries.get(game_idx).map(|e| e.basename.clone()) {
+            match selection {
+                3 => {
+                    let n = CURSOR_X10.len() as i32;
+                    let cur = if s.touches_cursor_idx < 0 { 1 } else { s.touches_cursor_idx };
+                    let next = (cur + dir).rem_euclid(n);
+                    keymap::set_cursor_speed_for(&basename, next);
+                    s.touches_cursor_idx = next;
+                }
+                4 => {
+                    keymap::toggle_show_cursor_for(&basename);
+                    s.touches_show_cursor = !s.touches_show_cursor;
+                }
+                _ => s.touches_gyro = keymap::step_gyro_for(&basename, dir),
+            }
+        }
+        s.screen = Screen::TouchesMenu { game_idx, selection };
+        return;
+    }
     match button {
         "Up" | "StickLUp" => {
             selection = if selection == 0 { last } else { selection - 1 };
@@ -9762,7 +9801,19 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                         lc.touches_revert_default
                     });
                 }
-                backend.draw_library_list_modal(lc.opt_keys, &game, selection, &rows, lc.touches_footer, false);
+                let u = crate::loc_ui::ui();
+                // Cursor speed, cursor and gyroscope step with Left and Right.
+                backend.draw_list_window(
+                    lc.opt_keys,
+                    Some(&game),
+                    selection,
+                    &rows,
+                    0b11_1000,
+                    &[
+                        (&[crate::backend::render::Btn::A], u.choose),
+                        (&[crate::backend::render::Btn::B], u.back),
+                    ],
+                );
             }
         }
         Screen::ProfileList { game_idx, selection } => {
@@ -9829,8 +9880,9 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 );
             }
         }
-        Screen::ProfileDeleteConfirm { profile_idx, .. } => {
+        Screen::ProfileDeleteConfirm { profile_idx, selection, .. } => {
             let lc = crate::loc::s();
+            let u = crate::loc_ui::ui();
             let name = LIBRARY
                 .lock()
                 .ok()
@@ -9845,14 +9897,18 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     })
                 })
                 .unwrap_or_default();
-            let refs = [name.as_str()];
-            // usize::MAX = no cursor (it's a confirm: A deletes / B cancels).
-            backend.draw_library_list_modal(
+            use crate::backend::render::{Choice, Icon};
+            backend.draw_library_dim_backdrop();
+            backend.draw_confirm(
+                Icon::Trash,
                 lc.profile_del_confirm,
                 "",
-                usize::MAX,
-                &refs,
-                lc.del_footer,
+                Some(&name),
+                &[
+                    Choice { label: u.cancel, destructive: false },
+                    Choice { label: lc.opt_delete, destructive: true },
+                ],
+                selection,
                 true,
             );
         }
