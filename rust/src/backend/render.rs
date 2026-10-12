@@ -1444,7 +1444,7 @@ pub(crate) use kit::text::HintItem;
 pub(crate) use kit::theme::col as ui_col;
 pub(crate) use kit::text::Btn;
 pub(crate) use pages::settings::{SettingsExtra, SettingsRow};
-pub(crate) use pages::windows::{Choice, WinRow};
+pub(crate) use pages::windows::{Choice, SortOption, WinRow};
 pub(crate) use kit::list::Row;
 pub(crate) use kit::sheet::{cascade_step, Sheet, Side, OPTIONS_CHILD_W, OPTIONS_W};
 

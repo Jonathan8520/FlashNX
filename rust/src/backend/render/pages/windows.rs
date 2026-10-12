@@ -272,28 +272,48 @@ impl SwitchRenderBackend {
     }
 }
 
+/// One way to sort, as the sort window shows it: its icon, what it sorts BY,
+/// and the two orders it gives, written as what the player will see, the
+/// natural one first ("Derniers ajoutés", "Premiers ajoutés").
+pub(crate) struct SortOption<'a> {
+    pub icon: Icon,
+    pub label: &'a str,
+    pub orders: [&'a str; 2],
+}
+
 impl SwitchRenderBackend {
-    /// The sort picker: the orders as rows with an icon, the one in force
-    /// ticked, and under the title the direction as a two-part switch that X
-    /// flips. Nothing applies before A: B leaves the list as it was.
+    /// The sort picker. Each row is a way to sort, with both its orders as
+    /// words on its right and the one it would apply lit: Left / Right (or X)
+    /// turn the focused row round, A applies it, B leaves the list as it was.
+    /// The sort in force is ticked. Bit `i` of `reversed` set = row `i` shows
+    /// its second order. `subtitle` says what the order applies to, `help`
+    /// what the rows cannot.
+    ///
+    /// It used to be noun rows ("Ajouté", "Plus joués") under one "Croissant /
+    /// Décroissant" switch for all of them, which said the opposite of the list
+    /// for most rows: their natural order is the descending one.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw_sort_window(
         &mut self,
         title: &str,
-        options: &[(Icon, &str)],
+        subtitle: Option<&str>,
+        options: &[SortOption],
         selection: usize,
         active: Option<usize>,
-        reverse: bool,
+        reversed: u8,
+        help: Option<&str>,
     ) {
         use super::super::kit::list::ScrollRows;
-        use kit::theme::{col, size};
-        let lc = crate::loc::s();
+        use kit::theme::col;
         let u = crate::loc_ui::ui();
-        let frame = self.draw_modal_frame(MODAL_W, options.len(), None, false, title, Some(""), None);
-        // The direction, where the subtitle would be.
-        let sx = frame.x + MODAL_ROW_X;
-        let cy = frame.y + 82.0;
-        let gw = self.kit_button(sx, cy, size::GLYPH, Btn::X, col::GLYPH);
-        self.kit_segmented(sx + gw + 10.0, cy, &[lc.sort_dir_asc, lc.sort_dir_desc], reverse as usize, size::LABEL);
+        // Wide enough for both orders of a row side by side in most languages;
+        // a pair too long for its row shows the lit one between arrows instead.
+        let width = MODAL_W_WIDE.min(self.dimensions.width as f32 - 40.0);
+        let help = help.filter(|h| !h.trim().is_empty());
+        let help_h = help.map_or(0.0, |t| self.kit_help_box_height(t, width - 32.0, 3) + 20.0);
+        let pad_top = if subtitle.is_some() { MODAL_PAD_TOP } else { MODAL_PAD_TOP_TIGHT };
+        let h = pad_top + options.len().max(1) as f32 * MODAL_ROW_H + help_h + MODAL_PAD_BOTTOM;
+        let frame = self.draw_modal_frame(width, options.len(), Some(h), false, title, subtitle, None);
         let spec = ScrollRows {
             x: frame.x + 16.0,
             w: frame.w - 32.0,
@@ -307,13 +327,19 @@ impl SwitchRenderBackend {
         };
         let (x, w) = (spec.x, spec.w);
         self.kit_scroll_rows(&spec, options.len(), selection, 0, |s, i, cy, focused| {
-            let (icon, label) = options[i];
-            let row = WinRow::new(icon, label).mark_if(active == Some(i), Icon::Check, col::OK);
+            let o = &options[i];
+            let lit = if i < 8 { ((reversed >> i) & 1) as usize } else { 0 };
+            let row = WinRow::new(o.icon, o.label)
+                .choice(&o.orders, lit)
+                .mark_if(active == Some(i), Icon::Check, col::OK);
             s.kit_row_item(x, cy, w, &row, focused);
         });
+        if let Some(text) = help {
+            self.kit_help_box(frame.x + 16.0, frame.y + frame.h - MODAL_PAD_BOTTOM - 10.0, frame.w - 32.0, text, 3);
+        }
         self.modal_hints(
             &frame,
-            &[(&[Btn::A], u.apply), (&[Btn::X], u.order), (&[Btn::B], u.cancel)],
+            &[(&[Btn::A], u.apply), (&[Btn::Dpad, Btn::X], u.sort_flip), (&[Btn::B], u.cancel)],
             false,
         );
         unsafe {

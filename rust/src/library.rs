@@ -87,7 +87,9 @@ pub(crate) enum Screen {
     FpDetails { selection: usize, scroll: usize, size: u64 },
     /// JOUER sort picker (Y): centered modal — A-Z / recent / most-played / size.
     /// `prev_sel`/`prev_scroll` restore the gallery cursor when B (cancel) is hit.
-    SortModal { selection: usize, prev_sel: usize, prev_scroll: usize, reverse: bool },
+    /// Bit `i` of `dirs` set = row `i` shows (and A would apply) its reversed
+    /// order: each row keeps the direction it was turned to.
+    SortModal { selection: usize, prev_sel: usize, prev_scroll: usize, dirs: u8 },
     /// Sort picker for the IMPORTER lists (Y). `kind` picks the target list +
     /// option set (`SORT_TARGET_*`): archive.org files (name/size), the
     /// Flashpoint gallery (name only — developers are unknown), or the IMPORTER
@@ -465,7 +467,7 @@ pub(crate) fn current_sort_reverse() -> bool {
 }
 
 /// Store the open shelf's sort, or the home's when none is open, then persist.
-/// Shared by both setters so a mode and a reverse flag can never land in
+/// The mode and its direction always together, so they can never land in
 /// different places.
 fn store_active_sort(mode: u8, rev: bool) {
     match sorting_folder() {
@@ -619,16 +621,6 @@ fn write_sort_pref(path: &str, mode: u8, rev: bool) {
     if std::fs::write(path, txt.as_bytes()).is_ok() {
         crate::sd::commit();
     }
-}
-
-/// Set + persist the active sort mode (0..=4), on the open shelf or the home.
-pub(crate) fn set_sort_mode(idx: u8) {
-    store_active_sort(idx, current_sort_reverse());
-}
-
-/// Set + persist the reverse flag, on the open shelf or the home.
-pub(crate) fn set_sort_reverse(rev: bool) {
-    store_active_sort(sort_mode_index() as u8, rev);
 }
 
 /// Read the persisted `(mode, reverse)` pair from a `digit[R]` pref file. First
@@ -3600,10 +3592,12 @@ fn set_screen_selection(s: &mut State, idx: usize) -> bool {
             }
             put!(selection, Screen::DistantUrlOptions { url_idx, selection: idx })
         }
-        Screen::SortModal { selection, prev_sel, prev_scroll, reverse } => put!(
-            selection,
-            Screen::SortModal { selection: idx, prev_sel, prev_scroll, reverse }
-        ),
+        Screen::SortModal { selection, prev_sel, prev_scroll, dirs } => {
+            if idx >= SORT_MODES {
+                return false;
+            }
+            put!(selection, Screen::SortModal { selection: idx, prev_sel, prev_scroll, dirs })
+        }
         Screen::BugPicker { selection, scroll_offset } => {
             put!(selection, Screen::BugPicker { selection: idx, scroll_offset })
         }
@@ -4395,8 +4389,8 @@ fn input_inner(button: &str) -> bool {
             }
             true
         }
-        Screen::SortModal { selection, prev_sel, prev_scroll, reverse } => {
-            handle_sort_modal_input(&mut s, button, selection, prev_sel, prev_scroll, reverse);
+        Screen::SortModal { selection, prev_sel, prev_scroll, dirs } => {
+            handle_sort_modal_input(&mut s, button, selection, prev_sel, prev_scroll, dirs);
             true
         }
         Screen::RemoteSortModal { selection, kind, reverse, prev_sel, prev_scroll } => {
@@ -6368,13 +6362,15 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
             return;
         }
         "Y" => {
-            // Open the sort picker (cursor on the active mode); remember where we
-            // were so B (cancel) restores it instead of jumping to the top.
+            // Open the sort picker (cursor on the active mode, turned the way it
+            // is); remember where we were so B (cancel) restores it instead of
+            // jumping to the top.
+            let mode = sort_mode_index();
             s.screen = Screen::SortModal {
-                selection: sort_mode_index(),
+                selection: mode,
                 prev_sel: selection,
                 prev_scroll: scroll,
-                reverse: current_sort_reverse(),
+                dirs: if current_sort_reverse() { 1 << mode } else { 0 },
             };
             return;
         }
@@ -8635,40 +8631,40 @@ fn run_fp_info_flow(selection: usize, scroll: usize) {
     }
 }
 
-/// JOUER sort picker (Y) input: Up/Down move, A applies + persists + re-sorts,
-/// B cancels. After a sort change the list reorders, so the cursor resets to top.
+/// How many ways the Play tab sorts (`SortMode`, `sort_mode_index`).
+const SORT_MODES: usize = 5;
+
+/// JOUER sort picker (Y) input: Up/Down move between the ways to sort, Left /
+/// Right turn the focused one to its natural or reversed order (X flips it), A
+/// applies it, B cancels. After a sort change the list reorders, so the cursor
+/// resets to the top.
 fn handle_sort_modal_input(
     s: &mut State,
     button: &str,
     mut selection: usize,
     prev_sel: usize,
     prev_scroll: usize,
-    reverse: bool,
+    mut dirs: u8,
 ) {
-    const N: usize = 5;
+    let bit = 1u8 << selection.min(7);
     match button {
-        "Up" | "StickLUp" => {
-            if selection > 0 {
-                selection -= 1;
-            }
-        }
-        "Down" | "StickLDown" => {
-            if selection + 1 < N {
-                selection += 1;
-            }
-        }
-        "X" => {
-            // Flip the direction shown; nothing applies before A, the same as
-            // the importer's sort pickers. It used to re-sort the library on
-            // the spot, so B ("cancel") could no longer cancel anything.
-            s.screen = Screen::SortModal { selection, prev_sel, prev_scroll, reverse: !reverse };
-            return;
-        }
+        "Up" | "StickLUp" => selection = list_step_wrap(selection, -1, SORT_MODES),
+        "Down" | "StickLDown" => selection = list_step_wrap(selection, 1, SORT_MODES),
+        // The row's two orders are a choice shown whole: Left lights the
+        // first, Right the second, and they stop there like every choice.
+        "Left" | "StickLLeft" => dirs &= !bit,
+        "Right" | "StickLRight" => dirs |= bit,
+        // Nothing applies before A, the same as the importer's pickers: X used
+        // to re-sort the library on the spot, so B ("cancel") could no longer
+        // cancel anything.
+        "X" => dirs ^= bit,
         "A" => {
-            // Applied a new sort → the list reorders, so land on the top.
-            set_sort_mode(selection as u8);
-            set_sort_reverse(reverse);
+            store_active_sort(selection as u8, dirs & bit != 0);
             sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
+            // A new order is a new list: every view snaps to the top and its
+            // covers start closed, rather than gliding from the old row.
+            crate::backend::render::gallery_anim_reset();
+            crate::backend::render::tile_open_reset();
             s.screen = Screen::List { selection: 0, scroll_offset: 0 };
             return;
         }
@@ -8679,7 +8675,7 @@ fn handle_sort_modal_input(
         }
         _ => {}
     }
-    s.screen = Screen::SortModal { selection, prev_sel, prev_scroll, reverse };
+    s.screen = Screen::SortModal { selection, prev_sel, prev_scroll, dirs };
 }
 
 /// Which list a `RemoteSortModal` sorts.
@@ -8725,15 +8721,15 @@ fn handle_remote_sort_modal_input(
                 selection += 1;
             }
         }
-        "X" => {
-            // Flip the direction indicator (applied on A). Stays in the modal.
-            s.screen = Screen::RemoteSortModal {
-                selection,
-                kind,
-                reverse: !reverse,
-                prev_sel,
-                prev_scroll,
+        // The window shows each row's two orders as a choice: Left lights the
+        // first, Right the second, X flips (applied on A). Stays in the modal.
+        "X" | "Left" | "StickLLeft" | "Right" | "StickLRight" => {
+            let reverse = match button {
+                "X" => !reverse,
+                "Left" | "StickLLeft" => false,
+                _ => true,
             };
+            s.screen = Screen::RemoteSortModal { selection, kind, reverse, prev_sel, prev_scroll };
             return;
         }
         "A" => {
@@ -10101,37 +10097,76 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 backend.draw_library_fp_details(&title, &dev, &publisher, &date, size, &cover, &desc, installed);
             }
         }
-        Screen::SortModal { selection, reverse, .. } => {
-            use crate::backend::render::Icon;
-            let lc = crate::loc::s();
-            let options = [
-                (Icon::SortAlpha, lc.sort_alpha),
-                (Icon::Calendar, lc.sort_recent),
-                (Icon::History, lc.sort_recent_played),
-                (Icon::Flame, lc.sort_played),
-                (Icon::HardDrive, lc.sort_size),
-            ];
-            backend.draw_sort_window(lc.sort_title, &options, selection, Some(sort_mode_index()), reverse);
+        Screen::SortModal { selection, prev_sel, prev_scroll, dirs } => {
+            use crate::backend::render::SortOption;
+            // The home under the window, as it will be once the window closes
+            // (a new sort lands on the first game), still and taking no taps,
+            // its covers' clocks running. Nothing drew it: the window's scrim
+            // landed on whatever the last frame left, darker every frame.
+            let (behind_sel, behind_scroll) = match PENDING_AFTER_CLOSE.lock().ok().as_deref() {
+                Some(Some(PendingClose::Goto(Screen::List { selection, scroll_offset }))) => (*selection, *scroll_offset),
+                _ => (prev_sel, prev_scroll),
+            };
+            let logo = LIBRARY.lock().map(|s| (s.banner_tex, s.banner_w, s.banner_h)).unwrap_or((0, 0, 0));
+            backend.clear_ui_transform();
+            crate::backend::render::set_ui_screen_kind(0);
+            draw_gallery(backend, behind_sel, behind_scroll, anim_origin);
+            backend.draw_navbar(Tab::Jouer.index(), logo);
+            crate::backend::render::navbar_clear();
+            crate::backend::render::set_ui_screen_kind(family_kind);
+            backend.set_ui_modal_scale(if modal_active { modal_scale } else { 1.0 });
+
+            let (lc, u) = (crate::loc::s(), crate::loc_ui::ui());
+            let options: [SortOption; SORT_MODES] = core::array::from_fn(|m| SortOption {
+                icon: sort_icon(m),
+                label: sort_criterion(m),
+                orders: [sort_state_label(m, false), sort_state_label(m, true)],
+            });
+            // Each shelf keeps its own order, so the window says which one.
+            let shelf = LIBRARY
+                .lock()
+                .ok()
+                .and_then(|s| s.folder_filter.clone())
+                .map(|f| if f == FAVORITES_SHELF { u.home_favorites.to_string() } else { f })
+                .unwrap_or_else(|| u.home_all.to_string());
+            let scope = u.sort_scope.replacen("{}", &shelf, 1);
+            backend.draw_sort_window(
+                lc.sort_title,
+                Some(&scope),
+                &options,
+                selection,
+                Some(sort_mode_index()),
+                dirs,
+                Some(u.help_sort),
+            );
         }
         Screen::RemoteSortModal { selection, kind, reverse, .. } => {
             let lc = crate::loc::s();
             // Flashpoint: NAME only. archive.org: NAME + SIZE. Saved URLs:
             // ADDED / NAME / SOURCE (same order as `importer_view` reads).
-            use crate::backend::render::Icon;
-            let options: &[(Icon, &str)] = match kind {
-                SORT_TARGET_FP => &[(Icon::SortAlpha, lc.sort_alpha)],
+            use crate::backend::render::{Icon, SortOption};
+            // Each criterion with its two orders as words, natural first, like
+            // the Play tab's picker; the one flag turns them all.
+            let u = crate::loc_ui::ui();
+            let name = SortOption { icon: Icon::SortAlpha, label: lc.sort_alpha, orders: [u.sort_az, u.sort_za] };
+            let options: &[SortOption] = match kind {
+                SORT_TARGET_FP => &[name],
                 SORT_TARGET_IMPORT => &[
-                    (Icon::Calendar, lc.sort_recent),
-                    (Icon::SortAlpha, lc.sort_alpha),
-                    (Icon::Globe, lc.sort_source),
-                    (Icon::Layers, lc.sort_files),
+                    SortOption { icon: Icon::Calendar, label: u.sort_by_added, orders: [u.sort_newest, u.sort_oldest] },
+                    name,
+                    SortOption { icon: Icon::Globe, label: lc.sort_source, orders: [u.sort_az, u.sort_za] },
+                    SortOption { icon: Icon::Layers, label: lc.sort_files, orders: [u.sort_most_games, u.sort_fewest_games] },
                 ],
-                _ => &[(Icon::SortAlpha, lc.sort_alpha), (Icon::HardDrive, lc.sort_size)],
+                _ => &[
+                    name,
+                    SortOption { icon: Icon::HardDrive, label: lc.sort_size, orders: [u.sort_largest, u.sort_smallest] },
+                ],
             };
             // Only the saved sources keep their order; the other two lists are
             // sorted once and forgotten, so nothing is ticked there.
             let active = if kind == SORT_TARGET_IMPORT { Some(import_sort_index()) } else { None };
-            backend.draw_sort_window(lc.sort_title, options, selection, active, reverse);
+            let dirs = if reverse { u8::MAX } else { 0 };
+            backend.draw_sort_window(lc.sort_title, None, options, selection, active, dirs, None);
         }
         // ── Phase 3.7 DISTANT mode ─────────────────────────────────────
         Screen::DistantIdle { selection, scroll_offset } => {
@@ -11457,4 +11492,13 @@ fn hsv_to_rgb_u32(h: f32, s: f32, v: f32) -> u32 {
     let g = ((g1 + m) * 255.0) as u32 & 0xFF;
     let b = ((b1 + m) * 255.0) as u32 & 0xFF;
     (r << 16) | (g << 8) | b
+}
+
+/// Strings this branch stopped reading. The tables in `loc.rs` and `loc_ui.rs`
+/// are only edited by the merge, which deletes them; until then this keeps
+/// them read, so the build stays free of warnings. Delete it with them.
+#[allow(dead_code)]
+fn retired_strings() -> [&'static str; 6] {
+    let (lc, u) = (crate::loc::s(), crate::loc_ui::ui());
+    [lc.sort_recent, lc.sort_played, lc.sort_recent_played, lc.sort_dir_asc, lc.sort_dir_desc, u.order]
 }
