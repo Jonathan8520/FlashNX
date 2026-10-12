@@ -6,8 +6,9 @@
 //! Same nine languages, same order, same rule as `loc.rs`: a field added here
 //! is added to every table, or nothing compiles. Same typography too: French
 //! puts a no-break space (`\u{a0}`) before ':', ';', '?', '!' and '%' and
-//! inside « », the other languages between a number and '%', except in the
-//! `kbd_*` strings the console's keyboard draws.
+//! inside « », and where another language writes a space between a number
+//! and '%' it is a no-break one, except in the `kbd_*` strings the console's
+//! keyboard draws.
 
 use crate::loc::{current, Lang};
 

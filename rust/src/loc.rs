@@ -17,8 +17,10 @@
 //! French typography: a no-break space, written `\u{a0}`, goes before ':',
 //! ';', '?', '!' and '%' and inside « », so a wrapped line never starts with
 //! the punctuation (the kit draws it as a space and never breaks a line
-//! there). The other languages put one between a number and '%'. The `kbd_*`
-//! strings keep plain spaces: the console's keyboard draws them, not the kit.
+//! there). Where another language writes a space between a number and '%'
+//! ("10 %"), it is a no-break one too; Chinese writes "10%" and Turkish "%10",
+//! with no space. The `kbd_*` strings keep plain spaces: the console's
+//! keyboard draws them, not the kit.
 
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::fs::File;
