@@ -236,6 +236,110 @@ impl SwitchRenderBackend {
         }
     }
 
+    /// `kit_default_tile` grown from a tile of size `base` into the box
+    /// `(x, y, w, h)`, with corners of radius `r`: the launch carries a game
+    /// with no cover to the whole screen the way it carries a cover, and the
+    /// quit brings it back. In a box of the base size with TILE corners it IS
+    /// the tile, so neither end of the movement jumps.
+    ///
+    /// The tile is zoomed, not laid out again: the name keeps the lines it had
+    /// on the tile, and it grows with its margins and the gamepad, up to a
+    /// 64 px name, so nothing reflows on the way. Its letters are not drawn at
+    /// every size they pass through. The glyph atlas keeps every size it is
+    /// asked for and has no room to spare, and the old launch walked one name
+    /// through fifty sizes. They are rasterized at the tile's size and at the
+    /// final one, each scaled to the size of the moment, the first fading into
+    /// the second as the box grows.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn kit_default_tile_grown(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        chip: u32,
+        name: &str,
+        base: (f32, f32),
+        r: f32,
+    ) {
+        use super::icons::Icon;
+        use super::theme::{col, radius};
+        /// The largest the name grows to, as on the full-screen launch before.
+        const NAME_MAX: f32 = 64.0;
+        /// The gamepad's size on the tile.
+        const PAD_ICON: f32 = 22.0;
+        let (bw, bh) = base;
+        if bw <= 0.0 || bh <= 0.0 || (w <= bw && h <= bh && r >= radius::TILE) {
+            self.kit_default_tile(x, y, w, h, chip, name);
+            return;
+        }
+        let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
+        let px0 = if bw >= 180.0 { 20.0 } else { 17.0 };
+        // The zoom at the end, on the whole screen: rounded down to a whole
+        // size of the name, so that state draws its letters at their own
+        // raster, unscaled. Then the zoom now, which reaches it there.
+        let fit = (vw / bw).min(vh / bh).clamp(1.0, NAME_MAX / px0);
+        let z_end = ((px0 * fit + 0.001).floor() / px0).max(1.0);
+        let z = (w / bw).min(h / bh).clamp(1.0, z_end);
+        // 0 while the box is the tile, 1 once it has grown to its final size.
+        let f = if z_end > 1.0 { (z - 1.0) / (z_end - 1.0) } else { 1.0 };
+        let chip = chip & 0x00FF_FFFF;
+        self.kit_rrect(x, y, w, h, r, 0xFF00_0000 | mix_rgb(chip, col::BG & 0x00FF_FFFF, 0.55));
+        let alpha = |a: f32, rgb: u32| ((a.clamp(0.0, 1.0) * 255.0).round() as u32) << 24 | rgb;
+        let pad0 = (bw * 0.07).clamp(10.0, 16.0);
+        let pad = pad0 * z;
+        // Each element is drawn from two rasters, the tile's and the final
+        // one, scaled about its own corner to its size of the moment.
+        if bw >= 64.0 && bh >= 48.0 {
+            let ink = mix_rgb(chip, col::BG & 0x00FF_FFFF, 0.25);
+            let end = (PAD_ICON * z_end).round();
+            let size = PAD_ICON + (end - PAD_ICON) * f;
+            let (ix, iy) = ((x + pad).round(), (y + pad).round());
+            for (raster, a) in [(PAD_ICON, 1.0 - f), (end, f)] {
+                if a > 0.0 {
+                    self.kit_scaled(ix, iy, size / raster, |s| {
+                        s.kit_icon(ix, iy + raster * 0.5, raster, Icon::Gamepad, alpha(a, ink));
+                    });
+                }
+            }
+        }
+        let ink = mix_rgb(chip, 0xFF_FF_FF, 0.78);
+        let shown = name.strip_suffix(".swf").or_else(|| name.strip_suffix(".SWF")).unwrap_or(name);
+        let max_lines = if bh >= 120.0 { 3 } else { 2 };
+        let lines = self.kit_wrap(shown, px0, bw - 2.0 * pad0, max_lines);
+        let end = (px0 * z_end).round();
+        let lh = (px0 * 1.15).round() * z;
+        let mut baseline = y + h - pad - lh * (lines.len().saturating_sub(1)) as f32;
+        let lx = (x + pad).round();
+        for line in &lines {
+            let by = baseline.round();
+            for (raster, a) in [(px0, 1.0 - f), (end, f)] {
+                if a > 0.0 {
+                    self.kit_scaled(lx, by, px0 * z / raster, |s| {
+                        s.kit_text_baseline(lx, by, raster, line, alpha(a, ink));
+                    });
+                }
+            }
+            baseline += lh;
+        }
+    }
+
+    /// Run `draw` with what it draws scaled by `s` about `(px, py)`, on top of
+    /// the UI transform already in force.
+    fn kit_scaled(&mut self, px: f32, py: f32, s: f32, draw: impl FnOnce(&mut Self)) {
+        let saved = (self.ui_scale, self.ui_pivot_x, self.ui_pivot_y, self.ui_translate_x, self.ui_translate_y);
+        let (s0, qx, qy, tx, ty) = saved;
+        // p -> p*s + P*(1 - s), then the transform in force, q -> q*s0 + Q*(1 - s0) + T,
+        // folded into one scale and one translation.
+        self.ui_scale = s0 * s;
+        self.ui_pivot_x = 0.0;
+        self.ui_pivot_y = 0.0;
+        self.ui_translate_x = s0 * px * (1.0 - s) + qx * (1.0 - s0) + tx;
+        self.ui_translate_y = s0 * py * (1.0 - s) + qy * (1.0 - s0) + ty;
+        draw(self);
+        (self.ui_scale, self.ui_pivot_x, self.ui_pivot_y, self.ui_translate_x, self.ui_translate_y) = saved;
+    }
+
     /// The generated tile without its name: what sits under a cover that is
     /// still fading in. With the name, the title showed through the art for the
     /// length of the fade.

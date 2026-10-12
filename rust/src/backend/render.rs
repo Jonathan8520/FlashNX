@@ -10590,6 +10590,7 @@ impl SwitchRenderBackend {
 
     /// The launch and quit reveal, `e` of the way from the selected tile (0)
     /// to the whole screen (1), in the window `(x, y, w, h)` between the two.
+    /// `tile` is the size of the tile it started from.
     ///
     /// The cover is carried, not cut out: drawn INTO the window, whole over its
     /// backdrop, with corners that straighten as it grows. At 0 that is exactly
@@ -10608,6 +10609,7 @@ impl SwitchRenderBackend {
         w: f32,
         h: f32,
         e: f32,
+        tile: (f32, f32),
         basename: &str,
         display_name: &str,
         color_chip: u32,
@@ -10632,22 +10634,11 @@ impl SwitchRenderBackend {
             CoverTex::Image { tex, w: iw, h: ih, amb } if iw > 0 && ih > 0 => {
                 self.kit_cover_reveal_r(x, y, w, h, tex, iw, ih, amb, 1.0, 1.0, r);
             }
-            _ => {
-                // No cover: the tile the library showed, its colour and the
-                // game's name, grown with the window.
-                let chip = color_chip & 0x00FF_FFFF;
-                self.kit_rrect(x, y, w, h, r, 0xFF00_0000 | kit::cover::mix_rgb(chip, col::BG & 0x00FF_FFFF, 0.55));
-                let px = (h / 9.0).clamp(17.0, 64.0).round();
-                let lines = self.kit_wrap(display_name, px, w * 0.8, 3);
-                let lh = (px * 1.25).round();
-                let mut cy = y + (h - lh * (lines.len() as f32 - 1.0)) * 0.5;
-                let ink = 0xFF00_0000 | kit::cover::mix_rgb(chip, 0xFF_FF_FF, 0.85);
-                for line in &lines {
-                    let tw = self.kit_measure(line, px);
-                    self.kit_text_mid((x + (w - tw) * 0.5).round(), cy, px, line, ink);
-                    cy += lh;
-                }
-            }
+            // No cover: the very tile the library showed, gamepad and name in
+            // their corners, grown with the window. It used to be redrawn in
+            // another layout (no gamepad, the name centred and larger), so the
+            // first frame of every launch and the last of every quit jumped.
+            _ => self.kit_default_tile_grown(x, y, w, h, color_chip, display_name, tile, r),
         }
         // Only the grid rings its selected tile (the panels and the shelf mark
         // theirs otherwise), so only there does a ring hand over.

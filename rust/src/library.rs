@@ -9503,7 +9503,7 @@ fn draw_game_reveal_window(backend: &mut SwitchRenderBackend, frac: f32, fade: f
     let wy = ry * (1.0 - frac);
     let ww = rw + (vw - rw) * frac;
     let wh = rh + (vh - rh) * frac;
-    backend.draw_game_reveal(wx, wy, ww, wh, frac, &basename, &name, color);
+    backend.draw_game_reveal(wx, wy, ww, wh, frac, (rw, rh), &basename, &name, color);
     // Launch fade-to-black: a black veil over the (full-screen) cover so the game
     // pops calmly out of the dark instead of replacing the cover in one frame.
     if fade > 0.0 {
