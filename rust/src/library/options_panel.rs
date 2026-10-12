@@ -769,7 +769,7 @@ fn draw_family_dialog(backend: &mut SwitchRenderBackend, screen: Screen, entry: 
                         if c.developer.is_empty() {
                             c.title.clone()
                         } else {
-                            std::format!("{} - {}", c.title, c.developer)
+                            std::format!("{}  \u{00B7}  {}", c.title, c.developer)
                         }
                     })
                     .collect();

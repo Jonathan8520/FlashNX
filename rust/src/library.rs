@@ -6934,12 +6934,15 @@ fn with_source_sheet<R>(
     // panel: a long translation must not run off its edge.
     let kind = if direct { lc.url_type_swf } else { lc.url_type_list };
     let on_card = match total {
+        // One file: on the card or not, as the source's row says it, rather
+        // than "0 of 1".
+        _ if direct => (have > 0).then(|| u.on_card.to_string()),
         Some(t) if t > 0 => Some(
             lc.url_info_files
                 .replacen("{}", &crate::backend::render::imp_count(have as u64), 1)
                 .replacen("{}", &crate::backend::render::imp_count(t as u64), 1),
         ),
-        _ if have > 0 => Some(u.imp_on_card_n.replacen("{}", &have.to_string(), 1)),
+        _ if have > 0 => Some(u.imp_on_card_n.replacen("{}", &crate::backend::render::imp_count(have as u64), 1)),
         _ => None,
     };
     let date = format_date(added);
@@ -7305,7 +7308,12 @@ fn run_direct_download(url: &str) {
             // the same file name". The URL still goes into the history: it is a
             // valid address the user asked for, and dropping it meant the saved
             // list quietly disagreed with what they typed.
-            let shown = safe_name.clone();
+            let shown = s
+                .entries
+                .iter()
+                .find(|e| e.basename == safe_name)
+                .map(|e| e.display_name.clone())
+                .unwrap_or_else(|| pretty_name(&safe_name));
             set_toast(
                 &mut s,
                 crate::loc::s().toast_already_imported.replace("{}", &shown),
@@ -11710,8 +11718,9 @@ fn finalize_gamezip_download(backend: &mut SwitchRenderBackend) {
         .map(str::trim)
         .filter(|t| !t.is_empty() && *t != stem);
     // Toast label, owned up-front: `file_name` (which `stem` borrows) is moved
-    // into `downloaded_basenames` below.
-    let shown = restored_title.unwrap_or(stem).to_string();
+    // into `downloaded_basenames` below. Without a real title, the name the
+    // library and the import page show, not the file's ("papa_louie_2").
+    let shown = restored_title.map(str::to_string).unwrap_or_else(|| pretty_name(&file_name));
     if let (Some(title), false) = (restored_title, file_name.is_empty()) {
         if write_meta_sidecar(&file_name, title) {
             log(&std::format!("library: saved real title \"{}\" for {}\n", title, file_name));
@@ -12085,11 +12094,10 @@ fn on_download_finished(backend: &mut SwitchRenderBackend) {
             }
         }
     }
-    // Toast label, owned before `file_name` is moved into the session list.
-    let shown = file_name
-        .strip_suffix(".swf")
-        .unwrap_or(&file_name)
-        .to_string();
+    // Toast label, owned before `file_name` is moved into the session list:
+    // the name the import page and the library show ("Papa Louie 2"), not
+    // the file's ("papa_louie_2").
+    let shown = pretty_name(&file_name);
     if let Ok(mut s) = LIBRARY.lock() {
         s.download_file_name.clear();
         s.download_out_path.clear();

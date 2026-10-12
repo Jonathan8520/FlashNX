@@ -3554,24 +3554,28 @@ pub fn ui() -> &'static Ui {
     }
 }
 
-/// "94 jeux", with each language's own plural rule (see `loc::games_count`).
+/// "94 jeux", "3 633 jeux": each language's own plural rule (a count-style
+/// phrasing in Russian and Chinese), and the number with the importer's
+/// thousands separator (`imp_count`), so an archive's page writes its count
+/// the way the row that opened it does ("6 / 3 633").
 pub fn games(n: usize) -> std::string::String {
+    let c = crate::backend::render::imp_count(n as u64);
     match current() {
         Lang::En if n == 1 => "1 game".into(),
-        Lang::En => std::format!("{} games", n),
-        Lang::Fr if n <= 1 => std::format!("{} jeu", n),
-        Lang::Fr => std::format!("{} jeux", n),
+        Lang::En => std::format!("{} games", c),
+        Lang::Fr if n <= 1 => std::format!("{} jeu", c),
+        Lang::Fr => std::format!("{} jeux", c),
         Lang::Es if n == 1 => "1 juego".into(),
-        Lang::Es => std::format!("{} juegos", n),
-        Lang::Ru => std::format!("Игр: {}", n),
+        Lang::Es => std::format!("{} juegos", c),
+        Lang::Ru => std::format!("Игр: {}", c),
         Lang::De if n == 1 => "1 Spiel".into(),
-        Lang::De => std::format!("{} Spiele", n),
+        Lang::De => std::format!("{} Spiele", c),
         Lang::It if n == 1 => "1 gioco".into(),
-        Lang::It => std::format!("{} giochi", n),
+        Lang::It => std::format!("{} giochi", c),
         Lang::Pt if n == 1 => "1 jogo".into(),
-        Lang::Pt => std::format!("{} jogos", n),
-        Lang::Zh => std::format!("游戏：{}", n),
-        Lang::Tr => std::format!("{} oyun", n),
+        Lang::Pt => std::format!("{} jogos", c),
+        Lang::Zh => std::format!("游戏：{}", c),
+        Lang::Tr => std::format!("{} oyun", c),
     }
 }
 
