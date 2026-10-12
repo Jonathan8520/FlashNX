@@ -208,6 +208,15 @@ pub struct Ui {
     pub loading_share: &'static str,
     pub loading_apply: &'static str,
     pub loading_delete: &'static str,
+    /// Shared-profiles list: a profile shared without a nickname.
+    pub profile_anonymous: &'static str,
+    /// Shared-profiles list: how many players applied a profile.
+    pub profile_applied_1: &'static str,
+    pub profile_applied_n: &'static str,
+    /// Shared-profiles list: a profile found by the game's name only (maybe another version of the file).
+    pub profile_same_name: &'static str,
+    /// Game options hint: L / R go to the previous / next game of the list.
+    pub other_game: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -354,6 +363,11 @@ const EN: Ui = Ui {
     loading_share: "Sending your controls…",
     loading_apply: "Applying the profile…",
     loading_delete: "Deleting your profile…",
+    profile_anonymous: "Anonymous",
+    profile_applied_1: "Applied once",
+    profile_applied_n: "Applied {} times",
+    profile_same_name: "Same name",
+    other_game: "Other game",
 };
 
 const FR: Ui = Ui {
@@ -500,6 +514,11 @@ const FR: Ui = Ui {
     loading_share: "Envoi de tes touches…",
     loading_apply: "Application du profil…",
     loading_delete: "Suppression de ton profil…",
+    profile_anonymous: "Anonyme",
+    profile_applied_1: "Appliqué 1 fois",
+    profile_applied_n: "Appliqué {} fois",
+    profile_same_name: "Même nom",
+    other_game: "Autre jeu",
 };
 
 const ES: Ui = Ui {
@@ -646,6 +665,11 @@ const ES: Ui = Ui {
     loading_share: "Enviando tus controles…",
     loading_apply: "Aplicando el perfil…",
     loading_delete: "Borrando tu perfil…",
+    profile_anonymous: "Anónimo",
+    profile_applied_1: "Aplicado 1 vez",
+    profile_applied_n: "Aplicado {} veces",
+    profile_same_name: "Mismo nombre",
+    other_game: "Otro juego",
 };
 
 const RU: Ui = Ui {
@@ -792,6 +816,11 @@ const RU: Ui = Ui {
     loading_share: "Отправка управления…",
     loading_apply: "Применение профиля…",
     loading_delete: "Удаление профиля…",
+    profile_anonymous: "Аноним",
+    profile_applied_1: "Применён 1 раз",
+    profile_applied_n: "Применён раз: {}",
+    profile_same_name: "То же имя",
+    other_game: "Другая игра",
 };
 
 const DE: Ui = Ui {
@@ -938,6 +967,11 @@ const DE: Ui = Ui {
     loading_share: "Deine Steuerung wird gesendet…",
     loading_apply: "Profil wird übernommen…",
     loading_delete: "Dein Profil wird gelöscht…",
+    profile_anonymous: "Anonym",
+    profile_applied_1: "1-mal übernommen",
+    profile_applied_n: "{}-mal übernommen",
+    profile_same_name: "Gleicher Name",
+    other_game: "Anderes Spiel",
 };
 
 const IT: Ui = Ui {
@@ -1084,6 +1118,11 @@ const IT: Ui = Ui {
     loading_share: "Invio dei tuoi controlli…",
     loading_apply: "Applicazione del profilo…",
     loading_delete: "Eliminazione del profilo…",
+    profile_anonymous: "Anonimo",
+    profile_applied_1: "Applicato 1 volta",
+    profile_applied_n: "Applicato {} volte",
+    profile_same_name: "Stesso nome",
+    other_game: "Altro gioco",
 };
 
 const PT: Ui = Ui {
@@ -1230,6 +1269,11 @@ const PT: Ui = Ui {
     loading_share: "Enviando seus controles…",
     loading_apply: "Aplicando o perfil…",
     loading_delete: "Apagando seu perfil…",
+    profile_anonymous: "Anônimo",
+    profile_applied_1: "Aplicado 1 vez",
+    profile_applied_n: "Aplicado {} vezes",
+    profile_same_name: "Mesmo nome",
+    other_game: "Outro jogo",
 };
 
 const ZH: Ui = Ui {
@@ -1376,6 +1420,11 @@ const ZH: Ui = Ui {
     loading_share: "正在发送你的按键…",
     loading_apply: "正在应用配置…",
     loading_delete: "正在删除你的配置…",
+    profile_anonymous: "匿名",
+    profile_applied_1: "已应用 1 次",
+    profile_applied_n: "已应用 {} 次",
+    profile_same_name: "同名",
+    other_game: "其他游戏",
 };
 
 const TR: Ui = Ui {
@@ -1522,6 +1571,11 @@ const TR: Ui = Ui {
     loading_share: "Kontrollerin gönderiliyor…",
     loading_apply: "Profil uygulanıyor…",
     loading_delete: "Profilin siliniyor…",
+    profile_anonymous: "Anonim",
+    profile_applied_1: "1 kez uygulandı",
+    profile_applied_n: "{} kez uygulandı",
+    profile_same_name: "Aynı ad",
+    other_game: "Diğer oyun",
 };
 
 pub fn ui() -> &'static Ui {

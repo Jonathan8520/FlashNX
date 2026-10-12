@@ -204,8 +204,8 @@ pub(crate) fn with_options_sheet<R>(
         key,
         "FAVORI" | "AFFICHAGE" | "ROTATION" | "ZOOM" | "PIXELS" | "FILTRE" | "OVERCLOCK" | "FPS"
     );
-    let hints_step = [(&[Btn::Dpad][..], u.change), (&[Btn::B][..], u.back)];
-    let hints_act = [(&[Btn::A][..], a_verb), (&[Btn::B][..], u.back)];
+    let hints_step = [(&[Btn::Dpad][..], u.change), (&[Btn::L, Btn::R][..], u.other_game), (&[Btn::B][..], u.back)];
+    let hints_act = [(&[Btn::A][..], a_verb), (&[Btn::L, Btn::R][..], u.other_game), (&[Btn::B][..], u.back)];
     let sections = [
         (opt_row("AFFICHAGE"), u.sec_image),
         (opt_row("OVERCLOCK"), u.sec_perf),
@@ -334,8 +334,22 @@ pub(crate) fn draw_options_family(
     draw_family_panels(backend, &entry, opt_sel, page, t);
     backend.clear_ui_transform();
 
-    // A question or the cover picker on top.
+    // A question or the cover picker on top, popping in by itself.
+    let dialog_key = match screen {
+        Screen::DeleteConfirm { .. } => 1,
+        Screen::ProfileDeleteConfirm { .. } => 2,
+        Screen::GameFolderDelete { .. } => 3,
+        Screen::CoverPicker { .. } => 4,
+        _ => 0,
+    };
+    if dialog_key != 0 && slide.is_none() {
+        backend.set_ui_modal_scale(crate::backend::render::dialog_pop_scale(dialog_key));
+    }
     draw_family_dialog(backend, screen, &entry);
+    backend.clear_ui_transform();
+    if dialog_key == 0 {
+        crate::backend::render::dialog_pop_scale(0);
+    }
     let _ = now;
 }
 

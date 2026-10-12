@@ -272,6 +272,10 @@ pub fn screen_is_sheet() -> bool {
                     | Screen::Preview { .. }
                     | Screen::ShareConfirm
                     | Screen::RevertPreview
+                    // These two draw the cascade too, with a question or a
+                    // spinner on top that animates by itself.
+                    | Screen::DeleteConfirm { .. }
+                    | Screen::Loading
             )
         })
         .unwrap_or(false)
@@ -1378,11 +1382,21 @@ pub(crate) struct ProfileItem {
     pub title: std::string::String,
     pub author: std::string::String,
     pub id: std::string::String,
+    /// How many players applied it (0 = unknown).
+    pub applied: u32,
+    /// Found by the game's name only, not by its file: maybe another version.
+    pub by_name: bool,
 }
 
 impl ProfileItem {
     pub(crate) fn of(m: &crate::profiles::Match) -> ProfileItem {
-        ProfileItem { title: m.profile.title().to_string(), author: m.profile.author.clone(), id: m.profile.id.clone() }
+        ProfileItem {
+            title: m.profile.title().to_string(),
+            author: m.profile.author.clone(),
+            id: m.profile.id.clone(),
+            applied: m.applied,
+            by_name: m.kind == crate::profiles::MatchKind::Title,
+        }
     }
 }
 
@@ -1402,27 +1416,46 @@ pub(crate) fn with_profiles_view<R>(
     use crate::backend::render::{ui_col, Btn, Icon, Row, Sheet};
     let lc = crate::loc::s();
     let u = crate::loc_ui::ui();
+    // Every community profile is for THIS game, so its title is the same on
+    // every row and told them apart from nothing: a row is named by who shared
+    // it ("Toi" for your own), with how much it was used, or "Même nom" when it
+    // was only found by the game's name. Copies from your other games are named
+    // by their game.
+    let applied: std::vec::Vec<std::string::String> = items
+        .iter()
+        .map(|it| match it.applied {
+            0 => std::string::String::new(),
+            1 => u.profile_applied_1.to_string(),
+            n => u.profile_applied_n.replace("{}", &n.to_string()),
+        })
+        .collect();
     let mut rows: std::vec::Vec<Row> = items
         .iter()
-        .map(|it| {
+        .zip(applied.iter())
+        .map(|(it, applied)| {
             let copy = crate::profiles::is_copy_row(&it.id);
+            let local = crate::profiles::is_local(&it.id);
             let mine = crate::profiles::is_mine(&it.id);
-            let icon = if copy {
-                Icon::Copy
+            let (icon, label): (Icon, &str) = if copy || local || copy_mode {
+                (if copy { Icon::Copy } else { Icon::Gamepad }, &it.title)
             } else if mine {
-                Icon::User
+                (Icon::User, u.profile_you)
+            } else if it.author.is_empty() {
+                (Icon::Users, u.profile_anonymous)
             } else {
-                Icon::Users
+                (Icon::Users, &it.author)
             };
-            let who: &str = if copy {
+            let value: &str = if copy || local || copy_mode {
                 ""
-            } else if mine {
-                u.profile_you
+            } else if !applied.is_empty() {
+                applied
+            } else if it.by_name {
+                u.profile_same_name
             } else {
-                &it.author
+                ""
             };
-            Row::new(icon, &it.title)
-                .value(who)
+            Row::new(icon, label)
+                .value(value)
                 .mark_if(!active.is_empty() && it.id == active, Icon::Check, ui_col::OK)
                 .opens_if(copy)
         })
@@ -1588,10 +1621,11 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
                 .and_then(|s| s.matches.get(profile_idx).map(|m| profile_name(&m.profile)))
                 .unwrap_or_default();
             use crate::backend::render::{Choice, Icon};
+            backend.set_ui_modal_scale(crate::backend::render::dialog_pop_scale(2));
             backend.draw_confirm(
                 Icon::Trash,
                 lc.profile_del_confirm,
-                "",
+                u.profile_del_body,
                 Some(&name),
                 &[
                     Choice { label: u.cancel, destructive: false },
@@ -1600,6 +1634,7 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
                 selection,
                 true,
             );
+            backend.clear_ui_transform();
         }
         Screen::Preview { profile_idx } => {
             let (rows, name) = TOUCHES

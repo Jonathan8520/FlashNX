@@ -141,6 +141,22 @@ fn pause_child() -> PauseChild {
     PAUSE_CHILD.lock().map(|g| *g).unwrap_or(PauseChild::None)
 }
 
+/// The pop of a question asked over panels that stay put (delete this game?
+/// this profile?): the question grows in on its own timeline, keyed by what it
+/// asks, while the panels behind do not move. Returns the scale to draw it at.
+pub fn dialog_pop_scale(key: u32) -> f32 {
+    static POP: std::sync::Mutex<(u32, u64)> = std::sync::Mutex::new((0, 0));
+    let now = unsafe { ruffle_tick_now() };
+    let freq = unsafe { ruffle_tick_freq() }.max(1) as f32;
+    let Ok(mut g) = POP.lock() else { return 1.0 };
+    if g.0 != key {
+        *g = (key, now);
+    }
+    let t = ((now.saturating_sub(g.1) as f32 * 1000.0 / freq) / 140.0).clamp(0.0, 1.0);
+    let e = 1.0 - (1.0 - t) * (1.0 - t);
+    0.9 + 0.1 * e
+}
+
 /// A fresh pause: the main panel alone, no sub-panel to slide back.
 pub fn pause_reset() {
     pause_child_set(PauseChild::None);

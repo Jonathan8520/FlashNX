@@ -7901,6 +7901,25 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
             s.screen = list_screen_for_abs(s, game_idx);
             return;
         }
+        // The previous / next game of the list behind, on the same row: setting
+        // up several games one after the other without closing the panel each
+        // time. Stops at the ends (the list behind follows the cursor).
+        "L" | "R" => {
+            let shown = local_filtered_indices(&s.entries, &s.local_filter, &s.folder_filter);
+            if let Some(pos) = shown.iter().position(|&i| i == game_idx) {
+                let next = if button == "L" {
+                    pos.checked_sub(1)
+                } else if pos + 1 < shown.len() {
+                    Some(pos + 1)
+                } else {
+                    None
+                };
+                if let Some(n) = next {
+                    s.screen = Screen::OptionsModal { game_idx: shown[n], selection };
+                    return;
+                }
+            }
+        }
         _ => {}
     }
     s.screen = Screen::OptionsModal { game_idx, selection };
