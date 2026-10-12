@@ -4245,7 +4245,7 @@ struct MoveJob {
 static MOVE_JOB: Mutex<Option<MoveJob>> = Mutex::new(None);
 
 /// Where the running move goes from and to, for its progress page. `None`
-/// for the frame between the answer and the job being queued.
+/// when no move is running: `start_move` refused it, or it has finished.
 pub(crate) fn move_paths() -> Option<(std::string::String, std::string::String)> {
     MOVE_JOB.lock().ok().and_then(|g| g.as_ref().map(|j| (j.src.clone(), j.dest.clone())))
 }
@@ -9072,9 +9072,9 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     total,
                 ),
                 None => {
-                    // No move behind this page (it ended with nobody to send the
-                    // screen back): the screen swallows every button, so it
-                    // must not stay up on its own.
+                    // No move behind this page (`start_move` refused it, or it
+                    // ended without sending the screen back): the screen
+                    // swallows every button, so it must not stay up on its own.
                     let root = primary_root();
                     backend.draw_library_move_page(root.trim_start_matches("sdmc:"), "", total, total);
                     if let Ok(mut s) = LIBRARY.lock() {
