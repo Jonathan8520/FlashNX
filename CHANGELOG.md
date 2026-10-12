@@ -20,7 +20,7 @@ The whole interface is redrawn. Every screen now uses the console's own fonts, a
 
 ### Changed
 
-- **Left and Right change values both ways**: game defaults, the SCREEN rows, OVERCLOCK, cursor speed, cursor visibility, gyroscope, and the zoom by steps of 10 %.
+- **A value changes only once A arms it**: A on a choice or a number outlines it in gold, Left and Right then change it (live in the pause, where the game shows it), A keeps it and B puts back what was there. Left and Right change nothing on a row that is not armed, so a stick pushed slightly sideways on the way down a list no longer changes what it passes; menus follow one axis of the stick at a time, and a fresh Left goes back from a page beside the pause or from the Settings pane. On/off switches flip with A, and a tap on an option sets it.
 - The pause menu no longer wraps from Resume to Quit, so one press of Up can no longer land on Quit.
 - Sorting waits for A: X flips the order shown, and B leaves the list as it was.
 - Holding L or R switches one tab, not one every 80 ms.

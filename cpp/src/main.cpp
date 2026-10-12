@@ -122,33 +122,25 @@ extern "C" void ruffle_draw_screen_menu(int selected);
 extern "C" void ruffle_menu_close_begin(void);
 extern "C" int  ruffle_draw_menu_closing(int selected);
 extern "C" int  ruffle_restart(void);
-// Pause-menu AFFICHAGE: next stage-scaling mode for the game being played.
-// Persists per game AND applies to the live player, so the frozen frame behind
-// the pause panel shows the result immediately.
-// Every `_step(dir)` below moves one value forward (dir >= 0) or back: A steps
-// forward, Left and Right either way.
-extern "C" int  ruffle_display_mode_step(int dir);
-// Pause-menu FILTRE: next screen filter for the game being played. Persists per
-// game; the next redraw picks it up, so the paused frame previews it.
-extern "C" int  ruffle_screen_filter_step(int dir);
-// Pause-menu FPS: show / hide the frame-rate counter for the game being played
-// (#111). Persists per game and, like FILTRE, needs nothing but the flag: the
-// counter is drawn after the frame, so the paused redraw previews it.
-extern "C" int  ruffle_fps_counter_step(int dir);
-// Pause-menu PIXELS: next texture sampling (auto / smooth / sharp) for the game
-// being played. A DIFFERENT setting from the row above -- this one is how the
-// game's own bitmaps are sampled, that one is the CRT pass over the finished
-// frame. Persists per game; the next redraw previews it.
-extern "C" int  ruffle_pixel_filter_step(int dir);
-// Pause-menu OVERCLOCK: on <-> off for the game being played. Persists
-// per game, and persists what the hardware ACCEPTED rather than what was asked
-// for, so a refused raise cannot leave a game marked ON while it runs at
-// 1020 MHz.
-extern "C" int  ruffle_power_mode_step(int dir);
-extern "C" int  ruffle_rotation_step(int dir);
-// Left / Right on ZOOM: ten percent either way, kept at once.
-extern "C" int  ruffle_zoom_step(int dir);
-extern "C" void ruffle_zoom_save(void);
+// The value rows of the pause and of ECRAN (OVERCLOCK, AFFICHAGE, ROTATION,
+// PIXELS, FILTRE), by panel (UI_KIND_PAUSE / UI_KIND_SCREEN) and row. Input
+// rule 1: A ARMS such a row, and only an armed row takes Left / Right; A
+// keeps the value, B puts back exactly what was there. The value is applied
+// to the game LIVE as it moves, so the frozen frame behind the panel shows
+// it, and written to the game's .prefs only when kept (lib.rs, the
+// pause_values module). The drawing reads the same armed state.
+extern "C" void ruffle_pause_opened(void);              // a fresh pause: nothing armed
+extern "C" int  ruffle_value_arm(int kind, int row);    // 1 = armed (a value row)
+extern "C" int  ruffle_value_armed(void);               // 1 = a row is armed
+// Step the armed value: 1 = it moved, 0 = against an end (silent), -1 = the
+// console refused it (a raise of the clock), which says so with a sound.
+extern "C" int  ruffle_value_step(int dir);
+extern "C" int  ruffle_value_confirm(void);             // A, Up / Down, closing
+extern "C" int  ruffle_value_cancel(void);              // B
+// A on a switch row (the FPS counter): flips it and keeps it.
+extern "C" int  ruffle_value_toggle(int kind, int row);
+// X: the game drops its own value and follows Reglages again (1 = it had one).
+extern "C" int  ruffle_value_reset(int kind, int row);
 // Close audren and join its worker. Idempotent; called on the way out, since
 // the launcher's interface sounds open a session no game will close.
 extern "C" void ruffle_audio_shutdown(void);
@@ -184,9 +176,15 @@ extern "C" void ruffle_set_direct_launch(int on);
 // Touch tables of the pause panels (lib.rs UI_KIND_PAUSE / UI_KIND_SCREEN).
 static const int UI_KIND_PAUSE  = 60;
 static const int UI_KIND_SCREEN = 61;
-// `dir` for A on a row whose options are all on show: go round (lib.rs
-// STEP_CYCLE). Left / Right pass -1 / 1 and stop at the ends.
-static const int STEP_CYCLE = 2;
+// What `ruffle_pause_touch` answers besides a row index (lib.rs PAUSE_TAP_*):
+// nothing, the way back (the rail or the page's caption), or a part of a
+// row's control that Rust already acted on (an option set, the switch
+// flipped, an armed arrow stepped), with the row in the low byte.
+static const int PAUSE_TAP_NONE    = -1;
+static const int PAUSE_TAP_BACK    = -2;
+static const int PAUSE_TAP_SET     = 0x1000;  // a value changed: the click
+static const int PAUSE_TAP_REFUSED = 0x2000;  // the console said no: the error
+static const int PAUSE_TAP_SAME    = 0x3000;  // the option already in force
 
 // In-game software keyboard (raised when a Flash TextField gains focus).
 extern "C" int  ruffle_keyboard_take_request(void);
@@ -323,9 +321,12 @@ static const MenuNavButton MENU_NAV_BUTTONS[] = {
     { "B",            HidNpadButton_B,            false },
     { "X",            HidNpadButton_X,            false },
     { "Y",            HidNpadButton_Y,            false },
-    // L/R: hold-to-repeat ON so DistantFiles page-up/down can be held to
-    // scroll quickly through thousand-entry archive.org dumps. DistantIdle
-    // history cycle is fine with repeat (just bumps the visible URL index).
+    // L/R: hold-to-repeat ON because they PAGE the long lists (an archive's
+    // games, which run to thousands, and the bug report's game list), where a
+    // held shoulder is how you get far fast. Everywhere else they act once per
+    // press and ignore the repeat ticks (`nav_may_wrap` on the Rust side): the
+    // tabs, the next / previous game in a game's options, the layers of the
+    // controls editor.
     { "L",            HidNpadButton_L,            true  },
     { "R",            HidNpadButton_R,            true  },
     { "ZL",           HidNpadButton_ZL,           false },
@@ -482,6 +483,64 @@ static u64 pause_repeat_step(PauseRepeat& r, u64 kDown, u64 kHeld, u64 now, u64 
     return out;
 }
 
+// Menu navigation acts on ONE axis at a time (input rule 7). A stick pushed a
+// little off straight sets a vertical AND a horizontal bit, and both used to
+// go through: going down a settings list, a thumb slightly off-centre stepped
+// the values it passed (Jonathan: "on peut descendre en diagonal
+// involontairement"). Filtered here, for the menu loops only, never for the
+// game's own buttons, the zoom framing or the cursor, which want both axes.
+//
+// When a stick leaves its centre, the axis pushed further is latched (a tie
+// goes vertical) and the other axis is dropped for as long as the latched one
+// is held. Letting go of the latched axis while the other is still held (the
+// thumb rolling round the rim) switches the latch, and the new direction
+// counts as a fresh press. The d-pad gets the same latch when both its axes
+// are down: the first one pressed wins. This is the usual dominant-axis
+// filtering of console menus.
+struct NavLatch {
+    int axis[3]; // left stick, right stick, d-pad: 0 free, 1 vertical, 2 horizontal
+};
+static void nav_latch_reset(NavLatch& n) {
+    n.axis[0] = n.axis[1] = n.axis[2] = 0;
+}
+static void nav_latch_group(int& axis, u64 vmask, u64 hmask, u64* held, u64* down, float dx, float dy) {
+    const u64 v = *held & vmask;
+    const u64 h = *held & hmask;
+    if (!v && !h) {
+        axis = 0;
+        return;
+    }
+    if (axis == 0) {
+        if (v && h) axis = (std::fabs(dy) >= std::fabs(dx)) ? 1 : 2;
+        else        axis = v ? 1 : 2;
+    } else if (axis == 1 && !v) {
+        axis = 2;
+        *down |= h;
+    } else if (axis == 2 && !h) {
+        axis = 1;
+        *down |= v;
+    }
+    const u64 drop = (axis == 1) ? hmask : vmask;
+    *held &= ~drop;
+    *down &= ~drop;
+}
+// Filter one frame of `held` / `down` in place. Only the direction bits are
+// touched; every other button goes through as it came.
+static void nav_filter(NavLatch& n, PadState* pad, u64* held, u64* down) {
+    const HidAnalogStickState l = padGetStickPos(pad, 0);
+    const HidAnalogStickState r = padGetStickPos(pad, 1);
+    nav_latch_group(n.axis[0], HidNpadButton_StickLUp | HidNpadButton_StickLDown,
+                    HidNpadButton_StickLLeft | HidNpadButton_StickLRight, held, down,
+                    (float)l.x, (float)l.y);
+    nav_latch_group(n.axis[1], HidNpadButton_StickRUp | HidNpadButton_StickRDown,
+                    HidNpadButton_StickRLeft | HidNpadButton_StickRRight, held, down,
+                    (float)r.x, (float)r.y);
+    // The d-pad has no deflection to compare: both axes pressed on the same
+    // frame is a tie, which goes vertical.
+    nav_latch_group(n.axis[2], HidNpadButton_Up | HidNpadButton_Down,
+                    HidNpadButton_Left | HidNpadButton_Right, held, down, 0.0f, 1.0f);
+}
+
 static void populate_bindings_from_keymap(void) {
     for (size_t i = 0; i < BINDINGS_COUNT; ++i) {
         BINDINGS[i].key = ruffle_keymap_lookup(BINDINGS[i].name);
@@ -541,7 +600,8 @@ enum MenuAction {
                             // three preview on the frozen frame behind the panel
                             // and all three answer the same question, so they sit
                             // together instead of taking three of seven rows.
-    MENU_POWER        = 3,  // OVERCLOCK ON / OFF, toggled in place on the row.
+    MENU_POWER        = 3,  // OVERCLOCK Off / Auto / On, a value row: A arms
+                            // it, Left / Right change it, A keeps it.
                             // Top level and NOT inside ECRAN: every ECRAN row
                             // previews on the frozen frame behind the panel and
                             // this one cannot, so buried a level down it would
@@ -558,7 +618,9 @@ enum MenuAction {
 enum ScreenAction {
     SCREEN_DISPLAY  = 0,
     SCREEN_ROTATION = 1,
-    SCREEN_ZOOM     = 2,  // geometry, so next to the rotation; the filter is colour
+    SCREEN_ZOOM     = 2,  // geometry, so next to the rotation; the filter is colour.
+                          // A row that opens a mode (the framing), not a value
+                          // row: its percentage is changed in there.
     SCREEN_PIXELS   = 3,  // resampling: the last step of the geometry, under ZOOM
     SCREEN_FILTER   = 4,
     SCREEN_FPS      = 5,  // adds something to the screen rather than changing
@@ -922,21 +984,40 @@ static int gyro_cursor_delta(float* dx, float* dy) {
     return mode;
 }
 
+// The GLOBAL default (RÉGLAGES > VITESSE) back in force: its file, or x1.0
+// when there is none. The file only exists once VITESSE has been changed, and
+// keeping whatever was in force without it carried a game's own speed into
+// the library, into the next game, and into the game that had just dropped
+// it (X on the row in the pause, which then still read "par défaut").
 static void cursor_speed_load() {
+    int v = 1;
     FILE* f = std::fopen(app_file_path("cursor_speed"), "rb");
     if (f) {
-        int v = 1;
-        if (std::fscanf(f, "%d", &v) == 1) g_cursor_speed_idx = v;
+        if (std::fscanf(f, "%d", &v) != 1) v = 1;
         std::fclose(f);
     }
+    g_cursor_speed_idx = v;
     cursor_speed_apply();
 }
-// Step to the next preset (dir >= 0) or the previous one, apply, persist.
-// Returns the new index.
-extern "C" int ruffle_cursor_speed_step(int dir) {
-    g_cursor_speed_idx = dir < 0
-        ? (g_cursor_speed_idx + CURSOR_SPEED_COUNT - 1) % CURSOR_SPEED_COUNT
-        : (g_cursor_speed_idx + 1) % CURSOR_SPEED_COUNT;
+// The preset in force, for the rows that show and step it.
+extern "C" int ruffle_cursor_speed_index(void) {
+    return g_cursor_speed_idx;
+}
+// Apply preset `idx` WITHOUT keeping it: an armed row moves the pointer's
+// speed live, and only A writes it (input rule 2); B puts the old one back
+// through here too.
+extern "C" void ruffle_cursor_speed_preview(int idx) {
+    g_cursor_speed_idx = idx;
+    cursor_speed_apply();
+}
+// The global default back in force, for a game that just dropped its own
+// speed (X on the row, in game).
+extern "C" void ruffle_cursor_speed_follow_global(void) {
+    cursor_speed_load();
+}
+// Apply preset `idx` and keep it. Returns the index in force.
+extern "C" int ruffle_cursor_speed_set(int idx) {
+    g_cursor_speed_idx = idx;
     cursor_speed_apply();
     if (g_in_game) {
         // In a game → save to THIS game's <basename>.cursor (via Rust). No bleed
@@ -1196,6 +1277,8 @@ static void worker_entry(void* arg) {
 
     MenuRepeatState lib_repeat;
     menu_repeat_reset(lib_repeat);
+    NavLatch lib_latch;
+    nav_latch_reset(lib_latch);
     bool first_lib_frame = true;
     // Keep BOTH loop conditions so the exit can be attributed. They mean very
     // different things — `library_active=0` is the app's own state machine
@@ -1217,19 +1300,23 @@ static void worker_entry(void* arg) {
             flashnx_clocks_reassert();
         }
         padUpdate(&pad);
-        const u64 kDownLib = padGetButtonsDown(&pad);
+        u64 kDownLib = padGetButtonsDown(&pad);
         const u64 kUpLib   = padGetButtonsUp(&pad);
-        const u64 kHeldLib = padGetButtons(&pad);
+        u64 kHeldLib = padGetButtons(&pad);
+        // One axis at a time for every list of the launcher (see nav_filter).
+        nav_filter(lib_latch, &pad, &kHeldLib, &kDownLib);
         const u64 now_lib  = ruffle_tick_now();
         // Forward joycon edges + auto-repeat (D-pad/sticks) into the
         // library state machine. Pause / Plus / face buttons are one-shot
         // (no repeat) — see MENU_NAV_BUTTONS.repeat flags.
         // Which nav directions are held RIGHT NOW, before any event goes out.
-        // Each direction is forwarded on its own, so a stick pushed diagonally
-        // sends two events in the same frame -- and where one of them is a
-        // multi-game jump, the pair moved five games for one flick. The Rust side
-        // suppresses the jump when the other axis is engaged, which it can only
-        // know from the held state; the events themselves carry no such context.
+        // The filter keeps each stick and the d-pad to one axis, but two of
+        // them can still be held on different axes (the d-pad down, a stick
+        // to the side), and each direction is forwarded on its own -- where
+        // one of the two is a multi-game jump, the pair moved five games for
+        // one flick. The Rust side suppresses the jump when the other axis is
+        // engaged, which it can only know from the held state; the events
+        // themselves carry no such context.
         {
             unsigned char nav = 0;
             if (kHeldLib & (HidNpadButton_Up | HidNpadButton_StickLUp | HidNpadButton_StickRUp))
@@ -1401,8 +1488,6 @@ static void worker_entry(void* arg) {
     // ZOOM framing mode (issue #101): a state INSIDE the ECRAN branch, because
     // backing out of it must land on the ECRAN rows, not on the game.
     bool zoom_mode = false;
-    // A zoom stepped with Left / Right that has not been written yet.
-    bool zoom_unsaved = false;
     // Frames the zoom keys have been held, so a long press accelerates. One
     // percent a frame is the right grain to land on a value and much too slow to
     // cross the whole range, which is what this fixes.
@@ -1442,6 +1527,9 @@ static void worker_entry(void* arg) {
     menu_repeat_reset(touches_repeat);
     PauseRepeat pause_rep;
     pause_repeat_reset(pause_rep);
+    // One axis at a time on every page of the pause (see nav_filter).
+    NavLatch pause_latch;
+    nav_latch_reset(pause_latch);
 
     // CpuBoostMode re-assert counter. A download raises FastLoad for its own
     // duration (net.cpp) and resets it on completion, but an aborted/errored
@@ -1531,13 +1619,21 @@ static void worker_entry(void* arg) {
                 continue;
             }
 
+            // The pause's lists move on one axis at a time (input rule 7):
+            // the filtered bits drive every page below except the framing
+            // mode, which wants both axes of both sticks.
+            u64 kDownN = kDown;
+            u64 kHeldN = kHeld;
+            nav_filter(pause_latch, &pad, &kHeldN, &kDownN);
+
             // ─── Sub-screen branch: TOUCHES (Rust-driven) ───────────────
             // If the user picked "TOUCHES" earlier, Rust now owns the
             // input + rendering for the keymap editor. We just forward
             // joycon down-edges and ask it to draw.
             if (ruffle_touches_active()) {
                 // `-` opened the pause, so `-` resumes the game from any of its
-                // pages; B is the one that goes back a level.
+                // pages (keeping a value armed there, which the close does);
+                // B is the one that goes back a level.
                 if (kDown & HidNpadButton_Minus) {
                     ruffle_touches_close();
                     if (ruffle_touches_consume_dirty()) {
@@ -1548,7 +1644,7 @@ static void worker_entry(void* arg) {
                     menu_closing = true;
                     continue;
                 }
-                menu_repeat_step(touches_repeat, kDown, kUp, kHeld,
+                menu_repeat_step(touches_repeat, kDownN, kUp, kHeldN,
                                  ruffle_tick_now(), tick_freq_global,
                                  ruffle_touches_input);
                 // Touchscreen, same contract as the launcher: tap a row to move
@@ -1584,15 +1680,7 @@ static void worker_entry(void* arg) {
                 continue;
             }
 
-            // ─── Sub-screen branch: ECRAN ───────────────────────────────
-            // Display mode / rotation / filter. Each `A` cycles the selected
-            // row's value and then falls through to the redraw at the bottom
-            // of this branch — no `continue` — so the frozen game frame behind
-            // the panel is re-rendered with the new setting and you see what it
-            // does to THIS game before going back to playing. `B` returns to the
-            // pause menu, which is why nothing here calls the close pop: the
-            // panel is not being dismissed, it is being backed out of.
-            // ─── ZOOM framing mode ──────────────────────────────────────
+            // ─── Sub-screen branch: ECRAN, ZOOM framing mode ────────────
             // The panel is gone and the picture is untouched: what the player
             // is judging here IS the framing, so nothing is laid over it but
             // two letterbox bands carrying the legend. Everything is live and
@@ -1761,81 +1849,92 @@ static void worker_entry(void* arg) {
                 continue;
             }
 
+            // ─── ECRAN rows ─────────────────────────────────────────────
+            // Each value row is ARMED by A, changed by Left / Right while armed
+            // and kept by A, or put back as it was by B (input rules 1 and 2).
+            // The value is applied live, and every pass of this branch
+            // re-renders the frozen frame behind the panel, so you see what it
+            // does to THIS game before keeping it. ZOOM opens the framing mode
+            // above; the counter is a switch A flips. B, unarmed, returns to
+            // the pause, which is why nothing here calls the close pop: the
+            // panel is backed out of, not dismissed.
             if (screen_menu) {
                 bool nav_rep = false;
-                const u64 kNav = pause_repeat_step(pause_rep, kDown, kHeld, ruffle_tick_now(), tick_freq_global, &nav_rep);
+                const u64 kNav = pause_repeat_step(pause_rep, kDownN, kHeldN, ruffle_tick_now(), tick_freq_global, &nav_rep);
+                // A turn of the picture or a new zoom moves what sits under the
+                // crosshair: after any change here the pointer is sent again,
+                // or the next click lands where the old picture put it.
+                bool changed = false;
+                bool back = false;
+                // Up / Down keep an armed value and move on: an armed row is
+                // no trap (input rule 2).
                 if (kNav & PAUSE_DIRS[0]) {
                     if (screen_selection > 0 || !nav_rep) {
+                        if (ruffle_value_armed()) ruffle_value_confirm();
                         screen_selection = (screen_selection + SCREEN_COUNT - 1) % SCREEN_COUNT;
                         ruffle_ui_sound(UI_SFX_MOVE);
                     }
                 }
                 if (kNav & PAUSE_DIRS[1]) {
                     if (screen_selection + 1 < SCREEN_COUNT || !nav_rep) {
+                        if (ruffle_value_armed()) ruffle_value_confirm();
                         screen_selection = (screen_selection + 1) % SCREEN_COUNT;
                         ruffle_ui_sound(UI_SFX_MOVE);
                     }
                 }
-                // Left / Right step the value under the cursor either way, so
-                // going one past what you wanted is one press back, not a lap.
-                {
-                    const u64 kStep = screen_selection == SCREEN_ZOOM ? kNav : kDown;
+                if (ruffle_value_armed()) {
+                    // Left / Right change the armed value, a held direction
+                    // repeating; against an end nothing moves and nothing
+                    // sounds.
                     int dir = 0;
-                    if (kStep & PAUSE_DIRS[2]) dir = -1;
-                    if (kStep & PAUSE_DIRS[3]) dir = 1;
+                    if (kNav & PAUSE_DIRS[2]) dir = -1;
+                    if (kNav & PAUSE_DIRS[3]) dir = 1;
                     if (dir != 0) {
-                        // A click only when the setting moved: at the end of a
-                        // row, Left or Right is silent, as nothing changed.
-                        int moved = 0;
-                        switch (screen_selection) {
-                        case SCREEN_DISPLAY:  moved = ruffle_display_mode_step(dir);  break;
-                        case SCREEN_ROTATION:
-                            moved = ruffle_rotation_step(dir);
-                            if (moved) ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
-                            break;
-                        case SCREEN_ZOOM:
-                            moved = ruffle_zoom_step(dir);
-                            if (moved) {
-                                zoom_unsaved = true;
-                                ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
-                            }
-                            break;
-                        case SCREEN_PIXELS:   moved = ruffle_pixel_filter_step(dir);  break;
-                        case SCREEN_FILTER:   moved = ruffle_screen_filter_step(dir); break;
-                        case SCREEN_FPS:      moved = ruffle_fps_counter_step(dir);   break;
+                        const int r = ruffle_value_step(dir);
+                        if (r > 0) {
+                            ruffle_ui_sound(UI_SFX_TOGGLE);
+                            changed = true;
+                        } else if (r < 0) {
+                            ruffle_ui_sound(UI_SFX_ERROR);
                         }
-                        if (moved) ruffle_ui_sound(UI_SFX_TOGGLE);
                     }
+                } else if (kDownN & PAUSE_DIRS[2]) {
+                    // Unarmed, Left points at the pause folded into its rail:
+                    // a fresh press goes back to it, exactly like B (input
+                    // rule 3). Right points nowhere and does nothing.
+                    back = true;
                 }
-                // The zoom stepped under a hold is written once the hold ends,
-                // or as soon as the cursor or the panel leaves it.
-                if (zoom_unsaved
-                    && (screen_selection != SCREEN_ZOOM
-                        || !(kHeld & (PAUSE_DIRS[2] | PAUSE_DIRS[3]))
-                        || (kDown & (HidNpadButton_Minus | HidNpadButton_B)))) {
-                    ruffle_zoom_save();
-                    zoom_unsaved = false;
-                }
-                if (kDown & HidNpadButton_Minus) {
-                    // `-` resumes the game from here too; B goes back to the
-                    // main panel.
+                if (kDownN & HidNpadButton_Minus) {
+                    // `-` resumes the game from here too, keeping an armed
+                    // value; B goes back to the main panel.
+                    ruffle_value_confirm();
                     screen_menu = false;
                     ruffle_ui_sound(UI_SFX_CLOSE);
                     ruffle_menu_close_begin();
                     menu_closing = true;
                     continue;
                 }
-                if (kDown & HidNpadButton_B) {
-                    screen_menu = false;
-                    pause_repeat_reset(pause_rep);
-                    ruffle_ui_sound(UI_SFX_BACK);
-                    ruffle_redraw_paused();
-                    ruffle_draw_menu(menu_selection);
-                    gl_context_swap();
-                    continue;
+                if (kDownN & HidNpadButton_B) {
+                    if (ruffle_value_armed()) {
+                        // B puts back what was there before A, and stays.
+                        ruffle_value_cancel();
+                        ruffle_ui_sound(UI_SFX_BACK);
+                        changed = true;
+                    } else {
+                        back = true;
+                    }
                 }
-                // A tap on a row moves the cursor there; a tap on the row it is
-                // already on is A.
+                // X: the game drops its own value for this row and follows
+                // Reglages again, as X does in its options in the launcher.
+                if ((kDownN & HidNpadButton_X) && !ruffle_value_armed()
+                    && ruffle_value_reset(UI_KIND_SCREEN, screen_selection) > 0) {
+                    ruffle_ui_sound(UI_SFX_TOGGLE);
+                    changed = true;
+                }
+                // Touch (input rule 6): an option or the switch acts at once,
+                // the rail or the "< Pause" caption goes back, a row moves the
+                // cursor, and the row it is already on is A. A tap anywhere
+                // but on the armed row keeps its value first (done by Rust).
                 bool tap_a = false;
                 {
                     hidGetTouchScreenStates(&touch_state, 1);
@@ -1844,7 +1943,22 @@ static void worker_entry(void* arg) {
                         t ? (float)touch_state.touches[0].x * UI_TOUCH_SCALE_X : 0.0f,
                         t ? (float)touch_state.touches[0].y * UI_TOUCH_SCALE_Y : 0.0f,
                         t ? 1 : 0, UI_KIND_SCREEN);
-                    if (hit >= 0 && hit < SCREEN_COUNT) {
+                    if (hit == PAUSE_TAP_BACK) {
+                        back = true;
+                    } else if (hit >= PAUSE_TAP_SET) {
+                        const int row = hit & 0xFF;
+                        const int what = hit & 0xF000;
+                        const bool moved = row != screen_selection && row < SCREEN_COUNT;
+                        if (row < SCREEN_COUNT) screen_selection = row;
+                        if (what == PAUSE_TAP_SET) {
+                            ruffle_ui_sound(UI_SFX_TOGGLE);
+                            changed = true;
+                        } else if (what == PAUSE_TAP_REFUSED) {
+                            ruffle_ui_sound(UI_SFX_ERROR);
+                        } else if (moved) {
+                            ruffle_ui_sound(UI_SFX_MOVE);
+                        }
+                    } else if (hit >= 0 && hit < SCREEN_COUNT) {
                         if (hit == screen_selection) {
                             tap_a = true;
                         } else {
@@ -1853,22 +1967,25 @@ static void worker_entry(void* arg) {
                         }
                     }
                 }
-                if ((kDown & HidNpadButton_A) || tap_a) {
-                    // ZOOM opens a mode; every other row goes round its options.
-                    ruffle_ui_sound(screen_selection == SCREEN_ZOOM ? UI_SFX_DECIDE : UI_SFX_TOGGLE);
-                    switch (screen_selection) {
-                    case SCREEN_DISPLAY:  ruffle_display_mode_step(STEP_CYCLE);   break;
-                    case SCREEN_ROTATION:
-                        ruffle_rotation_step(STEP_CYCLE);
-                        // Turning changes the basis the pointer is mapped
-                        // through AND recentres the framing, so the stage point
-                        // under the crosshair moves. Same reason as the zoom
-                        // arms above.
-                        ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
-                        break;
-                    case SCREEN_ZOOM:
-                        // Opens a mode instead of cycling a value: a free
-                        // percentage has no next entry to step to.
+                if (back) {
+                    screen_menu = false;
+                    pause_repeat_reset(pause_rep);
+                    ruffle_ui_sound(UI_SFX_BACK);
+                    if (changed) ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
+                    ruffle_redraw_paused();
+                    ruffle_draw_menu(menu_selection);
+                    gl_context_swap();
+                    continue;
+                }
+                if ((kDownN & HidNpadButton_A) || tap_a) {
+                    if (ruffle_value_armed()) {
+                        // A keeps the value (written to the game's .prefs now).
+                        ruffle_value_confirm();
+                        ruffle_ui_sound(UI_SFX_DECIDE);
+                    } else if (screen_selection == SCREEN_ZOOM) {
+                        // Opens a mode instead of arming a value: a free
+                        // percentage is framed, not stepped.
+                        ruffle_ui_sound(UI_SFX_DECIDE);
                         ruffle_zoom_begin();
                         zoom_mode = true;
                         zoom_hold = 0;
@@ -1878,12 +1995,16 @@ static void worker_entry(void* arg) {
                         zoom_pinching = false;
                         pan_hold = 0;
                         zoom_fine_hold = 0;
-                        break;
-                    case SCREEN_PIXELS:   ruffle_pixel_filter_step(STEP_CYCLE);   break;
-                    case SCREEN_FILTER:   ruffle_screen_filter_step(STEP_CYCLE);  break;
-                    case SCREEN_FPS:      ruffle_fps_counter_step(STEP_CYCLE);    break;
+                    } else if (screen_selection == SCREEN_FPS) {
+                        // A switch: A flips it, nothing to arm.
+                        if (ruffle_value_toggle(UI_KIND_SCREEN, screen_selection) > 0) {
+                            ruffle_ui_sound(UI_SFX_TOGGLE);
+                        }
+                    } else if (ruffle_value_arm(UI_KIND_SCREEN, screen_selection)) {
+                        ruffle_ui_sound(UI_SFX_DECIDE);
                     }
                 }
+                if (changed) ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
                 ruffle_redraw_paused();
                 ruffle_draw_screen_menu(screen_selection);
                 gl_context_swap();
@@ -1891,10 +2012,10 @@ static void worker_entry(void* arg) {
             }
 
             // ─── Pause main menu ────────────────────────────────────────
-            // Edge-detected nav so a held D-pad doesn't scroll past every
-            // entry. Press `-` again or `B` to dismiss (= Resume).
-            // Right stick navigates too (it's the mouse cursor only when the
-            // menu is closed — this branch `continue`s before the cursor code).
+            // Up / Down repeat when held, like every list. `-` or B dismisses
+            // (= Resume). Right stick navigates too (it's the mouse cursor only
+            // when the menu is closed: this branch `continue`s before the
+            // cursor code).
             //
             // A fresh Up on Resume wraps to Quit, the quickest way out, as
             // Jonathan asked; under a HELD direction the list stops at its
@@ -1902,30 +2023,37 @@ static void worker_entry(void* arg) {
             // spinning round to Resume.
             {
                 bool nav_rep = false;
-                const u64 kNav = pause_repeat_step(pause_rep, kDown, kHeld, ruffle_tick_now(), tick_freq_global, &nav_rep);
+                const u64 kNav = pause_repeat_step(pause_rep, kDownN, kHeldN, ruffle_tick_now(), tick_freq_global, &nav_rep);
                 if (kNav & PAUSE_DIRS[0]) {
                     if (menu_selection > 0 || !nav_rep) {
+                        if (ruffle_value_armed()) ruffle_value_confirm();
                         menu_selection = (menu_selection + MENU_COUNT - 1) % MENU_COUNT;
                         ruffle_ui_sound(UI_SFX_MOVE);
                     }
                 }
                 if (kNav & PAUSE_DIRS[1]) {
                     if (menu_selection + 1 < MENU_COUNT || !nav_rep) {
+                        if (ruffle_value_armed()) ruffle_value_confirm();
                         menu_selection = (menu_selection + 1) % MENU_COUNT;
                         ruffle_ui_sound(UI_SFX_MOVE);
                     }
                 }
-            }
-            if (menu_selection == MENU_POWER) {
-                if ((kDown & PAUSE_DIRS[2]) && ruffle_power_mode_step(-1)) {
-                    ruffle_ui_sound(UI_SFX_TOGGLE);
+                // OVERCLOCK, armed: Left / Right ask for the setting beside it,
+                // applied at once. A raise the console refuses keeps what was
+                // in force and says so.
+                if (ruffle_value_armed()) {
+                    int dir = 0;
+                    if (kNav & PAUSE_DIRS[2]) dir = -1;
+                    if (kNav & PAUSE_DIRS[3]) dir = 1;
+                    if (dir != 0) {
+                        const int r = ruffle_value_step(dir);
+                        if (r > 0) ruffle_ui_sound(UI_SFX_TOGGLE);
+                        else if (r < 0) ruffle_ui_sound(UI_SFX_ERROR);
+                    }
                 }
-                if ((kDown & PAUSE_DIRS[3]) && ruffle_power_mode_step(1)) {
-                    ruffle_ui_sound(UI_SFX_TOGGLE);
-                }
             }
-            // A tap on a row moves the cursor there; a tap on the row it is
-            // already on is A.
+            // Touch, as on ECRAN: the overclock's options act at once, a row
+            // moves the cursor, the row it is already on is A.
             bool tap_a = false;
             {
                 hidGetTouchScreenStates(&touch_state, 1);
@@ -1934,7 +2062,15 @@ static void worker_entry(void* arg) {
                     t ? (float)touch_state.touches[0].x * UI_TOUCH_SCALE_X : 0.0f,
                     t ? (float)touch_state.touches[0].y * UI_TOUCH_SCALE_Y : 0.0f,
                     t ? 1 : 0, UI_KIND_PAUSE);
-                if (hit >= 0 && hit < MENU_COUNT) {
+                if (hit >= PAUSE_TAP_SET) {
+                    const int row = hit & 0xFF;
+                    const int what = hit & 0xF000;
+                    const bool moved = row != menu_selection && row < MENU_COUNT;
+                    if (row < MENU_COUNT) menu_selection = row;
+                    if (what == PAUSE_TAP_SET) ruffle_ui_sound(UI_SFX_TOGGLE);
+                    else if (what == PAUSE_TAP_REFUSED) ruffle_ui_sound(UI_SFX_ERROR);
+                    else if (moved) ruffle_ui_sound(UI_SFX_MOVE);
+                } else if (hit >= 0 && hit < MENU_COUNT) {
                     if (hit == menu_selection) {
                         tap_a = true;
                     } else {
@@ -1943,12 +2079,17 @@ static void worker_entry(void* arg) {
                     }
                 }
             }
-            if (kDown & (HidNpadButton_Minus | HidNpadButton_B)) {
+            if ((kDownN & HidNpadButton_B) && ruffle_value_armed()) {
+                // B on the armed OVERCLOCK puts back the setting it had, and
+                // the pause stays.
+                ruffle_value_cancel();
+                ruffle_ui_sound(UI_SFX_BACK);
+            } else if (kDownN & (HidNpadButton_Minus | HidNpadButton_B)) {
                 // Scale the menu out (drained at the top of this branch over the
-                // next frames), then resume.
+                // next frames), then resume. `-` keeps an armed value.
                 // "dismissed", not "cancelled": B and `-` resume the game, they
-                // do not undo whatever the player just changed on the row they
-                // happen to be standing on.
+                // do not undo whatever the player kept on the rows.
+                ruffle_value_confirm();
                 std::printf("menu: pause CLOSE (row=%d, dismissed)\n", menu_selection);
                 std::fflush(stdout);
                 ruffle_ui_sound(UI_SFX_CLOSE);
@@ -1956,66 +2097,75 @@ static void worker_entry(void* arg) {
                 menu_closing = true;
                 continue;
             }
-            if ((kDown & HidNpadButton_A) || tap_a) {
-                // Resume closes the sheet, OVERCLOCK steps in place, the rest
-                // open a page or act.
-                ruffle_ui_sound(menu_selection == MENU_RESUME ? UI_SFX_CLOSE
-                                : menu_selection == MENU_POWER ? UI_SFX_TOGGLE
-                                : UI_SFX_DECIDE);
-                switch (menu_selection) {
-                case MENU_RESUME:
-                    std::printf("menu: pause CLOSE (REPRENDRE)\n");
-                    std::fflush(stdout);
-                    ruffle_menu_close_begin();
-                    menu_closing = true;
-                    continue;
-                case MENU_TOUCHES:
-                    // Hand control to the Rust TOUCHES sub-screen.
-                    // menu_open stays true so we re-enter the branch above
-                    // next frame; Rust closes itself on B.
-                    menu_repeat_reset(touches_repeat);
-                    ruffle_touches_open();
-                    continue;
-                case MENU_SCREEN:
-                    // Open the sub-panel on its first row and let the branch
-                    // above own the next frame.
-                    screen_menu = true;
-                    screen_selection = SCREEN_DISPLAY;
-                    zoom_mode = false;
-                    pause_repeat_reset(pause_rep);
-                    continue;
-                case MENU_POWER:
-                    // Goes round in place, like the ECRAN rows: the panel stays
-                    // open and the row redraws with the mode actually in force,
-                    // which is not always the one asked for.
-                    ruffle_power_mode_step(STEP_CYCLE);
-                    continue;
-                case MENU_RESTART: {
-                    std::printf("menu: REDEMARRER → ruffle_restart()\n");
-                    std::fflush(stdout);
-                    if (ruffle_restart() != 0) {
-                        std::printf("menu: ruffle_restart() failed\n");
+            // X: the overclock follows Reglages again, as in the game's options.
+            if ((kDownN & HidNpadButton_X) && !ruffle_value_armed()
+                && ruffle_value_reset(UI_KIND_PAUSE, menu_selection) > 0) {
+                ruffle_ui_sound(UI_SFX_TOGGLE);
+            }
+            if ((kDownN & HidNpadButton_A) || tap_a) {
+                if (ruffle_value_armed()) {
+                    // A keeps the overclock setting (written to the game's
+                    // .prefs now).
+                    ruffle_value_confirm();
+                    ruffle_ui_sound(UI_SFX_DECIDE);
+                } else {
+                    // Resume closes the sheet, OVERCLOCK arms, the rest open a
+                    // page or act.
+                    ruffle_ui_sound(menu_selection == MENU_RESUME ? UI_SFX_CLOSE : UI_SFX_DECIDE);
+                    switch (menu_selection) {
+                    case MENU_RESUME:
+                        std::printf("menu: pause CLOSE (REPRENDRE)\n");
                         std::fflush(stdout);
+                        ruffle_menu_close_begin();
+                        menu_closing = true;
+                        continue;
+                    case MENU_TOUCHES:
+                        // Hand control to the Rust TOUCHES sub-screen.
+                        // menu_open stays true so we re-enter the branch above
+                        // next frame; Rust closes itself on B.
+                        menu_repeat_reset(touches_repeat);
+                        ruffle_touches_open();
+                        continue;
+                    case MENU_SCREEN:
+                        // Open the sub-panel on its first row and let the branch
+                        // above own the next frame.
+                        screen_menu = true;
+                        screen_selection = SCREEN_DISPLAY;
+                        zoom_mode = false;
+                        pause_repeat_reset(pause_rep);
+                        continue;
+                    case MENU_POWER:
+                        // Armed in place: the panel stays open and the row
+                        // redraws outlined, taking Left / Right.
+                        ruffle_value_arm(UI_KIND_PAUSE, MENU_POWER);
+                        break;
+                    case MENU_RESTART: {
+                        std::printf("menu: REDEMARRER → ruffle_restart()\n");
+                        std::fflush(stdout);
+                        if (ruffle_restart() != 0) {
+                            std::printf("menu: ruffle_restart() failed\n");
+                            std::fflush(stdout);
+                            back_to_library = true;
+                            break;
+                        }
+                        menu_open = false;
+                        // NOT resume_after_pause() here, unlike every other resume:
+                        // ruffle_restart() destroyed the Player and built a new one,
+                        // whose clock starts NOW. There is no unplayed gap to hide,
+                        // and handing it one pushes its start_time into the FUTURE
+                        // by however long the menu was open -- getTimer() then reads
+                        // 0 for exactly that long (Instant::duration_since saturates
+                        // rather than panicking), which is the frozen-animation
+                        // failure mode of #100 reachable from any game's menu.
+                        last_tick = ruffle_tick_now();
+                        continue;
+                    }
+                    case MENU_QUIT:
                         back_to_library = true;
                         break;
                     }
-                    menu_open = false;
-                    // NOT resume_after_pause() here, unlike every other resume:
-                    // ruffle_restart() destroyed the Player and built a new one,
-                    // whose clock starts NOW. There is no unplayed gap to hide,
-                    // and handing it one pushes its start_time into the FUTURE
-                    // by however long the menu was open -- getTimer() then reads
-                    // 0 for exactly that long (Instant::duration_since saturates
-                    // rather than panicking), which is the frozen-animation
-                    // failure mode of #100 reachable from any game's menu.
-                    last_tick = ruffle_tick_now();
-                    continue;
+                    if (back_to_library) break;
                 }
-                case MENU_QUIT:
-                    back_to_library = true;
-                    break;
-                }
-                if (back_to_library) break;
             }
 
             // Re-render the frozen game frame + cursor, then layer the menu
@@ -2046,6 +2196,10 @@ static void worker_entry(void* arg) {
             menu_open = true;
             menu_selection = MENU_RESUME;
             pause_repeat_reset(pause_rep);
+            // The stick that was steering the game must not carry an axis
+            // latched from before into the menu.
+            nav_latch_reset(pause_latch);
+            ruffle_pause_opened();
             ruffle_ui_sound(UI_SFX_OPEN);
             // A fresh pause always opens on the main panel, never back inside
             // ECRAN where a previous pause happened to leave it.

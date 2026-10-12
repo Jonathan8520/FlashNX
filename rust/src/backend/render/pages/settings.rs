@@ -218,14 +218,17 @@ impl SwitchRenderBackend {
     /// beneath it and `desc` (what the layout in use looks like) under the
     /// names. The layout in use is lifted (tile fill, gold tick in its corner);
     /// with `focused` a gold ring glides to it, so the ring and the tick are
-    /// always on the same card: Left and Right apply at once. Returns the
-    /// cards' touch cells and where the next block can start.
+    /// always on the same card. `armed`: A has armed the row, so Left and Right
+    /// move the layout (the card shown is the one they moved to, kept by A),
+    /// and gold arrows beside the cards say so, as beside any armed control.
+    /// Returns the cards' touch cells and where the next block can start.
     pub(crate) fn settings_layouts(
         &mut self,
         top: f32,
         caption: &str,
         current: u8,
         focused: bool,
+        armed: bool,
         desc: &str,
     ) -> (std::vec::Vec<(f32, f32, f32, f32)>, f32) {
         const GAP: f32 = 16.0;
@@ -263,6 +266,16 @@ impl SwitchRenderBackend {
         if focused {
             let hx = glide_x(cx, GLIDE_KEY_CARDS, now);
             self.kit_ring(hx, y, cw, CARD_H, BLOCK_RADIUS, ring::GAP, ring::WIDTH, col::GOLD);
+        }
+        if armed {
+            // In the gutters either side of the row of cards, the one at an
+            // end of the four faded, like the arrows of an armed control.
+            const ARROW: f32 = 14.0;
+            const DIM: u32 = 0x59_FF_D7_40;
+            let cy = y + CARD_H * 0.5;
+            self.kit_icon(PANE_X - ARROW - 10.0, cy, ARROW, Icon::ChevronLeft, if cur == 0 { DIM } else { col::GOLD });
+            let right_ink = if cur >= 3 { DIM } else { col::GOLD };
+            self.kit_icon(PANE_X + PANE_W + 6.0, cy, ARROW, Icon::ChevronRight, right_ink);
         }
         // The tick on the layout in use, over the ring's corner.
         const DISC: f32 = 24.0;
@@ -339,14 +352,16 @@ impl SwitchRenderBackend {
 
     /// Rows in a raised block, a hairline between two rows, the gold pill on
     /// the row `focus` points at (gliding on `glide_key` from wherever the
-    /// pane's cursor was). Returns the rows' touch cells and the block's foot.
+    /// pane's cursor was). Returns the rows' touch cells, the block's foot,
+    /// and the parts of the rows' controls a finger can tap (`CtrlSegs`, by
+    /// row of the block).
     pub(crate) fn settings_block(
         &mut self,
         top: f32,
         rows: &[Row],
         focus: Option<usize>,
         glide_key: u32,
-    ) -> (std::vec::Vec<(f32, f32, f32, f32)>, f32) {
+    ) -> (std::vec::Vec<(f32, f32, f32, f32)>, f32, super::super::kit::list::CtrlSegs) {
         let h = BLOCK_ROW_H * rows.len() as f32;
         self.kit_rrect(PANE_X, top, PANE_W, h, BLOCK_RADIUS, col::PANEL);
         for i in 1..rows.len() {
@@ -359,12 +374,14 @@ impl SwitchRenderBackend {
             self.kit_focus_pill(PANE_X, hy, PANE_W, BLOCK_ROW_H);
         }
         let mut cells = std::vec::Vec::with_capacity(rows.len());
+        let mut segs = std::vec::Vec::new();
         for (i, row) in rows.iter().enumerate() {
             let y = top + i as f32 * BLOCK_ROW_H;
-            self.kit_row_item(PANE_X, y + BLOCK_ROW_H * 0.5, PANE_W, row, focus == Some(i));
+            let parts = self.kit_row_item(PANE_X, y + BLOCK_ROW_H * 0.5, PANE_W, row, focus == Some(i));
+            segs.extend(parts.into_iter().map(|(p, r)| (i, p, r)));
             cells.push((PANE_X, y, PANE_W, BLOCK_ROW_H));
         }
-        (cells, top + h)
+        (cells, top + h, segs)
     }
 
     /// The explanation under a block: small, quiet, on at most `max_lines`
@@ -394,7 +411,7 @@ impl SwitchRenderBackend {
     /// The game defaults: rows in groups that scroll above the box explaining
     /// the row with the cursor, which keeps its room at the foot of the pane.
     /// `selection` is `usize::MAX` while the cursor is in the column. Returns
-    /// the rows' touch cells.
+    /// the rows' touch cells and their controls' parts (`kit_pane_rows`).
     pub(crate) fn settings_rows(
         &mut self,
         top: f32,
@@ -403,7 +420,7 @@ impl SwitchRenderBackend {
         selection: usize,
         glide_key: u32,
         help: &str,
-    ) -> std::vec::Vec<(f32, f32, f32, f32)> {
+    ) -> (std::vec::Vec<(f32, f32, f32, f32)>, super::super::kit::list::CtrlSegs) {
         let p = Pane {
             rows,
             sections,
@@ -596,9 +613,15 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
-    /// Make `cells` the page's touch table, under the screen being drawn.
-    pub(crate) fn settings_publish(&mut self, cells: std::vec::Vec<(f32, f32, f32, f32)>) {
+    /// Make `cells` the page's touch table, under the screen being drawn, with
+    /// `segs` the parts of its controls (rows counted as cells of `cells`).
+    pub(crate) fn settings_publish(
+        &mut self,
+        cells: std::vec::Vec<(f32, f32, f32, f32)>,
+        segs: super::super::kit::list::CtrlSegs,
+    ) {
         ui_cells_publish(ui_screen_kind(), cells);
+        ui_segs_publish(ui_screen_kind(), segs);
     }
 
     /// Moving the library (#79): where from and where to, and a count of what

@@ -1608,14 +1608,6 @@ pub fn rotation_for(basename: &str) -> u8 {
         .unwrap_or_else(crate::loc::default_rotation)
 }
 
-/// Rotation of the ACTIVE game, 0 when nothing is playing.
-pub fn rotation() -> u8 {
-    match active_game_basename() {
-        Some(b) => rotation_for(&b),
-        None => 0,
-    }
-}
-
 pub fn set_rotation(q: u8) {
     if let Some(b) = active_game_basename() {
         set_rotation_for(&b, q);
@@ -1834,19 +1826,10 @@ pub fn gyro_mode_for(basename: &str) -> u8 {
         .unwrap_or(GYRO_OFF)
 }
 
-/// Step a game's setting OFF -> MARBLE -> POINTER (library OPTIONS > TOUCHES);
-/// returns the new value.
-/// `cycle_gyro_for` either way: forward for `dir >= 0`, back otherwise.
-pub fn step_gyro_for(basename: &str, dir: i32) -> u8 {
-    let mode = crate::step_wrap(gyro_mode_for(basename), GYRO_MODE_COUNT, dir as core::ffi::c_int);
-    write_pref(basename, "gyro", mode);
-    mode
-}
-
-pub fn cycle_gyro_for(basename: &str) -> u8 {
-    let mode = (gyro_mode_for(basename) + 1) % GYRO_MODE_COUNT;
-    write_pref(basename, "gyro", mode);
-    mode
+/// Write a game's setting (library OPTIONS > TOUCHES, once its armed row is
+/// kept).
+pub fn set_gyro_for(basename: &str, mode: u8) {
+    write_pref(basename, "gyro", mode.min(GYRO_MODE_COUNT - 1));
 }
 
 /// The running game's setting, mirrored for the C++ loop, which reads it every
@@ -1863,16 +1846,11 @@ pub fn refresh_gyro() {
     GYRO_MODE.store(gyro_mode(), std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Step the ACTIVE game's setting (pause menu > TOUCHES).
-pub fn cycle_gyro() {
-    step_gyro(1);
-}
-
-/// `cycle_gyro` either way: forward for `dir >= 0`, back otherwise.
-pub fn step_gyro(dir: i32) {
+/// Write the ACTIVE game's setting (pause menu > TOUCHES, once kept) and put
+/// it in force.
+pub fn set_gyro(mode: u8) {
     if let Some(b) = active_game_basename() {
-        let mode = crate::step_wrap(gyro_mode_for(&b), GYRO_MODE_COUNT, dir as core::ffi::c_int);
-        write_pref(&b, "gyro", mode);
+        set_gyro_for(&b, mode);
     }
     refresh_gyro();
 }
@@ -1918,15 +1896,6 @@ pub fn set_fps_counter(mode: u8) {
         return;
     };
     write_pref(&basename, "fps", mode);
-}
-
-/// Stage-scaling mode of the ACTIVE game (the one being played), 0 when unset
-/// or when no game is active.
-pub fn display_mode() -> u8 {
-    match active_game_basename() {
-        Some(b) => display_mode_for(&b),
-        None => 0,
-    }
 }
 
 /// Persist the ACTIVE game's stage-scaling mode. Called from the in-game pause

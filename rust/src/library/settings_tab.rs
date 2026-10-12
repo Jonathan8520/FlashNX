@@ -4,11 +4,13 @@
 //! sections down a column on the left, Quitter FlashNX pinned at its foot, and
 //! beside it the open section's settings, changed where they are shown. Up and
 //! Down in the column change the section and the pane follows at once; Right
-//! or A go into the pane; B, or Left on a row with nothing to move sideways,
-//! come back out. L and R still change tabs.
+//! or A go into the pane; B, or a fresh Left, come back out. L and R still
+//! change tabs.
 //!
-//! Everything applies the moment it changes, with two exceptions that one more
-//! press could not take back: the language waits for A (sweeping the cursor
+//! A setting changes the way it does everywhere (input rule 1): a switch flips
+//! on A; a choice or a number is armed by A, then Left and Right move it and
+//! A keeps it (B puts it back), so a stick pushed sideways on the way down the
+//! pane changes nothing. The language waits for A too (sweeping the cursor
 //! across nine scripts would leave a player in one they cannot read), and
 //! moving the library asks first (it renames real files).
 //!
@@ -157,6 +159,9 @@ fn column_input(s: &mut State, button: &str, section: SetSection) {
             }
             s.screen = Screen::Settings { section, in_pane: true, row: entry_row(section) };
         }
+        // À propos has only things to read: A has nothing to do, and says
+        // nothing.
+        "A" => crate::sfx::hush(),
         _ => {}
     }
 }
@@ -171,6 +176,35 @@ fn pane_input(s: &mut State, button: &str, section: SetSection, row: usize) {
     }
     let n = section.pane_len();
     let row = row.min(n.saturating_sub(1));
+    // An armed row (input rules 1 and 2): Left / Right move its value, A
+    // keeps it (written then), B or `-` put it back, Up / Down keep it and
+    // move on. Nothing else acts, Left included: on an armed row it is the
+    // value's, not the way back to the column.
+    if let Some(a) = armed_here(s) {
+        match button {
+            "Left" | "StickLLeft" | "Right" | "StickLRight" => {
+                let dir = if matches!(button, "Left" | "StickLLeft") { -1 } else { 1 };
+                let next = armed_next(section, row, a.cur, dir);
+                if next != a.cur {
+                    s.armed = Some(Armed { cur: next, ..a });
+                    crate::sfx::value_changed();
+                }
+                return;
+            }
+            "A" => {
+                confirm_armed(s);
+                crate::sfx::choose(crate::sfx::Sfx::Decide);
+                return;
+            }
+            "B" | "Minus" => {
+                s.armed = None;
+                crate::sfx::choose(crate::sfx::Sfx::Back);
+                return;
+            }
+            "Up" | "StickLUp" | "Down" | "StickLDown" => confirm_armed(s),
+            _ => return,
+        }
+    }
     match button {
         "B" | "Minus" => {
             s.screen = Screen::Settings { section, in_pane: false, row };
@@ -190,99 +224,74 @@ fn pane_input(s: &mut State, button: &str, section: SetSection, row: usize) {
         }
         _ => {}
     }
-    let dir: i32 = match button {
-        "Left" | "StickLLeft" => -1,
-        "Right" | "StickLRight" => 1,
-        "A" => crate::STEP_CYCLE as i32,
-        _ => return,
-    };
     if section == SetSection::Language {
-        language_input(s, dir, row, fresh);
+        language_input(s, button, row, fresh);
         return;
     }
-    let took = row_input(s, section, key_of(section, row), dir);
-    // Left on a row with nothing to move sideways goes back to the column, as
-    // on the console. Only on a press: a held Left stops on the row.
-    if !took && dir < 0 && fresh {
-        s.screen = Screen::Settings { section, in_pane: false, row };
+    match button {
+        // Left points at the section column: a fresh press goes back to it,
+        // from any row, as on the console (input rule 3). A held Left stays on
+        // the row, and Right does nothing (A or Right came in).
+        "Left" | "StickLLeft" if fresh => {
+            s.screen = Screen::Settings { section, in_pane: false, row };
+        }
+        "A" => row_a(s, section, key_of(section, row)),
+        _ => {}
     }
 }
 
-/// Left (-1), Right (1) or A (`STEP_CYCLE`) on row `key` of `section`.
-/// Returns whether the row took it: a row with nothing to move sideways does
-/// not take Left or Right.
-fn row_input(s: &mut State, section: SetSection, key: &str, dir: i32) -> bool {
-    let press = dir >= crate::STEP_CYCLE as i32;
+/// A on row `key` of `section`: arm a value, flip a switch, open what the row
+/// opens. The nickname and the idea open the keyboard: hoisted in `input()`.
+fn row_a(s: &mut State, section: SetSection, key: &str) {
     match (section, key) {
-        (SetSection::Library, "VUE") => {
-            // The layout is applied as the cursor reaches it, so the card in
-            // use and the card under the cursor are always the same one.
-            let cur = crate::loc::home_view();
-            let next = crate::step_choice(cur, crate::loc::HOME_VIEW_COUNT, dir as core::ffi::c_int);
-            if next != cur {
-                apply_home_view(next);
-                clicked(dir);
-            }
-            true
-        }
+        (SetSection::Library, "VUE") => arm_here(s, crate::loc::home_view() as u16),
         (SetSection::Library, "DOSSIER") => {
-            if press {
-                // Opens beside the folder in use, the cursor on it: the row
-                // opens on what it shows, among folders it could move to. Its
-                // own listing holds none (every folder in it is part of the
-                // library), and a new folder made beside it can take it. A
-                // library at the card's root has nothing beside it, and opens
-                // on itself.
-                let root = primary_root();
-                if browse_parent(&root).is_some() {
-                    browse_go_up(s, &root);
-                } else {
-                    s.dir_browse = list_dirs(&root);
-                    s.dir_path = root;
-                    s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 };
-                }
+            // Opens beside the folder in use, the cursor on it: the row opens
+            // on what it shows, among folders it could move to. Its own
+            // listing holds none (every folder in it is part of the library),
+            // and a new folder made beside it can take it. A library at the
+            // card's root has nothing beside it, and opens on itself.
+            let root = primary_root();
+            if browse_parent(&root).is_some() {
+                browse_go_up(s, &root);
+            } else {
+                s.dir_browse = list_dirs(&root);
+                s.dir_path = root;
+                s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 };
             }
-            press
         }
         (SetSection::Library, "SONS") => {
-            if let Some(on) = toggle_step(crate::loc::ui_sounds(), dir) {
-                // Turning them on is heard at once: the click below, or the
-                // press's own (`sfx::after_input`), plays after the switch.
-                crate::loc::set_ui_sounds(on);
-                crate::loc::save_current();
-                clicked(dir);
-            }
-            true
+            // A switch. Turning them on is heard at once: the press's click
+            // (`sfx::after_input`) plays after the switch.
+            crate::loc::set_ui_sounds(!crate::loc::ui_sounds());
+            crate::loc::save_current();
+            crate::sfx::value_changed();
         }
         (SetSection::Defaults, "TOUCHES") => {
-            if press {
-                // The global default keymap, in the editor every game uses.
-                keymap::init_for_global_default();
-                menu::open(None);
-                s.screen = Screen::SettingsKeymapEditor;
-            }
-            press
+            // The global default keymap, in the editor every game uses.
+            keymap::init_for_global_default();
+            menu::open(None);
+            s.screen = Screen::SettingsKeymapEditor;
         }
-        (SetSection::Defaults, k) => {
-            if default_step(k, dir) {
-                clicked(dir);
-            }
-            true
+        (SetSection::Defaults, "FPS") => {
+            let on = crate::loc::default_fps_counter() == 1;
+            crate::loc::set_default_fps_counter((!on) as u8);
+            crate::loc::save_current();
+            crate::sfx::value_changed();
         }
+        (SetSection::Defaults, k) => arm_here(s, default_value(k)),
         (SetSection::Help, "BUG") => {
-            if press {
-                // A report is about one game: with none on the card the row is
-                // greyed out, and A says why instead of opening an empty list.
-                if s.entries.is_empty() {
-                    set_toast(s, crate::loc::s().bug_no_games.to_string(), TOAST_INFO);
-                } else {
-                    s.screen = Screen::BugPicker { selection: 0, scroll_offset: 0 };
-                }
+            // A report is about one game: with none on the card the row is
+            // greyed out, and A says why, with the refusal's note, instead of
+            // opening an empty list.
+            if s.entries.is_empty() {
+                set_toast(s, crate::loc::s().bug_no_games.to_string(), TOAST_INFO);
+                crate::sfx::choose(crate::sfx::Sfx::Error);
+            } else {
+                s.screen = Screen::BugPicker { selection: 0, scroll_offset: 0 };
             }
-            press
         }
-        // The nickname and the idea open the keyboard: hoisted in `input()`.
-        _ => false,
+        _ => {}
     }
 }
 
@@ -290,42 +299,33 @@ fn row_input(s: &mut State, section: SetSection, key: &str, dir: i32) -> bool {
 /// Right stops at the end of a row, A applies. The one setting that waits for
 /// A: applied on the move, a sweep of the cursor would pass through scripts a
 /// player may not be able to read their way back from.
-fn language_input(s: &mut State, dir: i32, row: usize, fresh: bool) {
+fn language_input(s: &mut State, button: &str, row: usize, fresh: bool) {
     let n = crate::loc::PICKER_LANGS.len();
     let at = |row: usize| Screen::Settings { section: SetSection::Language, in_pane: true, row };
-    if dir >= crate::STEP_CYCLE as i32 {
-        if let Some(&lang) = crate::loc::PICKER_LANGS.get(row) {
-            if lang != crate::loc::current() {
+    match button {
+        "A" => match crate::loc::PICKER_LANGS.get(row) {
+            Some(&lang) if lang != crate::loc::current() => {
                 crate::loc::set(lang);
                 crate::loc::save(lang);
+                crate::sfx::value_changed();
+            }
+            // The language already in use: nothing to apply, nothing to hear.
+            _ => crate::sfx::hush(),
+        },
+        "Left" | "StickLLeft" => {
+            if row % LANG_COLS > 0 {
+                s.screen = at(row - 1);
+            } else if fresh {
+                s.screen = Screen::Settings { section: SetSection::Language, in_pane: false, row };
             }
         }
-    } else if dir < 0 {
-        if row % LANG_COLS > 0 {
-            s.screen = at(row - 1);
-        } else if fresh {
-            s.screen = Screen::Settings { section: SetSection::Language, in_pane: false, row };
+        "Right" | "StickLRight" => {
+            if row % LANG_COLS + 1 < LANG_COLS && row + 1 < n {
+                s.screen = at(row + 1);
+            }
         }
-    } else if row % LANG_COLS + 1 < LANG_COLS && row + 1 < n {
-        s.screen = at(row + 1);
+        _ => {}
     }
-}
-
-/// The click of a value moved by Left or Right. A press of A is heard by
-/// `sfx::after_input`, which hears every A; a sideways step it cannot tell
-/// from one against the end of a choice, which deserves silence.
-fn clicked(dir: i32) {
-    if dir < crate::STEP_CYCLE as i32 {
-        crate::sfx::play(crate::sfx::Sfx::Toggle);
-    }
-}
-
-/// A switch moved by `dir`: Right turns it on, Left off, A flips it. `None`
-/// when that changes nothing, which is also what keeps a held direction from
-/// flipping it on and off with every repeat.
-fn toggle_step(on: bool, dir: i32) -> Option<bool> {
-    let want = if dir >= crate::STEP_CYCLE as i32 { !on } else { dir > 0 };
-    (want != on).then_some(want)
 }
 
 /// Apply home layout `v`: written for the next boot, and the home's eased
@@ -338,107 +338,84 @@ fn apply_home_view(v: u8) {
     crate::backend::render::home_anim_reset();
 }
 
-/// One step on a game default. These are DEFAULTS, not overrides: a game with
-/// a value of its own (set from its options or its pause) keeps it, and keeps
-/// it when the default changes later. Returns whether a value changed.
-fn default_step(key: &str, dir: i32) -> bool {
+/// The value of the game default `key` as its row steps it: an index into its
+/// options, a preset index (the cursor speed), or the zoom's percentage.
+fn default_value(key: &str) -> u16 {
     use crate::loc as l;
-    let d = dir as core::ffi::c_int;
-    let set_if = |cur: u8, next: u8, set: fn(u8)| -> bool {
-        if next == cur {
-            false
-        } else {
-            set(next);
-            true
+    match key {
+        "AFFICHAGE" => l::default_display_mode() as u16,
+        "ROTATION" => l::default_rotation() as u16,
+        "PIXELS" => l::default_pixel_filter() as u16,
+        "FILTRE" => l::default_screen_filter() as u16,
+        "OVERCLOCK" => POWER_ORDER.iter().position(|m| *m == l::default_power_mode()).unwrap_or(0) as u16,
+        "ZOOM" => l::default_zoom(),
+        // C++ owns the live value, which out of a game IS the global default.
+        "VITESSE" => unsafe { ruffle_cursor_speed_index() }.max(0) as u16,
+        _ => 0,
+    }
+}
+
+/// The value armed row `row` of `section` moves to on one step `dir` from
+/// `cur`, stopping at the ends. The default zoom steps through its presets
+/// (`loc::DEFAULT_ZOOM_STEPS`), not the free percentage of the pause: there is
+/// no picture here to judge one against. A value that is no preset
+/// (hand-edited into settings.json) steps to the nearest preset that way.
+pub(crate) fn armed_next(section: SetSection, row: usize, cur: u16, dir: i32) -> u16 {
+    let n = match (section, key_of(section, row)) {
+        (SetSection::Library, "VUE") => crate::loc::HOME_VIEW_COUNT,
+        (SetSection::Defaults, "AFFICHAGE") => keymap::DISPLAY_MODE_COUNT,
+        (SetSection::Defaults, "ROTATION") => keymap::ROTATION_COUNT,
+        (SetSection::Defaults, "PIXELS") => keymap::PIXEL_FILTER_COUNT,
+        (SetSection::Defaults, "FILTRE") => keymap::SCREEN_FILTER_COUNT,
+        (SetSection::Defaults, "OVERCLOCK") => POWER_ORDER.len() as u8,
+        (SetSection::Defaults, "VITESSE") => crate::loc::CURSOR_SPEED_X10.len() as u8,
+        (SetSection::Defaults, "ZOOM") => {
+            let steps = crate::loc::DEFAULT_ZOOM_STEPS;
+            let next = if dir < 0 {
+                steps.iter().rev().find(|v| **v < cur).copied()
+            } else {
+                steps.iter().find(|v| **v > cur).copied()
+            };
+            return next.unwrap_or(cur);
         }
+        _ => return cur,
     };
-    let changed = match key {
-        "AFFICHAGE" => {
-            let cur = l::default_display_mode();
-            set_if(cur, crate::step_choice(cur, keymap::DISPLAY_MODE_COUNT, d), l::set_default_display_mode)
+    armed_step(cur, n as u16, dir)
+}
+
+/// Write the value armed row `row` of `section` was kept at.
+pub(crate) fn write_armed(section: SetSection, row: usize, v: u16) {
+    use crate::loc as l;
+    let i = v.min(u8::MAX as u16) as u8;
+    match (section, key_of(section, row)) {
+        (SetSection::Library, "VUE") => {
+            apply_home_view(i);
+            return;
         }
-        "ROTATION" => {
-            let cur = l::default_rotation();
-            set_if(cur, crate::step_choice(cur, keymap::ROTATION_COUNT, d), l::set_default_rotation)
-        }
-        "PIXELS" => {
-            let cur = l::default_pixel_filter();
-            set_if(cur, crate::step_choice(cur, keymap::PIXEL_FILTER_COUNT, d), l::set_default_pixel_filter)
-        }
-        "FILTRE" => {
-            let cur = l::default_screen_filter();
-            set_if(cur, crate::step_choice(cur, keymap::SCREEN_FILTER_COUNT, d), l::set_default_screen_filter)
-        }
+        (SetSection::Defaults, "AFFICHAGE") => l::set_default_display_mode(i),
+        (SetSection::Defaults, "ROTATION") => l::set_default_rotation(i),
+        (SetSection::Defaults, "PIXELS") => l::set_default_pixel_filter(i),
+        (SetSection::Defaults, "FILTRE") => l::set_default_screen_filter(i),
         // No clock is touched from here: a raise outside gameplay would be
         // spent entirely on drawing a menu.
-        "OVERCLOCK" => {
-            let cur = l::default_power_mode();
-            let at = POWER_ORDER.iter().position(|m| *m == cur).unwrap_or(0) as u8;
-            set_if(cur, POWER_ORDER[crate::step_choice(at, 3, d) as usize], l::set_default_power_mode)
-        }
-        "FPS" => match toggle_step(l::default_fps_counter() == 1, dir) {
-            Some(on) => {
-                l::set_default_fps_counter(on as u8);
-                true
-            }
-            None => false,
-        },
-        "ZOOM" => step_default_zoom(dir),
+        (SetSection::Defaults, "OVERCLOCK") => l::set_default_power_mode(POWER_ORDER[(i as usize).min(POWER_ORDER.len() - 1)]),
+        (SetSection::Defaults, "ZOOM") => l::set_default_zoom(v),
         // C++ owns the live value and its file, and knows on its own that out
-        // of a game this steps the global default.
-        "VITESSE" => return step_default_cursor(dir),
-        _ => false,
-    };
-    if changed {
-        l::save_current();
+        // of a game this sets the global default.
+        (SetSection::Defaults, "VITESSE") => {
+            unsafe { ruffle_cursor_speed_set(i as core::ffi::c_int) };
+            return;
+        }
+        _ => return,
     }
-    changed
-}
-
-/// The default zoom's presets (`loc::DEFAULT_ZOOM_STEPS`): presets and not
-/// the free percentage of the pause, because there is no picture here to
-/// judge one against. Left and Right stop at the ends, so holding one reaches
-/// the end and stays there; A goes round, as on every choice.
-fn step_default_zoom(dir: i32) -> bool {
-    if dir >= crate::STEP_CYCLE as i32 {
-        crate::loc::step_default_zoom(1);
-        return true;
-    }
-    let steps = crate::loc::DEFAULT_ZOOM_STEPS;
-    let cur = crate::loc::default_zoom();
-    let next = match steps.iter().position(|v| *v == cur) {
-        Some(i) if dir < 0 => steps[i.saturating_sub(1)],
-        Some(i) => steps[(i + 1).min(steps.len() - 1)],
-        // A value that is not a preset (hand-edited into settings.json) comes
-        // back to the first one, as it always has.
-        None => steps[0],
-    };
-    if next == cur {
-        return false;
-    }
-    crate::loc::set_default_zoom(next);
-    true
-}
-
-/// The cursor speed of the games that have none of their own. C++ steps it
-/// round past either end; Left and Right stop there instead, and only A goes
-/// round.
-fn step_default_cursor(dir: i32) -> bool {
-    let speeds = crate::loc::CURSOR_SPEED_X10;
-    let m = unsafe { ruffle_cursor_speed_mult_x10() }.max(0) as u32;
-    let press = dir >= crate::STEP_CYCLE as i32;
-    let at_end = (dir < 0 && m <= speeds[0]) || (dir > 0 && m >= speeds[speeds.len() - 1]);
-    if !press && at_end {
-        return false;
-    }
-    unsafe { ruffle_cursor_speed_step(if dir < 0 { -1 } else { 1 }) };
-    true
+    l::save_current();
 }
 
 /// A tap on the page, on cell `idx` of its touch table: the column's entries
 /// first, then the pane's places (in Bibliothèque the four cards, then its
 /// rows). Puts the cursor there, and answers true when it was already there,
-/// which the caller turns into A.
+/// which the caller turns into A. A layout card is applied as it is tapped,
+/// the way any option shown whole is (input rule 6).
 pub(crate) fn touch_select(s: &mut State, section: SetSection, in_pane: bool, row: usize, idx: usize) -> bool {
     let column = SetSection::ALL.len();
     if idx < column {
@@ -452,12 +429,20 @@ pub(crate) fn touch_select(s: &mut State, section: SetSection, in_pane: bool, ro
     let mut cell = idx - column;
     if section == SetSection::Library {
         if cell < LIBRARY_CARDS {
-            // A card is applied as it is tapped, the way Left and Right apply
-            // it: there is nothing to confirm, and tapping the card in use
-            // again must not move to the next one.
+            // Nothing to confirm, and tapping the card in use again must not
+            // move to the next one. The tapped card is the layout kept, armed
+            // or not: a layout row armed by A is dropped, or its cards kept
+            // lighting the armed layout over the tapped one, and the next A
+            // wrote it in place of what the finger chose.
             let v = cell as u8;
-            if crate::loc::home_view() != v {
+            let shown = armed_here(s).map_or(crate::loc::home_view(), |a| a.cur.min(u8::MAX as u16) as u8);
+            s.armed = None;
+            let stored = crate::loc::home_view();
+            if stored != v {
                 apply_home_view(v);
+            }
+            if stored != v || shown != v {
+                crate::sfx::value_changed();
             }
             s.screen = settings_at(SetSection::Library, "VUE");
             return false;
@@ -472,6 +457,50 @@ pub(crate) fn touch_select(s: &mut State, section: SetSection, in_pane: bool, ro
     }
     s.screen = Screen::Settings { section, in_pane: true, row: cell };
     false
+}
+
+/// A tap on part `part` of the control in cell `idx` of the page's table (see
+/// `touch_select` for the cells): an option of a game default is set at once
+/// and kept, a switch flips (input rule 6). The cursor goes to that row. The
+/// caller has already kept a value armed elsewhere, and plays the sound.
+pub(crate) fn touch_part(s: &mut State, section: SetSection, idx: usize, part: usize) {
+    use crate::loc as l;
+    let column = SetSection::ALL.len();
+    let Some(mut cell) = idx.checked_sub(column) else { return };
+    if section == SetSection::Library {
+        // The cards are tapped as cells, not parts.
+        let Some(c) = cell.checked_sub(LIBRARY_CARDS) else { return };
+        cell = c + 1;
+    }
+    if cell >= section.pane_len() {
+        return;
+    }
+    s.screen = Screen::Settings { section, in_pane: true, row: cell };
+    let key = key_of(section, cell);
+    let i = part.min(u8::MAX as usize) as u8;
+    let changed = match (section, key) {
+        (SetSection::Library, "SONS") => {
+            l::set_ui_sounds(!l::ui_sounds());
+            true
+        }
+        (SetSection::Defaults, "FPS") => {
+            l::set_default_fps_counter((l::default_fps_counter() != 1) as u8);
+            true
+        }
+        (SetSection::Defaults, "AFFICHAGE" | "ROTATION" | "PIXELS" | "FILTRE" | "OVERCLOCK") => {
+            let cur = default_value(key);
+            if part as u16 != cur {
+                write_armed(section, cell, i as u16);
+                crate::sfx::value_changed();
+            }
+            return;
+        }
+        _ => false,
+    };
+    if changed {
+        l::save_current();
+        crate::sfx::value_changed();
+    }
 }
 
 /// The home layouts, which take one place of the cursor and four of the
@@ -507,6 +536,11 @@ pub(crate) fn run_pseudo_flow() {
         crate::profiles::set_author_name(&name);
         if let Ok(mut g) = NICKNAME.lock() {
             *g = None;
+        }
+        // A value changed in place (the row shows the new name): it clicks,
+        // the same name typed again does not.
+        if nickname() != current {
+            crate::sfx::value_changed();
         }
     }
     if let Ok(mut s) = LIBRARY.lock() {
@@ -585,6 +619,9 @@ pub(crate) fn submit_report(report: crate::bugreport::Report, key: &'static str)
                 set_toast(&mut s, sent.to_string(), TOAST_OK);
                 s.screen = Screen::Settings { section: SetSection::Help, in_pane: true, row };
             }
+            // An idea is typed and sent from its own row, which is where the
+            // cursor lands again: the screens cannot tell that A did something.
+            crate::sfx::choose(crate::sfx::Sfx::Decide);
         }
         Err(e) => {
             if let Ok(mut g) = FAILED_SEND.lock() {
@@ -592,9 +629,10 @@ pub(crate) fn submit_report(report: crate::bugreport::Report, key: &'static str)
             }
             if let Ok(mut s) = LIBRARY.lock() {
                 // A retry that failed again stays on the same question, so the
-                // note that marks an error arriving has to be played by hand.
+                // note that marks an error arriving is chosen by hand, in place
+                // of the click A on an unchanged screen would make.
                 if matches!(s.screen, Screen::SendFailed { .. }) {
-                    crate::sfx::play(crate::sfx::Sfx::Error);
+                    crate::sfx::choose(crate::sfx::Sfx::Error);
                 }
                 // On Réessayer: the question is there to be answered with one
                 // press, and nothing is lost either way.
@@ -622,10 +660,10 @@ pub(crate) fn run_retry_flow(row: usize) {
 /// side. A on Réessayer is hoisted, so an A that reaches here is Fermer.
 pub(crate) fn handle_send_failed_input(s: &mut State, button: &str, row: usize) {
     match button {
-        // Left is the first answer, Right the second: a held direction stays
-        // where it points instead of flipping between the two.
-        "Left" | "StickLLeft" => s.screen = Screen::SendFailed { row, selection: 0 },
-        "Right" | "StickLRight" => s.screen = Screen::SendFailed { row, selection: 1 },
+        // The answers side by side (input rule 4).
+        "Left" | "StickLLeft" | "Right" | "StickLRight" => {
+            s.screen = Screen::SendFailed { row, selection: answer_at(button, 0) }
+        }
         "A" | "B" | "Minus" => {
             // The kept report stays: the question is drawn again through its
             // close, its reason read from there, and a reason gone empty would
@@ -729,6 +767,9 @@ pub(crate) fn draw_settings(
     if !under && matches!(screen, Screen::Settings { .. }) {
         LAST_SECTION.store(section.index(), core::sync::atomic::Ordering::Relaxed);
     }
+    // The value the armed row shows (`Armed`), drawn in place of the stored
+    // one until A keeps it.
+    let armed = LIBRARY.lock().ok().and_then(|s| s.armed.filter(|a| a.screen == screen)).map(|a| a.cur);
     backend.settings_still(under);
     backend.library_clear();
     let entries = [
@@ -748,13 +789,15 @@ pub(crate) fn draw_settings(
     };
     let saved = backend.settings_pane_begin(pane_key);
     let mut hints: std::vec::Vec<HintItem<'static>> = std::vec::Vec::new();
+    // The parts of the pane's controls a finger can tap, by cell of `cells`.
+    let mut segs: crate::backend::render::CtrlSegs = std::vec::Vec::new();
     let mut font_cold = false;
     match body {
         Body::Section { in_pane, row } => {
             let focus = if in_pane { Some(row) } else { None };
             match section {
-                SetSection::Library => library_pane(backend, focus, game_count, &mut cells, &mut hints),
-                SetSection::Defaults => defaults_pane(backend, focus, &mut cells, &mut hints),
+                SetSection::Library => library_pane(backend, focus, armed, game_count, &mut cells, &mut segs, &mut hints),
+                SetSection::Defaults => defaults_pane(backend, focus, armed, &mut cells, &mut segs, &mut hints),
                 SetSection::Language => {
                     font_cold = language_font_cold();
                     if font_cold {
@@ -787,7 +830,7 @@ pub(crate) fn draw_settings(
     // The pages opened in the pane publish their lists themselves; under a
     // window nothing here may be tapped.
     if !under && matches!(body, Body::Section { .. }) {
-        backend.settings_publish(cells);
+        backend.settings_publish(cells, segs);
     }
     backend.settings_still(false);
     if font_cold {
@@ -825,12 +868,15 @@ fn menu_path(steps: &[&str]) -> std::string::String {
 }
 
 /// Bibliothèque: the home layouts as cards, the games folder, the interface
-/// sounds, each with what it is for underneath.
+/// sounds, each with what it is for underneath. `armed` is the layout the
+/// cards show while their row is armed.
 fn library_pane(
     b: &mut SwitchRenderBackend,
     focus: Option<usize>,
+    armed: Option<u16>,
     game_count: usize,
     cells: &mut std::vec::Vec<(f32, f32, f32, f32)>,
+    segs: &mut crate::backend::render::CtrlSegs,
     hints: &mut std::vec::Vec<HintItem<'static>>,
 ) {
     let u = crate::loc_ui::ui();
@@ -838,43 +884,57 @@ fn library_pane(
     let glide = pane_glide(lib);
     let on_row = |key: &str| focus.filter(|r| *r == row_of(lib, key)).map(|_| 0);
     let top = b.settings_title(u.sec_library, None);
-    let view = crate::loc::home_view();
+    let vue_armed = armed.filter(|_| on_row("VUE").is_some());
+    let view = vue_armed.map_or(crate::loc::home_view(), |v| v.min(u8::MAX as u16) as u8);
     let desc = match view {
         1 => u.view_desc_list,
         2 => u.view_desc_strip,
         3 => u.view_desc_shelf,
         _ => u.view_desc_grid,
     };
-    let (c, y) = b.settings_layouts(top, u.row_home_view, view, on_row("VUE").is_some(), desc);
+    let (c, y) = b.settings_layouts(top, u.row_home_view, view, on_row("VUE").is_some(), vue_armed.is_some(), desc);
     cells.extend(c);
     let root = primary_root();
     let folder = [Row::new(Icon::Folder, u.row_games_dir).value(shown_path(&root)).opens()];
-    let (c, y) = b.settings_block(y + 8.0, &folder, on_row("DOSSIER"), glide);
+    let (c, y, _) = b.settings_block(y + 8.0, &folder, on_row("DOSSIER"), glide);
     cells.extend(c);
     let line = std::format!("{}  \u{00B7}  {}", u.help_games_dir, crate::loc_ui::games(game_count));
     let y = b.settings_note(y + 8.0, &line, 3);
     let on = crate::loc::ui_sounds();
     let sounds = [Row::new(if on { Icon::Volume } else { Icon::VolumeOff }, u.row_sounds).toggle(on)];
-    let (c, y) = b.settings_block(y + 18.0, &sounds, on_row("SONS"), glide);
+    let (c, y, sg) = b.settings_block(y + 18.0, &sounds, on_row("SONS"), glide);
+    // The switch's knob, counted as a cell of the page's table.
+    let base = cells.len();
+    segs.extend(sg.into_iter().map(|(r, p, rect)| (base + r, p, rect)));
     cells.extend(c);
     b.settings_note(y + 8.0, u.help_sounds, 2);
     *hints = match focus.map(|r| key_of(lib, r)) {
-        Some("VUE") => std::vec![(&[Btn::Dpad][..], u.change_view), (&[Btn::B][..], u.back)],
+        _ if vue_armed.is_some() => armed_hints(),
+        Some("VUE") => std::vec![(&[Btn::A][..], u.edit), (&[Btn::B][..], u.back)],
         Some("DOSSIER") => std::vec![(&[Btn::A][..], u.open), (&[Btn::B][..], u.back)],
-        Some(_) => std::vec![(&[Btn::Dpad][..], u.change), (&[Btn::B][..], u.back)],
+        Some(_) => std::vec![(&[Btn::A][..], u.change), (&[Btn::B][..], u.back)],
         None => std::vec::Vec::new(),
     };
 }
 
-/// Jeu par défaut: what every game starts with until it is set on its own,
-/// each setting with the same control and the same options as in a game's
-/// options and in the pause, so a setting looks the same wherever it is
-/// changed (the rotation's first option is "0°" on all three). The box under
-/// the rows explains the row with the cursor, Overclock setting by setting.
+/// What Left / Right, A and B do on an armed row (input rule 2).
+fn armed_hints() -> std::vec::Vec<HintItem<'static>> {
+    let u = crate::loc_ui::ui();
+    std::vec![(&[Btn::DpadLR][..], u.change), (&[Btn::A][..], u.validate), (&[Btn::B][..], u.cancel)]
+}
+
+/// Jeu par défaut: what every game starts with until it is set on its own, in
+/// the groups and with the controls and options of a game's options and of the
+/// pause, so a setting looks the same wherever it is changed (the rotation's
+/// first option is "0°" on all three). The box under the rows explains the row
+/// with the cursor, Overclock setting by setting. `armed` is the value the row
+/// under the cursor shows while armed.
 fn defaults_pane(
     b: &mut SwitchRenderBackend,
     focus: Option<usize>,
+    armed: Option<u16>,
     cells: &mut std::vec::Vec<(f32, f32, f32, f32)>,
+    segs: &mut crate::backend::render::CtrlSegs,
     hints: &mut std::vec::Vec<HintItem<'static>>,
 ) {
     use crate::loc as l;
@@ -882,32 +942,48 @@ fn defaults_pane(
     let u = crate::loc_ui::ui();
     let def = SetSection::Defaults;
     let top = b.settings_title(u.row_game_prefs, Some(u.prefs_sub));
+    let key = focus.map(|r| key_of(def, r));
+    // A row's value: the armed one on the armed row, the stored one elsewhere.
+    let value = |k: &str| match (key, armed) {
+        (Some(fk), Some(v)) if fk == k => v,
+        _ => default_value(k),
+    };
+    let is_armed = |k: &str| armed.is_some() && key == Some(k);
     let display = [l::display_mode_label(0), l::display_mode_label(1), l::display_mode_label(2)];
     let rotation = [l::rotation_label(0), l::rotation_label(1), l::rotation_label(2), l::rotation_label(3)];
     let pixels = [l::pixel_filter_label(0), l::pixel_filter_label(1), l::pixel_filter_label(2)];
     let filters = [l::screen_filter_label(0), l::screen_filter_label(1), l::screen_filter_label(2)];
-    let power = l::default_power_mode();
+    let power_at = value("OVERCLOCK") as usize;
+    let power = POWER_ORDER[power_at.min(POWER_ORDER.len() - 1)];
     let power_opts = POWER_ORDER.map(l::overclock_label);
-    let power_at = POWER_ORDER.iter().position(|m| *m == power).unwrap_or(0);
-    let zoom = std::format!("{} %", l::default_zoom());
-    let speed = l::mult_label(unsafe { ruffle_cursor_speed_mult_x10() }.max(5) as u32);
+    let zoom_v = value("ZOOM");
+    let zoom = std::format!("{} %", zoom_v);
+    let steps = l::DEFAULT_ZOOM_STEPS;
+    let zoom_ends = (steps.first().is_some_and(|f| zoom_v <= *f), steps.last().is_some_and(|m| zoom_v >= *m));
+    let n_speeds = l::CURSOR_SPEED_X10.len();
+    let speed_idx = (value("VITESSE") as usize).min(n_speeds.saturating_sub(1));
+    let speed = l::speed_label(speed_idx as i32);
     let rows = [
-        Row::new(Icon::Monitor, lc.set_display_mode).choice(&display, l::default_display_mode() as usize),
-        Row::new(Icon::Rotate, lc.set_rotation).choice(&rotation, l::default_rotation() as usize),
-        Row::new(Icon::ZoomIn, lc.set_zoom).cycle(&zoom),
-        Row::new(Icon::Pixels, lc.set_pixel_filter).choice(&pixels, l::default_pixel_filter() as usize),
-        Row::new(Icon::Tv, lc.set_screen_filter).choice(&filters, l::default_screen_filter() as usize),
-        Row::new(Icon::Cpu, lc.set_overclock).choice(&power_opts, power_at),
+        Row::new(Icon::Monitor, lc.set_display_mode)
+            .choice(&display, value("AFFICHAGE") as usize)
+            .armed_if(is_armed("AFFICHAGE")),
+        Row::new(Icon::Rotate, lc.set_rotation).choice(&rotation, value("ROTATION") as usize).armed_if(is_armed("ROTATION")),
+        Row::new(Icon::ZoomIn, lc.set_zoom).cycle(&zoom).ends(zoom_ends.0, zoom_ends.1).armed_if(is_armed("ZOOM")),
+        Row::new(Icon::Pixels, lc.set_pixel_filter).choice(&pixels, value("PIXELS") as usize).armed_if(is_armed("PIXELS")),
+        Row::new(Icon::Tv, lc.set_screen_filter).choice(&filters, value("FILTRE") as usize).armed_if(is_armed("FILTRE")),
+        Row::new(Icon::Cpu, lc.set_overclock).choice(&power_opts, power_at).armed_if(is_armed("OVERCLOCK")),
         Row::new(Icon::Gauge, lc.set_fps).toggle(l::default_fps_counter() == 1),
         Row::new(Icon::Gamepad, lc.keys_title).opens(),
-        Row::new(Icon::Pointer, lc.set_cursor_speed).cycle(&speed),
+        Row::new(Icon::Pointer, lc.set_cursor_speed)
+            .cycle(&speed)
+            .ends(speed_idx == 0, speed_idx + 1 >= n_speeds)
+            .armed_if(is_armed("VITESSE")),
     ];
     let sections = [
         (row_of(def, "AFFICHAGE"), u.sec_image),
         (row_of(def, "OVERCLOCK"), u.sec_perf),
         (row_of(def, "TOUCHES"), u.sec_controls),
     ];
-    let key = focus.map(|r| key_of(def, r));
     let built: std::string::String;
     let help: &str = match key {
         // The cursor still in the column: what the section is about.
@@ -942,10 +1018,15 @@ fn defaults_pane(
         Some("TOUCHES") => u.help_keys_default,
         Some(_) => u.help_cursor_default,
     };
-    cells.extend(b.settings_rows(top + 4.0, &rows, &sections, focus.unwrap_or(usize::MAX), pane_glide(def), help));
+    let (c, sg) = b.settings_rows(top + 4.0, &rows, &sections, focus.unwrap_or(usize::MAX), pane_glide(def), help);
+    let base = cells.len();
+    segs.extend(sg.into_iter().map(|(r, p, rect)| (base + r, p, rect)));
+    cells.extend(c);
     *hints = match key {
+        _ if armed.is_some() => armed_hints(),
         Some("TOUCHES") => std::vec![(&[Btn::A][..], u.open), (&[Btn::B][..], u.back)],
-        Some(_) => std::vec![(&[Btn::Dpad][..], u.change), (&[Btn::B][..], u.back)],
+        Some("FPS") => std::vec![(&[Btn::A][..], u.change), (&[Btn::B][..], u.back)],
+        Some(_) => std::vec![(&[Btn::A][..], u.edit), (&[Btn::B][..], u.back)],
         None => std::vec::Vec::new(),
     };
 }
@@ -993,7 +1074,7 @@ fn profile_pane(
     let row = [Row::new(Icon::User, u.row_pseudo)
         .value(if name.is_empty() { u.not_set } else { name.as_str() })
         .keyboard()];
-    let (c, y) = b.settings_block(top, &row, focus.map(|_| 0), pane_glide(SetSection::Profile));
+    let (c, y, _) = b.settings_block(top, &row, focus.map(|_| 0), pane_glide(SetSection::Profile));
     cells.extend(c);
     let y = b.settings_note(y + 8.0, u.help_pseudo, 2);
     // The way to a game's sharing, in the words its menus use.
@@ -1025,11 +1106,11 @@ fn help_pane(
         .value(if empty { "" } else { count.as_str() })
         .opens_if(!empty)
         .dim(empty)];
-    let (c, y) = b.settings_block(top, &bug, focus.filter(|r| *r == bug_row).map(|_| 0), glide);
+    let (c, y, _) = b.settings_block(top, &bug, focus.filter(|r| *r == bug_row).map(|_| 0), glide);
     cells.extend(c);
     let y = b.settings_note(y + 8.0, if empty { lc.bug_no_games } else { u.help_bug }, 3);
     let idea = [Row::new(Icon::Lightbulb, u.row_suggest).keyboard()];
-    let (c, y) = b.settings_block(y + 18.0, &idea, focus.filter(|r| *r == idea_row).map(|_| 0), glide);
+    let (c, y, _) = b.settings_block(y + 18.0, &idea, focus.filter(|r| *r == idea_row).map(|_| 0), glide);
     cells.extend(c);
     let y = b.settings_note(y + 8.0, u.help_suggest, 3);
     b.settings_note_icon(y + 16.0, Icon::Link, "github.com/Jonathan8520/FlashNX/issues", ui_col::TEXT2);
@@ -1059,7 +1140,7 @@ fn about_pane(b: &mut SwitchRenderBackend, logo: (u32, u32, u32)) {
         Row::new(Icon::Image, u.about_icons).value("Lucide (ISC)"),
         Row::new(Icon::HardDrive, u.about_memory).value(if applet { u.mem_applet } else { u.mem_full }),
     ];
-    let (_, y) = b.settings_block(y + 14.0, &rows, None, pane_glide(SetSection::About));
+    let (_, y, _) = b.settings_block(y + 14.0, &rows, None, pane_glide(SetSection::About));
     // Said here before a launch fails, not only after.
     if applet {
         b.settings_note(y + 8.0, lc.applet_notice, 3);

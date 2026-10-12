@@ -118,75 +118,73 @@ pub(crate) fn is_setting(key: &str) -> bool {
     matches!(key, "AFFICHAGE" | "ROTATION" | "ZOOM" | "PIXELS" | "FILTRE" | "OVERCLOCK" | "FPS")
 }
 
-/// Left / Right (`dir` -1 / 1) or A (`STEP_CYCLE`) on a settings row: the
-/// lit option moves along and stops at the ends, A goes round. Written for the
-/// next launch. Returns whether the value moved (a step refused at an end
-/// writes nothing and makes no sound).
-pub(crate) fn options_step(s: &mut State, game_idx: usize, key: &str, dir: i32) -> bool {
-    let Some(e) = s.entries.get(game_idx) else { return false };
-    let (b, path) = (e.basename.clone(), e.path.clone());
-    let p = game_prefs(&b, &path);
-    let d = dir as core::ffi::c_int;
-    let moved = match key {
-        "AFFICHAGE" => {
-            let v = crate::step_choice(p.display, keymap::DISPLAY_MODE_COUNT, d);
-            v != p.display && {
-                keymap::set_display_mode_for(&b, v);
-                true
-            }
-        }
-        "ROTATION" => {
-            let v = crate::step_choice(p.rotation, keymap::ROTATION_COUNT, d);
-            v != p.rotation && {
-                keymap::set_rotation_for(&b, v);
-                true
-            }
-        }
-        "ZOOM" => {
-            use crate::backend::render::{ZOOM_MAX, ZOOM_MIN};
-            // A steps up like Right: a percentage has no "round" to go.
-            let z = if dir < 0 { p.zoom.saturating_sub(10) } else { p.zoom.saturating_add(10) };
-            let z = z.clamp(ZOOM_MIN, ZOOM_MAX);
-            z != p.zoom && {
-                keymap::set_zoom_for(&b, z);
-                true
-            }
-        }
-        "PIXELS" => {
-            let v = crate::step_choice(p.pixels, keymap::PIXEL_FILTER_COUNT, d);
-            v != p.pixels && {
-                keymap::set_pixel_filter_for(&b, v);
-                true
-            }
-        }
-        "FILTRE" => {
-            let v = crate::step_choice(p.filter, keymap::SCREEN_FILTER_COUNT, d);
-            v != p.filter && {
-                keymap::set_screen_filter_for(&b, v);
-                true
-            }
-        }
-        "OVERCLOCK" => {
-            let at = POWER_ORDER.iter().position(|m| *m == p.power).unwrap_or(0) as u8;
-            let v = POWER_ORDER[crate::step_choice(at, 3, d) as usize];
-            v != p.power && {
-                keymap::set_power_mode_for(&b, v);
-                true
-            }
-        }
-        "FPS" => {
-            let v = crate::step_choice(p.fps, keymap::FPS_COUNTER_COUNT, d);
-            v != p.fps && {
-                keymap::set_fps_counter_for(&b, v);
-                true
-            }
-        }
-        _ => false,
-    };
-    if moved {
-        game_prefs_forget();
+/// Whether row `key` is a value A arms (input rule 1): a choice, or the zoom.
+/// The counter is a switch, which A flips.
+pub(crate) fn is_armable(key: &str) -> bool {
+    is_setting(key) && key != "FPS"
+}
+
+/// The value of setting `key` as its row steps it: an index into its options,
+/// or the zoom's percentage.
+pub(crate) fn options_value(s: &State, game_idx: usize, key: &str) -> u16 {
+    let Some(e) = s.entries.get(game_idx) else { return 0 };
+    let p = game_prefs(&e.basename, &e.path);
+    match key {
+        "AFFICHAGE" => p.display as u16,
+        "ROTATION" => p.rotation as u16,
+        "ZOOM" => p.zoom,
+        "PIXELS" => p.pixels as u16,
+        "FILTRE" => p.filter as u16,
+        "OVERCLOCK" => POWER_ORDER.iter().position(|m| *m == p.power).unwrap_or(0) as u16,
+        _ => 0,
     }
-    moved
+}
+
+/// One step `dir` along setting `key` from `cur`, stopping at the ends: the
+/// next option, or ten percent of zoom.
+pub(crate) fn options_next(key: &str, cur: u16, dir: i32) -> u16 {
+    use crate::backend::render::{ZOOM_MAX, ZOOM_MIN};
+    let n = match key {
+        "AFFICHAGE" => keymap::DISPLAY_MODE_COUNT,
+        "ROTATION" => keymap::ROTATION_COUNT,
+        "PIXELS" => keymap::PIXEL_FILTER_COUNT,
+        "FILTRE" => keymap::SCREEN_FILTER_COUNT,
+        "OVERCLOCK" => POWER_ORDER.len() as u8,
+        "ZOOM" => {
+            let z = if dir < 0 { cur.saturating_sub(10) } else { cur.saturating_add(10) };
+            return z.clamp(ZOOM_MIN, ZOOM_MAX);
+        }
+        _ => return cur,
+    };
+    armed_step(cur, n as u16, dir)
+}
+
+/// Write setting `key` of the game at `game_idx`, its armed value kept: the
+/// game has a value of its own for it from now on.
+pub(crate) fn options_write(s: &mut State, game_idx: usize, key: &str, v: u16) {
+    let Some(e) = s.entries.get(game_idx) else { return };
+    let b = e.basename.clone();
+    let i = v.min(u8::MAX as u16) as u8;
+    match key {
+        "AFFICHAGE" => keymap::set_display_mode_for(&b, i),
+        "ROTATION" => keymap::set_rotation_for(&b, i),
+        "ZOOM" => keymap::set_zoom_for(&b, v),
+        "PIXELS" => keymap::set_pixel_filter_for(&b, i),
+        "FILTRE" => keymap::set_screen_filter_for(&b, i),
+        "OVERCLOCK" => keymap::set_power_mode_for(&b, POWER_ORDER[(i as usize).min(POWER_ORDER.len() - 1)]),
+        _ => return,
+    }
+    game_prefs_forget();
+}
+
+/// A on the counter's switch: flipped and written.
+pub(crate) fn options_toggle_fps(s: &mut State, game_idx: usize) {
+    let Some(e) = s.entries.get(game_idx) else { return };
+    let (b, path) = (e.basename.clone(), e.path.clone());
+    let on = game_prefs(&b, &path).fps == 1;
+    keymap::set_fps_counter_for(&b, (!on) as u8);
+    game_prefs_forget();
+    crate::sfx::value_changed();
 }
 
 /// X on a setting row: the game drops its own value and follows the global
@@ -215,16 +213,33 @@ fn shelves_value(e: &Entry) -> std::string::String {
     }
 }
 
-/// The options panel as data, handed to `f`.
+/// The options panel as data, handed to `f`. `armed` is the value the row
+/// under the cursor shows while A has it armed (`Armed`).
 pub(crate) fn with_options_sheet<R>(
     backend: &mut SwitchRenderBackend,
     entry: &Entry,
     selection: usize,
+    armed: Option<u16>,
     f: impl FnOnce(&mut SwitchRenderBackend, &Sheet) -> R,
 ) -> R {
     let lc = crate::loc::s();
     let u = crate::loc_ui::ui();
-    let p = game_prefs(&entry.basename, &entry.path);
+    let key = OPTIONS_ENTRIES.get(selection).copied().unwrap_or("");
+    let mut p = game_prefs(&entry.basename, &entry.path);
+    // The armed row shows the value Left / Right have moved it to, not yet
+    // written: what A would keep.
+    if let Some(v) = armed {
+        let i = v.min(u8::MAX as u16) as u8;
+        match key {
+            "AFFICHAGE" => p.display = i,
+            "ROTATION" => p.rotation = i,
+            "ZOOM" => p.zoom = v,
+            "PIXELS" => p.pixels = i,
+            "FILTRE" => p.filter = i,
+            "OVERCLOCK" => p.power = POWER_ORDER[(i as usize).min(POWER_ORDER.len() - 1)],
+            _ => {}
+        }
+    }
     let fav = crate::favorites::is_favorite(&entry.basename);
     let shelves = shelves_value(entry);
     let display_opts = [lc.display_fit, lc.display_stretch, lc.display_fill];
@@ -234,9 +249,18 @@ pub(crate) fn with_options_sheet<R>(
     let oc_opts = [lc.overclock_off, lc.pixels_auto, lc.overclock_on];
     let oc_at = POWER_ORDER.iter().position(|m| *m == p.power).unwrap_or(0);
     let zoom = std::format!("{} %", p.zoom);
-    // A setting with no value of its own says so ("par défaut"): one sideways
-    // press gives the game its own value, and X takes it back.
-    let note = |k: &str| if is_setting(k) && p.own & own_bit(k) == 0 { Some(u.tag_default) } else { None };
+    let zoom_ends = (p.zoom <= crate::backend::render::ZOOM_MIN, p.zoom >= crate::backend::render::ZOOM_MAX);
+    // A setting with no value of its own says so ("par défaut"): keeping a
+    // value gives the game its own, and X takes it back. Not on the row
+    // being changed, where the arrows need the room.
+    let note = |k: &str| {
+        let armed_here = armed.is_some() && k == key;
+        if is_setting(k) && p.own & own_bit(k) == 0 && !armed_here {
+            Some(u.tag_default)
+        } else {
+            None
+        }
+    };
     let rows: std::vec::Vec<Row> = OPTIONS_ENTRIES
         .iter()
         .map(|k| match *k {
@@ -250,7 +274,7 @@ pub(crate) fn with_options_sheet<R>(
             "RACCOURCI" => Row::new(Icon::Home, u.opt_home_icon).toggle(p.home_icon),
             "AFFICHAGE" => Row::new(Icon::Monitor, lc.set_display_mode).choice(&display_opts, p.display as usize),
             "ROTATION" => Row::new(Icon::Rotate, lc.set_rotation).choice(&rot_opts, p.rotation as usize),
-            "ZOOM" => Row::new(Icon::ZoomIn, lc.set_zoom).cycle(&zoom),
+            "ZOOM" => Row::new(Icon::ZoomIn, lc.set_zoom).cycle(&zoom).ends(zoom_ends.0, zoom_ends.1),
             "PIXELS" => Row::new(Icon::Pixels, lc.set_pixel_filter).choice(&pix_opts, p.pixels as usize),
             "FILTRE" => Row::new(Icon::Tv, lc.set_screen_filter).choice(&filter_opts, p.filter as usize),
             "OVERCLOCK" => Row::new(Icon::Cpu, lc.set_overclock).choice(&oc_opts, oc_at),
@@ -258,9 +282,8 @@ pub(crate) fn with_options_sheet<R>(
             _ => Row::new(Icon::Trash, u.opt_delete_game).danger(),
         })
         .zip(OPTIONS_ENTRIES.iter())
-        .map(|(r, k)| r.note_opt(note(k)))
+        .map(|(r, k)| r.note_opt(note(k)).armed_if(armed.is_some() && *k == key))
         .collect();
-    let key = OPTIONS_ENTRIES.get(selection).copied().unwrap_or("");
     let help = match key {
         "FAVORI" => u.help_opt_fav,
         "TOUCHES" => u.help_keys,
@@ -281,6 +304,7 @@ pub(crate) fn with_options_sheet<R>(
         "FPS" => u.help_fps,
         _ => u.help_opt_delete,
     };
+    // What A does on the row: arm a value, flip a switch, open, act.
     let a_verb = match key {
         "TOUCHES" | "JAQUETTE" | "DOSSIER" => u.open,
         "RENOMMER" => lc.opt_rename,
@@ -291,16 +315,17 @@ pub(crate) fn with_options_sheet<R>(
                 u.install
             }
         }
+        "FAVORI" | "FPS" => u.change,
+        k if is_armable(k) => u.edit,
         _ => lc.opt_delete,
     };
-    let stepper = matches!(
-        key,
-        "FAVORI" | "AFFICHAGE" | "ROTATION" | "ZOOM" | "PIXELS" | "FILTRE" | "OVERCLOCK" | "FPS"
-    );
-    let hints_step = [(&[Btn::Dpad][..], u.change), (&[Btn::L, Btn::R][..], u.other_game), (&[Btn::B][..], u.back)];
-    // On a setting the game has its own value for, X goes back to the default.
+    // Armed, what Left / Right, A and B do now (input rule 2). On a setting
+    // the game has its own value for, X goes back to the default. The bar
+    // drops hints it has no room for from its end, keeping B (`kit_sheet_at`),
+    // so L R, the one every other row also shows, goes first.
+    let hints_armed = [(&[Btn::DpadLR][..], u.change), (&[Btn::A][..], u.validate), (&[Btn::B][..], u.cancel)];
     let hints_own = [
-        (&[Btn::Dpad][..], u.change),
+        (&[Btn::A][..], a_verb),
         (&[Btn::X][..], u.reset_default),
         (&[Btn::L, Btn::R][..], u.other_game),
         (&[Btn::B][..], u.back),
@@ -326,10 +351,10 @@ pub(crate) fn with_options_sheet<R>(
     sheet.row_h = 48.0;
     sheet.glide_key = 0x6200_0000;
     sheet.help = help;
-    sheet.hints = if own_here {
+    sheet.hints = if armed.is_some() {
+        &hints_armed
+    } else if own_here {
         &hints_own
-    } else if stepper {
-        &hints_step
     } else {
         &hints_act
     };
@@ -379,7 +404,7 @@ pub(crate) fn panels_left_edge(screen: Screen, vw: f32) -> Option<f32> {
 }
 
 /// The game a family screen is about.
-fn family_game(screen: Screen) -> Option<usize> {
+pub(crate) fn family_game(screen: Screen) -> Option<usize> {
     Some(match screen {
         Screen::OptionsModal { game_idx, .. }
         | Screen::DeleteConfirm { game_idx, .. }
@@ -424,9 +449,10 @@ pub(crate) fn draw_options_family(
             list_screen_for_abs(&s, game_idx),
             s.entries.get(game_idx).cloned(),
             (s.banner_tex, s.banner_w, s.banner_h),
+            s.armed.filter(|a| a.screen == screen).map(|a| a.cur),
         )
     });
-    let Some((home, Some(entry), logo)) = snap else { return };
+    let Some((home, Some(entry), logo, armed)) = snap else { return };
 
     // The library as it was, still, under the panels: the mockup shows it at
     // 62 %, and the tiles' clocks keep running instead of jumping when the
@@ -481,7 +507,20 @@ pub(crate) fn draw_options_family(
     if let Some(p) = slide {
         backend.set_ui_sheet_slide_right(p);
     }
-    draw_family_panels(backend, &entry, opt_sel, shown, t);
+    // The panel's own armed row, or the page's (the Touches et curseur page
+    // reads its own from the state).
+    let opt_armed = if matches!(screen, Screen::OptionsModal { .. }) { armed } else { None };
+    draw_family_panels(backend, &entry, opt_sel, opt_armed, shown, t);
+    // While a page folds back nothing publishes (the page has no cursor, the
+    // options are still a rail or cut by their moving edge), and every screen
+    // of the stack shares one touch kind: the page's own table stayed live
+    // for those frames. A tap on its rail closed the options, and a tap on
+    // one of its switches was read as an options row, the HOME icon's among
+    // them (a tile installed or removed). An empty table until the options
+    // publish theirs; a question drawn on top below publishes its own.
+    if matches!(shown, Some((_, false))) {
+        crate::backend::render::ui_cells_publish(kind, std::vec::Vec::new());
+    }
     backend.clear_ui_transform();
 
     // A question or the cover picker on top, popping in by itself.
@@ -521,7 +560,14 @@ pub(crate) fn draw_options_loading(backend: &mut SwitchRenderBackend, now: u64, 
 
 /// `page` is the page beside the options and whether it is live (false while
 /// it folds back after B: no cursor, no taps).
-fn draw_family_panels(backend: &mut SwitchRenderBackend, entry: &Entry, opt_sel: usize, page: Option<(Screen, bool)>, t: f32) {
+fn draw_family_panels(
+    backend: &mut SwitchRenderBackend,
+    entry: &Entry,
+    opt_sel: usize,
+    opt_armed: Option<u16>,
+    page: Option<(Screen, bool)>,
+    t: f32,
+) {
     let lc = crate::loc::s();
     let u = crate::loc_ui::ui();
     let live = page.map_or(true, |(_, l)| l);
@@ -532,22 +578,34 @@ fn draw_family_panels(backend: &mut SwitchRenderBackend, entry: &Entry, opt_sel:
     let cascade = |b: &mut SwitchRenderBackend, parent: &Sheet, child: Option<&Sheet>| {
         b.kit_cascade_on(Side::Right, OPTIONS_W, OPTIONS_CHILD_W, parent, branch, child, t);
     };
-    with_options_sheet(backend, entry, opt_sel, |b, parent| {
+    with_options_sheet(backend, entry, opt_sel, opt_armed, |b, parent| {
         // The way back, spelled out over each page.
         let back_options = [u.hint_options];
         let back_keys = [u.hint_options, lc.menu_keys];
         match page {
-            Some(Screen::TouchesMenu { selection, .. }) => {
-                let v = LIBRARY
-                    .lock()
-                    .ok()
-                    .map(|s| menu::TouchesView {
-                        speed_x10: launcher_speed_x10(s.touches_cursor_idx),
+            Some(Screen::TouchesMenu { game_idx, selection }) => {
+                let v = LIBRARY.lock().ok().map(|s| {
+                    // The armed row shows the value Left / Right moved it to.
+                    let page_armed = s.armed.filter(|a| live && a.screen == Screen::TouchesMenu { game_idx, selection });
+                    let armed_row = page_armed.and_then(|_| menu::TouchesRow::at(s.touches_can_revert, selection));
+                    let speed_idx = match (armed_row, page_armed) {
+                        (Some(menu::TouchesRow::Speed), Some(a)) => a.cur as usize,
+                        _ => touches_speed_idx(s.touches_cursor_idx) as usize,
+                    };
+                    let gyro = match (armed_row, page_armed) {
+                        (Some(menu::TouchesRow::Gyro), Some(a)) => a.cur.min(u8::MAX as u16) as u8,
+                        _ => s.touches_gyro,
+                    };
+                    menu::TouchesView {
+                        speed_idx,
+                        speed_own: s.touches_cursor_idx >= 0,
                         shown: s.touches_show_cursor,
-                        gyro: s.touches_gyro,
+                        gyro,
                         can_revert: s.touches_can_revert,
                         has_backup: s.touches_has_backup,
-                    });
+                        armed: armed_row,
+                    }
+                });
                 if let Some(v) = v {
                     menu::with_touches_view(b, &v, sel(selection), &back_options, |b, c| cascade(b, parent, Some(c)));
                 }
@@ -611,18 +669,6 @@ fn draw_family_panels(backend: &mut SwitchRenderBackend, entry: &Entry, opt_sel:
             _ => cascade(b, parent, None),
         }
     });
-}
-
-/// The cursor speed a game's Touches page shows: its own, or the global one it
-/// follows when it has none (the C++ side's live value, which in the launcher
-/// IS the global one).
-fn launcher_speed_x10(idx: i32) -> u32 {
-    if idx >= 0 {
-        let i = (idx as usize).min(crate::loc::CURSOR_SPEED_X10.len() - 1);
-        crate::loc::CURSOR_SPEED_X10[i]
-    } else {
-        (unsafe { ruffle_cursor_speed_mult_x10() }).max(5) as u32
-    }
 }
 
 /// The folders page as data, handed to `f`: "No folder" first, then every

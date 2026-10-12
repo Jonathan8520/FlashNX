@@ -2527,20 +2527,6 @@ pub fn set_default_zoom(v: u16) {
     DEFAULT_ZOOM.store(v, Ordering::Relaxed);
 }
 
-/// Step to the next preset, wrapping. A value that is not one of them (hand
-/// edited into settings.json) lands on the first.
-pub fn step_default_zoom(dir: i32) {
-    let cur = default_zoom();
-    let n = DEFAULT_ZOOM_STEPS.len();
-    let idx = DEFAULT_ZOOM_STEPS.iter().position(|v| *v == cur);
-    let next = match idx {
-        Some(i) if dir < 0 => DEFAULT_ZOOM_STEPS[(i + n - 1) % n],
-        Some(i) => DEFAULT_ZOOM_STEPS[(i + 1) % n],
-        None => DEFAULT_ZOOM_STEPS[0],
-    };
-    set_default_zoom(next);
-}
-
 pub fn default_screen_filter() -> u8 {
     DEFAULT_SCREEN_FILTER.load(Ordering::Relaxed)
 }

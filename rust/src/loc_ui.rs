@@ -585,6 +585,8 @@ pub struct Ui {
     /// short, rather than the overclock's: "Inactivo | Canica | Puntero" did not
     /// fit the pause's 440 px page in Spanish, Italian or Portuguese.
     pub gyro_off: &'static str,
+    /// Pause › Écran: help of the zoom row, which A opens into the framing mode (Left / Right no longer step it there).
+    pub help_zoom_frame: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -918,6 +920,7 @@ const EN: Ui = Ui {
     help_copy_game: "That other game's own controls. You see what changes before applying.",
     zoom_offset: "offset {}, {} px",
     gyro_off: "Off",
+    help_zoom_frame: "Enlarges the picture: A opens the framing, where ZL and ZR zoom and the stick moves the picture.",
 };
 
 const FR: Ui = Ui {
@@ -1251,6 +1254,7 @@ const FR: Ui = Ui {
     help_copy_game: "Les touches propres à cet autre jeu. Tu vois ce qui change avant d'appliquer.",
     zoom_offset: "décalé de {}, {} px",
     gyro_off: "Inactif",
+    help_zoom_frame: "Agrandit l'image : A ouvre le cadrage, où ZL et ZR zooment et le stick déplace l'image.",
 };
 
 const ES: Ui = Ui {
@@ -1403,7 +1407,7 @@ const ES: Ui = Ui {
     profile_same_name: "Mismo nombre",
     other_game: "Otro juego",
     tag_default: "predeterminado",
-    reset_default: "Predeterminado",
+    reset_default: "Restaurar",
     help_quit_direct: "Cierra el juego y FlashNX. Lo que el juego no haya guardado se pierde.",
     sec_controls: "Controles",
     stick_press: "pulsar",
@@ -1584,6 +1588,7 @@ const ES: Ui = Ui {
     help_copy_game: "Los controles propios de ese otro juego. Ves lo que cambia antes de aplicar.",
     zoom_offset: "desplazado {}, {} px",
     gyro_off: "No",
+    help_zoom_frame: "Amplía la imagen: A abre el encuadre, donde ZL y ZR hacen zoom y el stick mueve la imagen.",
 };
 
 const RU: Ui = Ui {
@@ -1736,7 +1741,7 @@ const RU: Ui = Ui {
     profile_same_name: "То же имя",
     other_game: "Другая игра",
     tag_default: "по умолчанию",
-    reset_default: "По умолчанию",
+    reset_default: "Сбросить",
     help_quit_direct: "Закрывает игру и FlashNX. Всё, что игра не сохранила, будет потеряно.",
     sec_controls: "Клавиши",
     stick_press: "нажатие",
@@ -1917,6 +1922,7 @@ const RU: Ui = Ui {
     help_copy_game: "Собственная раскладка той игры. Перед применением видно, что изменится.",
     zoom_offset: "сдвиг {}, {} пикс.",
     gyro_off: "Выкл",
+    help_zoom_frame: "Увеличивает картинку: A открывает кадрирование, где ZL и ZR меняют масштаб, а стик двигает картинку.",
 };
 
 const DE: Ui = Ui {
@@ -1950,7 +1956,7 @@ const DE: Ui = Ui {
     zoom_frame: "Ausschnitt",
     zoom_pixel: "Pixelgenau",
     zoom_reset: "Drücken: 100\u{a0}%",
-    validate: "Bestätigen",
+    validate: "OK",
     cancel: "Abbrechen",
     p1: "S1",
     p2: "S2",
@@ -2250,6 +2256,7 @@ const DE: Ui = Ui {
     help_copy_game: "Die eigene Tastenbelegung dieses anderen Spiels. Du siehst vorher, was sich ändert.",
     zoom_offset: "verschoben um {}, {} px",
     gyro_off: "Aus",
+    help_zoom_frame: "Vergrößert das Bild: A öffnet den Ausschnitt, wo ZL und ZR zoomen und der Stick das Bild verschiebt.",
 };
 
 const IT: Ui = Ui {
@@ -2402,7 +2409,7 @@ const IT: Ui = Ui {
     profile_same_name: "Stesso nome",
     other_game: "Altro gioco",
     tag_default: "predefinito",
-    reset_default: "Predefinito",
+    reset_default: "Ripristina",
     help_quit_direct: "Chiude il gioco e FlashNX. Ciò che il gioco non ha salvato va perso.",
     sec_controls: "Comandi",
     stick_press: "premi",
@@ -2583,6 +2590,7 @@ const IT: Ui = Ui {
     help_copy_game: "I comandi propri di quell'altro gioco. Vedi cosa cambia prima di applicare.",
     zoom_offset: "spostato di {}, {} px",
     gyro_off: "No",
+    help_zoom_frame: "Ingrandisce l'immagine: A apre l'inquadratura, dove ZL e ZR fanno lo zoom e lo stick sposta l'immagine.",
 };
 
 const PT: Ui = Ui {
@@ -2916,6 +2924,7 @@ const PT: Ui = Ui {
     help_copy_game: "Os controles próprios desse outro jogo. Você vê o que muda antes de aplicar.",
     zoom_offset: "deslocado {}, {} px",
     gyro_off: "Não",
+    help_zoom_frame: "Amplia a imagem: A abre o enquadramento, onde ZL e ZR fazem zoom e o analógico move a imagem.",
 };
 
 const ZH: Ui = Ui {
@@ -3249,6 +3258,7 @@ const ZH: Ui = Ui {
     help_copy_game: "那款游戏自己的按键配置。应用前可以看到会改变什么。",
     zoom_offset: "偏移 {}, {} 像素",
     gyro_off: "关闭",
+    help_zoom_frame: "放大画面：按 A 进入取景，ZL 和 ZR 缩放，摇杆移动画面。",
 };
 
 const TR: Ui = Ui {
@@ -3582,6 +3592,7 @@ const TR: Ui = Ui {
     help_copy_game: "O oyunun kendi kontrolleri. Uygulamadan önce neyin değiştiğini görürsün.",
     zoom_offset: "{}, {} px kaydırıldı",
     gyro_off: "Kapalı",
+    help_zoom_frame: "Görüntüyü büyütür: A kadrajı açar; orada ZL ve ZR yakınlaştırır, çubuk görüntüyü kaydırır.",
 };
 
 pub fn ui() -> &'static Ui {

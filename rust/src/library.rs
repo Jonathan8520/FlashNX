@@ -9,8 +9,10 @@
 //!
 //! Screens (state machine, like `menu::Screen`):
 //!   - **Empty**:        no SWF found, instructions where to drop files.
-//!   - **List**:         scrollable game list, A=JOUER, X=OPTIONS, -=QUITTER.
-//!   - **OptionsModal**: per-game options (TOUCHES + RETOUR for v1).
+//!   - **List**:         the Jouer tab, the library as covers or a list: A plays,
+//!                       + opens a game's options, - searches, Y sorts.
+//!   - **OptionsModal**: a game's options, a panel at the right edge with its
+//!                       pages beside it (`options_panel`).
 //!   - **Picked**:       user picked a game; `selected_path` is set; C++
 //!                       polls `is_active()` and exits the library loop.
 //!   - **Quit**:         user pressed - on the empty/list; C++ exits the
@@ -93,10 +95,12 @@ pub(crate) enum Screen {
     SortModal { selection: usize, prev_sel: usize, prev_scroll: usize, dirs: u8 },
     /// Sort picker for the IMPORTER lists (Y). `kind` picks the target list +
     /// option set (`SORT_TARGET_*`): archive.org files (name/size), the
-    /// Flashpoint gallery (name only — developers are unknown), or the IMPORTER
-    /// home's saved URLs (added/name/source). `reverse` mirrors the JOUER
-    /// modal's X toggle. `prev_*` restore the cursor on cancel.
-    RemoteSortModal { selection: usize, kind: u8, reverse: bool, prev_sel: usize, prev_scroll: usize },
+    /// Flashpoint gallery (name, developer, release), or the IMPORTER home's
+    /// saved URLs (added/name/source/files). Bit `i` of `dirs` set = row `i`
+    /// shows (and A would apply) its reversed order: each row keeps the order
+    /// it was turned to, as on the Play tab's picker. `prev_*` restore the
+    /// cursor on cancel.
+    RemoteSortModal { selection: usize, kind: u8, dirs: u8, prev_sel: usize, prev_scroll: usize },
     // ── Phase 3.7: DISTANT mode (archive.org import) ───────────────────
     /// IMPORTER home: the two action cards, then the saved sources. Rows 0 and 1
     /// are the cards (search Flashpoint, add an address), rows 2.. index
@@ -178,10 +182,11 @@ pub(crate) enum Screen {
     /// assumed: one screen serves both flows, and dismissing a suggestion once
     /// landed the cursor on the row above the button just pressed (#113).
     SendFailed { row: usize, selection: usize },
-    /// TOUCHES sub-menu (#20 regroup): everything controls-related for a game in
-    /// one place. `selection` indexes [edit, apply, share, (revert)] — the revert
-    /// row is present only when `State::touches_can_revert`. Reached from OPTIONS
-    /// > TOUCHES; B returns to OPTIONS.
+    /// The Touches et curseur page (#20 regroup): everything controls-related
+    /// for a game in one place. `selection` is a row of `menu::TouchesRow`:
+    /// edit, apply, share, the revert row when `State::touches_can_revert`, then
+    /// the cursor's speed, visibility and gyroscope. Reached from OPTIONS >
+    /// TOUCHES; B returns to OPTIONS.
     TouchesMenu { game_idx: usize, selection: usize },
     /// Picker of community control profiles matching a game (#20, TOUCHES >
     /// APPLIQUER). `selection` indexes `State::profile_matches`. A opens the
@@ -209,6 +214,125 @@ pub(crate) enum Screen {
     /// content. `render` runs the stashed `PendingNet` the next frame, which sets
     /// the real result screen. Carries no state — the action is in `PENDING_NET`.
     ProfileLoading,
+}
+
+/// A value row armed by A (input rule 1): Left / Right move `cur`, which the
+/// row shows in place of the stored value; A writes it, B drops it. Tied to
+/// the screen it was armed on (`armed_here`): on any other screen (the cursor
+/// moved, the page changed, the panel closed by a path that kept nothing)
+/// nothing is armed and nothing was written, so a value can only ever change
+/// on the card through A, Up / Down, the panel's close button or a tap
+/// elsewhere, all of which keep it first (`confirm_armed`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Armed {
+    pub screen: Screen,
+    /// The row's value when A armed it, and the one shown now: an index
+    /// into its options, a preset index, or a zoom percentage.
+    pub prior: u16,
+    pub cur: u16,
+}
+
+/// The armed value row of the screen up, if any.
+pub(crate) fn armed_here(s: &State) -> Option<Armed> {
+    s.armed.filter(|a| a.screen == s.screen)
+}
+
+/// Arm the row under the cursor of the screen up, at value `v`.
+fn arm_here(s: &mut State, v: u16) {
+    s.armed = Some(Armed { screen: s.screen, prior: v, cur: v });
+    crate::sfx::choose(crate::sfx::Sfx::Decide);
+}
+
+/// Keep the armed value of the screen up: written now when it moved (A, Up /
+/// Down, the panel's close button, a tap elsewhere, a tab switch). Nothing
+/// happens when nothing is armed.
+pub(crate) fn confirm_armed(s: &mut State) {
+    let armed = armed_here(s);
+    s.armed = None;
+    if let Some(a) = armed {
+        keep_armed(s, a);
+    }
+}
+
+/// Write armed value `a`, kept, on the row and screen it was armed on.
+fn keep_armed(s: &mut State, a: Armed) {
+    if a.cur == a.prior {
+        return;
+    }
+    match a.screen {
+        Screen::OptionsModal { game_idx, selection } => {
+            let key = OPTIONS_ENTRIES.get(selection).copied().unwrap_or("");
+            options_panel::options_write(s, game_idx, key, a.cur);
+        }
+        Screen::TouchesMenu { game_idx, selection } => touches_write(s, game_idx, selection, a.cur),
+        Screen::Settings { section, in_pane: true, row } => settings_tab::write_armed(section, row, a.cur),
+        _ => {}
+    }
+}
+
+/// The value armed row `a` moves to on one step `dir`: the next option, the
+/// next preset, ten percent of zoom, stopping at the ends.
+fn armed_next(s: &State, a: Armed, dir: i32) -> u16 {
+    match a.screen {
+        Screen::OptionsModal { selection, .. } => {
+            options_panel::options_next(OPTIONS_ENTRIES.get(selection).copied().unwrap_or(""), a.cur, dir)
+        }
+        Screen::TouchesMenu { selection, .. } => {
+            let n = match menu::TouchesRow::at(s.touches_can_revert, selection) {
+                Some(menu::TouchesRow::Speed) => CURSOR_X10.len(),
+                _ => keymap::GYRO_MODE_COUNT as usize,
+            };
+            armed_step(a.cur, n as u16, dir)
+        }
+        Screen::Settings { section, row, .. } => settings_tab::armed_next(section, row, a.cur, dir),
+        _ => a.cur,
+    }
+}
+
+/// The next value of an armed row with `n` options, one step `dir` along,
+/// stopping at the ends.
+fn armed_step(cur: u16, n: u16, dir: i32) -> u16 {
+    if dir < 0 {
+        cur.saturating_sub(1)
+    } else {
+        (cur + 1).min(n.saturating_sub(1))
+    }
+}
+
+/// A question with its answers side by side (`draw_confirm`): Left is the
+/// first answer, Right the second, absolutely, so a held direction rests on
+/// the answer it points at (input rule 4). Up and Down do nothing: the answers
+/// are not above one another. Every question of the launcher and of the game
+/// answers through here; they used to flip on any direction, every repeat
+/// tick of a held one, and three of them were the ones that delete.
+pub(crate) fn answer_at(button: &str, sel: usize) -> usize {
+    match button {
+        "Left" | "StickLLeft" => 0,
+        "Right" | "StickLRight" => 1,
+        _ => sel.min(1),
+    }
+}
+
+/// + on a page or a question of a game's options: the whole stack closes,
+/// back to the library on that game. A value armed on the page is kept first,
+/// and what a page left half done (a copy list, a preview, the covers found)
+/// goes with it, as B would have taken it on the way out.
+fn close_options_stack(s: &mut State, screen: Screen) {
+    let Some(game_idx) = options_panel::family_game(screen) else { return };
+    confirm_armed(s);
+    s.preview_rows.clear();
+    if s.profile_copy_mode {
+        s.profile_copy_mode = false;
+        s.profile_matches = std::mem::take(&mut s.profile_saved_matches);
+    }
+    if matches!(screen, Screen::CoverPicker { .. }) {
+        crate::backend::render::thumb_cancel_all();
+        s.cover_candidates.clear();
+        s.cover_msg.clear();
+        s.cover_query.clear();
+        s.cover_use_shot = false;
+    }
+    s.screen = list_screen_for_abs(s, game_idx);
 }
 
 // No "RETOUR" entry: B already backs out of the modal, so a dedicated row is
@@ -1670,6 +1794,8 @@ pub(crate) struct State {
     /// other files, its data files.
     import_had_files: bool,
     import_had_data: bool,
+    /// The value row armed by A, if any (see `Armed`).
+    pub(crate) armed: Option<Armed>,
 }
 
 static LIBRARY: Mutex<State> = Mutex::new(State {
@@ -1754,6 +1880,7 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     import_typed: std::string::String::new(),
     import_had_files: false,
     import_had_data: false,
+    armed: None,
 });
 
 /// Where the URL history persists across boots. Format: JSON array of
@@ -3539,6 +3666,7 @@ pub fn reset() {
         s.fp_desc_ready = false;
         s.fp_size_slot = -1;
         s.fp_size_pending = false;
+        s.armed = None;
         // url_history + history_idx are deliberately NOT cleared — they
         // persist across back-to-library cycles AND across .nro reboots
         // (loaded fresh from SD by load_history_from_sd at every library
@@ -3605,6 +3733,7 @@ static TOUCH: Mutex<TouchState> = Mutex::new(TouchState {
 /// A already knows how to open, confirm, rebind or delete; duplicating any of
 /// that here is how a touch path drifts away from the button path.
 fn tap_ui_row(x: f32, y: f32) {
+    use crate::sfx::{play, Sfx};
     // The kind of the screen that is up RIGHT NOW, read from the lock rather
     // than from the render stamp: C++ serves buttons before touch in the same
     // frame, so on the frame a button changes screens the stamp still names the
@@ -3613,23 +3742,188 @@ fn tap_ui_row(x: f32, y: f32) {
         Ok(s) => touch_kind(s.screen),
         Err(_) => return,
     };
-    let Some(hit) = crate::backend::render::ui_cells_hit(kind, x, y) else {
+    // The rail of a game's options and the caption of the page beside it look
+    // like the way back, and are (input rule 6): B, after keeping a value armed
+    // on the page, as a tap elsewhere does.
+    if crate::backend::render::ui_back_hit(kind, x, y) {
+        if let Ok(mut s) = LIBRARY.lock() {
+            confirm_armed(&mut s);
+        }
+        input("B");
         return;
-    };
+    }
     // The keymap editor keeps its selection in the `menu` module, not here.
     if matches!(kind, 70..=89) {
-        if menu::touch_select(hit) {
+        if let Some(hit) = crate::backend::render::ui_cells_hit(kind, x, y) {
+            if menu::touch_select(hit) {
+                input("A");
+            }
+        }
+        return;
+    }
+    // A part of a row's control does what it shows at once: an option is set,
+    // a switch flips (input rule 6).
+    if let Some((row, part)) = crate::backend::render::ui_seg_hit(kind, x, y) {
+        let activate = LIBRARY.lock().map(|mut s| touch_part(&mut s, row, part)).unwrap_or(false);
+        if activate {
             input("A");
         }
         return;
     }
+    let Some(hit) = crate::backend::render::ui_cells_hit(kind, x, y) else {
+        return;
+    };
     let mut activate = false;
     if let Ok(mut s) = LIBRARY.lock() {
+        let before = s.screen;
+        let armed = armed_here(&s);
         activate = set_screen_selection(&mut s, hit);
+        if !activate && s.screen != before {
+            // A tap on another row keeps the value armed on the one left, as
+            // Up / Down do (input rule 2).
+            s.armed = None;
+            if let Some(a) = armed {
+                keep_armed(&mut s, a);
+            }
+        }
+        // A tap is not a press: no `after_input` follows, so the sound is
+        // played here. A layout card applies as it is tapped (the click of a
+        // value); any other first tap moves the cursor (the move).
+        if crate::sfx::take_changed() {
+            play(Sfx::Toggle);
+        } else if !activate && s.screen != before {
+            play(Sfx::Move);
+        }
     }
     if activate {
         input("A");
     }
+}
+
+/// A tap on part `part` of the control of row `row` on the screen up (input
+/// rule 6): an option of a choice is set at once and kept, a switch flips, an
+/// armed arrow steps, an order of a sort window takes the focus. The cursor
+/// goes to that row; a value armed on another row is kept first. Returns true
+/// when the tap is A instead: on an order of a sort window that already has
+/// the focus, as a second tap on a row is.
+///
+/// A tap is not a press: no `after_input` follows it, so the sounds are
+/// played here, and a change a handler reports for one is not left for the
+/// next press to hear.
+fn touch_part(s: &mut State, row: usize, part: usize) -> bool {
+    use crate::backend::render::{SEG_NEXT, SEG_PREV};
+    use crate::sfx::{play, Sfx};
+    let armed = armed_here(s);
+    // The armed arrows step the armed row, as Left / Right do.
+    if part == SEG_PREV || part == SEG_NEXT {
+        if let Some(a) = armed {
+            let next = armed_next(s, a, if part == SEG_PREV { -1 } else { 1 });
+            if next != a.cur {
+                s.armed = Some(Armed { cur: next, ..a });
+                play(Sfx::Toggle);
+            }
+        }
+        return false;
+    }
+    let before = s.screen;
+    // Any other part: the armed value is kept (written), then the tap acts.
+    // On the armed row itself the tapped option is what is kept.
+    s.armed = None;
+    let mut activate = false;
+    match before {
+        Screen::OptionsModal { game_idx, .. } => {
+            let Some(&key) = OPTIONS_ENTRIES.get(row) else { return false };
+            if let Some(a) = armed.filter(|a| a.screen != (Screen::OptionsModal { game_idx, selection: row })) {
+                keep_armed(s, a);
+            }
+            s.screen = Screen::OptionsModal { game_idx, selection: row };
+            match key {
+                "FAVORI" => options_set_favorite(s, game_idx, row, None),
+                "FPS" => options_panel::options_toggle_fps(s, game_idx),
+                // The HOME icon's switch installs or removes a tile: that is
+                // A's work, with its toasts.
+                "RACCOURCI" => activate = true,
+                k if options_panel::is_armable(k) => {
+                    let v = part as u16;
+                    if v != options_panel::options_value(s, game_idx, k) {
+                        options_panel::options_write(s, game_idx, k, v);
+                        crate::sfx::value_changed();
+                    }
+                }
+                _ => {}
+            }
+        }
+        Screen::TouchesMenu { game_idx, .. } => {
+            let here = Screen::TouchesMenu { game_idx, selection: row };
+            if let Some(a) = armed.filter(|a| a.screen != here) {
+                keep_armed(s, a);
+            }
+            s.screen = here;
+            match menu::TouchesRow::at(s.touches_can_revert, row) {
+                Some(menu::TouchesRow::Gyro) => {
+                    let mode = (part as u16).min(keymap::GYRO_MODE_COUNT as u16 - 1);
+                    if mode != s.touches_gyro as u16 {
+                        touches_write(s, game_idx, row, mode);
+                        crate::sfx::value_changed();
+                    }
+                }
+                Some(menu::TouchesRow::ShowCursor) => {
+                    if let Some(basename) = s.entries.get(game_idx).map(|e| e.basename.clone()) {
+                        keymap::toggle_show_cursor_for(&basename);
+                        s.touches_show_cursor = !s.touches_show_cursor;
+                        crate::sfx::value_changed();
+                    }
+                }
+                _ => {}
+            }
+        }
+        Screen::Settings { section, .. } => {
+            if let Some(a) = armed {
+                keep_armed(s, a);
+            }
+            settings_tab::touch_part(s, section, row, part);
+        }
+        Screen::DistantUrlOptions { url_idx, .. } => {
+            s.screen = Screen::DistantUrlOptions { url_idx, selection: row };
+            // The favourite's switch.
+            if row == 0 {
+                if let Some(url) = s.url_history.get(url_idx).cloned() {
+                    toggle_url_favorite(s, &url);
+                    crate::sfx::value_changed();
+                }
+            }
+        }
+        // An order of a sort window: the focus goes there; a second tap on
+        // the order with the focus applies it, as A.
+        Screen::SortModal { selection, prev_sel, prev_scroll, dirs } => {
+            if row < SORT_MODES && row < 8 {
+                let bit = 1u8 << row;
+                let turned = if part == 1 { dirs | bit } else { dirs & !bit };
+                if row == selection && turned == dirs {
+                    return true;
+                }
+                s.screen = Screen::SortModal { selection: row, prev_sel, prev_scroll, dirs: turned };
+            }
+        }
+        Screen::RemoteSortModal { selection, kind, dirs, prev_sel, prev_scroll } => {
+            if row < remote_sort_count(kind) && row < 8 {
+                let bit = 1u8 << row;
+                let turned = if part == 1 { dirs | bit } else { dirs & !bit };
+                if row == selection && turned == dirs {
+                    return true;
+                }
+                s.screen = Screen::RemoteSortModal { selection: row, kind, dirs: turned, prev_sel, prev_scroll };
+            }
+        }
+        _ => {}
+    }
+    // Heard now, and taken, so the flag does not sound on the next press.
+    if crate::sfx::take_changed() {
+        play(Sfx::Toggle);
+    } else if s.screen != before && !activate {
+        play(Sfx::Move);
+    }
+    activate
 }
 
 /// A row-list drag finished: store where it left the list, and bring the cursor
@@ -3668,12 +3962,8 @@ fn commit_row_scroll(offset: usize, sel_lo: usize, sel_hi: usize) {
             let sel = if selection < base { selection } else { selection.clamp(sel_lo, hi) };
             s.screen = Screen::GamesDirPicker { selection: sel, scroll: offset };
         }
-        // The shelf picker has no scroll of its own: its window is DERIVED from
-        // the cursor, which the formula pins to the window's LAST row. Putting
-        // the cursor there is the only way to say where the list should rest.
-        Screen::GameFolderPicker { game_idx, .. } => {
-            s.screen = Screen::GameFolderPicker { game_idx, selection: hi };
-        }
+        // The folders page of a game's options is a sheet: it scrolls to its
+        // cursor by itself and publishes no row view, so no drag ends here.
         _ => {}
     }
 }
@@ -3734,11 +4024,11 @@ fn set_screen_selection(s: &mut State, idx: usize) -> bool {
         Screen::ProfileDeleteConfirm { game_idx, profile_idx, selection } => {
             put!(selection, Screen::ProfileDeleteConfirm { game_idx, profile_idx, selection: idx })
         }
-        Screen::RemoteSortModal { selection, kind, reverse, prev_sel, prev_scroll } => {
+        Screen::RemoteSortModal { selection, kind, dirs, prev_sel, prev_scroll } => {
             if idx >= remote_sort_count(kind) {
                 return false;
             }
-            put!(selection, Screen::RemoteSortModal { selection: idx, kind, reverse, prev_sel, prev_scroll })
+            put!(selection, Screen::RemoteSortModal { selection: idx, kind, dirs, prev_sel, prev_scroll })
         }
         Screen::DistantUrlOptions { url_idx, selection } => {
             // Favourite, edit, delete.
@@ -3903,8 +4193,12 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
                     .map(|t| t.index());
                 if let (Some(cur), Some(target)) = (cur, Tab::from_index(idx)) {
                     // Already there: a tap on the tab you are on does nothing,
-                    // rather than resetting its cursor to the top.
+                    // rather than resetting its cursor to the top. A value
+                    // armed in Réglages is kept, as a tap elsewhere keeps it.
                     if cur != idx {
+                        if let Ok(mut s) = LIBRARY.lock() {
+                            confirm_armed(&mut s);
+                        }
                         goto_tab(target, if idx > cur { 1.0 } else { -1.0 });
                     }
                 }
@@ -4203,6 +4497,10 @@ fn input_inner(button: &str) -> bool {
                 *p = Some(PendingClose::CloseMenuGoto(settings_at(SetSection::Defaults, "TOUCHES")));
             }
             crate::backend::render::modal_close_begin();
+            // The editor is still on screen while it scales out, so the
+            // screens cannot say B went back: said here, as a game's editor
+            // says it (`menu::input`).
+            crate::sfx::choose(crate::sfx::Sfx::Back);
             return true;
         }
     }
@@ -4219,7 +4517,7 @@ fn input_inner(button: &str) -> bool {
         if let Some(game_idx) = game {
             menu::close();
             if let Ok(mut s) = LIBRARY.lock() {
-                goto_touches_menu(&mut s, game_idx, 1);
+                goto_touches_menu(&mut s, game_idx, menu::MENU_APPLY);
             }
             defer_net(PendingNet::OpenProfiles { game_idx }, game_idx);
             return true;
@@ -4235,7 +4533,7 @@ fn input_inner(button: &str) -> bool {
                 match s.screen {
                     Screen::TouchesEditor { game_idx } => {
                         // Back to the TOUCHES sub-menu's EDIT row (#20 regroup).
-                        goto_touches_menu(&mut s, game_idx, 0);
+                        goto_touches_menu(&mut s, game_idx, menu::MENU_EDIT);
                         dest = Some(s.screen);
                     }
                     Screen::SettingsKeymapEditor => {
@@ -4272,7 +4570,9 @@ fn input_inner(button: &str) -> bool {
         // ── Navbar (v1.2.0): L/R switch tabs from any tab-home screen. ──
         // Intercepted before per-screen handling so the home screens don't
         // need to know about it. Sub-screens (`screen_tab` == None) keep L/R
-        // for their own use (e.g. nothing today; DISTANT paging moved to Up/Down).
+        // for their own use: they page an archive's games and the bug
+        // report's game list, and step to the previous / next game in a
+        // game's options (the controls editor's layers are `menu`'s).
         if matches!(button, "L" | "R") {
             if let Some(tab) = screen_tab(screen_snap) {
                 // One tab per PRESS. L / R auto-repeat (the file list pages
@@ -4280,6 +4580,11 @@ fn input_inner(button: &str) -> bool {
                 // wanted every 80 ms.
                 if !nav_may_wrap() {
                     return true;
+                }
+                // A value armed in Réglages is kept, as any way off its row
+                // keeps it.
+                if let Ok(mut s) = LIBRARY.lock() {
+                    confirm_armed(&mut s);
                 }
                 let target = if button == "L" { tab.prev() } else { tab.next() };
                 goto_tab(target, if button == "L" { -1.0 } else { 1.0 });
@@ -4414,16 +4719,18 @@ fn input_inner(button: &str) -> bool {
                 return true;
             }
         }
-        // TOUCHES sub-menu (#20 regroup): APPLY (1) opens the picker; SHARE (2)
-        // opens the share confirm (fetches my existing shared profile for the
-        // diff); REVERT (5) opens the revert preview. All hoisted (network/I/O).
-        // EDIT (0) + CURSOR SPEED (3) + SHOW-CURSOR (4) are handled under the lock.
+        // The Touches et curseur page (#20 regroup): APPLY opens the picker;
+        // SHARE opens the share confirm (fetches my existing shared profile for
+        // the diff); REVERT opens the revert preview. All hoisted (network/I/O).
+        // EDIT and the cursor's rows are handled under the lock.
         if let Screen::TouchesMenu { game_idx, selection } = screen_snap {
-            if button == "A" && selection == 1 {
+            let can_revert = LIBRARY.lock().map(|s| s.touches_can_revert).unwrap_or(false);
+            let row = menu::TouchesRow::at(can_revert, selection);
+            if button == "A" && row == Some(menu::TouchesRow::Apply) {
                 defer_net(PendingNet::OpenProfiles { game_idx }, game_idx);
                 return true;
             }
-            if button == "A" && selection == 2 {
+            if button == "A" && row == Some(menu::TouchesRow::Share) {
                 // PARTAGER. If the controls are already a catalog profile (unedited),
                 // this is an instant "already shared" toast — run it inline so no
                 // loading panel flashes. Otherwise it fetches my shared profile for
@@ -4441,7 +4748,7 @@ fn input_inner(button: &str) -> bool {
                 }
                 return true;
             }
-            if button == "A" && selection == 6 {
+            if button == "A" && row == Some(menu::TouchesRow::Revert) {
                 run_open_revert_preview_flow(game_idx);
                 return true;
             }
@@ -4569,13 +4876,17 @@ fn input_inner(button: &str) -> bool {
             }
             // A on a search that failed: the same search again, no keyboard.
             if failed && button == "A" {
-                run_fp_requery(false);
+                // The page stays and starts loading: the sound of A acting,
+                // which the screen alone cannot tell (it looks the same).
+                if run_fp_requery(false) {
+                    crate::sfx::choose(crate::sfx::Sfx::Decide);
+                }
                 return true;
             }
             // Hidden ZL+ZR chord (synthesised in main.cpp): flip the family
             // filter and re-run the query. Hoisted because it starts an async GET.
             if button == "ZL+ZR" {
-                run_fp_requery(true);
+                let _ = run_fp_requery(true);
                 return true;
             }
         }
@@ -4586,6 +4897,23 @@ fn input_inner(button: &str) -> bool {
     };
     let screen_copy = s.screen;
     let consumed = match screen_copy {
+        // The button that opened a panel closes it from any of its pages and
+        // questions, as `-` closes the pause from any of its pages; B goes
+        // back one level. + opened a game's options (and a source's, whose
+        // question is the one page it has).
+        _ if button == "Plus"
+            && options_panel::is_options_family(screen_copy)
+            && !matches!(screen_copy, Screen::OptionsModal { .. }) =>
+        {
+            close_options_stack(&mut s, screen_copy);
+            true
+        }
+        Screen::DistantHistoryConfirm { .. } if button == "Plus" => {
+            let url_idx = s.history_idx.unwrap_or(0);
+            let row = importer_row_for_abs(&s, url_idx);
+            s.screen = distant_idle_at(&s, row);
+            true
+        }
         Screen::Inactive | Screen::Picked | Screen::Quit => false,
         // Input is suspended during the launch reveal (handled above); this arm
         // only satisfies exhaustiveness.
@@ -4640,15 +4968,23 @@ fn input_inner(button: &str) -> bool {
             true
         }
         Screen::FpDetails { selection, scroll, .. } => {
-            // `+` / `B` close back to the results (the deferred modal-close
-            // machinery scales it out). A does exactly what A on the tile behind
-            // does, downloading the game or playing it when it is on the card:
-            // same code, so the two cannot disagree about what a press does.
-            if matches!(button, "B" | "Plus") {
+            // `+` opened it and closes it, B and `-` go back (the deferred
+            // modal-close machinery scales it out). A does exactly what A on
+            // the tile behind does, downloading the game or playing it when it
+            // is on the card: same code, so the two cannot disagree about what
+            // a press does.
+            if matches!(button, "B" | "Plus" | "Minus") {
                 s.screen = Screen::FpGallery { selection, scroll };
             } else if button == "A" {
                 s.screen = Screen::FpGallery { selection, scroll };
                 handle_fp_gallery_input(&mut s, "A", selection, scroll);
+                // A game on the card starts: the close below rewinds the
+                // screen to this window for its scale-out, so the sound the
+                // screens would give is the window's, not the launch every
+                // other start plays.
+                if matches!(s.screen, Screen::Launching { .. }) {
+                    crate::sfx::choose(crate::sfx::Sfx::Launch);
+                }
             }
             true
         }
@@ -4656,8 +4992,8 @@ fn input_inner(button: &str) -> bool {
             handle_sort_modal_input(&mut s, button, selection, prev_sel, prev_scroll, dirs);
             true
         }
-        Screen::RemoteSortModal { selection, kind, reverse, prev_sel, prev_scroll } => {
-            handle_remote_sort_modal_input(&mut s, button, selection, kind, reverse, prev_sel, prev_scroll);
+        Screen::RemoteSortModal { selection, kind, dirs, prev_sel, prev_scroll } => {
+            handle_remote_sort_modal_input(&mut s, button, selection, kind, dirs, prev_sel, prev_scroll);
             true
         }
         Screen::DistantIdle { selection, scroll_offset } => {
@@ -4707,11 +5043,9 @@ fn input_inner(button: &str) -> bool {
         }
         Screen::DistantCancelConfirm { selection } => {
             match button {
-                // The answers side by side: Left / Up on the first, Right / Down
-                // on the second, so a held direction rests on one.
-                "Left" | "StickLLeft" | "Up" | "StickLUp" => s.screen = Screen::DistantCancelConfirm { selection: 0 },
-                "Right" | "StickLRight" | "Down" | "StickLDown" => {
-                    s.screen = Screen::DistantCancelConfirm { selection: 1 }
+                // The answers side by side (input rule 4).
+                "Left" | "StickLLeft" | "Right" | "StickLRight" => {
+                    s.screen = Screen::DistantCancelConfirm { selection: answer_at(button, selection) }
                 }
                 // Stop: the question scales out with the page still behind it,
                 // the download keeps going until it has, then render stops it.
@@ -4739,8 +5073,9 @@ fn input_inner(button: &str) -> bool {
         Screen::ImportNotAddress { .. } => {
             // A is hoisted (the keyboard, or the search).
             match button {
-                "Left" | "StickLLeft" | "Up" | "StickLUp" => s.screen = Screen::ImportNotAddress { selection: 0 },
-                "Right" | "StickLRight" | "Down" | "StickLDown" => s.screen = Screen::ImportNotAddress { selection: 1 },
+                "Left" | "StickLLeft" | "Right" | "StickLRight" => {
+                    s.screen = Screen::ImportNotAddress { selection: answer_at(button, 0) }
+                }
                 "B" | "Minus" => s.screen = distant_idle_at(&s, 1),
                 _ => {}
             }
@@ -4751,9 +5086,8 @@ fn input_inner(button: &str) -> bool {
             // render's close-done; Cancel drops back onto the source's options,
             // on the row that asked, as a game's delete does.
             match button {
-                "Left" | "StickLLeft" | "Up" | "StickLUp" => s.screen = Screen::DistantHistoryConfirm { selection: 0 },
-                "Right" | "StickLRight" | "Down" | "StickLDown" => {
-                    s.screen = Screen::DistantHistoryConfirm { selection: 1 }
+                "Left" | "StickLLeft" | "Right" | "StickLRight" => {
+                    s.screen = Screen::DistantHistoryConfirm { selection: answer_at(button, selection) }
                 }
                 "A" if selection == 1 => {
                     let idx = s.history_idx.unwrap_or(0);
@@ -4807,8 +5141,8 @@ fn input_inner(button: &str) -> bool {
         Screen::ProfileDeleteConfirm { game_idx, profile_idx, selection } => {
             // A on "Delete" is hoisted in input(); everything else here.
             match button {
-                "Left" | "StickLLeft" | "Right" | "StickLRight" | "Up" | "StickLUp" | "Down" | "StickLDown" => {
-                    s.screen = Screen::ProfileDeleteConfirm { game_idx, profile_idx, selection: 1 - selection.min(1) };
+                "Left" | "StickLLeft" | "Right" | "StickLRight" => {
+                    s.screen = Screen::ProfileDeleteConfirm { game_idx, profile_idx, selection: answer_at(button, selection) };
                 }
                 "A" | "B" | "Minus" => {
                     s.screen = Screen::ProfileList { game_idx, selection: profile_idx };
@@ -4820,25 +5154,27 @@ fn input_inner(button: &str) -> bool {
         // Transient loading frame (#20): swallow input while the deferred flow runs.
         Screen::ProfileLoading => true,
         Screen::ProfilePreview { game_idx, profile_idx } => {
-            // A (apply) is hoisted in input(); B returns to the picker.
-            if matches!(button, "B" | "Minus") {
+            // A (apply) is hoisted in input(); B returns to the picker, and so
+            // does a fresh Right, toward the options' rail.
+            if matches!(button, "B" | "Minus") || toward_options_rail(button) {
                 s.preview_rows.clear();
                 s.screen = Screen::ProfileList { game_idx, selection: profile_idx };
             }
             true
         }
         Screen::RevertPreview { game_idx } => {
-            // A (revert) is hoisted in input(); B returns to the sub-menu.
-            if matches!(button, "B" | "Minus") {
+            // A (revert) is hoisted in input(); B (or a fresh Right) returns to
+            // the Touches et curseur page.
+            if matches!(button, "B" | "Minus") || toward_options_rail(button) {
                 s.preview_rows.clear();
-                goto_touches_menu(&mut s, game_idx, 6); // the REVERT row
+                goto_touches_menu(&mut s, game_idx, menu::MENU_REVERT);
             }
             true
         }
         Screen::ProfileShareConfirm { game_idx } => {
-            if matches!(button, "B" | "Minus") {
-                // Cancel → back to the TOUCHES sub-menu's SHARE row (index 2).
-                goto_touches_menu(&mut s, game_idx, 2);
+            if matches!(button, "B" | "Minus") || toward_options_rail(button) {
+                // Cancel → back to the Touches et curseur page's SHARE row.
+                goto_touches_menu(&mut s, game_idx, menu::MENU_SHARE);
             }
             // "A" (confirm) is hoisted to run_share_profile_flow.
             true
@@ -5239,12 +5575,15 @@ fn handle_games_dir_input(s: &mut State, button: &str, mut selection: usize, mut
                 // and the way the misplaced-saves bug stayed hidden.
                 //
                 // The library's own folder is no destination: its row says it
-                // is the one in use, and A on it does nothing.
+                // is the one in use, and A on it is refused, with the note a
+                // refusal makes (not the click of something done).
                 if !settings_tab::same_dir(&path, &root) {
                     // On "Cancel", like every question of the app: this one
                     // renames every file of the library, and a double press of
                     // A must not be how that happens.
                     s.screen = Screen::GamesDirConfirm { selection: 0 };
+                } else {
+                    crate::sfx::choose(crate::sfx::Sfx::Error);
                 }
                 return;
             }
@@ -5259,6 +5598,7 @@ fn handle_games_dir_input(s: &mut State, button: &str, mut selection: usize, mut
             // rather than discovered by a move that half fails.
             if settings_tab::inside_library(&child, &root) {
                 set_toast(s, crate::loc_ui::ui().dir_inside_lib.to_string(), TOAST_INFO);
+                crate::sfx::choose(crate::sfx::Sfx::Error);
                 return;
             }
             s.dir_browse = list_dirs(&child);
@@ -5475,10 +5815,10 @@ fn handle_bug_picker_input(s: &mut State, button: &str, mut selection: usize, mu
 /// here that touches the SD.
 fn handle_games_dir_confirm_input(s: &mut State, button: &str, selection: usize) {
     match button {
-        // Left is the first answer, Right the second: a held direction stays
-        // where it points instead of flipping between the two.
-        "Left" | "StickLLeft" => s.screen = Screen::GamesDirConfirm { selection: 0 },
-        "Right" | "StickLRight" => s.screen = Screen::GamesDirConfirm { selection: 1 },
+        // The answers side by side (input rule 4).
+        "Left" | "StickLLeft" | "Right" | "StickLRight" => {
+            s.screen = Screen::GamesDirConfirm { selection: answer_at(button, selection) }
+        }
         "A" => {
             if selection == 1 {
                 s.pending_games_dir = Some(s.dir_path.clone());
@@ -5490,6 +5830,31 @@ fn handle_games_dir_confirm_input(s: &mut State, button: &str, selection: usize)
         }
         "B" | "Minus" => s.screen = Screen::GamesDirPicker { selection: 0, scroll: 0 },
         _ => {}
+    }
+}
+
+/// `apply_game_folder` for a press, with the sound it deserves: a change
+/// clicks (its toast says which). A refusal or a failure has already sounded
+/// its note with its red toast (`set_toast`), the move that half happened
+/// (file moved, labels kept) included, so the screens must add nothing: the
+/// cursor landing on another row would click over the error.
+fn apply_game_folder_from_press(s: &mut State, game_idx: usize, target: &str) {
+    let before = s.entries.get(game_idx).map(|e| (e.path.clone(), shelves_of(e)));
+    apply_game_folder(s, game_idx, target);
+    // A red toast set by this very press still has all its frames: the
+    // countdown only runs in `render`, between presses.
+    if s.toast_kind == TOAST_ERR && s.toast_frames == TOAST_FRAMES {
+        crate::sfx::hush();
+        return;
+    }
+    // By path: a re-sort can move the game's index, and a move out of a
+    // folder changes the path itself, which is a change too.
+    let after = before
+        .as_ref()
+        .and_then(|(p, _)| s.entries.iter().find(|e| &e.path == p))
+        .map(|e| (e.path.clone(), shelves_of(e)));
+    if after != before {
+        crate::sfx::value_changed();
     }
 }
 
@@ -5521,6 +5886,8 @@ fn run_new_game_folder_flow(game_idx: usize) {
         if let Ok(mut s) = LIBRARY.lock() {
             set_toast(&mut s, crate::loc_ui::ui().folder_name_reserved.to_string(), TOAST_INFO);
         }
+        // Refused, with the note a refusal makes (the screen stays as it was).
+        crate::sfx::choose(crate::sfx::Sfx::Error);
         return;
     }
     if let Ok(mut s) = LIBRARY.lock() {
@@ -5535,8 +5902,11 @@ fn run_new_game_folder_flow(game_idx: usize) {
         if already {
             // News, not a failure: nothing went wrong, there was nothing to do.
             set_toast(&mut s, crate::loc::s().toast_folder_same.to_string(), TOAST_INFO);
+            // The toast says it all: the cursor moving onto that shelf below
+            // must not click over it.
+            crate::sfx::hush();
         } else {
-            apply_game_folder(&mut s, game_idx, &safe);
+            apply_game_folder_from_press(&mut s, game_idx, &safe);
         }
         // `apply_game_folder` already lands on the picker and has re-found the
         // game's index; only the cursor row is ours to set, onto the shelf that
@@ -5636,8 +6006,11 @@ fn run_open_share_confirm_flow(game_idx: usize) {
     if keymap::provenance(&basename).starts_with("community:") {
         if let Ok(mut s) = LIBRARY.lock() {
             set_toast(&mut s, crate::loc::s().profile_share_dup.to_string(), TOAST_INFO);
-            goto_touches_menu(&mut s, game_idx, 2);
+            goto_touches_menu(&mut s, game_idx, menu::MENU_SHARE);
         }
+        // Nothing sent, said by the toast: the note of a refusal, not the
+        // silence of a press that did nothing.
+        crate::sfx::choose(crate::sfx::Sfx::Error);
         return;
     }
     let current = keymap::effective_for(&basename);
@@ -5707,7 +6080,7 @@ fn run_share_profile_flow(game_idx: usize) {
     };
     if let Ok(mut s) = LIBRARY.lock() {
         set_toast(&mut s, msg, if ok { TOAST_OK } else { TOAST_ERR });
-        goto_touches_menu(&mut s, game_idx, 2); // back to the SHARE row
+        goto_touches_menu(&mut s, game_idx, menu::MENU_SHARE);
     }
 }
 
@@ -5833,7 +6206,7 @@ fn handle_profile_list_input(s: &mut State, button: &str, game_idx: usize, mut s
                 return;
             }
         }
-        "B" | "Minus" => {
+        _ if matches!(button, "B" | "Minus") || toward_options_rail(button) => {
             // From the copy list, back to the community list, on the copy row.
             if s.profile_copy_mode {
                 s.profile_copy_mode = false;
@@ -5842,7 +6215,7 @@ fn handle_profile_list_input(s: &mut State, button: &str, game_idx: usize, mut s
                 s.screen = Screen::ProfileList { game_idx, selection: last };
                 return;
             }
-            goto_touches_menu(s, game_idx, 1); // back to the sub-menu's APPLY row
+            goto_touches_menu(s, game_idx, menu::MENU_APPLY);
             return;
         }
         _ => {}
@@ -5967,7 +6340,7 @@ fn run_profile_apply_flow(game_idx: usize, profile_idx: usize) {
     let msg = if ok { lc.profile_applied_ok } else { crate::loc_ui::ui().profile_apply_failed };
     if let Ok(mut s) = LIBRARY.lock() {
         set_toast(&mut s, msg.to_string(), if ok { TOAST_OK } else { TOAST_ERR });
-        goto_touches_menu(&mut s, game_idx, 1); // back to the sub-menu (APPLY row)
+        goto_touches_menu(&mut s, game_idx, menu::MENU_APPLY);
     }
 }
 
@@ -5989,10 +6362,10 @@ fn set_toast(s: &mut State, msg: std::string::String, kind: u8) {
     s.toast_frames = TOAST_FRAMES;
 }
 
-/// Enter the TOUCHES sub-menu for a game (#20 regroup), recomputing whether the
-/// revert row applies + which label it needs. Called from OPTIONS > TOUCHES and
-/// from every return into the sub-menu, so revert availability is always fresh.
-/// `selection` is clamped to the rows actually present.
+/// Enter the Touches et curseur page for a game (#20 regroup), recomputing
+/// whether the revert row applies + which label it needs. Called from OPTIONS >
+/// TOUCHES and from every return into the page, so revert availability is
+/// always fresh. `selection` is clamped to the rows actually present.
 fn goto_touches_menu(s: &mut State, game_idx: usize, selection: usize) {
     let (has_backup, can_revert) = s
         .entries
@@ -6022,14 +6395,9 @@ fn goto_touches_menu(s: &mut State, game_idx: usize, selection: usize) {
         .entries
         .get(game_idx)
         .map_or(keymap::GYRO_OFF, |e| keymap::gyro_mode_for(&e.basename));
-    let row_count = TOUCHES_MENU_FIXED_ROWS + s.touches_can_revert as usize;
+    let row_count = menu::TouchesRow::count(s.touches_can_revert);
     s.screen = Screen::TouchesMenu { game_idx, selection: selection.min(row_count - 1) };
 }
-
-/// Fixed TOUCHES sub-menu rows: edit (0), apply (1), share (2), cursor speed (3),
-/// show-cursor toggle (4), gyroscope cursor (5). A revert row (6) is appended
-/// when `touches_can_revert`.
-const TOUCHES_MENU_FIXED_ROWS: usize = 6;
 
 /// Cursor-speed presets as x10 multipliers (`loc::CURSOR_SPEED_X10`).
 const CURSOR_X10: &[u32] = crate::loc::CURSOR_SPEED_X10;
@@ -6046,61 +6414,83 @@ fn touches_speed_idx(own: i32) -> i32 {
     CURSOR_X10.iter().position(|v| *v == m).unwrap_or(1) as i32
 }
 
-/// Input for the TOUCHES sub-menu (#20). Edit (0) + cursor speed (3) + show-cursor
-/// toggle (4) are handled here; apply (1) / share (2) / revert (5) are hoisted in
-/// `input()` (file I/O / network). B returns to OPTIONS on the TOUCHES row.
-fn handle_touches_menu_input(s: &mut State, button: &str, game_idx: usize, mut selection: usize) {
-    let row_count = TOUCHES_MENU_FIXED_ROWS + s.touches_can_revert as usize;
-    let last = row_count - 1;
-    // The three value rows step with Left and Right too, either way, as the
-    // same rows do in the pause menu.
-    let dir: i32 = match button {
-        "Left" | "StickLLeft" => -1,
-        "Right" | "StickLRight" => 1,
-        _ => 0,
-    };
-    if dir != 0 && (3..=5).contains(&selection) {
-        // Along what the row shows, stopping at the ends: the speed one preset
-        // down or up, the switch off or on, the gyroscope one setting along.
-        if let Some(basename) = s.entries.get(game_idx).map(|e| e.basename.clone()) {
-            match selection {
-                3 => {
-                    let n = CURSOR_X10.len() as i32;
-                    let cur = touches_speed_idx(s.touches_cursor_idx);
-                    let next = (cur + dir).clamp(0, n - 1);
-                    if next != cur {
-                        keymap::set_cursor_speed_for(&basename, next);
-                        s.touches_cursor_idx = next;
-                        crate::sfx::value_changed();
-                    }
-                }
-                4 => {
-                    if s.touches_show_cursor != (dir > 0) {
-                        keymap::toggle_show_cursor_for(&basename);
-                        s.touches_show_cursor = !s.touches_show_cursor;
-                        crate::sfx::value_changed();
-                    }
-                }
-                _ => {
-                    let cur = s.touches_gyro;
-                    if (dir < 0 && cur > 0) || (dir > 0 && cur + 1 < keymap::GYRO_MODE_COUNT) {
-                        s.touches_gyro = keymap::step_gyro_for(&basename, dir);
-                        crate::sfx::value_changed();
-                    }
-                }
-            }
+/// Write the armed value of the Touches page's row `selection` for the game
+/// at `game_idx` (read at its next launch): its own speed, or its gyroscope.
+fn touches_write(s: &mut State, game_idx: usize, selection: usize, v: u16) {
+    let Some(basename) = s.entries.get(game_idx).map(|e| e.basename.clone()) else { return };
+    match menu::TouchesRow::at(s.touches_can_revert, selection) {
+        Some(menu::TouchesRow::Speed) => {
+            let idx = (v as i32).min(CURSOR_X10.len() as i32 - 1);
+            keymap::set_cursor_speed_for(&basename, idx);
+            s.touches_cursor_idx = idx;
         }
-        s.screen = Screen::TouchesMenu { game_idx, selection };
-        return;
+        Some(menu::TouchesRow::Gyro) => {
+            let mode = v.min(keymap::GYRO_MODE_COUNT as u16 - 1) as u8;
+            keymap::set_gyro_for(&basename, mode);
+            s.touches_gyro = mode;
+        }
+        _ => {}
+    }
+}
+
+/// A fresh press toward the rail the game's options folded into, on the right
+/// of every page beside them: back a level, like B (input rule 3). A held
+/// direction stays put.
+///
+/// Like B down to its sound, chosen here: going back between two pages of
+/// the one panel stack, the screens alone read a press that is not B as A
+/// (`sfx::after_input`). Asked only once B and `-` did not match, by arms
+/// that go back when it answers true.
+fn toward_options_rail(button: &str) -> bool {
+    let back = matches!(button, "Right" | "StickLRight") && nav_may_wrap();
+    if back {
+        crate::sfx::choose(crate::sfx::Sfx::Back);
+    }
+    back
+}
+
+/// The Touches et curseur page of a game's options (#20): moving, edit, and
+/// the cursor's rows; apply / share / revert are hoisted in `input()` (file
+/// I/O / network). B returns to the options on the TOUCHES row.
+///
+/// The speed and the gyroscope are value rows (input rule 1): A arms one,
+/// Left / Right move it, A writes it, B drops it, Up / Down keep it and move
+/// on. Unarmed, Left changes nothing and a fresh Right points at the options'
+/// rail and goes back to it.
+fn handle_touches_menu_input(s: &mut State, button: &str, game_idx: usize, mut selection: usize) {
+    use menu::TouchesRow;
+    let count = TouchesRow::count(s.touches_can_revert);
+    let row = TouchesRow::at(s.touches_can_revert, selection);
+    if let Some(a) = armed_here(s) {
+        match button {
+            "Left" | "StickLLeft" | "Right" | "StickLRight" => {
+                let dir = if matches!(button, "Left" | "StickLLeft") { -1 } else { 1 };
+                let next = armed_next(s, a, dir);
+                if next != a.cur {
+                    s.armed = Some(Armed { cur: next, ..a });
+                    crate::sfx::value_changed();
+                }
+                return;
+            }
+            "A" => {
+                confirm_armed(s);
+                crate::sfx::choose(crate::sfx::Sfx::Decide);
+                return;
+            }
+            "B" | "Minus" => {
+                s.armed = None;
+                crate::sfx::choose(crate::sfx::Sfx::Back);
+                return;
+            }
+            "Up" | "StickLUp" | "Down" | "StickLDown" | "Plus" => confirm_armed(s),
+            _ => return,
+        }
     }
     match button {
-        "Up" | "StickLUp" => selection = list_step_wrap(selection, -1, last + 1),
-        "Down" | "StickLDown" => selection = list_step_wrap(selection, 1, last + 1),
-        "A" => {
-            // EDIT (0) + CURSOR SPEED (3) + SHOW-CURSOR (4) are local (file I/O
-            // only). Apply (1) / share (2) / revert (5) need network → hoisted in
-            // `input()`.
-            if selection == 0 {
+        "Up" | "StickLUp" => selection = list_step_wrap(selection, -1, count),
+        "Down" | "StickLDown" => selection = list_step_wrap(selection, 1, count),
+        "A" => match row {
+            Some(TouchesRow::Edit) => {
                 // Init the keymap for THIS game so current_binding / set_binding
                 // land in the right sidecar, then open the editor, which names
                 // the game in its header.
@@ -6112,39 +6502,39 @@ fn handle_touches_menu_input(s: &mut State, button: &str, game_idx: usize, mut s
                 s.screen = Screen::TouchesEditor { game_idx };
                 return;
             }
-            if selection == 3 {
-                // Cycle the per-game cursor speed in place (persist to the game's
-                // `<basename>.cursor`; applied next launch). Unset starts from the
-                // global speed the game was following.
-                let cur = touches_speed_idx(s.touches_cursor_idx);
-                let next = ((cur as usize + 1) % CURSOR_X10.len()) as i32;
-                if let Some(basename) = s.entries.get(game_idx).map(|e| e.basename.clone()) {
-                    keymap::set_cursor_speed_for(&basename, next);
-                }
-                s.touches_cursor_idx = next;
-                s.screen = Screen::TouchesMenu { game_idx, selection };
+            // The game's own speed, else the global one it follows, is where
+            // the steps start.
+            Some(TouchesRow::Speed) => {
+                let v = touches_speed_idx(s.touches_cursor_idx).max(0) as u16;
+                arm_here(s, v);
                 return;
             }
-            if selection == 4 {
-                // Toggle the per-game "show cursor" flag (persists in the keymap;
-                // applied next launch). Snapshot flips so the row label updates now.
+            Some(TouchesRow::Gyro) => {
+                let v = s.touches_gyro as u16;
+                arm_here(s, v);
+                return;
+            }
+            Some(TouchesRow::ShowCursor) => {
+                // A switch: flipped and written for the next launch, the
+                // snapshot with it so the row redraws now.
                 if let Some(basename) = s.entries.get(game_idx).map(|e| e.basename.clone()) {
                     keymap::toggle_show_cursor_for(&basename);
                     s.touches_show_cursor = !s.touches_show_cursor;
+                    crate::sfx::value_changed();
                 }
-                s.screen = Screen::TouchesMenu { game_idx, selection };
-                return;
             }
-            if selection == 5 {
-                // Gyroscope cursor (#119), per game, applied next launch.
-                if let Some(basename) = s.entries.get(game_idx).map(|e| e.basename.clone()) {
-                    s.touches_gyro = keymap::cycle_gyro_for(&basename);
-                }
-                s.screen = Screen::TouchesMenu { game_idx, selection };
-                return;
+            // Apply / share / revert are hoisted in `input()`.
+            _ => {}
+        },
+        // X: the game drops its own speed and follows Réglages again.
+        "X" if row == Some(TouchesRow::Speed) && s.touches_cursor_idx >= 0 => {
+            if let Some(basename) = s.entries.get(game_idx).map(|e| e.basename.clone()) {
+                keymap::set_cursor_speed_for(&basename, -1);
+                s.touches_cursor_idx = -1;
+                crate::sfx::value_changed();
             }
         }
-        "B" | "Minus" => {
+        _ if matches!(button, "B" | "Minus") || toward_options_rail(button) => {
             s.screen = Screen::OptionsModal { game_idx, selection: opt_row("TOUCHES") };
             return;
         }
@@ -6169,7 +6559,7 @@ fn run_touches_revert(game_idx: usize) {
     let msg = if ok { lc.profile_reverted_ok } else { crate::loc_ui::ui().profile_revert_failed };
     if let Ok(mut s) = LIBRARY.lock() {
         set_toast(&mut s, msg.to_string(), if ok { TOAST_OK } else { TOAST_ERR });
-        goto_touches_menu(&mut s, game_idx, 0); // back to the sub-menu
+        goto_touches_menu(&mut s, game_idx, menu::MENU_EDIT);
     }
 }
 
@@ -6314,7 +6704,7 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
                 selection: mode,
                 prev_sel: selection,
                 prev_scroll: scroll,
-                dirs: if current_sort_reverse() { 1 << mode } else { 0 },
+                dirs: sort_dirs(mode, current_sort_reverse()),
             };
             return;
         }
@@ -6346,14 +6736,18 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
         "B" => {
             let keep = filtered.get(selection).and_then(|&i| s.entries.get(i)).map(|e| e.path.clone());
             let searching = s.local_filter.as_deref().is_some_and(|f| !f.trim().is_empty());
+            // Both go back a level, which the screens cannot always tell: the
+            // cursor can land on the same row it left.
             if searching {
                 s.local_filter = None;
                 let row = keep.and_then(|p| row_of_path(s, &p)).unwrap_or(0);
                 crate::backend::render::gallery_anim_reset();
                 crate::backend::render::tile_open_reset();
                 s.screen = Screen::List { selection: row, scroll_offset: home_scroll_for(row, 0) };
+                crate::sfx::choose(crate::sfx::Sfx::Back);
             } else if s.folder_filter.is_some() {
                 goto_shelf(s, None, -1.0, selection, keep);
+                crate::sfx::choose(crate::sfx::Sfx::Back);
             }
             return;
         }
@@ -6367,6 +6761,7 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
             crate::backend::render::home_anim_reset();
             crate::backend::render::gallery_anim_reset();
             scroll = home_scroll_for(selection, 0);
+            crate::sfx::value_changed();
         }
         _ => {}
     }
@@ -6820,7 +7215,7 @@ fn handle_distant_idle_input(
                 s.screen = Screen::RemoteSortModal {
                     selection: import_sort_index(),
                     kind: SORT_TARGET_IMPORT,
-                    reverse: import_sort_reverse(),
+                    dirs: sort_dirs(import_sort_index(), import_sort_reverse()),
                     prev_sel: selection,
                     prev_scroll: scroll,
                 };
@@ -6838,6 +7233,8 @@ fn handle_distant_idle_input(
                     selection = importer_row_for_abs(s, abs);
                 }
                 crate::backend::render::gallery_anim_reset();
+                // Back a level, even when the cursor stays on its row.
+                crate::sfx::choose(crate::sfx::Sfx::Back);
             }
         }
         _ => {}
@@ -6850,10 +7247,11 @@ fn handle_distant_idle_input(
 }
 
 /// A saved source's options (`DistantUrlOptions`), a side panel over the list.
-/// Rows: favourite (A or Left / Right flip it, and the panel stays open while
-/// the list re-sorts underneath, as the game options do), edit the address (A,
-/// hoisted: the keyboard), delete (A asks first). B goes back to the source's
-/// row.
+/// Rows: favourite (a switch: A flips it, and the panel stays open while the
+/// list re-sorts underneath, as the game options do), edit the address (A,
+/// hoisted: the keyboard), delete (A asks first). B, `-` and the + that
+/// opened it go back to the source's row. Left and Right change nothing: a
+/// switch is A's (input rule 1).
 fn handle_distant_url_options_input(
     s: &mut State,
     button: &str,
@@ -6870,19 +7268,11 @@ fn handle_distant_url_options_input(
     match button {
         "Up" | "StickLUp" => selection = list_step_wrap(selection, -1, ROWS),
         "Down" | "StickLDown" => selection = list_step_wrap(selection, 1, ROWS),
-        // The favourite row is a switch: Right turns it on, Left off.
-        "Left" | "StickLLeft" | "Right" | "StickLRight" if selection == 0 => {
-            if let Some(url) = s.url_history.get(url_idx).cloned() {
-                let want = matches!(button, "Right" | "StickLRight");
-                if url_is_favorite(s, &url) != want {
-                    toggle_url_favorite(s, &url);
-                }
-            }
-        }
         "A" => match selection {
             0 => {
                 if let Some(url) = s.url_history.get(url_idx).cloned() {
                     toggle_url_favorite(s, &url);
+                    crate::sfx::value_changed();
                 }
             }
             2 => {
@@ -6893,7 +7283,7 @@ fn handle_distant_url_options_input(
             // 1 (edit) is hoisted in input().
             _ => {}
         },
-        "B" | "Plus" => {
+        "B" | "Minus" | "Plus" => {
             back(s);
             return;
         }
@@ -7412,12 +7802,13 @@ fn start_fp_search(query: &str, origin: Option<usize>) {
 /// failed, and the hidden ZL+ZR chord, which flips the family filter first
 /// (issue #33: the mature-rated catalogue, reachable without a settings row).
 /// No-op while a search is already running or before any. Called from
-/// `input()` only.
-fn run_fp_requery(flip_filter: bool) {
+/// `input()` only. Returns whether a search went out, so A can sound like it
+/// did something only when it did.
+fn run_fp_requery(flip_filter: bool) -> bool {
     let query = {
-        let Ok(mut s) = LIBRARY.lock() else { return };
+        let Ok(mut s) = LIBRARY.lock() else { return false };
         if s.fp_loading {
-            return;
+            return false;
         }
         if flip_filter {
             s.fp_content_filter = !s.fp_content_filter;
@@ -7426,9 +7817,10 @@ fn run_fp_requery(flip_filter: bool) {
         s.fp_query.clone()
     };
     if query.trim().is_empty() {
-        return;
+        return false;
     }
     start_fp_search(&query, None);
+    true
 }
 
 /// archive.org item import (async): start the metadata fetch + open the reveal
@@ -7554,7 +7946,7 @@ fn handle_distant_files_input(
                 s.screen = Screen::RemoteSortModal {
                     selection: s.files_sort.0 as usize,
                     kind: SORT_TARGET_FILES,
-                    reverse: s.files_sort.1,
+                    dirs: sort_dirs(s.files_sort.0 as usize, s.files_sort.1),
                     prev_sel: selection,
                     prev_scroll: scroll,
                 };
@@ -7562,6 +7954,24 @@ fn handle_distant_files_input(
             return;
         }
         "B" => {
+            // A search narrows the list: B shows every game again first, the
+            // cursor staying on the game it was on, as on Jouer and the
+            // importer's home. It used to fold the whole archive away, search
+            // and all, and its list cost a new fetch to get back.
+            if s.distant_filter.as_deref().is_some_and(|f| !f.trim().is_empty()) {
+                let keep = filtered.get(selection).copied();
+                s.distant_filter = None;
+                let total = s.remote_files.len();
+                let sel = keep.unwrap_or(0).min(total.saturating_sub(1));
+                crate::backend::render::gallery_anim_reset();
+                s.screen = Screen::DistantFiles {
+                    selection: sel,
+                    scroll_offset: clamp_scroll(scroll, sel, DISTANT_VISIBLE_ROWS),
+                };
+                // Back a level, even when the cursor stays on its row.
+                crate::sfx::choose(crate::sfx::Sfx::Back);
+                return;
+            }
             // Collapse the file list back down to its row; render() clears +
             // returns to the IMPORTER list once the reveal finishes. Keep the
             // screen + remote_files so the list stays drawable while it shrinks.
@@ -8028,7 +8438,7 @@ fn handle_game_folder_input(s: &mut State, button: &str, game_idx: usize, mut se
                     None => return,
                 }
             };
-            apply_game_folder(s, game_idx, &target);
+            apply_game_folder_from_press(s, game_idx, &target);
             return;
         }
         "X" => {
@@ -8043,7 +8453,7 @@ fn handle_game_folder_input(s: &mut State, button: &str, game_idx: usize, mut se
             }
             return;
         }
-        "B" | "Minus" => {
+        _ if matches!(button, "B" | "Minus") || toward_options_rail(button) => {
             s.screen = Screen::OptionsModal { game_idx, selection: opt_row("DOSSIER") };
             return;
         }
@@ -8060,9 +8470,7 @@ fn handle_game_folder_delete_input(
     mut selection: usize,
 ) {
     match button {
-        "Up" | "Down" | "StickLUp" | "StickLDown" | "Left" | "Right" | "StickLLeft" | "StickLRight" => {
-            selection = 1 - selection.min(1);
-        }
+        "Left" | "StickLLeft" | "Right" | "StickLRight" => selection = answer_at(button, selection),
         "A" => {
             // Cancel on the left (0), empty on the right (1), like the
             // console's own questions.
@@ -8574,35 +8982,49 @@ fn options_set_favorite(s: &mut State, game_idx: usize, selection: usize, want: 
 fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut selection: usize) {
     let total = OPTIONS_ENTRIES.len();
     let key = OPTIONS_ENTRIES.get(selection).copied().unwrap_or("");
-    // Left / Right change a setting where it is shown; on an action row they
-    // do nothing (an action is never one sideways press away).
-    let dir: i32 = match button {
-        "Left" | "StickLLeft" => -1,
-        "Right" | "StickLRight" => 1,
-        _ => 0,
-    };
-    if dir != 0 {
-        if key == "FAVORI" {
-            options_set_favorite(s, game_idx, selection, Some(dir > 0));
-            return;
+    // An armed setting (input rules 1 and 2): Left / Right move the value it
+    // shows, A keeps it (written then), B or Minus drop it. Up / Down, the
+    // shoulders and + keep it and go on with what they do; nothing else acts.
+    if let Some(a) = armed_here(s) {
+        match button {
+            "Left" | "StickLLeft" | "Right" | "StickLRight" => {
+                let dir = if matches!(button, "Left" | "StickLLeft") { -1 } else { 1 };
+                let next = armed_next(s, a, dir);
+                if next != a.cur {
+                    s.armed = Some(Armed { cur: next, ..a });
+                    crate::sfx::value_changed();
+                }
+                return;
+            }
+            "A" => {
+                confirm_armed(s);
+                crate::sfx::choose(crate::sfx::Sfx::Decide);
+                return;
+            }
+            "B" | "Minus" => {
+                s.armed = None;
+                crate::sfx::choose(crate::sfx::Sfx::Back);
+                return;
+            }
+            "Up" | "StickLUp" | "Down" | "StickLDown" | "L" | "R" | "Plus" => confirm_armed(s),
+            _ => return,
         }
-        if options_panel::options_step(s, game_idx, key, dir) {
-            crate::sfx::value_changed();
-        }
-        s.screen = Screen::OptionsModal { game_idx, selection };
-        return;
     }
+    // Unarmed, Left / Right change nothing here: the panel is the parent of
+    // its pages, with no rail to go back to.
     match button {
         // A fresh press wraps round (Up on the first row reaches Supprimer), a
         // held direction stops at the end.
         "Up" | "StickLUp" => selection = list_step_wrap(selection, -1, total),
         "Down" | "StickLDown" => selection = list_step_wrap(selection, 1, total),
         "A" => {
-            if options_panel::is_setting(key) {
-                if options_panel::options_step(s, game_idx, key, crate::STEP_CYCLE as i32) {
-                    crate::sfx::value_changed();
-                }
-                s.screen = Screen::OptionsModal { game_idx, selection };
+            if options_panel::is_armable(key) {
+                let v = options_panel::options_value(s, game_idx, key);
+                arm_here(s, v);
+                return;
+            }
+            if key == "FPS" {
+                options_panel::options_toggle_fps(s, game_idx);
                 return;
             }
             // `.get`, not `[..]`: `selection` can arrive from the touch layer,
@@ -8619,7 +9041,7 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                 "TOUCHES" => {
                     // Open the TOUCHES sub-menu (edit / apply / share / revert).
                     // #20 regroup: apply+share used to be sibling OPTIONS rows.
-                    goto_touches_menu(s, game_idx, 0);
+                    goto_touches_menu(s, game_idx, menu::MENU_EDIT);
                     return;
                 }
                 "RACCOURCI" => {
@@ -8661,6 +9083,11 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                             if removed { lc.shortcut_removed } else { crate::loc_ui::ui().shortcut_remove_err }.to_string(),
                             if removed { TOAST_OK } else { TOAST_ERR },
                         );
+                        // The row's switch moved: its click (a failure has
+                        // sounded its own note with the toast).
+                        if removed {
+                            crate::sfx::value_changed();
+                        }
                         return;
                     }
 
@@ -8718,6 +9145,7 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                         crate::sd::commit();
                         tile_index_forget();
                         set_toast(s, lc.shortcut_ok.to_string(), TOAST_OK);
+                        crate::sfx::value_changed();
                     } else {
                         // The config would otherwise sit there naming a tile
                         // that does not exist.
@@ -8960,8 +9388,7 @@ fn run_cover_fetch_flow(game_idx: usize, selection: usize) {
                 s.cover_candidates.clear();
                 s.cover_msg.clear();
                 s.cover_query.clear();
-                // Back to OPTIONS on the JAQUETTE row (index 3 after #20 regroup
-                // removed APPLIQUER/PARTAGER from the list).
+                // Back to OPTIONS on the JAQUETTE row.
                 s.screen = Screen::OptionsModal { game_idx, selection: opt_row("JAQUETTE") };
             }
         }
@@ -8980,16 +9407,10 @@ fn handle_cover_picker_input(s: &mut State, button: &str, game_idx: usize, mut s
     let total = s.cover_candidates.len();
     let cols = COVER_PICKER_COLS;
     match button {
-        "Left" | "StickLLeft" => {
-            if total > 0 && selection > 0 {
-                selection -= 1;
-            }
-        }
-        "Right" | "StickLRight" => {
-            if total > 0 && selection + 1 < total {
-                selection += 1;
-            }
-        }
+        // Left / Right come round at the ends on a press and stop under a
+        // hold, like the Play grid this one copies (Up / Down already did).
+        "Left" | "StickLLeft" => selection = list_step_wrap(selection, -1, total),
+        "Right" | "StickLRight" => selection = list_step_wrap(selection, 1, total),
         "Up" | "StickLUp" => {
             selection = grid_step(selection, false, cols, total);
         }
@@ -9002,6 +9423,7 @@ fn handle_cover_picker_input(s: &mut State, button: &str, game_idx: usize, mut s
             // land under the new URLs.
             s.cover_use_shot = !s.cover_use_shot;
             crate::backend::render::thumb_cancel_all();
+            crate::sfx::value_changed();
         }
         "B" => {
             crate::backend::render::thumb_cancel_all();
@@ -9009,7 +9431,7 @@ fn handle_cover_picker_input(s: &mut State, button: &str, game_idx: usize, mut s
             s.cover_msg.clear();
             s.cover_query.clear();
             s.cover_use_shot = false;
-            // JAQUETTE row (index 3 after #20 regroup).
+            // Back on the JAQUETTE row.
             s.screen = Screen::OptionsModal { game_idx, selection: opt_row("JAQUETTE") };
             return;
         }
@@ -9046,16 +9468,11 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
     let cols = FP_GALLERY_COLS;
     let rows_visible = FP_GALLERY_ROWS;
     match button {
-        "Left" | "StickLLeft" => {
-            if selection > 0 {
-                selection -= 1;
-            }
-        }
-        "Right" | "StickLRight" => {
-            if selection + 1 < total {
-                selection += 1;
-            }
-        }
+        // Left / Right come round at the ends on a press and stop under a
+        // hold, like the Play grid (Up / Down already did); the scroll below
+        // follows the cursor wherever it lands.
+        "Left" | "StickLLeft" => selection = list_step_wrap(selection, -1, total),
+        "Right" | "StickLRight" => selection = list_step_wrap(selection, 1, total),
         "Up" | "StickLUp" => {
             selection = grid_step(selection, false, cols, total);
         }
@@ -9151,7 +9568,7 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
                 s.screen = Screen::RemoteSortModal {
                     selection: s.fp_sort.0 as usize,
                     kind: SORT_TARGET_FP,
-                    reverse: s.fp_sort.1,
+                    dirs: sort_dirs(s.fp_sort.0 as usize, s.fp_sort.1),
                     prev_sel: selection,
                     prev_scroll: scroll,
                 };
@@ -9387,9 +9804,22 @@ fn download_elapsed() -> f32 {
 /// How many ways the Play tab sorts (`SortMode`, `sort_mode_index`).
 const SORT_MODES: usize = 5;
 
-/// JOUER sort picker (Y) input: Up/Down move between the ways to sort, Left /
-/// Right turn the focused one to its natural or reversed order (X flips it), A
-/// applies it, B cancels. After a sort change the list reorders, so the cursor
+/// A sort window's per-row orders as it opens: the row in force turned the
+/// way it is, every other row on its natural order.
+fn sort_dirs(active: usize, reversed: bool) -> u8 {
+    if reversed && active < 8 {
+        1 << active
+    } else {
+        0
+    }
+}
+
+/// JOUER sort picker (Y) input (input rule 5): Up/Down move between the ways to
+/// sort; Left / Right move the focus between the focused row's two orders,
+/// applying nothing and leaving the other rows as they are (each keeps its
+/// own, bit `i` of `dirs`); X flips the focused row's order; A applies the
+/// focused way and order and closes; B, `-` and the Y that opened it close
+/// with nothing changed. After a sort change the list reorders, so the cursor
 /// resets to the top.
 fn handle_sort_modal_input(
     s: &mut State,
@@ -9403,8 +9833,8 @@ fn handle_sort_modal_input(
     match button {
         "Up" | "StickLUp" => selection = list_step_wrap(selection, -1, SORT_MODES),
         "Down" | "StickLDown" => selection = list_step_wrap(selection, 1, SORT_MODES),
-        // The row's two orders are a choice shown whole: Left lights the
-        // first, Right the second, and they stop there like every choice.
+        // The focus moves to the order Left / Right point at, on this row
+        // only: navigation, so the cursor's sound, and nothing applied.
         "Left" | "StickLLeft" => dirs &= !bit,
         "Right" | "StickLRight" => dirs |= bit,
         // Nothing applies before A, the same as the importer's pickers: X used
@@ -9421,8 +9851,12 @@ fn handle_sort_modal_input(
             s.screen = Screen::List { selection: 0, scroll_offset: 0 };
             return;
         }
-        "B" => {
-            // Cancel → restore the cursor where it was.
+        "B" | "Minus" | "Y" => {
+            // Cancel → restore the cursor where it was. Y opened the window
+            // and closes it the same way, which is going back.
+            if button == "Y" {
+                crate::sfx::choose(crate::sfx::Sfx::Back);
+            }
             s.screen = Screen::List { selection: prev_sel, scroll_offset: prev_scroll };
             return;
         }
@@ -9437,34 +9871,73 @@ pub(crate) const SORT_TARGET_FP: u8 = 1; // Flashpoint result gallery
 pub(crate) const SORT_TARGET_IMPORT: u8 = 2; // IMPORTER home (saved URLs)
 
 /// The criteria a `RemoteSortModal` offers for `kind`, in order: icon, name,
-/// and the two orders it gives, its natural one first (the newest, A to Z, the
-/// largest...) then reversed, as the page headers name the order in force.
-/// `reverse` everywhere means "against the natural order", so a header never
-/// says "Croissant" over a list running biggest first.
-fn remote_sort_options(kind: u8) -> std::vec::Vec<(crate::backend::render::Icon, &'static str, [&'static str; 2])> {
+/// the two orders as the window shows them beside the name, and the same two
+/// as the page headers name the order in force, natural first (the newest, A
+/// to Z, the largest...) then reversed. `reverse` everywhere means "against
+/// the natural order", so a header never says "Croissant" over a list running
+/// biggest first.
+///
+/// Two wordings because the badge stands alone ("Nom, de Z à A") and the
+/// window's row already says what it sorts by: the badge's phrases there read
+/// "Nom [Nom, de A à Z | Nom, de Z à A]", the criterion three times, and were
+/// too long for the row in Spanish, which then fell back to one order between
+/// arrows. The Play tab's window reads "Nom [De A à Z | De Z à A]".
+struct RemoteSortOption {
+    icon: crate::backend::render::Icon,
+    label: &'static str,
+    window: [&'static str; 2],
+    badge: [&'static str; 2],
+}
+
+fn remote_sort_options(kind: u8) -> std::vec::Vec<RemoteSortOption> {
     use crate::backend::render::Icon;
     let lc = crate::loc::s();
     let u = crate::loc_ui::ui();
-    let name = (Icon::SortAlpha, lc.sort_alpha, [u.imp_name_az, u.imp_name_za]);
+    let az = [u.sort_az, u.sort_za];
+    let name = RemoteSortOption { icon: Icon::SortAlpha, label: lc.sort_alpha, window: az, badge: [u.imp_name_az, u.imp_name_za] };
     match kind {
         SORT_TARGET_FP => std::vec![
             name,
-            (Icon::User, lc.fp_details_dev, [u.imp_dev_az, u.imp_dev_za]),
-            (Icon::Calendar, u.imp_sort_release, [u.imp_rel_new, u.imp_rel_old]),
+            RemoteSortOption { icon: Icon::User, label: lc.fp_details_dev, window: az, badge: [u.imp_dev_az, u.imp_dev_za] },
+            RemoteSortOption {
+                icon: Icon::Calendar,
+                label: u.imp_sort_release,
+                window: [u.imp_rel_new, u.imp_rel_old],
+                badge: [u.imp_rel_new, u.imp_rel_old],
+            },
         ],
         SORT_TARGET_IMPORT => std::vec![
-            (Icon::Calendar, u.imp_sort_added, [u.imp_src_newest, u.imp_src_oldest]),
+            RemoteSortOption {
+                icon: Icon::Calendar,
+                label: u.imp_sort_added,
+                window: [u.imp_src_newest, u.imp_src_oldest],
+                badge: [u.imp_src_newest, u.imp_src_oldest],
+            },
             name,
-            (Icon::Link, lc.sort_source, [u.imp_site_az, u.imp_site_za]),
-            (Icon::Archive, lc.sort_files, [u.imp_src_most, u.imp_src_fewest]),
+            RemoteSortOption { icon: Icon::Link, label: lc.sort_source, window: az, badge: [u.imp_site_az, u.imp_site_za] },
+            RemoteSortOption {
+                icon: Icon::Archive,
+                label: lc.sort_files,
+                window: [u.imp_src_most, u.imp_src_fewest],
+                badge: [u.imp_src_most, u.imp_src_fewest],
+            },
         ],
-        _ => std::vec![name, (Icon::HardDrive, lc.sort_size, [u.imp_size_big, u.imp_size_small])],
+        // The same words as the Play tab's sort by size.
+        _ => std::vec![
+            name,
+            RemoteSortOption {
+                icon: Icon::HardDrive,
+                label: lc.sort_size,
+                window: [u.sort_largest, u.sort_smallest],
+                badge: [u.sort_largest, u.sort_smallest],
+            },
+        ],
     }
 }
 
 /// The order `crit` / `rev` of `kind` gives, as its outcome ("Les plus lourds").
 fn remote_sort_phrase(kind: u8, crit: u8, rev: bool) -> &'static str {
-    remote_sort_options(kind).get(crit as usize).map(|o| o.2[rev as usize]).unwrap_or("")
+    remote_sort_options(kind).get(crit as usize).map(|o| o.badge[rev as usize]).unwrap_or("")
 }
 
 /// Number of criteria in the IMPORTER sort picker, per target.
@@ -9472,10 +9945,14 @@ fn remote_sort_count(kind: u8) -> usize {
     remote_sort_options(kind).len()
 }
 
-/// IMPORTER sort picker (Y). `kind` selects the target list + option set (see
-/// `SORT_TARGET_*`). Left / Right (or X) pick the order, A applies + returns to
-/// the list (cursor top), B restores. The file and Flashpoint lists keep their
-/// order in `files_sort` / `fp_sort` until they are fetched again, so the window
+/// IMPORTER sort picker (Y), the Play tab's rules (input rule 5). `kind`
+/// selects the target list + option set (see `SORT_TARGET_*`). Up / Down move
+/// between criteria; Left / Right move the focus between the focused row's
+/// two orders, on that row only (bit `i` of `dirs`), applying nothing; X flips
+/// the focused row's order; A applies the focused criterion and order and
+/// returns to the list (cursor top); B, `-` and the Y that opened it restore
+/// it as it was. The file and Flashpoint lists keep their order in
+/// `files_sort` / `fp_sort` until they are fetched again, so the window
 /// reopens on it; the saved-URL sort is a persisted PREFERENCE (`url_history`
 /// keeps its insertion order — that's the ADDED criterion).
 fn handle_remote_sort_modal_input(
@@ -9483,20 +9960,23 @@ fn handle_remote_sort_modal_input(
     button: &str,
     mut selection: usize,
     kind: u8,
-    mut reverse: bool,
+    mut dirs: u8,
     prev_sel: usize,
     prev_scroll: usize,
 ) {
     let n = remote_sort_count(kind);
+    let bit = 1u8 << selection.min(7);
     match button {
         // A new press comes round, a held one stops at the end.
         "Up" | "StickLUp" => selection = list_step_wrap(selection, -1, n),
         "Down" | "StickLDown" => selection = list_step_wrap(selection, 1, n),
-        // The natural order on the left, its reverse on the right; X flips.
-        "Left" | "StickLLeft" => reverse = false,
-        "Right" | "StickLRight" => reverse = true,
-        "X" => reverse = !reverse,
+        // The focus moves to the order Left / Right point at, on this row
+        // only: navigation, so the cursor's sound, and nothing applied.
+        "Left" | "StickLLeft" => dirs &= !bit,
+        "Right" | "StickLRight" => dirs |= bit,
+        "X" => dirs ^= bit,
         "A" => {
+            let reverse = dirs & bit != 0;
             match kind {
                 SORT_TARGET_FP => {
                     s.fp_sort = (selection as u8, reverse);
@@ -9527,8 +10007,12 @@ fn handle_remote_sort_modal_input(
             }
             return;
         }
-        "B" => {
-            // Cancel → restore the list cursor where it was.
+        "B" | "Minus" | "Y" => {
+            // Cancel → restore the list cursor where it was. Y opened the
+            // window and closes it the same way, which is going back.
+            if button == "Y" {
+                crate::sfx::choose(crate::sfx::Sfx::Back);
+            }
             s.screen = match kind {
                 SORT_TARGET_FP => Screen::FpGallery { selection: prev_sel, scroll: prev_scroll },
                 SORT_TARGET_IMPORT => Screen::DistantIdle {
@@ -9541,7 +10025,7 @@ fn handle_remote_sort_modal_input(
         }
         _ => {}
     }
-    s.screen = Screen::RemoteSortModal { selection, kind, reverse, prev_sel, prev_scroll };
+    s.screen = Screen::RemoteSortModal { selection, kind, dirs, prev_sel, prev_scroll };
 }
 
 /// RENOMMER flow: open swkbd with the current display_name pre-filled,
@@ -9578,6 +10062,10 @@ fn run_rename_flow(game_idx: usize) {
             } else {
                 new_name_trimmed
             };
+            // A value changed in place: the panel stays, only the name moves.
+            if entry.display_name != current_display {
+                crate::sfx::value_changed();
+            }
         }
     }
 }
@@ -9587,8 +10075,8 @@ fn run_rename_flow(game_idx: usize) {
 /// B / Minus = cancel + back to OptionsModal.
 fn handle_delete_confirm_input(s: &mut State, button: &str, game_idx: usize, selection: usize) {
     match button {
-        "Left" | "StickLLeft" | "Right" | "StickLRight" | "Up" | "StickLUp" | "Down" | "StickLDown" => {
-            s.screen = Screen::DeleteConfirm { game_idx, selection: 1 - selection.min(1) };
+        "Left" | "StickLLeft" | "Right" | "StickLRight" => {
+            s.screen = Screen::DeleteConfirm { game_idx, selection: answer_at(button, selection) };
         }
         "A" if selection == 1 => {
             // Defer the delete until the close-out finishes: stash the action,
@@ -9753,9 +10241,11 @@ extern "C" {
         also_dir: *const core::ffi::c_char,
     ) -> core::ffi::c_int;
     fn swf_picker_count_companions(swf_path: *const core::ffi::c_char) -> core::ffi::c_int;
-    // Cursor-speed preset (main.cpp): cycle to the next preset (returns the new
-    // index), and read the current multiplier x10 (5,10,15,20,25) for the label.
-    pub(crate) fn ruffle_cursor_speed_step(dir: core::ffi::c_int) -> core::ffi::c_int;
+    // Cursor-speed preset (main.cpp): the preset in force, the same kept (out
+    // of a game, the global default's file), and the current multiplier x10
+    // (5,10,15,20,25) for a label.
+    pub(crate) fn ruffle_cursor_speed_index() -> core::ffi::c_int;
+    pub(crate) fn ruffle_cursor_speed_set(idx: core::ffi::c_int) -> core::ffi::c_int;
     pub(crate) fn ruffle_cursor_speed_mult_x10() -> core::ffi::c_int;
 }
 
@@ -11205,20 +11695,32 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 Some(u.help_sort),
             );
         }
-        Screen::RemoteSortModal { selection, kind, reverse, prev_sel, prev_scroll } => {
-            // The list being sorted stays behind the window, as it was.
+        Screen::RemoteSortModal { selection, kind, dirs, prev_sel, prev_scroll } => {
+            // The list being sorted stays behind the window: as it was, or,
+            // while the window closes on a new order, as it will be once it
+            // has (the first row of the re-sorted list), like the Play tab's
+            // window. Drawn at the old place, the pill sat on whatever the new
+            // order had put there, then jumped to the top.
+            let (behind_sel, behind_scroll) = match PENDING_AFTER_CLOSE.lock().ok().as_deref() {
+                Some(Some(PendingClose::Goto(Screen::DistantIdle { selection, scroll_offset })))
+                | Some(Some(PendingClose::Goto(Screen::DistantFiles { selection, scroll_offset }))) => {
+                    (*selection, *scroll_offset)
+                }
+                Some(Some(PendingClose::Goto(Screen::FpGallery { selection, scroll }))) => (*selection, *scroll),
+                _ => (prev_sel, prev_scroll),
+            };
             backend.clear_ui_transform();
             match kind {
-                SORT_TARGET_IMPORT => draw_home_backdrop(backend, prev_sel, prev_scroll),
-                SORT_TARGET_FP => draw_fp_page(backend, prev_sel, prev_scroll, false),
-                _ => draw_files_page(backend, prev_sel, prev_scroll, None, false),
+                SORT_TARGET_IMPORT => draw_home_backdrop(backend, behind_sel, behind_scroll),
+                SORT_TARGET_FP => draw_fp_page(backend, behind_sel, behind_scroll, false),
+                _ => draw_files_page(backend, behind_sel, behind_scroll, None, false),
             }
             backend.set_ui_modal_scale(if modal_active { modal_scale } else { 1.0 });
             // Each criterion with its two orders as words, natural first, like
-            // the Play tab's picker; the one flag turns them all.
+            // the Play tab's picker; each row keeps its own order.
             let options: std::vec::Vec<crate::backend::render::SortOption> = remote_sort_options(kind)
                 .into_iter()
-                .map(|(icon, label, orders)| crate::backend::render::SortOption { icon, label, orders })
+                .map(|o| crate::backend::render::SortOption { icon: o.icon, label: o.label, orders: o.window })
                 .collect();
             // The order in force is ticked on every list now: the file list and
             // the Flashpoint results keep theirs until they are fetched again.
@@ -11230,8 +11732,10 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     _ => s.files_sort.0 as usize,
                 })
                 .unwrap_or(0);
-            let dirs = if reverse { u8::MAX } else { 0 };
-            backend.draw_sort_window(crate::loc::s().sort_title, None, &options, selection, Some(active), dirs, None);
+            // The saved sources: favourites stay on top whatever the order,
+            // which no row says.
+            let help = if kind == SORT_TARGET_IMPORT { Some(crate::loc_ui::ui().imp_help_src_fav) } else { None };
+            backend.draw_sort_window(crate::loc::s().sort_title, None, &options, selection, Some(active), dirs, help);
         }
         // ── Phase 3.7 DISTANT mode ─────────────────────────────────────
         Screen::DistantIdle { selection, scroll_offset } => {

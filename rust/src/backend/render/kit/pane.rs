@@ -58,7 +58,8 @@ impl SwitchRenderBackend {
     /// Draw `p` in the rectangle from `top` to `bottom`, `w` wide from `x`.
     /// Returns one touch cell per row: the row's rectangle, or an empty one
     /// for a row scrolled out of the visible band (half a row showing at an
-    /// edge must not take a tap aimed at what is next to it).
+    /// edge must not take a tap aimed at what is next to it); and the parts of
+    /// the rows' controls a finger can tap (`CtrlSegs`, by row index).
     pub(crate) fn kit_pane_rows(
         &mut self,
         p: &Pane,
@@ -66,7 +67,7 @@ impl SwitchRenderBackend {
         top: f32,
         w: f32,
         bottom: f32,
-    ) -> std::vec::Vec<(f32, f32, f32, f32)> {
+    ) -> (std::vec::Vec<(f32, f32, f32, f32)>, super::list::CtrlSegs) {
         let help_room = if p.reserve_help { help_room() } else { 0.0 };
         if !p.help.trim().is_empty() {
             self.kit_help_box(x, bottom, w, p.help, HELP_LINES);
@@ -120,15 +121,20 @@ impl SwitchRenderBackend {
             self.kit_focus_pill(x, hy, rw, p.row_h);
         }
         let mut cells: std::vec::Vec<(f32, f32, f32, f32)> = std::vec![(0.0, 0.0, 0.0, 0.0); p.rows.len()];
+        let mut segs: super::list::CtrlSegs = std::vec::Vec::new();
         for (i, row) in p.rows.iter().enumerate() {
             let ry = area_top + ys[i] - scroll;
             if ry + p.row_h < area_top - 1.0 || ry > area_bot + 1.0 {
                 continue;
             }
-            if ry >= area_top - 1.0 && ry + p.row_h <= area_bot + 1.0 {
+            let whole = ry >= area_top - 1.0 && ry + p.row_h <= area_bot + 1.0;
+            if whole {
                 cells[i] = (x, ry, rw, p.row_h);
             }
-            self.kit_row_item(x, ry + p.row_h * 0.5, rw, row, i == p.selection);
+            let parts = self.kit_row_item(x, ry + p.row_h * 0.5, rw, row, i == p.selection);
+            if whole {
+                segs.extend(parts.into_iter().map(|(part, r)| (i, part, r)));
+            }
         }
         if scrolls {
             self.clear_clip();
@@ -140,6 +146,6 @@ impl SwitchRenderBackend {
             self.kit_rrect(bx, area_top + 4.0, BAR_W, track_h, BAR_W * 0.5, col::LINE);
             self.kit_rrect(bx, ty, BAR_W, thumb_h, BAR_W * 0.5, 0xFF_4A_5C_85);
         }
-        cells
+        (cells, segs)
     }
 }

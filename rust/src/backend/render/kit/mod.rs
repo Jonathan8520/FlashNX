@@ -10,7 +10,8 @@
 //! - `window`: windows, list rows, hint bars, the in-game side sheet.
 //! - `list`: a list that scrolls, with its pill, touch table and scrollbar.
 //! - `controls`: what sits on the right of a settings row (a choice with every
-//!   option shown, a value between arrows, a switch), chips and the help box.
+//!   option shown, a value whose arrows show only while its row is armed, a
+//!   switch), chips and the help box.
 //! - `sheet`: the side panel (in-game pause, the game options), and the
 //!   cascade that opens a sub-panel beside its parent.
 //! - `pane`: a panel's rows inside any rectangle (the Réglages pane): sections,
