@@ -216,13 +216,11 @@ pub fn touch_select(idx: usize) -> bool {
                 return false;
             };
             // A modifier row takes no cursor from a finger either, and returning
-            // false means the tap is simply ignored rather than counted as the
-            // first half of a double-tap that would then activate it.
-            if crate::keymap::PAD_SLOTS
-                .get(row)
-                .map(|s| crate::keymap::slot_is_modifier(s.name))
-                .unwrap_or(false)
-            {
+            // false means the tap is not counted as the first half of a
+            // double-tap that would then activate it. It says why, as A does.
+            if let Some(slot) = crate::keymap::PAD_SLOTS.get(row).filter(|s| crate::keymap::slot_is_modifier(s.name)) {
+                let msg = crate::loc_ui::ui().toast_modifier_locked.replace("{}", slot.name);
+                set_toast(&mut s, msg, TOAST_INFO);
                 return false;
             }
             if selection == row {
@@ -1087,7 +1085,7 @@ fn pad_step(cur: usize, dir: PadDir, wrap: bool) -> usize {
     if !wrap {
         return cur;
     }
-    let mut wrap = cur;
+    let mut far = cur;
     let mut edge = cy;
     for i in 0..n {
         if slot_locked(i) {
@@ -1096,10 +1094,10 @@ fn pad_step(cur: usize, dir: PadDir, wrap: bool) -> usize {
         let (x, y) = pad_center(i);
         if same_col(x) && ((want_max && y > edge) || (!want_max && y < edge)) {
             edge = y;
-            wrap = i;
+            far = i;
         }
     }
-    wrap
+    far
 }
 
 /// Whether slot `i` is a modifier in the open layer, and so takes no cursor.
@@ -1386,9 +1384,9 @@ fn kbd_horizontal(cur: usize, dir: i32, wrap: bool) -> usize {
 /// The key above (`dir` -1) or below (1) key `cur`: on the nearest row with a
 /// key under the cursor, the key whose span is closest to the cursor's centre.
 /// A row with nothing there (the space under the numpad, above it) is passed
-/// over rather than landed on sideways; when no row has anything under the
-/// cursor, the next row's nearest key it is. A fresh press comes round from
-/// the last row to the first, a held one stops.
+/// over rather than landed on sideways. A fresh press comes round from the
+/// last row to the first, and when no row has anything under the cursor it
+/// takes the next row's nearest key; a held one stops.
 fn kbd_vertical(cur: usize, dir: i32, wrap: bool) -> usize {
     let Some(&(_, row, _, _)) = keymap::KEYBOARD.get(cur) else { return cur };
     let cx = kbd_center(cur);
@@ -1432,7 +1430,11 @@ fn kbd_vertical(cur: usize, dir: i32, wrap: bool) -> usize {
             }
         }
     }
-    nearest.unwrap_or(cur)
+    if wrap {
+        nearest.unwrap_or(cur)
+    } else {
+        cur
+    }
 }
 
 fn handle_keyboard_input(

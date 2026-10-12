@@ -177,7 +177,7 @@ pub const KEYBOARD: &[(&str, u8, f32, f32)] = &[
     ("G", 3, 5.75, 1.0), ("H", 3, 6.75, 1.0), ("J", 3, 7.75, 1.0), ("K", 3, 8.75, 1.0),
     ("L", 3, 9.75, 1.0), (";", 3, 10.75, 1.0), ("'", 3, 11.75, 1.0), ("Enter", 3, 12.75, 2.25),
     ("Num1", 3, 16.0, 1.0), ("Num2", 3, 17.0, 1.0), ("Num3", 3, 18.0, 1.0), ("Num-", 3, 19.0, 1.0),
-    // Row 4 — shift row, Up at the top of the arrow cluster, then numpad
+    // Row 4: shift row, Up at the top of the arrow cluster, then numpad
     // 0 . Enter +.
     ("Shift", 4, 0.0, 2.25),
     ("Z", 4, 2.25, 1.0), ("X", 4, 3.25, 1.0), ("C", 4, 4.25, 1.0), ("V", 4, 5.25, 1.0),
@@ -185,14 +185,14 @@ pub const KEYBOARD: &[(&str, u8, f32, f32)] = &[
     (".", 4, 10.25, 1.0), ("/", 4, 11.25, 1.0),
     ("Up", 4, 13.0, 1.0),
     ("Num0", 4, 16.0, 1.0), ("Num.", 4, 17.0, 1.0), ("NumEnter", 4, 18.0, 1.0), ("Num+", 4, 19.0, 1.0),
-    // Row 5 — Ctrl + Alt + space bar, then the other three arrows under Up: the
+    // Row 5: Ctrl + Alt + space bar, then the other three arrows under Up, the
     // inverted T of every keyboard, the shape a hand looks for. In one flat row
     // ("← ↑ ↓ →") Up and Down sat side by side, and the four of them read as
-    // four more letters. Down is straight under Up, so the picker's
-    // nearest-centre Up / Down moves between the two.
+    // four more letters. Down is straight under Up, so the picker's Up and
+    // Down go straight from one to the other.
     ("Control", 5, 0.0, 1.5), ("Alt", 5, 1.5, 1.5), ("Space", 5, 3.0, 6.5),
     ("Left", 5, 12.0, 1.0), ("Down", 5, 13.0, 1.0), ("Right", 5, 14.0, 1.0),
-    // Row 6 — what is not a key, in a band of its own under the board (drawn as
+    // Row 6: what is not a key, in a band of its own under the board (drawn as
     // pills with icons): nothing, the two mouse buttons, the console keyboard.
     // Four equal slots across the whole width, so Down from anywhere on the
     // board lands on the one under it.
@@ -258,9 +258,11 @@ pub struct PadSlot {
 
 /// Width and height of the pad layout, in units. The renderer picks ONE scale
 /// from `min(inner_w / W, inner_h / H)` so the picture keeps its proportions on
-/// a narrow panel (a turned picture gives a portrait viewport).
+/// a narrow panel (a turned picture gives a portrait viewport). The height
+/// keeps most of a unit under the last right-hand row (it ends at 21.82), so
+/// the rows do not run into the line under them.
 pub const PAD_UNITS_W: f32 = 46.0;
-pub const PAD_UNITS_H: f32 = 22.0;
+pub const PAD_UNITS_H: f32 = 22.5;
 
 /// The shell: two grips, then the body over them. `(x, y, w, h, radius)`.
 /// Drawn FIRST, so every control sits on top of it.

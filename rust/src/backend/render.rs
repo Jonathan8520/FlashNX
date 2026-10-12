@@ -9927,7 +9927,7 @@ impl SwitchRenderBackend {
             self.kit_text_mid(left + 26.0, help_cy, size::LABEL, &t, col::TEXT2);
         }
         let hints_profiles: [kit::text::HintItem; 3] =
-            [(&[Btn::A], u.edit), (&[Btn::Y], lc.profile_title), (&[Btn::B], u.back)];
+            [(&[Btn::A], u.edit), (&[Btn::Y], u.shared_profiles), (&[Btn::B], u.back)];
         let hints_plain: [kit::text::HintItem; 2] = [(&[Btn::A], u.edit), (&[Btn::B], u.back)];
         let hints_x = self.touches_footer(x, y, w, h, if v.profiles { &hints_profiles } else { &hints_plain });
         if let Some(speed) = v.cursor_speed {

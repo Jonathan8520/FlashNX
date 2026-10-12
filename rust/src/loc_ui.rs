@@ -250,6 +250,8 @@ pub struct Ui {
     pub keys_numpad: &'static str,
     /// The caption over the key picker's band of what is not a key (None, the clicks, the Switch keyboard).
     pub keys_other: &'static str,
+    /// The controls editor's Y hint: the profiles other players shared for this game.
+    pub shared_profiles: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -413,6 +415,7 @@ const EN: Ui = Ui {
     help_key_click: "Clicks where the mouse cursor is.",
     keys_numpad: "Numpad",
     keys_other: "Other",
+    shared_profiles: "Shared profiles",
 };
 
 const FR: Ui = Ui {
@@ -576,6 +579,7 @@ const FR: Ui = Ui {
     help_key_click: "Clique là où se trouve le curseur de la souris.",
     keys_numpad: "Pavé numérique",
     keys_other: "Autres",
+    shared_profiles: "Profils partagés",
 };
 
 const ES: Ui = Ui {
@@ -739,6 +743,7 @@ const ES: Ui = Ui {
     help_key_click: "Hace clic donde está el cursor del ratón.",
     keys_numpad: "Teclado numérico",
     keys_other: "Otros",
+    shared_profiles: "Perfiles compartidos",
 };
 
 const RU: Ui = Ui {
@@ -902,6 +907,7 @@ const RU: Ui = Ui {
     help_key_click: "Щелчок там, где находится курсор мыши.",
     keys_numpad: "Цифровой блок",
     keys_other: "Другое",
+    shared_profiles: "Общие профили",
 };
 
 const DE: Ui = Ui {
@@ -1065,6 +1071,7 @@ const DE: Ui = Ui {
     help_key_click: "Klickt dort, wo der Mauszeiger steht.",
     keys_numpad: "Ziffernblock",
     keys_other: "Weitere",
+    shared_profiles: "Geteilte Profile",
 };
 
 const IT: Ui = Ui {
@@ -1228,6 +1235,7 @@ const IT: Ui = Ui {
     help_key_click: "Fa clic dove si trova il cursore del mouse.",
     keys_numpad: "Tastierino numerico",
     keys_other: "Altro",
+    shared_profiles: "Profili condivisi",
 };
 
 const PT: Ui = Ui {
@@ -1391,6 +1399,7 @@ const PT: Ui = Ui {
     help_key_click: "Clica onde está o cursor do mouse.",
     keys_numpad: "Teclado numérico",
     keys_other: "Outros",
+    shared_profiles: "Perfis compartilhados",
 };
 
 const ZH: Ui = Ui {
@@ -1554,6 +1563,7 @@ const ZH: Ui = Ui {
     help_key_click: "在鼠标光标所在处点击。",
     keys_numpad: "数字小键盘",
     keys_other: "其他",
+    shared_profiles: "共享配置",
 };
 
 const TR: Ui = Ui {
@@ -1717,6 +1727,7 @@ const TR: Ui = Ui {
     help_key_click: "Fare imlecinin olduğu yere tıklar.",
     keys_numpad: "Sayı tuşları",
     keys_other: "Diğer",
+    shared_profiles: "Paylaşılan profiller",
 };
 
 pub fn ui() -> &'static Ui {
