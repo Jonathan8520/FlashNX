@@ -38,7 +38,7 @@ use std::collections::HashMap;
 /// cells in a 1024² atlas, plenty for the whole UI.
 pub const RASTER_PX: f32 = 44.0;
 /// Atlas texture side (RGBA8).
-const ATLAS_DIM: usize = 1024;
+pub(crate) const ATLAS_DIM: usize = 1024;
 /// How many atlas textures we will allocate before giving up on new glyphs.
 ///
 /// One 1024² atlas holds 22 shelves of 22 cells at `RASTER_PX`, so about 484
@@ -51,7 +51,7 @@ const ATLAS_DIM: usize = 1024;
 /// character is actually drawn.
 const ATLAS_MAX: usize = 4;
 /// 1px gap between packed glyphs so bilinear sampling never bleeds neighbours.
-const PAD: usize = 1;
+pub(crate) const PAD: usize = 1;
 
 extern "C" {
     fn ruffle_log_cstr(msg: *const core::ffi::c_char);
@@ -220,7 +220,7 @@ fn glyph_cache() -> &'static std::sync::Mutex<std::vec::Vec<(char, Option<Cached
 ///
 /// NOTE for the caller: this binds and unbinds texture unit 0 with raw GL, so
 /// the renderer's state cache must be invalidated afterwards.
-fn new_atlas_texture() -> Option<GLuint> {
+pub(crate) fn new_atlas_texture() -> Option<GLuint> {
     // Cleared in STRIPS, from a buffer that is ALLOWED to fail.
     //
     // This used to stage the whole 1024² image: a 4 MB `vec![0u8; ..]` with no
@@ -698,6 +698,20 @@ fn raster_gid(
     raster: &mut ab_glyph_rasterizer::Rasterizer,
     gid: ttf_parser::GlyphId,
 ) -> (usize, usize, f32, f32, std::vec::Vec<u8>) {
+    raster_gid_px(face, raster, gid, RASTER_PX)
+}
+
+/// `raster_gid` at any size: `px` is pixels per em, like `RASTER_PX`.
+///
+/// The interface kit (`render/kit/text.rs`) rasterizes each glyph at the size
+/// it is drawn, so the pixels on screen are the ones the outline produced
+/// rather than a 44 px glyph scaled down by the texture sampler.
+pub(crate) fn raster_gid_px(
+    face: &ttf_parser::Face<'static>,
+    raster: &mut ab_glyph_rasterizer::Rasterizer,
+    gid: ttf_parser::GlyphId,
+    px: f32,
+) -> (usize, usize, f32, f32, std::vec::Vec<u8>) {
     let blank = || (0usize, 0usize, 0.0f32, 0.0f32, std::vec::Vec::new());
     // No outline at all: an ideographic space. NOT a miss — `ensure` must take
     // its `blank: true` branch so the pen advances and nothing is packed.
@@ -710,7 +724,7 @@ fn raster_gid(
     // ascender, ascent+descent) would resize every CJK glyph on screen without
     // a single constant changing. `units_per_em` is guaranteed 16..=16384 by
     // `head` parsing, which `Face::parse` already ran, so it cannot be zero.
-    let scale = RASTER_PX / face.units_per_em() as f32;
+    let scale = px / face.units_per_em() as f32;
     // Integer grid, rounded OUTWARDS on both sides. `x0`/`y0` are the bearings:
     // floor of the scaled box minimum, exactly what fontdue reported. The width
     // is algebraically fontdue's `ceil(width + fract(xmin))`, which is what

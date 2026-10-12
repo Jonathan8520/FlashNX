@@ -10282,8 +10282,12 @@ pub fn render(backend: &mut SwitchRenderBackend) {
     backend.clear_ui_transform();
     if let Some(tab) = screen_tab(screen) {
         backend.draw_navbar(tab.index());
-        // Version label, bottom-right of the home screens.
-        backend.draw_version_badge();
+        // Version label and author credit, bottom corners of the home screens.
+        // JOUER is on the interface kit, whose footer carries the credit itself
+        // and leaves the right-hand side to the button hints.
+        if tab.index() != 0 {
+            backend.draw_version_badge();
+        }
     } else {
         // No strip on a sub-screen, so nothing on it may be tapped. Without
         // this the cells published by the last home screen stayed live, and a

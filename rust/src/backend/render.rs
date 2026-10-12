@@ -1176,6 +1176,10 @@ use swf::{BlendMode, Color, GradientSpread};
 use crate::ffi::gl::*;
 use crate::query_ram;
 
+mod kit;
+pub(crate) use kit::text::Btn;
+use kit::theme;
+
 extern "C" {
     fn ruffle_log_cstr(msg: *const core::ffi::c_char);
     /// The card writer every other file goes through (cpp/src/swf_picker.cpp):
@@ -2948,6 +2952,14 @@ pub struct SwitchRenderBackend {
     /// own `Drop` body has run, while the GL context is still alive.
     font_atlas: Option<crate::backend::glyphs::FontAtlas>,
     atlas_init_done: bool,
+    /// The interface kit's fonts and atlas (`render/kit/text.rs`), built on
+    /// first use like `font_atlas`. Declared after the struct's own fields for
+    /// the same reason: it frees GL textures in its Drop.
+    kit_text: Option<std::boxed::Box<kit::text::UiText>>,
+    kit_text_tried: bool,
+    /// The kit's rounded-rectangle shader (`render/kit/shapes.rs`).
+    kit_shapes: Option<kit::shapes::ShapeProgram>,
+    kit_shapes_tried: bool,
     /// True only while the GAME's display list is being replayed to the screen,
     /// which is the one thing the free zoom (issue #101) applies to. Everything
     /// drawn around it -- the pause panel, the pointer, the zoom legend -- runs
@@ -6722,6 +6734,10 @@ impl SwitchRenderBackend {
             last_frame: FrameBreakdown::default(),
             font_atlas: None,
             atlas_init_done: false,
+            kit_text: None,
+            kit_text_tried: false,
+            kit_shapes: None,
+            kit_shapes_tried: false,
             game_layer: false,
         })
     }
@@ -10801,78 +10817,108 @@ impl SwitchRenderBackend {
         ui_cells_publish(touch_kind, cells);
     }
 
-    /// Top navbar (v1.2.0) — tab strip switched with the L/R shoulder buttons.
+    /// Top navbar: the tab strip switched with the L/R shoulder buttons.
     /// `active` indexes JOUER(0) / IMPORTER(1) / REGLAGES(2). Drawn last, over
     /// the top of every tab-home screen, by `library::render`.
+    ///
+    /// On the interface kit: the tabs in the console font, the active one white
+    /// over a gold bar, and the console's own L and R glyphs either side, which
+    /// say "the shoulders switch these" without a footer line spelling it out.
     pub fn draw_navbar(&mut self, active: usize) {
+        use theme::{col, radius, size};
         let vw = self.dimensions.width as f32;
-        let lc = crate::loc::s();
-        let tabs = [lc.tab_play, lc.tab_import, lc.tab_settings];
+        let u = crate::loc_ui::ui();
+        let tabs = [u.tab_play, u.tab_import, u.tab_settings];
 
-        let nav_y = 4.0_f32;
-        let nav_h = 34.0_f32;
-        // Background bar (semi-opaque dark navy) spanning the full width.
-        let bar = Matrix {
-            a: vw, b: 0.0, c: 0.0, d: nav_h,
-            tx: swf::Twips::from_pixels(0.0),
-            ty: swf::Twips::from_pixels(nav_y as f64),
-        };
-        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xE0_10_16_28), bar);
-
-        // L / R chevrons at the edges — hint that the shoulders switch tabs.
-        let edge_scale = 2.0;
-        let label_y = nav_y + 8.0;
-        let edge_col = swf::Color::from_rgb(0x88AACC, 255);
-        self.draw_text(14.0, label_y, edge_scale, "L", edge_col);
-        let r_w = self.measure_text("R", edge_scale);
-        self.draw_text(vw - 14.0 - r_w, label_y, edge_scale, "R", edge_col);
-
-        // Tab labels, centered as a group with even gaps.
-        let scale = 2.0;
-        let gap = 48.0;
+        // The strip's band, for touch: the whole 0..72 height under the tabs.
+        let nav_y = 0.0_f32;
+        let nav_h = 72.0_f32;
+        let cy = 36.0_f32;
+        let gap = 30.0_f32;
+        let shoulder_px = 22.0_f32;
         let widths = [
-            self.measure_text(tabs[0], scale),
-            self.measure_text(tabs[1], scale),
-            self.measure_text(tabs[2], scale),
+            self.kit_measure(tabs[0], size::TAB),
+            self.kit_measure(tabs[1], size::TAB),
+            self.kit_measure(tabs[2], size::TAB),
         ];
-        let total: f32 = widths.iter().sum::<f32>() + gap * (tabs.len() as f32 - 1.0);
-        let mut x = (vw - total) * 0.5;
-        // Hit boxes: the full HEIGHT of the strip and half the gap on each side,
-        // because a label two characters wide is not a target for a thumb.
+        let lw = self.kit_button_width(Btn::L, shoulder_px);
+        let rw = self.kit_button_width(Btn::R, shoulder_px);
+        let tabs_w: f32 = widths.iter().sum::<f32>() + gap * (tabs.len() as f32 - 1.0);
+        let total = lw + gap + tabs_w + gap + rw;
+        let mut x = ((vw - total) * 0.5).round();
+        self.kit_button(x, cy, shoulder_px, Btn::L, col::PILL_INK);
+        x += lw + gap;
+        // Hit boxes: the full height of the strip and half the gap on each side,
+        // because a label is not a target for a thumb.
         let mut cells = [(0.0f32, 0.0f32, 0.0f32, 0.0f32); 3];
-        {
-            let mut hx = x;
-            for k in 0..tabs.len() {
-                cells[k] = (hx - gap * 0.5, nav_y, widths[k] + gap, nav_h);
-                hx += widths[k] + gap;
-            }
-        }
-        navbar_publish(cells);
         for (i, t) in tabs.iter().enumerate() {
+            cells[i] = (x - gap * 0.5, nav_y, widths[i] + gap, nav_h);
             let is_active = i == active;
-            let color = if is_active {
-                swf::Color::from_rgb(0xFFD740, 255)
-            } else {
-                swf::Color::from_rgb(0x99AABB, 255)
-            };
+            let ink = if is_active { col::TEXT } else { col::TEXT3 };
+            self.kit_text_mid(x, cy, size::TAB, t, ink);
             if is_active {
-                // Underline the active tab.
-                let ul = Matrix {
-                    a: widths[i] + 8.0, b: 0.0, c: 0.0, d: 3.0,
-                    tx: swf::Twips::from_pixels((x - 4.0) as f64),
-                    ty: swf::Twips::from_pixels((nav_y + nav_h - 4.0) as f64),
-                };
-                <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), ul);
+                self.kit_rrect(x, cy + 16.0, widths[i], 3.0, radius::BAR, col::GOLD);
             }
-            self.draw_text(x, label_y, scale, t, color);
             x += widths[i] + gap;
         }
+        navbar_publish(cells);
+        self.kit_button(x, cy, shoulder_px, Btn::R, col::PILL_INK);
 
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
         }
         self.gl_state.invalidate();
+    }
+
+    /// The bottom band of the home screens: a hairline, the author credit on
+    /// the left and what the buttons do on the right.
+    ///
+    /// The credit is baked in on purpose (see `draw_version_badge`), so it moves
+    /// here rather than going away. The version itself is in REGLAGES.
+    fn kit_home_footer(&mut self) {
+        use theme::{col, size};
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        self.draw_overlay_rect(0.0, vh - 48.0, vw, 1.0, col::LINE);
+        let cy = vh - 24.0;
+        self.kit_text_mid(40.0, cy, size::CAPTION + 1.0, "Jonathan8520", col::TEXT3);
+        let u = crate::loc_ui::ui();
+        self.kit_hints_right(
+            vw - 40.0,
+            cy,
+            &[
+                (Btn::A, u.hint_play),
+                (Btn::Plus, u.hint_options),
+                (Btn::Y, u.hint_sort),
+                (Btn::Minus, u.hint_search),
+            ],
+        );
+    }
+
+    /// The selected game's facts on one line, the kit way: values in the second
+    /// text colour, separated by a dim middle dot. Returns the width drawn.
+    fn kit_game_facts(&mut self, x: f32, cy: f32, entry: &crate::library::Entry) -> f32 {
+        use theme::{col, size};
+        let mut parts: std::vec::Vec<std::string::String> = std::vec::Vec::with_capacity(4);
+        let sz = format_size_pretty(entry.size_bytes);
+        if !sz.is_empty() {
+            parts.push(sz);
+        }
+        parts.push(std::format!("SWF {} {}", entry.swf_version, entry.compression_label));
+        parts.push(std::string::String::from(if entry.is_as3 { "AS3" } else { "AVM1" }));
+        let secs = crate::playtime::get(&entry.basename);
+        if secs >= 60 {
+            parts.push(crate::loc_ui::playtime(secs));
+        }
+        let mut pen = x;
+        for (i, p) in parts.iter().enumerate() {
+            if i > 0 {
+                pen += self.kit_text_mid(pen, cy, size::LABEL, "  \u{00B7}  ", col::TEXT3);
+            }
+            pen += self.kit_text_mid(pen, cy, size::LABEL, p, col::TEXT2);
+        }
+        pen - x
     }
 
     /// Small version label in the bottom-right corner of the launcher UI (drawn
@@ -11237,114 +11283,61 @@ impl SwitchRenderBackend {
         filter: Option<&str>,
         total_unfiltered: usize,
     ) {
+        use theme::{col, size};
         let vw = self.dimensions.width as f32;
-        // Compact, fully below the navbar strip (y 4..38), scaled to a small
-        // target height so it doesn't dominate the screen.
-        let banner_y = 46.0;
+        // The logo moves into the tab strip's band, top-left, as on the console's
+        // own screens: the band under the strip is then free for the line that
+        // says what the grid is showing.
         if banner_tex != 0 && banner_w > 0 && banner_h > 0 {
-            // 56, not 72. The header band was 81% bare page colour: the banner is
-            // 720×144 so the old target resolved to exactly 0.5 → 360×72, and the
-            // count line sat alone on a full-width row under it. At 56 the logo
-            // draws 280×56 and the count moves into the space beside it, which
-            // gives the content band 30 px back without losing either element.
-            let target_h = 56.0;
-            let scale = (target_h / banner_h as f32).min((vw - 64.0) / banner_w as f32);
-            let draw_w = banner_w as f32 * scale;
-            let draw_h = banner_h as f32 * scale;
-            let draw_x = (vw - draw_w) * 0.5;
-            self.draw_textured_rect(draw_x, banner_y, draw_w, draw_h, banner_tex);
+            let draw_h = 30.0;
+            let draw_w = banner_w as f32 * draw_h / banner_h as f32;
+            self.draw_textured_rect(32.0, 21.0, draw_w, draw_h, banner_tex);
         } else {
-            let title = "FLASHNX";
-            let st = 3.0;
-            let tw = self.measure_text(title, st);
-            self.draw_text(
-                (vw - tw) * 0.5,
-                banner_y + 16.0,
-                st,
-                title,
-                swf::Color::from_rgb(0xFFD740, 255),
-            );
+            self.kit_text_mid(40.0, 36.0, size::TAB, "FlashNX", col::GOLD);
         }
 
-        // Same slot whether filtering or not, so the header height never moves.
-        // The open folder (issue #68) takes that same slot when no search is
-        // running: it narrows the list exactly as a search does, and the player
-        // is owed the same one line saying why they are not seeing everything.
-        // A search wins the slot because a search also ignores the folder.
+        // What the grid is showing, in this order of precedence (unchanged): a
+        // search inside an open folder, a search, an open folder, the whole
+        // library. A search also ignores the folder, so it wins the line.
+        let cy = 94.0;
+        let left = 40.0;
         let folder_open = HOME_FOLDER.lock().ok().and_then(|g| g.clone());
-        let sub = match (filter, folder_open.as_deref()) {
-            // BOTH, when both narrow. A search runs INSIDE the open shelf, so a
-            // line naming only the search claims a scope it does not have: on a
-            // six-game shelf it read "0 / 214 - FILTRE: sonic" and the player
-            // concluded their library had no match, one ZR away from it.
-            // `total_unfiltered` is the shelf's size, not the library's — see
-            // the caller.
-            // A search INSIDE a shelf: the denominator is the shelf, because
-            // that is what the search looked at. The shelf's own name is on the
-            // frame around the games, so it is not repeated here.
-            (Some(f), Some(_)) if !f.trim().is_empty() => std::format!(
-                "{} / {} - {}: {}",
-                shown,
-                total_unfiltered,
-                crate::loc::s().files_filter,
-                f,
-            ),
-            (Some(f), _) if !f.trim().is_empty() => {
-                crate::loc::count_line(shown, total_unfiltered, filter, || {
-                    crate::loc::games_count(shown)
-                })
+        let library_total = HOME_LIBRARY_TOTAL
+            .load(core::sync::atomic::Ordering::Relaxed)
+            .max(shown);
+        let searching = filter.map_or(false, |f| !f.trim().is_empty());
+        let mut x = left;
+        if searching {
+            // "3 / 94" then the term, dimmer: the numbers are the answer, the
+            // term is the reminder of the question.
+            let count = std::format!("{} / {}", shown, total_unfiltered);
+            x += self.kit_text_mid(x, cy, size::LABEL, &count, col::TEXT2);
+            let term = std::format!("   \u{201C}{}\u{201D}", filter.unwrap_or("").trim());
+            let term = self.kit_fit(&term, size::LABEL, vw * 0.5 - x);
+            self.kit_text_mid(x, cy, size::LABEL, &term, col::TEXT3);
+        } else if folder_open.is_some() {
+            // An open folder: how much of the library it holds. Its name is on
+            // the frame around the games, so it is not repeated here.
+            let count = std::format!("{} / {}", shown, library_total);
+            self.kit_text_mid(x, cy, size::LABEL, &count, col::TEXT2);
+        } else {
+            x += self.kit_text_mid(x, cy, size::LABEL, &crate::loc_ui::games(shown), col::TEXT2);
+            // Folders are walked with buttons on the back of the console, and
+            // nothing else on the home says they exist: show the two glyphs, but
+            // only while the library has a folder to walk.
+            if HOME_HAS_FOLDERS.load(core::sync::atomic::Ordering::Relaxed) {
+                x += 24.0;
+                x += self.kit_button(x, cy, 20.0, Btn::ZL, col::PILL_INK) + 4.0;
+                x += self.kit_button(x, cy, 20.0, Btn::ZR, col::PILL_INK) + 8.0;
+                self.kit_text_mid(x, cy, size::LABEL, crate::loc_ui::ui().folders, col::TEXT3);
             }
-            // A shelf with no search: against the WHOLE LIBRARY, which is the
-            // only comparison left worth making. It used to read "85 / 85" --
-            // the shelf measured against itself, two identical numbers that
-            // answered nothing. "85 / 87" says how much of the library this is.
-            (_, Some(_)) => std::format!(
-                "{} / {}",
-                shown,
-                HOME_LIBRARY_TOTAL
-                    .load(core::sync::atomic::Ordering::Relaxed)
-                    .max(shown),
-            ),
-            // Nothing else on the home says folders exist, and the buttons that
-            // walk them are on the back of the console. So the count line names
-            // them, but ONLY while the library actually has one -- a hint for a
-            // feature you are not using is noise on every other player's screen.
-            _ if HOME_HAS_FOLDERS.load(core::sync::atomic::Ordering::Relaxed) => std::format!(
-                "{}    ZL/ZR: {}",
-                crate::loc::games_count(shown),
-                crate::loc::s().home_folder,
-            ),
-            _ => crate::loc::games_count(shown),
-        };
-        // In the banner's LEFT flank, vertically centred in the 46..102 band,
-        // rather than centred on its own row below. This line is also the only
-        // indicator that a filter is active, so it stays visible in every layout —
-        // it is not decoration that could be dropped to save the row.
-        let ss = 1.8;
-        // Truncated to the flank. Centred on its own row this line could not
-        // collide with anything; beside the logo it can, and a long search term
-        // ran its last characters straight over the banner's left edge — about
-        // 25 characters was enough. The budget is x40 to the logo's edge less a
-        // 16 px gutter, and the logo is drawn centred at 280 px wide.
-        let logo_left = (vw - 280.0) * 0.5;
-        let sub = self.fit_text(&sub, ss, logo_left - 16.0 - 40.0);
-        self.draw_text(40.0, 67.7, ss, &sub, swf::Color::from_rgb(0xAABFD8, 255));
+        }
 
-        // Right flank: the current layout, mirroring the count line (#98). This
-        // is not the active sort that used to sit here and was removed as noise:
-        // the sort is one Y away and named in the modal that sets it, while the
-        // layout is changed from SETTINGS, two screens away, and the four
-        // layouts name themselves nowhere else — you can see that a grid is a
-        // grid, but not that it is called GRID.
-        let view = crate::loc::home_view_label(crate::loc::home_view());
-        let vwid = self.measure_text(view, ss);
-        self.draw_text(
-            vw - 40.0 - vwid,
-            67.7,
-            ss,
-            view,
-            swf::Color::from_rgb(0x7A8CA6, 255),
-        );
+        // Right: the layout's name. It is changed from REGLAGES, two screens
+        // away, and named nowhere else (#98).
+        let view = crate::loc_ui::view_label(crate::loc::home_view());
+        let vwid = self.kit_measure(view, size::LABEL);
+        self.kit_text_mid(vw - 40.0 - vwid, cy, size::LABEL, view, col::TEXT3);
     }
 
     /// Gold diamond on a dark chip, the favourite marker. The UI font has no star
@@ -11690,7 +11683,7 @@ impl SwitchRenderBackend {
         let band_bot = TOP + rows_visible as f32 * ROW_H;
         if entries.is_empty() {
             self.draw_home_empty(band_top, band_bot);
-            self.draw_page_footer(crate::loc::s().list_footer);
+            self.kit_home_footer();
             return;
         }
 
@@ -11862,7 +11855,7 @@ impl SwitchRenderBackend {
             entries.len(),
         );
 
-        self.draw_page_footer(crate::loc::s().list_footer);
+        self.kit_home_footer();
 
         // The reveal grows from the COVER PANEL, not from a text row: the panel is
         // already showing that game's art at full size, so the launch continues it.
@@ -12026,7 +12019,7 @@ impl SwitchRenderBackend {
         self.draw_home_header(banner_tex, banner_w, banner_h, entries.len(), filter, total_unfiltered);
         if entries.is_empty() {
             self.draw_home_empty(124.0, 592.0);
-            self.draw_page_footer(crate::loc::s().list_footer);
+            self.kit_home_footer();
             return;
         }
 
@@ -12211,7 +12204,7 @@ impl SwitchRenderBackend {
             self.draw_overlay_rect(track_x + (track_w - tw) * t, 616.0, tw, 12.0, 0xFF_FF_D7_40);
         }
 
-        self.draw_page_footer(crate::loc::s().list_footer);
+        self.kit_home_footer();
     }
 
     /// JOUER layout 3, the shelf: ONE row of large covers, the selected one grown
@@ -12249,7 +12242,7 @@ impl SwitchRenderBackend {
 
         if entries.is_empty() {
             self.draw_home_empty(124.0, 560.0);
-            self.draw_page_footer(crate::loc::s().list_footer);
+            self.kit_home_footer();
             return;
         }
 
@@ -12480,7 +12473,7 @@ impl SwitchRenderBackend {
             self.draw_overlay_rect(tx, 547.0, tw, 5.0, 0xFF_FF_D7_40);
         }
 
-        self.draw_page_footer(crate::loc::s().list_footer);
+        self.kit_home_footer();
     }
 
     pub fn draw_library_gallery(
@@ -12497,8 +12490,6 @@ impl SwitchRenderBackend {
     ) {
         self.library_clear();
         let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
-        let pulse = selection_pulse(phase_ticks);
 
         // Banner — compact, fully below the navbar strip (y 4..38). Scaled to a
         // small target height so it doesn't dominate the screen (was full 720x144).
@@ -12509,7 +12500,7 @@ impl SwitchRenderBackend {
             // after the header and before any tile work, so a non-empty library
             // reaches exactly the code it did before.
             self.draw_home_empty(126.0, 630.0);
-            self.draw_page_footer(crate::loc::s().list_footer);
+            self.kit_home_footer();
             return;
         }
 
@@ -12803,9 +12794,10 @@ impl SwitchRenderBackend {
 
             // Not the selected one: its frame is drawn after, and rounding the
             // tile here too would trap the tile's dark notches inside that frame.
-            if idx != selection {
-                self.round_corners(tx, ty, tw, th, 6.0);
-            }
+            // Every tile, the selected one included: the focus ring stands off
+            // the tile by a gap of page colour, so there is no frame for the
+            // corner notches to be trapped inside any more.
+            self.round_corners(tx, ty, tw, th, theme::radius::TILE);
 
             // NO AS3 BADGE. It used to sit here, in amber, on every AS3 tile.
             //
@@ -12818,32 +12810,12 @@ impl SwitchRenderBackend {
             // not. The engine is still named in the facts line under the
             // selection, where it belongs: a fact, not a verdict.
 
-            // Favorite marker, top-left. The UI font has
-            // no "*"/star glyph, so we draw the shape directly: a gold diamond on
-            // a dark chip (the chip gives contrast on bright covers). Favorites are
-            // also pinned to the top of the gallery (library::sort_entries).
+            // Favourite marker, top-left: a gold star on a dark chip (the chip
+            // gives contrast on bright covers). The old 5x7 font had no star, so
+            // this used to be a diamond built from a rotated square. Favourites
+            // are also pinned to the top of the gallery (library::sort_entries).
             if crate::favorites::is_favorite(&entries[idx].basename) {
-                let chip = 24.0;
-                let cx0 = tx + 4.0;
-                let cy0 = ty + 4.0;
-                let chip_m = Matrix {
-                    a: chip, b: 0.0, c: 0.0, d: chip,
-                    tx: swf::Twips::from_pixels(cx0 as f64),
-                    ty: swf::Twips::from_pixels(cy0 as f64),
-                };
-                <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xB0_00_00_00), chip_m);
-                // Gold diamond = unit square rotated 45° via the matrix, centered
-                // on the chip. (a+c)/2 = 0 so tx = center x; ty = center y - (b+d)/2.
-                let cx = cx0 + chip * 0.5;
-                let cy = cy0 + chip * 0.5;
-                let sz = 12.0_f32;
-                let cs = 0.70710678_f32; // cos/sin 45°
-                let diamond = Matrix {
-                    a: sz * cs, b: sz * cs, c: -sz * cs, d: sz * cs,
-                    tx: swf::Twips::from_pixels(cx as f64),
-                    ty: swf::Twips::from_pixels((cy - sz * cs) as f64),
-                };
-                <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), diamond);
+                self.kit_favorite_chip(tx + 8.0, ty + 8.0);
             }
         }
 
@@ -12857,11 +12829,18 @@ impl SwitchRenderBackend {
             let fy = frame_y - scroll_px - grow;
             let fw = frame_w + 2.0 * grow;
             let fh = ROW_IMG_H + 2.0 * grow;
-            self.draw_pulse_frame(fx, fy, fw, fh, pulse);
-            // Rounded once, frame included, so the cursor matches the tiles it
-            // travels between.
-            let b = Self::SEL_FRAME_B;
-            self.round_corners(fx - b, fy - b, fw + 2.0 * b, fh + 2.0 * b, 8.0);
+            // A gold ring that stands off the tile, concentric with its corners,
+            // instead of the breathing frame drawn over the cover's edge.
+            self.kit_ring(
+                fx,
+                fy,
+                fw,
+                fh,
+                theme::radius::TILE,
+                theme::ring::GAP,
+                theme::ring::WIDTH,
+                theme::col::GOLD,
+            );
         }
 
         self.clear_clip();
@@ -12877,42 +12856,19 @@ impl SwitchRenderBackend {
             rows_total as usize,
         );
 
-        // Selected-game info line (name + size · version · engine).
+        // The selected game: its name in gold, its facts under it, both on the
+        // grid's left edge rather than centred, so the eye goes from the tiles
+        // straight down to the name. Cut in the MIDDLE when too long, because
+        // what tells two "Scooby-Doo: Mayan Monster Mayhem Episode N" apart is
+        // at the end.
         if let Some(entry) = entries.get(selection) {
-            let nsc = 2.5;
-            // Measured, not counted: the name gets the full screen width and
-            // each character is charged what `draw_text` will actually advance.
-            // A budget derived from a flat 6 px let a Chinese title run off both
-            // ends of the screen.
-            let name = self.fit_text_mid(&entry.display_name, nsc, vw - 60.0);
-            let nw = self.measure_text(&name, nsc);
-            self.draw_text(
-                (vw - nw) * 0.5,
-                // Raised from vh-96 to open the band under the facts line: the
-                // shelf's bottom rule has to fit between them and the footer,
-                // and the footer cannot move down -- the corner stamps sit six
-                // pixels below it. The tile rows end at y588, so there is room
-                // above and none below. Six pixels, no more than the rule needs.
-                vh - 102.0,
-                nsc,
-                &name,
-                swf::Color::from_rgb(0xFFFFFF, 255),
-            );
-            // The same formatter as the other three layouts. This screen used to
-            // build its own string with "//" separators and "SWF V10" — the V says
-            // nothing "SWF" does not.
-            //
-            // Raised from vh-66 with the name above it: this line used to end at
-            // y668 against a footer starting at y678, ten pixels with the
-            // shelf's bottom rule to fit inside. It now ends at y660, the rule
-            // sits at y670, and the footer has not moved.
-            let facts = Self::game_facts(entry);
-            let isc = 2.0;
-            let iw = self.facts_width(&facts, isc);
-            self.draw_facts((vw - iw) * 0.5, vh - 74.0, isc, &facts);
+            use theme::{col, size};
+            let name = self.kit_fit_mid(&entry.display_name, size::TITLE, vw - 2.0 * LEFT);
+            self.kit_text_mid(LEFT, 606.0, size::TITLE, &name, col::GOLD);
+            self.kit_game_facts(LEFT, 642.0, entry);
         }
 
-        self.draw_page_footer(crate::loc::s().list_footer);
+        self.kit_home_footer();
 
         unsafe {
             glUseProgram(0);
@@ -15736,17 +15692,6 @@ fn format_size_pretty(bytes: u64) -> std::string::String {
 /// — accurate to ~3 decimal places, no libm dependency, branch-free except
 /// for the period fold. Plenty for visual pulses (we only use it to
 /// modulate amber → bright-amber and a 4-pixel cursor offset).
-/// Phase of the shared selection pulse, in [-1, 1], from a tick count.
-///
-/// Every cursor screen re-derived `sin(2*PI*t / 1.6)` with its own copy of the
-/// period, so the three cursors were in step only by luck: a screen that typed a
-/// different period would breathe out of time with the rest, for no reason a
-/// reader of either site could see.
-fn selection_pulse(ticks: u64) -> f32 {
-    let secs = ticks as f64 / (unsafe { ruffle_tick_freq() } as f64);
-    approx_sin(secs as f32 * (2.0 * core::f32::consts::PI / 1.6))
-}
-
 fn approx_sin(x: f32) -> f32 {
     // Fold to [-π, π].
     let two_pi = 2.0 * core::f32::consts::PI;
