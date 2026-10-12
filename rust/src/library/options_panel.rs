@@ -259,6 +259,10 @@ pub(crate) fn with_options_sheet<R>(
     let oc_at = POWER_ORDER.iter().position(|m| *m == p.power).unwrap_or(0);
     let zoom = std::format!("{} %", p.zoom);
     let zoom_ends = crate::loc::zoom_preset_ends(p.zoom);
+    // Where the zoom is fine-tuned and the picture framed: the pause's own
+    // row and page names, as Réglages names them for the default.
+    let zoom_path = settings_tab::menu_path(&[lc.pause_title, lc.menu_screen, lc.set_zoom]);
+    let zoom_help = u.help_opt_zoom.replacen("{}", &zoom_path, 1);
     // A setting with no value of its own says so ("par défaut"): keeping a
     // value gives the game its own, and X takes it back. Not on the row
     // being changed, where the arrows need the room.
@@ -294,8 +298,7 @@ pub(crate) fn with_options_sheet<R>(
         .zip(OPTIONS_ENTRIES.iter())
         .map(|(r, k)| r.note_opt(note(k)).armed_if(armed.is_some() && *k == key))
         .collect();
-    let zoom_help: std::string::String;
-    let help: &str = match key {
+    let help = match key {
         "FAVORI" => u.help_opt_fav,
         "TOUCHES" => u.help_keys,
         "JAQUETTE" => u.help_opt_cover,
@@ -304,13 +307,7 @@ pub(crate) fn with_options_sheet<R>(
         "RACCOURCI" => u.help_opt_home,
         "AFFICHAGE" => u.help_display,
         "ROTATION" => u.help_rotation,
-        "ZOOM" => {
-            // Where the zoom is fine-tuned and the picture framed: the pause's
-            // own row and page names, as Réglages names them for the default.
-            let path = settings_tab::menu_path(&[lc.pause_title, lc.menu_screen, lc.set_zoom]);
-            zoom_help = u.help_opt_zoom.replacen("{}", &path, 1);
-            &zoom_help
-        }
+        "ZOOM" => zoom_help.as_str(),
         "PIXELS" => u.help_pixels,
         "FILTRE" => u.help_filter,
         "OVERCLOCK" => match p.power {
