@@ -134,6 +134,9 @@ pub struct Ui {
     pub help_show_cursor: &'static str,
     pub help_gyro: &'static str,
     pub help_revert: &'static str,
+    /// The empty library: A's verb, and the line under the folder.
+    pub find_games: &'static str,
+    pub empty_import: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -231,6 +234,8 @@ const EN: Ui = Ui {
     help_show_cursor: "Shows or hides the mouse arrow over the game.",
     help_gyro: "Move the cursor by tilting the console: Pointer aims by turning it, Marble rolls with the tilt.",
     help_revert: "Puts back the controls you had before.",
+    find_games: "Find games",
+    empty_import: "Or search Flashpoint and archive.org from the Import tab.",
 };
 
 const FR: Ui = Ui {
@@ -328,6 +333,8 @@ const FR: Ui = Ui {
     help_show_cursor: "Affiche ou masque la flèche de la souris sur le jeu.",
     help_gyro: "Bouge le curseur en inclinant la console : Visée vise en la tournant, Bille roule avec l'inclinaison.",
     help_revert: "Remet les touches que tu avais avant.",
+    find_games: "Trouver des jeux",
+    empty_import: "Ou cherche sur Flashpoint et archive.org depuis l'onglet Importer.",
 };
 
 const ES: Ui = Ui {
@@ -425,6 +432,8 @@ const ES: Ui = Ui {
     help_show_cursor: "Muestra u oculta la flecha del ratón sobre el juego.",
     help_gyro: "Mueve el cursor inclinando la consola: Puntero apunta al girarla, Canica rueda con la inclinación.",
     help_revert: "Vuelve a poner los controles que tenías antes.",
+    find_games: "Buscar juegos",
+    empty_import: "O busca en Flashpoint y archive.org desde la pestaña Importar.",
 };
 
 const RU: Ui = Ui {
@@ -522,6 +531,8 @@ const RU: Ui = Ui {
     help_show_cursor: "Показывает или скрывает стрелку мыши поверх игры.",
     help_gyro: "Двигай курсор наклоном консоли: «Прицел» целится поворотом, «Шарик» катится от наклона.",
     help_revert: "Возвращает раскладку, которая была раньше.",
+    find_games: "Найти игры",
+    empty_import: "Или найди игры на Flashpoint и archive.org во вкладке «Загрузка».",
 };
 
 const DE: Ui = Ui {
@@ -619,6 +630,8 @@ const DE: Ui = Ui {
     help_show_cursor: "Zeigt oder verbirgt den Mauspfeil über dem Spiel.",
     help_gyro: "Bewege den Zeiger durch Neigen der Konsole: Zeiger zielt beim Drehen, Murmel rollt mit der Neigung.",
     help_revert: "Stellt die Belegung wieder her, die du vorher hattest.",
+    find_games: "Spiele finden",
+    empty_import: "Oder suche über den Tab Import auf Flashpoint und archive.org.",
 };
 
 const IT: Ui = Ui {
@@ -716,6 +729,8 @@ const IT: Ui = Ui {
     help_show_cursor: "Mostra o nasconde la freccia del mouse sul gioco.",
     help_gyro: "Muovi il cursore inclinando la console: Puntatore mira ruotandola, Biglia rotola con l'inclinazione.",
     help_revert: "Rimette i comandi che avevi prima.",
+    find_games: "Trova giochi",
+    empty_import: "Oppure cerca su Flashpoint e archive.org dalla scheda Importa.",
 };
 
 const PT: Ui = Ui {
@@ -813,6 +828,8 @@ const PT: Ui = Ui {
     help_show_cursor: "Mostra ou esconde a seta do mouse sobre o jogo.",
     help_gyro: "Mova o cursor inclinando o console: Ponteiro mira ao girar, Bolinha rola com a inclinação.",
     help_revert: "Volta os controles que você tinha antes.",
+    find_games: "Encontrar jogos",
+    empty_import: "Ou procure no Flashpoint e no archive.org pela aba Importar.",
 };
 
 const ZH: Ui = Ui {
@@ -910,6 +927,8 @@ const ZH: Ui = Ui {
     help_show_cursor: "在游戏上显示或隐藏鼠标箭头。",
     help_gyro: "倾斜主机来移动光标：指针模式靠转动瞄准，弹珠模式随倾斜滚动。",
     help_revert: "恢复你之前的按键配置。",
+    find_games: "寻找游戏",
+    empty_import: "或者在“导入”页搜索 Flashpoint 和 archive.org。",
 };
 
 const TR: Ui = Ui {
@@ -1007,6 +1026,8 @@ const TR: Ui = Ui {
     help_show_cursor: "Oyunun üzerindeki fare okunu gösterir veya gizler.",
     help_gyro: "İmleci konsolu eğerek hareket ettir: İşaretçi döndürerek nişan alır, Bilye eğimle yuvarlanır.",
     help_revert: "Önceki kontrollerini geri getirir.",
+    find_games: "Oyun bul",
+    empty_import: "Ya da Aktar sekmesinden Flashpoint ve archive.org'da ara.",
 };
 
 pub fn ui() -> &'static Ui {

@@ -3925,10 +3925,11 @@ pub fn input(button: &str) -> bool {
         // only satisfies exhaustiveness.
         Screen::Launching { .. } => true,
         Screen::Empty => {
-            match button {
-                "Minus" => { s.screen = Screen::Quit; }
-                "Y" => { s.screen = distant_idle_at(0); }
-                _ => {}
+            // A (and Y, its old shortcut) go and find games. Minus used to quit
+            // the app from here, the one screen where the search button closed
+            // everything; quitting is in RÉGLAGES, like from any other tab.
+            if matches!(button, "A" | "Y") {
+                s.screen = distant_idle_at(0);
             }
             true
         }

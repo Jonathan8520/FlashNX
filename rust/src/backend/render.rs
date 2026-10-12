@@ -307,26 +307,6 @@ fn is_cjk_wrappable(c: char) -> bool {
     )
 }
 
-/// Punctuation that may not start a line: it belongs to the character before
-/// it. Without this a Chinese title breaks right before its comma.
-fn cjk_no_line_start(c: char) -> bool {
-    matches!(c,
-        '\u{3001}' | '\u{3002}' | '\u{FF0C}' | '\u{FF0E}' | '\u{FF01}' | '\u{FF1F}'
-        | '\u{FF1A}' | '\u{FF1B}' | '\u{FF09}' | '\u{FF3D}' | '\u{FF5D}' | '\u{300D}'
-        | '\u{300F}' | '\u{3011}' | '\u{3015}' | '\u{2019}' | '\u{201D}'
-        | ',' | '.' | '!' | '?' | ':' | ';' | ')' | ']' | '}'
-    )
-}
-
-/// The mirror image: an opening bracket may not end a line.
-fn cjk_no_line_end(c: char) -> bool {
-    matches!(c,
-        '\u{FF08}' | '\u{FF3B}' | '\u{FF5B}' | '\u{300C}' | '\u{300E}' | '\u{3010}'
-        | '\u{3014}' | '\u{2018}' | '\u{201C}'
-        | '(' | '[' | '{'
-    )
-}
-
 static GLYPHS: &[(char, Glyph)] = &[
     (' ', ["     ", "     ", "     ", "     ", "     ", "     ", "     "]),
     ('A', [" ### ", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"]),
@@ -623,9 +603,6 @@ pub fn pan_limits(percent: u16, screen_w: f32, screen_h: f32) -> (i32, i32) {
         ((screen_h * (z - 1.0)) * 0.5).max(0.0) as i32,
     )
 }
-
-const FACTS_VALUE: u32 = 0xAABFD8;
-const FACTS_MUTED: u32 = 0x7A8CA6;
 
 // Scrollbar palette, one copy for the seven places that spelled it out inline.
 // They drifted exactly where an inline copy always drifts: the Flashpoint
@@ -8765,34 +8742,9 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
-    // (free helper for `draw_text`'s batching — see `push_text_quad` below)
-
-    /// Draw a string. ASCII + accented Latin + Cyrillic come from the embedded
-    /// 5x7 pixel font (see `GLYPHS`), folded to uppercase. Any other codepoint
-    /// (CJK etc.) falls back to the shared-font glyph atlas (`draw_atlas_glyph`)
-    /// as a full-width cell. `x`, `y` are top-left in screen pixels; each lit
-    /// bitmap pixel becomes a `scale × scale` solid rect (same path as
-    /// `draw_rect`). Unknown ASCII renders as blank space.
-    /// Text at the old call sites' coordinates: `y` is the top of a 7-unit-tall
-    /// capital, `scale` the 5x7 font's pixel size.
-    ///
-    /// Drawn in the console font now (`render/kit/text.rs`), at the size those
-    /// coordinates imply (see `legacy_px`), with the capitals centred in the box
-    /// the 5x7 capitals used to fill. Every screen not yet rebuilt on the kit
-    /// gets real lower case, accents and widths from this alone; the 5x7 font
-    /// stays as the fallback for a console without the shared fonts.
-    pub fn draw_text(&mut self, x: f32, y: f32, scale: f32, text: &str, color: swf::Color) {
-        if !kit::text::fonts_available() {
-            self.draw_text_5x7(x, y, scale, text, color);
-            return;
-        }
-        let px = legacy_px(scale);
-        let baseline = y + 3.5 * scale + kit::text::cap_height_px(px) * 0.5;
-        let rgba = ((color.a as u32) << 24) | ((color.r as u32) << 16) | ((color.g as u32) << 8) | color.b as u32;
-        self.kit_text_baseline(x, baseline, px, text, rgba);
-    }
-
-    /// The hand-drawn 5x7 font, kept for a console without the shared fonts.
+    /// The hand-drawn 5x7 font, kept for a console without the shared fonts:
+    /// every screen draws through the kit (`render/kit/text.rs`), which falls
+    /// back to this when the console fonts cannot be loaded.
     pub fn draw_text_5x7(&mut self, x: f32, y: f32, scale: f32, text: &str, color: swf::Color) {
         // Every lit RUN of the 5x7 font used to be its own `draw_rect` — a
         // uniform upload + glBufferData + glDrawArrays each, ~8 per character.
@@ -8928,154 +8880,12 @@ impl SwitchRenderBackend {
         verts.clear();
     }
 
-    /// Measure rendered width of `text` in pixels at the given scale. Mirrors
-    /// `draw_text`'s per-char advance EXACTLY (bitmap-font chars = 6 units,
-    /// CJK = full-width cell) so centring lines up with what's drawn — and so
-    /// it works without the (lazy) atlas existing yet.
-    /// `text`, shortened with a trailing ellipsis until it fits `max_w`.
-    ///
-    /// Flashpoint keeps a game's full published name, so titles run long
-    /// ("Scooby-Doo: Mayan Monster Mayhem Episode 4 - The Temple of Lost Souls").
-    /// A column that lets them run does not just look untidy, it draws over
-    /// whatever sits beside it. Cuts by CHARACTER, which is what the 5x7 pixel
-    /// font measures in anyway.
-    pub fn fit_text(&self, text: &str, scale: f32, max_w: f32) -> std::string::String {
-        if self.measure_text(text, scale) <= max_w {
-            return text.to_string();
-        }
-        const ELL: &str = "...";
-        let ell_w = self.measure_text(ELL, scale);
-        let budget = max_w - ell_w;
-        if budget <= 0.0 {
-            return std::string::String::new();
-        }
-        let mut out = std::string::String::new();
-        let mut w = 0.0;
-        for ch in text.chars() {
-            // `char_advance`, not `measure_text(&ch.to_string())`: the old form
-            // allocated a String per character of every ellipsised label.
-            let cw = char_advance(ch, scale);
-            if w + cw > budget {
-                break;
-            }
-            out.push(ch);
-            w += cw;
-        }
-        out.push_str(ELL);
-        out
-    }
-
-    /// Split `text` over at most two lines that each fit `max_w`, breaking on a
-    /// space. The detail panels show the game you are looking at, so its name is
-    /// worth two lines rather than an ellipsis: the list beside them is where a
-    /// title gets cut, because there it only has to be recognisable.
-    /// The second line is still ellipsised if even two lines are not enough.
-    /// Wrap `text` onto at most `max_lines` lines of `max_w`, ellipsising only the
-    /// last one.
-    ///
-    /// `wrap_text_2` is this with `max_lines` hard-wired to two, which is why
-    /// BANDE cut "Scooby-Doo: Mayan Monster Mayhem Episode 4 - The Temple of Lost
-    /// Souls" mid-title with 220 px of empty column under it: the limit was the
-    /// helper's, not the layout's.
-    pub fn wrap_text_n(
-        &self,
-        text: &str,
-        scale: f32,
-        max_w: f32,
-        max_lines: usize,
-    ) -> std::vec::Vec<std::string::String> {
-        let mut out: std::vec::Vec<std::string::String> = std::vec::Vec::new();
-        let mut rest = text.trim().to_string();
-        while !rest.is_empty() && out.len() + 1 < max_lines {
-            if self.measure_text(&rest, scale) <= max_w {
-                break;
-            }
-            let Some((end, next)) = self.wrap_point(&rest, scale, max_w) else {
-                break; // one unbroken word: the tail below cuts it
-            };
-            out.push(rest[..end].trim_end().to_string());
-            rest = rest[next..].trim_start().to_string();
-        }
-        if !rest.is_empty() {
-            out.push(self.fit_text(&rest, scale, max_w));
-        }
-        out
-    }
-
-    pub fn wrap_text_2(&self, text: &str, scale: f32, max_w: f32) -> (std::string::String, std::string::String) {
-        if self.measure_text(text, scale) <= max_w {
-            return (text.to_string(), std::string::String::new());
-        }
-        // Longest first line that still fits, ending on a break opportunity.
-        let Some((end, next)) = self.wrap_point(text, scale, max_w) else {
-            // One unbroken word: cut it rather than overflow.
-            return (self.fit_text(text, scale, max_w), std::string::String::new());
-        };
-        let rest = text[next..].trim_start();
-        (
-            text[..end].trim_end().to_string(),
-            self.fit_text(rest, scale, max_w),
-        )
-    }
-
     pub fn measure_text(&self, text: &str, scale: f32) -> f32 {
         let mut w = 0.0;
         for ch in text.chars() {
             w += char_advance(ch, scale);
         }
         w
-    }
-
-    /// Last break opportunity in `text` whose line still fits `max_w`, as
-    /// `(byte index the line ends at, byte index the next line starts at)`.
-    ///
-    /// Latin breaks on spaces. Chinese, Japanese and Korean are written without
-    /// any, so a title in one of those scripts offered no break at all: it was
-    /// ellipsised onto a single line under a panel with room for three (visible
-    /// as soon as issue #75 let a player type one in). In those scripts the
-    /// break sits between any two characters, minus the closing punctuation
-    /// that may not open a line and the opening brackets that may not close one.
-    ///
-    /// Widths accumulate as the scan walks the string rather than re-measuring
-    /// every prefix: with a break candidate at every single character, the
-    /// prefix-per-candidate version was quadratic in the title length.
-    fn wrap_point(&self, text: &str, scale: f32, max_w: f32) -> Option<(usize, usize)> {
-        let mut best: Option<(usize, usize)> = None;
-        let mut prev: Option<(usize, char)> = None;
-        // Width of `text[..i]` for the `i` the loop is looking at.
-        let mut w = 0.0f32;
-        for (i, ch) in text.char_indices() {
-            if let Some((pi, pc)) = prev {
-                // (line ends here, next line starts here, width of that line).
-                // A space is eaten by the break; a CJK break keeps both
-                // characters, so the line runs up to `i` included.
-                let point = if pc == ' ' {
-                    Some((pi, i, w - char_advance(pc, scale)))
-                } else if (is_cjk_wrappable(pc) || is_cjk_wrappable(ch))
-                    && ch != ' '
-                    && !cjk_no_line_start(ch)
-                    && !cjk_no_line_end(pc)
-                {
-                    Some((i, i, w))
-                } else {
-                    None
-                };
-                if let Some((end, next, line_w)) = point {
-                    if end == 0 {
-                        // Never emit an empty line: it would consume no input
-                        // and the caller's loop would not terminate.
-                    } else if line_w <= max_w {
-                        best = Some((end, next));
-                    } else {
-                        // Prefixes only grow, so nothing further out fits either.
-                        break;
-                    }
-                }
-            }
-            w += char_advance(ch, scale);
-            prev = Some((i, ch));
-        }
-        best
     }
 
     /// Draw one CJK (or other non-bitmap) glyph from the shared-font atlas at
@@ -9342,22 +9152,6 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
-    /// Draw `text` with a dark outline around it, for the one case where text
-    /// has to sit directly on the game's picture with no plate under it: it must
-    /// stay readable over a white sky and over a black cave, and any plate wide
-    /// enough to guarantee that would hide the thing being looked at.
-    ///
-    /// Four offset copies rather than a single drop shadow, because a shadow
-    /// only rescues the two edges it falls on.
-    fn draw_text_outlined(&mut self, x: f32, y: f32, scale: f32, text: &str, color: swf::Color) {
-        let o = (scale * 0.9).max(2.0);
-        let edge = swf::Color::from_rgba(0xE6_00_00_00);
-        for (dx, dy) in [(-o, 0.0), (o, 0.0), (0.0, -o), (0.0, o)] {
-            self.draw_text(x + dx, y + dy, scale, text, edge);
-        }
-        self.draw_text(x, y, scale, text, color);
-    }
-
     /// Zoom-adjust mode (issue #101): the framing legend, over an untouched
     /// picture.
     ///
@@ -9442,106 +9236,81 @@ impl SwitchRenderBackend {
     /// the letters of FPS and OC -- so this pulls no shared-font glyph and stays
     /// safe in applet mode, where loading that font is fatal.
     pub fn draw_fps_overlay(&mut self) {
+        use theme::col;
         let (measured, nominal) = fps_readout();
         unsafe {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             glDisable(GL_STENCIL_TEST);
         }
-        let (text, color) = if let (Some(real_x10), None) = (measured, nominal) {
-            // The movie declares no usable rate, so there is no denominator and
-            // no ratio. The measured rate alone still answers "is this running".
-            (
-                std::format!("FPS {}", fps_rate_str(real_x10)),
-                swf::Color::from_rgb(0xFFFFFF, 255),
-            )
+        // The rating, as a dot's colour: green at full speed, amber where the
+        // slowdown shows, red below two thirds. A reading aid over numbers that
+        // stay exact, so a glance is enough while both hands are on the game.
+        let (text, dot) = if let (Some(real_x10), None) = (measured, nominal) {
+            // The movie declares no usable rate: no denominator, no ratio, but
+            // the measured rate still answers "is this running".
+            (std::format!("{} FPS", fps_rate_str(real_x10)), col::TEXT3)
         } else if measured.is_none() {
-            // No window has closed yet. Show the nominal if we have one, so the
-            // counter is visibly alive instead of looking like a setting that
-            // did not take. NOT the same as a measured zero, which is a real
-            // reading and gets the red treatment below.
+            // No window has closed yet: the nominal, so the counter is visibly
+            // alive. Not a measured zero, which is real and gets red below.
             (
                 match nominal {
-                    Some(n) => std::format!("FPS -- / {}", fps_rate_str(n)),
-                    None => std::string::String::from("FPS --"),
+                    Some(n) => std::format!("-- / {} FPS", fps_rate_str(n)),
+                    None => std::string::String::from("-- FPS"),
                 },
-                swf::Color::from_rgb(0xFFFFFF, 255),
+                col::TEXT3,
             )
         } else {
             let real_x10 = measured.unwrap_or(0);
             let nominal_x10 = nominal.unwrap_or(0);
-            // Percent of nominal, in hundredths. `fps_readout` guarantees a
-            // non-zero denominator.
+            // `fps_readout` guarantees a non-zero denominator.
             let pct = (real_x10 as u64 * 100 / nominal_x10 as u64) as u32;
-            // Green at full speed, amber where the slowdown is noticeable, red
-            // below two thirds. The two thresholds are a reading aid layered on
-            // top of numbers that stay exact -- they exist so a glance is enough
-            // while both hands are on the game.
-            let color = match pct {
-                0..=65 => swf::Color::from_rgb(0xFF5040, 255),
-                66..=94 => swf::Color::from_rgb(0xFFD740, 255),
-                _ => swf::Color::from_rgb(0x4CAF50, 255),
+            let dot = match pct {
+                0..=65 => col::DANGER,
+                66..=94 => col::GOLD,
+                _ => col::OK,
             };
             (
                 std::format!(
-                    "FPS {} / {}   {}.{:02}X",
+                    "{} / {} FPS  \u{00B7}  {}.{:02}\u{00D7}",
                     fps_rate_str(real_x10),
                     fps_rate_str(nominal_x10),
                     pct / 100,
                     pct % 100,
                 ),
-                color,
+                dot,
             )
         };
-        const SCALE: f32 = 2.0;
-        const MARGIN: f32 = 16.0;
-        // The LOGICAL viewport, which is portrait while the picture is turned
-        // (#78) -- `world_matrix` composes the quarter-turn itself, so a corner
-        // named here is that corner of the turned picture.
+        const PX: f32 = 15.0;
+        const H: f32 = 28.0;
+        const MARGIN: f32 = 14.0;
+        // The LOGICAL viewport, portrait while the picture is turned (#78):
+        // `world_matrix` composes the quarter-turn, so this corner is that corner
+        // of the turned picture. Pinned to the RIGHT edge, so the pill grows to
+        // the left as the number does instead of sliding.
         let vw = self.dimensions.width as f32;
-        let w = self.measure_text(&text, SCALE);
-        // Pinned to the RIGHT edge. The left one moves by a character every time
-        // the rate crosses a ten, and a number that slides sideways is harder to
-        // read than one that grows. Top corner because the pause panel is
-        // centred and the framing legend owns the middle of both edges.
-        self.draw_text_outlined(vw - w - MARGIN, MARGIN, SCALE, &text, color);
-        // "OC" to its left while the overclock is IN FORCE (the mode the
-        // hardware holds, not the stored preference): a raise dropped for the
-        // battery, or not yet taken back after HOME, then shows as its absence
-        // next to the number it explains. Its own colour, apart from the speed
-        // colours, so it never reads as part of the rating.
+        let tw = self.kit_measure(&text, PX);
+        let w = 12.0 + 8.0 + 8.0 + tw + 12.0;
+        let x = (vw - MARGIN - w).round();
+        let y = MARGIN;
+        self.kit_rrect(x, y, w, H, H * 0.5, 0xB8_0A_10_1C);
+        self.kit_rrect(x + 12.0, y + H * 0.5 - 4.0, 8.0, 8.0, 4.0, dot);
+        self.kit_text_mid(x + 12.0 + 8.0 + 8.0, y + H * 0.5, PX, &text, col::TEXT);
+        // "OC" while the overclock is IN FORCE (the mode the hardware holds, not
+        // the stored preference): a raise dropped for the battery then shows as
+        // its absence next to the number it explains.
         if current_power_mode() == 1 {
-            const GAP: f32 = 14.0;
-            let ow = self.measure_text("OC", SCALE);
-            self.draw_text_outlined(
-                vw - w - MARGIN - GAP - ow,
-                MARGIN,
-                SCALE,
-                "OC",
-                swf::Color::from_rgb(0x40C4FF, 255),
-            );
+            let ow = self.kit_measure("OC", PX);
+            let cw = ow + 20.0;
+            let cx = x - 8.0 - cw;
+            self.kit_rrect(cx, y, cw, H, H * 0.5, 0xB8_0A_10_1C);
+            self.kit_text_mid(cx + 10.0, y + H * 0.5, PX, "OC", 0xFF_40_C4_FF);
         }
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
         }
         self.gl_state.invalidate();
-    }
-
-    /// Largest scale at or below `want` that fits `text` in a `w`-wide box, or
-    /// None when even scale 1 overflows — the renderer's way of saying "this
-    /// shape is too small to label", which is true of the SL/SR rail buttons.
-    fn label_scale(&self, text: &str, w: f32, want: f32) -> Option<f32> {
-        let full = self.measure_text(text, want);
-        if full <= w {
-            return Some(want);
-        }
-        let s = want * w / full;
-        if s >= 1.0 {
-            Some(s)
-        } else {
-            None
-        }
     }
 
     /// TOUCHES pad view — the keymap editor.
@@ -9665,15 +9434,10 @@ impl SwitchRenderBackend {
             let (mx, my, mw, mh) = crate::keymap::PAD_MINUS;
             let (x, y, d) = (px(mx), py(my), mw * u);
             self.draw_round_rect(x, y, d, mh * u, d * 0.5, ICON_LOCK_COL);
-            if let Some(s) = self.label_scale("-", d - 3.0, 1.6) {
-                let lw = self.measure_text("-", s);
-                self.draw_text(
-                    x + (d - lw) * 0.5,
-                    y + (mh * u - 7.0 * s) * 0.5,
-                    s,
-                    "-",
-                    swf::Color::from_rgb(ICON_NUB_COL, 255),
-                );
+            let lp = (d * 0.8).clamp(8.0, 16.0).round();
+            let lw = self.kit_measure("\u{2212}", lp);
+            if lw <= d - 2.0 {
+                self.kit_text_mid((x + (d - lw) * 0.5).round(), y + mh * u * 0.5, lp, "\u{2212}", 0xFF00_0000 | ICON_NUB_COL);
             }
         }
 
@@ -9761,15 +9525,16 @@ impl SwitchRenderBackend {
                     } else {
                         0xE8EEF6
                     };
-                    if let Some(s) = self.label_scale(slot.glyph, w - 4.0, 2.0) {
-                        let lw = self.measure_text(slot.glyph, s);
-                        self.draw_text(
-                            x + (w - lw) * 0.5,
-                            y + (h - 7.0 * s) * 0.5,
-                            s,
-                            slot.glyph,
-                            swf::Color::from_rgb(txt, 255),
-                        );
+                    // The label shrinks to fit its button, and a button too small
+                    // for one even at 9 px (the SL/SR rails) goes without.
+                    let mut lp = (h * 0.55).clamp(9.0, 17.0).round();
+                    let mut lw = self.kit_measure(slot.glyph, lp);
+                    if lw > w - 4.0 {
+                        lp = (lp * (w - 4.0) / lw).floor();
+                        lw = self.kit_measure(slot.glyph, lp);
+                    }
+                    if lp >= 9.0 {
+                        self.kit_text_mid((x + (w - lw) * 0.5).round(), y + h * 0.5, lp, slot.glyph, 0xFF00_0000 | txt);
                     }
                 }
             }
@@ -10166,58 +9931,39 @@ impl SwitchRenderBackend {
 
     /// Empty-state screen — no `.swf` found on SD. Shows where to drop files.
     pub fn draw_library_empty(&mut self) {
+        use theme::{col, radius, size};
         self.library_clear();
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
-
-        let title = crate::loc::s().empty_title;
-        let scale_title = 6.0;
-        let title_w = self.measure_text(title, scale_title);
-        // Drop shadow on the title — dark navy offset (4, 4) under the white.
-        self.draw_text(
-            (vw - title_w) * 0.5 + 4.0,
-            vh * 0.30 + 4.0,
-            scale_title,
-            title,
-            swf::Color::from_rgb(0x000000, 255),
-        );
-        self.draw_text(
-            (vw - title_w) * 0.5,
-            vh * 0.30,
-            scale_title,
-            title,
-            swf::Color::from_rgb(0xFFD740, 255),
-        );
-
         let lc = crate::loc::s();
-        let lines = [lc.empty_l1, lc.empty_l2, lc.empty_l3];
-        let scale_msg = 2.5;
-        let mut y = vh * 0.48;
-        for line in &lines {
-            let w = self.measure_text(line, scale_msg);
-            self.draw_text(
-                (vw - w) * 0.5,
-                y,
-                scale_msg,
-                line,
-                swf::Color::from_rgb(0xCCCCCC, 255),
-            );
-            y += 40.0;
-        }
+        let u = crate::loc_ui::ui();
+        let center = |s: &mut Self, text: &str, px: f32, cy: f32, ink: u32| {
+            let w = s.kit_measure(text, px);
+            s.kit_text_mid(((vw - w) * 0.5).round(), cy, px, text, ink);
+        };
+        // An icon, what is missing, where games go (the folder FlashNX really
+        // uses, not the default it once had), and the other way to get some.
+        let mut cy = 200.0;
+        self.kit_icon(((vw - 64.0) * 0.5).round(), cy, 64.0, Icon::Gamepad, col::TEXT3);
+        cy += 72.0;
+        center(self, lc.empty_title, size::TITLE + 6.0, cy, col::TEXT);
+        cy += 48.0;
+        center(self, lc.empty_l1, size::BODY, cy, col::TEXT2);
+        cy += 40.0;
+        let root = crate::library::primary_root();
+        let path = std::format!("{}/", root.trim_start_matches("sdmc:").trim_end_matches('/'));
+        let pw = self.kit_measure(&path, size::BODY) + 20.0 + 12.0 + 32.0;
+        let px0 = ((vw - pw) * 0.5).round();
+        self.kit_rrect(px0, cy - 22.0, pw, 44.0, radius::ROW, col::CHIP);
+        self.kit_icon(px0 + 16.0, cy, 20.0, Icon::FolderOpen, col::GOLD);
+        self.kit_text_mid(px0 + 16.0 + 20.0 + 12.0, cy, size::BODY, &path, col::TEXT);
+        cy += 44.0;
+        center(self, lc.empty_l3, size::BODY, cy, col::TEXT3);
+        cy += 56.0;
+        center(self, u.empty_import, size::LABEL + 1.0, cy, col::TEXT3);
 
-        // Footer: Y opens DISTANT mode (so a user with empty SD can
-        // still import via archive.org without needing to drop files
-        // on SD first); - exits .nro.
-        const HELP_SCALE: f32 = 2.0;
-        let help = crate::loc::s().empty_footer;
-        let help_w = self.measure_text(help, HELP_SCALE);
-        self.draw_text(
-            (vw - help_w) * 0.5,
-            vh - 60.0,
-            HELP_SCALE,
-            help,
-            swf::Color::from_rgb(0x99AABB, 255),
-        );
+        self.kit_footer_band();
+        self.kit_hints_right(vw - 40.0, vh - 24.0, &[(&[Btn::A], u.find_games)]);
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
@@ -10408,18 +10154,20 @@ impl SwitchRenderBackend {
                 self.draw_textured_rect(x + (w - dw) * 0.5, y + (h - dh) * 0.5, dw, dh, tex);
             }
             _ => {
-                // No cover: the colour chip + initials fill the window.
-                self.draw_overlay_rect(x, y, w, h, 0xFF_00_00_00 | color_chip);
-                let initials: std::string::String = display_name.chars().take(3).collect();
-                let isc = (h / 36.0).clamp(3.0, 14.0);
-                let tw = self.measure_text(&initials, isc);
-                self.draw_text(
-                    x + (w - tw) * 0.5,
-                    y + (h - 7.0 * isc) * 0.5,
-                    isc,
-                    &initials,
-                    swf::Color::from_rgb(0xFFFFFF, 255),
-                );
+                // No cover: the tile the library showed, its colour and the
+                // game's name, grown with the window.
+                let chip = color_chip & 0x00FF_FFFF;
+                self.draw_overlay_rect(x, y, w, h, 0xFF00_0000 | kit::cover::mix_rgb(chip, theme::col::BG & 0x00FF_FFFF, 0.55));
+                let px = (h / 9.0).clamp(18.0, 64.0).round();
+                let lines = self.kit_wrap(display_name, px, w * 0.8, 3);
+                let lh = (px * 1.25).round();
+                let mut cy = y + (h - lh * (lines.len() as f32 - 1.0)) * 0.5;
+                let ink = 0xFF00_0000 | kit::cover::mix_rgb(chip, 0xFF_FF_FF, 0.85);
+                for line in &lines {
+                    let tw = self.kit_measure(line, px);
+                    self.kit_text_mid((x + (w - tw) * 0.5).round(), cy, px, line, ink);
+                    cy += lh;
+                }
             }
         }
     }
@@ -10703,7 +10451,39 @@ impl SwitchRenderBackend {
     /// The selected game's facts on one line, the kit way: values in the second
     /// text colour, separated by a dim middle dot. Returns the width drawn.
     fn kit_game_facts(&mut self, x: f32, cy: f32, entry: &crate::library::Entry) -> f32 {
-        use theme::{col, size};
+        self.kit_game_facts_px(x, cy, entry, theme::size::LABEL)
+    }
+
+    /// Width `kit_game_facts_px` will take, for centring it.
+    fn kit_game_facts_width(&mut self, entry: &crate::library::Entry, px: f32) -> f32 {
+        let parts = Self::kit_facts_parts(entry);
+        let sep = self.kit_measure("  \u{00B7}  ", px);
+        let mut w = 0.0;
+        for (i, p) in parts.iter().enumerate() {
+            if i > 0 {
+                w += sep;
+            }
+            w += self.kit_measure(p, px);
+        }
+        w
+    }
+
+    /// `kit_game_facts` at a chosen size.
+    fn kit_game_facts_px(&mut self, x: f32, cy: f32, entry: &crate::library::Entry, px: f32) -> f32 {
+        use theme::col;
+        let parts = Self::kit_facts_parts(entry);
+        let mut pen = x;
+        for (i, p) in parts.iter().enumerate() {
+            if i > 0 {
+                pen += self.kit_text_mid(pen, cy, px, "  \u{00B7}  ", col::TEXT3);
+            }
+            pen += self.kit_text_mid(pen, cy, px, p, col::TEXT2);
+        }
+        pen - x
+    }
+
+    /// The facts themselves: size, what the file is, the engine, time played.
+    fn kit_facts_parts(entry: &crate::library::Entry) -> std::vec::Vec<std::string::String> {
         let mut parts: std::vec::Vec<std::string::String> = std::vec::Vec::with_capacity(4);
         let sz = format_size_pretty(entry.size_bytes);
         if !sz.is_empty() {
@@ -10715,14 +10495,51 @@ impl SwitchRenderBackend {
         if secs >= 60 {
             parts.push(crate::loc_ui::playtime(secs));
         }
-        let mut pen = x;
-        for (i, p) in parts.iter().enumerate() {
-            if i > 0 {
-                pen += self.kit_text_mid(pen, cy, size::LABEL, "  \u{00B7}  ", col::TEXT3);
-            }
-            pen += self.kit_text_mid(pen, cy, size::LABEL, p, col::TEXT2);
+        parts
+    }
+
+    /// The selected game's cover in a detail panel: fitted into the box minus
+    /// the caption under it, never blown up past twice its size (small and
+    /// sharp reads better than large and soft), the art and its caption
+    /// centred as one block. Rounded by the kit's shader, so no page-coloured
+    /// corners are painted on. Returns the art's rectangle.
+    #[allow(clippy::too_many_arguments)]
+    fn kit_cover_panel(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        caption_h: f32,
+        basename: &str,
+        name: &str,
+        chip: u32,
+    ) -> (f32, f32, f32, f32) {
+        // Full resolution: these panels are large enough that a tile thumbnail
+        // would show as mush.
+        let cover = self.cover_full_for(basename);
+        let (iw, ih) = match cover {
+            CoverTex::Image { w: iw, h: ih, .. } if iw > 0 && ih > 0 => (iw as f32, ih as f32),
+            _ => (4.0, 3.0),
+        };
+        let art_h = (h - caption_h).max(1.0);
+        let img_aspect = iw / ih;
+        let (mut dw, mut dh) = if img_aspect > w / art_h { (w, w / img_aspect) } else { (art_h * img_aspect, art_h) };
+        if matches!(cover, CoverTex::Image { .. }) && dw > iw * 2.0 {
+            dw = iw * 2.0;
+            dh = ih * 2.0;
         }
-        pen - x
+        let dx = (x + (w - dw) * 0.5).round();
+        let dy = (y + ((h - dh - caption_h) * 0.5).max(0.0)).round();
+        match cover {
+            CoverTex::Image { tex, w: tw, h: th, .. } => {
+                self.kit_shadow(dx, dy + 8.0, dw, dh, theme::radius::TILE, 18.0, 0x70_00_00_00);
+                self.kit_image(dx, dy, dw, dh, tex, [0.0, 0.0, 1.0, 1.0], 1.0, theme::radius::TILE);
+                let _ = (tw, th);
+            }
+            CoverTex::Default => self.kit_default_tile(dx, dy, dw, dh, chip, name),
+        }
+        (dx, dy, dw, dh)
     }
 
     /// Multi-file launch indicator (v1.3.0): a centered label near the bottom of
@@ -10730,18 +10547,19 @@ impl SwitchRenderBackend {
     /// game pulls in companion SWFs from its `.files/` folder. The caller gates
     /// when it shows (launch reveal only, once the cover fills the screen).
     pub fn draw_multifile_badge(&mut self, label: &str, count: i32) {
+        use theme::{col, size};
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
-        let text = std::format!("{} ({})", label, count);
-        let scale = 1.8;
-        let tw = self.measure_text(&text, scale);
-        self.draw_text(
-            (vw - tw) * 0.5,
-            vh - 48.0,
-            scale,
-            &text,
-            swf::Color::from_rgb(0xFFFFFF, 255),
-        );
+        // A pill over the bottom of the cover: an icon of stacked layers and the
+        // count, on a dark ground so it reads over any art.
+        let text = std::format!("{}  \u{00B7}  {}", label, count);
+        let tw = self.kit_measure(&text, size::LABEL + 1.0);
+        let w = 18.0 + 20.0 + 10.0 + tw + 20.0;
+        let x = ((vw - w) * 0.5).round();
+        let cy = vh - 56.0;
+        self.kit_rrect(x, cy - 20.0, w, 40.0, 20.0, 0xC8_0A_10_1C);
+        self.kit_icon(x + 18.0, cy, 20.0, Icon::Layers, col::GOLD);
+        self.kit_text_mid(x + 18.0 + 20.0 + 10.0, cy, size::LABEL + 1.0, &text, col::TEXT);
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
@@ -10764,66 +10582,19 @@ impl SwitchRenderBackend {
     /// layouts already leave, so not one of them had to move a pixel to make
     /// room.
     pub fn draw_folder_frame(&mut self, name: &str) {
+        // TWO HORIZONTAL RULES, no sides: BANDE and ETAGERE scroll SIDEWAYS and
+        // let their tiles run off both edges on purpose, so vertical borders
+        // would cut through the artwork. The rules sit in the gaps every layout
+        // leaves (y110 above the content, `vh - 50` between the facts and the
+        // footer). The folder's NAME is in the header line now, by its icon,
+        // where it no longer needs a plate to stay readable over a cover.
+        let _ = name;
         let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
-        // TWO HORIZONTAL RULES, no sides.
-        //
-        // A box was the obvious shape and it was wrong. BANDE and ETAGERE scroll
-        // SIDEWAYS and let their tiles run off both edges on purpose -- that
-        // bleed is what says there is more to the left and right -- so vertical
-        // borders cut straight through the artwork, and BANDE's position rail
-        // sat outside the box it was supposed to be in.
-        //
-        // These two lines sit in the gaps every layout already leaves, so
-        // nothing is ever crossed whatever scrolls past horizontally.
-        //
-        // The top one: the banner ends at y102 and the earliest content starts
-        // at y124 (BANDE's hero), so y110 is clear in all four.
-        //
-        // The bottom one is the tight one, and GRILLE sets it: its facts line
-        // ends at y660 and the footer starts at y678. y670 sits between them.
-        // The footer cannot be pushed down to make more room -- the corner
-        // stamps are six pixels under it -- so what little was needed came from
-        // raising the name and the facts, as little as would do.
         const TOP_Y: f32 = 110.0;
-        let bot_y = vh - 50.0;
         const M: f32 = 20.0;
-        const B: f32 = 2.0;
-        const ACCENT: u32 = 0xFF_FF_D7_40;
-        unsafe {
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        }
-        // The plaque interrupts the top rule, so it is drawn in two pieces with
-        // a gap for the text rather than a line through the word.
-        let ls = 1.8;
-        let label = self.fit_text(name, ls, vw - 200.0);
-        let lw = self.measure_text(&label, ls);
-        let gap_x0 = M + 14.0;
-        let gap_x1 = gap_x0 + lw + 24.0;
-        self.draw_overlay_rect(M, TOP_Y, (gap_x0 - M).max(0.0), B, ACCENT);
-        self.draw_overlay_rect(gap_x1, TOP_Y, (vw - M - gap_x1).max(0.0), B, ACCENT);
-        self.draw_overlay_rect(M, bot_y, vw - 2.0 * M, B, ACCENT);
-        // An opaque plate under the word, in the page's own navy.
-        //
-        // The plaque sits at the very top of the scrolling band, so a cover
-        // riding up under it turned amber text on a white logo into nothing at
-        // all. A legend on a frame is not a caption over the content: it needs
-        // its own ground, exactly like the gap it interrupts.
-        let ly = TOP_Y - 7.0 * ls * 0.5 + B * 0.5;
-        self.draw_overlay_rect(
-            gap_x0,
-            ly - 3.0,
-            (gap_x1 - gap_x0).max(0.0),
-            7.0 * ls + 6.0,
-            0xFF_14_20_38,
-        );
-        self.draw_text(
-            gap_x0 + 12.0,
-            ly,
-            ls,
-            &label,
-            swf::Color::from_rgb(0xFFD740, 255),
-        );
+        let ink = (theme::col::GOLD & 0x00FF_FFFF) | 0x90 << 24;
+        self.kit_rrect(M, TOP_Y, vw - 2.0 * M, 2.0, 1.0, ink);
+        self.kit_rrect(M, vh - 50.0, vw - 2.0 * M, 2.0, 1.0, ink);
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
@@ -11047,11 +10818,16 @@ impl SwitchRenderBackend {
             let term = std::format!("   \u{201C}{}\u{201D}", filter.unwrap_or("").trim());
             let term = self.kit_fit(&term, size::LABEL, vw * 0.5 - x);
             self.kit_text_mid(x, cy, size::LABEL, &term, col::TEXT3);
-        } else if folder_open.is_some() {
-            // An open folder: how much of the library it holds. Its name is on
-            // the frame around the games, so it is not repeated here.
-            let count = std::format!("{} / {}", shown, library_total);
-            self.kit_text_mid(x, cy, size::LABEL, &count, col::TEXT2);
+        } else if let Some(folder) = folder_open.as_deref() {
+            // An open folder: its name, then how much of the library it holds.
+            // ZL / ZR walk to the next folder, and say so.
+            x += self.kit_icon(x, cy, 18.0, Icon::FolderOpen, col::GOLD) + 10.0;
+            let name = self.kit_fit(folder, size::LABEL + 1.0, vw * 0.4);
+            x += self.kit_text_mid(x, cy, size::LABEL + 1.0, &name, col::TEXT);
+            let count = std::format!("  \u{00B7}  {} / {}", shown, library_total);
+            x += self.kit_text_mid(x, cy, size::LABEL, &count, col::TEXT2) + 24.0;
+            x += self.kit_button(x, cy, 20.0, Btn::ZL, col::PILL_INK) + 4.0;
+            self.kit_button(x, cy, 20.0, Btn::ZR, col::PILL_INK);
         } else {
             x += self.kit_text_mid(x, cy, size::LABEL, &crate::loc_ui::games(shown), col::TEXT2);
             // Folders are walked with buttons on the back of the console, and
@@ -11072,29 +10848,6 @@ impl SwitchRenderBackend {
         self.kit_text_mid(vw - 40.0 - vwid, cy, size::LABEL, view, col::TEXT3);
     }
 
-    /// Gold diamond on a dark chip, the favourite marker. The UI font has no star
-    /// glyph, so the shape is drawn directly. Shared by every JOUER layout so a
-    /// favourite is marked the same way wherever you look at it.
-    fn draw_favorite_mark(&mut self, x: f32, y: f32, chip: f32) {
-        let chip_m = Matrix {
-            a: chip, b: 0.0, c: 0.0, d: chip,
-            tx: swf::Twips::from_pixels(x as f64),
-            ty: swf::Twips::from_pixels(y as f64),
-        };
-        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgba(0xB0_00_00_00), chip_m);
-        // A unit square rotated 45 degrees by the matrix, centred on the chip.
-        let cx = x + chip * 0.5;
-        let cy = y + chip * 0.5;
-        let sz = chip * 0.5;
-        let cs = 0.70710678_f32;
-        let diamond = Matrix {
-            a: sz * cs, b: sz * cs, c: -sz * cs, d: sz * cs,
-            tx: swf::Twips::from_pixels(cx as f64),
-            ty: swf::Twips::from_pixels((cy - sz * cs) as f64),
-        };
-        <Self as CommandHandler>::draw_rect(self, swf::Color::from_rgb(0xFFD740, 255), diamond);
-    }
-
     /// Filled rounded rectangle, built from horizontal slivers.
     ///
     /// Unlike `round_corners`, this draws the shape instead of masking a square
@@ -11105,253 +10858,6 @@ impl SwitchRenderBackend {
         // The kit's distance-field shape: anti-aliased corners in one draw call,
         // where this used to stack one sliver per pixel row of each corner.
         self.kit_rrect(x, y, w, h, r, rgba);
-    }
-
-    /// Round the corners of the rect just drawn at (x,y,w,h), by painting the
-    /// four corner notches in the page colour.
-    ///
-    /// A cut-out rather than a rounded-rect shader: every cover here is an opaque
-    /// textured quad on the launcher's flat background, so masking the corners is
-    /// indistinguishable from rounding them and costs a handful of rects instead
-    /// of a second bitmap program in the frame path. It DOES assume that flat
-    /// background — this belongs to the library chrome, not to game rendering.
-    fn round_corners(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32) {
-        // EXACTLY the page colour from `library_clear`: glClearColor(0.078, 0.125,
-        // 0.219) is 0x14/0x20/0x38.
-        self.round_corners_on(x, y, w, h, r, 0xFF_14_20_38);
-    }
-
-    /// Same, over a surface that is NOT the page.
-    ///
-    /// The notch colour has to be whatever is actually behind the rect, and that
-    /// is not always the page: the cover picker clears with
-    /// `draw_library_dim_backdrop` (0x0A0F1A) and lays each cell on 0xFF0B1222, so
-    /// rounding its thumbnails with the page navy left four visibly lighter
-    /// patches in every cell — the exact smudge this function's own comment warns
-    /// about.
-    fn round_corners_on(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, bg: u32) {
-        let r = r.min(w * 0.5).min(h * 0.5);
-        if r <= 0.5 {
-            return;
-        }
-        let bg_col = bg;
-        // One sliver per pixel row of the corner: the notch is the part of the
-        // square outside the quarter circle, so its width shrinks as we descend.
-        let steps = r.ceil() as i32;
-        for i in 0..steps {
-            let dy = i as f32;
-            let inset = r - (r * r - (r - dy) * (r - dy)).max(0.0).sqrt();
-            if inset <= 0.0 {
-                continue;
-            }
-            let yt = y + dy;
-            let yb = y + h - dy - 1.0;
-            self.draw_overlay_rect(x, yt, inset, 1.0, bg_col);
-            self.draw_overlay_rect(x + w - inset, yt, inset, 1.0, bg_col);
-            self.draw_overlay_rect(x, yb, inset, 1.0, bg_col);
-            self.draw_overlay_rect(x + w - inset, yb, inset, 1.0, bg_col);
-        }
-    }
-
-    /// The amber wash painted behind the active row of a vertical list.
-    ///
-    /// Written out by hand on five screens, and the copies had already drifted:
-    /// the IMPORTER history bar and the archive.org file bar are meant to read as
-    /// the same object on the same 50 px pitch, yet one ends 4 px further right
-    /// and sits 2 px lower than the other. Nobody chose that; it is what five
-    /// independent `Matrix` literals cost. The tint was five literals too, spelled
-    /// two different ways, so any future change to it - fading the bar under an
-    /// open modal, a non-amber theme - was a five-site edit where missing one site
-    /// stays invisible until someone opens that one screen.
-    ///
-    /// `radius > 0.0` cuts the corners, which paints the PAGE colour and is
-    /// therefore only valid over a `library_clear` background, never on a modal.
-    fn draw_selection_bar(&mut self, x: f32, y: f32, w: f32, h: f32, _radius: f32) {
-        // The kit's focus pill (raised, gold edge), the same mark as every
-        // window's list, instead of an amber wash with page-colour notches.
-        self.kit_focus_pill(x, y, w, h);
-    }
-
-    /// Draw a game's cover fitted INSIDE the box (x,y,w,h), centred, aspect kept,
-    /// and return the rect it actually occupies.
-    ///
-    /// No letterbox bars: a detail panel shows one cover at a time, so the frame
-    /// can take the shape of the image instead of the image being forced into the
-    /// frame. That is the whole reason these layouts tolerate cover art the grid
-    /// cannot — and returning the rect lets the caller put the title right under
-    /// the picture rather than under an oversized box with a hole in it.
-    /// Falls back to the colour chip + initials, which fills a 4:3 slot.
-    fn draw_cover_fitted(
-        &mut self,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        caption_h: f32,
-        basename: &str,
-        display_name: &str,
-        color_chip: u32,
-    ) -> (f32, f32, f32, f32) {
-        // Full resolution, like the launch reveal: these panels are large enough
-        // that a tile thumbnail would show as mush.
-        let (iw, ih, tex) = match self.cover_full_for(basename) {
-            CoverTex::Image { tex, w: iw, h: ih, .. } if iw > 0 && ih > 0 => (iw as f32, ih as f32, Some(tex)),
-            _ => (4.0, 3.0, None),
-        };
-        // The art is fitted into the box MINUS the caption, not into the whole
-        // box. Fitting into `h` meant a cover as tall as its panel took all of it
-        // and the caption then landed entirely BELOW the box — in LISTE that put
-        // the facts line at y668..680 straight through the footer at y678.
-        // `caption_h` is documented as a reserve, so it has to be subtracted
-        // before the fit and not merely used to bias the centring.
-        let art_h = (h - caption_h).max(1.0);
-        let box_aspect = w / art_h;
-        let img_aspect = iw / ih;
-        let (mut dw, mut dh) = if img_aspect > box_aspect {
-            (w, w / img_aspect)
-        } else {
-            (art_h * img_aspect, art_h)
-        };
-        // Never blow a cover up more than 2x. Some logos are 156 px wide; filling
-        // a 340 px box with one turns it to mush, and small-but-sharp reads better
-        // than large-and-soft.
-        if tex.is_some() && dw > iw * 2.0 {
-            dw = iw * 2.0;
-            dh = ih * 2.0;
-        }
-        // The ART PLUS ITS CAPTION is centred as one block, which is why the
-        // caption's height is an argument. Centring the art alone dropped the
-        // caption into the middle of nowhere; anchoring to the top just moved the
-        // hole underneath. A short, wide cover cannot fill a tall panel, so the
-        // leftover space is split evenly above and below, where it reads as
-        // margin instead of as something missing.
-        let dx = x + (w - dw) * 0.5;
-        let dy = y + ((h - dh - caption_h) * 0.5).max(0.0);
-        match tex {
-            Some(t) => self.draw_textured_rect(dx, dy, dw, dh, t),
-            None => {
-                self.draw_overlay_rect(dx, dy, dw, dh, 0xFF_00_00_00 | color_chip);
-                let initials: std::string::String = display_name.chars().take(3).collect();
-                let isc = (dh / 36.0).clamp(3.0, 14.0);
-                let tw = self.measure_text(&initials, isc);
-                self.draw_text(
-                    dx + (dw - tw) * 0.5,
-                    dy + (dh - 7.0 * isc) * 0.5,
-                    isc,
-                    &initials,
-                    swf::Color::from_rgb(0xFFFFFF, 255),
-                );
-            }
-        }
-        (dx, dy, dw, dh)
-    }
-
-    /// One-line facts about a game for the detail panels: what a tile never had
-    /// room for. Playtime only appears once there is some, so a game you have
-    /// never played shows nothing rather than a zero.
-    /// The facts about a game, as coloured segments in draw order — the single
-    /// source for all four JOUER layouts.
-    ///
-    /// There used to be TWO of these: a three-space string here, and a
-    /// `//`-separated one with its own vocabulary ("SWF V10", a translated word
-    /// after the playtime) written inline in the gallery. The same information,
-    /// spelled two ways in two screens, which is what Jonathan noticed.
-    ///
-    /// Three things the old string could not say:
-    ///
-    /// - Version and compression are ONE group. They are not two facts, they are
-    ///   one — what the file is — and the eye groups "SWF 10 CWS" whatever the
-    ///   spacing, which is precisely why three spaces failed: a space INSIDE a
-    ///   fact and spaces BETWEEN facts differ only in quantity, and quantity is
-    ///   not something an eye ranks. Joined, a space means one thing and the bar
-    ///   means the other.
-    /// - The engine is ALWAYS named. The absence of "AS3" used to mean AVM1 —
-    ///   information encoded as nothing, unreadable by definition — and it made
-    ///   the line change its group COUNT from game to game. Now the flag changes
-    ///   a group's CONTENT, so nothing ever moves sideways.
-    /// - Groups are JOINED, never appended by hand. The old code pushed "   AS3"
-    ///   onto the string, which is how an unknown size (Flashpoint hits, where
-    ///   `format_size_pretty` returns "") produced a line starting with three
-    ///   spaces that `measure_text` counted, throwing the centring off by 16 px
-    ///   in the one screen where you import.
-    fn game_facts(entry: &crate::library::Entry) -> std::vec::Vec<(std::string::String, u32)> {
-        fn sep(out: &mut std::vec::Vec<(std::string::String, u32)>) {
-            // Emitted by the JOIN, so a leading or orphan separator cannot happen.
-            if !out.is_empty() {
-                out.push((std::string::String::from(" | "), FACTS_MUTED));
-            }
-        }
-        let mut out: std::vec::Vec<(std::string::String, u32)> = std::vec::Vec::with_capacity(8);
-
-        let size = format_size_pretty(entry.size_bytes);
-        if !size.is_empty() {
-            out.push((size, FACTS_VALUE));
-        }
-
-        sep(&mut out);
-        out.push((
-            std::format!("SWF {} {}", entry.swf_version, entry.compression_label),
-            FACTS_VALUE,
-        ));
-
-        // Named, not flagged. Both engines get the SAME colour as every other
-        // fact on the line: the amber one said "careful with this game", and
-        // that is no longer true of AS3 in particular.
-        sep(&mut out);
-        out.push((
-            std::string::String::from(if entry.is_as3 { "AS3" } else { "AVM1" }),
-            FACTS_VALUE,
-        ));
-
-        // The only genuinely optional group, and it is LAST: a game you have
-        // never played has no playtime, it does not have a playtime of zero. Its
-        // absence therefore cannot leave a hole or shift anything to its right.
-        let secs = crate::playtime::get(&entry.basename);
-        if secs >= 60 {
-            sep(&mut out);
-            out.push((
-                std::format!("{}H{:02}", secs / 3600, (secs % 3600) / 60),
-                FACTS_VALUE,
-            ));
-            // The word travels with the number: "0H02" alone does not say what it
-            // counts. The gallery already had it and the other three did not; it
-            // belongs in the muted voice, like a unit.
-            out.push((std::format!(" {}", crate::loc::s().played_label), FACTS_MUTED));
-        }
-        out
-    }
-
-    /// Width of a facts line, so the centred layouts place it the way they
-    /// already placed a plain string.
-    fn facts_width(&self, facts: &[(std::string::String, u32)], scale: f32) -> f32 {
-        facts.iter().map(|(t, _)| self.measure_text(t, scale)).sum()
-    }
-
-    /// Draw a facts line at `x`, `y` (top-left), one `draw_text` per segment.
-    ///
-    /// Segment by segment rather than two overlaid strings. The overlay trick is
-    /// cheaper by a few calls, but it silently depends on both layers advancing
-    /// identically — pure ASCII, non-ASCII last — and the day someone translates
-    /// a label or inserts one in the middle, the layers drift apart with no error
-    /// at all. Eight GL calls is on the order of 60 us against a 16.6 ms frame,
-    /// which is the right price for an invariant that cannot quietly break.
-    ///
-    /// The pen is ROUNDED at draw time while the accumulator stays exact: the bar
-    /// is two pixels of glyph, and an unrounded x rasterises it over one column or
-    /// two depending on the fraction, so the three bars on one line would not come
-    /// out the same thickness. On a pixel-art UI that is the loudest defect there is.
-    fn draw_facts(
-        &mut self,
-        x: f32,
-        y: f32,
-        scale: f32,
-        facts: &[(std::string::String, u32)],
-    ) {
-        let mut pen = x;
-        for (text, color) in facts {
-            self.draw_text(pen.round(), y, scale, text, swf::Color::from_rgb(*color, 255));
-            pen += self.measure_text(text, scale);
-        }
     }
 
     /// JOUER layout 1 (issue #52): titles as a text list, the selected game's
@@ -11455,44 +10961,23 @@ impl SwitchRenderBackend {
         let box_h = 460.0;
         let mut panel = (box_x, box_y, box_w, box_h);
         if let Some(e) = entries.get(selection) {
-            // Measured, not guessed. 88 was a fixed reserve for a caption that is
-            // 64.6 px on one title line and 90.6 on two; since `draw_cover_fitted`
-            // centres with `(h - dh - caption_h) * 0.5`, the common case pushed
-            // the art 11.7 px up for nothing. Wrapped once here and reused below,
-            // so the two cannot disagree either.
-            let (l1, l2) = self.wrap_text_2(&e.display_name, 2.4, box_w);
-            let lines = if l2.is_empty() { 1.0 } else { 2.0 };
-            let caption_h = 18.0 + lines * 26.0 + 8.0 + 12.6;
-            panel = self.draw_cover_fitted(
-                box_x, box_y, box_w, box_h, caption_h,
-                &e.basename, &e.display_name, e.color_chip,
-            );
-            self.round_corners(panel.0, panel.1, panel.2, panel.3, 8.0);
+            use theme::{col, size};
+            // Wrapped once, measured once: the caption's height is what the art
+            // is fitted against, so the two cannot disagree.
+            let lines = self.kit_wrap(&e.display_name, size::TITLE, box_w, 2);
+            let caption_h = 22.0 + lines.len() as f32 * 32.0 + 30.0;
+            panel = self.kit_cover_panel(box_x, box_y, box_w, box_h, caption_h, &e.basename, &e.display_name, e.color_chip);
             if crate::favorites::is_favorite(&e.basename) {
-                self.draw_favorite_mark(panel.0 + 6.0, panel.1 + 6.0, 26.0);
+                self.kit_favorite_chip(panel.0 + 8.0, panel.1 + 8.0);
             }
-
-            let mut ty = panel.1 + panel.3 + 18.0;
-            let ts = 2.4;
-            for line in [l1.as_str(), l2.as_str()] {
-                if line.is_empty() {
-                    continue;
-                }
-                let lw = self.measure_text(line, ts);
-                self.draw_text(
-                    box_x + ((box_w - lw) * 0.5).max(0.0),
-                    ty,
-                    ts,
-                    line,
-                    swf::Color::from_rgb(0xFFD740, 255),
-                );
-                ty += 26.0;
+            let mut ty = panel.1 + panel.3 + 30.0;
+            for line in &lines {
+                let lw = self.kit_measure(line, size::TITLE);
+                self.kit_text_mid((box_x + ((box_w - lw) * 0.5).max(0.0)).round(), ty, size::TITLE, line, col::TEXT);
+                ty += 32.0;
             }
-            ty += 8.0;
-            let facts = Self::game_facts(e);
-            let fs = 1.8;
-            let fw = self.facts_width(&facts, fs);
-            self.draw_facts(box_x + ((box_w - fw) * 0.5).max(0.0), ty, fs, &facts);
+            let fw = self.kit_game_facts_width(e, size::LABEL);
+            self.kit_game_facts_px((box_x + ((box_w - fw) * 0.5).max(0.0)).round(), ty + 2.0, e, size::LABEL);
         }
 
         // ── Title list, clipped to its band ──
@@ -11508,10 +10993,7 @@ impl SwitchRenderBackend {
         // the list feel continuous rather than stepped.
         let hl_y = hl_content_y - scroll_px;
         if !entries.is_empty() {
-            // Rounded only here: this bar is a narrow column over the page navy,
-            // where a cut corner reads as deliberate. The full-width bars have no
-            // margin to spend on one.
-            self.draw_selection_bar(list_x, hl_y, list_w, ROW_H - 6.0, 6.0);
+            self.kit_focus_pill(list_x, hl_y, list_w, ROW_H - 4.0);
         }
         for (idx, e) in entries.iter().enumerate() {
             let y = TOP + idx as f32 * ROW_H - scroll_px;
@@ -11519,36 +11001,23 @@ impl SwitchRenderBackend {
                 continue;
             }
 
-            // Colour chip: the same per-game hue the grid falls back to, kept here
+            // Colour dot: the same per-game hue the grid falls back to, kept here
             // so a game stays recognisable between the two layouts.
-            let chip = Matrix {
-                a: 6.0, b: 0.0, c: 0.0, d: ROW_H - 14.0,
-                tx: swf::Twips::from_pixels((list_x + 6.0) as f64),
-                ty: swf::Twips::from_pixels((y + 4.0) as f64),
-            };
-            <Self as CommandHandler>::draw_rect(
-                self, swf::Color::from_rgb(e.color_chip, 255), chip,
-            );
-            let col = if idx == selection {
-                swf::Color::from_rgb(0xFFD740, 255)
-            } else {
-                swf::Color::from_rgb(0xCCCCCC, 255)
-            };
-            // Favourites also sort to the top, so the marker confirms WHY a row is
+            let cy = y + (ROW_H - 4.0) * 0.5;
+            self.kit_rrect(list_x + 14.0, cy - 5.0, 10.0, 10.0, 5.0, 0xFF00_0000 | e.color_chip);
+            let focused = idx == selection;
+            let ink = if focused { theme::col::TEXT } else { theme::col::TEXT2 };
+            // Favourites also sort to the top, so the star confirms WHY a row is
             // up there rather than announcing something new.
             let fav = crate::favorites::is_favorite(&e.basename);
-            let text_x = if fav {
-                self.draw_favorite_mark(list_x + 20.0, y + 6.0, ROW_H - 12.0);
-                list_x + 20.0 + (ROW_H - 12.0) + 8.0
-            } else {
-                list_x + 22.0
-            };
+            let mut text_x = list_x + 36.0;
+            if fav {
+                self.kit_icon(text_x, cy, 16.0, Icon::Star, theme::col::GOLD);
+                text_x += 24.0;
+            }
             // Truncated to the column, never to the panel beside it.
-            let label = self.fit_text(&e.display_name, 2.0, list_x + list_w - text_x - 12.0);
-            // y+10, not y+9: the 14 px glyph then centres on y+17, which is where
-            // the highlight bar and the colour chip already centre. The text was
-            // the only one of the three out of line.
-            self.draw_text(text_x, y + 10.0, 2.0, &label, col);
+            let label = self.kit_fit_mid(&e.display_name, theme::size::ROW - 1.0, list_x + list_w - text_x - 14.0);
+            self.kit_text_mid(text_x, cy, theme::size::ROW - 1.0, &label, ink);
         }
         self.clear_clip();
 
@@ -11606,17 +11075,13 @@ impl SwitchRenderBackend {
         if let Ok(mut g) = gallery_cache().lock() {
             *g = (std::vec::Vec::new(), 0);
         }
+        // A search icon over the words: this is a search that found nothing.
         let msg = crate::loc::s().cover_none;
-        let sc = 2.5;
-        let w = self.measure_text(msg, sc);
         let vw = self.dimensions.width as f32;
-        self.draw_text(
-            (vw - w) * 0.5,
-            (band_top + band_bot) * 0.5 - 7.0 * sc * 0.5,
-            sc,
-            msg,
-            swf::Color::from_rgb(0x7A8CA6, 255),
-        );
+        let cy = (band_top + band_bot) * 0.5;
+        self.kit_icon(((vw - 40.0) * 0.5).round(), cy - 30.0, 40.0, Icon::Search, theme::col::TEXT3);
+        let w = self.kit_measure(msg, theme::size::BODY);
+        self.kit_text_mid(((vw - w) * 0.5).round(), cy + 18.0, theme::size::BODY, msg, theme::col::TEXT2);
     }
 
     /// JOUER layout 2, BANDE: a large cover of the selected game with its details
@@ -11736,26 +11201,19 @@ impl SwitchRenderBackend {
         // ── Hero cover, fitted inside its fixed box ──
         let mut hero = (HERO_X, HERO_Y, HERO_W, HERO_H);
         if let Some(e) = entries.get(selection) {
-            hero = self.draw_cover_fitted(
-                HERO_X, HERO_Y, HERO_W, HERO_H, 0.0,
-                &e.basename, &e.display_name, e.color_chip,
-            );
-            self.round_corners(hero.0, hero.1, hero.2, hero.3, 10.0);
+            use theme::{col, size};
+            hero = self.kit_cover_panel(HERO_X, HERO_Y, HERO_W, HERO_H, 0.0, &e.basename, &e.display_name, e.color_chip);
             if crate::favorites::is_favorite(&e.basename) {
-                self.draw_favorite_mark(hero.0 + 8.0, hero.1 + 8.0, 28.0);
+                self.kit_favorite_chip(hero.0 + 10.0, hero.1 + 10.0);
             }
-
-            let mut ty = HERO_Y + 6.0;
-            let ts = 2.8;
-            // Three lines here, not two: the column is 580 px wide and the cover
-            // row does not start until y468, so a long title had a third line's
-            // worth of empty space under it and was ellipsised anyway.
-            for line in self.wrap_text_n(&e.display_name, ts, vw - COL_X - 48.0, 3) {
-                self.draw_text(COL_X, ty, ts, &line, swf::Color::from_rgb(0xFFD740, 255));
-                ty += 32.0;
+            // Three lines: the column is wide and the row does not start until
+            // y468, so a long title has room for a third.
+            let mut ty = HERO_Y + 22.0;
+            for line in self.kit_wrap(&e.display_name, size::TITLE + 4.0, vw - COL_X - 48.0, 3) {
+                self.kit_text_mid(COL_X, ty, size::TITLE + 4.0, &line, col::TEXT);
+                ty += 38.0;
             }
-            let facts = Self::game_facts(e);
-            self.draw_facts(COL_X, ty + 14.0, 1.8, &facts);
+            self.kit_game_facts(COL_X, ty + 6.0, e);
         }
         if let Ok(mut r) = gallery_sel_rect().lock() {
             *r = hero;
@@ -11835,10 +11293,11 @@ impl SwitchRenderBackend {
             }
             // Veil measured against the EASED selection, so it lifts and settles
             // with the slide instead of switching at the moment the index changes.
+            // Rounded like the tile it darkens.
             let d = (i as f32 - sel_pos).abs().min(1.0);
             let alpha = (d * 0x70 as f32) as u32;
             if alpha > 0 {
-                self.draw_overlay_rect(x, ry, rw, rh, (alpha << 24) | 0x0C_10_18);
+                self.kit_rrect(x, ry, rw, rh, theme::radius::TILE, (alpha << 24) | 0x0C_10_18);
             }
         }
         // Selection frame, drawn after the row so it is never veiled, and placed
@@ -11851,16 +11310,7 @@ impl SwitchRenderBackend {
             // the tile's own expression makes disagreement impossible — this is
             // the rule ETAGERE's header comment already states.
             let fx = off + selection as f32 * pitch;
-            let fy = ROW_Y;
-            let fw = ROW_W;
-            let fh = ROW_H;
-            const B: f32 = 3.0;
-            const SEL: u32 = 0xFF_FF_D7_40;
-            self.draw_overlay_rect(fx - B, fy - B, fw + 2.0 * B, B, SEL);
-            self.draw_overlay_rect(fx - B, fy + fh, fw + 2.0 * B, B, SEL);
-            self.draw_overlay_rect(fx - B, fy, B, fh, SEL);
-            self.draw_overlay_rect(fx + fw, fy, B, fh, SEL);
-            self.round_corners(fx - B, fy - B, fw + 2.0 * B, fh + 2.0 * B, 8.0);
+            self.kit_ring(fx, ROW_Y, ROW_W, ROW_H, theme::radius::TILE, theme::ring::GAP, theme::ring::WIDTH, theme::col::GOLD);
         }
 
         // Position rail: 77 covers scrolled with nothing anywhere saying where in
@@ -11869,10 +11319,10 @@ impl SwitchRenderBackend {
         if total > 5 {
             let track_x = 56.0;
             let track_w = vw - 112.0;
-            self.draw_overlay_rect(track_x, 620.0, track_w, 4.0, 0x55_2A_36_48);
+            self.kit_rrect(track_x, 621.0, track_w, 4.0, 2.0, theme::col::LINE);
             let tw = (track_w * (vw / pitch) / total as f32).max(56.0);
             let t = (sel_pos / (total - 1) as f32).clamp(0.0, 1.0);
-            self.draw_overlay_rect(track_x + (track_w - tw) * t, 616.0, tw, 12.0, 0xFF_FF_D7_40);
+            self.kit_rrect(track_x + (track_w - tw) * t, 620.0, tw, 6.0, 3.0, theme::col::GOLD);
         }
 
         self.kit_home_footer();
@@ -11926,7 +11376,6 @@ impl SwitchRenderBackend {
         const RIGHT_SLOTS: usize = 2;
         const UPSCALE_MAX: f32 = 1.25;
         const VEIL: u32 = 0x0C_10_18;
-        const PLAQUE: u32 = 0xFF_0E_16_24;
         let w1 = W0 * (1.0 + GROW);
         let h1 = H0 * (1.0 + GROW);
         let cap_x = ANCHOR_CX - w1 * 0.5;
@@ -12023,13 +11472,9 @@ impl SwitchRenderBackend {
             let (x, y, w, h) = rect_of(i, b);
             let sc = 1.0 + GROW * b;
             match cover_lookup(&e.basename) {
-                Some(CoverTex::Image { tex, w: iw, h: ih, .. }) if iw > 0 && ih > 0 => {
-                    // Neutral plaque, never the colour chip: the hero's backdrop
-                    // must not change hue as the selection moves.
-                    self.draw_overlay_rect(x, y, w, h, PLAQUE);
+                Some(CoverTex::Image { tex, w: iw, h: ih, amb }) if iw > 0 && ih > 0 => {
                     let a = iw as f32 / ih as f32;
                     let bx = W0 / H0;
-                    let (fit_w, fit_h) = if a > bx { (w, w / a) } else { (h * a, h) };
                     // Resting zoom floor, a per-cover CONSTANT computed at BASE
                     // scale so it can never reflow: a cover that would have to be
                     // blown up past UPSCALE_MAX to fill the box rests part-way
@@ -12044,40 +11489,19 @@ impl SwitchRenderBackend {
                     } else {
                         ((u0 - UPSCALE_MAX) / (u0 - u1)).clamp(0.0, 1.0)
                     };
+                    // One continuous zoom-out from the box to the whole cover,
+                    // the cover's own blurred colours behind what it leaves.
                     let t = t_rest.max(b);
-                    // At t=0 the rect IS the box, so `draw_textured_rect_cover`
-                    // crops to fill; at t=1 the rect carries the image's aspect and
-                    // its UV remap degenerates to the whole image. One continuous
-                    // zoom-out, never a switch between two modes.
-                    let dw = w + (fit_w - w) * t;
-                    let dh = h + (fit_h - h) * t;
-                    self.draw_textured_rect_cover(
-                        x + (w - dw) * 0.5, y + (h - dh) * 0.5, dw, dh, tex, iw, ih,
-                        1.0,
-                    );
+                    self.kit_cover_reveal(x, y, w, h, tex, iw, ih, amb, t, 1.0);
                 }
-                _ => {
-                    self.draw_overlay_rect(x, y, w, h, 0xFF_00_00_00 | e.color_chip);
-                    let initials: std::string::String = e.display_name.chars().take(3).collect();
-                    let isc = 4.0 + 1.6 * b;
-                    let tw = self.measure_text(&initials, isc);
-                    self.draw_text(
-                        x + (w - tw) * 0.5,
-                        y + (h - 7.0 * isc) * 0.5,
-                        isc,
-                        &initials,
-                        swf::Color::from_rgb(0xFFFFFF, 255),
-                    );
-                }
+                _ => self.kit_default_tile(x, y, w, h, e.color_chip, &e.display_name),
             }
             let veil = (0x66 as f32 * (i as f32 - sel_pos).abs().min(1.0)) as u32;
             if veil > 0 {
-                self.draw_overlay_rect(x, y, w, h, (veil << 24) | VEIL);
+                self.kit_rrect(x, y, w, h, theme::radius::TILE, (veil << 24) | VEIL);
             }
-            // After the veil, so the notches end up page-coloured and not tinted.
-            self.round_corners(x, y, w, h, 10.0 * sc);
             if crate::favorites::is_favorite(&e.basename) {
-                self.draw_favorite_mark(x + 10.0 * sc, y + 10.0 * sc, 22.0 * sc);
+                self.kit_favorite_chip(x + 8.0 * sc, y + 8.0 * sc);
             }
         }
 
@@ -12086,7 +11510,7 @@ impl SwitchRenderBackend {
         // follow the same bump. At rest exactly one segment is lit under the active
         // cover; mid-slide two are half-lit and the light hands over. A fixed slot
         // bar would be the one element not derived from the eased value.
-        self.draw_overlay_rect(24.0, 380.0, 1232.0, 2.0, 0xFF_22_30_40);
+        self.kit_rrect(24.0, 380.0, 1232.0, 2.0, 1.0, theme::col::LINE);
         for &i in &visible {
             let b = bump(i);
             if b <= 0.01 {
@@ -12094,7 +11518,8 @@ impl SwitchRenderBackend {
             }
             let (x, _, w, _) = rect_of(i, b);
             let a = (b * 255.0) as u32;
-            self.draw_overlay_rect(x, 380.0, w, 3.0 + 7.0 * b, (a << 24) | 0x00_FF_D7_40);
+            let hgt = 3.0 + 5.0 * b;
+            self.kit_rrect(x + 8.0, 380.0, w - 16.0, hgt, hgt * 0.5, (a << 24) | (theme::col::GOLD & 0x00FF_FFFF));
         }
 
         // ── Everything below the shelf is text ──
@@ -12109,7 +11534,7 @@ impl SwitchRenderBackend {
             // Named from the INTEGER selection, not from `sel_pos.round()`: A
             // launches `selection`, so naming anything else would let the facts
             // describe a different game than the one that starts.
-            let (l1, l2) = self.wrap_text_2(&e.display_name, 3.2, cap_w);
+            let lines = self.kit_wrap(&e.display_name, theme::size::TITLE + 6.0, cap_w, 2);
             // 414, not 388: the lit segment above is `3.0 + 7.0 * b` tall from
             // y=380, so at full selection it reaches y=390 and the title's first
             // pixel row landed INSIDE it -- the name looked stuck to the light
@@ -12118,16 +11543,12 @@ impl SwitchRenderBackend {
             // this only show on the selected tile. The extra room past mere
             // clearance is free: the page had ~170 px of nothing between the rail
             // and the footer.
-            let mut ty = 414.0;
-            for line in [l1.as_str(), l2.as_str()] {
-                if line.is_empty() {
-                    continue;
-                }
-                self.draw_text(cap_x, ty, 3.2, line, swf::Color::from_rgb(0xFFD740, 255));
-                ty += 34.0;
+            let mut ty = 430.0;
+            for line in &lines {
+                self.kit_text_mid(cap_x, ty, theme::size::TITLE + 6.0, line, theme::col::TEXT);
+                ty += 40.0;
             }
-            let facts = Self::game_facts(e);
-            self.draw_facts(cap_x, ty + 12.0, 2.0, &facts);
+            self.kit_game_facts_px(cap_x, ty + 2.0, e, theme::size::LABEL + 1.0);
         }
 
         // Position rail — the row shows about five games out of many, so where you
@@ -12138,10 +11559,10 @@ impl SwitchRenderBackend {
             // row's caption.
             // Follows the caption down. A two-line title ends its facts line at
             // y=506, so the old 503 would have been drawn THROUGH it.
-            self.draw_overlay_rect(cap_x, 548.0, cap_w, 3.0, 0x55_2A_36_48);
+            self.kit_rrect(cap_x, 549.0, cap_w, 4.0, 2.0, theme::col::LINE);
             let tw = (cap_w * (1280.0 / PITCH) / n as f32).max(56.0);
             let tx = cap_x + (cap_w - tw) * (sel_pos / (n - 1) as f32).clamp(0.0, 1.0);
-            self.draw_overlay_rect(tx, 547.0, tw, 5.0, 0xFF_FF_D7_40);
+            self.kit_rrect(tx, 548.0, tw, 6.0, 3.0, theme::col::GOLD);
         }
 
         self.kit_home_footer();

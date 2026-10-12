@@ -134,7 +134,7 @@ pub(crate) fn crop_uv(img_w: u32, img_h: u32, box_w: f32, box_h: f32) -> [f32; 4
 }
 
 /// `a` and `b` (0xRRGGBB) mixed, `t` of the way from `a` to `b`.
-fn mix_rgb(a: u32, b: u32, t: f32) -> u32 {
+pub(crate) fn mix_rgb(a: u32, b: u32, t: f32) -> u32 {
     let ch = |s: u32| -> (f32, f32) {
         (((a >> s) & 0xFF) as f32, ((b >> s) & 0xFF) as f32)
     };
