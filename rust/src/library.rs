@@ -8653,9 +8653,11 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                     if shortcut_here(&path) {
                         let removed = tile_remove(&path);
                         crate::sd::commit();
+                        // A failed removal says it could not REMOVE the icon:
+                        // the install's failure message named the wrong act.
                         set_toast(
                             s,
-                            if removed { lc.shortcut_removed } else { lc.shortcut_err }.to_string(),
+                            if removed { lc.shortcut_removed } else { crate::loc_ui::ui().shortcut_remove_err }.to_string(),
                             if removed { TOAST_OK } else { TOAST_ERR },
                         );
                         return;
