@@ -762,8 +762,10 @@ pub(crate) fn draw_settings(
     }
     // A page in the pane is not the tab's home, so the tab strip is not drawn
     // for it after this: it is drawn here, and nothing on it can be tapped.
+    // Nor do L and R switch tabs from it (the bug list pages with them), so
+    // the strip goes without its L and R chips.
     if !matches!(screen, Screen::Settings { .. }) {
-        backend.draw_navbar(Tab::Reglages.index(), logo);
+        backend.draw_navbar_with(Tab::Reglages.index(), logo, false);
     }
     backend.settings_footer(if under { &[] } else { &hints });
     // The pages opened in the pane publish their lists themselves; under a

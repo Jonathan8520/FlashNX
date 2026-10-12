@@ -10595,6 +10595,15 @@ impl SwitchRenderBackend {
     /// over a gold bar, and the console's own L and R glyphs either side, which
     /// say "the shoulders switch these" without a footer line spelling it out.
     pub fn draw_navbar(&mut self, active: usize, logo: (GLuint, u32, u32)) {
+        self.draw_navbar_with(active, logo, true);
+    }
+
+    /// `draw_navbar`, with or without the L and R chips. Without them over a
+    /// page opened from a tab: L and R do not switch tabs there (a long list
+    /// pages with them), and chips that say they do would contradict the
+    /// page's own hints. The tabs keep their places either way, so the strip
+    /// does not shift as the page opens.
+    pub fn draw_navbar_with(&mut self, active: usize, logo: (GLuint, u32, u32), shoulders: bool) {
         use theme::{col, radius, size};
         let vw = self.dimensions.width as f32;
         // The logo, top-left in the strip's band as on the console's own
@@ -10627,7 +10636,9 @@ impl SwitchRenderBackend {
         let tabs_w: f32 = widths.iter().sum::<f32>() + gap * (tabs.len() as f32 - 1.0);
         let total = lw + gap + tabs_w + gap + rw;
         let mut x = ((vw - total) * 0.5).round();
-        self.kit_button(x, cy, shoulder_px, Btn::L, col::PILL_INK);
+        if shoulders {
+            self.kit_button(x, cy, shoulder_px, Btn::L, col::PILL_INK);
+        }
         x += lw + gap;
         // Hit boxes: the full height of the strip and half the gap on each side,
         // because a label is not a target for a thumb.
@@ -10643,7 +10654,9 @@ impl SwitchRenderBackend {
             x += widths[i] + gap;
         }
         navbar_publish(cells);
-        self.kit_button(x, cy, shoulder_px, Btn::R, col::PILL_INK);
+        if shoulders {
+            self.kit_button(x, cy, shoulder_px, Btn::R, col::PILL_INK);
+        }
 
         unsafe {
             glUseProgram(0);
