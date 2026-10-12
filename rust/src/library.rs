@@ -10549,7 +10549,13 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     s2.screen = distant_idle_at(&s2, row);
                 }
                 Some(PendingClose::StopDownload) => {
-                    stop_download(&mut s2);
+                    // Not once the game's other files have started: they
+                    // finish the import (see the B rule on DistantDownloading).
+                    if s2.dl_companion_active {
+                        s2.screen = Screen::DistantDownloading;
+                    } else {
+                        stop_download(&mut s2);
+                    }
                 }
                 None => {}
             }
@@ -11197,7 +11203,15 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             // question scales out: a stop or a carry-on is on its way then.
             drive_download(backend, !closing);
             // The download may have ended this very frame, taking the question
-            // with it.
+            // with it: a finished game or an error page replaces it. Ending
+            // into the game's other files takes it too. Those finish the import
+            // and B waits for them, and a stop now would leave the game's
+            // .swf on the card without its library entry, sidecars or cover.
+            if let Ok(mut s) = LIBRARY.lock() {
+                if s.dl_companion_active && matches!(s.screen, Screen::DistantCancelConfirm { .. }) {
+                    s.screen = Screen::DistantDownloading;
+                }
+            }
             if matches!(LIBRARY.lock().map(|s| s.screen), Ok(Screen::DistantCancelConfirm { .. })) {
                 backend.set_ui_modal_scale(if modal_active { modal_scale } else { 1.0 });
                 let u = crate::loc_ui::ui();
