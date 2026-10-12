@@ -5661,7 +5661,7 @@ fn run_open_share_confirm_flow(game_idx: usize) {
     if let Some(r) = keymap::cursor_diff_row(before_cursor, keymap::cursor_speed_for(&basename)) {
         rows.push(r);
     }
-    let rows = cap_preview_rows(rows);
+    let rows = menu::cap_rows(rows);
     if let Ok(mut s) = LIBRARY.lock() {
         s.preview_rows = rows;
         s.share_is_update = is_update;
@@ -5920,7 +5920,7 @@ fn run_open_preview_flow(game_idx: usize, profile_idx: usize) {
         return;
     }
     if let Ok(mut s) = LIBRARY.lock() {
-        s.preview_rows = cap_preview_rows(rows);
+        s.preview_rows = menu::cap_rows(rows);
         s.screen = Screen::ProfilePreview { game_idx, profile_idx };
     }
 }
@@ -5937,22 +5937,11 @@ fn run_open_revert_preview_flow(game_idx: usize) {
     };
     let current = keymap::effective_for(&basename);
     let target = keymap::revert_target(&basename);
-    let rows = cap_preview_rows(keymap::binding_diff_rows(&current, &target));
+    let rows = menu::cap_rows(keymap::binding_diff_rows(&current, &target));
     if let Ok(mut s) = LIBRARY.lock() {
         s.preview_rows = rows; // may be empty — revert still clears the active tag
         s.screen = Screen::RevertPreview { game_idx };
     }
-}
-
-/// Cap a diff list so the auto-sized modal still fits the screen, noting overflow.
-fn cap_preview_rows(mut rows: std::vec::Vec<std::string::String>) -> std::vec::Vec<std::string::String> {
-    const MAX_PREVIEW_ROWS: usize = 8;
-    if rows.len() > MAX_PREVIEW_ROWS {
-        let extra = rows.len() - MAX_PREVIEW_ROWS;
-        rows.truncate(MAX_PREVIEW_ROWS);
-        rows.push(std::format!("(+{} ...)", extra));
-    }
-    rows
 }
 
 /// A on the preview (#20): actually apply the profile. Hoisted so the popularity

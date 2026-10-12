@@ -554,6 +554,8 @@ pub struct Ui {
     pub shortcut_remove_err: &'static str,
     /// Toast for A on the folders page's "No folder" row when the game is in no folder already.
     pub toast_folder_none: &'static str,
+    /// `more_changes` for exactly one line left out, through `loc::fill_count` ("{}", where present, = 1).
+    pub more_changes_1: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -877,6 +879,7 @@ const EN: Ui = Ui {
     dir_new_in_lib: "You are in your library: create the new folder outside it.",
     shortcut_remove_err: "Couldn't remove the icon",
     toast_folder_none: "This game isn't in any folder.",
+    more_changes_1: "And {} more change",
 };
 
 const FR: Ui = Ui {
@@ -1200,6 +1203,7 @@ const FR: Ui = Ui {
     dir_new_in_lib: "Tu es dans ta bibliothèque : crée le nouveau dossier en dehors.",
     shortcut_remove_err: "Impossible de retirer l'icône",
     toast_folder_none: "Ce jeu n'est dans aucun dossier.",
+    more_changes_1: "Et {} autre changement",
 };
 
 const ES: Ui = Ui {
@@ -1523,6 +1527,7 @@ const ES: Ui = Ui {
     dir_new_in_lib: "Estás dentro de tu biblioteca: crea la carpeta nueva fuera de ella.",
     shortcut_remove_err: "No se pudo quitar el icono",
     toast_folder_none: "Este juego no está en ninguna carpeta.",
+    more_changes_1: "Y {} cambio más",
 };
 
 const RU: Ui = Ui {
@@ -1846,6 +1851,7 @@ const RU: Ui = Ui {
     dir_new_in_lib: "Ты внутри своей библиотеки: создай новую папку за её пределами.",
     shortcut_remove_err: "Не удалось убрать значок",
     toast_folder_none: "Эта игра не входит ни в одну папку.",
+    more_changes_1: "И ещё одно изменение",
 };
 
 const DE: Ui = Ui {
@@ -2169,6 +2175,7 @@ const DE: Ui = Ui {
     dir_new_in_lib: "Du bist in deiner Bibliothek: Lege den neuen Ordner außerhalb an.",
     shortcut_remove_err: "Symbol konnte nicht entfernt werden",
     toast_folder_none: "Dieses Spiel ist in keinem Ordner.",
+    more_changes_1: "Und {} weitere Änderung",
 };
 
 const IT: Ui = Ui {
@@ -2492,6 +2499,7 @@ const IT: Ui = Ui {
     dir_new_in_lib: "Sei dentro la tua libreria: crea la nuova cartella fuori da lì.",
     shortcut_remove_err: "Impossibile rimuovere l'icona",
     toast_folder_none: "Questo gioco non è in nessuna cartella.",
+    more_changes_1: "E un'altra modifica",
 };
 
 const PT: Ui = Ui {
@@ -2815,6 +2823,7 @@ const PT: Ui = Ui {
     dir_new_in_lib: "Você está dentro da sua biblioteca: crie a nova pasta fora dela.",
     shortcut_remove_err: "Não foi possível remover o ícone",
     toast_folder_none: "Este jogo não está em nenhuma pasta.",
+    more_changes_1: "E mais {} mudança",
 };
 
 const ZH: Ui = Ui {
@@ -3138,6 +3147,7 @@ const ZH: Ui = Ui {
     dir_new_in_lib: "你在游戏库内：请在游戏库外新建文件夹。",
     shortcut_remove_err: "无法移除图标",
     toast_folder_none: "此游戏不在任何文件夹中。",
+    more_changes_1: "还有 {} 处更改",
 };
 
 const TR: Ui = Ui {
@@ -3461,6 +3471,7 @@ const TR: Ui = Ui {
     dir_new_in_lib: "Kütüphanenin içindesin: yeni klasörü kütüphanenin dışında oluştur.",
     shortcut_remove_err: "Simge kaldırılamadı",
     toast_folder_none: "Bu oyun hiçbir klasörde değil.",
+    more_changes_1: "Ve {} değişiklik daha",
 };
 
 pub fn ui() -> &'static Ui {

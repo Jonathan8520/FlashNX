@@ -412,11 +412,16 @@ fn game_ctx() -> Option<(std::string::String, std::string::String, std::string::
     Some((basename, title, path))
 }
 
-fn cap_rows(mut rows: std::vec::Vec<std::string::String>) -> std::vec::Vec<std::string::String> {
+/// A before / after table cut to `MAX_PREVIEW_ROWS`, its last line saying how
+/// many were left out ("Et 3 autres changements", "Et 1 autre changement").
+/// The pause and a game's options share it, so the same table ends the same
+/// way in game and on a cover.
+pub(crate) fn cap_rows(mut rows: std::vec::Vec<std::string::String>) -> std::vec::Vec<std::string::String> {
     if rows.len() > MAX_PREVIEW_ROWS {
         let extra = rows.len() - MAX_PREVIEW_ROWS;
         rows.truncate(MAX_PREVIEW_ROWS);
-        rows.push(crate::loc_ui::ui().more_changes.replace("{}", &extra.to_string()));
+        let u = crate::loc_ui::ui();
+        rows.push(crate::loc::fill_count(u.more_changes_1, u.more_changes, extra as i32));
     }
     rows
 }
