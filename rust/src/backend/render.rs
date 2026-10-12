@@ -192,11 +192,11 @@ const GLIDE_KEY_COVER: u32 = 55;
 
 /// Which glyph a pad slot's label (`keymap::PadSlot::glyph`) is drawn with,
 /// and the caption beside it: "LS↑" is the left stick and an arrow, "LS" alone
-/// the left stick pushed in and "press", "↑" the d-pad with its top arm lit and
-/// an arrow. One table for every place a button is named (the editor, its key
-/// picker, the before / after tables), so they cannot disagree on a glyph again:
-/// the editor and the diff table each had their own copy, and fixing one would
-/// have left the other's widths wrong.
+/// the left stick pushed in and "press", "↑" the d-pad's cross with its top arm
+/// marked and an arrow. One table for every place a button is named (the
+/// editor, its key picker, the before / after tables), so they cannot disagree
+/// on a glyph again: the editor and the diff table each had their own copy, and
+/// fixing one would have left the other's widths wrong.
 fn pad_badge_parts(label: &str) -> (Option<Btn>, &str) {
     let single = match label {
         "A" => Some(Btn::A),

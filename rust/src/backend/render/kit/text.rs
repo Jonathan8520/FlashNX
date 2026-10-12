@@ -71,7 +71,8 @@ pub(crate) enum Btn {
     Minus,
     /// The d-pad, for "change a value" hints.
     Dpad,
-    /// The d-pad with one arm lit: a control that IS one of its directions.
+    /// The d-pad's cross with one arm marked: a control that IS one of its
+    /// directions.
     DpadUp,
     DpadDown,
     DpadLeft,
@@ -96,6 +97,11 @@ impl Btn {
     /// U+E104 / U+E105 are the sticks pressed in, U+E101 / U+E102 the sticks
     /// themselves. With the click glyph on the four direction rows, the editor
     /// showed a press icon beside an arrow, which is what Jonathan asked about.
+    ///
+    /// The d-pad is the cross at U+E110, and U+E111..E114 the same cross with
+    /// its up, down, left or right arm marked. U+E0EB..E0EE are not it: they
+    /// are the round direction buttons of a Joy-Con, a disc with a triangle,
+    /// and the editor's rows drew them beside the cross of its picture.
     fn glyph(self) -> char {
         match self {
             Btn::A => '\u{E0E0}',
@@ -111,10 +117,10 @@ impl Btn {
             Btn::Plus => '\u{E0EF}',
             Btn::Minus => '\u{E0F0}',
             Btn::Dpad => '\u{E0EA}',
-            Btn::DpadUp => '\u{E0EB}',
-            Btn::DpadDown => '\u{E0EC}',
-            Btn::DpadLeft => '\u{E0ED}',
-            Btn::DpadRight => '\u{E0EE}',
+            Btn::DpadUp => '\u{E111}',
+            Btn::DpadDown => '\u{E112}',
+            Btn::DpadLeft => '\u{E113}',
+            Btn::DpadRight => '\u{E114}',
             Btn::LStick => '\u{E101}',
             Btn::RStick => '\u{E102}',
             Btn::LStickPress => '\u{E104}',
@@ -150,8 +156,11 @@ impl Btn {
 
 /// The button glyphs this file draws, to say in the log which ones the
 /// console's NintendoExt lacks (`kit_button` then draws a disc with a letter).
-const LOGGED_GLYPHS: [char; 8] =
-    ['\u{E0E8}', '\u{E0E9}', '\u{E0EB}', '\u{E0EE}', '\u{E101}', '\u{E102}', '\u{E104}', '\u{E105}'];
+const LOGGED_GLYPHS: [char; 10] = [
+    '\u{E0E8}', '\u{E0E9}', // SL, SR
+    '\u{E101}', '\u{E102}', '\u{E104}', '\u{E105}', // the sticks, then pushed in
+    '\u{E111}', '\u{E112}', '\u{E113}', '\u{E114}', // the cross, one arm marked
+];
 
 fn shared_face(kind: core::ffi::c_int) -> Option<ttf_parser::Face<'static>> {
     let bytes: &'static [u8] = unsafe {
