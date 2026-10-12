@@ -8923,10 +8923,11 @@ fn open_fp_details(s: &mut State, selection: usize, scroll: usize) {
 static FP_SIZE_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Fill in the details window: the blurb through the thumbnail pool (async,
-/// like the logos), the size by a HEAD run on the frame after the window
-/// appeared. Called once a frame while the window is up, and from the results
-/// page, which collects a blurb still on its way after the window closed.
-fn drive_fp_details() {
+/// like the logos), the size by a HEAD run on the frame after the window has
+/// settled (`settled`: its opening pop is over; a HEAD in the middle of it would
+/// stall the animation). Called once a frame while the window is up, and from
+/// the results page, which collects a blurb still on its way after it closed.
+fn drive_fp_details(settled: bool) {
     // The blurb: collect the transfer in flight, or start the one needed.
     let (slot, for_sel, want) = match LIBRARY.lock() {
         Ok(s) => {
@@ -8979,7 +8980,7 @@ fn drive_fp_details() {
         Err(_) => None,
     };
     let Some((sel, id, zipped, launch_command)) = job else { return };
-    if !FP_SIZE_ARMED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+    if !settled || !FP_SIZE_ARMED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         return;
     }
     // Probe the URL the download will ACTUALLY use, mirroring the choice the
@@ -10926,7 +10927,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             if LIBRARY.lock().map(|s| s.fp_loading).unwrap_or(false) {
                 poll_fp_search();
             }
-            drive_fp_details();
+            drive_fp_details(false);
             // The page opens out of the Flashpoint card and folds back into it,
             // as an archive opens out of its row.
             if let Some((frac, collapsing, done)) = crate::backend::render::distant_reveal_step(now) {
@@ -10958,7 +10959,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             }
         }
         Screen::FpDetails { selection, scroll, size } => {
-            drive_fp_details();
+            drive_fp_details(!modal_active && !closing);
             // The results stay behind the window.
             backend.clear_ui_transform();
             draw_fp_page(backend, selection, scroll, false);
