@@ -140,10 +140,10 @@ extern "C" int  ruffle_fps_counter_step(int dir);
 // game's own bitmaps are sampled, that one is the CRT pass over the finished
 // frame. Persists per game; the next redraw previews it.
 extern "C" int  ruffle_pixel_filter_step(int dir);
-// Pause-menu OVERCLOCK: on <-> off for the game being played. Persists
-// per game, and persists what the hardware ACCEPTED rather than what was asked
-// for, so a refused raise cannot leave a game marked ON while it runs at
-// 1020 MHz.
+// Pause-menu OVERCLOCK: Off / Auto / On for the game being played.
+// Persists per game, and persists what the hardware ACCEPTED rather than what
+// was asked for, so a refused raise cannot leave a game marked ON while it runs
+// at 1020 MHz.
 extern "C" int  ruffle_power_mode_step(int dir);
 extern "C" int  ruffle_rotation_step(int dir);
 // Left / Right on ZOOM: ten percent either way, kept at once.
@@ -539,7 +539,7 @@ enum MenuAction {
                             // three preview on the frozen frame behind the panel
                             // and all three answer the same question, so they sit
                             // together instead of taking three of seven rows.
-    MENU_POWER        = 3,  // OVERCLOCK ON / OFF, toggled in place on the row.
+    MENU_POWER        = 3,  // OVERCLOCK Off / Auto / On, a choice on the row.
                             // Top level and NOT inside ECRAN: every ECRAN row
                             // previews on the frozen frame behind the panel and
                             // this one cannot, so buried a level down it would
@@ -1898,8 +1898,8 @@ static void worker_entry(void* arg) {
             }
 
             // ─── Pause main menu ────────────────────────────────────────
-            // Edge-detected nav so a held D-pad doesn't scroll past every
-            // entry. Press `-` again or `B` to dismiss (= Resume).
+            // A held direction repeats (PauseRepeat) and stops at the ends;
+            // a fresh press wraps. Press `-` again or `B` to dismiss (= Resume).
             // Right stick navigates too (it's the mouse cursor only when the
             // menu is closed — this branch `continue`s before the cursor code).
             //

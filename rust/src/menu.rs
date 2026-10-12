@@ -40,7 +40,7 @@ const MENU_GYRO: usize = 5;
 const MENU_REVERT: usize = 6;
 const MENU_FIXED_ROWS: usize = 6;
 
-// Toast kinds (match `SwitchRenderBackend::draw_toast`): 0 green, 1 red, 2 blue.
+// Toast kinds (match `SwitchRenderBackend::draw_toast`): 0 green, 1 red, 2 gold.
 const TOAST_OK: u8 = 0;
 const TOAST_ERR: u8 = 1;
 const TOAST_INFO: u8 = 2;
@@ -52,7 +52,7 @@ const TOAST_MS: u64 = 2500;
 const GLIDE_KEY_TOUCHES_MENU: u32 = 59;
 const GLIDE_KEY_TOUCHES_PROFILES: u32 = 60;
 
-/// Cap a diff list so the auto-sized modal still fits the screen.
+/// Cap a diff list so its page still fits the screen.
 const MAX_PREVIEW_ROWS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -121,7 +121,8 @@ struct State {
     preview_rows: std::vec::Vec<std::string::String>,
     /// Whether sharing will UPDATE an existing shared profile vs create the first.
     share_is_update: bool,
-    /// Transient toast over the current screen (msg + kind + frames remaining).
+    /// Transient toast over the current screen (msg + kind, up until
+    /// `toast_until`).
     toast_msg: std::string::String,
     toast_kind: u8,
     /// Tick until which the toast stays up (0 = none).
@@ -1993,11 +1994,11 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
         backend.draw_loading_card(pending_label(), now, 0.0, vw);
     }
     if let Some((msg, kind)) = toast {
-        // Beside the panels in game; under the editor's window, where it is.
+        // Beside the panels in game; on the footer band of the editor's window.
         if screen_is_sheet() {
             backend.draw_toast_in_game(&msg, kind);
         } else {
-            backend.draw_toast(&msg, kind);
+            backend.draw_toast_in_editor(&msg, kind);
         }
     }
 }

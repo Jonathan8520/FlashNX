@@ -1406,8 +1406,8 @@ pub fn cursor_speed_for(basename: &str) -> i32 {
 }
 
 /// Number of stage-scaling modes: 0 = fit (aspect kept, black bars, the Flash
-/// default), 1 = fill (aspect kept, overflow cropped), 2 = stretch (fills by
-/// distorting).
+/// default), 1 = stretch (fills by distorting), 2 = fill (aspect kept, overflow
+/// cropped), the order the choice shows them in.
 pub const DISPLAY_MODE_COUNT: u8 = 3;
 
 /// Per-game stage-scaling mode (by basename), 0 when unset. Stored in its OWN

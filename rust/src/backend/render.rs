@@ -77,9 +77,10 @@ use ruffle_render::transform::Transform;
 use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-/// Pause-menu labels rendered by `draw_menu_overlay`. C++ maps the selected
-/// index from this slice to an action (Resume / Touches / Restart / Quit).
-/// Keep the order in sync with the `MENU_*` constants in `cpp/src/main.cpp`.
+/// The pause menu's rows, as match keys: `draw_menu_overlay` draws each one's
+/// label from loc. C++ maps the selected index to an action (Resume, Touches,
+/// Écran, Overclock, Restart, Quit). Keep the order in sync with the `MENU_*`
+/// constants in `cpp/src/main.cpp`.
 // VITESSE moved into the in-game TOUCHES sub-menu (#20 Option 1), so it's no
 // longer a top-level pause entry.
 pub const MENU_ITEMS: &[&str] = &[
@@ -337,6 +338,9 @@ const TOUCHES_MARGIN: f32 = 16.0;
 const TOUCHES_PAD_X: f32 = 28.0;
 const TOUCHES_HEAD_H: f32 = 104.0;
 const TOUCHES_FOOT_H: f32 = 60.0;
+/// The footer band of the editor's window as last drawn (x, width, top), where
+/// its toast goes (`draw_toast_in_editor`).
+static TOUCHES_FOOT: std::sync::Mutex<Option<(f32, f32, f32)>> = std::sync::Mutex::new(None);
 const TOUCHES_TITLE_PX: f32 = 24.0;
 /// "None", the Minus caption: quieter than any value.
 const TOUCHES_QUIET: u32 = 0xFF_5A_6A_8F;
@@ -10499,6 +10503,9 @@ impl SwitchRenderBackend {
     /// What sits at the left (the cursor speed, the picker's legend) is the
     /// caller's; returns where the hints start, so it can stay clear of them.
     fn touches_footer(&mut self, x: f32, y: f32, w: f32, h: f32, hints: &[kit::text::HintItem]) -> f32 {
+        if let Ok(mut g) = TOUCHES_FOOT.lock() {
+            *g = Some((x, w, y + h - TOUCHES_FOOT_H));
+        }
         let line_w = w - 2.0 * TOUCHES_PAD_X;
         self.draw_overlay_rect(x + TOUCHES_PAD_X, y + h - TOUCHES_FOOT_H, line_w, 1.0, theme::col::LINE);
         let right = x + w - TOUCHES_PAD_X;
@@ -13440,7 +13447,7 @@ impl SwitchRenderBackend {
     }
 
     /// Transient toast banner near the bottom of the screen (#20). `kind`: 0 =
-    /// success (green), 1 = error (red), 2 = info (blue). Non-blocking — drawn on
+    /// success (green), 1 = error (red), 2 = info (gold). Non-blocking — drawn on
     /// top of the current screen for a couple of seconds (the library loop counts
     /// it down), so a share/apply/revert confirms without a full "thanks" modal.
     pub fn draw_toast(&mut self, msg: &str, kind: u8) {
@@ -13457,6 +13464,16 @@ impl SwitchRenderBackend {
         let vw = self.dimensions.width as f32;
         let y = if fps_counter_on() { 14.0 + 28.0 + 12.0 } else { 24.0 };
         self.draw_toast_in(msg, kind, left, vw, y);
+    }
+
+    /// The toast over the controls editor's window: on its footer band, for
+    /// the length of the toast. The footer toast sat on the line explaining the
+    /// focused row, which is what the player reads after a change.
+    pub fn draw_toast_in_editor(&mut self, msg: &str, kind: u8) {
+        match TOUCHES_FOOT.lock().ok().and_then(|g| *g) {
+            Some((x, w, top)) => self.draw_toast_in(msg, kind, x, x + w, top + (TOUCHES_FOOT_H - 52.0) * 0.5),
+            None => self.draw_toast(msg, kind),
+        }
     }
 
     /// The launcher's toast while a game's options are up: over the library,
@@ -13507,8 +13524,9 @@ impl SwitchRenderBackend {
     /// Shared loading overlay: a full-screen dim + the standard loading panel
     /// (title + spinner). Drawn OUTSIDE any modal pop-in scale
     /// (`clear_ui_transform`) so it stays full size instead of shrinking with a
-    /// modal's open animation. Used by the profile network flows AND the language
-    /// picker's first open, so they all look identical. `now` drives the rotation.
+    /// modal's open animation. Used by the language picker's first open, and by
+    /// a launcher flow with no screen to keep under its card (the others use
+    /// `draw_loading_card`). `now` drives the rotation.
     pub fn draw_loading_overlay(&mut self, title: &str, now: u64) {
         self.clear_ui_transform();
         let vw = self.dimensions.width as f32;
