@@ -7033,9 +7033,14 @@ fn run_add_url_flow(initial: Option<&str>) {
         }
         return;
     }
-    // The window opens out of the add card.
+    // The window opens out of the add card. The importer is put back under it
+    // first: retyped from the "not an address" question, that question was
+    // still the screen, and an address that leads nowhere new (a direct link to
+    // a game already on the card only says so in a toast) left it up behind
+    // the toast. A cancelled keyboard returned above and keeps it.
     if let Ok(mut s) = LIBRARY.lock() {
         s.import_return_row = 1;
+        s.screen = distant_idle_at(&s, 1);
     }
     run_fetch_for_url(&url, 1, IMPORT_SCROLL.load(std::sync::atomic::Ordering::Relaxed));
 }
