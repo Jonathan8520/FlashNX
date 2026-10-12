@@ -9934,6 +9934,7 @@ impl SwitchRenderBackend {
         ));
 
         let mut sheet = kit::sheet::Sheet::new(&game, &rows, selected);
+        sheet.title_is_name = true;
         sheet.kicker = Some(Icon::Pause);
         sheet.crumbs = core::slice::from_ref(&lc.pause_title);
         sheet.chips = &chips;

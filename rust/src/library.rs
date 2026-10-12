@@ -7474,6 +7474,8 @@ fn with_source_sheet<R>(
     let hints = [(&[Btn::A][..], a_verb), (&[Btn::B][..], u.back)];
     let crumbs = [u.tab_import];
     let mut sheet = Sheet::new(&name, &rows, selection);
+    // A source's name, cut in the middle as its row in the list cuts it.
+    sheet.title_is_name = true;
     sheet.kicker = Some(if direct { Icon::File } else { Icon::Archive });
     sheet.crumbs = &crumbs;
     sheet.subtitle = Some(u.imp_src_sub);

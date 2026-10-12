@@ -348,6 +348,7 @@ pub(crate) fn with_options_sheet<R>(
     ];
     let thumb = backend.cover_thumb(&entry.basename);
     let mut sheet = Sheet::new(&entry.display_name, &rows, selection);
+    sheet.title_is_name = true;
     sheet.subtitle = Some(u.opt_subtitle);
     sheet.thumb = Some(thumb.unwrap_or((0, 0, 0, 0)));
     // The name the grid's tile shows, not the file's.

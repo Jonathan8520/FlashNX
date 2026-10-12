@@ -29,6 +29,11 @@ pub(crate) struct Sheet<'a> {
     pub kicker: Option<Icon>,
     pub crumbs: &'a [&'a str],
     pub title: &'a str,
+    /// The title is a name (a game's, a source's): too long, it loses its
+    /// middle, where two episodes of a series do not differ, rather than its
+    /// end, where they do. Cut at its end, the pause's title showed the same
+    /// "Scooby-Doo: Mayan Monster Mayh…" for every episode.
+    pub title_is_name: bool,
     /// A line under the title ("Options de ce jeu").
     pub subtitle: Option<&'a str>,
     /// The game's cover beside the title: (texture, width, height, its
@@ -67,6 +72,7 @@ impl<'a> Sheet<'a> {
             kicker: None,
             crumbs: &[],
             title,
+            title_is_name: false,
             subtitle: None,
             thumb: None,
             thumb_tile: None,
@@ -268,9 +274,7 @@ impl SwitchRenderBackend {
             self.sheet_thumb(x + 24.0, y, TW, TH, thumb, s.thumb_tile);
             let tx = x + 24.0 + TW + 16.0;
             let tmax = x + w - 24.0 - tx;
-            // A game's name: cut in the middle, where two episodes of a series
-            // differ at the end.
-            let t = self.kit_fit_mid(s.title, size::WINDOW_TITLE - 1.0, tmax);
+            let t = self.sheet_title_fit(s, size::WINDOW_TITLE - 1.0, tmax);
             let has_sub = s.subtitle.is_some();
             let tcy = if has_sub { y + 20.0 } else { y + TH * 0.5 };
             self.kit_text_mid(tx, tcy, size::WINDOW_TITLE - 1.0, &t, col::TEXT);
@@ -284,7 +288,7 @@ impl SwitchRenderBackend {
                 self.sheet_kicker(x + 24.0, y + 8.5, inner, s);
                 y += 17.0 + 6.0;
             }
-            let t = self.kit_fit(s.title, size::WINDOW_TITLE + 2.0, inner);
+            let t = self.sheet_title_fit(s, size::WINDOW_TITLE + 2.0, inner);
             self.kit_text_mid(x + 24.0, y + 14.5, size::WINDOW_TITLE + 2.0, &t, col::TEXT);
             y += 29.0;
             if let Some(sub) = s.subtitle {
@@ -308,6 +312,16 @@ impl SwitchRenderBackend {
         let line_y = y.round();
         self.draw_overlay_rect(x + 24.0, line_y, w - 48.0, 1.0, col::LINE);
         line_y
+    }
+
+    /// The title of `s` cut to `max_w` at `px`: in the middle for a name
+    /// (`title_is_name`), at its end otherwise.
+    fn sheet_title_fit(&mut self, s: &Sheet, px: f32, max_w: f32) -> std::string::String {
+        if s.title_is_name {
+            self.kit_fit_mid(s.title, px, max_w)
+        } else {
+            self.kit_fit(s.title, px, max_w)
+        }
     }
 
     /// A panel's cover in a `w` x `h` box: the cover rule (filled when little
