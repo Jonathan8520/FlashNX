@@ -211,9 +211,11 @@ pub fn is_active() -> bool {
 /// — the same double-tap the gallery has always used. A key that fired on the
 /// first tap would rebind a button before the player could see which key their
 /// thumb had covered, and on a keyboard of a hundred caps a thumb covers four.
+/// A cursor that moves says so with the move sound, as a button press would.
 ///
-/// Only the two screens that publish a touch table answer: the per-button row
-/// list and the keyboard. The rest keep their buttons.
+/// The screens that publish a touch table answer: the pad and its keyboard,
+/// the Touches et curseur page, the shared profiles and the delete question.
+/// The parts of a row's control (an option, a switch) are `touch_part`'s.
 pub fn touch_select(idx: usize) -> bool {
     let Ok(mut s) = TOUCHES.lock() else {
         return false;
