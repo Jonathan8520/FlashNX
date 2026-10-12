@@ -173,12 +173,13 @@ pub(crate) fn after_input(
         return;
     }
     if before == after {
-        // A press that moved nothing: a value changed in place (the handler
-        // said so), or A acting where it stands. Anything else deserves
-        // silence: a step against the end of a list or a choice, an X or a Y
-        // with nothing to act on (they used to click like a toggle). A that
-        // does nothing says so through `hush`, a refusal through `choose`.
-        if changed || button == "A" {
+        // A press that moved nothing on screen: a value changed in place (the
+        // handler said so) clicks. Anything else deserves silence: a step
+        // against the end of a list or a choice, and an A, an X or a Y with
+        // nothing to act on (they used to click like a toggle whatever they
+        // did). What acts in place without changing a value says so itself
+        // (`choose`: arming a row, a refusal, a report sent).
+        if changed {
             play(Sfx::Toggle);
         }
         return;

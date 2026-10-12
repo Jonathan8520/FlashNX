@@ -634,10 +634,9 @@ pub fn input(button: &str) -> bool {
             }
         } else if b == a {
             // Nothing moved on screen: a value stepped in place or a switch
-            // flipped (the handler said so), or A acting where it stands. A
-            // step refused at an end is silent, and so is an X with nothing
-            // to act on.
-            if changed || button == "A" {
+            // flipped (the handler said so). A step refused at an end is
+            // silent, and so is an A or an X with nothing to act on.
+            if changed {
                 play(Sfx::Toggle);
             }
         } else if core::mem::discriminant(&b) == core::mem::discriminant(&a) {
@@ -1050,6 +1049,9 @@ fn run_open_share_confirm() {
             set_toast(&mut s, crate::loc::s().profile_share_dup.to_string(), TOAST_INFO);
             s.screen = Screen::Menu { selection: MENU_SHARE };
         }
+        // Nothing sent, said by the toast: the note of a refusal, not the
+        // silence of a press that did nothing (as in the launcher).
+        crate::sfx::choose(crate::sfx::Sfx::Error);
         return;
     }
     let current = keymap::effective_for(&basename);

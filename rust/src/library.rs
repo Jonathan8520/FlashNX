@@ -4876,13 +4876,17 @@ fn input_inner(button: &str) -> bool {
             }
             // A on a search that failed: the same search again, no keyboard.
             if failed && button == "A" {
-                run_fp_requery(false);
+                // The page stays and starts loading: the sound of A acting,
+                // which the screen alone cannot tell (it looks the same).
+                if run_fp_requery(false) {
+                    crate::sfx::choose(crate::sfx::Sfx::Decide);
+                }
                 return true;
             }
             // Hidden ZL+ZR chord (synthesised in main.cpp): flip the family
             // filter and re-run the query. Hoisted because it starts an async GET.
             if button == "ZL+ZR" {
-                run_fp_requery(true);
+                let _ = run_fp_requery(true);
                 return true;
             }
         }
@@ -5829,6 +5833,31 @@ fn handle_games_dir_confirm_input(s: &mut State, button: &str, selection: usize)
     }
 }
 
+/// `apply_game_folder` for a press, with the sound it deserves: a change
+/// clicks (its toast says which). A refusal or a failure has already sounded
+/// its note with its red toast (`set_toast`), the move that half happened
+/// (file moved, labels kept) included, so the screens must add nothing: the
+/// cursor landing on another row would click over the error.
+fn apply_game_folder_from_press(s: &mut State, game_idx: usize, target: &str) {
+    let before = s.entries.get(game_idx).map(|e| (e.path.clone(), shelves_of(e)));
+    apply_game_folder(s, game_idx, target);
+    // A red toast set by this very press still has all its frames: the
+    // countdown only runs in `render`, between presses.
+    if s.toast_kind == TOAST_ERR && s.toast_frames == TOAST_FRAMES {
+        crate::sfx::hush();
+        return;
+    }
+    // By path: a re-sort can move the game's index, and a move out of a
+    // folder changes the path itself, which is a change too.
+    let after = before
+        .as_ref()
+        .and_then(|(p, _)| s.entries.iter().find(|e| &e.path == p))
+        .map(|e| (e.path.clone(), shelves_of(e)));
+    if after != before {
+        crate::sfx::value_changed();
+    }
+}
+
 /// OPTIONS > DOSSIER > NOUVEAU DOSSIER (issue #68): name a shelf and put this
 /// game on it in one gesture. Hoisted out of the handler — swkbd blocks, and the
 /// library lock must not be held across it.
@@ -5857,6 +5886,8 @@ fn run_new_game_folder_flow(game_idx: usize) {
         if let Ok(mut s) = LIBRARY.lock() {
             set_toast(&mut s, crate::loc_ui::ui().folder_name_reserved.to_string(), TOAST_INFO);
         }
+        // Refused, with the note a refusal makes (the screen stays as it was).
+        crate::sfx::choose(crate::sfx::Sfx::Error);
         return;
     }
     if let Ok(mut s) = LIBRARY.lock() {
@@ -5870,8 +5901,11 @@ fn run_new_game_folder_flow(game_idx: usize) {
             .is_some_and(|e| on_shelf(e, &safe));
         if already {
             set_toast(&mut s, crate::loc::s().toast_folder_same.to_string(), TOAST_ERR);
+            // The red toast has sounded: the cursor moving onto that shelf
+            // below must not click over it.
+            crate::sfx::hush();
         } else {
-            apply_game_folder(&mut s, game_idx, &safe);
+            apply_game_folder_from_press(&mut s, game_idx, &safe);
         }
         // `apply_game_folder` already lands on the picker and has re-found the
         // game's index; only the cursor row is ours to set, onto the shelf that
@@ -5973,6 +6007,9 @@ fn run_open_share_confirm_flow(game_idx: usize) {
             set_toast(&mut s, crate::loc::s().profile_share_dup.to_string(), TOAST_INFO);
             goto_touches_menu(&mut s, game_idx, menu::MENU_SHARE);
         }
+        // Nothing sent, said by the toast: the note of a refusal, not the
+        // silence of a press that did nothing.
+        crate::sfx::choose(crate::sfx::Sfx::Error);
         return;
     }
     let current = keymap::effective_for(&basename);
@@ -6699,14 +6736,18 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
         "B" => {
             let keep = filtered.get(selection).and_then(|&i| s.entries.get(i)).map(|e| e.path.clone());
             let searching = s.local_filter.as_deref().is_some_and(|f| !f.trim().is_empty());
+            // Both go back a level, which the screens cannot always tell: the
+            // cursor can land on the same row it left.
             if searching {
                 s.local_filter = None;
                 let row = keep.and_then(|p| row_of_path(s, &p)).unwrap_or(0);
                 crate::backend::render::gallery_anim_reset();
                 crate::backend::render::tile_open_reset();
                 s.screen = Screen::List { selection: row, scroll_offset: home_scroll_for(row, 0) };
+                crate::sfx::choose(crate::sfx::Sfx::Back);
             } else if s.folder_filter.is_some() {
                 goto_shelf(s, None, -1.0, selection, keep);
+                crate::sfx::choose(crate::sfx::Sfx::Back);
             }
             return;
         }
@@ -7192,6 +7233,8 @@ fn handle_distant_idle_input(
                     selection = importer_row_for_abs(s, abs);
                 }
                 crate::backend::render::gallery_anim_reset();
+                // Back a level, even when the cursor stays on its row.
+                crate::sfx::choose(crate::sfx::Sfx::Back);
             }
         }
         _ => {}
@@ -7751,12 +7794,13 @@ fn start_fp_search(query: &str, origin: Option<usize>) {
 /// failed, and the hidden ZL+ZR chord, which flips the family filter first
 /// (issue #33: the mature-rated catalogue, reachable without a settings row).
 /// No-op while a search is already running or before any. Called from
-/// `input()` only.
-fn run_fp_requery(flip_filter: bool) {
+/// `input()` only. Returns whether a search went out, so A can sound like it
+/// did something only when it did.
+fn run_fp_requery(flip_filter: bool) -> bool {
     let query = {
-        let Ok(mut s) = LIBRARY.lock() else { return };
+        let Ok(mut s) = LIBRARY.lock() else { return false };
         if s.fp_loading {
-            return;
+            return false;
         }
         if flip_filter {
             s.fp_content_filter = !s.fp_content_filter;
@@ -7765,9 +7809,10 @@ fn run_fp_requery(flip_filter: bool) {
         s.fp_query.clone()
     };
     if query.trim().is_empty() {
-        return;
+        return false;
     }
     start_fp_search(&query, None);
+    true
 }
 
 /// archive.org item import (async): start the metadata fetch + open the reveal
@@ -7915,6 +7960,8 @@ fn handle_distant_files_input(
                     selection: sel,
                     scroll_offset: clamp_scroll(scroll, sel, DISTANT_VISIBLE_ROWS),
                 };
+                // Back a level, even when the cursor stays on its row.
+                crate::sfx::choose(crate::sfx::Sfx::Back);
                 return;
             }
             // Collapse the file list back down to its row; render() clears +
@@ -8383,7 +8430,7 @@ fn handle_game_folder_input(s: &mut State, button: &str, game_idx: usize, mut se
                     None => return,
                 }
             };
-            apply_game_folder(s, game_idx, &target);
+            apply_game_folder_from_press(s, game_idx, &target);
             return;
         }
         "X" => {
@@ -9024,6 +9071,11 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                             if removed { lc.shortcut_removed } else { lc.shortcut_err }.to_string(),
                             if removed { TOAST_OK } else { TOAST_ERR },
                         );
+                        // The row's switch moved: its click (a failure has
+                        // sounded its own note with the toast).
+                        if removed {
+                            crate::sfx::value_changed();
+                        }
                         return;
                     }
 
@@ -9081,6 +9133,7 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                         crate::sd::commit();
                         tile_index_forget();
                         set_toast(s, lc.shortcut_ok.to_string(), TOAST_OK);
+                        crate::sfx::value_changed();
                     } else {
                         // The config would otherwise sit there naming a tile
                         // that does not exist.
@@ -9992,6 +10045,10 @@ fn run_rename_flow(game_idx: usize) {
             } else {
                 new_name_trimmed
             };
+            // A value changed in place: the panel stays, only the name moves.
+            if entry.display_name != current_display {
+                crate::sfx::value_changed();
+            }
         }
     }
 }
