@@ -322,6 +322,9 @@ pub(crate) struct KeysView<'a> {
     pub cursor: usize,
     /// The keys the other buttons send, with their pad labels.
     pub used: &'a std::collections::BTreeMap<std::string::String, std::vec::Vec<&'static str>>,
+    /// A toast stands in for the line about the focused key (it is drawn on
+    /// it): the line is left out so its ends do not peek out round the pill.
+    pub quiet: bool,
 }
 
 /// What the editor's touch table holds after its twenty-five rows: the two
@@ -353,6 +356,26 @@ fn touches_help_band(portrait: bool) -> f32 {
     } else {
         36.0
     }
+}
+
+/// Where the controls editor's toast goes: centred between the first two x,
+/// its middle at the y, the window's help line. Written by the editor and its
+/// key picker as they draw (`touches_toast_anchor`), read by
+/// `draw_toast_in_touches`.
+static TOUCHES_TOAST_AT: std::sync::Mutex<(f32, f32, f32)> = std::sync::Mutex::new((0.0, 0.0, 0.0));
+
+fn touches_toast_anchor(left: f32, right: f32, cy: f32) {
+    if let Ok(mut g) = TOUCHES_TOAST_AT.lock() {
+        *g = (left, right, cy);
+    }
+}
+
+/// Where a toast is placed: by its top, its bottom or its middle.
+#[derive(Clone, Copy)]
+enum ToastAt {
+    Top(f32),
+    Bottom(f32),
+    Middle(f32),
 }
 
 /// Which column of the controls editor slot `i` of `keymap::PAD_SLOTS` sits
@@ -10450,6 +10473,7 @@ impl SwitchRenderBackend {
         // One line in landscape; in portrait, where a line is half as long,
         // it wraps in its band (centred there, the icon on its first line).
         let help_cy = y + h - TOUCHES_FOOT_H - help_h * 0.5;
+        touches_toast_anchor(x, x + w, help_cy);
         if !v.help.is_empty() {
             let lines = if portrait {
                 self.kit_wrap(v.help, size::LABEL, inner_w - 26.0, TOUCHES_HELP_LINES_PORTRAIT)
@@ -10899,8 +10923,11 @@ impl SwitchRenderBackend {
 
         // ── The line about the focused key, and the footer ───────────────
         let help_cy = y + h - TOUCHES_FOOT_H - help_h * 0.5;
+        touches_toast_anchor(x, x + w, help_cy);
         let focused = keys.get(v.cursor).map(|k| k.0).unwrap_or("");
         match v.used.get(focused) {
+            // A toast stands in for the line while it shows.
+            _ if v.quiet => {}
             // Who already sends it, as their glyphs: two buttons on one key is
             // allowed, but it should be a choice.
             Some(owners) if !owners.is_empty() => {
@@ -13719,29 +13746,53 @@ impl SwitchRenderBackend {
     /// it down), so a share/apply/revert confirms without a full "thanks" modal.
     pub fn draw_toast(&mut self, msg: &str, kind: u8) {
         let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
-        self.draw_toast_in(msg, kind, 0.0, vw, vh - 48.0 - 20.0 - 52.0);
+        self.draw_toast_in(msg, kind, 0.0, vw, ToastAt::Bottom(vh - 48.0 - 20.0));
     }
 
-    /// The same pill over the part of the screen the pause's panels leave free,
-    /// at its top: in game there is no footer to sit above, and the panels' help
-    /// and hints are exactly where the launcher's toast goes. Below the frame
-    /// counter when it is shown, which owns the top-right corner.
+    /// The same pill over the part of the screen the pause's panels leave free.
+    /// In landscape that is the right of the picture, at its top: in game there
+    /// is no footer to sit above, and the panels' help and hints are exactly
+    /// where the launcher's toast goes. Below the frame counter when it is
+    /// shown, which owns the top-right corner. In portrait the strip right of
+    /// the panels is too narrow, and the panels hug their rows at the top
+    /// (`kit::sheet`): the toast goes at the bottom, across the picture.
     pub fn draw_toast_in_game(&mut self, msg: &str, kind: u8) {
+        let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
+        if vh > vw {
+            self.draw_toast_in(msg, kind, 0.0, vw, ToastAt::Bottom(vh - 24.0));
+            return;
+        }
         let left = kit::sheet::SHEET_MARGIN + kit::sheet::RAIL_W + kit::sheet::CASCADE_GAP + kit::sheet::CHILD_W;
-        let vw = self.dimensions.width as f32;
         let y = if fps_counter_on() { 14.0 + 28.0 + 12.0 } else { 24.0 };
-        self.draw_toast_in(msg, kind, left, vw, y);
+        self.draw_toast_in(msg, kind, left, vw, ToastAt::Top(y));
+    }
+
+    /// The controls editor's toast, or its key picker's: on the window's help
+    /// line, which it stands in for while it shows. Under the window (the old
+    /// place, at the bottom of the screen) it covered the help line and the
+    /// footer's hairline in landscape and the rows in portrait, where the
+    /// window is taller than the screen's lower third.
+    pub fn draw_toast_in_touches(&mut self, msg: &str, kind: u8) {
+        let at = TOUCHES_TOAST_AT.lock().map(|g| *g).unwrap_or((0.0, 0.0, 0.0));
+        if at.1 <= at.0 {
+            self.draw_toast(msg, kind);
+            return;
+        }
+        self.draw_toast_in(msg, kind, at.0, at.1, ToastAt::Middle(at.2));
     }
 
     /// The launcher's toast while a game's options are up: over the library,
     /// left of the panels (`right`), where the footer toast would land on them.
     pub fn draw_toast_left_of(&mut self, msg: &str, kind: u8, right: f32) {
         let vh = self.dimensions.height as f32;
-        self.draw_toast_in(msg, kind, 0.0, right, vh - 48.0 - 20.0 - 52.0);
+        self.draw_toast_in(msg, kind, 0.0, right, ToastAt::Bottom(vh - 48.0 - 20.0));
     }
 
-    /// A toast centred between `left` and `right`, its top at `y`.
-    fn draw_toast_in(&mut self, msg: &str, kind: u8, left: f32, right: f32, y: f32) {
+    /// A toast centred between `left` and `right`, placed by `at`. A message
+    /// too long for one line wraps to a second, in a taller pill, instead of
+    /// losing its end: beside an open page the strip is 586 px, and what an
+    /// ellipsis took was the instruction ("...pour partager ta version").
+    fn draw_toast_in(&mut self, msg: &str, kind: u8, left: f32, right: f32, at: ToastAt) {
         use theme::{col, size};
         unsafe {
             glEnable(GL_BLEND);
@@ -13763,14 +13814,30 @@ impl SwitchRenderBackend {
         const DOT: f32 = 10.0;
         let area = right - left;
         let max_text = area - 40.0 - 2.0 * PAD - DOT - 14.0;
-        let text = self.kit_fit(msg, size::BODY, max_text);
-        let tw = self.kit_measure(&text, size::BODY);
+        let lines = self.kit_wrap(msg, size::BODY, max_text, 2);
+        let lh = (size::BODY * 1.45).round();
+        let h = H + lh * (lines.len().max(1) - 1) as f32;
+        let mut tw: f32 = 0.0;
+        for l in &lines {
+            tw = tw.max(self.kit_measure(l, size::BODY));
+        }
         let w = tw + 2.0 * PAD + DOT + 14.0;
         let x = (left + (area - w) * 0.5).round();
-        self.kit_shadow(x, y + 6.0, w, H, H * 0.5, 18.0, col::SHADOW);
-        self.kit_shape(x, y, w, H, H * 0.5, col::PANEL, 1.0, col::PANEL_LINE, 0.0);
-        self.kit_rrect(x + PAD, y + (H - DOT) * 0.5, DOT, DOT, DOT * 0.5, dot);
-        self.kit_text_mid(x + PAD + DOT + 14.0, y + H * 0.5, size::BODY, &text, col::TEXT);
+        let y = match at {
+            ToastAt::Top(y) => y,
+            ToastAt::Bottom(y) => y - h,
+            ToastAt::Middle(y) => y - h * 0.5,
+        }
+        .round();
+        self.kit_shadow(x, y + 6.0, w, h, H * 0.5, 18.0, col::SHADOW);
+        self.kit_shape(x, y, w, h, H * 0.5, col::PANEL, 1.0, col::PANEL_LINE, 0.0);
+        let cy = y + h * 0.5;
+        self.kit_rrect(x + PAD, cy - DOT * 0.5, DOT, DOT, DOT * 0.5, dot);
+        let mut ly = cy - lh * (lines.len().max(1) - 1) as f32 * 0.5;
+        for l in &lines {
+            self.kit_text_mid(x + PAD + DOT + 14.0, ly, size::BODY, l, col::TEXT);
+            ly += lh;
+        }
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);

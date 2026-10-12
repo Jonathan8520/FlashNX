@@ -1866,7 +1866,9 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
                 ],
                 cursor_speed: speed.as_deref(),
                 profiles: place.profiles,
-                help: &help,
+                // A toast stands in for the help line while it shows (it is
+                // drawn on it), so the line's ends do not peek out round it.
+                help: if toast.is_some() { "" } else { &help },
             });
         }
         Screen::Keyboard { button_idx, key_idx } => {
@@ -1889,6 +1891,7 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
                 current: &current,
                 cursor: key_idx,
                 used: &used,
+                quiet: toast.is_some(),
             });
         }
         Screen::Profiles { selection } => {
@@ -1961,11 +1964,11 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
         }
     }
     if let Some((msg, kind)) = toast {
-        // Beside the panels in game; under the editor's window, where it is.
+        // Beside the panels in game; on the editor's help line, where it is.
         if screen_is_sheet() {
             backend.draw_toast_in_game(&msg, kind);
         } else {
-            backend.draw_toast(&msg, kind);
+            backend.draw_toast_in_touches(&msg, kind);
         }
     }
 }
