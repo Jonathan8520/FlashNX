@@ -1888,11 +1888,13 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
             };
             let used = keymap::current_map_used_keys(slot.name);
             let crumbs = [place.crumbs[0], place.crumbs[1], lc.keys_title];
+            let player = keymap::edit_player();
             backend.draw_touches_keyboard(&crate::backend::render::KeysView {
                 crumbs: &crumbs,
                 glyph: slot.glyph,
                 layer: (!modif.is_empty()).then_some(modif),
-                player: keymap::edit_player(),
+                player,
+                live_layers: live_layers(player),
                 current: &current,
                 cursor: key_idx,
                 used: &used,

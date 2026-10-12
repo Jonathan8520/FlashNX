@@ -316,6 +316,9 @@ pub(crate) struct KeysView<'a> {
     /// The open combo layer's button ("ZL"), None in the Normal layer.
     pub layer: Option<&'a str>,
     pub player: u8,
+    /// The editor's `live_layers`: its header's height depends on them, and
+    /// the picker's header is the editor's.
+    pub live_layers: [bool; 5],
     /// What the button sends now in that layer.
     pub current: &'a PadValue,
     /// Indexes `keymap::KEYBOARD`.
@@ -341,8 +344,30 @@ const TOUCHES_PAD_X: f32 = 28.0;
 const TOUCHES_HEAD_H: f32 = 104.0;
 const TOUCHES_FOOT_H: f32 = 60.0;
 const TOUCHES_TITLE_PX: f32 = 24.0;
+/// The X, L and R glyphs beside the editor's player and layer switches.
+const TOUCHES_SWITCH_GLYPH: f32 = 22.0;
 /// "None", the Minus caption: quieter than any value.
 const TOUCHES_QUIET: u32 = 0xFF_5A_6A_8F;
+
+/// The controls editor's two switches: the players, then the layers.
+fn pad_switch_labels() -> ([&'static str; 2], [&'static str; 5]) {
+    let u = crate::loc_ui::ui();
+    ([u.player_1, u.player_2], [u.layer_normal, "ZL", "ZR", "L", "R"])
+}
+
+/// The controls editor's header as `touches_head` measures it.
+struct TouchesHead {
+    /// The band's height, down to its hairline.
+    h: f32,
+    /// The switches on the title's line, at the right.
+    wide: bool,
+    /// The layers on a row of their own, under the players.
+    split: bool,
+    /// [X] players | [L] layers [R] whole, then each segmented switch.
+    switches_w: f32,
+    players_w: f32,
+    layers_w: f32,
+}
 
 /// The band of the line about the focused row or key, over the footer: one
 /// line in landscape; in portrait, where a line is half as long, up to three
@@ -10200,29 +10225,11 @@ impl SwitchRenderBackend {
 
         // The header's two switches, measured first: on a narrow (turned)
         // screen they take a row of their own under the title.
-        let players = [u.player_1, u.player_2];
-        let layers = [u.layer_normal, "ZL", "ZR", "L", "R"];
-        let gpx = 22.0;
-        let bx = self.kit_button_width(Btn::X, gpx);
-        let bl = self.kit_button_width(Btn::L, gpx);
-        let br = self.kit_button_width(Btn::R, gpx);
-        let pw = self.pad_segments_width(&players, &[false; 2]);
-        let lw = self.pad_segments_width(&layers, &v.live_layers);
-        // [X] players | [L] layers [R], 8 px apart and a hairline between: the
-        // gaps the drawing below steps by, 8 + 8 + 9 (the line and the 8 px
-        // after it) + 8 + 8, so the R glyph ends on the window's padding.
-        let switches_w = bx + pw + bl + lw + br + 41.0;
-        let title_w = self.kit_measure(lc.keys_title, TOUCHES_TITLE_PX);
-        let wide = !portrait && title_w + 14.0 + 120.0 + 24.0 + switches_w <= inner_w;
-        // Even a row of their own can be too narrow for both switches (every
-        // combo layer live, in Russian): the layers then go on a row of their
-        // own under the players.
-        let split = !wide && switches_w > inner_w;
-        let head_h = match (wide, split) {
-            (true, _) => TOUCHES_HEAD_H,
-            (false, false) => TOUCHES_HEAD_H + 44.0,
-            (false, true) => TOUCHES_HEAD_H + 88.0,
-        };
+        let (players, layers) = pad_switch_labels();
+        let gpx = TOUCHES_SWITCH_GLYPH;
+        let head = self.touches_head(&v.live_layers);
+        let (wide, split, head_h) = (head.wide, head.split, head.h);
+        let (pw, lw, switches_w) = (head.players_w, head.layers_w, head.switches_w);
         let help_lh = (size::LABEL * 1.45).round();
         let help_h = touches_help_band(portrait);
 
@@ -10667,6 +10674,45 @@ impl SwitchRenderBackend {
         (x, y, w, h)
     }
 
+    /// The controls editor's header, measured: its two switches, where they
+    /// go and how tall that makes the band. The key picker draws the same
+    /// band from the same measure, so its hairline is where the editor's was
+    /// when A opens a row's keys. The picker used to assume one row of
+    /// switches under the title, and its hairline jumped 44 px whenever the
+    /// editor needed two (every combo layer live, in Russian).
+    fn touches_head(&mut self, live_layers: &[bool; 5]) -> TouchesHead {
+        let (players, layers) = pad_switch_labels();
+        let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
+        let inner_w = vw - 2.0 * TOUCHES_MARGIN - 2.0 * TOUCHES_PAD_X;
+        let portrait = vh > vw;
+        let gpx = TOUCHES_SWITCH_GLYPH;
+        let bx = self.kit_button_width(Btn::X, gpx);
+        let bl = self.kit_button_width(Btn::L, gpx);
+        let br = self.kit_button_width(Btn::R, gpx);
+        let players_w = self.pad_segments_width(&players, &[false; 2]);
+        let layers_w = self.pad_segments_width(&layers, live_layers);
+        // [X] players | [L] layers [R], 8 px apart and a hairline between: the
+        // gaps the editor steps by as it draws them, 8 + 8 + 9 (the line and
+        // the 8 px after it) + 8 + 8, so the R glyph ends on the window's
+        // padding.
+        let switches_w = bx + players_w + bl + layers_w + br + 41.0;
+        let title_w = self.kit_measure(crate::loc::s().keys_title, TOUCHES_TITLE_PX);
+        // On the title's line at the right when they fit beside it; on a
+        // narrow (turned) screen, on a row of their own under the title.
+        let wide = !portrait && title_w + 14.0 + 120.0 + 24.0 + switches_w <= inner_w;
+        // Even a row of their own can be too narrow for both switches (every
+        // combo layer live, in Russian): the layers then go on a row of their
+        // own under the players.
+        let split = !wide && switches_w > inner_w;
+        let h = match (wide, split) {
+            (true, _) => TOUCHES_HEAD_H,
+            (false, false) => TOUCHES_HEAD_H + 44.0,
+            (false, true) => TOUCHES_HEAD_H + 88.0,
+        };
+        TouchesHead { h, wide, split, switches_w, players_w, layers_w }
+    }
+
     /// The path over the controls editor's title ("Pause › Touches et
     /// curseur"), the last step brighter, as on the sheets it was opened from.
     fn touches_crumbs(&mut self, x: f32, cy: f32, max_w: f32, crumbs: &[&str]) {
@@ -10837,8 +10883,9 @@ impl SwitchRenderBackend {
         let split_row = if portrait { crate::keymap::KEYBOARD_ROWS_N - 1 } else { usize::MAX };
         let split = if portrait { SPLIT_GAP } else { 0.0 };
         // The editor's header and help band, so the hairlines stay put when
-        // the window goes from a row to its keys.
-        let head_h = if portrait { TOUCHES_HEAD_H + 44.0 } else { TOUCHES_HEAD_H };
+        // the window goes from a row to its keys (`touches_head`).
+        let head = self.touches_head(&v.live_layers);
+        let head_h = head.h;
         let help_h = touches_help_band(portrait);
         let help_lh = (size::LABEL * 1.45).round();
         // The keys take the room the window has: never taller than wide in
@@ -10887,7 +10934,8 @@ impl SwitchRenderBackend {
         // Where the editor has its switches: the player and the layer when
         // they are not the obvious ones, and the key it sends now. On the
         // title's line at the right in landscape; on the row under it, from
-        // the left, in portrait, where the title's line has no room for it.
+        // the left, when the editor has its switches on that row too
+        // (portrait), where the title's line has no room for it.
         let mut ctx: std::vec::Vec<std::string::String> = std::vec::Vec::new();
         if v.player == 2 {
             ctx.push(u.player_2.to_string());
@@ -10902,7 +10950,7 @@ impl SwitchRenderBackend {
             let words = if drop_parts { u.key_current.to_string() } else { ctx.join("  \u{00B7}  ") };
             let ww = self.kit_measure(&words, cpx);
             let cw = ww + 10.0 + cur_w;
-            let at = if portrait {
+            let at = if !head.wide {
                 (left + cw <= right).then_some((left, y + 110.0))
             } else {
                 (right - cw >= tx + 24.0).then_some((right - cw, ty))
