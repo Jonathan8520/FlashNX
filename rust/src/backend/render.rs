@@ -10137,8 +10137,9 @@ impl SwitchRenderBackend {
     ///
     /// Draws the controller from `keymap::PAD_SLOTS` (positioned controls in
     /// abstract units) with one row per control, in two columns flanking the
-    /// picture, and lights the selected control in BOTH places at once: the row
-    /// you are reading and the button you would press.
+    /// picture (under it, on a turned picture), and lights the selected control
+    /// in BOTH places at once: the row you are reading and the button you would
+    /// press.
     ///
     /// That pairing is the point of the screen. The list this replaced could
     /// tell you a binding but never where the button was, and it showed eight of
@@ -10794,10 +10795,11 @@ impl SwitchRenderBackend {
     /// TOUCHES key picker (issue #55), shown when A is pressed on a row of the
     /// pad, in the editor's own window. Draws a real PC keyboard from
     /// `keymap::KEYBOARD` (positioned keys, numpad on the RIGHT under its
-    /// caption, the arrows in an inverted T), and under it, in a band of their
-    /// own, what is not a key: nothing, the two clicks, the console keyboard.
-    /// The user navigates geometrically (menu.rs). QWERTY is fixed for every
-    /// language.
+    /// caption, the arrows in an inverted T; on a turned picture the numpad
+    /// drops under the main block, `keymap::keyboard_slot`), and under it, in a
+    /// band of their own, what is not a key: nothing, the two clicks, the
+    /// console keyboard. The user navigates geometrically (menu.rs), on the
+    /// same slots. QWERTY is fixed for every language.
     ///
     /// It says what is being edited and what it is now: "Key for" and the
     /// button's own glyph (behind its layer's glyph in a combo layer), the
