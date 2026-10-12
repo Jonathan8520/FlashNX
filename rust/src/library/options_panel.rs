@@ -509,17 +509,30 @@ pub(crate) fn draw_options_family(
     let _ = now;
 }
 
-/// The loading frame of a profile flow: the panels as they were, the spinner
-/// over them.
-pub(crate) fn draw_options_loading(backend: &mut SwitchRenderBackend, now: u64, anim_origin: u64, label: &str) {
-    let last = LAST_CHILD.lock().ok().and_then(|g| *g);
-    match last {
-        Some(page) => {
-            draw_options_family(backend, page, now, anim_origin, None, 0);
-            // Over the library side, left of the panels.
+/// The loading frame of a deferred flow (a profile, a cover): `from`, the
+/// screen it started from, as it was, and the spinner over it. Taking no taps.
+///
+/// It drew the last page beside the options instead, which a cover search has
+/// none of: the panels then went under a veil over the whole screen.
+pub(crate) fn draw_options_loading(
+    backend: &mut SwitchRenderBackend,
+    now: u64,
+    anim_origin: u64,
+    label: &str,
+    from: Option<Screen>,
+) {
+    match from.filter(|f| is_options_family(*f)) {
+        Some(screen) => {
+            draw_options_family(backend, screen, now, anim_origin, None, 0);
+            // Over the library side, left of the panels; over the middle of
+            // the screen when the cover picker's window covers it.
             let vw = backend.screen_size().0;
-            let left_of_panels = vw - 16.0 - 76.0 - 10.0 - OPTIONS_CHILD_W;
-            backend.draw_loading_card(label, now, 0.0, left_of_panels);
+            let right = if matches!(screen, Screen::CoverPicker { .. }) {
+                vw
+            } else {
+                panels_left_edge(screen, vw).unwrap_or(vw)
+            };
+            backend.draw_loading_card(label, now, 0.0, right);
         }
         None => backend.draw_loading_overlay(label, now),
     }

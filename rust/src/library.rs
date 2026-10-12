@@ -4433,7 +4433,8 @@ fn input_inner(button: &str) -> bool {
                 return true;
             }
             // JAQUETTE = Flashpoint cover search by name. Hoisted: it's a
-            // synchronous HTTPS call that must not run under the LIBRARY lock.
+            // synchronous HTTPS call that must not run under the LIBRARY lock,
+            // and it runs behind a loading card (`defer_net`).
             if button == "A" && OPTIONS_ENTRIES.get(selection).copied() == Some("JAQUETTE") {
                 run_cover_search_flow(game_idx);
                 return true;
@@ -4488,7 +4489,12 @@ fn input_inner(button: &str) -> bool {
         // Minus = refine: re-type the title and re-search (swkbd + HTTPS).
         if let Screen::CoverPicker { game_idx, selection } = screen_snap {
             if button == "A" {
-                run_cover_fetch_flow(game_idx, selection);
+                // Behind a loading card, and only for a cover that is there:
+                // the window that found nothing has nothing to download.
+                let there = LIBRARY.lock().map(|s| selection < s.cover_candidates.len()).unwrap_or(false);
+                if there {
+                    defer_net(PendingNet::CoverFetch { game_idx, selection }, game_idx);
+                }
                 return true;
             }
             if button == "Minus" {
@@ -9007,18 +9013,24 @@ fn looks_like_download_hash(tok: &str) -> bool {
 }
 
 /// OPTIONS > JAQUETTE: search Flashpoint by the game's name and open the cover
-/// picker. Gated on the online-covers toggle (OFF → notice). Called from
-/// `input()` only — runs a synchronous HTTPS search WITHOUT the LIBRARY lock.
+/// picker, behind a loading card (the search runs on the next frame, in
+/// `drive_pending_net`). Called from `input()` only.
 fn run_cover_search_flow(game_idx: usize) {
     let name = match LIBRARY.lock() {
-        Ok(g) => match g.entries.get(game_idx) {
-            Some(e) => e.display_name.clone(),
+        Ok(mut g) => match g.entries.get(game_idx) {
+            Some(e) => {
+                let name = e.display_name.clone();
+                // A new search starts on the logos, whatever the last picker
+                // was left showing.
+                g.cover_use_shot = false;
+                name
+            }
             None => return,
         },
         Err(_) => return,
     };
     let query = cover_query_from_name(&name);
-    run_cover_search_with(game_idx, query);
+    defer_net(PendingNet::CoverSearch { game_idx, query }, game_idx);
 }
 
 /// CoverPicker > Minus: re-open the keyboard pre-filled with the last query so
@@ -9042,12 +9054,13 @@ fn run_cover_research_flow(game_idx: usize) {
     if query.is_empty() {
         return; // empty submit = no-op, don't wipe the current list
     }
-    run_cover_search_with(game_idx, query);
+    defer_net(PendingNet::CoverSearch { game_idx, query }, game_idx);
 }
 
 /// Shared Flashpoint cover search: runs the synchronous HTTPS search for
 /// `query`, remembers it (for Minus/refine pre-fill), and opens or refreshes
-/// the CoverPicker. Called from `input()` only — no LIBRARY lock during HTTPS.
+/// the CoverPicker. Run by `drive_pending_net` behind its loading card, with
+/// no LIBRARY lock during HTTPS.
 fn run_cover_search_with(game_idx: usize, query: std::string::String) {
     let (cands, msg) = match crate::sources::flashpoint::search(&query) {
         Ok(list) if list.is_empty() => {
@@ -9084,9 +9097,11 @@ fn cover_url_for_source(cover_url: &str, use_shot: bool) -> std::string::String 
 }
 
 /// CoverPicker > A: download the chosen candidate's logo and cache it as the
-/// game's cover. Called from `input()` only — synchronous HTTPS download
-/// WITHOUT the LIBRARY lock. On success, invalidates the backend cover-texture
-/// cache so the grid shows the new art, and returns to the OPTIONS modal.
+/// game's cover. Run by `drive_pending_net` behind its loading card —
+/// synchronous HTTPS download WITHOUT the LIBRARY lock. On success,
+/// invalidates the backend cover-texture cache so the grid shows the new art,
+/// and returns to the OPTIONS modal; on failure the picker comes back with
+/// the reason in a toast.
 fn run_cover_fetch_flow(game_idx: usize, selection: usize) {
     let picked = match LIBRARY.lock() {
         Ok(g) => {
@@ -9113,15 +9128,21 @@ fn run_cover_fetch_flow(game_idx: usize, selection: usize) {
                 s.cover_candidates.clear();
                 s.cover_msg.clear();
                 s.cover_query.clear();
-                // Back to OPTIONS on the JAQUETTE row (index 3 after #20 regroup
-                // removed APPLIQUER/PARTAGER from the list).
+                // The next search starts on the logos: left on, a screenshot
+                // picked once opened every later search on screenshots.
+                s.cover_use_shot = false;
+                // Back to OPTIONS on the JAQUETTE row.
                 s.screen = Screen::OptionsModal { game_idx, selection: opt_row("JAQUETTE") };
             }
         }
         Err(e) => {
             log(&std::format!("covers: fetch FAILED: {}\n", e));
+            // Said out loud, over the picker it came from: the reason used to go
+            // into `cover_msg`, which the grid never draws, and A seemed to do
+            // nothing at all.
             if let Ok(mut s) = LIBRARY.lock() {
-                s.cover_msg = e;
+                set_toast(&mut s, e, TOAST_ERR);
+                s.screen = Screen::CoverPicker { game_idx, selection };
             }
         }
     }
@@ -10153,9 +10174,16 @@ enum PendingNet {
     /// One-time first-boot housekeeping (dedup + size backfill), run behind the
     /// "Optimisation" loading panel instead of freezing on a black screen.
     RunStartupMigrations,
+    /// OPTIONS > JAQUETTE, or Minus in the cover picker: the Flashpoint search
+    /// for `query` (HTTPS), then the picker.
+    CoverSearch { game_idx: usize, query: std::string::String },
+    /// A in the cover picker: download the cover on `selection` (HTTPS).
+    CoverFetch { game_idx: usize, selection: usize },
 }
 static PENDING_NET: Mutex<Option<(PendingNet, bool)>> = Mutex::new(None);
 static NET_LOADING_LABEL: Mutex<String> = Mutex::new(String::new());
+/// The screen the deferred flow started from, drawn under its loading card.
+static NET_LOADING_FROM: Mutex<Option<Screen>> = Mutex::new(None);
 /// True while the first-boot "Optimisation" modal should overlay the gallery:
 /// set when the housekeeping is queued, cleared once it finishes. The screen
 /// itself stays on JOUER, so the modal composites over the (dimmed) gallery.
@@ -10191,6 +10219,8 @@ fn defer_net(action: PendingNet, game_idx: usize) {
         PendingNet::ApplyProfile { .. } => u.loading_apply,
         PendingNet::DeleteProfile { .. } => u.loading_delete,
         PendingNet::RunStartupMigrations => crate::loc::s().optimizing,
+        PendingNet::CoverSearch { .. } => u.loading_covers,
+        PendingNet::CoverFetch { .. } => u.loading_cover_dl,
     }
     .to_string();
     let _ = game_idx;
@@ -10201,6 +10231,17 @@ fn defer_net(action: PendingNet, game_idx: usize) {
         *p = Some((action, false));
     }
     if let Ok(mut s) = LIBRARY.lock() {
+        // What stays under the card: the screen the flow started from, a
+        // question already answered giving way to the list it was asked over.
+        let from = match s.screen {
+            Screen::ProfileDeleteConfirm { game_idx, profile_idx, .. } => {
+                Screen::ProfileList { game_idx, selection: profile_idx }
+            }
+            other => other,
+        };
+        if let Ok(mut f) = NET_LOADING_FROM.lock() {
+            *f = Some(from);
+        }
         s.screen = Screen::ProfileLoading;
     }
 }
@@ -10253,6 +10294,8 @@ fn drive_pending_net() {
         PendingNet::DeleteProfile { game_idx, profile_idx } => {
             run_delete_profile_flow(game_idx, profile_idx)
         }
+        PendingNet::CoverSearch { game_idx, query } => run_cover_search_with(game_idx, query),
+        PendingNet::CoverFetch { game_idx, selection } => run_cover_fetch_flow(game_idx, selection),
     }
 }
 
@@ -11286,9 +11329,10 @@ pub fn render(backend: &mut SwitchRenderBackend) {
         }
         Screen::ProfileLoading => {
             // The panels as they were, the spinner over them, for the frame
-            // before the deferred GitHub call runs (#20).
+            // before the deferred network call runs (#20).
             let label = NET_LOADING_LABEL.lock().ok().map(|l| l.clone()).unwrap_or_default();
-            options_panel::draw_options_loading(backend, now, anim_origin, &label);
+            let from = NET_LOADING_FROM.lock().ok().and_then(|g| *g);
+            options_panel::draw_options_loading(backend, now, anim_origin, &label, from);
         }
         Screen::FpGallery { selection, scroll } => {
             let reveal = crate::backend::render::distant_reveal_step(now);

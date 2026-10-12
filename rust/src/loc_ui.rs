@@ -554,6 +554,9 @@ pub struct Ui {
     pub dir_root_refused: &'static str,
     /// RÉGLAGES > Aide et retours: the card over the page while a bug report or an idea is being sent.
     pub loading_report: &'static str,
+    /// A game's options: the card over the panels while the covers are searched for, then while the chosen one downloads.
+    pub loading_covers: &'static str,
+    pub loading_cover_dl: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -877,6 +880,8 @@ const EN: Ui = Ui {
     dir_new_in_lib: "You are in your library: create the new folder outside it.",
     dir_root_refused: "The card's root cannot hold your library",
     loading_report: "Sending your message…",
+    loading_covers: "Looking for covers…",
+    loading_cover_dl: "Downloading the cover…",
 };
 
 const FR: Ui = Ui {
@@ -1200,6 +1205,8 @@ const FR: Ui = Ui {
     dir_new_in_lib: "Tu es dans ta bibliothèque : crée le nouveau dossier en dehors.",
     dir_root_refused: "La racine de la carte ne peut pas accueillir ta bibliothèque",
     loading_report: "Envoi de ton message…",
+    loading_covers: "Recherche de jaquettes…",
+    loading_cover_dl: "Téléchargement de la jaquette…",
 };
 
 const ES: Ui = Ui {
@@ -1523,6 +1530,8 @@ const ES: Ui = Ui {
     dir_new_in_lib: "Estás dentro de tu biblioteca: crea la carpeta nueva fuera de ella.",
     dir_root_refused: "La raíz de la tarjeta no puede alojar tu biblioteca",
     loading_report: "Enviando tu mensaje…",
+    loading_covers: "Buscando carátulas…",
+    loading_cover_dl: "Descargando la carátula…",
 };
 
 const RU: Ui = Ui {
@@ -1846,6 +1855,8 @@ const RU: Ui = Ui {
     dir_new_in_lib: "Ты внутри своей библиотеки: создай новую папку за её пределами.",
     dir_root_refused: "Библиотеку нельзя поместить в корень карты",
     loading_report: "Отправка сообщения…",
+    loading_covers: "Поиск обложек…",
+    loading_cover_dl: "Загрузка обложки…",
 };
 
 const DE: Ui = Ui {
@@ -2169,6 +2180,8 @@ const DE: Ui = Ui {
     dir_new_in_lib: "Du bist in deiner Bibliothek: Lege den neuen Ordner außerhalb an.",
     dir_root_refused: "Deine Bibliothek kann nicht im Stammverzeichnis liegen",
     loading_report: "Deine Nachricht wird gesendet…",
+    loading_covers: "Suche nach Covern…",
+    loading_cover_dl: "Cover wird geladen…",
 };
 
 const IT: Ui = Ui {
@@ -2492,6 +2505,8 @@ const IT: Ui = Ui {
     dir_new_in_lib: "Sei dentro la tua libreria: crea la nuova cartella fuori da lì.",
     dir_root_refused: "La radice della scheda non può ospitare la tua libreria",
     loading_report: "Invio del tuo messaggio…",
+    loading_covers: "Ricerca delle copertine…",
+    loading_cover_dl: "Download della copertina…",
 };
 
 const PT: Ui = Ui {
@@ -2815,6 +2830,8 @@ const PT: Ui = Ui {
     dir_new_in_lib: "Você está dentro da sua biblioteca: crie a nova pasta fora dela.",
     dir_root_refused: "A raiz do cartão não pode receber a sua biblioteca",
     loading_report: "Enviando sua mensagem…",
+    loading_covers: "Procurando capas…",
+    loading_cover_dl: "Baixando a capa…",
 };
 
 const ZH: Ui = Ui {
@@ -3138,6 +3155,8 @@ const ZH: Ui = Ui {
     dir_new_in_lib: "你在游戏库内：请在游戏库外新建文件夹。",
     dir_root_refused: "存储卡根目录不能存放你的游戏库",
     loading_report: "正在发送你的消息…",
+    loading_covers: "正在查找封面…",
+    loading_cover_dl: "正在下载封面…",
 };
 
 const TR: Ui = Ui {
@@ -3461,6 +3480,8 @@ const TR: Ui = Ui {
     dir_new_in_lib: "Kütüphanenin içindesin: yeni klasörü kütüphanenin dışında oluştur.",
     dir_root_refused: "Kartın kök dizini kütüphaneni barındıramaz",
     loading_report: "Mesajın gönderiliyor…",
+    loading_covers: "Kapaklar aranıyor…",
+    loading_cover_dl: "Kapak indiriliyor…",
 };
 
 pub fn ui() -> &'static Ui {
