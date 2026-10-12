@@ -107,11 +107,7 @@ impl SwitchRenderBackend {
         let scrolls = max_off > 0.0;
         let rw = w - if scrolls { BAR_ROOM } else { 0.0 };
         if scrolls {
-            // The scissor is in screen pixels and ignores the slide a tab
-            // switch puts on the page, so it follows that slide by hand: a
-            // fixed clip would shave the rows on one side while they move.
-            let tx = self.ui_translate_x;
-            self.set_clip(x - 4.0 + tx, area_top, w + 8.0, area_bot - area_top);
+            self.set_clip(x - 4.0, area_top, w + 8.0, area_bot - area_top);
         }
         for (at, text) in p.sections {
             if let Some(ry) = ys.get(*at) {
