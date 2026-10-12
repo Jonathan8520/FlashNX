@@ -285,6 +285,7 @@ fn row_a(s: &mut State, section: SetSection, key: &str) {
             let on = crate::loc::default_fps_counter() == 1;
             crate::loc::set_default_fps_counter((!on) as u8);
             crate::loc::save_current();
+            default_written();
             crate::sfx::value_changed();
         }
         (SetSection::Defaults, k) => arm_here(s, default_value(k)),
@@ -417,6 +418,13 @@ pub(crate) fn write_armed(section: SetSection, row: usize, v: u16) {
         _ => return,
     }
     l::save_current();
+    default_written();
+}
+
+/// A game default was written: the games that follow it show it in their
+/// options, whose copy of the last game's settings is read again.
+fn default_written() {
+    options_panel::game_prefs_forget();
 }
 
 /// A tap on the page, on cell `idx` of its touch table: the column's entries
@@ -493,6 +501,7 @@ pub(crate) fn touch_part(s: &mut State, section: SetSection, idx: usize, part: u
         }
         (SetSection::Defaults, "FPS") => {
             l::set_default_fps_counter((l::default_fps_counter() != 1) as u8);
+            default_written();
             true
         }
         (SetSection::Defaults, "AFFICHAGE" | "ROTATION" | "PIXELS" | "FILTRE" | "OVERCLOCK") => {

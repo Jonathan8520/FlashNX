@@ -73,6 +73,13 @@ fn own_bit(key: &str) -> u8 {
 /// game's `.prefs` on the card and the HOME icon an IPC round trip through ns:
 /// asked every frame, that was eight SD reads and a title listing sixty times
 /// a second while the panel was open.
+///
+/// Forgotten after every write from the panel, and wherever they can change
+/// behind it: when + opens the panel, back from a game (the pause writes the
+/// game's own values), and when Réglages writes a default the game may
+/// follow. Kept across those, the panel showed the settings from before and
+/// "par défaut" on a setting the pause had just given the game, with an X
+/// that did nothing.
 static GAME_PREFS: Mutex<Option<(std::string::String, GamePrefs)>> = Mutex::new(None);
 
 pub(crate) fn game_prefs(basename: &str, path: &str) -> GamePrefs {

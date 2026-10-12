@@ -3071,6 +3071,10 @@ pub fn open() {
     }
     // Returning from a game? Bank that session's playtime before we re-sort.
     bank_playtime();
+    // The pause writes the game's settings straight to its `.prefs`: the
+    // options' copy from before the game no longer says what it runs with,
+    // nor which of its settings are its own.
+    options_panel::game_prefs_forget();
     // If we're re-opening after quitting a game, land the cursor back on
     // that game's row instead of the top of the list.
     let want = last_played_basename();
@@ -6784,6 +6788,10 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
         // the REGLAGES navbar tab (reached with L/R).
         "Plus" => {
             if let Some(&abs) = filtered.get(selection) {
+                // Read from the card again, not from the last time the panel
+                // was open: the pause, Réglages or the HOME menu itself may
+                // have changed this game's settings or its icon since.
+                options_panel::game_prefs_forget();
                 s.screen = Screen::OptionsModal { game_idx: abs, selection: 0 };
             }
             return;
