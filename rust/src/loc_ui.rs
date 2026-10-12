@@ -560,6 +560,14 @@ pub struct Ui {
     pub kbd_cover_guide: &'static str,
     /// Header of the Switch keyboard a game's own text field opens (a name entry, a password), and the keyboard a key bound to it opens.
     pub kbd_game_text_header: &'static str,
+    /// Toast when a shared profile could not be applied: writing the game's controls to the card failed.
+    pub profile_apply_failed: &'static str,
+    /// Toast when the controls could not be put back (backup or default): the card refused to copy or remove the file.
+    pub profile_revert_failed: &'static str,
+    /// Toast when the catalog refused a share without saying why.
+    pub profile_share_failed: &'static str,
+    /// Toast when the catalog refused to delete your shared profile without saying why.
+    pub profile_delete_failed: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -886,6 +894,10 @@ const EN: Ui = Ui {
     more_changes_1: "And {} more change",
     kbd_cover_guide: "Name of the game whose cover you want",
     kbd_game_text_header: "Text for the game",
+    profile_apply_failed: "Profile not applied: the card refused the write.",
+    profile_revert_failed: "Controls not restored: the card refused the write.",
+    profile_share_failed: "The catalog refused your controls. Try again later.",
+    profile_delete_failed: "The catalog did not delete your profile. Try again later.",
 };
 
 const FR: Ui = Ui {
@@ -1212,6 +1224,10 @@ const FR: Ui = Ui {
     more_changes_1: "Et {} autre changement",
     kbd_cover_guide: "Nom du jeu dont tu cherches la jaquette",
     kbd_game_text_header: "Saisie pour le jeu",
+    profile_apply_failed: "Profil non appliqué : la carte refuse l'écriture.",
+    profile_revert_failed: "Touches non rétablies : la carte refuse l'écriture.",
+    profile_share_failed: "Le catalogue a refusé tes touches. Réessaie plus tard.",
+    profile_delete_failed: "Le catalogue n'a pas supprimé ton profil. Réessaie plus tard.",
 };
 
 const ES: Ui = Ui {
@@ -1538,6 +1554,10 @@ const ES: Ui = Ui {
     more_changes_1: "Y {} cambio más",
     kbd_cover_guide: "Nombre del juego cuya portada buscas",
     kbd_game_text_header: "Texto para el juego",
+    profile_apply_failed: "Perfil no aplicado: la tarjeta rechazó la escritura.",
+    profile_revert_failed: "Controles no restaurados: la tarjeta rechazó la escritura.",
+    profile_share_failed: "El catálogo rechazó tus controles. Inténtalo más tarde.",
+    profile_delete_failed: "El catálogo no borró tu perfil. Inténtalo más tarde.",
 };
 
 const RU: Ui = Ui {
@@ -1864,6 +1884,10 @@ const RU: Ui = Ui {
     more_changes_1: "И ещё одно изменение",
     kbd_cover_guide: "Название игры, для которой ищешь обложку",
     kbd_game_text_header: "Текст для игры",
+    profile_apply_failed: "Профиль не применён: карта не приняла запись.",
+    profile_revert_failed: "Клавиши не возвращены: карта не приняла запись.",
+    profile_share_failed: "Каталог не принял твои клавиши. Попробуй позже.",
+    profile_delete_failed: "Каталог не удалил твой профиль. Попробуй позже.",
 };
 
 const DE: Ui = Ui {
@@ -2190,6 +2214,10 @@ const DE: Ui = Ui {
     more_changes_1: "Und {} weitere Änderung",
     kbd_cover_guide: "Name des Spiels, dessen Cover du suchst",
     kbd_game_text_header: "Text für das Spiel",
+    profile_apply_failed: "Profil nicht übernommen: Karte nicht beschreibbar.",
+    profile_revert_failed: "Steuerung nicht wiederhergestellt: Karte nicht beschreibbar.",
+    profile_share_failed: "Der Katalog lehnt deine Steuerung ab. Versuche es später.",
+    profile_delete_failed: "Dein Profil wurde nicht gelöscht. Versuche es später.",
 };
 
 const IT: Ui = Ui {
@@ -2516,6 +2544,10 @@ const IT: Ui = Ui {
     more_changes_1: "E un'altra modifica",
     kbd_cover_guide: "Nome del gioco di cui cerchi la copertina",
     kbd_game_text_header: "Testo per il gioco",
+    profile_apply_failed: "Profilo non applicato: la scheda rifiuta la scrittura.",
+    profile_revert_failed: "Comandi non ripristinati: la scheda rifiuta la scrittura.",
+    profile_share_failed: "Il catalogo ha rifiutato i tuoi comandi. Riprova più tardi.",
+    profile_delete_failed: "Il catalogo non ha eliminato il tuo profilo. Riprova più tardi.",
 };
 
 const PT: Ui = Ui {
@@ -2842,6 +2874,10 @@ const PT: Ui = Ui {
     more_changes_1: "E mais {} mudança",
     kbd_cover_guide: "Nome do jogo cuja capa você procura",
     kbd_game_text_header: "Texto para o jogo",
+    profile_apply_failed: "Perfil não aplicado: o cartão recusou a gravação.",
+    profile_revert_failed: "Controles não restaurados: o cartão recusou a gravação.",
+    profile_share_failed: "O catálogo recusou seus controles. Tente mais tarde.",
+    profile_delete_failed: "O catálogo não removeu seu perfil. Tente mais tarde.",
 };
 
 const ZH: Ui = Ui {
@@ -3168,6 +3204,10 @@ const ZH: Ui = Ui {
     more_changes_1: "还有 {} 处更改",
     kbd_cover_guide: "要查找封面的游戏名称",
     kbd_game_text_header: "输入游戏文字",
+    profile_apply_failed: "无法应用配置：存储卡拒绝写入。",
+    profile_revert_failed: "无法恢复按键：存储卡拒绝写入。",
+    profile_share_failed: "目录拒绝了你的按键。请稍后重试。",
+    profile_delete_failed: "目录未删除你的配置。请稍后重试。",
 };
 
 const TR: Ui = Ui {
@@ -3494,6 +3534,10 @@ const TR: Ui = Ui {
     more_changes_1: "Ve {} değişiklik daha",
     kbd_cover_guide: "Kapağını aradığın oyunun adı",
     kbd_game_text_header: "Oyun için metin",
+    profile_apply_failed: "Profil uygulanamadı: kart yazmayı reddetti.",
+    profile_revert_failed: "Kontroller geri yüklenemedi: kart yazmayı reddetti.",
+    profile_share_failed: "Katalog kontrollerini reddetti. Daha sonra tekrar dene.",
+    profile_delete_failed: "Katalog profilini silmedi. Daha sonra tekrar dene.",
 };
 
 pub fn ui() -> &'static Ui {

@@ -5963,7 +5963,8 @@ fn run_profile_apply_flow(game_idx: usize, profile_idx: usize) {
         crate::profiles::record_applied(&profile.id);
     }
     let lc = crate::loc::s();
-    let msg = if ok { lc.profile_applied_ok } else { lc.bug_fail_title };
+    // Saying what failed and why: "Échec" alone was the old bug window's title.
+    let msg = if ok { lc.profile_applied_ok } else { crate::loc_ui::ui().profile_apply_failed };
     if let Ok(mut s) = LIBRARY.lock() {
         set_toast(&mut s, msg.to_string(), if ok { TOAST_OK } else { TOAST_ERR });
         goto_touches_menu(&mut s, game_idx, 1); // back to the sub-menu (APPLY row)
@@ -6165,7 +6166,7 @@ fn run_touches_revert(game_idx: usize) {
     };
     let ok = keymap::revert_profile(&basename);
     let lc = crate::loc::s();
-    let msg = if ok { lc.profile_reverted_ok } else { lc.bug_fail_title };
+    let msg = if ok { lc.profile_reverted_ok } else { crate::loc_ui::ui().profile_revert_failed };
     if let Ok(mut s) = LIBRARY.lock() {
         set_toast(&mut s, msg.to_string(), if ok { TOAST_OK } else { TOAST_ERR });
         goto_touches_menu(&mut s, game_idx, 0); // back to the sub-menu

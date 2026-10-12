@@ -503,6 +503,9 @@ pub struct Strings {
     /// HTTP 404 specifically: the URL or item id is wrong / gone.
     pub err_not_found: &'static str,
     pub err_json: &'static str,          // {} = parser detail
+    /// Unread since both Flashpoint searches say
+    /// `loc_ui::Ui::imp_err_fp_unreadable`; goes after the merge.
+    #[allow(dead_code)]
     pub err_json_no_files: &'static str,
     pub err_dl_start: &'static str,      // {} = code
     pub err_dl_failed: &'static str,     // {} = code
@@ -529,6 +532,10 @@ pub struct Strings {
     pub bug_no_games: &'static str,
     pub bug_ok_title: &'static str,
     pub bug_ok_msg: &'static str,
+    /// Unread since every profile failure has its own toast
+    /// (`loc_ui::Ui::profile_apply_failed` and its three twins); goes after the
+    /// merge.
+    #[allow(dead_code)]
     pub bug_fail_title: &'static str,
     pub kbd_bug_header: &'static str,
     pub kbd_bug_guide: &'static str,

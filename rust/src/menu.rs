@@ -911,7 +911,8 @@ fn run_apply(profile_idx: usize) {
         keymap::init_for_swf(&basename);
     }
     let lc = crate::loc::s();
-    let msg = if ok { lc.profile_applied_ok } else { lc.bug_fail_title };
+    // Saying what failed and why: "Échec" alone was the old bug window's title.
+    let msg = if ok { lc.profile_applied_ok } else { crate::loc_ui::ui().profile_apply_failed };
     let can_revert = keymap::has_revert(&basename);
     let has_backup = keymap::has_backup(&basename);
     if let Ok(mut s) = TOUCHES.lock() {
@@ -1042,7 +1043,7 @@ fn run_revert() {
         keymap::init_for_swf(&basename);
     }
     let lc = crate::loc::s();
-    let msg = if ok { lc.profile_reverted_ok } else { lc.bug_fail_title };
+    let msg = if ok { lc.profile_reverted_ok } else { crate::loc_ui::ui().profile_revert_failed };
     let can_revert = keymap::has_revert(&basename);
     let has_backup = keymap::has_backup(&basename);
     if let Ok(mut s) = TOUCHES.lock() {
