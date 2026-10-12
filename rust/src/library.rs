@@ -5052,8 +5052,9 @@ fn run_new_game_folder_flow(game_idx: usize) {
     // it. The game would move somewhere nothing lists, with no way back.
     if is_our_bookkeeping(&safe) || safe.chars().all(|c| c == '.') {
         log(&std::format!("library: folder name {} refused\n", safe));
+        // Said as what it is: a reserved name, not a card that failed.
         if let Ok(mut s) = LIBRARY.lock() {
-            set_toast(&mut s, crate::loc::s().err_sd_write.to_string(), TOAST_ERR);
+            set_toast(&mut s, crate::loc_ui::ui().folder_name_reserved.to_string(), TOAST_INFO);
         }
         return;
     }

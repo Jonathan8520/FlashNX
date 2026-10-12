@@ -12885,15 +12885,12 @@ impl SwitchRenderBackend {
         self.draw_loading_panel(title, now);
     }
 
-    /// A bordered, centered "Optimisation" modal (shared modal chrome) composited
-    /// OVER the live gallery during the one-time first-boot housekeeping — same
-    /// look as the other modals (light dim + visible border), not a full-screen
-    /// overlay. The caller draws the gallery first; this sits on top with a
-    /// spinner under the title.
+    /// The one-time housekeeping after an update, over the live gallery the
+    /// caller drew first: the small loading card, saying what is being done.
     pub fn draw_optimizing_modal(&mut self, title: &str, now: u64) {
-        self.clear_ui_transform();
-        let frame = self.draw_modal_frame(MODAL_W, 0, Some(200.0), false, title, None, None);
-        self.draw_spinner(frame.x + frame.w * 0.5, frame.y + 130.0, 26.0, now);
+        // The same small card as every other wait, saying what is being done.
+        let vw = self.dimensions.width as f32;
+        self.draw_loading_card(title, now, 0.0, vw);
     }
 
     pub fn draw_library_dim_backdrop(&mut self) {

@@ -543,7 +543,7 @@ pub struct Strings {
 }
 
 const EN: Strings = Strings {
-    optimizing: "Optimizing",
+    optimizing: "Updating your library…",
     menu_resume: "Resume",
     menu_keys: "Controls and cursor",
     menu_screen: "Screen",
@@ -610,7 +610,7 @@ const EN: Strings = Strings {
     games_dir_confirm_1: "{} game will be moved to:",
     games_dir_confirm_yes: "Move",
     games_dir_confirm_no: "Cancel",
-    kbd_newdir_guide: "Name of the folder to create",
+    kbd_newdir_guide: "Name of the folder to create (no / or :)",
     games_dir_moving: "Moving…",
     extracting: "Extracting…",
     shortcut_ok: "Tile installed on the HOME menu",
@@ -742,7 +742,7 @@ const EN: Strings = Strings {
 };
 
 const FR: Strings = Strings {
-    optimizing: "Optimisation",
+    optimizing: "Mise à jour de ta bibliothèque…",
     menu_resume: "Reprendre",
     menu_keys: "Touches et curseur",
     menu_screen: "Écran",
@@ -809,7 +809,7 @@ const FR: Strings = Strings {
     games_dir_confirm_1: "{} jeu sera déplacé vers :",
     games_dir_confirm_yes: "Déplacer",
     games_dir_confirm_no: "Annuler",
-    kbd_newdir_guide: "Nom du dossier à créer",
+    kbd_newdir_guide: "Nom du dossier à créer (sans / ni :)",
     games_dir_moving: "Déplacement\u{2026}",
     extracting: "Extraction…",
     shortcut_ok: "Tuile installée sur le menu HOME",
@@ -941,7 +941,7 @@ const FR: Strings = Strings {
 };
 
 const ES: Strings = Strings {
-    optimizing: "Optimizando",
+    optimizing: "Actualizando tu biblioteca…",
     menu_resume: "Reanudar",
     menu_keys: "Controles y cursor",
     menu_screen: "Imagen",
@@ -1008,7 +1008,7 @@ const ES: Strings = Strings {
     games_dir_confirm_1: "{} juego se moverá a:",
     games_dir_confirm_yes: "Mover",
     games_dir_confirm_no: "Cancelar",
-    kbd_newdir_guide: "Nombre de la carpeta a crear",
+    kbd_newdir_guide: "Nombre de la carpeta a crear (sin / ni :)",
     games_dir_moving: "Moviendo…",
     extracting: "Extrayendo…",
     shortcut_ok: "Icono instalado en el menú HOME",
@@ -1141,7 +1141,7 @@ const ES: Strings = Strings {
 
 // Russian.
 const RU: Strings = Strings {
-    optimizing: "Оптимизация",
+    optimizing: "Обновление библиотеки…",
     menu_resume: "Продолжить",
     menu_keys: "Клавиши и курсор",
     menu_screen: "Изображение",
@@ -1204,11 +1204,11 @@ const RU: Strings = Strings {
     games_dir_new: "Новая папка",
     games_dir_current: "текущая",
     games_dir_confirm: "Переместить всю библиотеку сюда?",
-    games_dir_confirm_n: "{} игр будет перемещено в:",
+    games_dir_confirm_n: "Игр к перемещению: {}, в папку:",
     games_dir_confirm_1: "{} игра будет перемещена в:",
     games_dir_confirm_yes: "Переместить",
     games_dir_confirm_no: "Отмена",
-    kbd_newdir_guide: "Имя создаваемой папки",
+    kbd_newdir_guide: "Имя новой папки (без / и :)",
     games_dir_moving: "Перемещение…",
     extracting: "Извлечение…",
     shortcut_ok: "Значок установлен в меню HOME",
@@ -1267,7 +1267,7 @@ const RU: Strings = Strings {
     toast_folder_physical: "В этой папке на карте. Переместите его.",
     toast_name_taken: "{} уже есть в корне.",
     folder_emptied: "Папка очищена",
-    folder_leave_n: "{} игр покидают папку",
+    folder_leave_n: "Игр покинет папку: {}",
     folder_leave_1: "{} игра покидает папку",
     profile_del_confirm: "Удалить ваш профиль?",
     profile_del_ok: "Ваш профиль удален из каталога.",
@@ -1341,7 +1341,7 @@ const RU: Strings = Strings {
 
 // German.
 const DE: Strings = Strings {
-    optimizing: "Optimierung",
+    optimizing: "Deine Bibliothek wird aktualisiert…",
     menu_resume: "Fortsetzen",
     menu_keys: "Steuerung und Cursor",
     menu_screen: "Bildschirm",
@@ -1408,7 +1408,7 @@ const DE: Strings = Strings {
     games_dir_confirm_1: "{} Spiel wird verschoben nach:",
     games_dir_confirm_yes: "Verschieben",
     games_dir_confirm_no: "Abbrechen",
-    kbd_newdir_guide: "Name des neuen Ordners",
+    kbd_newdir_guide: "Name des neuen Ordners (ohne / und :)",
     games_dir_moving: "Verschieben…",
     extracting: "Entpacken…",
     shortcut_ok: "Kachel im HOME-Menü installiert",
@@ -1541,7 +1541,7 @@ const DE: Strings = Strings {
 
 // Italian.
 const IT: Strings = Strings {
-    optimizing: "Ottimizzazione",
+    optimizing: "Aggiornamento della libreria…",
     menu_resume: "Riprendi",
     menu_keys: "Comandi e cursore",
     menu_screen: "Immagine",
@@ -1608,7 +1608,7 @@ const IT: Strings = Strings {
     games_dir_confirm_1: "{} gioco sarà spostato in:",
     games_dir_confirm_yes: "Sposta",
     games_dir_confirm_no: "Annulla",
-    kbd_newdir_guide: "Nome della cartella da creare",
+    kbd_newdir_guide: "Nome della cartella da creare (senza / né :)",
     games_dir_moving: "Spostamento…",
     extracting: "Estrazione…",
     shortcut_ok: "Icona installata nel menu HOME",
@@ -1741,7 +1741,7 @@ const IT: Strings = Strings {
 
 // Portuguese (Brazil).
 const PT: Strings = Strings {
-    optimizing: "Otimizando",
+    optimizing: "Atualizando sua biblioteca…",
     menu_resume: "Continuar",
     menu_keys: "Controles e cursor",
     menu_screen: "Imagem",
@@ -1808,7 +1808,7 @@ const PT: Strings = Strings {
     games_dir_confirm_1: "{} jogo será movido para:",
     games_dir_confirm_yes: "Mover",
     games_dir_confirm_no: "Cancelar",
-    kbd_newdir_guide: "Nome da pasta a criar",
+    kbd_newdir_guide: "Nome da pasta a criar (sem / nem :)",
     games_dir_moving: "Movendo…",
     extracting: "Extraindo…",
     shortcut_ok: "Ícone instalado no menu HOME",
@@ -1942,7 +1942,7 @@ const PT: Strings = Strings {
 // Simplified Chinese (issue #41). Prose uses Chinese punctuation; names,
 // paths and URLs stay in Latin script.
 const ZH: Strings = Strings {
-    optimizing: "优化中",
+    optimizing: "正在更新游戏库…",
     menu_resume: "继续",
     menu_keys: "按键与光标",
     menu_screen: "屏幕",
@@ -2009,7 +2009,7 @@ const ZH: Strings = Strings {
     games_dir_confirm_1: "{} 个游戏将移动到：",
     games_dir_confirm_yes: "移动",
     games_dir_confirm_no: "取消",
-    kbd_newdir_guide: "要创建的文件夹名称",
+    kbd_newdir_guide: "要创建的文件夹名称（不含 / 和 :）",
     games_dir_moving: "移动中…",
     extracting: "解压中…",
     shortcut_ok: "图标已安装到主页菜单",
@@ -2142,7 +2142,7 @@ const ZH: Strings = Strings {
 
 // Turkish.
 const TR: Strings = Strings {
-    optimizing: "Optimize ediliyor",
+    optimizing: "Kütüphanen güncelleniyor…",
     menu_resume: "Devam et",
     menu_keys: "Kontroller ve imleç",
     menu_screen: "Görüntü",
@@ -2209,7 +2209,7 @@ const TR: Strings = Strings {
     games_dir_confirm_1: "{} oyun şuraya taşınacak:",
     games_dir_confirm_yes: "Taşı",
     games_dir_confirm_no: "İptal",
-    kbd_newdir_guide: "Oluşturulacak klasörün adı",
+    kbd_newdir_guide: "Oluşturulacak klasörün adı (/ ve : olmadan)",
     games_dir_moving: "Taşınıyor…",
     extracting: "Çıkartılıyor…",
     shortcut_ok: "Kutucuk ana menüye eklendi",
@@ -2268,8 +2268,8 @@ const TR: Strings = Strings {
     toast_folder_physical: "Kartta bu klasörde. Çıkarmak için taşıyın.",
     toast_name_taken: "{} kök dizinde zaten var.",
     folder_emptied: "Klasör boşaltıldı",
-    folder_leave_n: "{} oyun bu klasörden çıkarıldı",
-    folder_leave_1: "{} oyun bu klasörden çıkarıldı",
+    folder_leave_n: "{} oyun bu klasörden çıkacak",
+    folder_leave_1: "{} oyun bu klasörden çıkacak",
     profile_del_confirm: "Paylaşılan profilin silinsin mi?",
     profile_del_ok: "Paylaşılan profilin silindi.",
     profile_del_not_mine: "Silinecek bir şey yok: bu konsoldan paylaşılmadı.",

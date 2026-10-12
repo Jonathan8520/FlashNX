@@ -478,6 +478,8 @@ pub struct Ui {
     pub imp_months: &'static str,
     /// A date: {d} = the day, {m} = the short month name, {y} = the year.
     pub imp_date: &'static str,
+    /// A new folder named like FlashNX's own bookkeeping (covers, x.files, dots).
+    pub folder_name_reserved: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -763,6 +765,7 @@ const EN: Ui = Ui {
     imp_thousands: ",",
     imp_months: "Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec",
     imp_date: "{m} {d}, {y}",
+    folder_name_reserved: "FlashNX keeps this name for itself. Pick another one.",
 };
 
 const FR: Ui = Ui {
@@ -1048,6 +1051,7 @@ const FR: Ui = Ui {
     imp_thousands: " ",
     imp_months: "janv.|févr.|mars|avr.|mai|juin|juil.|août|sept.|oct.|nov.|déc.",
     imp_date: "{d} {m} {y}",
+    folder_name_reserved: "Ce nom est réservé par FlashNX. Choisis-en un autre.",
 };
 
 const ES: Ui = Ui {
@@ -1333,6 +1337,7 @@ const ES: Ui = Ui {
     imp_thousands: ".",
     imp_months: "ene|feb|mar|abr|may|jun|jul|ago|sept|oct|nov|dic",
     imp_date: "{d} {m} {y}",
+    folder_name_reserved: "FlashNX reserva este nombre. Elige otro.",
 };
 
 const RU: Ui = Ui {
@@ -1618,6 +1623,7 @@ const RU: Ui = Ui {
     imp_thousands: " ",
     imp_months: "янв.|февр.|марта|апр.|мая|июня|июля|авг.|сент.|окт.|нояб.|дек.",
     imp_date: "{d} {m} {y} г.",
+    folder_name_reserved: "Это имя занято FlashNX. Выбери другое.",
 };
 
 const DE: Ui = Ui {
@@ -1903,6 +1909,7 @@ const DE: Ui = Ui {
     imp_thousands: ".",
     imp_months: "Jan.|Feb.|März|Apr.|Mai|Juni|Juli|Aug.|Sept.|Okt.|Nov.|Dez.",
     imp_date: "{d}. {m} {y}",
+    folder_name_reserved: "Diesen Namen verwendet FlashNX selbst. Wähle einen anderen.",
 };
 
 const IT: Ui = Ui {
@@ -2188,6 +2195,7 @@ const IT: Ui = Ui {
     imp_thousands: ".",
     imp_months: "gen|feb|mar|apr|mag|giu|lug|ago|set|ott|nov|dic",
     imp_date: "{d} {m} {y}",
+    folder_name_reserved: "Questo nome è riservato a FlashNX. Scegline un altro.",
 };
 
 const PT: Ui = Ui {
@@ -2473,6 +2481,7 @@ const PT: Ui = Ui {
     imp_thousands: ".",
     imp_months: "jan.|fev.|mar.|abr.|mai.|jun.|jul.|ago.|set.|out.|nov.|dez.",
     imp_date: "{d} {m} {y}",
+    folder_name_reserved: "Este nome é reservado pelo FlashNX. Escolha outro.",
 };
 
 const ZH: Ui = Ui {
@@ -2758,6 +2767,7 @@ const ZH: Ui = Ui {
     imp_thousands: ",",
     imp_months: "1月|2月|3月|4月|5月|6月|7月|8月|9月|10月|11月|12月",
     imp_date: "{y}年{m}{d}日",
+    folder_name_reserved: "此名称由 FlashNX 保留，请换一个。",
 };
 
 const TR: Ui = Ui {
@@ -3043,6 +3053,7 @@ const TR: Ui = Ui {
     imp_thousands: ".",
     imp_months: "Oca|Şub|Mar|Nis|May|Haz|Tem|Ağu|Eyl|Eki|Kas|Ara",
     imp_date: "{d} {m} {y}",
+    folder_name_reserved: "Bu adı FlashNX kullanıyor. Başka bir ad seç.",
 };
 
 pub fn ui() -> &'static Ui {
