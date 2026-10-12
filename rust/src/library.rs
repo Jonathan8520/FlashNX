@@ -2646,6 +2646,17 @@ enum MoveOutcome {
     Stranded(std::string::String),
 }
 
+/// `move_game_inner`, and the game's HOME icon follows it (its config names the game by path).
+fn move_game_to_folder(path: &str, basename: &str, folder: &str) -> MoveOutcome {
+    let outcome = move_game_inner(path, basename, folder);
+    if let MoveOutcome::Moved(ref np) | MoveOutcome::Stranded(ref np) = outcome {
+        if np != path {
+            tiles_follow(path, np, false);
+        }
+    }
+    outcome
+}
+
 /// Move ONE game onto a shelf: its `.swf` and, if it has one, its `.files/`
 /// companion tree (issue #68). `folder` empty = back to the root.
 ///
@@ -2674,18 +2685,6 @@ enum MoveOutcome {
 /// it sweeps. A rollback that fails silently is how an entry comes to name a
 /// path with no file on it, and how SUPPRIMER then deletes a game's save while
 /// leaving the game.
-/// `move_game_inner`, and the game's HOME icon follows it: the icon's config
-/// names the game by its full path, which the move just changed.
-fn move_game_to_folder(path: &str, basename: &str, folder: &str) -> MoveOutcome {
-    let outcome = move_game_inner(path, basename, folder);
-    if let MoveOutcome::Moved(ref np) | MoveOutcome::Stranded(ref np) = outcome {
-        if np != path {
-            tiles_follow(path, np, false);
-        }
-    }
-    outcome
-}
-
 fn move_game_inner(path: &str, basename: &str, folder: &str) -> MoveOutcome {
     let root = primary_root();
     let dest_dir = if folder.is_empty() {
@@ -10615,9 +10614,6 @@ fn modal_kind(screen: Screen) -> u8 {
         return 1;
     }
     match screen {
-        Screen::OptionsModal { .. } => 1,
-        Screen::DeleteConfirm { .. } => 2,
-        Screen::CoverPicker { .. } => 3,
         // A source's options and the question deleting it asks are one panel
         // stack, like a game's options: the question comes up over the panel
         // without the panel popping again, and Cancel drops back onto it.
@@ -10638,21 +10634,11 @@ fn modal_kind(screen: Screen) -> u8 {
         Screen::SortModal { .. } => 9,
         Screen::RemoteSortModal { .. } => 7,
         Screen::FpDetails { .. } => 11,
-        // #20 profile modals: distinct ids so each gets the scale-in "pop" when it
-        // appears (they were kind 0 = no animation, unlike every other modal).
-        Screen::TouchesMenu { .. } => 12,
-        Screen::ProfileList { .. } => 13,
-        Screen::ProfilePreview { .. } => 14,
-        Screen::RevertPreview { .. } => 15,
-        Screen::ProfileShareConfirm { .. } => 16,
-        Screen::ProfileDeleteConfirm { .. } => 17,
         // The question about moving the library (#79). Its browser is no
         // window: it opens inside the RÉGLAGES pane, a page and not a pop.
         Screen::GamesDirConfirm { .. } => 20,
         // A report the relay did not take, asked over the page.
         Screen::SendFailed { .. } => 23,
-        Screen::GameFolderPicker { .. } => 21,
-        Screen::GameFolderDelete { .. } => 22,
         _ => 0,
     }
 }
@@ -10864,12 +10850,6 @@ fn maybe_arm_startup_migrations() {
         *p = Some((PendingNet::RunStartupMigrations, false));
     }
 }
-
-/// Modal kinds whose close the generic interception defers for a scale-out
-/// (plain modal -> non-modal). The destructive confirms (DeleteConfirm=2,
-/// DistantHistoryConfirm=6) are handled EXPLICITLY in their own handlers instead
-/// (they defer the mutation too — see `PendingClose`), so they're not listed here.
-
 
 /// The window a reveal opens through, `frac` of the way from `rect` (0) to
 /// the whole screen (1).
