@@ -920,11 +920,15 @@ pub fn pan_limits(percent: u16, screen_w: f32, screen_h: f32) -> (i32, i32) {
 // They drifted exactly where an inline copy always drifts: the Flashpoint
 // gallery's track came out white where every other one is slate, and three of
 // the seven clamp their thumb 4 px shorter than the rest. Differences nobody
-// decided, only inherited from whichever site happened to be open that day. The
-// thumb is the selection amber on purpose: on every screen it is the cursor,
-// seen from the edge of the page.
+// decided, only inherited from whichever site happened to be open that day.
+//
+// The thumb is slate on the line colour, as the Options mockup draws it and as
+// the side panels already did. It was the selection gold, so beside the grid's
+// gold ring two things on the page looked selected; gold is the one accent,
+// kept for focus.
 const SCROLLBAR_W: f32 = 4.0;
 const SCROLLBAR_MIN_THUMB: f32 = 24.0;
+const SCROLLBAR_THUMB: u32 = 0xFF_4A_5C_85;
 
 
 /// Count of `GpuDraw`s currently alive (created minus dropped). Used to
@@ -10363,7 +10367,7 @@ impl SwitchRenderBackend {
         let mut cy = 200.0;
         self.kit_icon(((vw - 64.0) * 0.5).round(), cy, 64.0, Icon::Gamepad, col::TEXT3);
         cy += 72.0;
-        center(self, lc.empty_title, size::TITLE + 6.0, cy, col::TEXT);
+        center(self, lc.empty_title, size::TITLE, cy, col::TEXT);
         cy += 48.0;
         center(self, lc.empty_l1, size::BODY, cy, col::TEXT2);
         cy += 40.0;
@@ -11854,23 +11858,6 @@ impl SwitchRenderBackend {
         }
     }
 
-    /// JOUER layout 2, BANDE: a large cover of the selected game with its details
-    /// beside it, over one full-width row of the whole library.
-    ///
-    /// Three rules, each fixing something an earlier pass got wrong:
-    ///
-    /// The columns are FIXED. Sizing the page from the art's own aspect made the
-    /// whole layout move every time the selection changed — a banner cover swelled
-    /// across the screen, a square one left a hole. The hero is fitted inside a box
-    /// it cannot outgrow, so the details and the row never move.
-    ///
-    /// EVERY game is drawn in the row, none skipped. Hiding the ones already
-    /// passed made tiles appear and vanish a step at a time while the row glided,
-    /// which is the popping: one discrete rule fighting one continuous one.
-    ///
-    /// The selection is anchored PART WAY IN, not at the edge, so the previous
-    /// cover stays half visible. A shelf you can only see forwards on does not
-    /// read as a shelf.
     /// The vertical scrollbar a scrolling page draws in its right-hand gutter: a
     /// track from `top` to `top + h` at `x`, and a thumb whose length is the
     /// visible share of `total` and whose position comes from the live pixel
@@ -11914,9 +11901,30 @@ impl SwitchRenderBackend {
         let w = 4.0;
         let bx = x + (SCROLLBAR_W - w) * 0.5;
         self.kit_rrect(bx, top, w, h, w * 0.5, theme::col::LINE);
-        self.kit_rrect(bx, top + (h - thumb_h) * t, w, thumb_h, w * 0.5, theme::col::GOLD);
+        self.kit_rrect(bx, top + (h - thumb_h) * t, w, thumb_h, w * 0.5, SCROLLBAR_THUMB);
     }
 
+    /// JOUER layout 2, BANDE: a large cover of the selected game with its details
+    /// beside it, over one full-width row of the whole library.
+    ///
+    /// Three rules, each fixing something an earlier pass got wrong:
+    ///
+    /// The columns are FIXED. Sizing the page from the art's own aspect made the
+    /// whole layout move every time the selection changed — a banner cover swelled
+    /// across the screen, a square one left a hole. The hero is fitted inside a box
+    /// it cannot outgrow, so the details and the row never move.
+    ///
+    /// EVERY game is drawn in the row, none skipped. Hiding the ones already
+    /// passed made tiles appear and vanish a step at a time while the row glided,
+    /// which is the popping: one discrete rule fighting one continuous one.
+    ///
+    /// The selection is anchored PART WAY IN, not at the edge, so the previous
+    /// cover stays half visible. A shelf you can only see forwards on does not
+    /// read as a shelf.
+    ///
+    /// The row's tiles do not open: the hero above is the selected cover at
+    /// size, and the row follows the cover rule of a box that only shows
+    /// (`kit_cover`), as Jaquettes.dc.html draws BANDE.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_library_shelf_view(
         &mut self,
@@ -12036,11 +12044,6 @@ impl SwitchRenderBackend {
             if x > vw || x + ROW_W < 0.0 {
                 continue;
             }
-            // From the SAME eased distance the veil below already uses, so the
-            // cover opens up and brightens as one movement across a slide
-            // instead of snapping at the frame the index changes.
-            let u = (1.0 - (i as f32 - sel_pos).abs()).max(0.0);
-            let b = u * u * (3.0 - 2.0 * u); // smoothstep, as ETAGERE's bump uses
             let (ry, rw, rh) = (ROW_Y, ROW_W, ROW_H);
             let cover = match cover_lookup(&e.basename) {
                 Some(t) => t,
@@ -12050,7 +12053,6 @@ impl SwitchRenderBackend {
                 }
                 None => CoverTex::Default,
             };
-            let _ = b;
             match cover {
                 CoverTex::Image { tex, w, h, amb } => {
                     self.kit_cover(x, ry, rw, rh, tex, w, h, amb, 1.0);
@@ -12096,7 +12098,7 @@ impl SwitchRenderBackend {
             self.kit_rrect(track_x, 621.0, track_w, 4.0, 2.0, theme::col::LINE);
             let tw = (track_w * (vw / pitch) / total as f32).max(56.0);
             let t = (sel_pos / (total - 1) as f32).clamp(0.0, 1.0);
-            self.kit_rrect(track_x + (track_w - tw) * t, 620.0, tw, 6.0, 3.0, theme::col::GOLD);
+            self.kit_rrect(track_x + (track_w - tw) * t, 620.0, tw, 6.0, 3.0, SCROLLBAR_THUMB);
         }
 
         self.kit_home_footer(false);
@@ -12322,7 +12324,7 @@ impl SwitchRenderBackend {
             self.kit_rrect(cap_x, 549.0, cap_w, 4.0, 2.0, theme::col::LINE);
             let tw = (cap_w * (1280.0 / PITCH) / n as f32).max(56.0);
             let tx = cap_x + (cap_w - tw) * (sel_pos / (n - 1) as f32).clamp(0.0, 1.0);
-            self.kit_rrect(tx, 548.0, tw, 6.0, 3.0, theme::col::GOLD);
+            self.kit_rrect(tx, 548.0, tw, 6.0, 3.0, SCROLLBAR_THUMB);
         }
 
         self.kit_home_footer(false);
