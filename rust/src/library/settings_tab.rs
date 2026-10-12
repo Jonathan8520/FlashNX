@@ -1206,8 +1206,9 @@ fn folders_page(
     rows.push(if same_dir(path, &root) {
         Row::new(Icon::CircleCheck, u.dir_current).dim(true)
     } else if is_card_root(path) {
-        // The root is no destination: said on the row A would act on.
-        Row::new(Icon::Check, u.dir_root_refused).dim(true)
+        // The root is no destination: said on the row A would act on, with
+        // the mark of a note rather than of the action it does not offer.
+        Row::new(Icon::Info, u.dir_root_refused).dim(true)
     } else {
         Row::new(Icon::Check, u.dir_choose)
     });
