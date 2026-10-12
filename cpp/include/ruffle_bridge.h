@@ -6,6 +6,21 @@
 extern "C" {
 #endif
 
+/// Interface sounds (cpp/src/audio.cpp), in the order rust/src/sfx.rs uses.
+enum {
+    UI_SFX_MOVE = 0,
+    UI_SFX_DECIDE = 1,
+    UI_SFX_BACK = 2,
+    UI_SFX_TAB = 3,
+    UI_SFX_TOGGLE = 4,
+    UI_SFX_ERROR = 5,
+    UI_SFX_OPEN = 6,
+    UI_SFX_CLOSE = 7,
+    UI_SFX_LAUNCH = 8,
+};
+/// Play one; returns at once. Brings audren up if nothing has.
+void ruffle_ui_sound(int kind);
+
 int  ruffle_init(void);
 /// Tell Ruffle which SWF path to load (instead of the hardcoded candidate
 /// list). Path string is copied into a Rust-owned buffer; caller's storage

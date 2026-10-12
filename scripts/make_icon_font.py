@@ -131,6 +131,8 @@ ICONS = [
     ("Joystick", "joystick", 0xE355, "a stick"),
     ("Hourglass", "hourglass", 0xE296, "waiting"),
     ("Pin", "pin", 0xE259, "pinned row"),
+    ("Volume", "volume-2", 0xE1AB, "interface sounds on"),
+    ("VolumeOff", "volume-x", 0xE1AC, "interface sounds off"),
 ]
 
 # Unicode's Private Use Area in the Basic Multilingual Plane. Every pinned code

@@ -13,8 +13,18 @@
 // Format: 48 kHz stereo PCM int16 (Switch native, matches what we tell
 // Ruffle's AudioMixer in SwitchAudioBackend::new). Two ping-pong wave buffers
 // of 4096 frames each (~85 ms latency at 48 kHz).
+//
+// The interface sounds (the menus' clicks) live here too, on voices 1-3:
+// short sounds synthesised once into their own memory pool and started by
+// the worker within one audren frame of being asked for, so a click lands
+// with the press instead of behind the ~340 ms of game audio queued on voice
+// 0. In the launcher no game owns audren, so the first sound brings it up on
+// its own ("UI mode", voice 0 left idle); a game starting adopts that session
+// and its end tears it down as before.
 
 #include <switch.h>
+#include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
@@ -48,10 +58,12 @@ static_assert(sizeof(s_mempool) >= MEMPOOL_SIZE,
 AudioDriver       s_drv;
 AudioDriverWaveBuf s_wavebufs[NUM_WAVE_BUFS];
 
-// Standard audren config: 5ms revision (47 audio frames / sec).
+// Standard audren config: 5ms revision (47 audio frames / sec). Six voices
+// because audren hands out as many CHANNELS as voices: the game's stereo voice
+// takes two, the three mono interface voices one each.
 constexpr AudioRendererConfig s_audren_cfg = {
     .output_rate    = AudioRendererOutputRate_48kHz,
-    .num_voices     = 4,
+    .num_voices     = 6,
     .num_effects    = 0,
     .num_sinks      = 1,
     .num_mix_objs   = 1,
@@ -62,6 +74,155 @@ Thread s_worker_thread;
 volatile bool s_worker_running = false;
 volatile bool s_voice_should_play = true;
 bool s_audio_initialised = false;
+// Voice 0 is fed by Ruffle's mixer only while a game owns the session. In UI
+// mode there is no mixer to pull from: the fill would leave stale samples.
+volatile bool s_game_mode = false;
+
+// ── Interface sounds ───────────────────────────────────────────────────────
+// Kinds, in the order `ruffle_ui_sound` takes them (rust/src/sfx.rs).
+enum UiSound {
+    UI_MOVE = 0,   // the cursor moved
+    UI_DECIDE,     // A opened or did something
+    UI_BACK,       // B went back
+    UI_TAB,        // L / R changed tab
+    UI_TOGGLE,     // a value changed in place
+    UI_ERROR,      // refused, or failed
+    UI_OPEN,       // a window or the pause opened
+    UI_CLOSE,      // it closed
+    UI_LAUNCH,     // a game is starting
+    UI_COUNT,
+};
+constexpr int UI_FIRST_VOICE = 1;
+constexpr int UI_VOICES      = 3;
+constexpr int SFX_RATE       = 48000;
+constexpr int SFX_CAPACITY   = 64 * 1024;            // mono samples
+alignas(AUDREN_MEMPOOL_ALIGNMENT) int16_t s_sfx_pool[SFX_CAPACITY];
+struct SfxSlot { int offset; int frames; };
+SfxSlot s_sfx[UI_COUNT];
+bool s_sfx_built = false;
+AudioDriverWaveBuf s_sfx_wavebufs[UI_VOICES];
+bool s_sfx_voice_ok[UI_VOICES];
+int s_sfx_next_voice = 0;
+std::atomic<int> s_sfx_request{0};    // kind + 1, 0 = nothing asked
+volatile bool s_ui_sounds_enabled = true;
+// Scratch for the sound being synthesised (the longest is ~0.35 s).
+float s_sfx_scratch[20000];
+
+// One note into the scratch: a sine gliding from `f0` to `f1` over `len`
+// samples starting at `at`, a quick linear attack, an exponential decay, an
+// optional octave (`h2`) and third harmonic (`h3`) for body.
+void sfx_tone(int at, int len, float f0, float f1, float amp, float attack_ms,
+              float decay_ms, float h2, float h3) {
+    const float two_pi = 6.28318530718f;
+    const int attack = (int)(attack_ms * SFX_RATE / 1000.0f) + 1;
+    const float tau = decay_ms * SFX_RATE / 1000.0f;
+    float phase = 0.0f;
+    for (int i = 0; i < len; ++i) {
+        const int k = at + i;
+        if (k < 0 || k >= (int)(sizeof(s_sfx_scratch) / sizeof(float))) break;
+        const float t = (float)i / (float)len;
+        const float f = f0 + (f1 - f0) * t;
+        phase += two_pi * f / SFX_RATE;
+        if (phase > two_pi) phase -= two_pi;
+        float env = i < attack ? (float)i / (float)attack : std::exp(-(float)(i - attack) / tau);
+        // A short fade at the very end, so a cut never clicks.
+        const int tail = len - i;
+        if (tail < 96) env *= (float)tail / 96.0f;
+        const float v = std::sin(phase) + h2 * std::sin(2.0f * phase) + h3 * std::sin(3.0f * phase);
+        s_sfx_scratch[k] += amp * env * v;
+    }
+}
+
+// Commit the scratch (its first `frames` samples) as sound `kind`.
+void sfx_commit(int kind, int& cursor, int frames) {
+    // Each sound starts on a 64-sample boundary: audren refuses a wave buffer
+    // whose data is not aligned.
+    cursor = (cursor + 63) & ~63;
+    if (cursor + frames > SFX_CAPACITY) frames = SFX_CAPACITY - cursor;
+    for (int i = 0; i < frames; ++i) {
+        float v = s_sfx_scratch[i];
+        // Soft clip, in case notes overlap past full scale.
+        v = v / (1.0f + std::fabs(v) * 0.15f);
+        if (v > 1.0f) v = 1.0f;
+        if (v < -1.0f) v = -1.0f;
+        s_sfx_pool[cursor + i] = (int16_t)(v * 32000.0f);
+    }
+    s_sfx[kind] = { cursor, frames };
+    cursor += frames;
+}
+
+void sfx_build() {
+    if (s_sfx_built) return;
+    int cursor = 0;
+    auto clear = [] { std::memset(s_sfx_scratch, 0, sizeof(s_sfx_scratch)); };
+    // A soft tick, high and very short: it plays on every step of a list.
+    clear(); sfx_tone(0, 1400, 1500, 1400, 0.20f, 0.6f, 6.0f, 0.25f, 0.0f);
+    sfx_commit(UI_MOVE, cursor, 1400);
+    // Two notes up a fifth: yes.
+    clear(); sfx_tone(0, 2600, 988, 988, 0.22f, 1.0f, 22.0f, 0.20f, 0.0f);
+    sfx_tone(2000, 3600, 1480, 1480, 0.22f, 1.0f, 35.0f, 0.20f, 0.0f);
+    sfx_commit(UI_DECIDE, cursor, 5600);
+    // The same, coming down a fourth: back.
+    clear(); sfx_tone(0, 2400, 1175, 1175, 0.20f, 1.0f, 20.0f, 0.20f, 0.0f);
+    sfx_tone(1900, 3100, 784, 784, 0.20f, 1.0f, 32.0f, 0.20f, 0.0f);
+    sfx_commit(UI_BACK, cursor, 5000);
+    // A small rising sweep: sideways, to the next tab.
+    clear(); sfx_tone(0, 2600, 700, 1050, 0.18f, 2.0f, 16.0f, 0.15f, 0.0f);
+    sfx_commit(UI_TAB, cursor, 2600);
+    // An even shorter, higher tick: a value changed.
+    clear(); sfx_tone(0, 1200, 2100, 2000, 0.16f, 0.5f, 4.5f, 0.20f, 0.0f);
+    sfx_commit(UI_TOGGLE, cursor, 1200);
+    // Two low, buzzy pulses: no.
+    clear(); sfx_tone(0, 3400, 233, 220, 0.22f, 2.0f, 45.0f, 0.0f, 0.35f);
+    sfx_tone(3600, 4400, 233, 220, 0.22f, 2.0f, 45.0f, 0.0f, 0.35f);
+    sfx_commit(UI_ERROR, cursor, 8000);
+    // A sweep up an octave, and its mirror: a window opens, it closes.
+    clear(); sfx_tone(0, 4300, 520, 1040, 0.16f, 4.0f, 30.0f, 0.10f, 0.0f);
+    sfx_commit(UI_OPEN, cursor, 4300);
+    clear(); sfx_tone(0, 3800, 1000, 520, 0.16f, 3.0f, 26.0f, 0.10f, 0.0f);
+    sfx_commit(UI_CLOSE, cursor, 3800);
+    // C E G C, ringing into each other: a game is starting.
+    clear();
+    sfx_tone(0, 9000, 1046.5f, 1046.5f, 0.17f, 2.0f, 90.0f, 0.20f, 0.0f);
+    sfx_tone(2400, 9000, 1318.5f, 1318.5f, 0.17f, 2.0f, 90.0f, 0.20f, 0.0f);
+    sfx_tone(4800, 9000, 1568.0f, 1568.0f, 0.17f, 2.0f, 90.0f, 0.20f, 0.0f);
+    sfx_tone(7200, 8800, 2093.0f, 2093.0f, 0.17f, 2.0f, 110.0f, 0.20f, 0.0f);
+    sfx_commit(UI_LAUNCH, cursor, 16000);
+    armDCacheFlush(s_sfx_pool, sizeof(s_sfx_pool));
+    s_sfx_built = true;
+    std::printf("audio: %d interface sounds, %d samples\n", (int)UI_COUNT, cursor);
+    std::fflush(stdout);
+}
+
+// On the worker thread only: every audrv call happens there, so the driver
+// is never touched from two threads at once.
+void sfx_play(int kind) {
+    if (kind < 0 || kind >= UI_COUNT || s_sfx[kind].frames <= 0) return;
+    // Round robin over the voices that came up, so a launch chord is not cut
+    // by the tick that follows it.
+    int slot = -1;
+    for (int n = 0; n < UI_VOICES; ++n) {
+        const int cand = (s_sfx_next_voice + n) % UI_VOICES;
+        if (s_sfx_voice_ok[cand]) {
+            slot = cand;
+            break;
+        }
+    }
+    if (slot < 0) return;
+    s_sfx_next_voice = (slot + 1) % UI_VOICES;
+    const int voice = UI_FIRST_VOICE + slot;
+    audrvVoiceStop(&s_drv, voice);
+    AudioDriverWaveBuf* wb = &s_sfx_wavebufs[slot];
+    std::memset(wb, 0, sizeof(*wb));
+    wb->data_pcm16 = s_sfx_pool + s_sfx[kind].offset;
+    wb->size = (u64)s_sfx[kind].frames * sizeof(int16_t);
+    wb->start_sample_offset = 0;
+    wb->end_sample_offset = s_sfx[kind].frames;
+    wb->state = AudioDriverWaveBufState_Free;
+    if (audrvVoiceAddWaveBuf(&s_drv, voice, wb)) {
+        audrvVoiceStart(&s_drv, voice);
+    }
+}
 
 extern "C" void ruffle_audio_fill_buffer(int16_t* out, size_t len);
 
@@ -77,9 +238,13 @@ void worker_entry(void* /*arg*/) {
         // Block until audren signals the next render frame (~5 ms).
         audrenWaitFrame();
 
+        // An interface sound asked for since the last frame.
+        const int req = s_sfx_request.exchange(0);
+        if (req > 0) sfx_play(req - 1);
+
         // Walk each wave buffer; whenever one is Free or Done it's safe
-        // to refill and resubmit.
-        for (int i = 0; i < NUM_WAVE_BUFS; ++i) {
+        // to refill and resubmit. Only while a game feeds voice 0.
+        for (int i = 0; i < NUM_WAVE_BUFS && s_game_mode; ++i) {
             AudioDriverWaveBuf* wb = &s_wavebufs[i];
             if (wb->state != AudioDriverWaveBufState_Free
                 && wb->state != AudioDriverWaveBufState_Done) {
@@ -125,7 +290,7 @@ void worker_entry(void* /*arg*/) {
         // voice if it stopped — happens on the very first frame and after
         // an underrun.
         audrvUpdate(&s_drv);
-        if (s_voice_should_play && !audrvVoiceIsPlaying(&s_drv, 0)) {
+        if (s_game_mode && s_voice_should_play && !audrvVoiceIsPlaying(&s_drv, 0)) {
             // Voice stopped while it should play = buffers ran dry (underrun).
             // Count it past warm-up so the heartbeat shows whether crackles
             // correlate with CPU-starved refills.
@@ -141,11 +306,13 @@ void worker_entry(void* /*arg*/) {
 
 } // namespace
 
-extern "C" int ruffle_audio_init(unsigned int /*sample_rate*/, unsigned int /*channels*/) {
-    if (s_audio_initialised) {
-        return 0;
-    }
+namespace {
 
+// Bring audren up: the session, the game's voice 0 (left idle until a game
+// feeds it), the interface voices, and the worker. Shared by the game's start
+// and by the first interface sound in the launcher.
+int audio_bring_up() {
+    sfx_build();
     Result rc = audrenInitialize(&s_audren_cfg);
     if (R_FAILED(rc)) {
         std::printf("audrenInitialize failed: 0x%x\n", rc); std::fflush(stdout);
@@ -196,6 +363,26 @@ extern "C" int ruffle_audio_init(unsigned int /*sample_rate*/, unsigned int /*ch
     audrvVoiceSetMixFactor(&s_drv, 0, 1.0f, 0, 0);  // L source → L final
     audrvVoiceSetMixFactor(&s_drv, 0, 1.0f, 1, 1);  // R source → R final
 
+    // The interface voices: mono, from their own pool, to both speakers.
+    {
+        for (int v = 0; v < UI_VOICES; ++v) s_sfx_voice_ok[v] = false;
+        int sfx_pool = audrvMemPoolAdd(&s_drv, s_sfx_pool, sizeof(s_sfx_pool));
+        if (sfx_pool >= 0 && audrvMemPoolAttach(&s_drv, sfx_pool)) {
+            for (int v = 0; v < UI_VOICES; ++v) {
+                const int id = UI_FIRST_VOICE + v;
+                if (!audrvVoiceInit(&s_drv, id, 1, PcmFormat_Int16, SFX_RATE)) continue;
+                s_sfx_voice_ok[v] = true;
+                audrvVoiceSetDestinationMix(&s_drv, id, AUDREN_FINAL_MIX_ID);
+                audrvVoiceSetMixFactor(&s_drv, id, 0.85f, 0, 0);
+                audrvVoiceSetMixFactor(&s_drv, id, 0.85f, 0, 1);
+            }
+        } else {
+            std::printf("audio: interface sounds unavailable (mempool)\n"); std::fflush(stdout);
+        }
+        std::memset(s_sfx_wavebufs, 0, sizeof(s_sfx_wavebufs));
+        s_sfx_next_voice = 0;
+    }
+
     // Lay out wave buffers within the memory pool.
     std::memset(s_wavebufs, 0, sizeof(s_wavebufs));
     for (int i = 0; i < NUM_WAVE_BUFS; ++i) {
@@ -210,7 +397,6 @@ extern "C" int ruffle_audio_init(unsigned int /*sample_rate*/, unsigned int /*ch
     }
 
     s_worker_running    = true;
-    s_voice_should_play = true;
 
     // Spawn the worker on a modest 64 KB stack — it only does memcpy +
     // syscalls, no deep stacks expected.
@@ -242,6 +428,33 @@ extern "C" int ruffle_audio_init(unsigned int /*sample_rate*/, unsigned int /*ch
     return 0;
 }
 
+} // namespace
+
+extern "C" int ruffle_audio_init(unsigned int /*sample_rate*/, unsigned int /*channels*/) {
+    // The launcher may already have brought the session up for its sounds:
+    // the game adopts it.
+    if (!s_audio_initialised && audio_bring_up() != 0) {
+        return -1;
+    }
+    s_voice_should_play = true;
+    s_game_mode = true;
+    return 0;
+}
+
+// Play interface sound `kind` (see `UiSound`). Brings audren up if nothing
+// has: in the launcher no game owns it. Returns at once; the worker starts
+// the sound on its next frame.
+extern "C" void ruffle_ui_sound(int kind) {
+    if (!s_ui_sounds_enabled || kind < 0 || kind >= UI_COUNT) return;
+    if (!s_audio_initialised && audio_bring_up() != 0) return;
+    s_sfx_request.store(kind + 1);
+}
+
+// RÉGLAGES > interface sounds.
+extern "C" void ruffle_ui_sounds_set_enabled(int on) {
+    s_ui_sounds_enabled = on != 0;
+}
+
 extern "C" void ruffle_audio_shutdown() {
     if (!s_audio_initialised) {
         return;
@@ -250,10 +463,14 @@ extern "C" void ruffle_audio_shutdown() {
     threadWaitForExit(&s_worker_thread);
     threadClose(&s_worker_thread);
     audrvVoiceStop(&s_drv, 0);
+    for (int v = 0; v < UI_VOICES; ++v) {
+        if (s_sfx_voice_ok[v]) audrvVoiceStop(&s_drv, UI_FIRST_VOICE + v);
+    }
     audrvUpdate(&s_drv);
     audrvClose(&s_drv);
     audrenExit();
     s_audio_initialised = false;
+    s_game_mode = false;
 }
 
 extern "C" void ruffle_audio_play() {

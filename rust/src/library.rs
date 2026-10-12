@@ -217,11 +217,12 @@ pub(crate) mod set_row {
     pub(crate) const GAMES_DIR: usize = 1;
     pub(crate) const GAME_PREFS: usize = 2;
     pub(crate) const LANGUAGE: usize = 3;
-    pub(crate) const PSEUDO: usize = 4;
-    pub(crate) const BUG: usize = 5;
-    pub(crate) const SUGGEST: usize = 6;
-    pub(crate) const QUIT: usize = 7;
-    pub(crate) const COUNT: usize = 8;
+    pub(crate) const SOUNDS: usize = 4;
+    pub(crate) const PSEUDO: usize = 5;
+    pub(crate) const BUG: usize = 6;
+    pub(crate) const SUGGEST: usize = 7;
+    pub(crate) const QUIT: usize = 8;
+    pub(crate) const COUNT: usize = 9;
 }
 
 pub(crate) const OPTIONS_ENTRIES: &[&str] = &[
@@ -3582,6 +3583,22 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
 }
 
 pub fn input(button: &str) -> bool {
+    // Every press, then the sound it deserves, read from what it changed
+    // (`sfx::after_input`): no screen has to remember to make a noise.
+    let before = LIBRARY.lock().map(|s| s.screen).ok();
+    let closing_before = crate::backend::render::modal_close_active();
+    let reveal_before = crate::backend::render::distant_reveal_active();
+    let consumed = input_inner(button);
+    if let (Some(b), Ok(a)) = (before, LIBRARY.lock().map(|s| s.screen)) {
+        let closing = (!closing_before && crate::backend::render::modal_close_active())
+            || (!reveal_before && crate::backend::render::distant_reveal_active());
+        let opened = modal_kind(a) != 0 && modal_kind(b) == 0;
+        crate::sfx::after_input(button, b, a, closing, screen_tab(b), screen_tab(a), opened);
+    }
+    consumed
+}
+
+fn input_inner(button: &str) -> bool {
     // Suspend input during a close-out / reveal transition (brief) so screens
     // can't be re-navigated mid-animation; the deferred swap lands in render()
     // when the animation finishes.
@@ -4214,6 +4231,16 @@ pub fn input(button: &str) -> bool {
 /// `Screen::BugResult { from_row }` (#113) and by `handle_bug_picker_input`'s B.
 fn handle_settings_input(s: &mut State, button: &str, mut selection: usize) {
     const LAST: usize = set_row::COUNT - 1;
+    // The sounds row is the one value on the page: A, Left and Right flip it.
+    if selection == set_row::SOUNDS && matches!(button, "A" | "Left" | "Right" | "StickLLeft" | "StickLRight") {
+        crate::loc::set_ui_sounds(!crate::loc::ui_sounds());
+        crate::loc::save_current();
+        if crate::loc::ui_sounds() {
+            crate::sfx::play(crate::sfx::Sfx::Toggle);
+        }
+        s.screen = Screen::SettingsModal { selection };
+        return;
+    }
     match button {
         "Up" | "StickLUp" => {
             selection = if selection == 0 { LAST } else { selection - 1 };
@@ -5625,6 +5652,9 @@ const TOAST_FRAMES: u32 = 150;
 /// Flash a small non-blocking toast over the current screen instead of switching
 /// to a full-screen "thanks" modal (#20). Drawn + counted down in `render`.
 fn set_toast(s: &mut State, msg: std::string::String, kind: u8) {
+    if kind == TOAST_ERR {
+        crate::sfx::play(crate::sfx::Sfx::Error);
+    }
     s.toast_msg = msg;
     s.toast_kind = kind;
     s.toast_frames = TOAST_FRAMES;
@@ -8999,6 +9029,17 @@ pub fn render(backend: &mut SwitchRenderBackend) {
     };
     let mut screen = s.screen;
     let anim_origin = s.anim_origin_ticks;
+    // An error arriving, from a press or from a download finishing: one note.
+    {
+        static LAST_ERROR: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+        let is_error = matches!(screen, Screen::DistantError)
+            || (matches!(screen, Screen::BugResult { .. }) && !s.bug_ok);
+        if is_error && !LAST_ERROR.swap(true, core::sync::atomic::Ordering::Relaxed) {
+            crate::sfx::play(crate::sfx::Sfx::Error);
+        } else if !is_error {
+            LAST_ERROR.store(false, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
     // The folder picker draws from state the lock owns, so snapshot it here
     // rather than reach back for it after the guard is gone.
     let (dir_path, dir_browse) = match s.screen {
@@ -9425,6 +9466,9 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     u.sec_library, u.open, true, SettingsExtra::None),
                 row(Icon::Globe, u.row_language, crate::loc::current().native_name(), u.help_language,
                     u.sec_general, u.open, true, SettingsExtra::None),
+                row(if crate::loc::ui_sounds() { Icon::Volume } else { Icon::VolumeOff }, u.row_sounds,
+                    if crate::loc::ui_sounds() { u.sounds_on } else { u.sounds_off }, u.help_sounds,
+                    u.sec_general, u.change, false, SettingsExtra::None),
                 row(Icon::User, u.row_pseudo, if author.is_empty() { lc.none } else { author.as_str() },
                     u.help_pseudo, u.sec_general, u.edit, false, SettingsExtra::None),
                 row(Icon::Bug, u.row_bug, "", u.help_bug, u.sec_help, u.open, true, SettingsExtra::None),

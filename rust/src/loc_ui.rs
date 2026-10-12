@@ -137,6 +137,11 @@ pub struct Ui {
     /// The empty library: A's verb, and the line under the folder.
     pub find_games: &'static str,
     pub empty_import: &'static str,
+    /// RÉGLAGES > interface sounds: the row, its two values, its help.
+    pub row_sounds: &'static str,
+    pub sounds_on: &'static str,
+    pub sounds_off: &'static str,
+    pub help_sounds: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -236,6 +241,10 @@ const EN: Ui = Ui {
     help_revert: "Puts back the controls you had before.",
     find_games: "Find games",
     empty_import: "Or search Flashpoint and archive.org from the Import tab.",
+    row_sounds: "Interface sounds",
+    sounds_on: "On",
+    sounds_off: "Off",
+    help_sounds: "A short click when you move, choose or go back in the menus. Games are not affected.",
 };
 
 const FR: Ui = Ui {
@@ -335,6 +344,10 @@ const FR: Ui = Ui {
     help_revert: "Remet les touches que tu avais avant.",
     find_games: "Trouver des jeux",
     empty_import: "Ou cherche sur Flashpoint et archive.org depuis l'onglet Importer.",
+    row_sounds: "Sons de l'interface",
+    sounds_on: "Activés",
+    sounds_off: "Désactivés",
+    help_sounds: "Un petit clic quand tu te déplaces, choisis ou reviens dans les menus. Les jeux ne sont pas concernés.",
 };
 
 const ES: Ui = Ui {
@@ -434,6 +447,10 @@ const ES: Ui = Ui {
     help_revert: "Vuelve a poner los controles que tenías antes.",
     find_games: "Buscar juegos",
     empty_import: "O busca en Flashpoint y archive.org desde la pestaña Importar.",
+    row_sounds: "Sonidos de la interfaz",
+    sounds_on: "Activados",
+    sounds_off: "Desactivados",
+    help_sounds: "Un clic breve al moverte, elegir o volver en los menús. No afecta a los juegos.",
 };
 
 const RU: Ui = Ui {
@@ -533,6 +550,10 @@ const RU: Ui = Ui {
     help_revert: "Возвращает раскладку, которая была раньше.",
     find_games: "Найти игры",
     empty_import: "Или найди игры на Flashpoint и archive.org во вкладке «Загрузка».",
+    row_sounds: "Звуки интерфейса",
+    sounds_on: "Вкл.",
+    sounds_off: "Выкл.",
+    help_sounds: "Короткий щелчок при перемещении, выборе и возврате в меню. На игры не влияет.",
 };
 
 const DE: Ui = Ui {
@@ -632,6 +653,10 @@ const DE: Ui = Ui {
     help_revert: "Stellt die Belegung wieder her, die du vorher hattest.",
     find_games: "Spiele finden",
     empty_import: "Oder suche über den Tab Import auf Flashpoint und archive.org.",
+    row_sounds: "Menütöne",
+    sounds_on: "An",
+    sounds_off: "Aus",
+    help_sounds: "Ein kurzer Klick beim Bewegen, Auswählen und Zurückgehen in den Menüs. Spiele sind nicht betroffen.",
 };
 
 const IT: Ui = Ui {
@@ -731,6 +756,10 @@ const IT: Ui = Ui {
     help_revert: "Rimette i comandi che avevi prima.",
     find_games: "Trova giochi",
     empty_import: "Oppure cerca su Flashpoint e archive.org dalla scheda Importa.",
+    row_sounds: "Suoni dell'interfaccia",
+    sounds_on: "Attivi",
+    sounds_off: "Disattivati",
+    help_sounds: "Un breve clic quando ti sposti, scegli o torni indietro nei menu. I giochi non cambiano.",
 };
 
 const PT: Ui = Ui {
@@ -830,6 +859,10 @@ const PT: Ui = Ui {
     help_revert: "Volta os controles que você tinha antes.",
     find_games: "Encontrar jogos",
     empty_import: "Ou procure no Flashpoint e no archive.org pela aba Importar.",
+    row_sounds: "Sons da interface",
+    sounds_on: "Ativados",
+    sounds_off: "Desativados",
+    help_sounds: "Um clique curto ao mover, escolher ou voltar nos menus. Os jogos não são afetados.",
 };
 
 const ZH: Ui = Ui {
@@ -929,6 +962,10 @@ const ZH: Ui = Ui {
     help_revert: "恢复你之前的按键配置。",
     find_games: "寻找游戏",
     empty_import: "或者在“导入”页搜索 Flashpoint 和 archive.org。",
+    row_sounds: "界面音效",
+    sounds_on: "开",
+    sounds_off: "关",
+    help_sounds: "在菜单中移动、选择或返回时发出轻微的提示音。不影响游戏。",
 };
 
 const TR: Ui = Ui {
@@ -1028,6 +1065,10 @@ const TR: Ui = Ui {
     help_revert: "Önceki kontrollerini geri getirir.",
     find_games: "Oyun bul",
     empty_import: "Ya da Aktar sekmesinden Flashpoint ve archive.org'da ara.",
+    row_sounds: "Arayüz sesleri",
+    sounds_on: "Açık",
+    sounds_off: "Kapalı",
+    help_sounds: "Menülerde gezinirken, seçerken veya geri dönerken kısa bir tık. Oyunları etkilemez.",
 };
 
 pub fn ui() -> &'static Ui {

@@ -911,6 +911,7 @@ mod keymap;
 mod library;
 mod loc;
 mod loc_ui;
+mod sfx;
 mod menu;
 mod net;
 mod player;

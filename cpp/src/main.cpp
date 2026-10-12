@@ -1647,11 +1647,13 @@ static void worker_entry(void* arg) {
                 // where the old magnification put it -- a third of a screen away
                 // at 300% -- and only heals when the stick is next nudged.
                 if (kDown & HidNpadButton_A) {
+                    ruffle_ui_sound(UI_SFX_DECIDE);
                     ruffle_zoom_commit();
                     ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
                     zoom_mode = false;
                     zoom_hold = 0;
                 } else if (kDown & (HidNpadButton_B | HidNpadButton_Minus)) {
+                    ruffle_ui_sound(UI_SFX_BACK);
                     ruffle_zoom_cancel();
                     ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
                     zoom_mode = false;
@@ -1667,9 +1669,11 @@ static void worker_entry(void* arg) {
             if (screen_menu) {
                 if (kDown & (HidNpadButton_Up | HidNpadButton_StickLUp | HidNpadButton_StickRUp)) {
                     screen_selection = (screen_selection + SCREEN_COUNT - 1) % SCREEN_COUNT;
+                    ruffle_ui_sound(UI_SFX_MOVE);
                 }
                 if (kDown & (HidNpadButton_Down | HidNpadButton_StickLDown | HidNpadButton_StickRDown)) {
                     screen_selection = (screen_selection + 1) % SCREEN_COUNT;
+                    ruffle_ui_sound(UI_SFX_MOVE);
                 }
                 // Left / Right step the value under the cursor either way, so
                 // going one past what you wanted is one press back, not a lap.
@@ -1678,6 +1682,7 @@ static void worker_entry(void* arg) {
                     if (kDown & (HidNpadButton_Left | HidNpadButton_StickLLeft)) dir = -1;
                     if (kDown & (HidNpadButton_Right | HidNpadButton_StickLRight)) dir = 1;
                     if (dir != 0) {
+                        ruffle_ui_sound(UI_SFX_TOGGLE);
                         switch (screen_selection) {
                         case SCREEN_DISPLAY:  ruffle_display_mode_step(dir);  break;
                         case SCREEN_ROTATION:
@@ -1696,12 +1701,15 @@ static void worker_entry(void* arg) {
                 }
                 if (kDown & (HidNpadButton_Minus | HidNpadButton_B)) {
                     screen_menu = false;
+                    ruffle_ui_sound(UI_SFX_BACK);
                     ruffle_redraw_paused();
                     ruffle_draw_menu(menu_selection);
                     gl_context_swap();
                     continue;
                 }
                 if (kDown & HidNpadButton_A) {
+                    // ZOOM opens a mode; every other row steps its value.
+                    ruffle_ui_sound(screen_selection == SCREEN_ZOOM ? UI_SFX_DECIDE : UI_SFX_TOGGLE);
                     switch (screen_selection) {
                     case SCREEN_DISPLAY:  ruffle_display_mode_step(1);   break;
                     case SCREEN_ROTATION:
@@ -1746,14 +1754,26 @@ static void worker_entry(void* arg) {
             // and one Up from there used to land on Quit, a press of A away
             // from losing the game in progress.
             if (kDown & (HidNpadButton_Up | HidNpadButton_StickLUp | HidNpadButton_StickRUp)) {
-                if (menu_selection > 0) menu_selection -= 1;
+                if (menu_selection > 0) {
+                    menu_selection -= 1;
+                    ruffle_ui_sound(UI_SFX_MOVE);
+                }
             }
             if (kDown & (HidNpadButton_Down | HidNpadButton_StickLDown | HidNpadButton_StickRDown)) {
-                if (menu_selection + 1 < MENU_COUNT) menu_selection += 1;
+                if (menu_selection + 1 < MENU_COUNT) {
+                    menu_selection += 1;
+                    ruffle_ui_sound(UI_SFX_MOVE);
+                }
             }
             if (menu_selection == MENU_POWER) {
-                if (kDown & (HidNpadButton_Left | HidNpadButton_StickLLeft)) ruffle_power_mode_step(-1);
-                if (kDown & (HidNpadButton_Right | HidNpadButton_StickLRight)) ruffle_power_mode_step(1);
+                if (kDown & (HidNpadButton_Left | HidNpadButton_StickLLeft)) {
+                    ruffle_power_mode_step(-1);
+                    ruffle_ui_sound(UI_SFX_TOGGLE);
+                }
+                if (kDown & (HidNpadButton_Right | HidNpadButton_StickLRight)) {
+                    ruffle_power_mode_step(1);
+                    ruffle_ui_sound(UI_SFX_TOGGLE);
+                }
             }
             if (kDown & (HidNpadButton_Minus | HidNpadButton_B)) {
                 // Scale the menu out (drained at the top of this branch over the
@@ -1763,11 +1783,17 @@ static void worker_entry(void* arg) {
                 // happen to be standing on.
                 std::printf("menu: pause CLOSE (row=%d, dismissed)\n", menu_selection);
                 std::fflush(stdout);
+                ruffle_ui_sound(UI_SFX_CLOSE);
                 ruffle_menu_close_begin();
                 menu_closing = true;
                 continue;
             }
             if (kDown & HidNpadButton_A) {
+                // Resume closes the sheet, OVERCLOCK steps in place, the rest
+                // open a page or act.
+                ruffle_ui_sound(menu_selection == MENU_RESUME ? UI_SFX_CLOSE
+                                : menu_selection == MENU_POWER ? UI_SFX_TOGGLE
+                                : UI_SFX_DECIDE);
                 switch (menu_selection) {
                 case MENU_RESUME:
                     std::printf("menu: pause CLOSE (REPRENDRE)\n");
@@ -1849,6 +1875,7 @@ static void worker_entry(void* arg) {
             }
             menu_open = true;
             menu_selection = MENU_RESUME;
+            ruffle_ui_sound(UI_SFX_OPEN);
             // A fresh pause always opens on the main panel, never back inside
             // ECRAN where a previous pause happened to leave it.
             screen_menu = false;

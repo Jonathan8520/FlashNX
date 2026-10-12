@@ -2622,6 +2622,18 @@ static DEFAULT_ZOOM: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU
 /// choice. The grid remains the default and nothing about it changes.
 static HOME_VIEW: AtomicU8 = AtomicU8::new(0);
 
+/// RÉGLAGES > interface sounds. On by default.
+static UI_SOUNDS: AtomicBool = AtomicBool::new(true);
+
+pub fn ui_sounds() -> bool {
+    UI_SOUNDS.load(Ordering::Relaxed)
+}
+
+pub fn set_ui_sounds(on: bool) {
+    UI_SOUNDS.store(on, Ordering::Relaxed);
+    crate::sfx::set_enabled(on);
+}
+
 /// Number of layouts, for cycling the REGLAGES row.
 pub const HOME_VIEW_COUNT: u8 = 4;
 
@@ -3020,7 +3032,7 @@ fn parse_u16_setting(json: &str, key: &str, lo: u16, hi: u16) -> Option<u16> {
 fn write_settings(lang: Lang, covers: bool) -> bool {
     let path = settings_write_path();
     let json = std::format!(
-        "{{\n    \"language\": \"{}\",\n    \"covers_online\": {},\n    \"display_mode\": {},\n    \"rotation\": {},\n    \"zoom\": {},\n    \"pixel_filter\": {},\n    \"screen_filter\": {},\n    \"overclock\": {},\n    \"fps_counter\": {},\n    \"home_view\": {}\n}}\n",
+        "{{\n    \"language\": \"{}\",\n    \"covers_online\": {},\n    \"display_mode\": {},\n    \"rotation\": {},\n    \"zoom\": {},\n    \"pixel_filter\": {},\n    \"screen_filter\": {},\n    \"overclock\": {},\n    \"fps_counter\": {},\n    \"home_view\": {},\n    \"ui_sounds\": {}\n}}\n",
         lang.code(),
         covers,
         default_display_mode(),
@@ -3031,6 +3043,7 @@ fn write_settings(lang: Lang, covers: bool) -> bool {
         default_power_mode(),
         default_fps_counter(),
         home_view(),
+        ui_sounds() as u8,
     );
     match File::create(&path) {
         Ok(mut f) => {
@@ -3109,6 +3122,9 @@ pub fn init() {
             }
             if let Some(v) = parse_u8_setting(&txt, "home_view", HOME_VIEW_COUNT) {
                 set_home_view(v);
+            }
+            if let Some(v) = parse_u8_setting(&txt, "ui_sounds", 2) {
+                set_ui_sounds(v == 1);
             }
             if let Some(lang) = parse_language(&txt) {
                 set(lang);

@@ -4,7 +4,7 @@
 //! the icons it took from Feather are MIT. Both notices travel with the font in
 //! `icons-LICENSE.txt`, next to this file. `icons.ttf` keeps only the icons
 //! listed below, as TrueType outlines with no hinting, which comes to about
-//! 28 KB in the .nro (the script prints the exact size).
+//! 29 KB in the .nro (the script prints the exact size).
 //!
 //! Why a font and not images: an outline goes through the same rasterizer as
 //! the interface text (`glyphs::raster_gid_px`, ttf-parser feeding
@@ -208,6 +208,10 @@ pub(crate) enum Icon {
     Hourglass,
     /// `pin`: pinned row.
     Pin,
+    /// `volume-2`: interface sounds on.
+    Volume,
+    /// `volume-x`: interface sounds off.
+    VolumeOff,
 }
 
 impl Icon {
@@ -291,6 +295,8 @@ impl Icon {
             Icon::Joystick => '\u{E355}',
             Icon::Hourglass => '\u{E296}',
             Icon::Pin => '\u{E259}',
+            Icon::Volume => '\u{E1AB}',
+            Icon::VolumeOff => '\u{E1AC}',
         }
     }
 }

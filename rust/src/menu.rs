@@ -55,7 +55,7 @@ const GLIDE_KEY_TOUCHES_PROFILES: u32 = 60;
 /// Cap a diff list so the auto-sized modal still fits the screen.
 const MAX_PREVIEW_ROWS: usize = 8;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Screen {
     Inactive,
     /// In-game TOUCHES sub-menu (edit / apply / share / cursor / revert).
@@ -398,6 +398,33 @@ fn drive_pending_net() {
 /// Forward a Switch-button **down-edge** event from C++. Returns true if the
 /// event was consumed (input shouldn't fall through to the game / pause menu).
 pub fn input(button: &str) -> bool {
+    // The sound each press deserves, read from what it changed, as in the
+    // launcher (`sfx::after_input`).
+    let before = TOUCHES.lock().map(|s| s.screen).ok();
+    let consumed = input_inner(button);
+    if let (Some(b), Ok(a)) = (before, TOUCHES.lock().map(|s| s.screen)) {
+        use crate::sfx::{play, Sfx};
+        let nav = matches!(
+            button,
+            "Up" | "Down" | "Left" | "Right" | "StickLUp" | "StickLDown" | "StickLLeft" | "StickLRight"
+        );
+        if matches!(a, Screen::Inactive) && !matches!(b, Screen::Inactive) {
+            play(Sfx::Back);
+        } else if b == a {
+            // Nothing moved: a value stepped in place, or a binding was set.
+            if matches!(button, "A" | "X") || (nav && matches!(b, Screen::Menu { .. })) {
+                play(Sfx::Toggle);
+            }
+        } else if core::mem::discriminant(&b) == core::mem::discriminant(&a) {
+            play(if nav { Sfx::Move } else { Sfx::Toggle });
+        } else {
+            play(if matches!(button, "B" | "Minus") { Sfx::Back } else { Sfx::Decide });
+        }
+    }
+    consumed
+}
+
+fn input_inner(button: &str) -> bool {
     let mut s = match TOUCHES.lock() {
         Ok(g) => g,
         Err(_) => return false,
