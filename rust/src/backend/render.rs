@@ -13056,7 +13056,9 @@ impl SwitchRenderBackend {
     }
 
     /// The page a search that matched nothing leaves, the same in every view:
-    /// what was searched, and the two ways out.
+    /// what was searched. The two ways out are the footer's
+    /// (`kit_home_footer`), as on the importer's empty lists: they were also
+    /// drawn under the message, the same two hints twice on one screen.
     ///
     /// A search that matches nothing leaves the same `Screen::List` with zero
     /// entries, and each layout used to draw its chrome around nothing, then a
@@ -13075,23 +13077,17 @@ impl SwitchRenderBackend {
         let u = crate::loc_ui::ui();
         let term = HOME_STRIP.lock().ok().and_then(|g| g.search.clone());
         let vw = self.dimensions.width as f32;
-        // The middle of the band between the strip and the footer.
+        // The middle of the band between the strip and the footer, where the
+        // icon and the message are centred as one block.
         let cy = 388.0;
-        self.kit_icon(((vw - 40.0) * 0.5).round(), cy - 44.0, 40.0, Icon::Search, col::TEXT3);
+        self.kit_icon(((vw - 40.0) * 0.5).round(), cy - 20.0, 40.0, Icon::Search, col::TEXT3);
         let msg = match &term {
             Some(t) => u.home_no_match.replacen("{}", t, 1),
             None => crate::loc::s().cover_none.to_string(),
         };
         let msg = self.kit_fit_mid(&msg, size::BODY, vw - 160.0);
         let w = self.kit_measure(&msg, size::BODY);
-        self.kit_text_mid(((vw - w) * 0.5).round(), cy + 10.0, size::BODY, &msg, col::TEXT2);
-        if term.is_some() {
-            self.kit_hints_centered(
-                vw * 0.5,
-                cy + 62.0,
-                &[(&[Btn::Minus], u.home_edit_search), (&[Btn::B], u.home_show_all)],
-            );
-        }
+        self.kit_text_mid(((vw - w) * 0.5).round(), cy + 34.0, size::BODY, &msg, col::TEXT2);
     }
 
     /// The vertical scrollbar a scrolling page draws in its right-hand gutter: a
