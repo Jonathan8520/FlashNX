@@ -2927,13 +2927,17 @@ pub(crate) fn step_choice(cur: u8, n: u8, dir: c_int) -> u8 {
 }
 
 #[no_mangle]
-pub extern "C" fn ruffle_display_mode_step(dir: c_int) {
-    let next = step_choice(keymap::display_mode(), keymap::DISPLAY_MODE_COUNT, dir);
+pub extern "C" fn ruffle_display_mode_step(dir: c_int) -> c_int {
+    let cur = keymap::display_mode();
+    let next = step_choice(cur, keymap::DISPLAY_MODE_COUNT, dir);
+    if next == cur {
+        return 0;
+    }
     keymap::set_display_mode(next);
     let state = unsafe {
         match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
             Some(s) => s,
-            None => return,
+            None => return 1,
         }
     };
     if let Ok(mut player) = state.player.lock() {
@@ -2945,6 +2949,7 @@ pub extern "C" fn ruffle_display_mode_step(dir: c_int) {
             _ => StageScaleMode::ShowAll,
         });
     }
+    1
 }
 
 /// The zoom + framing the ECRAN panel was showing when ZOOM was opened, so `B`
@@ -2998,11 +3003,13 @@ pub extern "C" fn ruffle_zoom_reset() {
 /// Left / Right on the ZOOM row: ten percent either way, kept at once. The
 /// framing mode is for the fine work; this is for "a bit bigger".
 #[no_mangle]
-pub extern "C" fn ruffle_zoom_step(dir: c_int) {
+pub extern "C" fn ruffle_zoom_step(dir: c_int) -> c_int {
     // Applied at once, written by `ruffle_zoom_save` when the hold ends: a write
     // is a rewrite of the game's `.prefs` plus an SD commit, and a held
     // direction steps every 80 ms.
+    let before = backend::render::game_zoom_percent();
     ruffle_zoom_adjust(if dir < 0 { -10 } else { 10 }, 0, 0);
+    (backend::render::game_zoom_percent() != before) as c_int
 }
 
 /// Write the zoom the ECRAN row stepped to (see `ruffle_zoom_step`).
@@ -3062,8 +3069,12 @@ pub extern "C" fn ruffle_draw_zoom_overlay() {
 /// redrawn turned -- so the player sees the result before committing, exactly
 /// like the display and filter rows. Issue #78.
 #[no_mangle]
-pub extern "C" fn ruffle_rotation_step(dir: c_int) {
-    let next = step_choice(keymap::rotation(), keymap::ROTATION_COUNT, dir);
+pub extern "C" fn ruffle_rotation_step(dir: c_int) -> c_int {
+    let cur = keymap::rotation();
+    let next = step_choice(cur, keymap::ROTATION_COUNT, dir);
+    if next == cur {
+        return 0;
+    }
     keymap::set_rotation(next);
     crate::backend::render::set_game_rotation(next);
     // Turning the picture re-frames it, so the framing offset goes back to
@@ -3088,7 +3099,7 @@ pub extern "C" fn ruffle_rotation_step(dir: c_int) {
     let state = unsafe {
         match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
             Some(s) => s,
-            None => return,
+            None => return 1,
         }
     };
     if let Ok(mut player) = state.player.lock() {
@@ -3104,6 +3115,7 @@ pub extern "C" fn ruffle_rotation_step(dir: c_int) {
             scale_factor: 1.0,
         });
     }
+    1
 }
 
 /// Pause-menu FILTRE row: cycle the ACTIVE game's screen filter and persist it.
@@ -3112,10 +3124,15 @@ pub extern "C" fn ruffle_rotation_step(dir: c_int) {
 /// enough and the next redraw (the paused one, behind the panel) shows it.
 /// The other half of issue #65.
 #[no_mangle]
-pub extern "C" fn ruffle_screen_filter_step(dir: c_int) {
-    let next = step_choice(keymap::screen_filter(), keymap::SCREEN_FILTER_COUNT, dir);
+pub extern "C" fn ruffle_screen_filter_step(dir: c_int) -> c_int {
+    let cur = keymap::screen_filter();
+    let next = step_choice(cur, keymap::SCREEN_FILTER_COUNT, dir);
+    if next == cur {
+        return 0;
+    }
     keymap::set_screen_filter(next);
     crate::backend::render::set_screen_filter(next);
+    1
 }
 
 /// Pause-menu ECRAN > FPS row: show or hide the counter for the game being
@@ -3125,10 +3142,15 @@ pub extern "C" fn ruffle_screen_filter_step(dir: c_int) {
 /// we draw after the frame, so flipping the flag is the whole change and the
 /// paused redraw behind the panel previews it on the next call.
 #[no_mangle]
-pub extern "C" fn ruffle_fps_counter_step(dir: c_int) {
-    let next = step_choice(keymap::fps_counter(), keymap::FPS_COUNTER_COUNT, dir);
+pub extern "C" fn ruffle_fps_counter_step(dir: c_int) -> c_int {
+    let cur = keymap::fps_counter();
+    let next = step_choice(cur, keymap::FPS_COUNTER_COUNT, dir);
+    if next == cur {
+        return 0;
+    }
     keymap::set_fps_counter(next);
     crate::backend::render::set_fps_counter(next == 1);
+    1
 }
 
 /// Pause-menu PIXELS row: cycle the ACTIVE game's texture sampling and persist
@@ -3141,10 +3163,15 @@ pub extern "C" fn ruffle_fps_counter_step(dir: c_int) {
 /// bilinear is helping or smearing is not a question anyone can answer from a
 /// word in a menu.
 #[no_mangle]
-pub extern "C" fn ruffle_pixel_filter_step(dir: c_int) {
-    let next = step_choice(keymap::pixel_filter(), keymap::PIXEL_FILTER_COUNT, dir);
+pub extern "C" fn ruffle_pixel_filter_step(dir: c_int) -> c_int {
+    let cur = keymap::pixel_filter();
+    let next = step_choice(cur, keymap::PIXEL_FILTER_COUNT, dir);
+    if next == cur {
+        return 0;
+    }
     keymap::set_pixel_filter(next);
     crate::backend::render::set_pixel_filter(next);
+    1
 }
 
 /// The running game's gyroscope cursor mode (#119): `keymap::GYRO_OFF`,
@@ -3163,7 +3190,7 @@ pub extern "C" fn ruffle_gyro_mode() -> c_int {
 /// case would leave the game marked HIGH forever while running at 1020, with
 /// the row saying one thing and the console doing another.
 #[no_mangle]
-pub extern "C" fn ruffle_power_mode_step(dir: c_int) {
+pub extern "C" fn ruffle_power_mode_step(dir: c_int) -> c_int {
     // Flip what the row SHOWS, which is the mode in force, not the stored
     // preference: the two part ways whenever the hardware is not where the
     // preference says (a raise dropped for the battery, the second after HOME
@@ -3178,7 +3205,7 @@ pub extern "C" fn ruffle_power_mode_step(dir: c_int) {
     let next = ORDER[step_choice(at, 3, dir) as usize];
     if next == shown {
         // Left on Off, Right on On: the end of the row, nothing to ask for.
-        return;
+        return 0;
     }
     let got = crate::clock_auto::apply_setting(next);
     keymap::set_power_mode(got);
@@ -3191,6 +3218,7 @@ pub extern "C" fn ruffle_power_mode_step(dir: c_int) {
         got,
         if next != got { " (REFUSED)" } else { "" },
     ));
+    1
 }
 
 /// Set by `ruffle_restart`, consumed by the SESSION START marker in

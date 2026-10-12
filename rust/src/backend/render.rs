@@ -9169,8 +9169,11 @@ impl SwitchRenderBackend {
             _ => u.choose,
         };
         let on_choice = MENU_ITEMS.get(selected) == Some(&"OVERCLOCK");
+        let on_resume = MENU_ITEMS.get(selected) == Some(&"REPRENDRE");
         let hints_choice = [(&[Btn::Dpad][..], u.change), (&[Btn::B][..], u.resume_game)];
         let hints_act = [(&[Btn::A][..], a_verb), (&[Btn::B][..], u.resume_game)];
+        // On Resume, A and B do the same thing: one hint, both buttons.
+        let hints_resume = [(&[Btn::A, Btn::B][..], u.resume_game)];
 
         // The chips. The reading is the one frozen with the picture: no frame
         // runs while paused, so there is no newer speed to report.
@@ -9202,7 +9205,13 @@ impl SwitchRenderBackend {
         sheet.chips = &chips;
         sheet.glide_key = GLIDE_KEY_PAUSE;
         sheet.help = help;
-        sheet.hints = if on_choice { &hints_choice } else { &hints_act };
+        sheet.hints = if on_choice {
+            &hints_choice
+        } else if on_resume {
+            &hints_resume
+        } else {
+            &hints_act
+        };
         f(self, &sheet)
     }
 

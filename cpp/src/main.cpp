@@ -127,27 +127,27 @@ extern "C" int  ruffle_restart(void);
 // the pause panel shows the result immediately.
 // Every `_step(dir)` below moves one value forward (dir >= 0) or back: A steps
 // forward, Left and Right either way.
-extern "C" void ruffle_display_mode_step(int dir);
+extern "C" int  ruffle_display_mode_step(int dir);
 // Pause-menu FILTRE: next screen filter for the game being played. Persists per
 // game; the next redraw picks it up, so the paused frame previews it.
-extern "C" void ruffle_screen_filter_step(int dir);
+extern "C" int  ruffle_screen_filter_step(int dir);
 // Pause-menu FPS: show / hide the frame-rate counter for the game being played
 // (#111). Persists per game and, like FILTRE, needs nothing but the flag: the
 // counter is drawn after the frame, so the paused redraw previews it.
-extern "C" void ruffle_fps_counter_step(int dir);
+extern "C" int  ruffle_fps_counter_step(int dir);
 // Pause-menu PIXELS: next texture sampling (auto / smooth / sharp) for the game
 // being played. A DIFFERENT setting from the row above -- this one is how the
 // game's own bitmaps are sampled, that one is the CRT pass over the finished
 // frame. Persists per game; the next redraw previews it.
-extern "C" void ruffle_pixel_filter_step(int dir);
+extern "C" int  ruffle_pixel_filter_step(int dir);
 // Pause-menu OVERCLOCK: on <-> off for the game being played. Persists
 // per game, and persists what the hardware ACCEPTED rather than what was asked
 // for, so a refused raise cannot leave a game marked ON while it runs at
 // 1020 MHz.
-extern "C" void ruffle_power_mode_step(int dir);
-extern "C" void ruffle_rotation_step(int dir);
+extern "C" int  ruffle_power_mode_step(int dir);
+extern "C" int  ruffle_rotation_step(int dir);
 // Left / Right on ZOOM: ten percent either way, kept at once.
-extern "C" void ruffle_zoom_step(int dir);
+extern "C" int  ruffle_zoom_step(int dir);
 extern "C" void ruffle_zoom_save(void);
 // Close audren and join its worker. Idempotent; called on the way out, since
 // the launcher's interface sounds open a session no game will close.
@@ -1778,22 +1778,27 @@ static void worker_entry(void* arg) {
                     if (kStep & PAUSE_DIRS[2]) dir = -1;
                     if (kStep & PAUSE_DIRS[3]) dir = 1;
                     if (dir != 0) {
-                        ruffle_ui_sound(UI_SFX_TOGGLE);
+                        // A click only when the setting moved: at the end of a
+                        // row, Left or Right is silent, as nothing changed.
+                        int moved = 0;
                         switch (screen_selection) {
-                        case SCREEN_DISPLAY:  ruffle_display_mode_step(dir);  break;
+                        case SCREEN_DISPLAY:  moved = ruffle_display_mode_step(dir);  break;
                         case SCREEN_ROTATION:
-                            ruffle_rotation_step(dir);
-                            ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
+                            moved = ruffle_rotation_step(dir);
+                            if (moved) ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
                             break;
                         case SCREEN_ZOOM:
-                            ruffle_zoom_step(dir);
-                            zoom_unsaved = true;
-                            ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
+                            moved = ruffle_zoom_step(dir);
+                            if (moved) {
+                                zoom_unsaved = true;
+                                ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
+                            }
                             break;
-                        case SCREEN_PIXELS:   ruffle_pixel_filter_step(dir);  break;
-                        case SCREEN_FILTER:   ruffle_screen_filter_step(dir); break;
-                        case SCREEN_FPS:      ruffle_fps_counter_step(dir);   break;
+                        case SCREEN_PIXELS:   moved = ruffle_pixel_filter_step(dir);  break;
+                        case SCREEN_FILTER:   moved = ruffle_screen_filter_step(dir); break;
+                        case SCREEN_FPS:      moved = ruffle_fps_counter_step(dir);   break;
                         }
+                        if (moved) ruffle_ui_sound(UI_SFX_TOGGLE);
                     }
                 }
                 // The zoom stepped under a hold is written once the hold ends,
@@ -1906,12 +1911,10 @@ static void worker_entry(void* arg) {
                 }
             }
             if (menu_selection == MENU_POWER) {
-                if (kDown & PAUSE_DIRS[2]) {
-                    ruffle_power_mode_step(-1);
+                if ((kDown & PAUSE_DIRS[2]) && ruffle_power_mode_step(-1)) {
                     ruffle_ui_sound(UI_SFX_TOGGLE);
                 }
-                if (kDown & PAUSE_DIRS[3]) {
-                    ruffle_power_mode_step(1);
+                if ((kDown & PAUSE_DIRS[3]) && ruffle_power_mode_step(1)) {
                     ruffle_ui_sound(UI_SFX_TOGGLE);
                 }
             }
