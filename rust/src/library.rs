@@ -75,7 +75,8 @@ pub(crate) enum Screen {
     /// Cover picker (OPTIONS > JAQUETTE, v1.2.0). Lists Flashpoint search
     /// candidates from `State::cover_candidates`; `selection` indexes that vec.
     /// `State::cover_msg` (non-empty) shows a notice instead of a list (covers
-    /// off / no results / fetch error). A = fetch+cache the chosen logo.
+    /// off / no results / a failed search). A = fetch+cache the chosen logo,
+    /// behind a loading card; a failed download says why in a toast.
     CoverPicker { game_idx: usize, selection: usize },
     /// Flashpoint game gallery (IMPORTER > X): a cover grid of search hits;
     /// A downloads the selected game's GameZIP, or plays it when a game of
