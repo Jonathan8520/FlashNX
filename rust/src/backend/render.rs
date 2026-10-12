@@ -9889,7 +9889,8 @@ impl SwitchRenderBackend {
             self.kit_shape(fx, fy, rw, rh, 9.0, col::LINE, 2.0, col::GOLD, 0.0);
         }
 
-        let mut cells: std::vec::Vec<(f32, f32, f32, f32)> = std::vec::Vec::with_capacity(PAD_CELL_ICON + PAD_SLOTS.len());
+        let mut cells: std::vec::Vec<(f32, f32, f32, f32)> =
+            std::vec::Vec::with_capacity(PAD_CELL_ICON + PAD_SLOTS.len());
         for (i, slot) in PAD_SLOTS.iter().enumerate() {
             let (rx, ry, rw, rh) = row_rect(i);
             cells.push((rx, ry, rw, rh));
@@ -10059,7 +10060,8 @@ impl SwitchRenderBackend {
     /// What sits at the left (the cursor speed, the picker's legend) is the
     /// caller's; returns where the hints start, so it can stay clear of them.
     fn touches_footer(&mut self, x: f32, y: f32, w: f32, h: f32, hints: &[kit::text::HintItem]) -> f32 {
-        self.draw_overlay_rect(x + TOUCHES_PAD_X, y + h - TOUCHES_FOOT_H, w - 2.0 * TOUCHES_PAD_X, 1.0, theme::col::LINE);
+        let line_w = w - 2.0 * TOUCHES_PAD_X;
+        self.draw_overlay_rect(x + TOUCHES_PAD_X, y + h - TOUCHES_FOOT_H, line_w, 1.0, theme::col::LINE);
         let right = x + w - TOUCHES_PAD_X;
         self.kit_hints_right(right, y + h - TOUCHES_FOOT_H * 0.5, hints);
         right - self.kit_hints_width(hints)
@@ -10081,7 +10083,14 @@ impl SwitchRenderBackend {
     /// (Touches.dc.html): a dark track, the current option gold, and a dot after
     /// an option marked `live` (a combo layer that holds a key, so a layer in
     /// use shows from the Normal tab). Returns each option's rect, for touch.
-    fn pad_segments(&mut self, x: f32, cy: f32, labels: &[&str], active: usize, live: &[bool]) -> std::vec::Vec<(f32, f32, f32, f32)> {
+    fn pad_segments(
+        &mut self,
+        x: f32,
+        cy: f32,
+        labels: &[&str],
+        active: usize,
+        live: &[bool],
+    ) -> std::vec::Vec<(f32, f32, f32, f32)> {
         use theme::col;
         const DOT: f32 = 6.0;
         const ON_INK: u32 = 0xFF_1A_14_05;

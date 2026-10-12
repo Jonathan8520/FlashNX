@@ -1784,7 +1784,10 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
                 player,
                 layer,
                 live_layers: live_layers(player),
-                stick_cursor: [stick_reads_as_cursor(&values, player, 'L'), stick_reads_as_cursor(&values, player, 'R')],
+                stick_cursor: [
+                    stick_reads_as_cursor(&values, player, 'L'),
+                    stick_reads_as_cursor(&values, player, 'R'),
+                ],
                 cursor_speed: speed.as_deref(),
                 profiles: place.profiles,
                 help: &help,
