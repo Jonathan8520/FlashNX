@@ -117,51 +117,6 @@ pub(crate) enum Sink {
     Sd,
 }
 
-/// The most SPECIFIC message we can give for the last transfer failure. One
-/// catch-all sentence ("check the clock, the WiFi and the URL") is worse than
-/// nothing: it blames the console clock for a search that merely returned too
-/// much data, and it trains the user to ignore the error. The curl code says
-/// which failure it actually was, so say that.
-pub(crate) fn https_error_message(sink: Sink) -> std::string::String {
-    let curl = unsafe { https_last_curl_code() };
-    let http = unsafe { https_last_http_code() } as i64;
-    let lc = crate::loc::s();
-    let owned = |s: &'static str| std::string::String::from(s);
-    match curl {
-        // CURLE_WRITE_ERROR — our write callback returned short.
-        23 => match sink {
-            Sink::Memory => owned(lc.err_response_big),
-            Sink::Sd => owned(lc.err_sd_write),
-        },
-        // COULDN'T_RESOLVE_PROXY / _HOST: the address never resolved. A console
-        // with its WiFi off and one whose DNS is broken fail identically here,
-        // so the message names both rather than blaming the WiFi alone — which
-        // sent a connected player checking the one thing that worked (#103).
-        5 | 6 => crate::loc::fill_one(lc.err_offline, curl),
-        // COULDN'T_CONNECT: the name DID resolve and the connection was refused.
-        // Nothing to check on the console; something between it and the server
-        // is saying no, which is a different sentence and a different fix.
-        7 => crate::loc::fill_one(lc.err_unreachable, curl),
-        // OPERATION_TIMEDOUT.
-        28 => owned(lc.err_timeout),
-        // TLS handshake / certificate problems. On Switch the usual cause is a
-        // wrong console clock (the cert reads as not-yet-valid), so THIS is the
-        // one place the clock advice belongs.
-        35 | 51 | 53 | 54 | 58 | 59 | 60 | 66 | 77 | 83 => owned(lc.err_tls),
-        // Transfer itself was fine — the server said no (404 / 403 / 429 / 5xx).
-        _ if http >= 400 => crate::loc::err_http_status(http),
-        // Everything else: the transfer broke on its way, mid-connection.
-        // This arm is reached only AFTER 5, 6 and 7 -- the three codes that mean
-        // "no network" -- have been taken above, so the WiFi is the one thing
-        // the code has just ruled out, and it used to be the only thing this
-        // sentence accused (#103). It also asked to check a URL, which the
-        // IMPORTER search user never typed: they typed a game name. The curl
-        // detail stays in the parentheses, because that is what makes a report
-        // diagnosable.
-        _ => crate::loc::err_https(&last_https_error()),
-    }
-}
-
 /// A transfer that failed, as the importer's error page needs it: the sentence
 /// for the player, and whether sending the same request again can work. The
 /// page offers "try again" only then: on a 404 or an answer too big to keep, it
@@ -178,25 +133,62 @@ impl Failure {
     }
 }
 
-/// `https_error_message` with whether trying again can help, read from the same
-/// codes. No network, a refused connection, a timeout, a server busy and a
-/// transfer cut short can all pass on a second try. A page that does not exist
-/// or is refused, an answer too big for its buffer, a full card and a
+/// The most SPECIFIC message we can give for the last transfer failure. One
+/// catch-all sentence ("check the clock, the WiFi and the URL") is worse than
+/// nothing: it blames the console clock for a search that merely returned too
+/// much data, and it trains the user to ignore the error. The curl code says
+/// which failure it actually was, so say that.
+pub(crate) fn https_error_message(sink: Sink) -> std::string::String {
+    https_failure(sink).msg
+}
+
+/// `https_error_message`, with whether trying again can help, decided in the
+/// same arm as the sentence so the two cannot drift apart. No network, a
+/// refused connection, a timeout, a server busy and a transfer cut short can
+/// all pass on a second try. An answer too big for its buffer, a full card, a
 /// certificate the console's clock rejects (a clock does not put itself right)
-/// fail the same way again.
+/// and a page that does not exist or is refused fail the same way again.
 pub(crate) fn https_failure(sink: Sink) -> Failure {
     let curl = unsafe { https_last_curl_code() };
     let http = unsafe { https_last_http_code() } as i64;
-    let retry = match curl {
-        23 => false,
-        5 | 6 | 7 | 28 => true,
-        35 | 51 | 53 | 54 | 58 | 59 | 60 | 66 | 77 | 83 => false,
-        // The server answered: busy (429, 5xx) or too slow to hear us out (408)
-        // can pass later; any other refusal is the same next time.
-        _ if http >= 400 => matches!(http, 408 | 429) || http >= 500,
-        _ => true,
+    let lc = crate::loc::s();
+    let owned = |s: &'static str| std::string::String::from(s);
+    let (msg, retry) = match curl {
+        // CURLE_WRITE_ERROR — our write callback returned short.
+        23 => match sink {
+            Sink::Memory => (owned(lc.err_response_big), false),
+            Sink::Sd => (owned(lc.err_sd_write), false),
+        },
+        // COULDN'T_RESOLVE_PROXY / _HOST: the address never resolved. A console
+        // with its WiFi off and one whose DNS is broken fail identically here,
+        // so the message names both rather than blaming the WiFi alone — which
+        // sent a connected player checking the one thing that worked (#103).
+        5 | 6 => (crate::loc::fill_one(lc.err_offline, curl), true),
+        // COULDN'T_CONNECT: the name DID resolve and the connection was refused.
+        // Nothing to check on the console; something between it and the server
+        // is saying no, which is a different sentence and a different fix.
+        7 => (crate::loc::fill_one(lc.err_unreachable, curl), true),
+        // OPERATION_TIMEDOUT.
+        28 => (owned(lc.err_timeout), true),
+        // TLS handshake / certificate problems. On Switch the usual cause is a
+        // wrong console clock (the cert reads as not-yet-valid), so THIS is the
+        // one place the clock advice belongs.
+        35 | 51 | 53 | 54 | 58 | 59 | 60 | 66 | 77 | 83 => (owned(lc.err_tls), false),
+        // Transfer itself was fine — the server said no (404 / 403 / 429 / 5xx).
+        // Busy (429, 5xx) or too slow to hear us out (408) can pass later; any
+        // other refusal is the same next time.
+        _ if http >= 400 => (crate::loc::err_http_status(http), matches!(http, 408 | 429) || http >= 500),
+        // Everything else: the transfer broke on its way, mid-connection.
+        // This arm is reached only AFTER 5, 6 and 7 -- the three codes that mean
+        // "no network" -- have been taken above, so the WiFi is the one thing
+        // the code has just ruled out, and it used to be the only thing this
+        // sentence accused (#103). It also asked to check a URL, which the
+        // IMPORTER search user never typed: they typed a game name. The curl
+        // detail stays in the parentheses, because that is what makes a report
+        // diagnosable.
+        _ => (crate::loc::err_https(&last_https_error()), true),
     };
-    Failure { msg: https_error_message(sink), retry }
+    Failure { msg, retry }
 }
 
 /// Generic synchronous HTTPS GET into a freshly-allocated buffer; returns the
