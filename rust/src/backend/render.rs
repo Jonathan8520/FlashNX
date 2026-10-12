@@ -674,45 +674,184 @@ pub fn rotation_swaps_axes() -> bool {
     matches!(game_rotation(), 1 | 3)
 }
 
-/// Folder the home is currently showing (issue #68); `None` = all of them.
+/// One chip of the shelf strip under the Play tab's tabs.
+pub struct HomeChip {
+    pub kind: HomeChipKind,
+    pub label: std::string::String,
+    /// The number beside the label. Only TOUS carries one, as on the mockup:
+    /// the tab row already says how many games the open shelf holds.
+    pub count: Option<usize>,
+}
+
+/// What a chip stands for, which picks its icon.
+#[derive(Clone, Copy, PartialEq)]
+pub enum HomeChipKind {
+    All,
+    Favorites,
+    /// A shelf that is a real directory on the card.
+    Folder,
+    /// A shelf that exists only as a label.
+    Label,
+}
+
+/// A chip as drawn: its label cut to fit, its count written out, its width.
+/// Kept with the strip and rebuilt only when the chips change, because the
+/// gallery draws sixty frames a second and each of these is an allocation.
+struct ChipLayout {
+    label: std::string::String,
+    count: Option<std::string::String>,
+    w: f32,
+}
+
+/// What the band under the tabs shows (Main.dc.html), as `library` sees it:
+/// the shelf chips, which one is open, the search running inside it and the
+/// sort in force. Published by `library::draw_gallery` under the same lock that
+/// reads the entries, so the strip can never describe another list than the
+/// one drawn under it.
 ///
-/// A static rather than a tenth argument through all four view renderers. It is
-/// read in exactly ONE place -- `draw_home_header`, to name the open shelf in
-/// the slot the active filter already uses -- and threading it would have meant
-/// four signatures and a dispatch tuple changed to move one line of text. The
-/// four views themselves never learn folders exist: they are handed the games
-/// that survived the filter, as they always were.
-static HOME_FOLDER: std::sync::Mutex<Option<std::string::String>> =
-    std::sync::Mutex::new(None);
+/// It replaces three statics that each told the header one fact (the open
+/// folder, whether any existed, the library's size), and a header that could
+/// therefore only print a sentence about them.
+struct HomeStrip {
+    /// Fingerprint of `chips`, so an unchanged strip is not rebuilt, and the
+    /// one `layout` was measured for.
+    fp: Option<u64>,
+    chips: std::vec::Vec<HomeChip>,
+    layout_fp: Option<u64>,
+    layout: std::vec::Vec<ChipLayout>,
+    /// The open shelf, an index into `chips`.
+    active: usize,
+    /// The search running inside the open shelf, how many games match, and
+    /// its chip as last measured (with the term and count it was measured for).
+    search: Option<std::string::String>,
+    matches: usize,
+    search_layout: Option<(std::string::String, usize, ChipLayout)>,
+    /// The sort in force (`library::sort_mode_index`) and its direction.
+    sort_mode: usize,
+    sort_reverse: bool,
+    /// Whether favourites lead the list on screen. The sort indicator says it
+    /// with a star: the order changes, they stay first.
+    favorites_first: bool,
+}
 
-/// Whether the library has any folder at all, so the header can ADVERTISE the
-/// shoulder buttons. Nothing on the home says folders exist otherwise, and an
-/// unadvertised button is a feature nobody finds.
-static HOME_HAS_FOLDERS: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+static HOME_STRIP: Mutex<HomeStrip> = Mutex::new(HomeStrip {
+    fp: None,
+    chips: std::vec::Vec::new(),
+    layout_fp: None,
+    layout: std::vec::Vec::new(),
+    active: 0,
+    search: None,
+    matches: 0,
+    search_layout: None,
+    sort_mode: 0,
+    sort_reverse: false,
+    favorites_first: false,
+});
 
-pub fn set_home_folder(folder: Option<&str>) {
-    if let Ok(mut g) = HOME_FOLDER.lock() {
-        // Compared before writing: this is called once per gallery frame, and
-        // the shelf changes about once a minute. Two allocations a frame for a
-        // string that is almost always the same one is not free at 60 Hz.
-        if g.as_deref() != folder {
-            *g = folder.map(|s| s.to_string());
-        }
+/// What one frame of the home tells the strip, besides the chips themselves.
+pub struct HomeStripState<'a> {
+    pub active: usize,
+    pub search: Option<&'a str>,
+    pub matches: usize,
+    pub sort_mode: usize,
+    pub sort_reverse: bool,
+    pub favorites_first: bool,
+}
+
+/// Publish the strip. `chips` only runs when `fp`, the fingerprint of what the
+/// chips show, has changed since the last call.
+pub fn home_strip_publish(fp: u64, chips: impl FnOnce() -> std::vec::Vec<HomeChip>, st: &HomeStripState) {
+    let Ok(mut g) = HOME_STRIP.lock() else { return };
+    if g.fp != Some(fp) {
+        g.chips = chips();
+        g.fp = Some(fp);
+    }
+    g.active = st.active.min(g.chips.len().saturating_sub(1));
+    let search = st.search.map(str::trim).filter(|t| !t.is_empty());
+    // Compared first: a term that is the same as last frame's costs nothing.
+    if g.search.as_deref() != search {
+        g.search = search.map(|t| t.to_string());
+    }
+    g.matches = st.matches;
+    g.sort_mode = st.sort_mode;
+    g.sort_reverse = st.sort_reverse;
+    g.favorites_first = st.favorites_first;
+}
+
+/// Whether a search narrows the home, and whether a shelf other than TOUS is
+/// open: what B does there, and what the footer says it does.
+pub fn home_strip_state() -> (bool, bool) {
+    HOME_STRIP.lock().map(|g| (g.search.is_some(), g.active != 0)).unwrap_or((false, false))
+}
+
+/// What a tap on the strip lands on.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum StripHit {
+    /// The search chip: edit the search.
+    Search,
+    /// A shelf chip, by its index in the chips.
+    Shelf(usize),
+    /// The sort indicator: open the sort window.
+    Sort,
+    /// The view indicator: the next view.
+    View,
+}
+
+/// Where the strip's targets were drawn, in screen pixels. Its own table, like
+/// the navbar's: the strip sits over the gallery, whose tiles have theirs.
+static STRIP_CELLS: Mutex<std::vec::Vec<((f32, f32, f32, f32), StripHit)>> = Mutex::new(std::vec::Vec::new());
+
+/// The strip target under `(x, y)`, if any.
+pub fn strip_hit(x: f32, y: f32) -> Option<StripHit> {
+    let g = STRIP_CELLS.lock().ok()?;
+    g.iter()
+        .find(|((rx, ry, rw, rh), _)| *rw > 0.0 && x >= *rx && x <= rx + rw && y >= *ry && y <= ry + rh)
+        .map(|(_, hit)| *hit)
+}
+
+fn publish_strip_cells(cells: std::vec::Vec<((f32, f32, f32, f32), StripHit)>) {
+    if let Ok(mut g) = STRIP_CELLS.lock() {
+        *g = cells;
     }
 }
 
-pub fn set_home_has_folders(any: bool) {
-    HOME_HAS_FOLDERS.store(any, core::sync::atomic::Ordering::Relaxed);
+/// The strip's moving parts: how far the chips are scrolled when they do not
+/// all fit, and the fill under the open shelf, which glides from chip to chip.
+/// In the chips' own coordinates, so the fill stays on its chip while they
+/// scroll. On the covers' clock, like the ring.
+struct StripAnim {
+    inited: bool,
+    tick: u64,
+    off: Glide,
+    fill_x: Glide,
+    fill_w: Glide,
 }
 
-/// Size of the WHOLE library, for the one line that needs to compare a shelf to
-/// it. Everything else on screen counts what is in front of the player.
-static HOME_LIBRARY_TOTAL: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
+static STRIP_ANIM: Mutex<StripAnim> = Mutex::new(StripAnim {
+    inited: false,
+    tick: 0,
+    off: Glide::at(0.0),
+    fill_x: Glide::at(0.0),
+    fill_w: Glide::at(0.0),
+});
 
-pub fn set_home_library_total(n: usize) {
-    HOME_LIBRARY_TOTAL.store(n, core::sync::atomic::Ordering::Relaxed);
+/// Put the strip straight where it belongs on the next frame: a fresh open, or
+/// coming back from another tab. A shelf change does NOT snap it: the fill
+/// travelling to the new chip is what shows where ZL / ZR went.
+pub fn home_strip_snap() {
+    if let Ok(mut a) = STRIP_ANIM.lock() {
+        a.inited = false;
+    }
+}
+
+/// Set while the home slides in from the side on a shelf change: the band
+/// under the tabs then stays still and only the content moves, as the navbar
+/// stays still on a tab change. A tab change clears it, since the whole page
+/// moves then.
+static HOME_HEADER_PINNED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn home_header_pin(on: bool) {
+    HOME_HEADER_PINNED.store(on, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Free zoom on the game's picture, in percent of the fitted size (issue #101),
@@ -10735,26 +10874,46 @@ impl SwitchRenderBackend {
     }
 
     /// The bottom band of the home screens: a hairline, the author credit on
-    /// the left and what the buttons do on the right.
+    /// the left (`kit_footer_band`) and what the buttons do on the right.
     ///
-    /// The credit and the version are in the band on the left
-    /// (`kit_footer_band`).
-    fn kit_home_footer(&mut self) {
+    /// B says what it does only where it does something: clear the search, or
+    /// go back to TOUS from a shelf. Over a search that matched nothing, A, +
+    /// and Y have nothing to act on, and only the two ways out are left.
+    fn kit_home_footer(&mut self, empty: bool) {
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
         self.kit_footer_band();
         let cy = vh - 24.0;
         let u = crate::loc_ui::ui();
-        self.kit_hints_right(
-            vw - 40.0,
-            cy,
-            &[
-                (&[Btn::A], u.hint_play),
-                (&[Btn::Plus], u.hint_options),
-                (&[Btn::Y], u.hint_sort),
-                (&[Btn::Minus], u.hint_search),
-            ],
-        );
+        let (searching, shelf_open) = home_strip_state();
+        if empty && searching {
+            self.kit_hints_right(
+                vw - 40.0,
+                cy,
+                &[(&[Btn::Minus], u.home_edit_search), (&[Btn::B], u.home_show_all)],
+            );
+            return;
+        }
+        let back = if searching {
+            Some(u.home_clear)
+        } else if shelf_open {
+            Some(u.home_all)
+        } else {
+            None
+        };
+        let base: [HintItem; 4] = [
+            (&[Btn::A], u.hint_play),
+            (&[Btn::Plus], u.hint_options),
+            (&[Btn::Y], u.hint_sort),
+            (&[Btn::Minus], u.hint_search),
+        ];
+        match back {
+            Some(verb) => {
+                let all: [HintItem; 5] = [base[0], base[1], base[2], base[3], (&[Btn::B], verb)];
+                self.kit_hints_right(vw - 40.0, cy, &all);
+            }
+            None => self.kit_hints_right(vw - 40.0, cy, &base),
+        }
     }
 
     /// The hairline and the left-hand credit every full-page screen ends with.
@@ -10883,41 +11042,6 @@ impl SwitchRenderBackend {
         self.kit_rrect(x, cy - 20.0, w, 40.0, 20.0, 0xC8_0A_10_1C);
         self.kit_icon(x + 18.0, cy, 20.0, Icon::Layers, col::GOLD);
         self.kit_text_mid(x + 18.0 + 20.0 + 10.0, cy, size::LABEL + 1.0, &text, col::TEXT);
-        unsafe {
-            glUseProgram(0);
-            glBindVertexArray(0);
-        }
-        self.gl_state.invalidate();
-    }
-
-    /// Frame the content band and name the open shelf on the frame itself.
-    ///
-    /// Being inside a folder was legible in exactly one place: a line of small
-    /// text in the top-left corner, above a grid that looked identical either
-    /// way. A player could scroll a shelf for a minute wondering where their
-    /// games had gone. A subset of the library has to LOOK like a subset.
-    ///
-    /// So the page gets a rule above and below its content, and the top one
-    /// carries a plaque with the shelf's name, the way a labelled group has been
-    /// drawn since forms had legends. It reads instantly and it says WHICH.
-    ///
-    /// Drawn AFTER the view, at fixed heights that fall in the gaps all four
-    /// layouts already leave, so not one of them had to move a pixel to make
-    /// room.
-    pub fn draw_folder_frame(&mut self, name: &str) {
-        // TWO HORIZONTAL RULES, no sides: BANDE and ETAGERE scroll SIDEWAYS and
-        // let their tiles run off both edges on purpose, so vertical borders
-        // would cut through the artwork. The rules sit in the gaps every layout
-        // leaves (y110 above the content, `vh - 50` between the facts and the
-        // footer). The folder's NAME is in the header line now, by its icon,
-        // where it no longer needs a plate to stay readable over a cover.
-        let _ = name;
-        let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
-        const TOP_Y: f32 = 110.0;
-        const M: f32 = 20.0;
-        let ink = (theme::col::GOLD & 0x00FF_FFFF) | 0x90 << 24;
-        self.kit_rrect(M, TOP_Y, vw - 2.0 * M, 2.0, 1.0, ink);
-        self.kit_rrect(M, vh - 50.0, vw - 2.0 * M, 2.0, 1.0, ink);
         unsafe {
             glUseProgram(0);
             glBindVertexArray(0);
@@ -11109,76 +11233,272 @@ impl SwitchRenderBackend {
         }
     }
 
-    /// JOUER library as a COVER GRID (v1.2.0; replaces the text list). Covers
-    /// are mandatory: a game with no sidecar/cached cover gets a generated tile
-    /// (per-game color + initials). `selection` is a linear index into
-    /// `entries`; `scroll_offset` is the first visible item (multiple of
-    /// `LIST_COLS`).
-    #[allow(clippy::too_many_arguments)]
-    /// Banner + the sub-line under it (active filter, else the library size).
-    /// Shared by the three JOUER layouts so the header height is identical in all
-    /// of them and switching views never shifts what is above the content band.
-    fn draw_home_header(
-        &mut self,
-        banner_tex: GLuint,
-        banner_w: u32,
-        banner_h: u32,
-        shown: usize,
-        filter: Option<&str>,
-        total_unfiltered: usize,
-    ) {
+    /// The band under the tabs (Main.dc.html): the shelf chips between the ZL
+    /// and ZR glyphs on the left, the sort in force and the view on the right,
+    /// and how many games the open shelf holds at the right end of the tab row.
+    /// Drawn by all four views, so switching views never moves what is above
+    /// the content.
+    ///
+    /// It used to be one line of text ("94 jeux  ZL ZR Dossiers"): which
+    /// shelves existed and where ZL and ZR would land was invisible, and
+    /// nothing said how the list was ordered, although every shelf keeps its
+    /// own sort and favourites always come first. Each chip is also a target
+    /// for a thumb, and so are the two indicators (`strip_hit`).
+    fn draw_home_header(&mut self, total_unfiltered: usize) {
         use theme::{col, size};
+        // Still while the content slides in from a shelf change.
+        let saved = if HOME_HEADER_PINNED.load(Ordering::Relaxed) { Some(self.ui_transform_take()) } else { None };
         let vw = self.dimensions.width as f32;
-        // The logo is the navbar's (`draw_navbar`), drawn on every tab.
-        let _ = (banner_tex, banner_w, banner_h);
+        let count = crate::loc_ui::games(total_unfiltered);
+        let cw = self.kit_measure(&count, size::LABEL);
+        self.kit_text_mid((vw - 40.0 - cw).round(), 36.0, size::LABEL, &count, col::TEXT3);
+        if let Ok(mut strip) = HOME_STRIP.lock() {
+            self.draw_home_strip(&mut strip);
+        }
+        if let Some(t) = saved {
+            self.ui_transform_put(t);
+        }
+    }
 
-        // What the grid is showing, in this order of precedence (unchanged): a
-        // search inside an open folder, a search, an open folder, the whole
-        // library. A search also ignores the folder, so it wins the line.
-        let cy = 94.0;
-        let left = 40.0;
-        let folder_open = HOME_FOLDER.lock().ok().and_then(|g| g.clone());
-        let library_total = HOME_LIBRARY_TOTAL
-            .load(core::sync::atomic::Ordering::Relaxed)
-            .max(shown);
-        let searching = filter.map_or(false, |f| !f.trim().is_empty());
-        let mut x = left;
-        if searching {
-            // "3 / 94" then the term, dimmer: the numbers are the answer, the
-            // term is the reminder of the question.
-            let count = std::format!("{} / {}", shown, total_unfiltered);
-            x += self.kit_text_mid(x, cy, size::LABEL, &count, col::TEXT2);
-            let term = std::format!("   \u{201C}{}\u{201D}", filter.unwrap_or("").trim());
-            let term = self.kit_fit(&term, size::LABEL, vw * 0.5 - x);
-            self.kit_text_mid(x, cy, size::LABEL, &term, col::TEXT3);
-        } else if let Some(folder) = folder_open.as_deref() {
-            // An open folder: its name, then how much of the library it holds.
-            // ZL / ZR walk to the next folder, and say so.
-            x += self.kit_icon(x, cy, 18.0, Icon::FolderOpen, col::GOLD) + 10.0;
-            let name = self.kit_fit(folder, size::LABEL + 1.0, vw * 0.4);
-            x += self.kit_text_mid(x, cy, size::LABEL + 1.0, &name, col::TEXT);
-            let count = std::format!("  \u{00B7}  {} / {}", shown, library_total);
-            x += self.kit_text_mid(x, cy, size::LABEL, &count, col::TEXT2) + 24.0;
-            x += self.kit_button(x, cy, 20.0, Btn::ZL, col::PILL_INK) + 4.0;
-            self.kit_button(x, cy, 20.0, Btn::ZR, col::PILL_INK);
-        } else {
-            x += self.kit_text_mid(x, cy, size::LABEL, &crate::loc_ui::games(shown), col::TEXT2);
-            // Folders are walked with buttons on the back of the console, and
-            // nothing else on the home says they exist: show the two glyphs, but
-            // only while the library has a folder to walk.
-            if HOME_HAS_FOLDERS.load(core::sync::atomic::Ordering::Relaxed) {
-                x += 24.0;
-                x += self.kit_button(x, cy, 20.0, Btn::ZL, col::PILL_INK) + 4.0;
-                x += self.kit_button(x, cy, 20.0, Btn::ZR, col::PILL_INK) + 8.0;
-                self.kit_text_mid(x, cy, size::LABEL, crate::loc_ui::ui().folders, col::TEXT3);
+    fn draw_home_strip(&mut self, strip: &mut HomeStrip) {
+        use kit::icons::Icon;
+        use theme::{col, size};
+        const CY: f32 = 94.0;
+        const H: f32 = 34.0;
+        const LEFT: f32 = 48.0;
+        const SHOULDER: f32 = 22.0;
+        const GAP: f32 = 8.0;
+        /// The cut edge of a strip too long for its room fades over this much.
+        const FADE: f32 = 24.0;
+        /// A shelf named after a whole sentence still leaves room for the rest.
+        const LABEL_MAX: f32 = 180.0;
+        let vw = self.dimensions.width as f32;
+        let right_end = vw - LEFT;
+        let mut cells: std::vec::Vec<((f32, f32, f32, f32), StripHit)> = std::vec::Vec::new();
+        let cell_y = CY - H * 0.5;
+
+        // ── Right: the sort in force, then the view ──
+        let view = crate::loc::home_view();
+        let view_label = crate::loc_ui::view_label(view);
+        let view_icon = match view {
+            1 => Icon::List,
+            2 => Icon::Strip,
+            3 => Icon::Shelf,
+            _ => Icon::Grid,
+        };
+        let xw = self.kit_button_width(Btn::X, 20.0);
+        let view_w = xw + 6.0 + 18.0 + 8.0 + self.kit_measure(view_label, size::LABEL);
+        let sort_label = crate::library::sort_state_label(strip.sort_mode, strip.sort_reverse);
+        let star_w = if strip.favorites_first { 14.0 + 6.0 } else { 0.0 };
+        let sort_w = star_w + 18.0 + 8.0 + self.kit_measure(sort_label, size::LABEL);
+        let view_x = (right_end - view_w).round();
+        let sort_x = (view_x - 18.0 - sort_w).round();
+        let mut x = sort_x;
+        if strip.favorites_first {
+            self.kit_star(x, CY, 14.0, col::GOLD);
+            x += star_w;
+        }
+        self.kit_icon(x, CY, 18.0, crate::library::sort_icon(strip.sort_mode), col::TEXT2);
+        self.kit_text_mid(x + 18.0 + 8.0, CY, size::LABEL, sort_label, col::TEXT2);
+        cells.push(((sort_x - 6.0, cell_y, sort_w + 12.0, H), StripHit::Sort));
+        let mut x = view_x;
+        // X changes the view from here; the glyph says so, the way ZL and ZR
+        // frame the chips they walk.
+        x += self.kit_button(x, CY, 20.0, Btn::X, col::PILL_INK) + 6.0;
+        self.kit_icon(x, CY, 18.0, view_icon, col::TEXT2);
+        self.kit_text_mid(x + 18.0 + 8.0, CY, size::LABEL, view_label, col::TEXT2);
+        cells.push(((view_x - 6.0, cell_y, view_w + 12.0, H), StripHit::View));
+
+        // ── Left: the chips ──
+        if strip.layout_fp != strip.fp {
+            let mut layout = std::vec::Vec::with_capacity(strip.chips.len());
+            for chip in &strip.chips {
+                layout.push(self.strip_chip_layout(&chip.label, chip.count, LABEL_MAX));
+            }
+            strip.layout = layout;
+            strip.layout_fp = strip.fp;
+        }
+        let search_fresh = match (&strip.search, &strip.search_layout) {
+            (Some(t), Some((lt, lm, _))) => t != lt || *lm != strip.matches,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if search_fresh {
+            if let Some(t) = strip.search.clone() {
+                let l = self.strip_chip_layout(&t, Some(strip.matches), LABEL_MAX);
+                strip.search_layout = Some((t, strip.matches, l));
             }
         }
+        if strip.search.is_none() {
+            strip.search_layout = None;
+        }
+        let searching = strip.search_layout.is_some();
+        let n = strip.layout.len() + searching as usize;
+        if n == 0 {
+            publish_strip_cells(cells);
+            return;
+        }
+        // The row: the search first while one runs, then the shelves.
+        let item_w = |i: usize| -> f32 {
+            match (searching, i) {
+                (true, 0) => strip.search_layout.as_ref().map_or(0.0, |(_, _, l)| l.w),
+                (true, i) => strip.layout[i - 1].w,
+                (false, i) => strip.layout[i].w,
+            }
+        };
+        let mut xs: std::vec::Vec<f32> = std::vec::Vec::with_capacity(n);
+        let mut total = 0.0f32;
+        for i in 0..n {
+            if i > 0 {
+                total += GAP;
+            }
+            xs.push(total);
+            total += item_w(i);
+        }
+        // ZL and ZR only when there is somewhere to walk to.
+        let walkable = strip.chips.len() > 1;
+        let zl_w = if walkable { self.kit_button_width(Btn::ZL, SHOULDER) } else { 0.0 };
+        let zr_w = if walkable { self.kit_button_width(Btn::ZR, SHOULDER) } else { 0.0 };
+        let clip_l = LEFT + if walkable { zl_w + 12.0 } else { 0.0 };
+        let room = (sort_x - 16.0 - if walkable { zr_w + 12.0 } else { 0.0 } - clip_l).max(0.0);
+        let overflow = total > room;
+        let max_off = (total - room).max(0.0);
+        let act = (strip.active + searching as usize).min(n - 1);
+        let (al, aw) = (xs[act], item_w(act));
 
-        // Right: the layout's name. It is changed from REGLAGES, two screens
-        // away, and named nowhere else (#98).
-        let view = crate::loc_ui::view_label(crate::loc::home_view());
-        let vwid = self.kit_measure(view, size::LABEL);
-        self.kit_text_mid(vw - 40.0 - vwid, cy, size::LABEL, view, col::TEXT3);
+        // Scroll as little as keeps the open shelf whole and clear of the
+        // fades; travel there on the covers' clock.
+        let now = unsafe { ruffle_tick_now() };
+        let freq = unsafe { ruffle_tick_freq() }.max(1) as f32;
+        let (off, fill_x, fill_w) = match STRIP_ANIM.lock() {
+            Ok(mut guard) => {
+                let a = &mut *guard;
+                let mut want = if overflow { a.off.to.clamp(0.0, max_off) } else { 0.0 };
+                if overflow {
+                    let lo = if act == 0 { 0.0 } else { al - FADE };
+                    let hi = if act + 1 == n { total } else { al + aw + FADE };
+                    if lo < want {
+                        want = lo;
+                    }
+                    if hi > want + room {
+                        want = hi - room;
+                    }
+                    want = want.clamp(0.0, max_off);
+                }
+                if !a.inited {
+                    a.inited = true;
+                    a.off = Glide::at(want);
+                    a.fill_x = Glide::at(al);
+                    a.fill_w = Glide::at(aw);
+                } else {
+                    let dt = (now.saturating_sub(a.tick) as f32 * 1000.0 / freq).min(100.0);
+                    for (g, to) in [(&mut a.off, want), (&mut a.fill_x, al), (&mut a.fill_w, aw)] {
+                        g.retarget(to);
+                        g.step(dt);
+                    }
+                }
+                a.tick = now;
+                (a.off.value(), a.fill_x.value(), a.fill_w.value())
+            }
+            Err(_) => (0.0, al, aw),
+        };
+
+        self.set_clip(clip_l, 72.0, room, 44.0);
+        // The open shelf's fill, under whichever chips it is travelling past.
+        self.kit_rrect((clip_l + fill_x - off).round(), cell_y, fill_w, H, H * 0.5, col::CHIP);
+        for i in 0..n {
+            let x = (clip_l + xs[i] - off).round();
+            let w = item_w(i);
+            if x > clip_l + room || x + w < clip_l {
+                continue;
+            }
+            let (layout, icon, hit, lit) = match (searching, i) {
+                (true, 0) => {
+                    let Some((_, _, l)) = strip.search_layout.as_ref() else { continue };
+                    (l, Some(Icon::Search), StripHit::Search, true)
+                }
+                _ => {
+                    let k = i - searching as usize;
+                    let icon = match strip.chips[k].kind {
+                        HomeChipKind::All => Some(Icon::Grid),
+                        HomeChipKind::Favorites => None,
+                        HomeChipKind::Folder => Some(Icon::Folder),
+                        HomeChipKind::Label => Some(Icon::Tag),
+                    };
+                    (&strip.layout[k], icon, StripHit::Shelf(k), k == strip.active)
+                }
+            };
+            if hit == StripHit::Search {
+                // What narrows the shelf: filled and edged in gold, so the
+                // open shelf's chip still reads as the shelf.
+                self.kit_shape(x, cell_y, w, H, H * 0.5, col::CHIP, 1.5, col::GOLD, 0.0);
+            }
+            let icon_ink = if lit { col::GOLD } else { col::TEXT3 };
+            let mut pen = x + 14.0;
+            match icon {
+                Some(ic) => {
+                    self.kit_icon(pen, CY, 16.0, ic, icon_ink);
+                }
+                // The favourites' star is the solid one, as everywhere a
+                // favourite is marked.
+                None => {
+                    self.kit_star(pen, CY, 16.0, icon_ink);
+                }
+            }
+            pen += 16.0 + 8.0;
+            pen += self.kit_text_mid(pen, CY, size::LABEL, &layout.label, if lit { col::TEXT } else { col::TEXT2 });
+            if let Some(c) = &layout.count {
+                self.kit_text_mid(pen + 6.0, CY, size::LABEL, c, col::TEXT3);
+            }
+            let (vx0, vx1) = (x.max(clip_l), (x + w).min(clip_l + room));
+            if vx1 > vx0 {
+                cells.push(((vx0, cell_y, vx1 - vx0, H), hit));
+            }
+        }
+        // A cut edge fades into the page, so a chip running out of room reads
+        // as "more this way" rather than as a broken one.
+        if off > 0.5 {
+            self.kit_shape(clip_l - 240.0, 40.0, 240.0 + FADE * 0.5, 110.0, 0.0, col::BG, 0.0, 0, FADE * 0.5);
+        }
+        if off < max_off - 0.5 {
+            self.kit_shape(clip_l + room - FADE * 0.5, 40.0, 240.0, 110.0, 0.0, col::BG, 0.0, 0, FADE * 0.5);
+        }
+        self.clear_clip();
+        if walkable {
+            self.kit_button(LEFT, CY, SHOULDER, Btn::ZL, col::PILL_INK);
+            // Right after the last chip, or pinned at the end of the room.
+            let zr_x = clip_l + total.min(room) + 12.0;
+            self.kit_button(zr_x.round(), CY, SHOULDER, Btn::ZR, col::PILL_INK);
+        }
+        publish_strip_cells(cells);
+    }
+
+    /// One chip's label cut to `max_w`, its count written out, and its width.
+    fn strip_chip_layout(&mut self, label: &str, count: Option<usize>, max_w: f32) -> ChipLayout {
+        use theme::size;
+        let label = self.kit_fit_mid(label, size::LABEL, max_w);
+        let count = count.map(|c| c.to_string());
+        let mut w = 14.0 + 16.0 + 8.0 + self.kit_measure(&label, size::LABEL) + 14.0;
+        if let Some(c) = &count {
+            w += 6.0 + self.kit_measure(c, size::LABEL);
+        }
+        ChipLayout { label, count, w: w.round() }
+    }
+
+    /// Set the UI transform aside (and clear it), for something drawn still
+    /// while the rest of the page moves.
+    fn ui_transform_take(&mut self) -> (f32, f32, f32, f32, f32) {
+        let t = (self.ui_scale, self.ui_pivot_x, self.ui_pivot_y, self.ui_translate_x, self.ui_translate_y);
+        self.clear_ui_transform();
+        t
+    }
+
+    fn ui_transform_put(&mut self, t: (f32, f32, f32, f32, f32)) {
+        self.ui_scale = t.0;
+        self.ui_pivot_x = t.1;
+        self.ui_pivot_y = t.2;
+        self.ui_translate_x = t.3;
+        self.ui_translate_y = t.4;
     }
 
     /// Filled rounded rectangle, built from horizontal slivers.
@@ -11212,16 +11532,12 @@ impl SwitchRenderBackend {
         selection: usize,
         scroll_offset: usize,
         entries: &[crate::library::Entry],
-        banner_tex: GLuint,
-        banner_w: u32,
-        banner_h: u32,
         phase_ticks: u64,
-        filter: Option<&str>,
         total_unfiltered: usize,
     ) {
         self.library_clear();
         let vw = self.dimensions.width as f32;
-        self.draw_home_header(banner_tex, banner_w, banner_h, entries.len(), filter, total_unfiltered);
+        self.draw_home_header(total_unfiltered);
 
         const TOP: f32 = 126.0;
         // 40 px rows fit 13 titles between the header and the footer. The first
@@ -11233,8 +11549,8 @@ impl SwitchRenderBackend {
         let band_top = TOP - 8.0;
         let band_bot = TOP + rows_visible as f32 * ROW_H;
         if entries.is_empty() {
-            self.draw_home_empty(band_top, band_bot);
-            self.kit_home_footer();
+            self.draw_home_empty();
+            self.kit_home_footer(true);
             return;
         }
 
@@ -11369,7 +11685,7 @@ impl SwitchRenderBackend {
             entries.len(),
         );
 
-        self.kit_home_footer();
+        self.kit_home_footer(false);
 
         // The reveal grows from the COVER PANEL, not from a text row: the panel is
         // already showing that game's art at full size, so the launch continues it.
@@ -11393,13 +11709,15 @@ impl SwitchRenderBackend {
         self.kit_footer_hints(text, vw - 40.0, vh - 24.0, false);
     }
 
-    /// Centred "NO RESULTS" for a home layout whose list came back empty.
+    /// The page a search that matched nothing leaves, the same in every view:
+    /// what was searched, and the two ways out.
     ///
     /// A search that matches nothing leaves the same `Screen::List` with zero
-    /// entries, and each of the four layouts then drew its chrome around nothing
-    /// at all: no tiles, no rows, no cover, no word. It was only ever mitigated by
-    /// the header's "0 / 77" count, which is a side effect and not a message.
-    fn draw_home_empty(&mut self, band_top: f32, band_bot: f32) {
+    /// entries, and each layout used to draw its chrome around nothing, then a
+    /// bare "No results" at four different heights, with A, + and Y still
+    /// offered in the footer for a list that had nothing to act on.
+    fn draw_home_empty(&mut self) {
+        use theme::{col, size};
         // Cleared FIRST. The four layouts return early from here without
         // publishing a layout, so the cache would still hold the cells of the
         // last non-empty frame — and `gallery_hit_test` walks exactly that list,
@@ -11408,13 +11726,26 @@ impl SwitchRenderBackend {
         if let Ok(mut g) = gallery_cache().lock() {
             *g = (std::vec::Vec::new(), 0);
         }
-        // A search icon over the words: this is a search that found nothing.
-        let msg = crate::loc::s().cover_none;
+        let u = crate::loc_ui::ui();
+        let term = HOME_STRIP.lock().ok().and_then(|g| g.search.clone());
         let vw = self.dimensions.width as f32;
-        let cy = (band_top + band_bot) * 0.5;
-        self.kit_icon(((vw - 40.0) * 0.5).round(), cy - 30.0, 40.0, Icon::Search, theme::col::TEXT3);
-        let w = self.kit_measure(msg, theme::size::BODY);
-        self.kit_text_mid(((vw - w) * 0.5).round(), cy + 18.0, theme::size::BODY, msg, theme::col::TEXT2);
+        // The middle of the band between the strip and the footer.
+        let cy = 388.0;
+        self.kit_icon(((vw - 40.0) * 0.5).round(), cy - 44.0, 40.0, Icon::Search, col::TEXT3);
+        let msg = match &term {
+            Some(t) => u.home_no_match.replacen("{}", t, 1),
+            None => crate::loc::s().cover_none.to_string(),
+        };
+        let msg = self.kit_fit_mid(&msg, size::BODY, vw - 160.0);
+        let w = self.kit_measure(&msg, size::BODY);
+        self.kit_text_mid(((vw - w) * 0.5).round(), cy + 10.0, size::BODY, &msg, col::TEXT2);
+        if term.is_some() {
+            self.kit_hints_centered(
+                vw * 0.5,
+                cy + 62.0,
+                &[(&[Btn::Minus], u.home_edit_search), (&[Btn::B], u.home_show_all)],
+            );
+        }
     }
 
     /// JOUER layout 2, BANDE: a large cover of the selected game with its details
@@ -11486,19 +11817,15 @@ impl SwitchRenderBackend {
         selection: usize,
         _scroll_offset: usize,
         entries: &[crate::library::Entry],
-        banner_tex: GLuint,
-        banner_w: u32,
-        banner_h: u32,
         phase_ticks: u64,
-        filter: Option<&str>,
         total_unfiltered: usize,
     ) {
         self.library_clear();
         let vw = self.dimensions.width as f32;
-        self.draw_home_header(banner_tex, banner_w, banner_h, entries.len(), filter, total_unfiltered);
+        self.draw_home_header(total_unfiltered);
         if entries.is_empty() {
-            self.draw_home_empty(124.0, 592.0);
-            self.kit_home_footer();
+            self.draw_home_empty();
+            self.kit_home_footer(true);
             return;
         }
 
@@ -11658,7 +11985,7 @@ impl SwitchRenderBackend {
             self.kit_rrect(track_x + (track_w - tw) * t, 620.0, tw, 6.0, 3.0, theme::col::GOLD);
         }
 
-        self.kit_home_footer();
+        self.kit_home_footer(false);
     }
 
     /// JOUER layout 3, the shelf: ONE row of large covers, the selected one grown
@@ -11683,20 +12010,16 @@ impl SwitchRenderBackend {
         selection: usize,
         _scroll_offset: usize,
         entries: &[crate::library::Entry],
-        banner_tex: GLuint,
-        banner_w: u32,
-        banner_h: u32,
         phase_ticks: u64,
-        filter: Option<&str>,
         total_unfiltered: usize,
     ) {
         self.library_clear();
         let vw = self.dimensions.width as f32;
-        self.draw_home_header(banner_tex, banner_w, banner_h, entries.len(), filter, total_unfiltered);
+        self.draw_home_header(total_unfiltered);
 
         if entries.is_empty() {
-            self.draw_home_empty(124.0, 560.0);
-            self.kit_home_footer();
+            self.draw_home_empty();
+            self.kit_home_footer(true);
             return;
         }
 
@@ -11884,7 +12207,7 @@ impl SwitchRenderBackend {
             self.kit_rrect(tx, 548.0, tw, 6.0, 3.0, theme::col::GOLD);
         }
 
-        self.kit_home_footer();
+        self.kit_home_footer(false);
     }
 
     /// JOUER layout 0, GRILLE: the covers as a grid of 16:10 tiles, five a row
@@ -11899,20 +12222,16 @@ impl SwitchRenderBackend {
         selection: usize,
         scroll_offset: usize,
         entries: &[crate::library::Entry],
-        banner_tex: GLuint,
-        banner_w: u32,
-        banner_h: u32,
         phase_ticks: u64,
-        filter: Option<&str>,
         total_unfiltered: usize,
     ) {
         self.library_clear();
         let vw = self.dimensions.width as f32;
-        self.draw_home_header(banner_tex, banner_w, banner_h, entries.len(), filter, total_unfiltered);
+        self.draw_home_header(total_unfiltered);
 
         if entries.is_empty() {
-            self.draw_home_empty(126.0, 630.0);
-            self.kit_home_footer();
+            self.draw_home_empty();
+            self.kit_home_footer(true);
             return;
         }
 
@@ -12214,7 +12533,7 @@ impl SwitchRenderBackend {
             self.kit_game_facts(LEFT, 648.0, entry);
         }
 
-        self.kit_home_footer();
+        self.kit_home_footer(false);
 
         unsafe {
             glUseProgram(0);

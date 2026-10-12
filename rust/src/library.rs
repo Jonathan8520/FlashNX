@@ -287,12 +287,19 @@ pub(crate) fn goto_tab(target: Tab, dir: f32) {
     // later cannot resurrect the trap.
     crate::backend::render::game_reveal_cancel();
     if let Ok(mut s) = LIBRARY.lock() {
+        // Leaving the Play tab: remember the game the cursor is on.
+        if let Screen::List { selection, .. } = s.screen {
+            shelf_cursor_save(&s, selection);
+        }
         s.screen = match target {
             Tab::Jouer => {
                 if s.entries.is_empty() {
                     Screen::Empty
                 } else {
-                    Screen::List { selection: 0, scroll_offset: 0 }
+                    // Back on that game, not on the first one: a look at
+                    // REGLAGES or IMPORTER is not a reason to lose your place.
+                    let row = shelf_cursor_row(&s);
+                    Screen::List { selection: row, scroll_offset: home_scroll_for(row, jouer_scroll()) }
                 }
             }
             Tab::Importer => distant_idle_at(0),
@@ -300,11 +307,14 @@ pub(crate) fn goto_tab(target: Tab, dir: f32) {
         };
     }
     // Slide the incoming tab's content in from the side asked for; the navbar
-    // stays fixed. (Tabs slide; modals and editors scale.)
+    // stays fixed, and so does nothing else. (Tabs slide; modals and editors
+    // scale.)
+    crate::backend::render::home_header_pin(false);
     crate::backend::render::tab_transition_begin(dir);
-    // Snap the JOUER glide so the gallery lands on its (reset) top instead of
-    // gliding from a stale cursor.
+    // Snap the JOUER glide and its strip, so the gallery lands on its cursor
+    // instead of gliding from wherever the last frame left them.
     crate::backend::render::gallery_anim_reset();
+    crate::backend::render::home_strip_snap();
 }
 
 /// The game most recently launched, as `(path, basename, display_name)`. Set on
@@ -363,8 +373,9 @@ static FOLDER_SORTS: Mutex<std::vec::Vec<(std::string::String, u8, bool)>> =
 /// threading it would have changed nine signatures to ask the same question.
 static ACTIVE_FOLDER: Mutex<Option<std::string::String>> = Mutex::new(None);
 
-/// Set the open shelf. Publishes to the RENDERER too, so the header line and
-/// the sort can never disagree about which shelf the player is on.
+/// Set the open shelf. The strip learns it from `draw_gallery`, under the same
+/// lock, so the chips and the sort can never disagree about which shelf the
+/// player is on.
 pub(crate) fn set_active_folder(folder: Option<&str>) {
     if let Ok(mut g) = ACTIVE_FOLDER.lock() {
         // Only on a real change: the gallery calls this every frame.
@@ -372,9 +383,6 @@ pub(crate) fn set_active_folder(folder: Option<&str>) {
             *g = folder.map(|s| s.to_string());
         }
     }
-    // The open shelf, named for the header. There is no empty-key stop any
-    // more, so a shelf either has a name or there is no shelf open.
-    crate::backend::render::set_home_folder(folder.filter(|f| !f.is_empty()));
 }
 
 /// The shelf whose sort applies, or `None` for TOUS, which uses the home's.
@@ -505,7 +513,7 @@ fn prune_folder_sorts(entries: &[Entry]) {
     let changed = match FOLDER_SORTS.lock() {
         Ok(mut g) => {
             let before = g.len();
-            g.retain(|(n, _, _)| live.iter().any(|(l, _)| l == n));
+            g.retain(|(n, _, _)| n == FAVORITES_SHELF || live.iter().any(|(l, _)| l == n));
             before != g.len()
         }
         Err(_) => false,
@@ -736,6 +744,255 @@ pub(crate) fn sort_entries(entries: &mut std::vec::Vec<Entry>, mode: SortMode, r
     // partition (sort_by_key on a bool: false=0 sorts first) keeps the active
     // order within the favorites and non-favorites groups.
     entries.sort_by_key(|e| !crate::favorites::is_favorite(&e.basename));
+}
+
+/// The icon of sort `mode` (`sort_mode_index`): the same on the strip under the
+/// tabs as on that sort's row in the sort window, so the two read as one thing.
+pub(crate) fn sort_icon(mode: usize) -> crate::backend::render::Icon {
+    use crate::backend::render::Icon;
+    match mode {
+        1 => Icon::Calendar,
+        2 => Icon::History,
+        3 => Icon::Flame,
+        4 => Icon::HardDrive,
+        _ => Icon::SortAlpha,
+    }
+}
+
+/// The order sort `mode` gives, written as what the player sees and with its
+/// direction in it ("Derniers ajoutés", "De Z à A"). The sort window and the
+/// strip use these same words. The old labels were menu nouns ("Ajouté",
+/// "Dernier joué") under a "Croissant / Décroissant" switch that said the
+/// opposite of the list for four sorts out of five, because their natural
+/// order is the descending one.
+pub(crate) fn sort_state_label(mode: usize, reverse: bool) -> &'static str {
+    let u = crate::loc_ui::ui();
+    let (natural, flipped) = match mode {
+        1 => (u.sort_newest, u.sort_oldest),
+        2 => (u.sort_played_recently, u.sort_played_long_ago),
+        3 => (u.sort_most_played, u.sort_least_played),
+        4 => (u.sort_largest, u.sort_smallest),
+        _ => (u.sort_az, u.sort_za),
+    };
+    if reverse { flipped } else { natural }
+}
+
+/// What sort `mode` is BY, for its row in the sort window ("Date d'ajout").
+pub(crate) fn sort_criterion(mode: usize) -> &'static str {
+    let (lc, u) = (crate::loc::s(), crate::loc_ui::ui());
+    match mode {
+        1 => u.sort_by_added,
+        2 => u.sort_by_last_played,
+        3 => u.sort_by_playtime,
+        4 => lc.sort_size,
+        _ => lc.sort_alpha,
+    }
+}
+
+/// The key `folder_filter` holds while the Favourites chip is open: a slash,
+/// which no folder name can contain (FAT forbids it, the same reason
+/// `ROOT_SORT_KEY` is one), and a star, so its line in `sort_folders.txt` says
+/// what it is. Being a shelf like the others, it keeps a sort of its own.
+pub(crate) const FAVORITES_SHELF: &str = "/\u{2605}";
+
+/// One stop of the shelf strip and of the ZL / ZR ring: the `folder_filter` it
+/// sets (`None` for TOUS) and what its chip shows.
+pub(crate) struct ShelfStop {
+    pub key: Option<std::string::String>,
+    pub kind: crate::backend::render::HomeChipKind,
+    pub label: std::string::String,
+    pub count: usize,
+}
+
+/// The stops, in the strip's order (Main.dc.html): TOUS, then the favourites
+/// when there is one, then every shelf by name.
+fn shelf_stops(entries: &[Entry]) -> std::vec::Vec<ShelfStop> {
+    use crate::backend::render::HomeChipKind;
+    let u = crate::loc_ui::ui();
+    let mut out = std::vec![ShelfStop {
+        key: None,
+        kind: HomeChipKind::All,
+        label: u.home_all.to_string(),
+        count: entries.len(),
+    }];
+    let favs = entries.iter().filter(|e| crate::favorites::is_favorite(&e.basename)).count();
+    if favs > 0 {
+        out.push(ShelfStop {
+            key: Some(FAVORITES_SHELF.to_string()),
+            kind: HomeChipKind::Favorites,
+            label: u.home_favorites.to_string(),
+            count: favs,
+        });
+    }
+    for (name, count) in folder_counts(entries) {
+        // A directory on the card, or only a label: two icons, as the options'
+        // folder page tells the two apart.
+        let kind = if shelf_has_directory(entries, &name) { HomeChipKind::Folder } else { HomeChipKind::Label };
+        out.push(ShelfStop { key: Some(name.clone()), kind, label: name, count });
+    }
+    out
+}
+
+/// What the strip shows, hashed without allocating, since it is asked every
+/// frame: each game's folder, its labels, whether it is a favourite, and the
+/// language the fixed chips are named in.
+fn shelves_fingerprint(entries: &[Entry]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |b: u8| {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    };
+    eat(crate::loc::current() as u8);
+    for e in entries {
+        for b in e.folder.as_bytes() {
+            eat(*b);
+        }
+        eat(0xFF);
+        for t in &e.tags {
+            for b in t.as_bytes() {
+                eat(*b);
+            }
+            eat(0xFE);
+        }
+        eat(crate::favorites::is_favorite(&e.basename) as u8);
+    }
+    h ^ entries.len() as u64
+}
+
+/// The stops, and their fingerprint, built again only when it changes: the
+/// shelf counts walk every game's shelves and the gallery asks every frame.
+static SHELF_STOPS: Mutex<(Option<u64>, std::vec::Vec<ShelfStop>)> = Mutex::new((None, std::vec::Vec::new()));
+
+fn with_shelf_stops<R>(entries: &[Entry], f: impl FnOnce(&[ShelfStop], u64) -> R) -> R {
+    let fp = shelves_fingerprint(entries);
+    let mut g = match SHELF_STOPS.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if g.0 != Some(fp) {
+        g.1 = shelf_stops(entries);
+        g.0 = Some(fp);
+    }
+    f(&g.1, fp)
+}
+
+/// The keys of the stops, in order, and which one is open.
+fn shelf_keys(s: &State) -> (std::vec::Vec<Option<std::string::String>>, usize) {
+    let keys: std::vec::Vec<Option<std::string::String>> =
+        with_shelf_stops(&s.entries, |stops, _| stops.iter().map(|st| st.key.clone()).collect());
+    let cur = keys.iter().position(|k| k.as_deref() == s.folder_filter.as_deref()).unwrap_or(0);
+    (keys, cur)
+}
+
+/// The game each shelf was left on, by path (TOUS under `None`), so walking to
+/// another shelf, or another tab, and back lands where you were rather than on
+/// the first game. A Vec, not a HashMap: `HashMap::new` crashes on Horizon
+/// without the RandomState patch, the reason favorites.rs keeps a Vec too.
+static SHELF_CURSOR: Mutex<std::vec::Vec<(Option<std::string::String>, std::string::String)>> =
+    Mutex::new(std::vec::Vec::new());
+
+/// Remember the game at `selection` (a row of what is on screen) for the open
+/// shelf.
+fn shelf_cursor_save(s: &State, selection: usize) {
+    let shown = local_filtered_indices(&s.entries, &s.local_filter, &s.folder_filter);
+    let Some(path) = shown.get(selection).and_then(|&i| s.entries.get(i)).map(|e| e.path.clone()) else {
+        return;
+    };
+    if let Ok(mut g) = SHELF_CURSOR.lock() {
+        match g.iter_mut().find(|(k, _)| k.as_deref() == s.folder_filter.as_deref()) {
+            Some(e) => e.1 = path,
+            None => g.push((s.folder_filter.clone(), path)),
+        }
+    }
+}
+
+/// The row of the game at `path` in what is on screen, if it is there.
+fn row_of_path(s: &State, path: &str) -> Option<usize> {
+    let shown = local_filtered_indices(&s.entries, &s.local_filter, &s.folder_filter);
+    shown.iter().position(|&i| s.entries.get(i).is_some_and(|e| e.path == path))
+}
+
+/// The row the open shelf was last left on, or the first.
+fn shelf_cursor_row(s: &State) -> usize {
+    let path = SHELF_CURSOR.lock().ok().and_then(|g| {
+        g.iter().find(|(k, _)| k.as_deref() == s.folder_filter.as_deref()).map(|(_, p)| p.clone())
+    });
+    path.and_then(|p| row_of_path(s, &p)).unwrap_or(0)
+}
+
+/// Open the shelf `key` (`None` = TOUS): ZL / ZR, a tap on its chip, or B back
+/// to TOUS. The content slides in from `dir`'s side while the strip stays still
+/// and its fill travels to the new chip. `keep` names a game to stay on (B
+/// keeps the selected one); otherwise the cursor goes back to where it was
+/// last left on that shelf.
+fn goto_shelf(s: &mut State, key: Option<std::string::String>, dir: f32, selection: usize, keep: Option<std::string::String>) {
+    shelf_cursor_save(s, selection);
+    // Walking to another shelf ends the search: the term was typed against
+    // the shelf you were on, and carrying it over would show a handful of rows
+    // with no visible reason.
+    s.local_filter = None;
+    s.folder_filter = key;
+    set_active_folder(s.folder_filter.as_deref());
+    // Each shelf keeps its own sort (falling back to the home's), so the list
+    // has to be re-ordered for the one just walked into.
+    sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
+    let row = keep.and_then(|p| row_of_path(s, &p)).unwrap_or_else(|| shelf_cursor_row(s));
+    // A different list: snap every view's glide and start its covers closed,
+    // or the gallery slides in from rows that no longer exist.
+    crate::backend::render::gallery_anim_reset();
+    crate::backend::render::tile_open_reset();
+    crate::backend::render::home_header_pin(true);
+    crate::backend::render::tab_transition_begin(dir);
+    s.screen = Screen::List { selection: row, scroll_offset: home_scroll_for(row, 0) };
+}
+
+/// The scroll that keeps `sel` on screen, starting from `scroll`, for the view
+/// in use. Worked out from the view's own shape rather than from the layout the
+/// last frame published, which still describes the list or the view from
+/// before when the shelf or the view has just changed.
+fn home_scroll_for(sel: usize, scroll: usize) -> usize {
+    let per_row = match crate::loc::home_view() {
+        1 => 1,
+        2 | 3 => return 0,
+        _ => GALLERY_COLS,
+    };
+    let visible = home_rows_visible();
+    let row = sel / per_row;
+    if row < scroll {
+        row
+    } else if row >= scroll + visible {
+        row + 1 - visible
+    } else {
+        scroll
+    }
+}
+
+/// A shelf can end while the cursor is on it: its last favourite taken off from
+/// the options, its last label removed. Back to TOUS then, on the same game,
+/// before the frame is drawn, rather than leaving the list on the fallback
+/// with a strip that no longer has the shelf to light. Returns the cursor to
+/// draw with.
+fn settle_vanished_shelf(selection: usize, scroll: usize) -> (usize, usize) {
+    let Ok(mut s) = LIBRARY.lock() else { return (selection, scroll) };
+    let vanished = match s.folder_filter.as_deref() {
+        Some(f) => !s.entries.iter().any(|e| on_shelf(e, f)),
+        None => false,
+    };
+    if !vanished {
+        return (selection, scroll);
+    }
+    // The list on screen was the fallback (every game), so the row is a row
+    // of the whole library.
+    let shown = local_filtered_indices(&s.entries, &s.local_filter, &s.folder_filter);
+    let keep = shown.get(selection).and_then(|&i| s.entries.get(i)).map(|e| e.path.clone());
+    s.folder_filter = None;
+    set_active_folder(None);
+    sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
+    let row = keep.and_then(|p| row_of_path(&s, &p)).unwrap_or(0);
+    let scroll = home_scroll_for(row, 0);
+    s.screen = Screen::List { selection: row, scroll_offset: scroll };
+    crate::backend::render::gallery_anim_reset();
+    (row, scroll)
 }
 
 fn note_played(path: &str, basename: &str, display_name: &str) {
@@ -1453,9 +1710,12 @@ const HISTORY_MAX: usize = 500;
 /// been. A missing/corrupt file just means "unknown", never an error.
 const HISTORY_META_PATH: &str = "sdmc:/switch/FlashNX/distant_history_meta.json";
 
-/// Rows of covers visible at once in the JOUER justified gallery (v1.2.0).
-/// Must match the number of rows `draw_library_gallery` fits under the banner.
+/// Rows of covers visible at once in the JOUER grid. `draw_library_gallery`
+/// lays its rows out from this.
 pub const GALLERY_ROWS_VISIBLE: usize = 3;
+
+/// Covers per row in the JOUER grid (Main.dc.html: five).
+pub const GALLERY_COLS: usize = 5;
 
 /// Rows of the JOUER content band visible at once, for the layout in use. The
 /// scroll clamp and the renderer both read this, so they cannot drift apart when
@@ -2648,6 +2908,8 @@ pub fn open() {
     // (cover shrinking back to the tile) doesn't carry it.
     LAUNCH_COMPANIONS.store(0, std::sync::atomic::Ordering::Relaxed);
     crate::backend::render::gallery_anim_reset();
+    crate::backend::render::home_strip_snap();
+    crate::backend::render::home_header_pin(false);
     // Play the quit "close" reveal: the cover shrinks from full screen back to
     // the launched tile (rect = the tile's pre-launch screen box, still cached).
     if let Some((bn, dn, color)) = collapse_info {
@@ -3118,6 +3380,8 @@ struct TouchState {
     /// screen, so a press there belongs to it whatever is underneath, and no
     /// gallery or row gesture may start.
     nav_press: Option<usize>,
+    /// The same for the shelf strip under the tabs, on the Play home.
+    strip_press: Option<crate::backend::render::StripHit>,
     /// Eased scroll (px) captured when the drag began.
     start_scroll_px: f32,
 }
@@ -3129,6 +3393,7 @@ static TOUCH: Mutex<TouchState> = Mutex::new(TouchState {
     dragging: false,
     start_scroll_px: 0.0,
     nav_press: None,
+    strip_press: None,
 });
 
 /// Forward the per-frame touchscreen state to the JOUER gallery: drag to scroll,
@@ -3327,6 +3592,32 @@ fn navbar_press_cancel() {
     }
 }
 
+/// A tap released on the shelf strip. Never called with a lock held: the
+/// search chip opens the keyboard, and the indicators go through `input` like
+/// the buttons they stand for.
+fn strip_tap(hit: crate::backend::render::StripHit) {
+    use crate::backend::render::StripHit;
+    match hit {
+        StripHit::Search => run_local_search_flow(),
+        StripHit::Sort => {
+            input("Y");
+        }
+        StripHit::View => {
+            input("X");
+        }
+        StripHit::Shelf(i) => {
+            if let Ok(mut s) = LIBRARY.lock() {
+                if let Screen::List { selection, .. } = s.screen {
+                    let (keys, cur) = shelf_keys(&s);
+                    if i != cur && i < keys.len() {
+                        goto_shelf(&mut s, keys[i].clone(), if i > cur { 1.0 } else { -1.0 }, selection, None);
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn touch(x: f32, y: f32, pressed: bool) {
     use crate::backend::render as r;
     // Movement (px) before a press is treated as a drag instead of a tap.
@@ -3398,6 +3689,32 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
                     }
                 }
             }
+            return;
+        }
+    }
+
+    // ── Then the shelf strip, on the Play home ───────────────────────────
+    // The same press-then-release contract as the navbar: a chip opens its
+    // shelf, the search chip edits the search, the two indicators open the
+    // sort window and change the view.
+    if matches!(LIBRARY.lock().map(|s| s.screen), Ok(Screen::List { .. })) {
+        let Ok(mut t) = TOUCH.lock() else { return };
+        if pressed && !t.down && t.strip_press.is_none() {
+            if let Some(hit) = r::strip_hit(x, y) {
+                t.strip_press = Some(hit);
+                return;
+            }
+        } else if let Some(hit) = t.strip_press {
+            if pressed {
+                // Slid off the target: the press is cancelled.
+                if r::strip_hit(x, y) != Some(hit) {
+                    t.strip_press = None;
+                }
+                return;
+            }
+            t.strip_press = None;
+            drop(t);
+            strip_tap(hit);
             return;
         }
     }
@@ -5920,16 +6237,17 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
         }
         "Up" | "StickLUp" => {
             // Single-row layouts have no adjacent row for `gallery_neighbor` to
-            // find, so Up/Down would be inert there. They jump instead — Up
-            // FORWARD, matching the row's own left-to-right reading order rather
-            // than a vertical list's.
+            // find, so Up/Down would be inert there. They jump instead, Down
+            // forward and Up back: the same direction they move in GRILLE and
+            // LISTE, so changing view never turns the vertical axis round. (Up
+            // used to jump forward here, with nothing on screen to say so.)
             if matches!(crate::loc::home_view(), 2 | 3) {
                 // Same rule as LISTE, other axis: here the row IS horizontal, so
                 // Left/Right is the normal path and the jump belongs to Up/Down.
                 if nav_is_diagonal() {
                     return;
                 }
-                selection = list_step_wrap(selection, home_page_step() as isize, total);
+                selection = list_step_wrap(selection, -(home_page_step() as isize), total);
             } else if let Some(ns) = gallery_neighbor(selection, -1) {
                 selection = ns;
             } else if total > 0 && nav_may_wrap() {
@@ -5947,7 +6265,7 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
                 if nav_is_diagonal() {
                     return;
                 }
-                selection = list_step_wrap(selection, -(home_page_step() as isize), total);
+                selection = list_step_wrap(selection, home_page_step() as isize, total);
             } else if let Some(ns) = gallery_neighbor(selection, 1) {
                 selection = ns;
             } else if total > 0 && nav_may_wrap() {
@@ -6002,9 +6320,9 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
             }
             return;
         }
-        // X = search (hoisted at the top of `input()`). `+` = per-game OPTIONS
-        // (moved off ZL); the Settings modal `+` used to open is now the
-        // REGLAGES navbar tab (reached with L/R).
+        // Minus = search (hoisted at the top of `input()`). `+` = per-game
+        // OPTIONS (moved off ZL); the Settings modal `+` used to open is now
+        // the REGLAGES navbar tab (reached with L/R).
         "Plus" => {
             if let Some(&abs) = filtered.get(selection) {
                 s.screen = Screen::OptionsModal { game_idx: abs, selection: 0 };
@@ -6022,67 +6340,55 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
             };
             return;
         }
-        // ZL / ZR walk the folders (issue #68), in echo of L / R walking the
+        // ZL / ZR walk the shelves (issue #68), in echo of L / R walking the
         // navbar tabs: shoulders move you sideways, the pair further in moves
-        // you between shelves. Both were unused in the whole library UI.
+        // you between shelves. The ring is the strip's chips in order (TOUS,
+        // the favourites, every shelf), so where they land is on screen.
         //
-        // No strip of folder chips on screen: the four home layouts each pin
-        // their first row to their own constant, and ETAGERE's touch band is two
-        // hard-coded literals, so reserving 44 px at the top meant retuning all
-        // four plus the shared row-count that the scroll clamp reads. The open
-        // folder is named in the header instead, in the slot the active filter
-        // already owns -- one line, no layout moved, every view for free.
+        // There used to be an ACCUEIL stop, "everything on no shelf". It earned
+        // its place when filing meant MOVING a file; now that filing is one
+        // press, it was TOUS minus a few games, a near-copy of the stop next to
+        // it costing a press on every turn of the ring.
         "ZL" | "ZR" => {
-            let folders = folder_counts(&s.entries);
-            if folders.is_empty() {
+            let (keys, cur) = shelf_keys(s);
+            if keys.len() < 2 {
                 return;
             }
-            // Walking to another shelf ends the search: the term was typed
-            // against the shelf you were on, and carrying it over would show a
-            // handful of rows with no visible reason.
-            s.local_filter = None;
-            // The ring is: TOUS, then one stop per shelf.
-            //
-            // There used to be an ACCUEIL stop between them -- "everything on
-            // no shelf". It earned its place when filing meant MOVING a file:
-            // it was the list of what you had not sorted yet, and it shrank as
-            // you worked. Now that filing is one button press, most libraries
-            // label a handful of games and ACCUEIL is TOUS minus a few: a
-            // near-copy of the stop next to it, costing a press on every turn of
-            // the ring, to answer a question almost nobody asks. The picker
-            // still has its row, which is a different thing -- taking a game OFF
-            // its shelves, not looking at the ones that have none.
-            let cur = match s.folder_filter.as_deref() {
-                None => 0,
-                Some(f) => folders.iter().position(|(n, _)| n == f).map_or(0, |i| i + 1),
-            };
-            let n = folders.len() + 1;
-            let next = if button == "ZR" {
-                (cur + 1) % n
-            } else {
-                (cur + n - 1) % n
-            };
-            s.folder_filter = match next {
-                0 => None,
-                i => Some(folders[i - 1].0.clone()),
-            };
-            set_active_folder(s.folder_filter.as_deref());
-            // Each shelf keeps its own sort (falling back to the home's), so the
-            // list has to be re-ordered for the one just walked into.
-            sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
-            // The list underneath is a different list now, so the cursor cannot
-            // keep its index: row 40 of ALL is nothing in a folder of six. Snap
-            // the glide too, or the gallery slides in from a row that no longer
-            // exists.
-            crate::backend::render::gallery_anim_reset();
-            // Then slide the whole thing in from the side, the way the navbar
-            // tabs do: the shoulders moved you sideways, so the picture should
-            // say so. ZR walks right, so the new shelf arrives from the right.
-            crate::backend::render::tab_transition_begin(
-                if button == "ZR" { 1.0 } else { -1.0 },
-            );
-            s.screen = Screen::List { selection: 0, scroll_offset: 0 };
+            let n = keys.len();
+            let next = if button == "ZR" { (cur + 1) % n } else { (cur + n - 1) % n };
+            // ZR walks right, so the new shelf arrives from the right.
+            goto_shelf(s, keys[next].clone(), if button == "ZR" { 1.0 } else { -1.0 }, selection, None);
             return;
+        }
+        // B, the way back everywhere else, is the way back here too: out of a
+        // search first, then off a shelf to TOUS, keeping the game the cursor
+        // is on in both cases. It did nothing at all, so the only way back to
+        // TOUS was ZL / ZR through every shelf, and a search could only be
+        // cleared by erasing it in the keyboard.
+        "B" => {
+            let keep = filtered.get(selection).and_then(|&i| s.entries.get(i)).map(|e| e.path.clone());
+            let searching = s.local_filter.as_deref().is_some_and(|f| !f.trim().is_empty());
+            if searching {
+                s.local_filter = None;
+                let row = keep.and_then(|p| row_of_path(s, &p)).unwrap_or(0);
+                crate::backend::render::gallery_anim_reset();
+                crate::backend::render::tile_open_reset();
+                s.screen = Screen::List { selection: row, scroll_offset: home_scroll_for(row, 0) };
+            } else if s.folder_filter.is_some() {
+                goto_shelf(s, None, -1.0, selection, keep);
+            }
+            return;
+        }
+        // X: the next view, from where the view is shown (the strip's right
+        // end), instead of two screens away in REGLAGES. Same game, same order,
+        // same shelf; only the layout changes, and it snaps rather than slides.
+        "X" => {
+            let next = (crate::loc::home_view() + 1) % crate::loc::HOME_VIEW_COUNT;
+            crate::loc::set_home_view(next);
+            crate::loc::save_current();
+            crate::backend::render::home_anim_reset();
+            crate::backend::render::gallery_anim_reset();
+            scroll = home_scroll_for(selection, 0);
         }
         _ => {}
     }
@@ -7056,6 +7362,10 @@ pub(crate) fn local_filtered_indices(
 pub(crate) fn on_shelf(e: &Entry, name: &str) -> bool {
     if name.is_empty() {
         return false;
+    }
+    // The favourites are a shelf too, the strip's second chip.
+    if name == FAVORITES_SHELF {
+        return crate::favorites::is_favorite(&e.basename);
     }
     e.folder == name || e.tags.iter().any(|t| t == name)
 }
@@ -8685,7 +8995,7 @@ fn run_distant_search_flow() {
     }
 }
 
-/// LOCAL list search (X) — same behaviour as the DISTANT filter: opens swkbd
+/// LOCAL list search (Minus) — same behaviour as the DISTANT filter: opens swkbd
 /// (pre-filled with the current filter so it can be refined), then narrows the
 /// list to entries whose display name or basename contains the text. Empty
 /// input clears the filter. Selection resets to the top of the filtered view.
@@ -8704,8 +9014,10 @@ fn run_local_search_flow() {
         s.local_filter = if trimmed.is_empty() { None } else { Some(trimmed) };
         s.screen = Screen::List { selection: 0, scroll_offset: 0 };
     }
-    // Filtered view = brand-new layout; snap the glide to the top.
+    // Filtered view = brand-new list; snap every view's glide to the top and
+    // start its covers closed.
     crate::backend::render::gallery_anim_reset();
+    crate::backend::render::tile_open_reset();
 }
 
 fn clamp_scroll(mut scroll: usize, selection: usize, visible_rows: usize) -> usize {
@@ -9025,66 +9337,63 @@ fn draw_gallery(
     anim_origin: u64,
 ) {
     let snapshot = LIBRARY.lock().ok().map(|s| {
-        // Publish the open folder for the header, which names it in the same
-        // slot an active filter uses. Done here, under the same lock that reads
-        // the entries, so the line can never describe a different list than the
-        // one being drawn.
         set_active_folder(s.folder_filter.as_deref());
-        // "Are there any shelves at all?" -- a labelled game makes one just as
-        // much as a directory does, so the strip appears for either.
-        crate::backend::render::set_home_has_folders(
-            s.entries.iter().any(|e| !e.folder.is_empty() || !e.tags.is_empty()),
-        );
-        crate::backend::render::set_home_library_total(s.entries.len());
         let idx = local_filtered_indices(&s.entries, &s.local_filter, &s.folder_filter);
+        // The strip under the tabs, published here, under the same lock that
+        // reads the entries, so it can never describe a different list than
+        // the one being drawn.
+        with_shelf_stops(&s.entries, |stops, fp| {
+            use crate::backend::render::{HomeChip, HomeChipKind, HomeStripState};
+            let active = stops.iter().position(|st| st.key.as_deref() == s.folder_filter.as_deref()).unwrap_or(0);
+            // Favourites lead every order; the sort indicator says so with a
+            // star whenever one leads the list on screen (they are pinned
+            // first, so the first game tells), except on their own shelf.
+            let favorites_first = s.folder_filter.as_deref() != Some(FAVORITES_SHELF)
+                && idx.first().is_some_and(|&i| crate::favorites::is_favorite(&s.entries[i].basename));
+            crate::backend::render::home_strip_publish(
+                fp,
+                || {
+                    stops
+                        .iter()
+                        .map(|st| HomeChip {
+                            kind: st.kind,
+                            label: st.label.clone(),
+                            count: if st.kind == HomeChipKind::All { Some(st.count) } else { None },
+                        })
+                        .collect()
+                },
+                &HomeStripState {
+                    active,
+                    search: s.local_filter.as_deref(),
+                    matches: idx.len(),
+                    sort_mode: sort_mode_index(),
+                    sort_reverse: current_sort_reverse(),
+                    favorites_first,
+                },
+            );
+        });
         let entries: std::vec::Vec<Entry> = idx.iter().map(|&i| s.entries[i].clone()).collect();
         (
-            LibraryListSnapshot {
-                entries,
-                banner_tex: s.banner_tex,
-                banner_w: s.banner_w,
-                banner_h: s.banner_h,
-            },
-            s.local_filter.clone(),
-            // The open shelf's DISPLAY name, for the frame drawn after the view.
-            s.folder_filter.clone(),
-            // The denominator of the header's "n / N" is the size of what the
-            // player is LOOKING AT before their search, i.e. the open shelf —
-            // not the library. On a six-game shelf, "0 / 214" for a search that
-            // only ever examined six is a lie about where the search went.
+            entries,
+            // How many games the player is LOOKING AT before their search, i.e.
+            // the open shelf, not the library: the tab row's count.
             local_filtered_indices(&s.entries, &None, &s.folder_filter).len(),
         )
     });
-    if let Some((snap, filter, folder_open, total_unfiltered)) = snapshot {
+    if let Some((entries, total_unfiltered)) = snapshot {
         let phase_ticks = unsafe { ruffle_tick_now() }.saturating_sub(anim_origin);
         // Same data, same selection, same actions — only the layout differs
         // (REGLAGES > AFFICHAGE HOME). Each one publishes the same cell table, so
         // navigation, touch and the launch reveal are shared.
-        let a = (
-            selection,
-            scroll_offset,
-            &snap.entries,
-            snap.banner_tex,
-            snap.banner_w,
-            snap.banner_h,
-            phase_ticks,
-            filter.as_deref(),
-            total_unfiltered,
-        );
+        let a = (selection, scroll_offset, &entries, phase_ticks, total_unfiltered);
         match crate::loc::home_view() {
-            1 => backend.draw_library_list_view(a.0, a.1, a.2, a.3, a.4, a.5, a.6, a.7, a.8),
+            1 => backend.draw_library_list_view(a.0, a.1, a.2, a.3, a.4),
             // BANDE is now the big-cover-plus-full-width-row layout: it was built as
             // ETAGERE, and reads better as the strip than the strip did. The old
             // centred-cover strip is gone rather than kept as a near-duplicate.
-            2 => backend.draw_library_shelf_view(a.0, a.1, a.2, a.3, a.4, a.5, a.6, a.7, a.8),
-            3 => backend.draw_library_etagere_view(a.0, a.1, a.2, a.3, a.4, a.5, a.6, a.7, a.8),
-            _ => backend.draw_library_gallery(a.0, a.1, a.2, a.3, a.4, a.5, a.6, a.7, a.8),
-        }
-        // A shelf is a SUBSET, and it has to look like one. Drawn after the view
-        // so it can read the content band the view just published, which is what
-        // lets one piece of code frame all four layouts.
-        if let Some(f) = folder_open {
-            backend.draw_folder_frame(&f);
+            2 => backend.draw_library_shelf_view(a.0, a.1, a.2, a.3, a.4),
+            3 => backend.draw_library_etagere_view(a.0, a.1, a.2, a.3, a.4),
+            _ => backend.draw_library_gallery(a.0, a.1, a.2, a.3, a.4),
         }
     }
 }
@@ -9238,8 +9547,10 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                         let new_sel = row.min(shown.len().saturating_sub(1));
                         let scroll = gallery_scroll_for(new_sel, jouer_scroll());
                         s2.screen = Screen::List { selection: new_sel, scroll_offset: scroll };
-                        // Layout shifted (a tile is gone) — snap the glide.
+                        // Layout shifted (a tile is gone) — snap the glide and
+                        // start the covers closed.
                         crate::backend::render::gallery_anim_reset();
+                        crate::backend::render::tile_open_reset();
                     }
                 }
                 Some(PendingClose::DeleteHistory) => {
@@ -9323,6 +9634,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             backend.draw_library_empty();
         }
         Screen::List { selection, scroll_offset } => {
+            let (selection, scroll_offset) = settle_vanished_shelf(selection, scroll_offset);
             // Remember where the gallery is, so every path that comes BACK to it
             // restores this scroll instead of deriving one from the row.
             JOUER_SCROLL.store(scroll_offset, std::sync::atomic::Ordering::Relaxed);
@@ -10896,13 +11208,6 @@ fn add_or_replace_path(path: &str) -> bool {
         sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
     }
     true
-}
-
-pub(crate) struct LibraryListSnapshot {
-    pub entries: std::vec::Vec<Entry>,
-    pub banner_tex: u32,
-    pub banner_w: u32,
-    pub banner_h: u32,
 }
 
 // ── Banner PNG decoding ───────────────────────────────────────────────────

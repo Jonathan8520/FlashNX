@@ -251,6 +251,16 @@ impl SwitchRenderBackend {
         }
     }
 
+    /// The favourite star, SOLID, in the `px` x `px` box whose left edge is `x`,
+    /// centred on `cy`; returns `px`. The console font's black star: Lucide's
+    /// outline star is what a row shows for a game that is NOT a favourite
+    /// (the options' switch), so a marked favourite never uses it.
+    pub(crate) fn kit_star(&mut self, x: f32, cy: f32, px: f32, ink: u32) -> f32 {
+        let w = self.kit_measure("\u{2605}", px);
+        self.kit_text_mid((x + (px - w) * 0.5).round(), cy, px, "\u{2605}", ink);
+        px
+    }
+
     /// Upload the backdrop for a cover. 0 when there is nothing to make it from.
     pub(crate) fn kit_ambient_texture(&mut self, rgba: &[u8], w: u32, h: u32) -> GLuint {
         match ambient_pixels(rgba, w, h) {
