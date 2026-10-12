@@ -228,7 +228,7 @@ pub(crate) fn with_options_sheet<R>(
     let fav = crate::favorites::is_favorite(&entry.basename);
     let shelves = shelves_value(entry);
     let display_opts = [lc.display_fit, lc.display_stretch, lc.display_fill];
-    let rot_opts = ["0°", lc.rot_90, lc.rot_180, lc.rot_270];
+    let rot_opts = [lc.rot_none, lc.rot_90, lc.rot_180, lc.rot_270];
     let pix_opts = [lc.pixels_auto, lc.pixels_smooth, lc.pixels_sharp];
     let filter_opts = [lc.filter_none, lc.filter_scanlines, lc.filter_crt];
     let oc_opts = [lc.overclock_off, lc.pixels_auto, lc.overclock_on];

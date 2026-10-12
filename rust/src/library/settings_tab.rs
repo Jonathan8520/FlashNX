@@ -866,10 +866,11 @@ fn library_pane(
     };
 }
 
-/// Jeu par défaut: what every game starts with until it is set on its own, in
-/// the groups and with the controls of a game's options, so a setting looks the
-/// same wherever it is changed. The box under the rows explains the row with
-/// the cursor, Overclock setting by setting.
+/// Jeu par défaut: what every game starts with until it is set on its own,
+/// each setting with the same control and the same options as in a game's
+/// options and in the pause, so a setting looks the same wherever it is
+/// changed (the rotation's first option is "0°" on all three). The box under
+/// the rows explains the row with the cursor, Overclock setting by setting.
 fn defaults_pane(
     b: &mut SwitchRenderBackend,
     focus: Option<usize>,
