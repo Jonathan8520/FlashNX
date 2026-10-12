@@ -7508,11 +7508,13 @@ fn draw_source_options(
     // L and R do not switch tabs under the panel: no L / R chips.
     backend.draw_navbar_with(Tab::Importer.index(), logo, false);
     crate::backend::render::navbar_clear();
-    backend.kit_scrim(0x9E_06_0A_14);
-    crate::backend::render::set_ui_screen_kind(kind);
+    // The slide first: the scrim darkens the list as far as the panel has
+    // come in.
     if let Some(p) = slide {
         backend.set_ui_sheet_slide_right(p);
     }
+    backend.kit_scrim(0x9E_06_0A_14);
+    crate::backend::render::set_ui_screen_kind(kind);
     let (vw, _) = backend.screen_size();
     let x = vw - crate::backend::render::SHEET_MARGIN - OPTIONS_W;
     with_source_sheet(backend, url_idx, selection, |b, sheet| b.kit_sheet_at(sheet, x, OPTIONS_W));

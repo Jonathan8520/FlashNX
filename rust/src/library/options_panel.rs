@@ -478,6 +478,11 @@ pub(crate) fn draw_options_family(
     // without its L / R chips, as over a page opened from RÉGLAGES.
     backend.draw_navbar_with(Tab::Jouer.index(), logo, false);
     crate::backend::render::navbar_clear();
+    // The panel's slide, set before the scrim, which darkens the library as
+    // far as the panel has come in.
+    if let Some(p) = slide {
+        backend.set_ui_sheet_slide_right(p);
+    }
     backend.kit_scrim(ui_col::SCRIM);
     crate::backend::render::set_ui_screen_kind(kind);
 
@@ -518,9 +523,6 @@ pub(crate) fn draw_options_family(
         Screen::OptionsModal { selection, .. } => selection,
         other => branch_of(other),
     };
-    if let Some(p) = slide {
-        backend.set_ui_sheet_slide_right(p);
-    }
     // The panel's own armed row, or the page's (the Touches et curseur page
     // reads its own from the state).
     let opt_armed = if matches!(screen, Screen::OptionsModal { .. }) { armed } else { None };

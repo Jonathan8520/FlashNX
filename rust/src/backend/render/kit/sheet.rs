@@ -977,8 +977,13 @@ impl SwitchRenderBackend {
         }
     }
 
-    /// The page behind a panel, darkened (the scrim of a window).
+    /// The page behind a panel, darkened (the scrim of a window), as far as
+    /// the panel has come in (`ui_sheet_reveal`, 1 when it stands): a game's
+    /// options and a source's darkened the library at full strength on the
+    /// panel's first frame, and on the way out kept it dark until the slide
+    /// had ended, then let go in one frame. Their callers set the slide first.
     pub(crate) fn kit_scrim(&mut self, rgba: u32) {
-        self.fill_screen_dim(rgba);
+        let a = ((rgba >> 24) as f32 * self.ui_sheet_reveal.clamp(0.0, 1.0)).round() as u32;
+        self.fill_screen_dim(a << 24 | (rgba & 0x00FF_FFFF));
     }
 }

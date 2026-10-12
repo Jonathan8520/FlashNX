@@ -11574,13 +11574,15 @@ impl SwitchRenderBackend {
     }
 
     /// The launcher's side panel coming in from the RIGHT edge (a game's
-    /// options), on the same timeline as `set_ui_sheet_slide`.
+    /// options), on the same timeline as `set_ui_sheet_slide`. The scrim
+    /// behind it follows the same slide (`kit_scrim`).
     pub fn set_ui_sheet_slide_right(&mut self, scale: f32) {
         let p = if modal_anim_closing() {
             scale
         } else {
             ((scale - MODAL_OPEN_FROM) / (1.0 - MODAL_OPEN_FROM)).clamp(0.0, 1.0)
         };
+        self.ui_sheet_reveal = p;
         self.ui_scale = 1.0;
         self.ui_pivot_x = 0.0;
         self.ui_pivot_y = 0.0;
