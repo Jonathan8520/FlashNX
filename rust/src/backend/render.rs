@@ -445,6 +445,9 @@ impl Glide {
 struct TileClock {
     key: u64,
     open: Glide,
+    /// The clock as this frame found it, before its step: the step is taken
+    /// again from here when it went the wrong way (see `tile_open`).
+    base: Glide,
     /// The frame that last drew the tile, and the one that last stepped its
     /// clock (a tile coming back into view is stepped once, not twice).
     seen: u32,
@@ -483,9 +486,12 @@ static TILE_OPEN: Mutex<TileOpen> = Mutex::new(TileOpen { tick: 0, dt_ms: 0.0, f
 /// stall (a game run, a sleep) does not jump every tile to its end, and the
 /// tiles the previous frame did not draw, which close unseen.
 ///
-/// Frames are counted in GALLERY frames, not in time: while another tab or a
-/// game is on screen no frame passes, and the tiles come back exactly as they
-/// were left rather than all judged out of sight.
+/// Frames are counted in GALLERY frames, not in time: while a game, or a tab
+/// with no grid, is on screen no frame passes, and the tiles come back exactly
+/// as they were left rather than all judged out of sight. The two grids share
+/// the counter, though: the Importer's Flashpoint results run their tiles on
+/// these clocks too, so while they are up the Play grid's tiles are out of
+/// sight, and the open one closes. Coming back to the Play tab, it opens again.
 fn tile_open_frame() {
     let now = unsafe { ruffle_tick_now() };
     let freq = unsafe { ruffle_tick_freq() }.max(1) as f32;
@@ -500,6 +506,7 @@ fn tile_open_frame() {
             if c.seen == prev {
                 return true;
             }
+            c.base = c.open;
             c.open.retarget(0.0);
             c.open.step(dt);
             c.stepped = frame;
@@ -520,35 +527,52 @@ fn tile_key(name: &str) -> u64 {
 
 /// Step tile `key` toward open (`selected`) or closed and return how open it
 /// is, eased, 0 to 1. Call once per tile per frame, after `tile_open_frame`.
+///
+/// A clock takes one step a frame, toward open when ANY tile of its key is
+/// selected. Two tiles can show the same thing (a result listed twice) and
+/// share a clock, and the callers go in index order: when the unselected copy
+/// came first it stepped the clock toward closed, the selected one could only
+/// turn it round without stepping, and the clock only ever moved toward closed,
+/// so the selected tile never opened. Now the step that went the wrong way is
+/// taken again from where the frame found the clock, whichever copy comes
+/// first. The same holds for a tile coming back into view, which
+/// `tile_open_frame` has already stepped toward closed.
 fn tile_open(key: u64, selected: bool) -> f32 {
     let Ok(mut g) = TILE_OPEN.lock() else {
         return if selected { 1.0 } else { 0.0 };
     };
     let (dt, frame) = (g.dt_ms, g.frame);
-    let target = if selected { 1.0 } else { 0.0 };
     let i = match g.clocks.iter().position(|c| c.key == key) {
         Some(i) => i,
         // A closed tile that stays closed needs no clock.
         None if !selected => return 0.0,
         None => {
-            g.clocks.push(TileClock { key, open: Glide::at(0.0), seen: frame, stepped: frame.wrapping_sub(1) });
+            g.clocks.push(TileClock {
+                key,
+                open: Glide::at(0.0),
+                base: Glide::at(0.0),
+                seen: frame,
+                stepped: frame.wrapping_sub(1),
+            });
             g.clocks.len() - 1
         }
     };
     let c = &mut g.clocks[i];
-    // Two tiles showing the same thing (a result listed twice) share a clock:
-    // the selected one has the frame, rather than the two pulling it both ways.
-    if c.seen == frame && !selected {
-        return c.open.value().clamp(0.0, 1.0);
-    }
-    c.open.retarget(target);
     if c.stepped != frame {
+        c.base = c.open;
+        c.open.retarget(if selected { 1.0 } else { 0.0 });
         c.open.step(dt);
         c.stepped = frame;
+    } else if selected && c.open.to != 1.0 {
+        c.open = c.base;
+        c.open.retarget(1.0);
+        c.open.step(dt);
     }
     c.seen = frame;
     let v = c.open.value().clamp(0.0, 1.0);
-    if !selected && c.open.settled() {
+    // Shut and staying shut: forgotten. Never while open, which a selected
+    // copy drawn earlier this frame may still need.
+    if c.open.to == 0.0 && c.open.settled() {
         g.clocks.swap_remove(i);
     }
     v
@@ -11217,6 +11241,7 @@ impl SwitchRenderBackend {
 
     /// The launch and quit reveal, `e` of the way from the selected tile (0)
     /// to the whole screen (1), in the window `(x, y, w, h)` between the two.
+    /// `tile` is the size of the tile it started from.
     ///
     /// The cover is carried, not cut out: drawn INTO the window, whole over its
     /// backdrop, with corners that straighten as it grows. At 0 that is exactly
@@ -11235,6 +11260,7 @@ impl SwitchRenderBackend {
         w: f32,
         h: f32,
         e: f32,
+        tile: (f32, f32),
         basename: &str,
         display_name: &str,
         color_chip: u32,
@@ -11259,22 +11285,11 @@ impl SwitchRenderBackend {
             CoverTex::Image { tex, w: iw, h: ih, amb } if iw > 0 && ih > 0 => {
                 self.kit_cover_reveal_r(x, y, w, h, tex, iw, ih, amb, 1.0, 1.0, r);
             }
-            _ => {
-                // No cover: the tile the library showed, its colour and the
-                // game's name, grown with the window.
-                let chip = color_chip & 0x00FF_FFFF;
-                self.kit_rrect(x, y, w, h, r, 0xFF00_0000 | kit::cover::mix_rgb(chip, col::BG & 0x00FF_FFFF, 0.55));
-                let px = (h / 9.0).clamp(17.0, 64.0).round();
-                let lines = self.kit_wrap(display_name, px, w * 0.8, 3);
-                let lh = (px * 1.25).round();
-                let mut cy = y + (h - lh * (lines.len() as f32 - 1.0)) * 0.5;
-                let ink = 0xFF00_0000 | kit::cover::mix_rgb(chip, 0xFF_FF_FF, 0.85);
-                for line in &lines {
-                    let tw = self.kit_measure(line, px);
-                    self.kit_text_mid((x + (w - tw) * 0.5).round(), cy, px, line, ink);
-                    cy += lh;
-                }
-            }
+            // No cover: the very tile the library showed, gamepad and name in
+            // their corners, grown with the window. It used to be redrawn in
+            // another layout (no gamepad, the name centred and larger), so the
+            // first frame of every launch and the last of every quit jumped.
+            _ => self.kit_default_tile_grown(x, y, w, h, color_chip, display_name, tile, r),
         }
         // Only the grid rings its selected tile (the panels and the shelf mark
         // theirs otherwise), so only there does a ring hand over.
@@ -11669,7 +11684,10 @@ impl SwitchRenderBackend {
     /// The selected game's cover in a detail panel (LISTE, BANDE): fitted into
     /// the box minus the caption under it, never blown up past twice its size
     /// (small and sharp reads better than large and soft), the art and its
-    /// caption centred as one block. Returns the art's rectangle.
+    /// caption centred as one block. Returns the art's rectangle, and whether
+    /// a cover was decoded for it this frame: the caller then decodes nothing
+    /// else before the next one, or the end of a dwell paid for two decodes
+    /// in one frame and dropped it.
     ///
     /// The tile thumbnail first, the full-resolution cover once the cursor has
     /// stayed on the game a moment, faded in over it. Decoding the full cover
@@ -11686,7 +11704,7 @@ impl SwitchRenderBackend {
         basename: &str,
         name: &str,
         chip: u32,
-    ) -> (f32, f32, f32, f32) {
+    ) -> ((f32, f32, f32, f32), bool) {
         /// How long the cursor has to stay before the full cover is decoded,
         /// and how long it takes to fade in over the thumbnail.
         const DWELL_MS: u64 = 150;
@@ -11705,9 +11723,11 @@ impl SwitchRenderBackend {
             },
             Err(_) => (now, 0),
         };
+        let mut decoded = false;
         let mut full = reveal_cover_lookup(basename);
         if full.is_none() && ms_since(since) >= DWELL_MS {
             full = Some(self.cover_full_for(basename));
+            decoded = true;
             full_at = now;
             if let Ok(mut g) = PANEL_COVER.lock() {
                 if let Some(p) = g.as_mut() {
@@ -11718,7 +11738,10 @@ impl SwitchRenderBackend {
         // The thumbnail, decoded now if the grid never got to it.
         let thumb = match (cover_lookup(basename), full) {
             (Some(t), _) => t,
-            (None, None) => self.cover_for(basename),
+            (None, None) => {
+                decoded = true;
+                self.cover_for(basename)
+            }
             (None, Some(_)) => CoverTex::Default,
         };
         // A full cover that was already decoded when the panel came to the game
@@ -11752,6 +11775,7 @@ impl SwitchRenderBackend {
         }
         // The box has the cover's own shape, so it fills; through `kit_cover`
         // a transparent logo sits on the same ground as in the grid.
+        let thumb_under = full_alpha < 1.0 && matches!(thumb, CoverTex::Image { .. });
         if full_alpha < 1.0 {
             match thumb {
                 CoverTex::Image { tex, w: tw, h: th, amb } => self.kit_cover(dx, dy, dw, dh, tex, tw, th, amb, 1.0),
@@ -11760,11 +11784,18 @@ impl SwitchRenderBackend {
             }
         }
         if let Some(CoverTex::Image { tex, w: tw, h: th, amb }) = full {
-            if full_alpha > 0.0 {
+            if full_alpha > 0.0 && thumb_under {
+                // Over the thumbnail, the picture alone. Its ground, faded in
+                // on top of a thumbnail already opaque, darkened the art for
+                // the length of the fade: half the full cover, a quarter of
+                // the half-dark backdrop and a quarter of the thumbnail at the
+                // midpoint.
+                self.kit_image(dx, dy, dw, dh, tex, kit::cover::crop_uv(tw, th, dw, dh), full_alpha, theme::radius::TILE);
+            } else if full_alpha > 0.0 {
                 self.kit_cover(dx, dy, dw, dh, tex, tw, th, amb, full_alpha);
             }
         }
-        (dx, dy, dw, dh)
+        ((dx, dy, dw, dh), decoded)
     }
 
     /// The layers badge of a multi-file game, in the top-right corner of a
@@ -12375,9 +12406,10 @@ impl SwitchRenderBackend {
         // upscaling at 2× native.
         let box_h = 460.0;
         let mut panel = (box_x, box_y, box_w, box_h);
-        // Asked before the panel, which may decode the selected game's own
-        // thumbnail this frame: the rows then wait for the next one.
-        let selected_ready = entries.get(selection).map_or(true, |e| cover_lookup(&e.basename).is_some());
+        // Whether the panel decoded a cover this frame (the selected game's
+        // thumbnail, or its full cover at the end of a dwell): the rows then
+        // wait for the next one.
+        let mut panel_decoded = false;
         if let Some(e) = entries.get(selection) {
             use theme::{col, size};
             // Wrapped once, measured once: the caption's height is what the art
@@ -12385,7 +12417,8 @@ impl SwitchRenderBackend {
             let lines = self.kit_wrap(&e.display_name, size::TITLE, box_w, 2);
             let fact_lines = self.kit_game_facts_lines(e, box_w);
             let caption_h = 22.0 + lines.len() as f32 * 32.0 + 30.0 + fact_lines.saturating_sub(1) as f32 * 24.0;
-            panel = self.kit_cover_panel(box_x, box_y, box_w, box_h, caption_h, &e.basename, &e.display_name, e.color_chip);
+            (panel, panel_decoded) =
+                self.kit_cover_panel(box_x, box_y, box_w, box_h, caption_h, &e.basename, &e.display_name, e.color_chip);
             if crate::favorites::is_favorite(&e.basename) {
                 self.kit_favorite_chip(panel.0 + 8.0, panel.1 + 8.0);
             }
@@ -12403,9 +12436,9 @@ impl SwitchRenderBackend {
         }
 
         // Small covers in the rows, from the tile thumbnails: one decode a frame
-        // like every view, the rows nearest the cursor first, and none while the
-        // panel is still waiting for the selected game's own thumbnail.
-        if selected_ready {
+        // like every view, the rows nearest the cursor first, and none on a
+        // frame the panel already decoded for.
+        if !panel_decoded {
             let first = (scroll_px / ROW_H).floor().max(0.0) as usize;
             let last = (first + rows_visible + 1).min(entries.len());
             let missing = (first..last)
@@ -12669,9 +12702,12 @@ impl SwitchRenderBackend {
 
         // ── Hero cover, fitted inside its fixed box ──
         let mut hero = (HERO_X, HERO_Y, HERO_W, HERO_H);
+        // Whether the hero decoded a cover this frame: the row then waits.
+        let mut hero_decoded = false;
         if let Some(e) = entries.get(selection) {
             use theme::{col, size};
-            hero = self.kit_cover_panel(HERO_X, HERO_Y, HERO_W, HERO_H, 0.0, &e.basename, &e.display_name, e.color_chip);
+            (hero, hero_decoded) =
+                self.kit_cover_panel(HERO_X, HERO_Y, HERO_W, HERO_H, 0.0, &e.basename, &e.display_name, e.color_chip);
             if crate::favorites::is_favorite(&e.basename) {
                 self.kit_favorite_chip(hero.0 + 10.0, hero.1 + 10.0);
             }
@@ -12733,7 +12769,8 @@ impl SwitchRenderBackend {
             };
         }
 
-        let mut decode_budget = COVER_DECODES_PER_FRAME;
+        // The row's decode, unless the hero has had this frame's.
+        let mut decode_budget = if hero_decoded { 0 } else { COVER_DECODES_PER_FRAME };
         for (i, e) in entries.iter().enumerate() {
             let x = off + i as f32 * pitch;
             if x > vw || x + ROW_W < 0.0 {
@@ -13052,8 +13089,10 @@ impl SwitchRenderBackend {
 
         // The mockup's grid: 48 px margins, five columns 20 px apart, tiles at
         // 16:10 (Jaquettes.dc.html), the first row 14 px under the shelf strip.
-        // `scroll_offset` is the first visible ROW.
-        const COLS: usize = 5;
+        // `scroll_offset` is the first visible ROW. The column count is the
+        // library's, which works out the scroll for a shelf or a view change
+        // before any frame of the grid exists.
+        const COLS: usize = crate::library::GALLERY_COLS;
         const LEFT: f32 = 48.0;
         const GAP: f32 = 20.0;
         const TOP: f32 = 130.0;
