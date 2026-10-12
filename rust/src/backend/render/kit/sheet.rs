@@ -435,6 +435,13 @@ impl SwitchRenderBackend {
     /// button drawn as the editor draws it, what it sends now, dim, and what it
     /// will send, bright. A line without tabs (a count of lines left out) is
     /// written across.
+    ///
+    /// A name that is no button (a cursor setting) may run into the first half
+    /// of "Avant", pushing that value right: "Afficher le curseur" was cut to
+    /// "Afficher le cu…" in a column sized for a glyph. A value that does not
+    /// fit its column steps down a size, then goes on two lines, before
+    /// anything is cut: "Comme en Normal", what a combo layer's empty button
+    /// sends, ran out of both columns.
     pub(crate) fn kit_diff_line(&mut self, x: f32, cy: f32, w: f32, line: &str) {
         let px = size::LABEL + 1.0;
         let mut it = line.split('\t');
@@ -442,11 +449,11 @@ impl SwitchRenderBackend {
         match (it.next(), it.next()) {
             (Some(before), Some(after)) => {
                 let (c0, c1) = (w * 0.34, w * 0.33);
-                self.kit_diff_what(x + 12.0, cy, c0 - 20.0, what);
-                let b = self.kit_fit(before, px, c1 - 14.0);
-                self.kit_text_mid(x + c0, cy, px, &b, col::TEXT3);
-                let a = self.kit_fit(after, px, w - c0 - c1 - 12.0);
-                self.kit_text_mid(x + c0 + c1, cy, px, &a, col::TEXT);
+                let what_max = if Self::diff_what_is_button(what) { c0 - 20.0 } else { c0 + c1 * 0.5 - 20.0 };
+                let what_end = self.kit_diff_what(x + 12.0, cy, what_max, what);
+                let bx = (x + c0).max(what_end + 12.0);
+                self.kit_diff_value(bx, cy, x + c0 + c1 - 14.0 - bx, before, col::TEXT3);
+                self.kit_diff_value(x + c0 + c1, cy, w - c0 - c1 - 12.0, after, col::TEXT);
             }
             _ => {
                 let t = self.kit_fit(what, px, w - 24.0);
@@ -455,10 +462,38 @@ impl SwitchRenderBackend {
         }
     }
 
+    /// A value of a diff line from `x`, in `room`: at 16 px, else 13, else on
+    /// two lines at 13 (the lines are 44 px tall), the second cut if it must.
+    fn kit_diff_value(&mut self, x: f32, cy: f32, room: f32, text: &str, ink: u32) {
+        let room = room.max(0.0);
+        for p in [size::LABEL + 1.0, size::CAPTION] {
+            if self.kit_measure(text, p) <= room {
+                self.kit_text_mid(x, cy, p, text, ink);
+                return;
+            }
+        }
+        let p = size::CAPTION;
+        let lines = self.kit_wrap(text, p, room, 2);
+        let lh = (p * 1.25).round();
+        let mut ly = cy - lh * (lines.len().max(1) - 1) as f32 * 0.5;
+        for l in &lines {
+            self.kit_text_mid(x, ly, p, l, ink);
+            ly += lh;
+        }
+    }
+
+    /// Whether a diff line's first column names a button (drawn as glyphs),
+    /// rather than a setting written as words.
+    fn diff_what_is_button(what: &str) -> bool {
+        let rest = what.strip_prefix("P2 ").unwrap_or(what);
+        let rest = rest.split_once('+').map_or(rest, |(_, b)| b);
+        crate::keymap::PAD_SLOTS.iter().any(|s| s.name == rest)
+    }
+
     /// The control a diff line is about: "P2 ZL+StickLUp" is a J2 chip, the ZL
     /// glyph, a plus and the left stick's badge. A name that is no button (a
-    /// cursor setting) is written as it is.
-    fn kit_diff_what(&mut self, x: f32, cy: f32, max_w: f32, what: &str) {
+    /// cursor setting) is written as it is. Returns where it ends.
+    fn kit_diff_what(&mut self, x: f32, cy: f32, max_w: f32, what: &str) -> f32 {
         let px = size::LABEL;
         let mut cx = x;
         let mut rest = what;
@@ -484,10 +519,11 @@ impl SwitchRenderBackend {
             Some(g) => {
                 let bw = self.pad_badge_width(g, px);
                 self.kit_pad_badge(cx, cy, bw, g, px, col::TEXT);
+                cx + bw
             }
             None => {
                 let t = self.kit_fit(rest, px, (x + max_w - cx).max(0.0));
-                self.kit_text_mid(cx, cy, px, &t, col::TEXT2);
+                cx + self.kit_text_mid(cx, cy, px, &t, col::TEXT2)
             }
         }
     }
