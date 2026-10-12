@@ -7460,11 +7460,9 @@ fn with_source_sheet<R>(
         Row::new(Icon::Trash, u.imp_delete_source).danger(),
     ];
     let help_edit = u.imp_help_src_edit.replacen("{}", &url, 1);
-    let help = match selection {
-        0 => u.imp_help_src_fav,
-        1 => help_edit.as_str(),
-        _ => lc.histdel_msg,
-    };
+    // One per row, in order; all of them size the help box.
+    let helps = [u.imp_help_src_fav, help_edit.as_str(), lc.histdel_msg];
+    let help = helps[selection.min(helps.len() - 1)];
     let a_verb = match selection {
         0 if fav => lc.opt_unfavorite,
         0 => u.imp_fav_add,
@@ -7483,6 +7481,7 @@ fn with_source_sheet<R>(
     sheet.row_h = 48.0;
     sheet.glide_key = 0x6400_0000;
     sheet.help = help;
+    sheet.helps = &helps;
     sheet.hints = &hints;
     Some(f(backend, &sheet))
 }

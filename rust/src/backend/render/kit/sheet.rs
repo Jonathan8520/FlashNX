@@ -54,6 +54,14 @@ pub(crate) struct Sheet<'a> {
     /// Glide key of the focus pill; also seeds the scroll's.
     pub glide_key: u32,
     pub help: &'a str,
+    /// Every help this page can show, whichever row has the cursor and
+    /// whatever value a row's help depends on (the overclock's three). The
+    /// help box is as tall as the longest of them at this panel's width, at
+    /// most `HELP_LINES`, and keeps that height while the cursor moves; the
+    /// rows get the rest. Four lines kept on every page left 50 px empty
+    /// over the box in the launcher's Touches et curseur page, while its
+    /// last row was cut by the bottom of the list. Empty: `HELP_LINES`.
+    pub helps: &'a [&'a str],
     /// Keep room for the help box even on a row without help, so the rows do
     /// not move when the cursor goes from one to the other. False for a list
     /// that never has any (a read-only preview).
@@ -83,6 +91,7 @@ impl<'a> Sheet<'a> {
             row_h: 52.0,
             glide_key: 0,
             help: "",
+            helps: &[],
             reserve_help: true,
             hints: &[],
             diff: &[],
@@ -120,16 +129,37 @@ pub(crate) enum Side {
 const SECTION_H: f32 = 36.0;
 /// Rows are this far apart beyond their own height.
 const ROW_GAP: f32 = 2.0;
-/// The help box always gets room for four lines, so the rows' area does not
-/// change size (and the list does not jump) when the help under it grows.
-/// Four, not three: a French help naming three options runs to a fourth line
-/// in a 440 px panel, and its end was the part that got cut.
+/// The most lines a panel's help box holds. Four, not three: a French help
+/// naming three options runs to a fourth line in a 440 px panel, and its end
+/// was the part that got cut. A page whose helps are all shorter keeps only
+/// the lines its longest takes (`Sheet::helps`).
 const HELP_LINES: usize = 4;
 const HINTS_BAND: f32 = 60.0;
 
-/// The room kept for the help box over the hints, with its gap.
-fn help_room() -> f32 {
-    28.0 + (size::LABEL * 1.45).round() * HELP_LINES as f32 + 10.0
+/// The room kept for a help box of `lines` lines over the hints, with its
+/// gap: none for none.
+fn help_room(lines: usize) -> f32 {
+    if lines == 0 {
+        0.0
+    } else {
+        super::controls::help_box_h(lines) + 10.0
+    }
+}
+
+/// How many lines each help took in a help box, by its text and the box's
+/// width (`help_key`): a page asks for the longest of its helps several times
+/// a frame (its frame, its rows, the rail it folds into), and wrapping every
+/// one of them each time cost a few thousand glyph lookups a frame.
+static HELP_FIT: std::sync::Mutex<std::vec::Vec<(u64, u8)>> = std::sync::Mutex::new(std::vec::Vec::new());
+
+/// FNV-1a of a help's text, seeded with the width it is wrapped at.
+fn help_key(text: &str, w: f32) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ w.to_bits() as u64;
+    for b in text.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
 }
 
 /// The bottom of the pause's panels as last drawn (`kit_cascade`), for what
@@ -205,23 +235,60 @@ impl SwitchRenderBackend {
         h + 16.0
     }
 
-    /// Top and height of the panel for `s`. In landscape every panel is the
-    /// screen's height. In portrait (a turned picture, 1280 tall) a panel that
-    /// tall put the help box 600 px under the rows it explains, and its dim
-    /// covered the lower half of the picture, where ÉCRAN shows what it does:
-    /// there a panel hugs its content, from the top, never taller than the
-    /// screen. The help box keeps its reserved lines, so a panel does not
-    /// change height as the cursor moves.
-    fn sheet_frame(&mut self, s: &Sheet) -> (f32, f32) {
+    /// Top and height of the panel for `s`, `w` wide. In landscape every panel
+    /// is the screen's height. In portrait (a turned picture, 1280 tall) a
+    /// panel that tall put the help box 600 px under the rows it explains, and
+    /// its dim covered the lower half of the picture, where ÉCRAN shows what
+    /// it does: there a panel hugs its content, from the top, never taller
+    /// than the screen. The help box keeps its lines whichever row has the
+    /// cursor (`sheet_help_lines`), so a panel does not change height as the
+    /// cursor moves.
+    fn sheet_frame(&mut self, s: &Sheet, w: f32) -> (f32, f32) {
         let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
         let full = vh - 2.0 * SHEET_MARGIN;
         if vh <= vw {
             return (SHEET_MARGIN, full);
         }
         let body = if s.diff.is_empty() { Self::sheet_layout(s).1 } else { SECTION_H + s.diff.len() as f32 * s.row_h };
-        let help = if s.reserve_help { help_room() } else { 0.0 };
+        let help = help_room(self.sheet_help_lines(s, w));
         let content = self.sheet_header_h(s) + 10.0 + body + help + HINTS_BAND;
         (SHEET_MARGIN, content.min(full).round())
+    }
+
+    /// How many lines the help box of `s` keeps in a panel `w` wide: as many
+    /// as the longest of its helps takes (the one showing among them), at
+    /// most `HELP_LINES`; `HELP_LINES` for a page that does not list its
+    /// helps, none for a page that keeps no room.
+    fn sheet_help_lines(&mut self, s: &Sheet, w: f32) -> usize {
+        if !s.reserve_help {
+            return 0;
+        }
+        if s.helps.is_empty() {
+            return HELP_LINES;
+        }
+        let box_w = w - 32.0;
+        let mut most = 0;
+        for text in s.helps.iter().chain(core::iter::once(&s.help)) {
+            let key = help_key(text, box_w);
+            let known = HELP_FIT.lock().ok().and_then(|g| g.iter().find(|(k, _)| *k == key).map(|(_, n)| *n as usize));
+            let n = match known {
+                Some(n) => n,
+                None => {
+                    let n = self.kit_help_lines(text, box_w, HELP_LINES);
+                    if let Ok(mut g) = HELP_FIT.lock() {
+                        // A few pages' worth in each of the languages a player
+                        // goes through; a long session starts over now and then.
+                        if g.len() >= 256 {
+                            g.clear();
+                        }
+                        g.push((key, n as u8));
+                    }
+                    n
+                }
+            };
+            most = most.max(n);
+        }
+        most
     }
 
     /// The caption line: an icon and the path, the last step brighter.
@@ -362,17 +429,24 @@ impl SwitchRenderBackend {
     /// `kit_sheet_at`; `publish` false for a panel that is only being shown on
     /// its way somewhere (it must not take the taps of the page in front).
     fn sheet_draw(&mut self, s: &Sheet, x: f32, w: f32, publish: bool) {
-        let (top, h) = self.sheet_frame(s);
+        let (top, h) = self.sheet_frame(s, w);
         self.kit_panel(x, top, w, h, false);
         let line_y = self.sheet_header(s, x, w, true);
 
-        // The help box and the hints, from the bottom up.
+        // The help box and the hints, from the bottom up. The box is as tall
+        // as the page's longest help, whichever row it explains: its top edge
+        // stays put while the cursor moves, and the list ends right over it.
         let hints_cy = top + h - HINTS_BAND * 0.5;
         let help_bottom = top + h - HINTS_BAND;
         let help_w = w - 32.0;
-        let help_room = if s.reserve_help { help_room() } else { 0.0 };
+        let help_lines = self.sheet_help_lines(s, w);
+        let help_room = help_room(help_lines);
         if !s.help.trim().is_empty() {
-            self.kit_help_box(x + 16.0, help_bottom, help_w, s.help, HELP_LINES);
+            if help_lines > 0 {
+                self.kit_help_box_lines(x + 16.0, help_bottom, help_w, s.help, help_lines);
+            } else {
+                self.kit_help_box(x + 16.0, help_bottom, help_w, s.help, HELP_LINES);
+            }
         }
         // The bar fits the panel: a hint that would run past its edge (a
         // long translation, a row with four of them) is left out, from the
@@ -463,12 +537,12 @@ impl SwitchRenderBackend {
     }
 
     /// The scroll the rows of `s` rest at with row `row` centred, and the top
-    /// and bottom of their area, for a panel at full height: the rail draws its
-    /// icons where the full panel had its rows.
-    fn sheet_rows_frame(&mut self, s: &Sheet, row: usize) -> (f32, f32, f32) {
-        let (top, h) = self.sheet_frame(s);
+    /// and bottom of their area, for the full panel, `w` wide: the rail draws
+    /// its icons where the full panel had its rows.
+    fn sheet_rows_frame(&mut self, s: &Sheet, row: usize, w: f32) -> (f32, f32, f32) {
+        let (top, h) = self.sheet_frame(s, w);
         let area_top = top + self.sheet_header_h(s) + 10.0;
-        let help_room = if s.reserve_help { help_room() } else { 0.0 };
+        let help_room = help_room(self.sheet_help_lines(s, w));
         let area_bot = top + h - HINTS_BAND - help_room;
         let area_h = (area_bot - area_top).max(s.row_h);
         let (ys, content_h) = Self::sheet_layout(s);
@@ -615,11 +689,13 @@ impl SwitchRenderBackend {
     /// was, the one the page came from on a pill with a chevron pointing at the
     /// page. It is the path, and the page's caption spells it out; a tap on
     /// either goes back a level (`kit_cascade_on`), as does the direction
-    /// pointing at it (input rule 3).
-    pub(crate) fn kit_sheet_rail(&mut self, s: &Sheet, x: f32, w: f32, branch: usize, side: Side) {
+    /// pointing at it (input rule 3). `full_w` is the parent's own width,
+    /// which its rows were laid out at.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn kit_sheet_rail(&mut self, s: &Sheet, x: f32, w: f32, branch: usize, side: Side, full_w: f32) {
         // The parent's own height: in portrait it hugs its rows, and the rail
         // keeps the panel it folds from.
-        let (top, h) = self.sheet_frame(s);
+        let (top, h) = self.sheet_frame(s, full_w);
         self.kit_panel(x, top, w, h, false);
         let cx = x + w * 0.5;
         // The head: the panel's own icon (the pause's), or its cover.
@@ -631,7 +707,7 @@ impl SwitchRenderBackend {
         }
         let line_y = (top + self.sheet_header_h(s)).round();
         self.draw_overlay_rect(x + 12.0, line_y, w - 24.0, 1.0, col::LINE);
-        let (scroll, area_top, area_bot) = self.sheet_rows_frame(s, branch);
+        let (scroll, area_top, area_bot) = self.sheet_rows_frame(s, branch, full_w);
         let (ys, _) = Self::sheet_layout(s);
         self.set_clip(x, area_top, w, area_bot - area_top);
         for (i, row) in s.rows.iter().enumerate() {
@@ -687,9 +763,9 @@ impl SwitchRenderBackend {
         const DIM: u32 = col::SCRIM_GAME;
         let a = (DIM >> 24) as f32 * self.ui_sheet_reveal.clamp(0.0, 1.0);
         let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
-        let (_, parent_h) = self.sheet_frame(parent);
+        let (_, parent_h) = self.sheet_frame(parent, SHEET_W);
         let child_h = match child {
-            Some(c) => self.sheet_frame(c).1,
+            Some(c) => self.sheet_frame(c, CHILD_W).1,
             None => 0.0,
         };
         let bottom = SHEET_MARGIN + parent_h.max(child_h);
@@ -779,10 +855,10 @@ impl SwitchRenderBackend {
             self.set_clip_outer(None);
             // The moving edge itself, so the cut reads as the panel's border.
             let ex = if side == Side::Left { px + pw - 1.0 } else { px };
-            let (ptop, ph) = self.sheet_frame(parent);
+            let (ptop, ph) = self.sheet_frame(parent, full_w);
             self.draw_overlay_rect(ex, ptop + 20.0, 1.0, ph - 40.0, col::PANEL_LINE);
         } else {
-            self.kit_sheet_rail(parent, px, pw, branch, side);
+            self.kit_sheet_rail(parent, px, pw, branch, side, full_w);
         }
         // Settled, the rail and the page's "‹ Parent" caption take a finger
         // back a level, as B does: both look like the way back (input rule

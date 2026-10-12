@@ -9866,27 +9866,29 @@ impl SwitchRenderBackend {
             Row::new(Icon::LogOut, lc.menu_quit),
         ];
         debug_assert_eq!(rows.len(), MENU_ITEMS.len());
-        let help = match MENU_ITEMS.get(selected) {
-            Some(&"REPRENDRE") => u.help_resume,
-            Some(&"TOUCHES") => u.help_keys,
-            Some(&"ECRAN") => u.help_screen,
-            Some(&"OVERCLOCK") => {
-                if overclock_refused() {
-                    lc.overclock_refused
-                } else {
-                    match power_shown {
-                        0 => u.help_oc_off,
-                        crate::keymap::POWER_AUTO => u.help_oc_auto,
-                        _ => u.help_oc_on,
-                    }
-                }
-            }
-            Some(&"REDEMARRER") => u.help_restart,
+        let refused = overclock_refused();
+        let help_of = |item: &str, power: u8| match item {
+            "REPRENDRE" => u.help_resume,
+            "TOUCHES" => u.help_keys,
+            "ECRAN" => u.help_screen,
+            "OVERCLOCK" if refused => lc.overclock_refused,
+            "OVERCLOCK" => match power {
+                0 => u.help_oc_off,
+                crate::keymap::POWER_AUTO => u.help_oc_auto,
+                _ => u.help_oc_on,
+            },
+            "REDEMARRER" => u.help_restart,
             // Started from a HOME icon there is no library to go back to.
-            Some(&"QUITTER") if crate::direct_launch() => u.help_quit_direct,
-            Some(&"QUITTER") => u.help_quit,
+            "QUITTER" if crate::direct_launch() => u.help_quit_direct,
+            "QUITTER" => u.help_quit,
             _ => "",
         };
+        let help = MENU_ITEMS.get(selected).map_or("", |item| help_of(item, power_shown));
+        // Every help the page can show, for the help box's height: each row's,
+        // and the overclock's for each of its settings and for a refused raise,
+        // which the armed row runs through as Left / Right move it.
+        let mut helps: std::vec::Vec<&str> = MENU_ITEMS.iter().map(|item| help_of(item, power_shown)).collect();
+        helps.extend([lc.overclock_refused, u.help_oc_off, u.help_oc_auto, u.help_oc_on]);
         // The A hint names what A does on THIS row; B always resumes.
         let a_verb = match MENU_ITEMS.get(selected) {
             Some(&"REPRENDRE") => u.resume,
@@ -9940,6 +9942,7 @@ impl SwitchRenderBackend {
         sheet.chips = &chips;
         sheet.glide_key = GLIDE_KEY_PAUSE;
         sheet.help = help;
+        sheet.helps = &helps;
         sheet.hints = if on_power && oc_armed {
             &hints_armed
         } else if on_power && oc_own {
@@ -10034,7 +10037,7 @@ impl SwitchRenderBackend {
         ];
         debug_assert_eq!(rows.len(), SCREEN_ITEMS.len());
         let key = SCREEN_ITEMS.get(selected).copied().unwrap_or("");
-        let help = match key {
+        let help_of = |key: &str| match key {
             "AFFICHAGE" => u.help_display,
             "ROTATION" => u.help_rotation,
             // A opens the framing on this row: Left and Right, which used to
@@ -10045,6 +10048,9 @@ impl SwitchRenderBackend {
             "FPS" => u.help_fps,
             _ => "",
         };
+        let help = help_of(key);
+        // Every row's, for the help box's height.
+        let helps: std::vec::Vec<&str> = SCREEN_ITEMS.iter().map(|k| help_of(k)).collect();
         // A arms a value row, opens the framing on ZOOM, flips the counter;
         // armed, what Left / Right, A and B do now. X shows where the game
         // has a value of its own to drop.
@@ -10063,6 +10069,7 @@ impl SwitchRenderBackend {
         sheet.crumbs = &crumbs;
         sheet.glide_key = GLIDE_KEY_SCREEN;
         sheet.help = help;
+        sheet.helps = &helps;
         sheet.hints = if armed.is_some() {
             &hints_armed
         } else if own {

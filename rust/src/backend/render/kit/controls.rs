@@ -299,20 +299,40 @@ impl SwitchRenderBackend {
 
     /// Height `kit_help_box` takes for `text` in `w`.
     pub(crate) fn kit_help_box_height(&mut self, text: &str, w: f32, max_lines: usize) -> f32 {
-        let lines = self.kit_wrap(text, size::LABEL, w - 16.0 - 18.0 - 12.0 - 16.0, max_lines);
-        let lh = (size::LABEL * 1.45).round();
-        28.0 + lh * lines.len().max(1) as f32
+        let lines = self.kit_help_lines(text, w, max_lines);
+        help_box_h(lines)
+    }
+
+    /// How many lines `text` takes in a help box `w` wide, at most
+    /// `max_lines`; none for no text.
+    pub(crate) fn kit_help_lines(&mut self, text: &str, w: f32, max_lines: usize) -> usize {
+        if text.trim().is_empty() {
+            return 0;
+        }
+        self.kit_wrap(text, size::LABEL, help_text_w(w), max_lines).len()
     }
 
     /// The box explaining the focused row: an info icon and the text, in a
     /// tile-coloured box whose BOTTOM edge is at `bottom`. Returns its height.
     pub(crate) fn kit_help_box(&mut self, x: f32, bottom: f32, w: f32, text: &str, max_lines: usize) -> f32 {
+        self.help_box(x, bottom, w, text, max_lines, false)
+    }
+
+    /// `kit_help_box` exactly `lines` lines tall, whatever its text takes,
+    /// the text from the top: a panel's box, which keeps its height while the
+    /// cursor goes from a long help to a short one (`Sheet::helps`).
+    pub(crate) fn kit_help_box_lines(&mut self, x: f32, bottom: f32, w: f32, text: &str, lines: usize) -> f32 {
+        self.help_box(x, bottom, w, text, lines, true)
+    }
+
+    /// The help box, `max_lines` tall when `fixed`, else as tall as its text.
+    fn help_box(&mut self, x: f32, bottom: f32, w: f32, text: &str, max_lines: usize, fixed: bool) -> f32 {
         if text.trim().is_empty() {
             return 0.0;
         }
-        let lines = self.kit_wrap(text, size::LABEL, w - 16.0 - 18.0 - 12.0 - 16.0, max_lines);
+        let lines = self.kit_wrap(text, size::LABEL, help_text_w(w), max_lines);
         let lh = (size::LABEL * 1.45).round();
-        let h = 28.0 + lh * lines.len().max(1) as f32;
+        let h = help_box_h(if fixed { max_lines } else { lines.len() });
         let y = bottom - h;
         self.kit_rrect(x, y, w, h, radius::ROW, col::TILE);
         self.kit_icon(x + 16.0, y + 14.0 + lh * 0.5, 18.0, Icon::Info, col::TEXT2);
@@ -323,4 +343,14 @@ impl SwitchRenderBackend {
         }
         h
     }
+}
+
+/// Height of a help box holding `lines` lines (one at least).
+pub(crate) fn help_box_h(lines: usize) -> f32 {
+    28.0 + (size::LABEL * 1.45).round() * lines.max(1) as f32
+}
+
+/// What a help box `w` wide leaves its text, beside the info icon.
+fn help_text_w(w: f32) -> f32 {
+    w - 16.0 - 18.0 - 12.0 - 16.0
 }

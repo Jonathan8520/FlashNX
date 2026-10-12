@@ -289,7 +289,7 @@ pub(crate) fn with_options_sheet<R>(
         .zip(OPTIONS_ENTRIES.iter())
         .map(|(r, k)| r.note_opt(note(k)).armed_if(armed.is_some() && *k == key))
         .collect();
-    let help = match key {
+    let help_of = |key: &str, power: u8| match key {
         "FAVORI" => u.help_opt_fav,
         "TOUCHES" => u.help_keys,
         "JAQUETTE" => u.help_opt_cover,
@@ -301,7 +301,7 @@ pub(crate) fn with_options_sheet<R>(
         "ZOOM" => u.help_opt_zoom,
         "PIXELS" => u.help_pixels,
         "FILTRE" => u.help_filter,
-        "OVERCLOCK" => match p.power {
+        "OVERCLOCK" => match power {
             0 => u.help_oc_off,
             keymap::POWER_AUTO => u.help_oc_auto,
             _ => u.help_oc_on,
@@ -309,6 +309,11 @@ pub(crate) fn with_options_sheet<R>(
         "FPS" => u.help_fps,
         _ => u.help_opt_delete,
     };
+    let help = help_of(key, p.power);
+    // Every row's, and the overclock's for each of its settings (the armed
+    // row goes through them), for the help box's height.
+    let mut helps: std::vec::Vec<&str> = OPTIONS_ENTRIES.iter().map(|k| help_of(k, p.power)).collect();
+    helps.extend(POWER_ORDER.iter().map(|m| help_of("OVERCLOCK", *m)));
     // What A does on the row: arm a value, flip a switch, open, act.
     let a_verb = match key {
         "TOUCHES" | "JAQUETTE" | "DOSSIER" => u.open,
@@ -357,6 +362,7 @@ pub(crate) fn with_options_sheet<R>(
     sheet.row_h = 48.0;
     sheet.glide_key = 0x6200_0000;
     sheet.help = help;
+    sheet.helps = &helps;
     sheet.hints = if armed.is_some() {
         &hints_armed
     } else if own_here {
@@ -843,6 +849,14 @@ fn with_folders_view<R>(
         }
     };
     let help = if on_physical { u.help_folder_physical } else { u.help_opt_folders };
+    // The helps its rows can show, for the help box's height: the folder the
+    // game's file sits in has its own.
+    let has_physical = folders.iter().any(|(n, _)| physical.as_deref() == Some(n.as_str()));
+    let helps: std::vec::Vec<&str> = if has_physical {
+        std::vec![u.help_opt_folders, u.help_folder_physical]
+    } else {
+        std::vec![u.help_opt_folders]
+    };
     let on_shelf_row = selection >= 1 && selection < last;
     let hints_physical = [(&[Btn::X][..], u.empty_verb), (&[Btn::B][..], u.back)];
     let hints_shelf = [(&[Btn::A][..], a_verb), (&[Btn::X][..], u.empty_verb), (&[Btn::B][..], u.back)];
@@ -853,6 +867,7 @@ fn with_folders_view<R>(
     sheet.row_h = 48.0;
     sheet.glide_key = 0x6100_0000;
     sheet.help = help;
+    sheet.helps = &helps;
     sheet.hints = if on_physical {
         &hints_physical
     } else if on_shelf_row {
