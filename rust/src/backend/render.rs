@@ -191,6 +191,11 @@ const MODAL_ROW_X: f32 = 36.0;
 /// 5x7 capitals), and the height of the focus pill drawn on it.
 const MODAL_ROW_CY: f32 = 10.0;
 const MODAL_PILL_H: f32 = 46.0;
+/// The band along the bottom of a window that holds its hints (`modal_hints`).
+const MODAL_FOOT_H: f32 = 56.0;
+/// The footer band of the cover picker's window as last drawn (x, width, top),
+/// where its toast goes (`draw_toast_in_cover_picker`).
+static COVER_FOOT: std::sync::Mutex<Option<(f32, f32, f32)>> = std::sync::Mutex::new(None);
 
 /// Glide slots for the lists that draw their own rows instead of going through
 /// `draw_modal_rows`.
@@ -11516,8 +11521,8 @@ impl SwitchRenderBackend {
     fn modal_hints(&mut self, frame: &ModalFrame, hints: &[kit::text::HintItem], danger: bool) {
         use theme::col;
         let (x, y, w, h) = (frame.x, frame.y, frame.w, frame.h);
-        self.draw_overlay_rect(x + 20.0, y + h - 56.0, w - 40.0, 1.0, if danger { col::DANGER_LINE } else { col::LINE });
-        self.kit_hints_centered(x + w * 0.5, y + h - 28.0, hints);
+        self.draw_overlay_rect(x + 20.0, y + h - MODAL_FOOT_H, w - 40.0, 1.0, if danger { col::DANGER_LINE } else { col::LINE });
+        self.kit_hints_centered(x + w * 0.5, y + h - MODAL_FOOT_H * 0.5, hints);
     }
 
     /// Top navbar: the tab strip switched with the L/R shoulder buttons.
@@ -13470,8 +13475,32 @@ impl SwitchRenderBackend {
     /// the length of the toast. The footer toast sat on the line explaining the
     /// focused row, which is what the player reads after a change.
     pub fn draw_toast_in_editor(&mut self, msg: &str, kind: u8) {
-        match TOUCHES_FOOT.lock().ok().and_then(|g| *g) {
-            Some((x, w, top)) => self.draw_toast_in(msg, kind, x, x + w, top + (TOUCHES_FOOT_H - 52.0) * 0.5),
+        let band = TOUCHES_FOOT.lock().ok().and_then(|g| *g);
+        self.draw_toast_on_band(msg, kind, band, TOUCHES_FOOT_H);
+    }
+
+    /// The toast over the cover picker's window, on its footer band for the
+    /// length of the toast, as over the controls editor. Placed like the other
+    /// screens of a game's options, left of the panel, it sat on the chosen
+    /// cover's title line and off the middle of the window.
+    pub fn draw_toast_in_cover_picker(&mut self, msg: &str, kind: u8) {
+        let band = COVER_FOOT.lock().ok().and_then(|g| *g);
+        self.draw_toast_on_band(msg, kind, band, MODAL_FOOT_H);
+    }
+
+    /// A toast centred on a window's footer band (`band`: x, width, top, and
+    /// `band_h` tall); the plain footer toast when that window was not drawn.
+    fn draw_toast_on_band(&mut self, msg: &str, kind: u8, band: Option<(f32, f32, f32)>, band_h: f32) {
+        match band {
+            Some((x, w, top)) => {
+                // The band's hints go under it whole, the window's own colour
+                // over them: a pill in their middle left the ends of the hint
+                // line sticking out on both sides of it. Clear of the hairline
+                // above and of the window's rounded corners below.
+                let inset = theme::radius::PANEL;
+                self.draw_overlay_rect(x + inset, top + 1.0, w - 2.0 * inset, band_h - 3.0, theme::col::PANEL);
+                self.draw_toast_in(msg, kind, x, x + w, top + (band_h - 52.0) * 0.5);
+            }
             None => self.draw_toast(msg, kind),
         }
     }

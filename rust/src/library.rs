@@ -11714,10 +11714,20 @@ pub fn render(backend: &mut SwitchRenderBackend) {
     });
     if let Some((msg, kind)) = toast {
         // Over the library, left of a game's options and its page, rather than
-        // on top of them.
-        match options_panel::panels_left_edge(screen, backend.screen_size().0) {
-            Some(right) => backend.draw_toast_left_of(&msg, kind, right),
-            None => backend.draw_toast(&msg, kind),
+        // on top of them; over the cover picker, on its own footer, the window
+        // covering the library. A loading card keeps the toast where the
+        // screen under it has it: that frame stays up for the whole call.
+        let place = match screen {
+            Screen::ProfileLoading => NET_LOADING_FROM.lock().ok().and_then(|g| *g).unwrap_or(screen),
+            other => other,
+        };
+        if matches!(place, Screen::CoverPicker { .. }) {
+            backend.draw_toast_in_cover_picker(&msg, kind);
+        } else {
+            match options_panel::panels_left_edge(place, backend.screen_size().0) {
+                Some(right) => backend.draw_toast_left_of(&msg, kind, right),
+                None => backend.draw_toast(&msg, kind),
+            }
         }
     }
 
