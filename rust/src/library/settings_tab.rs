@@ -747,9 +747,11 @@ pub(crate) fn inside_library(path: &str, root: &str) -> bool {
     inside_dir(path, root)
 }
 
-/// Whether `path` is a folder somewhere under `dir` (not `dir` itself).
+/// Whether `path` is a folder somewhere under `dir` (not `dir` itself), a
+/// trailing slash or not: the card's root is written `sdmc:/`, and read with
+/// its slash it passed for a folder inside itself.
 fn inside_dir(path: &str, dir: &str) -> bool {
-    let dir = dir.trim_end_matches('/');
+    let (path, dir) = (path.trim_end_matches('/'), dir.trim_end_matches('/'));
     !dir.is_empty() && path.len() > dir.len() && path.starts_with(dir) && path.as_bytes()[dir.len()] == b'/'
 }
 
