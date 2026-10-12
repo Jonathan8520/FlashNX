@@ -732,9 +732,9 @@ const EN: Strings = Strings {
     bug_fail_title: "Failed",
     kbd_bug_header: "FlashNX - Report a bug",
     kbd_bug_guide: "Opens a public GitHub issue. Describe the problem. Optional: your @handle. A short technical log is attached.",
-    kbd_suggest_header: "FlashNX - Make a suggestion",
-    kbd_suggest_guide: "Opens a public GitHub issue. Your idea / feature request for FlashNX.",
-    suggest_ok_msg: "Your suggestion was sent. Thanks for helping improve FlashNX.",
+    kbd_suggest_header: "FlashNX - Suggest an idea",
+    kbd_suggest_guide: "Your idea for FlashNX. It is posted as it is on FlashNX's public GitHub.",
+    suggest_ok_msg: "Your idea was sent. Thanks for helping improve FlashNX.",
 };
 
 const FR: Strings = Strings {
@@ -931,9 +931,9 @@ const FR: Strings = Strings {
     bug_fail_title: "Échec",
     kbd_bug_header: "FlashNX - Signaler un bug",
     kbd_bug_guide: "Ouvre une issue GitHub publique. Décris le problème. Option : ton @pseudo. Un court journal technique est joint.",
-    kbd_suggest_header: "FlashNX - Faire une proposition",
-    kbd_suggest_guide: "Ouvre une issue GitHub publique. Ton idée / proposition pour FlashNX.",
-    suggest_ok_msg: "Ta proposition a été envoyée. Merci de m'aider à améliorer FlashNX.",
+    kbd_suggest_header: "FlashNX - Proposer une idée",
+    kbd_suggest_guide: "Ton idée pour FlashNX. Elle est publiée telle quelle sur le GitHub public de FlashNX.",
+    suggest_ok_msg: "Ton idée a été envoyée. Merci de m'aider à améliorer FlashNX.",
 };
 
 const ES: Strings = Strings {
@@ -999,9 +999,9 @@ const ES: Strings = Strings {
     set_screen_filter: "Filtro",
     games_dir_new: "Nueva carpeta",
     games_dir_current: "en uso",
-    games_dir_confirm: "Mover toda la biblioteca aqui?",
-    games_dir_confirm_n: "{} juegos se moveran a:",
-    games_dir_confirm_1: "{} juego se movera a:",
+    games_dir_confirm: "¿Mover toda la biblioteca aquí?",
+    games_dir_confirm_n: "{} juegos se moverán a:",
+    games_dir_confirm_1: "{} juego se moverá a:",
     games_dir_confirm_yes: "Mover",
     games_dir_confirm_no: "Cancelar",
     kbd_newdir_guide: "Nombre de la carpeta a crear",
@@ -1130,9 +1130,9 @@ const ES: Strings = Strings {
     bug_fail_title: "Fallo",
     kbd_bug_header: "FlashNX - Reportar un fallo",
     kbd_bug_guide: "Abre un issue público en GitHub. Describe el problema. Opcional: tu @usuario. Se adjunta un registro técnico breve.",
-    kbd_suggest_header: "FlashNX - Hacer una sugerencia",
-    kbd_suggest_guide: "Abre un issue público en GitHub. Tu idea / sugerencia para FlashNX.",
-    suggest_ok_msg: "Tu sugerencia se envió. Gracias por ayudar a mejorar FlashNX.",
+    kbd_suggest_header: "FlashNX - Proponer una idea",
+    kbd_suggest_guide: "Tu idea para FlashNX. Se publica tal cual en el GitHub público de FlashNX.",
+    suggest_ok_msg: "Tu idea se envió. Gracias por ayudar a mejorar FlashNX.",
 };
 
 // Russian.
@@ -1168,7 +1168,7 @@ const RU: Strings = Strings {
     empty_l1: "Поместите файлы .swf в",
     empty_l3: "Затем перезапустите FlashNX.",
     applet_title: "Режим апплета",
-    applet_notice: "Для запуска игры нужна вся память приложения, которой нет в режиме апплета. В homebrew menu удерживайте R на игре, чтобы запустить FlashNX со всей памятью.",
+    applet_notice: "Для запуска игры нужна вся память приложения, которой нет в режиме апплета. В homebrew menu удерживай R на игре (или используй forwarder), чтобы запустить FlashNX со всей памятью.",
     opt_keys: "Клавиши и курсор",
     opt_rename: "Переименовать",
     opt_edit: "Изменить",
@@ -1324,15 +1324,15 @@ const RU: Strings = Strings {
     kbd_rename_guide: "Отображаемое имя (оставь пустым, чтобы вернуть имя файла)",
     kbd_search_header: "FlashNX - Поиск",
     kbd_search_guide: "Фильтр по имени файла (пусто = показать все)",
-    bug_no_games: "Нет игр для отчета. Сначала добавьте или загрузите .swf.",
+    bug_no_games: "Пока нет игр для отчёта. Сначала импортируй или добавь .swf.",
     bug_ok_title: "Спасибо!",
-    bug_ok_msg: "Отчет отправлен. Спасибо, что помогаете улучшить FlashNX.",
+    bug_ok_msg: "Отчёт отправлен. Спасибо, что помогаешь улучшить FlashNX.",
     bug_fail_title: "Ошибка",
     kbd_bug_header: "FlashNX - Сообщить об ошибке",
     kbd_bug_guide: "Откроет публичную issue на GitHub. Опиши проблему. По желанию: твой @ник. Прилагается краткий технический лог.",
     kbd_suggest_header: "FlashNX - Предложить идею",
-    kbd_suggest_guide: "Откроет публичную issue на GitHub. Твоя идея / предложение для FlashNX.",
-    suggest_ok_msg: "Предложение отправлено. Спасибо, что помогаете улучшить FlashNX.",
+    kbd_suggest_guide: "Твоя идея для FlashNX. Она будет опубликована как есть на открытом GitHub FlashNX.",
+    suggest_ok_msg: "Идея отправлена. Спасибо, что помогаешь улучшить FlashNX.",
 };
 
 // German.
@@ -1530,9 +1530,9 @@ const DE: Strings = Strings {
     bug_fail_title: "Fehlgeschlagen",
     kbd_bug_header: "FlashNX - Fehler melden",
     kbd_bug_guide: "Öffnet ein öffentliches GitHub-Issue. Beschreibe das Problem. Optional: dein @Name. Ein kurzes technisches Protokoll wird angehängt.",
-    kbd_suggest_header: "FlashNX - Vorschlag machen",
-    kbd_suggest_guide: "Öffnet ein öffentliches GitHub-Issue. Deine Idee / dein Wunsch für FlashNX.",
-    suggest_ok_msg: "Dein Vorschlag wurde gesendet. Danke, dass du hilfst, FlashNX zu verbessern.",
+    kbd_suggest_header: "FlashNX - Idee vorschlagen",
+    kbd_suggest_guide: "Deine Idee für FlashNX. Sie erscheint unverändert auf dem öffentlichen GitHub von FlashNX.",
+    suggest_ok_msg: "Deine Idee wurde gesendet. Danke, dass du hilfst, FlashNX zu verbessern.",
 };
 
 // Italian.
@@ -1731,8 +1731,8 @@ const IT: Strings = Strings {
     kbd_bug_header: "FlashNX - Segnala un bug",
     kbd_bug_guide: "Apre una issue pubblica su GitHub. Descrivi il problema. Facoltativo: il tuo @nome. Viene allegato un breve log tecnico.",
     kbd_suggest_header: "FlashNX - Proponi un'idea",
-    kbd_suggest_guide: "Apre una issue pubblica su GitHub. La tua idea / proposta per FlashNX.",
-    suggest_ok_msg: "La tua proposta è stata inviata. Grazie per aiutare a migliorare FlashNX.",
+    kbd_suggest_guide: "La tua idea per FlashNX. Viene pubblicata così com'è sul GitHub pubblico di FlashNX.",
+    suggest_ok_msg: "La tua idea è stata inviata. Grazie per aiutare a migliorare FlashNX.",
 };
 
 // Portuguese (Brazil).
@@ -1799,9 +1799,9 @@ const PT: Strings = Strings {
     set_screen_filter: "Filtro",
     games_dir_new: "Nova pasta",
     games_dir_current: "em uso",
-    games_dir_confirm: "Mover toda a biblioteca para ca?",
-    games_dir_confirm_n: "{} jogos serao movidos para:",
-    games_dir_confirm_1: "{} jogo sera movido para:",
+    games_dir_confirm: "Mover toda a biblioteca para cá?",
+    games_dir_confirm_n: "{} jogos serão movidos para:",
+    games_dir_confirm_1: "{} jogo será movido para:",
     games_dir_confirm_yes: "Mover",
     games_dir_confirm_no: "Cancelar",
     kbd_newdir_guide: "Nome da pasta a criar",
@@ -1930,9 +1930,9 @@ const PT: Strings = Strings {
     bug_fail_title: "Falhou",
     kbd_bug_header: "FlashNX - Relatar um bug",
     kbd_bug_guide: "Abre uma issue pública no GitHub. Descreva o problema. Opcional: seu @usuário. Um breve log técnico é anexado.",
-    kbd_suggest_header: "FlashNX - Fazer uma sugestão",
-    kbd_suggest_guide: "Abre uma issue pública no GitHub. Sua ideia / sugestão para o FlashNX.",
-    suggest_ok_msg: "Sua sugestão foi enviada. Obrigado por ajudar a melhorar o FlashNX.",
+    kbd_suggest_header: "FlashNX - Sugerir uma ideia",
+    kbd_suggest_guide: "Sua ideia para o FlashNX. Ela é publicada como está no GitHub público do FlashNX.",
+    suggest_ok_msg: "Sua ideia foi enviada. Obrigado por ajudar a melhorar o FlashNX.",
 };
 
 // Simplified Chinese (issue #41). Prose uses Chinese punctuation; names,
@@ -2132,8 +2132,8 @@ const ZH: Strings = Strings {
     kbd_bug_header: "FlashNX - 报告问题",
     kbd_bug_guide: "将打开一个公开的 GitHub issue。请描述问题。可选：你的 @用户名。将附带一份简短的技术日志。",
     kbd_suggest_header: "FlashNX - 提出建议",
-    kbd_suggest_guide: "将打开一个公开的 GitHub issue。你对 FlashNX 的想法 / 建议。",
-    suggest_ok_msg: "你的建议已发送。感谢你帮助改进 FlashNX。",
+    kbd_suggest_guide: "你对 FlashNX 的想法。它会原样发布到 FlashNX 的公开 GitHub 上。",
+    suggest_ok_msg: "你的想法已发送。感谢你帮助改进 FlashNX。",
 };
 
 // Turkish.
@@ -2169,7 +2169,7 @@ const TR: Strings = Strings {
     empty_l1: ".swf dosyalarını şuraya koyun",
     empty_l3: "Sonra FlashNX'ı yeniden başlatın.",
     applet_title: "Applet modu",
-    applet_notice: "Bir oyun başlatmak uygulamanın tüm belleğini gerektirir, applet modunda bu bellek yoktur. Homebrew menüsünde bir oyuna (veya forwarder'a) R tuşunu basılı tutarak FlashNX'ı tam bellekle başlatın.",
+    applet_notice: "Bir oyun başlatmak uygulamanın tüm belleğini gerektirir; applet modunda bu bellek yoktur. Homebrew menüsünde bir oyunun (veya forwarder'ın) üzerinde R tuşunu basılı tutarak FlashNX'i tam bellekle başlat.",
     opt_keys: "Kontroller ve imleç",
     opt_rename: "Yeniden adlandır",
     opt_edit: "Düzenle",
@@ -2325,15 +2325,15 @@ const TR: Strings = Strings {
     kbd_rename_guide: "Görünen ad (dosya adına dönmek için boş bırakın)",
     kbd_search_header: "FlashNX - Ara",
     kbd_search_guide: "Dosya adına göre filtrele (boş = hepsini göster)",
-    bug_no_games: "Bildirilecek oyun yok. Önce bir .swf aktarın.",
+    bug_no_games: "Bildirilecek oyun yok. Önce bir .swf içe aktar ya da kopyala.",
     bug_ok_title: "Teşekkürler!",
-    bug_ok_msg: "Raporun gönderildi. FlashNX'ı geliştirmeye yardım için teşekkürler.",
+    bug_ok_msg: "Raporun gönderildi. FlashNX'i geliştirmeye yardım ettiğin için teşekkürler.",
     bug_fail_title: "Başarısız",
     kbd_bug_header: "FlashNX - Hata bildir",
     kbd_bug_guide: "Herkese açık bir GitHub konusu açar. Sorunu anlat. İsteğe bağlı: @kullanıcı adın. Kısa bir teknik günlük eklenir.",
-    kbd_suggest_header: "FlashNX - Öneride bulun",
-    kbd_suggest_guide: "Herkese açık bir GitHub konusu açar. FlashNX için fikrin / özellik isteğin.",
-    suggest_ok_msg: "Önerin gönderildi. FlashNX'ı geliştirmeye yardım için teşekkürler.",
+    kbd_suggest_header: "FlashNX - Fikir öner",
+    kbd_suggest_guide: "FlashNX için fikrin. FlashNX'in herkese açık GitHub sayfasında olduğu gibi yayımlanır.",
+    suggest_ok_msg: "Fikrin gönderildi. FlashNX'i geliştirmeye yardım ettiğin için teşekkürler.",
 };
 
 /// Current language, as a `Lang` index. Default English; overridden by
