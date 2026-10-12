@@ -47,7 +47,7 @@ The same tab also imports from a URL: a direct `.swf`, an archive.org item, or a
 | **L / R** | Switch tabs (Play / Import / Settings) |
 | D-pad or sticks | Move in the cover gallery |
 | **A** | Play |
-| **Y** | Sort by name, date added, last played, most played or size (**X** reverses) |
+| **Y** | Sort by name, date added, last played, most played or size (**X** flips the order, **A** applies) |
 | **−** | Search by name |
 | **+** | Game options: favorite, controls, rename, cover, delete |
 
@@ -63,7 +63,7 @@ Your library size is shown under the logo. Quit, bug report and suggestions live
 | **Y** | Sort by date added, name, source or file count |
 | **+** | Entry details, plus edit, favorite and delete |
 
-Each row shows a readable name, a `SWF` or `LIST` tag, and how many of that source's files are already on your card. Accepts archive.org items and direct `.swf` URLs. The list scrolls smoothly and can be dragged with a finger.
+Each row shows a readable name, an icon saying whether it is a single file or an archive, and how many of that source's files are already on your card. Accepts archive.org items and direct `.swf` URLs. The list scrolls smoothly and can be dragged with a finger.
 
 **In game**
 
@@ -110,7 +110,8 @@ Plug in a second controller and you get **two players**, each with their own bin
 
 **The app itself**
 
-- **9 languages**: English, French, Spanish, Russian, German, Italian, Portuguese, Turkish and Simplified Chinese, auto-detected from the console language. Chinese needs the memory a HOME-menu entry gets; started from the Album, FlashNX falls back to English and says why.
+- **9 languages**: English, French, Spanish, Russian, German, Italian, Portuguese, Turkish and Simplified Chinese, auto-detected from the console language, all drawn in the console's own fonts with its button glyphs in the hints.
+- **Interface sounds** for moving, choosing and going back, which can be turned off in Settings.
 - **Report a bug or send a suggestion** from the Settings tab. It opens an issue on this repository through a small relay, with no account and no login, and a report carries the game's details so a broken game can actually be identified.
 
 ## Tested games
@@ -134,6 +135,7 @@ FlashNX is only a **Switch integration layer**. All credit for the Flash emulati
 - **[devkitPro](https://devkitpro.org/) / libnx** *(ISC)*: Switch toolchain and Horizon API.
 - **[switch-mesa](https://github.com/devkitPro/pacman-packages)** *(MIT)*: OpenGL/GLES via Nouveau, the graphics backend.
 - **Networking**: [libcurl](https://curl.se/) · [Mbed-TLS](https://github.com/Mbed-TLS/mbedtls) · [zlib](https://zlib.net/) · [Mozilla](https://curl.se/docs/caextract.html) CA bundle. **Rust crates**: [jpeg-decoder](https://github.com/image-rs/jpeg-decoder) (fork patched for newlib) · `png` · `serde` · `tracing` · `flate2` · `getrandom`, plus Ruffle's own dependencies.
+- **[Lucide](https://lucide.dev/)** *(ISC, with icons from Feather under MIT)*: the interface icons, as a font subset built by `scripts/make_icon_font.py`; both notices are in `rust/src/backend/render/kit/icons-LICENSE.txt`.
 - **[Flashpoint Archive](https://flashpointarchive.org/)**: the Flash preservation project. FlashNX uses its public APIs so you can find cover art and download the games you choose. Preserved games remain the property of their original creators, and FlashNX only fetches what you explicitly request.
 
 Thanks to the Switch homebrew ecosystem, whose projects were studied during the port's R&D without reusing code: [ScummVM](https://www.scummvm.org/), the PPSSPP Switch port, [Tico](https://github.com/ticohq/tico), [dawn-switch](https://github.com/dantiicu/dawn-switch), and the devkitPro / GBAtemp community.

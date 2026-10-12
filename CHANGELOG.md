@@ -2,6 +2,37 @@
 
 Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://github.com/ruffle-rs/ruffle).
 
+## Unreleased
+
+The whole interface is redrawn. Every screen now uses the console's own fonts, at their real size and with every accent, Cyrillic and Chinese character drawn properly; buttons are shown with the console's own glyphs; and the menus share one set of parts, so the same thing looks and behaves the same everywhere.
+
+### Interface
+
+- **The console's fonts and button glyphs everywhere.** The hand-drawn capitals are gone: text is drawn in the system font at the size it is shown, in natural case, and the hints along the bottom read as a button and a word (the A glyph, "Play") instead of a sentence of "A:PLAY +:OPTIONS".
+- **Icons.** Rows, settings, notices and the importer use a small icon set (Lucide), so a row says what it does before it is read.
+- **Covers of every shape.** A cover fills its tile when little would be cropped, and otherwise opens to the whole picture over its own blurred colours when it is selected. The detail panels of the List, Strip and Shelf views show the cover rounded, with a soft shadow.
+- **Settings** is two columns: the settings in groups with their current value on the left, and on the right a card explaining the selected one. The home view is chosen from drawings of the four layouts, and the language picker ticks the one in use.
+- **The pause menu is a panel down the left side**, over the game, with where you are written on top ("Pause › Screen"), a line explaining the selected row, and a B hint that says where it goes ("Resume game", "Back"). Controls and cursor, and the profile screens, are pages of that same panel.
+- **Import**: each source shows whether it is a file or an archive, how much of it is on your card (green when complete), and the hints follow the row. Downloads, loading and the games folder move use one progress card.
+- **Questions that delete something** have two buttons and start on Cancel.
+- **Game options** show the game's cover, size, engine and time played beside the actions, and the folder the game is in.
+- **Interface sounds**: a soft click when moving, choosing, going back or switching tabs. They can be turned off in Settings.
+
+### Changed
+
+- **Left and Right change values both ways**: game defaults, the SCREEN rows, OVERCLOCK, cursor speed, cursor visibility, gyroscope, and the zoom by steps of 10 %.
+- The pause menu no longer wraps from Resume to Quit, so one press of Up can no longer land on Quit.
+- Sorting waits for A: X flips the order shown, and B leaves the list as it was.
+- Holding L or R switches one tab, not one every 80 ms.
+- In the Flashpoint results, − searches again, as in every other list, and A in a game's details downloads it.
+- The empty library shows the folder FlashNX really uses, and − there no longer quits the app.
+
+### Fixed
+
+- After a search or a sort in Import, the cursor lands on the first source instead of the add row.
+- Clearing a saved address in the keyboard cancels the edit instead of deleting the source without asking.
+- Translations: broken capitals ("DÉplacer"), keyboard guides written in transliterated Russian, Turkish words missing ı, ş and ğ, and labels cut short for the old font.
+
 ## v1.9.0 (2026-10-09)
 
 Most of the games measured for this release now run at full speed. ActionScript 3 is compiled to native code, the overclock turns itself on only when a game falls behind, memory goes much further in the biggest games, saving no longer makes a game stutter, the cursor can follow the gyroscope, and a game can have its own tile on the HOME menu.
