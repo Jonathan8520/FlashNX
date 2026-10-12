@@ -7525,9 +7525,11 @@ fn with_source_sheet<R>(
         1 => help_edit.as_str(),
         _ => lc.histdel_msg,
     };
+    // What A does on the row. The favourite is a switch, as in a game's
+    // options, and says so in the same word: it read "Ajouter aux favoris" /
+    // "Retirer des favoris" here and "Changer" there for the same switch.
     let a_verb = match selection {
-        0 if fav => lc.opt_unfavorite,
-        0 => u.imp_fav_add,
+        0 => u.change,
         1 => u.edit,
         _ => lc.opt_delete,
     };
