@@ -3721,6 +3721,12 @@ fn set_screen_selection(s: &mut State, idx: usize) -> bool {
             put!(selection, Screen::SendFailed { row, selection: idx })
         }
         Screen::GamesDirPicker { selection, scroll } => {
+            // Past the rows: the crumb and the column (`subpage_tap`).
+            let rows = 1 + browse_parent(&s.dir_path).is_some() as usize + s.dir_browse.len();
+            if idx >= rows {
+                settings_tab::subpage_tap(s, idx - rows);
+                return false;
+            }
             put!(selection, Screen::GamesDirPicker { selection: idx, scroll })
         }
         Screen::GamesDirConfirm { selection } => {
@@ -3763,6 +3769,11 @@ fn set_screen_selection(s: &mut State, idx: usize) -> bool {
             put!(selection, Screen::SortModal { selection: idx, prev_sel, prev_scroll, dirs })
         }
         Screen::BugPicker { selection, scroll_offset } => {
+            let rows = s.entries.len();
+            if idx >= rows {
+                settings_tab::subpage_tap(s, idx - rows);
+                return false;
+            }
             put!(selection, Screen::BugPicker { selection: idx, scroll_offset })
         }
         Screen::TouchesMenu { game_idx, selection } => {
@@ -5225,8 +5236,9 @@ fn browse_go_up(s: &mut State, path: &str) {
 /// Folder browser of RÉGLAGES > Bibliothèque > Dossier des jeux (#79).
 ///
 /// Row 0 chooses the folder currently shown; the rows below descend into its
-/// subfolders. B goes back UP a level rather than out, which is what a file
-/// browser is expected to do — leaving happens from the top level, or with `-`.
+/// subfolders. Below the folder the browser opened on, B goes back UP a level
+/// rather than out, which is what a file browser is expected to do; from that
+/// folder or above it B leaves, and `-` leaves from anywhere.
 fn handle_games_dir_input(s: &mut State, button: &str, mut selection: usize, mut scroll: usize) {
     let path = s.dir_path.clone();
     // Rows: 0 = choose this folder, then "up" unless we are at the card root,
@@ -5285,10 +5297,12 @@ fn handle_games_dir_input(s: &mut State, button: &str, mut selection: usize, mut
             return;
         }
         "B" => {
-            // Same as the "up" row — including landing on the folder just left,
-            // which is the way most people go back up and the reason the fix on
-            // the row alone was invisible.
-            if browse_parent(&path).is_some() {
+            // Same as the "up" row below the folder the browser opened on --
+            // including landing on the folder just left, which is the way most
+            // people go back up and the reason the fix on the row alone was
+            // invisible. From that folder, or above it, B leaves
+            // (`settings_tab::b_climbs`).
+            if settings_tab::b_climbs(&path) && browse_parent(&path).is_some() {
                 browse_go_up(s, &path);
             } else {
                 s.dir_browse.clear();

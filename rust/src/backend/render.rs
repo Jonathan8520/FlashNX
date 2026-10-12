@@ -5898,6 +5898,20 @@ pub fn ui_cells_publish(kind: u32, rects: std::vec::Vec<(f32, f32, f32, f32)>) {
     }
 }
 
+/// Put `rects` after the first `base` cells of `kind`'s table: a page whose
+/// list published its rows makes more of the screen tappable (a crumb, a
+/// column beside the list) without the list knowing. Cut back to `base`
+/// first, so a frame that adds them again does not pile them up; nothing is
+/// added to another screen's table, nor to one shorter than the list.
+pub fn ui_cells_set_tail(kind: u32, base: usize, rects: std::vec::Vec<(f32, f32, f32, f32)>) {
+    if let Ok(mut g) = UI_CELLS.lock() {
+        if g.0 == kind && g.1.len() >= base {
+            g.1.truncate(base);
+            g.1.extend(rects);
+        }
+    }
+}
+
 /// Where the three navbar tabs are, and whether the strip is even on screen.
 ///
 /// Its OWN table, not `UI_CELLS`: the navbar is drawn OVER a screen that has
