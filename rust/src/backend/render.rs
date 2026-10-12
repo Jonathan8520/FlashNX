@@ -341,6 +341,46 @@ const TOUCHES_TITLE_PX: f32 = 24.0;
 /// "None", the Minus caption: quieter than any value.
 const TOUCHES_QUIET: u32 = 0xFF_5A_6A_8F;
 
+/// The band of the line about the focused row or key, over the footer: one
+/// line in landscape; in portrait, where a line is half as long, up to three
+/// lines of 22 px (what a stick that moves the cursor does runs to two in
+/// French, three with the wider Cyrillic of the stand-in font).
+const TOUCHES_HELP_LINES_PORTRAIT: usize = 3;
+
+fn touches_help_band(portrait: bool) -> f32 {
+    if portrait {
+        (theme::size::LABEL * 1.45).round() * TOUCHES_HELP_LINES_PORTRAIT as f32 + 14.0
+    } else {
+        36.0
+    }
+}
+
+/// Which column of the controls editor slot `i` of `keymap::PAD_SLOTS` sits
+/// in (0 for the left hand, 1 for the right) and its place down that column,
+/// read from its chip. The portrait layout stacks the rows under the picture
+/// in this order, the landscape one draws them at their chips, so the two
+/// show the same columns in the same order and `menu::pad_step`, which walks
+/// the chips, moves the cursor the way either one is drawn.
+fn pad_slot_column(i: usize) -> (usize, usize) {
+    let slots = crate::keymap::PAD_SLOTS;
+    let Some(s) = slots.get(i) else { return (0, 0) };
+    let col = |x: f32| usize::from(x >= TOUCHES_PIC_MID);
+    let c = col(s.chip.0);
+    let rank = slots.iter().filter(|o| col(o.chip.0) == c && o.chip.1 < s.chip.1).count();
+    (c, rank)
+}
+
+/// The most rows either column of the controls editor holds.
+fn pad_column_len() -> usize {
+    let slots = crate::keymap::PAD_SLOTS;
+    let left = slots.iter().filter(|s| s.chip.0 < TOUCHES_PIC_MID).count();
+    left.max(slots.len() - left)
+}
+
+/// The middle of the editor's controller picture, in pad units: the shell's.
+/// Chips left of it belong to the left hand.
+const TOUCHES_PIC_MID: f32 = 23.0;
+
 /// The header's segmented switches.
 const SEG_H: f32 = 36.0;
 const SEG_INSET: f32 = 3.0;
@@ -10037,20 +10077,35 @@ impl SwitchRenderBackend {
         const ICON_MOD_COL: u32 = 0xFF_2E_6E_63;
         const ICON_MOD_NUB: u32 = 0xFF_58_C0_AE;
         const ICON_LOCK_COL: u32 = 0xFF_22_32_4F;
-        /// The band of the line about the focused row, over the footer.
-        const HELP_H: f32 = 36.0;
         /// Between a column of rows and the picture.
         const COL_GAP: f32 = 28.0;
         /// The picture's width in pad units: the shell and its rail buttons
         /// (13.9 to 32.1), with a little air, centred on the shell's middle.
         const PIC_UNITS: f32 = 18.4;
-        const PIC_MID: f32 = 23.0;
+        const PIC_MID: f32 = TOUCHES_PIC_MID;
+        // Portrait (a turned picture). The picture is cropped to what it
+        // draws: from just over the shoulder buttons (5.2) to under the Minus
+        // note (20.6), so it can span the window instead of sitting between
+        // two columns of rows a third of the width each.
+        const P_PIC_TOP: f32 = 4.8;
+        const P_PIC_SPAN: f32 = 21.3 - P_PIC_TOP;
+        /// A row's pitch under the picture: a comfortable 38 px, never under
+        /// 30, and the gap between a row and the next.
+        const P_PITCH: f32 = 38.0;
+        const P_PITCH_MIN: f32 = 30.0;
+        const P_PITCH_MAX: f32 = 44.0;
+        const P_ROW_GAP: f32 = 6.0;
+        /// Between the header's hairline and the picture, the picture and the
+        /// rows; between the two columns.
+        const P_GAP: f32 = 12.0;
+        const P_COL_GAP: f32 = 16.0;
 
         let lc = crate::loc::s();
         let u = crate::loc_ui::ui();
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
         let inner_w = vw - 2.0 * TOUCHES_MARGIN - 2.0 * TOUCHES_PAD_X;
+        let portrait = vh > vw;
 
         // The header's two switches, measured first: on a narrow (turned)
         // screen they take a row of their own under the title.
@@ -10067,17 +10122,40 @@ impl SwitchRenderBackend {
         // after it) + 8 + 8, so the R glyph ends on the window's padding.
         let switches_w = bx + pw + bl + lw + br + 41.0;
         let title_w = self.kit_measure(lc.keys_title, TOUCHES_TITLE_PX);
-        let wide = title_w + 14.0 + 120.0 + 24.0 + switches_w <= inner_w;
-        let head_h = if wide { TOUCHES_HEAD_H } else { TOUCHES_HEAD_H + 44.0 };
+        let wide = !portrait && title_w + 14.0 + 120.0 + 24.0 + switches_w <= inner_w;
+        // Even a row of their own can be too narrow for both switches (every
+        // combo layer live, in Russian): the layers then go on a row of their
+        // own under the players.
+        let split = !wide && switches_w > inner_w;
+        let head_h = match (wide, split) {
+            (true, _) => TOUCHES_HEAD_H,
+            (false, false) => TOUCHES_HEAD_H + 44.0,
+            (false, true) => TOUCHES_HEAD_H + 88.0,
+        };
+        let help_lh = (size::LABEL * 1.45).round();
+        let help_h = touches_help_band(portrait);
 
         // ONE scale from BOTH axes: this is a picture of an object, and letting
-        // the axes disagree would stretch the controller. In landscape the height
-        // decides and the window fills the screen; a turned picture gives a
-        // narrow viewport, the width decides, and the window shrinks to the pad.
-        let avail_h = (vh - 2.0 * TOUCHES_MARGIN - head_h - HELP_H - TOUCHES_FOOT_H).max(80.0);
-        let unit = (inner_w / crate::keymap::PAD_UNITS_W).min(avail_h / crate::keymap::PAD_UNITS_H);
-        let pad_h = crate::keymap::PAD_UNITS_H * unit;
-        let (x, y, w, h) = self.touches_window(head_h + pad_h + HELP_H + TOUCHES_FOOT_H);
+        // the axes disagree would stretch the controller. In landscape the
+        // height decides and the window fills the screen. In portrait the rows
+        // go under the picture in two columns: they take a comfortable pitch
+        // first, and the picture gets the height that leaves, up to the width.
+        let n_rows = pad_column_len() as f32;
+        let (unit, pitch, content_h) = if portrait {
+            let avail = (vh - 2.0 * TOUCHES_MARGIN - head_h - help_h - TOUCHES_FOOT_H - 2.0 * P_GAP).max(120.0);
+            let unit_w = inner_w / PIC_UNITS;
+            let mut unit = ((avail - n_rows * P_PITCH) / P_PIC_SPAN).min(unit_w);
+            if unit < 16.0 {
+                unit = 16.0f32.min(unit_w);
+            }
+            let pitch = ((avail - P_PIC_SPAN * unit) / n_rows).clamp(P_PITCH_MIN, P_PITCH_MAX);
+            (unit, pitch, head_h + P_GAP + P_PIC_SPAN * unit + P_GAP + n_rows * pitch + help_h + TOUCHES_FOOT_H)
+        } else {
+            let avail_h = (vh - 2.0 * TOUCHES_MARGIN - head_h - help_h - TOUCHES_FOOT_H).max(80.0);
+            let unit = (inner_w / crate::keymap::PAD_UNITS_W).min(avail_h / crate::keymap::PAD_UNITS_H);
+            (unit, 0.0, head_h + crate::keymap::PAD_UNITS_H * unit + help_h + TOUCHES_FOOT_H)
+        };
+        let (x, y, w, h) = self.touches_window(content_h);
         let left = x + TOUCHES_PAD_X;
         let right = x + w - TOUCHES_PAD_X;
 
@@ -10085,8 +10163,10 @@ impl SwitchRenderBackend {
         self.touches_crumbs(left, y + 30.0, inner_w, v.crumbs);
         let ty = y + 66.0;
         let tw = self.kit_text_mid(left, ty, TOUCHES_TITLE_PX, lc.keys_title, col::TEXT);
+        // On the title's line at the right; on a row of their own under the
+        // title, from the left like the title over them.
         let sw_cy = if wide { ty } else { y + 110.0 };
-        let sw_x = right - switches_w;
+        let sw_x = if wide { right - switches_w } else { left };
         let subject_x = left + tw + 14.0;
         let subject_max = if wide { sw_x - 24.0 - subject_x } else { right - subject_x };
         if subject_max > 40.0 && !v.subject.is_empty() {
@@ -10102,28 +10182,47 @@ impl SwitchRenderBackend {
         cx += self.kit_button(cx, sw_cy, gpx, Btn::X, col::PILL_INK) + 8.0;
         let player_cells = self.pad_segments(cx, sw_cy, &players, if v.player == 2 { 1 } else { 0 }, &[false; 2]);
         cx += pw + 8.0;
-        self.draw_overlay_rect(cx, sw_cy - 12.0, 1.0, 24.0, col::PANEL_LINE);
-        cx += 9.0;
-        cx += self.kit_button(cx, sw_cy, gpx, Btn::L, col::PILL_INK) + 8.0;
-        let layer_cells = self.pad_segments(cx, sw_cy, &layers, v.layer.min(4), &v.live_layers);
+        let lay_cy = if split {
+            cx = left;
+            sw_cy + 44.0
+        } else {
+            self.draw_overlay_rect(cx, sw_cy - 12.0, 1.0, 24.0, col::PANEL_LINE);
+            cx += 9.0;
+            sw_cy
+        };
+        cx += self.kit_button(cx, lay_cy, gpx, Btn::L, col::PILL_INK) + 8.0;
+        let layer_cells = self.pad_segments(cx, lay_cy, &layers, v.layer.min(4), &v.live_layers);
         cx += lw + 8.0;
-        self.kit_button(cx, sw_cy, gpx, Btn::R, col::PILL_INK);
+        self.kit_button(cx, lay_cy, gpx, Btn::R, col::PILL_INK);
         self.draw_overlay_rect(left, y + head_h - 6.0, inner_w, 1.0, col::LINE);
 
         // Units -> pixels. The picture is centred in the window at the one
-        // scale; the two columns of rows run from the window's padding to the
-        // picture, so they line up with the header and the footer whatever room
-        // the height leaves. Their heights stay in units: a row and the button
-        // it names are what the eye pairs.
+        // scale. In landscape the two columns of rows run from the window's
+        // padding to the picture, so they line up with the header and the
+        // footer whatever room the height leaves, and their heights stay in
+        // units: a row and the button it names are what the eye pairs. In
+        // portrait they are stacked under the picture, the left hand's on the
+        // left, in the order the landscape columns read, one height for all.
         let ox = x + w * 0.5 - PIC_MID * unit;
-        let oy = y + head_h;
+        let oy = if portrait { y + head_h + P_GAP - P_PIC_TOP * unit } else { y + head_h };
         let px = |ux: f32| ox + ux * unit;
         let py = |uy: f32| oy + uy * unit;
-        let col_w = ((inner_w - PIC_UNITS * unit) * 0.5 - COL_GAP).max(40.0);
+        let rows_top = y + head_h + P_GAP + P_PIC_SPAN * unit + P_GAP;
+        let col_w = if portrait {
+            (inner_w - P_COL_GAP) * 0.5
+        } else {
+            ((inner_w - PIC_UNITS * unit) * 0.5 - COL_GAP).max(40.0)
+        };
         let row_rect = |i: usize| -> (f32, f32, f32, f32) {
             let Some(s) = PAD_SLOTS.get(i) else { return (0.0, 0.0, 0.0, 0.0) };
-            let rx = if s.chip.0 < PIC_MID { left } else { right - col_w };
-            (rx, py(s.chip.1), col_w, s.chip.3 * unit)
+            if portrait {
+                let (c, k) = pad_slot_column(i);
+                let rx = left + c as f32 * (col_w + P_COL_GAP);
+                (rx, rows_top + k as f32 * pitch, col_w, pitch - P_ROW_GAP)
+            } else {
+                let rx = if s.chip.0 < PIC_MID { left } else { right - col_w };
+                (rx, py(s.chip.1), col_w, s.chip.3 * unit)
+            }
         };
 
         // ── The shell ────────────────────────────────────────────────────
@@ -10263,11 +10362,14 @@ impl SwitchRenderBackend {
         }
 
         // ── The rows ─────────────────────────────────────────────────────
-        let row_h = PAD_SLOTS.first().map(|s| s.chip.3 * unit).unwrap_or(0.0);
+        let row_h = row_rect(0).3;
         let txt = (row_h * 0.5).clamp(10.0, size::LABEL);
         // One badge column for every row, as wide as the widest badge, so the
-        // values start in one place down both columns.
-        let mut badge_w: f32 = 2.4 * unit;
+        // values start in one place down both columns. The floor follows the
+        // picture in landscape, where the rows are in its units; in portrait
+        // the picture is larger and the columns narrower, and a floor taken
+        // from it would only take room from the values.
+        let mut badge_w: f32 = if portrait { 2.4 * txt } else { 2.4 * unit };
         for slot in PAD_SLOTS {
             badge_w = badge_w.max(self.pad_badge_width(slot.glyph, txt));
         }
@@ -10345,11 +10447,21 @@ impl SwitchRenderBackend {
         }
 
         // ── The line about the focused row, and the footer ───────────────
-        let help_cy = y + h - TOUCHES_FOOT_H - HELP_H * 0.5;
+        // One line in landscape; in portrait, where a line is half as long,
+        // it wraps in its band (centred there, the icon on its first line).
+        let help_cy = y + h - TOUCHES_FOOT_H - help_h * 0.5;
         if !v.help.is_empty() {
-            self.kit_icon(left, help_cy, 16.0, Icon::Info, col::TEXT3);
-            let t = self.kit_fit(v.help, size::LABEL, inner_w - 26.0);
-            self.kit_text_mid(left + 26.0, help_cy, size::LABEL, &t, col::TEXT2);
+            let lines = if portrait {
+                self.kit_wrap(v.help, size::LABEL, inner_w - 26.0, TOUCHES_HELP_LINES_PORTRAIT)
+            } else {
+                std::vec![self.kit_fit(v.help, size::LABEL, inner_w - 26.0)]
+            };
+            let mut ly = help_cy - help_lh * (lines.len().max(1) - 1) as f32 * 0.5;
+            self.kit_icon(left, ly, 16.0, Icon::Info, col::TEXT3);
+            for line in &lines {
+                self.kit_text_mid(left + 26.0, ly, size::LABEL, line, col::TEXT2);
+                ly += help_lh;
+            }
         }
         let hints_profiles: [kit::text::HintItem; 3] =
             [(&[Btn::A], u.edit), (&[Btn::Y], u.shared_profiles), (&[Btn::B], u.back)];
@@ -10579,7 +10691,11 @@ impl SwitchRenderBackend {
             let cink = if ink == theme::col::TEXT { theme::col::TEXT2 } else { ink };
             let cpx = pad_caption_px(px);
             let cx = gx + gw + PAD_CAPTION_GAP;
-            let c = self.kit_fit(caption, cpx, (x + w - cx).max(0.0));
+            // The room is what `w` leaves after the glyph, not what is left of
+            // `x + w` once the glyph went to a whole pixel: on the right-hand
+            // column `x` has a fraction, and the half pixel the rounding took
+            // cut the widest caption ("appui") that `w` was measured on.
+            let c = self.kit_fit(caption, cpx, (w - gw - PAD_CAPTION_GAP).max(0.0));
             self.kit_text_mid(cx, cy, cpx, &c, cink);
         }
     }
