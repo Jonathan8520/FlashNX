@@ -649,6 +649,12 @@ pub(crate) fn child_dir(path: &str, name: &str) -> std::string::String {
     }
 }
 
+/// Whether `path` is the card's root, which cannot take the library: the
+/// paths of the move and the library's own root are built for a folder.
+pub(crate) fn is_card_root(path: &str) -> bool {
+    path.trim_end_matches('/') == "sdmc:"
+}
+
 /// Whether two folder paths name the same folder, a trailing slash or not.
 pub(crate) fn same_dir(a: &str, b: &str) -> bool {
     a.trim_end_matches('/') == b.trim_end_matches('/')
@@ -1096,6 +1102,9 @@ fn folders_page(
     // one in use instead of closing the browser without a word.
     rows.push(if same_dir(path, &root) {
         Row::new(Icon::CircleCheck, u.dir_current).dim(true)
+    } else if is_card_root(path) {
+        // The root is no destination: said on the row A would act on.
+        Row::new(Icon::Check, u.dir_root_refused).dim(true)
     } else {
         Row::new(Icon::Check, u.dir_choose)
     });

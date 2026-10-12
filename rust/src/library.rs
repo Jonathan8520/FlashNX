@@ -5241,6 +5241,14 @@ fn handle_games_dir_input(s: &mut State, button: &str, mut selection: usize, mut
         "A" => {
             let root = primary_root();
             if selection == 0 {
+                // The card's root cannot take the library: its row says so,
+                // dimmed, and A on it does nothing. A move there wrote
+                // "sdmc://game.swf" paths and recorded "sdmc:" as the library,
+                // which then held every folder of the card, so it could never
+                // be moved out again.
+                if settings_tab::is_card_root(&path) {
+                    return;
+                }
                 // Choosing a folder moves the library into it. There is no
                 // "leave them" option: the old folder stays scanned either way,
                 // so leaving them changed nothing a user could see except
