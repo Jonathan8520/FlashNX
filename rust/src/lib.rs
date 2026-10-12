@@ -3413,10 +3413,10 @@ pub extern "C" fn ruffle_keymap_set_cursor_speed(idx: c_int) {
 pub extern "C" fn ruffle_touches_open() {
     // In-game, the pause TOUCHES entry now opens the sub-menu (#20 Option 1):
     // edit / apply / share / revert / cursor speed. The library opens the editor
-    // directly via `menu::open`.
+    // directly via `menu::open`. No pop: the page comes out beside the pause as
+    // a cascade (`ruffle_touches_draw` draws sheets without one), and arming the
+    // window timeline here only made a quick B replay the whole pause's opening.
     menu::open_submenu();
-    // Scale the panel in, same pop as the library / pause modals.
-    backend::render::modal_open_begin();
 }
 
 /// Last in-game TOUCHES screen kind drawn (0 = none), so `ruffle_touches_draw`
