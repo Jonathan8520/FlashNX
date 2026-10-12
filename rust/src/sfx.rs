@@ -184,14 +184,13 @@ pub(crate) fn after_input(
         }
         return;
     }
-    // Into or out of the RÉGLAGES pane: a level, not a step of the cursor.
+    // Into or out of the RÉGLAGES pane: a level, not a step of the cursor,
+    // whatever made it. Out is B, `-` or a fresh Left, which goes back to the
+    // column exactly as B does (input rule 3) and sounded like a move of the
+    // cursor while the sound followed the button; in is A or Right.
     if let (Screen::Settings { in_pane: a, .. }, Screen::Settings { in_pane: b, .. }) = (before, after) {
         if a != b {
-            play(match button {
-                "B" | "Minus" => Sfx::Back,
-                "A" => Sfx::Decide,
-                _ => Sfx::Move,
-            });
+            play(if b { Sfx::Decide } else { Sfx::Back });
             return;
         }
     }

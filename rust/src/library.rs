@@ -6445,8 +6445,17 @@ fn touches_write(s: &mut State, game_idx: usize, selection: usize, v: u16) {
 /// A fresh press toward the rail the game's options folded into, on the right
 /// of every page beside them: back a level, like B (input rule 3). A held
 /// direction stays put.
+///
+/// Like B down to its sound, chosen here: going back between two pages of
+/// the one panel stack, the screens alone read a press that is not B as A
+/// (`sfx::after_input`). Asked only once B and `-` did not match, by arms
+/// that go back when it answers true.
 fn toward_options_rail(button: &str) -> bool {
-    matches!(button, "Right" | "StickLRight") && nav_may_wrap()
+    let back = matches!(button, "Right" | "StickLRight") && nav_may_wrap();
+    if back {
+        crate::sfx::choose(crate::sfx::Sfx::Back);
+    }
+    back
 }
 
 /// The Touches et curseur page of a game's options (#20): moving, edit, and

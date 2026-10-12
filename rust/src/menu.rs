@@ -87,8 +87,17 @@ impl TouchesRow {
 /// A fresh press toward the pause folded into its rail, on the left of every
 /// page beside it: back a level, like B (input rule 3). A held direction
 /// stays put, so a Left held on the way into a page does not bounce out.
+///
+/// Like B down to its sound, chosen here: going back from one page to
+/// another (a preview to the profiles, the profiles to Touches et curseur),
+/// `input` reads a press that is not B as A. Asked only once B and `-` did
+/// not match, by arms that go back when it answers true.
 fn toward_rail(button: &str) -> bool {
-    matches!(button, "Left" | "StickLLeft") && crate::library::nav_may_wrap()
+    let back = matches!(button, "Left" | "StickLLeft") && crate::library::nav_may_wrap();
+    if back {
+        crate::sfx::choose(crate::sfx::Sfx::Back);
+    }
+    back
 }
 
 // Toast kinds (match `SwitchRenderBackend::draw_toast`): 0 green, 1 red, 2 blue.
