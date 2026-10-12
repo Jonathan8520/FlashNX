@@ -10062,8 +10062,12 @@ fn touch_kind(screen: Screen) -> u32 {
 fn modal_kind(screen: Screen) -> u8 {
     // A game's options and everything opened from them are ONE panel stack
     // (`options_panel`): the panel slides in from the right once, its pages
-    // come out beside it, and none of them pops on its own.
-    if options_panel::is_options_family(screen) {
+    // come out beside it, and none of them pops on its own. The frame of a
+    // profile flow's loading card is part of it (`defer_net` is only called
+    // from there): counted as no window at all, it made the result screen
+    // "open" again, and both panels slid back in from the right edge after
+    // every apply, share or delete.
+    if options_panel::is_options_family(screen) || matches!(screen, Screen::ProfileLoading) {
         return 1;
     }
     match screen {
@@ -11067,7 +11071,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
     // when it comes from somewhere else: back from the controls editor (drawn
     // over the same panels) the panel is already in place, and sliding it in
     // again would replay its opening for nothing.
-    let class: u8 = if options_panel::is_options_family(screen) {
+    let class: u8 = if options_panel::is_options_family(screen) || matches!(screen, Screen::ProfileLoading) {
         1
     } else if matches!(screen, Screen::TouchesEditor { .. }) {
         2
