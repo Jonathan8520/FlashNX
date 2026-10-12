@@ -183,23 +183,52 @@ pub fn touch_select(idx: usize) -> bool {
         // on the next A -- and `panic = "abort"` makes that a console fatal,
         // not an exception.
         Screen::List { selection } => {
-            if idx >= crate::keymap::PAD_SLOTS.len() {
+            use crate::backend::render::{PAD_CELL_ICON, PAD_CELL_LAYER, PAD_CELL_PLAYER};
+            let n = crate::keymap::PAD_SLOTS.len();
+            // The header's switches: a tap switches, as X and the shoulders
+            // do, and there is nothing to take after it.
+            if (PAD_CELL_PLAYER..PAD_CELL_ICON).contains(&idx) {
+                let before = (keymap::edit_player(), keymap::edit_subtab_index());
+                if idx < PAD_CELL_LAYER {
+                    keymap::set_edit_player(if idx == PAD_CELL_PLAYER { 1 } else { 2 });
+                } else {
+                    keymap::set_edit_subtab_index(idx - PAD_CELL_LAYER);
+                }
+                if (keymap::edit_player(), keymap::edit_subtab_index()) != before {
+                    crate::sfx::play(crate::sfx::Sfx::Tab);
+                }
+                s.screen = Screen::List { selection: unstick_cursor(selection) };
                 return false;
             }
+            // A control on the picture stands for its row. A stick stands for
+            // the one of its five rows already under the cursor, else its
+            // first, so a second tap on it opens the row being read.
+            let row = if (PAD_CELL_ICON..PAD_CELL_ICON + n).contains(&idx) {
+                let r = idx - PAD_CELL_ICON;
+                let same_stick = crate::keymap::PAD_SLOTS
+                    .get(r)
+                    .zip(crate::keymap::PAD_SLOTS.get(selection))
+                    .is_some_and(|(a, b)| matches!(a.shape, keymap::PadIcon::Stick(_)) && a.icon == b.icon);
+                if same_stick { selection } else { r }
+            } else if idx < n {
+                idx
+            } else {
+                return false;
+            };
             // A modifier row takes no cursor from a finger either, and returning
             // false means the tap is simply ignored rather than counted as the
             // first half of a double-tap that would then activate it.
             if crate::keymap::PAD_SLOTS
-                .get(idx)
+                .get(row)
                 .map(|s| crate::keymap::slot_is_modifier(s.name))
                 .unwrap_or(false)
             {
                 return false;
             }
-            if selection == idx {
+            if selection == row {
                 return true;
             }
-            s.screen = Screen::List { selection: idx };
+            s.screen = Screen::List { selection: row };
             false
         }
         // The rows of the sub-menu and the profile picker are pages of the
@@ -262,6 +291,22 @@ pub fn screen_kind() -> u8 {
             Screen::Loading => 9,
         })
         .unwrap_or(0)
+}
+
+/// Whether two screens (`screen_kind`) are one window: the editor and its key
+/// picker share `render::touches_window`, so going between them changes what
+/// is in the window and must not pop it in again after every key.
+pub fn same_window(a: u8, b: u8) -> bool {
+    matches!((a, b), (2, 3) | (3, 2))
+}
+
+/// `screen_kind`, the editor and its key picker counted as one window: what
+/// decides whether a window pops in.
+pub fn window_kind() -> u8 {
+    match screen_kind() {
+        3 => 2,
+        k => k,
+    }
 }
 
 /// Whether the screen up is a page of the pause sheet (the sub-menu, the
@@ -421,8 +466,14 @@ fn drive_pending_net() {
 /// event was consumed (input shouldn't fall through to the game / pause menu).
 pub fn input(button: &str) -> bool {
     // The sound each press deserves, read from what it changed, as in the
-    // launcher (`sfx::after_input`).
+    // launcher (`sfx::after_input`). Two changes the screen does not show by
+    // itself are read here too: the editor's layer, and a refusal (A on a
+    // modifier row, which used to click as if something had toggled).
     let before = TOUCHES.lock().map(|s| s.screen).ok();
+    let layer_before = keymap::edit_subtab_index();
+    let refused = button == "A"
+        && matches!(before, Some(Screen::List { selection })
+            if keymap::PAD_SLOTS.get(selection).is_some_and(|s| keymap::slot_is_modifier(s.name)));
     let consumed = input_inner(button);
     if let (Some(b), Ok(a)) = (before, TOUCHES.lock().map(|s| s.screen)) {
         use crate::sfx::{play, Sfx};
@@ -430,8 +481,16 @@ pub fn input(button: &str) -> bool {
             button,
             "Up" | "Down" | "Left" | "Right" | "StickLUp" | "StickLDown" | "StickLLeft" | "StickLRight"
         );
-        if matches!(a, Screen::Inactive) && !matches!(b, Screen::Inactive) {
+        if refused {
+            play(Sfx::Error);
+        } else if matches!(a, Screen::Inactive) && !matches!(b, Screen::Inactive) {
             play(Sfx::Back);
+        } else if matches!(button, "L" | "R") && matches!(b, Screen::List { .. }) {
+            // A layer is a tab; one that did not change (the end, or a held
+            // shoulder) is silent.
+            if keymap::edit_subtab_index() != layer_before {
+                play(Sfx::Tab);
+            }
         } else if b == a {
             // Nothing moved: a value stepped in place, or a binding was set.
             let stepper = matches!(b, Screen::Menu { selection } if matches!(selection, MENU_CURSOR | MENU_SHOWCURSOR | MENU_GYRO));
@@ -982,7 +1041,9 @@ fn pad_center(i: usize) -> (f32, f32) {
 /// what the player means by Right is "the other hand, same height" — which an
 /// index step would turn into "thirteen rows down". It also means the table in
 /// keymap.rs can be re-laid-out without a matching edit here.
-fn pad_step(cur: usize, dir: PadDir) -> usize {
+///
+/// `wrap`: whether Up and Down may come round at the end of a column.
+fn pad_step(cur: usize, dir: PadDir, wrap: bool) -> usize {
     let n = keymap::PAD_SLOTS.len();
     if n == 0 {
         return cur;
@@ -1013,15 +1074,19 @@ fn pad_step(cur: usize, dir: PadDir) -> usize {
     if let Some((i, _)) = best {
         return i;
     }
-    // Nothing that way. Up and Down wrap inside their own column, the way the
-    // list they replace wrapped; a cursor that stops dead at the top of a column
-    // reads as a stuck stick. Left and Right at the outer edge stay put — there
-    // is no third column to wrap to.
+    // Nothing that way. Up and Down come round inside their own column on a
+    // fresh press, and stop at the end under a held direction, as every list
+    // of the app does (`library::nav_may_wrap`): holding Down used to circle a
+    // column every 80 ms. Left and Right at the outer edge stay put, there is
+    // no third column to wrap to.
     let want_max = match dir {
         PadDir::Up => true,
         PadDir::Down => false,
         _ => return cur,
     };
+    if !wrap {
+        return cur;
+    }
     let mut wrap = cur;
     let mut edge = cy;
     for i in 0..n {
@@ -1060,7 +1125,7 @@ fn unstick_cursor(mut selection: usize) -> usize {
     // column always finds a free row -- but the loop is capped anyway rather
     // than trusting that to stay true.
     for _ in 0..n {
-        let next = pad_step(selection, PadDir::Down);
+        let next = pad_step(selection, PadDir::Down, true);
         if next == selection {
             break;
         }
@@ -1073,14 +1138,15 @@ fn unstick_cursor(mut selection: usize) -> usize {
 }
 
 fn handle_list_input(s: &mut State, button: &str, mut selection: usize) {
+    let wrap = crate::library::nav_may_wrap();
     match button {
-        "Up" | "StickLUp" => selection = pad_step(selection, PadDir::Up),
-        "Down" | "StickLDown" => selection = pad_step(selection, PadDir::Down),
+        "Up" | "StickLUp" => selection = pad_step(selection, PadDir::Up, wrap),
+        "Down" | "StickLDown" => selection = pad_step(selection, PadDir::Down, wrap),
         // Left and Right finally mean something on this screen: the pad has two
         // columns, and they cross to the other hand at the same height. The
         // SHOULDER L/R still change the combo layer, as they always did.
-        "Left" | "StickLLeft" => selection = pad_step(selection, PadDir::Left),
-        "Right" | "StickLRight" => selection = pad_step(selection, PadDir::Right),
+        "Left" | "StickLLeft" => selection = pad_step(selection, PadDir::Left, wrap),
+        "Right" | "StickLRight" => selection = pad_step(selection, PadDir::Right, wrap),
         // Player toggle (issue #40): X flips P1 <-> P2 (2 items, a toggle is fine).
         // P1 and P2 have their OWN combo layers, so the swap can lock or free the
         // row under the cursor.
@@ -1093,6 +1159,12 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize) {
         // edits THAT modifier's own combo layer. Pure view — a modifier becomes
         // active in-game as soon as its layer gets a binding (no separate toggle).
         "L" | "R" => {
+            // One layer per press: the shoulders repeat when held (the
+            // launcher pages long lists with them), and held here they ran
+            // from Normal to R in half a second.
+            if !wrap {
+                return;
+            }
             let cur = keymap::edit_subtab_index();
             let new = if button == "R" {
                 (cur + 1).min(keymap::SUBTAB_MODS.len() - 1)
@@ -1283,23 +1355,84 @@ fn kbd_none_index() -> usize {
 
 /// Horizontal centre (in layout units) of key `i`, for geometric navigation.
 fn kbd_center(i: usize) -> f32 {
-    let (_, _, x, w) = keymap::KEYBOARD[i];
-    x + w * 0.5
+    keymap::KEYBOARD.get(i).map(kbd_center_of).unwrap_or(0.0)
 }
 
-/// Nearest key to `cx` (by centre) among those on `row`. Rows always have ≥1 key,
-/// so this never returns None for a valid row.
-fn kbd_nearest_on_row(row: u8, cx: f32) -> Option<usize> {
-    keymap::KEYBOARD
-        .iter()
-        .enumerate()
-        .filter(|(_, k)| k.1 == row)
-        .min_by(|(ia, _), (ib, _)| {
-            (kbd_center(*ia) - cx)
-                .abs()
-                .total_cmp(&(kbd_center(*ib) - cx).abs())
-        })
-        .map(|(i, _)| i)
+/// The key beside key `cur` on its row, `dir` -1 for Left and 1 for Right.
+/// Past the end of the row, a fresh press comes round to its other end and a
+/// held one stops (`library::nav_may_wrap`): held, it used to circle the row.
+fn kbd_horizontal(cur: usize, dir: i32, wrap: bool) -> usize {
+    let Some(&(_, row, _, _)) = keymap::KEYBOARD.get(cur) else { return cur };
+    let cx = kbd_center(cur);
+    let on_row = || keymap::KEYBOARD.iter().enumerate().filter(move |(_, k)| k.1 == row);
+    let by_centre = |a: &(usize, &(&str, u8, f32, f32)), b: &(usize, &(&str, u8, f32, f32))| {
+        kbd_center_of(a.1).total_cmp(&kbd_center_of(b.1))
+    };
+    let next = if dir < 0 {
+        on_row().filter(|(_, k)| kbd_center_of(k) < cx - 0.01).max_by(by_centre)
+    } else {
+        on_row().filter(|(_, k)| kbd_center_of(k) > cx + 0.01).min_by(by_centre)
+    };
+    match next {
+        Some((i, _)) => i,
+        None if wrap => {
+            let far = if dir < 0 { on_row().max_by(by_centre) } else { on_row().min_by(by_centre) };
+            far.map_or(cur, |(i, _)| i)
+        }
+        None => cur,
+    }
+}
+
+/// The key above (`dir` -1) or below (1) key `cur`: on the nearest row with a
+/// key under the cursor, the key whose span is closest to the cursor's centre.
+/// A row with nothing there (the space under the numpad, above it) is passed
+/// over rather than landed on sideways; when no row has anything under the
+/// cursor, the next row's nearest key it is. A fresh press comes round from
+/// the last row to the first, a held one stops.
+fn kbd_vertical(cur: usize, dir: i32, wrap: bool) -> usize {
+    let Some(&(_, row, _, _)) = keymap::KEYBOARD.get(cur) else { return cur };
+    let cx = kbd_center(cur);
+    let n = keymap::KEYBOARD_ROWS_N as i32;
+    // 0 inside the key's span, else how far outside it the centre falls.
+    let gap = |k: &(&str, u8, f32, f32)| -> f32 {
+        if cx < k.2 {
+            k.2 - cx
+        } else if cx > k.2 + k.3 {
+            cx - (k.2 + k.3)
+        } else {
+            0.0
+        }
+    };
+    let best_on = |r: i32| -> Option<(usize, f32)> {
+        keymap::KEYBOARD
+            .iter()
+            .enumerate()
+            .filter(|(_, k)| k.1 as i32 == r)
+            .map(|(i, k)| (i, gap(k), (kbd_center_of(k) - cx).abs()))
+            .min_by(|a, b| a.1.total_cmp(&b.1).then(a.2.total_cmp(&b.2)))
+            .map(|(i, g, _)| (i, g))
+    };
+    let mut nearest = None;
+    let mut r = row as i32;
+    for _ in 1..n {
+        r += dir;
+        if r < 0 || r >= n {
+            if !wrap {
+                break;
+            }
+            r = r.rem_euclid(n);
+        }
+        if let Some((i, g)) = best_on(r) {
+            if nearest.is_none() {
+                nearest = Some(i);
+            }
+            // Under the cursor, or within half a key of it.
+            if g <= 0.5 {
+                return i;
+            }
+        }
+    }
+    nearest.unwrap_or(cur)
 }
 
 fn handle_keyboard_input(
@@ -1308,55 +1441,15 @@ fn handle_keyboard_input(
     button_idx: usize,
     mut key_idx: usize,
 ) {
-    let (name, cur_row, _, _) = keymap::KEYBOARD[key_idx];
-    let cur_cx = kbd_center(key_idx);
-    let n_rows = keymap::KEYBOARD_ROWS_N as u8;
-    // Row-scoped left/right by centre; up/down jump to the vertically adjacent row
-    // and land on the key whose centre is nearest — so the numpad column stays put.
+    let Some(&(name, _, _, _)) = keymap::KEYBOARD.get(key_idx) else { return };
+    let wrap = crate::library::nav_may_wrap();
+    // Left / Right along the row, Up / Down to the key under the cursor on the
+    // next row that has one, so the numpad column stays put.
     match button {
-        "Left" | "StickLLeft" => {
-            key_idx = keymap::KEYBOARD
-                .iter()
-                .enumerate()
-                .filter(|(_, k)| k.1 == cur_row && kbd_center_of(k) < cur_cx - 0.01)
-                .max_by(|a, b| kbd_center_of(a.1).total_cmp(&kbd_center_of(b.1)))
-                .map(|(i, _)| i)
-                // Wrap to the rightmost key on the row.
-                .or_else(|| {
-                    keymap::KEYBOARD
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, k)| k.1 == cur_row)
-                        .max_by(|a, b| kbd_center_of(a.1).total_cmp(&kbd_center_of(b.1)))
-                        .map(|(i, _)| i)
-                })
-                .unwrap_or(key_idx);
-        }
-        "Right" | "StickLRight" => {
-            key_idx = keymap::KEYBOARD
-                .iter()
-                .enumerate()
-                .filter(|(_, k)| k.1 == cur_row && kbd_center_of(k) > cur_cx + 0.01)
-                .min_by(|a, b| kbd_center_of(a.1).total_cmp(&kbd_center_of(b.1)))
-                .map(|(i, _)| i)
-                .or_else(|| {
-                    keymap::KEYBOARD
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, k)| k.1 == cur_row)
-                        .min_by(|a, b| kbd_center_of(a.1).total_cmp(&kbd_center_of(b.1)))
-                        .map(|(i, _)| i)
-                })
-                .unwrap_or(key_idx);
-        }
-        "Up" | "StickLUp" => {
-            let target = if cur_row == 0 { n_rows - 1 } else { cur_row - 1 };
-            key_idx = kbd_nearest_on_row(target, cur_cx).unwrap_or(key_idx);
-        }
-        "Down" | "StickLDown" => {
-            let target = if cur_row + 1 >= n_rows { 0 } else { cur_row + 1 };
-            key_idx = kbd_nearest_on_row(target, cur_cx).unwrap_or(key_idx);
-        }
+        "Left" | "StickLLeft" => key_idx = kbd_horizontal(key_idx, -1, wrap),
+        "Right" | "StickLRight" => key_idx = kbd_horizontal(key_idx, 1, wrap),
+        "Up" | "StickLUp" => key_idx = kbd_vertical(key_idx, -1, wrap),
+        "Down" | "StickLDown" => key_idx = kbd_vertical(key_idx, 1, wrap),
         "A" | "X" => {
             // "(none)" empties the button, and so does X from anywhere on the
             // board, without walking down to it; every other key is a real

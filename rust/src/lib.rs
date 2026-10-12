@@ -3400,9 +3400,10 @@ pub extern "C" fn ruffle_touches_draw() {
         let last = LAST_TOUCHES_KIND.swap(kind, std::sync::atomic::Ordering::Relaxed);
         // The sub-menu and the profile flows are pages of the pause sheet: one
         // replaces the last in place, the way moving between rows does. Only
-        // the editor and its keyboard, which are windows, pop.
+        // the editor's window pops, on the way in: its key picker opens in the
+        // same window, and re-popping all of it after every key was noise.
         let sheet = menu::screen_is_sheet();
-        if kind != 0 && kind != last && !sheet {
+        if kind != 0 && kind != last && !sheet && !menu::same_window(kind, last) {
             backend::render::modal_open_begin();
         }
         let (scale, active, _done) = backend::render::modal_scale_step(now);

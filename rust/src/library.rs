@@ -1506,8 +1506,9 @@ pub extern "C" fn ruffle_nav_repeat(is_repeat: core::ffi::c_int) {
 /// carousel: hold Down and the selection runs off the bottom, reappears at the
 /// top and keeps going, so you cannot use the hold to reach the end of a long
 /// library -- the one thing it is for. Stopping is also what says "this is the
-/// end", which a list that never stops can never say.
-fn nav_may_wrap() -> bool {
+/// end", which a list that never stops can never say. The controls editor and
+/// its key picker (`menu.rs`) follow it too, in game as in the launcher.
+pub(crate) fn nav_may_wrap() -> bool {
     !NAV_REPEAT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -8812,7 +8813,11 @@ fn touch_kind(screen: Screen) -> u32 {
         // Full pages, ids of their own well clear of the modal ones.
         Screen::SettingsModal { .. } => 100,
         Screen::BugPicker { .. } => 101,
-        // The keymap editor carries its sub-screen in the 70/80 bands already.
+        // The keymap editor carries its sub-screen in the 70/80 bands: the pad
+        // and its key picker share one window (one modal kind) but publish
+        // different tables.
+        Screen::TouchesEditor { .. } => 70 + menu::screen_kind() as u32,
+        Screen::SettingsKeymapEditor => 80 + menu::screen_kind() as u32,
         other => modal_kind(other) as u32,
     }
 }
@@ -8833,12 +8838,12 @@ fn modal_kind(screen: Screen) -> u8 {
         Screen::SettingsHomeViewPicker { .. } => 18,
         Screen::DistantUrlOptions { .. } => 5,
         Screen::DistantHistoryConfirm { .. } => 6,
-        // The keymap editor delegates to `menu::*`; fold its sub-screen id in so a
-        // List -> Keyboard (etc.) transition CHANGES the kind and re-fires the
-        // scale-in "pop", exactly like the in-game `ruffle_touches_draw` path.
+        // The keymap editor delegates to `menu::*`; its window pops in once, and
+        // its key picker opens inside that window (`menu::window_kind` counts
+        // the two as one), exactly like the in-game `ruffle_touches_draw` path.
         // Distinct 70-79 / 80-89 bands so they never collide with the ids above.
-        Screen::TouchesEditor { .. } => 70 + menu::screen_kind(),
-        Screen::SettingsKeymapEditor => 80 + menu::screen_kind(),
+        Screen::TouchesEditor { .. } => 70 + menu::window_kind(),
+        Screen::SettingsKeymapEditor => 80 + menu::window_kind(),
         Screen::SortModal { .. } => 9,
         Screen::RemoteSortModal { .. } => 7,
         Screen::FpDetails { .. } => 11,
