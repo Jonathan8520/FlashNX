@@ -498,15 +498,102 @@ pub(crate) fn draw_options_family(
         Screen::CoverPicker { .. } => 4,
         _ => 0,
     };
-    if dialog_key != 0 && slide.is_none() {
-        backend.set_ui_modal_scale(crate::backend::render::dialog_pop_scale(dialog_key));
+    if dialog_key != 0 {
+        // With the panels on their way out (Supprimer said yes), the question
+        // shrinks away on their timeline: it stayed at full size over the
+        // panel sliding out under it.
+        let scale = match slide {
+            Some(p) => p.clamp(0.0, 1.0),
+            None => crate::backend::render::dialog_pop_scale(dialog_key),
+        };
+        backend.set_ui_modal_scale(scale);
     }
     draw_family_dialog(backend, screen, &entry);
     backend.clear_ui_transform();
     if dialog_key == 0 {
         crate::backend::render::dialog_pop_scale(0);
     }
-    let _ = now;
+    // A question that has just gone (cancelled, or answered without leaving
+    // the panels) shrinks away like every other window, as it was last drawn:
+    // it grew in on its own and vanished in one frame. Not the cover picker,
+    // which asks nothing; not when the panels themselves are leaving.
+    let freq = unsafe { ruffle_tick_freq() }.max(1);
+    let (prev, prev_tick) = LAST_DIALOG.lock().map(|g| *g).unwrap_or((0, 0));
+    // A question drawn more than a few frames ago is not the one that just
+    // went: the family was left since (the game deleted), and came back.
+    let recent = now.saturating_sub(prev_tick) < freq / 10;
+    if let Ok(mut g) = LAST_DIALOG.lock() {
+        *g = (dialog_key, now);
+    }
+    if let Ok(mut g) = QUESTION_GHOST.lock() {
+        if dialog_key != 0 {
+            *g = None;
+        } else if recent && matches!(prev, 1..=3) && slide.is_none() {
+            *g = Some(now);
+        }
+    }
+    if dialog_key == 0 {
+        if let Some(scale) = question_ghost_scale(now, freq) {
+            let q = LAST_QUESTION.lock().ok().and_then(|g| g.clone());
+            if let Some(q) = q {
+                // It takes no taps on its way out.
+                crate::backend::render::set_ui_screen_kind(0);
+                backend.set_ui_modal_scale(scale);
+                draw_question(backend, &q);
+                backend.clear_ui_transform();
+                crate::backend::render::set_ui_screen_kind(kind);
+            }
+        }
+    }
+}
+
+/// The dialog drawn on the last frame of the options family, and when.
+static LAST_DIALOG: Mutex<(u32, u64)> = Mutex::new((0, 0));
+
+/// When the last question went away, for its shrink.
+static QUESTION_GHOST: Mutex<Option<u64>> = Mutex::new(None);
+
+/// The scale of a question shrinking away, None once it has gone: the window
+/// timeline's close, 110 ms accelerating away.
+fn question_ghost_scale(now: u64, freq: u64) -> Option<f32> {
+    let mut g = QUESTION_GHOST.lock().ok()?;
+    let start = (*g)?;
+    let t = now.saturating_sub(start) as f32 * 1000.0 / freq as f32 / 110.0;
+    if t >= 1.0 {
+        *g = None;
+        return None;
+    }
+    Some(1.0 - t * t)
+}
+
+/// A question of the options family, as data: what `draw_confirm` draws, kept
+/// from the last frame it was up so it can shrink away once answered.
+#[derive(Clone)]
+struct Question {
+    icon: Icon,
+    title: std::string::String,
+    body: std::string::String,
+    detail: Option<std::string::String>,
+    /// The two answers: label, and whether it loses something.
+    choices: [(&'static str, bool); 2],
+    selection: usize,
+    danger: bool,
+}
+
+static LAST_QUESTION: Mutex<Option<Question>> = Mutex::new(None);
+
+fn draw_question(backend: &mut SwitchRenderBackend, q: &Question) {
+    use crate::backend::render::Choice;
+    let choices = q.choices.map(|(label, destructive)| Choice { label, destructive });
+    backend.draw_confirm(q.icon, &q.title, &q.body, q.detail.as_deref(), &choices, q.selection, q.danger);
+}
+
+/// Draw `q` and remember it for its shrink.
+fn show_question(backend: &mut SwitchRenderBackend, q: Question) {
+    draw_question(backend, &q);
+    if let Ok(mut g) = LAST_QUESTION.lock() {
+        *g = Some(q);
+    }
 }
 
 /// The loading frame of a deferred flow (a profile, a cover): `from`, the
@@ -712,7 +799,6 @@ fn with_folders_view<R>(
 }
 
 fn draw_family_dialog(backend: &mut SwitchRenderBackend, screen: Screen, entry: &Entry) {
-    use crate::backend::render::Choice;
     let lc = crate::loc::s();
     let u = crate::loc_ui::ui();
     match screen {
@@ -722,17 +808,17 @@ fn draw_family_dialog(backend: &mut SwitchRenderBackend, screen: Screen, entry: 
             } else {
                 std::format!("{}  \u{00B7}  {}", entry.display_name, entry.basename)
             };
-            backend.draw_confirm(
-                Icon::Trash,
-                u.delete_game_title,
-                u.delete_game_body,
-                Some(&detail),
-                &[
-                    Choice { label: u.cancel, destructive: false },
-                    Choice { label: lc.opt_delete, destructive: true },
-                ],
-                selection,
-                true,
+            show_question(
+                backend,
+                Question {
+                    icon: Icon::Trash,
+                    title: u.delete_game_title.to_string(),
+                    body: u.delete_game_body.to_string(),
+                    detail: Some(detail),
+                    choices: [(u.cancel, false), (lc.opt_delete, true)],
+                    selection,
+                    danger: true,
+                },
             );
         }
         Screen::ProfileDeleteConfirm { profile_idx, selection, .. } => {
@@ -741,17 +827,17 @@ fn draw_family_dialog(backend: &mut SwitchRenderBackend, screen: Screen, entry: 
                 .ok()
                 .and_then(|s| s.profile_matches.get(profile_idx).map(|m| menu::profile_name(&m.profile)))
                 .unwrap_or_default();
-            backend.draw_confirm(
-                Icon::Trash,
-                lc.profile_del_confirm,
-                u.profile_del_body,
-                Some(&name),
-                &[
-                    Choice { label: u.cancel, destructive: false },
-                    Choice { label: lc.opt_delete, destructive: true },
-                ],
-                selection,
-                true,
+            show_question(
+                backend,
+                Question {
+                    icon: Icon::Trash,
+                    title: lc.profile_del_confirm.to_string(),
+                    body: u.profile_del_body.to_string(),
+                    detail: Some(name),
+                    choices: [(u.cancel, false), (lc.opt_delete, true)],
+                    selection,
+                    danger: true,
+                },
             );
         }
         Screen::GameFolderDelete { folder_idx, selection, .. } => {
@@ -766,17 +852,17 @@ fn draw_family_dialog(backend: &mut SwitchRenderBackend, screen: Screen, entry: 
                     crate::loc::fill_count(lc.folder_leave_1, lc.folder_leave_n, *count as i32),
                     u.folder_empty_body,
                 );
-                backend.draw_confirm(
-                    Icon::Folder,
-                    &title,
-                    &body,
-                    None,
-                    &[
-                        Choice { label: lc.games_dir_confirm_no, destructive: false },
-                        Choice { label: u.empty_verb, destructive: true },
-                    ],
-                    selection,
-                    false,
+                show_question(
+                    backend,
+                    Question {
+                        icon: Icon::Folder,
+                        title,
+                        body,
+                        detail: None,
+                        choices: [(lc.games_dir_confirm_no, false), (u.empty_verb, true)],
+                        selection,
+                        danger: false,
+                    },
                 );
             }
         }

@@ -4250,6 +4250,27 @@ fn input_inner(button: &str) -> bool {
             return true;
         }
     }
+    // A game's controls editor closes like the Réglages one: it scales out over
+    // its Touches et curseur page, then lands there. Left to `menu`, it
+    // vanished in one frame, the page's own pop being invisible (the options
+    // family draws without the window transform).
+    if matches!(button, "B" | "Minus") && menu::screen_kind() == 2 {
+        let game = LIBRARY.lock().ok().and_then(|s| match s.screen {
+            Screen::TouchesEditor { game_idx } => Some(game_idx),
+            _ => None,
+        });
+        if let Some(game_idx) = game {
+            if let Ok(mut p) = PENDING_AFTER_CLOSE.lock() {
+                *p = Some(PendingClose::CloseEditorToTouches { game_idx });
+            }
+            crate::backend::render::modal_close_begin();
+            // The way back, which `menu::input` played when it closed itself:
+            // the screen is still the editor after this press, and
+            // `sfx::after_input` leaves the editor's sounds to it.
+            crate::sfx::play(crate::sfx::Sfx::Back);
+            return true;
+        }
+    }
     // Sub-screen: TOUCHES editor owns input while active.
     if menu::is_active() {
         let consumed = menu::input(button);
@@ -10157,6 +10178,10 @@ enum PendingClose {
     /// Settings keymap editor, whose panel is `menu`-drawn: it must stay active
     /// (drawable) while it scales OUT, then close as the pop lands on the tab.
     CloseMenuGoto(Screen),
+    /// A game's controls editor scaled out: close the `menu` module and land on
+    /// the game's Touches et curseur page, read again (a key changed in the
+    /// editor can bring its revert row).
+    CloseEditorToTouches { game_idx: usize },
     DeleteGame { game_idx: usize },
     /// Delete the saved source `history_idx`; the cursor stays on `row`, the
     /// view row it was on, so the source below slides under it.
@@ -10991,6 +11016,10 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     // and land on the tab (which does not pop, being a tab).
                     menu::close();
                     s2.screen = t;
+                }
+                Some(PendingClose::CloseEditorToTouches { game_idx }) => {
+                    menu::close();
+                    goto_touches_menu(&mut s2, game_idx, 0);
                 }
                 Some(PendingClose::DeleteGame { game_idx }) => {
                     delete_game(&mut s2, game_idx);
