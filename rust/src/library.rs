@@ -8796,11 +8796,12 @@ fn handle_cover_picker_input(s: &mut State, button: &str, game_idx: usize, mut s
 /// card; B folds the page back into the Flashpoint card. Called under the
 /// LIBRARY lock; `net::start_download` is non-blocking so that's fine.
 fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mut scroll: usize) {
-    // Search still on its way: only B (or Minus) answers, cancelling it.
+    // Search still on its way: only B (or Minus) answers, cancelling it. The
+    // page stays "loading" while it folds back (the fold clears it once done):
+    // cleared here, the folding page read as a search that found nothing.
     if s.fp_loading {
         if matches!(button, "B" | "Minus") {
             net::cancel_archive_fetch();
-            s.fp_loading = false;
             crate::backend::render::distant_reveal_begin_collapse();
         }
         return;
@@ -10997,15 +10998,19 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             options_panel::draw_options_loading(backend, now, anim_origin, &label);
         }
         Screen::FpGallery { selection, scroll } => {
+            let reveal = crate::backend::render::distant_reveal_step(now);
             // The search in flight lands here, and a details blurb still on its
-            // way after its window closed is collected.
-            if LIBRARY.lock().map(|s| s.fp_loading).unwrap_or(false) {
+            // way after its window closed is collected. Not while the page folds
+            // back: B cancelled the search, whose handle now answers with an
+            // error, and the fold shows the waiting page it started from.
+            let folding = reveal.map_or(false, |(_, collapsing, _)| collapsing);
+            if !folding && LIBRARY.lock().map(|s| s.fp_loading).unwrap_or(false) {
                 poll_fp_search();
             }
             drive_fp_details(false);
             // The page opens out of the Flashpoint card and folds back into it,
             // as an archive opens out of its row.
-            if let Some((frac, collapsing, done)) = crate::backend::render::distant_reveal_step(now) {
+            if let Some((frac, collapsing, done)) = reveal {
                 let (vw, vh) = backend.screen_size();
                 let row = LIBRARY.lock().map(|s| s.import_return_row).unwrap_or(0);
                 draw_home_backdrop(backend, row, IMPORT_SCROLL.load(std::sync::atomic::Ordering::Relaxed));
