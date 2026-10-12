@@ -21,7 +21,8 @@ use super::*;
 use crate::backend::render::{ui_col, Btn, Choice, HintItem, Icon, Row};
 
 /// The column on the left, top to bottom. Quitter is not a section: it sits at
-/// the foot of the column, has no pane, and acts on A.
+/// the foot of the column and acts on A; its pane only explains it, and the
+/// cursor never goes in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SetSection {
     Library,
@@ -64,8 +65,8 @@ impl SetSection {
     }
 
     /// How many places the cursor can take in the pane. None in About, which
-    /// only has things to read, nor in Quitter, which has no pane: the cursor
-    /// does not go in there.
+    /// only has things to read, nor in Quitter, whose pane only explains what
+    /// it does: the cursor does not go in there.
     fn pane_len(self) -> usize {
         match self {
             SetSection::Language => crate::loc::PICKER_LANGS.len(),
