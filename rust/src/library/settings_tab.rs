@@ -522,9 +522,9 @@ pub(crate) fn run_pseudo_flow() {
 
 /// Aide et retours > Proposer une idée: the keyboard for a free text, posted
 /// as a "suggestion" issue (same relay and token as a bug report, another
-/// label). No game involved. Hoisted from `input()`: the keyboard and the
-/// synchronous POST must not run under the library lock. Empty input sends
-/// nothing.
+/// label). No game involved. Hoisted from `input()`: the keyboard must not run
+/// under the library lock; the text is then sent behind a card
+/// (`submit_report`). Empty input sends nothing.
 pub(crate) fn run_suggestion_flow() {
     let lc = crate::loc::s();
     let Some(text) = net::prompt_long(lc.kbd_suggest_header, lc.kbd_suggest_guide) else {
@@ -567,15 +567,57 @@ pub(crate) fn run_suggestion_flow() {
 /// here: only the question reads it, and only a failed send opens that.
 static FAILED_SEND: Mutex<Option<(crate::bugreport::Report, std::string::String)>> = Mutex::new(None);
 
-/// Send `report`, which started on the Aide et retours row `key`. Sent: a
-/// toast says so and the cursor is back on the row, the tab never left. Not
-/// sent: a question over the page gives the reason and offers to try again,
-/// the report kept for it.
+/// A report on its way, with the row it started on and whether the page has
+/// shown the card saying so (`drive_pending_send`).
+static PENDING_SEND: Mutex<Option<(crate::bugreport::Report, &'static str, bool)>> = Mutex::new(None);
+
+/// Send `report`, which started on the Aide et retours row `key`, on the next
+/// frames: the Aide et retours page is drawn once with a card saying it is
+/// being sent, then the POST runs. Run at once from the keyboard's flow, it
+/// froze the last frame from before the keyboard for as long as the relay took
+/// (up to 30 s on a dead connection), with nothing saying anything was going on.
 ///
 /// The row is carried rather than derived from `report.kind`: it is a fact
 /// about the menu, and dismissing a sent suggestion once landed the cursor on
 /// the bug row above the button just pressed (#113).
 pub(crate) fn submit_report(report: crate::bugreport::Report, key: &'static str) {
+    if let Ok(mut g) = PENDING_SEND.lock() {
+        *g = Some((report, key, false));
+    }
+    if let Ok(mut s) = LIBRARY.lock() {
+        let row = row_of(SetSection::Help, key);
+        s.screen = Screen::Settings { section: SetSection::Help, in_pane: true, row };
+    }
+}
+
+/// Whether a report is on its way: the page shows the card, and no press
+/// reaches it until the relay has answered.
+pub(crate) fn sending() -> bool {
+    PENDING_SEND.lock().map(|g| g.is_some()).unwrap_or(false)
+}
+
+/// The report `submit_report` queued: the first call lets the frame with the
+/// card be drawn, the next one sends it. Called at the top of `render`, like
+/// the profile flows' `drive_pending_net`.
+pub(crate) fn drive_pending_send() {
+    let job = {
+        let Ok(mut g) = PENDING_SEND.lock() else { return };
+        match g.take() {
+            None => return,
+            Some((report, key, false)) => {
+                *g = Some((report, key, true));
+                return;
+            }
+            Some((report, key, true)) => (report, key),
+        }
+    };
+    send_report(job.0, job.1);
+}
+
+/// Send `report` now. Sent: a toast says so and the cursor is back on the row,
+/// the tab never left. Not sent: a question over the page gives the reason and
+/// offers to try again, the report kept for it.
+fn send_report(report: crate::bugreport::Report, key: &'static str) {
     // The success line follows the FLOW, not the relay (#83): both go through
     // the same endpoint, but "your report was sent" after an idea reads like
     // the button sent the wrong thing.
@@ -597,21 +639,18 @@ pub(crate) fn submit_report(report: crate::bugreport::Report, key: &'static str)
                 *g = Some((report, e));
             }
             if let Ok(mut s) = LIBRARY.lock() {
-                // A retry that failed again stays on the same question, so the
-                // note that marks an error arriving has to be played by hand.
-                if matches!(s.screen, Screen::SendFailed { .. }) {
-                    crate::sfx::play(crate::sfx::Sfx::Error);
-                }
                 // On Réessayer: the question is there to be answered with one
-                // press, and nothing is lost either way.
+                // press, and nothing is lost either way. A retry that fails
+                // again comes back to it from the page with the card, so the
+                // note `render` plays for an error arriving marks it too.
                 s.screen = Screen::SendFailed { row, selection: 1 };
             }
         }
     }
 }
 
-/// A on Réessayer: the kept report, sent again. Hoisted from `input()`, being
-/// a network call.
+/// A on Réessayer: the kept report, sent again behind the card
+/// (`submit_report`). Hoisted from `input()` with the other report flows.
 pub(crate) fn run_retry_flow(row: usize) {
     let kept = FAILED_SEND.lock().ok().and_then(|mut g| g.take());
     match kept {
@@ -846,7 +885,8 @@ pub(crate) fn draw_settings(
     // over it, which goes back like B, and the column beside it, which opens
     // a section as on the tab (`subpage_tap`): neither could be tapped there,
     // and the crumb drawn as a way back said it could.
-    if !under {
+    let sending = sending();
+    if !under && !sending {
         match body {
             Body::Section { .. } => backend.settings_publish(cells),
             Body::Folders { .. } | Body::Games { .. } => {
@@ -860,6 +900,9 @@ pub(crate) fn draw_settings(
     backend.settings_still(false);
     if font_cold {
         backend.draw_loading_overlay(crate::loc::s().lang_title, unsafe { ruffle_tick_now() });
+    }
+    if sending {
+        backend.settings_loading_card(u.loading_report, unsafe { ruffle_tick_now() });
     }
 }
 

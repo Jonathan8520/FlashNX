@@ -552,6 +552,8 @@ pub struct Ui {
     pub dir_new_in_lib: &'static str,
     /// Games folder browser, at the card's root: the first row, dimmed, instead of "Use this folder".
     pub dir_root_refused: &'static str,
+    /// RÉGLAGES > Aide et retours: the card over the page while a bug report or an idea is being sent.
+    pub loading_report: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -874,6 +876,7 @@ const EN: Ui = Ui {
     load_failed_hint: "Menu",
     dir_new_in_lib: "You are in your library: create the new folder outside it.",
     dir_root_refused: "The card's root cannot hold your library",
+    loading_report: "Sending your message…",
 };
 
 const FR: Ui = Ui {
@@ -1196,6 +1199,7 @@ const FR: Ui = Ui {
     load_failed_hint: "Menu",
     dir_new_in_lib: "Tu es dans ta bibliothèque : crée le nouveau dossier en dehors.",
     dir_root_refused: "La racine de la carte ne peut pas accueillir ta bibliothèque",
+    loading_report: "Envoi de ton message…",
 };
 
 const ES: Ui = Ui {
@@ -1518,6 +1522,7 @@ const ES: Ui = Ui {
     load_failed_hint: "Menú",
     dir_new_in_lib: "Estás dentro de tu biblioteca: crea la carpeta nueva fuera de ella.",
     dir_root_refused: "La raíz de la tarjeta no puede alojar tu biblioteca",
+    loading_report: "Enviando tu mensaje…",
 };
 
 const RU: Ui = Ui {
@@ -1840,6 +1845,7 @@ const RU: Ui = Ui {
     load_failed_hint: "Меню",
     dir_new_in_lib: "Ты внутри своей библиотеки: создай новую папку за её пределами.",
     dir_root_refused: "Библиотеку нельзя поместить в корень карты",
+    loading_report: "Отправка сообщения…",
 };
 
 const DE: Ui = Ui {
@@ -2162,6 +2168,7 @@ const DE: Ui = Ui {
     load_failed_hint: "Menü",
     dir_new_in_lib: "Du bist in deiner Bibliothek: Lege den neuen Ordner außerhalb an.",
     dir_root_refused: "Deine Bibliothek kann nicht im Stammverzeichnis liegen",
+    loading_report: "Deine Nachricht wird gesendet…",
 };
 
 const IT: Ui = Ui {
@@ -2484,6 +2491,7 @@ const IT: Ui = Ui {
     load_failed_hint: "Menu",
     dir_new_in_lib: "Sei dentro la tua libreria: crea la nuova cartella fuori da lì.",
     dir_root_refused: "La radice della scheda non può ospitare la tua libreria",
+    loading_report: "Invio del tuo messaggio…",
 };
 
 const PT: Ui = Ui {
@@ -2806,6 +2814,7 @@ const PT: Ui = Ui {
     load_failed_hint: "Menu",
     dir_new_in_lib: "Você está dentro da sua biblioteca: crie a nova pasta fora dela.",
     dir_root_refused: "A raiz do cartão não pode receber a sua biblioteca",
+    loading_report: "Enviando sua mensagem…",
 };
 
 const ZH: Ui = Ui {
@@ -3128,6 +3137,7 @@ const ZH: Ui = Ui {
     load_failed_hint: "菜单",
     dir_new_in_lib: "你在游戏库内：请在游戏库外新建文件夹。",
     dir_root_refused: "存储卡根目录不能存放你的游戏库",
+    loading_report: "正在发送你的消息…",
 };
 
 const TR: Ui = Ui {
@@ -3450,6 +3460,7 @@ const TR: Ui = Ui {
     load_failed_hint: "Menü",
     dir_new_in_lib: "Kütüphanenin içindesin: yeni klasörü kütüphanenin dışında oluştur.",
     dir_root_refused: "Kartın kök dizini kütüphaneni barındıramaz",
+    loading_report: "Mesajın gönderiliyor…",
 };
 
 pub fn ui() -> &'static Ui {

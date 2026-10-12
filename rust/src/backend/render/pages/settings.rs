@@ -605,6 +605,13 @@ impl SwitchRenderBackend {
         ui_cells_publish(ui_screen_kind(), cells);
     }
 
+    /// A wait over the page, the column still on show: the small loading card
+    /// over the pane, saying what is being done.
+    pub(crate) fn settings_loading_card(&mut self, label: &str, now: u64) {
+        let vw = self.dimensions.width as f32;
+        self.draw_loading_card(label, now, DIVIDER_X, vw);
+    }
+
     /// Where a finger takes the crumb `crumb` of `settings_subpage_title`: the
     /// chevron and the words, with room around them for a thumb.
     pub(crate) fn settings_crumb_cell(&mut self, crumb: &str) -> (f32, f32, f32, f32) {

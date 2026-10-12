@@ -4205,6 +4205,11 @@ fn input_inner(button: &str) -> bool {
     {
         return true;
     }
+    // A report on its way (one frame with its card, then the POST): the page
+    // under the card takes no press until the relay has answered.
+    if settings_tab::sending() {
+        return true;
+    }
     // Settings keymap editor: closing it (B at the editor's top level — the List
     // screen, kind 2 — not inside a dropdown) scales the editor OUT before
     // landing on the REGLAGES tab. Intercept B HERE, before forwarding to menu,
@@ -5354,8 +5359,9 @@ fn bug_picker_order(entries: &[Entry]) -> std::vec::Vec<usize> {
 }
 
 /// BugPicker > A: snapshot the chosen game's metadata, open swkbd for a
-/// description, then POST the report to the relay. Hoisted from `input()` — the
-/// keyboard + synchronous HTTPS POST must NOT run under the LIBRARY lock.
+/// description, then send the report to the relay behind a card
+/// (`settings_tab::submit_report`). Hoisted from `input()` — the keyboard must
+/// NOT run under the LIBRARY lock.
 ///
 /// `row` is a row of the picker, not a position in `entries`: the two differ
 /// since the picker has its own order.
@@ -10866,6 +10872,8 @@ pub fn render(backend: &mut SwitchRenderBackend) {
     // Run any deferred profile network flow now that its loading panel has shown
     // a frame (#20). May transition the screen, so do it before reading it.
     drive_pending_net();
+    // Same for a bug report or an idea, behind its card on the RÉGLAGES page.
+    settings_tab::drive_pending_send();
     drive_pending_move();
     let s = match LIBRARY.lock() {
         Ok(g) => g,
