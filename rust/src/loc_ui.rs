@@ -554,6 +554,11 @@ pub struct Ui {
     /// panned: how far it is moved, horizontally then vertically, in screen
     /// pixels. The two {} are the numbers, a negative one with a real minus.
     pub zoom_offset: &'static str,
+    /// TOUCHES > Gyroscope, the setting that leaves the cursor to the sticks
+    /// (#119): its first option, beside gyro_marble and gyro_pointer. Its own word,
+    /// short, rather than the overclock's: "Inactivo | Canica | Puntero" did not
+    /// fit the pause's 440 px page in Spanish, Italian or Portuguese.
+    pub gyro_off: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -876,6 +881,7 @@ const EN: Ui = Ui {
     load_failed_hint: "Menu",
     dir_new_in_lib: "You are in your library: create the new folder outside it.",
     zoom_offset: "offset {}, {} px",
+    gyro_off: "Off",
 };
 
 const FR: Ui = Ui {
@@ -1198,6 +1204,7 @@ const FR: Ui = Ui {
     load_failed_hint: "Menu",
     dir_new_in_lib: "Tu es dans ta bibliothèque : crée le nouveau dossier en dehors.",
     zoom_offset: "décalé de {}, {} px",
+    gyro_off: "Inactif",
 };
 
 const ES: Ui = Ui {
@@ -1520,6 +1527,7 @@ const ES: Ui = Ui {
     load_failed_hint: "Menú",
     dir_new_in_lib: "Estás dentro de tu biblioteca: crea la carpeta nueva fuera de ella.",
     zoom_offset: "desplazado {}, {} px",
+    gyro_off: "No",
 };
 
 const RU: Ui = Ui {
@@ -1842,6 +1850,7 @@ const RU: Ui = Ui {
     load_failed_hint: "Меню",
     dir_new_in_lib: "Ты внутри своей библиотеки: создай новую папку за её пределами.",
     zoom_offset: "сдвиг {}, {} пикс.",
+    gyro_off: "Выкл",
 };
 
 const DE: Ui = Ui {
@@ -1866,7 +1875,7 @@ const DE: Ui = Ui {
     help_screen: "Anzeige, Drehung, Zoom, Pixel, Filter, FPS-Anzeige: Jede Änderung siehst du sofort am Spiel hinter diesem Menü.",
     help_restart: "Startet das Spiel von vorn. Die Spielstände bleiben erhalten.",
     help_quit: "Zurück zu deiner Bibliothek. Was das Spiel nicht gespeichert hat, geht verloren.",
-    help_display: "Einpassen zeigt das ganze Spiel, Strecken füllt den Bildschirm verzerrt, Füllen schneidet die Ränder ab.",
+    help_display: "Einpassen zeigt das ganze Spiel, Dehnen füllt den Bildschirm verzerrt, Füllen schneidet die Ränder ab.",
     help_rotation: "Dreht das Bild um eine Vierteldrehung, für Spiele im Hochformat.",
     help_zoom: "Vergrößert das Bild: Links und Rechts in 10-%-Schritten, A zum Ausrichten mit dem Stick.",
     help_filter: "Linien oder Röhren-Look (CRT) über dem Bild.",
@@ -2164,6 +2173,7 @@ const DE: Ui = Ui {
     load_failed_hint: "Menü",
     dir_new_in_lib: "Du bist in deiner Bibliothek: Lege den neuen Ordner außerhalb an.",
     zoom_offset: "verschoben um {}, {} px",
+    gyro_off: "Aus",
 };
 
 const IT: Ui = Ui {
@@ -2486,6 +2496,7 @@ const IT: Ui = Ui {
     load_failed_hint: "Menu",
     dir_new_in_lib: "Sei dentro la tua libreria: crea la nuova cartella fuori da lì.",
     zoom_offset: "spostato di {}, {} px",
+    gyro_off: "No",
 };
 
 const PT: Ui = Ui {
@@ -2808,6 +2819,7 @@ const PT: Ui = Ui {
     load_failed_hint: "Menu",
     dir_new_in_lib: "Você está dentro da sua biblioteca: crie a nova pasta fora dela.",
     zoom_offset: "deslocado {}, {} px",
+    gyro_off: "Não",
 };
 
 const ZH: Ui = Ui {
@@ -3130,6 +3142,7 @@ const ZH: Ui = Ui {
     load_failed_hint: "菜单",
     dir_new_in_lib: "你在游戏库内：请在游戏库外新建文件夹。",
     zoom_offset: "偏移 {}, {} 像素",
+    gyro_off: "关闭",
 };
 
 const TR: Ui = Ui {
@@ -3452,6 +3465,7 @@ const TR: Ui = Ui {
     load_failed_hint: "Menü",
     dir_new_in_lib: "Kütüphanenin içindesin: yeni klasörü kütüphanenin dışında oluştur.",
     zoom_offset: "{}, {} px kaydırıldı",
+    gyro_off: "Kapalı",
 };
 
 pub fn ui() -> &'static Ui {
