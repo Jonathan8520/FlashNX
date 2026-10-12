@@ -510,6 +510,16 @@ pub(crate) fn draw_options_family(
     // reads its own from the state).
     let opt_armed = if matches!(screen, Screen::OptionsModal { .. }) { armed } else { None };
     draw_family_panels(backend, &entry, opt_sel, opt_armed, shown, t);
+    // While a page folds back nothing publishes (the page has no cursor, the
+    // options are still a rail or cut by their moving edge), and every screen
+    // of the stack shares one touch kind: the page's own table stayed live
+    // for those frames. A tap on its rail closed the options, and a tap on
+    // one of its switches was read as an options row, the HOME icon's among
+    // them (a tile installed or removed). An empty table until the options
+    // publish theirs; a question drawn on top below publishes its own.
+    if matches!(shown, Some((_, false))) {
+        crate::backend::render::ui_cells_publish(kind, std::vec::Vec::new());
+    }
     backend.clear_ui_transform();
 
     // A question or the cover picker on top, popping in by itself.
