@@ -3350,8 +3350,9 @@ pub extern "C" fn ruffle_keymap_cursor_speed() -> c_int {
     keymap::cursor_speed()
 }
 
-/// Persist the active game's cursor-speed preset into its keymap (the in-game
-/// VITESSE cycle calls this so pointer speed is per-game). `idx < 0` clears it.
+/// Persist the active game's cursor-speed preset into its keymap, so pointer
+/// speed is per-game: called through `ruffle_cursor_speed_set` when the speed
+/// row's armed value is kept in game. `idx < 0` clears it.
 #[no_mangle]
 pub extern "C" fn ruffle_keymap_set_cursor_speed(idx: c_int) {
     keymap::set_cursor_speed(idx);

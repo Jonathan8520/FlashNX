@@ -82,7 +82,8 @@ impl SwitchRenderBackend {
     }
 
     /// Width `ctrl` will take (at most `max_w`: a choice that would not fit is
-    /// drawn as its current option between arrows).
+    /// drawn as its current option alone, as a cycle is at rest, its arrows
+    /// only while the row is armed).
     pub(crate) fn kit_ctrl_width(&mut self, ctrl: &Ctrl, max_w: f32) -> f32 {
         match *ctrl {
             Ctrl::None => 0.0,
@@ -100,7 +101,8 @@ impl SwitchRenderBackend {
     }
 
     /// Draw `ctrl` ending at `right`, centred on `cy`, in at most `max_w`;
-    /// returns the width it took. `focused` lights what Left / Right act on.
+    /// returns the width it took. `focused` brightens it on the row with the
+    /// cursor; the outline and arrows of an armed row are `kit_ctrl_parts`'.
     pub(crate) fn kit_ctrl(&mut self, right: f32, cy: f32, ctrl: &Ctrl, focused: bool, max_w: f32) -> f32 {
         match *ctrl {
             Ctrl::None => 0.0,

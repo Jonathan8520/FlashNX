@@ -235,7 +235,7 @@ impl SwitchRenderBackend {
         use kit::theme::col;
         let u = crate::loc_ui::ui();
         // Wide enough for both orders of a row side by side in most languages;
-        // a pair too long for its row shows the lit one between arrows instead.
+        // a pair too long for its row shows the lit one alone instead.
         let width = MODAL_W_WIDE.min(self.dimensions.width as f32 - 40.0);
         let help = help.filter(|h| !h.trim().is_empty());
         let help_h = help.map_or(0.0, |t| self.kit_help_box_height(t, width - 32.0, 3) + 20.0);
