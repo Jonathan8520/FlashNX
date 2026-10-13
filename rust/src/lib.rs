@@ -2697,7 +2697,7 @@ fn render_frame_with_dt(dt: FloatDuration) {
         // player parks the crosshair in the corner: the number wins, because it
         // is the thing being read.
         if backend::render::fps_counter_on() {
-            backend.draw_fps_overlay();
+            backend.draw_fps_overlay(false);
         }
     }
 
@@ -2764,7 +2764,7 @@ pub extern "C" fn ruffle_redraw_paused() {
         // the ECRAN row its preview -- press A and the corner changes on this
         // game's own frame.
         if show_fps {
-            backend.draw_fps_overlay();
+            backend.draw_fps_overlay(true);
         }
     }
 }

@@ -10265,7 +10265,13 @@ impl SwitchRenderBackend {
     ///
     /// Drawn with the kit (the console font), like the rest of the in-game
     /// interface.
-    pub fn draw_fps_overlay(&mut self) {
+    ///
+    /// `under_pause`: drawn behind the pause's panels, frozen with the picture.
+    /// On a turned picture the panels hug their rows from the top and covered
+    /// this corner (the dot and the reading, on a 720 px wide viewport), which
+    /// is what ÉCRAN's row previews: the pill goes under them there, as the
+    /// loading card does.
+    pub fn draw_fps_overlay(&mut self, under_pause: bool) {
         use theme::col;
         let (measured, nominal) = fps_readout();
         unsafe {
@@ -10320,10 +10326,12 @@ impl SwitchRenderBackend {
         // of the turned picture. Pinned to the RIGHT edge, so the pill grows to
         // the left as the number does instead of sliding.
         let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
         let tw = self.kit_measure(&text, PX);
         let w = 12.0 + 8.0 + 8.0 + tw + 12.0;
         let x = (vw - MARGIN - w).round();
-        let y = MARGIN;
+        let below = if under_pause && vh > vw { kit::sheet::cascade_bottom() } else { 0.0 };
+        let y = if below > 0.0 && below + MARGIN + H + MARGIN <= vh { below + MARGIN } else { MARGIN };
         self.kit_rrect(x, y, w, H, H * 0.5, 0xB8_0A_10_1C);
         self.kit_rrect(x + 12.0, y + H * 0.5 - 4.0, 8.0, 8.0, 4.0, dot);
         self.kit_text_mid(x + 12.0 + 8.0 + 8.0, y + H * 0.5, PX, &text, col::TEXT);
