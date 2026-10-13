@@ -12497,8 +12497,8 @@ fn extract_gamezip_main(
         let detail = if total > 0 {
             let pct = (done as f64 / total as f64 * 100.0).clamp(0.0, 100.0) as u32;
             std::format!(
-                "{} %  \u{00B7}  {}",
-                pct,
+                "{}  \u{00B7}  {}",
+                crate::loc_ui::percent(pct),
                 crate::backend::render::imp_n_of(
                     &crate::backend::render::imp_amount(done),
                     &crate::backend::render::imp_size(total)

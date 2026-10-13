@@ -1097,7 +1097,7 @@ fn defaults_pane(
     let power = POWER_ORDER[power_at.min(POWER_ORDER.len() - 1)];
     let power_opts = POWER_ORDER.map(l::overclock_label);
     let zoom_v = value("ZOOM");
-    let zoom = std::format!("{} %", zoom_v);
+    let zoom = crate::loc_ui::percent(zoom_v as u32);
     let zoom_ends = l::zoom_preset_ends(zoom_v);
     let n_speeds = l::CURSOR_SPEED_X10.len();
     let speed_idx = (value("VITESSE") as usize).min(n_speeds.saturating_sub(1));

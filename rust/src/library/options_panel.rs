@@ -259,7 +259,7 @@ pub(crate) fn with_options_sheet<R>(
     let filter_opts = [lc.filter_none, lc.filter_scanlines, lc.filter_crt];
     let oc_opts = [lc.overclock_off, lc.pixels_auto, lc.overclock_on];
     let oc_at = POWER_ORDER.iter().position(|m| *m == p.power).unwrap_or(0);
-    let zoom = std::format!("{} %", p.zoom);
+    let zoom = crate::loc_ui::percent(p.zoom as u32);
     let zoom_ends = crate::loc::zoom_preset_ends(p.zoom);
     // Where the zoom is fine-tuned and the picture framed: the pause's own
     // row and page names, as Réglages names them for the default.

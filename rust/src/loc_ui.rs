@@ -562,6 +562,9 @@ pub struct Ui {
     /// A game's options: the card over the panels while the covers are searched for, then while the chosen one downloads.
     pub loading_covers: &'static str,
     pub loading_cover_dl: &'static str,
+    /// A percentage, {} = the number: the zoom's rows and the framing's header, an import's progress
+    /// (`loc_ui::percent`). The language's own way: a no-break space before '%', none in Chinese, '%' first in Turkish.
+    pub percent: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -880,6 +883,7 @@ const EN: Ui = Ui {
     loading_report: "Sending your message…",
     loading_covers: "Looking for covers…",
     loading_cover_dl: "Downloading the cover…",
+    percent: "{}\u{a0}%",
 };
 
 const FR: Ui = Ui {
@@ -1198,6 +1202,7 @@ const FR: Ui = Ui {
     loading_report: "Envoi de ton message…",
     loading_covers: "Recherche de jaquettes…",
     loading_cover_dl: "Téléchargement de la jaquette…",
+    percent: "{}\u{a0}%",
 };
 
 const ES: Ui = Ui {
@@ -1516,6 +1521,7 @@ const ES: Ui = Ui {
     loading_report: "Enviando tu mensaje…",
     loading_covers: "Buscando carátulas…",
     loading_cover_dl: "Descargando la carátula…",
+    percent: "{}\u{a0}%",
 };
 
 const RU: Ui = Ui {
@@ -1834,6 +1840,7 @@ const RU: Ui = Ui {
     loading_report: "Отправка сообщения…",
     loading_covers: "Поиск обложек…",
     loading_cover_dl: "Загрузка обложки…",
+    percent: "{}\u{a0}%",
 };
 
 const DE: Ui = Ui {
@@ -2152,6 +2159,7 @@ const DE: Ui = Ui {
     loading_report: "Deine Nachricht wird gesendet…",
     loading_covers: "Suche nach Covern…",
     loading_cover_dl: "Cover wird geladen…",
+    percent: "{}\u{a0}%",
 };
 
 const IT: Ui = Ui {
@@ -2470,6 +2478,7 @@ const IT: Ui = Ui {
     loading_report: "Invio del tuo messaggio…",
     loading_covers: "Ricerca delle copertine…",
     loading_cover_dl: "Download della copertina…",
+    percent: "{}\u{a0}%",
 };
 
 const PT: Ui = Ui {
@@ -2788,6 +2797,7 @@ const PT: Ui = Ui {
     loading_report: "Enviando sua mensagem…",
     loading_covers: "Procurando capas…",
     loading_cover_dl: "Baixando a capa…",
+    percent: "{}\u{a0}%",
 };
 
 const ZH: Ui = Ui {
@@ -3106,6 +3116,7 @@ const ZH: Ui = Ui {
     loading_report: "正在发送你的消息…",
     loading_covers: "正在查找封面…",
     loading_cover_dl: "正在下载封面…",
+    percent: "{}%",
 };
 
 const TR: Ui = Ui {
@@ -3424,6 +3435,7 @@ const TR: Ui = Ui {
     loading_report: "Mesajın gönderiliyor…",
     loading_covers: "Kapaklar aranıyor…",
     loading_cover_dl: "Kapak indiriliyor…",
+    percent: "%{}",
 };
 
 pub fn ui() -> &'static Ui {
@@ -3463,6 +3475,14 @@ pub fn games(n: usize) -> std::string::String {
         Lang::Zh => std::format!("游戏：{}", c),
         Lang::Tr => std::format!("{} oyun", c),
     }
+}
+
+/// `n` percent, the way the language writes it ("150 %", "150%", "%150"):
+/// the zoom's rows and the framing's header, an import's progress. A format
+/// string wrote "150 %" in Turkish and Chinese too, under a framing legend that
+/// said "%100" and "100%".
+pub fn percent(n: u32) -> std::string::String {
+    ui().percent.replacen("{}", &n.to_string(), 1)
 }
 
 /// The layout's name, for the home header.

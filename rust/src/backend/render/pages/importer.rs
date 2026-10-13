@@ -141,7 +141,7 @@ pub(crate) fn imp_transfer_line(done: u64, total: u64, rate: Option<f32>) -> std
     let mut parts: std::vec::Vec<std::string::String> = std::vec::Vec::new();
     if total > 0 {
         let pct = ((done as f64 / total as f64) * 100.0).clamp(0.0, 100.0) as u32;
-        parts.push(std::format!("{} %", pct));
+        parts.push(crate::loc_ui::percent(pct));
         parts.push(imp_n_of(&imp_amount(done), &imp_size(total)));
     } else {
         parts.push(imp_amount(done));

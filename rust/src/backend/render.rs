@@ -10039,7 +10039,7 @@ impl SwitchRenderBackend {
         let rot_opts = [lc.rot_none, lc.rot_90, lc.rot_180, lc.rot_270];
         let pix_opts = [lc.pixels_auto, lc.pixels_smooth, lc.pixels_sharp];
         let filter_opts = [lc.filter_none, lc.filter_scanlines, lc.filter_crt];
-        let zoom = std::format!("{} %", game_zoom_percent());
+        let zoom = crate::loc_ui::percent(game_zoom_percent() as u32);
         let note = |key: &str, v: Option<V>| {
             if (v.is_some() && armed == v) || !pv::follows_default(key) {
                 None
@@ -10164,7 +10164,7 @@ impl SwitchRenderBackend {
                 v.to_string()
             }
         };
-        let mut head = std::format!("{}  {} %", lc.set_zoom, percent);
+        let mut head = std::format!("{}  {}", lc.set_zoom, crate::loc_ui::percent(percent as u32));
         if (ox, oy) != (0, 0) {
             let offset = u.zoom_offset.replacen("{}", &signed(ox), 1).replacen("{}", &signed(oy), 1);
             head.push_str("  \u{00B7}  ");
