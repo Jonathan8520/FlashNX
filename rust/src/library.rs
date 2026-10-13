@@ -7590,7 +7590,9 @@ fn with_source_sheet<R>(
         // the same word: it read "Ajouter aux favoris" / "Retirer des favoris"
         // here and "Changer" there for the same switch.
         0 => u.change,
-        1 => u.edit,
+        // The address opens the keyboard, as Réglages' keyboard rows do, and
+        // says it as they do: "Modifier" is the word of a value row A arms.
+        1 => u.type_text,
         _ => lc.opt_delete,
     };
     let hints = [(&[Btn::A][..], a_verb), (&[Btn::B][..], u.back)];

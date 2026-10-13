@@ -328,10 +328,13 @@ pub(crate) fn with_options_sheet<R>(
     // row goes through them), for the help box's height.
     let mut helps: std::vec::Vec<&str> = OPTIONS_ENTRIES.iter().map(|k| help_of(k, p.power)).collect();
     helps.extend(POWER_ORDER.iter().map(|m| help_of("OVERCLOCK", *m)));
-    // What A does on the row: arm a value, flip a switch, open, act.
+    // What A does on the row: arm a value, flip a switch, open, act. The
+    // keyboard row says what Réglages' keyboard rows say: "Umbenennen" made
+    // the German bar too long for the panel, and the bar dropped L R on this
+    // row alone.
     let a_verb = match key {
         "TOUCHES" | "JAQUETTE" | "DOSSIER" => u.open,
-        "RENOMMER" => lc.opt_rename,
+        "RENOMMER" => u.type_text,
         "RACCOURCI" => {
             if p.home_icon {
                 u.remove
