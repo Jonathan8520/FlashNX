@@ -9719,7 +9719,10 @@ fn handle_cover_picker_input(s: &mut State, button: &str, game_idx: usize, mut s
         "Down" | "StickLDown" => {
             selection = grid_step(selection, true, cols, total);
         }
-        "Y" => {
+        // Not on the window that found nothing, which offers no Y: there it
+        // clicked over a screen that did not change, and the flip stayed for
+        // the refined search, which then opened on screenshots.
+        "Y" if total > 0 => {
             // Swap the whole grid between screenshots and logos. The thumbnails in
             // flight are for the other source, so drop them rather than let them
             // land under the new URLs.
