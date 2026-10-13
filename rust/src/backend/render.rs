@@ -5656,13 +5656,63 @@ struct GalleryAnim {
     pop: f32,
     /// The Play grid's ring, in the same content space as `sel_*`, on the
     /// covers' own clock (`Glide`) so ring and cover settle on the same frame.
-    /// The importer's lists keep the fields above.
+    /// An archive's games and the Flashpoint grid keep the fields above.
     ring_x: Glide,
     ring_y: Glide,
     ring_w: Glide,
     /// How far through its pop the ring is (1 = at rest): a few pixels of
     /// swell that peak half way and end as the ring arrives.
     ring_pop: f32,
+    /// The importer home's one focus, which travels between its two cards
+    /// and its source rows (`draw_library_distant_list`).
+    imp_focus: FocusGlide,
+}
+
+/// A focus travelling between things of different shapes: the importer's
+/// cards, which it rings, and its source rows, which it fills as a pill.
+///
+/// The rect is in SCREEN space, not in the list's content space like `sel_y`:
+/// a card never scrolls, so a focus kept in content space flew off its card
+/// whenever a finger moved the list under it. Headed for a row, the caller
+/// moves it with the list's scroll each frame, which keeps it on its row
+/// exactly as content space did. `look` is how far it has turned from a
+/// card's ring (0) into a row's pill (1); `clip_top` and `clip_bot` are the
+/// band it is drawn in: the whole page for a card, the rows' band for a row,
+/// eased so that it never cuts the focus off as it crosses from one to the
+/// other.
+#[derive(Clone, Copy)]
+struct FocusGlide {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    look: f32,
+    clip_top: f32,
+    clip_bot: f32,
+}
+
+impl FocusGlide {
+    /// At rest on `rect` with `look`, drawn inside `clip` (top, bottom).
+    const fn at(rect: (f32, f32, f32, f32), look: f32, clip: (f32, f32)) -> FocusGlide {
+        FocusGlide { x: rect.0, y: rect.1, w: rect.2, h: rect.3, look, clip_top: clip.0, clip_bot: clip.1 }
+    }
+
+    /// One step of `dt` seconds towards `to`, every part at the same `rate`:
+    /// the rect, the look and the band arrive together, so the focus turns
+    /// into its new shape along the way rather than on arrival.
+    fn ease(&mut self, to: &FocusGlide, dt: f32, rate: f32) {
+        self.x = ease_to(self.x, to.x, dt, rate);
+        self.y = ease_to(self.y, to.y, dt, rate);
+        self.w = ease_to(self.w, to.w, dt, rate);
+        self.h = ease_to(self.h, to.h, dt, rate);
+        self.look = ease_to(self.look, to.look, dt, rate);
+        self.clip_top = ease_to(self.clip_top, to.clip_top, dt, rate);
+        self.clip_bot = ease_to(self.clip_bot, to.clip_bot, dt, rate);
+    }
+
+    fn rect(&self) -> (f32, f32, f32, f32) {
+        (self.x, self.y, self.w, self.h)
+    }
 }
 
 fn gallery_anim() -> &'static std::sync::Mutex<GalleryAnim> {
@@ -5679,6 +5729,7 @@ fn gallery_anim() -> &'static std::sync::Mutex<GalleryAnim> {
         ring_y: Glide::at(0.0),
         ring_w: Glide::at(0.0),
         ring_pop: 1.0,
+        imp_focus: FocusGlide::at((0.0, 0.0, 0.0, 0.0), 0.0, (0.0, 0.0)),
     });
     &A
 }

@@ -7630,8 +7630,18 @@ fn draw_source_options(
     kind: u32,
 ) {
     use crate::backend::render::OPTIONS_W;
-    let row = LIBRARY.lock().map(|s| importer_row_for_abs(&s, url_idx)).unwrap_or(0);
-    let scroll = IMPORT_SCROLL.load(std::sync::atomic::Ordering::Relaxed);
+    // The list as the panel will leave it (`distant_idle_at`): a favourite
+    // switched on here re-sorts it, and drawn at the scroll it had, its source
+    // could sit out of view behind the panel, then the list jumped to it the
+    // frame the panel was gone.
+    let cur = IMPORT_SCROLL.load(std::sync::atomic::Ordering::Relaxed);
+    let (row, scroll) = LIBRARY
+        .lock()
+        .map(|s| {
+            let row = importer_row_for_abs(&s, url_idx);
+            (row, importer_scroll_for(row, cur, importer_view(&s).len()))
+        })
+        .unwrap_or((0, cur));
     backend.clear_ui_transform();
     crate::backend::render::set_ui_screen_kind(0);
     draw_importer_home(backend, row, scroll, false);
@@ -12238,8 +12248,10 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             IMPORT_SCROLL.store(scroll_offset, std::sync::atomic::Ordering::Relaxed);
             IMPORT_ROW.store(selection, std::sync::atomic::Ordering::Relaxed);
             // Back from another page (an archive folding into its row, the
-            // results, an error): the glide state is that page's, so the pill
-            // and the scroll snap to the home's instead of flying in from it.
+            // results, an error, a source's panel): the glide state is that
+            // page's, so the focus and the scroll snap to the home's instead
+            // of flying in from it. What opens over the home draws it behind
+            // as it is about to land, so there the snap shows nothing.
             let gap = now.saturating_sub(HOME_TICK.swap(now, std::sync::atomic::Ordering::Relaxed));
             if gap > unsafe { ruffle_tick_freq() } / 20 {
                 crate::backend::render::gallery_anim_reset();
