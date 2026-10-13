@@ -114,6 +114,48 @@ pub const MENU_ITEMS: &[&str] = &[
 pub const SCREEN_ITEMS: &[&str] =
     &["AFFICHAGE", "ROTATION", "ZOOM", "PIXELS", "FILTRE", "FPS"];
 
+/// Where the ÉCRAN page is open, for what its two doors do differently.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScreenDoor {
+    /// Beside the pause, over the running game: every value previews on the
+    /// frozen frame behind, and A on Zoom opens the framing mode, where the
+    /// picture is what the zoom is judged against.
+    Pause,
+    /// Beside a game's options in the launcher, before the game runs: Zoom is
+    /// a value stepped through the presets (`loc::DEFAULT_ZOOM_STEPS`) once A
+    /// has armed it, there being no picture here to frame.
+    Options,
+}
+
+/// What the ÉCRAN page shows, wherever it is opened from: the pause (the
+/// running game) or a game's options in the launcher. One page, two doors,
+/// built by `with_screen_view`: the launcher used to list the same settings
+/// inline in its options, a second copy of these rows to keep in step.
+pub(crate) struct ScreenView {
+    /// The options in force, as indexes into their rows' options (the armed
+    /// row's value while it is armed).
+    pub display: u8,
+    pub rotation: u8,
+    pub pixels: u8,
+    pub filter: u8,
+    /// The zoom's percentage.
+    pub zoom: u16,
+    pub fps: bool,
+    /// Bit `i` set: the game has a value of its own for row `i` of
+    /// `SCREEN_ITEMS` (`screen_own_bits`). Else the row follows Réglages and
+    /// says so, and X has nothing to take back.
+    pub own: u8,
+    /// The row A has armed, as its index in `SCREEN_ITEMS`.
+    pub armed: Option<usize>,
+    pub door: ScreenDoor,
+}
+
+/// The `ScreenView::own` bits of a game for which `has_own` answers, by the
+/// rows' names, whether it has a value of its own.
+pub(crate) fn screen_own_bits(has_own: impl Fn(&str) -> bool) -> u8 {
+    SCREEN_ITEMS.iter().enumerate().take(8).filter(|(_, k)| has_own(k)).fold(0u8, |m, (i, _)| m | 1 << i)
+}
+
 /// Rows of `MENU_ITEMS` that open a panel beside the pause.
 pub const PAUSE_ROW_TOUCHES: usize = 1;
 pub const PAUSE_ROW_SCREEN: usize = 2;
@@ -10071,63 +10113,74 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
-    /// The ECRAN panel as data, handed to `f`. Rows follow `SCREEN_ITEMS`.
+    /// The ÉCRAN page as data, handed to `f`, in game or in a game's options
+    /// in the launcher (`ScreenView`). Rows follow `SCREEN_ITEMS`; `crumbs` is
+    /// the path back to the panel it opened from.
     ///
     /// Every setting shows all its options, the one in force lit: A arms it,
-    /// Left and Right move it while armed, live (input rule 1). The zoom, a
-    /// free percentage, shows its value and opens the framing mode; the
-    /// counter is a switch. All of it previews on the frozen frame to the
-    /// right, which C++ re-renders every frame. A row the game follows
-    /// Réglages for says "par défaut", as in its options in the launcher, and
-    /// X takes a row back to it.
-    pub(crate) fn with_screen_sheet<R>(&mut self, selected: usize, f: impl FnOnce(&mut Self, &kit::sheet::Sheet) -> R) -> R {
-        use crate::pause_values::{self as pv, PauseValue as V};
+    /// Left and Right move it while armed (input rule 1), live in game, where
+    /// all of it previews on the frozen frame to the right. The counter is a
+    /// switch. The zoom is what the doors do differently: in the pause a free
+    /// percentage, read on its row, that A opens the framing mode on; in the
+    /// launcher a value stepped through presets once armed, with a help
+    /// saying where to fine-tune it. A row the game follows Réglages for says
+    /// "par défaut", and X takes a row back to it.
+    pub(crate) fn with_screen_view<R>(
+        &mut self,
+        v: &ScreenView,
+        selected: usize,
+        crumbs: &[&str],
+        f: impl FnOnce(&mut Self, &kit::sheet::Sheet) -> R,
+    ) -> R {
         use kit::list::Row;
         let lc = crate::loc::s();
         let u = crate::loc_ui::ui();
-        // Every row is read back from what is in force: the armed value while
-        // a row is armed, what the game runs with otherwise.
-        let armed = pv::armed();
+        let in_game = v.door == ScreenDoor::Pause;
         let display_opts = [lc.display_fit, lc.display_stretch, lc.display_fill];
         let rot_opts = [lc.rot_none, lc.rot_90, lc.rot_180, lc.rot_270];
         let pix_opts = [lc.pixels_auto, lc.pixels_smooth, lc.pixels_sharp];
         let filter_opts = [lc.filter_none, lc.filter_scanlines, lc.filter_crt];
-        let zoom = crate::loc_ui::percent(game_zoom_percent() as u32);
-        let note = |key: &str, v: Option<V>| {
-            if (v.is_some() && armed == v) || !pv::follows_default(key) {
-                None
-            } else {
-                Some(u.tag_default)
-            }
-        };
-        let rows = [
-            Row::new(Icon::Monitor, lc.set_display_mode)
-                .choice(&display_opts, pv::current(V::Display) as usize)
-                .armed_if(armed == Some(V::Display))
-                .note_in_room(note("AFFICHAGE", Some(V::Display)), u.tag_default),
-            Row::new(Icon::Rotate, lc.set_rotation)
-                .choice(&rot_opts, pv::current(V::Rotation) as usize)
-                .armed_if(armed == Some(V::Rotation))
-                .note_in_room(note("ROTATION", Some(V::Rotation)), u.tag_default),
-            Row::new(Icon::ZoomIn, lc.set_zoom).value(&zoom).opens().note_in_room(note("ZOOM", None), u.tag_default),
-            Row::new(Icon::Pixels, lc.set_pixel_filter)
-                .choice(&pix_opts, pv::current(V::Pixels) as usize)
-                .armed_if(armed == Some(V::Pixels))
-                .note_in_room(note("PIXELS", Some(V::Pixels)), u.tag_default),
-            Row::new(Icon::Tv, lc.set_screen_filter)
-                .choice(&filter_opts, pv::current(V::Filter) as usize)
-                .armed_if(armed == Some(V::Filter))
-                .note_in_room(note("FILTRE", Some(V::Filter)), u.tag_default),
-            Row::new(Icon::Gauge, lc.set_fps).toggle(fps_counter_on()).note_in_room(note("FPS", None), u.tag_default),
-        ];
-        debug_assert_eq!(rows.len(), SCREEN_ITEMS.len());
+        let zoom = crate::loc_ui::percent(v.zoom as u32);
+        let zoom_ends = crate::loc::zoom_preset_ends(v.zoom);
+        let own = |i: usize| i < 8 && v.own & (1 << i) != 0;
+        let rows: std::vec::Vec<Row> = SCREEN_ITEMS
+            .iter()
+            .enumerate()
+            .map(|(i, k)| {
+                let row = match *k {
+                    "AFFICHAGE" => Row::new(Icon::Monitor, lc.set_display_mode).choice(&display_opts, v.display as usize),
+                    "ROTATION" => Row::new(Icon::Rotate, lc.set_rotation).choice(&rot_opts, v.rotation as usize),
+                    "ZOOM" if in_game => Row::new(Icon::ZoomIn, lc.set_zoom).value(&zoom).opens(),
+                    "ZOOM" => Row::new(Icon::ZoomIn, lc.set_zoom).cycle(&zoom).ends(zoom_ends.0, zoom_ends.1),
+                    "PIXELS" => Row::new(Icon::Pixels, lc.set_pixel_filter).choice(&pix_opts, v.pixels as usize),
+                    "FILTRE" => Row::new(Icon::Tv, lc.set_screen_filter).choice(&filter_opts, v.filter as usize),
+                    _ => Row::new(Icon::Gauge, lc.set_fps).toggle(v.fps),
+                };
+                // "par défaut" on a row with no value of its own; not on the
+                // row being changed, where the arrows need the room.
+                let armed = v.armed == Some(i);
+                let note = if armed || own(i) { None } else { Some(u.tag_default) };
+                row.armed_if(armed).note_in_room(note, u.tag_default)
+            })
+            .collect();
         let key = SCREEN_ITEMS.get(selected).copied().unwrap_or("");
+        // Where the zoom is fine-tuned and the picture framed, said in the
+        // launcher in the pause's own row and page names, as Réglages names
+        // them for the default zoom.
+        let zoom_options_help;
+        let zoom_help = if in_game {
+            // A opens the framing on this row: Left and Right, which used to
+            // step it by ten percent, are an armed row's only.
+            u.help_zoom_frame
+        } else {
+            let path = crate::library::menu_path(&[lc.pause_title, lc.menu_screen, lc.set_zoom]);
+            zoom_options_help = u.help_opt_zoom.replacen("{}", &path, 1);
+            zoom_options_help.as_str()
+        };
         let help_of = |key: &str| match key {
             "AFFICHAGE" => u.help_display,
             "ROTATION" => u.help_rotation,
-            // A opens the framing on this row: Left and Right, which used to
-            // step it by ten percent, are an armed row's only.
-            "ZOOM" => u.help_zoom_frame,
+            "ZOOM" => zoom_help,
             "PIXELS" => u.help_pixels,
             "FILTRE" => u.help_filter,
             "FPS" => u.help_fps,
@@ -10136,33 +10189,61 @@ impl SwitchRenderBackend {
         let help = help_of(key);
         // Every row's, for the help box's height.
         let helps: std::vec::Vec<&str> = SCREEN_ITEMS.iter().map(|k| help_of(k)).collect();
-        // A arms a value row, opens the framing on ZOOM, flips the counter;
-        // armed, what Left / Right, A and B do now. X shows where the game
-        // has a value of its own to drop.
+        // A arms a value row, opens the framing on the pause's zoom, flips the
+        // counter; armed, what Left / Right, A and B do now. X shows where the
+        // game has a value of its own to drop.
         let a_verb = match key {
-            "ZOOM" => u.zoom_frame,
+            "ZOOM" if in_game => u.zoom_frame,
             "FPS" => u.change,
             _ => u.edit,
         };
-        let own = !key.is_empty() && !pv::follows_default(key);
+        let own_here = SCREEN_ITEMS.iter().position(|k| *k == key).is_some_and(own);
         let hints_armed = [(&[Btn::DpadLR][..], u.change), (&[Btn::A][..], u.validate), (&[Btn::B][..], u.cancel)];
         let hints_own = [(&[Btn::A][..], a_verb), (&[Btn::X][..], u.reset_default), (&[Btn::B][..], u.back)];
         let hints = [(&[Btn::A][..], a_verb), (&[Btn::B][..], u.back)];
-        let crumbs = [lc.pause_title];
         let mut sheet = kit::sheet::Sheet::new(lc.menu_screen, &rows, selected);
         sheet.kicker = Some(Icon::ChevronLeft);
-        sheet.crumbs = &crumbs;
+        sheet.crumbs = crumbs;
         sheet.glide_key = GLIDE_KEY_SCREEN;
         sheet.help = help;
         sheet.helps = &helps;
-        sheet.hints = if armed.is_some() {
+        sheet.hints = if v.armed.is_some() {
             &hints_armed
-        } else if own {
+        } else if own_here {
             &hints_own
         } else {
             &hints
         };
         f(self, &sheet)
+    }
+
+    /// The pause's ÉCRAN page (`with_screen_view`), every row read back from
+    /// what is in force: the armed value while a row is armed, what the game
+    /// runs with otherwise.
+    pub(crate) fn with_screen_sheet<R>(&mut self, selected: usize, f: impl FnOnce(&mut Self, &kit::sheet::Sheet) -> R) -> R {
+        use crate::pause_values::{self as pv, PauseValue as V};
+        // The armed value row, if it is one of this page's (the overclock is
+        // the pause's own).
+        let armed = match pv::armed() {
+            Some(V::Display) => Some("AFFICHAGE"),
+            Some(V::Rotation) => Some("ROTATION"),
+            Some(V::Pixels) => Some("PIXELS"),
+            Some(V::Filter) => Some("FILTRE"),
+            _ => None,
+        };
+        let v = ScreenView {
+            display: pv::current(V::Display),
+            rotation: pv::current(V::Rotation),
+            pixels: pv::current(V::Pixels),
+            filter: pv::current(V::Filter),
+            zoom: game_zoom_percent(),
+            fps: fps_counter_on(),
+            own: screen_own_bits(|k| !pv::follows_default(k)),
+            armed: armed.and_then(|k| SCREEN_ITEMS.iter().position(|x| *x == k)),
+            door: ScreenDoor::Pause,
+        };
+        let crumbs = [crate::loc::s().pause_title];
+        self.with_screen_view(&v, selected, &crumbs, f)
     }
 
     /// Draw the ECRAN panel beside the pause rail. `selected` indexes

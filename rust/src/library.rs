@@ -12,7 +12,8 @@
 //!   - **List**:         the Jouer tab, the library as covers or a list: A plays,
 //!                       + opens a game's options, - searches, Y sorts.
 //!   - **OptionsModal**: a game's options, a panel at the right edge with its
-//!                       pages beside it (`options_panel`).
+//!                       pages beside it (`options_panel`): Touches et
+//!                       curseur, Écran, the folders.
 //!   - **Picked**:       user picked a game; `selected_path` is set; C++
 //!                       polls `is_active()` and exits the library loop.
 //!   - **Quit**:         user pressed - on the empty/list; C++ exits the
@@ -33,7 +34,7 @@ use std::fs::File;
 use std::io::Read;
 use std::sync::Mutex;
 
-use crate::backend::render::SwitchRenderBackend;
+use crate::backend::render::{SwitchRenderBackend, SCREEN_ITEMS};
 use crate::net::{self, RemoteFile};
 use crate::{keymap, menu};
 
@@ -190,6 +191,12 @@ pub(crate) enum Screen {
     /// the cursor's speed, visibility and gyroscope. Reached from OPTIONS >
     /// TOUCHES; B returns to OPTIONS.
     TouchesMenu { game_idx: usize, selection: usize },
+    /// The Écran page of a game's options, beside them as the pause's ÉCRAN
+    /// is beside the pause, with the same rows: display, rotation, zoom,
+    /// pixels, filter, the frame counter, set here before the game runs.
+    /// `selection` indexes `render::SCREEN_ITEMS`. Reached from OPTIONS >
+    /// ÉCRAN; B returns to OPTIONS.
+    ScreenMenu { game_idx: usize, selection: usize },
     /// Picker of community control profiles matching a game (#20, TOUCHES >
     /// APPLIQUER). `selection` indexes `State::profile_matches`. A opens the
     /// before/after preview; B returns to the TOUCHES sub-menu.
@@ -269,6 +276,10 @@ fn keep_armed(s: &mut State, a: Armed) {
             options_panel::options_write(s, game_idx, key, a.cur);
         }
         Screen::TouchesMenu { game_idx, selection } => touches_write(s, game_idx, selection, a.cur),
+        Screen::ScreenMenu { game_idx, selection } => {
+            let key = SCREEN_ITEMS.get(selection).copied().unwrap_or("");
+            options_panel::options_write(s, game_idx, key, a.cur);
+        }
         Screen::Settings { section, in_pane: true, row } => settings_tab::write_armed(section, row, a.cur),
         _ => {}
     }
@@ -287,6 +298,9 @@ fn armed_next(s: &State, a: Armed, dir: i32) -> u16 {
                 _ => keymap::GYRO_MODE_COUNT as usize,
             };
             armed_step(a.cur, n as u16, dir)
+        }
+        Screen::ScreenMenu { selection, .. } => {
+            options_panel::options_next(SCREEN_ITEMS.get(selection).copied().unwrap_or(""), a.cur, dir)
         }
         Screen::Settings { section, row, .. } => settings_tab::armed_next(section, row, a.cur, dir),
         _ => a.cur,
@@ -3872,18 +3886,26 @@ fn touch_part(s: &mut State, row: usize, part: usize) -> bool {
             s.screen = Screen::OptionsModal { game_idx, selection: row };
             match key {
                 "FAVORI" => options_set_favorite(s, game_idx, row, None),
-                "FPS" => options_panel::options_toggle_fps(s, game_idx),
                 // The HOME icon's switch installs or removes a tile: that is
                 // A's work, with its toasts.
                 "RACCOURCI" => activate = true,
-                k if options_panel::is_armable(k) => {
-                    let v = part as u16;
-                    if v != options_panel::options_value(s, game_idx, k) {
-                        options_panel::options_write(s, game_idx, k, v);
-                        crate::sfx::value_changed();
-                    }
-                }
+                "OVERCLOCK" => options_panel::options_tap(s, game_idx, key, part),
                 _ => {}
+            }
+        }
+        Screen::ScreenMenu { game_idx, .. } => {
+            let Some(&key) = SCREEN_ITEMS.get(row) else { return false };
+            let here = Screen::ScreenMenu { game_idx, selection: row };
+            if let Some(a) = armed.filter(|a| a.screen != here) {
+                keep_armed(s, a);
+            }
+            s.screen = here;
+            match key {
+                "FPS" => options_panel::options_toggle_fps(s, game_idx),
+                // The zoom is a value with no options to tap: a tap on its
+                // row is a tap on the row.
+                "ZOOM" => {}
+                _ => options_panel::options_tap(s, game_idx, key, part),
             }
         }
         Screen::TouchesMenu { game_idx, .. } => {
@@ -4096,6 +4118,12 @@ fn set_screen_selection(s: &mut State, idx: usize) -> bool {
         }
         Screen::TouchesMenu { game_idx, selection } => {
             put!(selection, Screen::TouchesMenu { game_idx, selection: idx })
+        }
+        Screen::ScreenMenu { game_idx, selection } => {
+            if idx >= SCREEN_ITEMS.len() {
+                return false;
+            }
+            put!(selection, Screen::ScreenMenu { game_idx, selection: idx })
         }
         Screen::ProfileList { game_idx, selection } => {
             // The page publishes every row by its index in the list.
@@ -5267,6 +5295,10 @@ fn input_inner(button: &str) -> bool {
         }
         Screen::TouchesMenu { game_idx, selection } => {
             handle_touches_menu_input(&mut s, button, game_idx, selection);
+            true
+        }
+        Screen::ScreenMenu { game_idx, selection } => {
+            handle_screen_menu_input(&mut s, button, game_idx, selection);
             true
         }
         Screen::ProfileList { game_idx, selection } => {
@@ -9341,8 +9373,8 @@ fn options_set_favorite(s: &mut State, game_idx: usize, selection: usize, want: 
 fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut selection: usize) {
     let total = OPTIONS_ENTRIES.len();
     let key = OPTIONS_ENTRIES.get(selection).copied().unwrap_or("");
-    // An armed setting (input rules 1 and 2): Left / Right move the value it
-    // shows, A keeps it (written then), B or Minus drop it. Up / Down, the
+    // The armed overclock (input rules 1 and 2): Left / Right move the value
+    // it shows, A keeps it (written then), B or Minus drop it. Up / Down, the
     // shoulders and + keep it and go on with what they do; nothing else acts.
     if let Some(a) = armed_here(s) {
         match button {
@@ -9394,13 +9426,9 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
         "Up" | "StickLUp" => selection = list_step_wrap(selection, -1, total),
         "Down" | "StickLDown" => selection = list_step_wrap(selection, 1, total),
         "A" => {
-            if options_panel::is_armable(key) {
+            if key == "OVERCLOCK" {
                 let v = options_panel::options_value(s, game_idx, key);
                 arm_here(s, v);
-                return;
-            }
-            if key == "FPS" {
-                options_panel::options_toggle_fps(s, game_idx);
                 return;
             }
             // `.get`, not `[..]`: `selection` can arrive from the touch layer,
@@ -9418,6 +9446,10 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                     // Open the TOUCHES sub-menu (edit / apply / share / revert).
                     // #20 regroup: apply+share used to be sibling OPTIONS rows.
                     goto_touches_menu(s, game_idx, menu::MENU_EDIT);
+                    return;
+                }
+                "ECRAN" => {
+                    s.screen = Screen::ScreenMenu { game_idx, selection: 0 };
                     return;
                 }
                 "RACCOURCI" => {
@@ -9578,7 +9610,7 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
             s.screen = list_screen_for_abs(s, game_idx);
             return;
         }
-        // Back to the global default for this setting.
+        // The overclock back to the global default.
         "X" => {
             if options_panel::options_reset(s, game_idx, key) {
                 crate::sfx::value_changed();
@@ -9601,6 +9633,77 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
         _ => {}
     }
     s.screen = Screen::OptionsModal { game_idx, selection };
+}
+
+/// The Écran page of a game's options: the pause's ÉCRAN rows
+/// (`render::SCREEN_ITEMS`), set for the game's next launch. The display, the
+/// rotation, the zoom, the pixels and the filter are values (input rule 1): A
+/// arms one, Left / Right move it, A writes it, B drops it, Up / Down keep it
+/// and move on. The counter is a switch, flipped and written by A. X takes a
+/// value of the game's own back to the default. Unarmed, Left changes nothing
+/// and a fresh Right points at the options' rail and goes back to it, as B
+/// does, onto the ÉCRAN row. + closes the whole stack before it gets here,
+/// keeping an armed value (`close_options_stack`).
+fn handle_screen_menu_input(s: &mut State, button: &str, game_idx: usize, mut selection: usize) {
+    let count = SCREEN_ITEMS.len();
+    let key = SCREEN_ITEMS.get(selection).copied().unwrap_or("");
+    if let Some(a) = armed_here(s) {
+        match button {
+            "Left" | "StickLLeft" | "Right" | "StickLRight" => {
+                let dir = if matches!(button, "Left" | "StickLLeft") { -1 } else { 1 };
+                let next = armed_next(s, a, dir);
+                if next != a.cur {
+                    s.armed = Some(Armed { cur: next, ..a });
+                    crate::sfx::value_changed();
+                }
+                return;
+            }
+            "A" => {
+                confirm_armed(s);
+                crate::sfx::choose(crate::sfx::Sfx::Decide);
+                return;
+            }
+            "B" | "Minus" => {
+                s.armed = None;
+                crate::sfx::choose(crate::sfx::Sfx::Back);
+                return;
+            }
+            // A held direction against the end of the list moves nothing, and
+            // keeps the row armed (`list_step_moves`).
+            "Up" | "StickLUp" | "Down" | "StickLDown" => {
+                if !list_step_moves(button, selection, count) {
+                    return;
+                }
+                confirm_armed(s);
+            }
+            _ => return,
+        }
+    }
+    match button {
+        "Up" | "StickLUp" => selection = list_step_wrap(selection, -1, count),
+        "Down" | "StickLDown" => selection = list_step_wrap(selection, 1, count),
+        "A" => match key {
+            "FPS" => options_panel::options_toggle_fps(s, game_idx),
+            "" => {}
+            k => {
+                let v = options_panel::options_value(s, game_idx, k);
+                arm_here(s, v);
+                return;
+            }
+        },
+        // The game drops its own value and follows Réglages again.
+        "X" => {
+            if options_panel::options_reset(s, game_idx, key) {
+                crate::sfx::value_changed();
+            }
+        }
+        _ if matches!(button, "B" | "Minus") || toward_options_rail(button) => {
+            s.screen = Screen::OptionsModal { game_idx, selection: opt_row("ECRAN") };
+            return;
+        }
+        _ => {}
+    }
+    s.screen = Screen::ScreenMenu { game_idx, selection };
 }
 
 /// The game L (`button`) or R goes to from the game at `game_idx` in its
@@ -12078,6 +12181,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             }
         }
         Screen::TouchesMenu { .. }
+        | Screen::ScreenMenu { .. }
         | Screen::ProfileList { .. }
         | Screen::ProfileDeleteConfirm { .. }
         | Screen::ProfilePreview { .. }

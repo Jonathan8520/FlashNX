@@ -578,6 +578,13 @@ pub struct Ui {
     pub lang_name_tr: &'static str,
     /// À propos, under the memory row when FlashNX has the whole memory: what that means, and what the Album would have given instead.
     pub mem_full_note: &'static str,
+    /// Title of the group of a game's options in the launcher that holds what the pause also
+    /// changes, in the pause's order (Touches et curseur, Écran, Overclock): the game as it plays.
+    pub sec_in_game: &'static str,
+    /// Help of the Écran row of a game's options in the launcher, which opens the page the pause
+    /// calls Écran. Lists its rows in the words of `help_screen`, the pause's own help for that row,
+    /// which says every change shows on the game behind the menu: in the launcher there is none yet.
+    pub help_opt_screen: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -906,6 +913,8 @@ const EN: Ui = Ui {
     lang_name_zh: "Chinese",
     lang_name_tr: "Turkish",
     mem_full_note: "FlashNX has the console's whole memory, so every game can run. Opened from the Album, it would only get the small share left to applets.",
+    sec_in_game: "In game",
+    help_opt_screen: "Display, rotation, zoom, pixels, filter, FPS counter: set this game's picture before you even start it.",
 };
 
 const FR: Ui = Ui {
@@ -1234,6 +1243,8 @@ const FR: Ui = Ui {
     lang_name_zh: "Chinois",
     lang_name_tr: "Turc",
     mem_full_note: "FlashNX dispose de toute la mémoire de la console\u{a0}: chaque jeu peut se lancer. Ouvert depuis l'Album, il n'aurait que la petite part laissée aux applets.",
+    sec_in_game: "En jeu",
+    help_opt_screen: "Affichage, rotation, zoom, pixels, filtre, compteur FPS\u{a0}: règle l'image de ce jeu avant même de le lancer.",
 };
 
 const ES: Ui = Ui {
@@ -1562,6 +1573,8 @@ const ES: Ui = Ui {
     lang_name_zh: "Chino",
     lang_name_tr: "Turco",
     mem_full_note: "FlashNX dispone de toda la memoria de la consola, así que cualquier juego puede iniciarse. Abierto desde el Álbum, solo tendría la pequeña parte que reciben los applets.",
+    sec_in_game: "En el juego",
+    help_opt_screen: "Pantalla, rotación, zoom, píxeles, filtro, contador FPS: ajusta la imagen de este juego antes incluso de iniciarlo.",
 };
 
 const RU: Ui = Ui {
@@ -1890,6 +1903,8 @@ const RU: Ui = Ui {
     lang_name_zh: "Китайский",
     lang_name_tr: "Турецкий",
     mem_full_note: "У FlashNX вся память консоли, поэтому запустится любая игра. Открытый из Альбома, он получил бы лишь небольшую долю, которую дают апплетам.",
+    sec_in_game: "В игре",
+    help_opt_screen: "Экран, поворот, масштаб, пиксели, фильтр, счётчик FPS: настрой картинку этой игры ещё до её запуска.",
 };
 
 const DE: Ui = Ui {
@@ -2218,6 +2233,8 @@ const DE: Ui = Ui {
     lang_name_zh: "Chinesisch",
     lang_name_tr: "Türkisch",
     mem_full_note: "FlashNX hat den ganzen Speicher der Konsole, jedes Spiel kann also starten. Aus dem Album geöffnet, bekäme es nur den kleinen Anteil für Applets.",
+    sec_in_game: "Im Spiel",
+    help_opt_screen: "Anzeige, Drehung, Zoom, Pixel, Filter, FPS-Anzeige: Stell das Bild dieses Spiels ein, noch bevor du es startest.",
 };
 
 const IT: Ui = Ui {
@@ -2546,6 +2563,8 @@ const IT: Ui = Ui {
     lang_name_zh: "Cinese",
     lang_name_tr: "Turco",
     mem_full_note: "FlashNX ha tutta la memoria della console, quindi ogni gioco può avviarsi. Aperto dall'Album, avrebbe solo la piccola parte lasciata alle applet.",
+    sec_in_game: "In gioco",
+    help_opt_screen: "Schermo, rotazione, zoom, pixel, filtro, contatore FPS: regola l'immagine di questo gioco ancora prima di avviarlo.",
 };
 
 const PT: Ui = Ui {
@@ -2874,6 +2893,8 @@ const PT: Ui = Ui {
     lang_name_zh: "Chinês",
     lang_name_tr: "Turco",
     mem_full_note: "O FlashNX tem toda a memória do console, então qualquer jogo pode ser iniciado. Aberto pelo Álbum, ele teria só a pequena parte reservada aos applets.",
+    sec_in_game: "No jogo",
+    help_opt_screen: "Tela, rotação, zoom, pixels, filtro, contador FPS: ajuste a imagem deste jogo antes mesmo de abri-lo.",
 };
 
 const ZH: Ui = Ui {
@@ -3202,6 +3223,8 @@ const ZH: Ui = Ui {
     lang_name_zh: "中文",
     lang_name_tr: "土耳其语",
     mem_full_note: "FlashNX 拥有主机的全部内存，所有游戏都能运行。若从相册打开，它只能获得留给小程序的少量内存。",
+    sec_in_game: "游戏中",
+    help_opt_screen: "显示、旋转、缩放、像素、滤镜、帧率显示：在启动之前就设置好这个游戏的画面。",
 };
 
 const TR: Ui = Ui {
@@ -3530,6 +3553,8 @@ const TR: Ui = Ui {
     lang_name_zh: "Çince",
     lang_name_tr: "Türkçe",
     mem_full_note: "FlashNX konsolun tüm belleğine sahip, bu yüzden her oyun başlayabilir. Albüm'den açılsaydı yalnızca applet'lere ayrılan küçük payı alırdı.",
+    sec_in_game: "Oyun içi",
+    help_opt_screen: "Ekran, döndürme, zoom, piksel, filtre, FPS sayacı: bu oyunun görüntüsünü daha açmadan ayarla.",
 };
 
 pub fn ui() -> &'static Ui {

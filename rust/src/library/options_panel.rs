@@ -3,32 +3,36 @@
 //! The panel the mockup draws (Options.dc.html): at the right edge, over the
 //! library dimmed behind it, the game's cover and name on top, then the rows
 //! in titled groups. First the game in the library (favourite, cover, folders,
-//! name, HOME icon), its controls, then its picture and its performance (the
-//! settings the pause's ÉCRAN and OVERCLOCK change, here before the game is
-//! even launched: a portrait game can be turned before its first run), and the
-//! delete row last, on its own.
+//! name, HOME icon), then the game as it plays, in the pause's own order and
+//! words: Touches et curseur, Écran, Overclock (what the pause changes, here
+//! before the game is even launched: a portrait game can be turned before its
+//! first run), and the delete row last, on its own.
 //!
 //! A row with a chevron opens its page BESIDE the panel, which folds to a rail
 //! at the right edge (`kit_cascade_on`, the in-game pause does the same from
-//! the left): Touches et curseur, the shared profiles and their previews, the
-//! folders. The path stays on screen and B goes back the way A came. Only the
-//! questions (delete this game? this profile? empty this folder?) and the
-//! cover picker sit on top, centred.
+//! the left): Touches et curseur, the shared profiles and their previews,
+//! Écran, the folders. The path stays on screen and B goes back the way A
+//! came. Only the questions (delete this game? this profile? empty this
+//! folder?) and the cover picker sit on top, centred.
 
 use super::*;
-use crate::backend::render::{ui_col, Btn, HintItem, Icon, Row, Sheet, Side, OPTIONS_CHILD_W, OPTIONS_W};
+use crate::backend::render::{
+    screen_own_bits, ui_col, Btn, HintItem, Icon, Row, ScreenDoor, ScreenView, Sheet, Side, OPTIONS_CHILD_W,
+    OPTIONS_W, SCREEN_ITEMS,
+};
 
 /// The rows of the game options, in order. Matched by name, never by index:
 /// `opt_row` finds where a row sits, so adding one moves nothing else.
 ///
-/// The picture rows in the order of the pause's ÉCRAN, the frame counter last
-/// among them: a player who found it there looks for it under Image here, and
-/// in Réglages › Jeu par défaut, which lists the same groups in this order.
+/// The game rows are the pause's, in its order (Jonathan: "le modal oncover
+/// pourquoi tu ne rajoutes pas en sous menu comme on fait dans modal ingame ?
+/// genre Ecran>"): Touches et curseur and Écran open their pages beside the
+/// panel, the overclock stays a choice on it. The picture's six settings used
+/// to be listed here inline, under Image, which made the panel fourteen rows
+/// deep and a second copy of the pause's ÉCRAN page.
 pub(crate) const OPTIONS_ENTRIES: &[&str] = &[
     "FAVORI", "JAQUETTE", "DOSSIER", "RENOMMER", "RACCOURCI",
-    "TOUCHES",
-    "AFFICHAGE", "ROTATION", "ZOOM", "PIXELS", "FILTRE", "FPS",
-    "OVERCLOCK",
+    "TOUCHES", "ECRAN", "OVERCLOCK",
     "SUPPRIMER",
 ];
 
@@ -38,7 +42,7 @@ pub(crate) fn opt_row(key: &str) -> usize {
 }
 
 /// A game's picture and performance settings, and whether it has a HOME
-/// icon, as its options show them.
+/// icon, as its options and their Écran page show them.
 #[derive(Clone, Copy)]
 pub(crate) struct GamePrefs {
     pub display: u8,
@@ -54,7 +58,8 @@ pub(crate) struct GamePrefs {
     pub own: u8,
 }
 
-/// Bits of `GamePrefs::own`, and the `.prefs` keys behind each setting row.
+/// Bits of `GamePrefs::own`, and the `.prefs` keys behind each setting row:
+/// the overclock on the panel, every row of its Écran page.
 const OWN_KEYS: [(&str, &[&str]); 7] = [
     ("AFFICHAGE", &["display"]),
     ("ROTATION", &["rot"]),
@@ -124,15 +129,25 @@ pub(crate) fn game_prefs_forget() {
 /// The overclock's three settings in the order its row shows them.
 const POWER_ORDER: [u8; 3] = [0, keymap::POWER_AUTO, 1];
 
-/// Whether row `key` is one of the game's settings (as opposed to an action).
-pub(crate) fn is_setting(key: &str) -> bool {
-    matches!(key, "AFFICHAGE" | "ROTATION" | "ZOOM" | "PIXELS" | "FILTRE" | "OVERCLOCK" | "FPS")
+/// `p` as the row of setting `key` shows it while A has it armed: at `v`,
+/// where Left / Right have moved it, not yet written (what A would keep).
+fn show_armed(p: &mut GamePrefs, key: &str, v: u16) {
+    let i = v.min(u8::MAX as u16) as u8;
+    match key {
+        "AFFICHAGE" => p.display = i,
+        "ROTATION" => p.rotation = i,
+        "ZOOM" => p.zoom = v,
+        "PIXELS" => p.pixels = i,
+        "FILTRE" => p.filter = i,
+        "OVERCLOCK" => p.power = POWER_ORDER[(i as usize).min(POWER_ORDER.len() - 1)],
+        _ => {}
+    }
 }
 
-/// Whether row `key` is a value A arms (input rule 1): a choice, or the zoom.
-/// The counter is a switch, which A flips.
-pub(crate) fn is_armable(key: &str) -> bool {
-    is_setting(key) && key != "FPS"
+/// Whether the game has a value of its own for setting `key` (else it
+/// follows the default set in Réglages, and its row says so).
+fn has_own(p: &GamePrefs, key: &str) -> bool {
+    p.own & own_bit(key) != 0
 }
 
 /// The value of setting `key` as its row steps it: an index into its options,
@@ -153,8 +168,8 @@ pub(crate) fn options_value(s: &State, game_idx: usize, key: &str) -> u16 {
 
 /// One step `dir` along setting `key` from `cur`, stopping at the ends: the
 /// next option, or the next zoom preset (`loc::zoom_preset_step`), as
-/// Réglages › Jeu par défaut steps the zoom every game starts at. Ten percent
-/// at a time up to 500 % is the pause's, with the picture on screen.
+/// Réglages › Jeu par défaut steps the zoom every game starts at. The free
+/// percentage is the pause's framing mode, with the picture on screen.
 pub(crate) fn options_next(key: &str, cur: u16, dir: i32) -> u16 {
     let n = match key {
         "AFFICHAGE" => keymap::DISPLAY_MODE_COUNT,
@@ -186,7 +201,18 @@ pub(crate) fn options_write(s: &mut State, game_idx: usize, key: &str, v: u16) {
     game_prefs_forget();
 }
 
-/// A on the counter's switch: flipped and written.
+/// A tap on option `part` of setting `key`'s choice (the overclock on the
+/// panel, a row of its Écran page): set at once and written, with no arming
+/// (input rule 6). The option already in force changes nothing.
+pub(crate) fn options_tap(s: &mut State, game_idx: usize, key: &str, part: usize) {
+    let v = part.min(u8::MAX as usize) as u16;
+    if v != options_value(s, game_idx, key) {
+        options_write(s, game_idx, key, v);
+        crate::sfx::value_changed();
+    }
+}
+
+/// A on the counter's switch (on the Écran page): flipped and written.
 pub(crate) fn options_toggle_fps(s: &mut State, game_idx: usize) {
     let Some(e) = s.entries.get(game_idx) else { return };
     let (b, path) = (e.basename.clone(), e.path.clone());
@@ -203,7 +229,7 @@ pub(crate) fn options_reset(s: &mut State, game_idx: usize, key: &str) -> bool {
     let (b, path) = (e.basename.clone(), e.path.clone());
     let p = game_prefs(&b, &path);
     let Some((_, keys)) = OWN_KEYS.iter().find(|(k, _)| *k == key) else { return false };
-    if p.own & own_bit(key) == 0 {
+    if !has_own(&p, key) {
         return false;
     }
     keymap::clear_prefs(&b, keys);
@@ -223,8 +249,9 @@ fn shelves_value(e: &Entry) -> std::string::String {
 }
 
 /// The options panel as data, handed to `f`. `armed` is the value the row
-/// under the cursor shows while A has it armed (`Armed`); `neighbours`, whether
-/// the list behind holds another game for L / R to go to.
+/// under the cursor shows while A has it armed (`Armed`: on the panel, only
+/// the overclock is a value); `neighbours`, whether the list behind holds
+/// another game for L / R to go to.
 pub(crate) fn with_options_sheet<R>(
     backend: &mut SwitchRenderBackend,
     entry: &Entry,
@@ -237,70 +264,38 @@ pub(crate) fn with_options_sheet<R>(
     let u = crate::loc_ui::ui();
     let key = OPTIONS_ENTRIES.get(selection).copied().unwrap_or("");
     let mut p = game_prefs(&entry.basename, &entry.path);
-    // The armed row shows the value Left / Right have moved it to, not yet
-    // written: what A would keep.
     if let Some(v) = armed {
-        let i = v.min(u8::MAX as u16) as u8;
-        match key {
-            "AFFICHAGE" => p.display = i,
-            "ROTATION" => p.rotation = i,
-            "ZOOM" => p.zoom = v,
-            "PIXELS" => p.pixels = i,
-            "FILTRE" => p.filter = i,
-            "OVERCLOCK" => p.power = POWER_ORDER[(i as usize).min(POWER_ORDER.len() - 1)],
-            _ => {}
-        }
+        show_armed(&mut p, key, v);
     }
     let fav = crate::favorites::is_favorite(&entry.basename);
     let shelves = shelves_value(entry);
-    let display_opts = [lc.display_fit, lc.display_stretch, lc.display_fill];
-    let rot_opts = [lc.rot_none, lc.rot_90, lc.rot_180, lc.rot_270];
-    let pix_opts = [lc.pixels_auto, lc.pixels_smooth, lc.pixels_sharp];
-    let filter_opts = [lc.filter_none, lc.filter_scanlines, lc.filter_crt];
     let oc_opts = [lc.overclock_off, lc.pixels_auto, lc.overclock_on];
     let oc_at = POWER_ORDER.iter().position(|m| *m == p.power).unwrap_or(0);
-    let zoom = crate::loc_ui::percent(p.zoom as u32);
-    let zoom_ends = crate::loc::zoom_preset_ends(p.zoom);
-    // Where the zoom is fine-tuned and the picture framed: the pause's own
-    // row and page names, as Réglages names them for the default.
-    let zoom_path = settings_tab::menu_path(&[lc.pause_title, lc.menu_screen, lc.set_zoom]);
-    let zoom_help = u.help_opt_zoom.replacen("{}", &zoom_path, 1);
-    // A setting with no value of its own says so ("par défaut"): keeping a
-    // value gives the game its own, and X takes it back. Not on the row
-    // being changed, where the arrows need the room.
-    let note = |k: &str| {
-        let armed_here = armed.is_some() && k == key;
-        if is_setting(k) && p.own & own_bit(k) == 0 && !armed_here {
-            Some(u.tag_default)
-        } else {
-            None
-        }
-    };
+    let oc_armed = armed.is_some() && key == "OVERCLOCK";
+    // An overclock with no value of its own says so ("par défaut"): keeping a
+    // value gives the game its own, and X takes it back. Not while it is being
+    // changed, where the arrows need the room.
+    let oc_note = if oc_armed || has_own(&p, "OVERCLOCK") { None } else { Some(u.tag_default) };
     let rows: std::vec::Vec<Row> = OPTIONS_ENTRIES
         .iter()
         .map(|k| match *k {
             // A switch, like the other on / off rows, and the star filled when
             // it is on: the row says what the game IS, not what A would do.
             "FAVORI" => Row::new(Icon::Star, lc.opt_favorite).filled_if(fav, ui_col::GOLD).toggle(fav),
-            "TOUCHES" => Row::new(Icon::Gamepad, lc.opt_keys).opens(),
             "JAQUETTE" => Row::new(Icon::Image, lc.opt_cover).opens(),
             "DOSSIER" => Row::new(Icon::Folder, lc.opt_folder).value(&shelves).opens(),
             // A brings up the Switch keyboard, as Réglages marks its own.
             "RENOMMER" => Row::new(Icon::Pencil, lc.opt_rename).keyboard(),
             "RACCOURCI" => Row::new(Icon::Home, u.opt_home_icon).toggle(p.home_icon),
-            "AFFICHAGE" => Row::new(Icon::Monitor, lc.set_display_mode).choice(&display_opts, p.display as usize),
-            "ROTATION" => Row::new(Icon::Rotate, lc.set_rotation).choice(&rot_opts, p.rotation as usize),
-            "ZOOM" => Row::new(Icon::ZoomIn, lc.set_zoom).cycle(&zoom).ends(zoom_ends.0, zoom_ends.1),
-            "PIXELS" => Row::new(Icon::Pixels, lc.set_pixel_filter).choice(&pix_opts, p.pixels as usize),
-            "FILTRE" => Row::new(Icon::Tv, lc.set_screen_filter).choice(&filter_opts, p.filter as usize),
-            "OVERCLOCK" => Row::new(Icon::Cpu, lc.set_overclock).choice(&oc_opts, oc_at),
-            "FPS" => Row::new(Icon::Gauge, lc.set_fps).toggle(p.fps == 1),
+            // The pause's own rows, icons and words: each opens the page the
+            // pause opens (`menu::with_touches_view`, `with_screen_view`).
+            "TOUCHES" => Row::new(Icon::Gamepad, lc.opt_keys).opens(),
+            "ECRAN" => Row::new(Icon::Monitor, lc.menu_screen).opens(),
+            "OVERCLOCK" => Row::new(Icon::Cpu, lc.set_overclock)
+                .choice(&oc_opts, oc_at)
+                .armed_if(oc_armed)
+                .note_in_room(oc_note, u.tag_default),
             _ => Row::new(Icon::Trash, u.opt_delete_game).danger(),
-        })
-        .zip(OPTIONS_ENTRIES.iter())
-        .map(|(r, k)| {
-            let r = if is_setting(k) { r.note_in_room(note(k), u.tag_default) } else { r };
-            r.armed_if(armed.is_some() && *k == key)
         })
         .collect();
     let help_of = |key: &str, power: u8| match key {
@@ -310,17 +305,14 @@ pub(crate) fn with_options_sheet<R>(
         "DOSSIER" => u.help_opt_folders,
         "RENOMMER" => u.help_opt_rename,
         "RACCOURCI" => u.help_opt_home,
-        "AFFICHAGE" => u.help_display,
-        "ROTATION" => u.help_rotation,
-        "ZOOM" => zoom_help.as_str(),
-        "PIXELS" => u.help_pixels,
-        "FILTRE" => u.help_filter,
+        // Not the pause's, which says every change shows on the game behind
+        // it: here there is no game behind yet.
+        "ECRAN" => u.help_opt_screen,
         "OVERCLOCK" => match power {
             0 => u.help_oc_off,
             keymap::POWER_AUTO => u.help_oc_auto,
             _ => u.help_oc_on,
         },
-        "FPS" => u.help_fps,
         _ => u.help_opt_delete,
     };
     let help = help_of(key, p.power);
@@ -328,12 +320,12 @@ pub(crate) fn with_options_sheet<R>(
     // row goes through them), for the help box's height.
     let mut helps: std::vec::Vec<&str> = OPTIONS_ENTRIES.iter().map(|k| help_of(k, p.power)).collect();
     helps.extend(POWER_ORDER.iter().map(|m| help_of("OVERCLOCK", *m)));
-    // What A does on the row: arm a value, flip a switch, open, act. The
-    // keyboard row says what Réglages' keyboard rows say: "Umbenennen" made
-    // the German bar too long for the panel, and the bar dropped L R on this
-    // row alone.
+    // What A does on the row: arm the overclock, flip a switch, open, act.
+    // The keyboard row says what Réglages' keyboard rows say: "Umbenennen"
+    // made the German bar too long for the panel, and the bar dropped L R on
+    // this row alone.
     let a_verb = match key {
-        "TOUCHES" | "JAQUETTE" | "DOSSIER" => u.open,
+        "TOUCHES" | "ECRAN" | "JAQUETTE" | "DOSSIER" => u.open,
         "RENOMMER" => u.type_text,
         "RACCOURCI" => {
             if p.home_icon {
@@ -342,14 +334,14 @@ pub(crate) fn with_options_sheet<R>(
                 u.install
             }
         }
-        "FAVORI" | "FPS" => u.change,
-        k if is_armable(k) => u.edit,
+        "FAVORI" => u.change,
+        "OVERCLOCK" => u.edit,
         _ => lc.opt_delete,
     };
-    // Armed, what Left / Right, A and B do now (input rule 2). On a setting
-    // the game has its own value for, X goes back to the default. The bar
-    // drops hints it has no room for from its end, keeping B (`kit_sheet_at`),
-    // so L R, the one every other row also shows, goes first. L R only where
+    // Armed, what Left / Right, A and B do now (input rule 2). On an
+    // overclock of the game's own, X goes back to the default. The bar drops
+    // hints it has no room for from its end, keeping B (`kit_sheet_at`), so
+    // L R, the one every other row also shows, goes first. L R only where
     // there is another game to go to: in a list of one they do nothing.
     let hints_armed = [(&[Btn::DpadLR][..], u.change), (&[Btn::A][..], u.validate), (&[Btn::B][..], u.cancel)];
     let other_game = neighbours.then_some((&[Btn::L, Btn::R][..], u.other_game));
@@ -358,19 +350,17 @@ pub(crate) fn with_options_sheet<R>(
         .chain(other_game)
         .chain([(&[Btn::B][..], u.back)])
         .collect();
-    let own_here = is_setting(key) && p.own & own_bit(key) != 0;
+    let own_here = key == "OVERCLOCK" && has_own(&p, key);
     let hints_act: std::vec::Vec<HintItem> = [(&[Btn::A][..], a_verb)]
         .into_iter()
         .chain(other_game)
         .chain([(&[Btn::B][..], u.back)])
         .collect();
-    // Every group under its title: the game in the library, its controls, its
-    // picture and its performance, then the delete row on its own.
+    // Two groups under their titles, the game in the library and the game as
+    // it plays, then the delete row on its own.
     let sections = [
         (opt_row("FAVORI"), u.sec_library),
-        (opt_row("TOUCHES"), u.sec_controls),
-        (opt_row("AFFICHAGE"), u.sec_image),
-        (opt_row("OVERCLOCK"), u.sec_perf),
+        (opt_row("TOUCHES"), u.sec_in_game),
         (opt_row("SUPPRIMER"), ""),
     ];
     let thumb = backend.cover_thumb(&entry.basename);
@@ -381,7 +371,13 @@ pub(crate) fn with_options_sheet<R>(
     // The name the grid's tile shows, not the file's.
     sheet.thumb_tile = Some((entry.color_chip, &entry.display_name));
     sheet.sections = &sections;
-    sheet.row_h = 48.0;
+    // 47 px rows, not 48: the kit takes a tap only on a row wholly inside
+    // the list (`kit_sheet_at`), and at 48 the Écran row, the last in view
+    // when the panel opens, ran 6 px past the list wherever the help takes
+    // three lines (every language but Chinese). Drawn whole, only its empty
+    // margin cut, it took no tap. Stepping by 49 px, it ends inside (at 413
+    // of 414 px).
+    sheet.row_h = 47.0;
     sheet.glide_key = 0x6200_0000;
     sheet.help = help;
     sheet.helps = &helps;
@@ -393,6 +389,28 @@ pub(crate) fn with_options_sheet<R>(
         &hints_act
     };
     f(backend, &sheet)
+}
+
+/// The Écran page of `entry`'s options as `with_screen_view` draws it: the
+/// game's own values, or the defaults it follows, and on row `selection`,
+/// while A has it armed, the value Left / Right moved it to (`armed`).
+fn screen_view(entry: &Entry, selection: usize, armed: Option<u16>) -> ScreenView {
+    let mut p = game_prefs(&entry.basename, &entry.path);
+    let key = SCREEN_ITEMS.get(selection).copied().unwrap_or("");
+    if let Some(v) = armed {
+        show_armed(&mut p, key, v);
+    }
+    ScreenView {
+        display: p.display,
+        rotation: p.rotation,
+        pixels: p.pixels,
+        filter: p.filter,
+        zoom: p.zoom,
+        fps: p.fps == 1,
+        own: screen_own_bits(|k| has_own(&p, k)),
+        armed: armed.and(SCREEN_ITEMS.iter().position(|k| *k == key)),
+        door: ScreenDoor::Options,
+    }
 }
 
 /// The page last drawn beside the options, kept so it can fold back after B:
@@ -412,6 +430,7 @@ pub(crate) fn is_options_family(screen: Screen) -> bool {
             | Screen::RevertPreview { .. }
             | Screen::ProfileShareConfirm { .. }
             | Screen::ProfileDeleteConfirm { .. }
+            | Screen::ScreenMenu { .. }
             | Screen::GameFolderPicker { .. }
             | Screen::GameFolderDelete { .. }
     )
@@ -431,6 +450,7 @@ pub(crate) fn panels_left_edge(screen: Screen, vw: f32) -> Option<f32> {
             | Screen::RevertPreview { .. }
             | Screen::ProfileShareConfirm { .. }
             | Screen::ProfileDeleteConfirm { .. }
+            | Screen::ScreenMenu { .. }
             | Screen::GameFolderPicker { .. }
             | Screen::GameFolderDelete { .. }
     );
@@ -449,6 +469,7 @@ pub(crate) fn family_game(screen: Screen) -> Option<usize> {
         | Screen::RevertPreview { game_idx }
         | Screen::ProfileShareConfirm { game_idx }
         | Screen::ProfileDeleteConfirm { game_idx, .. }
+        | Screen::ScreenMenu { game_idx, .. }
         | Screen::GameFolderPicker { game_idx, .. }
         | Screen::GameFolderDelete { game_idx, .. } => game_idx,
         _ => return None,
@@ -459,6 +480,7 @@ pub(crate) fn family_game(screen: Screen) -> Option<usize> {
 fn branch_of(screen: Screen) -> usize {
     match screen {
         Screen::GameFolderPicker { .. } | Screen::GameFolderDelete { .. } => opt_row("DOSSIER"),
+        Screen::ScreenMenu { .. } => opt_row("ECRAN"),
         Screen::CoverPicker { .. } => opt_row("JAQUETTE"),
         Screen::DeleteConfirm { .. } => opt_row("SUPPRIMER"),
         _ => opt_row("TOUCHES"),
@@ -546,8 +568,8 @@ pub(crate) fn draw_options_family(
         Screen::OptionsModal { selection, .. } => selection,
         other => branch_of(other),
     };
-    // The panel's own armed row, or the page's (the Touches et curseur page
-    // reads its own from the state).
+    // The panel's own armed row; a page beside it (Touches et curseur, Écran)
+    // reads its own from the state.
     let opt_armed = if matches!(screen, Screen::OptionsModal { .. }) { armed } else { None };
     draw_family_panels(backend, &entry, opt_sel, opt_armed, neighbours, shown, t);
     // While a page folds back nothing publishes (the page has no cursor, the
@@ -829,6 +851,14 @@ fn draw_family_panels(
                 menu::with_diff_view(b, &back_keys, lc.opt_share, Some(question), &rows, &hints, |b, c| {
                     cascade(b, parent, Some(c))
                 });
+            }
+            Some(Screen::ScreenMenu { game_idx, selection }) => {
+                // The armed row shows the value Left / Right moved it to.
+                let page_armed = LIBRARY.lock().ok().and_then(|s| {
+                    s.armed.filter(|a| live && a.screen == Screen::ScreenMenu { game_idx, selection }).map(|a| a.cur)
+                });
+                let v = screen_view(entry, selection, page_armed);
+                b.with_screen_view(&v, sel(selection), &back_options, |b, c| cascade(b, parent, Some(c)));
             }
             Some(Screen::GameFolderPicker { selection, .. }) => {
                 with_folders_view(b, entry, sel(selection), &back_options, |b, c| cascade(b, parent, Some(c)));

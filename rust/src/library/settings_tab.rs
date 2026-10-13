@@ -82,8 +82,8 @@ impl SetSection {
 // never by number: every screen that comes back to the tab lands on the row
 // that opened it through these names.
 const LIBRARY_ROWS: &[&str] = &["VUE", "DOSSIER", "SONS"];
-// The game defaults in the groups and the order of a game's options (the
-// controls, the picture as the pause's ÉCRAN lists it, the performance).
+// The game defaults in the order of the pause and of a game's options (the
+// controls, the picture as their ÉCRAN page lists it, the performance).
 const DEFAULTS_ROWS: &[&str] =
     &["TOUCHES", "VITESSE", "AFFICHAGE", "ROTATION", "ZOOM", "PIXELS", "FILTRE", "FPS", "OVERCLOCK"];
 const PROFILE_ROWS: &[&str] = &["PSEUDO"];
@@ -1108,7 +1108,7 @@ fn armed_hints() -> std::vec::Vec<HintItem<'static>> {
 }
 
 /// Jeu par défaut: what every game starts with until it is set on its own, in
-/// the groups and with the controls and options of a game's options and of the
+/// the order and with the controls and options of a game's options and of the
 /// pause, so a setting looks the same wherever it is changed (the rotation's
 /// first option is "0°" on all three). The box under the rows explains the row
 /// with the cursor, Overclock setting by setting. `armed` is the value the row
