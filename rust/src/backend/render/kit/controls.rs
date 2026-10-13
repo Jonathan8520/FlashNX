@@ -32,6 +32,8 @@ pub(crate) enum Ctrl<'a> {
 }
 
 const CHOICE_H: f32 = 32.0;
+/// Padding either side of a keycap's label (`kit_keycap`, `kit_keycap_width`).
+const KEYCAP_PAD_X: f32 = 9.0;
 /// Padding either side of an option and the options' text size, tried in turn
 /// before a choice gives up and shows its current option alone (its arrows
 /// come only once the row is armed): the usual one, a tighter one, then
@@ -228,7 +230,7 @@ impl SwitchRenderBackend {
     /// Returns its width.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn kit_keycap(&mut self, x: f32, cy: f32, max_w: f32, h: f32, label: &str, px: f32, dim: bool) -> f32 {
-        const PAD_X: f32 = 9.0;
+        const PAD_X: f32 = KEYCAP_PAD_X;
         let t = self.kit_fit(label, px, (max_w - 2.0 * PAD_X).max(0.0));
         let tw = self.kit_measure(&t, px);
         let w = (tw + 2.0 * PAD_X).max(h).min(max_w.max(h));
@@ -243,6 +245,14 @@ impl SwitchRenderBackend {
         self.kit_rrect(x, y, w, h - 2.0, 6.0, face);
         self.kit_text_mid((x + (w - tw) * 0.5).round(), y + (h - 2.0) * 0.5, px, &t, ink);
         w
+    }
+
+    /// The width `kit_keycap` takes for `label` in `max_w`, `h` tall, without
+    /// drawing it: for a key laid out from its right end.
+    pub(crate) fn kit_keycap_width(&mut self, max_w: f32, h: f32, label: &str, px: f32) -> f32 {
+        let t = self.kit_fit(label, px, (max_w - 2.0 * KEYCAP_PAD_X).max(0.0));
+        let tw = self.kit_measure(&t, px);
+        (tw + 2.0 * KEYCAP_PAD_X).max(h).min(max_w.max(h))
     }
 
     /// Width of a chip (see `kit_chip`).

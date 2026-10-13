@@ -10809,6 +10809,14 @@ impl SwitchRenderBackend {
             badge_w = badge_w.max(self.pad_badge_width(slot.glyph, txt));
         }
         let value_x = |rx: f32| rx + 10.0 + badge_w + 12.0;
+        // In landscape the left hand's column is the right one's mirror: its
+        // badges against the picture and its values beside them, aligned on
+        // their right. Read from the window's edge the way the right column
+        // is, the values sat against the outer edge and left a band of
+        // nothing between them and the controller, the picture centred in a
+        // window that looked lopsided.
+        let mirrored = |i: usize| !portrait && PAD_SLOTS.get(i).is_some_and(|s| s.chip.0 < PIC_MID);
+        let badge_left = |rx: f32, rw: f32| rx + rw - 10.0 - badge_w;
 
         // A stick that moves the cursor is ONE thing, not four rows saying
         // "None": its direction rows share one value that says what it does.
@@ -10826,8 +10834,12 @@ impl SwitchRenderBackend {
             let (Some(&first), Some(&last)) = (rows.first(), rows.last()) else { continue };
             let (rx, ry0, rw, _) = row_rect(first);
             let (_, ry1, _, rh1) = row_rect(last);
-            let gx = value_x(rx) - 6.0;
-            groups.push((gx, ry0 + 3.0, rx + rw - 6.0 - gx, ry1 + rh1 - 3.0 - (ry0 + 3.0)));
+            let (gx, gr) = if mirrored(first) {
+                (rx + 6.0, badge_left(rx, rw) - 6.0)
+            } else {
+                (value_x(rx) - 6.0, rx + rw - 6.0)
+            };
+            groups.push((gx, ry0 + 3.0, gr - gx, ry1 + rh1 - 3.0 - (ry0 + 3.0)));
             for i in rows {
                 if let Some(f) = in_group.get_mut(i) {
                     *f = true;
@@ -10865,20 +10877,34 @@ impl SwitchRenderBackend {
             } else {
                 col::TEXT
             };
-            self.kit_pad_badge(rx + 10.0, rcy, badge_w, slot.glyph, txt, badge_ink);
+            let mirror = mirrored(i);
+            let bx = if mirror { badge_left(rx, rw) } else { rx + 10.0 };
+            self.kit_pad_badge(bx, rcy, badge_w, slot.glyph, txt, badge_ink);
             if in_group.get(i).copied().unwrap_or(false) {
                 continue;
             }
-            let vx = value_x(rx);
-            let vmax = (rx + rw - 10.0 - vx).max(0.0);
-            self.pad_value(vx, rcy, vmax, rh, &value, slot.name, txt);
+            if mirror {
+                // From the badge outwards: measured first, then drawn so that
+                // it ends 12 px short of the badge.
+                let room = (bx - 12.0 - (rx + 10.0)).max(0.0);
+                let vw = self.pad_value_width(room, rh, &value, slot.name, txt);
+                self.pad_value(bx - 12.0 - vw, rcy, vw + 0.5, rh, &value, slot.name, txt);
+            } else {
+                let vx = value_x(rx);
+                let vmax = (rx + rw - 10.0 - vx).max(0.0);
+                self.pad_value(vx, rcy, vmax, rh, &value, slot.name, txt);
+            }
         }
         for &(gx, gy, gw, gh) in &groups {
             let gcy = gy + gh * 0.5;
             let isz = (txt + 1.0).round();
-            self.kit_icon(gx + 6.0, gcy, isz, Icon::Pointer, col::TEXT2);
             let t = self.kit_fit(u.keys_mouse_cursor, txt, (gw - 12.0 - isz - 8.0).max(0.0));
-            self.kit_text_mid(gx + 6.0 + isz + 8.0, gcy, txt, &t, col::TEXT2);
+            // A left-hand group in landscape reads against its badges, as its
+            // rows' values do.
+            let left_hand = !portrait && gx + gw * 0.5 < x + w * 0.5;
+            let start = if left_hand { gx + gw - 6.0 - (isz + 8.0 + self.kit_measure(&t, txt)) } else { gx + 6.0 };
+            self.kit_icon(start, gcy, isz, Icon::Pointer, col::TEXT2);
+            self.kit_text_mid(start + isz + 8.0, gcy, txt, &t, col::TEXT2);
         }
 
         // ── The line about the focused row, and the footer ───────────────
@@ -10972,6 +10998,44 @@ impl SwitchRenderBackend {
                 let t = self.kit_fit(&label, lpx, room);
                 self.kit_text_mid(x + isz + 7.0, cy, lpx, &t, col::TEXT3);
             }
+        }
+    }
+
+    /// The width `pad_value` takes for `value` in `max_w`, without drawing it:
+    /// for a value laid out from its right end (the left hand's column).
+    fn pad_value_width(&mut self, max_w: f32, row_h: f32, value: &PadValue, button: &str, px: f32) -> f32 {
+        let u = crate::loc_ui::ui();
+        match value {
+            PadValue::Key(k) => self.pad_key_width(max_w, row_h, k, px),
+            PadValue::None | PadValue::Inherited(None) => {
+                let t = self.kit_fit(u.key_none, px, max_w);
+                self.kit_measure(&t, px)
+            }
+            PadValue::Inherited(Some(k)) => {
+                let kw = self.pad_key_width(max_w, row_h, k, px);
+                let cw = self.kit_measure(u.key_same_as_normal, pad_caption_px(px));
+                if cw <= max_w - kw - 10.0 { kw + 10.0 + cw } else { kw }
+            }
+            PadValue::Modifier => {
+                let isz = (px + 1.0).round();
+                let label = crate::loc::s().keys_modifier.replace("{}", button);
+                let room = (max_w - isz - 7.0).max(0.0);
+                let lpx = if self.kit_measure(&label, px) <= room { px } else { pad_caption_px(px) };
+                let t = self.kit_fit(&label, lpx, room);
+                isz + 7.0 + self.kit_measure(&t, lpx)
+            }
+        }
+    }
+
+    /// The width `pad_key` takes for `name` in `max_w`, without drawing it.
+    fn pad_key_width(&mut self, max_w: f32, row_h: f32, name: &str, px: f32) -> f32 {
+        let label = crate::keymap::flash_key_display(name);
+        if matches!(name, "Left click" | "Right click" | "Clic gauche" | "Clic droit" | "Keyboard") {
+            let isz = (px + 1.0).round();
+            let t = self.kit_fit(&label, px, (max_w - isz - 7.0).max(0.0));
+            isz + 7.0 + self.kit_measure(&t, px)
+        } else {
+            self.kit_keycap_width(max_w, (row_h - 6.0).clamp(14.0, 24.0), &label, px)
         }
     }
 
