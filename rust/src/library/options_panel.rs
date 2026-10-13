@@ -657,7 +657,16 @@ static LAST_QUESTION: Mutex<Option<Question>> = Mutex::new(None);
 fn draw_question(backend: &mut SwitchRenderBackend, q: &Question) {
     use crate::backend::render::Choice;
     let choices = q.choices.map(|(label, destructive)| Choice { label, destructive });
-    backend.draw_confirm(q.icon, &q.title, &q.body, q.detail.as_deref(), &choices, q.selection, q.danger);
+    backend.draw_confirm(
+        q.icon,
+        &q.title,
+        &q.body,
+        q.detail.as_deref(),
+        &choices,
+        q.selection,
+        q.danger,
+        crate::loc_ui::ui().cancel,
+    );
 }
 
 /// Draw `q` and remember it for its shrink.

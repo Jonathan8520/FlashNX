@@ -1431,6 +1431,7 @@ pub(crate) fn draw_move_question(backend: &mut SwitchRenderBackend, selection: u
         ],
         selection,
         false,
+        crate::loc_ui::ui().cancel,
     );
 }
 
@@ -1450,5 +1451,6 @@ pub(crate) fn draw_send_failed(backend: &mut SwitchRenderBackend, selection: usi
         &[Choice { label: u.close, destructive: false }, Choice { label: u.retry, destructive: false }],
         selection,
         false,
+        u.cancel,
     );
 }

@@ -27,6 +27,10 @@ impl SwitchRenderBackend {
     /// there was the one that deleted. A selection that starts on the safe
     /// answer is what the callers use now. With a single answer it is a
     /// notice, which A and B both close.
+    ///
+    /// `back` names what B does in the footer: going back on the safe answer,
+    /// in its own word. "Annuler" on every question read the wrong way on the
+    /// one that stops a download, where B carries on downloading.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw_confirm(
         &mut self,
@@ -37,6 +41,7 @@ impl SwitchRenderBackend {
         choices: &[Choice],
         selection: usize,
         danger: bool,
+        back: &str,
     ) {
         use kit::theme::{col, radius, size};
         const PAD: f32 = 36.0;
@@ -115,7 +120,7 @@ impl SwitchRenderBackend {
             // A notice: its one answer is what A and B both do, and "Valider /
             // Annuler" would offer a choice that is not there.
             [only] => self.kit_hints_centered(x + w * 0.5, hy, &[(&[Btn::A, Btn::B][..], only.label)]),
-            _ => self.kit_hints_centered(x + w * 0.5, hy, &[(&[Btn::A], u.validate), (&[Btn::B], u.cancel)]),
+            _ => self.kit_hints_centered(x + w * 0.5, hy, &[(&[Btn::A], u.validate), (&[Btn::B], back)]),
         }
         unsafe {
             glUseProgram(0);

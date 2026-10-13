@@ -2190,6 +2190,7 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
                 ],
                 selection,
                 true,
+                u.cancel,
             );
             backend.clear_ui_transform();
         }

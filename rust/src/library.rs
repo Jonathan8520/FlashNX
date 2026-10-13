@@ -7676,6 +7676,7 @@ fn draw_source_options(
             ],
             q,
             true,
+            u.cancel,
         );
         backend.clear_ui_transform();
     }
@@ -11404,7 +11405,10 @@ fn draw_import_page(
     } else if let Some(src) = source.as_deref() {
         crumbs.push(src);
     }
-    let hints = [(&[Btn::B][..], u.cancel)];
+    // B stops it (or asks first, once it has run a while): "Arrêter", the
+    // word of the answer that does it, not "Annuler", which the question
+    // that follows gives to carrying on.
+    let hints = [(&[Btn::B][..], u.imp_stop)];
     backend.draw_import_progress(&ImportProgress {
         crumbs: &crumbs,
         title: &title,
@@ -11889,6 +11893,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 &[Choice { label: u.close, destructive: false }],
                 0,
                 false,
+                u.close,
             );
         }
         Screen::Empty => {
@@ -12261,6 +12266,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 ],
                 selection,
                 false,
+                u.cancel,
             );
         }
         Screen::DistantLoading => {
@@ -12365,6 +12371,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     ],
                     selection,
                     true,
+                    u.imp_keep_going,
                 );
             }
         }
