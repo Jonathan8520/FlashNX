@@ -579,75 +579,226 @@ extern "C" void https_get_cancel(void) {
 }
 
 // ── Async thumbnail GET (Flashpoint logos, non-blocking, PARALLEL) ─────────
-// A SECOND, isolated curl-multi handle dedicated to cover/logo thumbnails, with
-// a POOL of slots so several logos download CONCURRENTLY (curl_multi naturally
-// runs them in parallel) instead of one-at-a-time. It deliberately does NOT
-// touch g_multi/g_handle (the archive.org metadata + download handle). The
-// FpGallery / cover-picker render starts a fetch per free slot, pumps
-// `https_thumb_tick` once per frame, and takes each finished slot, so the grid
-// fills several covers at a time without ever blocking the UI.
+// A SECOND, isolated curl-multi handle dedicated to cover/logo thumbnails and
+// the importer's shelf searches, with a POOL of slots so several transfers run
+// CONCURRENTLY. It deliberately does NOT touch g_multi/g_handle (the
+// archive.org metadata + download handle).
+//
+// The transfers run on a thread of their own. They used to be pumped from the
+// launcher's frame (`https_thumb_tick` called `curl_multi_perform`), and that
+// call is where curl 7.69 does a connection's DNS lookup and its whole TLS
+// handshake with mbedtls -- which also parses all of cacert.pem again for
+// every new connection (curl caches the parsed CA store only from 7.87, and
+// not for mbedtls). Measured on the importer (2026-10-14): frames of 105 to
+// 217 ms each time a shelf search or a screenshot opened a connection, while
+// choosing and parsing the shelves cost 2 to 12 ms. Now the UI side only
+// queues a URL and reads a finished slot, under a mutex held for a few copies;
+// it never waits behind curl.
 namespace {
 constexpr int THUMB_SLOTS = 4;
-CURLM* g_thumb_multi = nullptr;
+
+// A slot as the UI sees it. `Queued`: handed over, not picked up yet;
+// `Running`: the worker has it; `Done`: the answer waits to be taken.
+enum class ThumbState : u8 { Free, Queued, Running, Done };
 struct ThumbSlot {
-    CURL*       handle = nullptr;
-    std::string buf;
-    long        http_code = 0;
-    long long   length = -1;    // Content-Length of the answer, -1 when not given
-    bool        active = false; // a transfer is in flight on this slot
-    bool        done   = false; // finished; bytes ready to take
+    ThumbState  state  = ThumbState::Free;
+    u32         gen    = 0;     // bumped by every start and cancel: a transfer
+                                // the worker finishes for an older one is dropped
+    bool        head   = false; // HEAD: only the Content-Length is wanted
+    std::string url;
+    std::string buf;            // the answer, moved in by the worker
     bool        ok     = false; // finished successfully (CURLE_OK + 2xx/3xx)
+    long long   length = -1;    // Content-Length of the answer, -1 when not given
 };
 ThumbSlot g_thumb[THUMB_SLOTS];
+Mutex     g_thumb_mutex;
+CondVar   g_thumb_wake;         // the worker sleeps on it when it has nothing
+bool      g_thumb_quit    = false;
+bool      g_thumb_started = false;
+Thread    g_thumb_thread;
 
-void thumb_slot_free(int i) {
-    if (g_thumb[i].handle) {
-        if (g_thumb_multi) curl_multi_remove_handle(g_thumb_multi, g_thumb[i].handle);
-        curl_easy_cleanup(g_thumb[i].handle);
-        g_thumb[i].handle = nullptr;
+// Worker side only: the transfer each slot runs, if any.
+struct ThumbXfer {
+    CURL*       handle = nullptr;
+    u32         gen    = 0;
+    std::string buf;
+};
+
+void thumb_xfer_drop(CURLM* multi, ThumbXfer& x) {
+    if (x.handle) {
+        curl_multi_remove_handle(multi, x.handle);
+        curl_easy_cleanup(x.handle);
+        x.handle = nullptr;
     }
-    g_thumb[i].buf.clear();
-    g_thumb[i].http_code = 0;
-    g_thumb[i].length = -1;
-    g_thumb[i].active = false;
-    g_thumb[i].done = false;
-    g_thumb[i].ok = false;
+    x.buf.clear();
 }
 
-// Start a transfer in a free slot: a GET, or with `head` a HEAD, whose answer
+void thumb_worker(void*) {
+    CURLM* multi = curl_multi_init();
+    ThumbXfer xfer[THUMB_SLOTS];
+    while (true) {
+        // What the UI asked for since the last pass, and what it took back.
+        struct Start { int slot; u32 gen; std::string url; bool head; };
+        Start starts[THUMB_SLOTS];
+        int n_start = 0;
+        bool drop[THUMB_SLOTS] = {};
+        mutexLock(&g_thumb_mutex);
+        if (g_thumb_quit) {
+            mutexUnlock(&g_thumb_mutex);
+            break;
+        }
+        for (int i = 0; i < THUMB_SLOTS; i++) {
+            ThumbSlot& s = g_thumb[i];
+            if (xfer[i].handle && (s.gen != xfer[i].gen || s.state != ThumbState::Running)) {
+                drop[i] = true;
+            }
+            if (s.state == ThumbState::Queued) {
+                starts[n_start++] = {i, s.gen, s.url, s.head};
+                s.state = ThumbState::Running;
+            }
+        }
+        mutexUnlock(&g_thumb_mutex);
+
+        for (int i = 0; i < THUMB_SLOTS; i++) {
+            if (drop[i]) thumb_xfer_drop(multi, xfer[i]);
+        }
+        for (int k = 0; k < n_start; k++) {
+            const Start& st = starts[k];
+            ThumbXfer& x = xfer[st.slot];
+            thumb_xfer_drop(multi, x);
+            CURL* c = multi ? curl_easy_init() : nullptr;
+            if (!c) {
+                mutexLock(&g_thumb_mutex);
+                if (g_thumb[st.slot].gen == st.gen) {
+                    g_thumb[st.slot].ok = false;
+                    g_thumb[st.slot].state = ThumbState::Done;
+                }
+                mutexUnlock(&g_thumb_mutex);
+                continue;
+            }
+            curl_easy_setopt(c, CURLOPT_URL, st.url.c_str());
+            curl_easy_setopt(c, CURLOPT_USERAGENT, "FlashNX/1.9.0 (Nintendo Switch homebrew)");
+            curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+            curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
+            curl_easy_setopt(c, CURLOPT_CAINFO, CACERT_PATH);
+            curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, write_to_string);
+            curl_easy_setopt(c, CURLOPT_WRITEDATA, &x.buf);
+            curl_easy_setopt(c, CURLOPT_TIMEOUT, 20L);
+            curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 8L);
+            // A thread of our own, so no alarm-based DNS timeout either.
+            curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+            if (st.head) curl_easy_setopt(c, CURLOPT_NOBODY, 1L);
+            curl_multi_add_handle(multi, c);
+            x.handle = c;
+            x.gen = st.gen;
+        }
+
+        bool busy = false;
+        if (multi) {
+            int running = 0;
+            curl_multi_perform(multi, &running);
+            CURLMsg* msg;
+            int left = 0;
+            while ((msg = curl_multi_info_read(multi, &left))) {
+                if (msg->msg != CURLMSG_DONE) continue;
+                for (int i = 0; i < THUMB_SLOTS; i++) {
+                    ThumbXfer& x = xfer[i];
+                    if (x.handle != msg->easy_handle) continue;
+                    long code = 0;
+                    curl_easy_getinfo(x.handle, CURLINFO_RESPONSE_CODE, &code);
+                    const bool ok = (msg->data.result == CURLE_OK) && code >= 200 && code < 400;
+                    curl_off_t cl = -1;
+                    if (ok) curl_easy_getinfo(x.handle, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &cl);
+                    curl_multi_remove_handle(multi, x.handle);
+                    curl_easy_cleanup(x.handle);
+                    x.handle = nullptr;
+                    mutexLock(&g_thumb_mutex);
+                    ThumbSlot& s = g_thumb[i];
+                    if (s.gen == x.gen && s.state == ThumbState::Running) {
+                        s.buf.swap(x.buf);
+                        s.ok = ok;
+                        s.length = ok ? (long long)cl : -1;
+                        s.state = ThumbState::Done;
+                    }
+                    mutexUnlock(&g_thumb_mutex);
+                    x.buf.clear();
+                    break;
+                }
+            }
+            for (int i = 0; i < THUMB_SLOTS; i++) busy = busy || xfer[i].handle;
+        }
+
+        if (busy) {
+            // Woken by the sockets; a new request waits at most this long.
+            int numfds = 0;
+            curl_multi_wait(multi, nullptr, 0, 20, &numfds);
+        } else {
+            mutexLock(&g_thumb_mutex);
+            bool queued = false;
+            for (int i = 0; i < THUMB_SLOTS; i++) queued = queued || g_thumb[i].state == ThumbState::Queued;
+            if (!queued && !g_thumb_quit) condvarWait(&g_thumb_wake, &g_thumb_mutex);
+            mutexUnlock(&g_thumb_mutex);
+        }
+    }
+    for (int i = 0; i < THUMB_SLOTS; i++) thumb_xfer_drop(multi, xfer[i]);
+    if (multi) curl_multi_cleanup(multi);
+}
+
+// Start the worker once. Core 2 below the audio worker and the save writer: it
+// spends its time on the network, and a TLS handshake must never delay a sound
+// buffer or a save. 256 KB of stack for mbedtls' handshake.
+bool thumb_worker_start() {
+    if (g_thumb_started) return true;
+    mutexInit(&g_thumb_mutex);
+    condvarInit(&g_thumb_wake);
+    g_thumb_quit = false;
+    Result rc = threadCreate(&g_thumb_thread, thumb_worker, nullptr, nullptr, 256 * 1024, 0x2F, 2);
+    if (R_FAILED(rc)) rc = threadCreate(&g_thumb_thread, thumb_worker, nullptr, nullptr, 256 * 1024, 0x2F, -2);
+    if (R_FAILED(rc)) {
+        std::printf("net: thumbnail worker threadCreate failed 0x%x\n", (unsigned)rc);
+        std::fflush(stdout);
+        return false;
+    }
+    threadStart(&g_thumb_thread);
+    g_thumb_started = true;
+    return true;
+}
+
+// Queue a transfer in a free slot: a GET, or with `head` a HEAD, whose answer
 // is only its Content-Length (https_thumb_slot_take_length).
 int thumb_start(const char* url, bool head) {
-    if (net_init() != 0) return -1;
-    if (!g_thumb_multi) {
-        g_thumb_multi = curl_multi_init();
-        if (!g_thumb_multi) return -1;
-    }
+    if (!url || net_init() != 0) return -1;
+    if (!thumb_worker_start()) return -1;
+    mutexLock(&g_thumb_mutex);
     int slot = -1;
     for (int i = 0; i < THUMB_SLOTS; i++) {
-        if (!g_thumb[i].active && !g_thumb[i].done) { slot = i; break; }
+        if (g_thumb[i].state == ThumbState::Free) { slot = i; break; }
     }
-    if (slot < 0) return -5;
-    CURL* c = curl_easy_init();
-    if (!c) return -1;
-    g_thumb[slot].buf.clear();
-    curl_easy_setopt(c, CURLOPT_URL, url);
-    curl_easy_setopt(c, CURLOPT_USERAGENT, "FlashNX/1.9.0 (Nintendo Switch homebrew)");
-    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
-    curl_easy_setopt(c, CURLOPT_CAINFO, CACERT_PATH);
-    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, write_to_string);
-    curl_easy_setopt(c, CURLOPT_WRITEDATA, &g_thumb[slot].buf);
-    curl_easy_setopt(c, CURLOPT_TIMEOUT, 20L);
-    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 8L);
-    if (head) curl_easy_setopt(c, CURLOPT_NOBODY, 1L);
-    curl_multi_add_handle(g_thumb_multi, c);
-    g_thumb[slot].handle = c;
-    g_thumb[slot].active = true;
-    g_thumb[slot].done = false;
-    g_thumb[slot].ok = false;
-    g_thumb[slot].http_code = 0;
-    g_thumb[slot].length = -1;
-    return slot;
+    if (slot >= 0) {
+        ThumbSlot& s = g_thumb[slot];
+        s.gen++;
+        s.state = ThumbState::Queued;
+        s.head = head;
+        s.url = url;
+        s.buf.clear();
+        s.ok = false;
+        s.length = -1;
+        condvarWakeOne(&g_thumb_wake);
+    }
+    mutexUnlock(&g_thumb_mutex);
+    return slot >= 0 ? slot : -5;
+}
+
+// Free a slot (lock held): its answer goes, and a transfer still running for
+// it is dropped by the worker on its next pass.
+void thumb_slot_free_locked(int i) {
+    g_thumb[i].gen++;
+    g_thumb[i].state = ThumbState::Free;
+    g_thumb[i].url.clear();
+    g_thumb[i].buf.clear();
+    g_thumb[i].buf.shrink_to_fit();
+    g_thumb[i].ok = false;
+    g_thumb[i].length = -1;
 }
 } // namespace
 
@@ -666,56 +817,46 @@ extern "C" int https_thumb_start_head(const char* url) {
     return thumb_start(url, true);
 }
 
-// Pump ALL in-flight thumbnail transfers once; mark completed slots `done`
-// (their bytes wait in the slot until taken). Returns the number still active.
+// Kept for the callers that pump once per frame: the worker runs the transfers
+// now, so this only says how many are still queued or running.
 extern "C" int https_thumb_tick(void) {
-    if (!g_thumb_multi) return 0;
-    int still_running = 0;
-    if (curl_multi_perform(g_thumb_multi, &still_running) != CURLM_OK) {
-        return still_running;
+    if (!g_thumb_started) return 0;
+    int n = 0;
+    mutexLock(&g_thumb_mutex);
+    for (int i = 0; i < THUMB_SLOTS; i++) {
+        if (g_thumb[i].state == ThumbState::Queued || g_thumb[i].state == ThumbState::Running) n++;
     }
-    CURLMsg* msg;
-    int left = 0;
-    while ((msg = curl_multi_info_read(g_thumb_multi, &left))) {
-        if (msg->msg != CURLMSG_DONE) continue;
-        for (int i = 0; i < THUMB_SLOTS; i++) {
-            if (g_thumb[i].handle != msg->easy_handle) continue;
-            curl_easy_getinfo(g_thumb[i].handle, CURLINFO_RESPONSE_CODE, &g_thumb[i].http_code);
-            g_thumb[i].ok = (msg->data.result == CURLE_OK)
-                && (g_thumb[i].http_code >= 200) && (g_thumb[i].http_code < 400);
-            if (g_thumb[i].ok) {
-                curl_off_t cl = -1;
-                curl_easy_getinfo(g_thumb[i].handle, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &cl);
-                g_thumb[i].length = (long long)cl;
-            }
-            curl_multi_remove_handle(g_thumb_multi, g_thumb[i].handle);
-            curl_easy_cleanup(g_thumb[i].handle);
-            g_thumb[i].handle = nullptr;
-            g_thumb[i].active = false;
-            g_thumb[i].done = true; // keep buf for the take below
-            break;
-        }
-    }
-    return still_running;
+    mutexUnlock(&g_thumb_mutex);
+    return n;
 }
 
 // Poll one slot: 1 = done OK, -2 = done error, 0 = in flight, -1 = invalid/free.
 extern "C" int https_thumb_slot_status(int slot) {
-    if (slot < 0 || slot >= THUMB_SLOTS) return -1;
-    if (g_thumb[slot].active) return 0;
-    if (g_thumb[slot].done) return g_thumb[slot].ok ? 1 : -2;
-    return -1;
+    if (slot < 0 || slot >= THUMB_SLOTS || !g_thumb_started) return -1;
+    mutexLock(&g_thumb_mutex);
+    int rc;
+    switch (g_thumb[slot].state) {
+        case ThumbState::Queued:
+        case ThumbState::Running: rc = 0; break;
+        case ThumbState::Done:    rc = g_thumb[slot].ok ? 1 : -2; break;
+        default:                  rc = -1; break;
+    }
+    mutexUnlock(&g_thumb_mutex);
+    return rc;
 }
 
 // Copy a done slot's bytes into `out` and FREE the slot. Returns bytes copied,
 // -3 if it doesn't fit `cap`, -2 if the slot errored, -1 invalid. Call once
 // after https_thumb_slot_status(slot) != 0.
 extern "C" int https_thumb_slot_take(int slot, char* out, int cap) {
-    if (slot < 0 || slot >= THUMB_SLOTS || !out || cap < 1) return -1;
-    if (!g_thumb[slot].done) return -1;
+    if (slot < 0 || slot >= THUMB_SLOTS || !out || cap < 1 || !g_thumb_started) return -1;
+    mutexLock(&g_thumb_mutex);
     int rc;
-    if (!g_thumb[slot].ok) {
+    if (g_thumb[slot].state != ThumbState::Done) {
+        rc = -1;
+    } else if (!g_thumb[slot].ok) {
         rc = -2;
+        thumb_slot_free_locked(slot);
     } else {
         const int n = (int)g_thumb[slot].buf.size();
         if (n > cap) {
@@ -724,26 +865,48 @@ extern "C" int https_thumb_slot_take(int slot, char* out, int cap) {
             std::memcpy(out, g_thumb[slot].buf.data(), (size_t)n);
             rc = n;
         }
+        thumb_slot_free_locked(slot);
     }
-    thumb_slot_free(slot);
+    mutexUnlock(&g_thumb_mutex);
     return rc;
 }
 
 // A done HEAD's answer: the Content-Length it found (-1 when the server gave
 // none, or on an error), and the slot FREED, as https_thumb_slot_take does.
 extern "C" long long https_thumb_slot_take_length(int slot) {
-    if (slot < 0 || slot >= THUMB_SLOTS || !g_thumb[slot].done) return -1;
-    const long long len = g_thumb[slot].ok ? g_thumb[slot].length : -1;
-    thumb_slot_free(slot);
+    if (slot < 0 || slot >= THUMB_SLOTS || !g_thumb_started) return -1;
+    mutexLock(&g_thumb_mutex);
+    long long len = -1;
+    if (g_thumb[slot].state == ThumbState::Done) {
+        len = g_thumb[slot].ok ? g_thumb[slot].length : -1;
+        thumb_slot_free_locked(slot);
+    }
+    mutexUnlock(&g_thumb_mutex);
     return len;
 }
 
+// Every slot freed at once (a page closed, the launcher leaving). The worker
+// drops what it was running for them on its next pass, within 20 ms.
 extern "C" void https_thumb_cancel(void) {
-    for (int i = 0; i < THUMB_SLOTS; i++) thumb_slot_free(i);
-    if (g_thumb_multi) {
-        curl_multi_cleanup(g_thumb_multi);
-        g_thumb_multi = nullptr;
-    }
+    if (!g_thumb_started) return;
+    mutexLock(&g_thumb_mutex);
+    for (int i = 0; i < THUMB_SLOTS; i++) thumb_slot_free_locked(i);
+    condvarWakeOne(&g_thumb_wake);
+    mutexUnlock(&g_thumb_mutex);
+}
+
+// Stop the worker and wait for it: before the sockets go at exit, so no TLS
+// handshake is left half-way in a socket that no longer exists.
+extern "C" void https_thumb_stop(void) {
+    if (!g_thumb_started) return;
+    mutexLock(&g_thumb_mutex);
+    for (int i = 0; i < THUMB_SLOTS; i++) thumb_slot_free_locked(i);
+    g_thumb_quit = true;
+    condvarWakeOne(&g_thumb_wake);
+    mutexUnlock(&g_thumb_mutex);
+    threadWaitForExit(&g_thumb_thread);
+    threadClose(&g_thumb_thread);
+    g_thumb_started = false;
 }
 
 // swkbd counts its length limit in CHARACTERS; our buffers are sized in BYTES.

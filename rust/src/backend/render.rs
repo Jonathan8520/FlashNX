@@ -12792,12 +12792,16 @@ impl SwitchRenderBackend {
         None
     }
 
-    /// Pump the single in-flight thumbnail fetch once per frame. On completion,
+    /// Collect a finished thumbnail fetch, once per frame. On completion,
     /// decode + upload the logo, cache it (success OR failure so it's not
     /// retried), and clear the in-flight marker so the next cell can start. Call
     /// once at the top of each thumbnail screen's render.
+    ///
+    /// One per frame: a screenshot costs 6 to 10 ms to decode, upload and blur
+    /// (measured on the importer, 2026-10-14), and two arriving together made
+    /// one 15 ms frame. The others wait in their slots for the next frames.
     fn pump_thumbnail_load(&mut self) {
-        // Advance every in-flight transfer, then reap the slots that finished.
+        // The transfers run on net.cpp's own thread; this only reaps.
         crate::net::thumb_pump();
         let done: std::vec::Vec<(i32, std::string::String)> = {
             let inflight = match thumb_inflight().lock() {
@@ -12807,6 +12811,7 @@ impl SwitchRenderBackend {
             inflight
                 .iter()
                 .filter(|(slot, _)| crate::net::thumb_slot_status(*slot) != 0)
+                .take(1)
                 .cloned()
                 .collect()
         };

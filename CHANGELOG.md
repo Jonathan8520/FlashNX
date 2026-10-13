@@ -31,6 +31,7 @@ The whole interface is redrawn. Every screen uses the console's own fonts, at th
 - In the Flashpoint results, − searches again, as in every other list, and a cover rests as the Play grid shows it (a banner logo used to be cropped to a few letters).
 - The empty library shows the folder FlashNX really uses, and − there no longer quits the app.
 - The games folder browser opens beside the library folder, and the card's root, which cannot hold the library, is refused with the reason.
+- The Import page stays smooth while its shelves, covers and screenshots load: these transfers run on their own thread. Each new secure connection used to freeze the screen for up to a fifth of a second, several times on every visit, and only one picture is now decoded per frame.
 - **Opened from the Album, FlashNX no longer crashes.** It gets only a small part of the console's memory there, too little for the new interface, so it opens on a page that says so, with the FlashNX logo, and offers to install FlashNX on the HOME Menu (its own icon, which always starts it with the full memory). An icon already made with Sphaira is recognised, and the page tells you to use it. Holding R while starting a game still works without installing anything.
 - A bug report carries much more of the game's session: its start (where loading goes wrong), then as much of its end as fits, up to 52 KB instead of 24. The periodic counters come last with only their latest values, and very long lines keep their start and end with the middle cut out.
 
