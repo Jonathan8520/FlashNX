@@ -359,7 +359,7 @@ fn drop_options_leftovers(s: &mut State, from: Screen) {
 mod options_panel;
 pub(crate) use options_panel::{opt_row, OPTIONS_ENTRIES};
 mod settings_tab;
-pub(crate) use settings_tab::SetSection;
+pub(crate) use settings_tab::{menu_path, SetSection};
 use settings_tab::settings_at;
 
 /// Top-level navbar tabs (v1.2.0), switched with the L/R shoulder buttons.

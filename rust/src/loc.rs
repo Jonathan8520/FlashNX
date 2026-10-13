@@ -773,7 +773,7 @@ const FR: Strings = Strings {
     profile_share_confirm: "Partager tes touches pour ce jeu\u{a0}?",
     share_confirm_update: "Met à jour ton profil partagé\u{a0}:",
     touches_edit: "Modifier les touches",
-    touches_revert_default: "Revenir aux touches de base",
+    touches_revert_default: "Touches par défaut",
     profile_preview_none: "Ce profil ne change aucune touche.",
     profile_share_dup: "Déjà dans le catalogue. Modifie une touche pour partager ta version.",
     toast_already_imported: "{} est déjà dans ta bibliothèque.",

@@ -1793,6 +1793,11 @@ pub(crate) fn with_touches_view<R>(
             .choice(&gyro_opts, v.gyro as usize)
             .armed_if(v.armed == Some(TouchesRow::Gyro)),
     ]);
+    // The defaults a revert with no backup puts back are the player's own,
+    // set in Réglages (`keymap::revert_target` reads them), not FlashNX's:
+    // the help names the place, in the words of its tab and row.
+    let revert_default_help =
+        u.help_revert_default.replacen("{}", &crate::library::menu_path(&[u.tab_settings, u.row_game_prefs]), 1);
     let help_of = |row: TouchesRow, gyro: u8| match row {
         TouchesRow::Edit => u.help_touches_edit,
         TouchesRow::Apply => u.help_touches_apply,
@@ -1806,7 +1811,7 @@ pub(crate) fn with_touches_view<R>(
             _ => u.help_gyro_off,
         },
         TouchesRow::Revert if v.has_backup => u.help_revert,
-        TouchesRow::Revert => u.help_revert_default,
+        TouchesRow::Revert => revert_default_help.as_str(),
     };
     let row = TouchesRow::at(v.can_revert, selection);
     let help = row.map_or("", |r| help_of(r, v.gyro));
