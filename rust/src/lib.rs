@@ -2980,6 +2980,9 @@ pub extern "C" fn ruffle_zoom_begin() {
         let (ox, oy) = backend::render::game_pan();
         *s = Some((backend::render::game_zoom_percent(), ox, oy));
     }
+    // A press begun on ÉCRAN goes with the panel: the mode reads the finger
+    // itself, and that press lifted after it would land as a tap on ÉCRAN.
+    backend::render::row_touch_cancel();
 }
 
 /// Nudge the zoom by `d_percent` and the framing by `(dx, dy)` screen pixels.
@@ -3182,6 +3185,8 @@ pub extern "C" fn ruffle_value_arm(kind: c_int, row: c_int) -> c_int {
 #[no_mangle]
 pub extern "C" fn ruffle_pause_opened() {
     pause_values::pause_opened();
+    // No press carried over from a page the last pause left half touched.
+    backend::render::row_touch_cancel();
 }
 
 /// 1 while a row of the pause's pages is armed.

@@ -1517,6 +1517,13 @@ static void worker_entry(void* arg) {
     int  pan_hold = 0;
     // Same, for the fine zoom on X / Y: a tap is one percent.
     int  zoom_fine_hold = 0;
+    // A finger already on the screen when a pause panel comes up: when the
+    // framing mode ends (one finger moves the picture there) or when `-` opens
+    // the pause over the game. Until it lifts, the panels get no touch: its
+    // first sample read as a new press, and lifting it then tapped whatever
+    // the panel had drawn under it, setting and saving an option the player
+    // never touched.
+    bool touch_wait_lift = false;
     // MENU_QUIT now means "back to library" — controlled by this flag.
     // appletMainLoop returning false (home button → Close) also exits the
     // inner loop but with back_to_library=false → full .nro exit.
@@ -1670,7 +1677,9 @@ static void worker_entry(void* arg) {
                 // tables; they simply had nothing feeding them, so the on-screen
                 // keyboard could only be reached with a stick.
                 hidGetTouchScreenStates(&touch_state, 1);
-                const bool menu_touch = touch_state.count > 0;
+                // Not a finger that was already down (`touch_wait_lift`).
+                if (touch_state.count == 0) touch_wait_lift = false;
+                const bool menu_touch = touch_state.count > 0 && !touch_wait_lift;
                 ruffle_menu_touch(
                     menu_touch ? (float)touch_state.touches[0].x * UI_TOUCH_SCALE_X : 0.0f,
                     menu_touch ? (float)touch_state.touches[0].y * UI_TOUCH_SCALE_Y : 0.0f,
@@ -1861,6 +1870,7 @@ static void worker_entry(void* arg) {
                     zoom_mode = false;
                     zoom_hold = 0;
                     pause_repeat_reset(pause_rep);
+                    touch_wait_lift = tcount > 0;
                 } else if (kDown & HidNpadButton_B) {
                     ruffle_ui_sound(UI_SFX_BACK);
                     ruffle_zoom_cancel();
@@ -1868,6 +1878,7 @@ static void worker_entry(void* arg) {
                     zoom_mode = false;
                     zoom_hold = 0;
                     pause_repeat_reset(pause_rep);
+                    touch_wait_lift = tcount > 0;
                 } else if (kDown & HidNpadButton_Minus) {
                     // `-` resumes the game from here as from every page of the
                     // pause, and keeps what is being set on the way, as the
@@ -1981,7 +1992,9 @@ static void worker_entry(void* arg) {
                 bool tap_a = false;
                 {
                     hidGetTouchScreenStates(&touch_state, 1);
-                    const bool t = touch_state.count > 0;
+                    // Not a finger that was already down (`touch_wait_lift`).
+                    if (touch_state.count == 0) touch_wait_lift = false;
+                    const bool t = touch_state.count > 0 && !touch_wait_lift;
                     const int hit = ruffle_pause_touch(
                         t ? (float)touch_state.touches[0].x * UI_TOUCH_SCALE_X : 0.0f,
                         t ? (float)touch_state.touches[0].y * UI_TOUCH_SCALE_Y : 0.0f,
@@ -2101,7 +2114,9 @@ static void worker_entry(void* arg) {
             bool tap_a = false;
             {
                 hidGetTouchScreenStates(&touch_state, 1);
-                const bool t = touch_state.count > 0;
+                // Not a finger that was already down (`touch_wait_lift`).
+                if (touch_state.count == 0) touch_wait_lift = false;
+                const bool t = touch_state.count > 0 && !touch_wait_lift;
                 const int hit = ruffle_pause_touch(
                     t ? (float)touch_state.touches[0].x * UI_TOUCH_SCALE_X : 0.0f,
                     t ? (float)touch_state.touches[0].y * UI_TOUCH_SCALE_Y : 0.0f,
@@ -2251,6 +2266,10 @@ static void worker_entry(void* arg) {
             // The stick that was steering the game must not carry an axis
             // latched from before into the menu.
             nav_latch_reset(pause_latch);
+            // Nor a finger left on the game: lifted once the panel is in, it
+            // tapped the row under it (`touch_wait_lift`).
+            hidGetTouchScreenStates(&touch_state, 1);
+            touch_wait_lift = touch_state.count > 0;
             ruffle_pause_opened();
             ruffle_ui_sound(UI_SFX_OPEN);
             // A fresh pause always opens on the main panel, never back inside
