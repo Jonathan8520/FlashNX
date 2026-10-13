@@ -17,15 +17,17 @@
 // turning that into a usable issue rather than a table of invented defaults.
 // Response: 200 { "ok": true, "url": "<issue html_url>" }  on success.
 
-// Headroom for `log_tail`: the app sends up to 24 KB of log, and JSON escaping
-// of the newlines inflates it further. Was 16 KB back when a report was <2 KB.
-const MAX_BODY = 96 * 1024;
+// Headroom for `log_tail`: the app sends up to 52 KB of log (24 KB before the
+// report carried the session's head), and JSON escaping of the newlines
+// inflates it further. Was 16 KB back when a report was <2 KB.
+const MAX_BODY = 128 * 1024;
 
-// How much of the log tail reaches the issue. GitHub rejects an issue body over
+// How much of the log reaches the issue. GitHub rejects an issue body over
 // 65536 characters and the log is the only unbounded part, so cap it here too
-// rather than trusting the client's own limit. Leaves ~30 KB of margin for the
-// rest of the body and for a future client that sends more.
-const MAX_LOG = 32 * 1024;
+// rather than trusting the client's own limit. Must stay at or above the app's
+// `LOG_TAIL_CAP` (52 KB): the cut keeps the END, so a smaller cap would drop the
+// session's head that the app puts first. Leaves ~8 KB for the rest of the body.
+const MAX_LOG = 56 * 1024;
 
 export default {
   async fetch(request, env) {
@@ -237,8 +239,8 @@ function buildIssue(r) {
   // (6005 against the 6013 the app said it sent).
   const logBytes = new TextEncoder().encode(rawLog).length;
   const logBlock = rawLog.trim()
-    ? `\n<details>\n<summary>Technical log (last ${
-        rawLog.length > MAX_LOG ? `${MAX_LOG} chars of ${logBytes}` : logBytes
+    ? `\n<details>\n<summary>Technical log (${
+        rawLog.length > MAX_LOG ? `last ${MAX_LOG} chars of ${logBytes}` : logBytes
       } bytes of the session)</summary>\n\n` +
       "```\n" +
       rawLog.slice(-MAX_LOG).replace(/```/g, "`​``") +

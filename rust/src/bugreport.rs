@@ -52,8 +52,8 @@ static ARCHIVE: std::sync::Mutex<
 > = std::sync::Mutex::new(std::vec::Vec::new());
 
 /// How many finished games keep their log. Three covers a normal "play a few,
-/// then report" run; each entry is at most `LOG_TAIL_CAP`, so this is ~72 KB of
-/// a 3 GB heap.
+/// then report" run; each entry is at most `LOG_TAIL_CAP`, so this is ~156 KB
+/// of a 3 GB heap.
 const ARCHIVE_SLOTS: usize = 3;
 
 /// Open a fresh log window for `basename`. Called from `ruffle_init` when a game
@@ -113,9 +113,12 @@ fn log_for(file: &str) -> std::string::String {
 ///
 /// 6 KB was too small to be worth much: on a real report it covered ~560 lines
 /// of session, nearly all of it telemetry, and on a bug noticed mid-session it
-/// would have held only the walk back to the menu. The relay caps it again on
-/// its own side, so raising this can never produce an issue GitHub refuses.
-const LOG_TAIL_CAP: usize = 24 * 1024;
+/// would have held only the walk back to the menu. 24 KB still reached back
+/// only 46 s into #127's 104 s session; 52 KB leaves ~10 KB of the 64 K for the
+/// rest of the issue. The relay caps it again on its own side (`MAX_LOG`), so
+/// raising this can never produce an issue GitHub refuses, but the relay must
+/// allow at least this much or it cuts the session's head off.
+const LOG_TAIL_CAP: usize = 52 * 1024;
 
 /// The tail of this session's log, for `Report::log_tail`.
 fn log_tail() -> std::string::String {

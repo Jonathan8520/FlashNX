@@ -31,6 +31,7 @@ The whole interface is redrawn. Every screen uses the console's own fonts, at th
 - In the Flashpoint results, − searches again, as in every other list, and a cover rests as the Play grid shows it (a banner logo used to be cropped to a few letters).
 - The empty library shows the folder FlashNX really uses, and − there no longer quits the app.
 - The games folder browser opens beside the library folder, and the card's root, which cannot hold the library, is refused with the reason.
+- A bug report carries much more of the game's session: its start (where loading goes wrong), then as much of its end as fits, up to 52 KB instead of 24. The periodic counters come last with only their latest values, and very long lines keep their start and end with the middle cut out.
 
 ### Fixed
 

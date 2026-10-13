@@ -61,14 +61,53 @@ static FILE* trace_file(void) {
 // A ring, so it can never grow: old lines fall off the back, which also means
 // the boot-time library scan has aged out by the time anyone files a report.
 namespace {
-// 64 KB of a 3 GB heap. Sized by how far back a report needs to see, not by
+// 256 KB of a 3 GB heap. Sized by how far back a report needs to see, not by
 // thrift: at 8 KB the window covered only the last few seconds of play, which
-// on a bug noticed mid-session is just the walk back to the menu.
-constexpr size_t LOG_RING_CAP = 64 * 1024;
+// on a bug noticed mid-session is just the walk back to the menu. A report
+// carries much less than this; the ring only has to outlast what it carries.
+constexpr size_t LOG_RING_CAP = 256 * 1024;
 char   g_ring[LOG_RING_CAP];
 size_t g_ring_len = 0;  // valid bytes, saturates at LOG_RING_CAP
 size_t g_ring_pos = 0;  // next write offset
 Mutex  g_ring_mutex;    // zero-initialised == unlocked, per libnx
+
+// Bytes written to the ring since the session started. When a report cannot
+// carry them all, it sends the head below, a line saying how much is left out,
+// then the newest bytes.
+size_t g_total = 0;
+
+// The first lines of the session, kept whole. A tail alone never has them once
+// a session runs a minute or two, and that is where loading goes wrong: missing
+// files, refused requests, the stubs a game hits while it sets up. None of the
+// fifteen reports that carried a log (1.8.0 to 1.9.0) reached back to its
+// SESSION START line; #114's began 26280 frames in.
+constexpr size_t HEAD_CAP = 8 * 1024;
+char   g_head[HEAD_CAP];
+size_t g_head_len = 0;
+bool   g_head_open = true; // closes at the first line that does not fit
+
+// Periodic counters (atlases, heap, JIT, gotos... every few seconds), kept in a
+// ring of their own and reported as their latest few blocks only. In the ring
+// with everything else they outnumbered what they were meant to explain: 61 %
+// of #127's 24 KB, against 10 % of game traces and warnings, so the window
+// reached back 46 s into a 104 s session. Their latest values are what a
+// reader wants; their history is on nxlink and in the SD trace.
+constexpr size_t STATS_RING_CAP = 32 * 1024;
+char   g_stats[STATS_RING_CAP];
+size_t g_stats_len = 0;
+size_t g_stats_pos = 0;
+size_t g_stats_total = 0;
+// How much of the stats ring a report carries: two or three blocks.
+constexpr size_t STATS_OUT = 8 * 1024;
+
+// A line longer than this keeps its start and its end with the middle cut out.
+// The long lines are URLs: Burrito Bison's Playtomic tracker repeats one of
+// ~1200 characters, each failed request printing it twice, so 8 lines filled
+// 15 % of a report. The end is kept because the sidecar warnings put their
+// verdict there ("tree ... holds 0 file(s)").
+constexpr size_t LINE_CAP = 640;
+constexpr size_t LINE_KEEP_HEAD = 440;
+constexpr size_t LINE_KEEP_TAIL = 160;
 
 // Per-frame heartbeat ("f1234: fps=... ram=..."), kept on its own instead of in
 // the ring. One of these is genuine context for a "this game is broken" report —
@@ -141,6 +180,21 @@ bool ring_excluded(const char* msg) {
     return false;
 }
 
+// The periodic counters, routed to the stats ring instead of the main one.
+bool is_periodic_stat(const char* msg) {
+    static const char* const PREFIXES[] = {
+        "atlasIdle: f", "evict: f", "gotos: f", "sounds: f", "gpu: f",
+        "heap: f", "jit: f", "census: f", "textures: f",
+        "clocks: auto state=", "avm1ops: last ", "avm1op 0x",
+        "getname: calls=", "audio: fills=", "register_shape: total=",
+        "root: frame ", "as3prof: ",
+    };
+    for (const char* p : PREFIXES) {
+        if (std::strncmp(msg, p, std::strlen(p)) == 0) return true;
+    }
+    return false;
+}
+
 // Previous line, for collapsing consecutive repeats. Bounded: a message longer
 // than this is never deduplicated, which is deliberate. Long lines here are the
 // sidecar warnings, and those differ only in a random suffix far into the
@@ -150,17 +204,70 @@ bool ring_excluded(const char* msg) {
 char   g_prev[256];
 size_t g_prev_rep = 0;
 
-// Append raw bytes. Caller holds g_ring_mutex.
-void ring_append_locked(const char* p, size_t n) {
-    if (n > LOG_RING_CAP) { // keep the tail of an oversized single message
-        p += n - LOG_RING_CAP;
-        n = LOG_RING_CAP;
+// Append raw bytes to a ring of `cap` bytes.
+void ring_put(char* buf, size_t cap, size_t& len, size_t& pos, const char* p, size_t n) {
+    if (n > cap) { // keep the tail of an oversized single message
+        p += n - cap;
+        n = cap;
     }
     for (size_t i = 0; i < n; i++) {
-        g_ring[g_ring_pos] = p[i];
-        g_ring_pos = (g_ring_pos + 1) % LOG_RING_CAP;
+        buf[pos] = p[i];
+        pos = (pos + 1) % cap;
     }
-    g_ring_len = (g_ring_len + n > LOG_RING_CAP) ? LOG_RING_CAP : g_ring_len + n;
+    len = (len + n > cap) ? cap : len + n;
+}
+
+// Copy the newest `want` bytes of a ring to `out`. With `align`, a copy that
+// starts mid-line skips to the next line rather than ship a fragment. Returns
+// the bytes written.
+size_t ring_copy_tail(const char* buf, size_t cap, size_t len, size_t pos,
+                      size_t want, bool align, char* out) {
+    if (want > len) want = len;
+    size_t start = (pos + cap - want) % cap;
+    if (align) {
+        size_t i = 0;
+        while (i < want && buf[(start + i) % cap] != '\n') i++;
+        if (i + 1 < want) {
+            start = (start + i + 1) % cap;
+            want -= i + 1;
+        }
+    }
+    for (size_t i = 0; i < want; i++) out[i] = buf[(start + i) % cap];
+    return want;
+}
+
+// Append raw bytes to the main ring, and to the head while it has room.
+// Caller holds g_ring_mutex.
+void ring_append_locked(const char* p, size_t n) {
+    ring_put(g_ring, LOG_RING_CAP, g_ring_len, g_ring_pos, p, n);
+    g_total += n;
+    if (g_head_open) {
+        if (g_head_len + n <= HEAD_CAP) {
+            std::memcpy(g_head + g_head_len, p, n);
+            g_head_len += n;
+        } else {
+            g_head_open = false;
+        }
+    }
+}
+
+// `msg` with its middle cut out when it is longer than LINE_CAP, else `msg`
+// itself. `scratch` must hold LINE_CAP + 64 bytes. The cuts step to a UTF-8
+// character boundary so no character is split.
+const char* line_capped(const char* msg, size_t& n, char* scratch) {
+    if (n <= LINE_CAP) return msg;
+    size_t a = LINE_KEEP_HEAD;
+    while (a > 0 && (static_cast<unsigned char>(msg[a]) & 0xC0) == 0x80) a--;
+    size_t b = n - LINE_KEEP_TAIL;
+    while (b < n && (static_cast<unsigned char>(msg[b]) & 0xC0) == 0x80) b++;
+    char mid[48];
+    const int k = std::snprintf(mid, sizeof(mid), " [... %zu bytes cut ...] ", b - a);
+    const size_t m = (k > 0) ? (size_t)k : 0;
+    std::memcpy(scratch, msg, a);
+    std::memcpy(scratch + a, mid, m);
+    std::memcpy(scratch + a + m, msg + b, n - b);
+    n = a + m + (n - b);
+    return scratch;
 }
 
 // Emit the pending "repeated N times" marker, if any. Caller holds the mutex.
@@ -194,8 +301,19 @@ void ring_push(const char* msg) {
         return;
     }
     if (ring_excluded(msg)) return;
-    const size_t n = std::strlen(msg);
-    if (n == 0) return;
+    const size_t full = std::strlen(msg);
+    if (full == 0) return;
+    char scratch[LINE_CAP + 64];
+    size_t cut = full;
+    const char* text = line_capped(msg, cut, scratch);
+    if (is_periodic_stat(msg)) {
+        mutexLock(&g_ring_mutex);
+        ring_put(g_stats, STATS_RING_CAP, g_stats_len, g_stats_pos, text, cut);
+        g_stats_total += cut;
+        mutexUnlock(&g_ring_mutex);
+        return;
+    }
+    const size_t n = full;
     mutexLock(&g_ring_mutex);
     // Collapse consecutive identical lines into one plus a count. Games trace
     // the same string every frame and our own per-frame notes repeat too, so
@@ -212,7 +330,7 @@ void ring_push(const char* msg) {
     } else {
         g_prev[0] = '\0';
     }
-    ring_append_locked(msg, n);
+    ring_append_locked(text, cut);
     mutexUnlock(&g_ring_mutex);
 }
 
@@ -225,6 +343,12 @@ extern "C" void ruffle_log_ring_reset(void) {
     mutexLock(&g_ring_mutex);
     g_ring_len = 0;
     g_ring_pos = 0;
+    g_total = 0;
+    g_head_len = 0;
+    g_head_open = true;
+    g_stats_len = 0;
+    g_stats_pos = 0;
+    g_stats_total = 0;
     g_prev[0] = '\0';
     g_prev_rep = 0;
     g_last_hb[0] = '\0';
@@ -264,33 +388,52 @@ extern "C" int ruffle_log_tail(char* out, int cap) {
         w += hb;
         if (out[w - 1] != '\n') out[w++] = '\n';
     }
-    const size_t room = (size_t)cap - 1 - w; // space left for the ring
-    size_t want = g_ring_len;
-    size_t start = (g_ring_pos + LOG_RING_CAP - want) % LOG_RING_CAP;
-    if (want > room) {
-        // Less room than ring: keep the NEWEST bytes.
-        const size_t drop = want - room;
-        start = (start + drop) % LOG_RING_CAP;
-        want -= drop;
+    // Then the session itself, the newest periodic counters last. When the
+    // whole session does not fit, it is its head, one line saying how much is
+    // left out, and its newest bytes.
+    static const char STATS_LABEL[] = "== periodic counters, latest ==\n";
+    const size_t stats_label = sizeof(STATS_LABEL) - 1;
+    const size_t left = (w < (size_t)cap - 1) ? (size_t)cap - 1 - w : 0;
+    size_t stats_want = g_stats_len < STATS_OUT ? g_stats_len : STATS_OUT;
+    if (stats_want > left / 4) stats_want = left / 4;
+    if (stats_want + stats_label > left) stats_want = 0;
+    const size_t events_room = left - (stats_want ? stats_want + stats_label : 0);
+    constexpr size_t GAP_RESERVE = 96; // the "left out" line
+    if (g_total <= events_room) {
+        // Everything since SESSION START fits (and the ring, larger than any
+        // report, still holds it all).
+        w += ring_copy_tail(g_ring, LOG_RING_CAP, g_ring_len, g_ring_pos,
+                            g_total, false, out + w);
+    } else if (events_room >= GAP_RESERVE + 1024) {
+        size_t head = g_head_len;
+        if (head + GAP_RESERVE + 1024 > events_room) head = 0;
+        std::memcpy(out + w, g_head, head);
+        w += head;
+        // The tail goes in after room for the gap line, which can only be
+        // written once the tail's aligned length is known.
+        char* tail_at = out + w + GAP_RESERVE;
+        const size_t tail_room =
+            (events_room > head + GAP_RESERVE) ? events_room - head - GAP_RESERVE : 0;
+        const size_t tail = ring_copy_tail(g_ring, LOG_RING_CAP, g_ring_len, g_ring_pos,
+                                           tail_room, true, tail_at);
+        const size_t gap = g_total - head - tail;
+        char line[GAP_RESERVE];
+        const int k = std::snprintf(line, sizeof(line),
+                                    "[... %zu KB of this session left out ...]\n",
+                                    (gap + 512) / 1024);
+        const size_t m = (k > 0 && (size_t)k < sizeof(line)) ? (size_t)k : 0;
+        std::memmove(out + w + m, tail_at, tail);
+        std::memcpy(out + w, line, m);
+        w += m + tail;
     }
-    const size_t ring_at = w;
-    for (size_t i = 0; i < want; i++) {
-        out[w++] = g_ring[(start + i) % LOG_RING_CAP];
+    if (stats_want) {
+        std::memcpy(out + w, STATS_LABEL, stats_label);
+        w += stats_label;
+        w += ring_copy_tail(g_stats, STATS_RING_CAP, g_stats_len, g_stats_pos,
+                            stats_want, stats_want < g_stats_total, out + w);
     }
     mutexUnlock(&g_ring_mutex);
     out[w] = '\0';
-    // The ring cuts wherever it wrapped, so its first line is usually half a
-    // line. Drop it rather than ship a fragment. Only the ring part is
-    // realigned; the heartbeat above it is already whole.
-    char* ring = out + ring_at;
-    const size_t ring_len = w - ring_at;
-    char* nl = (char*)std::memchr(ring, '\n', ring_len);
-    if (nl && (size_t)(nl - ring) + 1 < ring_len) {
-        const size_t skip = (size_t)(nl - ring) + 1;
-        std::memmove(ring, ring + skip, ring_len - skip);
-        w -= skip;
-        out[w] = '\0';
-    }
     return (int)w;
 }
 
