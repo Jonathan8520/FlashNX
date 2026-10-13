@@ -5672,10 +5672,10 @@ struct GalleryAnim {
 /// cards, which it rings, and its source rows, which it fills as a pill.
 ///
 /// The rect is in SCREEN space, not in the list's content space like `sel_y`:
-/// a card never scrolls, so a focus kept in content space flew off its card
-/// whenever a finger moved the list under it. Headed for a row, the caller
-/// moves it with the list's scroll each frame, which keeps it on its row
-/// exactly as content space did. `look` is how far it has turned from a
+/// a card never scrolls, and a focus kept in content space would fly off its
+/// card whenever a finger moved the list under it. Headed for a row, the
+/// caller moves it with the list's scroll each frame, which keeps it on its
+/// row exactly as content space would. `look` is how far it has turned from a
 /// card's ring (0) into a row's pill (1); `clip_top` and `clip_bot` are the
 /// band it is drawn in: the whole page for a card, the rows' band for a row,
 /// eased so that it never cuts the focus off as it crosses from one to the
