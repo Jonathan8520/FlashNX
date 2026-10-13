@@ -565,6 +565,13 @@ pub struct Ui {
     /// A percentage, {} = the number: the zoom's rows and the framing's header, an import's progress
     /// (`loc_ui::percent`). The language's own way: a no-break space before '%', none in Chinese, '%' first in Turkish.
     pub percent: &'static str,
+    /// Title of the group of a game's options in the launcher that holds what the pause also
+    /// changes, in the pause's order (Touches et curseur, Écran, Overclock): the game as it plays.
+    pub sec_in_game: &'static str,
+    /// Help of the Écran row of a game's options in the launcher, which opens the page the pause
+    /// calls Écran. Lists its rows in the words of `help_screen`, the pause's own help for that row,
+    /// which says every change shows on the game behind the menu: in the launcher there is none yet.
+    pub help_opt_screen: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -883,6 +890,8 @@ const EN: Ui = Ui {
     loading_covers: "Looking for covers…",
     loading_cover_dl: "Downloading the cover…",
     percent: "{}\u{a0}%",
+    sec_in_game: "In game",
+    help_opt_screen: "Display, rotation, zoom, pixels, filter, FPS counter: set this game's picture before you even start it.",
 };
 
 const FR: Ui = Ui {
@@ -1201,6 +1210,8 @@ const FR: Ui = Ui {
     loading_covers: "Recherche de jaquettes…",
     loading_cover_dl: "Téléchargement de la jaquette…",
     percent: "{}\u{a0}%",
+    sec_in_game: "En jeu",
+    help_opt_screen: "Affichage, rotation, zoom, pixels, filtre, compteur FPS\u{a0}: règle l'image de ce jeu avant même de le lancer.",
 };
 
 const ES: Ui = Ui {
@@ -1519,6 +1530,8 @@ const ES: Ui = Ui {
     loading_covers: "Buscando portadas…",
     loading_cover_dl: "Descargando la portada…",
     percent: "{}\u{a0}%",
+    sec_in_game: "En el juego",
+    help_opt_screen: "Pantalla, rotación, zoom, píxeles, filtro, contador FPS: ajusta la imagen de este juego antes incluso de iniciarlo.",
 };
 
 const RU: Ui = Ui {
@@ -1837,6 +1850,8 @@ const RU: Ui = Ui {
     loading_covers: "Поиск обложек…",
     loading_cover_dl: "Загрузка обложки…",
     percent: "{}\u{a0}%",
+    sec_in_game: "В игре",
+    help_opt_screen: "Экран, поворот, масштаб, пиксели, фильтр, счётчик FPS: настрой картинку этой игры ещё до её запуска.",
 };
 
 const DE: Ui = Ui {
@@ -2155,6 +2170,8 @@ const DE: Ui = Ui {
     loading_covers: "Suche nach Covern…",
     loading_cover_dl: "Cover wird geladen…",
     percent: "{}\u{a0}%",
+    sec_in_game: "Im Spiel",
+    help_opt_screen: "Anzeige, Drehung, Zoom, Pixel, Filter, FPS-Anzeige: Stell das Bild dieses Spiels ein, noch bevor du es startest.",
 };
 
 const IT: Ui = Ui {
@@ -2473,6 +2490,8 @@ const IT: Ui = Ui {
     loading_covers: "Ricerca delle copertine…",
     loading_cover_dl: "Download della copertina…",
     percent: "{}\u{a0}%",
+    sec_in_game: "In gioco",
+    help_opt_screen: "Schermo, rotazione, zoom, pixel, filtro, contatore FPS: regola l'immagine di questo gioco ancora prima di avviarlo.",
 };
 
 const PT: Ui = Ui {
@@ -2791,6 +2810,8 @@ const PT: Ui = Ui {
     loading_covers: "Procurando capas…",
     loading_cover_dl: "Baixando a capa…",
     percent: "{}\u{a0}%",
+    sec_in_game: "No jogo",
+    help_opt_screen: "Tela, rotação, zoom, pixels, filtro, contador FPS: ajuste a imagem deste jogo antes mesmo de abri-lo.",
 };
 
 const ZH: Ui = Ui {
@@ -3109,6 +3130,8 @@ const ZH: Ui = Ui {
     loading_covers: "正在查找封面…",
     loading_cover_dl: "正在下载封面…",
     percent: "{}%",
+    sec_in_game: "游戏中",
+    help_opt_screen: "显示、旋转、缩放、像素、滤镜、帧率显示：在启动之前就设置好这个游戏的画面。",
 };
 
 const TR: Ui = Ui {
@@ -3427,6 +3450,8 @@ const TR: Ui = Ui {
     loading_covers: "Kapaklar aranıyor…",
     loading_cover_dl: "Kapak indiriliyor…",
     percent: "%{}",
+    sec_in_game: "Oyun içi",
+    help_opt_screen: "Ekran, döndürme, zoom, piksel, filtre, FPS sayacı: bu oyunun görüntüsünü daha açmadan ayarla.",
 };
 
 pub fn ui() -> &'static Ui {
