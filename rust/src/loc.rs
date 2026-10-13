@@ -1261,7 +1261,7 @@ const DE: Strings = Strings {
     opt_favorite: "Favorit",
     opt_share: "Steuerung teilen",
     profile_shared_ok: "Deine Steuerung wurde gesendet. Danke für deine Hilfe.",
-    profile_copy_row: "Von einem anderen Spiel kopieren",
+    profile_copy_row: "Aus anderem Spiel kopieren",
     profile_copy_none: "Noch kein anderes Spiel hat eigene Tasten",
     profile_none: "Noch kein Profil für dieses Spiel. Teile deins!",
     profile_catalog_offline: "Katalog nicht verfügbar. Prüfe deine Verbindung.",
