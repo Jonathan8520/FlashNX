@@ -298,7 +298,10 @@ pub(crate) fn with_options_sheet<R>(
             _ => Row::new(Icon::Trash, u.opt_delete_game).danger(),
         })
         .zip(OPTIONS_ENTRIES.iter())
-        .map(|(r, k)| r.note_opt(note(k)).armed_if(armed.is_some() && *k == key))
+        .map(|(r, k)| {
+            let r = if is_setting(k) { r.note_in_room(note(k), u.tag_default) } else { r };
+            r.armed_if(armed.is_some() && *k == key)
+        })
         .collect();
     let help_of = |key: &str, power: u8| match key {
         "FAVORI" => u.help_opt_fav,

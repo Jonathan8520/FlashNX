@@ -9887,7 +9887,7 @@ impl SwitchRenderBackend {
             Row::new(Icon::Cpu, lc.set_overclock)
                 .choice(&oc_opts, pv::current(PauseValue::Overclock) as usize)
                 .armed_if(oc_armed)
-                .note_opt(oc_note),
+                .note_in_room(oc_note, u.tag_default),
             Row::new(Icon::Restart, lc.menu_restart),
             Row::new(Icon::LogOut, lc.menu_quit),
         ];
@@ -10045,21 +10045,21 @@ impl SwitchRenderBackend {
             Row::new(Icon::Monitor, lc.set_display_mode)
                 .choice(&display_opts, pv::current(V::Display) as usize)
                 .armed_if(armed == Some(V::Display))
-                .note_opt(note("AFFICHAGE", Some(V::Display))),
+                .note_in_room(note("AFFICHAGE", Some(V::Display)), u.tag_default),
             Row::new(Icon::Rotate, lc.set_rotation)
                 .choice(&rot_opts, pv::current(V::Rotation) as usize)
                 .armed_if(armed == Some(V::Rotation))
-                .note_opt(note("ROTATION", Some(V::Rotation))),
-            Row::new(Icon::ZoomIn, lc.set_zoom).value(&zoom).opens().note_opt(note("ZOOM", None)),
+                .note_in_room(note("ROTATION", Some(V::Rotation)), u.tag_default),
+            Row::new(Icon::ZoomIn, lc.set_zoom).value(&zoom).opens().note_in_room(note("ZOOM", None), u.tag_default),
             Row::new(Icon::Pixels, lc.set_pixel_filter)
                 .choice(&pix_opts, pv::current(V::Pixels) as usize)
                 .armed_if(armed == Some(V::Pixels))
-                .note_opt(note("PIXELS", Some(V::Pixels))),
+                .note_in_room(note("PIXELS", Some(V::Pixels)), u.tag_default),
             Row::new(Icon::Tv, lc.set_screen_filter)
                 .choice(&filter_opts, pv::current(V::Filter) as usize)
                 .armed_if(armed == Some(V::Filter))
-                .note_opt(note("FILTRE", Some(V::Filter))),
-            Row::new(Icon::Gauge, lc.set_fps).toggle(fps_counter_on()).note_opt(note("FPS", None)),
+                .note_in_room(note("FILTRE", Some(V::Filter)), u.tag_default),
+            Row::new(Icon::Gauge, lc.set_fps).toggle(fps_counter_on()).note_in_room(note("FPS", None), u.tag_default),
         ];
         debug_assert_eq!(rows.len(), SCREEN_ITEMS.len());
         let key = SCREEN_ITEMS.get(selected).copied().unwrap_or("");

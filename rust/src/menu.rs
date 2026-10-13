@@ -1787,7 +1787,7 @@ pub(crate) fn with_touches_view<R>(
             .cycle(&speed)
             .ends(speed_idx == 0, speed_idx + 1 >= n_speeds)
             .armed_if(speed_armed)
-            .note_opt(if speed_armed || v.speed_own { None } else { Some(u.tag_default) }),
+            .note_in_room(if speed_armed || v.speed_own { None } else { Some(u.tag_default) }, u.tag_default),
         Row::new(if v.shown { Icon::Eye } else { Icon::EyeOff }, lc.show_cursor).toggle(v.shown),
         Row::new(Icon::Compass, lc.set_gyro)
             .choice(&gyro_opts, v.gyro as usize)
