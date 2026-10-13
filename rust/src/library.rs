@@ -435,8 +435,12 @@ pub(crate) fn goto_tab(target: Tab, dir: f32) {
                     Screen::List { selection: row, scroll_offset: home_scroll_for(row, jouer_scroll()) }
                 }
             }
-            Tab::Importer => distant_idle_at(&s, IMPORT_ROW.load(std::sync::atomic::Ordering::Relaxed)),
-            // Back on the section the player left, not on the first one.
+            // The other two open at their start, the importer on its first
+            // card and Réglages on its first section (Jonathan: "quand on
+            // revient sur settings mets par défaut sur le premier element donc
+            // bibliotheque, pareil dans importer direct sur chercher"). Their
+            // own pages and windows still come back to where they were opened.
+            Tab::Importer => importer_tab_home(),
             Tab::Reglages => settings_tab::settings_home(),
         };
     }
@@ -5049,11 +5053,12 @@ fn input_inner(button: &str) -> bool {
         // only satisfies exhaustiveness.
         Screen::Launching { .. } => true,
         Screen::Empty => {
-            // A (and Y, its old shortcut) go and find games. Minus used to quit
-            // the app from here, the one screen where the search button closed
-            // everything; quitting is in RÉGLAGES, like from any other tab.
+            // A (and Y, its old shortcut) go and find games, on the importer
+            // as its tab opens. Minus used to quit the app from here, the one
+            // screen where the search button closed everything; quitting is
+            // in RÉGLAGES, like from any other tab.
             if matches!(button, "A" | "Y") {
-                s.screen = distant_idle_at(&s, 0);
+                s.screen = importer_tab_home();
             }
             true
         }
@@ -7191,11 +7196,9 @@ fn importer_scroll_for(row: usize, cur: usize, n: usize) -> usize {
     clamp_scroll(cur, row - IMPORTER_PINNED_ROWS, IMPORTER_VISIBLE_ROWS).min(max)
 }
 
-/// The importer row the cursor was last on, so leaving the tab and coming back
-/// lands where it was (`IMPORT_SCROLL` keeps the scroll the same way).
-static IMPORT_ROW: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
 /// The card last focused, 0 or 1: Up from the first source goes back to it.
+/// Recorded by every frame of the home, since a tap, a tab switch or a way
+/// back from another page puts the cursor on a card without a direction.
 static IMPORT_CARD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// When the importer home was last drawn as the page, to tell a frame that
@@ -7235,6 +7238,16 @@ fn distant_idle_at(s: &State, row: usize) -> Screen {
     let cur = IMPORT_SCROLL.load(std::sync::atomic::Ordering::Relaxed);
     let row = row.min(importer_last_row(s));
     Screen::DistantIdle { selection: row, scroll_offset: importer_scroll_for(row, cur, importer_view(s).len()) }
+}
+
+/// The importer as a way in from another tab finds it: the cursor on the
+/// Flashpoint card and the sources from the top, wherever they were left.
+/// Coming back from one of its own pages goes through `distant_idle_at`
+/// instead, to the row and the scroll it left.
+fn importer_tab_home() -> Screen {
+    IMPORT_SCROLL.store(0, std::sync::atomic::Ordering::Relaxed);
+    IMPORT_CARD.store(0, std::sync::atomic::Ordering::Relaxed);
+    Screen::DistantIdle { selection: 0, scroll_offset: 0 }
 }
 
 /// Importer row of history entry `abs` in the current view, so screens that act
@@ -12243,10 +12256,12 @@ pub fn render(backend: &mut SwitchRenderBackend) {
         }
         // ── Phase 3.7 DISTANT mode ─────────────────────────────────────
         Screen::DistantIdle { selection, scroll_offset } => {
-            // Remember where the list is (and the row) so every "back to the
-            // list" path, and the tab itself, can restore them.
+            // Remember where the list is, so every "back to the list" path
+            // can restore it, and the card the cursor is on (`IMPORT_CARD`).
             IMPORT_SCROLL.store(scroll_offset, std::sync::atomic::Ordering::Relaxed);
-            IMPORT_ROW.store(selection, std::sync::atomic::Ordering::Relaxed);
+            if selection < IMPORTER_PINNED_ROWS {
+                IMPORT_CARD.store(selection, std::sync::atomic::Ordering::Relaxed);
+            }
             // Back from another page (an archive folding into its row, the
             // results, an error, a source's panel): the glide state is that
             // page's, so the focus and the scroll snap to the home's instead
