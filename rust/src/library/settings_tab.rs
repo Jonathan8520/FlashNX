@@ -677,9 +677,11 @@ fn send_report(report: crate::bugreport::Report, key: &'static str) {
                 set_toast(&mut s, sent.to_string(), TOAST_OK);
                 s.screen = Screen::Settings { section: SetSection::Help, in_pane: true, row };
             }
-            // An idea is typed and sent from its own row, which is where the
-            // cursor lands again: the screens cannot tell that A did something.
-            crate::sfx::choose(crate::sfx::Sfx::Decide);
+            // Played now, with the toast: this runs from `render`, a frame
+            // after the card, outside any press. A sound only chosen here
+            // waited for the next press, which then made it instead of its
+            // own (a back for B, a move for Down).
+            crate::sfx::play(crate::sfx::Sfx::Decide);
         }
         Err(e) => {
             if let Ok(mut g) = FAILED_SEND.lock() {
