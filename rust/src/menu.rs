@@ -2229,8 +2229,7 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
         }
     }
     if loading {
-        let vw = backend.screen_size().0;
-        backend.draw_loading_card(pending_label(), now, 0.0, vw);
+        backend.draw_loading_card_in_game(pending_label(), now);
     }
     if let Some((msg, kind)) = toast {
         // Beside the panels in game; on the editor's help line, where it is.

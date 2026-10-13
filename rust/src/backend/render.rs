@@ -164,6 +164,12 @@ pub fn pause_reset() {
     kit::sheet::cascade_reset();
 }
 
+/// The right edge of a page of the pause in landscape (the rail, then the
+/// page beside it): where what goes over the game beside the page starts.
+fn pause_page_right() -> f32 {
+    kit::sheet::SHEET_MARGIN + kit::sheet::RAIL_W + kit::sheet::CASCADE_GAP + kit::sheet::CHILD_W
+}
+
 // ── Unified modal style ────────────────────────────────────────────────────
 // One look for every centered window: `draw_modal_frame` draws the panel, title
 // and hints from the kit (`render/kit/window.rs`), and only each window's body
@@ -14018,9 +14024,19 @@ impl SwitchRenderBackend {
             self.draw_toast_in(msg, kind, 0.0, vw, ToastAt::Bottom(vh - 24.0));
             return;
         }
-        let left = kit::sheet::SHEET_MARGIN + kit::sheet::RAIL_W + kit::sheet::CASCADE_GAP + kit::sheet::CHILD_W;
         let y = if fps_counter_on() { 14.0 + 28.0 + 12.0 } else { 24.0 };
-        self.draw_toast_in(msg, kind, left, vw, ToastAt::Top(y));
+        self.draw_toast_in(msg, kind, pause_page_right(), vw, ToastAt::Top(y));
+    }
+
+    /// The wait card of a page of the pause (the shared profiles, a share):
+    /// over the game beside the page in landscape, like the in-game toast.
+    /// Centred on the whole screen, it straddled the page's right edge, over
+    /// its rows' chevrons. In portrait it goes under the panels
+    /// (`draw_loading_card`).
+    pub fn draw_loading_card_in_game(&mut self, label: &str, now: u64) {
+        let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
+        let left = if vh > vw { 0.0 } else { pause_page_right() };
+        self.draw_loading_card(label, now, left, vw);
     }
 
     /// The controls editor's toast, or its key picker's: on the window's help
