@@ -6712,6 +6712,11 @@ fn run_touches_revert(game_idx: usize) {
         set_toast(&mut s, msg.to_string(), if ok { TOAST_OK } else { TOAST_ERR });
         goto_touches_menu(&mut s, game_idx, menu::MENU_EDIT);
     }
+    // The red toast has sounded its note: the page coming back adds no
+    // decide on top of it.
+    if !ok {
+        crate::sfx::hush();
+    }
 }
 
 fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scroll: usize) {
@@ -8747,6 +8752,12 @@ fn handle_game_folder_delete_input(
                 // from out here by path could not work: the path is what it
                 // changes.
                 let idx = empty_folder(s, folder_idx, game_idx);
+                // A red toast set by this press has sounded its note: the
+                // question going back to the folders adds no decide on top
+                // (a game whose name is taken at the root refuses the move).
+                if s.toast_kind == TOAST_ERR && s.toast_frames == TOAST_FRAMES {
+                    crate::sfx::hush();
+                }
                 // The shelf is gone, so its row is gone: land on the root, which
                 // is where its games now are.
                 s.screen = Screen::GameFolderPicker { game_idx: idx, selection: 0 };
