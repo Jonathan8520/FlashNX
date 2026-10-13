@@ -1800,6 +1800,10 @@ pub(crate) struct State {
     import_had_data: bool,
     /// The value row armed by A, if any (see `Armed`).
     pub(crate) armed: Option<Armed>,
+    /// Réglages › Bibliothèque: the layout card under the cursor while it is
+    /// not the one in use (Left / Right walk the cards, A applies). `None` is
+    /// the card in use.
+    pub(crate) view_focus: Option<u8>,
 }
 
 static LIBRARY: Mutex<State> = Mutex::new(State {
@@ -1885,6 +1889,7 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     import_had_files: false,
     import_had_data: false,
     armed: None,
+    view_focus: None,
 });
 
 /// Where the URL history persists across boots. Format: JSON array of
@@ -3778,10 +3783,10 @@ fn tap_ui_row(x: f32, y: f32) {
         }
         // A tap is not a press: no `after_input` follows, so the sound is
         // played here. A sound the tap's handler chose wins, as after a press
-        // (a tap out of a page in the Réglages pane goes back, like B). A
-        // layout card applies as it is tapped (the click of a value); any
-        // other first tap moves the cursor (the move), or takes it into or
-        // out of the Réglages pane (a level, as A and B sound it).
+        // (a tap out of a page in the Réglages pane goes back, like B; a
+        // layout card that takes the cursor moves it). A tap that sets a value
+        // clicks; any other first tap moves the cursor (the move), or takes it
+        // into or out of the Réglages pane (a level, as A and B sound it).
         let chosen = if activate { None } else { crate::sfx::take_chosen() };
         if let Some(c) = chosen {
             crate::sfx::take_changed();

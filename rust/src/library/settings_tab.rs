@@ -160,6 +160,7 @@ fn column_input(s: &mut State, button: &str, section: SetSection) {
                 }
                 HELD_INTO_PANE.store(true, core::sync::atomic::Ordering::Relaxed);
             }
+            s.view_focus = None;
             s.screen = Screen::Settings { section, in_pane: true, row: entry_row(section) };
         }
         // À propos has only things to read: A has nothing to do, and says
@@ -208,12 +209,18 @@ fn pane_input(s: &mut State, button: &str, section: SetSection, row: usize) {
             _ => return,
         }
     }
+    if section == SetSection::Library && key_of(section, row) == "VUE" && view_cards_input(s, button, row, fresh) {
+        return;
+    }
     match button {
         "B" | "Minus" => {
+            s.view_focus = None;
             s.screen = Screen::Settings { section, in_pane: false, row };
             return;
         }
         "Up" | "StickLUp" | "Down" | "StickLDown" => {
+            // A card walked to and left without A stays as it was.
+            s.view_focus = None;
             let down = matches!(button, "Down" | "StickLDown");
             // A press on an end comes round, a held direction stops there,
             // as in every list of the app.
@@ -247,7 +254,6 @@ fn pane_input(s: &mut State, button: &str, section: SetSection, row: usize) {
 /// opens. The nickname and the idea open the keyboard: hoisted in `input()`.
 fn row_a(s: &mut State, section: SetSection, key: &str) {
     match (section, key) {
-        (SetSection::Library, "VUE") => arm_here(s, crate::loc::home_view() as u16),
         (SetSection::Library, "DOSSIER") => {
             // Opens beside the folder in use, the cursor on it: the row opens
             // on what it shows, among folders it could move to. Its own
@@ -337,6 +343,51 @@ fn language_input(s: &mut State, button: &str, row: usize, fresh: bool) {
     }
 }
 
+/// The home layouts, chosen as the languages are (Jonathan: "il faut le faire
+/// comme langues donc A pour valider"): Left and Right walk the four cards
+/// with nothing applied, A applies the card under the cursor. A fresh Left on
+/// the first card goes back to the section column; Right stops on the last.
+/// Leaving the row without A leaves the layout in use as it was. Answers
+/// whether the press was the cards'.
+fn view_cards_input(s: &mut State, button: &str, row: usize, fresh: bool) -> bool {
+    let in_use = crate::loc::home_view();
+    let card = s.view_focus.unwrap_or(in_use).min(crate::loc::HOME_VIEW_COUNT - 1);
+    let walk_to = |s: &mut State, to: u8| {
+        s.view_focus = if to == in_use { None } else { Some(to) };
+        // The screen stays the same, so `after_input` would hear nothing.
+        crate::sfx::choose(crate::sfx::Sfx::Move);
+    };
+    match button {
+        "Left" | "StickLLeft" => {
+            if card > 0 {
+                walk_to(s, card - 1);
+            } else if fresh {
+                s.view_focus = None;
+                s.screen = Screen::Settings { section: SetSection::Library, in_pane: false, row };
+            }
+            true
+        }
+        "Right" | "StickLRight" => {
+            if card + 1 < crate::loc::HOME_VIEW_COUNT {
+                walk_to(s, card + 1);
+            }
+            true
+        }
+        "A" => {
+            s.view_focus = None;
+            if card != in_use {
+                apply_home_view(card);
+                crate::sfx::value_changed();
+            } else {
+                // The layout already in use: nothing to apply, nothing to hear.
+                crate::sfx::hush();
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Apply home layout `v`: written for the next boot, and the home's eased
 /// offsets dropped, since they belong to the layout that produced them and a
 /// new layout reading them would slide in from coordinates meaning something
@@ -371,7 +422,6 @@ fn default_value(key: &str) -> u16 {
 /// against.
 pub(crate) fn armed_next(section: SetSection, row: usize, cur: u16, dir: i32) -> u16 {
     let n = match (section, key_of(section, row)) {
-        (SetSection::Library, "VUE") => crate::loc::HOME_VIEW_COUNT,
         (SetSection::Defaults, "AFFICHAGE") => keymap::DISPLAY_MODE_COUNT,
         (SetSection::Defaults, "ROTATION") => keymap::ROTATION_COUNT,
         (SetSection::Defaults, "PIXELS") => keymap::PIXEL_FILTER_COUNT,
@@ -389,10 +439,6 @@ pub(crate) fn write_armed(section: SetSection, row: usize, v: u16) {
     use crate::loc as l;
     let i = v.min(u8::MAX as u16) as u8;
     match (section, key_of(section, row)) {
-        (SetSection::Library, "VUE") => {
-            apply_home_view(i);
-            return;
-        }
         (SetSection::Defaults, "AFFICHAGE") => l::set_default_display_mode(i),
         (SetSection::Defaults, "ROTATION") => l::set_default_rotation(i),
         (SetSection::Defaults, "PIXELS") => l::set_default_pixel_filter(i),
@@ -422,8 +468,9 @@ fn default_written() {
 /// A tap on the page, on cell `idx` of its touch table: the column's entries
 /// first, then the pane's places (in Bibliothèque the four cards, then its
 /// rows). Puts the cursor there, and answers true when it was already there,
-/// which the caller turns into A. A layout card is applied as it is tapped,
-/// the way any option shown whole is (input rule 6).
+/// which the caller turns into A. A layout card is a place like a language:
+/// the first tap takes the cursor to it, a tap on the card under the cursor
+/// applies it.
 pub(crate) fn touch_select(s: &mut State, section: SetSection, in_pane: bool, row: usize, idx: usize) -> bool {
     let column = SetSection::ALL.len();
     if idx < column {
@@ -437,20 +484,16 @@ pub(crate) fn touch_select(s: &mut State, section: SetSection, in_pane: bool, ro
     let mut cell = idx - column;
     if section == SetSection::Library {
         if cell < LIBRARY_CARDS {
-            // Nothing to confirm, and tapping the card in use again must not
-            // move to the next one. The tapped card is the layout kept, armed
-            // or not: a layout row armed by A is dropped, or its cards kept
-            // lighting the armed layout over the tapped one, and the next A
-            // wrote it in place of what the finger chose.
             let v = cell as u8;
-            let shown = armed_here(s).map_or(crate::loc::home_view(), |a| a.cur.min(u8::MAX as u16) as u8);
-            s.armed = None;
-            let stored = crate::loc::home_view();
-            if stored != v {
-                apply_home_view(v);
+            let in_use = crate::loc::home_view();
+            let on_cards = in_pane && row == row_of(SetSection::Library, "VUE");
+            if on_cards && s.view_focus.unwrap_or(in_use) == v {
+                return true;
             }
-            if stored != v || shown != v {
-                crate::sfx::value_changed();
+            s.view_focus = if v == in_use { None } else { Some(v) };
+            if on_cards {
+                // Same screen, another card: the move the cursor makes.
+                crate::sfx::choose(crate::sfx::Sfx::Move);
             }
             s.screen = settings_at(SetSection::Library, "VUE");
             return false;
@@ -874,8 +917,12 @@ pub(crate) fn draw_settings(
         LAST_SECTION.store(section.index(), core::sync::atomic::Ordering::Relaxed);
     }
     // The value the armed row shows (`Armed`), drawn in place of the stored
-    // one until A keeps it.
-    let armed = LIBRARY.lock().ok().and_then(|s| s.armed.filter(|a| a.screen == screen)).map(|a| a.cur);
+    // one until A keeps it, and the layout card under the cursor.
+    let (armed, view_focus) = LIBRARY
+        .lock()
+        .ok()
+        .map(|s| (s.armed.filter(|a| a.screen == screen).map(|a| a.cur), s.view_focus))
+        .unwrap_or((None, None));
     backend.settings_still(under);
     backend.library_clear();
     let entries = [
@@ -904,7 +951,7 @@ pub(crate) fn draw_settings(
         Body::Section { in_pane, row } => {
             let focus = if in_pane { Some(row) } else { None };
             match section {
-                SetSection::Library => library_pane(backend, focus, armed, game_count, &mut cells, &mut segs, &mut hints),
+                SetSection::Library => library_pane(backend, focus, view_focus, game_count, &mut cells, &mut segs, &mut hints),
                 SetSection::Defaults => defaults_pane(backend, focus, armed, &mut cells, &mut segs, &mut hints),
                 SetSection::Language => {
                     font_cold = language_font_cold();
@@ -999,12 +1046,12 @@ pub(crate) fn menu_path(steps: &[&str]) -> std::string::String {
 }
 
 /// Bibliothèque: the home layouts as cards, the games folder, the interface
-/// sounds, each with what it is for underneath. `armed` is the layout the
-/// cards show while their row is armed.
+/// sounds, each with what it is for underneath. `view_focus` is the card the
+/// cursor is on when it is not the layout in use.
 fn library_pane(
     b: &mut SwitchRenderBackend,
     focus: Option<usize>,
-    armed: Option<u16>,
+    view_focus: Option<u8>,
     game_count: usize,
     cells: &mut std::vec::Vec<(f32, f32, f32, f32)>,
     segs: &mut crate::backend::render::CtrlSegs,
@@ -1015,15 +1062,17 @@ fn library_pane(
     let glide = pane_glide(lib);
     let on_row = |key: &str| focus.filter(|r| *r == row_of(lib, key)).map(|_| 0);
     let top = b.settings_title(u.sec_library, None);
-    let vue_armed = armed.filter(|_| on_row("VUE").is_some());
-    let view = vue_armed.map_or(crate::loc::home_view(), |v| v.min(u8::MAX as u16) as u8);
-    let desc = match view {
+    let in_use = crate::loc::home_view();
+    // The card under the cursor, when the cursor is on the cards: the one in
+    // use until Left / Right walk away from it.
+    let card = on_row("VUE").map(|_| view_focus.unwrap_or(in_use));
+    let desc = match card.unwrap_or(in_use) {
         1 => u.view_desc_list,
         2 => u.view_desc_strip,
         3 => u.view_desc_shelf,
         _ => u.view_desc_grid,
     };
-    let (c, y) = b.settings_layouts(top, u.row_home_view, view, on_row("VUE").is_some(), vue_armed.is_some(), desc);
+    let (c, y) = b.settings_layouts(top, u.row_home_view, in_use, card, desc);
     cells.extend(c);
     let root = primary_root();
     let folder = [Row::new(Icon::Folder, u.row_games_dir).value(shown_path(&root)).opens()];
@@ -1040,8 +1089,9 @@ fn library_pane(
     cells.extend(c);
     b.settings_note(y + 8.0, u.help_sounds, 2);
     *hints = match focus.map(|r| key_of(lib, r)) {
-        _ if vue_armed.is_some() => armed_hints(),
-        Some("VUE") => std::vec![(&[Btn::A][..], u.edit), (&[Btn::B][..], u.back)],
+        // As on the languages: A only where it would change something.
+        Some("VUE") if card == Some(in_use) => std::vec![(&[Btn::B][..], u.back)],
+        Some("VUE") => std::vec![(&[Btn::A][..], u.apply), (&[Btn::B][..], u.back)],
         Some("DOSSIER") => std::vec![(&[Btn::A][..], u.open), (&[Btn::B][..], u.back)],
         Some(_) => std::vec![(&[Btn::A][..], u.change), (&[Btn::B][..], u.back)],
         None => std::vec::Vec::new(),

@@ -230,9 +230,8 @@ impl SwitchRenderBackend {
         &mut self,
         top: f32,
         caption: &str,
-        current: u8,
-        focused: bool,
-        armed: bool,
+        in_use: u8,
+        card: Option<u8>,
         desc: &str,
     ) -> (std::vec::Vec<(f32, f32, f32, f32)>, f32) {
         const GAP: f32 = 16.0;
@@ -242,7 +241,7 @@ impl SwitchRenderBackend {
         let c = self.kit_fit(caption, size::LABEL, PANE_W);
         self.kit_text_mid(PANE_X, top + 9.0, size::LABEL, &c, col::TEXT2);
         let y = top + 32.0;
-        let cur = (current as usize).min(3);
+        let cur = (in_use as usize).min(3);
         let now = unsafe { ruffle_tick_now() };
         let mut cells = std::vec::Vec::with_capacity(4);
         let label_cy = y + CARD_H + 20.0;
@@ -267,19 +266,12 @@ impl SwitchRenderBackend {
             cells.push((x, y, cw, CARD_H + 36.0));
         }
         let cx = PANE_X + cur as f32 * (cw + GAP);
-        if focused {
-            let hx = glide_x(cx, GLIDE_KEY_CARDS, now);
+        // The ring is the cursor, walked from card to card as the languages'
+        // is; the tick stays on the layout in use until A moves it there.
+        if let Some(f) = card {
+            let fx = PANE_X + (f as usize).min(3) as f32 * (cw + GAP);
+            let hx = glide_x(fx, GLIDE_KEY_CARDS, now);
             self.kit_ring(hx, y, cw, CARD_H, BLOCK_RADIUS, ring::GAP, ring::WIDTH, col::GOLD);
-        }
-        if armed {
-            // In the gutters either side of the row of cards, the one at an
-            // end of the four faded, like the arrows of an armed control.
-            const ARROW: f32 = 14.0;
-            const DIM: u32 = 0x59_FF_D7_40;
-            let cy = y + CARD_H * 0.5;
-            self.kit_icon(PANE_X - ARROW - 10.0, cy, ARROW, Icon::ChevronLeft, if cur == 0 { DIM } else { col::GOLD });
-            let right_ink = if cur >= 3 { DIM } else { col::GOLD };
-            self.kit_icon(PANE_X + PANE_W + 6.0, cy, ARROW, Icon::ChevronRight, right_ink);
         }
         // The tick on the layout in use, over the ring's corner.
         const DISC: f32 = 24.0;
