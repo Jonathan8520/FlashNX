@@ -2675,10 +2675,16 @@ int main(int argc, char** argv) {
     // the first that looks like a .swf; pass it to the worker via its thread arg
     // (argv memory outlives the thread — main blocks on threadWaitForExit).
     const char* forwarder_swf = nullptr;
+    // A HOME-menu tile started us, whether or not its config names a game:
+    // FlashNX's own tile (installed from the applet-mode page) has no config at
+    // all and opens the library. It still runs us as the application, so it
+    // needs the same exit request as a game's tile (see the end of main).
+    bool launched_by_tile = false;
     for (int i = 1; i < argc; ++i) {
         // A HOME-menu tile passes its config file; a hand-built forwarder, or
         // `nxlink --args`, passes the game directly. Both still work.
         if (path_is_tile_cfg(argv[i])) {
+            launched_by_tile = true;
             forwarder_swf = resolve_tile_cfg(argv[i]);
             if (forwarder_swf) break;
         } else if (path_is_swf(argv[i])) {
@@ -2936,7 +2942,10 @@ int main(int argc, char** argv) {
     // Not when the OS runs us as an applet (hbmenu, Sphaira's file browser):
     // there the library applet's version would end the process instead of
     // handing back to the menu.
-    if (forwarder_swf) {
+    // FlashNX's own tile counts too: quitting from Settings after it had opened
+    // the library put up the same error, because only a tile that named a game
+    // set this.
+    if (forwarder_swf || launched_by_tile) {
         const AppletType type = appletGetAppletType();
         if (type == AppletType_Application || type == AppletType_SystemApplication) {
             __nx_applet_exit_mode = 1;

@@ -31,6 +31,7 @@ The whole interface is redrawn. Every screen uses the console's own fonts, at th
 - In the Flashpoint results, − searches again, as in every other list, and a cover rests as the Play grid shows it (a banner logo used to be cropped to a few letters).
 - The empty library shows the folder FlashNX really uses, and − there no longer quits the app.
 - The games folder browser opens beside the library folder, and the card's root, which cannot hold the library, is refused with the reason.
+- **Opened from the Album, FlashNX no longer crashes.** It gets only a small part of the console's memory there, too little for the new interface, so it opens on a page that says so, with the FlashNX logo, and offers to install FlashNX on the HOME Menu (its own icon, which always starts it with the full memory). An icon already made with Sphaira is recognised, and the page tells you to use it. Holding R while starting a game still works without installing anything.
 - A bug report carries much more of the game's session: its start (where loading goes wrong), then as much of its end as fits, up to 52 KB instead of 24. The periodic counters come last with only their latest values, and very long lines keep their start and end with the middle cut out.
 
 ### Fixed
@@ -42,6 +43,7 @@ The whole interface is redrawn. Every screen uses the console's own fonts, at th
 - A refused overclock raise from Auto keeps Auto instead of switching the game to Off for good, and turning the frame counter on or off no longer loses the speed reading.
 - After a search or a sort in Import, the cursor lands on the first source instead of the add row.
 - Clearing a saved address in the keyboard cancels the edit instead of deleting the source without asking.
+- A game's HOME Menu icon shows the version of FlashNX that made it: icons made with 1.9.0 said 1.8.1.
 - Games locked by MochiCrypt, the MochiAds loader that decrypts the game after its ad (Charlie The Duck), start after about 10 seconds instead of staying on the loader for good: a request to the closed MochiAds servers now fails after 10 seconds, like a connection that never answers, instead of waiting forever.
 - Translations: broken capitals ("DÉplacer"), keyboard guides written in transliterated Russian, Turkish words missing ı, ş and ğ, labels cut short for the old font; Russian and Turkish now address the player informally everywhere, and French uses its no-break spaces.
 

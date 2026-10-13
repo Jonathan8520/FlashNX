@@ -38,7 +38,9 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <strings.h>
 #include <sys/stat.h>
 #include <string>
 #include <vector>
@@ -326,14 +328,17 @@ constexpr size_t NACP_AUTHOR_CAP = 0x100;
 /// The name goes into all sixteen language slots, as in the `.nro` writer this
 /// replaces: the HOME menu reads the slot matching the console language, so
 /// filling one would leave the tile blank on every other system setting.
-std::string build_nacp(const char* title, u64 program_id) {
+///
+/// `author` is "FlashNX" on a game's tile (the tool that made it) and the
+/// app's own author on FlashNX's tile, which is the app itself.
+std::string build_nacp(const char* title, const char* author, u64 program_id) {
     std::string nacp(NACP_SIZE, '\0');
     u8* p = (u8*)&nacp[0];
 
     for (size_t i = 0; i < NACP_LANG_COUNT; i++) {
         u8* e = p + i * NACP_LANG_STRIDE;
         std::snprintf((char*)e, NACP_NAME_CAP, "%s", title);
-        std::snprintf((char*)e + NACP_NAME_CAP, NACP_AUTHOR_CAP, "%s", "FlashNX");
+        std::snprintf((char*)e + NACP_NAME_CAP, NACP_AUTHOR_CAP, "%s", author);
     }
 
     p[0x3025] = 0;                      // startup_user_account: none, no profile prompt
@@ -801,7 +806,13 @@ bool build_tile(Tile& out, u64 program_id, const char* title, const char* swf_pa
     program_sections.push_back(make_romfs_section(build_romfs(program_files)));
     out.program = build_nca(program_id, NcaContentType_Program, program_sections, header_key);
 
-    const std::string nacp = build_nacp(title, program_id);
+    // A tile whose target is the `.nro` itself is FlashNX's own (installed from
+    // the applet-mode page); every other one starts a game.
+    const size_t target_len = std::strlen(swf_path);
+    const bool self_tile =
+        target_len >= 4 && strncasecmp(swf_path + target_len - 4, ".nro", 4) == 0;
+    const std::string nacp =
+        build_nacp(title, self_tile ? FLASHNX_AUTHOR : "FlashNX", program_id);
     std::vector<PfsFile> control_files;
     control_files.push_back({"control.nacp", (const u8*)nacp.data(), nacp.size()});
     // One icon, for American English. The HOME menu falls back to it for any
@@ -1112,6 +1123,83 @@ extern "C" int nsp_tile_exists(u64 program_id) {
         offset += count;
     }
     nsExit();
+    return found;
+}
+
+/// The program ID of an installed application whose name is `name` (any
+/// language, any case), or 0. Applet mode asks it for "FlashNX": a forwarder
+/// made with Sphaira or another tool starts FlashNX with the full memory as
+/// well as our own tile does, but it has its own program ID (derived from its
+/// launch arguments), so `nsp_tile_exists` cannot see it. Its name is the one
+/// thing it shares: Sphaira copies the `.nro`'s NACP, "FlashNX" by "Jonathan8520".
+///
+/// Read through `ns` and not the card: an installed title leaves nothing
+/// readable on the SD (its content is encrypted under `Nintendo/`).
+extern "C" u64 nsp_find_app_named(const char* name) {
+    if (!name || !name[0]) return 0;
+    if (R_FAILED(nsInitialize())) return 0;
+
+    // The control data carries an icon up to 128 KB; one buffer serves every
+    // title, and the applet pool has ~32 MB to spare once the renderer is up.
+    NsApplicationControlData* ctl =
+        static_cast<NsApplicationControlData*>(std::malloc(sizeof(NsApplicationControlData)));
+    // From the HOME Menu's own cache, never from storage: reading each title's
+    // control data off its content froze the applet page for tens of seconds
+    // on a console with 291 titles and no FlashNX among them (2026-10-14). The
+    // cache holds every title the HOME Menu shows, which is the only kind a
+    // player can start FlashNX from anyway.
+    //
+    // Even cached, one title costs ~9 ms (the call copies its 128 KB icon too):
+    // 1.5 s for 159 titles. So the IDs come first, all of them (cheap), and the
+    // ones starting 0x05 are read before the rest: that is the prefix of
+    // Sphaira's forwarders and of our own tiles, so the usual case is found in
+    // a few milliseconds. A time cap on the rest, so the page always comes up
+    // quickly: past it, FlashNX is taken as not installed and the page offers
+    // to install it, which is harmless.
+    constexpr u64 BUDGET_MS = 800;
+    const u64 t0 = armGetSystemTick();
+    u64 found = 0;
+    int checked = 0;
+    bool over = false;
+    if (ctl) {
+        std::vector<u64> ids;
+        NsApplicationRecord records[32];
+        s32 offset = 0;
+        while (true) {
+            s32 count = 0;
+            if (R_FAILED(nsListApplicationRecord(records, 32, offset, &count)) || count <= 0) break;
+            for (s32 i = 0; i < count; i++) ids.push_back(records[i].application_id);
+            if (count < 32) break;
+            offset += count;
+        }
+        std::stable_partition(ids.begin(), ids.end(), [](u64 id) { return (id >> 56) == 0x05; });
+        for (const u64 id : ids) {
+            if (armTicksToNs(armGetSystemTick() - t0) / 1000000 > BUDGET_MS) {
+                over = true;
+                break;
+            }
+            checked++;
+            u64 size = 0;
+            if (R_FAILED(nsGetApplicationControlData(NsApplicationControlSource_CacheOnly, id, ctl,
+                                                     sizeof(NsApplicationControlData), &size))) {
+                continue;
+            }
+            for (int l = 0; l < 16; l++) {
+                const char* n = ctl->nacp.lang[l].name;
+                if (n[0] && strncasecmp(n, name, sizeof(ctl->nacp.lang[l].name)) == 0) {
+                    found = id;
+                    break;
+                }
+            }
+            if (found) break;
+        }
+        std::free(ctl);
+    }
+    nsExit();
+    std::printf("nsp: looked for '%s' in %d title(s) in %llu ms%s\n", name, checked,
+                (unsigned long long)(armTicksToNs(armGetSystemTick() - t0) / 1000000),
+                over ? " (gave up: time cap)" : "");
+    std::fflush(stdout);
     return found;
 }
 

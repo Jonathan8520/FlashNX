@@ -43,29 +43,99 @@ impl SwitchRenderBackend {
         danger: bool,
         back: &str,
     ) {
-        use kit::theme::{col, radius, size};
-        const PAD: f32 = 36.0;
-        const DISC: f32 = 52.0;
-        const BTN_H: f32 = 50.0;
-        const BTN_GAP: f32 = 14.0;
         unsafe {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
             glDisable(GL_STENCIL_TEST);
         }
+        self.fill_screen_dim(if danger { MODAL_DIM_DANGER } else { kit::theme::col::SCRIM });
+        self.confirm_window(icon, title, body, None, 5, detail, choices, selection, danger, back, 0.0);
+    }
+
+    /// The page FlashNX shows when it was opened from the Album: the question
+    /// window of `draw_confirm` on a plain background instead of over a page,
+    /// with room for a second paragraph (the way round it that needs nothing
+    /// installed). Nothing else is drawn but the FlashNX logo above it (the
+    /// banner the tab bar already holds): the applet pool leaves ~32 MB once
+    /// the renderer is up, and the Play grid's covers ran that out on its
+    /// first frames.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_applet_block(
+        &mut self,
+        logo: (GLuint, u32, u32),
+        title: &str,
+        body: &str,
+        note: &str,
+        detail: Option<&str>,
+        choices: &[Choice],
+        selection: usize,
+        back: &str,
+    ) {
+        const LOGO_H: f32 = 64.0;
+        const LOGO_GAP: f32 = 28.0;
+        unsafe {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDisable(GL_STENCIL_TEST);
+        }
+        self.fill_screen_dim(kit::theme::col::BG);
+        let (tex, lw, lh) = logo;
+        let has_logo = tex != 0 && lw > 0 && lh > 0;
+        // The logo and the window are centred as one group.
+        let shift = if has_logo { (LOGO_H + LOGO_GAP) * 0.5 } else { 0.0 };
+        let wy = self.confirm_window(
+            Icon::Home, title, body, Some(note), 6, detail, choices, selection, false, back, shift,
+        );
+        if has_logo {
+            let draw_w = lw as f32 * LOGO_H / lh as f32;
+            let vw = self.dimensions.width as f32;
+            let x = ((vw - draw_w) * 0.5).round();
+            self.draw_textured_rect(x, (wy - LOGO_GAP - LOGO_H).round(), draw_w, LOGO_H, tex);
+        }
+    }
+
+    /// The window of a question: what `draw_confirm` and `draw_applet_block`
+    /// draw over their backgrounds. `note`, when given, is a second paragraph
+    /// under the first, in the quieter ink. Centred on the screen, then moved
+    /// down by `shift` (room for what goes above it). Returns its top edge.
+    #[allow(clippy::too_many_arguments)]
+    fn confirm_window(
+        &mut self,
+        icon: Icon,
+        title: &str,
+        body: &str,
+        note: Option<&str>,
+        max_lines: usize,
+        detail: Option<&str>,
+        choices: &[Choice],
+        selection: usize,
+        danger: bool,
+        back: &str,
+        shift: f32,
+    ) -> f32 {
+        use kit::theme::{col, radius, size};
+        const PAD: f32 = 36.0;
+        const DISC: f32 = 52.0;
+        const BTN_H: f32 = 50.0;
+        const BTN_GAP: f32 = 14.0;
+        const NOTE_GAP: f32 = 12.0;
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
-        self.fill_screen_dim(if danger { MODAL_DIM_DANGER } else { col::SCRIM });
         let w = 640.0f32.min(vw - 40.0);
         let text_x = PAD + DISC + 18.0;
         let text_w = w - text_x - PAD;
-        let lines = self.kit_wrap(body, size::BODY, text_w, 5);
+        let lines = self.kit_wrap(body, size::BODY, text_w, max_lines);
+        let note_lines = match note {
+            Some(n) => self.kit_wrap(n, size::BODY, text_w, max_lines),
+            None => std::vec::Vec::new(),
+        };
         let lh = 25.0;
-        let head_h = (34.0 + lines.len() as f32 * lh).max(DISC);
+        let note_h = if note_lines.is_empty() { 0.0 } else { NOTE_GAP + note_lines.len() as f32 * lh };
+        let head_h = (34.0 + lines.len() as f32 * lh + note_h).max(DISC);
         let detail_h = if detail.is_some() { 60.0 } else { 0.0 };
         let h = PAD + head_h + detail_h + 30.0 + BTN_H + 30.0 + 44.0;
         let x = ((vw - w) * 0.5).round();
-        let y = ((vh - h) * 0.5).round();
+        let y = ((vh - h) * 0.5 + shift).round();
         self.kit_panel(x, y, w, h, danger);
 
         let ink = if danger { col::DANGER } else { col::GOLD };
@@ -77,6 +147,13 @@ impl SwitchRenderBackend {
         for line in &lines {
             self.kit_text_mid(x + text_x, ly, size::BODY, line, col::TEXT2);
             ly += lh;
+        }
+        if !note_lines.is_empty() {
+            ly += NOTE_GAP;
+            for line in &note_lines {
+                self.kit_text_mid(x + text_x, ly, size::BODY, line, col::TEXT3);
+                ly += lh;
+            }
         }
         let mut by = y + PAD + head_h + 26.0;
         if let Some(d) = detail {
@@ -127,6 +204,7 @@ impl SwitchRenderBackend {
             glBindVertexArray(0);
         }
         self.gl_state.invalidate();
+        y
     }
 }
 

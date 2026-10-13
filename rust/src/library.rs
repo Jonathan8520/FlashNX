@@ -64,6 +64,14 @@ pub(crate) enum Screen {
     /// list row to return to on dismiss (pressed on an importer page, the page
     /// to go back to is held in `LAUNCH_BACKDROP` instead).
     AppletNotice { selection: usize, scroll_offset: usize },
+    /// Applet mode, from the very first frame: the whole launcher, not just a
+    /// game, is out of reach. The pool is ~224 MB, the renderer takes ~190 of
+    /// it, and the Play grid's covers ran the rest out within a second of the
+    /// first frame (the 1.9.0 interface fitted, the redesign does not). So the
+    /// library opens on this page instead, which draws nothing but its window,
+    /// and offers to install FlashNX on the HOME Menu, where it always starts
+    /// with the full memory. `selection` is the answer under the cursor.
+    AppletBlock { selection: usize },
     /// User pressed - or chose to quit; main loop exits the `.nro`.
     Quit,
     /// User pressed A on OPTIONS > TOUCHES — control delegated to
@@ -1690,6 +1698,13 @@ pub(crate) struct State {
     /// takeover) — games can't be launched (OOM). Set in `open()`. Drives the
     /// `AppletNotice` screen shown instead of the embedded red SWF (P1c).
     applet_mode: bool,
+    /// Applet mode: FlashNX's own HOME Menu tile is installed (checked when the
+    /// library opens, set again by a successful install). `AppletBlock` then
+    /// says to start it from there instead of offering to install it.
+    applet_tile: bool,
+    /// Applet mode: why the last install of FlashNX's own tile failed, shown in
+    /// `AppletBlock` until an install succeeds.
+    applet_install_err: Option<std::string::String>,
     /// Active substring filter on the LOCAL list (Minus (-) = open swkbd to
     /// set/edit; empty input = clear). Mirrors `distant_filter`: lowercase, substring
     /// match against the lowercased display name OR basename. `None` = show
@@ -1962,6 +1977,8 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     download_resume_pos: None,
     history_loaded: false,
     applet_mode: false,
+    applet_tile: false,
+    applet_install_err: None,
     local_filter: None,
     folder_filter: None,
     cover_candidates: std::vec::Vec::new(),
@@ -3330,6 +3347,14 @@ pub fn open() {
         if let Some(e) = found.and_then(|i| s.entries.get(i)) {
             collapse_info = Some((e.basename.clone(), e.display_name.clone(), e.color_chip));
         }
+        // Applet mode: the launcher itself does not fit (see `AppletBlock`), so
+        // it opens on the page that says so, and no grid frame is ever drawn.
+        if applet {
+            s.applet_tile = flashnx_on_home_menu();
+            s.applet_install_err = None;
+            s.screen = Screen::AppletBlock { selection: 0 };
+            collapse_info = None;
+        }
     }
     // Snap the gallery glide to wherever the cursor lands (last-played row),
     // so the first JOUER frame doesn't slide in from a stale position.
@@ -4183,6 +4208,9 @@ fn set_screen_selection(s: &mut State, idx: usize) -> bool {
         }
         // One answer, always the focused one: the first tap gives it.
         Screen::AppletNotice { .. } => idx == 0,
+        Screen::AppletBlock { selection } => {
+            put!(selection, Screen::AppletBlock { selection: idx })
+        }
         Screen::ProfileDeleteConfirm { game_idx, profile_idx, selection } => {
             put!(selection, Screen::ProfileDeleteConfirm { game_idx, profile_idx, selection: idx })
         }
@@ -5207,6 +5235,21 @@ fn input_inner(button: &str) -> bool {
             handle_list_input(&mut s, button, selection, scroll_offset);
             true
         }
+        Screen::AppletBlock { selection } => {
+            // Installed: one answer, Quit. Otherwise Install (or Retry after a
+            // failure) then Quit, side by side. Nothing else is reachable: no
+            // tab, no grid, no menu fits in what the applet pool leaves.
+            let two = !s.applet_tile;
+            match button {
+                "Left" | "StickLLeft" | "Right" | "StickLRight" if two => {
+                    s.screen = Screen::AppletBlock { selection: answer_at(button, selection) }
+                }
+                "A" if two && selection == 0 => install_self_tile(&mut s),
+                "A" | "B" | "Minus" | "Plus" => s.screen = Screen::Quit,
+                _ => {}
+            }
+            true
+        }
         Screen::AppletNotice { selection, scroll_offset } => {
             // Any dismiss button returns where the game was pressed: the same
             // list row, or the importer page it was on (`launch_from_importer`).
@@ -5570,6 +5613,9 @@ extern "C" {
     fn nsp_remove_tile(program_id: u64) -> core::ffi::c_int;
     /// 1 when a tile for this program ID is installed on the console.
     fn nsp_tile_exists(program_id: u64) -> core::ffi::c_int;
+    /// The program ID of an installed application named `name`, or 0. Finds
+    /// a FlashNX forwarder made with Sphaira, whose ID is not ours.
+    fn nsp_find_app_named(name: *const core::ffi::c_char) -> u64;
 }
 
 /// Top-level file names of `dir`, straight from one `readdir`.
@@ -9812,6 +9858,86 @@ fn tile_id_for(swf_path: &str) -> Option<u64> {
     Some(unsafe { nsp_program_id_for(c.as_ptr()) })
 }
 
+/// The `.nro` every tile starts (`DEFAULT_NRO` in forwarder/source/main.c).
+const SELF_NRO: &str = "sdmc:/switch/FlashNX/FlashNX.nro";
+
+/// FlashNX's own HOME Menu tile: a tile like a game's, derived from the path of
+/// the `.nro` instead of a `.swf`, and with no `tiles/<ID>.cfg`. The forwarder
+/// still hands FlashNX that config's path, FlashNX finds no file there and
+/// opens the library (`resolve_tile_cfg` in main.cpp), as an application, with
+/// the whole memory. The same way Sphaira installs a forwarder for any `.nro`.
+fn self_tile_id() -> Option<u64> {
+    tile_id_for(SELF_NRO)
+}
+
+/// FlashNX can already be started from the HOME Menu: our own tile, or any
+/// installed application named FlashNX (a forwarder made with Sphaira, which
+/// has its own program ID). Either one starts it with the full memory, so the
+/// applet page says to use it rather than offering a second icon.
+fn flashnx_on_home_menu() -> bool {
+    if self_tile_id().is_some_and(|id| unsafe { nsp_tile_exists(id) } == 1) {
+        log("applet: FlashNX's own tile is installed\n");
+        return true;
+    }
+    let t0 = unsafe { ruffle_tick_now() };
+    let other = unsafe { nsp_find_app_named(b"FlashNX\0".as_ptr() as *const core::ffi::c_char) };
+    let ms = (unsafe { ruffle_tick_now() } - t0) as f64 * 1000.0 / unsafe { ruffle_tick_freq() } as f64;
+    if other != 0 {
+        log(&std::format!("applet: FlashNX already installed as {:016X} ({:.0} ms)\n", other, ms));
+        return true;
+    }
+    log(&std::format!("applet: FlashNX not on the HOME Menu ({:.0} ms to look)\n", ms));
+    false
+}
+
+/// Install FlashNX's own tile, from `AppletBlock`. Records the outcome in
+/// `applet_tile` / `applet_install_err` for the page to show.
+fn install_self_tile(s: &mut State) {
+    let Some(id) = self_tile_id() else { return };
+    // A config under this ID would turn the tile into some game's. None is ever
+    // written for it, but a stale one costs nothing to rule out.
+    let _ = std::fs::remove_file(tile_cfg_path(id));
+    // The app's own icon, the one hbmenu shows (cpp/Makefile `ICON`).
+    let icon: &[u8] = include_bytes!("../../assets/icon.jpg");
+    let mut err = [0u8; 96];
+    let rc = match (std::ffi::CString::new("FlashNX"), std::ffi::CString::new(SELF_NRO)) {
+        (Ok(t), Ok(p)) => unsafe {
+            nsp_install_tile(
+                id,
+                t.as_ptr(),
+                p.as_ptr(),
+                icon.as_ptr(),
+                icon.len() as u32,
+                err.as_mut_ptr() as *mut core::ffi::c_char,
+                err.len() as u32,
+            )
+        },
+        _ => 0,
+    };
+    if rc == 1 {
+        crate::sd::commit();
+        log(&std::format!("applet: FlashNX installed on the HOME Menu as {:016X}\n", id));
+        s.applet_tile = true;
+        s.applet_install_err = None;
+        crate::sfx::value_changed();
+    } else {
+        let reason = std::ffi::CStr::from_bytes_until_nul(&err)
+            .ok()
+            .and_then(|c| c.to_str().ok())
+            .unwrap_or("?")
+            .to_string();
+        log(&std::format!("applet: installing FlashNX's own tile failed ({})\n", reason));
+        // On the card too, like a game's tile: the reason outlives the page.
+        let note = std::format!("{}\nFlashNX\n{}\n", SELF_NRO, reason);
+        if let Ok(c) = std::ffi::CString::new(TILE_ERROR_PATH) {
+            let b = note.as_bytes();
+            unsafe { swf_picker_write_file(c.as_ptr(), b.as_ptr(), b.len() as u32) };
+        }
+        s.applet_install_err = Some(reason);
+        crate::sfx::choose(crate::sfx::Sfx::Error);
+    }
+}
+
 /// Where a failed install leaves its reason, for reading back over FTP.
 const TILE_ERROR_PATH: &str = "sdmc:/switch/FlashNX/tile_error.txt";
 
@@ -11886,6 +12012,9 @@ fn modal_kind(screen: Screen) -> u8 {
         // The applet-mode notice, a window over the page the game was pressed
         // on: it pops in and scales out like the others.
         Screen::AppletNotice { .. } => 26,
+        // The applet-mode page: its window pops in like the others, over a
+        // plain background instead of a page.
+        Screen::AppletBlock { .. } => 27,
         // The keymap editor delegates to `menu::*`; its window pops in once, and
         // its key picker opens inside that window (`menu::window_kind` counts
         // the two as one), exactly like the in-game `ruffle_touches_draw` path.
@@ -12945,6 +13074,44 @@ pub fn render(backend: &mut SwitchRenderBackend) {
     // current screen has no animation.
     match screen {
         Screen::Inactive | Screen::Picked | Screen::Quit => {}
+        Screen::AppletBlock { selection } => {
+            use crate::backend::render::Choice;
+            // Nothing behind the window: no grid, no tab bar, no covers. And no
+            // tab bar to tap either.
+            crate::backend::render::navbar_clear();
+            backend.clear_ui_transform();
+            crate::backend::render::set_ui_screen_kind(ui_kind);
+            backend.set_ui_modal_scale(if modal_active { modal_scale } else { 1.0 });
+            let (lc, u) = (crate::loc::s(), crate::loc_ui::ui());
+            let (tile, err, logo) = LIBRARY
+                .lock()
+                .map(|s| (s.applet_tile, s.applet_install_err.clone(), (s.banner_tex, s.banner_w, s.banner_h)))
+                .unwrap_or((false, None, (0, 0, 0)));
+            let body = if tile {
+                lc.applet_block_installed
+            } else if err.is_some() {
+                lc.applet_block_failed
+            } else {
+                lc.applet_block_body
+            };
+            let first = if err.is_some() { u.retry } else { u.install };
+            let two = [
+                Choice { label: first, destructive: false },
+                Choice { label: u.quit, destructive: false },
+            ];
+            let one = [Choice { label: u.quit, destructive: false }];
+            let choices: &[Choice] = if tile { &one } else { &two };
+            backend.draw_applet_block(
+                logo,
+                lc.applet_block_title,
+                body,
+                lc.applet_block_note,
+                if tile { None } else { err.as_deref() },
+                choices,
+                if tile { 0 } else { selection.min(1) },
+                u.quit,
+            );
+        }
         Screen::AppletNotice { selection, scroll_offset } => {
             use crate::backend::render::{Choice, Icon};
             // A window over the page the game was pressed on, like every other

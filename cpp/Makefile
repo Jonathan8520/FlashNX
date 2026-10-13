@@ -55,6 +55,9 @@ ARCH     := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 # The version reaches C++ too: a shortcut writes it into its NACP, so a tile
 # that stops working says which FlashNX produced it. One source of truth.
 DEFINES  += -DFLASHNX_VERSION=\"$(APP_VERSION)\"
+# And the author, for FlashNX's own tile: it is the app itself, so it carries
+# the `.nro`'s author as a Sphaira forwarder does, not "FlashNX".
+DEFINES  += -DFLASHNX_AUTHOR=\"$(APP_AUTHOR)\"
 # The profiling build (scripts/build.sh --prof) exists for nothing else, so it
 # samples without the prof.on marker. See cpp/src/prof.cpp.
 ifeq ($(RUST_PROFILE),release-prof)
@@ -188,6 +191,12 @@ $(OUTPUT).nro: $(OUTPUT).elf $(OUTPUT).nacp
 # `cargo build` followed by `make` shows "Rien à faire" and the .nro
 # stays at the previous Rust binary.
 $(OUTPUT).elf: $(OFILES) $(RUST_STATICLIB)
+
+# nsp.cpp writes APP_VERSION into every tile it installs (FLASHNX_VERSION), and
+# make never sees a define change: the tiles installed by 1.9.0 said "1.8.1",
+# because nsp.o had last been compiled on 1.8.1. Recompile it when this file
+# changes.
+nsp.o: $(TOPDIR)/Makefile
 
 -include $(DEPENDS)
 
