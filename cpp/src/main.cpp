@@ -1485,6 +1485,13 @@ static void worker_entry(void* arg) {
     // suspended and we drain `ruffle_draw_menu_closing` until it reports done,
     // then resume the game. Keeps the close animated instead of snapping shut.
     bool menu_closing = false;
+    // Buttons pressed while the close animation plays, for both players. Those
+    // frames read no input, so a press made then had lost its edge by the
+    // first frame of the game: a jump pressed right after `-`, or a direction
+    // held to run, did nothing until it was let go and pressed again. The
+    // first frame back gives the game the ones still held.
+    u64  close_drain = 0;
+    u64  close_drain2 = 0;
     int  menu_selection = MENU_RESUME;
     // ECRAN sub-panel: open flag + its own row cursor, kept out of
     // `menu_selection` so backing out lands you on ECRAN rather than on
@@ -1612,6 +1619,9 @@ static void worker_entry(void* arg) {
             // On dismiss we don't snap shut; we keep re-rendering the frozen
             // frame + the shrinking menu until the close pop reports done.
             if (menu_closing) {
+                // Presses made now reach the game once it resumes.
+                close_drain = (close_drain | kDown) & ~kUp;
+                close_drain2 = (close_drain2 | kDown2) & ~kUp2;
                 ruffle_redraw_paused();
                 if (ruffle_draw_menu_closing(menu_selection)) {
                     menu_open = false;
@@ -2186,6 +2196,14 @@ static void worker_entry(void* arg) {
             continue;
         }
 
+        // The presses made while the pause closed, still held on this first
+        // frame back (`close_drain`), go to the game with this frame's own;
+        // the `-` that may have closed it is never one of them.
+        const u64 kDownG = kDown | (close_drain & kHeld & ~HidNpadButton_Minus);
+        const u64 kDownG2 = kDown2 | (close_drain2 & kHeld2 & ~HidNpadButton_Minus);
+        close_drain = 0;
+        close_drain2 = 0;
+
         // `-` opens the pause modal. Captured before BINDINGS so it can't
         // also fire a key event into Ruffle.
         if (kDown & HidNpadButton_Minus) {
@@ -2261,7 +2279,7 @@ static void worker_entry(void* arg) {
         for (size_t i = 0; i < BINDINGS_COUNT; ++i) {
             const ButtonBinding& b = BINDINGS[i];
             if (b.mask & p1_mod_buttons) continue; // this button is a modifier, muted
-            const bool dn = (kDown & b.mask) != 0;
+            const bool dn = (kDownG & b.mask) != 0;
             const bool up = (kUp   & b.mask) != 0;
             if (!dn && !up) continue;
             if (dn) {
@@ -2302,7 +2320,7 @@ static void worker_entry(void* arg) {
         for (size_t i = 0; i < BINDINGS_COUNT; ++i) {
             const u64 mask = BINDINGS[i].mask;
             if (mask & p2_mod_buttons) continue; // modifier button, muted
-            const bool dn = (kDown2 & mask) != 0;
+            const bool dn = (kDownG2 & mask) != 0;
             const bool up = (kUp2   & mask) != 0;
             if (!dn && !up) continue;
             if (dn) {
