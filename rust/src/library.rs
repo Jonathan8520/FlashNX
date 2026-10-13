@@ -4591,6 +4591,28 @@ fn input_inner(button: &str) -> bool {
             return true;
         }
     }
+    // + opened the game's options, so + closes them from the controls editor
+    // drawn over their pages too (and from its key picker), as it does from
+    // every page and question of theirs, and as `-` closes the pause from the
+    // editor in game: the editor goes at once, the options' panels slide out
+    // (`close_options_stack`). It was ignored here.
+    if button == "Plus" && matches!(menu::screen_kind(), 2 | 3) {
+        let game = LIBRARY.lock().ok().and_then(|s| match s.screen {
+            Screen::TouchesEditor { game_idx } => Some(game_idx),
+            _ => None,
+        });
+        if let Some(game_idx) = game {
+            menu::close();
+            if let Ok(mut s) = LIBRARY.lock() {
+                goto_touches_menu(&mut s, game_idx, menu::MENU_EDIT);
+                let page = s.screen;
+                close_options_stack(&mut s, page);
+            }
+            // The editor's own sounds are `menu::input`'s, and it is gone.
+            crate::sfx::choose(crate::sfx::Sfx::Decide);
+            return true;
+        }
+    }
     // A game's controls editor closes like the Réglages one: it scales out over
     // its Touches et curseur page, then lands there. Left to `menu`, it
     // vanished in one frame, the page's own pop being invisible (the options
