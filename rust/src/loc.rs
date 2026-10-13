@@ -1846,7 +1846,7 @@ const TR: Strings = Strings {
     menu_screen: "Görüntü",
     menu_restart: "Oyunu yeniden başlat",
     menu_quit: "Oyundan çık",
-    pause_title: "Duraklatıldı",
+    pause_title: "Duraklatma",
     keys_title: "Kontroller",
     keys_modifier: "Basılı tut: {} katmanı",
     flash_mouse_left: "Sol tık",
