@@ -3024,15 +3024,22 @@ pub(crate) fn zoom_live(percent: u16, ox: i32, oy: i32) {
 }
 
 /// `A`: keep it, and write it to the game's `.prefs` so it is there next launch.
+///
+/// Only when it changed, as every other value of the pause is kept: opened
+/// just to look and left with A, an untouched framing was written as the
+/// game's own, so its row lost "par défaut" and a later change of the default
+/// zoom in Réglages no longer reached the game.
 #[no_mangle]
 pub extern "C" fn ruffle_zoom_commit() {
+    let snap = ZOOM_SNAPSHOT.lock().ok().and_then(|mut s| s.take());
     let (ox, oy) = backend::render::game_pan();
-    keymap::set_zoom(backend::render::game_zoom_percent(), ox, oy);
+    let percent = backend::render::game_zoom_percent();
+    if snap == Some((percent, ox, oy)) {
+        return;
+    }
+    keymap::set_zoom(percent, ox, oy);
     // The game has a zoom of its own now: its row stops saying "par défaut".
     pause_values::prefs_written();
-    if let Ok(mut s) = ZOOM_SNAPSHOT.lock() {
-        *s = None;
-    }
 }
 
 /// `B`: put back what the panel was showing on the way in, and persist nothing.
