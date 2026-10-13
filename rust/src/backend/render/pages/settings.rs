@@ -219,13 +219,12 @@ impl SwitchRenderBackend {
     }
 
     /// The four home layouts as cards, under `caption`, with each one's name
-    /// beneath it and `desc` (what the layout in use looks like) under the
-    /// names. The layout in use is lifted (tile fill, gold tick in its corner);
-    /// with `focused` a gold ring glides to it, so the ring and the tick are
-    /// always on the same card. `armed`: A has armed the row, so Left and Right
-    /// move the layout (the card shown is the one they moved to, kept by A),
-    /// and gold arrows beside the cards say so, as beside any armed control.
-    /// Returns the cards' touch cells and where the next block can start.
+    /// beneath it and `desc` (what the card under the cursor looks like) under
+    /// the names. `in_use` is lifted (tile fill, gold tick in its corner);
+    /// `card`, when the cursor is on the cards, gets the gold ring, which
+    /// Left and Right walk to any card while the tick stays where it is until
+    /// A applies the one under the ring, as on the languages. Returns the
+    /// cards' touch cells and where the next block can start.
     pub(crate) fn settings_layouts(
         &mut self,
         top: f32,
@@ -257,7 +256,7 @@ impl SwitchRenderBackend {
                 3 => Icon::Shelf,
                 _ => Icon::Grid,
             };
-            let ink = if on { col::TEXT } else { col::TEXT2 };
+            let ink = if on || card == Some(v as u8) { col::TEXT } else { col::TEXT2 };
             let label = self.kit_fit(crate::loc_ui::view_label(v as u8), size::LABEL + 1.0, cw - 26.0);
             let lw = self.kit_measure(&label, size::LABEL + 1.0);
             let lx = (x + (cw - 16.0 - 8.0 - lw) * 0.5).round();

@@ -10,9 +10,10 @@
 //! A setting changes the way it does everywhere (input rule 1): a switch flips
 //! on A; a choice or a number is armed by A, then Left and Right move it and
 //! A keeps it (B puts it back), so a stick pushed sideways on the way down the
-//! pane changes nothing. The language waits for A too (sweeping the cursor
-//! across nine scripts would leave a player in one they cannot read), and
-//! moving the library asks first (it renames real files).
+//! pane changes nothing. The language and the home layout are places the
+//! cursor walks to, applied by A (sweeping the cursor across nine scripts
+//! would leave a player in one they cannot read), and moving the library asks
+//! first (it renames real files).
 //!
 //! A deeper level opens inside the pane with the path above it: the browser of
 //! the games folder, the game list of a bug report. Only the questions (move
@@ -311,9 +312,9 @@ fn row_a(s: &mut State, section: SetSection, key: &str) {
 }
 
 /// The languages: Left on the first column goes back to the section column,
-/// Right stops at the end of a row, A applies. The one setting that waits for
-/// A: applied on the move, a sweep of the cursor would pass through scripts a
-/// player may not be able to read their way back from.
+/// Right stops at the end of a row, A applies (the home layouts work the same
+/// way, `view_cards_input`). Applied on the move, a sweep of the cursor would
+/// pass through scripts a player may not be able to read their way back from.
 fn language_input(s: &mut State, button: &str, row: usize, fresh: bool) {
     let n = crate::loc::PICKER_LANGS.len();
     let at = |row: usize| Screen::Settings { section: SetSection::Language, in_pane: true, row };
