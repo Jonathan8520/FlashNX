@@ -1318,8 +1318,8 @@ fn help_pane(
     };
 }
 
-/// À propos: the version, who made FlashNX and under which licence, and what
-/// it is built on.
+/// À propos: the version, who made FlashNX and under which licence, what it
+/// is built on, and where its games come from.
 fn about_pane(b: &mut SwitchRenderBackend, logo: (u32, u32, u32)) {
     let u = crate::loc_ui::ui();
     let top = b.settings_title(u.sec_about, None);
@@ -1331,6 +1331,10 @@ fn about_pane(b: &mut SwitchRenderBackend, logo: (u32, u32, u32)) {
     let rows = [
         Row::new(Icon::Code, u.about_source).value("github.com/Jonathan8520/FlashNX"),
         Row::new(Icon::Play, u.about_engine).value("Ruffle"),
+        // Where the importer's games and covers come from: two volunteer
+        // archives, credited by name like the engine and the icons (no logo:
+        // neither publishes terms for its use).
+        Row::new(Icon::Archive, u.about_games).value("Flashpoint Archive  \u{00B7}  Internet Archive"),
         Row::new(Icon::Image, u.about_icons).value("Lucide (ISC)"),
     ];
     b.settings_block(y + 14.0, &rows, None, pane_glide(SetSection::About));

@@ -579,6 +579,8 @@ pub struct Ui {
     /// calls Écran. Lists its rows in the words of `help_screen`, the pause's own help for that row,
     /// which says every change shows on the game behind the menu: in the launcher there is none yet.
     pub help_opt_screen: &'static str,
+    /// À propos: the row naming where the importer's games and covers come from (the value is the projects' own names).
+    pub about_games: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -905,6 +907,7 @@ const EN: Ui = Ui {
     lang_name_tr: "Turkish",
     sec_in_game: "In game",
     help_opt_screen: "Display, rotation, zoom, pixels, filter, FPS counter: set this game's picture before you even start it.",
+    about_games: "Game sources",
 };
 
 const FR: Ui = Ui {
@@ -1231,6 +1234,7 @@ const FR: Ui = Ui {
     lang_name_tr: "Turc",
     sec_in_game: "En jeu",
     help_opt_screen: "Affichage, rotation, zoom, pixels, filtre, compteur FPS\u{a0}: règle l'image de ce jeu avant même de le lancer.",
+    about_games: "Sources de jeux",
 };
 
 const ES: Ui = Ui {
@@ -1557,6 +1561,7 @@ const ES: Ui = Ui {
     lang_name_tr: "Turco",
     sec_in_game: "En el juego",
     help_opt_screen: "Pantalla, rotación, zoom, píxeles, filtro, contador FPS: ajusta la imagen de este juego antes incluso de iniciarlo.",
+    about_games: "Fuentes de juegos",
 };
 
 const RU: Ui = Ui {
@@ -1883,6 +1888,7 @@ const RU: Ui = Ui {
     lang_name_tr: "Турецкий",
     sec_in_game: "В игре",
     help_opt_screen: "Экран, поворот, масштаб, пиксели, фильтр, счётчик FPS: настрой картинку этой игры ещё до её запуска.",
+    about_games: "Источники игр",
 };
 
 const DE: Ui = Ui {
@@ -2209,6 +2215,7 @@ const DE: Ui = Ui {
     lang_name_tr: "Türkisch",
     sec_in_game: "Im Spiel",
     help_opt_screen: "Anzeige, Drehung, Zoom, Pixel, Filter, FPS-Anzeige: Stell das Bild dieses Spiels ein, noch bevor du es startest.",
+    about_games: "Spielequellen",
 };
 
 const IT: Ui = Ui {
@@ -2535,6 +2542,7 @@ const IT: Ui = Ui {
     lang_name_tr: "Turco",
     sec_in_game: "In gioco",
     help_opt_screen: "Schermo, rotazione, zoom, pixel, filtro, contatore FPS: regola l'immagine di questo gioco ancora prima di avviarlo.",
+    about_games: "Fonti dei giochi",
 };
 
 const PT: Ui = Ui {
@@ -2861,6 +2869,7 @@ const PT: Ui = Ui {
     lang_name_tr: "Turco",
     sec_in_game: "No jogo",
     help_opt_screen: "Tela, rotação, zoom, pixels, filtro, contador FPS: ajuste a imagem deste jogo antes mesmo de abri-lo.",
+    about_games: "Fontes de jogos",
 };
 
 const ZH: Ui = Ui {
@@ -3187,6 +3196,7 @@ const ZH: Ui = Ui {
     lang_name_tr: "土耳其语",
     sec_in_game: "游戏中",
     help_opt_screen: "显示、旋转、缩放、像素、滤镜、帧率显示：在启动之前就设置好这个游戏的画面。",
+    about_games: "游戏来源",
 };
 
 const TR: Ui = Ui {
@@ -3513,6 +3523,7 @@ const TR: Ui = Ui {
     lang_name_tr: "Türkçe",
     sec_in_game: "Oyun içi",
     help_opt_screen: "Ekran, döndürme, zoom, piksel, filtre, FPS sayacı: bu oyunun görüntüsünü daha açmadan ayarla.",
+    about_games: "Oyun kaynakları",
 };
 
 pub fn ui() -> &'static Ui {
