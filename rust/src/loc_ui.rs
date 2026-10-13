@@ -576,6 +576,8 @@ pub struct Ui {
     pub lang_name_pt: &'static str,
     pub lang_name_zh: &'static str,
     pub lang_name_tr: &'static str,
+    /// À propos, under the memory row when FlashNX has the whole memory: what that means, and what the Album would have given instead.
+    pub mem_full_note: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -761,7 +763,7 @@ const EN: Ui = Ui {
     about_engine: "Flash engine",
     about_icons: "Icons",
     about_memory: "Memory",
-    mem_full: "Full",
+    mem_full: "Full: application mode",
     mem_applet: "Limited: applet mode",
     move_items: "{} / {} items",
     lib_moved: "Library moved: {}",
@@ -903,6 +905,7 @@ const EN: Ui = Ui {
     lang_name_pt: "Portuguese",
     lang_name_zh: "Chinese",
     lang_name_tr: "Turkish",
+    mem_full_note: "FlashNX has the console's whole memory, so every game can run. Opened from the Album, it would only get the small share left to applets.",
 };
 
 const FR: Ui = Ui {
@@ -1088,7 +1091,7 @@ const FR: Ui = Ui {
     about_engine: "Moteur Flash",
     about_icons: "Icônes",
     about_memory: "Mémoire",
-    mem_full: "Complète",
+    mem_full: "Complète\u{a0}: mode application",
     mem_applet: "Limitée\u{a0}: mode applet",
     move_items: "{} / {} éléments",
     lib_moved: "Bibliothèque déplacée\u{a0}: {}",
@@ -1230,6 +1233,7 @@ const FR: Ui = Ui {
     lang_name_pt: "Portugais",
     lang_name_zh: "Chinois",
     lang_name_tr: "Turc",
+    mem_full_note: "FlashNX dispose de toute la mémoire de la console\u{a0}: chaque jeu peut se lancer. Ouvert depuis l'Album, il n'aurait que la petite part laissée aux applets.",
 };
 
 const ES: Ui = Ui {
@@ -1415,7 +1419,7 @@ const ES: Ui = Ui {
     about_engine: "Motor Flash",
     about_icons: "Iconos",
     about_memory: "Memoria",
-    mem_full: "Completa",
+    mem_full: "Completa: modo aplicación",
     mem_applet: "Limitada: modo applet",
     move_items: "{} / {} elementos",
     lib_moved: "Biblioteca movida: {}",
@@ -1557,6 +1561,7 @@ const ES: Ui = Ui {
     lang_name_pt: "Portugués",
     lang_name_zh: "Chino",
     lang_name_tr: "Turco",
+    mem_full_note: "FlashNX dispone de toda la memoria de la consola, así que cualquier juego puede iniciarse. Abierto desde el Álbum, solo tendría la pequeña parte que reciben los applets.",
 };
 
 const RU: Ui = Ui {
@@ -1742,7 +1747,7 @@ const RU: Ui = Ui {
     about_engine: "Движок Flash",
     about_icons: "Значки",
     about_memory: "Память",
-    mem_full: "Полная",
+    mem_full: "Полная: режим приложения",
     mem_applet: "Ограничена: режим апплета",
     move_items: "{} / {} объектов",
     lib_moved: "Библиотека перемещена ({})",
@@ -1884,6 +1889,7 @@ const RU: Ui = Ui {
     lang_name_pt: "Португальский",
     lang_name_zh: "Китайский",
     lang_name_tr: "Турецкий",
+    mem_full_note: "У FlashNX вся память консоли, поэтому запустится любая игра. Открытый из Альбома, он получил бы лишь небольшую долю, которую дают апплетам.",
 };
 
 const DE: Ui = Ui {
@@ -2069,7 +2075,7 @@ const DE: Ui = Ui {
     about_engine: "Flash-Engine",
     about_icons: "Symbole",
     about_memory: "Speicher",
-    mem_full: "Vollständig",
+    mem_full: "Vollständig: Anwendungsmodus",
     mem_applet: "Begrenzt: Applet-Modus",
     move_items: "{} / {} Einträge",
     lib_moved: "Bibliothek verschoben: {}",
@@ -2211,6 +2217,7 @@ const DE: Ui = Ui {
     lang_name_pt: "Portugiesisch",
     lang_name_zh: "Chinesisch",
     lang_name_tr: "Türkisch",
+    mem_full_note: "FlashNX hat den ganzen Speicher der Konsole, jedes Spiel kann also starten. Aus dem Album geöffnet, bekäme es nur den kleinen Anteil für Applets.",
 };
 
 const IT: Ui = Ui {
@@ -2396,7 +2403,7 @@ const IT: Ui = Ui {
     about_engine: "Motore Flash",
     about_icons: "Icone",
     about_memory: "Memoria",
-    mem_full: "Completa",
+    mem_full: "Completa: modalità applicazione",
     mem_applet: "Limitata: modalità applet",
     move_items: "{} / {} elementi",
     lib_moved: "Libreria spostata: {}",
@@ -2538,6 +2545,7 @@ const IT: Ui = Ui {
     lang_name_pt: "Portoghese",
     lang_name_zh: "Cinese",
     lang_name_tr: "Turco",
+    mem_full_note: "FlashNX ha tutta la memoria della console, quindi ogni gioco può avviarsi. Aperto dall'Album, avrebbe solo la piccola parte lasciata alle applet.",
 };
 
 const PT: Ui = Ui {
@@ -2723,7 +2731,7 @@ const PT: Ui = Ui {
     about_engine: "Motor Flash",
     about_icons: "Ícones",
     about_memory: "Memória",
-    mem_full: "Completa",
+    mem_full: "Completa: modo aplicativo",
     mem_applet: "Limitada: modo applet",
     move_items: "{} / {} itens",
     lib_moved: "Biblioteca movida: {}",
@@ -2865,6 +2873,7 @@ const PT: Ui = Ui {
     lang_name_pt: "Português",
     lang_name_zh: "Chinês",
     lang_name_tr: "Turco",
+    mem_full_note: "O FlashNX tem toda a memória do console, então qualquer jogo pode ser iniciado. Aberto pelo Álbum, ele teria só a pequena parte reservada aos applets.",
 };
 
 const ZH: Ui = Ui {
@@ -3050,7 +3059,7 @@ const ZH: Ui = Ui {
     about_engine: "Flash 引擎",
     about_icons: "图标",
     about_memory: "内存",
-    mem_full: "完整",
+    mem_full: "完整：应用程序模式",
     mem_applet: "受限：小程序模式",
     move_items: "{} / {} 项",
     lib_moved: "游戏库已移动（{}）",
@@ -3192,6 +3201,7 @@ const ZH: Ui = Ui {
     lang_name_pt: "葡萄牙语",
     lang_name_zh: "中文",
     lang_name_tr: "土耳其语",
+    mem_full_note: "FlashNX 拥有主机的全部内存，所有游戏都能运行。若从相册打开，它只能获得留给小程序的少量内存。",
 };
 
 const TR: Ui = Ui {
@@ -3377,7 +3387,7 @@ const TR: Ui = Ui {
     about_engine: "Flash motoru",
     about_icons: "Simgeler",
     about_memory: "Bellek",
-    mem_full: "Tam",
+    mem_full: "Tam: uygulama modu",
     mem_applet: "Sınırlı: applet modu",
     move_items: "{} / {} öğe",
     lib_moved: "Kütüphane taşındı: {}",
@@ -3519,6 +3529,7 @@ const TR: Ui = Ui {
     lang_name_pt: "Portekizce",
     lang_name_zh: "Çince",
     lang_name_tr: "Türkçe",
+    mem_full_note: "FlashNX konsolun tüm belleğine sahip, bu yüzden her oyun başlayabilir. Albüm'den açılsaydı yalnızca applet'lere ayrılan küçük payı alırdı.",
 };
 
 pub fn ui() -> &'static Ui {

@@ -1341,9 +1341,12 @@ fn about_pane(b: &mut SwitchRenderBackend, logo: (u32, u32, u32)) {
         Row::new(Icon::HardDrive, u.about_memory).value(if applet { u.mem_applet } else { u.mem_full }),
     ];
     let (_, y, _) = b.settings_block(y + 14.0, &rows, None, pane_glide(SetSection::About));
-    // Said here before a launch fails, not only after.
+    // Said here before a launch fails, not only after; and with the whole
+    // memory, what that word means (the row alone read as jargon).
     if applet {
         b.settings_note(y + 8.0, lc.applet_notice, 3);
+    } else {
+        b.settings_note(y + 8.0, u.mem_full_note, 3);
     }
 }
 
