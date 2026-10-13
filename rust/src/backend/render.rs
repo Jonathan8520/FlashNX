@@ -12295,6 +12295,17 @@ impl SwitchRenderBackend {
     /// back to TOUS from a shelf. Over a search that matched nothing, A, + and
     /// Y have nothing to act on, and only the two ways out are left.
     fn kit_home_footer(&mut self, empty: bool) {
+        // Still while the content slides in from a shelf change, like the band
+        // under the tabs: only the games change place on ZL / ZR, and a footer
+        // sliding out and back in with them said the whole page had changed.
+        let saved = if HOME_HEADER_PINNED.load(Ordering::Relaxed) { Some(self.ui_transform_take()) } else { None };
+        self.kit_home_footer_band(empty);
+        if let Some(t) = saved {
+            self.ui_transform_put(t);
+        }
+    }
+
+    fn kit_home_footer_band(&mut self, empty: bool) {
         let vw = self.dimensions.width as f32;
         let vh = self.dimensions.height as f32;
         self.kit_footer_band();
