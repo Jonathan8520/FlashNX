@@ -932,10 +932,14 @@ fn handle_profiles_input(s: &mut State, button: &str, mut selection: usize) {
         }
         _ if matches!(button, "B" | "Minus") || toward_rail(button) => {
             // From the copy list, back to the community list, on the copy row.
+            // Both lists are the same screen, which `input` would hear as a
+            // step of the cursor (or as nothing, on the same row): going back
+            // sounds like going back, as the fresh Left already did.
             if s.copy_mode {
                 s.copy_mode = false;
                 s.matches = std::mem::take(&mut s.saved_matches);
                 s.screen = Screen::Profiles { selection: s.matches.len().max(1) - 1 };
+                crate::sfx::choose(crate::sfx::Sfx::Back);
                 return;
             }
             s.screen = Screen::Menu { selection: MENU_APPLY };

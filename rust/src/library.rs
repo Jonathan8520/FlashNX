@@ -6323,11 +6323,14 @@ fn handle_profile_list_input(s: &mut State, button: &str, game_idx: usize, mut s
         }
         _ if matches!(button, "B" | "Minus") || toward_options_rail(button) => {
             // From the copy list, back to the community list, on the copy row.
+            // The same screen for `sfx::after_input`, silent when the cursor
+            // lands on the row number it left: going back says so itself.
             if s.profile_copy_mode {
                 s.profile_copy_mode = false;
                 s.profile_matches = std::mem::take(&mut s.profile_saved_matches);
                 let last = s.profile_matches.len().max(1) - 1;
                 s.screen = Screen::ProfileList { game_idx, selection: last };
+                crate::sfx::choose(crate::sfx::Sfx::Back);
                 return;
             }
             goto_touches_menu(s, game_idx, menu::MENU_APPLY);
