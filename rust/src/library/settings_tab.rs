@@ -1238,10 +1238,14 @@ fn language_pane(
     let top = b.settings_title(u.row_language, None);
     let codes: std::vec::Vec<std::string::String> =
         crate::loc::PICKER_LANGS.iter().map(|l| l.code().to_uppercase()).collect();
-    let langs: std::vec::Vec<(&str, &str)> = crate::loc::PICKER_LANGS
+    // Each language under its own name, and under that its name in the
+    // interface's language (the way the console's own picker writes them):
+    // flags were the other idea, but a language is not a country (English,
+    // Portuguese and Chinese each belong to several).
+    let langs: std::vec::Vec<(&str, &str, &str)> = crate::loc::PICKER_LANGS
         .iter()
         .zip(codes.iter())
-        .map(|(l, c)| (c.as_str(), l.picker_name()))
+        .map(|(l, c)| (c.as_str(), l.picker_name(), l.name_in_ui()))
         .collect();
     let active = crate::loc::current().index();
     let (c, y) = b.settings_languages(top + 8.0, &langs, active, focus, u.lang_current);

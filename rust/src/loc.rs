@@ -115,6 +115,24 @@ impl Lang {
         self.native_name()
     }
 
+    /// This language's name in the language of the interface ("Allemand"
+    /// for German in a French interface), written under its own name in the
+    /// picker so a script a player cannot read still says what it is.
+    pub fn name_in_ui(self) -> &'static str {
+        let u = crate::loc_ui::ui();
+        match self {
+            Lang::En => u.lang_name_en,
+            Lang::Fr => u.lang_name_fr,
+            Lang::Es => u.lang_name_es,
+            Lang::Ru => u.lang_name_ru,
+            Lang::De => u.lang_name_de,
+            Lang::It => u.lang_name_it,
+            Lang::Pt => u.lang_name_pt,
+            Lang::Zh => u.lang_name_zh,
+            Lang::Tr => u.lang_name_tr,
+        }
+    }
+
     pub fn native_name(self) -> &'static str {
         match self {
             Lang::En => "English",

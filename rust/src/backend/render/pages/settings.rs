@@ -443,7 +443,7 @@ impl SwitchRenderBackend {
     pub(crate) fn settings_languages(
         &mut self,
         top: f32,
-        langs: &[(&str, &str)],
+        langs: &[(&str, &str, &str)],
         active: usize,
         focus: Option<usize>,
         current_caption: &str,
@@ -470,7 +470,7 @@ impl SwitchRenderBackend {
             self.kit_focus_pill(hx, hy, TW, TH);
         }
         let mut cells = std::vec::Vec::with_capacity(langs.len());
-        for (i, (code, name)) in langs.iter().enumerate() {
+        for (i, (code, name, in_ui)) in langs.iter().enumerate() {
             let (x, y) = pos(i);
             let cy = y + TH * 0.5;
             let lit = focus == Some(i) || i == active;
@@ -486,6 +486,12 @@ impl SwitchRenderBackend {
                 self.kit_icon(nx, cy + 14.0, 14.0, Icon::CircleCheck, col::OK);
                 let c = self.kit_fit(current_caption, size::CAPTION, nmax - 20.0);
                 self.kit_text_mid(nx + 20.0, cy + 14.0, size::CAPTION, &c, col::TEXT3);
+            } else if !in_ui.is_empty() && in_ui.to_lowercase() != name.to_lowercase() {
+                // Its name in the interface's language under its own, where
+                // the two differ ("Italiano" is the same word in Spanish).
+                self.kit_text_mid(nx, cy - 10.0, size::ROW, &n, if lit { col::TEXT } else { col::TEXT2 });
+                let t = self.kit_fit(in_ui, size::CAPTION, nmax);
+                self.kit_text_mid(nx, cy + 14.0, size::CAPTION, &t, col::TEXT3);
             } else {
                 self.kit_text_mid(nx, cy, size::ROW, &n, if lit { col::TEXT } else { col::TEXT2 });
             }

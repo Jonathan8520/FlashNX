@@ -565,6 +565,17 @@ pub struct Ui {
     /// A percentage, {} = the number: the zoom's rows and the framing's header, an import's progress
     /// (`loc_ui::percent`). The language's own way: a no-break space before '%', none in Chinese, '%' first in Turkish.
     pub percent: &'static str,
+    /// The nine languages named in this table's language, written under each language's own
+    /// name in the language picker (Réglages › Langue), as the console's own picker does.
+    pub lang_name_en: &'static str,
+    pub lang_name_fr: &'static str,
+    pub lang_name_es: &'static str,
+    pub lang_name_ru: &'static str,
+    pub lang_name_de: &'static str,
+    pub lang_name_it: &'static str,
+    pub lang_name_pt: &'static str,
+    pub lang_name_zh: &'static str,
+    pub lang_name_tr: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -883,6 +894,15 @@ const EN: Ui = Ui {
     loading_covers: "Looking for covers…",
     loading_cover_dl: "Downloading the cover…",
     percent: "{}\u{a0}%",
+    lang_name_en: "English",
+    lang_name_fr: "French",
+    lang_name_es: "Spanish",
+    lang_name_ru: "Russian",
+    lang_name_de: "German",
+    lang_name_it: "Italian",
+    lang_name_pt: "Portuguese",
+    lang_name_zh: "Chinese",
+    lang_name_tr: "Turkish",
 };
 
 const FR: Ui = Ui {
@@ -1201,6 +1221,15 @@ const FR: Ui = Ui {
     loading_covers: "Recherche de jaquettes…",
     loading_cover_dl: "Téléchargement de la jaquette…",
     percent: "{}\u{a0}%",
+    lang_name_en: "Anglais",
+    lang_name_fr: "Français",
+    lang_name_es: "Espagnol",
+    lang_name_ru: "Russe",
+    lang_name_de: "Allemand",
+    lang_name_it: "Italien",
+    lang_name_pt: "Portugais",
+    lang_name_zh: "Chinois",
+    lang_name_tr: "Turc",
 };
 
 const ES: Ui = Ui {
@@ -1519,6 +1548,15 @@ const ES: Ui = Ui {
     loading_covers: "Buscando portadas…",
     loading_cover_dl: "Descargando la portada…",
     percent: "{}\u{a0}%",
+    lang_name_en: "Inglés",
+    lang_name_fr: "Francés",
+    lang_name_es: "Español",
+    lang_name_ru: "Ruso",
+    lang_name_de: "Alemán",
+    lang_name_it: "Italiano",
+    lang_name_pt: "Portugués",
+    lang_name_zh: "Chino",
+    lang_name_tr: "Turco",
 };
 
 const RU: Ui = Ui {
@@ -1837,6 +1875,15 @@ const RU: Ui = Ui {
     loading_covers: "Поиск обложек…",
     loading_cover_dl: "Загрузка обложки…",
     percent: "{}\u{a0}%",
+    lang_name_en: "Английский",
+    lang_name_fr: "Французский",
+    lang_name_es: "Испанский",
+    lang_name_ru: "Русский",
+    lang_name_de: "Немецкий",
+    lang_name_it: "Итальянский",
+    lang_name_pt: "Португальский",
+    lang_name_zh: "Китайский",
+    lang_name_tr: "Турецкий",
 };
 
 const DE: Ui = Ui {
@@ -2155,6 +2202,15 @@ const DE: Ui = Ui {
     loading_covers: "Suche nach Covern…",
     loading_cover_dl: "Cover wird geladen…",
     percent: "{}\u{a0}%",
+    lang_name_en: "Englisch",
+    lang_name_fr: "Französisch",
+    lang_name_es: "Spanisch",
+    lang_name_ru: "Russisch",
+    lang_name_de: "Deutsch",
+    lang_name_it: "Italienisch",
+    lang_name_pt: "Portugiesisch",
+    lang_name_zh: "Chinesisch",
+    lang_name_tr: "Türkisch",
 };
 
 const IT: Ui = Ui {
@@ -2473,6 +2529,15 @@ const IT: Ui = Ui {
     loading_covers: "Ricerca delle copertine…",
     loading_cover_dl: "Download della copertina…",
     percent: "{}\u{a0}%",
+    lang_name_en: "Inglese",
+    lang_name_fr: "Francese",
+    lang_name_es: "Spagnolo",
+    lang_name_ru: "Russo",
+    lang_name_de: "Tedesco",
+    lang_name_it: "Italiano",
+    lang_name_pt: "Portoghese",
+    lang_name_zh: "Cinese",
+    lang_name_tr: "Turco",
 };
 
 const PT: Ui = Ui {
@@ -2791,6 +2856,15 @@ const PT: Ui = Ui {
     loading_covers: "Procurando capas…",
     loading_cover_dl: "Baixando a capa…",
     percent: "{}\u{a0}%",
+    lang_name_en: "Inglês",
+    lang_name_fr: "Francês",
+    lang_name_es: "Espanhol",
+    lang_name_ru: "Russo",
+    lang_name_de: "Alemão",
+    lang_name_it: "Italiano",
+    lang_name_pt: "Português",
+    lang_name_zh: "Chinês",
+    lang_name_tr: "Turco",
 };
 
 const ZH: Ui = Ui {
@@ -3109,6 +3183,15 @@ const ZH: Ui = Ui {
     loading_covers: "正在查找封面…",
     loading_cover_dl: "正在下载封面…",
     percent: "{}%",
+    lang_name_en: "英语",
+    lang_name_fr: "法语",
+    lang_name_es: "西班牙语",
+    lang_name_ru: "俄语",
+    lang_name_de: "德语",
+    lang_name_it: "意大利语",
+    lang_name_pt: "葡萄牙语",
+    lang_name_zh: "中文",
+    lang_name_tr: "土耳其语",
 };
 
 const TR: Ui = Ui {
@@ -3427,6 +3510,15 @@ const TR: Ui = Ui {
     loading_covers: "Kapaklar aranıyor…",
     loading_cover_dl: "Kapak indiriliyor…",
     percent: "%{}",
+    lang_name_en: "İngilizce",
+    lang_name_fr: "Fransızca",
+    lang_name_es: "İspanyolca",
+    lang_name_ru: "Rusça",
+    lang_name_de: "Almanca",
+    lang_name_it: "İtalyanca",
+    lang_name_pt: "Portekizce",
+    lang_name_zh: "Çince",
+    lang_name_tr: "Türkçe",
 };
 
 pub fn ui() -> &'static Ui {
