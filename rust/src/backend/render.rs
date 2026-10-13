@@ -1783,7 +1783,7 @@ pub(crate) use kit::sheet::{cascade_step, Sheet, Side, OPTIONS_CHILD_W, OPTIONS_
 pub(crate) use pages::importer::{
     imp_amount, imp_count, imp_date, imp_n_of, imp_quote, imp_release, imp_size, imp_transfer_line, imp_year,
     import_sel_rect,
-    FilesPage, ImportProgress, ImportStep, ImporterHome, SourceRow, StepState,
+    FilesPage, ImportProgress, ImportStep, ImporterHome, ShelfAction, ShelfTile, ShelfView, SourceRow, StepState,
 };
 pub(crate) use pages::flashpoint::{FpDetailsView, FpGrid, FpState};
 pub(crate) use kit::sheet::SHEET_MARGIN;
@@ -6962,6 +6962,24 @@ fn thumb_free(t: ThumbTex) {
 /// driver that gives out past about 4000.
 pub fn thumb_cache_clear() {
     let gone = thumb_cache().lock().map(|mut c| std::mem::take(&mut *c)).unwrap_or_default();
+    for (_, t) in gone {
+        thumb_free(t);
+    }
+}
+
+/// Every cached logo let go of but those whose address is in `keep` (the
+/// importer's shelves' screenshots, so the way back to it does not load them
+/// again).
+pub fn thumb_cache_clear_except(keep: &[std::string::String]) {
+    let gone: std::vec::Vec<(std::string::String, ThumbTex)> = match thumb_cache().lock() {
+        Ok(mut c) => {
+            let (kept, gone): (std::vec::Vec<_>, std::vec::Vec<_>) =
+                std::mem::take(&mut *c).into_iter().partition(|(u, _)| keep.iter().any(|k| k == u));
+            *c = kept;
+            gone
+        }
+        Err(_) => std::vec::Vec::new(),
+    };
     for (_, t) in gone {
         thumb_free(t);
     }

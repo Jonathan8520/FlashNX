@@ -312,14 +312,10 @@ pub struct Ui {
     pub dir_current: &'static str,
     /// Folder browser: A on a folder inside the library.
     pub dir_inside_lib: &'static str,
-    /// Importer: the Flashpoint card's title, the Flashpoint keyboard's header, and the error page's X hint.
+    /// Importer: the search button in the tab bar, the Flashpoint keyboard's header, and the error page's X hint.
     pub imp_fp_title: &'static str,
-    /// Under the Flashpoint card's title: what the search gives.
-    pub imp_fp_sub: &'static str,
-    /// Importer: the add card's title, and the address keyboard's header.
+    /// Importer: the add button in the "Mes sources" band, and the address keyboard's header.
     pub imp_add_title: &'static str,
-    /// Under the add card's title: which addresses work.
-    pub imp_add_sub: &'static str,
     /// The order of the saved sources, as the header and the sort window name it.
     /// By date added, the newest first.
     pub imp_src_newest: &'static str,
@@ -581,6 +577,28 @@ pub struct Ui {
     pub help_opt_screen: &'static str,
     /// À propos: the row naming where the importer's games and covers come from (the value is the projects' own names).
     pub about_games: &'static str,
+    /// The importer's first shelf: the games of a studio drawn at random.
+    pub disc_studio: &'static str,
+    /// Right of the studio shelf's line: what drawing again does.
+    pub disc_studio_note: &'static str,
+    /// The importer's second shelf: games drawn at random from the whole archive.
+    pub disc_lucky: &'static str,
+    /// Right of the random shelf's line: what drawing again does.
+    pub disc_lucky_note: &'static str,
+    /// The studio shelf's first action: all of the studio's games.
+    pub disc_see_all: &'static str,
+    /// Both shelves' second action: another studio, or another batch of games.
+    pub disc_again: &'static str,
+    /// Where the two shelves were, when neither could be fetched.
+    pub disc_unavailable: &'static str,
+    /// The random shelf's first action: a bigger draw on the results page.
+    pub disc_see_more: &'static str,
+    /// Under the see-more tile's icon.
+    pub disc_more_games: &'static str,
+    /// Under the studio shelf's draw-again tile's icon.
+    pub disc_other_studio: &'static str,
+    /// Under the random shelf's draw-again tile's icon.
+    pub disc_other_batch: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -777,9 +795,7 @@ const EN: Ui = Ui {
     dir_current: "Current folder",
     dir_inside_lib: "This folder is inside your library: choose another one.",
     imp_fp_title: "Search Flashpoint",
-    imp_fp_sub: "By name, with cover art and direct download",
     imp_add_title: "Add an address",
-    imp_add_sub: "An archive.org page or a direct link to a .swf",
     imp_src_newest: "Recently added",
     imp_src_oldest: "First added",
     imp_name_az: "Name, A to Z",
@@ -908,6 +924,17 @@ const EN: Ui = Ui {
     sec_in_game: "In game",
     help_opt_screen: "Display, rotation, zoom, pixels, filter, FPS counter: set this game's picture before you even start it.",
     about_games: "Game sources",
+    disc_studio: "A random studio",
+    disc_studio_note: "Draw again for another studio",
+    disc_lucky: "Random picks",
+    disc_lucky_note: "Draw again for other games",
+    disc_see_all: "See all",
+    disc_again: "Draw again",
+    disc_unavailable: "Flashpoint suggestions are unavailable for now",
+    disc_see_more: "See more",
+    disc_more_games: "more games",
+    disc_other_studio: "another studio",
+    disc_other_batch: "another batch",
 };
 
 const FR: Ui = Ui {
@@ -1104,9 +1131,7 @@ const FR: Ui = Ui {
     dir_current: "Dossier actuel",
     dir_inside_lib: "Ce dossier est dans ta bibliothèque\u{a0}: choisis-en un autre.",
     imp_fp_title: "Chercher sur Flashpoint",
-    imp_fp_sub: "Par nom, avec jaquette et téléchargement direct",
     imp_add_title: "Ajouter une adresse",
-    imp_add_sub: "Page archive.org ou lien direct vers un .swf",
     imp_src_newest: "Dernières ajoutées",
     imp_src_oldest: "Premières ajoutées",
     imp_name_az: "Nom, de A à Z",
@@ -1235,6 +1260,17 @@ const FR: Ui = Ui {
     sec_in_game: "En jeu",
     help_opt_screen: "Affichage, rotation, zoom, pixels, filtre, compteur FPS\u{a0}: règle l'image de ce jeu avant même de le lancer.",
     about_games: "Sources de jeux",
+    disc_studio: "Un studio au hasard",
+    disc_studio_note: "Relance pour un autre studio",
+    disc_lucky: "Au hasard",
+    disc_lucky_note: "Relance pour d'autres jeux",
+    disc_see_all: "Voir tout",
+    disc_again: "Relancer",
+    disc_unavailable: "Les découvertes Flashpoint sont indisponibles pour l'instant",
+    disc_see_more: "Voir plus",
+    disc_more_games: "d'autres jeux",
+    disc_other_studio: "autre studio",
+    disc_other_batch: "un autre lot",
 };
 
 const ES: Ui = Ui {
@@ -1431,9 +1467,7 @@ const ES: Ui = Ui {
     dir_current: "Carpeta actual",
     dir_inside_lib: "Esta carpeta está dentro de tu biblioteca: elige otra.",
     imp_fp_title: "Buscar en Flashpoint",
-    imp_fp_sub: "Por nombre, con portada y descarga directa",
     imp_add_title: "Añadir una dirección",
-    imp_add_sub: "Página de archive.org o enlace directo a un .swf",
     imp_src_newest: "Añadidas recientemente",
     imp_src_oldest: "Añadidas primero",
     imp_name_az: "Nombre, de la A a la Z",
@@ -1562,6 +1596,17 @@ const ES: Ui = Ui {
     sec_in_game: "En el juego",
     help_opt_screen: "Pantalla, rotación, zoom, píxeles, filtro, contador FPS: ajusta la imagen de este juego antes incluso de iniciarlo.",
     about_games: "Fuentes de juegos",
+    disc_studio: "Un estudio al azar",
+    disc_studio_note: "Vuelve a sortear para otro estudio",
+    disc_lucky: "Al azar",
+    disc_lucky_note: "Vuelve a sortear para otros juegos",
+    disc_see_all: "Ver todo",
+    disc_again: "Otra vez",
+    disc_unavailable: "Las sugerencias de Flashpoint no están disponibles por ahora",
+    disc_see_more: "Ver más",
+    disc_more_games: "más juegos",
+    disc_other_studio: "otro estudio",
+    disc_other_batch: "otro lote",
 };
 
 const RU: Ui = Ui {
@@ -1758,9 +1803,7 @@ const RU: Ui = Ui {
     dir_current: "Текущая папка",
     dir_inside_lib: "Эта папка внутри твоей библиотеки: выбери другую.",
     imp_fp_title: "Искать во Flashpoint",
-    imp_fp_sub: "По названию, с обложкой и прямой загрузкой",
     imp_add_title: "Добавить адрес",
-    imp_add_sub: "Страница archive.org или прямая ссылка на .swf",
     imp_src_newest: "Недавно добавленные",
     imp_src_oldest: "Давно добавленные",
     imp_name_az: "Имя, от А до Я",
@@ -1889,6 +1932,17 @@ const RU: Ui = Ui {
     sec_in_game: "В игре",
     help_opt_screen: "Экран, поворот, масштаб, пиксели, фильтр, счётчик FPS: настрой картинку этой игры ещё до её запуска.",
     about_games: "Источники игр",
+    disc_studio: "Случайная студия",
+    disc_studio_note: "«Ещё раз» покажет другую студию",
+    disc_lucky: "Наугад",
+    disc_lucky_note: "«Ещё раз» покажет другие игры",
+    disc_see_all: "Все игры",
+    disc_again: "Ещё раз",
+    disc_unavailable: "Подборки Flashpoint пока недоступны",
+    disc_see_more: "Ещё игры",
+    disc_more_games: "больше игр",
+    disc_other_studio: "другая студия",
+    disc_other_batch: "другие игры",
 };
 
 const DE: Ui = Ui {
@@ -2085,9 +2139,7 @@ const DE: Ui = Ui {
     dir_current: "Aktueller Ordner",
     dir_inside_lib: "Dieser Ordner liegt in deiner Bibliothek: Wähle einen anderen.",
     imp_fp_title: "In Flashpoint suchen",
-    imp_fp_sub: "Nach Name, mit Cover und direktem Download",
     imp_add_title: "Adresse hinzufügen",
-    imp_add_sub: "archive.org-Seite oder direkter Link zu einer .swf",
     imp_src_newest: "Zuletzt hinzugefügt",
     imp_src_oldest: "Zuerst hinzugefügt",
     imp_name_az: "Name, von A bis Z",
@@ -2216,6 +2268,17 @@ const DE: Ui = Ui {
     sec_in_game: "Im Spiel",
     help_opt_screen: "Anzeige, Drehung, Zoom, Pixel, Filter, FPS-Anzeige: Stell das Bild dieses Spiels ein, noch bevor du es startest.",
     about_games: "Spielequellen",
+    disc_studio: "Ein Studio per Zufall",
+    disc_studio_note: "Neu ziehen für ein anderes Studio",
+    disc_lucky: "Zufallsauswahl",
+    disc_lucky_note: "Neu ziehen für andere Spiele",
+    disc_see_all: "Alle ansehen",
+    disc_again: "Neu ziehen",
+    disc_unavailable: "Flashpoint-Vorschläge sind gerade nicht verfügbar",
+    disc_see_more: "Mehr ansehen",
+    disc_more_games: "weitere Spiele",
+    disc_other_studio: "anderes Studio",
+    disc_other_batch: "neue Auswahl",
 };
 
 const IT: Ui = Ui {
@@ -2412,9 +2475,7 @@ const IT: Ui = Ui {
     dir_current: "Cartella attuale",
     dir_inside_lib: "Questa cartella è dentro la tua libreria: scegline un'altra.",
     imp_fp_title: "Cerca su Flashpoint",
-    imp_fp_sub: "Per nome, con copertina e download diretto",
     imp_add_title: "Aggiungi un indirizzo",
-    imp_add_sub: "Pagina archive.org o link diretto a un .swf",
     imp_src_newest: "Aggiunte di recente",
     imp_src_oldest: "Aggiunte per prime",
     imp_name_az: "Nome, dalla A alla Z",
@@ -2543,6 +2604,17 @@ const IT: Ui = Ui {
     sec_in_game: "In gioco",
     help_opt_screen: "Schermo, rotazione, zoom, pixel, filtro, contatore FPS: regola l'immagine di questo gioco ancora prima di avviarlo.",
     about_games: "Fonti dei giochi",
+    disc_studio: "Uno studio a caso",
+    disc_studio_note: "Rilancia per un altro studio",
+    disc_lucky: "A caso",
+    disc_lucky_note: "Rilancia per altri giochi",
+    disc_see_all: "Vedi tutti",
+    disc_again: "Rilancia",
+    disc_unavailable: "I suggerimenti di Flashpoint non sono disponibili per ora",
+    disc_see_more: "Vedi altri",
+    disc_more_games: "altri giochi",
+    disc_other_studio: "altro studio",
+    disc_other_batch: "un altro lotto",
 };
 
 const PT: Ui = Ui {
@@ -2739,9 +2811,7 @@ const PT: Ui = Ui {
     dir_current: "Pasta atual",
     dir_inside_lib: "Esta pasta está dentro da sua biblioteca: escolha outra.",
     imp_fp_title: "Pesquisar no Flashpoint",
-    imp_fp_sub: "Por nome, com capa e download direto",
     imp_add_title: "Adicionar um endereço",
-    imp_add_sub: "Página do archive.org ou link direto para um .swf",
     imp_src_newest: "Adicionadas recentemente",
     imp_src_oldest: "Adicionadas primeiro",
     imp_name_az: "Nome, de A a Z",
@@ -2870,6 +2940,17 @@ const PT: Ui = Ui {
     sec_in_game: "No jogo",
     help_opt_screen: "Tela, rotação, zoom, pixels, filtro, contador FPS: ajuste a imagem deste jogo antes mesmo de abri-lo.",
     about_games: "Fontes de jogos",
+    disc_studio: "Um estúdio ao acaso",
+    disc_studio_note: "Sorteie de novo para outro estúdio",
+    disc_lucky: "Ao acaso",
+    disc_lucky_note: "Sorteie de novo para outros jogos",
+    disc_see_all: "Ver todos",
+    disc_again: "Sortear de novo",
+    disc_unavailable: "As sugestões do Flashpoint estão indisponíveis por enquanto",
+    disc_see_more: "Ver mais",
+    disc_more_games: "mais jogos",
+    disc_other_studio: "outro estúdio",
+    disc_other_batch: "outro lote",
 };
 
 const ZH: Ui = Ui {
@@ -3066,9 +3147,7 @@ const ZH: Ui = Ui {
     dir_current: "当前文件夹",
     dir_inside_lib: "这个文件夹在你的游戏库内：请选择其他文件夹。",
     imp_fp_title: "在 Flashpoint 中搜索",
-    imp_fp_sub: "按名称搜索，附带封面，可直接下载",
     imp_add_title: "添加地址",
-    imp_add_sub: "archive.org 页面或 .swf 直链",
     imp_src_newest: "最近添加",
     imp_src_oldest: "最早添加",
     imp_name_az: "名称，A 到 Z",
@@ -3197,6 +3276,17 @@ const ZH: Ui = Ui {
     sec_in_game: "游戏中",
     help_opt_screen: "显示、旋转、缩放、像素、滤镜、帧率显示：在启动之前就设置好这个游戏的画面。",
     about_games: "游戏来源",
+    disc_studio: "随机工作室",
+    disc_studio_note: "再抽一次可换工作室",
+    disc_lucky: "随机推荐",
+    disc_lucky_note: "再抽一次可换一批游戏",
+    disc_see_all: "查看全部",
+    disc_again: "再抽一次",
+    disc_unavailable: "暂时无法获取 Flashpoint 推荐",
+    disc_see_more: "查看更多",
+    disc_more_games: "更多游戏",
+    disc_other_studio: "换个工作室",
+    disc_other_batch: "换一批",
 };
 
 const TR: Ui = Ui {
@@ -3393,9 +3483,7 @@ const TR: Ui = Ui {
     dir_current: "Geçerli klasör",
     dir_inside_lib: "Bu klasör kütüphanenin içinde: başka bir klasör seç.",
     imp_fp_title: "Flashpoint'te ara",
-    imp_fp_sub: "Ada göre, kapaklı ve doğrudan indirmeli",
     imp_add_title: "Adres ekle",
-    imp_add_sub: "archive.org sayfası veya bir .swf'ye doğrudan bağlantı",
     imp_src_newest: "Son eklenenler",
     imp_src_oldest: "İlk eklenenler",
     imp_name_az: "Ad, A'dan Z'ye",
@@ -3524,6 +3612,17 @@ const TR: Ui = Ui {
     sec_in_game: "Oyun içi",
     help_opt_screen: "Ekran, döndürme, zoom, piksel, filtre, FPS sayacı: bu oyunun görüntüsünü daha açmadan ayarla.",
     about_games: "Oyun kaynakları",
+    disc_studio: "Rastgele bir stüdyo",
+    disc_studio_note: "Başka bir stüdyo için yeniden çek",
+    disc_lucky: "Rastgele",
+    disc_lucky_note: "Başka oyunlar için yeniden çek",
+    disc_see_all: "Tümünü gör",
+    disc_again: "Yeniden çek",
+    disc_unavailable: "Flashpoint önerileri şu an kullanılamıyor",
+    disc_see_more: "Daha fazla",
+    disc_more_games: "daha çok oyun",
+    disc_other_studio: "başka stüdyo",
+    disc_other_batch: "başka oyunlar",
 };
 
 pub fn ui() -> &'static Ui {

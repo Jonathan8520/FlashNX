@@ -20,6 +20,9 @@ use std::io::{Read, Seek, SeekFrom};
 const SEARCH_BASE: &str = "https://db-api.unstable.life/search";
 const GET_BASE: &str = "https://db-api.unstable.life/get";
 
+/// Games a search keeps at most (`parse_search`).
+pub const SEARCH_MAX: usize = 60;
+
 /// Public download URL for a game's GameZIP — by UUID alone, no auth.
 pub fn get_url(id: &str) -> std::string::String {
     std::format!("{}?id={}", GET_BASE, id)
@@ -101,7 +104,7 @@ pub fn parse_description(bytes: &[u8]) -> std::string::String {
 pub fn parse_search(
     bytes: &[u8],
 ) -> Result<std::vec::Vec<flashpoint::CatalogEntry>, std::string::String> {
-    const MAX: usize = 60;
+    const MAX: usize = SEARCH_MAX;
     let json: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| {
         net::log(&std::format!("gamezip: search JSON parse failed: {}\n", e));
         crate::loc::err_json(&e.to_string())

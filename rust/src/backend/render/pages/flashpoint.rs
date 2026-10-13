@@ -215,7 +215,13 @@ impl SwitchRenderBackend {
             }
             match self.thumb_for(g.urls[i]) {
                 Some(ThumbTex::Image { tex, w: tw, h: th, amb }) => {
-                    self.kit_cover_reveal(x, y, w, h, tex, tw, th, amb, b, 1.0);
+                    // At rest as filled as the 15 % rule allows, the rule the
+                    // Play grid follows, so a cover looks the same on both: a
+                    // banner logo rested cropped to a few of its letters here
+                    // ("Walk the Stork" showed "the S"). The selected tile
+                    // opens the rest of the way to the whole image.
+                    let rest = super::super::kit::cover::rest_t(tw, th, w0, h0);
+                    self.kit_cover_reveal(x, y, w, h, tex, tw, th, amb, rest + (1.0 - rest) * b, 1.0);
                 }
                 Some(ThumbTex::Failed) => {
                     // No logo: the tile carries the game's name, as a game
@@ -338,7 +344,7 @@ impl SwitchRenderBackend {
 
 /// A quiet colour of its own for a tile whose logo did not come, from what it
 /// shows, so two such tiles side by side do not look like one.
-fn tile_tint(key: &str) -> u32 {
+pub(super) fn tile_tint(key: &str) -> u32 {
     const TINTS: [u32; 6] = [0x5B_7F_D9, 0x8C_7C_CF, 0x4F_A8_9C, 0xC2_8A_4A, 0xB8_5E_7E, 0x6F_9A_4F];
     TINTS[(tile_key(key) % TINTS.len() as u64) as usize]
 }

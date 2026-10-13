@@ -1,15 +1,16 @@
 //! The IMPORTER tab (Importer.dc.html) and the pages it opens: an archive's
 //! games, the import in progress, and what went wrong.
 //!
-//! The home is two big actions side by side (search Flashpoint, add an
-//! address), each saying what it does, then "Mes sources" with how many there
-//! are and the order in force, then one row per saved source: a tile saying
-//! what kind it is, its name over its site, how much of it is on the card as a
-//! bar and a count, and a check once it is all there or a chevron while there
-//! is more to get. The two actions used to be list rows with "Flashpoint" and
-//! "archive.org" in the value column, which read as settings, and the sources
-//! had no way to tell an archive (A opens its list) from a single file (A
-//! downloads it).
+//! The home ("Importer · À découvrir", board C1) is a page that scrolls: two
+//! shelves of Flashpoint games, the studio of the day and a draw in a genre
+//! (six screenshots each, then the shelf's action), then "Mes sources" with
+//! how many there are, the add button and the order in force, then one row
+//! per saved source: a tile saying what kind it is, its name over its site,
+//! how much of it is on the card as a bar and a count, and a check once it is
+//! all there or a chevron while there is more to get. The search is a button
+//! in the tab bar, run from anywhere by X. The page used to open on two big
+//! cards (search, add an address): it said what could be done, but gave
+//! nothing to want.
 
 use super::super::kit::icons::Icon;
 use super::super::kit::list::Row;
@@ -176,9 +177,44 @@ pub(crate) struct SourceRow<'a> {
     pub favorite: bool,
 }
 
-/// The importer home as data. `selection` counts the two cards first (0 =
-/// Flashpoint, 1 = add an address), then the sources; `scroll` counts source
-/// rows only, since the cards never scroll away.
+/// One game on a discovery shelf.
+pub(crate) struct ShelfTile<'a> {
+    pub title: &'a str,
+    /// Its screenshot's address (`discover::screenshot_url`).
+    pub thumb: &'a str,
+    /// On the card already: the tick, and A plays it.
+    pub installed: bool,
+}
+
+/// A discovery shelf of the importer home: its line (what it is, which
+/// studio or genre, a word on how it changes), six games, then its action.
+pub(crate) struct ShelfView<'a> {
+    /// On the page (see `library::Shelf::shown`).
+    pub shown: bool,
+    /// Its search is on its way: waiting tiles.
+    pub loading: bool,
+    pub title: &'a str,
+    pub sub: &'a str,
+    pub note: &'a str,
+    pub tiles: &'a [ShelfTile<'a>],
+    /// Its two actions, after its games: see all (or more), draw again.
+    pub actions: [ShelfAction<'a>; 2],
+}
+
+/// One of a shelf's two action tiles: what it does (the name under it), the
+/// word under its icon, its icon, and whether its icon is gold (draw again,
+/// the tile that changes the shelf, as the dice was in the mockup).
+pub(crate) struct ShelfAction<'a> {
+    pub label: &'a str,
+    pub sub: &'a str,
+    pub icon: Icon,
+    pub gold: bool,
+}
+
+/// The importer home as data ("Importer · À découvrir", board C1).
+/// `selection` counts the studio's seven tiles, the draw's seven, the add
+/// button, then the sources (`library::IMPORTER_PINNED_ROWS`); `scroll` is
+/// the page's, in pixels.
 pub(crate) struct ImporterHome<'a> {
     pub rows: &'a [SourceRow<'a>],
     pub selection: usize,
@@ -188,14 +224,13 @@ pub(crate) struct ImporterHome<'a> {
     pub total: usize,
     /// The order in force, as the outcome it gives ("Dernières ajoutées").
     pub sort: &'a str,
+    /// The studio of the day, then the draw.
+    pub shelves: [ShelfView<'a>; 2],
     /// False when the page is only the backdrop of something drawn over it (a
     /// window, the list that opens out of a row): it then neither drives the
     /// shared glide nor publishes rows for touch, which belong to what is on top.
     pub interactive: bool,
 }
-
-/// The corner of the two cards, which the focus's ring follows outwards.
-const CARD_RADIUS: f32 = 16.0;
 /// How far inside its row the focus pill sits, above and below.
 const PILL_INSET: f32 = 3.0;
 /// The rate (`ease_to`) of both the list's scroll and the focus, which must
@@ -238,41 +273,54 @@ impl SwitchRenderBackend {
     /// Draw the importer home (see `ImporterHome`).
     pub(crate) fn draw_library_distant_list(&mut self, home: &ImporterHome) {
         use crate::library::{
-            importer_item_rect, IMPORTER_CARD_TOP, IMPORTER_PINNED_ROWS as PINNED, IMPORTER_ROW_H as ROW_H,
-            IMPORTER_ROW_TOP as ROW_TOP, IMPORTER_VISIBLE_ROWS as VISIBLE,
+            add_button_set, importer_item_rect, importer_max_scroll, importer_note_top, shelf_tile_size, shelf_top,
+            sources_head_top, sources_rows_top, ADD_BUTTON_H, IMPORTER_ADD_ROW as ADD, IMPORTER_BAND_BOT as BAND_BOT,
+            IMPORTER_BAND_TOP as BAND_TOP, IMPORTER_NOTE_H, IMPORTER_PINNED_ROWS as PINNED, IMPORTER_ROW_H as ROW_H,
+            SHELF_COLS, SHELF_HEAD_H, SHELF_SEE, SOURCES_HEAD_H,
         };
         self.library_clear();
         let vw = self.dimensions.width as f32;
-        let vh = self.dimensions.height as f32;
         let lc = crate::loc::s();
         let u = crate::loc_ui::ui();
         let n = home.rows.len();
         // A row the list no longer has (it shrank under the cursor) is drawn
         // as the last one, as the next press will take it.
         let sel = home.selection.min(n + PINNED - 1);
-        let band_top = ROW_TOP;
-        let band_bot = ROW_TOP + VISIBLE as f32 * ROW_H;
-        let max_scroll = n.saturating_sub(VISIBLE);
-        let target_scroll = home.scroll.min(max_scroll) as f32 * ROW_H;
         let now = unsafe { ruffle_tick_now() };
+        // The shelves' screenshots come in through the thumbnail pool.
+        self.pump_thumbnail_load();
 
-        // ONE focus for the page, from card to card, from a card to a row and
-        // back, from row to row: its rect, its look (a ring round a card, a
-        // pill on a row) and the band it is clipped to all glide together, so
-        // it never jumps at either end. It was two marks, a ring easing
-        // sideways over the cards and a pill gliding down the rows, swapped
-        // in one frame on the way between them (Jonathan: "il manque la
-        // fluidité dans importer entre Chercher/Ajouter et les lignes de
-        // sources"). The scroll glides as before, on the gallery's shared
-        // state like every page with a moving list; a backdrop is drawn
-        // where it rests.
-        let on_row = sel >= PINNED;
+        // ── The search, a button in the tab bar ─────────────────────────
+        self.imp_search_button(vw);
+
+        // ── Where the add button goes ───────────────────────────────────
+        // In the "Mes sources" band, before the order in force: both are
+        // words, so the button is placed from what they measure, before
+        // anything is laid out from it (the focus, the touch table).
+        let searching = home.filter.map_or(false, |f| !f.trim().is_empty());
+        let band_right = vw - IMPORTER_MARGIN_X - 12.0;
+        let sort_w = if n > 0 { self.kit_measure(home.sort, size::CAPTION + 1.0) + 8.0 + 16.0 } else { 0.0 };
+        let add_w = 14.0 + 16.0 + 8.0 + self.kit_measure(u.imp_add_title, size::CAPTION + 1.0) + 16.0;
+        let add_x = band_right - sort_w - if n > 0 { 18.0 } else { 0.0 } - add_w;
+        add_button_set(add_x, add_w);
+
+        // ONE focus for the page, from tile to tile, down to the add button
+        // and the rows and back: its rect, its look (a ring round a tile or
+        // the button, a pill on a row) and its band glide together, so it
+        // never jumps at either end. The whole page scrolls now, so the focus
+        // is carried by each frame's scroll change, then eased at the
+        // scroll's own rate: one glide on the screen, from where it is to
+        // where its item will rest, however far the page scrolls.
+        let max_scroll = importer_max_scroll(n, vw);
+        let target_scroll = (home.scroll as f32).min(max_scroll);
+        let on_row = sel > ADD;
+        let corner = if sel == ADD { ADD_BUTTON_H * 0.5 } else { radius::TILE };
         let focus_at = |scroll_px: f32| {
             let (x, y, w, h) = importer_item_rect(sel, scroll_px, vw);
             if on_row {
-                FocusGlide::at((x, y + PILL_INSET, w, h - 2.0 * PILL_INSET), 1.0, (band_top, band_bot))
+                FocusGlide::at((x, y + PILL_INSET, w, h - 2.0 * PILL_INSET), 1.0, (BAND_TOP, BAND_BOT))
             } else {
-                FocusGlide::at((x, y, w, h), 0.0, (0.0, vh))
+                FocusGlide::at((x, y, w, h), 0.0, (BAND_TOP, BAND_BOT))
             }
         };
         let (mut scroll_px, mut focus) = (target_scroll, focus_at(target_scroll));
@@ -291,18 +339,10 @@ impl SwitchRenderBackend {
                     let dt = if freq > 0.0 { (now.saturating_sub(a.last_tick) as f32 / freq).min(0.1) } else { 1.0 / 60.0 };
                     a.last_tick = now;
                     let before = a.scroll_px;
-                    // A finger on the list wins over the easing, 1:1.
+                    // A finger on the page wins over the easing, 1:1.
                     let eased = ease_to(a.scroll_px, target_scroll, dt, GLIDE_RATE);
                     a.scroll_px = touch_scroll.unwrap_or(eased);
-                    // Headed for a row, the focus moves with the list as the
-                    // rows do, so a row under it stays under it while a finger
-                    // scrolls the list; eased afterwards at the scroll's own
-                    // rate, it glides on the screen straight to where its row
-                    // will rest. Headed for a card, it stays on the page, as
-                    // the card does.
-                    if on_row {
-                        a.imp_focus.y -= a.scroll_px - before;
-                    }
+                    a.imp_focus.y -= a.scroll_px - before;
                     let to = focus_at(a.scroll_px);
                     a.imp_focus.ease(&to, dt, GLIDE_RATE);
                 }
@@ -312,91 +352,129 @@ impl SwitchRenderBackend {
         }
         let frect = focus.rect();
 
-        // ── The two actions ─────────────────────────────────────────────
-        // Their fills first, the focus over them, then what they say: the
-        // focus passes over a card on its way and under its words.
-        for i in 0..PINNED {
-            let (x, y, w, h) = importer_item_rect(i, 0.0, vw);
-            let hl = coverage(frect, (x, y, w, h));
-            self.kit_rrect(x, y, w, h, CARD_RADIUS, lit(col::PANEL, col::TILE, hl));
+        // ── The shelves ─────────────────────────────────────────────────
+        self.set_clip(0.0, BAND_TOP, vw, BAND_BOT - BAND_TOP);
+        let (_, tile_h) = shelf_tile_size(vw);
+        let label_px = size::CAPTION + 1.0;
+        for (k, shelf) in home.shelves.iter().enumerate() {
+            let Some(top) = shelf_top(k, vw) else { continue };
+            let y0 = top - scroll_px;
+            if y0 > BAND_BOT || y0 + SHELF_HEAD_H + tile_h + 30.0 < BAND_TOP {
+                continue;
+            }
+            // Its line: what it is, which studio or genre, how it changes.
+            let hy = y0 + 11.0;
+            let mut hx = IMPORTER_MARGIN_X + 12.0;
+            hx += self.kit_text_mid(hx, hy, size::LABEL, shelf.title, col::TEXT) + 10.0;
+            let note_w = self.kit_measure(shelf.note, label_px);
+            self.kit_text_mid(band_right - note_w, hy, label_px, shelf.note, col::TEXT2);
+            if !shelf.sub.is_empty() {
+                let st = self.kit_fit(shelf.sub, size::LABEL, (band_right - note_w - 24.0 - hx).max(0.0));
+                self.kit_text_mid(hx, hy, size::LABEL, &st, col::TEXT3);
+            }
+            for c in 0..SHELF_COLS {
+                let (x, y, w, h) = importer_item_rect(k * SHELF_COLS + c, scroll_px, vw);
+                let hl = coverage(frect, (x, y, w, h));
+                // The name under the tile, lit as far as the focus covers it.
+                let label_y = y + h + 6.0 + 9.0;
+                if c >= SHELF_SEE {
+                    let action = &shelf.actions[c - SHELF_SEE];
+                    self.imp_shelf_action(x, y, w, h, action, shelf.loading, hl);
+                    let t = self.kit_fit(action.label, label_px, w);
+                    self.kit_text_mid(x, label_y, label_px, &t, lit(col::TEXT2, col::TEXT, hl));
+                    continue;
+                }
+                if shelf.loading {
+                    self.kit_rrect(x, y, w, h, radius::TILE, col::TILE);
+                    self.kit_icon(x + (w - 24.0) * 0.5, y + h * 0.5, 24.0, Icon::Hourglass, col::TEXT3);
+                    continue;
+                }
+                // A shelf with fewer games: nothing there, its action
+                // already sits right after the last one.
+                let Some(tile) = shelf.tiles.get(c) else { continue };
+                match self.thumb_for(tile.thumb) {
+                    Some(ThumbTex::Image { tex, w: iw, h: ih, amb }) => self.kit_cover(x, y, w, h, tex, iw, ih, amb, 1.0),
+                    // No screenshot: the tile carries the game's name, as a
+                    // game without a cover does on the Play grid.
+                    Some(ThumbTex::Failed) => {
+                        self.kit_default_tile(x, y, w, h, super::flashpoint::tile_tint(tile.thumb), tile.title)
+                    }
+                    None => {
+                        self.kit_rrect(x, y, w, h, radius::TILE, col::TILE);
+                        self.kit_icon(x + (w - 24.0) * 0.5, y + h * 0.5, 24.0, Icon::Hourglass, col::TEXT3);
+                    }
+                }
+                if tile.installed {
+                    // Already on the card, as in the results.
+                    const CHIP: f32 = 26.0;
+                    let (bx, by) = (x + w - CHIP - 8.0, y + 8.0);
+                    self.kit_rrect(bx, by, CHIP, CHIP, 8.0, 0xB8_0A_10_1C);
+                    self.kit_icon(bx + 5.0, by + CHIP * 0.5, 16.0, Icon::CircleCheck, col::OK);
+                }
+                let t = self.kit_fit(tile.title, label_px, w);
+                self.kit_text_mid(x, label_y, label_px, &t, lit(col::TEXT2, col::TEXT, hl));
+            }
         }
-        self.set_clip(0.0, focus.clip_top, vw, (focus.clip_bot - focus.clip_top).max(0.0));
-        self.kit_focus_morph(focus.x, focus.y, focus.w, focus.h, CARD_RADIUS, focus.look);
-        self.clear_clip();
-        let cards = [
-            (Icon::Search, u.imp_fp_title, u.imp_fp_sub),
-            (Icon::Link, u.imp_add_title, u.imp_add_sub),
-        ];
-        for (i, (icon, title, sub)) in cards.iter().enumerate() {
-            let (x, y, w, h) = importer_item_rect(i, 0.0, vw);
-            let hl = coverage(frect, (x, y, w, h));
-            let cy = y + h * 0.5;
-            const TILE: f32 = 52.0;
-            self.imp_icon_tile(x + 20.0, cy - TILE * 0.5, TILE, 14.0, col::LINE, col::TILE, hl);
-            self.kit_icon(x + 20.0 + 13.0, cy, 26.0, *icon, lit(col::TEXT2, ICON_FOCUS, hl));
-            // Right edge: X on the Flashpoint card says it works from
-            // anywhere on the tab; the other one goes somewhere.
-            let right = x + w - 20.0;
-            let tail = if i == 0 {
-                let bw = self.kit_button_width(Btn::X, 26.0);
-                self.kit_button(right - bw, cy, 26.0, Btn::X, col::GLYPH);
-                bw
-            } else {
-                self.kit_icon(right - 18.0, cy, 18.0, Icon::ChevronRight, lit(CHEVRON_IDLE, col::GOLD, hl));
-                18.0
-            };
-            let tx = x + 88.0;
-            let avail = right - tail - 16.0 - tx;
-            let t = self.kit_fit(title, size::TAB, avail);
-            self.kit_text_mid(tx, cy - 11.0, size::TAB, &t, col::TEXT);
-            let st = self.kit_fit(sub, size::CAPTION + 1.0, avail);
-            self.kit_text_mid(tx, cy + 13.0, size::CAPTION + 1.0, &st, col::TEXT3);
+        // Neither shelf could be fetched: one line where they were says so,
+        // rather than a page that lost its top without a word.
+        if let Some(top) = importer_note_top() {
+            let cy = top + IMPORTER_NOTE_H * 0.5 - scroll_px;
+            let x = IMPORTER_MARGIN_X + 12.0;
+            self.kit_icon(x, cy, 18.0, Icon::WifiOff, col::TEXT3);
+            let t = self.kit_fit(u.disc_unavailable, size::LABEL, band_right - x - 28.0);
+            self.kit_text_mid(x + 28.0, cy, size::LABEL, &t, col::TEXT3);
         }
 
-        // ── "Mes sources", how many, and the order in force ─────────────
-        let hy = band_top - 20.0;
-        let searching = home.filter.map_or(false, |f| !f.trim().is_empty());
+        // ── "Mes sources", how many, the add button, the order in force ──
+        let hy = sources_head_top(vw) - scroll_px + (SOURCES_HEAD_H - 6.0) * 0.5;
         let mut hx = IMPORTER_MARGIN_X + 12.0;
         hx += self.kit_text_mid(hx, hy, size::LABEL, lc.dist_sources, col::TEXT) + 10.0;
-        let sort_w = if n > 0 {
-            let pw = self.kit_measure(home.sort, size::CAPTION + 1.0);
-            let right = vw - IMPORTER_MARGIN_X - 12.0;
-            self.kit_text_mid(right - pw, hy, size::CAPTION + 1.0, home.sort, col::TEXT2);
-            self.kit_icon(right - pw - 8.0 - 16.0, hy, 16.0, Icon::Sort, col::TEXT2);
-            pw + 8.0 + 16.0 + 24.0
-        } else {
-            0.0
-        };
+        if n > 0 {
+            let pw = self.kit_measure(home.sort, label_px);
+            self.kit_text_mid(band_right - pw, hy, label_px, home.sort, col::TEXT2);
+            self.kit_icon(band_right - pw - 8.0 - 16.0, hy, 16.0, Icon::Sort, col::TEXT2);
+        }
         if searching {
             let count = std::format!("{} / {}", imp_count(n as u64), imp_count(home.total as u64));
             hx += self.kit_text_mid(hx, hy, size::LABEL, &count, col::TEXT2);
             let term = std::format!("  \u{00B7}  {}", imp_quote(home.filter.unwrap_or("")));
-            let term = self.kit_fit(&term, size::LABEL, (vw - IMPORTER_MARGIN_X - 12.0 - sort_w - hx).max(0.0));
+            let term = self.kit_fit(&term, size::LABEL, (add_x - 18.0 - hx).max(0.0));
             self.kit_text_mid(hx, hy, size::LABEL, &term, col::TEXT3);
         } else {
             self.kit_text_mid(hx, hy, size::LABEL, &imp_count(home.total as u64), col::TEXT3);
         }
+        {
+            let (bx, by, bw, bh) = importer_item_rect(ADD, scroll_px, vw);
+            let hl = coverage(frect, (bx, by, bw, bh));
+            let cy = by + bh * 0.5;
+            self.kit_rrect(bx, by, bw, bh, bh * 0.5, lit(col::PANEL, col::TILE, hl));
+            self.kit_icon(bx + 14.0, cy, 16.0, Icon::Link, lit(col::TEXT2, ICON_FOCUS, hl));
+            self.kit_text_mid(bx + 14.0 + 16.0 + 8.0, cy, label_px, u.imp_add_title, col::TEXT);
+        }
+        self.clear_clip();
+
+        // ── The focus ───────────────────────────────────────────────────
+        // Over the tiles (a ring sits round a tile, not on it) and under the
+        // rows' words, inside the band the page scrolls in.
+        self.set_clip(0.0, focus.clip_top, vw, (focus.clip_bot - focus.clip_top).max(0.0));
+        self.kit_focus_morph(focus.x, focus.y, focus.w, focus.h, corner, focus.look);
+        self.clear_clip();
 
         // ── The sources ─────────────────────────────────────────────────
-        // The focus was drawn with the cards: on a row it is under the row's
-        // words as it is under a card's, inside the rows' band.
-        self.set_clip(0.0, band_top, vw, band_bot - band_top);
-        let first = (scroll_px / ROW_H).floor().max(0.0) as usize;
-        let last = (first + VISIBLE + 2).min(n);
+        self.set_clip(0.0, BAND_TOP, vw, BAND_BOT - BAND_TOP);
+        let rows_top = sources_rows_top(vw);
+        let first = ((scroll_px + BAND_TOP - rows_top) / ROW_H).floor().max(0.0) as usize;
+        let last = (((scroll_px + BAND_BOT - rows_top) / ROW_H).ceil().max(0.0) as usize + 1).min(n);
         for k in first..last {
-            let row = &home.rows[k];
             let (x, y, w, h) = importer_item_rect(k + PINNED, scroll_px, vw);
-            if y + h < band_top || y > band_bot {
-                continue;
-            }
             let hl = coverage(frect, (x, y + PILL_INSET, w, h - 2.0 * PILL_INSET));
-            self.imp_source_row(x, y + h * 0.5, w, row, hl);
+            self.imp_source_row(x, y + h * 0.5, w, &home.rows[k], hl);
         }
         self.clear_clip();
 
         // ── Nothing to list ─────────────────────────────────────────────
         if n == 0 {
-            let cy = (band_top + band_bot) * 0.5 - 20.0;
+            let cy = (rows_top - scroll_px + 70.0).min(BAND_BOT - 90.0);
             if searching {
                 let msg = fill(u.imp_no_source_match, &imp_quote(home.filter.unwrap_or("")));
                 self.imp_empty_state(Icon::Search, &msg, cy);
@@ -405,73 +483,100 @@ impl SwitchRenderBackend {
             }
         }
 
-        self.draw_scrollbar(vw - IMPORT_SCROLLBAR_INSET, band_top + 4.0, band_bot - band_top - 8.0, scroll_px, ROW_H, VISIBLE, n);
+        // The page's scrollbar, in pixels: its whole height against the band.
+        let band_h = BAND_BOT - BAND_TOP;
+        self.draw_scrollbar(
+            vw - IMPORT_SCROLLBAR_INSET,
+            BAND_TOP + 8.0,
+            band_h - 16.0,
+            scroll_px,
+            1.0,
+            band_h as usize,
+            (max_scroll + band_h) as usize,
+        );
 
         // ── Touch ───────────────────────────────────────────────────────
-        // The cards stay put while the rows scroll, but the hit test reads
-        // every cell in the list's scrolled space, so theirs are written
-        // already shifted by the scroll. A row caught half out of its band
-        // takes no tap: it would steal one aimed at the header or the cards.
+        // One cell per item, at its index in the selection, so a hit is the
+        // selection it lands on; an item off the page, half out of the band,
+        // or with nothing in it (a shelf not shown, an empty place) takes no
+        // tap. Cells are in the page's scrolled space.
         if home.interactive {
             let mut cells: std::vec::Vec<GalleryCell> = std::vec::Vec::with_capacity(n + PINNED);
-            for i in 0..PINNED {
-                let (x, y, w, h) = importer_item_rect(i, 0.0, vw);
-                cells.push(GalleryCell { row: 0, cx: x + w * 0.5, x, y: y + scroll_px, w, h });
-            }
-            for k in 0..n {
-                let (x, y, w, h) = importer_item_rect(k + PINNED, scroll_px, vw);
-                let shown = y >= band_top - 1.0 && y + h <= band_bot + 1.0;
-                cells.push(if shown {
-                    GalleryCell { row: k as u32 + 1, cx: x + w * 0.5, x, y: y + scroll_px, w, h }
+            for i in 0..n + PINNED {
+                let (x, y, w, h) = importer_item_rect(i, scroll_px, vw);
+                let there = if i < ADD {
+                    let (k, c) = (i / SHELF_COLS, i % SHELF_COLS);
+                    let shelf = &home.shelves[k];
+                    shelf.shown && (shelf.loading || c >= SHELF_SEE || c < shelf.tiles.len())
+                } else {
+                    true
+                };
+                let inside = y >= BAND_TOP - 1.0 && y + h <= BAND_BOT + 1.0;
+                cells.push(if there && inside {
+                    GalleryCell { row: i as u32, cx: x + w * 0.5, x, y: y + scroll_px, w, h }
                 } else {
                     GalleryCell::default()
                 });
             }
             if let Ok(mut g) = gallery_cache().lock() {
-                *g = (cells, n as u32);
+                *g = (cells, (n + PINNED) as u32);
             }
             if let Ok(mut v) = gallery_view().lock() {
+                // In pixels: a pitch of one, the page as its rows.
                 *v = GalleryView {
                     scroll_px,
-                    pitch: ROW_H,
-                    band_top: IMPORTER_CARD_TOP,
-                    band_bot,
-                    rows_total: n as u32,
-                    rows_visible: VISIBLE as u32,
+                    pitch: 1.0,
+                    band_top: BAND_TOP,
+                    band_bot: BAND_BOT,
+                    rows_total: (max_scroll + band_h) as u32,
+                    rows_visible: band_h as u32,
                     horizontal: false,
                     off_min: 0.0,
                     off_max: 0.0,
                 };
             }
-            if let Some(rect) = (sel >= PINNED).then(|| importer_item_rect(sel, scroll_px, vw)) {
-                import_sel_rect_set(rect);
-            }
+            // What a game started from here grows out of.
+            import_sel_rect_set(importer_item_rect(sel, scroll_px, vw));
         }
 
         // ── Hints: what A does here, and only what can be done ──────────
         self.kit_footer_band();
-        let a_verb = match sel {
-            0 => u.open,
-            1 => u.add,
-            _ => match home.rows.get(sel - PINNED) {
+        let mut hints: std::vec::Vec<HintItem> = std::vec::Vec::new();
+        if sel < ADD {
+            let (k, c) = (sel / SHELF_COLS, sel % SHELF_COLS);
+            let shelf = &home.shelves[k];
+            if c >= SHELF_SEE {
+                if !shelf.loading {
+                    hints.push((&[Btn::A][..], shelf.actions[c - SHELF_SEE].label));
+                }
+            } else if let (false, Some(t)) = (shelf.loading, shelf.tiles.get(c)) {
+                hints.push((&[Btn::A][..], if t.installed { u.hint_play } else { u.download }));
+                hints.push((&[Btn::Plus][..], u.info));
+            }
+            hints.push((&[Btn::X][..], lc.fp_title));
+        } else if sel == ADD {
+            hints.push((&[Btn::A][..], u.add));
+            hints.push((&[Btn::X][..], lc.fp_title));
+        } else {
+            let a_verb = match home.rows.get(sel - PINNED) {
                 Some(r) if r.direct && r.have > 0 => u.hint_play,
                 Some(r) if r.direct => u.download,
                 _ => u.open,
-            },
-        };
-        let mut hints: std::vec::Vec<HintItem> = std::vec![(&[Btn::A][..], a_verb)];
-        if sel >= PINNED {
+            };
+            hints.push((&[Btn::A][..], a_verb));
             hints.push((&[Btn::Plus][..], u.hint_options));
         }
-        if n > 1 {
-            hints.push((&[Btn::Y][..], u.hint_sort));
-        }
-        // Over a search that found nothing, Minus says what it is for there,
-        // in the words Jouer uses; B shows every source again, the same words
-        // on every list.
-        if home.total > 0 {
-            let verb = if searching && n == 0 { u.home_edit_search } else { u.hint_search };
-            hints.push((&[Btn::Minus][..], verb));
+        if sel >= ADD {
+            if n > 1 {
+                hints.push((&[Btn::Y][..], u.hint_sort));
+            }
+            // Over a search that found nothing, Minus says what it is for
+            // there, in the words Jouer uses; B shows every source again,
+            // the same words on every list.
+            if home.total > 0 {
+                let verb = if searching && n == 0 { u.home_edit_search } else { u.hint_search };
+                hints.push((&[Btn::Minus][..], verb));
+            }
         }
         if searching {
             hints.push((&[Btn::B][..], u.home_show_all));
@@ -482,6 +587,53 @@ impl SwitchRenderBackend {
             glBindVertexArray(0);
         }
         self.gl_state.invalidate();
+    }
+
+    /// The importer's search, a button at the right of the tab bar: an icon,
+    /// what it searches, and X, which runs it from anywhere on the page. It
+    /// does not scroll with the page. Published for a tap and for the
+    /// results page, which opens out of it.
+    fn imp_search_button(&mut self, vw: f32) {
+        const H: f32 = 40.0;
+        const CY: f32 = 36.0;
+        let u = crate::loc_ui::ui();
+        let px = size::LABEL;
+        let glyph = 24.0;
+        let gw = self.kit_button_width(Btn::X, glyph);
+        let label = self.kit_fit(u.imp_fp_title, px, 260.0);
+        let tw = self.kit_measure(&label, px);
+        let w = 16.0 + 18.0 + 10.0 + tw + 12.0 + gw + 8.0;
+        let x = vw - 40.0 - w;
+        self.kit_rrect(x, CY - H * 0.5, w, H, H * 0.5, col::TILE);
+        self.kit_icon(x + 16.0, CY, 18.0, Icon::Search, col::TEXT2);
+        self.kit_text_mid(x + 16.0 + 18.0 + 10.0, CY, px, &label, col::TEXT2);
+        self.kit_button(x + w - 8.0 - gw, CY, glyph, Btn::X, col::GLYPH);
+        crate::library::search_button_set((x, CY - H * 0.5, w, H));
+    }
+
+    /// One of a shelf's action tiles: an icon in its box, a word under it
+    /// (how many games the studio has; that another one comes), lit as far as
+    /// the focus covers it. Nothing under the icon while the shelf loads.
+    #[allow(clippy::too_many_arguments)]
+    fn imp_shelf_action(&mut self, x: f32, y: f32, w: f32, h: f32, action: &ShelfAction, loading: bool, hl: f32) {
+        const BOX: f32 = 44.0;
+        let gold = action.gold;
+        self.kit_rrect(x, y, w, h, radius::TILE, lit(col::PANEL, col::TILE, hl));
+        let sub = if loading { "" } else { action.sub };
+        let cy = y + h * 0.5 - if sub.is_empty() { 0.0 } else { 10.0 };
+        let bx = x + (w - BOX) * 0.5;
+        if gold {
+            self.kit_rrect(bx, cy - BOX * 0.5, BOX, BOX, 12.0, TILE_FOCUS);
+        } else {
+            self.kit_rrect(bx, cy - BOX * 0.5, BOX, BOX, 12.0, col::LINE);
+        }
+        let ink = if gold { ICON_FOCUS } else { lit(col::TEXT2, ICON_FOCUS, hl) };
+        self.kit_icon(bx + (BOX - 22.0) * 0.5, cy, 22.0, action.icon, ink);
+        if !sub.is_empty() {
+            let t = self.kit_fit(sub, size::CAPTION, w - 12.0);
+            let tw = self.kit_measure(&t, size::CAPTION);
+            self.kit_text_mid((x + (w - tw) * 0.5).round(), cy + BOX * 0.5 + 12.0, size::CAPTION, &t, col::TEXT3);
+        }
     }
 
     /// An icon's tile on a card or a row, `hl` of the way from `idle` to

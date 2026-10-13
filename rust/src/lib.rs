@@ -3820,6 +3820,10 @@ pub extern "C" fn ruffle_library_selected_path(out: *mut c_char, cap: c_int) -> 
 /// Ruffle's own. Idempotent.
 #[no_mangle]
 pub extern "C" fn ruffle_library_shutdown() {
+    // Nothing left in flight, and the thumbnails' textures freed while the
+    // renderer and its GL context are still up.
+    library::shutdown_leftovers(!library::picked());
+    log(b"library_shutdown: network stopped, thumbnails freed\n\0");
     if let Ok(mut slot) = LIBRARY_RENDERER.lock() {
         if slot.is_some() {
             log(b"library_shutdown: dropping standalone renderer\n\0");

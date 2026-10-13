@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <ctime>
 #include <malloc.h>
 #include <sys/stat.h>
 #include <switch.h>
@@ -503,6 +504,13 @@ extern "C" uint64_t ruffle_tick_now(void) {
 
 extern "C" uint64_t ruffle_tick_freq(void) {
     return armGetSystemTickFreq();
+}
+
+// Seconds since 1970 (UTC) on the console's clock: the importer's studio of
+// the day turns over with it. The Rust side has no working wall clock of its
+// own here (std's file times read 0 on Horizon), so it asks newlib's.
+extern "C" int64_t ruffle_unix_time(void) {
+    return (int64_t)time(nullptr);
 }
 // Actual current CPU and GPU clocks in Hz, straight from the clkrst sysmodule
 // (firmware 8.0+), so the heartbeat reports what the hardware IS doing rather

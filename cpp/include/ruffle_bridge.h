@@ -52,6 +52,9 @@ uint64_t ruffle_probe_heap_ceiling(uint64_t chunk_bytes, uint64_t* biggest_singl
 uint64_t ruffle_tick_now(void);
 uint64_t ruffle_tick_freq(void);
 
+/// Seconds since 1970 (UTC), from the console's clock (newlib `time`).
+int64_t ruffle_unix_time(void);
+
 /// Persist a panic message to `sdmc:/switch/ruffle-crash.log` (append mode)
 /// AND to stdout, then sleep ~150 ms so the kernel TCP buffer for nxlink has
 /// time to flush before the imminent abort(). Returns nothing. Safe to call

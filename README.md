@@ -34,7 +34,7 @@ Opened the usual way from the Album, homebrew only gets a small share of the con
 
 ## Getting games
 
-**You do not need a PC.** In the **Import** tab, press **X** to search the **[Flashpoint Archive](https://flashpointarchive.org/)**, the Flash preservation project, and download a game straight to your console. Its real title and cover art come along, multi-file games bring their companion files, and **+** on a result shows the details and the download size before you commit.
+**You do not need a PC.** The **Import** tab opens on games from the **[Flashpoint Archive](https://flashpointarchive.org/)**, the Flash preservation project: a studio drawn at random and games drawn at random from the whole archive. Press **A** on one to download it straight to your console, or **X** to search the archive by name. Its real title and cover art come along, multi-file games bring their companion files, and **+** on a game shows the details and the download size before you commit.
 
 The same tab also imports from a URL: a direct `.swf`, an archive.org item, or a Wayback Machine snapshot. And you can still drop your own `.swf` files into **`sdmc:/flashnx/`** from a computer.
 
@@ -61,13 +61,13 @@ Your library size is shown under the logo. Quit, bug report and suggestions live
 
 | | |
 |---|---|
-| **A** | Launch or download the selected entry |
+| **A** | Download or play a suggested game, see all of a studio's games or a bigger draw, draw again, or open a saved entry |
 | **X** | Search the **Flashpoint Archive** and download a game |
 | **−** | Search your saved URLs |
 | **Y** | Sort by date added, name, source or file count |
-| **+** | Entry details, plus edit, favorite and delete |
+| **+** | A game's details, or a saved entry's edit, favorite and delete |
 
-Each row shows a readable name, an icon saying whether it is a single file or an archive, and how many of that source's files are already on your card. Accepts archive.org items and direct `.swf` URLs. The list scrolls smoothly and can be dragged with a finger.
+The page opens on two shelves: a studio drawn at random from the whole archive, and games drawn at random from all of it. Each shows five games, then See all or See more, then Draw again. Neither shows what the archive flags as adult, nor crude or gory games. Under them, each saved row shows a readable name, an icon saying whether it is a single file or an archive, and how many of that source's files are already on your card. Accepts archive.org items and direct `.swf` URLs. The page scrolls smoothly and can be dragged with a finger.
 
 **In game**
 

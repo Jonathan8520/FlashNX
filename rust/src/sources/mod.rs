@@ -1,11 +1,10 @@
-//! Multi-source import + Flashpoint cover lookup.
-//!
-//! FlashNX stays CONTENT-NEUTRAL: the IMPORTER tab is a user-driven pipe
-//! (paste an archive.org URL or a direct `.swf` URL), and Flashpoint is used
-//! ONLY as a metadata/cover source for games the user already owns — never as
-//! a downloadable game catalog. `net.rs` owns the HTTPS transport; this layer
-//! adds the per-source URL parsing and JSON shapes on top of `net::http_get`.
+//! Multi-source import: archive.org and direct `.swf` addresses the player
+//! pastes, and Flashpoint, for covers, its search and downloads (allowed by
+//! the archive's admins, 2026-06), and the importer's discovery shelves.
+//! `net.rs` owns the HTTPS transport; this layer adds the per-source URL
+//! parsing and JSON shapes on top of it.
 
+pub mod discover;
 pub mod flashpoint;
 pub mod gamezip;
 

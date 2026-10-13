@@ -1389,6 +1389,7 @@ static void worker_entry(void* arg) {
         std::printf("library: user quit (no selection) — exiting .nro\n");
         std::fflush(stdout);
         ruffle_library_shutdown();
+        ruffle_log_cstr("teardown: library shut down\n");
         break;
     }
     std::printf("library: user picked %s\n", selected_path);
@@ -2659,9 +2660,10 @@ static void worker_entry(void* arg) {
     }
     } // end of outer "while (!exit_nro)"
 
+    ruffle_log_cstr("teardown: worker out of its loop, GL going\n");
     gl_context_shutdown();
     flashnx_clocks_restore();
-    std::printf("worker: exiting\n"); std::fflush(stdout);
+    ruffle_log_cstr("teardown: worker exiting\n");
 }
 
 int main(int argc, char** argv) {
@@ -2908,14 +2910,18 @@ int main(int argc, char** argv) {
     prof_boot(&t);
     threadStart(&t);
     threadWaitForExit(&t);
+    ruffle_log_cstr("teardown: worker joined\n");
     // The launcher's interface sounds bring audren up on their own (UI mode),
     // and only a game's audio backend ever shut it down. Left open, its worker
     // would keep waking every audren frame inside an NRO the loader is about
     // to unmap.
     ruffle_audio_shutdown();
+    ruffle_log_cstr("teardown: audio down\n");
     prof_shutdown();
     threadClose(&t);
 
+    // Logged before: nxlink's output goes through the sockets.
+    ruffle_log_cstr("teardown: closing romfs and sockets\n");
     romfsExit();
     socketExit();
 

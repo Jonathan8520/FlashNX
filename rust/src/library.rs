@@ -104,13 +104,14 @@ pub(crate) enum Screen {
     /// to, as on the Play tab's picker. `prev_*` restore the cursor on cancel.
     RemoteSortModal { selection: usize, kind: u8, dirs: u8, prev_sel: usize, prev_scroll: usize },
     // ── Phase 3.7: DISTANT mode (archive.org import) ───────────────────
-    /// IMPORTER home: the two action cards, then the saved sources. Rows 0 and 1
-    /// are the cards (search Flashpoint, add an address), rows 2.. index
-    /// `importer_view` (the filtered + sorted history). `scroll_offset` is the
-    /// topmost visible SOURCE (the cards never scroll) — a real field, not
-    /// derived from `selection`, so a touch drag can scroll the list without
-    /// moving the cursor. A opens the selected source (or acts on a card); +
-    /// opens a source's options.
+    /// IMPORTER home: the two discovery shelves, the add button, then the saved
+    /// sources. `selection` 0..14 are the shelves' tiles (seven each), 14 the
+    /// add button, 15.. index `importer_view` (the filtered + sorted history;
+    /// see `IMPORTER_PINNED_ROWS`). `scroll_offset` is the page's scroll in
+    /// pixels — a real field, not derived from `selection`, so a touch drag
+    /// can scroll the page without moving the cursor. A plays or downloads a
+    /// shelf's game (or runs its action), adds an address or opens a source;
+    /// + opens a game's details or a source's options.
     DistantIdle { selection: usize, scroll_offset: usize },
     /// Async archive.org metadata fetch in flight (v1.2.0). The reveal window is
     /// open from the launched URL's row with a spinner; `net::tick_archive_fetch`
@@ -437,6 +438,10 @@ pub(crate) fn goto_tab(target: Tab, dir: f32) {
         // Leaving the Play tab: remember the game the cursor is on.
         if let Screen::List { selection, .. } = s.screen {
             shelf_cursor_save(&s, selection);
+        }
+        // Leaving the importer: what its shelves started stops with it.
+        if matches!(s.screen, Screen::DistantIdle { .. }) && !matches!(target, Tab::Importer) {
+            shelves_leave(&mut s);
         }
         s.screen = match target {
             Tab::Jouer => {
@@ -1835,6 +1840,93 @@ pub(crate) struct State {
     /// not the one in use (Left / Right walk the cards, A applies). `None` is
     /// the card in use.
     pub(crate) view_focus: Option<u8>,
+    /// The importer home's two discovery shelves: the studio of the day, then
+    /// a draw in a genre (`SHELF_STUDIO`, `SHELF_LUCKY`).
+    shelves: [Shelf; 2],
+    /// A Flashpoint flow (a game's details, its download) started from a shelf
+    /// tile rather than from the search results: the importer home it goes
+    /// back to, as `(selection, scroll)`. `cover_candidates` then holds that
+    /// shelf's games, so the flows run unchanged on them.
+    fp_home: Option<(usize, usize)>,
+    /// The results page shows a studio's games ("see all" on its shelf), by
+    /// its name: a retry asks for them again, rather than searching for the
+    /// name, and the results keep only that studio's games.
+    fp_studio: Option<std::string::String>,
+    /// The results page shows a bigger draw ("see more" on the draw's
+    /// shelf), with the shelf's own games (`fp_seed`) among them.
+    fp_draw: bool,
+    fp_seed: std::vec::Vec<crate::sources::flashpoint::CatalogEntry>,
+}
+
+/// Where a discovery shelf is: never asked yet, its search on its way, its
+/// games in, or the search failed (asked again a while later).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ShelfPhase {
+    Idle,
+    Loading,
+    Ready,
+    Failed,
+}
+
+/// One discovery shelf of the importer home (`sources::discover`).
+#[derive(Clone)]
+struct Shelf {
+    /// The studio drawn, once found.
+    studio: std::string::String,
+    /// Candidate studios from a sample of the archive, in a random order:
+    /// tried in turn until one has enough games, the next ones at each draw
+    /// (`discover::studio_candidates`).
+    candidates: std::vec::Vec<std::string::String>,
+    /// The search on its way samples the archive (rather than asking for a
+    /// candidate's games).
+    sampling: bool,
+    /// Studios asked for since the last failure: bounded, so a sample of
+    /// small studios does not turn into a stream of requests.
+    asked: u8,
+    /// Failures in a row: the first is asked again soon, the next ones less
+    /// often (`SHELF_RETRY_FIRST_SECS`).
+    failures: u8,
+    /// The games the studio shelf has shown this session: a candidate whose
+    /// games are mostly among them is the same author under another name, and
+    /// is passed over.
+    seen: std::vec::Vec<std::string::String>,
+    /// The games shown, at most `discover::SHELF_GAMES`.
+    items: std::vec::Vec<crate::sources::flashpoint::CatalogEntry>,
+    /// Every game the search found: the studio's "see all" count.
+    total: usize,
+    phase: ShelfPhase,
+    /// Thumbnail-pool slot of the search in flight, -1 when none.
+    slot: i32,
+    /// Tick of the last failure, 0 before any: a failed shelf is asked again a
+    /// while later, and one that has failed stays hidden until it has games.
+    failed_at: u64,
+    /// Draws already made for the lot on its way: a sample with fewer games
+    /// than the shelf shows is drawn again, a few times.
+    tries: u8,
+}
+
+impl Shelf {
+    const EMPTY: Shelf = Shelf {
+        studio: std::string::String::new(),
+        candidates: std::vec::Vec::new(),
+        sampling: false,
+        asked: 0,
+        failures: 0,
+        seen: std::vec::Vec::new(),
+        items: std::vec::Vec::new(),
+        total: 0,
+        phase: ShelfPhase::Idle,
+        slot: -1,
+        failed_at: 0,
+        tries: 0,
+    };
+
+    /// On the page: with its games, or loading before any failure. A shelf
+    /// that failed is asked again out of sight, so a console without network
+    /// does not see it come and go every few seconds.
+    fn shown(&self) -> bool {
+        self.phase == ShelfPhase::Ready || (self.failed_at == 0 && self.phase != ShelfPhase::Failed)
+    }
 }
 
 static LIBRARY: Mutex<State> = Mutex::new(State {
@@ -1921,6 +2013,11 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     import_had_data: false,
     armed: None,
     view_focus: None,
+    shelves: [Shelf::EMPTY, Shelf::EMPTY],
+    fp_home: None,
+    fp_studio: None,
+    fp_draw: false,
+    fp_seed: std::vec::Vec::new(),
 });
 
 /// Where the URL history persists across boots. Format: JSON array of
@@ -4384,10 +4481,22 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
     // handler rather than growing a second one that would drift out of step.
     let (horizontal, off_min, off_max) = r::gallery_axis_read();
     let max_scroll_px = (rows_total.saturating_sub(rows_visible)) as f32 * pitch;
+    // The importer's search button sits in the tab bar, above the band the
+    // page scrolls in: a tap on it is X.
+    let on_search = |px: f32, py: f32| {
+        let (sx, sy, sw, sh) = search_button_rect();
+        sw > 0.0
+            && px >= sx
+            && px <= sx + sw
+            && py >= sy
+            && py <= sy + sh
+            && matches!(LIBRARY.lock().map(|s| s.screen), Ok(Screen::DistantIdle { .. }))
+    };
 
-    // Finger down: begin a gesture only inside the gallery band.
+    // Finger down: begin a gesture only inside the gallery band (or on the
+    // importer's search button).
     if pressed && !t.down {
-        if y >= band_top && y <= band_bot {
+        if (y >= band_top && y <= band_bot) || on_search(x, y) {
             t.down = true;
             t.dragging = false;
             t.start_x = x;
@@ -4465,6 +4574,11 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
                 }
             }
             r::gallery_touch_scroll_set(None);
+        } else if on_search(t.start_x, t.start_y) {
+            // TOUCH first: `input` locks LIBRARY again.
+            drop(t);
+            input("X");
+            return;
         } else if horizontal
             // Only when no TILE was hit. In BANDE the big cover is not a cell, so
             // this is the only way to tap it. In ETAGERE the enlarged cover IS a
@@ -4522,11 +4636,12 @@ pub fn touch(x: f32, y: f32, pressed: bool) {
                         }
                     }
                     Screen::DistantIdle { selection, scroll_offset } => {
-                        // The two cards are buttons: one tap acts. A source row
-                        // is selected by a first tap and opened by a second, so
-                        // a thumb landing on the wrong one only moves the cursor.
+                        // The add button is a button: one tap acts. A shelf's
+                        // tile and a source row are selected by a first tap and
+                        // opened by a second, so a thumb landing on the wrong
+                        // one only moves the cursor (a game's tile downloads).
                         // Dragging is handled above.
-                        if hit < IMPORTER_PINNED_ROWS || hit == selection {
+                        if hit == IMPORTER_ADD_ROW || hit == selection {
                             s.screen = Screen::DistantIdle { selection: hit, scroll_offset };
                             launch = true;
                         } else {
@@ -4728,7 +4843,7 @@ fn input_inner(button: &str) -> bool {
         if let Screen::DistantIdle { selection, scroll_offset } = screen_snap {
             if button == "X" {
                 // X anywhere on the IMPORTER home = search Flashpoint for a game
-                // to download (the glyph on the Flashpoint card says so).
+                // to download (the glyph on the search button says so).
                 // Hoisted: swkbd + HTTPS must run WITHOUT the lock.
                 if run_fp_search_flow(Some(selection)) {
                     crate::sfx::choose(crate::sfx::Sfx::Decide);
@@ -4746,16 +4861,14 @@ fn input_inner(button: &str) -> bool {
                 return true;
             }
             if button == "A" {
-                // The Flashpoint card runs the same flow X runs, so the shortcut
-                // and the card cannot drift apart; the add card asks for an
+                // A shelf's tile: its game (downloaded, or played when it is
+                // on the card) or its action; the add button asks for an
                 // address.
-                if selection == 0 {
-                    if run_fp_search_flow(Some(0)) {
-                        crate::sfx::choose(crate::sfx::Sfx::Decide);
-                    }
+                if selection < IMPORTER_ADD_ROW {
+                    shelf_press_a(selection, scroll_offset);
                     return true;
                 }
-                if selection == 1 {
+                if selection == IMPORTER_ADD_ROW {
                     run_add_url_flow(None);
                     return true;
                 }
@@ -4825,7 +4938,7 @@ fn input_inner(button: &str) -> bool {
                 if selection == 0 {
                     run_add_url_flow(Some(&typed));
                 } else {
-                    start_fp_search(&typed, Some(1));
+                    start_fp_search(&typed, Some(IMPORTER_ADD_ROW));
                 }
                 return true;
             }
@@ -5136,11 +5249,13 @@ fn input_inner(button: &str) -> bool {
             // the tile behind does, downloading the game or playing it when it
             // is on the card: same code, so the two cannot disagree about what
             // a press does.
+            // Opened from a shelf tile, it goes back to the home, on that tile
+            // (`fp_back_screen`).
             if matches!(button, "B" | "Plus" | "Minus") {
-                s.screen = Screen::FpGallery { selection, scroll };
+                s.screen = fp_back_screen(&s, selection, scroll);
             } else if button == "A" {
-                s.screen = Screen::FpGallery { selection, scroll };
-                handle_fp_gallery_input(&mut s, "A", selection, scroll);
+                s.screen = fp_back_screen(&s, selection, scroll);
+                fp_activate(&mut s, selection, scroll);
                 // A game on the card starts: the close below rewinds the
                 // screen to this window for its scale-out, so the sound the
                 // screens would give is the window's, not the launch every
@@ -5239,7 +5354,7 @@ fn input_inner(button: &str) -> bool {
                 "Left" | "StickLLeft" | "Right" | "StickLRight" => {
                     s.screen = Screen::ImportNotAddress { selection: answer_at(button, 0) }
                 }
-                "B" | "Minus" => s.screen = distant_idle_at(&s, 1),
+                "B" | "Minus" => s.screen = distant_idle_at(&s, IMPORTER_ADD_ROW),
                 _ => {}
             }
             true
@@ -7082,7 +7197,8 @@ pub(crate) fn importer_host(url: &str) -> std::string::String {
 
 /// Absolute indices into `url_history` in the order the IMPORTER home DISPLAYS
 /// them: search filter first, then the active sort. `Screen::DistantIdle`'s
-/// `selection` is a ROW index — rows 0 and 1 are the cards, rows 2.. index this.
+/// `selection` is a ROW index — the shelves' tiles and the add button first
+/// (`IMPORTER_PINNED_ROWS`), then this.
 pub(crate) fn importer_view(s: &State) -> std::vec::Vec<usize> {
     let needle = s
         .import_filter
@@ -7148,45 +7264,229 @@ pub(crate) fn importer_view(s: &State) -> std::vec::Vec<usize> {
     idx
 }
 
-/// The importer home's layout (Importer.dc.html), in screen pixels: two action
-/// cards side by side under the tabs, the "Mes sources" band, then the sources
-/// at a 58 px pitch. Shared by the renderer, the reveal that opens a row
-/// (`distant_row_rect`), the touch table and the scroll clamps, through
-/// `importer_item_rect`: the renderer laying rows out from its own literals while
-/// the reveal re-typed them is how a window once grew out of the row above.
+/// The importer home's layout ("Importer · À découvrir", board C1), in screen
+/// pixels: under the tabs the two discovery shelves, seven tiles each (six
+/// games, then the shelf's action), then the "Mes sources" band with the add
+/// button in it, then the sources at a 58 px pitch. The whole page scrolls, in
+/// pixels, between the tabs and the footer; the search is a button in the tab
+/// bar that does not scroll. Shared by the renderer, the reveal that opens out
+/// of an item (`distant_row_rect`), the touch table and the scroll, through
+/// `importer_item_rect`: the renderer laying rows out from its own literals
+/// while the reveal re-typed them is how a window once grew out of the row
+/// above.
 pub const IMPORTER_MARGIN: f32 = 48.0;
-pub const IMPORTER_CARD_TOP: f32 = 84.0;
-pub const IMPORTER_CARD_H: f32 = 92.0;
-pub const IMPORTER_CARD_GAP: f32 = 16.0;
-pub const IMPORTER_ROW_TOP: f32 = 228.0;
+/// Top of the content at scroll 0, and the band the page scrolls in (from
+/// under the tabs to the footer's line).
+pub const IMPORTER_TOP: f32 = 84.0;
+pub const IMPORTER_BAND_TOP: f32 = 72.0;
+pub const IMPORTER_BAND_BOT: f32 = 668.0;
+/// A shelf: its header line, its 4:3 tiles seven to a row, the title under
+/// each tile.
+pub const SHELF_COLS: usize = 7;
+pub const SHELF_GAP: f32 = 16.0;
+pub const SHELF_HEAD_H: f32 = 30.0;
+pub const SHELF_FOOT_H: f32 = 26.0;
+/// Between two blocks of the page.
+pub const IMPORTER_BLOCK_GAP: f32 = 20.0;
+/// The line that stands for both shelves when neither could be fetched.
+pub const IMPORTER_NOTE_H: f32 = 36.0;
+/// The "Mes sources" band, and the add button in it.
+pub const SOURCES_HEAD_H: f32 = 42.0;
+pub const ADD_BUTTON_H: f32 = 34.0;
 pub const IMPORTER_ROW_H: f32 = 58.0;
-/// Source rows visible at once, down to y 634, clear of the footer.
-pub const IMPORTER_VISIBLE_ROWS: usize = 7;
 
-/// The two actions above the saved sources: search Flashpoint, then add an
-/// address. `Screen::DistantIdle::selection` counts them first.
-///
-/// Flashpoint comes FIRST because it is the only import path that needs no URL:
-/// you type a name and pick a cover. The tab was built around archive.org URLs
-/// and kept that shape long after, so on a fresh install the whole screen said
-/// "paste an address" and the easy path was one letter in the footer legend.
-///
-/// Every row <-> URL conversion goes through `importer_row_for_abs` (or
-/// `importer_row_in`, on a view already built) and `importer_abs_for_row`, so
-/// this number is the only place the offset lives.
-pub const IMPORTER_PINNED_ROWS: usize = 2;
+/// `Screen::DistantIdle::selection`: the studio's seven tiles, the draw's
+/// seven, the add button, then the sources. Every row <-> URL conversion goes
+/// through `importer_row_for_abs` (or `importer_row_in`, on a view already
+/// built) and `importer_abs_for_row`, so `IMPORTER_PINNED_ROWS` is the only
+/// place the offset lives.
+pub const SHELF_STUDIO: usize = 0;
+pub const SHELF_LUCKY: usize = SHELF_COLS;
+/// A shelf's two actions, after its five games: see all (a studio's) or see
+/// more (a genre's), then draw again.
+pub const SHELF_SEE: usize = crate::sources::discover::SHELF_GAMES;
+pub const SHELF_AGAIN: usize = SHELF_SEE + 1;
+pub const IMPORTER_ADD_ROW: usize = 2 * SHELF_COLS;
+pub const IMPORTER_PINNED_ROWS: usize = IMPORTER_ADD_ROW + 1;
+/// Not a selection: the search button in the tab bar, as the place the
+/// results page opens out of and folds back into (`distant_row_rect`).
+pub const IMPORTER_SEARCH_ROW: usize = usize::MAX;
 
-/// Screen rect of importer item `row`: a card for rows 0 and 1, else a source
-/// row, at the list's pixel scroll `scroll_px` (source rows only scroll).
+/// Which shelves the page shows (bit 0 the studio, bit 1 the draw). Kept here
+/// for the geometry, which runs under the library's lock and so cannot read
+/// the shelves themselves.
+static SHELVES_SHOWN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0b11);
+
+/// `SHELVES_SHOWN` as the home's last frame had it: a shelf that came or
+/// went since moved the page under the cursor.
+static HOME_LAYOUT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0b11);
+
+/// The shelves on the page, as `SHELVES_SHOWN` last recorded them.
+pub(crate) fn shelves_shown() -> [bool; 2] {
+    let b = SHELVES_SHOWN.load(std::sync::atomic::Ordering::Relaxed);
+    [b & 1 != 0, b & 2 != 0]
+}
+
+/// How many game tiles each shelf has (low byte the studio, high byte the
+/// draw): its two actions come right after its last game. Five while it loads.
+static SHELF_GAME_TILES: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0x0505);
+
+/// Record which shelves `s` shows and how many games each has, for the
+/// geometry.
+fn publish_shelves(s: &State) {
+    let b = s.shelves[0].shown() as u8 | ((s.shelves[1].shown() as u8) << 1);
+    SHELVES_SHOWN.store(b, std::sync::atomic::Ordering::Relaxed);
+    let games = |k: usize| {
+        let shelf = &s.shelves[k];
+        if shelf.phase == ShelfPhase::Ready { shelf.items.len().min(SHELF_SEE) as u16 } else { SHELF_SEE as u16 }
+    };
+    SHELF_GAME_TILES.store(games(0) | (games(1) << 8), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The column tile `c` of shelf `k` is drawn in. A game's is its own; the
+/// two actions come right after the last game, so a studio with three games
+/// shows five tiles, not three, a gap and two. Their indexes in the selection
+/// stay `SHELF_SEE` and `SHELF_AGAIN`.
+pub(crate) fn shelf_draw_col(k: usize, c: usize) -> usize {
+    if c < SHELF_SEE {
+        return c;
+    }
+    let v = SHELF_GAME_TILES.load(std::sync::atomic::Ordering::Relaxed);
+    let games = (((v >> (8 * k.min(1))) & 0xFF) as usize).min(SHELF_SEE);
+    (games + (c - SHELF_SEE)).min(SHELF_COLS - 1)
+}
+
+/// A shelf tile's width and height: seven 4:3 tiles across the page.
+pub(crate) fn shelf_tile_size(vw: f32) -> (f32, f32) {
+    let w = (vw - 2.0 * IMPORTER_MARGIN - SHELF_GAP * (SHELF_COLS as f32 - 1.0)) / SHELF_COLS as f32;
+    (w, (w * 0.75).round())
+}
+
+/// A shelf's height, from the top of its header line to the bottom of the
+/// titles under its tiles.
+pub(crate) fn shelf_block_h(vw: f32) -> f32 {
+    SHELF_HEAD_H + shelf_tile_size(vw).1 + SHELF_FOOT_H
+}
+
+/// Top of shelf `k` in the page (scroll 0), `None` when it is not shown.
+pub(crate) fn shelf_top(k: usize, vw: f32) -> Option<f32> {
+    let shown = shelves_shown();
+    if !shown.get(k).copied().unwrap_or(false) {
+        return None;
+    }
+    let before = shown[..k].iter().filter(|s| **s).count() as f32;
+    Some(IMPORTER_TOP + before * (shelf_block_h(vw) + IMPORTER_BLOCK_GAP))
+}
+
+/// Top of the line that stands for the shelves when neither is shown.
+pub(crate) fn importer_note_top() -> Option<f32> {
+    (shelves_shown() == [false, false]).then_some(IMPORTER_TOP)
+}
+
+/// Top of the "Mes sources" band in the page (scroll 0).
+pub(crate) fn sources_head_top(vw: f32) -> f32 {
+    let shown = shelves_shown();
+    let n = shown.iter().filter(|s| **s).count() as f32;
+    if n == 0.0 {
+        IMPORTER_TOP + IMPORTER_NOTE_H + IMPORTER_BLOCK_GAP
+    } else {
+        IMPORTER_TOP + n * (shelf_block_h(vw) + IMPORTER_BLOCK_GAP)
+    }
+}
+
+/// Top of the first source row in the page (scroll 0).
+pub(crate) fn sources_rows_top(vw: f32) -> f32 {
+    sources_head_top(vw) + SOURCES_HEAD_H
+}
+
+/// How far the page scrolls with `n` sources: its content down to the last
+/// row, less the band it shows through.
+pub(crate) fn importer_max_scroll(n: usize, vw: f32) -> f32 {
+    let bottom = sources_rows_top(vw) + n as f32 * IMPORTER_ROW_H + 12.0;
+    (bottom - IMPORTER_BAND_BOT).max(0.0)
+}
+
+/// The add button's left edge and width, as the renderer last laid it out
+/// (it ends where the sort's label begins, and both are words), in f32 bits.
+static ADD_BUTTON_X: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Record where the add button was drawn (`ADD_BUTTON_X`).
+pub(crate) fn add_button_set(x: f32, w: f32) {
+    let bits = ((x.to_bits() as u64) << 32) | w.to_bits() as u64;
+    ADD_BUTTON_X.store(bits, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The add button's left edge and width, or a place near the right edge
+/// before it was first drawn.
+fn add_button_x(vw: f32) -> (f32, f32) {
+    let bits = ADD_BUTTON_X.load(std::sync::atomic::Ordering::Relaxed);
+    if bits == 0 {
+        return (vw - IMPORTER_MARGIN - 12.0 - 420.0, 230.0);
+    }
+    (f32::from_bits((bits >> 32) as u32), f32::from_bits(bits as u32))
+}
+
+/// The search button in the tab bar, as the renderer last drew it, in screen
+/// pixels (it never scrolls).
+static SEARCH_BUTTON: Mutex<(f32, f32, f32, f32)> = Mutex::new((0.0, 0.0, 0.0, 0.0));
+
+/// Record where the search button was drawn.
+pub(crate) fn search_button_set(rect: (f32, f32, f32, f32)) {
+    if let Ok(mut r) = SEARCH_BUTTON.lock() {
+        *r = rect;
+    }
+}
+
+/// The search button's rect, for a tap and for the results page's reveal.
+pub(crate) fn search_button_rect() -> (f32, f32, f32, f32) {
+    SEARCH_BUTTON.lock().map(|r| *r).unwrap_or_default()
+}
+
+/// Screen rect of importer item `row` at the page's pixel scroll `scroll_px`:
+/// a shelf tile, the add button, a source row, or the search button
+/// (`IMPORTER_SEARCH_ROW`). A tile of a shelf that is not shown is placed
+/// where the shelves' note is.
 pub(crate) fn importer_item_rect(row: usize, scroll_px: f32, vw: f32) -> (f32, f32, f32, f32) {
-    let w_all = vw - 2.0 * IMPORTER_MARGIN;
-    if row < IMPORTER_PINNED_ROWS {
-        let cw = ((w_all - IMPORTER_CARD_GAP) * 0.5).floor();
-        let x = IMPORTER_MARGIN + row as f32 * (cw + IMPORTER_CARD_GAP);
-        return (x, IMPORTER_CARD_TOP, cw, IMPORTER_CARD_H);
+    if row == IMPORTER_SEARCH_ROW {
+        return search_button_rect();
+    }
+    if row < IMPORTER_ADD_ROW {
+        let (k, c) = (row / SHELF_COLS, row % SHELF_COLS);
+        let col = shelf_draw_col(k, c);
+        let (w, h) = shelf_tile_size(vw);
+        let top = shelf_top(k, vw).unwrap_or(IMPORTER_TOP);
+        return (IMPORTER_MARGIN + col as f32 * (w + SHELF_GAP), top + SHELF_HEAD_H - scroll_px, w, h);
+    }
+    if row == IMPORTER_ADD_ROW {
+        let (x, w) = add_button_x(vw);
+        let y = sources_head_top(vw) + (SOURCES_HEAD_H - 6.0 - ADD_BUTTON_H) * 0.5;
+        return (x, y - scroll_px, w, ADD_BUTTON_H);
     }
     let k = (row - IMPORTER_PINNED_ROWS) as f32;
-    (IMPORTER_MARGIN, IMPORTER_ROW_TOP + k * IMPORTER_ROW_H - scroll_px, w_all, IMPORTER_ROW_H)
+    (
+        IMPORTER_MARGIN,
+        sources_rows_top(vw) + k * IMPORTER_ROW_H - scroll_px,
+        vw - 2.0 * IMPORTER_MARGIN,
+        IMPORTER_ROW_H,
+    )
+}
+
+/// What of the page must be on screen for the cursor on `row`, top and
+/// bottom in the page (scroll 0): a whole shelf for one of its tiles (its
+/// title and the names under it with it), the band with the first source
+/// for the add button, a row with the band above it for the first source.
+fn importer_item_span(row: usize, vw: f32) -> (f32, f32) {
+    if row < IMPORTER_ADD_ROW {
+        let top = shelf_top(row / SHELF_COLS, vw).unwrap_or(IMPORTER_TOP);
+        return (top, top + shelf_block_h(vw));
+    }
+    let head = sources_head_top(vw);
+    if row == IMPORTER_ADD_ROW {
+        return (head, head + SOURCES_HEAD_H + IMPORTER_ROW_H);
+    }
+    let k = row - IMPORTER_PINNED_ROWS;
+    let y = sources_rows_top(vw) + k as f32 * IMPORTER_ROW_H;
+    (if k == 0 { head } else { y }, y + IMPORTER_ROW_H)
 }
 
 /// An archive's game list: the rows' top (under the page header) and pitch.
@@ -7213,26 +7513,101 @@ pub(crate) fn fp_tile_rect(i: usize, scroll_px: f32, vw: f32) -> (f32, f32, f32,
     )
 }
 
-/// Last importer row (the add card when there is no source).
+/// The launcher's width, for the page's geometry where no backend is at hand
+/// (input): the interface is laid out at 1280 x 720.
+const IMPORTER_VW: f32 = 1280.0;
+
+/// Last importer row: the last source, or the add button when there is none.
 fn importer_last_row(s: &State) -> usize {
     importer_view(s).len() + IMPORTER_PINNED_ROWS - 1
 }
 
-/// The importer's scroll for the cursor on `row`, from the scroll it is at:
-/// moved only as far as the row needs, never past the end of `n` sources. A
-/// card needs none, it never scrolls away.
+/// The page's scroll, in pixels, for the cursor on `row`, from the scroll it
+/// is at: moved only as far as the row needs to be on screen with what goes
+/// with it (`importer_item_span`), never past the end of `n` sources.
 fn importer_scroll_for(row: usize, cur: usize, n: usize) -> usize {
-    let max = n.saturating_sub(IMPORTER_VISIBLE_ROWS);
-    if row < IMPORTER_PINNED_ROWS {
-        return cur.min(max);
-    }
-    clamp_scroll(cur, row - IMPORTER_PINNED_ROWS, IMPORTER_VISIBLE_ROWS).min(max)
+    let vw = IMPORTER_VW;
+    let (top, bot) = importer_item_span(row, vw);
+    // At most this far, or the top of what must show goes under the tabs; at
+    // least this far, or its bottom goes under the footer. The first shelf
+    // shows the page from its very top.
+    let hi = if top <= IMPORTER_TOP { 0.0 } else { top - (IMPORTER_BAND_TOP + 8.0) };
+    let lo = bot - (IMPORTER_BAND_BOT - 8.0);
+    let cur = cur as f32;
+    let at = if lo > hi { hi } else { cur.clamp(lo, hi) };
+    at.clamp(0.0, importer_max_scroll(n, vw)).round() as usize
 }
 
-/// The card last focused, 0 or 1: Up from the first source goes back to it.
-/// Recorded by every frame of the home, since a tap, a tab switch or a way
-/// back from another page puts the cursor on a card without a direction.
-static IMPORT_CARD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The column the cursor last had on a shelf: Up and Down between the
+/// shelves keep it, and coming back up from the add button finds it.
+static SHELF_COL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The columns of `shelf` that have a tile to stop on: all of them while it
+/// loads, its games and its two actions once it has them (a studio or a draw
+/// can have fewer games than the shelf holds).
+fn shelf_cols(shelf: &Shelf) -> std::vec::Vec<usize> {
+    if shelf.phase != ShelfPhase::Ready {
+        return (0..SHELF_COLS).collect();
+    }
+    let games = shelf.items.len().min(SHELF_SEE);
+    (0..games).chain([SHELF_SEE, SHELF_AGAIN]).collect()
+}
+
+/// Column `c` of `shelf`, or the nearest one it has a tile in.
+fn shelf_col_settle(shelf: &Shelf, c: usize) -> usize {
+    let cols = shelf_cols(shelf);
+    if cols.contains(&c) {
+        return c;
+    }
+    cols.iter().copied().filter(|&x| x < SHELF_SEE).last().unwrap_or(SHELF_SEE)
+}
+
+/// `row` moved onto something the page shows: a tile of a shelf that is not
+/// on the page goes to the same column of the other shelf, or to the add
+/// button when neither is; a column without a tile, to the nearest one with.
+fn importer_settle(s: &State, row: usize) -> usize {
+    if row >= IMPORTER_ADD_ROW {
+        return row;
+    }
+    let (k, c) = (row / SHELF_COLS, row % SHELF_COLS);
+    let k = if s.shelves[k].shown() {
+        k
+    } else if s.shelves[1 - k].shown() {
+        1 - k
+    } else {
+        return IMPORTER_ADD_ROW;
+    };
+    k * SHELF_COLS + shelf_col_settle(&s.shelves[k], c)
+}
+
+/// The shelf and the game under `row`, when it is a game's tile that has
+/// its game (not the shelf's action, not a tile still loading).
+fn shelf_game_at(s: &State, row: usize) -> Option<(usize, usize)> {
+    if row >= IMPORTER_ADD_ROW {
+        return None;
+    }
+    let (k, c) = (row / SHELF_COLS, row % SHELF_COLS);
+    let shelf = &s.shelves[k];
+    (c < SHELF_SEE && shelf.phase == ShelfPhase::Ready && c < shelf.items.len()).then_some((k, c))
+}
+
+/// Hand shelf `k`'s games to the Flashpoint flows (`cover_candidates`), to
+/// come back to the home on `selection` at `scroll` (`fp_home`): a game's
+/// details and its download then run as they do from the results.
+fn shelf_to_candidates(s: &mut State, k: usize, selection: usize, scroll: usize) {
+    s.cover_candidates = s.shelves[k].items.clone();
+    s.fp_home = Some((selection, scroll));
+}
+
+/// Where a Flashpoint flow goes back to: the results on result `selection`,
+/// or, for one started from a shelf tile (`fp_home`), the importer home on
+/// that tile.
+fn fp_back_screen(s: &State, selection: usize, scroll: usize) -> Screen {
+    match s.fp_home {
+        Some((sel, scroll_offset)) => Screen::DistantIdle { selection: sel, scroll_offset },
+        None => Screen::FpGallery { selection: selection.min(s.cover_candidates.len().saturating_sub(1)), scroll },
+    }
+}
 
 /// When the importer home was last drawn as the page, to tell a frame that
 /// follows another from one that comes back to it.
@@ -7269,23 +7644,28 @@ static JOUER_RESCROLL: std::sync::atomic::AtomicBool = std::sync::atomic::Atomic
 /// showing.
 fn distant_idle_at(s: &State, row: usize) -> Screen {
     let cur = IMPORT_SCROLL.load(std::sync::atomic::Ordering::Relaxed);
-    let row = row.min(importer_last_row(s));
+    let row = importer_settle(s, row.min(importer_last_row(s)));
     Screen::DistantIdle { selection: row, scroll_offset: importer_scroll_for(row, cur, importer_view(s).len()) }
 }
 
 /// The importer as a way in from another tab finds it: the cursor on the
-/// Flashpoint card and the sources from the top, wherever they were left.
-/// Coming back from one of its own pages goes through `distant_idle_at`
-/// instead, to the row and the scroll it left.
+/// first game of the first shelf on the page (the add button when no shelf
+/// is), the page from its top. Coming back from one of its own pages goes
+/// through `distant_idle_at` instead, to the row and the scroll it left.
 fn importer_tab_home() -> Screen {
     IMPORT_SCROLL.store(0, std::sync::atomic::Ordering::Relaxed);
-    IMPORT_CARD.store(0, std::sync::atomic::Ordering::Relaxed);
-    Screen::DistantIdle { selection: 0, scroll_offset: 0 }
+    SHELF_COL.store(0, std::sync::atomic::Ordering::Relaxed);
+    let selection = match shelves_shown() {
+        [true, _] => SHELF_STUDIO,
+        [false, true] => SHELF_LUCKY,
+        _ => IMPORTER_ADD_ROW,
+    };
+    Screen::DistantIdle { selection, scroll_offset: 0 }
 }
 
 /// Importer row of history entry `abs` in the current view, so screens that act
 /// on an ABSOLUTE url index can hand the cursor back to the right row. Falls back
-/// to the add card when `abs` is gone or filtered out.
+/// to the add button when `abs` is gone or filtered out.
 fn importer_row_for_abs(s: &State, abs: usize) -> usize {
     importer_row_in(&importer_view(s), abs)
 }
@@ -7295,11 +7675,12 @@ fn importer_row_for_abs(s: &State, abs: usize) -> usize {
 /// and sorts every saved source, and the FILES order looks each one up in the
 /// cache: a frame should build it once.
 fn importer_row_in(view: &[usize], abs: usize) -> usize {
-    view.iter().position(|&i| i == abs).map(|p| p + IMPORTER_PINNED_ROWS).unwrap_or(1)
+    view.iter().position(|&i| i == abs).map(|p| p + IMPORTER_PINNED_ROWS).unwrap_or(IMPORTER_ADD_ROW)
 }
 
-/// Absolute `url_history` index behind an IMPORTER row, or `None` for the two
-/// pinned action rows at the top and for out-of-range rows.
+/// Absolute `url_history` index behind an IMPORTER row, or `None` for the
+/// shelves' tiles and the add button above the sources, and for out-of-range
+/// rows.
 fn importer_abs_for_row(s: &State, row: usize) -> Option<usize> {
     if row < IMPORTER_PINNED_ROWS {
         return None;
@@ -7385,12 +7766,54 @@ fn url_is_direct(url: &str) -> bool {
 /// `ImporterHome`); `interactive` false when it is only the backdrop of what is
 /// drawn over it.
 fn draw_importer_home(backend: &mut SwitchRenderBackend, selection: usize, scroll: usize, interactive: bool) {
-    use crate::backend::render::{ImporterHome, SourceRow};
+    use crate::backend::render::{Icon, ImporterHome, ShelfAction, ShelfTile, ShelfView, SourceRow};
     let snap = LIBRARY
         .lock()
         .ok()
-        .map(|s| (importer_home_rows(&s), s.url_history.len(), s.import_filter.clone()));
-    let Some((rows, total, filter)) = snap else { return };
+        .map(|s| (importer_home_rows(&s), s.url_history.len(), s.import_filter.clone(), shelf_snaps(&s)));
+    let Some((rows, total, filter, snaps)) = snap else { return };
+    let u = crate::loc_ui::ui();
+    let tiles: [std::vec::Vec<ShelfTile>; 2] = core::array::from_fn(|k| {
+        snaps[k]
+            .tiles
+            .iter()
+            .map(|(title, thumb, installed)| ShelfTile { title, thumb, installed: *installed })
+            .collect()
+    });
+    // The search keeps sixty games at most: a studio that reaches it has
+    // more, and says so ("60+").
+    let studio_count = {
+        let n = snaps[0].total;
+        let label = crate::loc_ui::games(n);
+        if n >= crate::sources::gamezip::SEARCH_MAX {
+            label.replacen(&n.to_string(), &std::format!("{}+", n), 1)
+        } else {
+            label
+        }
+    };
+    let counts = [studio_count, std::string::String::new()];
+    let shelves: [ShelfView; 2] = core::array::from_fn(|k| ShelfView {
+        shown: snaps[k].shown,
+        loading: snaps[k].loading,
+        title: if k == 0 { u.disc_studio } else { u.disc_lucky },
+        sub: &snaps[k].sub,
+        note: if k == 0 { u.disc_studio_note } else { u.disc_lucky_note },
+        tiles: &tiles[k],
+        actions: [
+            ShelfAction {
+                label: if k == 0 { u.disc_see_all } else { u.disc_see_more },
+                sub: if k == 0 { &counts[0] } else { u.disc_more_games },
+                icon: Icon::Grid,
+                gold: false,
+            },
+            ShelfAction {
+                label: u.disc_again,
+                sub: if k == 0 { u.disc_other_studio } else { u.disc_other_batch },
+                icon: Icon::Refresh,
+                gold: true,
+            },
+        ],
+    });
     let refs: std::vec::Vec<SourceRow> = rows
         .iter()
         .map(|r| SourceRow {
@@ -7410,9 +7833,53 @@ fn draw_importer_home(backend: &mut SwitchRenderBackend, selection: usize, scrol
         filter: filter.as_deref(),
         total,
         sort,
+        shelves,
         interactive,
     });
 }
+
+/// One shelf as the home draws it, owned so it outlives the lock.
+struct ShelfSnap {
+    shown: bool,
+    loading: bool,
+    /// The studio's name, or the genre's.
+    sub: std::string::String,
+    /// Each game: its title, its screenshot's address, and whether it is on
+    /// the card (by name, the question A asks before playing it).
+    tiles: std::vec::Vec<(std::string::String, std::string::String, bool)>,
+    total: usize,
+}
+
+/// The two shelves as the home draws them.
+fn shelf_snaps(s: &State) -> [ShelfSnap; 2] {
+    use crate::sources::discover;
+    core::array::from_fn(|k| {
+        let shelf = &s.shelves[k];
+        let sub = if k == 0 { shelf.studio.clone() } else { std::string::String::new() };
+        let tiles = if shelf.phase == ShelfPhase::Ready {
+            shelf
+                .items
+                .iter()
+                .map(|c| {
+                    let name = crate::sources::gamezip::swf_filename(&c.title);
+                    let on_card = s.entries.iter().any(|e| e.basename == name);
+                    (c.title.clone(), discover::screenshot_url(&c.id), on_card)
+                })
+                .collect()
+        } else {
+            std::vec::Vec::new()
+        };
+        ShelfSnap {
+            shown: shelf.shown(),
+            loading: shelf.phase != ShelfPhase::Ready,
+            sub,
+            tiles,
+            total: shelf.total,
+        }
+    })
+}
+
+
 
 fn handle_distant_idle_input(
     s: &mut State,
@@ -7420,61 +7887,105 @@ fn handle_distant_idle_input(
     mut selection: usize,
     scroll: usize,
 ) {
-    // A (open / add), X (Flashpoint) and Minus (search) are hoisted: they open
-    // the keyboard or the network. Here: moving, the options, the sort, and B.
+    // A (download or play a game, see a studio's games, draw again, add an
+    // address, open a source), X (Flashpoint) and Minus (search) are hoisted:
+    // they open the keyboard or the network. Here: moving, a game's details, a
+    // source's options, the sort, and B.
     //
-    // The two cards sit side by side over the list. Down from a card goes to
-    // the first source and Up from the first source back to the card it came
-    // from; past either end of the list a NEW press comes round (Up on a card
-    // to the last source, Down on the last source to the cards) and a held one
-    // stops, like every list.
+    // The page is bands, top to bottom: the studio's shelf, the draw's shelf,
+    // the add button, the sources. Up and Down go from band to band, keeping
+    // the shelf column; past either end a NEW press comes round (Up on the
+    // first band to the last source, Down on the last source to the first
+    // band) and a held one stops, like every list. Left and Right walk a
+    // shelf's tiles, coming round on a press; in the sources they skip five,
+    // as in every other list.
     let n = importer_view(s).len();
     let last = n + IMPORTER_PINNED_ROWS - 1;
-    // A row the list no longer has (it shrank under the cursor) counts as the last.
-    selection = selection.min(last);
-    let card = IMPORT_CARD.load(std::sync::atomic::Ordering::Relaxed).min(IMPORTER_PINNED_ROWS - 1);
+    // A row the page no longer has (the list shrank under the cursor, a shelf
+    // went) counts as the nearest it has.
+    selection = importer_settle(s, selection.min(last));
+    let shown = [s.shelves[0].shown(), s.shelves[1].shown()];
+    let col = SHELF_COL.load(std::sync::atomic::Ordering::Relaxed).min(SHELF_COLS - 1);
+    let on_shelf = |s: &State, k: usize, c: usize| k * SHELF_COLS + shelf_col_settle(&s.shelves[k], c);
+    // The first band on the page, at the column the cursor last had on a shelf.
+    let top_band = |s: &State| match shown {
+        [true, _] => on_shelf(s, 0, col),
+        [false, true] => on_shelf(s, 1, col),
+        _ => IMPORTER_ADD_ROW,
+    };
     match button {
         "Up" | "StickLUp" => {
-            if selection < IMPORTER_PINNED_ROWS {
-                if n > 0 && nav_may_wrap() {
+            if selection < SHELF_LUCKY {
+                if nav_may_wrap() && n > 0 {
+                    selection = last;
+                }
+            } else if selection < IMPORTER_ADD_ROW {
+                if shown[0] {
+                    selection = on_shelf(s, 0, selection % SHELF_COLS);
+                } else if nav_may_wrap() && n > 0 {
+                    selection = last;
+                }
+            } else if selection == IMPORTER_ADD_ROW {
+                if shown[1] {
+                    selection = on_shelf(s, 1, col);
+                } else if shown[0] {
+                    selection = on_shelf(s, 0, col);
+                } else if nav_may_wrap() && n > 0 {
                     selection = last;
                 }
             } else if selection == IMPORTER_PINNED_ROWS {
-                selection = card;
+                selection = IMPORTER_ADD_ROW;
             } else {
                 selection -= 1;
             }
         }
         "Down" | "StickLDown" => {
-            if selection < IMPORTER_PINNED_ROWS {
+            if selection < SHELF_LUCKY {
+                selection = if shown[1] { on_shelf(s, 1, selection % SHELF_COLS) } else { IMPORTER_ADD_ROW };
+            } else if selection < IMPORTER_ADD_ROW {
+                selection = IMPORTER_ADD_ROW;
+            } else if selection == IMPORTER_ADD_ROW {
                 if n > 0 {
                     selection = IMPORTER_PINNED_ROWS;
+                } else if nav_may_wrap() {
+                    selection = top_band(s);
                 }
             } else if selection >= last {
                 if nav_may_wrap() {
-                    selection = card;
+                    selection = top_band(s);
                 }
             } else {
                 selection += 1;
             }
         }
-        // On the cards Left / Right go from one to the other; in the list they
-        // skip five sources, as in every other list. Suppressed on a diagonal.
+        // Suppressed on a diagonal: a thumb going down the page must not
+        // slide along a shelf on the way.
         "Left" | "StickLLeft" | "Right" | "StickLRight" => {
             if nav_is_diagonal() {
                 return;
             }
             let back = matches!(button, "Left" | "StickLLeft");
-            if selection < IMPORTER_PINNED_ROWS {
-                selection = if back { 0 } else { 1 };
-            } else if n > 0 {
+            if selection < IMPORTER_ADD_ROW {
+                let k = selection / SHELF_COLS;
+                let cols = shelf_cols(&s.shelves[k]);
+                let at = cols.iter().position(|&c| c == selection % SHELF_COLS).unwrap_or(0);
+                let next = list_step_wrap(at, if back { -1 } else { 1 }, cols.len());
+                selection = k * SHELF_COLS + cols[next.min(cols.len() - 1)];
+            } else if selection > IMPORTER_ADD_ROW && n > 0 {
                 let k = selection - IMPORTER_PINNED_ROWS;
                 let step = if back { -(LIST_SKIP as isize) } else { LIST_SKIP as isize };
                 selection = list_step_wrap(k, step, n) + IMPORTER_PINNED_ROWS;
             }
         }
         "Plus" => {
-            // Options on a saved source (the cards have none).
+            // A game's details on a shelf tile: the window the results open,
+            // on this shelf's games, coming back here.
+            if let Some((k, c)) = shelf_game_at(s, selection) {
+                shelf_to_candidates(s, k, selection, scroll);
+                open_fp_details(s, c, 0);
+                return;
+            }
+            // A saved source's options.
             if let Some(abs) = importer_abs_for_row(s, selection) {
                 s.screen = Screen::DistantUrlOptions { url_idx: abs, selection: 0 };
                 return;
@@ -7511,8 +8022,8 @@ fn handle_distant_idle_input(
         }
         _ => {}
     }
-    if selection < IMPORTER_PINNED_ROWS {
-        IMPORT_CARD.store(selection, std::sync::atomic::Ordering::Relaxed);
+    if selection < IMPORTER_ADD_ROW {
+        SHELF_COL.store(selection % SHELF_COLS, std::sync::atomic::Ordering::Relaxed);
     }
     let n = importer_view(s).len();
     s.screen = Screen::DistantIdle { selection, scroll_offset: importer_scroll_for(selection, scroll, n) };
@@ -7832,7 +8343,7 @@ fn rename_source(s: &mut State, idx: usize, new_url: &str) -> usize {
     at
 }
 
-/// The add card: the keyboard for a new address (`initial` pre-fills it when
+/// The add button: the keyboard for a new address (`initial` pre-fills it when
 /// retyping text that was not one), then open it. Text with a space in it
 /// cannot be an address (an archive.org identifier never has one): it is a
 /// game's name, so the importer offers to search Flashpoint for it instead of
@@ -7856,16 +8367,16 @@ fn run_add_url_flow(initial: Option<&str>) {
         }
         return;
     }
-    // The window opens out of the add card. The importer is put back under it
-    // first: retyped from the "not an address" question, that question was
+    // The window opens out of the add button. The importer is put back under
+    // it first: retyped from the "not an address" question, that question was
     // still the screen, and an address that leads nowhere new (a direct link to
     // a game already on the card only says so in a toast) left it up behind
     // the toast. A cancelled keyboard returned above and keeps it.
     if let Ok(mut s) = LIBRARY.lock() {
-        s.import_return_row = 1;
-        s.screen = distant_idle_at(&s, 1);
+        s.import_return_row = IMPORTER_ADD_ROW;
+        s.screen = distant_idle_at(&s, IMPORTER_ADD_ROW);
     }
-    run_fetch_for_url(&url, 1, IMPORT_SCROLL.load(std::sync::atomic::Ordering::Relaxed));
+    run_fetch_for_url(&url, IMPORTER_ADD_ROW, IMPORT_SCROLL.load(std::sync::atomic::Ordering::Relaxed));
 }
 
 /// `text` without a leading archive.org download or details address
@@ -7905,9 +8416,9 @@ fn run_import_search_flow() -> bool {
     let trimmed = typed.trim().to_string();
     if let Ok(mut s) = LIBRARY.lock() {
         s.import_filter = if trimmed.is_empty() { None } else { Some(trimmed) };
-        // Fresh (filtered) list: the cursor on its first source, under the two
-        // cards, or on the first card when nothing matched.
-        let row = if importer_view(&s).is_empty() { 0 } else { IMPORTER_PINNED_ROWS };
+        // Fresh (filtered) list: the cursor on its first source, or on the add
+        // button above the empty list when nothing matched.
+        let row = if importer_view(&s).is_empty() { IMPORTER_ADD_ROW } else { IMPORTER_PINNED_ROWS };
         IMPORT_SCROLL.store(0, std::sync::atomic::Ordering::Relaxed);
         s.screen = distant_idle_at(&s, row);
     }
@@ -8110,7 +8621,7 @@ fn run_direct_download(url: &str) {
     }
 }
 
-/// IMPORTER > X (or A on the Flashpoint card): the keyboard for a game's name,
+/// IMPORTER > X (or a tap on the search button): the keyboard for a game's name,
 /// pre-filled with the last search, then the search. `origin` is the importer
 /// row it was asked from, `None` from the results page itself (a new search).
 /// Called from `input()` only (the keyboard needs the lock free).
@@ -8137,21 +8648,89 @@ fn run_fp_search_flow(origin: Option<usize>) -> bool {
 fn start_fp_search(query: &str, origin: Option<usize>) {
     let filter = LIBRARY.lock().map(|s| s.fp_content_filter).unwrap_or(true);
     log(&std::format!("library: flashpoint game search \"{}\" (async)\n", query));
+    let url = crate::sources::gamezip::search_url(query, filter);
+    start_fp_query(&url, query, None, origin.map(|row| (row, IMPORTER_SEARCH_ROW)));
+}
+
+/// A studio's games on the results page: "see all" on the studio of the
+/// day's shelf (`origin_row`, its tile, which the page opens out of and folds
+/// back into). The header names the studio as it names a search.
+fn start_fp_studio(name: std::string::String, origin_row: usize) {
+    let filter = LIBRARY.lock().map(|s| s.fp_content_filter).unwrap_or(true);
+    log(&std::format!("library: flashpoint studio \"{}\" (async)\n", name));
+    let url = crate::sources::discover::studio_url(&name, filter);
+    let query = name.clone();
+    start_fp_query(&url, &query, Some(name), Some((origin_row, origin_row)));
+}
+
+/// "See more" on the draw's shelf: a bigger draw on the results page, with
+/// the shelf's own `games` among it (the shelf showed them, and asking for
+/// more must not make them vanish). The header says it is a random draw.
+/// From the importer, `origin_row` is the tile the page opens out of.
+fn start_fp_draw(games: std::vec::Vec<crate::sources::flashpoint::CatalogEntry>, origin_row: Option<usize>) {
+    use crate::sources::discover;
+    let filter = LIBRARY.lock().map(|s| s.fp_content_filter).unwrap_or(true);
+    let mut rng = discover::Rng::new(unsafe { ruffle_tick_now() } ^ discover::unix_time());
+    let url = discover::draw_more_url(&mut rng, filter);
+    log("library: flashpoint random draw (async)\n");
+    start_fp_query(&url, crate::loc_ui::ui().disc_lucky, None, origin_row.map(|r| (r, r)));
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.fp_draw = true;
+        s.fp_seed = games;
+    }
+}
+
+/// Every cached logo and screenshot let go of, but the screenshots of the
+/// games the shelves show: a new search, or the results folding back, does
+/// not make the importer load them again.
+fn clear_thumbs_but_shelves() {
+    let keep: std::vec::Vec<std::string::String> = LIBRARY
+        .lock()
+        .ok()
+        .map(|s| {
+            s.shelves
+                .iter()
+                .flat_map(|sh| sh.items.iter().map(|c| crate::sources::discover::screenshot_url(&c.id)))
+                .collect()
+        })
+        .unwrap_or_default();
+    crate::backend::render::thumb_cache_clear_except(&keep);
+}
+
+/// Ask db-api `url` behind the results page, titled `query`: its header and
+/// waiting tiles are up at once and the results fill them when they land.
+/// `studio` is set for a studio's games, so a retry asks for them again.
+/// From the importer, `origin` is the row to come back to and the item the
+/// page opens out of (the search button, a tile), and B folds it back there.
+fn start_fp_query(url: &str, query: &str, studio: Option<std::string::String>, origin: Option<(usize, usize)>) {
     // Drop any thumbnail still coming for the previous results, and the
     // details blurb with them: a slot freed here can be handed to a logo next.
-    // Their logos go too, textures and all: those results are gone.
+    // Their logos go too, textures and all: those results are gone. The
+    // shelves' screenshots stay, for the way back to the importer.
     crate::backend::render::thumb_cancel_all();
-    crate::backend::render::thumb_cache_clear();
+    clear_thumbs_but_shelves();
     // A fresh result set: snap the glide and the tiles' clocks to rest.
     crate::backend::render::gallery_anim_reset();
     crate::backend::render::tile_open_reset();
-    let started = net::start_get_async(&crate::sources::gamezip::search_url(query, filter));
+    let started = net::start_get_async(url);
     if let Ok(mut s) = LIBRARY.lock() {
         s.cover_candidates = std::vec::Vec::new();
         s.fp_query = query.to_string();
+        s.fp_studio = studio;
+        s.fp_draw = false;
+        s.fp_seed.clear();
+        s.fp_home = None;
         s.fp_sort = (0, false);
         s.fp_desc_slot = -1;
         s.fp_size_slot = -1;
+        // A shelf's search shared the pool just cancelled: it is asked again
+        // once the home is back, rather than counted as failed.
+        for shelf in s.shelves.iter_mut() {
+            if shelf.phase == ShelfPhase::Loading {
+                shelf.phase = ShelfPhase::Idle;
+                shelf.slot = -1;
+            }
+        }
         match started {
             Ok(()) => {
                 s.cover_msg = std::string::String::new();
@@ -8164,13 +8743,13 @@ fn start_fp_search(query: &str, origin: Option<usize>) {
                 s.fp_error = true;
             }
         }
-        if let Some(row) = origin {
+        if let Some((row, _)) = origin {
             s.import_return_row = row;
         }
         s.screen = Screen::FpGallery { selection: 0, scroll: 0 };
     }
-    if origin.is_some() {
-        crate::backend::render::distant_reveal_begin_expand(0, IMPORT_SCROLL.load(std::sync::atomic::Ordering::Relaxed));
+    if let Some((_, from)) = origin {
+        crate::backend::render::distant_reveal_begin_expand(from, IMPORT_SCROLL.load(std::sync::atomic::Ordering::Relaxed));
     }
 }
 
@@ -8181,7 +8760,7 @@ fn start_fp_search(query: &str, origin: Option<usize>) {
 /// `input()` only. Returns whether a search went out, so A can sound like it
 /// did something only when it did.
 fn run_fp_requery(flip_filter: bool) -> bool {
-    let query = {
+    let (query, studio, draw, filter) = {
         let Ok(mut s) = LIBRARY.lock() else { return false };
         if s.fp_loading {
             return false;
@@ -8190,8 +8769,19 @@ fn run_fp_requery(flip_filter: bool) -> bool {
             s.fp_content_filter = !s.fp_content_filter;
             log(&std::format!("library: flashpoint filter -> {}\n", s.fp_content_filter));
         }
-        s.fp_query.clone()
+        let draw = s.fp_draw.then(|| s.fp_seed.clone());
+        (s.fp_query.clone(), s.fp_studio.clone(), draw, s.fp_content_filter)
     };
+    // A bigger draw: another one, the shelf's games still among it.
+    if let Some(games) = draw {
+        start_fp_draw(games, None);
+        return true;
+    }
+    // A studio's games are asked for again as such, not as a search for its name.
+    if let Some(name) = studio {
+        start_fp_query(&crate::sources::discover::studio_url(&name, filter), &query, Some(name), None);
+        return true;
+    }
     if query.trim().is_empty() {
         return false;
     }
@@ -8640,7 +9230,8 @@ fn import_error(s: &mut State, kind: ErrKind, msg: &str, retry: bool, context: &
     crate::backend::render::distant_reveal_cancel();
     // Where B goes back to: the list the failure came from.
     s.import_error_back = match s.screen {
-        Screen::FpGallery { selection, scroll } => Screen::FpGallery { selection, scroll },
+        Screen::FpGallery { selection, scroll } => fp_back_screen(s, selection, scroll),
+        Screen::DistantIdle { selection, scroll_offset } => Screen::DistantIdle { selection, scroll_offset },
         Screen::DistantFiles { selection, scroll_offset } => Screen::DistantFiles { selection, scroll_offset },
         Screen::DistantDownloading | Screen::DistantCancelConfirm { .. } => download_back_screen(s),
         _ => Screen::Inactive,
@@ -8681,6 +9272,8 @@ fn leave_import_error(s: &mut State) {
         Screen::FpGallery { selection, scroll } if !s.cover_candidates.is_empty() => {
             Screen::FpGallery { selection: selection.min(s.cover_candidates.len() - 1), scroll }
         }
+        // A shelf game's download that failed: back on its tile.
+        Screen::DistantIdle { selection, .. } => distant_idle_at(s, selection),
         Screen::DistantFiles { selection, scroll_offset } if !s.remote_files.is_empty() => {
             let len = filtered_indices(&s.remote_files, &s.distant_filter).len();
             let sel = selection.min(len.saturating_sub(1));
@@ -8699,7 +9292,7 @@ fn leave_import_error(s: &mut State) {
 fn download_back_screen(s: &State) -> Screen {
     let (sel, scroll) = s.download_resume_pos.unwrap_or((0, 0));
     if s.download_zip_extract.is_some() || s.download_fp_direct {
-        Screen::FpGallery { selection: sel.min(s.cover_candidates.len().saturating_sub(1)), scroll }
+        fp_back_screen(s, sel, scroll)
     } else if !s.remote_files.is_empty() {
         let len = filtered_indices(&s.remote_files, &s.distant_filter).len();
         let sel = sel.min(len.saturating_sub(1));
@@ -9951,8 +10544,9 @@ fn handle_cover_picker_input(s: &mut State, button: &str, game_idx: usize, mut s
 /// Flashpoint results (IMPORTER > X) navigation + download. A cover grid of the
 /// search hits; A downloads the selected game's GameZIP (async — then
 /// `on_download_finished` unzips it), or plays it when it is already on the
-/// card; B folds the page back into the Flashpoint card. Called under the
-/// LIBRARY lock; `net::start_download` is non-blocking so that's fine.
+/// card; B folds the page back into what opened it (the search button, a
+/// studio's "see all" tile). Called under the LIBRARY lock;
+/// `net::start_download` is non-blocking so that's fine.
 fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mut scroll: usize) {
     // Search still on its way: only B (or Minus) answers, cancelling it. The
     // page stays "loading" while it folds back (the fold clears it once done):
@@ -9988,80 +10582,7 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
             selection = grid_step(selection, true, cols, total);
         }
         "A" => {
-            let Some(cand) = s.cover_candidates.get(selection).cloned() else {
-                return;
-            };
-            let swf_name = crate::sources::gamezip::swf_filename(&cand.title);
-            // Already on the card: A plays it, from here.
-            if let Some(abs) = s.entries.iter().position(|e| e.basename == swf_name) {
-                let rect = crate::backend::render::import_sel_rect();
-                launch_from_importer(s, abs, rect, Screen::FpGallery { selection, scroll });
-                return;
-            }
-            // No address of the player's in a Flashpoint download: one left
-            // from an archive tried before must not be offered for fixing (Y)
-            // on this game's error page, whichever way it fails.
-            s.failed_url.clear();
-            let swf_path = std::format!("{}/{}", primary_root(), swf_name);
-            // Zipped games come from the GameZIP server: download a temp `.zip`,
-            // then extract. Non-zipped (legacy "loose") games aren't on that
-            // server, so download their entry `.swf` straight from the htdocs
-            // mirror (derived from the launchCommand); companions are fetched
-            // afterwards, same as a GameZIP. `fp_direct` routes the finish path.
-            // Backstop for `parse_search`'s runnable filter. A bare `.swf` is
-            // runnable; a zipped HTML wrapper is too (we resolve the embedded
-            // entry SWF out of the GameZIP after download — e.g. Agent P Strikes
-            // Back). A non-.swf, non-wrapper (or non-zipped HTML) entry has
-            // nothing we can launch, so bail with a clear message BEFORE
-            // transferring the GameZIP.
-            let runnable = crate::sources::gamezip::launch_command_is_swf(&cand.launch_command)
-                || (cand.zipped
-                    && crate::sources::gamezip::launch_command_is_html(&cand.launch_command));
-            if !runnable {
-                import_error(s, ErrKind::Unsupported, crate::loc::s().err_fp_html_game, false, &cand.title);
-                return;
-            }
-            let (url, out_path, fp_direct) = if cand.zipped {
-                let zip_path = std::format!("{}/.fpdl.zip", primary_root());
-                (crate::sources::gamezip::get_url(&cand.id), zip_path, false)
-            } else {
-                match crate::sources::gamezip::htdocs_url_from_command(&cand.launch_command) {
-                    Some(u) => (u, swf_path.clone(), true),
-                    None => {
-                        // parse_search only keeps non-zipped games with a usable
-                        // command, so this is unexpected — surface an error rather
-                        // than a silent no-op.
-                        let msg = crate::loc_ui::ui().imp_err_fp_no_swf;
-                        import_error(s, ErrKind::Unsupported, msg, false, &cand.title);
-                        return;
-                    }
-                }
-            };
-            s.import_retry = Some(RetryAction::FpGame { selection, scroll });
-            match net::start_download(&url, &out_path) {
-                Ok(()) => {
-                    note_download_started();
-                    s.download_file_name = swf_name;
-                    s.download_out_path = out_path;
-                    s.download_source_url = url.clone();
-                    // Holds the FINAL .swf path for the Flashpoint finalize. For a
-                    // zipped game the download (a temp .zip) extracts INTO it; for
-                    // a non-zipped game it == download_out_path (downloaded direct).
-                    s.download_zip_extract = Some(swf_path);
-                    s.download_fp_direct = fp_direct;
-                    s.download_launch_command = cand.launch_command.clone();
-                    // Grab this game's cover automatically once the .swf lands.
-                    s.download_cover_url = Some(cand.cover_url.clone());
-                    // Keep the REAL title so we can restore it as the display
-                    // name (the filename loses `:` and other chars).
-                    s.download_title = Some(cand.title.clone());
-                    s.download_resume_pos = Some((selection, scroll));
-                    s.import_had_files = false;
-                    s.import_had_data = false;
-                    s.screen = Screen::DistantDownloading;
-                }
-                Err(e) => import_error(s, ErrKind::Download, &e, true, &cand.title),
-            }
+            fp_activate(s, selection, scroll);
             return;
         }
         "Plus" => {
@@ -10084,7 +10605,7 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
             return;
         }
         "B" => {
-            // Fold the page back into the Flashpoint card; render lands on the
+            // Fold the page back into what opened it; render lands on the
             // importer row the search was asked from once it has.
             crate::backend::render::distant_reveal_begin_collapse();
             return;
@@ -10099,6 +10620,400 @@ fn handle_fp_gallery_input(s: &mut State, button: &str, mut selection: usize, mu
         scroll = sel_row + 1 - rows_visible;
     }
     s.screen = Screen::FpGallery { selection, scroll };
+}
+
+/// A on Flashpoint game `selection` of `cover_candidates`: play it when it is
+/// on the card, else download it. The results page's A, the details window's,
+/// and a shelf tile's, which hands its games over first (`shelf_to_candidates`):
+/// one code, so they cannot disagree about what a press does. `scroll` is the
+/// results' scroll, to come back to; a shelf's flow comes back to the home
+/// (`fp_back_screen`).
+fn fp_activate(s: &mut State, selection: usize, scroll: usize) {
+    let Some(cand) = s.cover_candidates.get(selection).cloned() else {
+        return;
+    };
+    let swf_name = crate::sources::gamezip::swf_filename(&cand.title);
+    // Already on the card: A plays it, from here.
+    if let Some(abs) = s.entries.iter().position(|e| e.basename == swf_name) {
+        let rect = crate::backend::render::import_sel_rect();
+        let backdrop = fp_back_screen(s, selection, scroll);
+        launch_from_importer(s, abs, rect, backdrop);
+        return;
+    }
+    // No address of the player's in a Flashpoint download: one left
+    // from an archive tried before must not be offered for fixing (Y)
+    // on this game's error page, whichever way it fails.
+    s.failed_url.clear();
+    let swf_path = std::format!("{}/{}", primary_root(), swf_name);
+    // Zipped games come from the GameZIP server: download a temp `.zip`,
+    // then extract. Non-zipped (legacy "loose") games aren't on that
+    // server, so download their entry `.swf` straight from the htdocs
+    // mirror (derived from the launchCommand); companions are fetched
+    // afterwards, same as a GameZIP. `fp_direct` routes the finish path.
+    // Backstop for `parse_search`'s runnable filter. A bare `.swf` is
+    // runnable; a zipped HTML wrapper is too (we resolve the embedded
+    // entry SWF out of the GameZIP after download — e.g. Agent P Strikes
+    // Back). A non-.swf, non-wrapper (or non-zipped HTML) entry has
+    // nothing we can launch, so bail with a clear message BEFORE
+    // transferring the GameZIP.
+    let runnable = crate::sources::gamezip::launch_command_is_swf(&cand.launch_command)
+        || (cand.zipped && crate::sources::gamezip::launch_command_is_html(&cand.launch_command));
+    if !runnable {
+        import_error(s, ErrKind::Unsupported, crate::loc::s().err_fp_html_game, false, &cand.title);
+        return;
+    }
+    let (url, out_path, fp_direct) = if cand.zipped {
+        let zip_path = std::format!("{}/.fpdl.zip", primary_root());
+        (crate::sources::gamezip::get_url(&cand.id), zip_path, false)
+    } else {
+        match crate::sources::gamezip::htdocs_url_from_command(&cand.launch_command) {
+            Some(u) => (u, swf_path.clone(), true),
+            None => {
+                // parse_search only keeps non-zipped games with a usable
+                // command, so this is unexpected — surface an error rather
+                // than a silent no-op.
+                let msg = crate::loc_ui::ui().imp_err_fp_no_swf;
+                import_error(s, ErrKind::Unsupported, msg, false, &cand.title);
+                return;
+            }
+        }
+    };
+    s.import_retry = Some(RetryAction::FpGame { selection, scroll });
+    match net::start_download(&url, &out_path) {
+        Ok(()) => {
+            note_download_started();
+            s.download_file_name = swf_name;
+            s.download_out_path = out_path;
+            s.download_source_url = url.clone();
+            // Holds the FINAL .swf path for the Flashpoint finalize. For a
+            // zipped game the download (a temp .zip) extracts INTO it; for
+            // a non-zipped game it == download_out_path (downloaded direct).
+            s.download_zip_extract = Some(swf_path);
+            s.download_fp_direct = fp_direct;
+            s.download_launch_command = cand.launch_command.clone();
+            // Grab this game's cover automatically once the .swf lands.
+            s.download_cover_url = Some(cand.cover_url.clone());
+            // Keep the REAL title so we can restore it as the display
+            // name (the filename loses `:` and other chars).
+            s.download_title = Some(cand.title.clone());
+            s.download_resume_pos = Some((selection, scroll));
+            s.import_had_files = false;
+            s.import_had_data = false;
+            s.screen = Screen::DistantDownloading;
+        }
+        Err(e) => import_error(s, ErrKind::Download, &e, true, &cand.title),
+    }
+}
+
+/// A shelf's search is asked again this long after it failed, out of sight
+/// (`Shelf::shown`): soon after a first failure, then less often. The first
+/// request of a session can be the one that wakes the network up, and a
+/// shelf that failed on it stayed away twenty seconds; a console without
+/// network must not keep asking either.
+const SHELF_RETRY_FIRST_SECS: u64 = 3;
+const SHELF_RETRY_SECS: u64 = 20;
+
+/// Run the importer home's shelves: start the searches not asked yet (or
+/// asked again a while after failing), collect the ones that came back. Once
+/// a frame while the home is the page, through the thumbnail pool, so the
+/// page keeps answering while they come and the archive.org fetch keeps its
+/// own handle.
+fn drive_shelves() {
+    let now = unsafe { ruffle_tick_now() };
+    let freq = unsafe { ruffle_tick_freq() }.max(1);
+    for k in 0..2 {
+        let (phase, slot, failed_at, failures) = match LIBRARY.lock() {
+            Ok(s) => {
+                let shelf = &s.shelves[k];
+                (shelf.phase, shelf.slot, shelf.failed_at, shelf.failures)
+            }
+            Err(_) => return,
+        };
+        match phase {
+            ShelfPhase::Ready => {}
+            ShelfPhase::Failed => {
+                let wait = if failures <= 1 { SHELF_RETRY_FIRST_SECS } else { SHELF_RETRY_SECS };
+                if now.saturating_sub(failed_at) > wait * freq {
+                    if let Ok(mut s) = LIBRARY.lock() {
+                        s.shelves[k].phase = ShelfPhase::Idle;
+                    }
+                }
+            }
+            ShelfPhase::Idle => shelf_start(k, now),
+            ShelfPhase::Loading => {
+                if slot < 0 {
+                    if let Ok(mut s) = LIBRARY.lock() {
+                        s.shelves[k].phase = ShelfPhase::Idle;
+                    }
+                    continue;
+                }
+                net::thumb_pump();
+                if net::thumb_slot_status(slot) != 0 {
+                    let bytes = net::thumb_slot_take(slot);
+                    shelf_land(k, bytes, now);
+                }
+            }
+        }
+    }
+    if let Ok(s) = LIBRARY.lock() {
+        publish_shelves(&s);
+    }
+}
+
+/// Leaving the importer home: the transfers its shelves started (their
+/// searches, their screenshots) stop, and a shelf still waiting for its search
+/// asks again when the home is back. Nothing else pumps the thumbnail pool:
+/// left running, they sat there with nobody to collect them, unlike the
+/// results' and the cover picker's, which have always been stopped as their
+/// page closes. The screenshots already in stay, for the way back.
+fn shelves_leave(s: &mut State) {
+    crate::backend::render::thumb_cancel_all();
+    for shelf in s.shelves.iter_mut() {
+        if shelf.phase == ShelfPhase::Loading {
+            shelf.phase = ShelfPhase::Idle;
+            shelf.slot = -1;
+            shelf.sampling = false;
+        }
+    }
+}
+
+/// What the launcher leaves running when it closes (a game picked, the app
+/// quit), stopped: the thumbnail transfers, the archive.org fetch and a
+/// download. Quitting after a visit to the importer went to a black screen
+/// instead of closing (2026-10-13), with the shelves' transfers still in the
+/// pool: the process now ends with nothing in flight. When the app `quitting`,
+/// the logos' and screenshots' textures are given back too, while the GL
+/// context they belong to is still there; a game picked keeps them, so the
+/// importer is back at once after it instead of loading its screenshots
+/// again (Jonathan: "faut garder le cache des cover après avoir lancé un
+/// jeu"). Called from `ruffle_library_shutdown`, before the renderer goes.
+pub fn shutdown_leftovers(quitting: bool) {
+    net::cancel_download();
+    net::cancel_archive_fetch();
+    crate::backend::render::thumb_cancel_all();
+    if quitting {
+        crate::backend::render::thumb_cache_clear();
+    }
+    if let Ok(mut s) = LIBRARY.lock() {
+        shelves_leave(&mut s);
+    }
+}
+
+/// Studios asked for in a row, at most, before the studio shelf waits as after
+/// a failure: a sample full of one-game studios must not turn into a stream of
+/// requests.
+const STUDIO_MAX_ASKED: u8 = 8;
+
+/// Samples of the archive in a row, at most, that may come back without a
+/// studio before the shelf waits as after a failure.
+const STUDIO_MAX_SAMPLES: u8 = 3;
+
+/// Start shelf `k`'s search. The studio's: a sample of the archive when it has
+/// no candidates left, else the next candidate's games. The draw's: a sample
+/// of its genre (drawn too, the first time). Left for the next frame when the
+/// pool is busy with covers.
+fn shelf_start(k: usize, now: u64) {
+    use crate::sources::discover;
+    let url = {
+        let Ok(mut s) = LIBRARY.lock() else { return };
+        let shelf = &mut s.shelves[k];
+        let mut rng = discover::Rng::new(now ^ discover::unix_time() ^ ((k as u64) << 56) ^ ((shelf.tries as u64) << 40));
+        if k == 0 {
+            if shelf.candidates.is_empty() {
+                shelf.sampling = true;
+                discover::sample_url(&mut rng)
+            } else {
+                shelf.sampling = false;
+                shelf.asked = shelf.asked.saturating_add(1);
+                discover::studio_url(&shelf.candidates[0], true)
+            }
+        } else {
+            discover::draw_url(&mut rng)
+        }
+    };
+    let slot = net::thumb_start(&url);
+    if slot < 0 {
+        return;
+    }
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.shelves[k].slot = slot;
+        s.shelves[k].phase = ShelfPhase::Loading;
+    }
+}
+
+/// Shelf `k` could not be filled, for the reason `why` (in the log): asked
+/// again a while later, out of sight.
+fn shelf_fail(shelf: &mut Shelf, k: usize, now: u64, why: &str) {
+    shelf.phase = ShelfPhase::Failed;
+    shelf.failed_at = now.max(1);
+    shelf.failures = shelf.failures.saturating_add(1);
+    shelf.asked = 0;
+    shelf.tries = 0;
+    log(&std::format!("library: shelf {} failed: {}\n", k, why));
+}
+
+/// Shelf `k`'s search came back with `bytes` (`None`: it failed).
+///
+/// The studio's sample gives its candidates, in a random order. A candidate's
+/// games, past the shelves' filter and in that studio's name alone, make the
+/// shelf when there are enough, and the next draw takes the next candidate;
+/// too few, and the next candidate is asked at once. A draw shows five games
+/// of its sample, and is drawn again when the sample holds fewer. Both shelves
+/// show their games in the results' order (by name), so "see all" lists them
+/// as the shelf did.
+fn shelf_land(k: usize, bytes: Option<std::vec::Vec<u8>>, now: u64) {
+    use crate::sources::discover;
+    let Ok(mut s) = LIBRARY.lock() else { return };
+    let shelf = &mut s.shelves[k];
+    shelf.slot = -1;
+    if k == 0 && shelf.sampling {
+        shelf.sampling = false;
+        let Some(b) = bytes else {
+            shelf_fail(shelf, k, now, "the sample did not come back");
+            return;
+        };
+        shelf.candidates = discover::studio_candidates(&b, &mut discover::Rng::new(now ^ 0x5354));
+        if !shelf.candidates.is_empty() {
+            shelf.tries = 0;
+            shelf.phase = ShelfPhase::Idle;
+        } else if shelf.tries + 1 >= STUDIO_MAX_SAMPLES {
+            shelf_fail(shelf, k, now, "samples without a studio");
+        } else {
+            shelf.tries += 1;
+            shelf.phase = ShelfPhase::Idle;
+        }
+        return;
+    }
+    let Some(b) = bytes else {
+        shelf_fail(shelf, k, now, "the search did not come back");
+        return;
+    };
+    let developer = if k == 0 { shelf.candidates.first().cloned() } else { None };
+    let all = match crate::sources::gamezip::parse_search(&discover::family_filter(&b, developer.as_deref())) {
+        Ok(all) => all,
+        Err(_) => {
+            shelf_fail(shelf, k, now, "the answer was unreadable");
+            return;
+        }
+    };
+    if k == 0 {
+        let name = developer.unwrap_or_default();
+        // Drawn or too small, the candidate is used: the next draw, or the
+        // next ask, takes the one after it.
+        if !shelf.candidates.is_empty() {
+            shelf.candidates.remove(0);
+        }
+        // The same author under another of his names: most of these games
+        // were on the shelf already this session.
+        let known = all.iter().filter(|c| shelf.seen.contains(&c.id)).count();
+        let alias = !all.is_empty() && known * 2 >= all.len();
+        if all.len() >= discover::STUDIO_MIN_GAMES && !alias {
+            shelf.seen.extend(all.iter().map(|c| c.id.clone()));
+            let mut items = discover::pick(&all, &mut discover::Rng::new(now));
+            sort_fp_candidates(&mut items, (0, false));
+            shelf.items = items;
+            shelf.total = all.len();
+            shelf.studio = name.clone();
+            shelf.phase = ShelfPhase::Ready;
+            shelf.asked = 0;
+            shelf.failures = 0;
+            log(&std::format!("library: random studio \"{}\", {} games\n", name, all.len()));
+        } else if shelf.asked >= STUDIO_MAX_ASKED {
+            shelf_fail(shelf, k, now, "every studio asked had too few games");
+        } else {
+            shelf.phase = ShelfPhase::Idle;
+        }
+        return;
+    }
+    if !all.is_empty() && (all.len() >= discover::SHELF_GAMES || shelf.tries >= 2) {
+        let mut items = discover::pick(&all, &mut discover::Rng::new(now));
+        sort_fp_candidates(&mut items, (0, false));
+        shelf.items = items;
+        shelf.total = all.len();
+        shelf.phase = ShelfPhase::Ready;
+        shelf.tries = 0;
+        shelf.failures = 0;
+        log(&std::format!("library: draw ready, {} of {} games\n", shelf.items.len(), all.len()));
+    } else if shelf.tries < 2 {
+        shelf.tries += 1;
+        shelf.phase = ShelfPhase::Idle;
+    } else {
+        shelf_fail(shelf, k, now, "every draw was too small");
+    }
+}
+
+/// "Draw again" on the studio's shelf: the next studio of the sample (a new
+/// sample once they run out), its games to come.
+fn shelf_redraw_studio(s: &mut State) {
+    let shelf = &mut s.shelves[0];
+    if shelf.phase == ShelfPhase::Loading {
+        return;
+    }
+    log("library: studio drawn again\n");
+    shelf.items.clear();
+    shelf.total = 0;
+    shelf.asked = 0;
+    shelf.slot = -1;
+    shelf.failed_at = 0;
+    shelf.failures = 0;
+    shelf.phase = ShelfPhase::Idle;
+    publish_shelves(s);
+}
+
+/// "Draw again" on the draw's shelf: another lot, its games to come.
+fn shelf_redraw(s: &mut State) {
+    let shelf = &mut s.shelves[1];
+    if shelf.phase == ShelfPhase::Loading {
+        return;
+    }
+    log("library: draw drawn again\n");
+    shelf.items.clear();
+    shelf.total = 0;
+    shelf.tries = 0;
+    shelf.slot = -1;
+    shelf.failed_at = 0;
+    shelf.failures = 0;
+    shelf.phase = ShelfPhase::Idle;
+    publish_shelves(s);
+}
+
+/// A on a shelf tile (hoisted: "see all" and "see more" go to the network,
+/// and a game's download is the results' own code). A game plays when it is
+/// on the card.
+fn shelf_press_a(selection: usize, scroll: usize) {
+    let (k, c) = (selection / SHELF_COLS, selection % SHELF_COLS);
+    if c == SHELF_SEE {
+        let shelf = LIBRARY.lock().ok().and_then(|s| {
+            let shelf = &s.shelves[k];
+            (shelf.phase == ShelfPhase::Ready).then(|| (shelf.studio.clone(), shelf.items.clone()))
+        });
+        if let Some((studio, games)) = shelf {
+            crate::sfx::choose(crate::sfx::Sfx::Decide);
+            if k == 0 {
+                start_fp_studio(studio, selection);
+            } else {
+                start_fp_draw(games, Some(selection));
+            }
+        }
+        return;
+    }
+    if c == SHELF_AGAIN {
+        if let Ok(mut s) = LIBRARY.lock() {
+            if s.shelves[k].phase != ShelfPhase::Loading {
+                if k == 0 {
+                    shelf_redraw_studio(&mut s);
+                } else {
+                    shelf_redraw(&mut s);
+                }
+                crate::sfx::choose(crate::sfx::Sfx::Decide);
+            }
+        }
+        return;
+    }
+    let Ok(mut s) = LIBRARY.lock() else { return };
+    let Some((k, c)) = shelf_game_at(&s, selection) else { return };
+    shelf_to_candidates(&mut s, k, selection, scroll);
+    fp_activate(&mut s, c, 0);
 }
 
 /// Open a result's details window on what the search already returned (logo,
@@ -10522,8 +11437,8 @@ fn handle_remote_sort_modal_input(
                     // so the list is already re-ordered when we land back on it.
                     set_import_sort(selection as u8, reverse);
                     crate::backend::render::gallery_anim_reset();
-                    // Cursor on the first source, under the two cards.
-                    let row = if importer_view(s).is_empty() { 0 } else { IMPORTER_PINNED_ROWS };
+                    // Cursor on the first source, under the add button.
+                    let row = if importer_view(s).is_empty() { IMPORTER_ADD_ROW } else { IMPORTER_PINNED_ROWS };
                     IMPORT_SCROLL.store(0, std::sync::atomic::Ordering::Relaxed);
                     s.screen = distant_idle_at(s, row);
                 }
@@ -10899,17 +11814,21 @@ fn gallery_scroll_for(selection: usize, scroll: usize) -> usize {
     }
 }
 
-/// Screen rect of importer item `sel` (a card, or a source row as its focus
-/// pill sits), from the SAME geometry the renderer lays them out with
-/// (`importer_item_rect`). The expand/collapse reveal's grow-from / shrink-to
-/// box; a row scrolled out of view is held at the edge of the band, so the
-/// window still grows from somewhere on screen.
+/// Screen rect of importer item `sel` (a shelf tile, the add button, a source
+/// row as its focus pill sits, or the search button in the tab bar) at the
+/// page's pixel scroll `scroll`, from the SAME geometry the renderer lays them
+/// out with (`importer_item_rect`). The expand/collapse reveal's grow-from /
+/// shrink-to box; an item scrolled out of view is held at the edge of the
+/// band, so the window still grows from somewhere on screen.
 fn distant_row_rect(sel: usize, scroll: usize, vw: f32) -> (f32, f32, f32, f32) {
-    let (x, y, w, h) = importer_item_rect(sel, scroll as f32 * IMPORTER_ROW_H, vw);
-    if sel < IMPORTER_PINNED_ROWS {
+    let (x, y, w, h) = importer_item_rect(sel, scroll as f32, vw);
+    if sel == IMPORTER_SEARCH_ROW {
         return (x, y, w, h);
     }
-    let y = y.clamp(IMPORTER_ROW_TOP, IMPORTER_ROW_TOP + (IMPORTER_VISIBLE_ROWS - 1) as f32 * IMPORTER_ROW_H);
+    let y = y.clamp(IMPORTER_BAND_TOP, (IMPORTER_BAND_BOT - h).max(IMPORTER_BAND_TOP));
+    if sel <= IMPORTER_ADD_ROW {
+        return (x, y, w, h);
+    }
     (x, y + 3.0, w, h - 6.0)
 }
 
@@ -11342,10 +12261,32 @@ fn poll_fp_search() {
     match net::tick_get_async() {
         net::GetPoll::Pending => {}
         net::GetPoll::Done(bytes) => {
+            // A studio's games ("see all" on its shelf): that studio's alone
+            // (the search matches a substring of the name), past the shelf's
+            // filter, so the page lists what the shelf drew from.
+            // A bigger draw: past the shelves' filter too, the shelf's own
+            // games among the results.
+            let (studio, seed) = LIBRARY
+                .lock()
+                .ok()
+                .map(|s| (s.fp_studio.clone(), s.fp_draw.then(|| s.fp_seed.clone())))
+                .unwrap_or_default();
+            let bytes = match (&studio, &seed) {
+                (Some(name), _) => crate::sources::discover::family_filter(&bytes, Some(name)),
+                (None, Some(_)) => crate::sources::discover::family_filter(&bytes, None),
+                _ => bytes,
+            };
             let (mut cands, msg, failed) = match crate::sources::gamezip::parse_search(&bytes) {
                 Ok(list) => (list, std::string::String::new(), false),
                 Err(e) => (std::vec::Vec::new(), e, true),
             };
+            if let (Some(seed), false) = (seed, failed) {
+                for c in seed {
+                    if !cands.iter().any(|x| x.id == c.id || x.title.eq_ignore_ascii_case(&c.title)) {
+                        cands.push(c);
+                    }
+                }
+            }
             sort_fp_candidates(&mut cands, (0, false));
             if let Ok(mut s) = LIBRARY.lock() {
                 s.cover_candidates = cands;
@@ -11470,8 +12411,10 @@ fn retry_import(action: RetryAction) {
                 s.screen = distant_idle_at(&s, row);
                 return;
             }
-            s.screen = Screen::FpGallery { selection, scroll };
-            handle_fp_gallery_input(&mut s, "A", selection, scroll);
+            // The page the game was picked on (the results, or the home for a
+            // shelf's game) stands behind the download that starts again.
+            s.screen = fp_back_screen(&s, selection, scroll);
+            fp_activate(&mut s, selection, scroll);
         }
     }
 }
@@ -12209,13 +13152,18 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 poll_fp_search();
             }
             drive_fp_details();
-            // The page opens out of the Flashpoint card and folds back into it,
-            // as an archive opens out of its row.
+            // The page opens out of what asked for it (the search button, the
+            // studio's "see all" tile) and folds back into it, as an archive
+            // opens out of its row.
             if let Some((frac, collapsing, done)) = reveal {
                 let (vw, vh) = backend.screen_size();
                 let row = LIBRARY.lock().map(|s| s.import_return_row).unwrap_or(0);
                 draw_home_backdrop(backend, row, IMPORT_SCROLL.load(std::sync::atomic::Ordering::Relaxed));
-                let (rx, ry, rw, rh) = importer_item_rect(0, 0.0, vw);
+                let (rx, ry, rw, rh) = distant_row_rect(
+                    crate::backend::render::distant_reveal_source_sel(),
+                    crate::backend::render::distant_reveal_source_scroll(),
+                    vw,
+                );
                 let (wx, wy, ww, wh) = reveal_window((rx, ry, rw, rh), vw, vh, frac);
                 backend.set_clip(wx, wy, ww, wh);
                 draw_fp_page(backend, selection, scroll, false);
@@ -12226,7 +13174,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     // from. The query stays, for the keyboard's next prefill;
                     // the results go, and their logos' textures with them.
                     crate::backend::render::thumb_cancel_all();
-                    crate::backend::render::thumb_cache_clear();
+                    clear_thumbs_but_shelves();
                     if let Ok(mut s) = LIBRARY.lock() {
                         s.cover_candidates.clear();
                         s.cover_msg.clear();
@@ -12244,9 +13192,13 @@ pub fn render(backend: &mut SwitchRenderBackend) {
         }
         Screen::FpDetails { selection, scroll, size } => {
             drive_fp_details();
-            // The results stay behind the window.
+            // The page it was opened on stays behind the window: the results,
+            // or the importer home for a shelf's game.
             backend.clear_ui_transform();
-            draw_fp_page(backend, selection, scroll, false);
+            match LIBRARY.lock().ok().and_then(|s| s.fp_home) {
+                Some((home_sel, home_scroll)) => draw_home_backdrop(backend, home_sel, home_scroll),
+                None => draw_fp_page(backend, selection, scroll, false),
+            }
             backend.set_ui_modal_scale(if modal_active { modal_scale } else { 1.0 });
             let snap = LIBRARY.lock().ok().and_then(|s| {
                 let desc = s.fp_desc_ready.then(|| s.fp_desc.clone());
@@ -12366,11 +13318,35 @@ pub fn render(backend: &mut SwitchRenderBackend) {
         }
         // ── Phase 3.7 DISTANT mode ─────────────────────────────────────
         Screen::DistantIdle { selection, scroll_offset } => {
-            // Remember where the list is, so every "back to the list" path
-            // can restore it, and the card the cursor is on (`IMPORT_CARD`).
+            // The shelves' searches run while the home is up.
+            drive_shelves();
+            // A flow from a shelf tile is over once the home is back. A shelf
+            // that came or went moves everything under it: the cursor goes to
+            // what the page still shows (a shelf gone, a draw with fewer
+            // games) and the page scrolls to keep it in view.
+            // Only then: a finger scrolls the page past the cursor, and the
+            // page must stay where it left it.
+            let bits = SHELVES_SHOWN.load(std::sync::atomic::Ordering::Relaxed);
+            let moved = HOME_LAYOUT.swap(bits, std::sync::atomic::Ordering::Relaxed) != bits;
+            let (selection, scroll_offset) = match LIBRARY.lock() {
+                Ok(mut s) => {
+                    s.fp_home = None;
+                    let settled = importer_settle(&s, selection.min(importer_last_row(&s)));
+                    if (settled != selection || moved) && matches!(s.screen, Screen::DistantIdle { .. }) {
+                        let scroll = importer_scroll_for(settled, scroll_offset, importer_view(&s).len());
+                        s.screen = Screen::DistantIdle { selection: settled, scroll_offset: scroll };
+                        (settled, scroll)
+                    } else {
+                        (selection, scroll_offset)
+                    }
+                }
+                Err(_) => (selection, scroll_offset),
+            };
+            // Remember where the page is, so every "back to the list" path
+            // can restore it, and the shelf column the cursor is on.
             IMPORT_SCROLL.store(scroll_offset, std::sync::atomic::Ordering::Relaxed);
-            if selection < IMPORTER_PINNED_ROWS {
-                IMPORT_CARD.store(selection, std::sync::atomic::Ordering::Relaxed);
+            if selection < IMPORTER_ADD_ROW {
+                SHELF_COL.store(selection % SHELF_COLS, std::sync::atomic::Ordering::Relaxed);
             }
             // Back from another page (an archive folding into its row, the
             // results, an error, a source's panel): the glide state is that
@@ -12400,7 +13376,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
         Screen::ImportNotAddress { selection } => {
             use crate::backend::render::{Choice, Icon};
             backend.clear_ui_transform();
-            draw_home_backdrop(backend, 1, IMPORT_SCROLL.load(std::sync::atomic::Ordering::Relaxed));
+            draw_home_backdrop(backend, IMPORTER_ADD_ROW, IMPORT_SCROLL.load(std::sync::atomic::Ordering::Relaxed));
             backend.set_ui_modal_scale(if modal_active { modal_scale } else { 1.0 });
             let u = crate::loc_ui::ui();
             let typed = LIBRARY.lock().map(|s| s.import_typed.clone()).unwrap_or_default();
@@ -12898,10 +13874,10 @@ fn finalize_gamezip_download(backend: &mut SwitchRenderBackend) {
         {
             s.downloaded_basenames.push(file_name);
         }
-        // Back to the Flashpoint gallery so the user can grab another game.
+        // Back to the Flashpoint gallery so the user can grab another game, or
+        // to the importer home on the shelf tile the game came from.
         let (sel, scroll) = s.download_resume_pos.take().unwrap_or((0, 0));
-        let sel = sel.min(s.cover_candidates.len().saturating_sub(1));
-        s.screen = Screen::FpGallery { selection: sel, scroll };
+        s.screen = fp_back_screen(&s, sel, scroll);
         // The gallery looks identical after a download (bar the OK badge), so
         // confirm it landed — the download screen vanishing isn't a confirmation.
         if added {
