@@ -160,9 +160,11 @@ impl SwitchRenderBackend {
                         a.pop = 1.0;
                         a.last_sel = sel;
                     }
-                    // The Play grid's rates, so the two grids move alike.
+                    // The Play grid's rates, so the two grids move alike;
+                    // down the grid, the scroll's own rate, so the ring cannot
+                    // run past its tile while a long jump scrolls the grid.
                     a.sel_x = ease_to(a.sel_x, tx0, dt, 18.0);
-                    a.sel_y = ease_to(a.sel_y, ty0, dt, 18.0);
+                    a.sel_y = ease_to(a.sel_y, ty0, dt, 16.0);
                     a.sel_w = ease_to(a.sel_w, tile_w, dt, 18.0);
                     a.scroll_px = ease_to(a.scroll_px, target_scroll, dt, 16.0);
                     a.pop = ease_to(a.pop, 0.0, dt, 12.0);

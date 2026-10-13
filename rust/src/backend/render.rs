@@ -5860,9 +5860,12 @@ fn home_anim_step(
             1.0 / 60.0
         };
         a.last_tick = now;
-        // Same rates as the grid, so the three layouts feel like one app.
+        // Same rates as the grid, so the three layouts feel like one app. The
+        // highlight moves at the scroll's own rate: it is drawn at its content
+        // place minus the scroll, and at two rates the difference ran past its
+        // row on a long jump (last game to first) before coming back.
         a.scroll_px = ease_to(a.scroll_px, target_scroll, dt, 16.0);
-        a.hl_y = ease_to(a.hl_y, target_hl, dt, 18.0);
+        a.hl_y = ease_to(a.hl_y, target_hl, dt, 16.0);
         a.off = ease_to(a.off, target_off, dt, 16.0);
         a.sel_pos = ease_to(a.sel_pos, target_sel, dt, 14.0);
     }

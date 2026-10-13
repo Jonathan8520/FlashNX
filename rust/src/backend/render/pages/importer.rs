@@ -720,8 +720,12 @@ impl SwitchRenderBackend {
                     let dt = if freq > 0.0 { (now.saturating_sub(a.last_tick) as f32 / freq).min(0.1) } else { 1.0 / 60.0 };
                     a.last_tick = now;
                     a.last_sel = p.selection;
-                    a.scroll_px = ease_to(a.scroll_px, target_scroll, dt, 16.0);
-                    a.sel_y = ease_to(a.sel_y, target_hover, dt, 18.0);
+                    // One rate for both: the pill is drawn at its content
+                    // place minus the scroll, and at two rates it ran past its
+                    // row on a long jump (last game to first), as the home's
+                    // focus did (`GLIDE_RATE`).
+                    a.scroll_px = ease_to(a.scroll_px, target_scroll, dt, GLIDE_RATE);
+                    a.sel_y = ease_to(a.sel_y, target_hover, dt, GLIDE_RATE);
                 }
                 if let Some(px) = touch_scroll {
                     a.scroll_px = px;
