@@ -41,6 +41,7 @@ The whole interface is redrawn. Every screen uses the console's own fonts, at th
 - A refused overclock raise from Auto keeps Auto instead of switching the game to Off for good, and turning the frame counter on or off no longer loses the speed reading.
 - After a search or a sort in Import, the cursor lands on the first source instead of the add row.
 - Clearing a saved address in the keyboard cancels the edit instead of deleting the source without asking.
+- Games locked by MochiCrypt, the MochiAds loader that decrypts the game after its ad (Charlie The Duck), start after about 10 seconds instead of staying on the loader for good: a request to the closed MochiAds servers now fails after 10 seconds, like a connection that never answers, instead of waiting forever.
 - Translations: broken capitals ("DÉplacer"), keyboard guides written in transliterated Russian, Turkish words missing ı, ş and ğ, labels cut short for the old font; Russian and Turkish now address the player informally everywhere, and French uses its no-break spaces.
 
 ## v1.9.0 (2026-10-09)

@@ -64,6 +64,15 @@ use ruffle_core::socket::{ConnectionState, SocketAction, SocketHandle};
 /// enough to stay imperceptible on a load that was going to fail anyway.
 const FAIL_LATENCY_MS: u64 = 120;
 
+/// How long a request to a defunct ad host hangs before it fails, like a
+/// connection that never gets an answer. Longer than any MochiAd `ad_timeout`
+/// (2 to 5.5 s), so those preloaders still fail open on their own clock exactly
+/// as they did while the hang was endless; shorter than the 11 s a MochiCrypt
+/// preloader gives its ad, so the game starts when Flash would have started it.
+/// MochiCrypt (Charlie The Duck) only starts the game once its patch request has
+/// ENDED, success or failure: an endless hang kept it on the preloader for good.
+const DEAD_AD_HOST_TIMEOUT_MS: u64 = 10_000;
+
 struct ParkedFailure {
     due_tick: u64,
     waker: core::task::Waker,
@@ -151,8 +160,16 @@ impl core::future::Future for DelayedError {
 
 /// Wrap a fetch error so it arrives with a plausible round-trip latency.
 fn delayed_err(err: ErrorResponse) -> OwnedFuture<Box<dyn SuccessResponse>, ErrorResponse> {
+    delayed_err_after(err, FAIL_LATENCY_MS)
+}
+
+/// Wrap a fetch error so it arrives `ms` milliseconds from now.
+fn delayed_err_after(
+    err: ErrorResponse,
+    ms: u64,
+) -> OwnedFuture<Box<dyn SuccessResponse>, ErrorResponse> {
     Box::pin(DelayedError {
-        due_tick: now_ticks().saturating_add(ticks_from_ms(FAIL_LATENCY_MS)),
+        due_tick: now_ticks().saturating_add(ticks_from_ms(ms)),
         err: Some(err),
     })
 }
@@ -678,7 +695,9 @@ impl SidecarNavigator {
 /// Games that gate their preloader on `MochiAd.showPreGameAd` expect these to be
 /// UNREACHABLE — the connection hangs, then the preloader's own ~3 s ad_timeout
 /// fires and fail-opens into the game. We let such requests hang for exactly
-/// that reason (see `fetch`), instead of erroring immediately.
+/// that reason (see `fetch`), instead of erroring immediately; but only for
+/// `DEAD_AD_HOST_TIMEOUT_MS`, never for ever, since some preloaders wait for
+/// the request to end before they start the game.
 fn is_dead_ad_host(host: &str) -> bool {
     // mochibot.com is NOT in here. It is a hit counter, not an ad server: a game
     // fires it and forgets it, so there is nothing to fail open FROM, and hanging
@@ -919,10 +938,15 @@ impl NavigatorBackend for SidecarNavigator {
             return delayed_err(ErrorResponse { url: resolved.to_string(), error: err });
         }
         if resolved.host_str().is_some_and(is_dead_ad_host) {
-            tracing::info!("sidecar: stalling dead ad host {resolved} (mimic unreachable)");
-            return Box::pin(std::future::pending::<
-                Result<Box<dyn SuccessResponse>, ErrorResponse>,
-            >());
+            tracing::info!(
+                "sidecar: stalling dead ad host {resolved} (mimic unreachable, fails in {} s)",
+                DEAD_AD_HOST_TIMEOUT_MS / 1000
+            );
+            let err = Error::FetchError(std::format!("ad host unreachable: {resolved}"));
+            return delayed_err_after(
+                ErrorResponse { url: resolved.to_string(), error: err },
+                DEAD_AD_HOST_TIMEOUT_MS,
+            );
         }
         // Resolve in three layers (first hit wins):
         //   1. host-mirrored  `<dir>/<host>/<path>`  (full GameZIP tree, e.g.
