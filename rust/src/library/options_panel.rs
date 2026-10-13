@@ -287,8 +287,8 @@ pub(crate) fn with_options_sheet<R>(
             // A brings up the Switch keyboard, as Réglages marks its own.
             "RENOMMER" => Row::new(Icon::Pencil, lc.opt_rename).keyboard(),
             "RACCOURCI" => Row::new(Icon::Home, u.opt_home_icon).toggle(p.home_icon),
-            // The pause's own rows, icons and words: the same page opens from
-            // either (`with_screen_view`).
+            // The pause's own rows, icons and words: each opens the page the
+            // pause opens (`menu::with_touches_view`, `with_screen_view`).
             "TOUCHES" => Row::new(Icon::Gamepad, lc.opt_keys).opens(),
             "ECRAN" => Row::new(Icon::Monitor, lc.menu_screen).opens(),
             "OVERCLOCK" => Row::new(Icon::Cpu, lc.set_overclock)
@@ -568,8 +568,8 @@ pub(crate) fn draw_options_family(
         Screen::OptionsModal { selection, .. } => selection,
         other => branch_of(other),
     };
-    // The panel's own armed row, or the page's (the Touches et curseur page
-    // reads its own from the state).
+    // The panel's own armed row; a page beside it (Touches et curseur, Écran)
+    // reads its own from the state.
     let opt_armed = if matches!(screen, Screen::OptionsModal { .. }) { armed } else { None };
     draw_family_panels(backend, &entry, opt_sel, opt_armed, neighbours, shown, t);
     // While a page folds back nothing publishes (the page has no cursor, the
