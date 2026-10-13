@@ -1155,7 +1155,12 @@ fn defaults_pane(
             }
         }
         Some("FPS") => u.help_fps,
-        Some("TOUCHES") => u.help_keys_default,
+        Some("TOUCHES") => {
+            // A game's own controls, in the words of the menus that set them,
+            // joined so the path does not break around its arrows.
+            built = u.help_keys_default.replacen("{}", &menu_path(&[u.hint_options, lc.opt_keys]), 1);
+            &built
+        }
         Some(_) => u.help_cursor_default,
     };
     let (c, sg) = b.settings_rows(top + 4.0, &rows, &sections, focus.unwrap_or(usize::MAX), pane_glide(def), help);
