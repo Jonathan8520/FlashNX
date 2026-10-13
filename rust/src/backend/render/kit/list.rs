@@ -196,7 +196,15 @@ impl SwitchRenderBackend {
             // Étirer | Remplir" back to one value in a 440 px
             // panel, the very cycling the choice replaced. Only a choice that
             // still does not fit falls back (`kit_ctrl`).
-            let label_w = self.kit_measure(row.label, size::ROW).min(avail * 0.5);
+            //
+            // The caption under the label is part of the label's share: sized
+            // from the label alone, the control took the caption's room and
+            // cut it ("predetermi…" under "Pantalla", "padr…" under "Tela").
+            // Counted on a row that only keeps its room (`note_room`) too, so
+            // A arming the row, which hides the caption, does not resize the
+            // control under the player's eyes.
+            let note_w = row.note.or(row.note_room).map_or(0.0, |n| self.kit_measure(n, size::CAPTION));
+            let label_w = self.kit_measure(row.label, size::ROW).max(note_w).min(avail * 0.5);
             let max_w = (avail - label_w - mark_room - 20.0).max(60.0);
             let cw = self.kit_ctrl(right, cy, &row.ctrl, focused && !row.dim, max_w);
             parts = self.kit_ctrl_parts(right, cy, cw, row);
@@ -216,16 +224,17 @@ impl SwitchRenderBackend {
         // takes the control's width: set aside beside the control, it pushed
         // "Intégral | Étirer | Remplir" back to one value on
         // every game that follows the default, until a press gave the game
-        // its own value and the row redrew as three segments.
-        let label_cy = if row.note.is_some() { cy - 8.0 } else { cy };
+        // its own value and the row redrew as three segments. Whole or not at
+        // all: a caption is what gives way, and a cut one read as broken text.
+        let note = row.note.filter(|n| self.kit_measure(n, size::CAPTION) <= (avail + mark_w).max(0.0));
+        let label_cy = if note.is_some() { cy - 8.0 } else { cy };
         let l = self.kit_fit_mid(row.label, size::ROW, avail);
         let lw = self.kit_text_mid(lx, label_cy, size::ROW, &l, ink);
         if let Some((ic, mink)) = row.mark {
             self.kit_icon(lx + lw + 10.0, label_cy, MARK, ic, mink);
         }
-        if let Some(n) = row.note {
-            let n = self.kit_fit(n, size::CAPTION, (avail + mark_w).max(0.0));
-            self.kit_text_mid(lx, cy + 11.0, size::CAPTION, &n, col::TEXT3);
+        if let Some(n) = note {
+            self.kit_text_mid(lx, cy + 11.0, size::CAPTION, n, col::TEXT3);
         }
         parts
     }
@@ -257,6 +266,10 @@ pub(crate) struct Row<'a> {
     pub mark_room: bool,
     /// A small caption under the label ("par défaut").
     pub note: Option<&'a str>,
+    /// The room of a caption the row shows only some of the time, kept
+    /// either way: a setting's "par défaut", which goes while A has the row
+    /// armed, and whose control must not change size as it comes and goes.
+    pub note_room: Option<&'a str>,
     pub dim: bool,
     pub danger: bool,
     pub opens: bool,
@@ -284,6 +297,7 @@ impl<'a> Row<'a> {
             mark: None,
             mark_room: false,
             note: None,
+            note_room: None,
             dim: false,
             danger: false,
             opens: false,
@@ -335,9 +349,11 @@ impl<'a> Row<'a> {
         self
     }
 
-    /// A small caption under the label, when there is one.
-    pub(crate) fn note_opt(mut self, note: Option<&'a str>) -> Row<'a> {
+    /// A small caption under the label, when there is one, and the room of
+    /// `room` kept for it either way (see `note_room`).
+    pub(crate) fn note_in_room(mut self, note: Option<&'a str>, room: &'a str) -> Row<'a> {
         self.note = note;
+        self.note_room = Some(room);
         self
     }
 

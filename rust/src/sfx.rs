@@ -217,6 +217,12 @@ pub(crate) fn after_input(
             Sfx::Back
         } else if is_nav(button) || matches!(button, "L" | "R") {
             Sfx::Move
+        } else if button == "A" {
+            // A opening a folder of the games-folder browser, or the copy
+            // list in place of the shared profiles: something opened, as
+            // every other A that opens. An A that changed a value in place
+            // said so (`changed` above).
+            Sfx::Decide
         } else {
             Sfx::Toggle
         });

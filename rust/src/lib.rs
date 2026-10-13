@@ -2697,7 +2697,7 @@ fn render_frame_with_dt(dt: FloatDuration) {
         // player parks the crosshair in the corner: the number wins, because it
         // is the thing being read.
         if backend::render::fps_counter_on() {
-            backend.draw_fps_overlay();
+            backend.draw_fps_overlay(false);
         }
     }
 
@@ -2764,7 +2764,7 @@ pub extern "C" fn ruffle_redraw_paused() {
         // the ECRAN row its preview -- press A and the corner changes on this
         // game's own frame.
         if show_fps {
-            backend.draw_fps_overlay();
+            backend.draw_fps_overlay(true);
         }
     }
 }
@@ -2980,6 +2980,9 @@ pub extern "C" fn ruffle_zoom_begin() {
         let (ox, oy) = backend::render::game_pan();
         *s = Some((backend::render::game_zoom_percent(), ox, oy));
     }
+    // A press begun on ÉCRAN goes with the panel: the mode reads the finger
+    // itself, and that press lifted after it would land as a tap on ÉCRAN.
+    backend::render::row_touch_cancel();
 }
 
 /// Nudge the zoom by `d_percent` and the framing by `(dx, dy)` screen pixels.
@@ -3023,16 +3026,24 @@ pub(crate) fn zoom_live(percent: u16, ox: i32, oy: i32) {
     backend::render::set_game_zoom(percent, ox, oy, VIEWPORT_W as f32, VIEWPORT_H as f32);
 }
 
-/// `A`: keep it, and write it to the game's `.prefs` so it is there next launch.
+/// `A` (or `-`, which then resumes the game): keep it, and write it to the
+/// game's `.prefs` so it is there next launch.
+///
+/// Only when it changed, as every other value of the pause is kept: opened
+/// just to look and left with A, an untouched framing was written as the
+/// game's own, so its row lost "par défaut" and a later change of the default
+/// zoom in Réglages no longer reached the game.
 #[no_mangle]
 pub extern "C" fn ruffle_zoom_commit() {
+    let snap = ZOOM_SNAPSHOT.lock().ok().and_then(|mut s| s.take());
     let (ox, oy) = backend::render::game_pan();
-    keymap::set_zoom(backend::render::game_zoom_percent(), ox, oy);
+    let percent = backend::render::game_zoom_percent();
+    if snap == Some((percent, ox, oy)) {
+        return;
+    }
+    keymap::set_zoom(percent, ox, oy);
     // The game has a zoom of its own now: its row stops saying "par défaut".
     pause_values::prefs_written();
-    if let Ok(mut s) = ZOOM_SNAPSHOT.lock() {
-        *s = None;
-    }
 }
 
 /// `B`: put back what the panel was showing on the way in, and persist nothing.
@@ -3174,6 +3185,8 @@ pub extern "C" fn ruffle_value_arm(kind: c_int, row: c_int) -> c_int {
 #[no_mangle]
 pub extern "C" fn ruffle_pause_opened() {
     pause_values::pause_opened();
+    // No press carried over from a page the last pause left half touched.
+    backend::render::row_touch_cancel();
 }
 
 /// 1 while a row of the pause's pages is armed.

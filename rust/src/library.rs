@@ -318,25 +318,38 @@ pub(crate) fn answer_at(button: &str, sel: usize) -> usize {
 }
 
 /// + on a page or a question of a game's options: the whole stack closes,
-/// back to the library on that game. A value armed on the page is kept first,
-/// and what a page left half done (a copy list, a preview, the covers found)
-/// goes with it, as B would have taken it on the way out.
+/// back to the library on that game. A value armed on the page is kept first.
+/// What a page left half done (a copy list, a preview, the covers found) goes
+/// once the panels have slid out (`PendingClose::CloseOptions`), as B would
+/// have taken it on the way out. Dropped at once, it went before the page did:
+/// the cover picker shrank away as "no cover found", a preview as "no change",
+/// the copy list as the community profiles.
 fn close_options_stack(s: &mut State, screen: Screen) {
     let Some(game_idx) = options_panel::family_game(screen) else { return };
     confirm_armed(s);
+    let target = list_screen_for_abs(s, game_idx);
+    if let Ok(mut p) = PENDING_AFTER_CLOSE.lock() {
+        *p = Some(PendingClose::CloseOptions { from: screen, target });
+    }
+    crate::backend::render::modal_close_begin();
+}
+
+/// What the page `from` of a game's options left half done, dropped as the
+/// stack closes: a preview's rows, a copy list (the community profiles back in
+/// its place), the covers a search found.
+fn drop_options_leftovers(s: &mut State, from: Screen) {
     s.preview_rows.clear();
     if s.profile_copy_mode {
         s.profile_copy_mode = false;
         s.profile_matches = std::mem::take(&mut s.profile_saved_matches);
     }
-    if matches!(screen, Screen::CoverPicker { .. }) {
+    if matches!(from, Screen::CoverPicker { .. }) {
         crate::backend::render::thumb_cancel_all();
         s.cover_candidates.clear();
         s.cover_msg.clear();
         s.cover_query.clear();
         s.cover_use_shot = false;
     }
-    s.screen = list_screen_for_abs(s, game_idx);
 }
 
 // No "RETOUR" entry: B already backs out of the modal, so a dedicated row is
@@ -346,7 +359,7 @@ fn close_options_stack(s: &mut State, screen: Screen) {
 mod options_panel;
 pub(crate) use options_panel::{opt_row, OPTIONS_ENTRIES};
 mod settings_tab;
-pub(crate) use settings_tab::SetSection;
+pub(crate) use settings_tab::{menu_path, SetSection};
 use settings_tab::settings_at;
 
 /// Top-level navbar tabs (v1.2.0), switched with the L/R shoulder buttons.
@@ -2048,6 +2061,18 @@ pub(crate) fn list_step_wrap(sel: usize, delta: isize, total: usize) -> usize {
     } else {
         (sel + delta as usize).min(last)
     }
+}
+
+/// Whether Up / Down (`button`) moves the cursor of a list of `count` rows off
+/// row `sel`, which a held direction against an end does not. An armed row is
+/// kept by a press that moves on (input rule 2), not by one that stays put:
+/// the Down held to reach the last row repeated a moment after A had armed it,
+/// and that tick disarmed the row without a sound, so the Left that followed
+/// went back to the rail instead of changing the value. The pause's ÉCRAN
+/// page already kept a value only when its cursor really moved.
+pub(crate) fn list_step_moves(button: &str, sel: usize, count: usize) -> bool {
+    let delta = if matches!(button, "Up" | "StickLUp") { -1 } else { 1 };
+    list_step_wrap(sel, delta, count) != sel
 }
 
 /// Rows skipped by Left/Right in LISTE. Five, not a screenful: a screenful is
@@ -4105,7 +4130,13 @@ fn touch_press_cancel() {
 fn strip_tap(hit: crate::backend::render::StripHit) {
     use crate::backend::render::StripHit;
     match hit {
-        StripHit::Search => run_local_search_flow(),
+        // The keyboard's answer sounds as a press of `-` does, played here:
+        // a tap is followed by no `after_input`.
+        StripHit::Search => {
+            if run_local_search_flow() {
+                crate::sfx::play(crate::sfx::Sfx::Decide);
+            }
+        }
         StripHit::Sort => {
             input("Y");
         }
@@ -4565,6 +4596,28 @@ fn input_inner(button: &str) -> bool {
             return true;
         }
     }
+    // + opened the game's options, so + closes them from the controls editor
+    // drawn over their pages too (and from its key picker), as it does from
+    // every page and question of theirs, and as `-` closes the pause from the
+    // editor in game: the editor goes at once, the options' panels slide out
+    // (`close_options_stack`). It was ignored here.
+    if button == "Plus" && matches!(menu::screen_kind(), 2 | 3) {
+        let game = LIBRARY.lock().ok().and_then(|s| match s.screen {
+            Screen::TouchesEditor { game_idx } => Some(game_idx),
+            _ => None,
+        });
+        if let Some(game_idx) = game {
+            menu::close();
+            if let Ok(mut s) = LIBRARY.lock() {
+                goto_touches_menu(&mut s, game_idx, menu::MENU_EDIT);
+                let page = s.screen;
+                close_options_stack(&mut s, page);
+            }
+            // The editor's own sounds are `menu::input`'s, and it is gone.
+            crate::sfx::choose(crate::sfx::Sfx::Decide);
+            return true;
+        }
+    }
     // A game's controls editor closes like the Réglages one: it scales out over
     // its Touches et curseur page, then lands there. Left to `menu`, it
     // vanished in one frame, the page's own pop being invisible (the options
@@ -4645,7 +4698,9 @@ fn input_inner(button: &str) -> bool {
                 // X anywhere on the IMPORTER home = search Flashpoint for a game
                 // to download (the glyph on the Flashpoint card says so).
                 // Hoisted: swkbd + HTTPS must run WITHOUT the lock.
-                run_fp_search_flow(Some(selection));
+                if run_fp_search_flow(Some(selection)) {
+                    crate::sfx::choose(crate::sfx::Sfx::Decide);
+                }
                 return true;
             }
             if button == "Minus" {
@@ -4653,8 +4708,8 @@ fn input_inner(button: &str) -> bool {
                 // the JOUER gallery and the archive.org file list. Nothing to
                 // search before the first one is saved (the hint is not shown).
                 let any = LIBRARY.lock().map(|s| !s.url_history.is_empty()).unwrap_or(false);
-                if any {
-                    run_import_search_flow();
+                if any && run_import_search_flow() {
+                    crate::sfx::choose(crate::sfx::Sfx::Decide);
                 }
                 return true;
             }
@@ -4663,7 +4718,9 @@ fn input_inner(button: &str) -> bool {
                 // and the card cannot drift apart; the add card asks for an
                 // address.
                 if selection == 0 {
-                    run_fp_search_flow(Some(0));
+                    if run_fp_search_flow(Some(0)) {
+                        crate::sfx::choose(crate::sfx::Sfx::Decide);
+                    }
                     return true;
                 }
                 if selection == 1 {
@@ -4832,7 +4889,9 @@ fn input_inner(button: &str) -> bool {
                 return true;
             }
             if button == "Minus" {
-                run_cover_research_flow(game_idx);
+                if run_cover_research_flow(game_idx) {
+                    crate::sfx::choose(crate::sfx::Sfx::Decide);
+                }
                 return true;
             }
         }
@@ -4879,12 +4938,22 @@ fn input_inner(button: &str) -> bool {
         }
         // SEARCH is on Minus (-) now (was X). Hoisted because swkbd is a
         // synchronous fullscreen applet that must not run under the LIBRARY lock.
+        //
+        // A search the keyboard applied sounds like A acting: the list it
+        // lands on is the same screen, which `sfx::after_input` heard as a
+        // move, as Minus = B going back, or (the cursor already on the first
+        // row) as nothing at all. A cancelled keyboard changed nothing and
+        // stays silent.
         if matches!(screen_snap, Screen::DistantFiles { .. }) && button == "Minus" {
-            run_distant_search_flow();
+            if run_distant_search_flow() {
+                crate::sfx::choose(crate::sfx::Sfx::Decide);
+            }
             return true;
         }
         if matches!(screen_snap, Screen::List { .. }) && button == "Minus" {
-            run_local_search_flow();
+            if run_local_search_flow() {
+                crate::sfx::choose(crate::sfx::Sfx::Decide);
+            }
             return true;
         }
         // A on the bug-report picker = describe + send. Hoisted: the keyboard
@@ -4930,7 +4999,9 @@ fn input_inner(button: &str) -> bool {
             // Not while the search is still loading, where Minus cancels it.
             let (loading, failed) = LIBRARY.lock().map(|s| (s.fp_loading, s.fp_error)).unwrap_or((false, false));
             if !loading && (button == "X" || button == "Minus") {
-                run_fp_search_flow(None);
+                if run_fp_search_flow(None) {
+                    crate::sfx::choose(crate::sfx::Sfx::Decide);
+                }
                 return true;
             }
             // A on a search that failed: the same search again, no keyboard.
@@ -6316,11 +6387,14 @@ fn handle_profile_list_input(s: &mut State, button: &str, game_idx: usize, mut s
         }
         _ if matches!(button, "B" | "Minus") || toward_options_rail(button) => {
             // From the copy list, back to the community list, on the copy row.
+            // The same screen for `sfx::after_input`, silent when the cursor
+            // lands on the row number it left: going back says so itself.
             if s.profile_copy_mode {
                 s.profile_copy_mode = false;
                 s.profile_matches = std::mem::take(&mut s.profile_saved_matches);
                 let last = s.profile_matches.len().max(1) - 1;
                 s.screen = Screen::ProfileList { game_idx, selection: last };
+                crate::sfx::choose(crate::sfx::Sfx::Back);
                 return;
             }
             goto_touches_menu(s, game_idx, menu::MENU_APPLY);
@@ -6591,7 +6665,15 @@ fn handle_touches_menu_input(s: &mut State, button: &str, game_idx: usize, mut s
                 crate::sfx::choose(crate::sfx::Sfx::Back);
                 return;
             }
-            "Up" | "StickLUp" | "Down" | "StickLDown" | "Plus" => confirm_armed(s),
+            // A held direction against the end of the list moves nothing, and
+            // keeps the row armed (`list_step_moves`).
+            "Up" | "StickLUp" | "Down" | "StickLDown" => {
+                if !list_step_moves(button, selection, count) {
+                    return;
+                }
+                confirm_armed(s);
+            }
+            "Plus" => confirm_armed(s),
             _ => return,
         }
     }
@@ -6669,6 +6751,11 @@ fn run_touches_revert(game_idx: usize) {
     if let Ok(mut s) = LIBRARY.lock() {
         set_toast(&mut s, msg.to_string(), if ok { TOAST_OK } else { TOAST_ERR });
         goto_touches_menu(&mut s, game_idx, menu::MENU_EDIT);
+    }
+    // The red toast has sounded its note: the page coming back adds no
+    // decide on top of it.
+    if !ok {
+        crate::sfx::hush();
     }
 }
 
@@ -6839,6 +6926,11 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
             let next = if button == "ZR" { (cur + 1) % n } else { (cur + n - 1) % n };
             // ZR walks right, so the new shelf arrives from the right.
             goto_shelf(s, keys[next].clone(), if button == "ZR" { 1.0 } else { -1.0 }, selection, None);
+            // The screen holds the row and not the shelf: two shelves whose
+            // cursors sit on the same row number read as no change, and the
+            // step went silent while the new shelf slid in. A tap on its chip
+            // sounds the same.
+            crate::sfx::choose(crate::sfx::Sfx::Tab);
             return;
         }
         // B, the way back everywhere else, is the way back here too: out of a
@@ -7503,7 +7595,9 @@ fn with_source_sheet<R>(
         // the same word: it read "Ajouter aux favoris" / "Retirer des favoris"
         // here and "Changer" there for the same switch.
         0 => u.change,
-        1 => u.edit,
+        // The address opens the keyboard, as Réglages' keyboard rows do, and
+        // says it as they do: "Modifier" is the word of a value row A arms.
+        1 => u.type_text,
         _ => lc.opt_delete,
     };
     let hints = [(&[Btn::A][..], a_verb), (&[Btn::B][..], u.back)];
@@ -7587,6 +7681,7 @@ fn draw_source_options(
             ],
             q,
             true,
+            u.cancel,
         );
         backend.clear_ui_transform();
     }
@@ -7735,7 +7830,8 @@ fn strip_archive_prefix(text: &str) -> &str {
 /// then narrow the saved sources to the ones matching it (address or name).
 /// Empty input clears it. Called from `input()` only (the keyboard needs the
 /// lock free).
-fn run_import_search_flow() {
+/// Returns whether a search was applied (false: the keyboard was cancelled).
+fn run_import_search_flow() -> bool {
     let current = LIBRARY
         .lock()
         .ok()
@@ -7743,7 +7839,7 @@ fn run_import_search_flow() {
         .unwrap_or_default();
     let u = crate::loc_ui::ui();
     let Some(typed) = net::prompt_search_as(u.imp_kbd_src_header, u.imp_kbd_src_guide, &current) else {
-        return; // cancelled
+        return false; // cancelled
     };
     let trimmed = typed.trim().to_string();
     if let Ok(mut s) = LIBRARY.lock() {
@@ -7755,6 +7851,7 @@ fn run_import_search_flow() {
         s.screen = distant_idle_at(&s, row);
     }
     crate::backend::render::gallery_anim_reset();
+    true
 }
 
 /// Error screen (Y): re-type the address that just failed, pre-filled, then try
@@ -7956,17 +8053,19 @@ fn run_direct_download(url: &str) {
 /// pre-filled with the last search, then the search. `origin` is the importer
 /// row it was asked from, `None` from the results page itself (a new search).
 /// Called from `input()` only (the keyboard needs the lock free).
-fn run_fp_search_flow(origin: Option<usize>) {
+/// Returns whether a search went out (false: cancelled, or nothing typed).
+fn run_fp_search_flow(origin: Option<usize>) -> bool {
     let initial = LIBRARY.lock().map(|s| s.fp_query.clone()).unwrap_or_default();
     let u = crate::loc_ui::ui();
     let Some(query) = net::prompt_search_as(u.imp_fp_title, u.imp_kbd_fp_guide, &initial) else {
-        return;
+        return false;
     };
     let query = query.trim().to_string();
     if query.is_empty() {
-        return;
+        return false;
     }
     start_fp_search(&query, origin);
+    true
 }
 
 /// Search Flashpoint for `query`, behind the results page: its header and
@@ -8696,6 +8795,12 @@ fn handle_game_folder_delete_input(
                 // from out here by path could not work: the path is what it
                 // changes.
                 let idx = empty_folder(s, folder_idx, game_idx);
+                // A red toast set by this press has sounded its note: the
+                // question going back to the folders adds no decide on top
+                // (a game whose name is taken at the root refuses the move).
+                if s.toast_kind == TOAST_ERR && s.toast_frames == TOAST_FRAMES {
+                    crate::sfx::hush();
+                }
                 // The shelf is gone, so its row is gone: land on the root, which
                 // is where its games now are.
                 s.screen = Screen::GameFolderPicker { game_idx: idx, selection: 0 };
@@ -9231,7 +9336,24 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                 crate::sfx::choose(crate::sfx::Sfx::Back);
                 return;
             }
-            "Up" | "StickLUp" | "Down" | "StickLDown" | "L" | "R" | "Plus" => confirm_armed(s),
+            // A held direction against the end of the list moves nothing, and
+            // keeps the row armed (`list_step_moves`).
+            "Up" | "StickLUp" | "Down" | "StickLDown" => {
+                if !list_step_moves(button, selection, total) {
+                    return;
+                }
+                confirm_armed(s);
+            }
+            // L / R keep it on their way to another game. With none on that
+            // side (the end of the list, a list of one) or under a held
+            // shoulder they go nowhere, and the row stays armed.
+            "L" | "R" => {
+                if !nav_may_wrap() || options_neighbour(s, game_idx, button).is_none() {
+                    return;
+                }
+                confirm_armed(s);
+            }
+            "Plus" => confirm_armed(s),
             _ => return,
         }
     }
@@ -9442,24 +9564,32 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
             if !nav_may_wrap() {
                 return;
             }
-            let shown = local_filtered_indices(&s.entries, &s.local_filter, &s.folder_filter);
-            if let Some(pos) = shown.iter().position(|&i| i == game_idx) {
-                let next = if button == "L" {
-                    pos.checked_sub(1)
-                } else if pos + 1 < shown.len() {
-                    Some(pos + 1)
-                } else {
-                    None
-                };
-                if let Some(n) = next {
-                    s.screen = Screen::OptionsModal { game_idx: shown[n], selection };
-                    return;
-                }
+            if let Some(next) = options_neighbour(s, game_idx, button) {
+                s.screen = Screen::OptionsModal { game_idx: next, selection };
+                return;
             }
         }
         _ => {}
     }
     s.screen = Screen::OptionsModal { game_idx, selection };
+}
+
+/// The game L (`button`) or R goes to from the game at `game_idx` in its
+/// options: the previous or the next of the list behind the panel, None at
+/// its ends and in a list of one.
+pub(crate) fn options_neighbour(s: &State, game_idx: usize, button: &str) -> Option<usize> {
+    let shown = local_filtered_indices(&s.entries, &s.local_filter, &s.folder_filter);
+    let pos = shown.iter().position(|&i| i == game_idx)?;
+    let next = if button == "L" { pos.checked_sub(1)? } else { pos + 1 };
+    shown.get(next).copied()
+}
+
+/// Whether L or R has another game to go to from the game at `game_idx`
+/// (`options_neighbour` on either side), in one pass over the library: asked
+/// by the panel's hints on every frame.
+pub(crate) fn options_has_neighbour(s: &State, game_idx: usize) -> bool {
+    let shown = local_filtered_indices(&s.entries, &s.local_filter, &s.folder_filter);
+    shown.len() > 1 && shown.contains(&game_idx)
 }
 
 /// Build a Flashpoint search query from a game's display name: drop a trailing
@@ -9525,8 +9655,9 @@ fn run_cover_search_flow(game_idx: usize) {
 /// CoverPicker > Minus: re-open the keyboard pre-filled with the last query so
 /// the user can fix a name the filename couldn't match (e.g. `catmario` ->
 /// `cat mario`), then re-run the search. Called from `input()` only — swkbd +
-/// HTTPS must run WITHOUT the LIBRARY lock.
-fn run_cover_research_flow(game_idx: usize) {
+/// HTTPS must run WITHOUT the LIBRARY lock. Returns whether a search went out
+/// (false: cancelled, or nothing typed).
+fn run_cover_research_flow(game_idx: usize) -> bool {
     let current = match LIBRARY.lock() {
         Ok(g) if !g.cover_query.is_empty() => g.cover_query.clone(),
         Ok(g) => g
@@ -9534,7 +9665,7 @@ fn run_cover_research_flow(game_idx: usize) {
             .get(game_idx)
             .map(|e| cover_query_from_name(&e.display_name))
             .unwrap_or_default(),
-        Err(_) => return,
+        Err(_) => return false,
     };
     // Its own header and guide: this keyboard searches Flashpoint for a game's
     // name, and the library search's guide promises that an empty entry shows
@@ -9542,13 +9673,14 @@ fn run_cover_research_flow(game_idx: usize) {
     let lc = crate::loc::s();
     let guide = crate::loc_ui::ui().kbd_cover_guide;
     let Some(typed) = net::prompt_search_as(lc.cover_title, guide, &current) else {
-        return; // cancelled: keep the picker as it was
+        return false; // cancelled: keep the picker as it was
     };
     let query = typed.trim().to_string();
     if query.is_empty() {
-        return; // empty submit = no-op, don't wipe the current list
+        return false; // empty submit = no-op, don't wipe the current list
     }
     defer_net(PendingNet::CoverSearch { game_idx, query }, game_idx);
+    true
 }
 
 /// Shared Flashpoint cover search: runs the synchronous HTTPS search for
@@ -9658,7 +9790,10 @@ fn handle_cover_picker_input(s: &mut State, button: &str, game_idx: usize, mut s
         "Down" | "StickLDown" => {
             selection = grid_step(selection, true, cols, total);
         }
-        "Y" => {
+        // Not on the window that found nothing, which offers no Y: there it
+        // clicked over a screen that did not change, and the flip stayed for
+        // the refined search, which then opened on screenshots.
+        "Y" if total > 0 => {
             // Swap the whole grid between screenshots and logos. The thumbnails in
             // flight are for the other source, so drop them rather than let them
             // land under the new URLs.
@@ -10082,6 +10217,13 @@ fn handle_sort_modal_input(
         // to re-sort the library on the spot, so B ("cancel") could no longer
         // cancel anything.
         "X" => dirs ^= bit,
+        // The order already in force changes nothing: the window closes as B
+        // closes it, on the game the cursor was on. Re-applied, it sent the
+        // cursor to the top of a list that had not moved.
+        "A" if selection == sort_mode_index() && (dirs & bit != 0) == current_sort_reverse() => {
+            s.screen = Screen::List { selection: prev_sel, scroll_offset: prev_scroll };
+            return;
+        }
         "A" => {
             store_active_sort(selection as u8, dirs & bit != 0);
             sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
@@ -10218,6 +10360,22 @@ fn handle_remote_sort_modal_input(
         "X" => dirs ^= bit,
         "A" => {
             let reverse = dirs & bit != 0;
+            // The order already in force changes nothing: back to the list as
+            // B goes back, the cursor where it was (two thousand games down an
+            // archive, say), rather than on the first row.
+            let in_force = match kind {
+                SORT_TARGET_FP => s.fp_sort,
+                SORT_TARGET_IMPORT => (import_sort_index() as u8, import_sort_reverse()),
+                _ => s.files_sort,
+            };
+            if in_force == (selection as u8, reverse) {
+                s.screen = match kind {
+                    SORT_TARGET_FP => Screen::FpGallery { selection: prev_sel, scroll: prev_scroll },
+                    SORT_TARGET_IMPORT => Screen::DistantIdle { selection: prev_sel, scroll_offset: prev_scroll },
+                    _ => Screen::DistantFiles { selection: prev_sel, scroll_offset: prev_scroll },
+                };
+                return;
+            }
             match kind {
                 SORT_TARGET_FP => {
                     s.fp_sort = (selection as u8, reverse);
@@ -10502,7 +10660,8 @@ extern "C" {
 /// Search flow: open swkbd pre-filled with the current filter, submit
 /// becomes the new filter. Empty input clears the filter. Selection +
 /// scroll reset to 0 so the user starts at the top of the filtered view.
-fn run_distant_search_flow() {
+/// Returns whether a search was applied (false: the keyboard was cancelled).
+fn run_distant_search_flow() -> bool {
     let current = LIBRARY
         .lock()
         .ok()
@@ -10510,7 +10669,7 @@ fn run_distant_search_flow() {
         .unwrap_or_default();
     let u = crate::loc_ui::ui();
     let Some(typed) = net::prompt_search_as(u.imp_kbd_files_header, u.imp_kbd_files_guide, &current) else {
-        return; // cancelled
+        return false; // cancelled
     };
     let trimmed = typed.trim().to_string();
     if let Ok(mut s) = LIBRARY.lock() {
@@ -10519,14 +10678,17 @@ fn run_distant_search_flow() {
         crate::backend::render::gallery_anim_reset();
         s.screen = Screen::DistantFiles { selection: 0, scroll_offset: 0 };
     }
+    true
 }
 
 /// LOCAL list search (Minus) — same behaviour as the DISTANT filter: opens swkbd
 /// (pre-filled with the current filter so it can be refined), then narrows the
 /// list to entries whose display name or basename contains the text. Empty
 /// input clears the filter. Selection resets to the top of the filtered view.
-/// Called from `input()` only (swkbd must not run while we hold the lock).
-fn run_local_search_flow() {
+/// Called from `input()` and from a tap on the strip's search chip (swkbd
+/// must not run while we hold the lock).
+/// Returns whether a search was applied (false: the keyboard was cancelled).
+fn run_local_search_flow() -> bool {
     let current = LIBRARY
         .lock()
         .ok()
@@ -10538,7 +10700,7 @@ fn run_local_search_flow() {
     // first finger-up sample once the keyboard is gone.
     touch_press_cancel();
     let Some(typed) = typed else {
-        return; // cancelled
+        return false; // cancelled
     };
     let trimmed = typed.trim().to_string();
     if let Ok(mut s) = LIBRARY.lock() {
@@ -10549,6 +10711,7 @@ fn run_local_search_flow() {
     // start its covers closed.
     crate::backend::render::gallery_anim_reset();
     crate::backend::render::tile_open_reset();
+    true
 }
 
 fn clamp_scroll(mut scroll: usize, selection: usize, visible_rows: usize) -> usize {
@@ -10705,6 +10868,10 @@ enum PendingClose {
     /// the game's Touches et curseur page, read again (a key changed in the
     /// editor can bring its revert row).
     CloseEditorToTouches { game_idx: usize },
+    /// + closed a game's options from their page `from`: what it left half
+    /// done goes now that the panels are out (`drop_options_leftovers`), then
+    /// the library on the game, `target`.
+    CloseOptions { from: Screen, target: Screen },
     DeleteGame { game_idx: usize },
     /// Delete the saved source `history_idx`; the cursor stays on `row`, the
     /// view row it was on, so the source below slides under it.
@@ -11251,7 +11418,10 @@ fn draw_import_page(
     } else if let Some(src) = source.as_deref() {
         crumbs.push(src);
     }
-    let hints = [(&[Btn::B][..], u.cancel)];
+    // B stops it (or asks first, once it has run a while): "Arrêter", the
+    // word of the answer that does it, not "Annuler", which the question
+    // that follows gives to carrying on.
+    let hints = [(&[Btn::B][..], u.imp_stop)];
     backend.draw_import_progress(&ImportProgress {
         crumbs: &crumbs,
         title: &title,
@@ -11539,6 +11709,10 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     menu::close();
                     goto_touches_menu(&mut s2, game_idx, 0);
                 }
+                Some(PendingClose::CloseOptions { from, target }) => {
+                    drop_options_leftovers(&mut s2, from);
+                    s2.screen = target;
+                }
                 Some(PendingClose::DeleteGame { game_idx }) => {
                     delete_game(&mut s2, game_idx);
                     if s2.entries.is_empty() {
@@ -11732,6 +11906,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 &[Choice { label: u.close, destructive: false }],
                 0,
                 false,
+                u.close,
             );
         }
         Screen::Empty => {
@@ -12104,6 +12279,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 ],
                 selection,
                 false,
+                u.cancel,
             );
         }
         Screen::DistantLoading => {
@@ -12208,6 +12384,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     ],
                     selection,
                     true,
+                    u.imp_keep_going,
                 );
             }
         }
@@ -12333,8 +12510,8 @@ fn extract_gamezip_main(
         let detail = if total > 0 {
             let pct = (done as f64 / total as f64 * 100.0).clamp(0.0, 100.0) as u32;
             std::format!(
-                "{} %  \u{00B7}  {}",
-                pct,
+                "{}  \u{00B7}  {}",
+                crate::loc_ui::percent(pct),
                 crate::backend::render::imp_n_of(
                     &crate::backend::render::imp_amount(done),
                     &crate::backend::render::imp_size(total)

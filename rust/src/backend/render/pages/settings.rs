@@ -140,8 +140,13 @@ impl SwitchRenderBackend {
                 (col::TEXT2, col::TEXT2)
             };
             self.kit_icon(NAV_X + 16.0, cy, 20.0, *icon, icon_ink);
-            let l = self.kit_fit(label, size::BODY, NAV_W - 50.0 - 14.0);
-            self.kit_text_mid(NAV_X + 50.0, cy, size::BODY, &l, ink);
+            // A size down before any cut: the Russian "Значения по
+            // умолчанию" read "Значения по умолч…" at the column's size, and
+            // is whole a size under it.
+            let room = NAV_W - 50.0 - 14.0;
+            let px = if self.kit_measure(label, size::BODY) <= room { size::BODY } else { size::LABEL };
+            let l = self.kit_fit(label, px, room);
+            self.kit_text_mid(NAV_X + 50.0, cy, px, &l, ink);
             cells.push((NAV_X, y, NAV_W, NAV_ITEM_H));
         }
         self.draw_overlay_rect(DIVIDER_X, BODY_TOP, 1.0, BODY_BOTTOM - BODY_TOP, col::LINE);

@@ -164,6 +164,12 @@ pub fn pause_reset() {
     kit::sheet::cascade_reset();
 }
 
+/// The right edge of a page of the pause in landscape (the rail, then the
+/// page beside it): where what goes over the game beside the page starts.
+fn pause_page_right() -> f32 {
+    kit::sheet::SHEET_MARGIN + kit::sheet::RAIL_W + kit::sheet::CASCADE_GAP + kit::sheet::CHILD_W
+}
+
 // ── Unified modal style ────────────────────────────────────────────────────
 // One look for every centered window: `draw_modal_frame` draws the panel, title
 // and hints from the kit (`render/kit/window.rs`), and only each window's body
@@ -9887,7 +9893,7 @@ impl SwitchRenderBackend {
             Row::new(Icon::Cpu, lc.set_overclock)
                 .choice(&oc_opts, pv::current(PauseValue::Overclock) as usize)
                 .armed_if(oc_armed)
-                .note_opt(oc_note),
+                .note_in_room(oc_note, u.tag_default),
             Row::new(Icon::Restart, lc.menu_restart),
             Row::new(Icon::LogOut, lc.menu_quit),
         ];
@@ -10033,7 +10039,7 @@ impl SwitchRenderBackend {
         let rot_opts = [lc.rot_none, lc.rot_90, lc.rot_180, lc.rot_270];
         let pix_opts = [lc.pixels_auto, lc.pixels_smooth, lc.pixels_sharp];
         let filter_opts = [lc.filter_none, lc.filter_scanlines, lc.filter_crt];
-        let zoom = std::format!("{} %", game_zoom_percent());
+        let zoom = crate::loc_ui::percent(game_zoom_percent() as u32);
         let note = |key: &str, v: Option<V>| {
             if (v.is_some() && armed == v) || !pv::follows_default(key) {
                 None
@@ -10045,21 +10051,21 @@ impl SwitchRenderBackend {
             Row::new(Icon::Monitor, lc.set_display_mode)
                 .choice(&display_opts, pv::current(V::Display) as usize)
                 .armed_if(armed == Some(V::Display))
-                .note_opt(note("AFFICHAGE", Some(V::Display))),
+                .note_in_room(note("AFFICHAGE", Some(V::Display)), u.tag_default),
             Row::new(Icon::Rotate, lc.set_rotation)
                 .choice(&rot_opts, pv::current(V::Rotation) as usize)
                 .armed_if(armed == Some(V::Rotation))
-                .note_opt(note("ROTATION", Some(V::Rotation))),
-            Row::new(Icon::ZoomIn, lc.set_zoom).value(&zoom).opens().note_opt(note("ZOOM", None)),
+                .note_in_room(note("ROTATION", Some(V::Rotation)), u.tag_default),
+            Row::new(Icon::ZoomIn, lc.set_zoom).value(&zoom).opens().note_in_room(note("ZOOM", None), u.tag_default),
             Row::new(Icon::Pixels, lc.set_pixel_filter)
                 .choice(&pix_opts, pv::current(V::Pixels) as usize)
                 .armed_if(armed == Some(V::Pixels))
-                .note_opt(note("PIXELS", Some(V::Pixels))),
+                .note_in_room(note("PIXELS", Some(V::Pixels)), u.tag_default),
             Row::new(Icon::Tv, lc.set_screen_filter)
                 .choice(&filter_opts, pv::current(V::Filter) as usize)
                 .armed_if(armed == Some(V::Filter))
-                .note_opt(note("FILTRE", Some(V::Filter))),
-            Row::new(Icon::Gauge, lc.set_fps).toggle(fps_counter_on()).note_opt(note("FPS", None)),
+                .note_in_room(note("FILTRE", Some(V::Filter)), u.tag_default),
+            Row::new(Icon::Gauge, lc.set_fps).toggle(fps_counter_on()).note_in_room(note("FPS", None), u.tag_default),
         ];
         debug_assert_eq!(rows.len(), SCREEN_ITEMS.len());
         let key = SCREEN_ITEMS.get(selected).copied().unwrap_or("");
@@ -10158,7 +10164,7 @@ impl SwitchRenderBackend {
                 v.to_string()
             }
         };
-        let mut head = std::format!("{}  {} %", lc.set_zoom, percent);
+        let mut head = std::format!("{}  {}", lc.set_zoom, crate::loc_ui::percent(percent as u32));
         if (ox, oy) != (0, 0) {
             let offset = u.zoom_offset.replacen("{}", &signed(ox), 1).replacen("{}", &signed(oy), 1);
             head.push_str("  \u{00B7}  ");
@@ -10265,7 +10271,13 @@ impl SwitchRenderBackend {
     ///
     /// Drawn with the kit (the console font), like the rest of the in-game
     /// interface.
-    pub fn draw_fps_overlay(&mut self) {
+    ///
+    /// `under_pause`: drawn behind the pause's panels, frozen with the picture.
+    /// On a turned picture the panels hug their rows from the top and covered
+    /// this corner (the dot and the reading, on a 720 px wide viewport), which
+    /// is what ÉCRAN's row previews: the pill goes under them there, as the
+    /// loading card does.
+    pub fn draw_fps_overlay(&mut self, under_pause: bool) {
         use theme::col;
         let (measured, nominal) = fps_readout();
         unsafe {
@@ -10320,10 +10332,12 @@ impl SwitchRenderBackend {
         // of the turned picture. Pinned to the RIGHT edge, so the pill grows to
         // the left as the number does instead of sliding.
         let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
         let tw = self.kit_measure(&text, PX);
         let w = 12.0 + 8.0 + 8.0 + tw + 12.0;
         let x = (vw - MARGIN - w).round();
-        let y = MARGIN;
+        let below = if under_pause && vh > vw { kit::sheet::cascade_bottom() } else { 0.0 };
+        let y = if below > 0.0 && below + MARGIN + H + MARGIN <= vh { below + MARGIN } else { MARGIN };
         self.kit_rrect(x, y, w, H, H * 0.5, 0xB8_0A_10_1C);
         self.kit_rrect(x + 12.0, y + H * 0.5 - 4.0, 8.0, 8.0, 4.0, dot);
         self.kit_text_mid(x + 12.0 + 8.0 + 8.0, y + H * 0.5, PX, &text, col::TEXT);
@@ -10793,14 +10807,19 @@ impl SwitchRenderBackend {
                 self.kit_text_mid(x, cy, px, &t, TOUCHES_QUIET);
             }
             PadValue::Inherited(Some(k)) => {
-                // The key the layer falls back to, quieter, and why it is there.
+                // The key the layer falls back to, quieter, sized first: it is
+                // what the row says. Why it is there is a caption beside it,
+                // drawn only when it fits whole (captions are what gets
+                // dropped), the dimmed keycap marking an inherited key on its
+                // own. Given what the caption left, the key was cut first in a
+                // portrait column, and the caption after it: "Right cli… Same
+                // as No…" on every row of a combo layer.
+                let kw = self.pad_key(x, cy, max_w, row_h, k, px, true);
                 let cpx = pad_caption_px(px);
                 let caption = u.key_same_as_normal;
-                let cw = self.kit_measure(caption, cpx) + 10.0;
-                let kw = self.pad_key(x, cy, (max_w - cw).max(max_w * 0.5), row_h, k, px, true);
-                let room = (x + max_w - (x + kw + 10.0)).max(0.0);
-                let c = self.kit_fit(caption, cpx, room);
-                self.kit_text_mid(x + kw + 10.0, cy, cpx, &c, col::TEXT3);
+                if self.kit_measure(caption, cpx) <= max_w - kw - 10.0 {
+                    self.kit_text_mid(x + kw + 10.0, cy, cpx, caption, col::TEXT3);
+                }
             }
             PadValue::Modifier => {
                 // Not the stored binding: it is still in the keymap, and it will
@@ -10809,8 +10828,12 @@ impl SwitchRenderBackend {
                 let isz = (px + 1.0).round();
                 self.kit_icon(x, cy, isz, Icon::Layers, col::TEXT3);
                 let label = crate::loc::s().keys_modifier.replace("{}", button);
-                let t = self.kit_fit(&label, px, (max_w - isz - 7.0).max(0.0));
-                self.kit_text_mid(x + isz + 7.0, cy, px, &t, col::TEXT3);
+                // A size down before any cut: "Удержание: слой ZR" ran past a
+                // portrait column.
+                let room = (max_w - isz - 7.0).max(0.0);
+                let lpx = if self.kit_measure(&label, px) <= room { px } else { pad_caption_px(px) };
+                let t = self.kit_fit(&label, lpx, room);
+                self.kit_text_mid(x + isz + 7.0, cy, lpx, &t, col::TEXT3);
             }
         }
     }
@@ -14001,9 +14024,19 @@ impl SwitchRenderBackend {
             self.draw_toast_in(msg, kind, 0.0, vw, ToastAt::Bottom(vh - 24.0));
             return;
         }
-        let left = kit::sheet::SHEET_MARGIN + kit::sheet::RAIL_W + kit::sheet::CASCADE_GAP + kit::sheet::CHILD_W;
         let y = if fps_counter_on() { 14.0 + 28.0 + 12.0 } else { 24.0 };
-        self.draw_toast_in(msg, kind, left, vw, ToastAt::Top(y));
+        self.draw_toast_in(msg, kind, pause_page_right(), vw, ToastAt::Top(y));
+    }
+
+    /// The wait card of a page of the pause (the shared profiles, a share):
+    /// over the game beside the page in landscape, like the in-game toast.
+    /// Centred on the whole screen, it straddled the page's right edge, over
+    /// its rows' chevrons. In portrait it goes under the panels
+    /// (`draw_loading_card`).
+    pub fn draw_loading_card_in_game(&mut self, label: &str, now: u64) {
+        let (vw, vh) = (self.dimensions.width as f32, self.dimensions.height as f32);
+        let left = if vh > vw { 0.0 } else { pause_page_right() };
+        self.draw_loading_card(label, now, left, vw);
     }
 
     /// The controls editor's toast, or its key picker's: on the window's help

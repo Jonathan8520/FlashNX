@@ -98,9 +98,9 @@ pub struct Ui {
     pub remove: &'static str,
     pub create: &'static str,
     pub empty_verb: &'static str,
-    /// Emptying a shelf: the question ("{}" = the shelf) and what it does not do.
+    /// Emptying a shelf: the question ("{}" = the shelf). Its body is
+    /// `folder_leave_1` / `folder_leave_n` (loc.rs).
     pub folder_empty_title: &'static str,
-    pub folder_empty_body: &'static str,
     pub download: &'static str,
     /// L / R through a long list, a screenful at a time.
     pub page: &'static str,
@@ -189,7 +189,8 @@ pub struct Ui {
     pub help_gyro_off: &'static str,
     pub help_gyro_marble: &'static str,
     pub help_gyro_pointer: &'static str,
-    /// Help of the revert row when there is no backup: back to FlashNX's own keys.
+    /// Help of the revert row when there is no backup: back to the default
+    /// controls, the ones Réglages sets ({} = that place, `menu_path`).
     pub help_revert_default: &'static str,
     /// What a profile network call is doing, under its spinner.
     pub loading_profiles: &'static str,
@@ -278,7 +279,7 @@ pub struct Ui {
     pub type_text: &'static str,
     /// Value of the nickname row when there is none.
     pub not_set: &'static str,
-    /// Game defaults: help of the zoom, cursor speed and controls rows (in the zoom's, {} = the menu path).
+    /// Game defaults: help of the zoom, cursor speed and controls rows (in the zoom's and the controls', {} = a menu path).
     pub help_zoom_default: &'static str,
     pub help_keys_default: &'static str,
     pub help_cursor_default: &'static str,
@@ -561,6 +562,9 @@ pub struct Ui {
     /// A game's options: the card over the panels while the covers are searched for, then while the chosen one downloads.
     pub loading_covers: &'static str,
     pub loading_cover_dl: &'static str,
+    /// A percentage, {} = the number: the zoom's rows and the framing's header, an import's progress
+    /// (`loc_ui::percent`). The language's own way: a no-break space before '%', none in Chinese, '%' first in Turkish.
+    pub percent: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -633,7 +637,6 @@ const EN: Ui = Ui {
     create: "Create",
     empty_verb: "Empty",
     folder_empty_title: "Empty the folder {}?",
-    folder_empty_body: "No game is deleted.",
     download: "Download",
     page: "Page",
     delete_game_title: "Delete this game?",
@@ -690,7 +693,7 @@ const EN: Ui = Ui {
     help_gyro_off: "The gyroscope does not move the cursor. Marble rolls it as you tilt the console, Pointer aims it like a remote.",
     help_gyro_marble: "Marble: tilt the console and the cursor rolls toward the side that goes down.",
     help_gyro_pointer: "Pointer: the cursor goes where the controller points, like a Wii Remote.",
-    help_revert_default: "Puts back FlashNX's standard keys for this game.",
+    help_revert_default: "Puts back the default controls, the ones set in {}.",
     loading_profiles: "Looking for shared profiles…",
     loading_share_check: "Reading your shared profile…",
     loading_share: "Sending your controls…",
@@ -737,7 +740,7 @@ const EN: Ui = Ui {
     type_text: "Type",
     not_set: "Not set",
     help_zoom_default: "The zoom every game starts at. Fine-tune it in the game: {}.",
-    help_keys_default: "The controls of every game that has none of its own. A game set up from its Options › Controls and cursor keeps its own. The gyroscope and the cursor's visibility are set game by game.",
+    help_keys_default: "The controls of every game that has none of its own. A game set up from its {} keeps its own. The gyroscope and the cursor's visibility are set game by game.",
     help_cursor_default: "How fast the right stick moves the mouse cursor, in every game that has no speed of its own.",
     lang_current: "Current language",
     help_share_where: "To share a game's controls: {}",
@@ -879,6 +882,7 @@ const EN: Ui = Ui {
     loading_report: "Sending your message…",
     loading_covers: "Looking for covers…",
     loading_cover_dl: "Downloading the cover…",
+    percent: "{}\u{a0}%",
 };
 
 const FR: Ui = Ui {
@@ -951,7 +955,6 @@ const FR: Ui = Ui {
     create: "Créer",
     empty_verb: "Vider",
     folder_empty_title: "Vider le dossier {}\u{a0}?",
-    folder_empty_body: "Aucun jeu n'est supprimé.",
     download: "Télécharger",
     page: "Page",
     delete_game_title: "Supprimer ce jeu\u{a0}?",
@@ -1008,7 +1011,7 @@ const FR: Ui = Ui {
     help_gyro_off: "Le gyroscope ne bouge pas le curseur. Bille le fait rouler en inclinant la console, Visée le dirige comme une télécommande.",
     help_gyro_marble: "Bille\u{a0}: incline la console, le curseur roule vers le côté qui descend.",
     help_gyro_pointer: "Visée\u{a0}: le curseur va là où pointe la manette, comme une télécommande Wii.",
-    help_revert_default: "Remet les touches de base de FlashNX pour ce jeu.",
+    help_revert_default: "Remet les touches par défaut, celles de {}.",
     loading_profiles: "Recherche des profils partagés…",
     loading_share_check: "Lecture de ton profil partagé…",
     loading_share: "Envoi de tes touches…",
@@ -1055,7 +1058,7 @@ const FR: Ui = Ui {
     type_text: "Saisir",
     not_set: "Aucun",
     help_zoom_default: "Le zoom de départ de chaque jeu. Affine-le en jeu\u{a0}: {}.",
-    help_keys_default: "Les touches de chaque jeu qui n'a pas les siennes. Un jeu réglé depuis ses Options › Touches et curseur garde les siennes. Le gyroscope et l'affichage du curseur se règlent jeu par jeu.",
+    help_keys_default: "Les touches de chaque jeu qui n'a pas les siennes. Un jeu réglé depuis ses {} garde les siennes. Le gyroscope et l'affichage du curseur se règlent jeu par jeu.",
     help_cursor_default: "La vitesse du curseur de souris au stick droit, dans chaque jeu qui n'a pas la sienne.",
     lang_current: "Langue actuelle",
     help_share_where: "Pour partager les touches d'un jeu\u{a0}: {}",
@@ -1197,6 +1200,7 @@ const FR: Ui = Ui {
     loading_report: "Envoi de ton message…",
     loading_covers: "Recherche de jaquettes…",
     loading_cover_dl: "Téléchargement de la jaquette…",
+    percent: "{}\u{a0}%",
 };
 
 const ES: Ui = Ui {
@@ -1269,7 +1273,6 @@ const ES: Ui = Ui {
     create: "Crear",
     empty_verb: "Vaciar",
     folder_empty_title: "¿Vaciar la carpeta {}?",
-    folder_empty_body: "No se borra ningún juego.",
     download: "Descargar",
     page: "Página",
     delete_game_title: "¿Borrar este juego?",
@@ -1326,7 +1329,7 @@ const ES: Ui = Ui {
     help_gyro_off: "El giroscopio no mueve el cursor. Canica lo hace rodar al inclinar la consola, Puntero lo dirige como un mando a distancia.",
     help_gyro_marble: "Canica: inclina la consola y el cursor rueda hacia el lado que baja.",
     help_gyro_pointer: "Puntero: el cursor va adonde apunta el mando, como un mando de Wii.",
-    help_revert_default: "Vuelve a poner los controles estándar de FlashNX para este juego.",
+    help_revert_default: "Vuelve a poner los controles por defecto, los de {}.",
     loading_profiles: "Buscando perfiles compartidos…",
     loading_share_check: "Leyendo tu perfil compartido…",
     loading_share: "Enviando tus controles…",
@@ -1337,7 +1340,7 @@ const ES: Ui = Ui {
     profile_applied_n: "Aplicado {} veces",
     profile_same_name: "Mismo nombre",
     other_game: "Otro juego",
-    tag_default: "predeterminado",
+    tag_default: "por defecto",
     reset_default: "Restaurar",
     help_quit_direct: "Cierra el juego y FlashNX. Lo que el juego no haya guardado se pierde.",
     sec_controls: "Controles",
@@ -1373,7 +1376,7 @@ const ES: Ui = Ui {
     type_text: "Escribir",
     not_set: "Ninguno",
     help_zoom_default: "El zoom con el que empieza cada juego. Ajústalo en el juego: {}.",
-    help_keys_default: "Los controles de cada juego que no tenga los suyos. Un juego ajustado desde sus Opciones › Controles y cursor conserva los suyos. El giroscopio y la visibilidad del cursor se ajustan juego a juego.",
+    help_keys_default: "Los controles de cada juego que no tenga los suyos. Un juego ajustado desde sus {} conserva los suyos. El giroscopio y la visibilidad del cursor se ajustan juego a juego.",
     help_cursor_default: "La velocidad con la que el stick derecho mueve el cursor, en cada juego que no tenga la suya.",
     lang_current: "Idioma actual",
     help_share_where: "Para compartir los controles de un juego: {}",
@@ -1513,8 +1516,9 @@ const ES: Ui = Ui {
     help_zoom_frame: "Amplía la imagen: A abre el encuadre, donde ZL y ZR hacen zoom y el stick mueve la imagen.",
     dir_root_refused: "La raíz de la tarjeta no puede alojar tu biblioteca",
     loading_report: "Enviando tu mensaje…",
-    loading_covers: "Buscando carátulas…",
-    loading_cover_dl: "Descargando la carátula…",
+    loading_covers: "Buscando portadas…",
+    loading_cover_dl: "Descargando la portada…",
+    percent: "{}\u{a0}%",
 };
 
 const RU: Ui = Ui {
@@ -1532,7 +1536,7 @@ const RU: Ui = Ui {
     view_shelf: "Полка",
     resume_game: "Продолжить игру",
     choose: "Выбрать",
-    change: "Изменить",
+    change: "Сменить",
     back: "Назад",
     help_resume: "Вернуться в игру с того же места.",
     help_keys: "Клавиши этой игры, профили других игроков, скорость и видимость курсора, гироскоп.",
@@ -1587,7 +1591,6 @@ const RU: Ui = Ui {
     create: "Создать",
     empty_verb: "Очистить",
     folder_empty_title: "Очистить папку {}?",
-    folder_empty_body: "Ни одна игра не удаляется.",
     download: "Скачать",
     page: "Страница",
     delete_game_title: "Удалить эту игру?",
@@ -1644,7 +1647,7 @@ const RU: Ui = Ui {
     help_gyro_off: "Гироскоп не двигает курсор. «Шарик» катит его при наклоне консоли, «Прицел» наводит его, как пульт.",
     help_gyro_marble: "«Шарик»: наклони консоль, и курсор покатится к опущенной стороне.",
     help_gyro_pointer: "«Прицел»: курсор идёт туда, куда направлен контроллер, как пульт Wii.",
-    help_revert_default: "Возвращает стандартное управление FlashNX для этой игры.",
+    help_revert_default: "Возвращает клавиши, заданные в разделе {}.",
     loading_profiles: "Поиск профилей…",
     loading_share_check: "Чтение твоего профиля…",
     loading_share: "Отправка управления…",
@@ -1655,7 +1658,7 @@ const RU: Ui = Ui {
     profile_applied_n: "Применён раз: {}",
     profile_same_name: "То же имя",
     other_game: "Другая игра",
-    tag_default: "по умолчанию",
+    tag_default: "по умолч.",
     reset_default: "Сбросить",
     help_quit_direct: "Закрывает игру и FlashNX. Всё, что игра не сохранила, будет потеряно.",
     sec_controls: "Клавиши",
@@ -1691,7 +1694,7 @@ const RU: Ui = Ui {
     type_text: "Ввести",
     not_set: "Не задан",
     help_zoom_default: "Масштаб, с которым начинается каждая игра. Точнее его можно настроить в игре: {}.",
-    help_keys_default: "Клавиши для игр, у которых нет своих. Игра, настроенная через Параметры › Клавиши и курсор, сохраняет свои. Гироскоп и видимость курсора настраиваются для каждой игры отдельно.",
+    help_keys_default: "Клавиши для игр, у которых нет своих. Игра, настроенная через {}, сохраняет свои. Гироскоп и видимость курсора настраиваются для каждой игры отдельно.",
     help_cursor_default: "Скорость курсора мыши на правом стике во всех играх, где она не задана отдельно.",
     lang_current: "Текущий язык",
     help_share_where: "Чтобы поделиться клавишами игры: {}",
@@ -1760,7 +1763,7 @@ const RU: Ui = Ui {
     imp_fp_none: "Игры не найдены. Попробуй другое название или меньше слов.",
     imp_err_search: "Поиск не удался",
     imp_new_search: "Новый поиск",
-    imp_src_sub: "Настройки этого источника",
+    imp_src_sub: "Параметры этого источника",
     imp_delete_source: "Удалить источник",
     imp_help_src_fav: "Избранные источники всегда наверху списка, при любой сортировке.",
     imp_help_src_edit: "Текущий адрес: {}",
@@ -1833,6 +1836,7 @@ const RU: Ui = Ui {
     loading_report: "Отправка сообщения…",
     loading_covers: "Поиск обложек…",
     loading_cover_dl: "Загрузка обложки…",
+    percent: "{}\u{a0}%",
 };
 
 const DE: Ui = Ui {
@@ -1850,7 +1854,7 @@ const DE: Ui = Ui {
     view_shelf: "Regal",
     resume_game: "Spiel fortsetzen",
     choose: "Wählen",
-    change: "Ändern",
+    change: "Wechseln",
     back: "Zurück",
     help_resume: "Zurück ins Spiel, wo du aufgehört hast.",
     help_keys: "Die Tasten dieses Spiels, die Profile anderer Spieler, Tempo und Sichtbarkeit des Cursors, das Gyroskop.",
@@ -1905,7 +1909,6 @@ const DE: Ui = Ui {
     create: "Erstellen",
     empty_verb: "Leeren",
     folder_empty_title: "Ordner {} leeren?",
-    folder_empty_body: "Es wird kein Spiel gelöscht.",
     download: "Herunterladen",
     page: "Seite",
     delete_game_title: "Dieses Spiel löschen?",
@@ -1962,7 +1965,7 @@ const DE: Ui = Ui {
     help_gyro_off: "Das Gyroskop bewegt den Cursor nicht. Murmel lässt ihn rollen, wenn du die Konsole neigst, Zeiger richtet ihn wie eine Fernbedienung aus.",
     help_gyro_marble: "Murmel: Neige die Konsole, und der Cursor rollt zu der Seite, die nach unten geht.",
     help_gyro_pointer: "Zeiger: Der Cursor geht dorthin, wohin der Controller zeigt, wie eine Wii-Fernbedienung.",
-    help_revert_default: "Stellt die Standardtasten von FlashNX für dieses Spiel wieder her.",
+    help_revert_default: "Stellt die Standardsteuerung aus {} wieder her.",
     loading_profiles: "Suche nach geteilten Profilen…",
     loading_share_check: "Dein geteiltes Profil wird gelesen…",
     loading_share: "Deine Steuerung wird gesendet…",
@@ -2009,7 +2012,7 @@ const DE: Ui = Ui {
     type_text: "Eingeben",
     not_set: "Keiner",
     help_zoom_default: "Der Zoom, mit dem jedes Spiel startet. Feiner stellst du ihn im Spiel ein: {}.",
-    help_keys_default: "Die Steuerung jedes Spiels, das keine eigene hat. Ein Spiel, das du unter Optionen › Steuerung und Cursor eingerichtet hast, behält seine. Gyroskop und Cursoranzeige stellst du je Spiel ein.",
+    help_keys_default: "Die Steuerung jedes Spiels, das keine eigene hat. Ein Spiel, das du unter {} eingerichtet hast, behält seine. Gyroskop und Cursoranzeige stellst du je Spiel ein.",
     help_cursor_default: "Wie schnell der rechte Stick den Mauszeiger bewegt, in jedem Spiel ohne eigenes Tempo.",
     lang_current: "Aktuelle Sprache",
     help_share_where: "So teilst du die Steuerung eines Spiels: {}",
@@ -2151,6 +2154,7 @@ const DE: Ui = Ui {
     loading_report: "Deine Nachricht wird gesendet…",
     loading_covers: "Suche nach Covern…",
     loading_cover_dl: "Cover wird geladen…",
+    percent: "{}\u{a0}%",
 };
 
 const IT: Ui = Ui {
@@ -2223,7 +2227,6 @@ const IT: Ui = Ui {
     create: "Crea",
     empty_verb: "Svuota",
     folder_empty_title: "Svuotare la cartella {}?",
-    folder_empty_body: "Nessun gioco viene eliminato.",
     download: "Scarica",
     page: "Pagina",
     delete_game_title: "Eliminare questo gioco?",
@@ -2280,7 +2283,7 @@ const IT: Ui = Ui {
     help_gyro_off: "Il giroscopio non muove il cursore. Biglia lo fa rotolare inclinando la console, Puntatore lo dirige come un telecomando.",
     help_gyro_marble: "Biglia: inclina la console e il cursore rotola verso il lato che scende.",
     help_gyro_pointer: "Puntatore: il cursore va dove punta il controller, come un telecomando Wii.",
-    help_revert_default: "Rimette i comandi standard di FlashNX per questo gioco.",
+    help_revert_default: "Rimette i comandi predefiniti, quelli di {}.",
     loading_profiles: "Ricerca dei profili condivisi…",
     loading_share_check: "Lettura del tuo profilo condiviso…",
     loading_share: "Invio dei tuoi comandi…",
@@ -2327,7 +2330,7 @@ const IT: Ui = Ui {
     type_text: "Scrivi",
     not_set: "Nessuno",
     help_zoom_default: "Lo zoom con cui parte ogni gioco. Rifiniscilo in gioco: {}.",
-    help_keys_default: "I comandi di ogni gioco che non ha i suoi. Un gioco impostato da Opzioni › Comandi e cursore mantiene i propri. Giroscopio e visibilità del cursore si impostano gioco per gioco.",
+    help_keys_default: "I comandi di ogni gioco che non ha i suoi. Un gioco impostato da {} mantiene i propri. Giroscopio e visibilità del cursore si impostano gioco per gioco.",
     help_cursor_default: "La velocità del cursore del mouse con la levetta destra, in ogni gioco che non ha la sua.",
     lang_current: "Lingua attuale",
     help_share_where: "Per condividere i comandi di un gioco: {}",
@@ -2469,6 +2472,7 @@ const IT: Ui = Ui {
     loading_report: "Invio del tuo messaggio…",
     loading_covers: "Ricerca delle copertine…",
     loading_cover_dl: "Download della copertina…",
+    percent: "{}\u{a0}%",
 };
 
 const PT: Ui = Ui {
@@ -2541,7 +2545,6 @@ const PT: Ui = Ui {
     create: "Criar",
     empty_verb: "Esvaziar",
     folder_empty_title: "Esvaziar a pasta {}?",
-    folder_empty_body: "Nenhum jogo é apagado.",
     download: "Baixar",
     page: "Página",
     delete_game_title: "Excluir este jogo?",
@@ -2598,12 +2601,12 @@ const PT: Ui = Ui {
     help_gyro_off: "O giroscópio não move o cursor. Bolinha o faz rolar ao inclinar o console, Ponteiro o aponta como um controle remoto.",
     help_gyro_marble: "Bolinha: incline o console e o cursor rola para o lado que desce.",
     help_gyro_pointer: "Ponteiro: o cursor vai para onde o controle aponta, como um Wii Remote.",
-    help_revert_default: "Volta aos controles padrão do FlashNX para este jogo.",
+    help_revert_default: "Volta aos controles padrão, os de {}.",
     loading_profiles: "Procurando perfis compartilhados…",
     loading_share_check: "Lendo seu perfil compartilhado…",
     loading_share: "Enviando seus controles…",
     loading_apply: "Aplicando o perfil…",
-    loading_delete: "Apagando seu perfil…",
+    loading_delete: "Excluindo seu perfil…",
     profile_anonymous: "Anônimo",
     profile_applied_1: "Aplicado 1 vez",
     profile_applied_n: "Aplicado {} vezes",
@@ -2645,7 +2648,7 @@ const PT: Ui = Ui {
     type_text: "Digitar",
     not_set: "Nenhum",
     help_zoom_default: "O zoom com que cada jogo começa. Ajuste com precisão no jogo: {}.",
-    help_keys_default: "Os controles de cada jogo que não tem os seus. Um jogo ajustado em Opções › Controles e cursor mantém os dele. O giroscópio e a exibição do cursor são ajustados jogo a jogo.",
+    help_keys_default: "Os controles de cada jogo que não tem os seus. Um jogo ajustado em {} mantém os dele. O giroscópio e a exibição do cursor são ajustados jogo a jogo.",
     help_cursor_default: "A velocidade com que o analógico direito move o cursor, em cada jogo que não tem a sua.",
     lang_current: "Idioma atual",
     help_share_where: "Para compartilhar os controles de um jogo: {}",
@@ -2778,7 +2781,7 @@ const PT: Ui = Ui {
     profile_apply_failed: "Perfil não aplicado: o cartão recusou a gravação.",
     profile_revert_failed: "Controles não restaurados: o cartão recusou a gravação.",
     profile_share_failed: "O catálogo recusou seus controles. Tente mais tarde.",
-    profile_delete_failed: "O catálogo não removeu seu perfil. Tente mais tarde.",
+    profile_delete_failed: "O catálogo não excluiu seu perfil. Tente mais tarde.",
     help_copy_game: "Os controles próprios desse outro jogo. Você vê o que muda antes de aplicar.",
     zoom_offset: "deslocado {}, {} px",
     gyro_off: "Não",
@@ -2787,6 +2790,7 @@ const PT: Ui = Ui {
     loading_report: "Enviando sua mensagem…",
     loading_covers: "Procurando capas…",
     loading_cover_dl: "Baixando a capa…",
+    percent: "{}\u{a0}%",
 };
 
 const ZH: Ui = Ui {
@@ -2859,7 +2863,6 @@ const ZH: Ui = Ui {
     create: "新建",
     empty_verb: "清空",
     folder_empty_title: "清空文件夹 {}？",
-    folder_empty_body: "不会删除任何游戏。",
     download: "下载",
     page: "翻页",
     delete_game_title: "删除这个游戏？",
@@ -2916,7 +2919,7 @@ const ZH: Ui = Ui {
     help_gyro_off: "陀螺仪不移动光标。“弹珠”随主机倾斜滚动光标，“指针”像遥控器一样瞄准。",
     help_gyro_marble: "弹珠：倾斜主机，光标会滚向较低的一侧。",
     help_gyro_pointer: "指针：光标跟随手柄所指的方向，就像 Wii 遥控器。",
-    help_revert_default: "恢复 FlashNX 为此游戏设定的默认按键。",
+    help_revert_default: "恢复默认按键，即“{}”中的按键。",
     loading_profiles: "正在查找共享配置…",
     loading_share_check: "正在读取你的共享配置…",
     loading_share: "正在发送你的按键…",
@@ -2963,7 +2966,7 @@ const ZH: Ui = Ui {
     type_text: "输入",
     not_set: "未设置",
     help_zoom_default: "每个游戏开始时的缩放。可在游戏中细调：{}。",
-    help_keys_default: "所有没有自己按键的游戏所用的按键。在“选项 › 按键与光标”中单独设置过的游戏会保留自己的按键。陀螺仪和光标显示需逐个游戏设置。",
+    help_keys_default: "所有没有自己按键的游戏所用的按键。在“{}”中单独设置过的游戏会保留自己的按键。陀螺仪和光标显示需逐个游戏设置。",
     help_cursor_default: "在没有单独设置速度的游戏中，右摇杆移动鼠标光标的速度。",
     lang_current: "当前语言",
     help_share_where: "分享游戏按键：{}",
@@ -3105,6 +3108,7 @@ const ZH: Ui = Ui {
     loading_report: "正在发送你的消息…",
     loading_covers: "正在查找封面…",
     loading_cover_dl: "正在下载封面…",
+    percent: "{}%",
 };
 
 const TR: Ui = Ui {
@@ -3177,7 +3181,6 @@ const TR: Ui = Ui {
     create: "Oluştur",
     empty_verb: "Boşalt",
     folder_empty_title: "{} klasörü boşaltılsın mı?",
-    folder_empty_body: "Hiçbir oyun silinmez.",
     download: "İndir",
     page: "Sayfa",
     delete_game_title: "Bu oyun silinsin mi?",
@@ -3234,7 +3237,7 @@ const TR: Ui = Ui {
     help_gyro_off: "Jiroskop imleci hareket ettirmez. Bilye konsolu eğdikçe onu yuvarlar, İşaretçi onu bir kumanda gibi yönlendirir.",
     help_gyro_marble: "Bilye: konsolu eğ, imleç aşağı inen tarafa doğru yuvarlanır.",
     help_gyro_pointer: "İşaretçi: imleç, Wii Remote gibi, kumandanın gösterdiği yere gider.",
-    help_revert_default: "Bu oyun için FlashNX'in standart tuşlarını geri getirir.",
+    help_revert_default: "{} bölümündeki varsayılan tuşları geri getirir.",
     loading_profiles: "Paylaşılan profiller aranıyor…",
     loading_share_check: "Paylaşılan profilin okunuyor…",
     loading_share: "Kontrollerin gönderiliyor…",
@@ -3281,7 +3284,7 @@ const TR: Ui = Ui {
     type_text: "Yaz",
     not_set: "Yok",
     help_zoom_default: "Her oyunun başladığı zoom. Oyunda ince ayar yap: {}.",
-    help_keys_default: "Kendi kontrolleri olmayan her oyunun kontrolleri. Seçenekler › Kontroller ve imleç üzerinden ayarlanan bir oyun kendi kontrollerini korur. Jiroskop ve imleç görünürlüğü oyun oyun ayarlanır.",
+    help_keys_default: "Kendi kontrolleri olmayan her oyunun kontrolleri. {} üzerinden ayarlanan bir oyun kendi kontrollerini korur. Jiroskop ve imleç görünürlüğü oyun oyun ayarlanır.",
     help_cursor_default: "Kendi hızı olmayan her oyunda sağ çubuğun fare imlecini ne kadar hızlı hareket ettirdiği.",
     lang_current: "Geçerli dil",
     help_share_where: "Bir oyunun kontrollerini paylaşmak için: {}",
@@ -3406,7 +3409,7 @@ const TR: Ui = Ui {
     load_failed_title: "Bu oyun açılamıyor",
     load_failed_body: "Dosya artık kartta bu konumda değil ya da kalan bellek için çok büyük. Şurada arandı:",
     dir_new_in_lib: "Kütüphanenin içindesin: yeni klasörü kütüphanenin dışında oluştur.",
-    shortcut_remove_err: "Simge kaldırılamadı",
+    shortcut_remove_err: "Simge çıkarılamadı",
     toast_folder_none: "Bu oyun hiçbir klasörde değil.",
     more_changes_1: "Ve {} değişiklik daha",
     kbd_cover_guide: "Kapağını aradığın oyunun adı",
@@ -3423,6 +3426,7 @@ const TR: Ui = Ui {
     loading_report: "Mesajın gönderiliyor…",
     loading_covers: "Kapaklar aranıyor…",
     loading_cover_dl: "Kapak indiriliyor…",
+    percent: "%{}",
 };
 
 pub fn ui() -> &'static Ui {
@@ -3462,6 +3466,14 @@ pub fn games(n: usize) -> std::string::String {
         Lang::Zh => std::format!("游戏：{}", c),
         Lang::Tr => std::format!("{} oyun", c),
     }
+}
+
+/// `n` percent, the way the language writes it ("150 %", "150%", "%150"):
+/// the zoom's rows and the framing's header, an import's progress. A format
+/// string wrote "150 %" in Turkish and Chinese too, under a framing legend that
+/// said "%100" and "100%".
+pub fn percent(n: u32) -> std::string::String {
+    ui().percent.replacen("{}", &n.to_string(), 1)
 }
 
 /// The layout's name, for the home header.

@@ -846,8 +846,12 @@ fn handle_menu_input(s: &mut State, button: &str, mut selection: usize) {
                 choose(Sfx::Back);
                 return;
             }
-            // Kept, then the move below.
+            // Kept, then the move below. A held direction against the end of
+            // the list moves nothing, and keeps the row armed.
             "Up" | "StickLUp" | "Down" | "StickLDown" => {
+                if !crate::library::list_step_moves(button, selection, count) {
+                    return;
+                }
                 pv::confirm();
             }
             // Nothing else while armed: the hints name only what acts. (`-`
@@ -928,10 +932,14 @@ fn handle_profiles_input(s: &mut State, button: &str, mut selection: usize) {
         }
         _ if matches!(button, "B" | "Minus") || toward_rail(button) => {
             // From the copy list, back to the community list, on the copy row.
+            // Both lists are the same screen, which `input` would hear as a
+            // step of the cursor (or as nothing, on the same row): going back
+            // sounds like going back, as the fresh Left already did.
             if s.copy_mode {
                 s.copy_mode = false;
                 s.matches = std::mem::take(&mut s.saved_matches);
                 s.screen = Screen::Profiles { selection: s.matches.len().max(1) - 1 };
+                crate::sfx::choose(crate::sfx::Sfx::Back);
                 return;
             }
             s.screen = Screen::Menu { selection: MENU_APPLY };
@@ -1779,12 +1787,17 @@ pub(crate) fn with_touches_view<R>(
             .cycle(&speed)
             .ends(speed_idx == 0, speed_idx + 1 >= n_speeds)
             .armed_if(speed_armed)
-            .note_opt(if speed_armed || v.speed_own { None } else { Some(u.tag_default) }),
+            .note_in_room(if speed_armed || v.speed_own { None } else { Some(u.tag_default) }, u.tag_default),
         Row::new(if v.shown { Icon::Eye } else { Icon::EyeOff }, lc.show_cursor).toggle(v.shown),
         Row::new(Icon::Compass, lc.set_gyro)
             .choice(&gyro_opts, v.gyro as usize)
             .armed_if(v.armed == Some(TouchesRow::Gyro)),
     ]);
+    // The defaults a revert with no backup puts back are the player's own,
+    // set in Réglages (`keymap::revert_target` reads them), not FlashNX's:
+    // the help names the place, in the words of its tab and row.
+    let revert_default_help =
+        u.help_revert_default.replacen("{}", &crate::library::menu_path(&[u.tab_settings, u.row_game_prefs]), 1);
     let help_of = |row: TouchesRow, gyro: u8| match row {
         TouchesRow::Edit => u.help_touches_edit,
         TouchesRow::Apply => u.help_touches_apply,
@@ -1798,7 +1811,7 @@ pub(crate) fn with_touches_view<R>(
             _ => u.help_gyro_off,
         },
         TouchesRow::Revert if v.has_backup => u.help_revert,
-        TouchesRow::Revert => u.help_revert_default,
+        TouchesRow::Revert => revert_default_help.as_str(),
     };
     let row = TouchesRow::at(v.can_revert, selection);
     let help = row.map_or("", |r| help_of(r, v.gyro));
@@ -2182,6 +2195,7 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
                 ],
                 selection,
                 true,
+                u.cancel,
             );
             backend.clear_ui_transform();
         }
@@ -2221,8 +2235,7 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
         }
     }
     if loading {
-        let vw = backend.screen_size().0;
-        backend.draw_loading_card(pending_label(), now, 0.0, vw);
+        backend.draw_loading_card_in_game(pending_label(), now);
     }
     if let Some((msg, kind)) = toast {
         // Beside the panels in game; on the editor's help line, where it is.

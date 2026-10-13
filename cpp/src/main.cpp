@@ -1485,6 +1485,13 @@ static void worker_entry(void* arg) {
     // suspended and we drain `ruffle_draw_menu_closing` until it reports done,
     // then resume the game. Keeps the close animated instead of snapping shut.
     bool menu_closing = false;
+    // Buttons pressed while the close animation plays, for both players. Those
+    // frames read no input, so a press made then had lost its edge by the
+    // first frame of the game: a jump pressed right after `-`, or a direction
+    // held to run, did nothing until it was let go and pressed again. The
+    // first frame back gives the game the ones still held.
+    u64  close_drain = 0;
+    u64  close_drain2 = 0;
     int  menu_selection = MENU_RESUME;
     // ECRAN sub-panel: open flag + its own row cursor, kept out of
     // `menu_selection` so backing out lands you on ECRAN rather than on
@@ -1510,6 +1517,13 @@ static void worker_entry(void* arg) {
     int  pan_hold = 0;
     // Same, for the fine zoom on X / Y: a tap is one percent.
     int  zoom_fine_hold = 0;
+    // A finger already on the screen when a pause panel comes up: when the
+    // framing mode ends (one finger moves the picture there) or when `-` opens
+    // the pause over the game. Until it lifts, the panels get no touch: its
+    // first sample read as a new press, and lifting it then tapped whatever
+    // the panel had drawn under it, setting and saving an option the player
+    // never touched.
+    bool touch_wait_lift = false;
     // MENU_QUIT now means "back to library" — controlled by this flag.
     // appletMainLoop returning false (home button → Close) also exits the
     // inner loop but with back_to_library=false → full .nro exit.
@@ -1612,6 +1626,9 @@ static void worker_entry(void* arg) {
             // On dismiss we don't snap shut; we keep re-rendering the frozen
             // frame + the shrinking menu until the close pop reports done.
             if (menu_closing) {
+                // Presses made now reach the game once it resumes.
+                close_drain = (close_drain | kDown) & ~kUp;
+                close_drain2 = (close_drain2 | kDown2) & ~kUp2;
                 ruffle_redraw_paused();
                 if (ruffle_draw_menu_closing(menu_selection)) {
                     menu_open = false;
@@ -1660,7 +1677,9 @@ static void worker_entry(void* arg) {
                 // tables; they simply had nothing feeding them, so the on-screen
                 // keyboard could only be reached with a stick.
                 hidGetTouchScreenStates(&touch_state, 1);
-                const bool menu_touch = touch_state.count > 0;
+                // Not a finger that was already down (`touch_wait_lift`).
+                if (touch_state.count == 0) touch_wait_lift = false;
+                const bool menu_touch = touch_state.count > 0 && !touch_wait_lift;
                 ruffle_menu_touch(
                     menu_touch ? (float)touch_state.touches[0].x * UI_TOUCH_SCALE_X : 0.0f,
                     menu_touch ? (float)touch_state.touches[0].y * UI_TOUCH_SCALE_Y : 0.0f,
@@ -1693,7 +1712,7 @@ static void worker_entry(void* arg) {
             // The panel is gone and the picture is untouched: what the player
             // is judging here IS the framing, so nothing is laid over it but
             // two letterbox bands carrying the legend. Everything is live and
-            // nothing is written until `A`.
+            // nothing is written until `A` (or `-`, which resumes the game).
             if (screen_menu && zoom_mode) {
                 // COARSE zoom on the shoulders, FINE zoom on X / Y -- the same
                 // split as the sticks and the d-pad below, so each pair of
@@ -1838,18 +1857,44 @@ static void worker_entry(void* arg) {
                 // pointer here: without it the FIRST click after a zoom lands
                 // where the old magnification put it -- a third of a screen away
                 // at 300% -- and only heals when the stick is next nudged.
+                //
+                // Back on the ÉCRAN rows, a direction still held from the
+                // framing (the sticks and the d-pad move the picture here) must
+                // not start repeating: their timers did not run in this mode
+                // and still hold a press from before it, so the cursor ran
+                // down the list on its own.
                 if (kDown & HidNpadButton_A) {
                     ruffle_ui_sound(UI_SFX_DECIDE);
                     ruffle_zoom_commit();
                     ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
                     zoom_mode = false;
                     zoom_hold = 0;
-                } else if (kDown & (HidNpadButton_B | HidNpadButton_Minus)) {
+                    pause_repeat_reset(pause_rep);
+                    touch_wait_lift = tcount > 0;
+                } else if (kDown & HidNpadButton_B) {
                     ruffle_ui_sound(UI_SFX_BACK);
                     ruffle_zoom_cancel();
                     ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
                     zoom_mode = false;
                     zoom_hold = 0;
+                    pause_repeat_reset(pause_rep);
+                    touch_wait_lift = tcount > 0;
+                } else if (kDown & HidNpadButton_Minus) {
+                    // `-` resumes the game from here as from every page of the
+                    // pause, and keeps what is being set on the way, as the
+                    // close button does everywhere (input rule 2): the framing,
+                    // as A would. It used to throw the framing away and stay on
+                    // ÉCRAN, a second `-` away from the game.
+                    ruffle_zoom_commit();
+                    ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
+                    zoom_mode = false;
+                    zoom_hold = 0;
+                    screen_menu = false;
+                    pause_repeat_reset(pause_rep);
+                    ruffle_ui_sound(UI_SFX_CLOSE);
+                    ruffle_menu_close_begin();
+                    menu_closing = true;
+                    continue;
                 }
                 ruffle_redraw_paused();
                 if (zoom_mode) ruffle_draw_zoom_overlay();
@@ -1947,7 +1992,9 @@ static void worker_entry(void* arg) {
                 bool tap_a = false;
                 {
                     hidGetTouchScreenStates(&touch_state, 1);
-                    const bool t = touch_state.count > 0;
+                    // Not a finger that was already down (`touch_wait_lift`).
+                    if (touch_state.count == 0) touch_wait_lift = false;
+                    const bool t = touch_state.count > 0 && !touch_wait_lift;
                     const int hit = ruffle_pause_touch(
                         t ? (float)touch_state.touches[0].x * UI_TOUCH_SCALE_X : 0.0f,
                         t ? (float)touch_state.touches[0].y * UI_TOUCH_SCALE_Y : 0.0f,
@@ -1998,6 +2045,7 @@ static void worker_entry(void* arg) {
                         ruffle_zoom_begin();
                         zoom_mode = true;
                         zoom_hold = 0;
+                        pause_repeat_reset(pause_rep);
                         // The finger that tapped this row must not read as the
                         // start of a drag on the first frame of the mode.
                         zoom_touching = false;
@@ -2066,7 +2114,9 @@ static void worker_entry(void* arg) {
             bool tap_a = false;
             {
                 hidGetTouchScreenStates(&touch_state, 1);
-                const bool t = touch_state.count > 0;
+                // Not a finger that was already down (`touch_wait_lift`).
+                if (touch_state.count == 0) touch_wait_lift = false;
+                const bool t = touch_state.count > 0 && !touch_wait_lift;
                 const int hit = ruffle_pause_touch(
                     t ? (float)touch_state.touches[0].x * UI_TOUCH_SCALE_X : 0.0f,
                     t ? (float)touch_state.touches[0].y * UI_TOUCH_SCALE_Y : 0.0f,
@@ -2186,6 +2236,14 @@ static void worker_entry(void* arg) {
             continue;
         }
 
+        // The presses made while the pause closed, still held on this first
+        // frame back (`close_drain`), go to the game with this frame's own;
+        // the `-` that may have closed it is never one of them.
+        const u64 kDownG = kDown | (close_drain & kHeld & ~HidNpadButton_Minus);
+        const u64 kDownG2 = kDown2 | (close_drain2 & kHeld2 & ~HidNpadButton_Minus);
+        close_drain = 0;
+        close_drain2 = 0;
+
         // `-` opens the pause modal. Captured before BINDINGS so it can't
         // also fire a key event into Ruffle.
         if (kDown & HidNpadButton_Minus) {
@@ -2208,6 +2266,10 @@ static void worker_entry(void* arg) {
             // The stick that was steering the game must not carry an axis
             // latched from before into the menu.
             nav_latch_reset(pause_latch);
+            // Nor a finger left on the game: lifted once the panel is in, it
+            // tapped the row under it (`touch_wait_lift`).
+            hidGetTouchScreenStates(&touch_state, 1);
+            touch_wait_lift = touch_state.count > 0;
             ruffle_pause_opened();
             ruffle_ui_sound(UI_SFX_OPEN);
             // A fresh pause always opens on the main panel, never back inside
@@ -2261,7 +2323,7 @@ static void worker_entry(void* arg) {
         for (size_t i = 0; i < BINDINGS_COUNT; ++i) {
             const ButtonBinding& b = BINDINGS[i];
             if (b.mask & p1_mod_buttons) continue; // this button is a modifier, muted
-            const bool dn = (kDown & b.mask) != 0;
+            const bool dn = (kDownG & b.mask) != 0;
             const bool up = (kUp   & b.mask) != 0;
             if (!dn && !up) continue;
             if (dn) {
@@ -2302,7 +2364,7 @@ static void worker_entry(void* arg) {
         for (size_t i = 0; i < BINDINGS_COUNT; ++i) {
             const u64 mask = BINDINGS[i].mask;
             if (mask & p2_mod_buttons) continue; // modifier button, muted
-            const bool dn = (kDown2 & mask) != 0;
+            const bool dn = (kDownG2 & mask) != 0;
             const bool up = (kUp2   & mask) != 0;
             if (!dn && !up) continue;
             if (dn) {
