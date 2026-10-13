@@ -10801,8 +10801,11 @@ pub fn shutdown_leftovers(quitting: bool) {
 
 /// Studios asked for in a row, at most, before the studio shelf waits as after
 /// a failure: a sample full of one-game studios must not turn into a stream of
-/// requests.
-const STUDIO_MAX_ASKED: u8 = 8;
+/// requests. Each ask is a few kilobytes. Eight was too few once a sample
+/// gave each game's first credit only: most first credits are one-game
+/// authors, eight in a row came up, and the shelf left the page for a few
+/// seconds at the first visit.
+const STUDIO_MAX_ASKED: u8 = 24;
 
 /// Samples of the archive in a row, at most, that may come back without a
 /// studio before the shelf waits as after a failure.
