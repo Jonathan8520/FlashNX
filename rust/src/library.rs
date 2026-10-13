@@ -435,8 +435,12 @@ pub(crate) fn goto_tab(target: Tab, dir: f32) {
                     Screen::List { selection: row, scroll_offset: home_scroll_for(row, jouer_scroll()) }
                 }
             }
-            Tab::Importer => distant_idle_at(&s, IMPORT_ROW.load(std::sync::atomic::Ordering::Relaxed)),
-            // Back on the section the player left, not on the first one.
+            // The other two open at their start, the importer on its first
+            // card and Réglages on its first section (Jonathan: "quand on
+            // revient sur settings mets par défaut sur le premier element donc
+            // bibliotheque, pareil dans importer direct sur chercher"). Their
+            // own pages and windows still come back to where they were opened.
+            Tab::Importer => importer_tab_home(),
             Tab::Reglages => settings_tab::settings_home(),
         };
     }
@@ -5049,11 +5053,12 @@ fn input_inner(button: &str) -> bool {
         // only satisfies exhaustiveness.
         Screen::Launching { .. } => true,
         Screen::Empty => {
-            // A (and Y, its old shortcut) go and find games. Minus used to quit
-            // the app from here, the one screen where the search button closed
-            // everything; quitting is in RÉGLAGES, like from any other tab.
+            // A (and Y, its old shortcut) go and find games, on the importer
+            // as its tab opens. Minus used to quit the app from here, the one
+            // screen where the search button closed everything; quitting is
+            // in RÉGLAGES, like from any other tab.
             if matches!(button, "A" | "Y") {
-                s.screen = distant_idle_at(&s, 0);
+                s.screen = importer_tab_home();
             }
             true
         }
@@ -7134,8 +7139,9 @@ pub const IMPORTER_VISIBLE_ROWS: usize = 7;
 /// and kept that shape long after, so on a fresh install the whole screen said
 /// "paste an address" and the easy path was one letter in the footer legend.
 ///
-/// Every row <-> URL conversion goes through `importer_row_for_abs` and
-/// `importer_abs_for_row`, so this number is the only place the offset lives.
+/// Every row <-> URL conversion goes through `importer_row_for_abs` (or
+/// `importer_row_in`, on a view already built) and `importer_abs_for_row`, so
+/// this number is the only place the offset lives.
 pub const IMPORTER_PINNED_ROWS: usize = 2;
 
 /// Screen rect of importer item `row`: a card for rows 0 and 1, else a source
@@ -7191,11 +7197,9 @@ fn importer_scroll_for(row: usize, cur: usize, n: usize) -> usize {
     clamp_scroll(cur, row - IMPORTER_PINNED_ROWS, IMPORTER_VISIBLE_ROWS).min(max)
 }
 
-/// The importer row the cursor was last on, so leaving the tab and coming back
-/// lands where it was (`IMPORT_SCROLL` keeps the scroll the same way).
-static IMPORT_ROW: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
 /// The card last focused, 0 or 1: Up from the first source goes back to it.
+/// Recorded by every frame of the home, since a tap, a tab switch or a way
+/// back from another page puts the cursor on a card without a direction.
 static IMPORT_CARD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// When the importer home was last drawn as the page, to tell a frame that
@@ -7237,15 +7241,29 @@ fn distant_idle_at(s: &State, row: usize) -> Screen {
     Screen::DistantIdle { selection: row, scroll_offset: importer_scroll_for(row, cur, importer_view(s).len()) }
 }
 
+/// The importer as a way in from another tab finds it: the cursor on the
+/// Flashpoint card and the sources from the top, wherever they were left.
+/// Coming back from one of its own pages goes through `distant_idle_at`
+/// instead, to the row and the scroll it left.
+fn importer_tab_home() -> Screen {
+    IMPORT_SCROLL.store(0, std::sync::atomic::Ordering::Relaxed);
+    IMPORT_CARD.store(0, std::sync::atomic::Ordering::Relaxed);
+    Screen::DistantIdle { selection: 0, scroll_offset: 0 }
+}
+
 /// Importer row of history entry `abs` in the current view, so screens that act
 /// on an ABSOLUTE url index can hand the cursor back to the right row. Falls back
 /// to the add card when `abs` is gone or filtered out.
 fn importer_row_for_abs(s: &State, abs: usize) -> usize {
-    importer_view(s)
-        .iter()
-        .position(|&i| i == abs)
-        .map(|p| p + IMPORTER_PINNED_ROWS)
-        .unwrap_or(1)
+    importer_row_in(&importer_view(s), abs)
+}
+
+/// `importer_row_for_abs` in a view already built (`importer_view`), for a
+/// caller that needs the view for something else as well. Each build filters
+/// and sorts every saved source, and the FILES order looks each one up in the
+/// cache: a frame should build it once.
+fn importer_row_in(view: &[usize], abs: usize) -> usize {
+    view.iter().position(|&i| i == abs).map(|p| p + IMPORTER_PINNED_ROWS).unwrap_or(1)
 }
 
 /// Absolute `url_history` index behind an IMPORTER row, or `None` for the two
@@ -7630,8 +7648,19 @@ fn draw_source_options(
     kind: u32,
 ) {
     use crate::backend::render::OPTIONS_W;
-    let row = LIBRARY.lock().map(|s| importer_row_for_abs(&s, url_idx)).unwrap_or(0);
-    let scroll = IMPORT_SCROLL.load(std::sync::atomic::Ordering::Relaxed);
+    // The list as the panel will leave it (`distant_idle_at`): a favourite
+    // switched on here re-sorts it, and drawn at the scroll it had, its source
+    // could sit out of view behind the panel, then the list jumped to it the
+    // frame the panel was gone.
+    let cur = IMPORT_SCROLL.load(std::sync::atomic::Ordering::Relaxed);
+    let (row, scroll) = LIBRARY
+        .lock()
+        .map(|s| {
+            let view = importer_view(&s);
+            let row = importer_row_in(&view, url_idx);
+            (row, importer_scroll_for(row, cur, view.len()))
+        })
+        .unwrap_or((0, cur));
     backend.clear_ui_transform();
     crate::backend::render::set_ui_screen_kind(0);
     draw_importer_home(backend, row, scroll, false);
@@ -12233,13 +12262,17 @@ pub fn render(backend: &mut SwitchRenderBackend) {
         }
         // ── Phase 3.7 DISTANT mode ─────────────────────────────────────
         Screen::DistantIdle { selection, scroll_offset } => {
-            // Remember where the list is (and the row) so every "back to the
-            // list" path, and the tab itself, can restore them.
+            // Remember where the list is, so every "back to the list" path
+            // can restore it, and the card the cursor is on (`IMPORT_CARD`).
             IMPORT_SCROLL.store(scroll_offset, std::sync::atomic::Ordering::Relaxed);
-            IMPORT_ROW.store(selection, std::sync::atomic::Ordering::Relaxed);
+            if selection < IMPORTER_PINNED_ROWS {
+                IMPORT_CARD.store(selection, std::sync::atomic::Ordering::Relaxed);
+            }
             // Back from another page (an archive folding into its row, the
-            // results, an error): the glide state is that page's, so the pill
-            // and the scroll snap to the home's instead of flying in from it.
+            // results, an error, a source's panel): the glide state is that
+            // page's, so the focus and the scroll snap to the home's instead
+            // of flying in from it. What opens over the home draws it behind
+            // as it is about to land, so there the snap shows nothing.
             let gap = now.saturating_sub(HOME_TICK.swap(now, std::sync::atomic::Ordering::Relaxed));
             if gap > unsafe { ruffle_tick_freq() } / 20 {
                 crate::backend::render::gallery_anim_reset();

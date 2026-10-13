@@ -110,16 +110,12 @@ pub(crate) fn settings_at(section: SetSection, key: &str) -> Screen {
     Screen::Settings { section, in_pane: true, row: row_of(section, key) }
 }
 
-/// The section last open, for coming back to the tab with L / R.
-static LAST_SECTION: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-
-/// The tab as a tab switch finds it: the cursor in the column, on the section
-/// that was open when the player left. Quitter is the one entry not to come
-/// back to, with the next A closing the app.
+/// The tab as a tab switch finds it: the cursor in the column, on its first
+/// section, Bibliothèque, whichever was open when the player left. A page or a
+/// window opened from the tab comes back instead to the row that opened it
+/// (`settings_at`).
 pub(crate) fn settings_home() -> Screen {
-    let section = SetSection::at(LAST_SECTION.load(core::sync::atomic::Ordering::Relaxed));
-    let section = if section == SetSection::Quit { SetSection::Library } else { section };
-    Screen::Settings { section, in_pane: false, row: 0 }
+    Screen::Settings { section: SetSection::Library, in_pane: false, row: 0 }
 }
 
 /// Where the cursor lands on going into a section's pane: the first row, or in
@@ -923,9 +919,6 @@ pub(crate) fn draw_settings(
         Screen::SendFailed { row, .. } => (SetSection::Help, false, Body::Section { in_pane: true, row }),
         _ => return,
     };
-    if !under && matches!(screen, Screen::Settings { .. }) {
-        LAST_SECTION.store(section.index(), core::sync::atomic::Ordering::Relaxed);
-    }
     // The value the armed row shows (`Armed`), drawn in place of the stored
     // one until A keeps it, and the layout card under the cursor.
     let (armed, view_focus) = LIBRARY

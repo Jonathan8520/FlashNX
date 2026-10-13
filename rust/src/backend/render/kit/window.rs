@@ -9,7 +9,10 @@
 
 use super::super::*;
 use super::text::{Btn, HintItem};
-use super::theme::{col, radius};
+use super::theme::{col, radius, ring};
+
+/// The width of the gold edge of a focused row's pill.
+const PILL_EDGE: f32 = 2.0;
 
 /// A row's label and, for a "LABEL: VALUE" row, its value.
 ///
@@ -142,7 +145,22 @@ impl SwitchRenderBackend {
 
     /// The focus mark of a list row: a raised pill with a gold edge.
     pub(crate) fn kit_focus_pill(&mut self, x: f32, y: f32, w: f32, h: f32) {
-        self.kit_shape(x, y, w, h, radius::ROW, col::CHIP, 2.0, col::GOLD, 0.0);
+        self.kit_shape(x, y, w, h, radius::ROW, col::CHIP, PILL_EDGE, col::GOLD, 0.0);
+    }
+
+    /// One focus part way between a tile's ring (`look` 0, exactly
+    /// `kit_ring` round the box with the tile's `tile_radius`) and a row's
+    /// pill (`look` 1, exactly `kit_focus_pill` on the box), for a page whose
+    /// focus travels from tiles to rows. The ring's gap, its width, its
+    /// corners and the pill's fill all turn into the other's on the way, so
+    /// the focus never changes shape in a single frame.
+    pub(crate) fn kit_focus_morph(&mut self, x: f32, y: f32, w: f32, h: f32, tile_radius: f32, look: f32) {
+        let k = look.clamp(0.0, 1.0);
+        let out = (ring::GAP + ring::WIDTH) * (1.0 - k);
+        let edge = ring::WIDTH + (PILL_EDGE - ring::WIDTH) * k;
+        let corner = tile_radius + (radius::ROW - tile_radius) * k + out;
+        let fill = (((k * 255.0).round() as u32) << 24) | (col::CHIP & 0x00FF_FFFF);
+        self.kit_shape(x - out, y - out, w + 2.0 * out, h + 2.0 * out, corner, fill, edge, col::GOLD, 0.0);
     }
 
     /// Width of a segmented control with these labels at `px`.

@@ -13,7 +13,7 @@
 
 use super::super::kit::icons::Icon;
 use super::super::kit::list::Row;
-use super::super::kit::theme::{col, radius, ring, size};
+use super::super::kit::theme::{col, radius, size};
 use super::super::*;
 
 // ─── Numbers, sizes and dates, the way each language writes them ────────────
@@ -194,8 +194,19 @@ pub(crate) struct ImporterHome<'a> {
     pub interactive: bool,
 }
 
-/// Glide key of the ring that moves between the two cards.
-const CARD_RING_KEY: u32 = 0x7100_0000;
+/// The corner of the two cards, which the focus's ring follows outwards.
+const CARD_RADIUS: f32 = 16.0;
+/// How far inside its row the focus pill sits, above and below.
+const PILL_INSET: f32 = 3.0;
+/// The rate (`ease_to`) of both the list's scroll and the focus, which must
+/// be one rate. Headed for a row, the focus is carried by each frame's scroll
+/// change and then eased: at one rate the two make a single glide on the
+/// screen, from where the focus is to where its row will rest, however far the
+/// list scrolls. At two rates (16 and 18) they pulled apart on a long scroll:
+/// from a card to the first of 60 sources the focus rose into the tabs before
+/// coming down, and to the last one it shot past its row out of the band. 16
+/// is every list's scroll rate.
+const GLIDE_RATE: f32 = 16.0;
 /// Where the vertical scrollbar of every importer page sits, in the right
 /// margin past the rows (which end at the page margin, 48 px in).
 pub(crate) const IMPORT_SCROLLBAR_INSET: f32 = 40.0;
@@ -204,6 +215,24 @@ const CHEVRON_IDLE: u32 = 0xFF_5A_6A_8F;
 /// The tint of a focused icon tile: the gold at 14 %, as on the cards.
 const TILE_FOCUS: u32 = 0x24_FF_D7_40;
 const ICON_FOCUS: u32 = 0xFF_FF_E0_7A;
+
+/// `idle` turned `hl` of the way (0 to 1) into `focused`, both opaque: a card
+/// or a row lights up as far as the focus covers it.
+fn lit(idle: u32, focused: u32, hl: f32) -> u32 {
+    0xFF00_0000 | super::super::kit::cover::mix_rgb(idle, focused, hl.clamp(0.0, 1.0))
+}
+
+/// How much of `item` the focus rect `f` covers, 0 to 1. Each card and row
+/// lights up by this much, so its highlight comes and goes with the focus
+/// passing over it instead of switching on the frame the cursor moves.
+fn coverage(f: (f32, f32, f32, f32), item: (f32, f32, f32, f32)) -> f32 {
+    let w = (f.0 + f.2).min(item.0 + item.2) - f.0.max(item.0);
+    let h = (f.1 + f.3).min(item.1 + item.3) - f.1.max(item.1);
+    if w <= 0.0 || h <= 0.0 || item.2 <= 0.0 || item.3 <= 0.0 {
+        return 0.0;
+    }
+    (w * h / (item.2 * item.3)).clamp(0.0, 1.0)
+}
 
 impl SwitchRenderBackend {
     /// Draw the importer home (see `ImporterHome`).
@@ -214,68 +243,97 @@ impl SwitchRenderBackend {
         };
         self.library_clear();
         let vw = self.dimensions.width as f32;
+        let vh = self.dimensions.height as f32;
         let lc = crate::loc::s();
         let u = crate::loc_ui::ui();
         let n = home.rows.len();
-        let sel = home.selection;
+        // A row the list no longer has (it shrank under the cursor) is drawn
+        // as the last one, as the next press will take it.
+        let sel = home.selection.min(n + PINNED - 1);
         let band_top = ROW_TOP;
         let band_bot = ROW_TOP + VISIBLE as f32 * ROW_H;
         let max_scroll = n.saturating_sub(VISIBLE);
         let target_scroll = home.scroll.min(max_scroll) as f32 * ROW_H;
-        let target_pill = ROW_TOP + sel.saturating_sub(PINNED) as f32 * ROW_H;
         let now = unsafe { ruffle_tick_now() };
 
-        // The scroll and the focus pill glide, on the gallery's shared state
-        // like every other page with a moving list; a backdrop is drawn where
-        // it rests.
-        let (mut scroll_px, mut pill_y) = (target_scroll, target_pill);
+        // ONE focus for the page, from card to card, from a card to a row and
+        // back, from row to row: its rect, its look (a ring round a card, a
+        // pill on a row) and the band it is clipped to all glide together, so
+        // it never jumps at either end. It was two marks, a ring easing
+        // sideways over the cards and a pill gliding down the rows, swapped
+        // in one frame on the way between them (Jonathan: "il manque la
+        // fluidité dans importer entre Chercher/Ajouter et les lignes de
+        // sources"). The scroll glides as before, on the gallery's shared
+        // state like every page with a moving list; a backdrop is drawn
+        // where it rests.
+        let on_row = sel >= PINNED;
+        let focus_at = |scroll_px: f32| {
+            let (x, y, w, h) = importer_item_rect(sel, scroll_px, vw);
+            if on_row {
+                FocusGlide::at((x, y + PILL_INSET, w, h - 2.0 * PILL_INSET), 1.0, (band_top, band_bot))
+            } else {
+                FocusGlide::at((x, y, w, h), 0.0, (0.0, vh))
+            }
+        };
+        let (mut scroll_px, mut focus) = (target_scroll, focus_at(target_scroll));
         if home.interactive {
             let touch_scroll = gallery_touch_scroll_read();
             if let Ok(mut a) = gallery_anim().lock() {
                 if !a.inited {
+                    // A fresh page (the tab, a new search or order, back from
+                    // another page): everything where it belongs, no flight.
                     a.inited = true;
                     a.last_tick = now;
-                    a.last_sel = sel;
-                    a.scroll_px = target_scroll;
-                    a.sel_y = target_pill;
-                    a.sel_x = 0.0;
-                    a.sel_w = 0.0;
-                    a.pop = 0.0;
+                    a.scroll_px = touch_scroll.unwrap_or(target_scroll);
+                    a.imp_focus = focus_at(a.scroll_px);
                 } else {
                     let freq = unsafe { ruffle_tick_freq() } as f32;
                     let dt = if freq > 0.0 { (now.saturating_sub(a.last_tick) as f32 / freq).min(0.1) } else { 1.0 / 60.0 };
                     a.last_tick = now;
-                    // Coming down from a card the pill appears on its row
-                    // rather than flying in from wherever it last was.
-                    if a.last_sel < PINNED && sel >= PINNED {
-                        a.sel_y = target_pill;
+                    let before = a.scroll_px;
+                    // A finger on the list wins over the easing, 1:1.
+                    let eased = ease_to(a.scroll_px, target_scroll, dt, GLIDE_RATE);
+                    a.scroll_px = touch_scroll.unwrap_or(eased);
+                    // Headed for a row, the focus moves with the list as the
+                    // rows do, so a row under it stays under it while a finger
+                    // scrolls the list; eased afterwards at the scroll's own
+                    // rate, it glides on the screen straight to where its row
+                    // will rest. Headed for a card, it stays on the page, as
+                    // the card does.
+                    if on_row {
+                        a.imp_focus.y -= a.scroll_px - before;
                     }
-                    a.last_sel = sel;
-                    a.scroll_px = ease_to(a.scroll_px, target_scroll, dt, 16.0);
-                    a.sel_y = ease_to(a.sel_y, target_pill, dt, 18.0);
-                }
-                // A finger on the list wins over the easing, 1:1.
-                if let Some(px) = touch_scroll {
-                    a.scroll_px = px;
+                    let to = focus_at(a.scroll_px);
+                    a.imp_focus.ease(&to, dt, GLIDE_RATE);
                 }
                 scroll_px = a.scroll_px;
-                pill_y = a.sel_y;
+                focus = a.imp_focus;
             }
         }
+        let frect = focus.rect();
 
         // ── The two actions ─────────────────────────────────────────────
+        // Their fills first, the focus over them, then what they say: the
+        // focus passes over a card on its way and under its words.
+        for i in 0..PINNED {
+            let (x, y, w, h) = importer_item_rect(i, 0.0, vw);
+            let hl = coverage(frect, (x, y, w, h));
+            self.kit_rrect(x, y, w, h, CARD_RADIUS, lit(col::PANEL, col::TILE, hl));
+        }
+        self.set_clip(0.0, focus.clip_top, vw, (focus.clip_bot - focus.clip_top).max(0.0));
+        self.kit_focus_morph(focus.x, focus.y, focus.w, focus.h, CARD_RADIUS, focus.look);
+        self.clear_clip();
         let cards = [
             (Icon::Search, u.imp_fp_title, u.imp_fp_sub),
             (Icon::Link, u.imp_add_title, u.imp_add_sub),
         ];
         for (i, (icon, title, sub)) in cards.iter().enumerate() {
             let (x, y, w, h) = importer_item_rect(i, 0.0, vw);
-            let focused = sel == i;
-            self.kit_rrect(x, y, w, h, 16.0, if focused { col::TILE } else { col::PANEL });
+            let hl = coverage(frect, (x, y, w, h));
             let cy = y + h * 0.5;
             const TILE: f32 = 52.0;
-            self.kit_rrect(x + 20.0, cy - TILE * 0.5, TILE, TILE, 14.0, if focused { TILE_FOCUS } else { col::LINE });
-            self.kit_icon(x + 20.0 + 13.0, cy, 26.0, *icon, if focused { ICON_FOCUS } else { col::TEXT2 });
+            self.imp_icon_tile(x + 20.0, cy - TILE * 0.5, TILE, 14.0, col::LINE, col::TILE, hl);
+            self.kit_icon(x + 20.0 + 13.0, cy, 26.0, *icon, lit(col::TEXT2, ICON_FOCUS, hl));
             // Right edge: X on the Flashpoint card says it works from
             // anywhere on the tab; the other one goes somewhere.
             let right = x + w - 20.0;
@@ -284,7 +342,7 @@ impl SwitchRenderBackend {
                 self.kit_button(right - bw, cy, 26.0, Btn::X, col::GLYPH);
                 bw
             } else {
-                self.kit_icon(right - 18.0, cy, 18.0, Icon::ChevronRight, if focused { col::GOLD } else { CHEVRON_IDLE });
+                self.kit_icon(right - 18.0, cy, 18.0, Icon::ChevronRight, lit(CHEVRON_IDLE, col::GOLD, hl));
                 18.0
             };
             let tx = x + 88.0;
@@ -293,11 +351,6 @@ impl SwitchRenderBackend {
             self.kit_text_mid(tx, cy - 11.0, size::TAB, &t, col::TEXT);
             let st = self.kit_fit(sub, size::CAPTION + 1.0, avail);
             self.kit_text_mid(tx, cy + 13.0, size::CAPTION + 1.0, &st, col::TEXT3);
-        }
-        if sel < PINNED {
-            let (x, y, w, h) = importer_item_rect(sel, 0.0, vw);
-            let rx = if home.interactive { eased_list_x(x, CARD_RING_KEY, now) } else { x };
-            self.kit_ring(rx, y, w, h, 16.0, ring::GAP, ring::WIDTH, col::GOLD);
         }
 
         // ── "Mes sources", how many, and the order in force ─────────────
@@ -325,11 +378,9 @@ impl SwitchRenderBackend {
         }
 
         // ── The sources ─────────────────────────────────────────────────
+        // The focus was drawn with the cards: on a row it is under the row's
+        // words as it is under a card's, inside the rows' band.
         self.set_clip(0.0, band_top, vw, band_bot - band_top);
-        if sel >= PINNED && n > 0 {
-            let (x, _, w, _) = importer_item_rect(PINNED, 0.0, vw);
-            self.kit_focus_pill(x, pill_y - scroll_px + 3.0, w, ROW_H - 6.0);
-        }
         let first = (scroll_px / ROW_H).floor().max(0.0) as usize;
         let last = (first + VISIBLE + 2).min(n);
         for k in first..last {
@@ -338,7 +389,8 @@ impl SwitchRenderBackend {
             if y + h < band_top || y > band_bot {
                 continue;
             }
-            self.imp_source_row(x, y + h * 0.5, w, row, sel == k + PINNED);
+            let hl = coverage(frect, (x, y + PILL_INSET, w, h - 2.0 * PILL_INSET));
+            self.imp_source_row(x, y + h * 0.5, w, row, hl);
         }
         self.clear_clip();
 
@@ -432,9 +484,24 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
-    /// One source row centred on `cy` between `x` and `x + w` (the focus pill
-    /// is the caller's).
-    fn imp_source_row(&mut self, x: f32, cy: f32, w: f32, row: &SourceRow, focused: bool) {
+    /// An icon's tile on a card or a row, `hl` of the way from `idle` to
+    /// `focused` with the gold tint over it, which is how it looks under the
+    /// focus. The tint is translucent and used to sit straight on what was
+    /// under the tile (the card's fill, the pill's); laid over an opaque
+    /// colour of its own instead, it looks the same at rest and fades with
+    /// the focus.
+    #[allow(clippy::too_many_arguments)]
+    fn imp_icon_tile(&mut self, x: f32, y: f32, side: f32, corner: f32, idle: u32, focused: u32, hl: f32) {
+        self.kit_rrect(x, y, side, side, corner, lit(idle, focused, hl));
+        let alpha = ((TILE_FOCUS >> 24) as f32 * hl.clamp(0.0, 1.0)).round() as u32;
+        if alpha > 0 {
+            self.kit_rrect(x, y, side, side, corner, (alpha << 24) | (TILE_FOCUS & 0x00FF_FFFF));
+        }
+    }
+
+    /// One source row centred on `cy` between `x` and `x + w`, lit as far as
+    /// the focus covers it (`hl`, 0 to 1; the focus itself is the caller's).
+    fn imp_source_row(&mut self, x: f32, cy: f32, w: f32, row: &SourceRow, hl: f32) {
         const PAD: f32 = 12.0;
         const TILE: f32 = 38.0;
         const BAR_W: f32 = 120.0;
@@ -443,9 +510,10 @@ impl SwitchRenderBackend {
         const GAP: f32 = 14.0;
         let u = crate::loc_ui::ui();
         let tx = x + PAD;
-        self.kit_rrect(tx, cy - TILE * 0.5, TILE, TILE, 10.0, if focused { TILE_FOCUS } else { col::TILE });
+        // Under the focus the tile sat on the pill's fill: it turns into it.
+        self.imp_icon_tile(tx, cy - TILE * 0.5, TILE, 10.0, col::TILE, col::CHIP, hl);
         let icon = if row.direct { Icon::File } else { Icon::Archive };
-        self.kit_icon(tx + (TILE - 19.0) * 0.5, cy, 19.0, icon, if focused { ICON_FOCUS } else { col::TEXT2 });
+        self.kit_icon(tx + (TILE - 19.0) * 0.5, cy, 19.0, icon, lit(col::TEXT2, ICON_FOCUS, hl));
         if row.favorite {
             // The favourite's solid star, on the tile's corner as on a cover.
             const CHIP: f32 = 18.0;
@@ -468,14 +536,14 @@ impl SwitchRenderBackend {
                 self.kit_text_mid(right - tw, cy, size::LABEL, t, col::TEXT2);
                 right -= tw + GAP;
             } else {
-                self.kit_icon(right - MARK, cy, MARK, Icon::Download, if focused { col::GOLD } else { col::TEXT3 });
+                self.kit_icon(right - MARK, cy, MARK, Icon::Download, lit(col::TEXT3, col::GOLD, hl));
                 right -= MARK + GAP;
             }
         } else {
             if complete {
                 self.kit_icon(right - MARK, cy, MARK, Icon::Check, col::OK);
             } else {
-                self.kit_icon(right - MARK, cy, MARK, Icon::ChevronRight, if focused { col::GOLD } else { CHEVRON_IDLE });
+                self.kit_icon(right - MARK, cy, MARK, Icon::ChevronRight, lit(CHEVRON_IDLE, col::GOLD, hl));
             }
             right -= MARK + GAP;
             match row.total {
