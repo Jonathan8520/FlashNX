@@ -963,11 +963,10 @@ fn draw_family_dialog(backend: &mut SwitchRenderBackend, screen: Screen, entry: 
                 // deleted, so the panel is not red; only the button that takes
                 // the folder away is.
                 let title = u.folder_empty_title.replacen("{}", name, 1);
-                let body = std::format!(
-                    "{}. {}",
-                    crate::loc::fill_count(lc.folder_leave_1, lc.folder_leave_n, *count as i32),
-                    u.folder_empty_body,
-                );
+                // Both sentences in one string, punctuated by its language:
+                // joined here with ". ", Chinese read a Latin full stop
+                // between two of its own sentences.
+                let body = crate::loc::fill_count(lc.folder_leave_1, lc.folder_leave_n, *count as i32);
                 show_question(
                     backend,
                     Question {
