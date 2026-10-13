@@ -10793,14 +10793,19 @@ impl SwitchRenderBackend {
                 self.kit_text_mid(x, cy, px, &t, TOUCHES_QUIET);
             }
             PadValue::Inherited(Some(k)) => {
-                // The key the layer falls back to, quieter, and why it is there.
+                // The key the layer falls back to, quieter, sized first: it is
+                // what the row says. Why it is there is a caption beside it,
+                // drawn only when it fits whole (captions are what gets
+                // dropped), the dimmed keycap marking an inherited key on its
+                // own. Given what the caption left, the key was cut first in a
+                // portrait column, and the caption after it: "Right cli… Same
+                // as No…" on every row of a combo layer.
+                let kw = self.pad_key(x, cy, max_w, row_h, k, px, true);
                 let cpx = pad_caption_px(px);
                 let caption = u.key_same_as_normal;
-                let cw = self.kit_measure(caption, cpx) + 10.0;
-                let kw = self.pad_key(x, cy, (max_w - cw).max(max_w * 0.5), row_h, k, px, true);
-                let room = (x + max_w - (x + kw + 10.0)).max(0.0);
-                let c = self.kit_fit(caption, cpx, room);
-                self.kit_text_mid(x + kw + 10.0, cy, cpx, &c, col::TEXT3);
+                if self.kit_measure(caption, cpx) <= max_w - kw - 10.0 {
+                    self.kit_text_mid(x + kw + 10.0, cy, cpx, caption, col::TEXT3);
+                }
             }
             PadValue::Modifier => {
                 // Not the stored binding: it is still in the keymap, and it will
@@ -10809,8 +10814,12 @@ impl SwitchRenderBackend {
                 let isz = (px + 1.0).round();
                 self.kit_icon(x, cy, isz, Icon::Layers, col::TEXT3);
                 let label = crate::loc::s().keys_modifier.replace("{}", button);
-                let t = self.kit_fit(&label, px, (max_w - isz - 7.0).max(0.0));
-                self.kit_text_mid(x + isz + 7.0, cy, px, &t, col::TEXT3);
+                // A size down before any cut: "Удержание: слой ZR" ran past a
+                // portrait column.
+                let room = (max_w - isz - 7.0).max(0.0);
+                let lpx = if self.kit_measure(&label, px) <= room { px } else { pad_caption_px(px) };
+                let t = self.kit_fit(&label, lpx, room);
+                self.kit_text_mid(x + isz + 7.0, cy, lpx, &t, col::TEXT3);
             }
         }
     }
