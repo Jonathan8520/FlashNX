@@ -7139,8 +7139,9 @@ pub const IMPORTER_VISIBLE_ROWS: usize = 7;
 /// and kept that shape long after, so on a fresh install the whole screen said
 /// "paste an address" and the easy path was one letter in the footer legend.
 ///
-/// Every row <-> URL conversion goes through `importer_row_for_abs` and
-/// `importer_abs_for_row`, so this number is the only place the offset lives.
+/// Every row <-> URL conversion goes through `importer_row_for_abs` (or
+/// `importer_row_in`, on a view already built) and `importer_abs_for_row`, so
+/// this number is the only place the offset lives.
 pub const IMPORTER_PINNED_ROWS: usize = 2;
 
 /// Screen rect of importer item `row`: a card for rows 0 and 1, else a source
@@ -7254,11 +7255,15 @@ fn importer_tab_home() -> Screen {
 /// on an ABSOLUTE url index can hand the cursor back to the right row. Falls back
 /// to the add card when `abs` is gone or filtered out.
 fn importer_row_for_abs(s: &State, abs: usize) -> usize {
-    importer_view(s)
-        .iter()
-        .position(|&i| i == abs)
-        .map(|p| p + IMPORTER_PINNED_ROWS)
-        .unwrap_or(1)
+    importer_row_in(&importer_view(s), abs)
+}
+
+/// `importer_row_for_abs` in a view already built (`importer_view`), for a
+/// caller that needs the view for something else as well. Each build filters
+/// and sorts every saved source, and the FILES order looks each one up in the
+/// cache: a frame should build it once.
+fn importer_row_in(view: &[usize], abs: usize) -> usize {
+    view.iter().position(|&i| i == abs).map(|p| p + IMPORTER_PINNED_ROWS).unwrap_or(1)
 }
 
 /// Absolute `url_history` index behind an IMPORTER row, or `None` for the two
@@ -7651,8 +7656,9 @@ fn draw_source_options(
     let (row, scroll) = LIBRARY
         .lock()
         .map(|s| {
-            let row = importer_row_for_abs(&s, url_idx);
-            (row, importer_scroll_for(row, cur, importer_view(&s).len()))
+            let view = importer_view(&s);
+            let row = importer_row_in(&view, url_idx);
+            (row, importer_scroll_for(row, cur, view.len()))
         })
         .unwrap_or((0, cur));
     backend.clear_ui_transform();
