@@ -16,7 +16,7 @@
 //! cover picker sit on top, centred.
 
 use super::*;
-use crate::backend::render::{ui_col, Btn, Icon, Row, Sheet, Side, OPTIONS_CHILD_W, OPTIONS_W};
+use crate::backend::render::{ui_col, Btn, HintItem, Icon, Row, Sheet, Side, OPTIONS_CHILD_W, OPTIONS_W};
 
 /// The rows of the game options, in order. Matched by name, never by index:
 /// `opt_row` finds where a row sits, so adding one moves nothing else.
@@ -223,12 +223,14 @@ fn shelves_value(e: &Entry) -> std::string::String {
 }
 
 /// The options panel as data, handed to `f`. `armed` is the value the row
-/// under the cursor shows while A has it armed (`Armed`).
+/// under the cursor shows while A has it armed (`Armed`); `neighbours`, whether
+/// the list behind holds another game for L / R to go to.
 pub(crate) fn with_options_sheet<R>(
     backend: &mut SwitchRenderBackend,
     entry: &Entry,
     selection: usize,
     armed: Option<u16>,
+    neighbours: bool,
     f: impl FnOnce(&mut SwitchRenderBackend, &Sheet) -> R,
 ) -> R {
     let lc = crate::loc::s();
@@ -341,16 +343,21 @@ pub(crate) fn with_options_sheet<R>(
     // Armed, what Left / Right, A and B do now (input rule 2). On a setting
     // the game has its own value for, X goes back to the default. The bar
     // drops hints it has no room for from its end, keeping B (`kit_sheet_at`),
-    // so L R, the one every other row also shows, goes first.
+    // so L R, the one every other row also shows, goes first. L R only where
+    // there is another game to go to: in a list of one they do nothing.
     let hints_armed = [(&[Btn::DpadLR][..], u.change), (&[Btn::A][..], u.validate), (&[Btn::B][..], u.cancel)];
-    let hints_own = [
-        (&[Btn::A][..], a_verb),
-        (&[Btn::X][..], u.reset_default),
-        (&[Btn::L, Btn::R][..], u.other_game),
-        (&[Btn::B][..], u.back),
-    ];
+    let other_game = neighbours.then_some((&[Btn::L, Btn::R][..], u.other_game));
+    let hints_own: std::vec::Vec<HintItem> = [(&[Btn::A][..], a_verb), (&[Btn::X][..], u.reset_default)]
+        .into_iter()
+        .chain(other_game)
+        .chain([(&[Btn::B][..], u.back)])
+        .collect();
     let own_here = is_setting(key) && p.own & own_bit(key) != 0;
-    let hints_act = [(&[Btn::A][..], a_verb), (&[Btn::L, Btn::R][..], u.other_game), (&[Btn::B][..], u.back)];
+    let hints_act: std::vec::Vec<HintItem> = [(&[Btn::A][..], a_verb)]
+        .into_iter()
+        .chain(other_game)
+        .chain([(&[Btn::B][..], u.back)])
+        .collect();
     // Every group under its title: the game in the library, its controls, its
     // picture and its performance, then the delete row on its own.
     let sections = [
@@ -471,9 +478,10 @@ pub(crate) fn draw_options_family(
             s.entries.get(game_idx).cloned(),
             (s.banner_tex, s.banner_w, s.banner_h),
             s.armed.filter(|a| a.screen == screen).map(|a| a.cur),
+            options_neighbour(&s, game_idx, "L").is_some() || options_neighbour(&s, game_idx, "R").is_some(),
         )
     });
-    let Some((home, Some(entry), logo, armed)) = snap else { return };
+    let Some((home, Some(entry), logo, armed, neighbours)) = snap else { return };
 
     // The library as it was, still, under the panels: the mockup shows it at
     // 62 %, and the tiles' clocks keep running instead of jumping when the
@@ -535,7 +543,7 @@ pub(crate) fn draw_options_family(
     // The panel's own armed row, or the page's (the Touches et curseur page
     // reads its own from the state).
     let opt_armed = if matches!(screen, Screen::OptionsModal { .. }) { armed } else { None };
-    draw_family_panels(backend, &entry, opt_sel, opt_armed, shown, t);
+    draw_family_panels(backend, &entry, opt_sel, opt_armed, neighbours, shown, t);
     // While a page folds back nothing publishes (the page has no cursor, the
     // options are still a rail or cut by their moving edge), and every screen
     // of the stack shares one touch kind: the page's own table stayed live
@@ -701,12 +709,14 @@ pub(crate) fn draw_options_loading(
 }
 
 /// `page` is the page beside the options and whether it is live (false while
-/// it folds back after B: no cursor, no taps).
+/// it folds back after B: no cursor, no taps). `neighbours`: see
+/// `with_options_sheet`.
 fn draw_family_panels(
     backend: &mut SwitchRenderBackend,
     entry: &Entry,
     opt_sel: usize,
     opt_armed: Option<u16>,
+    neighbours: bool,
     page: Option<(Screen, bool)>,
     t: f32,
 ) {
@@ -720,7 +730,7 @@ fn draw_family_panels(
     let cascade = |b: &mut SwitchRenderBackend, parent: &Sheet, child: Option<&Sheet>| {
         b.kit_cascade_on(Side::Right, OPTIONS_W, OPTIONS_CHILD_W, parent, branch, child, t);
     };
-    with_options_sheet(backend, entry, opt_sel, opt_armed, |b, parent| {
+    with_options_sheet(backend, entry, opt_sel, opt_armed, neighbours, |b, parent| {
         // The way back, spelled out over each page.
         let back_options = [u.hint_options];
         let back_keys = [u.hint_options, lc.menu_keys];

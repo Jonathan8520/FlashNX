@@ -9314,7 +9314,16 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                 }
                 confirm_armed(s);
             }
-            "L" | "R" | "Plus" => confirm_armed(s),
+            // L / R keep it on their way to another game. With none on that
+            // side (the end of the list, a list of one) or under a held
+            // shoulder they go nowhere, and the row stays armed.
+            "L" | "R" => {
+                if !nav_may_wrap() || options_neighbour(s, game_idx, button).is_none() {
+                    return;
+                }
+                confirm_armed(s);
+            }
+            "Plus" => confirm_armed(s),
             _ => return,
         }
     }
@@ -9525,24 +9534,24 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
             if !nav_may_wrap() {
                 return;
             }
-            let shown = local_filtered_indices(&s.entries, &s.local_filter, &s.folder_filter);
-            if let Some(pos) = shown.iter().position(|&i| i == game_idx) {
-                let next = if button == "L" {
-                    pos.checked_sub(1)
-                } else if pos + 1 < shown.len() {
-                    Some(pos + 1)
-                } else {
-                    None
-                };
-                if let Some(n) = next {
-                    s.screen = Screen::OptionsModal { game_idx: shown[n], selection };
-                    return;
-                }
+            if let Some(next) = options_neighbour(s, game_idx, button) {
+                s.screen = Screen::OptionsModal { game_idx: next, selection };
+                return;
             }
         }
         _ => {}
     }
     s.screen = Screen::OptionsModal { game_idx, selection };
+}
+
+/// The game L (`button`) or R goes to from the game at `game_idx` in its
+/// options: the previous or the next of the list behind the panel, None at
+/// its ends and in a list of one.
+pub(crate) fn options_neighbour(s: &State, game_idx: usize, button: &str) -> Option<usize> {
+    let shown = local_filtered_indices(&s.entries, &s.local_filter, &s.folder_filter);
+    let pos = shown.iter().position(|&i| i == game_idx)?;
+    let next = if button == "L" { pos.checked_sub(1)? } else { pos + 1 };
+    shown.get(next).copied()
 }
 
 /// Build a Flashpoint search query from a game's display name: drop a trailing
