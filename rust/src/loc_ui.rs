@@ -1519,8 +1519,8 @@ const ES: Ui = Ui {
     help_zoom_frame: "Amplía la imagen: A abre el encuadre, donde ZL y ZR hacen zoom y el stick mueve la imagen.",
     dir_root_refused: "La raíz de la tarjeta no puede alojar tu biblioteca",
     loading_report: "Enviando tu mensaje…",
-    loading_covers: "Buscando carátulas…",
-    loading_cover_dl: "Descargando la carátula…",
+    loading_covers: "Buscando portadas…",
+    loading_cover_dl: "Descargando la portada…",
     percent: "{}\u{a0}%",
 };
 
