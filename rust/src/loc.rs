@@ -646,7 +646,7 @@ const EN: Strings = Strings {
     err_too_large: "This archive is too big to be read here.",
     err_https: "Transfer failed ({}). Try again in a moment.",
     err_offline: "Address not found (curl {}). Check the console's Wi-Fi, then its DNS.",
-    err_unreachable: "The server refused the connection (curl {}). The console is online, so something between it and the server is blocking this.",
+    err_unreachable: "The server refused the connection (curl {}). The console is online, so something in between is blocking it.",
     err_timeout: "The server did not answer in time. Try again.",
     err_tls: "Secure connection refused. Check the console's date and time: a wrong clock breaks HTTPS.",
     err_response_big: "Response too large for this build. Try a narrower search.",
