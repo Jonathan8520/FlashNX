@@ -318,25 +318,38 @@ pub(crate) fn answer_at(button: &str, sel: usize) -> usize {
 }
 
 /// + on a page or a question of a game's options: the whole stack closes,
-/// back to the library on that game. A value armed on the page is kept first,
-/// and what a page left half done (a copy list, a preview, the covers found)
-/// goes with it, as B would have taken it on the way out.
+/// back to the library on that game. A value armed on the page is kept first.
+/// What a page left half done (a copy list, a preview, the covers found) goes
+/// once the panels have slid out (`PendingClose::CloseOptions`), as B would
+/// have taken it on the way out. Dropped at once, it went before the page did:
+/// the cover picker shrank away as "no cover found", a preview as "no change",
+/// the copy list as the community profiles.
 fn close_options_stack(s: &mut State, screen: Screen) {
     let Some(game_idx) = options_panel::family_game(screen) else { return };
     confirm_armed(s);
+    let target = list_screen_for_abs(s, game_idx);
+    if let Ok(mut p) = PENDING_AFTER_CLOSE.lock() {
+        *p = Some(PendingClose::CloseOptions { from: screen, target });
+    }
+    crate::backend::render::modal_close_begin();
+}
+
+/// What the page `from` of a game's options left half done, dropped as the
+/// stack closes: a preview's rows, a copy list (the community profiles back in
+/// its place), the covers a search found.
+fn drop_options_leftovers(s: &mut State, from: Screen) {
     s.preview_rows.clear();
     if s.profile_copy_mode {
         s.profile_copy_mode = false;
         s.profile_matches = std::mem::take(&mut s.profile_saved_matches);
     }
-    if matches!(screen, Screen::CoverPicker { .. }) {
+    if matches!(from, Screen::CoverPicker { .. }) {
         crate::backend::render::thumb_cancel_all();
         s.cover_candidates.clear();
         s.cover_msg.clear();
         s.cover_query.clear();
         s.cover_use_shot = false;
     }
-    s.screen = list_screen_for_abs(s, game_idx);
 }
 
 // No "RETOUR" entry: B already backs out of the modal, so a dedicated row is
@@ -10785,6 +10798,10 @@ enum PendingClose {
     /// the game's Touches et curseur page, read again (a key changed in the
     /// editor can bring its revert row).
     CloseEditorToTouches { game_idx: usize },
+    /// + closed a game's options from their page `from`: what it left half
+    /// done goes now that the panels are out (`drop_options_leftovers`), then
+    /// the library on the game, `target`.
+    CloseOptions { from: Screen, target: Screen },
     DeleteGame { game_idx: usize },
     /// Delete the saved source `history_idx`; the cursor stays on `row`, the
     /// view row it was on, so the source below slides under it.
@@ -11618,6 +11635,10 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 Some(PendingClose::CloseEditorToTouches { game_idx }) => {
                     menu::close();
                     goto_touches_menu(&mut s2, game_idx, 0);
+                }
+                Some(PendingClose::CloseOptions { from, target }) => {
+                    drop_options_leftovers(&mut s2, from);
+                    s2.screen = target;
                 }
                 Some(PendingClose::DeleteGame { game_idx }) => {
                     delete_game(&mut s2, game_idx);
