@@ -14002,11 +14002,17 @@ impl SwitchRenderBackend {
             };
         }
 
-        // Draw the rows that can intersect the band. `scroll_offset` moves at
-        // most one row per input, so a ±1 window around it always covers the
-        // partially-scrolled rows; the scissor does the exact clipping.
-        let lo_row = scroll_offset.saturating_sub(1) as u32;
-        let hi_row = (scroll_offset + rows_visible + 1) as u32;
+        // Draw the rows that can intersect the band, worked out from where the
+        // list is on screen (`scroll_px`), a row of margin either side; the
+        // scissor does the exact clipping. A window around `scroll_offset` (the
+        // row input keeps) held while the buttons moved it a row at a time, but
+        // a finger drags the list freely and the row only follows on release:
+        // the rows past that window were not drawn, and the band went empty
+        // under the finger.
+        let first_row = ((scroll_px + band_top - TOP - cell_h) / pitch).floor().max(0.0) as u32;
+        let last_row = ((scroll_px + band_bot - TOP) / pitch).ceil().max(0.0) as u32;
+        let lo_row = first_row.saturating_sub(1);
+        let hi_row = last_row + 1;
         // Budget of NEW cover decodes for this frame — see COVER_DECODES_PER_FRAME.
         let mut decode_budget = COVER_DECODES_PER_FRAME;
         // Work AHEAD of the eye: the NEAREST undecoded tile in the WHOLE list,
