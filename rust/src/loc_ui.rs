@@ -3418,7 +3418,7 @@ const TR: Ui = Ui {
     load_failed_title: "Bu oyun açılamıyor",
     load_failed_body: "Dosya artık kartta bu konumda değil ya da kalan bellek için çok büyük. Şurada arandı:",
     dir_new_in_lib: "Kütüphanenin içindesin: yeni klasörü kütüphanenin dışında oluştur.",
-    shortcut_remove_err: "Simge kaldırılamadı",
+    shortcut_remove_err: "Simge çıkarılamadı",
     toast_folder_none: "Bu oyun hiçbir klasörde değil.",
     more_changes_1: "Ve {} değişiklik daha",
     kbd_cover_guide: "Kapağını aradığın oyunun adı",
