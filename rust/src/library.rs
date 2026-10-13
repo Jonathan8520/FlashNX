@@ -10201,6 +10201,13 @@ fn handle_sort_modal_input(
         // to re-sort the library on the spot, so B ("cancel") could no longer
         // cancel anything.
         "X" => dirs ^= bit,
+        // The order already in force changes nothing: the window closes as B
+        // closes it, on the game the cursor was on. Re-applied, it sent the
+        // cursor to the top of a list that had not moved.
+        "A" if selection == sort_mode_index() && (dirs & bit != 0) == current_sort_reverse() => {
+            s.screen = Screen::List { selection: prev_sel, scroll_offset: prev_scroll };
+            return;
+        }
         "A" => {
             store_active_sort(selection as u8, dirs & bit != 0);
             sort_entries(&mut s.entries, current_sort_mode(), current_sort_reverse());
@@ -10337,6 +10344,22 @@ fn handle_remote_sort_modal_input(
         "X" => dirs ^= bit,
         "A" => {
             let reverse = dirs & bit != 0;
+            // The order already in force changes nothing: back to the list as
+            // B goes back, the cursor where it was (two thousand games down an
+            // archive, say), rather than on the first row.
+            let in_force = match kind {
+                SORT_TARGET_FP => s.fp_sort,
+                SORT_TARGET_IMPORT => (import_sort_index() as u8, import_sort_reverse()),
+                _ => s.files_sort,
+            };
+            if in_force == (selection as u8, reverse) {
+                s.screen = match kind {
+                    SORT_TARGET_FP => Screen::FpGallery { selection: prev_sel, scroll: prev_scroll },
+                    SORT_TARGET_IMPORT => Screen::DistantIdle { selection: prev_sel, scroll_offset: prev_scroll },
+                    _ => Screen::DistantFiles { selection: prev_sel, scroll_offset: prev_scroll },
+                };
+                return;
+            }
             match kind {
                 SORT_TARGET_FP => {
                     s.fp_sort = (selection as u8, reverse);
