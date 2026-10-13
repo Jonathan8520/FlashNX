@@ -198,8 +198,15 @@ pub(crate) struct ImporterHome<'a> {
 const CARD_RADIUS: f32 = 16.0;
 /// How far inside its row the focus pill sits, above and below.
 const PILL_INSET: f32 = 3.0;
-/// The focus's rate (`ease_to`), the one the rows' pill has always had.
-const FOCUS_RATE: f32 = 18.0;
+/// The rate (`ease_to`) of both the list's scroll and the focus, which must
+/// be one rate. Headed for a row, the focus is carried by each frame's scroll
+/// change and then eased: at one rate the two make a single glide on the
+/// screen, from where the focus is to where its row will rest, however far the
+/// list scrolls. At two rates (16 and 18) they pulled apart on a long scroll:
+/// from a card to the first of 60 sources the focus rose into the tabs before
+/// coming down, and to the last one it shot past its row out of the band. 16
+/// is every list's scroll rate.
+const GLIDE_RATE: f32 = 16.0;
 /// Where the vertical scrollbar of every importer page sits, in the right
 /// margin past the rows (which end at the page margin, 48 px in).
 pub(crate) const IMPORT_SCROLLBAR_INSET: f32 = 40.0;
@@ -285,18 +292,19 @@ impl SwitchRenderBackend {
                     a.last_tick = now;
                     let before = a.scroll_px;
                     // A finger on the list wins over the easing, 1:1.
-                    let eased = ease_to(a.scroll_px, target_scroll, dt, 16.0);
+                    let eased = ease_to(a.scroll_px, target_scroll, dt, GLIDE_RATE);
                     a.scroll_px = touch_scroll.unwrap_or(eased);
                     // Headed for a row, the focus moves with the list as the
-                    // rows do, so a row under it stays under it while the list
-                    // scrolls and its glide between rows is the one it always
-                    // had. Headed for a card, it stays on the page, as the card
-                    // does.
+                    // rows do, so a row under it stays under it while a finger
+                    // scrolls the list; eased afterwards at the scroll's own
+                    // rate, it glides on the screen straight to where its row
+                    // will rest. Headed for a card, it stays on the page, as
+                    // the card does.
                     if on_row {
                         a.imp_focus.y -= a.scroll_px - before;
                     }
                     let to = focus_at(a.scroll_px);
-                    a.imp_focus.ease(&to, dt, FOCUS_RATE);
+                    a.imp_focus.ease(&to, dt, GLIDE_RATE);
                 }
                 scroll_px = a.scroll_px;
                 focus = a.imp_focus;

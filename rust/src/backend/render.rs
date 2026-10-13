@@ -5675,11 +5675,13 @@ struct GalleryAnim {
 /// a card never scrolls, and a focus kept in content space would fly off its
 /// card whenever a finger moved the list under it. Headed for a row, the
 /// caller moves it with the list's scroll each frame, which keeps it on its
-/// row exactly as content space would. `look` is how far it has turned from a
-/// card's ring (0) into a row's pill (1); `clip_top` and `clip_bot` are the
-/// band it is drawn in: the whole page for a card, the rows' band for a row,
-/// eased so that it never cuts the focus off as it crosses from one to the
-/// other.
+/// row as content space would, and eases it at the scroll's own rate, so that
+/// the two make one glide on the screen however far the list scrolls (at two
+/// rates a long scroll threw it out of the band and back). `look` is how far
+/// it has turned from a card's ring (0) into a row's pill (1); `clip_top` and
+/// `clip_bot` are the band it is drawn in: the whole page for a card, the
+/// rows' band for a row, eased with it so that it never cuts the focus off as
+/// it crosses from one to the other.
 #[derive(Clone, Copy)]
 struct FocusGlide {
     x: f32,
