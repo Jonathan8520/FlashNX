@@ -371,7 +371,13 @@ pub(crate) fn with_options_sheet<R>(
     // The name the grid's tile shows, not the file's.
     sheet.thumb_tile = Some((entry.color_chip, &entry.display_name));
     sheet.sections = &sections;
-    sheet.row_h = 48.0;
+    // 47 px rows, not 48: the kit takes a tap only on a row wholly inside
+    // the list (`kit_sheet_at`), and at 48 the Écran row, the last in view
+    // when the panel opens, ran 6 px past the list wherever the help takes
+    // three lines (every language but Chinese). Drawn whole, only its empty
+    // margin cut, it took no tap. Stepping by 49 px, it ends inside (at 413
+    // of 414 px).
+    sheet.row_h = 47.0;
     sheet.glide_key = 0x6200_0000;
     sheet.help = help;
     sheet.helps = &helps;
