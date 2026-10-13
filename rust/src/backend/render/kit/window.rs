@@ -148,6 +148,24 @@ impl SwitchRenderBackend {
         self.kit_shape(x, y, w, h, radius::ROW, col::CHIP, PILL_EDGE, col::GOLD, 0.0);
     }
 
+    /// `kit_focus_pill` at `alpha` (1 is the pill itself): the cursor of a
+    /// part of a page fading in as the focus arrives from another part.
+    pub(crate) fn kit_focus_pill_alpha(&mut self, x: f32, y: f32, w: f32, h: f32, alpha: f32) {
+        let a = alpha.clamp(0.0, 1.0);
+        self.kit_shape(x, y, w, h, radius::ROW, alpha_of(col::CHIP, a), PILL_EDGE, alpha_of(col::GOLD, a), 0.0);
+    }
+
+    /// The gold edge alone of `kit_focus_morph` (no fill), at `alpha`: the
+    /// focus on its way from one part of a page to another, drawn over what
+    /// it crosses without hiding it.
+    pub(crate) fn kit_focus_outline(&mut self, x: f32, y: f32, w: f32, h: f32, tile_radius: f32, look: f32, alpha: f32) {
+        let k = look.clamp(0.0, 1.0);
+        let out = (ring::GAP + ring::WIDTH) * (1.0 - k);
+        let edge = ring::WIDTH + (PILL_EDGE - ring::WIDTH) * k;
+        let corner = tile_radius + (radius::ROW - tile_radius) * k + out;
+        self.kit_shape(x - out, y - out, w + 2.0 * out, h + 2.0 * out, corner, 0, edge, alpha_of(col::GOLD, alpha.clamp(0.0, 1.0)), 0.0);
+    }
+
     /// One focus part way between a tile's ring (`look` 0, exactly
     /// `kit_ring` round the box with the tile's `tile_radius`) and a row's
     /// pill (`look` 1, exactly `kit_focus_pill` on the box), for a page whose
@@ -274,4 +292,10 @@ impl SwitchRenderBackend {
             None => 100.0,
         }
     }
+}
+
+/// `rgba` with its alpha scaled by `a` (0 to 1).
+pub(crate) fn alpha_of(rgba: u32, a: f32) -> u32 {
+    let base = (rgba >> 24) as f32;
+    (((base * a).round() as u32).min(255) << 24) | (rgba & 0x00FF_FFFF)
 }

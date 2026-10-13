@@ -79,6 +79,127 @@ fn still() -> bool {
     STILL.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// The page's focus between its parts (Jonathan: "il manque la transition
+/// fluide dans settings en passant de la sidebar gauche au contenu; pareil
+/// pour de vue bibliothèque à dossier des jeux"). Each part (the column, the
+/// layout cards, a block of rows, the game defaults' rows, the languages)
+/// keeps drawing its own cursor under its text and gliding it inside itself.
+/// When the cursor goes from one part to another, the old part's cursor goes
+/// and the new one's fades in, while a gold outline travels between them over
+/// what it crosses, turning from a card's ring into a row's pill on the way:
+/// before, one vanished and the other appeared, with nothing in between.
+struct FocusHandoff {
+    /// The part with the cursor (an owner key below, or a part's glide key),
+    /// 0 before any part has had it.
+    owner: u32,
+    /// Where its cursor is, the tile radius a ring takes round it, and its
+    /// look (0 a card's ring, 1 a row's pill).
+    rect: (f32, f32, f32, f32),
+    radius: f32,
+    look: f32,
+    /// Where the travel started (rect, radius, look), while it lasts.
+    from: Option<((f32, f32, f32, f32), f32, f32)>,
+    start: u64,
+    /// When a part last said it had the cursor: a part taking it after a
+    /// pause (a tab switch, back from a page or a window) arrives at once.
+    last_report: u64,
+}
+
+static FOCUS: std::sync::Mutex<FocusHandoff> = std::sync::Mutex::new(FocusHandoff {
+    owner: 0,
+    rect: (0.0, 0.0, 0.0, 0.0),
+    radius: 0.0,
+    look: 1.0,
+    from: None,
+    start: 0,
+    last_report: 0,
+});
+
+/// The parts with keys of their own; the blocks and the game defaults' rows
+/// go by their glide key.
+const OWNER_NAV: u32 = 0x5E10_0001;
+const OWNER_CARDS: u32 = 0x5E30_0001;
+const OWNER_LANG: u32 = 0x5E40_0001;
+/// How long the focus takes from one part to the next, and how long without a
+/// report counts as a pause.
+const HANDOFF_MS: f32 = 200.0;
+const HANDOFF_GAP_MS: f32 = 150.0;
+
+fn ms_since(tick: u64, now: u64) -> f32 {
+    let freq = unsafe { ruffle_tick_freq() }.max(1) as f32;
+    now.saturating_sub(tick) as f32 * 1000.0 / freq
+}
+
+fn handoff_progress(f: &FocusHandoff, now: u64) -> f32 {
+    (ms_since(f.start, now) / HANDOFF_MS).clamp(0.0, 1.0)
+}
+
+fn ease_out(t: f32) -> f32 {
+    1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t)
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+/// The travelling focus at progress `p`: rect, tile radius, look.
+fn handoff_at(from: ((f32, f32, f32, f32), f32, f32), f: &FocusHandoff, p: f32) -> ((f32, f32, f32, f32), f32, f32) {
+    let e = ease_out(p);
+    let (r0, rad0, look0) = from;
+    (
+        (lerp(r0.0, f.rect.0, e), lerp(r0.1, f.rect.1, e), lerp(r0.2, f.rect.2, e), lerp(r0.3, f.rect.3, e)),
+        lerp(rad0, f.radius, e),
+        lerp(look0, f.look, e),
+    )
+}
+
+/// How much of its own cursor part `owner` draws: all of it once the focus
+/// has arrived, fading in over the end of the travel, none while the focus is
+/// with another part (it is the part that has just been left).
+fn focus_alpha(owner: u32) -> f32 {
+    if still() {
+        return 1.0;
+    }
+    let now = unsafe { ruffle_tick_now() };
+    match FOCUS.lock() {
+        Ok(f) if f.owner == owner => match f.from {
+            None => 1.0,
+            Some(_) => {
+                let p = handoff_progress(&f, now);
+                ((p - 0.45) / 0.55).clamp(0.0, 1.0)
+            }
+        },
+        Ok(_) => 0.0,
+        Err(_) => 1.0,
+    }
+}
+
+/// `owner` has the cursor this frame, on `rect` (with the tile radius a ring
+/// takes round a card, and its look). A new owner starts the travel from
+/// where the focus is now, unless the last report is too old to travel from.
+fn focus_report(owner: u32, rect: (f32, f32, f32, f32), radius: f32, look: f32) {
+    let now = unsafe { ruffle_tick_now() };
+    let Ok(mut f) = FOCUS.lock() else { return };
+    if f.owner != owner {
+        let recent = f.owner != 0 && ms_since(f.last_report, now) <= HANDOFF_GAP_MS && !still();
+        f.from = if recent {
+            // From where it is drawn: mid-travel, from the point it had reached.
+            Some(match f.from {
+                Some(from) => handoff_at(from, &f, handoff_progress(&f, now)),
+                None => (f.rect, f.radius, f.look),
+            })
+        } else {
+            None
+        };
+        f.start = now;
+        f.owner = owner;
+    }
+    f.rect = rect;
+    f.radius = radius;
+    f.look = look;
+    f.last_report = now;
+}
+
 /// `eased_list_y`, or the target itself while the page is still.
 fn glide_y(target: f32, key: u32, now: u64) -> f32 {
     if still() { target } else { eased_list_y(target, key, now) }
@@ -118,7 +239,15 @@ impl SwitchRenderBackend {
         if current < n {
             if focused {
                 let hy = glide_y(item_y(current), GLIDE_KEY_NAV, now);
-                self.kit_focus_pill(NAV_X, hy, NAV_W, NAV_ITEM_H);
+                let a = focus_alpha(OWNER_NAV);
+                if a < 1.0 {
+                    // The section's quiet fill, under a cursor still arriving.
+                    self.kit_rrect(NAV_X, item_y(current), NAV_W, NAV_ITEM_H, radius::ROW, col::TILE);
+                }
+                if a > 0.0 {
+                    self.kit_focus_pill_alpha(NAV_X, hy, NAV_W, NAV_ITEM_H, a);
+                }
+                focus_report(OWNER_NAV, (NAV_X, item_y(current), NAV_W, NAV_ITEM_H), radius::ROW, 1.0);
             } else {
                 self.kit_rrect(NAV_X, item_y(current), NAV_W, NAV_ITEM_H, radius::ROW, col::TILE);
             }
@@ -151,6 +280,39 @@ impl SwitchRenderBackend {
         }
         self.draw_overlay_rect(DIVIDER_X, BODY_TOP, 1.0, BODY_BOTTOM - BODY_TOP, col::LINE);
         cells
+    }
+
+    /// The focus on its way between two parts of the page, over everything
+    /// (see `FocusHandoff`); nothing once it has arrived. `on_section` is
+    /// false on a page opened in the pane (the folder browser, a report's
+    /// games), whose list has a cursor of its own: the travel is dropped there.
+    pub(crate) fn settings_focus_overlay(&mut self, on_section: bool) {
+        let now = unsafe { ruffle_tick_now() };
+        let drawn = {
+            let Ok(mut f) = FOCUS.lock() else { return };
+            if !on_section || still() {
+                f.from = None;
+                if !on_section {
+                    f.owner = 0;
+                }
+                return;
+            }
+            match f.from {
+                Some(from) => {
+                    let p = handoff_progress(&f, now);
+                    if p >= 1.0 {
+                        f.from = None;
+                        None
+                    } else {
+                        Some((handoff_at(from, &f, p), 1.0 - ((p - 0.7) / 0.3).clamp(0.0, 1.0)))
+                    }
+                }
+                None => None,
+            }
+        };
+        if let Some(((r, radius, look), alpha)) = drawn {
+            self.kit_focus_outline(r.0, r.1, r.2, r.3, radius, look, alpha);
+        }
     }
 
     /// Start drawing the pane for `key` (a section, or a sub-page): when the
@@ -275,7 +437,12 @@ impl SwitchRenderBackend {
         if let Some(f) = card {
             let fx = PANE_X + (f as usize).min(3) as f32 * (cw + GAP);
             let hx = glide_x(fx, GLIDE_KEY_CARDS, now);
-            self.kit_ring(hx, y, cw, CARD_H, BLOCK_RADIUS, ring::GAP, ring::WIDTH, col::GOLD);
+            let a = focus_alpha(OWNER_CARDS);
+            if a > 0.0 {
+                let ink = super::super::kit::window::alpha_of(col::GOLD, a);
+                self.kit_ring(hx, y, cw, CARD_H, BLOCK_RADIUS, ring::GAP, ring::WIDTH, ink);
+            }
+            focus_report(OWNER_CARDS, (fx, y, cw, CARD_H), BLOCK_RADIUS, 0.0);
         }
         // The tick on the layout in use, over the ring's corner.
         const DISC: f32 = 24.0;
@@ -371,7 +538,11 @@ impl SwitchRenderBackend {
         if let Some(f) = focus.filter(|f| *f < rows.len()) {
             let now = unsafe { ruffle_tick_now() };
             let hy = glide_y(top + f as f32 * BLOCK_ROW_H, glide_key, now);
-            self.kit_focus_pill(PANE_X, hy, PANE_W, BLOCK_ROW_H);
+            let a = focus_alpha(glide_key);
+            if a > 0.0 {
+                self.kit_focus_pill_alpha(PANE_X, hy, PANE_W, BLOCK_ROW_H, a);
+            }
+            focus_report(glide_key, (PANE_X, top + f as f32 * BLOCK_ROW_H, PANE_W, BLOCK_ROW_H), radius::ROW, 1.0);
         }
         let mut cells = std::vec::Vec::with_capacity(rows.len());
         let mut segs = std::vec::Vec::new();
@@ -430,8 +601,13 @@ impl SwitchRenderBackend {
             help,
             reserve_help: true,
             still: still(),
+            focus_alpha: if selection < rows.len() { focus_alpha(glide_key) } else { 0.0 },
         };
-        self.kit_pane_rows(&p, PANE_X, top, PANE_W, BODY_BOTTOM)
+        let (cells, segs, focus) = self.kit_pane_rows(&p, PANE_X, top, PANE_W, BODY_BOTTOM);
+        if let Some(r) = focus {
+            focus_report(glide_key, r, radius::ROW, 1.0);
+        }
+        (cells, segs)
     }
 
     /// The languages, three to a row, each named in its own language beside
@@ -467,7 +643,11 @@ impl SwitchRenderBackend {
             let (fx, fy) = pos(f);
             let hx = glide_x(fx, GLIDE_KEY_LANG, now);
             let hy = glide_y(fy, GLIDE_KEY_LANG, now);
-            self.kit_focus_pill(hx, hy, TW, TH);
+            let a = focus_alpha(OWNER_LANG);
+            if a > 0.0 {
+                self.kit_focus_pill_alpha(hx, hy, TW, TH, a);
+            }
+            focus_report(OWNER_LANG, (fx, fy, TW, TH), radius::ROW, 1.0);
         }
         let mut cells = std::vec::Vec::with_capacity(langs.len());
         for (i, (code, name, in_ui)) in langs.iter().enumerate() {

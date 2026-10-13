@@ -976,6 +976,9 @@ pub(crate) fn draw_settings(
         Body::Games { selection, scroll } => list_rows = games_page(backend, selection, scroll, &mut hints),
     }
     backend.settings_pane_end(saved);
+    // The focus between the column and the pane, or between two parts of the
+    // pane, travels over both (see `settings_focus_overlay`).
+    backend.settings_focus_overlay(matches!(body, Body::Section { .. }) && !under);
     if column {
         hints = column_hints(section);
     }

@@ -35,6 +35,9 @@ pub(crate) struct Pane<'a> {
     /// rows shown under a window that has a cursor of its own (the glide slots
     /// are shared, and two lists easing at once make both snap every frame).
     pub still: bool,
+    /// How much of the pill to draw: less than 1 while the page's focus is
+    /// still on its way here from another part of the page.
+    pub focus_alpha: f32,
 }
 
 /// The room a section title takes over its rows (Options.dc.html: 36 px).
@@ -68,7 +71,7 @@ impl SwitchRenderBackend {
         top: f32,
         w: f32,
         bottom: f32,
-    ) -> (std::vec::Vec<(f32, f32, f32, f32)>, super::list::CtrlSegs) {
+    ) -> (std::vec::Vec<(f32, f32, f32, f32)>, super::list::CtrlSegs, Option<(f32, f32, f32, f32)>) {
         let help_room = if p.reserve_help { help_room() } else { 0.0 };
         if !p.help.trim().is_empty() {
             self.kit_help_box(x, bottom, w, p.help, HELP_LINES);
@@ -116,10 +119,16 @@ impl SwitchRenderBackend {
                 self.kit_section(x + 12.0, area_top + ry - scroll - 14.0, text);
             }
         }
+        // Where the cursor's row is drawn this frame, for a page whose focus
+        // travels between its parts.
+        let mut focus_rect = None;
         if focused {
             let at = area_top + ys[p.selection] - scroll;
             let hy = if p.still { at } else { eased_list_y(at, p.glide_key, now) };
-            self.kit_focus_pill(x, hy, rw, p.row_h);
+            if p.focus_alpha > 0.0 {
+                self.kit_focus_pill_alpha(x, hy, rw, p.row_h, p.focus_alpha);
+            }
+            focus_rect = Some((x, at, rw, p.row_h));
         }
         let mut cells: std::vec::Vec<(f32, f32, f32, f32)> = std::vec![(0.0, 0.0, 0.0, 0.0); p.rows.len()];
         let mut segs: super::list::CtrlSegs = std::vec::Vec::new();
@@ -147,6 +156,6 @@ impl SwitchRenderBackend {
             self.kit_rrect(bx, area_top + 4.0, BAR_W, track_h, BAR_W * 0.5, col::LINE);
             self.kit_rrect(bx, ty, BAR_W, thumb_h, BAR_W * 0.5, 0xFF_4A_5C_85);
         }
-        (cells, segs)
+        (cells, segs, focus_rect)
     }
 }
