@@ -9579,6 +9579,14 @@ pub(crate) fn options_neighbour(s: &State, game_idx: usize, button: &str) -> Opt
     shown.get(next).copied()
 }
 
+/// Whether L or R has another game to go to from the game at `game_idx`
+/// (`options_neighbour` on either side), in one pass over the library: asked
+/// by the panel's hints on every frame.
+pub(crate) fn options_has_neighbour(s: &State, game_idx: usize) -> bool {
+    let shown = local_filtered_indices(&s.entries, &s.local_filter, &s.folder_filter);
+    shown.len() > 1 && shown.contains(&game_idx)
+}
+
 /// Build a Flashpoint search query from a game's display name: drop a trailing
 /// `.swf`, turn `_`/`-` into spaces so "Super_Mario_63" matches "Super Mario 63".
 fn cover_query_from_name(name: &str) -> std::string::String {

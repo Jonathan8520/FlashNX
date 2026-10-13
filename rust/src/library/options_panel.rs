@@ -484,7 +484,7 @@ pub(crate) fn draw_options_family(
             s.entries.get(game_idx).cloned(),
             (s.banner_tex, s.banner_w, s.banner_h),
             s.armed.filter(|a| a.screen == screen).map(|a| a.cur),
-            options_neighbour(&s, game_idx, "L").is_some() || options_neighbour(&s, game_idx, "R").is_some(),
+            options_has_neighbour(&s, game_idx),
         )
     });
     let Some((home, Some(entry), logo, armed, neighbours)) = snap else { return };
