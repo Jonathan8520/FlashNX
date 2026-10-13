@@ -4112,7 +4112,13 @@ fn touch_press_cancel() {
 fn strip_tap(hit: crate::backend::render::StripHit) {
     use crate::backend::render::StripHit;
     match hit {
-        StripHit::Search => run_local_search_flow(),
+        // The keyboard's answer sounds as a press of `-` does, played here:
+        // a tap is followed by no `after_input`.
+        StripHit::Search => {
+            if run_local_search_flow() {
+                crate::sfx::play(crate::sfx::Sfx::Decide);
+            }
+        }
         StripHit::Sort => {
             input("Y");
         }
@@ -4652,7 +4658,9 @@ fn input_inner(button: &str) -> bool {
                 // X anywhere on the IMPORTER home = search Flashpoint for a game
                 // to download (the glyph on the Flashpoint card says so).
                 // Hoisted: swkbd + HTTPS must run WITHOUT the lock.
-                run_fp_search_flow(Some(selection));
+                if run_fp_search_flow(Some(selection)) {
+                    crate::sfx::choose(crate::sfx::Sfx::Decide);
+                }
                 return true;
             }
             if button == "Minus" {
@@ -4660,8 +4668,8 @@ fn input_inner(button: &str) -> bool {
                 // the JOUER gallery and the archive.org file list. Nothing to
                 // search before the first one is saved (the hint is not shown).
                 let any = LIBRARY.lock().map(|s| !s.url_history.is_empty()).unwrap_or(false);
-                if any {
-                    run_import_search_flow();
+                if any && run_import_search_flow() {
+                    crate::sfx::choose(crate::sfx::Sfx::Decide);
                 }
                 return true;
             }
@@ -4670,7 +4678,9 @@ fn input_inner(button: &str) -> bool {
                 // and the card cannot drift apart; the add card asks for an
                 // address.
                 if selection == 0 {
-                    run_fp_search_flow(Some(0));
+                    if run_fp_search_flow(Some(0)) {
+                        crate::sfx::choose(crate::sfx::Sfx::Decide);
+                    }
                     return true;
                 }
                 if selection == 1 {
@@ -4839,7 +4849,9 @@ fn input_inner(button: &str) -> bool {
                 return true;
             }
             if button == "Minus" {
-                run_cover_research_flow(game_idx);
+                if run_cover_research_flow(game_idx) {
+                    crate::sfx::choose(crate::sfx::Sfx::Decide);
+                }
                 return true;
             }
         }
@@ -4886,12 +4898,22 @@ fn input_inner(button: &str) -> bool {
         }
         // SEARCH is on Minus (-) now (was X). Hoisted because swkbd is a
         // synchronous fullscreen applet that must not run under the LIBRARY lock.
+        //
+        // A search the keyboard applied sounds like A acting: the list it
+        // lands on is the same screen, which `sfx::after_input` heard as a
+        // move, as Minus = B going back, or (the cursor already on the first
+        // row) as nothing at all. A cancelled keyboard changed nothing and
+        // stays silent.
         if matches!(screen_snap, Screen::DistantFiles { .. }) && button == "Minus" {
-            run_distant_search_flow();
+            if run_distant_search_flow() {
+                crate::sfx::choose(crate::sfx::Sfx::Decide);
+            }
             return true;
         }
         if matches!(screen_snap, Screen::List { .. }) && button == "Minus" {
-            run_local_search_flow();
+            if run_local_search_flow() {
+                crate::sfx::choose(crate::sfx::Sfx::Decide);
+            }
             return true;
         }
         // A on the bug-report picker = describe + send. Hoisted: the keyboard
@@ -4937,7 +4959,9 @@ fn input_inner(button: &str) -> bool {
             // Not while the search is still loading, where Minus cancels it.
             let (loading, failed) = LIBRARY.lock().map(|s| (s.fp_loading, s.fp_error)).unwrap_or((false, false));
             if !loading && (button == "X" || button == "Minus") {
-                run_fp_search_flow(None);
+                if run_fp_search_flow(None) {
+                    crate::sfx::choose(crate::sfx::Sfx::Decide);
+                }
                 return true;
             }
             // A on a search that failed: the same search again, no keyboard.
@@ -7753,7 +7777,8 @@ fn strip_archive_prefix(text: &str) -> &str {
 /// then narrow the saved sources to the ones matching it (address or name).
 /// Empty input clears it. Called from `input()` only (the keyboard needs the
 /// lock free).
-fn run_import_search_flow() {
+/// Returns whether a search was applied (false: the keyboard was cancelled).
+fn run_import_search_flow() -> bool {
     let current = LIBRARY
         .lock()
         .ok()
@@ -7761,7 +7786,7 @@ fn run_import_search_flow() {
         .unwrap_or_default();
     let u = crate::loc_ui::ui();
     let Some(typed) = net::prompt_search_as(u.imp_kbd_src_header, u.imp_kbd_src_guide, &current) else {
-        return; // cancelled
+        return false; // cancelled
     };
     let trimmed = typed.trim().to_string();
     if let Ok(mut s) = LIBRARY.lock() {
@@ -7773,6 +7798,7 @@ fn run_import_search_flow() {
         s.screen = distant_idle_at(&s, row);
     }
     crate::backend::render::gallery_anim_reset();
+    true
 }
 
 /// Error screen (Y): re-type the address that just failed, pre-filled, then try
@@ -7974,17 +8000,19 @@ fn run_direct_download(url: &str) {
 /// pre-filled with the last search, then the search. `origin` is the importer
 /// row it was asked from, `None` from the results page itself (a new search).
 /// Called from `input()` only (the keyboard needs the lock free).
-fn run_fp_search_flow(origin: Option<usize>) {
+/// Returns whether a search went out (false: cancelled, or nothing typed).
+fn run_fp_search_flow(origin: Option<usize>) -> bool {
     let initial = LIBRARY.lock().map(|s| s.fp_query.clone()).unwrap_or_default();
     let u = crate::loc_ui::ui();
     let Some(query) = net::prompt_search_as(u.imp_fp_title, u.imp_kbd_fp_guide, &initial) else {
-        return;
+        return false;
     };
     let query = query.trim().to_string();
     if query.is_empty() {
-        return;
+        return false;
     }
     start_fp_search(&query, origin);
+    true
 }
 
 /// Search Flashpoint for `query`, behind the results page: its header and
@@ -9551,8 +9579,9 @@ fn run_cover_search_flow(game_idx: usize) {
 /// CoverPicker > Minus: re-open the keyboard pre-filled with the last query so
 /// the user can fix a name the filename couldn't match (e.g. `catmario` ->
 /// `cat mario`), then re-run the search. Called from `input()` only — swkbd +
-/// HTTPS must run WITHOUT the LIBRARY lock.
-fn run_cover_research_flow(game_idx: usize) {
+/// HTTPS must run WITHOUT the LIBRARY lock. Returns whether a search went out
+/// (false: cancelled, or nothing typed).
+fn run_cover_research_flow(game_idx: usize) -> bool {
     let current = match LIBRARY.lock() {
         Ok(g) if !g.cover_query.is_empty() => g.cover_query.clone(),
         Ok(g) => g
@@ -9560,7 +9589,7 @@ fn run_cover_research_flow(game_idx: usize) {
             .get(game_idx)
             .map(|e| cover_query_from_name(&e.display_name))
             .unwrap_or_default(),
-        Err(_) => return,
+        Err(_) => return false,
     };
     // Its own header and guide: this keyboard searches Flashpoint for a game's
     // name, and the library search's guide promises that an empty entry shows
@@ -9568,13 +9597,14 @@ fn run_cover_research_flow(game_idx: usize) {
     let lc = crate::loc::s();
     let guide = crate::loc_ui::ui().kbd_cover_guide;
     let Some(typed) = net::prompt_search_as(lc.cover_title, guide, &current) else {
-        return; // cancelled: keep the picker as it was
+        return false; // cancelled: keep the picker as it was
     };
     let query = typed.trim().to_string();
     if query.is_empty() {
-        return; // empty submit = no-op, don't wipe the current list
+        return false; // empty submit = no-op, don't wipe the current list
     }
     defer_net(PendingNet::CoverSearch { game_idx, query }, game_idx);
+    true
 }
 
 /// Shared Flashpoint cover search: runs the synchronous HTTPS search for
@@ -10528,7 +10558,8 @@ extern "C" {
 /// Search flow: open swkbd pre-filled with the current filter, submit
 /// becomes the new filter. Empty input clears the filter. Selection +
 /// scroll reset to 0 so the user starts at the top of the filtered view.
-fn run_distant_search_flow() {
+/// Returns whether a search was applied (false: the keyboard was cancelled).
+fn run_distant_search_flow() -> bool {
     let current = LIBRARY
         .lock()
         .ok()
@@ -10536,7 +10567,7 @@ fn run_distant_search_flow() {
         .unwrap_or_default();
     let u = crate::loc_ui::ui();
     let Some(typed) = net::prompt_search_as(u.imp_kbd_files_header, u.imp_kbd_files_guide, &current) else {
-        return; // cancelled
+        return false; // cancelled
     };
     let trimmed = typed.trim().to_string();
     if let Ok(mut s) = LIBRARY.lock() {
@@ -10545,14 +10576,17 @@ fn run_distant_search_flow() {
         crate::backend::render::gallery_anim_reset();
         s.screen = Screen::DistantFiles { selection: 0, scroll_offset: 0 };
     }
+    true
 }
 
 /// LOCAL list search (Minus) — same behaviour as the DISTANT filter: opens swkbd
 /// (pre-filled with the current filter so it can be refined), then narrows the
 /// list to entries whose display name or basename contains the text. Empty
 /// input clears the filter. Selection resets to the top of the filtered view.
-/// Called from `input()` only (swkbd must not run while we hold the lock).
-fn run_local_search_flow() {
+/// Called from `input()` and from a tap on the strip's search chip (swkbd
+/// must not run while we hold the lock).
+/// Returns whether a search was applied (false: the keyboard was cancelled).
+fn run_local_search_flow() -> bool {
     let current = LIBRARY
         .lock()
         .ok()
@@ -10564,7 +10598,7 @@ fn run_local_search_flow() {
     // first finger-up sample once the keyboard is gone.
     touch_press_cancel();
     let Some(typed) = typed else {
-        return; // cancelled
+        return false; // cancelled
     };
     let trimmed = typed.trim().to_string();
     if let Ok(mut s) = LIBRARY.lock() {
@@ -10575,6 +10609,7 @@ fn run_local_search_flow() {
     // start its covers closed.
     crate::backend::render::gallery_anim_reset();
     crate::backend::render::tile_open_reset();
+    true
 }
 
 fn clamp_scroll(mut scroll: usize, selection: usize, visible_rows: usize) -> usize {
