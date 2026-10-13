@@ -6881,6 +6881,11 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize, mut scro
             let next = if button == "ZR" { (cur + 1) % n } else { (cur + n - 1) % n };
             // ZR walks right, so the new shelf arrives from the right.
             goto_shelf(s, keys[next].clone(), if button == "ZR" { 1.0 } else { -1.0 }, selection, None);
+            // The screen holds the row and not the shelf: two shelves whose
+            // cursors sit on the same row number read as no change, and the
+            // step went silent while the new shelf slid in. A tap on its chip
+            // sounds the same.
+            crate::sfx::choose(crate::sfx::Sfx::Tab);
             return;
         }
         // B, the way back everywhere else, is the way back here too: out of a
