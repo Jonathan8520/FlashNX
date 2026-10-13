@@ -3023,7 +3023,8 @@ pub(crate) fn zoom_live(percent: u16, ox: i32, oy: i32) {
     backend::render::set_game_zoom(percent, ox, oy, VIEWPORT_W as f32, VIEWPORT_H as f32);
 }
 
-/// `A`: keep it, and write it to the game's `.prefs` so it is there next launch.
+/// `A` (or `-`, which then resumes the game): keep it, and write it to the
+/// game's `.prefs` so it is there next launch.
 ///
 /// Only when it changed, as every other value of the pause is kept: opened
 /// just to look and left with A, an untouched framing was written as the

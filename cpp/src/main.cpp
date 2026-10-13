@@ -1703,7 +1703,7 @@ static void worker_entry(void* arg) {
             // The panel is gone and the picture is untouched: what the player
             // is judging here IS the framing, so nothing is laid over it but
             // two letterbox bands carrying the legend. Everything is live and
-            // nothing is written until `A`.
+            // nothing is written until `A` (or `-`, which resumes the game).
             if (screen_menu && zoom_mode) {
                 // COARSE zoom on the shoulders, FINE zoom on X / Y -- the same
                 // split as the sticks and the d-pad below, so each pair of
@@ -1861,13 +1861,29 @@ static void worker_entry(void* arg) {
                     zoom_mode = false;
                     zoom_hold = 0;
                     pause_repeat_reset(pause_rep);
-                } else if (kDown & (HidNpadButton_B | HidNpadButton_Minus)) {
+                } else if (kDown & HidNpadButton_B) {
                     ruffle_ui_sound(UI_SFX_BACK);
                     ruffle_zoom_cancel();
                     ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
                     zoom_mode = false;
                     zoom_hold = 0;
                     pause_repeat_reset(pause_rep);
+                } else if (kDown & HidNpadButton_Minus) {
+                    // `-` resumes the game from here as from every page of the
+                    // pause, and keeps what is being set on the way, as the
+                    // close button does everywhere (input rule 2): the framing,
+                    // as A would. It used to throw the framing away and stay on
+                    // ÉCRAN, a second `-` away from the game.
+                    ruffle_zoom_commit();
+                    ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
+                    zoom_mode = false;
+                    zoom_hold = 0;
+                    screen_menu = false;
+                    pause_repeat_reset(pause_rep);
+                    ruffle_ui_sound(UI_SFX_CLOSE);
+                    ruffle_menu_close_begin();
+                    menu_closing = true;
+                    continue;
                 }
                 ruffle_redraw_paused();
                 if (zoom_mode) ruffle_draw_zoom_overlay();
