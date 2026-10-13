@@ -1848,18 +1848,26 @@ static void worker_entry(void* arg) {
                 // pointer here: without it the FIRST click after a zoom lands
                 // where the old magnification put it -- a third of a screen away
                 // at 300% -- and only heals when the stick is next nudged.
+                //
+                // Back on the ÉCRAN rows, a direction still held from the
+                // framing (the sticks and the d-pad move the picture here) must
+                // not start repeating: their timers did not run in this mode
+                // and still hold a press from before it, so the cursor ran
+                // down the list on its own.
                 if (kDown & HidNpadButton_A) {
                     ruffle_ui_sound(UI_SFX_DECIDE);
                     ruffle_zoom_commit();
                     ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
                     zoom_mode = false;
                     zoom_hold = 0;
+                    pause_repeat_reset(pause_rep);
                 } else if (kDown & (HidNpadButton_B | HidNpadButton_Minus)) {
                     ruffle_ui_sound(UI_SFX_BACK);
                     ruffle_zoom_cancel();
                     ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
                     zoom_mode = false;
                     zoom_hold = 0;
+                    pause_repeat_reset(pause_rep);
                 }
                 ruffle_redraw_paused();
                 if (zoom_mode) ruffle_draw_zoom_overlay();
@@ -2008,6 +2016,7 @@ static void worker_entry(void* arg) {
                         ruffle_zoom_begin();
                         zoom_mode = true;
                         zoom_hold = 0;
+                        pause_repeat_reset(pause_rep);
                         // The finger that tapped this row must not read as the
                         // start of a drag on the first frame of the mode.
                         zoom_touching = false;
