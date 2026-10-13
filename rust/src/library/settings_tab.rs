@@ -204,7 +204,14 @@ fn pane_input(s: &mut State, button: &str, section: SetSection, row: usize) {
                 crate::sfx::choose(crate::sfx::Sfx::Back);
                 return;
             }
-            "Up" | "StickLUp" | "Down" | "StickLDown" => confirm_armed(s),
+            // A held direction against the end of the list moves nothing, and
+            // keeps the row armed (`list_step_moves`).
+            "Up" | "StickLUp" | "Down" | "StickLDown" => {
+                if !list_step_moves(button, row, n) {
+                    return;
+                }
+                confirm_armed(s);
+            }
             _ => return,
         }
     }

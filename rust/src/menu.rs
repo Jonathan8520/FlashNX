@@ -846,8 +846,12 @@ fn handle_menu_input(s: &mut State, button: &str, mut selection: usize) {
                 choose(Sfx::Back);
                 return;
             }
-            // Kept, then the move below.
+            // Kept, then the move below. A held direction against the end of
+            // the list moves nothing, and keeps the row armed.
             "Up" | "StickLUp" | "Down" | "StickLDown" => {
+                if !crate::library::list_step_moves(button, selection, count) {
+                    return;
+                }
                 pv::confirm();
             }
             // Nothing else while armed: the hints name only what acts. (`-`

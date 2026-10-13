@@ -2045,6 +2045,18 @@ pub(crate) fn list_step_wrap(sel: usize, delta: isize, total: usize) -> usize {
     }
 }
 
+/// Whether Up / Down (`button`) moves the cursor of a list of `count` rows off
+/// row `sel`, which a held direction against an end does not. An armed row is
+/// kept by a press that moves on (input rule 2), not by one that stays put:
+/// the Down held to reach the last row repeated a moment after A had armed it,
+/// and that tick disarmed the row without a sound, so the Left that followed
+/// went back to the rail instead of changing the value. The pause's ÉCRAN
+/// page already kept a value only when its cursor really moved.
+pub(crate) fn list_step_moves(button: &str, sel: usize, count: usize) -> bool {
+    let delta = if matches!(button, "Up" | "StickLUp") { -1 } else { 1 };
+    list_step_wrap(sel, delta, count) != sel
+}
+
 /// Rows skipped by Left/Right in LISTE. Five, not a screenful: a screenful is
 /// what a page jump is for, and it would land on a row with none of the titles
 /// you were reading still visible.
@@ -6586,7 +6598,15 @@ fn handle_touches_menu_input(s: &mut State, button: &str, game_idx: usize, mut s
                 crate::sfx::choose(crate::sfx::Sfx::Back);
                 return;
             }
-            "Up" | "StickLUp" | "Down" | "StickLDown" | "Plus" => confirm_armed(s),
+            // A held direction against the end of the list moves nothing, and
+            // keeps the row armed (`list_step_moves`).
+            "Up" | "StickLUp" | "Down" | "StickLDown" => {
+                if !list_step_moves(button, selection, count) {
+                    return;
+                }
+                confirm_armed(s);
+            }
+            "Plus" => confirm_armed(s),
             _ => return,
         }
     }
@@ -9226,7 +9246,15 @@ fn handle_options_input(s: &mut State, button: &str, game_idx: usize, mut select
                 crate::sfx::choose(crate::sfx::Sfx::Back);
                 return;
             }
-            "Up" | "StickLUp" | "Down" | "StickLDown" | "L" | "R" | "Plus" => confirm_armed(s),
+            // A held direction against the end of the list moves nothing, and
+            // keeps the row armed (`list_step_moves`).
+            "Up" | "StickLUp" | "Down" | "StickLDown" => {
+                if !list_step_moves(button, selection, total) {
+                    return;
+                }
+                confirm_armed(s);
+            }
+            "L" | "R" | "Plus" => confirm_armed(s),
             _ => return,
         }
     }
