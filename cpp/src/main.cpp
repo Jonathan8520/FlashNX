@@ -52,6 +52,7 @@ extern "C" const char* swf_picker_embedded_swf(void);
 // on it, and the forwarder path has to do the same.
 extern "C" int ruffle_is_applet_mode(void);
 extern "C" void https_thumb_stop(void);
+extern "C" void https_job_stop(void);
 
 // Phase 3.4 — library boot screen FFI (rust/src/library.rs).
 extern "C" void ruffle_loc_init(void);
@@ -2927,10 +2928,11 @@ int main(int argc, char** argv) {
     prof_shutdown();
     threadClose(&t);
 
-    // The thumbnail transfers' own thread (net.cpp), stopped while the sockets
-    // it may be using still exist.
+    // The network's two threads (net.cpp), stopped while the sockets they may
+    // be using still exist.
     https_thumb_stop();
-    ruffle_log_cstr("teardown: thumbnail network thread stopped\n");
+    https_job_stop();
+    ruffle_log_cstr("teardown: network threads stopped\n");
 
     // Logged before: nxlink's output goes through the sockets.
     ruffle_log_cstr("teardown: closing romfs and sockets\n");

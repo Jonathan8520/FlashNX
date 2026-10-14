@@ -27,8 +27,14 @@ extern "C" {
     fn https_download_tick() -> c_int;
     fn https_download_progress(done_out: *mut u64, total_out: *mut u64);
     fn https_download_cancel();
-    // Async in-memory GET (archive.org metadata) — same multi machinery as the
-    // download, but non-blocking so the UI can spin while it runs.
+    // A request on net.cpp's request thread: queued, polled, its answer taken.
+    // `post` != 0 POSTs `body` as JSON. See `request_with_frames`.
+    fn https_job_start(post: c_int, url: *const c_char, body: *const c_char) -> c_int;
+    fn https_job_poll(id: c_int) -> c_int;
+    fn https_job_take(id: c_int, out: *mut c_char, cap: c_int) -> c_int;
+    fn https_job_cancel();
+    // Async in-memory GET (archive.org metadata, Flashpoint searches): a request
+    // of that same thread, so non-blocking and nothing of it on the caller's.
     fn https_get_start(url: *const c_char) -> c_int;
     fn https_get_tick() -> c_int;
     fn https_get_buffer(out: *mut c_char, cap: c_int) -> c_int;
@@ -56,6 +62,71 @@ extern "C" {
     fn swkbd_prompt_rename(header: *const c_char, guide: *const c_char, initial: *const c_char, out: *mut c_char, cap: c_int) -> c_int;
     fn swkbd_prompt_search(header: *const c_char, guide: *const c_char, initial: *const c_char, out: *mut c_char, cap: c_int) -> c_int;
     fn ruffle_log_cstr(msg: *const c_char);
+}
+
+/// What a blocking request calls between two polls when the launcher has a
+/// frame to draw: `library::wait_frame`, set by the launcher's `render` around
+/// its deferred flows (community profiles, a cover's search or download, the
+/// bug report). None everywhere else (a game's navigator, boot), where
+/// `http_get` / `post_json` stay the plain blocking calls they were.
+static WAIT_FRAME: std::sync::Mutex<Option<fn()>> = std::sync::Mutex::new(None);
+
+/// Draw frames from inside blocking requests (`Some`) or stop (`None`).
+pub(crate) fn set_wait_frame(f: Option<fn()>) {
+    if let Ok(mut g) = WAIT_FRAME.lock() {
+        *g = f;
+    }
+}
+
+/// `http_get` / `post_json` while the launcher can draw: the request runs on
+/// net.cpp's request thread and the frames go on being drawn until it is done,
+/// so the loading card keeps turning instead of freezing for the whole
+/// transfer (1.3 to 3.9 s measured on the profiles, 2026-10-14). None when no
+/// frame hook is set, and the caller does the blocking call itself.
+fn request_with_frames(
+    post: bool,
+    url: &str,
+    body: &str,
+    cap: usize,
+) -> Option<Result<std::vec::Vec<u8>, std::string::String>> {
+    let hook = WAIT_FRAME.lock().ok().and_then(|g| *g)?;
+    let url_c = cstr(url);
+    let body_c = cstr(body);
+    let id = unsafe {
+        https_job_start(
+            post as c_int,
+            url_c.as_ptr() as *const c_char,
+            if post { body_c.as_ptr() as *const c_char } else { core::ptr::null() },
+        )
+    };
+    if id < 0 {
+        return Some(Err(crate::loc::err_https(&std::format!("rc {}", id))));
+    }
+    loop {
+        match unsafe { https_job_poll(id) } {
+            0 => hook(),
+            1 => break,
+            -3 => {
+                unsafe { https_job_cancel() };
+                return Some(Err(std::string::String::from(crate::loc::s().err_response_big)));
+            }
+            -2 => {
+                unsafe { https_job_cancel() };
+                return Some(Err(https_error_message(Sink::Memory)));
+            }
+            rc => return Some(Err(crate::loc::err_https(&std::format!("rc {}", rc)))),
+        }
+    }
+    let mut buf = std::vec![0u8; cap];
+    let n = unsafe { https_job_take(id, buf.as_mut_ptr() as *mut c_char, buf.len() as c_int) };
+    if n == -3 {
+        return Some(Err(std::string::String::from(crate::loc::s().err_response_big)));
+    }
+    if n < 0 {
+        return Some(Err(crate::loc::err_https(&std::format!("rc {}", n))));
+    }
+    buf.truncate(n as usize);
+    Some(Ok(buf))
 }
 
 /// NUL-terminate a string for passing to C.
@@ -201,6 +272,9 @@ pub(crate) fn http_get(
     url: &str,
     cap: usize,
 ) -> Result<std::vec::Vec<u8>, std::string::String> {
+    if let Some(r) = request_with_frames(false, url, "", cap) {
+        return r;
+    }
     let mut buf = std::vec![0u8; cap];
     let mut url_c = url.as_bytes().to_vec();
     url_c.push(0);
@@ -236,6 +310,9 @@ pub(crate) fn post_json(
     body: &str,
     cap: usize,
 ) -> Result<std::vec::Vec<u8>, std::string::String> {
+    if let Some(r) = request_with_frames(true, url, body, cap) {
+        return r;
+    }
     let mut buf = std::vec![0u8; cap];
     let url_c = cstr(url);
     let body_c = cstr(body);

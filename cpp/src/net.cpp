@@ -462,58 +462,272 @@ extern "C" void https_download_cancel(void) {
     }
 }
 
-// ── Async in-memory GET (archive.org metadata, non-blocking) ──────────────
-// Same curl-multi machinery as the download, but the response accumulates in
-// g_get_buf instead of a file, so the UI keeps rendering (a spinner) while it
-// runs. Returns: 0 on success (in progress), -1 init, -5 if busy.
-extern "C" int https_get_start(const char* url) {
-    // A GET already in flight is SUPERSEDED, not a reason to refuse.
-    //
-    // Refusing left the slot occupied forever: the caller that got -5 shows its
-    // error and stops calling https_get_tick, so nothing ever cleans up the
-    // handles of the fetch that was running, and every later request in the
-    // session fails the same way. Measured on hardware: two Flashpoint searches
-    // in a row (X pressed while the previous result list was still loading) and
-    // the launcher had no network left at all -- searches, archive.org metadata,
-    // everything.
-    //
-    // Superseding is also what the user means: a new search replaces the old
-    // one, it does not queue behind it.
-    if ((g_multi || g_handle) && !g_dl_file) {
-        std::printf("https_get_start: superseding an in-flight GET\n");
+// ── One request at a time, on a thread of its own ─────────────────────────
+// Everything else that ran curl on the launcher's thread goes through here:
+// the async GET below (Flashpoint "see all" / "see more", archive.org
+// metadata), which was pumped from the frame like the thumbnails were, and
+// the blocking GET/POST of the deferred flows (community profiles, a cover's
+// search and download, the bug report), which froze their loading card for the
+// whole transfer: 1.3 to 3.9 s measured on the profiles (2026-10-14). curl
+// 7.69 does each connection's DNS lookup and TLS handshake inside the call
+// that drives it, and re-parses all of cacert.pem for each new connection.
+//
+// A caller queues a request and polls it; one that has to block (net.rs
+// `http_get` / `post_json` while the launcher has a frame to draw) draws its
+// frames between polls. A new request supersedes the one before; a cancelled
+// or superseded transfer is aborted from its progress callback.
+namespace {
+enum class JobState : u8 { Idle, Queued, Running, Done };
+struct Job {
+    JobState    state    = JobState::Idle;
+    int         id       = 0;   // bumped by every start and cancel
+    bool        post     = false;
+    std::string url;
+    std::string body;
+    std::string out;
+    bool        overflow = false;
+    int         curl     = 0;
+    long        http     = 0;
+    bool        ok       = false;
+};
+Job     g_job;
+Mutex   g_job_mutex;
+CondVar g_job_wake;
+Thread  g_job_thread;
+bool    g_job_started = false;
+bool    g_job_quit    = false;
+
+// An answer past this is refused, as `https_get_into_buf` refuses one past its
+// buffer: the largest anything here asks for is 8 MB (archive.org metadata).
+constexpr size_t JOB_MAX = 16u << 20;
+
+struct JobSink {
+    std::string* out;
+    bool*        overflow;
+};
+
+size_t job_write(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    JobSink* k = (JobSink*)userdata;
+    const size_t n = size * nmemb;
+    if (k->out->size() + n > JOB_MAX) {
+        *k->overflow = true;
+        return 0;
+    }
+    k->out->append(ptr, n);
+    return n;
+}
+
+// Abort the transfer once its request is no longer the current one.
+int job_progress(void* userdata, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+    const int mine = (int)(intptr_t)userdata;
+    mutexLock(&g_job_mutex);
+    const bool stale = g_job.id != mine;
+    mutexUnlock(&g_job_mutex);
+    return stale ? 1 : 0;
+}
+
+void job_worker(void*) {
+    while (true) {
+        mutexLock(&g_job_mutex);
+        while (!g_job_quit && g_job.state != JobState::Queued) {
+            condvarWait(&g_job_wake, &g_job_mutex);
+        }
+        if (g_job_quit) {
+            mutexUnlock(&g_job_mutex);
+            break;
+        }
+        const int id = g_job.id;
+        const bool post = g_job.post;
+        const std::string url = g_job.url;
+        const std::string body = g_job.body;
+        g_job.state = JobState::Running;
+        mutexUnlock(&g_job_mutex);
+
+        std::string out;
+        bool overflow = false;
+        JobSink sink = {&out, &overflow};
+        CURLcode res = CURLE_FAILED_INIT;
+        long http = 0;
+        CURL* c = curl_easy_init();
+        struct curl_slist* headers = nullptr;
+        if (c) {
+            curl_easy_setopt(c, CURLOPT_URL, url.c_str());
+            curl_easy_setopt(c, CURLOPT_USERAGENT, "FlashNX/1.9.0 (Nintendo Switch homebrew)");
+            curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+            curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
+            curl_easy_setopt(c, CURLOPT_CAINFO, CACERT_PATH);
+            curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, job_write);
+            curl_easy_setopt(c, CURLOPT_WRITEDATA, &sink);
+            curl_easy_setopt(c, CURLOPT_TIMEOUT, 60L);
+            curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 10L);
+            curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+            curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, job_progress);
+            curl_easy_setopt(c, CURLOPT_XFERINFODATA, (void*)(intptr_t)id);
+            curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
+            if (post) {
+                headers = curl_slist_append(headers, "Content-Type: application/json");
+                headers = curl_slist_append(headers, "Accept: application/json");
+                curl_easy_setopt(c, CURLOPT_HTTPHEADER, headers);
+                curl_easy_setopt(c, CURLOPT_POST, 1L);
+                curl_easy_setopt(c, CURLOPT_POSTFIELDS, body.c_str());
+                curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, (long)body.size());
+            }
+            res = curl_easy_perform(c);
+            curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http);
+            curl_easy_cleanup(c);
+            if (headers) curl_slist_free_all(headers);
+        }
+        const bool ok = res == CURLE_OK && http >= 200 && http < 400;
+        if (!ok && res != CURLE_ABORTED_BY_CALLBACK) {
+            std::printf("net job %s %s: curl=%d (%s) http=%ld%s\n", post ? "POST" : "GET",
+                        url.c_str(), (int)res, curl_easy_strerror(res), http,
+                        overflow ? " (answer too big)" : "");
+            std::fflush(stdout);
+        }
+        mutexLock(&g_job_mutex);
+        if (g_job.id == id && g_job.state == JobState::Running) {
+            g_job.out.swap(out);
+            g_job.overflow = overflow;
+            g_job.curl = (int)res;
+            g_job.http = http;
+            g_job.ok = ok;
+            g_job.state = JobState::Done;
+        }
+        mutexUnlock(&g_job_mutex);
+    }
+}
+
+// Start the worker once, beside the thumbnails' (core 2, below the audio
+// worker and the save writer; 256 KB of stack for mbedtls' handshake).
+bool job_worker_start() {
+    if (g_job_started) return true;
+    mutexInit(&g_job_mutex);
+    condvarInit(&g_job_wake);
+    g_job_quit = false;
+    Result rc = threadCreate(&g_job_thread, job_worker, nullptr, nullptr, 256 * 1024, 0x2F, 2);
+    if (R_FAILED(rc)) rc = threadCreate(&g_job_thread, job_worker, nullptr, nullptr, 256 * 1024, 0x2F, -2);
+    if (R_FAILED(rc)) {
+        std::printf("net: request worker threadCreate failed 0x%x\n", (unsigned)rc);
         std::fflush(stdout);
-        multi_cleanup(false);
-        g_get_buf.clear();
+        return false;
     }
-    // A DOWNLOAD owns the slot (it writes to g_dl_file and the caller shows a
-    // progress bar). That one is not ours to cancel behind the user's back.
-    if (g_multi || g_handle) {
-        return -5;
+    threadStart(&g_job_thread);
+    g_job_started = true;
+    return true;
+}
+
+int g_get_job = 0; // the async GET's request, 0 when none
+} // namespace
+
+// Queue a request: a GET, or with `post` a POST of the JSON `body`. Returns its
+// id (> 0) to poll, or -1. Supersedes the request before it.
+extern "C" int https_job_start(int post, const char* url, const char* body) {
+    if (!url || net_init() != 0 || !job_worker_start()) return -1;
+    mutexLock(&g_job_mutex);
+    g_job.id = (g_job.id >= 0x7FFFFFF0) ? 1 : g_job.id + 1;
+    g_job.state = JobState::Queued;
+    g_job.post = post != 0;
+    g_job.url = url;
+    g_job.body = body ? body : "";
+    g_job.out.clear();
+    g_job.overflow = false;
+    g_job.curl = 0;
+    g_job.http = 0;
+    g_job.ok = false;
+    const int id = g_job.id;
+    condvarWakeOne(&g_job_wake);
+    mutexUnlock(&g_job_mutex);
+    return id;
+}
+
+// 0 = still running, 1 = done (take the answer), -2 = failed (the cause is in
+// https_last_curl_code / https_last_http_code, as after a blocking call), -3 =
+// the answer was too big, -4 = not the current request any more.
+extern "C" int https_job_poll(int id) {
+    if (!g_job_started) return -4;
+    mutexLock(&g_job_mutex);
+    int rc = -4;
+    if (g_job.id == id) {
+        switch (g_job.state) {
+            case JobState::Queued:
+            case JobState::Running: rc = 0; break;
+            case JobState::Done:
+                if (g_job.overflow) {
+                    rc = -3;
+                } else if (g_job.ok) {
+                    rc = 1;
+                } else {
+                    g_last_curl_result = g_job.curl;
+                    g_last_http_code = g_job.http;
+                    rc = -2;
+                }
+                break;
+            default: break;
+        }
     }
-    if (net_init() != 0) return -1;
-    CURLM* m = curl_multi_init();
-    CURL* c = curl_easy_init();
-    if (!m || !c) {
-        if (m) curl_multi_cleanup(m);
-        if (c) curl_easy_cleanup(c);
-        return -1;
+    mutexUnlock(&g_job_mutex);
+    return rc;
+}
+
+// Copy a done request's answer into `out` (NUL-terminated) and let it go.
+// Returns bytes copied, -3 if it does not fit `cap`, -1 if there is none.
+extern "C" int https_job_take(int id, char* out, int cap) {
+    if (!out || cap < 1 || !g_job_started) return -1;
+    mutexLock(&g_job_mutex);
+    int rc = -1;
+    if (g_job.id == id && g_job.state == JobState::Done) {
+        const size_t n = g_job.out.size();
+        if (n >= (size_t)cap) {
+            rc = -3;
+        } else {
+            std::memcpy(out, g_job.out.data(), n);
+            out[n] = '\0';
+            rc = (int)n;
+        }
+        g_job.state = JobState::Idle;
+        g_job.out.clear();
+        g_job.out.shrink_to_fit();
     }
-    g_get_buf.clear();
-    curl_easy_setopt(c, CURLOPT_URL, url);
-    curl_easy_setopt(c, CURLOPT_USERAGENT, "FlashNX/1.9.0 (Nintendo Switch homebrew)");
-    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
-    curl_easy_setopt(c, CURLOPT_CAINFO, CACERT_PATH);
-    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, write_to_string);
-    curl_easy_setopt(c, CURLOPT_WRITEDATA, &g_get_buf);
-    curl_easy_setopt(c, CURLOPT_TIMEOUT, 60L);
-    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 10L);
-    curl_multi_add_handle(m, c);
-    g_multi = m;
-    g_handle = c;
-    g_dl_file = nullptr; // in-memory GET, not a file download
-    g_bytes_done = 0;
-    g_bytes_total = 0;
+    mutexUnlock(&g_job_mutex);
+    return rc;
+}
+
+// Drop the current request: a transfer still running is aborted.
+extern "C" void https_job_cancel(void) {
+    if (!g_job_started) return;
+    mutexLock(&g_job_mutex);
+    g_job.id = (g_job.id >= 0x7FFFFFF0) ? 1 : g_job.id + 1;
+    g_job.state = JobState::Idle;
+    g_job.out.clear();
+    g_job.out.shrink_to_fit();
+    mutexUnlock(&g_job_mutex);
+}
+
+// Stop the worker and wait for it, before the sockets go at exit.
+extern "C" void https_job_stop(void) {
+    if (!g_job_started) return;
+    mutexLock(&g_job_mutex);
+    g_job.id = (g_job.id >= 0x7FFFFFF0) ? 1 : g_job.id + 1;
+    g_job.state = JobState::Idle;
+    g_job_quit = true;
+    condvarWakeOne(&g_job_wake);
+    mutexUnlock(&g_job_mutex);
+    threadWaitForExit(&g_job_thread);
+    threadClose(&g_job_thread);
+    g_job_started = false;
+}
+
+// ── Async in-memory GET (archive.org metadata, Flashpoint searches) ────────
+// A request of the worker above: nothing of it runs on the caller's thread.
+// Returns: 0 on success (in progress), -1 init.
+extern "C" int https_get_start(const char* url) {
+    // A GET already in flight is SUPERSEDED, not a reason to refuse: refusing
+    // left the slot occupied for good (two Flashpoint searches in a row and the
+    // launcher had no network left), and a new search replaces the old one in
+    // the player's mind too. `https_job_start` supersedes on its own.
+    const int id = https_job_start(0, url, nullptr);
+    if (id < 0) return -1;
+    g_get_job = id;
     g_last_curl_result = 0;
     g_last_http_code = 0;
     std::printf("https_get_start: %s\n", url);
@@ -521,59 +735,38 @@ extern "C" int https_get_start(const char* url) {
     return 0;
 }
 
-// Pump the GET once. Returns: 0 = in progress, 1 = done (response in g_get_buf),
-// <0 = error (handles cleaned up; g_get_buf left as-is).
+// Poll the GET. Returns: 0 = in progress, 1 = done (read it with
+// https_get_buffer), <0 = error (the cause in https_last_*).
 extern "C" int https_get_tick(void) {
-    if (!g_multi) return -1;
-    int still_running = 0;
-    CURLMcode mc = curl_multi_perform(g_multi, &still_running);
-    if (mc != CURLM_OK) {
-        std::printf("https_get_tick: curl_multi_perform mc=%d\n", (int)mc);
+    if (!g_get_job) return -1;
+    const int rc = https_job_poll(g_get_job);
+    if (rc == 0) return 0;
+    if (rc == 1) {
+        std::printf("https_get_tick: OK\n");
         std::fflush(stdout);
-        multi_cleanup(false);
-        return -2;
+        return 1;
     }
-    if (still_running > 0) return 0;
-
-    bool ok = false;
-    CURLMsg* msg;
-    int msgs_left = 0;
-    while ((msg = curl_multi_info_read(g_multi, &msgs_left))) {
-        if (msg->msg == CURLMSG_DONE && msg->easy_handle == g_handle) {
-            g_last_curl_result = (int)msg->data.result;
-            curl_easy_getinfo(g_handle, CURLINFO_RESPONSE_CODE, &g_last_http_code);
-            ok = (msg->data.result == CURLE_OK) && (g_last_http_code >= 200) && (g_last_http_code < 400);
-            break;
-        }
-    }
-    multi_cleanup(false); // frees g_multi/g_handle (g_dl_file is null); keeps g_get_buf
-    if (!ok) {
-        std::printf("https_get_tick: failed curl=%d (%s) http=%ld\n",
-                    g_last_curl_result, curl_easy_strerror((CURLcode)g_last_curl_result),
-                    g_last_http_code);
-        std::fflush(stdout);
-        return -2;
-    }
-    std::printf("https_get_tick: OK %zu bytes\n", g_get_buf.size());
+    std::printf("https_get_tick: failed (%d) curl=%d (%s) http=%ld\n", rc, g_last_curl_result,
+                curl_easy_strerror((CURLcode)g_last_curl_result), g_last_http_code);
     std::fflush(stdout);
-    return 1;
+    g_get_job = 0;
+    return -2;
 }
 
 // Copy the completed response into `out` (NUL-terminated). Returns bytes copied,
 // or -3 if the response doesn't fit in `cap`. Call after `https_get_tick` == 1.
 extern "C" int https_get_buffer(char* out, int cap) {
-    if (!out || cap < 1) return -1;
-    const int n = (int)g_get_buf.size();
-    if (n >= cap) return -3;
-    std::memcpy(out, g_get_buf.data(), (size_t)n);
-    out[n] = '\0';
-    return n;
+    if (!out || cap < 1 || !g_get_job) return -1;
+    const int rc = https_job_take(g_get_job, out, cap);
+    g_get_job = 0;
+    return rc;
 }
 
 extern "C" void https_get_cancel(void) {
-    if (g_multi) {
+    if (g_get_job) {
         std::printf("https_get_cancel\n"); std::fflush(stdout);
-        multi_cleanup(false);
+        https_job_cancel();
+        g_get_job = 0;
     }
     g_get_buf.clear();
 }

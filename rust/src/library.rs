@@ -12844,13 +12844,56 @@ fn draw_game_reveal_window(backend: &mut SwitchRenderBackend, frac: f32, fade: f
 /// Render the current screen using the backend. C++ calls this each frame
 /// while the library is active, AFTER `glClear` (we own the entire
 /// framebuffer — no Ruffle behind us at this stage).
+/// The renderer `wait_frame` draws with, set only while `render` runs the
+/// deferred flows (the same one `render` was handed, unused meanwhile).
+static WAIT_BACKEND: std::sync::atomic::AtomicPtr<SwitchRenderBackend> =
+    std::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+/// A frame drawn from inside one of those flows is under way: it must not run
+/// them again, nor draw another frame from a request of its own.
+static IN_WAIT_FRAME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// One frame of the launcher, drawn and shown while a deferred flow waits on
+/// the network (net.rs `request_with_frames`): its loading card keeps turning
+/// instead of freezing for the whole transfer. The screen is whatever the flow
+/// left (`ProfileLoading` and its card, the RÉGLAGES page and its sending
+/// card); the flow sets its result screen only once its answer is in.
+fn wait_frame() {
+    use std::sync::atomic::Ordering;
+    extern "C" {
+        fn svcSleepThread(nano: i64);
+    }
+    let p = WAIT_BACKEND.load(Ordering::Relaxed);
+    if p.is_null() || IN_WAIT_FRAME.swap(true, Ordering::Relaxed) {
+        // A request from inside a frame drawn here: no frame to draw, so wait
+        // a little rather than poll flat out.
+        unsafe { svcSleepThread(4_000_000) };
+        return;
+    }
+    // SAFETY: `p` is the renderer `render` was given; `render` is blocked in
+    // the flow that called us and touches it again only after we return.
+    render(unsafe { &mut *p });
+    unsafe { gl_context_swap() };
+    IN_WAIT_FRAME.store(false, Ordering::Relaxed);
+}
+
 pub fn render(backend: &mut SwitchRenderBackend) {
-    // Run any deferred profile network flow now that its loading panel has shown
-    // a frame (#20). May transition the screen, so do it before reading it.
-    drive_pending_net();
-    // Same for a bug report or an idea, behind its card on the RÉGLAGES page.
-    settings_tab::drive_pending_send();
-    drive_pending_move();
+    use std::sync::atomic::Ordering;
+    if !IN_WAIT_FRAME.load(Ordering::Relaxed) {
+        // The flows below block on the network; their requests draw frames
+        // while they wait (`wait_frame`).
+        WAIT_BACKEND.store(backend as *mut SwitchRenderBackend, Ordering::Relaxed);
+        net::set_wait_frame(Some(wait_frame));
+        // Run any deferred profile network flow now that its loading panel has
+        // shown a frame (#20). May transition the screen, so do it before
+        // reading it.
+        drive_pending_net();
+        // Same for a bug report or an idea, behind its card on the RÉGLAGES page.
+        settings_tab::drive_pending_send();
+        drive_pending_move();
+        net::set_wait_frame(None);
+        WAIT_BACKEND.store(core::ptr::null_mut(), Ordering::Relaxed);
+    }
     let s = match LIBRARY.lock() {
         Ok(g) => g,
         Err(_) => return,
