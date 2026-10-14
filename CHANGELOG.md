@@ -29,6 +29,7 @@ The whole interface is redrawn. Every screen uses the console's own fonts, at th
 - In the pause menu, Up on Resume goes straight to Quit; a held direction scrolls and stops at the ends instead of going round.
 - Holding L or R switches one tab, not one every 80 ms, and switching to Settings or Import starts on their first entry (Library, the first game of the studio shelf).
 - In the Flashpoint results, − searches again, as in every other list, and a cover rests as the Play grid shows it (a banner logo used to be cropped to a few letters).
+- A Flashpoint game's details (+) show its screenshot under its logo, with the title, the facts and the description beside them.
 - The empty library shows the folder FlashNX really uses, and − there no longer quits the app.
 - The games folder browser opens beside the library folder, and the card's root, which cannot hold the library, is refused with the reason.
 - The Import page stays smooth while its shelves, covers and screenshots load: these transfers run on their own thread. Each new secure connection used to freeze the screen for up to a fifth of a second, several times on every visit, and only one picture is now decoded per frame.

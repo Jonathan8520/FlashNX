@@ -360,28 +360,36 @@ pub(crate) struct FpDetailsView<'a> {
     /// server did not say.
     pub size: Option<u64>,
     pub cover_url: &'a str,
+    /// Its screenshot, under the logo (`discover::screenshot_url`, the one the
+    /// shelves show, so a shelf's game has it already). Empty for none.
+    pub shot_url: &'a str,
     /// `None` while the blurb is being fetched.
     pub description: Option<&'a str>,
     pub installed: bool,
 }
 
 impl SwitchRenderBackend {
-    /// A result's details: its logo whole on its backdrop, the title, who made
+    /// A result's details: its pictures down the left, the logo then the
+    /// screenshot, each whole on its backdrop; beside them the title, who made
     /// and published it, when, how big the download is, and its blurb. Opens
     /// at once on what the search already knows; the size and the blurb fill
     /// in as they arrive, a spinner holding their place.
     pub(crate) fn draw_library_fp_details(&mut self, d: &FpDetailsView) {
-        const W: f32 = 860.0;
+        const W: f32 = 960.0;
         const PAD: f32 = 36.0;
         const ART_W: f32 = 240.0;
         const ART_H: f32 = 150.0;
+        const ART_GAP: f32 = 14.0;
         const MAX_H: f32 = 620.0;
         let u = crate::loc_ui::ui();
         self.pump_thumbnail_load();
-        let cover = match self.thumb_for(d.cover_url) {
+        let image = |t: Option<ThumbTex>| match t {
             Some(ThumbTex::Image { tex, w, h, amb }) if tex != 0 => Some((tex, w, h, amb)),
             _ => None,
         };
+        let cover = image(self.thumb_for(d.cover_url));
+        let shot_tex = if d.shot_url.is_empty() { Some(ThumbTex::Failed) } else { self.thumb_for(d.shot_url) };
+        let shot = image(shot_tex);
         // Facts as icon and value, as the game options write theirs: "Label :
         // value" put a French space before the colon in every language.
         let mut facts: std::vec::Vec<(Icon, std::string::String, u32)> = std::vec::Vec::new();
@@ -407,13 +415,14 @@ impl SwitchRenderBackend {
         let text_x0 = PAD + ART_W + 28.0;
         let text_w = W - text_x0 - PAD;
         let title_lines = self.kit_wrap(d.title, size::WINDOW_TITLE, text_w, 2);
-        let head_h = (title_lines.len() as f32 * 30.0 + 14.0 + facts.len() as f32 * 28.0).max(ART_H);
-        // The blurb gets what the window has room for, up to its full height,
-        // rather than six lines and an ellipsis.
+        let head_h = title_lines.len() as f32 * 30.0 + 14.0 + facts.len() as f32 * 28.0;
+        // The blurb runs under the facts, beside the pictures, and gets what
+        // the window has room for, up to its full height, rather than six lines
+        // and an ellipsis.
         let room = MAX_H - PAD - head_h - 24.0 - 30.0 - 60.0;
         let max_lines = ((room / 23.0).floor() as usize).max(2);
         let desc_lines = match d.description {
-            Some(text) => self.kit_wrap(text, size::LABEL + 1.0, W - 2.0 * PAD, max_lines),
+            Some(text) => self.kit_wrap(text, size::LABEL + 1.0, text_w, max_lines),
             None => std::vec::Vec::new(),
         };
         // While the blurb is on its way the window takes the height of the
@@ -426,27 +435,50 @@ impl SwitchRenderBackend {
         let id = std::format!("{}\u{1F}{}", d.title, d.cover_url);
         let reserve = match OPENED_PENDING.lock() {
             Ok(mut g) if d.description.is_none() => {
-                *g = id;
+                *g = id.clone();
                 true
             }
             Ok(g) => *g == id,
             Err(_) => false,
         };
+        // The screenshot's place is settled when the window opens, for the same
+        // reason: a game known to have none shows its logo alone, and one found
+        // to have none once the window is up keeps an empty tile rather than
+        // the window shrinking under the reader.
+        static SHOT_SLOT: std::sync::Mutex<(std::string::String, bool)> =
+            std::sync::Mutex::new((std::string::String::new(), true));
+        let has_shot = !matches!(shot_tex, Some(ThumbTex::Failed));
+        let shot_slot = match SHOT_SLOT.lock() {
+            Ok(mut g) => {
+                if g.0 != id {
+                    *g = (id, has_shot);
+                }
+                g.1
+            }
+            Err(_) => has_shot,
+        };
+        let art_h = if shot_slot { 2.0 * ART_H + ART_GAP } else { ART_H };
         let desc_h = match d.description {
             _ if reserve => 24.0 + max_lines as f32 * 23.0,
             None => 24.0 + 40.0,
             Some(_) if desc_lines.is_empty() => 0.0,
             Some(_) => 24.0 + desc_lines.len() as f32 * 23.0,
         };
-        let h = PAD + head_h + desc_h + 30.0 + 60.0;
+        let h = PAD + art_h.max(head_h + desc_h) + 30.0 + 60.0;
         let frame = self.draw_modal_frame(W, 0, Some(h), false, "", None, None);
         let (x, y) = (frame.x, frame.y);
         let (ax, ay) = (x + PAD, y + PAD);
-        match cover {
-            Some((tex, w, h, amb)) => self.kit_cover(ax, ay, ART_W, ART_H, tex, w, h, amb, 1.0),
-            None => {
-                self.kit_rrect(ax, ay, ART_W, ART_H, radius::TILE, col::TILE);
-                self.kit_icon(ax + (ART_W - 36.0) * 0.5, ay + ART_H * 0.5, 36.0, Icon::Image, col::TEXT3);
+        let mut arts = std::vec![(ay, cover)];
+        if shot_slot {
+            arts.push((ay + ART_H + ART_GAP, shot));
+        }
+        for (py, art) in arts {
+            match art {
+                Some((tex, w, h, amb)) => self.kit_cover(ax, py, ART_W, ART_H, tex, w, h, amb, 1.0),
+                None => {
+                    self.kit_rrect(ax, py, ART_W, ART_H, radius::TILE, col::TILE);
+                    self.kit_icon(ax + (ART_W - 36.0) * 0.5, py + ART_H * 0.5, 36.0, Icon::Image, col::TEXT3);
+                }
             }
         }
         let tx = x + text_x0;
@@ -469,11 +501,11 @@ impl SwitchRenderBackend {
         }
         let dy = ay + head_h + 24.0;
         match d.description {
-            None => self.draw_spinner(ax + 14.0, dy + 10.0, 9.0, now),
+            None => self.draw_spinner(tx + 14.0, dy + 10.0, 9.0, now),
             Some(_) => {
                 let mut ly = dy;
                 for line in &desc_lines {
-                    self.kit_text_mid(ax, ly, size::LABEL + 1.0, line, col::TEXT3);
+                    self.kit_text_mid(tx, ly, size::LABEL + 1.0, line, col::TEXT3);
                     ly += 23.0;
                 }
             }

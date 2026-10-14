@@ -13434,13 +13434,14 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                         c.publisher.clone(),
                         crate::backend::render::imp_release(&c.release_date),
                         c.cover_url.clone(),
+                        if c.id.is_empty() { std::string::String::new() } else { crate::sources::discover::screenshot_url(&c.id) },
                         desc,
                         s.entries.iter().any(|e| e.basename == name),
                         pending,
                     )
                 })
             });
-            if let Some((title, dev, publisher, release, cover, desc, installed, pending)) = snap {
+            if let Some((title, dev, publisher, release, cover, shot, desc, installed, pending)) = snap {
                 backend.draw_library_fp_details(&crate::backend::render::FpDetailsView {
                     title: &title,
                     developer: &dev,
@@ -13448,6 +13449,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     release: &release,
                     size: if pending { None } else { Some(size) },
                     cover_url: &cover,
+                    shot_url: &shot,
                     description: desc.as_deref(),
                     installed,
                 });
