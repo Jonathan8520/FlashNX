@@ -45,6 +45,7 @@ The whole interface is redrawn. Every screen uses the console's own fonts, at th
 - A refused overclock raise from Auto keeps Auto instead of switching the game to Off for good, and turning the frame counter on or off no longer loses the speed reading.
 - After a search or a sort in Import, the cursor lands on the first source instead of the add row.
 - Clearing a saved address in the keyboard cancels the edit instead of deleting the source without asking.
+- Unpacking a big Flashpoint game is a third faster: Dragon City (2,932 files) took 4 min 20 s after its download, now under 3 minutes.
 - Deleting a game made of many files is instant: its folder goes to a trash that empties in the background, only while the launcher is left alone, and carries on at the next launch if needed. Dragon City (2,933 files) used to freeze the screen for a full minute.
 - A game's HOME Menu icon shows the version of FlashNX that made it: icons made with 1.9.0 said 1.8.1.
 - Games locked by MochiCrypt, the MochiAds loader that decrypts the game after its ad (Charlie The Duck), start after about 10 seconds instead of staying on the loader for good: a request to the closed MochiAds servers now fails after 10 seconds, like a connection that never answers, instead of waiting forever.

@@ -948,6 +948,30 @@ extern "C" int swf_picker_list_dirs(const char* dir, char* out, int cap) {
 // time (ignoring "already exists" — Horizon's mkdir, like create_dir_all, isn't
 // otherwise idempotent across nested levels), then fopen/fwrite/fclose.
 // Returns 1 on success, 0 on failure.
+// The deepest directory the last write created or found, so the next write
+// into the same folder skips its parents. An extraction writes thousands of
+// files a few folders deep (Dragon City: 2,932, up to ~10 levels), and a
+// mkdir of every component for every file, each an fs round trip answering
+// "already exists", was about a quarter of its 259 s; with this, 70 mkdirs and
+// 1.8 s (measured 2026-10-14).
+static char g_known_dir[512] = {0};
+
+// Create the parent directories of `path` (a copy of it in `buf`), past the
+// first `skip` bytes, a directory known to exist already. Skips the "sdmc:"
+// mount root (a bare mount mkdir fails) and treats EEXIST as success.
+static void make_parents(char* buf, size_t plen, size_t skip) {
+    for (size_t i = skip + 1; i < plen; ++i) {
+        if (buf[i] != '/') continue;
+        buf[i] = '\0';
+        if (buf[i - 1] != ':') {
+            if (::mkdir(buf, 0777) != 0 && errno != EEXIST) {
+                std::printf("swf_picker_write_file: mkdir(%s) errno=%d\n", buf, errno);
+            }
+        }
+        buf[i] = '/';
+    }
+}
+
 extern "C" int swf_picker_write_file(const char* path, const unsigned char* data,
                                      unsigned int len) {
     if (!path || !*path) return 0;
@@ -958,23 +982,49 @@ extern "C" int swf_picker_write_file(const char* path, const unsigned char* data
         return 0;
     }
     std::memcpy(buf, path, plen + 1);
-    // mkdir each parent component; skip the "sdmc:" mount root (bare mount mkdir
-    // fails), and treat EEXIST as success.
-    for (size_t i = 1; i < plen; ++i) {
-        if (buf[i] != '/') continue;
-        buf[i] = '\0';
-        if (buf[i - 1] != ':') {
-            if (::mkdir(buf, 0777) != 0 && errno != EEXIST) {
-                std::printf("swf_picker_write_file: mkdir(%s) errno=%d\n", buf, errno);
+    const char* slash = std::strrchr(path, '/');
+    const size_t dlen = slash ? (size_t)(slash - path) : 0; // parent, no trailing '/'
+    // How much of the parent is known to exist: all of it when it is the folder
+    // of the last write, else the components it shares with that folder.
+    size_t known = 0;
+    const size_t klen = std::strlen(g_known_dir);
+    if (klen && dlen) {
+        if (klen == dlen && std::memcmp(g_known_dir, path, dlen) == 0) {
+            known = plen; // nothing to create
+        } else {
+            size_t i = 0;
+            while (i < klen && i < dlen && g_known_dir[i] == path[i]) i++;
+            // Back to the last whole component both share.
+            if (!((i == klen && (path[i] == '/')) || (i == dlen && g_known_dir[i] == '/'))) {
+                while (i > 0 && path[i] != '/') i--;
             }
+            known = i;
         }
-        buf[i] = '/';
     }
+    if (known < plen) make_parents(buf, plen, known);
     FILE* f = std::fopen(path, "wb");
+    if (!f && errno == ENOENT && known > 0) {
+        // A folder the cache believed in is gone (deleted or moved since):
+        // create every parent and try once more.
+        g_known_dir[0] = '\0';
+        std::memcpy(buf, path, plen + 1);
+        make_parents(buf, plen, 0);
+        f = std::fopen(path, "wb");
+    }
     if (!f) {
+        g_known_dir[0] = '\0';
         std::printf("swf_picker_write_file: fopen(%s) errno=%d\n", path, errno);
         return 0;
     }
+    if (dlen && dlen < sizeof(g_known_dir)) {
+        std::memcpy(g_known_dir, path, dlen);
+        g_known_dir[dlen] = '\0';
+    }
+    // A big buffer, as the download has: newlib writes a fully buffered FILE
+    // in chunks of its buffer's size, and the default one turned each file
+    // into many small fs writes (Dragon City's extraction: 93 s in fwrite for
+    // what the download writes at 12 MB/s). newlib allocates it, fclose frees it.
+    std::setvbuf(f, nullptr, _IOFBF, 256 * 1024);
     const size_t wrote = (len > 0) ? std::fwrite(data, 1, len, f) : 0;
     std::fclose(f);
     if (wrote != (size_t)len) {
