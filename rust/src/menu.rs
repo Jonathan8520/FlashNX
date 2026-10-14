@@ -2070,6 +2070,21 @@ pub fn draw(backend: &mut SwitchRenderBackend, now: u64) {
     // Run any deferred profile network flow now that its loading panel showed a
     // frame. May transition the screen, so do it before snapshotting it.
     drive_pending_net();
+    draw_page(backend, now);
+}
+
+/// The pause's deferred profile flow (fetching, applying, sharing or deleting
+/// a profile), run in game before the frame is drawn, with no lock held:
+/// lib.rs `ruffle_touches_drive`, whose requests draw frames while they wait,
+/// the loading card's spinner turning. Run inside `draw`, it froze the game's
+/// frame for the whole request (1 to 4 s), the spinner still.
+pub fn drive() {
+    drive_pending_net();
+}
+
+/// `draw` without running the deferred flow: the in-game pause, which runs it
+/// before the frame (`drive`).
+pub fn draw_page(backend: &mut SwitchRenderBackend, now: u64) {
     // Snapshot the screen and the toast under one lock.
     let (screen, toast) = match TOUCHES.lock() {
         Ok(g) => {

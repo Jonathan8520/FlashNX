@@ -177,6 +177,9 @@ extern "C" int  ruffle_touches_active(void);
 extern "C" int  ruffle_touches_input(const char* button_name);
 extern "C" int  ruffle_touches_consume_dirty(void);
 extern "C" void ruffle_touches_draw(void);
+// The pause's deferred profile request, before the frame: its wait draws
+// frames itself, so the loading card's spinner turns (lib.rs).
+extern "C" void ruffle_touches_drive(void);
 extern "C" void ruffle_menu_touch(float x, float y, int pressed);
 extern "C" int  ruffle_pause_touch(float x, float y, int pressed, int live);
 extern "C" void ruffle_set_direct_launch(int on);
@@ -1708,6 +1711,15 @@ static void worker_entry(void* arg) {
                 if (ruffle_touches_consume_dirty()) {
                     populate_bindings_from_keymap();
                     cursor_speed_for_game();
+                }
+                // A profile request the page asked for runs here, before the
+                // frame and outside every lock, drawing frames while it waits.
+                if (ruffle_touches_active()) {
+                    ruffle_touches_drive();
+                    if (ruffle_touches_consume_dirty()) {
+                        populate_bindings_from_keymap();
+                        cursor_speed_for_game();
+                    }
                 }
                 ruffle_redraw_paused();
                 // The input above may have CLOSED the sub-menu (B). If so, drawing

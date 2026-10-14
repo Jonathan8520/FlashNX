@@ -3472,9 +3472,48 @@ pub extern "C" fn ruffle_touches_draw() {
         // both entrances to the editor. Zero while the panel is scaling: the rows
         // are drawn somewhere other than where the table says they are.
         backend::render::set_ui_screen_kind(if active || kind == 0 { 0 } else { 70 + kind as u32 });
-        menu::draw(backend, now);
+        // The deferred profile flow ran before the frame (`ruffle_touches_drive`).
+        menu::draw_page(backend, now);
         backend.clear_ui_transform();
     }
+}
+
+/// Run the pause's deferred profile request (fetching, applying, sharing or
+/// deleting a profile) before the frame is drawn, while no lock is held, so
+/// that its wait can draw frames (`pause_wait_frame`): the loading card's
+/// spinner turns, as the launcher's does, where the whole pause stood still
+/// for as long as the request took. C++ calls it each frame of the TOUCHES
+/// pages, before `ruffle_redraw_paused`; it does nothing when no request is
+/// due.
+#[no_mangle]
+pub extern "C" fn ruffle_touches_drive() {
+    net::set_wait_frame(Some(pause_wait_frame));
+    menu::drive();
+    net::set_wait_frame(None);
+}
+
+static PAUSE_WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// One frame of the pause's TOUCHES pages, drawn and shown while a profile
+/// request waits on the network: the frozen game, the page and its loading
+/// card, as the C++ loop draws them. The page is whatever the flow left (the
+/// loading card); the flow sets its result only once its answer is in.
+fn pause_wait_frame() {
+    use std::sync::atomic::Ordering;
+    extern "C" {
+        fn svcSleepThread(nano: i64);
+        fn gl_context_swap();
+    }
+    if PAUSE_WAITING.swap(true, Ordering::Relaxed) {
+        // A request from inside a frame drawn here: no frame to draw, so wait
+        // a little rather than poll flat out.
+        unsafe { svcSleepThread(4_000_000) };
+        return;
+    }
+    ruffle_redraw_paused();
+    ruffle_touches_draw();
+    unsafe { gl_context_swap() };
+    PAUSE_WAITING.store(false, Ordering::Relaxed);
 }
 
 /// Touchscreen for the IN-GAME pause editor (TOUCHES). The launcher has had
