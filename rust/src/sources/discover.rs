@@ -161,6 +161,30 @@ pub fn studio_url(name: &str, filter: bool) -> std::string::String {
     flashpoint::api_url(&query, ROUTE_MAX, !filter, false)
 }
 
+/// The search for `name`'s games from a game's details ("Du même studio", Y):
+/// a search, not a shelf, so Flash games of every library and status, and
+/// the player's filter (`filter`). `same_developer` keeps the exact name.
+pub fn developer_url(name: &str, filter: bool) -> std::string::String {
+    let query = std::format!("dev:\"{}\" platform:Flash", name.replace('"', ""));
+    flashpoint::api_url(&query, ROUTE_MAX, !filter, false)
+}
+
+/// A search's answer with only `name`'s own games: `family_filter`'s
+/// developer test alone, the player's filter having already chosen the rest.
+pub fn same_developer(bytes: &[u8], name: &str) -> std::vec::Vec<u8> {
+    let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return bytes.to_vec();
+    };
+    let Some(serde_json::Value::Array(arr)) = json.get_mut("games") else {
+        return bytes.to_vec();
+    };
+    arr.retain(|g| {
+        let dev = g.get("developer").and_then(|v| v.as_str()).unwrap_or("");
+        segments(dev).any(|s| s.eq_ignore_ascii_case(name))
+    });
+    serde_json::to_vec(&json).unwrap_or_else(|_| bytes.to_vec())
+}
+
 /// A draw: `DRAW_GAMES` games picked at random.
 pub fn draw_url() -> std::string::String {
     flashpoint::api_url(SHELF_QUERY, DRAW_GAMES, false, true)

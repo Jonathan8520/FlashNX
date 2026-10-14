@@ -384,6 +384,9 @@ pub(crate) struct FpDetailsView<'a> {
     /// The blurb, empty for none. The search gives it with the game.
     pub description: &'a str,
     pub installed: bool,
+    /// Y opens its developer's games ("Du même studio"): it has one, and the
+    /// page behind is not already theirs.
+    pub studio: bool,
 }
 
 impl SwitchRenderBackend {
@@ -499,11 +502,13 @@ impl SwitchRenderBackend {
             self.kit_text_mid(tx, ly, size::LABEL + 1.0, line, col::TEXT3);
             ly += 23.0;
         }
-        self.modal_hints(
-            &frame,
-            &[(&[Btn::A], if d.installed { u.hint_play } else { u.download }), (&[Btn::B], u.back)],
-            false,
-        );
+        let play = (&[Btn::A][..], if d.installed { u.hint_play } else { u.download });
+        let back = (&[Btn::B][..], u.back);
+        if d.studio {
+            self.modal_hints(&frame, &[play, (&[Btn::Y][..], u.fp_same_studio), back], false);
+        } else {
+            self.modal_hints(&frame, &[play, back], false);
+        }
         self.fp_done();
     }
 }

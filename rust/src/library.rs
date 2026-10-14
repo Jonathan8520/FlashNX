@@ -1863,6 +1863,10 @@ pub(crate) struct State {
     /// its name: a retry asks for them again, rather than searching for the
     /// name, and the results keep only that studio's games.
     fp_studio: Option<std::string::String>,
+    /// That studio page is its shelf's ("see all"): a family page whose ZL+ZR
+    /// draws another studio. False for one opened from a game's details
+    /// ("Du même studio", Y), which is a search for the developer.
+    fp_studio_shelf: bool,
     /// The results page shows a bigger draw ("see more" on the draw's
     /// shelf), with the shelf's own games (`fp_seed`) among them.
     fp_draw: bool,
@@ -1885,7 +1889,17 @@ pub(crate) struct State {
 /// stays a family page like its shelf, ZL+ZR draws again there instead of
 /// flipping the filter, and it starts no new search.
 fn on_shelf_page(s: &State) -> bool {
-    s.fp_draw || s.fp_studio.is_some() || s.fp_hunt > 0
+    s.fp_draw || s.fp_hunt > 0 || (s.fp_studio.is_some() && s.fp_studio_shelf)
+}
+
+/// The studio "Du même studio" (Y) would open from the details of result
+/// `selection`: its developer's first name, as the shelves take it. None when
+/// it has none, or when the page behind already lists that developer's games.
+fn details_studio(s: &State, selection: usize) -> Option<std::string::String> {
+    let c = s.cover_candidates.get(selection)?;
+    let name = crate::sources::discover::segments(&c.developer).next()?.to_string();
+    let shown = s.fp_home.is_none() && s.fp_studio.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(&name));
+    (!shown).then_some(name)
 }
 
 /// Where a discovery shelf is: never asked yet, its search on its way, its
@@ -2045,6 +2059,7 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     shelves: [Shelf::EMPTY, Shelf::EMPTY],
     fp_home: None,
     fp_studio: None,
+    fp_studio_shelf: false,
     fp_draw: false,
     fp_seed: std::vec::Vec::new(),
     fp_hunt: 0,
@@ -5177,6 +5192,17 @@ fn input_inner(button: &str) -> bool {
                 return true;
             }
         }
+        if let Screen::FpDetails { selection, .. } = screen_snap {
+            // Y: the game's developer, "Du même studio" (`start_fp_developer`).
+            if button == "Y" {
+                let name = LIBRARY.lock().ok().and_then(|s| details_studio(&s, selection));
+                if let Some(name) = name {
+                    crate::sfx::choose(crate::sfx::Sfx::Decide);
+                    start_fp_developer(name);
+                }
+                return true;
+            }
+        }
         if let Screen::FpGallery { .. } = screen_snap {
             // X or Minus = a new search without going back to the IMPORTER home,
             // the keyboard pre-filled with this one so it can be refined.
@@ -5184,7 +5210,7 @@ fn input_inner(button: &str) -> bool {
             // Not while the search is still loading, where Minus cancels it.
             let (loading, failed, shelf_page, studio_page) = LIBRARY
                 .lock()
-                .map(|s| (s.fp_loading, s.fp_error, on_shelf_page(&s), s.fp_studio.is_some() || s.fp_hunt > 0))
+                .map(|s| (s.fp_loading, s.fp_error, on_shelf_page(&s), (s.fp_studio.is_some() && s.fp_studio_shelf) || s.fp_hunt > 0))
                 .unwrap_or((false, false, false, false));
             // A shelf's page ("see all", "see more") starts no search: it is the
             // shelf's games, and B goes back to it (Jonathan, 2026-10-14).
@@ -8846,6 +8872,7 @@ fn start_fp_search(query: &str, origin: Option<usize>) {
     start_fp_query(&url, query, None, origin.map(|row| (row, IMPORTER_SEARCH_ROW)));
     if let Ok(mut s) = LIBRARY.lock() {
         s.fp_typed = query.to_string();
+        s.fp_studio_shelf = false;
         s.fp_hunt = 0;
         s.fp_hunt_sampling = false;
     }
@@ -8861,6 +8888,25 @@ fn start_fp_studio(name: std::string::String, origin_row: usize) {
     let query = name.clone();
     start_fp_query(&url, &query, Some(name), Some((origin_row, origin_row)));
     if let Ok(mut s) = LIBRARY.lock() {
+        s.fp_studio_shelf = true;
+        s.fp_hunt = 0;
+        s.fp_hunt_sampling = false;
+    }
+}
+
+/// "Du même studio" (Y) in a game's details: that developer's games on the
+/// results page (Jonathan, 2026-10-14), found as a search finds them: Flash
+/// games of every library and status, the player's own filter, a new search
+/// with − and X, and ZL+ZR flipping the filter. Not the shelf's family page,
+/// whose ZL+ZR draws another studio.
+fn start_fp_developer(name: std::string::String) {
+    let filter = LIBRARY.lock().map(|s| s.fp_content_filter).unwrap_or(true);
+    log(&std::format!("library: flashpoint developer \"{}\" (async)\n", name));
+    let url = crate::sources::discover::developer_url(&name, filter);
+    let query = name.clone();
+    start_fp_query(&url, &query, Some(name), None);
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.fp_studio_shelf = false;
         s.fp_hunt = 0;
         s.fp_hunt_sampling = false;
     }
@@ -8933,6 +8979,7 @@ fn studio_hunt_next() {
         Some(Some(name)) => {
             start_fp_query(&discover::studio_url(&name, true), u.disc_studio, Some(name), None);
             if let Ok(mut s) = LIBRARY.lock() {
+                s.fp_studio_shelf = true;
                 s.fp_hunt_sampling = false;
             }
         }
@@ -9111,7 +9158,8 @@ fn run_fp_requery(flip_filter: bool) -> bool {
             log(&std::format!("library: flashpoint filter -> {}\n", s.fp_content_filter));
         }
         let draw = s.fp_draw.then(|| s.fp_seed.clone());
-        (s.fp_query.clone(), s.fp_studio.clone(), draw, s.fp_hunt > 0)
+        let studio = s.fp_studio.clone().map(|n| (n, s.fp_studio_shelf, s.fp_content_filter));
+        (s.fp_query.clone(), studio, draw, s.fp_hunt > 0)
     };
     // A studio's page that failed while looking for another studio: it goes
     // on looking.
@@ -9124,9 +9172,16 @@ fn run_fp_requery(flip_filter: bool) -> bool {
         start_fp_draw(games, None, true);
         return true;
     }
-    // A studio's games are asked for again as such, not as a search for its name.
-    if let Some(name) = studio {
-        start_fp_query(&crate::sources::discover::studio_url(&name, true), &query, Some(name), None);
+    // A studio's games are asked for again as such, not as a search for its
+    // name: the shelf's family page, or the developer's from a game's details
+    // with the player's filter.
+    if let Some((name, shelf, filter)) = studio {
+        let url = if shelf {
+            crate::sources::discover::studio_url(&name, true)
+        } else {
+            crate::sources::discover::developer_url(&name, filter)
+        };
+        start_fp_query(&url, &query, Some(name), None);
         return true;
     }
     if query.trim().is_empty() {
@@ -12668,13 +12723,14 @@ fn poll_fp_search() {
             // filter, so the page lists what the shelf drew from.
             // A bigger draw: past the shelves' filter too, the shelf's own
             // games among the results.
-            let (studio, seed) = LIBRARY
+            let (studio, seed, shelf) = LIBRARY
                 .lock()
                 .ok()
-                .map(|s| (s.fp_studio.clone(), s.fp_draw.then(|| s.fp_seed.clone())))
+                .map(|s| (s.fp_studio.clone(), s.fp_draw.then(|| s.fp_seed.clone()), s.fp_studio_shelf))
                 .unwrap_or_default();
             let bytes = match (&studio, &seed) {
-                (Some(name), _) => crate::sources::discover::family_filter(&bytes, Some(name)),
+                (Some(name), _) if shelf => crate::sources::discover::family_filter(&bytes, Some(name)),
+                (Some(name), _) => crate::sources::discover::same_developer(&bytes, name),
                 (None, Some(_)) => crate::sources::discover::family_filter(&bytes, None),
                 _ => bytes,
             };
@@ -13692,6 +13748,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             backend.set_ui_modal_scale(if modal_active { modal_scale } else { 1.0 });
             let snap = LIBRARY.lock().ok().and_then(|s| {
                 let pending = s.fp_size_pending;
+                let studio = details_studio(&s, selection).is_some();
                 s.cover_candidates.get(selection).map(|c| {
                     let name = crate::sources::gamezip::swf_filename(&c.title);
                     (
@@ -13704,10 +13761,11 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                         c.description.clone(),
                         s.entries.iter().any(|e| e.basename == name),
                         pending,
+                        studio,
                     )
                 })
             });
-            if let Some((title, dev, publisher, release, cover, shot, desc, installed, pending)) = snap {
+            if let Some((title, dev, publisher, release, cover, shot, desc, installed, pending, studio)) = snap {
                 backend.draw_library_fp_details(&crate::backend::render::FpDetailsView {
                     title: &title,
                     developer: &dev,
@@ -13718,6 +13776,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     shot_url: &shot,
                     description: &desc,
                     installed,
+                    studio,
                 });
             }
         }
