@@ -42,6 +42,8 @@ The whole interface is redrawn. Every screen uses the console's own fonts, at th
 - The same in game: in the pause's Controls pages, fetching, applying, sharing or deleting a shared profile keeps its loading card turning, where the whole pause stood still for as long as the request took.
 - **Opened from the Album, FlashNX no longer crashes.** It gets only a small part of the console's memory there, too little for the new interface, so it opens on a page that says so, with the FlashNX logo, and offers to install FlashNX on the HOME Menu (its own icon, which always starts it with the full memory). An icon already made with Sphaira is recognised, and the page tells you to use it. Holding R while starting a game still works without installing anything.
 - A bug report carries much more of the game's session: its start (where loading goes wrong), then as much of its end as fits, up to 52 KB instead of 24. The periodic counters come last with only their latest values, and very long lines keep their start and end with the middle cut out.
+- **Blend modes cost a fraction of what they did.** A group drawn in Multiply, Overlay, Add or another blend mode used to copy, clear and redraw the whole screen, whatever its size; it now works on the part of the screen it covers. Dragon City draws 85 of them a frame and went from 6.5 frames a second to about 30, the speed it asks for: it spent 130 ms of every frame waiting on the graphics chip.
+- **The pause stays smooth over a slow game.** It drew the game again under its panel on every frame, so it ran as slowly as the game (Dragon City: 6.7 frames a second). The game is now drawn once and kept, and the pause runs at 60. The Screen page still draws the game live, to show each setting on it.
 
 ### Fixed
 

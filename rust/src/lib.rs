@@ -2687,6 +2687,8 @@ fn render_frame_with_dt(dt: FloatDuration) {
         if let Some((total_us, tick_us, render_us)) = slow_frame {
             backend.log_slow_frame(total_us, tick_us, render_us);
         }
+        // The game runs: the picture a pause kept is of no further use.
+        backend.pause_snapshot_release();
         if let Some(asked) = load_failed() {
             backend.draw_load_failed(&asked);
         }
@@ -2720,8 +2722,31 @@ fn render_frame_with_dt(dt: FloatDuration) {
 /// modal stays frozen but doesn't go black (the back buffer would otherwise
 /// be stale after a swap). Also redraws the cursor overlay so input still
 /// visually responds while paused.
+///
+/// This one draws the game every frame, for the pages that change it live:
+/// ÉCRAN previews each setting on it, the framing mode moves it.
 #[no_mangle]
 pub extern "C" fn ruffle_redraw_paused() {
+    redraw_paused(false);
+}
+
+/// The same, for the pages of the pause that change nothing in the picture:
+/// the main panel, TOUCHES et curseur and the closing slide. The game is drawn
+/// once, kept, and put back every frame after (`pause_snapshot_*`). Every
+/// paused frame used to cost a whole game render, so a heavy game paused as
+/// slowly as it ran: Dragon City's pause at 6.7 fps (2026-10-14).
+#[no_mangle]
+pub extern "C" fn ruffle_redraw_paused_frozen() {
+    redraw_paused(true);
+}
+
+/// Set when the kept picture may no longer be the game's: a fresh pause
+/// (`ruffle_pause_opened`), or a page that draws the game live, whose changes
+/// the next kept picture has to show.
+static PAUSE_SNAP_STALE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+fn redraw_paused(freeze: bool) {
+    use std::sync::atomic::Ordering::Relaxed;
     let state = unsafe {
         match (*core::ptr::addr_of_mut!(STATE)).as_mut() {
             Some(s) => s,
@@ -2732,7 +2757,30 @@ pub extern "C" fn ruffle_redraw_paused() {
         Ok(p) => p,
         Err(_) => return,
     };
-    player.render();
+    let t0 = unsafe { ruffle_tick_now() };
+    let stale = !freeze || PAUSE_SNAP_STALE.swap(false, Relaxed);
+    if !freeze {
+        PAUSE_SNAP_STALE.store(true, Relaxed);
+    }
+    let mut kept = false;
+    if !stale {
+        if let Some(backend) =
+            <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(player.renderer_mut())
+        {
+            kept = backend.pause_snapshot_present();
+        }
+    }
+    if !kept {
+        player.render();
+        if freeze {
+            if let Some(backend) =
+                <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(player.renderer_mut())
+            {
+                backend.pause_snapshot_capture();
+            }
+        }
+    }
+    pause_stats_note(t0, unsafe { ruffle_tick_now() }, kept);
     let cx = state.cursor_x;
     let cy = state.cursor_y;
     let clicked = state.cursor_clicked;
@@ -2767,6 +2815,61 @@ pub extern "C" fn ruffle_redraw_paused() {
             backend.draw_fps_overlay(true);
         }
     }
+}
+
+/// The pause's own frame rate, which no other line gives: a paused frame runs
+/// no tick, so the heartbeat reads `tick=0ms render=0ms`, and a kept picture
+/// skips `submit_frame`, so no heartbeat fires at all. One line every 60
+/// paused frames: the frame period (redraw to redraw, so the panel and the
+/// swap are in it), how many of them drew the game, and what the redraw cost.
+fn pause_stats_note(t0: u64, t1: u64, kept: bool) {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    static N: AtomicU64 = AtomicU64::new(0);
+    static PERIOD_SUM: AtomicU64 = AtomicU64::new(0);
+    static PERIOD_MAX: AtomicU64 = AtomicU64::new(0);
+    static DRAW_SUM: AtomicU64 = AtomicU64::new(0);
+    static KEPT: AtomicU64 = AtomicU64::new(0);
+    let freq = unsafe { ruffle_tick_freq() };
+    if freq == 0 {
+        return;
+    }
+    let last = LAST.swap(t0, Relaxed);
+    let period = t0.saturating_sub(last);
+    // The first paused frame, or the first after the game ran again: no
+    // period to measure (a second without a paused frame means it ran).
+    if last == 0 || period > freq {
+        return;
+    }
+    let n = N.fetch_add(1, Relaxed) + 1;
+    PERIOD_SUM.fetch_add(period, Relaxed);
+    PERIOD_MAX.fetch_max(period, Relaxed);
+    DRAW_SUM.fetch_add(t1.saturating_sub(t0), Relaxed);
+    KEPT.fetch_add(kept as u64, Relaxed);
+    if n < 60 {
+        return;
+    }
+    let us = |t: u64| t.saturating_mul(1_000_000) / freq;
+    let period_us = us(PERIOD_SUM.swap(0, Relaxed)) / n;
+    let max_us = us(PERIOD_MAX.swap(0, Relaxed));
+    let draw_us = us(DRAW_SUM.swap(0, Relaxed)) / n;
+    let kept_n = KEPT.swap(0, Relaxed);
+    N.store(0, Relaxed);
+    let fps_x10 = if period_us > 0 { 10_000_000 / period_us } else { 0 };
+    log_str(&std::format!(
+        "pause: {} frames at {}.{} fps (frame {}.{} ms, worst {}.{} ms), game drawn {} times, picture kept {}, redraw {}.{} ms\n",
+        n,
+        fps_x10 / 10,
+        fps_x10 % 10,
+        period_us / 1000,
+        (period_us % 1000) / 100,
+        max_us / 1000,
+        (max_us % 1000) / 100,
+        n - kept_n,
+        kept_n,
+        draw_us / 1000,
+        (draw_us % 1000) / 100,
+    ));
 }
 
 /// Frame of the last pause draw, of ANY of its panels.
@@ -2834,10 +2937,12 @@ pub extern "C" fn ruffle_draw_menu(selected: c_int) {
         // frames" at 60 fps. On a game slow enough that ONE frame exceeds 125 ms
         // (Dragon City sits near 6 fps = ~166 ms), every continuation frame looked
         // like a fresh open, so the pop restarted forever and the panel stayed
-        // pinned at MODAL_OPEN_FROM. The counter advances once per paused redraw
-        // (`ruffle_redraw_paused` -> `player.render()` -> `submit_frame`), so this
-        // is frame-rate independent, and it also covers reopening after TOUCHES or
-        // after a close drain, which take different C++ paths.
+        // pinned at MODAL_OPEN_FROM. The counter advances once per game render
+        // (`player.render()` -> `submit_frame`), so this is frame-rate
+        // independent, and it also covers reopening after TOUCHES or after a
+        // close drain, which take different C++ paths. A paused frame that puts
+        // the kept picture back (`ruffle_redraw_paused_frozen`) does not advance
+        // it, which reads as the same pause going on: it is.
         let now = unsafe { ruffle_tick_now() };
         if pause_frame_mark(backend) {
             // A fresh pause: the panel slides in alone, no sub-panel to fold
@@ -3184,6 +3289,8 @@ pub extern "C" fn ruffle_value_arm(kind: c_int, row: c_int) -> c_int {
 /// drawing side holds the player's, and putting a scaling mode back takes it.
 #[no_mangle]
 pub extern "C" fn ruffle_pause_opened() {
+    // The game ran since the last pause: whatever picture that one kept is old.
+    PAUSE_SNAP_STALE.store(true, std::sync::atomic::Ordering::Relaxed);
     pause_values::pause_opened();
     // No press carried over from a page the last pause left half touched.
     backend::render::row_touch_cancel();
@@ -3510,7 +3617,7 @@ fn pause_wait_frame() {
         unsafe { svcSleepThread(4_000_000) };
         return;
     }
-    ruffle_redraw_paused();
+    ruffle_redraw_paused_frozen();
     ruffle_touches_draw();
     unsafe { gl_context_swap() };
     PAUSE_WAITING.store(false, Ordering::Relaxed);

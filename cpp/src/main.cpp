@@ -80,6 +80,10 @@ extern "C" void ruffle_handle_mouse_move(int x, int y);
 extern "C" void ruffle_handle_mouse_button(bool down);
 extern "C" void ruffle_handle_mouse_right(bool down);
 extern "C" void ruffle_redraw_paused(void);
+// The same for the pause pages that change nothing in the picture (the main
+// panel, TOUCHES, the closing slide): the game is drawn once and kept. ECRAN and
+// the framing mode keep `ruffle_redraw_paused`, which shows their changes live.
+extern "C" void ruffle_redraw_paused_frozen(void);
 // Hide an interval of wall clock from the movie (#87). Frames only advance on
 // the dt we hand to ruffle_render_frame_dt, but getTimer() reads the real
 // clock, so a pause the player never simulated comes back as a jump for any
@@ -1650,7 +1654,7 @@ static void worker_entry(void* arg) {
                 // Presses made now reach the game once it resumes.
                 close_drain = (close_drain | kDown) & ~kUp;
                 close_drain2 = (close_drain2 | kDown2) & ~kUp2;
-                ruffle_redraw_paused();
+                ruffle_redraw_paused_frozen();
                 if (ruffle_draw_menu_closing(menu_selection)) {
                     menu_open = false;
                     menu_closing = false;
@@ -1721,7 +1725,7 @@ static void worker_entry(void* arg) {
                         cursor_speed_for_game();
                     }
                 }
-                ruffle_redraw_paused();
+                ruffle_redraw_paused_frozen();
                 // The input above may have CLOSED the sub-menu (B). If so, drawing
                 // ruffle_touches_draw() now would draw nothing over the game — the
                 // dim vanishes for one frame and the bright game flashes through.
@@ -2257,10 +2261,10 @@ static void worker_entry(void* arg) {
                 }
             }
 
-            // Re-render the frozen game frame + cursor, then layer the menu
+            // Put the frozen game frame back + cursor, then layer the menu
             // on top, then swap. Skipping ruffle_render_frame_dt freezes AVM
             // so the game doesn't advance.
-            ruffle_redraw_paused();
+            ruffle_redraw_paused_frozen();
             ruffle_draw_menu(menu_selection);
             gl_context_swap();
             continue;

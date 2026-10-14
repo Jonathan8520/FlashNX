@@ -41,7 +41,7 @@ use ruffle_render::bitmap::{
     Bitmap, BitmapFormat, BitmapHandle, BitmapHandleImpl, BitmapSource, PixelRegion, PixelSnapping,
     RgbaBufRead, SyncHandle,
 };
-use ruffle_render::commands::{CommandHandler, CommandList, RenderBlendMode};
+use ruffle_render::commands::{Command, CommandHandler, CommandList, RenderBlendMode};
 use ruffle_render::error::Error;
 use ruffle_render::filters::{DisplacementMapFilter, DisplacementMapFilterMode, Filter};
 use ruffle_render::matrix::Matrix;
@@ -2115,6 +2115,18 @@ static BLEND_N_TRIVIAL_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 static BLEND_N_TRIVIAL_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static BLEND_N_COMPLEX_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static BLEND_N_COMPLEX_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+// Blends held to the group's own box (`blend_region`, 2026-10-14): how many
+// were, how many were skipped because the group drew nothing on screen, and
+// the pixels the copy and the composite went over against what the whole
+// screen would have cost. Same CUR/FRAME swap as the counters above.
+static BLEND_RECT_N_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BLEND_RECT_N_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BLEND_SKIP_N_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BLEND_SKIP_N_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BLEND_PX_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BLEND_PX_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BLEND_PX_FULL_CUR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static BLEND_PX_FULL_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Render-target rebinds this frame (2026-08-24). A glow chain costs 6 of these
 /// to draw 5 half-res quads, and the measured 105 ms at 23 chains works out to
@@ -2896,6 +2908,11 @@ impl Drop for GpuDraw {
 struct GpuShape {
     draws: Vec<GpuDraw>,
     gradient_textures: Vec<GLuint>,
+    /// The shape's own box in pixels, strokes included (`shape_bounds`):
+    /// x_min, y_min, x_max, y_max. None for a shape with no valid box. It is
+    /// what lets a blend be held to the part of the screen its group covers
+    /// (`blend_region`), as ruffle#23528 does in the wgpu renderer.
+    bounds: Option<[f32; 4]>,
 }
 
 impl Drop for GpuShape {
@@ -3452,6 +3469,20 @@ pub struct SwitchRenderBackend {
     /// temp — the temp render detaches the colour attachment, so without this we
     /// couldn't composite the blended group back onto the enclosing offscreen.
     offscreen_target_tex: Option<GLuint>,
+    /// Blends hold their copy, clear and composite to the box their group
+    /// covers (`blend_region`). `blendrect.off` turns that off, to compare.
+    blend_rect_on: bool,
+    /// The one rectangle the next `render_commands_to_texture` clears (x, y,
+    /// w, h in the target's own pixels), taken by that call. Set by a blend
+    /// held to its box: the rest of its temp is never read.
+    offscreen_clear_rect: Option<(i32, i32, i32, i32)>,
+    /// The pause keeps the game's picture instead of drawing it again every
+    /// frame (`pause_snapshot_*`). `pausefreeze.off` turns that off.
+    pause_freeze_on: bool,
+    /// That picture, at the screen's size, and the framebuffer it is read
+    /// through to put it back. Freed as soon as the game runs again.
+    pause_snap: Option<StandaloneTexture>,
+    pause_snap_fbo: GLuint,
     /// Global pixel translation folded into `world_matrix` for the LIBRARY UI
     /// only (v1.2.0 polish). Lets `library::render` slide a whole screen's
     /// content for tab transitions / modal pops without every draw call knowing
@@ -5349,6 +5380,106 @@ fn as_dropped_bitmap(handle: &BitmapHandle) -> Option<&DroppedBitmap> {
 
 fn as_reloadable_bitmap(handle: &BitmapHandle) -> Option<&ReloadableBitmap> {
     <dyn Any>::downcast_ref(&*handle.0)
+}
+
+// ─── Blend boxes ──────────────────────────────────────────────────────────────
+//
+// A blend copied the whole screen, cleared a whole-screen temp and composited
+// a whole-screen quad, whatever the size of its group: three passes over
+// 1280x720 for a shadow a hundred pixels wide. Dragon City runs 85 Multiply
+// groups a frame and spent ~130 ms of its ~148 ms frames there, on the GPU
+// (2026-10-14: render took whatever the tick left of a constant 148 ms, at
+// gpu=307MHz). The wgpu renderer has the same design upstream, and
+// ruffle#23528 (open) holds each blend to the box its commands cover; the box
+// computation below is its `command_aabb`. The passes are scissored to that
+// box rather than run on a box-sized texture: the temps keep the screen's
+// size, so no sampling coordinate changes and the shaders are untouched.
+
+/// Margin around a blend's box, in pixels: antialiased edges, hairlines and
+/// miter tips can reach a little past a shape's own bounds.
+const BLEND_REGION_PAD: f32 = 4.0;
+
+/// Grow `acc` by the box of the rectangle (x0, y0)-(x1, y1) placed by `m`, in
+/// stage pixels. False on a transform that is not finite.
+fn bounds_add_quad(acc: &mut Option<[f32; 4]>, m: &Matrix, x0: f32, y0: f32, x1: f32, y1: f32) -> bool {
+    let tx = m.tx.to_pixels() as f32;
+    let ty = m.ty.to_pixels() as f32;
+    let mut b = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
+    for (x, y) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)] {
+        let px = m.a * x + m.c * y + tx;
+        let py = m.b * x + m.d * y + ty;
+        if !px.is_finite() || !py.is_finite() {
+            return false;
+        }
+        b = [b[0].min(px), b[1].min(py), b[2].max(px), b[3].max(py)];
+    }
+    *acc = Some(match *acc {
+        None => b,
+        Some(a) => [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])],
+    });
+    true
+}
+
+/// The box, in stage pixels, of everything `cmds` draws, grown into `acc`
+/// (left None when they draw nothing). False when one of them cannot be
+/// bounded: the blend then covers the whole screen, as before.
+///
+/// ruffle#23528 gives up on masks and on nested blends. Here a mask marker
+/// adds nothing, since a mask only ever takes pixels away and its shapes are
+/// commands of their own, and nested blends and alpha masks are walked.
+fn commands_bounds(cmds: &[Command], acc: &mut Option<[f32; 4]>) -> bool {
+    for cmd in cmds {
+        let ok = match cmd {
+            Command::RenderBitmap { bitmap, transform, pixel_snapping, .. } => {
+                let (w, h) = if as_dropped_bitmap(bitmap).is_some() {
+                    // `render_bitmap` draws nothing for it.
+                    continue;
+                } else if let Some(s) = as_standalone_bitmap(bitmap) {
+                    (s.0.width, s.0.height)
+                } else if let Some(s) = as_switch_bitmap(bitmap) {
+                    (s.width, s.height)
+                } else {
+                    return false;
+                };
+                let mut m = transform.matrix;
+                pixel_snapping.apply(&mut m);
+                bounds_add_quad(acc, &m, 0.0, 0.0, w as f32, h as f32)
+            }
+            // `render_stage3d` flips the quad within the same box.
+            Command::RenderStage3D { bitmap, transform } => match as_standalone_bitmap(bitmap) {
+                Some(s) => bounds_add_quad(acc, &transform.matrix, 0.0, 0.0, s.0.width as f32, s.0.height as f32),
+                None => return false,
+            },
+            Command::RenderShape { shape, transform } => match as_switch_shape(shape).and_then(|s| s.0.bounds) {
+                Some([x0, y0, x1, y1]) => bounds_add_quad(acc, &transform.matrix, x0, y0, x1, y1),
+                None => return false,
+            },
+            Command::RenderAlphaMask { maskee_commands, mask_commands } => {
+                commands_bounds(&maskee_commands.commands, acc) && commands_bounds(&mask_commands.commands, acc)
+            }
+            Command::DrawRect { matrix, .. }
+            | Command::DrawLine { matrix, .. }
+            | Command::DrawLineRect { matrix, .. } => bounds_add_quad(acc, matrix, 0.0, 0.0, 1.0, 1.0),
+            Command::PushMask | Command::ActivateMask | Command::DeactivateMask | Command::PopMask => true,
+            Command::Blend(list, _) => commands_bounds(&list.commands, acc),
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
+/// What a top-level blend's passes have to cover.
+#[derive(Clone, Copy)]
+enum BlendRegion {
+    /// The whole target, as before.
+    Full,
+    /// Nothing on screen: the group draws nothing there, so the blend changes
+    /// no pixel (its composite keeps the backdrop wherever the group is clear).
+    Empty,
+    /// This box of the target, x, y, w, h in pixels from the top left.
+    Rect(i32, i32, i32, i32),
 }
 
 /// Cached cover texture for a library game (v1.2.0 JOUER grid). Looked up by
@@ -7353,6 +7484,13 @@ impl SwitchRenderBackend {
             unsafe { flashnx_boc_set(0) };
             log(b"bocache: bocache.off present -> libdrm buffer-object cache DISABLED\n\0");
         }
+        // The two experiment switches of 2026-10-14, same convention.
+        if marker_present("blendrect.off") {
+            log(b"blend: blendrect.off present -> blends copy and composite the whole screen\n\0");
+        }
+        if marker_present("pausefreeze.off") {
+            log(b"pause: pausefreeze.off present -> the pause draws the game again every frame\n\0");
+        }
         LIVE_GPU_DRAWS.store(0, Ordering::Relaxed);
         LIVE_GPU_SHAPES.store(0, Ordering::Relaxed);
 
@@ -7591,6 +7729,11 @@ impl SwitchRenderBackend {
             shape_vao,
             offscreen_dims: None,
             offscreen_target_tex: None,
+            blend_rect_on: !marker_present("blendrect.off"),
+            offscreen_clear_rect: None,
+            pause_freeze_on: !marker_present("pausefreeze.off"),
+            pause_snap: None,
+            pause_snap_fbo: 0,
             ui_translate_x: 0.0,
             ui_translate_y: 0.0,
             clip_outer: None,
@@ -7768,6 +7911,8 @@ impl SwitchRenderBackend {
         commands: CommandList,
         clear: Option<Color>,
     ) -> bool {
+        // Taken first, so no render nested inside this one sees it.
+        let clear_rect = self.offscreen_clear_rect.take();
         if self.offscreen_fbo == 0 {
             unsafe {
                 let mut fbo: GLuint = 0;
@@ -7814,6 +7959,14 @@ impl SwitchRenderBackend {
             if scissor_was_on {
                 glDisable(GL_SCISSOR_TEST);
             }
+            // A blend held to its box clears only that box: nothing outside it
+            // is drawn here or read back (`blend_region`). Never over a scissor
+            // already in force, whose box this would overwrite.
+            let clear_rect = clear_rect.filter(|_| !scissor_was_on);
+            if let Some((x, y, w, h)) = clear_rect {
+                glEnable(GL_SCISSOR_TEST);
+                glScissor(x, y, w, h);
+            }
             // `Some(color)` = fresh target (clear to color). `None` = composite
             // mode: the temp was pre-seeded with the BitmapData's existing
             // content (render_offscreen's FreshWithTexture semantics), so keep
@@ -7828,6 +7981,9 @@ impl SwitchRenderBackend {
                 glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
             } else {
                 glClear(GL_STENCIL_BUFFER_BIT);
+            }
+            if clear_rect.is_some() {
+                glDisable(GL_SCISSOR_TEST);
             }
             if scissor_was_on {
                 glEnable(GL_SCISSOR_TEST);
@@ -9023,6 +9179,66 @@ impl SwitchRenderBackend {
         ok
     }
 
+    /// The part of the target a blend at the top level has to go over (see
+    /// "Blend boxes"). Only where stage pixels ARE target pixels: the screen,
+    /// unturned and unzoomed, with no interface transform. Never under a
+    /// scissor already in force (Stage3D), whose box ours would replace.
+    fn blend_region(&self, commands: &CommandList, w: u32, h: u32) -> BlendRegion {
+        if !self.blend_rect_on
+            || self.offscreen_dims.is_some()
+            || w == 0
+            || h == 0
+            || game_rotation() != 0
+            || (self.game_layer && game_zoom_percent() != 100)
+            || self.ui_scale != 1.0
+            || self.ui_translate_x != 0.0
+            || self.ui_translate_y != 0.0
+            || unsafe { glIsEnabled(GL_SCISSOR_TEST) } == GL_TRUE
+        {
+            return BlendRegion::Full;
+        }
+        let mut acc = None;
+        if !commands_bounds(&commands.commands, &mut acc) {
+            return BlendRegion::Full;
+        }
+        let Some([bx0, by0, bx1, by1]) = acc else {
+            return BlendRegion::Empty;
+        };
+        let x0 = (bx0 - BLEND_REGION_PAD).floor().max(0.0);
+        let y0 = (by0 - BLEND_REGION_PAD).floor().max(0.0);
+        let x1 = (bx1 + BLEND_REGION_PAD).ceil().min(w as f32);
+        let y1 = (by1 + BLEND_REGION_PAD).ceil().min(h as f32);
+        if x0 >= x1 || y0 >= y1 {
+            return BlendRegion::Empty;
+        }
+        let (rw, rh) = (x1 - x0, y1 - y0);
+        // Most of the screen anyway: a scissor would save next to nothing.
+        if rw * rh >= 0.9 * w as f32 * h as f32 {
+            return BlendRegion::Full;
+        }
+        BlendRegion::Rect(x0 as i32, y0 as i32, rw as i32, rh as i32)
+    }
+
+    /// Count a top-level blend for the SLOW line: how much of the screen its
+    /// passes went over.
+    fn note_blend_region(region: BlendRegion, w: u32, h: u32) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let full = w as u64 * h as u64;
+        BLEND_PX_FULL_CUR.fetch_add(full, Relaxed);
+        match region {
+            BlendRegion::Full => {
+                BLEND_PX_CUR.fetch_add(full, Relaxed);
+            }
+            BlendRegion::Empty => {
+                BLEND_SKIP_N_CUR.fetch_add(1, Relaxed);
+            }
+            BlendRegion::Rect(_, _, rw, rh) => {
+                BLEND_RECT_N_CUR.fetch_add(1, Relaxed);
+                BLEND_PX_CUR.fetch_add(rw as u64 * rh as u64, Relaxed);
+            }
+        }
+    }
+
     /// Run a complex blend (multiply/overlay/…) straight onto the current
     /// target: a full-screen quad samples the backdrop snapshot (`parent_tex`,
     /// unit 0) and the freshly-rendered blend group (`current_tex`, unit 1),
@@ -9572,6 +9788,17 @@ impl SwitchRenderBackend {
         let blend_n_triv = BLEND_N_TRIVIAL_FRAME.load(std::sync::atomic::Ordering::Relaxed);
         let blend_n_cx = BLEND_N_COMPLEX_FRAME.load(std::sync::atomic::Ordering::Relaxed);
         let blend_pct = if render_us > 0 { blend_us.saturating_mul(100) / render_us } else { 0 };
+        // Blends held to their box: how many, how many skipped (nothing on
+        // screen), and the share of the whole-screen pixels their passes still
+        // went over (100 = no saving, the state before 2026-10-14).
+        let blend_rect_n = BLEND_RECT_N_FRAME.load(std::sync::atomic::Ordering::Relaxed);
+        let blend_skip_n = BLEND_SKIP_N_FRAME.load(std::sync::atomic::Ordering::Relaxed);
+        let blend_px_full = BLEND_PX_FULL_FRAME.load(std::sync::atomic::Ordering::Relaxed);
+        let blend_px_pct = if blend_px_full > 0 {
+            BLEND_PX_FRAME.load(std::sync::atomic::Ordering::Relaxed).saturating_mul(100) / blend_px_full
+        } else {
+            0
+        };
         // Periodic-spike probes (2026-08-24). `swf=` is how many SWF frames the
         // tick actually ran: 1 means the game is in slow motion, 5 means a
         // catch-up burst. `gc=` is where the collector stopped (SLEEP/MARK/
@@ -9631,7 +9858,7 @@ impl SwitchRenderBackend {
         let prev_swap_us = to_us(unsafe { flashnx_prev_swap_ticks() });
         let prev_period_us = to_us(unsafe { flashnx_prev_period_ticks() });
         let msg = std::format!(
-            "SLOW f{} {}us (tick {}us render {}us) swf={} gc={} gcUs={} gcMB={} alloc={}/{}us({}%sm) free={}/{}us heap={}%  rtBind={} cacheUs={}us rtbindUs={}us contentUs={}us filtUs={}us mktex={}/{}us budget={} primOffs={}us primBmp={}us primRes={}us dc={} offs={} filt={}({}chains) resolve={} bmpUp={} shpReg={} blend={} pmask={} mdraw={} cacheEnt={} | offN={} offPix={} alloc={}us render={}us readback={}us upload={}us | blendUs={} ({}% of render) blendTriv={} blendCx={} | make={}/{}us del={}/{}us bf={}us evict={} stTex={} pool={} prevSwapUs={} prevPeriodUs={} | boNew={}/{}us boHit={} boZeroUs={} boDel={}/{}us boKept={} boEvict={} boBusy={} boIpc={} boFail={} boRetryOk={} boc={}/{}KB boBig={}/{}us/{}KB boOther={} boSlack={} ab={} | avm1={}/{}us/{}us mcref={} {}/{}/{}us\n",
+            "SLOW f{} {}us (tick {}us render {}us) swf={} gc={} gcUs={} gcMB={} alloc={}/{}us({}%sm) free={}/{}us heap={}%  rtBind={} cacheUs={}us rtbindUs={}us contentUs={}us filtUs={}us mktex={}/{}us budget={} primOffs={}us primBmp={}us primRes={}us dc={} offs={} filt={}({}chains) resolve={} bmpUp={} shpReg={} blend={} pmask={} mdraw={} cacheEnt={} | offN={} offPix={} alloc={}us render={}us readback={}us upload={}us | blendUs={} ({}% of render) blendTriv={} blendCx={} blendRect={} blendSkip={} blendPx={}% | make={}/{}us del={}/{}us bf={}us evict={} stTex={} pool={} prevSwapUs={} prevPeriodUs={} | boNew={}/{}us boHit={} boZeroUs={} boDel={}/{}us boKept={} boEvict={} boBusy={} boIpc={} boFail={} boRetryOk={} boc={}/{}KB boBig={}/{}us/{}KB boOther={} boSlack={} ab={} | avm1={}/{}us/{}us mcref={} {}/{}/{}us\n",
             self.frame_count,
             total_us, tick_us, render_us,
             swf_frames, gc_name, gc_us, gc_alloc / (1024 * 1024), d_alloc, alloc_us, small_pct, d_free, free_us, heap_pct, rt_binds,
@@ -9641,7 +9868,7 @@ impl SwitchRenderBackend {
             fb.resolve, fb.bmp_uploads, fb.shape_regs,
             fb.blend, fb.pushmask, fb.masked_draw, fb.cache_entries,
             off_n, off_pix, off_alloc, off_render, off_readback, off_upload,
-            blend_us, blend_pct, blend_n_triv, blend_n_cx,
+            blend_us, blend_pct, blend_n_triv, blend_n_cx, blend_rect_n, blend_skip_n, blend_px_pct,
             make_n, make_us, del_n, del_us, bf_us, evict_n,
             st_live, self.filter_tex_pool.len(), prev_swap_us, prev_period_us,
             b[BOC_NEW_N], to_us(b[BOC_NEW_T]), b[BOC_HIT], to_us(b[BOC_ZERO_T]),
@@ -11828,6 +12055,98 @@ impl SwitchRenderBackend {
     /// a fresh open from a continuation (see `ruffle_draw_menu`).
     pub fn frame_count(&self) -> u32 {
         self.frame_count
+    }
+
+    /// Keep what the screen holds now, the game just drawn and nothing laid
+    /// over it yet, so the pause can put it back (`pause_snapshot_present`)
+    /// instead of drawing the game again every frame. A paused frame cost a
+    /// whole game render: 150 ms on Dragon City, whose pause ran at 6.7 fps.
+    /// RetroArch does the same under its menu (`video_driver_cached_frame`
+    /// shows the last frame again, the core does not run).
+    pub fn pause_snapshot_capture(&mut self) {
+        if !self.pause_freeze_on {
+            return;
+        }
+        let (w, h) = self.physical_dims();
+        if w == 0 || h == 0 {
+            return;
+        }
+        if self.pause_snap.as_ref().map(|t| (t.width, t.height)) != Some((w, h)) {
+            self.pause_snap = None;
+            self.pause_snap = make_standalone_texture(w, h);
+        }
+        let Some(tex) = self.pause_snap.as_ref().map(|t| t.texture) else {
+            return;
+        };
+        unsafe {
+            // The screen: `submit_frame` ends there, the filter resolved.
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, w as GLsizei, h as GLsizei);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        }
+        self.gl_state.invalidate();
+    }
+
+    /// Put the kept picture back on the screen, pixel for pixel. False when
+    /// there is none at the screen's current size (the console was docked
+    /// meanwhile, or the texture could not be made): the caller then draws the
+    /// game, as before.
+    pub fn pause_snapshot_present(&mut self) -> bool {
+        if !self.pause_freeze_on {
+            return false;
+        }
+        let (w, h) = self.physical_dims();
+        let Some(tex) = self
+            .pause_snap
+            .as_ref()
+            .filter(|t| (t.width, t.height) == (w, h))
+            .map(|t| t.texture)
+        else {
+            return false;
+        };
+        unsafe {
+            if self.pause_snap_fbo == 0 {
+                let mut fbo: GLuint = 0;
+                glGenFramebuffers(1, &mut fbo);
+                if fbo == 0 {
+                    return false;
+                }
+                self.pause_snap_fbo = fbo;
+            }
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, self.pause_snap_fbo);
+            glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+            // A blit is clipped by the scissor and by nothing else.
+            let scissor_was_on = glIsEnabled(GL_SCISSOR_TEST) == GL_TRUE;
+            if scissor_was_on {
+                glDisable(GL_SCISSOR_TEST);
+            }
+            glBlitFramebuffer(
+                0, 0, w as GLint, h as GLint,
+                0, 0, w as GLint, h as GLint,
+                GL_COLOR_BUFFER_BIT, GL_NEAREST,
+            );
+            if scissor_was_on {
+                glEnable(GL_SCISSOR_TEST);
+            }
+            // Let go of the texture while the framebuffer is still bound: GL
+            // detaches a deleted texture only from a BOUND framebuffer, and one
+            // left attached here would keep its 3.5 MB alive after the release.
+            glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        }
+        self.gl_state.invalidate();
+        true
+    }
+
+    /// The game runs again: give the kept picture's memory back (3.5 MB in
+    /// handheld, 8 MB docked).
+    pub fn pause_snapshot_release(&mut self) {
+        if self.pause_snap.is_some() {
+            self.pause_snap = None;
+        }
     }
 
     /// The in-game sheet's open/close movement, driven by the same timeline as
@@ -14613,6 +14932,15 @@ impl RenderBackend for SwitchRenderBackend {
         shape: DistilledShape,
         bitmap_source: &dyn BitmapSource,
     ) -> ShapeHandle {
+        let sb = &shape.shape_bounds;
+        let bounds = (sb.x_min <= sb.x_max && sb.y_min <= sb.y_max).then(|| {
+            [
+                sb.x_min.to_pixels() as f32,
+                sb.y_min.to_pixels() as f32,
+                sb.x_max.to_pixels() as f32,
+                sb.y_max.to_pixels() as f32,
+            ]
+        });
         let mesh = self.tessellator.tessellate_shape(shape, bitmap_source);
 
         // Bake gradient textures first so per-draw can reference them.
@@ -14744,6 +15072,7 @@ impl RenderBackend for SwitchRenderBackend {
         ShapeHandle(Arc::new(SwitchShapeHandle(Arc::new(GpuShape {
             draws,
             gradient_textures,
+            bounds,
         }))))
     }
 
@@ -15937,6 +16266,14 @@ impl RenderBackend for SwitchRenderBackend {
             .store(BLEND_N_TRIVIAL_CUR.swap(0, AtomOrd::Relaxed), AtomOrd::Relaxed);
         BLEND_N_COMPLEX_FRAME
             .store(BLEND_N_COMPLEX_CUR.swap(0, AtomOrd::Relaxed), AtomOrd::Relaxed);
+        for (cur, frame) in [
+            (&BLEND_RECT_N_CUR, &BLEND_RECT_N_FRAME),
+            (&BLEND_SKIP_N_CUR, &BLEND_SKIP_N_FRAME),
+            (&BLEND_PX_CUR, &BLEND_PX_FRAME),
+            (&BLEND_PX_FULL_CUR, &BLEND_PX_FULL_FRAME),
+        ] {
+            frame.store(cur.swap(0, AtomOrd::Relaxed), AtomOrd::Relaxed);
+        }
         RT_BIND_FRAME.store(RT_BIND_CUR.swap(0, AtomOrd::Relaxed), AtomOrd::Relaxed);
         // Texture traffic of the whole frame, from the tick's GC drops to the
         // main command list above.
@@ -16819,9 +17156,26 @@ impl CommandHandler for SwitchRenderBackend {
                 // (BitmapData.draw / cache entry). Captured BEFORE the temp
                 // render below, which temporarily repoints these.
                 let outer_target = self.offscreen_target_tex;
+                // At the top level, only the group's own box (see "Blend
+                // boxes"); nested, `blend_region` always answers Full.
+                let region = self.blend_region(&commands, w, h);
+                if outer_target.is_none() {
+                    Self::note_blend_region(region, w, h);
+                }
+                if let BlendRegion::Empty = region {
+                    return;
+                }
                 let Some(temp) = (if w == 0 || h == 0 { None } else { self.filter_tex_pool.acquire(w, h) }) else {
                     commands.execute(self);
                     return;
+                };
+                // The temp is row 0 = top, the screen row 0 = bottom.
+                let scissor = match region {
+                    BlendRegion::Rect(x, y, rw, rh) => {
+                        self.offscreen_clear_rect = Some((x, y, rw, rh));
+                        Some((x, h as i32 - y - rh, rw, rh))
+                    }
+                    _ => None,
                 };
                 let transparent = Color { r: 0, g: 0, b: 0, a: 0 };
                 if self.render_commands_to_texture(temp.texture, w, h, commands, Some(transparent)) {
@@ -16839,6 +17193,12 @@ impl CommandHandler for SwitchRenderBackend {
                         }
                     }
                     let m = mode;
+                    if let Some((x, y, rw, rh)) = scissor {
+                        unsafe {
+                            glEnable(GL_SCISSOR_TEST);
+                            glScissor(x, y, rw, rh);
+                        }
+                    }
                     self.draw_fullscreen_texture(temp.texture, w, h, move || unsafe {
                         // Premultiplied group temp. Alpha channel always uses
                         // "over"; RGB uses the mode-specific factors/equation.
@@ -16858,6 +17218,9 @@ impl CommandHandler for SwitchRenderBackend {
                             }
                         }
                     });
+                    if scissor.is_some() {
+                        unsafe { glDisable(GL_SCISSOR_TEST) };
+                    }
                     // Nested: draw_fullscreen_texture reset the blend to the
                     // main-pass over-blend. Restore the offscreen accumulation
                     // blend (set by render_commands_to_texture) so the enclosing
@@ -16895,6 +17258,13 @@ impl CommandHandler for SwitchRenderBackend {
         BLEND_N_COMPLEX_CUR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (w, h) = self.current_target_dims();
         let flip = if self.offscreen_dims.is_some() { 0.0 } else { 1.0 };
+        // Only the group's own box (see "Blend boxes"): the backdrop copy, the
+        // temp's clear and the composite all go over that box alone.
+        let region = self.blend_region(&commands, w, h);
+        Self::note_blend_region(region, w, h);
+        if let BlendRegion::Empty = region {
+            return;
+        }
         let parent = if w == 0 || h == 0 { None } else { self.filter_tex_pool.acquire(w, h) };
         let current = if w == 0 || h == 0 { None } else { self.filter_tex_pool.acquire(w, h) };
         let (parent, current) = match (parent, current) {
@@ -16910,10 +17280,24 @@ impl CommandHandler for SwitchRenderBackend {
         // sampled straight regardless of target Y orientation). Reads from the
         // currently-bound framebuffer (the main FB here) into the texture bound
         // on the active unit, so pin the active unit to 0 first.
+        //
+        // Held to a box, the copy lands at the same place in `parent`, so the
+        // composite samples it exactly as before. The screen counts rows from
+        // the bottom, the group's temp from the top.
+        let scissor = match region {
+            BlendRegion::Rect(x, y, rw, rh) => {
+                self.offscreen_clear_rect = Some((x, y, rw, rh));
+                Some((x, h as i32 - y - rh, rw, rh))
+            }
+            _ => None,
+        };
         unsafe {
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, parent.texture);
-            glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, w as GLsizei, h as GLsizei);
+            match scissor {
+                Some((x, y, rw, rh)) => glCopyTexSubImage2D(GL_TEXTURE_2D, 0, x, y, x, y, rw, rh),
+                None => glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, w as GLsizei, h as GLsizei),
+            }
             glBindTexture(GL_TEXTURE_2D, 0);
         }
         let transparent = Color { r: 0, g: 0, b: 0, a: 0 };
@@ -16923,7 +17307,16 @@ impl CommandHandler for SwitchRenderBackend {
             // 8 paints the group's alpha in red (see the flags above).
             // 7 falls through the shader's `return s;` = a plain Normal composite.
             let m = if FORCE_NORMAL_COMPLEX_BLEND { 7 } else { complex_mode };
+            if let Some((x, y, rw, rh)) = scissor {
+                unsafe {
+                    glEnable(GL_SCISSOR_TEST);
+                    glScissor(x, y, rw, rh);
+                }
+            }
             self.composite_complex_to_current(parent.texture, current.texture, w, h, m, flip);
+            if scissor.is_some() {
+                unsafe { glDisable(GL_SCISSOR_TEST) };
+            }
         }
         self.filter_tex_pool.release(parent);
         self.filter_tex_pool.release(current);
@@ -16952,6 +17345,9 @@ impl Drop for SwitchRenderBackend {
             }
             if self.filter_fbo != 0 {
                 glDeleteFramebuffers(1, &self.filter_fbo);
+            }
+            if self.pause_snap_fbo != 0 {
+                glDeleteFramebuffers(1, &self.pause_snap_fbo);
             }
             if self.offscreen_depth_stencil != 0 {
                 glDeleteRenderbuffers(1, &self.offscreen_depth_stencil);

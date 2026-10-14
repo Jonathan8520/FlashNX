@@ -114,6 +114,9 @@ pub const GL_FRAMEBUFFER: GLenum = 0x8D40;
 pub const GL_COLOR_ATTACHMENT0: GLenum = 0x8CE0;
 pub const GL_FRAMEBUFFER_BINDING: GLenum = 0x8CA6;
 pub const GL_FRAMEBUFFER_COMPLETE: GLenum = 0x8CD5;
+// The two halves of a framebuffer binding, for glBlitFramebuffer.
+pub const GL_READ_FRAMEBUFFER: GLenum = 0x8CA8;
+pub const GL_DRAW_FRAMEBUFFER: GLenum = 0x8CA9;
 pub const GL_VIEWPORT: GLenum = 0x0BA2;
 // Renderbuffer (depth-stencil attachment so masks work inside an FBO)
 pub const GL_RENDERBUFFER: GLenum = 0x8D41;
@@ -338,6 +341,20 @@ extern "C" {
         level: GLint,
     );
     pub fn glCheckFramebufferStatus(target: GLenum) -> GLenum;
+    // GLES 3.0. Copies a rectangle between the read and draw framebuffers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn glBlitFramebuffer(
+        src_x0: GLint,
+        src_y0: GLint,
+        src_x1: GLint,
+        src_y1: GLint,
+        dst_x0: GLint,
+        dst_y0: GLint,
+        dst_x1: GLint,
+        dst_y1: GLint,
+        mask: GLbitfield,
+        filter: GLenum,
+    );
     pub fn glGetIntegerv(pname: GLenum, params: *mut GLint);
     pub fn glIsEnabled(cap: GLenum) -> GLboolean;
     pub fn glReadPixels(
