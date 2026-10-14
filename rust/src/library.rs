@@ -5588,22 +5588,115 @@ fn input_inner(button: &str) -> bool {
 struct MoveJob {
     src: std::string::String,
     dest: std::string::String,
-    /// Top-level file names, then subfolder names; `idx` walks both in order.
+    /// What is left to move: top-level file names, then subfolder names; `idx`
+    /// walks both in order.
     files: std::vec::Vec<std::string::String>,
     dirs: std::vec::Vec<std::string::String>,
     idx: usize,
-    /// The games (top-level `.swf` names) and the folders that did move. Only
-    /// their HOME icons follow the library: a game left behind still launches
-    /// from where it is.
-    moved_games: std::vec::Vec<std::string::String>,
-    moved_dirs: std::vec::Vec<std::string::String>,
+    /// Entries moved before this job began: a move resumed after the app was
+    /// closed in its middle counts its bar from them.
+    base: usize,
+    /// Everything the move set out to move when it began (its journal), files
+    /// then folders. At the end, the HOME icons follow every `.swf` and folder
+    /// of it that is now at `dest`, the ones moved before an interruption
+    /// included; a game left behind still launches from where it is.
+    all_files: std::vec::Vec<std::string::String>,
+    all_dirs: std::vec::Vec<std::string::String>,
     /// Entries that stayed in `src`: a file or folder of the same name was
     /// already at the destination, or the rename failed. Told to the player
     /// at the end, not only to the log: part of the library is still behind.
-    skipped: usize,
+    skipped: std::vec::Vec<std::string::String>,
 }
 
 static MOVE_JOB: Mutex<Option<MoveJob>> = Mutex::new(None);
+
+/// A move's journal on the card, written before its first rename and removed
+/// once it is over: the app closed in the middle of a move (HOME, the power
+/// button, a crash) finds it at the next launch and finishes the move
+/// (`resume_interrupted_move`). Without it, the library stayed recorded at the
+/// old folder with part of it already in the new one, the companion folders
+/// (moved last) apart from their games, and the HOME icons of what had moved
+/// pointing at the old place (Jonathan, 2026-10-14: "imagine on ferme en plein
+/// milieu"). Outside both folders, beside `games_dir`.
+const MOVE_JOURNAL: &str = "sdmc:/switch/FlashNX/library_move.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MoveJournal {
+    src: std::string::String,
+    dest: std::string::String,
+    files: std::vec::Vec<std::string::String>,
+    dirs: std::vec::Vec<std::string::String>,
+    skipped: std::vec::Vec<std::string::String>,
+}
+
+/// Write (or rewrite, when an entry is left behind) `job`'s journal.
+fn write_move_journal(job: &MoveJob) {
+    let journal = MoveJournal {
+        src: job.src.clone(),
+        dest: job.dest.clone(),
+        files: job.all_files.clone(),
+        dirs: job.all_dirs.clone(),
+        skipped: job.skipped.clone(),
+    };
+    if let Ok(text) = serde_json::to_string(&journal) {
+        let _ = std::fs::create_dir_all("sdmc:/switch/FlashNX");
+        if std::fs::write(MOVE_JOURNAL, text).is_err() {
+            log("games dir: could not write the move's journal\n");
+        }
+    }
+}
+
+/// A move the app was closed in the middle of (its journal is still on the
+/// card): finished from where it stopped, on its progress page, the first
+/// time the library draws after a launch. What is still in the old folder
+/// moves; what already moved stays; the HOME icons and the recorded folder
+/// follow at the end, as for a move that was never interrupted.
+fn resume_interrupted_move() {
+    use core::sync::atomic::Ordering;
+    static CHECKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if CHECKED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let Ok(text) = std::fs::read_to_string(MOVE_JOURNAL) else { return };
+    let Ok(j) = serde_json::from_str::<MoveJournal>(&text) else {
+        log("games dir: the move's journal is unreadable, dropped\n");
+        let _ = std::fs::remove_file(MOVE_JOURNAL);
+        return;
+    };
+    let _ = std::fs::create_dir_all(&j.dest);
+    let files = list_files_top(&j.src);
+    let dirs = list_dirs_all(&j.src);
+    let left = files.len() + dirs.len();
+    let base = (j.files.len() + j.dirs.len()).saturating_sub(left);
+    log(&std::format!("games dir: resuming the move {} -> {} ({} left)\n", j.src, j.dest, left));
+    MOVE_DONE.store(base, Ordering::Relaxed);
+    MOVE_TOTAL.store(base + left, Ordering::Relaxed);
+    if let Ok(mut g) = MOVE_JOB.lock() {
+        *g = Some(MoveJob {
+            src: j.src,
+            dest: j.dest,
+            files,
+            dirs,
+            idx: 0,
+            base,
+            all_files: j.files,
+            all_dirs: j.dirs,
+            skipped: j.skipped,
+        });
+    }
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.screen = Screen::GamesDirMoving;
+    }
+}
+
+/// `name` stays in the old folder: counted for the end, and kept in the
+/// journal, so a resumed move knows its namesake at the destination is not it.
+fn move_skip(job: &mut MoveJob, name: std::string::String) {
+    if !job.skipped.contains(&name) {
+        job.skipped.push(name);
+        write_move_journal(job);
+    }
+}
 
 /// Where the running move goes from and to, for its progress page. `None`
 /// when no move is running: `start_move` refused it, or it has finished.
@@ -5692,6 +5785,9 @@ const MOVE_STAYS: &[&str] = &[
     // else the app owns follows the games, because a folder you were told was
     // emptied should be empty — leaving settings behind invites deleting them.
     "games_dir",
+    // The move's own journal, for the same reason, should the library be the
+    // app's own folder.
+    "library_move.json",
 ];
 
 /// Queue a move of the whole games folder into `dest`.
@@ -5714,17 +5810,21 @@ fn start_move(dest: &str) -> bool {
     let dirs = list_dirs_all(&src);
     MOVE_DONE.store(0, core::sync::atomic::Ordering::Relaxed);
     MOVE_TOTAL.store(files.len() + dirs.len(), core::sync::atomic::Ordering::Relaxed);
+    let job = MoveJob {
+        src,
+        dest: dest.to_string(),
+        all_files: files.clone(),
+        all_dirs: dirs.clone(),
+        files,
+        dirs,
+        idx: 0,
+        base: 0,
+        skipped: std::vec::Vec::new(),
+    };
+    // On the card before the first rename (`MOVE_JOURNAL`).
+    write_move_journal(&job);
     if let Ok(mut g) = MOVE_JOB.lock() {
-        *g = Some(MoveJob {
-            src,
-            dest: dest.to_string(),
-            files,
-            dirs,
-            idx: 0,
-            moved_games: std::vec::Vec::new(),
-            moved_dirs: std::vec::Vec::new(),
-            skipped: 0,
-        });
+        *g = Some(job);
         true
     } else {
         false
@@ -5743,7 +5843,7 @@ fn step_move(job: &mut MoveJob) -> bool {
     }
     let i = job.idx;
     job.idx += 1;
-    MOVE_DONE.store(job.idx, core::sync::atomic::Ordering::Relaxed);
+    MOVE_DONE.store(job.base + job.idx, core::sync::atomic::Ordering::Relaxed);
 
     if i < n_files {
         let name = job.files[i].clone();
@@ -5758,18 +5858,14 @@ fn step_move(job: &mut MoveJob) -> bool {
         if file_exists_now(&to) {
             log(&std::format!("games dir: {} already there, left in place
 ", name));
-            job.skipped += 1;
+            move_skip(job, name);
             return true;
         }
         let from = std::format!("{}/{}", job.src, name);
         if std::fs::rename(&from, &to).is_err() {
             log(&std::format!("games dir: could not move {}
 ", name));
-            job.skipped += 1;
-            return true;
-        }
-        if name.to_ascii_lowercase().ends_with(".swf") {
-            job.moved_games.push(name);
+            move_skip(job, name);
         }
         return true;
     }
@@ -5783,16 +5879,14 @@ fn step_move(job: &mut MoveJob) -> bool {
     if dir_exists(&to) {
         log(&std::format!("games dir: {}/ already there, left in place
 ", name));
-        job.skipped += 1;
+        move_skip(job, name);
         return true;
     }
     let from = std::format!("{}/{}", job.src, name);
     if std::fs::rename(&from, &to).is_err() {
         log(&std::format!("games dir: could not move {}/
 ", name));
-        job.skipped += 1;
-    } else {
-        job.moved_dirs.push(name);
+        move_skip(job, name);
     }
     true
 }
@@ -5827,23 +5921,35 @@ fn drive_pending_move() {
         }
         g.take().expect("checked above")
     };
-    let MoveJob { src, dest, moved_games, moved_dirs, skipped, .. } = finished;
+    let MoveJob { src, dest, all_files, all_dirs, skipped, .. } = finished;
 
     set_primary_root(&dest);
     // The HOME icons of what moved, and of nothing else. Every icon under the
     // old folder used to be pointed at the new one, so a game left behind (its
     // name taken at the destination, a rename refused) got an icon launching a
-    // file that is not there, or the other game that kept it out.
+    // file that is not there, or the other game that kept it out. What moved
+    // is what the move set out to move, now at the destination, less what it
+    // left behind: the parts moved before an interruption are in it too.
+    let moved_games: std::vec::Vec<&std::string::String> = all_files
+        .iter()
+        .filter(|n| n.to_ascii_lowercase().ends_with(".swf") && !skipped.contains(*n))
+        .filter(|n| file_exists_now(&std::format!("{}/{}", dest, n)))
+        .collect();
+    let moved_dirs = all_dirs
+        .iter()
+        .filter(|n| !skipped.contains(*n) && dir_exists(&std::format!("{}/{}", dest, n)));
     let follow: std::vec::Vec<(std::string::String, std::string::String, bool)> = moved_games
         .iter()
-        .map(|n| (n, false))
-        .chain(moved_dirs.iter().map(|n| (n, true)))
+        .map(|n| (*n, false))
+        .chain(moved_dirs.map(|n| (n, true)))
         .map(|(n, prefix)| (std::format!("{}/{}", src, n), std::format!("{}/{}", dest, n), prefix))
         .collect();
     tiles_follow(&follow);
+    // Over: a launch no longer has anything to finish.
+    let _ = std::fs::remove_file(MOVE_JOURNAL);
+    let skipped = skipped.len();
     log(&std::format!(
-        "games dir: now {} ({} moved, {} left in {})
-",
+        "games dir: now {} ({} moved, {} left in {})\n",
         dest, moved_games.len(), skipped, src,
     ));
     // Rebuild the list: `add_path` PUSHES, and the boot scan relies on starting
@@ -13060,6 +13166,8 @@ pub fn render(backend: &mut SwitchRenderBackend) {
         drive_pending_net();
         // Same for a bug report or an idea, behind its card on the RÉGLAGES page.
         settings_tab::drive_pending_send();
+        // A move the app was closed in the middle of goes on (once a launch).
+        resume_interrupted_move();
         drive_pending_move();
         net::set_wait_frame(None);
         WAIT_BACKEND.store(core::ptr::null_mut(), Ordering::Relaxed);
