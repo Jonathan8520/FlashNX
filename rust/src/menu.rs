@@ -567,27 +567,34 @@ static PENDING_NET: std::sync::Mutex<Option<(PendingNet, bool)>> = std::sync::Mu
 /// The screen the deferred flow started from, drawn under its loading card.
 static LOADING_FROM: std::sync::Mutex<Option<Screen>> = std::sync::Mutex::new(None);
 
-/// What the pending flow is doing, for its loading card.
+/// What the pending flow is doing, for its loading card: set when it is
+/// queued and kept while it runs, as the launcher's `NET_LOADING_LABEL`. It
+/// was read from the queue, which the flow leaves when it starts: since the
+/// wait draws frames (`ruffle_touches_drive`), every card then said "loading
+/// the profiles", sharing and deleting included.
+static LOADING_LABEL: std::sync::Mutex<&'static str> = std::sync::Mutex::new("");
+
+/// The loading card's words (`LOADING_LABEL`).
 fn pending_label() -> &'static str {
-    let u = crate::loc_ui::ui();
-    match PENDING_NET.lock().ok().as_deref().and_then(|p| p.as_ref().map(|(a, _)| match a {
-        PendingNet::OpenProfiles => 0,
-        PendingNet::OpenShareConfirm => 1,
-        PendingNet::Share => 2,
-        PendingNet::Apply { .. } => 3,
-        PendingNet::Delete { .. } => 4,
-    })) {
-        Some(1) => u.loading_share_check,
-        Some(2) => u.loading_share,
-        Some(3) => u.loading_apply,
-        Some(4) => u.loading_delete,
-        _ => u.loading_profiles,
+    match LOADING_LABEL.lock() {
+        Ok(l) if !l.is_empty() => *l,
+        _ => crate::loc_ui::ui().loading_profiles,
     }
 }
 
 /// Stash `action` (run next frame) and flip to the loading screen now. Caller
 /// holds no lock (it dropped `s` first).
 fn defer_net(action: PendingNet) {
+    let u = crate::loc_ui::ui();
+    if let Ok(mut l) = LOADING_LABEL.lock() {
+        *l = match action {
+            PendingNet::OpenProfiles => u.loading_profiles,
+            PendingNet::OpenShareConfirm => u.loading_share_check,
+            PendingNet::Share => u.loading_share,
+            PendingNet::Apply { .. } => u.loading_apply,
+            PendingNet::Delete { .. } => u.loading_delete,
+        };
+    }
     if let Ok(mut p) = PENDING_NET.lock() {
         *p = Some((action, false));
     }
@@ -1002,11 +1009,7 @@ fn run_open_profiles() {
     // The list never comes up empty any more (the copy row ends it), so the
     // "no profile" / "offline" notice it used to show becomes a toast.
     let notice = if matches.is_empty() {
-        Some(if crate::profiles::catalog_unavailable() {
-            crate::loc::s().profile_catalog_offline
-        } else {
-            crate::loc::s().profile_none
-        })
+        Some(crate::profiles::empty_notice())
     } else {
         None
     };
@@ -1085,6 +1088,16 @@ fn run_apply(profile_idx: usize) {
 /// PARTAGER: open the share confirm with a before/after of my shared profile.
 fn run_open_share_confirm() {
     let Some((basename, title, path)) = game_ctx() else { return };
+    // No network: said at once, before the before/after of a share that could
+    // not be sent (it used to fail only once confirmed, blaming the server).
+    if crate::net::offline() {
+        if let Ok(mut s) = TOUCHES.lock() {
+            set_toast(&mut s, crate::loc::s().err_no_internet.to_string(), TOAST_ERR);
+            s.screen = Screen::Menu { selection: MENU_SHARE };
+        }
+        crate::sfx::choose(crate::sfx::Sfx::Error);
+        return;
+    }
     // Already a catalog profile, unchanged → nothing to share until edited.
     if keymap::provenance(&basename).starts_with("community:") {
         if let Ok(mut s) = TOUCHES.lock() {
@@ -1966,7 +1979,7 @@ pub(crate) fn with_profiles_view<R>(
                 .opens()
         })
         .collect();
-    let empty_msg = if crate::profiles::catalog_unavailable() { lc.profile_catalog_offline } else { lc.profile_none };
+    let empty_msg = crate::profiles::empty_notice();
     if rows.is_empty() {
         // An unreachable catalog must not be reported as an empty one.
         rows.push(Row::new(Icon::Info, empty_msg).dim(true));

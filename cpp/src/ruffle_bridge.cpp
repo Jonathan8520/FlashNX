@@ -1211,11 +1211,42 @@ extern "C" int32_t flashnx_batt_permille(void) {
     return (int32_t)(pct * 10.0 + 0.5);
 }
 
+// The network as FlashNX sees it: -1 offline (the console has no IP address),
+// -2 unknown (nifm would not open), else the Wi-Fi bars, 0 to 3 (3 wired).
+// Offline means no address, NOT "Nintendo's connection test failed": a
+// console behind 90DNS fails that test (nifm then never says Connected) while
+// its requests get through, and must not be told it is offline. Read at most
+// once a second.
+static int32_t net_state(void) {
+    static u64 last = 0;
+    static int32_t state = -2;
+    const u64 now = armGetSystemTick();
+    if (last != 0 && armTicksToNs(now - last) < 1000000000ULL) return state;
+    last = now;
+    static const bool nifm_ok = R_SUCCEEDED(nifmInitialize(NifmServiceType_User));
+    if (!nifm_ok) return state = -2;
+    u32 ip = 0;
+    if (R_FAILED(nifmGetCurrentIpAddress(&ip)) || ip == 0) return state = -1;
+    NifmInternetConnectionType type;
+    NifmInternetConnectionStatus st;
+    u32 bars = 0;
+    if (R_SUCCEEDED(nifmGetInternetConnectionStatus(&type, &bars, &st)) && type == NifmInternetConnectionType_WiFi)
+        return state = (int32_t)(bars > 3 ? 3 : bars);
+    return state = 3;
+}
+
+// 0 when the console has no network at all (no IP address): net.rs then does
+// not try a request, and says so at once instead of after the timeouts of a
+// connection that cannot be made. 1 otherwise, unknown included.
+extern "C" int flashnx_online(void) {
+    return net_state() == -1 ? 0 : 1;
+}
+
 // The launcher's status corner (Settings): the console's local time, its
-// network and its battery, as the HOME Menu shows them. Three service calls,
-// so read at most once a second; between, the last reading. Each value is -1
-// when it cannot be read. `wifi`: -1 when not connected, else the bars, 0 to
-// 3 (3 for a wired connection); `charging`: 1 on a charger.
+// network and its battery, as the HOME Menu shows them. Read at most once a
+// second; between, the last reading. Each value is -1 when it cannot be read.
+// `wifi`: -1 offline, else the bars, 0 to 3 (3 for a wired connection);
+// `charging`: 1 on a charger.
 extern "C" void flashnx_status(int32_t* hour, int32_t* minute, int32_t* wifi, int32_t* battery, int32_t* charging) {
     static u64 last = 0;
     static int32_t c[5] = {-1, -1, -1, -1, 0};
@@ -1235,15 +1266,9 @@ extern "C" void flashnx_status(int32_t* hour, int32_t* minute, int32_t* wifi, in
         } else {
             c[0] = c[1] = -1;
         }
-        static const bool nifm_ok = R_SUCCEEDED(nifmInitialize(NifmServiceType_User));
-        NifmInternetConnectionType type;
-        NifmInternetConnectionStatus st;
-        u32 bars = 0;
-        c[2] = -1;
-        if (nifm_ok && R_SUCCEEDED(nifmGetInternetConnectionStatus(&type, &bars, &st))
-            && st == NifmInternetConnectionStatus_Connected) {
-            c[2] = type == NifmInternetConnectionType_WiFi ? (int32_t)(bars > 3 ? 3 : bars) : 3;
-        }
+        // Connected as soon as the console has an address (`net_state`).
+        const int32_t net = net_state();
+        c[2] = net >= 0 ? net : -1;
         u32 pct = 0;
         PsmChargerType charger;
         c[3] = (psm_init_once() && R_SUCCEEDED(psmGetBatteryChargePercentage(&pct))) ? (int32_t)pct : -1;

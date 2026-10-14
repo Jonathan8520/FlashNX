@@ -606,6 +606,11 @@ static INDEX_TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 /// Whether the last catalog read succeeded. Starts true so a picker opened before
 /// any fetch does not accuse the network of anything.
 static INDEX_OK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// Whether every profile file the last picker needed could be read. The
+/// index stays cached for the session, so once the console goes offline the
+/// index still names this game's profiles while their files all fail: the
+/// list came back empty and said "no profile for this game yet".
+static FILES_OK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// Fetch + cache the online catalog index (once per session). A network failure
 /// caches an empty index so we don't re-hit it on every picker open.
@@ -659,7 +664,21 @@ fn fetch_index() -> std::vec::Vec<IndexEntry> {
 /// invitation to act on it, on the most ordinary trigger there is — an offline
 /// console.
 pub fn catalog_unavailable() -> bool {
-    !INDEX_OK.load(std::sync::atomic::Ordering::Relaxed)
+    use std::sync::atomic::Ordering;
+    !INDEX_OK.load(Ordering::Relaxed) || !FILES_OK.load(Ordering::Relaxed) || crate::net::offline()
+}
+
+/// What a picker that found nothing says: no connection at all, a catalog
+/// that could not be read, or truly no profile for this game.
+pub fn empty_notice() -> &'static str {
+    let lc = crate::loc::s();
+    if crate::net::offline() {
+        lc.err_no_internet
+    } else if catalog_unavailable() {
+        lc.profile_catalog_offline
+    } else {
+        lc.profile_none
+    }
 }
 
 /// Drop the cached online catalog + apply counts so the next picker open
@@ -682,6 +701,7 @@ pub fn invalidate_online_cache() {
 fn online_matches_for(fp_uuid: &str, swf_hash: &str, title: &str) -> std::vec::Vec<Match> {
     let title_norm = normalize_title(title);
     let mut out = std::vec::Vec::new();
+    FILES_OK.store(true, std::sync::atomic::Ordering::Relaxed);
     for e in fetch_index() {
         let kind = if !fp_uuid.is_empty() && e.fp_uuid == fp_uuid {
             MatchKind::Uuid
@@ -703,7 +723,10 @@ fn online_matches_for(fp_uuid: &str, swf_hash: &str, title: &str) -> std::vec::V
                     crate::net::log(&std::format!("profiles: parse {} failed\n", e.file));
                 }
             }
-            None => crate::net::log(&std::format!("profiles: fetch {} failed (api)\n", e.file)),
+            None => {
+                crate::net::log(&std::format!("profiles: fetch {} failed (api)\n", e.file));
+                FILES_OK.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
     out
@@ -757,16 +780,18 @@ fn fetch_counts() -> std::collections::BTreeMap<std::string::String, u32> {
     if COUNTS_TRIED.load(Ordering::Relaxed) {
         return COUNTS.lock().ok().and_then(|g| g.clone()).unwrap_or_default();
     }
-    COUNTS_TRIED.store(true, Ordering::Relaxed);
     let map = match crate::net::http_get(&worker_url("/counts"), 64 * 1024) {
+        // Only an answer counts as tried: a request made offline is asked
+        // again at the next picker, once the console is back online.
         Ok(bytes) => std::string::String::from_utf8(bytes)
             .ok()
             .and_then(|t| {
                 serde_json::from_str::<std::collections::BTreeMap<std::string::String, u32>>(&t).ok()
             })
             .unwrap_or_default(),
-        Err(_) => std::collections::BTreeMap::new(),
+        Err(_) => return std::collections::BTreeMap::new(),
     };
+    COUNTS_TRIED.store(true, Ordering::Relaxed);
     if let Ok(mut g) = COUNTS.lock() {
         *g = Some(map.clone());
     }

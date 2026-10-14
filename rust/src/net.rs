@@ -12,6 +12,8 @@
 use core::ffi::{c_char, c_int};
 
 extern "C" {
+    // 0 when the console has no IP address (ruffle_bridge.cpp `net_state`).
+    fn flashnx_online() -> c_int;
     fn write_cacert_to_sd(data: *const c_char, len: c_int) -> c_int;
     fn https_get_into_buf(url: *const c_char, buf: *mut c_char, cap: c_int) -> c_int;
     // Synchronous HTTPS POST with a JSON body (bug-report relay). Same return
@@ -70,6 +72,25 @@ extern "C" {
 /// bug report). None everywhere else (a game's navigator, boot), where
 /// `http_get` / `post_json` stay the plain blocking calls they were.
 static WAIT_FRAME: std::sync::Mutex<Option<fn()>> = std::sync::Mutex::new(None);
+
+/// The console has no network at all: no IP address (Wi-Fi off or out of
+/// range, no network set up). Only that: a console with an address that
+/// fails Nintendo's own connection test (90DNS) is online for FlashNX, its
+/// requests get through.
+pub(crate) fn offline() -> bool {
+    unsafe { flashnx_online() == 0 }
+}
+
+/// A request is not made offline (`offline`): it fails at once, saying so,
+/// where it used to wait out a connection that could not be made and then
+/// blame the server ("the console is online, something in between blocks").
+fn offline_check() -> Result<(), std::string::String> {
+    if offline() {
+        log("net: no IP address, request not made\n");
+        return Err(std::string::String::from(crate::loc::s().err_no_internet));
+    }
+    Ok(())
+}
 
 /// Draw frames from inside blocking requests (`Some`) or stop (`None`).
 pub(crate) fn set_wait_frame(f: Option<fn()>) {
@@ -272,6 +293,7 @@ pub(crate) fn http_get(
     url: &str,
     cap: usize,
 ) -> Result<std::vec::Vec<u8>, std::string::String> {
+    offline_check()?;
     if let Some(r) = request_with_frames(false, url, "", cap) {
         return r;
     }
@@ -310,6 +332,7 @@ pub(crate) fn post_json(
     body: &str,
     cap: usize,
 ) -> Result<std::vec::Vec<u8>, std::string::String> {
+    offline_check()?;
     if let Some(r) = request_with_frames(true, url, body, cap) {
         return r;
     }
@@ -473,6 +496,7 @@ pub fn archive_item_files(item_id: &str) -> std::vec::Vec<std::string::String> {
 /// Start the async archive.org metadata fetch (non-blocking). Returns
 /// immediately; the C++ multi handle runs on each `tick_archive_fetch`.
 pub fn start_archive_fetch(item_id: &str) -> Result<(), std::string::String> {
+    offline_check()?;
     let url = std::format!("https://archive.org/metadata/{}", item_id);
     let url_c = cstr(&url);
     let rc = unsafe { https_get_start(url_c.as_ptr() as *const c_char) };
@@ -529,6 +553,7 @@ pub enum GetPoll {
 /// Flashpoint game search so its result list arrives behind a spinner instead
 /// of freezing the UI on the blocking HTTP.
 pub fn start_get_async(url: &str) -> Result<(), std::string::String> {
+    offline_check()?;
     let url_c = cstr(url);
     let rc = unsafe { https_get_start(url_c.as_ptr() as *const c_char) };
     if rc != 0 {
@@ -644,6 +669,7 @@ pub(crate) fn url_encode_path(s: &str) -> std::string::String {
 /// Start an async download. The C++ side sets up a curl multi handle;
 /// subsequent calls to `download_tick` pump it without blocking.
 pub fn start_download(url: &str, out_path: &str) -> Result<(), std::string::String> {
+    offline_check()?;
     let mut url_c = url.as_bytes().to_vec();
     url_c.push(0);
     let mut path_c = out_path.as_bytes().to_vec();

@@ -6413,6 +6413,16 @@ fn run_open_share_confirm_flow(game_idx: usize) {
     let Some((basename, title, path)) = snap else {
         return;
     };
+    // No network: said at once, before the before/after of a share that could
+    // not be sent (it used to fail only once confirmed, blaming the server).
+    if crate::net::offline() {
+        if let Ok(mut s) = LIBRARY.lock() {
+            set_toast(&mut s, crate::loc::s().err_no_internet.to_string(), TOAST_ERR);
+            goto_touches_menu(&mut s, game_idx, menu::MENU_SHARE);
+        }
+        crate::sfx::choose(crate::sfx::Sfx::Error);
+        return;
+    }
     // Already a catalog profile, unchanged (applied or already shared) → nothing
     // new to send until a key is edited.
     if keymap::provenance(&basename).starts_with("community:") {
@@ -6541,11 +6551,7 @@ fn run_open_profiles_flow(game_idx: usize) {
     // The list never comes up empty any more (the copy row ends it), so the
     // "no profile" / "offline" notice it used to show becomes a toast.
     let notice = if matches.is_empty() {
-        Some(if crate::profiles::catalog_unavailable() {
-            crate::loc::s().profile_catalog_offline
-        } else {
-            crate::loc::s().profile_none
-        })
+        Some(crate::profiles::empty_notice())
     } else {
         None
     };

@@ -476,6 +476,8 @@ pub struct Strings {
     /// is broken: blaming only the WiFi sends a connected player to check the
     /// one thing that works (#103).
     pub err_offline: &'static str,
+    /// No network at all (no IP address): said before any request is tried.
+    pub err_no_internet: &'static str,
     /// curl 7: the name resolved and the connection was refused. A different
     /// instruction entirely: the network is up, something between the console
     /// and the server is saying no.
@@ -678,6 +680,7 @@ const EN: Strings = Strings {
     err_too_large: "This archive is too big to be read here.",
     err_https: "Transfer failed ({}). Try again in a moment.",
     err_offline: "Address not found (curl {}). Check the console's Wi-Fi, then its DNS.",
+    err_no_internet: "No internet connection. Check the console's Wi-Fi.",
     err_unreachable: "The server refused the connection (curl {}). The console is online, so something in between is blocking it.",
     err_timeout: "The server did not answer in time. Try again.",
     err_tls: "Secure connection refused. Check the console's date and time: a wrong clock breaks HTTPS.",
@@ -848,6 +851,7 @@ const FR: Strings = Strings {
     err_too_large: "Cette archive est trop grande pour être lue ici.",
     err_https: "Échec du transfert ({}). Réessaie dans un instant.",
     err_offline: "Adresse introuvable (curl {}). Vérifie le Wi-Fi de la console, puis son DNS.",
+    err_no_internet: "Pas de connexion Internet. Vérifie le Wi-Fi de la console.",
     err_unreachable: "Le serveur a refusé la connexion (curl {}). La console est en ligne, quelque chose entre elle et le serveur bloque.",
     err_timeout: "Le serveur n'a pas répondu à temps. Réessaie.",
     err_tls: "Connexion sécurisée refusée. Vérifie la date et l'heure de la console\u{a0}: une horloge fausse casse le HTTPS.",
@@ -1018,6 +1022,7 @@ const ES: Strings = Strings {
     err_too_large: "Esta fuente es demasiado grande para leerla aquí.",
     err_https: "Fallo de transferencia ({}). Inténtalo de nuevo en un momento.",
     err_offline: "Dirección no encontrada (curl {}). Comprueba el Wi-Fi de la consola y luego su DNS.",
+    err_no_internet: "Sin conexión a Internet. Comprueba el Wi-Fi de la consola.",
     err_unreachable: "El servidor rechazó la conexión (curl {}). La consola está en línea, algo entre ella y el servidor lo bloquea.",
     err_timeout: "El servidor no respondió a tiempo. Inténtalo de nuevo.",
     err_tls: "Conexión segura rechazada. Comprueba la fecha y la hora de la consola: un reloj mal ajustado rompe HTTPS.",
@@ -1189,6 +1194,7 @@ const RU: Strings = Strings {
     err_too_large: "Этот архив слишком велик, чтобы прочитать его здесь.",
     err_https: "Сбой передачи ({}). Попробуй через минуту.",
     err_offline: "Адрес не найден (curl {}). Проверь Wi-Fi консоли, затем DNS.",
+    err_no_internet: "Нет подключения к интернету. Проверь Wi-Fi консоли.",
     err_unreachable: "Сервер отклонил соединение (curl {}). Консоль онлайн, что-то между ней и сервером блокирует.",
     err_timeout: "Сервер не ответил вовремя. Попробуй снова.",
     err_tls: "Защищённое соединение отклонено. Проверь дату и время консоли: неверные часы ломают HTTPS.",
@@ -1360,6 +1366,7 @@ const DE: Strings = Strings {
     err_too_large: "Dieses Archiv ist zu groß, um hier gelesen zu werden.",
     err_https: "Übertragung fehlgeschlagen ({}). Gleich nochmal versuchen.",
     err_offline: "Adresse nicht gefunden (curl {}). Prüfe das WLAN der Konsole, dann ihren DNS.",
+    err_no_internet: "Keine Internetverbindung. Prüfe das WLAN der Konsole.",
     err_unreachable: "Der Server hat die Verbindung abgelehnt (curl {}). Die Konsole ist online, etwas dazwischen blockiert.",
     err_timeout: "Der Server hat nicht rechtzeitig geantwortet. Erneut versuchen.",
     err_tls: "Sichere Verbindung abgelehnt. Prüfe Datum und Uhrzeit der Konsole: eine falsche Uhr bricht HTTPS.",
@@ -1531,6 +1538,7 @@ const IT: Strings = Strings {
     err_too_large: "Questo archivio è troppo grande per essere letto qui.",
     err_https: "Trasferimento fallito ({}). Riprova tra poco.",
     err_offline: "Indirizzo non trovato (curl {}). Controlla il Wi-Fi della console, poi il suo DNS.",
+    err_no_internet: "Nessuna connessione a Internet. Controlla il Wi-Fi della console.",
     err_unreachable: "Il server ha rifiutato la connessione (curl {}). La console è online, qualcosa in mezzo blocca.",
     err_timeout: "Il server non ha risposto in tempo. Riprova.",
     err_tls: "Connessione sicura rifiutata. Controlla data e ora della console: un orologio errato rompe l'HTTPS.",
@@ -1702,6 +1710,7 @@ const PT: Strings = Strings {
     err_too_large: "Esta fonte é grande demais para ser lida aqui.",
     err_https: "Falha na transferência ({}). Tente de novo daqui a pouco.",
     err_offline: "Endereço não encontrado (curl {}). Verifique o Wi-Fi do console e depois o DNS.",
+    err_no_internet: "Sem conexão com a internet. Verifique o Wi-Fi do console.",
     err_unreachable: "O servidor recusou a conexão (curl {}). O console está online, algo no meio está bloqueando.",
     err_timeout: "O servidor não respondeu a tempo. Tente novamente.",
     err_tls: "Conexão segura recusada. Verifique a data e a hora do console: um relógio errado quebra o HTTPS.",
@@ -1874,6 +1883,7 @@ const ZH: Strings = Strings {
     err_too_large: "此存档太大，无法在这里读取。",
     err_https: "传输失败 ({})。请稍后重试。",
     err_offline: "找不到地址（curl {}）。请检查主机的 Wi-Fi，然后检查 DNS。",
+    err_no_internet: "没有网络连接。请检查主机的 Wi-Fi。",
     err_unreachable: "服务器拒绝了连接（curl {}）。主机在线，中间有东西在阻断。",
     err_timeout: "服务器未及时响应。请重试。",
     err_tls: "安全连接被拒绝。请检查主机的日期和时间：时钟错误会导致 HTTPS 失败。",
@@ -2045,6 +2055,7 @@ const TR: Strings = Strings {
     err_too_large: "Bu arşiv burada okunamayacak kadar büyük.",
     err_https: "Aktarım başarısız ({}). Biraz sonra tekrar dene.",
     err_offline: "Adres bulunamadı (curl {}). Konsolun Wi-Fi bağlantısını, sonra DNS'ini kontrol et.",
+    err_no_internet: "İnternet bağlantısı yok. Konsolun Wi-Fi'ını kontrol et.",
     err_unreachable: "Sunucu bağlantıyı reddetti (curl {}). Konsol çevrimiçi, arada bir şey engelliyor.",
     err_timeout: "Sunucu zamanında yanıt vermedi. Tekrar dene.",
     err_tls: "Güvenli bağlantı reddedildi. Konsolun tarih ve saatini kontrol et: yanlış saat HTTPS'i bozar.",
