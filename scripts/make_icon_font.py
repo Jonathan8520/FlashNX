@@ -133,6 +133,14 @@ ICONS = [
     ("Pin", "pin", 0xE259, "pinned row"),
     ("Volume", "volume-2", 0xE1AB, "interface sounds on"),
     ("VolumeOff", "volume-x", 0xE1AC, "interface sounds off"),
+    ("WifiHigh", "wifi-high", 0xE5F7, "Wi-Fi, two bars of three"),
+    ("WifiLow", "wifi-low", 0xE5F8, "Wi-Fi, one bar of three"),
+    ("WifiZero", "wifi-zero", 0xE5F9, "Wi-Fi, connected but no bar"),
+    ("BatteryFull", "battery-full", 0xE055, "battery, well charged"),
+    ("BatteryMedium", "battery-medium", 0xE057, "battery, half charged"),
+    ("BatteryLow", "battery-low", 0xE056, "battery, low"),
+    ("BatteryWarning", "battery-warning", 0xE3AC, "battery, nearly empty"),
+    ("BatteryCharging", "battery-charging", 0xE054, "battery, charging"),
 ]
 
 # Unicode's Private Use Area in the Basic Multilingual Plane. Every pinned code

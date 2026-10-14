@@ -209,7 +209,59 @@ fn glide_x(target: f32, key: u32, now: u64) -> f32 {
     if still() { target } else { eased_list_x(target, key, now) }
 }
 
+extern "C" {
+    fn flashnx_status(hour: *mut i32, minute: *mut i32, wifi: *mut i32, battery: *mut i32, charging: *mut i32);
+}
+
 impl SwitchRenderBackend {
+    /// The page's corner of the tab bar, where Jouer shows its count and the
+    /// importer its search: the console's time, network and battery, as the
+    /// HOME Menu shows them (Jonathan, 2026-10-14). From the right edge: the
+    /// battery's charge and its icon, the network, the time. What cannot be
+    /// read is left out, the network excepted, which then says offline.
+    pub(crate) fn settings_status_corner(&mut self) {
+        const CY: f32 = 36.0;
+        const ICON: f32 = 18.0;
+        const GAP: f32 = 18.0;
+        let (mut hour, mut minute, mut wifi, mut battery, mut charging) = (-1, -1, -1, -1, 0);
+        unsafe { flashnx_status(&mut hour, &mut minute, &mut wifi, &mut battery, &mut charging) };
+        let u = crate::loc_ui::ui();
+        let mut x = self.dimensions.width as f32 - 40.0;
+        if battery >= 0 {
+            // Low as the console says it: red at 15 % and under, unless charging.
+            let low = charging == 0 && battery <= 15;
+            let ink = if low { col::DANGER } else { col::TEXT3 };
+            let t = u.percent.replacen("{}", &battery.to_string(), 1);
+            x -= self.kit_measure(&t, size::LABEL);
+            self.kit_text_mid(x.round(), CY, size::LABEL, &t, ink);
+            let (icon, icon_ink) = match battery {
+                _ if charging != 0 => (Icon::BatteryCharging, col::OK),
+                0..=15 => (Icon::BatteryWarning, ink),
+                16..=33 => (Icon::BatteryLow, ink),
+                34..=66 => (Icon::BatteryMedium, ink),
+                _ => (Icon::BatteryFull, ink),
+            };
+            x -= 6.0 + ICON;
+            self.kit_icon(x.round(), CY, ICON, icon, icon_ink);
+            x -= GAP;
+        }
+        let net = match wifi {
+            0 => Icon::WifiZero,
+            1 => Icon::WifiLow,
+            2 => Icon::WifiHigh,
+            3 => Icon::Wifi,
+            _ => Icon::WifiOff,
+        };
+        x -= ICON;
+        self.kit_icon(x.round(), CY, ICON, net, col::TEXT3);
+        x -= GAP;
+        if hour >= 0 && minute >= 0 {
+            let t = std::format!("{}:{:02}", hour, minute);
+            x -= self.kit_measure(&t, size::LABEL);
+            self.kit_text_mid(x.round(), CY, size::LABEL, &t, col::TEXT3);
+        }
+    }
+
     /// Draw the page still (`true`, under a window) or alive (`false`).
     pub(crate) fn settings_still(&mut self, on: bool) {
         STILL.store(on, core::sync::atomic::Ordering::Relaxed);

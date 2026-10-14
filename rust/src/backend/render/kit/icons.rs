@@ -212,6 +212,22 @@ pub(crate) enum Icon {
     Volume,
     /// `volume-x`: interface sounds off.
     VolumeOff,
+    /// `wifi-high`: Wi-Fi, two bars of three.
+    WifiHigh,
+    /// `wifi-low`: Wi-Fi, one bar of three.
+    WifiLow,
+    /// `wifi-zero`: Wi-Fi, connected but no bar.
+    WifiZero,
+    /// `battery-full`: battery, well charged.
+    BatteryFull,
+    /// `battery-medium`: battery, half charged.
+    BatteryMedium,
+    /// `battery-low`: battery, low.
+    BatteryLow,
+    /// `battery-warning`: battery, nearly empty.
+    BatteryWarning,
+    /// `battery-charging`: battery, charging.
+    BatteryCharging,
 }
 
 impl Icon {
@@ -297,6 +313,14 @@ impl Icon {
             Icon::Pin => '\u{E259}',
             Icon::Volume => '\u{E1AB}',
             Icon::VolumeOff => '\u{E1AC}',
+            Icon::WifiHigh => '\u{E5F7}',
+            Icon::WifiLow => '\u{E5F8}',
+            Icon::WifiZero => '\u{E5F9}',
+            Icon::BatteryFull => '\u{E055}',
+            Icon::BatteryMedium => '\u{E057}',
+            Icon::BatteryLow => '\u{E056}',
+            Icon::BatteryWarning => '\u{E3AC}',
+            Icon::BatteryCharging => '\u{E054}',
         }
     }
 }

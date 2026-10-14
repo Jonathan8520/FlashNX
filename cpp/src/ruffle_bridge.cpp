@@ -1211,6 +1211,51 @@ extern "C" int32_t flashnx_batt_permille(void) {
     return (int32_t)(pct * 10.0 + 0.5);
 }
 
+// The launcher's status corner (Settings): the console's local time, its
+// network and its battery, as the HOME Menu shows them. Three service calls,
+// so read at most once a second; between, the last reading. Each value is -1
+// when it cannot be read. `wifi`: -1 when not connected, else the bars, 0 to
+// 3 (3 for a wired connection); `charging`: 1 on a charger.
+extern "C" void flashnx_status(int32_t* hour, int32_t* minute, int32_t* wifi, int32_t* battery, int32_t* charging) {
+    static u64 last = 0;
+    static int32_t c[5] = {-1, -1, -1, -1, 0};
+    const u64 now = armGetSystemTick();
+    if (last == 0 || armTicksToNs(now - last) >= 1000000000ULL) {
+        last = now;
+        // The time zone is the console's own (System Settings), as HOME's
+        // clock; time(nullptr) would be UTC.
+        static const bool time_ok = R_SUCCEEDED(timeInitialize());
+        u64 ts = 0;
+        TimeCalendarTime cal;
+        TimeCalendarAdditionalInfo info;
+        if (time_ok && R_SUCCEEDED(timeGetCurrentTime(TimeType_Default, &ts))
+            && R_SUCCEEDED(timeToCalendarTimeWithMyRule(ts, &cal, &info))) {
+            c[0] = cal.hour;
+            c[1] = cal.minute;
+        } else {
+            c[0] = c[1] = -1;
+        }
+        static const bool nifm_ok = R_SUCCEEDED(nifmInitialize(NifmServiceType_User));
+        NifmInternetConnectionType type;
+        NifmInternetConnectionStatus st;
+        u32 bars = 0;
+        c[2] = -1;
+        if (nifm_ok && R_SUCCEEDED(nifmGetInternetConnectionStatus(&type, &bars, &st))
+            && st == NifmInternetConnectionStatus_Connected) {
+            c[2] = type == NifmInternetConnectionType_WiFi ? (int32_t)(bars > 3 ? 3 : bars) : 3;
+        }
+        u32 pct = 0;
+        PsmChargerType charger;
+        c[3] = (psm_init_once() && R_SUCCEEDED(psmGetBatteryChargePercentage(&pct))) ? (int32_t)pct : -1;
+        c[4] = (psm_init_once() && R_SUCCEEDED(psmGetChargerType(&charger)) && charger != PsmChargerType_Unconnected) ? 1 : 0;
+    }
+    *hour = c[0];
+    *minute = c[1];
+    *wifi = c[2];
+    *battery = c[3];
+    *charging = c[4];
+}
+
 // 1 when running with the SMALL applet memory pool (~448-560 MB), 0 when we
 // have the full title-takeover application heap (~3.2 GB). Ruffle + our
 // backend need the full heap; in applet mode launching a SWF OOMs and falls

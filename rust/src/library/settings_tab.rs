@@ -928,6 +928,7 @@ pub(crate) fn draw_settings(
         .unwrap_or((None, None));
     backend.settings_still(under);
     backend.library_clear();
+    backend.settings_status_corner();
     let entries = [
         (Icon::Grid, u.sec_library),
         (Icon::Gamepad, u.row_game_prefs),
