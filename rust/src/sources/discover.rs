@@ -169,9 +169,28 @@ pub fn developer_url(name: &str, filter: bool) -> std::string::String {
     flashpoint::api_url(&query, ROUTE_MAX, !filter, false)
 }
 
+/// The same for a game the archive credits no developer for ("Du même
+/// éditeur", Y): its publisher's games. `pub:` is honoured by the route
+/// (2026-10-14: `pub:"i6.com" platform:Flash` = 33 games of 158 605), a
+/// substring match like `dev:`, so `same_publisher` keeps the exact name.
+pub fn publisher_url(name: &str, filter: bool) -> std::string::String {
+    let query = std::format!("pub:\"{}\" platform:Flash", name.replace('"', ""));
+    flashpoint::api_url(&query, ROUTE_MAX, !filter, false)
+}
+
 /// A search's answer with only `name`'s own games: `family_filter`'s
 /// developer test alone, the player's filter having already chosen the rest.
 pub fn same_developer(bytes: &[u8], name: &str) -> std::vec::Vec<u8> {
+    same_credit(bytes, "developer", name)
+}
+
+/// The same on the publisher field.
+pub fn same_publisher(bytes: &[u8], name: &str) -> std::vec::Vec<u8> {
+    same_credit(bytes, "publisher", name)
+}
+
+/// Keep the games whose `field` names `name` among its names.
+fn same_credit(bytes: &[u8], field: &str, name: &str) -> std::vec::Vec<u8> {
     let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(bytes) else {
         return bytes.to_vec();
     };
@@ -179,8 +198,8 @@ pub fn same_developer(bytes: &[u8], name: &str) -> std::vec::Vec<u8> {
         return bytes.to_vec();
     };
     arr.retain(|g| {
-        let dev = g.get("developer").and_then(|v| v.as_str()).unwrap_or("");
-        segments(dev).any(|s| s.eq_ignore_ascii_case(name))
+        let credit = g.get(field).and_then(|v| v.as_str()).unwrap_or("");
+        segments(credit).any(|s| s.eq_ignore_ascii_case(name))
     });
     serde_json::to_vec(&json).unwrap_or_else(|_| bytes.to_vec())
 }

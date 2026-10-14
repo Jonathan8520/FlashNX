@@ -30,7 +30,7 @@ The whole interface is redrawn. Every screen uses the console's own fonts, at th
 - Holding L or R switches one tab, not one every 80 ms, and switching to Settings or Import starts on their first entry (Library, the first game of the studio shelf).
 - In the Flashpoint results, − searches again, as in every other list, and a cover rests as the Play grid shows it (a banner logo used to be cropped to a few letters).
 - A Flashpoint game's details (+) show its screenshot under its logo, with the title, the facts and the description beside them.
-- Y in a Flashpoint game's details ("Same studio") opens its developer's other games, found as a search finds them: your own filter, and − or X for a new search from there.
+- Y in a Flashpoint game's details ("Same studio") opens its developer's other games, found as a search finds them: your own filter, and − or X for a new search from there. A game the archive credits no developer for (more than 45,000 Flash games) offers its publisher's games instead, "Same publisher": Truckster 3 leads to the 33 games i6.com published, Truckster 1 and 2 among them.
 - Settings shows the time, the network and the battery in its corner of the tab bar, as the HOME Menu does (the other tabs have their game count and their search there).
 - Settings, Profile shows your figures on the shared profiles: how many you shared and how many times others applied them. They load in the background when the section opens, and say when there is no connection.
 - The lists of shared profiles no longer read a file from the card for each of their rows on every frame (the console's install id, now read once a session).
