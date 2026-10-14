@@ -270,7 +270,21 @@ impl SwitchRenderBackend {
     /// Signaler un bug"), its title, and a line saying what to do here. Returns
     /// the y where the page's content can start.
     pub(crate) fn kit_page_header(&mut self, crumbs: &[&str], title: &str, subtitle: Option<&str>) -> f32 {
+        self.kit_page_header_logo(crumbs, title, subtitle, None)
+    }
+
+    /// `kit_page_header` with `logo`, (texture, width, height), before the
+    /// title, as tall as its letters: the Flashpoint results, titled
+    /// "Flashpoint", carry Flashpoint's logo. `None` is the plain header.
+    pub(crate) fn kit_page_header_logo(
+        &mut self,
+        crumbs: &[&str],
+        title: &str,
+        subtitle: Option<&str>,
+        logo: Option<(u32, u32, u32)>,
+    ) -> f32 {
         use super::theme::size;
+        const LOGO_H: f32 = 26.0;
         let vw = self.dimensions.width as f32;
         let x = 48.0;
         let mut cx = x;
@@ -281,8 +295,14 @@ impl SwitchRenderBackend {
             let ink = if i + 1 == crumbs.len() { col::TEXT2 } else { col::TEXT3 };
             cx += self.kit_text_mid(cx, 34.0, size::CAPTION + 1.0, c, ink);
         }
-        let t = self.kit_fit(title, size::TITLE, vw - 2.0 * x);
-        self.kit_text_mid(x, 70.0, size::TITLE, &t, col::TEXT);
+        let mut tx = x;
+        if let Some((tex, tw, th)) = logo.filter(|&(tex, tw, th)| tex != 0 && tw > 0 && th > 0) {
+            let lw = (LOGO_H * tw as f32 / th as f32).round();
+            self.kit_image(x, (70.0 - LOGO_H * 0.5).round(), lw, LOGO_H, tex, [0.0, 0.0, 1.0, 1.0], 1.0, 0.0);
+            tx += lw + 12.0;
+        }
+        let t = self.kit_fit(title, size::TITLE, vw - x - tx);
+        self.kit_text_mid(tx, 70.0, size::TITLE, &t, col::TEXT);
         match subtitle {
             Some(sub) => {
                 let s = self.kit_fit(sub, size::LABEL + 1.0, vw - 2.0 * x);

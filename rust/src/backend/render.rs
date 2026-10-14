@@ -3584,6 +3584,10 @@ pub struct SwitchRenderBackend {
     /// The kit's rounded-rectangle shader (`render/kit/shapes.rs`).
     kit_shapes: Option<kit::shapes::ShapeProgram>,
     kit_shapes_tried: bool,
+    /// Flashpoint's logo (`assets/flashpoint.png`): (texture, width, height),
+    /// made the first time the importer draws it (`fp_logo`).
+    fp_logo: Option<(GLuint, u32, u32)>,
+    fp_logo_tried: bool,
     /// True only while the GAME's display list is being replayed to the screen,
     /// which is the one thing the free zoom (issue #101) applies to. Everything
     /// drawn around it -- the pause panel, the pointer, the zoom legend -- runs
@@ -7606,6 +7610,8 @@ impl SwitchRenderBackend {
             kit_text_tried: false,
             kit_shapes: None,
             kit_shapes_tried: false,
+            fp_logo: None,
+            fp_logo_tried: false,
             game_layer: false,
         })
     }
@@ -16949,6 +16955,9 @@ impl Drop for SwitchRenderBackend {
             }
             if self.offscreen_depth_stencil != 0 {
                 glDeleteRenderbuffers(1, &self.offscreen_depth_stencil);
+            }
+            if let Some((tex, _, _)) = self.fp_logo {
+                glDeleteTextures(1, &tex);
             }
             // vertex_arena / index_arena released via their Drop impls.
             // Programs freed by their respective Drop impls.

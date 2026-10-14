@@ -142,7 +142,13 @@ impl SwitchRenderBackend {
         const CHEVRON: f32 = 18.0;
         const KEYBOARD: f32 = 18.0;
         let mut lx = x + PAD;
-        if let Some(ic) = row.icon {
+        if let Some((tex, tw, th)) = row.image.filter(|&(tex, tw, th)| tex != 0 && tw > 0 && th > 0) {
+            // Fitted whole into the icon's box, centred in it.
+            let s = (ICON / tw as f32).min(ICON / th as f32);
+            let (iw, ih) = ((tw as f32 * s).round(), (th as f32 * s).round());
+            self.kit_image((lx + (ICON - iw) * 0.5).round(), (cy - ih * 0.5).round(), iw, ih, tex, [0.0, 0.0, 1.0, 1.0], 1.0, 0.0);
+            lx += ICON + 14.0;
+        } else if let Some(ic) = row.icon {
             let ink = if row.danger {
                 col::DANGER
             } else if focused {
@@ -254,6 +260,10 @@ impl SwitchRenderBackend {
 #[derive(Clone, Copy)]
 pub(crate) struct Row<'a> {
     pub icon: Option<super::icons::Icon>,
+    /// A picture in the icon's place, (texture, width, height): a logo, whole
+    /// and in its own colours (About's Flashpoint row). The icon is drawn
+    /// when there is none.
+    pub image: Option<(u32, u32, u32)>,
     /// The icon drawn FILLED, in this colour: a favourite's star is a solid
     /// gold star, not the outline every other row has.
     pub filled: Option<u32>,
@@ -291,6 +301,7 @@ impl<'a> Row<'a> {
     pub(crate) fn new(icon: super::icons::Icon, label: &'a str) -> Row<'a> {
         Row {
             icon: Some(icon),
+            image: None,
             filled: None,
             label,
             ctrl: super::controls::Ctrl::None,
@@ -319,6 +330,12 @@ impl<'a> Row<'a> {
         if on {
             self.filled = Some(ink);
         }
+        self
+    }
+
+    /// `image` in the icon's place (see `Row::image`); `None` keeps the icon.
+    pub(crate) fn image(mut self, image: Option<(u32, u32, u32)>) -> Row<'a> {
+        self.image = image;
         self
     }
 

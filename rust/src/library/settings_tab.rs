@@ -1328,14 +1328,19 @@ fn about_pane(b: &mut SwitchRenderBackend, logo: (u32, u32, u32)) {
     // every language, like the credit in the footer band.
     let by = u.about_by.replacen("{}", "Jonathan8520", 1);
     let y = b.settings_about_header(top + 4.0, logo, &version, &by);
+    let fp_logo = b.fp_logo();
     let rows = [
         Row::new(Icon::Code, u.about_source).value("github.com/Jonathan8520/FlashNX"),
         Row::new(Icon::Play, u.about_engine).value("Ruffle"),
         // Where the importer's games and covers come from: two volunteer
-        // archives, credited by name like the engine and the icons (no logo:
-        // neither publishes terms for its use).
+        // archives, credited by name like the engine and the icons.
         Row::new(Icon::Archive, u.about_games).value("Flashpoint Archive  \u{00B7}  Internet Archive"),
         Row::new(Icon::Image, u.about_icons).value("Lucide (ISC)"),
+        // The importer shows Flashpoint's logo (assets/flashpoint.png), which
+        // is under CC BY 4.0 (flashpointarchive.org/branding): the credit its
+        // licence asks for, to the Flashpoint Archive, as its designer asked,
+        // beside the logo itself.
+        Row::new(Icon::Image, u.about_fp_logo).image(fp_logo).value("Flashpoint Archive (CC BY 4.0)"),
     ];
     b.settings_block(y + 14.0, &rows, None, pane_glide(SetSection::About));
 }

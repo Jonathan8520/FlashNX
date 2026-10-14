@@ -362,9 +362,14 @@ impl SwitchRenderBackend {
             if y0 > BAND_BOT || y0 + SHELF_HEAD_H + tile_h + 30.0 < BAND_TOP {
                 continue;
             }
-            // Its line: what it is, which studio or genre, how it changes.
+            // Its line: where its games come from (Flashpoint's logo), what it
+            // is, which studio or genre, how it changes.
             let hy = y0 + 11.0;
             let mut hx = IMPORTER_MARGIN_X + 12.0;
+            let logo_w = self.draw_fp_logo(hx, hy, 16.0);
+            if logo_w > 0.0 {
+                hx += logo_w + 8.0;
+            }
             hx += self.kit_text_mid(hx, hy, size::LABEL, shelf.title, col::TEXT) + 10.0;
             let note_w = self.kit_measure(shelf.note, label_px);
             self.kit_text_mid(band_right - note_w, hy, label_px, shelf.note, col::TEXT2);
@@ -589,24 +594,57 @@ impl SwitchRenderBackend {
         self.gl_state.invalidate();
     }
 
-    /// The importer's search, a button at the right of the tab bar: an icon,
-    /// what it searches, and X, which runs it from anywhere on the page. It
-    /// does not scroll with the page. Published for a tap and for the
-    /// results page, which opens out of it.
+    /// Flashpoint's logo (`assets/flashpoint.png`, its colourised arrow,
+    /// cropped and made smaller; CC BY 4.0, credited in About), made the first
+    /// time it is drawn. `None` when it could not be: the caller draws an icon.
+    /// About shows it too, on the row that credits it.
+    pub(crate) fn fp_logo(&mut self) -> Option<(GLuint, u32, u32)> {
+        if !self.fp_logo_tried {
+            self.fp_logo_tried = true;
+            const PNG: &[u8] = include_bytes!("../../../../../assets/flashpoint.png");
+            if let Some((mut rgba, w, h)) = crate::covers::decode_bytes(PNG) {
+                // Drawn far smaller than it is, through its mipmaps, which
+                // would average its transparent margin's black into its edges.
+                crate::covers::bleed_transparent(&mut rgba, w, h);
+                let tex = self.upload_cover_texture(&rgba, w, h);
+                self.fp_logo = (tex != 0).then_some((tex, w, h));
+            }
+        }
+        self.fp_logo
+    }
+
+    /// Flashpoint's logo `h` px tall, from `x`, centred on `cy`. Returns its
+    /// width, 0 when there is no logo (nothing drawn).
+    fn draw_fp_logo(&mut self, x: f32, cy: f32, h: f32) -> f32 {
+        let Some((tex, tw, th)) = self.fp_logo() else { return 0.0 };
+        let w = (h * tw as f32 / th.max(1) as f32).round();
+        self.kit_image(x, (cy - h * 0.5).round(), w, h, tex, [0.0, 0.0, 1.0, 1.0], 1.0, 0.0);
+        w
+    }
+
+    /// The importer's search, a button at the right of the tab bar:
+    /// Flashpoint's logo, what it searches, and X, which runs it from anywhere
+    /// on the page. It does not scroll with the page. Published for a tap and
+    /// for the results page, which opens out of it.
     fn imp_search_button(&mut self, vw: f32) {
         const H: f32 = 40.0;
         const CY: f32 = 36.0;
+        const LOGO_H: f32 = 20.0;
         let u = crate::loc_ui::ui();
         let px = size::LABEL;
         let glyph = 24.0;
         let gw = self.kit_button_width(Btn::X, glyph);
         let label = self.kit_fit(u.imp_fp_title, px, 260.0);
         let tw = self.kit_measure(&label, px);
-        let w = 16.0 + 18.0 + 10.0 + tw + 12.0 + gw + 8.0;
+        // The logo's width, or the search icon's when it could not be made.
+        let mark_w = self.fp_logo().map_or(18.0, |(_, lw, lh)| (LOGO_H * lw as f32 / lh.max(1) as f32).round());
+        let w = 16.0 + mark_w + 10.0 + tw + 12.0 + gw + 8.0;
         let x = vw - 40.0 - w;
         self.kit_rrect(x, CY - H * 0.5, w, H, H * 0.5, col::TILE);
-        self.kit_icon(x + 16.0, CY, 18.0, Icon::Search, col::TEXT2);
-        self.kit_text_mid(x + 16.0 + 18.0 + 10.0, CY, px, &label, col::TEXT2);
+        if self.draw_fp_logo(x + 16.0, CY, LOGO_H) == 0.0 {
+            self.kit_icon(x + 16.0, CY, 18.0, Icon::Search, col::TEXT2);
+        }
+        self.kit_text_mid(x + 16.0 + mark_w + 10.0, CY, px, &label, col::TEXT2);
         self.kit_button(x + w - 8.0 - gw, CY, glyph, Btn::X, col::GLYPH);
         crate::library::search_button_set((x, CY - H * 0.5, w, H));
     }

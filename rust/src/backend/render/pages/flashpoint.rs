@@ -65,7 +65,8 @@ impl SwitchRenderBackend {
         };
         let badge_w = if n > 1 { self.imp_sort_badge(vw - crate::library::IMPORTER_MARGIN, 102.0, g.sort) + 24.0 } else { 0.0 };
         let sub = self.kit_fit(&sub, size::LABEL + 1.0, vw - 2.0 * crate::library::IMPORTER_MARGIN - badge_w - 40.0);
-        self.kit_page_header(&[u.tab_import], lc.fp_title, Some(&sub));
+        let logo = self.fp_logo();
+        self.kit_page_header_logo(&[u.tab_import], lc.fp_title, Some(&sub), logo);
         let now = unsafe { ruffle_tick_now() };
         if g.state == FpState::Loading {
             // Something moving beside "Recherche de « mario »…", so a slow
