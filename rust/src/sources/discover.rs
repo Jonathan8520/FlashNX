@@ -29,7 +29,20 @@ const SCREENSHOT_BASE: &str = "https://db-api.unstable.life/screenshot";
 
 /// What every shelf search asks for: Flash games (not animations) that run.
 /// The entries the archive flags as extreme are left out by the route itself.
+///
+/// `library:arcade` is read and then dropped by the archive's search (FPA
+/// 0.13.7: the conversion of a parsed filter copies every field but the
+/// library), so a third to a half of what comes back is animations
+/// (`library` "theatre"; checked 2026-10-14, the same total with or without
+/// it). `is_game` keeps the games; the filter stays in the query for the day
+/// it works.
 const SHELF_QUERY: &str = "platform:Flash library:arcade status:Playable";
+
+/// A game, not an animation: in the archive's `arcade` library. An entry
+/// that does not say is kept.
+fn is_game(g: &serde_json::Value) -> bool {
+    g.get("library").and_then(|v| v.as_str()).map_or(true, |lib| lib == "arcade")
+}
 
 /// Games a shelf shows. Its last two tiles are its actions: see them all
 /// (or more of the genre), and draw again.
@@ -82,6 +95,12 @@ const EXCLUDED_TAGS: &[&str] = &[
     "Domestic Violence",
     "Animal Cruelty",
     "Cannibalism",
+    // Neither a warning nor a rating: Newgrounds' junk submissions (often a
+    // screen of insults, "[KK]dont zero thisASSHOLE") and the screamers, a
+    // face that jumps out with a shriek (Jonathan, 2026-10-14). Some 240 and
+    // 320 Flash games, a third of a percent of the archive.
+    "Spam",
+    "Jumpscare",
 ];
 
 /// A search that samples the archive: `SAMPLE_GAMES` games drawn at random,
@@ -106,7 +125,9 @@ pub fn studio_candidates(bytes: &[u8], rng: &mut Rng) -> std::vec::Vec<std::stri
     // own aliases ("Duke Boobee BZ Lar", "Dr. Steward 75K"...), each of which
     // used to be a studio of its own and drew the same games five times.
     let mut names: std::vec::Vec<std::string::String> = std::vec::Vec::new();
-    for g in arr {
+    // Games only: an animator's name would draw a shelf of animations, every
+    // one of them left out by `family_filter`.
+    for g in arr.iter().filter(|g| is_game(g)) {
         let dev = g.get("developer").and_then(|v| v.as_str()).unwrap_or("");
         let Some(seg) = segments(dev).next() else { continue };
         let lower = seg.to_lowercase();
@@ -152,11 +173,11 @@ pub fn draw_more_url(filter: bool) -> std::string::String {
 }
 
 /// A search's answer with the games a shelf must not show taken out (any of
-/// `EXCLUDED_TAGS`), and, for a studio, the games of another developer whose
-/// name only contains `developer`'s (the search matches a substring: "Max"
-/// would find "Max Games" and "Maxwell"). Handed to `gamezip::parse_search`
-/// as it is. An answer that is not the route's comes back untouched, for the
-/// parser to say what is wrong with it.
+/// `EXCLUDED_TAGS`, and the animations, `is_game`), and, for a studio, the
+/// games of another developer whose name only contains `developer`'s (the
+/// search matches a substring: "Max" would find "Max Games" and "Maxwell").
+/// Handed to `gamezip::parse_search` as it is. An answer that is not the
+/// route's comes back untouched, for the parser to say what is wrong with it.
 pub fn family_filter(bytes: &[u8], developer: Option<&str>) -> std::vec::Vec<u8> {
     let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(bytes) else {
         return bytes.to_vec();
@@ -181,7 +202,7 @@ pub fn family_filter(bytes: &[u8], developer: Option<&str>) -> std::vec::Vec<u8>
                 }
                 None => true,
             };
-            clean && theirs
+            is_game(g) && clean && theirs
         })
         .collect();
     *arr = kept;

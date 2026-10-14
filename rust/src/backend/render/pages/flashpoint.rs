@@ -39,6 +39,9 @@ pub(crate) struct FpGrid<'a> {
     pub installed: &'a [bool],
     /// The family filter's state, shown in its hint.
     pub filter_on: bool,
+    /// A shelf's page ("see all", "see more"): ZL+ZR draws again there, and
+    /// it starts no new search, so its footer says so (`on_shelf_page`).
+    pub shelf_page: bool,
     /// The order in force, as its outcome.
     pub sort: &'a str,
     /// False under a window or a reveal: no shared glide, no touch table.
@@ -107,21 +110,26 @@ impl SwitchRenderBackend {
                 self.kit_footer_band();
                 let filter = u.fp_filter.replacen("{}", if g.filter_on { u.imp_filter_on } else { u.imp_filter_off }, 1);
                 let chord = [Btn::ZL, Btn::ZR];
-                self.imp_footer_hints(&[
-                    (&[Btn::Minus][..], u.imp_new_search),
-                    (&[Btn::B][..], u.back),
-                    (&chord[..], filter.as_str()),
-                ]);
+                if g.shelf_page {
+                    self.imp_footer_hints(&[(&chord[..], u.disc_again), (&[Btn::B][..], u.back)]);
+                } else {
+                    self.imp_footer_hints(&[
+                        (&[Btn::Minus][..], u.imp_new_search),
+                        (&[Btn::B][..], u.back),
+                        (&chord[..], filter.as_str()),
+                    ]);
+                }
                 return self.fp_done();
             }
             FpState::Error => {
                 self.imp_empty_state_fp(Icon::WifiOff, Some(u.imp_err_search), g.msg, (band_top + band_bot) * 0.5);
                 self.kit_footer_band();
-                self.imp_footer_hints(&[
-                    (&[Btn::A][..], u.imp_retry),
-                    (&[Btn::Minus][..], u.imp_new_search),
-                    (&[Btn::B][..], u.back),
-                ]);
+                let mut hints: std::vec::Vec<kit::text::HintItem> = std::vec![(&[Btn::A][..], u.imp_retry)];
+                if !g.shelf_page {
+                    hints.push((&[Btn::Minus][..], u.imp_new_search));
+                }
+                hints.push((&[Btn::B][..], u.back));
+                self.imp_footer_hints(&hints);
                 return self.fp_done();
             }
             FpState::Results => {}
@@ -298,15 +306,24 @@ impl SwitchRenderBackend {
         let mut hints: std::vec::Vec<kit::text::HintItem> = std::vec![
             (&[Btn::A][..], if have { u.hint_play } else { u.download }),
             (&[Btn::Plus][..], u.info),
-            (&[Btn::Minus][..], u.imp_new_search),
         ];
+        // A shelf's page starts no search; ZL+ZR draws again there, an action
+        // of the page, so it comes before B rather than last.
+        if !g.shelf_page {
+            hints.push((&[Btn::Minus][..], u.imp_new_search));
+        }
         if n > 1 {
             hints.push((&[Btn::Y][..], u.hint_sort));
         }
+        if g.shelf_page {
+            hints.push((&chord[..], u.disc_again));
+        }
         hints.push((&[Btn::B][..], u.back));
-        // The family filter is a hidden chord: shown when there is room, and
-        // the first to go when there is not.
-        hints.push((&chord[..], filter.as_str()));
+        // On a search, the family filter is a hidden chord: shown when there
+        // is room, and the first to go when there is not.
+        if !g.shelf_page {
+            hints.push((&chord[..], filter.as_str()));
+        }
         self.imp_footer_hints(&hints);
         self.fp_done()
     }

@@ -1867,6 +1867,25 @@ pub(crate) struct State {
     /// shelf), with the shelf's own games (`fp_seed`) among them.
     fp_draw: bool,
     fp_seed: std::vec::Vec<crate::sources::flashpoint::CatalogEntry>,
+    /// "Relancer" on a studio's page is looking for another studio
+    /// (`studio_hunt_next`): the steps taken, bounded like the shelf's own
+    /// search; 0 when no hunt is on.
+    fp_hunt: u8,
+    /// The hunt's request in flight samples the archive for studios, rather
+    /// than asking for one's games.
+    fp_hunt_sampling: bool,
+    /// "See more"'s last list, with the shelf's games it was drawn for (their
+    /// ids): opened again on the same lot, the page shows it again rather than
+    /// drawing anew, which only "Relancer" does (Jonathan, 2026-10-14: a list
+    /// that changes on its own is not the player's doing).
+    fp_draw_last: Option<(std::vec::Vec<std::string::String>, std::vec::Vec<crate::sources::flashpoint::CatalogEntry>)>,
+}
+
+/// The results page is a shelf's ("see all", "see more"), not a search: it
+/// stays a family page like its shelf, ZL+ZR draws again there instead of
+/// flipping the filter, and it starts no new search.
+fn on_shelf_page(s: &State) -> bool {
+    s.fp_draw || s.fp_studio.is_some() || s.fp_hunt > 0
 }
 
 /// Where a discovery shelf is: never asked yet, its search on its way, its
@@ -2028,6 +2047,9 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     fp_studio: None,
     fp_draw: false,
     fp_seed: std::vec::Vec::new(),
+    fp_hunt: 0,
+    fp_hunt_sampling: false,
+    fp_draw_last: None,
 });
 
 /// Where the URL history persists across boots. Format: JSON array of
@@ -5160,7 +5182,15 @@ fn input_inner(button: &str) -> bool {
             // the keyboard pre-filled with this one so it can be refined.
             // Hoisted: swkbd + the async GET must run WITHOUT the LIBRARY lock.
             // Not while the search is still loading, where Minus cancels it.
-            let (loading, failed) = LIBRARY.lock().map(|s| (s.fp_loading, s.fp_error)).unwrap_or((false, false));
+            let (loading, failed, shelf_page, studio_page) = LIBRARY
+                .lock()
+                .map(|s| (s.fp_loading, s.fp_error, on_shelf_page(&s), s.fp_studio.is_some() || s.fp_hunt > 0))
+                .unwrap_or((false, false, false, false));
+            // A shelf's page ("see all", "see more") starts no search: it is the
+            // shelf's games, and B goes back to it (Jonathan, 2026-10-14).
+            if shelf_page && !loading && (button == "X" || button == "Minus") {
+                return true;
+            }
             if !loading && (button == "X" || button == "Minus") {
                 if run_fp_search_flow(None) {
                     crate::sfx::choose(crate::sfx::Sfx::Decide);
@@ -5176,10 +5206,25 @@ fn input_inner(button: &str) -> bool {
                 }
                 return true;
             }
-            // Hidden ZL+ZR chord (synthesised in main.cpp): flip the family
-            // filter and re-run the query. Hoisted because it starts an async GET.
+            // ZL+ZR (synthesised in main.cpp). On a search, the hidden chord:
+            // flip the family filter and re-run the query (issue #33). On a
+            // shelf's page, "Relancer", as on the shelf: another draw (with
+            // the shelf's games), or another studio, which the shelf then
+            // shows. A draw re-run was all the chord did there anyway, its
+            // filter flip hidden by the shelves' own. Hoisted because it
+            // starts an async GET.
             if button == "ZL+ZR" {
-                let _ = run_fp_requery(true);
+                let acted = if studio_page {
+                    !loading && {
+                        studio_hunt_start();
+                        true
+                    }
+                } else {
+                    run_fp_requery(!shelf_page)
+                };
+                if acted && shelf_page {
+                    crate::sfx::choose(crate::sfx::Sfx::Decide);
+                }
                 return true;
             }
         }
@@ -8689,33 +8734,162 @@ fn start_fp_search(query: &str, origin: Option<usize>) {
     start_fp_query(&url, query, None, origin.map(|row| (row, IMPORTER_SEARCH_ROW)));
     if let Ok(mut s) = LIBRARY.lock() {
         s.fp_typed = query.to_string();
+        s.fp_hunt = 0;
+        s.fp_hunt_sampling = false;
     }
 }
 
 /// A studio's games on the results page: "see all" on the studio of the
 /// day's shelf (`origin_row`, its tile, which the page opens out of and folds
-/// back into). The header names the studio as it names a search.
+/// back into). The header names the studio as it names a search. A family
+/// page, like its shelf, whatever the player's filter (`on_shelf_page`).
 fn start_fp_studio(name: std::string::String, origin_row: usize) {
-    let filter = LIBRARY.lock().map(|s| s.fp_content_filter).unwrap_or(true);
     log(&std::format!("library: flashpoint studio \"{}\" (async)\n", name));
-    let url = crate::sources::discover::studio_url(&name, filter);
+    let url = crate::sources::discover::studio_url(&name, true);
     let query = name.clone();
     start_fp_query(&url, &query, Some(name), Some((origin_row, origin_row)));
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.fp_hunt = 0;
+        s.fp_hunt_sampling = false;
+    }
 }
 
 /// "See more" on the draw's shelf: a bigger draw on the results page, with
 /// the shelf's own `games` among it (the shelf showed them, and asking for
 /// more must not make them vanish). The header says it is a random draw.
-/// From the importer, `origin_row` is the tile the page opens out of.
-fn start_fp_draw(games: std::vec::Vec<crate::sources::flashpoint::CatalogEntry>, origin_row: Option<usize>) {
-    let filter = LIBRARY.lock().map(|s| s.fp_content_filter).unwrap_or(true);
-    let url = crate::sources::discover::draw_more_url(filter);
-    log("library: flashpoint random draw (async)\n");
-    start_fp_query(&url, crate::loc_ui::ui().disc_lucky, None, origin_row.map(|r| (r, r)));
+/// From the importer, `origin_row` is the tile the page opens out of. A
+/// family page, like its shelf, whatever the player's filter. The list it
+/// showed for the same lot comes back (`fp_draw_last`) unless `again`, its
+/// "Relancer".
+fn start_fp_draw(games: std::vec::Vec<crate::sources::flashpoint::CatalogEntry>, origin_row: Option<usize>, again: bool) {
+    let lot: std::vec::Vec<std::string::String> = games.iter().map(|c| c.id.clone()).collect();
+    let kept = if again {
+        None
+    } else {
+        LIBRARY
+            .lock()
+            .ok()
+            .and_then(|s| s.fp_draw_last.as_ref().filter(|(seed, _)| *seed == lot).map(|(_, list)| list.clone()))
+    };
+    let title = crate::loc_ui::ui().disc_lucky;
+    let origin = origin_row.map(|r| (r, r));
+    match kept {
+        Some(list) => {
+            log("library: flashpoint random draw kept (the shelf's lot is the same)\n");
+            open_fp_page(None, list, title, None, origin);
+        }
+        None => {
+            log("library: flashpoint random draw (async)\n");
+            start_fp_query(&crate::sources::discover::draw_more_url(true), title, None, origin);
+        }
+    }
     if let Ok(mut s) = LIBRARY.lock() {
         s.fp_draw = true;
         s.fp_seed = games;
+        s.fp_hunt = 0;
+        s.fp_hunt_sampling = false;
     }
+}
+
+/// "Relancer" (ZL+ZR) on a studio's page: another studio, as the shelf's own
+/// "Relancer" draws one, and the shelf follows it (Jonathan, 2026-10-14): back
+/// on the importer, the shelf shows the studio the page showed.
+fn studio_hunt_start() {
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.fp_hunt = 0;
+        s.fp_hunt_sampling = false;
+    }
+    log("library: studio page drawn again\n");
+    studio_hunt_next();
+}
+
+/// The hunt's next step: the shelf's next candidate studio, or a new sample
+/// of the archive once they run out (`studio_hunt_land` takes the answer).
+/// Gives up after `STUDIO_MAX_ASKED` steps, as the shelf does.
+fn studio_hunt_next() {
+    use crate::sources::discover;
+    let u = crate::loc_ui::ui();
+    let step = LIBRARY.lock().ok().and_then(|mut s| {
+        s.fp_hunt = s.fp_hunt.saturating_add(1);
+        if s.fp_hunt > STUDIO_MAX_ASKED {
+            return None;
+        }
+        let shelf = &mut s.shelves[0];
+        Some((!shelf.candidates.is_empty()).then(|| shelf.candidates.remove(0)))
+    });
+    match step {
+        Some(Some(name)) => {
+            start_fp_query(&discover::studio_url(&name, true), u.disc_studio, Some(name), None);
+            if let Ok(mut s) = LIBRARY.lock() {
+                s.fp_hunt_sampling = false;
+            }
+        }
+        Some(None) => {
+            start_fp_query(&discover::sample_url(), u.disc_studio, None, None);
+            if let Ok(mut s) = LIBRARY.lock() {
+                s.fp_hunt_sampling = true;
+            }
+        }
+        None => {
+            log("library: studio page: every studio asked had too few games\n");
+            if let Ok(mut s) = LIBRARY.lock() {
+                // Still a hunt, so A ("Réessayer") starts it again.
+                s.fp_hunt = 1;
+                s.fp_loading = false;
+                s.fp_error = true;
+                s.cover_msg = u.disc_unavailable.to_string();
+            }
+        }
+    }
+}
+
+/// A hunt's answer, `bytes`: a sample gives the shelf its next candidates; a
+/// studio with enough games of its own (as the shelf counts them) becomes the
+/// shelf's, its games for the page to show. Returns true when the hunt went
+/// on to another step instead, the page still waiting.
+fn studio_hunt_land(bytes: &[u8]) -> bool {
+    use crate::sources::discover;
+    let now = unsafe { ruffle_tick_now() };
+    let (sampling, name) = match LIBRARY.lock() {
+        Ok(s) => (s.fp_hunt_sampling, s.fp_studio.clone()),
+        Err(_) => return false,
+    };
+    if sampling {
+        let candidates = discover::studio_candidates(bytes, &mut discover::Rng::new(now ^ 0x5354));
+        if let Ok(mut s) = LIBRARY.lock() {
+            s.shelves[0].candidates = candidates;
+            s.fp_hunt_sampling = false;
+        }
+        studio_hunt_next();
+        return true;
+    }
+    let Some(name) = name else { return false };
+    let all = crate::sources::gamezip::parse_search(&discover::family_filter(bytes, Some(&name))).unwrap_or_default();
+    let Ok(mut s) = LIBRARY.lock() else { return false };
+    let shelf = &mut s.shelves[0];
+    // The same author under another of his names, as `shelf_land` says.
+    let known = all.iter().filter(|c| shelf.seen.contains(&c.id)).count();
+    if all.len() < discover::STUDIO_MIN_GAMES || (!all.is_empty() && known * 2 >= all.len()) {
+        drop(s);
+        studio_hunt_next();
+        return true;
+    }
+    shelf.seen.extend(all.iter().map(|c| c.id.clone()));
+    let mut items = discover::pick(&all, &mut discover::Rng::new(now));
+    sort_fp_candidates(&mut items, (0, false));
+    shelf.items = items;
+    shelf.total = all.len();
+    shelf.studio = name.clone();
+    shelf.phase = ShelfPhase::Ready;
+    shelf.slot = -1;
+    shelf.asked = 0;
+    shelf.failures = 0;
+    shelf.failed_at = 0;
+    s.fp_query = name.clone();
+    s.fp_hunt = 0;
+    publish_shelves(&s);
+    log(&std::format!("library: studio page drew \"{}\", {} games\n", name, all.len()));
+    false
 }
 
 /// Every cached logo and screenshot let go of, but the screenshots of the
@@ -8741,6 +8915,18 @@ fn clear_thumbs_but_shelves() {
 /// From the importer, `origin` is the row to come back to and the item the
 /// page opens out of (the search button, a tile), and B folds it back there.
 fn start_fp_query(url: &str, query: &str, studio: Option<std::string::String>, origin: Option<(usize, usize)>) {
+    open_fp_page(Some(url), std::vec::Vec::new(), query, studio, origin);
+}
+
+/// `start_fp_query`'s page: it asks `url`, or, with none, shows `kept` at once
+/// (a list it showed before, "see more" opened again on the same lot).
+fn open_fp_page(
+    url: Option<&str>,
+    kept: std::vec::Vec<crate::sources::flashpoint::CatalogEntry>,
+    query: &str,
+    studio: Option<std::string::String>,
+    origin: Option<(usize, usize)>,
+) {
     // Drop any thumbnail still coming for the previous results, and the
     // details blurb with them: a slot freed here can be handed to a logo next.
     // Their logos go too, textures and all: those results are gone. The
@@ -8750,9 +8936,9 @@ fn start_fp_query(url: &str, query: &str, studio: Option<std::string::String>, o
     // A fresh result set: snap the glide and the tiles' clocks to rest.
     crate::backend::render::gallery_anim_reset();
     crate::backend::render::tile_open_reset();
-    let started = net::start_get_async(url);
+    let started = url.map(net::start_get_async);
     if let Ok(mut s) = LIBRARY.lock() {
-        s.cover_candidates = std::vec::Vec::new();
+        s.cover_candidates = kept;
         s.fp_query = query.to_string();
         s.fp_studio = studio;
         s.fp_draw = false;
@@ -8769,15 +8955,20 @@ fn start_fp_query(url: &str, query: &str, studio: Option<std::string::String>, o
             }
         }
         match started {
-            Ok(()) => {
+            Some(Ok(())) => {
                 s.cover_msg = std::string::String::new();
                 s.fp_loading = true;
                 s.fp_error = false;
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 s.cover_msg = e;
                 s.fp_loading = false;
                 s.fp_error = true;
+            }
+            None => {
+                s.cover_msg = std::string::String::new();
+                s.fp_loading = false;
+                s.fp_error = false;
             }
         }
         if let Some((row, _)) = origin {
@@ -8797,26 +8988,33 @@ fn start_fp_query(url: &str, query: &str, studio: Option<std::string::String>, o
 /// `input()` only. Returns whether a search went out, so A can sound like it
 /// did something only when it did.
 fn run_fp_requery(flip_filter: bool) -> bool {
-    let (query, studio, draw, filter) = {
+    let (query, studio, draw, hunt) = {
         let Ok(mut s) = LIBRARY.lock() else { return false };
         if s.fp_loading {
             return false;
         }
-        if flip_filter {
+        // A shelf's page keeps the family filter whatever the player's.
+        if flip_filter && !on_shelf_page(&s) {
             s.fp_content_filter = !s.fp_content_filter;
             log(&std::format!("library: flashpoint filter -> {}\n", s.fp_content_filter));
         }
         let draw = s.fp_draw.then(|| s.fp_seed.clone());
-        (s.fp_query.clone(), s.fp_studio.clone(), draw, s.fp_content_filter)
+        (s.fp_query.clone(), s.fp_studio.clone(), draw, s.fp_hunt > 0)
     };
+    // A studio's page that failed while looking for another studio: it goes
+    // on looking.
+    if hunt {
+        studio_hunt_next();
+        return true;
+    }
     // A bigger draw: another one, the shelf's games still among it.
     if let Some(games) = draw {
-        start_fp_draw(games, None);
+        start_fp_draw(games, None, true);
         return true;
     }
     // A studio's games are asked for again as such, not as a search for its name.
     if let Some(name) = studio {
-        start_fp_query(&crate::sources::discover::studio_url(&name, filter), &query, Some(name), None);
+        start_fp_query(&crate::sources::discover::studio_url(&name, true), &query, Some(name), None);
         return true;
     }
     if query.trim().is_empty() {
@@ -11111,7 +11309,7 @@ fn shelf_press_a(selection: usize, scroll: usize) {
             if k == 0 {
                 start_fp_studio(studio, selection);
             } else {
-                start_fp_draw(games, Some(selection));
+                start_fp_draw(games, Some(selection), false);
             }
         }
         return;
@@ -12314,9 +12512,10 @@ fn draw_fp_page(backend: &mut SwitchRenderBackend, selection: usize, scroll: usi
             FpState::Results
         };
         let sort = remote_sort_phrase(SORT_TARGET_FP, s.fp_sort.0, s.fp_sort.1);
-        (titles, devs, years, urls, installed, state, s.cover_msg.clone(), s.fp_query.clone(), s.fp_content_filter, sort)
+        let filter_on = s.fp_content_filter || on_shelf_page(&s);
+        (titles, devs, years, urls, installed, state, s.cover_msg.clone(), s.fp_query.clone(), filter_on, on_shelf_page(&s), sort)
     });
-    let Some((titles, devs, years, urls, installed, state, msg, query, filter_on, sort)) = snap else { return };
+    let Some((titles, devs, years, urls, installed, state, msg, query, filter_on, shelf_page, sort)) = snap else { return };
     let t: std::vec::Vec<&str> = titles.iter().map(|x| x.as_str()).collect();
     let d: std::vec::Vec<&str> = devs.iter().map(|x| x.as_str()).collect();
     let y: std::vec::Vec<&str> = years.iter().map(|x| x.as_str()).collect();
@@ -12333,6 +12532,7 @@ fn draw_fp_page(backend: &mut SwitchRenderBackend, selection: usize, scroll: usi
         urls: &u,
         installed: &installed,
         filter_on,
+        shelf_page,
         sort,
         interactive,
     });
@@ -12345,6 +12545,12 @@ fn poll_fp_search() {
     match net::tick_get_async() {
         net::GetPoll::Pending => {}
         net::GetPoll::Done(bytes) => {
+            // "Relancer" on a studio's page looking for another studio: a step
+            // of it, unless this studio is the one, whose games land below.
+            let hunting = LIBRARY.lock().map(|s| s.fp_hunt > 0).unwrap_or(false);
+            if hunting && studio_hunt_land(&bytes) {
+                return;
+            }
             // A studio's games ("see all" on its shelf): that studio's alone
             // (the search matches a substring of the name), past the shelf's
             // filter, so the page lists what the shelf drew from.
@@ -12364,7 +12570,9 @@ fn poll_fp_search() {
                 Ok(list) => (list, std::string::String::new(), false),
                 Err(e) => (std::vec::Vec::new(), e, true),
             };
+            let mut lot = None;
             if let (Some(seed), false) = (seed, failed) {
+                lot = Some(seed.iter().map(|c| c.id.clone()).collect::<std::vec::Vec<_>>());
                 for c in seed {
                     if !cands.iter().any(|x| x.id == c.id || x.title.eq_ignore_ascii_case(&c.title)) {
                         cands.push(c);
@@ -12373,6 +12581,10 @@ fn poll_fp_search() {
             }
             sort_fp_candidates(&mut cands, (0, false));
             if let Ok(mut s) = LIBRARY.lock() {
+                // A draw's list, kept for "see more" opened again on this lot.
+                if let Some(lot) = lot {
+                    s.fp_draw_last = Some((lot, cands.clone()));
+                }
                 s.cover_candidates = cands;
                 s.cover_msg = msg;
                 s.fp_loading = false;

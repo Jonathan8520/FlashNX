@@ -1358,8 +1358,9 @@ static void worker_entry(void* arg) {
         // Hidden ZL+ZR chord: emit one synthetic "ZL+ZR" event on the frame the
         // pair completes (both held now, not both held before this frame's new
         // presses). The library only acts on it in the Flashpoint results grid
-        // (toggle the content filter, issue #33); ZL/ZR are no-ops there on their
-        // own, so the individual events menu_repeat_step also forwarded are inert.
+        // (toggle the content filter, issue #33; "Relancer" on a shelf's page);
+        // ZL/ZR are no-ops there on their own, so the individual events
+        // menu_repeat_step also forwarded are inert.
         {
             const u64 ZLZR = HidNpadButton_ZL | HidNpadButton_ZR;
             const bool both_now  = (kHeldLib & ZLZR) == ZLZR;
