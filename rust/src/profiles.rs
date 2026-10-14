@@ -218,7 +218,26 @@ extern "C" {
 /// install re-sharing a game keeps the same id, so it UPDATES its own profile
 /// rather than piling up duplicates. Not an identity/login: it's only a dedup
 /// key, carries no personal data, and a fresh value on a reset SD is harmless.
+///
+/// Read once a session, then kept: it was a file read on every call, and
+/// `is_mine` calls it for each profile, which made Settings, Profile's figures
+/// cost 80 ms over 101 catalog entries (measured 2026-10-14) and the in-game
+/// list of profiles read it for each row on every frame. Nothing but this
+/// function writes the file, and only when there was none.
 pub fn install_id() -> std::string::String {
+    static CACHED: std::sync::Mutex<Option<std::string::String>> = std::sync::Mutex::new(None);
+    if let Some(id) = CACHED.lock().ok().and_then(|g| g.clone()) {
+        return id;
+    }
+    let id = install_id_uncached();
+    if let Ok(mut g) = CACHED.lock() {
+        *g = Some(id.clone());
+    }
+    id
+}
+
+/// `install_id` from the card, written there on the first run.
+fn install_id_uncached() -> std::string::String {
     // Reuse an existing id if one is on the SD (either root, for legacy installs).
     {
         let p = crate::library::config_read_path("install_id");
@@ -533,14 +552,17 @@ const GH_REF: &str = "community-profiles";
 /// it. `_=<tick>` defeats any conditional caching. None on any failure (network,
 /// rate limit, missing file).
 fn gh_api_fetch_text(path: &str, cap: usize) -> Option<std::string::String> {
-    let url = std::format!(
-        "{}{}?ref={}&_={}",
-        GH_API_BASE,
-        path,
-        GH_REF,
-        unsafe { ruffle_tick_now() },
-    );
-    let bytes = crate::net::http_get(&url, cap).ok()?;
+    let bytes = crate::net::http_get(&gh_api_url(path), cap).ok()?;
+    gh_api_decode(bytes)
+}
+
+/// The GitHub API's address of `path` on the catalog branch.
+fn gh_api_url(path: &str) -> std::string::String {
+    std::format!("{}{}?ref={}&_={}", GH_API_BASE, path, GH_REF, unsafe { ruffle_tick_now() })
+}
+
+/// A file's text out of the GitHub API's answer (base64 in a JSON object).
+fn gh_api_decode(bytes: std::vec::Vec<u8>) -> Option<std::string::String> {
     let text = std::string::String::from_utf8(bytes).ok()?;
     #[derive(serde::Deserialize)]
     struct ApiFile {
@@ -624,7 +646,13 @@ fn fetch_index() -> std::vec::Vec<IndexEntry> {
             .unwrap_or_default();
     }
     // Fetch via the GitHub API (fresh; raw.githubusercontent lags new commits).
-    match gh_api_fetch_text("index.json", 256 * 1024) {
+    take_index(gh_api_fetch_text("index.json", 256 * 1024))
+}
+
+/// The catalog index's text (or its failure) into the session's cache.
+fn take_index(text: Option<std::string::String>) -> std::vec::Vec<IndexEntry> {
+    use std::sync::atomic::Ordering;
+    match text {
         Some(text) => {
             // A parse failure is NOT an empty catalog. `unwrap_or_default` made it
             // one, logged it as "index fetched (0 entries)" and cached that as a
@@ -780,22 +808,73 @@ fn fetch_counts() -> std::collections::BTreeMap<std::string::String, u32> {
     if COUNTS_TRIED.load(Ordering::Relaxed) {
         return COUNTS.lock().ok().and_then(|g| g.clone()).unwrap_or_default();
     }
-    let map = match crate::net::http_get(&worker_url("/counts"), 64 * 1024) {
+    match crate::net::http_get(&worker_url("/counts"), 64 * 1024) {
         // Only an answer counts as tried: a request made offline is asked
         // again at the next picker, once the console is back online.
-        Ok(bytes) => std::string::String::from_utf8(bytes)
-            .ok()
-            .and_then(|t| {
-                serde_json::from_str::<std::collections::BTreeMap<std::string::String, u32>>(&t).ok()
-            })
-            .unwrap_or_default(),
-        Err(_) => return std::collections::BTreeMap::new(),
-    };
-    COUNTS_TRIED.store(true, Ordering::Relaxed);
+        Ok(bytes) => take_counts(bytes),
+        Err(_) => std::collections::BTreeMap::new(),
+    }
+}
+
+/// The counters' answer into the session's cache.
+fn take_counts(bytes: std::vec::Vec<u8>) -> std::collections::BTreeMap<std::string::String, u32> {
+    let map = std::string::String::from_utf8(bytes)
+        .ok()
+        .and_then(|t| serde_json::from_str::<std::collections::BTreeMap<std::string::String, u32>>(&t).ok())
+        .unwrap_or_default();
+    COUNTS_TRIED.store(true, std::sync::atomic::Ordering::Relaxed);
     if let Ok(mut g) = COUNTS.lock() {
         *g = Some(map.clone());
     }
     map
+}
+
+// ── Settings › Profile: the player's figures ──────────────────────────────
+
+/// Where the catalog index and the counters are, for a caller that fetches
+/// them itself, off the frame (Settings, through the thumbnail pool): the
+/// pickers' own reads block, behind their loading card.
+pub fn index_request_url() -> std::string::String {
+    gh_api_url("index.json")
+}
+
+pub fn counts_request_url() -> std::string::String {
+    worker_url("/counts")
+}
+
+/// Whether the index and the counters are already in this session's cache.
+pub fn index_cached() -> bool {
+    INDEX_TRIED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn counts_cached() -> bool {
+    COUNTS_TRIED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// An index fetched by `index_request_url` into the cache, as `fetch_index`
+/// would have it. False when it is not a readable index.
+pub fn ingest_index(bytes: std::vec::Vec<u8>) -> bool {
+    take_index(gh_api_decode(bytes));
+    index_cached()
+}
+
+/// Counters fetched by `counts_request_url` into the cache.
+pub fn ingest_counts(bytes: std::vec::Vec<u8>) {
+    take_counts(bytes);
+}
+
+/// The profiles shared from this console, from the cached index, and the
+/// times they were applied, from the cached counters (`None` while they are
+/// not in). `None` while the index is not.
+pub fn share_stats() -> Option<(usize, Option<u32>)> {
+    let index = ONLINE_INDEX.lock().ok().and_then(|g| g.clone())?;
+    let mine: std::vec::Vec<&IndexEntry> = index.iter().filter(|e| is_mine(&e.id)).collect();
+    let applied = COUNTS
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .map(|counts| mine.iter().map(|e| counts.get(&e.id).copied().unwrap_or(0)).sum());
+    Some((mine.len(), applied))
 }
 
 #[derive(serde::Serialize)]

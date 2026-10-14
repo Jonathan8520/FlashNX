@@ -64,6 +64,12 @@ pub struct Ui {
     pub row_game_prefs: &'static str,
     pub row_language: &'static str,
     pub row_pseudo: &'static str,
+    /// Settings › Profile: the caption of the shared profiles' figures.
+    pub stats_title: &'static str,
+    /// Its rows: the profiles shared from this console, the times they were
+    /// applied.
+    pub stat_shared: &'static str,
+    pub stat_applied: &'static str,
     pub row_bug: &'static str,
     pub row_suggest: &'static str,
     pub row_quit: &'static str,
@@ -645,6 +651,9 @@ const EN: Ui = Ui {
     row_game_prefs: "Game defaults",
     row_language: "Language",
     row_pseudo: "Nickname",
+    stats_title: "Shared profiles",
+    stat_shared: "Shared by you",
+    stat_applied: "Used by others",
     row_bug: "Report a bug",
     row_suggest: "Suggest an idea",
     row_quit: "Quit FlashNX",
@@ -982,6 +991,9 @@ const FR: Ui = Ui {
     row_game_prefs: "Jeu par défaut",
     row_language: "Langue",
     row_pseudo: "Pseudo",
+    stats_title: "Profils partagés",
+    stat_shared: "Partagés par toi",
+    stat_applied: "Utilisés par d'autres",
     row_bug: "Signaler un bug",
     row_suggest: "Proposer une idée",
     row_quit: "Quitter FlashNX",
@@ -1319,6 +1331,9 @@ const ES: Ui = Ui {
     row_game_prefs: "Valores por defecto",
     row_language: "Idioma",
     row_pseudo: "Apodo",
+    stats_title: "Perfiles compartidos",
+    stat_shared: "Compartidos por ti",
+    stat_applied: "Usados por otros",
     row_bug: "Informar de un error",
     row_suggest: "Proponer una idea",
     row_quit: "Salir de FlashNX",
@@ -1656,6 +1671,9 @@ const RU: Ui = Ui {
     row_game_prefs: "Значения по умолчанию",
     row_language: "Язык",
     row_pseudo: "Ник",
+    stats_title: "Общие профили",
+    stat_shared: "Опубликованы тобой",
+    stat_applied: "Применены другими",
     row_bug: "Сообщить об ошибке",
     row_suggest: "Предложить идею",
     row_quit: "Выйти из FlashNX",
@@ -1993,6 +2011,9 @@ const DE: Ui = Ui {
     row_game_prefs: "Spielvorgaben",
     row_language: "Sprache",
     row_pseudo: "Spitzname",
+    stats_title: "Geteilte Profile",
+    stat_shared: "Von dir geteilt",
+    stat_applied: "Von anderen genutzt",
     row_bug: "Fehler melden",
     row_suggest: "Idee vorschlagen",
     row_quit: "FlashNX beenden",
@@ -2330,6 +2351,9 @@ const IT: Ui = Ui {
     row_game_prefs: "Predefiniti dei giochi",
     row_language: "Lingua",
     row_pseudo: "Nickname",
+    stats_title: "Profili condivisi",
+    stat_shared: "Condivisi da te",
+    stat_applied: "Usati da altri",
     row_bug: "Segnala un bug",
     row_suggest: "Proponi un'idea",
     row_quit: "Esci da FlashNX",
@@ -2667,6 +2691,9 @@ const PT: Ui = Ui {
     row_game_prefs: "Padrões dos jogos",
     row_language: "Idioma",
     row_pseudo: "Apelido",
+    stats_title: "Perfis compartilhados",
+    stat_shared: "Compartilhados por você",
+    stat_applied: "Usados por outros",
     row_bug: "Relatar um erro",
     row_suggest: "Sugerir uma ideia",
     row_quit: "Sair do FlashNX",
@@ -3004,6 +3031,9 @@ const ZH: Ui = Ui {
     row_game_prefs: "游戏默认设置",
     row_language: "语言",
     row_pseudo: "昵称",
+    stats_title: "共享的配置",
+    stat_shared: "你分享的",
+    stat_applied: "他人使用",
     row_bug: "报告问题",
     row_suggest: "提出建议",
     row_quit: "退出 FlashNX",
@@ -3341,6 +3371,9 @@ const TR: Ui = Ui {
     row_game_prefs: "Oyun varsayılanları",
     row_language: "Dil",
     row_pseudo: "Takma ad",
+    stats_title: "Paylaşılan profiller",
+    stat_shared: "Senin paylaştıkların",
+    stat_applied: "Başkalarının kullandığı",
     row_bug: "Hata bildir",
     row_suggest: "Fikir öner",
     row_quit: "FlashNX'ten çık",
@@ -3672,6 +3705,50 @@ pub fn games(n: usize) -> std::string::String {
         Lang::Pt => std::format!("{} jogos", c),
         Lang::Zh => std::format!("游戏：{}", c),
         Lang::Tr => std::format!("{} oyun", c),
+    }
+}
+
+/// "4 profils", "1 profil": the shared profiles counted in Settings ›
+/// Profile, by each language's rule, as `games`.
+pub fn profiles(n: usize) -> std::string::String {
+    let c = crate::backend::render::imp_count(n as u64);
+    match current() {
+        Lang::En if n == 1 => "1 profile".into(),
+        Lang::En => std::format!("{} profiles", c),
+        Lang::Fr if n <= 1 => std::format!("{} profil", c),
+        Lang::Fr => std::format!("{} profils", c),
+        Lang::Es if n == 1 => "1 perfil".into(),
+        Lang::Es => std::format!("{} perfiles", c),
+        Lang::Ru => std::format!("Профилей: {}", c),
+        Lang::De if n == 1 => "1 Profil".into(),
+        Lang::De => std::format!("{} Profile", c),
+        Lang::It if n == 1 => "1 profilo".into(),
+        Lang::It => std::format!("{} profili", c),
+        Lang::Pt if n == 1 => "1 perfil".into(),
+        Lang::Pt => std::format!("{} perfis", c),
+        Lang::Zh => std::format!("配置：{}", c),
+        Lang::Tr => std::format!("{} profil", c),
+    }
+}
+
+/// "12 fois", "once": how many times the player's shared profiles were
+/// applied, by each language's rule.
+pub fn times(n: usize) -> std::string::String {
+    let c = crate::backend::render::imp_count(n as u64);
+    match current() {
+        Lang::En if n == 1 => "once".into(),
+        Lang::En => std::format!("{} times", c),
+        Lang::Fr => std::format!("{} fois", c),
+        Lang::Es if n == 1 => "1 vez".into(),
+        Lang::Es => std::format!("{} veces", c),
+        Lang::Ru => std::format!("Раз: {}", c),
+        Lang::De => std::format!("{}-mal", c),
+        Lang::It if n == 1 => "1 volta".into(),
+        Lang::It => std::format!("{} volte", c),
+        Lang::Pt if n == 1 => "1 vez".into(),
+        Lang::Pt => std::format!("{} vezes", c),
+        Lang::Zh => std::format!("{} 次", c),
+        Lang::Tr => std::format!("{} kez", c),
     }
 }
 

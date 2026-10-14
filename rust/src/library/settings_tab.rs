@@ -1276,9 +1276,150 @@ fn profile_pane(
     let y = b.settings_note(y + 8.0, u.help_pseudo, 2);
     // The way to a game's sharing, in the words its menus use.
     let path = menu_path(&[u.hint_options, lc.opt_keys, lc.opt_share]);
-    b.settings_note_icon(y + 16.0, Icon::Share, &u.help_share_where.replacen("{}", &path, 1), ui_col::TEXT3);
+    let y = b.settings_note_icon(y + 16.0, Icon::Share, &u.help_share_where.replacen("{}", &path, 1), ui_col::TEXT3);
+    // The player's figures on the shared profiles (Jonathan, 2026-10-14), to
+    // read, not to act on: no row takes the cursor.
+    let fig = drive_share_figures();
+    let unknown = |known_missing: bool| if known_missing { "\u{2014}" } else { "\u{2026}" };
+    let gone = fig.offline || fig.failed;
+    let mine = fig.mine.map(crate::loc_ui::profiles);
+    let applied = fig.applied.map(|n| crate::loc_ui::times(n as usize));
+    let rows = [
+        Row::new(Icon::Share, u.stat_shared).value(mine.as_deref().unwrap_or(unknown(gone))),
+        Row::new(Icon::Users, u.stat_applied).value(applied.as_deref().unwrap_or(unknown(gone || fig.catalog_in))),
+    ];
+    let y = b.settings_caption(y + 26.0, u.stats_title);
+    let (_, y, _) = b.settings_block(y, &rows, None, pane_glide(SetSection::Profile));
+    if fig.offline {
+        b.settings_note(y + 8.0, lc.err_no_internet, 2);
+    } else if fig.failed {
+        b.settings_note(y + 8.0, lc.profile_catalog_offline, 2);
+    }
     if focus.is_some() {
         *hints = std::vec![(&[Btn::A][..], u.type_text), (&[Btn::B][..], u.back)];
+    }
+}
+
+/// Réglages › Profil's figures on the shared profiles, gathered while the
+/// section is on screen and never on a frame's time: the catalog and its
+/// counters through the thumbnail pool, then counted once. A third figure, the
+/// library's games using a catalog profile, read eight games' keys a frame (a
+/// file each on the card), and the section lagged: dropped (Jonathan,
+/// 2026-10-14).
+struct ShareFigures {
+    /// When the section was last drawn. Shown again after a moment away, its
+    /// figures are gathered again: a profile may have been shared or applied
+    /// since (the catalog's cache is dropped by a share).
+    last_seen: u64,
+    index_slot: i32,
+    counts_slot: i32,
+    net: FiguresNet,
+    /// The figures, counted once when the catalog came in (`profiles::share_stats`
+    /// copies the index: not a thing to do every frame).
+    stats: Option<(usize, Option<u32>)>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum FiguresNet {
+    /// The requests are still to start (the pool may be busy a frame or two).
+    Start,
+    Loading,
+    Done,
+    /// No network: nothing asked (`net::offline`).
+    Offline,
+}
+
+static SHARE_FIGURES: std::sync::Mutex<Option<ShareFigures>> = std::sync::Mutex::new(None);
+
+/// What the section shows: each figure once it is known.
+#[derive(Default)]
+struct FiguresView {
+    mine: Option<usize>,
+    applied: Option<u32>,
+    /// The catalog is in: an applied count still missing then will not come.
+    catalog_in: bool,
+    offline: bool,
+    failed: bool,
+}
+
+/// One frame's worth of `ShareFigures`, and what it shows so far.
+fn drive_share_figures() -> FiguresView {
+    use crate::profiles;
+    let now = unsafe { ruffle_tick_now() };
+    let away = unsafe { ruffle_tick_freq() } / 2;
+    let Ok(mut g) = SHARE_FIGURES.lock() else { return FiguresView::default() };
+    let f = g.get_or_insert_with(|| ShareFigures {
+        last_seen: 0,
+        index_slot: -1,
+        counts_slot: -1,
+        net: FiguresNet::Start,
+        stats: None,
+    });
+    // Back on the section (or the first time): everything gathered again, but
+    // never while a request is still out, whose slot must be collected.
+    let idle = f.index_slot < 0 && f.counts_slot < 0;
+    if f.last_seen == 0 || (now.saturating_sub(f.last_seen) > away && idle) {
+        f.net = FiguresNet::Start;
+        f.stats = None;
+    }
+    f.last_seen = now;
+    match f.net {
+        FiguresNet::Start if crate::net::offline() => f.net = FiguresNet::Offline,
+        FiguresNet::Start => {
+            // -5: the pool is busy, asked again next frame; any other failure
+            // to start is final, and the figure it was for stays unknown.
+            let mut settled = true;
+            if !profiles::index_cached() && f.index_slot < 0 {
+                f.index_slot = crate::net::thumb_start(&profiles::index_request_url());
+                settled &= f.index_slot != -5;
+            }
+            if !profiles::counts_cached() && f.counts_slot < 0 {
+                f.counts_slot = crate::net::thumb_start(&profiles::counts_request_url());
+                settled &= f.counts_slot != -5;
+            }
+            if settled {
+                f.index_slot = f.index_slot.max(-1);
+                f.counts_slot = f.counts_slot.max(-1);
+                f.net = FiguresNet::Loading;
+            } else {
+                // A request that did start is collected later; the one refused
+                // is asked again.
+                if f.index_slot < 0 {
+                    f.index_slot = -1;
+                }
+                if f.counts_slot < 0 {
+                    f.counts_slot = -1;
+                }
+            }
+        }
+        FiguresNet::Loading => {
+            crate::net::thumb_pump();
+            if f.index_slot >= 0 && crate::net::thumb_slot_status(f.index_slot) != 0 {
+                if let Some(bytes) = crate::net::thumb_slot_take(f.index_slot) {
+                    profiles::ingest_index(bytes);
+                }
+                f.index_slot = -1;
+            }
+            if f.counts_slot >= 0 && crate::net::thumb_slot_status(f.counts_slot) != 0 {
+                if let Some(bytes) = crate::net::thumb_slot_take(f.counts_slot) {
+                    profiles::ingest_counts(bytes);
+                }
+                f.counts_slot = -1;
+            }
+            if f.index_slot < 0 && f.counts_slot < 0 {
+                f.net = FiguresNet::Done;
+                f.stats = profiles::share_stats();
+            }
+        }
+        FiguresNet::Done | FiguresNet::Offline => {}
+    }
+    let stats = f.stats;
+    FiguresView {
+        mine: stats.map(|s| s.0),
+        applied: stats.and_then(|s| s.1),
+        catalog_in: stats.is_some(),
+        offline: f.net == FiguresNet::Offline,
+        failed: f.net == FiguresNet::Done && stats.is_none(),
     }
 }
 

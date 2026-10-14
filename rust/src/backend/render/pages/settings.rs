@@ -262,6 +262,14 @@ impl SwitchRenderBackend {
         }
     }
 
+    /// A caption over a block of the pane, as the home layouts have theirs
+    /// ("Vue de l'accueil"). Returns where the block goes.
+    pub(crate) fn settings_caption(&mut self, top: f32, text: &str) -> f32 {
+        let c = self.kit_fit(text, size::LABEL, PANE_W);
+        self.kit_text_mid(PANE_X, top + 9.0, size::LABEL, &c, col::TEXT2);
+        top + 32.0
+    }
+
     /// Draw the page still (`true`, under a window) or alive (`false`).
     pub(crate) fn settings_still(&mut self, on: bool) {
         STILL.store(on, core::sync::atomic::Ordering::Relaxed);

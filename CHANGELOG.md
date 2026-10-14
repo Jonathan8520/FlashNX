@@ -31,6 +31,8 @@ The whole interface is redrawn. Every screen uses the console's own fonts, at th
 - In the Flashpoint results, − searches again, as in every other list, and a cover rests as the Play grid shows it (a banner logo used to be cropped to a few letters).
 - A Flashpoint game's details (+) show its screenshot under its logo, with the title, the facts and the description beside them.
 - Settings shows the time, the network and the battery in its corner of the tab bar, as the HOME Menu does (the other tabs have their game count and their search there).
+- Settings, Profile shows your figures on the shared profiles: how many you shared and how many times others applied them. They load in the background when the section opens, and say when there is no connection.
+- The lists of shared profiles no longer read a file from the card for each of their rows on every frame (the console's install id, now read once a session).
 - On a shelf's page (See all, See more), ZL+ZR is "Draw again", shown in the bar: another batch with the shelf's five games, or another studio, which the shelf then shows. These pages always keep the family filter, as their shelves do, and start no new search (− and X searched from them, and ZL+ZR flipped the filter, which on See more drew a new batch). See more shows the same list when opened again on the same shelf, until you draw again (it drew a new one at every visit). The shelves also leave out the games the archive tags Spam (Newgrounds' junk submissions) or Jumpscare (screamers).
 - The empty library shows the folder FlashNX really uses, and − there no longer quits the app.
 - The games folder browser opens beside the library folder, and the card's root, which cannot hold the library, is refused with the reason.
