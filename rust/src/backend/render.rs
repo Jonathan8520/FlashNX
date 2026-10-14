@@ -14534,8 +14534,8 @@ impl SwitchRenderBackend {
 /// Truncated, never rounded up: a size should not promise more than is there.
 /// Integers only, which keeps libm out of it like `approx_sin`.
 fn format_size_pretty(bytes: u64) -> std::string::String {
-    // Unknown size (e.g. Flashpoint search hits — db-api doesn't expose the
-    // GameZIP size) → show nothing rather than a misleading "0 B".
+    // Unknown size (e.g. a legacy Flashpoint game, whose files the archive
+    // does not measure) → show nothing rather than a misleading "0 B".
     if bytes == 0 {
         return std::string::String::new();
     }

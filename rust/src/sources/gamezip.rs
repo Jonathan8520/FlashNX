@@ -1,31 +1,107 @@
 //! Flashpoint GameZIP download — fetch a playable `.swf` for a Flash game the
 //! user picks from a Flashpoint search, WITHOUT any auth or OAuth.
 //!
-//! Pipeline (all PUBLIC endpoints, verified on hardware data 2026-06-07):
-//!   1. search   : db-api.unstable.life/search?smartSearch=<name>&platform=Flash&fields=id,title
-//!   2. download : db-api.unstable.life/get?id=<uuid>   -> a ZIP (the GameZIP)
+//! Pipeline (all PUBLIC endpoints, verified 2026-10-14):
+//!   1. search   : flashpointarchive.org/api/search?query=platform:Flash "<word>"...
+//!   2. download : download.unstable.life/gib-roms/Games/<uuid>-<ms>.zip -> the GameZIP
 //!   3. the ZIP holds `content.json` + `content/{host}{path}/<game>.swf` (deflate)
 //!
-//! `/get?id=` resolves the UUID to the packed ZIP server-side, so we never need
-//! the game_data `dateAdded` timestamp NOR an OAuth token (the admin-confirmed
-//! "fpfss client_credentials" route is only a fallback if `/get` is ever
-//! retired). We unzip with `flate2` (already in the dep tree — see
-//! `extract_first_swf`). CONTENT-NEUTRAL stays: the user searches and picks a
-//! game; we only fetch what they explicitly ask for, live from Flashpoint.
+//! The search gives each game its game data, and the download's name is built
+//! from the newest one's `dateAdded` in milliseconds, as Flashpoint's own web
+//! player (9o3o) builds it; Flashpoint's admin said building it is fine
+//! (2026-10-14). It used to be db-api's `/get?id=`, which found the ZIP from
+//! the UUID alone, but db-api stopped taking new games on 2025-08-17 and
+//! serves the data of that day (a game fixed since downloads unfixed); `/get`
+//! is kept for a game whose data date cannot be read. We unzip with `flate2`
+//! (already in the dep tree — see `extract_first_swf`). CONTENT-NEUTRAL stays:
+//! the user searches and picks a game; we only fetch what they explicitly ask
+//! for, live from Flashpoint.
 
 use crate::net;
 use crate::sources::flashpoint;
 use std::io::{Read, Seek, SeekFrom};
 
-const SEARCH_BASE: &str = "https://db-api.unstable.life/search";
 const GET_BASE: &str = "https://db-api.unstable.life/get";
+const ZIP_BASE: &str = "https://download.unstable.life/gib-roms/Games";
 
 /// Games a search keeps at most (`parse_search`).
 pub const SEARCH_MAX: usize = 60;
 
-/// Public download URL for a game's GameZIP — by UUID alone, no auth.
+/// Games a search asks the route for: all it gives, so the ones left out as
+/// not runnable or as repeats leave room for others before `SEARCH_MAX`.
+const SEARCH_ASK: usize = 100;
+
+/// db-api's download of a game's GameZIP, by UUID alone: the fallback for a
+/// game whose data date cannot be read (`zip_url`).
 pub fn get_url(id: &str) -> std::string::String {
     std::format!("{}?id={}", GET_BASE, id)
+}
+
+/// Where the GameZIP of game `id` downloads from, its game data dated
+/// `data_date` (ISO 8601, as the route gives it): `<id>-<ms>.zip`, the date in
+/// milliseconds since 1970. `None` when the date cannot be read.
+pub fn zip_url(id: &str, data_date: &str) -> Option<std::string::String> {
+    iso_millis(data_date).map(|ms| std::format!("{}/{}-{}.zip", ZIP_BASE, id, ms))
+}
+
+/// Milliseconds since 1970 (UTC) of an ISO 8601 date and time:
+/// `2025-08-17T19:24:19.379271Z` is 1755458659379. The fraction past the
+/// millisecond is cut, not rounded, as the archive names its files (checked
+/// on 71 games, every one's ZIP found at that name). An offset (`+02:00`) is
+/// taken into account; none, or `Z`, is UTC.
+fn iso_millis(s: &str) -> Option<i64> {
+    let b = s.trim().as_bytes();
+    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || !matches!(b[10], b'T' | b't' | b' ') || b[13] != b':' || b[16] != b':' {
+        return None;
+    }
+    let num = |from: usize, to: usize| -> Option<i64> {
+        let mut n = 0i64;
+        for &c in &b[from..to] {
+            if !c.is_ascii_digit() {
+                return None;
+            }
+            n = n * 10 + (c - b'0') as i64;
+        }
+        Some(n)
+    };
+    let (y, mo, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+    let (h, mi, sec) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let mut i = 19;
+    let mut ms = 0i64;
+    if b.get(i) == Some(&b'.') {
+        i += 1;
+        let start = i;
+        while i < b.len() && b[i].is_ascii_digit() {
+            if i - start < 3 {
+                ms = ms * 10 + (b[i] - b'0') as i64;
+            }
+            i += 1;
+        }
+        // ".5" is 500 ms, not 5.
+        for _ in (i - start).min(3)..3 {
+            ms *= 10;
+        }
+    }
+    let offset_min = match b.get(i) {
+        None | Some(b'Z') | Some(b'z') => 0,
+        Some(&sign) if (sign == b'+' || sign == b'-') && b.len() >= i + 6 && b[i + 3] == b':' => {
+            let m = num(i + 1, i + 3)? * 60 + num(i + 4, i + 6)?;
+            if sign == b'-' { -m } else { m }
+        }
+        _ => return None,
+    };
+    // Days since 1970-01-01 of a civil date (H. Hinnant's days_from_civil).
+    let yy = if mo <= 2 { y - 1 } else { y };
+    let era = yy.div_euclid(400);
+    let yoe = yy - era * 400;
+    let mp = (mo + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400_000 + (h * 3600 + mi * 60 + sec) * 1000 + ms - offset_min * 60_000)
 }
 
 /// Build a safe `<title>.swf` filename from a game title. ASCII-only (the
@@ -52,55 +128,28 @@ pub fn swf_filename(title: &str) -> std::string::String {
     s
 }
 
-/// Build the db-api search URL for `name`. Split from `parse_search` so the
-/// Flashpoint game search can run through the async GET path (spinner) instead
-/// of blocking the UI on a synchronous HTTP. `filter` maps to Flashpoint's
-/// content filter (its "Filter entries" checkbox): `true` (the default) excludes
-/// entries the archive flags as extreme — same default the cover search in
-/// flashpoint.rs uses. The importer can flip it to `false` (ZL+ZR in the results)
-/// to surface the mature-rated catalogue, matching the official launcher.
+/// The route's search for a game named `name` (`flashpoint::query_words`),
+/// among Flash games. Split from `parse_search` so the Flashpoint game search
+/// can run through the async GET path (spinner) instead of blocking the UI on
+/// a synchronous HTTP. `filter` maps to Flashpoint's content filter (its
+/// "Filter entries" checkbox): `true` (the default) excludes entries the
+/// archive flags as extreme — same default the cover search in flashpoint.rs
+/// uses. The importer can flip it to `false` (ZL+ZR in the results) to
+/// surface the mature-rated catalogue, matching the official launcher.
 pub fn search_url(name: &str, filter: bool) -> std::string::String {
-    let q = net::url_encode_path(name.trim());
-    std::format!(
-        "{}?smartSearch={}&platform=Flash&filter={}&fields=id,title,developer,publisher,releaseDate,zipped,launchCommand",
-        SEARCH_BASE, q, filter
-    )
+    // The words first: see `flashpoint::query_words`.
+    let query = std::format!("{} platform:Flash", flashpoint::query_words(name));
+    flashpoint::api_url(&query, SEARCH_ASK, !filter, false)
 }
 
-/// Where ONE game's blurb is (`originalDescription`, the text from the game's
-/// original site — verified present in the db-api payload 2026-07-31).
-///
-/// Deliberately a separate per-game request rather than another `fields=` entry
-/// on the gallery search: descriptions run to kilobytes each, and folding 60 of
-/// them into the search response would bloat it for a blurb the user only sees
-/// after pressing `+`. Fetched through the thumbnail pool, so the details
-/// window is up before it arrives.
-pub fn description_url(id: &str) -> std::string::String {
-    std::format!("{}?id={}&fields=id,originalDescription", SEARCH_BASE, net::url_encode_path(id))
-}
-
-/// The blurb out of `description_url`'s answer; empty when there is none.
-pub fn parse_description(bytes: &[u8]) -> std::string::String {
-    let Ok(json) = serde_json::from_slice::<serde_json::Value>(bytes) else {
-        return std::string::String::new();
-    };
-    json.as_array()
-        .and_then(|a| a.first())
-        .and_then(|g| g.get("originalDescription"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string()
-}
-
-/// Parse a db-api search response into up to 60 fetchable `CatalogEntry` hits
-/// (id = UUID, title, developer, cover_url, launch_command, zipped). `zipped`
-/// games download from the GameZIP server (`/get?id=`); non-zipped (legacy
-/// "loose") games 404 there but are fetched directly from the htdocs mirror via
-/// their launchCommand, so they're KEPT when that command maps to a usable
-/// htdocs URL (and dropped otherwise — nothing to download). Deduped: db-api
-/// returns the same game several times (exact UUID repeats AND same-title
-/// alternate entries), which clutters the cover grid; we keep the first of each.
+/// Parse the route's answer (`flashpoint::api_games`) into up to 60 fetchable
+/// `CatalogEntry` hits. A game with game data downloads its GameZIP
+/// (`zip_url`, from the newest of them); a legacy "loose" game has none, but
+/// its files live on the htdocs mirror, fetched via its launchCommand, so it is
+/// KEPT when that command maps to a usable htdocs URL (and dropped otherwise —
+/// nothing to download). Deduped: the archive holds the same game several
+/// times (exact UUID repeats AND same-title alternate entries), which clutters
+/// the cover grid; we keep the first of each.
 pub fn parse_search(
     bytes: &[u8],
 ) -> Result<std::vec::Vec<flashpoint::CatalogEntry>, std::string::String> {
@@ -109,10 +158,9 @@ pub fn parse_search(
         net::log(&std::format!("gamezip: search JSON parse failed: {}\n", e));
         crate::loc::err_json(&e.to_string())
     })?;
-    // Anything but a list is not an answer to a search: say it was unreadable,
-    // not the archive.org wording this used to borrow.
-    let arr = json
-        .as_array()
+    // Anything but the route's answer is not an answer to a search: say it was
+    // unreadable, not the archive.org wording this used to borrow.
+    let arr = flashpoint::api_games(&json)
         .ok_or_else(|| std::string::String::from(crate::loc_ui::ui().imp_err_fp_unreadable))?;
     let mut out: std::vec::Vec<flashpoint::CatalogEntry> = std::vec::Vec::new();
     let mut seen_ids: std::vec::Vec<std::string::String> = std::vec::Vec::new();
@@ -122,15 +170,23 @@ pub fn parse_search(
         if id.is_empty() {
             continue;
         }
-        let zipped = g.get("zipped").and_then(|v| v.as_bool()).unwrap_or(false);
-        let launch_command = g
-            .get("launchCommand")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        // A `zipped` game is fetched from the GameZIP server (`/get?id=`). A
-        // non-zipped (legacy "loose") entry 404s there, but its files live on
-        // the htdocs mirror, reachable from the launchCommand URL — keep it only
+        // The newest game data is the one the archive plays: a game fixed
+        // since it was added has a newer one, and both stay downloadable.
+        let data = g
+            .get("gameData")
+            .and_then(|v| v.as_array())
+            .and_then(|all| all.iter().max_by(|a, b| str_of(a, "dateAdded").cmp(str_of(b, "dateAdded"))));
+        let zipped = data.is_some();
+        // The game data's command names the entry IN its ZIP; the game's own
+        // (legacy) one is where it was before it had any, and may point
+        // elsewhere (Hot Dog Bush, issue #72).
+        let launch_command = match data.map(|d| str_of(d, "launchCommand")) {
+            Some(lc) if !lc.is_empty() => lc,
+            _ => str_of(g, "legacyLaunchCommand"),
+        }
+        .to_string();
+        // A game without game data has no GameZIP, but its files live on the
+        // htdocs mirror, reachable from the launchCommand URL — keep it only
         // when that command maps to a usable htdocs URL (else nothing to fetch).
         if !zipped && htdocs_url_from_command(&launch_command).is_none() {
             continue;
@@ -178,6 +234,11 @@ pub fn parse_search(
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        // A date that cannot be read leaves the download to db-api's `/get`.
+        let zip = data
+            .map(|d| zip_url(id, str_of(d, "dateAdded")).unwrap_or_else(|| get_url(id)))
+            .unwrap_or_default();
+        let size = data.and_then(|d| d.get("size")).and_then(|v| v.as_u64()).unwrap_or(0);
         out.push(flashpoint::CatalogEntry {
             id: id.to_string(),
             title,
@@ -187,12 +248,20 @@ pub fn parse_search(
             cover_url: flashpoint::cover_url(id),
             launch_command,
             zipped,
+            zip_url: zip,
+            size,
+            description: str_of(g, "originalDescription").trim().to_string(),
         });
         if out.len() >= MAX {
             break;
         }
     }
     Ok(out)
+}
+
+/// The text field `key` of a JSON object, "" when it has none.
+fn str_of<'a>(v: &'a serde_json::Value, key: &str) -> &'a str {
+    v.get(key).and_then(|v| v.as_str()).unwrap_or("")
 }
 
 // ── ZIP extraction (dependency-free, flate2 only) ─────────────────────────────

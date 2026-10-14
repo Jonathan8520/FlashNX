@@ -1661,9 +1661,6 @@ pub(crate) struct State {
     /// the URL *and* its display label, so "mario" finds
     /// `https://archive.org/details/super-mario-63` either way.
     pub(crate) import_filter: Option<std::string::String>,
-    /// Blurb for the game shown in the Flashpoint details popup (`+`), fetched
-    /// per-game when the popup opens. Empty = none published / fetch failed.
-    pub(crate) fp_desc: std::string::String,
     /// `(url, .swf count, added epoch, favorite)` side data, persisted in
     /// `distant_history_meta.json`. Feeds the "4/13" badge, the options modal's
     /// "added on", and the favorite pin; a URL never opened has no count yet.
@@ -1826,10 +1823,6 @@ pub(crate) struct State {
     fp_size_pending: bool,
     fp_size_slot: i32,
     fp_size_for: usize,
-    /// The details window's blurb has arrived (in `fp_desc`); until then the
-    /// thumbnail slot fetching it, -1 when none is running yet.
-    fp_desc_ready: bool,
-    fp_desc_slot: i32,
     /// The importer row an import started from (A or X on the importer): where
     /// B out of Flashpoint and the error page bring the cursor back, instead of
     /// to the top of the list.
@@ -1841,8 +1834,6 @@ pub(crate) struct State {
     /// Where B on the error page goes: the list the failure came from
     /// (`Screen::Inactive` = the importer, on `import_return_row`).
     import_error_back: Screen,
-    /// The Flashpoint result the details blurb in flight is for.
-    fp_desc_for: usize,
     /// What A on the error page sends again, when trying again can help.
     import_retry: Option<RetryAction>,
     /// A word typed as an address that archive.org did not know: the error page
@@ -1976,7 +1967,6 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     history_idx: None,
     distant_filter: None,
     import_filter: None,
-    fp_desc: std::string::String::new(),
     url_meta: std::vec::Vec::new(),
     meta_loaded: false,
     download_resume_pos: None,
@@ -2022,13 +2012,10 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     fp_size_pending: false,
     fp_size_slot: -1,
     fp_size_for: usize::MAX,
-    fp_desc_ready: false,
-    fp_desc_slot: -1,
     import_return_row: 0,
     import_error_kind: ErrKind::Open,
     import_error_context: std::string::String::new(),
     import_error_back: Screen::Inactive,
-    fp_desc_for: usize::MAX,
     import_retry: None,
     import_fp_suggest: std::string::String::new(),
     import_typed: std::string::String::new(),
@@ -3826,10 +3813,7 @@ pub fn reset() {
         s.import_retry = None;
         s.import_fp_suggest.clear();
         s.import_error_back = Screen::Inactive;
-        // The thumbnail pool was just emptied: no blurb or size is coming any
-        // more.
-        s.fp_desc_slot = -1;
-        s.fp_desc_ready = false;
+        // The thumbnail pool was just emptied: no size is coming any more.
         s.fp_size_slot = -1;
         s.fp_size_pending = false;
         s.armed = None;
@@ -8724,10 +8708,8 @@ fn start_fp_studio(name: std::string::String, origin_row: usize) {
 /// more must not make them vanish). The header says it is a random draw.
 /// From the importer, `origin_row` is the tile the page opens out of.
 fn start_fp_draw(games: std::vec::Vec<crate::sources::flashpoint::CatalogEntry>, origin_row: Option<usize>) {
-    use crate::sources::discover;
     let filter = LIBRARY.lock().map(|s| s.fp_content_filter).unwrap_or(true);
-    let mut rng = discover::Rng::new(unsafe { ruffle_tick_now() } ^ discover::unix_time());
-    let url = discover::draw_more_url(&mut rng, filter);
+    let url = crate::sources::discover::draw_more_url(filter);
     log("library: flashpoint random draw (async)\n");
     start_fp_query(&url, crate::loc_ui::ui().disc_lucky, None, origin_row.map(|r| (r, r)));
     if let Ok(mut s) = LIBRARY.lock() {
@@ -8753,7 +8735,7 @@ fn clear_thumbs_but_shelves() {
     crate::backend::render::thumb_cache_clear_except(&keep);
 }
 
-/// Ask db-api `url` behind the results page, titled `query`: its header and
+/// Ask Flashpoint `url` behind the results page, titled `query`: its header and
 /// waiting tiles are up at once and the results fill them when they land.
 /// `studio` is set for a studio's games, so a retry asks for them again.
 /// From the importer, `origin` is the row to come back to and the item the
@@ -8777,7 +8759,6 @@ fn start_fp_query(url: &str, query: &str, studio: Option<std::string::String>, o
         s.fp_seed.clear();
         s.fp_home = None;
         s.fp_sort = (0, false);
-        s.fp_desc_slot = -1;
         s.fp_size_slot = -1;
         // A shelf's search shared the pool just cancelled: it is asked again
         // once the home is back, rather than counted as failed.
@@ -10476,7 +10457,7 @@ fn cover_query_from_name(name: &str) -> std::string::String {
     let mut toks: std::vec::Vec<&str> = spaced.split_whitespace().collect();
     // Drop a single trailing download-id suffix (e.g. `pursuit-of-hat-2-15938d603`,
     // `haunt-the-house-719579f9`): itch/Flashpoint mirrors append these and they
-    // make smartSearch return nothing. Keep at least one real word.
+    // make a search for every word return nothing. Keep at least one real word.
     if toks.len() > 1 && looks_like_download_hash(toks[toks.len() - 1]) {
         toks.pop();
     }
@@ -10800,7 +10781,7 @@ fn fp_activate(s: &mut State, selection: usize, scroll: usize) {
     }
     let (url, out_path, fp_direct) = if cand.zipped {
         let zip_path = std::format!("{}/.fpdl.zip", primary_root());
-        (crate::sources::gamezip::get_url(&cand.id), zip_path, false)
+        (cand.zip_url.clone(), zip_path, false)
     } else {
         match crate::sources::gamezip::htdocs_url_from_command(&cand.launch_command) {
             Some(u) => (u, swf_path.clone(), true),
@@ -10875,7 +10856,7 @@ fn drive_shelves() {
                     }
                 }
             }
-            ShelfPhase::Idle => shelf_start(k, now),
+            ShelfPhase::Idle => shelf_start(k),
             ShelfPhase::Loading => {
                 if slot < 0 {
                     if let Ok(mut s) = LIBRARY.lock() {
@@ -10948,26 +10929,25 @@ const STUDIO_MAX_ASKED: u8 = 24;
 const STUDIO_MAX_SAMPLES: u8 = 3;
 
 /// Start shelf `k`'s search. The studio's: a sample of the archive when it has
-/// no candidates left, else the next candidate's games. The draw's: a sample
-/// of its genre (drawn too, the first time). Left for the next frame when the
-/// pool is busy with covers.
-fn shelf_start(k: usize, now: u64) {
+/// no candidates left, else the next candidate's games. The draw's: games
+/// picked at random. Left for the next frame when the pool is busy with
+/// covers.
+fn shelf_start(k: usize) {
     use crate::sources::discover;
     let url = {
         let Ok(mut s) = LIBRARY.lock() else { return };
         let shelf = &mut s.shelves[k];
-        let mut rng = discover::Rng::new(now ^ discover::unix_time() ^ ((k as u64) << 56) ^ ((shelf.tries as u64) << 40));
         if k == 0 {
             if shelf.candidates.is_empty() {
                 shelf.sampling = true;
-                discover::sample_url(&mut rng)
+                discover::sample_url()
             } else {
                 shelf.sampling = false;
                 shelf.asked = shelf.asked.saturating_add(1);
                 discover::studio_url(&shelf.candidates[0], true)
             }
         } else {
-            discover::draw_url(&mut rng)
+            discover::draw_url()
         }
     };
     let slot = net::thumb_start(&url);
@@ -11156,65 +11136,25 @@ fn shelf_press_a(selection: usize, scroll: usize) {
 }
 
 /// Open a result's details window on what the search already returned (logo,
-/// title, developer, publisher, date). The download size and the blurb used to
-/// be fetched BEFORE it opened, two blocking HTTPS round trips that froze the
-/// last frame for seconds after `+` with nothing to show the press was taken;
-/// now the window is up at once and they fill in (`drive_fp_details`).
+/// title, developer, publisher, date, blurb, and the GameZIP's size). The size
+/// and the blurb were once fetched BEFORE it opened, two blocking HTTPS round
+/// trips that froze the last frame for seconds after `+`; then once it was up,
+/// two requests a window. The search gives both now; only a legacy game's
+/// size, which the archive does not know, is still asked (`drive_fp_details`).
 fn open_fp_details(s: &mut State, selection: usize, scroll: usize) {
-    s.fp_desc.clear();
-    s.fp_desc_ready = false;
-    s.fp_size_pending = true;
-    s.screen = Screen::FpDetails { selection, scroll, size: 0 };
+    let size = s.cover_candidates.get(selection).map_or(0, |c| c.size);
+    s.fp_size_pending = size == 0;
+    s.screen = Screen::FpDetails { selection, scroll, size };
 }
 
-/// Fill in the details window: its blurb and its download size, both through
-/// the thumbnail pool (async, like the logos), so the window keeps answering
-/// while they come. The size was a blocking HEAD, which froze the window, its
-/// spinner and its buttons for as long as the server took. Called once a frame
-/// while the window is up, and from the results page, which collects a request
-/// still on its way after the window closed.
+/// Fill in the details window's download size when the search did not give
+/// it (a legacy game, on the htdocs mirror), by a HEAD through the thumbnail
+/// pool (async, like the logos), so the window keeps answering while it comes.
+/// The size was a blocking HEAD, which froze the window, its spinner and its
+/// buttons for as long as the server took. Called once a frame while the
+/// window is up, and from the results page, which collects a request still on
+/// its way after the window closed.
 fn drive_fp_details() {
-    // The blurb: collect the transfer in flight, or start the one needed.
-    let (slot, for_sel, want) = match LIBRARY.lock() {
-        Ok(s) => {
-            let want = match s.screen {
-                Screen::FpDetails { selection, .. } if !s.fp_desc_ready => Some(selection),
-                _ => None,
-            };
-            (s.fp_desc_slot, s.fp_desc_for, want)
-        }
-        Err(_) => return,
-    };
-    if slot >= 0 {
-        net::thumb_pump();
-        if net::thumb_slot_status(slot) != 0 {
-            let bytes = net::thumb_slot_take(slot);
-            if let Ok(mut s) = LIBRARY.lock() {
-                s.fp_desc_slot = -1;
-                // A blurb for another result (the window was closed and another
-                // opened while it came) is dropped; the right one starts next.
-                if want == Some(for_sel) {
-                    s.fp_desc = bytes.map(|b| crate::sources::gamezip::parse_description(&b)).unwrap_or_default();
-                    s.fp_desc_ready = true;
-                }
-            }
-        }
-    } else if let Some(sel) = want {
-        let id = LIBRARY.lock().ok().and_then(|s| s.cover_candidates.get(sel).map(|c| c.id.clone()));
-        if let Some(id) = id {
-            let started = net::thumb_start(&crate::sources::gamezip::description_url(&id));
-            if let Ok(mut s) = LIBRARY.lock() {
-                if started >= 0 {
-                    s.fp_desc_slot = started;
-                    s.fp_desc_for = sel;
-                } else if id.is_empty() {
-                    s.fp_desc_ready = true;
-                }
-            }
-        }
-    }
-
-    // The size, the same way, by a HEAD.
     let (slot, for_sel, want) = match LIBRARY.lock() {
         Ok(s) => {
             let want = match s.screen {
@@ -11231,7 +11171,8 @@ fn drive_fp_details() {
             let size = net::thumb_slot_take_length(slot);
             if let Ok(mut s) = LIBRARY.lock() {
                 s.fp_size_slot = -1;
-                // An answer for another result is dropped, as a blurb is.
+                // An answer for another result (the window was closed and
+                // another opened while it came) is dropped.
                 if want == Some(for_sel) {
                     s.fp_size_pending = false;
                     if let Screen::FpDetails { selection, scroll, .. } = s.screen {
@@ -11242,13 +11183,13 @@ fn drive_fp_details() {
         }
     } else if let Some(sel) = want {
         // Probe the URL the download will ACTUALLY use, mirroring the choice the
-        // `A` branch of `handle_fp_gallery_input` makes: the GameZIP server for a
-        // zipped game, the htdocs mirror for a legacy "loose" one. Probing
-        // `/get?id=` for a legacy entry always 404s.
+        // `A` branch of `handle_fp_gallery_input` makes: the GameZIP for a
+        // zipped game (whose size the search gives, unless it said 0), the
+        // htdocs mirror for a legacy "loose" one.
         let url = LIBRARY.lock().ok().and_then(|s| {
             s.cover_candidates.get(sel).and_then(|c| {
                 if c.zipped {
-                    Some(crate::sources::gamezip::get_url(&c.id))
+                    Some(c.zip_url.clone())
                 } else {
                     crate::sources::gamezip::htdocs_url_from_command(&c.launch_command)
                 }
@@ -12398,7 +12339,8 @@ fn draw_fp_page(backend: &mut SwitchRenderBackend, selection: usize, scroll: usi
 }
 
 /// Poll the Flashpoint search in flight; the results fill the page when it
-/// lands, in name order (db-api's own order reads as random in a grid).
+/// lands, in name order (a draw comes in a random order, which reads as no
+/// order at all in a grid).
 fn poll_fp_search() {
     match net::tick_get_async() {
         net::GetPoll::Pending => {}
@@ -13403,7 +13345,6 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                         s.cover_msg.clear();
                         s.fp_error = false;
                         s.fp_loading = false;
-                        s.fp_desc_slot = -1;
                         s.fp_size_slot = -1;
                         let row = s.import_return_row;
                         s.screen = distant_idle_at(&s, row);
@@ -13424,7 +13365,6 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             }
             backend.set_ui_modal_scale(if modal_active { modal_scale } else { 1.0 });
             let snap = LIBRARY.lock().ok().and_then(|s| {
-                let desc = s.fp_desc_ready.then(|| s.fp_desc.clone());
                 let pending = s.fp_size_pending;
                 s.cover_candidates.get(selection).map(|c| {
                     let name = crate::sources::gamezip::swf_filename(&c.title);
@@ -13435,7 +13375,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                         crate::backend::render::imp_release(&c.release_date),
                         c.cover_url.clone(),
                         if c.id.is_empty() { std::string::String::new() } else { crate::sources::discover::screenshot_url(&c.id) },
-                        desc,
+                        c.description.clone(),
                         s.entries.iter().any(|e| e.basename == name),
                         pending,
                     )
@@ -13450,7 +13390,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                     size: if pending { None } else { Some(size) },
                     cover_url: &cover,
                     shot_url: &shot,
-                    description: desc.as_deref(),
+                    description: &desc,
                     installed,
                 });
             }

@@ -1,6 +1,6 @@
 //! The importer's discovery shelves: a studio drawn at random, and games drawn
-//! at random from the whole archive. Both are db-api searches (Flashpoint's
-//! public API, the one the search and the downloads already use); this module
+//! at random from the whole archive. Both are searches of Flashpoint's site
+//! (`flashpoint::api_url`, the route the game search asks too); this module
 //! builds them and picks what a shelf shows.
 //!
 //! The second shelf drew inside one of eleven genres first, to keep the
@@ -21,28 +21,15 @@
 //! sample of the archive, another at each draw. Thousands of studios qualify.
 
 use crate::net;
-use crate::sources::flashpoint::CatalogEntry;
+use crate::sources::flashpoint::{self, CatalogEntry};
 
-extern "C" {
-    fn ruffle_unix_time() -> i64;
-}
-
-/// Seconds since 1970 on the console's clock: with the tick, what seeds the
-/// draws, so two launches do not start from the same studio.
-pub fn unix_time() -> u64 {
-    unsafe { ruffle_unix_time() }.max(0) as u64
-}
-
-const SEARCH_BASE: &str = "https://db-api.unstable.life/search";
+/// db-api still makes the screenshots smaller, new games' too: it fetches
+/// them from the archive's image server by the game's id.
 const SCREENSHOT_BASE: &str = "https://db-api.unstable.life/screenshot";
 
-/// What a shelf asks for: what the download and the details window need, as
-/// the search asks, and the tags `family_filter` reads.
-const FIELDS: &str = "id,title,developer,publisher,releaseDate,zipped,launchCommand,tags";
-
-/// The filters every shelf search carries: Flash games (not animations) that
-/// run, without the entries the archive flags as extreme.
-const SHELF_FILTERS: &str = "platform=Flash&library=arcade&status=Playable";
+/// What every shelf search asks for: Flash games (not animations) that run.
+/// The entries the archive flags as extreme are left out by the route itself.
+const SHELF_QUERY: &str = "platform:Flash library:arcade status:Playable";
 
 /// Games a shelf shows. Its last two tiles are its actions: see them all
 /// (or more of the genre), and draw again.
@@ -54,17 +41,20 @@ pub const SHELF_GAMES: usize = 5;
 /// look empty.
 pub const STUDIO_MIN_GAMES: usize = 3;
 
-/// How many hex digits a sample of the archive takes: three keep about one
-/// game in 140, some 500 Flash games of every kind and size.
-const SAMPLE_HEX: usize = 3;
+/// Games a sample of the archive draws, for their studios: some forty first
+/// credits once the one-letter names and the placeholders are out, of every
+/// kind and size.
+const SAMPLE_GAMES: usize = 50;
 
-/// How many hex digits a draw takes. A draw asks for the games whose
-/// identifier contains a few random hex digits: identifiers are random, so
-/// that is a random sample of the archive, and the API has no random order of
-/// its own. Four keep about one Flash game in 2 300, some thirty of them
-/// (measured on 2026-10-13); "see more" takes one digit fewer, sixteen times
-/// as many.
-const DRAW_HEX: usize = 4;
+/// Games a draw asks for. The route picks them at random from all the games
+/// that match; db-api had no random order, and a draw asked for the games
+/// whose identifier held a few random hex digits instead. Thirty leave enough
+/// for a shelf of five once `family_filter` and the games that cannot run are
+/// out; "see more" asks for all the route gives.
+const DRAW_GAMES: usize = 30;
+
+/// The most games one search of the route gives.
+const ROUTE_MAX: usize = 100;
 
 /// Content warnings a shelf leaves out, on top of the archive's own filter
 /// (`filter=true`, which hides what it flags as extreme). A shelf is what the
@@ -94,11 +84,10 @@ const EXCLUDED_TAGS: &[&str] = &[
     "Cannibalism",
 ];
 
-/// A search that samples the archive: the developers of the games whose
-/// identifier contains a few hex digits drawn by `rng`.
-pub fn sample_url(rng: &mut Rng) -> std::string::String {
-    let hex = rng.hex(SAMPLE_HEX);
-    std::format!("{}?id={}&{}&filter=true&fields=developer", SEARCH_BASE, hex, SHELF_FILTERS)
+/// A search that samples the archive: `SAMPLE_GAMES` games drawn at random,
+/// for their developers.
+pub fn sample_url() -> std::string::String {
+    flashpoint::api_url(SHELF_QUERY, SAMPLE_GAMES, false, true)
 }
 
 /// The studios of a sample (`sample_url`'s answer), each once, in an order
@@ -106,7 +95,10 @@ pub fn sample_url(rng: &mut Rng) -> std::string::String {
 /// and the next ones at each draw. Names too short to search for, and
 /// placeholders, are left out.
 pub fn studio_candidates(bytes: &[u8], rng: &mut Rng) -> std::vec::Vec<std::string::String> {
-    let Ok(serde_json::Value::Array(arr)) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return std::vec::Vec::new();
+    };
+    let Some(arr) = flashpoint::api_games(&json) else {
         return std::vec::Vec::new();
     };
     // The first name of each field only: a game credits its studio first,
@@ -114,7 +106,7 @@ pub fn studio_candidates(bytes: &[u8], rng: &mut Rng) -> std::vec::Vec<std::stri
     // own aliases ("Duke Boobee BZ Lar", "Dr. Steward 75K"...), each of which
     // used to be a studio of its own and drew the same games five times.
     let mut names: std::vec::Vec<std::string::String> = std::vec::Vec::new();
-    for g in &arr {
+    for g in arr {
         let dev = g.get("developer").and_then(|v| v.as_str()).unwrap_or("");
         let Some(seg) = segments(dev).next() else { continue };
         let lower = seg.to_lowercase();
@@ -131,66 +123,48 @@ pub fn studio_candidates(bytes: &[u8], rng: &mut Rng) -> std::vec::Vec<std::stri
     names
 }
 
-/// The names in a db-api `developer` field: several are joined by `;` or by
-/// a slash ("John Cooney / jmtb02", "DX Interactive; Damien Clarke").
+/// The names in a Flashpoint `developer` field: several are joined by `;` or
+/// by a slash ("John Cooney / jmtb02", "DX Interactive; Damien Clarke").
 pub fn segments(dev: &str) -> impl Iterator<Item = &str> {
     dev.split([';', '/']).map(str::trim).filter(|s| !s.is_empty())
 }
 
-/// The search for `name`'s games (a substring match on the developer field;
+/// The search for `name`'s games (a substring match on the developer field,
+/// the name between quotes so that its spaces and colons stay in it;
 /// `family_filter` keeps the exact name). `filter` leaves out what the archive
 /// flags as extreme: always on a shelf, the player's choice on the results
-/// page (as for a search). At most `STUDIO_LIMIT` rows come back: a studio can
-/// have more than 1 500 games, half a megabyte to fetch and parse for a shelf
-/// of six, and the results page shows sixty at most anyway.
+/// page (as for a search). The route gives a hundred games at most, by name: a
+/// studio can have more than 1 500, and the results page shows sixty anyway.
 pub fn studio_url(name: &str, filter: bool) -> std::string::String {
-    std::format!(
-        "{}?developer={}&{}&filter={}&limit={}&fields={}",
-        SEARCH_BASE,
-        net::url_encode_path(name),
-        SHELF_FILTERS,
-        filter,
-        STUDIO_LIMIT,
-        FIELDS
-    )
+    let query = std::format!("{} dev:\"{}\"", SHELF_QUERY, name.replace('"', ""));
+    flashpoint::api_url(&query, ROUTE_MAX, !filter, false)
 }
 
-/// Rows a studio's search asks for at most (see `studio_url`).
-const STUDIO_LIMIT: usize = 300;
-
-/// A draw: the games whose identifier contains `DRAW_HEX` digits drawn by
-/// `rng`, same filters as a studio's.
-pub fn draw_url(rng: &mut Rng) -> std::string::String {
-    let hex = rng.hex(DRAW_HEX);
-    std::format!("{}?id={}&{}&filter=true&fields={}", SEARCH_BASE, hex, SHELF_FILTERS, FIELDS)
+/// A draw: `DRAW_GAMES` games picked at random.
+pub fn draw_url() -> std::string::String {
+    flashpoint::api_url(SHELF_QUERY, DRAW_GAMES, false, true)
 }
 
-/// "See more" of the draw: one hex digit fewer, sixteen times as many games,
-/// at most `STUDIO_LIMIT` rows (the results show sixty).
-pub fn draw_more_url(rng: &mut Rng, filter: bool) -> std::string::String {
-    let hex = rng.hex(DRAW_HEX - 1);
-    std::format!(
-        "{}?id={}&{}&filter={}&limit={}&fields={}",
-        SEARCH_BASE,
-        hex,
-        SHELF_FILTERS,
-        filter,
-        STUDIO_LIMIT,
-        FIELDS
-    )
+/// "See more" of the draw: as many games as the route gives, picked at random
+/// (the results show sixty).
+pub fn draw_more_url(filter: bool) -> std::string::String {
+    flashpoint::api_url(SHELF_QUERY, ROUTE_MAX, !filter, true)
 }
 
 /// A search's answer with the games a shelf must not show taken out (any of
 /// `EXCLUDED_TAGS`), and, for a studio, the games of another developer whose
 /// name only contains `developer`'s (the search matches a substring: "Max"
 /// would find "Max Games" and "Maxwell"). Handed to `gamezip::parse_search`
-/// as it is. An answer that is not a list comes back untouched, for the
+/// as it is. An answer that is not the route's comes back untouched, for the
 /// parser to say what is wrong with it.
 pub fn family_filter(bytes: &[u8], developer: Option<&str>) -> std::vec::Vec<u8> {
-    let Ok(serde_json::Value::Array(arr)) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+    let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(bytes) else {
         return bytes.to_vec();
     };
-    let kept: std::vec::Vec<serde_json::Value> = arr
+    let Some(serde_json::Value::Array(arr)) = json.get_mut("games") else {
+        return bytes.to_vec();
+    };
+    let kept: std::vec::Vec<serde_json::Value> = std::mem::take(arr)
         .into_iter()
         .filter(|g| {
             let clean = match g.get("tags") {
@@ -210,7 +184,8 @@ pub fn family_filter(bytes: &[u8], developer: Option<&str>) -> std::vec::Vec<u8>
             clean && theirs
         })
         .collect();
-    serde_json::to_vec(&serde_json::Value::Array(kept)).unwrap_or_else(|_| bytes.to_vec())
+    *arr = kept;
+    serde_json::to_vec(&json).unwrap_or_else(|_| bytes.to_vec())
 }
 
 /// A game's screenshot as a tile shows it: reduced by the API (320 px wide,
@@ -220,8 +195,9 @@ pub fn screenshot_url(id: &str) -> std::string::String {
     std::format!("{}?id={}&width=320&format=jpeg&quality=80", SCREENSHOT_BASE, net::url_encode_path(id))
 }
 
-/// A small xorshift, seeded by the clock: the samples, the studios drawn from
-/// them, and which games a shelf shows.
+/// A small xorshift, seeded by the clock: the order the studios of a sample
+/// are tried in, and which games a shelf shows. The samples and the draws
+/// themselves are picked by the route.
 pub struct Rng(u64);
 
 impl Rng {
@@ -243,12 +219,6 @@ impl Rng {
     /// A number in `0..n` (`n` > 0).
     pub fn below(&mut self, n: usize) -> usize {
         (self.next() % n.max(1) as u64) as usize
-    }
-
-    /// `len` random hex digits.
-    pub fn hex(&mut self, len: usize) -> std::string::String {
-        const DIGITS: &[u8; 16] = b"0123456789abcdef";
-        (0..len).map(|_| DIGITS[self.below(16)] as char).collect()
     }
 }
 
