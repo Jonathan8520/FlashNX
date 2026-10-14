@@ -455,6 +455,12 @@ extern "C" void https_download_progress(uint64_t* done, uint64_t* total) {
     if (total) *total = g_bytes_total;
 }
 
+// 1 while a download is writing to the card (the trash worker waits for it).
+// Read from another thread: a hint, not a guarantee, which is all it needs.
+extern "C" int https_download_active(void) {
+    return (g_multi && g_dl_file) ? 1 : 0;
+}
+
 extern "C" void https_download_cancel(void) {
     if (g_multi) {
         std::printf("https_download_cancel\n"); std::fflush(stdout);

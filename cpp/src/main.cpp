@@ -53,6 +53,11 @@ extern "C" const char* swf_picker_embedded_swf(void);
 extern "C" int ruffle_is_applet_mode(void);
 extern "C" void https_thumb_stop(void);
 extern "C" void https_job_stop(void);
+// swf_picker.cpp: a deleted game's companion folder is emptied in the background.
+extern "C" void swf_picker_trash_start(void);
+extern "C" void swf_picker_trash_pause(void);
+extern "C" void swf_picker_trash_frame(int input);
+extern "C" void swf_picker_trash_stop(void);
 
 // Phase 3.4 — library boot screen FFI (rust/src/library.rs).
 extern "C" void ruffle_loc_init(void);
@@ -1286,6 +1291,9 @@ static void worker_entry(void* arg) {
     const double ms_scan = boot_ms_since(t_scan);
     const uint64_t t_open = armGetSystemTick();
     ruffle_library_open();
+    // The trash of deleted games empties while the library is up (and only
+    // then: a game has the card to itself).
+    swf_picker_trash_start();
     std::printf("boot: library_init %.0f ms | swf scan %.0f ms | library_open %.0f ms"
                 " | total since main %.0f ms\n",
                 ms_libinit, ms_scan, boot_ms_since(t_open), boot_ms_since(g_boot_t0));
@@ -1368,6 +1376,9 @@ static void worker_entry(void* arg) {
         const float lib_tx = lib_touch ? (float)touch_state.touches[0].x * UI_TOUCH_SCALE_X : 0.0f;
         const float lib_ty = lib_touch ? (float)touch_state.touches[0].y * UI_TOUCH_SCALE_Y : 0.0f;
         ruffle_library_touch(lib_tx, lib_ty, lib_touch ? 1 : 0);
+        // The trash of deleted games empties only while nothing is held or
+        // touched (it competes with the interface for the card).
+        swf_picker_trash_frame((padGetButtons(&pad) != 0 || lib_touch) ? 1 : 0);
         ruffle_library_render();
         gl_context_swap();
         if (first_lib_frame) {
@@ -1399,6 +1410,9 @@ static void worker_entry(void* arg) {
     // Forward the choice to Ruffle's loader (consumed by find_and_
     // load_swf_uncached → CACHED_SWF in lib.rs).
     ruffle_set_swf_path(selected_path);
+
+    // A game is starting: the trash waits for the library to come back.
+    swf_picker_trash_pause();
 
     // Drop the library's standalone SwitchRenderBackend so its GL
     // resources (~96 MB arenas + shader programs + banner texture)
@@ -2933,6 +2947,8 @@ int main(int argc, char** argv) {
     https_thumb_stop();
     https_job_stop();
     ruffle_log_cstr("teardown: network threads stopped\n");
+    // And the trash's, after the file it is on; the rest waits for next time.
+    swf_picker_trash_stop();
 
     // Logged before: nxlink's output goes through the sockets.
     ruffle_log_cstr("teardown: closing romfs and sockets\n");

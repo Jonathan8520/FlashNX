@@ -23,6 +23,11 @@
 #include <unistd.h>
 #include <vector>
 
+#include <switch.h>
+
+// net.cpp: 1 while a download is writing to the card.
+extern "C" int https_download_active(void);
+
 #include "ruffle_bridge.h"
 
 // Defined in the Rust staticlib: pushes one (path) onto the library's
@@ -284,6 +289,237 @@ static int remove_dir_recursive(const char* path) {
     return removed;
 }
 
+// ── Trash: a deleted game's companion folder, emptied in the background ───
+// Deleting Dragon City took a full minute of frozen screen (2026-10-14): its
+// companion tree holds 2,933 files, the SD card costs ~20 ms per unlink, and
+// the tree went file by file on the launcher's thread. Now the tree is RENAMED
+// into this folder, one request whatever its size (Sphaira moves folders the
+// same way, fsFsRenameDirectory), and a thread empties it file by file, so it
+// can stop between two files when a game starts or the launcher closes; what
+// is left is emptied at the next launch. It never deletes anything outside
+// this folder.
+namespace {
+constexpr const char* TRASH_PARENT = "sdmc:/switch/FlashNX";
+constexpr const char* TRASH_DIR = "sdmc:/switch/FlashNX/.trash";
+Thread  g_trash_thread;
+Mutex   g_trash_mutex;
+CondVar g_trash_wake;
+bool    g_trash_started = false;
+bool    g_trash_kick    = false; // something to empty since the worker last looked
+volatile bool g_trash_quit   = false;
+volatile bool g_trash_paused = false;
+// When the player last pressed or touched anything, and when the launcher's
+// loop last came round (main.cpp). The worker only deletes while the launcher
+// is at rest: measured while it ran flat out (2026-10-14), Play frames took 67
+// to 231 ms instead of 16 -- each of the interface's own reads of the card
+// (covers, while scrolling) queued behind an unlink of ~20 ms. Idle, the
+// interface reads almost nothing.
+volatile u64 g_trash_last_input = 0;
+volatile u64 g_trash_last_frame = 0;
+
+// Quiet for this long after a press before the worker resumes.
+constexpr u64 TRASH_IDLE_MS = 3000;
+
+u64 ticks_to_ms(u64 t) { return armTicksToNs(t) / 1000000; }
+
+// The launcher is at rest: nothing pressed for a while, its loop running (not
+// stuck in an extraction, which reads and writes the card itself), and no
+// download writing to the card.
+bool trash_idle() {
+    const u64 now = armGetSystemTick();
+    if (ticks_to_ms(now - g_trash_last_input) < TRASH_IDLE_MS) return false;
+    if (ticks_to_ms(now - g_trash_last_frame) > 200) return false;
+    if (https_download_active()) return false;
+    return true;
+}
+
+// Wait until the launcher is at rest. False when the worker must stop instead.
+bool trash_wait_idle() {
+    while (!trash_idle()) {
+        if (g_trash_quit || g_trash_paused) return false;
+        mutexLock(&g_trash_mutex);
+        if (!g_trash_quit && !g_trash_paused) {
+            condvarWaitTimeout(&g_trash_wake, &g_trash_mutex, 100000000ULL); // 100 ms
+        }
+        mutexUnlock(&g_trash_mutex);
+    }
+    return !(g_trash_quit || g_trash_paused);
+}
+
+// Remove one entry of the trash and everything under it. False when stopped
+// part-way (a game starting, the launcher closing): the rest stays for later.
+bool trash_remove_tree(const char* path, int& removed) {
+    DIR* d = opendir(path);
+    if (!d) {
+        if (::unlink(path) == 0) removed++;
+        return true;
+    }
+    char child[512];
+    while (struct dirent* ent = readdir(d)) {
+        // At rest only, and never past a game starting or the launcher closing.
+        if (!trash_wait_idle()) {
+            closedir(d);
+            return false;
+        }
+        const char* n = ent->d_name;
+        if (std::strcmp(n, ".") == 0 || std::strcmp(n, "..") == 0) continue;
+        const int nl = std::snprintf(child, sizeof(child), "%s/%s", path, n);
+        if (nl <= 0 || (size_t)nl >= sizeof(child)) continue;
+        if (ent->d_type == DT_DIR) {
+            if (!trash_remove_tree(child, removed)) {
+                closedir(d);
+                return false;
+            }
+        } else if (::unlink(child) == 0) {
+            // Committed now and then (~1 ms each), so a power cut keeps most of
+            // the work.
+            if (++removed % 200 == 0) fsdevCommitDevice("sdmc");
+        }
+    }
+    closedir(d);
+    if (::rmdir(path) == 0) removed++;
+    return true;
+}
+
+// The first entry of the trash, or false when it is empty.
+bool trash_first(char* out, size_t cap) {
+    DIR* d = opendir(TRASH_DIR);
+    if (!d) return false;
+    bool found = false;
+    while (struct dirent* ent = readdir(d)) {
+        const char* n = ent->d_name;
+        if (std::strcmp(n, ".") == 0 || std::strcmp(n, "..") == 0) continue;
+        const int nl = std::snprintf(out, cap, "%s/%s", TRASH_DIR, n);
+        found = nl > 0 && (size_t)nl < cap;
+        break;
+    }
+    closedir(d);
+    return found;
+}
+
+void trash_worker(void*) {
+    // A few seconds first, so the library's own first reads come before ours.
+    mutexLock(&g_trash_mutex);
+    if (!g_trash_quit) condvarWaitTimeout(&g_trash_wake, &g_trash_mutex, 3000000000ULL);
+    mutexUnlock(&g_trash_mutex);
+    char path[512];
+    while (!g_trash_quit) {
+        if (!g_trash_paused && trash_first(path, sizeof(path))) {
+            int removed = 0;
+            const u64 t0 = armGetSystemTick();
+            const bool whole = trash_remove_tree(path, removed);
+            fsdevCommitDevice("sdmc");
+            std::printf("trash: %s, %d entries in %llu ms%s\n", path, removed,
+                        (unsigned long long)(armTicksToNs(armGetSystemTick() - t0) / 1000000),
+                        whole ? "" : " (stopped, the rest later)");
+            std::fflush(stdout);
+            // Something there that will not go (read-only, a card error): do not
+            // spin on it. It is tried again at the next delete or launch.
+            if (whole && removed == 0) {
+                std::printf("trash: %s cannot be removed, left for later\n", path);
+                std::fflush(stdout);
+            } else {
+                continue;
+            }
+        }
+        mutexLock(&g_trash_mutex);
+        while (!g_trash_quit && (g_trash_paused || !g_trash_kick)) {
+            condvarWait(&g_trash_wake, &g_trash_mutex);
+        }
+        g_trash_kick = false;
+        mutexUnlock(&g_trash_mutex);
+    }
+}
+
+void trash_kick() {
+    if (!g_trash_started) return;
+    mutexLock(&g_trash_mutex);
+    g_trash_kick = true;
+    condvarWakeOne(&g_trash_wake);
+    mutexUnlock(&g_trash_mutex);
+}
+
+// Move `dir` into the trash. False when it could not be (no worker to empty
+// it, or the rename failed): the caller then deletes it in place, as before.
+bool trash_move(const char* dir) {
+    if (!g_trash_started) return false;
+    DIR* d = opendir(dir);
+    if (!d) return false;
+    closedir(d);
+    ::mkdir(TRASH_PARENT, 0755);
+    ::mkdir(TRASH_DIR, 0755);
+    char target[256];
+    std::snprintf(target, sizeof(target), "%s/%016llx", TRASH_DIR,
+                  (unsigned long long)armGetSystemTick());
+    if (::rename(dir, target) != 0) {
+        std::printf("trash: could not move %s (errno %d), deleting in place\n", dir, errno);
+        std::fflush(stdout);
+        return false;
+    }
+    std::printf("trash: moved %s -> %s\n", dir, target);
+    std::fflush(stdout);
+    trash_kick();
+    return true;
+}
+} // namespace
+
+// Start the trash worker (once; it empties what a previous run left), or
+// let it go on after a game.
+extern "C" void swf_picker_trash_start(void) {
+    if (!g_trash_started) {
+        mutexInit(&g_trash_mutex);
+        condvarInit(&g_trash_wake);
+        g_trash_quit = false;
+        g_trash_paused = false;
+        g_trash_kick = true;
+        // Core 2, lowest of our threads: it only ever waits on the card.
+        Result rc = threadCreate(&g_trash_thread, trash_worker, nullptr, nullptr, 64 * 1024, 0x30, 2);
+        if (R_FAILED(rc)) rc = threadCreate(&g_trash_thread, trash_worker, nullptr, nullptr, 64 * 1024, 0x30, -2);
+        if (R_FAILED(rc)) {
+            std::printf("trash: worker threadCreate failed 0x%x, deletes stay in place\n", (unsigned)rc);
+            std::fflush(stdout);
+            return;
+        }
+        threadStart(&g_trash_thread);
+        g_trash_started = true;
+        return;
+    }
+    mutexLock(&g_trash_mutex);
+    g_trash_paused = false;
+    g_trash_kick = true;
+    condvarWakeOne(&g_trash_wake);
+    mutexUnlock(&g_trash_mutex);
+}
+
+// The launcher's loop came round (`input` true: the player pressed or touched
+// something this frame). Called once per library frame from main.cpp.
+extern "C" void swf_picker_trash_frame(int input) {
+    const u64 now = armGetSystemTick();
+    g_trash_last_frame = now;
+    if (input) g_trash_last_input = now;
+}
+
+// A game is starting: the card is the game's. The worker stops after the file
+// it is on, and goes on when the library is back (`swf_picker_trash_start`).
+extern "C" void swf_picker_trash_pause(void) {
+    if (!g_trash_started) return;
+    mutexLock(&g_trash_mutex);
+    g_trash_paused = true;
+    mutexUnlock(&g_trash_mutex);
+}
+
+// Stop the worker and wait for it (one file at most), before the app exits.
+extern "C" void swf_picker_trash_stop(void) {
+    if (!g_trash_started) return;
+    mutexLock(&g_trash_mutex);
+    g_trash_quit = true;
+    condvarWakeOne(&g_trash_wake);
+    mutexUnlock(&g_trash_mutex);
+    threadWaitForExit(&g_trash_thread);
+    threadClose(&g_trash_thread);
+    g_trash_started = false;
+}
+
 // Phase 3.4.bis SUPPRIMER — delete a game's .swf + every sidecar / save
 // file matching its basename. Pattern matched: file name == basename OR
 // file name starts with `<basename>.` (catches `.meta.json`,
@@ -409,11 +645,16 @@ extern "C" int swf_picker_delete_game(const char* swf_path, const char* also_dir
         const int nl = std::snprintf(filesdir, sizeof(filesdir), "%s%.*s.files",
                                      dir, (int)stemlen, basename);
         if (nl > 0 && (size_t)nl < sizeof(filesdir)) {
-            const int n = remove_dir_recursive(filesdir);
-            if (n > 0) {
-                std::printf("swf_picker_delete_game: removed companion dir %s (%d entries)\n",
-                            filesdir, n);
-                removed += n;
+            // Into the trash at once (see above), emptied in the background.
+            if (trash_move(filesdir)) {
+                removed += 1;
+            } else {
+                const int n = remove_dir_recursive(filesdir);
+                if (n > 0) {
+                    std::printf("swf_picker_delete_game: removed companion dir %s (%d entries)\n",
+                                filesdir, n);
+                    removed += n;
+                }
             }
         }
     }
