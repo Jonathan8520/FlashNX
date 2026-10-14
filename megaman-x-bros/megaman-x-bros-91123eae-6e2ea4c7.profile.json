@@ -9,7 +9,7 @@
   "author": "Jonathan8520",
   "verified": false,
   "bindings": {
-    "A": "D",
+    "A": "A",
     "B": "S",
     "Down": "Down",
     "L": "Escape",
@@ -23,7 +23,7 @@
     "StickLUp": "Up",
     "Up": "Up",
     "X": "F",
-    "Y": "A",
+    "Y": "D",
     "ZL": "Right click",
     "ZR": "Left click"
   },
