@@ -1808,10 +1808,15 @@ pub(crate) struct State {
     files_sort: (u8, bool),
     /// The same for the Flashpoint results.
     fp_sort: (u8, bool),
-    /// The last Flashpoint search, for the keyboard's prefill and for A "try
-    /// again" on a search that failed. Not `cover_query`: that one is the cover
-    /// picker's, and B out of the results used to wipe it.
+    /// What the Flashpoint results page shows, its title, and what A "try
+    /// again" asks for again on a search that failed: the words searched, a
+    /// studio's name or the draw's label. Not `cover_query`: that one is the
+    /// cover picker's, and B out of the results used to wipe it.
     fp_query: std::string::String,
+    /// The last search for words, the keyboard's prefill. Not `fp_query`: a
+    /// studio's page and a draw's are titled with a name or a label ("Au
+    /// hasard"), which typed as a search found nothing.
+    fp_typed: std::string::String,
     /// The Flashpoint results page shows a search that failed (`cover_msg` says
     /// why) rather than one that found nothing.
     fp_error: bool,
@@ -2012,6 +2017,7 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     files_sort: (0, false),
     fp_sort: (0, false),
     fp_query: std::string::String::new(),
+    fp_typed: std::string::String::new(),
     fp_error: false,
     fp_size_pending: false,
     fp_size_slot: -1,
@@ -8668,12 +8674,13 @@ fn run_direct_download(url: &str) {
 }
 
 /// IMPORTER > X (or a tap on the search button): the keyboard for a game's name,
-/// pre-filled with the last search, then the search. `origin` is the importer
-/// row it was asked from, `None` from the results page itself (a new search).
-/// Called from `input()` only (the keyboard needs the lock free).
+/// pre-filled with the last search for words (not a studio's name or the
+/// draw's label the results page may show), then the search. `origin` is the
+/// importer row it was asked from, `None` from the results page itself (a new
+/// search). Called from `input()` only (the keyboard needs the lock free).
 /// Returns whether a search went out (false: cancelled, or nothing typed).
 fn run_fp_search_flow(origin: Option<usize>) -> bool {
-    let initial = LIBRARY.lock().map(|s| s.fp_query.clone()).unwrap_or_default();
+    let initial = LIBRARY.lock().map(|s| s.fp_typed.clone()).unwrap_or_default();
     let u = crate::loc_ui::ui();
     let Some(query) = net::prompt_search_as(u.imp_fp_title, u.imp_kbd_fp_guide, &initial) else {
         return false;
@@ -8696,6 +8703,9 @@ fn start_fp_search(query: &str, origin: Option<usize>) {
     log(&std::format!("library: flashpoint game search \"{}\" (async)\n", query));
     let url = crate::sources::gamezip::search_url(query, filter);
     start_fp_query(&url, query, None, origin.map(|row| (row, IMPORTER_SEARCH_ROW)));
+    if let Ok(mut s) = LIBRARY.lock() {
+        s.fp_typed = query.to_string();
+    }
 }
 
 /// A studio's games on the results page: "see all" on the studio of the
