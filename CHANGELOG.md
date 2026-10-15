@@ -53,6 +53,7 @@ The whole interface is redrawn. Every screen uses the console's own fonts, at th
 
 ### Fixed
 
+- After Restart in the pause menu, the cursor stays in the middle of the screen, where it shows. It used to jump back to where it was before the restart at its first move.
 - Combat Tournament Legends no longer slows down during a fight (#123): it fell from 60 to 5 frames a second within about a minute and a half, and now runs at full speed. Every fighter not picked unloads itself as the fight starts. The player ran its loading code again on every frame, so it unloaded itself again and again and left more behind each time, and the unloaded fighters kept running their whole fighting logic every frame, as Flash does not. Other ActionScript 2 games that unload clips benefit too.
 - A game made into its own app and opened from the Album says that it needs the full memory and how to get it (hold R while starting a game, then pick it in the Homebrew Menu), instead of opening FlashNX's library, which could crash there.
 

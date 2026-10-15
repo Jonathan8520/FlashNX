@@ -1575,6 +1575,17 @@ static void worker_entry(void* arg) {
     float cursor_x = GAME_VIEWPORT_W * 0.5f;
     float cursor_y = GAME_VIEWPORT_H * 0.5f;
     ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
+    // After a Restart: the new Player draws the cursor in the middle, so it
+    // goes back there. It used to keep its old position here, and the first
+    // move made it jump back to where it was before the restart. The
+    // gyroscope's aim and tilt anchor start again from the middle too.
+    auto recenter_cursor = [&]() {
+        cursor_x = GAME_VIEWPORT_W * 0.5f;
+        cursor_y = GAME_VIEWPORT_H * 0.5f;
+        ruffle_handle_mouse_move((int)cursor_x, (int)cursor_y);
+        g_aim_valid = false;
+        g_tilt_anchor_valid = false;
+    };
     touch_was_pressed = false;
     // Touch tap -> left click, held back until the movie has run a frame with
     // the new cursor position (#87). `touch_press_at` is the tick that press is
@@ -2349,6 +2360,7 @@ static void worker_entry(void* arg) {
                             break;
                         }
                         menu_open = false;
+                        recenter_cursor();
                         // NOT resume_after_pause() here, unlike every other resume:
                         // ruffle_restart() destroyed the Player and built a new one,
                         // whose clock starts NOW. There is no unplayed gap to hide,
@@ -2404,6 +2416,7 @@ static void worker_entry(void* arg) {
                 break;
             }
             // As the pause's own Restart: a new Player, whose clock starts now.
+            recenter_cursor();
             last_tick = ruffle_tick_now();
             continue;
         }
