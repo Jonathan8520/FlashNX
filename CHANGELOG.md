@@ -47,7 +47,13 @@ The whole interface is redrawn. Every screen uses the console's own fonts, at th
 - **ActionScript 2 games that change their clips' frames from script run faster.** After every `gotoAndStop` or `nextFrame`, the player walked the whole scene twice for ActionScript 3 bookkeeping that ActionScript 2 does not have. Madness: Project Nexus redresses every fighter with dozens of them each frame, so each enemy made all the others slower (#109): such a frame change now costs five to ten times less, and the game's code runs 15 to 19 % faster in a busy fight.
 - **The pause stays smooth over a slow game.** It drew the game again under its panel on every frame, so it ran as slowly as the game (Dragon City: 6.7 frames a second). The game is now drawn once and kept, and the pause runs at 60. The Screen page still draws the game live, to show each setting on it.
 
+### Added
+
+- **Turn a Flash game into its own Switch app without building anything** (#106): `scripts/make_standalone.py` takes `FlashNX.nro` as released, the game's `.swf`, a picture and a name, and writes an `.nro` that shows in the Homebrew Menu with that picture and name and starts straight into the game, without FlashNX installed and without the game on the SD card. The picture is laid out like FlashNX's HOME Menu icons, a multi-file game's companions go in with it, and the app stays on the FlashNX version it was made from. It needs only Python; double-clicked, it opens a small window. See DEVELOPMENT.md.
+
 ### Fixed
+
+- A game made into its own app and opened from the Album says that it needs the full memory and how to get it (hold R while starting a game, then pick it in the Homebrew Menu), instead of opening FlashNX's library, which could crash there.
 
 - OVERCLOCK AUTO no longer leaves a game crawling for half a minute after an unlucky try. It judges a raise on a second and a half of play: when enemies poured in during it, the raise looked useless, and the game then ran at a quarter of its speed while AUTO waited 30 s before trying again (Madness: Project Nexus, 3D Mario Racing). If the game now falls well below the speed it had when the try was judged, AUTO tries once more right away. It still keeps the overclock only when it helps, and drops it as soon as the game keeps up without it.
 - A game moved into a folder (or with the whole library) keeps its HOME menu icon: the icon follows it, and the icon's image follows the cover rule instead of a white frame around transparent covers.

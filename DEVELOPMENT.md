@@ -111,10 +111,40 @@ The UI/Video backends use the `Null*` implementations provided by default by `ru
 
 ## Self-contained build: ship one game as its own `.nro` (#106)
 
-A `.swf` dropped into **`cpp/romfs/`** is built into the binary and booted
-directly: no library, no SD card scan, the game is on screen as soon as Ruffle
-is up. It is the same code path a Sphaira forwarder takes, with the game read
-from `romfs:/` instead of the card.
+A `.nro` whose RomFS holds a `.swf` boots that game directly: no library, no SD
+card scan, the game is on screen as soon as Ruffle is up. It is the same code
+path a Sphaira forwarder takes, with the game read from `romfs:/` instead of the
+card. There are two ways to make one.
+
+### Without building anything: `scripts/make_standalone.py`
+
+```bash
+python scripts/make_standalone.py FlashNX.nro MyGame.swf --name "My Game" --author "Me" --icon cover.png
+```
+
+It takes `FlashNX.nro` as released (1.9.0 or later), keeps its program part
+byte for byte and writes a new asset section after it (the format is on
+[switchbrew](https://switchbrew.org/wiki/NRO)): the picture as the icon, laid out
+like FlashNX's tiles (cropped to the square only when that cuts at most 15 % of
+it, otherwise whole over a blurred, darkened copy of itself), FlashNX's NACP with
+the new name, author and version, and a RomFS holding the game. Its output is
+byte for byte what `elf2nro --icon --nacp --romfsdir` makes from the same files
+(checked against devkitPro's `elf2nro` and `build_romfs`, multi-file trees,
+accents and spaces included), and it reads the result back the way libnx does
+before keeping it. A `<game>.files` folder next to the `.swf` goes in as the
+companions. Python's standard library is all it needs; Pillow lets the picture be
+any size or format, without it the picture must be a 256x256 JPEG. Run without
+arguments (or double-clicked), it opens a small window doing the same.
+
+It names the file and its folder without spaces (`My_Game.nro` in
+`sdmc:/switch/My_Game/`): a HOME Menu forwarder made with Sphaira does not start
+an `.nro` whose path has a space in it ("the software was closed because an
+error occurred", before the app even runs; Sphaira's `owo.cpp` passes the path
+unquoted). The Homebrew Menu and Sphaira show the app's name, not the file's.
+
+### From source: `cpp/romfs/`
+
+A `.swf` dropped into **`cpp/romfs/`** is built into the binary.
 
 ```bash
 mkdir -p cpp/romfs
@@ -144,7 +174,15 @@ What to know before shipping one:
   fixed `game.swf`.
 - **Global settings are still shared.** `sdmc:/switch/FlashNX/` is hardcoded
   throughout, so UI language and the global REGLAGES defaults come from the same
-  files FlashNX itself uses. Only the per-game layer is separate.
+  files FlashNX itself uses. Only the per-game layer is separate. A player who
+  changes FlashNX's defaults, or a later FlashNX that writes those files
+  differently, can therefore change how the game starts.
+- **It stays on the FlashNX version it was made from.** Later fixes reach it
+  only when it is made again from a newer `FlashNX.nro`.
+- **Opened from the Album** (applet mode, a small part of the memory), it says
+  so and how to start it with all of it (hold R while starting a game, then pick
+  it in the Homebrew Menu), instead of running out of memory. Apps made from
+  1.9.0 still open the library there, which can crash.
 - **A launch argument still wins.** A `.swf` passed on the command line (a
   Sphaira forwarder) overrides the embedded game, which is a cheap way to test
   another file against the build without rebuilding it.

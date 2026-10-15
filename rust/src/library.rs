@@ -1702,6 +1702,10 @@ pub(crate) struct State {
     /// Applet mode: why the last install of FlashNX's own tile failed, shown in
     /// `AppletBlock` until an install succeeds.
     applet_install_err: Option<std::string::String>,
+    /// Applet mode in a self-contained game app (#106, its game in the .nro's
+    /// RomFS): `AppletBlock` says how to start the game with all the memory,
+    /// and offers no FlashNX tile to install, which would make no sense there.
+    applet_standalone: bool,
     /// Active substring filter on the LOCAL list (Minus (-) = open swkbd to
     /// set/edit; empty input = clear). Mirrors `distant_filter`: lowercase, substring
     /// match against the lowercased display name OR basename. `None` = show
@@ -2019,6 +2023,7 @@ static LIBRARY: Mutex<State> = Mutex::new(State {
     applet_mode: false,
     applet_tile: false,
     applet_install_err: None,
+    applet_standalone: false,
     local_filter: None,
     folder_filter: None,
     cover_candidates: std::vec::Vec::new(),
@@ -3393,7 +3398,10 @@ pub fn open() {
         // Applet mode: the launcher itself does not fit (see `AppletBlock`), so
         // it opens on the page that says so, and no grid frame is ever drawn.
         if applet {
-            s.applet_tile = flashnx_on_home_menu();
+            // A self-contained game app lands here too: main.cpp drops its
+            // game in applet mode rather than let it run out of memory.
+            s.applet_standalone = !unsafe { swf_picker_embedded_swf() }.is_null();
+            s.applet_tile = !s.applet_standalone && flashnx_on_home_menu();
             s.applet_install_err = None;
             s.screen = Screen::AppletBlock { selection: 0 };
             collapse_info = None;
@@ -5311,10 +5319,11 @@ fn input_inner(button: &str) -> bool {
             true
         }
         Screen::AppletBlock { selection } => {
-            // Installed: one answer, Quit. Otherwise Install (or Retry after a
-            // failure) then Quit, side by side. Nothing else is reachable: no
-            // tab, no grid, no menu fits in what the applet pool leaves.
-            let two = !s.applet_tile;
+            // Installed, or a self-contained game app: one answer, Quit.
+            // Otherwise Install (or Retry after a failure) then Quit, side by
+            // side. Nothing else is reachable: no tab, no grid, no menu fits in
+            // what the applet pool leaves.
+            let two = !s.applet_tile && !s.applet_standalone;
             match button {
                 "Left" | "StickLLeft" | "Right" | "StickLRight" if two => {
                     s.screen = Screen::AppletBlock { selection: answer_at(button, selection) }
@@ -10252,6 +10261,12 @@ fn self_tile_id() -> Option<u64> {
     tile_id_for(SELF_NRO)
 }
 
+extern "C" {
+    /// cpp/src/swf_picker.cpp: the game baked into this `.nro` (#106), or null
+    /// for FlashNX itself. Scanned once by main() before any thread starts.
+    fn swf_picker_embedded_swf() -> *const core::ffi::c_char;
+}
+
 /// FlashNX can already be started from the HOME Menu: our own tile, or any
 /// installed application named FlashNX (a forwarder made with Sphaira, which
 /// has its own program ID). Either one starts it with the full memory, so the
@@ -13487,17 +13502,26 @@ pub fn render(backend: &mut SwitchRenderBackend) {
             crate::backend::render::set_ui_screen_kind(ui_kind);
             backend.set_ui_modal_scale(if modal_active { modal_scale } else { 1.0 });
             let (lc, u) = (crate::loc::s(), crate::loc_ui::ui());
-            let (tile, err, logo) = LIBRARY
+            let (installed, err, logo, standalone) = LIBRARY
                 .lock()
-                .map(|s| (s.applet_tile, s.applet_install_err.clone(), (s.banner_tex, s.banner_w, s.banner_h)))
-                .unwrap_or((false, None, (0, 0, 0)));
-            let body = if tile {
+                .map(|s| {
+                    (s.applet_tile, s.applet_install_err.clone(), (s.banner_tex, s.banner_w, s.banner_h),
+                     s.applet_standalone)
+                })
+                .unwrap_or((false, None, (0, 0, 0), false));
+            // One answer, Quit, both when FlashNX's tile is there and in a
+            // self-contained game app, which has none to offer.
+            let tile = installed || standalone;
+            let body = if standalone {
+                lc.applet_standalone_body
+            } else if installed {
                 lc.applet_block_installed
             } else if err.is_some() {
                 lc.applet_block_failed
             } else {
                 lc.applet_block_body
             };
+            let note = if standalone { lc.applet_standalone_note } else { lc.applet_block_note };
             let first = if err.is_some() { u.retry } else { u.install };
             let two = [
                 Choice { label: first, destructive: false },
@@ -13509,7 +13533,7 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 logo,
                 lc.applet_block_title,
                 body,
-                lc.applet_block_note,
+                note,
                 if tile { None } else { err.as_deref() },
                 choices,
                 if tile { 0 } else { selection.min(1) },
