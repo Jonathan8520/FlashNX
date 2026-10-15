@@ -206,6 +206,18 @@ pub fn pause_reset() {
     kit::sheet::cascade_reset();
 }
 
+/// The pause is up inside a frame the game is still computing (lib.rs,
+/// `script_hook`): the rows that need the game drawn again are dimmed.
+static PAUSE_FROZEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn set_pause_frozen(on: bool) {
+    PAUSE_FROZEN.store(on, core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn pause_frozen() -> bool {
+    PAUSE_FROZEN.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// The right edge of a page of the pause in landscape (the rail, then the
 /// page beside it): where what goes over the game beside the page starts.
 fn pause_page_right() -> f32 {
@@ -10235,20 +10247,26 @@ impl SwitchRenderBackend {
         // A game following the default says so, as its options do in the
         // launcher; not while the row is being changed.
         let oc_note = if !oc_armed && !oc_own { Some(u.tag_default) } else { None };
+        // Opened while the game computes (`pause_frozen`): the rows that need
+        // the game drawn again or changed under it are dimmed and do nothing.
+        let frozen = pause_frozen();
         let rows = [
             Row::new(Icon::Play, lc.menu_resume),
-            Row::new(Icon::Gamepad, lc.menu_keys).opens(),
-            Row::new(Icon::Monitor, lc.menu_screen).opens(),
+            Row::new(Icon::Gamepad, lc.menu_keys).opens().dim(frozen),
+            Row::new(Icon::Monitor, lc.menu_screen).opens().dim(frozen),
             Row::new(Icon::Cpu, lc.set_overclock)
                 .choice(&oc_opts, pv::current(PauseValue::Overclock) as usize)
                 .armed_if(oc_armed)
-                .note_in_room(oc_note, u.tag_default),
+                .note_in_room(oc_note, u.tag_default)
+                .dim(frozen),
             Row::new(Icon::Restart, lc.menu_restart),
             Row::new(Icon::LogOut, lc.menu_quit),
         ];
         debug_assert_eq!(rows.len(), MENU_ITEMS.len());
         let refused = overclock_refused();
         let help_of = |item: &str, power: u8| match item {
+            "REPRENDRE" if frozen => u.help_resume_frozen,
+            "TOUCHES" | "ECRAN" | "OVERCLOCK" if frozen => u.help_frozen,
             "REPRENDRE" => u.help_resume,
             "TOUCHES" => u.help_keys,
             "ECRAN" => u.help_screen,
@@ -10291,6 +10309,9 @@ impl SwitchRenderBackend {
         let hints_act = [(&[Btn::A][..], a_verb), (&[Btn::B][..], u.resume_game)];
         // On Resume, A and B do the same thing: one hint, both buttons.
         let hints_resume = [(&[Btn::A, Btn::B][..], u.resume_game)];
+        // A dimmed row does nothing: B alone.
+        let hints_dimmed = [(&[Btn::B][..], u.resume_game)];
+        let on_dimmed = frozen && matches!(MENU_ITEMS.get(selected), Some(&"TOUCHES") | Some(&"ECRAN") | Some(&"OVERCLOCK"));
 
         // The chips. The reading is the one frozen with the picture: no frame
         // runs while paused, so there is no newer speed to report.
@@ -10324,7 +10345,9 @@ impl SwitchRenderBackend {
         sheet.glide_key = GLIDE_KEY_PAUSE;
         sheet.help = help;
         sheet.helps = &helps;
-        sheet.hints = if on_power && oc_armed {
+        sheet.hints = if on_dimmed {
+            &hints_dimmed
+        } else if on_power && oc_armed {
             &hints_armed
         } else if on_power && oc_own {
             &hints_power_own
@@ -12147,6 +12170,31 @@ impl SwitchRenderBackend {
         if self.pause_snap.is_some() {
             self.pause_snap = None;
         }
+    }
+
+    /// One frame of the pause opened inside a frame the game is still
+    /// computing (lib.rs, `script_hook`): the screen as the target, in the
+    /// state the pause is normally drawn in after `submit_frame`, and under
+    /// it the picture kept when it opened, or black. Ruffle is in the middle
+    /// of a script here, between two of its own draws: nothing of its GL
+    /// state is relied on, and the cache is dropped for its next draw.
+    pub fn frozen_frame_begin(&mut self) {
+        let (w, h) = self.physical_dims();
+        unsafe {
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glViewport(0, 0, w as GLsizei, h as GLsizei);
+            glDisable(GL_SCISSOR_TEST);
+            glDisable(GL_STENCIL_TEST);
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        }
+        self.gl_state.invalidate();
+        if !self.pause_snapshot_present() {
+            unsafe {
+                glClearColor(0.0, 0.0, 0.0, 1.0);
+                glClear(GL_COLOR_BUFFER_BIT);
+            }
+        }
+        self.gl_state.invalidate();
     }
 
     /// The in-game sheet's open/close movement, driven by the same timeline as

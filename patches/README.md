@@ -246,6 +246,24 @@ pointer. On Super Mario 63's world 8 it took the frame from 57 to 37 ms and the
 collector from 8.4 to 0.8 ms (A/B in one session, 2026-09-23). FlashNX turns
 it off only for an `mcref.off` marker on the SD card.
 
+**`core/src/player.rs`, `avm1/activation.rs`, `avm2/activation.rs` — the pause
+inside a computing frame; `backend/navigator.rs` — loads one at a time.**
+
+A script can hold one frame for up to 60 s (the timeout a movie may ask for),
+and FlashNX draws its pause between frames: `-` did nothing for that long
+(Super Mario Bros. Crossover's preloader, 2026-10-15). `set_script_hook`
+installs a function called where the timeout is checked (every 2,000 AVM1
+actions, every 10,000 AVM2 ops, compiled code included) with how long the
+frame has run and the renderer. FlashNX opens its pause there while the
+script waits, as Flash Player put its "script is running slowly" dialog at
+the same place. The hook answers whether to stop the script, as the timeout
+would (Quit, Restart), and how long it held it, added to `update_start` so
+the timeout does not count the pause. `NullExecutor::run_until` runs the
+loader futures one completed future at a time and stops between two when
+asked: Dragon City loads some thirty files in a row there, and a pause asked
+meanwhile now opens between two of them. With no hook set, and with `run`,
+everything behaves as upstream.
+
 **`core/src/avm1/activation.rs`, `display_object/container.rs` — AVM1
 profiling, behind the `flashnx_instr` feature.**
 

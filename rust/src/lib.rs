@@ -1747,6 +1747,11 @@ pub extern "C" fn ruffle_init() -> c_int {
     // whether an AS2 game misbehaves because of it, on the same binary. An
     // experiment, never a default. Read at every launch, so removing the file
     // turns the cache back on for the next game.
+    // The pause opened inside a frame the game is still computing
+    // (`script_hook`). Set once, the first time a game starts; a choice left
+    // over from the last game is dropped.
+    ruffle_core::set_script_hook(script_hook);
+    FROZEN_REQUEST.store(0, std::sync::atomic::Ordering::Relaxed);
     let mcref_cache = !backend::render::marker_present("mcref.off");
     ruffle_core::flashnx_set_mcref_cache(mcref_cache);
     if !mcref_cache {
@@ -2714,7 +2719,14 @@ fn render_frame_with_dt(dt: FloatDuration) {
     // the delay can't be built from a self-waking future — see
     // `backend::navigator::wake_due_failures`.
     crate::backend::navigator::wake_due_failures();
-    state.executor.run();
+    // One load at a time, and none after a `-` the watch thread saw: the
+    // loop then opens the pause, and the rest loads once it is closed. Dragon
+    // City loads some thirty files in a row here, and the whole time `-` did
+    // nothing (2026-10-15).
+    extern "C" {
+        fn flashnx_minus_pending() -> c_int;
+    }
+    state.executor.run_until(|| unsafe { flashnx_minus_pending() } != 0);
 }
 
 /// Redraw the current Player state WITHOUT advancing AVM/animation by a
@@ -2870,6 +2882,179 @@ fn pause_stats_note(t0: u64, t1: u64, kept: bool) {
         draw_us / 1000,
         (draw_us % 1000) / 100,
     ));
+}
+
+/// What the pause opened inside a computing frame was left with, for the loop
+/// once that frame ends (`ruffle_take_frozen_request`): 0 Resume or nothing,
+/// 1 Quit, 2 Restart. Set, every script still running in the frame stops.
+static FROZEN_REQUEST: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[no_mangle]
+pub extern "C" fn ruffle_take_frozen_request() -> c_int {
+    FROZEN_REQUEST.swap(0, std::sync::atomic::Ordering::Relaxed) as c_int
+}
+
+/// Ruffle asks this from inside a running script, where it checks the timeout
+/// (`ruffle_core::set_script_hook`), with how long the frame has run.
+///
+/// The game loop draws the pause between two frames, and a frame can last a
+/// minute: a loading, a calculation, a preloader stuck in its work (Super
+/// Mario Bros. Crossover, 50 s of white screen with `-` doing nothing,
+/// 2026-10-15). Once a frame has run half a second, a `-` the watch thread saw
+/// (`flashnx_take_minus_pressed`) opens the pause HERE, the script waiting,
+/// which is what Flash Player did with its "a script is running slowly"
+/// dialog. Resume lets it carry on where it was, and the time spent paused is
+/// not counted toward its timeout; Quit and Restart stop it, as the timeout
+/// would, then the loop does the rest once the frame ends.
+fn script_hook(
+    elapsed: core::time::Duration,
+    renderer: &mut dyn ruffle_render::backend::RenderBackend,
+) -> (bool, core::time::Duration) {
+    use std::sync::atomic::Ordering::Relaxed;
+    extern "C" {
+        fn flashnx_take_minus_pressed() -> c_int;
+    }
+    const ZERO: core::time::Duration = core::time::Duration::ZERO;
+    if FROZEN_REQUEST.load(Relaxed) != 0 {
+        return (true, ZERO);
+    }
+    if elapsed < core::time::Duration::from_millis(500) {
+        return (false, ZERO);
+    }
+    if unsafe { flashnx_take_minus_pressed() } == 0 {
+        return (false, ZERO);
+    }
+    let Some(backend) = <dyn std::any::Any>::downcast_mut::<SwitchRenderBackend>(renderer) else {
+        return (false, ZERO);
+    };
+    let t0 = unsafe { ruffle_tick_now() };
+    let outcome = frozen_pause(backend, elapsed.as_millis() as u64);
+    let freq = unsafe { ruffle_tick_freq() }.max(1);
+    let held = core::time::Duration::from_micros(unsafe { ruffle_tick_now() }.saturating_sub(t0).saturating_mul(1_000_000) / freq);
+    log_str(&std::format!(
+        "pause: inside the frame, left with {} after {} ms\n",
+        match outcome {
+            1 => "Quit",
+            2 => "Restart",
+            3 => "the console closing FlashNX",
+            _ => "Resume",
+        },
+        held.as_millis()
+    ));
+    match outcome {
+        1 | 2 => {
+            FROZEN_REQUEST.store(outcome, Relaxed);
+            (true, held)
+        }
+        // HOME > Close: the loop's next appletMainLoop says so too.
+        3 => (true, held),
+        _ => (false, held),
+    }
+}
+
+/// The pause inside a computing frame (`script_hook`), until it is left: 0
+/// Resume, 1 Quit, 2 Restart, 3 the console closing FlashNX. The same panel as
+/// the loop's, over the picture on screen when it opened; the rows that need
+/// the game drawn again or changed under it (Touches et curseur, Écran,
+/// Overclock) are dimmed and refuse A. Buttons only.
+fn frozen_pause(backend: &mut SwitchRenderBackend, elapsed_ms: u64) -> u8 {
+    use crate::sfx::{play, Sfx};
+    use backend::render::MENU_ITEMS;
+    extern "C" {
+        fn flashnx_frozen_pad_reset();
+        fn flashnx_frozen_pad_down() -> u32;
+        fn flashnx_applet_ok() -> c_int;
+        fn flashnx_take_minus_pressed() -> c_int;
+        fn gl_context_swap();
+    }
+    log_str(&std::format!("pause: opened inside a frame computing for {} ms\n", elapsed_ms));
+    let row = |name: &str| MENU_ITEMS.iter().position(|k| *k == name).unwrap_or(0);
+    let (resume, restart, quit) = (row("REPRENDRE"), row("REDEMARRER"), row("QUITTER"));
+    let rows = MENU_ITEMS.len();
+    unsafe { flashnx_frozen_pad_reset() };
+    // What the screen holds now: the last frame the game finished.
+    backend.pause_snapshot_capture();
+    backend::render::set_pause_frozen(true);
+    backend::render::modal_open_begin();
+    backend::render::pause_reset();
+    backend::render::set_ui_screen_kind(0);
+    play(Sfx::Open);
+    let mut sel = resume;
+    let outcome = loop {
+        if unsafe { flashnx_applet_ok() } == 0 {
+            break 3;
+        }
+        let b = unsafe { flashnx_frozen_pad_down() };
+        if b & 8 != 0 {
+            sel = (sel + rows - 1) % rows;
+            play(Sfx::Move);
+        }
+        if b & 16 != 0 {
+            sel = (sel + 1) % rows;
+            play(Sfx::Move);
+        }
+        if b & (2 | 4) != 0 {
+            play(Sfx::Close);
+            break 0;
+        }
+        if b & 1 != 0 {
+            if sel == resume {
+                play(Sfx::Close);
+                break 0;
+            } else if sel == restart {
+                play(Sfx::Decide);
+                break 2;
+            } else if sel == quit {
+                play(Sfx::Decide);
+                break 1;
+            }
+            play(Sfx::Error);
+        }
+        frozen_pause_frame(backend, sel, false);
+        unsafe { gl_context_swap() };
+    };
+    // Resume: the panel slides out over the kept picture, as the loop's pause.
+    if outcome == 0 {
+        backend::render::modal_close_begin();
+        while unsafe { flashnx_applet_ok() } != 0 {
+            let _ = unsafe { flashnx_frozen_pad_down() };
+            if frozen_pause_frame(backend, sel, true) {
+                break;
+            }
+            unsafe { gl_context_swap() };
+        }
+        // The slide's last frame still showed a strip of the panel at the left
+        // edge, and the screen keeps it until the game finishes its frame,
+        // seconds later on a loading: put the picture back alone.
+        backend.clear_ui_transform();
+        backend.frozen_frame_begin();
+        unsafe { gl_context_swap() };
+    }
+    backend::render::set_pause_frozen(false);
+    backend.clear_ui_transform();
+    // The `-` or B that closed it is not a press for the game's loop.
+    unsafe { flashnx_take_minus_pressed() };
+    outcome
+}
+
+/// One frame of `frozen_pause`, not yet shown. True once the closing slide
+/// has ended (nothing drawn then).
+fn frozen_pause_frame(backend: &mut SwitchRenderBackend, sel: usize, closing: bool) -> bool {
+    let now = unsafe { ruffle_tick_now() };
+    let (scale, active, done) = backend::render::modal_scale_step(now);
+    if closing && done {
+        backend.clear_ui_transform();
+        return true;
+    }
+    backend.frozen_frame_begin();
+    if active {
+        backend.set_ui_sheet_slide(scale);
+    } else {
+        backend.clear_ui_transform();
+    }
+    backend.draw_menu_overlay(sel);
+    backend.clear_ui_transform();
+    false
 }
 
 /// Frame of the last pause draw, of ANY of its panels.

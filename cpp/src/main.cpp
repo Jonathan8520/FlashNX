@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cmath>
+#include <atomic>
 #include <sys/stat.h>
 
 #include "ruffle_bridge.h"
@@ -31,6 +32,105 @@ static uint64_t g_prev_swap_ticks = 0;
 static uint64_t g_prev_period_ticks = 0;
 extern "C" uint64_t flashnx_prev_swap_ticks(void) { return g_prev_swap_ticks; }
 extern "C" uint64_t flashnx_prev_period_ticks(void) { return g_prev_period_ticks; }
+
+// ── `-` watched between frames ───────────────────────────────────────────────
+// The game loop reads the buttons once per frame, and only as they are at that
+// instant (padUpdate keeps the latest state alone): on a game slow enough, a
+// `-` pressed and let go between two frames was never seen, and the pause did
+// not open (Jonathan, 2026-10-15: "je veux juste que le modal s'ouvre meme si
+// le jeu lag"). This thread reads `-` every 10 ms with its own PadState and
+// keeps a press until the loop takes it. A game frozen in a script still opens
+// the pause only once its frame ends: nothing is drawn before that.
+static Thread            s_minus_thread;
+static std::atomic<bool> s_minus_running{false};
+static std::atomic<bool> s_minus_pressed{false};
+
+static void minus_watch_entry(void*) {
+    PadState wpad;
+    padInitializeDefault(&wpad);
+    while (s_minus_running.load(std::memory_order_relaxed)) {
+        padUpdate(&wpad);
+        if (padGetButtonsDown(&wpad) & HidNpadButton_Minus) {
+            s_minus_pressed.store(true, std::memory_order_relaxed);
+        }
+        svcSleepThread(10'000'000LL);
+    }
+}
+
+// While a game runs. Off the game's core when it can be (core 2, as audio).
+static void minus_watch_start(void) {
+    if (s_minus_running.load()) return;
+    s_minus_pressed.store(false);
+    s_minus_running.store(true);
+    Result rc = threadCreate(&s_minus_thread, minus_watch_entry, nullptr, nullptr, 16 * 1024, 0x2C, 2);
+    if (R_FAILED(rc)) {
+        rc = threadCreate(&s_minus_thread, minus_watch_entry, nullptr, nullptr, 16 * 1024, 0x2C, -2);
+    }
+    if (R_FAILED(rc)) {
+        s_minus_running.store(false);
+        std::printf("minus watch: threadCreate failed 0x%x, - is read once per frame only\n", rc);
+        std::fflush(stdout);
+        return;
+    }
+    threadStart(&s_minus_thread);
+}
+
+static void minus_watch_stop(void) {
+    if (!s_minus_running.exchange(false)) return;
+    threadWaitForExit(&s_minus_thread);
+    threadClose(&s_minus_thread);
+}
+
+// ── The pause opened inside a frame that computes ───────────────────────────
+// A game frozen in a script (a loading, a calculation) holds the game thread
+// for up to 60 s, and the loop below cannot draw the pause until it lets go.
+// Ruffle asks the Rust side at its timeout checks, inside the script
+// (`script_hook`), which draws the pause there while the script waits, as
+// Flash Player did with its "a script is running slowly" dialog. These are
+// its buttons and the applet's messages meanwhile.
+extern "C" int flashnx_take_minus_pressed(void) {
+    return s_minus_pressed.exchange(false, std::memory_order_relaxed) ? 1 : 0;
+}
+
+// Whether a `-` waits for the loop, left for it: the game's file loads stop
+// between two (`run_until` in lib.rs) so the pause opens sooner.
+extern "C" int flashnx_minus_pending(void) {
+    return s_minus_pressed.load(std::memory_order_relaxed) ? 1 : 0;
+}
+
+static PadState s_frozen_pad;
+static bool     s_frozen_pad_ready = false;
+
+// Start from the buttons as they are: one still held is not a press.
+extern "C" void flashnx_frozen_pad_reset(void) {
+    if (!s_frozen_pad_ready) {
+        padInitializeDefault(&s_frozen_pad);
+        s_frozen_pad_ready = true;
+    }
+    padUpdate(&s_frozen_pad);
+    padUpdate(&s_frozen_pad);
+}
+
+// Presses since the last call: 1 A, 2 B, 4 `-`, 8 up, 16 down (d-pad or
+// either stick), 32 `-` or B still held.
+extern "C" uint32_t flashnx_frozen_pad_down(void) {
+    padUpdate(&s_frozen_pad);
+    const u64 d = padGetButtonsDown(&s_frozen_pad);
+    const u64 h = padGetButtons(&s_frozen_pad);
+    uint32_t out = 0;
+    if (d & HidNpadButton_A) out |= 1;
+    if (d & HidNpadButton_B) out |= 2;
+    if (d & HidNpadButton_Minus) out |= 4;
+    if (d & (HidNpadButton_Up | HidNpadButton_StickLUp | HidNpadButton_StickRUp)) out |= 8;
+    if (d & (HidNpadButton_Down | HidNpadButton_StickLDown | HidNpadButton_StickRDown)) out |= 16;
+    if (h & (HidNpadButton_Minus | HidNpadButton_B)) out |= 32;
+    return out;
+}
+
+// The applet's messages (HOME, sleep, closing): 0 once FlashNX must exit.
+extern "C" int flashnx_applet_ok(void) {
+    return appletMainLoop() ? 1 : 0;
+}
 
 // Sampling profiler (cpp/src/prof.cpp). Inert unless `prof.on` is on the card.
 extern "C" void prof_boot(Thread* worker);
@@ -84,6 +184,9 @@ extern "C" void ruffle_redraw_paused(void);
 // panel, TOUCHES, the closing slide): the game is drawn once and kept. ECRAN and
 // the framing mode keep `ruffle_redraw_paused`, which shows their changes live.
 extern "C" void ruffle_redraw_paused_frozen(void);
+// What the pause opened inside a computing frame was left with: 0 Resume (or
+// nothing), 1 Quit, 2 Restart. The script was stopped for 1 and 2.
+extern "C" int  ruffle_take_frozen_request(void);
 // Hide an interval of wall clock from the movie (#87). Frames only advance on
 // the dt we hand to ruffle_render_frame_dt, but getTimer() reads the real
 // clock, so a pause the player never simulated comes back as a jump for any
@@ -1583,6 +1686,7 @@ static void worker_entry(void* arg) {
     // Normal every 30 frames makes gameplay self-healing without IPC spam.
     int boost_reassert = 0;
 
+    minus_watch_start();
     while (appletMainLoop()) {
         padUpdate(&pad);
         const u64 kDown = padGetButtonsDown(&pad);
@@ -1647,6 +1751,9 @@ static void worker_entry(void* arg) {
         }
 
         if (menu_open) {
+            // The pause reads `-` on its own (it closes it): a press the watch
+            // thread kept now must not open the pause again once it is shut.
+            s_minus_pressed.store(false, std::memory_order_relaxed);
             // ─── Closing drain: play the scale-out, then resume the game ──
             // On dismiss we don't snap shut; we keep re-rendering the frozen
             // frame + the shrinking menu until the close pop reports done.
@@ -2278,9 +2385,35 @@ static void worker_entry(void* arg) {
         close_drain = 0;
         close_drain2 = 0;
 
+        // The pause opened inside the last frame, while it computed, was left
+        // with Quit or Restart (`script_hook`): its script is already stopped.
+        const int frozen_req = ruffle_take_frozen_request();
+        if (frozen_req == 1) {
+            std::printf("menu: QUITTER from the pause opened inside a frame\n");
+            std::fflush(stdout);
+            back_to_library = true;
+            break;
+        }
+        if (frozen_req == 2) {
+            std::printf("menu: REDEMARRER from the pause opened inside a frame → ruffle_restart()\n");
+            std::fflush(stdout);
+            if (ruffle_restart() != 0) {
+                std::printf("menu: ruffle_restart() failed\n");
+                std::fflush(stdout);
+                back_to_library = true;
+                break;
+            }
+            // As the pause's own Restart: a new Player, whose clock starts now.
+            last_tick = ruffle_tick_now();
+            continue;
+        }
+
         // `-` opens the pause modal. Captured before BINDINGS so it can't
-        // also fire a key event into Ruffle.
-        if (kDown & HidNpadButton_Minus) {
+        // also fire a key event into Ruffle. So does a `-` the watch thread
+        // saw between two frames (`minus_watch_entry`), which this frame's
+        // read missed. Taken every frame, so one press opens one pause.
+        const bool minus_between = s_minus_pressed.exchange(false, std::memory_order_relaxed);
+        if ((kDown & HidNpadButton_Minus) || minus_between) {
             // Diagnostic: print the movie's own AVM1 variables at the exact
             // moment the player says "this is stuck". A pause is the one
             // instant the game state is worth reading, and `-` is the only
@@ -2656,6 +2789,7 @@ static void worker_entry(void* arg) {
 
         if (back_to_library) break;
     }
+    minus_watch_stop();
 
     // End of game loop. Either:
     //   - back_to_library == true: user picked QUITTER → tear down Ruffle,

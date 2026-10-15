@@ -303,7 +303,7 @@ index 3bd126464..3649753cf 100644
  pub use error::Error;
  pub use flv::FlvValueAvm1Ext;
 diff --git a/core/src/avm1/activation.rs b/core/src/avm1/activation.rs
-index bec5d438f..8321536d3 100644
+index bec5d438f..37cee122e 100644
 --- a/core/src/avm1/activation.rs
 +++ b/core/src/avm1/activation.rs
 @@ -29,6 +29,66 @@ use web_time::Instant;
@@ -409,16 +409,26 @@ index bec5d438f..8321536d3 100644
      }
  
      /// Run a single action from a given action reader.
-@@ -429,7 +507,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -429,23 +507,79 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          *self.context.actions_since_timeout_check += 1;
          if *self.context.actions_since_timeout_check >= 2000 {
              *self.context.actions_since_timeout_check = 0;
 -            if self.context.update_start.elapsed() >= self.context.max_execution_duration {
 +            if self.context.update_start.elapsed() >= *self.context.max_execution_duration {
++                return Err(Error::ExecutionTimeout);
++            }
++            // FlashNX: the frontend's pause, opened from here while the frame
++            // computes (`flashnx_script_hook`). The time it was up is not the
++            // script's.
++            let elapsed = self.context.update_start.elapsed();
++            let (stop, held) = crate::player::flashnx_script_hook(elapsed, &mut *self.context.renderer);
++            if stop {
                  return Err(Error::ExecutionTimeout);
              }
++            self.context.update_start += held;
          }
-@@ -438,14 +516,61 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+ 
+         if reader.get_ref().as_ptr() as usize >= data.as_ref().as_ptr_range().end as usize {
              //Executing beyond the end of a function constitutes an implicit return.
              Ok(FrameControl::Return(ReturnType::Implicit))
          } else {
@@ -481,7 +491,7 @@ index bec5d438f..8321536d3 100644
                  Action::Add => self.action_add(),
                  Action::Add2 => self.action_add_2(),
                  Action::And => self.action_and(),
-@@ -547,7 +672,18 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -547,7 +681,18 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                  Action::WaitForFrame2(action) => self.action_wait_for_frame_2(action, reader),
                  Action::With(action) => self.action_with(action, data),
                  Action::Unknown(action) => self.action_unknown(action),
@@ -500,7 +510,7 @@ index bec5d438f..8321536d3 100644
          }
      }
  
-@@ -1742,6 +1878,16 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -1742,6 +1887,16 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
      fn action_push(&mut self, action: Push) -> Result<FrameControl<'gc>, Error<'gc>> {
          for value in action.values {
@@ -517,7 +527,7 @@ index bec5d438f..8321536d3 100644
              use swf::avm1::types::Value as SwfValue;
              let value = match value {
                  SwfValue::Undefined => Value::Undefined,
-@@ -1768,7 +1914,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -1768,7 +1923,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
              };
              self.stack_push(value); // Needs to handle MovieClipReferences, in case pushing a register
          }
@@ -525,7 +535,7 @@ index bec5d438f..8321536d3 100644
      }
  
      fn action_push_duplicate(&mut self) -> Result<FrameControl<'gc>, Error<'gc>> {
-@@ -1907,10 +2052,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -1907,10 +2061,11 @@ impl<'a, 'gc> Activation<'a, 'gc> {
              return Ok(FrameControl::Continue);
          }
  
@@ -540,7 +550,7 @@ index bec5d438f..8321536d3 100644
              Value::Undefined => {
                  // In SWF6 and below, SetTarget2 on an undefined object resets the target to the base clip
                  if self.swf_version() > 6 {
-@@ -1919,27 +2065,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -1919,27 +2074,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                      self.set_target_clip(Some(base_clip));
                  }
              }
@@ -568,7 +578,7 @@ index bec5d438f..8321536d3 100644
              _ => {
                  let target = target.coerce_to_string(self)?;
                  return self.set_target(&target);
-@@ -2488,6 +2613,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2488,6 +2622,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
              return Ok(Some(o));
          }
  
@@ -589,7 +599,7 @@ index bec5d438f..8321536d3 100644
          // Otherwise, we coerce it into a string and try to resolve it as a path.
          // This means that values like `undefined` will resolve to clips with an instance name of
          // `"undefined"`, for example.
-@@ -2717,7 +2856,35 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2717,7 +2865,35 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
          // Finally! It's a plain old variable name.
          // Resolve using scope chain, as normal.
@@ -817,7 +827,7 @@ index 563ffbb03..ba6970ad5 100644
          context: &mut UpdateContext<'gc>,
          object: Object<'gc>,
 diff --git a/core/src/avm2/activation.rs b/core/src/avm2/activation.rs
-index ed1ff3034..61bed51da 100644
+index ed1ff3034..cc6620d6f 100644
 --- a/core/src/avm2/activation.rs
 +++ b/core/src/avm2/activation.rs
 @@ -57,7 +57,8 @@ pub struct Activation<'a, 'gc: 'a> {
@@ -1073,7 +1083,7 @@ index ed1ff3034..61bed51da 100644
  
              let result = match op {
                  Op::PushDouble { value } => self.op_push_double(*value),
-@@ -946,7 +1099,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -946,12 +1099,21 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          *self.context.actions_since_timeout_check += 1;
          if *self.context.actions_since_timeout_check >= 10000 {
              *self.context.actions_since_timeout_check = 0;
@@ -1082,7 +1092,21 @@ index ed1ff3034..61bed51da 100644
                  return Err(
                      "A script in this movie has taken too long to execute and has been terminated."
                          .into(),
-@@ -2023,6 +2176,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+                 );
+             }
++            // FlashNX: the frontend's pause, opened from here while the frame
++            // computes (`flashnx_script_hook`). The time it was up is not the
++            // script's.
++            let elapsed = self.context.update_start.elapsed();
++            let (stop, held) = crate::player::flashnx_script_hook(elapsed, &mut *self.context.renderer);
++            if stop {
++                return Err("A script in this movie was stopped from the pause.".into());
++            }
++            self.context.update_start += held;
+         }
+         Ok(())
+     }
+@@ -2023,6 +2185,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                      ((n1 as i64 + n2 as i64) as f64).into()
                  }
              }
@@ -1093,7 +1117,7 @@ index ed1ff3034..61bed51da 100644
              (Value::Number(n1), Value::Number(n2)) => (n1 + n2).into(),
              (Value::String(s), value2) => Value::String(AvmString::concat(
                  self.gc(),
-@@ -2072,11 +2229,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2072,11 +2238,23 @@ impl<'a, 'gc> Activation<'a, 'gc> {
          Ok(())
      }
  
@@ -1120,7 +1144,7 @@ index ed1ff3034..61bed51da 100644
  
          Ok(())
      }
-@@ -2134,8 +2303,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2134,8 +2312,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
      fn op_decrement(&mut self) -> Result<(), Error<'gc>> {
          let value = self.pop_stack().coerce_to_number(self)?;
@@ -1131,7 +1155,7 @@ index ed1ff3034..61bed51da 100644
  
          Ok(())
      }
-@@ -2151,8 +2321,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2151,8 +2330,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      fn op_divide(&mut self) -> Result<(), Error<'gc>> {
          let value2 = self.pop_stack().coerce_to_number(self)?;
          let value1 = self.pop_stack().coerce_to_number(self)?;
@@ -1142,7 +1166,7 @@ index ed1ff3034..61bed51da 100644
  
          Ok(())
      }
-@@ -2175,8 +2346,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2175,8 +2355,9 @@ impl<'a, 'gc> Activation<'a, 'gc> {
  
      fn op_increment(&mut self) -> Result<(), Error<'gc>> {
          let value = self.pop_stack().coerce_to_number(self)?;
@@ -1153,7 +1177,7 @@ index ed1ff3034..61bed51da 100644
  
          Ok(())
      }
-@@ -2274,6 +2446,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2274,6 +2455,8 @@ impl<'a, 'gc> Activation<'a, 'gc> {
                      ((n1 as i64 - n2 as i64) as f64).into()
                  }
              }
@@ -1162,7 +1186,7 @@ index ed1ff3034..61bed51da 100644
              (Value::Number(n1), Value::Number(n2)) => (n1 - n2).into(),
              _ => {
                  let value2 = value2.coerce_to_number(self)?;
-@@ -2288,10 +2462,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
+@@ -2288,10 +2471,20 @@ impl<'a, 'gc> Activation<'a, 'gc> {
      }
  
      fn op_subtract_i(&mut self) -> Result<(), Error<'gc>> {
@@ -5312,6 +5336,29 @@ index b98eb3f76..345782817 100644
          #[inline]
          fn register_mp3(&mut self, data: &[u8]) -> Result<SoundHandle, DecodeError> {
              self.$mixer.register_mp3(data)
+diff --git a/core/src/backend/navigator.rs b/core/src/backend/navigator.rs
+index 9d02cc0ac..8eda73583 100644
+--- a/core/src/backend/navigator.rs
++++ b/core/src/backend/navigator.rs
+@@ -367,6 +367,18 @@ impl NullExecutor {
+     pub fn run(&mut self) {
+         self.0.run_until_stalled();
+     }
++
++    /// FlashNX: `run`, one completed future at a time, stopping between two
++    /// as soon as `stop` says so; what is left runs at the next call. A game
++    /// loading thirty files in a row held the frontend's loop for as long
++    /// (Dragon City, 2026-10-15), and the pause asked for meanwhile waited.
++    pub fn run_until(&mut self, mut stop: impl FnMut() -> bool) {
++        while !stop() {
++            if !self.0.try_run_one() {
++                break;
++            }
++        }
++    }
+ }
+ 
+ impl Default for NullExecutor {
 diff --git a/core/src/bitmap/bitmap_data.rs b/core/src/bitmap/bitmap_data.rs
 index 29eb34fdc..7e81a7964 100644
 --- a/core/src/bitmap/bitmap_data.rs
@@ -8956,7 +9003,7 @@ index 91bdb52df..33230aaf1 100644
  pub fn broadcast_frame_entered<'gc>(context: &mut UpdateContext<'gc>) {
      let enter_frame_evt = EventObject::bare_default_event(context, "enterFrame");
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..e45157e4a 100644
+index 6e5379213..ac8c3c20c 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
 @@ -4,6 +4,9 @@
@@ -9028,7 +9075,7 @@ index 6e5379213..e45157e4a 100644
  pub use player::{Player, PlayerBuilder, PlayerMode, PlayerRuntime, StaticCallstack};
 +/// FlashNX: last tick's SWF-frame count + collector phase + arena allocation,
 +/// for the periodic-spike hunt (see `player::flashnx_gc_probe`).
-+pub use player::{flashnx_frame_accumulator_us, flashnx_gc_probe, set_render_cost};
++pub use player::{flashnx_frame_accumulator_us, flashnx_gc_probe, set_render_cost, set_script_hook};
 +pub use player::set_bitmap_cache;
 +pub use player::set_gc_small_pacing;
 +pub use display_object::set_flashnx_mask_fixes;
@@ -9638,7 +9685,7 @@ index a231dc080..d38d9c027 100644
      }
  }
 diff --git a/core/src/player.rs b/core/src/player.rs
-index edb74cccb..94a04fb4d 100644
+index edb74cccb..80d6fc2e6 100644
 --- a/core/src/player.rs
 +++ b/core/src/player.rs
 @@ -43,6 +43,7 @@ use crate::frame_lifecycle::{FramePhase, run_all_phases_avm2};
@@ -9657,7 +9704,7 @@ index edb74cccb..94a04fb4d 100644
  use std::sync::{Arc, Mutex, Weak};
  use std::time::Duration;
  use tracing::instrument;
-@@ -276,6 +278,220 @@ impl<'gc> GcRootData<'gc> {
+@@ -276,6 +278,243 @@ impl<'gc> GcRootData<'gc> {
  
  type GcArena = gc_arena::Arena<Rootable![GcRoot<'_>]>;
  
@@ -9783,6 +9830,29 @@ index edb74cccb..94a04fb4d 100644
 +    RENDER_COST.store(enabled, Ordering::Relaxed);
 +}
 +
++/// FlashNX: called from inside a running script where the timeout is checked
++/// (every 2 000 AVM1 actions, every 10 000 AVM2 ops, compiled code included),
++/// with how long the frame has run and the renderer. A script can hold one
++/// frame for up to 60 s (`script_limits`), and the frontend draws nothing in
++/// between frames: it opens its pause from here instead, the script waiting,
++/// as Flash Player put its "a script is running slowly" dialog at the same
++/// place. Answers whether to stop the script (as the timeout would), and how
++/// long it was held, which the timeout does not count. Unset, nothing changes.
++pub type ScriptHook = fn(Duration, &mut dyn RenderBackend) -> (bool, Duration);
++static SCRIPT_HOOK: std::sync::OnceLock<ScriptHook> = std::sync::OnceLock::new();
++
++pub fn set_script_hook(hook: ScriptHook) {
++    let _ = SCRIPT_HOOK.set(hook);
++}
++
++#[inline]
++pub(crate) fn flashnx_script_hook(elapsed: Duration, renderer: &mut dyn RenderBackend) -> (bool, Duration) {
++    match SCRIPT_HOOK.get() {
++        Some(hook) => hook(elapsed, renderer),
++        None => (false, Duration::ZERO),
++    }
++}
++
 +/// FlashNX: see `FLASHNX_FRAME_ACC_US`.
 +pub fn flashnx_frame_accumulator_us() -> u64 {
 +    FLASHNX_FRAME_ACC_US.load(Ordering::Relaxed)
@@ -9878,7 +9948,7 @@ index edb74cccb..94a04fb4d 100644
  #[derive(Copy, Clone, Debug, Eq, PartialEq)]
  enum RunState {
      Playing,
-@@ -519,11 +735,168 @@ impl Player {
+@@ -519,11 +758,168 @@ impl Player {
          FloatDuration::from_millis(self.frame_time(1000.0))
      }
  
@@ -10047,7 +10117,7 @@ index edb74cccb..94a04fb4d 100644
          self.frame_accumulator += dt;
          let frame_duration = self.frame_duration();
  
-@@ -554,6 +927,10 @@ impl Player {
+@@ -554,6 +950,10 @@ impl Player {
              }
          }
  
@@ -10058,7 +10128,7 @@ index edb74cccb..94a04fb4d 100644
          // Now that we're done running code,
          // we can stop pretending that more time passed than actually did.
          // Note: update_timers(dt) doesn't need to see this either.
-@@ -577,6 +954,10 @@ impl Player {
+@@ -577,6 +977,10 @@ impl Player {
                  .audio_skew_time(context.audio, cur_frame_offset)
          });
          self.frame_accumulator += FloatDuration::from_secs(audio_skew);
@@ -10069,7 +10139,7 @@ index edb74cccb..94a04fb4d 100644
  
          self.update_sockets();
          self.update_net_connections();
-@@ -2038,10 +2419,33 @@ impl Player {
+@@ -2038,10 +2442,33 @@ impl Player {
          let invalidated = self.enter_arena(|_, gc_root, _| gc_root.stage.invalidated());
  
          if invalidated {
@@ -10103,7 +10173,7 @@ index edb74cccb..94a04fb4d 100644
          }
  
          let mut background_color = Color::WHITE;
-@@ -2058,7 +2462,7 @@ impl Player {
+@@ -2058,7 +2485,7 @@ impl Player {
                  library: &gc_root.library,
                  transform_stack: &mut this.transform_stack,
                  is_offscreen: false,
@@ -10112,7 +10182,7 @@ index edb74cccb..94a04fb4d 100644
                  stage,
              };
  
-@@ -2296,7 +2700,7 @@ impl Player {
+@@ -2296,7 +2723,7 @@ impl Player {
                  external_interface,
                  start_time: this.start_time,
                  update_start: Instant::now(),
@@ -10121,7 +10191,7 @@ index edb74cccb..94a04fb4d 100644
                  focus_tracker: stage.focus_tracker(),
                  times_get_time_called: 0,
                  time_offset: &mut this.time_offset,
-@@ -2355,6 +2759,42 @@ impl Player {
+@@ -2355,6 +2782,42 @@ impl Player {
          self.debug_ui.borrow_mut()
      }
  
@@ -10164,7 +10234,7 @@ index edb74cccb..94a04fb4d 100644
      /// Update the current state of the player.
      ///
      /// The given function will be called with the current stage root, current
-@@ -2382,7 +2822,83 @@ impl Player {
+@@ -2382,7 +2845,83 @@ impl Player {
          self.update_mouse_state(EnumSet::empty(), false, &mut false);
  
          // GC
@@ -10249,7 +10319,7 @@ index edb74cccb..94a04fb4d 100644
  
          rval
      }
-@@ -2956,6 +3472,9 @@ impl PlayerBuilder {
+@@ -2956,6 +3495,9 @@ impl PlayerBuilder {
      pub fn build(self) -> Arc<Mutex<Player>> {
          use crate::backend::*;
          use ruffle_video::null;
@@ -10259,7 +10329,7 @@ index edb74cccb..94a04fb4d 100644
          let audio = self
              .audio
              .unwrap_or_else(|| Box::new(audio::NullAudioBackend::new()));
-@@ -3173,6 +3692,36 @@ pub struct DragObject<'gc> {
+@@ -3173,6 +3715,36 @@ pub struct DragObject<'gc> {
      pub constraint: Rectangle<Twips>,
  }
  
