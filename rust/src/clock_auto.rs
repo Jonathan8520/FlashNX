@@ -23,7 +23,9 @@
 //! - KEEP or REJECT: one window after the raise is skipped (the change itself),
 //!   the next two must show the speed at 97 % or more, or 15 % above what it
 //!   was. Otherwise the raise bought nothing: back down, and the next try waits
-//!   30 s, doubling to 4 min.
+//!   30 s, doubling to 4 min. Unless the game then falls well below the speed
+//!   the verdict was made at: the verdict was about another scene, and one
+//!   early try is allowed (see `STALE_SPEED`).
 //! - DOWN: a TRY, not a prediction. After 3 s at full speed, and unless the
 //!   work of one SWF frame scaled as if all of it were CPU (x1.75) is far over
 //!   the frame's budget, the clock goes back down and the game shows whether it
@@ -89,6 +91,16 @@ const RECHECK_S: u64 = 120;
 /// Wait after a raise that bought nothing, doubled each time, reset by a KEEP.
 const RETRY_S: u64 = 30;
 const RETRY_MAX_S: u64 = 240;
+/// A REJECT is judged on 1.5 s of play, and a scene that gets heavier inside
+/// them makes the raise look useless: Madness: Project Nexus went 0.87 -> 0.82
+/// as enemies came in, then sat 25 s at 0.23-0.38 waiting out the 30 s; 3D
+/// Mario Racing 0.44 -> 0.29, then 20 s at 0.18-0.20 (2026-10-15). Below this
+/// share of the speed it had at stock before the rejected try, the game is in
+/// another scene: one try without waiting. Once per REJECT, and not after a
+/// REJECT of such a try: that one waits as any other, so a game the raise
+/// does not help (Dragon City, its wall is the GPU) never sees more than one
+/// extra probe of 1.5 s per wait.
+const STALE_SPEED: f32 = 0.75;
 /// Wait after a raise the console refused (battery out of its Normal state).
 const REFUSED_RETRY_S: u64 = 60;
 /// Skin temperature guard, milli-C, read every `TEMP_EVERY_S`.
@@ -148,6 +160,11 @@ struct Gov {
     gain: f32,
     retry_at: u64,
     backoff_s: u64,
+    /// Stock speed before the last rejected try, while that REJECT still
+    /// allows an early try (`STALE_SPEED`); 0 when it does not.
+    reject_speed: f32,
+    /// The current raise is such an early try.
+    early_try: bool,
     hot: bool,
     temp_at: u64,
     // Per game, for the summary line and the bug report.
@@ -160,6 +177,7 @@ struct Gov {
     rejects: u32,
     downs: u32,
     refusals: u32,
+    earlies: u32,
     /// The summary line has been written for this game.
     summarized: bool,
     /// Windows judged, for the periodic state line.
@@ -182,6 +200,8 @@ static GOV: Mutex<Gov> = Mutex::new(Gov {
     gain: 0.0,
     retry_at: 0,
     backoff_s: RETRY_S,
+    reject_speed: 0.0,
+    early_try: false,
     hot: false,
     temp_at: 0,
     auto_since: 0,
@@ -193,6 +213,7 @@ static GOV: Mutex<Gov> = Mutex::new(Gov {
     rejects: 0,
     downs: 0,
     refusals: 0,
+    earlies: 0,
     summarized: false,
     windows: 0,
 });
@@ -236,6 +257,8 @@ impl Gov {
         if got != 1 {
             self.refusals += 1;
             self.retry_at = now + REFUSED_RETRY_S * freq();
+            // This wait is the battery's, not a verdict on a scene.
+            self.reject_speed = 0.0;
             log(&std::format!(
                 "clocks: auto UP refused ({}), next try in {} s\n",
                 why, REFUSED_RETRY_S,
@@ -275,6 +298,7 @@ impl Gov {
         self.close_high(now);
         self.enter(Phase::Low, now);
         self.retry_at = now + REFUSED_RETRY_S * freq();
+        self.reject_speed = 0.0;
         log(&std::format!(
             "clocks: auto raise dropped by the battery veto, next try in {} s\n",
             REFUSED_RETRY_S,
@@ -323,7 +347,10 @@ impl Gov {
                 if now.saturating_sub(self.since) > RELAX_S * f {
                     self.quiet_needed = DOWN_WINDOWS;
                 }
-                if speed >= UP_SPEED || self.hot || now < self.retry_at {
+                // A REJECT made on another scene does not hold the wait
+                // (`STALE_SPEED`).
+                let stale = self.reject_speed > 0.0 && speed < STALE_SPEED * self.reject_speed;
+                if speed >= UP_SPEED || self.hot || (now < self.retry_at && !stale) {
                     self.behind = 0;
                     self.speed_sum = 0.0;
                     self.work_sum = 0.0;
@@ -345,14 +372,26 @@ impl Gov {
                 if self.last_down != 0 && now.saturating_sub(self.last_down) < OSC_S * f {
                     self.quiet_needed = (self.quiet_needed * 2).min(QUIET_MAX);
                 }
-                let why = std::format!(
+                let early = now < self.retry_at;
+                let mut why = std::format!(
                     "speed={:.2} work={:.1}ms budget={:.1}ms",
                     base_speed, base_work / 1000.0, budget_us / 1000.0,
                 );
+                if early {
+                    why.push_str(&std::format!(
+                        " EARLY (under {:.0} % of {:.2}, the speed of the rejected try)",
+                        STALE_SPEED * 100.0, self.reject_speed,
+                    ));
+                }
                 if self.raise(now, &why) {
                     self.enter(Phase::Probe, now);
                     self.base_speed = base_speed;
                     self.base_work = base_work;
+                    self.early_try = early;
+                    if early {
+                        self.earlies += 1;
+                        self.reject_speed = 0.0;
+                    }
                 }
             }
             Phase::Probe => {
@@ -381,15 +420,23 @@ impl Gov {
                     self.keeps += 1;
                     self.gain = gain;
                     self.backoff_s = RETRY_S;
+                    self.reject_speed = 0.0;
                     self.enter(Phase::High, now);
                     log(&std::format!("clocks: auto KEEP {}\n", verdict));
                 } else {
                     self.rejects += 1;
                     self.lower(now);
                     self.retry_at = now + self.backoff_s * f;
+                    // One early try per REJECT, none after that try's own.
+                    self.reject_speed = if self.early_try { 0.0 } else { self.base_speed };
+                    let early = if self.reject_speed > 0.0 {
+                        std::format!(", or once under {:.2}", STALE_SPEED * self.reject_speed)
+                    } else {
+                        std::string::String::new()
+                    };
                     log(&std::format!(
-                        "clocks: auto REJECT {}, next try in {} s\n",
-                        verdict, self.backoff_s,
+                        "clocks: auto REJECT {}, next try in {} s{}\n",
+                        verdict, self.backoff_s, early,
                     ));
                     self.backoff_s = (self.backoff_s * 2).min(RETRY_MAX_S);
                 }
@@ -487,6 +534,8 @@ pub fn begin_game() {
     g.gain = 0.0;
     g.retry_at = 0;
     g.backoff_s = RETRY_S;
+    g.reject_speed = 0.0;
+    g.early_try = false;
     g.hot = false;
     g.temp_at = 0;
     g.auto_ticks = 0;
@@ -496,6 +545,7 @@ pub fn begin_game() {
     g.rejects = 0;
     g.downs = 0;
     g.refusals = 0;
+    g.earlies = 0;
 }
 
 /// The game is gone (the clock itself is restored by main.cpp right after).
@@ -510,8 +560,9 @@ pub fn end_game() {
         g.summarized = true;
         let f = freq();
         log(&std::format!(
-            "clocks: auto summary: raised {} s of {} s, ups={} keeps={} rejects={} downs={} refused={}\n",
+            "clocks: auto summary: raised {} s of {} s, ups={} keeps={} rejects={} downs={} refused={} early={}\n",
             g.high_ticks / f, g.auto_ticks / f, g.ups, g.keeps, g.rejects, g.downs, g.refusals,
+            g.earlies,
         ));
     }
 }

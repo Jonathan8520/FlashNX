@@ -49,6 +49,7 @@ The whole interface is redrawn. Every screen uses the console's own fonts, at th
 
 ### Fixed
 
+- OVERCLOCK AUTO no longer leaves a game crawling for half a minute after an unlucky try. It judges a raise on a second and a half of play: when enemies poured in during it, the raise looked useless, and the game then ran at a quarter of its speed while AUTO waited 30 s before trying again (Madness: Project Nexus, 3D Mario Racing). If the game now falls well below the speed it had when the try was judged, AUTO tries once more right away. It still keeps the overclock only when it helps, and drops it as soon as the game keeps up without it.
 - A game moved into a folder (or with the whole library) keeps its HOME menu icon: the icon follows it, and the icon's image follows the cover rule instead of a white frame around transparent covers.
 - A game that cannot be read (moved, deleted, too big) says so and where it was looked for, instead of a red screen.
 - A profile applied in game changes the cursor speed at once, and its preview shows the speed that really changes.
