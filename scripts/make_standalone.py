@@ -11,6 +11,11 @@ the SD card.
 
 Run it without arguments (or double-click it) for a small window doing the same.
 
+An app stays on the FlashNX it was made from; to move it to a newer one, without
+the game's files:
+
+    python make_standalone.py latest --update My_Game.nro
+
 How it works: an .nro ends with an asset section holding the icon, the NACP
 (name, author, version) and a RomFS (https://switchbrew.org/wiki/NRO). This
 keeps the program part of FlashNX.nro byte for byte and writes a new asset
@@ -381,7 +386,8 @@ class RomfsPlan(object):
                     d.dirs[part] = _Dir(part, d.path + b'/' + part, d)
                 d = d.dirs[part]
             name = parts[-1]
-            d.files[name] = _File(name, d.path + b'/' + name, d, src, os.path.getsize(src))
+            size = len(src) if isinstance(src, bytes) else os.path.getsize(src)
+            d.files[name] = _File(name, d.path + b'/' + name, d, src, size)
 
         dirs = []
         files = []
@@ -487,6 +493,9 @@ def write_romfs(out, plan):
     pad_to(out, start + ROMFS_FILE_PARTITION_OFS)
     for f in plan.files:
         pad_to(out, start + ROMFS_FILE_PARTITION_OFS + f.data_offset)
+        if isinstance(f.src, bytes):
+            out.write(f.src)
+            continue
         copied = 0
         with open(f.src, 'rb') as src:
             while True:
@@ -560,9 +569,13 @@ def verify_nro(path, entries):
         if found is None:
             raise AssertionError('%s not found in the RomFS' % rel)
         data_off, size = found
-        with open(src, 'rb') as f:
-            if f.read() != romfs[part_ofs + data_off:part_ofs + data_off + size]:
-                raise AssertionError('%s differs from its source' % rel)
+        if isinstance(src, bytes):
+            data = src
+        else:
+            with open(src, 'rb') as f:
+                data = f.read()
+        if data != romfs[part_ofs + data_off:part_ofs + data_off + size]:
+            raise AssertionError('%s differs from its source' % rel)
 
     listed = set()
 
@@ -582,6 +595,30 @@ def verify_nro(path, entries):
     walk(0, '')
     if listed != set(rel for rel, _src in entries):
         raise AssertionError('the RomFS lists %s' % sorted(listed))
+
+
+def romfs_files(romfs):
+    """Every file of a RomFS image, as (path, bytes), through its directory
+    links: what an app made earlier carries, to write it again."""
+    hdr = struct.unpack_from('<10Q', romfs, 0)
+    dt_ofs, ft_ofs, part_ofs = hdr[3], hdr[7], hdr[9]
+    files = []
+
+    def walk(off, prefix):
+        _p, _s, child, f, _n, _l = struct.unpack_from('<6I', romfs, dt_ofs + off)
+        while f != ROMFS_EMPTY:
+            _fp, sibling, data_off, size, _nx, nlen = struct.unpack_from('<IIQQII', romfs, ft_ofs + f)
+            name = romfs[ft_ofs + f + 0x20:ft_ofs + f + 0x20 + nlen].decode('utf-8')
+            files.append((prefix + name, bytes(romfs[part_ofs + data_off:part_ofs + data_off + size])))
+            f = sibling
+        while child != ROMFS_EMPTY:
+            _cp, sibling, _cc, _cf, _nx, nlen = struct.unpack_from('<6I', romfs, dt_ofs + child)
+            name = romfs[dt_ofs + child + 0x18:dt_ofs + child + 0x18 + nlen].decode('utf-8')
+            walk(child, prefix + name + '/')
+            child = sibling
+
+    walk(0, '')
+    return files
 
 
 # ---------------------------------------------------------------------------
@@ -633,45 +670,44 @@ def safe_file_name(text):
     return out.strip('_.') or 'game'
 
 
-def make_standalone(nro, swf, out_path, name=None, author=None, version=None,
-                    icon=None, files_dir=None, log=print):
-    """Write the standalone .nro; returns the list of files it carries."""
+# Beside the game in the RomFS: which FlashNX the app was made from, for
+# `update_app` to say what it replaces. FlashNX itself only looks for the .swf.
+MARKER = '.flashnx.json'
+
+
+def version_text(version):
+    return '.'.join(map(str, version)) if version else 'unknown'
+
+
+def flashnx_program(nro):
+    """The program part and NACP of a FlashNX.nro fit to carry a game, and
+    its version."""
     prefix, base_icon, base_nacp, base_romfs = read_nro(nro)
     found = nacp_version(base_nacp)
     if found is not None and found < MIN_FLASHNX:
         raise StandaloneError(
             'This FlashNX.nro is version %s; a game inside the .nro needs %s or later.'
-            % ('.'.join(map(str, found)), '.'.join(map(str, MIN_FLASHNX))))
+            % (version_text(found), version_text(MIN_FLASHNX)))
     if not base_nacp:
         raise StandaloneError('%s carries no NACP: use FlashNX.nro as released.'
                               % os.path.basename(nro))
-    entries = game_entries(swf, files_dir)
-    stem = os.path.basename(swf)[:-4]
-    name = name or stem
-    author = author or 'FlashNX'
-    version = version or '1.0.0'
-    icon_data = base_icon
-    if icon:
-        local, temporary = fetch_picture(icon)
-        try:
-            icon_data = make_icon(local)
-        finally:
-            if temporary:
-                os.remove(local)
-    nacp = make_nacp(base_nacp, name, author, version)
-    plan = RomfsPlan(entries)
-    if base_romfs:
-        log('note: this .nro already carried a game; it is replaced.')
-    if ' ' in os.path.basename(out_path):
-        log('note: with a space in its name (or its folder\'s), a HOME Menu icon '
-            'made with Sphaira will not start this app.')
+    return prefix, base_icon, base_nacp, base_romfs, found
 
+
+def marker(version):
+    import json
+    return (MARKER, json.dumps({'flashnx': version_text(version)}).encode('utf-8'))
+
+
+def write_app(out_path, prefix, icon_data, nacp, entries):
+    """Program part, then an asset section with the icon, the NACP and a
+    RomFS of `entries`; written beside `out_path`, read back, then put there."""
+    plan = RomfsPlan(entries)
     icon_off = ASSET_HEADER_SIZE
     nacp_off = icon_off + len(icon_data)
     romfs_off = nacp_off + len(nacp)
     asset_header = b'ASET' + struct.pack(
         '<I6Q', 0, icon_off, len(icon_data), nacp_off, len(nacp), romfs_off, plan.size)
-
     out_dir = os.path.dirname(os.path.abspath(out_path))
     fd, tmp = tempfile.mkstemp(suffix='.nro.part', dir=out_dir)
     try:
@@ -687,6 +723,83 @@ def make_standalone(nro, swf, out_path, name=None, author=None, version=None,
         if os.path.exists(tmp):
             os.remove(tmp)
         raise
+
+
+def app_info(path):
+    """What an app made from FlashNX carries: its name, author and version,
+    the FlashNX it was made from (None when unknown), and its files."""
+    import json
+    _prefix, icon, nacp, romfs = read_nro(path)
+    if not romfs:
+        raise StandaloneError('%s carries no game: it is not an app made from FlashNX.'
+                              % os.path.basename(path))
+    files = romfs_files(romfs)
+    if not any('/' not in rel and rel.lower().endswith('.swf') for rel, _data in files):
+        raise StandaloneError('%s carries no .swf: it is not an app made from FlashNX.'
+                              % os.path.basename(path))
+    made_from = None
+    for rel, data in files:
+        if rel == MARKER:
+            try:
+                made_from = json.loads(data.decode('utf-8')).get('flashnx')
+            except ValueError:
+                pass
+    return {
+        'name': nacp[0:NACP_NAME_CAP].split(b'\0')[0].decode('utf-8', 'replace'),
+        'author': nacp[NACP_NAME_CAP:NACP_NAME_CAP + NACP_AUTHOR_CAP].split(b'\0')[0].decode('utf-8', 'replace'),
+        'version': nacp[NACP_VERSION_OFF:NACP_VERSION_OFF + NACP_VERSION_CAP].split(b'\0')[0].decode('utf-8', 'replace'),
+        'flashnx': made_from,
+        'icon': icon,
+        'nacp': nacp,
+        'files': [(rel, data) for rel, data in files if rel != MARKER],
+    }
+
+
+def update_app(app, nro, out_path):
+    """The app `app` with the FlashNX of `nro`: its game, files, icon, name,
+    author and version kept as they are, the program part replaced. Saves and
+    settings live on the SD card under the game's name, so they carry over.
+    Returns (name, FlashNX it had, FlashNX it has now)."""
+    prefix, _icon, _nacp, _romfs, found = flashnx_program(nro)
+    info = app_info(app)
+    try:
+        had = tuple(int(p) for p in info['flashnx'].split('.'))
+    except (AttributeError, ValueError):
+        had = None
+    if had and found and had == found:
+        raise StandaloneError('%s already runs FlashNX %s: nothing to update.'
+                              % (info['name'], version_text(found)))
+    if had and found and had > found:
+        raise StandaloneError('%s runs FlashNX %s, newer than this FlashNX.nro (%s).'
+                              % (info['name'], version_text(had), version_text(found)))
+    write_app(out_path, prefix, info['icon'], info['nacp'], info['files'] + [marker(found)])
+    return info['name'], info['flashnx'], version_text(found)
+
+
+def make_standalone(nro, swf, out_path, name=None, author=None, version=None,
+                    icon=None, files_dir=None, log=print):
+    """Write the standalone .nro; returns the list of files it carries."""
+    prefix, base_icon, base_nacp, base_romfs, found = flashnx_program(nro)
+    entries = game_entries(swf, files_dir)
+    stem = os.path.basename(swf)[:-4]
+    name = name or stem
+    author = author or 'FlashNX'
+    version = version or '1.0.0'
+    icon_data = base_icon
+    if icon:
+        local, temporary = fetch_picture(icon)
+        try:
+            icon_data = make_icon(local)
+        finally:
+            if temporary:
+                os.remove(local)
+    nacp = make_nacp(base_nacp, name, author, version)
+    if base_romfs:
+        log('note: this .nro already carried a game; it is replaced.')
+    if ' ' in os.path.basename(out_path):
+        log('note: with a space in its name (or its folder\'s), a HOME Menu icon '
+            'made with Sphaira will not start this app.')
+    write_app(out_path, prefix, icon_data, nacp, entries + [marker(found)])
     return entries
 
 
@@ -1011,7 +1124,10 @@ def main_cli(argv):
         description='Turn one Flash game into its own Switch homebrew app (.nro).')
     p.add_argument('nro', help='FlashNX.nro, as released (1.9.0 or later), or "latest" to '
                                'download the latest release first')
-    p.add_argument('swf', help="the game's .swf")
+    p.add_argument('swf', nargs='?', help="the game's .swf (not with --update)")
+    p.add_argument('--update', metavar='APP.nro',
+                   help='an app made earlier: write it again with this FlashNX, its game, '
+                        'picture and name kept (in place, unless -o)')
     p.add_argument('--name', help='the app name (default: the .swf name)')
     p.add_argument('--author', help='the author shown in the Homebrew Menu')
     p.add_argument('--version', help='the version shown in the Homebrew Menu (default 1.0.0)')
@@ -1020,8 +1136,13 @@ def main_cli(argv):
     p.add_argument('--files', help='folder of companion files (default: <game>.files next to the .swf)')
     p.add_argument('-o', '--out', help='output .nro (default: <name>.nro here)')
     args = p.parse_args(argv)
-    name = args.name or os.path.basename(args.swf)[:-4]
-    out_path = args.out or safe_file_name(name) + '.nro'
+    if bool(args.update) == bool(args.swf):
+        p.error('give the game\'s .swf, or --update and an app made earlier (not both)')
+    if args.swf:
+        name = args.name or os.path.basename(args.swf)[:-4]
+        out_path = args.out or safe_file_name(name) + '.nro'
+    else:
+        out_path = args.out or args.update
     try:
         if args.nro == 'latest':
             shown = [-1]
@@ -1034,6 +1155,11 @@ def main_cli(argv):
 
             args.nro, version = download_flashnx(download_dir(), progress)
             print('FlashNX %s downloaded: %s' % (version, args.nro))
+        if args.update:
+            name, had, now = update_app(args.update, args.nro, out_path)
+            print('%s: FlashNX %s -> %s, written to %s'
+                  % (name, had or '(version not recorded)', now, out_path))
+            return 0
         entries = make_standalone(args.nro, args.swf, out_path, name, args.author,
                                   args.version, args.icon, args.files)
     except StandaloneError as e:
@@ -1500,8 +1626,10 @@ def main_gui():
     status = ttk.Label(bar, style='Muted.TLabel', wraplength=px(560), justify='left')
     status.grid(row=0, column=0, sticky='w', padx=(0, px(16)))
     open_btn = ttk.Button(bar, text='Show in folder')
+    update_btn = ttk.Button(bar, text='Update an app...')
+    update_btn.grid(row=0, column=2, sticky='e', padx=(0, px(10)))
     make_btn = ttk.Button(bar, text='Make the .nro', style='Primary.TButton')
-    make_btn.grid(row=0, column=2, sticky='e')
+    make_btn.grid(row=0, column=3, sticky='e')
 
     def say(text, error=False):
         status.configure(text=text, style='Error.TLabel' if error else 'Muted.TLabel')
@@ -1679,6 +1807,60 @@ def main_gui():
         root.after(100, poll, out_path, name)
 
     make_btn.configure(command=create)
+
+    def update_work(app, nro, out_path):
+        try:
+            results.put(('updated', update_app(app, nro, out_path)))
+        except StandaloneError as e:
+            results.put(('error', str(e)))
+        except Exception as e:  # a bug, said rather than swallowed
+            results.put(('error', 'Unexpected error: %r' % (e,)))
+
+    def poll_update(out_path):
+        try:
+            kind, value = results.get_nowait()
+        except queue.Empty:
+            root.after(100, poll_update, out_path)
+            return
+        make_btn.state(['!disabled'])
+        update_btn.state(['!disabled'])
+        if kind == 'error':
+            say(value, error=True)
+            return
+        name, had, now = value
+        say('%s now runs FlashNX %s%s. Copy it over the old one on the SD card: '
+            'saves and settings stay.' % (name, now, ' (it had %s)' % had if had else ''))
+        folder = os.path.dirname(os.path.abspath(out_path))
+        if sys.platform == 'win32':
+            open_btn.configure(command=lambda: os.startfile(folder))
+            open_btn.grid(row=0, column=1, sticky='e', padx=(0, px(10)))
+
+    def update():
+        """An app made earlier, written again with the FlashNX.nro of the
+        field: its game, picture, name, author and version kept."""
+        nro = fields['nro'].get().strip()
+        if not nro or nro_facts(nro)[1] is None:
+            say('Choose the FlashNX.nro to put in the app first, or Download the latest.',
+                error=True)
+            return
+        app = filedialog.askopenfilename(title='The app to update',
+                                         filetypes=[('Switch homebrew', '*.nro')])
+        if not app:
+            return
+        out_path = filedialog.asksaveasfilename(
+            title='Save the updated app as', defaultextension='.nro',
+            initialdir=os.path.dirname(app), initialfile=os.path.basename(app),
+            filetypes=[('Switch homebrew', '*.nro')])
+        if not out_path:
+            return
+        open_btn.grid_remove()
+        make_btn.state(['disabled'])
+        update_btn.state(['disabled'])
+        say('Updating %s...' % os.path.basename(app))
+        threading.Thread(target=update_work, args=(app, nro, out_path), daemon=True).start()
+        root.after(100, poll_update, out_path)
+
+    update_btn.configure(command=update)
 
     downloads = queue.Queue()
     busy = {'download': False}

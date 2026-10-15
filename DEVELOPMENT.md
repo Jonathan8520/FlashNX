@@ -167,6 +167,23 @@ an `.nro` whose path has a space in it ("the software was closed because an
 error occurred", before the app even runs; Sphaira's `owo.cpp` passes the path
 unquoted). The Homebrew Menu and Sphaira show the app's name, not the file's.
 
+An app stays on the FlashNX it was made from. To move it to a newer one,
+`--update` takes the app itself, without the game's files:
+
+```bash
+python scripts/make_standalone.py latest --update My_Game.nro
+```
+
+It keeps the app's icon, NACP and RomFS as they are and puts the new
+`FlashNX.nro`'s program part in front of them, then reads the result back like a
+new app (in place unless `-o` says otherwise; "Update an app..." in the window).
+Saves and settings live on the SD card under the game's file name, so they carry
+over. The RomFS holds a small `.flashnx.json` (`{"flashnx": "x.y.z"}`, hidden from
+FlashNX, which only looks for `.swf` files at the root) recording the FlashNX
+version the app was made from: an update to the same version or an older one is
+refused. An app without it (made before it existed) is updated whatever its
+version.
+
 ### From source: `cpp/romfs/`
 
 A `.swf` dropped into **`cpp/romfs/`** is built into the binary.
