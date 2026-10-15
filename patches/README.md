@@ -281,6 +281,17 @@ only in the exponent branch that uses it (two `powf` per number before).
 The race went from 83.5 to 75.4 ms of AS3 per frame (medians at 1785 MHz,
 two sessions); the Array, Number and Vector tests pass.
 
+**`core/src/avm2/activation_jit.rs` — helper counts, behind `flashnx_instr`.**
+
+The `jit:` line of measuring builds ends with `helpers N [...]`: how many
+times compiled code ran each op kind through its interpreter helper since
+the last report, the 14 most frequent by name. Read it with what a helper
+costs, ~15-20 ns: 3D Mario Racing ran ~230 000 a frame (2026-10-15), and
+making mixed int/Number arithmetic, Divide and Negate native removed
+~57 000 of them for 1-3 ms of a 77 ms frame, in the noise, so that change
+was taken out again. A game whose compiled code is slow is slow from the
+volume of its ops and their memory traffic, not from its helpers.
+
 **`core/src/avm1/activation.rs`, `display_object/container.rs` — AVM1
 profiling, behind the `flashnx_instr` feature.**
 

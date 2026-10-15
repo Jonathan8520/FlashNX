@@ -1212,10 +1212,10 @@ index ed1ff3034..cc6620d6f 100644
      }
 diff --git a/core/src/avm2/activation_jit.rs b/core/src/avm2/activation_jit.rs
 new file mode 100644
-index 000000000..3ca3f8326
+index 000000000..3a1c9faa0
 --- /dev/null
 +++ b/core/src/avm2/activation_jit.rs
-@@ -0,0 +1,1855 @@
+@@ -0,0 +1,1899 @@
 +//! FlashNX: a baseline JIT for AVM2 bytecode (AArch64, Switch build only).
 +//!
 +//! Fireboy & Watergirl 2 runs 2.65 million AVM2 ops per frame at ~57 CPU
@@ -1268,6 +1268,8 @@ index 000000000..3ca3f8326
 +use crate::avm2::object::{Object, ScriptObjectData};
 +use fnv::FnvHashMap;
 +use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
++#[cfg(feature = "flashnx_instr")]
++use std::sync::atomic::AtomicU64;
 +
 +unsafe extern "C" {
 +    fn flashnx_jit_init(size: usize, rw: *mut *mut u8, rx: *mut *mut u8) -> u32;
@@ -1370,7 +1372,22 @@ index 000000000..3ca3f8326
 +    /// when `set_map` asked for it: the profiling build's attribution of
 +    /// samples in compiled code to the ops that produced it.
 +    map: Vec<(usize, String)>,
++    /// The name of each op kind met while compiling, for `HELPER_N`.
++    #[cfg(feature = "flashnx_instr")]
++    kind_names: FnvHashMap<usize, String>,
 +}
++
++/// Measuring builds: how many times compiled code handed each op kind to its
++/// helper (`h_op`), that is ran it through the interpreter's handler rather
++/// than as native code, since the last `report`.
++///
++/// Read with what a helper costs: ~15-20 ns, not the 150-250 ns guessed
++/// first. 3D Mario Racing ran ~230 000 helpers a frame (2026-10-15); making
++/// mixed int/Number arithmetic, Divide and Negate native removed ~57 000 of
++/// them and saved 1-3 ms of a 77 ms frame, in the noise, so it was taken out
++/// again. Its time is the sheer volume of ops and their memory traffic.
++#[cfg(feature = "flashnx_instr")]
++static HELPER_N: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 +
 +/// Keep the op address map (`map`); off unless the profiling build asks.
 +static MAP: AtomicBool = AtomicBool::new(false);
@@ -1444,6 +1461,8 @@ index 000000000..3ca3f8326
 +            calls_slow: 0,
 +            layout: Layout::default(),
 +            map: Vec::new(),
++            #[cfg(feature = "flashnx_instr")]
++            kind_names: FnvHashMap::default(),
 +        })
 +    }
 +}
@@ -2006,6 +2025,11 @@ index 000000000..3ca3f8326
 +        flashnx_jit_flush(base, s.rx.add(s.used), total);
 +    }
 +    s.used += (total + 15) & !15;
++    // The names `report` gives the helper counts under (`HELPER_N`).
++    #[cfg(feature = "flashnx_instr")]
++    for op in ops.iter() {
++        s.kind_names.entry(kind(op)).or_insert_with(|| op_name(op));
++    }
 +    if MAP.load(AtomicOrdering::Relaxed) {
 +        push_map(s, addr, ops, &depth, &main_labels, main_exit);
 +        if let Some((_, labels, exit)) = &alt {
@@ -2505,6 +2529,8 @@ index 000000000..3ca3f8326
 +        let act = &mut *c.act;
 +        act.stack.set_stack_pointer(c.num_locals + depth as usize);
 +        let op = &*c.ops.add(idx as usize);
++        #[cfg(feature = "flashnx_instr")]
++        HELPER_N[kind(op)].fetch_add(1, AtomicOrdering::Relaxed);
 +        if K < KINDS {
 +            // One copy per op kind: the match below folds to one arm, and
 +            // each call site in compiled code has its own predictable branch.
@@ -2885,6 +2911,24 @@ index 000000000..3ca3f8326
 +    s.runs = 0;
 +    s.calls_direct = 0;
 +    s.calls_slow = 0;
++    // Measuring builds: the op kinds compiled code ran through their helper
++    // most often since the last report (`HELPER_N`).
++    #[cfg(feature = "flashnx_instr")]
++    let out = {
++        let mut counts: Vec<(u64, usize)> = (0..256)
++            .map(|k| (HELPER_N[k].swap(0, AtomicOrdering::Relaxed), k))
++            .filter(|(n, _)| *n > 0)
++            .collect();
++        counts.sort_by(|a, b| b.0.cmp(&a.0));
++        let total: u64 = counts.iter().map(|(n, _)| n).sum();
++        let top = counts
++            .iter()
++            .take(14)
++            .map(|(n, k)| format!("{} x{n}", s.kind_names.get(k).map_or("?", |n| n.as_str())))
++            .collect::<Vec<_>>()
++            .join(", ");
++        format!("{out}, helpers {total} [{top}]")
++    };
 +    out
 +}
 +
