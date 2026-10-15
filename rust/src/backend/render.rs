@@ -15975,10 +15975,11 @@ impl RenderBackend for SwitchRenderBackend {
                 let (gotos, run, skipped, list_skipped) = ruffle_core::take_inner_goto_stats();
                 let subtrees_skipped = ruffle_core::take_subtrees_skipped();
                 let enter_skipped = ruffle_core::take_enter_skipped();
-                if gotos > 0 || subtrees_skipped > 0 || enter_skipped > 0 {
+                let avm1_unframed = ruffle_core::take_avm1_inner_skipped();
+                if gotos > 0 || subtrees_skipped > 0 || enter_skipped > 0 || avm1_unframed > 0 {
                     log_str(&std::format!(
-                        "gotos: f{} last 300 frames: {} inner gotos ({} without touching the orphan list), orphans walked {} skipped {}, unchanged subtrees passed over {}, quiet subtrees passed over in enterFrame {}\n",
-                        self.frame_count, gotos, list_skipped, run, skipped, subtrees_skipped, enter_skipped
+                        "gotos: f{} last 300 frames: {} inner gotos ({} without touching the orphan list), orphans walked {} skipped {}, unchanged subtrees passed over {}, quiet subtrees passed over in enterFrame {}, AVM1 gotos without one {}\n",
+                        self.frame_count, gotos, list_skipped, run, skipped, subtrees_skipped, enter_skipped, avm1_unframed
                     ));
                 }
                 // Which event sounds were started, and how often: a sound

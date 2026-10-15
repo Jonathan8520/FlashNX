@@ -292,6 +292,35 @@ making mixed int/Number arithmetic, Divide and Negate native removed
 was taken out again. A game whose compiled code is slow is slow from the
 volume of its ops and their memory traffic, not from its helpers.
 
+**`core/src/frame_lifecycle.rs`, `display_object/movie_clip.rs`: no inner
+frame after an AVM1 goto.**
+
+Every explicit goto ran `run_inner_goto_frame`, which constructs the frame
+of every orphan and of the stage, broadcasts `frameConstructed` and
+`exitFrame`, runs AS3 frame scripts and fires LoaderInfo events: all of it
+AVM2. AVM1 clips are exempt from frame construction, have no frame scripts
+of that kind and are never orphans, but `run_frame_scripts` still walked
+the whole tree, and our clean-subtree skip never applies to AVM1 objects
+(they have no AVM2 object, so they always count as unfinished). Upstream
+already leaves the inner frame out of AVM1 no-op gotos (`no_op_goto`); now
+`explicit_goto_runs_inner_frame` leaves it out of every goto on an AVM1
+clip. Madness: Project Nexus (issue #109, 2026-10-15) redresses each
+character with ~40 `gotoAndStop` and a few `nextFrame` a frame: the walk was
+82 % of its goto time, ~117 us a goto and up to 259 us in a crowded fight,
+up to 12.7 ms a frame, growing with the number of characters twice over. At
+1785 MHz and ~50 000 actions a frame, AVM1 went from 31-33 to 26.6 ms a frame
+and a goto from 115 to ~20 us. The AVM1 tests pass (702, the known
+`movieclip_hittest` failure aside), the AVM2 ones too (1064,
+`stage3d_rotating_cube` aside). Upstream issues #24509 (Restaurant City)
+and #23876 (Peacekeeper) are the AS3 side of the same walk. FlashNX's
+`avm1goto.off` marker puts the inner frame back.
+
+The measuring build (`flashnx_instr`) also counts gotos (`FLASHNX_GOTO`:
+runs, rewinds, frames stepped through, PlaceObject tags decoded, time, time
+in the inner frame) and, with FlashNX's `avm1names.on` marker, the exclusive
+time of CallMethod by method name and GetMember by property name, which is
+what found this.
+
 **`core/src/avm1/activation.rs`, `display_object/container.rs` — AVM1
 profiling, behind the `flashnx_instr` feature.**
 

@@ -1773,6 +1773,22 @@ pub extern "C" fn ruffle_init() -> c_int {
     if !goto_skip {
         log(b"gotos: gotoskip.off present -> inner gotos walk every orphan\n\0");
     }
+    // `sdmc:/switch/FlashNX/avm1goto.off`: an AS2 gotoAndStop/nextFrame runs
+    // the AS3 inner frame again, as upstream does (see
+    // `explicit_goto_runs_inner_frame` in our Ruffle). Same kind of switch.
+    // `sdmc:/switch/FlashNX/avm1names.on` (measuring builds): the `avm1ops:`
+    // report also lists CallMethod by method name and GetMember by property
+    // name. Off by default, it slows every GetMember down.
+    let avm1_names = backend::render::marker_present("avm1names.on");
+    ruffle_core::flashnx_set_avm1_named(avm1_names);
+    if avm1_names {
+        log(b"avm1ops: avm1names.on present -> per-name CallMethod/GetMember tables\n\0");
+    }
+    let avm1_goto = !backend::render::marker_present("avm1goto.off");
+    ruffle_core::set_avm1_inner_goto_skip(avm1_goto);
+    if !avm1_goto {
+        log(b"gotos: avm1goto.off present -> AVM1 gotos run the inner frame\n\0");
+    }
     // `sdmc:/switch/FlashNX/offbounds.off`: BitmapData.draw copies the whole
     // bitmap in and out of its temp again (see `render_offscreen` in
     // render.rs). Same kind of experiment switch.
@@ -2505,9 +2521,12 @@ fn dump_avm1_hot_ops() {
     thread_local! {
         static PREV: core::cell::RefCell<([u64; 256], [u64; 256], (u64, u64, u64))> =
             const { core::cell::RefCell::new(([0; 256], [0; 256], (0, 0, 0))) };
+        static PREV_GOTO: core::cell::Cell<[u64; 7]> = const { core::cell::Cell::new([0; 7]) };
     }
     let (ticks, counts) = ruffle_core::flashnx_avm1_ops();
     let gn = ruffle_core::flashnx_getname_probe();
+    let named = ruffle_core::flashnx_avm1_named_take(15);
+    let goto = ruffle_core::flashnx_goto_probe();
     let freq = unsafe { ruffle_tick_freq() }.max(1);
     let us = |t: u64| t.saturating_mul(1_000_000) / freq;
     PREV.with(|prev| {
@@ -2538,6 +2557,27 @@ fn dump_avm1_hot_ops() {
             "getname: calls={} scanned={} avg={} us={} ns/call={}\n",
             calls, scanned, scanned / calls.max(1), us(gt),
             gt.saturating_mul(1_000_000_000) / freq / calls.max(1),
+        ));
+        // Issue #109 (2026-10-15): which methods and properties those are,
+        // and what timeline gotos cost (Madness redresses every character
+        // with ~40 gotoAndStop a frame).
+        for (tag, rows) in ["call", "get"].iter().zip(named.iter()) {
+            for (name, [n, t, clip]) in rows {
+                out.push_str(&std::format!(
+                    "avm1{} {:<22} n={:<8} us={:<8} ns/op={:<6} on_clip={}\n",
+                    tag, name, n, us(*t),
+                    t.saturating_mul(1_000_000_000) / freq / n.max(&1),
+                    clip,
+                ));
+            }
+        }
+        let pg = PREV_GOTO.with(|p| p.replace(goto));
+        let d: std::vec::Vec<u64> = (0..7).map(|i| goto[i].wrapping_sub(pg[i])).collect();
+        out.push_str(&std::format!(
+            "gotos: runs={} implicit={} rewinds={} frames={} places={} us={} ns/run={} inner_us={}\n",
+            d[0], d[5], d[1], d[2], d[3], us(d[4]),
+            d[4].saturating_mul(1_000_000_000) / freq / d[0].max(1),
+            us(d[6]),
         ));
         log_str(&out);
         prev.0 = ticks;
