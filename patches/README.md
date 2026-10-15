@@ -337,10 +337,35 @@ for the fighters whose handler starts with `_root.attachMovie("SoundDistance",
 to 5 fps in about a minute and a half. `transform_to_unloaded_state` now puts
 the flag back when the clip had already run its load event. A real movie
 loaded into a clip still runs it: the loader replaces the movie on its own
-path, not this one. The fight now holds ~36 fps at 1785 MHz, with 7 unloads
-in all and ~12 live movies instead of thousands. Upstream #19434 (an
-unloaded clip's `onEnterFrame` keeps running) and #21683 (nothing can be
-attached to it) are not addressed.
+path, not this one. The fight then held ~36 fps at 1785 MHz, with 7 unloads
+in all and ~12 live movies instead of thousands.
+
+**Same file, `frame_lifecycle.rs`: an unloaded clip gets no enterFrame
+(upstream #19434).**
+
+Flash stops `onClipEvent(enterFrame)` and `onEnterFrame` on a clip emptied by
+`unloadMovie()`; Ruffle kept sending them to the empty clip. The fighters of
+Combat Tournament Legends that unload themselves had been given an
+`onEnterFrame` with the whole fighter logic by their frame 1 script (it runs
+after the load handler, on the emptied clip): seven ghost fighters thinking
+every frame, 85 % of the fight's ActionScript (10.5 million actions per 240
+frames, 1.5 million without them), and `GoToLabel 'run' not found` warnings
+from their gotos into a movie with no frames. A new `MovieClipFlags::UNLOADED`
+(the flags go from `u8` to `u16`) is set by `transform_to_unloaded_state` and
+cleared by `replace_with_movie`, so a movie loaded into the clip afterwards,
+or still loading into it (a preloader's `onClipEvent(enterFrame)` on the
+container), gets its events as before; while it is set, `run_frame_avm1`
+sends no enterFrame. The fight now runs at full speed at 1785 MHz (19.9 ms of
+work a frame against 27) and stays at full speed when AUTO brings the clock
+back to 1020 MHz. On by default; FlashNX's `unloadedframe.off` marker sends
+the events again, and the `gotos:` line counts the ones withheld. Upstream
+#21683 (nothing can be attached to an unloaded clip) is not addressed.
+
+**Same file: `goto MISSED` said three times for a frame the movie never
+had.** The line stays for a clip still loading (the case it exists for); a
+goto past the end of a fully loaded clip is the movie's own harmless bug, and
+Combat Tournament Legends sends one to its HUD every frame (2000 lines in 90
+seconds, enough to push everything else out of a bug report's log).
 
 The measuring build also counts, on the `census:` line, the movies each
 `SwfMovie` constructor made since boot and the clips emptied since the last

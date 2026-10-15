@@ -8090,7 +8090,7 @@ index c4f4a8880..a5d6b5763 100644
          gc_context: &Mutation<'gc>,
          tag: swf::DefineMorphShape,
 diff --git a/core/src/display_object/movie_clip.rs b/core/src/display_object/movie_clip.rs
-index baa4a03c5..232de94da 100644
+index baa4a03c5..97cb496c9 100644
 --- a/core/src/display_object/movie_clip.rs
 +++ b/core/src/display_object/movie_clip.rs
 @@ -16,7 +16,7 @@ use crate::backend::audio::{AudioManager, SoundInstanceHandle};
@@ -8102,7 +8102,7 @@ index baa4a03c5..232de94da 100644
  use crate::context::{ActionType, RenderContext, UpdateContext};
  use crate::display_object::container::{ChildContainer, dispatch_removed_event};
  use crate::display_object::interactive::{
-@@ -48,19 +48,74 @@ use ruffle_common::utils::HasPrefixField;
+@@ -48,19 +48,94 @@ use ruffle_common::utils::HasPrefixField;
  use ruffle_macros::istr;
  use ruffle_render::perspective_projection::PerspectiveProjection;
  use smallvec::SmallVec;
@@ -8166,6 +8166,26 @@ index baa4a03c5..232de94da 100644
 +    })
 +}
 +
++/// FlashNX: whether a goto that missed its frame gets its `goto MISSED` line.
++/// One on a clip still loading always does; one on a fully loaded clip (a
++/// frame the movie never had) does the first three times, then a last line
++/// says the rest go unsaid.
++fn flashnx_goto_miss_worth_saying(still_loading: bool) -> bool {
++    use std::sync::atomic::{AtomicU32, Ordering};
++    static HARMLESS_SAID: AtomicU32 = AtomicU32::new(0);
++    if still_loading {
++        return true;
++    }
++    match HARMLESS_SAID.fetch_add(1, Ordering::Relaxed) {
++        0..3 => true,
++        3 => {
++            tracing::warn!("goto MISSED: further misses on fully loaded clips go unsaid");
++            false
++        }
++        _ => false,
++    }
++}
++
 +#[cfg(feature = "flashnx_instr")]
 +struct FlashnxGotoTimer(u64);
 +
@@ -8179,7 +8199,7 @@ index baa4a03c5..232de94da 100644
  /// Indication of what frame `run_frame` should jump to next.
  #[derive(PartialEq, Eq)]
  enum NextFrame {
-@@ -140,6 +195,11 @@ impl fmt::Debug for MovieClip<'_> {
+@@ -140,6 +215,11 @@ impl fmt::Debug for MovieClip<'_> {
  pub struct MovieClipWeak<'gc>(GcWeak<'gc, MovieClipData<'gc>>);
  
  impl<'gc> MovieClipWeak<'gc> {
@@ -8191,7 +8211,7 @@ index baa4a03c5..232de94da 100644
      pub fn upgrade(self, mc: &Mutation<'gc>) -> Option<MovieClip<'gc>> {
          self.0.upgrade(mc).map(MovieClip)
      }
-@@ -193,6 +253,16 @@ pub struct MovieClipData<'gc> {
+@@ -193,6 +273,16 @@ pub struct MovieClipData<'gc> {
      /// `None` in an AVM2 movie.
      next_avm1_clip: Lock<Option<MovieClip<'gc>>>,
  
@@ -8208,7 +8228,7 @@ index baa4a03c5..232de94da 100644
      audio_stream: Cell<Option<SoundInstanceHandle>>,
  
      #[collect(require_static)]
-@@ -262,6 +332,9 @@ impl<'gc> MovieClipData<'gc> {
+@@ -262,6 +352,9 @@ impl<'gc> MovieClipData<'gc> {
              hit_area: Lock::new(None),
              attached_audio: Lock::new(None),
              next_avm1_clip: Lock::new(None),
@@ -8218,7 +8238,7 @@ index baa4a03c5..232de94da 100644
          }
      }
  
-@@ -276,6 +349,11 @@ impl<'gc> MovieClip<'gc> {
+@@ -276,6 +369,11 @@ impl<'gc> MovieClip<'gc> {
          MovieClipWeak(Gc::downgrade(self.0))
      }
  
@@ -8230,7 +8250,7 @@ index baa4a03c5..232de94da 100644
      pub fn new(movie: Arc<SwfMovie>, mc: &Mutation<'gc>) -> Self {
          let shared = MovieClipShared::empty(movie);
          MovieClip(Gc::new(mc, MovieClipData::new(shared, mc)))
-@@ -375,6 +453,11 @@ impl<'gc> MovieClip<'gc> {
+@@ -375,6 +473,11 @@ impl<'gc> MovieClip<'gc> {
          is_root: bool,
          loader_info: Option<LoaderInfoObject<'gc>>,
      ) {
@@ -8242,7 +8262,7 @@ index baa4a03c5..232de94da 100644
          let write = Gc::write(context.gc(), self.0);
          let movie =
              movie.unwrap_or_else(|| Arc::new(SwfMovie::empty(write.movie().version(), None)));
-@@ -411,6 +494,30 @@ impl<'gc> MovieClip<'gc> {
+@@ -411,6 +514,30 @@ impl<'gc> MovieClip<'gc> {
          unlock!(Gc::write(mc, self.0), MovieClipData, next_avm1_clip).set(node);
      }
  
@@ -8273,7 +8293,22 @@ index baa4a03c5..232de94da 100644
      pub fn call_on_construct_handler(self, context: &mut UpdateContext<'gc>) {
          let Some(object) = self.0.object1.get() else {
              return;
-@@ -558,7 +665,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -454,8 +581,13 @@ impl<'gc> MovieClip<'gc> {
+             if is_load_frame {
+                 self.event_dispatch(context, ClipEvent::Load);
+                 self.0.set_initialized(true);
+-            } else {
++            } else if !self.0.contains_flag(MovieClipFlags::UNLOADED)
++                || crate::frame_lifecycle::unloaded_clip_gets_enter_frame()
++            {
+                 self.event_dispatch(context, ClipEvent::EnterFrame);
++            } else {
++                #[cfg(feature = "flashnx_instr")]
++                flashnx_note_emptied(self, "quiet");
+             }
+ 
+             // Run my SWF tags.
+@@ -558,7 +690,7 @@ impl<'gc> MovieClip<'gc> {
                  TagCode::FrameLabel => shared.frame_label(reader),
                  TagCode::JpegTables => shared.jpeg_tables(context, reader),
                  TagCode::ShowFrame => shared.show_frame(reader, tag_len),
@@ -8282,7 +8317,7 @@ index baa4a03c5..232de94da 100644
                  TagCode::SoundStreamHead => shared.sound_stream_head(reader, 1),
                  TagCode::SoundStreamHead2 => shared.sound_stream_head(reader, 2),
                  TagCode::VideoFrame => shared.preload_video_frame(context, reader),
-@@ -849,7 +956,9 @@ impl<'gc> MovieClip<'gc> {
+@@ -849,7 +981,9 @@ impl<'gc> MovieClip<'gc> {
      }
  
      pub fn play(self) {
@@ -8293,7 +8328,7 @@ index baa4a03c5..232de94da 100644
      }
  
      pub fn prev_frame(self, context: &mut UpdateContext<'gc>) {
-@@ -913,6 +1022,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -913,6 +1047,7 @@ impl<'gc> MovieClip<'gc> {
                  // the current frame, the goto is properly queued.
  
                  self.0.queued_goto_frame.set(Some(frame));
@@ -8301,7 +8336,7 @@ index baa4a03c5..232de94da 100644
  
                  // If we have a frame script on that frame, add ourselves to the
                  // frame script cleanup queue so that that frame script is
-@@ -1144,6 +1254,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -1144,6 +1279,7 @@ impl<'gc> MovieClip<'gc> {
      /// This sets the current frame of this MovieClip to a given number.
      pub fn set_current_frame(self, current_frame: FrameNumber) {
          self.0.current_frame.set(current_frame);
@@ -8309,7 +8344,7 @@ index baa4a03c5..232de94da 100644
      }
  
      /// The amount of frames loaded in this movieclip.
-@@ -1486,6 +1597,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -1486,6 +1622,7 @@ impl<'gc> MovieClip<'gc> {
              // in the meantime, it should absolutely run again.
              self.set_last_queued_script_frame(None);
          }
@@ -8317,7 +8352,7 @@ index baa4a03c5..232de94da 100644
      }
  
      /// Instantiate a given child object on the timeline at a given depth.
-@@ -1626,6 +1738,13 @@ impl<'gc> MovieClip<'gc> {
+@@ -1626,6 +1763,13 @@ impl<'gc> MovieClip<'gc> {
      }
  
      fn run_goto(mut self, context: &mut UpdateContext<'gc>, frame: FrameNumber, is_implicit: bool) {
@@ -8331,7 +8366,7 @@ index baa4a03c5..232de94da 100644
          if cfg!(feature = "timeline_debug") {
              tracing::debug!(
                  "[{}]: {} from frame {} to frame {}",
-@@ -1665,6 +1784,8 @@ impl<'gc> MovieClip<'gc> {
+@@ -1665,6 +1809,8 @@ impl<'gc> MovieClip<'gc> {
              // otherwise AS3 can observe byproducts of the rewinding process.
              self.0.tag_stream_pos.set(0);
              self.0.current_frame.set(0);
@@ -8340,7 +8375,7 @@ index baa4a03c5..232de94da 100644
  
              true
          } else {
-@@ -1698,6 +1819,8 @@ impl<'gc> MovieClip<'gc> {
+@@ -1698,6 +1844,8 @@ impl<'gc> MovieClip<'gc> {
          let mut reader = data.read_from(frame_pos);
          while self.current_frame() < clamped_frame && !reader.get_ref().is_empty() {
              self.0.increment_current_frame();
@@ -8349,7 +8384,7 @@ index baa4a03c5..232de94da 100644
              frame_pos = reader.get_ref().as_ptr() as u64 - tag_stream_start;
  
              let tag_callback = |reader: &mut _, tag_code, _tag_len| {
-@@ -1720,6 +1843,8 @@ impl<'gc> MovieClip<'gc> {
+@@ -1720,6 +1868,8 @@ impl<'gc> MovieClip<'gc> {
                  match action {
                      Action::Place(version) => {
                          index += 1;
@@ -8358,7 +8393,7 @@ index baa4a03c5..232de94da 100644
                          self.0.goto_place_object(
                              reader,
                              version,
-@@ -1747,6 +1872,29 @@ impl<'gc> MovieClip<'gc> {
+@@ -1747,6 +1897,36 @@ impl<'gc> MovieClip<'gc> {
              }
          }
          let hit_target_frame = self.0.current_frame() == frame;
@@ -8373,8 +8408,15 @@ index baa4a03c5..232de94da 100644
 +        //
 +        // `total` tells the two apart: loaded < total is a clip still being
 +        // preloaded (ours to fix), loaded == total is a movie asking for a
-+        // frame nobody ever authored (its own bug, and harmless).
-+        if !hit_target_frame {
++        // frame nobody ever authored (its own bug, and harmless). The harmless
++        // kind is said three times only: Combat Tournament Legends (#123) asks
++        // its HUD for frame 8 of 6 on every frame, 2000 lines in 90 seconds,
++        // which pushed everything else out of a bug report's log.
++        if !hit_target_frame
++            && flashnx_goto_miss_worth_saying(
++                self.0.frames_loaded() < i32::from(self.header_frames()),
++            )
++        {
 +            tracing::warn!(
 +                "goto MISSED: wanted={} clamped={} loaded={} total={} now={} who={}",
 +                frame,
@@ -8388,7 +8430,7 @@ index baa4a03c5..232de94da 100644
  
          if is_rewind {
              // Remove all display objects that were created after the
-@@ -1877,14 +2025,19 @@ impl<'gc> MovieClip<'gc> {
+@@ -1877,14 +2057,19 @@ impl<'gc> MovieClip<'gc> {
              .filter(|params| params.frame >= frame)
              .for_each(|goto| run_goto_command(self, context, goto));
  
@@ -8409,7 +8451,7 @@ index baa4a03c5..232de94da 100644
          }
  
          self.assert_expected_tag_end(hit_target_frame);
-@@ -2149,6 +2302,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -2149,6 +2334,7 @@ impl<'gc> MovieClip<'gc> {
          context: &mut UpdateContext<'gc>,
      ) {
          let current_frame = self.current_frame();
@@ -8417,7 +8459,7 @@ index baa4a03c5..232de94da 100644
  
          let write = unlock!(Gc::write(context.gc(), self.0), MovieClipData, cell);
          let mut frame_scripts = RefMut::map(write.borrow_mut(), |r| &mut r.frame_scripts);
-@@ -2391,6 +2545,8 @@ impl<'gc> MovieClip<'gc> {
+@@ -2391,6 +2577,8 @@ impl<'gc> MovieClip<'gc> {
      /// This happens if a MovieClip has been unloaded. The state is then changed one
      /// frame after the command to unload the MovieClip has been read.
      fn transform_to_unloaded_state(self, context: &mut UpdateContext<'gc>) {
@@ -8426,7 +8468,7 @@ index baa4a03c5..232de94da 100644
          let movie = if let Some(DisplayObject::MovieClip(parent_mc)) = self.parent() {
              let parent_movie = parent_mc.movie();
              let parent_version = parent_movie.version();
-@@ -2403,7 +2559,20 @@ impl<'gc> MovieClip<'gc> {
+@@ -2403,7 +2591,21 @@ impl<'gc> MovieClip<'gc> {
              None
          };
  
@@ -8444,10 +8486,11 @@ index baa4a03c5..232de94da 100644
 +        if was_initialized {
 +            self.0.set_initialized(true);
 +        }
++        self.0.set_flag(MovieClipFlags::UNLOADED, true);
      }
  
      pub fn attach_audio(self, context: &mut UpdateContext<'gc>, netstream: Option<NetStream<'gc>>) {
-@@ -2494,6 +2663,26 @@ impl<'gc> MovieClip<'gc> {
+@@ -2494,6 +2696,26 @@ impl<'gc> MovieClip<'gc> {
          }
      }
  
@@ -8474,7 +8517,7 @@ index baa4a03c5..232de94da 100644
      fn check_has_pending_script(self) {
          let has_pending_script = self.has_frame_script(self.0.current_frame.get());
          self.set_has_pending_script(has_pending_script);
-@@ -2519,8 +2708,14 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2519,8 +2741,14 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
  
      fn enter_frame(self, context: &mut UpdateContext<'gc>) {
          let skip_frame = self.base().should_skip_next_enter_frame();
@@ -8489,7 +8532,7 @@ index baa4a03c5..232de94da 100644
              if skip_frame {
                  // If we're skipping our current frame, then we want to skip it for our children
                  // as well. This counts as the skipped frame for any children that already
-@@ -2535,10 +2730,12 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2535,10 +2763,12 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
                  child.base().set_skip_next_enter_frame(true);
              }
              child.enter_frame(context);
@@ -8502,7 +8545,7 @@ index baa4a03c5..232de94da 100644
              return;
          }
  
-@@ -2554,6 +2751,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2554,6 +2784,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
              // after tags have executed.
              let data = self.0.shared.get().swf.clone();
              let place_actions = self.unqueue_filtered(|q| q.unqueue_add());
@@ -8510,7 +8553,7 @@ index baa4a03c5..232de94da 100644
  
              for (_, tag) in place_actions {
                  let mut reader = data.read_from(tag.tag_start);
-@@ -2566,6 +2764,18 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2566,6 +2797,18 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
                      tracing::error!("Error running queued tag: {:?}, got {}", tag.tag_type, e);
                  }
              }
@@ -8529,7 +8572,7 @@ index baa4a03c5..232de94da 100644
          }
      }
  
-@@ -2601,6 +2811,10 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2601,6 +2844,10 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
                      .0
                      .contains_flag(MovieClipFlags::RUNNING_CONSTRUCT_FRAME);
                  for child in self.iter_render_list() {
@@ -8540,7 +8583,7 @@ index baa4a03c5..232de94da 100644
                      // Under some conditions, we won't run `construct_frame` on
                      // a not-yet-constructed child
                      if child.object2().is_none() {
-@@ -2635,11 +2849,20 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2635,11 +2882,20 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
      }
  
      fn run_frame_scripts(self, context: &mut UpdateContext<'gc>) {
@@ -8561,7 +8604,7 @@ index baa4a03c5..232de94da 100644
      }
  
      fn render_self(self, context: &mut RenderContext<'_, 'gc>) {
-@@ -3019,6 +3242,24 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
+@@ -3019,6 +3275,24 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
                              result = None;
                          }
                      }
@@ -8586,7 +8629,7 @@ index baa4a03c5..232de94da 100644
                  } else if result.is_none() {
                      if let Some(child) = child.as_interactive() {
                          result = if !child.as_displayobject().movie().is_action_script_3() {
-@@ -3437,14 +3678,15 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3437,14 +3711,15 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let define_bits_lossless = reader.read_define_bits_lossless(version)?;
          let bitmap = Gc::new(
              context.gc(),
@@ -8605,7 +8648,7 @@ index baa4a03c5..232de94da 100644
          );
          self.library_mut(context)
              .register_character(define_bits_lossless.id, Character::Bitmap(bitmap));
-@@ -3562,13 +3804,17 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3562,13 +3837,17 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let library = self.library_mut(context);
          let (id, jpeg_data) = reader.read_define_bits()?;
          let jpeg_tables = library.jpeg_tables();
@@ -8627,7 +8670,7 @@ index baa4a03c5..232de94da 100644
                  alpha: None,
                  width,
                  height,
-@@ -3589,7 +3835,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3589,7 +3868,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let bitmap = Character::Bitmap(Gc::new(
              context.gc(),
              BitmapCharacter::new(CompressedBitmap::Jpeg {
@@ -8637,7 +8680,7 @@ index baa4a03c5..232de94da 100644
                  alpha: None,
                  width,
                  height,
-@@ -3612,8 +3859,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3612,8 +3892,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let bitmap = Character::Bitmap(Gc::new(
              context.gc(),
              BitmapCharacter::new(CompressedBitmap::Jpeg {
@@ -8649,7 +8692,7 @@ index baa4a03c5..232de94da 100644
                  width,
                  height,
              }),
-@@ -3842,7 +4090,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3842,7 +4123,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          reader: &mut SwfStream<'a>,
      ) -> Result<(), Error> {
          let sound = reader.read_define_sound()?;
@@ -8659,7 +8702,7 @@ index baa4a03c5..232de94da 100644
              self.library_mut(context)
                  .register_character(sound.id, Character::Sound(handle));
          } else {
-@@ -3968,11 +4217,35 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3968,11 +4250,35 @@ impl<'gc, 'a> MovieClipShared<'gc> {
      }
  
      #[inline]
@@ -8699,6 +8742,28 @@ index baa4a03c5..232de94da 100644
  
          Ok(())
      }
+@@ -4937,7 +5243,7 @@ pub enum QueuedTagAction {
+ bitflags! {
+     /// Boolean state flags used by `MovieClip`.
+     #[derive(Clone, Copy)]
+-    struct MovieClipFlags: u8 {
++    struct MovieClipFlags: u16 {
+         /// Whether this `MovieClip` has run its initial frame.
+         const INITIALIZED             = 1 << 0;
+ 
+@@ -4968,6 +5274,12 @@ bitflags! {
+ 
+         /// Whether the AVM2 constructor of this `MovieClip` threw an error.
+         const AVM2_CONSTRUCTOR_FAILED = 1 << 7;
++
++        /// FlashNX: emptied by `unloadMovie()` (`transform_to_unloaded_state`)
++        /// and not loaded into since; `replace_with_movie` clears it, so a
++        /// movie loaded into the clip afterwards brings its events back.
++        /// While set, the clip gets no enterFrame event (ruffle#19434).
++        const UNLOADED = 1 << 8;
+     }
+ }
+ 
 diff --git a/core/src/display_object/stage.rs b/core/src/display_object/stage.rs
 index 46fe8deb6..a0ceb8585 100644
 --- a/core/src/display_object/stage.rs
@@ -9301,10 +9366,10 @@ index 000000000..61d84324a
 +    line
 +}
 diff --git a/core/src/frame_lifecycle.rs b/core/src/frame_lifecycle.rs
-index 91bdb52df..51273a7c6 100644
+index 91bdb52df..a494720c5 100644
 --- a/core/src/frame_lifecycle.rs
 +++ b/core/src/frame_lifecycle.rs
-@@ -18,6 +18,68 @@ use crate::loader::LoadManager;
+@@ -18,6 +18,98 @@ use crate::loader::LoadManager;
  use crate::orphan_manager::OrphanManager;
  use tracing::instrument;
  
@@ -9359,6 +9424,36 @@ index 91bdb52df..51273a7c6 100644
 +    false
 +}
 +
++/// FlashNX (ruffle#19434): a clip emptied by `unloadMovie()` no longer gets its
++/// `onClipEvent(enterFrame)` and `onEnterFrame`; Flash stops them, Ruffle kept
++/// running them on the empty clip. In Combat Tournament Legends (#123) every
++/// fighter not picked unloads itself in its load handler, then its frame 1
++/// script gives the emptied clip an `onEnterFrame` with the whole fighter
++/// logic: seven ghost fighters thinking every frame, 85 % of the fight's
++/// ActionScript. On by default; off from FlashNX's `unloadedframe.off` marker,
++/// to compare.
++static AVM1_UNLOADED_QUIET: AtomicBool = AtomicBool::new(true);
++static AVM1_UNLOADED_SKIPPED: AtomicU64 = AtomicU64::new(0);
++
++pub fn set_avm1_unloaded_quiet(enabled: bool) {
++    AVM1_UNLOADED_QUIET.store(enabled, Ordering::Relaxed);
++}
++
++/// enterFrame events not sent to unloaded clips since the last call.
++pub fn take_avm1_unloaded_skipped() -> u64 {
++    AVM1_UNLOADED_SKIPPED.swap(0, Ordering::Relaxed)
++}
++
++/// FlashNX: whether an unloaded clip still gets its enterFrame event (see
++/// `AVM1_UNLOADED_QUIET`).
++pub fn unloaded_clip_gets_enter_frame() -> bool {
++    if AVM1_UNLOADED_QUIET.load(Ordering::Relaxed) {
++        AVM1_UNLOADED_SKIPPED.fetch_add(1, Ordering::Relaxed);
++        return false;
++    }
++    true
++}
++
 +/// (inner gotos, orphans processed by them, orphans skipped, gotos that did not
 +/// even iterate the orphan list) since the last call.
 +pub fn take_inner_goto_stats() -> (u64, u64, u64, u64) {
@@ -9373,7 +9468,7 @@ index 91bdb52df..51273a7c6 100644
  /// Which phase of the frame we're currently in.
  ///
  /// AVM2 frames exist in one of four phases: `Enter`, `Construct`,
-@@ -77,24 +139,54 @@ pub fn run_all_phases_avm2(context: &mut UpdateContext<'_>) {
+@@ -77,24 +169,54 @@ pub fn run_all_phases_avm2(context: &mut UpdateContext<'_>) {
          return;
      }
  
@@ -9428,7 +9523,7 @@ index 91bdb52df..51273a7c6 100644
      run_frame_script_cleanup(context);
  
      *context.frame_phase = FramePhase::Exit;
-@@ -130,6 +222,8 @@ pub fn run_inner_goto_frame<'gc>(
+@@ -130,6 +252,8 @@ pub fn run_inner_goto_frame<'gc>(
          // We skip the next `enter_frame` call, so that we will still run the framescripts
          // queued for our target frame.
          initial_clip.base().set_skip_next_enter_frame(true);
@@ -9437,7 +9532,7 @@ index 91bdb52df..51273a7c6 100644
  
          return;
      }
-@@ -143,18 +237,64 @@ pub fn run_inner_goto_frame<'gc>(
+@@ -143,18 +267,64 @@ pub fn run_inner_goto_frame<'gc>(
  
      // Note - we do *not* call `enter_frame` or dispatch an `enterFrame` event
  
@@ -9507,7 +9602,7 @@ index 91bdb52df..51273a7c6 100644
  
      for child in removed_frame_scripts {
          child.run_frame_scripts(context);
-@@ -168,11 +308,66 @@ pub fn run_inner_goto_frame<'gc>(
+@@ -168,11 +338,66 @@ pub fn run_inner_goto_frame<'gc>(
      // Instead, we do one cleanup at the end of the frame.
      // This performs special handling of clips which became orphaned as
      // a result of a RemoveObject tag - see `cleanup_dead_orphans` for details.
@@ -9576,7 +9671,7 @@ index 91bdb52df..51273a7c6 100644
  pub fn broadcast_frame_entered<'gc>(context: &mut UpdateContext<'gc>) {
      let enter_frame_evt = EventObject::bare_default_event(context, "enterFrame");
 diff --git a/core/src/lib.rs b/core/src/lib.rs
-index 6e5379213..1772d4b9b 100644
+index 6e5379213..59f795e22 100644
 --- a/core/src/lib.rs
 +++ b/core/src/lib.rs
 @@ -4,6 +4,9 @@
@@ -9589,7 +9684,7 @@ index 6e5379213..1772d4b9b 100644
  
  #[macro_use]
  mod display_object;
-@@ -15,10 +18,43 @@ extern crate num_derive;
+@@ -15,10 +18,44 @@ extern crate num_derive;
  #[macro_use]
  mod avm1;
  mod avm2;
@@ -9626,14 +9721,15 @@ index 6e5379213..1772d4b9b 100644
 +}
 +pub use bitmap::operations::{take_threshold_memo_hits, take_threshold_stats};
 +pub use frame_lifecycle::{
-+    set_avm1_inner_goto_skip, set_orphan_skip, take_avm1_inner_skipped, take_inner_goto_stats,
++    set_avm1_inner_goto_skip, set_avm1_unloaded_quiet, set_orphan_skip, take_avm1_inner_skipped,
++    take_avm1_unloaded_skipped, take_inner_goto_stats,
 +};
 +pub use display_object::set_lazy_shapes;
 +pub use display_object::{set_full_frame_skip, set_stage_skip, take_enter_skipped, take_subtrees_skipped};
  pub mod context;
  pub mod context_menu;
  mod drawing;
-@@ -26,6 +62,10 @@ mod ecma_conversions;
+@@ -26,6 +63,10 @@ mod ecma_conversions;
  pub mod events;
  pub mod focus_tracker;
  pub mod font;
@@ -9644,7 +9740,7 @@ index 6e5379213..1772d4b9b 100644
  mod frame_lifecycle;
  mod html;
  mod input;
-@@ -63,6 +103,18 @@ pub use events::PlayerEvent;
+@@ -63,6 +104,18 @@ pub use events::PlayerEvent;
  pub use indexmap;
  pub use loader::LoadBehavior;
  pub use player::{Player, PlayerBuilder, PlayerMode, PlayerRuntime, StaticCallstack};

@@ -1789,6 +1789,14 @@ pub extern "C" fn ruffle_init() -> c_int {
     if !avm1_goto {
         log(b"gotos: avm1goto.off present -> AVM1 gotos run the inner frame\n\0");
     }
+    // `sdmc:/switch/FlashNX/unloadedframe.off`: a clip emptied by unloadMovie()
+    // gets its enterFrame events again, as upstream does (see
+    // `unloaded_clip_gets_enter_frame` in our Ruffle). Same kind of switch.
+    let unloaded_quiet = !backend::render::marker_present("unloadedframe.off");
+    ruffle_core::set_avm1_unloaded_quiet(unloaded_quiet);
+    if !unloaded_quiet {
+        log(b"gotos: unloadedframe.off present -> unloaded clips keep their enterFrame\n\0");
+    }
     // `sdmc:/switch/FlashNX/offbounds.off`: BitmapData.draw copies the whole
     // bitmap in and out of its temp again (see `render_offscreen` in
     // render.rs). Same kind of experiment switch.
