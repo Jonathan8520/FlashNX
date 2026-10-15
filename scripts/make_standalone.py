@@ -78,6 +78,28 @@ def read_nro(path):
     return data[:size], icon, nacp, romfs
 
 
+def nro_assets(path):
+    """The icon and NACP of an .nro, read without the rest of it."""
+    with open(path, 'rb') as f:
+        head = f.read(0x80)
+        if len(head) < 0x80 or head[0x10:0x14] != b'NRO0':
+            raise StandaloneError('%s is not an .nro file.' % os.path.basename(path))
+        size = struct.unpack_from('<I', head, 0x18)[0]
+        f.seek(size)
+        aset = f.read(ASSET_HEADER_SIZE)
+        if len(aset) < ASSET_HEADER_SIZE or aset[:4] != b'ASET':
+            return b'', b''
+        icon_off, icon_len, nacp_off, nacp_len, _, _ = struct.unpack_from('<6Q', aset, 8)
+
+        def take(off, length):
+            if not length:
+                return b''
+            f.seek(size + off)
+            return f.read(length)
+
+        return take(icon_off, icon_len), take(nacp_off, nacp_len)
+
+
 def nacp_version(nacp):
     """The display version stored in a NACP, as a tuple of ints, or None."""
     if len(nacp) < NACP_VERSION_OFF + NACP_VERSION_CAP:
@@ -224,6 +246,53 @@ def cover_square(img, side=ICON_SIZE):
     return ground.convert('RGB')
 
 
+def is_web_picture(text):
+    """Whether the picture is given as a web address or a data: URI."""
+    return text.strip().strip('"').startswith(('http://', 'https://', 'data:image/'))
+
+
+def picture_source(text):
+    """The picture's own address from what a browser hands over: a Google
+    Images result (`imgres?imgurl=...`) points at the picture it shows."""
+    from urllib.parse import parse_qs, urlparse
+    text = text.strip().strip('"')
+    query = parse_qs(urlparse(text).query)
+    if text.startswith(('http://', 'https://')) and query.get('imgurl'):
+        return query['imgurl'][0]
+    return text
+
+
+def fetch_picture(src):
+    """A picture given as a web address, or as a data: URI (what Google
+    Images copies for its thumbnails), saved to a temporary file. Returns
+    (path, temporary); a local path comes back as is."""
+    src = picture_source(src)
+    if src.startswith('data:image/'):
+        import base64
+        from urllib.parse import unquote_to_bytes
+        header, _, payload = src.partition(',')
+        try:
+            data = base64.b64decode(payload) if ';base64' in header else unquote_to_bytes(payload)
+        except Exception:
+            raise StandaloneError('The picture\'s data: address is damaged.')
+    elif src.startswith(('http://', 'https://')):
+        import urllib.request
+        # Some image hosts refuse a request that does not look like a browser.
+        req = urllib.request.Request(src, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) FlashNX make_standalone.py'})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = r.read(32 << 20)
+        except Exception as e:
+            raise StandaloneError('Could not download the picture: %s' % e)
+    else:
+        return src, False
+    fd, path = tempfile.mkstemp(suffix='.picture')
+    with os.fdopen(fd, 'wb') as f:
+        f.write(data)
+    return path, True
+
+
 def make_icon(path):
     """The picture as the 256x256 baseline JPEG the Homebrew Menu draws."""
     with open(path, 'rb') as f:
@@ -242,7 +311,7 @@ def make_icon(path):
         img = Image.open(io.BytesIO(data))
         img.load()
     except Exception:
-        raise StandaloneError('%s is not a picture Pillow can read.' % os.path.basename(path))
+        raise StandaloneError('The picture is not one Pillow can read (JPG, PNG, WebP, BMP, GIF...).')
     out = io.BytesIO()
     # Quality 85, as FlashNX's HOME menu icons: flat box art bands below ~80.
     cover_square(img).save(out, 'JPEG', quality=85, progressive=False)
@@ -535,6 +604,11 @@ def game_entries(swf, files_dir=None):
     if files_dir:
         if not os.path.isdir(files_dir):
             raise StandaloneError('%s is not a folder.' % files_dir)
+        # A Flashpoint GameZIP unpacked as is (content.json beside content/):
+        # FlashNX keeps what is under content/, <host>/<path>, and so does this.
+        if (os.path.isfile(os.path.join(files_dir, 'content.json'))
+                and os.path.isdir(os.path.join(files_dir, 'content'))):
+            files_dir = os.path.join(files_dir, 'content')
         for top, subdirs, names in os.walk(files_dir):
             subdirs.sort()
             for n in sorted(names):
@@ -550,8 +624,10 @@ def safe_file_name(text):
     in it ("the software was closed because an error occurred", before the app
     even runs; its owo.cpp passes the path unquoted). The Homebrew Menu and
     Sphaira show the app's name, not this."""
-    bad = '<>:"/\\|?* '
-    out = ''.join('_' if (c in bad or ord(c) < 32) else c for c in text.strip())
+    # Letters, digits, _ - . only: apostrophes go ("Garfields"), anything else
+    # becomes _, so no tool along the way has a character to stumble on.
+    text = text.strip().replace("'", '').replace('’', '')
+    out = ''.join(c if (c.isalnum() or c in '_-.') else '_' for c in text)
     while '__' in out:
         out = out.replace('__', '_')
     return out.strip('_.') or 'game'
@@ -574,7 +650,14 @@ def make_standalone(nro, swf, out_path, name=None, author=None, version=None,
     name = name or stem
     author = author or 'FlashNX'
     version = version or '1.0.0'
-    icon_data = make_icon(icon) if icon else base_icon
+    icon_data = base_icon
+    if icon:
+        local, temporary = fetch_picture(icon)
+        try:
+            icon_data = make_icon(local)
+        finally:
+            if temporary:
+                os.remove(local)
     nacp = make_nacp(base_nacp, name, author, version)
     plan = RomfsPlan(entries)
     if base_romfs:
@@ -607,6 +690,65 @@ def make_standalone(nro, swf, out_path, name=None, author=None, version=None,
     return entries
 
 
+RELEASES_API = 'https://api.github.com/repos/Jonathan8520/FlashNX/releases/latest'
+
+
+def download_dir():
+    """Where a downloaded FlashNX.nro goes: next to this script, else the
+    Downloads folder, else the temporary folder."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for d in (here, os.path.join(os.path.expanduser('~'), 'Downloads'), tempfile.gettempdir()):
+        if os.path.isdir(d) and os.access(d, os.W_OK):
+            return d
+    return tempfile.gettempdir()
+
+
+def download_flashnx(dest_dir, progress=None):
+    """The FlashNX.nro of the latest release on GitHub, saved in `dest_dir`.
+    Returns (path, version). `progress(done, total)` follows the download."""
+    import json
+    import urllib.request
+    agent = {'User-Agent': 'FlashNX make_standalone.py'}
+    try:
+        req = urllib.request.Request(RELEASES_API, headers=dict(agent, Accept='application/vnd.github+json'))
+        with urllib.request.urlopen(req, timeout=30) as r:
+            release = json.load(r)
+    except Exception as e:
+        raise StandaloneError('Could not ask GitHub for the latest FlashNX: %s' % e)
+    asset = next((a for a in release.get('assets', []) if a.get('name') == 'FlashNX.nro'), None)
+    if asset is None:
+        raise StandaloneError('The latest FlashNX release has no FlashNX.nro.')
+    version = (release.get('tag_name') or '').lstrip('v') or '?'
+    total = asset.get('size') or 0
+    path = os.path.join(dest_dir, 'FlashNX.nro')
+    part = path + '.part'
+    try:
+        req = urllib.request.Request(asset['browser_download_url'], headers=agent)
+        done = 0
+        with urllib.request.urlopen(req, timeout=60) as r, open(part, 'wb') as out:
+            while True:
+                chunk = r.read(1 << 16)
+                if not chunk:
+                    break
+                out.write(chunk)
+                done += len(chunk)
+                if progress:
+                    progress(done, total)
+        if total and done != total:
+            raise StandaloneError('The download stopped at %d of %d bytes.' % (done, total))
+        read_nro(part)  # whole, and an .nro
+        os.replace(part, path)
+    except StandaloneError:
+        if os.path.exists(part):
+            os.remove(part)
+        raise
+    except Exception as e:
+        if os.path.exists(part):
+            os.remove(part)
+        raise StandaloneError('Could not download FlashNX.nro: %s' % e)
+    return path, version
+
+
 def describe(out_path, entries, name):
     folder = safe_file_name(name)
     return ('%s written (%.1f MB, %d file%s inside).\n'
@@ -618,6 +760,248 @@ def describe(out_path, entries, name):
                '' if len(entries) == 1 else 's', folder, entries[0][0]))
 
 
+# The FlashNX wordmark for the window (assets/banner.png, cropped, 96 px high,
+# 128 colours), so it shows even when this script is downloaded on its own.
+LOGO_PNG = (
+    'iVBORw0KGgoAAAANSUhEUgAAAi0AAABgCAMAAADmbrLbAAAB/lBMVEXbVyfNXDChWCPbYiuhKxyk'
+    'Y0u3LBy0UyPWb0ypLBvHMR1xYBNpHQ/iaEnwZkbVYyXpiU7ldWj1izq4TCNuZWI1JxPih03TLSTG'
+    'OSa7JRXvgzryjkT///91AnK2akUA/wCtk1QAbwAAAP/XjlTGNie3Rh4AAHH/AP8A//+lD1IAampz'
+    'DgC6hlPchTuzZ0WtmR3/qqp//wD/AH8AAAD5WBryNxz6Zhn2Rxz8dBfxLB3wNiLvKyHxRiTxVybz'
+    'Zif0dyj/AADUJxt+AAC6Ixfvlk6TNy2qOCevSC13OTTXNxn2hTD4kkTTh0zWSRd4OQ2UOBe0NxLQ'
+    'NhmUZjevVy7MhUuTWDKTSCrrZzLXKSKmKCTLd06xNibsdjL3h0bNRyyoJhyqRy2zRyvKKRrUSCf/'
+    '/wCqVy/QRynSZy/yaUR5KCinJxvvZ0vQVy6zVyrOVxbSNyaqNxiWNiiPKA6OKSjVZiyzZTPOZjLX'
+    'SBrSVirXNiOtdkt8VzHPOCe0Nyfpe0+qKiQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+    'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADJkiG2AAAAgHRSTlPbYBmmGhOa'
+    'YF1cogYMod4ipRLqlgQEXNNpzLLwAQJZARUCASUW1gIBAQQCVlRknAgDAgIA/v7+/v7+/f78+vj4'
+    'AfECsNERMC4I7fn6Vs4ID2zPDC9nERHR8DctT9HMkEcUTs/RARKuje0JNtSPT87PMCsTEa4ub+mw'
+    '7g4Jr26RSwNTyVgAADGOSURBVHja1X33Q9vIt6+quzHEsJDdlO3feu9979mGIGRbJl8X2GAHHJu6'
+    'jk0NCYTeAoR//Z0pkkbSyDh4f7hMCJaNdObMOZ85bUaykOqlRaONqNpYiDYajYXGNWoL0NSF/1lY'
+    'kBYkVV34snCtNtQvcCRFF758+aJK8Kn643ObxMiP6pfGly8LpMGZajQ6nHpkLaqabUEdblwvNNSt'
+    'qPplum+609dfQF6SBCLF7brRQJ1I9wsoOryAdNJoXDfQxRLhzrpuGHG6AOfAbzgFNdDddfQ62oUm'
+    'pqRiDoiah5uNZnNBGkkJ97Fz/eMvv/zyBrV3dnvjaJyP8Mff/fjFoFS+YBIh1xlq9HGBZfjHN3ik'
+    '7xyi+OXHRp90JfXNd6zgzA6+e6N+6X5lRX1hMhIK2Tz9m0p2WP03w3DoxQtyzr/fvPnRl7Cq0vMt'
+    'gvSyN6rUDS3PohJA5bvvBlH7z7e3wcEfU5uEg+94FAbfLKSMx4QW6d0gb5Rv1D6HAXT5Ih58d495'
+    'abz4gSv5F8P4uusXgz/8YX74B24m0+qCH1i+sxnBp5sXgbq6oGUTDOMbNIY/nsAFP8z+MDs7+wPu'
+    'kfzmNjj1yZMns7j9MahitGz+rA6iPmefwA+iBSfASX/85530mNBipM4Gf5glrJM2iyXyZ7xPtMQS'
+    'gyAToDxLZQiCop0MnnU3v1IcX4Da7BPakIKCC3iaRl8M+mjpT7HBZTrReEdhBVr+AZQO7Q9M+4fB'
+    'F9f+aAGLBFPpjx+w4vO85vP5bB59/OrVq7x8RtCSevO9fS46gL/BwRMx+qjQMnwmI9Zn0QCxUF7h'
+    'cQjJPkEfFZ8gmdgixYfoN4iIqN0XLTKZmLNY7paE5ToB2U9SUshzlARj+P6Mx7QhBb/3qBUPUxCC'
+    'km/ckpBUwMosUe23N3yRsEM8TWL3v57MusnAoNbE5qMKcaNBIe8cIZFjsNifyWqIT3yEPDsb9/MY'
+    'uP2+L8x6L83ndySJeipgmUt79kko9iNH7Wfyk1kuKzAnfNEiSaHBP3+YfRBSCMOogyAJ/zav/+sJ'
+    '54xZWaw8JrQkoud5nmrkYLQ/tNRlPznnZ78PdkOLA792WzuvJiha9k/5tMFqcfKiaQCuH1jQKP3Q'
+    'EgIX/XCwkJl3SsW42RA5UgZHVX9UGVGiKnPRcir1VQnYTCVkXwMOSt3qcm1V5F64KKYoWlQpKPhY'
+    'LbkueehtnX3PU3p+fPw0KFX5aPmbtCAO9mFYzD526iMEeme8yZNfO288KrSoNa5W8zv9DcNIiWv+'
+    '7n5WPjP8r5S4Vil/GjTRkqrtn/pYLTno4fvvko9pGYegRdrko6Wqhv4CsLyy0PArHy0cdv93588S'
+    'Hy1itT+6I8E1f1nPfr/ia1yiPj4MrJ0VwUalc8HXaqnufEiUuWofF+QgDhoEHzeUz/eNFkGkjlES'
+    'uWjZqT+qsCV1zY8YBbE/si+r3dCSfxKS/K4cSvGvhCDXQstmKnjKVSUYF3d23jgb5PqhVwAWwoQX'
+    'LUZT+issC4QtZ3TSbYlrXNMjTT8qtETPubo57Tf6kna6zMz87KAa9fFFz1LcZGqctXaGH3mUZDht'
+    'yzTyQ7zADPxQueKDlqgk/jnbr2UZh3Z6RgD5s8RDS37xPPqoCrmbPo7oVOqT8JncTdqzf75RfS78'
+    'vzGRd+X4mhhj44pzYZxvtcQzZ4grohA37w1xBVmqpfhoeb4lyv17IYiix3fqJFeIJrjeVdivPiq0'
+    'vKz7BLl9oiV6D1qeDDZ8MnSjKvOjDHGEPS14mvOJcxPsedeJ75+88glaaoYPWhZUea1/N5SHTnaa'
+    'BC1VLlpyp/uxR4WW4aCp1XFnZtdnkNs1bMGu6KzmgzM/a5dwezpuRSwvi2xZceEdyYfGOfmQeY4H'
+    'LWro+78gZsGdUNuh8oNc8PePCi1RbqKbh2H2GbZ0RwvgUdziB3hVV645Pk6TzTNXB4IHBHjxZU20'
+    'o2GjGaIhLnviONJjUor6oWXzjBM5jTtq3f6xioVa9CKbaIGwhWdbwIJvPrYgN28FZePkFUB/1mf4'
+    '5YlCxz3F4rMFX/x6LgDpiw23CbJPGjchlUOEpYrJu3o2SEJc8wR0BQaLLEmGH1qQF2WuwJIhv16Z'
+    'K0wWcuxFJzt8Hrc+ks9Ug5aQ1vImJYvr/OJO43HZloacZ9FCpJJjs9WHVVs8Ycu4awaCx9jih93n'
+    'VLC2esexyVhwrxSiOHd83OIcB5aY8AItQyeG3tF8yJoIZIwoaLFJudGCVrjGGXxZDaCQy4333hbP'
+    'GwZJ4WhhmyGFTAtaRHpcm1vABuRZUULL51DY0tcwKkE5z0Dw1TgzP7GKx1+tidx9C0YdWyX7VHIl'
+    'uPgvnvhGGGfQQo9eAeEv/4+aljf/mSU2wOqeoiXIBvGCq5aMkD7+iqt/AdrnXpqM2h4NuDenEVrc'
+    'tPK50+D1Y8KKkaqfwnwZd06hXE6AbNXohyw2EPZEcooJ+4JxsAG8vCtal21rYAl2PGctQNuFlB3B'
+    'RZyAIi+vkF0AlRUUtNg4snWelKopf9uSkPN8rHyW94LBfasF72nlsmKmeRDkjnPQsj/yqKotKbAB'
+    '4zlWMRgufQ7DQFHdq3vMNPiWBncBWs6PM06D4hfQ4oLvZiwoYL/gxiKOc/GaxrsnedasmcgT5Lpj'
+    'N4bgXtRc46ElJwjJfSlajS3UyC7j4eHr6+vhaDRaxXu68c7uagXeX0u1anUkZgfxRuN8zevBYEyP'
+    'awHaiJ2vcRTZ7zCwMb/PqXuyHBMta3lbu68sVXlSKGNEOuVFEShyGUKEVJQP8byJHHSaKRdatnZ4'
+    'SAeDmww2HjaJjC15zctJblEsP6qwJcEF/XjufKv/Su69MSC4Ik7itSCyaLFVHCx6Eu4mNS5eGK5U'
+    'IGhZGXzC9Sifg1K0G1q4vANYTvcfuuMHedc8h2LwUe2bMyr1HVvcOUY1fa6jj4A7uTd5QCWXH3lW'
+    'iXflZXDXg6zo/mmOa7TWQl9SiQTNbNyeyO2H3Gip8NEy/nDdGte8IBfs5T63qGUYqRRNpQzf1qft'
+    'xyQwFfPofprG1pmc48BF2G+4B0DZ77WSCwbiXrTk8nJC4lklnrU7lbx2aFhKCj4wlAAtPA1x/JAL'
+    'LYYUXOOi5XT/+UOVo4oyL2w5DT6qe4mMRlDmKfV0v08TGe0FLVirbgiMiFy0LO5Imx60gGI/+8FQ'
+    'HQqZSneSk4PNzW5o2WwEF3mqzT18nRWCXC7JPSnmPRfd4/glIUmS+sVskoRfrHsE8ZGEPlXV6+Gf'
+    'v0kxUVUyKahbX9QtqSEtLGzBJ9ICuokSukW/JPj42m34jAV+2LJTN2OE4QqiTm7GxOxJPd2L2dhZ'
+    '66GMlcvHz6oeq7TIQwvfN0b3L7nd5NbEhBhnwZJLp8mJn8W6Z33KgZbp+g5lIOcMMh6+ziqx/p5x'
+    'REnJY61UdeXNm++4Dd3BRw7wD26hlZUVQNPwvXeZgKeJAsLO1JVQiNIJheDnDfwL4Y/gVcQNXkOY'
+    'ciIhLbBkIWzxgh5nq4AWY2grIa2smMS/+44QSwCZMwDns67i6SFsIVp1FWhTTd40RGjh1bGq4Iq4'
+    '/eRk2eIgh4MOGg+nOabFiZaq5QpdaHn4DtrrM5mLlmD0mTfG/zr4Z68N39w3+O7Nirpw7w68aFtK'
+    'ACy+fkWXcKk9efK9o8my6KyfVs52chy0LJ6jabQlrYTeEeqDNjVQw9evX9+9UdvTXSu5PVXIc3lX'
+    '9d8Aq5Tjhi37MW6UDsaFSxg1VtW/CfgTCFo4PtaBllrdJyV6uHeWRK4jEoLeMZ3trOW/rT0B0IRC'
+    'ia2uq8ANSQWkxP/8JuI5QRabzML/LhvkpplhNFJRwAqghE8eYB0Knfln2QuhtZ6WU1CA4Qj0jOd1'
+    'Plp2JN4qp5GS9vgd5fMOsDx9imxQLv1Z5u2DdaCluc91zrnTevWvRot3c0vUDodzbsyTt86GPszn'
+    '19bADiR8b7//cQugMhhfW2NWuWwC4+R/zhXTE4subhms3+ebyH0JlbYAKgy7Fn38O78mfw1JfjcF'
+    'NRBa0r25ooYz16xzk2JhzydoiAYFH8qOAOH1HB6HIHMNhMDib4vvCnM7Dy9BSaJnBiAZntbdM8CI'
+    'coulfsLL2bMuv/Y1dMaXEagyFP8zn3fb2/s7SH8WmwyHTTfosYZzl+X2GYCFIjGdTrN4sY7WBkNq'
+    'wqcYtdPrUm1erhsOtFj4zTpdfNO3sJPO3tOXIL+9RIyn05/328p9aOFHpLl+SlB1mYcWCHL/7rEt'
+    'O9+yxM2Sy+fjIe4NoLGzUHwgn/PYqR5oZiGyYgxW+5yHls9yIhH6c8A0WyZa0rlsLmuelkX2ZSCk'
+    'cjfXNuunPUEXh6NizWBzYosjB1ou9/3cgLQncNFCkY4IyeFOfCAHWdFnWeJOP8Gxt8UybmlTIGns'
+    'NqS+0GJZWiJOrArvnlxpx5S5/RtdkbamLFeQaaSO3EBoyHsz8haqJDDaIKTgirQz/nCQo59mL/d3'
+    'mejUtgFUuNksTjIlcSDviWeclBGDCM48Z4lMVm+eaDy3uLPFGCijeW5yxFyey17W/ZxyMyhkXUN1'
+    'xLm5rByUdgAs2exnOViL3oeWpojRkrYbEdxp/cGbC16KGC0Okggt3rClUj6lesDdph3NDymoZaHl'
+    'cvGQ9Hc3/BJf19BESbNnmwTT7i5c3aUvpRHDbSIx1jHWoNc0si3yIotGB1/WpEvjekloy1Uu+BuS'
+    'ODYQ948TK9VRz1Uto23NK6QqYa/sl4EpZW89lwiQhFjCpXh4DmAB7ch+WY3A5mTnGOkuuQFepQcH'
+    'uSMwebIuksDPZdBdJDGUjkCgmk2nxznq8wMLaSBL1y34RuNMJmBxmimmZXHjwiWd3mP3xFUQ6HP0'
+    'Ihst6c+LuSxD3duLOeVza/IZGwioX740XoL128OW13WJBTXHFIN0nYm7mwlqtJ1X+ga5xLiYEHaK'
+    'JIeUAmApJ2TktgUhWB++Hy3NHUBL1s064LXx4NvEqgBAt/Khjz3P9sSYJNpQ7TLtfYxBGsmS5fKZ'
+    'qoprOY72eqQoiDWGRRzkEriYaKEqzN3PGqgii8IOxrg0VkLYNZX3cjm3fNC7iTT6lPk8i7rfObMn'
+    'hAocuQU1jlx8zVcXW+VLolALx7kcFTlceBlU6jt4en1O1v0gx3iin8s7yGl50UI2TDxgNW8TBSMe'
+    'eQJr3luHF5qiG6k9QwXPl0X5bJe1u1JI9s7bnoHoYBEni6QojtHCWsms01T5UAOELYp2GSK6Eo+f'
+    'o+pfQvbiDTi8mEm7SCEKADg720Dpq0cQYLT3/dGiNMXPLFqoE8KvwmVHqaGFJ5gnELRM34+WCgTo'
+    'Wa7gpB6A8jfeppCUxCGZhbDFs1emiaZZuo/mnLzGFgJL9sHUhMt9R7Io5/go6K0HdFrOvpFUWvm6'
+    'JgRhClZFmWedJiIRwQW9LAbcuW2St8554oKwxT9oMKqQRKfHKRBBC8LcZ+qbsttBSUpgiaEiru+C'
+    'L+OJdveFHGf4gJZEYmVlZWhoxdXMD4aGEtLWVqNoeNEiLuZ4+Ot4+Kh1Li3l8nWQ7WogsrlFds/Y'
+    'bj2+6BVnr9pFaCmzaEnIPSPZr4fcYqhNhzoEYBGCbQMtDOYILBwjmnsblt2mihiXhFUBl7gcCcFi'
+    't4ld3rN7ArT8FkgKCC4oUlFe1s/XkAbmgpL/fgPBucHKK04wVmvx+CBtX9E/1OJsw5+EhjwlhUTs'
+    'nIcW9KA2D1r2T3NdJW7KzkfjgBbzcTFYmKE4x7JYNLraAUixYJIyMWn0Z1HO3m8/st0AidFMFqsT'
+    'oQG0F7GIC914qmdxIpA1Ce0dSrLgpTQO3kw1wZA45aJFjHW7Rwu7IrMjBJFwck4QwMgkg0obwjzo'
+    '8ULudjedjZZNFMpxJIyrS85GF0Fcn8br7tvJ1OYOzxvw0NLc7z59s7Y2/NRxWrcCFwNMS7aHCe/X'
+    'l+CIFhHos105wxrvjpYsWAYcPagA5By4DGkTBbkmiVzWng57igJq9ZrYcZgQkpmkLfLRkkp0QUul'
+    'I1scCnNBJVZV3oJ5EZJhaau8k0dokYPST72gpSLt5XwmNfizXC7bpeE/XnZ+djk8tD2Ray+96bxa'
+    'P5fnemnCxYSPzk7rTXu9wWla7OOJiXvoX6C2kewwM2yoIvuGQNDvxAXTJnzRkpUTQDOxhcCSE4KV'
+    '56nfy6c5RsQTExNU5QpEGAI/NqPPq25zjXYa/Ge3TWbPy7bNEpIK2KFqLZxMJsO1moSdYnpOlGqp'
+    'XtBSq19y7XSPzn5C3+6kXLH09T7fXnK2YAxHpeDbXlpSnhP42risW9X/LWvqEe7pEObmZFmORLqR'
+    'jwQikUgy2akxFYfN4o4PWrKY5ja+gSoiJ5OBiCzP+aJFlNAzUlBNI3sZHEFLlULOMmbC3PwF4VXo'
+    'SCkp+ZlHZTFE0tPUFpcjsErd7xaWgp9NiWwEK9GUUamg7V/NooKnV3ZiPqwkekJLc/80+xC7baNF'
+    'cRVRNtsi14ILHQ5+o7XYsRKLHcdIU2KKoljvzFf0BymIFOKFNKDFtC3P23vOKAf/mphrBSH0Lx9C'
+    'P8fHxwpu6OhYwf+hl2PlUDk8PFSUIusrh8qXWR+reyHLnU5ZOpSkUqkkSXBtOMjFC+IPAhdI1QDH'
+    'qOCZSv3cSKKg4eJCEDYuk4FwIJujaDlJHaP0hWdccD3XSJ1xp2F27/ieNd6gPIGEAfBMHk1P/8+1'
+    'tCBVKtfRWjk+gNCSlQ+njZ7QUhR9nPPERG9oafWIFsg3dn1yPHN7NbvXmh4Y9IxY9PhQvuBM8uxl'
+    'uWnV/GVPTJzNbiTLtWqsGo36VI5wL7GYpFSnnVtJFkSBjxZ9IxkEmkAyKtWKaJdmVKoqQZ5dwGip'
+    'TUM6NI5DkzJ6vN9/DwjCxW+/JZOA4sPwJUn5hct6Be914/W4iG8XM2LcsDu7Ica6o6V2SNEibK/W'
+    'jC21Xk8kkIhr4qccBpGc+L03tIBq032gJSu03BZjuMyLhLL4Ob39tFrQY1wIWkwHVwNhTrjRom+X'
+    'Htht9ZyLlgkAS6fpWfsGlyrzwLIhlrcSceQhYWbvtdHux//+7bdAIBwGW3asiDsfiLAg/vqd+AzO'
+    'jCChcqLJC7sBvJ17RtLuXGKJCBu3ypBSj8fPyzVc7KJhHiRu1ele0FIp7/Ek0q3Zf8dTN+jebDXN'
+    'Lfe59gI8oBWDGx5vmU1PtKzdXjUwBq6gC0TZKv7tgf2d84KEiYv5ZJk3l2tK8sJClxm6QuAstRMh'
+    'HE4BWlCcbzSD4X/9618xpQnmDFKMHI0odrbAzO3WLy/4xqWWMobrOwIPLdvle7ac1s9x2itcBI6k'
+    'rf34p4FP5/XmPyT4GHUNZmdRru/2gpbmPgpyYWwUBmkTEN0RQ9GSBVY77j0DMfE0y2YjdLpvd/p8'
+    '4glGi0dan1vWYn0b0DLhyYrF4sO6TaB5xMwOUyZzQS5YUpKSnKPsmTKEvClyqCT2Fom9J2j5R00J'
+    'h2+DO6H9dru+t2gucQpiG9czgp/5kcsZuMYEEawp0gkzFmh3X4hph3DiM3GxHT5uQwYCqe6neKhe'
+    'Pv+EMzI06WWx3QtaJBxjcMxHT3DRdTD0nkmG/D0hA2eYgstuO/YC+MQvhrFpbKJGfjO3yBhGW6Qm'
+    'Y4J1laAB04jWIcidIIi3oJrNxttDbMJA6D57Rsh3uQGtCMmiUyh4Kl0kywr3/Bh4SjJVyekIBReR'
+    'MDibRaQUgpbjaKO+H9w7RXWq/S3QF8w34ojoPV/V/UtmeKYqkDrVaBPpasLEroXgDbHrFw4koqhk'
+    'iXqfe6vUyqc4rM1+iIuinMvqlNdFOfG8J7QI2YlvbiaUdF1oHXm8JHIIFp5MKwTReKrL46W7bX/A'
+    'LTUCcz2bdbORZr6coY69s2Unsd6yubiokq8JUyvfdEt3zSsZZCzm/ExkrJb8zPJHwCIpEEzhmoqu'
+    'g50TQ6F4HNU0Pwh7UpngiJy9J5G0p9nayDqmKnVF52qihtFiQhdfhca40f3rKaTyHtgQHdAS+aiU'
+    'dzAJeJdbhMzMVA8ERt0gJ5haUkQ6Qv2b0GLZlg3vWrm0xwhN1yn1jWSlOygqqjqEmrkONTSkqio6'
+    'IL9XRGSy3LMd0AKJpxkvXaadgNaRHD7EQ2bzrHhBH1/8toI3OWjRJ4Sk4mMioxKKW+xxg3o23ioS'
+    'BQv6CDREkII3kwCO4llzcoOBaBOy1c4GGxoSf5/GZRuFQYsl3XTaGws4JuJWCK9VAjdhpSQTT6Ij'
+    '9lgtQWDU9lePhZZyi1yk6xMPaICWcNG7iOVBC/zeCMb8EtiKOrTyy4qpUnSDzldHw0tV8Thxvm4j'
+    'd9kxg9xq/dKJeR0JE+Dy6dOAubRFl72+0mWvr7hHgGVx+BlnGK7eYFSQD9V8pFo9agmW8icwWFql'
+    'NjL3VAownz98wBscs4LQOgSwfLAFtdEx6wDl1gU7IckRqPP817bomi2YrtAqd7u1qr0fJ4V3QT78'
+    'VfxkazudZSZzNscut/l6ovJlVn8wWsARJZUTt+PYl7O8+Kbjg5bhoRUEEWSgP5H2wWy53Aem5Rym'
+    'RcccQ0pkJdAL9W0HWvAZtL6ew6Qc5BD5xcVPnxCIEGDcjKHahmsU2Jb6qeb6aJvhD7QDfqgdQosH'
+    'luG2lkw2WofHCRRNWPxul2tWMD9n226rY1QTScgetOCou4tpMV6iYA4xrsvhBAILq21dtw5QYPTy'
+    'XrSATHTWBuhuLesmSfyiuxqgpeK5QYhYcKfihG1+1UNFN3OAcf7wwbECRU2lfaRndTdz2A4LslV/'
+    '3e3IDjFSDtIM1xZJ+hZ/AMZnIO7enW8gyXCmB2R2PiJVy9s2gzDgCzmsJOIfcmlmLurU6mxDphQa'
+    'YNB/0SpL9iYOT7cIaf5oaXbx8BXwXjpxAsiRZTEnumW7LNVmhbg6fR9aqj5Brn5/MkTQEqi5WW2I'
+    'wgQHLdzvlSNY+cBqkG0udHKYmJgTrdsIRsrbvTFNiNnkcYoQV9u/OOsAPMlctEox31uoZItFJJlt'
+    'kW40YuawOXOCx2j/Qtr20xetIzMnUeqtDa820ORHM9tBCL/IHf/qY7Sxf0rAIgQOUQTFdyFYBrLj'
+    'vjsuWkC1OscPZTLz0ObQr5ku7ULYuK0YriwYTJ/uRcsGZ7sCuqMw/imXdclAdx10Uz/MLGvVeLrc'
+    'useheqDHGJ0BgMuwM8jl0JoTFd8djXCBzoBl9VcRDy7rRvqFLCptkg5ZaJkbs2ddo7PNmxlZWRZ0'
+    'DlpaJd+Aw1BfxAXczdV8AGPNXzKQsJXVrmgxUm2iWjeZ+UgkgBp5eR14/Rq9oBZwtaOo+95DiA55'
+    '0TDHu6oqtiu6PxbuR4scrjCp+4ZTL5YV4RsuegIR1oeBUF1lQF/e4zE2559/tG14AVgi4V8TOwOQ'
+    '++CtjfMzDrC023ieO9FidQ2o39C91oX4UNfoIMiNHPl6kIoU/0S6mXn6WvADCzGy2eylb7QsWEGu'
+    'zkGLfrNawu0QN+VQURS0RAst7GxH7g6Mk84l39+792Y9A+B/ymUflItZZC9kZq5XVzcEDlpcfs1j'
+    'bcwcJv6iwYQtZZnnorcPfRfwytQDY7DIY5DznAqCcDG3sd16OxaZMCsJyLIopk/RTSu8LSq2ja52'
+    '5jihgO60wabxnXtb7HJzyECWmJbC0w37at07EVEcLfiWXAQzMOSZ24mNMaVaqwI2qtNKVYnWatHd'
+    'WCy2Cy22ewJHVfiHfmK7nrvJpmscC47ClrLbCCEvZGElk8k8EC1McfC5Etj41tzOFiHAxb5L29jl'
+    'BbkTunzouwZZbmFKGTTag7HDdmdP2JiXk8FwuKQcjllCkUVIh1BqkbG8Nc4YWXdSilxwQnov0tHv'
+    'SHjXJ9zYrLyIZ0maPDODrtZ0nUgZeHTKm0Tfe+Xu9xM1gxsc6er31JK7Vu+LBC0ZN1pcLsto7jNg'
+    'caBF/4ZYey7Ilj8qq9tC71ebJ2Vw52CLL+0kf7rIDVs23vqGLWpCJrQ0AEvgUCkHk8nA2/BhLRZT'
+    'sJciyp0XE+0Eok06pUwIrfJzxq61b+d688PI2q36fSdLo0wlTMGCEJJBYM7MZEzcsM4oe+m3WETR'
+    '0t4jqmUvBXrb5QevFkslHLY4bIWOS75O3C7goWQmNA1LTdM0j29g5UWmBkd9znBIuj1gCHlPz/A+'
+    'yJhwEURrIVZttwTO5fOrvvmHCikRJqVdHQRKRanc6YDzrtWsqhYe2FwrAbmzQDFqSgmmp/TScSeE'
+    'POPhHimavGSYAUKS5lMtlJriAJ2OGQoW0h3KT1xoIQIW9rb4tASaRezhLjNExDoVndY6fPBDbVHV'
+    'wZyu1iD1qw1XbW66HcJDgc40jAQNvWImNA8q8N/RrwwrO/zGFQ5VlcC82bOfb8NKQpoj2qJixEct'
+    'aylLsfzKhD0aPXOz6rtLbQuZDxgNgCVSKtYUpQ1xX2cfP0y00hEIWoSW+GsiBNOE9mkStiu5NAYK'
+    'zOi2k55gz2XhjdAS8UOL2rnE/WCzaY9yYmb+9et5hgGLtJ6ND013QYtS2iYyoWgx4eLZDtd7a3Y2'
+    'WLSAhsE061dJ1765YidugoUAQUOnUT0iuNgq18hHuu4ZIZzTcsURtdLbyLzZvZkPudIjDXWGfplE'
+    'LLTcWJJPQBY74ZFnJlLy3QaytScQPq8iq4pSrouiuIeqxOixjCe3G6T/bTGRQDNecxHe7jgr4s3V'
+    'eYoWLw/Wod61ktt4gYu45oSgwoP3M5Hw+5sr9+iQ5FGcu9nFthC0gM6w0AAzGUR0vtsK031oEamZ'
+    'JYYAwSCja1fJo2FXKUuguqdoQdxO4I809yg0/KN7ZZeZmHOvaRq7tXAgMm/DhdsIVkxqJnAALYfP'
+    'DLPmscGR56inYMCYA5nQnlkPH5ZFvNL84cMH8p1QtQAODGa2xwAsME0YrGJOL7ZLVZc/j8wgW6Zl'
+    'fNFi4azCX0+R4th46+ZVpEcE5reHx+CwvcPTUZzb5fktyioNW4CURTCTOQg+HC3tFkGxZgIQoSFz'
+    'lYwlHGX1clz3oAK3mZn5dWjzpMHBOq0QekSF2nzQG5fFFISX+RnbajgkgjnS2L/RT+D/TelngwG9'
+    '5+r526PNe9HyNLAX//ThwwAkr7rwW+Dob2BJW7gyciAm0LqzbgOU6vwiWXJFz83b+YyueSeObmuJ'
+    'uJVIh/vYlF+KL2hH7KRDE3c+XIrFVm+uvKLH9WKlC1roDKfMm6RvVmMP3uBWNtHCqEKfOXA+5seo'
+    'dgSdBxVUFWTLOW/Rv7dv0e0bMzzlR0re2wgM6eQoHI5EbuCieV47QPDLuNGC4BL5+JKyWWpxHB+g'
+    'peI7ixKyVRceAKQQe3n19Bam/jCYcB1Bu6Qk4ii6ybhwMH/bdFbYjMrqzYyueeCiUXZtiQW4ldzh'
+    '5ov4AMDdPSUBLIFlJZY6anHQkkFxPjeJFujmFqw0zYWW1tHDt1uD0DQOWm4daR5a3Ne9DmfmILB6'
+    'qBRrqBWVIhwoinJ8XCseHR6OHeg8tCjcOuZ07KRUOgyHV6E5bhu6pS2yPsP2bAog8pFu1ositHin'
+    'dmTVr7aRGgFRYp9KKv2U4kwgHEu9rAJatMx8pFxriwM6M9OtSbJadG/jkCBc90WL/Q7QwuOoqAJY'
+    'oCe3kLWZwB3aeFoMHnDQAuzL4omvbQGZZJxoQUejreaDE+jfIY/MuNEyMfN0dZgdVO1o21aG+QLJ'
+    'xO2Rn1E7HhM4rmsm0O1GmljlH8WTYrHYrBVrRdIq6KdSO/4Ynp9x9E0OIh+pBz6BYWgctFieysug'
+    'KOBAHeVa1uzXZsJHRqpaXN2A0O2mo0AOmvUAAGZJxO2IjFQFXBHfVzuwMx9UOA8mN9o4lPaCDdwk'
+    'DuTBFc14yQHaBW7JRSAV5m3WEWWIOc4cjB0/2LSMmNGrpjHzVgg4d1keg/joKTZStYOAL1iwFfQK'
+    'bz5cexibFSVwpWmaW542WhA4eWjxjeeklpc/GNJdMWUUlYBwdRVYbRrq/qXuVRFYHcVLthTJaBmt'
+    'K2AgivFYJZqYxrM4nXdOBggKA/R8iKK5aMnu+T4vF0I5zWHb0CuK9R7+vV4naIp52HChxSgSR+RE'
+    'y9XNquIbFYAV5EgucvjQqtA9aGljv+IexvyYb2VBOdzmomUVjMZuGNACalLwir/3pMz8W870bI8d'
+    'cDh0X8pL6YfVessRHVk0CsCFQVN0MC7YOjhwi4xLkYsWHLYQfLAsaVeR0sPv4oBJyXhV02YJzgIO'
+    'hC1WCMmgpYtp2S25lIHfzIB2H2hbliNXzqoLoVdMke+bLYqejAhOnfdfwKtBxs1Byw1ahNwNJ4XA'
+    'bbGC7gt1owWbj3nefrza6k3GByx24AI+zHvpr/WQoHOTiPXAEQ1LKkeRmYwDjMRu6EKrNMy3LWU6'
+    'YU2FkasOAg9fJIL4QmOhSknqrRMWLSer27oD0mQeBhT/W4lcyiAXgQV/6K1JpRtdy7hyE0BDjQ4D'
+    'TNmEWzOQMoVjXcpMjDu3Jl4AFcWL4WTy9qhiGFZ5gdW7Birn7ceLlog+u0Yu87dFrwhUkjw7uUEH'
+    '6wF7o2Px7fwMa7vokaZvc/YtINsyXG7xih7zYeXhaFEimgOrFC3bJTaDbq4eaBmObfHrd3gXrVBw'
+    'wpaHBlhRBTjQ3BN2Zv62apaDEJw1J1xQSuRHcLrNEyUekpF6LgWD+DtHzPKCY0IjtBxWecuzt1if'
+    '96DFu6SIdg1leQ6vEHlvo71IXZELLRlwRZ69s9i2VDrbPGZYmt+MlpITLWY0thE8ag+pZqG0eHug'
+    'eaoH2hWgemh4M2pMk68624xuGs/QLSNKWw0NcMOWsB3AG0Pc9uyZ8x28/z9DxWLHDoM0q83chIns'
+    'jZi44RIicVS+YVKztM1L2Q5uEVogjpCIuS5v664cGLUrXpALTIBxuQcsMzeeBWgjpYbspQUWl5Pr'
+    'YcXWrCQFDjK2cbEPhFa5yUNLEWSi8TjY7QctGR5aspfBI/ver+LtleUGbLTofo8KaAyFBgY8KYqG'
+    '5vq9VnBkxH0fW6waO+rEB3QPWKglwLUxKhlnmDkT8M3AlI5DlPTw6oAw+IxWhaZdOSjtwHSArvYc'
+    'nMW9aOl4HkAcC1E/5IpKtPXAcozdMXJ74DBdJlr0jY7C80QnY6McZgqR0oNrc9MmWiadaNH0gTi6'
+    'B4zuKi8Griz+bFOo63uhIXWorKrlcr2Ov6kM2YMQ2ueNJ4sTLzghsM0vPrG3Fo/HBzimRTu4pQHb'
+    's3LryloNsPucf9stwXegBS9tQZZXcjyKodrZYNBi4fFglR8oFlcj93iimZvyT4b7zkQ6ExxIh6Ol'
+    'yOqJ49zSjYUWpjaL4lzPfd4Cykwio5yViPXww1MiI/URo0WbdKoWFTnRnb+ha4qWmQwjLhtSA3Fv'
+    '+/TJNKxutGg2Wop1dCJt6L4kdEvgJ2+jj8pj6rSMaTGNqjEMNgB9Munsc95/QQQl+BnXkgyK20uO'
+    'UnORlBfYyjnu1+82guLb0akucNEykL66vkxxWA0JupbxoqWwHj6JuajPZ8yUmD1T3xabXrSclG44'
+    'rABajlP9RLnER2oe1QJgDmimWAwUvGhBfGZdD0D8gBbnTKdBTZFN8WDMnJN/I3vTemrQjWvWUeHO'
+    'BErk6ZNGDTkiGMSkw6FCtuq3XXoEp1ia07YwxspecXWhhYQtfruJKneRrmgBCbjr9O2QuVyrTU3Z'
+    'o5xagnyo6k7RIzOMZSU+gdRzFS9aKqs3btMOp09F7k76QMvJ2Dx2RJSBSdxoPAuTk6ClFpiZxH+z'
+    'O6dX8NXL6JWN4W0LPl1uadqU1kOzO5zEDIBMp6bQGxQ+nPzdrJsLFloI/8i1zgQO/YqHJ6s3VEeT'
+    '1oiB15tVxyJklAa5GdCj7a40s8rDS6IDS0xezsrLZ/kXrQ/RMU4RoE0S5BReh92ZzvBhoACDn3QE'
+    'OEiIesv9De8CBFFjo7ZCKSMaQsuDyy2ojBaeRwBFzE5NTjpoZyYjq78TtITX0TCcfyQi7qJgcgwc'
+    'TtJx3Vh1zEp5Gyt3chJkNEUavXpqcjLDUHJ0CBeQUxHLhcBHOqUMpaVTtKBfkxjZvsEoXpFaxWHL'
+    'pDlkLPSMu3T2j4RMwYKHQAQE0eetr8BLt6NTmg0WW5xEWFMuH2ZM4+SRDA+PbJKCZWmUUxYBNSxp'
+    'mAk0Y6hUprArUv/uQku0hNDi0CgSz2jkY60PtKTCETJ1MK9OQBTM0uvJ3TozEW3dZYiOsLgnJy3r'
+    'lNGIutDgGRFcRZafm+oFYzA1mbEF2q1ZPU8ROWHdaYXR2yJ1NCpdZsB/ttHSxUUXUQXbOh0f4PpG'
+    '6Sfnzl0BU7XQgs7Wrtbf+2Z2xVUwLlSHzOCItFDg6gwxVeqHJs2BEVlNalOjgeUTDvXXFC0m45Sw'
+    'ICpu21IpRRiwmHxoowFluh+0lCIFDFQqE1M0DrQoy5FCL6o1tWrKeMrWLnB6YJcpUHbXM1omTRCb'
+    '0wpdOTMaODLdxi4J6AiaKB+grvX3PtPIMEoRXSOWjUXLuuvxE0rLxJQlGaB7tf7R9xEJ1aPAwRW5'
+    'RHPxj7zY0phzwbhJgxbax6RG0DJ1tRS4K3rr+ZWjwOgUoWYyPoUxoG//qrjQokDY4hWkNvrwSi4R'
+    'SXh9ylTDJI61CFqAqYI5OQ0lMOpS7ZSfZrGnmMyYM0Wboi4uw3KqjCHL0zNaLJRYtmqmEICEyCwe'
+    'rh5oU6zuiWrX3/vcimFMI3hNUv3T0eAsxOEnpvH0zJj4JK9TGswh30fVGtXVgxlrpnimEqQ5zp1o'
+    'KHm2DCaFDLJBT8NHnE1OxsntwRKBocU4vkAXxtxoQeV3Lwt9pUQYsO8jk1garC0gjNjqLd5FCm7d'
+    '+Wt1qVAoaIx28XzILI1acz2K9IAd31RXeDigMsWCuhBhBK/cuiSDVbsU+Tjsg5ZhlC9Muj1RwbWs'
+    'tFUiZ9loAXanpgpdFtKN1FGg4CuewjpbqMFFXN2EIx0cuXY9EOZ+qZlyhB0da2hJKKW3EooTLRDk'
+    'Zlw8TE1qk5H3/aFlWhlbJ/aP1S5By53JwvRJeL3gmuhTfkqG5O9p4UpzogUUfGMpWAI92Njs0nho'
+    'AWAUQLHM4kgpcqVNctCi+OwRmz5BKxlOpWK0OGNQtAUhY+mEHMG/9bFuxrxCBMUVTsERRRvD2A9Z'
+    'o6MdwU/htd9aThGosxbZFIkuj7nQUsbzkZhDyvgUQrpS7AstRmw5sm67F0ZHS5FVa3C7HwPrk565'
+    'jlhxywXC+UAYgvcpt/5AVk0rgT3QJhk0saiY5GKGOU0D0/U6zJRSXpoBHcUfiZ/AMhZ9t1Z50QKD'
+    'KwSO/umYyRBcTTosEG7rd11d//Lrgp+1LASWmRDz13JcYCJcsyNtsvA0XPT5xgf17nVhhhOOQJzr'
+    'iJ+F6fKNiRa2rfcZ5CKpvKdwceTQoPZIyZb3idMXuSe/Ayzvj5XXS+Z8xF4cBULr9p7cGszabt6s'
+    'i2cCE1BYB7Awk+8fpRvNATWcsk6Nrvp9JcuuguHlGkCh4IgA0W6iUc3FAfrv2WXpdEXF8CgTFDva'
+    'eoAJWxS8gcs7wkxh3X/f0LQSKBS80R6EOq0xdrTCyOoNByxT6+FYqt92DHCxbYWF89GxExuIlZO7'
+    '15Dts/GBbV8sjwP2/2kgrCjHgVHLtJp6ng/TZQ8j1Y5oU5MuPzQ5NdnNHVnvCgXo4XjX4TFu7CDE'
+    'DJNQHcrvAa41EraweEfRljMCNFAobhrbKRutV4GjrtMTptXS1GSG42ULjkKNincSTzq9LbFA4V3f'
+    'HlBEwLBuXqNp8hhbMhRi1Hq7WuRut2+0RI/fB8B1OHUHaLk9ZrgeObkLjBYKzgnjlQioMqYYsfC6'
+    'rWv6cnBn+bWyZQx6bJO4eoegUgA/d1QcccxmbKkYtEwRP+q7J5fmC64+ltyuCxycmw9NmwG0PO9q'
+    'qZcDS1NTvNEtRe6Yb+cst8C0cIYJfujE/96w3eXIEmc6TWmjcdYVCWg/kOc8DTj4Z99oSU1Xj8IQ'
+    'mS6hZtZVQXrOOniqshx+vQ76KiD2zAq1xQkSx9ISGBaU2Mbeo0Fhz0mrr9rSzZ1JbgRVcrXM1dS3'
+    'wEVDPa9DtrBcHHHdm9FCCXTGkbED+wHfPbkntxsaY8mog786WHXUUYZLHtePb5q+rXS/wQJc0RIy'
+    'GpoXLcye3CLeAYQFbQ8S3oAf6hoWnSCrzcicHmhaPHTM2Jbi6s0oSk2dbTSgpP6KNoxuGAw8ffq0'
+    'gDCDKCPNO2/GMXZPlsOB10/X7e6XHBytvw7ckf07VSUwirFHz4IDhtPY6o3Zh0mncH8D5oB+qbjr'
+    'Toel5MGSm8rSUuTWb/lMjQUOrjz8L10FnHerVlZvrlwsoNMDq5V7wsBlNHYyamt8qI3eWo+kN34u'
+    'tzZmeKNcD3RfyKndRUZ51x1sd05YtKD7P+nTwewW+AscEa1YFY/C4TDuIEJI3x4Nux9RN32i4JMC'
+    'gdF10p7Shi4Iv1eOiShfnoTxw8xMLtGbOysqqJRu3eOgjzzDBxH6jj4EzXwYWjh8twr03fbCeHlk'
+    'UYtEbGrgr/wsaSUcMLmL4Isw/4FwLeoszt3aDNg8hpV7brAwTlYDgYglRsIXamE7f2aZdgmBV8Rl'
+    'sVgDyRJ6EfbCyBi7N1ZIFU+Uj8vQPuL/H1FbXlZO1NRf1tDXUSnLy+/v3ofD798vH3FzipHdXdfj'
+    'yd6/f49eILa1N2TEdpVl3D7C3+/u7lZLR0VbVkoJ/qIs3929/2gNadkeFvqQ/Eaf0T8qsWmfiVFU'
+    'juC096gb4Bq3EgjG/7sldoH/9ybrcB269P3d0YnLTFeKyyY/qOEO7kpHlR62nC/fYbK4mQMsKSwO'
+    'itKRQsna7W5ZKd43+6eLyh1zBT4GSnBl1LXn/39RG8EPKovR55VVoqnH1IaHHbs5K5WRf/700+Nh'
+    '/5+E1+hPP/3k83xlgX5jB3gDphnGX8wIom8Qyv60DfTn6WlFoVyQA9cFTkahubvprRl268I0OpGe'
+    'P42HYHSXjH0FkSh+yxOGk1HjPrqWgAgbJkdcXU1bn5MzCRtGL9QJv9Msd07q/x9JuL31IbC9WwAA'
+    'AABJRU5ErkJggg=='
+)
+
+
 # ---------------------------------------------------------------------------
 # Command line and window
 # ---------------------------------------------------------------------------
@@ -625,18 +1009,31 @@ def describe(out_path, entries, name):
 def main_cli(argv):
     p = argparse.ArgumentParser(
         description='Turn one Flash game into its own Switch homebrew app (.nro).')
-    p.add_argument('nro', help='FlashNX.nro, as released (1.9.0 or later)')
+    p.add_argument('nro', help='FlashNX.nro, as released (1.9.0 or later), or "latest" to '
+                               'download the latest release first')
     p.add_argument('swf', help="the game's .swf")
     p.add_argument('--name', help='the app name (default: the .swf name)')
     p.add_argument('--author', help='the author shown in the Homebrew Menu')
     p.add_argument('--version', help='the version shown in the Homebrew Menu (default 1.0.0)')
-    p.add_argument('--icon', help='a picture for the icon (default: the FlashNX icon)')
+    p.add_argument('--icon', help='a picture for the icon, a file or a web address '
+                                  '(default: the FlashNX icon)')
     p.add_argument('--files', help='folder of companion files (default: <game>.files next to the .swf)')
     p.add_argument('-o', '--out', help='output .nro (default: <name>.nro here)')
     args = p.parse_args(argv)
     name = args.name or os.path.basename(args.swf)[:-4]
     out_path = args.out or safe_file_name(name) + '.nro'
     try:
+        if args.nro == 'latest':
+            shown = [-1]
+
+            def progress(done, total):
+                tenth = done * 10 // total if total else 0
+                if tenth != shown[0]:
+                    shown[0] = tenth
+                    print('downloading FlashNX.nro... %d %%' % (tenth * 10))
+
+            args.nro, version = download_flashnx(download_dir(), progress)
+            print('FlashNX %s downloaded: %s' % (version, args.nro))
         entries = make_standalone(args.nro, args.swf, out_path, name, args.author,
                                   args.version, args.icon, args.files)
     except StandaloneError as e:
@@ -646,77 +1043,750 @@ def main_cli(argv):
     return 0
 
 
+def windows_drop(hwnds, on_drop):
+    """Make the windows `hwnds` drop targets for what Explorer and browsers
+    drag, through OLE's IDropTarget (the interface browsers drag with; the
+    simpler WM_DROPFILES only ever carries files that exist on disk), from
+    the standard library alone. `on_drop(items)` gets file paths, or a picture's
+    address. Returns an object to keep alive, or None where this cannot work
+    (not Windows, not 64-bit, OLE refused)."""
+    if sys.platform != 'win32':
+        return None
+    import ctypes
+    import re
+    from ctypes import wintypes
+    if ctypes.sizeof(ctypes.c_void_p) != 8:
+        return None  # POINTL by value is declared below as one 64-bit register
+    ole32, shell32, user32, kernel32 = (ctypes.windll.ole32, ctypes.windll.shell32,
+                                        ctypes.windll.user32, ctypes.windll.kernel32)
+    if ole32.OleInitialize(None) not in (0, 1):  # S_OK, S_FALSE (already)
+        return None
+
+    HRESULT = ctypes.c_long
+    S_OK, E_NOINTERFACE = 0, -2147467262
+    DROPEFFECT_COPY = 1
+    CF_UNICODETEXT, CF_HDROP = 13, 15
+    TYMED_HGLOBAL, DVASPECT_CONTENT = 1, 1
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalSize.restype = ctypes.c_size_t
+    kernel32.GlobalSize.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    shell32.DragQueryFileW.restype = wintypes.UINT
+    shell32.DragQueryFileW.argtypes = [ctypes.c_void_p, wintypes.UINT, ctypes.c_wchar_p, wintypes.UINT]
+    user32.RegisterClipboardFormatW.restype = wintypes.UINT
+    ole32.RegisterDragDrop.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    ole32.ReleaseStgMedium.argtypes = [ctypes.c_void_p]
+
+    class GUID(ctypes.Structure):
+        _fields_ = [('Data1', wintypes.DWORD), ('Data2', wintypes.WORD),
+                    ('Data3', wintypes.WORD), ('Data4', ctypes.c_ubyte * 8)]
+
+    class FORMATETC(ctypes.Structure):
+        _fields_ = [('cfFormat', wintypes.WORD), ('ptd', ctypes.c_void_p),
+                    ('dwAspect', wintypes.DWORD), ('lindex', wintypes.LONG),
+                    ('tymed', wintypes.DWORD)]
+
+    class STGMEDIUM(ctypes.Structure):
+        _fields_ = [('tymed', wintypes.DWORD), ('handle', ctypes.c_void_p),
+                    ('pUnkForRelease', ctypes.c_void_p)]
+
+    def guid(text):
+        g = GUID()
+        ole32.CLSIDFromString(ctypes.c_wchar_p(text), ctypes.byref(g))
+        return bytes(g)
+
+    known = {guid('{00000000-0000-0000-C000-000000000046}'),  # IUnknown
+             guid('{00000122-0000-0000-C000-000000000046}')}  # IDropTarget
+    cf_url = user32.RegisterClipboardFormatW('UniformResourceLocatorW')
+    cf_html = user32.RegisterClipboardFormatW('HTML Format')
+
+    # IDataObject::GetData is the fourth entry of its vtable.
+    GetData = ctypes.WINFUNCTYPE(HRESULT, ctypes.c_void_p, ctypes.POINTER(FORMATETC),
+                                 ctypes.POINTER(STGMEDIUM))
+
+    def get(data_object, fmt, read):
+        vtable = ctypes.cast(data_object, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
+        fe = FORMATETC(fmt, None, DVASPECT_CONTENT, -1, TYMED_HGLOBAL)
+        medium = STGMEDIUM()
+        if GetData(vtable[3])(data_object, ctypes.byref(fe), ctypes.byref(medium)) != S_OK:
+            return None
+        try:
+            return read(medium.handle)
+        finally:
+            ole32.ReleaseStgMedium(ctypes.byref(medium))
+
+    def read_files(hdrop):
+        count = shell32.DragQueryFileW(hdrop, 0xFFFFFFFF, None, 0)
+        paths = []
+        for i in range(count):
+            size = shell32.DragQueryFileW(hdrop, i, None, 0) + 1
+            buf = ctypes.create_unicode_buffer(size)
+            shell32.DragQueryFileW(hdrop, i, buf, size)
+            paths.append(buf.value)
+        return paths
+
+    def read_bytes(handle):
+        ptr = kernel32.GlobalLock(handle)
+        if not ptr:
+            return None
+        try:
+            return ctypes.string_at(ptr, kernel32.GlobalSize(handle))
+        finally:
+            kernel32.GlobalUnlock(handle)
+
+    def items_of(data_object):
+        files = get(data_object, CF_HDROP, read_files)
+        if files:
+            return files
+        # A picture dragged from a page: the HTML the browser hands over
+        # names the picture itself, where the URL may be the link around it.
+        html = get(data_object, cf_html, read_bytes)
+        if html:
+            m = re.search(rb'<img[^>]*?\ssrc\s*=\s*["\']([^"\']+)', html, re.I)
+            if m:
+                src = m.group(1).decode('utf-8', 'replace').replace('&amp;', '&')
+                if is_web_picture(src):
+                    return [src]
+        for fmt in (cf_url, CF_UNICODETEXT):
+            raw = get(data_object, fmt, read_bytes)
+            if raw:
+                text = raw.decode('utf-16-le', 'replace').split('\0')[0].strip()
+                if text:
+                    return [text]
+        return []
+
+    QueryInterface = ctypes.WINFUNCTYPE(HRESULT, ctypes.c_void_p, ctypes.c_void_p,
+                                        ctypes.POINTER(ctypes.c_void_p))
+    Count = ctypes.WINFUNCTYPE(wintypes.ULONG, ctypes.c_void_p)
+    # POINTL travels by value; 8 bytes go in one register on 64-bit Windows.
+    DragEnter = ctypes.WINFUNCTYPE(HRESULT, ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD,
+                                   ctypes.c_int64, ctypes.POINTER(wintypes.DWORD))
+    DragOver = ctypes.WINFUNCTYPE(HRESULT, ctypes.c_void_p, wintypes.DWORD, ctypes.c_int64,
+                                  ctypes.POINTER(wintypes.DWORD))
+    DragLeave = ctypes.WINFUNCTYPE(HRESULT, ctypes.c_void_p)
+
+    def query_interface(this, riid, ppv):
+        if ctypes.string_at(riid, 16) in known:
+            ppv[0] = this
+            return S_OK
+        ppv[0] = None
+        return E_NOINTERFACE
+
+    def drag_enter(this, data_object, keys, point, effect):
+        effect[0] = DROPEFFECT_COPY
+        return S_OK
+
+    def drag_over(this, keys, point, effect):
+        effect[0] = DROPEFFECT_COPY
+        return S_OK
+
+    def drop(this, data_object, keys, point, effect):
+        effect[0] = DROPEFFECT_COPY
+        try:
+            items = items_of(data_object)
+        except Exception:
+            items = []
+        on_drop(items)
+        return S_OK
+
+    # The object lives as long as the window: reference counting is moot.
+    callbacks = (QueryInterface(query_interface), Count(lambda this: 1), Count(lambda this: 1),
+                 DragEnter(drag_enter), DragOver(drag_over),
+                 DragLeave(lambda this: S_OK), DragEnter(drop))
+    vtable = (ctypes.c_void_p * len(callbacks))(
+        *[ctypes.cast(c, ctypes.c_void_p).value for c in callbacks])
+    target = ctypes.pointer(vtable)  # a COM object is a pointer to its vtable
+    registered = [h for h in hwnds if ole32.RegisterDragDrop(h, ctypes.addressof(target)) == S_OK]
+    if not registered:
+        return None
+    return (callbacks, vtable, target, registered)
+
+
 def main_gui():
+    import io
+    import queue
+    import threading
+    import time
     import tkinter as tk
-    from tkinter import filedialog, messagebox, ttk
+    from tkinter import filedialog, font as tkfont, ttk
 
-    root = tk.Tk()
-    root.title('FlashNX: make a standalone app')
-    frame = ttk.Frame(root, padding=12)
-    frame.grid(sticky='nsew')
+    if sys.platform == 'win32':
+        # Without this Windows scales the window as a bitmap on a scaled
+        # display, and every letter comes out blurred.
+        try:
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
+
+    # Drops: on Windows through OLE itself (`windows_drop`, nothing to
+    # install); elsewhere only if the tkinterdnd2 package happens to be there,
+    # Tk shipping no drag and drop of its own.
+    can_drop = False
+    if sys.platform != 'win32':
+        try:
+            from tkinterdnd2 import DND_FILES, DND_TEXT, TkinterDnD
+            root = TkinterDnD.Tk()
+            can_drop = True
+        except Exception:
+            pass
+    if not can_drop:
+        root = tk.Tk()
+    root.title('FlashNX: make a Switch app')
+    # Fonts follow the display's scaling by themselves; sizes in pixels do not.
+    scale = max(1.0, root.winfo_fpixels('1i') / 96.0)
+
+    def px(v):
+        return int(round(v * scale))
+
+    icon_px = px(168)
+    root.minsize(px(780), 0)
+
+    bg, card, ink, muted, line, err = '#f5f5f3', '#ffffff', '#1d1d1f', '#6e6e73', '#d6d6d2', '#b3261e'
+    family = 'Segoe UI' if sys.platform == 'win32' else tkfont.nametofont('TkDefaultFont').actual('family')
+    for named in ('TkDefaultFont', 'TkTextFont', 'TkMenuFont', 'TkHeadingFont'):
+        tkfont.nametofont(named).configure(family=family, size=10)
+    root.configure(bg=bg)
+
+    style = ttk.Style(root)
+    style.theme_use('clam')
+    style.configure('.', background=bg, foreground=ink, font=(family, 10))
+    style.configure('TFrame', background=bg)
+    style.configure('TLabel', background=bg, foreground=ink)
+    style.configure('Title.TLabel', font=(family, 17, 'bold'))
+    style.configure('Muted.TLabel', foreground=muted)
+    style.configure('Field.TLabel', font=(family, 10, 'bold'))
+    style.configure('Hint.TLabel', foreground=muted, font=(family, 9))
+    style.configure('Error.TLabel', foreground=err)
+    style.configure('HintError.TLabel', foreground=err, font=(family, 9))
+    style.configure('Link.TLabel', foreground=ink, font=(family, 9, 'underline'))
+    for name, size, weight, colour in (('Card.TLabel', 10, 'normal', ink),
+                                       ('CardName.TLabel', 12, 'bold', ink),
+                                       ('CardMuted.TLabel', 9, 'normal', muted)):
+        style.configure(name, background=card, foreground=colour, font=(family, size, weight))
+    style.configure('TEntry', fieldbackground=card, bordercolor=line, lightcolor=card,
+                    darkcolor=card, insertcolor=ink, padding=(8, 6))
+    style.map('TEntry', bordercolor=[('focus', '#8e8e93')], lightcolor=[('focus', card)])
+    style.configure('TButton', background=card, foreground=ink, bordercolor=line,
+                    lightcolor=card, darkcolor=card, focuscolor=card, padding=(14, 6))
+    style.map('TButton', background=[('pressed', '#e4e4e1'), ('active', '#ededea')],
+              lightcolor=[('active', '#ededea')], darkcolor=[('active', '#ededea')])
+    style.configure('Primary.TButton', background=ink, foreground='#ffffff', bordercolor=ink,
+                    lightcolor=ink, darkcolor=ink, focuscolor=ink, padding=(20, 9),
+                    font=(family, 10, 'bold'))
+    style.map('Primary.TButton',
+              background=[('disabled', '#b0b0b4'), ('pressed', '#000000'), ('active', '#3a3a3c')],
+              lightcolor=[('disabled', '#b0b0b4'), ('active', '#3a3a3c')],
+              darkcolor=[('disabled', '#b0b0b4'), ('active', '#3a3a3c')],
+              bordercolor=[('disabled', '#b0b0b4')],
+              foreground=[('disabled', '#f5f5f3')])
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    nro_cache = {}
+
+    def nro_facts(path):
+        """(icon, version) of an .nro, read once per file and change; the
+        version is None when it cannot be read."""
+        try:
+            key = (path, os.path.getmtime(path))
+        except OSError:
+            return None, None
+        if key not in nro_cache:
+            try:
+                icon, nacp = nro_assets(path)
+                nro_cache[key] = (icon or None, nacp_version(nacp))
+            except (OSError, StandaloneError):
+                nro_cache[key] = (None, None)
+        return nro_cache[key]
+
+    # Next to the script (where "Download the latest" puts it), where the
+    # command runs, and the build of a FlashNX checkout: the newest version,
+    # then the newest file.
+    found = [os.path.normpath(c) for c in dict.fromkeys((
+        os.path.join(here, 'FlashNX.nro'), os.path.join(os.getcwd(), 'FlashNX.nro'),
+        os.path.join(here, os.pardir, 'cpp', 'FlashNX.nro'))) if os.path.isfile(c)]
+    default_nro = max(found, key=lambda p: (nro_facts(p)[1] or (0,), os.path.getmtime(p)),
+                      default='')
+
+    outer = ttk.Frame(root, padding=(px(28), px(24), px(28), px(22)))
+    outer.grid(sticky='nsew')
     root.columnconfigure(0, weight=1)
-    frame.columnconfigure(1, weight=1)
+    outer.columnconfigure(0, weight=1)
+    def flashnx_logo(height):
+        """The wordmark at `height` pixels: resampled with Pillow, or halved by
+        Tk itself (it reads PNG since 8.6) without it."""
+        import base64
+        try:
+            from PIL import Image, ImageTk
+            im = Image.open(io.BytesIO(base64.b64decode(LOGO_PNG)))
+            width = max(1, int(round(im.width * height / float(im.height))))
+            return ImageTk.PhotoImage(im.resize((width, height), Image.LANCZOS))
+        except ImportError:
+            img = tk.PhotoImage(data=LOGO_PNG)
+            return img.subsample(max(1, int(round(img.height() / float(height)))))
+        except Exception:
+            return None
 
-    here = os.path.dirname(os.path.abspath(sys.argv[0]))
-    default_nro = next((c for c in (os.path.join(here, 'FlashNX.nro'),
-                                    os.path.join(os.getcwd(), 'FlashNX.nro'))
-                        if os.path.isfile(c)), '')
+    header = ttk.Frame(outer)
+    header.grid(row=0, column=0, columnspan=2, sticky='w')
+    ttk.Label(header, text='Make a Switch app from a Flash game', style='Title.TLabel').pack(
+        anchor='w')
+    ttk.Label(outer, style='Muted.TLabel', wraplength=px(720), justify='left',
+              text='One .nro with FlashNX and the game inside. It shows in the Homebrew Menu '
+                   'and starts straight into the game, without FlashNX installed.').grid(
+        row=1, column=0, columnspan=2, sticky='w', pady=(px(4), px(20)))
+
+    form = ttk.Frame(outer)
+    form.grid(row=2, column=0, sticky='nsew')
+    form.columnconfigure(0, weight=1)
     fields = {}
+    heads = {}
+    hints = {}
+    form_row = [0]
 
-    def row(r, label, key, browse=None, value=''):
-        ttk.Label(frame, text=label).grid(row=r, column=0, sticky='w', pady=3)
+    def field(label, key, hint=None, browse=None, value='', parent=None, col=0, width=None,
+              note=None, limit=None):
+        host = parent or form
+        r = form_row[0] if parent is None else 0
+        head = ttk.Frame(host)
+        head.grid(row=r, column=col, sticky='w', pady=(0, px(4)), padx=(0 if col == 0 else px(12), 0))
+        ttk.Label(head, text=label, style='Field.TLabel').pack(side='left')
+        if hint:
+            hints[key] = ttk.Label(head, text='  ' + hint, style='Hint.TLabel')
+            hints[key].pack(side='left')
         var = tk.StringVar(value=value)
-        ttk.Entry(frame, textvariable=var, width=48).grid(row=r, column=1, sticky='ew', padx=6)
+        entry = ttk.Entry(host, textvariable=var, width=width or 10)
+        if limit:
+            # What the NACP has room for, in UTF-8 bytes: typing stops there
+            # rather than the name being cut when the app is written.
+            check = root.register(lambda text: len(text.encode('utf-8')) <= limit)
+            entry.configure(validate='key', validatecommand=(check, '%P'))
+        # Without a Browse button beside it, a field spans its column too.
+        entry.grid(row=r + 1, column=col, sticky='ew', padx=(0 if col == 0 else px(12), 0),
+                   columnspan=1 if (browse or parent is not None) else 2)
         if browse:
-            ttk.Button(frame, text='Browse...', command=browse).grid(row=r, column=2)
+            ttk.Button(host, text='Browse...', command=browse).grid(
+                row=r + 1, column=1, sticky='e', padx=(px(10), 0))
+            # A path is read by its end: show the file name, not C:\Users\...
+            var.trace_add('write', lambda *_: entry.after_idle(entry.xview_moveto, 1.0))
+        if parent is None:
+            form_row[0] += 2
+            if note:
+                # What a field accepts, under it: beside the label it would
+                # widen the whole window.
+                ttk.Label(form, text=note, style='Hint.TLabel').grid(
+                    row=form_row[0], column=0, columnspan=2, sticky='w', pady=(px(4), 0))
+                form_row[0] += 1
+            ttk.Frame(form, height=px(12)).grid(row=form_row[0], column=0)
+            form_row[0] += 1
+        undoable(var, entry)
         fields[key] = var
+        heads[key] = head
+        return var
 
-    def pick(key, title, types):
-        path = filedialog.askopenfilename(title=title, filetypes=types)
+    def undoable(var, entry):
+        """Ctrl+Z / Ctrl+Y in a field, which a Tk entry does not have. A run
+        of typing is one step; a value chosen or dropped is one too."""
+        done, undone = [var.get()], []
+        state = {'busy': False, 'typed_at': 0.0}
+
+        def changed(*_):
+            if state['busy']:
+                return
+            value, now = var.get(), time.monotonic()
+            if value == done[-1]:
+                return
+            typing = abs(len(value) - len(done[-1])) == 1
+            if typing and len(done) > 1 and now - state['typed_at'] < 1.0:
+                done[-1] = value
+            else:
+                done.append(value)
+            state['typed_at'] = now if typing else 0.0
+            undone.clear()
+
+        def put(value):
+            state['busy'] = True
+            var.set(value)
+            state['busy'] = False
+            entry.icursor('end')
+
+        def undo(_event=None):
+            if len(done) > 1:
+                undone.append(done.pop())
+                put(done[-1])
+            return 'break'
+
+        def redo(_event=None):
+            if undone:
+                done.append(undone.pop())
+                put(done[-1])
+            return 'break'
+
+        var.trace_add('write', changed)
+        for seq in ('<Control-z>', '<Control-Z>'):
+            entry.bind(seq, lambda e: redo() if e.state & 0x1 else undo())
+        for seq in ('<Control-y>', '<Control-Y>'):
+            entry.bind(seq, redo)
+
+    def pick_file(key, title, types):
+        start = os.path.dirname(fields[key].get()) if fields[key].get() else None
+        path = filedialog.askopenfilename(title=title, filetypes=types, initialdir=start)
         if path:
-            fields[key].set(path)
-            if key == 'swf' and not fields['name'].get():
-                fields['name'].set(os.path.basename(path)[:-4])
+            fields[key].set(os.path.normpath(path))
 
-    row(0, 'FlashNX.nro', 'nro', lambda: pick('nro', 'FlashNX.nro', [('Switch homebrew', '*.nro')]),
-        default_nro)
-    row(1, 'Game (.swf)', 'swf', lambda: pick('swf', 'The game', [('Flash game', '*.swf')]))
-    row(2, 'Picture (optional)', 'icon', lambda: pick(
-        'icon', 'Picture for the icon', [('Pictures', '*.jpg *.jpeg *.png *.webp *.bmp *.gif'),
-                                         ('All files', '*.*')]))
-    row(3, 'Name', 'name')
-    row(4, 'Author', 'author')
-    row(5, 'Version', 'version', value='1.0.0')
-    status = tk.StringVar(value='Companion files in a "<game>.files" folder next to the .swf go in too.')
-    ttk.Label(frame, textvariable=status, wraplength=460, justify='left').grid(
-        row=7, column=0, columnspan=3, sticky='w', pady=(10, 0))
+    def pick_folder():
+        path = filedialog.askdirectory(title='Folder of the game\'s companion files')
+        if path:
+            fields['files'].set(os.path.normpath(path))
+
+    field('FlashNX.nro', 'nro', 'as released, 1.9.0 or later',
+          lambda: pick_file('nro', 'FlashNX.nro', [('Switch homebrew', '*.nro')]), default_nro)
+    download_link = ttk.Label(heads['nro'], text='Download the latest', style='Link.TLabel',
+                              cursor='hand2')
+    download_link.pack(side='left', padx=(px(12), 0))
+    field('Game', 'swf', '.swf',
+          lambda: pick_file('swf', 'The game', [('Flash game', '*.swf')]))
+    field('Companion files', 'files', 'optional, found next to the game when it has some',
+          pick_folder)
+    try:
+        import PIL  # noqa: F401 (only whether it is there)
+        picture_note = 'JPG, PNG, WebP, BMP, GIF or a web address. Square, 256x256 or more, is best.'
+    except ImportError:
+        picture_note = 'A 256x256 JPEG (install Pillow for any picture: py -m pip install pillow).'
+    field('Picture', 'icon', 'optional, found next to the game when it has one', note=picture_note,
+          browse=
+          lambda: pick_file('icon', 'Picture for the icon',
+                            [('Pictures', '*.jpg *.jpeg *.png *.webp *.bmp *.gif'),
+                             ('All files', '*.*')]))
+    # The NACP's room, as Sphaira's forwarder editor limits them too.
+    field('Name', 'name', 'up to %d characters' % (NACP_NAME_CAP - 1), limit=NACP_NAME_CAP - 1)
+    pair = ttk.Frame(form)
+    pair.grid(row=form_row[0], column=0, columnspan=2, sticky='ew')
+    pair.columnconfigure(0, weight=3)
+    pair.columnconfigure(1, weight=1)
+    field('Author', 'author', 'up to %d' % (NACP_AUTHOR_CAP - 1), value='FlashNX', parent=pair,
+          col=0, limit=NACP_AUTHOR_CAP - 1)
+    field('Version', 'version', 'up to %d' % (NACP_VERSION_CAP - 1), value='1.0.0', parent=pair,
+          col=1, limit=NACP_VERSION_CAP - 1)
+
+    # The app as the Homebrew Menu will list it.
+    preview = tk.Frame(outer, bg=card, highlightthickness=1, highlightbackground=line,
+                       padx=px(18), pady=px(16))
+    preview.grid(row=2, column=1, sticky='n', padx=(px(28), 0))
+    logo = flashnx_logo(px(22))
+    if logo is not None:
+        tk.Label(preview, image=logo, bg=card, bd=0).pack(anchor='center', pady=(0, px(14)))
+        preview.logo = logo  # Tk keeps no reference of its own
+    ttk.Label(preview, text='In the Homebrew Menu', style='CardMuted.TLabel').pack(anchor='w')
+    # A label sized by an image counts pixels; with text alone it counts
+    # characters. A blank square image keeps it a square either way.
+    blank = tk.PhotoImage(width=icon_px, height=icon_px)
+    icon_box = tk.Label(preview, bg='#e9e9e6', image=blank, compound='center', bd=0,
+                        fg=muted, font=(family, 9))
+    icon_box.pack(pady=(px(10), px(12)))
+    shown_name = ttk.Label(preview, style='CardName.TLabel', wraplength=icon_px + px(24),
+                           justify='left')
+    shown_name.pack(anchor='w')
+    shown_author = ttk.Label(preview, style='CardMuted.TLabel', wraplength=icon_px + px(24),
+                             justify='left')
+    shown_author.pack(anchor='w', pady=(px(2), 0))
+    shown_version = ttk.Label(preview, style='CardMuted.TLabel')
+    shown_version.pack(anchor='w')
+
+    bar = ttk.Frame(outer)
+    bar.grid(row=3, column=0, columnspan=2, sticky='ew', pady=(px(22), 0))
+    bar.columnconfigure(0, weight=1)
+    status = ttk.Label(bar, style='Muted.TLabel', wraplength=px(560), justify='left')
+    status.grid(row=0, column=0, sticky='w', padx=(0, px(16)))
+    open_btn = ttk.Button(bar, text='Show in folder')
+    make_btn = ttk.Button(bar, text='Make the .nro', style='Primary.TButton')
+    make_btn.grid(row=0, column=2, sticky='e')
+
+    def say(text, error=False):
+        status.configure(text=text, style='Error.TLabel' if error else 'Muted.TLabel')
+
+    # `web`: a picture given by its address -> its downloaded copy, None while
+    # it downloads, or the reason it failed.
+    state = {'auto_name': '', 'auto_icon': '', 'icon_key': None, 'photo': None, 'web': {}}
+    pictures = queue.Queue()
+
+    def fetch_web(src):
+        try:
+            pictures.put((src, fetch_picture(src)[0]))
+        except StandaloneError as e:
+            pictures.put((src, e))
+
+    def poll_pictures():
+        try:
+            while True:
+                src, result = pictures.get_nowait()
+                state['web'][src] = result
+                if fields['icon'].get().strip() == src:
+                    state['icon_key'] = None
+                    refresh()
+                    if isinstance(result, StandaloneError):
+                        say(str(result), error=True)
+        except queue.Empty:
+            pass
+        root.after(150, poll_pictures)
+
+    def show_nro_version(nro):
+        """Beside the FlashNX.nro label: what is asked for, or the version of
+        the file chosen."""
+        if not nro:
+            text, style_name = '  as released, %s or later' % '.'.join(map(str, MIN_FLASHNX)), 'Hint.TLabel'
+        elif not os.path.isfile(nro):
+            text, style_name = '  no such file', 'HintError.TLabel'
+        else:
+            version = nro_facts(nro)[1]
+            if version is None:
+                text, style_name = '  not a FlashNX .nro', 'HintError.TLabel'
+            elif version < MIN_FLASHNX:
+                text, style_name = ('  version %s, too old: %s or later'
+                                    % ('.'.join(map(str, version)), '.'.join(map(str, MIN_FLASHNX))),
+                                    'HintError.TLabel')
+            else:
+                text, style_name = '  version %s' % '.'.join(map(str, version)), 'Hint.TLabel'
+        hints['nro'].configure(text=text, style=style_name)
+
+    def refresh(*_):
+        swf = fields['swf'].get().strip()
+        stem = os.path.basename(swf)[:-4] if swf.lower().endswith('.swf') else ''
+        # The name follows the game until it is typed over.
+        if stem and fields['name'].get() in ('', state['auto_name']):
+            state['auto_name'] = stem
+            fields['name'].set(stem)
+        name = fields['name'].get().strip() or stem or 'My game'
+        shown_name.configure(text=name)
+        shown_author.configure(text=fields['author'].get().strip() or 'FlashNX')
+        shown_version.configure(text='Version ' + (fields['version'].get().strip() or '1.0.0'))
+        icon, nro = fields['icon'].get().strip(), fields['nro'].get().strip()
+        show_nro_version(nro)
+        key = (icon, nro)
+        if key == state['icon_key']:
+            return
+        state['icon_key'] = key
+        try:
+            from PIL import Image, ImageTk
+        except ImportError:
+            icon_box.configure(image=blank, text='Install Pillow\nfor a preview')
+            return
+        if icon and is_web_picture(icon):
+            got = state['web'].get(icon, 'unasked')
+            if got == 'unasked':
+                state['web'][icon] = None
+                threading.Thread(target=fetch_web, args=(icon,), daemon=True).start()
+            if got in ('unasked', None):
+                state['icon_key'] = None  # look again once it is here
+                icon_box.configure(image=blank, text='Downloading\nthe picture...')
+                return
+            icon = got if isinstance(got, str) else ''
+        img = None
+        try:
+            if icon and os.path.isfile(icon):
+                img = cover_square(Image.open(icon))
+            elif nro and os.path.isfile(nro):
+                data = nro_facts(nro)[0]
+                img = Image.open(io.BytesIO(data)).convert('RGB') if data else None
+        except Exception:
+            img = None
+        if img is None:
+            state['photo'] = None
+            icon_box.configure(image=blank, text='')
+            return
+        state['photo'] = ImageTk.PhotoImage(img.resize((icon_px, icon_px), Image.LANCZOS))
+        icon_box.configure(image=state['photo'], text='')
+
+    def on_game(*_):
+        swf = fields['swf'].get().strip()
+        if swf.lower().endswith('.swf'):
+            folder, base = os.path.dirname(swf), os.path.basename(swf)
+            guess = os.path.join(folder, base[:-4] + '.files')
+            fields['files'].set(guess if os.path.isdir(guess) else '')
+            # The cover FlashNX itself would show for the game: named like it,
+            # beside it (covers.rs, `resolve`). Never over a picture chosen.
+            if fields['icon'].get().strip() in ('', state['auto_icon']):
+                cover = next((c for c in (os.path.join(folder, n + ext)
+                                          for n in (base[:-4], base)
+                                          for ext in ('.png', '.jpg', '.jpeg', '.webp'))
+                              if os.path.isfile(c)), '')
+                state['auto_icon'] = cover
+                fields['icon'].set(cover)
+        refresh()
+
+    for key, var in fields.items():
+        var.trace_add('write', on_game if key == 'swf' else refresh)
+    refresh()
+    poll_pictures()
+
+    results = queue.Queue()
+
+    def work(args):
+        try:
+            results.put(('ok', make_standalone(*args, log=lambda s: results.put(('note', s)))))
+        except StandaloneError as e:
+            results.put(('error', str(e)))
+        except Exception as e:  # a bug, said rather than swallowed
+            results.put(('error', 'Unexpected error: %r' % (e,)))
+
+    def poll(out_path, name):
+        try:
+            kind, value = results.get_nowait()
+        except queue.Empty:
+            root.after(100, poll, out_path, name)
+            return
+        if kind == 'note':
+            say(value)
+            root.after(100, poll, out_path, name)
+            return
+        make_btn.state(['!disabled'])
+        if kind == 'error':
+            say(value, error=True)
+            return
+        size = os.path.getsize(out_path) / 1e6
+        say('%s is ready (%.1f MB). Copy it to sdmc:/switch/%s/ on the SD card.'
+            % (os.path.basename(out_path), size, safe_file_name(name)))
+        folder = os.path.dirname(os.path.abspath(out_path))
+        if sys.platform == 'win32':
+            open_btn.configure(command=lambda: os.startfile(folder))
+            open_btn.grid(row=0, column=1, sticky='e', padx=(0, px(10)))
 
     def create():
         nro, swf = fields['nro'].get().strip(), fields['swf'].get().strip()
         if not nro or not swf:
-            messagebox.showerror('Missing file', 'Choose FlashNX.nro and the game first.')
+            say('Choose FlashNX.nro and the game first.', error=True)
             return
         name = fields['name'].get().strip() or os.path.basename(swf)[:-4]
         out_path = filedialog.asksaveasfilename(
             title='Save the app as', defaultextension='.nro',
+            initialdir=os.path.dirname(swf) or None,
             initialfile=safe_file_name(name) + '.nro', filetypes=[('Switch homebrew', '*.nro')])
         if not out_path:
             return
-        status.set('Writing...')
-        root.update_idletasks()
-        try:
-            entries = make_standalone(nro, swf, out_path, name, fields['author'].get().strip(),
-                                      fields['version'].get().strip(),
-                                      fields['icon'].get().strip() or None,
-                                      log=lambda s: status.set(s))
-        except StandaloneError as e:
-            status.set('')
-            messagebox.showerror('Could not make the app', str(e))
-            return
-        status.set(describe(out_path, entries, name))
+        open_btn.grid_remove()
+        make_btn.state(['disabled'])
+        say('Writing %s...' % os.path.basename(out_path))
+        icon = fields['icon'].get().strip()
+        # A picture from the web already downloaded for the preview is used as
+        # is, rather than fetched again.
+        if isinstance(state['web'].get(icon), str):
+            icon = state['web'][icon]
+        args = (nro, swf, out_path, name, fields['author'].get().strip(),
+                fields['version'].get().strip(), icon or None,
+                fields['files'].get().strip() or None)
+        threading.Thread(target=work, args=(args,), daemon=True).start()
+        root.after(100, poll, out_path, name)
 
-    ttk.Button(frame, text='Make the .nro', command=create).grid(
-        row=6, column=0, columnspan=3, pady=(12, 0))
+    make_btn.configure(command=create)
+
+    downloads = queue.Queue()
+    busy = {'download': False}
+
+    def fetch():
+        try:
+            downloads.put(('done', download_flashnx(
+                download_dir(), lambda done, total: downloads.put(('progress', (done, total))))))
+        except StandaloneError as e:
+            downloads.put(('error', str(e)))
+        except Exception as e:  # a bug, said rather than swallowed
+            downloads.put(('error', 'Unexpected error: %r' % (e,)))
+
+    def poll_download():
+        final = progress = None
+        while True:
+            try:
+                kind, value = downloads.get_nowait()
+            except queue.Empty:
+                break
+            if kind == 'progress':
+                progress = value
+            else:
+                final = (kind, value)
+        if final is None:
+            if progress:
+                done, total = progress
+                say('Downloading FlashNX.nro... %d %%' % (done * 100 // total) if total
+                    else 'Downloading FlashNX.nro... %.1f MB' % (done / 1e6))
+            root.after(100, poll_download)
+            return
+        busy['download'] = False
+        make_btn.state(['!disabled'])
+        kind, value = final
+        if kind == 'error':
+            say(value, error=True)
+            return
+        path, version = value
+        fields['nro'].set(path)
+        say('FlashNX %s is downloaded: %s' % (version, path))
+
+    def download(_event=None):
+        if busy['download']:
+            return
+        busy['download'] = True
+        make_btn.state(['disabled'])
+        say('Asking GitHub for the latest FlashNX...')
+        threading.Thread(target=fetch, daemon=True).start()
+        root.after(100, poll_download)
+
+    download_link.bind('<Button-1>', download)
+
+    picture_ext = ('.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif')
+
+    def take(item):
+        """Put one dropped thing in its field, by what it is."""
+        item = item.strip()
+        low = item.lower()
+        if is_web_picture(item):
+            fields['icon'].set(picture_source(item))
+        elif low.endswith('.swf'):
+            fields['swf'].set(os.path.normpath(item))
+        elif low.endswith('.nro'):
+            fields['nro'].set(os.path.normpath(item))
+        elif low.endswith(picture_ext):
+            fields['icon'].set(os.path.normpath(item))
+        elif os.path.isdir(item):
+            fields['files'].set(os.path.normpath(item))
+        else:
+            return False
+        return True
+
+    def accept(items):
+        taken = [take(i) for i in items]
+        if not any(taken):
+            say('Drop a .swf game, a picture (or one from a web page), a FlashNX.nro '
+                'or a folder of companion files.', error=True)
+
+    def on_drop(event):
+        accept(root.tk.splitlist(event.data))
+        return event.action
+
+    def walk(w):
+        yield w
+        for c in w.winfo_children():
+            yield from walk(c)
+
+    if can_drop:
+        for w in walk(root):
+            w.drop_target_register(DND_FILES, DND_TEXT)
+            w.dnd_bind('<<Drop:DND_Files>>', on_drop)
+            w.dnd_bind('<<Drop:DND_Text>>', on_drop)
+    else:
+        # Every Tk widget is a window of its own on Windows: all of them, and
+        # the frame around the window, take drops.
+        root.update_idletasks()
+        hwnds = [int(root.wm_frame(), 16)] + [w.winfo_id() for w in walk(root)]
+        root.dnd = windows_drop(hwnds, lambda items: root.after(0, accept, items))
+        can_drop = root.dnd is not None
+    if can_drop:
+        say('Drop the game, a picture or one from a web page anywhere here.\n'
+            'Your game stays on this computer.')
+    else:
+        say('Your game stays on this computer.')
+    root.update_idletasks()
+    w, h = root.winfo_reqwidth(), root.winfo_reqheight()
+    root.geometry('+%d+%d' % ((root.winfo_screenwidth() - w) // 2,
+                              max(0, (root.winfo_screenheight() - h) // 3)))
     root.mainloop()
     return 0
 

@@ -134,7 +134,32 @@ accents and spaces included), and it reads the result back the way libnx does
 before keeping it. A `<game>.files` folder next to the `.swf` goes in as the
 companions. Python's standard library is all it needs; Pillow lets the picture be
 any size or format, without it the picture must be a 256x256 JPEG. Run without
-arguments (or double-clicked), it opens a small window doing the same.
+arguments (or double-clicked), it opens a window doing the same, with the
+FlashNX logo and a preview of the app as the Homebrew Menu will list it. Given
+`latest` instead of a path (or "Download the latest" in the window), it first
+downloads the latest release's `FlashNX.nro` from GitHub, next to itself
+(`scripts/*.nro` is git-ignored), so a creator only needs the script. The
+picture can also be a web address (a Google Images result link points at the
+picture it shows, and its `data:` thumbnails work too), downloaded for the
+preview and the icon. On Windows the window takes drops anywhere, with nothing
+to install: a `.swf`, a picture, a `FlashNX.nro`, a companion folder, or a
+picture dragged straight from a web page. Tk has no drag and drop of its own,
+and the simple `WM_DROPFILES` only carries files that exist on disk, so the
+script registers an OLE `IDropTarget` through `ctypes` (`windows_drop`), the
+interface browsers drag with: Explorer's `CF_HDROP` gives the files, and for a
+picture from a page the `<img src>` of the HTML the browser hands over (the URL
+may be the link around it), else the URL itself. Elsewhere, drops work only if
+the `tkinterdnd2` package is installed; pasting the picture's address works
+everywhere. Its fields take Ctrl+Z and Ctrl+Y. Choosing the game fills its
+companion folder and its cover when they sit beside it, named as FlashNX looks
+for them (`<game>.files`, `<game>.png`/`.jpg`, or `<game>.swf.png`/`.jpg`), never
+over a picture already chosen. A Flashpoint GameZIP unpacked as is
+(`content.json` beside `content/`) works as a companion folder too: only what is
+under `content/` goes in, `<host>/<path>`, the way FlashNX lays it out. The name,
+author and version fields stop at what the NACP holds (511, 255 and 15 bytes of
+UTF-8). The version of the `FlashNX.nro` chosen shows
+beside its field, and by default the window takes the newest one it finds
+(next to the script, where it runs, then `cpp/FlashNX.nro` in a checkout).
 
 It names the file and its folder without spaces (`My_Game.nro` in
 `sdmc:/switch/My_Game/`): a HOME Menu forwarder made with Sphaira does not start

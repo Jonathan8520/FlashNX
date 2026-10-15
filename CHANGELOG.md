@@ -49,7 +49,7 @@ The whole interface is redrawn. Every screen uses the console's own fonts, at th
 
 ### Added
 
-- **Turn a Flash game into its own Switch app without building anything** (#106): `scripts/make_standalone.py` takes `FlashNX.nro` as released, the game's `.swf`, a picture and a name, and writes an `.nro` that shows in the Homebrew Menu with that picture and name and starts straight into the game, without FlashNX installed and without the game on the SD card. The picture is laid out like FlashNX's HOME Menu icons, a multi-file game's companions go in with it, and the app stays on the FlashNX version it was made from. It needs only Python; double-clicked, it opens a small window. See DEVELOPMENT.md.
+- **Turn a Flash game into its own Switch app without building anything** (#106): `scripts/make_standalone.py` takes `FlashNX.nro` as released, the game's `.swf`, a picture and a name, and writes an `.nro` that shows in the Homebrew Menu with that picture and name and starts straight into the game, without FlashNX installed and without the game on the SD card. The picture is laid out like FlashNX's HOME Menu icons, a multi-file game's companions go in with it, and the app stays on the FlashNX version it was made from. It needs only Python, can download the latest FlashNX.nro itself, and opens a window when double-clicked, with a preview of the app as the Homebrew Menu will show it. The picture can be a file or a web address, and on Windows the game, its files and a picture straight from a web page can be dragged onto the window. See DEVELOPMENT.md.
 
 ### Fixed
 

@@ -50,3 +50,7 @@ Cargo.lock
 
 # Python bytecode (scripts/*.py)
 __pycache__/
+
+# make_standalone.py downloads FlashNX.nro next to itself, and its output.
+/scripts/*.nro
+/scripts/*.nro.part
