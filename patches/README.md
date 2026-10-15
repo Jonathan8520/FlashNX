@@ -321,6 +321,31 @@ in the inner frame) and, with FlashNX's `avm1names.on` marker, the exclusive
 time of CallMethod by method name and GetMember by property name, which is
 what found this.
 
+**`display_object/movie_clip.rs`: an unloaded clip does not run its load
+event again (upstream #4024).**
+
+`transform_to_unloaded_state` swaps the clip's movie for an empty one through
+`replace_with_movie`, which resets the clip's flags, `INITIALIZED` with them,
+so the next frame dispatched `ClipEvent::Load` again: `onClipEvent(load)` and
+`onLoad` ran a second time after `unloadMovie()`, where Flash runs them once.
+A load handler that unloads its own clip then unloaded it every frame. Combat
+Tournament Legends (issue #123, 2026-10-15) places every fighter on the stage
+and has each one not picked do `this.unloadMovie()` in its load handler: 7
+clips unloaded per frame, each round leaving a new empty movie behind (and,
+for the fighters whose handler starts with `_root.attachMovie("SoundDistance",
+...)`, one more clip on `_root`), and a fight went from 60
+to 5 fps in about a minute and a half. `transform_to_unloaded_state` now puts
+the flag back when the clip had already run its load event. A real movie
+loaded into a clip still runs it: the loader replaces the movie on its own
+path, not this one. The fight now holds ~36 fps at 1785 MHz, with 7 unloads
+in all and ~12 live movies instead of thousands. Upstream #19434 (an
+unloaded clip's `onEnterFrame` keeps running) and #21683 (nothing can be
+attached to it) are not addressed.
+
+The measuring build also counts, on the `census:` line, the movies each
+`SwfMovie` constructor made since boot and the clips emptied since the last
+line, by path (`FLASHNX_EMPTIED`), which is what found this.
+
 **`core/src/avm1/activation.rs`, `display_object/container.rs` — AVM1
 profiling, behind the `flashnx_instr` feature.**
 

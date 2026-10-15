@@ -21,7 +21,7 @@ index ddc2ef98c..0e2ee1adf 100644
  
  [build-dependencies]
 diff --git a/core/common/src/tag_utils.rs b/core/common/src/tag_utils.rs
-index 371775c28..a7ad1dff1 100644
+index 371775c28..7beba9de2 100644
 --- a/core/common/src/tag_utils.rs
 +++ b/core/common/src/tag_utils.rs
 @@ -17,7 +17,7 @@ pub struct SwfMovie {
@@ -33,7 +33,7 @@ index 371775c28..a7ad1dff1 100644
  
      /// The URL the SWF was downloaded from.
      url: String,
-@@ -50,6 +50,129 @@ pub struct SwfMovie {
+@@ -50,9 +50,150 @@ pub struct SwfMovie {
      sandbox_type: SandboxType,
  }
  
@@ -139,6 +139,7 @@ index 371775c28..a7ad1dff1 100644
 +
 +impl Clone for MovieData {
 +    fn clone(&self) -> Self {
++        note_made(6);
 +        match &self.0 {
 +            MovieBytes::Owned(data) => Self::new(data.clone()),
 +            MovieBytes::Shared(data) => Self::shared(data.clone()),
@@ -160,10 +161,30 @@ index 371775c28..a7ad1dff1 100644
 +    (LIVE_MOVIES.load(Relaxed), LIVE_MOVIE_BYTES.load(Relaxed))
 +}
 +
++/// FlashNX: how many movies each constructor has made since boot, in the order
++/// empty, fake (length), fake (data), error, from_data, loaded image, copy. The
++/// census line prints them, so a count of live movies that keeps climbing says
++/// which path makes them.
++static MOVIES_MADE: [std::sync::atomic::AtomicU64; 7] =
++    [const { std::sync::atomic::AtomicU64::new(0) }; 7];
++
++fn note_made(kind: usize) {
++    MOVIES_MADE[kind].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++}
++
++/// FlashNX: the counts behind `MOVIES_MADE`.
++pub fn movies_made() -> [u64; 7] {
++    std::array::from_fn(|i| MOVIES_MADE[i].load(std::sync::atomic::Ordering::Relaxed))
++}
++
  impl SwfMovie {
      /// Construct an empty movie.
      pub fn empty(swf_version: u8, loader_url: Option<String>) -> Self {
-@@ -60,7 +183,7 @@ impl SwfMovie {
++        note_made(0);
+         let url = "file:///".to_string();
+         let header = HeaderExt::default_with_swf_version(swf_version);
+ 
+@@ -60,7 +201,7 @@ impl SwfMovie {
          let sandbox_type = SandboxType::infer(url.as_str(), &header);
          Self {
              header,
@@ -172,7 +193,15 @@ index 371775c28..a7ad1dff1 100644
              url,
              loader_url,
              parameters: Vec::new(),
-@@ -89,7 +212,7 @@ impl SwfMovie {
+@@ -81,6 +222,7 @@ impl SwfMovie {
+         loader_url: Option<String>,
+         compressed_len: usize,
+     ) -> Self {
++        note_made(1);
+         let url = "file:///".to_string();
+         let header = HeaderExt::default_with_swf_version(swf_version);
+ 
+@@ -89,7 +231,7 @@ impl SwfMovie {
          Self {
              header,
              compressed_len,
@@ -181,7 +210,15 @@ index 371775c28..a7ad1dff1 100644
              url,
              loader_url,
              parameters: Vec::new(),
-@@ -115,7 +238,7 @@ impl SwfMovie {
+@@ -107,6 +249,7 @@ impl SwfMovie {
+         loader_url: Option<String>,
+         compressed_data: Vec<u8>,
+     ) -> Self {
++        note_made(2);
+         let url = "file:///".to_string();
+         let header = HeaderExt::default_with_swf_version(swf_version);
+ 
+@@ -115,7 +258,7 @@ impl SwfMovie {
          Self {
              header,
              compressed_len: compressed_data.len(),
@@ -190,7 +227,14 @@ index 371775c28..a7ad1dff1 100644
              url,
              loader_url,
              parameters: Vec::new(),
-@@ -138,7 +261,7 @@ impl SwfMovie {
+@@ -132,13 +275,14 @@ impl SwfMovie {
+     /// This happens if no file could be loaded or if the loaded content is no valid
+     /// supported content.
+     pub fn error_movie(movie_url: String) -> Self {
++        note_made(3);
+         let header = HeaderExt::default_error_header();
+ 
+         // TODO What sandbox type should we use here?
          let sandbox_type = SandboxType::infer(movie_url.as_str(), &header);
          Self {
              header,
@@ -199,7 +243,14 @@ index 371775c28..a7ad1dff1 100644
              url: movie_url,
              loader_url: None,
              parameters: Vec::new(),
-@@ -162,7 +285,7 @@ impl SwfMovie {
+@@ -156,13 +300,14 @@ impl SwfMovie {
+         url: String,
+         loader_url: Option<String>,
+     ) -> Result<Self, swf::error::Error> {
++        note_made(4);
+         let compressed_len = swf_data.len();
+         let swf_buf = swf::read::decompress_swf(swf_data)?;
+         let encoding = swf::SwfStr::encoding_for_version(swf_buf.header.version());
          let sandbox_type = SandboxType::infer(url.as_str(), &swf_buf.header);
          let mut movie = Self {
              header: swf_buf.header,
@@ -208,7 +259,7 @@ index 371775c28..a7ad1dff1 100644
              url,
              loader_url,
              parameters: Vec::new(),
-@@ -176,6 +299,29 @@ impl SwfMovie {
+@@ -176,8 +321,32 @@ impl SwfMovie {
          Ok(movie)
      }
  
@@ -237,8 +288,11 @@ index 371775c28..a7ad1dff1 100644
 +
      /// Construct a movie based on a loaded image (JPEG, GIF or PNG).
      pub fn from_loaded_image(url: String, length: usize, width: u32, height: u32) -> Self {
++        note_made(5);
          let stage_size = Rectangle::ZERO
-@@ -185,7 +331,7 @@ impl SwfMovie {
+             .with_width(Twips::from_pixels_i32(width as i32))
+             .with_height(Twips::from_pixels_i32(height as i32));
+@@ -185,7 +354,7 @@ impl SwfMovie {
          let sandbox_type = SandboxType::infer(url.as_str(), &header);
          let mut movie = Self {
              header,
@@ -247,7 +301,7 @@ index 371775c28..a7ad1dff1 100644
              url,
              loader_url: None,
              parameters: Vec::new(),
-@@ -225,7 +371,7 @@ impl SwfMovie {
+@@ -225,7 +394,7 @@ impl SwfMovie {
      }
  
      pub fn data(&self) -> &[u8] {
@@ -256,7 +310,7 @@ index 371775c28..a7ad1dff1 100644
      }
  
      /// Returns the suggested string encoding for the given SWF version.
-@@ -319,7 +465,7 @@ impl Debug for SwfMovie {
+@@ -319,7 +488,7 @@ impl Debug for SwfMovie {
      fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
          f.debug_struct("SwfMovie")
              .field("header", &self.header)
@@ -7332,7 +7386,7 @@ index 0926945e0..844b86e46 100644
      /// A tracker for the current keyboard focused element
      pub focus_tracker: FocusTracker<'gc>,
 diff --git a/core/src/display_object.rs b/core/src/display_object.rs
-index 2e6e01783..7abb7ce29 100644
+index 2e6e01783..5688087a8 100644
 --- a/core/src/display_object.rs
 +++ b/core/src/display_object.rs
 @@ -32,6 +32,10 @@ mod avm1_button;
@@ -7346,7 +7400,7 @@ index 2e6e01783..7abb7ce29 100644
  mod edit_text;
  mod graphic;
  mod interactive;
-@@ -55,10 +59,13 @@ pub use bitmap::{Bitmap, BitmapClass};
+@@ -55,10 +59,15 @@ pub use bitmap::{Bitmap, BitmapClass};
  pub use edit_text::LayoutDebugBoxesFlag;
  pub use edit_text::{AutoSizeMode, EditText, TextSelection};
  pub use graphic::Graphic;
@@ -7357,10 +7411,12 @@ index 2e6e01783..7abb7ce29 100644
  pub use movie_clip::{MovieClip, MovieClipHandle, MovieClipWeak, Scene};
 +#[cfg(feature = "flashnx_instr")]
 +pub(crate) use movie_clip::FLASHNX_GOTO;
++#[cfg(feature = "flashnx_instr")]
++pub(crate) use movie_clip::flashnx_emptied_take;
  use ruffle_render::backend::{BitmapCacheEntry, RenderBackend};
  use ruffle_render::bitmap::{BitmapHandle, BitmapInfo, PixelSnapping};
  use ruffle_render::blend::ExtendedBlendMode;
-@@ -257,6 +264,10 @@ pub enum RenderMask<'gc> {
+@@ -257,6 +266,10 @@ pub enum RenderMask<'gc> {
  // Ensure this always has the same alignment as its subclasses (needed for `Gc` casts).
  #[repr(align(8))]
  pub struct DisplayObjectBase<'gc> {
@@ -7371,7 +7427,7 @@ index 2e6e01783..7abb7ce29 100644
      cell: RefCell<DisplayObjectBaseMut>,
      parent: Lock<Option<DisplayObject<'gc>>>,
      place_frame: Cell<u16>,
-@@ -332,6 +343,8 @@ struct DisplayObjectBaseMut {
+@@ -332,6 +345,8 @@ struct DisplayObjectBaseMut {
  impl Default for DisplayObjectBase<'_> {
      fn default() -> Self {
          Self {
@@ -7380,7 +7436,7 @@ index 2e6e01783..7abb7ce29 100644
              cell: RefCell::new(DisplayObjectBaseMut {
                  filters: Default::default(),
                  blend_shader: None,
-@@ -683,6 +696,24 @@ impl<'gc> DisplayObjectBase<'gc> {
+@@ -683,6 +698,24 @@ impl<'gc> DisplayObjectBase<'gc> {
          self.set_flag(DisplayObjectFlags::SKIP_NEXT_ENTER_FRAME, skip);
      }
  
@@ -7405,7 +7461,7 @@ index 2e6e01783..7abb7ce29 100644
      fn set_avm1_removed(&self, value: bool) {
          self.set_flag(DisplayObjectFlags::AVM1_REMOVED, value);
      }
-@@ -931,6 +962,221 @@ struct DrawCacheInfo {
+@@ -931,6 +964,221 @@ struct DrawCacheInfo {
      filters: Vec<Filter>,
  }
  
@@ -7627,7 +7683,7 @@ index 2e6e01783..7abb7ce29 100644
  pub fn render_base<'gc>(
      this: DisplayObject<'gc>,
      context: &mut RenderContext<'_, 'gc>,
-@@ -953,7 +1199,18 @@ pub fn render_base<'gc>(
+@@ -953,7 +1201,18 @@ pub fn render_base<'gc>(
          None
      };
  
@@ -7647,7 +7703,7 @@ index 2e6e01783..7abb7ce29 100644
          let mut cache_info: Option<DrawCacheInfo> = None;
          let base_transform = context.transform_stack.transform();
          let bounds: Rectangle<Twips> = this.render_bounds_with_transform(
-@@ -1873,6 +2130,11 @@ pub trait TDisplayObject<'gc>:
+@@ -1873,6 +2132,11 @@ pub trait TDisplayObject<'gc>:
          let write = Gc::write(context.gc(), self.base());
          DisplayObjectBase::set_parent_ignoring_orphan_list(write, parent);
          let parent_removed = had_parent && parent.is_none();
@@ -7659,7 +7715,7 @@ index 2e6e01783..7abb7ce29 100644
  
          if parent_removed {
              if let Some(int) = self.as_interactive() {
-@@ -2393,11 +2655,19 @@ pub trait TDisplayObject<'gc>:
+@@ -2393,11 +2657,19 @@ pub trait TDisplayObject<'gc>:
  
      /// Run any frame scripts (if they exist and this object needs to run them).
      fn run_frame_scripts(self, context: &mut UpdateContext<'gc>) {
@@ -7679,7 +7735,7 @@ index 2e6e01783..7abb7ce29 100644
      }
  
      /// Called before the child is about to be rendered.
-@@ -2585,6 +2855,18 @@ pub trait TDisplayObject<'gc>:
+@@ -2585,6 +2857,18 @@ pub trait TDisplayObject<'gc>:
      /// Tests if a given stage position point intersects with the world bounds of this object.
      #[no_dynamic]
      fn hit_test_bounds(self, point: Point<Twips>) -> bool {
@@ -7698,7 +7754,7 @@ index 2e6e01783..7abb7ce29 100644
          self.world_bounds(BoundsMode::Engine).contains(point)
      }
  
-@@ -2604,6 +2886,13 @@ pub trait TDisplayObject<'gc>:
+@@ -2604,6 +2888,13 @@ pub trait TDisplayObject<'gc>:
          point: Point<Twips>,
          options: HitTestOptions,
      ) -> bool {
@@ -7712,7 +7768,7 @@ index 2e6e01783..7abb7ce29 100644
          // Default to using bounding box.
          (!options.contains(HitTestOptions::SKIP_INVISIBLE) || self.visible())
              && self.hit_test_bounds(point)
-@@ -2995,6 +3284,20 @@ bitflags! {
+@@ -2995,6 +3286,20 @@ bitflags! {
          /// (they need to be instantiated "manually" by
          /// `Sprite.constructChildren`).
          const MANUAL_FRAME_CONSTRUCT  = 1 << 16;
@@ -7733,7 +7789,7 @@ index 2e6e01783..7abb7ce29 100644
      }
  }
  
-@@ -3232,3 +3535,25 @@ impl<'gc> DisplayObjectWeak<'gc> {
+@@ -3232,3 +3537,25 @@ impl<'gc> DisplayObjectWeak<'gc> {
          }
      }
  }
@@ -8034,7 +8090,7 @@ index c4f4a8880..a5d6b5763 100644
          gc_context: &Mutation<'gc>,
          tag: swf::DefineMorphShape,
 diff --git a/core/src/display_object/movie_clip.rs b/core/src/display_object/movie_clip.rs
-index baa4a03c5..6f83b1e49 100644
+index baa4a03c5..232de94da 100644
 --- a/core/src/display_object/movie_clip.rs
 +++ b/core/src/display_object/movie_clip.rs
 @@ -16,7 +16,7 @@ use crate::backend::audio::{AudioManager, SoundInstanceHandle};
@@ -8046,7 +8102,7 @@ index baa4a03c5..6f83b1e49 100644
  use crate::context::{ActionType, RenderContext, UpdateContext};
  use crate::display_object::container::{ChildContainer, dispatch_removed_event};
  use crate::display_object::interactive::{
-@@ -48,19 +48,40 @@ use ruffle_common::utils::HasPrefixField;
+@@ -48,19 +48,74 @@ use ruffle_common::utils::HasPrefixField;
  use ruffle_macros::istr;
  use ruffle_render::perspective_projection::PerspectiveProjection;
  use smallvec::SmallVec;
@@ -8076,6 +8132,40 @@ index baa4a03c5..6f83b1e49 100644
 +    FLASHNX_GOTO[i].fetch_add(n, std::sync::atomic::Ordering::Relaxed);
 +}
 +
++// FlashNX (instr builds): clips whose movie was swapped for an empty one
++// (unloaded, or emptied by a load), by path with digits folded to `#`, for the
++// census line. Combat Tournament Legends (#123) piled up thousands of empty
++// movies during a fight; this says on which clips.
++#[cfg(feature = "flashnx_instr")]
++thread_local! {
++    static FLASHNX_EMPTIED: std::cell::RefCell<std::collections::HashMap<String, u64>> =
++        Default::default();
++}
++
++#[cfg(feature = "flashnx_instr")]
++fn flashnx_note_emptied(clip: MovieClip<'_>, how: &str) {
++    let path: String = clip
++        .path()
++        .to_string()
++        .chars()
++        .map(|c| if c.is_ascii_digit() { '#' } else { c })
++        .collect();
++    FLASHNX_EMPTIED.with(|t| *t.borrow_mut().entry(format!("{how} {path}")).or_default() += 1);
++}
++
++/// FlashNX (instr builds): the clips emptied since the last call, most first.
++#[cfg(feature = "flashnx_instr")]
++pub fn flashnx_emptied_take() -> String {
++    FLASHNX_EMPTIED.with(|t| {
++        let mut t = t.borrow_mut();
++        let total: u64 = t.values().sum();
++        let mut top: Vec<(String, u64)> = t.drain().collect();
++        top.sort_by(|a, b| b.1.cmp(&a.1));
++        let shown: Vec<String> = top.iter().take(6).map(|(k, n)| format!("{k} x{n}")).collect();
++        format!("{total} [{}]", shown.join(", "))
++    })
++}
++
 +#[cfg(feature = "flashnx_instr")]
 +struct FlashnxGotoTimer(u64);
 +
@@ -8089,7 +8179,7 @@ index baa4a03c5..6f83b1e49 100644
  /// Indication of what frame `run_frame` should jump to next.
  #[derive(PartialEq, Eq)]
  enum NextFrame {
-@@ -140,6 +161,11 @@ impl fmt::Debug for MovieClip<'_> {
+@@ -140,6 +195,11 @@ impl fmt::Debug for MovieClip<'_> {
  pub struct MovieClipWeak<'gc>(GcWeak<'gc, MovieClipData<'gc>>);
  
  impl<'gc> MovieClipWeak<'gc> {
@@ -8101,7 +8191,7 @@ index baa4a03c5..6f83b1e49 100644
      pub fn upgrade(self, mc: &Mutation<'gc>) -> Option<MovieClip<'gc>> {
          self.0.upgrade(mc).map(MovieClip)
      }
-@@ -193,6 +219,16 @@ pub struct MovieClipData<'gc> {
+@@ -193,6 +253,16 @@ pub struct MovieClipData<'gc> {
      /// `None` in an AVM2 movie.
      next_avm1_clip: Lock<Option<MovieClip<'gc>>>,
  
@@ -8118,7 +8208,7 @@ index baa4a03c5..6f83b1e49 100644
      audio_stream: Cell<Option<SoundInstanceHandle>>,
  
      #[collect(require_static)]
-@@ -262,6 +298,9 @@ impl<'gc> MovieClipData<'gc> {
+@@ -262,6 +332,9 @@ impl<'gc> MovieClipData<'gc> {
              hit_area: Lock::new(None),
              attached_audio: Lock::new(None),
              next_avm1_clip: Lock::new(None),
@@ -8128,7 +8218,7 @@ index baa4a03c5..6f83b1e49 100644
          }
      }
  
-@@ -276,6 +315,11 @@ impl<'gc> MovieClip<'gc> {
+@@ -276,6 +349,11 @@ impl<'gc> MovieClip<'gc> {
          MovieClipWeak(Gc::downgrade(self.0))
      }
  
@@ -8140,15 +8230,19 @@ index baa4a03c5..6f83b1e49 100644
      pub fn new(movie: Arc<SwfMovie>, mc: &Mutation<'gc>) -> Self {
          let shared = MovieClipShared::empty(movie);
          MovieClip(Gc::new(mc, MovieClipData::new(shared, mc)))
-@@ -375,6 +419,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -375,6 +453,11 @@ impl<'gc> MovieClip<'gc> {
          is_root: bool,
          loader_info: Option<LoaderInfoObject<'gc>>,
      ) {
 +        crate::display_object::mark_lifecycle_dirty(self.into());
++        #[cfg(feature = "flashnx_instr")]
++        if movie.is_none() {
++            flashnx_note_emptied(self, "emptied");
++        }
          let write = Gc::write(context.gc(), self.0);
          let movie =
              movie.unwrap_or_else(|| Arc::new(SwfMovie::empty(write.movie().version(), None)));
-@@ -411,6 +456,30 @@ impl<'gc> MovieClip<'gc> {
+@@ -411,6 +494,30 @@ impl<'gc> MovieClip<'gc> {
          unlock!(Gc::write(mc, self.0), MovieClipData, next_avm1_clip).set(node);
      }
  
@@ -8179,7 +8273,7 @@ index baa4a03c5..6f83b1e49 100644
      pub fn call_on_construct_handler(self, context: &mut UpdateContext<'gc>) {
          let Some(object) = self.0.object1.get() else {
              return;
-@@ -558,7 +627,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -558,7 +665,7 @@ impl<'gc> MovieClip<'gc> {
                  TagCode::FrameLabel => shared.frame_label(reader),
                  TagCode::JpegTables => shared.jpeg_tables(context, reader),
                  TagCode::ShowFrame => shared.show_frame(reader, tag_len),
@@ -8188,7 +8282,7 @@ index baa4a03c5..6f83b1e49 100644
                  TagCode::SoundStreamHead => shared.sound_stream_head(reader, 1),
                  TagCode::SoundStreamHead2 => shared.sound_stream_head(reader, 2),
                  TagCode::VideoFrame => shared.preload_video_frame(context, reader),
-@@ -849,7 +918,9 @@ impl<'gc> MovieClip<'gc> {
+@@ -849,7 +956,9 @@ impl<'gc> MovieClip<'gc> {
      }
  
      pub fn play(self) {
@@ -8199,7 +8293,7 @@ index baa4a03c5..6f83b1e49 100644
      }
  
      pub fn prev_frame(self, context: &mut UpdateContext<'gc>) {
-@@ -913,6 +984,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -913,6 +1022,7 @@ impl<'gc> MovieClip<'gc> {
                  // the current frame, the goto is properly queued.
  
                  self.0.queued_goto_frame.set(Some(frame));
@@ -8207,7 +8301,7 @@ index baa4a03c5..6f83b1e49 100644
  
                  // If we have a frame script on that frame, add ourselves to the
                  // frame script cleanup queue so that that frame script is
-@@ -1144,6 +1216,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -1144,6 +1254,7 @@ impl<'gc> MovieClip<'gc> {
      /// This sets the current frame of this MovieClip to a given number.
      pub fn set_current_frame(self, current_frame: FrameNumber) {
          self.0.current_frame.set(current_frame);
@@ -8215,7 +8309,7 @@ index baa4a03c5..6f83b1e49 100644
      }
  
      /// The amount of frames loaded in this movieclip.
-@@ -1486,6 +1559,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -1486,6 +1597,7 @@ impl<'gc> MovieClip<'gc> {
              // in the meantime, it should absolutely run again.
              self.set_last_queued_script_frame(None);
          }
@@ -8223,7 +8317,7 @@ index baa4a03c5..6f83b1e49 100644
      }
  
      /// Instantiate a given child object on the timeline at a given depth.
-@@ -1626,6 +1700,13 @@ impl<'gc> MovieClip<'gc> {
+@@ -1626,6 +1738,13 @@ impl<'gc> MovieClip<'gc> {
      }
  
      fn run_goto(mut self, context: &mut UpdateContext<'gc>, frame: FrameNumber, is_implicit: bool) {
@@ -8237,7 +8331,7 @@ index baa4a03c5..6f83b1e49 100644
          if cfg!(feature = "timeline_debug") {
              tracing::debug!(
                  "[{}]: {} from frame {} to frame {}",
-@@ -1665,6 +1746,8 @@ impl<'gc> MovieClip<'gc> {
+@@ -1665,6 +1784,8 @@ impl<'gc> MovieClip<'gc> {
              // otherwise AS3 can observe byproducts of the rewinding process.
              self.0.tag_stream_pos.set(0);
              self.0.current_frame.set(0);
@@ -8246,7 +8340,7 @@ index baa4a03c5..6f83b1e49 100644
  
              true
          } else {
-@@ -1698,6 +1781,8 @@ impl<'gc> MovieClip<'gc> {
+@@ -1698,6 +1819,8 @@ impl<'gc> MovieClip<'gc> {
          let mut reader = data.read_from(frame_pos);
          while self.current_frame() < clamped_frame && !reader.get_ref().is_empty() {
              self.0.increment_current_frame();
@@ -8255,7 +8349,7 @@ index baa4a03c5..6f83b1e49 100644
              frame_pos = reader.get_ref().as_ptr() as u64 - tag_stream_start;
  
              let tag_callback = |reader: &mut _, tag_code, _tag_len| {
-@@ -1720,6 +1805,8 @@ impl<'gc> MovieClip<'gc> {
+@@ -1720,6 +1843,8 @@ impl<'gc> MovieClip<'gc> {
                  match action {
                      Action::Place(version) => {
                          index += 1;
@@ -8264,7 +8358,7 @@ index baa4a03c5..6f83b1e49 100644
                          self.0.goto_place_object(
                              reader,
                              version,
-@@ -1747,6 +1834,29 @@ impl<'gc> MovieClip<'gc> {
+@@ -1747,6 +1872,29 @@ impl<'gc> MovieClip<'gc> {
              }
          }
          let hit_target_frame = self.0.current_frame() == frame;
@@ -8294,7 +8388,7 @@ index baa4a03c5..6f83b1e49 100644
  
          if is_rewind {
              // Remove all display objects that were created after the
-@@ -1877,14 +1987,19 @@ impl<'gc> MovieClip<'gc> {
+@@ -1877,14 +2025,19 @@ impl<'gc> MovieClip<'gc> {
              .filter(|params| params.frame >= frame)
              .for_each(|goto| run_goto_command(self, context, goto));
  
@@ -8315,7 +8409,7 @@ index baa4a03c5..6f83b1e49 100644
          }
  
          self.assert_expected_tag_end(hit_target_frame);
-@@ -2149,6 +2264,7 @@ impl<'gc> MovieClip<'gc> {
+@@ -2149,6 +2302,7 @@ impl<'gc> MovieClip<'gc> {
          context: &mut UpdateContext<'gc>,
      ) {
          let current_frame = self.current_frame();
@@ -8323,7 +8417,37 @@ index baa4a03c5..6f83b1e49 100644
  
          let write = unlock!(Gc::write(context.gc(), self.0), MovieClipData, cell);
          let mut frame_scripts = RefMut::map(write.borrow_mut(), |r| &mut r.frame_scripts);
-@@ -2494,6 +2610,26 @@ impl<'gc> MovieClip<'gc> {
+@@ -2391,6 +2545,8 @@ impl<'gc> MovieClip<'gc> {
+     /// This happens if a MovieClip has been unloaded. The state is then changed one
+     /// frame after the command to unload the MovieClip has been read.
+     fn transform_to_unloaded_state(self, context: &mut UpdateContext<'gc>) {
++        #[cfg(feature = "flashnx_instr")]
++        flashnx_note_emptied(self, "unloaded");
+         let movie = if let Some(DisplayObject::MovieClip(parent_mc)) = self.parent() {
+             let parent_movie = parent_mc.movie();
+             let parent_version = parent_movie.version();
+@@ -2403,7 +2559,20 @@ impl<'gc> MovieClip<'gc> {
+             None
+         };
+ 
++        // FlashNX (ruffle#4024): `replace_with_movie` clears the flag that says
++        // the clip already ran its load event, so the next frame ran
++        // `onClipEvent(load)` / `onLoad` again; Flash runs it once. A handler
++        // that unloads its own clip (Combat Tournament Legends, #123: every
++        // fighter not picked does `this.unloadMovie()` in its load handler)
++        // then unloaded it again every frame, and each round left a new empty
++        // movie and whatever the handler attached behind: 7 per frame, 60 to
++        // 5 fps within a fight. Loading a real movie into the clip still runs
++        // its load event: that path does not come through here.
++        let was_initialized = self.0.initialized();
+         self.replace_with_movie(context, movie, self.is_root(), None);
++        if was_initialized {
++            self.0.set_initialized(true);
++        }
+     }
+ 
+     pub fn attach_audio(self, context: &mut UpdateContext<'gc>, netstream: Option<NetStream<'gc>>) {
+@@ -2494,6 +2663,26 @@ impl<'gc> MovieClip<'gc> {
          }
      }
  
@@ -8350,7 +8474,7 @@ index baa4a03c5..6f83b1e49 100644
      fn check_has_pending_script(self) {
          let has_pending_script = self.has_frame_script(self.0.current_frame.get());
          self.set_has_pending_script(has_pending_script);
-@@ -2519,8 +2655,14 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2519,8 +2708,14 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
  
      fn enter_frame(self, context: &mut UpdateContext<'gc>) {
          let skip_frame = self.base().should_skip_next_enter_frame();
@@ -8365,7 +8489,7 @@ index baa4a03c5..6f83b1e49 100644
              if skip_frame {
                  // If we're skipping our current frame, then we want to skip it for our children
                  // as well. This counts as the skipped frame for any children that already
-@@ -2535,10 +2677,12 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2535,10 +2730,12 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
                  child.base().set_skip_next_enter_frame(true);
              }
              child.enter_frame(context);
@@ -8378,7 +8502,7 @@ index baa4a03c5..6f83b1e49 100644
              return;
          }
  
-@@ -2554,6 +2698,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2554,6 +2751,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
              // after tags have executed.
              let data = self.0.shared.get().swf.clone();
              let place_actions = self.unqueue_filtered(|q| q.unqueue_add());
@@ -8386,7 +8510,7 @@ index baa4a03c5..6f83b1e49 100644
  
              for (_, tag) in place_actions {
                  let mut reader = data.read_from(tag.tag_start);
-@@ -2566,6 +2711,18 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2566,6 +2764,18 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
                      tracing::error!("Error running queued tag: {:?}, got {}", tag.tag_type, e);
                  }
              }
@@ -8405,7 +8529,7 @@ index baa4a03c5..6f83b1e49 100644
          }
      }
  
-@@ -2601,6 +2758,10 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2601,6 +2811,10 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
                      .0
                      .contains_flag(MovieClipFlags::RUNNING_CONSTRUCT_FRAME);
                  for child in self.iter_render_list() {
@@ -8416,7 +8540,7 @@ index baa4a03c5..6f83b1e49 100644
                      // Under some conditions, we won't run `construct_frame` on
                      // a not-yet-constructed child
                      if child.object2().is_none() {
-@@ -2635,11 +2796,20 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
+@@ -2635,11 +2849,20 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
      }
  
      fn run_frame_scripts(self, context: &mut UpdateContext<'gc>) {
@@ -8437,7 +8561,7 @@ index baa4a03c5..6f83b1e49 100644
      }
  
      fn render_self(self, context: &mut RenderContext<'_, 'gc>) {
-@@ -3019,6 +3189,24 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
+@@ -3019,6 +3242,24 @@ impl<'gc> TInteractiveObject<'gc> for MovieClip<'gc> {
                              result = None;
                          }
                      }
@@ -8462,7 +8586,7 @@ index baa4a03c5..6f83b1e49 100644
                  } else if result.is_none() {
                      if let Some(child) = child.as_interactive() {
                          result = if !child.as_displayobject().movie().is_action_script_3() {
-@@ -3437,14 +3625,15 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3437,14 +3678,15 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let define_bits_lossless = reader.read_define_bits_lossless(version)?;
          let bitmap = Gc::new(
              context.gc(),
@@ -8481,7 +8605,7 @@ index baa4a03c5..6f83b1e49 100644
          );
          self.library_mut(context)
              .register_character(define_bits_lossless.id, Character::Bitmap(bitmap));
-@@ -3562,13 +3751,17 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3562,13 +3804,17 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let library = self.library_mut(context);
          let (id, jpeg_data) = reader.read_define_bits()?;
          let jpeg_tables = library.jpeg_tables();
@@ -8503,7 +8627,7 @@ index baa4a03c5..6f83b1e49 100644
                  alpha: None,
                  width,
                  height,
-@@ -3589,7 +3782,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3589,7 +3835,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let bitmap = Character::Bitmap(Gc::new(
              context.gc(),
              BitmapCharacter::new(CompressedBitmap::Jpeg {
@@ -8513,7 +8637,7 @@ index baa4a03c5..6f83b1e49 100644
                  alpha: None,
                  width,
                  height,
-@@ -3612,8 +3806,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3612,8 +3859,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          let bitmap = Character::Bitmap(Gc::new(
              context.gc(),
              BitmapCharacter::new(CompressedBitmap::Jpeg {
@@ -8525,7 +8649,7 @@ index baa4a03c5..6f83b1e49 100644
                  width,
                  height,
              }),
-@@ -3842,7 +4037,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3842,7 +4090,8 @@ impl<'gc, 'a> MovieClipShared<'gc> {
          reader: &mut SwfStream<'a>,
      ) -> Result<(), Error> {
          let sound = reader.read_define_sound()?;
@@ -8535,7 +8659,7 @@ index baa4a03c5..6f83b1e49 100644
              self.library_mut(context)
                  .register_character(sound.id, Character::Sound(handle));
          } else {
-@@ -3968,11 +4164,35 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+@@ -3968,11 +4217,35 @@ impl<'gc, 'a> MovieClipShared<'gc> {
      }
  
      #[inline]
@@ -8980,10 +9104,10 @@ index 000000000..37c4b2b27
 +}
 diff --git a/core/src/flashnx_census.rs b/core/src/flashnx_census.rs
 new file mode 100644
-index 000000000..292909795
+index 000000000..61d84324a
 --- /dev/null
 +++ b/core/src/flashnx_census.rs
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,192 @@
 +//! FlashNX: census of live objects, for the `census:` heartbeat line.
 +//!
 +//! Super Smash Flash 2's GC heap grows by ~100 MB per Classic level (130 MB at
@@ -9145,7 +9269,7 @@ index 000000000..292909795
 +    let (snd_shared, snd_copied) = crate::backend::audio::sound_bytes_stats();
 +    let (released, dropped, kept) = crate::library::movie_free_stats();
 +    let mb = |b: u64| b / (1024 * 1024);
-+    format!(
++    let line = format!(
 +        "movies={} ({}MB) released={} dropped={} kept={} bitmapBytes shared={}MB copied={}MB soundBytes shared={}MB copied={}MB",
 +        movies,
 +        mb(movie_bytes),
@@ -9156,7 +9280,25 @@ index 000000000..292909795
 +        mb(copied),
 +        mb(snd_shared),
 +        mb(snd_copied),
-+    )
++    );
++    // Measuring builds: which constructor made the movies (since boot), and
++    // which clips were emptied (since the last line).
++    #[cfg(feature = "flashnx_instr")]
++    let line = {
++        let m = ruffle_common::tag_utils::movies_made();
++        format!(
++            "{line} | made: empty={} fakeLen={} fakeData={} error={} data={} image={} copy={} | emptied {}",
++            m[0],
++            m[1],
++            m[2],
++            m[3],
++            m[4],
++            m[5],
++            m[6],
++            crate::display_object::flashnx_emptied_take(),
++        )
++    };
++    line
 +}
 diff --git a/core/src/frame_lifecycle.rs b/core/src/frame_lifecycle.rs
 index 91bdb52df..51273a7c6 100644
