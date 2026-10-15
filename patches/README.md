@@ -264,6 +264,23 @@ asked: Dragon City loads some thirty files in a row there, and a pause asked
 meanwhile now opens between two of them. With no hook set, and with `run`,
 everything behaves as upstream.
 
+**`core/src/avm2/globals/array.rs`, `avm2/value.rs` — `sortOn` on one field,
+`join` of one element, number formatting.**
+
+Measured on 3D Mario Racing (2026-10-15, `as3prof`), a software 3D engine
+that sorts its ~1 500 triangles by depth every frame and whose obfuscated
+code writes `x - [y]`, which turns `[y]` into a number through `join`
+~4 500 times a frame. `sortOn` with a single field now reads each
+element's field once, on first use, instead of twice per comparison, which
+is what avmplus does (ArrayClass.cpp: "pre-get our field values so we can
+just do a regular sort"); the comparison is unchanged and a null element
+raises its error at the same comparison. `join` of zero or one element
+returns that element's string without the list, the joined copy and a
+second string. `Value::coerce_to_string` computes the rounded precision
+only in the exponent branch that uses it (two `powf` per number before).
+The race went from 83.5 to 75.4 ms of AS3 per frame (medians at 1785 MHz,
+two sessions); the Array, Number and Vector tests pass.
+
 **`core/src/avm1/activation.rs`, `display_object/container.rs` — AVM1
 profiling, behind the `flashnx_instr` feature.**
 
