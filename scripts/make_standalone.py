@@ -60,41 +60,30 @@ class StandaloneError(Exception):
 # The .nro: program part and asset section
 # ---------------------------------------------------------------------------
 
-def read_nro(path):
-    """The program part of an .nro, and its icon, NACP and RomFS (b'' if absent)."""
+def nro_layout(path):
+    """An .nro's parts, from its headers alone: the size of its program part,
+    its icon and NACP (b'' if absent), and where its RomFS lies in the file as
+    (offset, size), size 0 when it has none. The file is checked to hold every
+    part, so a cut download is caught. The RomFS stays on disk: it is the game,
+    and a game can run to gigabytes."""
+    name = os.path.basename(path)
     with open(path, 'rb') as f:
-        data = f.read()
-    if len(data) < 0x80 or data[0x10:0x14] != b'NRO0':
-        raise StandaloneError('%s is not an .nro file.' % os.path.basename(path))
-    size = struct.unpack_from('<I', data, 0x18)[0]
-    if size > len(data):
-        raise StandaloneError('%s is truncated.' % os.path.basename(path))
-    icon = nacp = romfs = b''
-    if len(data) >= size + ASSET_HEADER_SIZE and data[size:size + 4] == b'ASET':
-        icon_off, icon_len, nacp_off, nacp_len, romfs_off, romfs_len = struct.unpack_from(
-            '<6Q', data, size + 8)
-
-        def take(off, length):
-            return data[size + off:size + off + length] if length else b''
-
-        icon = take(icon_off, icon_len)
-        nacp = take(nacp_off, nacp_len)
-        romfs = take(romfs_off, romfs_len)
-    return data[:size], icon, nacp, romfs
-
-
-def nro_assets(path):
-    """The icon and NACP of an .nro, read without the rest of it."""
-    with open(path, 'rb') as f:
+        total = os.fstat(f.fileno()).st_size
         head = f.read(0x80)
         if len(head) < 0x80 or head[0x10:0x14] != b'NRO0':
-            raise StandaloneError('%s is not an .nro file.' % os.path.basename(path))
+            raise StandaloneError('%s is not an .nro file.' % name)
         size = struct.unpack_from('<I', head, 0x18)[0]
+        if size > total:
+            raise StandaloneError('%s is truncated.' % name)
         f.seek(size)
         aset = f.read(ASSET_HEADER_SIZE)
         if len(aset) < ASSET_HEADER_SIZE or aset[:4] != b'ASET':
-            return b'', b''
-        icon_off, icon_len, nacp_off, nacp_len, _, _ = struct.unpack_from('<6Q', aset, 8)
+            return size, b'', b'', (0, 0)
+        icon_off, icon_len, nacp_off, nacp_len, romfs_off, romfs_len = struct.unpack_from(
+            '<6Q', aset, 8)
+        for off, length in ((icon_off, icon_len), (nacp_off, nacp_len), (romfs_off, romfs_len)):
+            if length and size + off + length > total:
+                raise StandaloneError('%s is truncated.' % name)
 
         def take(off, length):
             if not length:
@@ -102,7 +91,20 @@ def nro_assets(path):
             f.seek(size + off)
             return f.read(length)
 
-        return take(icon_off, icon_len), take(nacp_off, nacp_len)
+        romfs = (size + romfs_off, romfs_len) if romfs_len else (0, 0)
+        return size, take(icon_off, icon_len), take(nacp_off, nacp_len), romfs
+
+
+def nro_assets(path):
+    """The icon and NACP of an .nro, read without the rest of it."""
+    return nro_layout(path)[1:3]
+
+
+def read_program(path, size):
+    """The first `size` bytes of an .nro: its program part, which every app
+    made from it carries unchanged."""
+    with open(path, 'rb') as f:
+        return f.read(size)
 
 
 def nacp_version(nacp):
@@ -350,6 +352,49 @@ def hash_table_count(n):
     return count
 
 
+class Slice(object):
+    """`size` bytes of the file `path` from `offset`: a file inside an app made
+    earlier, copied out of it by `update_app` without being read into memory."""
+
+    __slots__ = ('path', 'offset', 'size')
+
+    def __init__(self, path, offset, size):
+        self.path = path
+        self.offset = offset
+        self.size = size
+
+
+# What a RomFS file can come from: bytes, the path of a file, or a `Slice`.
+
+def source_size(src):
+    if isinstance(src, bytes):
+        return len(src)
+    if isinstance(src, Slice):
+        return src.size
+    return os.path.getsize(src)
+
+
+def source_chunks(src):
+    """A RomFS source's bytes, `COPY_CHUNK` at a time, so that no file, however
+    big, is ever held whole."""
+    if isinstance(src, bytes):
+        yield src
+        return
+    if isinstance(src, Slice):
+        path, offset, left = src.path, src.offset, src.size
+    else:
+        path, offset, left = src, 0, None
+    with open(path, 'rb') as f:
+        f.seek(offset)
+        while left is None or left > 0:
+            chunk = f.read(COPY_CHUNK if left is None else min(COPY_CHUNK, left))
+            if not chunk:
+                return
+            if left is not None:
+                left -= len(chunk)
+            yield chunk
+
+
 class _Dir(object):
     def __init__(self, name, path, parent):
         self.name = name        # bytes, b'' for the root
@@ -386,8 +431,7 @@ class RomfsPlan(object):
                     d.dirs[part] = _Dir(part, d.path + b'/' + part, d)
                 d = d.dirs[part]
             name = parts[-1]
-            size = len(src) if isinstance(src, bytes) else os.path.getsize(src)
-            d.files[name] = _File(name, d.path + b'/' + name, d, src, size)
+            d.files[name] = _File(name, d.path + b'/' + name, d, src, source_size(src))
 
         dirs = []
         files = []
@@ -487,25 +531,22 @@ def pad_to(out, position):
     out.write(b'\0' * gap)
 
 
-def write_romfs(out, plan):
+def write_romfs(out, plan, advance=None):
+    """`advance(n)`, if given, hears of each `n` bytes of file data written."""
     start = out.tell()
     out.write(plan.header())
     pad_to(out, start + ROMFS_FILE_PARTITION_OFS)
     for f in plan.files:
         pad_to(out, start + ROMFS_FILE_PARTITION_OFS + f.data_offset)
-        if isinstance(f.src, bytes):
-            out.write(f.src)
-            continue
         copied = 0
-        with open(f.src, 'rb') as src:
-            while True:
-                chunk = src.read(COPY_CHUNK)
-                if not chunk:
-                    break
-                out.write(chunk)
-                copied += len(chunk)
+        for chunk in source_chunks(f.src):
+            out.write(chunk)
+            copied += len(chunk)
+            if advance:
+                advance(len(chunk))
         if copied != f.size:
-            raise StandaloneError('%s changed while it was being copied.' % f.src)
+            raise StandaloneError('%s changed while it was being copied.'
+                                  % (f.src if isinstance(f.src, str) else f.path.decode('utf-8')))
     pad_to(out, start + plan.dir_hash_ofs)
     for table in plan.tables():
         out.write(table)
@@ -517,108 +558,153 @@ def write_romfs(out, plan):
 # Reading the result back the way libnx does
 # ---------------------------------------------------------------------------
 
-def verify_nro(path, entries):
-    """Open the written .nro as the console will: find each file through the
-    RomFS hash tables (libnx's lookup) and through the directory links
-    (`readdir`, how FlashNX finds its game), and compare it with its source."""
-    prefix, _icon, _nacp, romfs = read_nro(path)
-    del prefix
-    hdr = struct.unpack_from('<10Q', romfs, 0)
-    (_, dh_ofs, dh_size, dt_ofs, _dt_size, fh_ofs, fh_size, ft_ofs, _ft_size, part_ofs) = hdr
-    dh_count = dh_size // 4
-    fh_count = fh_size // 4
+class RomfsReader(object):
+    """A RomFS image inside an open file, read as libnx reads one: its header
+    and its four tables in memory (they hold names and offsets, a few hundred
+    KB for thousands of files), its files left where they are on disk."""
 
-    def dir_entry(off):
-        parent, sibling, child, first_file, nxt, nlen = struct.unpack_from('<6I', romfs, dt_ofs + off)
-        name = romfs[dt_ofs + off + 0x18:dt_ofs + off + 0x18 + nlen]
-        return parent, sibling, child, first_file, nxt, name
+    def __init__(self, f, base):
+        self.f = f
+        self.base = base
+        hdr = self._read(0, ROMFS_HEADER_SIZE)
+        (_, dh_ofs, dh_size, dt_ofs, dt_size, fh_ofs, fh_size, ft_ofs, ft_size,
+         part_ofs) = struct.unpack('<10Q', hdr)
+        self.dir_hash = self._read(dh_ofs, dh_size)
+        self.dir_table = self._read(dt_ofs, dt_size)
+        self.file_hash = self._read(fh_ofs, fh_size)
+        self.file_table = self._read(ft_ofs, ft_size)
+        self.dh_count = dh_size // 4
+        self.fh_count = fh_size // 4
+        self.part = base + part_ofs
 
-    def file_entry(off):
-        parent, sibling, data_off, size, nxt, nlen = struct.unpack_from('<IIQQII', romfs, ft_ofs + off)
-        name = romfs[ft_ofs + off + 0x20:ft_ofs + off + 0x20 + nlen]
-        return parent, sibling, data_off, size, nxt, name
+    def _read(self, off, size):
+        self.f.seek(self.base + off)
+        data = self.f.read(size)
+        if len(data) != size:
+            raise StandaloneError('The RomFS is damaged: it ends early.')
+        return data
 
-    def lookup_dir(parent, name):
-        off = struct.unpack_from('<I', romfs, dh_ofs + 4 * (path_hash(parent, name) % dh_count))[0]
-        while off != ROMFS_EMPTY:
-            p, _s, _c, _f, nxt, n = dir_entry(off)
+    def dir_entry(self, off):
+        parent, sibling, child, first_file, nxt, nlen = struct.unpack_from('<6I', self.dir_table, off)
+        return parent, sibling, child, first_file, nxt, self.dir_table[off + 0x18:off + 0x18 + nlen]
+
+    def file_entry(self, off):
+        parent, sibling, data_off, size, nxt, nlen = struct.unpack_from('<IIQQII', self.file_table, off)
+        return parent, sibling, data_off, size, nxt, self.file_table[off + 0x20:off + 0x20 + nlen]
+
+    def lookup_dir(self, parent, name):
+        """libnx's lookup: the hash bucket, then its chain."""
+        if not self.dh_count:
+            return None
+        bucket = path_hash(parent, name) % self.dh_count
+        off = struct.unpack_from('<I', self.dir_hash, 4 * bucket)[0]
+        seen = set()
+        while off != ROMFS_EMPTY and off not in seen:
+            seen.add(off)
+            p, _s, _c, _f, nxt, n = self.dir_entry(off)
             if p == parent and n == name:
                 return off
             off = nxt
         return None
 
-    def lookup_file(parent, name):
-        off = struct.unpack_from('<I', romfs, fh_ofs + 4 * (path_hash(parent, name) % fh_count))[0]
-        while off != ROMFS_EMPTY:
-            p, _s, data_off, size, nxt, n = file_entry(off)
+    def lookup_file(self, parent, name):
+        """(offset in the file, size) of a file, found as libnx finds it."""
+        if not self.fh_count:
+            return None
+        bucket = path_hash(parent, name) % self.fh_count
+        off = struct.unpack_from('<I', self.file_hash, 4 * bucket)[0]
+        seen = set()
+        while off != ROMFS_EMPTY and off not in seen:
+            seen.add(off)
+            p, _s, data_off, size, nxt, n = self.file_entry(off)
             if p == parent and n == name:
-                return data_off, size
+                return self.part + data_off, size
             off = nxt
         return None
 
-    if lookup_dir(0, b'') != 0:
-        raise AssertionError('RomFS root not found')
-    for rel, src in entries:
-        parts = [p.encode('utf-8') for p in rel.split('/') if p]
-        parent = 0
-        for part in parts[:-1]:
-            parent = lookup_dir(parent, part)
-            if parent is None:
-                raise AssertionError('folder of %s not found in the RomFS' % rel)
-        found = lookup_file(parent, parts[-1])
-        if found is None:
-            raise AssertionError('%s not found in the RomFS' % rel)
-        data_off, size = found
-        if isinstance(src, bytes):
-            data = src
-        else:
-            with open(src, 'rb') as f:
-                data = f.read()
-        if data != romfs[part_ofs + data_off:part_ofs + data_off + size]:
-            raise AssertionError('%s differs from its source' % rel)
+    def files(self):
+        """Every file as (path, offset in the file, size), through the
+        directory links: `readdir`, which is how FlashNX finds its game."""
+        out = []
+        seen = set()
 
-    listed = set()
+        def walk(off, prefix):
+            if off in seen:
+                raise StandaloneError('The RomFS is damaged: a folder lists itself.')
+            seen.add(off)
+            _p, _s, child, f, _n, _name = self.dir_entry(off)
+            files_seen = set()
+            while f != ROMFS_EMPTY and f not in files_seen:
+                files_seen.add(f)
+                _fp, sibling, data_off, size, _nx, n = self.file_entry(f)
+                out.append((prefix + n.decode('utf-8'), self.part + data_off, size))
+                f = sibling
+            while child != ROMFS_EMPTY:
+                _cp, sibling, _cc, _cf, _nx, n = self.dir_entry(child)
+                walk(child, prefix + n.decode('utf-8') + '/')
+                child = sibling
 
-    def walk(off, prefix):
-        _p, _s, child, first_file, _n, _name = dir_entry(off)
-        f = first_file
-        while f != ROMFS_EMPTY:
-            _fp, sibling, _d, _sz, _nx, n = file_entry(f)
-            listed.add(prefix + n.decode('utf-8'))
-            f = sibling
-        c = child
-        while c != ROMFS_EMPTY:
-            _cp, sibling, _cc, _cf, _nx, n = dir_entry(c)
-            walk(c, prefix + n.decode('utf-8') + '/')
-            c = sibling
+        try:
+            walk(0, '')
+        except (struct.error, UnicodeDecodeError):
+            raise StandaloneError('The RomFS is damaged.')
+        return out
 
-    walk(0, '')
+
+def same_bytes(f, offset, size, src, advance=None):
+    """Whether `size` bytes of `f` at `offset` are the source `src`, compared
+    a chunk at a time."""
+    if source_size(src) != size:
+        return False
+    f.seek(offset)
+    chunks = source_chunks(src)
+    try:
+        for chunk in chunks:
+            if f.read(len(chunk)) != chunk:
+                return False
+            if advance:
+                advance(len(chunk))
+    finally:
+        chunks.close()
+    return True
+
+
+def verify_nro(path, entries, advance=None):
+    """Open the written .nro as the console will: find each file through the
+    RomFS hash tables (libnx's lookup) and through the directory links
+    (`readdir`, how FlashNX finds its game), and compare it with its source.
+    Read a chunk at a time, as it was written: a game of several GB is never
+    held in memory."""
+    _size, _icon, _nacp, (romfs_off, romfs_size) = nro_layout(path)
+    if not romfs_size:
+        raise AssertionError('no RomFS written')
+    with open(path, 'rb') as f:
+        rd = RomfsReader(f, romfs_off)
+        if rd.lookup_dir(0, b'') != 0:
+            raise AssertionError('RomFS root not found')
+        for rel, src in entries:
+            parts = [p.encode('utf-8') for p in rel.split('/') if p]
+            parent = 0
+            for part in parts[:-1]:
+                parent = rd.lookup_dir(parent, part)
+                if parent is None:
+                    raise AssertionError('folder of %s not found in the RomFS' % rel)
+            found = rd.lookup_file(parent, parts[-1])
+            if found is None:
+                raise AssertionError('%s not found in the RomFS' % rel)
+            if not same_bytes(f, found[0], found[1], src, advance):
+                raise AssertionError('%s differs from its source' % rel)
+        listed = set(rel for rel, _off, _size in rd.files())
     if listed != set(rel for rel, _src in entries):
         raise AssertionError('the RomFS lists %s' % sorted(listed))
 
 
-def romfs_files(romfs):
-    """Every file of a RomFS image, as (path, bytes), through its directory
-    links: what an app made earlier carries, to write it again."""
-    hdr = struct.unpack_from('<10Q', romfs, 0)
-    dt_ofs, ft_ofs, part_ofs = hdr[3], hdr[7], hdr[9]
-    files = []
-
-    def walk(off, prefix):
-        _p, _s, child, f, _n, _l = struct.unpack_from('<6I', romfs, dt_ofs + off)
-        while f != ROMFS_EMPTY:
-            _fp, sibling, data_off, size, _nx, nlen = struct.unpack_from('<IIQQII', romfs, ft_ofs + f)
-            name = romfs[ft_ofs + f + 0x20:ft_ofs + f + 0x20 + nlen].decode('utf-8')
-            files.append((prefix + name, bytes(romfs[part_ofs + data_off:part_ofs + data_off + size])))
-            f = sibling
-        while child != ROMFS_EMPTY:
-            _cp, sibling, _cc, _cf, _nx, nlen = struct.unpack_from('<6I', romfs, dt_ofs + child)
-            name = romfs[dt_ofs + child + 0x18:dt_ofs + child + 0x18 + nlen].decode('utf-8')
-            walk(child, prefix + name + '/')
-            child = sibling
-
-    walk(0, '')
-    return files
+def romfs_files(path, romfs_off):
+    """Every file of the RomFS at `romfs_off` in the file `path`, as (path in
+    the RomFS, offset in the file, size): what an app made earlier carries, to
+    write it again without reading it into memory."""
+    with open(path, 'rb') as f:
+        return RomfsReader(f, romfs_off).files()
 
 
 # ---------------------------------------------------------------------------
@@ -680,9 +766,9 @@ def version_text(version):
 
 
 def flashnx_program(nro):
-    """The program part and NACP of a FlashNX.nro fit to carry a game, and
-    its version."""
-    prefix, base_icon, base_nacp, base_romfs = read_nro(nro)
+    """The program part, icon and NACP of a FlashNX.nro fit to carry a game,
+    whether it already carries one, and its version."""
+    size, base_icon, base_nacp, (_romfs_off, romfs_size) = nro_layout(nro)
     found = nacp_version(base_nacp)
     if found is not None and found < MIN_FLASHNX:
         raise StandaloneError(
@@ -691,7 +777,7 @@ def flashnx_program(nro):
     if not base_nacp:
         raise StandaloneError('%s carries no NACP: use FlashNX.nro as released.'
                               % os.path.basename(nro))
-    return prefix, base_icon, base_nacp, base_romfs, found
+    return read_program(nro, size), base_icon, base_nacp, romfs_size > 0, found
 
 
 def marker(version):
@@ -699,15 +785,46 @@ def marker(version):
     return (MARKER, json.dumps({'flashnx': version_text(version)}).encode('utf-8'))
 
 
-def write_app(out_path, prefix, icon_data, nacp, entries):
+# The largest file FAT32 holds: 4 GiB less one byte. The homebrew guides
+# recommend FAT32 for the Switch's card (exFAT corrupts more easily when an
+# app is left with HOME); the console reads a bigger .nro from exFAT, since
+# libnx reads a RomFS with 64-bit offsets.
+FAT32_MAX_FILE = 0xFFFFFFFF
+
+
+def fat32_note(size):
+    """What to tell about an app of `size` bytes, or None when FAT32 holds it."""
+    if size <= FAT32_MAX_FILE:
+        return None
+    return ('note: this app is %.1f GB. A card formatted FAT32, the usual one for '
+            'homebrew, cannot hold a file over 4 GB: it needs a card formatted exFAT.'
+            % (size / 1e9))
+
+
+def write_app(out_path, prefix, icon_data, nacp, entries, log=print, progress=None):
     """Program part, then an asset section with the icon, the NACP and a
-    RomFS of `entries`; written beside `out_path`, read back, then put there."""
+    RomFS of `entries`; written beside `out_path`, read back, then put there.
+    `progress(done, total)` follows both passes over the game's bytes: a
+    game of several GB takes minutes, and a window that only said
+    "Writing..." all that time looked stuck."""
     plan = RomfsPlan(entries)
     icon_off = ASSET_HEADER_SIZE
     nacp_off = icon_off + len(icon_data)
     romfs_off = nacp_off + len(nacp)
     asset_header = b'ASET' + struct.pack(
         '<I6Q', 0, icon_off, len(icon_data), nacp_off, len(nacp), romfs_off, plan.size)
+    # Said before the copy, which for a game this big takes a while.
+    note = fat32_note(len(prefix) + romfs_off + plan.size)
+    if note:
+        log(note)
+    total = 2 * sum(f.size for f in plan.files)
+    done = [0]
+
+    def advance(n):
+        done[0] += n
+        if progress:
+            progress(done[0], total)
+
     out_dir = os.path.dirname(os.path.abspath(out_path))
     fd, tmp = tempfile.mkstemp(suffix='.nro.part', dir=out_dir)
     try:
@@ -716,8 +833,8 @@ def write_app(out_path, prefix, icon_data, nacp, entries):
             out.write(asset_header)
             out.write(icon_data)
             out.write(nacp)
-            write_romfs(out, plan)
-        verify_nro(tmp, entries)
+            write_romfs(out, plan, advance)
+        verify_nro(tmp, entries, advance)
         os.replace(tmp, out_path)
     except BaseException:
         if os.path.exists(tmp):
@@ -727,22 +844,29 @@ def write_app(out_path, prefix, icon_data, nacp, entries):
 
 def app_info(path):
     """What an app made from FlashNX carries: its name, author and version,
-    the FlashNX it was made from (None when unknown), and its files."""
+    the FlashNX it was made from (None when unknown), and its files, as parts
+    of `path` (`Slice`) rather than read into memory."""
     import json
-    _prefix, icon, nacp, romfs = read_nro(path)
-    if not romfs:
+    _size, icon, nacp, (romfs_off, romfs_size) = nro_layout(path)
+    if not romfs_size:
         raise StandaloneError('%s carries no game: it is not an app made from FlashNX.'
                               % os.path.basename(path))
-    files = romfs_files(romfs)
-    if not any('/' not in rel and rel.lower().endswith('.swf') for rel, _data in files):
+    try:
+        files = romfs_files(path, romfs_off)
+    except StandaloneError as e:
+        raise StandaloneError('%s: %s' % (os.path.basename(path), e))
+    if not any('/' not in rel and rel.lower().endswith('.swf') for rel, _off, _size in files):
         raise StandaloneError('%s carries no .swf: it is not an app made from FlashNX.'
                               % os.path.basename(path))
     made_from = None
-    for rel, data in files:
-        if rel == MARKER:
+    for rel, off, size in files:
+        if rel == MARKER and size <= 4096:
+            with open(path, 'rb') as f:
+                f.seek(off)
+                data = f.read(size)
             try:
                 made_from = json.loads(data.decode('utf-8')).get('flashnx')
-            except ValueError:
+            except (ValueError, AttributeError):
                 pass
     return {
         'name': nacp[0:NACP_NAME_CAP].split(b'\0')[0].decode('utf-8', 'replace'),
@@ -751,16 +875,18 @@ def app_info(path):
         'flashnx': made_from,
         'icon': icon,
         'nacp': nacp,
-        'files': [(rel, data) for rel, data in files if rel != MARKER],
+        'files': [(rel, Slice(path, off, size)) for rel, off, size in files if rel != MARKER],
     }
 
 
-def update_app(app, nro, out_path):
+def update_app(app, nro, out_path, log=print, progress=None):
     """The app `app` with the FlashNX of `nro`: its game, files, icon, name,
     author and version kept as they are, the program part replaced. Saves and
     settings live on the SD card under the game's name, so they carry over.
-    Returns (name, FlashNX it had, FlashNX it has now)."""
-    prefix, _icon, _nacp, _romfs, found = flashnx_program(nro)
+    The game's files are copied out of the old app a chunk at a time, so
+    `out_path` may be `app` itself: it is replaced only once the new one has
+    been read back. Returns (name, FlashNX it had, FlashNX it has now)."""
+    prefix, _icon, _nacp, _carried, found = flashnx_program(nro)
     info = app_info(app)
     try:
         had = tuple(int(p) for p in info['flashnx'].split('.'))
@@ -772,14 +898,15 @@ def update_app(app, nro, out_path):
     if had and found and had > found:
         raise StandaloneError('%s runs FlashNX %s, newer than this FlashNX.nro (%s).'
                               % (info['name'], version_text(had), version_text(found)))
-    write_app(out_path, prefix, info['icon'], info['nacp'], info['files'] + [marker(found)])
+    write_app(out_path, prefix, info['icon'], info['nacp'], info['files'] + [marker(found)],
+              log, progress)
     return info['name'], info['flashnx'], version_text(found)
 
 
 def make_standalone(nro, swf, out_path, name=None, author=None, version=None,
-                    icon=None, files_dir=None, log=print):
+                    icon=None, files_dir=None, log=print, progress=None):
     """Write the standalone .nro; returns the list of files it carries."""
-    prefix, base_icon, base_nacp, base_romfs, found = flashnx_program(nro)
+    prefix, base_icon, base_nacp, carried, found = flashnx_program(nro)
     entries = game_entries(swf, files_dir)
     stem = os.path.basename(swf)[:-4]
     name = name or stem
@@ -794,12 +921,12 @@ def make_standalone(nro, swf, out_path, name=None, author=None, version=None,
             if temporary:
                 os.remove(local)
     nacp = make_nacp(base_nacp, name, author, version)
-    if base_romfs:
+    if carried:
         log('note: this .nro already carried a game; it is replaced.')
     if ' ' in os.path.basename(out_path):
         log('note: with a space in its name (or its folder\'s), a HOME Menu icon '
             'made with Sphaira will not start this app.')
-    write_app(out_path, prefix, icon_data, nacp, entries + [marker(found)])
+    write_app(out_path, prefix, icon_data, nacp, entries + [marker(found)], log, progress)
     return entries
 
 
@@ -849,7 +976,7 @@ def download_flashnx(dest_dir, progress=None):
                     progress(done, total)
         if total and done != total:
             raise StandaloneError('The download stopped at %d of %d bytes.' % (done, total))
-        read_nro(part)  # whole, and an .nro
+        nro_layout(part)  # whole, and an .nro
         os.replace(part, path)
     except StandaloneError:
         if os.path.exists(part):
@@ -1155,13 +1282,24 @@ def main_cli(argv):
 
             args.nro, version = download_flashnx(download_dir(), progress)
             print('FlashNX %s downloaded: %s' % (version, args.nro))
+
+        def copying(done, total):
+            # Only a big game takes long enough to need it.
+            if total < (64 << 20):
+                return
+            tenth = done * 10 // total
+            if tenth != shown_copy[0]:
+                shown_copy[0] = tenth
+                print('writing and checking %s... %d %%' % (os.path.basename(out_path), tenth * 10))
+
+        shown_copy = [-1]
         if args.update:
-            name, had, now = update_app(args.update, args.nro, out_path)
+            name, had, now = update_app(args.update, args.nro, out_path, progress=copying)
             print('%s: FlashNX %s -> %s, written to %s'
                   % (name, had or '(version not recorded)', now, out_path))
             return 0
         entries = make_standalone(args.nro, args.swf, out_path, name, args.author,
-                                  args.version, args.icon, args.files)
+                                  args.version, args.icon, args.files, progress=copying)
     except StandaloneError as e:
         print('error: %s' % e, file=sys.stderr)
         return 1
@@ -1202,6 +1340,7 @@ def windows_drop(hwnds, on_drop):
     shell32.DragQueryFileW.argtypes = [ctypes.c_void_p, wintypes.UINT, ctypes.c_wchar_p, wintypes.UINT]
     user32.RegisterClipboardFormatW.restype = wintypes.UINT
     ole32.RegisterDragDrop.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    ole32.RevokeDragDrop.argtypes = [ctypes.c_void_p]
     ole32.ReleaseStgMedium.argtypes = [ctypes.c_void_p]
 
     class GUID(ctypes.Structure):
@@ -1292,11 +1431,25 @@ def windows_drop(hwnds, on_drop):
                                   ctypes.POINTER(wintypes.DWORD))
     DragLeave = ctypes.WINFUNCTYPE(HRESULT, ctypes.c_void_p)
 
+    # A Python exception must never leave one of these: OLE would get back a
+    # value ctypes leaves undefined, and under pythonw, the double-click,
+    # where stderr is None, not even a line saying why. Each method answers
+    # `failed` instead.
+    E_UNEXPECTED = -2147418113
+
+    def guarded(fn, failed):
+        def method(*args):
+            try:
+                return fn(*args)
+            except Exception:
+                return failed
+        return method
+
     def query_interface(this, riid, ppv):
+        ppv[0] = None
         if ctypes.string_at(riid, 16) in known:
             ppv[0] = this
             return S_OK
-        ppv[0] = None
         return E_NOINTERFACE
 
     def drag_enter(this, data_object, keys, point, effect):
@@ -1317,16 +1470,26 @@ def windows_drop(hwnds, on_drop):
         return S_OK
 
     # The object lives as long as the window: reference counting is moot.
-    callbacks = (QueryInterface(query_interface), Count(lambda this: 1), Count(lambda this: 1),
-                 DragEnter(drag_enter), DragOver(drag_over),
-                 DragLeave(lambda this: S_OK), DragEnter(drop))
+    callbacks = (QueryInterface(guarded(query_interface, E_NOINTERFACE)),
+                 Count(lambda this: 1), Count(lambda this: 1),
+                 DragEnter(guarded(drag_enter, E_UNEXPECTED)),
+                 DragOver(guarded(drag_over, E_UNEXPECTED)),
+                 DragLeave(lambda this: S_OK), DragEnter(guarded(drop, E_UNEXPECTED)))
     vtable = (ctypes.c_void_p * len(callbacks))(
         *[ctypes.cast(c, ctypes.c_void_p).value for c in callbacks])
     target = ctypes.pointer(vtable)  # a COM object is a pointer to its vtable
     registered = [h for h in hwnds if ole32.RegisterDragDrop(h, ctypes.addressof(target)) == S_OK]
     if not registered:
         return None
-    return (callbacks, vtable, target, registered)
+
+    def revoke():
+        """Undo the registration while the windows still exist, as
+        RegisterDragDrop asks: OLE keeps a pointer to the callbacks above, and
+        they go when this function's objects do."""
+        while registered:
+            ole32.RevokeDragDrop(registered.pop())
+
+    return (callbacks, vtable, target, registered, revoke)
 
 
 def main_gui():
@@ -1623,13 +1786,24 @@ def main_gui():
     bar = ttk.Frame(outer)
     bar.grid(row=3, column=0, columnspan=2, sticky='ew', pady=(px(22), 0))
     bar.columnconfigure(0, weight=1)
-    status = ttk.Label(bar, style='Muted.TLabel', wraplength=px(560), justify='left')
+    # Its wrapping width is what the buttons leave of the bar (`fit_status`),
+    # never more: a long line here, or Show in folder coming up, used to widen
+    # the window by a fifth, moving the form and the preview under the mouse.
+    status = ttk.Label(bar, style='Muted.TLabel', wraplength=px(300), justify='left')
     status.grid(row=0, column=0, sticky='w', padx=(0, px(16)))
     open_btn = ttk.Button(bar, text='Show in folder')
     update_btn = ttk.Button(bar, text='Update an app...')
     update_btn.grid(row=0, column=2, sticky='e', padx=(0, px(10)))
     make_btn = ttk.Button(bar, text='Make the .nro', style='Primary.TButton')
     make_btn.grid(row=0, column=3, sticky='e')
+    # Show in folder's place, kept while it is hidden.
+    bar.columnconfigure(1, minsize=open_btn.winfo_reqwidth() + px(10))
+
+    def fit_status(_event=None):
+        buttons = sum(bar.grid_bbox(column=c, row=0)[2] for c in (1, 2, 3))
+        status.configure(wraplength=max(px(200), bar.winfo_width() - buttons - px(16)))
+
+    bar.bind('<Configure>', fit_status)
 
     def say(text, error=False):
         status.configure(text=text, style='Error.TLabel' if error else 'Muted.TLabel')
@@ -1749,32 +1923,68 @@ def main_gui():
     poll_pictures()
 
     results = queue.Queue()
+    # The notes of the job under way ("a card formatted FAT32 cannot hold
+    # it"...), kept under the line that ends it: shown one by one, each was
+    # replaced by the next, and the last by "is ready", so none stayed read.
+    notes = []
+
+    def note(text):
+        text = text[len('note: '):] if text.startswith('note: ') else text
+        notes.append(text[:1].upper() + text[1:])
+        say(notes[-1])
+
+    def with_notes(text):
+        return '\n'.join([text] + notes)
+
+    def percent():
+        """A `progress` for the job: its percentage, sent on once per change."""
+        shown = [-1]
+
+        def progress(done, total):
+            pct = done * 100 // total if total else 100
+            if pct != shown[0]:
+                shown[0] = pct
+                results.put(('progress', pct))
+        return progress
+
+    def outcome(doing):
+        """The job's end as (kind, value), or None while it runs. Everything
+        waiting is taken at each look: one message per look left "is ready"
+        seconds behind a hundred percentages."""
+        while True:
+            try:
+                kind, value = results.get_nowait()
+            except queue.Empty:
+                return None
+            if kind == 'note':
+                note(value)
+            elif kind == 'progress':
+                say(with_notes('%s %d %%' % (doing, value)))
+            else:
+                return kind, value
 
     def work(args):
         try:
-            results.put(('ok', make_standalone(*args, log=lambda s: results.put(('note', s)))))
+            results.put(('ok', make_standalone(*args, log=lambda s: results.put(('note', s)),
+                                               progress=percent())))
         except StandaloneError as e:
             results.put(('error', str(e)))
         except Exception as e:  # a bug, said rather than swallowed
             results.put(('error', 'Unexpected error: %r' % (e,)))
 
     def poll(out_path, name):
-        try:
-            kind, value = results.get_nowait()
-        except queue.Empty:
+        done = outcome('Writing %s...' % os.path.basename(out_path))
+        if done is None:
             root.after(100, poll, out_path, name)
             return
-        if kind == 'note':
-            say(value)
-            root.after(100, poll, out_path, name)
-            return
+        kind, value = done
         make_btn.state(['!disabled'])
         if kind == 'error':
             say(value, error=True)
             return
         size = os.path.getsize(out_path) / 1e6
-        say('%s is ready (%.1f MB). Copy it to sdmc:/switch/%s/ on the SD card.'
-            % (os.path.basename(out_path), size, safe_file_name(name)))
+        say(with_notes('%s is ready (%.1f MB). Copy it to sdmc:/switch/%s/ on the SD card.'
+                       % (os.path.basename(out_path), size, safe_file_name(name))))
         folder = os.path.dirname(os.path.abspath(out_path))
         if sys.platform == 'win32':
             open_btn.configure(command=lambda: os.startfile(folder))
@@ -1794,6 +2004,7 @@ def main_gui():
             return
         open_btn.grid_remove()
         make_btn.state(['disabled'])
+        del notes[:]
         say('Writing %s...' % os.path.basename(out_path))
         icon = fields['icon'].get().strip()
         # A picture from the web already downloaded for the preview is used as
@@ -1810,26 +2021,28 @@ def main_gui():
 
     def update_work(app, nro, out_path):
         try:
-            results.put(('updated', update_app(app, nro, out_path)))
+            results.put(('updated', update_app(app, nro, out_path,
+                                               log=lambda s: results.put(('note', s)),
+                                               progress=percent())))
         except StandaloneError as e:
             results.put(('error', str(e)))
         except Exception as e:  # a bug, said rather than swallowed
             results.put(('error', 'Unexpected error: %r' % (e,)))
 
     def poll_update(out_path):
-        try:
-            kind, value = results.get_nowait()
-        except queue.Empty:
+        done = outcome('Updating %s...' % os.path.basename(out_path))
+        if done is None:
             root.after(100, poll_update, out_path)
             return
+        kind, value = done
         make_btn.state(['!disabled'])
         update_btn.state(['!disabled'])
         if kind == 'error':
             say(value, error=True)
             return
         name, had, now = value
-        say('%s now runs FlashNX %s%s. Copy it over the old one on the SD card: '
-            'saves and settings stay.' % (name, now, ' (it had %s)' % had if had else ''))
+        say(with_notes('%s now runs FlashNX %s%s. Copy it over the old one on the SD card: '
+                       'saves and settings stay.' % (name, now, ' (it had %s)' % had if had else '')))
         folder = os.path.dirname(os.path.abspath(out_path))
         if sys.platform == 'win32':
             open_btn.configure(command=lambda: os.startfile(folder))
@@ -1856,6 +2069,7 @@ def main_gui():
         open_btn.grid_remove()
         make_btn.state(['disabled'])
         update_btn.state(['disabled'])
+        del notes[:]
         say('Updating %s...' % os.path.basename(app))
         threading.Thread(target=update_work, args=(app, nro, out_path), daemon=True).start()
         root.after(100, poll_update, out_path)
@@ -1960,6 +2174,12 @@ def main_gui():
         hwnds = [int(root.wm_frame(), 16)] + [w.winfo_id() for w in walk(root)]
         root.dnd = windows_drop(hwnds, lambda items: root.after(0, accept, items))
         can_drop = root.dnd is not None
+        if can_drop:
+            def close():
+                root.dnd[-1]()
+                root.destroy()
+
+            root.protocol('WM_DELETE_WINDOW', close)
     if can_drop:
         say('Drop the game, a picture or one from a web page anywhere here.\n'
             'Your game stays on this computer.')

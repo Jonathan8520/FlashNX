@@ -184,6 +184,27 @@ version the app was made from: an update to the same version or an older one is
 refused. An app without it (made before it existed) is updated whatever its
 version.
 
+A game of any size goes through without being held in memory: the files are
+copied a 4 MB chunk at a time, read back the same way, and an update copies the
+game out of the old app the same way (a 96 MB game used to take 288 MB of RAM to
+make and 480 MB to update, 8 MB now). Both passes report a percentage, in the
+window's status line and, for a game over 64 MB, on the command line. An app
+over 4 GB is written all the same, with a note: FAT32, the format the homebrew
+guides recommend for the card, cannot hold a file that big, while libnx reads a
+RomFS with 64-bit offsets, so it runs from an exFAT card.
+
+`scripts/test_make_standalone.py` checks all of this. Most of it runs anywhere,
+on a small FlashNX.nro it makes up: the app carries the game file for file, an
+update in place keeps it and replaces the program part, the version checks,
+a cut file refused, the memory a 96 MB game takes (measured with `tracemalloc`).
+Two tests compare with devkitPro byte for byte and are skipped without it: the
+RomFS against `build_romfs`, and the whole `.nro` against `elf2nro` (that one
+also needs a build, `cpp/FlashNX.elf` and `cpp/FlashNX.nro`).
+
+```bash
+python scripts/test_make_standalone.py
+```
+
 ### From source: `cpp/romfs/`
 
 A `.swf` dropped into **`cpp/romfs/`** is built into the binary.
@@ -214,11 +235,15 @@ What to know before shipping one:
   same name would share those files on one console, so give the game a name of
   its own. That is also why the boot code scans `romfs:/` instead of expecting a
   fixed `game.swf`.
-- **Global settings are still shared.** `sdmc:/switch/FlashNX/` is hardcoded
-  throughout, so UI language and the global REGLAGES defaults come from the same
-  files FlashNX itself uses. Only the per-game layer is separate. A player who
-  changes FlashNX's defaults, or a later FlashNX that writes those files
-  differently, can therefore change how the game starts.
+- **Global settings are read, never written.** UI language and the global
+  REGLAGES defaults come from FlashNX's own `settings.json` (read at boot by
+  `ruffle_loc_init`, as for a forwarder), and the app has no library and no
+  REGLAGES to write it from, so it cannot undo the player's choices. Without
+  FlashNX on the card it starts from the defaults. A player who changes
+  FlashNX's defaults, or a later FlashNX that writes that file differently, can
+  therefore change how the game starts. What the app does write is the game's
+  own: its saves (`sdmc:/flashnx/saves/`), its play time, and the controls and
+  display choices made from its pause, all filed under the `.swf` name.
 - **It stays on the FlashNX version it was made from.** Later fixes reach it
   only when it is made again from a newer `FlashNX.nro`.
 - **Opened from the Album** (applet mode, a small part of the memory), it says
