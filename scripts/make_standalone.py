@@ -721,6 +721,15 @@ def game_entries(swf, files_dir=None):
         raise StandaloneError('%s is not a .swf file.' % name)
     stem = name[:-4]
     entries = [(name, swf)]
+    # A Flashpoint game's original address, in `<game>.swf.base` beside it.
+    # FlashNX runs the game under that URL (rust/src/lib.rs, `ruffle_init`): its
+    # relative loads resolve against it into `<game>.files/<host>/<path>`, and
+    # its saves are named after it. Left out, such a game ran under the flat
+    # `flashforswitch.local` address, found none of its files and stalled on
+    # its loader, and it saved apart from the same game in FlashNX.
+    base = swf + '.base'
+    if os.path.isfile(base):
+        entries.append((name + '.base', base))
     if files_dir is None:
         guess = os.path.join(os.path.dirname(os.path.abspath(swf)), stem + '.files')
         files_dir = guess if os.path.isdir(guess) else None

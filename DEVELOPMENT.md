@@ -132,7 +132,9 @@ byte for byte what `elf2nro --icon --nacp --romfsdir` makes from the same files
 (checked against devkitPro's `elf2nro` and `build_romfs`, multi-file trees,
 accents and spaces included), and it reads the result back the way libnx does
 before keeping it. A `<game>.files` folder next to the `.swf` goes in as the
-companions. Python's standard library is all it needs; Pillow lets the picture be
+companions, and so does a Flashpoint game's `<game>.swf.base` (its original
+address, which FlashNX runs the game under: without it a host-pathed game finds
+none of its files, and saves apart from the same game played in FlashNX). Python's standard library is all it needs; Pillow lets the picture be
 any size or format, without it the picture must be a 256x256 JPEG. Run without
 arguments (or double-clicked), it opens a window doing the same, with the
 FlashNX logo and a preview of the app as the Homebrew Menu will list it. Given

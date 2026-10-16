@@ -170,6 +170,17 @@ class MakeAndUpdate(Work):
         self.assertEqual(ms.app_info(app)['flashnx'], '2.1.0')
         self.assertEqual(self.app_files(app), GAME)
 
+    def test_flashpoint_address_goes_in(self):
+        # FlashNX reads `romfs:/<game>.swf.base` for the URL to run the game
+        # under; without it a host-pathed game finds none of its files.
+        swf = self.game()
+        with open(swf + '.base', 'wb') as f:
+            f.write(b'http://www.example.com/game/Mon Jeu.swf')
+        app = self.path('Mon_Jeu.nro')
+        ms.make_standalone(fake_flashnx(self.path('FlashNX.nro'), '2.0.0'), swf, app, log=quiet)
+        files = self.app_files(app)
+        self.assertEqual(files['Mon Jeu.swf.base'], b'http://www.example.com/game/Mon Jeu.swf')
+
     def test_progress_goes_to_the_end(self):
         seen = []
         ms.make_standalone(fake_flashnx(self.path('FlashNX.nro'), '2.0.0'), self.game(),
