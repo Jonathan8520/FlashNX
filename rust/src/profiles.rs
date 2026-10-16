@@ -110,26 +110,15 @@ impl Profile {
     }
     /// This profile's controls as a `Keymap` (base + combos), so preview diffs and
     /// apply share one representation. Cursor speed lives outside the keymap.
-    /// A player the profile says nothing about (players 3 and 4 in every profile
-    /// shared before #128, player 2 before #40) gets that player's defaults, as a
-    /// fresh keymap would: left empty, the preview listed every one of their
-    /// buttons as going to "None", and applying it took their keys away.
     pub fn to_keymap(&self) -> Keymap {
-        let or_defaults = |map: &BTreeMap<std::string::String, std::string::String>, player: u8| {
-            if map.is_empty() {
-                crate::keymap::player_default_bindings(player)
-            } else {
-                map.clone()
-            }
-        };
         let mut km = Keymap {
             version: 1,
             bindings: self.bindings.clone(),
-            bindings_p2: or_defaults(&self.bindings_p2, 2),
+            bindings_p2: self.bindings_p2.clone(),
             combo_layers: self.combo_layers.clone(),
             combo_layers_p2: self.combo_layers_p2.clone(),
-            bindings_p3: or_defaults(&self.bindings_p3, 3),
-            bindings_p4: or_defaults(&self.bindings_p4, 4),
+            bindings_p3: self.bindings_p3.clone(),
+            bindings_p4: self.bindings_p4.clone(),
             combo_layers_p3: self.combo_layers_p3.clone(),
             combo_layers_p4: self.combo_layers_p4.clone(),
             // Legacy single-layer fields are unused here (migration-only on load).
@@ -146,8 +135,13 @@ impl Profile {
             show_cursor: self.show_cursor,
         };
         // The buttons the profile predates get what loading it would give
-        // them. A profile from before SL and SR (issue #128) previewed them
-        // going to "None", when once applied they take the profile's L and R.
+        // them, as a fresh keymap would. A player it says nothing about
+        // (players 3 and 4 in every profile shared before #128, player 2
+        // before #40) gets that player's defaults: left empty, the preview
+        // listed every one of their buttons as going to "None", and applying
+        // it took their keys away. A profile from before SL and SR (issue
+        // #128) previewed them going to "None" too, when once applied they
+        // take the profile's L and R.
         crate::keymap::merge_all_defaults(&mut km);
         km
     }

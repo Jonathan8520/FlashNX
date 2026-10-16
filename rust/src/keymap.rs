@@ -2519,7 +2519,7 @@ fn player_fallback(player: u8) -> &'static [(&'static str, &'static str)] {
     }
 }
 
-pub(crate) fn player_default_bindings(player: u8) -> BTreeMap<std::string::String, std::string::String> {
+fn player_default_bindings(player: u8) -> BTreeMap<std::string::String, std::string::String> {
     let mut m = BTreeMap::new();
     for (btn, key) in player_fallback(player) {
         m.insert((*btn).into(), (*key).into());

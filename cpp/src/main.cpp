@@ -110,14 +110,14 @@ extern "C" void flashnx_frozen_pad_reset(void) {
         padInitializeDefault(&s_frozen_pad);
         s_frozen_pad_ready = true;
     }
-    flashnx_pad_update(&s_frozen_pad, PAD_FLAG_PLAYER1 | PAD_FLAG_SHOULDERS);
-    flashnx_pad_update(&s_frozen_pad, PAD_FLAG_PLAYER1 | PAD_FLAG_SHOULDERS);
+    flashnx_pad_update(&s_frozen_pad, PAD_FLAG_PLAYER1 | PAD_FLAG_MENU);
+    flashnx_pad_update(&s_frozen_pad, PAD_FLAG_PLAYER1 | PAD_FLAG_MENU);
 }
 
 // Presses since the last call: 1 A, 2 B, 4 `-`, 8 up, 16 down (d-pad or
 // either stick), 32 `-` or B still held.
 extern "C" uint32_t flashnx_frozen_pad_down(void) {
-    flashnx_pad_update(&s_frozen_pad, PAD_FLAG_PLAYER1 | PAD_FLAG_SHOULDERS);
+    flashnx_pad_update(&s_frozen_pad, PAD_FLAG_PLAYER1 | PAD_FLAG_MENU);
     const u64 d = padGetButtonsDown(&s_frozen_pad);
     const u64 h = padGetButtons(&s_frozen_pad);
     uint32_t out = 0;
@@ -1458,7 +1458,11 @@ static void worker_entry(void* arg) {
             lib_clock_check = 0;
             flashnx_clocks_reassert();
         }
-        flashnx_pad_update(&pad, PAD_FLAG_PLAYER1 | PAD_FLAG_SHOULDERS);
+        // Not as player 1 (issue #128): the launcher has no pause, so a right
+        // Joy-Con's + stays +, the Options its hints name. Read as the pause's
+        // `-`, it ran the search instead, and Options was out of reach on a
+        // lone Joy-Con of either side. Its B still goes back, as `-` does.
+        flashnx_pad_update(&pad, PAD_FLAG_MENU);
         u64 kDownLib = padGetButtonsDown(&pad);
         const u64 kUpLib   = padGetButtonsUp(&pad);
         u64 kHeldLib = padGetButtons(&pad);
@@ -1722,15 +1726,38 @@ static void worker_entry(void* arg) {
     // Normal every 30 frames makes gameplay self-healing without IPC spam.
     int boost_reassert = 0;
 
+    // Player 1's stick on a lone Joy-Con (issue #128; what it does is told
+    // where the loop reads it, before the key bindings). Kept per game: as
+    // statics in the loop, a game quit with the stick on the cursor had the
+    // next one start there, the stick moving the gold cursor instead of the
+    // player. Restart keeps it, being the same game.
+    bool stick_cursor = false;
+    bool stick_cursor_click = false;  // A holds the click it pressed
+    u64  press_since = 0;             // tick the stick went in, 0 = out
+    bool press_long = false;          // this press already switched
+    int  press_tap_frames = 0;        // a short push's key, held this many frames more
+    int  press_tap_key = SK_NONE;
+    ruffle_set_stick_cursor(0);
+    const u64 STICK_DIRS = HidNpadButton_StickLUp | HidNpadButton_StickLDown |
+                           HidNpadButton_StickLLeft | HidNpadButton_StickLRight;
+    auto p1_key = [](int key, bool down) {
+        if (key == SK_MOUSE_LEFT)       ruffle_handle_mouse_button(down);
+        else if (key == SK_MOUSE_RIGHT) ruffle_handle_mouse_right(down);
+        else if (key == SK_KEYBOARD)  { if (down) ruffle_keyboard_request_manual(); }
+        else if (key != SK_NONE)        ruffle_handle_key(key, down);
+    };
+
     minus_watch_start();
     while (appletMainLoop()) {
         const bool p1_single = (flashnx_pad_update(&pad, PAD_FLAG_PLAYER1) & PAD_READ_SINGLE) != 0;
         // In the pause and its pages, a lone Joy-Con's SL and SR are its
         // shoulders, L and R, which the menus page with (the editor's layers,
-        // its tabs): it has no others. In the game they are SL and SR, as its
+        // its tabs): it has no others. Its trigger is ZL or ZR there, as in
+        // the launcher (ZR opens the shared profiles from the editor). In the
+        // game SL and SR are SL and SR and the trigger does nothing, as its
         // editor shows them (issue #128).
-        const bool menu_shoulders = menu_open && p1_single;
-        auto menu_keys = [menu_shoulders](u64 m) { return menu_shoulders ? pad_lone_shoulders(m) : m; };
+        const bool menu_lone = menu_open && p1_single;
+        auto menu_keys = [menu_lone](u64 m) { return menu_lone ? pad_lone_menu(m) : m; };
         const u64 kDown = menu_keys(padGetButtonsDown(&pad));
         const u64 kUp   = menu_keys(padGetButtonsUp(&pad));
         const u64 kHeld = menu_keys(padGetButtons(&pad));
@@ -2509,6 +2536,21 @@ static void worker_entry(void* arg) {
                     }
                 }
             }
+            // And player 1's stick on a lone Joy-Con (issue #128): the click A
+            // holds in cursor mode, a short push's key still held for the
+            // game, a push under way. Their releases came after the pause,
+            // the click's only with the next A, which then did nothing but let
+            // go of it.
+            if (stick_cursor_click) {
+                ruffle_handle_mouse_button(false);
+                stick_cursor_click = false;
+            }
+            if (press_tap_frames > 0) {
+                p1_key(press_tap_key, false);
+                press_tap_frames = 0;
+                press_tap_key = SK_NONE;
+            }
+            press_since = 0;
             // Leave a trace. Until this line the pause modal was INVISIBLE in a
             // log: unless the player happened to change the power mode, nothing
             // said the game had even been paused. That turned "did the modal
@@ -2520,15 +2562,6 @@ static void worker_entry(void* arg) {
             continue;
         }
 
-        // Keyboard-style buttons via edge detection. A button bound to a mouse
-        // pseudo-code clicks at the cursor instead of sending a key event.
-        //
-        // Combo layers (issue #57, per-modifier): each ACTIVE modifier (ZL/ZR/L/R
-        // with a layer) is a dedicated modifier -> its own key is muted. The
-        // currently-HELD active modifier (priority ZL>ZR>L>R) makes every other
-        // button send THAT layer's key, falling through to the base key when the
-        // layer doesn't map it. The key is chosen at PRESS time (g_p1_down_key) so
-        // the key-up matches even if the modifier is released first.
         // Player 1 on a lone Joy-Con (issue #128) has one stick. Pushing it
         // in switches between the game and the cursor, where A clicks, at
         // once while its row ("appui" of the left stick in the editor) has no
@@ -2538,60 +2571,46 @@ static void worker_entry(void* arg) {
         // held half a second switches. In cursor mode the stick's directions
         // and A are not the game's. Going to the cursor lets go of the keys
         // they held; leaving it (or the lone Joy-Con) lets go of a click A
-        // held.
-        static bool s_stick_cursor = false;
-        static bool s_stick_cursor_click = false;
-        static u64  s_press_since = 0;     // tick the stick went in, 0 = out
-        static bool s_press_long = false;  // this press already switched
-        static int  s_press_tap_frames = 0;
-        static int  s_press_tap_key = SK_NONE;
-        const u64 STICK_DIRS = HidNpadButton_StickLUp | HidNpadButton_StickLDown |
-                               HidNpadButton_StickLLeft | HidNpadButton_StickLRight;
-        auto p1_key = [](int key, bool down) {
-            if (key == SK_MOUSE_LEFT)       ruffle_handle_mouse_button(down);
-            else if (key == SK_MOUSE_RIGHT) ruffle_handle_mouse_right(down);
-            else if (key == SK_KEYBOARD)  { if (down) ruffle_keyboard_request_manual(); }
-            else if (key != SK_NONE)        ruffle_handle_key(key, down);
-        };
-        if (s_press_tap_frames > 0 && --s_press_tap_frames == 0) {
-            p1_key(s_press_tap_key, false);
-            s_press_tap_key = SK_NONE;
+        // held. The state is the game's, set before the loop.
+        if (press_tap_frames > 0 && --press_tap_frames == 0) {
+            p1_key(press_tap_key, false);
+            press_tap_key = SK_NONE;
         }
         {
-            bool now = s_stick_cursor;
+            bool now = stick_cursor;
             const u64 tick = armGetSystemTick();
             if (!p1_single) {
                 now = false;
-                s_press_since = 0;
+                press_since = 0;
             } else {
                 int press_key = SK_NONE;
                 for (size_t i = 0; i < BINDINGS_COUNT; ++i) {
                     if (BINDINGS[i].mask == HidNpadButton_StickL) press_key = BINDINGS[i].key;
                 }
                 if (kDownG & HidNpadButton_StickL) {
-                    s_press_since = tick;
+                    press_since = tick;
                     // Nothing on the push: it switches now, and its release
                     // has nothing to send.
-                    s_press_long = press_key == SK_NONE;
-                    if (s_press_long) now = !now;
+                    press_long = press_key == SK_NONE;
+                    if (press_long) now = !now;
                 }
-                if (s_press_since != 0 && (kHeld & HidNpadButton_StickL) && !s_press_long &&
-                    tick - s_press_since >= armGetSystemTickFreq() / 2) {
-                    s_press_long = true;
+                if (press_since != 0 && (kHeld & HidNpadButton_StickL) && !press_long &&
+                    tick - press_since >= armGetSystemTickFreq() / 2) {
+                    press_long = true;
                     now = !now;
                 }
-                if (s_press_since != 0 && (kUp & HidNpadButton_StickL)) {
-                    if (!s_press_long && s_press_tap_frames == 0 && press_key != SK_NONE) {
+                if (press_since != 0 && (kUp & HidNpadButton_StickL)) {
+                    if (!press_long && press_tap_frames == 0 && press_key != SK_NONE) {
                         p1_key(press_key, true);
                         std::printf("stick press: its key sent to the game (key %d)\n", press_key);
                         std::fflush(stdout);
-                        s_press_tap_key = press_key;
-                        s_press_tap_frames = 2;
+                        press_tap_key = press_key;
+                        press_tap_frames = 2;
                     }
-                    s_press_since = 0;
+                    press_since = 0;
                 }
             }
-            if (now != s_stick_cursor) {
+            if (now != stick_cursor) {
                 if (now) {
                     for (size_t i = 0; i < BINDINGS_COUNT; ++i) {
                         if ((BINDINGS[i].mask & (STICK_DIRS | HidNpadButton_A)) && g_p1_down_key[i] != SK_NONE) {
@@ -2602,31 +2621,40 @@ static void worker_entry(void* arg) {
                             else if (key != SK_KEYBOARD && key != SK_NONE) ruffle_handle_key(key, false);
                         }
                     }
-                } else if (s_stick_cursor_click) {
+                } else if (stick_cursor_click) {
                     ruffle_handle_mouse_button(false);
-                    s_stick_cursor_click = false;
+                    stick_cursor_click = false;
                 }
-                s_stick_cursor = now;
+                stick_cursor = now;
                 ruffle_set_stick_cursor(now ? 1 : 0);
                 std::printf("stick cursor: %s\n", now ? "on" : "off");
                 std::fflush(stdout);
             }
         }
         const u64 p1_withheld = p1_single
-            ? (HidNpadButton_StickL | (s_stick_cursor ? (STICK_DIRS | HidNpadButton_A) : 0))
+            ? (HidNpadButton_StickL | (stick_cursor ? (STICK_DIRS | HidNpadButton_A) : 0))
             : 0;
-        if (s_stick_cursor) {
-            if ((kDownG & HidNpadButton_A) && !s_stick_cursor_click) {
+        if (stick_cursor) {
+            if ((kDownG & HidNpadButton_A) && !stick_cursor_click) {
                 ruffle_handle_mouse_button(true);
-                s_stick_cursor_click = true;
-            } else if ((kUp & HidNpadButton_A) && s_stick_cursor_click) {
+                stick_cursor_click = true;
+            } else if ((kUp & HidNpadButton_A) && stick_cursor_click) {
                 ruffle_handle_mouse_button(false);
-                s_stick_cursor_click = false;
+                stick_cursor_click = false;
             }
         }
         const u64 kDownG1 = kDownG & ~p1_withheld;
         const u64 kUp1 = kUp & ~p1_withheld;
 
+        // Keyboard-style buttons via edge detection. A button bound to a mouse
+        // pseudo-code clicks at the cursor instead of sending a key event.
+        //
+        // Combo layers (issue #57, per-modifier): each ACTIVE modifier (ZL/ZR/L/R
+        // with a layer) is a dedicated modifier -> its own key is muted. The
+        // currently-HELD active modifier (priority ZL>ZR>L>R) makes every other
+        // button send THAT layer's key, falling through to the base key when the
+        // layer doesn't map it. The key is chosen at PRESS time (g_p1_down_key) so
+        // the key-up matches even if the modifier is released first.
         u64 p1_mod_buttons = 0; // all active-modifier buttons (always muted)
         int p1_active_mod = -1; // held active modifier whose layer applies
         for (int m = 0; m < CM_COUNT; ++m) {
@@ -2731,7 +2759,7 @@ static void worker_entry(void* arg) {
         // rule as the right stick). By default the left stick is the arrow keys
         // (so this is skipped); clear its direction bindings in TOUCHES and it
         // drives the cursor. Both sticks feed the one shared cursor.
-        if (!g_left_stick_dpad || s_stick_cursor) {
+        if (!g_left_stick_dpad || stick_cursor) {
             const HidAnalogStickState ls = padGetStickPos(&pad, 0);
             const float lsx = (float)ls.x;
             const float lsy = (float)ls.y;

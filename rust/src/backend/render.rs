@@ -11504,10 +11504,6 @@ impl SwitchRenderBackend {
         w
     }
 
-    /// A segmented switch as the controls editor's header draws it
-    /// (Touches.dc.html): a dark track, the current option gold, and a dot after
-    /// an option marked `live` (a combo layer that holds a key, so a layer in
-    /// use shows from the Normal tab). Returns each option's rect, for touch.
     /// The controllers chip's width: the Y glyph and its word.
     fn pad_controllers_width(&mut self) -> f32 {
         let label = crate::loc_ui::ui().controllers;
@@ -11526,6 +11522,10 @@ impl SwitchRenderBackend {
         (x, (cy - SEG_H * 0.5).round(), w, SEG_H)
     }
 
+    /// A segmented switch as the controls editor's header draws it
+    /// (Touches.dc.html): a dark track, the current option gold, and a dot after
+    /// an option marked `live` (a combo layer that holds a key, so a layer in
+    /// use shows from the Normal tab). Returns each option's rect, for touch.
     fn pad_segments(
         &mut self,
         x: f32,

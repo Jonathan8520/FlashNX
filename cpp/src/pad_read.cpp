@@ -23,6 +23,7 @@ const Move LEFT_MOVES[] = {
     {HidNpadButton_Right, HidNpadButton_X},
     {HidNpadButton_Up, HidNpadButton_Y},
     {HidNpadButton_Minus, HidNpadButton_Minus},
+    {HidNpadButton_ZL, PAD_LONE_ZL},
     {HidNpadButton_LeftSL, HidNpadButton_LeftSL},
     {HidNpadButton_LeftSR, HidNpadButton_LeftSR},
     {HidNpadButton_StickL, HidNpadButton_StickL},
@@ -41,6 +42,7 @@ const Move RIGHT_MOVES[] = {
     {HidNpadButton_Y, HidNpadButton_X},
     {HidNpadButton_B, HidNpadButton_Y},
     {HidNpadButton_Plus, HidNpadButton_Plus},
+    {HidNpadButton_ZR, PAD_LONE_ZR},
     {HidNpadButton_RightSL, HidNpadButton_RightSL},
     {HidNpadButton_RightSR, HidNpadButton_RightSR},
     {HidNpadButton_StickR, HidNpadButton_StickL},
@@ -61,9 +63,10 @@ void combine(PadState* pad, const HidNpadCommonState& st) {
     if (!stick_moving(pad->sticks[1])) pad->sticks[1] = st.analog_stick_r;
 }
 
-// One lone Joy-Con's state, turned to a standard pad. Its L / ZL (or R / ZR),
-// on the far end of a Joy-Con held on its side, are left out, as Nintendo's
-// solo grip, SDL and RetroArch leave them.
+// One lone Joy-Con's state, turned to a standard pad. Its L (or R), on the
+// far end of a Joy-Con held on its side, is left out, as Nintendo's solo grip,
+// SDL and RetroArch leave it; its ZL (or ZR) beside it is kept apart for the
+// menus (`PAD_LONE_ZL`).
 void turn(bool left, u32 flags, HidNpadCommonState& st) {
     const Move* moves = left ? LEFT_MOVES : RIGHT_MOVES;
     const size_t n = left ? sizeof(LEFT_MOVES) / sizeof(LEFT_MOVES[0])
@@ -75,7 +78,7 @@ void turn(bool left, u32 flags, HidNpadCommonState& st) {
     if (!left && (flags & PAD_FLAG_PLAYER1) && (out & HidNpadButton_Plus)) {
         out = (out & ~HidNpadButton_Plus) | HidNpadButton_Minus;
     }
-    if (flags & PAD_FLAG_SHOULDERS) out = pad_lone_shoulders(out);
+    if (flags & PAD_FLAG_MENU) out = pad_lone_menu(out);
     st.buttons = out;
     // The same quarter turn as the arrows above, in numbers (y up).
     const HidAnalogStickState raw = left ? st.analog_stick_l : st.analog_stick_r;
@@ -89,9 +92,7 @@ void turn(bool left, u32 flags, HidNpadCommonState& st) {
 
 }  // namespace
 
-u32 flashnx_pad_update(PadState* pad, u32 flags, bool log) {
-    // What each controller id's lone Joy-Con sent last, for `log`.
-    static u64 s_last_raw[8] = {};
+u32 flashnx_pad_update(PadState* pad, u32 flags) {
     u32 read = 0;
     pad->active_id_mask = 0;
     pad->active_handheld = false;
@@ -154,15 +155,8 @@ u32 flashnx_pad_update(PadState* pad, u32 flags, bool log) {
         }
         if (count != 0 && (state.attributes & HidNpadAttribute_IsConnected)) {
             if (lone) {
-                const u64 raw = state.buttons;
                 turn(lone == 1, flags, state);
                 read |= PAD_READ_SINGLE;
-                if (log && raw != s_last_raw[i]) {
-                    s_last_raw[i] = raw;
-                    std::printf("joycon: No%u %s raw 0x%llx -> 0x%llx\n", i + 1, lone == 1 ? "left" : "right",
-                                (unsigned long long)raw, (unsigned long long)state.buttons);
-                    std::fflush(stdout);
-                }
             }
             pad->active_id_mask |= BIT(i);
             pad->style_set |= style_set;
