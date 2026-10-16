@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  <strong>Homebrew Flash player for Nintendo Switch.</strong><br>
-  Run your Flash games (<code>.swf</code>, AS1/AS2 and part of AS3) straight from the SD card.<br>
+  <strong>Play Flash games on your Nintendo Switch.</strong><br>
+  FlashNX runs <code>.swf</code> games (ActionScript 1, 2 and much of 3) and downloads them for you from the Flashpoint Archive.<br>
   Powered by <a href="https://github.com/ruffle-rs/ruffle">Ruffle</a>.
 </p>
 
@@ -15,138 +15,86 @@
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="License">
 </p>
 
-| Play | Flashpoint | In game | Settings |
-|:---:|:---:|:---:|:---:|
-| ![FlashNX library](assets/screenshots/library.png) | ![Flashpoint download](assets/screenshots/flashpoint.png) | ![In game + pause menu](assets/screenshots/in-game.png) | ![Settings](assets/screenshots/settings.png) |
-| Cover gallery, L/R tabs | Download games from Flashpoint | Game + pause menu / key editor | Language, controls, bug report |
+<p align="center">
+  <img src="assets/screenshots/play.png" alt="The Play tab: your library" width="100%">
+</p>
 
-## Installation
+| Getting games | In game |
+|:---:|:---:|
+| ![The Import tab: Flashpoint shelves and your sources](assets/screenshots/import.png) | ![The pause menu over a game](assets/screenshots/pause.png) |
 
-**Easiest, via the [Homebrew App Store](https://hb-app.store/switch/FlashNX):** open **hb-appstore** on your Switch, search for **FlashNX**, install. Updates follow automatically.
+## Install
 
-**Or manually:** download **`FlashNX.nro`** from the [Releases](https://github.com/Jonathan8520/FlashNX/releases) and copy it to **`sdmc:/switch/FlashNX/FlashNX.nro`**. *(Modded Switch with Atmosphère required.)*
+1. You need a Switch running **Atmosphère**.
+2. Install **FlashNX** from the **[Homebrew App Store](https://hb-app.store/switch/FlashNX)**, or copy **`FlashNX.nro`** from the [latest release](https://github.com/Jonathan8520/FlashNX/releases/latest) to **`sdmc:/switch/FlashNX/`**.
+3. **Hold R while opening any game from the HOME Menu**, then pick FlashNX in the Homebrew Menu. This gives it the console's full memory.
 
-### Launching it, the part that matters
+Opened from the Album, FlashNX gets too little memory for Flash games. It says so and offers to put its icon on the HOME Menu, which always starts it with the full memory (an icon on the HOME Menu needs signature patches, like any homebrew).
 
-**Hold R while opening a game from the Home menu**, then pick FlashNX in the Homebrew Menu.
+## Get games
 
-Opened the usual way from the Album, homebrew only gets a small share of the console's memory, which is not enough to run a Flash game: FlashNX starts but refuses to launch anything and tells you why. Holding R gives it the whole console instead, and so does a Home menu tile. Any game in your library can get one from its own menu: it appears on the console's home screen under its own name with its own cover art, and pressing it boots straight into that game. Installing a tile needs signature patches, the same as any other homebrew title on the home screen. **[Sphaira](https://github.com/ITotalJustice/sphaira)** users keep a second route: FlashNX registers a `.swf` association, so a game can also be picked in Sphaira's file browser.
+- **From the console**: the **Import** tab shows games from the [Flashpoint Archive](https://flashpointarchive.org/), a random studio and random games, without adult, crude or gory ones. **A** downloads a game with its cover and the files it needs, **+** shows its details first, **X** searches by name.
+- **From a web address**: a direct `.swf` link, an archive.org item or a Wayback Machine snapshot, in the same tab.
+- **From a computer**: copy `.swf` files to **`sdmc:/flashnx/`**. A `<game>.png` or `.jpg` next to one becomes its cover.
 
-## Getting games
+## Play
 
-**You do not need a PC.** The **Import** tab opens on games from the **[Flashpoint Archive](https://flashpointarchive.org/)**, the Flash preservation project: a studio drawn at random and games drawn at random from the whole archive. Press **A** on one to download it straight to your console, or **X** to search the archive by name. Its real title and cover art come along, multi-file games bring their companion files, and **+** on a game shows the details and the download size before you commit.
+**In the library**, the bottom of the screen shows what the buttons do. Also: **L / R** change tab, **ZL / ZR** change folder, **X** changes the layout (grid, list, strip or shelf).
 
-The same tab also imports from a URL: a direct `.swf`, an archive.org item, or a Wayback Machine snapshot. And you can still drop your own `.swf` files into **`sdmc:/flashnx/`** from a computer.
+**In a game**, **−** opens the pause menu. Every game starts with a ready-made layout: the left stick for the arrow keys, A for Space, the right stick or touch for the mouse cursor, ZR to click. The pause menu changes any of it, for that game only:
 
-## Controls
-
-**In the library**
-
-| | |
-|---|---|
-| **L / R** | Switch tabs (Play / Import / Settings) |
-| **ZL / ZR** | Switch folders (All, Favourites, then each folder) |
-| D-pad or sticks | Move in the cover gallery |
-| **A** | Play |
-| **X** | Change the view (grid, list, strip, shelf) |
-| **Y** | Sort by name, date added, last played, most played or size (Left and Right pick the order, **A** applies) |
-| **−** | Search by name |
-| **+** | Game options: favorite, cover, folders, rename, HOME menu icon, controls, picture settings, delete |
-
-Your library size is shown under the logo. Quit, bug report and suggestions live in the Settings tab.
-
-**In every menu**, a setting changes only on purpose: **A** on a choice or a number outlines it in gold, Left and Right then change it, **A** keeps it and **B** puts back what was there. Switches flip with **A**, and a tap on an option picks it. Left and Right never change a setting that is not outlined, so a stick pushed a little sideways on the way down a list changes nothing; on a page opened beside its menu, Left (or Right, toward the column of icons) goes back.
-
-**Import tab**
-
-| | |
-|---|---|
-| **A** | Download or play a suggested game, see all of a studio's games or a bigger draw, draw again, or open a saved entry |
-| **X** | Search the **Flashpoint Archive** and download a game |
-| **−** | Search your saved URLs |
-| **Y** | Sort by date added, name, source or file count |
-| **+** | A game's details, or a saved entry's edit, favorite and delete |
-
-The page opens on two shelves: a studio drawn at random from the whole archive, and games drawn at random from all of it. Each shows five games, then See all or See more, then Draw again. Neither shows what the archive flags as adult, nor crude or gory games. Under them, each saved row shows a readable name, an icon saying whether it is a single file or an archive, and how many of that source's files are already on your card. Accepts archive.org items and direct `.swf` URLs. The page scrolls smoothly and can be dragged with a finger.
-
-**In game**
-
-| | |
-|---|---|
-| Left stick or D-pad | Arrow keys |
-| **A B X Y** | Flash keys (remappable) |
-| Right stick | Mouse cursor |
-| **ZR** or touch | Left click |
-| **ZL** | Right click |
-| **−** | Pause menu |
-
-The control editor binds any of 88 Flash keys (letters, digits, arrows, F1-F12, symbols, numpad) or a mouse click from a visual keyboard, per game, with a global default in Settings. It also covers SL/SR, the stick presses, and turning the right stick into a d-pad. Clicking a text field in a game opens the Switch keyboard.
-
-For games needing more inputs than the pad has buttons, a **combo layer** lets you hold a shoulder button so every other button sends a second key (`ZL + A` sends `F1`). The four modifiers are independent.
-
-Up to **four players** can play at once, each with their own controller and bindings, for Flash games built around several people sharing one keyboard. A single Joy-Con held on its side is a whole controller: press **Y** in the control editor to open the console's controller screen, where each player presses SL and SR on theirs. The editor then draws the controller each player holds, a Joy-Con on its side with only its own buttons, so every button does what its row says. Press **X** in the editor to go from one player to the next. A player 1 on a single Joy-Con opens the pause with its small button, and pushes the stick in to turn it into the cursor (A then clicks), and again to get it back; with a key of their own on the push, they hold it half a second instead.
+- **Controls and cursor**: any button to any key or mouse click. Holding ZL, ZR, L or R gives the buttons a second key.
+- **Up to four players**, each with their own controller and keys. A single Joy-Con held sideways counts as a whole controller.
+- **Shared profiles**: download the controls other players made for a game, or share yours.
+- **Screen** (display, rotation, zoom, filters), **Overclock**, **Restart** and **Quit**.
 
 ## Features
 
-**Your library**
+- A **HOME Menu icon** for any game, with its name and cover, that starts straight into it.
+- **Folders**: a game can be in several, and its file stays where it is.
+- **Saves** kept on the SD card, and **play time** for each game.
+- **Overclock AUTO** raises the CPU only while a game falls behind, and only if it helps.
+- **Gyroscope cursor**: aim like a Wii remote, or tilt the console like a tray with a marble on it.
+- **9 languages**, picked from the console's language.
+- **Report a bug or send a suggestion** from Settings, with no account.
 
-- **Four ways to lay it out**: a grid of covers, a list with the selected cover shown whole beside it, a strip, or a shelf. Pick one in SETTINGS and it is remembered.
-- **Folders**: put games on shelves from a game's options, and switch between them with ZL and ZR. A shelf is a label, not a directory, so filing a game leaves its file where it is and one game can be on several shelves at once. Folders you made yourself on the card show up as shelves too.
-- **Cover art**: Drop a `<game>.png` or `.jpg` next to the `.swf`, or fetch artwork from the Flashpoint Archive in a game's options and pick from thumbnails. Games without one get a generated tile.
-- **Favorites** pinned to the top, **playtime** tracked per game, and sorting by name, date added, last played, most played or size.
-- **Rename** a game for display without touching the file, and deleting one cleans up everything it left on the card.
-- **Touch**: in handheld, drag the gallery to scroll, tap a game to select it, tap again to launch.
-- **A tile on the HOME menu**: the HOME MENU row of a game's menu installs it as its own icon on the console's home screen, with its name and cover, and the icon starts the game directly. Quitting returns to the HOME menu like any other game. The tile holds no copy of the engine, so updating FlashNX updates every tile. It needs signature patches, like any homebrew title on the home screen.
+## Turn a game into its own Switch app
 
-**Controls**
+<p align="center">
+  <img src="assets/screenshots/make-standalone.png" alt="make_standalone.py, the window" width="720">
+</p>
 
-- **Community control profiles**: share your bindings for a game and download what other players have shared for it. Applying a profile is non-destructive and can be reverted, and verified or most-applied ones come first. Your combo layers and cursor settings travel with it.
-- **Copy from another game**: start a game's controls from the ones you set for another, sequels first.
-- **Cursor**: adjustable speed (x0.5 to x2.5, set live from the pause menu) and a per-game show or hide toggle for games played entirely on the pad.
-- **Gyroscope cursor**: per game, aim like a Wii remote (POINTER) or tilt the console like a tray with a marble on it (MARBLE).
+**`make_standalone.py`** puts FlashNX and one game into a single `.nro`: an app with its own name and picture in the Homebrew Menu, which starts straight into the game. Nothing else to install on the Switch.
 
-**In game**
+1. Install [Python](https://www.python.org/downloads/) on your computer.
+2. Download **`make_standalone.py`** from the [latest release](https://github.com/Jonathan8520/FlashNX/releases/latest) and double-click it.
+3. Drop the game's `.swf` on the window: the files FlashNX downloaded with it come along. Check the name and the picture, then press **Make the .nro**.
+4. Copy the app to `sdmc:/switch/<Its_Name>/` on the SD card.
 
-- **Automatic saves** on the SD card for games that save (SharedObject `.sol`).
-- **Pause menu** (**−**): resume, controls and cursor, screen, overclock, restart, quit. The SCREEN panel holds how the game uses the display (fit, stretch, fill), a quarter-turn rotation, a free zoom, a scanline or CRT filter, how bitmaps are sampled (AUTO follows the game's own smoothing flag, as Flash Player did, or force SMOOTH or SHARP for pixel art) and a frame counter that shows the measured rate against the rate the game asks for. Every one of these, overclock included, is kept for that game alone, and SETTINGS > GAME DEFAULTS sets what a game you have never touched will use. When the picture is turned, the pause menu and its pages turn with it and use a layout made for portrait.
-- **Multi-file games**: some games load companion `.swf` files. A Flashpoint download fetches them automatically into a `<game>.files/` folder; for a game added another way, put them there yourself.
-- **Games packaged as a web page**: a few Flashpoint entries ship an `index.html` instead of a plain `.swf`. FlashNX reads its configuration and runs the game, which covers Disney/Yamago minigames (*Agent P Strikes Back*, *Tron Uprising*) and titles such as *Dragon City*.
-
-**The app itself**
-
-- **9 languages**: English, French, Spanish, Russian, German, Italian, Portuguese, Turkish and Simplified Chinese, auto-detected from the console language, all drawn in the console's own fonts with its button glyphs in the hints.
-- **Interface sounds** for moving, choosing and going back, which can be turned off in Settings.
-- **Report a bug or send a suggestion** from the Settings tab. It opens an issue on this repository through a small relay, with no account and no login, and a report carries the game's details so a broken game can actually be identified.
-
-## Tested games
-
-Super Mario 63 · Super Mario World Flash · Mario Forever · Tetris'd · Flappy Bird · Mario 3D Racing · Icy Tower · Papa Louie 2 and 3 · Newgrounds Rumble · Garfield's Scary Scavenger Hunt · Scooby-Doo: Mayan Monster Mayhem · The Binding of Isaac · Super Smash Flash · Super Brawl 2 · Infiltrating the Airship · This Is the Only Level · Fireboy & Watergirl 2 · Cat Mario · Agent P Strikes Back · Dragon City · Hemp Tycoon · Tron Uprising
-
-Most of the games measured for 1.9.0 run at full speed (see the table in [CHANGELOG.md](CHANGELOG.md)), but it still varies between games and between scenes of the same game. See the first limitation below for why.
+**Update an app...** moves an app made earlier to a newer FlashNX, keeping its game. Command line and details: [DEVELOPMENT.md](DEVELOPMENT.md#without-building-anything-scriptsmake_standalonepy).
 
 ## Known limitations
 
-- **Heavy games**: frame-rate drops come from **Ruffle's AVM1/AVM2 virtual machines** (CPU-bound: AS3 goes through a basic JIT, AS2 is interpreted), not from our rendering. The pause menu has an OVERCLOCK row for that, no external tool needed. It is worth 1.41x on average and nothing at all on a game that was never CPU-bound, so the default, AUTO, raises the CPU only while a game falls behind its own frame rate and the raise measurably helps, and drops back once the game keeps up without it. ON holds it for the whole session, OFF never raises it, and the choice is kept per game.
-- **AS3 compatibility**: partial, inherited from Ruffle (see [Ruffle compatibility](https://ruffle.rs/compatibility)). AS3 games show a badge in the library.
-- **No savestate or rewind**: Ruffle does not expose a snapshot of the execution state. Games' native `.sol` saves do work.
-- **Audio**: occasional light crackle on *very* dense scenes.
+- **Not every game works**: compatibility, especially for ActionScript 3, is [Ruffle's](https://ruffle.rs/compatibility). Report a game that does not work from **Settings › Help and feedback › Report a bug**.
+- **Heavy games can slow down.** Overclock AUTO helps where it can.
+- **No savestates.** The games' own saves work.
+- **Audio** can crackle a little in very busy scenes.
 
 ## Credits & licenses
 
 FlashNX is only a **Switch integration layer**. All credit for the Flash emulation goes to **Ruffle**.
 
-- **[Ruffle](https://github.com/ruffle-rs/ruffle)** *(Apache-2.0 / MIT)*: the Flash engine, SWF parsing and the AVM1/AVM2 interpreter. FlashNX embeds `ruffle_core`, `ruffle_render` and `swf`.
+- **[Ruffle](https://github.com/ruffle-rs/ruffle)** *(Apache-2.0 / MIT)*: the Flash engine, SWF parsing and the ActionScript virtual machines. FlashNX embeds `ruffle_core`, `ruffle_render`, `ruffle_video_software`, `naga-agal` and `swf`.
 - **[devkitPro](https://devkitpro.org/) / libnx** *(ISC)*: Switch toolchain and Horizon API.
-- **[switch-mesa](https://github.com/devkitPro/pacman-packages)** *(MIT)*: OpenGL/GLES via Nouveau, the graphics backend.
-- **Networking**: [libcurl](https://curl.se/) · [Mbed-TLS](https://github.com/Mbed-TLS/mbedtls) · [zlib](https://zlib.net/) · [Mozilla](https://curl.se/docs/caextract.html) CA bundle. **Rust crates**: [jpeg-decoder](https://github.com/image-rs/jpeg-decoder) (fork patched for newlib) · `png` · `serde` · `tracing` · `flate2` · `getrandom`, plus Ruffle's own dependencies.
+- **[switch-mesa](https://github.com/devkitPro/pacman-packages)** *(MIT)*: OpenGL/GLES via Nouveau, the graphics backend, with a modified copy of devkitPro's **libdrm_nouveau** *(MIT)* built in (`cpp/third_party/libdrm_nouveau`).
+- **Networking**: [libcurl](https://curl.se/) · [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) · [zlib](https://zlib.net/) · [Mozilla](https://curl.se/docs/caextract.html) CA bundle.
+- **Rust crates**: [jpeg-decoder](https://github.com/image-rs/jpeg-decoder) (a fork patched for newlib, `third_party/jpeg-decoder-switchfork`) · `jpeg-encoder` · `png` · `image-webp` · `ttf-parser` · `ab_glyph_rasterizer` · `serde` · `serde_json` · `flate2` · `dlmalloc` · `url` · `encoding_rs`, plus Ruffle's own dependencies.
 - **[Lucide](https://lucide.dev/)** *(ISC, with icons from Feather under MIT)*: the interface icons, as a font subset built by `scripts/make_icon_font.py`; both notices are in `rust/src/backend/render/kit/icons-LICENSE.txt`.
 - **[Flashpoint Archive](https://flashpointarchive.org/)**: the Flash preservation project. FlashNX uses its public APIs so you can find cover art and download the games you choose. Preserved games remain the property of their original creators, and FlashNX only fetches what you explicitly request. The Flashpoint logo in the Import tab is the Flashpoint Archive's, under [CC BY 4.0](https://flashpointarchive.org/branding) (`assets/flashpoint.png`: its colorized version, cropped and resized).
-
-Thanks to the Switch homebrew ecosystem, whose projects were studied during the port's R&D without reusing code: [ScummVM](https://www.scummvm.org/), the PPSSPP Switch port, [Tico](https://github.com/ticohq/tico), [dawn-switch](https://github.com/dantiicu/dawn-switch), and the devkitPro / GBAtemp community.
+- **[Internet Archive](https://archive.org/)**: the archive.org items and Wayback Machine snapshots the Import tab can take a game from.
 
 **License**: the FlashNX integration code is under the **MIT** license (see [`LICENSE`](LICENSE)). Ruffle and the other dependencies keep their own.
 
 ---
 
-📖 **Architecture, build & technical notes** → [DEVELOPMENT.md](DEVELOPMENT.md)
-📦 **Changelog** → [CHANGELOG.md](CHANGELOG.md)
+**Architecture, build and technical notes**: [DEVELOPMENT.md](DEVELOPMENT.md) · **Changelog**: [CHANGELOG.md](CHANGELOG.md)
