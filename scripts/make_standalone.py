@@ -301,6 +301,42 @@ def fetch_picture(src):
     return path, True
 
 
+def has_pillow():
+    try:
+        import PIL  # noqa: F401 (only whether it is there)
+        return True
+    except ImportError:
+        return False
+
+
+def add_pillow():
+    """Install Pillow for the Python running this script, usable at once,
+    without a restart: the window offers it, so that nobody has to type a
+    command. Returns None, or what went wrong.
+
+    pip installs for the user when the Python install itself is not
+    writeable, into a site-packages folder Python only puts on its path if
+    it existed at startup; it is added here when it was not."""
+    import importlib
+    import site
+    import subprocess
+    try:
+        run = subprocess.run(
+            [sys.executable, '-m', 'pip', 'install', '--disable-pip-version-check', 'pillow'],
+            capture_output=True, text=True, timeout=600,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    except Exception as e:
+        return str(e)
+    if run.returncode != 0:
+        lines = [l.strip() for l in (run.stderr or run.stdout or '').splitlines() if l.strip()]
+        return lines[-1] if lines else 'pip stopped with code %d' % run.returncode
+    user_site = site.getusersitepackages()
+    if site.ENABLE_USER_SITE and user_site not in sys.path and os.path.isdir(user_site):
+        site.addsitedir(user_site)
+    importlib.invalidate_caches()
+    return None if has_pillow() else 'Pillow is installed but this Python cannot load it yet'
+
+
 def make_icon(path):
     """The picture as the 256x256 baseline JPEG the Homebrew Menu draws."""
     with open(path, 'rb') as f:
@@ -312,8 +348,8 @@ def make_icon(path):
         if info and info[:2] == (ICON_SIZE, ICON_SIZE) and not info[2]:
             return data
         raise StandaloneError(
-            'The picture must be a 256x256 JPEG (not progressive), or install '
-            'Pillow ("pip install pillow") to use any picture.')
+            'Without Pillow the picture must be a 256x256 JPEG (not progressive). Pillow reads '
+            'any picture: "Add Pillow" under the preview in the window, or py -m pip install pillow.')
     import io
     try:
         img = Image.open(io.BytesIO(data))
@@ -2069,13 +2105,49 @@ def main_gui():
     picture_link = link(preview, 'Change the picture...', lambda: picture_menu(picture_link),
                         on_card=True)
     picture_link.pack(anchor='w', pady=(px(10), 0))
-    try:
-        import PIL  # noqa: F401 (only whether it is there)
-        picture_note = 'Square, 256x256 or more, is best.'
-    except ImportError:
-        picture_note = 'A 256x256 JPEG (py -m pip install pillow for any picture).'
-    ttk.Label(preview, text=picture_note, style='CardMuted.TLabel',
-              wraplength=icon_px + px(24), justify='left').pack(anchor='w')
+    picture_note = ttk.Label(preview, style='CardMuted.TLabel', wraplength=icon_px + px(24),
+                             justify='left')
+    picture_note.pack(anchor='w')
+    # Without Pillow, the one link that adds it (`add_pillow`): it used to be a
+    # pip command written under the picture, to type in a terminal.
+    pillow_link = link(preview, 'Add Pillow', lambda: adding_pillow(), on_card=True)
+
+    def show_pillow():
+        if has_pillow():
+            picture_note.configure(text='Square, 256x256 or more, is best.')
+            pillow_link.pack_forget()
+        else:
+            picture_note.configure(text='Only a 256x256 JPEG until Pillow is added. It reads any '
+                                        'picture and shows the preview.')
+            pillow_link.pack(anchor='w', pady=(px(4), 0))
+
+    pillow_jobs = queue.Queue()
+
+    def adding_pillow():
+        if pillow_link.cget('text') != 'Add Pillow':
+            return
+        pillow_link.configure(text='Adding Pillow...')
+        say('Adding Pillow, which reads any picture (a few MB from the internet)...')
+        threading.Thread(target=lambda: pillow_jobs.put(add_pillow()), daemon=True).start()
+        root.after(200, poll_pillow)
+
+    def poll_pillow():
+        try:
+            problem = pillow_jobs.get_nowait()
+        except queue.Empty:
+            root.after(200, poll_pillow)
+            return
+        pillow_link.configure(text='Add Pillow')
+        if problem:
+            say('Pillow could not be added: %s. In a terminal: py -m pip install pillow' % problem,
+                error=True)
+            return
+        say('Pillow is added: any picture works now, and the preview shows it.')
+        show_pillow()
+        state['icon_key'] = None
+        refresh()
+
+    show_pillow()
     icon_box.bind('<Button-1>', lambda _e: picture_menu(icon_box))
 
     # ── Bottom: the FlashNX inside, what is going on, the two actions ──────
@@ -2320,7 +2392,7 @@ def main_gui():
         try:
             from PIL import Image, ImageTk
         except ImportError:
-            icon_box.configure(image=blank, text='Install Pillow\nfor a preview')
+            icon_box.configure(image=blank, text='Add Pillow\nfor a preview')
             return
         if icon and is_web_picture(icon):
             got = state['web'].get(icon, 'unasked')

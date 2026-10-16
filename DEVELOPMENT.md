@@ -142,7 +142,9 @@ played in FlashNX. Names do not always match, so both can be given by hand:
 address itself. Without `--name` the app takes the real title FlashNX keeps in
 `<game>.swf.meta.json`, else the file's name. Python's standard library is all it
 needs; Pillow lets the picture be any size or format, without it the picture must
-be a 256x256 JPEG. Given `latest` instead of a path, it first downloads the latest
+be a 256x256 JPEG. The window offers to add Pillow ("Add Pillow" under the
+preview, `add_pillow`: pip for the Python running the script, usable at once
+without a restart), so nobody has to type a command. Given `latest` instead of a path, it first downloads the latest
 release's `FlashNX.nro` from GitHub, next to itself (`scripts/*.nro` is
 git-ignored), so a creator only needs the script. The picture can also be a web
 address (a Google Images result link points at the picture it shows, and its
