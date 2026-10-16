@@ -2272,6 +2272,15 @@ def main_gui():
         choice['files'] = choice['address'] = None
         is_swf = swf.lower().endswith('.swf')
         state['game_title'] = (meta_title(swf) or os.path.basename(swf)[:-4]) if is_swf else ''
+        # The name follows the game until it is typed over: its real title when
+        # FlashNX kept one beside it (`meta_title`), else its file name. Only
+        # when the game changes: done on every change of the fields, emptying
+        # the name to type another refilled it at once, and typing over a
+        # selected name put the title back in the middle of the new one
+        # ("Super Mario 63Super_Mario_63_2010").
+        if is_swf and fields['name'].get() in ('', state['auto_name']):
+            state['auto_name'] = state['game_title']
+            fields['name'].set(state['game_title'])
         if is_swf and fields['icon'].get().strip() in ('', state['auto_icon']):
             # The cover FlashNX itself would show for the game: named like it,
             # beside it (covers.rs, `resolve`), else the one it downloaded,
@@ -2294,12 +2303,7 @@ def main_gui():
         else:
             game_view.grid_remove()
             empty_view.grid(row=0, column=0, sticky='nsew')
-        # The name follows the game until it is typed over: its real title when
-        # FlashNX kept one beside it (`meta_title`), else its file name.
         title = state['game_title']
-        if title and fields['name'].get() in ('', state['auto_name']):
-            state['auto_name'] = title
-            fields['name'].set(title)
         shown_name.configure(text=fields['name'].get().strip() or title or 'My game')
         shown_author.configure(text=fields['author'].get().strip() or 'FlashNX')
         shown_version.configure(text='Version ' + (fields['version'].get().strip() or '1.0.0'))
