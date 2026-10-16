@@ -712,9 +712,10 @@ def romfs_files(path, romfs_off):
 # Putting it together
 # ---------------------------------------------------------------------------
 
-def game_entries(swf, files_dir=None):
-    """The RomFS contents: the .swf at the root, its companions under
-    `<game>.files/` (where FlashNX looks for them next to the game)."""
+def game_entries(swf, files_dir=None, address=None):
+    """The RomFS contents: the .swf at the root, its Flashpoint address beside
+    it (`game_address`), its companions under `<game>.files/` (where FlashNX
+    looks for them next to the game)."""
     if not os.path.isfile(swf):
         raise StandaloneError('%s does not exist.' % swf)
     name = os.path.basename(swf)
@@ -722,15 +723,9 @@ def game_entries(swf, files_dir=None):
         raise StandaloneError('%s is not a .swf file.' % name)
     stem = name[:-4]
     entries = [(name, swf)]
-    # A Flashpoint game's original address, in `<game>.swf.base` beside it.
-    # FlashNX runs the game under that URL (rust/src/lib.rs, `ruffle_init`): its
-    # relative loads resolve against it into `<game>.files/<host>/<path>`, and
-    # its saves are named after it. Left out, such a game ran under the flat
-    # `flashforswitch.local` address, found none of its files and stalled on
-    # its loader, and it saved apart from the same game in FlashNX.
-    base = swf + '.base'
-    if os.path.isfile(base):
-        entries.append((name + '.base', base))
+    url = game_address(swf, address)
+    if url:
+        entries.append((name + '.base', url.encode('utf-8')))
     root = companions_root(swf, files_dir)
     if root:
         for top, subdirs, names in os.walk(root):
@@ -740,6 +735,41 @@ def game_entries(swf, files_dir=None):
                 rel = os.path.relpath(full, root).replace(os.sep, '/')
                 entries.append((stem + '.files/' + rel, full))
     return entries
+
+
+def game_address(swf, address=None):
+    """A Flashpoint game's original address, or None.
+
+    FlashNX runs such a game under that URL (rust/src/lib.rs, `ruffle_init`,
+    which reads `romfs:/<game>.swf.base`): its relative loads resolve against
+    it into `<game>.files/<host>/<path>`, and its saves are named after it.
+    Left out, the game ran under the flat `flashforswitch.local` address,
+    found none of its files and stalled on its loader, and it saved apart
+    from the same game in FlashNX.
+
+    `address` None takes the `<game>.swf.base` FlashNX writes beside a game it
+    downloads; False means none; a web address is that address; anything else
+    is the path of a file holding one, a `.base` named otherwise."""
+    if address is False:
+        return None
+    if address is None:
+        if not os.path.isfile(swf + '.base'):
+            return None
+        address = swf + '.base'
+    text = address.strip()
+    if not text.startswith(('http://', 'https://')):
+        try:
+            with open(address, 'rb') as f:
+                text = f.read(4096).decode('utf-8', 'replace').strip()
+        except OSError:
+            raise StandaloneError('%s does not exist.' % address)
+        # Flashpoint quotes a launch command with a space in it; FlashNX
+        # writes it unquoted, but a hand-made file may not be.
+        text = text.strip('"').strip()
+        if not text.startswith(('http://', 'https://')):
+            raise StandaloneError('%s does not hold a web address: a .swf.base is one line, '
+                                  'http://... or https://...' % os.path.basename(address))
+    return text.splitlines()[0].strip()
 
 
 def companions_root(swf, files_dir=None):
@@ -775,20 +805,21 @@ def website_folders(root):
     return sorted(n for n in names if HOST_FOLDER.match(n) and os.path.isdir(os.path.join(root, n)))
 
 
-def address_note(swf, root):
-    """The note for a game whose files are filed by website while its
-    `.swf.base` is not beside it, or None. FlashNX writes that file with the
-    game when it downloads one from Flashpoint; copying the game off the card
+def address_note(swf, root, address=None):
+    """The note for a game whose files are filed by website while it has no
+    Flashpoint address (`game_address`), or None. FlashNX writes that address
+    beside a game it downloads from Flashpoint; copying the game off the card
     without it is easy, and nothing else would say why the app then hangs."""
-    if os.path.isfile(swf + '.base'):
+    if game_address(swf, address):
         return None
     sites = website_folders(root)
     if not sites:
         return None
     shown = ', '.join(sites[:2]) + (', ...' if len(sites) > 2 else '')
     return ('note: its files are filed by website (%s), but %s.base, the address the game '
-            'runs at, is not beside it. Copy it from the SD card too: without it the game '
-            'will not find its files.' % (shown, os.path.basename(swf)))
+            'runs at, is not beside it. Copy it from the SD card too, or give it with '
+            '--address: without it the game will not find its files.'
+            % (shown, os.path.basename(swf)))
 
 
 def meta_title(swf):
@@ -803,22 +834,26 @@ def meta_title(swf):
     return title.strip() if isinstance(title, str) and title.strip() else None
 
 
-def game_report(swf, files_dir=None, nro=None):
+def game_report(swf, files_dir=None, nro=None, address=None):
     """What an app made from `swf` would carry, worked out without writing
     anything, for the window to say as soon as the game is chosen: how many
-    companion files and how big, whether its Flashpoint address goes with
-    it, the note when that address is missing, and the app's size in bytes
-    (None without a FlashNX.nro to count its program part)."""
-    entries = game_entries(swf, files_dir)
+    companion files and how big, and from which folder; its Flashpoint
+    address, if any; the websites its files are filed under when that address
+    is missing; and the app's size in bytes (None without a FlashNX.nro to
+    count its program part)."""
+    entries = game_entries(swf, files_dir, address)
     companions = [src for rel, src in entries if '/' in rel]
     root = companions_root(swf, files_dir)
+    url = game_address(swf, address)
     report = {
         'files': len(companions),
         'bytes': sum(source_size(s) for s in companions),
-        'base': any(rel.endswith('.base') for rel, _src in entries if '/' not in rel),
-        'note': address_note(swf, root),
+        'folder': root,
+        'address': url,
+        'base': bool(url),
+        'note': address_note(swf, root, address),
         # The folders named like websites while the address is missing.
-        'sites': [] if os.path.isfile(swf + '.base') else website_folders(root),
+        'sites': [] if url else website_folders(root),
         'game': os.path.basename(swf),
         'size': None,
     }
@@ -996,10 +1031,10 @@ def update_app(app, nro, out_path, log=print, progress=None):
 
 
 def make_standalone(nro, swf, out_path, name=None, author=None, version=None,
-                    icon=None, files_dir=None, log=print, progress=None):
+                    icon=None, files_dir=None, log=print, progress=None, address=None):
     """Write the standalone .nro; returns the list of files it carries."""
     prefix, base_icon, base_nacp, carried, found = flashnx_program(nro)
-    entries = game_entries(swf, files_dir)
+    entries = game_entries(swf, files_dir, address)
     stem = os.path.basename(swf)[:-4]
     name = name or meta_title(swf) or stem
     author = author or 'FlashNX'
@@ -1015,7 +1050,7 @@ def make_standalone(nro, swf, out_path, name=None, author=None, version=None,
     nacp = make_nacp(base_nacp, name, author, version)
     if carried:
         log('note: this .nro already carried a game; it is replaced.')
-    missing = address_note(swf, companions_root(swf, files_dir))
+    missing = address_note(swf, companions_root(swf, files_dir), address)
     if missing:
         log(missing)
     if ' ' in os.path.basename(out_path):
@@ -1357,6 +1392,10 @@ def main_cli(argv):
     p.add_argument('--icon', help='a picture for the icon, a file or a web address '
                                   '(default: the FlashNX icon)')
     p.add_argument('--files', help='folder of companion files (default: <game>.files next to the .swf)')
+    p.add_argument('--address', metavar='FILE_OR_URL',
+                   help="a Flashpoint game's original address: the file FlashNX keeps it in, "
+                        "named otherwise than <game>.swf.base, or the address itself "
+                        "(default: <game>.swf.base next to the .swf)")
     p.add_argument('-o', '--out', help='output .nro (default: <name>.nro here)')
     args = p.parse_args(argv)
     if bool(args.update) == bool(args.swf):
@@ -1395,7 +1434,8 @@ def main_cli(argv):
                   % (name, had or '(version not recorded)', now, out_path))
             return 0
         entries = make_standalone(args.nro, args.swf, out_path, name, args.author,
-                                  args.version, args.icon, args.files, progress=copying)
+                                  args.version, args.icon, args.files, progress=copying,
+                                  address=args.address)
     except StandaloneError as e:
         print('error: %s' % e, file=sys.stderr)
         return 1
@@ -1403,13 +1443,15 @@ def main_cli(argv):
     return 0
 
 
-def windows_drop(hwnds, on_drop):
+def windows_drop(hwnds, on_drop, on_hover=None):
     """Make the windows `hwnds` drop targets for what Explorer and browsers
     drag, through OLE's IDropTarget (the interface browsers drag with; the
     simpler WM_DROPFILES only ever carries files that exist on disk), from
     the standard library alone. `on_drop(items)` gets file paths, or a picture's
-    address. Returns an object to keep alive, or None where this cannot work
-    (not Windows, not 64-bit, OLE refused)."""
+    address; `on_hover(True)` hears that something is dragged over the
+    window, `on_hover(False)` that it left or was dropped. Returns an object
+    to keep alive, or None where this cannot work (not Windows, not 64-bit,
+    OLE refused)."""
     if sys.platform != 'win32':
         return None
     import ctypes
@@ -1548,8 +1590,17 @@ def windows_drop(hwnds, on_drop):
             return S_OK
         return E_NOINTERFACE
 
+    def hover(over):
+        if on_hover:
+            on_hover(over)
+
     def drag_enter(this, data_object, keys, point, effect):
         effect[0] = DROPEFFECT_COPY
+        hover(True)
+        return S_OK
+
+    def drag_leave(this):
+        hover(False)
         return S_OK
 
     def drag_over(this, keys, point, effect):
@@ -1562,6 +1613,7 @@ def windows_drop(hwnds, on_drop):
             items = items_of(data_object)
         except Exception:
             items = []
+        hover(False)
         on_drop(items)
         return S_OK
 
@@ -1570,7 +1622,7 @@ def windows_drop(hwnds, on_drop):
                  Count(lambda this: 1), Count(lambda this: 1),
                  DragEnter(guarded(drag_enter, E_UNEXPECTED)),
                  DragOver(guarded(drag_over, E_UNEXPECTED)),
-                 DragLeave(lambda this: S_OK), DragEnter(guarded(drop, E_UNEXPECTED)))
+                 DragLeave(guarded(drag_leave, S_OK)), DragEnter(guarded(drop, E_UNEXPECTED)))
     vtable = (ctypes.c_void_p * len(callbacks))(
         *[ctypes.cast(c, ctypes.c_void_p).value for c in callbacks])
     target = ctypes.pointer(vtable)  # a COM object is a pointer to its vtable
@@ -1589,12 +1641,20 @@ def windows_drop(hwnds, on_drop):
 
 
 def main_gui():
+    """The window: two steps, the game then its name in the Homebrew Menu,
+    beside a preview of the app as the Homebrew Menu will list it.
+
+    It used to lay every input out as a field of its own, seven of them with
+    four Browse buttons and a hint beside every label, though most are found
+    beside the game. Now what goes in with the game is a list of what was
+    found, each line with a link to change it: names do not always match
+    (Jonathan, 2026-10-16), so nothing found is beyond reach."""
     import io
     import queue
     import threading
     import time
     import tkinter as tk
-    from tkinter import filedialog, font as tkfont, ttk
+    from tkinter import filedialog, font as tkfont, simpledialog, ttk
 
     if sys.platform == 'win32':
         # Without this Windows scales the window as a bitmap on a scaled
@@ -1626,10 +1686,14 @@ def main_gui():
         return int(round(v * scale))
 
     icon_px = px(168)
-    root.minsize(px(780), 0)
+    left_w = px(560)          # the steps' column, fixed: nothing it says moves the window
+    card_pad = px(18)
+    text_w = left_w - 2 * card_pad - px(4)
 
     bg, card, ink, muted, line, err = '#f5f5f3', '#ffffff', '#1d1d1f', '#6e6e73', '#d6d6d2', '#b3261e'
     family = 'Segoe UI' if sys.platform == 'win32' else tkfont.nametofont('TkDefaultFont').actual('family')
+    # Segoe UI has no check mark; Tk on Windows does not fall back for it.
+    symbols = 'Segoe UI Symbol' if sys.platform == 'win32' else family
     for named in ('TkDefaultFont', 'TkTextFont', 'TkMenuFont', 'TkHeadingFont'):
         tkfont.nametofont(named).configure(family=family, size=10)
     root.configure(bg=bg)
@@ -1641,15 +1705,23 @@ def main_gui():
     style.configure('TLabel', background=bg, foreground=ink)
     style.configure('Title.TLabel', font=(family, 17, 'bold'))
     style.configure('Muted.TLabel', foreground=muted)
-    style.configure('Field.TLabel', font=(family, 10, 'bold'))
-    style.configure('Hint.TLabel', foreground=muted, font=(family, 9))
     style.configure('Error.TLabel', foreground=err)
-    style.configure('HintError.TLabel', foreground=err, font=(family, 9))
+    style.configure('Step.TLabel', font=(family, 12, 'bold'))
+    style.configure('StepNum.TLabel', foreground=muted, font=(family, 12, 'bold'))
+    style.configure('Field.TLabel', font=(family, 10, 'bold'))
     style.configure('Link.TLabel', foreground=ink, font=(family, 9, 'underline'))
-    for name, size, weight, colour in (('Card.TLabel', 10, 'normal', ink),
-                                       ('CardName.TLabel', 12, 'bold', ink),
-                                       ('CardMuted.TLabel', 9, 'normal', muted)):
-        style.configure(name, background=card, foreground=colour, font=(family, size, weight))
+    for name, size, weight, colour, face in (
+            ('Card.TLabel', 10, 'normal', ink, family),
+            ('CardTitle.TLabel', 12, 'bold', ink, family),
+            ('CardName.TLabel', 12, 'bold', ink, family),
+            ('CardMuted.TLabel', 9, 'normal', muted, family),
+            ('CardOff.TLabel', 10, 'normal', muted, family),
+            ('CardBad.TLabel', 10, 'normal', err, family),
+            ('CardLink.TLabel', 9, 'underline', ink, family),
+            ('CardMark.TLabel', 10, 'normal', ink, symbols),
+            ('CardMarkOff.TLabel', 10, 'normal', muted, symbols),
+            ('CardMarkBad.TLabel', 10, 'normal', err, symbols)):
+        style.configure(name, background=card, foreground=colour, font=(face, size, weight))
     style.configure('TEntry', fieldbackground=card, bordercolor=line, lightcolor=card,
                     darkcolor=card, insertcolor=ink, padding=(8, 6))
     style.map('TEntry', bordercolor=[('focus', '#8e8e93')], lightcolor=[('focus', card)])
@@ -1666,6 +1738,17 @@ def main_gui():
               darkcolor=[('disabled', '#b0b0b4'), ('active', '#3a3a3c')],
               bordercolor=[('disabled', '#b0b0b4')],
               foreground=[('disabled', '#f5f5f3')])
+    row_font = tkfont.Font(root, family=family, size=10)
+    name_font = tkfont.Font(root, family=family, size=12, weight='bold')
+
+    def fit(text, font, width):
+        """`text` cut to `width` pixels in `font`, its end kept: a file is
+        read by its name, a path by its last folders."""
+        if font.measure(text) <= width:
+            return text
+        while text and font.measure('...' + text) > width:
+            text = text[1:]
+        return '...' + text
 
     here = os.path.dirname(os.path.abspath(__file__))
     nro_cache = {}
@@ -1694,10 +1777,34 @@ def main_gui():
     default_nro = max(found, key=lambda p: (nro_facts(p)[1] or (0,), os.path.getmtime(p)),
                       default='')
 
-    outer = ttk.Frame(root, padding=(px(28), px(24), px(28), px(22)))
-    outer.grid(sticky='nsew')
-    root.columnconfigure(0, weight=1)
-    outer.columnconfigure(0, weight=1)
+    # What the app is made of. `choice` holds what was picked by hand for the
+    # two things otherwise found beside the game: None takes what is there,
+    # False takes nothing, anything else is what was picked.
+    fields = {key: tk.StringVar(value=value) for key, value in (
+        ('nro', default_nro), ('swf', ''), ('icon', ''),
+        ('name', ''), ('author', 'FlashNX'), ('version', '1.0.0'))}
+    choice = {'files': None, 'address': None}
+    # `web`: a picture given by its address -> its downloaded copy, None while
+    # it downloads, or the reason it failed.
+    state = {'auto_name': '', 'auto_icon': '', 'icon_key': None, 'photo': None, 'web': {},
+             'game_title': '', 'report_key': None, 'report_done': None, 'swf_seen': None}
+
+    def link(parent, text, command, on_card=False):
+        label = ttk.Label(parent, text=text, style='CardLink.TLabel' if on_card else 'Link.TLabel',
+                          cursor='hand2')
+        label.bind('<Button-1>', lambda _e: command())
+        return label
+
+    def popup(widget, items):
+        """A small menu under `widget`: (label, command), None for a rule."""
+        menu = tk.Menu(root, tearoff=0)
+        for item in items:
+            if item is None:
+                menu.add_separator()
+            else:
+                menu.add_command(label=item[0], command=item[1])
+        menu.tk_popup(widget.winfo_rootx(), widget.winfo_rooty() + widget.winfo_height())
+
     def flashnx_logo(height):
         """The wordmark at `height` pixels: resampled with Pillow, or halved by
         Tk itself (it reads PNG since 8.6) without it."""
@@ -1713,94 +1820,169 @@ def main_gui():
         except Exception:
             return None
 
-    header = ttk.Frame(outer)
-    header.grid(row=0, column=0, columnspan=2, sticky='w')
-    ttk.Label(header, text='Make a Switch app from a Flash game', style='Title.TLabel').pack(
-        anchor='w')
-    ttk.Label(outer, style='Muted.TLabel', wraplength=px(720), justify='left',
+    outer = ttk.Frame(root, padding=(px(28), px(22), px(28), px(20)))
+    outer.grid(sticky='nsew')
+    root.columnconfigure(0, weight=1)
+    ttk.Label(outer, text='Make a Switch app from a Flash game', style='Title.TLabel').grid(
+        row=0, column=0, columnspan=2, sticky='w')
+    ttk.Label(outer, style='Muted.TLabel', wraplength=left_w + icon_px + px(60), justify='left',
               text='One .nro with FlashNX and the game inside. It shows in the Homebrew Menu '
                    'and starts straight into the game, without FlashNX installed.').grid(
         row=1, column=0, columnspan=2, sticky='w', pady=(px(4), px(20)))
 
-    form = ttk.Frame(outer)
-    form.grid(row=2, column=0, sticky='nsew')
-    form.columnconfigure(0, weight=1)
-    fields = {}
-    heads = {}
-    hints = {}
-    under = {}  # the line under a field, by field
-    form_row = [0]
+    left = ttk.Frame(outer)
+    left.grid(row=2, column=0, sticky='nw')
+    left.columnconfigure(0, minsize=left_w)
 
-    def field(label, key, hint=None, browse=None, value='', parent=None, col=0, width=None,
-              note=None, limit=None, live_note=False):
-        host = parent or form
-        r = form_row[0] if parent is None else 0
-        head = ttk.Frame(host)
-        head.grid(row=r, column=col, sticky='w', pady=(0, px(4)), padx=(0 if col == 0 else px(12), 0))
-        ttk.Label(head, text=label, style='Field.TLabel').pack(side='left')
-        if hint:
-            hints[key] = ttk.Label(head, text='  ' + hint, style='Hint.TLabel')
-            hints[key].pack(side='left')
-        var = tk.StringVar(value=value)
-        entry = ttk.Entry(host, textvariable=var, width=width or 10)
-        if limit:
-            # What the NACP has room for, in UTF-8 bytes: typing stops there
-            # rather than the name being cut when the app is written.
-            check = root.register(lambda text: len(text.encode('utf-8')) <= limit)
-            entry.configure(validate='key', validatecommand=(check, '%P'))
-        # Without a Browse button beside it, a field spans its column too.
-        entry.grid(row=r + 1, column=col, sticky='ew', padx=(0 if col == 0 else px(12), 0),
-                   columnspan=1 if (browse or parent is not None) else 2)
-        if browse:
-            ttk.Button(host, text='Browse...', command=browse).grid(
-                row=r + 1, column=1, sticky='e', padx=(px(10), 0))
-            # A path is read by its end: show the file name, not C:\Users\...
-            var.trace_add('write', lambda *_: entry.after_idle(entry.xview_moveto, 1.0))
-        if parent is None:
-            form_row[0] += 2
-            if note or live_note:
-                # What a field accepts, under it: beside the label it would
-                # widen the whole window. A live one wraps in the form's width.
-                under[key] = ttk.Label(form, text=note or '', style='Hint.TLabel', justify='left',
-                                       wraplength=px(560) if live_note else 0)
-                under[key].grid(row=form_row[0], column=0, columnspan=2, sticky='nw', pady=(px(4), 0))
-                if live_note:
-                    # Two lines kept whatever it says, so the fields under it
-                    # stay put as it changes (what to copy, then what goes in).
-                    lines = tkfont.Font(root, family=family, size=9).metrics('linespace')
-                    form.rowconfigure(form_row[0], minsize=2 * lines + px(8))
-                form_row[0] += 1
-            ttk.Frame(form, height=px(12)).grid(row=form_row[0], column=0)
-            form_row[0] += 1
-        undoable(var, entry)
-        fields[key] = var
-        heads[key] = head
-        return var
+    def step(row, number, title, top=0):
+        head = ttk.Frame(left)
+        head.grid(row=row, column=0, sticky='w', pady=(top, px(8)))
+        ttk.Label(head, text=number, style='StepNum.TLabel').pack(side='left', padx=(0, px(10)))
+        ttk.Label(head, text=title, style='Step.TLabel').pack(side='left')
+
+    # ── 1. The game ────────────────────────────────────────────────────────
+    step(0, '1', 'The game')
+    game_card = tk.Frame(left, bg=card, highlightthickness=max(1, px(1)), highlightbackground=line,
+                         highlightcolor=line, padx=card_pad, pady=px(14))
+    game_card.grid(row=1, column=0, sticky='ew')
+    game_card.columnconfigure(0, weight=1)
+
+    def choose_game():
+        start = os.path.dirname(fields['swf'].get()) if fields['swf'].get() else None
+        path = filedialog.askopenfilename(title='The game', initialdir=start,
+                                          filetypes=[('Flash game', '*.swf')])
+        if path:
+            fields['swf'].set(os.path.normpath(path))
+
+    # Before a game: where it goes, the button that does the same, and what
+    # to bring from the card with it, inside the place it is dropped on.
+    empty_view = tk.Frame(game_card, bg=card)
+    ttk.Label(empty_view, text='Drop the game here', style='CardTitle.TLabel').grid(
+        row=0, column=0, sticky='w')
+    ttk.Button(empty_view, text='Choose the game...', command=choose_game).grid(
+        row=1, column=0, sticky='w', pady=(px(10), px(10)))
+    ttk.Label(empty_view, style='CardMuted.TLabel', wraplength=text_w, justify='left',
+              text='Its .swf, with everything beside it whose name starts the same: its .files '
+                   'folder, its .swf.base. Games downloaded in FlashNX are in sdmc:/flashnx/ on '
+                   'the SD card, or in the games folder chosen in FlashNX.').grid(
+        row=2, column=0, sticky='w')
+
+    # With a game: its name, then a line for each thing that goes in with it,
+    # each with its link, as found or as picked.
+    game_view = tk.Frame(game_card, bg=card)
+    game_view.columnconfigure(0, weight=1)
+    game_name = ttk.Label(game_view, style='CardName.TLabel')
+    game_name.grid(row=0, column=0, sticky='w')
+    link(game_view, 'Change...', choose_game, on_card=True).grid(row=0, column=1, sticky='e')
+    rows_box = tk.Frame(game_view, bg=card)
+    rows_box.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(px(10), 0))
+    rows_box.columnconfigure(1, weight=1)
+    rows = []
+    # Made once and filled in (`show_row`): on Windows each widget is a window
+    # of its own, registered for drops when the window opens.
+    for i in range(3):
+        mark = ttk.Label(rows_box, style='CardMark.TLabel', width=2)
+        # Up to its link, which takes about 80 px: wrapped at less, a red line
+        # broke in the middle of the card with nothing beside it.
+        text = ttk.Label(rows_box, style='Card.TLabel', wraplength=text_w - px(110), justify='left')
+        act = ttk.Label(rows_box, style='CardLink.TLabel', cursor='hand2')
+        mark.grid(row=i, column=0, sticky='nw')
+        text.grid(row=i, column=1, sticky='nw', pady=(0, px(4)))
+        act.grid(row=i, column=2, sticky='ne', padx=(px(12), 0))
+        rows.append((mark, text, act))
+
+    def show_row(i, kind, words, action=None):
+        """Line `i`: 'ok' (a check mark), 'off' (nothing there, quiet, a
+        dash), 'info' (quiet, no mark), 'bad' (it will go wrong, in red) or
+        None (hidden); `action` is (link, what it does)."""
+        mark, text, act = rows[i]
+        if kind is None:
+            for w in rows[i]:
+                w.configure(text='')
+            return
+        mark.configure(text={'ok': '\u2713', 'off': '\u2013', 'info': '', 'bad': '\u2717'}[kind],
+                       style={'ok': 'CardMark', 'off': 'CardMarkOff', 'info': 'CardMarkOff',
+                              'bad': 'CardMarkBad'}[kind] + '.TLabel')
+        text.configure(text=words, style={'ok': 'Card', 'off': 'CardOff', 'info': 'CardOff',
+                                          'bad': 'CardBad'}[kind] + '.TLabel')
+        if action:
+            act.configure(text=action[0])
+            act.bind('<Button-1>', lambda _e, w=act, f=action[1]: f(w))
+        else:
+            act.configure(text='')
+            act.unbind('<Button-1>')
+
+    def set_choice(key, value):
+        choice[key] = value
+        state['report_key'] = None
+        refresh()
+
+    def pick_folder(_widget=None):
+        path = filedialog.askdirectory(title='The game\'s companion files')
+        if path:
+            set_choice('files', os.path.normpath(path))
+
+    def files_menu(widget):
+        items = [('Another folder...', pick_folder), ('None', lambda: set_choice('files', False))]
+        if choice['files'] is not None:
+            items.append(('The one beside the game', lambda: set_choice('files', None)))
+        popup(widget, items)
+
+    def pick_address_file():
+        swf = fields['swf'].get().strip()
+        path = filedialog.askopenfilename(
+            title='The file holding the game\'s Flashpoint address (its .swf.base)',
+            initialdir=os.path.dirname(swf) or None,
+            filetypes=[('Flashpoint address', '*.base'), ('All files', '*.*')])
+        if path:
+            set_choice('address', os.path.normpath(path))
+
+    def type_address():
+        url = simpledialog.askstring(
+            'Flashpoint address', 'The address the game ran at (http://... or https://...):',
+            parent=root)
+        if url and url.strip():
+            set_choice('address', url.strip())
+
+    def address_menu(widget):
+        items = [('From a file...', pick_address_file), ('Type it...', type_address)]
+        if choice['address'] is not False:
+            items.append(('None', lambda: set_choice('address', False)))
+        if choice['address'] is not None:
+            items.append(('The one beside the game', lambda: set_choice('address', None)))
+        popup(widget, items)
+
+    # ── 2. In the Homebrew Menu ────────────────────────────────────────────
+    step(2, '2', 'In the Homebrew Menu', top=px(22))
+    names = ttk.Frame(left)
+    names.grid(row=3, column=0, sticky='ew')
+    names.columnconfigure(0, weight=3)
+    names.columnconfigure(1, weight=1)
 
     def undoable(var, entry):
         """Ctrl+Z / Ctrl+Y in a field, which a Tk entry does not have. A run
         of typing is one step; a value chosen or dropped is one too."""
         done, undone = [var.get()], []
-        state = {'busy': False, 'typed_at': 0.0}
+        flags = {'busy': False, 'typed_at': 0.0}
 
         def changed(*_):
-            if state['busy']:
+            if flags['busy']:
                 return
             value, now = var.get(), time.monotonic()
             if value == done[-1]:
                 return
             typing = abs(len(value) - len(done[-1])) == 1
-            if typing and len(done) > 1 and now - state['typed_at'] < 1.0:
+            if typing and len(done) > 1 and now - flags['typed_at'] < 1.0:
                 done[-1] = value
             else:
                 done.append(value)
-            state['typed_at'] = now if typing else 0.0
+            flags['typed_at'] = now if typing else 0.0
             undone.clear()
 
         def put(value):
-            state['busy'] = True
+            flags['busy'] = True
             var.set(value)
-            state['busy'] = False
+            flags['busy'] = False
             entry.icursor('end')
 
         def undo(_event=None):
@@ -1821,54 +2003,26 @@ def main_gui():
         for seq in ('<Control-y>', '<Control-Y>'):
             entry.bind(seq, redo)
 
-    def pick_file(key, title, types):
-        start = os.path.dirname(fields[key].get()) if fields[key].get() else None
-        path = filedialog.askopenfilename(title=title, filetypes=types, initialdir=start)
-        if path:
-            fields[key].set(os.path.normpath(path))
+    def text_field(label, key, limit, row, col, span=1):
+        pad = (0 if col == 0 else px(12), 0)
+        ttk.Label(names, text=label, style='Field.TLabel').grid(
+            row=row, column=col, columnspan=span, sticky='w', padx=pad, pady=(0, px(4)))
+        entry = ttk.Entry(names, textvariable=fields[key], width=10)
+        # What the NACP has room for, in UTF-8 bytes (511, 255, 15, as
+        # Sphaira's forwarder editor limits them): typing stops there rather
+        # than the name being cut when the app is written.
+        check = root.register(lambda text: len(text.encode('utf-8')) <= limit)
+        entry.configure(validate='key', validatecommand=(check, '%P'))
+        entry.grid(row=row + 1, column=col, columnspan=span, sticky='ew', padx=pad,
+                   pady=(0, px(12)))
+        undoable(fields[key], entry)
 
-    def pick_folder():
-        path = filedialog.askdirectory(title='Folder of the game\'s companion files')
-        if path:
-            fields['files'].set(os.path.normpath(path))
+    text_field('Name', 'name', NACP_NAME_CAP - 1, 0, 0, span=2)
+    text_field('Author', 'author', NACP_AUTHOR_CAP - 1, 2, 0)
+    text_field('Version', 'version', NACP_VERSION_CAP - 1, 2, 1)
 
-    field('FlashNX.nro', 'nro', 'as released, 1.9.0 or later',
-          lambda: pick_file('nro', 'FlashNX.nro', [('Switch homebrew', '*.nro')]), default_nro)
-    download_link = ttk.Label(heads['nro'], text='Download the latest', style='Link.TLabel',
-                              cursor='hand2')
-    download_link.pack(side='left', padx=(px(12), 0))
-    field('Game', 'swf', '.swf',
-          lambda: pick_file('swf', 'The game', [('Flash game', '*.swf')]))
-    field('Companion files', 'files', 'optional, found next to the game when it has some',
-          pick_folder, live_note=True)
-    # What goes into the app, under the game's two fields (`show_contents`).
-    # A little under the form's width: at exactly its width the label's own
-    # padding asked for more, the form grew, the label followed, and the
-    # window crept 45 px wider before Tk settled.
-    form.bind('<Configure>', lambda e: under['files'].configure(wraplength=max(px(200), e.width - px(8))))
-    try:
-        import PIL  # noqa: F401 (only whether it is there)
-        picture_note = 'JPG, PNG, WebP, BMP, GIF or a web address. Square, 256x256 or more, is best.'
-    except ImportError:
-        picture_note = 'A 256x256 JPEG (install Pillow for any picture: py -m pip install pillow).'
-    field('Picture', 'icon', 'optional, found next to the game when it has one', note=picture_note,
-          browse=
-          lambda: pick_file('icon', 'Picture for the icon',
-                            [('Pictures', '*.jpg *.jpeg *.png *.webp *.bmp *.gif'),
-                             ('All files', '*.*')]))
-    # The NACP's room, as Sphaira's forwarder editor limits them too.
-    field('Name', 'name', 'up to %d characters' % (NACP_NAME_CAP - 1), limit=NACP_NAME_CAP - 1)
-    pair = ttk.Frame(form)
-    pair.grid(row=form_row[0], column=0, columnspan=2, sticky='ew')
-    pair.columnconfigure(0, weight=3)
-    pair.columnconfigure(1, weight=1)
-    field('Author', 'author', 'up to %d' % (NACP_AUTHOR_CAP - 1), value='FlashNX', parent=pair,
-          col=0, limit=NACP_AUTHOR_CAP - 1)
-    field('Version', 'version', 'up to %d' % (NACP_VERSION_CAP - 1), value='1.0.0', parent=pair,
-          col=1, limit=NACP_VERSION_CAP - 1)
-
-    # The app as the Homebrew Menu will list it.
-    preview = tk.Frame(outer, bg=card, highlightthickness=1, highlightbackground=line,
+    # ── The app as the Homebrew Menu will list it ──────────────────────────
+    preview = tk.Frame(outer, bg=card, highlightthickness=max(1, px(1)), highlightbackground=line,
                        padx=px(18), pady=px(16))
     preview.grid(row=2, column=1, sticky='n', padx=(px(28), 0))
     logo = flashnx_logo(px(22))
@@ -1880,7 +2034,7 @@ def main_gui():
     # characters. A blank square image keeps it a square either way.
     blank = tk.PhotoImage(width=icon_px, height=icon_px)
     icon_box = tk.Label(preview, bg='#e9e9e6', image=blank, compound='center', bd=0,
-                        fg=muted, font=(family, 9))
+                        fg=muted, font=(family, 9), cursor='hand2')
     icon_box.pack(pady=(px(10), px(12)))
     shown_name = ttk.Label(preview, style='CardName.TLabel', wraplength=icon_px + px(24),
                            justify='left')
@@ -1891,22 +2045,78 @@ def main_gui():
     shown_version = ttk.Label(preview, style='CardMuted.TLabel')
     shown_version.pack(anchor='w')
 
-    bar = ttk.Frame(outer)
-    bar.grid(row=3, column=0, columnspan=2, sticky='ew', pady=(px(22), 0))
-    bar.columnconfigure(0, weight=1)
-    # Its wrapping width is what the buttons leave of the bar (`fit_status`),
-    # never more: a long line here used to widen the window by a fifth, moving
-    # the form and the preview under the mouse.
-    status = ttk.Label(bar, style='Muted.TLabel', wraplength=px(300), justify='left')
-    status.grid(row=0, column=0, sticky='w', padx=(0, px(16)))
-    # Under the line saying where the app went, a link to its folder, as
-    # "Download the latest" is a link: a third button beside the two took
-    # their width from that line for good, and left a word alone on a line.
-    open_link = ttk.Label(bar, text='Show in folder', style='Link.TLabel', cursor='hand2')
-    update_btn = ttk.Button(bar, text='Update an app...')
-    update_btn.grid(row=0, column=1, rowspan=2, sticky='e', padx=(0, px(10)))
-    make_btn = ttk.Button(bar, text='Make the .nro', style='Primary.TButton')
-    make_btn.grid(row=0, column=2, rowspan=2, sticky='e')
+    def pick_picture():
+        start = os.path.dirname(fields['swf'].get()) if fields['swf'].get() else None
+        path = filedialog.askopenfilename(
+            title='Picture for the icon (square, 256x256 or more, is best)', initialdir=start,
+            filetypes=[('Pictures', '*.jpg *.jpeg *.png *.webp *.bmp *.gif'), ('All files', '*.*')])
+        if path:
+            fields['icon'].set(os.path.normpath(path))
+
+    def web_picture():
+        src = simpledialog.askstring(
+            'Picture from the web',
+            'The picture\'s address (a Google Images result works too):', parent=root)
+        if src and src.strip():
+            fields['icon'].set(picture_source(src))
+
+    def picture_menu(widget):
+        items = [('A file...', pick_picture), ('A web address...', web_picture)]
+        if fields['icon'].get().strip():
+            items.append(('FlashNX\'s icon', lambda: fields['icon'].set('')))
+        popup(widget, items)
+
+    picture_link = link(preview, 'Change the picture...', lambda: picture_menu(picture_link),
+                        on_card=True)
+    picture_link.pack(anchor='w', pady=(px(10), 0))
+    try:
+        import PIL  # noqa: F401 (only whether it is there)
+        picture_note = 'Square, 256x256 or more, is best.'
+    except ImportError:
+        picture_note = 'A 256x256 JPEG (py -m pip install pillow for any picture).'
+    ttk.Label(preview, text=picture_note, style='CardMuted.TLabel',
+              wraplength=icon_px + px(24), justify='left').pack(anchor='w')
+    icon_box.bind('<Button-1>', lambda _e: picture_menu(icon_box))
+
+    # ── Bottom: the FlashNX inside, what is going on, the two actions ──────
+    tk.Frame(outer, bg=line, height=max(1, px(1))).grid(
+        row=3, column=0, columnspan=2, sticky='ew', pady=(px(10), 0))
+    foot = ttk.Frame(outer)
+    foot.grid(row=4, column=0, columnspan=2, sticky='ew', pady=(px(16), 0))
+    foot.columnconfigure(0, weight=1)
+    nro_line = ttk.Frame(foot)
+    nro_line.grid(row=0, column=0, sticky='w')
+    nro_text = ttk.Label(nro_line, style='Muted.TLabel')
+    nro_text.pack(side='left')
+
+    def choose_nro():
+        start = os.path.dirname(fields['nro'].get()) if fields['nro'].get() else None
+        path = filedialog.askopenfilename(title='FlashNX.nro, as released', initialdir=start,
+                                          filetypes=[('Switch homebrew', '*.nro')])
+        if path:
+            fields['nro'].set(os.path.normpath(path))
+
+    download_link = link(nro_line, 'Download the latest', lambda: download())
+    download_link.pack(side='left', padx=(px(12), 0))
+    link(nro_line, 'Another file...', choose_nro).pack(side='left', padx=(px(12), 0))
+    # Its wrapping width is what the buttons leave (`fit_status`), never more:
+    # a long line here used to widen the window, moving everything above it.
+    status = ttk.Label(foot, style='Muted.TLabel', wraplength=px(300), justify='left')
+    status.grid(row=1, column=0, sticky='w', pady=(px(6), 0), padx=(0, px(16)))
+    open_link = ttk.Label(foot, text='Show in folder', style='Link.TLabel', cursor='hand2')
+    update_btn = ttk.Button(foot, text='Update an app...')
+    update_btn.grid(row=0, column=1, rowspan=3, sticky='e', padx=(0, px(10)))
+    make_btn = ttk.Button(foot, text='Make the .nro', style='Primary.TButton')
+    make_btn.grid(row=0, column=2, rowspan=3, sticky='e')
+
+    def fit_status(_event=None):
+        buttons = sum(foot.grid_bbox(column=c, row=0)[2] for c in (1, 2))
+        status.configure(wraplength=max(px(200), foot.winfo_width() - buttons - px(24)))
+
+    foot.bind('<Configure>', fit_status)
+
+    def say(text, error=False):
+        status.configure(text=text, style='Error.TLabel' if error else 'Muted.TLabel')
 
     def show_folder(path):
         """The link to the folder `path` is in (Windows' Explorer)."""
@@ -1914,21 +2124,112 @@ def main_gui():
             return
         folder = os.path.dirname(os.path.abspath(path))
         open_link.bind('<Button-1>', lambda _e: os.startfile(folder))
-        open_link.grid(row=1, column=0, sticky='w', pady=(px(4), 0))
+        open_link.grid(row=2, column=0, sticky='w', pady=(px(4), 0))
 
-    def fit_status(_event=None):
-        buttons = sum(bar.grid_bbox(column=c, row=0)[2] for c in (1, 2))
-        status.configure(wraplength=max(px(200), bar.winfo_width() - buttons - px(24)))
+    def show_nro_line(nro):
+        """The FlashNX the app is made with, or what is wrong with it."""
+        version = nro_facts(nro)[1] if nro and os.path.isfile(nro) else None
+        if not nro:
+            text, style_name = 'No FlashNX.nro yet:', 'Error.TLabel'
+        elif not os.path.isfile(nro):
+            text, style_name = 'No FlashNX.nro at %s:' % fit(nro, row_font, px(260)), 'Error.TLabel'
+        elif version is None:
+            text, style_name = '%s is not a FlashNX .nro:' % os.path.basename(nro), 'Error.TLabel'
+        elif version < MIN_FLASHNX:
+            text, style_name = ('FlashNX %s is too old (%s or later):'
+                                % (version_text(version), version_text(MIN_FLASHNX)), 'Error.TLabel')
+        else:
+            text, style_name = 'Made with FlashNX %s' % version_text(version), 'Muted.TLabel'
+        nro_text.configure(text=text, style=style_name)
 
-    bar.bind('<Configure>', fit_status)
+    # ── What goes into the app, worked out off the window's thread ─────────
+    # A game's companions can be thousands of files, read off a card in a
+    # reader.
+    reports = queue.Queue()
 
-    def say(text, error=False):
-        status.configure(text=text, style='Error.TLabel' if error else 'Muted.TLabel')
+    def size_text(n):
+        if n < 1e6:
+            return '%d KB' % max(1, round(n / 1e3))
+        return '%.1f MB' % (n / 1e6) if n < 1e9 else '%.2f GB' % (n / 1e9)
 
-    # `web`: a picture given by its address -> its downloaded copy, None while
-    # it downloads, or the reason it failed.
-    state = {'auto_name': '', 'auto_icon': '', 'icon_key': None, 'photo': None, 'web': {},
-             'game_title': '', 'report_key': None, 'report_done': None}
+    def show_contents(report):
+        """The lines under the game: its companion files, its Flashpoint
+        address, the app's size. Each says where it comes from when it was
+        picked, and has its link."""
+        if isinstance(report, StandaloneError):
+            show_row(0, 'bad', str(report))
+            show_row(1, None, '')
+            show_row(2, None, '')
+            return
+        n = report['files']
+        if n:
+            words = '%d companion file%s, %s' % (n, '' if n == 1 else 's', size_text(report['bytes']))
+            if choice['files']:
+                words += ', from %s' % os.path.basename(report['folder'].rstrip('\\/'))
+            show_row(0, 'ok', words, ('Change...', files_menu))
+        elif choice['files'] is False:
+            show_row(0, 'off', 'No companion files: left out', ('Change...', files_menu))
+        else:
+            show_row(0, 'off', 'No companion files', ('Add a folder...', pick_folder))
+        if report['address']:
+            shown = report['address'].split('://', 1)[-1]
+            lead = 'Its Flashpoint address, '
+            room = text_w - px(130) - row_font.measure(lead)
+            show_row(1, 'ok', lead + fit(shown, row_font, room), ('Change...', address_menu))
+        elif report['sites']:
+            show_row(1, 'bad', 'Its Flashpoint address, %s.base, is missing: the game will not find '
+                               'its files, filed by website (%s).'
+                     % (report['game'], ', '.join(report['sites'][:2])
+                        + (', ...' if len(report['sites']) > 2 else '')),
+                     ('Choose...', address_menu))
+        else:
+            show_row(1, 'off', 'No Flashpoint address (only Flashpoint games have one)',
+                     ('Add...', address_menu))
+        if report['size'] is None:
+            show_row(2, None, '')
+        elif fat32_note(report['size']):
+            show_row(2, 'bad', 'About %s: too big for a card formatted FAT32, the usual one for '
+                               'homebrew. It needs one formatted exFAT.' % size_text(report['size']))
+        else:
+            show_row(2, 'info', 'About %s in all' % size_text(report['size']))
+
+    def report_job(key):
+        swf, files, address, nro = key
+        try:
+            result = game_report(swf, files, nro or None, address)
+        except StandaloneError as e:
+            result = e
+        except Exception as e:  # an unreadable folder, a file gone: said, not swallowed
+            result = StandaloneError('Could not read the game\'s files: %s' % e)
+        reports.put((key, result))
+
+    def ask_report():
+        swf, nro = fields['swf'].get().strip(), fields['nro'].get().strip()
+        key = (swf, choice['files'], choice['address'], nro if nro and nro_facts(nro)[1] else '')
+        if key == state['report_key']:
+            return
+        state['report_key'] = key
+        if not swf:
+            return
+        if not os.path.isfile(swf):
+            # On one line: the whole path ran to four and pushed step 2 down.
+            lead = 'Not there any more: '
+            show_contents(StandaloneError(lead + fit(
+                os.path.dirname(swf), row_font, text_w - px(110) - row_font.measure(lead))))
+            return
+        if not swf.lower().endswith('.swf'):
+            show_contents(StandaloneError('%s is not a .swf game.' % os.path.basename(swf)))
+            return
+        threading.Thread(target=report_job, args=(key,), daemon=True).start()
+
+        def slow():
+            # Only a count that takes a while says so; a quick one would blink.
+            if state['report_key'] == key and state['report_done'] != key:
+                show_row(0, 'off', 'Counting the game\'s files...')
+
+        root.after(300, slow)
+
+    # ── Keeping it all in step ─────────────────────────────────────────────
     pictures = queue.Queue()
 
     def fetch_web(src):
@@ -1937,7 +2238,8 @@ def main_gui():
         except StandaloneError as e:
             pictures.put((src, e))
 
-    def poll_pictures():
+    def poll():
+        """Pictures from the web, and what goes into the app, as they come."""
         try:
             while True:
                 src, result = pictures.get_nowait()
@@ -1949,8 +2251,6 @@ def main_gui():
                         say(str(result), error=True)
         except queue.Empty:
             pass
-        # And what goes into the app (`ask_report`), when it is still the
-        # game in the fields.
         try:
             while True:
                 key, result = reports.get_nowait()
@@ -1959,141 +2259,56 @@ def main_gui():
                     show_contents(result)
         except queue.Empty:
             pass
-        root.after(150, poll_pictures)
+        root.after(150, poll)
 
-    def show_nro_version(nro):
-        """Beside the FlashNX.nro label: what is asked for, or the version of
-        the file chosen."""
-        if not nro:
-            text, style_name = '  as released, %s or later' % '.'.join(map(str, MIN_FLASHNX)), 'Hint.TLabel'
-        elif not os.path.isfile(nro):
-            text, style_name = '  no such file', 'HintError.TLabel'
-        else:
-            version = nro_facts(nro)[1]
-            if version is None:
-                text, style_name = '  not a FlashNX .nro', 'HintError.TLabel'
-            elif version < MIN_FLASHNX:
-                text, style_name = ('  version %s, too old: %s or later'
-                                    % ('.'.join(map(str, version)), '.'.join(map(str, MIN_FLASHNX))),
-                                    'HintError.TLabel')
-            else:
-                text, style_name = '  version %s' % '.'.join(map(str, version)), 'Hint.TLabel'
-        hints['nro'].configure(text=text, style=style_name)
-
-    def show_game_hints(swf, files):
-        """Beside the game's two labels: what they take, or what is wrong with
-        the path, as the FlashNX.nro field says it."""
-        if swf and not os.path.isfile(swf):
-            text, style_name = '  no such file', 'HintError.TLabel'
-        elif swf and not swf.lower().endswith('.swf'):
-            text, style_name = '  not a .swf', 'HintError.TLabel'
-        else:
-            text, style_name = '  .swf', 'Hint.TLabel'
-        hints['swf'].configure(text=text, style=style_name)
-        if files and not os.path.isdir(files):
-            text, style_name = '  no such folder', 'HintError.TLabel'
-        else:
-            text, style_name = '  optional, found next to the game when it has some', 'Hint.TLabel'
-        hints['files'].configure(text=text, style=style_name)
-
-    # What goes into the app, worked out off the window's thread: a game's
-    # companions can be thousands of files, read off a card in a reader.
-    reports = queue.Queue()
-    from_flashnx = ('From the SD card (sdmc:/flashnx/, or the games folder chosen in FlashNX), '
-                    'copy the .swf with everything beside it whose name starts the same: its '
-                    '.files folder, its .swf.base.')
-
-    def size_text(n):
-        if n < 1e6:
-            return '%d KB' % max(1, round(n / 1e3))
-        return '%.1f MB' % (n / 1e6) if n < 1e9 else '%.2f GB' % (n / 1e9)
-
-    def show_contents(report):
-        """The line under the game's fields: what to copy, until a game is
-        chosen; then what goes in with it and how big the app will be, in red,
-        and said first, when something will go wrong. Everything taken from
-        beside the game was invisible: one file left behind on the card, and
-        nothing said why the app would not work."""
-        label = under['files']
-        if report is None:
-            label.configure(text=from_flashnx, style='Hint.TLabel')
+    def on_game():
+        """A new game: what is beside it is taken again, its title becomes the
+        name (until typed over) and its cover the picture (never over one
+        picked)."""
+        swf = fields['swf'].get().strip()
+        if swf == state['swf_seen']:
             return
-        if isinstance(report, StandaloneError):
-            label.configure(text=str(report), style='HintError.TLabel')
-            return
-        if report['sites']:
-            # The one thing that will break the app, alone and first: the
-            # summary under it pushed it to a third line.
-            label.configure(
-                text='Its address file, %s.base, is missing: copy it from the SD card next to '
-                     'the .swf, or the game will not find its files (filed by website: %s).'
-                     % (report['game'],
-                        ', '.join(report['sites'][:2]) + (', ...' if len(report['sites']) > 2 else '')),
-                style='HintError.TLabel')
-            return
-        items = ['the game']
-        if report['files']:
-            items.append('%d companion file%s (%s)' % (
-                report['files'], '' if report['files'] == 1 else 's', size_text(report['bytes'])))
-        if report['base']:
-            items.append('its Flashpoint address')
-        listed = ('the game alone' if len(items) == 1
-                  else ', '.join(items[:-1]) + ' and ' + items[-1])
-        text = 'In the app: %s.' % listed
-        if report['size']:
-            text += ' About %s in all.' % size_text(report['size'])
-        if fat32_note(report['size'] or 0):
-            label.configure(text=text + ' Too big for a card formatted FAT32, the usual one for '
-                                        'homebrew: it needs one formatted exFAT.',
-                            style='HintError.TLabel')
-        else:
-            label.configure(text=text, style='Hint.TLabel')
-
-    def report_job(key):
-        swf, files, nro = key
-        try:
-            result = game_report(swf, files or None, nro or None)
-        except StandaloneError as e:
-            result = e
-        except Exception as e:  # an unreadable folder, a file gone: said, not swallowed
-            result = StandaloneError('Could not read the game\'s files: %s' % e)
-        reports.put((key, result))
-
-    def ask_report():
-        swf, files, nro = (fields[k].get().strip() for k in ('swf', 'files', 'nro'))
-        key = (swf, files, nro if nro and nro_facts(nro)[1] is not None else '')
-        if key == state['report_key']:
-            return
-        state['report_key'] = key
-        if not (swf.lower().endswith('.swf') and os.path.isfile(swf)):
-            show_contents(None)
-            return
-        threading.Thread(target=report_job, args=(key,), daemon=True).start()
-
-        def slow():
-            # Only a count that takes a while says so; a quick one would blink.
-            if state['report_key'] == key and state['report_done'] != key:
-                under['files'].configure(text='Counting the game\'s files...', style='Hint.TLabel')
-
-        root.after(300, slow)
+        state['swf_seen'] = swf
+        choice['files'] = choice['address'] = None
+        is_swf = swf.lower().endswith('.swf')
+        state['game_title'] = (meta_title(swf) or os.path.basename(swf)[:-4]) if is_swf else ''
+        if is_swf and fields['icon'].get().strip() in ('', state['auto_icon']):
+            # The cover FlashNX itself would show for the game: named like it,
+            # beside it (covers.rs, `resolve`), else the one it downloaded,
+            # cached in covers/ beside the games or copied out of there.
+            folder, base = os.path.dirname(swf), os.path.basename(swf)
+            names_ = [n + ext for n in (base[:-4], base) for ext in ('.png', '.jpg', '.jpeg', '.webp')]
+            names_ += [base + '.cover.png', os.path.join('covers', base + '.cover.png')]
+            cover = next((c for c in (os.path.join(folder, n) for n in names_)
+                          if os.path.isfile(c)), '')
+            state['auto_icon'] = cover
+            fields['icon'].set(cover)
 
     def refresh(*_):
+        on_game()
         swf = fields['swf'].get().strip()
-        stem = os.path.basename(swf)[:-4] if swf.lower().endswith('.swf') else ''
+        if swf:
+            empty_view.grid_remove()
+            game_view.grid(row=0, column=0, sticky='nsew')
+            game_name.configure(text=fit(os.path.basename(swf), name_font, text_w - px(90)))
+        else:
+            game_view.grid_remove()
+            empty_view.grid(row=0, column=0, sticky='nsew')
         # The name follows the game until it is typed over: its real title when
         # FlashNX kept one beside it (`meta_title`), else its file name.
-        title = state['game_title'] if stem else ''
+        title = state['game_title']
         if title and fields['name'].get() in ('', state['auto_name']):
             state['auto_name'] = title
             fields['name'].set(title)
-        name = fields['name'].get().strip() or title or 'My game'
-        shown_name.configure(text=name)
+        shown_name.configure(text=fields['name'].get().strip() or title or 'My game')
         shown_author.configure(text=fields['author'].get().strip() or 'FlashNX')
         shown_version.configure(text='Version ' + (fields['version'].get().strip() or '1.0.0'))
-        icon, nro = fields['icon'].get().strip(), fields['nro'].get().strip()
-        show_nro_version(nro)
-        show_game_hints(swf, fields['files'].get().strip())
+        nro = fields['nro'].get().strip()
+        show_nro_line(nro)
         ask_report()
+        show_icon(fields['icon'].get().strip(), nro)
+
+    def show_icon(icon, nro):
         key = (icon, nro)
         if key == state['icon_key']:
             return
@@ -2129,32 +2344,10 @@ def main_gui():
         state['photo'] = ImageTk.PhotoImage(img.resize((icon_px, icon_px), Image.LANCZOS))
         icon_box.configure(image=state['photo'], text='')
 
-    def on_game(*_):
-        swf = fields['swf'].get().strip()
-        is_swf = swf.lower().endswith('.swf')
-        state['game_title'] = (meta_title(swf) or os.path.basename(swf)[:-4]) if is_swf else ''
-        if is_swf:
-            folder, base = os.path.dirname(swf), os.path.basename(swf)
-            guess = os.path.join(folder, base[:-4] + '.files')
-            fields['files'].set(guess if os.path.isdir(guess) else '')
-            # The cover FlashNX itself would show for the game: named like it,
-            # beside it (covers.rs, `resolve`), else the one it downloaded,
-            # cached in covers/ beside the games or copied out of there next
-            # to the game. Never over a picture chosen.
-            if fields['icon'].get().strip() in ('', state['auto_icon']):
-                names = [n + ext for n in (base[:-4], base) for ext in ('.png', '.jpg', '.jpeg', '.webp')]
-                names += [base + '.cover.png', os.path.join('covers', base + '.cover.png')]
-                cover = next((c for c in (os.path.join(folder, n) for n in names)
-                              if os.path.isfile(c)), '')
-                state['auto_icon'] = cover
-                fields['icon'].set(cover)
-        refresh()
+    for var in fields.values():
+        var.trace_add('write', refresh)
 
-    for key, var in fields.items():
-        var.trace_add('write', on_game if key == 'swf' else refresh)
-    refresh()
-    poll_pictures()
-
+    # ── Making the app, updating one ───────────────────────────────────────
     results = queue.Queue()
     # The notes of the job under way ("a card formatted FAT32 cannot hold
     # it"...), kept under the line that ends it: shown one by one, each was
@@ -2196,22 +2389,23 @@ def main_gui():
             else:
                 return kind, value
 
-    def work(args):
+    def work(args, address):
         try:
             results.put(('ok', make_standalone(*args, log=lambda s: results.put(('note', s)),
-                                               progress=percent())))
+                                               progress=percent(), address=address)))
         except StandaloneError as e:
             results.put(('error', str(e)))
         except Exception as e:  # a bug, said rather than swallowed
             results.put(('error', 'Unexpected error: %r' % (e,)))
 
-    def poll(out_path, name):
+    def poll_make(out_path, name):
         done = outcome('Writing %s...' % os.path.basename(out_path))
         if done is None:
-            root.after(100, poll, out_path, name)
+            root.after(100, poll_make, out_path, name)
             return
         kind, value = done
         make_btn.state(['!disabled'])
+        update_btn.state(['!disabled'])
         if kind == 'error':
             say(value, error=True)
             return
@@ -2220,12 +2414,24 @@ def main_gui():
                        % (os.path.basename(out_path), size, safe_file_name(name))))
         show_folder(out_path)
 
+    def nro_ready():
+        nro = fields['nro'].get().strip()
+        version = nro_facts(nro)[1] if nro else None
+        if version is None or version < MIN_FLASHNX:
+            say('Choose the FlashNX.nro to put in the app first, or Download the latest.',
+                error=True)
+            return None
+        return nro
+
     def create():
-        nro, swf = fields['nro'].get().strip(), fields['swf'].get().strip()
-        if not nro or not swf:
-            say('Choose FlashNX.nro and the game first.', error=True)
+        swf = fields['swf'].get().strip()
+        if not swf:
+            say('Choose the game first.', error=True)
             return
-        name = fields['name'].get().strip() or os.path.basename(swf)[:-4]
+        nro = nro_ready()
+        if not nro:
+            return
+        name = fields['name'].get().strip() or state['game_title'] or os.path.basename(swf)[:-4]
         out_path = filedialog.asksaveasfilename(
             title='Save the app as', defaultextension='.nro',
             initialdir=os.path.dirname(swf) or None,
@@ -2234,6 +2440,7 @@ def main_gui():
             return
         open_link.grid_remove()
         make_btn.state(['disabled'])
+        update_btn.state(['disabled'])
         del notes[:]
         say('Writing %s...' % os.path.basename(out_path))
         icon = fields['icon'].get().strip()
@@ -2242,10 +2449,9 @@ def main_gui():
         if isinstance(state['web'].get(icon), str):
             icon = state['web'][icon]
         args = (nro, swf, out_path, name, fields['author'].get().strip(),
-                fields['version'].get().strip(), icon or None,
-                fields['files'].get().strip() or None)
-        threading.Thread(target=work, args=(args,), daemon=True).start()
-        root.after(100, poll, out_path, name)
+                fields['version'].get().strip(), icon or None, choice['files'])
+        threading.Thread(target=work, args=(args, choice['address']), daemon=True).start()
+        root.after(100, poll_make, out_path, name)
 
     make_btn.configure(command=create)
 
@@ -2276,12 +2482,10 @@ def main_gui():
         show_folder(out_path)
 
     def update():
-        """An app made earlier, written again with the FlashNX.nro of the
-        field: its game, picture, name, author and version kept."""
-        nro = fields['nro'].get().strip()
-        if not nro or nro_facts(nro)[1] is None:
-            say('Choose the FlashNX.nro to put in the app first, or Download the latest.',
-                error=True)
+        """An app made earlier, written again with the FlashNX.nro chosen
+        below: its game, picture, name, author and version kept."""
+        nro = nro_ready()
+        if not nro:
             return
         app = filedialog.askopenfilename(title='The app to update',
                                          filetypes=[('Switch homebrew', '*.nro')])
@@ -2343,7 +2547,7 @@ def main_gui():
         fields['nro'].set(path)
         say('FlashNX %s is downloaded: %s' % (version, path))
 
-    def download(_event=None):
+    def download():
         if busy['download']:
             return
         busy['download'] = True
@@ -2352,12 +2556,11 @@ def main_gui():
         threading.Thread(target=fetch, daemon=True).start()
         root.after(100, poll_download)
 
-    download_link.bind('<Button-1>', download)
-
+    # ── Drops ──────────────────────────────────────────────────────────────
     picture_ext = ('.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif')
 
     def take(item):
-        """Put one dropped thing in its field, by what it is."""
+        """Put one dropped thing where it goes, by what it is."""
         item = item.strip()
         low = item.lower()
         if is_web_picture(item):
@@ -2366,21 +2569,30 @@ def main_gui():
             fields['swf'].set(os.path.normpath(item))
         elif low.endswith('.nro'):
             fields['nro'].set(os.path.normpath(item))
+        elif low.endswith('.base'):
+            set_choice('address', os.path.normpath(item))
         elif low.endswith(picture_ext):
             fields['icon'].set(os.path.normpath(item))
         elif os.path.isdir(item):
-            fields['files'].set(os.path.normpath(item))
+            set_choice('files', os.path.normpath(item))
         else:
             return False
         return True
 
     def accept(items):
+        # The game first, so that what is dropped with it lands on it rather
+        # than being taken again from beside it.
+        items = sorted(items, key=lambda i: not i.strip().lower().endswith('.swf'))
         taken = [take(i) for i in items]
         if not any(taken):
-            say('Drop a .swf game, a picture (or one from a web page), a FlashNX.nro '
-                'or a folder of companion files.', error=True)
+            say('Drop a .swf game, its companion folder or its .swf.base, a picture (or one '
+                'from a web page), or a FlashNX.nro.', error=True)
+
+    def hover(over):
+        game_card.configure(highlightbackground=ink if over else line)
 
     def on_drop(event):
+        hover(False)
         accept(root.tk.splitlist(event.data))
         return event.action
 
@@ -2389,17 +2601,25 @@ def main_gui():
         for c in w.winfo_children():
             yield from walk(c)
 
+    refresh()
+    poll()
+    # The card keeps its height between its two views, so step 2 stays put.
+    root.update_idletasks()
+    game_card.rowconfigure(0, minsize=max(empty_view.winfo_reqheight(), game_view.winfo_reqheight()))
+
     if can_drop:
         for w in walk(root):
             w.drop_target_register(DND_FILES, DND_TEXT)
             w.dnd_bind('<<Drop:DND_Files>>', on_drop)
             w.dnd_bind('<<Drop:DND_Text>>', on_drop)
+            w.dnd_bind('<<DropEnter>>', lambda e: (hover(True), e.action)[1])
+            w.dnd_bind('<<DropLeave>>', lambda e: (hover(False), e.action)[1])
     else:
         # Every Tk widget is a window of its own on Windows: all of them, and
         # the frame around the window, take drops.
-        root.update_idletasks()
         hwnds = [int(root.wm_frame(), 16)] + [w.winfo_id() for w in walk(root)]
-        root.dnd = windows_drop(hwnds, lambda items: root.after(0, accept, items))
+        root.dnd = windows_drop(hwnds, lambda items: root.after(0, accept, items),
+                                lambda over: root.after(0, hover, over))
         can_drop = root.dnd is not None
         if can_drop:
             def close():
@@ -2407,11 +2627,8 @@ def main_gui():
                 root.destroy()
 
             root.protocol('WM_DELETE_WINDOW', close)
-    if can_drop:
-        say('Drop the game, a picture or one from a web page anywhere here.\n'
-            'Your game stays on this computer.')
-    else:
-        say('Your game stays on this computer.')
+    say('Your game stays on this computer.' if can_drop else
+        'Your game stays on this computer. Dropping files here needs the tkinterdnd2 package.')
     root.update_idletasks()
     w, h = root.winfo_reqwidth(), root.winfo_reqheight()
     root.geometry('+%d+%d' % ((root.winfo_screenwidth() - w) // 2,

@@ -220,6 +220,33 @@ class MakeAndUpdate(Work):
                            self.path('Brawl.nro'), log=said.append)
         self.assertTrue(any('Brawl.swf.base' in s for s in said))
 
+    def test_address_named_otherwise_or_typed(self):
+        # Names do not always match: the address can come from any file, or
+        # be typed, and then nothing is said missing.
+        swf = self.flashpoint_game(with_base=False)
+        other = self.path('fp', 'brawl address.txt')
+        with open(other, 'wb') as f:
+            f.write(b'"http://static.example.com/games/brawl/Brawl.swf"\r\n')
+        typed = 'https://static.example.com/games/brawl/Brawl.swf'
+        flashnx = fake_flashnx(self.path('FlashNX.nro'), '2.0.0')
+        for given, expected in ((other, b'http://static.example.com/games/brawl/Brawl.swf'),
+                                (typed, typed.encode())):
+            report = ms.game_report(swf, address=given)
+            self.assertTrue(report['base'])
+            self.assertIsNone(report['note'])
+            self.assertEqual(report['sites'], [])
+            app = self.path('Brawl.nro')
+            ms.make_standalone(flashnx, swf, app, log=quiet, address=given)
+            self.assertEqual(self.app_files(app)['Brawl.swf.base'], expected)
+
+    def test_address_file_without_one_is_refused(self):
+        swf = self.flashpoint_game(with_base=False)
+        wrong = self.path('fp', 'notes.txt')
+        with open(wrong, 'wb') as f:
+            f.write(b'not an address')
+        with self.assertRaises(ms.StandaloneError):
+            ms.game_report(swf, address=wrong)
+
     def test_plain_folders_are_not_websites(self):
         # A game's own folders (`data`, `v1.2`) are not a website: no note.
         write_tree(self.path('g'), {'G.swf': b'FWS', 'G.files/data/a.xml': b'x', 'G.files/v1.2/b': b'y'})
