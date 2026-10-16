@@ -721,9 +721,16 @@ impl SwitchRenderBackend {
     /// Whether a diff line's first column names a button (drawn as glyphs),
     /// rather than a setting written as words.
     fn diff_what_is_button(what: &str) -> bool {
-        let rest = what.strip_prefix("P2 ").unwrap_or(what);
+        let rest = Self::diff_player(what).map_or(what, |(_, r)| r);
         let rest = rest.split_once('+').map_or(rest, |(_, b)| b);
-        crate::keymap::PAD_SLOTS.iter().any(|s| s.name == rest)
+        crate::keymap::PAD_SLOTS_OTHERS.iter().any(|s| s.name == rest)
+    }
+
+    /// The player a diff line is about, 2 to 4, and the rest of it: player 1's
+    /// lines are bare, the others' start "P2 " to "P4 " (`keymap::player_tag`).
+    fn diff_player(what: &str) -> Option<(u8, &str)> {
+        (2..=crate::keymap::MAX_PLAYERS)
+            .find_map(|p| what.strip_prefix(crate::keymap::player_tag(p)).map(|r| (p, r)))
     }
 
     /// The control a diff line is about: "P2 ZL+StickLUp" is a J2 chip, the ZL
@@ -734,15 +741,15 @@ impl SwitchRenderBackend {
         let px = size::LABEL;
         let mut cx = x;
         let mut rest = what;
-        if let Some(r) = rest.strip_prefix("P2 ") {
-            let p2 = crate::loc_ui::ui().p2;
+        if let Some((player, r)) = Self::diff_player(rest) {
+            let p2 = crate::backend::render::player_short(player);
             let tw = self.kit_measure(p2, size::CAPTION);
             self.kit_rrect(cx, cy - 11.0, tw + 14.0, 22.0, 6.0, col::PILL);
             self.kit_text_mid(cx + 7.0, cy, size::CAPTION, p2, col::PILL_INK);
             cx += tw + 14.0 + 8.0;
             rest = r;
         }
-        let slot_glyph = |name: &str| crate::keymap::PAD_SLOTS.iter().find(|s| s.name == name).map(|s| s.glyph);
+        let slot_glyph = |name: &str| crate::keymap::PAD_SLOTS_OTHERS.iter().find(|s| s.name == name).map(|s| s.glyph);
         if let Some((m, b)) = rest.split_once('+') {
             if let (Some(mg), Some(_)) = (slot_glyph(m), slot_glyph(b)) {
                 let mw = self.pad_badge_width(mg, px);

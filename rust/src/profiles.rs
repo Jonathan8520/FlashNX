@@ -73,6 +73,17 @@ pub struct Profile {
     pub combo_layers: BTreeMap<std::string::String, BTreeMap<std::string::String, std::string::String>>,
     #[serde(default)]
     pub combo_layers_p2: BTreeMap<std::string::String, BTreeMap<std::string::String, std::string::String>>,
+    /// Players 3 and 4 (issue #128), as player 2. Absent from every profile
+    /// shared before them, which then read as those players' defaults
+    /// (`to_keymap`).
+    #[serde(default)]
+    pub bindings_p3: BTreeMap<std::string::String, std::string::String>,
+    #[serde(default)]
+    pub bindings_p4: BTreeMap<std::string::String, std::string::String>,
+    #[serde(default)]
+    pub combo_layers_p3: BTreeMap<std::string::String, BTreeMap<std::string::String, std::string::String>>,
+    #[serde(default)]
+    pub combo_layers_p4: BTreeMap<std::string::String, BTreeMap<std::string::String, std::string::String>>,
     /// Per-game cursor speed preset index, -1 = unset (the game keeps its own /
     /// the default). Lives in a separate `.cursor` file locally; carried here so a
     /// shared profile restores the author's pointer speed too.
@@ -99,13 +110,28 @@ impl Profile {
     }
     /// This profile's controls as a `Keymap` (base + combos), so preview diffs and
     /// apply share one representation. Cursor speed lives outside the keymap.
+    /// A player the profile says nothing about (players 3 and 4 in every profile
+    /// shared before #128, player 2 before #40) gets that player's defaults, as a
+    /// fresh keymap would: left empty, the preview listed every one of their
+    /// buttons as going to "None", and applying it took their keys away.
     pub fn to_keymap(&self) -> Keymap {
-        Keymap {
+        let or_defaults = |map: &BTreeMap<std::string::String, std::string::String>, player: u8| {
+            if map.is_empty() {
+                crate::keymap::player_default_bindings(player)
+            } else {
+                map.clone()
+            }
+        };
+        let mut km = Keymap {
             version: 1,
             bindings: self.bindings.clone(),
-            bindings_p2: self.bindings_p2.clone(),
+            bindings_p2: or_defaults(&self.bindings_p2, 2),
             combo_layers: self.combo_layers.clone(),
             combo_layers_p2: self.combo_layers_p2.clone(),
+            bindings_p3: or_defaults(&self.bindings_p3, 3),
+            bindings_p4: or_defaults(&self.bindings_p4, 4),
+            combo_layers_p3: self.combo_layers_p3.clone(),
+            combo_layers_p4: self.combo_layers_p4.clone(),
             // Legacy single-layer fields are unused here (migration-only on load).
             bindings_layer2: BTreeMap::new(),
             bindings_layer2_p2: BTreeMap::new(),
@@ -118,7 +144,12 @@ impl Profile {
                 None => std::format!("community:{}", self.id),
             },
             show_cursor: self.show_cursor,
-        }
+        };
+        // The buttons the profile predates get what loading it would give
+        // them. A profile from before SL and SR (issue #128) previewed them
+        // going to "None", when once applied they take the profile's L and R.
+        crate::keymap::merge_all_defaults(&mut km);
+        km
     }
 }
 
@@ -417,6 +448,10 @@ fn blank_profile(id: std::string::String, title: std::string::String) -> Profile
         bindings_p2: BTreeMap::new(),
         combo_layers: BTreeMap::new(),
         combo_layers_p2: BTreeMap::new(),
+        bindings_p3: BTreeMap::new(),
+        bindings_p4: BTreeMap::new(),
+        combo_layers_p3: BTreeMap::new(),
+        combo_layers_p4: BTreeMap::new(),
         cursor_speed: -1,
         show_cursor: true,
     }
@@ -471,6 +506,10 @@ pub fn local_copies(basename: &str, title: &str) -> std::vec::Vec<Match> {
         p.bindings_p2 = km.bindings_p2;
         p.combo_layers = km.combo_layers;
         p.combo_layers_p2 = km.combo_layers_p2;
+        p.bindings_p3 = km.bindings_p3;
+        p.bindings_p4 = km.bindings_p4;
+        p.combo_layers_p3 = km.combo_layers_p3;
+        p.combo_layers_p4 = km.combo_layers_p4;
         p.cursor_speed = speed;
         p.show_cursor = km.show_cursor;
         scored.push((shared, crate::playtime::get_last(&other), Match { profile: p, kind: MatchKind::Title, applied: 0 }));
@@ -946,6 +985,11 @@ struct SharePayload<'a> {
     // (worker.js) — a client-only change would be dropped there.
     combo_layers: &'a BTreeMap<std::string::String, BTreeMap<std::string::String, std::string::String>>,
     combo_layers_p2: &'a BTreeMap<std::string::String, BTreeMap<std::string::String, std::string::String>>,
+    // Players 3 and 4 (issue #128): the relay Worker must store these too.
+    bindings_p3: &'a BTreeMap<std::string::String, std::string::String>,
+    bindings_p4: &'a BTreeMap<std::string::String, std::string::String>,
+    combo_layers_p3: &'a BTreeMap<std::string::String, BTreeMap<std::string::String, std::string::String>>,
+    combo_layers_p4: &'a BTreeMap<std::string::String, BTreeMap<std::string::String, std::string::String>>,
     cursor_speed: i32,
     /// Per-game pointer-visibility toggle (default true). The relay Worker must
     /// store this too (worker.js) or a shared "cursor hidden" profile reverts to
@@ -993,6 +1037,10 @@ pub fn share(
         bindings_p2: &km.bindings_p2,
         combo_layers: &km.combo_layers,
         combo_layers_p2: &km.combo_layers_p2,
+        bindings_p3: &km.bindings_p3,
+        bindings_p4: &km.bindings_p4,
+        combo_layers_p3: &km.combo_layers_p3,
+        combo_layers_p4: &km.combo_layers_p4,
         cursor_speed,
         show_cursor: km.show_cursor,
     };

@@ -4800,12 +4800,13 @@ fn input_inner(button: &str) -> bool {
             return true;
         }
     }
-    // A game's controls editor: Y opens the shared profiles, the mockup's
-    // shortcut. They are a page of the game's Touches et curseur (its "Apply a
-    // profile" row) and come off the network, so the editor closes onto that
-    // page and the page's own flow runs from there: B on the profiles comes
-    // back to the page, where the path says it goes.
-    if button == "Y" && menu::screen_kind() == 2 {
+    // A game's controls editor: ZR opens the shared profiles (Y until #128,
+    // which gave Y the controllers, beside the player switch). They are a page
+    // of the game's Touches et curseur (its "Apply a profile" row) and come off
+    // the network, so the editor closes onto that page and the page's own flow
+    // runs from there: B on the profiles comes back to the page, where the path
+    // says it goes.
+    if button == "ZR" && menu::screen_kind() == 2 {
         let game = LIBRARY.lock().ok().and_then(|s| match s.screen {
             Screen::TouchesEditor { game_idx } => Some(game_idx),
             _ => None,

@@ -89,6 +89,13 @@ pub(crate) enum Btn {
     /// A stick pushed in (L3 / R3), a button of its own.
     LStickPress,
     RStickPress,
+    /// One of a Joy-Con's four buttons by its place, held on its own on its
+    /// side (issue #128): the round button with a triangle pointing at that
+    /// place. Its printed letter is not the one it acts as once it lies down.
+    JoyUp,
+    JoyDown,
+    JoyLeft,
+    JoyRight,
     /// The rail buttons of a Joy-Con held on its own, sideways.
     SL,
     SR,
@@ -134,6 +141,10 @@ impl Btn {
             Btn::RStick => '\u{E102}',
             Btn::LStickPress => '\u{E104}',
             Btn::RStickPress => '\u{E105}',
+            Btn::JoyUp => '\u{E0EB}',
+            Btn::JoyDown => '\u{E0EC}',
+            Btn::JoyLeft => '\u{E0ED}',
+            Btn::JoyRight => '\u{E0EE}',
         }
     }
 
@@ -161,14 +172,19 @@ impl Btn {
             Btn::DpadRight => "\u{2192}",
             Btn::LStick | Btn::LStickPress => "L",
             Btn::RStick | Btn::RStickPress => "R",
+            Btn::JoyUp => "\u{2191}",
+            Btn::JoyDown => "\u{2193}",
+            Btn::JoyLeft => "\u{2190}",
+            Btn::JoyRight => "\u{2192}",
         }
     }
 }
 
 /// The button glyphs this file draws, to say in the log which ones the
 /// console's NintendoExt lacks (`kit_button` then draws a disc with a letter).
-const LOGGED_GLYPHS: [char; 12] = [
+const LOGGED_GLYPHS: [char; 16] = [
     '\u{E0E8}', '\u{E0E9}', // SL, SR
+    '\u{E0EB}', '\u{E0EC}', '\u{E0ED}', '\u{E0EE}', // a lone Joy-Con's four, by place
     '\u{E101}', '\u{E102}', '\u{E104}', '\u{E105}', // the sticks, then pushed in
     '\u{E110}', // the plain cross
     '\u{E111}', '\u{E112}', '\u{E113}', '\u{E114}', // the cross, one arm marked

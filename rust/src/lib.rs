@@ -2745,8 +2745,9 @@ fn render_frame_with_dt(dt: FloatDuration) {
         if let Some(asked) = load_failed() {
             backend.draw_load_failed(&asked);
         }
-        if show_cursor {
-            backend.draw_cursor_overlay(cx, cy, clicked);
+        let stick_cursor = stick_cursor_on();
+        if show_cursor || stick_cursor {
+            backend.draw_cursor_overlay(cx, cy, clicked, stick_cursor);
         }
         // After the pointer, so the two never argue over the same pixels if a
         // player parks the crosshair in the corner: the number wins, because it
@@ -2864,8 +2865,9 @@ fn redraw_paused(freeze: bool) {
         //
         // Nor the pointer while framing, for the same reason as the counter: a
         // white cross on the picture whose framing is being judged.
-        if show_cursor && !framing {
-            backend.draw_cursor_overlay(cx, cy, clicked);
+        let stick_cursor = stick_cursor_on();
+        if (show_cursor || stick_cursor) && !framing {
+            backend.draw_cursor_overlay(cx, cy, clicked, stick_cursor);
         }
         // The reading freezes with the picture, which is right: no frame is
         // being run, so there is no new speed to report. It is also what gives
@@ -2875,6 +2877,20 @@ fn redraw_paused(freeze: bool) {
             backend.draw_fps_overlay(true);
         }
     }
+}
+
+/// Player 1 on a lone Joy-Con has switched its stick to the cursor (issue
+/// #128, the stick's click in `main.cpp`): the cursor is drawn then, in gold,
+/// even with the pointer hidden, so the stick's mode shows on screen.
+static STICK_CURSOR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[no_mangle]
+pub extern "C" fn ruffle_set_stick_cursor(on: c_int) {
+    STICK_CURSOR.store(on != 0, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn stick_cursor_on() -> bool {
+    STICK_CURSOR.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The pause's own frame rate, which no other line gives: a paused frame runs
@@ -3631,10 +3647,11 @@ pub extern "C" fn ruffle_keymap_lookup(name: *const c_char) -> c_int {
     keymap::lookup(button).unwrap_or(SK_NONE)
 }
 
-/// Player-2 (issue #40) equivalent of [`ruffle_keymap_lookup`]: resolve a
-/// controller-2 button name to its Flash `SK_*` code via the P2 keymap.
+/// [`ruffle_keymap_lookup`] for player `player` (issues #40, #128; 1 to
+/// `keymap::MAX_PLAYERS`): resolve a button of that player's controller to its
+/// Flash `SK_*` code through that player's keymap.
 #[no_mangle]
-pub extern "C" fn ruffle_keymap_lookup_p2(name: *const c_char) -> c_int {
+pub extern "C" fn ruffle_keymap_lookup_player(player: c_int, name: *const c_char) -> c_int {
     if name.is_null() {
         return SK_NONE;
     }
@@ -3643,7 +3660,7 @@ pub extern "C" fn ruffle_keymap_lookup_p2(name: *const c_char) -> c_int {
     let Ok(button) = s.to_str() else {
         return SK_NONE;
     };
-    keymap::lookup_p2(button).unwrap_or(SK_NONE)
+    keymap::lookup_player(player as u8, button).unwrap_or(SK_NONE)
 }
 
 /// Map a C++ modifier code (1=ZL, 2=ZR, 3=L, 4=R) to its name, or "" if invalid.
@@ -3673,9 +3690,9 @@ pub extern "C" fn ruffle_keymap_lookup_combo(mod_code: c_int, name: *const c_cha
     keymap::lookup_combo(combo_mod_name(mod_code), button).unwrap_or(SK_NONE)
 }
 
-/// Player-2 counterpart of [`ruffle_keymap_lookup_combo`].
+/// [`ruffle_keymap_lookup_combo`] for player `player` (1 to `keymap::MAX_PLAYERS`).
 #[no_mangle]
-pub extern "C" fn ruffle_keymap_lookup_combo_p2(mod_code: c_int, name: *const c_char) -> c_int {
+pub extern "C" fn ruffle_keymap_lookup_combo_player(player: c_int, mod_code: c_int, name: *const c_char) -> c_int {
     if name.is_null() {
         return SK_NONE;
     }
@@ -3684,7 +3701,7 @@ pub extern "C" fn ruffle_keymap_lookup_combo_p2(mod_code: c_int, name: *const c_
     let Ok(button) = s.to_str() else {
         return SK_NONE;
     };
-    keymap::lookup_combo_p2(combo_mod_name(mod_code), button).unwrap_or(SK_NONE)
+    keymap::lookup_combo_player(player as u8, combo_mod_name(mod_code), button).unwrap_or(SK_NONE)
 }
 
 /// 1 when `mod_code`'s combo layer is active (has a binding) for P1 → C++ treats
@@ -3694,10 +3711,10 @@ pub extern "C" fn ruffle_keymap_combo_active(mod_code: c_int) -> c_int {
     keymap::combo_active(combo_mod_name(mod_code)) as c_int
 }
 
-/// Player-2 counterpart of [`ruffle_keymap_combo_active`].
+/// [`ruffle_keymap_combo_active`] for player `player` (1 to `keymap::MAX_PLAYERS`).
 #[no_mangle]
-pub extern "C" fn ruffle_keymap_combo_active_p2(mod_code: c_int) -> c_int {
-    keymap::combo_active_p2(combo_mod_name(mod_code)) as c_int
+pub extern "C" fn ruffle_keymap_combo_active_player(player: c_int, mod_code: c_int) -> c_int {
+    keymap::combo_active_player(player as u8, combo_mod_name(mod_code)) as c_int
 }
 
 /// Per-game cursor-speed preset index for the active keymap, or -1 if unset.

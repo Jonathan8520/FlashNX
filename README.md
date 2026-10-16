@@ -84,7 +84,7 @@ The control editor binds any of 88 Flash keys (letters, digits, arrows, F1-F12, 
 
 For games needing more inputs than the pad has buttons, a **combo layer** lets you hold a shoulder button so every other button sends a second key (`ZL + A` sends `F1`). The four modifiers are independent.
 
-Plug in a second controller and you get **two players**, each with their own bindings, for Flash games built around two people sharing one keyboard. Press **X** in the editor to switch between the Player 1 and Player 2 tabs.
+Up to **four players** can play at once, each with their own controller and bindings, for Flash games built around several people sharing one keyboard. A single Joy-Con held on its side is a whole controller: press **Y** in the control editor to open the console's controller screen, where each player presses SL and SR on theirs. The editor then draws the controller each player holds, a Joy-Con on its side with only its own buttons, so every button does what its row says. Press **X** in the editor to go from one player to the next. A player 1 on a single Joy-Con opens the pause with its small button, and pushes the stick in to turn it into the cursor (A then clicks), and again to get it back; with a key of their own on the push, they hold it half a second instead.
 
 ## Features
 

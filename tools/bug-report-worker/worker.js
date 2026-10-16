@@ -403,6 +403,12 @@ async function handleProfileShare(r, env) {
     // carries the whole control setup, not just the base bindings.
     combo_layers: obj(r.combo_layers),
     combo_layers_p2: obj(r.combo_layers_p2),
+    // Players 3 and 4 (#128), as player 2. An app from before them sends none:
+    // empty, which the app reads back as those players' defaults.
+    bindings_p3: obj(r.bindings_p3),
+    bindings_p4: obj(r.bindings_p4),
+    combo_layers_p3: obj(r.combo_layers_p3),
+    combo_layers_p4: obj(r.combo_layers_p4),
     cursor_speed: cursorSpeed,
     // Per-game "show cursor" toggle (default true when absent/unspecified), so a
     // shared "hide the pointer" profile survives the round-trip.

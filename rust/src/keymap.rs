@@ -38,7 +38,7 @@ pub struct Keymap {
     pub bindings: BTreeMap<std::string::String, std::string::String>,
     /// Player 2 (controller 2) bindings for local 2-player (issue #40), in the
     /// SAME file. `#[serde(default)]` so pre-#40 keymaps still load (an absent /
-    /// empty map gets the P2 defaults via `merge_fallback_defaults_p2`).
+    /// empty map gets the P2 defaults via `merge_fallback_defaults_players`).
     #[serde(default)]
     pub bindings_p2: BTreeMap<std::string::String, std::string::String>,
     /// Player 1 "combo layer" bindings (issue #57): the key each button sends
@@ -60,6 +60,18 @@ pub struct Keymap {
     /// Player 2 combo layers — the P2 counterpart of `combo_layers`.
     #[serde(default)]
     pub combo_layers_p2: BTreeMap<std::string::String, BTreeMap<std::string::String, std::string::String>>,
+    /// Players 3 and 4 (issue #128), as player 2: their bindings and combo
+    /// layers in the same file. `#[serde(default)]` keeps older keymaps and
+    /// profiles loading; a player with no map gets the defaults
+    /// (`merge_fallback_defaults_players`).
+    #[serde(default)]
+    pub bindings_p3: BTreeMap<std::string::String, std::string::String>,
+    #[serde(default)]
+    pub bindings_p4: BTreeMap<std::string::String, std::string::String>,
+    #[serde(default)]
+    pub combo_layers_p3: BTreeMap<std::string::String, BTreeMap<std::string::String, std::string::String>>,
+    #[serde(default)]
+    pub combo_layers_p4: BTreeMap<std::string::String, BTreeMap<std::string::String, std::string::String>>,
     // Legacy single-layer combo fields (pre per-modifier). READ for migration into
     // `combo_layers` on load, then never written (`skip_serializing`).
     #[serde(default, skip_serializing)]
@@ -95,6 +107,52 @@ pub(crate) fn default_show_cursor() -> bool {
     true
 }
 
+/// How many players FlashNX reads, one controller each (issues #40, #128).
+pub const MAX_PLAYERS: u8 = 4;
+
+type Layers = BTreeMap<std::string::String, BTreeMap<std::string::String, std::string::String>>;
+
+impl Keymap {
+    /// Player `player`'s base bindings, 1 to `MAX_PLAYERS` (any other number
+    /// reads as player 1).
+    pub fn player_bindings(&self, player: u8) -> &BTreeMap<std::string::String, std::string::String> {
+        match player {
+            2 => &self.bindings_p2,
+            3 => &self.bindings_p3,
+            4 => &self.bindings_p4,
+            _ => &self.bindings,
+        }
+    }
+
+    pub fn player_bindings_mut(&mut self, player: u8) -> &mut BTreeMap<std::string::String, std::string::String> {
+        match player {
+            2 => &mut self.bindings_p2,
+            3 => &mut self.bindings_p3,
+            4 => &mut self.bindings_p4,
+            _ => &mut self.bindings,
+        }
+    }
+
+    /// Player `player`'s combo layers, by modifier.
+    pub fn player_layers(&self, player: u8) -> &Layers {
+        match player {
+            2 => &self.combo_layers_p2,
+            3 => &self.combo_layers_p3,
+            4 => &self.combo_layers_p4,
+            _ => &self.combo_layers,
+        }
+    }
+
+    pub fn player_layers_mut(&mut self, player: u8) -> &mut Layers {
+        match player {
+            2 => &mut self.combo_layers_p2,
+            3 => &mut self.combo_layers_p3,
+            4 => &mut self.combo_layers_p4,
+            _ => &mut self.combo_layers,
+        }
+    }
+}
+
 /// Hardcoded fallback baked into the .nro. Mirrors what `cpp/src/main.cpp`
 /// used to declare as the static `BINDINGS` array — Mario 63's Z/X/Shift
 /// platformer convention plus universal Space/Enter/Escape/P/arrows. Buttons
@@ -108,6 +166,12 @@ pub const FALLBACK_BINDINGS: &[(&str, &str)] = &[
     ("R",            "Enter"),  // "Press Start" prompts
     ("Plus",         "P"),      // standard in-game pause key
     ("L",            "Escape"),
+    // SL / SR as L / R: they are a lone Joy-Con's shoulders (issue #128),
+    // where L and R are out of reach, and the editor shows them as such. A map
+    // that has an L and R of its own gives them to SL and SR instead
+    // (`merge_defaults_into`).
+    ("SL",           "Escape"),
+    ("SR",           "Enter"),
     ("ZR",           "Left click"),  // primary click (also the legacy hardcoded ZR)
     ("ZL",           "Right click"), // secondary click
     ("Left",         "Left"),
@@ -307,6 +371,7 @@ pub enum Nub {
 }
 
 /// One remappable control, as the pad view lays it out.
+#[derive(Clone, Copy)]
 pub struct PadSlot {
     /// Button name — the same string `EDITABLE_BUTTONS` and the keymap use.
     pub name: &'static str,
@@ -352,60 +417,309 @@ pub const PAD_MINUS: (f32, f32, f32, f32) = (21.3, 10.0, 1.2, 1.2);
 /// left column is worked by the left thumb or index, every row in the right by
 /// the right. Rows sit on a fixed 1.66-unit pitch from y = 0.5, which is what
 /// makes thirteen of them fit twice over without a scrollbar.
-pub const PAD_SLOTS: &[PadSlot] = &[
-    // ── Left hand ────────────────────────────────────────────────────────
-    PadSlot { name: "ZL", glyph: "ZL", chip: (0.4, 0.50, 13.2, 1.4),
-              icon: (15.4, 5.2, 3.6, 1.1), shape: PadIcon::Slab },
-    PadSlot { name: "L", glyph: "L", chip: (0.4, 2.16, 13.2, 1.4),
-              icon: (15.4, 6.5, 3.6, 1.1), shape: PadIcon::Slab },
-    PadSlot { name: "SL", glyph: "SL", chip: (0.4, 3.82, 13.2, 1.4),
-              icon: (13.9, 10.2, 0.7, 2.2), shape: PadIcon::Slab },
-    PadSlot { name: "StickLUp", glyph: "LS\u{2191}", chip: (0.4, 5.48, 13.2, 1.4),
-              icon: (16.0, 8.8, 3.4, 3.4), shape: PadIcon::Stick(Nub::Up) },
-    PadSlot { name: "StickLDown", glyph: "LS\u{2193}", chip: (0.4, 7.14, 13.2, 1.4),
-              icon: (16.0, 8.8, 3.4, 3.4), shape: PadIcon::Stick(Nub::Down) },
-    PadSlot { name: "StickLLeft", glyph: "LS\u{2190}", chip: (0.4, 8.80, 13.2, 1.4),
-              icon: (16.0, 8.8, 3.4, 3.4), shape: PadIcon::Stick(Nub::Left) },
-    PadSlot { name: "StickLRight", glyph: "LS\u{2192}", chip: (0.4, 10.46, 13.2, 1.4),
-              icon: (16.0, 8.8, 3.4, 3.4), shape: PadIcon::Stick(Nub::Right) },
-    PadSlot { name: "StickLPress", glyph: "LS", chip: (0.4, 12.12, 13.2, 1.4),
-              icon: (16.0, 8.8, 3.4, 3.4), shape: PadIcon::Stick(Nub::Press) },
-    PadSlot { name: "Up", glyph: "\u{2191}", chip: (0.4, 13.78, 13.2, 1.4),
-              icon: (17.85, 13.10, 1.10, 1.30), shape: PadIcon::Slab },
-    PadSlot { name: "Down", glyph: "\u{2193}", chip: (0.4, 15.44, 13.2, 1.4),
-              icon: (17.85, 14.40, 1.10, 1.30), shape: PadIcon::Slab },
-    PadSlot { name: "Left", glyph: "\u{2190}", chip: (0.4, 17.10, 13.2, 1.4),
-              icon: (17.10, 13.85, 1.30, 1.10), shape: PadIcon::Slab },
-    PadSlot { name: "Right", glyph: "\u{2192}", chip: (0.4, 18.76, 13.2, 1.4),
-              icon: (18.40, 13.85, 1.30, 1.10), shape: PadIcon::Slab },
-    // ── Right hand ───────────────────────────────────────────────────────
-    PadSlot { name: "ZR", glyph: "ZR", chip: (32.4, 0.50, 13.2, 1.4),
-              icon: (27.0, 5.2, 3.6, 1.1), shape: PadIcon::Slab },
-    PadSlot { name: "R", glyph: "R", chip: (32.4, 2.16, 13.2, 1.4),
-              icon: (27.0, 6.5, 3.6, 1.1), shape: PadIcon::Slab },
-    PadSlot { name: "SR", glyph: "SR", chip: (32.4, 3.82, 13.2, 1.4),
-              icon: (31.4, 10.2, 0.7, 2.2), shape: PadIcon::Slab },
-    PadSlot { name: "X", glyph: "X", chip: (32.4, 5.48, 13.2, 1.4),
-              icon: (26.85, 8.10, 1.5, 1.5), shape: PadIcon::Disc },
-    PadSlot { name: "Y", glyph: "Y", chip: (32.4, 7.14, 13.2, 1.4),
-              icon: (25.10, 9.85, 1.5, 1.5), shape: PadIcon::Disc },
-    PadSlot { name: "A", glyph: "A", chip: (32.4, 8.80, 13.2, 1.4),
-              icon: (28.60, 9.85, 1.5, 1.5), shape: PadIcon::Disc },
-    PadSlot { name: "B", glyph: "B", chip: (32.4, 10.46, 13.2, 1.4),
-              icon: (26.85, 11.60, 1.5, 1.5), shape: PadIcon::Disc },
-    PadSlot { name: "Plus", glyph: "+", chip: (32.4, 12.12, 13.2, 1.4),
-              icon: (23.5, 10.0, 1.2, 1.2), shape: PadIcon::Disc },
-    PadSlot { name: "StickRUp", glyph: "RS\u{2191}", chip: (32.4, 13.78, 13.2, 1.4),
-              icon: (25.4, 13.30, 3.2, 3.2), shape: PadIcon::Stick(Nub::Up) },
-    PadSlot { name: "StickRDown", glyph: "RS\u{2193}", chip: (32.4, 15.44, 13.2, 1.4),
-              icon: (25.4, 13.30, 3.2, 3.2), shape: PadIcon::Stick(Nub::Down) },
-    PadSlot { name: "StickRLeft", glyph: "RS\u{2190}", chip: (32.4, 17.10, 13.2, 1.4),
-              icon: (25.4, 13.30, 3.2, 3.2), shape: PadIcon::Stick(Nub::Left) },
-    PadSlot { name: "StickRRight", glyph: "RS\u{2192}", chip: (32.4, 18.76, 13.2, 1.4),
-              icon: (25.4, 13.30, 3.2, 3.2), shape: PadIcon::Stick(Nub::Right) },
-    PadSlot { name: "StickRPress", glyph: "RS", chip: (32.4, 20.42, 13.2, 1.4),
-              icon: (25.4, 13.30, 3.2, 3.2), shape: PadIcon::Stick(Nub::Press) },
+/// The Pro controller's twenty-five controls, then `$extra` (player 2 to 4's
+/// `-`). One list for both tables, so they cannot drift apart.
+macro_rules! pro_pad_slots {
+    ($($extra:expr),* $(,)?) => {
+        &[
+        // ── Left hand ────────────────────────────────────────────────────────
+        PadSlot { name: "ZL", glyph: "ZL", chip: (0.4, 0.50, 13.2, 1.4),
+                  icon: (15.4, 5.2, 3.6, 1.1), shape: PadIcon::Slab },
+        PadSlot { name: "L", glyph: "L", chip: (0.4, 2.16, 13.2, 1.4),
+                  icon: (15.4, 6.5, 3.6, 1.1), shape: PadIcon::Slab },
+        PadSlot { name: "SL", glyph: "SL", chip: (0.4, 3.82, 13.2, 1.4),
+                  icon: (13.9, 10.2, 0.7, 2.2), shape: PadIcon::Slab },
+        PadSlot { name: "StickLUp", glyph: "LS\u{2191}", chip: (0.4, 5.48, 13.2, 1.4),
+                  icon: (16.0, 8.8, 3.4, 3.4), shape: PadIcon::Stick(Nub::Up) },
+        PadSlot { name: "StickLDown", glyph: "LS\u{2193}", chip: (0.4, 7.14, 13.2, 1.4),
+                  icon: (16.0, 8.8, 3.4, 3.4), shape: PadIcon::Stick(Nub::Down) },
+        PadSlot { name: "StickLLeft", glyph: "LS\u{2190}", chip: (0.4, 8.80, 13.2, 1.4),
+                  icon: (16.0, 8.8, 3.4, 3.4), shape: PadIcon::Stick(Nub::Left) },
+        PadSlot { name: "StickLRight", glyph: "LS\u{2192}", chip: (0.4, 10.46, 13.2, 1.4),
+                  icon: (16.0, 8.8, 3.4, 3.4), shape: PadIcon::Stick(Nub::Right) },
+        PadSlot { name: "StickLPress", glyph: "LS", chip: (0.4, 12.12, 13.2, 1.4),
+                  icon: (16.0, 8.8, 3.4, 3.4), shape: PadIcon::Stick(Nub::Press) },
+        PadSlot { name: "Up", glyph: "\u{2191}", chip: (0.4, 13.78, 13.2, 1.4),
+                  icon: (17.85, 13.10, 1.10, 1.30), shape: PadIcon::Slab },
+        PadSlot { name: "Down", glyph: "\u{2193}", chip: (0.4, 15.44, 13.2, 1.4),
+                  icon: (17.85, 14.40, 1.10, 1.30), shape: PadIcon::Slab },
+        PadSlot { name: "Left", glyph: "\u{2190}", chip: (0.4, 17.10, 13.2, 1.4),
+                  icon: (17.10, 13.85, 1.30, 1.10), shape: PadIcon::Slab },
+        PadSlot { name: "Right", glyph: "\u{2192}", chip: (0.4, 18.76, 13.2, 1.4),
+                  icon: (18.40, 13.85, 1.30, 1.10), shape: PadIcon::Slab },
+        // ── Right hand ───────────────────────────────────────────────────────
+        PadSlot { name: "ZR", glyph: "ZR", chip: (32.4, 0.50, 13.2, 1.4),
+                  icon: (27.0, 5.2, 3.6, 1.1), shape: PadIcon::Slab },
+        PadSlot { name: "R", glyph: "R", chip: (32.4, 2.16, 13.2, 1.4),
+                  icon: (27.0, 6.5, 3.6, 1.1), shape: PadIcon::Slab },
+        PadSlot { name: "SR", glyph: "SR", chip: (32.4, 3.82, 13.2, 1.4),
+                  icon: (31.4, 10.2, 0.7, 2.2), shape: PadIcon::Slab },
+        PadSlot { name: "X", glyph: "X", chip: (32.4, 5.48, 13.2, 1.4),
+                  icon: (26.85, 8.10, 1.5, 1.5), shape: PadIcon::Disc },
+        PadSlot { name: "Y", glyph: "Y", chip: (32.4, 7.14, 13.2, 1.4),
+                  icon: (25.10, 9.85, 1.5, 1.5), shape: PadIcon::Disc },
+        PadSlot { name: "A", glyph: "A", chip: (32.4, 8.80, 13.2, 1.4),
+                  icon: (28.60, 9.85, 1.5, 1.5), shape: PadIcon::Disc },
+        PadSlot { name: "B", glyph: "B", chip: (32.4, 10.46, 13.2, 1.4),
+                  icon: (26.85, 11.60, 1.5, 1.5), shape: PadIcon::Disc },
+        PadSlot { name: "Plus", glyph: "+", chip: (32.4, 12.12, 13.2, 1.4),
+                  icon: (23.5, 10.0, 1.2, 1.2), shape: PadIcon::Disc },
+        PadSlot { name: "StickRUp", glyph: "RS\u{2191}", chip: (32.4, 13.78, 13.2, 1.4),
+                  icon: (25.4, 13.30, 3.2, 3.2), shape: PadIcon::Stick(Nub::Up) },
+        PadSlot { name: "StickRDown", glyph: "RS\u{2193}", chip: (32.4, 15.44, 13.2, 1.4),
+                  icon: (25.4, 13.30, 3.2, 3.2), shape: PadIcon::Stick(Nub::Down) },
+        PadSlot { name: "StickRLeft", glyph: "RS\u{2190}", chip: (32.4, 17.10, 13.2, 1.4),
+                  icon: (25.4, 13.30, 3.2, 3.2), shape: PadIcon::Stick(Nub::Left) },
+        PadSlot { name: "StickRRight", glyph: "RS\u{2192}", chip: (32.4, 18.76, 13.2, 1.4),
+                  icon: (25.4, 13.30, 3.2, 3.2), shape: PadIcon::Stick(Nub::Right) },
+        PadSlot { name: "StickRPress", glyph: "RS", chip: (32.4, 20.42, 13.2, 1.4),
+                  icon: (25.4, 13.30, 3.2, 3.2), shape: PadIcon::Stick(Nub::Press) },
+            $($extra,)*
+        ]
+    };
+}
+
+pub const PAD_SLOTS: &[PadSlot] = pro_pad_slots!();
+
+/// Players 2 to 4 on a full controller (issue #128): player 1's pad and their
+/// `-`, a button like any other for them (only player 1's opens the pause), at
+/// the foot of the left hand's column, where its thirteenth row fits.
+pub const PAD_SLOTS_OTHERS: &[PadSlot] = pro_pad_slots!(PadSlot {
+    name: "Minus",
+    glyph: "-",
+    chip: (0.4, 20.42, 13.2, 1.4),
+    icon: PAD_MINUS,
+    shape: PadIcon::Disc,
+});
+
+// ── A Joy-Con on its own (issue #128) ─────────────────────────────────────────
+// Held on its side, rail up, stick on the left, as the console's controller
+// screen draws it. `cpp/src/pad_read.cpp` turns its buttons so that the one on
+// the right of the four is A, the bottom one B, the top one X and the left one
+// Y, its stick the left stick: these rows are the same keys as the Pro
+// controller's of the same names. The four are named by their place, the round
+// buttons with a triangle of the console's font (`J`+direction), because the
+// letters printed on a right Joy-Con are not the ones they act as once it lies
+// on its side, and the left one has none.
+
+const JOY_SHELL: &[(f32, f32, f32, f32, f32)] = &[
+    (15.6, 2.0, 14.8, 0.9, 0.4), // the rail
+    (15.0, 2.6, 16.0, 7.0, 3.5), // the body
 ];
+
+const JOY_STICK: (f32, f32, f32, f32) = (16.6, 4.3, 3.6, 3.6);
+/// Where the left Joy-Con's `-` and the right one's `+` sit, on its side.
+const JOY_MINUS: (f32, f32, f32, f32) = (15.7, 3.1, 1.1, 1.1);
+const JOY_PLUS: (f32, f32, f32, f32) = (29.2, 3.1, 1.1, 1.1);
+
+/// One of a Joy-Con's rows: column 0 (left hand) or 1, `k`-th from the top on
+/// the editor's 1.66-unit pitch.
+macro_rules! joy_row {
+    ($name:expr, $glyph:expr, $col:expr, $k:expr, $icon:expr, $shape:expr) => {
+        PadSlot {
+            name: $name,
+            glyph: $glyph,
+            chip: (if $col == 0 { 0.4 } else { 32.4 }, 0.50 + 1.66 * $k as f32, 13.2, 1.4),
+            icon: $icon,
+            shape: $shape,
+        }
+    };
+}
+
+const JOY_SL: (f32, f32, f32, f32) = (17.0, 1.55, 2.6, 0.8);
+const JOY_SR: (f32, f32, f32, f32) = (26.4, 1.55, 2.6, 0.8);
+const JOY_UP: (f32, f32, f32, f32) = (26.65, 3.6, 1.5, 1.5);
+const JOY_DOWN: (f32, f32, f32, f32) = (26.65, 7.1, 1.5, 1.5);
+const JOY_LEFT: (f32, f32, f32, f32) = (24.9, 5.35, 1.5, 1.5);
+const JOY_RIGHT: (f32, f32, f32, f32) = (28.4, 5.35, 1.5, 1.5);
+
+/// Each column follows the picture top down, as the Pro controller's does: on
+/// the left SL (on the rail), then the stick; on the right SR, then the four
+/// buttons in the stick's order, up, down, left, right. The small button of
+/// players 2 to 4 comes under the rail button on its side, the left Joy-Con's
+/// `-` on the left, the right one's `+` on the right.
+macro_rules! joy_stick_rows {
+    ($k:expr) => {
+        [
+            joy_row!("StickLUp", "LS\u{2191}", 0, $k, JOY_STICK, PadIcon::Stick(Nub::Up)),
+            joy_row!("StickLDown", "LS\u{2193}", 0, $k + 1, JOY_STICK, PadIcon::Stick(Nub::Down)),
+            joy_row!("StickLLeft", "LS\u{2190}", 0, $k + 2, JOY_STICK, PadIcon::Stick(Nub::Left)),
+            joy_row!("StickLRight", "LS\u{2192}", 0, $k + 3, JOY_STICK, PadIcon::Stick(Nub::Right)),
+            joy_row!("StickLPress", "LS", 0, $k + 4, JOY_STICK, PadIcon::Stick(Nub::Press)),
+        ]
+    };
+}
+
+macro_rules! joy_face_rows {
+    ($k:expr) => {
+        [
+            joy_row!("X", "JU", 1, $k, JOY_UP, PadIcon::Disc),
+            joy_row!("B", "JD", 1, $k + 1, JOY_DOWN, PadIcon::Disc),
+            joy_row!("Y", "JL", 1, $k + 2, JOY_LEFT, PadIcon::Disc),
+            joy_row!("A", "JR", 1, $k + 3, JOY_RIGHT, PadIcon::Disc),
+        ]
+    };
+}
+
+const JOY_STICK_ROWS: [PadSlot; 5] = joy_stick_rows!(1);
+const JOY_STICK_ROWS_LOW: [PadSlot; 5] = joy_stick_rows!(2);
+const JOY_FACE_ROWS: [PadSlot; 4] = joy_face_rows!(1);
+const JOY_FACE_ROWS_LOW: [PadSlot; 4] = joy_face_rows!(2);
+
+const JOY_SLOTS_P1: &[PadSlot] = &[
+    joy_row!("SL", "SL", 0, 0, JOY_SL, PadIcon::Slab),
+    JOY_STICK_ROWS[0],
+    JOY_STICK_ROWS[1],
+    JOY_STICK_ROWS[2],
+    JOY_STICK_ROWS[3],
+    JOY_STICK_ROWS[4],
+    joy_row!("SR", "SR", 1, 0, JOY_SR, PadIcon::Slab),
+    JOY_FACE_ROWS[0],
+    JOY_FACE_ROWS[1],
+    JOY_FACE_ROWS[2],
+    JOY_FACE_ROWS[3],
+];
+
+const JOY_LEFT_SLOTS_OTHERS: &[PadSlot] = &[
+    joy_row!("SL", "SL", 0, 0, JOY_SL, PadIcon::Slab),
+    joy_row!("Minus", "-", 0, 1, JOY_MINUS, PadIcon::Disc),
+    JOY_STICK_ROWS_LOW[0],
+    JOY_STICK_ROWS_LOW[1],
+    JOY_STICK_ROWS_LOW[2],
+    JOY_STICK_ROWS_LOW[3],
+    JOY_STICK_ROWS_LOW[4],
+    joy_row!("SR", "SR", 1, 0, JOY_SR, PadIcon::Slab),
+    JOY_FACE_ROWS[0],
+    JOY_FACE_ROWS[1],
+    JOY_FACE_ROWS[2],
+    JOY_FACE_ROWS[3],
+];
+
+const JOY_RIGHT_SLOTS_OTHERS: &[PadSlot] = &[
+    joy_row!("SL", "SL", 0, 0, JOY_SL, PadIcon::Slab),
+    JOY_STICK_ROWS[0],
+    JOY_STICK_ROWS[1],
+    JOY_STICK_ROWS[2],
+    JOY_STICK_ROWS[3],
+    JOY_STICK_ROWS[4],
+    joy_row!("SR", "SR", 1, 0, JOY_SR, PadIcon::Slab),
+    joy_row!("Plus", "+", 1, 1, JOY_PLUS, PadIcon::Disc),
+    JOY_FACE_ROWS_LOW[0],
+    JOY_FACE_ROWS_LOW[1],
+    JOY_FACE_ROWS_LOW[2],
+    JOY_FACE_ROWS_LOW[3],
+];
+
+/// The button a layout draws greyed with no row, under a note: the pause.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PadPause {
+    Minus,
+    Plus,
+}
+
+/// One controller as the controls editor draws it: the Pro controller (or a
+/// Joy-Con pair, or the console in hand, which have the same buttons), or a
+/// Joy-Con on its own, for player 1 or for the others (issue #128).
+pub struct PadLayout {
+    /// The rows; the editor keeps its cursor on the same button when they
+    /// change under it (`menu::sync_pad_slots`).
+    pub slots: &'static [PadSlot],
+    /// The silhouette, `(x, y, w, h, radius)`, drawn first.
+    pub shell: &'static [(f32, f32, f32, f32, f32)],
+    /// Player 1's pause button, greyed with no row, and the note's height.
+    pub pause: Option<(PadPause, (f32, f32, f32, f32), f32)>,
+    /// The layout's size in units, in landscape.
+    pub units_w: f32,
+    pub units_h: f32,
+    /// The picture's middle and width, in units.
+    pub pic_mid: f32,
+    pub pic_w: f32,
+    /// What a turned (portrait) picture keeps, top to bottom, in units.
+    pub pic_top: f32,
+    pub pic_bottom: f32,
+}
+
+pub static PAD_PRO_P1: PadLayout = PadLayout {
+    slots: PAD_SLOTS,
+    shell: PAD_SHELL,
+    pause: Some((PadPause::Minus, PAD_MINUS, 20.6)),
+    units_w: PAD_UNITS_W,
+    units_h: PAD_UNITS_H,
+    pic_mid: 23.0,
+    pic_w: 18.4,
+    pic_top: 4.8,
+    pic_bottom: 21.3,
+};
+
+pub static PAD_PRO_OTHERS: PadLayout = PadLayout {
+    slots: PAD_SLOTS_OTHERS,
+    shell: PAD_SHELL,
+    pause: None,
+    units_w: PAD_UNITS_W,
+    units_h: PAD_UNITS_H,
+    pic_mid: 23.0,
+    pic_w: 18.4,
+    pic_top: 4.8,
+    pic_bottom: 21.3,
+};
+
+/// `units_h`: under the longest column (six rows end at 10.2 units, seven at
+/// 11.86) and player 1's note.
+const fn joy_layout(
+    slots: &'static [PadSlot],
+    pause: Option<(PadPause, (f32, f32, f32, f32), f32)>,
+    units_h: f32,
+) -> PadLayout {
+    PadLayout {
+        slots,
+        shell: JOY_SHELL,
+        pause,
+        units_w: PAD_UNITS_W,
+        units_h,
+        pic_mid: 23.0,
+        pic_w: 17.2,
+        pic_top: 1.2,
+        pic_bottom: 11.4,
+    }
+}
+
+pub static PAD_JOY_LEFT_P1: PadLayout = joy_layout(JOY_SLOTS_P1, Some((PadPause::Minus, JOY_MINUS, 10.7)), 11.6);
+pub static PAD_JOY_RIGHT_P1: PadLayout = joy_layout(JOY_SLOTS_P1, Some((PadPause::Plus, JOY_PLUS, 10.7)), 11.6);
+pub static PAD_JOY_LEFT_OTHERS: PadLayout = joy_layout(JOY_LEFT_SLOTS_OTHERS, None, 12.4);
+pub static PAD_JOY_RIGHT_OTHERS: PadLayout = joy_layout(JOY_RIGHT_SLOTS_OTHERS, None, 11.6);
+
+extern "C" {
+    /// What player `player` holds now (`cpp/src/pad_read.cpp`): 0 nothing, 1
+    /// a full controller, 2 a left Joy-Con on its own, 3 a right one.
+    fn flashnx_player_pad_kind(player: core::ffi::c_int) -> core::ffi::c_int;
+}
+
+/// What player `player` holds now: 0 nothing, 1 a full controller (a Pro
+/// controller, a Joy-Con pair, the console in hand), 2 a left Joy-Con on its
+/// own, 3 a right one.
+pub fn player_pad_kind(player: u8) -> u8 {
+    // SAFETY: plain C call reading the console's controller state.
+    unsafe { flashnx_player_pad_kind(player as core::ffi::c_int) as u8 }
+}
+
+/// The controller the editor draws for player `player`: the Joy-Con they hold
+/// on its own, else the Pro controller (also what nothing in hand shows).
+pub fn pad_layout_for(player: u8) -> &'static PadLayout {
+    let first = player <= 1;
+    match (player_pad_kind(player), first) {
+        (2, true) => &PAD_JOY_LEFT_P1,
+        (3, true) => &PAD_JOY_RIGHT_P1,
+        (2, false) => &PAD_JOY_LEFT_OTHERS,
+        (3, false) => &PAD_JOY_RIGHT_OTHERS,
+        (_, true) => &PAD_PRO_P1,
+        (_, false) => &PAD_PRO_OTHERS,
+    }
+}
+
+/// The layout of the player the editor is on.
+pub fn pad_layout() -> &'static PadLayout {
+    pad_layout_for(edit_player())
+}
 
 /// Byte-wise string equality usable in a const block.
 const fn const_str_eq(a: &str, b: &str) -> bool {
@@ -529,9 +843,13 @@ fn fallback_keymap() -> Keymap {
     Keymap {
         version: 1,
         bindings,
-        bindings_p2: p2_default_bindings(),
+        bindings_p2: player_default_bindings(2),
         combo_layers: BTreeMap::new(), // combos start empty (opt-in per game)
         combo_layers_p2: BTreeMap::new(),
+        bindings_p3: player_default_bindings(3),
+        bindings_p4: player_default_bindings(4),
+        combo_layers_p3: BTreeMap::new(),
+        combo_layers_p4: BTreeMap::new(),
         bindings_layer2: BTreeMap::new(), // legacy (migration only)
         bindings_layer2_p2: BTreeMap::new(),
         combo_modifier: std::string::String::new(),
@@ -548,10 +866,35 @@ fn fallback_keymap() -> Keymap {
 /// "" (present) and is left as-is. Applied in-memory after every load — the file
 /// on SD is only rewritten when the user next edits a binding.
 fn merge_fallback_defaults(km: &mut Keymap) {
-    for (btn, key) in FALLBACK_BINDINGS {
-        km.bindings
-            .entry((*btn).into())
-            .or_insert_with(|| (*key).into());
+    merge_defaults_into(&mut km.bindings, FALLBACK_BINDINGS);
+}
+
+/// Every player's defaults merged (`merge_fallback_defaults` and
+/// `merge_fallback_defaults_players`): what a map gives once loaded.
+pub(crate) fn merge_all_defaults(km: &mut Keymap) {
+    merge_fallback_defaults(km);
+    merge_fallback_defaults_players(km);
+}
+
+/// `defaults` into `map` for the buttons it does not mention. SL and SR are a
+/// lone Joy-Con's L and R (issue #128), so a map from before them takes ITS L
+/// and R, not the default ones: a game that put L on Shift has Shift on SL
+/// too, and one that left L without a key leaves SL without one.
+fn merge_defaults_into(
+    map: &mut BTreeMap<std::string::String, std::string::String>,
+    defaults: &[(&str, &str)],
+) {
+    for (btn, key) in defaults {
+        if !matches!(*btn, "SL" | "SR") {
+            map.entry((*btn).into()).or_insert_with(|| (*key).into());
+        }
+    }
+    for (rail, shoulder) in [("SL", "L"), ("SR", "R")] {
+        if !map.contains_key(rail) {
+            if let Some(key) = map.get(shoulder).cloned() {
+                map.insert(rail.into(), key);
+            }
+        }
     }
 }
 
@@ -560,10 +903,10 @@ fn merge_fallback_defaults(km: &mut Keymap) {
 /// English canonical names ("Left click"/"Right click") on load, so the editor
 /// dropdown + display match and the file is rewritten to English the next time
 /// the user edits a binding. Old files keep working untouched until then —
-/// `flash_key_name_to_sk` still accepts the French names. Applied to both the
-/// P1 and P2 maps.
+/// `flash_key_name_to_sk` still accepts the French names. Applied to every
+/// player's map.
 fn migrate_legacy_key_names(km: &mut Keymap) {
-    for map in [&mut km.bindings, &mut km.bindings_p2] {
+    for map in [&mut km.bindings, &mut km.bindings_p2, &mut km.bindings_p3, &mut km.bindings_p4] {
         for v in map.values_mut() {
             if v.as_str() == "Clic gauche" {
                 *v = "Left click".into();
@@ -771,7 +1114,7 @@ pub fn init_for_swf(swf_basename: &str) {
     // Backfill defaults for buttons this keymap predates (e.g. ZR/ZL clicks on a
     // sidecar saved before they were editable), so the editor and behaviour agree.
     merge_fallback_defaults(&mut km);
-    merge_fallback_defaults_p2(&mut km); // issue #40: ensure P2 has working defaults
+    merge_fallback_defaults_players(&mut km); // #40, #128: players 2 to 4 get working defaults
 
     if let Ok(mut g) = ACTIVE_BASENAME.lock() {
         *g = Some(swf_basename.into());
@@ -800,7 +1143,7 @@ pub fn init_for_global_default() {
         km
     };
     merge_fallback_defaults(&mut km);
-    merge_fallback_defaults_p2(&mut km); // issue #40: ensure P2 has working defaults
+    merge_fallback_defaults_players(&mut km); // #40, #128: players 2 to 4 get working defaults
     if let Ok(mut g) = ACTIVE_BASENAME.lock() {
         *g = Some(GLOBAL_SENTINEL.into());
     }
@@ -833,13 +1176,11 @@ pub fn current_binding(button: &str) -> Option<std::string::String> {
     // combo layer of that modifier (issue #57, per-modifier). `edit_subtab_*` are
     // atomics — no re-lock of ACTIVE_KEYMAP → no deadlock.
     let combo_mod = edit_subtab_modifier();
-    let p2 = edit_player() == 2;
+    let player = edit_player();
     let val = if combo_mod.is_empty() {
-        let map = if p2 { &km.bindings_p2 } else { &km.bindings };
-        map.get(button)
+        km.player_bindings(player).get(button)
     } else {
-        let layers = if p2 { &km.combo_layers_p2 } else { &km.combo_layers };
-        layers.get(combo_mod).and_then(|m| m.get(button))
+        km.player_layers(player).get(combo_mod).and_then(|m| m.get(button))
     };
     val.filter(|v| !v.is_empty()) // "" = explicitly unbound (see set_binding)
         .cloned()
@@ -851,8 +1192,7 @@ pub fn current_binding(button: &str) -> Option<std::string::String> {
 pub fn base_binding(button: &str) -> Option<std::string::String> {
     let g = ACTIVE_KEYMAP.lock().ok()?;
     let km = g.as_ref()?;
-    let map = if edit_player() == 2 { &km.bindings_p2 } else { &km.bindings };
-    map.get(button).filter(|v| !v.is_empty()).cloned()
+    km.player_bindings(edit_player()).get(button).filter(|v| !v.is_empty()).cloned()
 }
 
 /// The keys the other buttons send in the map the editor is on (player and
@@ -868,12 +1208,15 @@ pub fn current_map_used_keys(editing: &str) -> BTreeMap<std::string::String, std
     let mut used: BTreeMap<std::string::String, std::vec::Vec<&'static str>> = BTreeMap::new();
     let Ok(g) = ACTIVE_KEYMAP.lock() else { return used };
     let Some(km) = g.as_ref() else { return used };
-    let p2 = edit_player() == 2;
+    let player = edit_player();
     let open = edit_subtab_modifier();
-    let base = if p2 { &km.bindings_p2 } else { &km.bindings };
-    let layers = if p2 { &km.combo_layers_p2 } else { &km.combo_layers };
+    let base = km.player_bindings(player);
+    let layers = km.player_layers(player);
     let layer = if open.is_empty() { None } else { layers.get(open) };
-    for slot in PAD_SLOTS {
+    // The buttons of the controller the editor draws (issue #128): a key
+    // only a Pro controller's + sends is not taken on a Joy-Con, which has no
+    // such row to show it on.
+    for slot in pad_layout().slots {
         let b = slot.name;
         // `slot_is_modifier`, inline: it takes the keymap lock held here.
         let muted = b == open || (SUBTAB_MODS[1..].contains(&b) && layer_has_binding(b, layers.get(b)));
@@ -935,14 +1278,13 @@ pub fn set_binding(button: &str, flash_key: Option<&str>) -> bool {
         };
         let Some(km) = g.as_mut() else { return false };
         let combo_mod = edit_subtab_modifier();
-        let p2 = edit_player() == 2;
+        let player = edit_player();
         // Empty marker (not remove) so a deliberate unbind survives the next
         // default-merge (ABSENT button gets its fallback; empty stays off).
         let val = flash_key.map(std::string::String::from).unwrap_or_default();
         let prev_source = km.source.clone();
         if combo_mod.is_empty() {
-            let map = if p2 { &mut km.bindings_p2 } else { &mut km.bindings };
-            let prev = map.insert(button.into(), val);
+            let prev = km.player_bindings_mut(player).insert(button.into(), val);
             undo = Some((std::string::String::new(), prev, prev_source));
         } else {
             // Per-modifier combo layer (issue #57): create it on first bind.
@@ -950,7 +1292,7 @@ pub fn set_binding(button: &str, flash_key: Option<&str>) -> bool {
             // layer, an absent button and an empty one both fall through to the
             // Normal key (`lookup_combo`), which is what the editor calls "Same
             // as Normal", and an emptied layer goes with its last entry.
-            let layers = if p2 { &mut km.combo_layers_p2 } else { &mut km.combo_layers };
+            let layers = km.player_layers_mut(player);
             let prev = if flash_key.is_some() {
                 layers.entry(combo_mod.to_string()).or_default().insert(button.into(), val)
             } else {
@@ -974,13 +1316,11 @@ pub fn set_binding(button: &str, flash_key: Option<&str>) -> bool {
     if let Some((layer, prev, prev_source)) = undo {
         if let Ok(mut g) = ACTIVE_KEYMAP.lock() {
             if let Some(km) = g.as_mut() {
-                let p2 = edit_player() == 2;
+                let player = edit_player();
                 let map = if layer.is_empty() {
-                    if p2 { &mut km.bindings_p2 } else { &mut km.bindings }
-                } else if p2 {
-                    km.combo_layers_p2.entry(layer.clone()).or_default()
+                    km.player_bindings_mut(player)
                 } else {
-                    km.combo_layers.entry(layer.clone()).or_default()
+                    km.player_layers_mut(player).entry(layer.clone()).or_default()
                 };
                 match prev {
                     Some(v) => {
@@ -1263,7 +1603,7 @@ pub fn effective_for(basename: &str) -> Keymap {
         fallback_keymap()
     };
     merge_fallback_defaults(&mut km);
-    merge_fallback_defaults_p2(&mut km);
+    merge_fallback_defaults_players(&mut km);
     km
 }
 
@@ -1279,7 +1619,7 @@ pub fn default_effective() -> Keymap {
     let default = find_user_path("keymap_default.json");
     let mut km = try_default_or_fallback(default.as_deref());
     merge_fallback_defaults(&mut km);
-    merge_fallback_defaults_p2(&mut km);
+    merge_fallback_defaults_players(&mut km);
     km
 }
 
@@ -1297,7 +1637,7 @@ pub fn revert_target(basename: &str) -> Keymap {
         try_default_or_fallback(default.as_deref())
     };
     merge_fallback_defaults(&mut km);
-    merge_fallback_defaults_p2(&mut km);
+    merge_fallback_defaults_players(&mut km);
     km
 }
 
@@ -1352,7 +1692,7 @@ pub fn binding_diff_rows(cur: &Keymap, tgt: &Keymap) -> std::vec::Vec<std::strin
                 flash_key_display(k).into_owned()
             }
         };
-        for slot in PAD_SLOTS {
+        for slot in PAD_SLOTS_OTHERS {
             let btn = slot.name;
             let c = c_map.get(btn).map(std::string::String::as_str).unwrap_or("");
             let n = t_map.get(btn).map(std::string::String::as_str).unwrap_or("");
@@ -1361,20 +1701,20 @@ pub fn binding_diff_rows(cur: &Keymap, tgt: &Keymap) -> std::vec::Vec<std::strin
             }
         }
     };
-    // Base bindings, both players (#40).
-    diff_map("", u.key_none, &cur.bindings, &tgt.bindings);
-    diff_map("P2 ", u.key_none, &cur.bindings_p2, &tgt.bindings_p2);
-    // Per-modifier combo layers, both players (#57): a combo-only change must show
-    // up too, and under the RIGHT modifier ("ZL+A" vs "R+A"). An absent layer diffs
-    // against an empty one, so turning a combo on/off registers.
+    // Base bindings, every player (#40, #128): player 1's rows bare, the
+    // others' tagged "P2 " to "P4 " (`player_tag`).
     let empty = BTreeMap::new();
-    for m in &SUBTAB_MODS[1..] {
-        let c1 = cur.combo_layers.get(*m).unwrap_or(&empty);
-        let t1 = tgt.combo_layers.get(*m).unwrap_or(&empty);
-        diff_map(&std::format!("{}+", m), u.key_same_as_normal, c1, t1);
-        let c2 = cur.combo_layers_p2.get(*m).unwrap_or(&empty);
-        let t2 = tgt.combo_layers_p2.get(*m).unwrap_or(&empty);
-        diff_map(&std::format!("P2 {}+", m), u.key_same_as_normal, c2, t2);
+    for player in 1..=MAX_PLAYERS {
+        let tag = player_tag(player);
+        diff_map(tag, u.key_none, cur.player_bindings(player), tgt.player_bindings(player));
+        // Per-modifier combo layers (#57): a combo-only change must show up
+        // too, and under the RIGHT modifier ("ZL+A" vs "R+A"). An absent layer
+        // diffs against an empty one, so turning a combo on/off registers.
+        for m in &SUBTAB_MODS[1..] {
+            let c = cur.player_layers(player).get(*m).unwrap_or(&empty);
+            let t = tgt.player_layers(player).get(*m).unwrap_or(&empty);
+            diff_map(&std::format!("{}{}+", tag, m), u.key_same_as_normal, c, t);
+        }
     }
     // Cursor visibility (show-cursor toggle) rides IN the keymap, so a change to it
     // must register too — otherwise hiding the pointer would read as "no changes"
@@ -2121,28 +2461,94 @@ pub const FALLBACK_BINDINGS_P2: &[(&str, &str)] = &[
     ("Y", "Num4"),
     ("R", "Num5"),
     ("L", "Num6"),
+    ("SR", "Num5"),
+    ("SL", "Num6"),
 ];
 
-fn p2_default_bindings() -> BTreeMap<std::string::String, std::string::String> {
+// Players 3 and 4 (issue #128). Super Smash Flash 2, the best-known Flash game
+// for four at one keyboard, gives its players 3 and 4 no keys at all: there is
+// no convention to follow. These only have to differ from players 1 and 2 and
+// from each other, so that a game's own controls menu, set to player 3, learns
+// player 3's Joy-Con by its keys: I J K L and the top-row 7 8 9 0 for player 3,
+// T F G H and the numpad's 7 8 9 0 for player 4.
+pub const FALLBACK_BINDINGS_P3: &[(&str, &str)] = &[
+    ("Left", "J"),
+    ("Right", "L"),
+    ("Up", "I"),
+    ("Down", "K"),
+    ("StickLLeft", "J"),
+    ("StickLRight", "L"),
+    ("StickLUp", "I"),
+    ("StickLDown", "K"),
+    ("A", "7"),
+    ("B", "8"),
+    ("X", "9"),
+    ("Y", "0"),
+    ("R", "O"),
+    ("L", "U"),
+    ("SR", "O"),
+    ("SL", "U"),
+];
+
+pub const FALLBACK_BINDINGS_P4: &[(&str, &str)] = &[
+    ("Left", "F"),
+    ("Right", "H"),
+    ("Up", "T"),
+    ("Down", "G"),
+    ("StickLLeft", "F"),
+    ("StickLRight", "H"),
+    ("StickLUp", "T"),
+    ("StickLDown", "G"),
+    ("A", "Num7"),
+    ("B", "Num8"),
+    ("X", "Num9"),
+    ("Y", "Num0"),
+    ("R", "V"),
+    ("L", "C"),
+    ("SR", "V"),
+    ("SL", "C"),
+];
+
+/// Player `player`'s defaults (players 2 to 4; player 1's are `FALLBACK_BINDINGS`).
+fn player_fallback(player: u8) -> &'static [(&'static str, &'static str)] {
+    match player {
+        2 => FALLBACK_BINDINGS_P2,
+        3 => FALLBACK_BINDINGS_P3,
+        4 => FALLBACK_BINDINGS_P4,
+        _ => FALLBACK_BINDINGS,
+    }
+}
+
+pub(crate) fn player_default_bindings(player: u8) -> BTreeMap<std::string::String, std::string::String> {
     let mut m = BTreeMap::new();
-    for (btn, key) in FALLBACK_BINDINGS_P2 {
+    for (btn, key) in player_fallback(player) {
         m.insert((*btn).into(), (*key).into());
     }
     m
 }
 
-/// Backfill P2 defaults for any P2 button the loaded keymap doesn't mention, so
-/// pre-#40 files (no `bindings_p2`) and partial maps still get a working P2.
-fn merge_fallback_defaults_p2(km: &mut Keymap) {
-    for (btn, key) in FALLBACK_BINDINGS_P2 {
-        km.bindings_p2
-            .entry((*btn).into())
-            .or_insert_with(|| (*key).into());
+/// Backfill the defaults of players 2 to 4 for any button the loaded keymap
+/// does not mention, so files from before #40 (no `bindings_p2`) or #128 (no
+/// `bindings_p3` / `_p4`), and partial maps, still give every player a pad.
+fn merge_fallback_defaults_players(km: &mut Keymap) {
+    for player in 2..=MAX_PLAYERS {
+        merge_defaults_into(km.player_bindings_mut(player), player_fallback(player));
     }
 }
 
-/// Which player the TOUCHES editor is currently editing (1 or 2). In-game input
-/// is always resolved per-player (`lookup` = P1, `lookup_p2` = P2); this only
+/// How a diff row names a player's button: player 1's bare ("StickLUp"), the
+/// others' after "P2 " to "P4 " (the profile preview draws it as a chip).
+pub fn player_tag(player: u8) -> &'static str {
+    match player {
+        2 => "P2 ",
+        3 => "P3 ",
+        4 => "P4 ",
+        _ => "",
+    }
+}
+
+/// Which player the TOUCHES editor is currently editing (1 to `MAX_PLAYERS`).
+/// In-game input is always resolved per player (`lookup_player`); this only
 /// steers the editor's `current_binding` / `set_binding` to the right map.
 static EDIT_PLAYER: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
 
@@ -2152,27 +2558,26 @@ pub fn edit_player() -> u8 {
 
 pub fn set_edit_player(player: u8) {
     EDIT_PLAYER.store(
-        if player == 2 { 2 } else { 1 },
+        if (1..=MAX_PLAYERS).contains(&player) { player } else { 1 },
         std::sync::atomic::Ordering::Relaxed,
     );
 }
 
-/// The editor's active SUB-TAB, PER PLAYER (index 0 = P1, 1 = P2), as an index
-/// into `SUBTAB_MODS`: 0 = NORMAL (base bindings), 1..=4 = the ZL/ZR/L/R combo
-/// layer being edited (issue #57, per-modifier). Session state, reset to NORMAL
-/// for both when the editor opens (the persisted combo layers are untouched — a
-/// modifier stays active in-game as long as its layer has bindings). Steers only
-/// the editor's `current_binding` / `set_binding`; in-game uses `lookup_combo*`.
-static EDIT_SUBTAB: [std::sync::atomic::AtomicU8; 2] = [
-    std::sync::atomic::AtomicU8::new(0),
-    std::sync::atomic::AtomicU8::new(0),
-];
+/// The editor's active SUB-TAB, PER PLAYER (index 0 = P1 ... 3 = P4), as an
+/// index into `SUBTAB_MODS`: 0 = NORMAL (base bindings), 1..=4 = the ZL/ZR/L/R
+/// combo layer being edited (issue #57, per-modifier). Session state, reset to
+/// NORMAL for every player when the editor opens (the persisted combo layers
+/// are untouched — a modifier stays active in-game as long as its layer has
+/// bindings). Steers only the editor's `current_binding` / `set_binding`;
+/// in-game uses `lookup_combo_player`.
+static EDIT_SUBTAB: [std::sync::atomic::AtomicU8; MAX_PLAYERS as usize] =
+    [const { std::sync::atomic::AtomicU8::new(0) }; MAX_PLAYERS as usize];
 
 /// Sub-tab index -> modifier name. Index 0 ("") = the NORMAL (base) tab.
 pub const SUBTAB_MODS: [&str; 5] = ["", "ZL", "ZR", "L", "R"];
 
 fn subtab_slot() -> usize {
-    if edit_player() == 2 { 1 } else { 0 }
+    (edit_player().clamp(1, MAX_PLAYERS) - 1) as usize
 }
 
 /// Current sub-tab index (0..=4) for the edit player. 0 = NORMAL.
@@ -2193,7 +2598,7 @@ pub fn edit_subtab_modifier() -> &'static str {
     SUBTAB_MODS[edit_subtab_index()]
 }
 
-/// Reset BOTH players' sub-tabs to NORMAL — called when the editor opens so it
+/// Reset every player's sub-tab to NORMAL — called when the editor opens so it
 /// always starts clean, without touching the persisted combo layers.
 pub fn reset_edit_subtabs() {
     for v in &EDIT_SUBTAB {
@@ -2201,12 +2606,12 @@ pub fn reset_edit_subtabs() {
     }
 }
 
-/// Player-2 equivalent of [`lookup`]: resolve a controller-2 button to its Flash
-/// `SK_*` code via the `bindings_p2` map of the active keymap.
-pub fn lookup_p2(button_name: &str) -> Option<core::ffi::c_int> {
+/// [`lookup`] for player `player` (1 to `MAX_PLAYERS`): resolve a button of that
+/// player's controller to its Flash `SK_*` code through that player's map.
+pub fn lookup_player(player: u8, button_name: &str) -> Option<core::ffi::c_int> {
     let g = ACTIVE_KEYMAP.lock().ok()?;
     let km = g.as_ref()?;
-    let key_name = km.bindings_p2.get(button_name)?;
+    let key_name = km.player_bindings(player).get(button_name)?;
     if key_name.is_empty() {
         return Some(crate::SK_NONE);
     }
@@ -2227,11 +2632,11 @@ pub fn lookup_combo(modifier: &str, button_name: &str) -> Option<core::ffi::c_in
     Some(flash_key_name_to_sk(key_name))
 }
 
-/// Player-2 counterpart of [`lookup_combo`].
-pub fn lookup_combo_p2(modifier: &str, button_name: &str) -> Option<core::ffi::c_int> {
+/// [`lookup_combo`] for player `player` (1 to `MAX_PLAYERS`).
+pub fn lookup_combo_player(player: u8, modifier: &str, button_name: &str) -> Option<core::ffi::c_int> {
     let g = ACTIVE_KEYMAP.lock().ok()?;
     let km = g.as_ref()?;
-    let key_name = km.combo_layers_p2.get(modifier)?.get(button_name)?;
+    let key_name = km.player_layers(player).get(modifier)?.get(button_name)?;
     if key_name.is_empty() {
         return None;
     }
@@ -2294,19 +2699,15 @@ pub fn slot_is_modifier(button: &str) -> bool {
     if !SUBTAB_MODS[1..].contains(&button) {
         return false;
     }
-    if edit_player() == 2 {
-        combo_active_p2(button)
-    } else {
-        combo_active(button)
-    }
+    combo_active_player(edit_player(), button)
 }
 
-/// Player-2 counterpart of [`combo_active`].
-pub fn combo_active_p2(modifier: &str) -> bool {
+/// [`combo_active`] for player `player` (1 to `MAX_PLAYERS`).
+pub fn combo_active_player(player: u8, modifier: &str) -> bool {
     ACTIVE_KEYMAP
         .lock()
         .ok()
-        .and_then(|g| g.as_ref().map(|k| layer_has_binding(modifier, k.combo_layers_p2.get(modifier))))
+        .and_then(|g| g.as_ref().map(|k| layer_has_binding(modifier, k.player_layers(player).get(modifier))))
         .unwrap_or(false)
 }
 

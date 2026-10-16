@@ -120,12 +120,13 @@ enum Screen {
     Inactive,
     /// In-game TOUCHES sub-menu (edit / apply / share / cursor / revert).
     Menu { selection: usize },
-    /// The pad view — the keymap editor. `selection` indexes `keymap::PAD_SLOTS`.
+    /// The pad view — the keymap editor. `selection` indexes the rows of the
+    /// controller in the edited player's hands (`keymap::pad_layout`).
     /// No scroll: the pad shows all twenty-five controls at once, so there is no
     /// window for a cursor to fall out of and nothing to put back on the way in.
     List { selection: usize },
     /// Visual keyboard picker (issue #55). `button_idx` indexes
-    /// `keymap::PAD_SLOTS`; `key_idx` indexes `keymap::KEYBOARD` (positioned
+    /// those rows; `key_idx` indexes `keymap::KEYBOARD` (positioned
     /// keys, geometric 2D nav).
     Keyboard { button_idx: usize, key_idx: usize },
     /// Community-profile picker (in-game apply). `selection` indexes `matches`.
@@ -187,6 +188,8 @@ struct State {
     toast_kind: u8,
     /// Tick until which the toast stays up (0 = none).
     toast_until: u64,
+    /// The rows the cursor was last on (`sync_pad_slots`).
+    pad_slots: &'static [keymap::PadSlot],
 }
 
 static TOUCHES: Mutex<State> = Mutex::new(State {
@@ -206,7 +209,32 @@ static TOUCHES: Mutex<State> = Mutex::new(State {
     toast_msg: std::string::String::new(),
     toast_kind: 0,
     toast_until: 0,
+    pad_slots: keymap::PAD_SLOTS,
 });
+
+/// The editor's rows follow the controller in the edited player's hands
+/// (issue #128): a Joy-Con on its own has eleven of the Pro controller's
+/// buttons. When they change (the player picks up another controller, or X
+/// moves to a player who holds one), the cursor stays on the same button if
+/// the new controller has it, else goes to the first row; a key picker open
+/// on a button the new one lacks closes onto the rows.
+fn sync_pad_slots(s: &mut State) {
+    let slots = keymap::pad_layout().slots;
+    let old = s.pad_slots;
+    if core::ptr::eq(old.as_ptr(), slots.as_ptr()) && old.len() == slots.len() {
+        return;
+    }
+    s.pad_slots = slots;
+    let same = |i: usize| old.get(i).and_then(|o| slots.iter().position(|n| n.name == o.name));
+    s.screen = match s.screen {
+        Screen::List { selection } => Screen::List { selection: unstick_cursor(same(selection).unwrap_or(0)) },
+        Screen::Keyboard { button_idx, key_idx } => match same(button_idx) {
+            Some(i) => Screen::Keyboard { button_idx: i, key_idx },
+            None => Screen::List { selection: unstick_cursor(0) },
+        },
+        other => other,
+    };
+}
 
 pub fn is_active() -> bool {
     TOUCHES
@@ -230,6 +258,7 @@ pub fn touch_select(idx: usize) -> bool {
     let Ok(mut s) = TOUCHES.lock() else {
         return false;
     };
+    sync_pad_slots(&mut s);
     match s.screen {
         Screen::Keyboard { button_idx, key_idx } => {
             if idx >= crate::keymap::KEYBOARD.len() {
@@ -251,14 +280,21 @@ pub fn touch_select(idx: usize) -> bool {
         // on the next A -- and `panic = "abort"` makes that a console fatal,
         // not an exception.
         Screen::List { selection } => {
-            use crate::backend::render::{PAD_CELL_ICON, PAD_CELL_LAYER, PAD_CELL_PLAYER};
-            let n = crate::keymap::PAD_SLOTS.len();
+            use crate::backend::render::{PAD_CELL_ICON, PAD_CELL_LAYER, PAD_CELL_PADS, PAD_CELL_PLAYER};
+            let n = crate::keymap::pad_layout().slots.len();
+            // The controllers chip: the console's screen, as Y opens it. It
+            // holds the screen until it closes, so the lock goes first.
+            if idx == PAD_CELL_PADS {
+                drop(s);
+                open_controller_screen();
+                return false;
+            }
             // The header's switches: a tap switches, as X and the shoulders
             // do, and there is nothing to take after it.
             if (PAD_CELL_PLAYER..PAD_CELL_ICON).contains(&idx) {
                 let before = (keymap::edit_player(), keymap::edit_subtab_index());
-                if idx < PAD_CELL_LAYER {
-                    keymap::set_edit_player(if idx == PAD_CELL_PLAYER { 1 } else { 2 });
+                if idx < PAD_CELL_PADS {
+                    keymap::set_edit_player((idx - PAD_CELL_PLAYER + 1) as u8);
                 } else {
                     keymap::set_edit_subtab_index(idx - PAD_CELL_LAYER);
                 }
@@ -273,9 +309,9 @@ pub fn touch_select(idx: usize) -> bool {
             // first, so a second tap on it opens the row being read.
             let row = if (PAD_CELL_ICON..PAD_CELL_ICON + n).contains(&idx) {
                 let r = idx - PAD_CELL_ICON;
-                let same_stick = crate::keymap::PAD_SLOTS
+                let same_stick = crate::keymap::pad_layout().slots
                     .get(r)
-                    .zip(crate::keymap::PAD_SLOTS.get(selection))
+                    .zip(crate::keymap::pad_layout().slots.get(selection))
                     .is_some_and(|(a, b)| matches!(a.shape, keymap::PadIcon::Stick(_)) && a.icon == b.icon);
                 if same_stick { selection } else { r }
             } else if idx < n {
@@ -287,7 +323,7 @@ pub fn touch_select(idx: usize) -> bool {
             // false means the tap is not counted as the first half of a
             // double-tap that would then activate it. It says why, and sounds
             // the refusal, as A does (`input`).
-            if let Some(slot) = crate::keymap::PAD_SLOTS.get(row).filter(|s| crate::keymap::slot_is_modifier(s.name)) {
+            if let Some(slot) = crate::keymap::pad_layout().slots.get(row).filter(|s| crate::keymap::slot_is_modifier(s.name)) {
                 let msg = crate::loc_ui::ui().toast_modifier_locked.replace("{}", slot.name);
                 set_toast(&mut s, msg, TOAST_INFO);
                 crate::sfx::play(crate::sfx::Sfx::Error);
@@ -644,7 +680,7 @@ pub fn input(button: &str) -> bool {
     let layer_before = keymap::edit_subtab_index();
     let refused = button == "A"
         && matches!(before, Some(Screen::List { selection })
-            if keymap::PAD_SLOTS.get(selection).is_some_and(|s| keymap::slot_is_modifier(s.name)));
+            if keymap::pad_layout().slots.get(selection).is_some_and(|s| keymap::slot_is_modifier(s.name)));
     let consumed = input_inner(button);
     // Read (and forget) whether a value moved and which sound the handler
     // chose, whatever happens next, so neither leaks into the next press.
@@ -693,6 +729,7 @@ fn input_inner(button: &str) -> bool {
         Ok(g) => g,
         Err(_) => return false,
     };
+    sync_pad_slots(&mut s);
     match s.screen {
         Screen::Inactive => false,
         Screen::Menu { selection } => {
@@ -725,12 +762,20 @@ fn input_inner(button: &str) -> bool {
             true
         }
         Screen::List { selection } => {
-            // In game, B goes back to the Touches et curseur page and Y on to
-            // its shared profiles. Both read the card (and Y the catalogue),
+            // In game, B goes back to the Touches et curseur page and ZR on to
+            // its shared profiles. Both read the card (and ZR the catalogue),
             // so they run without the lock, like that page's own rows.
-            if s.submenu && matches!(button, "B" | "Minus" | "Y") {
+            if s.submenu && matches!(button, "B" | "Minus" | "ZR") {
                 drop(s);
-                leave_editor_in_game(button == "Y");
+                leave_editor_in_game(button == "ZR");
+                return true;
+            }
+            // Y: the console's controller screen (issue #128), beside the
+            // player switch it goes with. It holds the screen until it closes,
+            // so it runs without the lock too.
+            if button == "Y" {
+                drop(s);
+                open_controller_screen();
                 return true;
             }
             handle_list_input(&mut s, button, selection);
@@ -1242,7 +1287,7 @@ enum PadDir {
 /// `.get`, not `[..]`: with `panic = "abort"` an out-of-range index is a console
 /// fatal, and a cursor reaches here from a touch table that outlives its panel.
 fn pad_center(i: usize) -> (f32, f32) {
-    keymap::PAD_SLOTS
+    keymap::pad_layout().slots
         .get(i)
         .map(|s| (s.chip.0 + s.chip.2 * 0.5, s.chip.1 + s.chip.3 * 0.5))
         .unwrap_or((0.0, 0.0))
@@ -1257,7 +1302,7 @@ fn pad_center(i: usize) -> (f32, f32) {
 ///
 /// `wrap`: whether Up and Down may come round at the end of a column.
 fn pad_step(cur: usize, dir: PadDir, wrap: bool) -> usize {
-    let n = keymap::PAD_SLOTS.len();
+    let n = keymap::pad_layout().slots.len();
     if n == 0 {
         return cur;
     }
@@ -1317,7 +1362,7 @@ fn pad_step(cur: usize, dir: PadDir, wrap: bool) -> usize {
 
 /// Whether slot `i` is a modifier in the open layer, and so takes no cursor.
 fn slot_locked(i: usize) -> bool {
-    keymap::PAD_SLOTS
+    keymap::pad_layout().slots
         .get(i)
         .map(|s| keymap::slot_is_modifier(s.name))
         .unwrap_or(false)
@@ -1330,7 +1375,7 @@ fn slot_locked(i: usize) -> bool {
 /// ZL a modifier is what locks ZL everywhere else). Without it the cursor sits
 /// on a row it can no longer open, and A does nothing with no explanation.
 fn unstick_cursor(mut selection: usize) -> usize {
-    let n = keymap::PAD_SLOTS.len();
+    let n = keymap::pad_layout().slots.len();
     if n == 0 || !slot_locked(selection) {
         return selection;
     }
@@ -1360,11 +1405,11 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize) {
         // SHOULDER L/R still change the combo layer, as they always did.
         "Left" | "StickLLeft" => selection = pad_step(selection, PadDir::Left, wrap),
         "Right" | "StickLRight" => selection = pad_step(selection, PadDir::Right, wrap),
-        // Player toggle (issue #40): X flips P1 <-> P2 (2 items, a toggle is fine).
-        // P1 and P2 have their OWN combo layers, so the swap can lock or free the
-        // row under the cursor.
+        // Player switch (issues #40, #128): X goes to the next player, from the
+        // last back to the first. Each player has their OWN combo layers, so the
+        // move can lock or free the row under the cursor.
         "X" => {
-            keymap::set_edit_player(if keymap::edit_player() == 2 { 1 } else { 2 });
+            keymap::set_edit_player(keymap::edit_player() % keymap::MAX_PLAYERS + 1);
             selection = unstick_cursor(selection);
             crate::sfx::value_changed();
         }
@@ -1397,7 +1442,7 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize) {
             // `.get`, not `[..]`: with `panic = "abort"` an out-of-range row here
             // is a console fatal, and this index arrives from a cursor several
             // screens and one touch table away from where it is bounded.
-            let Some(slot) = keymap::PAD_SLOTS.get(selection) else {
+            let Some(slot) = keymap::pad_layout().slots.get(selection) else {
                 return;
             };
             // Reachable even though the cursor skips locked rows: a tap, or a
@@ -1428,8 +1473,26 @@ fn handle_list_input(s: &mut State, button: &str, mut selection: usize) {
     s.screen = Screen::List { selection };
 }
 
+extern "C" {
+    /// The console's controller screen (`cpp/src/pad_read.cpp`): each player
+    /// takes a controller, SL+SR on a Joy-Con held on its side. Holds the
+    /// screen until it closes; returns the players it confirmed, or -1.
+    fn flashnx_controller_applet(max_players: core::ffi::c_int) -> core::ffi::c_int;
+}
+
+/// Y in the controls editor, wherever it is open (issue #128): the console's
+/// controller screen, for as many players as FlashNX reads. The editor is
+/// where the players are told apart (X), so it is where they get their
+/// controllers.
+pub(crate) fn open_controller_screen() {
+    crate::sfx::play(crate::sfx::Sfx::Decide);
+    // SAFETY: plain C call; it shows a system screen and returns.
+    let players = unsafe { flashnx_controller_applet(keymap::MAX_PLAYERS as core::ffi::c_int) };
+    crate::net::log(&std::format!("controllers: {} player(s) after the screen\n", players));
+}
+
 /// Leave the in-game editor for the Touches et curseur page (B), or for its
-/// shared profiles (Y, the mockup's shortcut; B there comes back to the page).
+/// shared profiles (ZR; B there comes back to the page).
 /// The page's "Revenir…" row depends on the keys just edited, so it is worked
 /// out again here, as on the launcher side: it used to stay as it was when the
 /// page opened, missing after a first edit and stale once a key was set back.
@@ -1492,7 +1555,7 @@ fn editor_place() -> Option<Place> {
 /// sends in the open layer.
 fn pad_values() -> std::vec::Vec<PadValue> {
     let normal = keymap::edit_subtab_index() == 0;
-    keymap::PAD_SLOTS
+    keymap::pad_layout().slots
         .iter()
         .map(|slot| {
             if keymap::slot_is_modifier(slot.name) {
@@ -1516,7 +1579,7 @@ fn pad_values() -> std::vec::Vec<PadValue> {
 fn live_layers(player: u8) -> [bool; 5] {
     let mut live = [false; 5];
     for (i, m) in keymap::SUBTAB_MODS.iter().enumerate().skip(1) {
-        live[i] = if player == 2 { keymap::combo_active_p2(m) } else { keymap::combo_active(m) };
+        live[i] = keymap::combo_active_player(player, m);
     }
     live
 }
@@ -1527,7 +1590,7 @@ fn live_layers(player: u8) -> [bool; 5] {
 /// maps none of them. Player 2 has no cursor.
 fn stick_reads_as_cursor(values: &[PadValue], player: u8, stick: char) -> bool {
     player == 1
-        && keymap::PAD_SLOTS
+        && keymap::pad_layout().slots
             .iter()
             .zip(values)
             .filter(|(slot, _)| keymap::stick_of_direction(slot.name) == Some(stick))
@@ -1538,11 +1601,16 @@ fn stick_reads_as_cursor(values: &[PadValue], player: u8, stick: char) -> bool {
 /// else what the open layer means, else what the screen is for.
 fn pad_help(selection: usize, values: &[PadValue], player: u8, layer: usize) -> std::string::String {
     let u = crate::loc_ui::ui();
-    let Some(slot) = keymap::PAD_SLOTS.get(selection) else {
+    let Some(slot) = keymap::pad_layout().slots.get(selection) else {
         return std::string::String::new();
     };
     if matches!(slot.name, "SL" | "SR") {
         return u.help_pad_slsr.to_string();
+    }
+    // Player 1 on a Joy-Con alone: the stick's push is also the way to the
+    // cursor, held (`main.cpp`, issue #128).
+    if player == 1 && layer == 0 && slot.name == "StickLPress" && keymap::player_pad_kind(1) >= 2 {
+        return u.help_pad_joy_press.to_string();
     }
     if player == 1 && layer == 0 && keymap::stick_of_direction(slot.name).is_some() {
         return u.help_pad_stick.to_string();
@@ -1685,7 +1753,7 @@ fn handle_keyboard_input(
             // flash-key name. Emptied in a combo layer, a button sends its
             // Normal key again (`keymap::set_binding`).
             let target = if button == "X" || name == "(none)" { None } else { Some(name) };
-            let Some(edit_btn) = keymap::PAD_SLOTS.get(button_idx).map(|s| s.name) else {
+            let Some(edit_btn) = keymap::pad_layout().slots.get(button_idx).map(|s| s.name) else {
                 return;
             };
             // Giving a key to the first direction of a stick that moved the
@@ -2100,7 +2168,8 @@ pub fn drive() {
 pub fn draw_page(backend: &mut SwitchRenderBackend, now: u64) {
     // Snapshot the screen and the toast under one lock.
     let (screen, toast) = match TOUCHES.lock() {
-        Ok(g) => {
+        Ok(mut g) => {
+            sync_pad_slots(&mut g);
             let t = if now < g.toast_until { Some((g.toast_msg.clone(), g.toast_kind)) } else { None };
             (g.screen, t)
         }
@@ -2151,6 +2220,7 @@ pub fn draw_page(backend: &mut SwitchRenderBackend, now: u64) {
             backend.draw_touches_pad(&crate::backend::render::PadView {
                 crumbs: &place.crumbs,
                 subject: &place.subject,
+                layout: keymap::pad_layout(),
                 selection,
                 values: &values,
                 player,
@@ -2169,7 +2239,7 @@ pub fn draw_page(backend: &mut SwitchRenderBackend, now: u64) {
         }
         Screen::Keyboard { button_idx, key_idx } => {
             let Some(place) = editor_place() else { return };
-            let Some(slot) = keymap::PAD_SLOTS.get(button_idx) else { return };
+            let Some(slot) = keymap::pad_layout().slots.get(button_idx) else { return };
             // The chord in a combo layer: the layer's glyph, then the button.
             let modif = keymap::edit_subtab_modifier();
             let current = match keymap::current_binding(slot.name) {

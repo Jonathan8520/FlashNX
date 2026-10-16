@@ -290,6 +290,11 @@ fn pad_badge_parts(label: &str) -> (Option<Btn>, &str) {
         "SR" => Some(Btn::SR),
         "+" => Some(Btn::Plus),
         "-" => Some(Btn::Minus),
+        // A Joy-Con held alone, its four buttons by place (issue #128).
+        "JU" => Some(Btn::JoyUp),
+        "JD" => Some(Btn::JoyDown),
+        "JL" => Some(Btn::JoyLeft),
+        "JR" => Some(Btn::JoyRight),
         _ => None,
     };
     if single.is_some() {
@@ -350,9 +355,11 @@ pub(crate) struct PadView<'a> {
     pub crumbs: &'a [&'a str],
     /// Beside the title: the game's name, or "for every game".
     pub subject: &'a str,
-    /// Indexes `keymap::PAD_SLOTS`.
+    /// The controller drawn: the one in the edited player's hands (issue #128).
+    pub layout: &'static crate::keymap::PadLayout,
+    /// Indexes `layout.slots`.
     pub selection: usize,
-    /// One per `keymap::PAD_SLOTS`.
+    /// One per `layout.slots`.
     pub values: &'a [PadValue],
     pub player: u8,
     /// Indexes `keymap::SUBTAB_MODS`: 0 is Normal.
@@ -393,11 +400,14 @@ pub(crate) struct KeysView<'a> {
     pub quiet: bool,
 }
 
-/// What the editor's touch table holds after its twenty-five rows: the two
-/// player segments, the five layer segments, then the controls on the picture
-/// (one per row, in `PAD_SLOTS` order).
-pub(crate) const PAD_CELL_PLAYER: usize = crate::keymap::PAD_SLOTS.len();
-pub(crate) const PAD_CELL_LAYER: usize = PAD_CELL_PLAYER + 2;
+/// What the editor's touch table holds after its rows (as many as the
+/// controller with the most, the empty ones for a smaller one): the player
+/// segments (one per player, issue #128), the controllers chip beside them,
+/// the five layer segments, then the controls on the picture (one per row, in
+/// the drawn controller's order).
+pub(crate) const PAD_CELL_PLAYER: usize = crate::keymap::PAD_SLOTS_OTHERS.len();
+pub(crate) const PAD_CELL_PADS: usize = PAD_CELL_PLAYER + crate::keymap::MAX_PLAYERS as usize;
+pub(crate) const PAD_CELL_LAYER: usize = PAD_CELL_PADS + 1;
 pub(crate) const PAD_CELL_ICON: usize = PAD_CELL_LAYER + 5;
 
 /// The window: as wide as the screen less this margin, its content this far
@@ -412,10 +422,35 @@ const TOUCHES_SWITCH_GLYPH: f32 = 22.0;
 /// "None", the Minus caption: quieter than any value.
 const TOUCHES_QUIET: u32 = 0xFF_5A_6A_8F;
 
-/// The controls editor's two switches: the players, then the layers.
-fn pad_switch_labels() -> ([&'static str; 2], [&'static str; 5]) {
+/// The controls editor's two switches: the players, then the layers. The
+/// players in their short form (J1 to J4): four "Joueur N" did not fit beside
+/// the layers on the title's line (issue #128).
+fn pad_switch_labels() -> ([&'static str; crate::keymap::MAX_PLAYERS as usize], [&'static str; 5]) {
     let u = crate::loc_ui::ui();
-    ([u.player_1, u.player_2], [u.layer_normal, "ZL", "ZR", "L", "R"])
+    ([u.p1, u.p2, u.p3, u.p4], [u.layer_normal, "ZL", "ZR", "L", "R"])
+}
+
+/// A player's name in full ("Joueur 3"), 1 to `MAX_PLAYERS`.
+pub(crate) fn player_label(player: u8) -> &'static str {
+    let u = crate::loc_ui::ui();
+    match player {
+        2 => u.player_2,
+        3 => u.player_3,
+        4 => u.player_4,
+        _ => u.player_1,
+    }
+}
+
+/// A player's short name ("J3"), as a profile preview's chip and the editor's
+/// switch write it.
+pub(crate) fn player_short(player: u8) -> &'static str {
+    let u = crate::loc_ui::ui();
+    match player {
+        2 => u.p2,
+        3 => u.p3,
+        4 => u.p4,
+        _ => u.p1,
+    }
 }
 
 /// The controls editor's header as `touches_head` measures it.
@@ -426,10 +461,12 @@ struct TouchesHead {
     wide: bool,
     /// The layers on a row of their own, under the players.
     split: bool,
-    /// [X] players | [L] layers [R] whole, then each segmented switch.
+    /// [X] players [Y] controllers | [L] layers [R] whole, then each
+    /// segmented switch and the controllers chip.
     switches_w: f32,
     players_w: f32,
     layers_w: f32,
+    pads_w: f32,
 }
 
 /// The band of the line about the focused row or key, over the footer: one
@@ -466,31 +503,25 @@ enum ToastAt {
     Middle(f32),
 }
 
-/// Which column of the controls editor slot `i` of `keymap::PAD_SLOTS` sits
+/// Which column of the controls editor slot `i` of `slots` sits
 /// in (0 for the left hand, 1 for the right) and its place down that column,
 /// read from its chip. The portrait layout stacks the rows under the picture
 /// in this order, the landscape one draws them at their chips, so the two
 /// show the same columns in the same order and `menu::pad_step`, which walks
 /// the chips, moves the cursor the way either one is drawn.
-fn pad_slot_column(i: usize) -> (usize, usize) {
-    let slots = crate::keymap::PAD_SLOTS;
+fn pad_slot_column(slots: &[crate::keymap::PadSlot], mid: f32, i: usize) -> (usize, usize) {
     let Some(s) = slots.get(i) else { return (0, 0) };
-    let col = |x: f32| usize::from(x >= TOUCHES_PIC_MID);
+    let col = |x: f32| usize::from(x >= mid);
     let c = col(s.chip.0);
     let rank = slots.iter().filter(|o| col(o.chip.0) == c && o.chip.1 < s.chip.1).count();
     (c, rank)
 }
 
 /// The most rows either column of the controls editor holds.
-fn pad_column_len() -> usize {
-    let slots = crate::keymap::PAD_SLOTS;
-    let left = slots.iter().filter(|s| s.chip.0 < TOUCHES_PIC_MID).count();
+fn pad_column_len(slots: &[crate::keymap::PadSlot], mid: f32) -> usize {
+    let left = slots.iter().filter(|s| s.chip.0 < mid).count();
     left.max(slots.len() - left)
 }
-
-/// The middle of the editor's controller picture, in pad units: the shell's.
-/// Chips left of it belong to the left hand.
-const TOUCHES_PIC_MID: f32 = 23.0;
 
 /// The header's segmented switches.
 const SEG_H: f32 = 36.0;
@@ -9902,7 +9933,9 @@ impl SwitchRenderBackend {
     /// Intended to be called *after* `submit_frame` has returned so it
     /// overlays the player's rendering rather than getting cleared away.
     /// Re-binds the GL state we'd left in a fresh state at end of submit.
-    pub fn draw_cursor_overlay(&mut self, x: f32, y: f32, clicked: bool) {
+    /// `gold`: the cursor a lone Joy-Con's stick drives (issue #128), in
+    /// FlashNX's gold instead of white, so the stick's mode shows.
+    pub fn draw_cursor_overlay(&mut self, x: f32, y: f32, clicked: bool, gold: bool) {
         const BAR_W: f32 = 24.0;
         const BAR_H: f32 = 4.0;
         // Black outline thickness on each side, so the "+" stays visible over
@@ -9911,6 +9944,8 @@ impl SwitchRenderBackend {
         // Red when clicked, white otherwise. Helps confirm clicks register.
         let color = if clicked {
             swf::Color::from_rgb(0xFF1744, 255)
+        } else if gold {
+            swf::Color::from_rgb(0xFFD740, 255)
         } else {
             swf::Color::from_rgb(0xFFFFFF, 255)
         };
@@ -10771,7 +10806,7 @@ impl SwitchRenderBackend {
 
     /// TOUCHES pad view: the keymap editor (Touches.dc.html).
     ///
-    /// Draws the controller from `keymap::PAD_SLOTS` (positioned controls in
+    /// Draws the controller from its `keymap::PadLayout` (positioned controls in
     /// abstract units) with one row per control, in two columns flanking the
     /// picture (under it, on a turned picture), and lights the selected control
     /// in BOTH places at once: the row you are reading and the button you would
@@ -10791,7 +10826,11 @@ impl SwitchRenderBackend {
     /// picture), and a stick that moves the cursor as one value across its four
     /// direction rows.
     pub(crate) fn draw_touches_pad(&mut self, v: &PadView) {
-        use crate::keymap::{Nub, PadIcon, PAD_SLOTS};
+        use crate::keymap::{Nub, PadIcon, PadPause};
+        // The controller in the edited player's hands (issue #128): the Pro
+        // controller, or a Joy-Con alone on its side, with its own rows.
+        let lay = v.layout;
+        let slots = lay.slots;
         use theme::{col, size};
         // Amber is the cursor everywhere in this app. Teal marks a button that
         // is a MODIFIER rather than a key, the teal the key picker uses for a
@@ -10806,16 +10845,17 @@ impl SwitchRenderBackend {
         const ICON_LOCK_COL: u32 = 0xFF_22_32_4F;
         /// Between a column of rows and the picture.
         const COL_GAP: f32 = 28.0;
-        /// The picture's width in pad units: the shell and its rail buttons
-        /// (13.9 to 32.1), with a little air, centred on the shell's middle.
-        const PIC_UNITS: f32 = 18.4;
-        const PIC_MID: f32 = TOUCHES_PIC_MID;
+        // The picture's width in pad units, with a little air, centred on
+        // the shell's middle (the Pro controller's shell and rail buttons run
+        // from 13.9 to 32.1). Chips left of the middle belong to the left hand.
+        let pic_units = lay.pic_w;
+        let pic_mid = lay.pic_mid;
         // Portrait (a turned picture). The picture is cropped to what it
-        // draws: from just over the shoulder buttons (5.2) to under the Minus
-        // note (20.6), so it can span the window instead of sitting between
-        // two columns of rows a third of the width each.
-        const P_PIC_TOP: f32 = 4.8;
-        const P_PIC_SPAN: f32 = 21.3 - P_PIC_TOP;
+        // draws (the Pro controller: from just over the shoulder buttons to
+        // under the Minus note), so it can span the window instead of sitting
+        // between two columns of rows a third of the width each.
+        let p_pic_top = lay.pic_top;
+        let p_pic_span = lay.pic_bottom - lay.pic_top;
         /// A row's pitch under the picture: a comfortable 38 px, never under
         /// 30, and the gap between a row and the next.
         const P_PITCH: f32 = 38.0;
@@ -10840,7 +10880,7 @@ impl SwitchRenderBackend {
         let gpx = TOUCHES_SWITCH_GLYPH;
         let head = self.touches_head(&v.live_layers);
         let (wide, split, head_h) = (head.wide, head.split, head.h);
-        let (pw, lw, switches_w) = (head.players_w, head.layers_w, head.switches_w);
+        let (pw, lw, switches_w, padw) = (head.players_w, head.layers_w, head.switches_w, head.pads_w);
         let help_lh = (size::LABEL * 1.45).round();
         let help_h = touches_help_band(portrait);
 
@@ -10849,20 +10889,20 @@ impl SwitchRenderBackend {
         // height decides and the window fills the screen. In portrait the rows
         // go under the picture in two columns: they take a comfortable pitch
         // first, and the picture gets the height that leaves, up to the width.
-        let n_rows = pad_column_len() as f32;
+        let n_rows = pad_column_len(slots, pic_mid) as f32;
         let (unit, pitch, content_h) = if portrait {
             let avail = (vh - 2.0 * TOUCHES_MARGIN - head_h - help_h - TOUCHES_FOOT_H - 2.0 * P_GAP).max(120.0);
-            let unit_w = inner_w / PIC_UNITS;
-            let mut unit = ((avail - n_rows * P_PITCH) / P_PIC_SPAN).min(unit_w);
+            let unit_w = inner_w / pic_units;
+            let mut unit = ((avail - n_rows * P_PITCH) / p_pic_span).min(unit_w);
             if unit < 16.0 {
                 unit = 16.0f32.min(unit_w);
             }
-            let pitch = ((avail - P_PIC_SPAN * unit) / n_rows).clamp(P_PITCH_MIN, P_PITCH_MAX);
-            (unit, pitch, head_h + P_GAP + P_PIC_SPAN * unit + P_GAP + n_rows * pitch + help_h + TOUCHES_FOOT_H)
+            let pitch = ((avail - p_pic_span * unit) / n_rows).clamp(P_PITCH_MIN, P_PITCH_MAX);
+            (unit, pitch, head_h + P_GAP + p_pic_span * unit + P_GAP + n_rows * pitch + help_h + TOUCHES_FOOT_H)
         } else {
             let avail_h = (vh - 2.0 * TOUCHES_MARGIN - head_h - help_h - TOUCHES_FOOT_H).max(80.0);
-            let unit = (inner_w / crate::keymap::PAD_UNITS_W).min(avail_h / crate::keymap::PAD_UNITS_H);
-            (unit, 0.0, head_h + crate::keymap::PAD_UNITS_H * unit + help_h + TOUCHES_FOOT_H)
+            let unit = (inner_w / lay.units_w).min(avail_h / lay.units_h);
+            (unit, 0.0, head_h + lay.units_h * unit + help_h + TOUCHES_FOOT_H)
         };
         let (x, y, w, h) = self.touches_window(content_h);
         let left = x + TOUCHES_PAD_X;
@@ -10889,8 +10929,18 @@ impl SwitchRenderBackend {
         // (issue #55/#57).
         let mut cx = sw_x;
         cx += self.kit_button(cx, sw_cy, gpx, Btn::X, col::PILL_INK) + 8.0;
-        let player_cells = self.pad_segments(cx, sw_cy, &players, if v.player == 2 { 1 } else { 0 }, &[false; 2]);
+        let player_cells = self.pad_segments(
+            cx,
+            sw_cy,
+            &players,
+            (v.player.clamp(1, crate::keymap::MAX_PLAYERS) - 1) as usize,
+            &[false; crate::keymap::MAX_PLAYERS as usize],
+        );
         cx += pw + 8.0;
+        // Y beside the players: the console's controller screen, where each
+        // of them takes a controller (issue #128).
+        let pads_cell = self.pad_controllers_chip(cx, sw_cy);
+        cx += padw + 8.0;
         let lay_cy = if split {
             cx = left;
             sw_cy + 44.0
@@ -10912,24 +10962,24 @@ impl SwitchRenderBackend {
         // units: a row and the button it names are what the eye pairs. In
         // portrait they are stacked under the picture, the left hand's on the
         // left, in the order the landscape columns read, one height for all.
-        let ox = x + w * 0.5 - PIC_MID * unit;
-        let oy = if portrait { y + head_h + P_GAP - P_PIC_TOP * unit } else { y + head_h };
+        let ox = x + w * 0.5 - pic_mid * unit;
+        let oy = if portrait { y + head_h + P_GAP - p_pic_top * unit } else { y + head_h };
         let px = |ux: f32| ox + ux * unit;
         let py = |uy: f32| oy + uy * unit;
-        let rows_top = y + head_h + P_GAP + P_PIC_SPAN * unit + P_GAP;
+        let rows_top = y + head_h + P_GAP + p_pic_span * unit + P_GAP;
         let col_w = if portrait {
             (inner_w - P_COL_GAP) * 0.5
         } else {
-            ((inner_w - PIC_UNITS * unit) * 0.5 - COL_GAP).max(40.0)
+            ((inner_w - pic_units * unit) * 0.5 - COL_GAP).max(40.0)
         };
         let row_rect = |i: usize| -> (f32, f32, f32, f32) {
-            let Some(s) = PAD_SLOTS.get(i) else { return (0.0, 0.0, 0.0, 0.0) };
+            let Some(s) = slots.get(i) else { return (0.0, 0.0, 0.0, 0.0) };
             if portrait {
-                let (c, k) = pad_slot_column(i);
+                let (c, k) = pad_slot_column(slots, pic_mid, i);
                 let rx = left + c as f32 * (col_w + P_COL_GAP);
                 (rx, rows_top + k as f32 * pitch, col_w, pitch - P_ROW_GAP)
             } else {
-                let rx = if s.chip.0 < PIC_MID { left } else { right - col_w };
+                let rx = if s.chip.0 < pic_mid { left } else { right - col_w };
                 (rx, py(s.chip.1), col_w, s.chip.3 * unit)
             }
         };
@@ -10937,19 +10987,21 @@ impl SwitchRenderBackend {
         // ── The shell ────────────────────────────────────────────────────
         // Grips first, body over them, one colour: it is a silhouette, and a
         // seam between the three would read as three objects.
-        for &(sx, sy, sw, sh, r) in crate::keymap::PAD_SHELL {
+        for &(sx, sy, sw, sh, r) in lay.shell {
             self.draw_round_rect(px(sx), py(sy), sw * unit, sh * unit, r * unit, SHELL_COL);
         }
 
-        // ── Minus, locked ────────────────────────────────────────────────
-        {
-            let (mx, my, mw, mh) = crate::keymap::PAD_MINUS;
+        // ── Player 1's pause button, locked ──────────────────────────────
+        // `-` on a controller and on a left Joy-Con alone, `+` on a right one
+        // (issue #128); the other players' is a row like any other.
+        let pause_sign = |b: PadPause| if b == PadPause::Plus { "+" } else { "\u{2212}" };
+        if let Some((button, (mx, my, mw, mh), _)) = lay.pause {
             let (mxp, myp, d) = (px(mx), py(my), mw * unit);
             self.draw_round_rect(mxp, myp, d, mh * unit, d * 0.5, ICON_LOCK_COL);
             let lp = (d * 0.8).clamp(8.0, 16.0).round();
-            let mlw = self.kit_measure("\u{2212}", lp);
+            let mlw = self.kit_measure(pause_sign(button), lp);
             if mlw <= d - 2.0 {
-                self.kit_text_mid((mxp + (d - mlw) * 0.5).round(), myp + mh * unit * 0.5, lp, "\u{2212}", ICON_NUB_COL);
+                self.kit_text_mid((mxp + (d - mlw) * 0.5).round(), myp + mh * unit * 0.5, lp, pause_sign(button), ICON_NUB_COL);
             }
         }
 
@@ -10961,12 +11013,12 @@ impl SwitchRenderBackend {
         // second pass: the d-pad arms meet, and the one under the cursor has to
         // be the one on top.
         let is_mod = |i: usize| matches!(v.values.get(i), Some(PadValue::Modifier));
-        let sel_slot = PAD_SLOTS.get(v.selection);
+        let sel_slot = slots.get(v.selection);
         // Each control's rect, for touch: a tap on the picture picks its row.
         // A stick answers once, on its first slot.
-        let mut icon_cells: std::vec::Vec<(f32, f32, f32, f32)> = std::vec![(0.0, 0.0, 0.0, 0.0); PAD_SLOTS.len()];
+        let mut icon_cells: std::vec::Vec<(f32, f32, f32, f32)> = std::vec![(0.0, 0.0, 0.0, 0.0); slots.len()];
         for pass in 0..2 {
-            for (i, slot) in PAD_SLOTS.iter().enumerate() {
+            for (i, slot) in slots.iter().enumerate() {
                 let is_sel = i == v.selection;
                 if is_sel != (pass == 1) {
                     continue;
@@ -10985,7 +11037,7 @@ impl SwitchRenderBackend {
                         // Only the first slot of the group draws the ring, and
                         // only when the cursor is elsewhere: a selected slot owns
                         // its stick and draws it in pass 1 with its own nub.
-                        let group_head = PAD_SLOTS
+                        let group_head = slots
                             .iter()
                             .position(|o| matches!(o.shape, PadIcon::Stick(_)) && o.icon == slot.icon)
                             .unwrap_or(i);
@@ -11045,28 +11097,40 @@ impl SwitchRenderBackend {
                     };
                     // The label shrinks to fit its button, and a button too small
                     // for one even at 9 px (the SL/SR rails) goes without.
+                    // A lone Joy-Con's four buttons carry the arrow their row's
+                    // badge points with (issue #128), `-` the minus sign.
+                    let label = match slot.glyph {
+                        "JU" => "\u{2191}",
+                        "JD" => "\u{2193}",
+                        "JL" => "\u{2190}",
+                        "JR" => "\u{2192}",
+                        "-" => "\u{2212}",
+                        g => g,
+                    };
                     let mut lp = (sh * 0.55).clamp(9.0, 17.0).round();
-                    let mut glw = self.kit_measure(slot.glyph, lp);
+                    let mut glw = self.kit_measure(label, lp);
                     if glw > sw - 4.0 {
                         lp = (lp * (sw - 4.0) / glw).floor();
-                        glw = self.kit_measure(slot.glyph, lp);
+                        glw = self.kit_measure(label, lp);
                     }
                     if lp >= 9.0 {
-                        self.kit_text_mid((sx + (sw - glw) * 0.5).round(), sy + sh * 0.5, lp, slot.glyph, txt);
+                        self.kit_text_mid((sx + (sw - glw) * 0.5).round(), sy + sh * 0.5, lp, label, txt);
                     }
                 }
             }
         }
 
-        // Why Minus has no row: it opens the pause, from wherever this editor
-        // was opened. Under the picture, where the eye goes looking for it.
-        {
+        // Why player 1's pause button has no row: it opens the pause, from
+        // wherever this editor was opened. Under the picture, where the eye
+        // goes looking for it.
+        if let Some((button, _, note_y)) = lay.pause {
+            let glyph = if button == PadPause::Plus { Btn::Plus } else { Btn::Minus };
             let npx = (unit * 0.6).clamp(10.0, size::CAPTION);
-            let gw = self.kit_button_width(Btn::Minus, npx + 3.0);
+            let gw = self.kit_button_width(glyph, npx + 3.0);
             let nw = gw + 6.0 + self.kit_measure(u.keys_minus_note, npx);
-            let nx = (px(PIC_MID) - nw * 0.5).round();
-            let ncy = py(20.6);
-            self.kit_button(nx, ncy, npx + 3.0, Btn::Minus, TOUCHES_QUIET);
+            let nx = (px(pic_mid) - nw * 0.5).round();
+            let ncy = py(note_y);
+            self.kit_button(nx, ncy, npx + 3.0, glyph, TOUCHES_QUIET);
             self.kit_text_mid(nx + gw + 6.0, ncy, npx, u.keys_minus_note, TOUCHES_QUIET);
         }
 
@@ -11079,7 +11143,7 @@ impl SwitchRenderBackend {
         // the picture is larger and the columns narrower, and a floor taken
         // from it would only take room from the values.
         let mut badge_w: f32 = if portrait { 2.4 * txt } else { 2.4 * unit };
-        for slot in PAD_SLOTS {
+        for slot in slots {
             badge_w = badge_w.max(self.pad_badge_width(slot.glyph, txt));
         }
         let value_x = |rx: f32| rx + 10.0 + badge_w + 12.0;
@@ -11089,7 +11153,7 @@ impl SwitchRenderBackend {
         // is, the values sat against the outer edge and left a band of
         // nothing between them and the controller, the picture centred in a
         // window that looked lopsided.
-        let mirrored = |i: usize| !portrait && PAD_SLOTS.get(i).is_some_and(|s| s.chip.0 < PIC_MID);
+        let mirrored = |i: usize| !portrait && slots.get(i).is_some_and(|s| s.chip.0 < pic_mid);
         let badge_left = |rx: f32, rw: f32| rx + rw - 10.0 - badge_w;
 
         // A stick that moves the cursor is ONE thing, not four rows saying
@@ -11102,8 +11166,8 @@ impl SwitchRenderBackend {
             if !v.stick_cursor[si] {
                 continue;
             }
-            let rows: std::vec::Vec<usize> = (0..PAD_SLOTS.len())
-                .filter(|&i| crate::keymap::stick_of_direction(PAD_SLOTS[i].name) == Some(*stick))
+            let rows: std::vec::Vec<usize> = (0..slots.len())
+                .filter(|&i| crate::keymap::stick_of_direction(slots[i].name) == Some(*stick))
                 .collect();
             let (Some(&first), Some(&last)) = (rows.first(), rows.last()) else { continue };
             let (rx, ry0, rw, _) = row_rect(first);
@@ -11129,7 +11193,7 @@ impl SwitchRenderBackend {
         // that most needs following by eye. The mockup's focused row: a darker
         // fill than a keycap, so the key on it stays a key, inside a gold edge.
         let now = unsafe { ruffle_tick_now() };
-        if v.selection < PAD_SLOTS.len() {
+        if v.selection < slots.len() {
             let (rx, ry, rw, rh) = row_rect(v.selection);
             let fx = eased_list_x(rx, GLIDE_KEY_KEYS, now);
             let fy = eased_list_y(ry, GLIDE_KEY_KEYS, now);
@@ -11137,8 +11201,8 @@ impl SwitchRenderBackend {
         }
 
         let mut cells: std::vec::Vec<(f32, f32, f32, f32)> =
-            std::vec::Vec::with_capacity(PAD_CELL_ICON + PAD_SLOTS.len());
-        for (i, slot) in PAD_SLOTS.iter().enumerate() {
+            std::vec::Vec::with_capacity(PAD_CELL_ICON + slots.len());
+        for (i, slot) in slots.iter().enumerate() {
             let (rx, ry, rw, rh) = row_rect(i);
             cells.push((rx, ry, rw, rh));
             let rcy = ry + rh * 0.5;
@@ -11200,7 +11264,7 @@ impl SwitchRenderBackend {
             }
         }
         let hints_profiles: [kit::text::HintItem; 3] =
-            [(&[Btn::A], u.edit), (&[Btn::Y], u.shared_profiles), (&[Btn::B], u.back)];
+            [(&[Btn::A], u.edit), (&[Btn::ZR], u.shared_profiles), (&[Btn::B], u.back)];
         let hints_plain: [kit::text::HintItem; 2] = [(&[Btn::A], u.edit), (&[Btn::B], u.back)];
         let hints_x = self.touches_footer(x, y, w, h, if v.profiles { &hints_profiles } else { &hints_plain });
         if let Some(speed) = v.cursor_speed {
@@ -11216,9 +11280,11 @@ impl SwitchRenderBackend {
             }
         }
 
-        // Touch: the rows, then the switches, then the picture (see the
-        // `PAD_CELL_*` indices).
+        // Touch: the rows (an empty cell for each row this controller lacks),
+        // then the switches, then the picture (see the `PAD_CELL_*` indices).
+        cells.resize(PAD_CELL_PLAYER, (0.0, 0.0, 0.0, 0.0));
         cells.extend(player_cells);
+        cells.push(pads_cell);
         cells.extend(layer_cells);
         cells.extend(icon_cells);
         ui_cells_publish(ui_screen_kind(), cells);
@@ -11374,13 +11440,14 @@ impl SwitchRenderBackend {
         let bx = self.kit_button_width(Btn::X, gpx);
         let bl = self.kit_button_width(Btn::L, gpx);
         let br = self.kit_button_width(Btn::R, gpx);
-        let players_w = self.pad_segments_width(&players, &[false; 2]);
+        let players_w = self.pad_segments_width(&players, &[false; crate::keymap::MAX_PLAYERS as usize]);
         let layers_w = self.pad_segments_width(&layers, live_layers);
-        // [X] players | [L] layers [R], 8 px apart and a hairline between: the
-        // gaps the editor steps by as it draws them, 8 + 8 + 9 (the line and
-        // the 8 px after it) + 8 + 8, so the R glyph ends on the window's
-        // padding.
-        let switches_w = bx + players_w + bl + layers_w + br + 41.0;
+        let pads_w = self.pad_controllers_width();
+        // [X] players [Y] controllers | [L] layers [R], 8 px apart and a
+        // hairline between: the gaps the editor steps by as it draws them,
+        // 8 + 8 + 8 + 9 (the line and the 8 px after it) + 8 + 8, so the R
+        // glyph ends on the window's padding.
+        let switches_w = bx + players_w + pads_w + bl + layers_w + br + 49.0;
         let title_w = self.kit_measure(crate::loc::s().keys_title, TOUCHES_TITLE_PX);
         // On the title's line at the right when they fit beside it; on a
         // narrow (turned) screen, on a row of their own under the title.
@@ -11394,7 +11461,7 @@ impl SwitchRenderBackend {
             (false, false) => TOUCHES_HEAD_H + 44.0,
             (false, true) => TOUCHES_HEAD_H + 88.0,
         };
-        TouchesHead { h, wide, split, switches_w, players_w, layers_w }
+        TouchesHead { h, wide, split, switches_w, players_w, layers_w, pads_w }
     }
 
     /// The path over the controls editor's title ("Pause › Touches et
@@ -11441,6 +11508,24 @@ impl SwitchRenderBackend {
     /// (Touches.dc.html): a dark track, the current option gold, and a dot after
     /// an option marked `live` (a combo layer that holds a key, so a layer in
     /// use shows from the Normal tab). Returns each option's rect, for touch.
+    /// The controllers chip's width: the Y glyph and its word.
+    fn pad_controllers_width(&mut self) -> f32 {
+        let label = crate::loc_ui::ui().controllers;
+        self.kit_button_width(Btn::Y, TOUCHES_SWITCH_GLYPH) + 6.0 + self.kit_measure(label, SEG_PX)
+    }
+
+    /// Y and "Manettes" beside the player switch, read like the footer's
+    /// hints: the console's controller screen (issue #128). Returns its touch
+    /// rectangle.
+    fn pad_controllers_chip(&mut self, x: f32, cy: f32) -> (f32, f32, f32, f32) {
+        use theme::col;
+        let label = crate::loc_ui::ui().controllers;
+        let gw = self.kit_button(x, cy, TOUCHES_SWITCH_GLYPH, Btn::Y, col::PILL_INK);
+        self.kit_text_mid(x + gw + 6.0, cy, SEG_PX, label, col::TEXT2);
+        let w = self.pad_controllers_width();
+        (x, (cy - SEG_H * 0.5).round(), w, SEG_H)
+    }
+
     fn pad_segments(
         &mut self,
         x: f32,
@@ -11621,8 +11706,8 @@ impl SwitchRenderBackend {
         // the left, when the editor has its switches on that row too
         // (portrait), where the title's line has no room for it.
         let mut ctx: std::vec::Vec<std::string::String> = std::vec::Vec::new();
-        if v.player == 2 {
-            ctx.push(u.player_2.to_string());
+        if v.player > 1 {
+            ctx.push(player_label(v.player).to_string());
         }
         if let Some(m) = v.layer {
             ctx.push(u.key_layer.replacen("{}", m, 1));
