@@ -154,8 +154,18 @@ may be the link around it), else the URL itself. Elsewhere, drops work only if
 the `tkinterdnd2` package is installed; pasting the picture's address works
 everywhere. Its fields take Ctrl+Z and Ctrl+Y. Choosing the game fills its
 companion folder and its cover when they sit beside it, named as FlashNX looks
-for them (`<game>.files`, `<game>.png`/`.jpg`, or `<game>.swf.png`/`.jpg`), never
-over a picture already chosen. A Flashpoint GameZIP unpacked as is
+for them (`<game>.files`, `<game>.png`/`.jpg`, or `<game>.swf.png`/`.jpg`, then
+the cover FlashNX downloaded, `covers/<game>.swf.cover.png`), never over a picture
+already chosen, and its name with the real title FlashNX keeps in
+`<game>.swf.meta.json` (the command line takes it too). Under the game's fields a
+line says what to copy from the card before a game is chosen, then what goes in
+with it and about how big the app will be (`game_report`, worked out off the
+window's thread), in red when a Flashpoint game's files are filed by website and
+its `.swf.base` was left behind, or when the app will not fit on a FAT32 card;
+the command line says the first as a note. A path that does not exist is said
+beside its field, as for `FlashNX.nro`. The window keeps its width whatever its
+lines say (each wraps a little under the space it has), and that line keeps two
+lines' height, so nothing under it moves. A Flashpoint GameZIP unpacked as is
 (`content.json` beside `content/`) works as a companion folder too: only what is
 under `content/` goes in, `<host>/<path>`, the way FlashNX lays it out. The name,
 author and version fields stop at what the NACP holds (511, 255 and 15 bytes of

@@ -181,6 +181,56 @@ class MakeAndUpdate(Work):
         files = self.app_files(app)
         self.assertEqual(files['Mon Jeu.swf.base'], b'http://www.example.com/game/Mon Jeu.swf')
 
+    def flashpoint_game(self, with_base=True):
+        """A game laid out as FlashNX keeps one it downloaded from Flashpoint:
+        its files under `<game>.files/<host>/<path>`, its address and its
+        title beside it."""
+        write_tree(self.path('fp'), {
+            'Brawl.swf': b'FWS' + os.urandom(500),
+            'Brawl.files/static.example.com/games/brawl/data.xml': b'<data/>',
+            'Brawl.files/static.example.com/games/brawl/level1.swf': os.urandom(2000),
+            'Brawl.swf.meta.json': b'{"display_name": "Super Brawl 2"}',
+        })
+        swf = self.path('fp', 'Brawl.swf')
+        if with_base:
+            with open(swf + '.base', 'wb') as f:
+                f.write(b'http://static.example.com/games/brawl/Brawl.swf')
+        return swf
+
+    def test_report_says_what_goes_in(self):
+        flashnx = fake_flashnx(self.path('FlashNX.nro'), '2.0.0')
+        report = ms.game_report(self.flashpoint_game(), nro=flashnx)
+        self.assertEqual(report['files'], 2)
+        self.assertEqual(report['bytes'], 7 + 2000)
+        self.assertTrue(report['base'])
+        self.assertIsNone(report['note'])
+        # Within a few KB of the app actually written (the icon is guessed).
+        app = self.path('Brawl.nro')
+        ms.make_standalone(flashnx, self.path('fp', 'Brawl.swf'), app, log=quiet)
+        self.assertLess(abs(report['size'] - os.path.getsize(app)), 96 << 10)
+
+    def test_missing_address_is_said(self):
+        swf = self.flashpoint_game(with_base=False)
+        report = ms.game_report(swf)
+        self.assertFalse(report['base'])
+        self.assertIn('Brawl.swf.base', report['note'])
+        self.assertIn('static.example.com', report['note'])
+        said = []
+        ms.make_standalone(fake_flashnx(self.path('FlashNX.nro'), '2.0.0'), swf,
+                           self.path('Brawl.nro'), log=said.append)
+        self.assertTrue(any('Brawl.swf.base' in s for s in said))
+
+    def test_plain_folders_are_not_websites(self):
+        # A game's own folders (`data`, `v1.2`) are not a website: no note.
+        write_tree(self.path('g'), {'G.swf': b'FWS', 'G.files/data/a.xml': b'x', 'G.files/v1.2/b': b'y'})
+        self.assertIsNone(ms.game_report(self.path('g', 'G.swf'))['note'])
+
+    def test_real_title_is_the_default_name(self):
+        swf = self.flashpoint_game()
+        app = self.path('x.nro')
+        ms.make_standalone(fake_flashnx(self.path('FlashNX.nro'), '2.0.0'), swf, app, log=quiet)
+        self.assertEqual(ms.app_info(app)['name'], 'Super Brawl 2')
+
     def test_progress_goes_to_the_end(self):
         seen = []
         ms.make_standalone(fake_flashnx(self.path('FlashNX.nro'), '2.0.0'), self.game(),

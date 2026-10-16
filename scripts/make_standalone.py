@@ -31,6 +31,7 @@ the picture be any size or format; without it, give a 256x256 JPEG.
 
 import argparse
 import os
+import re
 import struct
 import sys
 import tempfile
@@ -730,24 +731,106 @@ def game_entries(swf, files_dir=None):
     base = swf + '.base'
     if os.path.isfile(base):
         entries.append((name + '.base', base))
-    if files_dir is None:
-        guess = os.path.join(os.path.dirname(os.path.abspath(swf)), stem + '.files')
-        files_dir = guess if os.path.isdir(guess) else None
-    if files_dir:
-        if not os.path.isdir(files_dir):
-            raise StandaloneError('%s is not a folder.' % files_dir)
-        # A Flashpoint GameZIP unpacked as is (content.json beside content/):
-        # FlashNX keeps what is under content/, <host>/<path>, and so does this.
-        if (os.path.isfile(os.path.join(files_dir, 'content.json'))
-                and os.path.isdir(os.path.join(files_dir, 'content'))):
-            files_dir = os.path.join(files_dir, 'content')
-        for top, subdirs, names in os.walk(files_dir):
+    root = companions_root(swf, files_dir)
+    if root:
+        for top, subdirs, names in os.walk(root):
             subdirs.sort()
             for n in sorted(names):
                 full = os.path.join(top, n)
-                rel = os.path.relpath(full, files_dir).replace(os.sep, '/')
+                rel = os.path.relpath(full, root).replace(os.sep, '/')
                 entries.append((stem + '.files/' + rel, full))
     return entries
+
+
+def companions_root(swf, files_dir=None):
+    """The folder whose tree goes in as the game's companions, or None: the
+    one given, else `<game>.files` beside the game."""
+    if files_dir is None:
+        stem = os.path.basename(swf)[:-4]
+        guess = os.path.join(os.path.dirname(os.path.abspath(swf)), stem + '.files')
+        files_dir = guess if os.path.isdir(guess) else None
+    if not files_dir:
+        return None
+    if not os.path.isdir(files_dir):
+        raise StandaloneError('%s is not a folder.' % files_dir)
+    # A Flashpoint GameZIP unpacked as is (content.json beside content/):
+    # FlashNX keeps what is under content/, <host>/<path>, and so does this.
+    if (os.path.isfile(os.path.join(files_dir, 'content.json'))
+            and os.path.isdir(os.path.join(files_dir, 'content'))):
+        files_dir = os.path.join(files_dir, 'content')
+    return files_dir
+
+
+# A folder named like a website (`www.example.com`, `static.nickjr.com`): how
+# the files of a Flashpoint game are filed, `<host>/<path>`.
+HOST_FOLDER = re.compile(r'^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$')
+
+
+def website_folders(root):
+    """The folders at the top of `root` named like websites, sorted."""
+    try:
+        names = os.listdir(root) if root else []
+    except OSError:
+        return []
+    return sorted(n for n in names if HOST_FOLDER.match(n) and os.path.isdir(os.path.join(root, n)))
+
+
+def address_note(swf, root):
+    """The note for a game whose files are filed by website while its
+    `.swf.base` is not beside it, or None. FlashNX writes that file with the
+    game when it downloads one from Flashpoint; copying the game off the card
+    without it is easy, and nothing else would say why the app then hangs."""
+    if os.path.isfile(swf + '.base'):
+        return None
+    sites = website_folders(root)
+    if not sites:
+        return None
+    shown = ', '.join(sites[:2]) + (', ...' if len(sites) > 2 else '')
+    return ('note: its files are filed by website (%s), but %s.base, the address the game '
+            'runs at, is not beside it. Copy it from the SD card too: without it the game '
+            'will not find its files.' % (shown, os.path.basename(swf)))
+
+
+def meta_title(swf):
+    """The game's real title, from the `<game>.swf.meta.json` FlashNX keeps
+    beside a game it downloaded, or None."""
+    import json
+    try:
+        with open(swf + '.meta.json', 'rb') as f:
+            title = json.loads(f.read(64 << 10).decode('utf-8')).get('display_name')
+    except (OSError, ValueError, AttributeError):
+        return None
+    return title.strip() if isinstance(title, str) and title.strip() else None
+
+
+def game_report(swf, files_dir=None, nro=None):
+    """What an app made from `swf` would carry, worked out without writing
+    anything, for the window to say as soon as the game is chosen: how many
+    companion files and how big, whether its Flashpoint address goes with
+    it, the note when that address is missing, and the app's size in bytes
+    (None without a FlashNX.nro to count its program part)."""
+    entries = game_entries(swf, files_dir)
+    companions = [src for rel, src in entries if '/' in rel]
+    root = companions_root(swf, files_dir)
+    report = {
+        'files': len(companions),
+        'bytes': sum(source_size(s) for s in companions),
+        'base': any(rel.endswith('.base') for rel, _src in entries if '/' not in rel),
+        'note': address_note(swf, root),
+        # The folders named like websites while the address is missing.
+        'sites': [] if os.path.isfile(swf + '.base') else website_folders(root),
+        'game': os.path.basename(swf),
+        'size': None,
+    }
+    if nro:
+        try:
+            program = nro_layout(nro)[0]
+        except (OSError, StandaloneError):
+            return report
+        plan = RomfsPlan(entries + [marker(None)])
+        # The icon is not made yet: FlashNX's is about 76 KB, a cover less.
+        report['size'] = program + ASSET_HEADER_SIZE + (80 << 10) + NACP_SIZE + plan.size
+    return report
 
 
 def safe_file_name(text):
@@ -918,7 +1001,7 @@ def make_standalone(nro, swf, out_path, name=None, author=None, version=None,
     prefix, base_icon, base_nacp, carried, found = flashnx_program(nro)
     entries = game_entries(swf, files_dir)
     stem = os.path.basename(swf)[:-4]
-    name = name or stem
+    name = name or meta_title(swf) or stem
     author = author or 'FlashNX'
     version = version or '1.0.0'
     icon_data = base_icon
@@ -932,6 +1015,9 @@ def make_standalone(nro, swf, out_path, name=None, author=None, version=None,
     nacp = make_nacp(base_nacp, name, author, version)
     if carried:
         log('note: this .nro already carried a game; it is replaced.')
+    missing = address_note(swf, companions_root(swf, files_dir))
+    if missing:
+        log(missing)
     if ' ' in os.path.basename(out_path):
         log('note: with a space in its name (or its folder\'s), a HOME Menu icon '
             'made with Sphaira will not start this app.')
@@ -1264,7 +1350,8 @@ def main_cli(argv):
     p.add_argument('--update', metavar='APP.nro',
                    help='an app made earlier: write it again with this FlashNX, its game, '
                         'picture and name kept (in place, unless -o)')
-    p.add_argument('--name', help='the app name (default: the .swf name)')
+    p.add_argument('--name', help='the app name (default: the title in the <game>.swf.meta.json '
+                                  'FlashNX keeps beside a downloaded game, else the .swf name)')
     p.add_argument('--author', help='the author shown in the Homebrew Menu')
     p.add_argument('--version', help='the version shown in the Homebrew Menu (default 1.0.0)')
     p.add_argument('--icon', help='a picture for the icon, a file or a web address '
@@ -1275,7 +1362,7 @@ def main_cli(argv):
     if bool(args.update) == bool(args.swf):
         p.error('give the game\'s .swf, or --update and an app made earlier (not both)')
     if args.swf:
-        name = args.name or os.path.basename(args.swf)[:-4]
+        name = args.name or meta_title(args.swf) or os.path.basename(args.swf)[:-4]
         out_path = args.out or safe_file_name(name) + '.nro'
     else:
         out_path = args.out or args.update
@@ -1641,10 +1728,11 @@ def main_gui():
     fields = {}
     heads = {}
     hints = {}
+    under = {}  # the line under a field, by field
     form_row = [0]
 
     def field(label, key, hint=None, browse=None, value='', parent=None, col=0, width=None,
-              note=None, limit=None):
+              note=None, limit=None, live_note=False):
         host = parent or form
         r = form_row[0] if parent is None else 0
         head = ttk.Frame(host)
@@ -1670,11 +1758,17 @@ def main_gui():
             var.trace_add('write', lambda *_: entry.after_idle(entry.xview_moveto, 1.0))
         if parent is None:
             form_row[0] += 2
-            if note:
+            if note or live_note:
                 # What a field accepts, under it: beside the label it would
-                # widen the whole window.
-                ttk.Label(form, text=note, style='Hint.TLabel').grid(
-                    row=form_row[0], column=0, columnspan=2, sticky='w', pady=(px(4), 0))
+                # widen the whole window. A live one wraps in the form's width.
+                under[key] = ttk.Label(form, text=note or '', style='Hint.TLabel', justify='left',
+                                       wraplength=px(560) if live_note else 0)
+                under[key].grid(row=form_row[0], column=0, columnspan=2, sticky='nw', pady=(px(4), 0))
+                if live_note:
+                    # Two lines kept whatever it says, so the fields under it
+                    # stay put as it changes (what to copy, then what goes in).
+                    lines = tkfont.Font(root, family=family, size=9).metrics('linespace')
+                    form.rowconfigure(form_row[0], minsize=2 * lines + px(8))
                 form_row[0] += 1
             ttk.Frame(form, height=px(12)).grid(row=form_row[0], column=0)
             form_row[0] += 1
@@ -1746,7 +1840,12 @@ def main_gui():
     field('Game', 'swf', '.swf',
           lambda: pick_file('swf', 'The game', [('Flash game', '*.swf')]))
     field('Companion files', 'files', 'optional, found next to the game when it has some',
-          pick_folder)
+          pick_folder, live_note=True)
+    # What goes into the app, under the game's two fields (`show_contents`).
+    # A little under the form's width: at exactly its width the label's own
+    # padding asked for more, the form grew, the label followed, and the
+    # window crept 45 px wider before Tk settled.
+    form.bind('<Configure>', lambda e: under['files'].configure(wraplength=max(px(200), e.width - px(8))))
     try:
         import PIL  # noqa: F401 (only whether it is there)
         picture_note = 'JPG, PNG, WebP, BMP, GIF or a web address. Square, 256x256 or more, is best.'
@@ -1796,21 +1895,30 @@ def main_gui():
     bar.grid(row=3, column=0, columnspan=2, sticky='ew', pady=(px(22), 0))
     bar.columnconfigure(0, weight=1)
     # Its wrapping width is what the buttons leave of the bar (`fit_status`),
-    # never more: a long line here, or Show in folder coming up, used to widen
-    # the window by a fifth, moving the form and the preview under the mouse.
+    # never more: a long line here used to widen the window by a fifth, moving
+    # the form and the preview under the mouse.
     status = ttk.Label(bar, style='Muted.TLabel', wraplength=px(300), justify='left')
     status.grid(row=0, column=0, sticky='w', padx=(0, px(16)))
-    open_btn = ttk.Button(bar, text='Show in folder')
+    # Under the line saying where the app went, a link to its folder, as
+    # "Download the latest" is a link: a third button beside the two took
+    # their width from that line for good, and left a word alone on a line.
+    open_link = ttk.Label(bar, text='Show in folder', style='Link.TLabel', cursor='hand2')
     update_btn = ttk.Button(bar, text='Update an app...')
-    update_btn.grid(row=0, column=2, sticky='e', padx=(0, px(10)))
+    update_btn.grid(row=0, column=1, rowspan=2, sticky='e', padx=(0, px(10)))
     make_btn = ttk.Button(bar, text='Make the .nro', style='Primary.TButton')
-    make_btn.grid(row=0, column=3, sticky='e')
-    # Show in folder's place, kept while it is hidden.
-    bar.columnconfigure(1, minsize=open_btn.winfo_reqwidth() + px(10))
+    make_btn.grid(row=0, column=2, rowspan=2, sticky='e')
+
+    def show_folder(path):
+        """The link to the folder `path` is in (Windows' Explorer)."""
+        if sys.platform != 'win32':
+            return
+        folder = os.path.dirname(os.path.abspath(path))
+        open_link.bind('<Button-1>', lambda _e: os.startfile(folder))
+        open_link.grid(row=1, column=0, sticky='w', pady=(px(4), 0))
 
     def fit_status(_event=None):
-        buttons = sum(bar.grid_bbox(column=c, row=0)[2] for c in (1, 2, 3))
-        status.configure(wraplength=max(px(200), bar.winfo_width() - buttons - px(16)))
+        buttons = sum(bar.grid_bbox(column=c, row=0)[2] for c in (1, 2))
+        status.configure(wraplength=max(px(200), bar.winfo_width() - buttons - px(24)))
 
     bar.bind('<Configure>', fit_status)
 
@@ -1819,7 +1927,8 @@ def main_gui():
 
     # `web`: a picture given by its address -> its downloaded copy, None while
     # it downloads, or the reason it failed.
-    state = {'auto_name': '', 'auto_icon': '', 'icon_key': None, 'photo': None, 'web': {}}
+    state = {'auto_name': '', 'auto_icon': '', 'icon_key': None, 'photo': None, 'web': {},
+             'game_title': '', 'report_key': None, 'report_done': None}
     pictures = queue.Queue()
 
     def fetch_web(src):
@@ -1838,6 +1947,16 @@ def main_gui():
                     refresh()
                     if isinstance(result, StandaloneError):
                         say(str(result), error=True)
+        except queue.Empty:
+            pass
+        # And what goes into the app (`ask_report`), when it is still the
+        # game in the fields.
+        try:
+            while True:
+                key, result = reports.get_nowait()
+                if key == state['report_key']:
+                    state['report_done'] = key
+                    show_contents(result)
         except queue.Empty:
             pass
         root.after(150, poll_pictures)
@@ -1861,19 +1980,120 @@ def main_gui():
                 text, style_name = '  version %s' % '.'.join(map(str, version)), 'Hint.TLabel'
         hints['nro'].configure(text=text, style=style_name)
 
+    def show_game_hints(swf, files):
+        """Beside the game's two labels: what they take, or what is wrong with
+        the path, as the FlashNX.nro field says it."""
+        if swf and not os.path.isfile(swf):
+            text, style_name = '  no such file', 'HintError.TLabel'
+        elif swf and not swf.lower().endswith('.swf'):
+            text, style_name = '  not a .swf', 'HintError.TLabel'
+        else:
+            text, style_name = '  .swf', 'Hint.TLabel'
+        hints['swf'].configure(text=text, style=style_name)
+        if files and not os.path.isdir(files):
+            text, style_name = '  no such folder', 'HintError.TLabel'
+        else:
+            text, style_name = '  optional, found next to the game when it has some', 'Hint.TLabel'
+        hints['files'].configure(text=text, style=style_name)
+
+    # What goes into the app, worked out off the window's thread: a game's
+    # companions can be thousands of files, read off a card in a reader.
+    reports = queue.Queue()
+    from_flashnx = ('From the SD card (sdmc:/flashnx/, or the games folder chosen in FlashNX), '
+                    'copy the .swf with everything beside it whose name starts the same: its '
+                    '.files folder, its .swf.base.')
+
+    def size_text(n):
+        if n < 1e6:
+            return '%d KB' % max(1, round(n / 1e3))
+        return '%.1f MB' % (n / 1e6) if n < 1e9 else '%.2f GB' % (n / 1e9)
+
+    def show_contents(report):
+        """The line under the game's fields: what to copy, until a game is
+        chosen; then what goes in with it and how big the app will be, in red,
+        and said first, when something will go wrong. Everything taken from
+        beside the game was invisible: one file left behind on the card, and
+        nothing said why the app would not work."""
+        label = under['files']
+        if report is None:
+            label.configure(text=from_flashnx, style='Hint.TLabel')
+            return
+        if isinstance(report, StandaloneError):
+            label.configure(text=str(report), style='HintError.TLabel')
+            return
+        if report['sites']:
+            # The one thing that will break the app, alone and first: the
+            # summary under it pushed it to a third line.
+            label.configure(
+                text='Its address file, %s.base, is missing: copy it from the SD card next to '
+                     'the .swf, or the game will not find its files (filed by website: %s).'
+                     % (report['game'],
+                        ', '.join(report['sites'][:2]) + (', ...' if len(report['sites']) > 2 else '')),
+                style='HintError.TLabel')
+            return
+        items = ['the game']
+        if report['files']:
+            items.append('%d companion file%s (%s)' % (
+                report['files'], '' if report['files'] == 1 else 's', size_text(report['bytes'])))
+        if report['base']:
+            items.append('its Flashpoint address')
+        listed = ('the game alone' if len(items) == 1
+                  else ', '.join(items[:-1]) + ' and ' + items[-1])
+        text = 'In the app: %s.' % listed
+        if report['size']:
+            text += ' About %s in all.' % size_text(report['size'])
+        if fat32_note(report['size'] or 0):
+            label.configure(text=text + ' Too big for a card formatted FAT32, the usual one for '
+                                        'homebrew: it needs one formatted exFAT.',
+                            style='HintError.TLabel')
+        else:
+            label.configure(text=text, style='Hint.TLabel')
+
+    def report_job(key):
+        swf, files, nro = key
+        try:
+            result = game_report(swf, files or None, nro or None)
+        except StandaloneError as e:
+            result = e
+        except Exception as e:  # an unreadable folder, a file gone: said, not swallowed
+            result = StandaloneError('Could not read the game\'s files: %s' % e)
+        reports.put((key, result))
+
+    def ask_report():
+        swf, files, nro = (fields[k].get().strip() for k in ('swf', 'files', 'nro'))
+        key = (swf, files, nro if nro and nro_facts(nro)[1] is not None else '')
+        if key == state['report_key']:
+            return
+        state['report_key'] = key
+        if not (swf.lower().endswith('.swf') and os.path.isfile(swf)):
+            show_contents(None)
+            return
+        threading.Thread(target=report_job, args=(key,), daemon=True).start()
+
+        def slow():
+            # Only a count that takes a while says so; a quick one would blink.
+            if state['report_key'] == key and state['report_done'] != key:
+                under['files'].configure(text='Counting the game\'s files...', style='Hint.TLabel')
+
+        root.after(300, slow)
+
     def refresh(*_):
         swf = fields['swf'].get().strip()
         stem = os.path.basename(swf)[:-4] if swf.lower().endswith('.swf') else ''
-        # The name follows the game until it is typed over.
-        if stem and fields['name'].get() in ('', state['auto_name']):
-            state['auto_name'] = stem
-            fields['name'].set(stem)
-        name = fields['name'].get().strip() or stem or 'My game'
+        # The name follows the game until it is typed over: its real title when
+        # FlashNX kept one beside it (`meta_title`), else its file name.
+        title = state['game_title'] if stem else ''
+        if title and fields['name'].get() in ('', state['auto_name']):
+            state['auto_name'] = title
+            fields['name'].set(title)
+        name = fields['name'].get().strip() or title or 'My game'
         shown_name.configure(text=name)
         shown_author.configure(text=fields['author'].get().strip() or 'FlashNX')
         shown_version.configure(text='Version ' + (fields['version'].get().strip() or '1.0.0'))
         icon, nro = fields['icon'].get().strip(), fields['nro'].get().strip()
         show_nro_version(nro)
+        show_game_hints(swf, fields['files'].get().strip())
+        ask_report()
         key = (icon, nro)
         if key == state['icon_key']:
             return
@@ -1911,16 +2131,20 @@ def main_gui():
 
     def on_game(*_):
         swf = fields['swf'].get().strip()
-        if swf.lower().endswith('.swf'):
+        is_swf = swf.lower().endswith('.swf')
+        state['game_title'] = (meta_title(swf) or os.path.basename(swf)[:-4]) if is_swf else ''
+        if is_swf:
             folder, base = os.path.dirname(swf), os.path.basename(swf)
             guess = os.path.join(folder, base[:-4] + '.files')
             fields['files'].set(guess if os.path.isdir(guess) else '')
             # The cover FlashNX itself would show for the game: named like it,
-            # beside it (covers.rs, `resolve`). Never over a picture chosen.
+            # beside it (covers.rs, `resolve`), else the one it downloaded,
+            # cached in covers/ beside the games or copied out of there next
+            # to the game. Never over a picture chosen.
             if fields['icon'].get().strip() in ('', state['auto_icon']):
-                cover = next((c for c in (os.path.join(folder, n + ext)
-                                          for n in (base[:-4], base)
-                                          for ext in ('.png', '.jpg', '.jpeg', '.webp'))
+                names = [n + ext for n in (base[:-4], base) for ext in ('.png', '.jpg', '.jpeg', '.webp')]
+                names += [base + '.cover.png', os.path.join('covers', base + '.cover.png')]
+                cover = next((c for c in (os.path.join(folder, n) for n in names)
                               if os.path.isfile(c)), '')
                 state['auto_icon'] = cover
                 fields['icon'].set(cover)
@@ -1994,10 +2218,7 @@ def main_gui():
         size = os.path.getsize(out_path) / 1e6
         say(with_notes('%s is ready (%.1f MB). Copy it to sdmc:/switch/%s/ on the SD card.'
                        % (os.path.basename(out_path), size, safe_file_name(name))))
-        folder = os.path.dirname(os.path.abspath(out_path))
-        if sys.platform == 'win32':
-            open_btn.configure(command=lambda: os.startfile(folder))
-            open_btn.grid(row=0, column=1, sticky='e', padx=(0, px(10)))
+        show_folder(out_path)
 
     def create():
         nro, swf = fields['nro'].get().strip(), fields['swf'].get().strip()
@@ -2011,7 +2232,7 @@ def main_gui():
             initialfile=safe_file_name(name) + '.nro', filetypes=[('Switch homebrew', '*.nro')])
         if not out_path:
             return
-        open_btn.grid_remove()
+        open_link.grid_remove()
         make_btn.state(['disabled'])
         del notes[:]
         say('Writing %s...' % os.path.basename(out_path))
@@ -2052,10 +2273,7 @@ def main_gui():
         name, had, now = value
         say(with_notes('%s now runs FlashNX %s%s. Copy it over the old one on the SD card: '
                        'saves and settings stay.' % (name, now, ' (it had %s)' % had if had else '')))
-        folder = os.path.dirname(os.path.abspath(out_path))
-        if sys.platform == 'win32':
-            open_btn.configure(command=lambda: os.startfile(folder))
-            open_btn.grid(row=0, column=1, sticky='e', padx=(0, px(10)))
+        show_folder(out_path)
 
     def update():
         """An app made earlier, written again with the FlashNX.nro of the
@@ -2075,7 +2293,7 @@ def main_gui():
             filetypes=[('Switch homebrew', '*.nro')])
         if not out_path:
             return
-        open_btn.grid_remove()
+        open_link.grid_remove()
         make_btn.state(['disabled'])
         update_btn.state(['disabled'])
         del notes[:]
