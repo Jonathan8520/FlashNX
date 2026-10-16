@@ -2419,13 +2419,23 @@ def main_gui():
         show_folder(out_path)
 
     def nro_ready():
+        """The FlashNX.nro to use, or None after saying why it cannot be:
+        what is wrong with the one chosen, not "choose one" when one is."""
         nro = fields['nro'].get().strip()
-        version = nro_facts(nro)[1] if nro else None
-        if version is None or version < MIN_FLASHNX:
-            say('Choose the FlashNX.nro to put in the app first, or Download the latest.',
-                error=True)
-            return None
-        return nro
+        version = nro_facts(nro)[1] if nro and os.path.isfile(nro) else None
+        if version is not None and version >= MIN_FLASHNX:
+            return nro
+        if not nro:
+            why = 'No FlashNX.nro yet'
+        elif not os.path.isfile(nro):
+            why = 'The FlashNX.nro chosen is not there any more'
+        elif version is None:
+            why = '%s is not a FlashNX .nro' % os.path.basename(nro)
+        else:
+            why = ('FlashNX %s is too old to carry a game: it needs %s or later, the first to start '
+                   'straight into the game it holds' % (version_text(version), version_text(MIN_FLASHNX)))
+        say(why + '. Download the latest, or choose another file.', error=True)
+        return None
 
     def create():
         swf = fields['swf'].get().strip()
