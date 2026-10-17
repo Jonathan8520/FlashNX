@@ -12813,6 +12813,10 @@ impl SwitchRenderBackend {
             if is_active {
                 self.kit_rrect(x, cy + 16.0, widths[i], 3.0, radius::BAR, col::GOLD);
             }
+            // A newer FlashNX is waiting in Réglages > À propos.
+            if i == 2 && crate::updater::badge() {
+                self.kit_rrect(x + widths[i] + 4.0, cy - 14.0, 8.0, 8.0, 4.0, col::GOLD);
+            }
             x += widths[i] + gap;
         }
         navbar_publish(cells);

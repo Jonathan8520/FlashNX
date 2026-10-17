@@ -28,6 +28,28 @@
 #include <switch.h>
 #include <curl/curl.h>
 
+// Free space on the SD card in bytes, or -1 when the card cannot say.
+//
+// Debug marker, the same shape as `noalloc.on`: a number in
+// `sdmc:/switch/FlashNX/fakefree.mb` is taken as the free space in MB, which is
+// how "the card is full" gets tried on a card that is not.
+extern "C" long long flashnx_sd_free_bytes(void) {
+    if (FILE* f = std::fopen("sdmc:/switch/FlashNX/fakefree.mb", "rb")) {
+        char buf[32] = {};
+        std::fread(buf, 1, sizeof(buf) - 1, f);
+        std::fclose(f);
+        const long long mb = std::atoll(buf);
+        std::printf("sd: fakefree.mb present -> %lld MB free\n", mb);
+        std::fflush(stdout);
+        return mb * 1024 * 1024;
+    }
+    FsFileSystem* fs = fsdevGetDeviceFileSystem("sdmc");
+    if (!fs) return -1;
+    s64 free_bytes = 0;
+    if (R_FAILED(fsFsGetFreeSpace(fs, "/", &free_bytes))) return -1;
+    return (long long)free_bytes;
+}
+
 namespace {
 
 constexpr const char* CACERT_PATH = "sdmc:/switch/FlashNX/cacert.pem";
@@ -83,6 +105,22 @@ int       g_last_curl_result = 0;
 long      g_last_http_code   = 0;
 uint64_t  g_dl_start_tick    = 0;   // armGetSystemTick at start, for the speed log
 
+// Room on the card, checked once per download as soon as its size is known
+// (`xfer_progress`). A download that cannot fit stops there, in the first
+// second, instead of filling the card and failing at the end. `g_dl_unpack`
+// is set for a GameZIP, which is extracted next to itself before the zip is
+// deleted: it needs its own size twice.
+bool      g_dl_space_checked = false;
+bool      g_dl_no_space      = false;
+bool      g_dl_unpack        = false;
+uint64_t  g_dl_space_size    = 0;
+uint64_t  g_dl_space_need    = 0;
+uint64_t  g_dl_space_free    = 0;
+
+// Kept free on top of what a download needs, for everything else that writes
+// to the card while it runs (saves, covers, the log).
+constexpr uint64_t SPACE_MARGIN = 8ull * 1024 * 1024;
+
 void multi_cleanup(bool delete_partial) {
     // Drop the CPU boost we raised for the download (idempotent).
     appletSetCpuBoostMode(ApmCpuBoostMode_Normal);
@@ -107,12 +145,37 @@ void multi_cleanup(bool delete_partial) {
     g_bytes_done = 0;
     g_bytes_total = 0;
     g_dl_out_path[0] = 0;
+    g_dl_unpack = false;
 }
 
 int xfer_progress(void* /*ud*/, curl_off_t dltotal, curl_off_t dlnow,
                   curl_off_t /*ultotal*/, curl_off_t /*ulnow*/) {
     g_bytes_done = (uint64_t)dlnow;
     g_bytes_total = (uint64_t)dltotal;
+    // Only on the answer that carries the file: a redirect has a length of its
+    // own (a few bytes of HTML), and checking that would pass every download.
+    if (!g_dl_space_checked && dltotal > 0 && g_handle) {
+        long code = 0;
+        curl_easy_getinfo(g_handle, CURLINFO_RESPONSE_CODE, &code);
+        if (code >= 200 && code < 300) {
+            g_dl_space_checked = true;
+            const long long free_bytes = flashnx_sd_free_bytes();
+            if (free_bytes >= 0) {
+                const uint64_t left = (uint64_t)(dltotal - dlnow);
+                const uint64_t need = left + (g_dl_unpack ? (uint64_t)dltotal : 0) + SPACE_MARGIN;
+                if (need > (uint64_t)free_bytes) {
+                    g_dl_no_space = true;
+                    g_dl_space_size = (uint64_t)dltotal;
+                    g_dl_space_need = need;
+                    g_dl_space_free = (uint64_t)free_bytes;
+                    std::printf("https_download: %llu bytes needed, %lld free on the card -> stopping\n",
+                                (unsigned long long)need, free_bytes);
+                    std::fflush(stdout);
+                    return 1; // aborts the transfer (CURLE_ABORTED_BY_CALLBACK)
+                }
+            }
+        }
+    }
     return 0;
 }
 
@@ -305,7 +368,9 @@ extern "C" int https_last_http_code(void) { return (int)g_last_http_code; }
 //   -1 on curl init failure
 //   -4 on fopen(out_path) failure
 //   -5 if a download is already in flight
-extern "C" int https_download_start(const char* url, const char* out_path) {
+// `unpack`: the file is a GameZIP that will be extracted beside itself, so the
+// room checked for is twice its size (see `g_dl_unpack`).
+extern "C" int https_download_start_ex(const char* url, const char* out_path, int unpack) {
     if (g_multi || g_handle) {
         return -5;
     }
@@ -365,6 +430,9 @@ extern "C" int https_download_start(const char* url, const char* out_path) {
     g_last_http_code = 0;
     g_dl_start_tick = armGetSystemTick();
     g_fwrite_ticks = 0;
+    g_dl_space_checked = false;
+    g_dl_no_space = false;
+    g_dl_unpack = unpack != 0;
     // Boost the CPU for the download (TLS decrypt + curl can be the limit on the
     // base clock). Reset by multi_cleanup when the transfer ends.
     appletSetCpuBoostMode(ApmCpuBoostMode_FastLoad);
@@ -373,9 +441,22 @@ extern "C" int https_download_start(const char* url, const char* out_path) {
     return 0;
 }
 
+extern "C" int https_download_start(const char* url, const char* out_path) {
+    return https_download_start_ex(url, out_path, 0);
+}
+
+// What the last download stopped for lack of room was (its size), needed and
+// found, in bytes. Meaningful after `https_download_tick` returned -6.
+extern "C" void https_download_space(uint64_t* size, uint64_t* need, uint64_t* free_bytes) {
+    if (size) *size = g_dl_space_size;
+    if (need) *need = g_dl_space_need;
+    if (free_bytes) *free_bytes = g_dl_space_free;
+}
+
 // Pump the multi handle once. Returns:
 //   0 = still in progress
 //   1 = finished successfully
+//   -6 = stopped because the card has no room for it (`https_download_space`)
 //   <0 = error (download cleaned up, file deleted)
 extern "C" int https_download_tick(void) {
     if (!g_multi) return -1;
@@ -427,12 +508,30 @@ extern "C" int https_download_tick(void) {
         }
     }
     if (!ok) {
+        if (g_dl_no_space) {
+            multi_cleanup(true);
+            return -6;
+        }
         std::printf("https_download_tick: failed curl=%d (%s) http=%ld\n",
                     g_last_curl_result, curl_easy_strerror((CURLcode)g_last_curl_result),
                     g_last_http_code);
         std::fflush(stdout);
         multi_cleanup(true);
         return -2;
+    }
+    // The last buffered bytes (up to the 512 KB of `g_dl_iobuf`) reach the card
+    // only now. A card that fills here used to pass for a finished download and
+    // leave a truncated file behind, announced as a success.
+    if (g_dl_file) {
+        const int close_rc = std::fclose(g_dl_file);
+        g_dl_file = nullptr;
+        if (close_rc != 0) {
+            g_last_curl_result = (int)CURLE_WRITE_ERROR;
+            std::printf("https_download_tick: the last write to %s failed\n", g_dl_out_path);
+            std::fflush(stdout);
+            multi_cleanup(true);
+            return -2;
+        }
     }
     {
         u64 freq = armGetSystemTickFreq();

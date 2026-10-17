@@ -630,6 +630,40 @@ pub struct Ui {
     pub disc_other_studio: &'static str,
     /// Under the random shelf's draw-again tile's icon.
     pub disc_other_batch: &'static str,
+    /// À propos: the row of FlashNX's own updates.
+    pub upd_row: &'static str,
+    /// Its value while GitHub is being asked.
+    pub upd_checking: &'static str,
+    /// Its value when the version running is the newest.
+    pub upd_latest: &'static str,
+    /// Its value when a newer one exists. {} = that version.
+    pub upd_new: &'static str,
+    /// Its value before an answer, or when none came.
+    pub upd_unknown: &'static str,
+    /// Its value once the update is in place, before a restart. {} = the version.
+    pub upd_ready: &'static str,
+    /// The A hint on that row when nothing newer is known: ask now.
+    pub upd_check: &'static str,
+    /// The note under the row: when FlashNX asks, and that nothing installs on its own.
+    pub upd_help: &'static str,
+    /// The window offering an update. {} = the new version.
+    pub upd_offer_title: &'static str,
+    /// Its text. {} = the version running, then {} = the download's size.
+    pub upd_offer_body: &'static str,
+    /// Its answer that closes it.
+    pub upd_later: &'static str,
+    /// The page shown while the update downloads.
+    pub upd_page_title: &'static str,
+    /// Under its bar once downloaded, while the file is checked and put in place.
+    pub upd_verifying: &'static str,
+    /// The window once installed. {} = the version.
+    pub upd_done_title: &'static str,
+    /// Its text when FlashNX can start itself again.
+    pub upd_done_restart: &'static str,
+    /// Its text when it cannot (the player quits and starts it).
+    pub upd_done_manual: &'static str,
+    /// Its answer that starts FlashNX again (not the pause's "restart the game").
+    pub upd_restart: &'static str,
 }
 
 const EN: Ui = Ui {
@@ -981,6 +1015,23 @@ const EN: Ui = Ui {
     disc_more_games: "more games",
     disc_other_studio: "another studio",
     disc_other_batch: "another batch",
+    upd_row: "Update",
+    upd_checking: "Checking…",
+    upd_latest: "Up to date",
+    upd_new: "{} available",
+    upd_unknown: "Not checked",
+    upd_ready: "{} installed",
+    upd_check: "Check",
+    upd_help: "Each time it starts with a connection, FlashNX asks GitHub for a newer version. Nothing is installed until you say so.",
+    upd_offer_title: "FlashNX {} is available",
+    upd_offer_body: "You have version {}. The update ({}) replaces FlashNX itself: your games, saves and settings stay as they are.",
+    upd_later: "Later",
+    upd_page_title: "Updating FlashNX",
+    upd_verifying: "Checking the file…",
+    upd_done_title: "FlashNX {} is installed",
+    upd_done_restart: "Restart FlashNX to use the new version.",
+    upd_done_manual: "Quit FlashNX and start it again to use the new version.",
+    upd_restart: "Restart",
 };
 
 const FR: Ui = Ui {
@@ -1332,6 +1383,23 @@ const FR: Ui = Ui {
     disc_more_games: "d'autres jeux",
     disc_other_studio: "autre studio",
     disc_other_batch: "un autre lot",
+    upd_row: "Mise à jour",
+    upd_checking: "Recherche…",
+    upd_latest: "À jour",
+    upd_new: "{} disponible",
+    upd_unknown: "Pas vérifié",
+    upd_ready: "{} installée",
+    upd_check: "Vérifier",
+    upd_help: "À chaque démarrage avec une connexion, FlashNX demande à GitHub s'il existe une version plus récente. Rien ne s'installe sans ton accord.",
+    upd_offer_title: "FlashNX {} est disponible",
+    upd_offer_body: "Tu as la version {}. La mise à jour ({}) remplace FlashNX lui-même\u{a0}: tes jeux, sauvegardes et réglages restent tels quels.",
+    upd_later: "Plus tard",
+    upd_page_title: "Mise à jour de FlashNX",
+    upd_verifying: "Vérification du fichier…",
+    upd_done_title: "FlashNX {} est installé",
+    upd_done_restart: "Redémarre FlashNX pour utiliser la nouvelle version.",
+    upd_done_manual: "Quitte FlashNX et relance-le pour utiliser la nouvelle version.",
+    upd_restart: "Redémarrer",
 };
 
 const ES: Ui = Ui {
@@ -1683,6 +1751,23 @@ const ES: Ui = Ui {
     disc_more_games: "más juegos",
     disc_other_studio: "otro estudio",
     disc_other_batch: "otro lote",
+    upd_row: "Actualización",
+    upd_checking: "Buscando…",
+    upd_latest: "Al día",
+    upd_new: "{} disponible",
+    upd_unknown: "Sin comprobar",
+    upd_ready: "{} instalada",
+    upd_check: "Comprobar",
+    upd_help: "Cada vez que se inicia con conexión, FlashNX pregunta a GitHub si hay una versión más reciente. No se instala nada sin tu permiso.",
+    upd_offer_title: "FlashNX {} está disponible",
+    upd_offer_body: "Tienes la versión {}. La actualización ({}) reemplaza el propio FlashNX: tus juegos, partidas guardadas y ajustes no cambian.",
+    upd_later: "Más tarde",
+    upd_page_title: "Actualizando FlashNX",
+    upd_verifying: "Comprobando el archivo…",
+    upd_done_title: "FlashNX {} está instalado",
+    upd_done_restart: "Reinicia FlashNX para usar la nueva versión.",
+    upd_done_manual: "Sal de FlashNX y vuelve a abrirlo para usar la nueva versión.",
+    upd_restart: "Reiniciar",
 };
 
 const RU: Ui = Ui {
@@ -2034,6 +2119,23 @@ const RU: Ui = Ui {
     disc_more_games: "больше игр",
     disc_other_studio: "другая студия",
     disc_other_batch: "другие игры",
+    upd_row: "Обновление",
+    upd_checking: "Проверка…",
+    upd_latest: "Последняя версия",
+    upd_new: "Доступна {}",
+    upd_unknown: "Не проверено",
+    upd_ready: "{} установлена",
+    upd_check: "Проверить",
+    upd_help: "При каждом запуске с подключением FlashNX спрашивает у GitHub, нет ли новой версии. Ничего не устанавливается без твоего согласия.",
+    upd_offer_title: "Доступен FlashNX {}",
+    upd_offer_body: "У тебя версия {}. Обновление ({}) заменяет сам FlashNX: игры, сохранения и настройки остаются как есть.",
+    upd_later: "Позже",
+    upd_page_title: "Обновление FlashNX",
+    upd_verifying: "Проверка файла…",
+    upd_done_title: "FlashNX {} установлен",
+    upd_done_restart: "Перезапусти FlashNX, чтобы пользоваться новой версией.",
+    upd_done_manual: "Выйди из FlashNX и запусти его снова, чтобы пользоваться новой версией.",
+    upd_restart: "Перезапустить",
 };
 
 const DE: Ui = Ui {
@@ -2385,6 +2487,23 @@ const DE: Ui = Ui {
     disc_more_games: "weitere Spiele",
     disc_other_studio: "anderes Studio",
     disc_other_batch: "neue Auswahl",
+    upd_row: "Update",
+    upd_checking: "Suche…",
+    upd_latest: "Aktuell",
+    upd_new: "{} verfügbar",
+    upd_unknown: "Nicht geprüft",
+    upd_ready: "{} installiert",
+    upd_check: "Prüfen",
+    upd_help: "Bei jedem Start mit Verbindung fragt FlashNX bei GitHub nach einer neueren Version. Installiert wird nichts ohne deine Zustimmung.",
+    upd_offer_title: "FlashNX {} ist verfügbar",
+    upd_offer_body: "Du hast Version {}. Das Update ({}) ersetzt FlashNX selbst: Spiele, Spielstände und Einstellungen bleiben, wie sie sind.",
+    upd_later: "Später",
+    upd_page_title: "FlashNX wird aktualisiert",
+    upd_verifying: "Datei wird geprüft…",
+    upd_done_title: "FlashNX {} ist installiert",
+    upd_done_restart: "Starte FlashNX neu, um die neue Version zu nutzen.",
+    upd_done_manual: "Beende FlashNX und starte es neu, um die neue Version zu nutzen.",
+    upd_restart: "Neu starten",
 };
 
 const IT: Ui = Ui {
@@ -2736,6 +2855,23 @@ const IT: Ui = Ui {
     disc_more_games: "altri giochi",
     disc_other_studio: "altro studio",
     disc_other_batch: "un altro lotto",
+    upd_row: "Aggiornamento",
+    upd_checking: "Ricerca…",
+    upd_latest: "Aggiornato",
+    upd_new: "{} disponibile",
+    upd_unknown: "Non verificato",
+    upd_ready: "{} installata",
+    upd_check: "Verifica",
+    upd_help: "A ogni avvio con una connessione, FlashNX chiede a GitHub se esiste una versione più recente. Non si installa nulla senza il tuo consenso.",
+    upd_offer_title: "FlashNX {} è disponibile",
+    upd_offer_body: "Hai la versione {}. L'aggiornamento ({}) sostituisce FlashNX stesso: giochi, salvataggi e impostazioni restano come sono.",
+    upd_later: "Più tardi",
+    upd_page_title: "Aggiornamento di FlashNX",
+    upd_verifying: "Verifica del file…",
+    upd_done_title: "FlashNX {} è installato",
+    upd_done_restart: "Riavvia FlashNX per usare la nuova versione.",
+    upd_done_manual: "Esci da FlashNX e riavvialo per usare la nuova versione.",
+    upd_restart: "Riavvia",
 };
 
 const PT: Ui = Ui {
@@ -3087,6 +3223,23 @@ const PT: Ui = Ui {
     disc_more_games: "mais jogos",
     disc_other_studio: "outro estúdio",
     disc_other_batch: "outro lote",
+    upd_row: "Atualização",
+    upd_checking: "Procurando…",
+    upd_latest: "Atualizado",
+    upd_new: "{} disponível",
+    upd_unknown: "Não verificado",
+    upd_ready: "{} instalada",
+    upd_check: "Verificar",
+    upd_help: "Sempre que abre com conexão, o FlashNX pergunta ao GitHub se há uma versão mais nova. Nada é instalado sem a sua permissão.",
+    upd_offer_title: "O FlashNX {} está disponível",
+    upd_offer_body: "Você tem a versão {}. A atualização ({}) substitui o próprio FlashNX: seus jogos, saves e configurações continuam como estão.",
+    upd_later: "Mais tarde",
+    upd_page_title: "Atualizando o FlashNX",
+    upd_verifying: "Verificando o arquivo…",
+    upd_done_title: "O FlashNX {} está instalado",
+    upd_done_restart: "Reinicie o FlashNX para usar a nova versão.",
+    upd_done_manual: "Saia do FlashNX e abra-o de novo para usar a nova versão.",
+    upd_restart: "Reiniciar",
 };
 
 const ZH: Ui = Ui {
@@ -3438,6 +3591,23 @@ const ZH: Ui = Ui {
     disc_more_games: "更多游戏",
     disc_other_studio: "换个工作室",
     disc_other_batch: "换一批",
+    upd_row: "更新",
+    upd_checking: "正在检查…",
+    upd_latest: "已是最新",
+    upd_new: "{} 可用",
+    upd_unknown: "未检查",
+    upd_ready: "{} 已安装",
+    upd_check: "检查",
+    upd_help: "每次在联网状态下启动时，FlashNX 会向 GitHub 查询是否有新版本。未经你同意不会安装任何内容。",
+    upd_offer_title: "FlashNX {} 已推出",
+    upd_offer_body: "你当前的版本是 {}。更新（{}）只替换 FlashNX 本身：你的游戏、存档和设置保持不变。",
+    upd_later: "稍后",
+    upd_page_title: "正在更新 FlashNX",
+    upd_verifying: "正在检查文件…",
+    upd_done_title: "FlashNX {} 已安装",
+    upd_done_restart: "重启 FlashNX 即可使用新版本。",
+    upd_done_manual: "请退出 FlashNX 并重新启动以使用新版本。",
+    upd_restart: "重启",
 };
 
 const TR: Ui = Ui {
@@ -3789,6 +3959,23 @@ const TR: Ui = Ui {
     disc_more_games: "daha çok oyun",
     disc_other_studio: "başka stüdyo",
     disc_other_batch: "başka oyunlar",
+    upd_row: "Güncelleme",
+    upd_checking: "Kontrol ediliyor…",
+    upd_latest: "Güncel",
+    upd_new: "{} mevcut",
+    upd_unknown: "Kontrol edilmedi",
+    upd_ready: "{} yüklendi",
+    upd_check: "Kontrol et",
+    upd_help: "FlashNX, bağlantıyla her açılışında GitHub'a daha yeni bir sürüm olup olmadığını sorar. Sen onaylamadan hiçbir şey yüklenmez.",
+    upd_offer_title: "FlashNX {} mevcut",
+    upd_offer_body: "Sende {} sürümü var. Güncelleme ({}) yalnızca FlashNX'in kendisini değiştirir: oyunların, kayıtların ve ayarların olduğu gibi kalır.",
+    upd_later: "Sonra",
+    upd_page_title: "FlashNX güncelleniyor",
+    upd_verifying: "Dosya kontrol ediliyor…",
+    upd_done_title: "FlashNX {} yüklendi",
+    upd_done_restart: "Yeni sürümü kullanmak için FlashNX'i yeniden başlat.",
+    upd_done_manual: "Yeni sürümü kullanmak için FlashNX'ten çık ve yeniden başlat.",
+    upd_restart: "Yeniden başlat",
 };
 
 pub fn ui() -> &'static Ui {

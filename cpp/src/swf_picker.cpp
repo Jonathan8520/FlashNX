@@ -1026,9 +1026,14 @@ extern "C" int swf_picker_write_file(const char* path, const unsigned char* data
     // what the download writes at 12 MB/s). newlib allocates it, fclose frees it.
     std::setvbuf(f, nullptr, _IOFBF, 256 * 1024);
     const size_t wrote = (len > 0) ? std::fwrite(data, 1, len, f) : 0;
-    std::fclose(f);
-    if (wrote != (size_t)len) {
-        std::printf("swf_picker_write_file: short write %s (%zu/%u)\n", path, wrote, len);
+    // A file that fits the buffer reaches the card only at fclose, so a full
+    // card fails HERE and nowhere else. Unchecked, it left an empty file that
+    // counted as written. A failed file is removed rather than left half there.
+    const int close_rc = std::fclose(f);
+    if (wrote != (size_t)len || close_rc != 0) {
+        std::printf("swf_picker_write_file: short write %s (%zu/%u, close %d)\n", path, wrote,
+                    len, close_rc);
+        std::remove(path);
         return 0;
     }
     return 1;

@@ -921,6 +921,7 @@ mod profiles;
 mod sd;
 mod sources;
 mod tags;
+mod updater;
 
 use core::ffi::{c_char, c_int};
 use std::sync::{Arc, Mutex};

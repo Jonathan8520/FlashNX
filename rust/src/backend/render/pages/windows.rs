@@ -9,6 +9,22 @@
 use super::super::kit::icons::Icon;
 use super::super::*;
 
+/// Where the gold edge of a question's answers is drawn this frame: eased
+/// toward `target`, and put there at once for a window just opened (`key`, the
+/// window's kind and its number of answers) or one not drawn a moment ago.
+/// Its own slot, not the lists' (`eased_list_x`): the page under the window
+/// may be gliding its own cursor in the same frames.
+fn answer_glide(target: f32, key: u32) -> f32 {
+    static GLIDE: std::sync::Mutex<(u32, u64, f32)> = std::sync::Mutex::new((0, 0, 0.0));
+    let now = unsafe { ruffle_tick_now() };
+    let freq = unsafe { ruffle_tick_freq() } as f32;
+    let Ok(mut g) = GLIDE.lock() else { return target };
+    let dt = if freq > 0.0 { now.saturating_sub(g.1) as f32 / freq } else { 1.0 };
+    let x = if g.0 != key || dt > 0.25 { target } else { ease_to(g.2, target, dt, 20.0) };
+    *g = (key, now, x);
+    x
+}
+
 /// One answer of a `draw_confirm` question.
 pub(crate) struct Choice<'a> {
     pub label: &'a str,
@@ -164,18 +180,25 @@ impl SwitchRenderBackend {
             by += detail_h;
         }
 
-        // The answers.
+        // The answers. Their wells first, then the gold edge, which glides from
+        // one answer to the other as the focus does in every list instead of
+        // jumping in one frame, then the labels over it.
         let n = choices.len().max(1) as f32;
         let bw = ((w - 2.0 * PAD - BTN_GAP * (n - 1.0)) / n).floor();
         let mut cells = std::vec::Vec::with_capacity(choices.len());
+        for i in 0..choices.len() {
+            let bx = x + PAD + i as f32 * (bw + BTN_GAP);
+            self.kit_rrect(bx, by, bw, BTN_H, radius::ROW, if danger { 0x60_00_00_00 } else { 0xFF_22_32_4F });
+        }
+        if !choices.is_empty() {
+            let on = selection.min(choices.len() - 1);
+            let target = x + PAD + on as f32 * (bw + BTN_GAP);
+            let ex = answer_glide(target, (ui_screen_kind() as u32) << 8 | choices.len() as u32);
+            self.kit_shape(ex, by, bw, BTN_H, radius::ROW, col::CHIP, 2.0, col::GOLD, 0.0);
+        }
         for (i, c) in choices.iter().enumerate() {
             let bx = x + PAD + i as f32 * (bw + BTN_GAP);
             let on = i == selection;
-            if on {
-                self.kit_shape(bx, by, bw, BTN_H, radius::ROW, col::CHIP, 2.0, col::GOLD, 0.0);
-            } else {
-                self.kit_rrect(bx, by, bw, BTN_H, radius::ROW, if danger { 0x60_00_00_00 } else { 0xFF_22_32_4F });
-            }
             let label = self.kit_fit(c.label, size::ROW, bw - 24.0);
             let lw = self.kit_measure(&label, size::ROW);
             let ink = if c.destructive {

@@ -63,13 +63,14 @@ impl SetSection {
             SetSection::Defaults => DEFAULTS_ROWS,
             SetSection::Profile => PROFILE_ROWS,
             SetSection::Help => HELP_ROWS,
-            SetSection::Language | SetSection::About | SetSection::Quit => &[],
+            SetSection::About => ABOUT_ROWS,
+            SetSection::Language | SetSection::Quit => &[],
         }
     }
 
-    /// How many places the cursor can take in the pane. None in About, which
-    /// only has things to read, nor in Quitter, whose pane only explains what
-    /// it does: the cursor does not go in there.
+    /// How many places the cursor can take in the pane. None in Quitter, whose
+    /// pane only explains what it does: the cursor does not go in there. In
+    /// About only the update row takes it; the credits are things to read.
     fn pane_len(self) -> usize {
         match self {
             SetSection::Language => crate::loc::PICKER_LANGS.len(),
@@ -88,6 +89,7 @@ const DEFAULTS_ROWS: &[&str] =
     &["TOUCHES", "VITESSE", "AFFICHAGE", "ROTATION", "ZOOM", "PIXELS", "FILTRE", "FPS", "OVERCLOCK"];
 const PROFILE_ROWS: &[&str] = &["PSEUDO"];
 const HELP_ROWS: &[&str] = &["BUG", "IDEE"];
+const ABOUT_ROWS: &[&str] = &["MAJ"];
 
 /// The languages, three to a row.
 const LANG_COLS: usize = 3;
@@ -160,7 +162,7 @@ fn column_input(s: &mut State, button: &str, section: SetSection) {
             s.view_focus = None;
             s.screen = Screen::Settings { section, in_pane: true, row: entry_row(section) };
         }
-        // À propos has only things to read: A has nothing to do, and says
+        // A section with nothing to go into: A has nothing to do, and says
         // nothing.
         "A" => crate::sfx::hush(),
         _ => {}
@@ -310,6 +312,7 @@ fn row_a(s: &mut State, section: SetSection, key: &str) {
                 s.screen = Screen::BugPicker { selection: 0, scroll_offset: 0 };
             }
         }
+        (SetSection::About, "MAJ") => update_flow::about_row_a(s),
         _ => {}
     }
 }
@@ -939,6 +942,9 @@ pub(crate) fn draw_settings(
         (Icon::Power, u.row_quit),
     ];
     let mut cells = backend.settings_nav(&entries, section.index(), column && !under);
+    if crate::updater::badge() {
+        backend.settings_nav_dot(SetSection::About.index());
+    }
     let pane_key = match body {
         Body::Section { .. } => section.index() as u32,
         Body::Folders { .. } => 0x100,
@@ -967,7 +973,7 @@ pub(crate) fn draw_settings(
                 }
                 SetSection::Profile => profile_pane(backend, focus, &mut cells, &mut hints),
                 SetSection::Help => help_pane(backend, focus, game_count, &mut cells, &mut hints),
-                SetSection::About => about_pane(backend, logo),
+                SetSection::About => about_pane(backend, logo, focus, &mut cells, &mut hints),
                 SetSection::Quit => quit_pane(backend),
             }
         }
@@ -1033,8 +1039,6 @@ fn column_hints(section: SetSection) -> std::vec::Vec<HintItem<'static>> {
     let u = crate::loc_ui::ui();
     match section {
         SetSection::Quit => std::vec![(&[Btn::A][..], u.quit)],
-        // Only things to read: A has nothing to do.
-        SetSection::About => std::vec::Vec::new(),
         _ => std::vec![(&[Btn::A][..], u.open)],
     }
 }
@@ -1460,9 +1464,17 @@ fn help_pane(
     };
 }
 
-/// À propos: the version, who made FlashNX and under which licence, what it
-/// is built on, and where its games come from.
-fn about_pane(b: &mut SwitchRenderBackend, logo: (u32, u32, u32)) {
+/// À propos: the version, whether a newer one exists (the one row the cursor
+/// goes to), who made FlashNX and under which licence, what it is built on,
+/// and where its games come from.
+fn about_pane(
+    b: &mut SwitchRenderBackend,
+    logo: (u32, u32, u32),
+    focus: Option<usize>,
+    cells: &mut std::vec::Vec<(f32, f32, f32, f32)>,
+    hints: &mut std::vec::Vec<HintItem<'static>>,
+) {
+    use crate::updater::Check;
     let u = crate::loc_ui::ui();
     let top = b.settings_title(u.sec_about, None);
     let version = u.about_version.replacen("{}", crate::bugreport::APP_VERSION, 1);
@@ -1470,6 +1482,34 @@ fn about_pane(b: &mut SwitchRenderBackend, logo: (u32, u32, u32)) {
     // every language, like the credit in the footer band.
     let by = u.about_by.replacen("{}", "Jonathan8520", 1);
     let y = b.settings_about_header(top + 4.0, logo, &version, &by);
+    // The update row: what the check found, and A to act on it.
+    let installed = crate::updater::installed();
+    let check = crate::updater::status();
+    let state = match (&installed, &check) {
+        (Some(v), _) => u.upd_ready.replacen("{}", v, 1),
+        (None, Check::Available(r)) => u.upd_new.replacen("{}", &r.version, 1),
+        (None, Check::Running) => u.upd_checking.to_string(),
+        (None, Check::UpToDate) => u.upd_latest.to_string(),
+        (None, Check::NotYet | Check::Failed) => u.upd_unknown.to_string(),
+    };
+    let fresh = installed.is_some() || matches!(check, Check::Available(_));
+    let row = [Row::new(Icon::CloudDownload, u.upd_row)
+        .value(&state)
+        .mark_if(fresh, Icon::CloudDownload, ui_col::GOLD)
+        .opens_if(fresh)];
+    let glide = pane_glide(SetSection::About);
+    let (c, y, _) = b.settings_block(y + 14.0, &row, focus.map(|_| 0), glide);
+    cells.extend(c);
+    let y = b.settings_note(y + 8.0, u.upd_help, 2);
+    *hints = match focus {
+        Some(_) if installed.is_some() => std::vec![(&[Btn::A][..], u.upd_restart), (&[Btn::B][..], u.back)],
+        Some(_) if matches!(check, Check::Available(_)) => {
+            std::vec![(&[Btn::A][..], u.install), (&[Btn::B][..], u.back)]
+        }
+        Some(_) if matches!(check, Check::Running) => std::vec![(&[Btn::B][..], u.back)],
+        Some(_) => std::vec![(&[Btn::A][..], u.upd_check), (&[Btn::B][..], u.back)],
+        None => std::vec::Vec::new(),
+    };
     let fp_logo = b.fp_logo();
     let rows = [
         Row::new(Icon::Code, u.about_source).value("github.com/Jonathan8520/FlashNX"),
@@ -1484,7 +1524,7 @@ fn about_pane(b: &mut SwitchRenderBackend, logo: (u32, u32, u32)) {
         // beside the logo itself.
         Row::new(Icon::Image, u.about_fp_logo).image(fp_logo).value("Flashpoint Archive (CC BY 4.0)"),
     ];
-    b.settings_block(y + 14.0, &rows, None, pane_glide(SetSection::About));
+    b.settings_block(y + 14.0, &rows, None, glide);
 }
 
 /// Quitter: what it does, beside the entry that does it.

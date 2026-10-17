@@ -157,6 +157,7 @@ extern "C" const char* swf_picker_embedded_swf(void);
 extern "C" int ruffle_is_applet_mode(void);
 extern "C" void https_thumb_stop(void);
 extern "C" void https_job_stop(void);
+extern "C" void flashnx_update_check_stop(void); // updater.cpp
 // swf_picker.cpp: a deleted game's companion folder is emptied in the background.
 extern "C" void swf_picker_trash_start(void);
 extern "C" void swf_picker_trash_pause(void);
@@ -1273,6 +1274,104 @@ static void remember_own_path(const char* self_nro) {
     std::fclose(f);
     std::printf("tiles: FlashNX runs from %s, noted in %s for the HOME Menu tiles\n", path, note);
     std::fflush(stdout);
+}
+
+// FlashNX's own file and arguments, for an update to replace the file and start
+// it again (rust/src/updater.rs). Empty when argv[0] is not a file on the card,
+// and in a self-contained build (#106), which is never updated in place.
+static char g_self_nro[512];
+static char g_self_args[2048];
+// An update asked to start FlashNX again on the way out (see the end of main).
+static bool g_restart_requested = false;
+
+static void remember_self(int argc, char** argv) {
+    if (argc < 1 || !argv[0] || !argv[0][0]) return;
+    const char* a0 = argv[0];
+    char path[sizeof(g_self_nro)];
+    if (a0[0] == '/') {
+        std::snprintf(path, sizeof(path), "sdmc:%s", a0);
+    } else if (std::strncmp(a0, "sdmc:/", 6) == 0) {
+        std::snprintf(path, sizeof(path), "%s", a0);
+    } else {
+        return;
+    }
+    struct stat st;
+    if (::stat(path, &st) != 0) return;
+    std::snprintf(g_self_nro, sizeof(g_self_nro), "%s", path);
+    // The same arguments again, each quoted (a path can hold spaces), so a tile
+    // started again is still a tile and a game started again is that game.
+    size_t n = (size_t)std::snprintf(g_self_args, sizeof(g_self_args), "\"%s\"", path);
+    for (int i = 1; i < argc && n < sizeof(g_self_args); ++i) {
+        if (!argv[i] || std::strchr(argv[i], '"')) continue;
+        n += (size_t)std::snprintf(g_self_args + n, sizeof(g_self_args) - n, " \"%s\"", argv[i]);
+    }
+}
+
+// FlashNX's own `.nro` (`sdmc:/...`) into `out`: its length, 0 when unknown.
+extern "C" int flashnx_self_nro(char* out, int cap) {
+    const int n = (int)std::strlen(g_self_nro);
+    if (n == 0 || !out || cap <= n) return 0;
+    std::memcpy(out, g_self_nro, (size_t)n + 1);
+    return n;
+}
+
+// 1 when FlashNX can start itself again on the way out: the loader that started
+// it (hbmenu's nx-hbloader, a tile's forwarder) reads a next path to load.
+extern "C" int flashnx_restart_supported(void) {
+    return (g_self_nro[0] != 0 && envHasNextLoad()) ? 1 : 0;
+}
+
+extern "C" char* fake_heap_start;
+extern "C" char* fake_heap_end;
+extern "C" void __appExit(void);
+extern "C" void NX_NORETURN __nx_exit(Result rc, LoaderReturnFn retaddr);
+
+// libnx's own `__libnx_exit` (runtime/init.c), with one step added for an
+// update's restart: the heap is wiped before the loader gets it back.
+//
+// The FlashNX started next gets the very same heap from the loader, and
+// newlib's calloc takes memory fresh from sbrk to be zero already (its
+// MORECORE_CLEARS). From the kernel it is, and after hbmenu it nearly is,
+// hbmenu being small. After a FlashNX it is gigabytes of the last run's data:
+// the restarted FlashNX died inside malloc while Mesa compiled its first
+// shaders, on structures calloc had handed over full of old pointers
+// (2026-10-17, "the software was closed because an error occurred", no
+// Atmosphère report, a DataAbort in ruffle-crash.log). dlmalloc assumes the
+// same of the big blocks it is given.
+//
+// After __appExit, so every service is closed and nothing frees into the heap
+// once it is wiped. Only what is mapped read-write is touched: memory still
+// lent to a service would fault.
+extern "C" void NX_NORETURN __libnx_exit(int rc) {
+    (void)rc;
+    __appExit();
+    if (g_restart_requested) {
+        uintptr_t a = (uintptr_t)fake_heap_start;
+        const uintptr_t end = (uintptr_t)fake_heap_end;
+        while (a < end) {
+            MemoryInfo info;
+            u32 page = 0;
+            if (R_FAILED(svcQueryMemory(&info, &page, a)) || info.size == 0) break;
+            const uintptr_t lo = a;
+            uintptr_t hi = (uintptr_t)(info.addr + info.size);
+            if (hi > end) hi = end;
+            if ((info.perm & Perm_Rw) == Perm_Rw && hi > lo) {
+                std::memset((void*)lo, 0, hi - lo);
+            }
+            a = hi;
+        }
+    }
+    __nx_exit(0, envGetExitFuncPtr());
+}
+
+// Ask the loader to start FlashNX again once it exits. 1 when the loader took it.
+extern "C" int flashnx_request_restart(void) {
+    if (!g_self_nro[0] || !envHasNextLoad()) return 0;
+    if (R_FAILED(envSetNextLoad(g_self_nro, g_self_args))) return 0;
+    g_restart_requested = true;
+    std::printf("update: FlashNX starts again from %s on exit\n", g_self_nro);
+    std::fflush(stdout);
+    return 1;
 }
 
 // True if `path` ends in ".swf" (case-insensitive). Recognises a forwarder
@@ -3299,6 +3398,7 @@ int main(int argc, char** argv) {
     if (!embedded_swf) {
         register_sphaira_assoc(argc > 0 ? argv[0] : nullptr);
         remember_own_path(argc > 0 ? argv[0] : nullptr);
+        remember_self(argc, argv);
     }
     std::printf("boot: main() pre-worker done at %.0f ms\n", boot_ms_since(g_boot_t0));
     std::fflush(stdout);
@@ -3337,6 +3437,7 @@ int main(int argc, char** argv) {
     // be using still exist.
     https_thumb_stop();
     https_job_stop();
+    flashnx_update_check_stop();
     ruffle_log_cstr("teardown: network threads stopped\n");
     // And the trash's, after the file it is on; the rest waits for next time.
     swf_picker_trash_stop();
@@ -3360,7 +3461,10 @@ int main(int argc, char** argv) {
     // FlashNX's own tile counts too: quitting from Settings after it had opened
     // the library put up the same error, because only a tile that named a game
     // set this.
-    if (forwarder_swf || launched_by_tile) {
+    // Except when an update starts FlashNX again: the process does not end
+    // then, the tile's forwarder loads the new `.nro` into it the way hbmenu
+    // loads a game, and exit mode 1 would end it before that.
+    if ((forwarder_swf || launched_by_tile) && !g_restart_requested) {
         const AppletType type = appletGetAppletType();
         if (type == AppletType_Application || type == AppletType_SystemApplication) {
             __nx_applet_exit_mode = 1;

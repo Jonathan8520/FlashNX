@@ -38,6 +38,14 @@ use crate::backend::render::{SwitchRenderBackend, SCREEN_ITEMS};
 use crate::net::{self, RemoteFile};
 use crate::{keymap, menu};
 
+/// Where an update's windows were opened from, and go back to: the Play grid
+/// (the window offered on its own) or the À propos row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpdFrom {
+    Gallery { selection: usize, scroll: usize },
+    About,
+}
+
 /// Currently displayed library screen. `Inactive` is set before
 /// `ruffle_library_init` runs and after the user has picked a game.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,6 +202,13 @@ pub(crate) enum Screen {
     /// assumed: one screen serves both flows, and dismissing a suggestion once
     /// landed the cursor on the row above the button just pressed (#113).
     SendFailed { row: usize, selection: usize },
+    /// FlashNX's own update (`crate::updater`): offered in a window over the
+    /// page it came from, Plus tard (0) or Installer (1); downloaded on a page
+    /// of its own; then the window saying it is in place, Plus tard (0) or
+    /// Redémarrer (1). `from` is where each of them goes back to.
+    UpdateOffer { selection: usize, from: UpdFrom },
+    UpdateWorking { from: UpdFrom },
+    UpdateDone { selection: usize, from: UpdFrom },
     /// The Touches et curseur page (#20 regroup): everything controls-related
     /// for a game in one place. `selection` is a row of `menu::TouchesRow`:
     /// edit, apply, share, the revert row when `State::touches_can_revert`, then
@@ -384,6 +399,7 @@ pub(crate) use options_panel::{opt_row, OPTIONS_ENTRIES};
 mod settings_tab;
 pub(crate) use settings_tab::{menu_path, SetSection};
 use settings_tab::settings_at;
+mod update_flow;
 
 /// Top-level navbar tabs (v1.2.0), switched with the L/R shoulder buttons.
 /// Each maps to a "home" screen. The navbar is drawn on every tab-home screen;
@@ -4231,6 +4247,12 @@ fn set_screen_selection(s: &mut State, idx: usize) -> bool {
         Screen::SendFailed { row, selection } => {
             put!(selection, Screen::SendFailed { row, selection: idx })
         }
+        Screen::UpdateOffer { selection, from } => {
+            put!(selection, Screen::UpdateOffer { selection: idx, from })
+        }
+        Screen::UpdateDone { selection, from } => {
+            put!(selection, Screen::UpdateDone { selection: idx, from })
+        }
         Screen::GamesDirPicker { selection, scroll } => {
             // Past the rows: the crumb and the column (`subpage_tap`).
             let rows = 1 + browse_parent(&s.dir_path).is_some() as usize + s.dir_browse.len();
@@ -5535,6 +5557,18 @@ fn input_inner(button: &str) -> bool {
         Screen::SendFailed { row, .. } => {
             // A on Réessayer is hoisted (a network call); the rest is here.
             settings_tab::handle_send_failed_input(&mut s, button, row);
+            true
+        }
+        Screen::UpdateOffer { selection, from } => {
+            update_flow::offer_input(&mut s, button, selection, from);
+            true
+        }
+        Screen::UpdateWorking { from } => {
+            update_flow::working_input(&mut s, button, from);
+            true
+        }
+        Screen::UpdateDone { selection, from } => {
+            update_flow::done_input(&mut s, button, selection, from);
             true
         }
         Screen::TouchesMenu { game_idx, selection } => {
@@ -11206,7 +11240,14 @@ fn fp_activate(s: &mut State, selection: usize, scroll: usize) {
         }
     };
     s.import_retry = Some(RetryAction::FpGame { selection, scroll });
-    match net::start_download(&url, &out_path) {
+    // A GameZIP is extracted beside itself: the room checked once its size is
+    // known is twice that size.
+    let started = if fp_direct {
+        net::start_download(&url, &out_path)
+    } else {
+        net::start_download_unpacked(&url, &out_path)
+    };
+    match started {
         Ok(()) => {
             note_download_started();
             s.download_file_name = swf_name;
@@ -12390,6 +12431,9 @@ fn modal_kind(screen: Screen) -> u8 {
         Screen::GamesDirConfirm { .. } => 20,
         // A report the relay did not take, asked over the page.
         Screen::SendFailed { .. } => 23,
+        // FlashNX's own update: its two windows (the download is a page).
+        Screen::UpdateOffer { .. } => 28,
+        Screen::UpdateDone { .. } => 29,
         _ => 0,
     }
 }
@@ -12581,6 +12625,10 @@ fn maybe_arm_startup_migrations() {
     if CHECKED.swap(true, Ordering::Relaxed) {
         return;
     }
+    // A GameZIP download cut short by a power-off leaves its zip behind, up to
+    // gigabytes, until the next GameZIP download overwrites it. Nothing can be
+    // downloading yet on the first frame.
+    let _ = std::fs::remove_file(std::format!("{}/.fpdl.zip", primary_root()));
     let has = |name: &str| {
         crate::sources::gamezip::read_file_bounded(&primary_user_path(name), 4).is_some()
     };
@@ -13054,6 +13102,10 @@ fn drive_download(backend: &mut SwitchRenderBackend, tick: bool) {
         if tick {
             match net::tick_download() {
                 Ok(false) => {}
+                // The card is full: every file after this one would fail the
+                // same way, and a game missing them may not start. Nothing of it
+                // stays, and the page says why.
+                Err(f) if f.card => abort_import_for_card(&f.msg),
                 // Done OR errored: a failed file is skipped (the game may still
                 // partly work, and the mirror can serve it at play time), the
                 // queue carries on / finalizes.
@@ -13080,6 +13132,27 @@ fn drive_download(backend: &mut SwitchRenderBackend, tick: bool) {
             }
         }
     }
+}
+
+/// A multi-file game whose companion files no longer fit: remove what this
+/// import wrote (the game's `.swf` and its `.files/` folder) and show `msg`.
+fn abort_import_for_card(msg: &str) {
+    let Ok(mut s) = LIBRARY.lock() else { return };
+    let swf_path = s.download_zip_extract.clone().unwrap_or_else(|| s.download_out_path.clone());
+    if !swf_path.is_empty() {
+        let files_dir = crate::sidecar_dir_for(Some(&swf_path)).to_string_lossy().into_owned();
+        log(&std::format!("library: card full during {}'s files -> removing it\n", swf_path));
+        let _ = std::fs::remove_file(&swf_path);
+        let _ = std::fs::remove_dir_all(&files_dir);
+        crate::sd::commit();
+    }
+    let name = s
+        .download_title
+        .clone()
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| pretty_name(&s.download_file_name));
+    import_error(&mut s, ErrKind::Download, msg, false, &name);
+    clear_download_state(&mut s);
 }
 
 /// The importer's error page, from the state: what failed (the title), on what
@@ -13271,6 +13344,8 @@ pub fn render(backend: &mut SwitchRenderBackend) {
         // A move the app was closed in the middle of goes on (once a launch).
         resume_interrupted_move();
         drive_pending_move();
+        // FlashNX's own update: the check, its window, its download.
+        update_flow::drive();
         net::set_wait_frame(None);
         WAIT_BACKEND.store(core::ptr::null_mut(), Ordering::Relaxed);
     }
@@ -13700,6 +13775,17 @@ pub fn render(backend: &mut SwitchRenderBackend) {
                 _ => menu::draw(backend, now),
             }
         }
+        Screen::UpdateOffer { from, .. } | Screen::UpdateDone { from, .. } => {
+            // A window over the page it came up over (the Play grid, or the
+            // RÉGLAGES tab on À propos), still and taking no taps.
+            backend.clear_ui_transform();
+            crate::backend::render::set_ui_screen_kind(0);
+            update_flow::draw_behind(backend, from, anim_origin, (&dir_path, &dir_browse), game_count);
+            crate::backend::render::set_ui_screen_kind(ui_kind);
+            backend.set_ui_modal_scale(if modal_active { modal_scale } else { 1.0 });
+            update_flow::draw_window(backend, screen);
+        }
+        Screen::UpdateWorking { .. } => update_flow::draw_page(backend),
         Screen::GamesDirMoving => {
             // Drawn for every frame of the move: where from, where to, and a
             // real count, not a spinner that says only "something is
@@ -14187,7 +14273,7 @@ fn extract_gamezip_main(
     swf_path: &str,
     launch_command: &str,
     backend: &mut SwitchRenderBackend,
-) -> Option<(std::string::String, std::vec::Vec<u8>)> {
+) -> Result<(std::string::String, std::vec::Vec<u8>), std::string::String> {
     // No whole-archive read: `extract_gamezip_tree` now STREAMS the ZIP straight
     // off the SD card, one entry at a time (see its docs), so a multi-GB GameZIP
     // (Super Smash Flash 2 ~3.4 GB) extracts within the ~3.2 GB heap instead of
@@ -14247,18 +14333,26 @@ fn extract_gamezip_main(
             launch_command,
             &mut draw_progress,
         ) {
-            Some(v) => v,
-            None => {
-                // No SWF produced (empty/corrupt zip, or every entry over the
-                // per-entry cap). Wipe the partial tree so a failed multi-GB
+            Ok(v) => v,
+            Err(why) => {
+                // No game produced. Wipe the partial tree so a failed multi-GB
                 // extraction doesn't strand gigabytes on the SD card.
+                use crate::sources::gamezip::ExtractFail;
                 let _ = std::fs::remove_dir_all(&files_dir);
-                return None;
+                return Err(match why {
+                    ExtractFail::NoSwf => crate::loc_ui::ui().imp_err_fp_no_swf.to_string(),
+                    ExtractFail::NoSpace(size, need, free) => crate::loc::err_sd_space(size, need, free),
+                    ExtractFail::Write => crate::loc::s().err_sd_write.to_string(),
+                });
             }
         };
     if std::fs::write(swf_path, &swf).is_err() {
+        // The tree is no use without its game, and the card that refused this
+        // write is the one it fills.
         log("library: gamezip .swf write failed\n");
-        return None;
+        let _ = std::fs::remove_file(swf_path);
+        let _ = std::fs::remove_dir_all(&files_dir);
+        return Err(crate::loc::s().err_sd_write.to_string());
     }
     crate::sd::commit();
     log(&std::format!(
@@ -14267,7 +14361,7 @@ fn extract_gamezip_main(
         swf.len(),
         files_dir,
     ));
-    Some((entry_name, swf))
+    Ok((entry_name, swf))
 }
 
 /// Pop the next companion name and start its download into `<files-dir>/<name>`
@@ -14628,14 +14722,17 @@ fn on_download_finished(backend: &mut SwitchRenderBackend) {
     // Flashpoint GameZIP: the downloaded file is a `.zip`; extract its `.swf`
     // to `swf_path` and add THAT (not the zip), then delete the temp zip.
     if let Some(swf_path) = zip_extract {
-        let Some((entry_name, swf)) = extract_gamezip_main(&out_path, &swf_path, &launch_command, backend) else {
-            let _ = std::fs::remove_file(&out_path);
-            if let Ok(mut s) = LIBRARY.lock() {
-                let name = s.download_title.clone().unwrap_or_else(|| pretty_name(&file_name));
-                import_error(&mut s, ErrKind::Download, crate::loc_ui::ui().imp_err_fp_no_swf, false, &name);
-                clear_download_state(&mut s);
+        let (entry_name, swf) = match extract_gamezip_main(&out_path, &swf_path, &launch_command, backend) {
+            Ok(v) => v,
+            Err(msg) => {
+                let _ = std::fs::remove_file(&out_path);
+                if let Ok(mut s) = LIBRARY.lock() {
+                    let name = s.download_title.clone().unwrap_or_else(|| pretty_name(&file_name));
+                    import_error(&mut s, ErrKind::Download, &msg, false, &name);
+                    clear_download_state(&mut s);
+                }
+                return;
             }
-            return;
         };
         let _ = std::fs::remove_file(&out_path);
         // HTML-wrapped game: the launchCommand pointed at the `index.html`

@@ -4,8 +4,14 @@ Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://
 
 ## Unreleased
 
+### Added
+
+- **FlashNX updates itself.** When it starts with a connection, FlashNX asks GitHub for a newer version. A new one is offered once, in a window over the Play grid; after that, a dot on Settings and the Update row in About lead to it. Installing downloads `FlashNX.nro` next to the running one, checks it against the SHA-256 GitHub publishes for it, and only then puts it in place; Restart starts the new version at once, from the Homebrew Menu or from a HOME Menu icon. Nothing is downloaded or installed until you press A, and a game made into its own app keeps the version it was made with.
+
 ### Fixed
 
+- **Downloads that do not fit on the SD card** stop as soon as their size is known, saying how much to free up, instead of filling the card first. A Flashpoint game is checked for twice its size, because its archive is unpacked next to itself, and its contents are checked again before unpacking.
+- **A card that fills during a download** no longer leaves a cut-off game announced as downloaded: the last part of every file is checked, unpacking stops at the first refused write and removes what it wrote, a game whose extra files no longer fit is removed and says why, and the message names the full card instead of "The downloaded game holds no .swf file". A Flashpoint archive left behind by a download cut short is removed at the next start.
 - **HOME Menu icons on a console without signature patches** (#129). Installing an icon used to succeed there and leave a tile that refused to start. FlashNX now checks that the console accepts the tile before adding it, and otherwise says that it needs signature patches (sys-patch), leaving nothing on the home screen.
 - **HOME Menu icons when FlashNX is not in `/switch/FlashNX/`.** A tile only looked for `sdmc:/switch/FlashNX/FlashNX.nro` and failed to start (2346-0003) when the `.nro` was somewhere else, such as straight in `/switch/`. FlashNX now notes where it was started from, and tiles look there when the usual place is empty. Icons installed by 2.0.0 keep the old behaviour until they are installed again (turn "Icon on the HOME Menu" off and on in the game's options).
 

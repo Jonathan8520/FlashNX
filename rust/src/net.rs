@@ -26,6 +26,9 @@ extern "C" {
     fn https_last_curl_code() -> c_int;
     fn https_last_http_code() -> c_int;
     fn https_download_start(url: *const c_char, out_path: *const c_char) -> c_int;
+    fn https_download_start_ex(url: *const c_char, out_path: *const c_char, unpack: c_int) -> c_int;
+    fn https_download_space(size: *mut u64, need: *mut u64, free: *mut u64);
+    fn flashnx_sd_free_bytes() -> i64;
     fn https_download_tick() -> c_int;
     fn https_download_progress(done_out: *mut u64, total_out: *mut u64);
     fn https_download_cancel();
@@ -216,13 +219,22 @@ pub(crate) enum Sink {
 pub struct Failure {
     pub msg: std::string::String,
     pub retry: bool,
+    /// The card is full or refused the write: every later file of the same
+    /// import would fail the same way, so the import stops instead of skipping.
+    pub card: bool,
 }
 
 impl Failure {
     /// A failure that the same request will meet again.
     fn lasting(msg: &str) -> Self {
-        Failure { msg: std::string::String::from(msg), retry: false }
+        Failure { msg: std::string::String::from(msg), retry: false, card: false }
     }
+}
+
+/// Free space on the SD card, None when the card cannot say.
+pub(crate) fn sd_free_bytes() -> Option<u64> {
+    let n = unsafe { flashnx_sd_free_bytes() };
+    (n >= 0).then_some(n as u64)
 }
 
 /// The most SPECIFIC message we can give for the last transfer failure. One
@@ -280,7 +292,7 @@ pub(crate) fn https_failure(sink: Sink) -> Failure {
         // diagnosable.
         _ => (crate::loc::err_https(&last_https_error()), true),
     };
-    Failure { msg, retry }
+    Failure { msg, retry, card: curl == 23 && sink == Sink::Sd }
 }
 
 /// Generic synchronous HTTPS GET into a freshly-allocated buffer; returns the
@@ -416,7 +428,7 @@ fn parse_archive_metadata(buf: &[u8], item_id: &str) -> Result<std::vec::Vec<Rem
     // A garbled answer, which the next one may well not be.
     let json: serde_json::Value = serde_json::from_slice(buf).map_err(|e| {
         log(&std::format!("net: JSON parse failed: {}\n", e));
-        Failure { msg: crate::loc::err_json(&e.to_string()), retry: true }
+        Failure { msg: crate::loc::err_json(&e.to_string()), retry: true, card: false }
     })?;
     // archive.org answers an identifier it does not know with `{}` and HTTP
     // 200, so a typo in an address arrives here, not as a 404: say that, rather
@@ -669,13 +681,25 @@ pub(crate) fn url_encode_path(s: &str) -> std::string::String {
 /// Start an async download. The C++ side sets up a curl multi handle;
 /// subsequent calls to `download_tick` pump it without blocking.
 pub fn start_download(url: &str, out_path: &str) -> Result<(), std::string::String> {
+    start_download_with(url, out_path, false)
+}
+
+/// `start_download` for a GameZIP, which is extracted beside itself before it
+/// is deleted: the room checked for is twice its size.
+pub fn start_download_unpacked(url: &str, out_path: &str) -> Result<(), std::string::String> {
+    start_download_with(url, out_path, true)
+}
+
+fn start_download_with(url: &str, out_path: &str, unpack: bool) -> Result<(), std::string::String> {
     offline_check()?;
-    let mut url_c = url.as_bytes().to_vec();
-    url_c.push(0);
-    let mut path_c = out_path.as_bytes().to_vec();
-    path_c.push(0);
+    let url_c = cstr(url);
+    let path_c = cstr(out_path);
     let rc = unsafe {
-        https_download_start(url_c.as_ptr() as *const c_char, path_c.as_ptr() as *const c_char)
+        if unpack {
+            https_download_start_ex(url_c.as_ptr() as *const c_char, path_c.as_ptr() as *const c_char, 1)
+        } else {
+            https_download_start(url_c.as_ptr() as *const c_char, path_c.as_ptr() as *const c_char)
+        }
     };
     if rc != 0 {
         return Err(crate::loc::err_dl_start(rc));
@@ -701,7 +725,13 @@ pub fn tick_download() -> Result<bool, Failure> {
         log(&std::format!("net: download failed: {}\n", last_https_error()));
         return Err(https_failure(Sink::Sd));
     }
-    Err(Failure { msg: crate::loc::err_dl_failed(rc), retry: true })
+    // Stopped as soon as its size was known: it would not have fit.
+    if rc == -6 {
+        let (mut size, mut need, mut free) = (0u64, 0u64, 0u64);
+        unsafe { https_download_space(&mut size, &mut need, &mut free) };
+        return Err(Failure { msg: crate::loc::err_sd_space(size, need, free), retry: false, card: true });
+    }
+    Err(Failure { msg: crate::loc::err_dl_failed(rc), retry: true, card: false })
 }
 
 /// Current bytes downloaded / total bytes (0 until the Content-Length

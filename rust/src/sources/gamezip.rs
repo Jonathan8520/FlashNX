@@ -945,6 +945,45 @@ fn fallback_rank(entry_name: &str, launch_file: Option<&str>) -> u8 {
     }
 }
 
+/// Why an extraction produced no game.
+pub enum ExtractFail {
+    /// Nothing usable in the archive: no `.swf`, a corrupt zip, or every entry
+    /// over the per-entry cap.
+    NoSwf,
+    /// The contents do not fit on the card beside the zip: (the zip's size,
+    /// needed, free) bytes.
+    NoSpace(u64, u64, u64),
+    /// The card refused a write part-way (full, or write-protected).
+    Write,
+}
+
+/// Kept free on top of what an extraction writes (net.cpp `SPACE_MARGIN`).
+const SPACE_MARGIN: u64 = 8 * 1024 * 1024;
+
+/// What extracting the archive will write: the unpacked size of every entry,
+/// read from the local headers alone, stopping where the extraction stops.
+fn unpacked_size(f: &mut std::fs::File, file_len: u64) -> u64 {
+    let mut header = [0u8; 30];
+    let mut off: u64 = 0;
+    let mut total: u64 = 0;
+    while off + 30 <= file_len {
+        if !read_at(f, off, &mut header) || &header[0..4] != b"PK\x03\x04" {
+            break;
+        }
+        let flags = u16::from_le_bytes([header[6], header[7]]);
+        let csize = u32::from_le_bytes([header[18], header[19], header[20], header[21]]);
+        let usize_ = u32::from_le_bytes([header[22], header[23], header[24], header[25]]);
+        let nlen = u16::from_le_bytes([header[26], header[27]]) as u64;
+        let elen = u16::from_le_bytes([header[28], header[29]]) as u64;
+        if flags & 0x0008 != 0 || csize == 0xFFFF_FFFF || usize_ == 0xFFFF_FFFF {
+            break;
+        }
+        total += usize_ as u64;
+        off += 30 + nlen + elen + csize as u64;
+    }
+    total
+}
+
 /// `on_progress(consumed, total)` is called once per entry, in bytes of the ZIP
 /// walked so far. It exists because this function BLOCKS for as long as the
 /// download did on a big game: Super Smash Flash 2 is 3.1 GB of archive, and the
@@ -961,14 +1000,26 @@ pub fn extract_gamezip_tree(
     files_dir: &str,
     launch_command: &str,
     on_progress: &mut dyn FnMut(u64, u64),
-) -> Option<(std::vec::Vec<u8>, std::string::String)> {
+) -> Result<(std::vec::Vec<u8>, std::string::String), ExtractFail> {
     // STREAMED extraction: walk the GameZIP's local file headers straight off the
     // SD card, holding only ONE entry's bytes in RAM at a time. The whole archive
     // is never read into memory, so a multi-GB GameZIP (e.g. Super Smash Flash 2
     // ~3.4 GB) extracts within the Switch's ~3.2 GB heap. (The old path read the
     // entire zip into a Vec, capped at 512 MB — anything bigger silently failed.)
-    let mut f = std::fs::File::open(zip_path).ok()?;
-    let file_len = f.seek(SeekFrom::End(0)).ok()?;
+    let mut f = std::fs::File::open(zip_path).map_err(|_| ExtractFail::NoSwf)?;
+    let file_len = f.seek(SeekFrom::End(0)).map_err(|_| ExtractFail::NoSwf)?;
+
+    // The zip stays on the card until the extraction is done, so its contents
+    // have to fit beside it. Checked before the first write, because a card
+    // that filled part-way used to keep extracting for minutes, leave gigabytes
+    // of half a game behind and then say the archive held no game.
+    if let Some(free) = net::sd_free_bytes() {
+        let need = unpacked_size(&mut f, file_len) + SPACE_MARGIN;
+        if need > free {
+            net::log(&std::format!("extract: {} bytes to write, {} free -> not extracting\n", need, free));
+            return Err(ExtractFail::NoSpace(file_len, need, free));
+        }
+    }
 
     // Decode the launch entry up front so it matches the zip's literal (decoded)
     // entry names; the comparison below decodes each entry name too (robust to a
@@ -1003,7 +1054,6 @@ pub fn extract_gamezip_tree(
 
     let mut entries = 0usize;
     let mut written = 0usize;
-    let mut failed = 0usize;
     let mut inflate_fail = 0usize;
 
     let mut header = [0u8; 30];
@@ -1087,7 +1137,13 @@ pub fn extract_gamezip_tree(
                             crate::sd::commit();
                         }
                     } else {
-                        failed += 1;
+                        // Every entry after this one would fail the same way:
+                        // stop here instead of inflating the rest for nothing.
+                        net::log(&std::format!(
+                            "extract: {} entries, {} written, stopped at a refused write\n",
+                            entries, written,
+                        ));
+                        return Err(ExtractFail::Write);
                     }
                     if is_swf && launch_swf.is_none() {
                         let rank = fallback_rank(&name, launch_file.as_deref());
@@ -1108,8 +1164,8 @@ pub fn extract_gamezip_tree(
         off = next_off;
     }
     net::log(&std::format!(
-        "extract: {} entries, {} written, {} write-failed, {} inflate-failed\n",
-        entries, written, failed, inflate_fail,
+        "extract: {} entries, {} written, {} inflate-failed\n",
+        entries, written, inflate_fail,
     ));
     if launch_swf.is_none() {
         if let Some((bytes, name, rank)) = &fallback_swf {
@@ -1122,7 +1178,7 @@ pub fn extract_gamezip_tree(
             ));
         }
     }
-    launch_swf.or_else(|| fallback_swf.map(|(b, n, _)| (b, n)))
+    launch_swf.or_else(|| fallback_swf.map(|(b, n, _)| (b, n))).ok_or(ExtractFail::NoSwf)
 }
 
 // ── Multi-file games: companion SWF fetch ─────────────────────────────────────

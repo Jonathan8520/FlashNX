@@ -498,6 +498,13 @@ pub struct Strings {
     pub err_response_big: &'static str,
     /// A download failed WRITING to the SD card (full / unwritable).
     pub err_sd_write: &'static str,
+    /// A download or an update that does not fit on the card, said before it
+    /// fills it. {} = its size, then {} = what has to be freed up.
+    pub err_sd_space: &'static str,
+    /// An update asked for when none is known any more (or a build that cannot be updated in place).
+    pub upd_err_none: &'static str,
+    /// The downloaded update does not match the SHA-256 GitHub gives for it.
+    pub upd_err_corrupt: &'static str,
     /// The server answered an error status. {} = the HTTP code.
     pub err_http_status: &'static str,
     /// 429 / 5xx: the host is up but temporarily unable, which is a different
@@ -696,6 +703,9 @@ const EN: Strings = Strings {
     err_tls: "Secure connection refused. Check the console's date and time: a wrong clock breaks HTTPS.",
     err_response_big: "Response too large for this build. Try a narrower search.",
     err_sd_write: "Could not write to the SD card. It may be full or write-protected.",
+    err_sd_space: "Not enough space on the SD card for this download ({}): free up {}.",
+    upd_err_none: "There is no update to install.",
+    upd_err_corrupt: "The downloaded update is damaged. Try again.",
     err_http_status: "The server refused the request (HTTP {}). Try again later.",
     err_server_busy: "The server is overloaded (HTTP {}). Your link is fine, try again in a few minutes.",
     err_not_found: "Not found (404). The address is wrong, or the page was removed.",
@@ -870,6 +880,9 @@ const FR: Strings = Strings {
     err_tls: "Connexion sécurisée refusée. Vérifie la date et l'heure de la console\u{a0}: une horloge fausse casse le HTTPS.",
     err_response_big: "Réponse trop volumineuse. Essaie une recherche plus précise.",
     err_sd_write: "Écriture impossible sur la carte SD. Elle est peut-être pleine.",
+    err_sd_space: "Pas assez de place sur la carte SD pour ce téléchargement ({})\u{a0}: libère {}.",
+    upd_err_none: "Il n'y a pas de mise à jour à installer.",
+    upd_err_corrupt: "La mise à jour téléchargée est abîmée. Réessaie.",
     err_http_status: "Le serveur a refusé la requête (HTTP {}). Réessaie plus tard.",
     err_server_busy: "Le serveur est saturé (HTTP {}). Ton lien n'est pas en cause, réessaie dans quelques minutes.",
     err_not_found: "Introuvable (404). L'adresse est fausse, ou la page a été supprimée.",
@@ -1044,6 +1057,9 @@ const ES: Strings = Strings {
     err_tls: "Conexión segura rechazada. Comprueba la fecha y la hora de la consola: un reloj mal ajustado rompe HTTPS.",
     err_response_big: "Respuesta demasiado grande. Prueba una búsqueda más precisa.",
     err_sd_write: "No se pudo escribir en la tarjeta SD. Quizá esté llena.",
+    err_sd_space: "No hay espacio suficiente en la tarjeta SD para esta descarga ({}): libera {}.",
+    upd_err_none: "No hay ninguna actualización que instalar.",
+    upd_err_corrupt: "La actualización descargada está dañada. Inténtalo de nuevo.",
     err_http_status: "El servidor rechazó la petición (HTTP {}). Inténtalo más tarde.",
     err_server_busy: "El servidor está saturado (HTTP {}). Tu enlace está bien, inténtalo en unos minutos.",
     err_not_found: "No encontrado (404). La dirección es incorrecta o la página se eliminó.",
@@ -1219,6 +1235,9 @@ const RU: Strings = Strings {
     err_tls: "Защищённое соединение отклонено. Проверь дату и время консоли: неверные часы ломают HTTPS.",
     err_response_big: "Ответ слишком большой. Уточни запрос.",
     err_sd_write: "Не удалось записать на SD-карту. Возможно, она заполнена.",
+    err_sd_space: "Недостаточно места на SD-карте для этой загрузки ({}): освободи {}.",
+    upd_err_none: "Нет обновления для установки.",
+    upd_err_corrupt: "Загруженное обновление повреждено. Попробуй ещё раз.",
     err_http_status: "Сервер отклонил запрос (HTTP {}). Попробуй позже.",
     err_server_busy: "Сервер перегружен (HTTP {}). Ссылка верна, попробуй через несколько минут.",
     err_not_found: "Не найдено (404). Адрес неверный, или страница удалена.",
@@ -1394,6 +1413,9 @@ const DE: Strings = Strings {
     err_tls: "Sichere Verbindung abgelehnt. Prüfe Datum und Uhrzeit der Konsole: eine falsche Uhr bricht HTTPS.",
     err_response_big: "Antwort zu groß. Versuche eine genauere Suche.",
     err_sd_write: "Schreiben auf die SD-Karte fehlgeschlagen. Sie ist eventuell voll.",
+    err_sd_space: "Nicht genug Platz auf der SD-Karte für diesen Download ({}): Gib {} frei.",
+    upd_err_none: "Es gibt kein Update zu installieren.",
+    upd_err_corrupt: "Das heruntergeladene Update ist beschädigt. Versuch es noch einmal.",
     err_http_status: "Der Server hat die Anfrage abgelehnt (HTTP {}). Später erneut versuchen.",
     err_server_busy: "Der Server ist überlastet (HTTP {}). Dein Link ist in Ordnung, versuche es in ein paar Minuten erneut.",
     err_not_found: "Nicht gefunden (404). Die Adresse ist falsch, oder die Seite wurde entfernt.",
@@ -1569,6 +1591,9 @@ const IT: Strings = Strings {
     err_tls: "Connessione sicura rifiutata. Controlla data e ora della console: un orologio errato rompe l'HTTPS.",
     err_response_big: "Risposta troppo grande. Prova una ricerca più precisa.",
     err_sd_write: "Impossibile scrivere sulla scheda SD. Forse è piena.",
+    err_sd_space: "Spazio insufficiente sulla scheda SD per questo download ({}): libera {}.",
+    upd_err_none: "Non c'è nessun aggiornamento da installare.",
+    upd_err_corrupt: "L'aggiornamento scaricato è danneggiato. Riprova.",
     err_http_status: "Il server ha rifiutato la richiesta (HTTP {}). Riprova più tardi.",
     err_server_busy: "Il server è sovraccarico (HTTP {}). Il tuo link è corretto, riprova tra qualche minuto.",
     err_not_found: "Non trovato (404). L'indirizzo è sbagliato, oppure la pagina è stata rimossa.",
@@ -1744,6 +1769,9 @@ const PT: Strings = Strings {
     err_tls: "Conexão segura recusada. Verifique a data e a hora do console: um relógio errado quebra o HTTPS.",
     err_response_big: "Resposta muito grande. Tente uma busca mais precisa.",
     err_sd_write: "Não foi possível escrever no cartão SD. Talvez esteja cheio.",
+    err_sd_space: "Espaço insuficiente no cartão SD para este download ({}): libere {}.",
+    upd_err_none: "Não há atualização para instalar.",
+    upd_err_corrupt: "A atualização baixada está danificada. Tente de novo.",
     err_http_status: "O servidor recusou o pedido (HTTP {}). Tente mais tarde.",
     err_server_busy: "O servidor está sobrecarregado (HTTP {}). Seu link está certo, tente em alguns minutos.",
     err_not_found: "Não encontrado (404). O endereço está errado, ou a página foi removida.",
@@ -1920,6 +1948,9 @@ const ZH: Strings = Strings {
     err_tls: "安全连接被拒绝。请检查主机的日期和时间：时钟错误会导致 HTTPS 失败。",
     err_response_big: "响应过大。请使用更精确的搜索。",
     err_sd_write: "无法写入 SD 卡。可能已满或被写保护。",
+    err_sd_space: "SD 卡空间不足，无法下载（{}）：请释放 {}。",
+    upd_err_none: "没有可安装的更新。",
+    upd_err_corrupt: "下载的更新已损坏，请重试。",
     err_http_status: "服务器拒绝了请求 (HTTP {})。请稍后重试。",
     err_server_busy: "服务器过载 (HTTP {})。链接没有问题，请过几分钟再试。",
     err_not_found: "未找到 (404)。地址有误，或页面已被删除。",
@@ -2095,6 +2126,9 @@ const TR: Strings = Strings {
     err_tls: "Güvenli bağlantı reddedildi. Konsolun tarih ve saatini kontrol et: yanlış saat HTTPS'i bozar.",
     err_response_big: "Yanıt çok büyük. Daha dar bir arama dene.",
     err_sd_write: "SD karta yazılamadı. Dolu olabilir.",
+    err_sd_space: "SD kartta bu indirme ({}) için yeterli yer yok: {} yer aç.",
+    upd_err_none: "Yüklenecek bir güncelleme yok.",
+    upd_err_corrupt: "İndirilen güncelleme bozuk. Tekrar dene.",
     err_http_status: "Sunucu isteği reddetti (HTTP {}). Daha sonra dene.",
     err_server_busy: "Sunucu aşırı yüklü (HTTP {}). Bağlantı doğru, birkaç dakika sonra dene.",
     err_not_found: "Bulunamadı (404). Adres yanlış ya da sayfa kaldırılmış.",
@@ -2470,6 +2504,17 @@ pub fn err_json(detail: &str) -> std::string::String {
 }
 pub fn err_dl_start(code: i32) -> std::string::String {
     fill(s().err_dl_start, &code.to_string())
+}
+/// Not enough room on the card for a download of `size` bytes that needs
+/// `need` with `free` there. Said as the size the player was shown and what to
+/// free up: "21 MB needed" for a game shown as 6.4 MB read as a wrong figure,
+/// though it was right (a Flashpoint archive is unpacked beside itself, and a
+/// margin is kept).
+pub fn err_sd_space(size: u64, need: u64, free: u64) -> std::string::String {
+    use crate::backend::render::imp_size;
+    s().err_sd_space
+        .replacen("{}", &imp_size(size), 1)
+        .replacen("{}", &imp_size(need.saturating_sub(free).max(1)), 1)
 }
 pub fn err_dl_failed(code: i32) -> std::string::String {
     fill(s().err_dl_failed, &code.to_string())

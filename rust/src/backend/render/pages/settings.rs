@@ -342,6 +342,13 @@ impl SwitchRenderBackend {
         cells
     }
 
+    /// A gold dot at the end of entry `i` of the column (not Quitter): there is
+    /// something new in that section.
+    pub(crate) fn settings_nav_dot(&mut self, i: usize) {
+        let y = BODY_TOP + i as f32 * (NAV_ITEM_H + NAV_GAP);
+        self.kit_rrect(NAV_X + NAV_W - 24.0, y + NAV_ITEM_H * 0.5 - 4.0, 8.0, 8.0, 4.0, col::GOLD);
+    }
+
     /// The focus on its way between two parts of the page, over everything
     /// (see `FocusHandoff`); nothing once it has arrived. `on_section` is
     /// false on a page opened in the pane (the folder browser, a report's
