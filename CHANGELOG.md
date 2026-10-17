@@ -2,7 +2,9 @@
 
 Homebrew Flash player for Nintendo Switch (`.nro`), powered by [Ruffle](https://github.com/ruffle-rs/ruffle).
 
-## Unreleased
+## v2.0.1 (2026-10-18)
+
+FlashNX now updates itself, checks the room on the SD card before a download fills it, and its HOME Menu icons work on more consoles.
 
 ### Added
 

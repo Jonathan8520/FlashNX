@@ -26,7 +26,7 @@ INCLUDES    := include third_party/libdrm_nouveau
 # title/author below, and the SD data dir `switch/FlashNX/`.
 APP_TITLE   := FlashNX
 APP_AUTHOR  := Jonathan8520
-APP_VERSION := 2.0.0
+APP_VERSION := 2.0.1
 # Icon shown in hbmenu / Sphaira / forwarders. Lives in the repo root's
 # `assets/` folder so it sits next to README + the banner. devkitPro's
 # %.nro rule reads $(NROFLAGS) which we wire below — without --icon= the
@@ -195,8 +195,8 @@ $(OUTPUT).elf: $(OFILES) $(RUST_STATICLIB)
 # nsp.cpp writes APP_VERSION into every tile it installs (FLASHNX_VERSION), and
 # make never sees a define change: the tiles installed by 1.9.0 said "1.8.1",
 # because nsp.o had last been compiled on 1.8.1. Recompile it when this file
-# changes.
-nsp.o: $(TOPDIR)/Makefile
+# changes. net.cpp and updater.cpp put the version in their User-Agent.
+nsp.o net.o updater.o: $(TOPDIR)/Makefile
 
 -include $(DEPENDS)
 
